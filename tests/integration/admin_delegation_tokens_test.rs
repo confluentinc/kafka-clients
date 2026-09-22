@@ -42,7 +42,7 @@
 //!
 //! The blocker is therefore client-side and out of scope here
 //! (`PLAN-multilanguage-admin.md` §0): `AdminClientConfig` recognises no
-//! `security.protocol` / `sasl.*` key and `KafkaAdminClient::from_config`
+//! `security.protocol` / `sasl.*` key and `KafkaAdminClient::new`
 //! (`src/admin/kafka_admin_client.rs:283-291`) passes a literal
 //! `SecurityProtocol::Plaintext`, so the admin client cannot authenticate at all.
 //! The fixture *does* already expose SASL_PLAINTEXT and SASL_SSL listeners with a
@@ -79,7 +79,7 @@ use confluent_kafka::admin::{
     CreateDelegationTokenOptions, DescribeDelegationTokenOptions, ExpireDelegationTokenOptions,
     RenewDelegationTokenOptions,
 };
-use confluent_kafka::common::protocol::Errors;
+use confluent_kafka::common::Errors;
 use confluent_kafka::common::security::auth::KafkaPrincipal;
 
 use crate::common::admin_backend::{AdminBackend, admin_for};
@@ -96,7 +96,7 @@ const UNKNOWN_HMAC: &[u8] = b"not-a-real-hmac";
 
 /// Asserts an error is Java's `DELEGATION_TOKEN_REQUEST_NOT_ALLOWED`, with the
 /// message the broker sends.
-fn assert_not_allowed(backend: &str, what: &str, error: &confluent_kafka::common::KafkaError) {
+fn assert_not_allowed(backend: &str, what: &str, error: &confluent_kafka::common::Error) {
     assert_eq!(
         error.error(),
         Errors::DelegationTokenRequestNotAllowed,
@@ -132,9 +132,9 @@ async fn delegation_token_rpcs_are_rejected_on_a_plaintext_connection<F: AdminBa
     let error = admin
         .create_delegation_token(
             CreateDelegationTokenOptions::new()
-                .renewers(vec![KafkaPrincipal::new(KafkaPrincipal::USER_TYPE, "renewer")])
-                .owner(KafkaPrincipal::new(KafkaPrincipal::USER_TYPE, "owner"))
-                .max_lifetime_ms(3_600_000),
+                .set_renewers(vec![KafkaPrincipal::new(KafkaPrincipal::USER_TYPE, "renewer")])
+                .set_owner(KafkaPrincipal::new(KafkaPrincipal::USER_TYPE, "owner"))
+                .set_max_lifetime_ms(3_600_000),
         )
         .await
         .expect_err("createDelegationToken is refused over PLAINTEXT");
@@ -145,20 +145,23 @@ async fn delegation_token_rpcs_are_rejected_on_a_plaintext_connection<F: AdminBa
     let error = admin
         .describe_delegation_token(
             DescribeDelegationTokenOptions::new()
-                .owners(Some(vec![KafkaPrincipal::new(KafkaPrincipal::USER_TYPE, "owner")])),
+                .set_owners(Some(vec![KafkaPrincipal::new(KafkaPrincipal::USER_TYPE, "owner")])),
         )
         .await
         .expect_err("describeDelegationToken is refused over PLAINTEXT");
     assert_not_allowed(backend, "describeDelegationToken", &error);
 
     let error = admin
-        .renew_delegation_token(UNKNOWN_HMAC, RenewDelegationTokenOptions::new().renew_time_period_ms(3_600_000))
+        .renew_delegation_token(
+            UNKNOWN_HMAC,
+            RenewDelegationTokenOptions::new().set_renew_time_period_ms(3_600_000),
+        )
         .await
         .expect_err("renewDelegationToken is refused over PLAINTEXT");
     assert_not_allowed(backend, "renewDelegationToken", &error);
 
     let error = admin
-        .expire_delegation_token(UNKNOWN_HMAC, ExpireDelegationTokenOptions::new().expiry_time_period_ms(-1))
+        .expire_delegation_token(UNKNOWN_HMAC, ExpireDelegationTokenOptions::new().set_expiry_time_period_ms(-1))
         .await
         .expect_err("expireDelegationToken is refused over PLAINTEXT");
     assert_not_allowed(backend, "expireDelegationToken", &error);
@@ -196,8 +199,8 @@ async fn delegation_token_round_trip_on_the_mock_client<F: AdminBackendFactory>(
     let token = admin
         .create_delegation_token(
             CreateDelegationTokenOptions::new()
-                .renewers(vec![alice.clone(), bob.clone()])
-                .max_lifetime_ms(max_lifetime_ms),
+                .set_renewers(vec![alice.clone(), bob.clone()])
+                .set_max_lifetime_ms(max_lifetime_ms),
         )
         .await
         .unwrap_or_else(|e| panic!("{backend} backend: create delegation token: {e}"));
@@ -205,7 +208,7 @@ async fn delegation_token_round_trip_on_the_mock_client<F: AdminBackendFactory>(
     let info = token.token_info();
     assert_eq!(info.owner(), &alice, "{backend} backend: the mock makes renewers[0] the owner");
     // `TokenInformation::new` sets the requester equal to the owner, and the
-    // harness rebuilds through `with_requester`, so this pins that the requester
+    // harness rebuilds through `with_token_requester`, so this pins that the requester
     // crossed as its own field rather than being re-derived from the owner.
     assert_eq!(
         info.token_requester(),
@@ -286,7 +289,7 @@ async fn delegation_token_round_trip_on_the_mock_client<F: AdminBackendFactory>(
     //    contents crossed rather than being ignored — an ignored filter would
     //    return the token here and pass step 2 as well.
     let filtered = admin
-        .describe_delegation_token(DescribeDelegationTokenOptions::new().owners(Some(vec![bob.clone()])))
+        .describe_delegation_token(DescribeDelegationTokenOptions::new().set_owners(Some(vec![bob.clone()])))
         .await
         .unwrap_or_else(|e| panic!("{backend} backend: describe delegation token (filtered): {e}"));
     assert!(
@@ -299,7 +302,7 @@ async fn delegation_token_round_trip_on_the_mock_client<F: AdminBackendFactory>(
     let expiry = admin
         .renew_delegation_token(
             token.hmac(),
-            RenewDelegationTokenOptions::new().renew_time_period_ms(renew_period),
+            RenewDelegationTokenOptions::new().set_renew_time_period_ms(renew_period),
         )
         .await
         .unwrap_or_else(|e| panic!("{backend} backend: renew delegation token: {e}"));
@@ -335,7 +338,7 @@ async fn delegation_token_round_trip_on_the_mock_client<F: AdminBackendFactory>(
     // 6. Expire with the -1 sentinel, which for *this* RPC means "immediately"
     //    rather than "use the broker default" — the mock removes the token.
     let expired = admin
-        .expire_delegation_token(token.hmac(), ExpireDelegationTokenOptions::new().expiry_time_period_ms(-1))
+        .expire_delegation_token(token.hmac(), ExpireDelegationTokenOptions::new().set_expiry_time_period_ms(-1))
         .await
         .unwrap_or_else(|e| panic!("{backend} backend: expire delegation token: {e}"));
     assert_eq!(expired, -1, "{backend} backend: the mock echoes the expiry period it was given");

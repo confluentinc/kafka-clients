@@ -41,9 +41,13 @@ pub fn generate_messages(input_dir: &Path, output_dir: &Path) -> Result<(), Box<
 
     // Process each specification
     let mut success_count = 0;
+    let mut generated_modules = Vec::new();
     for spec_file in &spec_files {
         match process_spec_file(spec_file, output_dir) {
-            Ok(()) => success_count += 1,
+            Ok(module_and_type) => {
+                success_count += 1;
+                generated_modules.push(module_and_type);
+            },
             Err(e) => {
                 eprintln!("  Error: {}", e);
                 // Generate stub on error so tests can still compile
@@ -55,7 +59,7 @@ pub fn generate_messages(input_dir: &Path, output_dir: &Path) -> Result<(), Box<
     }
 
     // Generate mod.rs to include all generated modules
-    generate_mod_file(&spec_files, output_dir)?;
+    generate_mod_file(&spec_files, &generated_modules, output_dir)?;
 
     eprintln!(
         "Successfully generated {} out of {} message types",
@@ -251,6 +255,40 @@ pub fn generate_api_message_type(input_dir: &Path, output_dir: &Path) -> Result<
     for data in apis.values() {
         let variant = to_snake_case(&data.name(&api_names)).to_uppercase();
         writeln!(file, "            Self::{} => \"{}\",", variant, data.name(&api_names))?;
+    }
+    writeln!(file, "        }}")?;
+    writeln!(file, "    }}")?;
+    writeln!(file)?;
+
+    // enum_name()
+    //
+    // Java's generated `ApiMessageType` carries two distinct spellings of the API
+    // name: the public `name` field (`"Metadata"`, emitted above as `name()`) and
+    // the enum constant name (`"METADATA"`), which `Enum.name()` returns and which
+    // the generated `toString()` delegates to
+    // (`ApiMessageTypeGenerator.generateToString`). Java code that interpolates the
+    // enum value itself — `"..." + apiKey` — gets the constant spelling, so the
+    // Rust translation needs it as an accessor too.
+    writeln!(file, "    /// The name of this enum variant, e.g. `\"METADATA\"`.")?;
+    writeln!(file, "    ///")?;
+    writeln!(
+        file,
+        "    /// This is the Rust equivalent of Java's `Enum.name()` on the generated"
+    )?;
+    writeln!(
+        file,
+        "    /// `ApiMessageType` enum, which its `toString()` also returns. It differs"
+    )?;
+    writeln!(
+        file,
+        "    /// from [`Self::name`], the translation of Java's public `name` field, which"
+    )?;
+    writeln!(file, "    /// carries the specification spelling (e.g. `\"Metadata\"`).")?;
+    writeln!(file, "    pub fn enum_name(self) -> &'static str {{")?;
+    writeln!(file, "        match self {{")?;
+    for data in apis.values() {
+        let variant = to_snake_case(&data.name(&api_names)).to_uppercase();
+        writeln!(file, "            Self::{} => \"{}\",", variant, variant)?;
     }
     writeln!(file, "        }}")?;
     writeln!(file, "    }}")?;
@@ -498,6 +536,18 @@ pub fn generate_api_message_type(input_dir: &Path, output_dir: &Path) -> Result<
     writeln!(file, "    }}")?;
 
     writeln!(file, "}}")?;
+    writeln!(file)?;
+
+    // Display — Java's generated `toString()` returns `this.name()`, the enum
+    // constant name (`ApiMessageTypeGenerator.generateToString`).
+    writeln!(file, "impl std::fmt::Display for ApiMessageType {{")?;
+    writeln!(
+        file,
+        "    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {{"
+    )?;
+    writeln!(file, "        f.write_str(self.enum_name())")?;
+    writeln!(file, "    }}")?;
+    writeln!(file, "}}")?;
 
     Ok(())
 }
@@ -520,7 +570,9 @@ fn find_json_files(dir: &Path) -> Result<Vec<PathBuf>, Box<dyn std::error::Error
     Ok(json_files)
 }
 
-fn process_spec_file(spec_file: &Path, output_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
+/// Generates one message module and returns `(module_name, top_level_type)` so the
+/// caller can emit the parent re-export CLAUDE.md §2 requires for the top-level type.
+fn process_spec_file(spec_file: &Path, output_dir: &Path) -> Result<(String, String), Box<dyn std::error::Error>> {
     let file_name = spec_file.file_stem().and_then(|s| s.to_str()).ok_or("Invalid file name")?;
 
     eprintln!("  Processing: {}", file_name);
@@ -565,7 +617,7 @@ fn process_spec_file(spec_file: &Path, output_dir: &Path) -> Result<(), Box<dyn 
     // Generate the message struct
     generate_message_struct(&mut file, &message_spec)?;
 
-    Ok(())
+    Ok((module_name, format!("{}Data", message_spec.name())))
 }
 
 fn generate_message_struct(file: &mut fs::File, spec: &MessageSpec) -> Result<(), Box<dyn std::error::Error>> {
@@ -573,15 +625,20 @@ fn generate_message_struct(file: &mut fs::File, spec: &MessageSpec) -> Result<()
     let data_class_name = format!("{}Data", spec.name());
     let flexible_versions = spec.flexible_versions();
 
-    // Generate common structs first (defined at message level)
+    // Generate common structs first (defined at message level).
+    // Java: `generateClass(commonStruct, commonStruct.versions())`
+    // (`MessageDataGenerator.java:129-134`) — a common struct is its own version root.
     for common_struct in spec.common_structs() {
         generate_common_struct(file, common_struct, flexible_versions)?;
     }
 
-    // Generate nested structs (for array element types and direct struct types)
+    // Generate nested structs (for array element types and direct struct types).
+    // Java threads `parentVersions.intersect(struct.versions())` into each subclass
+    // (`MessageDataGenerator.java:170-184`); at the top level that is just the
+    // message's own version range.
     for field in struct_spec.fields() {
         // Always try to generate nested struct - the function will determine if it's needed
-        generate_nested_struct(file, field, flexible_versions)?;
+        generate_nested_struct(file, field, flexible_versions, struct_spec.versions())?;
     }
 
     // Generate main struct
@@ -654,8 +711,9 @@ fn generate_message_struct(file: &mut fs::File, spec: &MessageSpec) -> Result<()
     generate_read_method(file, &data_class_name, struct_spec, flexible_versions)?;
     writeln!(file)?;
 
-    // write() method
-    generate_write_method(file, &data_class_name, struct_spec, flexible_versions)?;
+    // write() method. Java's top-level call passes the message's own range as
+    // `parentVersions` (`MessageDataGenerator.java:65-68`).
+    generate_write_method(file, &data_class_name, struct_spec, flexible_versions, struct_spec.versions())?;
     writeln!(file)?;
 
     // schema() method
@@ -686,10 +744,17 @@ fn generate_message_struct(file: &mut fs::File, spec: &MessageSpec) -> Result<()
     Ok(())
 }
 
+/// `parent_versions` is Java's `parentVersions` for this subclass: the enclosing
+/// struct's *effective* range (`MessageDataGenerator.java:176`,
+/// `parentVersions.intersect(struct.versions())`). It is intersected with this
+/// struct's own declared range to obtain the versions at which `write()` can actually
+/// be invoked — which is what decides whether a field's version gate has a reachable
+/// `else` half. See [`non_ignorable_check_applies`].
 fn generate_nested_struct(
     file: &mut fs::File,
     field: &FieldSpec,
     flexible_versions: Versions,
+    parent_versions: Versions,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Get the struct name from either direct Struct type or Array(Struct) type
     let struct_name = match field.field_type() {
@@ -713,10 +778,14 @@ fn generate_nested_struct(
         return Ok(());
     }
 
+    // Java's `curVersions` for this struct: the versions at which the enclosing struct
+    // can actually reach it (`MessageDataGenerator.java:718`).
+    let cur_versions = parent_versions.intersect(field.versions());
+
     // First, recursively generate any nested structs within this nested struct
     for nested_field in field.fields() {
         if !nested_field.fields().is_empty() {
-            generate_nested_struct(file, nested_field, flexible_versions)?;
+            generate_nested_struct(file, nested_field, flexible_versions, cur_versions)?;
         }
     }
 
@@ -765,7 +834,7 @@ fn generate_nested_struct(
     writeln!(file)?;
 
     // Generate write method
-    generate_write_method(file, &struct_name, &struct_spec, flexible_versions)?;
+    generate_write_method(file, &struct_name, &struct_spec, flexible_versions, parent_versions)?;
 
     // Builder setters
     generate_builder_setters(file, &struct_spec)?;
@@ -795,7 +864,7 @@ fn generate_common_struct(
     // First, recursively generate any nested structs within this common struct
     for field in struct_spec.fields() {
         if !field.fields().is_empty() {
-            generate_nested_struct(file, field, flexible_versions)?;
+            generate_nested_struct(file, field, flexible_versions, struct_spec.versions())?;
         }
     }
 
@@ -845,8 +914,10 @@ fn generate_common_struct(
     generate_read_method(file, struct_name, struct_spec, flexible_versions)?;
     writeln!(file)?;
 
-    // Generate write method for common struct
-    generate_write_method(file, struct_name, struct_spec, flexible_versions)?;
+    // Generate write method for common struct. Java treats a common struct as its own
+    // version root: `generateClass(commonStruct, commonStruct.versions())`
+    // (`MessageDataGenerator.java:129-134`).
+    generate_write_method(file, struct_name, struct_spec, flexible_versions, struct_spec.versions())?;
 
     // Builder setters
     generate_builder_setters(file, struct_spec)?;
@@ -1089,19 +1160,19 @@ fn generate_add_size_body(
             writeln!(file, "{}for field in &self.unknown_tagged_fields {{", indent)?;
             writeln!(
                 file,
-                "{}    size.add_bytes(crate::common::protocol::varint::size_of_unsigned_varint(field.tag()));",
+                "{}    size.add_bytes(crate::common::protocol::ByteUtils::size_of_unsigned_varint(field.tag()));",
                 indent
             )?;
             writeln!(
                 file,
-                "{}    size.add_bytes(crate::common::protocol::varint::size_of_unsigned_varint(field.size() as u32));",
+                "{}    size.add_bytes(crate::common::protocol::ByteUtils::size_of_unsigned_varint(field.size() as u32));",
                 indent
             )?;
             writeln!(file, "{}    size.add_bytes(field.size() as i32);", indent)?;
             writeln!(file, "{}}}", indent)?;
             writeln!(
                 file,
-                "{}size.add_bytes(crate::common::protocol::varint::size_of_unsigned_varint(num_tagged_fields));",
+                "{}size.add_bytes(crate::common::protocol::ByteUtils::size_of_unsigned_varint(num_tagged_fields));",
                 indent
             )?;
             writeln!(file, "        }}")?;
@@ -1111,19 +1182,19 @@ fn generate_add_size_body(
             writeln!(file, "{}for field in &self.unknown_tagged_fields {{", indent)?;
             writeln!(
                 file,
-                "{}    size.add_bytes(crate::common::protocol::varint::size_of_unsigned_varint(field.tag()));",
+                "{}    size.add_bytes(crate::common::protocol::ByteUtils::size_of_unsigned_varint(field.tag()));",
                 indent
             )?;
             writeln!(
                 file,
-                "{}    size.add_bytes(crate::common::protocol::varint::size_of_unsigned_varint(field.size() as u32));",
+                "{}    size.add_bytes(crate::common::protocol::ByteUtils::size_of_unsigned_varint(field.size() as u32));",
                 indent
             )?;
             writeln!(file, "{}    size.add_bytes(field.size() as i32);", indent)?;
             writeln!(file, "{}}}", indent)?;
             writeln!(
                 file,
-                "{}size.add_bytes(crate::common::protocol::varint::size_of_unsigned_varint(num_tagged_fields));",
+                "{}size.add_bytes(crate::common::protocol::ByteUtils::size_of_unsigned_varint(num_tagged_fields));",
                 indent
             )?;
         }
@@ -1345,7 +1416,7 @@ fn generate_string_add_size(
         if flexible_versions.lowest() == 0 {
             writeln!(
                 file,
-                "{}    size.add_bytes(crate::common::protocol::varint::size_of_unsigned_varint(bytes_len + 1));",
+                "{}    size.add_bytes(crate::common::protocol::ByteUtils::size_of_unsigned_varint(bytes_len + 1));",
                 indent
             )?;
         } else {
@@ -1362,7 +1433,7 @@ fn generate_string_add_size(
             }
             writeln!(
                 file,
-                "{}        size.add_bytes(crate::common::protocol::varint::size_of_unsigned_varint(bytes_len + 1));",
+                "{}        size.add_bytes(crate::common::protocol::ByteUtils::size_of_unsigned_varint(bytes_len + 1));",
                 indent
             )?;
             writeln!(file, "{}    }} else {{", indent)?;
@@ -1396,7 +1467,7 @@ fn generate_bytes_add_size(
         if flexible_versions.lowest() == 0 {
             writeln!(
                 file,
-                "{}    size.add_bytes(crate::common::protocol::varint::size_of_unsigned_varint(bytes_len + 1));",
+                "{}    size.add_bytes(crate::common::protocol::ByteUtils::size_of_unsigned_varint(bytes_len + 1));",
                 indent
             )?;
         } else {
@@ -1413,7 +1484,7 @@ fn generate_bytes_add_size(
             }
             writeln!(
                 file,
-                "{}        size.add_bytes(crate::common::protocol::varint::size_of_unsigned_varint(bytes_len + 1));",
+                "{}        size.add_bytes(crate::common::protocol::ByteUtils::size_of_unsigned_varint(bytes_len + 1));",
                 indent
             )?;
             writeln!(file, "{}    }} else {{", indent)?;
@@ -1441,7 +1512,7 @@ fn generate_array_add_size(
         if flexible_versions.lowest() == 0 {
             writeln!(
                 file,
-                "{}size.add_bytes(crate::common::protocol::varint::size_of_unsigned_varint({}.len() as u32 + 1));",
+                "{}size.add_bytes(crate::common::protocol::ByteUtils::size_of_unsigned_varint({}.len() as u32 + 1));",
                 indent, accessor
             )?;
         } else {
@@ -1458,7 +1529,7 @@ fn generate_array_add_size(
             }
             writeln!(
                 file,
-                "{}    size.add_bytes(crate::common::protocol::varint::size_of_unsigned_varint({}.len() as u32 + 1));",
+                "{}    size.add_bytes(crate::common::protocol::ByteUtils::size_of_unsigned_varint({}.len() as u32 + 1));",
                 indent, accessor
             )?;
             writeln!(file, "{}}} else {{", indent)?;
@@ -1508,7 +1579,7 @@ fn generate_array_element_add_size(
                 if flexible_versions.lowest() == 0 {
                     writeln!(
                         file,
-                        "{}    size.add_bytes(crate::common::protocol::varint::size_of_unsigned_varint(bytes_len + 1));",
+                        "{}    size.add_bytes(crate::common::protocol::ByteUtils::size_of_unsigned_varint(bytes_len + 1));",
                         indent
                     )?;
                 } else {
@@ -1525,7 +1596,7 @@ fn generate_array_element_add_size(
                     }
                     writeln!(
                         file,
-                        "{}        size.add_bytes(crate::common::protocol::varint::size_of_unsigned_varint(bytes_len + 1));",
+                        "{}        size.add_bytes(crate::common::protocol::ByteUtils::size_of_unsigned_varint(bytes_len + 1));",
                         indent
                     )?;
                     writeln!(file, "{}    }} else {{", indent)?;
@@ -1543,7 +1614,7 @@ fn generate_array_element_add_size(
                 if flexible_versions.lowest() == 0 {
                     writeln!(
                         file,
-                        "{}    size.add_bytes(crate::common::protocol::varint::size_of_unsigned_varint(bytes_len + 1));",
+                        "{}    size.add_bytes(crate::common::protocol::ByteUtils::size_of_unsigned_varint(bytes_len + 1));",
                         indent
                     )?;
                 } else {
@@ -1560,7 +1631,7 @@ fn generate_array_element_add_size(
                     }
                     writeln!(
                         file,
-                        "{}        size.add_bytes(crate::common::protocol::varint::size_of_unsigned_varint(bytes_len + 1));",
+                        "{}        size.add_bytes(crate::common::protocol::ByteUtils::size_of_unsigned_varint(bytes_len + 1));",
                         indent
                     )?;
                     writeln!(file, "{}    }} else {{", indent)?;
@@ -1627,7 +1698,7 @@ fn generate_tagged_field_add_size(
     writeln!(file, "{}num_tagged_fields += 1;", inner)?;
     writeln!(
         file,
-        "{}size.add_bytes(crate::common::protocol::varint::size_of_unsigned_varint({}));",
+        "{}size.add_bytes(crate::common::protocol::ByteUtils::size_of_unsigned_varint({}));",
         inner, tag
     )?;
     generate_tagged_field_content_size(file, field, &field_name, flexible_versions, &inner)?;
@@ -1640,52 +1711,133 @@ fn generate_tagged_field_add_size(
     Ok(())
 }
 
-/// Get the default check expression for a tagged field.
+/// True when Java's `FieldSpec.fieldDefault` would render this field's default as
+/// the literal `null` (`FieldSpec.java:400-475`).
 ///
-/// Returns a condition string that is true when the field has a non-default value
-/// and should be written to the wire. Tagged fields at their default value are NOT
-/// written, matching Java behavior.
+/// Only `string` / `bytes` / `struct` / `array` reach it through an explicit
+/// `"default": "null"` in the spec. `records` reaches it *unconditionally* — Java has a
+/// bare `else if (type.isRecords()) return "null";` (`FieldSpec.java:452-453`) with no
+/// nullability or explicit-default test, which is why it is checked first here.
+fn field_default_is_null(field: &FieldSpec) -> bool {
+    if matches!(field.field_type(), FieldType::Records) {
+        return true;
+    }
+    matches!(field.field_default(), Some(serde_json::Value::String(s)) if s == "null")
+}
+
+/// The "is this field set to something other than its default?" condition.
+///
+/// Mirrors `FieldSpec.generateNonDefaultValueCheck`
+/// (`kafka/generator/.../FieldSpec.java:587-641`), always with Java's
+/// `nullableVersions = field.nullableVersions()` argument.
+///
+/// Java uses this one predicate for **two** purposes, and so does this generator:
+///
+///   1. "should this tagged field be serialised at all?" — a tagged field at its
+///      default is omitted from the wire (`MessageDataGenerator.java:779`, `:1163`);
+///   2. "is a value being dropped by a version gate?" — the guard emitted by
+///      [`generate_non_ignorable_field_error`] (`MessageDataGenerator.java:794`).
+///
+/// Keep the two uses on this single function: divergence between them is exactly the
+/// class of bug the guard exists to catch.
 fn get_default_check(field: &FieldSpec, field_name: &str) -> String {
+    // Java's `nullableVersions.empty()` test. `is_nullable_field` is its negation.
     let nullable = is_nullable_field(field);
-    if nullable {
-        // Check if this is a nullable field with default "null"
-        let has_null_default = matches!(field.field_default(), Some(serde_json::Value::String(s)) if s == "null");
-        if has_null_default {
-            // For fields defaulting to null, only write when non-null
-            return format!("self.{}.is_some()", field_name);
-        }
-        // For nullable fields with non-null default, write when the value differs from default.
-        // Java defaults nullable string/bytes to "" / Bytes.EMPTY (not null).
-        // Write when null (to encode the null state) OR when the value differs from default.
-        match field.field_type() {
-            FieldType::Struct(struct_name) => {
-                // Java: field == null || !field.equals(new StructName())
-                return format!(
+    let default_is_null = field_default_is_null(field);
+
+    match field.field_type() {
+        // Java `type().isArray()` branch (FieldSpec.java:593-601).
+        FieldType::Array(_) => {
+            if default_is_null {
+                format!("self.{}.is_some()", field_name)
+            } else if !nullable {
+                format!("!self.{}.is_empty()", field_name)
+            } else {
+                format!("self.{}.as_ref().map_or(true, |v| !v.is_empty())", field_name)
+            }
+        },
+        // Java `type().isBytes()` branch (FieldSpec.java:602-621). `records` is NOT
+        // `isBytes()` in Java — only `BytesFieldType` overrides it (`FieldType.java:257`)
+        // — so `records` falls through to the final `else` below.
+        FieldType::Bytes => {
+            if default_is_null {
+                format!("self.{}.is_some()", field_name)
+            } else if !nullable {
+                format!("!self.{}.is_empty()", field_name)
+            } else {
+                format!("self.{}.as_ref().map_or(true, |v| !v.is_empty())", field_name)
+            }
+        },
+        // Java `isString() || isStruct() || UUIDFieldType` branch (FieldSpec.java:622-632).
+        FieldType::String => {
+            if default_is_null {
+                format!("self.{}.is_some()", field_name)
+            } else {
+                // Java compares against `fieldDefault`, which is `""` when the spec sets no
+                // default. Comparing against a borrowed `&str` rather than an owned
+                // `String::new()` keeps the emitted code free of `clippy::cmp_owned`, and
+                // `!is_empty()` is the same predicate as `!equals("")`.
+                let literal = match field.field_default() {
+                    Some(serde_json::Value::String(s)) if !s.is_empty() => Some(s.clone()),
+                    _ => None,
+                };
+                match (literal, nullable) {
+                    (None, false) => format!("!self.{}.is_empty()", field_name),
+                    (None, true) => format!("self.{}.as_ref().map_or(true, |v| !v.is_empty())", field_name),
+                    (Some(d), false) => format!("self.{} != \"{}\"", field_name, d),
+                    (Some(d), true) => format!("self.{}.as_deref() != Some(\"{}\")", field_name, d),
+                }
+            }
+        },
+        FieldType::Struct(struct_name) => {
+            if default_is_null {
+                format!("self.{}.is_some()", field_name)
+            } else if !nullable {
+                format!("self.{} != {}::new()", field_name, struct_name)
+            } else {
+                format!(
                     "self.{}.is_none() || self.{}.as_ref().unwrap() != &{}::new()",
                     field_name, field_name, struct_name
-                );
-            },
-            FieldType::String => {
-                // Java: field == null || !field.isEmpty()
-                return format!("self.{}.as_ref().map_or(true, |v| !v.is_empty())", field_name);
-            },
-            FieldType::Bytes | FieldType::Records => {
-                // Java: field == null || field.length != 0
-                return format!("self.{}.as_ref().map_or(true, |v| !v.is_empty())", field_name);
-            },
-            _ => {
-                // For other nullable fields with non-null default, just check is_some
-                return format!("self.{}.is_some()", field_name);
-            },
-        }
-    }
-    match field.field_type() {
-        FieldType::String => format!("!self.{}.is_empty()", field_name),
-        FieldType::Array(_) => format!("!self.{}.is_empty()", field_name),
-        FieldType::Bytes | FieldType::Records => format!("!self.{}.is_empty()", field_name),
+                )
+            }
+        },
+        FieldType::Uuid => {
+            let default_val = get_default_value(field.field_type(), field.field_default());
+            if !nullable {
+                format!("self.{} != {}", field_name, default_val)
+            } else {
+                format!(
+                    "self.{}.is_none() || self.{}.as_ref().unwrap() != &{}",
+                    field_name, field_name, default_val
+                )
+            }
+        },
+        // Java `BoolFieldType` branch (FieldSpec.java:633-636): a bare `if (field)` when
+        // the default is false, `if (!field)` when it is true. Spelling it that way
+        // rather than `!= false` also keeps `clippy::bool_comparison` quiet.
         FieldType::Bool => {
             let default_val = get_default_value(field.field_type(), field.field_default());
-            format!("self.{} != {}", field_name, default_val)
+            if default_val == "true" {
+                format!("!self.{}", field_name)
+            } else {
+                format!("self.{}", field_name)
+            }
+        },
+        // Java's final `else` (FieldSpec.java:637-639): `field != <default>`. `records`
+        // lands here with a `null` default, i.e. a plain presence test.
+        FieldType::Records => {
+            if nullable {
+                format!("self.{}.is_some()", field_name)
+            } else {
+                // No spec in the corpus declares a non-nullable `records` field; the Rust
+                // type is then a bare `Bytes`, which has no `null` state to test.
+                format!("!self.{}.is_empty()", field_name)
+            }
+        },
+        FieldType::Float64 => {
+            let default_val = get_default_value(field.field_type(), field.field_default());
+            // Float comparison: use to_bits() for exact comparison like Java's Double.compare
+            format!("self.{}.to_bits() != {}f64.to_bits()", field_name, default_val)
         },
         FieldType::Int8
         | FieldType::Int16
@@ -1696,20 +1848,55 @@ fn get_default_check(field: &FieldSpec, field_name: &str) -> String {
             let default_val = get_default_value(field.field_type(), field.field_default());
             format!("self.{} != {}", field_name, default_val)
         },
-        FieldType::Float64 => {
-            let default_val = get_default_value(field.field_type(), field.field_default());
-            // Float comparison: use to_bits() for exact comparison like Java's Double.compare
-            format!("self.{}.to_bits() != {}f64.to_bits()", field_name, default_val)
-        },
-        FieldType::Uuid => {
-            let default_val = get_default_value(field.field_type(), field.field_default());
-            format!("self.{} != {}", field_name, default_val)
-        },
-        FieldType::Struct(_) => {
-            let default_val = get_default_value(field.field_type(), field.field_default());
-            format!("self.{} != {}", field_name, default_val)
-        },
     }
+}
+
+/// True when Java's generator would emit the "non-default value at an unsupported
+/// version" guard for `field` inside `write()`.
+///
+/// Two conditions, both taken from Java:
+///
+///   - `!field.ignorable()` — `MessageDataGenerator.java:792`. An `"ignorable": true`
+///     field is silently dropped by Java too, so adding the guard there would reject
+///     encodings Java accepts (see `.claude/rules/producer-transactions.md` §11).
+///   - the `else` half of the field's version conditional is reachable —
+///     `VersionConditional.generate` (`VersionConditional.java:189-218`) only emits
+///     `ifNotMember` when `possibleVersions - containingVersions` is non-empty.
+///     `possibleVersions` is the struct's own range, because the generated `write()`
+///     has already rejected every version outside it.
+fn non_ignorable_check_applies(field: &FieldSpec, struct_versions: Versions) -> bool {
+    if field.ignorable() {
+        return false;
+    }
+    field.versions().lowest() > struct_versions.lowest() || field.versions().highest() < struct_versions.highest()
+}
+
+/// Emits the body of Java's non-ignorable-field guard: the `throw` that refuses to
+/// encode a message the requested version cannot represent.
+///
+/// Mirrors `FieldSpec.generateNonIgnorableFieldCheck` (`FieldSpec.java:652-665`). The
+/// caller supplies the surrounding `if` / `else if`, because the two call sites reach
+/// this branch differently.
+///
+/// The message names the field with `FieldSpec::camel_case_name` — Java's
+/// `camelCaseName()` (`FieldSpec.java:188-190`, `:661`), i.e. the spec name with a
+/// lower-cased first letter, not the snake_case Rust identifier — so the text is
+/// byte-identical to the Java client's for the same field.
+fn generate_non_ignorable_field_error(
+    file: &mut fs::File,
+    field: &FieldSpec,
+    indent: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    writeln!(file, "{}return Err(std::io::Error::new(", indent)?;
+    writeln!(file, "{}    std::io::ErrorKind::InvalidData,", indent)?;
+    writeln!(
+        file,
+        "{}    format!(\"Attempted to write a non-default {} at version {{}}\", version),",
+        indent,
+        field.camel_case_name()
+    )?;
+    writeln!(file, "{}));", indent)?;
+    Ok(())
 }
 
 /// Generate the content size for a tagged field (the data portion, plus the size varint wrapper).
@@ -1736,7 +1923,7 @@ fn generate_tagged_field_content_size(
         FieldType::Bool | FieldType::Int8 => {
             writeln!(
                 file,
-                "{}size.add_bytes(crate::common::protocol::varint::size_of_unsigned_varint(1)); // size prefix",
+                "{}size.add_bytes(crate::common::protocol::ByteUtils::size_of_unsigned_varint(1)); // size prefix",
                 indent
             )?;
             writeln!(file, "{}size.add_bytes(1);", indent)?;
@@ -1744,7 +1931,7 @@ fn generate_tagged_field_content_size(
         FieldType::Int16 | FieldType::Uint16 => {
             writeln!(
                 file,
-                "{}size.add_bytes(crate::common::protocol::varint::size_of_unsigned_varint(2)); // size prefix",
+                "{}size.add_bytes(crate::common::protocol::ByteUtils::size_of_unsigned_varint(2)); // size prefix",
                 indent
             )?;
             writeln!(file, "{}size.add_bytes(2);", indent)?;
@@ -1752,7 +1939,7 @@ fn generate_tagged_field_content_size(
         FieldType::Int32 | FieldType::Uint32 => {
             writeln!(
                 file,
-                "{}size.add_bytes(crate::common::protocol::varint::size_of_unsigned_varint(4)); // size prefix",
+                "{}size.add_bytes(crate::common::protocol::ByteUtils::size_of_unsigned_varint(4)); // size prefix",
                 indent
             )?;
             writeln!(file, "{}size.add_bytes(4);", indent)?;
@@ -1760,7 +1947,7 @@ fn generate_tagged_field_content_size(
         FieldType::Int64 => {
             writeln!(
                 file,
-                "{}size.add_bytes(crate::common::protocol::varint::size_of_unsigned_varint(8)); // size prefix",
+                "{}size.add_bytes(crate::common::protocol::ByteUtils::size_of_unsigned_varint(8)); // size prefix",
                 indent
             )?;
             writeln!(file, "{}size.add_bytes(8);", indent)?;
@@ -1768,7 +1955,7 @@ fn generate_tagged_field_content_size(
         FieldType::Float64 => {
             writeln!(
                 file,
-                "{}size.add_bytes(crate::common::protocol::varint::size_of_unsigned_varint(8)); // size prefix",
+                "{}size.add_bytes(crate::common::protocol::ByteUtils::size_of_unsigned_varint(8)); // size prefix",
                 indent
             )?;
             writeln!(file, "{}size.add_bytes(8);", indent)?;
@@ -1776,7 +1963,7 @@ fn generate_tagged_field_content_size(
         FieldType::Uuid => {
             writeln!(
                 file,
-                "{}size.add_bytes(crate::common::protocol::varint::size_of_unsigned_varint(16)); // size prefix",
+                "{}size.add_bytes(crate::common::protocol::ByteUtils::size_of_unsigned_varint(16)); // size prefix",
                 indent
             )?;
             writeln!(file, "{}size.add_bytes(16);", indent)?;
@@ -1790,7 +1977,7 @@ fn generate_tagged_field_content_size(
                 writeln!(file, "{}        let bytes_len = val.len() as u32;", indent)?;
                 writeln!(
                     file,
-                    "{}        let string_prefix_size = crate::common::protocol::varint::size_of_unsigned_varint(bytes_len + 1);",
+                    "{}        let string_prefix_size = crate::common::protocol::ByteUtils::size_of_unsigned_varint(bytes_len + 1);",
                     indent
                 )?;
                 writeln!(
@@ -1800,7 +1987,7 @@ fn generate_tagged_field_content_size(
                 )?;
                 writeln!(
                     file,
-                    "{}        size.add_bytes(crate::common::protocol::varint::size_of_unsigned_varint(inner_size as u32));",
+                    "{}        size.add_bytes(crate::common::protocol::ByteUtils::size_of_unsigned_varint(inner_size as u32));",
                     indent
                 )?;
                 writeln!(file, "{}        size.add_bytes(inner_size);", indent)?;
@@ -1808,7 +1995,7 @@ fn generate_tagged_field_content_size(
                 // null encoding: varint(0) = 1 byte, so inner_size = 1
                 writeln!(
                     file,
-                    "{}        size.add_bytes(crate::common::protocol::varint::size_of_unsigned_varint(1)); // size prefix for null",
+                    "{}        size.add_bytes(crate::common::protocol::ByteUtils::size_of_unsigned_varint(1)); // size prefix for null",
                     indent
                 )?;
                 writeln!(file, "{}        size.add_bytes(1); // varint(0) for null", indent)?;
@@ -1817,13 +2004,13 @@ fn generate_tagged_field_content_size(
                 writeln!(file, "{}    let bytes_len = {}.len() as u32;", indent, accessor)?;
                 writeln!(
                     file,
-                    "{}    let string_prefix_size = crate::common::protocol::varint::size_of_unsigned_varint(bytes_len + 1);",
+                    "{}    let string_prefix_size = crate::common::protocol::ByteUtils::size_of_unsigned_varint(bytes_len + 1);",
                     indent
                 )?;
                 writeln!(file, "{}    let inner_size = string_prefix_size + bytes_len as i32;", indent)?;
                 writeln!(
                     file,
-                    "{}    size.add_bytes(crate::common::protocol::varint::size_of_unsigned_varint(inner_size as u32)); // size prefix",
+                    "{}    size.add_bytes(crate::common::protocol::ByteUtils::size_of_unsigned_varint(inner_size as u32)); // size prefix",
                     indent
                 )?;
                 writeln!(file, "{}    size.add_bytes(inner_size);", indent)?;
@@ -1837,13 +2024,13 @@ fn generate_tagged_field_content_size(
                 writeln!(file, "{}        let bytes_len = val.len() as u32;", indent)?;
                 writeln!(
                     file,
-                    "{}        let bytes_prefix_size = crate::common::protocol::varint::size_of_unsigned_varint(bytes_len + 1);",
+                    "{}        let bytes_prefix_size = crate::common::protocol::ByteUtils::size_of_unsigned_varint(bytes_len + 1);",
                     indent
                 )?;
                 writeln!(file, "{}        let inner_size = bytes_prefix_size + bytes_len as i32;", indent)?;
                 writeln!(
                     file,
-                    "{}        size.add_bytes(crate::common::protocol::varint::size_of_unsigned_varint(inner_size as u32));",
+                    "{}        size.add_bytes(crate::common::protocol::ByteUtils::size_of_unsigned_varint(inner_size as u32));",
                     indent
                 )?;
                 writeln!(file, "{}        size.add_bytes(inner_size);", indent)?;
@@ -1851,7 +2038,7 @@ fn generate_tagged_field_content_size(
                 // null encoding: varint(0) = 1 byte, so inner_size = 1
                 writeln!(
                     file,
-                    "{}        size.add_bytes(crate::common::protocol::varint::size_of_unsigned_varint(1)); // size prefix for null",
+                    "{}        size.add_bytes(crate::common::protocol::ByteUtils::size_of_unsigned_varint(1)); // size prefix for null",
                     indent
                 )?;
                 writeln!(file, "{}        size.add_bytes(1); // varint(0) for null", indent)?;
@@ -1860,13 +2047,13 @@ fn generate_tagged_field_content_size(
                 writeln!(file, "{}    let bytes_len = {}.len() as u32;", indent, accessor)?;
                 writeln!(
                     file,
-                    "{}    let bytes_prefix_size = crate::common::protocol::varint::size_of_unsigned_varint(bytes_len + 1);",
+                    "{}    let bytes_prefix_size = crate::common::protocol::ByteUtils::size_of_unsigned_varint(bytes_len + 1);",
                     indent
                 )?;
                 writeln!(file, "{}    let inner_size = bytes_prefix_size + bytes_len as i32;", indent)?;
                 writeln!(
                     file,
-                    "{}    size.add_bytes(crate::common::protocol::varint::size_of_unsigned_varint(inner_size as u32)); // size prefix",
+                    "{}    size.add_bytes(crate::common::protocol::ByteUtils::size_of_unsigned_varint(inner_size as u32)); // size prefix",
                     indent
                 )?;
                 writeln!(file, "{}    size.add_bytes(inner_size);", indent)?;
@@ -1880,7 +2067,7 @@ fn generate_tagged_field_content_size(
             // Array length prefix (varint(len+1))
             writeln!(
                 file,
-                "{}    array_size += crate::common::protocol::varint::size_of_unsigned_varint({}.len() as u32 + 1);",
+                "{}    array_size += crate::common::protocol::ByteUtils::size_of_unsigned_varint({}.len() as u32 + 1);",
                 indent, accessor
             )?;
             // Element sizes
@@ -1894,7 +2081,7 @@ fn generate_tagged_field_content_size(
                         writeln!(file, "{}        let elem_len = element.len() as u32;", indent)?;
                         writeln!(
                             file,
-                            "{}        array_size += crate::common::protocol::varint::size_of_unsigned_varint(elem_len + 1);",
+                            "{}        array_size += crate::common::protocol::ByteUtils::size_of_unsigned_varint(elem_len + 1);",
                             indent
                         )?;
                         writeln!(file, "{}        array_size += elem_len as i32;", indent)?;
@@ -1910,7 +2097,7 @@ fn generate_tagged_field_content_size(
             }
             writeln!(
                 file,
-                "{}    size.add_bytes(crate::common::protocol::varint::size_of_unsigned_varint(array_size as u32)); // size prefix",
+                "{}    size.add_bytes(crate::common::protocol::ByteUtils::size_of_unsigned_varint(array_size as u32)); // size prefix",
                 indent
             )?;
             writeln!(file, "{}    size.add_bytes(array_size);", indent)?;
@@ -1936,7 +2123,7 @@ fn generate_tagged_field_content_size(
                     )?;
                     writeln!(
                         file,
-                        "{}    size.add_bytes(crate::common::protocol::varint::size_of_unsigned_varint(content_size as u32)); // size prefix",
+                        "{}    size.add_bytes(crate::common::protocol::ByteUtils::size_of_unsigned_varint(content_size as u32)); // size prefix",
                         indent
                     )?;
                     writeln!(file, "{}    size.add_bytes(content_size);", indent)?;
@@ -1954,7 +2141,7 @@ fn generate_tagged_field_content_size(
                     )?;
                     writeln!(
                         file,
-                        "{}    size.add_bytes(crate::common::protocol::varint::size_of_unsigned_varint(content_size as u32)); // size prefix",
+                        "{}    size.add_bytes(crate::common::protocol::ByteUtils::size_of_unsigned_varint(content_size as u32)); // size prefix",
                         indent
                     )?;
                     writeln!(file, "{}    size.add_bytes(content_size);", indent)?;
@@ -1966,7 +2153,7 @@ fn generate_tagged_field_content_size(
                     )?;
                     writeln!(
                         file,
-                        "{}    size.add_bytes(crate::common::protocol::varint::size_of_unsigned_varint(1)); // size prefix for 1 byte",
+                        "{}    size.add_bytes(crate::common::protocol::ByteUtils::size_of_unsigned_varint(1)); // size prefix for 1 byte",
                         indent
                     )?;
                     writeln!(file, "{}    size.add_bytes(1); // varint(0) null indicator", indent)?;
@@ -1979,7 +2166,7 @@ fn generate_tagged_field_content_size(
                 writeln!(file, "{}    let struct_size = struct_acc.total_size();", indent)?;
                 writeln!(
                     file,
-                    "{}    size.add_bytes(crate::common::protocol::varint::size_of_unsigned_varint(struct_size as u32)); // size prefix",
+                    "{}    size.add_bytes(crate::common::protocol::ByteUtils::size_of_unsigned_varint(struct_size as u32)); // size prefix",
                     indent
                 )?;
                 writeln!(file, "{}    size.add_bytes(struct_size);", indent)?;
@@ -2339,7 +2526,7 @@ fn generate_tagged_field_read(
                         writeln!(file, "{}                    readable.read_bytes(&mut struct_bytes)?;", indent)?;
                         writeln!(
                             file,
-                            "{}                    let mut struct_accessor = crate::common::protocol::ByteBufferAccessor::from_bytes(struct_bytes);",
+                            "{}                    let mut struct_accessor = crate::common::protocol::ByteBufferAccessor::new(struct_bytes);",
                             indent
                         )?;
                         writeln!(
@@ -2535,7 +2722,7 @@ fn generate_tagged_field_write(
                             writeln!(file, "{}                    let bytes = val.as_bytes();", indent)?;
                             writeln!(
                                 file,
-                                "{}                    let string_prefix_size = crate::common::protocol::varint::size_of_unsigned_varint((bytes.len() as u32) + 1);",
+                                "{}                    let string_prefix_size = crate::common::protocol::ByteUtils::size_of_unsigned_varint((bytes.len() as u32) + 1);",
                                 indent
                             )?;
                             writeln!(
@@ -2567,7 +2754,7 @@ fn generate_tagged_field_write(
                             writeln!(file, "{}                let bytes = {}.as_bytes();", indent, tagged_accessor)?;
                             writeln!(
                                 file,
-                                "{}                let string_prefix_size = crate::common::protocol::varint::size_of_unsigned_varint((bytes.len() as u32) + 1);",
+                                "{}                let string_prefix_size = crate::common::protocol::ByteUtils::size_of_unsigned_varint((bytes.len() as u32) + 1);",
                                 indent
                             )?;
                             writeln!(
@@ -2653,7 +2840,7 @@ fn generate_tagged_field_write(
                         writeln!(file, "{}                // Calculate array size", indent)?;
                         writeln!(
                             file,
-                            "{}                let mut size_accessor = crate::common::protocol::ByteBufferAccessor::new(1024);",
+                            "{}                let mut size_accessor = crate::common::protocol::ByteBufferAccessor::new(Vec::with_capacity(1024));",
                             indent
                         )?;
                         writeln!(file, "{}                // Write array length", indent)?;
@@ -2764,7 +2951,7 @@ fn generate_tagged_field_write(
                             writeln!(file, "{}                    // Calculate bytes size", indent)?;
                             writeln!(
                                 file,
-                                "{}                    let mut size_accessor = crate::common::protocol::ByteBufferAccessor::new(256);",
+                                "{}                    let mut size_accessor = crate::common::protocol::ByteBufferAccessor::new(Vec::with_capacity(256));",
                                 indent
                             )?;
                             writeln!(
@@ -2797,7 +2984,7 @@ fn generate_tagged_field_write(
                             writeln!(file, "{}                // Calculate bytes size", indent)?;
                             writeln!(
                                 file,
-                                "{}                let mut size_accessor = crate::common::protocol::ByteBufferAccessor::new(256);",
+                                "{}                let mut size_accessor = crate::common::protocol::ByteBufferAccessor::new(Vec::with_capacity(256));",
                                 indent
                             )?;
                             writeln!(
@@ -2842,7 +3029,7 @@ fn generate_tagged_field_write(
                                 )?;
                                 writeln!(
                                     file,
-                                    "{}                    let mut size_accessor = crate::common::protocol::ByteBufferAccessor::new(256);",
+                                    "{}                    let mut size_accessor = crate::common::protocol::ByteBufferAccessor::new(Vec::with_capacity(256));",
                                     indent
                                 )?;
                                 writeln!(
@@ -2872,7 +3059,7 @@ fn generate_tagged_field_write(
                                 )?;
                                 writeln!(
                                     file,
-                                    "{}                let mut size_accessor = crate::common::protocol::ByteBufferAccessor::new(256);",
+                                    "{}                let mut size_accessor = crate::common::protocol::ByteBufferAccessor::new(Vec::with_capacity(256));",
                                     indent
                                 )?;
                                 writeln!(
@@ -2898,7 +3085,7 @@ fn generate_tagged_field_write(
                             writeln!(file, "{}                // Calculate struct size", indent)?;
                             writeln!(
                                 file,
-                                "{}                let mut size_accessor = crate::common::protocol::ByteBufferAccessor::new(256);",
+                                "{}                let mut size_accessor = crate::common::protocol::ByteBufferAccessor::new(Vec::with_capacity(256));",
                                 indent
                             )?;
                             writeln!(
@@ -3056,11 +3243,15 @@ fn generate_read_method(
     Ok(())
 }
 
+/// `parent_versions` mirrors Java's `generateClassWriter(className, struct, parentVersions)`
+/// (`MessageDataGenerator.java:702-703`). Only the non-ignorable-field guard consults it,
+/// via `curVersions = parentVersions.intersect(struct.versions())` (`:718`).
 fn generate_write_method(
     file: &mut fs::File,
     class_name: &str,
     struct_spec: &StructSpec,
     flexible_versions: Versions,
+    parent_versions: Versions,
 ) -> Result<(), Box<dyn std::error::Error>> {
     writeln!(
         file,
@@ -3088,11 +3279,38 @@ fn generate_write_method(
     writeln!(file, "        }}")?;
     writeln!(file)?;
 
-    // Generate write for each non-tagged field
+    // Generate write for each non-tagged field.
+    //
+    // Java walks *every* field here and wraps each one in a version conditional whose
+    // `else` half carries the non-ignorable guard (`MessageDataGenerator.java:720-798`).
+    // This generator writes tagged fields from a separate block further down, so a
+    // tagged field only contributes its guard at this point in field order — which is
+    // where Java emits it too.
+    let struct_versions = struct_spec.versions().intersect(parent_versions);
     for field in struct_spec.fields() {
         if field.tagged_versions().empty() {
             let effective_flex = field_flexible_versions(field, flexible_versions);
-            generate_field_write(file, field, effective_flex)?;
+            generate_field_write(file, field, effective_flex, struct_versions)?;
+        } else if non_ignorable_check_applies(field, struct_versions) {
+            let field_name = escape_rust_keyword(&to_snake_case(field.name()));
+            let versions = field.versions();
+            let unsupported =
+                if versions.lowest() > struct_versions.lowest() && versions.highest() < struct_versions.highest() {
+                    format!("(version < {} || version > {})", versions.lowest(), versions.highest())
+                } else if versions.lowest() > struct_versions.lowest() {
+                    format!("version < {}", versions.lowest())
+                } else {
+                    format!("version > {}", versions.highest())
+                };
+            writeln!(
+                file,
+                "        if {} && ({}) {{",
+                unsupported,
+                get_default_check(field, &field_name)
+            )?;
+            generate_non_ignorable_field_error(file, field, "            ")?;
+            writeln!(file, "        }}")?;
+            writeln!(file)?;
         }
     }
 
@@ -3813,6 +4031,7 @@ fn generate_field_write(
     file: &mut fs::File,
     field: &FieldSpec,
     flexible_versions: Versions,
+    struct_versions: Versions,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let field_name = to_snake_case(field.name());
     let field_name = escape_rust_keyword(&field_name);
@@ -4025,6 +4244,13 @@ fn generate_field_write(
     }
 
     if has_version_check {
+        // The `else` half of Java's field version conditional: refuse to encode a value
+        // the requested version has no room for, instead of dropping it.
+        // `MessageDataGenerator.java:792-797`.
+        if non_ignorable_check_applies(field, struct_versions) {
+            writeln!(file, "        }} else if {} {{", get_default_check(field, &field_name))?;
+            generate_non_ignorable_field_error(file, field, "            ")?;
+        }
         writeln!(file, "        }}")?;
     }
     writeln!(file)?;
@@ -4567,15 +4793,27 @@ fn get_default_value_for_field(field: &FieldSpec) -> String {
             return "None".to_string();
         }
         // Nullable with no explicit default: Java defaults to non-null empty values
-        // for String, Bytes and Struct. Only fields with an explicit
+        // for String, Bytes, Struct and Array. Only fields with an explicit
         // "default": "null" in the JSON spec default to null/None.
+        //
+        // The array arm is the same rule CLAUDE.md §2 states for string/bytes, and it
+        // comes from the same place: `FieldSpec.fieldDefault`'s `type.isArray()` branch
+        // returns `new <List>(0)` and only returns `"null"` when the spec asks for it
+        // (`FieldSpec.java:465-475`) — `validateNullDefault()` is reached *only* on that
+        // explicit path. Defaulting these to `None` instead made a default-constructed
+        // message encode a null array where Java encodes an empty one, and made Java's
+        // own `MessageTest.testOffsetFetchRequestVersions` (which leaves `Topics` unset
+        // at v8+) trip the non-default-at-unsupported-version guard.
         if default.is_none() {
             match field.field_type() {
                 FieldType::String => return "Some(String::new())".to_string(),
                 FieldType::Bytes => return "Some(Vec::new())".to_string(),
+                FieldType::Array(_) => return "Some(Vec::new())".to_string(),
                 FieldType::Struct(struct_name) => {
                     return format!("Some({}::new())", struct_name);
                 },
+                // No spec in either corpus declares a nullable field of any other type,
+                // so this arm is unreachable; Java has no `null` default for them either.
                 _ => return "None".to_string(),
             }
         }
@@ -4692,7 +4930,11 @@ fn escape_rust_keyword(name: &str) -> String {
     }
 }
 
-fn generate_mod_file(spec_files: &[PathBuf], output_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
+fn generate_mod_file(
+    spec_files: &[PathBuf],
+    generated_modules: &[(String, String)],
+    output_dir: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
     let mod_file = output_dir.join("mod.rs");
     let mut file = fs::File::create(mod_file)?;
 
@@ -4709,6 +4951,23 @@ fn generate_mod_file(spec_files: &[PathBuf], output_dir: &Path) -> Result<(), Bo
         let file_name = spec_file.file_stem().and_then(|s| s.to_str()).ok_or("Invalid file name")?;
         let module_name = format!("{}_data", to_snake_case(file_name));
         writeln!(file, "pub mod {};", module_name)?;
+    }
+
+    // Re-export each module's top-level message struct at the parent. The crate root
+    // globs this module (`pub use generated::*;`), so callers reach the type as
+    // `confluent_kafka::ProduceRequestData` rather than through the per-message module
+    // (CLAUDE.md §2: import through the parent re-export, not the file module path).
+    //
+    // The modules themselves stay public, unlike the hand-written file modules: their
+    // *nested* struct names collide across modules (`PartitionData` is declared in 20
+    // of them), so the module path is the only qualifier those types have — which is
+    // exactly the Java outer-class qualifier §2 reserves the submodule path for.
+    //
+    // A spec that fails to parse gets a stub file and no entry here, so no re-export
+    // is emitted for a module that has no top-level struct to re-export.
+    writeln!(file)?;
+    for (module_name, data_class_name) in generated_modules {
+        writeln!(file, "pub use {}::{};", module_name, data_class_name)?;
     }
 
     Ok(())
@@ -4866,5 +5125,199 @@ mod tests {
         assert!(!stripped.contains("// inline comment"));
         assert!(stripped.contains("\"name\""));
         assert!(stripped.contains("\"test\""));
+    }
+
+    fn field(json: &str) -> FieldSpec {
+        let mut spec: FieldSpec = serde_json::from_str(json).expect("valid field spec");
+        spec.validate().expect("field spec validates");
+        spec
+    }
+
+    fn versions(lowest: i16, highest: i16) -> Versions {
+        Versions::new(lowest, highest).expect("valid range")
+    }
+
+    /// Java names the field in the guard message with `camelCaseName()`
+    /// (`FieldSpec.java:188-190`, used at `:661`), not the snake_case Rust identifier,
+    /// so the emitted text is byte-identical to the Java client's for the same field.
+    #[test]
+    fn test_camel_case_name_matches_java_lower_case_first() {
+        let name = |n: &str| field(&format!(r#"{{ "name": "{n}", "type": "int32", "versions": "0+" }}"#));
+        assert_eq!(name("ProducerId").camel_case_name(), "producerId");
+        assert_eq!(name("Enable2Pc").camel_case_name(), "enable2Pc");
+        assert_eq!(name("KeepPreparedTxn").camel_case_name(), "keepPreparedTxn");
+        // Already-camelCase spec names (the test corpus uses these) are unchanged.
+        assert_eq!(name("processId").camel_case_name(), "processId");
+    }
+
+    /// The `"ignorable"` flag is the whole gate: Java emits the guard only under
+    /// `if (!field.ignorable())` (`MessageDataGenerator.java:792`), and adding it to an
+    /// ignorable field would start rejecting encodings Java accepts
+    /// (`.claude/rules/producer-transactions.md` §11).
+    #[test]
+    fn test_non_ignorable_check_skips_ignorable_fields() {
+        // InitProducerIdRequest.ProducerId: v3+ in a 0-6 message, not ignorable.
+        let producer_id = field(r#"{ "name": "ProducerId", "type": "int64", "versions": "3+", "default": "-1" }"#);
+        assert!(non_ignorable_check_applies(&producer_id, versions(0, 6)));
+
+        // TxnOffsetCommitRequest.CommittedLeaderEpoch: v2+ but "ignorable": true.
+        let leader_epoch = field(
+            r#"{ "name": "CommittedLeaderEpoch", "type": "int32", "versions": "2+",
+                 "default": "-1", "ignorable": true }"#,
+        );
+        assert!(!non_ignorable_check_applies(&leader_epoch, versions(0, 5)));
+    }
+
+    /// Java only emits the `else` half when `possibleVersions - containingVersions` is
+    /// non-empty (`VersionConditional.java:189-218`). A field spanning the whole struct
+    /// range has no unsupported version to guard against.
+    #[test]
+    fn test_non_ignorable_check_needs_a_reachable_unsupported_version() {
+        let all_versions = field(r#"{ "name": "GroupId", "type": "string", "versions": "0+" }"#);
+        assert!(!non_ignorable_check_applies(&all_versions, versions(0, 6)));
+
+        // The nested-struct case: `ListOffsetsResponse` is 1-11 and its `Partitions`
+        // struct is declared "0+", but `Timestamp` is "1+" — so once the struct range is
+        // intersected with the parent's, v0 is unreachable and Java emits no guard.
+        let timestamp = field(r#"{ "name": "Timestamp", "type": "int64", "versions": "1+", "default": "-1" }"#);
+        assert!(!non_ignorable_check_applies(&timestamp, versions(1, 11)));
+        // Without that intersection the same field would be guarded — this is the
+        // difference `generate_write_method`'s `parent_versions` argument exists for.
+        assert!(non_ignorable_check_applies(&timestamp, versions(0, 11)));
+
+        // A field removed in later versions is guarded on the upper side too.
+        let replica_id = field(r#"{ "name": "ReplicaId", "type": "int32", "versions": "0-14", "default": "-1" }"#);
+        assert!(non_ignorable_check_applies(&replica_id, versions(0, 18)));
+    }
+
+    /// `get_default_check` mirrors `FieldSpec.generateNonDefaultValueCheck`
+    /// (`FieldSpec.java:587-641`), which Java reuses verbatim for both the tagged-field
+    /// "should this be written?" test and this guard.
+    #[test]
+    fn test_get_default_check_mirrors_java_per_type() {
+        // Numeric: `field != <default>`.
+        let producer_id = field(r#"{ "name": "ProducerId", "type": "int64", "versions": "3+", "default": "-1" }"#);
+        assert_eq!(get_default_check(&producer_id, "producer_id"), "self.producer_id != -1");
+
+        // Bool: Java writes a bare `if (field)` / `if (!field)` rather than `!= false`.
+        let enable_2pc = field(r#"{ "name": "Enable2Pc", "type": "bool", "versions": "6+", "default": "false" }"#);
+        assert_eq!(get_default_check(&enable_2pc, "enable2_pc"), "self.enable2_pc");
+        let auto_create =
+            field(r#"{ "name": "AllowAutoTopicCreation", "type": "bool", "versions": "4+", "default": "true" }"#);
+        assert_eq!(
+            get_default_check(&auto_create, "allow_auto_topic_creation"),
+            "!self.allow_auto_topic_creation"
+        );
+
+        // Explicit `"default": "null"` — Java's `field != null`.
+        let instance_id = field(
+            r#"{ "name": "GroupInstanceId", "type": "string", "versions": "3+",
+                 "nullableVersions": "3+", "default": "null" }"#,
+        );
+        assert_eq!(
+            get_default_check(&instance_id, "group_instance_id"),
+            "self.group_instance_id.is_some()"
+        );
+
+        // Nullable without an explicit null default — Java's `field == null || !field.isEmpty()`.
+        // Null counts as *non*-default here, which is why the field's own default has to
+        // be the empty collection (see `get_default_value_for_field`).
+        let topics = field(
+            r#"{ "name": "Topics", "type": "[]OffsetFetchRequestTopic", "versions": "0-7",
+                 "nullableVersions": "2-7" }"#,
+        );
+        assert_eq!(
+            get_default_check(&topics, "topics"),
+            "self.topics.as_ref().map_or(true, |v| !v.is_empty())"
+        );
+
+        // Non-nullable string with no default — Java's `!field.equals("")`.
+        let member_id = field(r#"{ "name": "MemberId", "type": "string", "versions": "3+", "default": "" }"#);
+        assert_eq!(get_default_check(&member_id, "member_id"), "!self.member_id.is_empty()");
+
+        // Non-nullable array — Java's `!field.isEmpty()`.
+        let keys = field(r#"{ "name": "CoordinatorKeys", "type": "[]string", "versions": "4+" }"#);
+        assert_eq!(
+            get_default_check(&keys, "coordinator_keys"),
+            "!self.coordinator_keys.is_empty()"
+        );
+
+        // Struct — Java's `!field.equals(new Struct())`.
+        let leader = field(r#"{ "name": "CurrentLeader", "type": "LeaderIdAndEpoch", "versions": "12+" }"#);
+        assert_eq!(
+            get_default_check(&leader, "current_leader"),
+            "self.current_leader != LeaderIdAndEpoch::new()"
+        );
+    }
+
+    /// Generates a nested struct into a scratch file and returns the emitted Rust.
+    fn emit_nested_struct(field: &FieldSpec, parent_versions: Versions) -> String {
+        let path = std::env::temp_dir().join(format!(
+            "ckr-gen-{}-{}-{}.rs",
+            std::process::id(),
+            parent_versions.lowest(),
+            parent_versions.highest()
+        ));
+        {
+            let mut file = fs::File::create(&path).expect("create scratch file");
+            generate_nested_struct(&mut file, field, Versions::NONE, parent_versions).expect("generate");
+        }
+        let emitted = fs::read_to_string(&path).expect("read scratch file");
+        let _ = fs::remove_file(&path);
+        emitted
+    }
+
+    /// Pins the `parent_versions` threading at the **emission** level, not just in the
+    /// predicate.
+    ///
+    /// Java hands each subclass `parentVersions.intersect(struct.versions())`
+    /// (`MessageDataGenerator.java:176`, `:183`) and intersects again at `:718`, so a
+    /// nested struct declared wider than its enclosing message is still only guarded
+    /// over versions the message can reach. This is the `ListOffsetsResponse` shape:
+    /// the message is 1-11, its `Partitions` struct is declared `0+`, and `Timestamp`
+    /// is `1+` — so v0 is unreachable and Java emits no guard.
+    ///
+    /// Reverting the threading (passing the field's own range as the parent) puts the
+    /// guard back, which is exactly the 7-guard over-emission this argument suppressed.
+    /// Nothing else in the suite fails if it regresses: the spurious guards land on
+    /// versions no message-level round-trip can reach.
+    #[test]
+    fn test_nested_struct_guard_respects_the_enclosing_message_versions() {
+        let partitions = field(
+            r#"{ "name": "Partitions", "type": "[]ListOffsetsPartitionResponse", "versions": "0+",
+                 "fields": [
+                   { "name": "Timestamp", "type": "int64", "versions": "1+", "default": "-1" }
+                 ] }"#,
+        );
+
+        let within_reach = emit_nested_struct(&partitions, versions(1, 11));
+        assert!(
+            !within_reach.contains("Attempted to write a non-default timestamp"),
+            "v0 is unreachable from a 1-11 message, so Java emits no guard:\n{within_reach}"
+        );
+
+        let v0_reachable = emit_nested_struct(&partitions, versions(0, 11));
+        assert!(
+            v0_reachable.contains("Attempted to write a non-default timestamp at version"),
+            "with v0 reachable the guard is required:\n{v0_reachable}"
+        );
+    }
+
+    /// An unset nullable array is the **empty** list, not null: `FieldSpec.fieldDefault`
+    /// returns `new <List>(0)` and only yields `"null"` on an explicit
+    /// `"default": "null"` (`FieldSpec.java:465-475`).
+    #[test]
+    fn test_nullable_array_defaults_to_empty_not_none() {
+        let implicit = field(
+            r#"{ "name": "Topics", "type": "[]OffsetFetchRequestTopic", "versions": "0-7",
+                 "nullableVersions": "2-7" }"#,
+        );
+        assert_eq!(get_default_value_for_field(&implicit), "Some(Vec::new())");
+
+        let explicit = field(
+            r#"{ "name": "Topics", "type": "[]MetadataRequestTopic", "versions": "0+",
+                 "nullableVersions": "0+", "default": "null" }"#,
+        );
+        assert_eq!(get_default_value_for_field(&explicit), "None");
     }
 }

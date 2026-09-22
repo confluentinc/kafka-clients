@@ -19,10 +19,10 @@
 use std::collections::HashMap;
 use std::io;
 
+use crate::CreatePartitionsResponseData;
 use crate::common::protocol::{ApiKeys, Errors, Readable};
-use crate::create_partitions_response_data::CreatePartitionsResponseData;
 
-use super::abstract_response::update_error_counts;
+use super::AbstractResponse;
 
 /// A CreatePartitions response.
 ///
@@ -67,7 +67,7 @@ impl CreatePartitionsResponse {
     pub fn error_counts(&self) -> HashMap<Errors, i32> {
         let mut counts = HashMap::new();
         for result in &self.data.results {
-            update_error_counts(&mut counts, Errors::for_code(result.error_code));
+            AbstractResponse::update_error_counts(&mut counts, Errors::for_code(result.error_code));
         }
         counts
     }
@@ -108,12 +108,12 @@ mod tests {
         ok.set_error_code(Errors::None.code());
         let mut bad = CreatePartitionsTopicResult::new();
         bad.set_name("bad".to_string());
-        bad.set_error_code(Errors::InvalidTopicException.code());
+        bad.set_error_code(Errors::InvalidTopicError.code());
         data.set_results(vec![ok, bad]);
         let response = CreatePartitionsResponse::new(data);
         let counts = response.error_counts();
         assert_eq!(counts.get(&Errors::None), Some(&1));
-        assert_eq!(counts.get(&Errors::InvalidTopicException), Some(&1));
+        assert_eq!(counts.get(&Errors::InvalidTopicError), Some(&1));
     }
 
     #[test]

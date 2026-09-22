@@ -19,31 +19,11 @@
 use std::collections::HashMap;
 use std::io;
 
+use crate::DescribeGroupsResponseData;
 use crate::common::protocol::{ApiKeys, Errors, Readable};
-use crate::describe_groups_response_data::{DescribeGroupsResponseData, DescribedGroup};
+use crate::describe_groups_response_data::DescribedGroup;
 
-use super::abstract_response::update_error_counts;
-
-/// Sentinel authorized-operations value indicating the field was omitted.
-///
-/// Corresponds to `DescribeGroupsResponse.AUTHORIZED_OPERATIONS_OMITTED`
-/// (`Integer.MIN_VALUE`).
-pub const AUTHORIZED_OPERATIONS_OMITTED: i32 = i32::MIN;
-
-/// The "unknown state" placeholder used in error group entries.
-///
-/// Corresponds to `DescribeGroupsResponse.UNKNOWN_STATE`.
-pub const UNKNOWN_STATE: &str = "";
-
-/// The "unknown protocol type" placeholder used in error group entries.
-///
-/// Corresponds to `DescribeGroupsResponse.UNKNOWN_PROTOCOL_TYPE`.
-pub const UNKNOWN_PROTOCOL_TYPE: &str = "";
-
-/// The "unknown protocol" placeholder used in error group entries.
-///
-/// Corresponds to `DescribeGroupsResponse.UNKNOWN_PROTOCOL`.
-pub const UNKNOWN_PROTOCOL: &str = "";
+use super::AbstractResponse;
 
 /// A `DescribeGroups` response.
 ///
@@ -54,6 +34,27 @@ pub struct DescribeGroupsResponse {
 }
 
 impl DescribeGroupsResponse {
+    /// Sentinel authorized-operations value indicating the field was omitted.
+    ///
+    /// Corresponds to `DescribeGroupsResponse.AUTHORIZED_OPERATIONS_OMITTED`
+    /// (`Integer.MIN_VALUE`).
+    pub const AUTHORIZED_OPERATIONS_OMITTED: i32 = i32::MIN;
+
+    /// The "unknown state" placeholder used in error group entries.
+    ///
+    /// Corresponds to `DescribeGroupsResponse.UNKNOWN_STATE`.
+    pub const UNKNOWN_STATE: &str = "";
+
+    /// The "unknown protocol type" placeholder used in error group entries.
+    ///
+    /// Corresponds to `DescribeGroupsResponse.UNKNOWN_PROTOCOL_TYPE`.
+    pub const UNKNOWN_PROTOCOL_TYPE: &str = "";
+
+    /// The "unknown protocol" placeholder used in error group entries.
+    ///
+    /// Corresponds to `DescribeGroupsResponse.UNKNOWN_PROTOCOL`.
+    pub const UNKNOWN_PROTOCOL: &str = "";
+
     /// Creates a new `DescribeGroupsResponse` from the underlying data.
     pub fn new(data: DescribeGroupsResponseData) -> Self {
         Self { data }
@@ -97,7 +98,7 @@ impl DescribeGroupsResponse {
     pub fn error_counts(&self) -> HashMap<Errors, i32> {
         let mut counts = HashMap::new();
         for group in &self.data.groups {
-            update_error_counts(&mut counts, Errors::for_code(group.error_code));
+            AbstractResponse::update_error_counts(&mut counts, Errors::for_code(group.error_code));
         }
         counts
     }
@@ -111,11 +112,11 @@ impl DescribeGroupsResponse {
         group
             .set_group_id(group_id.into())
             .set_error_code(error.code())
-            .set_group_state(UNKNOWN_STATE.to_string())
-            .set_protocol_type(UNKNOWN_PROTOCOL_TYPE.to_string())
-            .set_protocol_data(UNKNOWN_PROTOCOL.to_string())
+            .set_group_state(DescribeGroupsResponse::UNKNOWN_STATE.to_string())
+            .set_protocol_type(DescribeGroupsResponse::UNKNOWN_PROTOCOL_TYPE.to_string())
+            .set_protocol_data(DescribeGroupsResponse::UNKNOWN_PROTOCOL.to_string())
             .set_members(Vec::new())
-            .set_authorized_operations(AUTHORIZED_OPERATIONS_OMITTED);
+            .set_authorized_operations(DescribeGroupsResponse::AUTHORIZED_OPERATIONS_OMITTED);
         group
     }
 
@@ -174,7 +175,10 @@ mod tests {
         assert_eq!(group.group_id, "g1");
         assert_eq!(group.error_code, Errors::GroupIdNotFound.code());
         assert_eq!(group.group_state, "");
-        assert_eq!(group.authorized_operations, AUTHORIZED_OPERATIONS_OMITTED);
+        assert_eq!(
+            group.authorized_operations,
+            DescribeGroupsResponse::AUTHORIZED_OPERATIONS_OMITTED
+        );
     }
 
     #[test]

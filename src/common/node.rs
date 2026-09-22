@@ -38,11 +38,11 @@ impl Node {
 
     /// Creates a new `Node` with the given rack.
     pub fn with_rack(id: i32, host: String, port: i32, rack: Option<String>) -> Self {
-        Self::with_rack_and_fenced(id, host, port, rack, false)
+        Self::with_rack_is_fenced(id, host, port, rack, false)
     }
 
     /// Creates a new `Node` with the given rack and fenced status.
-    pub fn with_rack_and_fenced(id: i32, host: String, port: i32, rack: Option<String>, is_fenced: bool) -> Self {
+    pub fn with_rack_is_fenced(id: i32, host: String, port: i32, rack: Option<String>, is_fenced: bool) -> Self {
         Self { id, id_string: id.to_string(), host, port, rack, is_fenced }
     }
 
@@ -155,7 +155,7 @@ mod tests {
 
     #[test]
     fn test_node_with_fenced() {
-        let node = Node::with_rack_and_fenced(1, "localhost".to_string(), 9092, None, true);
+        let node = Node::with_rack_is_fenced(1, "localhost".to_string(), 9092, None, true);
         assert!(node.is_fenced());
     }
 

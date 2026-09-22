@@ -19,7 +19,7 @@
 use std::collections::HashMap;
 
 use crate::common::utils::ProducerIdAndEpoch;
-use crate::common::{KafkaError, KafkaFuture};
+use crate::common::{Error, KafkaFuture};
 
 /// The result of `Admin::fence_producers`.
 ///
@@ -54,9 +54,9 @@ impl FenceProducersResult {
     ///
     /// # Errors
     ///
-    /// Returns [`KafkaError::illegal_argument`] if `transactional_id` was not
+    /// Returns [`Error::local_illegal_argument`] if `transactional_id` was not
     /// included in the request.
-    pub fn producer_id(&self, transactional_id: &str) -> Result<KafkaFuture<i64>, KafkaError> {
+    pub fn producer_id(&self, transactional_id: &str) -> Result<KafkaFuture<i64>, Error> {
         self.find_and_apply(transactional_id, |p| p.producer_id)
     }
 
@@ -67,9 +67,9 @@ impl FenceProducersResult {
     ///
     /// # Errors
     ///
-    /// Returns [`KafkaError::illegal_argument`] if `transactional_id` was not
+    /// Returns [`Error::local_illegal_argument`] if `transactional_id` was not
     /// included in the request.
-    pub fn epoch_id(&self, transactional_id: &str) -> Result<KafkaFuture<i16>, KafkaError> {
+    pub fn epoch_id(&self, transactional_id: &str) -> Result<KafkaFuture<i16>, Error> {
         self.find_and_apply(transactional_id, |p| p.epoch)
     }
 
@@ -81,7 +81,7 @@ impl FenceProducersResult {
     }
 
     /// Mirrors `FenceProducersResult.findAndApply`.
-    fn find_and_apply<T, F>(&self, transactional_id: &str, followup: F) -> Result<KafkaFuture<T>, KafkaError>
+    fn find_and_apply<T, F>(&self, transactional_id: &str, followup: F) -> Result<KafkaFuture<T>, Error>
     where
         T: Clone + Send + Sync + 'static,
         F: Fn(&ProducerIdAndEpoch) -> T + Send + Sync + 'static,
@@ -90,7 +90,7 @@ impl FenceProducersResult {
             .get(transactional_id)
             .map(|future| future.then_apply(move |p| followup(&p)))
             .ok_or_else(|| {
-                KafkaError::illegal_argument(format!(
+                Error::local_illegal_argument(format!(
                     "TransactionalId `{transactional_id}` was not included in the request"
                 ))
             })
@@ -100,7 +100,7 @@ impl FenceProducersResult {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::kafka_future::KafkaFutureImpl;
+    use crate::common::internals::KafkaFutureImpl;
 
     #[tokio::test]
     async fn producer_id_and_epoch_id_project_the_future() {

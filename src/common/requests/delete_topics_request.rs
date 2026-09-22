@@ -18,10 +18,12 @@
 
 use std::io;
 
+use crate::DeleteTopicsRequestData;
+use crate::DeleteTopicsResponseData;
 use crate::common::Uuid;
 use crate::common::protocol::{ApiKeys, Errors, Readable};
-use crate::delete_topics_request_data::{DeleteTopicState, DeleteTopicsRequestData};
-use crate::delete_topics_response_data::{DeletableTopicResult, DeleteTopicsResponseData};
+use crate::delete_topics_request_data::DeleteTopicState;
+use crate::delete_topics_response_data::DeletableTopicResult;
 
 use super::{ConcreteRequest, ConcreteResponse, DeleteTopicsResponse, RequestBuilder};
 
@@ -131,7 +133,7 @@ pub struct DeleteTopicsRequestBuilder {
 
 impl DeleteTopicsRequestBuilder {
     /// Creates a builder from existing data.
-    pub fn from_data(data: DeleteTopicsRequestData) -> Self {
+    pub fn new(data: DeleteTopicsRequestData) -> Self {
         Self {
             data,
             oldest_allowed_version: ApiKeys::DELETE_TOPICS.oldest_version(),
@@ -223,7 +225,7 @@ mod tests {
         data.set_timeout_ms(15000);
         let mut request = ConcreteRequest::DeleteTopics(DeleteTopicsRequest::new(data, 5));
         let bytes = request.serialize().unwrap();
-        let mut readable = crate::common::ByteBufferAccessor::from_bytes(bytes.into_buffer());
+        let mut readable = crate::common::ByteBufferAccessor::new(bytes.into_buffer());
         let parsed = DeleteTopicsRequest::parse(&mut readable, 5).unwrap();
         assert_eq!(parsed.data().topic_names, vec!["to-delete".to_string()]);
         assert_eq!(parsed.data().timeout_ms, 15000);

@@ -33,19 +33,19 @@ use std::sync::{Arc, Mutex};
 use log::trace;
 use tokio::sync::{Notify, mpsc, oneshot};
 
-use crate::common::memory::buffer_supplier::BufferSupplier;
-use crate::common::protocol::Errors;
+use crate::common::Errors;
+use crate::common::memory::BufferSupplier;
 use crate::common::requests::ConcreteResponse;
-use crate::common::requests::fetch_response::FetchResponse;
-use crate::common::{KafkaError, Node};
-use crate::consumer::internals::abstract_fetch::AbstractFetch;
-use crate::consumer::internals::consumer_metadata::ConsumerMetadata;
-use crate::consumer::internals::fetch_buffer::FetchBuffer;
-use crate::consumer::internals::fetch_config::FetchConfig;
-use crate::consumer::internals::fetch_metrics_manager::FetchMetricsManager;
-use crate::consumer::internals::network_client_delegate::{PollResult, UnsentRequest};
-use crate::consumer::internals::request_manager::RequestManager;
-use crate::consumer::internals::subscription_state::SubscriptionState;
+use crate::common::requests::FetchResponse;
+use crate::common::{Error, Node};
+use crate::consumer::internals::AbstractFetch;
+use crate::consumer::internals::ConsumerMetadata;
+use crate::consumer::internals::FetchBuffer;
+use crate::consumer::internals::FetchConfig;
+use crate::consumer::internals::FetchMetricsManager;
+use crate::consumer::internals::RequestManager;
+use crate::consumer::internals::SubscriptionState;
+use crate::consumer::internals::{PollResult, UnsentRequest};
 use crate::fetch_session_handler::FetchSessionRequestData;
 
 /// Callback that supplies the "is this node currently unreachable due to
@@ -59,18 +59,7 @@ pub(crate) type IsUnavailableFn = Arc<dyn Fn(&Node) -> bool + Send + Sync + 'sta
 
 /// Callback that returns `Err(...)` when the node has a pending
 /// authentication failure (Java's `maybeThrowAuthFailure`).
-pub(crate) type MaybeAuthFailureFn = Arc<dyn Fn(&Node) -> Result<(), KafkaError> + Send + Sync + 'static>;
-
-/// Always-available stub for [`IsUnavailableFn`]: every node is
-/// reachable. Used by tests and as a default when no delegate is wired.
-pub(crate) fn always_available() -> IsUnavailableFn {
-    Arc::new(|_| false)
-}
-
-/// No-op stub for [`MaybeAuthFailureFn`].
-pub(crate) fn no_auth_failure() -> MaybeAuthFailureFn {
-    Arc::new(|_| Ok(()))
-}
+pub(crate) type MaybeAuthFailureFn = Arc<dyn Fn(&Node) -> Result<(), Error> + Send + Sync + 'static>;
 
 /// Envelope for routing a fetch-request completion (or its
 /// transport-level failure) from the spawned response forwarder back
@@ -115,7 +104,7 @@ pub(crate) enum PendingFetchCompletion {
     Failure {
         fetch_target: Node,
         request_data: FetchSessionRequestData,
-        error: KafkaError,
+        error: Error,
         for_close: bool,
     },
 }
@@ -131,10 +120,10 @@ pub(crate) struct FetchRequestManager {
     /// are completed together on the next `pollInternal` (Java does
     /// this via `whenComplete` chaining; Rust collects them in a single
     /// slot and resolves them in one shot).
-    pending_fetch_requests: Option<Vec<oneshot::Sender<Result<(), KafkaError>>>>,
+    pending_fetch_requests: Option<Vec<oneshot::Sender<Result<(), Error>>>>,
     /// Node-availability callbacks supplied by the consumer bg task. They
     /// are stored as `Arc<dyn Fn>` so the bg task can plug in
-    /// [`crate::consumer::internals::network_client_delegate::NetworkClientDelegate`]
+    /// [`crate::consumer::internals::NetworkClientDelegate`]
     /// indirectly without `FetchRequestManager` holding a direct
     /// reference to the delegate.
     is_unavailable: IsUnavailableFn,
@@ -169,6 +158,17 @@ pub(crate) struct FetchRequestManager {
 }
 
 impl FetchRequestManager {
+    /// Always-available stub for [`IsUnavailableFn`]: every node is
+    /// reachable. Used by tests and as a default when no delegate is wired.
+    pub(crate) fn always_available() -> IsUnavailableFn {
+        Arc::new(|_| false)
+    }
+
+    /// No-op stub for [`MaybeAuthFailureFn`].
+    pub(crate) fn no_auth_failure() -> MaybeAuthFailureFn {
+        Arc::new(|_| Ok(()))
+    }
+
     /// Constructs a `FetchRequestManager` from explicit dependencies.
     ///
     /// Translates the 9-arg Java constructor. Drops the `LogContext` (we use
@@ -183,7 +183,7 @@ impl FetchRequestManager {
         decompression_buffer_supplier: Arc<BufferSupplier>,
         is_unavailable: IsUnavailableFn,
         maybe_throw_auth_failure: MaybeAuthFailureFn,
-        api_versions: Arc<crate::api_versions::ApiVersions>,
+        api_versions: Arc<crate::ApiVersions>,
         metrics_manager: Arc<FetchMetricsManager>,
     ) -> Self {
         let (pending_completion_tx, pending_completion_rx) = mpsc::unbounded_channel();
@@ -225,7 +225,7 @@ impl FetchRequestManager {
     /// so concurrent callers all complete on ONE `pollInternal`. The
     /// Rust port collects all acks in a single slot; the next `poll`
     /// completes them together.
-    pub(crate) fn create_fetch_requests(&mut self) -> oneshot::Receiver<Result<(), KafkaError>> {
+    pub(crate) fn create_fetch_requests(&mut self) -> oneshot::Receiver<Result<(), Error>> {
         let (tx, rx) = oneshot::channel();
         self.pending_fetch_requests.get_or_insert_with(Vec::new).push(tx);
         rx
@@ -238,7 +238,7 @@ impl FetchRequestManager {
     /// to enqueue the ack. The next `poll(current_time_ms)` completes
     /// all accumulated acks together (Java's single-slot
     /// `pendingFetchRequestFuture` semantics).
-    pub(crate) fn enqueue_create_fetch_requests(&mut self, ack: oneshot::Sender<Result<(), KafkaError>>) {
+    pub(crate) fn enqueue_create_fetch_requests(&mut self, ack: oneshot::Sender<Result<(), Error>>) {
         self.pending_fetch_requests.get_or_insert_with(Vec::new).push(ack);
     }
 
@@ -305,10 +305,17 @@ impl FetchRequestManager {
                     // callers exceptionally and returns a "dummy" empty
                     // PollResult to avoid interrupting other request
                     // managers.
+                    // Java's `catch (Throwable t)` completes the future with
+                    // `t` UNCHANGED. Rebuilding it (as `Error::local_illegal_state`,
+                    // keeping only the message) would discard the class, the
+                    // error code and the source — turning a fatal
+                    // `SASL_AUTHENTICATION_FAILED` from
+                    // `maybe_throw_auth_failure` into something for which
+                    // `is_authentication_error()`, `is_api_error()` and
+                    // `is_kafka_error()` all answer false, i.e. a fatal
+                    // authentication failure presented as client misuse.
                     for tx in pending_acks {
-                        // Cheap KafkaError clone via String reformat.
-                        let cloned = KafkaError::illegal_state(e.message().to_string());
-                        let _ = tx.send(Err(cloned));
+                        let _ = tx.send(Err(e.clone()));
                     }
                     return PollResult::empty();
                 },
@@ -389,7 +396,7 @@ impl FetchRequestManager {
                             _ => PendingFetchCompletion::Failure {
                                 fetch_target: fetch_target_for_forwarder,
                                 request_data: request_data_for_forwarder,
-                                error: KafkaError::new(Errors::UnknownServerError),
+                                error: Error::new(Errors::UnknownServerError),
                                 for_close: for_close_flag,
                             },
                         }
@@ -403,7 +410,7 @@ impl FetchRequestManager {
                     Err(_recv) => PendingFetchCompletion::Failure {
                         fetch_target: fetch_target_for_forwarder,
                         request_data: request_data_for_forwarder,
-                        error: KafkaError::new(Errors::NetworkException),
+                        error: Error::new(Errors::NetworkError),
                         for_close: for_close_flag,
                     },
                 };
@@ -532,7 +539,7 @@ impl Drop for FetchRequestManager {
         // dropped receiver.
         if let Some(pending) = self.pending_fetch_requests.take() {
             for tx in pending {
-                let _ = tx.send(Err(KafkaError::illegal_state(
+                let _ = tx.send(Err(Error::local_illegal_state(
                     "FetchRequestManager dropped with pending CreateFetchRequests ack",
                 )));
             }
@@ -546,7 +553,7 @@ mod tests {
     use crate::common::IsolationLevel;
     use crate::common::TopicPartition;
     use crate::common::internals::ClusterResourceListeners;
-    use crate::consumer::internals::auto_offset_reset_strategy::AutoOffsetResetStrategy;
+    use crate::consumer::AutoOffsetResetStrategy;
     use std::collections::HashSet;
     use std::time::{Duration, Instant};
 
@@ -587,10 +594,10 @@ mod tests {
             subs,
             make_fetch_config(),
             Arc::new(FetchBuffer::new()),
-            Arc::new(crate::common::memory::buffer_supplier::BufferSupplier::create()),
-            always_available(),
-            no_auth_failure(),
-            Arc::new(crate::api_versions::ApiVersions::new()),
+            Arc::new(crate::common::memory::BufferSupplier::create()),
+            FetchRequestManager::always_available(),
+            FetchRequestManager::no_auth_failure(),
+            Arc::new(crate::ApiVersions::new()),
             FetchMetricsManager::for_test(),
         )
     }
@@ -762,7 +769,7 @@ mod tests {
     /// `poll_on_close` can resolve `cluster.node_by_id(node_id)` to
     /// produce a close-fetch-session `UnsentRequest`.
     ///
-    /// `request_test_utils::metadata_update_with(1, ...)` seeds exactly
+    /// `request_test_utils::RequestTestUtils::metadata_update_with(1, ...)` seeds exactly
     /// one node with id=0 (see `metadata_update_with_full` — node IDs are
     /// `0..num_nodes`). So `node_id` MUST be 0 with this helper.
     fn bootstrap_cluster_node(mgr: &FetchRequestManager, node_id: i32, topic: &str, partitions: i32) {
@@ -773,7 +780,7 @@ mod tests {
             .add_transient_topics(HashSet::from([topic.to_string()]));
         let mut counts = HashMap::new();
         counts.insert(topic.to_string(), partitions);
-        let response = crate::common::requests::request_test_utils::metadata_update_with(1, &counts);
+        let response = crate::common::requests::RequestTestUtils::metadata_update_with(1, &counts);
         mgr.abstract_fetch
             .metadata
             .metadata_arc()
@@ -784,11 +791,20 @@ mod tests {
     /// (or `None` for a disconnect-style response). Mirrors the
     /// `build_list_offsets_client_response` helper in
     /// `offsets_request_manager.rs`.
-    fn build_fetch_client_response(response: Option<FetchResponse>) -> crate::client_response::ClientResponse {
-        use crate::common::protocol::ApiKeys;
-        use crate::common::requests::request_header::RequestHeader;
-        let header = RequestHeader::new(&ApiKeys::FETCH, ApiKeys::FETCH.latest_version(), "", 1).expect("header");
-        crate::client_response::ClientResponse::with_timeout(
+    fn build_fetch_client_response(response: Option<FetchResponse>) -> crate::ClientResponse {
+        use crate::common::ApiKeys;
+        use crate::common::requests::{RequestHeader, RequestHeaderOptionsBuilder};
+        let header = RequestHeader::with_options(
+            RequestHeaderOptionsBuilder::new()
+                .set_request_api_key(&ApiKeys::FETCH)
+                .set_request_version(ApiKeys::FETCH.latest_version())
+                .set_client_id("")
+                .set_correlation_id(1)
+                .build()
+                .unwrap(),
+        )
+        .expect("header");
+        crate::ClientResponse::with_timed_out(
             header,
             None,
             "0",
@@ -833,9 +849,7 @@ mod tests {
         let unsent = result.unsent_requests.into_iter().next().unwrap();
 
         // Fire a transport-level retriable failure through the handler.
-        unsent
-            .handler()
-            .on_failure(0, KafkaError::new(crate::common::protocol::Errors::NetworkException));
+        unsent.handler().on_failure(0, Error::new(crate::common::Errors::NetworkError));
 
         // Wait deterministically for the drain on the next `poll(now)`
         // to observe the failure and remove node 0 from the pending set.
@@ -874,7 +888,7 @@ mod tests {
     /// drain.
     #[tokio::test]
     async fn test_response_routing_success_path() {
-        use crate::fetch_response_data::FetchResponseData;
+        use crate::FetchResponseData;
         let mut mgr = make_manager();
         bootstrap_cluster_node(&mgr, 0, "t", 1);
         let _ = mgr.abstract_fetch.session_handler_or_create(0);
@@ -949,34 +963,37 @@ mod tests {
 /// directly to stay fast and deterministic (these are unit tests, no broker).
 #[cfg(test)]
 mod round_trip {
+    use crate::common::requests::FetchMetadata;
     use std::collections::{HashMap, HashSet};
     use std::sync::{Arc, Mutex};
 
+    use crate::FetchResponseData;
     use crate::common::compress::Compression;
     use crate::common::header::RecordHeader;
     use crate::common::internals::ClusterResourceListeners;
     use crate::common::protocol::{ApiKeys, Errors};
     use crate::common::record::TimestampType;
-    use crate::common::record::internal::{MemoryRecords, RecordBatch, SimpleRecord};
-    use crate::common::requests::fetch_metadata::INVALID_SESSION_ID;
-    use crate::common::requests::fetch_request::FetchRequest;
-    use crate::common::requests::fetch_response::{FetchResponse, INVALID_PREFERRED_REPLICA_ID};
+    use crate::common::record::internal::{
+        MemoryRecords, MemoryRecordsBuilderOptionsBuilder, RecordBatch, SimpleRecord, SimpleRecordOptionsBuilder,
+    };
+    use crate::common::requests::FetchRequest;
+    use crate::common::requests::FetchResponse;
     use crate::common::serialization::Deserializer;
-    use crate::common::{IsolationLevel, KafkaError, Node, TopicPartition, Uuid};
-    use crate::consumer::internals::auto_offset_reset_strategy::AutoOffsetResetStrategy;
-    use crate::consumer::internals::consumer_metadata::ConsumerMetadata;
-    use crate::consumer::internals::deserializers::Deserializers;
-    use crate::consumer::internals::fetch_buffer::FetchBuffer;
-    use crate::consumer::internals::fetch_collector::{FetchCollector, SystemFetchCollectorTime};
-    use crate::consumer::internals::fetch_config::FetchConfig;
-    use crate::consumer::internals::fetch_metrics_manager::FetchMetricsManager;
-    use crate::consumer::internals::subscription_state::{FetchPosition, SubscriptionState};
+    use crate::common::{Error, IsolationLevel, Node, TopicPartition, Uuid};
+    use crate::consumer::AutoOffsetResetStrategy;
+    use crate::consumer::internals::ConsumerMetadata;
+    use crate::consumer::internals::Deserializers;
+    use crate::consumer::internals::FetchBuffer;
+    use crate::consumer::internals::FetchConfig;
+    use crate::consumer::internals::FetchMetricsManager;
+    use crate::consumer::internals::{FetchCollector, SystemFetchCollectorTime};
+    use crate::consumer::internals::{FetchPosition, SubscriptionState};
     use crate::fetch_response_data::{
-        AbortedTransaction, FetchResponseData, FetchableTopicResponse, NodeEndpoint, PartitionData as RespPartitionData,
+        AbortedTransaction, FetchableTopicResponse, NodeEndpoint, PartitionData as RespPartitionData,
     };
     use crate::metadata::LeaderAndEpoch;
 
-    use super::{always_available, no_auth_failure};
+    use super::FetchRequestManager;
 
     const TOPIC: &str = "test";
     const VALID_LEADER_EPOCH: i32 = 0;
@@ -984,7 +1001,7 @@ mod round_trip {
     /// Identity (byte-array) deserializer — Java's `ByteArrayDeserializer`.
     struct BytesDeserializer;
     impl Deserializer<Vec<u8>> for BytesDeserializer {
-        fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<Vec<u8>, KafkaError> {
+        fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<Vec<u8>, Error> {
             Ok(data.to_vec())
         }
     }
@@ -995,9 +1012,9 @@ mod round_trip {
         fail_value: Vec<u8>,
     }
     impl Deserializer<Vec<u8>> for FailOnValueDeserializer {
-        fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<Vec<u8>, KafkaError> {
+        fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<Vec<u8>, Error> {
             if data == self.fail_value.as_slice() {
-                return Err(KafkaError::serialization("simulated value deserialization failure"));
+                return Err(Error::serialization("simulated value deserialization failure"));
             }
             Ok(data.to_vec())
         }
@@ -1020,12 +1037,18 @@ mod round_trip {
         let simple: Vec<SimpleRecord> = (0..count)
             .map(|i| {
                 let value = (first_message_id + i as i64).to_string();
-                SimpleRecord::new(0, Some(b"key".to_vec()), Some(value.into_bytes()), vec![])
+                SimpleRecord::with_timestamp_key_value(0, Some(b"key".to_vec()), Some(value.into_bytes()))
             })
             .collect();
-        MemoryRecords::with_records_at_offset(2, base_offset, Compression::none(), TimestampType::CreateTime, &simple)
-            .buffer()
-            .to_vec()
+        MemoryRecords::with_records_with_magic_initial_offset_timestamp_type(
+            2,
+            base_offset,
+            Compression::none(),
+            TimestampType::CreateTime,
+            &simple,
+        )
+        .buffer()
+        .to_vec()
     }
 
     /// Like [`build_records`] but stamps the batch's partition leader epoch,
@@ -1041,31 +1064,45 @@ mod round_trip {
         let simple: Vec<SimpleRecord> = (0..count)
             .map(|i| {
                 let value = (first_message_id + i as i64).to_string();
-                SimpleRecord::new(0, Some(b"key".to_vec()), Some(value.into_bytes()), vec![])
+                SimpleRecord::with_timestamp_key_value(0, Some(b"key".to_vec()), Some(value.into_bytes()))
             })
             .collect();
-        MemoryRecords::with_records_at_offset_plep(base_offset, Compression::none(), partition_leader_epoch, &simple)
-            .buffer()
-            .to_vec()
+        MemoryRecords::with_records_with_initial_offset_partition_leader_epoch(
+            base_offset,
+            Compression::none(),
+            partition_leader_epoch,
+            &simple,
+        )
+        .buffer()
+        .to_vec()
     }
 
     /// A single record carrying headers, at `base_offset` (for `testHeaders`).
     fn build_records_with_headers(base_offset: i64, value: &[u8], headers: Vec<RecordHeader>) -> Vec<u8> {
-        let simple = vec![SimpleRecord::new(
-            0,
-            Some(b"key".to_vec()),
-            Some(value.to_vec()),
-            headers,
+        let simple = vec![SimpleRecord::with_options(
+            SimpleRecordOptionsBuilder::new()
+                .set_timestamp(0)
+                .set_key(Some(b"key".to_vec()))
+                .set_value(Some(value.to_vec()))
+                .set_headers(headers)
+                .build()
+                .expect("SimpleRecordOptionsBuilder::build: every mandatory parameter is set above"),
         )];
-        MemoryRecords::with_records_at_offset(2, base_offset, Compression::none(), TimestampType::CreateTime, &simple)
-            .buffer()
-            .to_vec()
+        MemoryRecords::with_records_with_magic_initial_offset_timestamp_type(
+            2,
+            base_offset,
+            Compression::none(),
+            TimestampType::CreateTime,
+            &simple,
+        )
+        .buffer()
+        .to_vec()
     }
 
     /// Records at explicit (non-contiguous) offsets, for
     /// `testFetchNonContinuousRecords` / compacted-topic gap tests.
     fn build_records_at_offsets(offsets: &[i64]) -> Vec<u8> {
-        let mut builder = MemoryRecords::builder_with_magic(
+        let mut builder = MemoryRecords::builder_with_initial_capacity_magic(
             1024,
             RecordBatch::MAGIC_VALUE_V2,
             Compression::none(),
@@ -1089,20 +1126,23 @@ mod round_trip {
         is_transactional: bool,
         is_control_batch: bool,
     ) -> Vec<u8> {
-        let mut builder = MemoryRecords::builder_full(
-            512,
-            RecordBatch::MAGIC_VALUE_V2,
-            Compression::none(),
-            TimestampType::CreateTime,
-            base_offset,
-            -1,
-            producer_id,
-            0,
-            0,
-            is_transactional,
-            is_control_batch,
-            -1,
-            512,
+        let mut builder = MemoryRecords::builder_with_options(
+            MemoryRecordsBuilderOptionsBuilder::new()
+                .set_initial_capacity(512)
+                .set_magic(RecordBatch::MAGIC_VALUE_V2)
+                .set_compression(Compression::none())
+                .set_timestamp_type(TimestampType::CreateTime)
+                .set_base_offset(base_offset)
+                .set_log_append_time(-1)
+                .set_producer_id(producer_id)
+                .set_producer_epoch(0)
+                .set_base_sequence(0)
+                .set_is_transactional(is_transactional)
+                .set_is_control_batch(is_control_batch)
+                .set_partition_leader_epoch(-1)
+                .set_write_limit(512)
+                .build()
+                .expect("MemoryRecordsBuilderOptionsBuilder::build: every mandatory parameter is set above"),
         );
         for i in 0..count {
             let offset = base_offset + i as i64;
@@ -1118,11 +1158,16 @@ mod round_trip {
     fn build_records_with_leader_epoch_values(base_offset: i64, count: i32, partition_leader_epoch: i32) -> Vec<u8> {
         let value = partition_leader_epoch.to_string();
         let simple: Vec<SimpleRecord> = (0..count)
-            .map(|_| SimpleRecord::new(0, Some(b"key".to_vec()), Some(value.clone().into_bytes()), vec![]))
+            .map(|_| SimpleRecord::with_timestamp_key_value(0, Some(b"key".to_vec()), Some(value.clone().into_bytes())))
             .collect();
-        MemoryRecords::with_records_at_offset_plep(base_offset, Compression::none(), partition_leader_epoch, &simple)
-            .buffer()
-            .to_vec()
+        MemoryRecords::with_records_with_initial_offset_partition_leader_epoch(
+            base_offset,
+            Compression::none(),
+            partition_leader_epoch,
+            &simple,
+        )
+        .buffer()
+        .to_vec()
     }
 
     /// An empty v2 batch header declaring `[base_offset, last_offset]` with no
@@ -1153,7 +1198,7 @@ mod round_trip {
     /// The CRC is NOT recomputed after the overwrite, so the buffer must be
     /// decoded with `check.crcs=false`.
     fn build_records_with_missing_last(base_offset: i64, present_count: i32) -> Vec<u8> {
-        let mut builder = MemoryRecords::builder_with_magic(
+        let mut builder = MemoryRecords::builder_with_initial_capacity_magic(
             1024,
             RecordBatch::MAGIC_VALUE_V2,
             Compression::none(),
@@ -1188,20 +1233,23 @@ mod round_trip {
     /// A transactional v2 batch at explicit `offsets` for producer `pid`,
     /// optionally a control batch.
     fn build_batch_full_offsets(base_offset: i64, offsets: &[i64], pid: i64, is_transactional: bool) -> Vec<u8> {
-        let mut builder = MemoryRecords::builder_full(
-            512,
-            RecordBatch::MAGIC_VALUE_V2,
-            Compression::none(),
-            TimestampType::CreateTime,
-            base_offset,
-            -1,
-            pid,
-            0,
-            0,
-            is_transactional,
-            false,
-            -1,
-            512,
+        let mut builder = MemoryRecords::builder_with_options(
+            MemoryRecordsBuilderOptionsBuilder::new()
+                .set_initial_capacity(512)
+                .set_magic(RecordBatch::MAGIC_VALUE_V2)
+                .set_compression(Compression::none())
+                .set_timestamp_type(TimestampType::CreateTime)
+                .set_base_offset(base_offset)
+                .set_log_append_time(-1)
+                .set_producer_id(pid)
+                .set_producer_epoch(0)
+                .set_base_sequence(0)
+                .set_is_transactional(is_transactional)
+                .set_is_control_batch(false)
+                .set_partition_leader_epoch(-1)
+                .set_write_limit(512)
+                .build()
+                .expect("MemoryRecordsBuilderOptionsBuilder::build: every mandatory parameter is set above"),
         );
         for &off in offsets {
             let value = off.to_string();
@@ -1225,7 +1273,11 @@ mod round_trip {
 
     impl FullFetchResponse {
         fn new() -> Self {
-            Self { session_id: INVALID_SESSION_ID, node_endpoints: Vec::new(), topics: Vec::new() }
+            Self {
+                session_id: FetchMetadata::INVALID_SESSION_ID,
+                node_endpoints: Vec::new(),
+                topics: Vec::new(),
+            }
         }
 
         fn session_id(mut self, id: i32) -> Self {
@@ -1261,7 +1313,7 @@ mod round_trip {
             pd.set_high_watermark(high_watermark);
             pd.set_last_stable_offset(last_stable_offset);
             pd.set_log_start_offset(0);
-            pd.set_preferred_read_replica(INVALID_PREFERRED_REPLICA_ID);
+            pd.set_preferred_read_replica(FetchResponse::INVALID_PREFERRED_REPLICA_ID);
             pd.set_records(records.map(bytes::Bytes::from));
             self.push_partition(topic, topic_id, pd)
         }
@@ -1316,7 +1368,7 @@ mod round_trip {
         pd.set_high_watermark(high_watermark);
         pd.set_last_stable_offset(last_stable_offset);
         pd.set_log_start_offset(0);
-        pd.set_preferred_read_replica(INVALID_PREFERRED_REPLICA_ID);
+        pd.set_preferred_read_replica(FetchResponse::INVALID_PREFERRED_REPLICA_ID);
         pd.set_records(Some(bytes::Bytes::from(records)));
         let txns: Vec<AbortedTransaction> = aborted
             .into_iter()
@@ -1339,7 +1391,7 @@ mod round_trip {
         mgr: super::FetchRequestManager,
         subscriptions: Arc<Mutex<SubscriptionState>>,
         metadata: Arc<ConsumerMetadata>,
-        api_versions: Arc<crate::api_versions::ApiVersions>,
+        api_versions: Arc<crate::ApiVersions>,
         fetch_buffer: Arc<FetchBuffer>,
         fetch_config: FetchConfig,
         topic_ids: HashMap<String, Uuid>,
@@ -1373,15 +1425,15 @@ mod round_trip {
             ));
             let fetch_buffer = Arc::new(FetchBuffer::new());
             let fetch_config = Self::make_config(max_poll_records, isolation_level);
-            let api_versions = Arc::new(crate::api_versions::ApiVersions::new());
+            let api_versions = Arc::new(crate::ApiVersions::new());
             let mgr = super::FetchRequestManager::new(
                 metadata.clone(),
                 subscriptions.clone(),
                 fetch_config.clone(),
                 fetch_buffer.clone(),
-                Arc::new(crate::common::memory::buffer_supplier::BufferSupplier::create()),
-                always_available(),
-                no_auth_failure(),
+                Arc::new(crate::common::memory::BufferSupplier::create()),
+                FetchRequestManager::always_available(),
+                FetchRequestManager::no_auth_failure(),
                 api_versions.clone(),
                 FetchMetricsManager::for_test(),
             );
@@ -1404,7 +1456,7 @@ mod round_trip {
         fn seed_metadata(&self, num_nodes: i32, topic_partition_counts: &HashMap<String, i32>) {
             let topics: HashSet<String> = topic_partition_counts.keys().cloned().collect();
             self.metadata.add_transient_topics(topics);
-            let response = crate::common::requests::request_test_utils::metadata_update_with_ids(
+            let response = crate::common::requests::RequestTestUtils::metadata_update_with_ids(
                 "dummy",
                 num_nodes,
                 &HashMap::new(),
@@ -1566,7 +1618,7 @@ mod round_trip {
             &mut self,
             node_id: i32,
             request_data: &crate::fetch_session_handler::FetchSessionRequestData,
-            error: KafkaError,
+            error: Error,
         ) {
             let node = Node::new(node_id, "localhost".to_string(), 1969 + node_id);
             self.mgr.abstract_fetch_mut().handle_fetch_failure(&node, request_data, &error);
@@ -1635,7 +1687,7 @@ mod round_trip {
 
         /// Like [`Self::collect_records`] but surfaces the `collect_fetch`
         /// error instead of unwrapping (for the OOR-after-records test).
-        fn collect_records_result(&self) -> Result<crate::consumer::ConsumerRecords<Vec<u8>, Vec<u8>>, KafkaError> {
+        fn collect_records_result(&self) -> Result<crate::consumer::ConsumerRecords<Vec<u8>, Vec<u8>>, Error> {
             let deserializers: Arc<Deserializers<Vec<u8>, Vec<u8>>> =
                 Arc::new(Deserializers::new(Box::new(BytesDeserializer), Box::new(BytesDeserializer)));
             let collector = FetchCollector::new(
@@ -1654,7 +1706,7 @@ mod round_trip {
         fn collect_records_failing_on_value(
             &self,
             fail_value: Vec<u8>,
-        ) -> Result<crate::consumer::ConsumerRecords<Vec<u8>, Vec<u8>>, KafkaError> {
+        ) -> Result<crate::consumer::ConsumerRecords<Vec<u8>, Vec<u8>>, Error> {
             let deserializers: Arc<Deserializers<Vec<u8>, Vec<u8>>> = Arc::new(Deserializers::new(
                 Box::new(BytesDeserializer),
                 Box::new(FailOnValueDeserializer { fail_value }),
@@ -1699,7 +1751,7 @@ mod round_trip {
         assert!(rt.has_completed_fetches());
 
         let records = rt.collect_records();
-        let recs = records.records_for_partition(&tp(0));
+        let recs = records.records_partition(&tp(0));
         assert_eq!(3, recs.len());
         // Next fetch position is 4.
         assert_eq!(Some(4), rt.position(&tp(0)));
@@ -1748,7 +1800,7 @@ mod round_trip {
         rt.deliver(*node_id, request_data, response, req.version());
 
         let records = rt.collect_records();
-        assert_eq!(3, records.records_for_partition(&tp(0)).len());
+        assert_eq!(3, records.records_partition(&tp(0)).len());
         assert_eq!(Some(4), rt.position(&tp(0)));
     }
 
@@ -1773,7 +1825,7 @@ mod round_trip {
         rt.deliver(*node_id, request_data, response, req.version());
 
         let records = rt.collect_records();
-        assert_eq!(3, records.records_for_partition(&tp(0)).len());
+        assert_eq!(3, records.records_partition(&tp(0)).len());
         assert_eq!(Some(4), rt.position(&tp(0)));
     }
 
@@ -1786,7 +1838,7 @@ mod round_trip {
         let mut rt = RoundTrip::new(1, i32::MAX, IsolationLevel::ReadUncommitted, ids);
         // Re-seed metadata with leader epoch 99 for the test topic.
         rt.metadata.add_transient_topics(HashSet::from([TOPIC.to_string()]));
-        let response = crate::common::requests::request_test_utils::metadata_update_with_ids(
+        let response = crate::common::requests::RequestTestUtils::metadata_update_with_ids(
             "dummy",
             1,
             &HashMap::new(),
@@ -1853,7 +1905,7 @@ mod round_trip {
         // Top-level FETCH_SESSION_TOPIC_ID_ERROR response.
         let mut data = FetchResponseData::new();
         data.set_error_code(Errors::FetchSessionTopicIdError.code());
-        data.set_session_id(INVALID_SESSION_ID);
+        data.set_session_id(FetchMetadata::INVALID_SESSION_ID);
         data.set_throttle_time_ms(0);
         let response = FetchResponse::new(data);
         rt.deliver(*node_id, request_data, response, built[node_id].version());
@@ -2034,8 +2086,8 @@ mod round_trip {
 
         // Collect 2 (max.poll.records=2): tp0 offsets 1,2; position -> 3.
         let recs1 = rt.collect_records_max(2);
-        assert!(recs1.records_for_partition(&tp(1)).is_empty(), "tp1 has no records");
-        let r0 = recs1.records_for_partition(&tp(0));
+        assert!(recs1.records_partition(&tp(1)).is_empty(), "tp1 has no records");
+        let r0 = recs1.records_partition(&tp(0));
         assert_eq!(2, r0.len());
         assert_eq!(1, r0[0].offset());
         assert_eq!(2, r0[1].offset());
@@ -2045,7 +2097,7 @@ mod round_trip {
         // There's still a buffered record (offset 3) — collect it WITHOUT a
         // new fetch: position advances to 4.
         let recs1b = rt.collect_records_max(2);
-        let r0b = recs1b.records_for_partition(&tp(0));
+        let r0b = recs1b.records_partition(&tp(0));
         assert_eq!(1, r0b.len());
         assert_eq!(3, r0b[0].offset());
         assert_eq!(Some(4), rt.position(&tp(0)));
@@ -2059,7 +2111,7 @@ mod round_trip {
             .build();
         rt.deliver(*nid3, rd3, resp3, built3[nid3].version());
         let recs3 = rt.collect_records_max(2);
-        let r0c = recs3.records_for_partition(&tp(0));
+        let r0c = recs3.records_partition(&tp(0));
         assert_eq!(2, r0c.len());
         assert_eq!(4, r0c[0].offset());
         assert_eq!(5, r0c[1].offset());
@@ -2071,6 +2123,13 @@ mod round_trip {
     /// `FetchRequestManagerTest.testFetchCompletedBeforeHandlerAdded`: a
     /// success response for a node with NO session handler is ignored (no
     /// panic, no buffered fetch).
+    ///
+    /// Also pins Java's `finally { removePendingFetchRequest(...) }`
+    /// (`AbstractFetch.java:253-255`), which runs even on the `handler == null`
+    /// early `return`. Skipping it would leave the node in
+    /// `nodes_with_pending_fetch_requests` forever, and
+    /// `prepare_fetch_requests` skips every node in that set — so every
+    /// partition led by that broker would stall permanently.
     #[test]
     fn test_fetch_completed_before_handler_added() {
         let (topic_id, ids) = single_topic_id();
@@ -2083,12 +2142,109 @@ mod round_trip {
         let (node_id, (_n, request_data)) = prepared.iter().next().unwrap();
         rt.mgr.abstract_fetch_mut().close_session_handler(*node_id);
 
+        // The build above marked the node as having a fetch request in flight.
+        assert!(
+            rt.mgr.abstract_fetch_mut().nodes_with_pending_fetch_requests.contains(node_id),
+            "the built request must have marked the node pending"
+        );
+
         let response = FullFetchResponse::new()
             .partition(TOPIC, topic_id, 0, Some(build_records(1, 3, 1)), Errors::None, 100, -1)
             .build();
         // Must not panic; must not buffer a fetch.
         rt.deliver(*node_id, request_data, response, built[node_id].version());
         assert!(!rt.has_completed_fetches(), "no handler -> response ignored, nothing buffered");
+        // Java's `finally` runs on the `handler == null` return too, so the
+        // node must NOT be left pending — otherwise it is never fetched again.
+        assert!(
+            !rt.mgr.abstract_fetch_mut().nodes_with_pending_fetch_requests.contains(node_id),
+            "the handler-not-found path must still clear the pending-fetch marker"
+        );
+        let _ = topic_id;
+    }
+
+    /// Java's `catch (Throwable t) { pendingFetchRequestFuture
+    /// .completeExceptionally(t); return PollResult.EMPTY; }`
+    /// (`FetchRequestManager.java:172-175`) hands `t` to the application
+    /// **unchanged**.
+    ///
+    /// The only error exit from `prepare_fetch_requests` is
+    /// `maybe_throw_auth_failure(node)` (`AbstractFetch.java:452-457`, reached
+    /// when the node is inside the reconnect-backoff window), so this drives
+    /// that path with a failing auth closure and pins that the class, the
+    /// error code, the message and the `source()` all survive.
+    ///
+    /// Rebuilding the error as `Error::local_illegal_state(e.message())` — as this
+    /// site used to — keeps only the message and makes
+    /// `is_authentication_error()`, `is_api_error()` and `is_kafka_error()` all
+    /// answer `false`: a fatal authentication failure presented to the
+    /// application as client misuse.
+    #[test]
+    fn create_fetch_requests_propagates_the_prepare_error_unchanged() {
+        let (topic_id, ids) = single_topic_id();
+        // TWO nodes, and only ONE of them unavailable. `prepare_fetch_requests`
+        // short-circuits to `Ok(empty)` when EVERY node is pending-or-
+        // unavailable, so a single unavailable node would never reach the auth
+        // check; Java's loop is per-partition, so keeping one node fetchable is
+        // what actually exercises `maybeThrowAuthFailure`.
+        let mut rt = RoundTrip::new(2, i32::MAX, IsolationLevel::ReadUncommitted, ids);
+        rt.assign_and_seek(&[tp(0), tp(1), tp(2), tp(3)]);
+        let unavailable_node_id = {
+            let cluster = rt.metadata.metadata_arc().fetch();
+            cluster.nodes()[0].id()
+        };
+
+        // Java reaches `maybeThrowAuthFailure` only for a node that is
+        // currently unavailable, so both closures must fire.
+        // The same shape `NetworkClientDelegate::maybe_return_auth_failure`
+        // produces, plus a cause so the `source()` assertion is meaningful.
+        let cause = Error::with_message(Errors::SaslAuthenticationFailed, "invalid credentials");
+        let auth_error = Error::SaslAuthentication(crate::common::errors::SaslAuthenticationError::with_source(
+            "Authentication failed during authentication due to invalid credentials with SASL mechanism SCRAM-SHA-256",
+            cause,
+        ));
+        let auth_error_for_closure = auth_error.clone();
+        rt.mgr.is_unavailable = Arc::new(move |n: &Node| n.id() == unavailable_node_id);
+        rt.mgr.maybe_throw_auth_failure = Arc::new(move |n: &Node| {
+            if n.id() == unavailable_node_id {
+                Err(auth_error_for_closure.clone())
+            } else {
+                Ok(())
+            }
+        });
+
+        let mut ack = rt.mgr.create_fetch_requests();
+        let poll_result = crate::consumer::internals::RequestManager::poll(&mut rt.mgr, 0);
+        assert!(
+            poll_result.unsent_requests.is_empty(),
+            "Java returns PollResult.EMPTY so the other request managers keep polling"
+        );
+
+        let err = ack
+            .try_recv()
+            .expect("the pending create-fetch-requests ack must be completed")
+            .expect_err("the prepare failure must surface");
+
+        // Class + code preserved, not flattened to IllegalState.
+        assert!(
+            !matches!(err, Error::LocalIllegalState(_)),
+            "the error must not be rebuilt as IllegalState: {err:?}"
+        );
+        assert_eq!(
+            Errors::SaslAuthenticationFailed,
+            err.error(),
+            "the protocol error code must survive: {err:?}"
+        );
+        // Hierarchy predicates that the flattening inverted.
+        assert!(err.is_authentication_error(), "must stay an authentication error: {err:?}");
+        assert!(err.is_api_error(), "must stay an API error: {err:?}");
+        assert!(err.is_kafka_error(), "must stay a Kafka error: {err:?}");
+        // Message and cause preserved.
+        assert_eq!(auth_error.message(), err.message(), "the message must survive verbatim");
+        assert!(
+            std::error::Error::source(&err).is_some(),
+            "the cause must survive — rebuilding the error dropped it: {err:?}"
+        );
         let _ = topic_id;
     }
 
@@ -2152,7 +2308,7 @@ mod round_trip {
         rt.pause(&tp(1));
         let collected = rt.collect_records();
         rt.resume(&tp(1));
-        assert_eq!(3, collected.records_for_partition(&tp(0)).len(), "tp0 fully collected");
+        assert_eq!(3, collected.records_partition(&tp(0)).len(), "tp0 fully collected");
         assert!(!rt.buffered_partitions().contains(&tp(0)), "tp0 no longer buffered");
         assert!(rt.buffered_partitions().contains(&tp(1)), "tp1 still buffered");
 
@@ -2249,16 +2405,16 @@ mod round_trip {
     ///
     /// **Deliberate divergence from Java (documented, regression-tested).**
     /// In Rust the per-partition build loop (`abstract_fetch.rs`
-    /// `prepare_fetch_requests`) does NOT raise `IllegalState` on an
+    /// `prepare_fetch_requests`) does NOT raise `LocalIllegalState` on an
     /// `Ok(None)` position; it `continue`s and skips the partition. This is
     /// the intentional Phase-13 fix to COMMENTS.DONE.1.md Issue 7: surfacing
-    /// `IllegalState` for a missing position over-propagated a transient
+    /// `LocalIllegalState` for a missing position over-propagated a transient
     /// rebalance-window race (the Rust KIP-848 bg-task interleaves application
     /// events between the `fetchable_partitions()` snapshot and the
     /// per-partition `position()` query, a window Java's per-call
     /// `synchronized` model keeps narrow). That fix is regression-tested by
     /// `test_async_consumer_re2j_pattern_expand_subscription`; re-raising
-    /// `IllegalState` here would re-break it.
+    /// `LocalIllegalState` here would re-break it.
     ///
     /// A null position also makes tp1 NOT `is_fetchable` (no valid position),
     /// so it is excluded from both `fetchable_partitions()` and
@@ -2487,8 +2643,8 @@ mod round_trip {
                 rt.deliver(*node_id, request_data, resp.build(), built[node_id].version());
             }
             let initial = rt.collect_records();
-            assert!(!initial.records_for_partition(&tp(0)).is_empty(), "tp0 fetched ({error:?})");
-            assert!(!initial.records_for_partition(&tp(1)).is_empty(), "tp1 fetched ({error:?})");
+            assert!(!initial.records_partition(&tp(0)).is_empty(), "tp0 fetched ({error:?})");
+            assert!(!initial.records_partition(&tp(1)).is_empty(), "tp1 fetched ({error:?})");
             assert_eq!(
                 Some(0),
                 rt.preferred_read_replica(&tp(0), 0),
@@ -2528,11 +2684,11 @@ mod round_trip {
             // preferred replica + requests a metadata update for tp0.
             let after = rt.collect_records();
             assert!(
-                after.records_for_partition(&tp(0)).is_empty(),
+                after.records_partition(&tp(0)).is_empty(),
                 "tp0 errored -> no records ({error:?})"
             );
             assert!(
-                !after.records_for_partition(&tp(1)).is_empty(),
+                !after.records_partition(&tp(1)).is_empty(),
                 "tp1 still returns records ({error:?})"
             );
 
@@ -2597,7 +2753,7 @@ mod round_trip {
         pd.set_high_watermark(high_watermark);
         pd.set_last_stable_offset(-1);
         pd.set_log_start_offset(0);
-        pd.set_preferred_read_replica(INVALID_PREFERRED_REPLICA_ID);
+        pd.set_preferred_read_replica(FetchResponse::INVALID_PREFERRED_REPLICA_ID);
         pd.set_records(Some(bytes::Bytes::from(records)));
         pd
     }
@@ -2619,7 +2775,7 @@ mod round_trip {
 
         use crate::common::header::{Header, Headers};
         let records = rt.collect_records();
-        let recs = records.records_for_partition(&tp(0));
+        let recs = records.records_partition(&tp(0));
         assert_eq!(1, recs.len());
         let hdrs = recs[0].headers().to_array();
         assert_eq!(2, hdrs.len(), "both headers must survive decode");
@@ -2646,7 +2802,7 @@ mod round_trip {
         deliver_single(&mut rt, topic_id, records_pd(0, buf, Errors::None, 100));
 
         let records = rt.collect_records();
-        let recs = records.records_for_partition(&tp(0));
+        let recs = records.records_partition(&tp(0));
         assert_eq!(6, recs.len());
         for rec in recs {
             let expected: i32 = std::str::from_utf8(rec.value().unwrap()).unwrap().parse().unwrap();
@@ -2667,7 +2823,7 @@ mod round_trip {
         deliver_single(&mut rt, topic_id, records_pd(0, bytes, Errors::None, 100));
 
         let records = rt.collect_records();
-        let recs = records.records_for_partition(&tp(0));
+        let recs = records.records_partition(&tp(0));
         assert_eq!(2, recs.len());
         for rec in recs {
             assert_eq!(None, rec.leader_epoch(), "no batch leader epoch -> None");
@@ -2687,7 +2843,7 @@ mod round_trip {
         // First fetch: 3 records at offsets 1,2,3.
         deliver_single(&mut rt, topic_id, records_pd(0, build_records(1, 3, 1), Errors::None, 100));
         let recs = rt.collect_records();
-        let r = recs.records_for_partition(&tp(0));
+        let r = recs.records_partition(&tp(0));
         assert_eq!(2, r.len());
         assert_eq!(1, r[0].offset());
         assert_eq!(2, r[1].offset());
@@ -2695,7 +2851,7 @@ mod round_trip {
 
         // Second collect (no new fetch): the buffered 3rd record.
         let recs2 = rt.collect_records();
-        let r2 = recs2.records_for_partition(&tp(0));
+        let r2 = recs2.records_partition(&tp(0));
         assert_eq!(1, r2.len());
         assert_eq!(3, r2[0].offset());
         assert_eq!(Some(4), rt.position(&tp(0)));
@@ -2703,7 +2859,7 @@ mod round_trip {
         // Next fetch: 2 records at offsets 4,5.
         deliver_single(&mut rt, topic_id, records_pd(0, build_records(4, 2, 4), Errors::None, 100));
         let recs3 = rt.collect_records();
-        let r3 = recs3.records_for_partition(&tp(0));
+        let r3 = recs3.records_partition(&tp(0));
         assert_eq!(2, r3.len());
         assert_eq!(4, r3[0].offset());
         assert_eq!(5, r3[1].offset());
@@ -2723,7 +2879,7 @@ mod round_trip {
         deliver_single(&mut rt, topic_id, records_pd(0, bytes, Errors::None, 100));
 
         let records = rt.collect_records();
-        let recs = records.records_for_partition(&tp(0));
+        let recs = records.records_partition(&tp(0));
         assert_eq!(3, recs.len());
         assert_eq!(15, recs[0].offset());
         assert_eq!(20, recs[1].offset());
@@ -2773,7 +2929,7 @@ mod round_trip {
         deliver_single(&mut rt, topic_id, records_pd(0, bytes, Errors::None, 100));
 
         let records = rt.collect_records();
-        assert_eq!(3, records.records_for_partition(&tp(0)).len());
+        assert_eq!(3, records.records_partition(&tp(0)).len());
         // Position points to the batch's next offset (4), not the last present
         // record + 1 (3).
         assert_eq!(Some(4), rt.position(&tp(0)));
@@ -2797,7 +2953,7 @@ mod round_trip {
         let recs = rt.collect_records();
         assert_eq!(
             2,
-            recs.records_for_partition(&tp(0)).len(),
+            recs.records_partition(&tp(0)).len(),
             "READ_UNCOMMITTED returns aborted records"
         );
     }
@@ -2821,7 +2977,7 @@ mod round_trip {
         //
         // Until Milestone 11 Phase 8 that omission was forced: a READ_COMMITTED
         // control batch from an aborted producer returned
-        // `KafkaError::unsupported_version`. **That blocker is gone** —
+        // `Error::unsupported_version`. **That blocker is gone** —
         // `ControlRecordType` is translated and `CompletedFetch::contains_abort_marker`
         // implements Java's branch — so the omission is now only *unwritten*, and
         // this test plus the three named below are tracked as a follow-up in
@@ -2832,7 +2988,7 @@ mod round_trip {
         deliver_single(&mut rt, topic_id, pd);
 
         let recs = rt.collect_records();
-        assert!(recs.records_for_partition(&tp(0)).is_empty(), "all aborted -> no records");
+        assert!(recs.records_partition(&tp(0)).is_empty(), "all aborted -> no records");
         // Position advanced past the aborted data batch (to 2).
         assert_eq!(Some(2), rt.position(&tp(0)), "position advances past skipped aborted txn");
     }
@@ -2885,7 +3041,7 @@ mod round_trip {
         deliver_single(&mut rt, topic_id, pd);
 
         let recs = rt.collect_records();
-        let r = recs.records_for_partition(&tp(0));
+        let r = recs.records_partition(&tp(0));
         let offsets: Vec<i64> = r.iter().map(|x| x.offset()).collect();
         assert_eq!(vec![3, 4, 30, 31, 32], offsets, "only committed records, aborted skipped");
     }
@@ -2896,7 +3052,7 @@ mod round_trip {
     /// advances; tp0's position is unchanged and the OOR error surfaces.
     /// Re-collecting does not lose records or re-advance.
     #[test]
-    fn test_fetch_position_after_exception() {
+    fn test_fetch_position_after_error() {
         let (topic_id, ids) = single_topic_id();
         // AutoOffsetReset NONE so OOR raises instead of silently resetting.
         let subscriptions = Arc::new(Mutex::new(SubscriptionState::new(AutoOffsetResetStrategy::NONE)));
@@ -2911,15 +3067,15 @@ mod round_trip {
         ));
         let fetch_buffer = Arc::new(FetchBuffer::new());
         let fetch_config = RoundTrip::make_config(i32::MAX, IsolationLevel::ReadUncommitted);
-        let api_versions = Arc::new(crate::api_versions::ApiVersions::new());
+        let api_versions = Arc::new(crate::ApiVersions::new());
         let mgr = super::FetchRequestManager::new(
             metadata.clone(),
             subscriptions.clone(),
             fetch_config.clone(),
             fetch_buffer.clone(),
-            Arc::new(crate::common::memory::buffer_supplier::BufferSupplier::create()),
-            always_available(),
-            no_auth_failure(),
+            Arc::new(crate::common::memory::BufferSupplier::create()),
+            FetchRequestManager::always_available(),
+            FetchRequestManager::no_auth_failure(),
             api_versions.clone(),
             FetchMetricsManager::for_test(),
         );
@@ -2942,7 +3098,7 @@ mod round_trip {
         }
 
         // Fetch #1: deliver only tp1's 3 records (offsets 1,2,3) and collect.
-        // (Rust flattens OFFSET_OUT_OF_RANGE to a KafkaError::IllegalState,
+        // (Rust flattens OFFSET_OUT_OF_RANGE to an Error::LocalIllegalState,
         // which the collector ALWAYS propagates even when other partitions
         // have records — unlike Java, where OffsetOutOfRangeException is a
         // KafkaException swallowed while the fetch is non-empty. Delivering the
@@ -2960,7 +3116,7 @@ mod round_trip {
             rt.deliver(*node_id, request_data, resp, built[node_id].version());
         }
         let recs = rt.collect_records();
-        assert_eq!(3, recs.records_for_partition(&tp(1)).len());
+        assert_eq!(3, recs.records_partition(&tp(1)).len());
         assert_eq!(Some(4), rt.position(&tp(1)), "tp1 advanced to 4");
         assert_eq!(Some(1), rt.position(&tp(0)), "tp0 position unchanged");
 
@@ -3045,15 +3201,15 @@ mod round_trip {
         ));
         let fetch_buffer = Arc::new(FetchBuffer::new());
         let fetch_config = RoundTrip::make_config(2, IsolationLevel::ReadUncommitted);
-        let api_versions = Arc::new(crate::api_versions::ApiVersions::new());
+        let api_versions = Arc::new(crate::ApiVersions::new());
         let mgr = super::FetchRequestManager::new(
             metadata.clone(),
             subscriptions.clone(),
             fetch_config.clone(),
             fetch_buffer.clone(),
-            Arc::new(crate::common::memory::buffer_supplier::BufferSupplier::create()),
-            always_available(),
-            no_auth_failure(),
+            Arc::new(crate::common::memory::BufferSupplier::create()),
+            FetchRequestManager::always_available(),
+            FetchRequestManager::no_auth_failure(),
             api_versions.clone(),
             FetchMetricsManager::for_test(),
         );
@@ -3092,7 +3248,7 @@ mod round_trip {
 
         let (_built, prepared) = rt.build_fetch_requests(0);
         let (node_id, (_n, request_data)) = prepared.iter().next().unwrap();
-        rt.deliver_failure(*node_id, request_data, KafkaError::new(Errors::NetworkException));
+        rt.deliver_failure(*node_id, request_data, Error::new(Errors::NetworkError));
 
         let recs = rt.collect_records();
         assert!(recs.is_empty(), "no records on disconnect");
@@ -3212,10 +3368,7 @@ mod round_trip {
             .build();
         rt.deliver(*node_id, request_data, resp, built[node_id].version());
         let records = rt.collect_records();
-        assert!(
-            records.records_for_partition(&tp(0)).is_empty(),
-            "no records for paused partition"
-        );
+        assert!(records.records_partition(&tp(0)).is_empty(), "no records for paused partition");
     }
 
     /// Translated from
@@ -3255,11 +3408,8 @@ mod round_trip {
 
         // Collect: only tp1 returns records; tp0 is skipped (still buffered).
         let records = rt.collect_records();
-        assert_eq!(3, records.records_for_partition(&tp(1)).len(), "tp1 records returned");
-        assert!(
-            records.records_for_partition(&tp(0)).is_empty(),
-            "paused tp0 returns no records"
-        );
+        assert_eq!(3, records.records_partition(&tp(1)).len(), "tp1 records returned");
+        assert!(records.records_partition(&tp(0)).is_empty(), "paused tp0 returns no records");
         assert!(rt.has_completed_fetches(), "tp0's completed fetch is retained");
         assert!(
             rt.buffered_partitions().contains(&tp(0)),
@@ -3295,7 +3445,7 @@ mod round_trip {
         let records = rt.collect_records_max(2);
         assert_eq!(
             2,
-            records.records_for_partition(&tp(0)).len(),
+            records.records_partition(&tp(0)).len(),
             "2 of 3 records returned with maxPollRecords=2"
         );
 
@@ -3303,7 +3453,7 @@ mod round_trip {
         // completed fetch is retained but is not "available".
         rt.pause(&tp(0));
         let paused = rt.collect_records_max(2);
-        assert!(paused.records_for_partition(&tp(0)).is_empty(), "no records while paused");
+        assert!(paused.records_partition(&tp(0)).is_empty(), "no records while paused");
         assert!(rt.has_completed_fetches(), "partial fetch retained while paused");
         assert!(!rt.has_available_fetches(), "no available (non-paused) fetch while paused");
 
@@ -3312,7 +3462,7 @@ mod round_trip {
         let resumed = rt.collect_records_max(2);
         assert_eq!(
             1,
-            resumed.records_for_partition(&tp(0)).len(),
+            resumed.records_partition(&tp(0)).len(),
             "last remaining record returned after resume"
         );
         assert!(!rt.has_completed_fetches(), "buffer drained after resume");
@@ -3350,7 +3500,7 @@ mod round_trip {
         // its base offset — no records returned.
         let records = rt.collect_records();
         assert!(
-            records.records_for_partition(&tp(0)).is_empty(),
+            records.records_partition(&tp(0)).is_empty(),
             "buffered fetch discarded after seek to new offset"
         );
         assert!(!rt.has_completed_fetches(), "discarded fetch removed from buffer");
@@ -3362,7 +3512,7 @@ mod round_trip {
     /// on tp1 before collecting suppresses the OOR error so the subsequent
     /// collect returns no records and does not raise.
     #[test]
-    fn test_seek_before_exception() {
+    fn test_seek_before_error() {
         let (topic_id, ids) = single_topic_id();
         // AutoOffsetReset NONE so OOR would raise, maxPollRecords=2.
         let subscriptions = Arc::new(Mutex::new(SubscriptionState::new(AutoOffsetResetStrategy::NONE)));
@@ -3377,15 +3527,15 @@ mod round_trip {
         ));
         let fetch_buffer = Arc::new(FetchBuffer::new());
         let fetch_config = RoundTrip::make_config(2, IsolationLevel::ReadUncommitted);
-        let api_versions = Arc::new(crate::api_versions::ApiVersions::new());
+        let api_versions = Arc::new(crate::ApiVersions::new());
         let mgr = super::FetchRequestManager::new(
             metadata.clone(),
             subscriptions.clone(),
             fetch_config.clone(),
             fetch_buffer.clone(),
-            Arc::new(crate::common::memory::buffer_supplier::BufferSupplier::create()),
-            always_available(),
-            no_auth_failure(),
+            Arc::new(crate::common::memory::BufferSupplier::create()),
+            FetchRequestManager::always_available(),
+            FetchRequestManager::no_auth_failure(),
             api_versions.clone(),
             FetchMetricsManager::for_test(),
         );
@@ -3411,7 +3561,7 @@ mod round_trip {
             .build();
         rt.deliver(*node0, rd0, resp0, built0[node0].version());
         let r1 = rt.collect_records_max(2);
-        assert_eq!(2, r1.records_for_partition(&tp(0)).len(), "first collect returns 2");
+        assert_eq!(2, r1.records_partition(&tp(0)).len(), "first collect returns 2");
 
         // Add tp1, seek it, fetch -> tp1 returns OFFSET_OUT_OF_RANGE.
         rt.assign_only(&[tp(0), tp(1)]);
@@ -3449,7 +3599,7 @@ mod round_trip {
         rt.seek(&tp(1), 10);
         let r2 = rt.collect_records_result().expect("seek before OOR suppresses the error");
         assert!(
-            r2.records_for_partition(&tp(1)).is_empty(),
+            r2.records_partition(&tp(1)).is_empty(),
             "no records or error for tp1 after seeking past OOR"
         );
     }
@@ -3515,7 +3665,7 @@ mod round_trip {
         // Disconnect on the next fetch -> preferred replica cleared.
         let (_built, prepared) = rt.build_fetch_requests(0);
         let (node_id, (_n, request_data)) = prepared.iter().next().unwrap();
-        rt.deliver_failure(*node_id, request_data, KafkaError::new(Errors::NetworkException));
+        rt.deliver_failure(*node_id, request_data, Error::new(Errors::NetworkError));
         assert_eq!(
             None,
             rt.preferred_read_replica(&tp(0), 0),
@@ -3539,7 +3689,7 @@ mod round_trip {
         // Unassign tp0, then disconnect: handle_fetch_failure's clear is a
         // no-op for the now-unassigned partition (no assigned state to mutate).
         rt.assign_only(&[]);
-        rt.deliver_failure(*node_id, request_data, KafkaError::new(Errors::NetworkException));
+        rt.deliver_failure(*node_id, request_data, Error::new(Errors::NetworkError));
         // Unassigned -> no preferred replica retrievable.
         assert_eq!(None, rt.preferred_read_replica(&tp(0), 0));
     }

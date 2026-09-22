@@ -40,11 +40,11 @@
 //! control-record path, which is not translated — see `memory_records_builder.rs`),
 //! so `record_key`'s recomputation is a negligible, faithful divergence.
 
-use crate::common::KafkaError;
-use crate::common::protocol::message_util::to_version_prefixed_byte_buffer;
+use crate::ControlRecordTypeSchemaData;
+use crate::common::Error;
+use crate::common::InvalidRecordError;
+use crate::common::protocol::MessageUtil;
 use crate::common::protocol::{ByteBufferAccessor, Readable};
-use crate::common::record::InvalidRecordError;
-use crate::control_record_type_schema_data::ControlRecordTypeSchemaData;
 
 /// Control records specify a schema for the record key which includes a version
 /// and type:
@@ -124,10 +124,13 @@ impl ControlRecordType {
         // is an `ExceptionInInitializerError` (fatal). Writing a single `int16`
         // field into a correctly pre-sized buffer cannot fail, so an error here is
         // unrecoverable (CLAUDE.md §10.1).
-        to_version_prefixed_byte_buffer(ControlRecordTypeSchemaData::HIGHEST_SUPPORTED_VERSION, &mut schema)
-            .expect("control record key serialization is infallible")
-            .buffer()
-            .to_vec()
+        MessageUtil::to_version_prefixed_byte_buffer(
+            ControlRecordTypeSchemaData::HIGHEST_SUPPORTED_VERSION,
+            &mut schema,
+        )
+        .expect("control record key serialization is infallible")
+        .buffer()
+        .to_vec()
     }
 
     /// The serialized control-record key for this type.
@@ -137,13 +140,13 @@ impl ControlRecordType {
     ///
     /// # Errors
     ///
-    /// Returns a [`KafkaError`] for [`Self::Unknown`] — Java throws
+    /// Returns a [`Error`] for [`Self::Unknown`] — Java throws
     /// `IllegalArgumentException("Cannot serialize UNKNOWN control record type")`
     /// (a recoverable unchecked exception, so a `Result` here per CLAUDE.md §10.2).
     #[allow(dead_code)]
-    pub fn record_key(self) -> Result<Vec<u8>, KafkaError> {
+    pub fn record_key(self) -> Result<Vec<u8>, Error> {
         if self == Self::Unknown {
-            return Err(KafkaError::illegal_argument("Cannot serialize UNKNOWN control record type"));
+            return Err(Error::local_illegal_argument("Cannot serialize UNKNOWN control record type"));
         }
         Ok(self.key_buffer())
     }
@@ -186,7 +189,7 @@ impl ControlRecordType {
             )));
         }
 
-        let mut buffer = ByteBufferAccessor::from_bytes(key.to_vec());
+        let mut buffer = ByteBufferAccessor::new(key.to_vec());
         let mut version = buffer
             .read_short()
             .map_err(|e| InvalidRecordError::new(format!("Failed to read control record key version: {e}")))?;

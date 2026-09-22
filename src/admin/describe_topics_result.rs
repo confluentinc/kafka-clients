@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! The result of `Admin::describe_topics`.
+//! The result of `Admin::describe_topics_with_topics`.
 //!
 //! Corresponds to `org.apache.kafka.clients.admin.DescribeTopicsResult`.
 
@@ -21,7 +21,7 @@ use std::collections::HashMap;
 use crate::admin::TopicDescription;
 use crate::common::{KafkaFuture, Uuid};
 
-/// The result of `Admin::describe_topics`.
+/// The result of `Admin::describe_topics_with_topics`.
 ///
 /// Corresponds to `org.apache.kafka.clients.admin.DescribeTopicsResult`. As
 /// with `DeleteTopicsResult`, the "keyed by id XOR name" invariant is a closed
@@ -89,8 +89,8 @@ impl DescribeTopicsResult {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::KafkaError;
-    use crate::common::kafka_future::KafkaFutureImpl;
+    use crate::common::Error;
+    use crate::common::internals::KafkaFutureImpl;
 
     fn description(name: &str) -> TopicDescription {
         TopicDescription::new(name, false, vec![])
@@ -121,7 +121,7 @@ mod tests {
         map.insert(Uuid::new(1, 1), h1.future());
         let result = DescribeTopicsResult::of_topic_ids(map);
         assert!(result.all_topic_names().is_none());
-        h1.complete_exceptionally(KafkaError::IllegalState("x".to_string()));
+        h1.complete_with_error(Error::local_illegal_state("x".to_string()));
         assert!(result.all_topic_ids().unwrap().get().await.is_err());
     }
 }

@@ -72,10 +72,10 @@
 //!   covered by `test_async_consumer_headers`.
 //! - SKIP `testAsyncConsumerInterceptors` /
 //!   `testAsyncConsumerInterceptorsWithWrongKeyValue` — no public way to
-//!   attach a `ConsumerInterceptor`. `new_consumer` always builds an EMPTY
+//!   attach a `ConsumerInterceptor`. `KafkaConsumer::new` always builds an EMPTY
 //!   interceptor chain (`async_kafka_consumer.rs:761`); Java's reflective
 //!   `interceptor.classes` loader is not translated, and the
-//!   `new_with_components` seam carrying interceptors is `pub(crate)`,
+//!   `with_components` seam carrying interceptors is `pub(crate)`,
 //!   unreachable from an integration crate. Real API-shape gap.
 //! - SKIP `testAsyncConsumerStaticConsumerDetectsNewPartitionCreatedAfterRestart`
 //!   — needs `admin.createPartitions(increaseTo(2))` mid-test; the Rust
@@ -99,18 +99,18 @@ use std::collections::HashSet;
 use std::time::Duration;
 use std::time::Instant;
 
-use confluent_kafka::common::KafkaError;
+use confluent_kafka::common::Error;
+use confluent_kafka::common::Errors;
 use confluent_kafka::common::TopicPartition;
 use confluent_kafka::common::header::Header;
 use confluent_kafka::common::header::Headers;
 use confluent_kafka::common::header::RecordHeaders;
-use confluent_kafka::common::protocol::Errors;
 use confluent_kafka::common::record::TimestampType;
 use confluent_kafka::common::serialization::ByteArraySerializer;
 use confluent_kafka::common::serialization::Deserializer;
 use confluent_kafka::consumer::Consumer;
 use confluent_kafka::consumer::ConsumerConfig;
-use confluent_kafka::consumer::new_consumer;
+use confluent_kafka::consumer::KafkaConsumer;
 use confluent_kafka::producer::KafkaProducer;
 use confluent_kafka::producer::Producer;
 use confluent_kafka::producer::ProducerConfig;
@@ -120,7 +120,7 @@ use crate::common::cluster_config::{ClusterConfig, kip848_3_broker};
 use crate::common::test_context::TestContext;
 
 // Type alias matching the bytes-typed `Consumer` trait object returned by
-// `new_consumer::<Vec<u8>, Vec<u8>>` (mirrors Java's `Consumer<byte[], byte[]>`).
+// `KafkaConsumer::new::<Vec<u8>, Vec<u8>>` (mirrors Java's `Consumer<byte[], byte[]>`).
 type BytesConsumer = dyn Consumer<Vec<u8>, Vec<u8>>;
 
 // ── Cluster configs ───────────────────────────────────────────────────
@@ -158,7 +158,7 @@ fn cluster_config_log_append_time() -> ClusterConfig {
 struct ByteArrayDeserializer;
 
 impl Deserializer<Vec<u8>> for ByteArrayDeserializer {
-    fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<Vec<u8>, KafkaError> {
+    fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<Vec<u8>, Error> {
         Ok(data.to_vec())
     }
 }
@@ -180,7 +180,7 @@ fn make_consumer_config(bootstrap: &str, group_id: &str, overrides: &[(&str, &st
     for (k, v) in overrides {
         props.insert((*k).to_string(), (*v).to_string());
     }
-    ConsumerConfig::from_properties(&props).expect("invalid test config")
+    ConsumerConfig::new(&props).expect("invalid test config")
 }
 
 /// Build a *groupless* `ConsumerConfig` — `group.id` is intentionally
@@ -196,7 +196,7 @@ fn make_groupless_consumer_config(bootstrap: &str, overrides: &[(&str, &str)]) -
     for (k, v) in overrides {
         props.insert((*k).to_string(), (*v).to_string());
     }
-    ConsumerConfig::from_properties(&props).expect("invalid test config")
+    ConsumerConfig::new(&props).expect("invalid test config")
 }
 
 fn make_producer_config(bootstrap: &str) -> ProducerConfig {
@@ -207,11 +207,11 @@ fn make_producer_config(bootstrap: &str) -> ProducerConfig {
         ("max.block.ms".to_string(), "30000".to_string()),
         ("linger.ms".to_string(), "5".to_string()),
     ]);
-    ProducerConfig::from_properties(&props).expect("invalid producer test config")
+    ProducerConfig::new(&props).expect("invalid producer test config")
 }
 
 fn build_producer(bootstrap: &str) -> KafkaProducer<Vec<u8>, Vec<u8>> {
-    KafkaProducer::from_config(
+    KafkaProducer::new(
         make_producer_config(bootstrap),
         Box::new(ByteArraySerializer),
         Box::new(ByteArraySerializer),
@@ -220,12 +220,12 @@ fn build_producer(bootstrap: &str) -> KafkaProducer<Vec<u8>, Vec<u8>> {
 }
 
 fn make_consumer(bootstrap: &str, group_id: &str, overrides: &[(&str, &str)]) -> Box<BytesConsumer> {
-    new_consumer::<Vec<u8>, Vec<u8>>(
+    KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
         make_consumer_config(bootstrap, group_id, overrides),
         Box::new(ByteArrayDeserializer),
         Box::new(ByteArrayDeserializer),
     )
-    .expect("new_consumer should succeed")
+    .expect("KafkaConsumer::new should succeed")
 }
 
 // ── Producer helpers ─────────────────────────────────────────────────
@@ -243,14 +243,14 @@ async fn send_records(
         let timestamp = starting_timestamp + i as i64;
         let key = format!("key {i}").into_bytes();
         let value = format!("value {i}").into_bytes();
-        let record = ProducerRecord::with_timestamp(
+        let record = ProducerRecord::with_partition_timestamp_key(
             tp.topic().to_string(),
             Some(tp.partition()),
             Some(timestamp),
             Some(key),
             Some(value),
         )
-        .expect("ProducerRecord::with_timestamp should not fail for non-negative ts/partition");
+        .expect("ProducerRecord::with_partition_timestamp_key should not fail for non-negative ts/partition");
         last_future = Some(
             <KafkaProducer<Vec<u8>, Vec<u8>> as Producer<Vec<u8>, Vec<u8>>>::send(producer, record)
                 .await
@@ -259,7 +259,9 @@ async fn send_records(
     }
     producer.flush().await.expect("producer.flush should succeed");
     if let Some(f) = last_future {
-        f.get_timeout(Duration::from_secs(30)).await.expect("last send should succeed");
+        f.get_with_timeout(Duration::from_secs(30))
+            .await
+            .expect("last send should succeed");
     }
 }
 
@@ -433,20 +435,25 @@ async fn test_async_consumer_headers() {
     headers.add_key_value("headerKey", Some(b"headerValue")).expect("add header");
     headers.add_key_value("headerKey2", Some(b"headerValue2")).expect("add header");
     headers.add_key_value("headerKey3", Some(b"headerValue3")).expect("add header");
-    let record =
-        ProducerRecord::with_headers(topic.clone(), Some(0), Some(b"key".to_vec()), Some(b"value".to_vec()), headers)
-            .expect("ProducerRecord::with_headers should succeed");
+    let record = ProducerRecord::with_partition_key_headers(
+        topic.clone(),
+        Some(0),
+        Some(b"key".to_vec()),
+        Some(b"value".to_vec()),
+        headers,
+    )
+    .expect("ProducerRecord::with_partition_key_headers should succeed");
     let fut = <KafkaProducer<Vec<u8>, Vec<u8>> as Producer<Vec<u8>, Vec<u8>>>::send(&producer, record)
         .await
         .expect("send should succeed");
-    fut.get_timeout(Duration::from_secs(30)).await.expect("send should ack");
+    fut.get_with_timeout(Duration::from_secs(30)).await.expect("send should ack");
     producer.close().await.expect("producer close");
 
     let mut consumer = make_consumer(ctx.bootstrap_servers(), &group_id, &[]);
     assert_eq!(consumer.assignment().len(), 0);
     consumer.assign(vec![tp.clone()]).await.expect("assign should succeed");
     assert_eq!(consumer.assignment().len(), 1);
-    consumer.seek(tp.clone(), 0).await.expect("seek should succeed");
+    consumer.seek_with_offset(tp.clone(), 0).await.expect("seek should succeed");
 
     let records = consume_records(consumer.as_mut(), 1).await;
     assert_eq!(records.len(), 1);
@@ -527,7 +534,7 @@ async fn test_async_consumer_pause_state_not_preserved_by_rebalance() {
     send_records(&producer, &tp, 5, starting_timestamp).await;
     producer.close().await.expect("producer close");
 
-    consumer.subscribe(vec![topic.clone()]).await.expect("subscribe");
+    consumer.subscribe_with_topics(vec![topic.clone()]).await.expect("subscribe");
     consume_and_verify_records(consumer.as_mut(), &tp, 5, 0, 0, starting_timestamp).await;
     consumer.pause(std::slice::from_ref(&tp)).await.expect("pause");
 
@@ -538,7 +545,10 @@ async fn test_async_consumer_pause_state_not_preserved_by_rebalance() {
     // which `waitForCondition`-polls exactly once and verifies that 0 records
     // come back from the now-revoked partition. `consume_records` mirrors that
     // single poll for `num_records == 0` (see its comment).
-    consumer.subscribe(vec![topic2.clone()]).await.expect("subscribe topic2");
+    consumer
+        .subscribe_with_topics(vec![topic2.clone()])
+        .await
+        .expect("subscribe topic2");
     consume_and_verify_records(consumer.as_mut(), &tp, 0, 5, 0, starting_timestamp).await;
 
     consumer.close().await.expect("consumer close");
@@ -606,7 +616,7 @@ async fn test_async_consumer_partitions_for_invalid_topic() {
         .expect_err("partitions_for on an invalid topic should fail");
     let msg = err.to_string();
     assert!(
-        msg.contains("Invalid topic") || msg.contains("invalid topic") || err.error() == Errors::InvalidTopicException,
+        msg.contains("Invalid topic") || msg.contains("invalid topic") || err.error() == Errors::InvalidTopicError,
         "expected InvalidTopic error, got: {msg}"
     );
 
@@ -630,7 +640,7 @@ async fn test_async_consumer_list_topics() {
     send_records(&producer, &TopicPartition::new(topic1.clone(), 0), 1, current_time_ms()).await;
     producer.close().await.expect("producer close");
 
-    consumer.subscribe(vec![topic1.clone()]).await.expect("subscribe");
+    consumer.subscribe_with_topics(vec![topic1.clone()]).await.expect("subscribe");
     let _ = consumer.poll(Duration::from_millis(100)).await.expect("poll");
 
     // Retry list_topics until all three named topics are visible (metadata
@@ -701,7 +711,7 @@ async fn test_async_consumer_seek() {
     assert_eq!(consumer.position(&tp).await.expect("position"), 0);
     consume_and_verify_records(consumer.as_mut(), &tp, 1, 0, 0, starting_timestamp).await;
 
-    consumer.seek(tp.clone(), mid as i64).await.expect("seek mid");
+    consumer.seek_with_offset(tp.clone(), mid as i64).await.expect("seek mid");
     assert_eq!(consumer.position(&tp).await.expect("position"), mid as i64);
     // Record at offset mid has key/value index mid and timestamp mid.
     consume_and_verify_records(consumer.as_mut(), &tp, 1, mid as i64, mid, mid as i64).await;
@@ -727,9 +737,9 @@ async fn test_async_consumer_seek_throws_illegal_state_if_partitions_not_assigne
         .await
         .expect_err("seek_to_end unassigned should fail");
     match err {
-        KafkaError::IllegalState(msg) => {
+        Error::LocalIllegalState(msg) => {
             // Java: `"No current assignment for partition " + TP`.
-            assert_eq!(msg, format!("No current assignment for partition {tp}"));
+            assert_eq!(msg.message(), format!("No current assignment for partition {tp}"));
         },
         other => panic!("expected IllegalState, got {other:?}"),
     }
@@ -814,7 +824,7 @@ async fn test_async_consumer_end_offsets() {
     send_records(&producer, &tp, num_records, current_time_ms()).await;
     producer.close().await.expect("producer close");
 
-    consumer.subscribe(vec![topic.clone()]).await.expect("subscribe");
+    consumer.subscribe_with_topics(vec![topic.clone()]).await.expect("subscribe");
     await_assignment(
         consumer.as_mut(),
         &HashSet::from([tp.clone(), tp2.clone()]),
@@ -873,7 +883,7 @@ async fn test_async_consumer_fetch_offsets_for_time() {
         .await
         .expect_err("negative target time should fail");
     assert!(
-        matches!(neg_err, KafkaError::IllegalArgument(_)),
+        matches!(neg_err, Error::LocalIllegalArgument(_)),
         "expected IllegalArgument for negative target time, got {neg_err:?}"
     );
 
@@ -913,19 +923,19 @@ async fn test_async_consumer_consuming_with_null_group_id() {
     let bootstrap = ctx.bootstrap_servers().to_string();
     // consumer1: groupless, earliest. consumer2: groupless, latest.
     // consumer3: groupless, explicit seek.
-    let mut consumer1 = new_consumer::<Vec<u8>, Vec<u8>>(
+    let mut consumer1 = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
         make_groupless_consumer_config(&bootstrap, &[("auto.offset.reset", "earliest"), ("client.id", "consumer1")]),
         Box::new(ByteArrayDeserializer),
         Box::new(ByteArrayDeserializer),
     )
     .expect("consumer1");
-    let mut consumer2 = new_consumer::<Vec<u8>, Vec<u8>>(
+    let mut consumer2 = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
         make_groupless_consumer_config(&bootstrap, &[("auto.offset.reset", "latest"), ("client.id", "consumer2")]),
         Box::new(ByteArrayDeserializer),
         Box::new(ByteArrayDeserializer),
     )
     .expect("consumer2");
-    let mut consumer3 = new_consumer::<Vec<u8>, Vec<u8>>(
+    let mut consumer3 = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
         make_groupless_consumer_config(&bootstrap, &[("auto.offset.reset", "earliest"), ("client.id", "consumer3")]),
         Box::new(ByteArrayDeserializer),
         Box::new(ByteArrayDeserializer),
@@ -937,7 +947,7 @@ async fn test_async_consumer_consuming_with_null_group_id() {
     // gives 2 partitions; only partition 0 is used).
     create_topic(consumer1.as_mut(), &topic, 1).await;
     for i in 1..=3 {
-        let record = ProducerRecord::with_partition(
+        let record = ProducerRecord::with_partition_key(
             topic.clone(),
             Some(0),
             Some(format!("k{i}").into_bytes()),
@@ -947,16 +957,16 @@ async fn test_async_consumer_consuming_with_null_group_id() {
         let fut = <KafkaProducer<Vec<u8>, Vec<u8>> as Producer<Vec<u8>, Vec<u8>>>::send(&producer, record)
             .await
             .expect("send");
-        fut.get_timeout(Duration::from_secs(30)).await.expect("ack");
+        fut.get_with_timeout(Duration::from_secs(30)).await.expect("ack");
     }
     producer.close().await.expect("producer close");
 
     consumer1.assign(vec![tp.clone()]).await.expect("assign c1");
     consumer2.assign(vec![tp.clone()]).await.expect("assign c2");
     consumer3.assign(vec![tp.clone()]).await.expect("assign c3");
-    // Java: `consumer3.seek(TP, 1)` — a literal offset, skipping the first of
+    // Java: `consumer3.seek_with_offset(TP, 1)` — a literal offset, skipping the first of
     // the 3 records (offsets 0, 1, 2).
-    consumer3.seek(tp.clone(), 1).await.expect("seek c3");
+    consumer3.seek_with_offset(tp.clone(), 1).await.expect("seek c3");
 
     let num_records1 = poll_count(consumer1.as_mut(), 3, Duration::from_secs(15)).await;
     // Java: commitSync / committed raise InvalidGroupId for groupless.
@@ -997,12 +1007,12 @@ async fn test_async_consumer_null_group_id_not_supported_if_committing() {
     let tp = TopicPartition::new(topic.clone(), 0);
 
     let bootstrap = ctx.bootstrap_servers().to_string();
-    let mut consumer = new_consumer::<Vec<u8>, Vec<u8>>(
+    let mut consumer = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
         make_groupless_consumer_config(&bootstrap, &[("auto.offset.reset", "earliest"), ("client.id", "consumer1")]),
         Box::new(ByteArrayDeserializer),
         Box::new(ByteArrayDeserializer),
     )
-    .expect("new_consumer");
+    .expect("KafkaConsumer::new");
     create_topic(consumer.as_mut(), &topic, 2).await;
     consumer.assign(vec![tp.clone()]).await.expect("assign");
 
@@ -1034,10 +1044,10 @@ async fn test_async_consumer_position_respects_timeout() {
     consumer.assign(vec![tp.clone()]).await.expect("assign");
 
     let err = consumer
-        .position_timeout(&tp, Duration::from_secs(3))
+        .position_with_timeout(&tp, Duration::from_secs(3))
         .await
         .expect_err("position on a nonexistent partition should time out");
-    assert!(matches!(err, KafkaError::Timeout(_)), "expected Timeout, got {err:?}");
+    assert!(matches!(err, Error::Timeout(_)), "expected Timeout, got {err:?}");
 
     consumer.close().await.expect("consumer close");
 }
@@ -1059,7 +1069,7 @@ async fn test_async_consumer_position_respects_wakeup() {
     // (`PlaintextConsumerTest.java:1501-1504`). Java's `Consumer` reference is
     // freely shareable across threads. The Rust equivalent obtains a
     // `Clone + Send + Sync` `ConsumerHandle` BEFORE the `&mut` borrow taken
-    // by `position_timeout`, then fires `wakeup()` from a spawned task —
+    // by `position_with_timeout`, then fires `wakeup()` from a spawned task —
     // sound, no `unsafe`, no reference to the consumer crossing the boundary.
     let handle = consumer.handle();
     let waker = tokio::spawn(async move {
@@ -1067,10 +1077,10 @@ async fn test_async_consumer_position_respects_wakeup() {
         handle.wakeup();
     });
 
-    let result = consumer.position_timeout(&tp, Duration::from_secs(3)).await;
+    let result = consumer.position_with_timeout(&tp, Duration::from_secs(3)).await;
     let _ = waker.await;
     let err = result.expect_err("position should be interrupted by wakeup");
-    assert!(matches!(err, KafkaError::Wakeup(_)), "expected Wakeup, got {err:?}");
+    assert!(matches!(err, Error::Wakeup(_)), "expected Wakeup, got {err:?}");
 
     consumer.close().await.expect("consumer close");
 }
@@ -1082,12 +1092,12 @@ async fn test_async_consumer_position_respects_wakeup() {
 #[tokio::test(flavor = "multi_thread")]
 async fn test_async_consumer_position_with_error_connection_respects_wakeup() {
     // bootstrap points at an unreachable address (Java: "localhost:12345").
-    let mut consumer = new_consumer::<Vec<u8>, Vec<u8>>(
+    let mut consumer = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
         make_consumer_config("localhost:12345", "g_position_err_wakeup", &[]),
         Box::new(ByteArrayDeserializer),
         Box::new(ByteArrayDeserializer),
     )
-    .expect("new_consumer");
+    .expect("KafkaConsumer::new");
     let topic = "topic".to_string();
     let tp = TopicPartition::new(topic, 15);
     consumer.assign(vec![tp.clone()]).await.expect("assign");
@@ -1101,10 +1111,10 @@ async fn test_async_consumer_position_with_error_connection_respects_wakeup() {
         handle.wakeup();
     });
 
-    let result = consumer.position_timeout(&tp, Duration::from_secs(100)).await;
+    let result = consumer.position_with_timeout(&tp, Duration::from_secs(100)).await;
     let _ = waker.await;
     let err = result.expect_err("position should be interrupted by wakeup despite connection error");
-    assert!(matches!(err, KafkaError::Wakeup(_)), "expected Wakeup, got {err:?}");
+    assert!(matches!(err, Error::Wakeup(_)), "expected Wakeup, got {err:?}");
 
     consumer.close().await.expect("consumer close");
 }
@@ -1124,19 +1134,19 @@ async fn test_async_consumer_offset_related_when_timeout_zero() {
     create_topic(consumer.as_mut(), &topic, 2).await;
 
     let result1 = consumer
-        .beginning_offsets_timeout(std::slice::from_ref(&tp), Duration::ZERO)
+        .beginning_offsets_with_timeout(std::slice::from_ref(&tp), Duration::ZERO)
         .await
         .expect("beginning_offsets(ZERO)");
     assert_eq!(result1.len(), 0, "beginning_offsets with zero timeout should be empty");
 
     let result2 = consumer
-        .end_offsets_timeout(std::slice::from_ref(&tp), Duration::ZERO)
+        .end_offsets_with_timeout(std::slice::from_ref(&tp), Duration::ZERO)
         .await
         .expect("end_offsets(ZERO)");
     assert_eq!(result2.len(), 0, "end_offsets with zero timeout should be empty");
 
     let result3 = consumer
-        .offsets_for_times_timeout(HashMap::from([(tp.clone(), 0i64)]), Duration::ZERO)
+        .offsets_for_times_with_timeout(HashMap::from([(tp.clone(), 0i64)]), Duration::ZERO)
         .await
         .expect("offsets_for_times(ZERO)");
     // Translation deviation: Java's zero-timeout arm returns a map of

@@ -41,8 +41,7 @@ use super::NetworkReceive;
 use super::NetworkSend;
 use super::Receive;
 use super::Selectable;
-use super::authentication_error::is_authentication_error;
-use super::selectable::USE_DEFAULT_BUFFER_SIZE;
+use super::is_authentication_error;
 use super::{ChannelState, channel_state};
 
 use indexmap::IndexMap;
@@ -59,9 +58,6 @@ use std::net::SocketAddr;
 use std::sync::{Arc, Mutex as StdMutex};
 use std::task::{Context, Poll, Wake, Waker};
 use std::time::Instant;
-
-/// Value indicating no idle timeout.
-pub const NO_IDLE_TIMEOUT_MS: i64 = -1;
 
 /// Shared between the [`Selector`] and every per-channel [`ChannelWaker`].
 ///
@@ -287,6 +283,9 @@ pub struct Selector {
 }
 
 impl Selector {
+    /// Value indicating no idle timeout.
+    pub const NO_IDLE_TIMEOUT_MS: i64 = -1;
+
     /// Create a new selector.
     ///
     /// # Arguments
@@ -294,7 +293,7 @@ impl Selector {
     /// * `max_receive_size` - Max size in bytes of a single network receive
     ///   (use `UNLIMITED` for no limit)
     /// * `connection_max_idle_ms` - Max idle connection time
-    ///   (use [`NO_IDLE_TIMEOUT_MS`] to disable idle timeout)
+    ///   (use [`Self::NO_IDLE_TIMEOUT_MS`] to disable idle timeout)
     /// * `channel_builder` - Channel builder for every new connection
     pub fn new(max_receive_size: i32, connection_max_idle_ms: i64, channel_builder: Box<dyn ChannelBuilder>) -> Self {
         Self::with_log_context(max_receive_size, connection_max_idle_ms, channel_builder, LogContext::empty())
@@ -307,7 +306,7 @@ impl Selector {
     /// * `max_receive_size` - Max size in bytes of a single network receive
     ///   (use `UNLIMITED` for no limit)
     /// * `connection_max_idle_ms` - Max idle connection time
-    ///   (use [`NO_IDLE_TIMEOUT_MS`] to disable idle timeout)
+    ///   (use [`Self::NO_IDLE_TIMEOUT_MS`] to disable idle timeout)
     /// * `channel_builder` - Channel builder for every new connection
     /// * `log_context` - Contextual log message prefix
     pub fn with_log_context(
@@ -350,7 +349,7 @@ impl Selector {
 
     /// Convenience constructor matching the common Java pattern.
     pub fn with_defaults(connection_max_idle_ms: i64, channel_builder: Box<dyn ChannelBuilder>) -> Self {
-        Self::new(super::network_receive::UNLIMITED, connection_max_idle_ms, channel_builder)
+        Self::new(NetworkReceive::UNLIMITED, connection_max_idle_ms, channel_builder)
     }
 
     /// Create a new selector with default max receive size and a `LogContext`.
@@ -359,12 +358,7 @@ impl Selector {
         channel_builder: Box<dyn ChannelBuilder>,
         log_context: LogContext,
     ) -> Self {
-        Self::with_log_context(
-            super::network_receive::UNLIMITED,
-            connection_max_idle_ms,
-            channel_builder,
-            log_context,
-        )
+        Self::with_log_context(NetworkReceive::UNLIMITED, connection_max_idle_ms, channel_builder, log_context)
     }
 
     /// Returns the interned `Arc<str>` key for `id` from the active channels
@@ -522,7 +516,7 @@ impl Selector {
 
         for channel_id in &self.failed_sends {
             self.disconnected
-                .insert(channel_id.to_string(), channel_state::FAILED_SEND.clone());
+                .insert(channel_id.to_string(), ChannelState::FAILED_SEND.clone());
         }
         self.failed_sends.clear();
         self.made_read_progress_last_poll = false;
@@ -878,7 +872,7 @@ impl Selector {
                 connection_id
             );
             if let Some(channel) = self.channels.get_mut(connection_id.as_str()) {
-                channel.set_state(channel_state::EXPIRED.clone());
+                channel.set_state(ChannelState::EXPIRED.clone());
             }
             // Use graceful close to process any buffered receives before
             // fully closing the channel, matching the Java implementation.
@@ -1129,10 +1123,10 @@ impl Selectable for Selector {
 
         // Configure socket
         socket.set_keepalive(true)?;
-        if send_buffer_size != USE_DEFAULT_BUFFER_SIZE {
+        if send_buffer_size != Self::USE_DEFAULT_BUFFER_SIZE {
             socket.set_send_buffer_size(send_buffer_size as u32)?;
         }
-        if receive_buffer_size != USE_DEFAULT_BUFFER_SIZE {
+        if receive_buffer_size != Self::USE_DEFAULT_BUFFER_SIZE {
             socket.set_recv_buffer_size(receive_buffer_size as u32)?;
         }
         socket.set_nodelay(true)?;
@@ -1201,7 +1195,7 @@ impl Selectable for Selector {
     async fn close_channel(&mut self, id: &str) {
         if self.channels.contains_key(id) {
             if let Some(channel) = self.channels.get_mut(id) {
-                channel.set_state(channel_state::LOCAL_CLOSE.clone());
+                channel.set_state(ChannelState::LOCAL_CLOSE.clone());
             }
             self.close_channel_internal(id, CloseMode::DiscardNoNotify).await;
         } else if let Some(closing_channel) = self.closing_channels.remove(id) {
@@ -1232,7 +1226,7 @@ impl Selectable for Selector {
                 },
                 Err(e) => {
                     // Update the state for consistency
-                    channel.set_state(channel_state::FAILED_SEND.clone());
+                    channel.set_state(ChannelState::FAILED_SEND.clone());
                     // Error path only (matches Java allocating here); a fresh
                     // `Arc<str>` is fine since the channel is about to be removed.
                     self.failed_sends.push(Arc::from(connection_id.as_str()));
@@ -1397,25 +1391,37 @@ impl Selectable for Selector {
 
             // Phase 26 (Fix #1): match stock Java `NetworkClient.poll`, which
             // loops `do { selector.poll(t) } while (completedReceives().isEmpty()
-            // && disconnected().isEmpty())` — it does NOT return on completed
-            // *sends*. A send-only round (fetch / heartbeat / commit request
-            // written, response not yet arrived) keeps waiting in the `select!`
-            // below for the actual response, rather than returning and forcing
-            // `run_once` to spin a full extra iteration (drain events + poll
-            // every manager) before re-entering to await the response. Every
-            // consumer request expects a response, so there is no
-            // fire-and-forget send that would block forever; `completed_sends`
-            // still accumulate and are returned to the caller when the poll next
-            // breaks (on receive / connect / disconnect / deadline), just one
-            // cycle later.
+            // && disconnected().isEmpty())` — it does NOT return on a completed
+            // *response-expecting* send. A send-only round (fetch / heartbeat /
+            // commit / `acks!=0` produce request written, response not yet
+            // arrived) keeps waiting in the `select!` below for the actual
+            // response, rather than returning and forcing `run_once` to spin a
+            // full extra iteration (drain events + poll every manager) before
+            // re-entering to await the response. Such `completed_sends` still
+            // accumulate and are returned to the caller when the poll next breaks
+            // (on receive / connect / disconnect / deadline), just one cycle
+            // later.
+            //
+            // EXCEPTION — fire-and-forget sends (producer `acks=0`): these get NO
+            // response ever, so there is nothing to wait for. If they did not
+            // break here, the loop would park in `select!` until the deadline,
+            // delaying every acks=0 send's synthesized completion
+            // (`NetworkClient::handle_completed_sends`) by the full poll timeout —
+            // observed as a ~throughput collapse to a few hundred msg/s with
+            // multi-second latency and an idle CPU. This mirrors Java, whose
+            // `Selector.poll` returns on the write-readiness event that completes
+            // the send. Only fire-and-forget sends are checked, so the
+            // response-expecting optimization above is preserved unchanged.
             //
             // CRITICAL (§10): `connected` MUST stay in the break.
             // `poll_channel_reads` pushes onto `self.connected` on the
             // post-handshake (TLS/SASL) ready transition specifically so `poll()`
             // exits and `handle_initiate_api_version_requests` fires (the join
             // path). Removing `connected` would re-introduce the join stall.
-            let made_progress =
-                !self.completed_receives.is_empty() || !self.connected.is_empty() || !self.disconnected.is_empty();
+            let made_progress = !self.completed_receives.is_empty()
+                || !self.connected.is_empty()
+                || !self.disconnected.is_empty()
+                || self.completed_sends.iter().any(NetworkSend::is_fire_and_forget);
 
             if made_progress {
                 break;
@@ -1923,11 +1929,7 @@ mod tests {
 
     async fn create_selector() -> Selector {
         let channel_builder = Box::new(PlaintextChannelBuilder::new(None));
-        Selector::new(
-            super::super::network_receive::UNLIMITED,
-            CONNECTION_MAX_IDLE_MS,
-            channel_builder,
-        )
+        Selector::new(super::NetworkReceive::UNLIMITED, CONNECTION_MAX_IDLE_MS, channel_builder)
     }
 
     async fn blocking_connect(selector: &mut Selector, node: &str, port: u16) {
@@ -2178,11 +2180,7 @@ mod tests {
     async fn test_close_oldest_connection() {
         let server = EchoServer::new().await.unwrap();
         let channel_builder = Box::new(PlaintextChannelBuilder::new(None));
-        let mut selector = Selector::new(
-            super::super::network_receive::UNLIMITED,
-            CONNECTION_MAX_IDLE_MS,
-            channel_builder,
-        );
+        let mut selector = Selector::new(super::NetworkReceive::UNLIMITED, CONNECTION_MAX_IDLE_MS, channel_builder);
 
         let addr: SocketAddr = format!("127.0.0.1:{}", server.port()).parse().unwrap();
         selector
@@ -2209,7 +2207,7 @@ mod tests {
             selector.disconnected().contains_key("0"),
             "The idle connection should have been closed"
         );
-        assert_eq!(channel_state::EXPIRED, *selector.disconnected().get("0").unwrap());
+        assert_eq!(ChannelState::EXPIRED, *selector.disconnected().get("0").unwrap());
 
         selector.poll(0).await.unwrap();
     }
@@ -2263,7 +2261,7 @@ mod tests {
 
         selector.poll(0).await.unwrap();
         assert!(selector.disconnected().contains_key("0"), "Channel not closed");
-        assert_eq!(channel_state::FAILED_SEND, *selector.disconnected().get("0").unwrap());
+        assert_eq!(ChannelState::FAILED_SEND, *selector.disconnected().get("0").unwrap());
 
         selector.poll(0).await.unwrap();
     }
@@ -2500,11 +2498,7 @@ mod tests {
     async fn test_lowest_priority_channel() {
         let server = EchoServer::new().await.unwrap();
         let channel_builder = Box::new(PlaintextChannelBuilder::new(None));
-        let mut selector = Selector::new(
-            super::super::network_receive::UNLIMITED,
-            CONNECTION_MAX_IDLE_MS,
-            channel_builder,
-        );
+        let mut selector = Selector::new(super::NetworkReceive::UNLIMITED, CONNECTION_MAX_IDLE_MS, channel_builder);
 
         let conns = 5;
         let addr: SocketAddr = format!("127.0.0.1:{}", server.port()).parse().unwrap();
@@ -2636,7 +2630,7 @@ mod tests {
             "Channel not removed from closingChannels"
         );
         assert!(selector.disconnected().contains_key(&id), "Disconnect not notified");
-        assert_eq!(channel_state::EXPIRED, *selector.disconnected().get(&id).unwrap());
+        assert_eq!(ChannelState::EXPIRED, *selector.disconnected().get(&id).unwrap());
 
         selector.poll(0).await.unwrap();
     }
@@ -2966,11 +2960,7 @@ mod tests {
     async fn create_counting_selector() -> (Selector, TryReadCounts) {
         let counts: TryReadCounts = Arc::new(StdMutex::new(HashMap::new()));
         let channel_builder = Box::new(CountingChannelBuilder { counts: counts.clone() });
-        let selector = Selector::new(
-            super::super::network_receive::UNLIMITED,
-            CONNECTION_MAX_IDLE_MS,
-            channel_builder,
-        );
+        let selector = Selector::new(super::NetworkReceive::UNLIMITED, CONNECTION_MAX_IDLE_MS, channel_builder);
         (selector, counts)
     }
 
@@ -3326,6 +3316,75 @@ mod tests {
         // break) and are covered by `test_readiness_wait_path`,
         // `blocking_connect`/`wait_for_channel_ready`, and the `test_close*`
         // family. Only `completed_sends` was removed from the break here.
+
+        // Cleanup.
+        selector.close_channel("0").await;
+        selector.poll(0).await.unwrap();
+    }
+
+    /// Regression test for the producer `acks=0` collapse: a **fire-and-forget**
+    /// send (one that expects no response, `NetworkSend::is_fire_and_forget`)
+    /// gets NO receive ever, so the poll that completes it MUST break promptly
+    /// rather than parking to the deadline. This is the inverse of
+    /// `test_send_only_poll_does_not_return_early`'s `(a2)` case (a
+    /// response-expecting send, which correctly parks to the deadline).
+    ///
+    /// Before the fix, `made_progress` excluded `completed_sends` entirely, so an
+    /// `acks=0` send's synthesized completion (`NetworkClient::handle_completed_sends`)
+    /// was delayed by the full poll timeout — observed as an ~1600x throughput
+    /// collapse (a few hundred msg/s) with multi-second latency and an idle CPU.
+    ///
+    /// Bounded by a hard `tokio::time::timeout` so a regression (parking to the
+    /// long deadline) fails the test instead of blocking the suite.
+    #[tokio::test]
+    async fn test_fire_and_forget_send_breaks_poll_promptly() {
+        use std::time::{Duration, Instant};
+
+        let server = SinkServer::new().await.unwrap();
+        let mut selector = create_selector().await;
+        blocking_connect(&mut selector, "0", server.port()).await;
+
+        // Settle the connect bookkeeping so the measured poll genuinely parks on
+        // the socket-readiness `select!` (deadline = Some), matching the sibling
+        // test's settle loop.
+        for _ in 0..3 {
+            selector.poll(20).await.unwrap();
+        }
+
+        // Queue a FIRE-AND-FORGET send (producer acks=0): no echo will ever come
+        // back from the sink server, so the only terminal event is the send
+        // completing.
+        let mut send = create_send("0", "fire-and-forget");
+        send.set_fire_and_forget(true);
+        selector.send(send).unwrap();
+
+        // A single poll with a LONG (10s) deadline must return PROMPTLY once the
+        // send is written — the fire-and-forget completed send breaks the poll
+        // loop. Pre-fix, this poll would park the full 10s.
+        let start = Instant::now();
+        tokio::time::timeout(Duration::from_secs(3), selector.poll(10_000))
+            .await
+            .expect("fire-and-forget poll hung well past a prompt return")
+            .unwrap();
+        let elapsed = start.elapsed();
+
+        assert!(
+            !selector.completed_sends().is_empty(),
+            "the fire-and-forget request should have been written and completed as a send"
+        );
+        assert!(
+            selector.completed_sends().iter().any(NetworkSend::is_fire_and_forget),
+            "the completed send must be marked fire-and-forget"
+        );
+        assert!(
+            selector.completed_receives().is_empty(),
+            "the sink server never echoes, so there must be no completed receive"
+        );
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "a fire-and-forget send must break the poll promptly (returned in {elapsed:?}), \
+             not park to the 10s deadline"
+        );
 
         // Cleanup.
         selector.close_channel("0").await;

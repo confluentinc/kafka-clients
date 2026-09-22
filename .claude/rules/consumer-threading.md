@@ -19,13 +19,36 @@ blocks in Java:
   - `async fn position(...)`, `async fn committed(...)`
   - `async fn beginning_offsets(...)`, `async fn end_offsets(...)`,
     `async fn offsets_for_times(...)`
-  - `async fn subscribe(...)`, `async fn unsubscribe()`, `async fn close(...)`
+  - `async fn subscribe_with_topics(...)`,
+    `async fn subscribe_with_topics_listener(...)`,
+    `async fn subscribe_with_pattern(...)`,
+    `async fn subscribe_with_pattern_listener(...)`
+  - `async fn unsubscribe()`, `async fn close()`,
+    `async fn close_with_timeout(...)`, `async fn close_with_options(...)`
   - `async fn partitions_for(...)`, `async fn list_topics(...)`
 
 Java methods that do not block remain synchronous:
 
   - `assignment()`, `subscription()`, `paused()`, `metrics()`, `client_id()`,
     `group_metadata()`, `wakeup()`
+
+Two notes on the names above, so neither is "corrected" back later:
+
+  - **Only the `SubscriptionPattern` form of pattern subscription exists.**
+    Java has four `subscribe(Pattern ...)` / `subscribe(SubscriptionPattern ...)`
+    overloads; the two taking `java.util.regex.Pattern` match client-side against
+    consumer metadata and are deliberately NOT translated (see the comment on the
+    `Consumer` trait and `AsyncKafkaConsumer.java:2107,2131`). So
+    `subscribe_with_pattern` takes a `SubscriptionPattern`, which the group
+    coordinator evaluates server-side with RE2/J (KIP-848); there is no `Regex`
+    anywhere on the consumer surface.
+  - **The `_with_` infixes are mandated by CLAUDE.md §2**, which requires
+    `<base>_with_<param1>_<param2>` for every overload beyond the
+    intersection-of-parameters one. `subscribe_with_topics`,
+    `close_with_timeout`, `close_with_options`, `commit_sync_with_offsets` etc.
+    are therefore not verbose spellings to be shortened — the plain name is
+    reserved for the overload that exists in Java with the intersection
+    parameter set.
 
 **Why:** The underlying network stack (`Selector`, `NetworkClient`) is async
 and the background task is a `tokio::spawn`. A sync `poll()` facade would
@@ -63,20 +86,29 @@ trait with `Box<dyn Consumer<K, V>>` for runtime dispatch:
     {
         // Blocking-in-Java methods become async (see §1).
         async fn poll(&mut self, timeout: Duration)
-            -> Result<ConsumerRecords<K, V>, KafkaError>;
-        async fn subscribe(&mut self, topics: Vec<String>) -> Result<(), KafkaError>;
-        async fn subscribe_with_listener(
+            -> Result<ConsumerRecords<K, V>, Error>;
+        async fn subscribe_with_topics(&mut self, topics: Vec<String>) -> Result<(), Error>;
+        async fn subscribe_with_topics_listener(
             &mut self,
             topics: Vec<String>,
             listener: Arc<dyn ConsumerRebalanceListener>,
-        ) -> Result<(), KafkaError>;
-        async fn unsubscribe(&mut self) -> Result<(), KafkaError>;
-        async fn commit_sync(&mut self) -> Result<(), KafkaError>;
-        async fn commit_async(&mut self) -> Result<(), KafkaError>;
-        async fn position(&mut self, partition: &TopicPartition) -> Result<i64, KafkaError>;
-        async fn committed(&mut self, partitions: &HashSet<TopicPartition>)
-            -> Result<HashMap<TopicPartition, OffsetAndMetadata>, KafkaError>;
-        async fn close(&mut self, options: CloseOptions) -> Result<(), KafkaError>;
+        ) -> Result<(), Error>;
+        async fn subscribe_with_pattern(
+            &mut self,
+            pattern: SubscriptionPattern,
+        ) -> Result<(), Error>;
+        async fn subscribe_with_pattern_listener(
+            &mut self,
+            pattern: SubscriptionPattern,
+            listener: Arc<dyn ConsumerRebalanceListener>,
+        ) -> Result<(), Error>;
+        async fn unsubscribe(&mut self) -> Result<(), Error>;
+        async fn commit_sync(&mut self) -> Result<(), Error>;
+        async fn commit_async(&mut self) -> Result<(), Error>;
+        async fn position(&mut self, partition: &TopicPartition) -> Result<i64, Error>;
+        async fn committed(&mut self, partitions: &[TopicPartition])
+            -> Result<HashMap<TopicPartition, OffsetAndMetadata>, Error>;
+        async fn close_with_options(&mut self, options: CloseOptions) -> Result<(), Error>;
         // ... other methods that block in Java ...
 
         // Methods that do not block in Java stay sync.
@@ -89,13 +121,13 @@ trait with `Box<dyn Consumer<K, V>>` for runtime dispatch:
     }
 
     pub fn new_consumer<K, V>(config: ConsumerConfig)
-        -> Result<Box<dyn Consumer<K, V>>, KafkaError>
+        -> Result<Box<dyn Consumer<K, V>>, Error>
     where K: Send + Sync + 'static, V: Send + Sync + 'static
     {
         match config.group_protocol() {
             GroupProtocol::Consumer =>
                 Ok(Box::new(AsyncKafkaConsumer::<K, V>::new(config)?)),
-            GroupProtocol::Classic => Err(KafkaError::unsupported_version(
+            GroupProtocol::Classic => Err(Error::unsupported_version(
                 "Classic group protocol is not yet supported in this client; \
                  set group.protocol=consumer (KIP-848).",
             )),
@@ -157,7 +189,7 @@ Benefits over an enum-dispatch alternative:
 **Do NOT use `#[async_trait]` for:**
 
   - `Deserializer<T>` / `Serializer<T>` — per-record, sync trait
-    (`fn deserialize(bytes: &[u8]) -> Result<T, KafkaError>`).
+    (`fn deserialize(bytes: &[u8]) -> Result<T, Error>`).
   - `ConsumerInterceptor<K, V>` — per-batch but with per-record processing
     inside; keep generic dispatch (`<I: ConsumerInterceptor<K, V>>`) where
     feasible.
@@ -237,7 +269,7 @@ shared between the app side and the background task via
     and calls `token.cancel()`. Callable from any thread / task.
   - Every async public method (`poll`, `commit_sync`, `position`,
     `committed`, `close`, etc.) `select!`s `token.cancelled()` as a branch
-    and returns `KafkaError::Wakeup` when it wins.
+    and returns `Error::Wakeup` when it wins.
   - On returning `Wakeup`, the consumer **rotates** the token: sends a
     fresh `CancellationToken::new()` on the watch channel. The bg task
     observes the new token on its next loop iteration and uses it in its
@@ -260,7 +292,7 @@ volatile-flag combo.
   - The bg task re-reads `wakeup_rx.borrow().clone()` at the top of each
     `run_once` iteration before constructing its `select!`.
   - Rotate the token by sending `CancellationToken::new()` on the watch
-    channel immediately before returning `KafkaError::Wakeup` from a
+    channel immediately before returning `Error::Wakeup` from a
     public method. Do NOT try to plug the (Java-equivalent) race where a
     concurrent `wakeup()` call between cancellation and rotation can be
     lost — Java has the same race and the behavior is intentional.
@@ -402,7 +434,7 @@ Match Java behavior. Specifically:
     explicitly). Resolve by reading the Java source during planning.
   - `partition.assignment.strategy` and other classic-protocol-only config
     keys: accept silently as Java does. Do NOT add Rust-side rejection.
-  - `enforce_rebalance(reason)`: match Java's `AsyncKafkaConsumer`
+  - `enforce_rebalance_with_reason(reason)`: match Java's `AsyncKafkaConsumer`
     behavior (Java javadoc says it is classic-only; the AsyncKafkaConsumer
     implementation is the source of truth for the exact exception type).
 
@@ -428,13 +460,13 @@ send path. The symmetric rule on the receive path:
 **`Deserializer<T>` trait shape:**
 
     pub trait Deserializer<T>: Send + Sync + 'static {
-        fn deserialize(&self, topic: &str, data: &[u8]) -> Result<T, KafkaError>;
-        fn deserialize_with_headers(
+        fn deserialize(&self, topic: &str, data: &[u8]) -> Result<T, Error>;
+        fn deserialize_headers(
             &self,
             topic: &str,
             headers: &Headers,
             data: &[u8],
-        ) -> Result<T, KafkaError> {
+        ) -> Result<T, Error> {
             self.deserialize(topic, data)
         }
     }
@@ -564,7 +596,7 @@ The mechanism mirrors Java's bidirectional event handshake
   1. The background task encounters a state change requiring a listener
      callback. It enqueues a `RebalanceListenerCallbackNeeded` event on
      the background-events channel, carrying a
-     `tokio::sync::oneshot::Sender<Result<(), KafkaError>>`.
+     `tokio::sync::oneshot::Sender<Result<(), Error>>`.
   2. The bg loop does **NOT** block on the matching `oneshot::Receiver`
      (Phase 41). It stores the receiver as cross-iteration state on the
      membership manager and **returns**, so the loop keeps spinning —
@@ -687,15 +719,15 @@ The mechanism mirrors Java's bidirectional event handshake
         async fn on_partitions_revoked(
             &self,
             partitions: &[TopicPartition],
-        ) -> Result<(), KafkaError>;
+        ) -> Result<(), Error>;
         async fn on_partitions_assigned(
             &self,
             partitions: &[TopicPartition],
-        ) -> Result<(), KafkaError>;
+        ) -> Result<(), Error>;
         async fn on_partitions_lost(
             &self,
             partitions: &[TopicPartition],
-        ) -> Result<(), KafkaError> {
+        ) -> Result<(), Error> {
             // Matches Java's default behavior on the listener interface.
             self.on_partitions_revoked(partitions).await
         }

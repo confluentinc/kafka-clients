@@ -47,10 +47,10 @@
 use std::collections::HashMap;
 use std::io;
 
-use crate::add_partitions_to_txn_request_data::{AddPartitionsToTxnRequestData, AddPartitionsToTxnTopic};
-use crate::add_partitions_to_txn_response_data::{
-    AddPartitionsToTxnPartitionResult, AddPartitionsToTxnResponseData, AddPartitionsToTxnTopicResult,
-};
+use crate::AddPartitionsToTxnRequestData;
+use crate::AddPartitionsToTxnResponseData;
+use crate::add_partitions_to_txn_request_data::AddPartitionsToTxnTopic;
+use crate::add_partitions_to_txn_response_data::{AddPartitionsToTxnPartitionResult, AddPartitionsToTxnTopicResult};
 use crate::common::TopicPartition;
 use crate::common::protocol::{ApiKeys, Errors, Readable};
 
@@ -58,17 +58,6 @@ use super::AddPartitionsToTxnResponse;
 use super::ConcreteRequest;
 use super::ConcreteResponse;
 use super::RequestBuilder;
-
-/// Highest version a client may send.
-///
-/// Corresponds to `AddPartitionsToTxnRequest.LAST_CLIENT_VERSION`.
-pub const LAST_CLIENT_VERSION: i16 = 3;
-
-/// Lowest version carrying the broker (batched-transactions) shape.
-///
-/// Also the first version to support verification requests. Corresponds to
-/// `AddPartitionsToTxnRequest.EARLIEST_BROKER_VERSION`.
-pub const EARLIEST_BROKER_VERSION: i16 = 4;
 
 /// An `AddPartitionsToTxn` request.
 ///
@@ -80,6 +69,17 @@ pub struct AddPartitionsToTxnRequest {
 }
 
 impl AddPartitionsToTxnRequest {
+    /// Highest version a client may send.
+    ///
+    /// Corresponds to `AddPartitionsToTxnRequest.LAST_CLIENT_VERSION`.
+    pub const LAST_CLIENT_VERSION: i16 = 3;
+
+    /// Lowest version carrying the broker (batched-transactions) shape.
+    ///
+    /// Also the first version to support verification requests. Corresponds to
+    /// `AddPartitionsToTxnRequest.EARLIEST_BROKER_VERSION`.
+    pub const EARLIEST_BROKER_VERSION: i16 = 4;
+
     /// Creates a new `AddPartitionsToTxnRequest` from data and version.
     pub fn new(data: AddPartitionsToTxnRequestData, version: i16) -> Self {
         Self { data, version }
@@ -124,12 +124,12 @@ impl AddPartitionsToTxnRequest {
     /// Builds the canonical error response for this request, matching Java's
     /// `AddPartitionsToTxnRequest.getErrorResponse(throttleTimeMs, Throwable)`.
     ///
-    /// Below [`EARLIEST_BROKER_VERSION`] the error is reported per partition, in
+    /// Below [`Self::EARLIEST_BROKER_VERSION`] the error is reported per partition, in
     /// the `results_by_topic_v3_and_below` field; from v4 it is a single
     /// top-level `error_code`. The throttle time is set either way.
     pub fn get_error_response(&self, throttle_time_ms: i32, error: &Errors) -> ConcreteResponse {
         let mut response = AddPartitionsToTxnResponseData::new();
-        if self.version < EARLIEST_BROKER_VERSION {
+        if self.version < AddPartitionsToTxnRequest::EARLIEST_BROKER_VERSION {
             response.set_results_by_topic_v3_and_below(Self::error_response_for_topics(
                 &self.data.v3_and_below_topics,
                 error,
@@ -198,7 +198,7 @@ pub struct AddPartitionsToTxnRequestBuilder {
 
 impl AddPartitionsToTxnRequestBuilder {
     /// Creates a builder for a producer's own transaction, capped at
-    /// [`LAST_CLIENT_VERSION`].
+    /// [`AddPartitionsToTxnRequest::LAST_CLIENT_VERSION`].
     ///
     /// Corresponds to `AddPartitionsToTxnRequest.Builder.forClient`.
     pub fn for_client(
@@ -216,7 +216,7 @@ impl AddPartitionsToTxnRequestBuilder {
         Self {
             data,
             oldest_allowed_version: ApiKeys::ADD_PARTITIONS_TO_TXN.oldest_version(),
-            latest_allowed_version: LAST_CLIENT_VERSION,
+            latest_allowed_version: AddPartitionsToTxnRequest::LAST_CLIENT_VERSION,
         }
     }
 
@@ -305,13 +305,13 @@ mod tests {
     #[test]
     fn test_for_client_caps_the_version_at_last_client_version() {
         let builder = AddPartitionsToTxnRequestBuilder::for_client("txn-1", 1, 0, &[tp("t", 0)]);
-        assert_eq!(builder.latest_allowed_version(), LAST_CLIENT_VERSION);
+        assert_eq!(builder.latest_allowed_version(), AddPartitionsToTxnRequest::LAST_CLIENT_VERSION);
         assert_eq!(
             builder.oldest_allowed_version(),
             ApiKeys::ADD_PARTITIONS_TO_TXN.oldest_version()
         );
         assert!(
-            LAST_CLIENT_VERSION < ApiKeys::ADD_PARTITIONS_TO_TXN.latest_version(),
+            AddPartitionsToTxnRequest::LAST_CLIENT_VERSION < ApiKeys::ADD_PARTITIONS_TO_TXN.latest_version(),
             "the cap is only meaningful if the API supports higher versions"
         );
     }
@@ -357,7 +357,10 @@ mod tests {
             0,
             &[tp("topic-a", 0), tp("topic-a", 5), tp("topic-b", 1)],
         );
-        let request = match builder.build_version(LAST_CLIENT_VERSION).expect("build") {
+        let request = match builder
+            .build_version(AddPartitionsToTxnRequest::LAST_CLIENT_VERSION)
+            .expect("build")
+        {
             ConcreteRequest::AddPartitionsToTxn(request) => request,
             other => panic!("expected AddPartitionsToTxn, got {other:?}"),
         };
@@ -394,7 +397,7 @@ mod tests {
     fn test_get_error_response_v4_and_above_is_top_level() {
         let mut data = AddPartitionsToTxnRequestData::new();
         data.set_v3_and_below_topics(vec![]);
-        let request = AddPartitionsToTxnRequest::new(data, EARLIEST_BROKER_VERSION);
+        let request = AddPartitionsToTxnRequest::new(data, AddPartitionsToTxnRequest::EARLIEST_BROKER_VERSION);
 
         match request.get_error_response(5, &Errors::InvalidTxnState) {
             ConcreteResponse::AddPartitionsToTxn(response) => {
@@ -408,7 +411,8 @@ mod tests {
 
     #[test]
     fn test_serialization_round_trip_all_client_versions() {
-        for version in ApiKeys::ADD_PARTITIONS_TO_TXN.oldest_version()..=LAST_CLIENT_VERSION {
+        for version in ApiKeys::ADD_PARTITIONS_TO_TXN.oldest_version()..=AddPartitionsToTxnRequest::LAST_CLIENT_VERSION
+        {
             let mut builder =
                 AddPartitionsToTxnRequestBuilder::for_client("txn-1", 42, 7, &[tp("topic-a", 0), tp("topic-b", 1)]);
             let mut built = builder.build_version(version).expect("build");
@@ -452,7 +456,8 @@ mod tests {
         const PRODUCER_EPOCH: i16 = 1;
         const THROTTLE_TIME_MS: i32 = 10;
 
-        for version in ApiKeys::ADD_PARTITIONS_TO_TXN.oldest_version()..=LAST_CLIENT_VERSION {
+        for version in ApiKeys::ADD_PARTITIONS_TO_TXN.oldest_version()..=AddPartitionsToTxnRequest::LAST_CLIENT_VERSION
+        {
             let partitions = vec![tp("topic", 0), tp("topic", 1)];
             let mut builder =
                 AddPartitionsToTxnRequestBuilder::for_client("transaction1", PRODUCER_ID, PRODUCER_EPOCH, &partitions);
@@ -548,7 +553,7 @@ mod tests {
         // Belt-and-suspenders: parse the hand-derived bytes and confirm the
         // fields come back as expected — so the test proves both that the bytes
         // match the spec AND that the reader agrees with them.
-        let mut reader = ByteBufferAccessor::from_bytes(expected.to_vec());
+        let mut reader = ByteBufferAccessor::new(expected.to_vec());
         let parsed = AddPartitionsToTxnRequest::parse(&mut reader, version).expect("parse");
         assert_eq!(parsed.data().v3_and_below_transactional_id, "txn-1");
         assert_eq!(parsed.data().v3_and_below_producer_id, 42);
@@ -609,7 +614,7 @@ mod tests {
         );
 
         // Belt-and-suspenders: parse the hand-derived bytes back.
-        let mut reader = ByteBufferAccessor::from_bytes(expected.to_vec());
+        let mut reader = ByteBufferAccessor::new(expected.to_vec());
         let parsed = AddPartitionsToTxnRequest::parse(&mut reader, version).expect("parse");
         assert_eq!(parsed.data().v3_and_below_transactional_id, "txn-1");
         assert_eq!(parsed.data().v3_and_below_producer_id, 42);

@@ -43,7 +43,7 @@ use confluent_kafka::common::config::{ConfigResource, ConfigResourceType};
 use crate::common::admin_backend::{AdminBackend, ConfigEntryView, ConfigView, admin_for, all_of, create_topic};
 use crate::common::backend_factory::AdminBackendFactory;
 use crate::common::test_context::TestContext;
-use crate::common::test_utils::retry_on_exception_with_timeout;
+use crate::common::test_utils::retry_on_error_with_timeout;
 use crate::multilanguage_admin_test;
 
 /// How long to retry a config read-back before failing. Mirrors the `5000L`
@@ -264,7 +264,7 @@ async fn describe_cluster_returns_nodes_controller_and_id<F: AdminBackendFactory
     // that mangled the int32 list shows up here rather than as a silently smaller
     // set.
     let with_operations = admin
-        .describe_cluster(DescribeClusterOptions::new().include_authorized_operations(true))
+        .describe_cluster(DescribeClusterOptions::new().set_include_authorized_operations(true))
         .await
         .unwrap_or_else(|e| panic!("{backend} backend: describe cluster with operations: {e}"));
     let operations = with_operations
@@ -356,7 +356,7 @@ async fn incremental_alter_configs_set_and_delete_topic_config<F: AdminBackendFa
     // Config changes reach the brokers asynchronously, so retry the read-back
     // until it holds (Java: `TestUtils.retryOnExceptionWithTimeout` around the
     // describe-and-assert).
-    retry_on_exception_with_timeout(CONFIG_PROPAGATION_TIMEOUT, || async {
+    retry_on_error_with_timeout(CONFIG_PROPAGATION_TIMEOUT, || async {
         let value = retention_ms(&admin, &resource).await?;
         if value.as_deref() == Some("123456789") {
             Ok(())
@@ -401,7 +401,7 @@ async fn incremental_alter_configs_set_and_delete_topic_config<F: AdminBackendFa
 
     // Likewise retry the post-delete read-back. `retention.ms` must still be
     // present (as the broker default) but no longer hold the custom value.
-    retry_on_exception_with_timeout(CONFIG_PROPAGATION_TIMEOUT, || async {
+    retry_on_error_with_timeout(CONFIG_PROPAGATION_TIMEOUT, || async {
         let described = admin
             .describe_configs(std::slice::from_ref(&resource), DescribeConfigsOptions::new())
             .await
@@ -477,7 +477,9 @@ async fn describe_configs_reports_synonyms_and_documentation<F: AdminBackendFact
     let described = admin
         .describe_configs(
             std::slice::from_ref(&resource),
-            DescribeConfigsOptions::new().include_synonyms(true).include_documentation(true),
+            DescribeConfigsOptions::new()
+                .set_include_synonyms(true)
+                .set_include_documentation(true),
         )
         .await
         .unwrap_or_else(|e| panic!("{backend} backend: describe configs: {e}"));
@@ -609,7 +611,7 @@ async fn list_client_metrics_resources_lists_subscription<F: AdminBackendFactory
     .await;
 
     // The new subscription becomes visible to the listing asynchronously.
-    retry_on_exception_with_timeout(CONFIG_PROPAGATION_TIMEOUT, || async {
+    retry_on_error_with_timeout(CONFIG_PROPAGATION_TIMEOUT, || async {
         #[allow(deprecated)]
         let listings = admin
             .list_client_metrics_resources(ListClientMetricsResourcesOptions::new())

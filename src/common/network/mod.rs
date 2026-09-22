@@ -17,37 +17,43 @@
 //! This module provides the low-level TCP I/O and Kafka protocol framing.
 //! It sits between the wire protocol and the higher-level channel abstraction.
 
-pub mod authentication_error;
-pub mod authenticator;
-pub mod byte_buffer_send;
-pub mod channel_builder;
-pub(crate) mod channel_builders;
-pub mod channel_metadata_registry;
+mod authentication_error;
+mod authenticator;
+mod byte_buffer_send;
+mod channel_builder;
+mod channel_builders;
+mod channel_metadata_registry;
 pub mod channel_state;
-pub mod cipher_information;
-pub mod client_information;
-pub mod connection_mode;
-pub mod invalid_receive_error;
+mod cipher_information;
+mod client_information;
+mod connection_mode;
+mod invalid_receive_error;
 pub mod kafka_channel;
-pub mod listener_name;
-pub mod mock_selector;
-pub mod network_receive;
-pub mod network_send;
-pub mod plaintext_channel_builder;
-pub mod plaintext_transport_layer;
-pub mod receive;
-pub mod sasl_channel_builder;
-pub mod selectable;
-pub mod selector;
-pub mod send;
-pub mod ssl_channel_builder;
-pub mod ssl_transport_layer;
-pub mod transport_layer;
+mod listener_name;
+mod mock_selector;
+mod network_receive;
+mod network_send;
+mod plaintext_channel_builder;
+mod plaintext_transport_layer;
+mod receive;
+mod sasl_channel_builder;
+mod selectable;
+mod selector;
+mod send;
+mod ssl_channel_builder;
+mod ssl_transport_layer;
+mod transport_layer;
 
-pub use authentication_error::{AuthenticationError, auth_io_error, is_authentication_error};
+// `AuthenticationError` itself is not re-exported here: the single translation of
+// `org.apache.kafka.common.errors.AuthenticationException` lives at
+// `crate::common::errors::AuthenticationError`, and one type deserves one path.
+pub use authentication_error::{
+    auth_io_error, auth_io_error_with_source, authentication_error_message, is_authentication_error,
+};
 pub use authenticator::{Authenticator, PlaintextAuthenticator};
 pub use byte_buffer_send::ByteBufferSend;
 pub use channel_builder::ChannelBuilder;
+pub use channel_builders::ChannelBuilders;
 pub use channel_metadata_registry::{ChannelMetadataRegistry, DefaultChannelMetadataRegistry};
 pub use channel_state::ChannelState;
 pub use cipher_information::CipherInformation;

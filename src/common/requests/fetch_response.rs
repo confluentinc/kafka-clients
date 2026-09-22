@@ -28,22 +28,11 @@ use std::collections::{HashMap, HashSet};
 
 use indexmap::IndexMap;
 
+use crate::FetchResponseData;
 use crate::common::TopicPartition;
 use crate::common::Uuid;
 use crate::common::protocol::{ApiKeys, Errors};
-use crate::fetch_response_data::{FetchResponseData, PartitionData};
-
-/// Sentinel value for an invalid (uninitialized) high-watermark.
-pub const INVALID_HIGH_WATERMARK: i64 = -1;
-
-/// Sentinel value for an invalid last-stable-offset.
-pub const INVALID_LAST_STABLE_OFFSET: i64 = -1;
-
-/// Sentinel value for an invalid log-start-offset.
-pub const INVALID_LOG_START_OFFSET: i64 = -1;
-
-/// Sentinel value indicating that no preferred replica was returned.
-pub const INVALID_PREFERRED_REPLICA_ID: i32 = -1;
+use crate::fetch_response_data::PartitionData;
 
 /// A FETCH RPC response.
 ///
@@ -57,6 +46,97 @@ pub struct FetchResponse {
 }
 
 impl FetchResponse {
+    /// Sentinel value for an invalid (uninitialized) high-watermark.
+    pub const INVALID_HIGH_WATERMARK: i64 = -1;
+
+    /// Sentinel value for an invalid last-stable-offset.
+    pub const INVALID_LAST_STABLE_OFFSET: i64 = -1;
+
+    /// Sentinel value for an invalid log-start-offset.
+    pub const INVALID_LOG_START_OFFSET: i64 = -1;
+
+    /// Sentinel value indicating that no preferred replica was returned.
+    pub const INVALID_PREFERRED_REPLICA_ID: i32 = -1;
+
+    /// Returns the records buffer from a [`PartitionData`], borrowing the
+    /// underlying bytes — no copy.
+    ///
+    /// The Java equivalent is `FetchResponse.recordsOrFail(PartitionData)`
+    /// which returns a non-null `Records`. The Rust translation returns
+    /// `&[u8]`; an absent buffer yields an empty slice.
+    ///
+    /// **This is not the zero-copy entry point.** The slice itself is a borrow,
+    /// but `MemoryRecords::readable_records` is `Bytes::copy_from_slice`, so
+    /// anything that wraps this return value copies the whole partition payload.
+    /// The §27 route is the `partition.records` field directly: it is already a
+    /// refcounted [`bytes::Bytes`] slice of the response buffer, so cloning it is
+    /// a refcount bump. `FetchCollector::initialize` takes that route; this helper
+    /// exists to translate the Java method and for callers that only need to read
+    /// the bytes in place.
+    pub fn records_or_fail(partition: &PartitionData) -> &[u8] {
+        partition.records.as_deref().unwrap_or(&[])
+    }
+
+    /// Returns the size in bytes of the partition's records, or 0 if absent.
+    ///
+    /// Translates `FetchResponse.recordsSize(PartitionData)`.
+    pub fn records_size(partition: &PartitionData) -> i32 {
+        partition.records.as_ref().map(|r| r.len() as i32).unwrap_or(0)
+    }
+
+    /// Returns true if the partition response carries a diverging-epoch entry
+    /// the client should act on.
+    ///
+    /// Translates `FetchResponse.isDivergingEpoch(PartitionData)`.
+    pub fn is_diverging_epoch(partition: &PartitionData) -> bool {
+        partition.diverging_epoch.epoch >= 0
+    }
+
+    /// Returns the diverging-epoch entry if present.
+    ///
+    /// Translates `FetchResponse.divergingEpoch(PartitionData)`.
+    pub fn diverging_epoch(partition: &PartitionData) -> Option<&crate::fetch_response_data::EpochEndOffset> {
+        if partition.diverging_epoch.epoch < 0 {
+            None
+        } else {
+            Some(&partition.diverging_epoch)
+        }
+    }
+
+    /// Returns the preferred read-replica id if the broker advertised one.
+    ///
+    /// Translates `FetchResponse.preferredReadReplica(PartitionData)`.
+    pub fn preferred_read_replica(partition: &PartitionData) -> Option<i32> {
+        if partition.preferred_read_replica == Self::INVALID_PREFERRED_REPLICA_ID {
+            None
+        } else {
+            Some(partition.preferred_read_replica)
+        }
+    }
+
+    /// Returns true if the partition response carries a preferred-replica
+    /// recommendation.
+    ///
+    /// Translates `FetchResponse.isPreferredReplica(PartitionData)`.
+    pub fn is_preferred_replica(partition: &PartitionData) -> bool {
+        partition.preferred_read_replica != Self::INVALID_PREFERRED_REPLICA_ID
+    }
+
+    /// Builds an empty partition response carrying the given error code.
+    ///
+    /// Translates `FetchResponse.partitionResponse(int, Errors)`.
+    pub fn partition_response(partition: i32, error: Errors) -> PartitionData {
+        let mut pd = PartitionData::new();
+        pd.set_partition_index(partition);
+        pd.set_error_code(error.code());
+        pd.set_high_watermark(Self::INVALID_HIGH_WATERMARK);
+        // Java sets records to MemoryRecords.EMPTY; the auto-generated Rust
+        // PartitionData uses Option<Bytes>, so we leave it as `Some(Bytes::new())`
+        // to mirror that "empty but non-null" semantics.
+        pd.set_records(Some(bytes::Bytes::new()));
+        pd
+    }
+
     /// Constructs a `FetchResponse` from auto-generated data.
     ///
     /// Mirrors Java's private constructor (used by `parse` and `of`).
@@ -261,78 +341,6 @@ impl std::fmt::Display for FetchResponse {
     }
 }
 
-/// Returns the records buffer from a [`PartitionData`], borrowing the
-/// underlying bytes — no copy.
-///
-/// The Java equivalent is `FetchResponse.recordsOrFail(PartitionData)`
-/// which returns a non-null `Records`. The Rust translation returns
-/// `&[u8]`; an absent buffer yields an empty slice. This is the §27
-/// zero-copy entry point — callers wrap the slice in `MemoryRecords` (or
-/// equivalent) without copying.
-pub fn records_or_fail(partition: &PartitionData) -> &[u8] {
-    partition.records.as_deref().unwrap_or(&[])
-}
-
-/// Returns the size in bytes of the partition's records, or 0 if absent.
-///
-/// Translates `FetchResponse.recordsSize(PartitionData)`.
-pub fn records_size(partition: &PartitionData) -> i32 {
-    partition.records.as_ref().map(|r| r.len() as i32).unwrap_or(0)
-}
-
-/// Returns true if the partition response carries a diverging-epoch entry
-/// the client should act on.
-///
-/// Translates `FetchResponse.isDivergingEpoch(PartitionData)`.
-pub fn is_diverging_epoch(partition: &PartitionData) -> bool {
-    partition.diverging_epoch.epoch >= 0
-}
-
-/// Returns the diverging-epoch entry if present.
-///
-/// Translates `FetchResponse.divergingEpoch(PartitionData)`.
-pub fn diverging_epoch(partition: &PartitionData) -> Option<&crate::fetch_response_data::EpochEndOffset> {
-    if partition.diverging_epoch.epoch < 0 {
-        None
-    } else {
-        Some(&partition.diverging_epoch)
-    }
-}
-
-/// Returns the preferred read-replica id if the broker advertised one.
-///
-/// Translates `FetchResponse.preferredReadReplica(PartitionData)`.
-pub fn preferred_read_replica(partition: &PartitionData) -> Option<i32> {
-    if partition.preferred_read_replica == INVALID_PREFERRED_REPLICA_ID {
-        None
-    } else {
-        Some(partition.preferred_read_replica)
-    }
-}
-
-/// Returns true if the partition response carries a preferred-replica
-/// recommendation.
-///
-/// Translates `FetchResponse.isPreferredReplica(PartitionData)`.
-pub fn is_preferred_replica(partition: &PartitionData) -> bool {
-    partition.preferred_read_replica != INVALID_PREFERRED_REPLICA_ID
-}
-
-/// Builds an empty partition response carrying the given error code.
-///
-/// Translates `FetchResponse.partitionResponse(int, Errors)`.
-pub fn partition_response(partition: i32, error: Errors) -> PartitionData {
-    let mut pd = PartitionData::new();
-    pd.set_partition_index(partition);
-    pd.set_error_code(error.code());
-    pd.set_high_watermark(INVALID_HIGH_WATERMARK);
-    // Java sets records to MemoryRecords.EMPTY; the auto-generated Rust
-    // PartitionData uses Option<Bytes>, so we leave it as `Some(Bytes::new())`
-    // to mirror that "empty but non-null" semantics.
-    pd.set_records(Some(bytes::Bytes::new()));
-    pd
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -446,8 +454,8 @@ mod tests {
     fn test_records_or_fail_returns_empty_slice_when_absent() {
         let mut p = PartitionData::new();
         p.set_records(None);
-        assert_eq!(0, records_or_fail(&p).len());
-        assert_eq!(0, records_size(&p));
+        assert_eq!(0, FetchResponse::records_or_fail(&p).len());
+        assert_eq!(0, FetchResponse::records_size(&p));
     }
 
     #[test]
@@ -456,9 +464,9 @@ mod tests {
         let mut p = PartitionData::new();
         p.set_records(Some(bytes::Bytes::from(bytes.clone())));
         // Zero-copy borrow — the returned slice points into p.records.
-        let borrowed = records_or_fail(&p);
+        let borrowed = FetchResponse::records_or_fail(&p);
         assert_eq!(&bytes[..], borrowed);
-        assert_eq!(5, records_size(&p));
+        assert_eq!(5, FetchResponse::records_size(&p));
     }
 
     #[test]
@@ -468,33 +476,33 @@ mod tests {
         ee.set_epoch(3);
         ee.set_end_offset(100);
         p_present.set_diverging_epoch(ee);
-        assert!(is_diverging_epoch(&p_present));
-        assert_eq!(3, diverging_epoch(&p_present).unwrap().epoch);
+        assert!(FetchResponse::is_diverging_epoch(&p_present));
+        assert_eq!(3, FetchResponse::diverging_epoch(&p_present).unwrap().epoch);
 
         let p_absent = PartitionData::new();
-        assert!(!is_diverging_epoch(&p_absent));
-        assert!(diverging_epoch(&p_absent).is_none());
+        assert!(!FetchResponse::is_diverging_epoch(&p_absent));
+        assert!(FetchResponse::diverging_epoch(&p_absent).is_none());
     }
 
     #[test]
     fn test_preferred_read_replica_present_and_absent() {
         let mut p_present = PartitionData::new();
         p_present.set_preferred_read_replica(2);
-        assert!(is_preferred_replica(&p_present));
-        assert_eq!(Some(2), preferred_read_replica(&p_present));
+        assert!(FetchResponse::is_preferred_replica(&p_present));
+        assert_eq!(Some(2), FetchResponse::preferred_read_replica(&p_present));
 
         let mut p_absent = PartitionData::new();
-        p_absent.set_preferred_read_replica(INVALID_PREFERRED_REPLICA_ID);
-        assert!(!is_preferred_replica(&p_absent));
-        assert!(preferred_read_replica(&p_absent).is_none());
+        p_absent.set_preferred_read_replica(FetchResponse::INVALID_PREFERRED_REPLICA_ID);
+        assert!(!FetchResponse::is_preferred_replica(&p_absent));
+        assert!(FetchResponse::preferred_read_replica(&p_absent).is_none());
     }
 
     #[test]
     fn test_partition_response_factory() {
-        let pd = partition_response(7, Errors::OffsetOutOfRange);
+        let pd = FetchResponse::partition_response(7, Errors::OffsetOutOfRange);
         assert_eq!(7, pd.partition_index);
         assert_eq!(Errors::OffsetOutOfRange.code(), pd.error_code);
-        assert_eq!(INVALID_HIGH_WATERMARK, pd.high_watermark);
+        assert_eq!(FetchResponse::INVALID_HIGH_WATERMARK, pd.high_watermark);
         assert_eq!(Some(0), pd.records.as_ref().map(|v| v.len()));
     }
 
@@ -585,8 +593,8 @@ mod tests {
 
         let p0 = &moved[&TopicPartition::new("topic-a", 0)];
         let p1 = &moved[&TopicPartition::new("topic-a", 1)];
-        assert_eq!(recs0.as_slice(), records_or_fail(p0));
-        assert_eq!(recs1.as_slice(), records_or_fail(p1));
+        assert_eq!(recs0.as_slice(), FetchResponse::records_or_fail(p0));
+        assert_eq!(recs1.as_slice(), FetchResponse::records_or_fail(p1));
         assert_eq!(101, p0.high_watermark);
         assert_eq!(201, p1.high_watermark);
     }

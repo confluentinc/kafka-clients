@@ -97,15 +97,15 @@ use std::time::Instant;
 
 use async_trait::async_trait;
 
-use confluent_kafka::common::KafkaError;
+use confluent_kafka::common::Error;
 use confluent_kafka::common::TopicPartition;
 use confluent_kafka::common::serialization::ByteArraySerializer;
 use confluent_kafka::common::serialization::Deserializer;
 use confluent_kafka::consumer::Consumer;
 use confluent_kafka::consumer::ConsumerConfig;
+use confluent_kafka::consumer::KafkaConsumer;
 use confluent_kafka::consumer::OffsetAndMetadata;
 use confluent_kafka::consumer::OffsetCommitCallback;
-use confluent_kafka::consumer::new_consumer;
 use confluent_kafka::producer::KafkaProducer;
 use confluent_kafka::producer::Producer;
 use confluent_kafka::producer::ProducerConfig;
@@ -115,7 +115,7 @@ use crate::common::cluster_config::{ClusterConfig, kip848_3_broker};
 use crate::common::test_context::TestContext;
 
 // Type alias matching the bytes-typed `Consumer` trait object returned
-// by `new_consumer::<Vec<u8>, Vec<u8>>`. Used in helper signatures so
+// by `KafkaConsumer::new::<Vec<u8>, Vec<u8>>`. Used in helper signatures so
 // the tests pass `&mut consumer` (which deref-coerces from
 // `Box<dyn Consumer<Vec<u8>, Vec<u8>>>`).
 type BytesConsumer = dyn Consumer<Vec<u8>, Vec<u8>>;
@@ -149,7 +149,7 @@ fn cluster_config_with_kip848_3brokers() -> ClusterConfig {
 struct ByteArrayDeserializer;
 
 impl Deserializer<Vec<u8>> for ByteArrayDeserializer {
-    fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<Vec<u8>, KafkaError> {
+    fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<Vec<u8>, Error> {
         Ok(data.to_vec())
     }
 }
@@ -177,12 +177,12 @@ fn make_consumer_config_bytes(
     for (k, v) in overrides {
         props.insert((*k).to_string(), (*v).to_string());
     }
-    ConsumerConfig::from_properties(&props).expect("invalid test config")
+    ConsumerConfig::new(&props).expect("invalid test config")
 }
 
 fn new_bytes_consumer(config: ConsumerConfig) -> Box<dyn Consumer<Vec<u8>, Vec<u8>>> {
-    new_consumer::<Vec<u8>, Vec<u8>>(config, Box::new(ByteArrayDeserializer), Box::new(ByteArrayDeserializer))
-        .expect("new_consumer should succeed")
+    KafkaConsumer::new::<Vec<u8>, Vec<u8>>(config, Box::new(ByteArrayDeserializer), Box::new(ByteArrayDeserializer))
+        .expect("KafkaConsumer::new should succeed")
 }
 
 // ── Producer helpers (mirror Java's ClientsTestUtils.sendRecords) ─────
@@ -195,11 +195,11 @@ fn make_producer_config(bootstrap: &str) -> ProducerConfig {
         ("max.block.ms".to_string(), "30000".to_string()),
         ("linger.ms".to_string(), "5".to_string()),
     ]);
-    ProducerConfig::from_properties(&props).expect("invalid producer test config")
+    ProducerConfig::new(&props).expect("invalid producer test config")
 }
 
 fn build_producer_bytes(bootstrap: &str) -> KafkaProducer<Vec<u8>, Vec<u8>> {
-    KafkaProducer::from_config(
+    KafkaProducer::new(
         make_producer_config(bootstrap),
         Box::new(ByteArraySerializer),
         Box::new(ByteArraySerializer),
@@ -220,14 +220,14 @@ async fn send_records_with_producer(
         let timestamp = starting_timestamp + i as i64;
         let key = format!("key {i}").into_bytes();
         let value = format!("value {i}").into_bytes();
-        let record = ProducerRecord::with_timestamp(
+        let record = ProducerRecord::with_partition_timestamp_key(
             tp.topic().to_string(),
             Some(tp.partition()),
             Some(timestamp),
             Some(key),
             Some(value),
         )
-        .expect("ProducerRecord::with_timestamp should not fail");
+        .expect("ProducerRecord::with_partition_timestamp_key should not fail");
         last_future = Some(
             <KafkaProducer<Vec<u8>, Vec<u8>> as Producer<Vec<u8>, Vec<u8>>>::send(producer, record)
                 .await
@@ -236,7 +236,9 @@ async fn send_records_with_producer(
     }
     producer.flush().await.expect("producer.flush should succeed");
     if let Some(f) = last_future {
-        f.get_timeout(Duration::from_secs(30)).await.expect("last send should succeed");
+        f.get_with_timeout(Duration::from_secs(30))
+            .await
+            .expect("last send should succeed");
     }
 }
 
@@ -378,15 +380,15 @@ async fn consume_and_verify_records_bytes(
 #[derive(Clone)]
 struct CountConsumerCommitCallback {
     success_count: Arc<AtomicUsize>,
-    exception_count: Arc<AtomicUsize>,
-    last_error: Arc<Mutex<Option<KafkaError>>>,
+    error_count: Arc<AtomicUsize>,
+    last_error: Arc<Mutex<Option<Error>>>,
 }
 
 impl CountConsumerCommitCallback {
     fn new() -> Self {
         Self {
             success_count: Arc::new(AtomicUsize::new(0)),
-            exception_count: Arc::new(AtomicUsize::new(0)),
+            error_count: Arc::new(AtomicUsize::new(0)),
             last_error: Arc::new(Mutex::new(None)),
         }
     }
@@ -395,8 +397,8 @@ impl CountConsumerCommitCallback {
         self.success_count.load(Ordering::SeqCst)
     }
 
-    fn exception_count(&self) -> usize {
-        self.exception_count.load(Ordering::SeqCst)
+    fn error_count(&self) -> usize {
+        self.error_count.load(Ordering::SeqCst)
     }
 
     fn last_error_is_some(&self) -> bool {
@@ -406,13 +408,13 @@ impl CountConsumerCommitCallback {
 
 #[async_trait]
 impl OffsetCommitCallback for CountConsumerCommitCallback {
-    async fn on_complete(&self, _offsets: &HashMap<TopicPartition, OffsetAndMetadata>, error: Option<&KafkaError>) {
+    async fn on_complete(&self, _offsets: &HashMap<TopicPartition, OffsetAndMetadata>, error: Option<&Error>) {
         match error {
             None => {
                 self.success_count.fetch_add(1, Ordering::SeqCst);
             },
             Some(err) => {
-                self.exception_count.fetch_add(1, Ordering::SeqCst);
+                self.error_count.fetch_add(1, Ordering::SeqCst);
                 *self.last_error.lock().expect("last_error mutex poisoned") = Some(err.clone());
             },
         }
@@ -430,9 +432,9 @@ async fn send_and_await_async_commit(
     let cb = CountConsumerCommitCallback::new();
     let cb_arc: Arc<dyn OffsetCommitCallback> = Arc::new(cb.clone());
     consumer
-        .commit_async_offsets_with_callback(offsets.clone(), Arc::clone(&cb_arc))
+        .commit_async_with_offsets_callback(offsets.clone(), Arc::clone(&cb_arc))
         .await
-        .expect("commit_async_offsets_with_callback should enqueue");
+        .expect("commit_async_with_offsets_callback should enqueue");
 
     let deadline = Instant::now() + Duration::from_secs(30);
     while Instant::now() < deadline {
@@ -445,11 +447,11 @@ async fn send_and_await_async_commit(
             // unless it is retriable, in which case resend.
             let err = cb.last_error.lock().expect("last_error poisoned").clone();
             if let Some(e) = err {
-                if e.is_retriable() {
+                if e.is_retriable_error() {
                     // Reset and resend.
                     *cb.last_error.lock().expect("poisoned") = None;
                     consumer
-                        .commit_async_offsets_with_callback(offsets.clone(), Arc::clone(&cb_arc))
+                        .commit_async_with_offsets_callback(offsets.clone(), Arc::clone(&cb_arc))
                         .await
                         .expect("resend should enqueue");
                 } else {
@@ -494,12 +496,21 @@ async fn test_async_consumer_auto_commit_on_close() {
         create_topic(consumer.as_mut(), &topic, 2).await;
         send_records_bytes(ctx.bootstrap_servers(), &tp, 1000, current_time_ms()).await;
 
-        consumer.subscribe(vec![topic.clone()]).await.expect("subscribe should succeed");
+        consumer
+            .subscribe_with_topics(vec![topic.clone()])
+            .await
+            .expect("subscribe should succeed");
         let expected: HashSet<TopicPartition> = [tp.clone(), tp1.clone()].into_iter().collect();
         await_assignment(consumer.as_mut(), &expected, Duration::from_secs(90)).await;
         // Should auto-commit sought positions before closing.
-        consumer.seek(tp.clone(), 300).await.expect("seek tp should succeed");
-        consumer.seek(tp1.clone(), 500).await.expect("seek tp1 should succeed");
+        consumer
+            .seek_with_offset(tp.clone(), 300)
+            .await
+            .expect("seek tp should succeed");
+        consumer
+            .seek_with_offset(tp1.clone(), 500)
+            .await
+            .expect("seek tp1 should succeed");
         consumer.close().await.expect("consumer close should succeed");
     }
 
@@ -533,11 +544,20 @@ async fn test_async_consumer_auto_commit_on_close_after_wakeup() {
         create_topic(consumer.as_mut(), &topic, 2).await;
         send_records_bytes(ctx.bootstrap_servers(), &tp, 1000, current_time_ms()).await;
 
-        consumer.subscribe(vec![topic.clone()]).await.expect("subscribe should succeed");
+        consumer
+            .subscribe_with_topics(vec![topic.clone()])
+            .await
+            .expect("subscribe should succeed");
         let expected: HashSet<TopicPartition> = [tp.clone(), tp1.clone()].into_iter().collect();
         await_assignment(consumer.as_mut(), &expected, Duration::from_secs(90)).await;
-        consumer.seek(tp.clone(), 300).await.expect("seek tp should succeed");
-        consumer.seek(tp1.clone(), 500).await.expect("seek tp1 should succeed");
+        consumer
+            .seek_with_offset(tp.clone(), 300)
+            .await
+            .expect("seek tp should succeed");
+        consumer
+            .seek_with_offset(tp1.clone(), 500)
+            .await
+            .expect("seek tp1 should succeed");
         // Wakeup before closing to simulate breaking a poll loop from
         // another thread. The pending wakeup must not prevent close-path
         // auto-commit from flushing.
@@ -572,13 +592,13 @@ async fn test_async_consumer_commit_metadata() {
     consumer.assign(vec![tp.clone()]).await.expect("assign should succeed");
 
     // Sync commit: offset 5, leaderEpoch 15, metadata "foo".
-    let sync_metadata = OffsetAndMetadata::with_leader_epoch(5, Some(15), "foo").expect("OffsetAndMetadata");
+    let sync_metadata = OffsetAndMetadata::with_leader_epoch_metadata(5, Some(15), "foo").expect("OffsetAndMetadata");
     let mut sync_offsets = HashMap::new();
     sync_offsets.insert(tp.clone(), sync_metadata.clone());
     consumer
-        .commit_sync_offsets(sync_offsets)
+        .commit_sync_with_offsets(sync_offsets)
         .await
-        .expect("commit_sync_offsets should succeed");
+        .expect("commit_sync_with_offsets should succeed");
     let committed = consumer
         .committed(std::slice::from_ref(&tp))
         .await
@@ -603,9 +623,9 @@ async fn test_async_consumer_commit_metadata() {
     let mut null_offsets = HashMap::new();
     null_offsets.insert(tp.clone(), null_metadata.clone());
     consumer
-        .commit_sync_offsets(null_offsets)
+        .commit_sync_with_offsets(null_offsets)
         .await
-        .expect("commit_sync_offsets should succeed");
+        .expect("commit_sync_with_offsets should succeed");
     let committed = consumer
         .committed(std::slice::from_ref(&tp))
         .await
@@ -638,7 +658,7 @@ async fn test_async_consumer_async_commit() {
         let mut offsets = HashMap::new();
         offsets.insert(tp.clone(), OffsetAndMetadata::new(i).expect("OffsetAndMetadata"));
         consumer
-            .commit_async_offsets_with_callback(offsets, Arc::clone(&cb_arc))
+            .commit_async_with_offsets_callback(offsets, Arc::clone(&cb_arc))
             .await
             .expect("commit_async should enqueue");
     }
@@ -692,7 +712,10 @@ async fn test_async_consumer_commit_specified_offsets() {
 
     let mut commit1 = HashMap::new();
     commit1.insert(tp.clone(), OffsetAndMetadata::new(3).expect("OffsetAndMetadata"));
-    consumer.commit_sync_offsets(commit1).await.expect("commit_sync_offsets tp");
+    consumer
+        .commit_sync_with_offsets(commit1)
+        .await
+        .expect("commit_sync_with_offsets tp");
 
     let committed = consumer.committed(std::slice::from_ref(&tp)).await.expect("committed tp");
     assert_eq!(committed.get(&tp).expect("tp committed present").offset(), 3);
@@ -705,7 +728,10 @@ async fn test_async_consumer_commit_specified_offsets() {
 
     let mut commit2 = HashMap::new();
     commit2.insert(tp1.clone(), OffsetAndMetadata::new(5).expect("OffsetAndMetadata"));
-    consumer.commit_sync_offsets(commit2).await.expect("commit_sync_offsets tp1");
+    consumer
+        .commit_sync_with_offsets(commit2)
+        .await
+        .expect("commit_sync_with_offsets tp1");
 
     let committed = consumer.committed(&[tp.clone(), tp1.clone()]).await.expect("committed both");
     assert_eq!(committed.get(&tp).expect("tp committed").offset(), 3);
@@ -767,17 +793,20 @@ async fn test_async_consumer_auto_commit_on_rebalance() {
     send_records_with_producer(&producer, &tp1, 500, now).await;
     producer.close().await.expect("producer close should succeed");
 
-    consumer.subscribe(vec![topic.clone()]).await.expect("subscribe should succeed");
+    consumer
+        .subscribe_with_topics(vec![topic.clone()])
+        .await
+        .expect("subscribe should succeed");
     let expected: HashSet<TopicPartition> = [tp.clone(), tp1.clone()].into_iter().collect();
     await_assignment(consumer.as_mut(), &expected, Duration::from_secs(90)).await;
 
-    consumer.seek(tp.clone(), 300).await.expect("seek tp");
-    consumer.seek(tp1.clone(), 500).await.expect("seek tp1");
+    consumer.seek_with_offset(tp.clone(), 300).await.expect("seek tp");
+    consumer.seek_with_offset(tp1.clone(), 500).await.expect("seek tp1");
 
     // Change subscription to trigger a rebalance — auto-commit fires on
     // the revocation that precedes the new assignment.
     consumer
-        .subscribe(vec![topic.clone(), topic2.clone()])
+        .subscribe_with_topics(vec![topic.clone(), topic2.clone()])
         .await
         .expect("re-subscribe should succeed");
 
@@ -818,11 +847,14 @@ async fn test_async_consumer_subscribe_and_commit_sync() {
     let mut consumer = new_bytes_consumer(make_consumer_config_bytes(ctx.bootstrap_servers(), &group_id, false, &[]));
     ensure_topic_with_2_partitions(consumer.as_mut(), &topic).await;
     assert_eq!(consumer.assignment().len(), 0);
-    consumer.subscribe(vec![topic.clone()]).await.expect("subscribe should succeed");
+    consumer
+        .subscribe_with_topics(vec![topic.clone()])
+        .await
+        .expect("subscribe should succeed");
     let expected: HashSet<TopicPartition> = [tp.clone(), tp1.clone()].into_iter().collect();
     await_assignment(consumer.as_mut(), &expected, Duration::from_secs(90)).await;
 
-    consumer.seek(tp.clone(), 0).await.expect("seek tp");
+    consumer.seek_with_offset(tp.clone(), 0).await.expect("seek tp");
     consumer.commit_sync().await.expect("commit_sync should succeed");
 
     consumer.close().await.expect("consumer close should succeed");
@@ -830,7 +862,7 @@ async fn test_async_consumer_subscribe_and_commit_sync() {
 
 /// Translates Java's `testAsyncConsumerPositionAndCommit` (line 419).
 ///
-/// `position()` on an unassigned partition throws `IllegalState`; after
+/// `position()` on an unassigned partition throws `LocalIllegalState`; after
 /// assigning, position resets to 0; commit/position interplay; another
 /// consumer in the same group reads from the committed position.
 #[tokio::test(flavor = "multi_thread")]
@@ -866,7 +898,7 @@ async fn test_async_consumer_position_and_commit() {
         .await
         .expect_err("position on unassigned should err");
     assert!(
-        matches!(err, KafkaError::IllegalState(_)),
+        matches!(err, Error::LocalIllegalState(_)),
         "expected IllegalState for position() on unassigned partition, got {err:?}"
     );
 
@@ -960,13 +992,13 @@ async fn test_commit_async_completed_before_consumer_closes() {
         let mut o1 = HashMap::new();
         o1.insert(tp.clone(), OffsetAndMetadata::new(1).expect("OffsetAndMetadata"));
         consumer
-            .commit_async_offsets_with_callback(o1, Arc::clone(&cb_arc))
+            .commit_async_with_offsets_callback(o1, Arc::clone(&cb_arc))
             .await
             .expect("commitAsync 1");
         let mut o2 = HashMap::new();
         o2.insert(tp1.clone(), OffsetAndMetadata::new(1).expect("OffsetAndMetadata"));
         consumer
-            .commit_async_offsets_with_callback(o2, Arc::clone(&cb_arc))
+            .commit_async_with_offsets_callback(o2, Arc::clone(&cb_arc))
             .await
             .expect("commitAsync 2");
 
@@ -1009,11 +1041,14 @@ async fn test_commit_async_completed_before_commit_sync_returns() {
     let mut o1 = HashMap::new();
     o1.insert(tp.clone(), OffsetAndMetadata::new(1).expect("OffsetAndMetadata"));
     consumer
-        .commit_async_offsets_with_callback(o1, Arc::clone(&cb_arc))
+        .commit_async_with_offsets_callback(o1, Arc::clone(&cb_arc))
         .await
         .expect("commitAsync 1");
     // Empty sync commit: the async callback must fire before it returns.
-    consumer.commit_sync_offsets(HashMap::new()).await.expect("commit_sync empty");
+    consumer
+        .commit_sync_with_offsets(HashMap::new())
+        .await
+        .expect("commit_sync empty");
 
     let committed = consumer.committed(std::slice::from_ref(&tp)).await.expect("committed");
     assert_eq!(committed.get(&tp).expect("tp committed").offset(), 1);
@@ -1023,12 +1058,12 @@ async fn test_commit_async_completed_before_commit_sync_returns() {
     let mut o2 = HashMap::new();
     o2.insert(tp.clone(), OffsetAndMetadata::new(2).expect("OffsetAndMetadata"));
     consumer
-        .commit_async_offsets_with_callback(o2, Arc::clone(&cb_arc))
+        .commit_async_with_offsets_callback(o2, Arc::clone(&cb_arc))
         .await
         .expect("commitAsync 2");
     let mut sync2 = HashMap::new();
     sync2.insert(tp1.clone(), OffsetAndMetadata::new(2).expect("OffsetAndMetadata"));
-    consumer.commit_sync_offsets(sync2).await.expect("commit_sync tp1");
+    consumer.commit_sync_with_offsets(sync2).await.expect("commit_sync tp1");
 
     let committed = consumer.committed(&[tp.clone(), tp1.clone()]).await.expect("committed");
     assert_eq!(committed.get(&tp).expect("tp committed").offset(), 2);
@@ -1039,10 +1074,13 @@ async fn test_commit_async_completed_before_commit_sync_returns() {
     let mut o3 = HashMap::new();
     o3.insert(tp.clone(), OffsetAndMetadata::new(3).expect("OffsetAndMetadata"));
     consumer
-        .commit_async_offsets_with_callback(o3, Arc::clone(&cb_arc))
+        .commit_async_with_offsets_callback(o3, Arc::clone(&cb_arc))
         .await
         .expect("commitAsync 3");
-    consumer.commit_sync_offsets(HashMap::new()).await.expect("commit_sync empty");
+    consumer
+        .commit_sync_with_offsets(HashMap::new())
+        .await
+        .expect("commit_sync empty");
 
     let committed = consumer.committed(&[tp.clone(), tp1.clone()]).await.expect("committed");
     assert_eq!(committed.get(&tp).expect("tp committed").offset(), 3);
@@ -1077,7 +1115,7 @@ async fn test_commit_async_completed_before_commit_sync_returns() {
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "Requires cluster.shutdownBroker() on all brokers; the pooled \
             test harness has no broker-shutdown API. The exact close-path \
-            CommitFailedException message is unit-tested in \
+            commit-failed message is unit-tested in \
             commit_request_manager.rs:4217+."]
 async fn test_commit_async_fails_when_coordinator_unavailable_during_close() {
     let mut ctx = TestContext::new(cluster_config_with_kip848_3brokers()).await;
@@ -1103,13 +1141,13 @@ async fn test_commit_async_fails_when_coordinator_unavailable_during_close() {
     let mut offsets = HashMap::new();
     offsets.insert(tp.clone(), OffsetAndMetadata::new(1).expect("OffsetAndMetadata"));
     consumer
-        .commit_async_offsets_with_callback(offsets, Arc::clone(&cb_arc))
+        .commit_async_with_offsets_callback(offsets, Arc::clone(&cb_arc))
         .await
         .expect("commitAsync");
 
     let start = Instant::now();
     consumer
-        .close_with_options(confluent_kafka::consumer::CloseOptions::timeout(Duration::from_millis(500)))
+        .close_with_options(confluent_kafka::consumer::CloseOptions::new_timeout(Duration::from_millis(500)))
         .await
         .expect("close should complete");
     let close_duration = start.elapsed();
@@ -1117,18 +1155,18 @@ async fn test_commit_async_fails_when_coordinator_unavailable_during_close() {
     assert!(close_duration < Duration::from_secs(1), "close too long: {close_duration:?}");
     assert!(cb.last_error_is_some(), "callback should have recorded an error");
     let err = cb.last_error.lock().expect("poisoned").clone().expect("error present");
-    // Java asserts `CommitFailedException`. In Rust, `ConsumerError::CommitFailed`
-    // flows through `KafkaError::IllegalState` (see `src/consumer/errors.rs:237`
-    // and the unit test
-    // `commit_request_manager::tests::commit_async_fails_when_coordinator_unavailable_during_close`).
+    // Java asserts `CommitFailedException`, which is now its own Rust class
+    // rather than being flattened into `Error::LocalIllegalState`.
     assert!(
-        matches!(&err, KafkaError::IllegalState(msg)
-            if msg == "Failed to commit offsets: Coordinator unknown and consumer is closing"),
-        "expected exact CommitFailedException message, got {err:?}"
+        matches!(&err, Error::ConsumerCommitFailed(e)
+            if e.message() == "Failed to commit offsets: Coordinator unknown and consumer is closing"),
+        "expected the exact commit-failed message, got {err:?}"
     );
+    // Java's `getMessage()` is `Error::message()`; `Display` is `toString()`,
+    // which now prefixes the class name for every translated class.
     assert_eq!(
-        err.to_string(),
+        err.message(),
         "Failed to commit offsets: Coordinator unknown and consumer is closing"
     );
-    assert_eq!(cb.exception_count(), 1);
+    assert_eq!(cb.error_count(), 1);
 }

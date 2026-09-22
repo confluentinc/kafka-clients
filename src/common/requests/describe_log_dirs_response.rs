@@ -19,18 +19,10 @@
 use std::collections::HashMap;
 use std::io;
 
+use crate::DescribeLogDirsResponseData;
 use crate::common::protocol::{ApiKeys, Errors, Readable};
-use crate::describe_log_dirs_response_data::DescribeLogDirsResponseData;
 
-use super::abstract_response::update_error_counts;
-
-/// The sentinel offset lag returned when a replica is not being moved or does
-/// not exist (`DescribeLogDirsResponse.INVALID_OFFSET_LAG`).
-pub const INVALID_OFFSET_LAG: i64 = -1;
-
-/// The sentinel returned for total/usable volume bytes when the broker does not
-/// report a value (`DescribeLogDirsResponse.UNKNOWN_VOLUME_BYTES`).
-pub const UNKNOWN_VOLUME_BYTES: i64 = -1;
+use super::AbstractResponse;
 
 /// A DescribeLogDirs response.
 ///
@@ -41,6 +33,14 @@ pub struct DescribeLogDirsResponse {
 }
 
 impl DescribeLogDirsResponse {
+    /// The sentinel offset lag returned when a replica is not being moved or does
+    /// not exist (`DescribeLogDirsResponse.INVALID_OFFSET_LAG`).
+    pub const INVALID_OFFSET_LAG: i64 = -1;
+
+    /// The sentinel returned for total/usable volume bytes when the broker does not
+    /// report a value (`DescribeLogDirsResponse.UNKNOWN_VOLUME_BYTES`).
+    pub const UNKNOWN_VOLUME_BYTES: i64 = -1;
+
     /// Creates a new `DescribeLogDirsResponse` from the underlying data.
     pub fn new(data: DescribeLogDirsResponseData) -> Self {
         Self { data }
@@ -77,7 +77,7 @@ impl DescribeLogDirsResponse {
         let mut counts = HashMap::new();
         counts.insert(Errors::for_code(self.data.error_code), 1);
         for result in &self.data.results {
-            update_error_counts(&mut counts, Errors::for_code(result.error_code));
+            AbstractResponse::update_error_counts(&mut counts, Errors::for_code(result.error_code));
         }
         counts
     }

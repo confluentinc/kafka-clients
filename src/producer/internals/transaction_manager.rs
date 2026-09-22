@@ -14,60 +14,36 @@
 
 //! State for transactions, and the state needed to ensure idempotent production.
 
+use crate::common::requests::ProduceResponse;
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::fmt;
 use std::sync::Arc;
 
+use crate::AddOffsetsToTxnRequestData;
+use crate::AddPartitionsToTxnRequestData;
 use crate::ApiVersions;
-use crate::add_offsets_to_txn_request_data::AddOffsetsToTxnRequestData;
-use crate::add_partitions_to_txn_request_data::AddPartitionsToTxnRequestData;
+use crate::EndTxnRequestData;
+use crate::FindCoordinatorRequestData;
+use crate::InitProducerIdRequestData;
+use crate::TxnOffsetCommitRequestData;
+use crate::common::errors::TransactionAbortableError;
 use crate::common::protocol::{ApiKeys, Errors};
 use crate::common::record::internal::RecordBatch;
-use crate::common::requests::find_coordinator_request::CoordinatorType;
-use crate::common::requests::produce_response::INVALID_OFFSET;
+use crate::common::requests::CoordinatorType;
 use crate::common::requests::{
-    AddOffsetsToTxnRequestBuilder, AddPartitionsToTxnRequestBuilder, CommittedOffset, ConcreteResponse,
-    EndTxnRequestBuilder, FindCoordinatorRequestBuilder, InitProducerIdRequestBuilder, PartitionResponse,
-    RequestBuilder, TransactionResult, TxnOffsetCommitRequestBuilder, V3_AND_BELOW_TXN_ID,
+    AddOffsetsToTxnRequestBuilder, AddPartitionsToTxnRequestBuilder, AddPartitionsToTxnResponse, CommittedOffset,
+    ConcreteResponse, EndTxnRequestBuilder, FindCoordinatorRequestBuilder, InitProducerIdRequestBuilder,
+    PartitionResponse, RequestBuilder, TransactionResult, TxnOffsetCommitRequestBuilder,
+    TxnOffsetCommitRequestBuilderOptionsBuilder,
 };
 use crate::common::utils::{LogContext, ProducerIdAndEpoch};
-use crate::common::{KafkaError, Node, TopicPartition};
-use crate::consumer::{ConsumerGroupMetadata, OffsetAndMetadata};
-use crate::end_txn_request_data::EndTxnRequestData;
-use crate::find_coordinator_request_data::FindCoordinatorRequestData;
-use crate::init_producer_id_request_data::InitProducerIdRequestData;
+use crate::common::{Error, KafkaError, LocalIllegalStateError, Node, TopicPartition};
+use crate::consumer::{ConsumerCommitFailedError, ConsumerGroupMetadata, OffsetAndMetadata};
 use crate::producer::internals::{
     InFlightBatchKey, ProducerBatch, TransactionalRequestResult, TxnPartitionEntry, TxnPartitionMap,
 };
-use crate::txn_offset_commit_request_data::TxnOffsetCommitRequestData;
 use crate::{kafka_debug, kafka_error, kafka_info, kafka_trace};
-
-/// Sentinel for "no transactional request is currently in flight".
-///
-/// `pub(crate)` because the field it guards lives on the [`Sender`] task
-/// (rules §2); see [`PendingRequests`].
-///
-/// [`Sender`]: crate::producer::internals::Sender
-pub(crate) const NO_INFLIGHT_REQUEST_CORRELATION_ID: i32 = -1;
-
-/// The KIP-890 feature flag whose finalized level decides whether Transaction V2
-/// is in force.
-///
-/// Java writes the string literal inline at `TransactionManager.java:499`; named
-/// here because [`TransactionManager::maybe_update_transaction_v2_enabled`] and the
-/// tests in this file and in `sender.rs` all need it. Per CLAUDE.md §2 it is
-/// exported only by this file — reached as
-/// `producer::internals::transaction_manager::TRANSACTION_VERSION_FEATURE`, never
-/// re-exported through the parent module.
-pub(crate) const TRANSACTION_VERSION_FEATURE: &str = "transaction.version";
-
-/// The `retryBackoffMs` an `AddPartitionsToTxn` retry uses after the first
-/// `CONCURRENT_TRANSACTIONS` error of a transaction.
-///
-/// Translated from `TransactionManager.ADD_PARTITIONS_RETRY_BACKOFF_MS`
-/// (Java 133).
-const ADD_PARTITIONS_RETRY_BACKOFF_MS: i64 = 20;
 
 /// The Sender task's queue of transactional requests waiting to be sent.
 ///
@@ -301,16 +277,16 @@ impl CoordinatorNodes {
     ///
     /// # Errors
     ///
-    /// [`KafkaError::IllegalState`] for [`CoordinatorType::Share`], mirroring
+    /// [`Error::LocalIllegalState`] for [`CoordinatorType::Share`], mirroring
     /// Java's `default:` arm and its message. Java's enum has the same variant, so
     /// this is a translated branch rather than a Rust artefact.
-    pub(crate) fn coordinator(&self, coordinator_type: CoordinatorType) -> Result<Option<&Node>, KafkaError> {
+    pub(crate) fn coordinator(&self, coordinator_type: CoordinatorType) -> Result<Option<&Node>, Error> {
         match coordinator_type {
             CoordinatorType::Group => Ok(self.consumer_group.as_ref()),
             CoordinatorType::Transaction => Ok(self.transaction.as_ref()),
-            CoordinatorType::Share => Err(KafkaError::illegal_state(format!(
+            CoordinatorType::Share => Err(Error::local_illegal_state(format!(
                 "Received an invalid coordinator type: {}",
-                coordinator_type_name(coordinator_type)
+                coordinator_type.name()
             ))),
         }
     }
@@ -320,14 +296,14 @@ impl CoordinatorNodes {
     /// Translated from `lookupCoordinator`'s `switch` (Java 1192-1201), whose
     /// `default:` arm carries a **different** message from
     /// [`Self::coordinator`]'s.
-    fn clear(&mut self, coordinator_type: CoordinatorType) -> Result<(), KafkaError> {
+    fn clear(&mut self, coordinator_type: CoordinatorType) -> Result<(), Error> {
         match coordinator_type {
             CoordinatorType::Group => self.consumer_group = None,
             CoordinatorType::Transaction => self.transaction = None,
             CoordinatorType::Share => {
-                return Err(KafkaError::illegal_state(format!(
+                return Err(Error::local_illegal_state(format!(
                     "Invalid coordinator type: {}",
-                    coordinator_type_name(coordinator_type)
+                    coordinator_type.name()
                 )));
             },
         }
@@ -340,30 +316,17 @@ impl CoordinatorNodes {
     /// (Java 1694-1704), whose `default:` arm logs and calls `fatalError` rather
     /// than throwing directly — so the caller, not this method, decides what to do
     /// with the error.
-    fn set(&mut self, coordinator_type: CoordinatorType, node: Node) -> Result<(), KafkaError> {
+    fn set(&mut self, coordinator_type: CoordinatorType, node: Node) -> Result<(), Error> {
         match coordinator_type {
             CoordinatorType::Group => self.consumer_group = Some(node),
             CoordinatorType::Transaction => self.transaction = Some(node),
             CoordinatorType::Share => {
-                return Err(KafkaError::illegal_state(
+                return Err(Error::local_illegal_state(
                     "Group coordinator lookup failed: Unexpected coordinator type in response",
                 ));
             },
         }
         Ok(())
-    }
-}
-
-/// Java's `CoordinatorType.name()`, as interpolated into the two
-/// `IllegalStateException` messages in `TransactionManager`.
-///
-/// The Rust enum has no `Display`, and `Debug` would print `Share` where Java
-/// prints `SHARE`.
-pub(crate) fn coordinator_type_name(coordinator_type: CoordinatorType) -> &'static str {
-    match coordinator_type {
-        CoordinatorType::Group => "GROUP",
-        CoordinatorType::Transaction => "TRANSACTION",
-        CoordinatorType::Share => "SHARE",
     }
 }
 
@@ -905,7 +868,7 @@ impl TxnRequestHandler {
     /// unsynchronized half of `TxnRequestHandler.onComplete` (Java 1406-1420).
     ///
     /// [`Sender`]: crate::producer::internals::Sender
-    pub(crate) fn fail(&self, error: KafkaError) {
+    pub(crate) fn fail(&self, error: Error) {
         self.result.fail(error);
     }
 }
@@ -1206,7 +1169,7 @@ pub(crate) struct TransactionManager {
     transaction_started: bool,
 
     current_state: State,
-    last_error: Option<KafkaError>,
+    last_error: Option<Error>,
     producer_id_and_epoch: ProducerIdAndEpoch,
     client_side_epoch_bump_required: bool,
     /// The finalized-features epoch the KIP-890 feature read last observed
@@ -1269,6 +1232,32 @@ pub(crate) struct TransactionManager {
 }
 
 impl TransactionManager {
+    /// Sentinel for "no transactional request is currently in flight".
+    ///
+    /// `pub(crate)` because the field it guards lives on the [`Sender`] task
+    /// (rules §2); see [`PendingRequests`].
+    ///
+    /// [`Sender`]: crate::producer::internals::Sender
+    pub(crate) const NO_INFLIGHT_REQUEST_CORRELATION_ID: i32 = -1;
+
+    /// The KIP-890 feature flag whose finalized level decides whether Transaction V2
+    /// is in force.
+    ///
+    /// Java writes the string literal inline at `TransactionManager.java:499`; named
+    /// here because [`TransactionManager::maybe_update_transaction_v2_enabled`] and the
+    /// tests in this file and in `sender.rs` all need it. Per CLAUDE.md §2 it is
+    /// exported only by this file — reached as
+    /// `producer::internals::transaction_manager::TRANSACTION_VERSION_FEATURE`, never
+    /// re-exported through the parent module.
+    pub(crate) const TRANSACTION_VERSION_FEATURE: &str = "transaction.version";
+
+    /// The `retryBackoffMs` an `AddPartitionsToTxn` retry uses after the first
+    /// `CONCURRENT_TRANSACTIONS` error of a transaction.
+    ///
+    /// Translated from `TransactionManager.ADD_PARTITIONS_RETRY_BACKOFF_MS`
+    /// (Java 133).
+    const ADD_PARTITIONS_RETRY_BACKOFF_MS: i64 = 20;
+
     /// Creates a transaction manager.
     ///
     /// Translated from `TransactionManager(LogContext, String, int, long,
@@ -1278,7 +1267,7 @@ impl TransactionManager {
     /// the untranslated transactional arms stayed unreachable, is gone: Phase 5a
     /// implemented the transactional state machine and Phase 5b the four request
     /// handlers, Transaction V2 and two-phase commit, so nothing is deferred here
-    /// any more. `KafkaProducer::from_config` keeps its own guard on
+    /// any more. `KafkaProducer::new` keeps its own guard on
     /// `transactional.id` until Phase 6 wires the public API (PLAN §7.1), so the
     /// only way to build a transactional manager today is directly.
     pub(crate) fn new(
@@ -1336,7 +1325,7 @@ impl TransactionManager {
     ///
     /// # Errors
     ///
-    /// - [`KafkaError::IllegalState`] on a non-transactional producer
+    /// - [`Error::LocalIllegalState`] on a non-transactional producer
     ///   (`ensureTransactional`), when the manager is already in an error state
     ///   (`maybeFailWithError`), when a *different* operation's result is still
     ///   unacknowledged, or when `UNINITIALIZED → INITIALIZING` is not a valid
@@ -1346,7 +1335,7 @@ impl TransactionManager {
         &mut self,
         keep_prepared_txn: bool,
         pending_requests: &mut PendingRequests,
-    ) -> Result<Arc<TransactionalRequestResult>, KafkaError> {
+    ) -> Result<Arc<TransactionalRequestResult>, Error> {
         self.initialize_transactions_internal(ProducerIdAndEpoch::NONE, keep_prepared_txn, pending_requests)
     }
 
@@ -1369,7 +1358,7 @@ impl TransactionManager {
         &mut self,
         producer_id_and_epoch: ProducerIdAndEpoch,
         pending_requests: &mut PendingRequests,
-    ) -> Result<Arc<TransactionalRequestResult>, KafkaError> {
+    ) -> Result<Arc<TransactionalRequestResult>, Error> {
         self.initialize_transactions_internal(producer_id_and_epoch, false, pending_requests)
     }
 
@@ -1394,7 +1383,7 @@ impl TransactionManager {
         producer_id_and_epoch: ProducerIdAndEpoch,
         keep_prepared_txn: bool,
         pending_requests: &mut PendingRequests,
-    ) -> Result<Arc<TransactionalRequestResult>, KafkaError> {
+    ) -> Result<Arc<TransactionalRequestResult>, Error> {
         self.maybe_fail_with_error()?;
 
         let is_epoch_bump = producer_id_and_epoch != ProducerIdAndEpoch::NONE;
@@ -1457,14 +1446,14 @@ impl TransactionManager {
     ///
     /// # Errors
     ///
-    /// [`KafkaError::IllegalState`] on a non-transactional producer, while another
+    /// [`Error::LocalIllegalState`] on a non-transactional producer, while another
     /// operation's result is unacknowledged, or when the manager is in an error
     /// state; and from `READY → IN_TRANSACTION` being the table's only arm into
     /// [`State::InTransaction`], which is what rejects `beginTransaction` before
     /// `initTransactions` completes.
-    pub(crate) fn begin_transaction(&mut self) -> Result<(), KafkaError> {
+    pub(crate) fn begin_transaction(&mut self) -> Result<(), Error> {
         self.ensure_transactional()?;
-        self.throw_if_pending_state(TransactionOperation::BeginTransaction)?;
+        self.return_error_if_pending_state(TransactionOperation::BeginTransaction)?;
         self.maybe_fail_with_error()?;
         self.transition_to(State::InTransaction, None, Caller::App)
     }
@@ -1489,16 +1478,16 @@ impl TransactionManager {
     ///
     /// # Errors
     ///
-    /// [`KafkaError::IllegalState`] on a non-transactional producer, while another
+    /// [`Error::LocalIllegalState`] on a non-transactional producer, while another
     /// operation's result is unacknowledged, when the manager is in an error state,
     /// or when `→ PREPARED_TRANSACTION` is not valid — its only sources are
     /// `IN_TRANSACTION` and `INITIALIZING` (Java 172).
     // Java `prepareTransaction` (KIP-939, Java 342). Retained for parity (DoD #2);
     // exercised only by this crate's tests.
     #[allow(dead_code)]
-    pub(crate) fn prepare_transaction(&mut self) -> Result<(), KafkaError> {
+    pub(crate) fn prepare_transaction(&mut self) -> Result<(), Error> {
         self.ensure_transactional()?;
-        self.throw_if_pending_state(TransactionOperation::PrepareTransaction)?;
+        self.return_error_if_pending_state(TransactionOperation::PrepareTransaction)?;
         self.maybe_fail_with_error()?;
         self.transition_to(State::PreparedTransaction, None, Caller::App)?;
         self.prepared_txn_state =
@@ -1523,7 +1512,7 @@ impl TransactionManager {
     ///
     /// # Errors
     ///
-    /// [`KafkaError::IllegalState`] on a non-transactional producer, when a
+    /// [`Error::LocalIllegalState`] on a non-transactional producer, when a
     /// *different* operation's result is still unacknowledged, when the manager is
     /// in an error state (`maybeFailWithError`), or when
     /// `→ COMMITTING_TRANSACTION` is not a valid transition — which is what rejects
@@ -1531,7 +1520,7 @@ impl TransactionManager {
     pub(crate) fn begin_commit(
         &mut self,
         pending_requests: &mut PendingRequests,
-    ) -> Result<Arc<TransactionalRequestResult>, KafkaError> {
+    ) -> Result<Arc<TransactionalRequestResult>, Error> {
         self.handle_cached_transaction_request_result(
             |manager| {
                 manager.maybe_fail_with_error()?;
@@ -1577,7 +1566,7 @@ impl TransactionManager {
     /// identically there.
     ///
     /// The Sender is currently the *only* live caller, since
-    /// `KafkaProducer::from_config` still rejects `transactional.id` until Phase 6
+    /// `KafkaProducer::new` still rejects `transactional.id` until Phase 6
     /// (PLAN §7.1) — so hardcoding [`Caller::App`] was wrong for the one caller that
     /// exists.
     ///
@@ -1607,7 +1596,7 @@ impl TransactionManager {
         &mut self,
         pending_requests: &mut PendingRequests,
         caller: Caller,
-    ) -> Result<Arc<TransactionalRequestResult>, KafkaError> {
+    ) -> Result<Arc<TransactionalRequestResult>, Error> {
         self.handle_cached_transaction_request_result(
             |manager| {
                 if manager.current_state != State::AbortableError {
@@ -1651,7 +1640,7 @@ impl TransactionManager {
     ///
     /// # Errors
     ///
-    /// [`KafkaError::IllegalState`] on a non-transactional producer, while another
+    /// [`Error::LocalIllegalState`] on a non-transactional producer, while another
     /// operation's result is unacknowledged, when the manager is in an error state,
     /// or when no transaction is in progress.
     pub(crate) fn send_offsets_to_transaction(
@@ -1659,13 +1648,13 @@ impl TransactionManager {
         offsets: HashMap<TopicPartition, OffsetAndMetadata>,
         group_metadata: ConsumerGroupMetadata,
         pending_requests: &mut PendingRequests,
-    ) -> Result<Arc<TransactionalRequestResult>, KafkaError> {
+    ) -> Result<Arc<TransactionalRequestResult>, Error> {
         self.ensure_transactional()?;
-        self.throw_if_pending_state(TransactionOperation::SendOffsetsToTransaction)?;
+        self.return_error_if_pending_state(TransactionOperation::SendOffsetsToTransaction)?;
         self.maybe_fail_with_error()?;
 
         if self.current_state != State::InTransaction {
-            return Err(KafkaError::illegal_state(format!(
+            return Err(Error::local_illegal_state(format!(
                 "Cannot send offsets if a transaction is not in progress (currentState= {})",
                 self.current_state
             )));
@@ -1741,17 +1730,20 @@ impl TransactionManager {
                 .insert(topic_partition.clone(), committed_offset);
         }
 
-        let builder = TxnOffsetCommitRequestBuilder::new(
+        let builder = TxnOffsetCommitRequestBuilder::with_options(
             // `ensureTransactional()` has already run, so the id is present.
-            self.transactional_id.clone().unwrap_or_default(),
-            group_metadata.group_id(),
-            self.producer_id_and_epoch.producer_id,
-            self.producer_id_and_epoch.epoch,
-            &self.pending_txn_offset_commits,
-            group_metadata.member_id(),
-            group_metadata.generation_id(),
-            group_metadata.group_instance_id().map(ToString::to_string),
-            self.is_transaction_v2_enabled(),
+            TxnOffsetCommitRequestBuilderOptionsBuilder::new()
+                .set_transactional_id(self.transactional_id.clone().unwrap_or_default())
+                .set_consumer_group_id(group_metadata.group_id())
+                .set_producer_id(self.producer_id_and_epoch.producer_id)
+                .set_producer_epoch(self.producer_id_and_epoch.epoch)
+                .set_pending_txn_offset_commits(&self.pending_txn_offset_commits)
+                .set_is_transaction_v2_enabled(self.is_transaction_v2_enabled())
+                .set_member_id(group_metadata.member_id().to_string())
+                .set_generation_id(group_metadata.generation_id())
+                .set_group_instance_id(group_metadata.group_instance_id().map(ToString::to_string))
+                .build()
+                .expect("TxnOffsetCommitRequestBuilderOptionsBuilder::build: every mandatory parameter is set above"),
         );
         let kind = TxnRequestHandlerKind::TxnOffsetCommit { builder };
         match result {
@@ -1784,7 +1776,7 @@ impl TransactionManager {
         &mut self,
         transaction_result: TransactionResult,
         pending_requests: &mut PendingRequests,
-    ) -> Result<Arc<TransactionalRequestResult>, KafkaError> {
+    ) -> Result<Arc<TransactionalRequestResult>, Error> {
         if !self.new_partitions_in_transaction.is_empty() {
             let handler = self.add_partitions_to_transaction_handler();
             self.enqueue_request(pending_requests, handler);
@@ -1880,7 +1872,7 @@ impl TransactionManager {
         let transaction_version = info
             .finalized_features
             .as_ref()
-            .and_then(|features| features.get(TRANSACTION_VERSION_FEATURE).copied());
+            .and_then(|features| features.get(TransactionManager::TRANSACTION_VERSION_FEATURE).copied());
         let was_transaction_v2_enabled = self.is_transaction_v2_enabled;
         self.is_transaction_v2_enabled = transaction_version.is_some_and(|version| version >= 2);
         kafka_debug!(
@@ -1942,7 +1934,7 @@ impl TransactionManager {
     /// The error that moved this manager into an error state, if any.
     ///
     /// Corresponds to `lastError()` (Java 462).
-    pub(crate) fn last_error(&self) -> Option<&KafkaError> {
+    pub(crate) fn last_error(&self) -> Option<&Error> {
         self.last_error.as_ref()
     }
 
@@ -2037,7 +2029,7 @@ impl TransactionManager {
     /// `bump_idempotent_epoch_and_reset_id_if_needed` is state-guarded, so a
     /// test-only door is needed instead.
     #[cfg(test)]
-    fn force_enqueue_init_producer_id_for_test(
+    pub(crate) fn force_enqueue_init_producer_id_for_test(
         &mut self,
         pending_requests: &mut PendingRequests,
     ) -> Arc<TransactionalRequestResult> {
@@ -2064,12 +2056,10 @@ impl TransactionManager {
     /// from both sides: `TxnRequestHandler.fatalError` (Java 1359) runs on the
     /// Sender, while `KafkaProducer`'s transactional API (Phase 6) reaches it
     /// from the application task.
-    pub(crate) fn transition_to_fatal_error(&mut self, error: KafkaError, caller: Caller) -> Result<(), KafkaError> {
-        // Stamp `is_fatal()` at this choke point so both the error stored as
-        // `last_error` (through `transition_to`) and the one failed on the
-        // pending slot report fatal. Every path into `State::FatalError` goes
-        // through here, so this cannot be missed (CLAUDE.md §10.3).
-        let error = error.into_fatal();
+    pub(crate) fn transition_to_fatal_error(&mut self, error: Error, caller: Caller) -> Result<(), Error> {
+        // Fatality is recorded by the transition itself, not on the error: Java
+        // keeps it in `currentState` (`hasFatalError()` == `currentState ==
+        // FATAL_ERROR`) and stores a plain `RuntimeException` in `lastError`.
         kafka_info!(self.log_context, "Transiting to fatal error state due to {}", error);
         self.transition_to(State::FatalError, Some(error.clone()), caller)?;
 
@@ -2095,16 +2085,12 @@ impl TransactionManager {
     /// transition itself is permitted because the manager is in
     /// [`State::Initializing`] when the response arrives, and
     /// `INITIALIZING → ABORTABLE_ERROR` is a valid arm of the table (Java 180).
-    pub(crate) fn transition_to_abortable_error(
-        &mut self,
-        error: KafkaError,
-        caller: Caller,
-    ) -> Result<(), KafkaError> {
+    pub(crate) fn transition_to_abortable_error(&mut self, error: Error, caller: Caller) -> Result<(), Error> {
         if self.current_state == State::AbortingTransaction {
             kafka_debug!(
                 self.log_context,
                 "Skipping transition to abortable error state since the transaction is already being aborted. \
-                 Underlying exception: {}",
+                 Underlying error: {}",
                 error
             );
             return Ok(());
@@ -2129,10 +2115,10 @@ impl TransactionManager {
     /// and the error is fatal.
     fn transition_to_abortable_error_or_fatal_error(
         &mut self,
-        abortable_error: KafkaError,
-        fatal_error: KafkaError,
+        abortable_error: Error,
+        fatal_error: Error,
         caller: Caller,
-    ) -> Result<(), KafkaError> {
+    ) -> Result<(), Error> {
         if self.can_handle_abortable_error() {
             if self.need_to_trigger_epoch_bump_from_client() {
                 self.client_side_epoch_bump_required = true;
@@ -2191,7 +2177,7 @@ impl TransactionManager {
     /// Phase 5a because it is the only writer that clears the per-transaction sets
     /// and `prepared_txn_state`, and splitting it from the state machine would have
     /// meant writing it twice.
-    fn reset_transaction_state(&mut self) -> Result<(), KafkaError> {
+    fn reset_transaction_state(&mut self) -> Result<(), Error> {
         if self.client_side_epoch_bump_required {
             self.transition_to(State::Initializing, None, Caller::Sender)?;
         } else {
@@ -2237,7 +2223,7 @@ impl TransactionManager {
     /// (`Sender.java:356`), not the `new AuthenticationException(exception)`
     /// wrapper it hands to [`Self::fail_pending_requests`] one line earlier
     /// (`:354`). Preserved.
-    pub(crate) fn transition_to_uninitialized(&mut self, error: &KafkaError, caller: Caller) -> Result<(), KafkaError> {
+    pub(crate) fn transition_to_uninitialized(&mut self, error: &Error, caller: Caller) -> Result<(), Error> {
         self.transition_to(State::Uninitialized, None, caller)?;
         // Java 758-760.
         if let Some(pending) = self.pending_transition.as_ref() {
@@ -2267,9 +2253,9 @@ impl TransactionManager {
     pub(crate) fn fail_pending_requests(
         &mut self,
         pending_requests: &mut PendingRequests,
-        error: &KafkaError,
+        error: &Error,
         caller: Caller,
-    ) -> Result<(), KafkaError> {
+    ) -> Result<(), Error> {
         for handler in pending_requests.iter() {
             // Java: handler.abortableError(exception), i.e. result.fail(e) then
             // transitionToAbortableError(e), per handler and in that order.
@@ -2291,24 +2277,23 @@ impl TransactionManager {
     /// `NetworkClientUtils.awaitReady`, which throws `AuthenticationException`.
     ///
     /// Java's parameter is narrowed to `AuthenticationException`. This crate has
-    /// no `KafkaError` variant for that family — a genuine authentication failure
-    /// is an [`AuthenticationError`](crate::common::network::authentication_error::AuthenticationError)
+    /// no `Error` variant for that family — a genuine authentication failure
+    /// is an [`AuthenticationError`](crate::common::errors::AuthenticationError)
     /// carried inside an `io::Error` at the transport layer — so the parameter is
-    /// a plain [`KafkaError`] and the caller supplies it. The body treats it as a
+    /// a plain [`Error`] and the caller supplies it. The body treats it as a
     /// `RuntimeException` in Java too.
     pub(crate) fn authentication_failed(
         &mut self,
         pending_requests: &mut PendingRequests,
-        error: &KafkaError,
+        error: &Error,
         caller: Caller,
-    ) -> Result<(), KafkaError> {
+    ) -> Result<(), Error> {
         // Java routes this through `TxnRequestHandler.fatalError` (Java 941 →
-        // 1357-1360), so the failure is a fatal transition. Rust inlines the
-        // two statements rather than calling `self.fatal_error`, so the
-        // `handler.fail` below would otherwise receive the un-stamped error;
-        // stamp it here so the app-visible copy reports `is_fatal()`
-        // (CLAUDE.md §10.3).
-        let error = error.clone().into_fatal();
+        // 1357-1360), so the failure is a fatal transition. Rust inlines the two
+        // statements rather than calling `self.fatal_error`. The error is passed
+        // through unchanged; fatality is recorded by the transition into
+        // `State::FatalError`, which `has_fatal_error()` reads — Java keeps it in
+        // `currentState`, not on the exception.
         for handler in pending_requests.iter() {
             // Java: request.fatalError(e), i.e. result.fail(e) then
             // transitionToFatalError(e).
@@ -2370,21 +2355,17 @@ impl TransactionManager {
     /// false, the second refuted by the twenty lines of `Sender.run` around the
     /// call site it cited. Recorded because the pull toward inventing a
     /// present-tense payoff is what produced both.
-    pub(crate) fn close(&mut self, pending_requests: &mut PendingRequests, caller: Caller) -> Result<(), KafkaError> {
+    pub(crate) fn close(&mut self, pending_requests: &mut PendingRequests, caller: Caller) -> Result<(), Error> {
         #[cfg(test)]
         {
             self.close_call_count += 1;
         }
         // Java routes each handler through `TxnRequestHandler.fatalError`
         // (Java 952 → 1357-1360) and fails the pending slot directly (Java
-        // 953-955) — all fatal transitions. Stamp `is_fatal()` on the shared
-        // error at creation so every copy the woken caller receives reports
-        // it; `TransactionalRequestResult::fail` is last-writer-wins, so the
-        // pending-slot fail below (which does not go through
-        // `transition_to_fatal_error`) must see the stamped error too
-        // (CLAUDE.md §10.3).
-        let shutdown_error =
-            KafkaError::with_message(Errors::UnknownServerError, "The producer closed forcefully").into_fatal();
+        // 953-955) — all fatal transitions. Every copy carries the same message;
+        // the fatality of the situation lives in the state machine, so a woken
+        // caller learns it from `has_fatal_error()` rather than from the error.
+        let shutdown_error = Error::kafka_message("The producer closed forcefully");
         for handler in pending_requests.iter() {
             handler.fail(shutdown_error.clone());
             self.transition_to_fatal_error(shutdown_error.clone(), caller)?;
@@ -2407,13 +2388,13 @@ impl TransactionManager {
     ///
     /// # Errors
     ///
-    /// - [`KafkaError::IllegalState`] when the transition is not permitted.
+    /// - [`Error::LocalIllegalState`] when the transition is not permitted.
     ///   When `caller` is [`Caller::Sender`] the manager first moves to
     ///   [`State::FatalError`] and records the error as [`Self::last_error`]
     ///   ("poisons" itself).
-    /// - [`KafkaError::IllegalArgument`] when moving to an error state without
+    /// - [`Error::LocalIllegalArgument`] when moving to an error state without
     ///   an error, mirroring Java's `IllegalArgumentException` (Java 1133).
-    fn transition_to(&mut self, target: State, error: Option<KafkaError>, caller: Caller) -> Result<(), KafkaError> {
+    fn transition_to(&mut self, target: State, error: Option<Error>, caller: Caller) -> Result<(), Error> {
         if !target.is_transition_valid(self.current_state) {
             let id_string = match &self.transactional_id {
                 Some(id) => format!("TransactionalId {id}: "),
@@ -2424,7 +2405,7 @@ impl TransactionManager {
                 self.current_state
             );
 
-            let error = KafkaError::illegal_state(message);
+            let error = Error::local_illegal_state(message);
             if caller.should_poison_state_on_invalid_transition() {
                 self.current_state = State::FatalError;
                 self.last_error = Some(error.clone());
@@ -2433,8 +2414,8 @@ impl TransactionManager {
         } else if target == State::FatalError || target == State::AbortableError {
             match error {
                 None => {
-                    return Err(KafkaError::illegal_argument(format!(
-                        "Cannot transition to {target} with a null exception"
+                    return Err(Error::local_illegal_argument(format!(
+                        "Cannot transition to {target} with a null error"
                     )));
                 },
                 Some(error) => self.last_error = Some(error),
@@ -2471,12 +2452,12 @@ impl TransactionManager {
     /// `isAcked()` key, rather than `isCompleted()`, is what
     /// `.claude/rules/producer-transactions.md` §5 exists to protect: a completed
     /// but never-awaited `commitTransaction` must still be retryable.
-    fn throw_if_pending_state(&mut self, operation: TransactionOperation) -> Result<(), KafkaError> {
+    fn return_error_if_pending_state(&mut self, operation: TransactionOperation) -> Result<(), Error> {
         if let Some(pending) = self.pending_transition.as_ref() {
             if pending.result.is_acked() {
                 self.pending_transition = None;
             } else {
-                return Err(KafkaError::illegal_state(format!(
+                return Err(Error::local_illegal_state(format!(
                     "Cannot attempt operation `{operation}` because the previous call to `{}` timed out and must \
                      be retried",
                     pending.operation
@@ -2500,7 +2481,7 @@ impl TransactionManager {
     ///      finished, so the slot is released and `supplier` runs.
     ///   2. It has not, and `next_state` differs — the caller's `await` timed out
     ///      and a *different* operation is being attempted. Rejected with
-    ///      [`KafkaError::IllegalState`]; the pending operation stays retryable.
+    ///      [`Error::LocalIllegalState`]; the pending operation stays retryable.
     ///   3. It has not, and `next_state` matches — the caller is retrying the same
     ///      operation. The **same** `Arc` is returned, so a `commitTransaction`
     ///      that already completed is not sent twice.
@@ -2518,9 +2499,9 @@ impl TransactionManager {
         supplier: F,
         next_state: State,
         operation: &str,
-    ) -> Result<Arc<TransactionalRequestResult>, KafkaError>
+    ) -> Result<Arc<TransactionalRequestResult>, Error>
     where
-        F: FnOnce(&mut Self) -> Result<Arc<TransactionalRequestResult>, KafkaError>,
+        F: FnOnce(&mut Self) -> Result<Arc<TransactionalRequestResult>, Error>,
     {
         self.ensure_transactional()?;
 
@@ -2528,7 +2509,7 @@ impl TransactionManager {
             if pending.result.is_acked() {
                 self.pending_transition = None;
             } else if next_state != pending.state {
-                return Err(KafkaError::illegal_state(format!(
+                return Err(Error::local_illegal_state(format!(
                     "Cannot attempt operation `{operation}` because the previous call to `{}` timed out and must \
                      be retried",
                     pending.operation
@@ -2546,9 +2527,9 @@ impl TransactionManager {
     /// Rejects a transactional operation on a non-transactional producer.
     ///
     /// Corresponds to `ensureTransactional()` (Java 1147).
-    fn ensure_transactional(&self) -> Result<(), KafkaError> {
+    fn ensure_transactional(&self) -> Result<(), Error> {
         if !self.is_transactional() {
-            return Err(KafkaError::illegal_state(
+            return Err(Error::local_illegal_state(
                 "Transactional method invoked on a non-transactional producer.",
             ));
         }
@@ -2561,10 +2542,10 @@ impl TransactionManager {
     ///
     /// Java chains `lastError` as the cause of the thrown exception for the
     /// `IllegalStateException` and bare-`KafkaException` cases.
-    /// [`KafkaError`] has no cause chain, and Java's `getMessage()` does not
+    /// [`Error`] has no cause chain, and Java's `getMessage()` does not
     /// include the cause either, so the message text is reproduced exactly and
     /// the cause stays reachable through [`Self::last_error`].
-    fn maybe_fail_with_error(&self) -> Result<(), KafkaError> {
+    fn maybe_fail_with_error(&self) -> Result<(), Error> {
         if !self.has_error() {
             return Ok(());
         }
@@ -2576,53 +2557,56 @@ impl TransactionManager {
         let error = match &self.last_error {
             // for ProducerFencedException, do not wrap it as a KafkaException
             // but create a new instance without the call trace since it was not thrown because of the current call
-            Some(error) if error.error() == Errors::ProducerFenced => KafkaError::with_message(
+            Some(error) if error.error() == Errors::ProducerFenced => Error::with_message(
                 Errors::ProducerFenced,
                 format!(
                     "Producer with transactionalId '{transactional_id}' and {producer_id_and_epoch} has been \
                          fenced by another producer with the same transactionalId"
                 ),
             ),
-            Some(error) if error.error() == Errors::InvalidProducerEpoch => KafkaError::with_message(
+            Some(error) if error.error() == Errors::InvalidProducerEpoch => Error::with_message(
                 Errors::InvalidProducerEpoch,
                 format!(
                     "Producer with transactionalId '{transactional_id}' and {producer_id_and_epoch} attempted to \
                          produce with an old epoch"
                 ),
             ),
-            Some(KafkaError::IllegalState(_)) => KafkaError::illegal_state(format!(
-                "Producer with transactionalId '{transactional_id}' and {producer_id_and_epoch} cannot execute \
+            // Java: `new IllegalStateException(msg, lastError)` — the cause is
+            // carried, so the caller can see which transition poisoned the manager.
+            Some(cause @ Error::LocalIllegalState(_)) => Error::LocalIllegalState(LocalIllegalStateError::with_source(
+                format!(
+                    "Producer with transactionalId '{transactional_id}' and {producer_id_and_epoch} cannot execute \
                      transactional method because of previous invalid state transition attempt"
+                ),
+                cause.clone(),
             )),
             // Java: new KafkaException("Cannot execute transactional method because we are in an error state",
             // lastError). A bare KafkaException carries no wire code, which this
             // crate spells as `Errors::UnknownServerError` (cf.
-            // `record_accumulator.rs:1095`).
-            _ => KafkaError::with_message(
-                Errors::UnknownServerError,
-                "Cannot execute transactional method because we are in an error state",
-            ),
+            // `record_accumulator.rs:1095`). The cause is what lets the application
+            // tell a fatal condition from an abortable one on this path — the
+            // message and code are identical for both.
+            _ => {
+                const MESSAGE: &str = "Cannot execute transactional method because we are in an error state";
+                match &self.last_error {
+                    Some(cause) => Error::KafkaError(KafkaError::with_message_source(
+                        Errors::UnknownServerError,
+                        MESSAGE,
+                        cause.clone(),
+                    )),
+                    // `has_error()` is state-driven, so a set state with no recorded
+                    // error is reachable; Java would pass a null cause here.
+                    None => Error::kafka_message(MESSAGE),
+                }
+            },
         };
-        // librdkafka semantics (CLAUDE.md §10.3, no Java equivalent — Java
-        // signals via exception subtypes): the two error states each get their
-        // own disjoint enrichment on the rebuilt error, mirroring the
-        // per-operation copies stamped at the transition choke points.
-        //
-        //   - ABORTABLE_ERROR: stamp `txn_requires_abort()` — abort_transaction()
-        //     is the way out.
-        //   - FATAL_ERROR (the `else`): stamp `is_fatal()` — the producer cannot
-        //     recover and must be recreated, so an app testing `is_fatal()` after
-        //     a fence/cluster-auth/poison failure does not retry a dead producer
-        //     (the bug this branch previously had). `into_fatal` promotes the
-        //     poison path's `IllegalState` too (see `KafkaError::into_fatal`).
-        //
-        // The two flags stay disjoint: fatal never sets requires-abort and vice
-        // versa.
-        if self.has_abortable_error() {
-            Err(error.with_txn_requires_abort())
-        } else {
-            Err(error.into_fatal())
-        }
+        // The error is returned as-is regardless of which error state we are in.
+        // Java's `maybeFailWithError` distinguishes the two states only through the
+        // exception *type* it throws (`ProducerFencedException`,
+        // `InvalidProducerEpochException`, `IllegalStateException`, else
+        // `KafkaException`) — built above; the state itself stays queryable through
+        // `has_fatal_error()` / `has_abortable_error()`.
+        Err(error)
     }
 
     /// Records an error that arose on the send path, moving to an error state
@@ -2638,11 +2622,7 @@ impl TransactionManager {
     /// `ProducerFencedException` → [`Errors::ProducerFenced`],
     /// `UnsupportedVersionException` → [`Errors::UnsupportedVersion`],
     /// `InvalidPidMappingException` → [`Errors::InvalidProducerIdMapping`].
-    pub(crate) fn maybe_transition_to_error_state(
-        &mut self,
-        error: &KafkaError,
-        caller: Caller,
-    ) -> Result<(), KafkaError> {
+    pub(crate) fn maybe_transition_to_error_state(&mut self, error: &Error, caller: Caller) -> Result<(), Error> {
         if matches!(
             error.error(),
             Errors::ClusterAuthorizationFailed
@@ -2661,15 +2641,17 @@ impl TransactionManager {
             //
             // Java tests `instanceof RetriableException || instanceof
             // InvalidTxnStateException`. `InvalidTxnStateException` is **not** a
-            // `RetriableException`, so both tests are needed. The `TransactionAbortableException`
-            // Java builds chains the original as its cause; `KafkaError` has no cause chain
-            // (PLAN §10.5 deviation 5), so the message is reproduced exactly and the original
-            // stays reachable through the caller's own value.
-            let error = if error.is_retriable() || error.error() == Errors::InvalidTxnState {
-                KafkaError::with_message(
-                    Errors::TransactionAbortable,
+            // `RetriableException`, so both tests are needed. Java `:778` chains the
+            // original as the new error's cause
+            // (`new TransactionAbortableException(msg, exception)`), and the chain is
+            // observable: `transition_to_abortable_error` stores only the rewritten
+            // error as `last_error`, so this is the value `maybe_fail_with_error`
+            // hands the application, and its `source()` must be the original.
+            let error = if error.is_retriable_error() || error.error() == Errors::InvalidTxnState {
+                Error::TransactionAbortable(TransactionAbortableError::with_source(
                     "Transaction Request was aborted after exhausting retries.",
-                )
+                    error.clone(),
+                ))
             } else {
                 error.clone()
             };
@@ -2811,7 +2793,7 @@ impl TransactionManager {
         &mut self,
         topic_partition: &TopicPartition,
         batches: &mut [&mut ProducerBatch],
-    ) -> Result<(), KafkaError> {
+    ) -> Result<(), Error> {
         if self.has_fatal_error() {
             kafka_debug!(
                 self.log_context,
@@ -2869,9 +2851,9 @@ impl TransactionManager {
     /// the epoch instead.
     ///
     /// Corresponds to `resetIdempotentProducerId()` (Java 618).
-    fn reset_idempotent_producer_id(&mut self, caller: Caller) -> Result<(), KafkaError> {
+    fn reset_idempotent_producer_id(&mut self, caller: Caller) -> Result<(), Error> {
         if self.is_transactional() {
-            return Err(KafkaError::illegal_state(
+            return Err(Error::local_illegal_state(
                 "Cannot reset producer state for a transactional producer. You must either abort the ongoing \
                  transaction or reinitialize the transactional producer instead",
             ));
@@ -2943,7 +2925,7 @@ impl TransactionManager {
         &mut self,
         batches: &mut InFlightBatchPool<'_>,
         caller: Caller,
-    ) -> Result<(), KafkaError> {
+    ) -> Result<(), Error> {
         if self.producer_id_and_epoch.epoch == i16::MAX {
             self.reset_idempotent_producer_id(caller)?;
         } else {
@@ -2996,7 +2978,7 @@ impl TransactionManager {
         batches: &mut InFlightBatchPool<'_>,
         pending_requests: &mut PendingRequests,
         caller: Caller,
-    ) -> Result<(), KafkaError> {
+    ) -> Result<(), Error> {
         if !self.is_transactional() {
             if self.client_side_epoch_bump_required {
                 self.bump_idempotent_producer_epoch(batches, caller)?;
@@ -3076,7 +3058,7 @@ impl TransactionManager {
         &mut self,
         topic_partition: &TopicPartition,
         increment: i32,
-    ) -> Result<(), KafkaError> {
+    ) -> Result<(), Error> {
         self.txn_partition_map.get_mut(topic_partition)?.increment_sequence(increment);
         Ok(())
     }
@@ -3084,9 +3066,9 @@ impl TransactionManager {
     /// Records `batch` as in flight.
     ///
     /// Corresponds to `addInFlightBatch(ProducerBatch)` (Java 697).
-    pub(crate) fn add_in_flight_batch(&mut self, batch: &ProducerBatch) -> Result<(), KafkaError> {
+    pub(crate) fn add_in_flight_batch(&mut self, batch: &ProducerBatch) -> Result<(), Error> {
         if !batch.has_sequence() {
-            return Err(KafkaError::illegal_state(format!(
+            return Err(Error::local_illegal_state(format!(
                 "Can't track batch for partition {} when sequence is not set.",
                 batch.topic_partition
             )));
@@ -3105,7 +3087,7 @@ impl TransactionManager {
     /// Returns the lowest inflight sequence if the transaction manager is tracking inflight requests for this
     /// partition. If there are no inflight requests being tracked for this partition, this method will return
     /// [`RecordBatch::NO_SEQUENCE`].
-    pub(crate) fn first_in_flight_sequence(&mut self, topic_partition: &TopicPartition) -> Result<i32, KafkaError> {
+    pub(crate) fn first_in_flight_sequence(&mut self, topic_partition: &TopicPartition) -> Result<i32, Error> {
         if !self.has_inflight_batches(topic_partition) {
             return Ok(RecordBatch::NO_SEQUENCE);
         }
@@ -3122,14 +3104,14 @@ impl TransactionManager {
     pub(crate) fn next_batch_by_sequence(
         &self,
         topic_partition: &TopicPartition,
-    ) -> Result<Option<InFlightBatchKey>, KafkaError> {
+    ) -> Result<Option<InFlightBatchKey>, Error> {
         self.txn_partition_map.next_batch_by_sequence(topic_partition)
     }
 
     /// Removes `batch` from the in-flight set.
     ///
     /// Corresponds to `removeInFlightBatch(ProducerBatch)` (Java 721).
-    pub(crate) fn remove_in_flight_batch(&mut self, batch: &ProducerBatch) -> Result<(), KafkaError> {
+    pub(crate) fn remove_in_flight_batch(&mut self, batch: &ProducerBatch) -> Result<(), Error> {
         if self.has_inflight_batches(&batch.topic_partition) {
             self.txn_partition_map.remove_in_flight_batch(batch)?;
         }
@@ -3163,12 +3145,8 @@ impl TransactionManager {
     ///
     /// Corresponds to `updateLastAckedOffset(PartitionResponse, ProducerBatch)`
     /// (Java 738).
-    fn update_last_acked_offset(
-        &mut self,
-        response: &PartitionResponse,
-        batch: &ProducerBatch,
-    ) -> Result<(), KafkaError> {
-        if response.base_offset == INVALID_OFFSET {
+    fn update_last_acked_offset(&mut self, response: &PartitionResponse, batch: &ProducerBatch) -> Result<(), Error> {
+        if response.base_offset == ProduceResponse::INVALID_OFFSET {
             return Ok(());
         }
         let last_offset = response.base_offset + i64::from(batch.record_count) - 1;
@@ -3185,7 +3163,7 @@ impl TransactionManager {
         &mut self,
         batch: &ProducerBatch,
         response: &PartitionResponse,
-    ) -> Result<(), KafkaError> {
+    ) -> Result<(), Error> {
         let last_acked_sequence = self.maybe_update_last_acked_sequence(&batch.topic_partition, batch.last_sequence());
         kafka_trace!(
             self.log_context,
@@ -3215,17 +3193,17 @@ impl TransactionManager {
     /// and `UnknownProducerIdException` **extends** it, so an idempotent
     /// producer's `UnknownProducerId` matches the first branch and requests an
     /// epoch bump; only a transactional producer reaches the second branch. The
-    /// two wire codes are unrelated `Errors` values in Rust, so the relation is
-    /// spelled out by [`is_out_of_order_sequence`] — see
+    /// relation is recovered by [`Error::is_out_of_order_sequence_error`], the
+    /// single predicate encoding that `extends` edge (CLAUDE.md §10.4) — see
     /// `.claude/rules/producer-transactions.md` §9.
     pub(crate) fn handle_failed_batch(
         &mut self,
         batch: &ProducerBatch,
-        error: &KafkaError,
+        error: &Error,
         adjust_sequence_numbers: bool,
         batches: &mut [&mut ProducerBatch],
         caller: Caller,
-    ) -> Result<(), KafkaError> {
+    ) -> Result<(), Error> {
         self.maybe_transition_to_error_state(error, caller)?;
         self.remove_in_flight_batch(batch)?;
 
@@ -3243,7 +3221,7 @@ impl TransactionManager {
             return Ok(());
         }
 
-        if is_out_of_order_sequence(error.error()) && !self.is_transactional() {
+        if error.is_out_of_order_sequence_error() && !self.is_transactional() {
             kafka_error!(
                 self.log_context,
                 "The broker returned {} for topic-partition {} with producerId {}, epoch {}, and sequence number {}",
@@ -3337,7 +3315,7 @@ impl TransactionManager {
     /// transition, but the transactional arm reaches
     /// [`Self::transition_to_abortable_error_or_fatal_error`] and so needs it
     /// (PLAN §10.5 deviation 6 said this phase would add it).
-    pub(crate) fn maybe_resolve_sequences(&mut self, caller: Caller) -> Result<(), KafkaError> {
+    pub(crate) fn maybe_resolve_sequences(&mut self, caller: Caller) -> Result<(), Error> {
         // Java removes through the key-set iterator. Collected here because the
         // loop body needs `&mut self`; each partition is handled independently,
         // so `HashMap` iteration order is not observable.
@@ -3361,19 +3339,17 @@ impl TransactionManager {
                 // For the transactional producer, we bump the epoch if possible, otherwise we transition to a
                 // fatal error.
                 //
-                // Java's two `new KafkaException(..)` instances carry no wire code,
-                // which this crate spells as `Errors::UnknownServerError` (the same
-                // convention `maybe_fail_with_error` and `close` use).
+                // Java's two `new KafkaException(..)` instances (Java 866, 868) are
+                // BARE `KafkaException`s: `is_kafka_error()` is `true` and
+                // `is_api_error()` is `false`. `Error::kafka` is the only spelling that
+                // gives that — `Error::with_message(Errors::UnknownServerError, ..)`
+                // resolves the code to `UnknownServerException`, an `ApiException`.
                 const UNACKED_MESSAGES_ERR: &str = "The client hasn't received acknowledgment for some previously \
                                                     sent messages and can no longer retry them. ";
-                let abortable_error = KafkaError::with_message(
-                    Errors::UnknownServerError,
-                    format!("{UNACKED_MESSAGES_ERR}It is safe to abort the transaction and continue."),
-                );
-                let fatal_error = KafkaError::with_message(
-                    Errors::UnknownServerError,
-                    format!("{UNACKED_MESSAGES_ERR}It isn't safe to continue."),
-                );
+                let abortable_error = Error::kafka_message(format!(
+                    "{UNACKED_MESSAGES_ERR}It is safe to abort the transaction and continue."
+                ));
+                let fatal_error = Error::kafka_message(format!("{UNACKED_MESSAGES_ERR}It isn't safe to continue."));
                 self.transition_to_abortable_error_or_fatal_error(abortable_error, fatal_error, caller)?;
                 self.partitions_with_unresolved_sequences.remove(&topic_partition);
                 continue;
@@ -3443,7 +3419,7 @@ impl TransactionManager {
         &mut self,
         pending_requests: &mut PendingRequests,
         has_incomplete_batches: bool,
-    ) -> Result<Option<TxnRequestHandler>, KafkaError> {
+    ) -> Result<Option<TxnRequestHandler>, Error> {
         if !self.new_partitions_in_transaction.is_empty() {
             let handler = self.add_partitions_to_transaction_handler();
             self.enqueue_request(pending_requests, handler);
@@ -3524,17 +3500,11 @@ impl TransactionManager {
             }
             if let Some(last_error) = &self.last_error {
                 // The failed result is what a blocked commit_transaction() /
-                // send_offsets_to_transaction() call surfaces; from the
-                // abortable state it carries txn_requires_abort() so the
-                // application knows abort (not retry or close) is the way out
-                // (librdkafka semantics, CLAUDE.md §10.3).
-                let error = last_error.clone();
-                let error = if self.has_abortable_error() {
-                    error.with_txn_requires_abort()
-                } else {
-                    error
-                };
-                handler.fail(error);
+                // send_offsets_to_transaction() call surfaces. Java passes
+                // `lastError` through unchanged (`requestHandler.fail(lastError)`);
+                // whether abort is the way out is read from the state
+                // (`has_abortable_error()`), not from the error.
+                handler.fail(last_error.clone());
             }
             return true;
         }
@@ -3550,7 +3520,7 @@ impl TransactionManager {
     ///
     /// # Errors
     ///
-    /// [`KafkaError::IllegalState`] when `handler` needs no coordinator. Java's
+    /// [`Error::LocalIllegalState`] when `handler` needs no coordinator. Java's
     /// `switch (null)` would raise a `NullPointerException` there; both callers
     /// guard on `needsCoordinator()` (`Sender.java:521`,
     /// `TransactionManager.java:1413`), so it is unreachable in either language.
@@ -3559,9 +3529,9 @@ impl TransactionManager {
         coordinators: &mut CoordinatorNodes,
         pending_requests: &mut PendingRequests,
         handler: &TxnRequestHandler,
-    ) -> Result<(), KafkaError> {
+    ) -> Result<(), Error> {
         let Some(coordinator_type) = self.coordinator_type(handler) else {
-            return Err(KafkaError::illegal_state(
+            return Err(Error::local_illegal_state(
                 "Invalid coordinator type: null — the request needs no coordinator",
             ));
         };
@@ -3583,7 +3553,7 @@ impl TransactionManager {
         pending_requests: &mut PendingRequests,
         coordinator_type: CoordinatorType,
         coordinator_key: &str,
-    ) -> Result<(), KafkaError> {
+    ) -> Result<(), Error> {
         coordinators.clear(coordinator_type)?;
 
         let mut data = FindCoordinatorRequestData::new();
@@ -3683,13 +3653,10 @@ impl TransactionManager {
     /// of `onComplete` (Java 1408, 1417, 1425).
     ///
     /// [`Sender`]: crate::producer::internals::Sender
-    pub(crate) fn fatal_error(&mut self, handler: &TxnRequestHandler, error: KafkaError) -> Result<(), KafkaError> {
-        // Stamp `is_fatal()` at this choke point so the copy the app awaits
-        // (via `handler.result`) and the copy stored as `last_error` /
-        // failed on the pending slot (in `transition_to_fatal_error`) all
-        // report fatal. Java carries this in the exception hierarchy; the
-        // flat error code does not, so it is enriched here (CLAUDE.md §10.3).
-        let error = error.into_fatal();
+    pub(crate) fn fatal_error(&mut self, handler: &TxnRequestHandler, error: Error) -> Result<(), Error> {
+        // The error is failed onto the handler unchanged. Java signals fatality
+        // through the state machine plus the exception *type* that
+        // `maybeFailWithError` throws — never a flag on the error itself.
         handler.result.fail(error.clone());
         // Every caller is on the response path, which runs on the Sender task.
         self.transition_to_fatal_error(error, Caller::Sender)
@@ -3699,7 +3666,7 @@ impl TransactionManager {
     ///
     /// Corresponds to `TxnRequestHandler.abortableError(RuntimeException)`
     /// (Java 1362).
-    fn abortable_error(&mut self, handler: &TxnRequestHandler, error: KafkaError) -> Result<(), KafkaError> {
+    fn abortable_error(&mut self, handler: &TxnRequestHandler, error: Error) -> Result<(), Error> {
         handler.result.fail(error.clone());
         // Every caller is on the response path, which runs on the Sender task.
         self.transition_to_abortable_error(error, Caller::Sender)
@@ -3720,11 +3687,7 @@ impl TransactionManager {
     /// Distinct from [`Self::transition_to_abortable_error_or_fatal_error`]
     /// (Java 557), which takes *two* exceptions and does not touch a handler
     /// result: that one serves `maybeResolveSequences`, this one the response path.
-    fn abortable_error_if_possible(
-        &mut self,
-        handler: &TxnRequestHandler,
-        error: KafkaError,
-    ) -> Result<(), KafkaError> {
+    fn abortable_error_if_possible(&mut self, handler: &TxnRequestHandler, error: Error) -> Result<(), Error> {
         if self.can_handle_abortable_error() {
             if self.need_to_trigger_epoch_bump_from_client() {
                 self.client_side_epoch_bump_required = true;
@@ -3827,7 +3790,7 @@ impl TransactionManager {
         response: &ConcreteResponse,
         coordinators: &mut CoordinatorNodes,
         pending_requests: &mut PendingRequests,
-    ) -> Result<(), KafkaError> {
+    ) -> Result<(), Error> {
         // Where Java dispatches virtually on the handler subclass, this matches on
         // the kind (PLAN §10.5 deviation 2).
         match &handler.kind {
@@ -3874,22 +3837,22 @@ impl TransactionManager {
         response: &ConcreteResponse,
         coordinators: &mut CoordinatorNodes,
         pending_requests: &mut PendingRequests,
-    ) -> Result<(), KafkaError> {
+    ) -> Result<(), Error> {
         let TxnRequestHandlerKind::FindCoordinator { builder } = &handler.kind else {
-            return Err(KafkaError::illegal_state(
+            return Err(Error::local_illegal_state(
                 "handle_find_coordinator_response called for another request kind",
             ));
         };
         let ConcreteResponse::FindCoordinator(find_coordinator_response) = response else {
             // Java casts unconditionally; a mismatch would be a
             // ClassCastException. Surfaced as an error per CLAUDE.md §10.2.
-            return Err(KafkaError::illegal_state(format!(
+            return Err(Error::local_illegal_state(format!(
                 "Expected a FindCoordinator response for a FindCoordinator request, got {response}"
             )));
         };
 
         let coordinator_type = CoordinatorType::for_id(builder.data().key_type)
-            .map_err(|error| KafkaError::illegal_state(error.to_string()))?;
+            .map_err(|error| Error::local_illegal_state(error.to_string()))?;
         let request_key = builder.data().key.clone();
         let response_coordinators = find_coordinator_response.coordinators();
 
@@ -3899,7 +3862,7 @@ impl TransactionManager {
                 self.log_context,
                 "Group coordinator lookup failed: Invalid response containing more than a single coordinator"
             );
-            let error = KafkaError::illegal_state(
+            let error = Error::local_illegal_state(
                 "Group coordinator lookup failed: Invalid response containing more than a single coordinator",
             );
             self.fatal_error(&handler, error.clone())?;
@@ -3935,38 +3898,37 @@ impl TransactionManager {
             kafka_info!(
                 self.log_context,
                 "Discovered {} coordinator {}",
-                coordinator_type_name(coordinator_type).to_lowercase(),
+                coordinator_type.name().to_lowercase(),
                 node
             );
             return Ok(());
         }
-        if error.is_retriable() {
+        if error.error().is_some_and(|e| e.is_retriable_error()) {
             self.retry(pending_requests, handler);
             return Ok(());
         }
         if error == Errors::TransactionalIdAuthorizationFailed {
-            return self.fatal_error(&handler, KafkaError::new(error));
+            return self.fatal_error(&handler, Error::new(error));
         }
         if error == Errors::GroupAuthorizationFailed {
-            // Java: GroupAuthorizationException.forGroupId(key). The constructor
-            // defaults this message ("Not authorized to access group: {key}"), so
-            // the explicit `with_message` is no longer needed.
-            return self.abortable_error(&handler, KafkaError::group_authorization(key));
+            // Java: GroupAuthorizationException.forGroupId(key). The typed
+            // constructor defaults this message ("Not authorized to access group:
+            // {key}") and records the group id, so no explicit `with_message` is
+            // needed.
+            return self.abortable_error(&handler, Error::group_authorization(key));
         }
         if error == Errors::TransactionAbortable {
-            return self.abortable_error(&handler, KafkaError::new(error));
+            return self.abortable_error(&handler, Error::new(error));
         }
         // Java interpolates a null errorMessage as the text "null".
         let error_message = coordinator_data.error_message.as_deref().unwrap_or("null");
+        // Java 1716: `new KafkaException(String.format(..))` — a bare `KafkaException`.
         self.fatal_error(
             &handler,
-            KafkaError::with_message(
-                Errors::UnknownServerError,
-                format!(
-                    "Could not find a coordinator with type {} with key {key} due to unexpected error: {error_message}",
-                    coordinator_type_name(coordinator_type)
-                ),
-            ),
+            Error::kafka_message(format!(
+                "Could not find a coordinator with type {} with key {key} due to unexpected error: {error_message}",
+                coordinator_type.name()
+            )),
         )
     }
 
@@ -3980,16 +3942,16 @@ impl TransactionManager {
         response: &ConcreteResponse,
         coordinators: &mut CoordinatorNodes,
         pending_requests: &mut PendingRequests,
-    ) -> Result<(), KafkaError> {
+    ) -> Result<(), Error> {
         let TxnRequestHandlerKind::InitProducerId { builder, is_epoch_bump } = &handler.kind else {
-            return Err(KafkaError::illegal_state(
+            return Err(Error::local_illegal_state(
                 "handle_init_producer_id_response called for another request kind",
             ));
         };
         let ConcreteResponse::InitProducerId(init_producer_id_response) = response else {
             // Java casts unconditionally; a mismatch would be a
             // ClassCastException. Surfaced as an error per CLAUDE.md §10.2.
-            return Err(KafkaError::illegal_state(format!(
+            return Err(Error::local_illegal_state(format!(
                 "Expected an InitProducerId response for an InitProducerId request, got {response}"
             )));
         };
@@ -4042,7 +4004,7 @@ impl TransactionManager {
             self.retry(pending_requests, handler);
             return Ok(());
         }
-        if error.is_retriable() {
+        if error.error().is_some_and(|e| e.is_retriable_error()) {
             self.retry(pending_requests, handler);
             return Ok(());
         }
@@ -4053,25 +4015,23 @@ impl TransactionManager {
                 error.message(),
                 State::AbortableError
             );
-            let error = KafkaError::new(error);
+            let error = Error::new(error);
             self.last_error = Some(error.clone());
             return self.abortable_error(&handler, error);
         }
         if error == Errors::InvalidProducerEpoch || error == Errors::ProducerFenced {
             // We could still receive INVALID_PRODUCER_EPOCH from old versioned transaction coordinator,
             // just treat it the same as PRODUCE_FENCED.
-            return self.fatal_error(&handler, KafkaError::new(Errors::ProducerFenced));
+            return self.fatal_error(&handler, Error::new(Errors::ProducerFenced));
         }
         if error == Errors::TransactionAbortable {
-            let error = KafkaError::new(error);
+            let error = Error::new(error);
             return self.abortable_error(&handler, error);
         }
+        // Java 1536: `new KafkaException("Unexpected error in InitProducerIdResponse; " + ..)`.
         self.fatal_error(
             &handler,
-            KafkaError::with_message(
-                Errors::UnknownServerError,
-                format!("Unexpected error in InitProducerIdResponse; {}", error.message()),
-            ),
+            Error::kafka_message(format!("Unexpected error in InitProducerIdResponse; {}", error.message())),
         )
     }
 
@@ -4092,7 +4052,7 @@ impl TransactionManager {
     ///
     /// # A response with no v3-and-below results
     ///
-    /// Java reads `errors().get(V3_AND_BELOW_TXN_ID)` (Java 1561) and then iterates
+    /// Java reads `errors().get(AddPartitionsToTxnResponse::V3_AND_BELOW_TXN_ID)` (Java 1561) and then iterates
     /// it unchecked. `errors()` omits that key entirely when the response carries no
     /// v3-and-below topic results, so a malformed or v4+-shaped response makes Java
     /// raise a `NullPointerException` inside `NetworkClient.poll`. Rust must not
@@ -4106,17 +4066,20 @@ impl TransactionManager {
         response: &ConcreteResponse,
         coordinators: &mut CoordinatorNodes,
         pending_requests: &mut PendingRequests,
-    ) -> Result<(), KafkaError> {
+    ) -> Result<(), Error> {
         let ConcreteResponse::AddPartitionsToTxn(add_partitions_to_txn_response) = response else {
             // Java casts unconditionally; a mismatch would be a
             // ClassCastException. Surfaced as an error per CLAUDE.md §10.2.
-            return Err(KafkaError::illegal_state(format!(
+            return Err(Error::local_illegal_state(format!(
                 "Expected an AddPartitionsToTxn response for an AddPartitionsToTxn request, got {response}"
             )));
         };
-        let Some(errors) = add_partitions_to_txn_response.errors().remove(V3_AND_BELOW_TXN_ID) else {
+        let Some(errors) = add_partitions_to_txn_response
+            .errors()
+            .remove(AddPartitionsToTxnResponse::V3_AND_BELOW_TXN_ID)
+        else {
             // See the method docs: Java raises NullPointerException here.
-            return Err(KafkaError::illegal_state(
+            return Err(Error::local_illegal_state(
                 "AddPartitionsToTxn response carries no results for this client's transaction",
             ));
         };
@@ -4146,18 +4109,18 @@ impl TransactionManager {
                 self.maybe_override_retry_backoff_ms(&mut handler);
                 self.retry(pending_requests, handler);
                 return Ok(());
-            } else if error.is_retriable() {
+            } else if error.error().is_some_and(|e| e.is_retriable_error()) {
                 self.retry(pending_requests, handler);
                 return Ok(());
             } else if error == Errors::InvalidProducerEpoch || error == Errors::ProducerFenced {
                 // We could still receive INVALID_PRODUCER_EPOCH from old versioned transaction coordinator,
                 // just treat it the same as PRODUCE_FENCED.
-                return self.fatal_error(&handler, KafkaError::new(Errors::ProducerFenced));
+                return self.fatal_error(&handler, Error::new(Errors::ProducerFenced));
             } else if error == Errors::TransactionalIdAuthorizationFailed
                 || error == Errors::InvalidTxnState
                 || error == Errors::InvalidProducerIdMapping
             {
-                return self.fatal_error(&handler, KafkaError::new(error));
+                return self.fatal_error(&handler, Error::new(error));
             } else if error == Errors::TopicAuthorizationFailed {
                 unauthorized_topics.insert(topic_partition.topic().to_string());
             } else if error == Errors::OperationNotAttempted {
@@ -4169,9 +4132,9 @@ impl TransactionManager {
                 );
                 has_partition_errors = true;
             } else if error == Errors::UnknownProducerId {
-                return self.abortable_error_if_possible(&handler, KafkaError::new(error));
+                return self.abortable_error_if_possible(&handler, Error::new(error));
             } else if error == Errors::TransactionAbortable {
-                return self.abortable_error(&handler, KafkaError::new(error));
+                return self.abortable_error(&handler, Error::new(error));
             } else {
                 kafka_error!(
                     self.log_context,
@@ -4192,23 +4155,20 @@ impl TransactionManager {
             .retain(|partition| !errors.contains_key(partition));
 
         if !unauthorized_topics.is_empty() {
-            return self.abortable_error(&handler, KafkaError::topic_authorization(unauthorized_topics));
+            return self.abortable_error(&handler, Error::topic_authorization(unauthorized_topics));
         }
         if has_partition_errors {
-            // Java: new KafkaException("Could not add partitions to transaction due
-            // to errors: " + errors), which interpolates a `HashMap`. A bare
-            // KafkaException carries no wire code — `Errors::UnknownServerError` is
-            // this crate's spelling for that — and the map is rendered in sorted
-            // order so the message is reproducible.
+            // Java 1625: `new KafkaException("Could not add partitions to transaction
+            // due to errors: " + errors)`, which interpolates a `HashMap`. A bare
+            // `KafkaException` — `Error::kafka`, not a code-resolved
+            // `UnknownServerError` — and the map is rendered in sorted order so the
+            // message is reproducible.
             return self.abortable_error(
                 &handler,
-                KafkaError::with_message(
-                    Errors::UnknownServerError,
-                    format!(
-                        "Could not add partitions to transaction due to errors: {}",
-                        format_partition_errors(&errors)
-                    ),
-                ),
+                Error::kafka_message(format!(
+                    "Could not add partitions to transaction due to errors: {}",
+                    format_partition_errors(&errors)
+                )),
             );
         }
 
@@ -4241,16 +4201,16 @@ impl TransactionManager {
         response: &ConcreteResponse,
         coordinators: &mut CoordinatorNodes,
         pending_requests: &mut PendingRequests,
-    ) -> Result<(), KafkaError> {
+    ) -> Result<(), Error> {
         let TxnRequestHandlerKind::EndTxn { builder } = &handler.kind else {
-            return Err(KafkaError::illegal_state(
+            return Err(Error::local_illegal_state(
                 "handle_end_txn_response called for another request kind",
             ));
         };
         let ConcreteResponse::EndTxn(end_txn_response) = response else {
             // Java casts unconditionally; a mismatch would be a
             // ClassCastException. Surfaced as an error per CLAUDE.md §10.2.
-            return Err(KafkaError::illegal_state(format!(
+            return Err(Error::local_illegal_state(format!(
                 "Expected an EndTxn response for an EndTxn request, got {response}"
             )));
         };
@@ -4287,45 +4247,41 @@ impl TransactionManager {
             self.retry(pending_requests, handler);
             return Ok(());
         }
-        if error.is_retriable() {
+        if error.error().is_some_and(|e| e.is_retriable_error()) {
             self.retry(pending_requests, handler);
             return Ok(());
         }
         if error == Errors::InvalidProducerEpoch || error == Errors::ProducerFenced {
             // We could still receive INVALID_PRODUCER_EPOCH from old versioned transaction coordinator,
             // just treat it the same as PRODUCE_FENCED.
-            return self.fatal_error(&handler, KafkaError::new(Errors::ProducerFenced));
+            return self.fatal_error(&handler, Error::new(Errors::ProducerFenced));
         }
         if error == Errors::TransactionalIdAuthorizationFailed
             || error == Errors::InvalidTxnState
             || error == Errors::InvalidProducerIdMapping
         {
-            return self.fatal_error(&handler, KafkaError::new(error));
+            return self.fatal_error(&handler, Error::new(error));
         }
         if error == Errors::UnknownProducerId {
-            return self.abortable_error_if_possible(&handler, KafkaError::new(error));
+            return self.abortable_error_if_possible(&handler, Error::new(error));
         }
         if is_abort && error == Errors::TransactionAbortable {
-            // Java: new KafkaException("Failed to abort transaction", error.exception()).
-            // `KafkaException(message, cause).getMessage()` returns only the message
-            // ("Failed to abort transaction") — the cause lives in `getCause()`, which
-            // this crate's `KafkaError` has no analog for, so it is not carried. A bare
-            // KafkaException carries no wire code, which this crate spells as
-            // `Errors::UnknownServerError`.
+            // Java 1787: `new KafkaException("Failed to abort transaction",
+            // error.exception())` — a bare `KafkaException` whose message is exactly
+            // "Failed to abort transaction" and whose *cause* is the wire error.
+            // Folding the cause into the message changed both the class and the text.
             return self.fatal_error(
                 &handler,
-                KafkaError::with_message(Errors::UnknownServerError, "Failed to abort transaction"),
+                Error::kafka_message_source("Failed to abort transaction", Error::new(error)),
             );
         }
         if error == Errors::TransactionAbortable {
-            return self.abortable_error(&handler, KafkaError::new(error));
+            return self.abortable_error(&handler, Error::new(error));
         }
+        // Java 1791: `new KafkaException("Unhandled error in EndTxnResponse: " + ..)`.
         self.fatal_error(
             &handler,
-            KafkaError::with_message(
-                Errors::UnknownServerError,
-                format!("Unhandled error in EndTxnResponse: {}", error.message()),
-            ),
+            Error::kafka_message(format!("Unhandled error in EndTxnResponse: {}", error.message())),
         )
     }
 
@@ -4344,16 +4300,16 @@ impl TransactionManager {
         response: &ConcreteResponse,
         coordinators: &mut CoordinatorNodes,
         pending_requests: &mut PendingRequests,
-    ) -> Result<(), KafkaError> {
+    ) -> Result<(), Error> {
         let TxnRequestHandlerKind::AddOffsetsToTxn { builder, offsets, group_metadata } = &handler.kind else {
-            return Err(KafkaError::illegal_state(
+            return Err(Error::local_illegal_state(
                 "handle_add_offsets_to_txn_response called for another request kind",
             ));
         };
         let ConcreteResponse::AddOffsetsToTxn(add_offsets_to_txn_response) = response else {
             // Java casts unconditionally; a mismatch would be a
             // ClassCastException. Surfaced as an error per CLAUDE.md §10.2.
-            return Err(KafkaError::illegal_state(format!(
+            return Err(Error::local_illegal_state(format!(
                 "Expected an AddOffsetsToTxn response for an AddOffsetsToTxn request, got {response}"
             )));
         };
@@ -4385,37 +4341,35 @@ impl TransactionManager {
             self.retry(pending_requests, handler);
             return Ok(());
         }
-        if error.is_retriable() {
+        if error.error().is_some_and(|e| e.is_retriable_error()) {
             self.retry(pending_requests, handler);
             return Ok(());
         }
         if error == Errors::UnknownProducerId {
-            return self.abortable_error_if_possible(&handler, KafkaError::new(error));
+            return self.abortable_error_if_possible(&handler, Error::new(error));
         }
         if error == Errors::InvalidProducerEpoch || error == Errors::ProducerFenced {
             // We could still receive INVALID_PRODUCER_EPOCH from old versioned transaction coordinator,
             // just treat it the same as PRODUCE_FENCED.
-            return self.fatal_error(&handler, KafkaError::new(Errors::ProducerFenced));
+            return self.fatal_error(&handler, Error::new(Errors::ProducerFenced));
         }
         if error == Errors::TransactionalIdAuthorizationFailed
             || error == Errors::InvalidTxnState
             || error == Errors::InvalidProducerIdMapping
         {
-            return self.fatal_error(&handler, KafkaError::new(error));
+            return self.fatal_error(&handler, Error::new(error));
         }
         if error == Errors::GroupAuthorizationFailed {
             // Java: GroupAuthorizationException.forGroupId(builder.data.groupId()).
-            return self.abortable_error(&handler, KafkaError::group_authorization(group_id));
+            return self.abortable_error(&handler, Error::group_authorization(group_id));
         }
         if error == Errors::TransactionAbortable {
-            return self.abortable_error(&handler, KafkaError::new(error));
+            return self.abortable_error(&handler, Error::new(error));
         }
+        // Java 1851: `new KafkaException("Unexpected error in AddOffsetsToTxnResponse: " + ..)`.
         self.fatal_error(
             &handler,
-            KafkaError::with_message(
-                Errors::UnknownServerError,
-                format!("Unexpected error in AddOffsetsToTxnResponse: {}", error.message()),
-            ),
+            Error::kafka_message(format!("Unexpected error in AddOffsetsToTxnResponse: {}", error.message())),
         )
     }
 
@@ -4437,7 +4391,9 @@ impl TransactionManager {
     ///
     /// Both builders snapshot the topic collection at construction — Java's
     /// `TxnOffsetCommitRequest.Builder` calls `setTopics(getTopics(pendingTxnOffsetCommits))`,
-    /// and [`TxnOffsetCommitRequestBuilder::new`] takes the map by reference and
+    /// and
+    /// [`TxnOffsetCommitRequestBuilder::with_options`]
+    /// takes the map by reference and
     /// copies it the same way (it cannot borrow `self.pending_txn_offset_commits`,
     /// since the handler outlives the call). `reenqueue()` (Java 1394) and
     /// [`Self::retry`] both re-enqueue the *same handler with the same builder*, and
@@ -4458,16 +4414,16 @@ impl TransactionManager {
         response: &ConcreteResponse,
         coordinators: &mut CoordinatorNodes,
         pending_requests: &mut PendingRequests,
-    ) -> Result<(), KafkaError> {
+    ) -> Result<(), Error> {
         let TxnRequestHandlerKind::TxnOffsetCommit { builder } = &handler.kind else {
-            return Err(KafkaError::illegal_state(
+            return Err(Error::local_illegal_state(
                 "handle_txn_offset_commit_response called for another request kind",
             ));
         };
         let ConcreteResponse::TxnOffsetCommit(txn_offset_commit_response) = response else {
             // Java casts unconditionally; a mismatch would be a
             // ClassCastException. Surfaced as an error per CLAUDE.md §10.2.
-            return Err(KafkaError::illegal_state(format!(
+            return Err(Error::local_illegal_state(format!(
                 "Expected a TxnOffsetCommit response for a TxnOffsetCommit request, got {response}"
             )));
         };
@@ -4495,54 +4451,48 @@ impl TransactionManager {
                     coordinator_reloaded = true;
                     self.lookup_coordinator(coordinators, pending_requests, CoordinatorType::Group, &group_id)?;
                 }
-            } else if error.is_retriable() {
+            } else if error.error().is_some_and(|e| e.is_retriable_error()) {
                 // If the topic is unknown, the coordinator is loading, or is another retriable error, retry with the
                 // current coordinator
                 continue;
             } else if error == Errors::GroupAuthorizationFailed {
                 // Java: GroupAuthorizationException.forGroupId(builder.data.groupId()).
-                self.abortable_error(&handler, KafkaError::group_authorization(group_id.clone()))?;
+                self.abortable_error(&handler, Error::group_authorization(group_id.clone()))?;
                 break;
             } else if error == Errors::FencedInstanceId || error == Errors::TransactionAbortable {
-                self.abortable_error(&handler, KafkaError::new(error))?;
+                self.abortable_error(&handler, Error::new(error))?;
                 break;
             } else if error == Errors::UnknownMemberId || error == Errors::IllegalGeneration {
-                // Java: new CommitFailedException("Transaction offset Commit failed
-                // due to consumer group metadata mismatch: " + error.exception().getMessage()).
-                // `CommitFailedException` extends `KafkaException` and carries no wire
-                // code, which this crate spells as `Errors::UnknownServerError`. NOT
-                // `ConsumerError::CommitFailed`, whose `From` impl flattens to
-                // `KafkaError::IllegalState` — that would send `maybeFailWithError`
-                // down Java's `instanceof IllegalStateException` branch (Java 1167)
-                // instead of its bare-`KafkaException` one.
+                // Java 1923: `new CommitFailedException("Transaction offset Commit
+                // failed due to consumer group metadata mismatch: " + ..)`.
+                // `CommitFailedException extends KafkaException` directly, so it is a
+                // `KafkaException` that is NOT an `ApiException` — exactly what
+                // `ConsumerCommitFailedError` encodes. (A code-resolved
+                // `Errors::UnknownServerError` made `is_api_error()` answer `true`.)
                 self.abortable_error(
                     &handler,
-                    KafkaError::with_message(
-                        Errors::UnknownServerError,
-                        format!(
-                            "Transaction offset Commit failed due to consumer group metadata mismatch: {}",
-                            error.message()
-                        ),
-                    ),
+                    Error::ConsumerCommitFailed(ConsumerCommitFailedError::new(format!(
+                        "Transaction offset Commit failed due to consumer group metadata mismatch: {}",
+                        error.message()
+                    ))),
                 )?;
                 break;
             } else if error == Errors::InvalidProducerEpoch || error == Errors::ProducerFenced {
                 // We could still receive INVALID_PRODUCER_EPOCH from old versioned transaction coordinator,
                 // just treat it the same as PRODUCE_FENCED.
-                self.fatal_error(&handler, KafkaError::new(Errors::ProducerFenced))?;
+                self.fatal_error(&handler, Error::new(Errors::ProducerFenced))?;
                 break;
             } else if error == Errors::TransactionalIdAuthorizationFailed
                 || error == Errors::UnsupportedForMessageFormat
             {
-                self.fatal_error(&handler, KafkaError::new(error))?;
+                self.fatal_error(&handler, Error::new(error))?;
                 break;
             } else {
+                // Java 1937: `new KafkaException("Unexpected error in
+                // TxnOffsetCommitResponse: " + ..)` — a bare `KafkaException`.
                 self.fatal_error(
                     &handler,
-                    KafkaError::with_message(
-                        Errors::UnknownServerError,
-                        format!("Unexpected error in TxnOffsetCommitResponse: {}", error.message()),
-                    ),
+                    Error::kafka_message(format!("Unexpected error in TxnOffsetCommitResponse: {}", error.message())),
                 )?;
                 break;
             }
@@ -4590,7 +4540,7 @@ impl TransactionManager {
             return;
         }
         if let TxnRequestHandlerKind::AddPartitionsToTxn { retry_backoff_ms, .. } = &mut handler.kind {
-            *retry_backoff_ms = ADD_PARTITIONS_RETRY_BACKOFF_MS;
+            *retry_backoff_ms = TransactionManager::ADD_PARTITIONS_RETRY_BACKOFF_MS;
         }
     }
 
@@ -4639,20 +4589,20 @@ impl TransactionManager {
     /// disagree, and a `contains`-guard would then skip a `get_or_create` Java
     /// performs. Trading a correctness edge for two atomic increments is the wrong
     /// way round.
-    pub(crate) fn maybe_add_partition(&mut self, topic_partition: &TopicPartition) -> Result<(), KafkaError> {
+    pub(crate) fn maybe_add_partition(&mut self, topic_partition: &TopicPartition) -> Result<(), Error> {
         self.maybe_fail_with_error()?;
-        self.throw_if_pending_state(TransactionOperation::Send)?;
+        self.return_error_if_pending_state(TransactionOperation::Send)?;
 
         if self.is_transactional() {
             if !self.has_producer_id() {
-                return Err(KafkaError::illegal_state(format!(
+                return Err(Error::local_illegal_state(format!(
                     "Cannot add partition {topic_partition} to transaction before completing a call to \
                      initTransactions"
                 )));
             } else if self.current_state != State::InTransaction {
                 // Java's message has two spaces before the state; reproduced so
                 // message assertions keep matching (Java 447).
-                return Err(KafkaError::illegal_state(format!(
+                return Err(Error::local_illegal_state(format!(
                     "Cannot add partition {topic_partition} to transaction while in state  {}",
                     self.current_state
                 )));
@@ -4702,7 +4652,7 @@ impl TransactionManager {
         batch_key: InFlightBatchKey,
         sequence_has_been_reset: bool,
         batches: &mut [&mut ProducerBatch],
-    ) -> Result<bool, KafkaError> {
+    ) -> Result<bool, Error> {
         let error = response.error;
 
         // An UNKNOWN_PRODUCER_ID means that we have lost the producer state on the broker. Depending on the log start
@@ -4783,17 +4733,8 @@ impl TransactionManager {
         }
 
         // If neither of the above cases are true, retry if the exception is retriable
-        Ok(error.is_retriable())
+        Ok(error.error().is_some_and(|e| e.is_retriable_error()))
     }
-}
-
-/// Whether `code` satisfies Java's `instanceof OutOfOrderSequenceException`.
-///
-/// `UnknownProducerIdException extends OutOfOrderSequenceException`, so both wire
-/// codes match. The relation is stated once here rather than open-coded at each
-/// dispatch site — see `.claude/rules/producer-transactions.md` §9.
-pub(crate) fn is_out_of_order_sequence(code: Errors) -> bool {
-    matches!(code, Errors::OutOfOrderSequenceNumber | Errors::UnknownProducerId)
 }
 
 /// A per-partition error map in topic-then-partition order.
@@ -4839,21 +4780,21 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
+    use crate::AddOffsetsToTxnResponseData;
+    use crate::AddPartitionsToTxnResponseData;
+    use crate::EndTxnResponseData;
+    use crate::InitProducerIdResponseData;
     use crate::NodeApiVersions;
-    use crate::add_offsets_to_txn_response_data::AddOffsetsToTxnResponseData;
-    use crate::add_partitions_to_txn_response_data::AddPartitionsToTxnResponseData;
     use crate::api_versions_response_data::{ApiVersion, FinalizedFeatureKey, SupportedFeatureKey};
+    use crate::common::ApiKeys;
     use crate::common::compress::Compression;
-    use crate::common::protocol::ApiKeys;
     use crate::common::record::TimestampType;
-    use crate::common::record::internal::memory_records::MemoryRecords;
+    use crate::common::record::internal::MemoryRecords;
     use crate::common::requests::{
         AddOffsetsToTxnResponse, AddPartitionsToTxnRequest, AddPartitionsToTxnResponse, EndTxnResponse,
-        FindCoordinatorResponse, InitProducerIdResponse, TxnOffsetCommitResponse,
+        FindCoordinatorResponse, InitProducerIdResponse, PartitionResponseOptionsBuilder, TxnOffsetCommitResponse,
     };
-    use crate::end_txn_response_data::EndTxnResponseData;
-    use crate::init_producer_id_response_data::InitProducerIdResponseData;
-    use crate::producer::internals::sender::is_authorization_error_handled_by_sender;
+    use crate::producer::internals::SenderStatics;
 
     // Constants mirroring `TransactionManagerTest`'s fields (Java 125-155).
     const TRANSACTIONAL_ID: &str = "foobar";
@@ -4878,13 +4819,13 @@ mod tests {
     }
 
     /// Java's `new KafkaException()`, which carries no wire error code.
-    fn kafka_exception() -> KafkaError {
-        KafkaError::with_message(Errors::UnknownServerError, "")
+    fn bare_kafka_error() -> Error {
+        Error::with_message(Errors::UnknownServerError, "")
     }
 
     /// Java's `new TimeoutException()`.
-    fn timeout_exception() -> KafkaError {
-        KafkaError::timeout("")
+    fn timeout_error() -> Error {
+        Error::timeout("")
     }
 
     /// Builds an idempotent (non-transactional) manager.
@@ -4942,7 +4883,7 @@ mod tests {
         let api_versions = Arc::new(ApiVersions::new());
         api_versions.update(
             "0",
-            NodeApiVersions::new(
+            NodeApiVersions::with_node_finalized_features_finalized_features_epoch(
                 &[
                     api_version(&ApiKeys::INIT_PRODUCER_ID, 6),
                     api_version(
@@ -4981,7 +4922,7 @@ mod tests {
     /// The `supportedFeatures` list Java's fixture builds (Java 198-201).
     fn transaction_version_supported_features(level: i16) -> Vec<SupportedFeatureKey> {
         let mut supported_feature = SupportedFeatureKey::new();
-        supported_feature.set_name(TRANSACTION_VERSION_FEATURE.to_string());
+        supported_feature.set_name(TransactionManager::TRANSACTION_VERSION_FEATURE.to_string());
         supported_feature.set_max_version(level);
         supported_feature.set_min_version(0);
         vec![supported_feature]
@@ -4990,7 +4931,7 @@ mod tests {
     /// The `finalizedFeatures` list Java's fixture builds (Java 202-205).
     fn transaction_version_finalized_features(level: i16) -> Vec<FinalizedFeatureKey> {
         let mut finalized_feature = FinalizedFeatureKey::new();
-        finalized_feature.set_name(TRANSACTION_VERSION_FEATURE.to_string());
+        finalized_feature.set_name(TransactionManager::TRANSACTION_VERSION_FEATURE.to_string());
         finalized_feature.set_max_version_level(level);
         finalized_feature.set_min_version_level(level);
         vec![finalized_feature]
@@ -5009,7 +4950,7 @@ mod tests {
         init_producer_id.set_max_version(3);
         api_versions.update(
             "0",
-            NodeApiVersions::new(
+            NodeApiVersions::with_node_finalized_features_finalized_features_epoch(
                 &[init_producer_id],
                 &transaction_version_supported_features(level),
                 &transaction_version_finalized_features(level),
@@ -5020,7 +4961,8 @@ mod tests {
 
     /// A single-record batch, mirroring `batchWithValue` (Java 840).
     fn batch_with_value(topic_partition: &TopicPartition, value: &str) -> ProducerBatch {
-        let builder = MemoryRecords::builder(64, Compression::none(), TimestampType::CreateTime, 0);
+        let builder =
+            MemoryRecords::builder_with_initial_capacity(64, Compression::none(), TimestampType::CreateTime, 0);
         let mut batch = ProducerBatch::new(topic_partition.clone(), builder, 0);
         assert!(
             batch.try_append(0, Some(&[]), Some(value.as_bytes()), &[], None, 0).is_ok(),
@@ -5080,7 +5022,7 @@ mod tests {
         error: Errors,
         producer_id: i64,
         epoch: i16,
-    ) -> Result<(), KafkaError> {
+    ) -> Result<(), Error> {
         let mut coordinators = CoordinatorNodes::new();
         complete_init_producer_id_with_coordinators(
             manager,
@@ -5104,7 +5046,7 @@ mod tests {
         error: Errors,
         producer_id: i64,
         epoch: i16,
-    ) -> Result<(), KafkaError> {
+    ) -> Result<(), Error> {
         let mut data = InitProducerIdResponseData::new();
         data.set_error_code(error.code())
             .set_producer_id(producer_id)
@@ -5116,9 +5058,10 @@ mod tests {
 
     /// The `AddPartitionsToTxnResponse` Java's `prepareAddPartitionsToTxn`
     /// (Java 4027) builds: the per-partition errors filed under
-    /// [`V3_AND_BELOW_TXN_ID`], which is the only shape a client request produces.
+    /// [`AddPartitionsToTxnResponse::V3_AND_BELOW_TXN_ID`], which is the only shape a client request produces.
     fn add_partitions_to_txn_response(errors: &HashMap<TopicPartition, Errors>) -> ConcreteResponse {
-        let result = AddPartitionsToTxnResponse::result_for_transaction(V3_AND_BELOW_TXN_ID, errors);
+        let result =
+            AddPartitionsToTxnResponse::result_for_transaction(AddPartitionsToTxnResponse::V3_AND_BELOW_TXN_ID, errors);
         let mut data = AddPartitionsToTxnResponseData::new();
         data.set_results_by_topic_v3_and_below(result.topic_results)
             .set_throttle_time_ms(0);
@@ -5137,7 +5080,7 @@ mod tests {
         manager: &mut TransactionManager,
         pending_requests: &mut PendingRequests,
         errors: &[(TopicPartition, Errors)],
-    ) -> Result<(), KafkaError> {
+    ) -> Result<(), Error> {
         let mut coordinators = CoordinatorNodes::new();
         run_add_partitions_to_txn_with_coordinators(manager, &mut coordinators, pending_requests, errors)
     }
@@ -5149,7 +5092,7 @@ mod tests {
         coordinators: &mut CoordinatorNodes,
         pending_requests: &mut PendingRequests,
         errors: &[(TopicPartition, Errors)],
-    ) -> Result<(), KafkaError> {
+    ) -> Result<(), Error> {
         let handler = manager
             .next_request(pending_requests, false)
             .expect("next_request does not fail on this path")
@@ -5187,7 +5130,7 @@ mod tests {
         error: Errors,
         response_producer_id: i64,
         response_epoch: i16,
-    ) -> Result<(), KafkaError> {
+    ) -> Result<(), Error> {
         let mut coordinators = CoordinatorNodes::new();
         let handler = manager
             .next_request(pending_requests, false)
@@ -5218,7 +5161,7 @@ mod tests {
         pending_requests: &mut PendingRequests,
         result: TransactionResult,
         error: Errors,
-    ) -> Result<(), KafkaError> {
+    ) -> Result<(), Error> {
         run_end_txn(
             manager,
             pending_requests,
@@ -5238,7 +5181,7 @@ mod tests {
         pending_requests: &mut PendingRequests,
         consumer_group_id: &str,
         error: Errors,
-    ) -> Result<(), KafkaError> {
+    ) -> Result<(), Error> {
         let handler = manager
             .next_request(pending_requests, false)
             .expect("next_request does not fail on this path")
@@ -5269,7 +5212,7 @@ mod tests {
         coordinators: &mut CoordinatorNodes,
         pending_requests: &mut PendingRequests,
         consumer_group_id: &str,
-    ) -> Result<(), KafkaError> {
+    ) -> Result<(), Error> {
         let handler = manager
             .next_request(pending_requests, false)
             .expect("next_request does not fail on this path")
@@ -5322,7 +5265,7 @@ mod tests {
         pending_requests: &mut PendingRequests,
         consumer_group_id: &str,
         errors: &[(TopicPartition, Errors)],
-    ) -> Result<(), KafkaError> {
+    ) -> Result<(), Error> {
         run_txn_offset_commit_with_group_metadata(
             manager,
             coordinators,
@@ -5342,7 +5285,7 @@ mod tests {
         consumer_group_id: &str,
         group_metadata: Option<&ConsumerGroupMetadata>,
         errors: &[(TopicPartition, Errors)],
-    ) -> Result<(), KafkaError> {
+    ) -> Result<(), Error> {
         let handler = manager
             .next_request(pending_requests, false)
             .expect("next_request does not fail on this path")
@@ -5358,7 +5301,9 @@ mod tests {
         }
 
         let error_map: HashMap<TopicPartition, Errors> = errors.iter().cloned().collect();
-        let response = ConcreteResponse::TxnOffsetCommit(TxnOffsetCommitResponse::from_error_map(0, &error_map));
+        let response = ConcreteResponse::TxnOffsetCommit(
+            TxnOffsetCommitResponse::with_request_throttle_ms_response_data(0, &error_map),
+        );
         manager.handle_response(handler, &response, coordinators, pending_requests)
     }
 
@@ -5439,7 +5384,7 @@ mod tests {
     /// error survives the refusal, and an abort clears it.
     ///
     /// Java identifies the recorded error by `e.getCause().getClass()`.
-    /// [`KafkaError`] has no cause chain (PLAN §10.5 deviation 5), and
+    /// [`Error`] has no cause chain (PLAN §10.5 deviation 5), and
     /// `maybeFailWithError` reproduces Java's message without it, so the cause is
     /// asserted where it actually lives — [`TransactionManager::last_error`] — by
     /// wire code.
@@ -5692,20 +5637,30 @@ mod tests {
         }
 
         // Sender.java:325-327 → shouldHandleAuthorizationError, :351-360.
-        let authorization_error =
-            last_error.filter(|error| manager.has_abortable_error() && is_authorization_error_handled_by_sender(error));
+        let authorization_error = last_error.filter(|error| {
+            manager.has_abortable_error() && SenderStatics::is_authorization_error_handled_by_sender(error)
+        });
         if let Some(error) = authorization_error {
             // Java wraps the cause in `new AuthenticationException(exception)`
-            // (Sender.java:354). Java's `AuthenticationException` base class
-            // carries no wire code — only its subclasses do — so it maps to
-            // `Errors::UnknownServerError`, the convention `maybe_fail_with_error`
-            // and `close` already use for a codeless Java exception. NOT
-            // `SaslAuthenticationFailed`: the cause here is a cluster
-            // authorization failure and nothing about it is SASL.
+            // (Sender.java:354), so the class is `AuthenticationException` and the
+            // cause is carried. NOT `SaslAuthenticationFailed`: the cause here is a
+            // cluster or transactional-id authorization failure and nothing about it
+            // is SASL — the wire code stays `UNKNOWN_SERVER_ERROR` (-1), which is
+            // correct, because `Errors.java` maps only `SaslAuthenticationException`
+            // and `UnsupportedByAuthenticationException`, never the base class, so
+            // `Errors.forException`'s superclass walk falls through.
+            //
+            // This is the same spelling `Sender::handle_authorization_error` uses:
+            // `Error::with_message(Errors::UnknownServerError, ..)` resolved to an
+            // `ApiException`, for which `is_authentication_error()` — and hence
+            // `request_utils::RequestUtils::is_fatal_error` — answered `false`.
             manager
                 .fail_pending_requests(
                     pending_requests,
-                    &KafkaError::fatal(Errors::UnknownServerError, error.message()),
+                    &Error::Authentication(crate::common::errors::AuthenticationError::with_source(
+                        error.message(),
+                        error.clone(),
+                    )),
                     Caller::Sender,
                 )
                 .expect("failing pending requests succeeds");
@@ -5721,7 +5676,7 @@ mod tests {
             .expect("bumping the epoch succeeds");
 
         // Sender.java:333-335 — see the doc comment for why this is a predicate.
-        if in_flight_request_correlation_id != NO_INFLIGHT_REQUEST_CORRELATION_ID
+        if in_flight_request_correlation_id != TransactionManager::NO_INFLIGHT_REQUEST_CORRELATION_ID
             || (!pending_requests.is_empty() && !manager.has_error())
         {
             return SenderPhaseOutcome::ReturnedOnTransactionalRequest;
@@ -6001,7 +5956,7 @@ mod tests {
     /// So what the pair pins is a **contract**, not a live path: the poisoning
     /// asymmetry must already hold when Phase 6 opens the application-side caller
     /// (`KafkaProducer.abortTransaction`) and removes
-    /// `KafkaProducer::from_config`'s `transactional.id` guard. That is worth as much
+    /// `KafkaProducer::new`'s `transactional.id` guard. That is worth as much
     /// — it is the guarantee Java's shutdown loop is written against
     /// (`Sender.java:269-271`) — and it is why an unreachable-today invalid source is
     /// a fine choice.
@@ -6055,7 +6010,7 @@ mod tests {
             let error = manager
                 .transition_to(target, None, Caller::App)
                 .expect_err("an error is required");
-            assert_eq!(error.message(), format!("Cannot transition to {name} with a null exception"));
+            assert_eq!(error.message(), format!("Cannot transition to {name} with a null error"));
         }
     }
 
@@ -6103,10 +6058,10 @@ mod tests {
                 send_error.message(),
                 "Cannot execute transactional method because we are in an error state"
             );
-            // The abortable state stamps the librdkafka-style flag (CLAUDE.md
-            // §10.3): the application can learn programmatically that
-            // abort_transaction() is the way out.
-            assert!(send_error.txn_requires_abort());
+            // Java records the condition in the state machine, not on the error:
+            // `hasAbortableError()` == `currentState == ABORTABLE_ERROR`, and the
+            // javadoc's answer to the thrown `KafkaException` is to abort.
+            assert!(manager.has_abortable_error());
         }
     }
 
@@ -6148,7 +6103,7 @@ mod tests {
                     &mut manager,
                     &mut pool,
                     &mut pending,
-                    NO_INFLIGHT_REQUEST_CORRELATION_ID
+                    TransactionManager::NO_INFLIGHT_REQUEST_CORRELATION_ID
                 ),
                 SenderPhaseOutcome::RecoveredFromAuthorizationError
             );
@@ -6179,7 +6134,7 @@ mod tests {
                     &mut manager,
                     &mut pool,
                     &mut pending,
-                    NO_INFLIGHT_REQUEST_CORRELATION_ID
+                    TransactionManager::NO_INFLIGHT_REQUEST_CORRELATION_ID
                 ),
                 SenderPhaseOutcome::ReturnedOnTransactionalRequest
             );
@@ -6214,28 +6169,27 @@ mod tests {
         // `InitProducerIdHandler`'s authorization arm makes (Java 1528), while
         // leaving a handler queued for `fail_pending_requests` to fail.
         manager
-            .transition_to_abortable_error(KafkaError::new(Errors::ClusterAuthorizationFailed), Caller::Sender)
+            .transition_to_abortable_error(Error::new(Errors::ClusterAuthorizationFailed), Caller::Sender)
             .expect("INITIALIZING -> ABORTABLE_ERROR is valid");
         let queued_result = manager.force_enqueue_init_producer_id_for_test(&mut pending);
         assert!(!pending.is_empty());
-        // `Sender.java:354` passes `new AuthenticationException(exception)`. Java's
-        // `AuthenticationException` base class has no wire code, which this crate
-        // spells as `Errors::UnknownServerError` — the same convention
-        // `maybe_fail_with_error` and `close` use. Built non-fatal here so the
-        // three sub-cases below distinguish the abortable path (leaves it
-        // recoverable) from the two fatal paths (stamp `is_fatal()`).
-        let authentication_error = KafkaError::with_message(Errors::UnknownServerError, "authentication failed");
+        // `Sender.java:354` passes `new AuthenticationException(exception)`, so the
+        // class is `Error::Authentication` — see
+        // `Sender::handle_authorization_error`, and
+        // `sender::tests::handle_authorization_error_fails_pending_requests_with_an_authentication_error`
+        // which pins it. The same error value drives all three sub-cases below; what
+        // distinguishes them is the state each one transitions into — abortable
+        // (recoverable) versus the two fatal paths.
+        let authentication_error =
+            Error::Authentication(crate::common::errors::AuthenticationError::new("authentication failed"));
         manager
             .fail_pending_requests(&mut pending, &authentication_error, Caller::Sender)
             .expect("ABORTABLE_ERROR self-loop is valid");
         assert!(queued_result.is_completed());
         assert_eq!(queued_result.error().expect("failed").message(), "authentication failed");
         // `fail_pending_requests` → `abortableError`: an abortable error is
-        // recoverable, so it must NOT be marked fatal.
-        assert!(
-            !queued_result.error().expect("failed").is_fatal(),
-            "an abortable error is not fatal"
-        );
+        // recoverable, so the manager must NOT land in FATAL_ERROR.
+        assert!(!manager.has_fatal_error(), "an abortable error must not be fatal");
         assert!(manager.has_abortable_error(), "the state stays ABORTABLE_ERROR (self-loop)");
         assert_eq!(manager.last_error().expect("recorded").message(), "authentication failed");
         assert!(!pending.is_empty(), "Java does not clear the queue (Java 945-946)");
@@ -6248,16 +6202,20 @@ mod tests {
         manager
             .authentication_failed(&mut pending, &authentication_error, Caller::Sender)
             .expect("FATAL_ERROR is always a valid target");
-        assert!(manager.has_fatal_error());
-        assert_eq!(queued_result.error().expect("failed").message(), "authentication failed");
-        // `authentication_failed` → per-handler `fatalError`: the app-visible
-        // error must report fatal even though the raw input was not.
-        assert!(
-            queued_result.error().expect("failed").is_fatal(),
-            "authentication_failed must fail handlers with a fatal error"
+        // `authentication_failed` → per-handler `fatalError`: one transition into
+        // FATAL_ERROR, and the raw error reaches both the handler's result and
+        // `last_error` unchanged (Java stores a plain RuntimeException).
+        assert!(manager.has_fatal_error(), "authentication_failed transitions to FATAL_ERROR");
+        assert_eq!(
+            queued_result.error().expect("failed").message(),
+            "authentication failed",
+            "the handler's result carries the raw error"
         );
-        assert_eq!(manager.last_error().expect("recorded").message(), "authentication failed");
-        assert!(manager.last_error().expect("recorded").is_fatal(), "last_error must be fatal");
+        assert_eq!(
+            manager.last_error().expect("recorded").message(),
+            "authentication failed",
+            "and so does last_error"
+        );
 
         // close → fatalError with Java's message.
         let mut manager = idempotent_manager(false);
@@ -6266,22 +6224,20 @@ mod tests {
         manager
             .close(&mut pending, Caller::Sender)
             .expect("FATAL_ERROR is always a valid target");
-        assert!(manager.has_fatal_error());
+        // `close` builds its own error and fails handlers/pending directly, so the
+        // same message must reach both objects, and the transition records the
+        // fatality once.
+        assert!(manager.has_fatal_error(), "close transitions to FATAL_ERROR");
         assert_eq!(
             queued_result.error().expect("failed").message(),
-            "The producer closed forcefully"
-        );
-        // `close` builds its own error and fails handlers/pending directly, so
-        // the stamp on the app-visible copy is load-bearing here.
-        assert!(
-            queued_result.error().expect("failed").is_fatal(),
-            "a force-closed producer's error must be fatal"
+            "The producer closed forcefully",
+            "the handler's result carries close's own error"
         );
         assert_eq!(
             manager.last_error().expect("recorded").message(),
-            "The producer closed forcefully"
+            "The producer closed forcefully",
+            "and so does last_error"
         );
-        assert!(manager.last_error().expect("recorded").is_fatal(), "last_error must be fatal");
     }
 
     /// Builds an `InitProducerId` handler directly, bypassing the state guards on
@@ -6397,12 +6353,12 @@ mod tests {
                 "INVALID_PRODUCER_EPOCH is reported as PRODUCER_FENCED"
             );
             // The state is fatal, so the error the app observes must report it
-            // too — otherwise "if !err.is_fatal() { retry }" retries a dead
-            // producer forever (CLAUDE.md §10.3).
-            assert!(last_error.is_fatal(), "last_error must be fatal for {error_code:?}");
+            // producer is dead: the state is FATAL_ERROR and the app-visible error
+            // is typed `ProducerFenced`, which is how Java tells the caller not to
+            // retry (`maybeFailWithError` rethrows `ProducerFencedException`).
+            assert!(manager.has_fatal_error(), "the manager must be fatal for {error_code:?}");
             let app_error = result.error().expect("failed");
             assert_eq!(app_error.error(), Errors::ProducerFenced);
-            assert!(app_error.is_fatal(), "the app-visible error must be fatal for {error_code:?}");
         }
     }
 
@@ -6467,8 +6423,12 @@ mod tests {
                 Errors::InvalidRequest.message()
             )
         );
+        // Java 1536: `new KafkaException(..)` — bare, so not an `ApiException`.
+        assert!(matches!(last_error, Error::KafkaError(_)), "got {last_error:?}");
+        assert!(last_error.is_kafka_error(), "Java throws KafkaException here");
+        assert!(!last_error.is_api_error(), "a bare KafkaException is not an ApiException");
         // Stamping fatal preserves the custom message and reports fatal.
-        assert!(last_error.is_fatal(), "an unexpected InitProducerId error must be fatal");
+        assert!(manager.has_fatal_error(), "an unexpected InitProducerId error must be fatal");
     }
 
     // `test_mismatched_correlation_id_is_fatal` (Java 1407-1408) and
@@ -6514,7 +6474,7 @@ mod tests {
             .bump_idempotent_epoch_and_reset_id_if_needed(&mut pool, &mut pending, Caller::Sender)
             .expect("the initial InitProducerId is enqueued");
         manager
-            .transition_to_fatal_error(kafka_exception(), Caller::Sender)
+            .transition_to_fatal_error(bare_kafka_error(), Caller::Sender)
             .expect("FATAL_ERROR is always a valid target");
 
         assert!(!pending.is_empty());
@@ -6589,7 +6549,7 @@ mod tests {
         let mut pool = InFlightBatchPool::new();
         let error = manager
             .bump_idempotent_epoch_and_reset_id_if_needed(&mut pool, &mut pending, Caller::Sender)
-            .expect_err("a queued partition with no entry is Java's IllegalStateException");
+            .expect_err("a queued partition with no entry is Java's illegal-state case");
         assert_eq!(
             error.message(),
             format!(
@@ -6645,7 +6605,7 @@ mod tests {
         for transaction_v2_enabled in [true, false] {
             let mut manager = idempotent_manager(transaction_v2_enabled);
             manager
-                .transition_to_fatal_error(kafka_exception(), Caller::App)
+                .transition_to_fatal_error(bare_kafka_error(), Caller::App)
                 .expect("FATAL_ERROR is always a valid target");
             let error = manager.maybe_add_partition(&tp0()).expect_err("a fatal error fails the send");
             assert_eq!(
@@ -6654,7 +6614,7 @@ mod tests {
             );
             // librdkafka keeps fatal and requires-abort disjoint (CLAUDE.md
             // §10.3): a fatal-state error must NOT tell the app to abort.
-            assert!(!error.txn_requires_abort());
+            assert!(!manager.has_abortable_error());
         }
     }
 
@@ -6677,7 +6637,7 @@ mod tests {
                 tp0()
             )
         );
-        assert!(matches!(error, KafkaError::IllegalState(_)));
+        assert!(matches!(error, Error::LocalIllegalState(_)));
     }
 
     /// Translated from `testFailIfNotReadyForSendNoOngoingTransaction`
@@ -6695,7 +6655,7 @@ mod tests {
             error.message(),
             format!("Cannot add partition {} to transaction while in state  READY", tp0())
         );
-        assert!(matches!(error, KafkaError::IllegalState(_)));
+        assert!(matches!(error, Error::LocalIllegalState(_)));
     }
 
     /// Translated from `testFailIfNotReadyForSendAfterAbortableError`
@@ -6708,7 +6668,7 @@ mod tests {
         do_init_transactions(&mut manager, &mut pending, PRODUCER_ID, EPOCH).await;
         manager.begin_transaction().expect("READY -> IN_TRANSACTION is valid");
         manager
-            .transition_to_abortable_error(kafka_exception(), Caller::App)
+            .transition_to_abortable_error(bare_kafka_error(), Caller::App)
             .expect("IN_TRANSACTION -> ABORTABLE_ERROR is valid");
 
         let error = manager
@@ -6729,7 +6689,7 @@ mod tests {
         let mut pending = PendingRequests::new();
         do_init_transactions(&mut manager, &mut pending, PRODUCER_ID, EPOCH).await;
         manager
-            .transition_to_fatal_error(kafka_exception(), Caller::App)
+            .transition_to_fatal_error(bare_kafka_error(), Caller::App)
             .expect("FATAL_ERROR is always a valid target");
 
         let error = manager.maybe_add_partition(&tp0()).expect_err("a fatal error fails the send");
@@ -6739,52 +6699,71 @@ mod tests {
         );
     }
 
-    /// `maybe_fail_with_error` enriches the error it hands the application with the
-    /// librdkafka-style `is_fatal()` / `txn_requires_abort()` flags, kept disjoint
-    /// (CLAUDE.md §10.3, `producer-transactions.md` §9). This pins the enrichment
-    /// directly on `maybe_fail_with_error`'s output across all three error surfaces,
-    /// because that method rebuilds the error **fresh** from `last_error` — the stamps
-    /// applied at the transition choke points do not survive the rebuild, so this is
-    /// the surface every `begin_*` / `send` / `commit` / `abort` call actually hits
-    /// once the manager is already in an error state.
+    /// `maybe_fail_with_error` picks the exception it hands the application by the
+    /// *type* of `last_error`, exactly as Java's `maybeFailWithError`
+    /// (`TransactionManager.java:1096-1112`) does: `ProducerFencedException` and
+    /// `InvalidProducerEpochException` are rethrown as themselves,
+    /// `IllegalStateException` is rethrown as an `IllegalStateException` naming the
+    /// invalid transition, and anything else becomes a bare `KafkaException`.
     ///
-    /// Discriminating: the fatal and poison cases both fail without the fatal-branch
-    /// `into_fatal()` stamp (and the poison case additionally requires
-    /// `KafkaError::into_fatal` to *promote* the payload-only `IllegalState`).
+    /// This asserts the returned value for each of the three reachable arms — the
+    /// falsifiable part. The manager's state is checked once per arm as the
+    /// precondition that got us there, not as the subject: `has_fatal_error()` and
+    /// `has_abortable_error()` both read the single `current_state` field, so
+    /// asserting they disagree would only restate that a Rust enum holds one
+    /// variant.
+    ///
+    /// The poison arm is the behaviour that changed when the librdkafka-style
+    /// `into_fatal` stamp was removed: an `LocalIllegalState` reaching
+    /// `transition_to_fatal_error` now stays `LocalIllegalState` instead of being
+    /// promoted to a wire-code error, which is what Java does.
     #[tokio::test]
-    async fn test_maybe_fail_with_error_stamps_fatal_and_abortable_disjointly() {
-        // Fatal state (a producer fence): is_fatal() == true, and NOT requires-abort.
+    async fn test_maybe_fail_with_error_picks_the_error_java_throws() {
+        // Fatal state (a producer fence): FATAL_ERROR, and NOT abortable.
         let mut manager = transactional_manager(false);
         let mut pending = PendingRequests::new();
         do_init_transactions(&mut manager, &mut pending, PRODUCER_ID, EPOCH).await;
         manager
-            .transition_to_fatal_error(KafkaError::new(Errors::ProducerFenced), Caller::App)
+            .transition_to_fatal_error(Error::new(Errors::ProducerFenced), Caller::App)
             .expect("FATAL_ERROR is always a valid target");
+        assert!(manager.has_fatal_error(), "precondition: the fence lands in FATAL_ERROR");
         let fatal = manager.maybe_fail_with_error().expect_err("a fatal state fails the operation");
-        assert!(fatal.is_fatal(), "a fatal-state error must report is_fatal(): {fatal:?}");
-        assert!(!fatal.txn_requires_abort(), "fatal and requires-abort are disjoint: {fatal:?}");
+        // Java rethrows `ProducerFencedException` itself, not a wrapping KafkaException.
+        assert!(matches!(fatal, Error::ProducerFenced(_)), "got {fatal:?}");
+        assert_eq!(fatal.error(), Errors::ProducerFenced);
+        assert_eq!(
+            fatal.message(),
+            format!(
+                "Producer with transactionalId '{TRANSACTIONAL_ID}' and \
+                 (producerId={PRODUCER_ID}, epoch={EPOCH}) has been fenced by another producer \
+                 with the same transactionalId"
+            )
+        );
 
-        // Abortable state: txn_requires_abort() == true, and NOT fatal.
+        // Abortable state: ABORTABLE_ERROR, and NOT fatal.
         let mut manager = transactional_manager(false);
         let mut pending = PendingRequests::new();
         do_init_transactions(&mut manager, &mut pending, PRODUCER_ID, EPOCH).await;
         manager.begin_transaction().expect("READY -> IN_TRANSACTION is valid");
         manager
-            .transition_to_abortable_error(kafka_exception(), Caller::App)
+            .transition_to_abortable_error(bare_kafka_error(), Caller::App)
             .expect("IN_TRANSACTION -> ABORTABLE_ERROR is valid");
+        assert!(manager.has_abortable_error(), "precondition: the manager is ABORTABLE_ERROR");
         let abortable = manager
             .maybe_fail_with_error()
             .expect_err("an abortable state fails the operation");
-        assert!(
-            abortable.txn_requires_abort(),
-            "an abortable-state error must report txn_requires_abort(): {abortable:?}"
+        // Java's final `else`: a bare KafkaException, which carries no wire code.
+        assert_eq!(abortable.error(), Errors::UnknownServerError, "got {abortable:?}");
+        assert_eq!(
+            abortable.message(),
+            "Cannot execute transactional method because we are in an error state"
         );
-        assert!(!abortable.is_fatal(), "fatal and requires-abort are disjoint: {abortable:?}");
 
         // Poison path (KAFKA-14831): a Sender-side invalid transition moves the
-        // manager to FATAL_ERROR and stores an `IllegalState` `last_error`, which
-        // `maybe_fail_with_error` rebuilds as a fresh `IllegalState`. `into_fatal` must
-        // promote it so the poison path reports fatal too, not left non-fatal.
+        // manager to FATAL_ERROR and stores an `LocalIllegalState` `last_error`, which
+        // `maybe_fail_with_error` rebuilds as a fresh `LocalIllegalState` — matching Java's
+        // `maybeFailWithError`, which rethrows `IllegalStateException` there. The
+        // fatality of the situation lives in the state, asserted below.
         let mut manager = idempotent_manager(false);
         manager
             .transition_to(State::Ready, None, Caller::Sender)
@@ -6793,14 +6772,69 @@ mod tests {
         let poisoned = manager
             .maybe_fail_with_error()
             .expect_err("the poisoned state fails the operation");
+        // Stays `LocalIllegalState` — Java rethrows `IllegalStateException` here
+        // (`TransactionManager.java:1104-1107`). Under the removed `into_fatal`
+        // stamp this was promoted to a wire-code error instead.
+        assert!(matches!(poisoned, Error::LocalIllegalState(_)), "got {poisoned:?}");
         assert!(
-            poisoned.is_fatal(),
-            "a poisoned (IllegalState-in-fatal-state) error must be promoted to is_fatal(): {poisoned:?}"
+            poisoned
+                .message()
+                .contains("cannot execute transactional method because of previous invalid state transition attempt"),
+            "got {}",
+            poisoned.message()
         );
-        assert!(
-            !poisoned.txn_requires_abort(),
-            "promotion does not set requires-abort: {poisoned:?}"
+    }
+
+    /// The bare-`KafkaException` arm of `maybe_fail_with_error` carries `last_error`
+    /// as its source, so an application can tell a **fatal** condition from an
+    /// **abortable** one — which that arm's message and code cannot express, being
+    /// identical for both.
+    ///
+    /// Java does this with `new KafkaException(msg, lastError)` and the caller's
+    /// `e.getCause() instanceof ClusterAuthorizationException`
+    /// (`TransactionManager.java:1112`).
+    #[tokio::test]
+    async fn test_error_state_error_carries_last_error_as_its_source() {
+        // Fatal: a cluster-authorization failure the producer cannot recover from.
+        let mut fatal_mgr = transactional_manager(false);
+        let mut pending = PendingRequests::new();
+        do_init_transactions(&mut fatal_mgr, &mut pending, PRODUCER_ID, EPOCH).await;
+        fatal_mgr
+            .transition_to_fatal_error(Error::new(Errors::ClusterAuthorizationFailed), Caller::App)
+            .expect("FATAL_ERROR is always a valid target");
+        let fatal = fatal_mgr
+            .maybe_fail_with_error()
+            .expect_err("a fatal state fails the operation");
+
+        // Abortable: an invalid transaction state, which `abort_transaction` clears.
+        let mut abortable_mgr = transactional_manager(false);
+        let mut pending = PendingRequests::new();
+        do_init_transactions(&mut abortable_mgr, &mut pending, PRODUCER_ID, EPOCH).await;
+        abortable_mgr.begin_transaction().expect("READY -> IN_TRANSACTION is valid");
+        abortable_mgr
+            .transition_to_abortable_error(Error::new(Errors::InvalidTxnState), Caller::App)
+            .expect("IN_TRANSACTION -> ABORTABLE_ERROR is valid");
+        let abortable = abortable_mgr
+            .maybe_fail_with_error()
+            .expect_err("an abortable state fails the operation");
+
+        // The wrapper itself is indistinguishable — this is why the source matters.
+        assert_eq!(fatal.error(), abortable.error());
+        assert_eq!(fatal.message(), abortable.message());
+
+        // The source tells them apart.
+        assert_eq!(
+            fatal.source().expect("the fatal cause is carried").error(),
+            Errors::ClusterAuthorizationFailed
         );
+        assert_eq!(
+            abortable.source().expect("the abortable cause is carried").error(),
+            Errors::InvalidTxnState
+        );
+
+        // And it is reachable through the std trait, so `Box<dyn Error>` chains work.
+        use std::error::Error as StdError;
+        assert!(StdError::source(&fatal).is_some());
     }
 
     /// Drives `sendOffsetsToTransaction` to the point where the `TxnOffsetCommit` is
@@ -6898,8 +6932,8 @@ mod tests {
     /// Translated from `testHandlingOfNetworkExceptionOnTxnOffsetCommit`
     /// (Java 2482-2485).
     #[tokio::test]
-    async fn test_handling_of_network_exception_on_txn_offset_commit() {
-        retriable_error_in_txn_offset_commit(Errors::NetworkException).await;
+    async fn test_handling_of_network_error_on_txn_offset_commit() {
+        retriable_error_in_txn_offset_commit(Errors::NetworkError).await;
     }
 
     /// The shared body of `testFatalErrorInTxnOffsetCommit(Errors, Errors)`
@@ -6985,7 +7019,7 @@ mod tests {
         let mut pending = PendingRequests::new();
         let mut coordinators = CoordinatorNodes::new();
         #[allow(deprecated)]
-        let group_metadata = ConsumerGroupMetadata::with_details(
+        let group_metadata = ConsumerGroupMetadata::with_generation_id_member_id_group_instance_id(
             CONSUMER_GROUP_ID,
             GENERATION_ID,
             fenced_member_id,
@@ -7029,10 +7063,10 @@ mod tests {
     /// (Java 1225-1257), which differ only in the triggering code: both map to
     /// Java's `CommitFailedException` (Java 1929-1931).
     ///
-    /// `CommitFailedException` extends `KafkaException` and has no wire code, so it
-    /// is encoded as a bare-`KafkaException` [`Errors::UnknownServerError`] and
-    /// identified by its message — which is why the message is asserted exactly
-    /// (`definition-of-done.md` §3).
+    /// `CommitFailedException` extends `KafkaException` *directly* — so it is a
+    /// `KafkaException` that is NOT an `ApiException` — and it has no wire code. That
+    /// is exactly [`ConsumerCommitFailedError`], which is what the arm builds; the
+    /// message is asserted exactly too (`definition-of-done.md` §3).
     #[tokio::test]
     async fn test_group_metadata_mismatch_in_txn_offset_commit_by_group_metadata() {
         for (member_id, generation_id, error, expected_message) in [
@@ -7055,7 +7089,12 @@ mod tests {
             let mut pending = PendingRequests::new();
             let mut coordinators = CoordinatorNodes::new();
             #[allow(deprecated)]
-            let group_metadata = ConsumerGroupMetadata::with_details(CONSUMER_GROUP_ID, generation_id, member_id, None);
+            let group_metadata = ConsumerGroupMetadata::with_generation_id_member_id_group_instance_id(
+                CONSUMER_GROUP_ID,
+                generation_id,
+                member_id,
+                None,
+            );
             let partition = TopicPartition::new("foo".to_string(), 0);
             let send_offsets_result = send_offsets_and_discover_group_coordinator(
                 &mut manager,
@@ -7076,10 +7115,16 @@ mod tests {
             )
             .expect("a group-metadata mismatch moves to an abortable error");
 
-            assert_eq!(
-                manager.last_error().expect("an abortable error is recorded").message(),
-                expected_message
+            let last_error = manager.last_error().expect("an abortable error is recorded");
+            assert_eq!(last_error.message(), expected_message);
+            // Java 1923: `new CommitFailedException(..)`. It extends `KafkaException`
+            // directly, so `is_kafka_error()` is `true` and `is_api_error()` is `false`.
+            assert!(
+                matches!(last_error, Error::ConsumerCommitFailed(_)),
+                "expected ConsumerCommitFailed, got {last_error:?}"
             );
+            assert!(last_error.is_kafka_error(), "CommitFailedException extends KafkaException");
+            assert!(!last_error.is_api_error(), "CommitFailedException is not an ApiException");
             assert!(send_offsets_result.is_completed());
             assert!(!send_offsets_result.is_successful());
             assert_eq!(
@@ -7156,7 +7201,7 @@ mod tests {
         let error = manager
             .prepare_transaction()
             .expect_err("READY -> PREPARED_TRANSACTION is not a valid transition");
-        assert!(matches!(error, KafkaError::IllegalState(_)), "unexpected error: {error:?}");
+        assert!(matches!(error, Error::LocalIllegalState(_)), "unexpected error: {error:?}");
         assert_eq!(manager.prepared_transaction_state(), ProducerIdAndEpoch::NONE);
 
         // An idempotent producer is refused earlier, by `ensureTransactional`.
@@ -7320,7 +7365,7 @@ mod tests {
         assert!(manager.transaction_contains_partition(&partition));
 
         manager
-            .transition_to_abortable_error(kafka_exception(), Caller::App)
+            .transition_to_abortable_error(bare_kafka_error(), Caller::App)
             .expect("IN_TRANSACTION -> ABORTABLE_ERROR is valid");
         assert!(manager.has_ongoing_transaction());
 
@@ -7335,20 +7380,17 @@ mod tests {
         assert!(!manager.has_ongoing_transaction());
     }
 
-    /// The `is_abort && TRANSACTION_ABORTABLE` arm of the EndTxn handler
-    /// (`handle_end_txn_response`, Java 1783) is **fatal**, not abortable: an
-    /// abortable error encountered *while aborting* would make a retried abort
-    /// cycle forever, so the abort is failed at the application layer instead.
+    /// `EndTxnHandler`'s abort-specific arm (Java 1784-1787): when an *abort* itself
+    /// gets `TRANSACTION_ABORTABLE`, retrying the abort would cycle, so Java converts
+    /// it to a **fatal** bare `KafkaException("Failed to abort transaction", cause)`.
     ///
-    /// This arm is ordered **before** the plain `TRANSACTION_ABORTABLE` arm (Java
-    /// 1787), and the ordering is load-bearing (see the doc comment on
-    /// [`TransactionManager::handle_end_txn_response`]): swapping the two arms
-    /// routes this response to `abortable_error` (ABORTABLE_ERROR, retryable) and
-    /// makes this test fail — the manager would land in ABORTABLE_ERROR with a
-    /// `TransactionAbortable` cause instead of FATAL_ERROR with the
-    /// "Failed to abort transaction" `UnknownServerError`.
+    /// `TransactionManagerTest` has no cover for this arm —
+    /// `testTransactionAbortableExceptionInEndTxn` (Java 3925) drives a *commit*, so
+    /// it takes the `abortableError` arm at `:1789` instead. Both halves of Java's
+    /// value are asserted: the message is exactly "Failed to abort transaction" (the
+    /// cause is NOT folded into it) and `source()` is the wire error.
     #[tokio::test]
-    async fn test_transaction_abortable_exception_in_end_txn_abort_is_fatal() {
+    async fn test_abortable_error_while_aborting_is_fatal_with_the_cause_attached() {
         let partition = TopicPartition::new("foo".to_string(), 0);
         let mut manager = transactional_manager(false);
         let mut pending = PendingRequests::new();
@@ -7356,9 +7398,8 @@ mod tests {
         do_init_transactions(&mut manager, &mut pending, PRODUCER_ID, EPOCH).await;
         manager.begin_transaction().expect("READY -> IN_TRANSACTION is valid");
         manager.maybe_add_partition(&partition).expect("a new partition is registered");
-        run_add_partitions_to_txn(&mut manager, &mut pending, &[(partition.clone(), Errors::None)])
+        run_add_partitions_to_txn(&mut manager, &mut pending, &[(partition, Errors::None)])
             .expect("a successful AddPartitionsToTxn response is handled");
-
         let abort_result = manager
             .begin_abort(&mut pending, Caller::App)
             .expect("IN_TRANSACTION -> ABORTING is valid");
@@ -7369,34 +7410,40 @@ mod tests {
             TransactionResult::Abort,
             Errors::TransactionAbortable,
         )
-        .expect("the EndTxn(ABORT) response is handled");
+        .expect("the error is handled, not propagated");
 
-        // The abort itself hitting TRANSACTION_ABORTABLE is fatal, NOT abortable
-        // (the load-bearing arm ordering). A retryable abort would cycle forever.
         assert!(
             manager.has_fatal_error(),
-            "EndTxn(ABORT) + TRANSACTION_ABORTABLE must be fatal, not abortable"
+            "retrying the abort would cycle, so Java treats this as fatal"
         );
-        let last = manager.last_error().expect("a fatal error is recorded");
+        let last_error = manager.last_error().expect("recorded");
         assert_eq!(
-            last.error(),
-            Errors::UnknownServerError,
-            "a bare KafkaException spells as UnknownServerError"
-        );
-        assert_eq!(
-            last.message(),
+            last_error.message(),
             "Failed to abort transaction",
-            "the cause is not carried in the message (KafkaError has no cause chain)"
+            "Java's message does not carry the cause's text"
         );
-        assert!(last.is_fatal());
+        // Java 1787: `new KafkaException(msg, error.exception())` — bare, so not an
+        // `ApiException`.
+        assert!(matches!(last_error, Error::KafkaError(_)), "got {last_error:?}");
+        assert!(last_error.is_kafka_error(), "Java throws KafkaException here");
+        assert!(!last_error.is_api_error(), "a bare KafkaException is not an ApiException");
+        let cause =
+            crate::common::error::ErrorSource::source(last_error).expect("Java passes error.exception() as the cause");
+        assert_eq!(cause.error(), Errors::TransactionAbortable, "got {cause:?}");
 
         // The awaited abort result surfaces the same fatal error to the caller.
         let error = abort_result.await_result().await.expect_err("the abort failed");
         assert_eq!(error.message(), "Failed to abort transaction");
-        assert!(error.is_fatal());
+        assert!(matches!(error, Error::KafkaError(_)), "got {error:?}");
 
-        // An abort cannot clear a fatal error state (refused twice).
-        assert_fatal_error(&mut manager, &mut pending, Errors::UnknownServerError);
+        // A fatal error cannot be cleared by aborting (Java 1104-1107): the abort
+        // is refused, and refused again.
+        for attempt in 0..2 {
+            manager
+                .begin_abort(&mut pending, Caller::App)
+                .expect_err("aborting after a fatal error must be refused");
+            assert!(manager.has_fatal_error(), "still fatal after refused abort {attempt}");
+        }
     }
 
     /// Translated from `testHasOngoingTransactionFatalError` (Java 378-397).
@@ -7421,7 +7468,7 @@ mod tests {
         assert!(manager.transaction_contains_partition(&partition));
 
         manager
-            .transition_to_fatal_error(kafka_exception(), Caller::App)
+            .transition_to_fatal_error(bare_kafka_error(), Caller::App)
             .expect("FATAL_ERROR is always a valid target");
         assert!(!manager.has_ongoing_transaction());
     }
@@ -7509,7 +7556,7 @@ mod tests {
             .next_request(&mut pending, false)
             .expect("next_request does not fail on this path")
             .expect("the retry must be pending");
-        assert_eq!(handler.retry_backoff_ms(), ADD_PARTITIONS_RETRY_BACKOFF_MS);
+        assert_eq!(handler.retry_backoff_ms(), TransactionManager::ADD_PARTITIONS_RETRY_BACKOFF_MS);
     }
 
     /// Translated from
@@ -7656,12 +7703,12 @@ mod tests {
 
             if fatal {
                 manager
-                    .transition_to_fatal_error(kafka_exception(), Caller::App)
+                    .transition_to_fatal_error(bare_kafka_error(), Caller::App)
                     .expect("FATAL_ERROR is always a valid target");
                 assert!(manager.has_fatal_error());
             } else {
                 manager
-                    .transition_to_abortable_error(kafka_exception(), Caller::App)
+                    .transition_to_abortable_error(bare_kafka_error(), Caller::App)
                     .expect("IN_TRANSACTION -> ABORTABLE_ERROR is valid");
                 assert!(manager.has_abortable_error());
             }
@@ -7713,7 +7760,7 @@ mod tests {
     /// Translated from `testTransactionAbortableExceptionInInitProducerId`
     /// (Java 3871-3885).
     #[tokio::test]
-    async fn test_transaction_abortable_exception_in_init_producer_id() {
+    async fn test_transaction_abortable_error_in_init_producer_id() {
         let mut manager = transactional_manager(false);
         let mut pending = PendingRequests::new();
         let init_pid_result = manager
@@ -7803,7 +7850,7 @@ mod tests {
     /// Translated from `testTransactionAbortableExceptionInAddOffsetsToTxn`
     /// (Java 3949-3967).
     #[tokio::test]
-    async fn test_transaction_abortable_exception_in_add_offsets_to_txn() {
+    async fn test_transaction_abortable_error_in_add_offsets_to_txn() {
         let (mut manager, mut pending, send_offsets_result) =
             add_offsets_to_txn_failure(Errors::TransactionAbortable).await;
         assert_eq!(
@@ -7894,7 +7941,7 @@ mod tests {
     /// Translated from `testTransactionAbortableExceptionInTxnOffsetCommit`
     /// (Java 3969-3988).
     #[tokio::test]
-    async fn test_transaction_abortable_exception_in_txn_offset_commit() {
+    async fn test_transaction_abortable_error_in_txn_offset_commit() {
         let (mut manager, mut pending, send_offsets_result) =
             txn_offset_commit_failure(Errors::TransactionAbortable).await;
         assert_eq!(
@@ -7918,10 +7965,10 @@ mod tests {
         let error = send_offsets_result.error().expect("the result carries an error");
         assert_eq!(error.error(), Errors::GroupAuthorizationFailed);
         // Java: `((GroupAuthorizationException) result.error()).groupId()`.
-        let KafkaError::GroupAuthorization(group_error) = &error else {
+        let Error::GroupAuthorization(group_error) = &error else {
             panic!("expected a GroupAuthorization error, got {error:?}");
         };
-        assert_eq!(group_error.group_id, CONSUMER_GROUP_ID);
+        assert_eq!(group_error.group_id(), CONSUMER_GROUP_ID);
         assert!(!manager.has_pending_offset_commits());
         assert_abortable_error(&mut manager, &mut pending, Errors::GroupAuthorizationFailed);
     }
@@ -8040,7 +8087,7 @@ mod tests {
     /// Translated from `testTransactionAbortableExceptionInAddPartitions`
     /// (Java 3886-3900).
     #[tokio::test]
-    async fn test_transaction_abortable_exception_in_add_partitions() {
+    async fn test_transaction_abortable_error_in_add_partitions() {
         let (mut manager, mut pending) = add_partitions_failure(Errors::TransactionAbortable).await;
         assert_abortable_error(&mut manager, &mut pending, Errors::TransactionAbortable);
     }
@@ -8598,7 +8645,7 @@ mod tests {
         let error = manager
             .initialize_transactions(false, &mut pending)
             .expect_err("initTransactions may not run twice");
-        assert!(matches!(error, KafkaError::IllegalState(_)));
+        assert!(matches!(error, Error::LocalIllegalState(_)));
         assert_eq!(
             error.message(),
             format!(
@@ -8631,10 +8678,7 @@ mod tests {
             .await_result_timeout(Duration::from_millis(0), "Unexpected time out during the test.")
             .await
             .expect_err("nothing has answered the InitProducerId yet");
-        assert!(
-            matches!(timeout, KafkaError::Timeout(_)),
-            "Java raises TimeoutException: {timeout:?}"
-        );
+        assert!(matches!(timeout, Error::Timeout(_)), "Java raises a timeout error: {timeout:?}");
         // AK 4.3.1: the timeout message carries the caller-supplied reason.
         assert!(
             timeout.message().contains("Unexpected time out during the test."),
@@ -8724,7 +8768,7 @@ mod tests {
     ///
     /// `initTransactions` is the only Phase-5a operation that installs a slot, so
     /// the "different operation" is driven through
-    /// [`TransactionManager::throw_if_pending_state`] — the same rejection Java
+    /// [`TransactionManager::return_error_if_pending_state`] — the same rejection Java
     /// produces from `beginTransaction` (Java 332) and `send` (Java 439). The
     /// `nextState != pendingTransition.state` arm of
     /// `handleCachedTransactionRequestResult` itself needs a second
@@ -8747,7 +8791,7 @@ mod tests {
                 "Cannot attempt operation `beginTransaction` because the previous call to `initTransactions` timed \
                  out and must be retried"
             );
-            assert!(matches!(error, KafkaError::IllegalState(_)));
+            assert!(matches!(error, Error::LocalIllegalState(_)));
         }
         // Rejecting must not disturb the state machine or the pending result.
         assert_eq!(manager.current_state(), State::Initializing);
@@ -8774,7 +8818,7 @@ mod tests {
 
         manager
             .transition_to_fatal_error(
-                KafkaError::with_message(Errors::InvalidProducerIdMapping, "pid mapping is gone"),
+                Error::with_message(Errors::InvalidProducerIdMapping, "pid mapping is gone"),
                 Caller::Sender,
             )
             .expect("FATAL_ERROR is always a valid target");
@@ -8783,10 +8827,10 @@ mod tests {
         let error = result.await_result().await.expect_err("the pending operation failed");
         assert_eq!(error.error(), Errors::InvalidProducerIdMapping);
         assert_eq!(error.message(), "pid mapping is gone");
-        // The transition to FATAL_ERROR stamps the pending result's error, so a
-        // caller woken from `initTransactions` sees `is_fatal()` even though the
-        // raw input was not marked fatal.
-        assert!(error.is_fatal(), "the pending transition's error must report fatal");
+        // The pending result carries the raw error (asserted above); the fatality
+        // of the situation is the manager's state, which is where Java keeps it,
+        // so a caller woken from `initTransactions` reads it from there.
+        assert!(manager.has_fatal_error(), "the manager must be in the fatal state");
     }
 
     /// [`TransactionManager::close`] fails the pending transition even when the
@@ -8821,14 +8865,11 @@ mod tests {
             !manager.has_fatal_error(),
             "with an empty queue Java performs no transition — only the pending result is failed"
         );
-        // The state did NOT transition (empty queue), so `transition_to_fatal_error`
-        // — and its choke-point stamp — never ran. The force-close error is still
-        // fatal because `close` stamps it at creation: a force-closed producer is
-        // unusable, so the woken caller must not retry (CLAUDE.md §10.3).
-        assert!(
-            error.is_fatal(),
-            "a force-closed producer's error must be fatal even with an empty queue"
-        );
+        // There is deliberately NO per-error fatality assertion here. Java performs
+        // no transition on this path (asserted above) and its exceptions carry no
+        // `isFatal()` flag — `close` simply fails the pending result with
+        // `KafkaException("The producer closed forcefully")`, whose message is
+        // asserted above. That message is the whole contract Java offers here.
     }
 
     /// [`TransactionManager::transition_to_uninitialized`] fails the pending
@@ -8842,10 +8883,10 @@ mod tests {
             .initialize_transactions(false, &mut pending)
             .expect("initTransactions is valid from UNINITIALIZED");
         manager
-            .transition_to_abortable_error(KafkaError::new(Errors::ClusterAuthorizationFailed), Caller::Sender)
+            .transition_to_abortable_error(Error::new(Errors::ClusterAuthorizationFailed), Caller::Sender)
             .expect("INITIALIZING -> ABORTABLE_ERROR is valid");
 
-        let authorization_error = KafkaError::new(Errors::ClusterAuthorizationFailed);
+        let authorization_error = Error::new(Errors::ClusterAuthorizationFailed);
         manager
             .transition_to_uninitialized(&authorization_error, Caller::Sender)
             .expect("ABORTABLE_ERROR -> UNINITIALIZED is valid");
@@ -8879,9 +8920,9 @@ mod tests {
         // `READY → ABORTABLE_ERROR`, which the table forbids (Java 180).
         let batch = batch_with_value(&tp0(), "test");
         let error = manager
-            .handle_failed_batch(&batch, &kafka_exception(), false, &mut [], Caller::Sender)
+            .handle_failed_batch(&batch, &bare_kafka_error(), false, &mut [], Caller::Sender)
             .expect_err("READY -> ABORTABLE_ERROR is not a valid transition");
-        assert!(matches!(error, KafkaError::IllegalState(_)));
+        assert!(matches!(error, Error::LocalIllegalState(_)));
         assert!(manager.has_fatal_error());
 
         // Validate that these operations fail after the invalid state transition attempt above.
@@ -8922,12 +8963,12 @@ mod tests {
     async fn test_maybe_transition_to_error_state_transactional_arm() {
         // Retriable and InvalidTxnState are rewritten (Java 774-777).
         for original in [
-            KafkaError::new(Errors::NotLeaderOrFollower),
-            KafkaError::new(Errors::InvalidTxnState),
-            timeout_exception(),
+            Error::new(Errors::NotLeaderOrFollower),
+            Error::new(Errors::InvalidTxnState),
+            timeout_error(),
         ] {
             assert!(
-                original.is_retriable() || original.error() == Errors::InvalidTxnState,
+                original.is_retriable_error() || original.error() == Errors::InvalidTxnState,
                 "the fixture must exercise the rewrite arm"
             );
             let mut manager = transactional_manager(false);
@@ -8945,6 +8986,18 @@ mod tests {
                 last_error.message(),
                 "Transaction Request was aborted after exhausting retries."
             );
+            // Java 778 chains the original as the cause:
+            // `new TransactionAbortableException(msg, exception)`. `last_error` is what
+            // `maybe_fail_with_error` hands the application, so the chain must survive
+            // the store — the message and code are identical for every input, and the
+            // cause is the only thing that says which error exhausted its retries.
+            let cause = crate::common::error::ErrorSource::source(last_error)
+                .expect("Java chains the original error as the cause");
+            assert_eq!(
+                cause.error(),
+                original.error(),
+                "the cause must be the error that exhausted its retries, got {cause:?}"
+            );
         }
 
         // A non-retriable, non-InvalidTxnState error is carried through as-is
@@ -8953,8 +9006,8 @@ mod tests {
         let mut pending = PendingRequests::new();
         do_init_transactions(&mut manager, &mut pending, PRODUCER_ID, EPOCH).await;
         manager.begin_transaction().expect("READY -> IN_TRANSACTION is valid");
-        let original = KafkaError::with_message(Errors::RecordListTooLarge, "too big");
-        assert!(!original.is_retriable());
+        let original = Error::with_message(Errors::RecordListTooLarge, "too big");
+        assert!(!original.is_retriable_error());
         manager
             .maybe_transition_to_error_state(&original, Caller::App)
             .expect("IN_TRANSACTION -> ABORTABLE_ERROR is valid");
@@ -8974,7 +9027,7 @@ mod tests {
             let mut pending = PendingRequests::new();
             do_init_transactions(&mut manager, &mut pending, PRODUCER_ID, EPOCH).await;
             manager
-                .maybe_transition_to_error_state(&KafkaError::new(code), Caller::App)
+                .maybe_transition_to_error_state(&Error::new(code), Caller::App)
                 .expect("FATAL_ERROR is always a valid target");
             assert!(manager.has_fatal_error(), "{code} must be fatal");
         }
@@ -9085,7 +9138,7 @@ mod tests {
         error: Errors,
         key: &str,
         node: &Node,
-    ) -> Result<(), KafkaError> {
+    ) -> Result<(), Error> {
         let response = ConcreteResponse::FindCoordinator(FindCoordinatorResponse::prepare_response(error, key, node));
         manager.handle_response(handler, &response, coordinators, pending_requests)
     }
@@ -9178,7 +9231,7 @@ mod tests {
             .expect("next_request does not fail on this path")
             .expect("queued");
         let find_coordinator_result = Arc::clone(handler.result());
-        assert!(Errors::CoordinatorNotAvailable.is_retriable());
+        assert!(Errors::CoordinatorNotAvailable.error().is_some_and(|e| e.is_retriable_error()));
         complete_find_coordinator(
             &mut manager,
             &mut coordinators,
@@ -9405,7 +9458,7 @@ mod tests {
             .expect("next_request does not fail on this path")
             .expect("queued");
         let unexpected = Errors::InvalidRequest;
-        assert!(!unexpected.is_retriable());
+        assert!(!unexpected.error().is_some_and(|e| e.is_retriable_error()));
         complete_find_coordinator(
             &mut manager,
             &mut coordinators,
@@ -9417,14 +9470,18 @@ mod tests {
         )
         .expect("the error is handled");
         assert!(manager.has_fatal_error());
+        let last_error = manager.last_error().expect("recorded");
         assert_eq!(
-            manager.last_error().expect("recorded").message(),
+            last_error.message(),
             format!(
                 "Could not find a coordinator with type TRANSACTION with key {TRANSACTIONAL_ID} due to unexpected \
                  error: {}",
                 unexpected.message()
             )
         );
+        // Java 1716: `new KafkaException(String.format(..))` — bare.
+        assert!(matches!(last_error, Error::KafkaError(_)), "got {last_error:?}");
+        assert!(!last_error.is_api_error(), "a bare KafkaException is not an ApiException");
     }
 
     /// Translated from `testLookupCoordinatorOnNotCoordinatorError`
@@ -9509,7 +9566,7 @@ mod tests {
             .lookup_coordinator(&mut coordinators, &mut pending, CoordinatorType::Transaction, TRANSACTIONAL_ID)
             .expect("TRANSACTION is a valid coordinator type");
         manager
-            .transition_to_abortable_error(kafka_exception(), Caller::Sender)
+            .transition_to_abortable_error(bare_kafka_error(), Caller::Sender)
             .expect("INITIALIZING -> ABORTABLE_ERROR is valid");
 
         let handler = manager
@@ -9546,7 +9603,12 @@ mod tests {
                 .set_max_version(max_version);
             api_versions.update(
                 broker_node().id_string(),
-                NodeApiVersions::new(&[init_producer_id], &[], &[], 0),
+                NodeApiVersions::with_node_finalized_features_finalized_features_epoch(
+                    &[init_producer_id],
+                    &[],
+                    &[],
+                    0,
+                ),
             );
             let mut manager = TransactionManager::new(
                 LogContext::empty(),
@@ -9661,16 +9723,23 @@ mod tests {
             if coordinator_supports_bump {
                 assert!(manager.has_abortable_error());
                 assert!(manager.client_side_epoch_bump_required());
+                let last_error = manager.last_error().expect("recorded");
                 assert_eq!(
-                    manager.last_error().expect("recorded").message(),
+                    last_error.message(),
                     format!("{UNACKED}It is safe to abort the transaction and continue.")
                 );
+                // Java 866: `new KafkaException(..)` — bare. `maybe_transition_to_error_state`
+                // passes a non-retriable, non-`INVALID_TXN_STATE` error straight through,
+                // so this is the value the application receives.
+                assert!(matches!(last_error, Error::KafkaError(_)), "got {last_error:?}");
+                assert!(!last_error.is_api_error(), "a bare KafkaException is not an ApiException");
             } else {
                 assert!(manager.has_fatal_error());
-                assert_eq!(
-                    manager.last_error().expect("recorded").message(),
-                    format!("{UNACKED}It isn't safe to continue.")
-                );
+                let last_error = manager.last_error().expect("recorded");
+                assert_eq!(last_error.message(), format!("{UNACKED}It isn't safe to continue."));
+                // Java 868: the other `new KafkaException(..)`, also bare.
+                assert!(matches!(last_error, Error::KafkaError(_)), "got {last_error:?}");
+                assert!(!last_error.is_api_error(), "a bare KafkaException is not an ApiException");
             }
             assert!(!manager.has_unresolved_sequences(), "the partition is dropped either way");
         }
@@ -9706,14 +9775,36 @@ mod tests {
 
             // First batch succeeds
             let b1_append_time = 0;
-            let b1_response = PartitionResponse::new(Errors::None, 500, b1_append_time, 0, Vec::new(), None);
+            let b1_response = PartitionResponse::with_options(
+                PartitionResponseOptionsBuilder::new()
+                    .set_error(Errors::None)
+                    .set_base_offset(500)
+                    .set_log_append_time(b1_append_time)
+                    .set_log_start_offset(0)
+                    .set_record_errors(Vec::new())
+                    .set_error_message(None)
+                    .set_current_leader(crate::produce_response_data::LeaderIdAndEpoch::new())
+                    .build()
+                    .unwrap(),
+            );
             b1.complete(500, b1_append_time);
             manager
                 .handle_completed_batch(&b1, &b1_response)
                 .expect("the completion is recorded");
 
             // We get an UNKNOWN_PRODUCER_ID, so bump the epoch and set sequence numbers back to 0
-            let b2_response = PartitionResponse::new(Errors::UnknownProducerId, -1, -1, 500, Vec::new(), None);
+            let b2_response = PartitionResponse::with_options(
+                PartitionResponseOptionsBuilder::new()
+                    .set_error(Errors::UnknownProducerId)
+                    .set_base_offset(-1)
+                    .set_log_append_time(-1)
+                    .set_log_start_offset(500)
+                    .set_record_errors(Vec::new())
+                    .set_error_message(None)
+                    .set_current_leader(crate::produce_response_data::LeaderIdAndEpoch::new())
+                    .build()
+                    .unwrap(),
+            );
             assert!(
                 manager
                     .can_retry(
@@ -9738,7 +9829,7 @@ mod tests {
                         &mut manager,
                         &mut pool,
                         &mut pending,
-                        NO_INFLIGHT_REQUEST_CORRELATION_ID
+                        TransactionManager::NO_INFLIGHT_REQUEST_CORRELATION_ID
                     ),
                     SenderPhaseOutcome::Continued
                 );
@@ -9767,12 +9858,34 @@ mod tests {
             let tp0b1 = write_idempotent_batch_with_value(&mut manager, &tp0(), "1");
             let tp1b1 = write_idempotent_batch_with_value(&mut manager, &tp1(), "1");
 
-            let tp0b1_response = PartitionResponse::new(Errors::None, -1, -1, 400, Vec::new(), None);
+            let tp0b1_response = PartitionResponse::with_options(
+                PartitionResponseOptionsBuilder::new()
+                    .set_error(Errors::None)
+                    .set_base_offset(-1)
+                    .set_log_append_time(-1)
+                    .set_log_start_offset(400)
+                    .set_record_errors(Vec::new())
+                    .set_error_message(None)
+                    .set_current_leader(crate::produce_response_data::LeaderIdAndEpoch::new())
+                    .build()
+                    .unwrap(),
+            );
             manager
                 .handle_completed_batch(&tp0b1, &tp0b1_response)
                 .expect("the completion is recorded");
 
-            let tp1b1_response = PartitionResponse::new(Errors::None, -1, -1, 400, Vec::new(), None);
+            let tp1b1_response = PartitionResponse::with_options(
+                PartitionResponseOptionsBuilder::new()
+                    .set_error(Errors::None)
+                    .set_base_offset(-1)
+                    .set_log_append_time(-1)
+                    .set_log_start_offset(400)
+                    .set_record_errors(Vec::new())
+                    .set_error_message(None)
+                    .set_current_leader(crate::produce_response_data::LeaderIdAndEpoch::new())
+                    .build()
+                    .unwrap(),
+            );
             manager
                 .handle_completed_batch(&tp1b1, &tp1b1_response)
                 .expect("the completion is recorded");
@@ -9782,7 +9895,18 @@ mod tests {
             assert_eq!(manager.sequence_number(&tp0()), 2);
             assert_eq!(manager.sequence_number(&tp1()), 2);
 
-            let b1_response = PartitionResponse::new(Errors::UnknownProducerId, -1, -1, 400, Vec::new(), None);
+            let b1_response = PartitionResponse::with_options(
+                PartitionResponseOptionsBuilder::new()
+                    .set_error(Errors::UnknownProducerId)
+                    .set_base_offset(-1)
+                    .set_log_append_time(-1)
+                    .set_log_start_offset(400)
+                    .set_record_errors(Vec::new())
+                    .set_error_message(None)
+                    .set_current_leader(crate::produce_response_data::LeaderIdAndEpoch::new())
+                    .build()
+                    .unwrap(),
+            );
             assert!(
                 manager
                     .can_retry(
@@ -9795,7 +9919,18 @@ mod tests {
                     .expect("the retry decision is made")
             );
 
-            let b2_response = PartitionResponse::new(Errors::None, -1, -1, 400, Vec::new(), None);
+            let b2_response = PartitionResponse::with_options(
+                PartitionResponseOptionsBuilder::new()
+                    .set_error(Errors::None)
+                    .set_base_offset(-1)
+                    .set_log_append_time(-1)
+                    .set_log_start_offset(400)
+                    .set_record_errors(Vec::new())
+                    .set_error_message(None)
+                    .set_current_leader(crate::produce_response_data::LeaderIdAndEpoch::new())
+                    .build()
+                    .unwrap(),
+            );
             manager
                 .handle_completed_batch(&tp1b1, &b2_response)
                 .expect("the completion is recorded");
@@ -9861,7 +9996,18 @@ mod tests {
             initialize_idempotent_producer_id(&mut manager, &mut pending, PRODUCER_ID + 1, 0);
 
             // We continue to track the state of tp0 until in-flight requests complete
-            let b1_response = PartitionResponse::new(Errors::None, 500, 0, 0, Vec::new(), None);
+            let b1_response = PartitionResponse::with_options(
+                PartitionResponseOptionsBuilder::new()
+                    .set_error(Errors::None)
+                    .set_base_offset(500)
+                    .set_log_append_time(0)
+                    .set_log_start_offset(0)
+                    .set_record_errors(Vec::new())
+                    .set_error_message(None)
+                    .set_current_leader(crate::produce_response_data::LeaderIdAndEpoch::new())
+                    .build()
+                    .unwrap(),
+            );
             manager
                 .handle_completed_batch(&b1, &b1_response)
                 .expect("the completion is recorded");
@@ -9880,7 +10026,18 @@ mod tests {
                 Some(epoch)
             );
 
-            let b2_response = PartitionResponse::new(Errors::None, 500, 0, 0, Vec::new(), None);
+            let b2_response = PartitionResponse::with_options(
+                PartitionResponseOptionsBuilder::new()
+                    .set_error(Errors::None)
+                    .set_base_offset(500)
+                    .set_log_append_time(0)
+                    .set_log_start_offset(0)
+                    .set_record_errors(Vec::new())
+                    .set_error_message(None)
+                    .set_current_leader(crate::produce_response_data::LeaderIdAndEpoch::new())
+                    .build()
+                    .unwrap(),
+            );
             manager
                 .handle_completed_batch(&b2, &b2_response)
                 .expect("the completion is recorded");
@@ -9964,7 +10121,21 @@ mod tests {
             let b1 = write_idempotent_batch_with_value(&mut manager, &tp0, "1");
             assert_eq!(manager.sequence_number(&tp0), 1);
             manager
-                .handle_completed_batch(&b1, &PartitionResponse::new(Errors::None, 500, 0, 0, Vec::new(), None))
+                .handle_completed_batch(
+                    &b1,
+                    &PartitionResponse::with_options(
+                        PartitionResponseOptionsBuilder::new()
+                            .set_error(Errors::None)
+                            .set_base_offset(500)
+                            .set_log_append_time(0)
+                            .set_log_start_offset(0)
+                            .set_record_errors(Vec::new())
+                            .set_error_message(None)
+                            .set_current_leader(crate::produce_response_data::LeaderIdAndEpoch::new())
+                            .build()
+                            .unwrap(),
+                    ),
+                )
                 .expect("the completion is recorded");
             assert_eq!(manager.last_acked_sequence(&tp0), Some(0));
 
@@ -9979,7 +10150,7 @@ mod tests {
             assert_eq!(manager.sequence_number(&tp0), 2);
             manager.mark_sequence_unresolved(&b2);
             manager
-                .handle_failed_batch(&b2, &timeout_exception(), false, &mut [], Caller::Sender)
+                .handle_failed_batch(&b2, &timeout_error(), false, &mut [], Caller::Sender)
                 .expect("the failure is recorded");
             assert!(manager.has_unresolved_sequences());
 
@@ -9990,7 +10161,12 @@ mod tests {
 
             // Java reaches the bump through `runUntil(.. epoch == 6)`.
             let mut pool = InFlightBatchPool::new();
-            run_manager_transaction_phase(&mut manager, &mut pool, &mut pending, NO_INFLIGHT_REQUEST_CORRELATION_ID);
+            run_manager_transaction_phase(
+                &mut manager,
+                &mut pool,
+                &mut pending,
+                TransactionManager::NO_INFLIGHT_REQUEST_CORRELATION_ID,
+            );
             assert_eq!(manager.producer_id_and_epoch().epoch, 6);
         }
     }
@@ -10016,7 +10192,7 @@ mod tests {
             // The first batch fails with a timeout
             manager.mark_sequence_unresolved(&b1);
             manager
-                .handle_failed_batch(&b1, &timeout_exception(), false, &mut [], Caller::Sender)
+                .handle_failed_batch(&b1, &timeout_error(), false, &mut [], Caller::Sender)
                 .expect("the failure is recorded");
             assert!(manager.has_unresolved_sequences());
 
@@ -10030,7 +10206,7 @@ mod tests {
 
             // The second batch fails as well with a timeout
             manager
-                .handle_failed_batch(&b2, &timeout_exception(), false, &mut [], Caller::Sender)
+                .handle_failed_batch(&b2, &timeout_error(), false, &mut [], Caller::Sender)
                 .expect("the failure is recorded");
             manager
                 .bump_idempotent_epoch_and_reset_id_if_needed(&mut pool, &mut pending, Caller::Sender)
@@ -10041,7 +10217,21 @@ mod tests {
             // The third batch succeeds, which should resolve the sequence number without
             // requiring a producerId reset.
             manager
-                .handle_completed_batch(&b3, &PartitionResponse::new(Errors::None, 500, 0, 0, Vec::new(), None))
+                .handle_completed_batch(
+                    &b3,
+                    &PartitionResponse::with_options(
+                        PartitionResponseOptionsBuilder::new()
+                            .set_error(Errors::None)
+                            .set_base_offset(500)
+                            .set_log_append_time(0)
+                            .set_log_start_offset(0)
+                            .set_record_errors(Vec::new())
+                            .set_error_message(None)
+                            .set_current_leader(crate::produce_response_data::LeaderIdAndEpoch::new())
+                            .build()
+                            .unwrap(),
+                    ),
+                )
                 .expect("the completion is recorded");
             manager.maybe_resolve_sequences(Caller::Sender).expect("resolving succeeds");
             assert_eq!(manager.producer_id_and_epoch(), producer_id_and_epoch);
@@ -10070,13 +10260,27 @@ mod tests {
             // The first batch fails with a timeout
             manager.mark_sequence_unresolved(&b1);
             manager
-                .handle_failed_batch(&b1, &timeout_exception(), false, &mut [], Caller::Sender)
+                .handle_failed_batch(&b1, &timeout_error(), false, &mut [], Caller::Sender)
                 .expect("the failure is recorded");
             assert!(manager.has_unresolved_sequences());
 
             // The second batch succeeds, but sequence numbers are still not resolved
             manager
-                .handle_completed_batch(&b2, &PartitionResponse::new(Errors::None, 500, 0, 0, Vec::new(), None))
+                .handle_completed_batch(
+                    &b2,
+                    &PartitionResponse::with_options(
+                        PartitionResponseOptionsBuilder::new()
+                            .set_error(Errors::None)
+                            .set_base_offset(500)
+                            .set_log_append_time(0)
+                            .set_log_start_offset(0)
+                            .set_record_errors(Vec::new())
+                            .set_error_message(None)
+                            .set_current_leader(crate::produce_response_data::LeaderIdAndEpoch::new())
+                            .build()
+                            .unwrap(),
+                    ),
+                )
                 .expect("the completion is recorded");
             let mut pool = InFlightBatchPool::new();
             manager
@@ -10087,11 +10291,16 @@ mod tests {
 
             // When the last inflight batch fails, we have to bump the epoch
             manager
-                .handle_failed_batch(&b3, &timeout_exception(), false, &mut [], Caller::Sender)
+                .handle_failed_batch(&b3, &timeout_error(), false, &mut [], Caller::Sender)
                 .expect("the failure is recorded");
 
             // Java reaches the bump through `runUntil(.. epoch == 2)`.
-            run_manager_transaction_phase(&mut manager, &mut pool, &mut pending, NO_INFLIGHT_REQUEST_CORRELATION_ID);
+            run_manager_transaction_phase(
+                &mut manager,
+                &mut pool,
+                &mut pending,
+                TransactionManager::NO_INFLIGHT_REQUEST_CORRELATION_ID,
+            );
             assert_eq!(manager.producer_id_and_epoch().epoch, 2);
             assert!(!manager.has_unresolved_sequences());
             assert_eq!(manager.sequence_number(&tp0), 0);
@@ -10115,7 +10324,7 @@ mod tests {
             manager
                 .handle_failed_batch(
                     &b1,
-                    &KafkaError::with_message(Errors::OutOfOrderSequenceNumber, "out of sequence"),
+                    &Error::with_message(Errors::OutOfOrderSequenceNumber, "out of sequence"),
                     false,
                     &mut [],
                     Caller::Sender,
@@ -10129,13 +10338,13 @@ mod tests {
             assert_eq!(manager.producer_id_and_epoch(), id_and_epoch_after_first_batch);
 
             manager
-                .transition_to_fatal_error(kafka_exception(), Caller::App)
+                .transition_to_fatal_error(bare_kafka_error(), Caller::App)
                 .expect("FATAL_ERROR is always a valid target");
 
             // The second batch should not bump the epoch as txn manager is already in fatal error state
             let b2 = write_idempotent_batch_with_value(&mut manager, &tp0, "2");
             manager
-                .handle_failed_batch(&b2, &timeout_exception(), true, &mut [], Caller::Sender)
+                .handle_failed_batch(&b2, &timeout_error(), true, &mut [], Caller::Sender)
                 .expect("the failure is ignored in a fatal state");
             manager
                 .bump_idempotent_epoch_and_reset_id_if_needed(&mut pool, &mut pending, Caller::Sender)

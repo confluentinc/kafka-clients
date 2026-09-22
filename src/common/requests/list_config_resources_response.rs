@@ -19,11 +19,11 @@
 use std::collections::HashMap;
 use std::io;
 
+use crate::ListConfigResourcesResponseData;
 use crate::common::config::{ConfigResource, ConfigResourceType};
 use crate::common::protocol::{ApiKeys, Errors, Readable};
-use crate::list_config_resources_response_data::ListConfigResourcesResponseData;
 
-use super::abstract_response::single_error_count;
+use super::AbstractResponse;
 
 /// A ListConfigResources response.
 ///
@@ -86,7 +86,7 @@ impl ListConfigResourcesResponse {
 
     /// Returns the error counts for this response.
     pub fn error_counts(&self) -> HashMap<Errors, i32> {
-        single_error_count(Errors::for_code(self.data.error_code))
+        AbstractResponse::single_error_count(Errors::for_code(self.data.error_code))
     }
 
     /// Parses a `ListConfigResourcesResponse` from a readable buffer at the

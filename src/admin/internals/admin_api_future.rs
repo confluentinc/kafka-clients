@@ -20,15 +20,16 @@
 use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
 
-use crate::common::KafkaError;
-use crate::common::kafka_future::{KafkaFuture, KafkaFutureImpl};
+use crate::common::Error;
+use crate::common::KafkaFuture;
+use crate::common::internals::KafkaFutureImpl;
 
 /// The broker id used for keys that have no cached mapping.
 ///
 /// Corresponds to `AdminApiFuture.UNKNOWN_BROKER_ID`.
 pub(crate) const UNKNOWN_BROKER_ID: i32 = -1;
 
-/// The future bundle that the [`AdminApiDriver`](super::admin_api_driver::AdminApiDriver)
+/// The future bundle that the [`AdminApiDriver`](super::AdminApiDriver)
 /// completes as keys are resolved.
 ///
 /// Corresponds to `AdminApiFuture<K, V>`. Kept a plain (non-`async`) trait per
@@ -62,17 +63,18 @@ pub(crate) trait AdminApiFuture<K, V>: Send {
     fn complete_lookup(&self, _broker_id_mapping: HashMap<K, i32>) {}
 
     /// Invoked when lookup fails with a fatal error on a set of keys. The
-    /// default delegates to [`complete_exceptionally`](Self::complete_exceptionally).
+    /// default delegates to [`complete_with_error`](Self::complete_with_error).
     ///
     /// Mirrors `completeLookupExceptionally`.
-    fn complete_lookup_exceptionally(&self, lookup_errors: HashMap<K, KafkaError>) {
-        self.complete_exceptionally(lookup_errors);
+    fn complete_lookup_with_error(&self, lookup_errors: HashMap<K, Error>) {
+        self.complete_with_error(lookup_errors);
     }
 
     /// Completes the futures associated with the given keys exceptionally.
     ///
-    /// Mirrors `completeExceptionally`.
-    fn complete_exceptionally(&self, errors: HashMap<K, KafkaError>);
+    /// Mirrors `completeExceptionally`. The Rust name differs because
+    /// CLAUDE.md §2 keeps the word "exception" out of Rust identifiers.
+    fn complete_with_error(&self, errors: HashMap<K, Error>);
 }
 
 /// A simple [`AdminApiFuture`] that holds one completable future per key with no
@@ -80,7 +82,7 @@ pub(crate) trait AdminApiFuture<K, V>: Send {
 ///
 /// Corresponds to `AdminApiFuture.SimpleAdminApiFuture` (created via
 /// `AdminApiFuture.forKeys(keys)`). Used by the group-describe handlers, which
-/// key their futures by [`CoordinatorKey`](super::coordinator_key::CoordinatorKey).
+/// key their futures by [`CoordinatorKey`](super::CoordinatorKey).
 pub(crate) struct SimpleAdminApiFuture<K, V>
 where
     K: Clone + Eq + Hash,
@@ -137,10 +139,10 @@ where
         }
     }
 
-    fn complete_exceptionally(&self, errors: HashMap<K, KafkaError>) {
+    fn complete_with_error(&self, errors: HashMap<K, Error>) {
         for (key, error) in errors {
             if let Some(future) = self.futures.get(&key) {
-                future.complete_exceptionally(error);
+                future.complete_with_error(error);
             }
         }
     }

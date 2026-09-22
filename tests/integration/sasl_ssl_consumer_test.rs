@@ -35,14 +35,14 @@ use std::collections::HashMap;
 use std::time::Duration;
 use std::time::Instant;
 
-use confluent_kafka::common::KafkaError;
+use confluent_kafka::common::Error;
 use confluent_kafka::common::TopicPartition;
 use confluent_kafka::common::serialization::ByteArraySerializer;
 use confluent_kafka::common::serialization::Deserializer;
 use confluent_kafka::consumer::Consumer;
 use confluent_kafka::consumer::ConsumerConfig;
 use confluent_kafka::consumer::ConsumerRecord;
-use confluent_kafka::consumer::new_consumer;
+use confluent_kafka::consumer::KafkaConsumer;
 use confluent_kafka::producer::KafkaProducer;
 use confluent_kafka::producer::Producer;
 use confluent_kafka::producer::ProducerConfig;
@@ -53,7 +53,7 @@ use crate::common::kafka_cluster::{SASL_PASSWORD, SASL_USERNAME};
 use crate::common::test_context::TestContext;
 
 /// Type alias for the bytes-typed `Consumer` trait object returned by
-/// `new_consumer::<Vec<u8>, Vec<u8>>`.
+/// `KafkaConsumer::new::<Vec<u8>, Vec<u8>>`.
 type BytesConsumer = dyn Consumer<Vec<u8>, Vec<u8>>;
 
 /// Local byte-array deserializer (the crate exports `ByteArraySerializer` but
@@ -61,7 +61,7 @@ type BytesConsumer = dyn Consumer<Vec<u8>, Vec<u8>>;
 struct ByteArrayDeserializer;
 
 impl Deserializer<Vec<u8>> for ByteArrayDeserializer {
-    fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<Vec<u8>, KafkaError> {
+    fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<Vec<u8>, Error> {
         Ok(data.to_vec())
     }
 }
@@ -118,7 +118,7 @@ fn make_sasl_ssl_consumer_config(
         // `ssl_sasl_test`'s SASL_SSL selector helper.
         ("ssl.endpoint.identification.algorithm".to_string(), String::new()),
     ]);
-    ConsumerConfig::from_properties(&props).expect("invalid SASL_SSL consumer config")
+    ConsumerConfig::new(&props).expect("invalid SASL_SSL consumer config")
 }
 
 /// Build a SASL_SSL `ProducerConfig` (PLAIN, acks=all) against `:9097`.
@@ -135,12 +135,12 @@ fn make_sasl_ssl_producer_config(bootstrap: &str, ca_cert_pem: &str) -> Producer
         ("ssl.truststore.certificates".to_string(), ca_cert_pem.to_string()),
         ("ssl.endpoint.identification.algorithm".to_string(), String::new()),
     ]);
-    ProducerConfig::from_properties(&props).expect("invalid SASL_SSL producer config")
+    ProducerConfig::new(&props).expect("invalid SASL_SSL producer config")
 }
 
 /// Produce `num_records` byte records to `tp` over SASL_SSL, then flush.
 async fn produce_records_sasl_ssl(bootstrap: &str, ca_cert_pem: &str, tp: &TopicPartition, num_records: usize) {
-    let producer: KafkaProducer<Vec<u8>, Vec<u8>> = KafkaProducer::from_config(
+    let producer: KafkaProducer<Vec<u8>, Vec<u8>> = KafkaProducer::new(
         make_sasl_ssl_producer_config(bootstrap, ca_cert_pem),
         Box::new(ByteArraySerializer),
         Box::new(ByteArraySerializer),
@@ -149,13 +149,13 @@ async fn produce_records_sasl_ssl(bootstrap: &str, ca_cert_pem: &str, tp: &Topic
 
     let mut last_future = None;
     for i in 0..num_records {
-        let record: ProducerRecord<Vec<u8>, Vec<u8>> = ProducerRecord::with_partition(
+        let record: ProducerRecord<Vec<u8>, Vec<u8>> = ProducerRecord::with_partition_key(
             tp.topic().to_string(),
             Some(tp.partition()),
             Some(format!("key {i}").into_bytes()),
             Some(format!("value {i}").into_bytes()),
         )
-        .expect("ProducerRecord::with_partition should not fail for a non-negative partition");
+        .expect("ProducerRecord::with_partition_key should not fail for a non-negative partition");
         // Call the `Producer` trait `send` (1-arg) via fully-qualified syntax
         // so the inherent zero-copy
         // `KafkaProducer::<Vec<u8>,Vec<u8>>::send(record, callback)` does not
@@ -168,7 +168,9 @@ async fn produce_records_sasl_ssl(bootstrap: &str, ca_cert_pem: &str, tp: &Topic
     }
     producer.flush().await.expect("producer.flush should succeed");
     if let Some(f) = last_future {
-        f.get_timeout(Duration::from_secs(30)).await.expect("last send should succeed");
+        f.get_with_timeout(Duration::from_secs(30))
+            .await
+            .expect("last send should succeed");
     }
     producer.close().await.expect("producer close should succeed");
 }
@@ -202,14 +204,17 @@ async fn test_sasl_ssl_consume_records() {
     const NUM_RECORDS: usize = 5;
     produce_records_sasl_ssl(&bootstrap, &ca_cert_pem, &tp, NUM_RECORDS).await;
 
-    let mut consumer = new_consumer::<Vec<u8>, Vec<u8>>(
+    let mut consumer = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
         make_sasl_ssl_consumer_config(&bootstrap, &group_id, &ca_cert_pem, SASL_USERNAME, SASL_PASSWORD),
         Box::new(ByteArrayDeserializer),
         Box::new(ByteArrayDeserializer),
     )
-    .expect("new_consumer should succeed for SASL_SSL");
+    .expect("KafkaConsumer::new should succeed for SASL_SSL");
 
-    consumer.subscribe(vec![topic.clone()]).await.expect("subscribe should succeed");
+    consumer
+        .subscribe_with_topics(vec![topic.clone()])
+        .await
+        .expect("subscribe should succeed");
 
     let records = consume_records(&mut *consumer, NUM_RECORDS).await;
     assert_eq!(
@@ -240,14 +245,17 @@ async fn test_sasl_ssl_wrong_credentials() {
     let topic = ctx.topic("sasl_ssl_bad_creds_topic");
     let group_id = ctx.group_id("sasl_ssl_bad_creds_group");
 
-    let mut consumer = new_consumer::<Vec<u8>, Vec<u8>>(
+    let mut consumer = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
         make_sasl_ssl_consumer_config(&bootstrap, &group_id, &ca_cert_pem, SASL_USERNAME, "wrong-password"),
         Box::new(ByteArrayDeserializer),
         Box::new(ByteArrayDeserializer),
     )
-    .expect("new_consumer should succeed (config is structurally valid)");
+    .expect("KafkaConsumer::new should succeed (config is structurally valid)");
 
-    consumer.subscribe(vec![topic.clone()]).await.expect("subscribe should succeed");
+    consumer
+        .subscribe_with_topics(vec![topic.clone()])
+        .await
+        .expect("subscribe should succeed");
 
     // Drive poll for a bounded period; authentication must fail and surface as
     // an error rather than hanging. We bound the whole sequence with an outer

@@ -22,20 +22,19 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::common::protocol::Errors;
+use crate::OffsetDeleteRequestData;
+use crate::common::Errors;
 use crate::common::requests::{ConcreteResponse, CoordinatorType, OffsetDeleteRequestBuilder, RequestBuilder};
 use crate::common::utils::LogContext;
-use crate::common::{KafkaError, Node, TopicPartition};
+use crate::common::{Error, Node, TopicPartition};
 use crate::kafka_warn;
-use crate::offset_delete_request_data::{
-    OffsetDeleteRequestData, OffsetDeleteRequestPartition, OffsetDeleteRequestTopic,
-};
+use crate::offset_delete_request_data::{OffsetDeleteRequestPartition, OffsetDeleteRequestTopic};
 
-use super::admin_api_future::SimpleAdminApiFuture;
-use super::admin_api_handler::{AdminApiHandler, ApiResult, RequestAndKeys};
-use super::admin_api_lookup_strategy::AdminApiLookupStrategy;
-use super::coordinator_key::CoordinatorKey;
-use super::coordinator_strategy::CoordinatorStrategy;
+use super::AdminApiLookupStrategy;
+use super::CoordinatorKey;
+use super::CoordinatorStrategy;
+use super::SimpleAdminApiFuture;
+use super::{AdminApiHandler, ApiResult, RequestAndKeys};
 
 /// The per-partition delete result value produced by this handler.
 type PartitionErrors = HashMap<TopicPartition, Errors>;
@@ -118,7 +117,7 @@ impl DeleteConsumerGroupOffsetsHandler {
     fn handle_group_error(
         &self,
         error: Errors,
-        failed: &mut HashMap<CoordinatorKey, KafkaError>,
+        failed: &mut HashMap<CoordinatorKey, Error>,
         groups_to_unmap: &mut HashSet<CoordinatorKey>,
     ) {
         match error {
@@ -132,7 +131,7 @@ impl DeleteConsumerGroupOffsetsHandler {
                     self.group_id.id_value,
                     error
                 );
-                failed.insert(self.group_id.clone(), KafkaError::new(error));
+                failed.insert(self.group_id.clone(), Error::new(error));
             },
             Errors::CoordinatorLoadInProgress => {
                 // If the coordinator is loading, we just need to retry.
@@ -161,7 +160,7 @@ impl DeleteConsumerGroupOffsetsHandler {
                     self.group_id.id_value,
                     other
                 );
-                failed.insert(self.group_id.clone(), KafkaError::new(other));
+                failed.insert(self.group_id.clone(), Error::new(other));
             },
         }
     }
@@ -192,7 +191,12 @@ impl AdminApiHandler<CoordinatorKey, PartitionErrors> for DeleteConsumerGroupOff
         self.validate_keys(group_ids);
 
         let ConcreteResponse::OffsetDelete(response) = response else {
-            panic!("DeleteConsumerGroupOffsetsHandler received an unexpected response type: {response:?}");
+            // `KafkaAdminClient.java:1387-1391` fails this one call on a response-type
+            // mismatch; see `ApiResult::failed_all`.
+            return ApiResult::failed_all(
+                group_ids,
+                Error::local_illegal_state("DeleteConsumerGroupOffsetsHandler received an unexpected response type"),
+            );
         };
 
         let error = Errors::for_code(response.data().error_code);
@@ -228,10 +232,9 @@ impl AdminApiHandler<CoordinatorKey, PartitionErrors> for DeleteConsumerGroupOff
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::OffsetDeleteResponseData;
     use crate::common::requests::{ConcreteResponse, OffsetDeleteResponse};
-    use crate::offset_delete_response_data::{
-        OffsetDeleteResponseData, OffsetDeleteResponsePartition, OffsetDeleteResponseTopic,
-    };
+    use crate::offset_delete_response_data::{OffsetDeleteResponsePartition, OffsetDeleteResponseTopic};
 
     const GROUP_ID: &str = "group-id";
 

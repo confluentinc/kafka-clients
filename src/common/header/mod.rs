@@ -27,6 +27,8 @@ pub(crate) mod internals;
 // package. CLAUDE.md §2 keeps the `internals` Rust module `pub(crate)`, so
 // we re-export the public types at the `common::header` level to make them
 // reachable from external code (matching Java's effective visibility).
+use crate::common::LocalIllegalStateError;
+
 pub use internals::{RecordHeader, RecordHeaders};
 
 /// A header is a key-value pair.
@@ -53,19 +55,28 @@ pub trait Header {
 pub trait Headers {
     /// Adds a header (key inside), to the end, returning if the operation succeeded.
     ///
+    /// Translates Java's `Headers add(Header header)` (`Headers.java:34`). Java
+    /// overloads `add` with `add(String key, byte[] value)`; the two parameter
+    /// lists have nothing in common, so under CLAUDE.md §2 neither overload keeps
+    /// the plain name and both are suffixed with their parameter names.
+    ///
     /// # Errors
     ///
     /// Returns an error if headers are in a read-only state.
-    fn add(&mut self, header: RecordHeader) -> Result<(), IllegalStateError>;
+    fn add_header(&mut self, header: RecordHeader) -> Result<(), LocalIllegalStateError>;
 
     /// Creates and adds a header, to the end, returning if the operation succeeded.
+    ///
+    /// Translates Java's `Headers add(String key, byte[] value)`
+    /// (`Headers.java:44`) — see [`add_header`](Headers::add_header) for why
+    /// neither overload keeps the plain name.
     ///
     /// The key and value are borrowed; the allocation is performed internally.
     ///
     /// # Errors
     ///
     /// Returns an error if headers are in a read-only state.
-    fn add_key_value(&mut self, key: &str, value: Option<&[u8]>) -> Result<(), IllegalStateError>;
+    fn add_key_value(&mut self, key: &str, value: Option<&[u8]>) -> Result<(), LocalIllegalStateError>;
 
     /// Removes all headers for the given key returning if the operation succeeded,
     /// while preserving the insertion order of the remaining headers.
@@ -73,13 +84,17 @@ pub trait Headers {
     /// # Errors
     ///
     /// Returns an error if headers are in a read-only state.
-    fn remove(&mut self, key: &str) -> Result<(), IllegalStateError>;
+    fn remove(&mut self, key: &str) -> Result<(), LocalIllegalStateError>;
 
     /// Returns just one (the very last) header for the given key, if present.
     fn last_header(&self, key: &str) -> Option<&RecordHeader>;
 
     /// Returns all headers for the given key, in the order they were added in.
-    fn headers_for_key(&self, key: &str) -> Vec<&RecordHeader>;
+    ///
+    /// Translates Java's `Iterable<Header> headers(String key)`
+    /// (`Headers.java:71`), which is not overloaded — so the plain translated
+    /// name is the whole name (CLAUDE.md §2).
+    fn headers(&self, key: &str) -> Vec<&RecordHeader>;
 
     /// Returns all headers as a slice.
     ///
@@ -89,32 +104,3 @@ pub trait Headers {
     /// Returns an iterator over the headers.
     fn iter(&self) -> std::slice::Iter<'_, RecordHeader>;
 }
-
-/// Error returned when a mutating operation is attempted on read-only headers.
-///
-/// Corresponds to Java's `IllegalStateException` thrown by `RecordHeaders`
-/// when the collection has been set to read-only.
-#[derive(Clone, Debug)]
-pub struct IllegalStateError {
-    message: String,
-}
-
-impl IllegalStateError {
-    /// Create a new `IllegalStateError` with the given message.
-    pub fn new(message: impl Into<String>) -> Self {
-        Self { message: message.into() }
-    }
-
-    /// The error message.
-    pub fn message(&self) -> &str {
-        &self.message
-    }
-}
-
-impl std::fmt::Display for IllegalStateError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.message)
-    }
-}
-
-impl std::error::Error for IllegalStateError {}

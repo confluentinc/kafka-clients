@@ -27,8 +27,22 @@ use std::collections::HashMap;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use crate::common::TopicPartition;
-use crate::consumer::interceptor::ConsumerInterceptor;
+use crate::consumer::ConsumerInterceptor;
 use crate::consumer::{ConsumerRecords, OffsetAndMetadata};
+
+/// Render a [`catch_unwind`] payload as text for a log line.
+///
+/// Java logs the caught `Exception` itself (`log.warn("...", e)`), so the
+/// operator sees a message and a stack trace. The nearest Rust equivalent is
+/// the panic payload, which for `panic!("...")` is a `String` or `&str`; any
+/// other payload type is opaque and reported as such.
+fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> &str {
+    payload
+        .downcast_ref::<String>()
+        .map(|s| s.as_str())
+        .or_else(|| payload.downcast_ref::<&str>().copied())
+        .unwrap_or("<non-string panic payload>")
+}
 
 /// A container that holds the list of [`ConsumerInterceptor`] instances and
 /// wraps calls to the chain.
@@ -153,13 +167,18 @@ where
             // by Java's "undefined behavior on mid-modification panic"
             // caveat, so we assert it explicitly.
             let result = catch_unwind(AssertUnwindSafe(|| interceptor.on_consume(records)));
-            if result.is_err() {
+            if let Err(payload) = result {
                 // Matches Java's
                 //   log.warn("Error executing interceptor onConsume callback", e);
+                // including the caught exception — the operator needs the
+                // cause to act on it.
                 // The next interceptor is called with the current value
                 // of `*records` (unchanged if the panic happened before
                 // the interceptor wrote, partially mutated otherwise).
-                log::warn!("Error executing interceptor onConsume callback");
+                log::warn!(
+                    "Error executing interceptor onConsume callback: {}",
+                    panic_payload_message(&*payload)
+                );
             }
         }
     }
@@ -179,8 +198,12 @@ where
             // `AssertUnwindSafe` is required despite the call signature
             // being immutable. No cross-call invariant is touched here.
             let result = catch_unwind(AssertUnwindSafe(|| interceptor.on_commit(offsets)));
-            if result.is_err() {
-                log::warn!("Error executing interceptor onCommit callback");
+            if let Err(payload) = result {
+                // Java: `log.warn("Error executing interceptor onCommit callback", e)`.
+                log::warn!(
+                    "Error executing interceptor onCommit callback: {}",
+                    panic_payload_message(&*payload)
+                );
             }
         }
     }
@@ -198,8 +221,9 @@ impl<K: 'static, V: 'static> Drop for ConsumerInterceptors<K, V> {
             // interceptor's interior state may not be `UnwindSafe` and we
             // are about to drop the value anyway.
             let result = catch_unwind(AssertUnwindSafe(|| interceptor.close()));
-            if result.is_err() {
-                log::error!("Failed to close consumer interceptor");
+            if let Err(payload) = result {
+                // Java: `log.error("Failed to close consumer interceptor ", e)`.
+                log::error!("Failed to close consumer interceptor: {}", panic_payload_message(&*payload));
             }
         }
     }
@@ -231,10 +255,9 @@ mod tests {
 
     use super::*;
     use crate::common::TopicPartition;
-    use crate::common::header::internals::RecordHeaders;
     use crate::common::record::TimestampType;
-    use crate::consumer::interceptor::ConsumerInterceptor;
-    use crate::consumer::{ConsumerRecord, ConsumerRecords, OffsetAndMetadata};
+    use crate::consumer::ConsumerInterceptor;
+    use crate::consumer::{ConsumerRecord, ConsumerRecordOptionsBuilder, ConsumerRecords, OffsetAndMetadata};
 
     /// Shared interior state for [`FilterConsumerInterceptor`]. Held in an
     /// [`Arc`] so the test can poke the toggles and read the counts from
@@ -295,7 +318,8 @@ mod tests {
         fn on_consume(&self, records: &mut ConsumerRecords<i32, i32>) {
             self.state.on_consume_count.fetch_add(1, Ordering::SeqCst);
             if self.state.throw_on_consume.load(Ordering::SeqCst) {
-                panic!("Injected exception in FilterConsumerInterceptor.on_consume.");
+                // Java: `"Injected exception in FilterConsumerInterceptor.onConsume."`.
+                panic!("Injected failure in FilterConsumerInterceptor.on_consume.");
             }
 
             // Mirror Java's `FilterConsumerInterceptor.onConsume`
@@ -322,22 +346,25 @@ mod tests {
             for tp in records.partitions().cloned().collect::<Vec<_>>() {
                 if tp.partition() != self.state.filter_partition {
                     let recs: Vec<ConsumerRecord<i32, i32>> = records
-                        .records_for_partition(&tp)
+                        .records_partition(&tp)
                         .iter()
                         .map(|r| {
-                            ConsumerRecord::with_all(
-                                r.topic().to_string(),
-                                r.partition(),
-                                r.offset(),
-                                r.timestamp(),
-                                r.timestamp_type(),
-                                r.serialized_key_size(),
-                                r.serialized_value_size(),
-                                r.key().copied(),
-                                r.value().copied(),
-                                r.headers().clone(),
-                                r.leader_epoch(),
-                                r.delivery_count(),
+                            ConsumerRecord::with_options(
+                                ConsumerRecordOptionsBuilder::new()
+                                    .set_topic(r.topic().to_string())
+                                    .set_partition(r.partition())
+                                    .set_offset(r.offset())
+                                    .set_key(r.key().copied())
+                                    .set_value(r.value().copied())
+                                    .set_timestamp(r.timestamp())
+                                    .set_timestamp_type(r.timestamp_type())
+                                    .set_serialized_key_size(r.serialized_key_size())
+                                    .set_serialized_value_size(r.serialized_value_size())
+                                    .set_headers(r.headers().clone())
+                                    .set_leader_epoch(r.leader_epoch())
+                                    .set_delivery_count(r.delivery_count())
+                                    .build()
+                                    .unwrap(),
                             )
                         })
                         .collect();
@@ -352,13 +379,14 @@ mod tests {
             // has already succeeded. If a panic occurred above, this
             // assignment is never reached and `*records` retains its
             // original value — Java's "previous-good batch" guarantee.
-            *records = ConsumerRecords::new(new_records, new_next_offsets);
+            *records = ConsumerRecords::with_next_offsets(new_records, new_next_offsets);
         }
 
         fn on_commit(&self, _offsets: &HashMap<TopicPartition, OffsetAndMetadata>) {
             self.state.on_commit_count.fetch_add(1, Ordering::SeqCst);
             if self.state.throw_on_commit.load(Ordering::SeqCst) {
-                panic!("Injected exception in FilterConsumerInterceptor.on_commit.");
+                // Java: `"Injected exception in FilterConsumerInterceptor.onCommit."`.
+                panic!("Injected failure in FilterConsumerInterceptor.on_commit.");
             }
         }
     }
@@ -368,24 +396,26 @@ mod tests {
         //   new ConsumerRecord<>(topic, partition, 0, 0L,
         //       TimestampType.CREATE_TIME, 0, 0, 1, 1, new RecordHeaders(),
         //       Optional.empty())
-        ConsumerRecord::with_all(
-            topic.to_string(),
-            partition,
-            0, // offset
-            0, // timestamp
-            TimestampType::CreateTime,
-            0, // serialized_key_size
-            0, // serialized_value_size
-            Some(1),
-            Some(1),
-            RecordHeaders::new(),
-            None, // leader_epoch
-            None, // delivery_count
+        ConsumerRecord::with_options(
+            // headers, leader_epoch and delivery_count keep the initial values
+            // `ConsumerRecordOptionsBuilder::new` gives them, which are Java's.
+            ConsumerRecordOptionsBuilder::new()
+                .set_topic(topic.to_string())
+                .set_partition(partition)
+                .set_offset(0)
+                .set_key(Some(1))
+                .set_value(Some(1))
+                .set_timestamp(0)
+                .set_timestamp_type(TimestampType::CreateTime)
+                .set_serialized_key_size(0)
+                .set_serialized_value_size(0)
+                .build()
+                .unwrap(),
         )
     }
 
     fn make_offset_and_metadata(offset: i64) -> OffsetAndMetadata {
-        OffsetAndMetadata::with_leader_epoch(offset, None, "").unwrap()
+        OffsetAndMetadata::with_leader_epoch_metadata(offset, None, "").unwrap()
     }
 
     fn validate_next_offsets(
@@ -443,7 +473,7 @@ mod tests {
         );
         next_offsets.insert(filter_topic_part2.clone(), make_offset_and_metadata(1));
 
-        ConsumerRecords::new(records, next_offsets)
+        ConsumerRecords::with_next_offsets(records, next_offsets)
     }
 
     /// Translates `ConsumerInterceptorsTest.testOnConsumeChain`.
@@ -600,7 +630,7 @@ mod tests {
         records.insert(tp.clone(), vec![make_consumer_record("t", 0)]);
         let mut next_offsets: HashMap<TopicPartition, OffsetAndMetadata> = HashMap::new();
         next_offsets.insert(tp, make_offset_and_metadata(1));
-        let mut input = ConsumerRecords::new(records, next_offsets);
+        let mut input = ConsumerRecords::with_next_offsets(records, next_offsets);
 
         // No panic should escape `on_consume`. All three interceptors are
         // called; the middle (Counting) interceptor records once.

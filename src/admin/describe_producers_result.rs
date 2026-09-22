@@ -18,8 +18,8 @@
 
 use std::collections::HashMap;
 
-use crate::admin::producer_state::ProducerState;
-use crate::common::{KafkaError, KafkaFuture, TopicPartition};
+use crate::admin::ProducerState;
+use crate::common::{Error, KafkaFuture, TopicPartition};
 
 /// The producer state of a single partition.
 ///
@@ -69,13 +69,10 @@ impl DescribeProducersResult {
     ///
     /// # Errors
     ///
-    /// Returns [`KafkaError::illegal_argument`] if `partition` was not requested.
-    pub fn partition_result(
-        &self,
-        partition: &TopicPartition,
-    ) -> Result<KafkaFuture<PartitionProducerState>, KafkaError> {
+    /// Returns [`Error::local_illegal_argument`] if `partition` was not requested.
+    pub fn partition_result(&self, partition: &TopicPartition) -> Result<KafkaFuture<PartitionProducerState>, Error> {
         self.futures.get(partition).cloned().ok_or_else(|| {
-            KafkaError::illegal_argument(format!("Topic partition {partition} was not included in the request"))
+            Error::local_illegal_argument(format!("Topic partition {partition} was not included in the request"))
         })
     }
 
@@ -91,7 +88,7 @@ impl DescribeProducersResult {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::kafka_future::KafkaFutureImpl;
+    use crate::common::internals::KafkaFutureImpl;
 
     fn state(producer_id: i64) -> PartitionProducerState {
         PartitionProducerState::new(vec![ProducerState::new(producer_id, 1, 0, 0, None, None)])

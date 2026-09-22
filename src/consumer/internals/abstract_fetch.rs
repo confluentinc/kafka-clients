@@ -61,21 +61,19 @@ use indexmap::IndexMap;
 use log::{debug, trace};
 use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 
+use crate::common::ApiKeys;
 use crate::common::Node;
 use crate::common::TopicPartition;
-use crate::common::memory::buffer_supplier::BufferSupplier;
-use crate::common::protocol::ApiKeys;
-use crate::common::requests::fetch_request::{
-    CONSUMER_REPLICA_ID, FetchRequestBuilder, INVALID_LOG_START_OFFSET, PartitionData,
-};
-use crate::common::requests::fetch_response::FetchResponse;
-use crate::consumer::internals::completed_fetch::CompletedFetch;
-use crate::consumer::internals::consumer_metadata::ConsumerMetadata;
-use crate::consumer::internals::fetch_buffer::FetchBuffer;
-use crate::consumer::internals::fetch_config::FetchConfig;
-use crate::consumer::internals::fetch_metrics_aggregator::FetchMetricsAggregator;
-use crate::consumer::internals::fetch_metrics_manager::FetchMetricsManager;
-use crate::consumer::internals::subscription_state::SubscriptionState;
+use crate::common::memory::BufferSupplier;
+use crate::common::requests::FetchResponse;
+use crate::common::requests::fetch_request::{FetchRequest, FetchRequestBuilder, PartitionData};
+use crate::consumer::internals::CompletedFetch;
+use crate::consumer::internals::ConsumerMetadata;
+use crate::consumer::internals::FetchBuffer;
+use crate::consumer::internals::FetchConfig;
+use crate::consumer::internals::FetchMetricsAggregator;
+use crate::consumer::internals::FetchMetricsManager;
+use crate::consumer::internals::SubscriptionState;
 use crate::fetch_session_handler::{FetchSessionHandler, FetchSessionRequestData};
 
 /// Shared state and methods used by the fetch request managers
@@ -87,7 +85,7 @@ use crate::fetch_session_handler::{FetchSessionHandler, FetchSessionRequestData}
 /// # Field visibility
 ///
 /// All fields are `pub(crate)` so the composing
-/// [`crate::consumer::internals::request_manager::RequestManager`]
+/// [`crate::consumer::internals::RequestManager`]
 /// implementation in Phase 7b can read / write them. This matches Java's
 /// `protected` semantics on the abstract base.
 pub(crate) struct AbstractFetch {
@@ -134,7 +132,7 @@ pub(crate) struct AbstractFetch {
     /// the position (`maybeValidatePositionForCurrentLeader`). Phase 7a
     /// dropped this parameter; Phase 37 re-introduces it because the
     /// leadership-change branch of `handle_fetch_success` needs it.
-    api_versions: Arc<crate::api_versions::ApiVersions>,
+    api_versions: Arc<crate::ApiVersions>,
 
     /// Records fetch / lag / lead / latency metrics. Shared (`Arc`) so the
     /// per-response [`FetchMetricsAggregator`] can record bytes/records into the
@@ -168,7 +166,7 @@ impl AbstractFetch {
         fetch_config: FetchConfig,
         fetch_buffer: Arc<FetchBuffer>,
         decompression_buffer_supplier: Arc<BufferSupplier>,
-        api_versions: Arc<crate::api_versions::ApiVersions>,
+        api_versions: Arc<crate::ApiVersions>,
         metrics_manager: Arc<FetchMetricsManager>,
     ) -> Self {
         Self {
@@ -315,12 +313,12 @@ impl AbstractFetch {
             self.fetch_config.min_bytes,
             to_fetch,
         )
-        .isolation_level(self.fetch_config.isolation_level)
+        .set_isolation_level(self.fetch_config.isolation_level)
         .set_max_bytes(self.fetch_config.max_bytes)
-        .metadata(request_data.metadata)
-        .removed(request_data.to_forget.clone())
-        .replaced(request_data.to_replace.clone())
-        .rack_id(self.fetch_config.client_rack_id.clone());
+        .set_metadata(request_data.metadata)
+        .set_removed(request_data.to_forget.clone())
+        .set_replaced(request_data.to_replace.clone())
+        .set_rack_id(self.fetch_config.client_rack_id.clone());
 
         debug!("Sending fetch request to broker {}", fetch_target.id());
         debug!("Adding pending request for node {}", fetch_target.id());
@@ -346,16 +344,24 @@ impl AbstractFetch {
         request_latency_ms: i64,
     ) {
         let session_id = request_data.metadata.session_id();
-        let handler = match self.session_handlers.get_mut(&fetch_target.id()) {
-            Some(h) => h,
-            None => {
-                log::error!(
-                    "Unable to find FetchSessionHandler for node {}. Ignoring fetch response.",
-                    fetch_target.id()
-                );
-                return;
-            },
-        };
+        // Java's `handler == null` `return` sits INSIDE the `try`, so the
+        // `finally { removePendingFetchRequest(...) }` (`AbstractFetch.java:253-255`)
+        // still runs. Leaking the node id here would be permanent, not a
+        // delay: `prepare_fetch_requests` skips every node in
+        // `nodes_with_pending_fetch_requests`, so that broker's partitions
+        // would never be fetched again.
+        if !self.session_handlers.contains_key(&fetch_target.id()) {
+            log::error!(
+                "Unable to find FetchSessionHandler for node {}. Ignoring fetch response.",
+                fetch_target.id()
+            );
+            self.remove_pending_fetch_request(fetch_target, session_id);
+            return;
+        }
+        let handler = self
+            .session_handlers
+            .get_mut(&fetch_target.id())
+            .expect("presence checked above");
 
         if !handler.handle_response(&response, request_version) {
             // FETCH_SESSION_TOPIC_ID_ERROR drives a metadata refresh per
@@ -391,11 +397,11 @@ impl AbstractFetch {
                 .unwrap_or(0);
             let parts_with_data = response_data
                 .values()
-                .filter(|pd| crate::common::requests::fetch_response::records_size(pd) > 0)
+                .filter(|pd| crate::common::requests::FetchResponse::records_size(pd) > 0)
                 .count();
             let total_bytes: i64 = response_data
                 .values()
-                .map(|pd| crate::common::requests::fetch_response::records_size(pd) as i64)
+                .map(|pd| crate::common::requests::FetchResponse::records_size(pd) as i64)
                 .sum();
             log::info!(
                 target: "fetch_diag",
@@ -435,16 +441,47 @@ impl AbstractFetch {
             }) {
                 Some(p) => p,
                 None => {
-                    // "Received fetch response for missing session partition" —
-                    // Java throws IllegalStateException. We log and drop
-                    // the partition entry; the response handler returning
-                    // true would have caught this earlier in well-formed
-                    // sessions.
-                    log::error!(
-                        "Response for missing session request partition: partition={} metadata={}",
-                        partition,
-                        request_data.metadata
-                    );
+                    // "Received fetch response for missing session partition".
+                    //
+                    // DELIBERATE DIVERGENCE, recorded rather than assumed
+                    // (definition-of-done.md §7). Java throws
+                    // `IllegalStateException` (`AbstractFetch.java:184-199`),
+                    // which aborts the whole response: no `CompletedFetch` is
+                    // added for this partition OR any partition after it, and
+                    // `fetchBuffer.wakeup()` (`:232`) is skipped because it
+                    // sits outside the `finally`. So one malformed entry
+                    // discards every well-formed entry beside it and leaves a
+                    // `poll()` blocking until its timeout. Rust skips only the
+                    // offending partition, keeping the rest of the response and
+                    // the wakeup. The condition means the broker echoed a
+                    // partition the client never asked for, which is a
+                    // protocol-level fault this client cannot act on either
+                    // way, so the narrower blast radius is preferred.
+                    //
+                    // The two message variants follow Java's, including the
+                    // `data.metadata().isFull()` split, so the diagnostic a
+                    // user reports is comparable with the Java client's.
+                    // `toSend` is rendered as its partition keys rather than
+                    // the whole map: Java's `PartitionData.toString()` adds
+                    // fetch offsets and sizes that are noise for this fault,
+                    // and the keys are what identifies the mismatch.
+                    if request_data.metadata.is_full() {
+                        log::error!(
+                            "Response for missing full request partition: partition={}; metadata={}",
+                            partition,
+                            request_data.metadata
+                        );
+                    } else {
+                        log::error!(
+                            "Response for missing session request partition: partition={}; metadata={}; \
+                             toSend={:?}; toForget={:?}; toReplace={:?}",
+                            partition,
+                            request_data.metadata,
+                            request_data.to_send.keys().collect::<Vec<_>>(),
+                            request_data.to_forget,
+                            request_data.to_replace
+                        );
+                    }
                     continue;
                 },
             };
@@ -458,11 +495,10 @@ impl AbstractFetch {
             // KIP-951: when a partition reports a leadership-change error AND
             // carries new leader info, record it for the post-loop metadata
             // update. Translates `AbstractFetch.java:207-214`.
-            let partition_error = crate::common::protocol::Errors::for_code(partition_data.error_code);
+            let partition_error = crate::common::Errors::for_code(partition_data.error_code);
             if matches!(
                 partition_error,
-                crate::common::protocol::Errors::NotLeaderOrFollower
-                    | crate::common::protocol::Errors::FencedLeaderEpoch
+                crate::common::Errors::NotLeaderOrFollower | crate::common::Errors::FencedLeaderEpoch
             ) {
                 let leader_id = partition_data.current_leader.leader_id;
                 let leader_epoch = partition_data.current_leader.leader_epoch;
@@ -480,7 +516,7 @@ impl AbstractFetch {
             // `partition` is the owned loop key; move it into the
             // CompletedFetch (its topic is an Arc<str>, so even the prior
             // clone was an Arc bump, not a String copy — §27 topic-name rule).
-            let cf = CompletedFetch::new_full(
+            let cf = CompletedFetch::with_full(
                 self.subscriptions.clone(),
                 self.decompression_buffer_supplier.clone(),
                 partition,
@@ -562,12 +598,12 @@ impl AbstractFetch {
     /// Translates `public void handleCloseFetchSessionFailure(Node,
     /// FetchSessionHandler.FetchRequestData, Throwable)`. Drops the node
     /// from the pending-fetch set and logs at debug (Java logs the
-    /// throwable; we log the `KafkaError` message).
+    /// throwable; we log the `Error` message).
     pub(crate) fn handle_close_fetch_session_failure(
         &mut self,
         fetch_target: &Node,
         request_data: &FetchSessionRequestData,
-        error: &crate::common::KafkaError,
+        error: &crate::common::Error,
     ) {
         let session_id = request_data.metadata.session_id();
         self.remove_pending_fetch_request(fetch_target, session_id);
@@ -587,7 +623,7 @@ impl AbstractFetch {
         &mut self,
         fetch_target: &Node,
         request_data: &FetchSessionRequestData,
-        error: &crate::common::KafkaError,
+        error: &crate::common::Error,
     ) {
         let session_id = request_data.metadata.session_id();
         if let Some(handler) = self.session_handlers.get_mut(&fetch_target.id()) {
@@ -628,7 +664,7 @@ impl AbstractFetch {
 
     /// Returns the IDs of nodes for which we currently hold a fetch
     /// session handler. Used by
-    /// [`crate::consumer::internals::fetch_request_manager::FetchRequestManager::poll_on_close`]
+    /// [`crate::consumer::internals::FetchRequestManager::poll_on_close`]
     /// to resolve the per-node `Node` map for close-session requests.
     pub(crate) fn session_handler_ids(&self) -> Vec<i32> {
         self.session_handlers.keys().copied().collect()
@@ -657,8 +693,8 @@ impl AbstractFetch {
         &mut self,
         current_time_ms: i64,
         is_unavailable: impl Fn(&Node) -> bool,
-        maybe_throw_auth_failure: impl Fn(&Node) -> Result<(), crate::common::KafkaError>,
-    ) -> Result<HashMap<i32, (Node, FetchSessionRequestData)>, crate::common::KafkaError> {
+        maybe_throw_auth_failure: impl Fn(&Node) -> Result<(), crate::common::Error>,
+    ) -> Result<HashMap<i32, (Node, FetchSessionRequestData)>, crate::common::Error> {
         // Update metrics in case there was an assignment change. Java does this
         // first thing in `prepareFetchRequests`. The manager is `Arc`-shared
         // (per-response aggregators hold clones), so its assignment-tracking
@@ -844,7 +880,7 @@ impl AbstractFetch {
             let partition_data = PartitionData::new(
                 topic_id,
                 position_offset,
-                INVALID_LOG_START_OFFSET,
+                FetchRequest::INVALID_LOG_START_OFFSET,
                 self.fetch_config.fetch_size,
                 position_leader_epoch,
             );
@@ -894,7 +930,7 @@ impl AbstractFetch {
     /// side effects.
     fn compute_buffered_nodes(
         &self,
-        guard: &mut crate::consumer::internals::subscription_state::SubscriptionState,
+        guard: &mut crate::consumer::internals::SubscriptionState,
         buffered: &HashSet<TopicPartition>,
         current_time_ms: i64,
         cluster: &crate::common::Cluster,
@@ -957,16 +993,12 @@ impl Drop for AbstractFetch {
     }
 }
 
-/// Helpful constants exposed for `FetchRequestManager`'s callers.
-pub(crate) const ABSTRACT_FETCH_CONSUMER_REPLICA_ID: i32 = CONSUMER_REPLICA_ID;
-pub(crate) const ABSTRACT_FETCH_INVALID_LOG_START_OFFSET: i64 = INVALID_LOG_START_OFFSET;
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::common::IsolationLevel;
     use crate::common::internals::ClusterResourceListeners;
-    use crate::consumer::internals::auto_offset_reset_strategy::AutoOffsetResetStrategy;
+    use crate::consumer::AutoOffsetResetStrategy;
 
     fn make_fetch_config() -> FetchConfig {
         FetchConfig::new(
@@ -1006,7 +1038,7 @@ mod tests {
             make_fetch_config(),
             Arc::new(FetchBuffer::new()),
             Arc::new(BufferSupplier::create()),
-            Arc::new(crate::api_versions::ApiVersions::new()),
+            Arc::new(crate::ApiVersions::new()),
             FetchMetricsManager::for_test(),
         )
     }
@@ -1124,7 +1156,7 @@ mod tests {
         let request_data = handler.build_request(builder);
 
         let node = Node::new(6, "host".to_string(), 9092);
-        let err = crate::common::KafkaError::illegal_state("simulated");
+        let err = crate::common::Error::local_illegal_state("simulated");
         af.handle_close_fetch_session_failure(&node, &request_data, &err);
         assert!(!af.pending_fetch_node_ids().contains(&6));
     }
@@ -1171,7 +1203,7 @@ mod tests {
         metadata.add_transient_topics(HashSet::from([topic.to_string()]));
         let mut counts = HashMap::new();
         counts.insert(topic.to_string(), num_partitions);
-        let response = crate::common::requests::request_test_utils::metadata_update_with(num_nodes, &counts);
+        let response = crate::common::requests::RequestTestUtils::metadata_update_with(num_nodes, &counts);
         metadata.metadata_arc().update_with_current_request_version(&response, false, 0);
     }
 
@@ -1211,7 +1243,7 @@ mod tests {
             make_fetch_config(),
             Arc::new(FetchBuffer::new()),
             Arc::new(BufferSupplier::create()),
-            Arc::new(crate::api_versions::ApiVersions::new()),
+            Arc::new(crate::ApiVersions::new()),
             FetchMetricsManager::for_test(),
         );
         // The only node (id 0) has an in-flight fetch.
@@ -1243,7 +1275,7 @@ mod tests {
             make_fetch_config(),
             Arc::new(FetchBuffer::new()),
             Arc::new(BufferSupplier::create()),
-            Arc::new(crate::api_versions::ApiVersions::new()),
+            Arc::new(crate::ApiVersions::new()),
             FetchMetricsManager::for_test(),
         );
         // No node is pending, but every node is unavailable.
@@ -1271,7 +1303,7 @@ mod tests {
             make_fetch_config(),
             Arc::new(FetchBuffer::new()),
             Arc::new(BufferSupplier::create()),
-            Arc::new(crate::api_versions::ApiVersions::new()),
+            Arc::new(crate::ApiVersions::new()),
             FetchMetricsManager::for_test(),
         );
 
@@ -1284,7 +1316,7 @@ mod tests {
             let mut set: HashSet<TopicPartition> = HashSet::new();
             set.insert(partition.clone());
             guard.assign_from_user(set).unwrap();
-            let position = crate::consumer::internals::subscription_state::FetchPosition::with_leader(
+            let position = crate::consumer::internals::FetchPosition::with_leader(
                 0,
                 Some(0),
                 crate::metadata::LeaderAndEpoch::new(Some(leader), Some(0)),
@@ -1327,28 +1359,35 @@ mod tests {
 
     // ── Phase 20 Fix #2b: handle_fetch_success moves records, no copy ───────
 
+    use crate::FetchResponseData;
     use crate::common::compress::Compression;
     use crate::common::record::TimestampType;
     use crate::common::record::internal::{MemoryRecords, SimpleRecord};
-    use crate::common::requests::fetch_metadata::INVALID_SESSION_ID;
+    use crate::common::requests::FetchMetadata;
     use crate::common::serialization::Deserializer;
-    use crate::consumer::internals::deserializers::Deserializers;
-    use crate::consumer::internals::fetch_collector::{FetchCollector, SystemFetchCollectorTime};
-    use crate::fetch_response_data::{FetchResponseData, FetchableTopicResponse, PartitionData as RespPartitionData};
+    use crate::consumer::internals::Deserializers;
+    use crate::consumer::internals::{FetchCollector, SystemFetchCollectorTime};
+    use crate::fetch_response_data::{FetchableTopicResponse, PartitionData as RespPartitionData};
 
     /// Minimal UTF-8 string deserializer for this test module.
     struct StringDeserializer;
     impl Deserializer<String> for StringDeserializer {
-        fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<String, crate::common::KafkaError> {
+        fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<String, crate::common::Error> {
             Ok(String::from_utf8_lossy(data).into_owned())
         }
     }
 
     fn encode_records(starting_offset: i64, count: i32) -> Vec<u8> {
         let records: Vec<SimpleRecord> = (0..count)
-            .map(|i| SimpleRecord::new(0, Some(b"key".to_vec()), Some(format!("value-{i}").into_bytes()), vec![]))
+            .map(|i| {
+                SimpleRecord::with_timestamp_key_value(
+                    0,
+                    Some(b"key".to_vec()),
+                    Some(format!("value-{i}").into_bytes()),
+                )
+            })
             .collect();
-        let mr = MemoryRecords::with_records_at_offset(
+        let mr = MemoryRecords::with_records_with_magic_initial_offset_timestamp_type(
             2,
             starting_offset,
             Compression::none(),
@@ -1375,7 +1414,7 @@ mod tests {
             make_fetch_config(),
             fetch_buffer.clone(),
             Arc::new(BufferSupplier::create()),
-            Arc::new(crate::api_versions::ApiVersions::new()),
+            Arc::new(crate::ApiVersions::new()),
             FetchMetricsManager::for_test(),
         );
 
@@ -1399,7 +1438,7 @@ mod tests {
             PartitionData::new(
                 crate::common::Uuid::ZERO_UUID,
                 0,
-                INVALID_LOG_START_OFFSET,
+                FetchRequest::INVALID_LOG_START_OFFSET,
                 1024 * 1024,
                 Some(0),
             ),
@@ -1418,7 +1457,7 @@ mod tests {
         topic_resp.set_topic("topic-a".to_string());
         topic_resp.set_partitions(vec![rpd]);
         let mut data = FetchResponseData::new();
-        data.set_session_id(INVALID_SESSION_ID);
+        data.set_session_id(FetchMetadata::INVALID_SESSION_ID);
         data.set_responses(vec![topic_resp]);
         let response = FetchResponse::new(data);
         assert_eq!(
@@ -1448,7 +1487,7 @@ mod tests {
         let fetch = collector.collect_fetch(&fetch_buffer).unwrap();
         assert_eq!(COUNT as usize, fetch.count(), "all moved records must survive the move");
 
-        let recs = fetch.records_for_partition(&partition);
+        let recs = fetch.records_partition(&partition);
         assert_eq!(COUNT as usize, recs.len());
         for (i, rec) in recs.iter().enumerate() {
             assert_eq!(i as i64, rec.offset(), "offset ordering preserved");
@@ -1482,7 +1521,7 @@ mod tests {
             make_fetch_config(),
             fetch_buffer,
             Arc::new(BufferSupplier::create()),
-            Arc::new(crate::api_versions::ApiVersions::new()),
+            Arc::new(crate::ApiVersions::new()),
             FetchMetricsManager::for_test(),
         );
 
@@ -1506,7 +1545,7 @@ mod tests {
                 PartitionData::new(
                     crate::common::Uuid::ZERO_UUID,
                     0,
-                    INVALID_LOG_START_OFFSET,
+                    FetchRequest::INVALID_LOG_START_OFFSET,
                     1024 * 1024,
                     Some(0),
                 ),
@@ -1531,7 +1570,7 @@ mod tests {
         topic_resp.set_topic("topic-a".to_string());
         topic_resp.set_partitions(partitions);
         let mut data = FetchResponseData::new();
-        data.set_session_id(INVALID_SESSION_ID);
+        data.set_session_id(FetchMetadata::INVALID_SESSION_ID);
         data.set_responses(vec![topic_resp]);
         let response = FetchResponse::new(data);
 
@@ -1558,10 +1597,10 @@ mod tests {
 
         let alloc_count;
         {
-            let _guard = crate::test_alloc_tracker::AllocTrackingGuard::new();
-            crate::test_alloc_tracker::AllocTrackingGuard::reset();
+            let _guard = crate::AllocTrackingGuard::new();
+            crate::AllocTrackingGuard::reset();
             af.handle_fetch_success(&node, &request_data, response, 12, 0);
-            alloc_count = crate::test_alloc_tracker::AllocTrackingGuard::count();
+            alloc_count = crate::AllocTrackingGuard::count();
         }
 
         let max_allowed = OVERHEAD_BUDGET + PER_PARTITION_BUDGET * (PARTITIONS as usize);

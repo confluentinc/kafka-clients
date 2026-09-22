@@ -65,10 +65,10 @@
 use std::time::Duration;
 
 use confluent_kafka::admin::{CreateAclsOptions, DeleteAclsOptions, DescribeAclsOptions, DescribeTopicsOptions};
+use confluent_kafka::common::Errors;
 use confluent_kafka::common::acl::{
     AccessControlEntry, AccessControlEntryFilter, AclBinding, AclBindingFilter, AclOperation, AclPermissionType,
 };
-use confluent_kafka::common::protocol::Errors;
 use confluent_kafka::common::resource::{PatternType, ResourcePattern, ResourcePatternFilter, ResourceType};
 
 use crate::common::admin_backend::{AdminBackend, admin_for, all_of_exactly, create_topic};
@@ -182,9 +182,9 @@ async fn deleted_bindings<B: AdminBackend>(admin: &B, filters: &[AclBindingFilte
         let results = deleted[filter].as_ref().expect("checked by all_of_exactly");
         for result in results.values() {
             assert!(
-                result.exception().is_none(),
+                result.error().is_none(),
                 "{backend} backend: deleting an ACL matched by {filter:?} failed inside the FilterResult: {:?}",
-                result.exception()
+                result.error()
             );
             if let Some(binding) = result.binding() {
                 bindings.push(binding.clone());
@@ -312,9 +312,9 @@ async fn delete_acls_reports_the_removed_binding<F: AdminBackendFactory>(ctx: &m
     // Both halves of a FilterResult are independent optionals, so "the binding is
     // set" does not imply "the exception is not" — assert it.
     assert!(
-        result.exception().is_none(),
+        result.error().is_none(),
         "{backend} backend: a successfully deleted ACL carries no exception, got {:?}",
-        result.exception()
+        result.error()
     );
 
     // describe now shows it gone.
@@ -388,9 +388,9 @@ async fn deny_binding_round_trip<F: AdminBackendFactory>(ctx: &mut TestContext, 
 /// sequence proves the authorizer is acting on the binding this client sent rather
 /// than merely storing it:
 ///
-///   1. `describe_topics` on a fresh topic succeeds — the implicit allow applies;
+///   1. `describe_topics_with_topics` on a fresh topic succeeds — the implicit allow applies;
 ///   2. `create_acls` installs DENY DESCRIBE on that topic for `User:ANONYMOUS`;
-///   3. the same `describe_topics` now fails with `TOPIC_AUTHORIZATION_FAILED`;
+///   3. the same `describe_topics_with_topics` now fails with `TOPIC_AUTHORIZATION_FAILED`;
 ///   4. `delete_acls` removes it and access returns.
 ///
 /// So `AclBinding`, `AccessControlEntry`, `ResourcePattern` and the
@@ -407,7 +407,7 @@ async fn explicit_deny_is_enforced_by_the_authorizer<F: AdminBackendFactory>(ctx
     // Reads `describe_topics` for our topic, returning the per-topic outcome.
     let describe = || async {
         admin
-            .describe_topics(std::slice::from_ref(&topic), DescribeTopicsOptions::new())
+            .describe_topics_with_topics(std::slice::from_ref(&topic), DescribeTopicsOptions::new())
             .await
             .unwrap_or_else(|e| panic!("{backend} backend: describe topics: {e}"))
             .get(&topic)

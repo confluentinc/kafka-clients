@@ -31,25 +31,17 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::OnceLock;
 
+use crate::MetadataResponseData;
 use crate::common::Cluster;
 use crate::common::Node;
 use crate::common::PartitionInfo;
 use crate::common::TopicPartition;
 use crate::common::Uuid;
 use crate::common::protocol::{ApiKeys, Errors, Readable};
-use crate::metadata_response_data::{MetadataResponseBroker, MetadataResponseData, MetadataResponseTopic};
+use crate::metadata_response_data::{MetadataResponseBroker, MetadataResponseTopic};
 
-use super::abstract_response::update_error_counts;
-use super::request_utils::get_leader_epoch;
-
-/// Sentinel value indicating that the controller ID is unknown.
-pub const NO_CONTROLLER_ID: i32 = -1;
-
-/// Sentinel value indicating that the partition has no leader.
-pub const NO_LEADER_ID: i32 = -1;
-
-/// Sentinel value indicating that authorized operations have been omitted.
-pub const AUTHORIZED_OPERATIONS_OMITTED: i32 = i32::MIN;
+use super::AbstractResponse;
+use super::RequestUtils;
 
 /// A Metadata response.
 ///
@@ -62,13 +54,22 @@ pub struct MetadataResponse {
 }
 
 impl MetadataResponse {
+    /// Sentinel value indicating that the controller ID is unknown.
+    pub const NO_CONTROLLER_ID: i32 = -1;
+
+    /// Sentinel value indicating that the partition has no leader.
+    pub const NO_LEADER_ID: i32 = -1;
+
+    /// Sentinel value indicating that authorized operations have been omitted.
+    pub const AUTHORIZED_OPERATIONS_OMITTED: i32 = i32::MIN;
+
     /// Creates a new `MetadataResponse` from data and version.
-    pub fn new(data: MetadataResponseData, version: i16) -> Self {
-        Self::from_data(data, has_reliable_leader_epochs(version))
+    pub fn with_version(data: MetadataResponseData, version: i16) -> Self {
+        Self::with_has_reliable_leader_epochs(data, has_reliable_leader_epochs(version))
     }
 
     /// Creates a new `MetadataResponse` from data with explicit epoch reliability flag.
-    pub fn from_data(data: MetadataResponseData, has_reliable_leader_epochs: bool) -> Self {
+    pub fn with_has_reliable_leader_epochs(data: MetadataResponseData, has_reliable_leader_epochs: bool) -> Self {
         Self { data, has_reliable_leader_epochs, holder: OnceLock::new() }
     }
 
@@ -147,9 +148,9 @@ impl MetadataResponse {
         let mut error_counts = HashMap::new();
         for metadata in &self.data.topics {
             for p in &metadata.partitions {
-                update_error_counts(&mut error_counts, Errors::for_code(p.error_code));
+                AbstractResponse::update_error_counts(&mut error_counts, Errors::for_code(p.error_code));
             }
-            update_error_counts(&mut error_counts, Errors::for_code(metadata.error_code));
+            AbstractResponse::update_error_counts(&mut error_counts, Errors::for_code(metadata.error_code));
         }
         error_counts
     }
@@ -186,12 +187,12 @@ impl MetadataResponse {
                 }
             }
         }
-        Cluster::new(
+        Cluster::with_invalid_topics_controller_topic_ids(
             self.data.cluster_id.clone(),
             self.brokers().to_vec(),
             partitions,
             self.topics_by_error(Errors::TopicAuthorizationFailed),
-            self.topics_by_error(Errors::InvalidTopicException),
+            self.topics_by_error(Errors::InvalidTopicError),
             internal_topics,
             self.controller().cloned(),
             topic_ids,
@@ -272,7 +273,7 @@ impl MetadataResponse {
     /// Returns an error if parsing fails.
     pub fn parse(readable: &mut dyn Readable, version: i16) -> std::io::Result<Self> {
         let data = MetadataResponseData::read(readable, version)?;
-        Ok(Self::from_data(data, has_reliable_leader_epochs(version)))
+        Ok(Self::with_has_reliable_leader_epochs(data, has_reliable_leader_epochs(version)))
     }
 
     /// Returns whether the client should throttle upon receiving this response.
@@ -282,7 +283,7 @@ impl MetadataResponse {
 
     /// Constructs a `MetadataResponse` for testing.
     #[allow(clippy::too_many_arguments)]
-    pub fn prepare_response(
+    pub fn prepare_response_version(
         version: i16,
         throttle_time_ms: i32,
         brokers: &[Node],
@@ -291,7 +292,7 @@ impl MetadataResponse {
         topics: Vec<MetadataResponseTopic>,
         cluster_authorized_operations: i32,
     ) -> Self {
-        Self::prepare_response_with_reliability(
+        Self::prepare_response_has_reliable_epoch(
             has_reliable_leader_epochs(version),
             throttle_time_ms,
             brokers,
@@ -304,7 +305,7 @@ impl MetadataResponse {
 
     /// Constructs a `MetadataResponse` with explicit leader epoch reliability flag.
     #[allow(clippy::too_many_arguments)]
-    pub fn prepare_response_with_reliability(
+    pub fn prepare_response_has_reliable_epoch(
         has_reliable_epoch: bool,
         throttle_time_ms: i32,
         brokers: &[Node],
@@ -334,7 +335,7 @@ impl MetadataResponse {
         response_data.set_cluster_authorized_operations(cluster_authorized_operations);
         response_data.set_topics(topics);
 
-        Self::from_data(response_data, has_reliable_epoch)
+        Self::with_has_reliable_leader_epochs(response_data, has_reliable_epoch)
     }
 }
 
@@ -407,7 +408,7 @@ impl Holder {
                 let leader_id = partition_meta.leader_id;
                 let leader_id_opt = if leader_id < 0 { None } else { Some(leader_id) };
 
-                let leader_epoch = get_leader_epoch(partition_meta.leader_epoch);
+                let leader_epoch = RequestUtils::get_leader_epoch(partition_meta.leader_epoch);
                 let topic_partition = TopicPartition::new(topic.clone(), partition_index);
                 partition_metadata_list.push(PartitionMetadata {
                     error: partition_error,
@@ -454,19 +455,14 @@ pub struct TopicMetadata {
 
 impl TopicMetadata {
     /// Creates a new `TopicMetadata` with default authorized operations.
-    pub fn new_simple(
-        error: Errors,
-        topic: String,
-        is_internal: bool,
-        partition_metadata: Vec<PartitionMetadata>,
-    ) -> Self {
+    pub fn new(error: Errors, topic: String, is_internal: bool, partition_metadata: Vec<PartitionMetadata>) -> Self {
         Self {
             error,
             topic,
             topic_id: Uuid::zero(),
             is_internal,
             partition_metadata,
-            authorized_operations: AUTHORIZED_OPERATIONS_OMITTED,
+            authorized_operations: MetadataResponse::AUTHORIZED_OPERATIONS_OMITTED,
         }
     }
 
@@ -634,7 +630,7 @@ mod tests {
         let mut data = MetadataResponseData::new();
         data.set_topics(topics);
 
-        let metadata_response = MetadataResponse::new(data, ApiKeys::METADATA.latest_version());
+        let metadata_response = MetadataResponse::with_version(data, ApiKeys::METADATA.latest_version());
         let cluster = metadata_response.build_cluster();
         assert!(cluster.topic_name(&Uuid::zero()).is_none());
         assert!(cluster.topic_name(&zero_uuid).is_none());

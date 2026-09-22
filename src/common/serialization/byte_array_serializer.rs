@@ -18,8 +18,8 @@
 //!
 //! Corresponds to Java's `org.apache.kafka.common.serialization.ByteArraySerializer`.
 
-use crate::common::KafkaError;
-use crate::common::header::internals::RecordHeaders;
+use crate::common::Error;
+use crate::common::header::RecordHeaders;
 use crate::common::serialization::Serializer;
 
 /// Serializes byte arrays by passing them through unchanged.
@@ -36,22 +36,22 @@ impl ByteArraySerializer {
 }
 
 impl Serializer<[u8]> for ByteArraySerializer {
-    fn serialize(&self, _topic: &str, data: Option<&[u8]>) -> Result<Option<Vec<u8>>, KafkaError> {
+    fn serialize(&self, _topic: &str, data: Option<&[u8]>) -> Result<Option<Vec<u8>>, Error> {
         Ok(data.map(|d| d.to_vec()))
     }
 }
 
 impl Serializer<Vec<u8>> for ByteArraySerializer {
-    fn serialize(&self, _topic: &str, data: Option<&Vec<u8>>) -> Result<Option<Vec<u8>>, KafkaError> {
+    fn serialize(&self, _topic: &str, data: Option<&Vec<u8>>) -> Result<Option<Vec<u8>>, Error> {
         Ok(data.cloned())
     }
 
-    fn serialize_owned_with_headers(
+    fn serialize_owned_headers(
         &self,
         _topic: &str,
         _headers: &RecordHeaders,
         data: Option<Vec<u8>>,
-    ) -> Result<Option<Vec<u8>>, KafkaError> {
+    ) -> Result<Option<Vec<u8>>, Error> {
         Ok(data)
     }
 }
@@ -63,7 +63,7 @@ mod tests {
     #[test]
     fn test_serialize_null() {
         let serializer = ByteArraySerializer::new();
-        let result: Result<Option<Vec<u8>>, KafkaError> = Serializer::<[u8]>::serialize(&serializer, "topic", None);
+        let result: Result<Option<Vec<u8>>, Error> = Serializer::<[u8]>::serialize(&serializer, "topic", None);
         assert_eq!(result.unwrap(), None);
     }
 

@@ -21,52 +21,53 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::time::Duration;
 
+use confluent_kafka::admin::ConfigEntryOptionsBuilder;
+use confluent_kafka::admin::config_entry::{ConfigSource, ConfigType};
 use confluent_kafka::admin::{
     AbortTransactionOptions, AbortTransactionSpec, Admin, AdminClientConfig, AlterClientQuotasOptions, AlterConfigOp,
     AlterConfigsOptions, AlterConsumerGroupOffsetsOptions, AlterPartitionReassignmentsOptions,
     AlterReplicaLogDirsOptions, AlterUserScramCredentialsOptions, ClassicGroupDescription, Config, ConfigEntry,
-    ConfigSource, ConfigType, ConsumerGroupDescription, CreateAclsOptions, CreateDelegationTokenOptions,
-    CreatePartitionsOptions, CreateTopicsOptions, CreateTopicsResult, DeleteAclsOptions,
-    DeleteConsumerGroupOffsetsOptions, DeleteConsumerGroupsOptions, DeleteRecordsOptions, DeleteTopicsOptions,
-    DeletedRecords, DescribeAclsOptions, DescribeClassicGroupsOptions, DescribeClientQuotasOptions,
-    DescribeClusterOptions, DescribeConfigsOptions, DescribeConsumerGroupsOptions, DescribeDelegationTokenOptions,
-    DescribeFeaturesOptions, DescribeLogDirsOptions, DescribeProducersOptions, DescribeReplicaLogDirsOptions,
-    DescribeTopicsOptions, DescribeTransactionsOptions, DescribeUserScramCredentialsOptions, ElectLeadersOptions,
-    ExpireDelegationTokenOptions, FeatureUpdate, FenceProducersOptions, FilterResults, FinalizedVersionRange,
-    GroupListing, GroupOffsets, ListConfigResourcesOptions, ListConsumerGroupOffsetsOptions,
-    ListConsumerGroupOffsetsSpec, ListGroupsOptions, ListOffsetsOptions, ListOffsetsResultInfo,
-    ListPartitionReassignmentsOptions, ListTopicsOptions, ListTransactionsOptions, LogDirDescription, MockAdminClient,
-    NewPartitionReassignment, NewPartitions, NewTopic, OffsetSpec, PartitionProducerState, PartitionReassignment,
-    RecordsToDelete, RemoveMembersFromConsumerGroupOptions, RenewDelegationTokenOptions, SupportedVersionRange,
-    TerminateTransactionOptions, TopicDescription, TopicListing, TopicMetadataAndConfig, TransactionDescription,
-    TransactionListing, UpdateFeaturesOptions, UserScramCredentialAlteration, UserScramCredentialsDescription,
-    new_admin_client,
+    ConsumerGroupDescription, CreateAclsOptions, CreateDelegationTokenOptions, CreatePartitionsOptions,
+    CreateTopicsOptions, CreateTopicsResult, DeleteAclsOptions, DeleteConsumerGroupOffsetsOptions,
+    DeleteConsumerGroupsOptions, DeleteRecordsOptions, DeleteTopicsOptions, DeletedRecords, DescribeAclsOptions,
+    DescribeClassicGroupsOptions, DescribeClientQuotasOptions, DescribeClusterOptions, DescribeConfigsOptions,
+    DescribeConsumerGroupsOptions, DescribeDelegationTokenOptions, DescribeFeaturesOptions, DescribeLogDirsOptions,
+    DescribeProducersOptions, DescribeReplicaLogDirsOptions, DescribeTopicsOptions, DescribeTransactionsOptions,
+    DescribeUserScramCredentialsOptions, ElectLeadersOptions, ExpireDelegationTokenOptions, FeatureUpdate,
+    FenceProducersOptions, FilterResults, FinalizedVersionRange, GroupListing, GroupOffsets, KafkaAdminClient,
+    ListConfigResourcesOptions, ListConsumerGroupOffsetsOptions, ListConsumerGroupOffsetsSpec, ListGroupsOptions,
+    ListOffsetsOptions, ListOffsetsResultInfo, ListPartitionReassignmentsOptions, ListTopicsOptions,
+    ListTransactionsOptions, LogDirDescription, MockAdminClient, NewPartitionReassignment, NewPartitions, NewTopic,
+    OffsetSpec, PartitionProducerState, PartitionReassignment, RecordsToDelete, RemoveMembersFromConsumerGroupOptions,
+    RenewDelegationTokenOptions, SupportedVersionRange, TerminateTransactionOptions, TopicDescription, TopicListing,
+    TopicMetadataAndConfig, TransactionDescription, TransactionListing, UpdateFeaturesOptions,
+    UserScramCredentialAlteration, UserScramCredentialsDescription,
 };
 #[allow(deprecated)]
 use confluent_kafka::admin::{
     ClientMetricsResourceListing, ConsumerGroupListing, ListClientMetricsResourcesOptions, ListConsumerGroupsOptions,
 };
+use confluent_kafka::common::Errors;
 use confluent_kafka::common::acl::{AclBinding, AclBindingFilter, AclOperation};
 use confluent_kafka::common::config::{ConfigResource, ConfigResourceType};
-use confluent_kafka::common::protocol::Errors;
 use confluent_kafka::common::quota::{ClientQuotaAlteration, ClientQuotaEntity, ClientQuotaFilter};
 use confluent_kafka::common::security::token::delegation::DelegationToken;
 use confluent_kafka::common::utils::ProducerIdAndEpoch;
 use confluent_kafka::common::{
-    ElectionType, KafkaError, KafkaFuture, Node, TopicCollection, TopicPartition, TopicPartitionReplica, Uuid,
+    ElectionType, Error, KafkaFuture, Node, TopicCollection, TopicPartition, TopicPartitionReplica, Uuid,
 };
 use confluent_kafka::consumer::OffsetAndMetadata;
 
 use crate::common::backend_factory::AdminBackendFactory;
 use crate::common::test_context::TestContext;
 use crate::common::test_utils::{
-    DEFAULT_PAUSE_MS, TOPIC_METADATA_PROPAGATION_WAIT_MS, retry_on_exception_with_timeout, wait_until_true_with_timeout,
+    DEFAULT_PAUSE_MS, TOPIC_METADATA_PROPAGATION_WAIT_MS, retry_on_error_with_timeout, wait_until_true_with_timeout,
 };
 
 /// Timeout that stands for Java's no-argument `Admin.close()`, which delegates
 /// to `close(Duration.ofMillis(Long.MAX_VALUE))`. Same convention the C FFI
-/// uses for a negative `timeout_ms` (`src/ffi/admin.rs::close_timeout`).
-fn close_timeout(timeout: Option<Duration>) -> Duration {
+/// uses for a negative `timeout_ms` (`src/ffi/admin.rs::close_with_timeout`).
+fn close_with_timeout(timeout: Option<Duration>) -> Duration {
     timeout.unwrap_or_else(|| Duration::from_millis(i64::MAX as u64))
 }
 
@@ -102,7 +103,7 @@ fn close_timeout(timeout: Option<Duration>) -> Duration {
 /// entry points fire their callback with a fully-built result struct), so
 /// already-resolved plain data is the honest wire shape rather than a
 /// simplification. Per-key granularity is still asserted — later slices carry it
-/// as `HashMap<K, Result<V, KafkaError>>` rather than as futures.
+/// as `HashMap<K, Result<V, Error>>` rather than as futures.
 ///
 /// Knowingly accepted consequence: the harness cannot assert that an Admin
 /// method *returns before* its futures resolve. That property is untestable
@@ -121,7 +122,7 @@ fn close_timeout(timeout: Option<Duration>) -> Duration {
 /// mechanical; a method that departs from them forces its call sites to be
 /// restructured.
 ///
-///   1. **Per-key methods return `HashMap<K, Result<V, KafkaError>>`.** Today a
+///   1. **Per-key methods return `HashMap<K, Result<V, Error>>`.** Today a
 ///      body reads one key out of a per-key accessor and awaits it —
 ///      `result.values()[&topic].get().await`,
 ///      `result.topic_name_values().unwrap()[&topic].get().await`,
@@ -158,56 +159,56 @@ pub trait AdminBackend {
         &self,
         new_topics: &[NewTopic],
         options: CreateTopicsOptions,
-    ) -> Result<Outcomes<String, TopicMetadataAndConfig>, KafkaError>;
+    ) -> Result<Outcomes<String, TopicMetadataAndConfig>, Error>;
 
     /// Delete topics by name (`TopicCollection::of_topic_names`).
     async fn delete_topics(
         &self,
         names: &[String],
         options: DeleteTopicsOptions,
-    ) -> Result<Outcomes<String, ()>, KafkaError>;
+    ) -> Result<Outcomes<String, ()>, Error>;
 
     /// Delete topics by id (`TopicCollection::of_topic_ids`).
     async fn delete_topics_by_ids(
         &self,
         topic_ids: &[Uuid],
         options: DeleteTopicsOptions,
-    ) -> Result<Outcomes<Uuid, ()>, KafkaError>;
+    ) -> Result<Outcomes<Uuid, ()>, Error>;
 
     /// List the topics in the cluster, keyed by topic name.
     ///
     /// Not an [`Outcomes`]: Java's `ListTopicsResult` holds one
     /// `KafkaFuture<Map<String, TopicListing>>`, so an individual listing can
     /// never fail. `names()` is this map's key set and `listings()` its values.
-    async fn list_topics(&self, options: ListTopicsOptions) -> Result<HashMap<String, TopicListing>, KafkaError>;
+    async fn list_topics(&self, options: ListTopicsOptions) -> Result<HashMap<String, TopicListing>, Error>;
 
     /// Describe topics by name (`TopicCollection::of_topic_names`).
-    async fn describe_topics(
+    async fn describe_topics_with_topics(
         &self,
         names: &[String],
         options: DescribeTopicsOptions,
-    ) -> Result<Outcomes<String, TopicDescription>, KafkaError>;
+    ) -> Result<Outcomes<String, TopicDescription>, Error>;
 
     /// Describe topics by id (`TopicCollection::of_topic_ids`).
     async fn describe_topics_by_ids(
         &self,
         topic_ids: &[Uuid],
         options: DescribeTopicsOptions,
-    ) -> Result<Outcomes<Uuid, TopicDescription>, KafkaError>;
+    ) -> Result<Outcomes<Uuid, TopicDescription>, Error>;
 
     /// Increase the partition counts of the given topics.
     async fn create_partitions(
         &self,
         new_partitions: &HashMap<String, NewPartitions>,
         options: CreatePartitionsOptions,
-    ) -> Result<Outcomes<String, ()>, KafkaError>;
+    ) -> Result<Outcomes<String, ()>, Error>;
 
     /// Delete records before the given offset of each partition.
     async fn delete_records(
         &self,
         records_to_delete: &HashMap<TopicPartition, RecordsToDelete>,
         options: DeleteRecordsOptions,
-    ) -> Result<Outcomes<TopicPartition, DeletedRecords>, KafkaError>;
+    ) -> Result<Outcomes<TopicPartition, DeletedRecords>, Error>;
 
     /// Describe the cluster: its id, brokers, controller and (optionally) the
     /// operations the caller is authorized to perform on it.
@@ -217,7 +218,7 @@ pub trait AdminBackend {
     /// any failure is a whole-call failure — which is exactly what both bindings
     /// do (`ClusterDescription` in `admin.py`, the four direct attribute
     /// accessors on `kafka_admin_DescribeClusterResult_t`).
-    async fn describe_cluster(&self, options: DescribeClusterOptions) -> Result<ClusterDescription, KafkaError>;
+    async fn describe_cluster(&self, options: DescribeClusterOptions) -> Result<ClusterDescription, Error>;
 
     /// Describe the configuration of each resource.
     ///
@@ -227,14 +228,14 @@ pub trait AdminBackend {
         &self,
         resources: &[ConfigResource],
         options: DescribeConfigsOptions,
-    ) -> Result<Outcomes<ConfigResource, ConfigView>, KafkaError>;
+    ) -> Result<Outcomes<ConfigResource, ConfigView>, Error>;
 
     /// Incrementally alter the configuration of each resource.
     async fn incremental_alter_configs(
         &self,
         configs: &HashMap<ConfigResource, Vec<AlterConfigOp>>,
         options: AlterConfigsOptions,
-    ) -> Result<Outcomes<ConfigResource, ()>, KafkaError>;
+    ) -> Result<Outcomes<ConfigResource, ()>, Error>;
 
     /// List the cluster's config resources whose type is in
     /// `config_resource_types`; an empty set requests every supported type.
@@ -245,7 +246,7 @@ pub trait AdminBackend {
         &self,
         config_resource_types: &HashSet<ConfigResourceType>,
         options: ListConfigResourcesOptions,
-    ) -> Result<Vec<ConfigResource>, KafkaError>;
+    ) -> Result<Vec<ConfigResource>, Error>;
 
     /// List the cluster's client-metrics resources (KIP-714).
     ///
@@ -257,7 +258,7 @@ pub trait AdminBackend {
     async fn list_client_metrics_resources(
         &self,
         options: ListClientMetricsResourcesOptions,
-    ) -> Result<Vec<ClientMetricsResourceListing>, KafkaError>;
+    ) -> Result<Vec<ClientMetricsResourceListing>, Error>;
 
     /// Query the log directories of each broker.
     ///
@@ -271,14 +272,14 @@ pub trait AdminBackend {
         &self,
         brokers: &[i32],
         options: DescribeLogDirsOptions,
-    ) -> Result<Outcomes<i32, HashMap<String, LogDirDescription>>, KafkaError>;
+    ) -> Result<Outcomes<i32, HashMap<String, LogDirDescription>>, Error>;
 
     /// Move each replica to the given log directory.
     async fn alter_replica_log_dirs(
         &self,
         replica_assignment: &HashMap<TopicPartitionReplica, String>,
         options: AlterReplicaLogDirsOptions,
-    ) -> Result<Outcomes<TopicPartitionReplica, ()>, KafkaError>;
+    ) -> Result<Outcomes<TopicPartitionReplica, ()>, Error>;
 
     /// Query which log directory hosts each replica, and which one it is moving
     /// to.
@@ -289,7 +290,7 @@ pub trait AdminBackend {
         &self,
         replicas: &[TopicPartitionReplica],
         options: DescribeReplicaLogDirsOptions,
-    ) -> Result<Outcomes<TopicPartitionReplica, ReplicaLogDirInfoView>, KafkaError>;
+    ) -> Result<Outcomes<TopicPartitionReplica, ReplicaLogDirInfoView>, Error>;
 
     /// Elect a leader for each of `partitions`, or for **every** partition in
     /// the cluster when `partitions` is `None` (Java's null `Set`).
@@ -313,7 +314,7 @@ pub trait AdminBackend {
         election_type: ElectionType,
         partitions: Option<HashSet<TopicPartition>>,
         options: ElectLeadersOptions,
-    ) -> Result<Outcomes<TopicPartition, ()>, KafkaError>;
+    ) -> Result<Outcomes<TopicPartition, ()>, Error>;
 
     /// Start or cancel a reassignment of each partition's replica set.
     ///
@@ -326,7 +327,7 @@ pub trait AdminBackend {
         &self,
         reassignments: &HashMap<TopicPartition, Option<NewPartitionReassignment>>,
         options: AlterPartitionReassignmentsOptions,
-    ) -> Result<Outcomes<TopicPartition, ()>, KafkaError>;
+    ) -> Result<Outcomes<TopicPartition, ()>, Error>;
 
     /// List the ongoing partition reassignments, restricted to `partitions` or
     /// over the whole cluster when it is `None` (Java's `Optional.empty()`).
@@ -340,7 +341,7 @@ pub trait AdminBackend {
         &self,
         partitions: Option<HashSet<TopicPartition>>,
         options: ListPartitionReassignmentsOptions,
-    ) -> Result<HashMap<TopicPartition, PartitionReassignment>, KafkaError>;
+    ) -> Result<HashMap<TopicPartition, PartitionReassignment>, Error>;
 
     /// Look up one offset per partition, each selected by an [`OffsetSpec`].
     ///
@@ -352,7 +353,7 @@ pub trait AdminBackend {
         &self,
         topic_partition_offsets: &HashMap<TopicPartition, OffsetSpec>,
         options: ListOffsetsOptions,
-    ) -> Result<Outcomes<TopicPartition, ListOffsetsResultInfo>, KafkaError>;
+    ) -> Result<Outcomes<TopicPartition, ListOffsetsResultInfo>, Error>;
 
     /// List every group in the cluster.
     ///
@@ -360,7 +361,7 @@ pub trait AdminBackend {
     /// splits **one** future into `valid()` listings and an *unkeyed* `errors()`
     /// collection, and the two are independent — a partial success has both
     /// non-empty. See [`Listings`].
-    async fn list_groups(&self, options: ListGroupsOptions) -> Result<Listings<GroupListing>, KafkaError>;
+    async fn list_groups(&self, options: ListGroupsOptions) -> Result<Listings<GroupListing>, Error>;
 
     /// List the consumer groups in the cluster.
     ///
@@ -371,21 +372,21 @@ pub trait AdminBackend {
     async fn list_consumer_groups(
         &self,
         options: ListConsumerGroupsOptions,
-    ) -> Result<Listings<ConsumerGroupListing>, KafkaError>;
+    ) -> Result<Listings<ConsumerGroupListing>, Error>;
 
     /// Describe the given groups, classic or KIP-848 consumer protocol.
     async fn describe_consumer_groups(
         &self,
         group_ids: &[String],
         options: DescribeConsumerGroupsOptions,
-    ) -> Result<Outcomes<String, ConsumerGroupDescription>, KafkaError>;
+    ) -> Result<Outcomes<String, ConsumerGroupDescription>, Error>;
 
     /// Describe the given groups, classic protocol only.
     async fn describe_classic_groups(
         &self,
         group_ids: &[String],
         options: DescribeClassicGroupsOptions,
-    ) -> Result<Outcomes<String, ClassicGroupDescription>, KafkaError>;
+    ) -> Result<Outcomes<String, ClassicGroupDescription>, Error>;
 
     /// List each group's committed offsets.
     ///
@@ -395,11 +396,11 @@ pub trait AdminBackend {
     /// partition, which is not a committed offset of 0. Same two-level shape as
     /// [`AdminBackend::describe_log_dirs`], and not the
     /// value-carries-its-own-error case — no level of this value holds an error.
-    async fn list_consumer_group_offsets(
+    async fn list_consumer_group_offsets_with_group_specs(
         &self,
         group_specs: &HashMap<String, ListConsumerGroupOffsetsSpec>,
         options: ListConsumerGroupOffsetsOptions,
-    ) -> Result<Outcomes<String, GroupOffsets>, KafkaError>;
+    ) -> Result<Outcomes<String, GroupOffsets>, Error>;
 
     /// Commit offsets on behalf of `group_id`.
     ///
@@ -414,7 +415,7 @@ pub trait AdminBackend {
         group_id: &str,
         offsets: &HashMap<TopicPartition, OffsetAndMetadata>,
         options: AlterConsumerGroupOffsetsOptions,
-    ) -> Result<Outcomes<TopicPartition, ()>, KafkaError>;
+    ) -> Result<Outcomes<TopicPartition, ()>, Error>;
 
     /// Delete `group_id`'s committed offsets for `partitions`.
     ///
@@ -425,7 +426,7 @@ pub trait AdminBackend {
         group_id: &str,
         partitions: &HashSet<TopicPartition>,
         options: DeleteConsumerGroupOffsetsOptions,
-    ) -> Result<Outcomes<TopicPartition, ()>, KafkaError>;
+    ) -> Result<Outcomes<TopicPartition, ()>, Error>;
 
     /// Delete the given groups. Per-group void, with one future per key, so the
     /// outer `Err` has its ordinary narrow meaning.
@@ -433,7 +434,7 @@ pub trait AdminBackend {
         &self,
         group_ids: &[String],
         options: DeleteConsumerGroupsOptions,
-    ) -> Result<Outcomes<String, ()>, KafkaError>;
+    ) -> Result<Outcomes<String, ()>, Error>;
 
     /// Remove members from `group_id`, keyed by `group.instance.id`.
     ///
@@ -454,7 +455,7 @@ pub trait AdminBackend {
         &self,
         group_id: &str,
         options: RemoveMembersFromConsumerGroupOptions,
-    ) -> Result<Outcomes<String, ()>, KafkaError>;
+    ) -> Result<Outcomes<String, ()>, Error>;
 
     /// Create the given ACL bindings, keyed by the binding itself.
     ///
@@ -465,7 +466,7 @@ pub trait AdminBackend {
         &self,
         acls: &[AclBinding],
         options: CreateAclsOptions,
-    ) -> Result<Outcomes<AclBinding, ()>, KafkaError>;
+    ) -> Result<Outcomes<AclBinding, ()>, Error>;
 
     /// List the ACL bindings matching `filter`.
     ///
@@ -476,7 +477,7 @@ pub trait AdminBackend {
         &self,
         filter: &AclBindingFilter,
         options: DescribeAclsOptions,
-    ) -> Result<Vec<AclBinding>, KafkaError>;
+    ) -> Result<Vec<AclBinding>, Error>;
 
     /// Delete every ACL matching each filter, keyed by the filter.
     ///
@@ -491,7 +492,7 @@ pub trait AdminBackend {
         &self,
         filters: &[AclBindingFilter],
         options: DeleteAclsOptions,
-    ) -> Result<Outcomes<AclBindingFilter, FilterResults>, KafkaError>;
+    ) -> Result<Outcomes<AclBindingFilter, FilterResults>, Error>;
 
     /// Describe the client quotas matching `filter`, keyed by entity.
     ///
@@ -504,7 +505,7 @@ pub trait AdminBackend {
         &self,
         filter: &ClientQuotaFilter,
         options: DescribeClientQuotasOptions,
-    ) -> Result<HashMap<ClientQuotaEntity, HashMap<String, f64>>, KafkaError>;
+    ) -> Result<HashMap<ClientQuotaEntity, HashMap<String, f64>>, Error>;
 
     /// Apply each entity's quota changes. Per-entity void, with one future per
     /// key, so the outer `Err` has its ordinary narrow meaning.
@@ -516,7 +517,7 @@ pub trait AdminBackend {
         &self,
         entries: &[ClientQuotaAlteration],
         options: AlterClientQuotasOptions,
-    ) -> Result<Outcomes<ClientQuotaEntity, ()>, KafkaError>;
+    ) -> Result<Outcomes<ClientQuotaEntity, ()>, Error>;
 
     /// Describe each user's SCRAM credentials, keyed by user name. An empty
     /// `users` requests every user, which is Java's no-argument overload.
@@ -534,7 +535,7 @@ pub trait AdminBackend {
         &self,
         users: &[String],
         options: DescribeUserScramCredentialsOptions,
-    ) -> Result<Outcomes<String, UserScramCredentialsDescription>, KafkaError>;
+    ) -> Result<Outcomes<String, UserScramCredentialsDescription>, Error>;
 
     /// Apply each SCRAM credential upsertion / deletion. Per-user void, one
     /// future per key.
@@ -542,61 +543,50 @@ pub trait AdminBackend {
         &self,
         alterations: &[UserScramCredentialAlteration],
         options: AlterUserScramCredentialsOptions,
-    ) -> Result<Outcomes<String, ()>, KafkaError>;
+    ) -> Result<Outcomes<String, ()>, Error>;
 
     /// Create a delegation token.
     ///
     /// Not an [`Outcomes`]: `CreateDelegationTokenResult` holds a single
     /// `KafkaFuture<DelegationToken>`.
-    async fn create_delegation_token(
-        &self,
-        options: CreateDelegationTokenOptions,
-    ) -> Result<DelegationToken, KafkaError>;
+    async fn create_delegation_token(&self, options: CreateDelegationTokenOptions) -> Result<DelegationToken, Error>;
 
     /// Renew the token identified by `hmac`, returning its new expiry timestamp.
-    async fn renew_delegation_token(
-        &self,
-        hmac: &[u8],
-        options: RenewDelegationTokenOptions,
-    ) -> Result<i64, KafkaError>;
+    async fn renew_delegation_token(&self, hmac: &[u8], options: RenewDelegationTokenOptions) -> Result<i64, Error>;
 
     /// Expire the token identified by `hmac`, returning the expiry timestamp.
     ///
     /// An `expiry_time_period_ms` of -1 means *expire immediately* rather than
     /// "use the broker default", which is the sentinel the other two token
     /// options use.
-    async fn expire_delegation_token(
-        &self,
-        hmac: &[u8],
-        options: ExpireDelegationTokenOptions,
-    ) -> Result<i64, KafkaError>;
+    async fn expire_delegation_token(&self, hmac: &[u8], options: ExpireDelegationTokenOptions) -> Result<i64, Error>;
 
     /// List the delegation tokens the caller may see, optionally filtered by
     /// owner (`options.owners()`; `None` is Java's unset filter).
     async fn describe_delegation_token(
         &self,
         options: DescribeDelegationTokenOptions,
-    ) -> Result<Vec<DelegationToken>, KafkaError>;
+    ) -> Result<Vec<DelegationToken>, Error>;
 
     /// Describe the cluster's supported and finalized feature versions.
     ///
     /// The value is [`FeatureMetadataView`] rather than the production
     /// `FeatureMetadata`; see there for why.
-    async fn describe_features(&self, options: DescribeFeaturesOptions) -> Result<FeatureMetadataView, KafkaError>;
+    async fn describe_features(&self, options: DescribeFeaturesOptions) -> Result<FeatureMetadataView, Error>;
 
     /// Raise (or downgrade) the finalized level of each feature. Per-feature
     /// void, one future per key.
     ///
     /// The outer `Err` also carries a *synchronous* failure, which this is the
     /// only RPC in the harness to have: the Rust `Admin::update_features` returns
-    /// `Result<UpdateFeaturesResult, KafkaError>` because Java's `updateFeatures`
+    /// `Result<UpdateFeaturesResult, Error>` because Java's `updateFeatures`
     /// throws `IllegalArgumentException` for an empty map or a blank feature
     /// name, before any future exists.
     async fn update_features(
         &self,
         feature_updates: &HashMap<String, FeatureUpdate>,
         options: UpdateFeaturesOptions,
-    ) -> Result<Outcomes<String, ()>, KafkaError>;
+    ) -> Result<Outcomes<String, ()>, Error>;
 
     /// Describe the active producers of each partition.
     ///
@@ -608,14 +598,14 @@ pub trait AdminBackend {
         &self,
         partitions: &[TopicPartition],
         options: DescribeProducersOptions,
-    ) -> Result<Outcomes<TopicPartition, PartitionProducerState>, KafkaError>;
+    ) -> Result<Outcomes<TopicPartition, PartitionProducerState>, Error>;
 
     /// Describe each transactional id's current transaction.
     async fn describe_transactions(
         &self,
         transactional_ids: &[String],
         options: DescribeTransactionsOptions,
-    ) -> Result<Outcomes<String, TransactionDescription>, KafkaError>;
+    ) -> Result<Outcomes<String, TransactionDescription>, Error>;
 
     /// Abort the transaction described by `spec` on its partition.
     ///
@@ -629,7 +619,7 @@ pub trait AdminBackend {
         &self,
         spec: AbortTransactionSpec,
         options: AbortTransactionOptions,
-    ) -> Result<(), KafkaError>;
+    ) -> Result<(), Error>;
 
     /// Forcibly terminate `transactional_id`'s ongoing transaction.
     ///
@@ -640,7 +630,7 @@ pub trait AdminBackend {
         &self,
         transactional_id: &str,
         options: TerminateTransactionOptions,
-    ) -> Result<(), KafkaError>;
+    ) -> Result<(), Error>;
 
     /// List the cluster's transactions, keyed by the broker that reported them.
     ///
@@ -654,7 +644,7 @@ pub trait AdminBackend {
     async fn list_transactions(
         &self,
         options: ListTransactionsOptions,
-    ) -> Result<Outcomes<i32, Vec<TransactionListing>>, KafkaError>;
+    ) -> Result<Outcomes<i32, Vec<TransactionListing>>, Error>;
 
     /// Fence out any producer currently using each transactional id, returning
     /// the newly allocated producer id and epoch.
@@ -668,7 +658,7 @@ pub trait AdminBackend {
         &self,
         transactional_ids: &[String],
         options: FenceProducersOptions,
-    ) -> Result<Outcomes<String, ProducerIdAndEpoch>, KafkaError>;
+    ) -> Result<Outcomes<String, ProducerIdAndEpoch>, Error>;
 
     /// Close the admin client, joining its background task.
     ///
@@ -677,7 +667,7 @@ pub trait AdminBackend {
     /// `Result` here exists because the gRPC backends can fail at the transport
     /// or binding level, which is a harness failure the scenario must see rather
     /// than a Kafka-level error.
-    async fn close(&self, timeout: Option<Duration>) -> Result<(), KafkaError>;
+    async fn close(&self, timeout: Option<Duration>) -> Result<(), Error>;
 
     /// Short backend label used in assertion messages.
     fn name(&self) -> &'static str;
@@ -689,7 +679,7 @@ pub trait AdminBackend {
 /// precedes any per-key future (a synchronous throw, an unknown handle, a
 /// transport error); this map is what a Java caller would read out of the
 /// `*Result`'s per-key `KafkaFuture`s.
-pub type Outcomes<K, V> = HashMap<K, Result<V, KafkaError>>;
+pub type Outcomes<K, V> = HashMap<K, Result<V, Error>>;
 
 /// The already-resolved outcome of an RPC whose Java `*Result` splits **one**
 /// future into `valid()` and an *unkeyed* `errors()` collection: `listGroups` and
@@ -701,7 +691,7 @@ pub type Outcomes<K, V> = HashMap<K, Result<V, KafkaError>>;
 /// `errors()`) over a single `KafkaFuture<Collection<Object>>`, so there is no
 /// class to translate — but there is nothing to key either, which rules out
 /// [`Outcomes`]. Both bindings already collapse the pair exactly this way:
-/// `admin.py`'s `list_groups` returns `([GroupListing], [KafkaError])` and the C
+/// `admin.py`'s `list_groups` returns `([GroupListing], [Error])` and the C
 /// handle exposes `_valid_count` / `_get_valid` next to `_error_count` /
 /// `_get_error` as two independent lists. So this is the honest resolved shape,
 /// and it is convention #4 of [`AdminBackend`] applied to a split rather than to
@@ -712,7 +702,7 @@ pub type Outcomes<K, V> = HashMap<K, Result<V, KafkaError>>;
 /// another failed) has both non-empty and of unrelated lengths. Java's `all()` is
 /// the fold that fails if `errors` is non-empty, which [`Listings::all`]
 /// provides.
-// No `PartialEq`: `KafkaError` is not comparable (it carries a message and a
+// No `PartialEq`: `Error` is not comparable (it carries a message and a
 // source), so `errors` cannot be. Scenarios compare `valid` and read
 // `errors`' codes.
 #[derive(Clone, Debug)]
@@ -720,7 +710,7 @@ pub struct Listings<T> {
     /// Java `valid()`.
     pub valid: Vec<T>,
     /// Java `errors()`, unkeyed.
-    pub errors: Vec<KafkaError>,
+    pub errors: Vec<Error>,
 }
 
 impl<T> Listings<T> {
@@ -731,7 +721,7 @@ impl<T> Listings<T> {
     /// specifying which; this picks the first, and because the fold runs
     /// identically for all four backends over the same pair it cannot make
     /// backends disagree. Same reasoning as [`all_of`].
-    pub fn all(&self) -> Result<&[T], KafkaError> {
+    pub fn all(&self) -> Result<&[T], Error> {
         match self.errors.first() {
             Some(error) => Err(error.clone()),
             None => Ok(&self.valid),
@@ -757,7 +747,7 @@ impl<T> Listings<T> {
 /// assertion prints. A scenario that must assert a *particular* key's error
 /// reads that key out of the map instead, which every converted body that cares
 /// does.
-pub fn all_of<K, V>(outcomes: &Outcomes<K, V>) -> Result<(), KafkaError> {
+pub fn all_of<K, V>(outcomes: &Outcomes<K, V>) -> Result<(), Error> {
     for outcome in outcomes.values() {
         if let Err(e) = outcome {
             return Err(e.clone());
@@ -836,17 +826,17 @@ where
 // `ClientQuotaFilterComponent::{of_entity, of_default_entity, of_entity_type}`,
 // `ClientQuotaAlteration::new`, `Op::new`, `ScramCredentialInfo::new`,
 // `UserScramCredentialsDescription::new`, `FilterResult::new`,
-// `FilterResults::new`, `DelegationToken::new`, `TokenInformation::with_requester`,
+// `FilterResults::new`, `DelegationToken::new`, `TokenInformation::with_token_requester`,
 // `KafkaPrincipal::with_token_authenticated`, `SupportedVersionRange::new` and
 // `FinalizedVersionRange::new` are all public. (`ClientQuotaFilter::new` is
 // private, but it is an *input* the harness only reads, and its three public
 // factories cover both `strict` values.)
 //
 // Slice G4 added none either, for the same reason: `GroupListing::new`,
-// `ConsumerGroupListing::new`, `ConsumerGroupDescription::new`,
+// `ConsumerGroupListing::with_group_state_group_type`, `ConsumerGroupDescription::new`,
 // `ClassicGroupDescription::new`, `MemberDescription::new`,
 // `MemberAssignment::new`, `MemberToRemove::new` and
-// `OffsetAndMetadata::{new, with_metadata, with_leader_epoch}` are all public, so
+// `OffsetAndMetadata::{new, new_metadata, new_leader_epoch_metadata}` are all public, so
 // the nine group RPCs cross entirely as production types. It did add
 // [`Listings`], but that is not a stand-in for an unreachable constructor — it is
 // the resolved form of a Java result shape that has no class at all.
@@ -898,7 +888,7 @@ pub struct ConfigSynonymView {
 /// One configuration entry as `describeConfigs` reports it, standing in for the
 /// production [`ConfigEntry`].
 ///
-/// The blocker is [`ConfigSynonymView`]: `ConfigEntry::with_metadata` is public
+/// The blocker is [`ConfigSynonymView`]: `ConfigEntry::with_options` is public
 /// but takes `Vec<ConfigSynonym>`, whose constructor is not. Dropping synonyms
 /// to keep the production type was rejected — `describeConfigs` reports all nine
 /// `ConfigEntry` fields through *every* binding (`kafka_admin_ConfigEntry_*`,
@@ -1081,9 +1071,9 @@ pub struct RustNativeAdmin {
 
 impl RustNativeAdmin {
     /// Build a network-backed admin client from `config`.
-    pub fn from_config(config: &HashMap<String, String>) -> Result<Self, KafkaError> {
-        let config = AdminClientConfig::from_properties(config)?;
-        Ok(Self { admin: new_admin_client(config)? })
+    pub fn from_config(config: &HashMap<String, String>) -> Result<Self, Error> {
+        let config = AdminClientConfig::new(config)?;
+        Ok(Self { admin: Box::new(KafkaAdminClient::new(config)?) })
     }
 
     /// Build a broker-less [`MockAdminClient`] with `num_brokers` brokers.
@@ -1092,7 +1082,7 @@ impl RustNativeAdmin {
     ///
     /// Propagates [`MockAdminClient::create`]'s rejection of `num_brokers < 1`,
     /// which is Java's `brokers.get(0)` throw.
-    pub fn mock(num_brokers: i32) -> Result<Self, KafkaError> {
+    pub fn mock(num_brokers: i32) -> Result<Self, Error> {
         Ok(Self { admin: Box::new(MockAdminClient::create(num_brokers)?) })
     }
 }
@@ -1102,14 +1092,14 @@ impl AdminBackend for RustNativeAdmin {
         &self,
         new_topics: &[NewTopic],
         options: CreateTopicsOptions,
-    ) -> Result<Outcomes<String, TopicMetadataAndConfig>, KafkaError> {
-        let result = self.admin.create_topics(new_topics, options);
+    ) -> Result<Outcomes<String, TopicMetadataAndConfig>, Error> {
+        let result = self.admin.create_topics_with_options(new_topics, options);
         let mut outcomes = HashMap::new();
         for (name, created) in result.values() {
             // `values()` is Java's `KafkaFuture<Void>` view: it fails only if the
             // creation itself failed. The metadata is a second, independent
             // level — see `metadata_of`.
-            let outcome = match created.get_timeout(NATIVE_FUTURE_TIMEOUT).await {
+            let outcome = match created.get_with_timeout(NATIVE_FUTURE_TIMEOUT).await {
                 Err(e) => Err(e),
                 Ok(()) => Ok(metadata_of(&result, &name).await),
             };
@@ -1122,13 +1112,13 @@ impl AdminBackend for RustNativeAdmin {
         &self,
         names: &[String],
         options: DeleteTopicsOptions,
-    ) -> Result<Outcomes<String, ()>, KafkaError> {
+    ) -> Result<Outcomes<String, ()>, Error> {
         let result = self
             .admin
-            .delete_topics(TopicCollection::of_topic_names(names.to_vec()), options);
-        let values = result
-            .topic_name_values()
-            .ok_or_else(|| KafkaError::illegal_state("deleteTopics(ofTopicNames) did not return name-keyed futures"))?;
+            .delete_topics_with_options(TopicCollection::of_topic_names(names.to_vec()), options);
+        let values = result.topic_name_values().ok_or_else(|| {
+            Error::local_illegal_state("deleteTopics(ofTopicNames) did not return name-keyed futures")
+        })?;
         Ok(resolve(values.iter().map(|(name, f)| (name.clone(), f.clone()))).await)
     }
 
@@ -1136,34 +1126,34 @@ impl AdminBackend for RustNativeAdmin {
         &self,
         topic_ids: &[Uuid],
         options: DeleteTopicsOptions,
-    ) -> Result<Outcomes<Uuid, ()>, KafkaError> {
+    ) -> Result<Outcomes<Uuid, ()>, Error> {
         let result = self
             .admin
-            .delete_topics(TopicCollection::of_topic_ids(topic_ids.to_vec()), options);
+            .delete_topics_with_options(TopicCollection::of_topic_ids(topic_ids.to_vec()), options);
         let values = result
             .topic_id_values()
-            .ok_or_else(|| KafkaError::illegal_state("deleteTopics(ofTopicIds) did not return id-keyed futures"))?;
+            .ok_or_else(|| Error::local_illegal_state("deleteTopics(ofTopicIds) did not return id-keyed futures"))?;
         Ok(resolve(values.iter().map(|(id, f)| (*id, f.clone()))).await)
     }
 
-    async fn list_topics(&self, options: ListTopicsOptions) -> Result<HashMap<String, TopicListing>, KafkaError> {
+    async fn list_topics(&self, options: ListTopicsOptions) -> Result<HashMap<String, TopicListing>, Error> {
         self.admin
-            .list_topics(options)
+            .list_topics_with_options(options)
             .names_to_listings()
-            .get_timeout(NATIVE_FUTURE_TIMEOUT)
+            .get_with_timeout(NATIVE_FUTURE_TIMEOUT)
             .await
     }
 
-    async fn describe_topics(
+    async fn describe_topics_with_topics(
         &self,
         names: &[String],
         options: DescribeTopicsOptions,
-    ) -> Result<Outcomes<String, TopicDescription>, KafkaError> {
+    ) -> Result<Outcomes<String, TopicDescription>, Error> {
         let result = self
             .admin
-            .describe_topics(TopicCollection::of_topic_names(names.to_vec()), options);
+            .describe_topics_with_topics_options(TopicCollection::of_topic_names(names.to_vec()), options);
         let values = result.topic_name_values().ok_or_else(|| {
-            KafkaError::illegal_state("describeTopics(ofTopicNames) did not return name-keyed futures")
+            Error::local_illegal_state("describeTopics(ofTopicNames) did not return name-keyed futures")
         })?;
         Ok(resolve(values.iter().map(|(name, f)| (name.clone(), f.clone()))).await)
     }
@@ -1172,13 +1162,13 @@ impl AdminBackend for RustNativeAdmin {
         &self,
         topic_ids: &[Uuid],
         options: DescribeTopicsOptions,
-    ) -> Result<Outcomes<Uuid, TopicDescription>, KafkaError> {
+    ) -> Result<Outcomes<Uuid, TopicDescription>, Error> {
         let result = self
             .admin
-            .describe_topics(TopicCollection::of_topic_ids(topic_ids.to_vec()), options);
+            .describe_topics_with_topics_options(TopicCollection::of_topic_ids(topic_ids.to_vec()), options);
         let values = result
             .topic_id_values()
-            .ok_or_else(|| KafkaError::illegal_state("describeTopics(ofTopicIds) did not return id-keyed futures"))?;
+            .ok_or_else(|| Error::local_illegal_state("describeTopics(ofTopicIds) did not return id-keyed futures"))?;
         Ok(resolve(values.iter().map(|(id, f)| (*id, f.clone()))).await)
     }
 
@@ -1186,8 +1176,8 @@ impl AdminBackend for RustNativeAdmin {
         &self,
         new_partitions: &HashMap<String, NewPartitions>,
         options: CreatePartitionsOptions,
-    ) -> Result<Outcomes<String, ()>, KafkaError> {
-        let result = self.admin.create_partitions(new_partitions, options);
+    ) -> Result<Outcomes<String, ()>, Error> {
+        let result = self.admin.create_partitions_with_options(new_partitions, options);
         Ok(resolve(result.values().iter().map(|(name, f)| (name.clone(), f.clone()))).await)
     }
 
@@ -1195,21 +1185,21 @@ impl AdminBackend for RustNativeAdmin {
         &self,
         records_to_delete: &HashMap<TopicPartition, RecordsToDelete>,
         options: DeleteRecordsOptions,
-    ) -> Result<Outcomes<TopicPartition, DeletedRecords>, KafkaError> {
-        let result = self.admin.delete_records(records_to_delete, options);
+    ) -> Result<Outcomes<TopicPartition, DeletedRecords>, Error> {
+        let result = self.admin.delete_records_with_options(records_to_delete, options);
         Ok(resolve(result.low_watermarks().iter().map(|(tp, f)| (tp.clone(), f.clone()))).await)
     }
 
-    async fn describe_cluster(&self, options: DescribeClusterOptions) -> Result<ClusterDescription, KafkaError> {
-        let result = self.admin.describe_cluster(options);
+    async fn describe_cluster(&self, options: DescribeClusterOptions) -> Result<ClusterDescription, Error> {
+        let result = self.admin.describe_cluster_with_options(options);
         // All four are awaited before any error is reported, so none is
         // abandoned; when more than one failed, the first in Java's declaration
         // order wins. Identical to the FFI's `submit_describe_cluster`, so the
         // four backends pick the same error out of a multi-failure.
-        let nodes = result.nodes().get_timeout(NATIVE_FUTURE_TIMEOUT).await;
-        let controller = result.controller().get_timeout(NATIVE_FUTURE_TIMEOUT).await;
-        let cluster_id = result.cluster_id().get_timeout(NATIVE_FUTURE_TIMEOUT).await;
-        let authorized_operations = result.authorized_operations().get_timeout(NATIVE_FUTURE_TIMEOUT).await;
+        let nodes = result.nodes().get_with_timeout(NATIVE_FUTURE_TIMEOUT).await;
+        let controller = result.controller().get_with_timeout(NATIVE_FUTURE_TIMEOUT).await;
+        let cluster_id = result.cluster_id().get_with_timeout(NATIVE_FUTURE_TIMEOUT).await;
+        let authorized_operations = result.authorized_operations().get_with_timeout(NATIVE_FUTURE_TIMEOUT).await;
         Ok(ClusterDescription {
             nodes: nodes?,
             controller: controller?,
@@ -1222,14 +1212,14 @@ impl AdminBackend for RustNativeAdmin {
         &self,
         resources: &[ConfigResource],
         options: DescribeConfigsOptions,
-    ) -> Result<Outcomes<ConfigResource, ConfigView>, KafkaError> {
-        let result = self.admin.describe_configs(resources, options);
+    ) -> Result<Outcomes<ConfigResource, ConfigView>, Error> {
+        let result = self.admin.describe_configs_with_options(resources, options);
         let mut outcomes = HashMap::with_capacity(result.values().len());
         for (resource, future) in result.values() {
             outcomes.insert(
                 resource.clone(),
                 future
-                    .get_timeout(NATIVE_FUTURE_TIMEOUT)
+                    .get_with_timeout(NATIVE_FUTURE_TIMEOUT)
                     .await
                     .map(|config| config_view(&config)),
             );
@@ -1241,8 +1231,8 @@ impl AdminBackend for RustNativeAdmin {
         &self,
         configs: &HashMap<ConfigResource, Vec<AlterConfigOp>>,
         options: AlterConfigsOptions,
-    ) -> Result<Outcomes<ConfigResource, ()>, KafkaError> {
-        let result = self.admin.incremental_alter_configs(configs, options);
+    ) -> Result<Outcomes<ConfigResource, ()>, Error> {
+        let result = self.admin.incremental_alter_configs_with_options(configs, options);
         Ok(resolve(result.values().iter().map(|(r, f)| (r.clone(), f.clone()))).await)
     }
 
@@ -1250,11 +1240,11 @@ impl AdminBackend for RustNativeAdmin {
         &self,
         config_resource_types: &HashSet<ConfigResourceType>,
         options: ListConfigResourcesOptions,
-    ) -> Result<Vec<ConfigResource>, KafkaError> {
+    ) -> Result<Vec<ConfigResource>, Error> {
         self.admin
-            .list_config_resources(config_resource_types, options)
+            .list_config_resources_with_options(config_resource_types, options)
             .all()
-            .get_timeout(NATIVE_FUTURE_TIMEOUT)
+            .get_with_timeout(NATIVE_FUTURE_TIMEOUT)
             .await
     }
 
@@ -1262,11 +1252,11 @@ impl AdminBackend for RustNativeAdmin {
     async fn list_client_metrics_resources(
         &self,
         options: ListClientMetricsResourcesOptions,
-    ) -> Result<Vec<ClientMetricsResourceListing>, KafkaError> {
+    ) -> Result<Vec<ClientMetricsResourceListing>, Error> {
         self.admin
-            .list_client_metrics_resources(options)
+            .list_client_metrics_resources_with_options(options)
             .all()
-            .get_timeout(NATIVE_FUTURE_TIMEOUT)
+            .get_with_timeout(NATIVE_FUTURE_TIMEOUT)
             .await
     }
 
@@ -1274,8 +1264,8 @@ impl AdminBackend for RustNativeAdmin {
         &self,
         brokers: &[i32],
         options: DescribeLogDirsOptions,
-    ) -> Result<Outcomes<i32, HashMap<String, LogDirDescription>>, KafkaError> {
-        let result = self.admin.describe_log_dirs(brokers, options);
+    ) -> Result<Outcomes<i32, HashMap<String, LogDirDescription>>, Error> {
+        let result = self.admin.describe_log_dirs_with_options(brokers, options);
         Ok(resolve(result.descriptions().iter().map(|(broker, f)| (*broker, f.clone()))).await)
     }
 
@@ -1283,8 +1273,8 @@ impl AdminBackend for RustNativeAdmin {
         &self,
         replica_assignment: &HashMap<TopicPartitionReplica, String>,
         options: AlterReplicaLogDirsOptions,
-    ) -> Result<Outcomes<TopicPartitionReplica, ()>, KafkaError> {
-        let result = self.admin.alter_replica_log_dirs(replica_assignment, options);
+    ) -> Result<Outcomes<TopicPartitionReplica, ()>, Error> {
+        let result = self.admin.alter_replica_log_dirs_with_options(replica_assignment, options);
         Ok(resolve(result.values().iter().map(|(r, f)| (r.clone(), f.clone()))).await)
     }
 
@@ -1292,12 +1282,12 @@ impl AdminBackend for RustNativeAdmin {
         &self,
         replicas: &[TopicPartitionReplica],
         options: DescribeReplicaLogDirsOptions,
-    ) -> Result<Outcomes<TopicPartitionReplica, ReplicaLogDirInfoView>, KafkaError> {
-        let result = self.admin.describe_replica_log_dirs(replicas, options);
+    ) -> Result<Outcomes<TopicPartitionReplica, ReplicaLogDirInfoView>, Error> {
+        let result = self.admin.describe_replica_log_dirs_with_options(replicas, options);
         let mut outcomes = HashMap::with_capacity(result.values().len());
         for (replica, future) in result.values() {
             let outcome = future
-                .get_timeout(NATIVE_FUTURE_TIMEOUT)
+                .get_with_timeout(NATIVE_FUTURE_TIMEOUT)
                 .await
                 .map(|info| ReplicaLogDirInfoView {
                     current_replica_log_dir: info.current_replica_log_dir().map(str::to_string),
@@ -1315,16 +1305,16 @@ impl AdminBackend for RustNativeAdmin {
         election_type: ElectionType,
         partitions: Option<HashSet<TopicPartition>>,
         options: ElectLeadersOptions,
-    ) -> Result<Outcomes<TopicPartition, ()>, KafkaError> {
+    ) -> Result<Outcomes<TopicPartition, ()>, Error> {
         // One future for the whole map, so its failure is the outer `Err`; the
         // per-partition `Optional<Throwable>` inside becomes the inner `Result`.
         // Same shape as the FFI's `submit_elect_leaders`, which likewise returns
         // `partitions()` unchanged.
         let outcomes = self
             .admin
-            .elect_leaders(election_type, partitions, options)
+            .elect_leaders_with_options(election_type, partitions, options)
             .partitions()
-            .get_timeout(NATIVE_FUTURE_TIMEOUT)
+            .get_with_timeout(NATIVE_FUTURE_TIMEOUT)
             .await?;
         Ok(outcomes
             .into_iter()
@@ -1336,8 +1326,8 @@ impl AdminBackend for RustNativeAdmin {
         &self,
         reassignments: &HashMap<TopicPartition, Option<NewPartitionReassignment>>,
         options: AlterPartitionReassignmentsOptions,
-    ) -> Result<Outcomes<TopicPartition, ()>, KafkaError> {
-        let result = self.admin.alter_partition_reassignments(reassignments, options);
+    ) -> Result<Outcomes<TopicPartition, ()>, Error> {
+        let result = self.admin.alter_partition_reassignments_with_options(reassignments, options);
         Ok(resolve(result.values().iter().map(|(tp, f)| (tp.clone(), f.clone()))).await)
     }
 
@@ -1345,11 +1335,11 @@ impl AdminBackend for RustNativeAdmin {
         &self,
         partitions: Option<HashSet<TopicPartition>>,
         options: ListPartitionReassignmentsOptions,
-    ) -> Result<HashMap<TopicPartition, PartitionReassignment>, KafkaError> {
+    ) -> Result<HashMap<TopicPartition, PartitionReassignment>, Error> {
         self.admin
-            .list_partition_reassignments(partitions, options)
+            .list_partition_reassignments_with_partitions_options(partitions, options)
             .reassignments()
-            .get_timeout(NATIVE_FUTURE_TIMEOUT)
+            .get_with_timeout(NATIVE_FUTURE_TIMEOUT)
             .await
     }
 
@@ -1357,8 +1347,8 @@ impl AdminBackend for RustNativeAdmin {
         &self,
         topic_partition_offsets: &HashMap<TopicPartition, OffsetSpec>,
         options: ListOffsetsOptions,
-    ) -> Result<Outcomes<TopicPartition, ListOffsetsResultInfo>, KafkaError> {
-        let result = self.admin.list_offsets(topic_partition_offsets, options);
+    ) -> Result<Outcomes<TopicPartition, ListOffsetsResultInfo>, Error> {
+        let result = self.admin.list_offsets_with_options(topic_partition_offsets, options);
         // `ListOffsetsResult` exposes its futures through `partitionResult(tp)`
         // rather than as a map, so the *requested* keys drive the collection —
         // and a key the call did not attempt is a whole-call `Err`, not a
@@ -1368,18 +1358,18 @@ impl AdminBackend for RustNativeAdmin {
         for tp in topic_partition_offsets.keys() {
             outcomes.insert(
                 tp.clone(),
-                result.partition_result(tp)?.get_timeout(NATIVE_FUTURE_TIMEOUT).await,
+                result.partition_result(tp)?.get_with_timeout(NATIVE_FUTURE_TIMEOUT).await,
             );
         }
         Ok(outcomes)
     }
 
-    async fn list_groups(&self, options: ListGroupsOptions) -> Result<Listings<GroupListing>, KafkaError> {
-        let result = self.admin.list_groups(options);
+    async fn list_groups(&self, options: ListGroupsOptions) -> Result<Listings<GroupListing>, Error> {
+        let result = self.admin.list_groups_with_options(options);
         // Both views are awaited before either error is reported, so neither is
         // abandoned. Identical to the FFI's `submit_list_groups`.
-        let valid = result.valid().get_timeout(NATIVE_FUTURE_TIMEOUT).await;
-        let errors = result.errors().get_timeout(NATIVE_FUTURE_TIMEOUT).await;
+        let valid = result.valid().get_with_timeout(NATIVE_FUTURE_TIMEOUT).await;
+        let errors = result.errors().get_with_timeout(NATIVE_FUTURE_TIMEOUT).await;
         Ok(Listings { valid: valid?, errors: errors? })
     }
 
@@ -1387,10 +1377,10 @@ impl AdminBackend for RustNativeAdmin {
     async fn list_consumer_groups(
         &self,
         options: ListConsumerGroupsOptions,
-    ) -> Result<Listings<ConsumerGroupListing>, KafkaError> {
-        let result = self.admin.list_consumer_groups(options);
-        let valid = result.valid().get_timeout(NATIVE_FUTURE_TIMEOUT).await;
-        let errors = result.errors().get_timeout(NATIVE_FUTURE_TIMEOUT).await;
+    ) -> Result<Listings<ConsumerGroupListing>, Error> {
+        let result = self.admin.list_consumer_groups_with_options(options);
+        let valid = result.valid().get_with_timeout(NATIVE_FUTURE_TIMEOUT).await;
+        let errors = result.errors().get_with_timeout(NATIVE_FUTURE_TIMEOUT).await;
         Ok(Listings { valid: valid?, errors: errors? })
     }
 
@@ -1398,8 +1388,8 @@ impl AdminBackend for RustNativeAdmin {
         &self,
         group_ids: &[String],
         options: DescribeConsumerGroupsOptions,
-    ) -> Result<Outcomes<String, ConsumerGroupDescription>, KafkaError> {
-        let result = self.admin.describe_consumer_groups(group_ids, options);
+    ) -> Result<Outcomes<String, ConsumerGroupDescription>, Error> {
+        let result = self.admin.describe_consumer_groups_with_options(group_ids, options);
         Ok(resolve(result.described_groups().into_iter()).await)
     }
 
@@ -1407,17 +1397,19 @@ impl AdminBackend for RustNativeAdmin {
         &self,
         group_ids: &[String],
         options: DescribeClassicGroupsOptions,
-    ) -> Result<Outcomes<String, ClassicGroupDescription>, KafkaError> {
-        let result = self.admin.describe_classic_groups(group_ids, options);
+    ) -> Result<Outcomes<String, ClassicGroupDescription>, Error> {
+        let result = self.admin.describe_classic_groups_with_options(group_ids, options);
         Ok(resolve(result.described_groups().into_iter()).await)
     }
 
-    async fn list_consumer_group_offsets(
+    async fn list_consumer_group_offsets_with_group_specs(
         &self,
         group_specs: &HashMap<String, ListConsumerGroupOffsetsSpec>,
         options: ListConsumerGroupOffsetsOptions,
-    ) -> Result<Outcomes<String, GroupOffsets>, KafkaError> {
-        let result = self.admin.list_consumer_group_offsets(group_specs, options);
+    ) -> Result<Outcomes<String, GroupOffsets>, Error> {
+        let result = self
+            .admin
+            .list_consumer_group_offsets_with_group_specs_options(group_specs, options);
         // The *requested* group ids drive the collection, and a group the call
         // did not attempt is a whole-call `Err` rather than a missing entry —
         // Java's `partitionsToOffsetAndMetadata(groupId)` throws
@@ -1427,7 +1419,7 @@ impl AdminBackend for RustNativeAdmin {
         let mut outcomes = HashMap::with_capacity(group_specs.len());
         for group_id in group_specs.keys() {
             let future = result.partitions_to_offset_and_metadata_for_group(group_id)?;
-            outcomes.insert(group_id.clone(), future.get_timeout(NATIVE_FUTURE_TIMEOUT).await);
+            outcomes.insert(group_id.clone(), future.get_with_timeout(NATIVE_FUTURE_TIMEOUT).await);
         }
         Ok(outcomes)
     }
@@ -1437,18 +1429,21 @@ impl AdminBackend for RustNativeAdmin {
         group_id: &str,
         offsets: &HashMap<TopicPartition, OffsetAndMetadata>,
         options: AlterConsumerGroupOffsetsOptions,
-    ) -> Result<Outcomes<TopicPartition, ()>, KafkaError> {
-        let result = self.admin.alter_consumer_group_offsets(group_id, offsets, options);
+    ) -> Result<Outcomes<TopicPartition, ()>, Error> {
+        let result = self.admin.alter_consumer_group_offsets_with_options(group_id, offsets, options);
         if offsets.is_empty() {
             // No per-partition slot exists, so the single future's failure is
             // the only observable. Same branch as the FFI's
             // `submit_alter_consumer_group_offsets`.
-            result.all().get_timeout(NATIVE_FUTURE_TIMEOUT).await?;
+            result.all().get_with_timeout(NATIVE_FUTURE_TIMEOUT).await?;
             return Ok(HashMap::new());
         }
         let mut outcomes = HashMap::with_capacity(offsets.len());
         for tp in offsets.keys() {
-            outcomes.insert(tp.clone(), result.partition_result(tp).get_timeout(NATIVE_FUTURE_TIMEOUT).await);
+            outcomes.insert(
+                tp.clone(),
+                result.partition_result(tp).get_with_timeout(NATIVE_FUTURE_TIMEOUT).await,
+            );
         }
         Ok(outcomes)
     }
@@ -1458,17 +1453,19 @@ impl AdminBackend for RustNativeAdmin {
         group_id: &str,
         partitions: &HashSet<TopicPartition>,
         options: DeleteConsumerGroupOffsetsOptions,
-    ) -> Result<Outcomes<TopicPartition, ()>, KafkaError> {
-        let result = self.admin.delete_consumer_group_offsets(group_id, partitions, options);
+    ) -> Result<Outcomes<TopicPartition, ()>, Error> {
+        let result = self
+            .admin
+            .delete_consumer_group_offsets_with_options(group_id, partitions, options);
         if partitions.is_empty() {
-            result.all().get_timeout(NATIVE_FUTURE_TIMEOUT).await?;
+            result.all().get_with_timeout(NATIVE_FUTURE_TIMEOUT).await?;
             return Ok(HashMap::new());
         }
         let mut outcomes = HashMap::with_capacity(partitions.len());
         for tp in partitions {
             outcomes.insert(
                 tp.clone(),
-                result.partition_result(tp)?.get_timeout(NATIVE_FUTURE_TIMEOUT).await,
+                result.partition_result(tp)?.get_with_timeout(NATIVE_FUTURE_TIMEOUT).await,
             );
         }
         Ok(outcomes)
@@ -1478,8 +1475,8 @@ impl AdminBackend for RustNativeAdmin {
         &self,
         group_ids: &[String],
         options: DeleteConsumerGroupsOptions,
-    ) -> Result<Outcomes<String, ()>, KafkaError> {
-        let result = self.admin.delete_consumer_groups(group_ids, options);
+    ) -> Result<Outcomes<String, ()>, Error> {
+        let result = self.admin.delete_consumer_groups_with_options(group_ids, options);
         Ok(resolve(result.deleted_groups().into_iter()).await)
     }
 
@@ -1487,16 +1484,16 @@ impl AdminBackend for RustNativeAdmin {
         &self,
         group_id: &str,
         options: RemoveMembersFromConsumerGroupOptions,
-    ) -> Result<Outcomes<String, ()>, KafkaError> {
+    ) -> Result<Outcomes<String, ()>, Error> {
         // The member set has to be read off the options before they are moved
         // into the call, exactly as the FFI's
         // `submit_remove_members_from_consumer_group` does.
         let members: Vec<_> = options.members().iter().cloned().collect();
-        let result = self.admin.remove_members_from_consumer_group(group_id, options);
+        let result = self.admin.remove_members_from_consumer_group_with_options(group_id, options);
         if members.is_empty() {
             // `removeAll` mode: Java's `memberResult` is not applicable, so
             // `all()` is the only observable and the map stays empty.
-            result.all().get_timeout(NATIVE_FUTURE_TIMEOUT).await?;
+            result.all().get_with_timeout(NATIVE_FUTURE_TIMEOUT).await?;
             return Ok(HashMap::new());
         }
         let mut outcomes = HashMap::with_capacity(members.len());
@@ -1504,7 +1501,7 @@ impl AdminBackend for RustNativeAdmin {
             let future = result.member_result(member)?;
             outcomes.insert(
                 member.group_instance_id().to_string(),
-                future.get_timeout(NATIVE_FUTURE_TIMEOUT).await,
+                future.get_with_timeout(NATIVE_FUTURE_TIMEOUT).await,
             );
         }
         Ok(outcomes)
@@ -1514,8 +1511,8 @@ impl AdminBackend for RustNativeAdmin {
         &self,
         acls: &[AclBinding],
         options: CreateAclsOptions,
-    ) -> Result<Outcomes<AclBinding, ()>, KafkaError> {
-        let result = self.admin.create_acls(acls, options);
+    ) -> Result<Outcomes<AclBinding, ()>, Error> {
+        let result = self.admin.create_acls_with_options(acls, options);
         Ok(resolve(result.values().iter().map(|(binding, f)| (binding.clone(), f.clone()))).await)
     }
 
@@ -1523,11 +1520,11 @@ impl AdminBackend for RustNativeAdmin {
         &self,
         filter: &AclBindingFilter,
         options: DescribeAclsOptions,
-    ) -> Result<Vec<AclBinding>, KafkaError> {
+    ) -> Result<Vec<AclBinding>, Error> {
         self.admin
-            .describe_acls(filter, options)
+            .describe_acls_with_options(filter, options)
             .values()
-            .get_timeout(NATIVE_FUTURE_TIMEOUT)
+            .get_with_timeout(NATIVE_FUTURE_TIMEOUT)
             .await
     }
 
@@ -1535,8 +1532,8 @@ impl AdminBackend for RustNativeAdmin {
         &self,
         filters: &[AclBindingFilter],
         options: DeleteAclsOptions,
-    ) -> Result<Outcomes<AclBindingFilter, FilterResults>, KafkaError> {
-        let result = self.admin.delete_acls(filters, options);
+    ) -> Result<Outcomes<AclBindingFilter, FilterResults>, Error> {
+        let result = self.admin.delete_acls_with_options(filters, options);
         Ok(resolve(result.values().iter().map(|(filter, f)| (filter.clone(), f.clone()))).await)
     }
 
@@ -1544,11 +1541,11 @@ impl AdminBackend for RustNativeAdmin {
         &self,
         filter: &ClientQuotaFilter,
         options: DescribeClientQuotasOptions,
-    ) -> Result<HashMap<ClientQuotaEntity, HashMap<String, f64>>, KafkaError> {
+    ) -> Result<HashMap<ClientQuotaEntity, HashMap<String, f64>>, Error> {
         self.admin
-            .describe_client_quotas(filter, options)
+            .describe_client_quotas_with_options(filter, options)
             .entities()
-            .get_timeout(NATIVE_FUTURE_TIMEOUT)
+            .get_with_timeout(NATIVE_FUTURE_TIMEOUT)
             .await
     }
 
@@ -1556,8 +1553,8 @@ impl AdminBackend for RustNativeAdmin {
         &self,
         entries: &[ClientQuotaAlteration],
         options: AlterClientQuotasOptions,
-    ) -> Result<Outcomes<ClientQuotaEntity, ()>, KafkaError> {
-        let result = self.admin.alter_client_quotas(entries, options);
+    ) -> Result<Outcomes<ClientQuotaEntity, ()>, Error> {
+        let result = self.admin.alter_client_quotas_with_options(entries, options);
         Ok(resolve(result.values().iter().map(|(entity, f)| (entity.clone(), f.clone()))).await)
     }
 
@@ -1565,8 +1562,8 @@ impl AdminBackend for RustNativeAdmin {
         &self,
         users: &[String],
         options: DescribeUserScramCredentialsOptions,
-    ) -> Result<Outcomes<String, UserScramCredentialsDescription>, KafkaError> {
-        let result = self.admin.describe_user_scram_credentials(users, options);
+    ) -> Result<Outcomes<String, UserScramCredentialsDescription>, Error> {
+        let result = self.admin.describe_user_scram_credentials_with_users_options(users, options);
         // Java's three views composed into the per-user shape, exactly as
         // `src/ffi/admin.rs`'s `submit_describe_user_scram_credentials` does — so
         // all four backends answer with the same key set and the same errors.
@@ -1583,16 +1580,16 @@ impl AdminBackend for RustNativeAdmin {
         //     error and it becomes the whole-call `Err`; and if the composition
         //     yields no rows at all, the `all()` error is returned rather than
         //     dropped (the empty-key-set trap).
-        let all_error = match result.all().get_timeout(NATIVE_FUTURE_TIMEOUT).await {
+        let all_error = match result.all().get_with_timeout(NATIVE_FUTURE_TIMEOUT).await {
             Ok(map) => {
                 return Ok(map.into_iter().map(|(user, description)| (user, Ok(description))).collect());
             },
             Err(e) => e,
         };
-        let listed = result.users().get_timeout(NATIVE_FUTURE_TIMEOUT).await?;
+        let listed = result.users().get_with_timeout(NATIVE_FUTURE_TIMEOUT).await?;
         let mut outcomes = HashMap::with_capacity(listed.len());
         for user in listed {
-            let outcome = result.description(&user).get_timeout(NATIVE_FUTURE_TIMEOUT).await;
+            let outcome = result.description(&user).get_with_timeout(NATIVE_FUTURE_TIMEOUT).await;
             outcomes.insert(user, outcome);
         }
         if outcomes.is_empty() {
@@ -1605,63 +1602,52 @@ impl AdminBackend for RustNativeAdmin {
         &self,
         alterations: &[UserScramCredentialAlteration],
         options: AlterUserScramCredentialsOptions,
-    ) -> Result<Outcomes<String, ()>, KafkaError> {
-        let result = self.admin.alter_user_scram_credentials(alterations, options);
+    ) -> Result<Outcomes<String, ()>, Error> {
+        let result = self.admin.alter_user_scram_credentials_with_options(alterations, options);
         Ok(resolve(result.values().iter().map(|(user, f)| (user.clone(), f.clone()))).await)
     }
 
-    async fn create_delegation_token(
-        &self,
-        options: CreateDelegationTokenOptions,
-    ) -> Result<DelegationToken, KafkaError> {
+    async fn create_delegation_token(&self, options: CreateDelegationTokenOptions) -> Result<DelegationToken, Error> {
         self.admin
-            .create_delegation_token(options)
+            .create_delegation_token_with_options(options)
             .delegation_token()
-            .get_timeout(NATIVE_FUTURE_TIMEOUT)
+            .get_with_timeout(NATIVE_FUTURE_TIMEOUT)
             .await
     }
 
-    async fn renew_delegation_token(
-        &self,
-        hmac: &[u8],
-        options: RenewDelegationTokenOptions,
-    ) -> Result<i64, KafkaError> {
+    async fn renew_delegation_token(&self, hmac: &[u8], options: RenewDelegationTokenOptions) -> Result<i64, Error> {
         self.admin
-            .renew_delegation_token(hmac, options)
+            .renew_delegation_token_with_options(hmac, options)
             .expiry_timestamp()
-            .get_timeout(NATIVE_FUTURE_TIMEOUT)
+            .get_with_timeout(NATIVE_FUTURE_TIMEOUT)
             .await
     }
 
-    async fn expire_delegation_token(
-        &self,
-        hmac: &[u8],
-        options: ExpireDelegationTokenOptions,
-    ) -> Result<i64, KafkaError> {
+    async fn expire_delegation_token(&self, hmac: &[u8], options: ExpireDelegationTokenOptions) -> Result<i64, Error> {
         self.admin
-            .expire_delegation_token(hmac, options)
+            .expire_delegation_token_with_options(hmac, options)
             .expiry_timestamp()
-            .get_timeout(NATIVE_FUTURE_TIMEOUT)
+            .get_with_timeout(NATIVE_FUTURE_TIMEOUT)
             .await
     }
 
     async fn describe_delegation_token(
         &self,
         options: DescribeDelegationTokenOptions,
-    ) -> Result<Vec<DelegationToken>, KafkaError> {
+    ) -> Result<Vec<DelegationToken>, Error> {
         self.admin
-            .describe_delegation_token(options)
+            .describe_delegation_token_with_options(options)
             .delegation_tokens()
-            .get_timeout(NATIVE_FUTURE_TIMEOUT)
+            .get_with_timeout(NATIVE_FUTURE_TIMEOUT)
             .await
     }
 
-    async fn describe_features(&self, options: DescribeFeaturesOptions) -> Result<FeatureMetadataView, KafkaError> {
+    async fn describe_features(&self, options: DescribeFeaturesOptions) -> Result<FeatureMetadataView, Error> {
         let metadata = self
             .admin
-            .describe_features(options)
+            .describe_features_with_options(options)
             .feature_metadata()
-            .get_timeout(NATIVE_FUTURE_TIMEOUT)
+            .get_with_timeout(NATIVE_FUTURE_TIMEOUT)
             .await?;
         Ok(FeatureMetadataView {
             finalized_features: metadata.finalized_features().clone(),
@@ -1674,11 +1660,11 @@ impl AdminBackend for RustNativeAdmin {
         &self,
         feature_updates: &HashMap<String, FeatureUpdate>,
         options: UpdateFeaturesOptions,
-    ) -> Result<Outcomes<String, ()>, KafkaError> {
+    ) -> Result<Outcomes<String, ()>, Error> {
         // The only RPC whose Rust submission is fallible: an empty map or a blank
         // feature name is an `IllegalArgumentException` in Java, thrown before any
         // future exists, so it is the whole-call `Err` here.
-        let result = self.admin.update_features(feature_updates, options)?;
+        let result = self.admin.update_features_with_options(feature_updates, options)?;
         Ok(resolve(result.values().iter().map(|(feature, f)| (feature.clone(), f.clone()))).await)
     }
 
@@ -1686,8 +1672,8 @@ impl AdminBackend for RustNativeAdmin {
         &self,
         partitions: &[TopicPartition],
         options: DescribeProducersOptions,
-    ) -> Result<Outcomes<TopicPartition, PartitionProducerState>, KafkaError> {
-        let result = self.admin.describe_producers(partitions, options);
+    ) -> Result<Outcomes<TopicPartition, PartitionProducerState>, Error> {
+        let result = self.admin.describe_producers_with_options(partitions, options);
         // `DescribeProducersResult` exposes `partitionResult(tp)` rather than a
         // map, so the *requested* keys drive the collection and a partition the
         // call did not attempt is a whole-call `Err`. A repeated partition
@@ -1701,7 +1687,7 @@ impl AdminBackend for RustNativeAdmin {
             }
             outcomes.insert(
                 tp.clone(),
-                result.partition_result(tp)?.get_timeout(NATIVE_FUTURE_TIMEOUT).await,
+                result.partition_result(tp)?.get_with_timeout(NATIVE_FUTURE_TIMEOUT).await,
             );
         }
         Ok(outcomes)
@@ -1711,8 +1697,8 @@ impl AdminBackend for RustNativeAdmin {
         &self,
         transactional_ids: &[String],
         options: DescribeTransactionsOptions,
-    ) -> Result<Outcomes<String, TransactionDescription>, KafkaError> {
-        let result = self.admin.describe_transactions(transactional_ids, options);
+    ) -> Result<Outcomes<String, TransactionDescription>, Error> {
+        let result = self.admin.describe_transactions_with_options(transactional_ids, options);
         // `description(id)` rather than a map, so the requested ids drive the
         // collection — the `describeProducers` shape, and the FFI's
         // `submit_describe_transactions`.
@@ -1721,7 +1707,10 @@ impl AdminBackend for RustNativeAdmin {
             if outcomes.contains_key(id) {
                 continue;
             }
-            outcomes.insert(id.clone(), result.description(id)?.get_timeout(NATIVE_FUTURE_TIMEOUT).await);
+            outcomes.insert(
+                id.clone(),
+                result.description(id)?.get_with_timeout(NATIVE_FUTURE_TIMEOUT).await,
+            );
         }
         Ok(outcomes)
     }
@@ -1730,11 +1719,11 @@ impl AdminBackend for RustNativeAdmin {
         &self,
         spec: AbortTransactionSpec,
         options: AbortTransactionOptions,
-    ) -> Result<(), KafkaError> {
+    ) -> Result<(), Error> {
         self.admin
-            .abort_transaction(spec, options)
+            .abort_transaction_with_options(spec, options)
             .all()
-            .get_timeout(NATIVE_FUTURE_TIMEOUT)
+            .get_with_timeout(NATIVE_FUTURE_TIMEOUT)
             .await
     }
 
@@ -1742,27 +1731,27 @@ impl AdminBackend for RustNativeAdmin {
         &self,
         transactional_id: &str,
         options: TerminateTransactionOptions,
-    ) -> Result<(), KafkaError> {
+    ) -> Result<(), Error> {
         self.admin
-            .force_terminate_transaction(transactional_id, options)
+            .force_terminate_transaction_with_options(transactional_id, options)
             .result()
-            .get_timeout(NATIVE_FUTURE_TIMEOUT)
+            .get_with_timeout(NATIVE_FUTURE_TIMEOUT)
             .await
     }
 
     async fn list_transactions(
         &self,
         options: ListTransactionsOptions,
-    ) -> Result<Outcomes<i32, Vec<TransactionListing>>, KafkaError> {
-        let result = self.admin.list_transactions(options);
+    ) -> Result<Outcomes<i32, Vec<TransactionListing>>, Error> {
+        let result = self.admin.list_transactions_with_options(options);
         // `by_broker_id()` keeps the per-broker future, so a broker that failed
         // is one entry error rather than a whole-call failure; only the
         // broker-discovery future's own failure is the outer `Err`. Same view the
         // FFI's `submit_list_transactions` drives.
-        let by_broker = result.by_broker_id().get_timeout(NATIVE_FUTURE_TIMEOUT).await?;
+        let by_broker = result.by_broker_id().get_with_timeout(NATIVE_FUTURE_TIMEOUT).await?;
         let mut outcomes = HashMap::with_capacity(by_broker.len());
         for (broker_id, future) in by_broker {
-            outcomes.insert(broker_id, future.get_timeout(NATIVE_FUTURE_TIMEOUT).await);
+            outcomes.insert(broker_id, future.get_with_timeout(NATIVE_FUTURE_TIMEOUT).await);
         }
         Ok(outcomes)
     }
@@ -1771,8 +1760,8 @@ impl AdminBackend for RustNativeAdmin {
         &self,
         transactional_ids: &[String],
         options: FenceProducersOptions,
-    ) -> Result<Outcomes<String, ProducerIdAndEpoch>, KafkaError> {
-        let result = self.admin.fence_producers(transactional_ids, options);
+    ) -> Result<Outcomes<String, ProducerIdAndEpoch>, Error> {
+        let result = self.admin.fence_producers_with_options(transactional_ids, options);
         // Java has no accessor for the pair, only the two `then_apply`
         // projections `producerId(id)` and `epochId(id)`. They resolve from the
         // same per-id future, so they succeed or fail together and awaiting both
@@ -1783,8 +1772,8 @@ impl AdminBackend for RustNativeAdmin {
             if outcomes.contains_key(id) {
                 continue;
             }
-            let producer_id = result.producer_id(id)?.get_timeout(NATIVE_FUTURE_TIMEOUT).await;
-            let epoch = result.epoch_id(id)?.get_timeout(NATIVE_FUTURE_TIMEOUT).await;
+            let producer_id = result.producer_id(id)?.get_with_timeout(NATIVE_FUTURE_TIMEOUT).await;
+            let epoch = result.epoch_id(id)?.get_with_timeout(NATIVE_FUTURE_TIMEOUT).await;
             let outcome = match (producer_id, epoch) {
                 (Ok(producer_id), Ok(epoch)) => Ok(ProducerIdAndEpoch::new(producer_id, epoch)),
                 // Both projections share one future, so the two errors are the
@@ -1796,8 +1785,8 @@ impl AdminBackend for RustNativeAdmin {
         Ok(outcomes)
     }
 
-    async fn close(&self, timeout: Option<Duration>) -> Result<(), KafkaError> {
-        self.admin.close(close_timeout(timeout)).await;
+    async fn close(&self, timeout: Option<Duration>) -> Result<(), Error> {
+        self.admin.close_with_timeout(close_with_timeout(timeout)).await;
         Ok(())
     }
 
@@ -1810,7 +1799,7 @@ impl AdminBackend for RustNativeAdmin {
 /// of hanging.
 ///
 /// Every admin integration test predating this harness awaited with an explicit
-/// `get_timeout(Duration::from_secs(30))`, and the first conversions replaced
+/// `get_with_timeout(Duration::from_secs(30))`, and the first conversions replaced
 /// that with an unbounded `get()`. `admin_config` sets
 /// `default.api.timeout.ms=30000`, so a broker-side stall still fails on its
 /// own; what an unbounded `get()` loses is the bound on a **client-side future
@@ -1833,7 +1822,7 @@ where
 {
     let mut outcomes = HashMap::new();
     for (key, future) in futures {
-        outcomes.insert(key, future.get_timeout(NATIVE_FUTURE_TIMEOUT).await);
+        outcomes.insert(key, future.get_with_timeout(NATIVE_FUTURE_TIMEOUT).await);
     }
     outcomes
 }
@@ -1850,10 +1839,10 @@ where
 /// `TopicMetadataAndConfig(KafkaException)` state.
 async fn metadata_of(result: &CreateTopicsResult, topic: &str) -> TopicMetadataAndConfig {
     let (topic_id, num_partitions, replication_factor, config) = (
-        result.topic_id(topic).get_timeout(NATIVE_FUTURE_TIMEOUT).await,
-        result.num_partitions(topic).get_timeout(NATIVE_FUTURE_TIMEOUT).await,
-        result.replication_factor(topic).get_timeout(NATIVE_FUTURE_TIMEOUT).await,
-        result.config(topic).get_timeout(NATIVE_FUTURE_TIMEOUT).await,
+        result.topic_id(topic).get_with_timeout(NATIVE_FUTURE_TIMEOUT).await,
+        result.num_partitions(topic).get_with_timeout(NATIVE_FUTURE_TIMEOUT).await,
+        result.replication_factor(topic).get_with_timeout(NATIVE_FUTURE_TIMEOUT).await,
+        result.config(topic).get_with_timeout(NATIVE_FUTURE_TIMEOUT).await,
     );
     match (topic_id, num_partitions, replication_factor, config) {
         (Ok(id), Ok(partitions), Ok(replication), Ok(config)) => {
@@ -1866,7 +1855,7 @@ async fn metadata_of(result: &CreateTopicsResult, topic: &str) -> TopicMetadataA
                 .or_else(|| partitions.err())
                 .or_else(|| replication.err())
                 .or_else(|| config.err())
-                .unwrap_or_else(|| KafkaError::illegal_state("createTopics metadata accessors disagreed on success")),
+                .unwrap_or_else(|| Error::local_illegal_state("createTopics metadata accessors disagreed on success")),
         ),
     }
 }
@@ -1888,20 +1877,19 @@ fn comparable_config(config: &Config) -> Config {
         config
             .entries()
             .map(|entry| {
-                ConfigEntry::with_metadata(
-                    entry.name().to_string(),
-                    entry.value().map(str::to_string),
-                    if entry.is_default() {
+                let options = ConfigEntryOptionsBuilder::new()
+                    .set_name(entry.name().to_string())
+                    .set_value(entry.value().map(str::to_string))
+                    .set_source(if entry.is_default() {
                         ConfigSource::DefaultConfig
                     } else {
                         ConfigSource::Unknown
-                    },
-                    entry.is_sensitive(),
-                    entry.is_read_only(),
-                    Vec::new(),
-                    ConfigType::Unknown,
-                    None,
-                )
+                    })
+                    .set_is_sensitive(entry.is_sensitive())
+                    .set_is_read_only(entry.is_read_only())
+                    .build()
+                    .unwrap();
+                ConfigEntry::with_options(options)
             })
             .collect::<Vec<_>>(),
     )
@@ -1957,7 +1945,7 @@ pub async fn admin_for<F: AdminBackendFactory>(factory: &F, ctx: &TestContext) -
 /// [`crate::common::test_utils::try_partition_count`] for an [`AdminBackend`].
 pub async fn try_partition_count<B: AdminBackend>(admin: &B, topic: &str) -> Option<usize> {
     admin
-        .describe_topics(&[topic.to_string()], DescribeTopicsOptions::new())
+        .describe_topics_with_topics(&[topic.to_string()], DescribeTopicsOptions::new())
         .await
         .ok()
         .and_then(|described| match described.get(topic) {
@@ -1988,7 +1976,11 @@ pub async fn wait_for_all_partitions_metadata<B: AdminBackend>(admin: &B, topic:
 pub async fn create_topic<B: AdminBackend>(admin: &B, topic: &str, num_partitions: i32, replication_factor: i16) {
     let created = admin
         .create_topics(
-            &[NewTopic::new(topic.to_string(), num_partitions, replication_factor)],
+            &[NewTopic::with_num_partitions_replication_factor(
+                topic.to_string(),
+                Some(num_partitions),
+                Some(replication_factor),
+            )],
             CreateTopicsOptions::new(),
         )
         .await
@@ -2038,7 +2030,7 @@ pub async fn create_topic<B: AdminBackend>(admin: &B, topic: &str, num_partition
 /// regardless.
 ///
 /// Only `UNKNOWN_TOPIC_OR_PARTITION` is retried. Any other failure panics out of
-/// the loop on the first attempt — `retry_on_exception_with_timeout` catches the
+/// the loop on the first attempt — `retry_on_error_with_timeout` catches the
 /// `Err` return, not panics — so this cannot turn a genuine backend defect into
 /// a 60-second timeout, and [`all_of_exactly`]'s completeness check still runs
 /// unweakened on the attempt that gets through.
@@ -2050,7 +2042,7 @@ pub async fn alter_consumer_group_offsets_awaiting_propagation<B: AdminBackend>(
 ) {
     let expected: Vec<TopicPartition> = offsets.keys().cloned().collect();
     let expected = expected.as_slice();
-    retry_on_exception_with_timeout(Duration::from_millis(TOPIC_METADATA_PROPAGATION_WAIT_MS), || async move {
+    retry_on_error_with_timeout(Duration::from_millis(TOPIC_METADATA_PROPAGATION_WAIT_MS), || async move {
         let backend = admin.name();
         let outcomes = admin
             .alter_consumer_group_offsets(group_id, offsets, AlterConsumerGroupOffsetsOptions::new())

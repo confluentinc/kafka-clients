@@ -29,8 +29,63 @@ use std::sync::atomic::{AtomicI32, Ordering};
 
 use crate::common::Cluster;
 use crate::common::utils::LogContext;
-use crate::common::utils::{murmur2, to_positive};
+use crate::common::utils::Utils;
 use crate::kafka_trace;
+
+/// Hash function used to map a serialized record key to a partition.
+///
+/// # Deviation from Java parity (Definition-of-Done §7)
+///
+/// This enum has **no counterpart in the Java Kafka client**. Java's
+/// `BuiltInPartitioner.partitionForKey` unconditionally uses murmur2
+/// (`Utils.toPositive(Utils.murmur2(key)) % numPartitions`). It is introduced
+/// here because this client intentionally changes the *default* key hash to
+/// IEEE CRC-32, matching librdkafka's `consistent_random` partitioner
+/// (`rd_kafka_msg_partitioner_consistent`: `rd_crc32(key, keylen) %
+/// partition_cnt`) rather than the Java default. The motivation is
+/// librdkafka migration: the vast majority of existing Confluent client
+/// deployments (Go, Python, .NET, C/C++) are librdkafka-based and already
+/// partition keyed records by CRC-32, so defaulting to CRC-32 lets this Rust
+/// client co-partition with them out of the box.
+///
+/// Both hashers must remain selectable — CRC-32 for librdkafka parity (the
+/// default) and murmur2 for exact Java parity — so the choice is modelled as
+/// this `Copy` enum threaded through the (keyed) partition path. It is
+/// selected via the `partitioner.class` producer config (see
+/// [`ProducerConfig::key_hasher`](crate::producer::ProducerConfig)).
+///
+/// The keyless (sticky, KIP-794) partitioning path is **not** affected by this
+/// enum; it is unchanged from Java.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Default)]
+pub(crate) enum KeyHasher {
+    /// IEEE 802.3 / zlib CRC-32 (`crc32fast::hash`), taken **unsigned** modulo
+    /// the partition count. Matches librdkafka `consistent_random`. This is the
+    /// default.
+    #[default]
+    Crc32,
+    /// Kafka's murmur2 (`Utils.toPositive(Utils.murmur2(key)) % numPartitions`).
+    /// Exact Java-client parity.
+    Murmur2,
+}
+
+impl KeyHasher {
+    /// Whether a record with this (present, non-ignored) serialized key should
+    /// be hashed to a partition, or fall through to the keyless sticky path.
+    ///
+    /// - [`KeyHasher::Crc32`]: an **empty** key falls through to sticky
+    ///   partitioning, matching librdkafka `consistent_random`
+    ///   (`rd_kafka_msg_partitioner_consistent_random`: `keylen == 0` routes to
+    ///   the random/sticky partitioner).
+    /// - [`KeyHasher::Murmur2`]: every non-null key is hashed, including an
+    ///   empty one, matching Java (`serializedKey != null` is the only gate).
+    #[inline]
+    pub(crate) fn hashes_key(self, key: &[u8]) -> bool {
+        match self {
+            KeyHasher::Crc32 => !key.is_empty(),
+            KeyHasher::Murmur2 => true,
+        }
+    }
+}
 
 /// Information for the current sticky partition.
 ///
@@ -162,7 +217,7 @@ impl BuiltInPartitioner {
     ///
     /// This method can be overridden in tests to provide deterministic behavior.
     fn random_partition(&mut self) -> i32 {
-        to_positive(rand::random::<i32>())
+        Utils::to_positive(rand::random::<i32>())
     }
 
     /// Test-only function. When partition load stats are defined, return the end
@@ -339,11 +394,27 @@ impl BuiltInPartitioner {
         self.partition_load_stats = Some(PartitionLoadStats::new(queue_sizes.to_vec(), partition_ids.to_vec(), length));
     }
 
-    /// Default hashing function to choose a partition from the serialized key bytes.
+    /// Hashing function to choose a partition from the serialized key bytes.
     ///
-    /// Translated from `BuiltInPartitioner.partitionForKey`.
-    pub fn partition_for_key(serialized_key: &[u8], num_partitions: i32) -> i32 {
-        to_positive(murmur2(serialized_key)) % num_partitions
+    /// Translated from `BuiltInPartitioner.partitionForKey`, generalised over the
+    /// [`KeyHasher`] so the default (CRC-32, librdkafka parity) and the murmur2
+    /// (Java parity) variants share one call path. `num_partitions` must be
+    /// positive — callers guard this.
+    ///
+    /// - [`KeyHasher::Crc32`]: `(crc32(key) % num_partitions)` with the modulo
+    ///   computed on **unsigned** values, matching librdkafka
+    ///   (`rd_crc32(key, keylen) % partition_cnt`, where `rd_crc32_t` is
+    ///   `uint32_t` so the `int32_t` count is promoted to unsigned). There is
+    ///   deliberately **no** `to_positive`/`& 0x7fffffff` masking here — that
+    ///   would give a different partition for keys whose CRC has the high bit
+    ///   set.
+    /// - [`KeyHasher::Murmur2`]: `Utils.toPositive(Utils.murmur2(key)) %
+    ///   num_partitions`, identical to the Java client.
+    pub fn partition_for_key(serialized_key: &[u8], num_partitions: i32, hasher: KeyHasher) -> i32 {
+        match hasher {
+            KeyHasher::Crc32 => (crc32fast::hash(serialized_key) % (num_partitions as u32)) as i32,
+            KeyHasher::Murmur2 => Utils::to_positive(Utils::murmur2(serialized_key)) % num_partitions,
+        }
     }
 }
 
@@ -419,7 +490,7 @@ mod tests {
         }
 
         fn next_partition(&mut self, cluster: &Cluster) -> i32 {
-            let random = to_positive(self.mock_random.fetch_add(1, Ordering::Relaxed));
+            let random = Utils::to_positive(self.mock_random.fetch_add(1, Ordering::Relaxed));
             if let Some(ref stats) = self.inner.partition_load_stats {
                 debug_assert!(stats.length > 0);
                 let cft = &stats.cumulative_frequency_table;
@@ -457,7 +528,7 @@ mod tests {
     }
 
     fn make_cluster(nodes: &[Node], partitions: Vec<PartitionInfo>) -> Cluster {
-        Cluster::new(
+        Cluster::with_invalid_topics_controller_topic_ids(
             Some("clusterId".to_string()),
             nodes.to_vec(),
             partitions,
@@ -640,5 +711,129 @@ mod tests {
 
         // Should not panic
         let _ = BuiltInPartitioner::new(&topic_a, 1);
+    }
+
+    // ---- KeyHasher / partition_for_key (Phase 1: CRC-32 default partitioner) ----
+
+    /// The default [`KeyHasher`] is CRC-32 (librdkafka `consistent_random`
+    /// parity), NOT murmur2 (the Java default). This is the deliberate deviation
+    /// this phase introduces.
+    #[test]
+    fn test_key_hasher_default_is_crc32() {
+        assert_eq!(KeyHasher::default(), KeyHasher::Crc32);
+    }
+
+    /// IEEE 802.3 / zlib CRC-32 golden vectors.
+    ///
+    /// Generated with Python `zlib.crc32(key)` (identical polynomial to
+    /// `crc32fast::hash` — CRC-32/ISO-HDLC, poly 0x04C11DB7 reflected). The
+    /// `b"123456789" == 0xCBF43926` entry is the canonical CRC-32 check value.
+    /// These prove `crc32fast::hash` matches zlib / librdkafka `rd_crc32`.
+    #[test]
+    fn test_crc32_golden_vectors() {
+        assert_eq!(crc32fast::hash(b""), 0x0000_0000);
+        assert_eq!(crc32fast::hash(b"a"), 0xE8B7_BE43);
+        assert_eq!(crc32fast::hash(b"abc"), 0x3524_41C2);
+        assert_eq!(crc32fast::hash(b"123456789"), 0xCBF4_3926);
+        assert_eq!(crc32fast::hash(b"The quick brown fox jumps over the lazy dog"), 0x414F_A339);
+    }
+
+    /// `partition_for_key` under [`KeyHasher::Crc32`]: `crc32(key) % n` with an
+    /// **unsigned** modulo (no `to_positive` masking).
+    ///
+    /// Expected partitions generated with Python `zlib.crc32(key) % n`.
+    /// Includes `b"a"` (crc 0xE8B7BE43) and `b"123456789"` (crc 0xCBF43926),
+    /// both of which have the CRC **high bit set** — see
+    /// `test_crc32_partition_unsigned_vs_masked` for why that matters.
+    #[test]
+    fn test_crc32_key_to_partition_table() {
+        // (key, n, expected partition) with n in {1, 3, 7, 12, 64}.
+        let cases: &[(&[u8], i32, i32)] = &[
+            (b"a", 1, 0),
+            (b"a", 3, 0),
+            (b"a", 7, 4),
+            (b"a", 12, 3),
+            (b"a", 64, 3),
+            (b"abc", 1, 0),
+            (b"abc", 3, 0),
+            (b"abc", 7, 5),
+            (b"abc", 12, 6),
+            (b"abc", 64, 2),
+            (b"kafka", 1, 0),
+            (b"kafka", 3, 2),
+            (b"kafka", 7, 6),
+            (b"kafka", 12, 11),
+            (b"kafka", 64, 23),
+            (b"hello", 1, 0),
+            (b"hello", 3, 1),
+            (b"hello", 7, 2),
+            (b"hello", 12, 10),
+            (b"hello", 64, 6),
+            (b"123456789", 1, 0),
+            (b"123456789", 3, 2),
+            (b"123456789", 7, 5),
+            (b"123456789", 12, 2),
+            (b"123456789", 64, 38),
+        ];
+        for (key, n, expected) in cases {
+            assert_eq!(
+                BuiltInPartitioner::partition_for_key(key, *n, KeyHasher::Crc32),
+                *expected,
+                "crc32 key={:?} n={}",
+                String::from_utf8_lossy(key),
+                n
+            );
+        }
+    }
+
+    /// A key whose CRC-32 has the high bit set must use the **unsigned** modulo,
+    /// which differs from a `to_positive`-masked (`& 0x7fffffff`) result.
+    ///
+    /// `b"a"` -> crc 0xE8B7BE43 (high bit set). Unsigned `% 3 == 0`, but a
+    /// masked `to_positive(0xE8B7BE43) % 3 == 1`. Asserting both proves the
+    /// implementation does NOT mask (librdkafka parity).
+    #[test]
+    fn test_crc32_partition_unsigned_vs_masked() {
+        let crc = crc32fast::hash(b"a");
+        assert_eq!(crc, 0xE8B7_BE43);
+        assert_ne!(crc & 0x8000_0000, 0, "precondition: high bit set");
+
+        // Unsigned modulo (what the implementation does).
+        assert_eq!(BuiltInPartitioner::partition_for_key(b"a", 3, KeyHasher::Crc32), 0);
+        assert_eq!((crc % 3) as i32, 0);
+
+        // A masked modulo would give a DIFFERENT partition — this is the bug we
+        // avoid by not calling `Utils::to_positive`.
+        assert_eq!(Utils::to_positive(crc as i32) % 3, 1);
+    }
+
+    /// `partition_for_key` under [`KeyHasher::Murmur2`] is byte-for-byte the old
+    /// (Java-parity) behaviour: `Utils::to_positive(Utils::murmur2(key)) % n`.
+    #[test]
+    fn test_murmur2_key_to_partition_matches_java_formula() {
+        let keys: &[&[u8]] = &[b"a", b"abc", b"kafka", b"hello", b"123456789", b""];
+        for n in [1_i32, 3, 7, 12, 64] {
+            for key in keys {
+                assert_eq!(
+                    BuiltInPartitioner::partition_for_key(key, n, KeyHasher::Murmur2),
+                    Utils::to_positive(Utils::murmur2(key)) % n,
+                    "murmur2 key={:?} n={}",
+                    String::from_utf8_lossy(key),
+                    n
+                );
+            }
+        }
+    }
+
+    /// The empty-key rule ([`KeyHasher::hashes_key`]): under CRC-32 an empty key
+    /// is NOT hashed (falls to sticky, librdkafka `consistent_random`); under
+    /// murmur2 every key including empty IS hashed (Java parity). A non-empty
+    /// key is hashed under both.
+    #[test]
+    fn test_key_hasher_hashes_key_empty_rule() {
+        assert!(!KeyHasher::Crc32.hashes_key(b""));
+        assert!(KeyHasher::Crc32.hashes_key(b"k"));
+        assert!(KeyHasher::Murmur2.hashes_key(b""));
+        assert!(KeyHasher::Murmur2.hashes_key(b"k"));
     }
 }

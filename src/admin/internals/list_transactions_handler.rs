@@ -19,19 +19,19 @@
 
 use std::collections::HashSet;
 
-use crate::admin::options::ListTransactionsOptions;
-use crate::admin::transaction_listing::TransactionListing;
-use crate::admin::transaction_state::TransactionState;
-use crate::common::protocol::Errors;
+use crate::ListTransactionsRequestData;
+use crate::admin::ListTransactionsOptions;
+use crate::admin::TransactionListing;
+use crate::admin::TransactionState;
+use crate::common::Errors;
 use crate::common::requests::{ConcreteResponse, ListTransactionsRequestBuilder, RequestBuilder};
 use crate::common::utils::LogContext;
-use crate::common::{KafkaError, Node};
-use crate::list_transactions_request_data::ListTransactionsRequestData;
+use crate::common::{Error, Node};
 use crate::{kafka_debug, kafka_error};
 
-use super::admin_api_handler::{AdminApiHandler, ApiResult, RequestAndKeys};
-use super::admin_api_lookup_strategy::AdminApiLookupStrategy;
-use super::all_brokers_strategy::{AllBrokersFuture, AllBrokersStrategy, BrokerKey};
+use super::AdminApiLookupStrategy;
+use super::{AdminApiHandler, ApiResult, RequestAndKeys};
+use super::{AllBrokersFuture, AllBrokersStrategy, BrokerKey};
 
 /// Handler for `listTransactions`.
 ///
@@ -111,7 +111,13 @@ impl AdminApiHandler<BrokerKey, Vec<TransactionListing>> for ListTransactionsHan
         let key = Self::require_singleton(keys, broker_id);
 
         let ConcreteResponse::ListTransactions(response) = response else {
-            return ApiResult::new(std::collections::HashMap::new(), std::collections::HashMap::new(), Vec::new());
+            // Java fails the call once (`KafkaAdminClient.java:1387-1391`); an empty
+            // result would silently re-issue the request until the deadline. See
+            // `ApiResult::failed_all`.
+            return ApiResult::failed_all(
+                keys,
+                Error::local_illegal_state("ListTransactionsHandler received an unexpected response type"),
+            );
         };
         let error = Errors::for_code(response.data().error_code);
 
@@ -132,7 +138,7 @@ impl AdminApiHandler<BrokerKey, Vec<TransactionListing>> for ListTransactionsHan
                 std::collections::HashMap::new(),
                 std::collections::HashMap::from([(
                     key,
-                    KafkaError::with_message(
+                    Error::with_message(
                         error,
                         format!(
                             "ListTransactions request sent to broker {broker_id} failed because the coordinator is shutting down"
@@ -152,11 +158,9 @@ impl AdminApiHandler<BrokerKey, Vec<TransactionListing>> for ListTransactionsHan
                 std::collections::HashMap::new(),
                 std::collections::HashMap::from([(
                     key,
-                    KafkaError::with_message(
+                    Error::with_message(
                         error,
-                        format!(
-                            "ListTransactions request sent to broker {broker_id} failed with an unexpected exception"
-                        ),
+                        format!("ListTransactions request sent to broker {broker_id} failed with an unexpected error"),
                     ),
                 )]),
                 Vec::new(),
@@ -190,8 +194,9 @@ impl AdminApiHandler<BrokerKey, Vec<TransactionListing>> for ListTransactionsHan
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ListTransactionsResponseData;
     use crate::common::requests::ListTransactionsResponse;
-    use crate::list_transactions_response_data::{ListTransactionsResponseData, TransactionState as WireTxnState};
+    use crate::list_transactions_response_data::TransactionState as WireTxnState;
 
     fn log_context() -> LogContext {
         LogContext::new("[test] ")

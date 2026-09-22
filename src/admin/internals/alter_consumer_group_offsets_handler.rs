@@ -19,21 +19,20 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::common::protocol::Errors;
+use crate::OffsetCommitRequestData;
+use crate::common::Errors;
 use crate::common::requests::{ConcreteResponse, CoordinatorType, OffsetCommitRequestBuilder, RequestBuilder};
 use crate::common::utils::LogContext;
-use crate::common::{Node, TopicPartition};
+use crate::common::{Error, Node, TopicPartition};
 use crate::consumer::OffsetAndMetadata;
 use crate::kafka_warn;
-use crate::offset_commit_request_data::{
-    OffsetCommitRequestData, OffsetCommitRequestPartition, OffsetCommitRequestTopic,
-};
+use crate::offset_commit_request_data::{OffsetCommitRequestPartition, OffsetCommitRequestTopic};
 
-use super::admin_api_future::SimpleAdminApiFuture;
-use super::admin_api_handler::{AdminApiHandler, ApiResult, RequestAndKeys};
-use super::admin_api_lookup_strategy::AdminApiLookupStrategy;
-use super::coordinator_key::CoordinatorKey;
-use super::coordinator_strategy::CoordinatorStrategy;
+use super::AdminApiLookupStrategy;
+use super::CoordinatorKey;
+use super::CoordinatorStrategy;
+use super::SimpleAdminApiFuture;
+use super::{AdminApiHandler, ApiResult, RequestAndKeys};
 
 /// The per-partition commit result value produced by this handler.
 type PartitionErrors = HashMap<TopicPartition, Errors>;
@@ -206,7 +205,15 @@ impl AdminApiHandler<CoordinatorKey, PartitionErrors> for AlterConsumerGroupOffs
         self.validate_keys(group_ids);
 
         let ConcreteResponse::OffsetCommit(response) = response else {
-            panic!("AlterConsumerGroupOffsetsHandler received an unexpected response type: {response:?}");
+            // Java's `(OffsetCommitResponse) abstractResponse` downcast throws
+            // `ClassCastException`, which `KafkaAdminClient.java:1387-1391` catches
+            // and turns into `call.fail(now, t)` — this RPC fails, the client keeps
+            // serving everything else. A `panic!` here instead killed the admin
+            // background task and poisoned the driver mutex.
+            return ApiResult::failed_all(
+                group_ids,
+                Error::local_illegal_state("AlterConsumerGroupOffsetsHandler received an unexpected response type"),
+            );
         };
 
         let mut groups_to_unmap = HashSet::new();
@@ -291,7 +298,7 @@ mod tests {
     }
 
     fn response(partition_results: &PartitionErrors) -> ConcreteResponse {
-        ConcreteResponse::OffsetCommit(OffsetCommitResponse::from_response_data(0, partition_results))
+        ConcreteResponse::OffsetCommit(OffsetCommitResponse::with_throttle_time_ms_response_data(0, partition_results))
     }
 
     fn partition_errors(error: Errors) -> PartitionErrors {

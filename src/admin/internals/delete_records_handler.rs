@@ -20,19 +20,21 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use crate::admin::deleted_records::DeletedRecords;
-use crate::admin::records_to_delete::RecordsToDelete;
-use crate::common::protocol::Errors;
+use crate::DeleteRecordsRequestData;
+use crate::admin::DeletedRecords;
+use crate::admin::RecordsToDelete;
+use crate::common::Errors;
+use crate::common::errors::ApiError;
 use crate::common::requests::{ConcreteResponse, DeleteRecordsRequestBuilder, RequestBuilder};
 use crate::common::utils::LogContext;
-use crate::common::{KafkaError, Node, TopicPartition};
-use crate::delete_records_request_data::{DeleteRecordsPartition, DeleteRecordsRequestData, DeleteRecordsTopic};
+use crate::common::{Error, Node, TopicPartition};
+use crate::delete_records_request_data::{DeleteRecordsPartition, DeleteRecordsTopic};
 use crate::kafka_debug;
 
-use super::admin_api_handler::{AdminApiHandler, ApiResult, RequestAndKeys};
-use super::admin_api_lookup_strategy::AdminApiLookupStrategy;
-use super::partition_leader_cache::PartitionLeaderCache;
-use super::partition_leader_strategy::{PartitionLeaderFuture, PartitionLeaderStrategy};
+use super::AdminApiLookupStrategy;
+use super::PartitionLeaderCache;
+use super::{AdminApiHandler, ApiResult, RequestAndKeys};
+use super::{PartitionLeaderFuture, PartitionLeaderStrategy};
 
 /// Handler for `deleteRecords`.
 ///
@@ -78,7 +80,7 @@ impl DeleteRecordsHandler {
         let mut deletions_for_topic: HashMap<String, DeleteRecordsTopic> = HashMap::new();
         for topic_partition in keys {
             let to_delete = self.records_to_delete.get(topic_partition);
-            let offset = to_delete.map(RecordsToDelete::before_offset_value).unwrap_or(-1);
+            let offset = to_delete.map(RecordsToDelete::before_offset).unwrap_or(-1);
             let topic = deletions_for_topic
                 .entry(topic_partition.topic().to_string())
                 .or_insert_with(|| {
@@ -105,11 +107,11 @@ impl DeleteRecordsHandler {
         &self,
         topic_partition: &TopicPartition,
         error: Errors,
-        failed: &mut HashMap<TopicPartition, KafkaError>,
+        failed: &mut HashMap<TopicPartition, Error>,
         unmapped: &mut Vec<TopicPartition>,
         retriable: &mut HashSet<TopicPartition>,
     ) {
-        if error.is_invalid_metadata() {
+        if error.error().is_some_and(|e| e.is_invalid_metadata_error()) {
             kafka_debug!(
                 self.log_context,
                 "DeleteRecords lookup request for topic partition {} will be retried due to invalid leader metadata {:?}",
@@ -117,7 +119,7 @@ impl DeleteRecordsHandler {
                 error
             );
             unmapped.push(topic_partition.clone());
-        } else if error.is_retriable() {
+        } else if error.error().is_some_and(|e| e.is_retriable_error()) {
             kafka_debug!(
                 self.log_context,
                 "DeleteRecords fulfillment request for topic partition {} will be retried due to {:?}",
@@ -132,7 +134,7 @@ impl DeleteRecordsHandler {
                 topic_partition,
                 error
             );
-            failed.insert(topic_partition.clone(), KafkaError::new(error));
+            failed.insert(topic_partition.clone(), Error::new(error));
         }
     }
 }
@@ -145,7 +147,7 @@ impl AdminApiHandler<TopicPartition, DeletedRecords> for DeleteRecordsHandler {
     fn build_request(&self, broker_id: i32, keys: &HashSet<TopicPartition>) -> Vec<RequestAndKeys<TopicPartition>> {
         let data = self.build_batched_request(broker_id, keys);
         vec![RequestAndKeys {
-            request: Box::new(DeleteRecordsRequestBuilder::from_data(data)) as Box<dyn RequestBuilder>,
+            request: Box::new(DeleteRecordsRequestBuilder::new(data)) as Box<dyn RequestBuilder>,
             keys: keys.clone(),
         }]
     }
@@ -157,10 +159,16 @@ impl AdminApiHandler<TopicPartition, DeletedRecords> for DeleteRecordsHandler {
         response: &ConcreteResponse,
     ) -> ApiResult<TopicPartition, DeletedRecords> {
         let ConcreteResponse::DeleteRecords(response) = response else {
-            return ApiResult::new(HashMap::new(), HashMap::new(), Vec::new());
+            // Java fails the call once (`KafkaAdminClient.java:1387-1391`); an empty
+            // result would silently re-issue the request until the deadline. See
+            // `ApiResult::failed_all`.
+            return ApiResult::failed_all(
+                keys,
+                Error::local_illegal_state("DeleteRecordsHandler received an unexpected response type"),
+            );
         };
         let mut completed: HashMap<TopicPartition, DeletedRecords> = HashMap::new();
-        let mut failed: HashMap<TopicPartition, KafkaError> = HashMap::new();
+        let mut failed: HashMap<TopicPartition, Error> = HashMap::new();
         let mut unmapped: Vec<TopicPartition> = Vec::new();
         let mut retriable: HashSet<TopicPartition> = HashSet::new();
 
@@ -183,14 +191,15 @@ impl AdminApiHandler<TopicPartition, DeletedRecords> for DeleteRecordsHandler {
                 && !failed.contains_key(topic_partition)
                 && !retriable.contains(topic_partition)
             {
-                let sanity_check_error = KafkaError::with_message(
-                    Errors::UnknownServerError,
-                    format!(
-                        "The response from broker {} did not contain a result for topic partition {}",
-                        broker.id(),
-                        topic_partition
-                    ),
-                );
+                // `new ApiException(..)` (`DeleteRecordsHandler.java:136-140`) — the
+                // concrete base class, which `Error::Api` translates. Spelling it
+                // `Errors::UnknownServerError` resolved to the `UnknownServerError`
+                // *subclass* instead (finding 246).
+                let sanity_check_error = Error::Api(ApiError::new(format!(
+                    "The response from broker {} did not contain a result for topic partition {}",
+                    broker.id(),
+                    topic_partition
+                )));
                 failed.insert(topic_partition.clone(), sanity_check_error);
             }
         }
@@ -205,14 +214,14 @@ impl AdminApiHandler<TopicPartition, DeletedRecords> for DeleteRecordsHandler {
 
 #[cfg(test)]
 mod tests {
-    use super::super::admin_api_future::AdminApiFuture;
+    use super::super::AdminApiFuture;
     use super::*;
-    use crate::common::protocol::ApiKeys;
+    use crate::DeleteRecordsResponseData;
+    use crate::MetadataResponseData;
+    use crate::common::ApiKeys;
     use crate::common::requests::{DeleteRecordsResponse, MetadataResponse};
-    use crate::delete_records_response_data::{
-        DeleteRecordsPartitionResult, DeleteRecordsResponseData, DeleteRecordsTopicResult,
-    };
-    use crate::metadata_response_data::{MetadataResponseData, MetadataResponsePartition, MetadataResponseTopic};
+    use crate::delete_records_response_data::{DeleteRecordsPartitionResult, DeleteRecordsTopicResult};
+    use crate::metadata_response_data::{MetadataResponsePartition, MetadataResponseTopic};
 
     const TIMEOUT: i32 = 2000;
 
@@ -227,7 +236,7 @@ mod tests {
     fn records_to_delete() -> HashMap<TopicPartition, RecordsToDelete> {
         [tp(0), tp(1), tp(2), tp(3)]
             .into_iter()
-            .map(|k| (k, RecordsToDelete::before_offset(10)))
+            .map(|k| (k, RecordsToDelete::with_before_offset(10)))
             .collect()
     }
 
@@ -395,6 +404,43 @@ mod tests {
         assert_result(&result, completed, failed, unmapped, retriable);
     }
 
+    /// A response of the wrong type is what Java's
+    /// `catch (Throwable t) { call.fail(now, t) }`
+    /// (`KafkaAdminClient.java:1387-1391`) exists for: the `(XResponse)
+    /// abstractResponse` downcast throws `ClassCastException`, the affected call
+    /// fails once, and the client keeps serving everything else.
+    ///
+    /// This handler used to return an empty `ApiResult`, which completes nothing,
+    /// fails nothing and unmaps nothing — the driver has already cleared the
+    /// in-flight request, so it re-issued the identical request under backoff until
+    /// the deadline and the caller got a generic timeout with the real cause gone.
+    #[test]
+    fn an_unexpected_response_type_fails_every_key_of_the_request() {
+        let keys: HashSet<TopicPartition> = records_to_delete().into_keys().collect();
+        // Any other variant: `Metadata` is what the lookup stage of this same driver
+        // uses, so it is the realistic mis-route.
+        let wrong = ConcreteResponse::Metadata(crate::common::requests::MetadataResponse::with_version(
+            crate::MetadataResponseData::new(),
+            0,
+        ));
+        let result = handler().handle_response(&node(1), &keys, &wrong);
+
+        assert!(result.completed_keys.is_empty(), "nothing may be reported as completed");
+        assert!(result.unmapped_keys.is_empty(), "a type mismatch is not a lookup problem");
+        assert_eq!(
+            result.failed_keys.keys().cloned().collect::<HashSet<_>>(),
+            keys,
+            "every key the request covered must be failed, as `AdminApiDriver.onFailure` does"
+        );
+        for error in result.failed_keys.values() {
+            assert_eq!(error.message(), "DeleteRecordsHandler received an unexpected response type");
+            assert!(
+                !error.is_retriable_error(),
+                "a wire-plumbing bug must not be retried: {error:?}"
+            );
+        }
+    }
+
     #[test]
     fn handle_response_sanity_check() {
         let error_partition = tp(0);
@@ -428,7 +474,7 @@ mod tests {
         let mut metadata = MetadataResponseData::new();
         metadata.set_topics(vec![topic_metadata]);
         let metadata_response =
-            ConcreteResponse::Metadata(MetadataResponse::new(metadata, ApiKeys::METADATA.latest_version()));
+            ConcreteResponse::Metadata(MetadataResponse::with_version(metadata, ApiKeys::METADATA.latest_version()));
 
         let handler = handler();
         let strategy = handler.lookup_strategy();

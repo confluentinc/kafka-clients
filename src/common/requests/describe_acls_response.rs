@@ -19,13 +19,14 @@
 use std::collections::HashMap;
 use std::io;
 
-use crate::common::KafkaError;
+use crate::DescribeAclsResponseData;
+use crate::common::Error;
 use crate::common::acl::{AccessControlEntry, AclBinding, AclOperation, AclPermissionType};
 use crate::common::protocol::{ApiKeys, Errors, Readable};
 use crate::common::resource::{PatternType, ResourcePattern, ResourceType};
-use crate::describe_acls_response_data::{AclDescription, DescribeAclsResource, DescribeAclsResponseData};
+use crate::describe_acls_response_data::{AclDescription, DescribeAclsResource};
 
-use super::abstract_response::update_error_counts;
+use super::AbstractResponse;
 
 /// A DescribeAcls response.
 ///
@@ -89,7 +90,7 @@ impl DescribeAclsResponse {
     /// Returns the error counts aggregated for this response.
     pub fn error_counts(&self) -> HashMap<Errors, i32> {
         let mut counts = HashMap::new();
-        update_error_counts(&mut counts, Errors::for_code(self.data.error_code));
+        AbstractResponse::update_error_counts(&mut counts, Errors::for_code(self.data.error_code));
         counts
     }
 
@@ -118,7 +119,7 @@ impl DescribeAclsResponse {
     /// Returns an error if a resource carries pattern/permission combinations
     /// that are invalid for an [`AclBinding`] (mirrors the exceptions Java's
     /// `ResourcePattern`/`AccessControlEntry` constructors would throw).
-    pub fn acl_bindings(resources: &[DescribeAclsResource]) -> Result<Vec<AclBinding>, KafkaError> {
+    pub fn acl_bindings(resources: &[DescribeAclsResource]) -> Result<Vec<AclBinding>, Error> {
         let mut bindings = Vec::new();
         for resource in resources {
             for acl in &resource.acls {

@@ -21,21 +21,23 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use crate::admin::describe_producers_result::PartitionProducerState;
-use crate::admin::options::DescribeProducersOptions;
-use crate::admin::producer_state::ProducerState;
-use crate::common::protocol::Errors;
+use crate::DescribeProducersRequestData;
+use crate::admin::DescribeProducersOptions;
+use crate::admin::KafkaAdminClient;
+use crate::admin::PartitionProducerState;
+use crate::admin::ProducerState;
+use crate::common::Errors;
 use crate::common::requests::{ConcreteResponse, DescribeProducersRequestBuilder, RequestBuilder};
 use crate::common::utils::LogContext;
-use crate::common::{KafkaError, Node, TopicPartition};
-use crate::describe_producers_request_data::{DescribeProducersRequestData, TopicRequest};
+use crate::common::{Error, Node, TopicPartition};
+use crate::describe_producers_request_data::TopicRequest;
 use crate::{kafka_debug, kafka_error};
 
-use super::admin_api_handler::{AdminApiHandler, ApiResult, RequestAndKeys};
-use super::admin_api_lookup_strategy::AdminApiLookupStrategy;
-use super::partition_leader_cache::PartitionLeaderCache;
-use super::partition_leader_strategy::{PartitionLeaderFuture, PartitionLeaderStrategy};
-use super::static_broker_strategy::StaticBrokerStrategy;
+use super::AdminApiLookupStrategy;
+use super::PartitionLeaderCache;
+use super::StaticBrokerStrategy;
+use super::{AdminApiHandler, ApiResult, RequestAndKeys};
+use super::{PartitionLeaderFuture, PartitionLeaderStrategy};
 
 /// Handler for `describeProducers`.
 ///
@@ -52,7 +54,7 @@ impl DescribeProducersHandler {
     /// [`StaticBrokerStrategy`] targets that broker directly; otherwise a
     /// [`PartitionLeaderStrategy`] looks up each partition's leader.
     pub(crate) fn new(options: DescribeProducersOptions, log_context: LogContext) -> Self {
-        let lookup_strategy: Box<dyn AdminApiLookupStrategy<TopicPartition>> = match options.broker_id_opt() {
+        let lookup_strategy: Box<dyn AdminApiLookupStrategy<TopicPartition>> = match options.broker_id() {
             Some(broker_id) => Box::new(StaticBrokerStrategy::new(broker_id)),
             None => Box::new(PartitionLeaderStrategy::new(log_context.clone())),
         };
@@ -97,12 +99,13 @@ impl DescribeProducersHandler {
         &self,
         topic_partition: &TopicPartition,
         error: Errors,
-        failed: &mut HashMap<TopicPartition, KafkaError>,
+        error_message: &Option<String>,
+        failed: &mut HashMap<TopicPartition, Error>,
         unmapped: &mut Vec<TopicPartition>,
     ) {
         match error {
             Errors::NotLeaderOrFollower => {
-                if let Some(broker_id) = self.options.broker_id_opt() {
+                if let Some(broker_id) = self.options.broker_id() {
                     // Typically these errors are retriable, but if the user
                     // specified the brokerId explicitly, then they are fatal.
                     kafka_error!(
@@ -113,7 +116,7 @@ impl DescribeProducersHandler {
                     );
                     failed.insert(
                         topic_partition.clone(),
-                        KafkaError::with_message(
+                        Error::with_message(
                             error,
                             format!(
                                 "Failed to describe active producers for partition {topic_partition} on brokerId {broker_id}"
@@ -137,7 +140,7 @@ impl DescribeProducersHandler {
                     topic_partition
                 );
             },
-            Errors::InvalidTopicException => {
+            Errors::InvalidTopicError => {
                 kafka_error!(
                     self.log_context,
                     "Invalid topic in `DescribeProducers` response for partition {}",
@@ -145,7 +148,13 @@ impl DescribeProducersHandler {
                 );
                 failed.insert(
                     topic_partition.clone(),
-                    KafkaError::invalid_topics(HashSet::from([topic_partition.topic().to_string()])),
+                    Error::invalid_topics_message(
+                        HashSet::from([topic_partition.topic().to_string()]),
+                        format!(
+                            "Failed to fetch metadata for partition {topic_partition} due to invalid topic error: {}",
+                            KafkaAdminClient::message_with_fallback(error.code(), error_message)
+                        ),
+                    ),
                 );
             },
             Errors::TopicAuthorizationFailed => {
@@ -156,7 +165,14 @@ impl DescribeProducersHandler {
                 );
                 failed.insert(
                     topic_partition.clone(),
-                    KafkaError::topic_authorization(HashSet::from([topic_partition.topic().to_string()])),
+                    Error::topic_authorization_message(
+                        HashSet::from([topic_partition.topic().to_string()]),
+                        format!(
+                            "Failed to describe active producers for partition {topic_partition} due to \
+                             authorization failure on topic `{}`",
+                            topic_partition.topic()
+                        ),
+                    ),
                 );
             },
             _ => {
@@ -167,7 +183,7 @@ impl DescribeProducersHandler {
                 );
                 failed.insert(
                     topic_partition.clone(),
-                    KafkaError::with_message(
+                    Error::with_message(
                         error,
                         format!("Failed to describe active producers for partition {topic_partition} due to unexpected error"),
                     ),
@@ -193,14 +209,23 @@ impl AdminApiHandler<TopicPartition, PartitionProducerState> for DescribeProduce
     fn handle_response(
         &self,
         _broker: &Node,
-        _keys: &HashSet<TopicPartition>,
+        keys: &HashSet<TopicPartition>,
         response: &ConcreteResponse,
     ) -> ApiResult<TopicPartition, PartitionProducerState> {
         let ConcreteResponse::DescribeProducers(response) = response else {
-            return ApiResult::new(HashMap::new(), HashMap::new(), Vec::new());
+            // An empty `ApiResult` completes nothing, fails nothing and unmaps
+            // nothing — the driver has already cleared the in-flight request, so it
+            // re-issues the identical request under backoff until the deadline and
+            // the caller sees a generic timeout with the real cause gone. Java fails
+            // the call once (`KafkaAdminClient.java:1387-1391`); see
+            // `ApiResult::failed_all`.
+            return ApiResult::failed_all(
+                keys,
+                Error::local_illegal_state("DescribeProducersHandler received an unexpected response type"),
+            );
         };
         let mut completed: HashMap<TopicPartition, PartitionProducerState> = HashMap::new();
-        let mut failed: HashMap<TopicPartition, KafkaError> = HashMap::new();
+        let mut failed: HashMap<TopicPartition, Error> = HashMap::new();
         let mut unmapped: Vec<TopicPartition> = Vec::new();
 
         for topic_response in &response.data().topics {
@@ -209,7 +234,13 @@ impl AdminApiHandler<TopicPartition, PartitionProducerState> for DescribeProduce
                     TopicPartition::new(topic_response.name.as_str(), partition_response.partition_index);
                 let error = Errors::for_code(partition_response.error_code);
                 if error != Errors::None {
-                    self.handle_partition_error(&topic_partition, error, &mut failed, &mut unmapped);
+                    self.handle_partition_error(
+                        &topic_partition,
+                        error,
+                        &partition_response.error_message,
+                        &mut failed,
+                        &mut unmapped,
+                    );
                     continue;
                 }
 
@@ -253,9 +284,10 @@ impl AdminApiHandler<TopicPartition, PartitionProducerState> for DescribeProduce
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::DescribeProducersResponseData;
     use crate::common::requests::DescribeProducersResponse;
     use crate::describe_producers_response_data::{
-        DescribeProducersResponseData, PartitionResponse, ProducerState as WireProducerState, TopicResponse,
+        PartitionResponse, ProducerState as WireProducerState, TopicResponse,
     };
 
     fn new_handler(options: DescribeProducersOptions) -> DescribeProducersHandler {
@@ -296,7 +328,7 @@ mod tests {
     #[test]
     fn broker_id_set_in_options() {
         let broker_id = 3;
-        let handler = new_handler(DescribeProducersOptions::new().broker_id(broker_id));
+        let handler = new_handler(DescribeProducersOptions::new().set_broker_id(broker_id));
         for tp in [tp("foo", 5), tp("bar", 3), tp("foo", 4)] {
             let scope = handler.lookup_strategy().lookup_scope(&tp);
             assert_eq!(scope.destination_broker_id(), Some(broker_id), "Unexpected brokerId for {tp}");
@@ -348,8 +380,13 @@ mod tests {
             result.failed_keys.keys().cloned().collect::<HashSet<_>>(),
             HashSet::from([topic_partition.clone()])
         );
-        match result.failed_keys.get(&topic_partition).unwrap() {
-            KafkaError::TopicAuthorization(e) => assert_eq!(e.unauthorized_topics, HashSet::from(["foo".to_string()])),
+        let err = result.failed_keys.get(&topic_partition).unwrap();
+        assert_eq!(
+            err.message(),
+            "Failed to describe active producers for partition foo-5 due to authorization failure on topic `foo`"
+        );
+        match err {
+            Error::TopicAuthorization(e) => assert_eq!(e.unauthorized_topics(), &HashSet::from(["foo".to_string()])),
             other => panic!("expected TopicAuthorization, got {other:?}"),
         }
     }
@@ -358,13 +395,18 @@ mod tests {
     #[test]
     fn invalid_topic() {
         let topic_partition = tp("foo", 5);
-        let result = handle_response_with_error(
-            DescribeProducersOptions::new(),
-            &topic_partition,
-            Errors::InvalidTopicException,
+        let result =
+            handle_response_with_error(DescribeProducersOptions::new(), &topic_partition, Errors::InvalidTopicError);
+        let err = result.failed_keys.get(&topic_partition).unwrap();
+        // No broker-supplied error message, so `messageWithFallback()` yields the
+        // code's default text.
+        assert_eq!(
+            err.message(),
+            "Failed to fetch metadata for partition foo-5 due to invalid topic error: \
+             The request attempted to perform an operation on an invalid topic."
         );
-        match result.failed_keys.get(&topic_partition).unwrap() {
-            KafkaError::InvalidTopic(e) => assert_eq!(e.invalid_topics, HashSet::from(["foo".to_string()])),
+        match err {
+            Error::InvalidTopic(e) => assert_eq!(e.invalid_topics(), &HashSet::from(["foo".to_string()])),
             other => panic!("expected InvalidTopic, got {other:?}"),
         }
     }
@@ -410,7 +452,7 @@ mod tests {
     #[test]
     fn fatal_not_leader_error_if_static_mapped() {
         let topic_partition = tp("foo", 5);
-        let options = DescribeProducersOptions::new().broker_id(1);
+        let options = DescribeProducersOptions::new().set_broker_id(1);
         let result = handle_response_with_error(options, &topic_partition, Errors::NotLeaderOrFollower);
         assert!(result.completed_keys.is_empty());
         assert!(result.unmapped_keys.is_empty());
@@ -428,7 +470,7 @@ mod tests {
     #[test]
     fn completed_result() {
         let topic_partition = tp("foo", 5);
-        let options = DescribeProducersOptions::new().broker_id(1);
+        let options = DescribeProducersOptions::new().set_broker_id(1);
         let handler = new_handler(options);
 
         let mut wire0 = WireProducerState::new();

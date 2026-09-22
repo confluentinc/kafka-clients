@@ -20,3 +20,10 @@ perf-results
 # Consumer benchmark output (keep the repo readable; results are large/ephemeral)
 /consumer-perf/results/consumer-perf/compare/librdkafka_e2e
 tools/java-perf-test/bin/
+# Operator-created soak client configs hold live Confluent Cloud API keys, and
+# the soak README instructs creating them inside the working tree. `.config` is
+# matched by no other rule here, so they would show up as untracked and be one
+# `git add -A` from a committed secret. `ccloud.config.example` carries no
+# credentials and is not matched by `*.config`.
+/bindings/python/soak/*.config
+

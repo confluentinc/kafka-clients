@@ -655,9 +655,9 @@ async fn producer_perf_test() {
 
     // --- Create producer ---
     let props = config.producer_props(&bootstrap_servers);
-    let producer_config = ProducerConfig::from_properties(&props).expect("Invalid producer config");
+    let producer_config = ProducerConfig::new(&props).expect("Invalid producer config");
 
-    let producer = KafkaProducer::<Vec<u8>, Vec<u8>>::from_config(
+    let producer = KafkaProducer::<Vec<u8>, Vec<u8>>::new(
         producer_config,
         Box::new(ByteArraySerializer),
         Box::new(ByteArraySerializer),
@@ -764,7 +764,7 @@ async fn producer_perf_test() {
                 ProducerRecord::with_key(topic.clone(), key.as_deref(), Some(value.as_slice()));
             if let Ok(produce_call) = producer.send(record, None).await {
                 let md = produce_call
-                    .get_timeout(Duration::from_secs(30))
+                    .get_with_timeout(Duration::from_secs(30))
                     .await
                     .expect("warmup send failed");
                 assert!(
@@ -821,7 +821,7 @@ async fn producer_perf_test() {
                     }
                 },
                 Err(e) => {
-                    eprintln!("Produce call resulted in exception: {e:?}");
+                    eprintln!("Produce call resulted in an error: {e:?}");
                 },
             }
             completed_messages_for_completion.fetch_add(1, Ordering::Relaxed);
@@ -836,7 +836,7 @@ async fn producer_perf_test() {
         // at max rate. This keeps pace with the producer, so the unbounded
         // channel never deeply fills.
         while let Some((produce_call, start_time)) = produce_calls_rx.recv().await {
-            let result = produce_call.get_timeout(Duration::from_secs(60)).await;
+            let result = produce_call.get_with_timeout(Duration::from_secs(60)).await;
             record_completed_calls(result, start_time);
         }
         // The channel is closed and drained: the response for the last message

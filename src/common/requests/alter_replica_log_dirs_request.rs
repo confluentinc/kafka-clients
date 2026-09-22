@@ -19,10 +19,9 @@
 use std::collections::HashMap;
 use std::io;
 
-use crate::alter_replica_log_dirs_request_data::AlterReplicaLogDirsRequestData;
-use crate::alter_replica_log_dirs_response_data::{
-    AlterReplicaLogDirPartitionResult, AlterReplicaLogDirTopicResult, AlterReplicaLogDirsResponseData,
-};
+use crate::AlterReplicaLogDirsRequestData;
+use crate::AlterReplicaLogDirsResponseData;
+use crate::alter_replica_log_dirs_response_data::{AlterReplicaLogDirPartitionResult, AlterReplicaLogDirTopicResult};
 use crate::common::TopicPartition;
 use crate::common::protocol::{ApiKeys, Errors, Readable};
 
@@ -138,7 +137,7 @@ pub struct AlterReplicaLogDirsRequestBuilder {
 
 impl AlterReplicaLogDirsRequestBuilder {
     /// Creates a builder from existing data.
-    pub fn from_data(data: AlterReplicaLogDirsRequestData) -> Self {
+    pub fn new(data: AlterReplicaLogDirsRequestData) -> Self {
         Self {
             data,
             oldest_allowed_version: ApiKeys::ALTER_REPLICA_LOG_DIRS.oldest_version(),
@@ -234,7 +233,7 @@ mod tests {
         data.set_dirs(vec![dir("/data0", vec![topic("round-trip-topic", vec![3, 4])])]);
         let mut request = ConcreteRequest::AlterReplicaLogDirs(AlterReplicaLogDirsRequest::new(data, 2));
         let bytes = request.serialize().unwrap();
-        let mut readable = crate::common::ByteBufferAccessor::from_bytes(bytes.into_buffer());
+        let mut readable = crate::common::ByteBufferAccessor::new(bytes.into_buffer());
         let parsed = AlterReplicaLogDirsRequest::parse(&mut readable, 2).unwrap();
         assert_eq!(parsed.data().dirs.len(), 1);
         assert_eq!(parsed.data().dirs[0].path, "/data0");

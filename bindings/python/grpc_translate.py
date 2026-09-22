@@ -43,64 +43,7 @@ import admin as ka  # noqa: E402  (NewTopic / NewPartitions / RecordsToDelete / 
 import producer_service_pb2 as pb  # noqa: E402  (generated)
 import consumer_service_pb2 as cpb  # noqa: E402  (generated)
 import admin_service_pb2 as apb  # noqa: E402  (generated)
-
-# Mapping from KafkaError variant integers (matching the proto enum) to a
-# best-effort label. The Rust client decodes the variant explicitly, so
-# the only thing that matters here is that we send a correct discriminator.
-GENERIC = 0
-TOPIC_AUTHORIZATION = 1
-INVALID_TOPIC = 2
-GROUP_AUTHORIZATION = 3
-BUFFER_EXHAUSTED = 4
-ILLEGAL_ARGUMENT = 5
-ILLEGAL_STATE = 6
-TIMEOUT = 7
-RECORD_TOO_LARGE = 8
-SERIALIZATION = 9
-
-
-def _guess_variant(message):
-    """Infer the proto KafkaError.Variant from a KafkaError message.
-
-    The C FFI doesn't surface the Rust-side enum discriminator — only
-    the integer code, the message string, and the retriable/fatal
-    flags. Map the messages we know about to specific variants so the
-    Rust client's `matches!(err, KafkaError::Foo(_))` assertions hold.
-    """
-    if not message:
-        return GENERIC
-    lowered = message.lower()
-    if "max.request.size" in lowered or "is larger than" in lowered or "too large" in lowered:
-        return RECORD_TOO_LARGE
-    if "buffer is full" in lowered or "buffer.memory" in lowered:
-        return BUFFER_EXHAUSTED
-    if "timed out" in lowered or "expired" in lowered or "not present in metadata" in lowered:
-        return TIMEOUT
-    if "topic authorization" in lowered:
-        return TOPIC_AUTHORIZATION
-    if "invalid topic" in lowered:
-        return INVALID_TOPIC
-    if "group authorization" in lowered:
-        return GROUP_AUTHORIZATION
-    if "illegal state" in lowered or "already been closed" in lowered:
-        return ILLEGAL_STATE
-    # Illegal *argument*. The C FFI drops the KafkaError discriminator — a core
-    # `KafkaError::IllegalArgument` and a core `KafkaError::IllegalState` both
-    # report `Errors::UnknownServerError` and `KafkaError::message()` returns the
-    # bare text with no `IllegalArgumentError:` prefix — so the only signal left
-    # is the message. These two phrases are not invented: they are Java's own
-    # literal strings, which the Rust core reproduces verbatim
-    # (`KafkaAdminClient.java:4578,4585` ->
-    # `src/admin/kafka_admin_client.rs:4586,4592`), and they are what
-    # `updateFeatures` answers for an empty map or a blank feature name. Without
-    # this arm that rejection crosses as GENERIC while the native backend reports
-    # `KafkaError::IllegalArgument` — a false 3-against-1 with no defect behind
-    # it, in a slice that has such a rejection.
-    if "can not be null or empty" in lowered or "can not be empty" in lowered:
-        return ILLEGAL_ARGUMENT
-    if "serialization" in lowered or "failed to serialize" in lowered:
-        return SERIALIZATION
-    return GENERIC
+import _error_code as ec  # noqa: E402  (generated: cargo xtask generate-error-codes)
 
 
 class AdminRequestError(ValueError):
@@ -109,16 +52,16 @@ class AdminRequestError(ValueError):
     **This is a rule, not a one-off.** A request whose *arguments* are malformed
     (a dropped `OffsetSpec.kind`, a `FOR_TIMESTAMP` with no timestamp, ...) is a
     caller error, and Java answers caller errors with `IllegalArgumentException`.
-    The C++ server stamps `VARIANT_ILLEGAL_ARGUMENT` for exactly these; raising a
+    The C++ server stamps `LOCAL_ILLEGAL_ARGUMENT` for exactly these; raising a
     bare `ValueError` here instead landed in `_kafka_error_to_proto`'s
-    generic-exception branch and crossed as `ILLEGAL_STATE`, so the two servers
-    disagreed on the one field the Rust client matches on — `variant` — while
+    generic-exception branch and crossed as `LOCAL_ILLEGAL_STATE`, so the two
+    servers disagreed on the one field the Rust client decodes — `code` — while
     both carried a comment claiming they agreed "at the same level" (true about
-    the level, silent about the variant).
+    the level, silent about the class).
 
     So every request-validation failure in either Python server raises this, and
-    `_kafka_error_to_proto` maps it to `ILLEGAL_ARGUMENT`. A genuine
-    `KafkaError` from the binding is untouched and keeps its own variant. Same
+    `_kafka_error_to_proto` maps it to `LOCAL_ILLEGAL_ARGUMENT`. A genuine
+    `KafkaError` from the binding is untouched and keeps its own class. Same
     shape as `_admin_constructor_error`, which solved the constructor-rejection
     case; this generalises it to the request path.
     """
@@ -130,10 +73,10 @@ class _AdminEncodeError(RuntimeError):
 
     Distinct from [AdminRequestError], which is a malformed *request* and is
     Java's `IllegalArgumentException`. This one is a binding/server bug, so it
-    crosses as ILLEGAL_STATE through `_kafka_error_to_proto`'s generic branch —
-    which is exactly the variant the C++ server's `make_synthetic_error(
-    VARIANT_ILLEGAL_STATE, ...)` stamps for the same state, so the servers agree
-    on the *variant* and not merely on the level (the mistake round 14 caught for
+    crosses as LOCAL_ILLEGAL_STATE through `_kafka_error_to_proto`'s generic
+    branch — which is exactly the class the C++ server's
+    `make_synthetic_error(...)` stamps for the same state, so the servers agree
+    on the *class* and not merely on the level (the mistake round 14 caught for
     the request direction).
 
     It exists so the failure is a typed envelope rather than an AttributeError
@@ -144,37 +87,35 @@ class _AdminEncodeError(RuntimeError):
 
 def _kafka_error_to_proto(err):
     """Translate a producer.py KafkaError (or generic Exception) into a
-    proto KafkaError. The C FFI doesn't expose the structured variant
-    discriminator (it's all KafkaError on the C side), so we infer the
-    variant heuristically from the message — it has to round-trip
-    through the wire because the Rust client matches on variant."""
+    proto KafkaError.
+
+    `code` is the only discriminator the proto carries, and that is enough:
+    it is the FFI error code (kafka_common_ErrorCode_t), which is injective
+    over the client's error classes, so the Rust client derives the class from
+    it. This is what retired `_guess_variant`, which substring-matched the
+    message text to recover a class the code could not carry back when several
+    classes shared code -1.
+
+    `is_retriable` / `is_fatal` are gone from the proto too: no reader consumed
+    them and both are derivable from the code. KafkaError.is_retriable stays in
+    the Python public API; it simply has no internal caller.
+    """
     if isinstance(err, AdminRequestError):
         # Request-validation failure: Java's IllegalArgumentException, and the
-        # variant the C++ server stamps for the same condition.
+        # class the C++ server stamps for the same condition.
         return pb.KafkaError(
-            variant=ILLEGAL_ARGUMENT,
-            code=-1,
+            code=ec.LOCAL_ILLEGAL_ARGUMENT,
             message=f"python server: {err}",
-            is_retriable=False,
-            is_fatal=True,
         )
     if isinstance(err, kp.KafkaError):
-        message = err.message or ""
-        return pb.KafkaError(
-            variant=_guess_variant(message),
-            code=err.code,
-            message=message,
-            is_retriable=err.is_retriable,
-            is_fatal=err.is_fatal,
-        )
-    # Unexpected non-Kafka exception: surface as IllegalState so the
-    # Rust side sees a clear signal something went wrong server-side.
+        return pb.KafkaError(code=err.code, message=err.message or "")
+    # Unexpected non-Kafka exception: this is the server's own bookkeeping
+    # failure, not an error the client reported, so it is fabricated as
+    # LocalIllegalState. That is inventing an error rather than guessing at
+    # one, which is why this path survives while _guess_variant did not.
     return pb.KafkaError(
-        variant=ILLEGAL_STATE,
-        code=-1,
+        code=ec.LOCAL_ILLEGAL_STATE,
         message=f"python server: {type(err).__name__}: {err}",
-        is_retriable=False,
-        is_fatal=True,
     )
 
 
@@ -182,19 +123,16 @@ def _admin_synthetic_error(message):
     """A server-manufactured `KafkaError` for a per-entry state the binding
     should not have produced.
 
-    Mirrors the C++ server's `make_synthetic_error(VARIANT_ILLEGAL_STATE, ...)`
-    field for field (variant, code -1, non-retriable, fatal) so that when both
-    servers meet the same impossible input they answer with the same *variant*
-    and not merely at the same level — the distinction round 14 caught for the
-    request direction. Only the `"c server: "` / `"python server: "` prefix
-    differs, which is deliberate: it names which server manufactured it.
+    Mirrors the C++ server's `make_synthetic_error(...)` field for field (the
+    `LOCAL_ILLEGAL_STATE` code, and the message) so that when both servers meet
+    the same impossible input they answer with the same *class* and not merely
+    at the same level — the distinction round 14 caught for the request
+    direction. Only the `"c server: "` / `"python server: "` prefix differs,
+    which is deliberate: it names which server manufactured it.
     """
     return pb.KafkaError(
-        variant=ILLEGAL_STATE,
-        code=-1,
+        code=ec.LOCAL_ILLEGAL_STATE,
         message=f"python server: {message}",
-        is_retriable=False,
-        is_fatal=True,
     )
 
 
@@ -565,21 +503,18 @@ def _admin_constructor_error(err):
     """Translate a *constructor* failure for CreateAdminResponse.error.
 
     A genuine KafkaError (a bad AdminClient config the FFI rejected) is
-    forwarded verbatim and keeps its own variant. Anything else means the
+    forwarded verbatim and keeps its own class. Anything else means the
     constructor rejected its arguments without a Kafka error of its own — the
     mock's `num_brokers < 1`, where the FFI returns NULL — and crosses as
-    ILLEGAL_ARGUMENT, matching Java's IllegalArgumentException and the C++
-    server. Without this the shared fallback in `_kafka_error_to_proto` would
-    report ILLEGAL_STATE and the C and Python backends would disagree on a
-    state neither one is wrong about."""
+    LOCAL_ILLEGAL_ARGUMENT, matching Java's IllegalArgumentException and the
+    C++ server. Without this the shared fallback in `_kafka_error_to_proto`
+    would report LOCAL_ILLEGAL_STATE and the C and Python backends would
+    disagree on a state neither one is wrong about."""
     if isinstance(err, kp.KafkaError):
         return _kafka_error_to_proto(err)
     return pb.KafkaError(
-        variant=ILLEGAL_ARGUMENT,
-        code=-1,
+        code=ec.LOCAL_ILLEGAL_ARGUMENT,
         message=f"python server: {type(err).__name__}: {err}",
-        is_retriable=False,
-        is_fatal=True,
     )
 
 
@@ -1058,7 +993,7 @@ def _admin_offset_specs(protos):
     KIND_UNSPECIFIED and FOR_TIMESTAMP-without-a-timestamp are protocol errors
     rather than a defaulted variant: a dropped `kind` field must fail the call,
     not silently become `earliest()` and pass. They raise `AdminRequestError`, so
-    they cross with the **ILLEGAL_ARGUMENT variant** the C++ server stamps for the
+    they cross with the **LOCAL_ILLEGAL_ARGUMENT code** the C++ server stamps for the
     same condition -- not merely at the same level. See `AdminRequestError`."""
     out = {}
     for p in protos:
@@ -1760,7 +1695,7 @@ def _admin_create_delegation_token_response(token):
 
     A None token from a successful call is a binding bug rather than a Kafka
     outcome, and it has to become a *typed* error rather than an AttributeError:
-    the C++ server stamps a synthetic ILLEGAL_STATE for the same state, and
+    the C++ server stamps a synthetic LOCAL_ILLEGAL_STATE for the same state, and
     without this the two would disagree on whether the response even carries an
     envelope.
     """

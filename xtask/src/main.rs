@@ -25,6 +25,7 @@ fn main() -> anyhow::Result<()> {
         Some("format") => format()?,
         Some("format-check") => format_check()?,
         Some("check-generated") => check_generated()?,
+        Some("generate-error-codes") => generate_error_codes()?,
         Some("check-bindings") => check_bindings_task()?,
         Some("lint") => lint()?,
         Some("doc-hygiene") => doc_hygiene()?,
@@ -74,6 +75,8 @@ fn format_check() -> anyhow::Result<()> {
 }
 
 fn check_generated() -> anyhow::Result<()> {
+    check_error_codes_up_to_date()?;
+
     println!("🔍 Checking generated code formatting...");
 
     let generated_files = find_generated_files()?;
@@ -168,11 +171,189 @@ fn find_generated_files() -> anyhow::Result<Vec<PathBuf>> {
     Ok(files)
 }
 
+// ---------------------------------------------------------------------------
+// Error-code constants generated from `kafka_common_ErrorCode_t`
+// ---------------------------------------------------------------------------
+//
+// `src/ffi/common.rs`'s `kafka_common_ErrorCode_t` is the one place the error
+// codes are declared. C sees them through the cbindgen-generated header, so it
+// needs nothing here; the two consumers that cannot include that header need a
+// copy of the values, and copies are what drift:
+//
+//   - `bindings/python/_error_code.py` -- the gRPC test servers put the real
+//     code on their own synthetic errors ("unknown consumer_id"), and a unit
+//     test asserts a code instead of matching message text. Private (leading
+//     underscore): the Python public API is `code` / `message` /
+//     `is_retriable` on `KafkaError` and nothing re-exports this module.
+//   - `tests/common/error_code.rs` -- the multilanguage harness decodes a proto
+//     `KafkaError` back into a Rust `Error` by its code. It cannot use the enum
+//     itself: `src/ffi` is behind the `ffi` feature, which the multilanguage
+//     test targets do not enable.
+//
+// `check-generated` re-runs the generation and fails on any difference, so a
+// stale copy breaks the build rather than a test (CLAUDE.md #6: xtask programs
+// rather than shell scripts).
+
+const ERROR_CODE_SOURCE: &str = "src/ffi/common.rs";
+const ERROR_CODE_PY: &str = "bindings/python/_error_code.py";
+const ERROR_CODE_RS: &str = "tests/common/error_code.rs";
+
+/// Extract `(name, value)` for every enumerator of `kafka_common_ErrorCode_t`.
+fn parse_error_codes() -> anyhow::Result<Vec<(String, i32)>> {
+    let source = fs::read_to_string(ERROR_CODE_SOURCE)?;
+    let body = source
+        .split_once("pub enum kafka_common_ErrorCode_t {")
+        .map(|(_, rest)| rest)
+        .ok_or_else(|| anyhow::anyhow!("{ERROR_CODE_SOURCE}: kafka_common_ErrorCode_t not found"))?;
+    // The enum is the only item declared before the next top-level `}`.
+    let body = body.split_once("\n}").map(|(body, _)| body).unwrap_or(body);
+
+    let mut codes = Vec::new();
+    for line in body.lines() {
+        let line = line.trim();
+        let Some(rest) = line.strip_prefix("kafka_common_ErrorCode_") else {
+            continue;
+        };
+        let Some((name, value)) = rest.split_once(" = ") else {
+            continue;
+        };
+        let value: i32 = value.trim_end_matches(',').parse()?;
+        codes.push((name.to_string(), value));
+    }
+    if codes.is_empty() {
+        anyhow::bail!("{ERROR_CODE_SOURCE}: kafka_common_ErrorCode_t has no enumerators");
+    }
+    Ok(codes)
+}
+
+fn error_codes_python(codes: &[(String, i32)]) -> String {
+    let mut out = String::new();
+    out.push_str(
+        r#"# Copyright 2025 Confluent Inc.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Error-code constants -- GENERATED, DO NOT EDIT.
+
+Generated from kafka_common_ErrorCode_t in src/ffi/common.rs by
+`cargo xtask generate-error-codes`, and checked for staleness by
+`cargo xtask check-generated`.
+
+Private plumbing, not public API: KafkaError exposes `code`, `message` and
+`is_retriable`, and neither producer.py nor consumer.py re-exports this module.
+The users are the gRPC test servers, which stamp the real code on their own
+synthetic errors, and the unit tests, which compare a code instead of matching
+message text.
+
+Values are the FFI error codes: Java's wire codes at Java's own values, plus
+negatives for the classes only the client raises. They are injective over the
+error classes, so the code alone identifies the class.
+"""
+
+"#,
+    );
+    for (name, value) in codes {
+        out.push_str(&format!("{name} = {value}\n"));
+    }
+    out
+}
+
+fn error_codes_rust(codes: &[(String, i32)]) -> String {
+    let mut out = String::new();
+    out.push_str(
+        r#"// Copyright 2025 Confluent Inc.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+//! Error-code constants -- GENERATED, DO NOT EDIT.
+//!
+//! Generated from `kafka_common_ErrorCode_t` in `src/ffi/common.rs` by
+//! `cargo xtask generate-error-codes`, and checked for staleness by
+//! `cargo xtask check-generated`.
+//!
+//! The multilanguage harness decodes a proto `KafkaError` back into an
+//! [`Error`](confluent_kafka::common::Error) by its code, and cannot use the
+//! enum itself: `src/ffi` is behind the `ffi` feature, which the multilanguage
+//! test targets do not enable.
+//!
+//! Values are the FFI error codes: Java's wire codes at Java's own values, plus
+//! negatives for the classes only the client raises. They are injective over
+//! the error classes, so the code alone identifies the class.
+
+"#,
+    );
+    for (name, value) in codes {
+        out.push_str(&format!("pub const {name}: i32 = {value};\n"));
+    }
+    out
+}
+
+fn generate_error_codes() -> anyhow::Result<()> {
+    println!("🔧 Generating error-code constants from {ERROR_CODE_SOURCE}...");
+
+    let codes = parse_error_codes()?;
+    fs::write(ERROR_CODE_PY, error_codes_python(&codes))?;
+    fs::write(ERROR_CODE_RS, error_codes_rust(&codes))?;
+
+    println!("✅ Wrote {} constants to {ERROR_CODE_PY} and {ERROR_CODE_RS}", codes.len());
+    Ok(())
+}
+
+/// Fail when a generated error-code file no longer matches the Rust enum.
+fn check_error_codes_up_to_date() -> anyhow::Result<()> {
+    println!("🔍 Checking generated error-code constants...");
+
+    let codes = parse_error_codes()?;
+    let mut stale = Vec::new();
+    for (path, expected) in [
+        (ERROR_CODE_PY, error_codes_python(&codes)),
+        (ERROR_CODE_RS, error_codes_rust(&codes)),
+    ] {
+        match fs::read_to_string(path) {
+            Ok(actual) if actual == expected => {},
+            _ => stale.push(path),
+        }
+    }
+
+    if !stale.is_empty() {
+        eprintln!("\n❌ Stale generated error-code constants: {}", stale.join(", "));
+        eprintln!("   Run: cargo xtask generate-error-codes");
+        exit(1);
+    }
+
+    println!("✅ Error-code constants are up to date ({} codes)", codes.len());
+    Ok(())
+}
+
 fn lint() -> anyhow::Result<()> {
     // Structural doc defects clippy cannot see: an item's attributes or doc
     // comment migrated onto a neighbour. Run first, because it is instant and its
     // failures are always real.
     doc_hygiene()?;
+
+    // CLAUDE.md §2's import rule, in the one place the compiler cannot enforce it:
+    // a file module stays visible inside its own subtree even when declared `mod x;`.
+    module_path_hygiene()?;
 
     println!("🔍 Running clippy lints...");
 
@@ -469,6 +650,177 @@ fn doc_hygiene() -> anyhow::Result<()> {
     Err(anyhow::anyhow!("{} doc-hygiene finding(s)", findings.len()))
 }
 
+/// CLAUDE.md §2: a translated Java class is imported through its parent module's
+/// re-export (`crate::producer::ProducerRecord`), never through the file module that
+/// holds it (the same type spelled with a `producer_record` segment in between). The
+/// file module path is reserved for Java *nested* types, e.g. `ConfigSource` reached
+/// through `config_entry`.
+///
+/// Most of that rule is enforced by the compiler, because the file modules are
+/// declared `mod x;` — but a private module stays visible to the declaring module and
+/// all of its descendants, so a sibling reaching through `super::<file module>::<Type>`
+/// still compiles. This check covers exactly that blind spot.
+///
+/// It flags a `<file module>::<Name>` segment pair only when the file module's own
+/// parent re-exports that exact `Name`, and only when the pair is reached through a
+/// longer path (preceded by `::`). Both conditions matter: the first leaves Java nested
+/// types alone (`common::network` re-exports `ChannelState` but not the nested `State`,
+/// so only the former is a violation), and the second leaves the defining
+/// `pub use` line in the parent's own `mod.rs` alone.
+///
+/// A file module whose name is also a directory module's name is skipped, because the
+/// pair is keyed on the bare segment rather than the full path: the three
+/// module-inception files (`metrics`, `utils`, `resource`) sit inside a directory of
+/// the same name, so `common::metrics::Metrics` — the *correct* path — is
+/// indistinguishable from a violation by segment name alone.
+fn module_path_hygiene() -> anyhow::Result<()> {
+    println!("🔍 Checking module-path hygiene...");
+
+    // (file module segment, re-exported name) for every hand-written parent module.
+    let mut reexports: Vec<(String, String)> = Vec::new();
+    let mut directory_modules: Vec<String> = Vec::new();
+    for path in rust_sources("src")? {
+        if path.file_name().and_then(|n| n.to_str()) == Some("mod.rs") {
+            if let Some(name) = path.parent().and_then(|d| d.file_name()).and_then(|n| n.to_str()) {
+                directory_modules.push(name.to_string());
+            }
+        }
+    }
+    for path in rust_sources("src")? {
+        let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or_default();
+        if file_name != "mod.rs" && file_name != "lib.rs" {
+            continue;
+        }
+        let dir = path.parent().unwrap_or(&path);
+        let text = fs::read_to_string(&path)?;
+        for body in use_statements(&text) {
+            // Only a re-export of a *direct child file module* counts: `<seg>::<Name>`
+            // or `self::<seg>::<Name>`, with `<seg>.rs` sitting next to this `mod.rs`.
+            let body = body.trim_start_matches("self::");
+            let Some((segment, tail)) = body.split_once("::") else {
+                continue;
+            };
+            if segment.contains(' ') || !dir.join(format!("{segment}.rs")).is_file() {
+                continue;
+            }
+            if directory_modules.iter().any(|name| name == segment) {
+                continue;
+            }
+            for name in brace_list(tail) {
+                // `pub use x::y as z;` re-exports under `z`; the path a caller must not
+                // write is still `x::y`, so key on the original name.
+                let original = name.split(" as ").next().unwrap_or(&name).trim().to_string();
+                if !original.is_empty() && original != "*" && original != "self" {
+                    reexports.push((segment.to_string(), original));
+                }
+            }
+        }
+    }
+    reexports.sort();
+    reexports.dedup();
+
+    // A path is only ours to judge if its first segment names this crate. Without
+    // that guard a file module sharing a name with a std one — `common/error.rs`
+    // against `std::error` — matches every `std::error::Error` in the repo.
+    let mut crate_roots: Vec<String> = ["crate", "self", "super", "confluent_kafka"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    crate_roots.extend(directory_modules.iter().cloned());
+    crate_roots.sort();
+    crate_roots.dedup();
+
+    let mut findings: Vec<String> = Vec::new();
+    for root in ["src", "tests", "examples", "consumer-perf/src"] {
+        if !PathBuf::from(root).is_dir() {
+            continue;
+        }
+        for path in rust_sources(root)? {
+            let text = fs::read_to_string(&path)?;
+            for (number, line) in text.lines().enumerate() {
+                for (segment, name) in &reexports {
+                    let needle = format!("::{segment}::{name}");
+                    let mut from = 0;
+                    while let Some(at) = line[from..].find(&needle) {
+                        let start = from + at;
+                        let end = start + needle.len();
+                        from = start + 1;
+                        // Reject a longer identifier on either side (`::topic::TopicX`).
+                        if line[end..].starts_with(|c: char| c.is_alphanumeric() || c == '_') {
+                            continue;
+                        }
+                        let head: String = line[..start]
+                            .chars()
+                            .rev()
+                            .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == ':')
+                            .collect::<Vec<_>>()
+                            .into_iter()
+                            .rev()
+                            .collect();
+                        let root = head.trim_start_matches(':').split("::").next().unwrap_or_default();
+                        if !crate_roots.iter().any(|allowed| allowed == root) {
+                            continue;
+                        }
+                        findings.push(format!(
+                            "{}:{} reaches `{name}` through the file module `{segment}` — \
+                             import it from the parent re-export instead (CLAUDE.md §2)",
+                            path.display(),
+                            number + 1
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    if findings.is_empty() {
+        println!("✅ Module-path hygiene clean!");
+        return Ok(());
+    }
+    for finding in &findings {
+        eprintln!("  {finding}");
+    }
+    Err(anyhow::anyhow!("{} module-path finding(s)", findings.len()))
+}
+
+/// The body of every `use` statement in `text`, whitespace-collapsed and with the
+/// leading visibility/keyword and trailing `;` stripped. Multi-line statements are
+/// joined, so a braced list arrives as one string.
+fn use_statements(text: &str) -> Vec<String> {
+    let mut bodies = Vec::new();
+    let mut rest = text;
+    while let Some(at) = rest.find("use ") {
+        let before_is_boundary = rest[..at].ends_with('\n')
+            || rest[..at].trim_end().ends_with("pub")
+            || rest[..at].trim_end().ends_with("(crate)")
+            || rest[..at].chars().rev().take_while(|c| *c == ' ').count() == at;
+        let after = &rest[at + 4..];
+        let Some(end) = after.find(';') else { break };
+        if before_is_boundary {
+            bodies.push(after[..end].split_whitespace().collect::<Vec<_>>().join(" "));
+        }
+        rest = &after[end + 1..];
+    }
+    bodies
+}
+
+/// `Name` -> `["Name"]`; `{A, B as C}` -> `["A", "B as C"]`. Nested braces are skipped,
+/// since this check only needs the simple shapes the repo's `mod.rs` files use.
+fn brace_list(tail: &str) -> Vec<String> {
+    let tail = tail.trim();
+    let Some(inner) = tail.strip_prefix('{').and_then(|t| t.strip_suffix('}')) else {
+        return vec![tail.to_string()];
+    };
+    if inner.contains('{') {
+        return Vec::new();
+    }
+    inner
+        .split(',')
+        .map(|n| n.trim().to_string())
+        .filter(|n| !n.is_empty())
+        .collect()
+}
+
 /// Every `.rs` file under `root`, recursively, in a deterministic order.
 fn rust_sources(root: &str) -> anyhow::Result<Vec<PathBuf>> {
     let mut found = Vec::new();
@@ -495,7 +847,8 @@ fn print_help() {
         "Tasks:
   format          Format all Rust code including generated files
   format-check    Check if code is formatted correctly
-  check-generated Check generated code formatting only (no changes)
+  check-generated Check generated code formatting and error-code staleness (no changes)
+  generate-error-codes  Regenerate the error-code constants for Python and the test harness
   check-bindings  Check Py_BuildValue / PyArg_Parse* format arity in the Python C extension
   lint            Run doc-hygiene plus clippy lints (warnings are errors)
   doc-hygiene     Check for migrated attributes and stacked doc blocks
@@ -510,6 +863,7 @@ Usage:
   cargo xtask format
   cargo xtask format-check
   cargo xtask check-generated
+  cargo xtask generate-error-codes
   cargo xtask check-bindings [path/to/file.c]
   cargo xtask lint
   cargo xtask doc-hygiene

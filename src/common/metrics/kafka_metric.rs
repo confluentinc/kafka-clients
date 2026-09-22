@@ -18,7 +18,7 @@
 use std::sync::{Arc, Mutex};
 
 use crate::common::metrics::{Measurable, MetricConfig, MetricValue, MetricValueProvider, Time};
-use crate::common::{KafkaError, Metric, MetricName};
+use crate::common::{Error, Metric, MetricName};
 
 /// A metric tracked by the registry. Holds a [`MetricName`], a (mutable)
 /// [`MetricConfig`] and a [`MetricValueProvider`].
@@ -74,7 +74,7 @@ impl KafkaMetric {
 
     /// Get the underlying [`Measurable`] value provider.
     ///
-    /// Returns [`KafkaError::IllegalState`] when the provider is a
+    /// Returns [`Error::LocalIllegalState`] when the provider is a
     /// [`MetricValueProvider::Gauge`] instead — Java's `measurable()` throws
     /// `IllegalStateException("Not a measurable: " + class)` in that case
     /// (`KafkaMetric.java`). Per CLAUDE.md §10.2 an unchecked-but-recoverable
@@ -85,10 +85,10 @@ impl KafkaMetric {
     /// trait object, which is the closest equivalent — trait objects have no
     /// meaningful value equality, so callers assert on `is_ok()` / the measured
     /// value instead.
-    pub fn measurable(&self) -> Result<&dyn Measurable, KafkaError> {
+    pub fn measurable(&self) -> Result<&dyn Measurable, Error> {
         match &self.metric_value_provider {
             MetricValueProvider::Measurable(m) => Ok(m.as_ref()),
-            MetricValueProvider::Gauge(_) => Err(KafkaError::illegal_state(
+            MetricValueProvider::Gauge(_) => Err(Error::local_illegal_state(
                 "Not a measurable: the metric value provider is a Gauge",
             )),
         }
@@ -121,8 +121,8 @@ impl Metric for KafkaMetric {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::common::metrics::MockTime;
     use crate::common::metrics::stats::Value;
-    use crate::common::metrics::time::mock::MockTime;
     use crate::common::metrics::{ClosureGauge, Stat, SystemTime};
     use std::collections::BTreeMap;
 

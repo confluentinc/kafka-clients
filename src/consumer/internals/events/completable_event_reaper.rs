@@ -16,14 +16,14 @@
 //!
 //! Translated from
 //! `org.apache.kafka.clients.consumer.internals.events.CompletableEventReaper`.
-//! Tracks [`super::completable_event::CompletableEventErasedHandle`]s and
+//! Tracks [`super::CompletableEventErasedHandle`]s and
 //! expires any whose deadline has passed, by failing their inner oneshot
-//! sender with [`KafkaError::timeout`].
+//! sender with [`Error::timeout`].
 //!
 //! Java uses `List<CompletableEvent<?>>` with explicit iterator-remove;
 //! Rust uses `Vec<Arc<dyn CompletableEventErasedHandle>>` with
 //! [`Vec::retain`]. Identity comparison goes via
-//! [`super::completable_event::CompletableEventErasedHandle::inner_id`]
+//! [`super::CompletableEventErasedHandle::inner_id`]
 //! (the stable pointer to the underlying `HandleInner`) to preserve
 //! Java's `List.contains(event)` reference-equality semantics across
 //! repeated `CompletableEventHandle::erased()` calls.
@@ -32,9 +32,9 @@ use std::sync::Arc;
 
 use log::{debug, trace};
 
-use crate::common::KafkaError;
+use crate::common::Error;
 
-use super::completable_event::CompletableEventErasedHandle;
+use super::CompletableEventErasedHandle;
 
 /// Tracks [`CompletableEventErasedHandle`]s and expires deadline-exceeded
 /// events.
@@ -68,7 +68,7 @@ impl CompletableEventReaper {
     /// Java: `reap(long currentTimeMs) -> long`. Two-step process:
     ///
     ///   1. For every tracked event whose deadline has passed, fail its
-    ///      sender with [`KafkaError::timeout`].
+    ///      sender with [`Error::timeout`].
     ///   2. Remove all events whose sender slot has already been consumed
     ///      (either via the call above, via normal completion on the bg
     ///      task, or via cancellation).
@@ -107,7 +107,7 @@ impl CompletableEventReaper {
             // check and the call.
             expired_count += 1;
 
-            let error = KafkaError::timeout(format!(
+            let error = Error::timeout(format!(
                 "{} was {} ms past its expiration of {}",
                 handle.type_name(),
                 past_due,
@@ -116,14 +116,14 @@ impl CompletableEventReaper {
 
             if handle.fail_with_timeout(error) {
                 debug!(
-                    "Event {} completed exceptionally since its expiration of {} passed {} ms ago",
+                    "Event {} completed with an error since its expiration of {} passed {} ms ago",
                     handle.type_name(),
                     deadline,
                     past_due
                 );
             } else {
                 trace!(
-                    "Event {} not completed exceptionally since it was previously completed",
+                    "Event {} not completed with an error since it was previously completed",
                     handle.type_name()
                 );
             }
@@ -149,10 +149,10 @@ impl CompletableEventReaper {
     /// events that were expired (i.e. that were still not done at the
     /// time of the call).
     pub(crate) fn reap_on_close(&mut self, unprocessed_events: &mut Vec<Arc<dyn CompletableEventErasedHandle>>) -> u64 {
-        let tracked_expired = complete_events_exceptionally_on_close(self.tracked.iter());
+        let tracked_expired = complete_events_with_error_on_close(self.tracked.iter());
         self.tracked.clear();
 
-        let extra_expired = complete_events_exceptionally_on_close(unprocessed_events.iter());
+        let extra_expired = complete_events_with_error_on_close(unprocessed_events.iter());
         unprocessed_events.clear();
 
         tracked_expired + extra_expired
@@ -193,7 +193,7 @@ impl CompletableEventReaper {
 /// the count BEFORE attempting expiration. Java counts the event as soon
 /// as it observes it not-done, regardless of whether another task wins
 /// the race to actually complete the slot.
-fn complete_events_exceptionally_on_close<'a, I>(handles: I) -> u64
+fn complete_events_with_error_on_close<'a, I>(handles: I) -> u64
 where
     I: IntoIterator<Item = &'a Arc<dyn CompletableEventErasedHandle>>,
 {
@@ -210,19 +210,19 @@ where
         // check above and our completion attempt.
         count += 1;
 
-        let error = KafkaError::timeout(format!(
+        let error = Error::timeout(format!(
             "{} could not be completed before the consumer closed",
             handle.type_name()
         ));
 
         if handle.fail_with_timeout(error) {
             debug!(
-                "Event {} completed exceptionally since the consumer is closing",
+                "Event {} completed with an error since the consumer is closing",
                 handle.type_name()
             );
         } else {
             trace!(
-                "Event {} not completed exceptionally since it was completed prior to the consumer closing",
+                "Event {} not completed with an error since it was completed prior to the consumer closing",
                 handle.type_name()
             );
         }
@@ -232,7 +232,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::super::completable_event::make_completable_event;
+    use super::super::CompletableEvent;
     use super::*;
 
     #[test]
@@ -245,7 +245,7 @@ mod tests {
     #[test]
     fn expired_event_is_failed_and_removed() {
         let mut reaper = CompletableEventReaper::new();
-        let (_handle, mut rx, erased) = make_completable_event::<()>(100);
+        let (_handle, mut rx, erased) = CompletableEvent::make_completable_event::<()>(100);
         reaper.add(erased);
 
         // Not yet past deadline.
@@ -257,13 +257,13 @@ mod tests {
         assert_eq!(reaper.size(), 0);
 
         let received = rx.try_recv().expect("sender used");
-        assert!(matches!(received, Err(KafkaError::Timeout(_))), "got: {:?}", received);
+        assert!(matches!(received, Err(Error::Timeout(_))), "got: {:?}", received);
     }
 
     #[test]
     fn completed_event_is_removed_but_not_counted_as_expired() {
         let mut reaper = CompletableEventReaper::new();
-        let (handle, mut rx, erased) = make_completable_event::<()>(100);
+        let (handle, mut rx, erased) = CompletableEvent::make_completable_event::<()>(100);
         reaper.add(erased);
 
         // Complete it normally.
@@ -274,7 +274,7 @@ mod tests {
         assert_eq!(reaper.size(), 0);
 
         // Java `testCompleted` (CompletableEventReaperTest.java:96) asserts
-        // the successful value survives the reap untouched. `KafkaError`
+        // the successful value survives the reap untouched. `Error`
         // does not derive `PartialEq`, so we pattern-match instead of
         // `assert_eq!`-ing against `Ok(())`.
         assert!(matches!(rx.try_recv().expect("sender used"), Ok(())));
@@ -283,10 +283,10 @@ mod tests {
     #[test]
     fn reap_on_close_expires_tracked_and_extra() {
         let mut reaper = CompletableEventReaper::new();
-        let (_h1, mut rx1, erased1) = make_completable_event::<()>(1_000);
+        let (_h1, mut rx1, erased1) = CompletableEvent::make_completable_event::<()>(1_000);
         reaper.add(erased1);
 
-        let (_h2, mut rx2, erased2) = make_completable_event::<()>(1_000);
+        let (_h2, mut rx2, erased2) = CompletableEvent::make_completable_event::<()>(1_000);
         // erased2 is NOT added to the reaper — only passed in.
         let mut extras = vec![erased2];
 
@@ -295,18 +295,18 @@ mod tests {
         // Java: `events.clear()` (CompletableEventReaper.java:150).
         assert!(extras.is_empty(), "reap_on_close must clear the supplied collection");
 
-        assert!(matches!(rx1.try_recv().unwrap(), Err(KafkaError::Timeout(_))));
-        assert!(matches!(rx2.try_recv().unwrap(), Err(KafkaError::Timeout(_))));
+        assert!(matches!(rx1.try_recv().unwrap(), Err(Error::Timeout(_))));
+        assert!(matches!(rx2.try_recv().unwrap(), Err(Error::Timeout(_))));
     }
 
     #[test]
     fn contains_uses_ptr_eq() {
         let mut reaper = CompletableEventReaper::new();
-        let (_h, _rx, erased) = make_completable_event::<()>(0);
+        let (_h, _rx, erased) = CompletableEvent::make_completable_event::<()>(0);
         reaper.add(Arc::clone(&erased));
         assert!(reaper.contains(&erased));
 
-        let (_h2, _rx2, erased2) = make_completable_event::<()>(0);
+        let (_h2, _rx2, erased2) = CompletableEvent::make_completable_event::<()>(0);
         assert!(!reaper.contains(&erased2));
     }
 
@@ -319,7 +319,7 @@ mod tests {
     #[test]
     fn contains_works_across_erased_recreation() {
         let mut reaper = CompletableEventReaper::new();
-        let (handle, _rx) = super::super::completable_event::CompletableEventHandle::<()>::new(0);
+        let (handle, _rx) = super::super::CompletableEventHandle::<()>::new(0);
         let erased_a = handle.erased();
         reaper.add(erased_a);
 
@@ -336,8 +336,8 @@ mod tests {
     #[test]
     fn completed_and_expired() {
         let mut reaper = CompletableEventReaper::new();
-        let (h1, _rx1, erased1) = make_completable_event::<()>(100);
-        let (_h2, mut rx2, erased2) = make_completable_event::<()>(100);
+        let (h1, _rx1, erased1) = CompletableEvent::make_completable_event::<()>(100);
+        let (_h2, mut rx2, erased2) = CompletableEvent::make_completable_event::<()>(100);
         reaper.add(erased1);
         reaper.add(erased2);
 
@@ -354,7 +354,7 @@ mod tests {
         assert_eq!(reaper.size(), 0);
 
         // Event2's receiver sees a timeout error.
-        assert!(matches!(rx2.try_recv().unwrap(), Err(KafkaError::Timeout(_))));
+        assert!(matches!(rx2.try_recv().unwrap(), Err(Error::Timeout(_))));
     }
 
     /// Java `testIncompleteQueue` — events tracked only in the supplied
@@ -364,8 +364,8 @@ mod tests {
     #[test]
     fn reap_on_close_handles_queue_only_events() {
         let mut reaper = CompletableEventReaper::new();
-        let (h1, mut rx1, erased1) = make_completable_event::<()>(1_000);
-        let (_h2, mut rx2, erased2) = make_completable_event::<()>(1_000);
+        let (h1, mut rx1, erased1) = CompletableEvent::make_completable_event::<()>(1_000);
+        let (_h2, mut rx2, erased2) = CompletableEvent::make_completable_event::<()>(1_000);
 
         // Complete h1 in advance.
         assert!(h1.complete(()));
@@ -383,7 +383,7 @@ mod tests {
         // Event1 still carries its `Ok(())` result.
         assert!(matches!(rx1.try_recv().unwrap(), Ok(())));
         // Event2 was timed out.
-        assert!(matches!(rx2.try_recv().unwrap(), Err(KafkaError::Timeout(_))));
+        assert!(matches!(rx2.try_recv().unwrap(), Err(Error::Timeout(_))));
 
         assert_eq!(reaper.size(), 0);
     }
@@ -394,8 +394,8 @@ mod tests {
     #[test]
     fn reap_on_close_handles_tracked_only_events() {
         let mut reaper = CompletableEventReaper::new();
-        let (h1, mut rx1, erased1) = make_completable_event::<()>(1_000);
-        let (_h2, mut rx2, erased2) = make_completable_event::<()>(1_000);
+        let (h1, mut rx1, erased1) = CompletableEvent::make_completable_event::<()>(1_000);
+        let (_h2, mut rx2, erased2) = CompletableEvent::make_completable_event::<()>(1_000);
         reaper.add(erased1);
         reaper.add(erased2);
 
@@ -408,14 +408,14 @@ mod tests {
         assert!(queue.is_empty());
 
         assert!(matches!(rx1.try_recv().unwrap(), Ok(())));
-        assert!(matches!(rx2.try_recv().unwrap(), Err(KafkaError::Timeout(_))));
+        assert!(matches!(rx2.try_recv().unwrap(), Err(Error::Timeout(_))));
     }
 
     #[test]
     fn uncompleted_events_filters_done() {
         let mut reaper = CompletableEventReaper::new();
-        let (h1, _rx1, erased1) = make_completable_event::<()>(0);
-        let (_h2, _rx2, erased2) = make_completable_event::<()>(0);
+        let (h1, _rx1, erased1) = CompletableEvent::make_completable_event::<()>(0);
+        let (_h2, _rx2, erased2) = CompletableEvent::make_completable_event::<()>(0);
         reaper.add(erased1);
         reaper.add(erased2);
 

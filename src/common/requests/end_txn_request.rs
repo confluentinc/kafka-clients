@@ -21,22 +21,15 @@
 
 use std::io;
 
+use crate::EndTxnRequestData;
+use crate::EndTxnResponseData;
 use crate::common::protocol::{ApiKeys, Errors, Readable};
-use crate::end_txn_request_data::EndTxnRequestData;
-use crate::end_txn_response_data::EndTxnResponseData;
 
 use super::ConcreteRequest;
 use super::ConcreteResponse;
 use super::EndTxnResponse;
 use super::RequestBuilder;
 use super::TransactionResult;
-
-/// Highest version predating KIP-890 Transaction V2.
-///
-/// A client that has not negotiated Transaction V2 must not send above this, so
-/// [`EndTxnRequestBuilder::build_version`] clamps to it. Corresponds to
-/// `EndTxnRequest.LAST_STABLE_VERSION_BEFORE_TRANSACTION_V2`.
-pub const LAST_STABLE_VERSION_BEFORE_TRANSACTION_V2: i16 = 4;
 
 /// An `EndTxn` request.
 ///
@@ -48,6 +41,13 @@ pub struct EndTxnRequest {
 }
 
 impl EndTxnRequest {
+    /// Highest version predating KIP-890 Transaction V2.
+    ///
+    /// A client that has not negotiated Transaction V2 must not send above this, so
+    /// [`EndTxnRequestBuilder::build_version`] clamps to it. Corresponds to
+    /// `EndTxnRequest.LAST_STABLE_VERSION_BEFORE_TRANSACTION_V2`.
+    pub const LAST_STABLE_VERSION_BEFORE_TRANSACTION_V2: i16 = 4;
+
     /// Creates a new `EndTxnRequest` from data and version.
     ///
     /// Java's constructor is private — instances come from the builder or
@@ -148,7 +148,7 @@ impl EndTxnRequestBuilder {
             // `latestVersionUnstable: false`, so the two accessors agree today;
             // the explicit `false` form is nonetheless the faithful translation
             // of Java's `super(apiKey)` (§12) regardless of the flag's value.
-            latest_allowed_version: ApiKeys::END_TXN.latest_version_with_unstable(false),
+            latest_allowed_version: ApiKeys::END_TXN.latest_version_enable_unstable_last_version(false),
         }
     }
 
@@ -177,7 +177,7 @@ impl RequestBuilder for EndTxnRequestBuilder {
     }
 
     /// Builds at `version`, **clamped** to
-    /// [`LAST_STABLE_VERSION_BEFORE_TRANSACTION_V2`] when Transaction V2 is not
+    /// [`EndTxnRequest::LAST_STABLE_VERSION_BEFORE_TRANSACTION_V2`] when Transaction V2 is not
     /// enabled.
     ///
     /// Mirrors Java's `Builder.build(short)`, which does
@@ -189,7 +189,7 @@ impl RequestBuilder for EndTxnRequestBuilder {
         let version = if self.is_transaction_v2_enabled {
             version
         } else {
-            version.min(LAST_STABLE_VERSION_BEFORE_TRANSACTION_V2)
+            version.min(EndTxnRequest::LAST_STABLE_VERSION_BEFORE_TRANSACTION_V2)
         };
         Ok(ConcreteRequest::EndTxn(EndTxnRequest::new(self.data.clone(), version)))
     }
@@ -251,16 +251,19 @@ mod tests {
     fn test_build_clamps_version_without_transaction_v2() {
         let latest = ApiKeys::END_TXN.latest_version();
         assert!(
-            latest > LAST_STABLE_VERSION_BEFORE_TRANSACTION_V2,
+            latest > EndTxnRequest::LAST_STABLE_VERSION_BEFORE_TRANSACTION_V2,
             "the clamp is only meaningful if the API supports higher versions"
         );
 
         // Above the cap: clamped down.
-        assert_eq!(build_at(latest, false).version(), LAST_STABLE_VERSION_BEFORE_TRANSACTION_V2);
+        assert_eq!(
+            build_at(latest, false).version(),
+            EndTxnRequest::LAST_STABLE_VERSION_BEFORE_TRANSACTION_V2
+        );
         // Exactly at the cap: unchanged.
         assert_eq!(
-            build_at(LAST_STABLE_VERSION_BEFORE_TRANSACTION_V2, false).version(),
-            LAST_STABLE_VERSION_BEFORE_TRANSACTION_V2
+            build_at(EndTxnRequest::LAST_STABLE_VERSION_BEFORE_TRANSACTION_V2, false).version(),
+            EndTxnRequest::LAST_STABLE_VERSION_BEFORE_TRANSACTION_V2
         );
         // Below the cap: unchanged — the clamp is a maximum, not a target.
         assert_eq!(build_at(1, false).version(), 1);
@@ -356,7 +359,7 @@ mod tests {
             let expected_version = if is_transaction_v2_enabled {
                 latest_version
             } else {
-                LAST_STABLE_VERSION_BEFORE_TRANSACTION_V2
+                EndTxnRequest::LAST_STABLE_VERSION_BEFORE_TRANSACTION_V2
             };
             assert_eq!(
                 request.version(),
@@ -392,7 +395,7 @@ mod tests {
     #[test]
     fn test_builder_offers_only_released_versions() {
         let builder = EndTxnRequestBuilder::new(data(true), true);
-        let released = ApiKeys::END_TXN.latest_version_with_unstable(false);
+        let released = ApiKeys::END_TXN.latest_version_enable_unstable_last_version(false);
 
         assert_eq!(builder.latest_allowed_version(), released);
 

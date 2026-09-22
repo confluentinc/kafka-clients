@@ -23,21 +23,13 @@ use std::net::IpAddr;
 
 use rustc_hash::FxHashMap;
 
+use super::ClientUtils;
 use super::ConnectionState;
 use super::HostResolver;
-use super::client_utils;
+use crate::common::Error;
 use crate::common::utils::ExponentialBackoff;
 use crate::common::utils::LogContext;
 use crate::kafka_info;
-
-/// Exponential base for reconnect backoff.
-pub const CLUSTER_CONNECTION_STATES_RECONNECT_BACKOFF_EXP_BASE: i32 = 2;
-/// Jitter factor for reconnect backoff.
-pub const CLUSTER_CONNECTION_STATES_RECONNECT_BACKOFF_JITTER: f64 = 0.2;
-/// Exponential base for connection setup timeout.
-pub const CLUSTER_CONNECTION_STATES_CONNECTION_SETUP_TIMEOUT_EXP_BASE: i32 = 2;
-/// Jitter factor for connection setup timeout.
-pub const CLUSTER_CONNECTION_STATES_CONNECTION_SETUP_TIMEOUT_JITTER: f64 = 0.2;
 
 /// The state of our connection to each node in the cluster.
 ///
@@ -61,6 +53,18 @@ pub struct ClusterConnectionStates<H: HostResolver> {
 }
 
 impl<H: HostResolver> ClusterConnectionStates<H> {
+    /// Exponential base for reconnect backoff.
+    pub const RECONNECT_BACKOFF_EXP_BASE: i32 = 2;
+
+    /// Jitter factor for reconnect backoff.
+    pub const RECONNECT_BACKOFF_JITTER: f64 = 0.2;
+
+    /// Exponential base for connection setup timeout.
+    pub const CONNECTION_SETUP_TIMEOUT_EXP_BASE: i32 = 2;
+
+    /// Jitter factor for connection setup timeout.
+    pub const CONNECTION_SETUP_TIMEOUT_JITTER: f64 = 0.2;
+
     /// Creates a new `ClusterConnectionStates`.
     ///
     /// # Arguments
@@ -80,16 +84,16 @@ impl<H: HostResolver> ClusterConnectionStates<H> {
         Self {
             reconnect_backoff: ExponentialBackoff::new(
                 reconnect_backoff_ms,
-                CLUSTER_CONNECTION_STATES_RECONNECT_BACKOFF_EXP_BASE,
+                Self::RECONNECT_BACKOFF_EXP_BASE,
                 reconnect_backoff_max_ms,
-                CLUSTER_CONNECTION_STATES_RECONNECT_BACKOFF_JITTER,
+                Self::RECONNECT_BACKOFF_JITTER,
             )
             .expect("Invalid reconnect backoff jitter"),
             connection_setup_timeout: ExponentialBackoff::new(
                 connection_setup_timeout_ms,
-                CLUSTER_CONNECTION_STATES_CONNECTION_SETUP_TIMEOUT_EXP_BASE,
+                Self::CONNECTION_SETUP_TIMEOUT_EXP_BASE,
                 connection_setup_timeout_max_ms,
-                CLUSTER_CONNECTION_STATES_CONNECTION_SETUP_TIMEOUT_JITTER,
+                Self::CONNECTION_SETUP_TIMEOUT_JITTER,
             )
             .expect("Invalid connection setup timeout jitter"),
             node_state: FxHashMap::default(),
@@ -203,7 +207,7 @@ impl<H: HostResolver> ClusterConnectionStates<H> {
         let state = self.node_state(id)?;
         if state.addresses.is_empty() {
             let host = state.host.clone();
-            let addresses = client_utils::resolve(&host, &self.host_resolver).await?;
+            let addresses = ClientUtils::resolve(&host, &self.host_resolver).await?;
             let state = self.node_state(id)?;
             state.resolve_addresses_with(addresses);
         }
@@ -289,7 +293,16 @@ impl<H: HostResolver> ClusterConnectionStates<H> {
     }
 
     /// Enter the authentication failed state for the given node.
-    pub fn authentication_failed(&mut self, id: &str, now: i64, error: String) {
+    ///
+    /// `error` is Java's `AuthenticationException exception` parameter
+    /// (`ClusterConnectionStates.java:272`) — the object the channel raised, so
+    /// the concrete subclass (`SaslAuthenticationException`,
+    /// `SslAuthenticationException`, or the base class) reaches
+    /// [`authentication_error`](Self::authentication_error) intact. It used to be
+    /// a `String`, which flattened every failure to the base class one hop past
+    /// [`ChannelState`](crate::common::network::ChannelState) and made an SSL
+    /// certificate rejection indistinguishable from a rejected SASL credential.
+    pub fn authentication_failed(&mut self, id: &str, now: i64, error: Error) {
         let node_state = self
             .node_state
             .get_mut(id)
@@ -325,9 +338,16 @@ impl<H: HostResolver> ClusterConnectionStates<H> {
         self.node_state.get(id).is_some_and(|s| s.state.is_disconnected())
     }
 
-    /// Return authentication error message if an authentication error occurred.
-    pub fn authentication_error(&self, id: &str) -> Option<&str> {
-        self.node_state.get(id).and_then(|s| s.authentication_error.as_deref())
+    /// Return the authentication error if an authentication error occurred.
+    ///
+    /// Java's `authenticationException(String id)`
+    /// (`ClusterConnectionStates.java:331`), which returns the
+    /// `AuthenticationException` object — hence the whole [`Error`], not its
+    /// message: every caller (`NetworkClient.authenticationException` and from
+    /// there the admin, consumer and producer) needs the class, not just the
+    /// text.
+    pub fn authentication_error(&self, id: &str) -> Option<&Error> {
+        self.node_state.get(id).and_then(|s| s.authentication_error.as_ref())
     }
 
     /// Get the state of a given connection.
@@ -446,7 +466,7 @@ impl<H: HostResolver> ClusterConnectionStates<H> {
 struct NodeConnectionState {
     host: String,
     state: ConnectionState,
-    authentication_error: Option<String>,
+    authentication_error: Option<Error>,
     last_connect_attempt_ms: i64,
     failed_attempts: i64,
     failed_connect_attempts: i64,
@@ -551,6 +571,11 @@ impl fmt::Display for NodeConnectionState {
 mod tests {
     use super::*;
     use std::net::Ipv4Addr;
+
+    /// A concrete instantiation used purely to name the associated constants.
+    /// They do not depend on `H`, but a generic type cannot infer it (E0282).
+    type ConnStates = ClusterConnectionStates<SingleIpHostResolver>;
+
     use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 
     // --- Mock time ---
@@ -687,8 +712,7 @@ mod tests {
         assert!(!connection_states.is_blacked_out(NODE_ID1, time.milliseconds()));
         assert!(!connection_states.has_ready_nodes(time.milliseconds()));
         let connection_delay = connection_states.connection_delay(NODE_ID1, time.milliseconds());
-        let connection_delay_delta =
-            CONNECTION_SETUP_TIMEOUT_MS as f64 * CLUSTER_CONNECTION_STATES_CONNECTION_SETUP_TIMEOUT_JITTER;
+        let connection_delay_delta = CONNECTION_SETUP_TIMEOUT_MS as f64 * ConnStates::CONNECTION_SETUP_TIMEOUT_JITTER;
         assert!(
             (connection_delay as f64 - CONNECTION_SETUP_TIMEOUT_MS as f64).abs() <= connection_delay_delta,
             "Expected connectionDelay ~= {} +/- {}, got {}",
@@ -721,7 +745,7 @@ mod tests {
 
         // After disconnecting we expect a backoff value equal to the reconnect.backoff.ms setting
         // (plus minus 20% jitter)
-        let backoff_tolerance = RECONNECT_BACKOFF_MS as f64 * CLUSTER_CONNECTION_STATES_RECONNECT_BACKOFF_JITTER;
+        let backoff_tolerance = RECONNECT_BACKOFF_MS as f64 * ConnStates::RECONNECT_BACKOFF_JITTER;
         let current_backoff = connection_states.connection_delay(NODE_ID1, time.milliseconds());
         assert!(
             (current_backoff as f64 - RECONNECT_BACKOFF_MS as f64).abs() <= backoff_tolerance,
@@ -792,14 +816,27 @@ mod tests {
         connection_states.authentication_failed(
             NODE_ID1,
             time.milliseconds(),
-            "No path to CA for certificate!".to_string(),
+            Error::SslAuthentication(crate::common::errors::SslAuthenticationError::new(
+                "No path to CA for certificate!",
+            )),
         );
         time.sleep(1000);
         assert_eq!(
             ConnectionState::AuthenticationFailed,
             connection_states.connection_state(NODE_ID1)
         );
-        assert!(connection_states.authentication_error(NODE_ID1).is_some());
+        // Java stores the `AuthenticationException` object
+        // (`ClusterConnectionStates.java:274`), so the subclass survives the hop:
+        // a TLS certificate rejection must not read back as a SASL failure. The
+        // message is the channel's own bare text, with no second class prefix.
+        let stored = connection_states
+            .authentication_error(NODE_ID1)
+            .expect("the authentication error must be recorded");
+        assert!(
+            matches!(stored, Error::SslAuthentication(_)),
+            "the SSL subclass must survive: {stored:?}"
+        );
+        assert_eq!(stored.message(), "No path to CA for certificate!");
         assert!(!connection_states.has_ready_nodes(time.milliseconds()));
         assert!(!connection_states.can_connect(NODE_ID1, time.milliseconds()));
 
@@ -836,7 +873,7 @@ mod tests {
         let mut time = MockTime::new();
 
         let effective_max_reconnect_backoff =
-            (RECONNECT_BACKOFF_MAX as f64 * (1.0 + CLUSTER_CONNECTION_STATES_RECONNECT_BACKOFF_JITTER)).round() as i64;
+            (RECONNECT_BACKOFF_MAX as f64 * (1.0 + ConnStates::RECONNECT_BACKOFF_JITTER)).round() as i64;
         connection_states.connecting(NODE_ID1, time.milliseconds(), "localhost");
         time.sleep(1000);
         connection_states.disconnected(NODE_ID1, time.milliseconds());
@@ -932,7 +969,7 @@ mod tests {
         let mut connection_states = create_multi_ip_states();
         let time = MockTime::new();
 
-        let resolved = client_utils::resolve(HOST_TWO_IPS, &connection_states.host_resolver)
+        let resolved = ClientUtils::resolve(HOST_TWO_IPS, &connection_states.host_resolver)
             .await
             .unwrap();
         assert!(resolved.len() > 1);
@@ -953,7 +990,7 @@ mod tests {
         let mut connection_states = create_multi_ip_states();
         let time = MockTime::new();
 
-        let resolved = client_utils::resolve(HOST_TWO_IPS, &connection_states.host_resolver)
+        let resolved = ClientUtils::resolve(HOST_TWO_IPS, &connection_states.host_resolver)
             .await
             .unwrap();
         assert!(resolved.len() > 1);
@@ -1009,13 +1046,13 @@ mod tests {
 
         // Check the exponential timeout growth
         let max_n = ((CONNECTION_SETUP_TIMEOUT_MAX_MS as f64 / CONNECTION_SETUP_TIMEOUT_MS as f64).ln()
-            / (CLUSTER_CONNECTION_STATES_CONNECTION_SETUP_TIMEOUT_EXP_BASE as f64).ln()) as i32;
+            / (ConnStates::CONNECTION_SETUP_TIMEOUT_EXP_BASE as f64).ln()) as i32;
         for n in 0..=max_n {
             connection_states.connecting(NODE_ID1, time.milliseconds(), "localhost");
             assert!(connection_states.connecting_nodes().contains(NODE_ID1));
-            let expected = CONNECTION_SETUP_TIMEOUT_MS as f64
-                * (CLUSTER_CONNECTION_STATES_CONNECTION_SETUP_TIMEOUT_EXP_BASE as f64).powi(n);
-            let tolerance = expected * CLUSTER_CONNECTION_STATES_CONNECTION_SETUP_TIMEOUT_JITTER;
+            let expected =
+                CONNECTION_SETUP_TIMEOUT_MS as f64 * (ConnStates::CONNECTION_SETUP_TIMEOUT_EXP_BASE as f64).powi(n);
+            let tolerance = expected * ConnStates::CONNECTION_SETUP_TIMEOUT_JITTER;
             let actual = connection_states.connection_setup_timeout_ms(NODE_ID1) as f64;
             assert!(
                 (actual - expected).abs() <= tolerance,
@@ -1031,8 +1068,7 @@ mod tests {
         // Check the timeout value upper bound
         connection_states.connecting(NODE_ID1, time.milliseconds(), "localhost");
         let actual = connection_states.connection_setup_timeout_ms(NODE_ID1) as f64;
-        let tolerance =
-            CONNECTION_SETUP_TIMEOUT_MAX_MS as f64 * CLUSTER_CONNECTION_STATES_CONNECTION_SETUP_TIMEOUT_JITTER;
+        let tolerance = CONNECTION_SETUP_TIMEOUT_MAX_MS as f64 * ConnStates::CONNECTION_SETUP_TIMEOUT_JITTER;
         assert!(
             (actual - CONNECTION_SETUP_TIMEOUT_MAX_MS as f64).abs() <= tolerance,
             "Expected connectionSetupTimeoutMs ~= {} +/- {}, got {}",
@@ -1045,7 +1081,7 @@ mod tests {
         // Should reset the timeout value to the init value
         connection_states.ready(NODE_ID1);
         let actual = connection_states.connection_setup_timeout_ms(NODE_ID1) as f64;
-        let tolerance = CONNECTION_SETUP_TIMEOUT_MS as f64 * CLUSTER_CONNECTION_STATES_CONNECTION_SETUP_TIMEOUT_JITTER;
+        let tolerance = CONNECTION_SETUP_TIMEOUT_MS as f64 * ConnStates::CONNECTION_SETUP_TIMEOUT_JITTER;
         assert!(
             (actual - CONNECTION_SETUP_TIMEOUT_MS as f64).abs() <= tolerance,
             "Expected connectionSetupTimeoutMs ~= {} +/- {}, got {}",
@@ -1096,8 +1132,7 @@ mod tests {
         // connections
         time.sleep(
             CONNECTION_SETUP_TIMEOUT_MS / 2
-                + (CONNECTION_SETUP_TIMEOUT_MS as f64 * CLUSTER_CONNECTION_STATES_CONNECTION_SETUP_TIMEOUT_JITTER)
-                    as i64,
+                + (CONNECTION_SETUP_TIMEOUT_MS as f64 * ConnStates::CONNECTION_SETUP_TIMEOUT_JITTER) as i64,
         );
 
         // Expect two timed out connections.
@@ -1114,8 +1149,7 @@ mod tests {
         // connection
         time.sleep(
             CONNECTION_SETUP_TIMEOUT_MS / 2
-                + (CONNECTION_SETUP_TIMEOUT_MS as f64 * CLUSTER_CONNECTION_STATES_CONNECTION_SETUP_TIMEOUT_JITTER)
-                    as i64,
+                + (CONNECTION_SETUP_TIMEOUT_MS as f64 * ConnStates::CONNECTION_SETUP_TIMEOUT_JITTER) as i64,
         );
 
         // Expect one timed out connection
@@ -1139,7 +1173,7 @@ mod tests {
         let mut connection_states = create_multi_ip_states();
         let time = MockTime::new();
 
-        let resolved = client_utils::resolve(HOST_TWO_IPS, &connection_states.host_resolver)
+        let resolved = ClientUtils::resolve(HOST_TWO_IPS, &connection_states.host_resolver)
             .await
             .unwrap();
         assert!(resolved.len() > 1);
@@ -1162,7 +1196,7 @@ mod tests {
         let mut time = MockTime::new();
 
         let reconnect_backoff_max_exp = (RECONNECT_BACKOFF_MAX as f64 / (RECONNECT_BACKOFF_MS.max(1) as f64)).ln()
-            / (CLUSTER_CONNECTION_STATES_RECONNECT_BACKOFF_EXP_BASE as f64).ln();
+            / (ConnStates::RECONNECT_BACKOFF_EXP_BASE as f64).ln();
 
         connection_states.remove(NODE_ID1);
         // Run through 10 disconnects and check that reconnect backoff value is within expected
@@ -1175,18 +1209,18 @@ mod tests {
 
             connection_states.disconnected(NODE_ID1, time.milliseconds());
             // Calculate expected backoff value without jitter
-            let expected_backoff = ((CLUSTER_CONNECTION_STATES_RECONNECT_BACKOFF_EXP_BASE as f64)
+            let expected_backoff = ((ConnStates::RECONNECT_BACKOFF_EXP_BASE as f64)
                 .powf((i as f64).min(reconnect_backoff_max_exp))
                 * RECONNECT_BACKOFF_MS as f64)
                 .round() as i64;
             let current_backoff = connection_states.connection_delay(NODE_ID1, time.milliseconds());
             assert!(
                 (current_backoff as f64 - expected_backoff as f64).abs()
-                    <= CLUSTER_CONNECTION_STATES_RECONNECT_BACKOFF_JITTER * expected_backoff as f64,
+                    <= ConnStates::RECONNECT_BACKOFF_JITTER * expected_backoff as f64,
                 "Attempt {}: Expected backoff ~= {} +/- {}, got {}",
                 i,
                 expected_backoff,
-                CLUSTER_CONNECTION_STATES_RECONNECT_BACKOFF_JITTER * expected_backoff as f64,
+                ConnStates::RECONNECT_BACKOFF_JITTER * expected_backoff as f64,
                 current_backoff
             );
             time.sleep(connection_states.connection_delay(NODE_ID1, time.milliseconds()) + 1);

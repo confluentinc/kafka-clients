@@ -42,8 +42,8 @@ use confluent_kafka::admin::{
     DescribeTopicsOptions, ElectLeadersOptions, ListOffsetsOptions, ListPartitionReassignmentsOptions,
     NewPartitionReassignment, OffsetSpec, OpType,
 };
+use confluent_kafka::common::Errors;
 use confluent_kafka::common::config::{ConfigResource, ConfigResourceType};
-use confluent_kafka::common::protocol::Errors;
 use confluent_kafka::common::serialization::ByteArraySerializer;
 use confluent_kafka::common::{ElectionType, IsolationLevel, TopicPartition, TopicPartitionInfo};
 use confluent_kafka::producer::{KafkaProducer, Producer, ProducerConfig, ProducerRecord};
@@ -53,7 +53,7 @@ use crate::common::backend_factory::AdminBackendFactory;
 use crate::common::cluster_config::ClusterConfig;
 use crate::common::test_context::TestContext;
 use crate::common::test_utils::{
-    TOPIC_METADATA_PROPAGATION_WAIT_MS, retry_on_exception_with_timeout, wait_until_true_with_timeout,
+    TOPIC_METADATA_PROPAGATION_WAIT_MS, retry_on_error_with_timeout, wait_until_true_with_timeout,
 };
 use crate::multilanguage_admin_test;
 
@@ -72,14 +72,14 @@ async fn produce_records(bootstrap: &str, topic: &str, partition: i32, num: usiz
         ("acks".to_string(), "all".to_string()),
         ("max.block.ms".to_string(), "30000".to_string()),
     ]);
-    let config = ProducerConfig::from_properties(&props).expect("valid producer config");
+    let config = ProducerConfig::new(&props).expect("valid producer config");
     let producer: KafkaProducer<Vec<u8>, Vec<u8>> =
-        KafkaProducer::from_config(config, Box::new(ByteArraySerializer), Box::new(ByteArraySerializer))
+        KafkaProducer::new(config, Box::new(ByteArraySerializer), Box::new(ByteArraySerializer))
             .expect("build producer");
     let value = vec![b'x'; value_len];
     let mut last = None;
     for i in 0..num {
-        let record = ProducerRecord::with_partition(
+        let record = ProducerRecord::with_partition_key(
             topic.to_string(),
             Some(partition),
             Some(format!("key {i}").into_bytes()),
@@ -94,7 +94,7 @@ async fn produce_records(bootstrap: &str, topic: &str, partition: i32, num: usiz
     }
     producer.flush().await.expect("flush");
     if let Some(f) = last {
-        f.get_timeout(Duration::from_secs(30)).await.expect("last send");
+        f.get_with_timeout(Duration::from_secs(30)).await.expect("last send");
     }
     producer.close().await.expect("producer close");
 }
@@ -113,7 +113,7 @@ async fn offset_of<B: AdminBackend>(
     tp: &TopicPartition,
     spec: OffsetSpec,
     options: ListOffsetsOptions,
-) -> Result<confluent_kafka::admin::ListOffsetsResultInfo, confluent_kafka::common::KafkaError> {
+) -> Result<confluent_kafka::admin::ListOffsetsResultInfo, confluent_kafka::common::Error> {
     let outcomes = admin
         .list_offsets(&HashMap::from([(tp.clone(), spec)]), options)
         .await
@@ -181,12 +181,12 @@ async fn broker_ids<B: AdminBackend>(admin: &B) -> Vec<i32> {
 /// The client is *correct* not to retry this itself — Java's describe-by-names
 /// `Call` completes the per-topic future exceptionally on any topic-level error
 /// (`KafkaAdminClient.java:2253-2254`, `if (error != Errors.NONE)` →
-/// `future.completeExceptionally(error.exception())`), with no retry — so the
+/// `future.completeExceptionally(error.error())`), with no retry — so the
 /// wait belongs in the test.
 ///
 /// Only `UNKNOWN_TOPIC_OR_PARTITION` is retried. Every other outcome — a failed
 /// call, a missing key, any other per-topic error — panics on the first attempt,
-/// because `retry_on_exception_with_timeout` catches the `Err` return and not
+/// because `retry_on_error_with_timeout` catches the `Err` return and not
 /// panics. So this cannot turn a genuine backend defect into a 60-second
 /// timeout.
 ///
@@ -196,10 +196,10 @@ async fn broker_ids<B: AdminBackend>(admin: &B) -> Vec<i32> {
 /// and no assertion is weakened.
 async fn partition_zero_of<B: AdminBackend>(admin: &B, topic: &str) -> TopicPartitionInfo {
     let found: RefCell<Option<TopicPartitionInfo>> = RefCell::new(None);
-    retry_on_exception_with_timeout(Duration::from_millis(TOPIC_METADATA_PROPAGATION_WAIT_MS), || async {
+    retry_on_error_with_timeout(Duration::from_millis(TOPIC_METADATA_PROPAGATION_WAIT_MS), || async {
         let backend = admin.name();
         let described = admin
-            .describe_topics(std::slice::from_ref(&topic.to_string()), DescribeTopicsOptions::new())
+            .describe_topics_with_topics(std::slice::from_ref(&topic.to_string()), DescribeTopicsOptions::new())
             .await
             .unwrap_or_else(|e| panic!("{backend} backend: describe topics: {e}"));
         match described
@@ -399,7 +399,7 @@ async fn list_offsets_covers_every_offset_spec_variant<F: AdminBackendFactory>(c
     // `"latestVersionUnstable": false` mark v11 as a stable, released part of
     // 4.2 — not gated behind an unstable-versions flag). Our client already
     // negotiates v11 for this spec (`ListOffsetsRequestBuilder::
-    // for_consumer_with_features` sets `min_version = 11` for
+    // for_consumer_options` sets `min_version = 11` for
     // `require_earliest_pending_upload_timestamp`, covered by
     // `for_consumer_require_earliest_pending_upload_forces_v11`), so the
     // request goes through as an ordinary, successful v11 call. The broker's
@@ -525,7 +525,7 @@ async fn list_offsets_honours_isolation_level_and_timeout<F: AdminBackendFactory
 
     // A deliberately odd millisecond count, so the value is not one a truncating
     // conversion would land on by chance.
-    let options = ListOffsetsOptions::with_isolation_level(IsolationLevel::ReadCommitted).timeout_ms(Some(20_001));
+    let options = ListOffsetsOptions::with_isolation_level(IsolationLevel::ReadCommitted).set_timeout_ms(Some(20_001));
     assert_eq!(
         options.isolation_level(),
         IsolationLevel::ReadCommitted,

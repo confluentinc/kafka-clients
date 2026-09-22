@@ -66,7 +66,7 @@
 //! Actually SASL/SCRAM-*authenticating* with the created credential is not
 //! translated. The admin client on this branch cannot authenticate at all:
 //! `AdminClientConfig` recognises no `security.protocol` / `sasl.*` key and
-//! `KafkaAdminClient::from_config` (`src/admin/kafka_admin_client.rs:283-291`)
+//! `KafkaAdminClient::new` (`src/admin/kafka_admin_client.rs:283-291`)
 //! passes a literal `SecurityProtocol::Plaintext`. That is a production gap
 //! recorded in `design/current/status.md:606-609` and out of scope for this
 //! harness; a vacuous SASL test is deliberately not written in its place.
@@ -106,7 +106,7 @@ async fn alter<B: AdminBackend>(admin: &B, user: &str, alteration: UserScramCred
 async fn describe_one<B: AdminBackend>(
     admin: &B,
     user: &str,
-) -> Option<Result<confluent_kafka::admin::UserScramCredentialsDescription, confluent_kafka::common::KafkaError>> {
+) -> Option<Result<confluent_kafka::admin::UserScramCredentialsDescription, confluent_kafka::common::Error>> {
     admin
         .describe_user_scram_credentials(
             std::slice::from_ref(&user.to_string()),
@@ -140,7 +140,7 @@ async fn upsert_describe_delete_scram_credential_round_trips<F: AdminBackendFact
     //    every backend, since the harness carries it — and the broker rejects a
     //    malformed salted password.
     let upsertion =
-        UserScramCredentialUpsertion::new(&user, ScramCredentialInfo::new(mechanism, iterations), "password");
+        UserScramCredentialUpsertion::with_str(&user, ScramCredentialInfo::new(mechanism, iterations), "password");
     alter(
         &admin,
         &user,

@@ -19,20 +19,20 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::admin::transaction_description::TransactionDescription;
-use crate::admin::transaction_state::TransactionState;
-use crate::common::protocol::Errors;
+use crate::DescribeTransactionsRequestData;
+use crate::admin::TransactionDescription;
+use crate::admin::TransactionState;
+use crate::common::Errors;
 use crate::common::requests::{ConcreteResponse, CoordinatorType, DescribeTransactionsRequestBuilder, RequestBuilder};
 use crate::common::utils::LogContext;
-use crate::common::{KafkaError, Node, TopicPartition};
-use crate::describe_transactions_request_data::DescribeTransactionsRequestData;
+use crate::common::{Error, Node, TopicPartition};
 use crate::{kafka_debug, kafka_warn};
 
-use super::admin_api_future::SimpleAdminApiFuture;
-use super::admin_api_handler::{AdminApiHandler, ApiResult, RequestAndKeys};
-use super::admin_api_lookup_strategy::AdminApiLookupStrategy;
-use super::coordinator_key::CoordinatorKey;
-use super::coordinator_strategy::CoordinatorStrategy;
+use super::AdminApiLookupStrategy;
+use super::CoordinatorKey;
+use super::CoordinatorStrategy;
+use super::SimpleAdminApiFuture;
+use super::{AdminApiHandler, ApiResult, RequestAndKeys};
 
 /// Handler for `describeTransactions`.
 ///
@@ -92,14 +92,14 @@ impl DescribeTransactionsHandler {
         &self,
         transactional_id_key: &CoordinatorKey,
         error: Errors,
-        failed: &mut HashMap<CoordinatorKey, KafkaError>,
+        failed: &mut HashMap<CoordinatorKey, Error>,
         unmapped: &mut Vec<CoordinatorKey>,
     ) {
         match error {
             Errors::TransactionalIdAuthorizationFailed => {
                 failed.insert(
                     transactional_id_key.clone(),
-                    KafkaError::with_message(
+                    Error::with_message(
                         error,
                         format!(
                             "DescribeTransactions request for transactionalId `{}` failed due to authorization failure",
@@ -111,7 +111,7 @@ impl DescribeTransactionsHandler {
             Errors::TransactionalIdNotFound => {
                 failed.insert(
                     transactional_id_key.clone(),
-                    KafkaError::with_message(
+                    Error::with_message(
                         error,
                         format!(
                             "DescribeTransactions request for transactionalId `{}` failed because the ID could not be found",
@@ -142,7 +142,7 @@ impl DescribeTransactionsHandler {
             _ => {
                 failed.insert(
                     transactional_id_key.clone(),
-                    KafkaError::with_message(
+                    Error::with_message(
                         error,
                         format!(
                             "DescribeTransactions request for transactionalId `{}` failed due to unexpected error",
@@ -175,10 +175,16 @@ impl AdminApiHandler<CoordinatorKey, TransactionDescription> for DescribeTransac
         response: &ConcreteResponse,
     ) -> ApiResult<CoordinatorKey, TransactionDescription> {
         let ConcreteResponse::DescribeTransactions(response) = response else {
-            return ApiResult::new(HashMap::new(), HashMap::new(), Vec::new());
+            // Java fails the call once (`KafkaAdminClient.java:1387-1391`); an empty
+            // result would silently re-issue the request until the deadline. See
+            // `ApiResult::failed_all`.
+            return ApiResult::failed_all(
+                keys,
+                Error::local_illegal_state("DescribeTransactionsHandler received an unexpected response type"),
+            );
         };
         let mut completed: HashMap<CoordinatorKey, TransactionDescription> = HashMap::new();
-        let mut failed: HashMap<CoordinatorKey, KafkaError> = HashMap::new();
+        let mut failed: HashMap<CoordinatorKey, Error> = HashMap::new();
         let mut unmapped: Vec<CoordinatorKey> = Vec::new();
 
         for transaction_state in &response.data().transaction_states {
@@ -236,10 +242,9 @@ impl AdminApiHandler<CoordinatorKey, TransactionDescription> for DescribeTransac
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::DescribeTransactionsResponseData;
     use crate::common::requests::DescribeTransactionsResponse;
-    use crate::describe_transactions_response_data::{
-        DescribeTransactionsResponseData, TopicData, TransactionState as WireTransactionState,
-    };
+    use crate::describe_transactions_response_data::{TopicData, TransactionState as WireTransactionState};
 
     fn log_context() -> LogContext {
         LogContext::new("[test] ")

@@ -34,8 +34,8 @@ use confluent_kafka::admin::{
     CreatePartitionsOptions, DeleteRecordsOptions, DeleteTopicsOptions, DescribeTopicsOptions, NewPartitions,
     RecordsToDelete,
 };
+use confluent_kafka::common::Errors;
 use confluent_kafka::common::TopicPartition;
-use confluent_kafka::common::protocol::Errors;
 use confluent_kafka::common::serialization::ByteArraySerializer;
 use confluent_kafka::producer::{KafkaProducer, Producer, ProducerConfig, ProducerRecord};
 
@@ -54,9 +54,8 @@ fn build_producer(bootstrap: &str) -> KafkaProducer<Vec<u8>, Vec<u8>> {
         ("acks".to_string(), "all".to_string()),
         ("max.block.ms".to_string(), "30000".to_string()),
     ]);
-    let config = ProducerConfig::from_properties(&props).expect("valid producer config");
-    KafkaProducer::from_config(config, Box::new(ByteArraySerializer), Box::new(ByteArraySerializer))
-        .expect("build producer")
+    let config = ProducerConfig::new(&props).expect("valid producer config");
+    KafkaProducer::new(config, Box::new(ByteArraySerializer), Box::new(ByteArraySerializer)).expect("build producer")
 }
 
 /// Produce `num` records to `(topic, partition)`, waiting for the broker acks.
@@ -64,7 +63,7 @@ async fn produce_records(bootstrap: &str, topic: &str, partition: i32, num: usiz
     let producer = build_producer(bootstrap);
     let mut last = None;
     for i in 0..num {
-        let record = ProducerRecord::with_partition(
+        let record = ProducerRecord::with_partition_key(
             topic.to_string(),
             Some(partition),
             Some(format!("key {i}").into_bytes()),
@@ -79,12 +78,12 @@ async fn produce_records(bootstrap: &str, topic: &str, partition: i32, num: usiz
     }
     producer.flush().await.expect("flush");
     if let Some(f) = last {
-        f.get_timeout(Duration::from_secs(30)).await.expect("last send");
+        f.get_with_timeout(Duration::from_secs(30)).await.expect("last send");
     }
     producer.close().await.expect("producer close");
 }
 
-/// Returns the current partition count for `topic` via `describe_topics`.
+/// Returns the current partition count for `topic` via `describe_topics_with_topics`.
 async fn partition_count<B: AdminBackend>(admin: &B, topic: &str) -> usize {
     try_partition_count(admin, topic)
         .await
@@ -188,7 +187,7 @@ async fn create_partitions_with_assignment<F: AdminBackendFactory>(ctx: &mut Tes
 
     // Learn this cluster's broker id from the partition the broker placed itself.
     let described = admin
-        .describe_topics(std::slice::from_ref(&topic), DescribeTopicsOptions::new())
+        .describe_topics_with_topics(std::slice::from_ref(&topic), DescribeTopicsOptions::new())
         .await
         .unwrap_or_else(|e| panic!("{backend} backend: describe topics: {e}"));
     let broker_id = described[&topic]
@@ -201,7 +200,7 @@ async fn create_partitions_with_assignment<F: AdminBackendFactory>(ctx: &mut Tes
     // 1 -> 2 partitions, so exactly one assignment for the one new partition.
     let counts = HashMap::from([(
         topic.clone(),
-        NewPartitions::increase_to_with_assignments(2, vec![vec![broker_id]]),
+        NewPartitions::increase_to_new_assignments(2, vec![vec![broker_id]]),
     )]);
     let created = admin
         .create_partitions(&counts, CreatePartitionsOptions::new())
@@ -211,7 +210,7 @@ async fn create_partitions_with_assignment<F: AdminBackendFactory>(ctx: &mut Tes
 
     wait_for_all_partitions_metadata(&admin, &topic, 2).await;
     let described = admin
-        .describe_topics(std::slice::from_ref(&topic), DescribeTopicsOptions::new())
+        .describe_topics_with_topics(std::slice::from_ref(&topic), DescribeTopicsOptions::new())
         .await
         .unwrap_or_else(|e| panic!("{backend} backend: describe topics: {e}"));
     let desc = described[&topic]
@@ -232,7 +231,7 @@ async fn create_partitions_with_assignment<F: AdminBackendFactory>(ctx: &mut Tes
     ctx.cleanup().await;
 }
 
-/// `increase_to_with_assignments(n, vec![])` — Java's legal
+/// `increase_to_new_assignments(n, vec![])` — Java's legal
 /// `NewPartitions.increaseTo(int, emptyList())` — is a **different** request from
 /// `increase_to(n)`, and the broker rejects it.
 ///
@@ -265,13 +264,13 @@ async fn create_partitions_with_an_empty_assignment_list_is_rejected<F: AdminBac
 
     // 1 -> 3 partitions with an *empty* assignment list: two partitions are being
     // added but zero assignments are supplied, so the controller refuses.
-    let counts = HashMap::from([(topic.clone(), NewPartitions::increase_to_with_assignments(3, Vec::new()))]);
+    let counts = HashMap::from([(topic.clone(), NewPartitions::increase_to_new_assignments(3, Vec::new()))]);
     let created = admin
         .create_partitions(&counts, CreatePartitionsOptions::new())
         .await
         .unwrap_or_else(|e| panic!("{backend} backend: create partitions: {e}"));
     let err = created[&topic].as_ref().expect_err(&format!(
-        "{backend} backend: increase_to_with_assignments(3, []) must be rejected, not treated as increase_to(3)"
+        "{backend} backend: increase_to_new_assignments(3, []) must be rejected, not treated as increase_to(3)"
     ));
     assert_eq!(
         err.error(),
@@ -316,7 +315,7 @@ async fn delete_records_advances_low_watermark<F: AdminBackendFactory>(ctx: &mut
 
     // Delete everything before offset 5; the low watermark advances to 5.
     let tp = TopicPartition::new(topic.clone(), 0);
-    let records = HashMap::from([(tp.clone(), RecordsToDelete::before_offset(5))]);
+    let records = HashMap::from([(tp.clone(), RecordsToDelete::with_before_offset(5))]);
     let deleted = admin
         .delete_records(&records, DeleteRecordsOptions::new())
         .await
@@ -347,7 +346,7 @@ async fn delete_records_offset_out_of_range_fails<F: AdminBackendFactory>(ctx: &
     produce_records(&bootstrap, &topic, 0, 5).await;
 
     let tp = TopicPartition::new(topic.clone(), 0);
-    let records = HashMap::from([(tp.clone(), RecordsToDelete::before_offset(1000))]);
+    let records = HashMap::from([(tp.clone(), RecordsToDelete::with_before_offset(1000))]);
     let deleted = admin
         .delete_records(&records, DeleteRecordsOptions::new())
         .await
@@ -384,7 +383,7 @@ async fn delete_records_nonexistent_partition_fails<F: AdminBackendFactory>(ctx:
 
     // Partition 5 does not exist (topic has only partition 0).
     let tp = TopicPartition::new(topic.clone(), 5);
-    let records = HashMap::from([(tp.clone(), RecordsToDelete::before_offset(0))]);
+    let records = HashMap::from([(tp.clone(), RecordsToDelete::with_before_offset(0))]);
     let deleted = admin
         .delete_records(&records, DeleteRecordsOptions::new())
         .await
@@ -395,7 +394,7 @@ async fn delete_records_nonexistent_partition_fails<F: AdminBackendFactory>(ctx:
     // The leader lookup never succeeds, so the driver fails the key when the
     // API timeout elapses.
     assert!(
-        err.is_retriable() || matches!(err.error(), Errors::RequestTimedOut),
+        err.is_retriable_error() || matches!(err.error(), Errors::RequestTimedOut),
         "{backend} backend: expected a timeout, got {err:?}"
     );
 

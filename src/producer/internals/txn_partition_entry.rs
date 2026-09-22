@@ -14,12 +14,12 @@
 
 //! Per-partition idempotence/transaction bookkeeping.
 
+use crate::common::requests::ProduceResponse;
 use std::collections::{BTreeSet, HashMap};
 
-use crate::common::KafkaError;
+use crate::common::Error;
 use crate::common::TopicPartition;
-use crate::common::record::internal::default_record_batch::increment_sequence;
-use crate::common::requests::produce_response::INVALID_OFFSET;
+use crate::common::record::internal::DefaultRecordBatch;
 use crate::common::utils::ProducerIdAndEpoch;
 use crate::producer::internals::ProducerBatch;
 
@@ -107,7 +107,7 @@ impl TxnPartitionEntry {
             producer_id_and_epoch: ProducerIdAndEpoch::NONE,
             next_sequence: 0,
             last_acked_sequence: Self::NO_LAST_ACKED_SEQUENCE_NUMBER,
-            last_acked_offset: INVALID_OFFSET,
+            last_acked_offset: ProduceResponse::INVALID_OFFSET,
             inflight_batches_by_sequence: BTreeSet::new(),
         }
     }
@@ -129,7 +129,7 @@ impl TxnPartitionEntry {
 
     /// The last acknowledged offset, or `None` if none has been acknowledged.
     pub(crate) fn last_acked_offset(&self) -> Option<i64> {
-        if self.last_acked_offset != INVALID_OFFSET {
+        if self.last_acked_offset != ProduceResponse::INVALID_OFFSET {
             Some(self.last_acked_offset)
         } else {
             None
@@ -165,7 +165,7 @@ impl TxnPartitionEntry {
     /// Delegates to the shared wrapping helper, as Java delegates to
     /// `DefaultRecordBatch.incrementSequence`.
     pub(crate) fn increment_sequence(&mut self, increment: i32) {
-        self.next_sequence = increment_sequence(self.next_sequence, increment);
+        self.next_sequence = DefaultRecordBatch::increment_sequence(self.next_sequence, increment);
     }
 
     /// Records `batch` as in flight for this partition.
@@ -198,7 +198,7 @@ impl TxnPartitionEntry {
         &mut self,
         new_producer_id_and_epoch: ProducerIdAndEpoch,
         batches: &mut [&mut ProducerBatch],
-    ) -> Result<(), KafkaError> {
+    ) -> Result<(), Error> {
         let mut sequence = 0;
         // Fallible: `reset_sequence_numbers` errors if `batches` is missing a
         // batch this entry tracks. Propagated rather than discarded, because
@@ -243,7 +243,7 @@ impl TxnPartitionEntry {
         base_sequence: i64,
         record_count: i32,
         batches: &mut [&mut ProducerBatch],
-    ) -> Result<(), KafkaError> {
+    ) -> Result<(), Error> {
         self.decrement_sequence(record_count)?;
         let topic_partition = self.topic_partition.clone();
         self.reset_sequence_numbers(batches, |batch| {
@@ -255,7 +255,7 @@ impl TxnPartitionEntry {
             if new_sequence < 0 {
                 // Java throws IllegalStateException; per CLAUDE.md §10.2 this
                 // is a Result, not a panic. Message text preserved.
-                return Err(KafkaError::illegal_state(format!(
+                return Err(Error::local_illegal_state(format!(
                     "Sequence number for batch with sequence {} for partition {} is going to become negative: {}",
                     batch.base_sequence(),
                     topic_partition,
@@ -316,9 +316,9 @@ impl TxnPartitionEntry {
     /// (`TransactionManager.java:655`) exists precisely to rewrite it
     /// (`:652-653`). Supplying only the Sender's map there would hit the error
     /// below and break idempotent recovery.
-    fn reset_sequence_numbers<F>(&mut self, batches: &mut [&mut ProducerBatch], mut reset: F) -> Result<(), KafkaError>
+    fn reset_sequence_numbers<F>(&mut self, batches: &mut [&mut ProducerBatch], mut reset: F) -> Result<(), Error>
     where
-        F: FnMut(&mut ProducerBatch) -> Result<(), KafkaError>,
+        F: FnMut(&mut ProducerBatch) -> Result<(), Error>,
     {
         // Index the pool by key. Stored as indices rather than `&mut` references
         // so the borrow checker permits handing out one mutable batch at a time.
@@ -345,7 +345,7 @@ impl TxnPartitionEntry {
         let mut resolved = Vec::with_capacity(tracked.len());
         for key in &tracked {
             let Some(&index) = pool.get(key) else {
-                return Err(KafkaError::illegal_state(format!(
+                return Err(Error::local_illegal_state(format!(
                     "No in-flight batch supplied for tracked sequence {:?} on partition {}; \
                      the caller must supply every batch this entry tracks",
                     key, self.topic_partition
@@ -373,10 +373,10 @@ impl TxnPartitionEntry {
     /// `DefaultRecordBatch`. Wrapping here would silently produce a large
     /// positive sequence instead of an error. See
     /// `.claude/rules/producer-transactions.md` §8.
-    fn decrement_sequence(&mut self, decrement: i32) -> Result<(), KafkaError> {
+    fn decrement_sequence(&mut self, decrement: i32) -> Result<(), Error> {
         let updated_sequence = self.next_sequence - decrement;
         if updated_sequence < 0 {
-            return Err(KafkaError::illegal_state(format!(
+            return Err(Error::local_illegal_state(format!(
                 "Sequence number for partition {} is going to become negative: {}",
                 self.topic_partition, updated_sequence
             )));
@@ -391,7 +391,7 @@ mod tests {
     use super::*;
     use crate::common::compress::Compression;
     use crate::common::record::TimestampType;
-    use crate::common::record::internal::memory_records::MemoryRecords;
+    use crate::common::record::internal::MemoryRecords;
 
     fn tp() -> TopicPartition {
         TopicPartition::new("topic".to_string(), 0)
@@ -399,7 +399,8 @@ mod tests {
 
     /// Builds a batch with `record_count` records and the given producer state.
     fn batch(producer_id: i64, epoch: i16, base_sequence: i32, record_count: i32) -> ProducerBatch {
-        let builder = MemoryRecords::builder(512, Compression::none(), TimestampType::CreateTime, 128);
+        let builder =
+            MemoryRecords::builder_with_initial_capacity(512, Compression::none(), TimestampType::CreateTime, 128);
         let mut b = ProducerBatch::new(tp(), builder, 0);
         b.record_count = record_count;
         b.set_producer_state(producer_id, epoch, base_sequence, false);
@@ -421,7 +422,7 @@ mod tests {
     fn test_last_acked_offset_sentinel_maps_to_none() {
         let mut entry = TxnPartitionEntry::new(tp());
         assert_eq!(entry.last_acked_offset(), None);
-        entry.set_last_acked_offset(INVALID_OFFSET);
+        entry.set_last_acked_offset(ProduceResponse::INVALID_OFFSET);
         assert_eq!(entry.last_acked_offset(), None);
         entry.set_last_acked_offset(0);
         assert_eq!(entry.last_acked_offset(), Some(0));

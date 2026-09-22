@@ -18,9 +18,10 @@
 
 use std::io;
 
+use crate::CreatePartitionsRequestData;
+use crate::CreatePartitionsResponseData;
 use crate::common::protocol::{ApiKeys, Errors, Readable};
-use crate::create_partitions_request_data::CreatePartitionsRequestData;
-use crate::create_partitions_response_data::{CreatePartitionsResponseData, CreatePartitionsTopicResult};
+use crate::create_partitions_response_data::CreatePartitionsTopicResult;
 
 use super::{ConcreteRequest, ConcreteResponse, CreatePartitionsResponse, RequestBuilder};
 
@@ -110,7 +111,7 @@ pub struct CreatePartitionsRequestBuilder {
 
 impl CreatePartitionsRequestBuilder {
     /// Creates a builder from existing data.
-    pub fn from_data(data: CreatePartitionsRequestData) -> Self {
+    pub fn new(data: CreatePartitionsRequestData) -> Self {
         Self {
             data,
             oldest_allowed_version: ApiKeys::CREATE_PARTITIONS.oldest_version(),
@@ -157,12 +158,12 @@ mod tests {
         let mut data = CreatePartitionsRequestData::new();
         data.set_topics(vec![topic("a", 3), topic("b", 4)]);
         let request = CreatePartitionsRequest::new(data, 3);
-        let response = request.get_error_response(100, &Errors::InvalidTopicException);
+        let response = request.get_error_response(100, &Errors::InvalidTopicError);
         if let ConcreteResponse::CreatePartitions(r) = response {
             assert_eq!(r.data().results.len(), 2);
             assert_eq!(r.data().throttle_time_ms, 100);
             for result in &r.data().results {
-                assert_eq!(result.error_code, Errors::InvalidTopicException.code());
+                assert_eq!(result.error_code, Errors::InvalidTopicError.code());
             }
         } else {
             panic!("expected CreatePartitions response");
@@ -179,7 +180,7 @@ mod tests {
         data.set_validate_only(true);
         let mut request = ConcreteRequest::CreatePartitions(CreatePartitionsRequest::new(data, 3));
         let bytes = request.serialize().unwrap();
-        let mut readable = crate::common::ByteBufferAccessor::from_bytes(bytes.into_buffer());
+        let mut readable = crate::common::ByteBufferAccessor::new(bytes.into_buffer());
         let parsed = CreatePartitionsRequest::parse(&mut readable, 3).unwrap();
         assert_eq!(parsed.data().topics.len(), 1);
         assert_eq!(parsed.data().topics[0].name, "round-trip-topic");
@@ -193,15 +194,48 @@ mod tests {
     ///   topics: compact array (len+1 = 0x02)
     ///     name: compact string "t" (len+1 = 0x02, 0x74)
     ///     count: int32 = 3 (00 00 00 03)
-    ///     assignments: compact nullable array = null (0x00)
+    ///     assignments: compact nullable array, **empty** (len+1 = 0x01)
     ///     _tagged_fields: 0x00
     ///   timeout_ms: int32 = 100 (00 00 00 64)
     ///   validate_only: bool = false (0x00)
     ///   _tagged_fields: 0x00
+    ///
+    /// `assignments` is left unset here, and an unset nullable array is **empty**, not
+    /// null: `FieldSpec.fieldDefault` returns `new <List>(0)` for an array unless the
+    /// spec says `"default": "null"` (`FieldSpec.java:465-475`), and this spec does not.
+    /// The explicitly-null encoding is pinned by the sibling test below.
     #[test]
     fn serialize_known_byte_vector_v3() {
         let mut data = CreatePartitionsRequestData::new();
         data.set_topics(vec![topic("t", 3)]);
+        data.set_timeout_ms(100);
+        data.set_validate_only(false);
+        let mut request = ConcreteRequest::CreatePartitions(CreatePartitionsRequest::new(data, 3));
+        let bytes = request.serialize().unwrap();
+        let expected: &[u8] = &[
+            0x02, // topics array length + 1
+            0x02, 0x74, // name "t"
+            0x00, 0x00, 0x00, 0x03, // count = 3
+            0x01, // assignments = empty array (length 0 + 1)
+            0x00, // topic tagged fields
+            0x00, 0x00, 0x00, 0x64, // timeout_ms = 100
+            0x00, // validate_only = false
+            0x00, // request tagged fields
+        ];
+        assert_eq!(bytes.into_buffer().as_slice(), expected);
+    }
+
+    /// Companion to `serialize_known_byte_vector_v3`: an explicitly-null `assignments`
+    /// encodes as compact-array length 0 (`0x00`), which is a different wire value from
+    /// the empty array above. Keeping both pinned is what makes the empty/null
+    /// distinction a regression-detectable property rather than an accident of the
+    /// field's default.
+    #[test]
+    fn serialize_known_byte_vector_v3_null_assignments() {
+        let mut data = CreatePartitionsRequestData::new();
+        let mut t = topic("t", 3);
+        t.set_assignments(None);
+        data.set_topics(vec![t]);
         data.set_timeout_ms(100);
         data.set_validate_only(false);
         let mut request = ConcreteRequest::CreatePartitions(CreatePartitionsRequest::new(data, 3));

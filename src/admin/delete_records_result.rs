@@ -18,7 +18,7 @@
 
 use std::collections::HashMap;
 
-use crate::admin::deleted_records::DeletedRecords;
+use crate::admin::DeletedRecords;
 use crate::common::{KafkaFuture, TopicPartition};
 
 /// The result of `Admin::delete_records`.
@@ -50,8 +50,8 @@ impl DeleteRecordsResult {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::KafkaError;
-    use crate::common::kafka_future::KafkaFutureImpl;
+    use crate::common::Error;
+    use crate::common::internals::KafkaFutureImpl;
 
     #[tokio::test]
     async fn all_succeeds_when_each_completes() {
@@ -71,7 +71,7 @@ mod tests {
         let mut map = HashMap::new();
         map.insert(TopicPartition::new("t", 0), h1.future());
         let result = DeleteRecordsResult::new(map);
-        h1.complete_exceptionally(KafkaError::IllegalState("boom".to_string()));
+        h1.complete_with_error(Error::local_illegal_state("boom".to_string()));
         assert!(result.all().get().await.is_err());
     }
 }

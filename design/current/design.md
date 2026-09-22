@@ -286,7 +286,7 @@ cancellation-safe — see the note under [Consumer](#consumer-srcconsumer).
 ### Producer (`src/producer/`)
 
 `Producer<K, V>` (`producer_trait.rs:38`) declares six methods, all `async`:
-`send`, `send_with_callback`, `flush`, `partitions_for`, `close`,
+`send`, `send_callback`, `flush`, `partitions_for`, `close`,
 `close_timeout`. `KafkaProducer<K, V>` (`kafka_producer.rs:912`) and
 `MockProducer<K, V>` (`mock_producer.rs:295`) implement it.
 
@@ -305,9 +305,14 @@ concrete type or take `impl Producer<K, V>`. Transactional methods
 completes the future later.*
 
 The app-side path is `do_send` (`kafka_producer.rs:486`) →
-`wait_on_metadata(max_block_ms)` → serialize key/value → choose partition
-(explicit → `BuiltInPartitioner::partition_for_key` → `UNKNOWN_PARTITION`) →
-`ensure_valid_record_size` → `accumulator.append(...)`. The sender is woken
+`wait_on_metadata(max_block_ms)` → serialize key/value → choose partition →
+`ensure_valid_record_size` → `accumulator.append(...)`. Partition choice: an
+explicit partition wins; otherwise a present, non-ignored key is hashed by the
+configured `KeyHasher` (CRC-32 by default, for co-partitioning parity with
+librdkafka's `consistent_random`; or murmur2 for exact Java parity, selected via
+`partitioner.class`) through `BuiltInPartitioner::partition_for_key`; failing
+that, `UNKNOWN_PARTITION` defers to the sticky partitioner (see
+`design/current/partitioner.md`). The sender is woken
 only when the append filled a batch or started a new one
 (`kafka_producer.rs:604-611`), matching Java.
 
@@ -430,10 +435,17 @@ allocation behaviour.
 
 ### Admin (`src/admin/`)
 
-The `Admin` trait (`src/admin/mod.rs:249`) has **46 sync `fn` RPC methods and
-exactly one `async fn` (`close`)**, the shape `.claude/rules/admin-client.md`
-§1 requires. `new_admin_client(config)` (`mod.rs:655`) returns
-`Box<dyn Admin>`; `KafkaAdminClient` and `MockAdminClient` implement it.
+The `Admin` trait (`src/admin/mod.rs:249`) has **98 sync `fn` RPC methods and
+exactly two `async fn`s (`close` / `close_timeout`)**, the shape
+`.claude/rules/admin-client.md` §1 requires. Of the 98, only 46 are required —
+the options-taking `<rpc>_options` forms an implementor writes. The other 52 are
+**trait default methods** translating Java's `default xxx(args)` bodies that
+forward to `xxx(args, new XxxOptions())`; per CLAUDE.md §2 the no-options form
+owns the plain name, so `create_topics(&[NewTopic])` forwards to
+`create_topics_options(&[NewTopic], CreateTopicsOptions::default())`. Likewise
+`close()` is the default forwarding to the required `close_timeout(Duration)`.
+`new_admin_client(config)` (`mod.rs:1121`) returns `Box<dyn Admin>`;
+`KafkaAdminClient` and `MockAdminClient` implement it.
 
 **Why sync methods, when the consumer's are async.** The distinguishing signal
 is *where* the blocking happens in Java. `Consumer.poll()` itself performs I/O
@@ -443,7 +455,8 @@ background thread and returns instantly with a `*Result` wrapping one
 methods stay plain `fn` that enqueue a `Call` and return a result struct, and
 the caller awaits the futures it cares about. `close()` is `async` because
 Java's `close(Duration)` joins the background thread. `#[async_trait]` sits on
-the trait only so `close()` is dispatchable through `Box<dyn Admin>`; it does
+the trait only so `close()` / `close_timeout()` are dispatchable through
+`Box<dyn Admin>`; it does
 not reach the internal `Call` / driver types, which are plain structs driven by
 the background task.
 

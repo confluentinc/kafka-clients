@@ -22,7 +22,7 @@ use bytes::Bytes;
 
 use crate::common::simple_records_message_data::SimpleRecordsMessageData;
 use confluent_kafka::common::compress::Compression;
-use confluent_kafka::common::protocol::message_util::to_byte_buffer_accessor;
+use confluent_kafka::common::protocol::MessageUtil;
 use confluent_kafka::common::protocol::{ByteBufferAccessor, Message, ObjectSerializationCache};
 use confluent_kafka::common::record::{MemoryRecords, SimpleRecord};
 
@@ -34,7 +34,7 @@ fn hash_of<T: Hash>(val: &T) -> u64 {
 
 /// Java: `new SimpleRecordsMessageData(readable, version)`.
 fn deserialize(buf: &[u8], version: i16) -> SimpleRecordsMessageData {
-    let mut accessor = ByteBufferAccessor::from_bytes(buf.to_vec());
+    let mut accessor = ByteBufferAccessor::new(buf.to_vec());
     let mut message = SimpleRecordsMessageData::new();
     Message::read(&mut message, &mut accessor, version).unwrap();
     message
@@ -44,7 +44,7 @@ fn deserialize(buf: &[u8], version: i16) -> SimpleRecordsMessageData {
 /// the sibling test files do — a cheap extra check Java gets from its own
 /// `MessageUtil` path.
 fn test_round_trip(message: &mut SimpleRecordsMessageData, version: i16) {
-    let accessor = to_byte_buffer_accessor(message, version).unwrap();
+    let accessor = MessageUtil::to_byte_buffer_accessor(message, version).unwrap();
     let buf = accessor.buffer();
 
     let mut cache = ObjectSerializationCache::new();
@@ -69,7 +69,7 @@ fn test_all_round_trips(message: &mut SimpleRecordsMessageData) {
 fn records_of(values: &[&str]) -> Bytes {
     let records: Vec<SimpleRecord> = values
         .iter()
-        .map(|value| SimpleRecord::new_with_value(Some(value.as_bytes().to_vec())))
+        .map(|value| SimpleRecord::with_value(Some(value.as_bytes().to_vec())))
         .collect();
     MemoryRecords::with_records(Compression::none(), &records)
         .buffer_bytes()
@@ -130,8 +130,14 @@ fn test_null_and_empty_records_are_distinct_on_the_wire() {
     for version in
         SimpleRecordsMessageData::LOWEST_SUPPORTED_VERSION..=SimpleRecordsMessageData::HIGHEST_SUPPORTED_VERSION
     {
-        let null_bytes = to_byte_buffer_accessor(&mut null_records, version).unwrap().buffer().to_vec();
-        let empty_bytes = to_byte_buffer_accessor(&mut empty_records, version).unwrap().buffer().to_vec();
+        let null_bytes = MessageUtil::to_byte_buffer_accessor(&mut null_records, version)
+            .unwrap()
+            .buffer()
+            .to_vec();
+        let empty_bytes = MessageUtil::to_byte_buffer_accessor(&mut empty_records, version)
+            .unwrap()
+            .buffer()
+            .to_vec();
         assert_ne!(
             null_bytes, empty_bytes,
             "null and empty record sets must encode differently at version {version}"
@@ -169,7 +175,10 @@ fn test_non_nullable_records_write_does_not_mutate_the_message() {
     let version = 0;
 
     // First write.
-    let bytes1 = to_byte_buffer_accessor(&mut message, version).unwrap().buffer().to_vec();
+    let bytes1 = MessageUtil::to_byte_buffer_accessor(&mut message, version)
+        .unwrap()
+        .buffer()
+        .to_vec();
 
     // The write must NOT have emptied the (non-nullable) records field — the exact
     // side effect `std::mem::take` produced.
@@ -188,7 +197,10 @@ fn test_non_nullable_records_write_does_not_mutate_the_message() {
     );
 
     // A second write of the same message must produce identical bytes.
-    let bytes2 = to_byte_buffer_accessor(&mut message, version).unwrap().buffer().to_vec();
+    let bytes2 = MessageUtil::to_byte_buffer_accessor(&mut message, version)
+        .unwrap()
+        .buffer()
+        .to_vec();
     assert_eq!(
         bytes1, bytes2,
         "a second write must emit the same bytes (write must be side-effect-free)"

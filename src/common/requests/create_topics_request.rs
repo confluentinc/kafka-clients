@@ -18,18 +18,12 @@
 
 use std::io;
 
+use crate::CreateTopicsRequestData;
+use crate::CreateTopicsResponseData;
 use crate::common::protocol::{ApiKeys, Errors, Readable};
-use crate::create_topics_request_data::CreateTopicsRequestData;
-use crate::create_topics_response_data::{CreatableTopicResult, CreateTopicsResponseData};
+use crate::create_topics_response_data::CreatableTopicResult;
 
 use super::{ConcreteRequest, ConcreteResponse, CreateTopicsResponse, RequestBuilder};
-
-/// The number of partitions was not specified (a replica assignment was given
-/// instead).
-pub const NO_NUM_PARTITIONS: i32 = -1;
-/// The replication factor was not specified (a replica assignment was given
-/// instead).
-pub const NO_REPLICATION_FACTOR: i16 = -1;
 
 /// A CreateTopics request.
 ///
@@ -41,6 +35,14 @@ pub struct CreateTopicsRequest {
 }
 
 impl CreateTopicsRequest {
+    /// The number of partitions was not specified (a replica assignment was given
+    /// instead).
+    pub const NO_NUM_PARTITIONS: i32 = -1;
+
+    /// The replication factor was not specified (a replica assignment was given
+    /// instead).
+    pub const NO_REPLICATION_FACTOR: i16 = -1;
+
     /// Creates a new `CreateTopicsRequest` from data and version.
     pub fn new(data: CreateTopicsRequestData, version: i16) -> Self {
         Self { data, version }
@@ -119,7 +121,7 @@ pub struct CreateTopicsRequestBuilder {
 
 impl CreateTopicsRequestBuilder {
     /// Creates a builder from existing data.
-    pub fn from_data(data: CreateTopicsRequestData) -> Self {
+    pub fn new(data: CreateTopicsRequestData) -> Self {
         Self {
             data,
             oldest_allowed_version: ApiKeys::CREATE_TOPICS.oldest_version(),
@@ -154,7 +156,10 @@ impl RequestBuilder for CreateTopicsRequestBuilder {
             .topics
             .iter()
             .filter(|t| t.assignments.is_empty())
-            .filter(|t| t.num_partitions == NO_NUM_PARTITIONS || t.replication_factor == NO_REPLICATION_FACTOR)
+            .filter(|t| {
+                t.num_partitions == CreateTopicsRequest::NO_NUM_PARTITIONS
+                    || t.replication_factor == CreateTopicsRequest::NO_REPLICATION_FACTOR
+            })
             .map(|t| t.name.as_str())
             .collect();
         if !topics_with_defaults.is_empty() && version < 4 {
@@ -191,15 +196,19 @@ mod tests {
     fn build_rejects_validate_only_v0() {
         let mut data = CreateTopicsRequestData::new();
         data.set_validate_only(true);
-        let mut builder = CreateTopicsRequestBuilder::from_data(data);
+        let mut builder = CreateTopicsRequestBuilder::new(data);
         assert!(builder.build_version(0).is_err());
     }
 
     #[test]
     fn build_rejects_defaults_below_v4() {
         let mut data = CreateTopicsRequestData::new();
-        data.set_topics(vec![topic("t", NO_NUM_PARTITIONS, NO_REPLICATION_FACTOR)]);
-        let mut builder = CreateTopicsRequestBuilder::from_data(data);
+        data.set_topics(vec![topic(
+            "t",
+            CreateTopicsRequest::NO_NUM_PARTITIONS,
+            CreateTopicsRequest::NO_REPLICATION_FACTOR,
+        )]);
+        let mut builder = CreateTopicsRequestBuilder::new(data);
         let err = builder.build_version(3).unwrap_err();
         assert!(err.to_string().contains("version 4+"), "{err}");
         // v4 accepts defaults.
@@ -211,12 +220,12 @@ mod tests {
         let mut data = CreateTopicsRequestData::new();
         data.set_topics(vec![topic("a", 1, 1), topic("b", 1, 1)]);
         let request = CreateTopicsRequest::new(data, 7);
-        let response = request.get_error_response(100, &Errors::InvalidTopicException);
+        let response = request.get_error_response(100, &Errors::InvalidTopicError);
         if let ConcreteResponse::CreateTopics(r) = response {
             assert_eq!(r.data().topics.len(), 2);
             assert_eq!(r.data().throttle_time_ms, 100);
             for t in &r.data().topics {
-                assert_eq!(t.error_code, Errors::InvalidTopicException.code());
+                assert_eq!(t.error_code, Errors::InvalidTopicError.code());
             }
         } else {
             panic!("expected CreateTopics response");
@@ -232,7 +241,7 @@ mod tests {
         data.set_timeout_ms(30000);
         let mut request = ConcreteRequest::CreateTopics(CreateTopicsRequest::new(data, 7));
         let bytes = request.serialize().unwrap();
-        let mut readable = crate::common::ByteBufferAccessor::from_bytes(bytes.into_buffer());
+        let mut readable = crate::common::ByteBufferAccessor::new(bytes.into_buffer());
         let parsed = CreateTopicsRequest::parse(&mut readable, 7).unwrap();
         assert_eq!(parsed.data().topics.len(), 1);
         assert_eq!(parsed.data().topics[0].name, "round-trip-topic");

@@ -22,8 +22,8 @@ use std::marker::PhantomData;
 
 use crate::common::requests::{ConcreteResponse, RequestBuilder};
 
-use super::admin_api_lookup_strategy::{AdminApiLookupStrategy, LookupResult};
-use super::api_request_scope::ApiRequestScope;
+use super::ApiRequestScope;
+use super::{AdminApiLookupStrategy, LookupResult};
 
 /// A lookup strategy for cases where the destination broker id is already known
 /// and no explicit lookup is required.

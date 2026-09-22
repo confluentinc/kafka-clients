@@ -19,10 +19,7 @@
 use std::collections::HashMap;
 
 use crate::admin::Config;
-use crate::common::{KafkaError, KafkaFuture, Uuid};
-
-/// Sentinel used when the broker did not return partition/replication metadata.
-pub(crate) const UNKNOWN: i32 = -1;
+use crate::common::{Error, KafkaFuture, Uuid};
 
 /// Topic metadata and configuration returned per created topic.
 ///
@@ -31,7 +28,7 @@ pub(crate) const UNKNOWN: i32 = -1;
 /// Java's `ensureSuccess`, which rethrows the stored `ApiException`).
 #[derive(Clone, Debug)]
 pub struct TopicMetadataAndConfig {
-    exception: Option<KafkaError>,
+    error: Option<Error>,
     topic_id: Uuid,
     num_partitions: i32,
     replication_factor: i32,
@@ -41,54 +38,48 @@ pub struct TopicMetadataAndConfig {
 impl TopicMetadataAndConfig {
     /// Creates a successful metadata-and-config holder.
     pub fn new(topic_id: Uuid, num_partitions: i32, replication_factor: i32, config: Config) -> Self {
-        Self {
-            exception: None,
-            topic_id,
-            num_partitions,
-            replication_factor,
-            config: Some(config),
-        }
+        Self { error: None, topic_id, num_partitions, replication_factor, config: Some(config) }
     }
 
     /// Creates a holder representing a failure; every accessor returns the
     /// error.
-    pub fn with_error(exception: KafkaError) -> Self {
+    pub fn with_error(error: Error) -> Self {
         Self {
-            exception: Some(exception),
+            error: Some(error),
             topic_id: Uuid::zero(),
-            num_partitions: UNKNOWN,
-            replication_factor: UNKNOWN,
+            num_partitions: CreateTopicsResult::UNKNOWN,
+            replication_factor: CreateTopicsResult::UNKNOWN,
             config: None,
         }
     }
 
-    fn ensure_success(&self) -> Result<(), KafkaError> {
-        match &self.exception {
+    fn ensure_success(&self) -> Result<(), Error> {
+        match &self.error {
             Some(e) => Err(e.clone()),
             None => Ok(()),
         }
     }
 
     /// The topic id, or the stored error.
-    pub fn topic_id(&self) -> Result<Uuid, KafkaError> {
+    pub fn topic_id(&self) -> Result<Uuid, Error> {
         self.ensure_success()?;
         Ok(self.topic_id)
     }
 
     /// The number of partitions, or the stored error.
-    pub fn num_partitions(&self) -> Result<i32, KafkaError> {
+    pub fn num_partitions(&self) -> Result<i32, Error> {
         self.ensure_success()?;
         Ok(self.num_partitions)
     }
 
     /// The replication factor, or the stored error.
-    pub fn replication_factor(&self) -> Result<i32, KafkaError> {
+    pub fn replication_factor(&self) -> Result<i32, Error> {
         self.ensure_success()?;
         Ok(self.replication_factor)
     }
 
     /// The topic config, or the stored error.
-    pub fn config(&self) -> Result<Config, KafkaError> {
+    pub fn config(&self) -> Result<Config, Error> {
         self.ensure_success()?;
         // Only `None` when an exception is present, already handled above.
         Ok(self.config.clone().expect("config present on success"))
@@ -104,6 +95,9 @@ pub struct CreateTopicsResult {
 }
 
 impl CreateTopicsResult {
+    /// Sentinel used when the broker did not return partition/replication metadata.
+    pub(crate) const UNKNOWN: i32 = -1;
+
     /// Creates a result from a map of topic name to per-topic future.
     pub(crate) fn new(futures: HashMap<String, KafkaFuture<TopicMetadataAndConfig>>) -> Self {
         Self { futures }
@@ -188,7 +182,7 @@ impl CreateTopicsResult {
 mod tests {
     use super::*;
     use crate::admin::ConfigEntry;
-    use crate::common::kafka_future::KafkaFutureImpl;
+    use crate::common::internals::KafkaFutureImpl;
 
     fn config() -> Config {
         Config::new([ConfigEntry::new("k".to_string(), Some("v".to_string()))])
@@ -223,7 +217,7 @@ mod tests {
         let result = CreateTopicsResult::new(futures);
 
         ok.complete(TopicMetadataAndConfig::new(Uuid::new(1, 2), 3, 2, config()));
-        bad.complete_exceptionally(KafkaError::IllegalArgument("nope".to_string()));
+        bad.complete_with_error(Error::local_illegal_argument("nope"));
 
         let raw = result.futures();
         assert_eq!(raw.len(), 2);
@@ -236,7 +230,7 @@ mod tests {
         let metadata = raw["ok"].get().await.unwrap();
         assert_eq!(metadata.num_partitions().unwrap(), 3);
         // Per-key errors stay per-key.
-        assert!(matches!(raw["bad"].get().await, Err(KafkaError::IllegalArgument(_))));
+        assert!(matches!(raw["bad"].get().await, Err(Error::LocalIllegalArgument(_))));
     }
 
     #[tokio::test]
@@ -246,12 +240,10 @@ mod tests {
         futures.insert("t".to_string(), handle.future());
         let result = CreateTopicsResult::new(futures);
 
-        handle.complete(TopicMetadataAndConfig::with_error(KafkaError::IllegalState(
-            "unsupported".to_string(),
-        )));
+        handle.complete(TopicMetadataAndConfig::with_error(Error::local_illegal_state("unsupported")));
 
-        assert!(matches!(result.config("t").get().await, Err(KafkaError::IllegalState(_))));
-        assert!(matches!(result.topic_id("t").get().await, Err(KafkaError::IllegalState(_))));
+        assert!(matches!(result.config("t").get().await, Err(Error::LocalIllegalState(_))));
+        assert!(matches!(result.topic_id("t").get().await, Err(Error::LocalIllegalState(_))));
         // values()/all() still succeed (they only observe completion, not the
         // metadata accessors' stored error).
         assert_eq!(result.all().get().await.unwrap(), ());

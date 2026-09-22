@@ -28,28 +28,14 @@ use std::collections::HashMap;
 
 use indexmap::IndexMap;
 
+use crate::FetchRequestData;
+use crate::common::ApiKeys;
 use crate::common::IsolationLevel;
 use crate::common::TopicIdPartition;
 use crate::common::TopicPartition;
 use crate::common::Uuid;
-use crate::common::protocol::ApiKeys;
-use crate::common::requests::fetch_metadata::FetchMetadata;
-use crate::fetch_request_data::{FetchPartition, FetchRequestData, FetchTopic, ForgottenTopic};
-
-/// The replica id used by ordinary consumers.
-pub const CONSUMER_REPLICA_ID: i32 = -1;
-
-/// Default response max bytes (used for versions that lack a request-level
-/// limit). Mirrors Java's `Integer.MAX_VALUE`.
-pub const DEFAULT_RESPONSE_MAX_BYTES: i32 = i32::MAX;
-
-/// Sentinel value for a missing log-start offset on a fetch request.
-pub const INVALID_LOG_START_OFFSET: i64 = -1;
-
-/// Sentinel value indicating that the partition leader epoch is unknown.
-///
-/// Mirrors `org.apache.kafka.common.record.RecordBatch.NO_PARTITION_LEADER_EPOCH`.
-pub const NO_PARTITION_LEADER_EPOCH: i32 = -1;
+use crate::common::requests::FetchMetadata;
+use crate::fetch_request_data::{FetchPartition, FetchTopic, ForgottenTopic};
 
 /// Per-partition fetch state carried in the request.
 ///
@@ -94,7 +80,7 @@ impl PartitionData {
     /// Constructs a partition entry with all fields explicit.
     ///
     /// Translates the 6-arg Java constructor.
-    pub fn new_with_last_fetched_epoch(
+    pub fn with_last_fetched_epoch(
         topic_id: Uuid,
         fetch_offset: i64,
         log_start_offset: i64,
@@ -125,6 +111,116 @@ pub struct FetchRequest {
 }
 
 impl FetchRequest {
+    /// The replica id used by ordinary consumers.
+    pub const CONSUMER_REPLICA_ID: i32 = -1;
+
+    /// Default response max bytes (used for versions that lack a request-level
+    /// limit). Mirrors Java's `Integer.MAX_VALUE`.
+    pub const DEFAULT_RESPONSE_MAX_BYTES: i32 = i32::MAX;
+
+    /// Sentinel value for a missing log-start offset on a fetch request.
+    pub const INVALID_LOG_START_OFFSET: i64 = -1;
+
+    /// Sentinel value indicating that the partition leader epoch is unknown.
+    ///
+    /// Mirrors `org.apache.kafka.common.record.RecordBatch.NO_PARTITION_LEADER_EPOCH`.
+    pub const NO_PARTITION_LEADER_EPOCH: i32 = -1;
+
+    /// Helper used by `build_version` to bucket a list of `TopicIdPartition`s
+    /// into per-topic `ForgottenTopic` entries.
+    fn add_to_forgotten_topic_map(
+        to_forget: &[TopicIdPartition],
+        forgotten_map: &mut IndexMap<String, ForgottenTopic>,
+    ) {
+        for tip in to_forget {
+            let topic = tip.topic().to_string();
+            let entry = forgotten_map.entry(topic.clone()).or_insert_with(|| {
+                let mut ft = ForgottenTopic::new();
+                ft.set_topic(topic);
+                ft.set_topic_id(tip.topic_id());
+                ft.set_partitions(Vec::new());
+                ft
+            });
+            entry.partitions.push(tip.partition());
+        }
+    }
+
+    /// Resolves the replica id from raw fetch-request data, handling v15+ which
+    /// stores it in `replica_state`. Mirrors Java's `FetchRequest.replicaId(...)`.
+    pub fn replica_id_from(data: &FetchRequestData) -> i32 {
+        if data.replica_id != -1 {
+            data.replica_id
+        } else {
+            data.replica_state.replica_id
+        }
+    }
+
+    /// Returns true if the broker id is non-negative.
+    pub fn is_valid_broker_id(broker_id: i32) -> bool {
+        broker_id >= 0
+    }
+
+    /// Returns true if the replica id identifies a consumer (rather than a broker
+    /// follower or future-local replica).
+    ///
+    /// Mirrors Java's `FetchRequest.isConsumer(int)`.
+    pub fn is_consumer(replica_id: i32) -> bool {
+        const FUTURE_LOCAL_REPLICA_ID: i32 = -3;
+        replica_id < 0 && replica_id != FUTURE_LOCAL_REPLICA_ID
+    }
+
+    /// Returns a human-readable description of a replica id.
+    ///
+    /// Mirrors Java's `FetchRequest.describeReplicaId(int)`.
+    pub fn describe_replica_id(replica_id: i32) -> String {
+        const ORDINARY_CONSUMER_ID: i32 = -1;
+        const DEBUGGING_CONSUMER_ID: i32 = -2;
+        const FUTURE_LOCAL_REPLICA_ID: i32 = -3;
+        match replica_id {
+            ORDINARY_CONSUMER_ID => "consumer".to_string(),
+            DEBUGGING_CONSUMER_ID => "debug consumer".to_string(),
+            FUTURE_LOCAL_REPLICA_ID => "future local replica".to_string(),
+            _ if Self::is_valid_broker_id(replica_id) => format!("replica [{replica_id}]"),
+            _ => format!("invalid replica [{replica_id}]"),
+        }
+    }
+
+    /// For versions < 13, builds the partition data map using only the request
+    /// data; for versions >= 13, also consults the topic-id-to-name map.
+    ///
+    /// Translates `FetchRequest.fetchData(Map<Uuid, String>)`.
+    pub fn fetch_data_from(
+        request: &FetchRequest,
+        topic_names: &HashMap<Uuid, String>,
+    ) -> IndexMap<TopicIdPartition, PartitionData> {
+        let mut out: IndexMap<TopicIdPartition, PartitionData> = IndexMap::new();
+        let version = request.version();
+        for topic in &request.data.topics {
+            let name = if version < 13 {
+                topic.topic.clone() // never null per the protocol
+            } else {
+                topic_names.get(&topic.topic_id).cloned().unwrap_or_default()
+            };
+            for fp in &topic.partitions {
+                let tip = TopicIdPartition::with_partition_topic(topic.topic_id, fp.partition, name.clone());
+                let pd = PartitionData::with_last_fetched_epoch(
+                    topic.topic_id,
+                    fp.fetch_offset,
+                    fp.log_start_offset,
+                    fp.partition_max_bytes,
+                    Self::optional_epoch(fp.current_leader_epoch),
+                    Self::optional_epoch(fp.last_fetched_epoch),
+                );
+                out.insert(tip, pd);
+            }
+        }
+        out
+    }
+
+    fn optional_epoch(raw: i32) -> Option<i32> {
+        if raw < 0 { None } else { Some(raw) }
+    }
+
     /// Constructs a `FetchRequest` from data + version. The fetch-session
     /// metadata is derived from `data.session_id()` / `data.session_epoch()`.
     pub fn new(data: FetchRequestData, version: i16) -> Self {
@@ -189,7 +285,7 @@ impl FetchRequest {
     /// # Errors
     ///
     /// Returns an error if the encoded isolation level is unknown.
-    pub fn isolation_level(&self) -> Result<IsolationLevel, crate::common::KafkaError> {
+    pub fn isolation_level(&self) -> Result<IsolationLevel, crate::common::Error> {
         IsolationLevel::for_id(self.data.isolation_level as u8)
     }
 
@@ -218,9 +314,9 @@ impl FetchRequest {
     pub fn get_error_response(
         &self,
         throttle_time_ms: i32,
-        error: &crate::common::protocol::Errors,
+        error: &crate::common::Errors,
     ) -> crate::common::requests::ConcreteResponse {
-        let mut data = crate::fetch_response_data::FetchResponseData::new();
+        let mut data = crate::FetchResponseData::new();
         data.set_throttle_time_ms(throttle_time_ms);
         data.set_error_code(error.code());
         data.set_session_id(self.metadata.session_id());
@@ -272,11 +368,11 @@ impl FetchRequestBuilder {
         Self {
             oldest_allowed_version: ApiKeys::FETCH.oldest_version(),
             latest_allowed_version: max_version,
-            replica_id: CONSUMER_REPLICA_ID,
+            replica_id: FetchRequest::CONSUMER_REPLICA_ID,
             replica_epoch: -1,
             max_wait,
             min_bytes,
-            max_bytes: DEFAULT_RESPONSE_MAX_BYTES,
+            max_bytes: FetchRequest::DEFAULT_RESPONSE_MAX_BYTES,
             isolation_level: IsolationLevel::ReadUncommitted,
             metadata: FetchMetadata::LEGACY,
             rack_id: String::new(),
@@ -287,24 +383,24 @@ impl FetchRequestBuilder {
     }
 
     /// Sets the isolation level.
-    pub fn isolation_level(mut self, level: IsolationLevel) -> Self {
+    pub fn set_isolation_level(mut self, level: IsolationLevel) -> Self {
         self.isolation_level = level;
         self
     }
 
     /// Returns the current metadata. Visible for testing.
-    pub fn metadata_value(&self) -> FetchMetadata {
+    pub fn metadata(&self) -> FetchMetadata {
         self.metadata
     }
 
     /// Sets the fetch session metadata.
-    pub fn metadata(mut self, metadata: FetchMetadata) -> Self {
+    pub fn set_metadata(mut self, metadata: FetchMetadata) -> Self {
         self.metadata = metadata;
         self
     }
 
     /// Sets the rack id.
-    pub fn rack_id(mut self, rack_id: impl Into<String>) -> Self {
+    pub fn set_rack_id(mut self, rack_id: impl Into<String>) -> Self {
         self.rack_id = rack_id.into();
         self
     }
@@ -320,14 +416,28 @@ impl FetchRequestBuilder {
         self
     }
 
+    /// Returns the removed-partitions list.
+    ///
+    /// Translates `FetchRequest.Builder.removed()`.
+    pub fn removed(&self) -> &[TopicIdPartition] {
+        &self.removed
+    }
+
     /// Sets the removed-partitions list.
-    pub fn removed(mut self, removed: Vec<TopicIdPartition>) -> Self {
+    pub fn set_removed(mut self, removed: Vec<TopicIdPartition>) -> Self {
         self.removed = removed;
         self
     }
 
+    /// Returns the replaced-partitions list.
+    ///
+    /// Translates `FetchRequest.Builder.replaced()`.
+    pub fn replaced(&self) -> &[TopicIdPartition] {
+        &self.replaced
+    }
+
     /// Sets the replaced-partitions list.
-    pub fn replaced(mut self, replaced: Vec<TopicIdPartition>) -> Self {
+    pub fn set_replaced(mut self, replaced: Vec<TopicIdPartition>) -> Self {
         self.replaced = replaced;
         self
     }
@@ -350,7 +460,7 @@ impl FetchRequestBuilder {
     /// Builds the request at the given version.
     pub fn build_version(&self, version: i16) -> FetchRequest {
         let effective_max_bytes = if version < 3 {
-            DEFAULT_RESPONSE_MAX_BYTES
+            FetchRequest::DEFAULT_RESPONSE_MAX_BYTES
         } else {
             self.max_bytes
         };
@@ -374,12 +484,12 @@ impl FetchRequestBuilder {
         // topic name via a LinkedHashMap. We use IndexMap here too for
         // deterministic wire ordering.
         let mut forgotten: IndexMap<String, ForgottenTopic> = IndexMap::new();
-        add_to_forgotten_topic_map(&self.removed, &mut forgotten);
+        FetchRequest::add_to_forgotten_topic_map(&self.removed, &mut forgotten);
         // For versions older than 13, replaced partitions are not sent in
         // the forget set in order to avoid removing the newly added
         // partition in the fetch set.
         if version >= 13 {
-            add_to_forgotten_topic_map(&self.replaced, &mut forgotten);
+            FetchRequest::add_to_forgotten_topic_map(&self.replaced, &mut forgotten);
         }
         data.set_forgotten_topics_data(forgotten.into_iter().map(|(_, ft)| ft).collect());
 
@@ -403,8 +513,16 @@ impl FetchRequestBuilder {
 
             let mut fp = FetchPartition::new();
             fp.set_partition(topic_partition.partition());
-            fp.set_current_leader_epoch(partition_data.current_leader_epoch.unwrap_or(NO_PARTITION_LEADER_EPOCH));
-            fp.set_last_fetched_epoch(partition_data.last_fetched_epoch.unwrap_or(NO_PARTITION_LEADER_EPOCH));
+            fp.set_current_leader_epoch(
+                partition_data
+                    .current_leader_epoch
+                    .unwrap_or(FetchRequest::NO_PARTITION_LEADER_EPOCH),
+            );
+            fp.set_last_fetched_epoch(
+                partition_data
+                    .last_fetched_epoch
+                    .unwrap_or(FetchRequest::NO_PARTITION_LEADER_EPOCH),
+            );
             fp.set_fetch_offset(partition_data.fetch_offset);
             fp.set_log_start_offset(partition_data.log_start_offset);
             fp.set_partition_max_bytes(partition_data.max_bytes);
@@ -420,98 +538,6 @@ impl FetchRequestBuilder {
 
         FetchRequest::new(data, version)
     }
-}
-
-/// Helper used by `build_version` to bucket a list of `TopicIdPartition`s
-/// into per-topic `ForgottenTopic` entries.
-fn add_to_forgotten_topic_map(to_forget: &[TopicIdPartition], forgotten_map: &mut IndexMap<String, ForgottenTopic>) {
-    for tip in to_forget {
-        let topic = tip.topic().to_string();
-        let entry = forgotten_map.entry(topic.clone()).or_insert_with(|| {
-            let mut ft = ForgottenTopic::new();
-            ft.set_topic(topic);
-            ft.set_topic_id(tip.topic_id());
-            ft.set_partitions(Vec::new());
-            ft
-        });
-        entry.partitions.push(tip.partition());
-    }
-}
-
-/// Resolves the replica id from raw fetch-request data, handling v15+ which
-/// stores it in `replica_state`. Mirrors Java's `FetchRequest.replicaId(...)`.
-pub fn replica_id_from(data: &FetchRequestData) -> i32 {
-    if data.replica_id != -1 {
-        data.replica_id
-    } else {
-        data.replica_state.replica_id
-    }
-}
-
-/// Returns true if the broker id is non-negative.
-pub fn is_valid_broker_id(broker_id: i32) -> bool {
-    broker_id >= 0
-}
-
-/// Returns true if the replica id identifies a consumer (rather than a broker
-/// follower or future-local replica).
-///
-/// Mirrors Java's `FetchRequest.isConsumer(int)`.
-pub fn is_consumer(replica_id: i32) -> bool {
-    const FUTURE_LOCAL_REPLICA_ID: i32 = -3;
-    replica_id < 0 && replica_id != FUTURE_LOCAL_REPLICA_ID
-}
-
-/// Returns a human-readable description of a replica id.
-///
-/// Mirrors Java's `FetchRequest.describeReplicaId(int)`.
-pub fn describe_replica_id(replica_id: i32) -> String {
-    const ORDINARY_CONSUMER_ID: i32 = -1;
-    const DEBUGGING_CONSUMER_ID: i32 = -2;
-    const FUTURE_LOCAL_REPLICA_ID: i32 = -3;
-    match replica_id {
-        ORDINARY_CONSUMER_ID => "consumer".to_string(),
-        DEBUGGING_CONSUMER_ID => "debug consumer".to_string(),
-        FUTURE_LOCAL_REPLICA_ID => "future local replica".to_string(),
-        _ if is_valid_broker_id(replica_id) => format!("replica [{replica_id}]"),
-        _ => format!("invalid replica [{replica_id}]"),
-    }
-}
-
-/// For versions < 13, builds the partition data map using only the request
-/// data; for versions >= 13, also consults the topic-id-to-name map.
-///
-/// Translates `FetchRequest.fetchData(Map<Uuid, String>)`.
-pub fn fetch_data_from(
-    request: &FetchRequest,
-    topic_names: &HashMap<Uuid, String>,
-) -> IndexMap<TopicIdPartition, PartitionData> {
-    let mut out: IndexMap<TopicIdPartition, PartitionData> = IndexMap::new();
-    let version = request.version();
-    for topic in &request.data.topics {
-        let name = if version < 13 {
-            topic.topic.clone() // never null per the protocol
-        } else {
-            topic_names.get(&topic.topic_id).cloned().unwrap_or_default()
-        };
-        for fp in &topic.partitions {
-            let tip = TopicIdPartition::from_parts(topic.topic_id, fp.partition, name.clone());
-            let pd = PartitionData::new_with_last_fetched_epoch(
-                topic.topic_id,
-                fp.fetch_offset,
-                fp.log_start_offset,
-                fp.partition_max_bytes,
-                optional_epoch(fp.current_leader_epoch),
-                optional_epoch(fp.last_fetched_epoch),
-            );
-            out.insert(tip, pd);
-        }
-    }
-    out
-}
-
-fn optional_epoch(raw: i32) -> Option<i32> {
-    if raw < 0 { None } else { Some(raw) }
 }
 
 impl crate::common::requests::RequestBuilder for FetchRequestBuilder {
@@ -543,16 +569,16 @@ mod tests {
     }
 
     fn pd(topic_id: Uuid, fetch_offset: i64) -> PartitionData {
-        PartitionData::new(topic_id, fetch_offset, INVALID_LOG_START_OFFSET, 1024, None)
+        PartitionData::new(topic_id, fetch_offset, FetchRequest::INVALID_LOG_START_OFFSET, 1024, None)
     }
 
     #[test]
     fn test_for_consumer_defaults() {
         let builder = FetchRequestBuilder::for_consumer(15, 500, 1, IndexMap::new());
-        assert_eq!(builder.replica_id, CONSUMER_REPLICA_ID);
+        assert_eq!(builder.replica_id, FetchRequest::CONSUMER_REPLICA_ID);
         assert_eq!(builder.max_wait, 500);
         assert_eq!(builder.min_bytes, 1);
-        assert_eq!(builder.max_bytes, DEFAULT_RESPONSE_MAX_BYTES);
+        assert_eq!(builder.max_bytes, FetchRequest::DEFAULT_RESPONSE_MAX_BYTES);
         assert_eq!(builder.isolation_level, IsolationLevel::ReadUncommitted);
         assert_eq!(builder.metadata, FetchMetadata::LEGACY);
         assert_eq!(builder.rack_id, "");
@@ -567,7 +593,7 @@ mod tests {
         let builder = FetchRequestBuilder::for_consumer(15, 500, 1, data);
         let req = builder.build_version(15);
         // v15 stores replica id in replica_state.
-        assert_eq!(CONSUMER_REPLICA_ID, req.replica_id());
+        assert_eq!(FetchRequest::CONSUMER_REPLICA_ID, req.replica_id());
         assert_eq!(500, req.max_wait());
         assert_eq!(1, req.min_bytes());
         assert!(!req.is_from_follower());
@@ -581,7 +607,7 @@ mod tests {
         data.insert(tp("t", 0), pd(topic_id, 100));
         let builder = FetchRequestBuilder::for_consumer(12, 500, 1, data);
         let req = builder.build_version(12);
-        assert_eq!(CONSUMER_REPLICA_ID, req.replica_id());
+        assert_eq!(FetchRequest::CONSUMER_REPLICA_ID, req.replica_id());
         assert_eq!(12, req.version());
     }
 
@@ -614,7 +640,7 @@ mod tests {
         let req = FetchRequestBuilder::for_consumer(12, 500, 1, data)
             .set_max_bytes(123_456)
             .build_version(2);
-        assert_eq!(DEFAULT_RESPONSE_MAX_BYTES, req.max_bytes());
+        assert_eq!(FetchRequest::DEFAULT_RESPONSE_MAX_BYTES, req.max_bytes());
     }
 
     #[test]
@@ -631,11 +657,11 @@ mod tests {
     #[test]
     fn test_build_removed_partitions_v12_no_replaced() {
         let id = Uuid::random_uuid();
-        let removed = vec![TopicIdPartition::from_parts(id, 5, "x")];
-        let replaced = vec![TopicIdPartition::from_parts(id, 6, "y")];
+        let removed = vec![TopicIdPartition::with_partition_topic(id, 5, "x")];
+        let replaced = vec![TopicIdPartition::with_partition_topic(id, 6, "y")];
         let builder = FetchRequestBuilder::for_consumer(15, 500, 1, IndexMap::new())
-            .removed(removed)
-            .replaced(replaced);
+            .set_removed(removed)
+            .set_replaced(replaced);
         let req = builder.build_version(12);
         // v12 only includes removed; replaced is dropped.
         let forgotten = &req.data().forgotten_topics_data;
@@ -646,20 +672,35 @@ mod tests {
     #[test]
     fn test_build_removed_and_replaced_v13() {
         let id = Uuid::random_uuid();
-        let removed = vec![TopicIdPartition::from_parts(id, 5, "x")];
-        let replaced = vec![TopicIdPartition::from_parts(id, 6, "y")];
+        let removed = vec![TopicIdPartition::with_partition_topic(id, 5, "x")];
+        let replaced = vec![TopicIdPartition::with_partition_topic(id, 6, "y")];
         let builder = FetchRequestBuilder::for_consumer(15, 500, 1, IndexMap::new())
-            .removed(removed)
-            .replaced(replaced);
+            .set_removed(removed)
+            .set_replaced(replaced);
         let req = builder.build_version(13);
         let forgotten = &req.data().forgotten_topics_data;
         assert_eq!(2, forgotten.len());
     }
 
     #[test]
+    fn test_removed_and_replaced_round_trip() {
+        let id = Uuid::random_uuid();
+        let builder = FetchRequestBuilder::for_consumer(15, 500, 1, IndexMap::new());
+        // Java's Builder defaults both to `Collections.emptyList()`.
+        assert!(builder.removed().is_empty());
+        assert!(builder.replaced().is_empty());
+
+        let removed = vec![TopicIdPartition::with_partition_topic(id, 5, "x")];
+        let replaced = vec![TopicIdPartition::with_partition_topic(id, 6, "y")];
+        let builder = builder.set_removed(removed.clone()).set_replaced(replaced.clone());
+        assert_eq!(removed.as_slice(), builder.removed());
+        assert_eq!(replaced.as_slice(), builder.replaced());
+    }
+
+    #[test]
     fn test_isolation_level_round_trip() {
         let builder = FetchRequestBuilder::for_consumer(15, 500, 1, IndexMap::new())
-            .isolation_level(IsolationLevel::ReadCommitted);
+            .set_isolation_level(IsolationLevel::ReadCommitted);
         let req = builder.build_version(15);
         assert_eq!(IsolationLevel::ReadCommitted, req.isolation_level().unwrap());
     }
@@ -667,27 +708,27 @@ mod tests {
     #[test]
     fn test_metadata_round_trip() {
         let builder =
-            FetchRequestBuilder::for_consumer(15, 500, 1, IndexMap::new()).metadata(FetchMetadata::new(42, 7));
+            FetchRequestBuilder::for_consumer(15, 500, 1, IndexMap::new()).set_metadata(FetchMetadata::new(42, 7));
         let req = builder.build_version(15);
         assert_eq!(FetchMetadata::new(42, 7), req.metadata());
     }
 
     #[test]
     fn test_describe_replica_id() {
-        assert_eq!("consumer", describe_replica_id(-1));
-        assert_eq!("debug consumer", describe_replica_id(-2));
-        assert_eq!("future local replica", describe_replica_id(-3));
-        assert_eq!("replica [3]", describe_replica_id(3));
-        assert_eq!("invalid replica [-10]", describe_replica_id(-10));
+        assert_eq!("consumer", FetchRequest::describe_replica_id(-1));
+        assert_eq!("debug consumer", FetchRequest::describe_replica_id(-2));
+        assert_eq!("future local replica", FetchRequest::describe_replica_id(-3));
+        assert_eq!("replica [3]", FetchRequest::describe_replica_id(3));
+        assert_eq!("invalid replica [-10]", FetchRequest::describe_replica_id(-10));
     }
 
     #[test]
     fn test_is_consumer() {
-        assert!(is_consumer(-1));
-        assert!(is_consumer(-2));
-        assert!(!is_consumer(-3)); // FUTURE_LOCAL_REPLICA_ID
-        assert!(!is_consumer(0));
-        assert!(!is_consumer(5));
+        assert!(FetchRequest::is_consumer(-1));
+        assert!(FetchRequest::is_consumer(-2));
+        assert!(!FetchRequest::is_consumer(-3)); // FUTURE_LOCAL_REPLICA_ID
+        assert!(!FetchRequest::is_consumer(0));
+        assert!(!FetchRequest::is_consumer(5));
     }
 
     #[test]
@@ -699,7 +740,7 @@ mod tests {
 
         let mut topic_names = HashMap::new();
         topic_names.insert(id, "resolved".to_string());
-        let resolved = fetch_data_from(&req, &topic_names);
+        let resolved = FetchRequest::fetch_data_from(&req, &topic_names);
         assert_eq!(1, resolved.len());
         let (tip, partition_data) = resolved.iter().next().unwrap();
         assert_eq!("resolved", tip.topic());
@@ -715,7 +756,7 @@ mod tests {
         data.insert(tp("name-in-data", 0), pd(id, 100));
         let req = FetchRequestBuilder::for_consumer(15, 500, 1, data).build_version(12);
 
-        let resolved = fetch_data_from(&req, &HashMap::new());
+        let resolved = FetchRequest::fetch_data_from(&req, &HashMap::new());
         let (tip, _) = resolved.iter().next().unwrap();
         // v12 keeps the topic name from the request body.
         assert_eq!("name-in-data", tip.topic());

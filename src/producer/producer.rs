@@ -1,0 +1,197 @@
+// Copyright 2025 Confluent Inc.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+//! The Producer trait — the interface for the KafkaProducer.
+//!
+//! Translated from `org.apache.kafka.clients.producer.Producer`.
+
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::Duration;
+
+use crate::common::Error;
+use crate::common::KafkaFuture;
+use crate::common::MetricName;
+use crate::common::PartitionInfo;
+use crate::common::TopicPartition;
+use crate::common::metrics::KafkaMetric;
+use crate::consumer::ConsumerGroupMetadata;
+use crate::consumer::OffsetAndMetadata;
+use crate::producer::Callback;
+use crate::producer::ProducerRecord;
+use crate::producer::RecordMetadata;
+
+/// The interface for the [`KafkaProducer`](super::KafkaProducer).
+///
+/// Translated from `org.apache.kafka.clients.producer.Producer`.
+#[allow(async_fn_in_trait)]
+pub trait Producer<K, V> {
+    /// Needs to be called before any other method when the `transactional.id` is
+    /// set in the configuration.
+    ///
+    /// See [`KafkaProducer::init_transactions`](super::KafkaProducer::init_transactions).
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` if:
+    /// - No `transactional.id` has been configured
+    ///   ([`LocalIllegalState`](Error::LocalIllegalState))
+    /// - The broker does not support transactions
+    ///   ([`UnsupportedVersion`](Error::UnsupportedVersion))
+    /// - The configured `transactional.id` is not authorized, or the idempotent
+    ///   producer id is unavailable
+    /// - The producer has encountered a previous fatal error
+    /// - Initialization does not complete within `max.block.ms`
+    ///   ([`Timeout`](Error::Timeout))
+    async fn init_transactions(&self) -> Result<(), Error>;
+
+    /// Should be called before the start of each new transaction.
+    ///
+    /// See [`KafkaProducer::begin_transaction`](super::KafkaProducer::begin_transaction).
+    ///
+    /// Stays synchronous because Java's `beginTransaction`
+    /// (`KafkaProducer.java:674-681`) is a pure state transition and never
+    /// blocks.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` if no `transactional.id` has been configured, if
+    /// `init_transactions` has not yet been invoked, if another producer with
+    /// the same `transactional.id` has fenced this one, or if the producer has
+    /// encountered a previous fatal error.
+    fn begin_transaction(&self) -> Result<(), Error>;
+
+    /// Sends a list of specified offsets to the consumer group coordinator, and
+    /// also marks those offsets as part of the current transaction.
+    ///
+    /// See [`KafkaProducer::send_offsets_to_transaction`](super::KafkaProducer::send_offsets_to_transaction).
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` if no `transactional.id` has been configured or no
+    /// transaction has been started, if `group_metadata` is invalid, if the
+    /// commit failed and cannot be retried, or if the offsets are not sent
+    /// within `max.block.ms` ([`Timeout`](Error::Timeout)).
+    async fn send_offsets_to_transaction(
+        &self,
+        offsets: HashMap<TopicPartition, OffsetAndMetadata>,
+        group_metadata: ConsumerGroupMetadata,
+    ) -> Result<(), Error>;
+
+    /// Commits the ongoing transaction.
+    ///
+    /// See [`KafkaProducer::commit_transaction`](super::KafkaProducer::commit_transaction).
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` if no `transactional.id` has been configured or no
+    /// transaction has been started, if the producer has encountered a previous
+    /// fatal or abortable error, or if the commit does not complete within
+    /// `max.block.ms` ([`Timeout`](Error::Timeout)).
+    async fn commit_transaction(&self) -> Result<(), Error>;
+
+    /// Aborts the ongoing transaction.
+    ///
+    /// See [`KafkaProducer::abort_transaction`](super::KafkaProducer::abort_transaction).
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` if no `transactional.id` has been configured or no
+    /// transaction has been started, if the producer has encountered a previous
+    /// fatal error, or if the abort does not complete within `max.block.ms`
+    /// ([`Timeout`](Error::Timeout)).
+    async fn abort_transaction(&self) -> Result<(), Error>;
+
+    /// Asynchronously send a record to a topic. Equivalent to
+    /// `send_with_callback(record, None)`.
+    ///
+    /// See [`send_with_callback`](Producer::send_with_callback) for details.
+    async fn send(&self, record: ProducerRecord<K, V>) -> Result<KafkaFuture<RecordMetadata>, Error>;
+
+    /// Asynchronously send a record to a topic and invoke the provided callback
+    /// when the send has been acknowledged.
+    ///
+    /// The send is asynchronous and this method will return immediately once the record
+    /// has been stored in the buffer of records waiting to be sent. It may block
+    /// waiting for metadata or buffer space.
+    ///
+    /// # Arguments
+    ///
+    /// * `record` - The record to send
+    /// * `callback` - A user-supplied callback to execute when the record has been
+    ///   acknowledged by the server (`None` indicates no callback)
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` if:
+    /// - The producer has already been closed ([`LocalIllegalState`](Error::LocalIllegalState))
+    /// - The key or value cannot be serialized ([`Serialization`](Error::Serialization))
+    /// - A Kafka-related error occurs
+    async fn send_with_callback(
+        &self,
+        record: ProducerRecord<K, V>,
+        callback: Option<Callback>,
+    ) -> Result<KafkaFuture<RecordMetadata>, Error>;
+
+    /// Invoking this method makes all buffered records immediately available to send
+    /// and awaits the completion of the requests associated with these records.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` if an error occurs during flushing.
+    async fn flush(&self) -> Result<(), Error>;
+
+    /// Get the partition metadata for the given topic.
+    ///
+    /// This can be used for custom partitioning.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` if:
+    /// - The topic cannot be found within `max.block.ms` ([`Timeout`](Error::Timeout))
+    /// - The producer has been closed
+    async fn partitions_for(&self, topic: &str) -> Result<Vec<PartitionInfo>, Error>;
+
+    /// Get the full set of producer metrics maintained by this producer.
+    ///
+    /// Translated from `Producer.metrics()`. The returned map is keyed by
+    /// [`MetricName`]; the value type is `Arc<KafkaMetric>` — [`KafkaMetric`]
+    /// is the concrete registry entry (Java's `Metric` interface). This method
+    /// does not block in Java, so it stays a synchronous `fn`.
+    ///
+    /// The returned `HashMap` is a snapshot clone of `Arc<KafkaMetric>`
+    /// handles; mutating it does not affect the registry (Java's
+    /// `Collections.unmodifiableMap` analog).
+    fn metrics(&self) -> HashMap<MetricName, Arc<KafkaMetric>>;
+
+    /// Close this producer. This method awaits until all previously sent requests
+    /// complete.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` if an error occurs during closing.
+    async fn close(&self) -> Result<(), Error>;
+
+    /// Close this producer, waiting up to the given timeout for pending requests
+    /// to complete.
+    ///
+    /// If the producer is unable to complete all requests before the timeout
+    /// expires, this method will fail any unsent and unacknowledged records
+    /// immediately.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` if an error occurs during closing.
+    async fn close_with_timeout(&self, timeout: Duration) -> Result<(), Error>;
+}

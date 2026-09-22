@@ -16,13 +16,9 @@
 //!
 //! Corresponds to `org.apache.kafka.common.resource.ResourcePattern`.
 
-use crate::common::KafkaError;
+use crate::common::Error;
 
 use super::{PatternType, ResourcePatternFilter, ResourceType};
-
-/// A special literal resource name that corresponds to 'all resources of a
-/// certain type'.
-pub const WILDCARD_RESOURCE: &str = "*";
 
 /// Represents a pattern that is used by ACLs to match zero or more
 /// [`Resource`](super::Resource)s.
@@ -36,29 +32,33 @@ pub struct ResourcePattern {
 }
 
 impl ResourcePattern {
+    /// A special literal resource name that corresponds to 'all resources of a
+    /// certain type'.
+    pub const WILDCARD_RESOURCE: &str = "*";
+
     /// Create a pattern using the supplied parameters.
     ///
     /// # Arguments
     /// * `resource_type` - specific resource type
-    /// * `name` - resource name, which can be the [`WILDCARD_RESOURCE`]
+    /// * `name` - resource name, which can be the [`Self::WILDCARD_RESOURCE`]
     /// * `pattern_type` - specific resource pattern type, which controls how the
     ///   pattern will match resource names
     ///
     /// # Errors
     ///
-    /// Returns [`KafkaError::IllegalArgument`] if `resource_type` is
+    /// Returns [`Error::LocalIllegalArgument`] if `resource_type` is
     /// [`ResourceType::Any`], or `pattern_type` is [`PatternType::Match`] or
     /// [`PatternType::Any`] (mirrors Java's `IllegalArgumentException`).
     pub fn new(
         resource_type: ResourceType,
         name: impl Into<String>,
         pattern_type: PatternType,
-    ) -> Result<ResourcePattern, KafkaError> {
+    ) -> Result<ResourcePattern, Error> {
         if resource_type == ResourceType::Any {
-            return Err(KafkaError::illegal_argument("resourceType must not be ANY"));
+            return Err(Error::local_illegal_argument("resourceType must not be ANY"));
         }
         if pattern_type == PatternType::Match || pattern_type == PatternType::Any {
-            return Err(KafkaError::illegal_argument(format!("patternType must not be {pattern_type}")));
+            return Err(Error::local_illegal_argument(format!("patternType must not be {pattern_type}")));
         }
         Ok(ResourcePattern { resource_type, name: name.into(), pattern_type })
     }
@@ -110,19 +110,19 @@ mod tests {
     #[test]
     fn should_throw_if_resource_type_is_any() {
         let err = ResourcePattern::new(ResourceType::Any, "name", PatternType::Literal);
-        assert!(matches!(err, Err(KafkaError::IllegalArgument(_))));
+        assert!(matches!(err, Err(Error::LocalIllegalArgument(_))));
     }
 
     #[test]
     fn should_throw_if_pattern_type_is_match() {
         let err = ResourcePattern::new(ResourceType::Topic, "name", PatternType::Match);
-        assert!(matches!(err, Err(KafkaError::IllegalArgument(_))));
+        assert!(matches!(err, Err(Error::LocalIllegalArgument(_))));
     }
 
     #[test]
     fn should_throw_if_pattern_type_is_any() {
         let err = ResourcePattern::new(ResourceType::Topic, "name", PatternType::Any);
-        assert!(matches!(err, Err(KafkaError::IllegalArgument(_))));
+        assert!(matches!(err, Err(Error::LocalIllegalArgument(_))));
     }
 
     #[test]

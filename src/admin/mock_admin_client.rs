@@ -18,12 +18,15 @@
 //! to the topic, cluster, and config methods that are in scope through Tier 1
 //! Phase 3).
 
+use crate::common::requests::DescribeLogDirsResponse;
+use crate::consumer::internals::ConsumerProtocol;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Mutex;
 use std::time::Duration;
 
 use async_trait::async_trait;
 
+use crate::DescribeUserScramCredentialsResponseData;
 use crate::admin::FilterResults;
 use crate::admin::{
     AbortTransactionOptions, AbortTransactionResult, AbortTransactionSpec, DescribeProducersOptions,
@@ -66,23 +69,18 @@ use crate::admin::{
     ListClientMetricsResourcesResult, ListConsumerGroupsOptions, ListConsumerGroupsResult,
 };
 use crate::common::ElectionType;
+use crate::common::Errors;
 use crate::common::KafkaFuture;
 use crate::common::acl::{AclBinding, AclBindingFilter, AclOperation};
 use crate::common::config::{ConfigResource, ConfigResourceType};
-use crate::common::kafka_future::KafkaFutureImpl;
-use crate::common::protocol::Errors;
+use crate::common::internals::KafkaFutureImpl;
 use crate::common::quota::{ClientQuotaAlteration, ClientQuotaEntity, ClientQuotaFilter};
-use crate::common::requests::describe_log_dirs_response::UNKNOWN_VOLUME_BYTES;
 use crate::common::security::auth::KafkaPrincipal;
 use crate::common::security::token::delegation::{DelegationToken, TokenInformation};
 use crate::common::utils::ProducerIdAndEpoch;
+use crate::common::{Error, Node, TopicCollection, TopicPartition, TopicPartitionInfo, TopicPartitionReplica, Uuid};
 use crate::common::{GroupState, GroupType};
-use crate::common::{
-    KafkaError, Node, TopicCollection, TopicPartition, TopicPartitionInfo, TopicPartitionReplica, Uuid,
-};
 use crate::consumer::OffsetAndMetadata;
-use crate::consumer::internals::consumer_protocol::PROTOCOL_TYPE;
-use crate::describe_user_scram_credentials_response_data::DescribeUserScramCredentialsResponseData;
 use crate::leave_group_request_data::MemberIdentity;
 
 use std::collections::{BTreeSet, HashSet};
@@ -182,7 +180,7 @@ impl MockAdminClient {
     ///
     /// # Errors
     ///
-    /// Returns [`KafkaError::illegal_argument`] when `num_brokers` is less than
+    /// Returns [`Error::local_illegal_argument`] when `num_brokers` is less than
     /// one. Java throws instead of producing a broker-less mock: its
     /// `Builder.build()` reads `brokers.get(0)` for the controller
     /// (`MockAdminClient.java:210`), which raises `IndexOutOfBoundsException` on
@@ -199,7 +197,7 @@ impl MockAdminClient {
     /// unchecked but recoverable") and not §10.1's unrecoverable case. It also
     /// keeps [`crate::ffi::admin`] free of a panic that could unwind out of
     /// `kafka_admin_MockAdminClient_new` and abort the process.
-    pub fn create(num_brokers: i32) -> Result<Self, KafkaError> {
+    pub fn create(num_brokers: i32) -> Result<Self, Error> {
         let brokers: Vec<Node> = (0..num_brokers)
             .map(|id| Node::new(id, "localhost".to_string(), 1000 + id))
             .collect();
@@ -209,7 +207,7 @@ impl MockAdminClient {
         let controller = match brokers.first() {
             Some(node) => node.clone(),
             None => {
-                return Err(KafkaError::illegal_argument(format!(
+                return Err(Error::local_illegal_argument(format!(
                     "num_brokers must be at least 1, was {num_brokers}"
                 )));
             },
@@ -276,7 +274,7 @@ impl MockAdminClient {
     // --- seeding mutators ---------------------------------------------------
     //
     // Convention for this group: a seeding helper whose Java counterpart is a
-    // `void` method that *throws* returns `Result<(), KafkaError>` and reuses
+    // `void` method that *throws* returns `Result<(), Error>` and reuses
     // Java's message verbatim, rather than panicking. Java's throws here are all
     // catchable `IllegalArgumentException`s, and CLAUDE.md §10.2 asks for a
     // `Result` for a recoverable Java throw even when it is unchecked. A helper
@@ -303,7 +301,7 @@ impl MockAdminClient {
     }
 
     /// Seeds the committed consumer-group offsets returned by
-    /// `list_consumer_group_offsets` for the given partitions.
+    /// `list_consumer_group_offsets_with_group_specs` for the given partitions.
     ///
     /// Mirrors `MockAdminClient.updateConsumerGroupOffsets`.
     pub fn update_consumer_group_offsets(&self, new_offsets: HashMap<TopicPartition, i64>) {
@@ -317,17 +315,17 @@ impl MockAdminClient {
     ///
     /// # Errors
     ///
-    /// Returns [`KafkaError::IllegalArgument`] if `broker_id` is not one of the
+    /// Returns [`Error::LocalIllegalArgument`] if `broker_id` is not one of the
     /// mock's brokers. Java has no equivalent setter — `Builder.brokerLogDirs`
     /// installs the whole list up front — so this message has no Java
     /// counterpart; it exists because indexing `brokerLogDirs` out of range
     /// would otherwise panic.
-    pub fn set_broker_log_dirs(&self, broker_id: i32, log_dirs: Vec<String>) -> Result<(), KafkaError> {
+    pub fn set_broker_log_dirs(&self, broker_id: i32, log_dirs: Vec<String>) -> Result<(), Error> {
         let mut state = self.state.lock().unwrap();
         let slot = usize::try_from(broker_id)
             .ok()
             .and_then(|id| state.broker_log_dirs.get_mut(id))
-            .ok_or_else(|| KafkaError::illegal_argument(format!("Broker {broker_id} does not exist.")))?;
+            .ok_or_else(|| Error::local_illegal_argument(format!("Broker {broker_id} does not exist.")))?;
         *slot = log_dirs;
         Ok(())
     }
@@ -338,7 +336,7 @@ impl MockAdminClient {
     ///
     /// # Errors
     ///
-    /// Returns [`KafkaError::IllegalArgument`] with Java's message if the topic
+    /// Returns [`Error::LocalIllegalArgument`] with Java's message if the topic
     /// was already added, or if any partition names a broker the mock does not
     /// have as its leader, in its replica list, or in its ISR
     /// (`MockAdminClient.java:296-309`).
@@ -348,10 +346,10 @@ impl MockAdminClient {
         name: &str,
         partitions: Vec<TopicPartitionInfo>,
         configs: Option<BTreeMap<String, String>>,
-    ) -> Result<(), KafkaError> {
+    ) -> Result<(), Error> {
         let mut state = self.state.lock().unwrap();
         if state.all_topics.contains_key(name) {
-            return Err(KafkaError::illegal_argument(format!("Topic {name} was already added.")));
+            return Err(Error::local_illegal_argument(format!("Topic {name} was already added.")));
         }
         // Java validates every partition against the broker list before touching
         // `brokerLogDirs` (MockAdminClient.java:298-309). Note that
@@ -362,13 +360,13 @@ impl MockAdminClient {
         for partition in &partitions {
             let known_leader = partition.leader().is_some_and(|leader| state.brokers.contains(leader));
             if !known_leader {
-                return Err(KafkaError::illegal_argument("Leader broker unknown"));
+                return Err(Error::local_illegal_argument("Leader broker unknown"));
             }
             if !partition.replicas().iter().all(|node| state.brokers.contains(node)) {
-                return Err(KafkaError::illegal_argument("Unknown brokers in replica list"));
+                return Err(Error::local_illegal_argument("Unknown brokers in replica list"));
             }
             if !partition.isr().iter().all(|node| state.brokers.contains(node)) {
-                return Err(KafkaError::illegal_argument("Unknown brokers in isr list"));
+                return Err(Error::local_illegal_argument("Unknown brokers in isr list"));
             }
         }
         // Each partition starts on the first log directory of its leader broker.
@@ -383,7 +381,7 @@ impl MockAdminClient {
         for leader in partitions.iter().filter_map(TopicPartitionInfo::leader) {
             let dirs = &state.broker_log_dirs[leader.id() as usize];
             let first = dirs.first().ok_or_else(|| {
-                KafkaError::illegal_argument(format!("Broker {} has no log directories.", leader.id()))
+                Error::local_illegal_argument(format!("Broker {} has no log directories.", leader.id()))
             })?;
             partition_log_dirs.push(first.clone());
         }
@@ -405,20 +403,20 @@ impl MockAdminClient {
         Ok(())
     }
 
-    /// Marks a topic for deletion so `describe_topics` treats it as absent.
+    /// Marks a topic for deletion so `describe_topics_with_topics` treats it as absent.
     ///
     /// Mirrors `MockAdminClient.markTopicForDeletion`.
     ///
     /// # Errors
     ///
-    /// Returns [`KafkaError::IllegalArgument`] with Java's message if the topic
+    /// Returns [`Error::LocalIllegalArgument`] with Java's message if the topic
     /// does not exist (`MockAdminClient.java:328-330`).
-    pub fn mark_topic_for_deletion(&self, name: &str) -> Result<(), KafkaError> {
+    pub fn mark_topic_for_deletion(&self, name: &str) -> Result<(), Error> {
         let mut state = self.state.lock().unwrap();
         let topic = state
             .all_topics
             .get_mut(name)
-            .ok_or_else(|| KafkaError::illegal_argument(format!("Topic {name} did not exist.")))?;
+            .ok_or_else(|| Error::local_illegal_argument(format!("Topic {name} did not exist.")))?;
         topic.marked_for_deletion = true;
         Ok(())
     }
@@ -429,8 +427,8 @@ impl MockAdminClient {
     }
 }
 
-fn timeout_error() -> KafkaError {
-    KafkaError::Timeout("The mock timed out the request.".to_string())
+fn timeout_error() -> Error {
+    Error::timeout("The mock timed out the request.".to_string())
 }
 
 /// Current wall-clock time in milliseconds since the Unix epoch, mirroring
@@ -463,17 +461,17 @@ fn current_time_millis() -> i64 {
 fn find_partition_reassignment(
     state: &State,
     partition: &TopicPartition,
-) -> Result<Option<PartitionReassignment>, KafkaError> {
+) -> Result<Option<PartitionReassignment>, Error> {
     let Some(reassignment) = state.reassignments.get(partition) else {
         return Ok(None);
     };
     let metadata = state.all_topics.get(partition.topic()).ok_or_else(|| {
-        KafkaError::illegal_state(format!(
+        Error::local_illegal_state(format!(
             "Internal MockAdminClient logic error: found reassignment for {partition}, but no TopicMetadata"
         ))
     })?;
     let info = metadata.partitions.get(partition.partition() as usize).ok_or_else(|| {
-        KafkaError::illegal_state(format!(
+        Error::local_illegal_state(format!(
             "Internal MockAdminClient logic error: found reassignment for {partition}, but no TopicPartitionInfo"
         ))
     })?;
@@ -495,7 +493,7 @@ fn find_partition_reassignment(
 
 fn config_from_new_topic(new_topic: &NewTopic) -> Config {
     let entries = new_topic
-        .config_map()
+        .configs()
         .map(|configs| {
             configs
                 .iter()
@@ -522,7 +520,7 @@ fn to_config_object(map: &BTreeMap<String, String>) -> Config {
 /// Returns an error for an unsupported op type (mirrors Java's
 /// `InvalidRequestException`). `Append` / `Subtract` are list-type operations
 /// that Java's mock does not implement, matching its `default` branch.
-fn apply_alter_ops(map: &mut BTreeMap<String, String>, ops: &[AlterConfigOp]) -> Result<(), KafkaError> {
+fn apply_alter_ops(map: &mut BTreeMap<String, String>, ops: &[AlterConfigOp]) -> Result<(), Error> {
     for op in ops {
         match op.op_type() {
             OpType::Set => {
@@ -535,7 +533,7 @@ fn apply_alter_ops(map: &mut BTreeMap<String, String>, ops: &[AlterConfigOp]) ->
                 map.remove(op.config_entry().name());
             },
             other => {
-                return Err(KafkaError::with_message(
+                return Err(Error::with_message(
                     Errors::InvalidRequest,
                     format!("Unsupported op type {other:?}"),
                 ));
@@ -548,15 +546,15 @@ fn apply_alter_ops(map: &mut BTreeMap<String, String>, ops: &[AlterConfigOp]) ->
 /// Reads the config description for a single resource.
 ///
 /// Corresponds to `MockAdminClient.getResourceDescription`.
-fn get_resource_description(state: &mut State, resource: &ConfigResource) -> Result<Config, KafkaError> {
+fn get_resource_description(state: &mut State, resource: &ConfigResource) -> Result<Config, Error> {
     match resource.resource_type() {
         ConfigResourceType::Broker => {
             let broker_id: usize = resource.name().parse().map_err(|_| {
-                KafkaError::with_message(Errors::InvalidRequest, format!("Broker {} not found.", resource.name()))
+                Error::with_message(Errors::InvalidRequest, format!("Broker {} not found.", resource.name()))
             })?;
             match state.broker_configs.get(broker_id) {
                 Some(config) => Ok(to_config_object(config)),
-                None => Err(KafkaError::with_message(
+                None => Err(Error::with_message(
                     Errors::InvalidRequest,
                     format!("Broker {} not found.", resource.name()),
                 )),
@@ -573,7 +571,7 @@ fn get_resource_description(state: &mut State, resource: &ConfigResource) -> Res
                     return Ok(to_config_object(&config));
                 }
             }
-            Err(KafkaError::with_message(
+            Err(Error::with_message(
                 Errors::UnknownTopicOrPartition,
                 format!("Resource {resource} not found."),
             ))
@@ -581,7 +579,7 @@ fn get_resource_description(state: &mut State, resource: &ConfigResource) -> Res
         ConfigResourceType::ClientMetrics => {
             let resource_name = resource.name();
             if resource_name.is_empty() {
-                return Err(KafkaError::with_message(Errors::InvalidRequest, "Empty resource name"));
+                return Err(Error::with_message(Errors::InvalidRequest, "Empty resource name"));
             }
             let config = state.client_metrics_configs.get(resource_name).cloned().unwrap_or_default();
             Ok(to_config_object(&config))
@@ -589,7 +587,7 @@ fn get_resource_description(state: &mut State, resource: &ConfigResource) -> Res
         ConfigResourceType::Group => {
             let resource_name = resource.name();
             if resource_name.is_empty() {
-                return Err(KafkaError::with_message(Errors::InvalidRequest, "Empty resource name"));
+                return Err(Error::with_message(Errors::InvalidRequest, "Empty resource name"));
             }
             let mut group_config = state.group_configs.get(resource_name).cloned().unwrap_or_default();
             // Overlay defaults for keys not already present (Java's `putIfAbsent`).
@@ -598,7 +596,7 @@ fn get_resource_description(state: &mut State, resource: &ConfigResource) -> Res
             }
             Ok(to_config_object(&group_config))
         },
-        _ => Err(KafkaError::unsupported_version("Not implemented yet")),
+        _ => Err(Error::unsupported_version("Not implemented yet")),
     }
 }
 
@@ -609,14 +607,14 @@ fn handle_incremental_resource_alteration(
     state: &mut State,
     resource: &ConfigResource,
     ops: &[AlterConfigOp],
-) -> Result<(), KafkaError> {
+) -> Result<(), Error> {
     match resource.resource_type() {
         ConfigResourceType::Broker => {
             let broker_id: usize = resource.name().parse().map_err(|_| {
-                KafkaError::with_message(Errors::InvalidRequest, format!("no such broker as {}", resource.name()))
+                Error::with_message(Errors::InvalidRequest, format!("no such broker as {}", resource.name()))
             })?;
             if broker_id >= state.broker_configs.len() {
-                return Err(KafkaError::with_message(
+                return Err(Error::with_message(
                     Errors::InvalidRequest,
                     format!("no such broker as {broker_id}"),
                 ));
@@ -628,10 +626,7 @@ fn handle_incremental_resource_alteration(
         },
         ConfigResourceType::Topic => {
             let metadata = state.all_topics.get_mut(resource.name()).ok_or_else(|| {
-                KafkaError::with_message(
-                    Errors::UnknownTopicOrPartition,
-                    format!("No such topic as {}", resource.name()),
-                )
+                Error::with_message(Errors::UnknownTopicOrPartition, format!("No such topic as {}", resource.name()))
             })?;
             let mut new_map = metadata.configs.clone().unwrap_or_default();
             apply_alter_ops(&mut new_map, ops)?;
@@ -641,7 +636,7 @@ fn handle_incremental_resource_alteration(
         ConfigResourceType::ClientMetrics => {
             let resource_name = resource.name();
             if resource_name.is_empty() {
-                return Err(KafkaError::with_message(Errors::InvalidRequest, "Empty resource name"));
+                return Err(Error::with_message(Errors::InvalidRequest, "Empty resource name"));
             }
             let mut new_map = state.client_metrics_configs.get(resource_name).cloned().unwrap_or_default();
             apply_alter_ops(&mut new_map, ops)?;
@@ -651,27 +646,27 @@ fn handle_incremental_resource_alteration(
         ConfigResourceType::Group => {
             let resource_name = resource.name();
             if resource_name.is_empty() {
-                return Err(KafkaError::with_message(Errors::InvalidRequest, "Empty resource name"));
+                return Err(Error::with_message(Errors::InvalidRequest, "Empty resource name"));
             }
             let mut new_map = state.group_configs.get(resource_name).cloned().unwrap_or_default();
             apply_alter_ops(&mut new_map, ops)?;
             state.group_configs.insert(resource_name.to_string(), new_map);
             Ok(())
         },
-        _ => Err(KafkaError::unsupported_version("Not implemented yet")),
+        _ => Err(Error::unsupported_version("Not implemented yet")),
     }
 }
 
 #[async_trait]
 impl Admin for MockAdminClient {
-    fn create_topics(&self, new_topics: &[NewTopic], _options: CreateTopicsOptions) -> CreateTopicsResult {
+    fn create_topics_with_options(&self, new_topics: &[NewTopic], _options: CreateTopicsOptions) -> CreateTopicsResult {
         let mut state = self.state.lock().unwrap();
         let mut result: HashMap<String, crate::common::KafkaFuture<TopicMetadataAndConfig>> = HashMap::new();
 
         if state.timeout_next_requests > 0 {
             for new_topic in new_topics {
                 let handle: KafkaFutureImpl<TopicMetadataAndConfig> = KafkaFutureImpl::new();
-                handle.complete_exceptionally(timeout_error());
+                handle.complete_with_error(timeout_error());
                 result.insert(new_topic.name().to_string(), handle.future());
             }
             state.timeout_next_requests -= 1;
@@ -683,7 +678,7 @@ impl Admin for MockAdminClient {
             let topic_name = new_topic.name().to_string();
 
             if state.all_topics.contains_key(&topic_name) {
-                handle.complete_exceptionally(KafkaError::with_message(
+                handle.complete_with_error(Error::with_message(
                     Errors::TopicAlreadyExists,
                     format!("Topic {topic_name} exists already."),
                 ));
@@ -696,7 +691,7 @@ impl Admin for MockAdminClient {
                 replication_factor = state.default_replication_factor;
             }
             if replication_factor as usize > state.brokers.len() {
-                handle.complete_exceptionally(KafkaError::with_message(
+                handle.complete_with_error(Error::with_message(
                     Errors::InvalidReplicationFactor,
                     format!(
                         "Replication factor: {} is larger than brokers: {}",
@@ -722,7 +717,7 @@ impl Admin for MockAdminClient {
             // situation as a per-topic error instead of a panic (CLAUDE.md
             // §10.2), so `create_topics` gets the same treatment here.
             if state.broker_log_dirs[leader.id() as usize].is_empty() {
-                handle.complete_exceptionally(KafkaError::illegal_argument(format!(
+                handle.complete_with_error(Error::local_illegal_argument(format!(
                     "Broker {} has no log directories.",
                     leader.id()
                 )));
@@ -731,7 +726,7 @@ impl Admin for MockAdminClient {
             }
             let partitions: Vec<TopicPartitionInfo> = (0..number_of_partitions)
                 .map(|i| {
-                    TopicPartitionInfo::new(
+                    TopicPartitionInfo::with_elr_last_known_elr(
                         i,
                         Some(leader.clone()),
                         replicas.clone(),
@@ -757,7 +752,7 @@ impl Admin for MockAdminClient {
                     is_internal: false,
                     partitions,
                     partition_log_dirs,
-                    configs: new_topic.config_map().cloned(),
+                    configs: new_topic.configs().cloned(),
                     marked_for_deletion: false,
                     fetches_remaining_until_visible: 0,
                 },
@@ -774,7 +769,7 @@ impl Admin for MockAdminClient {
         CreateTopicsResult::new(result)
     }
 
-    fn delete_topics(&self, topics: TopicCollection, _options: DeleteTopicsOptions) -> DeleteTopicsResult {
+    fn delete_topics_with_options(&self, topics: TopicCollection, _options: DeleteTopicsOptions) -> DeleteTopicsResult {
         let mut state = self.state.lock().unwrap();
         match topics {
             TopicCollection::TopicNames(names) => {
@@ -782,9 +777,9 @@ impl Admin for MockAdminClient {
                 for name in names {
                     let handle: KafkaFutureImpl<()> = KafkaFutureImpl::new();
                     if state.timeout_next_requests > 0 {
-                        handle.complete_exceptionally(timeout_error());
+                        handle.complete_with_error(timeout_error());
                     } else if state.all_topics.remove(&name).is_none() {
-                        handle.complete_exceptionally(KafkaError::with_message(
+                        handle.complete_with_error(Error::with_message(
                             Errors::UnknownTopicOrPartition,
                             format!("Topic {name} does not exist."),
                         ));
@@ -806,12 +801,12 @@ impl Admin for MockAdminClient {
                 for id in ids {
                     let handle: KafkaFutureImpl<()> = KafkaFutureImpl::new();
                     if state.timeout_next_requests > 0 {
-                        handle.complete_exceptionally(timeout_error());
+                        handle.complete_with_error(timeout_error());
                     } else {
                         let name = state.topic_names.remove(&id);
                         let removed = name.as_ref().is_some_and(|n| state.all_topics.remove(n).is_some());
                         if !removed {
-                            handle.complete_exceptionally(KafkaError::with_message(
+                            handle.complete_with_error(Error::with_message(
                                 Errors::UnknownTopicOrPartition,
                                 format!("Topic {id} does not exist."),
                             ));
@@ -832,12 +827,12 @@ impl Admin for MockAdminClient {
         }
     }
 
-    fn list_topics(&self, _options: ListTopicsOptions) -> ListTopicsResult {
+    fn list_topics_with_options(&self, _options: ListTopicsOptions) -> ListTopicsResult {
         let mut state = self.state.lock().unwrap();
         let handle: KafkaFutureImpl<HashMap<String, TopicListing>> = KafkaFutureImpl::new();
 
         if state.timeout_next_requests > 0 {
-            handle.complete_exceptionally(timeout_error());
+            handle.complete_with_error(timeout_error());
             state.timeout_next_requests -= 1;
             return ListTopicsResult::new(handle.future());
         }
@@ -857,7 +852,11 @@ impl Admin for MockAdminClient {
         ListTopicsResult::new(handle.future())
     }
 
-    fn describe_topics(&self, topics: TopicCollection, _options: DescribeTopicsOptions) -> DescribeTopicsResult {
+    fn describe_topics_with_topics_options(
+        &self,
+        topics: TopicCollection,
+        _options: DescribeTopicsOptions,
+    ) -> DescribeTopicsResult {
         let mut state = self.state.lock().unwrap();
         match topics {
             TopicCollection::TopicNames(names) => {
@@ -866,13 +865,13 @@ impl Admin for MockAdminClient {
                 for requested in &names {
                     let handle: KafkaFutureImpl<TopicDescription> = KafkaFutureImpl::new();
                     if timing_out {
-                        handle.complete_exceptionally(timeout_error());
+                        handle.complete_with_error(timeout_error());
                         result.insert(requested.clone(), handle.future());
                         continue;
                     }
                     match state.all_topics.get(requested) {
                         Some(metadata) if !metadata.marked_for_deletion => {
-                            handle.complete(TopicDescription::with_authorized_operations(
+                            handle.complete(TopicDescription::with_authorized_operations_topic_id(
                                 requested.clone(),
                                 metadata.is_internal,
                                 metadata.partitions.clone(),
@@ -883,7 +882,7 @@ impl Admin for MockAdminClient {
                             ));
                         },
                         _ => {
-                            handle.complete_exceptionally(KafkaError::with_message(
+                            handle.complete_with_error(Error::with_message(
                                 Errors::UnknownTopicOrPartition,
                                 format!("Topic {requested} not found."),
                             ));
@@ -902,7 +901,7 @@ impl Admin for MockAdminClient {
                 for requested in &ids {
                     let handle: KafkaFutureImpl<TopicDescription> = KafkaFutureImpl::new();
                     if timing_out {
-                        handle.complete_exceptionally(timeout_error());
+                        handle.complete_with_error(timeout_error());
                         result.insert(*requested, handle.future());
                         continue;
                     }
@@ -913,7 +912,7 @@ impl Admin for MockAdminClient {
                         .filter(|(_, m)| !m.marked_for_deletion);
                     match found {
                         Some((name, metadata)) => {
-                            handle.complete(TopicDescription::with_authorized_operations(
+                            handle.complete(TopicDescription::with_authorized_operations_topic_id(
                                 name,
                                 metadata.is_internal,
                                 metadata.partitions.clone(),
@@ -924,7 +923,7 @@ impl Admin for MockAdminClient {
                             ));
                         },
                         None => {
-                            handle.complete_exceptionally(KafkaError::with_message(
+                            handle.complete_with_error(Error::with_message(
                                 Errors::UnknownTopicId,
                                 format!("Topic id {requested} not found."),
                             ));
@@ -940,7 +939,7 @@ impl Admin for MockAdminClient {
         }
     }
 
-    fn create_partitions(
+    fn create_partitions_with_options(
         &self,
         new_partitions: &HashMap<String, NewPartitions>,
         _options: CreatePartitionsOptions,
@@ -948,18 +947,18 @@ impl Admin for MockAdminClient {
         // Java's `MockAdminClient.createPartitions` (MockAdminClient.java:626-628)
         // throws `UnsupportedOperationException("Not implemented yet")`. Per
         // `.claude/rules/admin-client.md` §9 the Rust mock returns an
-        // "unsupported" `KafkaError` per key instead of panicking (faithful
+        // "unsupported" `Error` per key instead of panicking (faithful
         // translation of the Java behavior).
         let mut result = HashMap::new();
         for topic in new_partitions.keys() {
             let handle: KafkaFutureImpl<()> = KafkaFutureImpl::new();
-            handle.complete_exceptionally(KafkaError::unsupported_version("Not implemented yet"));
+            handle.complete_with_error(Error::unsupported_version("Not implemented yet"));
             result.insert(topic.clone(), handle.future());
         }
         CreatePartitionsResult::new(result)
     }
 
-    fn delete_records(
+    fn delete_records_with_options(
         &self,
         records_to_delete: &HashMap<TopicPartition, RecordsToDelete>,
         _options: DeleteRecordsOptions,
@@ -968,18 +967,18 @@ impl Admin for MockAdminClient {
         // returns an empty result for an empty request and otherwise throws
         // `UnsupportedOperationException("Not implemented yet")`. Per
         // `.claude/rules/admin-client.md` §9 the non-empty case returns an
-        // "unsupported" `KafkaError` per key instead of panicking (faithful
+        // "unsupported" `Error` per key instead of panicking (faithful
         // translation of the Java behavior).
         let mut result = HashMap::new();
         for topic_partition in records_to_delete.keys() {
             let handle: KafkaFutureImpl<DeletedRecords> = KafkaFutureImpl::new();
-            handle.complete_exceptionally(KafkaError::unsupported_version("Not implemented yet"));
+            handle.complete_with_error(Error::unsupported_version("Not implemented yet"));
             result.insert(topic_partition.clone(), handle.future());
         }
         DeleteRecordsResult::new(result)
     }
 
-    fn describe_producers(
+    fn describe_producers_with_options(
         &self,
         partitions: &[TopicPartition],
         _options: DescribeProducersOptions,
@@ -987,18 +986,18 @@ impl Admin for MockAdminClient {
         // Java's `MockAdminClient.describeProducers` (MockAdminClient.java:1368-1370)
         // throws `UnsupportedOperationException("Not implemented yet")`. Per
         // `.claude/rules/admin-client.md` §9 the Rust mock returns an
-        // "unsupported" `KafkaError` per key instead of panicking (faithful
+        // "unsupported" `Error` per key instead of panicking (faithful
         // translation of the Java behavior).
         let mut result = HashMap::new();
         for topic_partition in partitions {
             let handle: KafkaFutureImpl<PartitionProducerState> = KafkaFutureImpl::new();
-            handle.complete_exceptionally(KafkaError::unsupported_version("Not implemented yet"));
+            handle.complete_with_error(Error::unsupported_version("Not implemented yet"));
             result.insert(topic_partition.clone(), handle.future());
         }
         DescribeProducersResult::new(result)
     }
 
-    fn abort_transaction(
+    fn abort_transaction_with_options(
         &self,
         spec: AbortTransactionSpec,
         _options: AbortTransactionOptions,
@@ -1006,14 +1005,14 @@ impl Admin for MockAdminClient {
         // Java's `MockAdminClient.abortTransaction` (MockAdminClient.java:1378-1381)
         // throws `UnsupportedOperationException("Not implemented yet")`. Per
         // `.claude/rules/admin-client.md` §9 the Rust mock returns an
-        // "unsupported" `KafkaError` per key instead of panicking (faithful
+        // "unsupported" `Error` per key instead of panicking (faithful
         // translation of the Java behavior).
         let handle: KafkaFutureImpl<()> = KafkaFutureImpl::new();
-        handle.complete_exceptionally(KafkaError::unsupported_version("Not implemented yet"));
+        handle.complete_with_error(Error::unsupported_version("Not implemented yet"));
         AbortTransactionResult::new(HashMap::from([(spec.topic_partition().clone(), handle.future())]))
     }
 
-    fn describe_transactions(
+    fn describe_transactions_with_options(
         &self,
         transactional_ids: &[String],
         _options: DescribeTransactionsOptions,
@@ -1021,43 +1020,47 @@ impl Admin for MockAdminClient {
         // Java's `MockAdminClient.describeTransactions` (MockAdminClient.java:1373-1375)
         // throws `UnsupportedOperationException("Not implemented yet")`. Per
         // `.claude/rules/admin-client.md` §9 the Rust mock returns an
-        // "unsupported" `KafkaError` per key instead of panicking (faithful
+        // "unsupported" `Error` per key instead of panicking (faithful
         // translation of the Java behavior).
         let mut result = HashMap::new();
         for id in transactional_ids {
             let handle: KafkaFutureImpl<TransactionDescription> = KafkaFutureImpl::new();
-            handle.complete_exceptionally(KafkaError::unsupported_version("Not implemented yet"));
+            handle.complete_with_error(Error::unsupported_version("Not implemented yet"));
             result.insert(id.clone(), handle.future());
         }
         DescribeTransactionsResult::new(result)
     }
 
-    fn fence_producers(&self, transactional_ids: &[String], _options: FenceProducersOptions) -> FenceProducersResult {
+    fn fence_producers_with_options(
+        &self,
+        transactional_ids: &[String],
+        _options: FenceProducersOptions,
+    ) -> FenceProducersResult {
         // Java's `MockAdminClient.fenceProducers` (MockAdminClient.java:1393-1395)
         // throws `UnsupportedOperationException("Not implemented yet")`. Per
         // `.claude/rules/admin-client.md` §9 the Rust mock returns an
-        // "unsupported" `KafkaError` per key instead of panicking (faithful
+        // "unsupported" `Error` per key instead of panicking (faithful
         // translation of the Java behavior).
         let mut result = HashMap::new();
         for id in transactional_ids {
             let handle: KafkaFutureImpl<ProducerIdAndEpoch> = KafkaFutureImpl::new();
-            handle.complete_exceptionally(KafkaError::unsupported_version("Not implemented yet"));
+            handle.complete_with_error(Error::unsupported_version("Not implemented yet"));
             result.insert(id.clone(), handle.future());
         }
         FenceProducersResult::new(result)
     }
 
-    fn list_transactions(&self, _options: ListTransactionsOptions) -> ListTransactionsResult {
+    fn list_transactions_with_options(&self, _options: ListTransactionsOptions) -> ListTransactionsResult {
         // Java's `MockAdminClient.listTransactions` (MockAdminClient.java:1388-1390)
         // throws `UnsupportedOperationException("Not implemented yet")`. Per
         // `.claude/rules/admin-client.md` §9 the Rust mock completes the
         // top-level future exceptionally instead of panicking.
         let handle: KafkaFutureImpl<HashMap<i32, KafkaFuture<Vec<TransactionListing>>>> = KafkaFutureImpl::new();
-        handle.complete_exceptionally(KafkaError::unsupported_version("Not implemented yet"));
+        handle.complete_with_error(Error::unsupported_version("Not implemented yet"));
         ListTransactionsResult::new(handle.future())
     }
 
-    fn force_terminate_transaction(
+    fn force_terminate_transaction_with_options(
         &self,
         transactional_id: &str,
         options: TerminateTransactionOptions,
@@ -1072,11 +1075,11 @@ impl Admin for MockAdminClient {
         // "Not implemented yet" — so the resulting future carries the same
         // "unsupported" error Java's mock throws, by a different route.
         let mut fence_options = FenceProducersOptions::new();
-        if options.timeout().is_some() {
-            fence_options = fence_options.timeout_ms(options.timeout());
+        if options.timeout_ms().is_some() {
+            fence_options = fence_options.set_timeout_ms(options.timeout_ms());
         }
         let ids = vec![transactional_id.to_string()];
-        let fence_result = self.fence_producers(&ids, fence_options);
+        let fence_result = self.fence_producers_with_options(&ids, fence_options);
         let future = fence_result
             .fenced_producers()
             .get(transactional_id)
@@ -1085,7 +1088,7 @@ impl Admin for MockAdminClient {
         TerminateTransactionResult::new(future)
     }
 
-    fn describe_cluster(&self, _options: DescribeClusterOptions) -> DescribeClusterResult {
+    fn describe_cluster_with_options(&self, _options: DescribeClusterOptions) -> DescribeClusterResult {
         let mut state = self.state.lock().unwrap();
         let nodes: KafkaFutureImpl<Vec<Node>> = KafkaFutureImpl::new();
         let controller: KafkaFutureImpl<Option<Node>> = KafkaFutureImpl::new();
@@ -1094,10 +1097,10 @@ impl Admin for MockAdminClient {
 
         if state.timeout_next_requests > 0 {
             let err = timeout_error();
-            nodes.complete_exceptionally(err.clone());
-            controller.complete_exceptionally(err.clone());
-            cluster_id.complete_exceptionally(err.clone());
-            authorized_operations.complete_exceptionally(err);
+            nodes.complete_with_error(err.clone());
+            controller.complete_with_error(err.clone());
+            cluster_id.complete_with_error(err.clone());
+            authorized_operations.complete_with_error(err);
             state.timeout_next_requests -= 1;
         } else {
             nodes.complete(state.brokers.clone());
@@ -1114,7 +1117,7 @@ impl Admin for MockAdminClient {
         )
     }
 
-    fn describe_configs(
+    fn describe_configs_with_options(
         &self,
         config_resources: &[ConfigResource],
         _options: DescribeConfigsOptions,
@@ -1125,7 +1128,7 @@ impl Admin for MockAdminClient {
             let mut result = HashMap::new();
             for resource in config_resources {
                 let handle: KafkaFutureImpl<Config> = KafkaFutureImpl::new();
-                handle.complete_exceptionally(timeout_error());
+                handle.complete_with_error(timeout_error());
                 result.insert(resource.clone(), handle.future());
             }
             state.timeout_next_requests -= 1;
@@ -1137,14 +1140,14 @@ impl Admin for MockAdminClient {
             let handle: KafkaFutureImpl<Config> = KafkaFutureImpl::new();
             match get_resource_description(&mut state, resource) {
                 Ok(config) => handle.complete(config),
-                Err(e) => handle.complete_exceptionally(e),
+                Err(e) => handle.complete_with_error(e),
             };
             result.insert(resource.clone(), handle.future());
         }
         DescribeConfigsResult::new(result)
     }
 
-    fn incremental_alter_configs(
+    fn incremental_alter_configs_with_options(
         &self,
         configs: &HashMap<ConfigResource, Vec<AlterConfigOp>>,
         _options: AlterConfigsOptions,
@@ -1155,14 +1158,14 @@ impl Admin for MockAdminClient {
             let handle: KafkaFutureImpl<()> = KafkaFutureImpl::new();
             match handle_incremental_resource_alteration(&mut state, resource, ops) {
                 Ok(()) => handle.complete(()),
-                Err(e) => handle.complete_exceptionally(e),
+                Err(e) => handle.complete_with_error(e),
             };
             result.insert(resource.clone(), handle.future());
         }
         AlterConfigsResult::new(result)
     }
 
-    fn list_config_resources(
+    fn list_config_resources_with_options(
         &self,
         config_resource_types: &HashSet<ConfigResourceType>,
         _options: ListConfigResourcesOptions,
@@ -1203,7 +1206,7 @@ impl Admin for MockAdminClient {
     }
 
     #[allow(deprecated)]
-    fn list_client_metrics_resources(
+    fn list_client_metrics_resources_with_options(
         &self,
         _options: ListClientMetricsResourcesOptions,
     ) -> ListClientMetricsResourcesResult {
@@ -1221,7 +1224,11 @@ impl Admin for MockAdminClient {
     }
 
     /// Mirrors `MockAdminClient.describeLogDirs`.
-    fn describe_log_dirs(&self, brokers: &[i32], _options: DescribeLogDirsOptions) -> DescribeLogDirsResult {
+    fn describe_log_dirs_with_options(
+        &self,
+        brokers: &[i32],
+        _options: DescribeLogDirsOptions,
+    ) -> DescribeLogDirsResult {
         let state = self.state.lock().unwrap();
         let mut unwrapped: HashMap<i32, HashMap<String, LogDirDescription>> = HashMap::new();
         for &broker in brokers {
@@ -1256,11 +1263,11 @@ impl Admin for MockAdminClient {
                     );
                     map.insert(
                         log_dir.clone(),
-                        LogDirDescription::with_volume_bytes(
+                        LogDirDescription::with_total_bytes_usable_bytes(
                             existing.error().cloned(),
                             replica_infos,
-                            existing.total_bytes().unwrap_or(UNKNOWN_VOLUME_BYTES),
-                            existing.usable_bytes().unwrap_or(UNKNOWN_VOLUME_BYTES),
+                            existing.total_bytes().unwrap_or(DescribeLogDirsResponse::UNKNOWN_VOLUME_BYTES),
+                            existing.usable_bytes().unwrap_or(DescribeLogDirsResponse::UNKNOWN_VOLUME_BYTES),
                         ),
                     );
                 }
@@ -1279,7 +1286,7 @@ impl Admin for MockAdminClient {
     }
 
     /// Mirrors `MockAdminClient.alterReplicaLogDirs`.
-    fn alter_replica_log_dirs(
+    fn alter_replica_log_dirs_with_options(
         &self,
         replica_assignment: &HashMap<TopicPartitionReplica, String>,
         _options: AlterReplicaLogDirsOptions,
@@ -1292,14 +1299,14 @@ impl Admin for MockAdminClient {
 
             let dirs = state.broker_log_dirs.get(replica.broker_id() as usize);
             if dirs.is_none() {
-                handle.complete_exceptionally(KafkaError::with_message(
+                handle.complete_with_error(Error::with_message(
                     Errors::ReplicaNotAvailable,
                     format!("Can't find {replica}"),
                 ));
                 continue;
             }
             if !dirs.unwrap().contains(new_log_dir) {
-                handle.complete_exceptionally(KafkaError::with_message(
+                handle.complete_with_error(Error::with_message(
                     Errors::KafkaStorageError,
                     format!("Log directory {new_log_dir} is offline"),
                 ));
@@ -1331,7 +1338,7 @@ impl Admin for MockAdminClient {
                     handle.complete(());
                 },
                 None => {
-                    handle.complete_exceptionally(KafkaError::with_message(
+                    handle.complete_with_error(Error::with_message(
                         Errors::ReplicaNotAvailable,
                         format!("Can't find {replica}"),
                     ));
@@ -1342,7 +1349,7 @@ impl Admin for MockAdminClient {
     }
 
     /// Mirrors `MockAdminClient.describeReplicaLogDirs`.
-    fn describe_replica_log_dirs(
+    fn describe_replica_log_dirs_with_options(
         &self,
         replicas: &[TopicPartitionReplica],
         _options: DescribeReplicaLogDirsOptions,
@@ -1386,20 +1393,20 @@ impl Admin for MockAdminClient {
     /// Mirrors `MockAdminClient.electLeaders`, which throws
     /// `UnsupportedOperationException("Not implemented yet")`
     /// (`MockAdminClient.java:797`). Translated to a future failed with an
-    /// "unsupported" `KafkaError` (CLAUDE.md §10.1: no panic in public API).
-    fn elect_leaders(
+    /// "unsupported" `Error` (CLAUDE.md §10.1: no panic in public API).
+    fn elect_leaders_with_options(
         &self,
         _election_type: ElectionType,
         _partitions: Option<HashSet<TopicPartition>>,
         _options: ElectLeadersOptions,
     ) -> ElectLeadersResult {
-        let handle: KafkaFutureImpl<HashMap<TopicPartition, Option<KafkaError>>> = KafkaFutureImpl::new();
-        handle.complete_exceptionally(KafkaError::unsupported_version("Not implemented yet"));
+        let handle: KafkaFutureImpl<HashMap<TopicPartition, Option<Error>>> = KafkaFutureImpl::new();
+        handle.complete_with_error(Error::unsupported_version("Not implemented yet"));
         ElectLeadersResult::new(handle.future())
     }
 
     /// Mirrors `MockAdminClient.alterPartitionReassignments`.
-    fn alter_partition_reassignments(
+    fn alter_partition_reassignments_with_options(
         &self,
         reassignments: &HashMap<TopicPartition, Option<NewPartitionReassignment>>,
         _options: AlterPartitionReassignmentsOptions,
@@ -1412,7 +1419,7 @@ impl Admin for MockAdminClient {
             let out_of_range = partition.partition() < 0
                 || topic_metadata.is_none_or(|m| (m.partitions.len() as i32) <= partition.partition());
             if out_of_range {
-                future.complete_exceptionally(KafkaError::new(Errors::UnknownTopicOrPartition));
+                future.complete_with_error(Error::new(Errors::UnknownTopicOrPartition));
             } else if let Some(reassignment) = new_reassignment {
                 state.reassignments.insert(partition.clone(), reassignment.clone());
                 future.complete(());
@@ -1433,7 +1440,7 @@ impl Admin for MockAdminClient {
     /// representable in this signature, so the result's single future is failed
     /// instead — the same accommodation `list_offsets` makes for a
     /// `TimestampSpec` (CLAUDE.md §10.1).
-    fn list_partition_reassignments(
+    fn list_partition_reassignments_with_partitions_options(
         &self,
         partitions: Option<HashSet<TopicPartition>>,
         _options: ListPartitionReassignmentsOptions,
@@ -1452,7 +1459,7 @@ impl Admin for MockAdminClient {
                 },
                 Ok(None) => {},
                 Err(e) => {
-                    handle.complete_exceptionally(e);
+                    handle.complete_with_error(e);
                     return ListPartitionReassignmentsResult::new(handle.future());
                 },
             }
@@ -1466,8 +1473,8 @@ impl Admin for MockAdminClient {
     /// Java throws `UnsupportedOperationException` for a `TimestampSpec`
     /// (`MockAdminClient.java:1230`); since a synchronous throw is not
     /// representable in this signature, the affected partition's future is
-    /// failed with an "unsupported" `KafkaError` (CLAUDE.md §10.1).
-    fn list_offsets(
+    /// failed with an "unsupported" `Error` (CLAUDE.md §10.1).
+    fn list_offsets_with_options(
         &self,
         topic_partition_offsets: &HashMap<TopicPartition, OffsetSpec>,
         _options: ListOffsetsOptions,
@@ -1478,7 +1485,7 @@ impl Admin for MockAdminClient {
             let future: KafkaFutureImpl<ListOffsetsResultInfo> = KafkaFutureImpl::new();
             match spec {
                 OffsetSpec::Timestamp(_) => {
-                    future.complete_exceptionally(KafkaError::unsupported_version("Not implemented yet"));
+                    future.complete_with_error(Error::unsupported_version("Not implemented yet"));
                 },
                 OffsetSpec::Earliest => {
                     let offset = state.beginning_offsets.get(tp).copied().unwrap_or(-1);
@@ -1494,43 +1501,43 @@ impl Admin for MockAdminClient {
         ListOffsetsResult::new(futures)
     }
 
-    fn list_groups(&self, _options: ListGroupsOptions) -> ListGroupsResult {
+    fn list_groups_with_options(&self, _options: ListGroupsOptions) -> ListGroupsResult {
         // Mirrors Java's `MockAdminClient.listGroups`: one CONSUMER/STABLE
         // GroupListing per seeded group config.
         let state = self.state.lock().unwrap();
-        let listings: Vec<Result<GroupListing, KafkaError>> = state
+        let listings: Vec<Result<GroupListing, Error>> = state
             .group_configs
             .keys()
             .map(|g| {
                 Ok(GroupListing::new(
                     g.clone(),
                     Some(GroupType::Consumer),
-                    PROTOCOL_TYPE,
+                    ConsumerProtocol::PROTOCOL_TYPE,
                     Some(GroupState::Stable),
                 ))
             })
             .collect();
-        let handle: KafkaFutureImpl<Vec<Result<GroupListing, KafkaError>>> = KafkaFutureImpl::new();
+        let handle: KafkaFutureImpl<Vec<Result<GroupListing, Error>>> = KafkaFutureImpl::new();
         handle.complete(listings);
         ListGroupsResult::new(handle.future())
     }
 
     #[allow(deprecated)]
-    fn list_consumer_groups(&self, _options: ListConsumerGroupsOptions) -> ListConsumerGroupsResult {
+    fn list_consumer_groups_with_options(&self, _options: ListConsumerGroupsOptions) -> ListConsumerGroupsResult {
         // Mirrors Java's `MockAdminClient.listConsumerGroups`: a simple
         // ConsumerGroupListing per seeded group config.
         let state = self.state.lock().unwrap();
-        let listings: Vec<Result<ConsumerGroupListing, KafkaError>> = state
+        let listings: Vec<Result<ConsumerGroupListing, Error>> = state
             .group_configs
             .keys()
-            .map(|g| Ok(ConsumerGroupListing::new(g.clone(), None, None, false)))
+            .map(|g| Ok(ConsumerGroupListing::with_group_state_group_type(g.clone(), None, None, false)))
             .collect();
-        let handle: KafkaFutureImpl<Vec<Result<ConsumerGroupListing, KafkaError>>> = KafkaFutureImpl::new();
+        let handle: KafkaFutureImpl<Vec<Result<ConsumerGroupListing, Error>>> = KafkaFutureImpl::new();
         handle.complete(listings);
         ListConsumerGroupsResult::new(handle.future())
     }
 
-    fn describe_consumer_groups(
+    fn describe_consumer_groups_with_options(
         &self,
         group_ids: &[String],
         _options: DescribeConsumerGroupsOptions,
@@ -1542,13 +1549,13 @@ impl Admin for MockAdminClient {
         let mut futures = HashMap::new();
         for group_id in group_ids {
             let handle: KafkaFutureImpl<ConsumerGroupDescription> = KafkaFutureImpl::new();
-            handle.complete_exceptionally(KafkaError::unsupported_version("Not implemented yet"));
+            handle.complete_with_error(Error::unsupported_version("Not implemented yet"));
             futures.insert(group_id.clone(), handle.future());
         }
         DescribeConsumerGroupsResult::new(futures)
     }
 
-    fn describe_classic_groups(
+    fn describe_classic_groups_with_options(
         &self,
         group_ids: &[String],
         _options: DescribeClassicGroupsOptions,
@@ -1560,13 +1567,13 @@ impl Admin for MockAdminClient {
         let mut futures = HashMap::new();
         for group_id in group_ids {
             let handle: KafkaFutureImpl<ClassicGroupDescription> = KafkaFutureImpl::new();
-            handle.complete_exceptionally(KafkaError::unsupported_version("Not implemented yet"));
+            handle.complete_with_error(Error::unsupported_version("Not implemented yet"));
             futures.insert(group_id.clone(), handle.future());
         }
         DescribeClassicGroupsResult::new(futures)
     }
 
-    fn list_consumer_group_offsets(
+    fn list_consumer_group_offsets_with_group_specs_options(
         &self,
         group_specs: &HashMap<String, ListConsumerGroupOffsetsSpec>,
         _options: ListConsumerGroupOffsetsOptions,
@@ -1580,7 +1587,7 @@ impl Admin for MockAdminClient {
                 .keys()
                 .map(|group| {
                     let handle: KafkaFutureImpl<GroupOffsets> = KafkaFutureImpl::new();
-                    handle.complete_exceptionally(KafkaError::unsupported_version("Not implemented yet"));
+                    handle.complete_with_error(Error::unsupported_version("Not implemented yet"));
                     (group.clone(), handle.future())
                 })
                 .collect();
@@ -1589,7 +1596,7 @@ impl Admin for MockAdminClient {
 
         let (group, spec) = group_specs.iter().next().expect("exactly one group");
         // `None` topic partitions (or an empty list) means "all partitions".
-        let include_all = spec.get_topic_partitions().is_none_or(<[_]>::is_empty);
+        let include_all = spec.topic_partitions().is_none_or(<[_]>::is_empty);
         let state = self.state.lock().unwrap();
         // Java builds each row with `new OffsetAndMetadata(entry.getValue())`
         // inline in the collect (MockAdminClient.java:756), and that constructor
@@ -1604,10 +1611,10 @@ impl Admin for MockAdminClient {
         // calling thread — and abort the process. So the error is surfaced on the
         // group's future, which the trait signature can carry
         // (CLAUDE.md §10.1/§10.2, admin-client.md §9).
-        let offsets: Result<GroupOffsets, KafkaError> = state
+        let offsets: Result<GroupOffsets, Error> = state
             .committed_offsets
             .iter()
-            .filter(|(tp, _)| include_all || spec.get_topic_partitions().is_some_and(|tps| tps.contains(tp)))
+            .filter(|(tp, _)| include_all || spec.topic_partitions().is_some_and(|tps| tps.contains(tp)))
             .map(|(tp, &offset)| OffsetAndMetadata::new(offset).map(|committed| (tp.clone(), Some(committed))))
             .collect();
         drop(state);
@@ -1618,13 +1625,13 @@ impl Admin for MockAdminClient {
                 handle.complete(offsets);
             },
             Err(error) => {
-                handle.complete_exceptionally(error);
+                handle.complete_with_error(error);
             },
         }
         ListConsumerGroupOffsetsResult::new(HashMap::from([(group.clone(), handle.future())]))
     }
 
-    fn alter_consumer_group_offsets(
+    fn alter_consumer_group_offsets_with_options(
         &self,
         _group_id: &str,
         _offsets: &HashMap<TopicPartition, OffsetAndMetadata>,
@@ -1636,11 +1643,11 @@ impl Admin for MockAdminClient {
         // admin-client.md §9 the Rust mock surfaces that as an exceptional
         // future rather than a panic.
         let handle: KafkaFutureImpl<HashMap<TopicPartition, Errors>> = KafkaFutureImpl::new();
-        handle.complete_exceptionally(KafkaError::unsupported_version("Not implement yet"));
+        handle.complete_with_error(Error::unsupported_version("Not implement yet"));
         AlterConsumerGroupOffsetsResult::new(handle.future())
     }
 
-    fn delete_consumer_group_offsets(
+    fn delete_consumer_group_offsets_with_options(
         &self,
         _group_id: &str,
         partitions: &HashSet<TopicPartition>,
@@ -1651,11 +1658,11 @@ impl Admin for MockAdminClient {
         // (MockAdminClient.java:783). Per admin-client.md §9 the Rust mock
         // surfaces that as an exceptional future rather than a panic.
         let handle: KafkaFutureImpl<HashMap<TopicPartition, Errors>> = KafkaFutureImpl::new();
-        handle.complete_exceptionally(KafkaError::unsupported_version("Not implemented yet"));
+        handle.complete_with_error(Error::unsupported_version("Not implemented yet"));
         DeleteConsumerGroupOffsetsResult::new(handle.future(), partitions.clone())
     }
 
-    fn delete_consumer_groups(
+    fn delete_consumer_groups_with_options(
         &self,
         group_ids: &[String],
         _options: DeleteConsumerGroupsOptions,
@@ -1667,13 +1674,13 @@ impl Admin for MockAdminClient {
         let mut futures = HashMap::new();
         for group_id in group_ids {
             let handle: KafkaFutureImpl<()> = KafkaFutureImpl::new();
-            handle.complete_exceptionally(KafkaError::unsupported_version("Not implemented yet"));
+            handle.complete_with_error(Error::unsupported_version("Not implemented yet"));
             futures.insert(group_id.clone(), handle.future());
         }
         DeleteConsumerGroupsResult::new(futures)
     }
 
-    fn remove_members_from_consumer_group(
+    fn remove_members_from_consumer_group_with_options(
         &self,
         _group_id: &str,
         options: RemoveMembersFromConsumerGroupOptions,
@@ -1683,11 +1690,11 @@ impl Admin for MockAdminClient {
         // (MockAdminClient.java:801-803). Per admin-client.md §9 the Rust mock
         // surfaces that as an exceptional future rather than a panic.
         let handle: KafkaFutureImpl<HashMap<MemberIdentity, Errors>> = KafkaFutureImpl::new();
-        handle.complete_exceptionally(KafkaError::unsupported_version("Not implemented yet"));
+        handle.complete_with_error(Error::unsupported_version("Not implemented yet"));
         RemoveMembersFromConsumerGroupResult::new(handle.future(), options.members().clone())
     }
 
-    fn create_acls(&self, acls: &[AclBinding], _options: CreateAclsOptions) -> CreateAclsResult {
+    fn create_acls_with_options(&self, acls: &[AclBinding], _options: CreateAclsOptions) -> CreateAclsResult {
         // Java's `MockAdminClient.createAcls` throws
         // `UnsupportedOperationException("Not implemented yet")`
         // (MockAdminClient.java:806-808). Per admin-client.md §9 the Rust mock
@@ -1696,23 +1703,27 @@ impl Admin for MockAdminClient {
         let mut futures = HashMap::new();
         for acl in acls {
             let handle: KafkaFutureImpl<()> = KafkaFutureImpl::new();
-            handle.complete_exceptionally(KafkaError::unsupported_version("Not implemented yet"));
+            handle.complete_with_error(Error::unsupported_version("Not implemented yet"));
             futures.insert(acl.clone(), handle.future());
         }
         CreateAclsResult::new(futures)
     }
 
-    fn describe_acls(&self, _filter: &AclBindingFilter, _options: DescribeAclsOptions) -> DescribeAclsResult {
+    fn describe_acls_with_options(
+        &self,
+        _filter: &AclBindingFilter,
+        _options: DescribeAclsOptions,
+    ) -> DescribeAclsResult {
         // Java's `MockAdminClient.describeAcls` throws
         // `UnsupportedOperationException("Not implemented yet")`
         // (MockAdminClient.java:811-813). Per admin-client.md §9 the Rust mock
         // surfaces that as an exceptional future rather than a panic.
         let handle: KafkaFutureImpl<Vec<AclBinding>> = KafkaFutureImpl::new();
-        handle.complete_exceptionally(KafkaError::unsupported_version("Not implemented yet"));
+        handle.complete_with_error(Error::unsupported_version("Not implemented yet"));
         DescribeAclsResult::new(handle.future())
     }
 
-    fn delete_acls(&self, filters: &[AclBindingFilter], _options: DeleteAclsOptions) -> DeleteAclsResult {
+    fn delete_acls_with_options(&self, filters: &[AclBindingFilter], _options: DeleteAclsOptions) -> DeleteAclsResult {
         // Java's `MockAdminClient.deleteAcls` throws
         // `UnsupportedOperationException("Not implemented yet")`
         // (MockAdminClient.java:816-818). Per admin-client.md §9 the Rust mock
@@ -1720,13 +1731,13 @@ impl Admin for MockAdminClient {
         let mut futures = HashMap::new();
         for filter in filters {
             let handle: KafkaFutureImpl<FilterResults> = KafkaFutureImpl::new();
-            handle.complete_exceptionally(KafkaError::unsupported_version("Not implemented yet"));
+            handle.complete_with_error(Error::unsupported_version("Not implemented yet"));
             futures.insert(filter.clone(), handle.future());
         }
         DeleteAclsResult::new(futures)
     }
 
-    fn describe_client_quotas(
+    fn describe_client_quotas_with_options(
         &self,
         _filter: &ClientQuotaFilter,
         _options: DescribeClientQuotasOptions,
@@ -1736,11 +1747,11 @@ impl Admin for MockAdminClient {
         // (MockAdminClient.java:1243-1245). Per admin-client.md §9 the Rust mock
         // surfaces that as an exceptional future rather than a panic.
         let handle: KafkaFutureImpl<HashMap<ClientQuotaEntity, HashMap<String, f64>>> = KafkaFutureImpl::new();
-        handle.complete_exceptionally(KafkaError::unsupported_version("Not implement yet"));
+        handle.complete_with_error(Error::unsupported_version("Not implement yet"));
         DescribeClientQuotasResult::new(handle.future())
     }
 
-    fn alter_client_quotas(
+    fn alter_client_quotas_with_options(
         &self,
         entries: &[ClientQuotaAlteration],
         _options: AlterClientQuotasOptions,
@@ -1752,13 +1763,13 @@ impl Admin for MockAdminClient {
         let mut futures = HashMap::new();
         for entry in entries {
             let handle: KafkaFutureImpl<()> = KafkaFutureImpl::new();
-            handle.complete_exceptionally(KafkaError::unsupported_version("Not implement yet"));
+            handle.complete_with_error(Error::unsupported_version("Not implement yet"));
             futures.insert(entry.entity().clone(), handle.future());
         }
         AlterClientQuotasResult::new(futures)
     }
 
-    fn describe_user_scram_credentials(
+    fn describe_user_scram_credentials_with_users_options(
         &self,
         _users: &[String],
         _options: DescribeUserScramCredentialsOptions,
@@ -1768,11 +1779,11 @@ impl Admin for MockAdminClient {
         // (MockAdminClient.java:1251-1254). Per admin-client.md §9 the Rust mock
         // surfaces that as an exceptional future rather than a panic.
         let handle: KafkaFutureImpl<DescribeUserScramCredentialsResponseData> = KafkaFutureImpl::new();
-        handle.complete_exceptionally(KafkaError::unsupported_version("Not implemented yet"));
+        handle.complete_with_error(Error::unsupported_version("Not implemented yet"));
         DescribeUserScramCredentialsResult::new(handle.future())
     }
 
-    fn alter_user_scram_credentials(
+    fn alter_user_scram_credentials_with_options(
         &self,
         alterations: &[UserScramCredentialAlteration],
         _options: AlterUserScramCredentialsOptions,
@@ -1784,20 +1795,23 @@ impl Admin for MockAdminClient {
         let mut futures = HashMap::new();
         for alteration in alterations {
             let handle: KafkaFutureImpl<()> = KafkaFutureImpl::new();
-            handle.complete_exceptionally(KafkaError::unsupported_version("Not implemented yet"));
+            handle.complete_with_error(Error::unsupported_version("Not implemented yet"));
             futures.insert(alteration.user().to_string(), handle.future());
         }
         AlterUserScramCredentialsResult::new(futures)
     }
 
-    fn create_delegation_token(&self, options: CreateDelegationTokenOptions) -> CreateDelegationTokenResult {
+    fn create_delegation_token_with_options(
+        &self,
+        options: CreateDelegationTokenOptions,
+    ) -> CreateDelegationTokenResult {
         // Mirrors MockAdminClient.createDelegationToken: reject any non-User
         // renewer, otherwise mint a token whose id doubles as its HMAC and
         // whose owner is the first renewer, and store it in `all_tokens`.
         let handle: KafkaFutureImpl<DelegationToken> = KafkaFutureImpl::new();
-        for renewer in options.get_renewers() {
+        for renewer in options.renewers() {
             if renewer.principal_type() != KafkaPrincipal::USER_TYPE {
-                handle.complete_exceptionally(KafkaError::with_message(Errors::InvalidPrincipalType, ""));
+                handle.complete_with_error(Error::with_message(Errors::InvalidPrincipalType, ""));
                 return CreateDelegationTokenResult::new(handle.future());
             }
         }
@@ -1809,8 +1823,8 @@ impl Admin for MockAdminClient {
         // inline on the calling thread, so it would unwind across an
         // `extern "C"` boundary and abort the process. Per CLAUDE.md §10.1 the
         // future is completed exceptionally instead.
-        let Some(owner) = options.get_renewers().first().cloned() else {
-            handle.complete_exceptionally(KafkaError::illegal_argument(
+        let Some(owner) = options.renewers().first().cloned() else {
+            handle.complete_with_error(Error::local_illegal_argument(
                 "createDelegationToken requires at least one renewer: MockAdminClient makes the first renewer the owner",
             ));
             return CreateDelegationTokenResult::new(handle.future());
@@ -1821,9 +1835,9 @@ impl Admin for MockAdminClient {
         let token_info = TokenInformation::new(
             token_id.clone(),
             owner,
-            options.get_renewers().to_vec(),
+            options.renewers().to_vec(),
             current_time_millis(),
-            options.get_max_lifetime_ms(),
+            options.max_lifetime_ms(),
             -1,
         );
         let token = DelegationToken::new(token_info, token_id.into_bytes());
@@ -1832,11 +1846,15 @@ impl Admin for MockAdminClient {
         CreateDelegationTokenResult::new(handle.future())
     }
 
-    fn renew_delegation_token(&self, hmac: &[u8], options: RenewDelegationTokenOptions) -> RenewDelegationTokenResult {
+    fn renew_delegation_token_with_options(
+        &self,
+        hmac: &[u8],
+        options: RenewDelegationTokenOptions,
+    ) -> RenewDelegationTokenResult {
         // Mirrors MockAdminClient.renewDelegationToken: update the expiry of
         // every matching token; error if none matched.
         let handle: KafkaFutureImpl<i64> = KafkaFutureImpl::new();
-        let expiry_timestamp = options.get_renew_time_period_ms();
+        let expiry_timestamp = options.renew_time_period_ms();
         let mut token_found = false;
         {
             let mut state = self.state.lock().unwrap();
@@ -1850,12 +1868,12 @@ impl Admin for MockAdminClient {
         if token_found {
             handle.complete(expiry_timestamp);
         } else {
-            handle.complete_exceptionally(KafkaError::with_message(Errors::DelegationTokenNotFound, ""));
+            handle.complete_with_error(Error::with_message(Errors::DelegationTokenNotFound, ""));
         }
         RenewDelegationTokenResult::new(handle.future())
     }
 
-    fn expire_delegation_token(
+    fn expire_delegation_token_with_options(
         &self,
         hmac: &[u8],
         options: ExpireDelegationTokenOptions,
@@ -1864,7 +1882,7 @@ impl Admin for MockAdminClient {
         // whose expiry period is the `-1` sentinel or already in the past;
         // error if none matched.
         let handle: KafkaFutureImpl<i64> = KafkaFutureImpl::new();
-        let expiry_timestamp = options.get_expiry_time_period_ms();
+        let expiry_timestamp = options.expiry_time_period_ms();
         let now = current_time_millis();
         let mut token_found = false;
         let mut tokens_to_remove = Vec::new();
@@ -1885,12 +1903,15 @@ impl Admin for MockAdminClient {
         if token_found {
             handle.complete(expiry_timestamp);
         } else {
-            handle.complete_exceptionally(KafkaError::with_message(Errors::DelegationTokenNotFound, ""));
+            handle.complete_with_error(Error::with_message(Errors::DelegationTokenNotFound, ""));
         }
         ExpireDelegationTokenResult::new(handle.future())
     }
 
-    fn describe_delegation_token(&self, options: DescribeDelegationTokenOptions) -> DescribeDelegationTokenResult {
+    fn describe_delegation_token_with_options(
+        &self,
+        options: DescribeDelegationTokenOptions,
+    ) -> DescribeDelegationTokenResult {
         // Mirrors MockAdminClient.describeDelegationToken: no owners filter
         // returns every token; otherwise only tokens whose owner is in the
         // filter. (Java NPEs on a null owners list; the Rust option models the
@@ -1898,7 +1919,7 @@ impl Admin for MockAdminClient {
         // tokens — matching the real client's "null describes all" contract.)
         let handle: KafkaFutureImpl<Vec<DelegationToken>> = KafkaFutureImpl::new();
         let state = self.state.lock().unwrap();
-        let tokens = match options.get_owners() {
+        let tokens = match options.owners() {
             // Null or empty owners filter -> describe all tokens.
             None | Some([]) => state.all_tokens.clone(),
             Some(owners) => state
@@ -1912,7 +1933,7 @@ impl Admin for MockAdminClient {
         DescribeDelegationTokenResult::new(handle.future())
     }
 
-    fn describe_features(&self, _options: DescribeFeaturesOptions) -> DescribeFeaturesResult {
+    fn describe_features_with_options(&self, _options: DescribeFeaturesOptions) -> DescribeFeaturesResult {
         // Mirrors MockAdminClient.describeFeatures: derive finalized and
         // supported ranges from the seeded feature-level maps.
         let state = self.state.lock().unwrap();
@@ -1929,7 +1950,7 @@ impl Admin for MockAdminClient {
                     supported_features.insert(feature.clone(), supported);
                 },
                 (Err(e), _) | (_, Err(e)) => {
-                    handle.complete_exceptionally(e);
+                    handle.complete_with_error(e);
                     return DescribeFeaturesResult::new(handle.future());
                 },
             }
@@ -1939,15 +1960,15 @@ impl Admin for MockAdminClient {
         DescribeFeaturesResult::new(handle.future())
     }
 
-    fn update_features(
+    fn update_features_with_options(
         &self,
         feature_updates: &HashMap<String, FeatureUpdate>,
         options: UpdateFeaturesOptions,
-    ) -> Result<UpdateFeaturesResult, KafkaError> {
+    ) -> Result<UpdateFeaturesResult, Error> {
         // Mirrors MockAdminClient.updateFeatures: validate each update against
         // the seeded version bounds; the first failure aborts the whole batch.
         let mut state = self.state.lock().unwrap();
-        let mut error: Option<KafkaError> = None;
+        let mut error: Option<Error> = None;
         for (feature, update) in feature_updates {
             let cur = state.feature_levels.get(feature).copied().unwrap_or(0);
             let next = update.max_version_level();
@@ -1965,12 +1986,12 @@ impl Admin for MockAdminClient {
             match &error {
                 None => {
                     handle.complete(());
-                    if !options.get_validate_only() {
+                    if !options.validate_only() {
                         state.feature_levels.insert(feature.clone(), update.max_version_level());
                     }
                 },
                 Some(e) => {
-                    handle.complete_exceptionally(e.clone());
+                    handle.complete_with_error(e.clone());
                 },
             }
             results.insert(feature.clone(), handle.future());
@@ -1979,7 +2000,7 @@ impl Admin for MockAdminClient {
         Ok(UpdateFeaturesResult::new(results))
     }
 
-    async fn close(&self, _timeout: Duration) {
+    async fn close_with_timeout(&self, _timeout: Duration) {
         // Nothing to close for the in-memory mock.
     }
 }
@@ -2025,8 +2046,8 @@ fn validate_feature_update(cur: i16, next: i16, min: i16, max: i16, upgrade_type
 
 /// Composes the mock's `InvalidRequestException` for a rejected feature update.
 /// Mirrors `MockAdminClient.invalidUpdateVersion`.
-fn invalid_update_version(feature: &str, version: i16, message: &str) -> KafkaError {
-    KafkaError::with_message(
+fn invalid_update_version(feature: &str, version: i16, message: &str) -> Error {
+    Error::with_message(
         Errors::InvalidRequest,
         format!("Invalid update version {version} for feature {feature}. {message}"),
     )
@@ -2049,7 +2070,7 @@ mod tests {
     fn create_rejects_zero_brokers_rather_than_fabricating_a_controller() {
         let err = MockAdminClient::create(0).expect_err("zero brokers must be rejected");
         assert!(
-            matches!(err, KafkaError::IllegalArgument(_)),
+            matches!(err, Error::LocalIllegalArgument(_)),
             "expected IllegalArgument, got {err:?}"
         );
         assert_eq!(err.message(), "num_brokers must be at least 1, was 0");
@@ -2072,7 +2093,7 @@ mod tests {
     async fn controller_is_always_one_of_the_seeded_nodes() {
         for num_brokers in 1..=3 {
             let mock = MockAdminClient::create(num_brokers).expect("num_brokers is at least 1");
-            let described = mock.describe_cluster(DescribeClusterOptions::new());
+            let described = mock.describe_cluster_with_options(DescribeClusterOptions::new());
             let nodes = described.nodes().get().await.expect("nodes");
             let controller = described.controller().get().await.expect("controller").expect("a controller");
             assert!(
@@ -2097,9 +2118,11 @@ mod tests {
         mock
     }
 
-    async fn update_one(mock: &MockAdminClient, next: i16, upgrade_type: UpgradeType) -> Result<(), KafkaError> {
+    async fn update_one(mock: &MockAdminClient, next: i16, upgrade_type: UpgradeType) -> Result<(), Error> {
         let updates = HashMap::from([("feature".to_string(), FeatureUpdate::new(next, upgrade_type).unwrap())]);
-        let result = mock.update_features(&updates, UpdateFeaturesOptions::new()).unwrap();
+        let result = mock
+            .update_features_with_options(&updates, UpdateFeaturesOptions::new())
+            .unwrap();
         result.values()["feature"].get().await
     }
 
@@ -2107,7 +2130,7 @@ mod tests {
     async fn mock_describe_features_returns_seeded_ranges() {
         let mock = admin_with_features();
         let metadata = mock
-            .describe_features(DescribeFeaturesOptions::new())
+            .describe_features_with_options(DescribeFeaturesOptions::new())
             .feature_metadata()
             .get()
             .await
@@ -2129,7 +2152,7 @@ mod tests {
         update_one(&mock, 4, UpgradeType::Upgrade).await.unwrap();
         // The finalized level is now 4.
         let metadata = mock
-            .describe_features(DescribeFeaturesOptions::new())
+            .describe_features_with_options(DescribeFeaturesOptions::new())
             .feature_metadata()
             .get()
             .await
@@ -2145,12 +2168,12 @@ mod tests {
         let mock = admin_with_features();
         let updates = HashMap::from([("feature".to_string(), FeatureUpdate::new(4, UpgradeType::Upgrade).unwrap())]);
         let result = mock
-            .update_features(&updates, UpdateFeaturesOptions::new().validate_only(true))
+            .update_features_with_options(&updates, UpdateFeaturesOptions::new().set_validate_only(true))
             .unwrap();
         result.values()["feature"].get().await.unwrap();
         // Level unchanged because validate_only was set.
         let metadata = mock
-            .describe_features(DescribeFeaturesOptions::new())
+            .describe_features_with_options(DescribeFeaturesOptions::new())
             .feature_metadata()
             .get()
             .await
@@ -2224,7 +2247,7 @@ mod tests {
         // guard is dead code, mirroring Java).
         update_one(&mock, 2, UpgradeType::UnsafeDowngrade).await.unwrap();
         let metadata = mock
-            .describe_features(DescribeFeaturesOptions::new())
+            .describe_features_with_options(DescribeFeaturesOptions::new())
             .feature_metadata()
             .get()
             .await
@@ -2238,16 +2261,24 @@ mod tests {
     #[tokio::test]
     async fn create_then_list_and_describe() {
         let client = admin();
-        let result = client.create_topics(&[NewTopic::new("t", 2, 2)], CreateTopicsOptions::new());
+        let result = client.create_topics_with_options(
+            &[NewTopic::with_num_partitions_replication_factor("t", Some(2), Some(2))],
+            CreateTopicsOptions::new(),
+        );
         result.all().get().await.unwrap();
         assert_eq!(result.num_partitions("t").get().await.unwrap(), 2);
         assert_eq!(result.replication_factor("t").get().await.unwrap(), 2);
 
-        let names = client.list_topics(ListTopicsOptions::new()).names().get().await.unwrap();
+        let names = client
+            .list_topics_with_options(ListTopicsOptions::new())
+            .names()
+            .get()
+            .await
+            .unwrap();
         assert!(names.contains("t"));
 
         let desc = client
-            .describe_topics(
+            .describe_topics_with_topics_options(
                 TopicCollection::of_topic_names(vec!["t".to_string()]),
                 DescribeTopicsOptions::new(),
             )
@@ -2263,12 +2294,18 @@ mod tests {
     async fn create_existing_topic_fails_with_topic_exists() {
         let client = admin();
         client
-            .create_topics(&[NewTopic::new("t", 1, 1)], CreateTopicsOptions::new())
+            .create_topics_with_options(
+                &[NewTopic::with_num_partitions_replication_factor("t", Some(1), Some(1))],
+                CreateTopicsOptions::new(),
+            )
             .all()
             .get()
             .await
             .unwrap();
-        let result = client.create_topics(&[NewTopic::new("t", 1, 1)], CreateTopicsOptions::new());
+        let result = client.create_topics_with_options(
+            &[NewTopic::with_num_partitions_replication_factor("t", Some(1), Some(1))],
+            CreateTopicsOptions::new(),
+        );
         let err = result.values()["t"].get().await.unwrap_err();
         assert_eq!(err.error(), Errors::TopicAlreadyExists);
         assert_eq!(err.message(), "Topic t exists already.");
@@ -2277,7 +2314,10 @@ mod tests {
     #[tokio::test]
     async fn create_with_replication_factor_too_large_fails() {
         let client = MockAdminClient::create(1).expect("num_brokers is at least 1");
-        let result = client.create_topics(&[NewTopic::new("t", 1, 5)], CreateTopicsOptions::new());
+        let result = client.create_topics_with_options(
+            &[NewTopic::with_num_partitions_replication_factor("t", Some(1), Some(5))],
+            CreateTopicsOptions::new(),
+        );
         let err = result.values()["t"].get().await.unwrap_err();
         assert_eq!(err.error(), Errors::InvalidReplicationFactor);
     }
@@ -2286,7 +2326,10 @@ mod tests {
     async fn mock_create_topics_rejects_a_leader_with_no_log_directories() {
         let client = admin();
         client.set_broker_log_dirs(0, Vec::new()).expect("broker 0 exists");
-        let result = client.create_topics(&[NewTopic::new("t", 1, 1)], CreateTopicsOptions::new());
+        let result = client.create_topics_with_options(
+            &[NewTopic::with_num_partitions_replication_factor("t", Some(1), Some(1))],
+            CreateTopicsOptions::new(),
+        );
         let err = result.values()["t"].get().await.unwrap_err();
         assert_eq!(err.message(), "Broker 0 has no log directories.");
     }
@@ -2294,7 +2337,7 @@ mod tests {
     #[tokio::test]
     async fn describe_nonexistent_topic_is_unknown_topic() {
         let client = admin();
-        let result = client.describe_topics(
+        let result = client.describe_topics_with_topics_options(
             TopicCollection::of_topic_names(vec!["missing".to_string()]),
             DescribeTopicsOptions::new(),
         );
@@ -2307,13 +2350,16 @@ mod tests {
     async fn delete_then_gone() {
         let client = admin();
         client
-            .create_topics(&[NewTopic::new("t", 1, 1)], CreateTopicsOptions::new())
+            .create_topics_with_options(
+                &[NewTopic::with_num_partitions_replication_factor("t", Some(1), Some(1))],
+                CreateTopicsOptions::new(),
+            )
             .all()
             .get()
             .await
             .unwrap();
         client
-            .delete_topics(
+            .delete_topics_with_options(
                 TopicCollection::of_topic_names(vec!["t".to_string()]),
                 DeleteTopicsOptions::new(),
             )
@@ -2321,14 +2367,19 @@ mod tests {
             .get()
             .await
             .unwrap();
-        let names = client.list_topics(ListTopicsOptions::new()).names().get().await.unwrap();
+        let names = client
+            .list_topics_with_options(ListTopicsOptions::new())
+            .names()
+            .get()
+            .await
+            .unwrap();
         assert!(!names.contains("t"));
     }
 
     #[tokio::test]
     async fn delete_missing_topic_fails() {
         let client = admin();
-        let result = client.delete_topics(
+        let result = client.delete_topics_with_options(
             TopicCollection::of_topic_names(vec!["nope".to_string()]),
             DeleteTopicsOptions::new(),
         );
@@ -2340,17 +2391,23 @@ mod tests {
     async fn timeout_next_request_times_out_create() {
         let client = admin();
         client.timeout_next_request(1);
-        let result = client.create_topics(&[NewTopic::new("t", 1, 1)], CreateTopicsOptions::new());
-        assert!(matches!(result.values()["t"].get().await, Err(KafkaError::Timeout(_))));
+        let result = client.create_topics_with_options(
+            &[NewTopic::with_num_partitions_replication_factor("t", Some(1), Some(1))],
+            CreateTopicsOptions::new(),
+        );
+        assert!(matches!(result.values()["t"].get().await, Err(Error::Timeout(_))));
         // Next request succeeds.
-        let result2 = client.create_topics(&[NewTopic::new("t2", 1, 1)], CreateTopicsOptions::new());
+        let result2 = client.create_topics_with_options(
+            &[NewTopic::with_num_partitions_replication_factor("t2", Some(1), Some(1))],
+            CreateTopicsOptions::new(),
+        );
         result2.all().get().await.unwrap();
     }
 
     #[tokio::test]
     async fn describe_cluster_returns_brokers_and_controller() {
         let client = admin();
-        let result = client.describe_cluster(DescribeClusterOptions::new());
+        let result = client.describe_cluster_with_options(DescribeClusterOptions::new());
         let nodes = result.nodes().get().await.unwrap();
         assert_eq!(nodes.len(), 3);
         let controller = result.controller().get().await.unwrap();
@@ -2364,12 +2421,12 @@ mod tests {
         let client = admin();
         client.timeout_next_request(1);
         // First call times out on every future.
-        let timed_out = client.describe_cluster(DescribeClusterOptions::new());
-        assert!(matches!(timed_out.nodes().get().await, Err(KafkaError::Timeout(_))));
-        assert!(matches!(timed_out.controller().get().await, Err(KafkaError::Timeout(_))));
-        assert!(matches!(timed_out.cluster_id().get().await, Err(KafkaError::Timeout(_))));
+        let timed_out = client.describe_cluster_with_options(DescribeClusterOptions::new());
+        assert!(matches!(timed_out.nodes().get().await, Err(Error::Timeout(_))));
+        assert!(matches!(timed_out.controller().get().await, Err(Error::Timeout(_))));
+        assert!(matches!(timed_out.cluster_id().get().await, Err(Error::Timeout(_))));
         // The counter is decremented, so the next call succeeds.
-        let recovered = client.describe_cluster(DescribeClusterOptions::new());
+        let recovered = client.describe_cluster_with_options(DescribeClusterOptions::new());
         assert_eq!(recovered.nodes().get().await.unwrap().len(), 3);
     }
 
@@ -2378,16 +2435,17 @@ mod tests {
         let client = admin();
         let mut configs = BTreeMap::new();
         configs.insert("retention.ms".to_string(), "1000".to_string());
-        let new_topic = NewTopic::new("t", 1, 1).configs(configs);
+        let new_topic = NewTopic::with_num_partitions_replication_factor("t", Some(1), Some(1)).set_configs(configs);
         client
-            .create_topics(&[new_topic], CreateTopicsOptions::new())
+            .create_topics_with_options(&[new_topic], CreateTopicsOptions::new())
             .all()
             .get()
             .await
             .unwrap();
 
         let resource = ConfigResource::new(ConfigResourceType::Topic, "t".to_string());
-        let result = client.describe_configs(std::slice::from_ref(&resource), DescribeConfigsOptions::new());
+        let result =
+            client.describe_configs_with_options(std::slice::from_ref(&resource), DescribeConfigsOptions::new());
         let config = result.values()[&resource].get().await.unwrap();
         assert_eq!(config.get("retention.ms").unwrap().value(), Some("1000"));
     }
@@ -2396,7 +2454,8 @@ mod tests {
     async fn describe_configs_broker_returns_default_replication_factor() {
         let client = admin();
         let resource = ConfigResource::new(ConfigResourceType::Broker, "0".to_string());
-        let result = client.describe_configs(std::slice::from_ref(&resource), DescribeConfigsOptions::new());
+        let result =
+            client.describe_configs_with_options(std::slice::from_ref(&resource), DescribeConfigsOptions::new());
         let config = result.values()[&resource].get().await.unwrap();
         assert_eq!(config.get("default.replication.factor").unwrap().value(), Some("3"));
     }
@@ -2405,7 +2464,8 @@ mod tests {
     async fn describe_configs_unknown_topic_is_unknown_topic_error() {
         let client = admin();
         let resource = ConfigResource::new(ConfigResourceType::Topic, "missing".to_string());
-        let result = client.describe_configs(std::slice::from_ref(&resource), DescribeConfigsOptions::new());
+        let result =
+            client.describe_configs_with_options(std::slice::from_ref(&resource), DescribeConfigsOptions::new());
         let err = result.values()[&resource].get().await.unwrap_err();
         assert_eq!(err.error(), Errors::UnknownTopicOrPartition);
         assert_eq!(err.message(), "Resource ConfigResource(type=Topic, name='missing') not found.");
@@ -2415,7 +2475,8 @@ mod tests {
     async fn describe_configs_unknown_broker_is_invalid_request() {
         let client = admin();
         let resource = ConfigResource::new(ConfigResourceType::Broker, "99".to_string());
-        let result = client.describe_configs(std::slice::from_ref(&resource), DescribeConfigsOptions::new());
+        let result =
+            client.describe_configs_with_options(std::slice::from_ref(&resource), DescribeConfigsOptions::new());
         let err = result.values()[&resource].get().await.unwrap_err();
         assert_eq!(err.error(), Errors::InvalidRequest);
         assert_eq!(err.message(), "Broker 99 not found.");
@@ -2426,9 +2487,11 @@ mod tests {
         let client = admin();
         client.timeout_next_request(1);
         let resource = ConfigResource::new(ConfigResourceType::Broker, "0".to_string());
-        let timed_out = client.describe_configs(std::slice::from_ref(&resource), DescribeConfigsOptions::new());
-        assert!(matches!(timed_out.values()[&resource].get().await, Err(KafkaError::Timeout(_))));
-        let recovered = client.describe_configs(std::slice::from_ref(&resource), DescribeConfigsOptions::new());
+        let timed_out =
+            client.describe_configs_with_options(std::slice::from_ref(&resource), DescribeConfigsOptions::new());
+        assert!(matches!(timed_out.values()[&resource].get().await, Err(Error::Timeout(_))));
+        let recovered =
+            client.describe_configs_with_options(std::slice::from_ref(&resource), DescribeConfigsOptions::new());
         recovered.values()[&resource].get().await.unwrap();
     }
 
@@ -2436,7 +2499,10 @@ mod tests {
     async fn incremental_alter_configs_topic_set_and_delete() {
         let client = admin();
         client
-            .create_topics(&[NewTopic::new("t", 1, 1)], CreateTopicsOptions::new())
+            .create_topics_with_options(
+                &[NewTopic::with_num_partitions_replication_factor("t", Some(1), Some(1))],
+                CreateTopicsOptions::new(),
+            )
             .all()
             .get()
             .await
@@ -2451,13 +2517,14 @@ mod tests {
         let mut configs = HashMap::new();
         configs.insert(resource.clone(), vec![set_op]);
         client
-            .incremental_alter_configs(&configs, AlterConfigsOptions::new())
+            .incremental_alter_configs_with_options(&configs, AlterConfigsOptions::new())
             .all()
             .get()
             .await
             .unwrap();
 
-        let described = client.describe_configs(std::slice::from_ref(&resource), DescribeConfigsOptions::new());
+        let described =
+            client.describe_configs_with_options(std::slice::from_ref(&resource), DescribeConfigsOptions::new());
         assert_eq!(
             described.values()[&resource]
                 .get()
@@ -2474,12 +2541,13 @@ mod tests {
         let mut configs = HashMap::new();
         configs.insert(resource.clone(), vec![delete_op]);
         client
-            .incremental_alter_configs(&configs, AlterConfigsOptions::new())
+            .incremental_alter_configs_with_options(&configs, AlterConfigsOptions::new())
             .all()
             .get()
             .await
             .unwrap();
-        let described = client.describe_configs(std::slice::from_ref(&resource), DescribeConfigsOptions::new());
+        let described =
+            client.describe_configs_with_options(std::slice::from_ref(&resource), DescribeConfigsOptions::new());
         assert!(described.values()[&resource].get().await.unwrap().get("retention.ms").is_none());
     }
 
@@ -2490,7 +2558,7 @@ mod tests {
         let op = AlterConfigOp::new(ConfigEntry::new("k".to_string(), Some("v".to_string())), OpType::Set);
         let mut configs = HashMap::new();
         configs.insert(resource.clone(), vec![op]);
-        let result = client.incremental_alter_configs(&configs, AlterConfigsOptions::new());
+        let result = client.incremental_alter_configs_with_options(&configs, AlterConfigsOptions::new());
         let err = result.values()[&resource].get().await.unwrap_err();
         assert_eq!(err.error(), Errors::UnknownTopicOrPartition);
         assert_eq!(err.message(), "No such topic as missing");
@@ -2507,7 +2575,7 @@ mod tests {
         let mut configs = HashMap::new();
         configs.insert(resource.clone(), vec![op]);
         client
-            .incremental_alter_configs(&configs, AlterConfigsOptions::new())
+            .incremental_alter_configs_with_options(&configs, AlterConfigsOptions::new())
             .all()
             .get()
             .await
@@ -2515,7 +2583,7 @@ mod tests {
 
         // The new client-metrics resource now shows up in list_config_resources.
         let listed = client
-            .list_config_resources(
+            .list_config_resources_with_options(
                 &HashSet::from([ConfigResourceType::ClientMetrics]),
                 ListConfigResourcesOptions::new(),
             )
@@ -2535,7 +2603,7 @@ mod tests {
         // Empty when nothing has been seeded, mirroring Java's mock over an
         // empty `clientMetricsConfigs`.
         let empty = client
-            .list_client_metrics_resources(ListClientMetricsResourcesOptions::new())
+            .list_client_metrics_resources_with_options(ListClientMetricsResourcesOptions::new())
             .all()
             .get()
             .await
@@ -2552,7 +2620,7 @@ mod tests {
             let mut configs = HashMap::new();
             configs.insert(resource, vec![op]);
             client
-                .incremental_alter_configs(&configs, AlterConfigsOptions::new())
+                .incremental_alter_configs_with_options(&configs, AlterConfigsOptions::new())
                 .all()
                 .get()
                 .await
@@ -2560,7 +2628,7 @@ mod tests {
         }
 
         let listed = client
-            .list_client_metrics_resources(ListClientMetricsResourcesOptions::new())
+            .list_client_metrics_resources_with_options(ListClientMetricsResourcesOptions::new())
             .all()
             .get()
             .await
@@ -2581,7 +2649,7 @@ mod tests {
         let op = AlterConfigOp::new(ConfigEntry::new("k".to_string(), Some("v".to_string())), OpType::Set);
         let mut configs = HashMap::new();
         configs.insert(resource.clone(), vec![op]);
-        let result = client.incremental_alter_configs(&configs, AlterConfigsOptions::new());
+        let result = client.incremental_alter_configs_with_options(&configs, AlterConfigsOptions::new());
         let err = result.values()[&resource].get().await.unwrap_err();
         assert_eq!(err.error(), Errors::InvalidRequest);
         assert_eq!(err.message(), "Empty resource name");
@@ -2591,13 +2659,16 @@ mod tests {
     async fn list_config_resources_all_types_when_empty() {
         let client = admin();
         client
-            .create_topics(&[NewTopic::new("t", 1, 1)], CreateTopicsOptions::new())
+            .create_topics_with_options(
+                &[NewTopic::with_num_partitions_replication_factor("t", Some(1), Some(1))],
+                CreateTopicsOptions::new(),
+            )
             .all()
             .get()
             .await
             .unwrap();
         let listed = client
-            .list_config_resources(&HashSet::new(), ListConfigResourcesOptions::new())
+            .list_config_resources_with_options(&HashSet::new(), ListConfigResourcesOptions::new())
             .all()
             .get()
             .await
@@ -2615,13 +2686,19 @@ mod tests {
     async fn list_config_resources_filters_by_type() {
         let client = admin();
         client
-            .create_topics(&[NewTopic::new("t", 1, 1)], CreateTopicsOptions::new())
+            .create_topics_with_options(
+                &[NewTopic::with_num_partitions_replication_factor("t", Some(1), Some(1))],
+                CreateTopicsOptions::new(),
+            )
             .all()
             .get()
             .await
             .unwrap();
         let listed = client
-            .list_config_resources(&HashSet::from([ConfigResourceType::Topic]), ListConfigResourcesOptions::new())
+            .list_config_resources_with_options(
+                &HashSet::from([ConfigResourceType::Topic]),
+                ListConfigResourcesOptions::new(),
+            )
             .all()
             .get()
             .await
@@ -2646,9 +2723,9 @@ mod tests {
     #[tokio::test]
     async fn create_delegation_token_rejects_non_user_renewer() {
         let client = admin();
-        let options = CreateDelegationTokenOptions::new().renewers(vec![KafkaPrincipal::new("Group", "admins")]);
+        let options = CreateDelegationTokenOptions::new().set_renewers(vec![KafkaPrincipal::new("Group", "admins")]);
         let err = client
-            .create_delegation_token(options)
+            .create_delegation_token_with_options(options)
             .delegation_token()
             .get()
             .await
@@ -2668,7 +2745,7 @@ mod tests {
     async fn create_delegation_token_without_a_renewer_reports_an_error() {
         let client = admin();
         let err = client
-            .create_delegation_token(CreateDelegationTokenOptions::new())
+            .create_delegation_token_with_options(CreateDelegationTokenOptions::new())
             .delegation_token()
             .get()
             .await
@@ -2680,7 +2757,7 @@ mod tests {
         // Nothing was stored, so a describe still finds no tokens.
         assert!(
             client
-                .describe_delegation_token(DescribeDelegationTokenOptions::new())
+                .describe_delegation_token_with_options(DescribeDelegationTokenOptions::new())
                 .delegation_tokens()
                 .get()
                 .await
@@ -2696,16 +2773,21 @@ mod tests {
     async fn create_then_describe_lists_token() {
         let client = admin();
         let options = CreateDelegationTokenOptions::new()
-            .renewers(vec![user("alice")])
-            .max_lifetime_ms(1000);
-        let token = client.create_delegation_token(options).delegation_token().get().await.unwrap();
+            .set_renewers(vec![user("alice")])
+            .set_max_lifetime_ms(1000);
+        let token = client
+            .create_delegation_token_with_options(options)
+            .delegation_token()
+            .get()
+            .await
+            .unwrap();
         assert_eq!(token.token_info().owner(), &user("alice"));
         assert_eq!(token.token_info().max_timestamp(), 1000);
         assert_eq!(token.token_info().expiry_timestamp(), -1);
         assert_eq!(token.hmac(), token.token_info().token_id().as_bytes());
 
         let listed = client
-            .describe_delegation_token(DescribeDelegationTokenOptions::new())
+            .describe_delegation_token_with_options(DescribeDelegationTokenOptions::new())
             .delegation_tokens()
             .get()
             .await
@@ -2719,7 +2801,10 @@ mod tests {
     async fn renew_delegation_token_found_and_not_found() {
         let client = admin();
         let unknown = client
-            .renew_delegation_token(b"nope", RenewDelegationTokenOptions::new().renew_time_period_ms(10))
+            .renew_delegation_token_with_options(
+                b"nope",
+                RenewDelegationTokenOptions::new().set_renew_time_period_ms(10),
+            )
             .expiry_timestamp()
             .get()
             .await
@@ -2728,13 +2813,16 @@ mod tests {
         assert_eq!(unknown.message(), "");
 
         let token = client
-            .create_delegation_token(CreateDelegationTokenOptions::new().renewers(vec![user("alice")]))
+            .create_delegation_token_with_options(CreateDelegationTokenOptions::new().set_renewers(vec![user("alice")]))
             .delegation_token()
             .get()
             .await
             .unwrap();
         let expiry = client
-            .renew_delegation_token(token.hmac(), RenewDelegationTokenOptions::new().renew_time_period_ms(4242))
+            .renew_delegation_token_with_options(
+                token.hmac(),
+                RenewDelegationTokenOptions::new().set_renew_time_period_ms(4242),
+            )
             .expiry_timestamp()
             .get()
             .await
@@ -2748,7 +2836,7 @@ mod tests {
     async fn expire_delegation_token_not_found() {
         let client = admin();
         let err = client
-            .expire_delegation_token(b"nope", ExpireDelegationTokenOptions::new())
+            .expire_delegation_token_with_options(b"nope", ExpireDelegationTokenOptions::new())
             .expiry_timestamp()
             .get()
             .await
@@ -2763,14 +2851,17 @@ mod tests {
     async fn expire_delegation_token_negative_one_removes_token() {
         let client = admin();
         let token = client
-            .create_delegation_token(CreateDelegationTokenOptions::new().renewers(vec![user("alice")]))
+            .create_delegation_token_with_options(CreateDelegationTokenOptions::new().set_renewers(vec![user("alice")]))
             .delegation_token()
             .get()
             .await
             .unwrap();
 
         let expiry = client
-            .expire_delegation_token(token.hmac(), ExpireDelegationTokenOptions::new().expiry_time_period_ms(-1))
+            .expire_delegation_token_with_options(
+                token.hmac(),
+                ExpireDelegationTokenOptions::new().set_expiry_time_period_ms(-1),
+            )
             .expiry_timestamp()
             .get()
             .await
@@ -2778,7 +2869,7 @@ mod tests {
         assert_eq!(expiry, -1);
 
         let listed = client
-            .describe_delegation_token(DescribeDelegationTokenOptions::new())
+            .describe_delegation_token_with_options(DescribeDelegationTokenOptions::new())
             .delegation_tokens()
             .get()
             .await
@@ -2792,20 +2883,22 @@ mod tests {
     async fn describe_delegation_token_owners_filter() {
         let client = admin();
         let token_alice = client
-            .create_delegation_token(CreateDelegationTokenOptions::new().renewers(vec![user("alice")]))
+            .create_delegation_token_with_options(CreateDelegationTokenOptions::new().set_renewers(vec![user("alice")]))
             .delegation_token()
             .get()
             .await
             .unwrap();
         let _token_bob = client
-            .create_delegation_token(CreateDelegationTokenOptions::new().renewers(vec![user("bob")]))
+            .create_delegation_token_with_options(CreateDelegationTokenOptions::new().set_renewers(vec![user("bob")]))
             .delegation_token()
             .get()
             .await
             .unwrap();
 
         let listed = client
-            .describe_delegation_token(DescribeDelegationTokenOptions::new().owners(Some(vec![user("alice")])))
+            .describe_delegation_token_with_options(
+                DescribeDelegationTokenOptions::new().set_owners(Some(vec![user("alice")])),
+            )
             .delegation_tokens()
             .get()
             .await
@@ -2816,9 +2909,9 @@ mod tests {
     /// Seeds one topic and reassigns its only partition.
     async fn admin_with_reassignment() -> (MockAdminClient, TopicPartition) {
         let client = admin();
-        let new_topic = NewTopic::new("rt", 1, 3);
+        let new_topic = NewTopic::with_num_partitions_replication_factor("rt", Some(1), Some(3));
         client
-            .create_topics(std::slice::from_ref(&new_topic), CreateTopicsOptions::new())
+            .create_topics_with_options(std::slice::from_ref(&new_topic), CreateTopicsOptions::new())
             .all()
             .get()
             .await
@@ -2827,7 +2920,7 @@ mod tests {
         let tp = TopicPartition::new("rt".to_string(), 0);
         let target = NewPartitionReassignment::new(vec![1, 2]).unwrap();
         client
-            .alter_partition_reassignments(
+            .alter_partition_reassignments_with_options(
                 &HashMap::from([(tp.clone(), Some(target))]),
                 AlterPartitionReassignmentsOptions::new(),
             )
@@ -2843,7 +2936,7 @@ mod tests {
         let (client, tp) = admin_with_reassignment().await;
 
         let listed = client
-            .list_partition_reassignments(None, ListPartitionReassignmentsOptions::new())
+            .list_partition_reassignments_with_partitions_options(None, ListPartitionReassignmentsOptions::new())
             .reassignments()
             .get()
             .await
@@ -2857,7 +2950,7 @@ mod tests {
 
         // An empty `Optional` cancels (`MockAdminClient.java:1160-1162`).
         client
-            .alter_partition_reassignments(
+            .alter_partition_reassignments_with_options(
                 &HashMap::from([(tp.clone(), None)]),
                 AlterPartitionReassignmentsOptions::new(),
             )
@@ -2866,7 +2959,7 @@ mod tests {
             .await
             .unwrap();
         let listed = client
-            .list_partition_reassignments(None, ListPartitionReassignmentsOptions::new())
+            .list_partition_reassignments_with_partitions_options(None, ListPartitionReassignmentsOptions::new())
             .reassignments()
             .get()
             .await
@@ -2884,7 +2977,7 @@ mod tests {
     async fn list_partition_reassignments_after_topic_deletion_fails_the_future() {
         let (client, _tp) = admin_with_reassignment().await;
         client
-            .delete_topics(
+            .delete_topics_with_options(
                 TopicCollection::of_topic_names(vec!["rt".to_string()]),
                 DeleteTopicsOptions::new(),
             )
@@ -2894,7 +2987,7 @@ mod tests {
             .unwrap();
 
         let error = client
-            .list_partition_reassignments(None, ListPartitionReassignmentsOptions::new())
+            .list_partition_reassignments_with_partitions_options(None, ListPartitionReassignmentsOptions::new())
             .reassignments()
             .get()
             .await
@@ -2919,9 +3012,9 @@ mod tests {
     #[tokio::test]
     async fn list_partition_reassignments_after_topic_shrink_fails_the_future() {
         let client = admin();
-        let wide = NewTopic::new("rt2", 2, 3);
+        let wide = NewTopic::with_num_partitions_replication_factor("rt2", Some(2), Some(3));
         client
-            .create_topics(std::slice::from_ref(&wide), CreateTopicsOptions::new())
+            .create_topics_with_options(std::slice::from_ref(&wide), CreateTopicsOptions::new())
             .all()
             .get()
             .await
@@ -2932,7 +3025,7 @@ mod tests {
         let tp = TopicPartition::new("rt2".to_string(), 1);
         let target = NewPartitionReassignment::new(vec![1, 2]).unwrap();
         client
-            .alter_partition_reassignments(
+            .alter_partition_reassignments_with_options(
                 &HashMap::from([(tp.clone(), Some(target))]),
                 AlterPartitionReassignmentsOptions::new(),
             )
@@ -2942,7 +3035,7 @@ mod tests {
             .unwrap();
 
         client
-            .delete_topics(
+            .delete_topics_with_options(
                 TopicCollection::of_topic_names(vec!["rt2".to_string()]),
                 DeleteTopicsOptions::new(),
             )
@@ -2951,16 +3044,16 @@ mod tests {
             .await
             .unwrap();
 
-        let narrow = NewTopic::new("rt2", 1, 3);
+        let narrow = NewTopic::with_num_partitions_replication_factor("rt2", Some(1), Some(3));
         client
-            .create_topics(std::slice::from_ref(&narrow), CreateTopicsOptions::new())
+            .create_topics_with_options(std::slice::from_ref(&narrow), CreateTopicsOptions::new())
             .all()
             .get()
             .await
             .unwrap();
 
         let error = client
-            .list_partition_reassignments(None, ListPartitionReassignmentsOptions::new())
+            .list_partition_reassignments_with_partitions_options(None, ListPartitionReassignmentsOptions::new())
             .reassignments()
             .get()
             .await
@@ -2975,7 +3068,7 @@ mod tests {
     /// Builds a `TopicPartitionInfo` with the given leader / replicas / isr and
     /// no offline, ELR or last-known-ELR replicas.
     fn partition_info(partition: i32, leader: Option<Node>, replicas: Vec<Node>, isr: Vec<Node>) -> TopicPartitionInfo {
-        TopicPartitionInfo::new(partition, leader, replicas, isr, Vec::new(), Vec::new())
+        TopicPartitionInfo::with_elr_last_known_elr(partition, leader, replicas, isr, Vec::new(), Vec::new())
     }
 
     /// The nodes `MockAdminClient::create` seeds, so a test can name a broker
@@ -3016,7 +3109,7 @@ mod tests {
         mock.add_topic(false, "topic", partitions.clone(), None).unwrap();
         let error = mock.add_topic(false, "topic", partitions, None).unwrap_err();
         assert!(
-            matches!(error, KafkaError::IllegalArgument(_)),
+            matches!(error, Error::LocalIllegalArgument(_)),
             "Java throws IllegalArgumentException: {error:?}"
         );
         assert_eq!(error.message(), "Topic topic was already added.");
@@ -3040,7 +3133,7 @@ mod tests {
         assert_eq!(error.message(), "Leader broker unknown");
         // Neither rejected topic was recorded.
         let listed = mock
-            .list_topics(ListTopicsOptions::new())
+            .list_topics_with_options(ListTopicsOptions::new())
             .names()
             .get()
             .await
@@ -3104,7 +3197,7 @@ mod tests {
         let mock = admin();
         let error = mock.mark_topic_for_deletion("nope").unwrap_err();
         assert!(
-            matches!(error, KafkaError::IllegalArgument(_)),
+            matches!(error, Error::LocalIllegalArgument(_)),
             "Java throws IllegalArgumentException: {error:?}"
         );
         assert_eq!(error.message(), "Topic nope did not exist.");
@@ -3120,7 +3213,7 @@ mod tests {
         // `IllegalArgumentException("Invalid negative offset")` from
         // `new OffsetAndMetadata(...)` while building the row
         // (MockAdminClient.java:756, OffsetAndMetadata.java:49-50). The Rust mock
-        // must surface a `KafkaError`, not panic: the FFI runs this inline on the
+        // must surface a `Error`, not panic: the FFI runs this inline on the
         // caller's thread, so a panic would unwind out of `extern "C"`.
         let mock = admin();
         let tp = TopicPartition::new("topic".to_string(), 0);
@@ -3128,14 +3221,14 @@ mod tests {
 
         let specs = HashMap::from([("group".to_string(), ListConsumerGroupOffsetsSpec::new())]);
         let error = mock
-            .list_consumer_group_offsets(&specs, ListConsumerGroupOffsetsOptions::new())
+            .list_consumer_group_offsets_with_group_specs_options(&specs, ListConsumerGroupOffsetsOptions::new())
             .partitions_to_offset_and_metadata()
             .expect("exactly one group was requested")
             .get()
             .await
             .unwrap_err();
         assert!(
-            matches!(error, KafkaError::IllegalArgument(_)),
+            matches!(error, Error::LocalIllegalArgument(_)),
             "Java throws IllegalArgumentException: {error:?}"
         );
         assert_eq!(error.message(), "Invalid negative offset");
@@ -3144,7 +3237,7 @@ mod tests {
         // distinguishes "returned an error" from "aborted the process".
         mock.update_consumer_group_offsets(HashMap::from([(tp.clone(), 7i64)]));
         let offsets = mock
-            .list_consumer_group_offsets(&specs, ListConsumerGroupOffsetsOptions::new())
+            .list_consumer_group_offsets_with_group_specs_options(&specs, ListConsumerGroupOffsetsOptions::new())
             .partitions_to_offset_and_metadata()
             .expect("exactly one group was requested")
             .get()
@@ -3165,10 +3258,10 @@ mod tests {
 
         let specs = HashMap::from([(
             "group".to_string(),
-            ListConsumerGroupOffsetsSpec::new().topic_partitions(Some(vec![selected.clone()])),
+            ListConsumerGroupOffsetsSpec::new().set_topic_partitions(Some(vec![selected.clone()])),
         )]);
         let offsets = mock
-            .list_consumer_group_offsets(&specs, ListConsumerGroupOffsetsOptions::new())
+            .list_consumer_group_offsets_with_group_specs_options(&specs, ListConsumerGroupOffsetsOptions::new())
             .partitions_to_offset_and_metadata()
             .expect("exactly one group was requested")
             .get()

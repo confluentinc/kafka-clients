@@ -12,80 +12,121 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Kafka error hierarchy.
+//! Java's `KafkaException` base class.
 //!
-//! Mirrors Java's `KafkaException` / `ApiException` class hierarchy using
-//! Rust structs and composition. Each specific error struct contains a
-//! [`KafkaGenericError`] base with common fields (error code, message, fatal flag)
-//! plus its own subclass-specific fields.
+//! [`KafkaError`] carries exactly the state `KafkaException` does — a protocol
+//! error code and an optional message — and every specific error struct embeds
+//! one, mirroring Java's subclasses inheriting it.
 //!
-//! [`KafkaError`] is the unified enum used for polymorphic error handling
-//! in return types and storage, replacing the separate `MetadataError` and
-//! `UnsupportedApiError` types.
+//! It is NOT this crate's base error type. That is [`Error`], the flat enum in
+//! [`super::error`], which `KafkaError` is only one payload of: its
+//! [`KafkaError`](Error::KafkaError) variant stands for a *bare*
+//! `KafkaException`, one with no subclass-specific fields. `Error::Timeout` and
+//! the rest are Kafka errors too — see [`Error::is_kafka_error`] for that test.
+//!
+//! The file keeps its `kafka_error` name because it translates
+//! `KafkaException.java`, as does the C FFI type `kafka_common_Error_t`
+//! (CLAUDE.md §3).
 
-use std::collections::HashSet;
 use std::fmt;
 
-use super::Errors;
+use ambassador::Delegate;
 
-// ---------------------------------------------------------------------------
-// Base struct — corresponds to Java's KafkaException / ApiException
-// ---------------------------------------------------------------------------
+use super::error::{ErrorCode, ErrorHierarchy, ErrorMessage, ErrorName, ErrorSource};
+// Ambassador exports its generated helper macros beside the trait; a
+// `#[delegate]` outside the trait's own module has to import them.
+use super::error::ambassador_impl_ErrorMessage;
+use super::{Error, Errors};
 
 /// Base Kafka error with common fields shared by all error types.
 ///
 /// Corresponds to Java's `KafkaException` / `ApiException` base class.
-/// Contains the protocol error code, an optional custom message, and a
-/// fatal flag.
+/// Contains the protocol error code and an optional custom message —
+/// exactly the state Java's `KafkaException` carries. Fatality is NOT state
+/// here: like Java, it is derived from the error's identity, see
+/// `request_utils::RequestUtils::is_fatal_error`.
 ///
-/// Specific error types (e.g., [`TopicAuthorizationError`]) embed this
+/// Specific error types (e.g., [`TopicAuthorizationError`](crate::common::errors::TopicAuthorizationError)) embed this
 /// struct and add their own fields, mirroring Java's error subclasses.
+///
+/// Do not confuse this with [`Error`], the flat enum that wraps it — or with
+/// that enum's [`KafkaError`](Error::KafkaError) variant, which holds exactly
+/// one of these and nothing else.
 ///
 /// # Examples
 ///
 /// ```
-/// use confluent_kafka::common::KafkaGenericError;
-/// use confluent_kafka::common::protocol::Errors;
+/// use confluent_kafka::common::KafkaError;
+/// use confluent_kafka::common::Errors;
 ///
-/// let err = KafkaGenericError::new(Errors::RequestTimedOut);
-/// assert!(err.is_retriable());
-/// assert!(!err.is_fatal());
+/// let err = KafkaError::new(Errors::RequestTimedOut);
 /// assert_eq!(err.code(), 7);
+/// assert_eq!(err.message(), Errors::RequestTimedOut.message());
 /// ```
-#[derive(Clone, Debug)]
-pub struct KafkaGenericError {
+///
+/// Classification lives on [`Error`], which wraps this type — Java's
+/// `KafkaException` has no `isRetriable()` either:
+///
+/// ```
+/// use confluent_kafka::common::Error;
+/// use confluent_kafka::common::Errors;
+///
+/// assert!(Error::new(Errors::RequestTimedOut).is_retriable_error());
+/// ```
+#[derive(Clone, Debug, Delegate)]
+// `target = "self"`: the trait impl is generated from the inherent `message()`
+// below. If that method ever disappeared, this would recurse — and rustc's
+// `unconditional_recursion` lint turns that into a compile error under
+// `#![deny(warnings)]`.
+#[delegate(ErrorMessage, target = "self")]
+pub struct KafkaError {
     /// The protocol error code.
     error: Errors,
     /// Custom error message. If `None`, [`Errors::message()`] is used.
     custom_message: Option<String>,
-    /// Whether this error is fatal (unrecoverable at the client level).
-    fatal: bool,
-    /// Whether this error was surfaced by a transactional operation while the
-    /// transaction must be aborted (librdkafka's
-    /// `rd_kafka_error_txn_requires_abort()`, per CLAUDE.md §10.3). Java has no
-    /// equivalent — it signals through exception subtypes — so the producer's
-    /// `TransactionManager` stamps this on the errors it surfaces from the
-    /// `ABORTABLE_ERROR` state.
-    requires_abort: bool,
+    /// The underlying cause — Java's `KafkaException(String, Throwable)`.
+    source: Option<Box<Error>>,
 }
 
-impl KafkaGenericError {
-    /// Create a `KafkaGenericError` from an error code with the default message.
+impl KafkaError {
+    // The four constructors below map one-for-one onto Java's four
+    // `KafkaException` constructors — `()` (`KafkaException.java:38`),
+    // `(String message)` (`:30`), `(Throwable cause)` (`:34`) and
+    // `(String message, Throwable cause)` (`:26`) — with a leading `error: Errors`
+    // that has no Java counterpart: it carries what Java's subclass identity
+    // carried, since this struct stands in for the whole base class (CLAUDE.md
+    // §10.3). `error` is therefore in every signature, so the parameter-name
+    // intersection is `{error}` and `new(error)` — Java's no-arg form — keeps the
+    // plain name under CLAUDE.md §2; the rest are suffixed with the Rust
+    // parameters beyond it, in declaration order.
+
+    /// Create a `KafkaError` from an error code with the default message.
+    /// Mirrors Java's no-arg `KafkaException()`.
     pub fn new(error: Errors) -> Self {
-        Self { error, custom_message: None, fatal: false, requires_abort: false }
+        Self { error, custom_message: None, source: None }
     }
 
-    /// Create a `KafkaGenericError` from an error code with a custom message.
+    /// Create a `KafkaError` from an error code with a custom message.
+    /// Mirrors Java's `KafkaException(String message)`.
     pub fn with_message(error: Errors, message: impl Into<String>) -> Self {
-        Self { error, custom_message: Some(message.into()), fatal: false, requires_abort: false }
+        Self { error, custom_message: Some(message.into()), source: None }
     }
 
-    /// Create a fatal `KafkaGenericError`.
-    ///
-    /// Fatal errors indicate that the client cannot recover and must be
-    /// propagated to the application.
-    pub fn fatal(error: Errors, message: impl Into<String>) -> Self {
-        Self { error, custom_message: Some(message.into()), fatal: true, requires_abort: false }
+    /// Create a `KafkaError` from an error code, a custom message, and the error
+    /// that caused it. Mirrors Java's `KafkaException(String message, Throwable cause)`.
+    pub fn with_message_source(error: Errors, message: impl Into<String>, source: Error) -> Self {
+        Self { error, custom_message: Some(message.into()), source: Some(Box::new(source)) }
+    }
+
+    /// Create a `KafkaError` from an error code and the error that caused it,
+    /// keeping the code's default message. Mirrors `KafkaException(Throwable cause)`.
+    pub fn with_source(error: Errors, source: Error) -> Self {
+        Self { error, custom_message: None, source: Some(Box::new(source)) }
+    }
+
+    /// The underlying cause, if any. Mirrors Java's `getCause()`.
+    pub fn source(&self) -> Option<&Error> {
+        self.source.as_deref()
     }
 
     /// The protocol error code.
@@ -106,924 +147,52 @@ impl KafkaGenericError {
             None => self.error.message(),
         }
     }
-
-    /// Whether this error is retriable.
-    ///
-    /// Delegates to [`Errors::is_retriable()`].
-    pub fn is_retriable(&self) -> bool {
-        self.error.is_retriable()
-    }
-
-    /// Whether this error is fatal (unrecoverable at the client level).
-    pub fn is_fatal(&self) -> bool {
-        self.fatal
-    }
-
-    /// Whether this error requires the transaction to be aborted.
-    ///
-    /// True either because the broker said so on the wire (KIP-890's
-    /// `TRANSACTION_ABORTABLE` code) or because the producer's transaction
-    /// state machine stamped the error on its way out of the
-    /// `ABORTABLE_ERROR` state (see the `requires_abort` field).
-    pub fn txn_requires_abort(&self) -> bool {
-        self.requires_abort || self.error == Errors::TransactionAbortable
-    }
 }
 
-impl fmt::Display for KafkaGenericError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.message())
-    }
-}
-
-impl std::error::Error for KafkaGenericError {}
-
-// ---------------------------------------------------------------------------
-// Specific error structs — correspond to Java error subclasses
-// ---------------------------------------------------------------------------
-
-/// Topic authorization failure with the set of unauthorized topics.
-///
-/// Corresponds to Java's `TopicAuthorizationException`.
-#[derive(Clone, Debug)]
-pub struct TopicAuthorizationError {
-    /// Base error fields.
-    kafka_error: KafkaGenericError,
-    /// The set of unauthorized topics.
-    pub unauthorized_topics: HashSet<String>,
-}
-
-impl TopicAuthorizationError {
-    /// Create a new topic authorization error.
-    pub fn new(unauthorized_topics: HashSet<String>) -> Self {
-        Self {
-            kafka_error: KafkaGenericError::new(Errors::TopicAuthorizationFailed),
-            unauthorized_topics,
-        }
-    }
-
-    /// Access the base error.
-    pub fn kafka_error(&self) -> &KafkaGenericError {
-        &self.kafka_error
-    }
-}
-
-/// Invalid topic error with the set of invalid topics.
-///
-/// Corresponds to Java's `InvalidTopicException`.
-#[derive(Clone, Debug)]
-pub struct InvalidTopicError {
-    /// Base error fields.
-    kafka_error: KafkaGenericError,
-    /// The set of invalid topics.
-    pub invalid_topics: HashSet<String>,
-}
-
-impl InvalidTopicError {
-    /// Create a new invalid topic error.
-    pub fn new(invalid_topics: HashSet<String>) -> Self {
-        Self {
-            kafka_error: KafkaGenericError::new(Errors::InvalidTopicException),
-            invalid_topics,
-        }
-    }
-
-    /// Access the base error.
-    pub fn kafka_error(&self) -> &KafkaGenericError {
-        &self.kafka_error
-    }
-}
-
-/// Group authorization failure with the group ID.
-///
-/// Corresponds to Java's `GroupAuthorizationException`.
-#[derive(Clone, Debug)]
-pub struct GroupAuthorizationError {
-    /// Base error fields.
-    kafka_error: KafkaGenericError,
-    /// The group ID that failed authorization.
-    pub group_id: String,
-}
-
-impl GroupAuthorizationError {
-    /// Create a new group authorization error.
-    ///
-    /// Mirrors Java's `GroupAuthorizationException.forGroupId(groupId)`, whose
-    /// message is always `"Not authorized to access group: {groupId}"`
-    /// (`GroupAuthorizationException.java`). Defaulting the message here means
-    /// every `KafkaError::group_authorization(id)` call site carries that text
-    /// rather than the generic error-code fallback.
-    pub fn new(group_id: impl Into<String>) -> Self {
-        let group_id = group_id.into();
-        Self {
-            kafka_error: KafkaGenericError::with_message(
-                Errors::GroupAuthorizationFailed,
-                format!("Not authorized to access group: {group_id}"),
-            ),
-            group_id,
-        }
-    }
-
-    /// Create a group authorization error carrying a custom message.
-    ///
-    /// Mirrors Java's `GroupAuthorizationException(String message)` /
-    /// `forGroupId(...)`, where the exception message is caller-supplied
-    /// rather than the default error text. Used when the coordinator manager
-    /// surfaces a fatal `GroupAuthorizationException("...")`.
-    pub fn with_message(group_id: impl Into<String>, message: impl Into<String>) -> Self {
-        Self {
-            kafka_error: KafkaGenericError::with_message(Errors::GroupAuthorizationFailed, message),
-            group_id: group_id.into(),
-        }
-    }
-
-    /// Access the base error.
-    pub fn kafka_error(&self) -> &KafkaGenericError {
-        &self.kafka_error
-    }
-}
-
-/// Throttling quota exceeded error carrying the throttle time.
-///
-/// Corresponds to Java's `ThrottlingQuotaExceededException` (a
-/// `RetriableException` subclass carrying error code
-/// [`Errors::ThrottlingQuotaExceeded`] plus a `throttleTimeMs`).
-#[derive(Clone, Debug)]
-pub struct ThrottlingQuotaExceededError {
-    /// Base error fields.
-    kafka_error: KafkaGenericError,
-    /// The amount of time to wait before retrying, in milliseconds.
-    pub throttle_time_ms: i32,
-}
-
-impl ThrottlingQuotaExceededError {
-    /// Create a new throttling quota exceeded error.
-    pub fn new(throttle_time_ms: i32, message: impl Into<String>) -> Self {
-        Self {
-            kafka_error: KafkaGenericError::with_message(Errors::ThrottlingQuotaExceeded, message),
-            throttle_time_ms,
-        }
-    }
-
-    /// Access the base error.
-    pub fn kafka_error(&self) -> &KafkaGenericError {
-        &self.kafka_error
-    }
-
-    /// The amount of time to wait before retrying, in milliseconds.
-    pub fn throttle_time_ms(&self) -> i32 {
-        self.throttle_time_ms
-    }
-}
-
-// ---------------------------------------------------------------------------
-// KafkaError — unified enum for polymorphic error handling
-// ---------------------------------------------------------------------------
-
-/// Unified Kafka error type for polymorphic error handling.
-///
-/// This enum wraps the error struct hierarchy so that any Kafka error can
-/// be stored and returned through a single type. Each variant holds a
-/// specific error struct that contains [`KafkaGenericError`] as its base.
-///
-/// Common methods (`error()`, `code()`, `message()`, `is_retriable()`,
-/// `is_fatal()`, `txn_requires_abort()`) are delegated to the inner
-/// [`KafkaGenericError`] base.
-///
-/// This type is used in `Result` return types and `Option` storage where
-/// any kind of Kafka error may occur.
-#[derive(Clone, Debug)]
-pub enum KafkaError {
-    /// Generic Kafka error with no additional context.
-    Generic(KafkaGenericError),
-    /// Topic authorization failure with unauthorized topic set.
-    TopicAuthorization(TopicAuthorizationError),
-    /// Invalid topic error with invalid topic set.
-    InvalidTopic(InvalidTopicError),
-    /// Group authorization failure with group ID.
-    GroupAuthorization(GroupAuthorizationError),
-    /// Throttling quota exceeded error carrying the throttle time.
-    ///
-    /// Corresponds to Java's `ThrottlingQuotaExceededException`.
-    ThrottlingQuotaExceeded(ThrottlingQuotaExceededError),
-    /// Buffer exhausted error — the producer cannot allocate memory for a record
-    /// because the buffer pool is full and the max blocking time has elapsed.
-    ///
-    /// Corresponds to Java's `BufferExhaustedException`.
-    BufferExhausted(KafkaGenericError),
-    /// Illegal argument error — an invalid argument was provided to a method.
-    ///
-    /// Corresponds to Java's `IllegalArgumentException`.
-    IllegalArgument(String),
-    /// Illegal state error — a method was called in an invalid state.
-    ///
-    /// Corresponds to Java's `IllegalStateException`.
-    IllegalState(String),
-    /// Timeout error — an operation did not complete within the specified time.
-    ///
-    /// Corresponds to Java's `TimeoutException`.
-    Timeout(String),
-    /// Record too large error — the record is larger than the configured maximum.
-    ///
-    /// Corresponds to Java's `RecordTooLargeException`.
-    RecordTooLarge(String),
-    /// Serialization error — the key or value could not be serialized.
-    ///
-    /// Corresponds to Java's `SerializationException`.
-    Serialization(String),
-    /// Wakeup error — a blocking operation was preempted by `wakeup()`.
-    ///
-    /// Corresponds to Java's `WakeupException` (extends `KafkaException`,
-    /// carries no error code). Used by `Consumer::wakeup()` to break out
-    /// of a `poll()` / `commit_sync()` / etc. call.
-    Wakeup(String),
-    /// A plain Kafka error — Java's `KafkaException` thrown directly, i.e.
-    /// *not* an `ApiException` subclass and carrying no protocol error code.
-    ///
-    /// The distinction is behavioural, not cosmetic:
-    /// `KafkaProducer.doSend` catches `ApiException` first (invokes the user
-    /// callback with the placeholder metadata and returns a failed future,
-    /// `KafkaProducer.java:1056-1068`) and a bare `KafkaException` second
-    /// (records the error, notifies the interceptors and **rethrows** without
-    /// invoking the callback, `:1073-1077`). Modelling one of these throws as
-    /// an `ApiException` would fire a user callback where Java guarantees it
-    /// does not fire at all.
-    ///
-    /// The producer raises it in two places:
-    /// - `RecordAccumulator.tryAppend` — "Producer closed while send in
-    ///   progress" (`RecordAccumulator.java:427-428`)
-    /// - `BufferPool.allocate` — "Producer closed while allocating memory"
-    ///   (`BufferPool.java:119`, `:157`)
-    ///
-    /// Like the other message-only variants it has no [`Errors`] code, so
-    /// [`error()`](Self::error) reports [`Errors::UnknownServerError`].
-    Kafka(String),
-    /// Concurrent modification error — the consumer was accessed from more
-    /// than one thread.
-    ///
-    /// Corresponds to Java's `java.util.ConcurrentModificationException`,
-    /// thrown by `KafkaConsumer.acquire()` ("KafkaConsumer is not safe for
-    /// multi-threaded access"). Like `IllegalState`, it is a plain
-    /// `RuntimeException` — neither an `ApiException` nor a `KafkaException`
-    /// — so it is never retriable and never fatal.
-    ConcurrentModification(String),
-    /// Transaction aborted error — undrained batches are being failed because
-    /// the transaction was aborted.
-    ///
-    /// Corresponds to Java's `TransactionAbortedException`, which extends
-    /// `ApiException` but carries **no wire error code** (it is absent from
-    /// `Errors.java`), so it needs its own variant rather than a
-    /// [`Generic`](Self::Generic) wrapping an [`Errors`]. Java throws it from
-    /// exactly one place: `Sender.abortBatches`, as
-    /// `accumulator.abortUndrainedBatches(new TransactionAbortedException())`.
-    ///
-    /// Unlike [`Wakeup`](Self::Wakeup) this IS an `ApiException`, so
-    /// [`is_api_exception`](Self::is_api_exception) returns `true` for it.
-    TransactionAborted(String),
-}
-
-impl KafkaError {
-    // -- Convenience constructors ------------------------------------------
-
-    /// Create a generic error from an error code.
-    pub fn new(error: Errors) -> Self {
-        Self::Generic(KafkaGenericError::new(error))
-    }
-
-    /// Create a generic error with a custom message.
-    pub fn with_message(error: Errors, message: impl Into<String>) -> Self {
-        Self::Generic(KafkaGenericError::with_message(error, message))
-    }
-
-    /// Create a fatal error.
-    pub fn fatal(error: Errors, message: impl Into<String>) -> Self {
-        Self::Generic(KafkaGenericError::fatal(error, message))
-    }
-
-    /// Create a topic authorization error.
-    pub fn topic_authorization(topics: HashSet<String>) -> Self {
-        Self::TopicAuthorization(TopicAuthorizationError::new(topics))
-    }
-
-    /// Create an invalid topic error.
-    pub fn invalid_topics(topics: HashSet<String>) -> Self {
-        Self::InvalidTopic(InvalidTopicError::new(topics))
-    }
-
-    /// Create a group authorization error.
-    pub fn group_authorization(group_id: impl Into<String>) -> Self {
-        Self::GroupAuthorization(GroupAuthorizationError::new(group_id))
-    }
-
-    /// Create a group authorization error carrying a custom message
-    /// (Java: `new GroupAuthorizationException(message)`).
-    pub fn group_authorization_with_message(group_id: impl Into<String>, message: impl Into<String>) -> Self {
-        Self::GroupAuthorization(GroupAuthorizationError::with_message(group_id, message))
-    }
-
-    /// Create an invalid group ID error.
-    ///
-    /// Corresponds to Java's `InvalidGroupIdException` (an `ApiException`
-    /// subclass carrying error code [`Errors::InvalidGroupId`]). Thrown
-    /// by group-management / offset-commit APIs when the consumer was
-    /// constructed without a valid `group.id`.
-    pub fn invalid_group_id(message: impl Into<String>) -> Self {
-        Self::Generic(KafkaGenericError::with_message(Errors::InvalidGroupId, message))
-    }
-
-    /// Create a throttling quota exceeded error.
-    ///
-    /// Corresponds to Java's `ThrottlingQuotaExceededException(int, String)`.
-    pub fn throttling_quota_exceeded(throttle_time_ms: i32, message: impl Into<String>) -> Self {
-        Self::ThrottlingQuotaExceeded(ThrottlingQuotaExceededError::new(throttle_time_ms, message))
-    }
-
-    /// The throttle time carried by a [`ThrottlingQuotaExceeded`](Self::ThrottlingQuotaExceeded)
-    /// error, or `None` for any other error.
-    ///
-    /// Mirrors Java's `ThrottlingQuotaExceededException.throttleTimeMs()`.
-    pub fn throttle_time_ms(&self) -> Option<i32> {
-        match self {
-            Self::ThrottlingQuotaExceeded(e) => Some(e.throttle_time_ms),
-            _ => None,
-        }
-    }
-
-    /// Create a buffer exhausted error.
-    ///
-    /// Corresponds to Java's `BufferExhaustedException`.
-    pub fn buffer_exhausted(message: impl Into<String>) -> Self {
-        Self::BufferExhausted(KafkaGenericError::with_message(Errors::UnknownServerError, message))
-    }
-
-    /// Create an illegal argument error.
-    ///
-    /// Corresponds to Java's `IllegalArgumentException`.
-    pub fn illegal_argument(message: impl Into<String>) -> Self {
-        Self::IllegalArgument(message.into())
-    }
-
-    /// Create an illegal state error.
-    ///
-    /// Corresponds to Java's `IllegalStateException`.
-    pub fn illegal_state(message: impl Into<String>) -> Self {
-        Self::IllegalState(message.into())
-    }
-
-    /// Create a timeout error.
-    ///
-    /// Corresponds to Java's `TimeoutException`.
-    pub fn timeout(message: impl Into<String>) -> Self {
-        Self::Timeout(message.into())
-    }
-
-    /// Create a record too large error.
-    ///
-    /// Corresponds to Java's `RecordTooLargeException`.
-    pub fn record_too_large(message: impl Into<String>) -> Self {
-        Self::RecordTooLarge(message.into())
-    }
-
-    /// Create a serialization error.
-    ///
-    /// Corresponds to Java's `SerializationException`.
-    pub fn serialization(message: impl Into<String>) -> Self {
-        Self::Serialization(message.into())
-    }
-
-    /// Create an unsupported version error.
-    pub fn unsupported_version(message: impl Into<String>) -> Self {
-        Self::Generic(KafkaGenericError::with_message(Errors::UnsupportedVersion, message))
-    }
-
-    /// Create a wakeup error.
-    ///
-    /// Corresponds to Java's `WakeupException`. Returned from blocking
-    /// `Consumer` operations (`poll`, `commit_sync`, `position`, etc.)
-    /// when `wakeup()` is invoked from another task.
-    pub fn wakeup(message: impl Into<String>) -> Self {
-        Self::Wakeup(message.into())
-    }
-
-    /// Create a concurrent modification error.
-    ///
-    /// Corresponds to Java's `ConcurrentModificationException` thrown by
-    /// `KafkaConsumer.acquire()` when the consumer is accessed from more
-    /// than one thread.
-    pub fn concurrent_modification(message: impl Into<String>) -> Self {
-        Self::ConcurrentModification(message.into())
-    }
-
-    /// Create a transaction aborted error with Java's default message.
-    ///
-    /// Corresponds to Java's no-arg `TransactionAbortedException()`, whose
-    /// message is `"Failing batch since transaction was aborted"`.
-    pub fn transaction_aborted() -> Self {
-        Self::TransactionAborted("Failing batch since transaction was aborted".to_string())
-    }
-
-    /// Create a transaction aborted error with a custom message.
-    ///
-    /// Corresponds to Java's `TransactionAbortedException(String)`.
-    pub fn transaction_aborted_with_message(message: impl Into<String>) -> Self {
-        Self::TransactionAborted(message.into())
-    }
-
-    /// Create a plain Kafka error — Java's `new KafkaException(message)`.
-    ///
-    /// See [`Kafka`](Self::Kafka): this is a `KafkaException` that is **not**
-    /// an `ApiException`, which is what keeps `KafkaProducer::do_send*` from
-    /// invoking the user callback for it.
-    pub fn kafka(message: impl Into<String>) -> Self {
-        Self::Kafka(message.into())
-    }
-
-    /// Create a record batch too large error.
-    ///
-    /// Corresponds to Java's `RecordBatchTooLargeException`.
-    pub fn record_batch_too_large(message: impl Into<String>) -> Self {
-        Self::Generic(KafkaGenericError::with_message(Errors::MessageTooLarge, message))
-    }
-
-    // -- Base access -------------------------------------------------------
-
-    /// Access the base [`KafkaGenericError`] common to all variants.
-    ///
-    /// Returns `None` for variants that do not carry a [`KafkaGenericError`]
-    /// (e.g. [`IllegalArgument`](Self::IllegalArgument), [`IllegalState`](Self::IllegalState)).
-    pub fn kafka_error(&self) -> Option<&KafkaGenericError> {
-        match self {
-            Self::Generic(e) | Self::BufferExhausted(e) => Some(e),
-            Self::TopicAuthorization(e) => Some(&e.kafka_error),
-            Self::InvalidTopic(e) => Some(&e.kafka_error),
-            Self::GroupAuthorization(e) => Some(&e.kafka_error),
-            Self::ThrottlingQuotaExceeded(e) => Some(&e.kafka_error),
-            Self::IllegalArgument(_)
-            | Self::IllegalState(_)
-            | Self::Timeout(_)
-            | Self::RecordTooLarge(_)
-            | Self::Serialization(_)
-            | Self::Wakeup(_)
-            | Self::Kafka(_)
-            | Self::ConcurrentModification(_)
-            | Self::TransactionAborted(_) => None,
-        }
-    }
-
-    /// Marks this error as requiring a transaction abort (librdkafka's
-    /// `rd_kafka_error_txn_requires_abort()`; CLAUDE.md §10.3). Consuming
-    /// builder used by the producer's `TransactionManager` when it surfaces an
-    /// error from the `ABORTABLE_ERROR` state.
-    ///
-    /// Most `KafkaGenericError`-based variants are stamped in place. The
-    /// remaining payload-only variants carry no [`KafkaGenericError`] base to
-    /// hold the flag: the abortable state's stored cause is a wire-level error
-    /// in practice, and the string-payload variants (`Timeout`, ...) represent
-    /// conditions librdkafka does not classify as requires-abort either, so they
-    /// pass through unchanged.
-    ///
-    /// [`IllegalState`](Self::IllegalState) is the one exception, handled
-    /// **symmetrically to [`into_fatal`](Self::into_fatal)**: rather than
-    /// silently dropping the flag, it is **promoted** to a wire-code
-    /// ([`Generic`](Self::Generic)) error preserving the message so the
-    /// requires-abort flag survives. In practice this promotion is defensive —
-    /// the manager's abortable path (`maybe_fail_with_error` /
-    /// `maybe_terminate_request_with_error`) only stamps requires-abort on a
-    /// wire-level cause; an `IllegalState` `last_error` is produced solely by the
-    /// KAFKA-14831 poison transition, which moves to `FatalError`, so it never
-    /// reaches the abortable branch. The promotion removes the silent drop and
-    /// keeps the two builders consistent (`error()` is
-    /// [`Errors::UnknownServerError`] for both variants, so the code is
-    /// unchanged).
-    pub(crate) fn with_txn_requires_abort(mut self) -> Self {
-        match &mut self {
-            Self::Generic(e) | Self::BufferExhausted(e) => e.requires_abort = true,
-            Self::TopicAuthorization(e) => e.kafka_error.requires_abort = true,
-            Self::InvalidTopic(e) => e.kafka_error.requires_abort = true,
-            Self::GroupAuthorization(e) => e.kafka_error.requires_abort = true,
-            Self::ThrottlingQuotaExceeded(e) => e.kafka_error.requires_abort = true,
-            // Promote (see the doc comment): symmetric with `into_fatal`, so the
-            // requires-abort flag is preserved rather than silently dropped.
-            Self::IllegalState(message) => {
-                return Self::with_message(Errors::UnknownServerError, std::mem::take(message))
-                    .with_txn_requires_abort();
-            },
-            Self::IllegalArgument(_)
-            | Self::Timeout(_)
-            | Self::RecordTooLarge(_)
-            | Self::Serialization(_)
-            | Self::Wakeup(_)
-            | Self::Kafka(_)
-            | Self::ConcurrentModification(_)
-            | Self::TransactionAborted(_) => {},
-        }
-        self
-    }
-
-    /// Marks this error as fatal (unrecoverable at the client level;
-    /// librdkafka's `rd_kafka_error_is_fatal()`, per CLAUDE.md §10.3),
-    /// preserving its error code and message.
-    ///
-    /// Consuming builder used by the producer's `TransactionManager` at the
-    /// choke points that move the state machine to [`State::FatalError`], so
-    /// the [`KafkaError`] the application actually receives reports
-    /// [`is_fatal`](Self::is_fatal) `== true`. Java signals this through the
-    /// exception hierarchy (`ProducerFencedException` and the other fatal
-    /// causes leave the producer in a state "from which it cannot recover" —
-    /// `TransactionManager.java:270`); the flat error code carries no such
-    /// distinction on its own, so it is stamped here.
-    ///
-    /// Most `KafkaGenericError`-based variants are stamped in place, preserving
-    /// their code and message. [`IllegalState`](Self::IllegalState) has no
-    /// `KafkaGenericError` base to hold the flag, yet a fatal transition can
-    /// leave one in `last_error`: the producer's KAFKA-14831 poison transition
-    /// (`transition_to`) stores an `IllegalState` while moving to
-    /// [`State::FatalError`], and `maybe_fail_with_error` then surfaces it to the
-    /// application from a fatal state. So it must report fatal too — it is
-    /// **promoted** to a fatal wire-code ([`Generic`](Self::Generic)) error
-    /// preserving the message (Java throws `IllegalStateException` there and has
-    /// no `is_fatal()` concept; `error()` is [`Errors::UnknownServerError`] for
-    /// both variants, so the code is unchanged). The remaining payload-only
-    /// variants (`Timeout`, `Serialization`, …) never reach `into_fatal` on a
-    /// fatal path, so they pass through unchanged.
-    ///
-    /// [`State::FatalError`]: crate::producer::internals::transaction_manager
-    /// [`TransactionManager`]: crate::producer::internals::TransactionManager
-    pub(crate) fn into_fatal(mut self) -> Self {
-        match &mut self {
-            Self::Generic(e) | Self::BufferExhausted(e) => e.fatal = true,
-            Self::TopicAuthorization(e) => e.kafka_error.fatal = true,
-            Self::InvalidTopic(e) => e.kafka_error.fatal = true,
-            Self::GroupAuthorization(e) => e.kafka_error.fatal = true,
-            Self::ThrottlingQuotaExceeded(e) => e.kafka_error.fatal = true,
-            // Promote (see the doc comment): the poison path is the only source
-            // of an `IllegalState` `last_error`, and it is always fatal.
-            Self::IllegalState(message) => {
-                return Self::with_message(Errors::UnknownServerError, std::mem::take(message)).into_fatal();
-            },
-            Self::IllegalArgument(_)
-            | Self::Timeout(_)
-            | Self::RecordTooLarge(_)
-            | Self::Serialization(_)
-            | Self::Wakeup(_)
-            | Self::Kafka(_)
-            | Self::ConcurrentModification(_)
-            | Self::TransactionAborted(_) => {},
-        }
-        self
-    }
-
-    // -- Delegating methods ------------------------------------------------
-
-    /// The protocol error code.
-    ///
-    /// Returns [`Errors::UnknownServerError`] for variants without a
-    /// [`KafkaGenericError`].
-    pub fn error(&self) -> Errors {
-        match self.kafka_error() {
-            Some(e) => e.error(),
-            None => Errors::UnknownServerError,
-        }
-    }
-
-    /// The numeric error code (i16).
-    pub fn code(&self) -> i16 {
-        self.error().code()
-    }
-
-    /// The error message.
-    pub fn message(&self) -> &str {
-        match self {
-            Self::IllegalArgument(msg)
-            | Self::IllegalState(msg)
-            | Self::Timeout(msg)
-            | Self::RecordTooLarge(msg)
-            | Self::Serialization(msg)
-            | Self::Wakeup(msg)
-            | Self::Kafka(msg)
-            | Self::ConcurrentModification(msg)
-            | Self::TransactionAborted(msg) => msg,
-            _ => self.kafka_error().map_or("Unknown error", |e| e.message()),
-        }
-    }
-
-    /// Whether this error is retriable.
-    ///
-    /// [`IllegalArgument`](Self::IllegalArgument) and
-    /// [`IllegalState`](Self::IllegalState) are never retriable.
-    ///
-    /// [`Timeout`](Self::Timeout) is retriable: Java's `TimeoutException`
-    /// extends `RetriableException` extends `ApiException`, so timeouts are
-    /// transient by definition. Special-cased here because `Timeout` has no
-    /// embedded `Errors` code and would otherwise fall through to `false`.
-    pub fn is_retriable(&self) -> bool {
-        matches!(self, Self::Timeout(_)) || self.kafka_error().is_some_and(|e| e.is_retriable())
-    }
-
-    /// Whether this error is fatal.
-    ///
-    /// [`IllegalArgument`](Self::IllegalArgument) and
-    /// [`IllegalState`](Self::IllegalState) are not marked fatal.
-    pub fn is_fatal(&self) -> bool {
-        self.kafka_error().is_some_and(|e| e.is_fatal())
-    }
-
-    /// Whether this error requires the transaction to be aborted.
-    pub fn txn_requires_abort(&self) -> bool {
-        self.kafka_error().is_some_and(|e| e.txn_requires_abort())
-    }
-
-    /// Whether this error corresponds to a Java `ApiException`.
-    ///
-    /// In Java, `ApiException` is a subclass of `KafkaException` that
-    /// represents errors from the Kafka API. In `KafkaProducer.doSend()`,
-    /// `ApiException`s are caught and returned via a failed future (with
-    /// callback invocation), while other exceptions propagate directly.
-    ///
-    /// The following error types correspond to Java `ApiException` subclasses:
-    /// - `InvalidTopic` (InvalidTopicException extends ApiException)
-    /// - `RecordTooLarge` (RecordTooLargeException extends ApiException)
-    /// - `Timeout` (TimeoutException extends RetriableException extends ApiException)
-    /// - `Generic` (covers all other Errors-based exceptions)
-    /// - `TopicAuthorization` (TopicAuthorizationException extends ApiException)
-    /// - `GroupAuthorization` (GroupAuthorizationException extends ApiException)
-    /// - `BufferExhausted` (BufferExhaustedException extends ApiException)
-    /// - `TransactionAborted` (TransactionAbortedException extends ApiException,
-    ///   despite carrying no error code)
-    ///
-    /// NOT `ApiException`:
-    /// - `IllegalArgument` (IllegalArgumentException extends RuntimeException)
-    /// - `IllegalState` (IllegalStateException extends RuntimeException)
-    /// - `Serialization` (SerializationException extends KafkaException, NOT ApiException)
-    /// - `Wakeup` (WakeupException extends KafkaException, NOT ApiException)
-    /// - `Kafka` (a bare KafkaException — see [`Kafka`](Self::Kafka))
-    /// - `ConcurrentModification` (java.util.ConcurrentModificationException)
-    ///
-    /// Not to be confused with [`is_kafka_error`](Self::is_kafka_error), which
-    /// asks the broader question (is this from Kafka at all, vs. a generic
-    /// programming error?). `Serialization` and `Wakeup` separate the two.
-    pub fn is_api_exception(&self) -> bool {
-        !matches!(
-            self,
-            Self::IllegalArgument(_)
-                | Self::IllegalState(_)
-                | Self::Serialization(_)
-                | Self::Wakeup(_)
-                | Self::Kafka(_)
-                | Self::ConcurrentModification(_)
-        )
-    }
-
-    /// Whether this is a Kafka error rather than a generic programming
-    /// error.
-    ///
-    /// This enum flattens two families that Java keeps apart by class
-    /// hierarchy: Kafka's own `KafkaException` tree, and the generic
-    /// `java.lang` / `java.util` runtime exceptions that sit beside it as
-    /// siblings rather than below it (`common/KafkaException.java:22`).
-    /// The predicate recovers that distinction, mirroring Java's
-    /// `t instanceof KafkaException` test.
-    ///
-    /// Returns `false` for exactly the generic variants — the ones raised
-    /// by misuse of the client rather than by Kafka itself:
-    /// - [`IllegalArgument`](Self::IllegalArgument) (`IllegalArgumentException`)
-    /// - [`IllegalState`](Self::IllegalState) (`IllegalStateException`)
-    /// - [`ConcurrentModification`](Self::ConcurrentModification)
-    ///   (`ConcurrentModificationException`)
-    ///
-    /// Everything else returns `true`: the `ApiException` subtypes,
-    /// [`Serialization`](Self::Serialization), [`Wakeup`](Self::Wakeup) and
-    /// the bare [`Generic`](Self::Generic) all map to `KafkaException`
-    /// subclasses.
-    ///
-    /// Beware the polarity difference against the sibling
-    /// [`is_api_exception`](Self::is_api_exception): both return `true` for
-    /// the in-hierarchy case, but they are not the same test — `Serialization`
-    /// and `Wakeup` are Kafka errors that are NOT `ApiException`s, so they
-    /// return `true` here and `false` there.
-    ///
-    /// Two call sites depend on this:
-    /// - `ConsumerUtils.maybeWrapAsKafkaException(t, message)`
-    ///   (`ConsumerUtils.java:256`) — a Kafka error passes through unchanged;
-    ///   a generic one gets wrapped in a new `KafkaException(message, t)`.
-    /// - `FetchCollector` — Java's `catch (KafkaException e)` cannot catch a
-    ///   generic error, so those propagate where Kafka errors are swallowed.
-    pub fn is_kafka_error(&self) -> bool {
-        !matches!(
-            self,
-            Self::IllegalArgument(_) | Self::IllegalState(_) | Self::ConcurrentModification(_)
-        )
+impl ErrorSource for KafkaError {
+    fn source(&self) -> Option<&Error> {
+        self.source.as_deref()
     }
 }
 
 impl fmt::Display for KafkaError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Generic(e) | Self::BufferExhausted(e) => write!(f, "{e}"),
-            Self::TopicAuthorization(e) => {
-                write!(f, "{}: {:?}", e.kafka_error, e.unauthorized_topics)
-            },
-            Self::InvalidTopic(e) => {
-                write!(f, "{}: {:?}", e.kafka_error, e.invalid_topics)
-            },
-            Self::GroupAuthorization(e) => {
-                write!(f, "{}: {}", e.kafka_error, e.group_id)
-            },
-            Self::ThrottlingQuotaExceeded(e) => write!(f, "{}", e.kafka_error),
-            Self::IllegalArgument(msg) => write!(f, "IllegalArgumentError: {msg}"),
-            Self::IllegalState(msg) => write!(f, "IllegalStateError: {msg}"),
-            Self::Timeout(msg) => write!(f, "TimeoutError: {msg}"),
-            Self::RecordTooLarge(msg) => write!(f, "RecordTooLargeError: {msg}"),
-            Self::Serialization(msg) => write!(f, "SerializationError: {msg}"),
-            Self::Wakeup(msg) => write!(f, "WakeupError: {msg}"),
-            Self::Kafka(msg) => write!(f, "KafkaError: {msg}"),
-            Self::ConcurrentModification(msg) => write!(f, "ConcurrentModificationError: {msg}"),
-            Self::TransactionAborted(msg) => write!(f, "TransactionAbortedError: {msg}"),
-        }
+        write!(f, "{}", self.message())
     }
 }
 
-impl std::error::Error for KafkaError {}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// `ConcurrentModification` mirrors `IllegalState`: a plain Java
-    /// `RuntimeException`, so it carries no protocol code, is never
-    /// retriable or fatal, and is neither an `ApiException` nor a
-    /// `KafkaException`.
-    #[test]
-    fn concurrent_modification_parity_with_illegal_state() {
-        let cme = KafkaError::concurrent_modification("KafkaConsumer is not safe for multi-threaded access.");
-        let ise = KafkaError::illegal_state("bad state");
-
-        assert_eq!(cme.message(), "KafkaConsumer is not safe for multi-threaded access.");
-        assert_eq!(cme.code(), ise.code());
-        assert_eq!(cme.error(), ise.error());
-        assert_eq!(cme.is_retriable(), ise.is_retriable());
-        assert!(!cme.is_retriable());
-        assert_eq!(cme.is_fatal(), ise.is_fatal());
-        assert!(!cme.is_fatal());
-        assert_eq!(cme.is_api_exception(), ise.is_api_exception());
-        assert!(!cme.is_api_exception());
-        assert_eq!(cme.is_kafka_error(), ise.is_kafka_error());
-        assert!(!cme.is_kafka_error());
-        assert!(cme.kafka_error().is_none());
+impl std::error::Error for KafkaError {
+    /// Wired to the stored source. This impl used to be empty, so `source()`
+    /// answered `None` even when a cause was present — Java's
+    /// `KafkaException(String, Throwable)` keeps it.
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.source.as_deref().map(|e| e as &(dyn std::error::Error + 'static))
     }
+}
 
-    #[test]
-    fn concurrent_modification_display() {
-        let cme = KafkaError::concurrent_modification("oops");
-        assert_eq!(cme.to_string(), "ConcurrentModificationError: oops");
+impl ErrorCode for KafkaError {
+    fn error(&self) -> Errors {
+        self.error
     }
+}
 
-    #[test]
-    fn transaction_aborted_default_message() {
-        // Java's no-arg TransactionAbortedException message, verbatim.
-        let err = KafkaError::transaction_aborted();
-        assert_eq!(err.message(), "Failing batch since transaction was aborted");
+// Hand-written rather than emitted by `error_name_impl!` in `super::error`: that
+// macro covers the payloads declared in their own files, and this one is
+// declared right here.
+impl ErrorName for KafkaError {
+    fn name(&self) -> &'static str {
+        "KafkaError"
     }
+}
 
-    #[test]
-    fn transaction_aborted_custom_message() {
-        let err = KafkaError::transaction_aborted_with_message("custom reason");
-        assert_eq!(err.message(), "custom reason");
-    }
-
-    #[test]
-    fn transaction_aborted_display() {
-        let err = KafkaError::transaction_aborted();
-        assert_eq!(
-            err.to_string(),
-            "TransactionAbortedError: Failing batch since transaction was aborted"
-        );
-    }
-
-    #[test]
-    fn transaction_aborted_has_no_error_code() {
-        // TransactionAbortedException is absent from Java's Errors enum, which
-        // is the whole reason this is its own variant.
-        assert!(KafkaError::transaction_aborted().kafka_error().is_none());
-    }
-
-    #[test]
-    fn transaction_aborted_is_api_exception() {
-        // Java: TransactionAbortedException extends ApiException. This is the
-        // difference from Wakeup, which is a KafkaException but NOT an
-        // ApiException — the distinction drives whether KafkaProducer.doSend()
-        // fails the future or propagates.
-        let err = KafkaError::transaction_aborted();
-        assert!(err.is_api_exception());
-        assert!(err.is_kafka_error());
-        assert!(!KafkaError::wakeup("w").is_api_exception());
-    }
-
-    #[test]
-    fn transaction_aborted_is_not_retriable_or_fatal() {
-        let err = KafkaError::transaction_aborted();
-        assert!(!err.is_retriable());
-        assert!(!err.is_fatal());
-        assert!(!err.txn_requires_abort());
-    }
-
-    /// The librdkafka-style requires-abort flag (CLAUDE.md §10.3): false by
-    /// default, stamped by `with_txn_requires_abort`, implied by the KIP-890
-    /// `TRANSACTION_ABORTABLE` wire code, independent of `is_fatal()`, and —
-    /// symmetric with `into_fatal` — promotes the payload-only `IllegalState`
-    /// to a wire-code error rather than silently dropping the flag.
-    #[test]
-    fn with_txn_requires_abort_stamps_and_promotes() {
-        let plain = KafkaError::new(Errors::MessageTooLarge);
-        assert!(!plain.txn_requires_abort());
-        assert!(!plain.is_fatal());
-
-        let stamped = KafkaError::new(Errors::MessageTooLarge).with_txn_requires_abort();
-        assert!(stamped.txn_requires_abort());
-        assert!(!stamped.is_fatal(), "requires-abort and fatal stay disjoint");
-        assert_eq!(stamped.error(), Errors::MessageTooLarge, "stamping changes no other observable");
-
-        // The wire code alone already answers true, unstamped.
-        assert!(KafkaError::new(Errors::TransactionAbortable).txn_requires_abort());
-
-        // `IllegalState` has no requires-abort-capable base, so — symmetric with
-        // `into_fatal` — it is promoted to a wire-code error preserving the message
-        // rather than silently dropping the flag.
-        let illegal = KafkaError::illegal_state("misuse").with_txn_requires_abort();
-        assert!(
-            illegal.txn_requires_abort(),
-            "a promoted IllegalState must carry requires-abort, not drop it"
-        );
-        assert_eq!(illegal.message(), "misuse", "the message is preserved across promotion");
-        assert!(!illegal.is_fatal(), "promotion does not set fatal");
-    }
-
-    /// The librdkafka-style fatal flag (CLAUDE.md §10.3): false by default,
-    /// stamped by `into_fatal`, preserves the code and (custom) message,
-    /// independent of `txn_requires_abort()`, and promotes the payload-only
-    /// `IllegalState` (which a fatal poison transition can produce) to a fatal
-    /// wire-code error rather than leaving it non-fatal.
-    #[test]
-    fn into_fatal_stamps_and_promotes() {
-        let plain = KafkaError::new(Errors::ProducerFenced);
-        assert!(!plain.is_fatal());
-
-        let stamped = KafkaError::new(Errors::ProducerFenced).into_fatal();
-        assert!(stamped.is_fatal());
-        assert_eq!(stamped.error(), Errors::ProducerFenced, "stamping changes no other observable");
-        assert!(!stamped.txn_requires_abort(), "fatal and requires-abort stay disjoint");
-
-        // A custom message survives the stamp (the UnknownServerError fatal path).
-        let with_message = KafkaError::with_message(Errors::UnknownServerError, "boom").into_fatal();
-        assert!(with_message.is_fatal());
-        assert_eq!(with_message.message(), "boom", "the custom message is preserved");
-
-        // `IllegalState` has no fatal-capable base, so `into_fatal` promotes it to
-        // a fatal wire-code error preserving the message — the KAFKA-14831 poison
-        // path surfaces an `IllegalState` from a fatal state that must report
-        // fatal (see `maybe_fail_with_error`).
-        let illegal = KafkaError::illegal_state("misuse").into_fatal();
-        assert!(illegal.is_fatal(), "a fatal IllegalState must be promoted, not left non-fatal");
-        assert_eq!(illegal.message(), "misuse", "the message is preserved across promotion");
-        assert!(!illegal.txn_requires_abort(), "promotion does not set requires-abort");
-    }
-
-    /// [`KafkaError::Kafka`] models a Java `KafkaException` thrown directly:
-    /// a `KafkaException` but **not** an `ApiException`. That single bit is
-    /// what decides whether `KafkaProducer.doSend` invokes the user callback
-    /// (`catch (ApiException e)`) or rethrows (`catch (KafkaException e)`),
-    /// so pin it here rather than only at the producer call site.
-    #[test]
-    fn bare_kafka_exception_is_not_an_api_exception() {
-        let bare = KafkaError::kafka("Producer closed while send in progress");
-
-        assert!(!bare.is_api_exception(), "a bare KafkaException is not an ApiException");
-        assert!(bare.is_kafka_error(), "but it *is* a KafkaException");
-        assert_eq!("Producer closed while send in progress", bare.message());
-        // No protocol code, like the other message-only variants.
-        assert!(bare.kafka_error().is_none());
-        assert_eq!(Errors::UnknownServerError, bare.error());
-        assert!(!bare.is_retriable());
-        assert!(!bare.is_fatal());
-        assert!(!bare.txn_requires_abort());
-        assert_eq!("KafkaError: Producer closed while send in progress", bare.to_string());
-
-        // Contrast with `Generic`, which is how an `Errors`-coded
-        // `ApiException` is modelled.
-        let api = KafkaError::with_message(Errors::UnknownServerError, "Producer closed while send in progress");
-        assert!(api.is_api_exception());
-    }
-
-    /// `KafkaError::group_authorization(id)` carries Java's
-    /// `GroupAuthorizationException.forGroupId(id)` message text by default,
-    /// rather than falling back to the generic error-code string.
-    #[test]
-    fn group_authorization_defaults_forgroupid_message() {
-        assert_eq!(
-            KafkaError::group_authorization("g1").message(),
-            "Not authorized to access group: g1"
-        );
-        // The custom-message constructor still overrides the default text.
-        assert_eq!(KafkaError::group_authorization_with_message("g1", "custom").message(), "custom");
+/// A *bare* `KafkaException`: `Error::KafkaError` is now only reached for
+/// [`Errors::None`], since every other code maps to its own class through
+/// [`Errors::error`]. So it answers for `KafkaException` itself and nothing
+/// else — in particular NOT [`is_api_error`](ErrorHierarchy::is_api_error),
+/// because `KafkaException` is the parent of `ApiException`, not an instance of
+/// it. The remaining predicates take the trait's `false`.
+impl ErrorHierarchy for KafkaError {
+    fn is_kafka_error(&self) -> bool {
+        true
     }
 }

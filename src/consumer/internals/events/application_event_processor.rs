@@ -70,15 +70,15 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
-use super::application_event::ApplicationEvent;
-use super::completable_event_reaper::CompletableEventReaper;
-use super::event_processor::EventProcessor;
-use crate::common::{IsolationLevel, KafkaError, TopicPartition};
+use super::ApplicationEvent;
+use super::CompletableEventReaper;
+use super::EventProcessor;
+use crate::common::{Error, IsolationLevel, TopicPartition};
+use crate::consumer::ConsumerRebalanceListener;
 use crate::consumer::OffsetAndMetadata;
-use crate::consumer::consumer_rebalance_listener::ConsumerRebalanceListener;
-use crate::consumer::internals::consumer_metadata::ConsumerMetadata;
-use crate::consumer::internals::request_managers::RequestManagers;
-use crate::consumer::internals::subscription_state::{FetchPosition, SubscriptionState};
+use crate::consumer::internals::ConsumerMetadata;
+use crate::consumer::internals::RequestManagers;
+use crate::consumer::internals::{FetchPosition, SubscriptionState};
 
 /// Translated from `ApplicationEventProcessor`. Owns shared references to
 /// the consumer's request managers, metadata, and subscription state and
@@ -100,7 +100,7 @@ pub(crate) struct ApplicationEventProcessor {
     /// `consumer-threading.md` §16.
     subscriptions: Arc<Mutex<SubscriptionState>>,
     /// Shared application-event reaper — same instance owned by
-    /// [`super::super::consumer_network_thread::ConsumerNetworkThread`].
+    /// [`super::super::ConsumerNetworkThread`].
     /// The processor registers SECONDARY handles (e.g. `offsets_ready`
     /// from `CommitAsync` / `CommitSync` when the commit manager is
     /// absent) so their deadlines are still enforced even though the
@@ -165,7 +165,7 @@ impl ApplicationEventProcessor {
     /// call and dropped before completing the handle (§16).
     fn process_assignment_change(
         &mut self,
-        handle: super::completable_event::CompletableEventHandle<()>,
+        handle: super::CompletableEventHandle<()>,
         current_time_ms: i64,
         partitions: HashSet<TopicPartition>,
     ) {
@@ -195,7 +195,7 @@ impl ApplicationEventProcessor {
                 handle.complete(());
             },
             Err(e) => {
-                handle.complete_exceptionally(e);
+                handle.complete_with_error(e);
             },
         }
     }
@@ -207,9 +207,9 @@ impl ApplicationEventProcessor {
     /// supplied strategy.
     fn process_reset_offset(
         &mut self,
-        handle: super::completable_event::CompletableEventHandle<()>,
+        handle: super::CompletableEventHandle<()>,
         partitions: HashSet<TopicPartition>,
-        offset_reset_strategy: super::super::auto_offset_reset_strategy::AutoOffsetResetStrategy,
+        offset_reset_strategy: super::super::AutoOffsetResetStrategy,
     ) {
         let result = {
             let mut guard = self.lock_subscriptions();
@@ -227,7 +227,7 @@ impl ApplicationEventProcessor {
                 handle.complete(());
             },
             Err(e) => {
-                handle.complete_exceptionally(e);
+                handle.complete_with_error(e);
             },
         }
     }
@@ -235,7 +235,7 @@ impl ApplicationEventProcessor {
     /// Java: `process(SeekUnvalidatedEvent)`.
     fn process_seek_unvalidated(
         &mut self,
-        handle: super::completable_event::CompletableEventHandle<()>,
+        handle: super::CompletableEventHandle<()>,
         partition: TopicPartition,
         offset: i64,
         offset_epoch: Option<i32>,
@@ -248,7 +248,7 @@ impl ApplicationEventProcessor {
             // already validates; we propagate the error to the handle for
             // safety.
             if let Err(e) = self.metadata.update_last_seen_epoch_if_newer(&partition, epoch) {
-                handle.complete_exceptionally(e);
+                handle.complete_with_error(e);
                 return;
             }
         }
@@ -263,7 +263,7 @@ impl ApplicationEventProcessor {
                 handle.complete(());
             },
             Err(e) => {
-                handle.complete_exceptionally(e);
+                handle.complete_with_error(e);
             },
         }
     }
@@ -271,11 +271,11 @@ impl ApplicationEventProcessor {
     /// Java: `process(PausePartitionsEvent)`.
     fn process_pause_partitions(
         &mut self,
-        handle: super::completable_event::CompletableEventHandle<()>,
+        handle: super::CompletableEventHandle<()>,
         partitions: HashSet<TopicPartition>,
     ) {
         log::debug!("Pausing partitions {:?}", partitions);
-        let result: Result<(), KafkaError> = {
+        let result: Result<(), Error> = {
             let mut guard = self.lock_subscriptions();
             partitions.iter().try_for_each(|tp| guard.pause(tp))
         };
@@ -284,7 +284,7 @@ impl ApplicationEventProcessor {
                 handle.complete(());
             },
             Err(e) => {
-                handle.complete_exceptionally(e);
+                handle.complete_with_error(e);
             },
         }
     }
@@ -292,11 +292,11 @@ impl ApplicationEventProcessor {
     /// Java: `process(ResumePartitionsEvent)`.
     fn process_resume_partitions(
         &mut self,
-        handle: super::completable_event::CompletableEventHandle<()>,
+        handle: super::CompletableEventHandle<()>,
         partitions: HashSet<TopicPartition>,
     ) {
         log::debug!("Resuming partitions {:?}", partitions);
-        let result: Result<(), KafkaError> = {
+        let result: Result<(), Error> = {
             let mut guard = self.lock_subscriptions();
             partitions.iter().try_for_each(|tp| guard.resume(tp))
         };
@@ -305,7 +305,7 @@ impl ApplicationEventProcessor {
                 handle.complete(());
             },
             Err(e) => {
-                handle.complete_exceptionally(e);
+                handle.complete_with_error(e);
             },
         }
     }
@@ -318,7 +318,7 @@ impl ApplicationEventProcessor {
     /// `OptionalLong`; the Rust translation uses `Option<i64>`.
     fn process_current_lag(
         &mut self,
-        handle: super::completable_event::CompletableEventHandle<Option<i64>>,
+        handle: super::CompletableEventHandle<Option<i64>>,
         partition: TopicPartition,
         isolation_level: IsolationLevel,
     ) {
@@ -329,7 +329,7 @@ impl ApplicationEventProcessor {
             HaveLag(i64),
             RequestEndOffset,
             EmptyOnly,
-            Error(KafkaError),
+            Error(Error),
         }
         let decision = {
             let mut guard = self.lock_subscriptions();
@@ -375,10 +375,7 @@ impl ApplicationEventProcessor {
                 // Java: Emulates Consumer.endOffsets() — fire-and-forget
                 // `ListOffsets(LATEST)` so the lag is available next call.
                 let mut ts = std::collections::HashMap::new();
-                ts.insert(
-                    partition.clone(),
-                    crate::common::requests::list_offsets_request::LATEST_TIMESTAMP,
-                );
+                ts.insert(partition.clone(), crate::common::requests::ListOffsetsRequest::LATEST_TIMESTAMP);
                 {
                     let mut rm_guard = self.lock_request_managers();
                     if let Some(offsets_mgr) = rm_guard.offsets.as_mut() {
@@ -394,23 +391,19 @@ impl ApplicationEventProcessor {
                 handle.complete(None);
             },
             Decision::Error(e) => {
-                handle.complete_exceptionally(e);
+                handle.complete_with_error(e);
             },
         }
     }
 
-    fn complete_lag_error(
-        &self,
-        handle: super::completable_event::CompletableEventHandle<Option<i64>>,
-        err: KafkaError,
-    ) {
-        handle.complete_exceptionally(err);
+    fn complete_lag_error(&self, handle: super::CompletableEventHandle<Option<i64>>, err: Error) {
+        handle.complete_with_error(err);
     }
 
     /// Java: `process(TopicSubscriptionChangeEvent)`.
     fn process_topic_subscription_change(
         &mut self,
-        handle: super::completable_event::CompletableEventHandle<()>,
+        handle: super::CompletableEventHandle<()>,
         topics: HashSet<String>,
         listener: Option<Arc<dyn ConsumerRebalanceListener>>,
     ) {
@@ -429,13 +422,13 @@ impl ApplicationEventProcessor {
             return;
         }
 
-        // subscribe_topics returns `Result<bool, KafkaError>` — the bool
+        // subscribe_with_topics returns `Result<bool, Error>` — the bool
         // is `true` when the subscription actually changed (Java triggers
         // `requestUpdateForNewTopics` on change). On error, fail the
         // handle and return without notifying the membership manager.
         let subscribe_result = {
             let mut guard = self.lock_subscriptions();
-            guard.subscribe_topics(topics, listener)
+            guard.subscribe_with_topics(topics, listener)
         };
 
         match subscribe_result {
@@ -455,7 +448,7 @@ impl ApplicationEventProcessor {
                 handle.complete(());
             },
             Err(e) => {
-                handle.complete_exceptionally(e);
+                handle.complete_with_error(e);
             },
         }
     }
@@ -463,7 +456,7 @@ impl ApplicationEventProcessor {
     /// Java: `process(TopicPatternSubscriptionChangeEvent)`.
     fn process_topic_pattern_subscription_change(
         &mut self,
-        handle: super::completable_event::CompletableEventHandle<()>,
+        handle: super::CompletableEventHandle<()>,
         pattern: regex::Regex,
         listener: Option<Arc<dyn ConsumerRebalanceListener>>,
     ) {
@@ -474,7 +467,7 @@ impl ApplicationEventProcessor {
             guard.subscribe_pattern(pattern, listener)
         };
         if let Err(e) = subscribe_result {
-            handle.complete_exceptionally(e);
+            handle.complete_with_error(e);
             return;
         }
 
@@ -501,7 +494,7 @@ impl ApplicationEventProcessor {
     /// Java: `process(TopicRe2JPatternSubscriptionChangeEvent)`.
     fn process_topic_re2j_pattern_subscription_change(
         &mut self,
-        handle: super::completable_event::CompletableEventHandle<()>,
+        handle: super::CompletableEventHandle<()>,
         pattern: crate::consumer::SubscriptionPattern,
         listener: Option<Arc<dyn ConsumerRebalanceListener>>,
     ) {
@@ -513,7 +506,10 @@ impl ApplicationEventProcessor {
             rm_guard.consumer_heartbeat.is_some()
         };
         if !has_membership {
-            handle.complete_exceptionally(KafkaError::illegal_state(
+            // Java: `new KafkaException("MembershipManager is not available
+            // when processing a subscribe event")` (`:386`) — a *bare*
+            // `KafkaException`, so `is_kafka_error()` must answer true.
+            handle.complete_with_error(Error::kafka_message(
                 "MembershipManager is not available when processing a subscribe event",
             ));
             return;
@@ -521,7 +517,7 @@ impl ApplicationEventProcessor {
 
         let subscribe_result = {
             let mut guard = self.lock_subscriptions();
-            guard.subscribe_re2j_pattern(pattern, listener)
+            guard.subscribe_with_pattern(pattern, listener)
         };
         match subscribe_result {
             Ok(()) => {
@@ -535,13 +531,13 @@ impl ApplicationEventProcessor {
                 handle.complete(());
             },
             Err(e) => {
-                handle.complete_exceptionally(e);
+                handle.complete_with_error(e);
             },
         }
     }
 
     /// Java: `process(UpdatePatternSubscriptionEvent)`.
-    fn process_update_pattern_subscription(&mut self, handle: super::completable_event::CompletableEventHandle<()>) {
+    fn process_update_pattern_subscription(&mut self, handle: super::CompletableEventHandle<()>) {
         // Java: `consumerMembershipManager.ifPresent(mm ->
         // maybeUpdatePatternSubscription(mm::onSubscriptionUpdated))`.
         // In Rust the membership manager is reached via the heartbeat
@@ -588,7 +584,7 @@ impl ApplicationEventProcessor {
     /// the future the membership manager is waiting on.
     ///
     /// The Rust translation collapses the round-trip by embedding a
-    /// `tokio::sync::oneshot::Sender<Result<(), KafkaError>>` directly in
+    /// `tokio::sync::oneshot::Sender<Result<(), Error>>` directly in
     /// `BackgroundEvent::PartitionsRemoved` / `BackgroundEvent::PartitionsAssigned`
     /// (see `AbstractMembershipManager::enqueue_rebalance_callback` /
     /// `enqueue_partitions_assigned_event`). The membership manager holds
@@ -604,8 +600,8 @@ impl ApplicationEventProcessor {
     /// future diagnostics (e.g. tracing the original Java event lifecycle).
     fn process_consumer_rebalance_listener_callback_completed(
         &mut self,
-        method_name: crate::consumer::consumer_rebalance_listener_method_name::ConsumerRebalanceListenerMethodName,
-        error: Option<KafkaError>,
+        method_name: crate::consumer::ConsumerRebalanceListenerMethodName,
+        error: Option<Error>,
     ) {
         let _ = error;
         let rm_guard = self.lock_request_managers();
@@ -713,8 +709,8 @@ impl ApplicationEventProcessor {
     /// Mirrors Java's `manager.commitAsync(offsets).whenComplete(...)`.
     fn process_commit_async(
         &mut self,
-        handle: super::completable_event::CompletableEventHandle<HashMap<TopicPartition, OffsetAndMetadata>>,
-        offsets_ready: super::completable_event::CompletableEventHandle<()>,
+        handle: super::CompletableEventHandle<HashMap<TopicPartition, OffsetAndMetadata>>,
+        offsets_ready: super::CompletableEventHandle<()>,
         offsets: Option<HashMap<TopicPartition, OffsetAndMetadata>>,
     ) {
         // Java: `if (requestManagers.commitRequestManager.isEmpty()) { ... }`.
@@ -737,7 +733,7 @@ impl ApplicationEventProcessor {
                 // handle with the application-event reaper (Phase-10
                 // R3-1). The reaper holds a strong ref keeping the
                 // sender alive, then completes it with
-                // `KafkaError::Timeout` when `deadline_ms` elapses —
+                // `Error::Timeout` when `deadline_ms` elapses —
                 // exactly mirroring Java's `Timer`-based timeout.
                 {
                     let mut reaper = match self.application_event_reaper.lock() {
@@ -747,7 +743,9 @@ impl ApplicationEventProcessor {
                     reaper.add(offsets_ready.erased());
                 }
                 drop(offsets_ready);
-                handle.complete_exceptionally(KafkaError::illegal_state(
+                // Java: `new KafkaException("Unable to async commit offset
+                // because ...")` (`:246`) — a bare `KafkaException`.
+                handle.complete_with_error(Error::kafka_message(
                     "Unable to async commit offset because the CommitRequestManager is not available. Check if group.id was set correctly",
                 ));
                 return;
@@ -771,10 +769,10 @@ impl ApplicationEventProcessor {
                     handle.complete(committed);
                 },
                 Ok(Err(err)) => {
-                    handle.complete_exceptionally(err);
+                    handle.complete_with_error(err);
                 },
                 Err(_recv_err) => {
-                    handle.complete_exceptionally(KafkaError::illegal_state("commit_async_no_callback sender dropped"));
+                    handle.complete_with_error(Error::local_illegal_state("commit_async_no_callback sender dropped"));
                 },
             }
         });
@@ -788,8 +786,8 @@ impl ApplicationEventProcessor {
     /// when the event was constructed on the app side).
     fn process_commit_sync(
         &mut self,
-        handle: super::completable_event::CompletableEventHandle<HashMap<TopicPartition, OffsetAndMetadata>>,
-        offsets_ready: super::completable_event::CompletableEventHandle<()>,
+        handle: super::CompletableEventHandle<HashMap<TopicPartition, OffsetAndMetadata>>,
+        offsets_ready: super::CompletableEventHandle<()>,
         offsets: Option<HashMap<TopicPartition, OffsetAndMetadata>>,
     ) {
         let deadline_ms = handle.deadline_ms();
@@ -805,7 +803,7 @@ impl ApplicationEventProcessor {
                 // TimeoutException. See `process_commit_async` for the
                 // full rationale — Rust registers the secondary handle
                 // with the reaper so its deadline is enforced and the
-                // receiver eventually resolves with `KafkaError::Timeout`
+                // receiver eventually resolves with `Error::Timeout`
                 // (Phase-10 R3-1).
                 {
                     let mut reaper = match self.application_event_reaper.lock() {
@@ -815,7 +813,9 @@ impl ApplicationEventProcessor {
                     reaper.add(offsets_ready.erased());
                 }
                 drop(offsets_ready);
-                handle.complete_exceptionally(KafkaError::illegal_state(
+                // Java: `new KafkaException("Unable to sync commit offset
+                // because ...")` (`:264`) — a bare `KafkaException`.
+                handle.complete_with_error(Error::kafka_message(
                     "Unable to sync commit offset because the CommitRequestManager is not available. Check if group.id was set correctly",
                 ));
                 return;
@@ -836,10 +836,10 @@ impl ApplicationEventProcessor {
                     handle.complete(committed);
                 },
                 Ok(Err(err)) => {
-                    handle.complete_exceptionally(err);
+                    handle.complete_with_error(err);
                 },
                 Err(_recv_err) => {
-                    handle.complete_exceptionally(KafkaError::illegal_state("commit_sync sender dropped"));
+                    handle.complete_with_error(Error::local_illegal_state("commit_sync sender dropped"));
                 },
             }
         });
@@ -848,7 +848,7 @@ impl ApplicationEventProcessor {
     /// Java: `process(FetchCommittedOffsetsEvent)`.
     fn process_fetch_committed_offsets(
         &mut self,
-        handle: super::completable_event::CompletableEventHandle<HashMap<TopicPartition, OffsetAndMetadata>>,
+        handle: super::CompletableEventHandle<HashMap<TopicPartition, OffsetAndMetadata>>,
         partitions: HashSet<TopicPartition>,
     ) {
         let deadline_ms = handle.deadline_ms();
@@ -857,7 +857,9 @@ impl ApplicationEventProcessor {
             let rm_guard = self.lock_request_managers();
             let Some(commit) = rm_guard.commit.as_ref() else {
                 drop(rm_guard);
-                handle.complete_exceptionally(KafkaError::illegal_state(
+                // Java: `new KafkaException("Unable to fetch committed offset
+                // because ...")` (`:282`) — a bare `KafkaException`.
+                handle.complete_with_error(Error::kafka_message(
                     "Unable to fetch committed offset because the CommitRequestManager is not available. Check if group.id was set correctly",
                 ));
                 return;
@@ -888,10 +890,10 @@ impl ApplicationEventProcessor {
                     handle.complete(stripped);
                 },
                 Ok(Err(err)) => {
-                    handle.complete_exceptionally(err);
+                    handle.complete_with_error(err);
                 },
                 Err(_recv_err) => {
-                    handle.complete_exceptionally(KafkaError::illegal_state("fetch_offsets sender dropped"));
+                    handle.complete_with_error(Error::local_illegal_state("fetch_offsets sender dropped"));
                 },
             }
         });
@@ -900,11 +902,8 @@ impl ApplicationEventProcessor {
     /// Java: `process(ListOffsetsEvent)`.
     fn process_list_offsets(
         &mut self,
-        handle: super::completable_event::CompletableEventHandle<
-            HashMap<
-                TopicPartition,
-                Option<crate::consumer::internals::offset_and_timestamp_internal::OffsetAndTimestampInternal>,
-            >,
+        handle: super::CompletableEventHandle<
+            HashMap<TopicPartition, Option<crate::consumer::internals::OffsetAndTimestampInternal>>,
         >,
         timestamps_to_search: HashMap<TopicPartition, i64>,
         require_timestamps: bool,
@@ -913,7 +912,7 @@ impl ApplicationEventProcessor {
             let mut rm_guard = self.lock_request_managers();
             let Some(offsets_mgr) = rm_guard.offsets.as_mut() else {
                 drop(rm_guard);
-                handle.complete_exceptionally(KafkaError::illegal_state(
+                handle.complete_with_error(Error::local_illegal_state(
                     "OffsetsRequestManager not available when processing a ListOffsets event",
                 ));
                 return;
@@ -926,10 +925,10 @@ impl ApplicationEventProcessor {
                     handle.complete(map);
                 },
                 Ok(Err(err)) => {
-                    handle.complete_exceptionally(err);
+                    handle.complete_with_error(err);
                 },
                 Err(_recv_err) => {
-                    handle.complete_exceptionally(KafkaError::illegal_state(
+                    handle.complete_with_error(Error::local_illegal_state(
                         "OffsetsRequestManager fetch_offsets sender dropped",
                     ));
                 },
@@ -938,14 +937,14 @@ impl ApplicationEventProcessor {
     }
 
     /// Java: `process(CheckAndUpdatePositionsEvent)`.
-    fn process_check_and_update_positions(&mut self, handle: super::completable_event::CompletableEventHandle<()>) {
+    fn process_check_and_update_positions(&mut self, handle: super::CompletableEventHandle<()>) {
         let deadline_ms = handle.deadline_ms();
         let now_ms = current_time_ms_now();
         let update_rx = {
             let mut rm_guard = self.lock_request_managers();
             let Some(offsets_mgr) = rm_guard.offsets.as_mut() else {
                 drop(rm_guard);
-                handle.complete_exceptionally(KafkaError::illegal_state(
+                handle.complete_with_error(Error::local_illegal_state(
                     "OffsetsRequestManager not available when processing a CheckAndUpdatePositions event",
                 ));
                 return;
@@ -958,10 +957,10 @@ impl ApplicationEventProcessor {
                     handle.complete(());
                 },
                 Ok(Err(err)) => {
-                    handle.complete_exceptionally(err);
+                    handle.complete_with_error(err);
                 },
                 Err(_recv_err) => {
-                    handle.complete_exceptionally(KafkaError::illegal_state(
+                    handle.complete_with_error(Error::local_illegal_state(
                         "OffsetsRequestManager update_fetch_positions sender dropped",
                     ));
                 },
@@ -972,7 +971,7 @@ impl ApplicationEventProcessor {
     /// Java: `process(TopicMetadataEvent)`.
     fn process_topic_metadata(
         &mut self,
-        handle: super::completable_event::CompletableEventHandle<HashMap<String, Vec<crate::common::PartitionInfo>>>,
+        handle: super::CompletableEventHandle<HashMap<String, Vec<crate::common::PartitionInfo>>>,
         topic: String,
     ) {
         let deadline_ms = handle.deadline_ms();
@@ -980,7 +979,7 @@ impl ApplicationEventProcessor {
             let rm_guard = self.lock_request_managers();
             let Some(tm_mgr) = rm_guard.topic_metadata.as_ref() else {
                 drop(rm_guard);
-                handle.complete_exceptionally(KafkaError::illegal_state(
+                handle.complete_with_error(Error::local_illegal_state(
                     "TopicMetadataRequestManager not available when processing a TopicMetadata event",
                 ));
                 return;
@@ -993,10 +992,10 @@ impl ApplicationEventProcessor {
                     handle.complete(map);
                 },
                 Ok(Err(err)) => {
-                    handle.complete_exceptionally(err);
+                    handle.complete_with_error(err);
                 },
                 Err(_recv_err) => {
-                    handle.complete_exceptionally(KafkaError::illegal_state(
+                    handle.complete_with_error(Error::local_illegal_state(
                         "TopicMetadataRequestManager request_topic_metadata sender dropped",
                     ));
                 },
@@ -1007,14 +1006,14 @@ impl ApplicationEventProcessor {
     /// Java: `process(AllTopicsMetadataEvent)`.
     fn process_all_topics_metadata(
         &mut self,
-        handle: super::completable_event::CompletableEventHandle<HashMap<String, Vec<crate::common::PartitionInfo>>>,
+        handle: super::CompletableEventHandle<HashMap<String, Vec<crate::common::PartitionInfo>>>,
     ) {
         let deadline_ms = handle.deadline_ms();
         let md_rx = {
             let rm_guard = self.lock_request_managers();
             let Some(tm_mgr) = rm_guard.topic_metadata.as_ref() else {
                 drop(rm_guard);
-                handle.complete_exceptionally(KafkaError::illegal_state(
+                handle.complete_with_error(Error::local_illegal_state(
                     "TopicMetadataRequestManager not available when processing an AllTopicsMetadata event",
                 ));
                 return;
@@ -1027,10 +1026,10 @@ impl ApplicationEventProcessor {
                     handle.complete(map);
                 },
                 Ok(Err(err)) => {
-                    handle.complete_exceptionally(err);
+                    handle.complete_with_error(err);
                 },
                 Err(_recv_err) => {
-                    handle.complete_exceptionally(KafkaError::illegal_state(
+                    handle.complete_with_error(Error::local_illegal_state(
                         "TopicMetadataRequestManager request_all_topics_metadata sender dropped",
                     ));
                 },
@@ -1039,12 +1038,12 @@ impl ApplicationEventProcessor {
     }
 
     /// Java: `process(CreateFetchRequestsEvent)`.
-    fn process_create_fetch_requests(&mut self, handle: super::completable_event::CompletableEventHandle<()>) {
+    fn process_create_fetch_requests(&mut self, handle: super::CompletableEventHandle<()>) {
         let fetch_rx = {
             let mut rm_guard = self.lock_request_managers();
             let Some(fetch_mgr) = rm_guard.fetch.as_mut() else {
                 drop(rm_guard);
-                handle.complete_exceptionally(KafkaError::illegal_state(
+                handle.complete_with_error(Error::local_illegal_state(
                     "FetchRequestManager not available when processing a CreateFetchRequests event",
                 ));
                 return;
@@ -1057,10 +1056,10 @@ impl ApplicationEventProcessor {
                     handle.complete(());
                 },
                 Ok(Err(err)) => {
-                    handle.complete_exceptionally(err);
+                    handle.complete_with_error(err);
                 },
                 Err(_recv_err) => {
-                    handle.complete_exceptionally(KafkaError::illegal_state(
+                    handle.complete_with_error(Error::local_illegal_state(
                         "FetchRequestManager create_fetch_requests sender dropped",
                     ));
                 },
@@ -1078,7 +1077,7 @@ impl ApplicationEventProcessor {
     ///    and complete the handle immediately. Java: "If the consumer is
     ///    not using the group management capabilities, we still need to
     ///    clear all assignments it may have."
-    fn process_unsubscribe(&mut self, handle: super::completable_event::CompletableEventHandle<()>) {
+    fn process_unsubscribe(&mut self, handle: super::CompletableEventHandle<()>) {
         // Resolve dispatch under a brief lock. Mirror Java's
         // `if (requestManagers.consumerHeartbeatRequestManager.isPresent())`
         // branch — heartbeat present → spawn `leave_group` continuation;
@@ -1099,7 +1098,7 @@ impl ApplicationEventProcessor {
                             handle.complete(());
                         },
                         Err(err) => {
-                            handle.complete_exceptionally(err);
+                            handle.complete_with_error(err);
                         },
                     }
                 });
@@ -1117,7 +1116,7 @@ impl ApplicationEventProcessor {
     /// Java: `process(LeaveGroupOnCloseEvent)`.
     fn process_leave_group_on_close(
         &mut self,
-        handle: super::completable_event::CompletableEventHandle<()>,
+        handle: super::CompletableEventHandle<()>,
         membership_operation: crate::consumer::GroupMembershipOperation,
     ) {
         // Java: `if (requestManagers.consumerMembershipManager.isPresent())`.
@@ -1142,7 +1141,7 @@ impl ApplicationEventProcessor {
                             handle.complete(());
                         },
                         Err(err) => {
-                            handle.complete_exceptionally(err);
+                            handle.complete_with_error(err);
                         },
                     }
                 });
@@ -1153,7 +1152,7 @@ impl ApplicationEventProcessor {
                 // app-side caller will time out via the reaper. To make
                 // the failure observable (DoD §5: no silent drops) we
                 // explicitly fail the handle.
-                handle.complete_exceptionally(KafkaError::illegal_state(
+                handle.complete_with_error(Error::local_illegal_state(
                     "ConsumerMembershipManager not available when processing a LeaveGroupOnClose event",
                 ));
             },
@@ -1175,7 +1174,7 @@ impl ApplicationEventProcessor {
     /// completes `event.future().completeExceptionally(e)`.
     fn process_apply_assignment(
         &mut self,
-        handle: super::completable_event::CompletableEventHandle<()>,
+        handle: super::CompletableEventHandle<()>,
         assigned_partitions: HashSet<TopicPartition>,
         added_partitions: Vec<TopicPartition>,
     ) {
@@ -1192,7 +1191,7 @@ impl ApplicationEventProcessor {
                     handle.complete(());
                 },
                 Err(err) => {
-                    handle.complete_exceptionally(err);
+                    handle.complete_with_error(err);
                 },
             },
             None => {
@@ -1202,7 +1201,7 @@ impl ApplicationEventProcessor {
                 // exceptionally with an IllegalStateException.
                 // (StreamsMembershipManager is §20-skip.)
                 log::warn!("No membership manager available when processing ApplyAssignmentEvent");
-                handle.complete_exceptionally(KafkaError::illegal_state(
+                handle.complete_with_error(Error::local_illegal_state(
                     "No membership manager available when processing ApplyAssignmentEvent",
                 ));
             },
@@ -1221,7 +1220,7 @@ impl ApplicationEventProcessor {
     ///    `onConsumerPoll`, `resetPollTimer(pollTimeMs)`.
     /// 4. `updateFetchPositions(deadlineMs)` → continues to
     ///    `createFetchRequests()` on success; mark state complete.
-    /// 5. Errors mapped via `maybe_complete_async_poll_event_exceptionally`
+    /// 5. Errors mapped via `maybe_complete_async_poll_event_with_error`
     ///    semantics (timeout errors are ignored; other errors fail the
     ///    state).
     ///
@@ -1229,12 +1228,7 @@ impl ApplicationEventProcessor {
     /// `update_fetch_positions` call returns (matching Java's
     /// `event.markValidatePositionsComplete()` — Java sets it
     /// synchronously, between the call and the `whenComplete`).
-    fn process_async_poll(
-        &mut self,
-        deadline_ms: i64,
-        poll_time_ms: i64,
-        state: Arc<super::application_event::AsyncPollState>,
-    ) {
+    fn process_async_poll(&mut self, deadline_ms: i64, poll_time_ms: i64, state: Arc<super::AsyncPollState>) {
         // Snapshot Arc clones for the spawned task — every shared
         // dependency the continuation needs.
         let request_managers = Arc::clone(&self.request_managers);
@@ -1316,7 +1310,7 @@ impl ApplicationEventProcessor {
                 if let Err(err) = mm.reconcile(poll_time_ms, true).await
                     && !is_ignorable_async_poll_error(&err)
                 {
-                    state.complete_exceptionally(err);
+                    state.complete_with_error(err);
                     return;
                 }
             }
@@ -1390,7 +1384,7 @@ impl ApplicationEventProcessor {
                 };
                 let Some(offsets_mgr) = rm_guard.offsets.as_mut() else {
                     // Without OffsetsRequestManager we cannot make progress.
-                    state.complete_exceptionally(KafkaError::illegal_state(
+                    state.complete_with_error(Error::local_illegal_state(
                         "OffsetsRequestManager not available when processing AsyncPoll",
                     ));
                     return;
@@ -1411,12 +1405,12 @@ impl ApplicationEventProcessor {
                         // Java: `log.trace("Ignoring timeout for {}: {}", ...)`.
                         log::trace!("Ignoring timeout during update_fetch_positions: {}", err);
                     } else {
-                        state.complete_exceptionally(err);
+                        state.complete_with_error(err);
                         return;
                     }
                 },
                 Err(_recv_err) => {
-                    state.complete_exceptionally(KafkaError::illegal_state(
+                    state.complete_with_error(Error::local_illegal_state(
                         "OffsetsRequestManager update_fetch_positions sender dropped",
                     ));
                     return;
@@ -1430,7 +1424,7 @@ impl ApplicationEventProcessor {
                     Err(p) => p.into_inner(),
                 };
                 let Some(fetch_mgr) = rm_guard.fetch.as_mut() else {
-                    state.complete_exceptionally(KafkaError::illegal_state(
+                    state.complete_with_error(Error::local_illegal_state(
                         "FetchRequestManager not available when processing AsyncPoll",
                     ));
                     return;
@@ -1449,11 +1443,11 @@ impl ApplicationEventProcessor {
                         // event.completeSuccessfully).
                         state.complete_successfully();
                     } else {
-                        state.complete_exceptionally(err);
+                        state.complete_with_error(err);
                     }
                 },
                 Err(_recv_err) => {
-                    state.complete_exceptionally(KafkaError::illegal_state(
+                    state.complete_with_error(Error::local_illegal_state(
                         "FetchRequestManager create_fetch_requests sender dropped",
                     ));
                 },
@@ -1511,8 +1505,8 @@ fn current_time_ms_now() -> i64 {
 /// chain so the consumer can recover on the next `poll()` iteration —
 /// AsyncPoll itself is a polling primitive and a per-iteration timeout is
 /// not user-facing. Non-timeout errors are surfaced.
-fn is_ignorable_async_poll_error(err: &KafkaError) -> bool {
-    matches!(err, KafkaError::Timeout(_))
+fn is_ignorable_async_poll_error(err: &Error) -> bool {
+    matches!(err, Error::Timeout(_))
 }
 
 impl EventProcessor<ApplicationEvent> for ApplicationEventProcessor {
@@ -1636,24 +1630,24 @@ mod tests {
     use tokio::sync::{mpsc, oneshot};
 
     use super::*;
-    use crate::api_versions::ApiVersions;
+    use crate::ApiVersions;
     use crate::common::internals::ClusterResourceListeners;
-    use crate::common::{IsolationLevel, KafkaError, TopicPartition};
+    use crate::common::{Error, IsolationLevel, TopicPartition};
+    use crate::consumer::AutoOffsetResetStrategy;
     use crate::consumer::ConsumerConfig;
+    use crate::consumer::ConsumerRebalanceListenerMethodName;
     use crate::consumer::SubscriptionPattern;
-    use crate::consumer::consumer_rebalance_listener_method_name::ConsumerRebalanceListenerMethodName;
-    use crate::consumer::internals::auto_offset_reset_strategy::AutoOffsetResetStrategy;
-    use crate::consumer::internals::commit_request_manager::CommitRequestManager;
-    use crate::consumer::internals::consumer_heartbeat_request_manager::ConsumerHeartbeatRequestManager;
-    use crate::consumer::internals::consumer_membership_manager::ConsumerMembershipManager;
-    use crate::consumer::internals::coordinator_request_manager::CoordinatorRequestManager;
-    use crate::consumer::internals::events::application_event::ApplicationEvent;
-    use crate::consumer::internals::events::background_event_handler::BackgroundEventHandler;
-    use crate::consumer::internals::events::completable_event::CompletableEventHandle;
-    use crate::consumer::internals::offsets_request_manager::OffsetsRequestManager;
-    use crate::consumer::internals::request_manager::RequestManager;
-    use crate::consumer::internals::subscription_state::SubscriptionState;
-    use crate::consumer::internals::topic_metadata_request_manager::TopicMetadataRequestManager;
+    use crate::consumer::internals::CommitRequestManager;
+    use crate::consumer::internals::ConsumerHeartbeatRequestManager;
+    use crate::consumer::internals::ConsumerMembershipManager;
+    use crate::consumer::internals::CoordinatorRequestManager;
+    use crate::consumer::internals::OffsetsRequestManager;
+    use crate::consumer::internals::RequestManager;
+    use crate::consumer::internals::SubscriptionState;
+    use crate::consumer::internals::TopicMetadataRequestManager;
+    use crate::consumer::internals::events::ApplicationEvent;
+    use crate::consumer::internals::events::BackgroundEventHandler;
+    use crate::consumer::internals::events::CompletableEventHandle;
 
     /// Shared test fixture mirroring Java's `setupProcessor(withGroupId)`.
     struct Fixture {
@@ -1668,8 +1662,8 @@ mod tests {
     }
 
     fn make_metadata(subs: Arc<Mutex<SubscriptionState>>) -> Arc<ConsumerMetadata> {
-        let config = ConsumerConfig::new(vec!["localhost:9092".to_string()]);
-        Arc::new(ConsumerMetadata::from_config(&config, subs, ClusterResourceListeners::new()))
+        let config = ConsumerConfig { bootstrap_servers: vec!["localhost:9092".to_string()], ..Default::default() };
+        Arc::new(ConsumerMetadata::with_config(&config, subs, ClusterResourceListeners::new()))
     }
 
     fn make_subscriptions() -> Arc<Mutex<SubscriptionState>> {
@@ -1686,17 +1680,15 @@ mod tests {
     /// the subscription has no fetchable partitions, which matches the
     /// Java tests' Mockito-stubbed `createFetchRequests` return.
     fn setup_processor_with_fetch(with_group_id: bool, with_fetch: bool) -> Fixture {
-        use crate::common::memory::buffer_supplier::BufferSupplier;
-        use crate::consumer::internals::fetch_buffer::FetchBuffer;
-        use crate::consumer::internals::fetch_config::FetchConfig;
-        use crate::consumer::internals::fetch_request_manager::{
-            FetchRequestManager, always_available, no_auth_failure,
-        };
+        use crate::common::memory::BufferSupplier;
+        use crate::consumer::internals::FetchBuffer;
+        use crate::consumer::internals::FetchConfig;
+        use crate::consumer::internals::FetchRequestManager;
 
         let subscriptions = make_subscriptions();
         let metadata = make_metadata(Arc::clone(&subscriptions));
 
-        let config = ConsumerConfig::new(vec!["localhost:9092".to_string()]);
+        let config = ConsumerConfig { bootstrap_servers: vec!["localhost:9092".to_string()], ..Default::default() };
         let coordinator = if with_group_id {
             Some(Arc::new(CoordinatorRequestManager::new(100, 1_000, "test-group")))
         } else {
@@ -1709,7 +1701,7 @@ mod tests {
                 Arc::clone(&subscriptions),
                 "test-group",
                 None,
-                Arc::new(crate::common::metrics::time::SystemTime),
+                Arc::new(crate::common::metrics::SystemTime),
                 0,
             )))
         } else {
@@ -1735,6 +1727,10 @@ mod tests {
             60_000,
             Arc::new(ApiVersions::new()),
             None,
+            Arc::new(crate::consumer::internals::PositionsValidator::new(
+                Arc::clone(&subscriptions),
+                Arc::clone(&metadata),
+            )),
         ));
         let fetch = if with_fetch {
             let fetch_config = FetchConfig::new(
@@ -1753,10 +1749,10 @@ mod tests {
                 fetch_config,
                 Arc::new(FetchBuffer::new()),
                 Arc::new(BufferSupplier::create()),
-                always_available(),
-                no_auth_failure(),
+                FetchRequestManager::always_available(),
+                FetchRequestManager::no_auth_failure(),
                 Arc::new(ApiVersions::new()),
-                crate::consumer::internals::fetch_metrics_manager::FetchMetricsManager::for_test(),
+                crate::consumer::internals::FetchMetricsManager::for_test(),
             ))
         } else {
             None
@@ -1813,7 +1809,7 @@ mod tests {
             Arc::clone(&bg_handler),
             true,
             None,
-            Arc::new(crate::common::metrics::time::SystemTime),
+            Arc::new(crate::common::metrics::SystemTime),
         ));
         ConsumerHeartbeatRequestManager::new(0, config, hb_coordinator, subscriptions, mm, bg_handler)
     }
@@ -1822,11 +1818,11 @@ mod tests {
         TopicPartition::new(topic.to_string(), partition)
     }
 
-    fn await_complete(rx: oneshot::Receiver<Result<(), KafkaError>>) -> Result<(), KafkaError> {
+    fn await_complete(rx: oneshot::Receiver<Result<(), Error>>) -> Result<(), Error> {
         rx.blocking_recv().expect("oneshot channel dropped")
     }
 
-    fn await_complete_value<T: Send + 'static>(rx: oneshot::Receiver<Result<T, KafkaError>>) -> Result<T, KafkaError> {
+    fn await_complete_value<T: Send + 'static>(rx: oneshot::Receiver<Result<T, Error>>) -> Result<T, Error> {
         rx.blocking_recv().expect("oneshot channel dropped")
     }
 
@@ -1912,7 +1908,7 @@ mod tests {
     // existing pattern subscription.
     // -------------------------------------------------------------------
     #[test]
-    fn assignment_change_event_with_exception() {
+    fn assignment_change_event_with_error() {
         let mut fx = setup_processor(false);
         // Put the subscription into AutoPattern mode so AssignFromUser
         // surfaces an IllegalStateException (mixed-subscription error).
@@ -1999,7 +1995,7 @@ mod tests {
     // Java: testSeekUnvalidatedEventWithException
     // -------------------------------------------------------------------
     #[test]
-    fn seek_unvalidated_event_with_exception_fails_handle() {
+    fn seek_unvalidated_event_with_error_fails_handle() {
         let mut fx = setup_processor(false);
         // Do NOT assign — `seek_unvalidated` errors when partition is
         // not assigned (Java's `IllegalStateException`).
@@ -2104,7 +2100,7 @@ mod tests {
             let mut guard = fx.subscriptions.lock().unwrap();
             let mut topics = HashSet::new();
             topics.insert("a".to_string());
-            guard.subscribe_topics(topics, None).unwrap();
+            guard.subscribe_with_topics(topics, None).unwrap();
         }
         let pattern = Regex::new("topic.*").unwrap();
         let (handle, rx) = CompletableEventHandle::<()>::new(20_000);
@@ -2143,7 +2139,7 @@ mod tests {
             let mut guard = fx.subscriptions.lock().unwrap();
             let mut topics = HashSet::new();
             topics.insert("a".to_string());
-            guard.subscribe_topics(topics, None).unwrap();
+            guard.subscribe_with_topics(topics, None).unwrap();
         }
         let pattern = SubscriptionPattern::new("t*".to_string());
         let (handle, rx) = CompletableEventHandle::<()>::new(20_000);
@@ -2349,7 +2345,7 @@ mod tests {
     }
 
     /// `CommitAsync` without a commit manager fails the primary handle
-    /// with `illegal_state` carrying Java's exact error message. Java's
+    /// with a bare `KafkaException` carrying Java's exact error message. Java's
     /// `process(AsyncCommitEvent)` empty-manager branch only completes
     /// `event.future()` exceptionally and leaves `offsetsReady`
     /// un-completed — the app-side then surfaces a TimeoutException via
@@ -2360,16 +2356,16 @@ mod tests {
     /// from Java's "wait the full deadline then TimeoutException". Phase-10
     /// R3-1 fixes that by registering `offsets_ready` with the
     /// application-event reaper, which keeps a strong ref to the inner
-    /// sender and completes it with `KafkaError::Timeout` once the
+    /// sender and completes it with `Error::Timeout` once the
     /// deadline elapses — mirroring Java's `Timer`-based timeout.
     ///
     /// This test pins both halves of the contract: (a) the primary
-    /// handle fails immediately with the illegal-state message, (b) the
+    /// handle fails immediately with that message, (b) the
     /// secondary `offsets_ready` is registered with the reaper and is
-    /// completed with a `KafkaError::Timeout` when `reap` runs past the
+    /// completed with a `Error::Timeout` when `reap` runs past the
     /// deadline.
     #[tokio::test(flavor = "current_thread")]
-    async fn commit_async_without_commit_manager_fails_with_illegal_state() {
+    async fn commit_async_without_commit_manager_fails_with_kafka_error() {
         let mut fx = setup_processor(false); // no group id → no commit manager
         let (handle, rx) = CompletableEventHandle::<HashMap<TopicPartition, OffsetAndMetadata>>::new(60_000);
         let (offsets_ready, mut ready_rx) = CompletableEventHandle::<()>::new(60_000);
@@ -2389,9 +2385,24 @@ mod tests {
             .process(ApplicationEvent::CommitAsync { handle, offsets_ready, offsets: None });
 
         let err = rx.await.expect("sender alive").expect_err("primary handle must fail");
+        // DoD #3: assert the message text AND the class. Java throws a bare
+        // `KafkaException` here (`ApplicationEventProcessor.java:246`), so
+        // `is_kafka_error()` must be true — `Error::local_illegal_state` would answer
+        // false and flip every §10.4 gate the app side consults.
+        assert_eq!(
+            err.message(),
+            "Unable to async commit offset because the CommitRequestManager is not available. \
+             Check if group.id was set correctly",
+            "expected Java's exact AsyncCommitEvent message, got: {err}"
+        );
         assert!(
-            err.to_string().contains("CommitRequestManager is not available"),
-            "expected illegal-state error mentioning CommitRequestManager, got: {err}"
+            err.is_kafka_error(),
+            // Java throws a bare `KafkaException` here.
+            "is_kafka_error() must be true: {err:?}"
+        );
+        assert!(
+            !matches!(err, Error::LocalIllegalState(_)),
+            "must not be an IllegalState error: {err:?}"
         );
 
         // The secondary `offsets_ready` handle must be registered with
@@ -2420,7 +2431,7 @@ mod tests {
 
         // Advance past the deadline and run the reaper — Java's `Timer`
         // fires `TimeoutException`; Rust's reaper fires
-        // `KafkaError::Timeout` with the equivalent diagnostic.
+        // `Error::Timeout` with the equivalent diagnostic.
         let expired = {
             let mut r = fx.reaper.lock().unwrap();
             r.reap(60_001)
@@ -2432,13 +2443,13 @@ mod tests {
         let received = ready_rx.await.expect("reaper completed the sender, receiver must resolve");
         let timeout_err = received.expect_err("expected timeout error, got Ok");
         match &timeout_err {
-            KafkaError::Timeout(msg) => {
+            Error::Timeout(msg) => {
                 assert!(
-                    msg.contains("past its expiration"),
+                    msg.message().contains("past its expiration"),
                     "expected reaper timeout diagnostic, got: {timeout_err}"
                 );
             },
-            other => panic!("expected KafkaError::Timeout, got: {other:?}"),
+            other => panic!("expected Error::Timeout, got: {other:?}"),
         }
 
         // And the reaper has dropped the entry now that it is done.
@@ -2474,14 +2485,14 @@ mod tests {
     }
 
     /// `CommitSync` without a commit manager fails the primary handle
-    /// with `illegal_state` and registers `offsets_ready` with the
+    /// with a bare `KafkaException` and registers `offsets_ready` with the
     /// reaper so its deadline is enforced (Phase-10 R3-1) — mirroring
     /// Java's `process(SyncCommitEvent)` empty-manager branch followed
     /// by the `ConsumerUtils.getResult(offsetsReady, timer)`
     /// `TimeoutException`. See `commit_async_without_commit_manager_*`
     /// for the full rationale.
     #[tokio::test(flavor = "current_thread")]
-    async fn commit_sync_without_commit_manager_fails_with_illegal_state() {
+    async fn commit_sync_without_commit_manager_fails_with_kafka_error() {
         let mut fx = setup_processor(false);
         let (handle, rx) = CompletableEventHandle::<HashMap<TopicPartition, OffsetAndMetadata>>::new(60_000);
         let (offsets_ready, mut ready_rx) = CompletableEventHandle::<()>::new(60_000);
@@ -2496,9 +2507,24 @@ mod tests {
             .process(ApplicationEvent::CommitSync { handle, offsets_ready, offsets: None });
 
         let err = rx.await.expect("sender alive").expect_err("must fail without commit manager");
+        // DoD #3: assert the message text AND the class. Java throws a bare
+        // `KafkaException` here (`ApplicationEventProcessor.java:264`), so
+        // `is_kafka_error()` must be true — `Error::local_illegal_state` would answer
+        // false and flip every §10.4 gate the app side consults.
+        assert_eq!(
+            err.message(),
+            "Unable to sync commit offset because the CommitRequestManager is not available. \
+             Check if group.id was set correctly",
+            "expected Java's exact SyncCommitEvent message, got: {err}"
+        );
         assert!(
-            err.to_string().contains("CommitRequestManager is not available"),
-            "expected illegal-state error, got: {err}"
+            err.is_kafka_error(),
+            // Java throws a bare `KafkaException` here.
+            "is_kafka_error() must be true: {err:?}"
+        );
+        assert!(
+            !matches!(err, Error::LocalIllegalState(_)),
+            "must not be an IllegalState error: {err:?}"
         );
 
         // The secondary `offsets_ready` handle is registered with the
@@ -2522,7 +2548,7 @@ mod tests {
         );
 
         // Advance past the deadline and reap — secondary handle is
-        // completed with `KafkaError::Timeout` (Java's
+        // completed with `Error::Timeout` (Java's
         // `TimeoutException` analog).
         let expired = {
             let mut r = fx.reaper.lock().unwrap();
@@ -2533,13 +2559,13 @@ mod tests {
         let received = ready_rx.await.expect("reaper completed the sender, receiver must resolve");
         let timeout_err = received.expect_err("expected timeout error, got Ok");
         match &timeout_err {
-            KafkaError::Timeout(msg) => {
+            Error::Timeout(msg) => {
                 assert!(
-                    msg.contains("past its expiration"),
+                    msg.message().contains("past its expiration"),
                     "expected reaper timeout diagnostic, got: {timeout_err}"
                 );
             },
-            other => panic!("expected KafkaError::Timeout, got: {other:?}"),
+            other => panic!("expected Error::Timeout, got: {other:?}"),
         }
 
         {
@@ -2549,17 +2575,32 @@ mod tests {
     }
 
     /// `FetchCommittedOffsets` without a commit manager fails the handle
-    /// with `illegal_state`.
+    /// with a bare `KafkaException`.
     #[tokio::test(flavor = "current_thread")]
-    async fn fetch_committed_offsets_without_commit_manager_fails_with_illegal_state() {
+    async fn fetch_committed_offsets_without_commit_manager_fails_with_kafka_error() {
         let mut fx = setup_processor(false);
         let (handle, rx) = CompletableEventHandle::<HashMap<TopicPartition, OffsetAndMetadata>>::new(60_000);
         fx.processor
             .process(ApplicationEvent::FetchCommittedOffsets { handle, partitions: HashSet::new() });
         let err = rx.await.expect("sender alive").expect_err("must fail without commit manager");
+        // DoD #3: assert the message text AND the class. Java throws a bare
+        // `KafkaException` here (`ApplicationEventProcessor.java:282`), so
+        // `is_kafka_error()` must be true — `Error::local_illegal_state` would answer
+        // false and flip every §10.4 gate the app side consults.
+        assert_eq!(
+            err.message(),
+            "Unable to fetch committed offset because the CommitRequestManager is not available. \
+             Check if group.id was set correctly",
+            "expected Java's exact FetchCommittedOffsetsEvent message, got: {err}"
+        );
         assert!(
-            err.to_string().contains("CommitRequestManager is not available"),
-            "expected illegal-state error, got: {err}"
+            err.is_kafka_error(),
+            // Java throws a bare `KafkaException` here.
+            "is_kafka_error() must be true: {err:?}"
+        );
+        assert!(
+            !matches!(err, Error::LocalIllegalState(_)),
+            "must not be an IllegalState error: {err:?}"
         );
     }
 
@@ -2585,10 +2626,7 @@ mod tests {
     async fn list_offsets_empty_timestamps_resolves_immediately() {
         let mut fx = setup_processor(true);
         let (handle, rx) = CompletableEventHandle::<
-            HashMap<
-                TopicPartition,
-                Option<crate::consumer::internals::offset_and_timestamp_internal::OffsetAndTimestampInternal>,
-            >,
+            HashMap<TopicPartition, Option<crate::consumer::internals::OffsetAndTimestampInternal>>,
         >::new(60_000);
         fx.processor.process(ApplicationEvent::ListOffsets {
             handle,
@@ -2629,7 +2667,7 @@ mod tests {
             let mut guard = fx.subscriptions.lock().unwrap();
             let mut topics = HashSet::new();
             topics.insert("topic1".to_string());
-            guard.subscribe_topics(topics, None).unwrap();
+            guard.subscribe_with_topics(topics, None).unwrap();
         }
         let (handle, rx) = CompletableEventHandle::<()>::new(60_000);
         fx.processor.process(ApplicationEvent::Unsubscribe { handle });
@@ -2684,7 +2722,7 @@ mod tests {
             reaper,
         );
 
-        let state = Arc::new(super::super::application_event::AsyncPollState::new());
+        let state = Arc::new(super::super::AsyncPollState::new());
         processor.process(ApplicationEvent::AsyncPoll {
             deadline_ms: 60_000,
             poll_time_ms: 0,
@@ -2747,7 +2785,7 @@ mod tests {
     }
 
     fn make_offset_and_metadata(offset: i64, epoch: Option<i32>) -> OffsetAndMetadata {
-        OffsetAndMetadata::with_leader_epoch(offset, epoch, "").expect("valid offset")
+        OffsetAndMetadata::with_leader_epoch_metadata(offset, epoch, "").expect("valid offset")
     }
 
     // -------------------------------------------------------------------
@@ -2790,7 +2828,7 @@ mod tests {
         let mut fx = setup_processor(true);
         // AsyncPollEvent — drives the spawn path (no assertions on
         // outcome here; covered by the dedicated AsyncPoll tests).
-        let state = Arc::new(super::super::application_event::AsyncPollState::new());
+        let state = Arc::new(super::super::AsyncPollState::new());
         fx.processor
             .process(ApplicationEvent::AsyncPoll { deadline_ms: 12_445, poll_time_ms: 12_345, state });
         // CreateFetchRequestsEvent — fetch manager absent → handle fails;
@@ -2828,10 +2866,7 @@ mod tests {
         for require_timestamps in [true, false] {
             let mut fx = setup_processor(true);
             let (handle, rx) = CompletableEventHandle::<
-                HashMap<
-                    TopicPartition,
-                    Option<crate::consumer::internals::offset_and_timestamp_internal::OffsetAndTimestampInternal>,
-                >,
+                HashMap<TopicPartition, Option<crate::consumer::internals::OffsetAndTimestampInternal>>,
             >::new(20_000);
             fx.processor.process(ApplicationEvent::ListOffsets {
                 handle,
@@ -2862,7 +2897,7 @@ mod tests {
         let fx = setup_processor_with_fetch(true, true);
         let request_managers = Arc::clone(&fx.request_managers);
         let mut processor = fx.processor;
-        let state = Arc::new(super::super::application_event::AsyncPollState::new());
+        let state = Arc::new(super::super::AsyncPollState::new());
         processor.process(ApplicationEvent::AsyncPoll {
             deadline_ms: 12_446,
             poll_time_ms: 12_345,
@@ -3158,7 +3193,7 @@ mod tests {
     // `offsets_ready.isDone()` is true and `event.future()` throws.
     // -------------------------------------------------------------------
     #[tokio::test(flavor = "current_thread")]
-    async fn sync_commit_event_with_exception_propagates_to_handle() {
+    async fn sync_commit_event_with_error_propagates_to_handle() {
         let fx = setup_processor(true);
         // Empty event-offsets + empty `all_consumed()` would short-circuit
         // to Ok(empty); seed a partition position so the commit is
@@ -3185,7 +3220,7 @@ mod tests {
                 move || {
                     let guard = request_managers_for_drive.lock().expect("rm poisoned");
                     if let Some(commit) = guard.commit.as_ref() {
-                        commit.fail_first_unsent_commit_for_test(KafkaError::illegal_state("boom"))
+                        commit.fail_first_unsent_commit_for_test(Error::local_illegal_state("boom"))
                     } else {
                         false
                     }
@@ -3318,7 +3353,7 @@ mod tests {
     // the propagation path).
     // -------------------------------------------------------------------
     #[tokio::test(flavor = "current_thread")]
-    async fn async_commit_event_with_exception_propagates_to_handle() {
+    async fn async_commit_event_with_error_propagates_to_handle() {
         let fx = setup_processor(true);
         let partition = tp("topic", 0);
         let position = FetchPosition::with_leader(5, Some(1), crate::metadata::LeaderAndEpoch::no_leader_or_epoch());
@@ -3342,7 +3377,7 @@ mod tests {
                 move || {
                     let guard = request_managers_for_drive.lock().expect("rm poisoned");
                     if let Some(commit) = guard.commit.as_ref() {
-                        commit.fail_first_unsent_commit_for_test(KafkaError::illegal_state("kaboom"))
+                        commit.fail_first_unsent_commit_for_test(Error::local_illegal_state("kaboom"))
                     } else {
                         false
                     }
@@ -3386,7 +3421,7 @@ mod tests {
 
         let request_managers = Arc::clone(&fx.request_managers);
         let mut processor = fx.processor;
-        let state = Arc::new(super::super::application_event::AsyncPollState::new());
+        let state = Arc::new(super::super::AsyncPollState::new());
         processor.process(ApplicationEvent::AsyncPoll {
             deadline_ms: 1_000,
             poll_time_ms: 100,
@@ -3434,7 +3469,7 @@ mod tests {
         publish_topic_metadata(&fx.metadata, "test-topic");
         let request_managers = Arc::clone(&fx.request_managers);
         let mut processor = fx.processor;
-        let state = Arc::new(super::super::application_event::AsyncPollState::new());
+        let state = Arc::new(super::super::AsyncPollState::new());
         processor.process(ApplicationEvent::AsyncPoll {
             deadline_ms: 1_000,
             poll_time_ms: 100,
@@ -3495,7 +3530,7 @@ mod tests {
         processor.metadata_version_snapshot = fx.metadata.update_version();
 
         let request_managers = Arc::clone(&fx.request_managers);
-        let state = Arc::new(super::super::application_event::AsyncPollState::new());
+        let state = Arc::new(super::super::AsyncPollState::new());
         processor.process(ApplicationEvent::AsyncPoll {
             deadline_ms: 1_000,
             poll_time_ms: 100,
@@ -3575,13 +3610,12 @@ mod tests {
         {
             let mut guard = fx.request_managers.lock().expect("rm poisoned");
             let offsets_mgr = guard.offsets.as_mut().expect("offsets manager present");
-            offsets_mgr
-                .set_cached_update_positions_exception_for_test(KafkaError::illegal_state("Intentional failure"));
+            offsets_mgr.set_cached_update_positions_error_for_test(Error::local_illegal_state("Intentional failure"));
         }
 
         let request_managers = Arc::clone(&fx.request_managers);
         let mut processor = fx.processor;
-        let state = Arc::new(super::super::application_event::AsyncPollState::new());
+        let state = Arc::new(super::super::AsyncPollState::new());
         processor.process(ApplicationEvent::AsyncPoll {
             deadline_ms: 110,
             poll_time_ms: 100,
@@ -3620,13 +3654,12 @@ mod tests {
     /// `metadata.fetch().topics()` reports it. Mirrors the Java tests'
     /// `cluster.topics()` Mockito stubs.
     fn publish_topic_metadata(metadata: &ConsumerMetadata, topic_name: &str) {
+        use crate::MetadataResponseData;
+        use crate::common::ApiKeys;
         use crate::common::Node;
         use crate::common::Uuid;
-        use crate::common::protocol::ApiKeys;
         use crate::common::requests::MetadataResponse;
-        use crate::metadata_response_data::{
-            MetadataResponseBroker, MetadataResponseData, MetadataResponsePartition, MetadataResponseTopic,
-        };
+        use crate::metadata_response_data::{MetadataResponseBroker, MetadataResponsePartition, MetadataResponseTopic};
         let node = Node::new(1, "localhost".to_string(), 9092);
         let mut data = MetadataResponseData::new();
         data.set_cluster_id(Some("test-cluster-id".to_string()));
@@ -3654,7 +3687,7 @@ mod tests {
         topic.set_partitions(vec![partition]);
         data.set_topics(vec![topic]);
 
-        let response = MetadataResponse::new(data, ApiKeys::METADATA.latest_version());
+        let response = MetadataResponse::with_version(data, ApiKeys::METADATA.latest_version());
         metadata
             .metadata_arc()
             .update_with_current_request_version(&response, false, 1_000);

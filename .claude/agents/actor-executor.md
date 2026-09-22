@@ -57,7 +57,7 @@ Before committing, review your own code for:
 ## Key Translation Rules (Summary)
 - Java packages → Rust modules (e.g., `org.apache.kafka.clients.consumer` → `clients::consumer`)
 - PascalCase class names preserved, camelCase methods → snake_case
-- Exceptions → `Result<T, KafkaError>` with `is_retriable()`, `is_fatal()`, `txn_requires_abort()`
+- Exceptions → `Result<T, Error>` with hierarchy predicates (`is_retriable_error()`, `is_kafka_error()`, …) on `Error`; `is_transaction_abortable_error()` is a leaf-variant test on `Error`; fatality is the free function `request_utils::is_fatal_error(&Error)`, not an `Error` method (see CLAUDE.md §10.4)
 - No `panic!` in public API except unrecoverable errors (OOM, division by zero)
 - Callbacks → await after async call; non-blocking callbacks → `tokio::task::spawn`
 - Non-blocking IO with Tokio, single Selector pattern

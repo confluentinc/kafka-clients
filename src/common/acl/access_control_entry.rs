@@ -16,7 +16,7 @@
 //!
 //! Corresponds to `org.apache.kafka.common.acl.AccessControlEntry`.
 
-use crate::common::KafkaError;
+use crate::common::Error;
 
 use super::access_control_entry_data::AccessControlEntryData;
 use super::{AccessControlEntryFilter, AclOperation, AclPermissionType};
@@ -42,7 +42,7 @@ impl AccessControlEntry {
     ///
     /// # Errors
     ///
-    /// Returns [`KafkaError::IllegalArgument`] if `operation` is
+    /// Returns [`Error::LocalIllegalArgument`] if `operation` is
     /// [`AclOperation::Any`] or `permission_type` is
     /// [`AclPermissionType::Any`] (mirrors Java's `IllegalArgumentException`).
     pub fn new(
@@ -50,12 +50,12 @@ impl AccessControlEntry {
         host: impl Into<String>,
         operation: AclOperation,
         permission_type: AclPermissionType,
-    ) -> Result<AccessControlEntry, KafkaError> {
+    ) -> Result<AccessControlEntry, Error> {
         if operation == AclOperation::Any {
-            return Err(KafkaError::illegal_argument("operation must not be ANY"));
+            return Err(Error::local_illegal_argument("operation must not be ANY"));
         }
         if permission_type == AclPermissionType::Any {
-            return Err(KafkaError::illegal_argument("permissionType must not be ANY"));
+            return Err(Error::local_illegal_argument("permissionType must not be ANY"));
         }
         Ok(AccessControlEntry {
             data: AccessControlEntryData::new(Some(principal.into()), Some(host.into()), operation, permission_type),
@@ -88,7 +88,7 @@ impl AccessControlEntry {
 
     /// Create a filter which matches only this `AccessControlEntry`.
     pub fn to_filter(&self) -> AccessControlEntryFilter {
-        AccessControlEntryFilter::from_data(self.data.clone())
+        AccessControlEntryFilter::with_data(self.data.clone())
     }
 
     /// Return true if this ACE has any UNKNOWN components.
@@ -110,13 +110,13 @@ mod tests {
     #[test]
     fn rejects_any_operation() {
         let err = AccessControlEntry::new("User:x", "*", AclOperation::Any, AclPermissionType::Allow);
-        assert!(matches!(err, Err(KafkaError::IllegalArgument(_))));
+        assert!(matches!(err, Err(Error::LocalIllegalArgument(_))));
     }
 
     #[test]
     fn rejects_any_permission_type() {
         let err = AccessControlEntry::new("User:x", "*", AclOperation::Read, AclPermissionType::Any);
-        assert!(matches!(err, Err(KafkaError::IllegalArgument(_))));
+        assert!(matches!(err, Err(Error::LocalIllegalArgument(_))));
     }
 
     #[test]

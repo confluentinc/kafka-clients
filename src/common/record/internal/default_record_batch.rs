@@ -39,22 +39,15 @@
 
 use std::io;
 
+use crate::common::InvalidRecordError;
 use crate::common::compress::Compression;
-use crate::common::header::internals::RecordHeader;
-use crate::common::record::InvalidRecordError;
+use crate::common::header::RecordHeader;
 use crate::common::record::TimestampType;
+use crate::common::record::internal::AbstractRecords;
 use crate::common::record::internal::CompressionType;
 use crate::common::record::internal::DefaultRecord;
 use crate::common::record::internal::RecordBatch;
 use crate::common::record::internal::SimpleRecord;
-use crate::common::record::internal::abstract_records::LOG_OVERHEAD;
-
-// Attribute masks
-const COMPRESSION_CODEC_MASK: u8 = 0x07;
-const TRANSACTIONAL_FLAG_MASK: u8 = 0x10;
-const CONTROL_FLAG_MASK: u8 = 0x20;
-const DELETE_HORIZON_FLAG_MASK: u8 = 0x40;
-const TIMESTAMP_TYPE_MASK: u8 = 0x08;
 
 /// Record batch implementation for magic 2 and above.
 ///
@@ -68,6 +61,105 @@ pub struct DefaultRecordBatch {
 }
 
 impl DefaultRecordBatch {
+    // Attribute masks
+    const COMPRESSION_CODEC_MASK: u8 = 0x07;
+
+    const TRANSACTIONAL_FLAG_MASK: u8 = 0x10;
+
+    const CONTROL_FLAG_MASK: u8 = 0x20;
+
+    const DELETE_HORIZON_FLAG_MASK: u8 = 0x40;
+
+    const TIMESTAMP_TYPE_MASK: u8 = 0x08;
+
+    /// Compute the attributes byte for a record batch header.
+    fn compute_attributes(
+        compression_type: CompressionType,
+        timestamp_type: TimestampType,
+        is_transactional: bool,
+        is_control: bool,
+        is_delete_horizon_set: bool,
+    ) -> u8 {
+        assert!(
+            timestamp_type != TimestampType::NoTimestampType,
+            "Timestamp type must be provided to compute attributes for message format v2 and above"
+        );
+
+        let mut attributes: u8 = if is_transactional {
+            Self::TRANSACTIONAL_FLAG_MASK
+        } else {
+            0
+        };
+        if is_control {
+            attributes |= Self::CONTROL_FLAG_MASK;
+        }
+        let id = compression_type.id();
+        if id > 0 {
+            attributes |= Self::COMPRESSION_CODEC_MASK & id;
+        }
+        if timestamp_type == TimestampType::LogAppendTime {
+            attributes |= Self::TIMESTAMP_TYPE_MASK;
+        }
+        if is_delete_horizon_set {
+            attributes |= Self::DELETE_HORIZON_FLAG_MASK;
+        }
+        attributes
+    }
+
+    /// Increment a sequence number, wrapping around at `i32::MAX`.
+    ///
+    /// Corresponds to Java's `DefaultRecordBatch.incrementSequence(int, int)`.
+    pub fn increment_sequence(sequence: i32, increment: i32) -> i32 {
+        if sequence > i32::MAX - increment {
+            increment - (i32::MAX - sequence) - 1
+        } else {
+            sequence + increment
+        }
+    }
+
+    /// Decrement a sequence number, wrapping around at 0.
+    ///
+    /// Corresponds to Java's `DefaultRecordBatch.decrementSequence(int, int)`.
+    pub fn decrement_sequence(sequence: i32, decrement: i32) -> i32 {
+        if sequence < decrement {
+            i32::MAX - (decrement - sequence) + 1
+        } else {
+            sequence - decrement
+        }
+    }
+
+    fn read_i64(buf: &[u8], offset: usize) -> i64 {
+        i64::from_be_bytes(buf[offset..offset + 8].try_into().unwrap())
+    }
+
+    fn read_i32(buf: &[u8], offset: usize) -> i32 {
+        i32::from_be_bytes(buf[offset..offset + 4].try_into().unwrap())
+    }
+
+    fn read_u32(buf: &[u8], offset: usize) -> u32 {
+        u32::from_be_bytes(buf[offset..offset + 4].try_into().unwrap())
+    }
+
+    fn read_i16(buf: &[u8], offset: usize) -> i16 {
+        i16::from_be_bytes(buf[offset..offset + 2].try_into().unwrap())
+    }
+
+    fn write_i64(buf: &mut [u8], offset: usize, value: i64) {
+        buf[offset..offset + 8].copy_from_slice(&value.to_be_bytes());
+    }
+
+    fn write_i32(buf: &mut [u8], offset: usize, value: i32) {
+        buf[offset..offset + 4].copy_from_slice(&value.to_be_bytes());
+    }
+
+    fn write_u32(buf: &mut [u8], offset: usize, value: u32) {
+        buf[offset..offset + 4].copy_from_slice(&value.to_be_bytes());
+    }
+
+    fn write_i16(buf: &mut [u8], offset: usize, value: i16) {
+        buf[offset..offset + 2].copy_from_slice(&value.to_be_bytes());
+    }
+
     /// Create a new `DefaultRecordBatch` wrapping the given buffer.
     ///
     /// The buffer must contain a complete record batch starting at index 0.
@@ -76,7 +168,7 @@ impl DefaultRecordBatch {
     }
 
     /// Create a `DefaultRecordBatch` from a byte slice (copies the data).
-    pub fn from_slice(data: &[u8]) -> Self {
+    pub fn with_slice(data: &[u8]) -> Self {
         Self { buffer: data.to_vec() }
     }
 
@@ -135,7 +227,7 @@ impl DefaultRecordBatch {
 
     /// Returns the producer epoch of this batch.
     pub fn producer_epoch(&self) -> i16 {
-        read_i16(&self.buffer, RecordBatch::PRODUCER_EPOCH_OFFSET)
+        DefaultRecordBatch::read_i16(&self.buffer, RecordBatch::PRODUCER_EPOCH_OFFSET)
     }
 
     /// Returns the base sequence of this batch.
@@ -154,7 +246,7 @@ impl DefaultRecordBatch {
         if base_sequence == RecordBatch::NO_SEQUENCE {
             RecordBatch::NO_SEQUENCE
         } else {
-            increment_sequence(base_sequence, self.last_offset_delta())
+            DefaultRecordBatch::increment_sequence(base_sequence, self.last_offset_delta())
         }
     }
 
@@ -166,6 +258,13 @@ impl DefaultRecordBatch {
     /// Returns whether this batch uses compression.
     pub fn is_compressed(&self) -> bool {
         self.as_ref().is_compressed()
+    }
+
+    /// Whether this batch uses compression, failing for an unknown codec id.
+    ///
+    /// See [`DefaultRecordBatch::try_compression_type`].
+    pub fn try_is_compressed(&self) -> Result<bool, crate::common::Error> {
+        self.as_ref().try_is_compressed()
     }
 
     /// Returns the total size of this batch in bytes (including LOG_OVERHEAD).
@@ -190,13 +289,13 @@ impl DefaultRecordBatch {
 
     /// Returns whether the delete horizon flag is set.
     fn has_delete_horizon_ms(&self) -> bool {
-        (self.attributes() & DELETE_HORIZON_FLAG_MASK) > 0
+        (self.attributes() & DefaultRecordBatch::DELETE_HORIZON_FLAG_MASK) > 0
     }
 
     /// Returns the delete horizon timestamp if set, otherwise `None`.
     pub fn delete_horizon_ms(&self) -> Option<i64> {
         if self.has_delete_horizon_ms() {
-            Some(read_i64(&self.buffer, RecordBatch::BASE_TIMESTAMP_OFFSET))
+            Some(DefaultRecordBatch::read_i64(&self.buffer, RecordBatch::BASE_TIMESTAMP_OFFSET))
         } else {
             None
         }
@@ -240,7 +339,7 @@ impl DefaultRecordBatch {
     /// Set the last offset of this batch and recompute the base offset.
     pub fn set_last_offset(&mut self, offset: i64) {
         let last_offset_delta = self.last_offset_delta();
-        write_i64(
+        DefaultRecordBatch::write_i64(
             &mut self.buffer,
             RecordBatch::BASE_OFFSET_OFFSET,
             offset - last_offset_delta as i64,
@@ -255,22 +354,22 @@ impl DefaultRecordBatch {
             return;
         }
 
-        let attributes = compute_attributes(
+        let attributes = DefaultRecordBatch::compute_attributes(
             self.compression_type(),
             timestamp_type,
             self.is_transactional(),
             self.is_control_batch(),
             self.has_delete_horizon_ms(),
         );
-        write_i16(&mut self.buffer, RecordBatch::ATTRIBUTES_OFFSET, attributes as i16);
-        write_i64(&mut self.buffer, RecordBatch::MAX_TIMESTAMP_OFFSET, max_timestamp);
+        DefaultRecordBatch::write_i16(&mut self.buffer, RecordBatch::ATTRIBUTES_OFFSET, attributes as i16);
+        DefaultRecordBatch::write_i64(&mut self.buffer, RecordBatch::MAX_TIMESTAMP_OFFSET, max_timestamp);
         let crc = self.compute_checksum();
-        write_u32(&mut self.buffer, RecordBatch::CRC_OFFSET, crc);
+        DefaultRecordBatch::write_u32(&mut self.buffer, RecordBatch::CRC_OFFSET, crc);
     }
 
     /// Set the partition leader epoch.
     pub fn set_partition_leader_epoch(&mut self, epoch: i32) {
-        write_i32(&mut self.buffer, RecordBatch::PARTITION_LEADER_EPOCH_OFFSET, epoch);
+        DefaultRecordBatch::write_i32(&mut self.buffer, RecordBatch::PARTITION_LEADER_EPOCH_OFFSET, epoch);
     }
 
     /// Returns a reference to the underlying buffer.
@@ -395,7 +494,19 @@ impl DefaultRecordBatch {
             // Check that no data remains
             let mut check_buf = [0u8; 1];
             match io::Read::read(&mut reader, &mut check_buf) {
-                Ok(0) | Err(_) => {}, // EOF, good
+                Ok(0) => {}, // EOF, good
+                // Java's `ensureNoneRemaining` throws here — `catch (IOException e)
+                // { throw new KafkaException("Error checking for remaining bytes
+                // after reading batch", e); }` (`DefaultRecordBatch.java:645-652`).
+                // Treating the failure as a clean EOF hid a truncated or corrupt
+                // decompression stream behind a successful-looking parse. (The class
+                // differs: this function's error type is `InvalidRecordError`, also
+                // inside the `KafkaException` hierarchy and also non-retriable.)
+                Err(e) => {
+                    return Err(InvalidRecordError::new(format!(
+                        "Error checking for remaining bytes after reading batch: {e}"
+                    )));
+                },
                 Ok(_) => {
                     return Err(InvalidRecordError::new(
                         "Incorrect declared batch size, records still remaining in file",
@@ -516,7 +627,7 @@ impl DefaultRecordBatch {
             base_timestamp
         );
 
-        let attributes = compute_attributes(
+        let attributes = DefaultRecordBatch::compute_attributes(
             compression_type,
             timestamp_type,
             is_transactional,
@@ -529,22 +640,26 @@ impl DefaultRecordBatch {
             buffer.resize(RecordBatch::RECORD_BATCH_OVERHEAD, 0);
         }
 
-        write_i64(buffer, RecordBatch::BASE_OFFSET_OFFSET, base_offset);
-        write_i32(buffer, RecordBatch::LENGTH_OFFSET, (size_in_bytes - LOG_OVERHEAD) as i32);
-        write_i32(buffer, RecordBatch::PARTITION_LEADER_EPOCH_OFFSET, partition_leader_epoch);
+        DefaultRecordBatch::write_i64(buffer, RecordBatch::BASE_OFFSET_OFFSET, base_offset);
+        DefaultRecordBatch::write_i32(
+            buffer,
+            RecordBatch::LENGTH_OFFSET,
+            (size_in_bytes - AbstractRecords::LOG_OVERHEAD) as i32,
+        );
+        DefaultRecordBatch::write_i32(buffer, RecordBatch::PARTITION_LEADER_EPOCH_OFFSET, partition_leader_epoch);
         buffer[RecordBatch::MAGIC_OFFSET] = magic as u8;
-        write_i16(buffer, RecordBatch::ATTRIBUTES_OFFSET, attributes as i16);
-        write_i64(buffer, RecordBatch::BASE_TIMESTAMP_OFFSET, base_timestamp);
-        write_i64(buffer, RecordBatch::MAX_TIMESTAMP_OFFSET, max_timestamp);
-        write_i32(buffer, RecordBatch::LAST_OFFSET_DELTA_OFFSET, last_offset_delta);
-        write_i64(buffer, RecordBatch::PRODUCER_ID_OFFSET, producer_id);
-        write_i16(buffer, RecordBatch::PRODUCER_EPOCH_OFFSET, epoch);
-        write_i32(buffer, RecordBatch::BASE_SEQUENCE_OFFSET, sequence);
-        write_i32(buffer, RecordBatch::RECORDS_COUNT_OFFSET, num_records);
+        DefaultRecordBatch::write_i16(buffer, RecordBatch::ATTRIBUTES_OFFSET, attributes as i16);
+        DefaultRecordBatch::write_i64(buffer, RecordBatch::BASE_TIMESTAMP_OFFSET, base_timestamp);
+        DefaultRecordBatch::write_i64(buffer, RecordBatch::MAX_TIMESTAMP_OFFSET, max_timestamp);
+        DefaultRecordBatch::write_i32(buffer, RecordBatch::LAST_OFFSET_DELTA_OFFSET, last_offset_delta);
+        DefaultRecordBatch::write_i64(buffer, RecordBatch::PRODUCER_ID_OFFSET, producer_id);
+        DefaultRecordBatch::write_i16(buffer, RecordBatch::PRODUCER_EPOCH_OFFSET, epoch);
+        DefaultRecordBatch::write_i32(buffer, RecordBatch::BASE_SEQUENCE_OFFSET, sequence);
+        DefaultRecordBatch::write_i32(buffer, RecordBatch::RECORDS_COUNT_OFFSET, num_records);
 
         // Compute CRC over attributes through end of buffer
         let crc = crc32c::crc32c(&buffer[RecordBatch::ATTRIBUTES_OFFSET..]);
-        write_u32(buffer, RecordBatch::CRC_OFFSET, crc);
+        DefaultRecordBatch::write_u32(buffer, RecordBatch::CRC_OFFSET, crc);
     }
 
     /// Write a batch header to the given buffer at a specific position.
@@ -580,7 +695,7 @@ impl DefaultRecordBatch {
             base_timestamp
         );
 
-        let attributes = compute_attributes(
+        let attributes = DefaultRecordBatch::compute_attributes(
             compression_type,
             timestamp_type,
             is_transactional,
@@ -589,36 +704,36 @@ impl DefaultRecordBatch {
         );
 
         // Write all header fields at position
-        write_i64(&mut buffer[position..], RecordBatch::BASE_OFFSET_OFFSET, base_offset);
-        write_i32(
+        DefaultRecordBatch::write_i64(&mut buffer[position..], RecordBatch::BASE_OFFSET_OFFSET, base_offset);
+        DefaultRecordBatch::write_i32(
             &mut buffer[position..],
             RecordBatch::LENGTH_OFFSET,
-            (size_in_bytes - LOG_OVERHEAD) as i32,
+            (size_in_bytes - AbstractRecords::LOG_OVERHEAD) as i32,
         );
-        write_i32(
+        DefaultRecordBatch::write_i32(
             &mut buffer[position..],
             RecordBatch::PARTITION_LEADER_EPOCH_OFFSET,
             partition_leader_epoch,
         );
         buffer[position + RecordBatch::MAGIC_OFFSET] = magic as u8;
-        write_i16(&mut buffer[position..], RecordBatch::ATTRIBUTES_OFFSET, attributes as i16);
-        write_i64(&mut buffer[position..], RecordBatch::BASE_TIMESTAMP_OFFSET, base_timestamp);
-        write_i64(&mut buffer[position..], RecordBatch::MAX_TIMESTAMP_OFFSET, max_timestamp);
-        write_i32(
+        DefaultRecordBatch::write_i16(&mut buffer[position..], RecordBatch::ATTRIBUTES_OFFSET, attributes as i16);
+        DefaultRecordBatch::write_i64(&mut buffer[position..], RecordBatch::BASE_TIMESTAMP_OFFSET, base_timestamp);
+        DefaultRecordBatch::write_i64(&mut buffer[position..], RecordBatch::MAX_TIMESTAMP_OFFSET, max_timestamp);
+        DefaultRecordBatch::write_i32(
             &mut buffer[position..],
             RecordBatch::LAST_OFFSET_DELTA_OFFSET,
             last_offset_delta,
         );
-        write_i64(&mut buffer[position..], RecordBatch::PRODUCER_ID_OFFSET, producer_id);
-        write_i16(&mut buffer[position..], RecordBatch::PRODUCER_EPOCH_OFFSET, epoch);
-        write_i32(&mut buffer[position..], RecordBatch::BASE_SEQUENCE_OFFSET, sequence);
-        write_i32(&mut buffer[position..], RecordBatch::RECORDS_COUNT_OFFSET, num_records);
+        DefaultRecordBatch::write_i64(&mut buffer[position..], RecordBatch::PRODUCER_ID_OFFSET, producer_id);
+        DefaultRecordBatch::write_i16(&mut buffer[position..], RecordBatch::PRODUCER_EPOCH_OFFSET, epoch);
+        DefaultRecordBatch::write_i32(&mut buffer[position..], RecordBatch::BASE_SEQUENCE_OFFSET, sequence);
+        DefaultRecordBatch::write_i32(&mut buffer[position..], RecordBatch::RECORDS_COUNT_OFFSET, num_records);
 
         // Compute CRC over from attributes offset to the end of this batch
         let crc_start = position + RecordBatch::ATTRIBUTES_OFFSET;
         let crc_end = position + size_in_bytes;
         let crc = crc32c::crc32c(&buffer[crc_start..crc_end]);
-        write_u32(&mut buffer[position..], RecordBatch::CRC_OFFSET, crc);
+        DefaultRecordBatch::write_u32(&mut buffer[position..], RecordBatch::CRC_OFFSET, crc);
     }
 }
 
@@ -656,17 +771,17 @@ impl<'a> DefaultRecordBatchRef<'a> {
 
     /// Returns the base timestamp of the batch.
     pub fn base_timestamp(&self) -> i64 {
-        read_i64(self.buffer, RecordBatch::BASE_TIMESTAMP_OFFSET)
+        DefaultRecordBatch::read_i64(self.buffer, RecordBatch::BASE_TIMESTAMP_OFFSET)
     }
 
     /// Returns the max timestamp of the batch.
     pub fn max_timestamp(&self) -> i64 {
-        read_i64(self.buffer, RecordBatch::MAX_TIMESTAMP_OFFSET)
+        DefaultRecordBatch::read_i64(self.buffer, RecordBatch::MAX_TIMESTAMP_OFFSET)
     }
 
     /// Returns the timestamp type of this batch.
     pub fn timestamp_type(&self) -> TimestampType {
-        if (self.attributes() & TIMESTAMP_TYPE_MASK) == 0 {
+        if (self.attributes() & DefaultRecordBatch::TIMESTAMP_TYPE_MASK) == 0 {
             TimestampType::CreateTime
         } else {
             TimestampType::LogAppendTime
@@ -675,12 +790,12 @@ impl<'a> DefaultRecordBatchRef<'a> {
 
     /// Returns the base offset of this batch.
     pub fn base_offset(&self) -> i64 {
-        read_i64(self.buffer, RecordBatch::BASE_OFFSET_OFFSET)
+        DefaultRecordBatch::read_i64(self.buffer, RecordBatch::BASE_OFFSET_OFFSET)
     }
 
     /// Returns the last offset delta of this batch.
     fn last_offset_delta(&self) -> i32 {
-        read_i32(self.buffer, RecordBatch::LAST_OFFSET_DELTA_OFFSET)
+        DefaultRecordBatch::read_i32(self.buffer, RecordBatch::LAST_OFFSET_DELTA_OFFSET)
     }
 
     /// Returns the last offset of this batch.
@@ -690,17 +805,49 @@ impl<'a> DefaultRecordBatchRef<'a> {
 
     /// Returns the producer ID of this batch.
     pub fn producer_id(&self) -> i64 {
-        read_i64(self.buffer, RecordBatch::PRODUCER_ID_OFFSET)
+        DefaultRecordBatch::read_i64(self.buffer, RecordBatch::PRODUCER_ID_OFFSET)
     }
 
     /// Returns the base sequence of this batch.
     pub fn base_sequence(&self) -> i32 {
-        read_i32(self.buffer, RecordBatch::BASE_SEQUENCE_OFFSET)
+        DefaultRecordBatch::read_i32(self.buffer, RecordBatch::BASE_SEQUENCE_OFFSET)
     }
 
-    /// Returns the compression type of this batch.
+    /// Returns the compression type of this batch, treating a codec id this
+    /// client does not know as [`CompressionType::None`].
+    ///
+    /// Use [`try_compression_type`](Self::try_compression_type) for a batch that
+    /// came off the wire — see there for why the difference matters.
     pub fn compression_type(&self) -> CompressionType {
-        CompressionType::for_id(self.attributes() & COMPRESSION_CODEC_MASK).unwrap_or(CompressionType::None)
+        CompressionType::for_id(self.attributes() & DefaultRecordBatch::COMPRESSION_CODEC_MASK)
+            .unwrap_or(CompressionType::None)
+    }
+
+    /// Returns the compression type of this batch, failing for a codec id this
+    /// client does not know — Java's behaviour.
+    ///
+    /// `COMPRESSION_CODEC_MASK` is `0x07`, so ids 5-7 are wire-reachable and
+    /// CRC-valid. `CompressionType.forId` throws `IllegalArgumentException` for
+    /// them (`CompressionType.java:144-159`) and
+    /// `DefaultRecordBatch.compressionType()` lets it propagate
+    /// (`DefaultRecordBatch.java:217-219`). Reporting `None` instead would mark
+    /// such a batch *uncompressed* and hand its still-compressed bytes to the
+    /// record parser, so a consumer would either skip the batch or surface
+    /// fabricated records.
+    ///
+    /// `IllegalArgumentException` is not a `KafkaException`, so in Java it escapes
+    /// `FetchCollector`'s swallow guard and reaches the application — which the
+    /// `Error::local_illegal_argument` returned by [`CompressionType::for_id`]
+    /// reproduces.
+    pub fn try_compression_type(&self) -> Result<CompressionType, crate::common::Error> {
+        CompressionType::for_id(self.attributes() & DefaultRecordBatch::COMPRESSION_CODEC_MASK)
+    }
+
+    /// Whether this batch uses compression, failing for an unknown codec id.
+    ///
+    /// See [`try_compression_type`](Self::try_compression_type).
+    pub fn try_is_compressed(&self) -> Result<bool, crate::common::Error> {
+        Ok(self.try_compression_type()? != CompressionType::None)
     }
 
     /// Returns whether this batch uses compression.
@@ -710,32 +857,32 @@ impl<'a> DefaultRecordBatchRef<'a> {
 
     /// Returns the total size of this batch in bytes (including LOG_OVERHEAD).
     pub fn size_in_bytes(&self) -> usize {
-        LOG_OVERHEAD + read_i32(self.buffer, RecordBatch::LENGTH_OFFSET) as usize
+        AbstractRecords::LOG_OVERHEAD + DefaultRecordBatch::read_i32(self.buffer, RecordBatch::LENGTH_OFFSET) as usize
     }
 
     /// Returns the number of records declared in the batch header.
     pub fn records_count(&self) -> i32 {
-        read_i32(self.buffer, RecordBatch::RECORDS_COUNT_OFFSET)
+        DefaultRecordBatch::read_i32(self.buffer, RecordBatch::RECORDS_COUNT_OFFSET)
     }
 
     /// Returns whether this batch is transactional.
     pub fn is_transactional(&self) -> bool {
-        (self.attributes() & TRANSACTIONAL_FLAG_MASK) > 0
+        (self.attributes() & DefaultRecordBatch::TRANSACTIONAL_FLAG_MASK) > 0
     }
 
     /// Returns whether this is a control batch.
     pub fn is_control_batch(&self) -> bool {
-        (self.attributes() & CONTROL_FLAG_MASK) > 0
+        (self.attributes() & DefaultRecordBatch::CONTROL_FLAG_MASK) > 0
     }
 
     /// Returns the partition leader epoch.
     pub fn partition_leader_epoch(&self) -> i32 {
-        read_i32(self.buffer, RecordBatch::PARTITION_LEADER_EPOCH_OFFSET)
+        DefaultRecordBatch::read_i32(self.buffer, RecordBatch::PARTITION_LEADER_EPOCH_OFFSET)
     }
 
     /// Returns the stored CRC32C checksum.
     pub fn checksum(&self) -> u32 {
-        read_u32(self.buffer, RecordBatch::CRC_OFFSET)
+        DefaultRecordBatch::read_u32(self.buffer, RecordBatch::CRC_OFFSET)
     }
 
     /// Compute the CRC32C over the attributes through the end of the batch.
@@ -773,7 +920,7 @@ impl<'a> DefaultRecordBatchRef<'a> {
 
     /// Returns the attributes byte (lower byte of the 2-byte attributes field).
     fn attributes(&self) -> u8 {
-        read_i16(self.buffer, RecordBatch::ATTRIBUTES_OFFSET) as u8
+        DefaultRecordBatch::read_i16(self.buffer, RecordBatch::ATTRIBUTES_OFFSET) as u8
     }
 
     /// The log-append timestamp for the batch, if the batch uses
@@ -851,137 +998,99 @@ impl std::hash::Hash for DefaultRecordBatch {
     }
 }
 
-/// Compute the attributes byte for a record batch header.
-fn compute_attributes(
-    compression_type: CompressionType,
-    timestamp_type: TimestampType,
-    is_transactional: bool,
-    is_control: bool,
-    is_delete_horizon_set: bool,
-) -> u8 {
-    assert!(
-        timestamp_type != TimestampType::NoTimestampType,
-        "Timestamp type must be provided to compute attributes for message format v2 and above"
-    );
-
-    let mut attributes: u8 = if is_transactional { TRANSACTIONAL_FLAG_MASK } else { 0 };
-    if is_control {
-        attributes |= CONTROL_FLAG_MASK;
-    }
-    let id = compression_type.id();
-    if id > 0 {
-        attributes |= COMPRESSION_CODEC_MASK & id;
-    }
-    if timestamp_type == TimestampType::LogAppendTime {
-        attributes |= TIMESTAMP_TYPE_MASK;
-    }
-    if is_delete_horizon_set {
-        attributes |= DELETE_HORIZON_FLAG_MASK;
-    }
-    attributes
-}
-
-/// Increment a sequence number, wrapping around at `i32::MAX`.
-///
-/// Corresponds to Java's `DefaultRecordBatch.incrementSequence(int, int)`.
-pub fn increment_sequence(sequence: i32, increment: i32) -> i32 {
-    if sequence > i32::MAX - increment {
-        increment - (i32::MAX - sequence) - 1
-    } else {
-        sequence + increment
-    }
-}
-
-/// Decrement a sequence number, wrapping around at 0.
-///
-/// Corresponds to Java's `DefaultRecordBatch.decrementSequence(int, int)`.
-pub fn decrement_sequence(sequence: i32, decrement: i32) -> i32 {
-    if sequence < decrement {
-        i32::MAX - (decrement - sequence) + 1
-    } else {
-        sequence - decrement
-    }
-}
-
 // -- Big-endian read/write helpers --
-
-fn read_i64(buf: &[u8], offset: usize) -> i64 {
-    i64::from_be_bytes(buf[offset..offset + 8].try_into().unwrap())
-}
-
-fn read_i32(buf: &[u8], offset: usize) -> i32 {
-    i32::from_be_bytes(buf[offset..offset + 4].try_into().unwrap())
-}
-
-fn read_u32(buf: &[u8], offset: usize) -> u32 {
-    u32::from_be_bytes(buf[offset..offset + 4].try_into().unwrap())
-}
-
-fn read_i16(buf: &[u8], offset: usize) -> i16 {
-    i16::from_be_bytes(buf[offset..offset + 2].try_into().unwrap())
-}
-
-fn write_i64(buf: &mut [u8], offset: usize, value: i64) {
-    buf[offset..offset + 8].copy_from_slice(&value.to_be_bytes());
-}
-
-fn write_i32(buf: &mut [u8], offset: usize, value: i32) {
-    buf[offset..offset + 4].copy_from_slice(&value.to_be_bytes());
-}
-
-fn write_u32(buf: &mut [u8], offset: usize, value: u32) {
-    buf[offset..offset + 4].copy_from_slice(&value.to_be_bytes());
-}
-
-fn write_i16(buf: &mut [u8], offset: usize, value: i16) {
-    buf[offset..offset + 2].copy_from_slice(&value.to_be_bytes());
-}
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::common::record::internal::MemoryRecords;
+    use crate::common::record::internal::MemoryRecordsBuilderOptionsBuilder;
     use crate::common::record::internal::Record;
-    use crate::common::record::internal::SimpleRecord;
+    use crate::common::record::internal::{SimpleRecord, SimpleRecordOptionsBuilder};
 
     #[test]
     fn test_increment_sequence() {
-        assert_eq!(increment_sequence(5, 5), 10);
-        assert_eq!(increment_sequence(i32::MAX, 1), 0);
-        assert_eq!(increment_sequence(i32::MAX - 5, 10), 4);
+        assert_eq!(DefaultRecordBatch::increment_sequence(0, 0), 0);
+        assert_eq!(DefaultRecordBatch::increment_sequence(5, 5), 10);
+        assert_eq!(DefaultRecordBatch::increment_sequence(10, 5), 15);
+        assert_eq!(DefaultRecordBatch::increment_sequence(i32::MAX, 1), 0);
+        assert_eq!(DefaultRecordBatch::increment_sequence(i32::MAX - 1, 2), 0);
+        assert_eq!(DefaultRecordBatch::increment_sequence(i32::MAX - 5, 10), 4);
     }
 
     #[test]
     fn test_decrement_sequence() {
-        assert_eq!(decrement_sequence(5, 5), 0);
-        assert_eq!(decrement_sequence(0, 1), i32::MAX);
+        assert_eq!(DefaultRecordBatch::decrement_sequence(5, 5), 0);
+        assert_eq!(DefaultRecordBatch::decrement_sequence(0, 1), i32::MAX);
     }
 
     #[test]
     fn test_compute_attributes() {
-        let attrs = compute_attributes(CompressionType::None, TimestampType::CreateTime, false, false, false);
+        let attrs = DefaultRecordBatch::compute_attributes(
+            CompressionType::None,
+            TimestampType::CreateTime,
+            false,
+            false,
+            false,
+        );
         assert_eq!(attrs, 0);
 
-        let attrs = compute_attributes(CompressionType::Gzip, TimestampType::CreateTime, false, false, false);
-        assert_eq!(attrs & COMPRESSION_CODEC_MASK, 1);
+        let attrs = DefaultRecordBatch::compute_attributes(
+            CompressionType::Gzip,
+            TimestampType::CreateTime,
+            false,
+            false,
+            false,
+        );
+        assert_eq!(attrs & DefaultRecordBatch::COMPRESSION_CODEC_MASK, 1);
 
-        let attrs = compute_attributes(CompressionType::None, TimestampType::LogAppendTime, false, false, false);
-        assert_ne!(attrs & TIMESTAMP_TYPE_MASK, 0);
+        let attrs = DefaultRecordBatch::compute_attributes(
+            CompressionType::None,
+            TimestampType::LogAppendTime,
+            false,
+            false,
+            false,
+        );
+        assert_ne!(attrs & DefaultRecordBatch::TIMESTAMP_TYPE_MASK, 0);
 
-        let attrs = compute_attributes(CompressionType::None, TimestampType::CreateTime, true, false, false);
-        assert_ne!(attrs & TRANSACTIONAL_FLAG_MASK, 0);
+        let attrs = DefaultRecordBatch::compute_attributes(
+            CompressionType::None,
+            TimestampType::CreateTime,
+            true,
+            false,
+            false,
+        );
+        assert_ne!(attrs & DefaultRecordBatch::TRANSACTIONAL_FLAG_MASK, 0);
 
-        let attrs = compute_attributes(CompressionType::None, TimestampType::CreateTime, false, true, false);
-        assert_ne!(attrs & CONTROL_FLAG_MASK, 0);
+        let attrs = DefaultRecordBatch::compute_attributes(
+            CompressionType::None,
+            TimestampType::CreateTime,
+            false,
+            true,
+            false,
+        );
+        assert_ne!(attrs & DefaultRecordBatch::CONTROL_FLAG_MASK, 0);
 
-        let attrs = compute_attributes(CompressionType::None, TimestampType::CreateTime, false, false, true);
-        assert_ne!(attrs & DELETE_HORIZON_FLAG_MASK, 0);
+        let attrs = DefaultRecordBatch::compute_attributes(
+            CompressionType::None,
+            TimestampType::CreateTime,
+            false,
+            false,
+            true,
+        );
+        assert_ne!(attrs & DefaultRecordBatch::DELETE_HORIZON_FLAG_MASK, 0);
     }
 
     #[test]
     #[should_panic(expected = "Timestamp type must be provided")]
     fn test_compute_attributes_no_timestamp_type() {
-        compute_attributes(CompressionType::None, TimestampType::NoTimestampType, false, false, false);
+        DefaultRecordBatch::compute_attributes(
+            CompressionType::None,
+            TimestampType::NoTimestampType,
+            false,
+            false,
+            false,
+        );
     }
 
     // -- Tests translated from DefaultRecordBatchTest.java --
@@ -1036,7 +1145,7 @@ mod tests {
     /// Corresponds to Java's `DefaultRecordBatchTest.buildDefaultRecordBatch`.
     #[test]
     fn test_build_default_record_batch() {
-        let mut builder = MemoryRecords::builder_with_magic(
+        let mut builder = MemoryRecords::builder_with_initial_capacity_magic(
             2048,
             RecordBatch::MAGIC_VALUE_V2,
             Compression::none(),
@@ -1070,16 +1179,19 @@ mod tests {
         let epoch = 145_i16;
         let base_sequence = 983_i32;
 
-        let mut builder = MemoryRecords::builder_with_producer(
-            2048,
-            RecordBatch::MAGIC_VALUE_V2,
-            Compression::none(),
-            TimestampType::CreateTime,
-            1234567,
-            RecordBatch::NO_TIMESTAMP,
-            pid,
-            epoch,
-            base_sequence,
+        let mut builder = MemoryRecords::builder_with_options(
+            MemoryRecordsBuilderOptionsBuilder::new()
+                .set_initial_capacity(2048)
+                .set_magic(RecordBatch::MAGIC_VALUE_V2)
+                .set_compression(Compression::none())
+                .set_timestamp_type(TimestampType::CreateTime)
+                .set_base_offset(1234567)
+                .set_log_append_time(RecordBatch::NO_TIMESTAMP)
+                .set_producer_id(pid)
+                .set_producer_epoch(epoch)
+                .set_base_sequence(base_sequence)
+                .build()
+                .expect("MemoryRecordsBuilderOptionsBuilder::build: every mandatory parameter is set above"),
         );
         builder.append_with_offset_bytes(1234567, 1, Some(b"a"), Some(b"v"));
         builder.append_with_offset_bytes(1234568, 2, Some(b"b"), Some(b"v"));
@@ -1108,16 +1220,19 @@ mod tests {
         let epoch = 145_i16;
         let base_sequence = i32::MAX - 1;
 
-        let mut builder = MemoryRecords::builder_with_producer(
-            2048,
-            RecordBatch::MAGIC_VALUE_V2,
-            Compression::none(),
-            TimestampType::CreateTime,
-            1234567,
-            RecordBatch::NO_TIMESTAMP,
-            pid,
-            epoch,
-            base_sequence,
+        let mut builder = MemoryRecords::builder_with_options(
+            MemoryRecordsBuilderOptionsBuilder::new()
+                .set_initial_capacity(2048)
+                .set_magic(RecordBatch::MAGIC_VALUE_V2)
+                .set_compression(Compression::none())
+                .set_timestamp_type(TimestampType::CreateTime)
+                .set_base_offset(1234567)
+                .set_log_append_time(RecordBatch::NO_TIMESTAMP)
+                .set_producer_id(pid)
+                .set_producer_epoch(epoch)
+                .set_base_sequence(base_sequence)
+                .build()
+                .expect("MemoryRecordsBuilderOptionsBuilder::build: every mandatory parameter is set above"),
         );
         builder.append_with_offset_bytes(1234567, 1, Some(b"a"), Some(b"v"));
         builder.append_with_offset_bytes(1234568, 2, Some(b"b"), Some(b"v"));
@@ -1143,7 +1258,7 @@ mod tests {
     /// Corresponds to Java's `DefaultRecordBatchTest.testSizeInBytes`.
     #[test]
     fn test_size_in_bytes() {
-        use crate::common::header::internals::RecordHeader;
+        use crate::common::header::RecordHeader;
 
         let headers = vec![
             RecordHeader::new("foo".to_string(), Some(b"value".to_vec())),
@@ -1152,10 +1267,18 @@ mod tests {
 
         let timestamp = 1_700_000_000_000_i64;
         let records = vec![
-            SimpleRecord::new_with_key_value(timestamp, Some(b"key".to_vec()), Some(b"value".to_vec())),
-            SimpleRecord::new_with_key_value(timestamp + 30000, None, Some(b"value".to_vec())),
-            SimpleRecord::new_with_key_value(timestamp + 60000, Some(b"key".to_vec()), None),
-            SimpleRecord::new(timestamp + 60000, Some(b"key".to_vec()), Some(b"value".to_vec()), headers),
+            SimpleRecord::with_timestamp_key_value(timestamp, Some(b"key".to_vec()), Some(b"value".to_vec())),
+            SimpleRecord::with_timestamp_key_value(timestamp + 30000, None, Some(b"value".to_vec())),
+            SimpleRecord::with_timestamp_key_value(timestamp + 60000, Some(b"key".to_vec()), None),
+            SimpleRecord::with_options(
+                SimpleRecordOptionsBuilder::new()
+                    .set_timestamp(timestamp + 60000)
+                    .set_key(Some(b"key".to_vec()))
+                    .set_value(Some(b"value".to_vec()))
+                    .set_headers(headers)
+                    .build()
+                    .expect("SimpleRecordOptionsBuilder::build: every mandatory parameter is set above"),
+            ),
         ];
         let actual_size = MemoryRecords::with_records(Compression::none(), &records).size_in_bytes();
         assert_eq!(actual_size, DefaultRecordBatch::size_in_bytes_of_simple_records(&records));
@@ -1164,15 +1287,15 @@ mod tests {
     /// Corresponds to Java's `DefaultRecordBatchTest.testInvalidRecordSize`.
     #[test]
     fn test_invalid_record_size() {
-        let records = MemoryRecords::with_records_at_offset(
+        let records = MemoryRecords::with_records_with_magic_initial_offset_timestamp_type(
             RecordBatch::MAGIC_VALUE_V2,
             0,
             Compression::none(),
             TimestampType::CreateTime,
             &[
-                SimpleRecord::new_with_key_value(1, Some(b"a".to_vec()), Some(b"1".to_vec())),
-                SimpleRecord::new_with_key_value(2, Some(b"b".to_vec()), Some(b"2".to_vec())),
-                SimpleRecord::new_with_key_value(3, Some(b"c".to_vec()), Some(b"3".to_vec())),
+                SimpleRecord::with_timestamp_key_value(1, Some(b"a".to_vec()), Some(b"1".to_vec())),
+                SimpleRecord::with_timestamp_key_value(2, Some(b"b".to_vec()), Some(b"2".to_vec())),
+                SimpleRecord::with_timestamp_key_value(3, Some(b"c".to_vec()), Some(b"3".to_vec())),
             ],
         );
 
@@ -1192,7 +1315,7 @@ mod tests {
         invalid_count: i32,
     ) -> DefaultRecordBatch {
         let compression = Compression::of(compression_type);
-        let mut builder = MemoryRecords::builder_with_magic(
+        let mut builder = MemoryRecords::builder_with_initial_capacity_magic(
             512,
             RecordBatch::MAGIC_VALUE_V2,
             compression,
@@ -1209,6 +1332,87 @@ mod tests {
         buf[RecordBatch::RECORDS_COUNT_OFFSET..RecordBatch::RECORDS_COUNT_OFFSET + 4]
             .copy_from_slice(&invalid_count.to_be_bytes());
         DefaultRecordBatch::new(buf)
+    }
+
+    /// Java's `ensureNoneRemaining` turns a failure of the "is there anything
+    /// left?" read into an error — `catch (IOException e) { throw new
+    /// KafkaException("Error checking for remaining bytes after reading batch",
+    /// e); }` (`DefaultRecordBatch.java:645-652`).
+    ///
+    /// Truncating the gzip trailer leaves every record decodable but makes the
+    /// end-of-stream read fail, which is the only input that reaches that arm.
+    /// Before this behaviour was restored the arm was `Ok(0) | Err(_) => {}`, so
+    /// this batch parsed clean and handed the caller three records from a
+    /// provably corrupt stream.
+    #[test]
+    fn test_corrupt_compressed_stream_fails_the_remaining_bytes_check() {
+        let now = 1_700_000_000_000_i64;
+        let mut builder = MemoryRecords::builder_with_initial_capacity_magic(
+            512,
+            RecordBatch::MAGIC_VALUE_V2,
+            Compression::of(CompressionType::Gzip),
+            TimestampType::CreateTime,
+            0,
+        );
+        builder.append_with_offset_bytes(0, now, None, Some(b"hello"));
+        builder.append_with_offset_bytes(1, now, None, Some(b"there"));
+        builder.append_with_offset_bytes(2, now, None, Some(b"beautiful"));
+        let records = builder.build();
+
+        // The batch is well-formed and parses cleanly as built.
+        let intact = DefaultRecordBatch::new(records.buffer().to_vec());
+        assert_eq!(intact.iter_records().expect("the intact batch parses").len(), 3);
+
+        // Drop 4 of the 8 gzip trailer bytes: the deflate stream still yields all
+        // three records, but the read that checks for leftovers hits EOF inside
+        // the trailer and fails.
+        let mut buf = records.buffer().to_vec();
+        buf.truncate(buf.len() - 4);
+        let batch = DefaultRecordBatch::new(buf);
+
+        let err = batch.iter_records().expect_err("a corrupt stream must not parse clean");
+        assert_eq!(
+            err.message(),
+            "Error checking for remaining bytes after reading batch: unexpected end of file"
+        );
+    }
+
+    /// A codec id this client does not know must fail with Java's
+    /// `IllegalArgumentException` message (`CompressionType.java:144-159`,
+    /// propagated by `DefaultRecordBatch.compressionType()` at
+    /// `DefaultRecordBatch.java:217-219`). `try_compression_type` returns
+    /// [`CompressionType::for_id`]'s error unchanged, so the message is the one
+    /// place both spellings must agree.
+    #[test]
+    fn test_try_compression_type_rejects_an_unknown_codec_id() {
+        let records = MemoryRecords::with_records_with_magic_initial_offset_timestamp_type(
+            RecordBatch::MAGIC_VALUE_V2,
+            0,
+            Compression::none(),
+            TimestampType::CreateTime,
+            &[SimpleRecord::with_timestamp_key_value(
+                1,
+                Some(b"a".to_vec()),
+                Some(b"1".to_vec()),
+            )],
+        );
+        let mut buf = records.buffer().to_vec();
+        // Codec ids 5-7 fit `COMPRESSION_CODEC_MASK` (0x07), so they are
+        // wire-reachable; write 5 into the attributes field.
+        buf[RecordBatch::ATTRIBUTES_OFFSET..RecordBatch::ATTRIBUTES_OFFSET + 2].copy_from_slice(&5_i16.to_be_bytes());
+        let batch = DefaultRecordBatch::new(buf);
+
+        let err = batch.as_ref().try_compression_type().expect_err("codec id 5 is unknown");
+        assert_eq!(err.message(), "Unknown compression type id: 5");
+        // Java throws `IllegalArgumentException`, which is not a `KafkaException`.
+        assert!(matches!(err, crate::common::Error::LocalIllegalArgument(_)));
+        assert!(!err.is_kafka_error());
+
+        let err = batch.try_is_compressed().expect_err("codec id 5 is unknown");
+        assert_eq!(err.message(), "Unknown compression type id: 5");
+
+        // The lenient accessor still reports `None`, as its own doc says.
+        assert_eq!(batch.compression_type(), CompressionType::None);
     }
 
     /// Corresponds to Java's `DefaultRecordBatchTest.testInvalidRecordCountTooManyNonCompressedV2`.
@@ -1250,15 +1454,15 @@ mod tests {
     /// Corresponds to Java's `DefaultRecordBatchTest.testInvalidCrc`.
     #[test]
     fn test_invalid_crc() {
-        let records = MemoryRecords::with_records_at_offset(
+        let records = MemoryRecords::with_records_with_magic_initial_offset_timestamp_type(
             RecordBatch::MAGIC_VALUE_V2,
             0,
             Compression::none(),
             TimestampType::CreateTime,
             &[
-                SimpleRecord::new_with_key_value(1, Some(b"a".to_vec()), Some(b"1".to_vec())),
-                SimpleRecord::new_with_key_value(2, Some(b"b".to_vec()), Some(b"2".to_vec())),
-                SimpleRecord::new_with_key_value(3, Some(b"c".to_vec()), Some(b"3".to_vec())),
+                SimpleRecord::with_timestamp_key_value(1, Some(b"a".to_vec()), Some(b"1".to_vec())),
+                SimpleRecord::with_timestamp_key_value(2, Some(b"b".to_vec()), Some(b"2".to_vec())),
+                SimpleRecord::with_timestamp_key_value(3, Some(b"c".to_vec()), Some(b"3".to_vec())),
             ],
         );
 
@@ -1276,11 +1480,11 @@ mod tests {
     #[test]
     fn test_set_last_offset() {
         let simple_records = vec![
-            SimpleRecord::new_with_key_value(1, Some(b"a".to_vec()), Some(b"1".to_vec())),
-            SimpleRecord::new_with_key_value(2, Some(b"b".to_vec()), Some(b"2".to_vec())),
-            SimpleRecord::new_with_key_value(3, Some(b"c".to_vec()), Some(b"3".to_vec())),
+            SimpleRecord::with_timestamp_key_value(1, Some(b"a".to_vec()), Some(b"1".to_vec())),
+            SimpleRecord::with_timestamp_key_value(2, Some(b"b".to_vec()), Some(b"2".to_vec())),
+            SimpleRecord::with_timestamp_key_value(3, Some(b"c".to_vec()), Some(b"3".to_vec())),
         ];
-        let records = MemoryRecords::with_records_at_offset(
+        let records = MemoryRecords::with_records_with_magic_initial_offset_timestamp_type(
             RecordBatch::MAGIC_VALUE_V2,
             0,
             Compression::none(),
@@ -1312,15 +1516,15 @@ mod tests {
     /// Corresponds to Java's `DefaultRecordBatchTest.testSetPartitionLeaderEpoch`.
     #[test]
     fn test_set_partition_leader_epoch() {
-        let records = MemoryRecords::with_records_at_offset(
+        let records = MemoryRecords::with_records_with_magic_initial_offset_timestamp_type(
             RecordBatch::MAGIC_VALUE_V2,
             0,
             Compression::none(),
             TimestampType::CreateTime,
             &[
-                SimpleRecord::new_with_key_value(1, Some(b"a".to_vec()), Some(b"1".to_vec())),
-                SimpleRecord::new_with_key_value(2, Some(b"b".to_vec()), Some(b"2".to_vec())),
-                SimpleRecord::new_with_key_value(3, Some(b"c".to_vec()), Some(b"3".to_vec())),
+                SimpleRecord::with_timestamp_key_value(1, Some(b"a".to_vec()), Some(b"1".to_vec())),
+                SimpleRecord::with_timestamp_key_value(2, Some(b"b".to_vec()), Some(b"2".to_vec())),
+                SimpleRecord::with_timestamp_key_value(3, Some(b"c".to_vec()), Some(b"3".to_vec())),
             ],
         );
 
@@ -1341,15 +1545,15 @@ mod tests {
     /// Corresponds to Java's `DefaultRecordBatchTest.testSetLogAppendTime`.
     #[test]
     fn test_set_log_append_time() {
-        let records = MemoryRecords::with_records_at_offset(
+        let records = MemoryRecords::with_records_with_magic_initial_offset_timestamp_type(
             RecordBatch::MAGIC_VALUE_V2,
             0,
             Compression::none(),
             TimestampType::CreateTime,
             &[
-                SimpleRecord::new_with_key_value(1, Some(b"a".to_vec()), Some(b"1".to_vec())),
-                SimpleRecord::new_with_key_value(2, Some(b"b".to_vec()), Some(b"2".to_vec())),
-                SimpleRecord::new_with_key_value(3, Some(b"c".to_vec()), Some(b"3".to_vec())),
+                SimpleRecord::with_timestamp_key_value(1, Some(b"a".to_vec()), Some(b"1".to_vec())),
+                SimpleRecord::with_timestamp_key_value(2, Some(b"b".to_vec()), Some(b"2".to_vec())),
+                SimpleRecord::with_timestamp_key_value(3, Some(b"c".to_vec()), Some(b"3".to_vec())),
             ],
         );
 
@@ -1378,15 +1582,15 @@ mod tests {
     #[test]
     #[should_panic(expected = "Timestamp type must be provided")]
     fn test_set_no_timestamp_type_not_allowed() {
-        let records = MemoryRecords::with_records_at_offset(
+        let records = MemoryRecords::with_records_with_magic_initial_offset_timestamp_type(
             RecordBatch::MAGIC_VALUE_V2,
             0,
             Compression::none(),
             TimestampType::CreateTime,
             &[
-                SimpleRecord::new_with_key_value(1, Some(b"a".to_vec()), Some(b"1".to_vec())),
-                SimpleRecord::new_with_key_value(2, Some(b"b".to_vec()), Some(b"2".to_vec())),
-                SimpleRecord::new_with_key_value(3, Some(b"c".to_vec()), Some(b"3".to_vec())),
+                SimpleRecord::with_timestamp_key_value(1, Some(b"a".to_vec()), Some(b"1".to_vec())),
+                SimpleRecord::with_timestamp_key_value(2, Some(b"b".to_vec()), Some(b"2".to_vec())),
+                SimpleRecord::with_timestamp_key_value(3, Some(b"c".to_vec()), Some(b"3".to_vec())),
             ],
         );
         let buf = records.buffer().to_vec();
@@ -1407,18 +1611,18 @@ mod tests {
             CompressionType::Zstd,
         ] {
             let compression = Compression::of(*compression_type);
-            let records = MemoryRecords::with_records_at_offset(
+            let records = MemoryRecords::with_records_with_magic_initial_offset_timestamp_type(
                 RecordBatch::MAGIC_VALUE_V2,
                 0,
                 compression,
                 TimestampType::CreateTime,
                 &[
-                    SimpleRecord::new_with_key_value(1, Some(b"a".to_vec()), Some(b"1".to_vec())),
-                    SimpleRecord::new_with_key_value(2, Some(b"b".to_vec()), Some(b"2".to_vec())),
-                    SimpleRecord::new_with_key_value(3, Some(b"c".to_vec()), Some(b"3".to_vec())),
+                    SimpleRecord::with_timestamp_key_value(1, Some(b"a".to_vec()), Some(b"1".to_vec())),
+                    SimpleRecord::with_timestamp_key_value(2, Some(b"b".to_vec()), Some(b"2".to_vec())),
+                    SimpleRecord::with_timestamp_key_value(3, Some(b"c".to_vec()), Some(b"3".to_vec())),
                 ],
             );
-            let batch = DefaultRecordBatch::from_slice(records.buffer());
+            let batch = DefaultRecordBatch::with_slice(records.buffer());
             let iter_records = batch
                 .iter_records()
                 .unwrap_or_else(|e| panic!("Failed for {:?}: {}", compression_type, e));

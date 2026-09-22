@@ -36,25 +36,26 @@
 //! 3. Returns `Ok(())` if I/O would block (partial read/write)
 //! 4. Stores partial reads in `net_in_buffer` for the next call
 
+use crate::SaslAuthenticateRequestData;
+use crate::SaslHandshakeRequestData;
+use crate::common::Error;
 use crate::common::network::Authenticator;
 use crate::common::network::ByteBufferSend;
 use crate::common::network::KafkaSend;
 use crate::common::network::NetworkReceive;
 use crate::common::network::Receive;
-use crate::common::network::authentication_error::auth_io_error;
 use crate::common::network::{InterestOps, TransportLayer};
+use crate::common::network::{auth_io_error, auth_io_error_with_source};
 use crate::common::protocol::{ApiKeys, ByteBufferAccessor, Errors};
 use crate::common::requests::ApiVersionsRequestBuilder;
 use crate::common::requests::ApiVersionsResponse;
 use crate::common::requests::ConcreteRequest;
 use crate::common::requests::ConcreteResponse;
 use crate::common::requests::RequestBuilder;
-use crate::common::requests::RequestHeader;
 use crate::common::requests::SaslAuthenticateRequest;
 use crate::common::requests::SaslHandshakeRequest;
 use crate::common::requests::SaslHandshakeResponse;
-use crate::sasl_authenticate_request_data::SaslAuthenticateRequestData;
-use crate::sasl_handshake_request_data::SaslHandshakeRequestData;
+use crate::common::requests::{RequestHeader, RequestHeaderOptionsBuilder};
 
 use crate::common::utils::LogContext;
 use crate::kafka_debug;
@@ -62,29 +63,6 @@ use crate::kafka_debug;
 use std::future::Future;
 use std::io;
 use std::pin::Pin;
-
-/// Sentinel version value indicating that the Kafka SASL authenticate header
-/// should not be used (legacy mode, pre-KIP-152).
-const DISABLE_KAFKA_SASL_AUTHENTICATE_HEADER: i16 = -1;
-
-/// The maximum reserved correlation ID for SASL requests.
-///
-/// The reserved range of correlation IDs for SASL requests ensures that SASL
-/// requests are separated from those used in `NetworkClient` for Kafka requests.
-/// This prevents mismatched correlation IDs during re-authentication.
-pub const SASL_CLIENT_AUTHENTICATOR_MAX_RESERVED_CORRELATION_ID: i32 = i32::MAX;
-
-/// The minimum reserved correlation ID for SASL requests.
-///
-/// Only one request is expected in-flight at a time during authentication,
-/// so the small range (8 values) is sufficient.
-pub const SASL_CLIENT_AUTHENTICATOR_MIN_RESERVED_CORRELATION_ID: i32 =
-    SASL_CLIENT_AUTHENTICATOR_MAX_RESERVED_CORRELATION_ID - 7;
-
-/// Returns `true` if the correlation ID is reserved for SASL requests.
-pub fn is_reserved(correlation_id: i32) -> bool {
-    correlation_id >= SASL_CLIENT_AUTHENTICATOR_MIN_RESERVED_CORRELATION_ID
-}
 
 /// Internal state transitions for SASL client authentication.
 ///
@@ -163,6 +141,29 @@ pub struct SaslClientAuthenticator {
 }
 
 impl SaslClientAuthenticator {
+    /// Returns `true` if the correlation ID is reserved for SASL requests.
+    pub fn is_reserved(correlation_id: i32) -> bool {
+        correlation_id >= SaslClientAuthenticator::SASL_CLIENT_AUTHENTICATOR_MIN_RESERVED_CORRELATION_ID
+    }
+
+    /// Sentinel version value indicating that the Kafka SASL authenticate header
+    /// should not be used (legacy mode, pre-KIP-152).
+    const DISABLE_KAFKA_SASL_AUTHENTICATE_HEADER: i16 = -1;
+
+    /// The maximum reserved correlation ID for SASL requests.
+    ///
+    /// The reserved range of correlation IDs for SASL requests ensures that SASL
+    /// requests are separated from those used in `NetworkClient` for Kafka requests.
+    /// This prevents mismatched correlation IDs during re-authentication.
+    pub const SASL_CLIENT_AUTHENTICATOR_MAX_RESERVED_CORRELATION_ID: i32 = i32::MAX;
+
+    /// The minimum reserved correlation ID for SASL requests.
+    ///
+    /// Only one request is expected in-flight at a time during authentication,
+    /// so the small range (8 values) is sufficient.
+    pub const SASL_CLIENT_AUTHENTICATOR_MIN_RESERVED_CORRELATION_ID: i32 =
+        Self::SASL_CLIENT_AUTHENTICATOR_MAX_RESERVED_CORRELATION_ID - 7;
+
     /// Creates a new `SaslClientAuthenticator`.
     ///
     /// # Arguments
@@ -192,7 +193,7 @@ impl SaslClientAuthenticator {
             client_id: client_id.to_string(),
             correlation_id: 0,
             sasl_handshake_version: 0,
-            sasl_authenticate_version: DISABLE_KAFKA_SASL_AUTHENTICATE_HEADER,
+            sasl_authenticate_version: SaslClientAuthenticator::DISABLE_KAFKA_SASL_AUTHENTICATE_HEADER,
             current_request_header: None,
             net_out_buffer: None,
             net_in_buffer: None,
@@ -222,8 +223,8 @@ impl SaslClientAuthenticator {
 
     /// Allocates the next correlation ID from the reserved range.
     fn next_correlation_id(&mut self) -> i32 {
-        if !is_reserved(self.correlation_id) {
-            self.correlation_id = SASL_CLIENT_AUTHENTICATOR_MIN_RESERVED_CORRELATION_ID;
+        if !SaslClientAuthenticator::is_reserved(self.correlation_id) {
+            self.correlation_id = SaslClientAuthenticator::SASL_CLIENT_AUTHENTICATOR_MIN_RESERVED_CORRELATION_ID;
         }
         let id = self.correlation_id;
         self.correlation_id = self.correlation_id.wrapping_add(1);
@@ -233,7 +234,15 @@ impl SaslClientAuthenticator {
     /// Creates the next request header for the given API key and version.
     fn next_request_header(&mut self, api_key: &'static ApiKeys, version: i16) -> io::Result<RequestHeader> {
         let correlation_id = self.next_correlation_id();
-        let header = RequestHeader::new(api_key, version, &self.client_id, correlation_id)?;
+        let header = RequestHeader::with_options(
+            RequestHeaderOptionsBuilder::new()
+                .set_request_api_key(api_key)
+                .set_request_version(version)
+                .set_client_id(&self.client_id)
+                .set_correlation_id(correlation_id)
+                .build()
+                .expect("RequestHeaderOptionsBuilder::build: every mandatory parameter is set above"),
+        )?;
         self.current_request_header = Some(header.clone());
         Ok(header)
     }
@@ -287,17 +296,18 @@ impl SaslClientAuthenticator {
     /// Returns `true` if a token was sent.
     async fn send_sasl_client_token(&mut self, transport: &mut (dyn TransportLayer + Send)) -> io::Result<()> {
         let sasl_token = self.create_sasl_token();
-        let send: Box<dyn KafkaSend> = if self.sasl_authenticate_version == DISABLE_KAFKA_SASL_AUTHENTICATE_HEADER {
-            Box::new(ByteBufferSend::size_prefixed(bytes::Bytes::from(sasl_token)))
-        } else {
-            let mut data = SaslAuthenticateRequestData::new();
-            data.set_auth_bytes(sasl_token);
-            let request = SaslAuthenticateRequest::new(data, self.sasl_authenticate_version);
-            let header = self.next_request_header(&ApiKeys::SASL_AUTHENTICATE, self.sasl_authenticate_version)?;
-            let mut concrete = ConcreteRequest::SaslAuthenticate(request);
-            let byte_buffer_send = concrete.to_send(&header)?;
-            Box::new(byte_buffer_send)
-        };
+        let send: Box<dyn KafkaSend> =
+            if self.sasl_authenticate_version == SaslClientAuthenticator::DISABLE_KAFKA_SASL_AUTHENTICATE_HEADER {
+                Box::new(ByteBufferSend::size_prefixed(bytes::Bytes::from(sasl_token)))
+            } else {
+                let mut data = SaslAuthenticateRequestData::new();
+                data.set_auth_bytes(sasl_token);
+                let request = SaslAuthenticateRequest::new(data, self.sasl_authenticate_version);
+                let header = self.next_request_header(&ApiKeys::SASL_AUTHENTICATE, self.sasl_authenticate_version)?;
+                let mut concrete = ConcreteRequest::SaslAuthenticate(request);
+                let byte_buffer_send = concrete.to_send(&header)?;
+                Box::new(byte_buffer_send)
+            };
         self.send_request(send, transport).await
     }
 
@@ -364,39 +374,62 @@ impl SaslClientAuthenticator {
         &mut self,
         transport: &mut (dyn TransportLayer + Send),
     ) -> io::Result<Option<ConcreteResponse>> {
-        let response_bytes = match self.receive_response_or_token(transport).await {
-            Ok(Some(bytes)) => bytes,
-            Ok(None) => return Ok(None),
-            Err(e) => {
-                kafka_debug!(
-                    self.log_context,
-                    "Invalid SASL mechanism response, server may be expecting only GSSAPI tokens"
-                );
-                self.set_sasl_state(SaslState::Failed);
-                // Java throws IllegalSaslStateException (an AuthenticationException)
-                // here — a genuine authentication failure, fatal and not retried.
-                return Err(auth_io_error(format!(
-                    "Invalid SASL mechanism response, server may be expecting a different protocol: {e}"
-                )));
-            },
+        // Java's `catch (BufferUnderflowException | SchemaException |
+        // IllegalArgumentException e)` covers only the *parse* of the response
+        // (handled on the `parse_response` call below). `receiveResponseOrToken()`
+        // throws `IOException`, which that clause does NOT catch, so a transient
+        // read failure propagates as a network disconnect — retriable, reconnect
+        // with backoff — rather than becoming a fatal authentication failure.
+        let response_bytes = match self.receive_response_or_token(transport).await? {
+            Some(bytes) => bytes,
+            None => return Ok(None),
         };
 
         let request_header = self
             .current_request_header
             .as_ref()
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "No pending request header for SASL response"))?;
-        let mut buffer = ByteBufferAccessor::from_bytes(response_bytes);
-        let response = ConcreteResponse::parse_response(&mut buffer, request_header).map_err(|e| {
-            kafka_debug!(
-                self.log_context,
-                "Invalid SASL mechanism response, server may be expecting only GSSAPI tokens"
-            );
-            self.set_sasl_state(SaslState::Failed);
-            // Java throws IllegalSaslStateException (an AuthenticationException).
-            auth_io_error(format!(
-                "Invalid SASL mechanism response, server may be expecting a different protocol: {e}"
-            ))
-        })?;
+        let mut buffer = ByteBufferAccessor::new(response_bytes);
+        // Java routes through `NetworkClient.parseResponse` (`:824-840`), not the
+        // raw parse, so a correlation-id mismatch is converted to a
+        // `SchemaException` **only** when the request used a reserved SASL
+        // correlation id and the response did not; otherwise it is rethrown.
+        //
+        // Java then catches exactly three classes here:
+        // `BufferUnderflowException | SchemaException | IllegalArgumentException`
+        // (`SaslClientAuthenticator.java`). A rethrown
+        // `CorrelationIdMismatchException` is an `IllegalStateException` and is
+        // NOT among them, so it propagates out of `receiveKafkaResponse` without
+        // failing authentication. Catching everything here — as this did before —
+        // turned that case into a fatal authentication failure.
+        //
+        // Java's re-authentication branch (`reauthInfo.reauthenticating()`, which
+        // parks an unrelated in-flight receive in `pendingAuthenticatedReceives`
+        // and returns null) has no counterpart: KIP-368 client-side
+        // re-authentication is not wired in this client, so `reauthenticating()`
+        // is always false and the branch is unreachable. See COMMENTS finding 25.
+        let response = match crate::NetworkClientStatics::parse_response(&mut buffer, request_header) {
+            Ok(response) => response,
+            Err(error) if matches!(error, Error::Schema(_) | Error::LocalIllegalArgument(_)) => {
+                kafka_debug!(
+                    self.log_context,
+                    "Invalid SASL mechanism response, server may be expecting only GSSAPI tokens"
+                );
+                self.set_sasl_state(SaslState::Failed);
+                // Java: `throw new IllegalSaslStateException(msg, e)` — the
+                // two-argument form, so the message is Java's literal text and the
+                // cause hangs off `getCause()` rather than being appended to it.
+                return Err(auth_io_error_with_source(
+                    "Invalid SASL mechanism response, server may be expecting a different protocol",
+                    error,
+                ));
+            },
+            Err(error) => {
+                // Outside Java's catch: propagate without touching the SASL state
+                // and without classifying it as an authentication failure.
+                return Err(io::Error::new(io::ErrorKind::InvalidData, error.to_string()));
+            },
+        };
         self.current_request_header = None;
         Ok(Some(response))
     }
@@ -407,7 +440,7 @@ impl SaslClientAuthenticator {
     /// token. Otherwise, it parses a SaslAuthenticateResponse and validates the
     /// error code.
     async fn receive_token(&mut self, transport: &mut (dyn TransportLayer + Send)) -> io::Result<Option<Vec<u8>>> {
-        if self.sasl_authenticate_version == DISABLE_KAFKA_SASL_AUTHENTICATE_HEADER {
+        if self.sasl_authenticate_version == SaslClientAuthenticator::DISABLE_KAFKA_SASL_AUTHENTICATE_HEADER {
             self.receive_response_or_token(transport).await
         } else {
             match self.receive_kafka_response(transport).await? {
@@ -504,7 +537,7 @@ impl SaslClientAuthenticator {
             SaslState::SendApiVersionsRequest => {
                 // Always use version 0 request since brokers treat requests with
                 // schema exceptions as GSSAPI tokens
-                let mut builder = ApiVersionsRequestBuilder::for_version(0);
+                let mut builder = ApiVersionsRequestBuilder::with_version(0);
                 let mut request = builder.build()?;
                 let header = self.next_request_header(&ApiKeys::API_VERSIONS, request.version())?;
                 let send = Box::new(request.to_send(&header)?);
@@ -614,15 +647,16 @@ impl Authenticator for SaslClientAuthenticator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api_versions_response_data::{ApiVersion, ApiVersionsResponseData};
+    use crate::ApiVersionsResponseData;
+    use crate::SaslAuthenticateResponseData;
+    use crate::SaslHandshakeResponseData;
+    use crate::api_versions_response_data::ApiVersion;
+    use crate::common::Writable;
     use crate::common::network::InterestOps;
-    use crate::common::network::authentication_error::is_authentication_error;
+    use crate::common::network::is_authentication_error;
     use crate::common::protocol::Message;
     use crate::common::protocol::ObjectSerializationCache;
-    use crate::common::protocol::Writable;
     use crate::common::requests::ResponseHeader;
-    use crate::sasl_authenticate_response_data::SaslAuthenticateResponseData;
-    use crate::sasl_handshake_response_data::SaslHandshakeResponseData;
 
     use std::collections::VecDeque;
     use std::net::SocketAddr;
@@ -787,13 +821,13 @@ mod tests {
         data.set_api_keys(vec![hs_version, auth_version]);
 
         // Serialize header + body
-        let mut response_header = ResponseHeader::new(correlation_id, 0); // v0 header for ApiVersions v0
+        let mut response_header = ResponseHeader::with_correlation_id(correlation_id, 0); // v0 header for ApiVersions v0
         let mut cache = ObjectSerializationCache::new();
         let header_size = Message::size(response_header.data(), &mut cache, response_header.header_version()).unwrap();
         let body_size = Message::size(&data, &mut cache, 0).unwrap();
         let total_size = header_size + body_size;
 
-        let mut buf = ByteBufferAccessor::new(4 + total_size as usize);
+        let mut buf = ByteBufferAccessor::new(Vec::with_capacity(4 + total_size as usize));
         buf.write_int(total_size).unwrap();
         let hv = response_header.header_version();
         Message::write(response_header.data_mut(), &mut buf, &cache, hv).unwrap();
@@ -814,14 +848,14 @@ mod tests {
 
         let api_key = &ApiKeys::SASL_HANDSHAKE;
         let header_version = api_key.response_header_version(version);
-        let mut response_header = ResponseHeader::new(correlation_id, header_version);
+        let mut response_header = ResponseHeader::with_correlation_id(correlation_id, header_version);
 
         let mut cache = ObjectSerializationCache::new();
         let header_size = Message::size(response_header.data(), &mut cache, response_header.header_version()).unwrap();
         let body_size = Message::size(&data, &mut cache, version).unwrap();
         let total_size = header_size + body_size;
 
-        let mut buf = ByteBufferAccessor::new(4 + total_size as usize);
+        let mut buf = ByteBufferAccessor::new(Vec::with_capacity(4 + total_size as usize));
         buf.write_int(total_size).unwrap();
         let hv = response_header.header_version();
         Message::write(response_header.data_mut(), &mut buf, &cache, hv).unwrap();
@@ -844,14 +878,14 @@ mod tests {
 
         let api_key = &ApiKeys::SASL_AUTHENTICATE;
         let header_version = api_key.response_header_version(version);
-        let mut response_header = ResponseHeader::new(correlation_id, header_version);
+        let mut response_header = ResponseHeader::with_correlation_id(correlation_id, header_version);
 
         let mut cache = ObjectSerializationCache::new();
         let header_size = Message::size(response_header.data(), &mut cache, response_header.header_version()).unwrap();
         let body_size = Message::size(&data, &mut cache, version).unwrap();
         let total_size = header_size + body_size;
 
-        let mut buf = ByteBufferAccessor::new(4 + total_size as usize);
+        let mut buf = ByteBufferAccessor::new(Vec::with_capacity(4 + total_size as usize));
         buf.write_int(total_size).unwrap();
         let hv = response_header.header_version();
         Message::write(response_header.data_mut(), &mut buf, &cache, hv).unwrap();
@@ -908,12 +942,18 @@ mod tests {
             LogContext::empty(),
         );
         let id1 = auth.next_correlation_id();
-        assert!(is_reserved(id1));
-        assert_eq!(id1, SASL_CLIENT_AUTHENTICATOR_MIN_RESERVED_CORRELATION_ID);
+        assert!(SaslClientAuthenticator::is_reserved(id1));
+        assert_eq!(
+            id1,
+            SaslClientAuthenticator::SASL_CLIENT_AUTHENTICATOR_MIN_RESERVED_CORRELATION_ID
+        );
 
         let id2 = auth.next_correlation_id();
-        assert!(is_reserved(id2));
-        assert_eq!(id2, SASL_CLIENT_AUTHENTICATOR_MIN_RESERVED_CORRELATION_ID + 1);
+        assert!(SaslClientAuthenticator::is_reserved(id2));
+        assert_eq!(
+            id2,
+            SaslClientAuthenticator::SASL_CLIENT_AUTHENTICATOR_MIN_RESERVED_CORRELATION_ID + 1
+        );
     }
 
     /// Test 3b: Correlation ID wraps correctly when reserved range is exhausted.
@@ -937,25 +977,37 @@ mod tests {
         // Exhaust all 8 reserved IDs
         for i in 0..8 {
             let id = auth.next_correlation_id();
-            assert_eq!(id, SASL_CLIENT_AUTHENTICATOR_MIN_RESERVED_CORRELATION_ID + i);
-            assert!(is_reserved(id));
+            assert_eq!(
+                id,
+                SaslClientAuthenticator::SASL_CLIENT_AUTHENTICATOR_MIN_RESERVED_CORRELATION_ID + i
+            );
+            assert!(SaslClientAuthenticator::is_reserved(id));
         }
         // At this point correlation_id has wrapped past i32::MAX.
         // The 9th call should detect that the ID is no longer reserved and
         // reset to SASL_CLIENT_AUTHENTICATOR_MIN_RESERVED_CORRELATION_ID.
         let id = auth.next_correlation_id();
-        assert_eq!(id, SASL_CLIENT_AUTHENTICATOR_MIN_RESERVED_CORRELATION_ID);
-        assert!(is_reserved(id));
+        assert_eq!(
+            id,
+            SaslClientAuthenticator::SASL_CLIENT_AUTHENTICATOR_MIN_RESERVED_CORRELATION_ID
+        );
+        assert!(SaslClientAuthenticator::is_reserved(id));
     }
 
     /// Test 4: is_reserved boundary conditions.
     #[test]
     fn test_is_reserved() {
-        assert!(is_reserved(SASL_CLIENT_AUTHENTICATOR_MAX_RESERVED_CORRELATION_ID));
-        assert!(is_reserved(SASL_CLIENT_AUTHENTICATOR_MIN_RESERVED_CORRELATION_ID));
-        assert!(!is_reserved(SASL_CLIENT_AUTHENTICATOR_MIN_RESERVED_CORRELATION_ID - 1));
-        assert!(!is_reserved(0));
-        assert!(!is_reserved(-1));
+        assert!(SaslClientAuthenticator::is_reserved(
+            SaslClientAuthenticator::SASL_CLIENT_AUTHENTICATOR_MAX_RESERVED_CORRELATION_ID
+        ));
+        assert!(SaslClientAuthenticator::is_reserved(
+            SaslClientAuthenticator::SASL_CLIENT_AUTHENTICATOR_MIN_RESERVED_CORRELATION_ID
+        ));
+        assert!(!SaslClientAuthenticator::is_reserved(
+            SaslClientAuthenticator::SASL_CLIENT_AUTHENTICATOR_MIN_RESERVED_CORRELATION_ID - 1
+        ));
+        assert!(!SaslClientAuthenticator::is_reserved(0));
+        assert!(!SaslClientAuthenticator::is_reserved(-1));
     }
 
     /// Test 5: Version negotiation extracts SASL versions from ApiVersionsResponse.
@@ -1015,7 +1067,7 @@ mod tests {
 
         // Step 2: Receive ApiVersionsResponse
         let api_versions_bytes = build_api_versions_response_bytes(
-            SASL_CLIENT_AUTHENTICATOR_MIN_RESERVED_CORRELATION_ID,
+            SaslClientAuthenticator::SASL_CLIENT_AUTHENTICATOR_MIN_RESERVED_CORRELATION_ID,
             ApiKeys::SASL_HANDSHAKE.latest_version(),
             ApiKeys::SASL_AUTHENTICATE.latest_version(),
         );
@@ -1028,7 +1080,7 @@ mod tests {
 
         // Step 3: Receive SaslHandshakeResponse
         let handshake_bytes = build_sasl_handshake_response_bytes(
-            SASL_CLIENT_AUTHENTICATOR_MIN_RESERVED_CORRELATION_ID + 1,
+            SaslClientAuthenticator::SASL_CLIENT_AUTHENTICATOR_MIN_RESERVED_CORRELATION_ID + 1,
             &Errors::None,
             vec!["PLAIN".to_string()],
             auth.sasl_handshake_version(),
@@ -1045,7 +1097,7 @@ mod tests {
         // The client goes directly to Complete (no CLIENT_COMPLETE intermediate
         // state, since PLAIN has no challenge-response cycle).
         let sasl_auth_bytes = build_sasl_authenticate_response_bytes(
-            SASL_CLIENT_AUTHENTICATOR_MIN_RESERVED_CORRELATION_ID + 2,
+            SaslClientAuthenticator::SASL_CLIENT_AUTHENTICATOR_MIN_RESERVED_CORRELATION_ID + 2,
             &Errors::None,
             None,
             &[],
@@ -1077,7 +1129,7 @@ mod tests {
 
         // Receive ApiVersionsResponse
         let api_versions_bytes = build_api_versions_response_bytes(
-            SASL_CLIENT_AUTHENTICATOR_MIN_RESERVED_CORRELATION_ID,
+            SaslClientAuthenticator::SASL_CLIENT_AUTHENTICATOR_MIN_RESERVED_CORRELATION_ID,
             ApiKeys::SASL_HANDSHAKE.latest_version(),
             ApiKeys::SASL_AUTHENTICATE.latest_version(),
         );
@@ -1087,7 +1139,7 @@ mod tests {
 
         // Receive SaslHandshakeResponse with UNSUPPORTED_SASL_MECHANISM
         let handshake_bytes = build_sasl_handshake_response_bytes(
-            SASL_CLIENT_AUTHENTICATOR_MIN_RESERVED_CORRELATION_ID + 1,
+            SaslClientAuthenticator::SASL_CLIENT_AUTHENTICATOR_MIN_RESERVED_CORRELATION_ID + 1,
             &Errors::UnsupportedSaslMechanism,
             vec!["SCRAM-SHA-256".to_string()],
             auth.sasl_handshake_version(),
@@ -1123,7 +1175,7 @@ mod tests {
 
         // Receive ApiVersionsResponse
         let api_versions_bytes = build_api_versions_response_bytes(
-            SASL_CLIENT_AUTHENTICATOR_MIN_RESERVED_CORRELATION_ID,
+            SaslClientAuthenticator::SASL_CLIENT_AUTHENTICATOR_MIN_RESERVED_CORRELATION_ID,
             ApiKeys::SASL_HANDSHAKE.latest_version(),
             ApiKeys::SASL_AUTHENTICATE.latest_version(),
         );
@@ -1133,7 +1185,7 @@ mod tests {
 
         // Receive SaslHandshakeResponse (success)
         let handshake_bytes = build_sasl_handshake_response_bytes(
-            SASL_CLIENT_AUTHENTICATOR_MIN_RESERVED_CORRELATION_ID + 1,
+            SaslClientAuthenticator::SASL_CLIENT_AUTHENTICATOR_MIN_RESERVED_CORRELATION_ID + 1,
             &Errors::None,
             vec!["PLAIN".to_string()],
             auth.sasl_handshake_version(),
@@ -1144,7 +1196,7 @@ mod tests {
 
         // Receive SaslAuthenticateResponse with error
         let sasl_auth_bytes = build_sasl_authenticate_response_bytes(
-            SASL_CLIENT_AUTHENTICATOR_MIN_RESERVED_CORRELATION_ID + 2,
+            SaslClientAuthenticator::SASL_CLIENT_AUTHENTICATOR_MIN_RESERVED_CORRELATION_ID + 2,
             &Errors::SaslAuthenticationFailed,
             Some("Authentication failed: Invalid credentials"),
             &[],
@@ -1190,12 +1242,15 @@ mod tests {
 
         data.set_api_keys(vec![hs_version]);
 
-        let mut response_header = ResponseHeader::new(SASL_CLIENT_AUTHENTICATOR_MIN_RESERVED_CORRELATION_ID, 0);
+        let mut response_header = ResponseHeader::with_correlation_id(
+            SaslClientAuthenticator::SASL_CLIENT_AUTHENTICATOR_MIN_RESERVED_CORRELATION_ID,
+            0,
+        );
         let mut cache = ObjectSerializationCache::new();
         let header_size = Message::size(response_header.data(), &mut cache, response_header.header_version()).unwrap();
         let body_size = Message::size(&data, &mut cache, 0).unwrap();
         let total_size = header_size + body_size;
-        let mut buf = ByteBufferAccessor::new(4 + total_size as usize);
+        let mut buf = ByteBufferAccessor::new(Vec::with_capacity(4 + total_size as usize));
         buf.write_int(total_size).unwrap();
         let hv = response_header.header_version();
         Message::write(response_header.data_mut(), &mut buf, &cache, hv).unwrap();
@@ -1205,11 +1260,14 @@ mod tests {
 
         auth.authenticate_impl(&mut transport).await.unwrap();
         // Should be in ReceiveHandshakeResponse (fell through from ReceiveApiVersionsResponse)
-        assert_eq!(auth.sasl_authenticate_version(), DISABLE_KAFKA_SASL_AUTHENTICATE_HEADER);
+        assert_eq!(
+            auth.sasl_authenticate_version(),
+            SaslClientAuthenticator::DISABLE_KAFKA_SASL_AUTHENTICATE_HEADER
+        );
 
         // Receive SaslHandshakeResponse
         let handshake_bytes = build_sasl_handshake_response_bytes(
-            SASL_CLIENT_AUTHENTICATOR_MIN_RESERVED_CORRELATION_ID + 1,
+            SaslClientAuthenticator::SASL_CLIENT_AUTHENTICATOR_MIN_RESERVED_CORRELATION_ID + 1,
             &Errors::None,
             vec!["PLAIN".to_string()],
             0,
@@ -1250,7 +1308,7 @@ mod tests {
 
         // Receive ApiVersionsResponse
         let api_versions_bytes = build_api_versions_response_bytes(
-            SASL_CLIENT_AUTHENTICATOR_MIN_RESERVED_CORRELATION_ID,
+            SaslClientAuthenticator::SASL_CLIENT_AUTHENTICATOR_MIN_RESERVED_CORRELATION_ID,
             ApiKeys::SASL_HANDSHAKE.latest_version(),
             ApiKeys::SASL_AUTHENTICATE.latest_version(),
         );
@@ -1260,7 +1318,7 @@ mod tests {
 
         // Receive SaslHandshakeResponse with ILLEGAL_SASL_STATE
         let handshake_bytes = build_sasl_handshake_response_bytes(
-            SASL_CLIENT_AUTHENTICATOR_MIN_RESERVED_CORRELATION_ID + 1,
+            SaslClientAuthenticator::SASL_CLIENT_AUTHENTICATOR_MIN_RESERVED_CORRELATION_ID + 1,
             &Errors::IllegalSaslState,
             vec!["PLAIN".to_string()],
             auth.sasl_handshake_version(),

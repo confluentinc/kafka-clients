@@ -98,10 +98,10 @@ use std::ffi::{CStr, c_char};
 use std::future::Future;
 use std::time::Duration;
 
-use crate::common::{KafkaError, TopicPartition};
+use crate::common::{Error, TopicPartition};
 use crate::consumer::{ConsumerHandle, OffsetAndMetadata};
 
-use super::common::{box_error, kafka_common_KafkaError_t};
+use super::common::{box_error, kafka_common_Error_t};
 use super::consumer::{
     box_long_offset_map, box_offset_and_timestamp_map, box_offset_map, box_string_list, box_topic_partition_list,
     clone_core_handle, kafka_consumer_Consumer_t, kafka_consumer_LongOffsetMap_t,
@@ -140,9 +140,9 @@ unsafe fn wrapper_ref(handle: *const kafka_consumer_ConsumerHandle_t) -> &'stati
 /// Rejects a call made from inside a tokio runtime, where
 /// [`tokio::runtime::Handle::block_on`] would panic. See the module
 /// documentation ("Threading contract").
-fn ensure_blocking_allowed() -> Result<(), KafkaError> {
+fn ensure_blocking_allowed() -> Result<(), Error> {
     if tokio::runtime::Handle::try_current().is_ok() {
-        return Err(KafkaError::illegal_state(
+        return Err(Error::local_illegal_state(
             "kafka_consumer_ConsumerHandle operations block the calling thread and cannot be \
              called from within an async runtime; call them from the consumer's callback \
              dispatcher thread or from a plain thread.",
@@ -153,7 +153,7 @@ fn ensure_blocking_allowed() -> Result<(), KafkaError> {
 
 /// Drives a void-returning core-handle future to completion on the calling
 /// thread. Returns null on success, or an owned error handle on failure.
-fn block_on_void<F>(handle: *const kafka_consumer_ConsumerHandle_t, op: F) -> *mut kafka_common_KafkaError_t
+fn block_on_void<F>(handle: *const kafka_consumer_ConsumerHandle_t, op: F) -> *mut kafka_common_Error_t
 where
     F: FnOnce(&'static ConsumerHandle) -> BoxFuture,
 {
@@ -171,7 +171,7 @@ where
 /// void-returning core-handle method (each returns a distinct anonymous
 /// future). One `Box` per FFI call is amortized over a whole consumer
 /// operation — not a hot path (CLAUDE.md §11).
-type BoxFuture = std::pin::Pin<Box<dyn Future<Output = Result<(), KafkaError>> + 'static>>;
+type BoxFuture = std::pin::Pin<Box<dyn Future<Output = Result<(), Error>> + 'static>>;
 
 /// Drives a value-returning core-handle future to completion on the calling
 /// thread, handing the `Ok` value to `complete` (which builds the C handle) and
@@ -185,9 +185,9 @@ fn block_on_value<T, F, C, H>(
     out: *mut *mut H,
     op: F,
     complete: C,
-) -> *mut kafka_common_KafkaError_t
+) -> *mut kafka_common_Error_t
 where
-    F: FnOnce(&'static ConsumerHandle) -> std::pin::Pin<Box<dyn Future<Output = Result<T, KafkaError>> + 'static>>,
+    F: FnOnce(&'static ConsumerHandle) -> std::pin::Pin<Box<dyn Future<Output = Result<T, Error>> + 'static>>,
     C: FnOnce(T) -> *mut H,
 {
     if let Err(e) = ensure_blocking_allowed() {
@@ -344,7 +344,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_assign(
     topics: *const *const c_char,
     partitions: *const i32,
     count: i32,
-) -> *mut kafka_common_KafkaError_t {
+) -> *mut kafka_common_Error_t {
     let tps = unsafe { read_topic_partitions(topics, partitions, count) };
     block_on_void(handle, move |h| Box::pin(async move { h.assign(tps).await }))
 }
@@ -361,9 +361,9 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_seek(
     topic: *const c_char,
     partition: i32,
     offset: i64,
-) -> *mut kafka_common_KafkaError_t {
+) -> *mut kafka_common_Error_t {
     let tp = unsafe { topic_partition(topic, partition) };
-    block_on_void(handle, move |h| Box::pin(async move { h.seek(tp, offset).await }))
+    block_on_void(handle, move |h| Box::pin(async move { h.seek_with_offset(tp, offset).await }))
 }
 
 /// Seeks a single partition to `offset` with commit metadata / leader epoch.
@@ -382,7 +382,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_seek_with_metadata(
     offset: i64,
     leader_epoch: i32,
     metadata: *const c_char,
-) -> *mut kafka_common_KafkaError_t {
+) -> *mut kafka_common_Error_t {
     let tp = unsafe { topic_partition(topic, partition) };
     let metadata_str = if metadata.is_null() {
         String::new()
@@ -390,11 +390,13 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_seek_with_metadata(
         unsafe { CStr::from_ptr(metadata) }.to_string_lossy().to_string()
     };
     let epoch = if leader_epoch < 0 { None } else { Some(leader_epoch) };
-    let oam = match OffsetAndMetadata::with_leader_epoch(offset, epoch, metadata_str) {
+    let oam = match OffsetAndMetadata::with_leader_epoch_metadata(offset, epoch, metadata_str) {
         Ok(o) => o,
         Err(e) => return box_error(e),
     };
-    block_on_void(handle, move |h| Box::pin(async move { h.seek_with_metadata(tp, oam).await }))
+    block_on_void(handle, move |h| {
+        Box::pin(async move { h.seek_with_offset_and_metadata(tp, oam).await })
+    })
 }
 
 /// Seeks the given partitions to their beginning offsets. Returns null on
@@ -409,7 +411,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_seek_to_beginning(
     topics: *const *const c_char,
     partitions: *const i32,
     count: i32,
-) -> *mut kafka_common_KafkaError_t {
+) -> *mut kafka_common_Error_t {
     let tps = unsafe { read_topic_partitions(topics, partitions, count) };
     block_on_void(handle, move |h| Box::pin(async move { h.seek_to_beginning(&tps).await }))
 }
@@ -426,7 +428,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_seek_to_end(
     topics: *const *const c_char,
     partitions: *const i32,
     count: i32,
-) -> *mut kafka_common_KafkaError_t {
+) -> *mut kafka_common_Error_t {
     let tps = unsafe { read_topic_partitions(topics, partitions, count) };
     block_on_void(handle, move |h| Box::pin(async move { h.seek_to_end(&tps).await }))
 }
@@ -443,7 +445,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_pause(
     topics: *const *const c_char,
     partitions: *const i32,
     count: i32,
-) -> *mut kafka_common_KafkaError_t {
+) -> *mut kafka_common_Error_t {
     let tps = unsafe { read_topic_partitions(topics, partitions, count) };
     block_on_void(handle, move |h| Box::pin(async move { h.pause(&tps).await }))
 }
@@ -460,7 +462,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_resume(
     topics: *const *const c_char,
     partitions: *const i32,
     count: i32,
-) -> *mut kafka_common_KafkaError_t {
+) -> *mut kafka_common_Error_t {
     let tps = unsafe { read_topic_partitions(topics, partitions, count) };
     block_on_void(handle, move |h| Box::pin(async move { h.resume(&tps).await }))
 }
@@ -483,7 +485,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_position(
     topic: *const c_char,
     partition: i32,
     out_position: *mut i64,
-) -> *mut kafka_common_KafkaError_t {
+) -> *mut kafka_common_Error_t {
     let tp = unsafe { topic_partition(topic, partition) };
     block_on_position(handle, out_position, move |h| Box::pin(async move { h.position(&tp).await }))
 }
@@ -501,11 +503,11 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_position_timeout(
     partition: i32,
     timeout_ms: i64,
     out_position: *mut i64,
-) -> *mut kafka_common_KafkaError_t {
+) -> *mut kafka_common_Error_t {
     let tp = unsafe { topic_partition(topic, partition) };
     let timeout = Duration::from_millis(timeout_ms.max(0) as u64);
     block_on_position(handle, out_position, move |h| {
-        Box::pin(async move { h.position_timeout(&tp, timeout).await })
+        Box::pin(async move { h.position_with_timeout(&tp, timeout).await })
     })
 }
 
@@ -525,7 +527,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_committed(
     partitions: *const i32,
     count: i32,
     out_map: *mut *mut kafka_consumer_OffsetMap_t,
-) -> *mut kafka_common_KafkaError_t {
+) -> *mut kafka_common_Error_t {
     let tps = unsafe { read_topic_partitions(topics, partitions, count) };
     block_on_value(
         handle,
@@ -550,7 +552,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_beginning_offsets(
     partitions: *const i32,
     count: i32,
     out_map: *mut *mut kafka_consumer_LongOffsetMap_t,
-) -> *mut kafka_common_KafkaError_t {
+) -> *mut kafka_common_Error_t {
     let tps = unsafe { read_topic_partitions(topics, partitions, count) };
     block_on_value(
         handle,
@@ -575,7 +577,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_end_offsets(
     partitions: *const i32,
     count: i32,
     out_map: *mut *mut kafka_consumer_LongOffsetMap_t,
-) -> *mut kafka_common_KafkaError_t {
+) -> *mut kafka_common_Error_t {
     let tps = unsafe { read_topic_partitions(topics, partitions, count) };
     block_on_value(
         handle,
@@ -602,7 +604,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_offsets_for_times(
     timestamps: *const i64,
     count: i32,
     out_map: *mut *mut kafka_consumer_OffsetAndTimestampMap_t,
-) -> *mut kafka_common_KafkaError_t {
+) -> *mut kafka_common_Error_t {
     let req = unsafe { read_timestamps_to_search(topics, partitions, timestamps, count) };
     block_on_value(
         handle,
@@ -629,7 +631,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_offsets_for_times(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_commit_sync(
     handle: *const kafka_consumer_ConsumerHandle_t,
-) -> *mut kafka_common_KafkaError_t {
+) -> *mut kafka_common_Error_t {
     block_on_void(handle, |h| Box::pin(async move { h.commit_sync().await }))
 }
 
@@ -650,12 +652,12 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_commit_sync_offsets(
     leader_epochs: *const i32,
     metadata: *const *const c_char,
     count: i32,
-) -> *mut kafka_common_KafkaError_t {
+) -> *mut kafka_common_Error_t {
     let map = match unsafe { read_offset_map(topics, partitions, offsets, leader_epochs, metadata, count) } {
         Ok(m) => m,
         Err(e) => return box_error(e),
     };
-    block_on_void(handle, move |h| Box::pin(async move { h.commit_sync_offsets(map).await }))
+    block_on_void(handle, move |h| Box::pin(async move { h.commit_sync_with_offsets(map).await }))
 }
 
 /// Commits the offsets the owning consumer has consumed asynchronously
@@ -671,7 +673,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_commit_sync_offsets(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_commit_async(
     handle: *const kafka_consumer_ConsumerHandle_t,
-) -> *mut kafka_common_KafkaError_t {
+) -> *mut kafka_common_Error_t {
     block_on_void(handle, |h| Box::pin(async move { h.commit_async().await }))
 }
 
@@ -690,7 +692,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_commit_async_offsets(
     leader_epochs: *const i32,
     metadata: *const *const c_char,
     count: i32,
-) -> *mut kafka_common_KafkaError_t {
+) -> *mut kafka_common_Error_t {
     let map = match unsafe { read_offset_map(topics, partitions, offsets, leader_epochs, metadata, count) } {
         Ok(m) => m,
         Err(e) => return box_error(e),
@@ -719,9 +721,9 @@ fn block_on_position<F>(
     handle: *const kafka_consumer_ConsumerHandle_t,
     out_position: *mut i64,
     op: F,
-) -> *mut kafka_common_KafkaError_t
+) -> *mut kafka_common_Error_t
 where
-    F: FnOnce(&'static ConsumerHandle) -> std::pin::Pin<Box<dyn Future<Output = Result<i64, KafkaError>> + 'static>>,
+    F: FnOnce(&'static ConsumerHandle) -> std::pin::Pin<Box<dyn Future<Output = Result<i64, Error>> + 'static>>,
 {
     if let Err(e) = ensure_blocking_allowed() {
         return box_error(e);
@@ -743,7 +745,7 @@ mod tests {
     use super::*;
     use std::ffi::CString;
 
-    use crate::ffi::common::{kafka_common_KafkaError_destroy, kafka_common_KafkaError_message};
+    use crate::ffi::common::{kafka_common_Error_destroy, kafka_common_Error_message};
     use crate::ffi::consumer::{
         kafka_consumer_Consumer_destroy, kafka_consumer_Consumer_poll, kafka_consumer_ConsumerRecords_destroy,
         kafka_consumer_MockConsumer_new, kafka_consumer_StringList_count, kafka_consumer_StringList_destroy,
@@ -755,8 +757,8 @@ mod tests {
     /// # Safety
     ///
     /// `err` must be a valid, non-null error handle.
-    unsafe fn error_message(err: *const kafka_common_KafkaError_t) -> String {
-        let message = unsafe { kafka_common_KafkaError_message(err) };
+    unsafe fn error_message(err: *const kafka_common_Error_t) -> String {
+        let message = unsafe { kafka_common_Error_message(err) };
         unsafe { CStr::from_ptr(message) }.to_string_lossy().to_string()
     }
 
@@ -823,11 +825,11 @@ mod tests {
             message.contains("not supported on a MockConsumer handle"),
             "unexpected message: {message}"
         );
-        unsafe { kafka_common_KafkaError_destroy(err) };
+        unsafe { kafka_common_Error_destroy(err) };
 
         let err = unsafe { kafka_consumer_ConsumerHandle_commit_async(handle) };
         assert!(!err.is_null());
-        unsafe { kafka_common_KafkaError_destroy(err) };
+        unsafe { kafka_common_Error_destroy(err) };
 
         let topic = CString::new("t").unwrap();
         let topics = [topic.as_ptr()];
@@ -835,45 +837,45 @@ mod tests {
 
         let err = unsafe { kafka_consumer_ConsumerHandle_assign(handle, topics.as_ptr(), partitions.as_ptr(), 1) };
         assert!(!err.is_null());
-        unsafe { kafka_common_KafkaError_destroy(err) };
+        unsafe { kafka_common_Error_destroy(err) };
 
         let err = unsafe { kafka_consumer_ConsumerHandle_seek(handle, topic.as_ptr(), 0, 5) };
         assert!(!err.is_null());
-        unsafe { kafka_common_KafkaError_destroy(err) };
+        unsafe { kafka_common_Error_destroy(err) };
 
         let err = unsafe {
             kafka_consumer_ConsumerHandle_seek_with_metadata(handle, topic.as_ptr(), 0, 5, -1, std::ptr::null())
         };
         assert!(!err.is_null());
-        unsafe { kafka_common_KafkaError_destroy(err) };
+        unsafe { kafka_common_Error_destroy(err) };
 
         let err =
             unsafe { kafka_consumer_ConsumerHandle_seek_to_beginning(handle, topics.as_ptr(), partitions.as_ptr(), 1) };
         assert!(!err.is_null());
-        unsafe { kafka_common_KafkaError_destroy(err) };
+        unsafe { kafka_common_Error_destroy(err) };
 
         let err = unsafe { kafka_consumer_ConsumerHandle_seek_to_end(handle, topics.as_ptr(), partitions.as_ptr(), 1) };
         assert!(!err.is_null());
-        unsafe { kafka_common_KafkaError_destroy(err) };
+        unsafe { kafka_common_Error_destroy(err) };
 
         let err = unsafe { kafka_consumer_ConsumerHandle_pause(handle, topics.as_ptr(), partitions.as_ptr(), 1) };
         assert!(!err.is_null());
-        unsafe { kafka_common_KafkaError_destroy(err) };
+        unsafe { kafka_common_Error_destroy(err) };
 
         let err = unsafe { kafka_consumer_ConsumerHandle_resume(handle, topics.as_ptr(), partitions.as_ptr(), 1) };
         assert!(!err.is_null());
-        unsafe { kafka_common_KafkaError_destroy(err) };
+        unsafe { kafka_common_Error_destroy(err) };
 
         let mut position = -7i64;
         let err = unsafe { kafka_consumer_ConsumerHandle_position(handle, topic.as_ptr(), 0, &mut position) };
         assert!(!err.is_null());
         assert_eq!(-7, position, "out_position must be untouched on failure");
-        unsafe { kafka_common_KafkaError_destroy(err) };
+        unsafe { kafka_common_Error_destroy(err) };
 
         let err =
             unsafe { kafka_consumer_ConsumerHandle_position_timeout(handle, topic.as_ptr(), 0, 100, &mut position) };
         assert!(!err.is_null());
-        unsafe { kafka_common_KafkaError_destroy(err) };
+        unsafe { kafka_common_Error_destroy(err) };
 
         let mut offset_map: *mut kafka_consumer_OffsetMap_t = std::ptr::null_mut();
         let err = unsafe {
@@ -881,7 +883,7 @@ mod tests {
         };
         assert!(!err.is_null());
         assert!(offset_map.is_null(), "out_map must be untouched on failure");
-        unsafe { kafka_common_KafkaError_destroy(err) };
+        unsafe { kafka_common_Error_destroy(err) };
 
         let mut long_map: *mut kafka_consumer_LongOffsetMap_t = std::ptr::null_mut();
         let err = unsafe {
@@ -894,13 +896,13 @@ mod tests {
             )
         };
         assert!(!err.is_null());
-        unsafe { kafka_common_KafkaError_destroy(err) };
+        unsafe { kafka_common_Error_destroy(err) };
 
         let err = unsafe {
             kafka_consumer_ConsumerHandle_end_offsets(handle, topics.as_ptr(), partitions.as_ptr(), 1, &mut long_map)
         };
         assert!(!err.is_null());
-        unsafe { kafka_common_KafkaError_destroy(err) };
+        unsafe { kafka_common_Error_destroy(err) };
 
         let timestamps = [0i64];
         let mut ts_map: *mut kafka_consumer_OffsetAndTimestampMap_t = std::ptr::null_mut();
@@ -915,7 +917,7 @@ mod tests {
             )
         };
         assert!(!err.is_null());
-        unsafe { kafka_common_KafkaError_destroy(err) };
+        unsafe { kafka_common_Error_destroy(err) };
 
         let commit_offsets = [1i64];
         let epochs = [-1i32];
@@ -931,7 +933,7 @@ mod tests {
             )
         };
         assert!(!err.is_null());
-        unsafe { kafka_common_KafkaError_destroy(err) };
+        unsafe { kafka_common_Error_destroy(err) };
 
         let err = unsafe {
             kafka_consumer_ConsumerHandle_commit_async_offsets(
@@ -945,7 +947,7 @@ mod tests {
             )
         };
         assert!(!err.is_null());
-        unsafe { kafka_common_KafkaError_destroy(err) };
+        unsafe { kafka_common_Error_destroy(err) };
 
         unsafe { kafka_consumer_ConsumerHandle_destroy(handle) };
         unsafe { kafka_consumer_Consumer_destroy(consumer) };
@@ -976,7 +978,7 @@ mod tests {
         assert!(!err.is_null());
         let message = unsafe { error_message(err) };
         assert!(message.contains("negative offset"), "unexpected message: {message}");
-        unsafe { kafka_common_KafkaError_destroy(err) };
+        unsafe { kafka_common_Error_destroy(err) };
 
         unsafe { kafka_consumer_ConsumerHandle_destroy(handle) };
         unsafe { kafka_consumer_Consumer_destroy(consumer) };
@@ -997,7 +999,7 @@ mod tests {
                 message.contains("cannot be called from within an async runtime"),
                 "unexpected message: {message}"
             );
-            unsafe { kafka_common_KafkaError_destroy(err) };
+            unsafe { kafka_common_Error_destroy(err) };
 
             // The sync getters do not block, so they still work in that context.
             let assignment = unsafe { kafka_consumer_ConsumerHandle_assignment(handle) };
@@ -1016,14 +1018,14 @@ mod tests {
         let (consumer, handle) = mock_with_handle();
         unsafe { kafka_consumer_ConsumerHandle_wakeup(handle) };
 
-        let mut poll_err: *mut kafka_common_KafkaError_t = std::ptr::null_mut();
+        let mut poll_err: *mut kafka_common_Error_t = std::ptr::null_mut();
         let records = unsafe { kafka_consumer_Consumer_poll(consumer, 10, &mut poll_err) };
         assert!(records.is_null());
         assert!(!poll_err.is_null());
-        unsafe { kafka_common_KafkaError_destroy(poll_err) };
+        unsafe { kafka_common_Error_destroy(poll_err) };
 
         // The flag was cleared, so the next poll succeeds.
-        let mut poll_err2: *mut kafka_common_KafkaError_t = std::ptr::null_mut();
+        let mut poll_err2: *mut kafka_common_Error_t = std::ptr::null_mut();
         let records = unsafe { kafka_consumer_Consumer_poll(consumer, 10, &mut poll_err2) };
         assert!(poll_err2.is_null());
         assert!(!records.is_null());

@@ -48,7 +48,7 @@ impl CreateDelegationTokenOptions {
     ///
     /// Mirrors `CreateDelegationTokenOptions.renewers`.
     #[must_use]
-    pub fn renewers(mut self, renewers: Vec<KafkaPrincipal>) -> Self {
+    pub fn set_renewers(mut self, renewers: Vec<KafkaPrincipal>) -> Self {
         self.renewers = renewers;
         self
     }
@@ -56,7 +56,7 @@ impl CreateDelegationTokenOptions {
     /// The principals allowed to renew the token.
     ///
     /// Mirrors `CreateDelegationTokenOptions.renewers`.
-    pub fn get_renewers(&self) -> &[KafkaPrincipal] {
+    pub fn renewers(&self) -> &[KafkaPrincipal] {
         &self.renewers
     }
 
@@ -64,7 +64,7 @@ impl CreateDelegationTokenOptions {
     ///
     /// Mirrors `CreateDelegationTokenOptions.owner`.
     #[must_use]
-    pub fn owner(mut self, owner: KafkaPrincipal) -> Self {
+    pub fn set_owner(mut self, owner: KafkaPrincipal) -> Self {
         self.owner = Some(owner);
         self
     }
@@ -73,7 +73,7 @@ impl CreateDelegationTokenOptions {
     ///
     /// Mirrors `CreateDelegationTokenOptions.owner`, which returns an
     /// `Optional`.
-    pub fn get_owner(&self) -> Option<&KafkaPrincipal> {
+    pub fn owner(&self) -> Option<&KafkaPrincipal> {
         self.owner.as_ref()
     }
 
@@ -82,7 +82,7 @@ impl CreateDelegationTokenOptions {
     ///
     /// Mirrors `CreateDelegationTokenOptions.maxLifetimeMs`.
     #[must_use]
-    pub fn max_lifetime_ms(mut self, max_lifetime_ms: i64) -> Self {
+    pub fn set_max_lifetime_ms(mut self, max_lifetime_ms: i64) -> Self {
         self.max_lifetime_ms = max_lifetime_ms;
         self
     }
@@ -90,40 +90,40 @@ impl CreateDelegationTokenOptions {
     /// The maximum lifetime of the token in milliseconds.
     ///
     /// Mirrors `CreateDelegationTokenOptions.maxLifetimeMs`.
-    pub fn get_max_lifetime_ms(&self) -> i64 {
+    pub fn max_lifetime_ms(&self) -> i64 {
         self.max_lifetime_ms
     }
 
     /// Sets the maximum lifetime of the token in milliseconds.
     ///
     /// Mirrors the deprecated `CreateDelegationTokenOptions.maxlifeTimeMs(long)`
-    /// (deprecated since 4.0; use [`Self::max_lifetime_ms`]).
-    #[deprecated(note = "use max_lifetime_ms")]
+    /// (deprecated since 4.0; use [`Self::set_max_lifetime_ms`]).
+    #[deprecated(note = "use set_max_lifetime_ms")]
     #[must_use]
-    pub fn maxlife_time_ms(self, max_lifetime_ms: i64) -> Self {
-        self.max_lifetime_ms(max_lifetime_ms)
+    pub fn set_maxlife_time_ms(self, max_lifetime_ms: i64) -> Self {
+        self.set_max_lifetime_ms(max_lifetime_ms)
     }
 
     /// The maximum lifetime of the token in milliseconds.
     ///
     /// Mirrors the deprecated `CreateDelegationTokenOptions.maxlifeTimeMs()`
-    /// (deprecated since 4.0; use [`Self::get_max_lifetime_ms`]).
-    #[deprecated(note = "use get_max_lifetime_ms")]
-    pub fn get_maxlife_time_ms(&self) -> i64 {
+    /// (deprecated since 4.0; use [`Self::max_lifetime_ms`]).
+    #[deprecated(note = "use max_lifetime_ms")]
+    pub fn maxlife_time_ms(&self) -> i64 {
         self.max_lifetime_ms
     }
 
     /// Set the timeout in milliseconds for this operation, or `None` to use the
     /// default API timeout for the `AdminClient`.
     #[must_use]
-    pub fn timeout_ms(mut self, timeout_ms: Option<i32>) -> Self {
+    pub fn set_timeout_ms(mut self, timeout_ms: Option<i32>) -> Self {
         self.timeout_ms = timeout_ms;
         self
     }
 
     /// The timeout in milliseconds for this operation, or `None` if the default
     /// API timeout should be used.
-    pub fn timeout(&self) -> Option<i32> {
+    pub fn timeout_ms(&self) -> Option<i32> {
         self.timeout_ms
     }
 }
@@ -135,10 +135,10 @@ mod tests {
     #[test]
     fn defaults() {
         let options = CreateDelegationTokenOptions::new();
-        assert_eq!(options.get_max_lifetime_ms(), -1);
-        assert!(options.get_renewers().is_empty());
-        assert!(options.get_owner().is_none());
-        assert_eq!(options.timeout(), None);
+        assert_eq!(options.max_lifetime_ms(), -1);
+        assert!(options.renewers().is_empty());
+        assert!(options.owner().is_none());
+        assert_eq!(options.timeout_ms(), None);
     }
 
     #[test]
@@ -146,13 +146,13 @@ mod tests {
         let owner = KafkaPrincipal::new(KafkaPrincipal::USER_TYPE, "alice");
         let renewer = KafkaPrincipal::new(KafkaPrincipal::USER_TYPE, "bob");
         let options = CreateDelegationTokenOptions::new()
-            .owner(owner.clone())
-            .renewers(vec![renewer.clone()])
-            .max_lifetime_ms(1000)
-            .timeout_ms(Some(5000));
-        assert_eq!(options.get_owner(), Some(&owner));
-        assert_eq!(options.get_renewers(), &[renewer]);
-        assert_eq!(options.get_max_lifetime_ms(), 1000);
-        assert_eq!(options.timeout(), Some(5000));
+            .set_owner(owner.clone())
+            .set_renewers(vec![renewer.clone()])
+            .set_max_lifetime_ms(1000)
+            .set_timeout_ms(Some(5000));
+        assert_eq!(options.owner(), Some(&owner));
+        assert_eq!(options.renewers(), &[renewer]);
+        assert_eq!(options.max_lifetime_ms(), 1000);
+        assert_eq!(options.timeout_ms(), Some(5000));
     }
 }

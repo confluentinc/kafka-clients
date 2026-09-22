@@ -35,14 +35,14 @@ use std::sync::{Arc, Mutex};
 use regex::Regex;
 use tokio::sync::Notify;
 
-use crate::common::{IsolationLevel, KafkaError, PartitionInfo, TopicPartition};
-use crate::consumer::consumer_rebalance_listener::ConsumerRebalanceListener;
-use crate::consumer::consumer_rebalance_listener_method_name::ConsumerRebalanceListenerMethodName;
-use crate::consumer::internals::auto_offset_reset_strategy::AutoOffsetResetStrategy;
-use crate::consumer::internals::offset_and_timestamp_internal::OffsetAndTimestampInternal;
+use crate::common::{Error, IsolationLevel, PartitionInfo, TopicPartition};
+use crate::consumer::AutoOffsetResetStrategy;
+use crate::consumer::ConsumerRebalanceListener;
+use crate::consumer::ConsumerRebalanceListenerMethodName;
+use crate::consumer::internals::OffsetAndTimestampInternal;
 use crate::consumer::{GroupMembershipOperation, OffsetAndMetadata, SubscriptionPattern};
 
-use super::completable_event::CompletableEventHandle;
+use super::CompletableEventHandle;
 
 /// Single-enum translation of Java's `ApplicationEvent` hierarchy.
 ///
@@ -66,7 +66,7 @@ pub(crate) enum ApplicationEvent {
     /// invoking the listener, sends this with the result.
     ConsumerRebalanceListenerCallbackCompleted {
         method_name: ConsumerRebalanceListenerMethodName,
-        error: Option<KafkaError>,
+        error: Option<Error>,
     },
     /// `AsyncPollEvent` — pumps the membership / fetch state machine.
     ///
@@ -184,7 +184,7 @@ pub(crate) enum ApplicationEvent {
     ///
     /// `listener` mirrors Java's `SubscriptionChangeEvent.listener` —
     /// `Optional<ConsumerRebalanceListener>` carried so the bg-task
-    /// `subscribe_topics(...)` call can register it against
+    /// `subscribe_with_topics(...)` call can register it against
     /// `SubscriptionState`.
     TopicSubscriptionChange {
         handle: CompletableEventHandle<()>,
@@ -307,26 +307,26 @@ impl ApplicationEvent {
     /// `org.apache.kafka.clients.consumer.internals.events.MetadataErrorNotifiableEvent.onMetadataError`.
     /// Java has the trait per-class; in Rust we centralise the dispatch
     /// on the enum so the processor doesn't need a runtime down-cast.
-    pub(crate) fn on_metadata_error(&self, error: KafkaError) -> bool {
+    pub(crate) fn on_metadata_error(&self, error: Error) -> bool {
         match self {
             Self::AsyncPoll { state, .. } => {
-                state.complete_exceptionally(error);
+                state.complete_with_error(error);
                 true
             },
             Self::CheckAndUpdatePositions { handle } => {
-                handle.complete_exceptionally(error);
+                handle.complete_with_error(error);
                 true
             },
             Self::ListOffsets { handle, .. } => {
-                handle.complete_exceptionally(error);
+                handle.complete_with_error(error);
                 true
             },
             Self::TopicMetadata { handle, .. } => {
-                handle.complete_exceptionally(error);
+                handle.complete_with_error(error);
                 true
             },
             Self::AllTopicsMetadata { handle } => {
-                handle.complete_exceptionally(error);
+                handle.complete_with_error(error);
                 true
             },
             _ => false,
@@ -342,7 +342,7 @@ impl ApplicationEvent {
     /// a non-`_` arm in `on_metadata_error`. The `metadata_error_notifiable_predicate_matches_on_metadata_error`
     /// test below enforces this with `assert_eq!(predicate, dispatched)`.
     ///
-    /// Used by [`crate::consumer::internals::consumer_network_thread::ConsumerNetworkThread::process_application_events`]
+    /// Used by [`crate::consumer::internals::ConsumerNetworkThread::process_application_events`]
     /// to decide whether to query `network_client_delegate.get_and_clear_metadata_error()`
     /// in the per-event arm (Java mirrors this with `event instanceof
     /// MetadataErrorNotifiableEvent`).
@@ -362,13 +362,11 @@ impl ApplicationEvent {
     /// `handle: CompletableEventHandle<T>` field). Non-completable
     /// variants return `None`.
     ///
-    /// Used by [`crate::consumer::internals::consumer_network_thread::ConsumerNetworkThread::process_application_events`]
-    /// to register the handle with the [`super::completable_event_reaper::CompletableEventReaper`]
+    /// Used by [`crate::consumer::internals::ConsumerNetworkThread::process_application_events`]
+    /// to register the handle with the [`super::CompletableEventReaper`]
     /// — mirrors Java's
     /// `if (event instanceof CompletableEvent) applicationEventReaper.add((CompletableEvent<?>) event)`.
-    pub(crate) fn erased_handle(
-        &self,
-    ) -> Option<std::sync::Arc<dyn super::completable_event::CompletableEventErasedHandle>> {
+    pub(crate) fn erased_handle(&self) -> Option<std::sync::Arc<dyn super::CompletableEventErasedHandle>> {
         match self {
             // Completable variants — return the erased handle.
             Self::AssignmentChange { handle, .. } => Some(handle.erased()),
@@ -415,12 +413,12 @@ impl ApplicationEvent {
     /// `processApplicationEvents` (which handles "immediately completed
     /// events") still notifies `AsyncPoll` via `on_metadata_error`.
     ///
-    /// Used by [`crate::consumer::internals::consumer_network_thread::ConsumerNetworkThread`]
+    /// Used by [`crate::consumer::internals::ConsumerNetworkThread`]
     /// to track in-flight notifiable events for the post-poll
     /// `maybeFailOnMetadataError(uncompletedEvents)` arm.
     pub(crate) fn metadata_error_notifiable_handle(
         &self,
-    ) -> Option<std::sync::Arc<dyn super::completable_event::CompletableEventErasedHandle>> {
+    ) -> Option<std::sync::Arc<dyn super::CompletableEventErasedHandle>> {
         match self {
             Self::CheckAndUpdatePositions { handle } => Some(handle.erased()),
             Self::ListOffsets { handle, .. } => Some(handle.erased()),
@@ -463,7 +461,7 @@ impl std::fmt::Display for ApplicationEvent {
 /// [`is_complete`](Self::is_complete) and [`error`](Self::error) between
 /// `poll()` iterations, while the bg task drives the state forward via
 /// [`complete_successfully`](Self::complete_successfully),
-/// [`complete_exceptionally`](Self::complete_exceptionally), and
+/// [`complete_with_error`](Self::complete_with_error), and
 /// [`mark_validate_positions_complete`](Self::mark_validate_positions_complete).
 pub(crate) struct AsyncPollState {
     /// `volatile boolean isComplete` — Java's primary completion flag.
@@ -473,9 +471,9 @@ pub(crate) struct AsyncPollState {
     /// logic has finished.
     is_validate_positions_complete: AtomicBool,
     /// `volatile KafkaException error` — set on exceptional completion.
-    /// Wrapped in `Mutex<Option<...>>` because `KafkaError` is not
+    /// Wrapped in `Mutex<Option<...>>` because `Error` is not
     /// trivially `AtomicPtr`-shareable.
-    error: Mutex<Option<KafkaError>>,
+    error: Mutex<Option<Error>>,
     /// AK 4.3.1 (KAFKA-20106): `reconciliationCheckFuture.isDone()`. Set by
     /// the bg task once it has, while processing this poll event, checked
     /// any pending reconciliation (triggered commits and marked revoked
@@ -553,7 +551,10 @@ impl AsyncPollState {
     /// reconciliation-check future to unblock any waiters (the error is
     /// surfaced through the normal `check_inflight_poll` mechanism via the
     /// `error` field), stores the error, AND sets `is_complete`.
-    pub(crate) fn complete_exceptionally(&self, err: KafkaError) {
+    ///
+    /// The Rust name drops the Java spelling because CLAUDE.md §2 keeps
+    /// "exception" out of Rust identifiers.
+    pub(crate) fn complete_with_error(&self, err: Error) {
         self.mark_reconciliation_check_complete();
         let mut guard = match self.error.lock() {
             Ok(g) => g,
@@ -570,7 +571,7 @@ impl AsyncPollState {
     /// Clones the error if present (Java returns a shared reference; in
     /// Rust the receiver may need to inspect/raise it independently of
     /// the bg task observing it again).
-    pub(crate) fn error(&self) -> Option<KafkaError> {
+    pub(crate) fn error(&self) -> Option<Error> {
         let guard = match self.error.lock() {
             Ok(g) => g,
             Err(poisoned) => poisoned.into_inner(),
@@ -627,7 +628,7 @@ impl std::fmt::Display for ApplicationEventEnvelope {
 
 #[cfg(test)]
 mod tests {
-    use super::super::completable_event::make_completable_event;
+    use super::super::CompletableEvent;
     use super::*;
 
     fn new_async_poll(deadline_ms: i64, poll_time_ms: i64) -> ApplicationEvent {
@@ -682,12 +683,12 @@ mod tests {
     }
 
     #[test]
-    fn async_poll_state_completes_exceptionally() {
+    fn async_poll_state_completes_with_error() {
         let state = AsyncPollState::new();
-        state.complete_exceptionally(KafkaError::timeout("boom"));
+        state.complete_with_error(Error::timeout("boom"));
         assert!(state.is_complete());
         let err = state.error().expect("error present");
-        assert!(matches!(err, KafkaError::Timeout(_)));
+        assert!(matches!(err, Error::Timeout(_)));
     }
 
     #[test]
@@ -707,40 +708,42 @@ mod tests {
         // `AsyncPoll` is notifiable: state.error is populated.
         let state = Arc::new(AsyncPollState::new());
         let ev = ApplicationEvent::AsyncPoll { deadline_ms: 0, poll_time_ms: 0, state: Arc::clone(&state) };
-        assert!(ev.on_metadata_error(KafkaError::timeout("md")));
+        assert!(ev.on_metadata_error(Error::timeout("md")));
         assert!(state.is_complete());
-        assert!(matches!(state.error().unwrap(), KafkaError::Timeout(_)));
+        assert!(matches!(state.error().unwrap(), Error::Timeout(_)));
 
         // `CheckAndUpdatePositions` is notifiable.
-        let (handle, mut rx, _erased) = make_completable_event::<()>(0);
+        let (handle, mut rx, _erased) = CompletableEvent::make_completable_event::<()>(0);
         let ev = ApplicationEvent::CheckAndUpdatePositions { handle };
-        assert!(ev.on_metadata_error(KafkaError::timeout("md")));
-        assert!(matches!(rx.try_recv().unwrap(), Err(KafkaError::Timeout(_))));
+        assert!(ev.on_metadata_error(Error::timeout("md")));
+        assert!(matches!(rx.try_recv().unwrap(), Err(Error::Timeout(_))));
 
         // `ListOffsets` is notifiable.
         let (handle, mut rx, _erased) =
-            make_completable_event::<HashMap<TopicPartition, Option<OffsetAndTimestampInternal>>>(0);
+            CompletableEvent::make_completable_event::<HashMap<TopicPartition, Option<OffsetAndTimestampInternal>>>(0);
         let ev =
             ApplicationEvent::ListOffsets { handle, timestamps_to_search: HashMap::new(), require_timestamps: false };
-        assert!(ev.on_metadata_error(KafkaError::timeout("md")));
-        assert!(matches!(rx.try_recv().unwrap(), Err(KafkaError::Timeout(_))));
+        assert!(ev.on_metadata_error(Error::timeout("md")));
+        assert!(matches!(rx.try_recv().unwrap(), Err(Error::Timeout(_))));
 
         // `TopicMetadata` is notifiable.
-        let (handle, mut rx, _erased) = make_completable_event::<HashMap<String, Vec<PartitionInfo>>>(0);
+        let (handle, mut rx, _erased) =
+            CompletableEvent::make_completable_event::<HashMap<String, Vec<PartitionInfo>>>(0);
         let ev = ApplicationEvent::TopicMetadata { handle, topic: "t".to_string() };
-        assert!(ev.on_metadata_error(KafkaError::timeout("md")));
-        assert!(matches!(rx.try_recv().unwrap(), Err(KafkaError::Timeout(_))));
+        assert!(ev.on_metadata_error(Error::timeout("md")));
+        assert!(matches!(rx.try_recv().unwrap(), Err(Error::Timeout(_))));
 
         // `AllTopicsMetadata` is notifiable.
-        let (handle, mut rx, _erased) = make_completable_event::<HashMap<String, Vec<PartitionInfo>>>(0);
+        let (handle, mut rx, _erased) =
+            CompletableEvent::make_completable_event::<HashMap<String, Vec<PartitionInfo>>>(0);
         let ev = ApplicationEvent::AllTopicsMetadata { handle };
-        assert!(ev.on_metadata_error(KafkaError::timeout("md")));
-        assert!(matches!(rx.try_recv().unwrap(), Err(KafkaError::Timeout(_))));
+        assert!(ev.on_metadata_error(Error::timeout("md")));
+        assert!(matches!(rx.try_recv().unwrap(), Err(Error::Timeout(_))));
 
         // Non-notifiable variants return false and do not consume the
         // handle's sender.
         let ev = ApplicationEvent::CommitOnClose;
-        assert!(!ev.on_metadata_error(KafkaError::timeout("md")));
+        assert!(!ev.on_metadata_error(Error::timeout("md")));
     }
 
     /// Verifies `is_metadata_error_notifiable()` agrees with the set of
@@ -756,25 +759,25 @@ mod tests {
         let state = Arc::new(AsyncPollState::new());
         let ev = ApplicationEvent::AsyncPoll { deadline_ms: 0, poll_time_ms: 0, state };
         assert!(ev.is_metadata_error_notifiable());
-        assert!(ev.on_metadata_error(KafkaError::timeout("md")));
+        assert!(ev.on_metadata_error(Error::timeout("md")));
 
-        let (handle, _rx, _erased) = make_completable_event::<()>(0);
+        let (handle, _rx, _erased) = CompletableEvent::make_completable_event::<()>(0);
         let ev = ApplicationEvent::CheckAndUpdatePositions { handle };
         assert!(ev.is_metadata_error_notifiable());
-        assert!(ev.on_metadata_error(KafkaError::timeout("md")));
+        assert!(ev.on_metadata_error(Error::timeout("md")));
 
         // Non-notifiable variants: predicate false, dispatch false.
         let ev = ApplicationEvent::CommitOnClose;
         assert!(!ev.is_metadata_error_notifiable());
-        assert!(!ev.on_metadata_error(KafkaError::timeout("md")));
+        assert!(!ev.on_metadata_error(Error::timeout("md")));
 
         let ev = ApplicationEvent::NewTopicsMetadataUpdate;
         assert!(!ev.is_metadata_error_notifiable());
-        assert!(!ev.on_metadata_error(KafkaError::timeout("md")));
+        assert!(!ev.on_metadata_error(Error::timeout("md")));
 
         let ev = ApplicationEvent::StopFindCoordinatorOnClose;
         assert!(!ev.is_metadata_error_notifiable());
-        assert!(!ev.on_metadata_error(KafkaError::timeout("md")));
+        assert!(!ev.on_metadata_error(Error::timeout("md")));
     }
 
     /// Verifies `erased_handle()` returns `Some` for variants extending
@@ -783,15 +786,15 @@ mod tests {
     #[test]
     fn erased_handle_returns_some_for_completable_variants() {
         // Completable variants.
-        let (h, _rx, _e) = make_completable_event::<()>(0);
+        let (h, _rx, _e) = CompletableEvent::make_completable_event::<()>(0);
         let ev = ApplicationEvent::AssignmentChange { handle: h, current_time_ms: 0, partitions: HashSet::new() };
         assert!(ev.erased_handle().is_some());
 
-        let (h, _rx, _e) = make_completable_event::<()>(0);
+        let (h, _rx, _e) = CompletableEvent::make_completable_event::<()>(0);
         let ev = ApplicationEvent::Unsubscribe { handle: h };
         assert!(ev.erased_handle().is_some());
 
-        let (h, _rx, _e) = make_completable_event::<()>(0);
+        let (h, _rx, _e) = CompletableEvent::make_completable_event::<()>(0);
         let ev =
             ApplicationEvent::LeaveGroupOnClose { handle: h, membership_operation: GroupMembershipOperation::Default };
         assert!(ev.erased_handle().is_some());
@@ -826,12 +829,12 @@ mod tests {
     #[test]
     fn metadata_error_notifiable_handle_returns_intersection() {
         // CheckAndUpdatePositions — notifiable AND completable.
-        let (h, _rx, _e) = make_completable_event::<()>(0);
+        let (h, _rx, _e) = CompletableEvent::make_completable_event::<()>(0);
         let ev = ApplicationEvent::CheckAndUpdatePositions { handle: h };
         assert!(ev.metadata_error_notifiable_handle().is_some());
 
         // ListOffsets — notifiable AND completable.
-        let (h, _rx, _e) = make_completable_event(0);
+        let (h, _rx, _e) = CompletableEvent::make_completable_event(0);
         let ev = ApplicationEvent::ListOffsets {
             handle: h,
             timestamps_to_search: HashMap::new(),
@@ -840,12 +843,12 @@ mod tests {
         assert!(ev.metadata_error_notifiable_handle().is_some());
 
         // TopicMetadata — notifiable AND completable.
-        let (h, _rx, _e) = make_completable_event(0);
+        let (h, _rx, _e) = CompletableEvent::make_completable_event(0);
         let ev = ApplicationEvent::TopicMetadata { handle: h, topic: "t".to_string() };
         assert!(ev.metadata_error_notifiable_handle().is_some());
 
         // AllTopicsMetadata — notifiable AND completable.
-        let (h, _rx, _e) = make_completable_event(0);
+        let (h, _rx, _e) = CompletableEvent::make_completable_event(0);
         let ev = ApplicationEvent::AllTopicsMetadata { handle: h };
         assert!(ev.metadata_error_notifiable_handle().is_some());
 
@@ -858,7 +861,7 @@ mod tests {
         );
 
         // Completable but NOT notifiable — must return None.
-        let (h, _rx, _e) = make_completable_event::<()>(0);
+        let (h, _rx, _e) = CompletableEvent::make_completable_event::<()>(0);
         let ev = ApplicationEvent::AssignmentChange { handle: h, current_time_ms: 0, partitions: HashSet::new() };
         assert!(ev.metadata_error_notifiable_handle().is_none());
 
@@ -873,7 +876,7 @@ mod tests {
 
     #[test]
     fn assignment_change_carries_current_time_ms() {
-        let (handle, _rx, _erased) = make_completable_event::<()>(0);
+        let (handle, _rx, _erased) = CompletableEvent::make_completable_event::<()>(0);
         let ev = ApplicationEvent::AssignmentChange { handle, current_time_ms: 1234, partitions: HashSet::new() };
         if let ApplicationEvent::AssignmentChange { current_time_ms, .. } = ev {
             assert_eq!(current_time_ms, 1234);
@@ -884,7 +887,7 @@ mod tests {
 
     #[test]
     fn leave_group_on_close_carries_membership_operation() {
-        let (handle, _rx, _erased) = make_completable_event::<()>(0);
+        let (handle, _rx, _erased) = CompletableEvent::make_completable_event::<()>(0);
         let ev =
             ApplicationEvent::LeaveGroupOnClose { handle, membership_operation: GroupMembershipOperation::LeaveGroup };
         if let ApplicationEvent::LeaveGroupOnClose { membership_operation, .. } = ev {
@@ -896,7 +899,7 @@ mod tests {
 
     #[test]
     fn current_lag_carries_isolation_level() {
-        let (handle, _rx, _erased) = make_completable_event::<Option<i64>>(0);
+        let (handle, _rx, _erased) = CompletableEvent::make_completable_event::<Option<i64>>(0);
         let ev = ApplicationEvent::CurrentLag {
             handle,
             partition: TopicPartition::new("t".to_string(), 0),
@@ -912,8 +915,9 @@ mod tests {
     #[test]
     fn commit_async_carries_offsets_ready_and_optional_offsets() {
         // Variant accepts `None` for "commit all consumed".
-        let (handle, _rx, _erased) = make_completable_event::<HashMap<TopicPartition, OffsetAndMetadata>>(0);
-        let (offsets_ready, mut ready_rx, _ready_erased) = make_completable_event::<()>(0);
+        let (handle, _rx, _erased) =
+            CompletableEvent::make_completable_event::<HashMap<TopicPartition, OffsetAndMetadata>>(0);
+        let (offsets_ready, mut ready_rx, _ready_erased) = CompletableEvent::make_completable_event::<()>(0);
         let ev = ApplicationEvent::CommitAsync { handle, offsets_ready, offsets: None };
         if let ApplicationEvent::CommitAsync { offsets, offsets_ready, .. } = ev {
             assert!(offsets.is_none());
@@ -927,7 +931,7 @@ mod tests {
 
     #[test]
     fn update_pattern_subscription_is_completable() {
-        let (handle, _rx, _erased) = make_completable_event::<()>(0);
+        let (handle, _rx, _erased) = CompletableEvent::make_completable_event::<()>(0);
         let ev = ApplicationEvent::UpdatePatternSubscription { handle };
         assert_eq!(ev.type_name(), "UpdatePatternSubscription");
         if let ApplicationEvent::UpdatePatternSubscription { handle } = ev {

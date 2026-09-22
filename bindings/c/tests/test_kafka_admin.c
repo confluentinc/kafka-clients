@@ -24,7 +24,7 @@
 //
 // test_mock_admin.c covers the RPC semantics against MockAdminClient. What only
 // this file can cover is the production path: building and *entering* the tokio
-// runtime so `new_admin_client` can spawn its background task, close/destroy
+// runtime so `KafkaAdminClient::new` can spawn its background task, close/destroy
 // against `AdminKind::Kafka` rather than `AdminKind::Mock`, and `mock_ref`
 // rejecting a production handle.
 
@@ -40,6 +40,17 @@ void tearDown(void) {}
 
 /* An RPC timeout short enough that an unreachable bootstrap fails fast. */
 #define RPC_TIMEOUT_MS (1000)
+
+/* A bootstrap address that is genuinely dead, for the one test below that
+ * asserts a *specific* failure rather than merely accepting both outcomes.
+ * Port 1 (tcpmux) is privileged, so no unprivileged developer process can be
+ * squatting on it, and it is effectively never served -- unlike 9092, which on
+ * a Kafka developer's machine frequently has a real broker on it. The literal
+ * 127.0.0.1 rather than `localhost` pins the stack, since `localhost` may
+ * resolve to ::1 first. A refused connection also returns immediately, so the
+ * "comes back inside the explicit timeout" property holds deterministically
+ * instead of incidentally. */
+#define NO_BROKER_BOOTSTRAP "127.0.0.1:1"
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -57,11 +68,11 @@ static int wait_for(atomic_int *flag, int expected) {
     return atomic_load(flag) >= expected;
 }
 
-/* Builds a production AdminClient against an unreachable bootstrap. Asserts the
- * construction succeeded (the address is only parsed, not connected). */
-static kafka_admin_AdminClient_t *create_admin(void) {
+/* Builds a production AdminClient against `bootstrap`. Asserts the construction
+ * succeeded (the address is only parsed, not connected). */
+static kafka_admin_AdminClient_t *create_admin_at(const char *bootstrap) {
     const char *configs[] = {
-        "bootstrap.servers",     "localhost:9092",
+        "bootstrap.servers",     bootstrap,
         "client.id",             "c-kafka-admin-test",
         "default.api.timeout.ms", "1000",
         "request.timeout.ms",     "500",
@@ -71,12 +82,23 @@ static kafka_admin_AdminClient_t *create_admin(void) {
         kafka_admin_AdminClientProperties_from_configs(configs);
     TEST_ASSERT_NOT_NULL(props);
 
-    kafka_common_KafkaError_t *err = NULL;
+    kafka_common_Error_t *err = NULL;
     kafka_admin_AdminClient_t *admin = kafka_admin_AdminClient_new(props, &err);
     kafka_admin_AdminClientProperties_destroy(props);
     TEST_ASSERT_NULL(err);
     TEST_ASSERT_NOT_NULL(admin);
     return admin;
+}
+
+/* The default: `localhost:9092`, which may or may not have a broker on it. Every
+ * caller of this form accepts both outcomes, per the note at the top of the file. */
+static kafka_admin_AdminClient_t *create_admin(void) {
+    return create_admin_at("localhost:9092");
+}
+
+/* For assertions that only hold with nothing listening. */
+static kafka_admin_AdminClient_t *create_admin_no_broker(void) {
+    return create_admin_at(NO_BROKER_BOOTSTRAP);
 }
 
 // ---------------------------------------------------------------------------
@@ -128,11 +150,11 @@ typedef struct {
     int had_error;
 } close_result_t;
 
-static void on_close(kafka_common_KafkaError_t *error, void *user_data) {
+static void on_close(kafka_common_Error_t *error, void *user_data) {
     close_result_t *r = (close_result_t *)user_data;
     if (error != NULL) {
         r->had_error = 1;
-        kafka_common_KafkaError_destroy(error);
+        kafka_common_Error_destroy(error);
     }
     atomic_fetch_add(&r->fired, 1);
 }
@@ -160,24 +182,24 @@ static void test_kafka_admin_close_async(void) {
 static void test_kafka_admin_mock_driver_rejects_production_handle(void) {
     kafka_admin_AdminClient_t *admin = create_admin();
 
-    kafka_common_KafkaError_t *err =
+    kafka_common_Error_t *err =
         kafka_admin_MockAdminClient_timeout_next_request(admin, 1);
     TEST_ASSERT_NOT_NULL(err);
     TEST_ASSERT_EQUAL_STRING("this operation is only supported on a MockAdminClient",
-                             kafka_common_KafkaError_message(err));
-    kafka_common_KafkaError_destroy(err);
+                             kafka_common_Error_message(err));
+    kafka_common_Error_destroy(err);
 
     kafka_admin_AdminClient_destroy(admin);
 }
 
 /* The same driver with a NULL handle reports the null-handle error instead. */
 static void test_kafka_admin_mock_driver_null_handle(void) {
-    kafka_common_KafkaError_t *err =
+    kafka_common_Error_t *err =
         kafka_admin_MockAdminClient_timeout_next_request(NULL, 1);
     TEST_ASSERT_NOT_NULL(err);
     TEST_ASSERT_EQUAL_STRING("admin handle must not be null",
-                             kafka_common_KafkaError_message(err));
-    kafka_common_KafkaError_destroy(err);
+                             kafka_common_Error_message(err));
+    kafka_common_Error_destroy(err);
 }
 
 // ---------------------------------------------------------------------------
@@ -194,12 +216,12 @@ static void test_kafka_admin_list_topics_returns_without_hanging(void) {
     kafka_admin_AdminClient_t *admin = create_admin();
 
     kafka_admin_ListTopicsResult_t *result = NULL;
-    kafka_common_KafkaError_t *err =
+    kafka_common_Error_t *err =
         kafka_admin_AdminClient_list_topics(admin, RPC_TIMEOUT_MS, true, &result);
     if (err != NULL) {
         TEST_ASSERT_NULL(result);
-        TEST_ASSERT_NOT_NULL(kafka_common_KafkaError_message(err));
-        kafka_common_KafkaError_destroy(err);
+        TEST_ASSERT_NOT_NULL(kafka_common_Error_message(err));
+        kafka_common_Error_destroy(err);
     } else {
         TEST_ASSERT_NOT_NULL(result);
         kafka_admin_ListTopicsResult_destroy(result);
@@ -216,7 +238,7 @@ typedef struct {
 } list_result_t;
 
 static void on_list(kafka_admin_ListTopicsResult_t *result,
-                    kafka_common_KafkaError_t *error, void *user_data) {
+                    kafka_common_Error_t *error, void *user_data) {
     list_result_t *r = (list_result_t *)user_data;
     if (result != NULL) {
         r->had_result = 1;
@@ -224,7 +246,7 @@ static void on_list(kafka_admin_ListTopicsResult_t *result,
     }
     if (error != NULL) {
         r->had_error = 1;
-        kafka_common_KafkaError_destroy(error);
+        kafka_common_Error_destroy(error);
     }
     atomic_fetch_add(&r->fired, 1);
 }
@@ -251,11 +273,11 @@ static void test_kafka_admin_describe_topics_by_ids_rejects_bad_id(void) {
 
     const char *bad_ids[1] = {"not-a-base64-uuid"};
     kafka_admin_DescribeTopicsResult_t *result = NULL;
-    kafka_common_KafkaError_t *err = kafka_admin_AdminClient_describe_topics_by_ids(
+    kafka_common_Error_t *err = kafka_admin_AdminClient_describe_topics_by_ids(
         admin, bad_ids, 1, RPC_TIMEOUT_MS, false, -1, &result);
     TEST_ASSERT_NOT_NULL(err);
     TEST_ASSERT_NULL(result);
-    kafka_common_KafkaError_destroy(err);
+    kafka_common_Error_destroy(err);
 
     kafka_admin_AdminClient_destroy(admin);
 }
@@ -314,12 +336,12 @@ static void test_kafka_admin_describe_cluster_returns_without_hanging(void) {
     kafka_admin_AdminClient_t *admin = create_admin();
 
     kafka_admin_DescribeClusterResult_t *result = NULL;
-    kafka_common_KafkaError_t *err = kafka_admin_AdminClient_describe_cluster(
+    kafka_common_Error_t *err = kafka_admin_AdminClient_describe_cluster(
         admin, RPC_TIMEOUT_MS, false, false, &result);
     if (err != NULL) {
         TEST_ASSERT_NULL(result);
-        TEST_ASSERT_NOT_NULL(kafka_common_KafkaError_message(err));
-        kafka_common_KafkaError_destroy(err);
+        TEST_ASSERT_NOT_NULL(kafka_common_Error_message(err));
+        kafka_common_Error_destroy(err);
     } else {
         TEST_ASSERT_NOT_NULL(result);
         TEST_ASSERT_NOT_NULL(kafka_admin_DescribeClusterResult_cluster_id(result));
@@ -337,7 +359,7 @@ typedef struct {
 } cluster_result_t;
 
 static void on_describe_cluster(kafka_admin_DescribeClusterResult_t *result,
-                                kafka_common_KafkaError_t *error, void *user_data) {
+                                kafka_common_Error_t *error, void *user_data) {
     cluster_result_t *r = (cluster_result_t *)user_data;
     if (result != NULL) {
         r->had_result = 1;
@@ -345,7 +367,7 @@ static void on_describe_cluster(kafka_admin_DescribeClusterResult_t *result,
     }
     if (error != NULL) {
         r->had_error = 1;
-        kafka_common_KafkaError_destroy(error);
+        kafka_common_Error_destroy(error);
     }
     atomic_fetch_add(&r->fired, 1);
 }
@@ -372,11 +394,11 @@ static void test_kafka_admin_list_config_resources_returns_without_hanging(void)
     kafka_admin_AdminClient_t *admin = create_admin();
 
     kafka_admin_ListConfigResourcesResult_t *result = NULL;
-    kafka_common_KafkaError_t *err =
+    kafka_common_Error_t *err =
         kafka_admin_AdminClient_list_config_resources(admin, NULL, 0, RPC_TIMEOUT_MS, &result);
     if (err != NULL) {
         TEST_ASSERT_NULL(result);
-        kafka_common_KafkaError_destroy(err);
+        kafka_common_Error_destroy(err);
     } else {
         TEST_ASSERT_NOT_NULL(result);
         kafka_admin_ListConfigResourcesResult_destroy(result);
@@ -399,11 +421,11 @@ static void test_kafka_admin_incremental_alter_configs_rejects_bad_op_type(void)
     const int32_t ops[1] = {123};
 
     kafka_admin_AlterConfigsResult_t *result = NULL;
-    kafka_common_KafkaError_t *err = kafka_admin_AdminClient_incremental_alter_configs(
+    kafka_common_Error_t *err = kafka_admin_AdminClient_incremental_alter_configs(
         admin, types, names, keys, values, ops, 1, RPC_TIMEOUT_MS, false, &result);
     TEST_ASSERT_NOT_NULL(err);
     TEST_ASSERT_NULL(result);
-    kafka_common_KafkaError_destroy(err);
+    kafka_common_Error_destroy(err);
 
     kafka_admin_AdminClient_destroy(admin);
 }
@@ -455,9 +477,16 @@ static void test_kafka_admin_b2_empty_batches_need_no_broker(void) {
 /* B3, on the production client with no broker reachable. Empty batches resolve
  * with no network round trip; `listPartitionReassignments` with
  * `all_partitions = true` does need the controller, so it must *time out*
- * rather than hang, which is the property this suite exists to check. */
+ * rather than hang, which is the property this suite exists to check.
+ *
+ * This is the one test in the file that asserts a specific *failure* rather
+ * than accepting either outcome, so it is the one that needs the bootstrap to
+ * be genuinely dead -- hence NO_BROKER_BOOTSTRAP rather than the shared
+ * `create_admin()`. Against `localhost:9092` it fails on any machine that
+ * happens to have a broker there (a stray container from another project is
+ * enough), because the controller answers and the call succeeds. */
 static void test_kafka_admin_b3_empty_batches_need_no_broker(void) {
-    kafka_admin_AdminClient_t *admin = create_admin();
+    kafka_admin_AdminClient_t *admin = create_admin_no_broker();
 
     kafka_admin_AlterPartitionReassignmentsResult_t *altered = NULL;
     TEST_ASSERT_NULL(kafka_admin_AdminClient_alter_partition_reassignments(
@@ -476,11 +505,11 @@ static void test_kafka_admin_b3_empty_batches_need_no_broker(void) {
     /* Needs the controller, so this one really does go to the network and comes
      * back with an error inside the explicit timeout. */
     kafka_admin_ListPartitionReassignmentsResult_t *listed = NULL;
-    kafka_common_KafkaError_t *err = kafka_admin_AdminClient_list_partition_reassignments(
+    kafka_common_Error_t *err = kafka_admin_AdminClient_list_partition_reassignments(
         admin, true, NULL, NULL, 0, RPC_TIMEOUT_MS, &listed);
     TEST_ASSERT_NOT_NULL(err);
     TEST_ASSERT_NULL(listed);
-    kafka_common_KafkaError_destroy(err);
+    kafka_common_Error_destroy(err);
 
     kafka_admin_AdminClient_destroy(admin);
 }
@@ -492,13 +521,13 @@ static void test_kafka_admin_b3_rejects_bad_arguments(void) {
     kafka_admin_AdminClient_t *admin = create_admin();
 
     kafka_admin_ElectLeadersResult_t *elected = NULL;
-    kafka_common_KafkaError_t *err = kafka_admin_AdminClient_elect_leaders(
+    kafka_common_Error_t *err = kafka_admin_AdminClient_elect_leaders(
         admin, 3, true, NULL, NULL, 0, RPC_TIMEOUT_MS, &elected);
     TEST_ASSERT_NOT_NULL(err);
     TEST_ASSERT_NULL(elected);
     TEST_ASSERT_EQUAL_STRING("Value 3 must be one of [PREFERRED, UNCLEAN]",
-                             kafka_common_KafkaError_message(err));
-    kafka_common_KafkaError_destroy(err);
+                             kafka_common_Error_message(err));
+    kafka_common_Error_destroy(err);
 
     const char *topics[1] = {"t"};
     const int32_t partitions[1] = {0};
@@ -515,8 +544,8 @@ static void test_kafka_admin_b3_rejects_bad_arguments(void) {
     TEST_ASSERT_EQUAL_STRING(
         "reassignment for t-0 at index 0: Cannot create a new partition reassignment without any "
         "replicas",
-        kafka_common_KafkaError_message(err));
-    kafka_common_KafkaError_destroy(err);
+        kafka_common_Error_message(err));
+    kafka_common_Error_destroy(err);
 
     const bool is_timestamp[1] = {false};
     const int64_t specs[1] = {-1};
@@ -525,8 +554,8 @@ static void test_kafka_admin_b3_rejects_bad_arguments(void) {
                                                RPC_TIMEOUT_MS, 5, &offsets);
     TEST_ASSERT_NOT_NULL(err);
     TEST_ASSERT_NULL(offsets);
-    TEST_ASSERT_EQUAL_STRING("Unknown isolation level 5", kafka_common_KafkaError_message(err));
-    kafka_common_KafkaError_destroy(err);
+    TEST_ASSERT_EQUAL_STRING("Unknown isolation level 5", kafka_common_Error_message(err));
+    kafka_common_Error_destroy(err);
 
     kafka_admin_AdminClient_destroy(admin);
 }
@@ -542,12 +571,12 @@ static void test_kafka_admin_b4_rejects_bad_arguments(void) {
     const int32_t partitions[1] = {0};
     const int64_t offsets[1] = {0};
     kafka_admin_AlterConsumerGroupOffsetsResult_t *altered = NULL;
-    kafka_common_KafkaError_t *err = kafka_admin_AdminClient_alter_consumer_group_offsets(
+    kafka_common_Error_t *err = kafka_admin_AdminClient_alter_consumer_group_offsets(
         admin, NULL, topics, partitions, offsets, NULL, NULL, NULL, 1, RPC_TIMEOUT_MS, &altered);
     TEST_ASSERT_NOT_NULL(err);
     TEST_ASSERT_NULL(altered);
-    TEST_ASSERT_EQUAL_STRING("group_id must not be null", kafka_common_KafkaError_message(err));
-    kafka_common_KafkaError_destroy(err);
+    TEST_ASSERT_EQUAL_STRING("group_id must not be null", kafka_common_Error_message(err));
+    kafka_common_Error_destroy(err);
 
     /* A negative offset: Java's OffsetAndMetadata constructor throws. */
     const int64_t bad_offsets[1] = {-2};
@@ -558,8 +587,8 @@ static void test_kafka_admin_b4_rejects_bad_arguments(void) {
     TEST_ASSERT_NOT_NULL(err);
     TEST_ASSERT_NULL(altered);
     TEST_ASSERT_EQUAL_STRING("offset at index 0: Invalid negative offset",
-                             kafka_common_KafkaError_message(err));
-    kafka_common_KafkaError_destroy(err);
+                             kafka_common_Error_message(err));
+    kafka_common_Error_destroy(err);
 
     /* A duplicate group id in the two-level listConsumerGroupOffsets request. */
     const char *groups[2] = {"g", "g"};
@@ -571,8 +600,8 @@ static void test_kafka_admin_b4_rejects_bad_arguments(void) {
     TEST_ASSERT_NOT_NULL(err);
     TEST_ASSERT_NULL(listed);
     TEST_ASSERT_EQUAL_STRING("group id `g` appears more than once at index 1",
-                             kafka_common_KafkaError_message(err));
-    kafka_common_KafkaError_destroy(err);
+                             kafka_common_Error_message(err));
+    kafka_common_Error_destroy(err);
 
     /* An empty member list without `remove_all`: Java's Collection constructor
      * throws rather than treating it as "remove everything". */
@@ -582,8 +611,8 @@ static void test_kafka_admin_b4_rejects_bad_arguments(void) {
     TEST_ASSERT_NOT_NULL(err);
     TEST_ASSERT_NULL(removed);
     TEST_ASSERT_EQUAL_STRING("Invalid empty members has been provided",
-                             kafka_common_KafkaError_message(err));
-    kafka_common_KafkaError_destroy(err);
+                             kafka_common_Error_message(err));
+    kafka_common_Error_destroy(err);
 
     kafka_admin_AdminClient_destroy(admin);
 }
@@ -640,13 +669,13 @@ static void test_kafka_admin_b5b_rejects_bad_arguments(void) {
     const char *types[1] = {"User"};
     const char *names[1] = {NULL};
     kafka_admin_CreateDelegationTokenResult_t *created = NULL;
-    kafka_common_KafkaError_t *err = kafka_admin_AdminClient_create_delegation_token(
+    kafka_common_Error_t *err = kafka_admin_AdminClient_create_delegation_token(
         admin, types, names, 1, NULL, NULL, -1, RPC_TIMEOUT_MS, &created);
     TEST_ASSERT_NOT_NULL(err);
     TEST_ASSERT_NULL(created);
     TEST_ASSERT_EQUAL_STRING("renewer principal name at index 0 must not be null",
-                             kafka_common_KafkaError_message(err));
-    kafka_common_KafkaError_destroy(err);
+                             kafka_common_Error_message(err));
+    kafka_common_Error_destroy(err);
 
     /* An empty update map: the production client throws where the mock does
      * not, so this arm has no coverage in test_mock_admin.c. */
@@ -656,8 +685,8 @@ static void test_kafka_admin_b5b_rejects_bad_arguments(void) {
     TEST_ASSERT_NOT_NULL(err);
     TEST_ASSERT_NULL(updated);
     TEST_ASSERT_EQUAL_STRING("Feature updates can not be null or empty.",
-                             kafka_common_KafkaError_message(err));
-    kafka_common_KafkaError_destroy(err);
+                             kafka_common_Error_message(err));
+    kafka_common_Error_destroy(err);
 
     /* A repeated feature name: Java takes a Map, where the second update would
      * silently replace the first. */
@@ -670,8 +699,8 @@ static void test_kafka_admin_b5b_rejects_bad_arguments(void) {
     TEST_ASSERT_NOT_NULL(err);
     TEST_ASSERT_NULL(updated);
     TEST_ASSERT_EQUAL_STRING("feature update at index 1 repeats feature `metadata.version`",
-                             kafka_common_KafkaError_message(err));
-    kafka_common_KafkaError_destroy(err);
+                             kafka_common_Error_message(err));
+    kafka_common_Error_destroy(err);
 
     kafka_admin_AdminClient_destroy(admin);
 }
@@ -715,7 +744,7 @@ static void test_kafka_admin_b5b_empty_password_is_a_per_user_error(void) {
     const int32_t password_lens[2] = {0, 3};
 
     kafka_admin_AlterUserScramCredentialsResult_t *altered = NULL;
-    kafka_common_KafkaError_t *err = kafka_admin_AdminClient_alter_user_scram_credentials(
+    kafka_common_Error_t *err = kafka_admin_AdminClient_alter_user_scram_credentials(
         admin, users, upsertions, mechanisms, iterations, passwords, password_lens, NULL, NULL, NULL,
         2, RPC_TIMEOUT_MS, &altered);
     TEST_ASSERT_NULL(err);
@@ -746,26 +775,26 @@ static void test_kafka_admin_b5b_empty_password_is_a_per_user_error(void) {
 static void test_kafka_admin_b6_rejects_bad_arguments(void) {
     kafka_admin_AdminClient_t *admin = create_admin();
 
-    kafka_common_KafkaError_t *err =
+    kafka_common_Error_t *err =
         kafka_admin_AdminClient_abort_transaction(admin, NULL, 0, 1, 1, 1, RPC_TIMEOUT_MS);
     TEST_ASSERT_NOT_NULL(err);
     TEST_ASSERT_EQUAL_STRING("abort transaction topic must not be null",
-                             kafka_common_KafkaError_message(err));
-    kafka_common_KafkaError_destroy(err);
+                             kafka_common_Error_message(err));
+    kafka_common_Error_destroy(err);
 
     /* 65537 truncates to 1 under a bare cast, which is a legal epoch. */
     err = kafka_admin_AdminClient_abort_transaction(admin, "txn-topic", 0, 1, 65537, 1,
                                                     RPC_TIMEOUT_MS);
     TEST_ASSERT_NOT_NULL(err);
     TEST_ASSERT_EQUAL_STRING("producer epoch 65537 does not fit in a 16-bit epoch",
-                             kafka_common_KafkaError_message(err));
-    kafka_common_KafkaError_destroy(err);
+                             kafka_common_Error_message(err));
+    kafka_common_Error_destroy(err);
 
     err = kafka_admin_AdminClient_force_terminate_transaction(admin, NULL, RPC_TIMEOUT_MS);
     TEST_ASSERT_NOT_NULL(err);
     TEST_ASSERT_EQUAL_STRING("transactional id must not be null",
-                             kafka_common_KafkaError_message(err));
-    kafka_common_KafkaError_destroy(err);
+                             kafka_common_Error_message(err));
+    kafka_common_Error_destroy(err);
 
     kafka_admin_AdminClient_destroy(admin);
 }
@@ -807,11 +836,11 @@ static void test_kafka_admin_list_transactions_returns_without_hanging(void) {
     kafka_admin_AdminClient_t *admin = create_admin();
 
     kafka_admin_ListTransactionsResult_t *result = NULL;
-    kafka_common_KafkaError_t *err = kafka_admin_AdminClient_list_transactions(
+    kafka_common_Error_t *err = kafka_admin_AdminClient_list_transactions(
         admin, NULL, 0, NULL, 0, -1, NULL, RPC_TIMEOUT_MS, &result);
     if (err != NULL) {
         TEST_ASSERT_NULL(result);
-        kafka_common_KafkaError_destroy(err);
+        kafka_common_Error_destroy(err);
     } else {
         TEST_ASSERT_NOT_NULL(result);
         kafka_admin_ListTransactionsResult_destroy(result);

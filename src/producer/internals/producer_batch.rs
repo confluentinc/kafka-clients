@@ -18,28 +18,28 @@
 //!
 //! This class is not thread safe and external synchronization must be used when modifying it.
 
+use crate::producer::RecordMetadata;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicI32, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 
-use log::{debug, trace};
+use log::{debug, error, trace};
 
-use crate::common::KafkaError;
+use crate::common::Error;
 use crate::common::TopicPartition;
 use crate::common::header::Header;
-use crate::common::header::internals::RecordHeader;
+use crate::common::header::RecordHeader;
 use crate::common::record::TimestampType;
+use crate::common::record::internal::AbstractRecords;
 use crate::common::record::internal::CompressionRatioEstimator;
 use crate::common::record::internal::CompressionType;
 use crate::common::record::internal::MemoryRecords;
 use crate::common::record::internal::MemoryRecordsBuilder;
 use crate::common::record::internal::Record;
 use crate::common::record::internal::RecordBatch;
-use crate::common::record::internal::abstract_records;
 use crate::producer::Callback;
 use crate::producer::internals::FutureRecordMetadata;
 use crate::producer::internals::ProduceRequestResult;
-use crate::producer::record_metadata;
 
 /// The final state of a batch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -122,11 +122,11 @@ pub struct ProducerBatch {
 impl ProducerBatch {
     /// Create a new `ProducerBatch`.
     pub fn new(tp: TopicPartition, records_builder: MemoryRecordsBuilder, created_ms: i64) -> Self {
-        Self::new_with_split(tp, records_builder, created_ms, false)
+        Self::with_split(tp, records_builder, created_ms, false)
     }
 
     /// Create a new `ProducerBatch`, optionally marking it as a split batch.
-    pub fn new_with_split(
+    pub fn with_split(
         tp: TopicPartition,
         mut records_builder: MemoryRecordsBuilder,
         created_ms: i64,
@@ -227,7 +227,7 @@ impl ProducerBatch {
         }
 
         self.records_builder.append(timestamp, key, value, headers);
-        self.max_record_size = self.max_record_size.max(abstract_records::estimate_size_in_bytes_upper_bound(
+        self.max_record_size = self.max_record_size.max(AbstractRecords::estimate_size_in_bytes_upper_bound(
             self.magic(),
             self.records_builder.compression().compression_type(),
             key,
@@ -273,7 +273,7 @@ impl ProducerBatch {
         }
 
         self.records_builder.append(timestamp, key, value, headers);
-        self.max_record_size = self.max_record_size.max(abstract_records::estimate_size_in_bytes_upper_bound(
+        self.max_record_size = self.max_record_size.max(AbstractRecords::estimate_size_in_bytes_upper_bound(
             self.magic(),
             self.records_builder.compression().compression_type(),
             key,
@@ -300,7 +300,7 @@ impl ProducerBatch {
     }
 
     /// Abort the batch and complete the future and callbacks.
-    pub fn abort(&self, exception: KafkaError) {
+    pub fn abort(&self, error: Error) {
         let prev = self.final_state.compare_exchange(
             FINAL_STATE_NONE,
             FINAL_STATE_ABORTED,
@@ -314,13 +314,13 @@ impl ProducerBatch {
 
         trace!("Aborting batch for partition {}", self.topic_partition);
 
-        let err = Arc::new(exception);
-        let error_fn: Arc<dyn Fn(i32) -> Option<KafkaError> + Send + Sync> = {
+        let err = Arc::new(error);
+        let error_fn: Arc<dyn Fn(i32) -> Option<Error> + Send + Sync> = {
             let err = Arc::clone(&err);
             Arc::new(move |_idx| Some((*err).clone()))
         };
         self.complete_future_and_fire_callbacks(
-            record_metadata::INVALID_OFFSET,
+            RecordMetadata::INVALID_OFFSET,
             RecordBatch::NO_TIMESTAMP,
             Some(error_fn),
         );
@@ -341,16 +341,12 @@ impl ProducerBatch {
     /// Complete the batch exceptionally.
     ///
     /// Returns `true` if the batch was completed as a result of this call.
-    pub fn complete_exceptionally(
+    pub fn complete_with_error(
         &self,
-        _top_level_exception: KafkaError,
-        record_exceptions: Arc<dyn Fn(i32) -> Option<KafkaError> + Send + Sync>,
+        _top_level_error: Error,
+        record_errors: Arc<dyn Fn(i32) -> Option<Error> + Send + Sync>,
     ) -> bool {
-        self.done(
-            record_metadata::INVALID_OFFSET,
-            RecordBatch::NO_TIMESTAMP,
-            Some(record_exceptions),
-        )
+        self.done(RecordMetadata::INVALID_OFFSET, RecordBatch::NO_TIMESTAMP, Some(record_errors))
     }
 
     /// Finalize the state of a batch.
@@ -358,9 +354,9 @@ impl ProducerBatch {
         &self,
         base_offset: i64,
         log_append_time: i64,
-        record_exceptions: Option<Arc<dyn Fn(i32) -> Option<KafkaError> + Send + Sync>>,
+        record_errors: Option<Arc<dyn Fn(i32) -> Option<Error> + Send + Sync>>,
     ) -> bool {
-        let try_final_state = if record_exceptions.is_none() {
+        let try_final_state = if record_errors.is_none() {
             FinalState::Succeeded
         } else {
             FinalState::Failed
@@ -386,7 +382,7 @@ impl ProducerBatch {
         );
 
         if prev.is_ok() {
-            self.complete_future_and_fire_callbacks(base_offset, log_append_time, record_exceptions);
+            self.complete_future_and_fire_callbacks(base_offset, log_append_time, record_errors);
             return true;
         }
 
@@ -417,23 +413,44 @@ impl ProducerBatch {
         &self,
         base_offset: i64,
         log_append_time: i64,
-        record_exceptions: Option<Arc<dyn Fn(i32) -> Option<KafkaError> + Send + Sync>>,
+        record_errors: Option<Arc<dyn Fn(i32) -> Option<Error> + Send + Sync>>,
     ) {
         // Set the future before invoking the callbacks as we rely on its state for the
         // `on_completion` call.
-        self.produce_future.set(base_offset, log_append_time, record_exceptions.clone());
+        self.produce_future.set(base_offset, log_append_time, record_errors.clone());
 
         // Execute callbacks — matches Java's loop in completeFutureAndFireCallbacks.
         // Take ownership of the thunks so we can consume FnOnce callbacks.
         let mut thunks = self.thunks.lock().unwrap();
         for (i, thunk) in thunks.iter_mut().enumerate() {
             if let Some(callback) = thunk.callback.take() {
-                if let Some(ref errors_fn) = record_exceptions {
-                    let exception = errors_fn(i as i32);
-                    callback(None, exception.as_ref());
-                } else {
-                    let metadata = thunk.future.value();
-                    callback(Some(&metadata), None);
+                // Java's try/catch sits INSIDE the loop
+                // (`ProducerBatch.java:307-322`), which is what isolates each user
+                // callback: one bad callback must neither skip the remaining records
+                // nor stop `produceFuture.done()` from running.
+                //
+                // `Callback` is infallible in Rust, so the only failure channel is a
+                // panic. Left uncaught it escaped this loop, so `produce_future` was
+                // never marked done — `ProduceRequestResult::await_completion` waits
+                // on a `watch` that would then never be set, hanging every
+                // `send().await` in the batch and any `flush()` — and it poisoned
+                // `self.thunks` while its guard was held. Same shape as
+                // `NetworkClient::complete_responses`, which translates the same Java
+                // idiom.
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    if let Some(ref errors_fn) = record_errors {
+                        let error = errors_fn(i as i32);
+                        callback(None, error.as_ref());
+                    } else {
+                        let metadata = thunk.future.value();
+                        callback(Some(&metadata), None);
+                    }
+                }));
+                if let Err(payload) = result {
+                    error!(
+                        "Error executing user-provided callback on message for topic-partition '{}': {:?}",
+                        self.topic_partition, payload
+                    );
                 }
             }
         }
@@ -530,10 +547,10 @@ impl ProducerBatch {
             self.produce_future.add_dependent(Arc::clone(&split_batch.produce_future));
         }
 
-        let error_fn: Arc<dyn Fn(i32) -> Option<KafkaError> + Send + Sync> =
-            Arc::new(|_idx| Some(KafkaError::record_batch_too_large("Record batch too large".to_string())));
+        let error_fn: Arc<dyn Fn(i32) -> Option<Error> + Send + Sync> =
+            Arc::new(|_idx| Some(Error::record_batch_too_large("Record batch too large".to_string())));
         self.produce_future
-            .set(record_metadata::INVALID_OFFSET, RecordBatch::NO_TIMESTAMP, Some(error_fn));
+            .set(RecordMetadata::INVALID_OFFSET, RecordBatch::NO_TIMESTAMP, Some(error_fn));
         self.produce_future.done();
 
         self.assign_producer_state_to_batches(batches);
@@ -577,7 +594,7 @@ impl ProducerBatch {
         headers: &[RecordHeader],
         batch_size: i32,
     ) -> ProducerBatch {
-        let initial_size = (abstract_records::estimate_size_in_bytes_upper_bound(
+        let initial_size = (AbstractRecords::estimate_size_in_bytes_upper_bound(
             self.magic(),
             self.records_builder.compression().compression_type(),
             key,
@@ -586,14 +603,14 @@ impl ProducerBatch {
         ))
         .max(batch_size) as usize;
 
-        let builder = MemoryRecords::builder_with_magic(
+        let builder = MemoryRecords::builder_with_initial_capacity_magic(
             initial_size,
             self.magic(),
             self.records_builder.compression().clone(),
             TimestampType::CreateTime,
             0,
         );
-        ProducerBatch::new_with_split(self.topic_partition.clone(), builder, self.created_ms, true)
+        ProducerBatch::with_split(self.topic_partition.clone(), builder, self.created_ms, true)
     }
 
     /// Returns whether the batch uses compression.
@@ -649,11 +666,17 @@ impl ProducerBatch {
         self.retry
     }
 
-    /// Take the built memory records, moving ownership without copying.
+    /// The built memory records for this batch.
+    ///
+    /// Translated from `ProducerBatch.records()` (`ProducerBatch.java:483-485`), which
+    /// is a bare `recordsBuilder.build()` and is therefore **re-callable**: the send
+    /// path calls it to serialise the produce request, and `split` calls it again (via
+    /// `validateAndGetRecordBatch`) when the broker answers `MESSAGE_TOO_LARGE`.
+    ///
+    /// The returned [`MemoryRecords`] wraps a refcounted [`bytes::Bytes`], so this
+    /// clones a handle, not the record bytes (CLAUDE.md §12).
     pub fn records(&mut self) -> MemoryRecords {
-        self.records_builder
-            .take_built_records()
-            .expect("records() called but no records built")
+        self.records_builder.build()
     }
 
     /// The estimated size in bytes of the batch.
@@ -729,6 +752,11 @@ impl ProducerBatch {
     }
 
     /// Returns a reference to the underlying buffer.
+    // No Rust caller today (outside tests). Kept because it translates a Java
+    // method and DoD #2 requires the translated class to carry all of them; the
+    // `dead_code` lint only became visible once `KafkaProducer::with_options`
+    // stopped leaking this type through a `pub` signature.
+    #[allow(dead_code)]
     pub fn buffer(&self) -> &Vec<u8> {
         self.records_builder.buffer()
     }
@@ -747,6 +775,7 @@ impl ProducerBatch {
     }
 
     /// Whether the batch is still writable (not closed).
+    #[allow(dead_code)]
     pub fn is_writable(&self) -> bool {
         !self.records_builder.is_closed()
     }
@@ -812,11 +841,13 @@ impl ProducerBatch {
     }
 
     /// The current leader epoch (visible for testing).
+    #[allow(dead_code)]
     pub fn current_leader_epoch(&self) -> Option<i32> {
         self.current_leader_epoch
     }
 
     /// The attempt number when the leader was last changed (visible for testing).
+    #[allow(dead_code)]
     pub fn attempts_when_leader_last_changed(&self) -> i32 {
         self.attempts_when_leader_last_changed
     }
@@ -845,8 +876,8 @@ impl std::fmt::Debug for ProducerBatch {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::common::Errors;
     use crate::common::compress::Compression;
-    use crate::common::protocol::Errors;
 
     const NOW: i64 = 1488748346917;
 
@@ -855,7 +886,7 @@ mod tests {
     }
 
     fn make_builder() -> MemoryRecordsBuilder {
-        MemoryRecords::builder(512, Compression::none(), TimestampType::CreateTime, 128)
+        MemoryRecords::builder_with_initial_capacity(512, Compression::none(), TimestampType::CreateTime, 128)
     }
 
     /// Translated from `ProducerBatchTest.testBatchAbort`.
@@ -866,8 +897,8 @@ mod tests {
             .try_append(NOW, None, Some(&[0u8; 10]), &[], None, NOW)
             .unwrap_or_else(|_| panic!("Append should succeed"));
 
-        let exception = KafkaError::with_message(Errors::UnknownServerError, "test abort");
-        batch.abort(exception);
+        let error = Error::with_message(Errors::UnknownServerError, "test abort");
+        batch.abort(error);
         assert!(future.is_done());
 
         // subsequent completion should be ignored
@@ -884,12 +915,12 @@ mod tests {
             .try_append(NOW, None, Some(&[0u8; 10]), &[], None, NOW)
             .unwrap_or_else(|_| panic!("Append should succeed"));
 
-        let exception = KafkaError::with_message(Errors::UnknownServerError, "test abort");
-        batch.abort(exception);
+        let error = Error::with_message(Errors::UnknownServerError, "test abort");
+        batch.abort(error);
 
         // This should panic
-        let exception2 = KafkaError::with_message(Errors::UnknownServerError, "test abort 2");
-        batch.abort(exception2);
+        let error2 = Error::with_message(Errors::UnknownServerError, "test abort 2");
+        batch.abort(error2);
     }
 
     /// Translated from `ProducerBatchTest.testBatchCannotCompleteTwice`.
@@ -910,6 +941,90 @@ mod tests {
             batch.complete(1000, 20);
         }));
         assert!(result.is_err(), "Second complete should panic");
+    }
+
+    /// `ProducerBatch.completeFutureAndFireCallbacks` puts its `try`/`catch`
+    /// **inside** the per-record loop (`ProducerBatch.java:307-322`), so one bad user
+    /// callback neither skips the remaining records nor stops
+    /// `produceFuture.done()`:
+    ///
+    /// ```java
+    /// } catch (Exception e) {
+    ///     log.error("Error executing user-provided callback on message for topic-partition '{}'", topicPartition, e);
+    /// }
+    /// ```
+    ///
+    /// `Callback` is infallible in Rust, so the only failure channel is a panic.
+    /// Uncaught it escaped the loop, which meant (1) the later records' callbacks
+    /// were skipped, (2) `produce_future.done()` never ran — so every
+    /// `send().await` in the batch and any `flush()` hung forever — and (3)
+    /// `self.thunks` was poisoned while its guard was held.
+    #[tokio::test]
+    async fn a_panicking_user_callback_does_not_abort_the_batch_completion() {
+        let mut batch = ProducerBatch::new(make_tp(), make_builder(), NOW);
+
+        let first_ran = Arc::new(AtomicI32::new(0));
+        let third_ran = Arc::new(AtomicI32::new(0));
+
+        let first = Arc::clone(&first_ran);
+        batch
+            .try_append(
+                NOW,
+                None,
+                Some(&[0u8; 10]),
+                &[],
+                Some(Box::new(move |_, _| {
+                    first.fetch_add(1, Ordering::SeqCst);
+                })),
+                NOW,
+            )
+            .unwrap_or_else(|_| panic!("Append should succeed"));
+
+        batch
+            .try_append(
+                NOW,
+                None,
+                Some(&[0u8; 10]),
+                &[],
+                Some(Box::new(|_, _| panic!("user callback blew up"))),
+                NOW,
+            )
+            .unwrap_or_else(|_| panic!("Append should succeed"));
+
+        let third = Arc::clone(&third_ran);
+        batch
+            .try_append(
+                NOW,
+                None,
+                Some(&[0u8; 10]),
+                &[],
+                Some(Box::new(move |_, _| {
+                    third.fetch_add(1, Ordering::SeqCst);
+                })),
+                NOW,
+            )
+            .unwrap_or_else(|_| panic!("Append should succeed"));
+
+        // The panicking callback must not escape `complete`.
+        assert!(batch.complete(500, 10), "the batch must complete");
+
+        assert_eq!(
+            first_ran.load(Ordering::SeqCst),
+            1,
+            "the callback before the panic must have run"
+        );
+        assert_eq!(
+            third_ran.load(Ordering::SeqCst),
+            1,
+            "the callback after the panic must still run — Java's catch is inside the loop"
+        );
+        assert!(batch.is_done(), "the batch must be marked done");
+        // `produce_future.done()` must have run: this would hang forever otherwise.
+        tokio::time::timeout(std::time::Duration::from_secs(5), batch.produce_future.await_completion())
+            .await
+            .expect("produce_future.done() must run even when a user callback panics");
+        // The thunks mutex must not be poisoned.
+        assert!(batch.thunks.lock().is_ok(), "the thunks mutex must not be poisoned");
     }
 
     /// Translated from `ProducerBatchTest.testBatchExpiration`.
@@ -954,7 +1069,7 @@ mod tests {
     /// in record-level iteration.
     #[test]
     fn test_split_preserves_headers() {
-        let builder = MemoryRecords::builder_with_buffer(
+        let builder = MemoryRecords::builder_with_buffer_magic(
             vec![0u8; 1024],
             RecordBatch::CURRENT_MAGIC_VALUE,
             Compression::none(),
@@ -1062,7 +1177,7 @@ mod tests {
 
     /// Translated from `ProducerBatchTest.testCompleteExceptionallyWithRecordErrors`.
     #[test]
-    fn test_complete_exceptionally_with_record_errors() {
+    fn test_complete_with_error_and_record_errors() {
         let record_count = 5;
         let mut batch = ProducerBatch::new(make_tp(), make_builder(), NOW);
 
@@ -1076,19 +1191,15 @@ mod tests {
         assert_eq!(record_count, batch.record_count);
 
         // Create per-record exceptions for records 0 and 3.
-        let record_exceptions: Arc<dyn Fn(i32) -> Option<KafkaError> + Send + Sync> =
-            Arc::new(|idx: i32| -> Option<KafkaError> {
-                match idx {
-                    0 | 3 => Some(KafkaError::with_message(
-                        Errors::UnknownServerError,
-                        format!("record error {}", idx),
-                    )),
-                    _ => Some(KafkaError::with_message(Errors::UnknownServerError, "top level")),
-                }
-            });
+        let record_errors: Arc<dyn Fn(i32) -> Option<Error> + Send + Sync> = Arc::new(|idx: i32| -> Option<Error> {
+            match idx {
+                0 | 3 => Some(Error::with_message(Errors::UnknownServerError, format!("record error {}", idx))),
+                _ => Some(Error::with_message(Errors::UnknownServerError, "top level")),
+            }
+        });
 
-        let top_level_exception = KafkaError::with_message(Errors::UnknownServerError, "top level");
-        batch.complete_exceptionally(top_level_exception, record_exceptions);
+        let top_level_error = Error::with_message(Errors::UnknownServerError, "top level");
+        batch.complete_with_error(top_level_error, record_errors);
         assert!(batch.is_done());
 
         for future in &futures {
@@ -1148,7 +1259,7 @@ mod tests {
         assert!(!batch.is_split_batch());
 
         let builder2 = make_builder();
-        let batch2 = ProducerBatch::new_with_split(make_tp(), builder2, NOW, true);
+        let batch2 = ProducerBatch::with_split(make_tp(), builder2, NOW, true);
         assert!(batch2.is_split_batch());
     }
 
@@ -1168,7 +1279,7 @@ mod tests {
     fn test_split_preserves_magic_and_compression_type() {
         // We only support magic V2 and NONE compression for record-level iteration.
         let magic = RecordBatch::CURRENT_MAGIC_VALUE;
-        let builder = MemoryRecords::builder_with_buffer(
+        let builder = MemoryRecords::builder_with_buffer_magic(
             vec![0u8; 1024],
             magic,
             Compression::none(),
@@ -1204,16 +1315,138 @@ mod tests {
         }
     }
 
+    /// A batch is splittable **after** the send path has already read its records.
+    ///
+    /// No Java counterpart, because Java cannot get this wrong:
+    /// `ProducerBatch.records()` is a bare `recordsBuilder.build()`
+    /// (`ProducerBatch.java:483-485`) and Java's `build()` memoises, so it is
+    /// re-callable by construction. Rust's used to hand its only copy away, and
+    /// `Sender.completeBatch`'s `MESSAGE_TOO_LARGE` arm (`Sender.java:674-688`) is
+    /// exactly a `split()` after a `records()` — the batch cannot receive that error
+    /// before being sent. PLAN §9.18; this is the unit-level shape of the end-to-end
+    /// reproducer `sender.rs::test_too_large_batches_are_safely_removed`.
+    #[test]
+    fn test_records_readable_after_send_then_split() {
+        let magic = RecordBatch::CURRENT_MAGIC_VALUE;
+        let builder = MemoryRecords::builder_with_buffer_magic(
+            vec![0u8; 1024],
+            magic,
+            Compression::none(),
+            TimestampType::CreateTime,
+            0,
+        );
+        let mut batch = ProducerBatch::new(make_tp(), builder, NOW);
+
+        let mut appended = 0;
+        loop {
+            if batch.try_append(NOW, Some(b"hi"), Some(b"there"), &[], None, NOW).is_err() {
+                break;
+            }
+            appended += 1;
+        }
+        assert!(appended > 1, "the batch must hold more than one record to be splittable");
+
+        // What `Sender::send_producer_data` does to build the produce request.
+        let sent = batch.records();
+        assert!(sent.size_in_bytes() > 0);
+
+        // What `RecordAccumulator::split_and_reenqueue` does when the broker answers
+        // MESSAGE_TOO_LARGE. Before the §9.18 fix this panicked with
+        // "build() called but no records built".
+        let reread = batch.records();
+        assert_eq!(sent.buffer(), reread.buffer(), "the second read must see the same bytes");
+
+        let sub_batches = batch.split(512);
+        assert!(sub_batches.len() >= 2, "batch should split into multiple sub-batches");
+        let split_record_count: i32 = sub_batches.iter().map(|b| b.record_count).sum();
+        assert_eq!(split_record_count, appended, "no record may be lost by the split");
+    }
+
+    /// `definition-of-done.md` §10 / CLAUDE.md §11-12 for
+    /// [`ProducerBatch::records`], which `Sender::send_producer_data` calls once per
+    /// drained batch.
+    ///
+    /// Two properties, both measured with the same
+    /// [`crate::AllocTrackingGuard`] the consumer's §27 budget
+    /// tests use:
+    ///
+    ///   1. **Nothing scales with the record count.** A 1-record batch and a
+    ///      64-record batch must cost the same, so the per-record component is
+    ///      exactly zero — this is the property DoD §10 is about.
+    ///   2. **Re-reading is free and copies nothing.** Every call after the first
+    ///      allocates zero and hands back the *same* bytes, at the same address. That
+    ///      is what keeps the `MESSAGE_TOO_LARGE` split off the copy path
+    ///      (CLAUDE.md §12) now that it re-reads the batch instead of panicking.
+    ///
+    /// Absolute counts on this build: the first call costs 1 allocation — `bytes`
+    /// promotes a `Bytes::from(Vec)` to a shared representation on its first clone, a
+    /// single 3-word `Shared` — and every later call costs 0. Before the §9.18 fix the
+    /// first call cost 0 (it moved the value out) and the second cost 1, but that one
+    /// was a **full re-copy of the batch** through `take_batch_data`, so the fix trades
+    /// a per-batch 24-byte allocation for removing a whole-batch `memcpy` from the
+    /// split path. Neither is per record.
+    #[test]
+    fn test_records_allocations_do_not_scale_with_the_record_count() {
+        fn records_allocations(record_count: usize) -> usize {
+            let builder = MemoryRecords::builder_with_buffer_magic(
+                vec![0u8; 4096],
+                RecordBatch::CURRENT_MAGIC_VALUE,
+                Compression::none(),
+                TimestampType::CreateTime,
+                0,
+            );
+            let mut batch = ProducerBatch::new(make_tp(), builder, NOW);
+            for _ in 0..record_count {
+                assert!(
+                    batch.try_append(NOW, Some(b"hi"), Some(b"there"), &[], None, NOW).is_ok(),
+                    "the buffer is sized to hold every record"
+                );
+            }
+            // `RecordAccumulator::drain` closes the batch before the Sender reads it.
+            batch.close();
+
+            let _guard = crate::AllocTrackingGuard::new();
+            crate::AllocTrackingGuard::reset();
+            let first = batch.records();
+            let first_count = crate::AllocTrackingGuard::count();
+
+            crate::AllocTrackingGuard::reset();
+            let second = batch.records();
+            let second_count = crate::AllocTrackingGuard::count();
+            let third = batch.records();
+            let third_count = crate::AllocTrackingGuard::count();
+
+            assert_eq!(second_count, 0, "re-reading a batch must not allocate");
+            assert_eq!(third_count, 0, "re-reading a batch must not allocate");
+            assert_eq!(
+                first.buffer().as_ptr(),
+                second.buffer().as_ptr(),
+                "re-reading a batch must not copy it"
+            );
+            assert_eq!(first.buffer().as_ptr(), third.buffer().as_ptr());
+            assert!(first_count > 0, "the tracker must actually be measuring");
+            first_count
+        }
+
+        let one_record = records_allocations(1);
+        let sixty_four_records = records_allocations(64);
+        assert_eq!(
+            one_record, sixty_four_records,
+            "reading a 64-record batch must allocate exactly as much as a 1-record batch; \
+             got {one_record} vs {sixty_four_records}"
+        );
+    }
+
     /// Translated from `ProducerBatchTest.testCompleteExceptionallyWithNullRecordErrors`.
     ///
     /// In Java, passing `null` for the `recordExceptions` function to `completeExceptionally`
     /// results in a `NullPointerException` when the code tries to call `recordExceptions.apply(i)`.
-    /// In Rust, `complete_exceptionally` takes a non-optional `Arc<dyn Fn(...)>`, so passing
+    /// In Rust, `complete_with_error` takes a non-optional `Arc<dyn Fn(...)>`, so passing
     /// "null" is not possible at the type level. This test verifies that the function is invoked
     /// correctly by providing a function that returns `None` for all indices (the closest Rust
     /// analog of a "null" result from the function).
     #[test]
-    fn test_complete_exceptionally_with_none_returning_error_fn() {
+    fn test_complete_with_error_and_none_returning_error_fn() {
         let record_count = 5;
         let mut batch = ProducerBatch::new(make_tp(), make_builder(), NOW);
 
@@ -1227,10 +1460,10 @@ mod tests {
         assert_eq!(record_count, batch.record_count);
 
         // A function that returns None for all indices (closest to Java null behavior).
-        let record_exceptions: Arc<dyn Fn(i32) -> Option<KafkaError> + Send + Sync> = Arc::new(|_idx| None);
+        let record_errors: Arc<dyn Fn(i32) -> Option<Error> + Send + Sync> = Arc::new(|_idx| None);
 
-        let top_level_exception = KafkaError::with_message(Errors::UnknownServerError, "top level");
-        batch.complete_exceptionally(top_level_exception, record_exceptions);
+        let top_level_error = Error::with_message(Errors::UnknownServerError, "top level");
+        batch.complete_with_error(top_level_error, record_errors);
         assert!(batch.is_done());
 
         for future in &futures {
@@ -1254,9 +1487,9 @@ mod tests {
         let err_flag = Arc::clone(&got_error);
         let meta_flag = Arc::clone(&got_metadata);
 
-        let callback: Callback = Box::new(move |metadata, exception| {
+        let callback: Callback = Box::new(move |metadata, error| {
             inv.fetch_add(1, Ordering::SeqCst);
-            *err_flag.lock().unwrap() = exception.is_some();
+            *err_flag.lock().unwrap() = error.is_some();
             *meta_flag.lock().unwrap() = metadata.is_some();
         });
 
@@ -1265,8 +1498,8 @@ mod tests {
             .try_append(NOW, None, Some(&[0u8; 10]), &[], Some(callback), NOW)
             .unwrap_or_else(|_| panic!("Append should succeed"));
 
-        let exception = KafkaError::with_message(Errors::UnknownServerError, "test abort");
-        batch.abort(exception);
+        let error = Error::with_message(Errors::UnknownServerError, "test abort");
+        batch.abort(error);
         assert!(future.is_done());
         assert_eq!(1, invocations.load(Ordering::SeqCst));
         assert!(*got_error.lock().unwrap(), "Callback should receive error");
@@ -1293,9 +1526,9 @@ mod tests {
         let err_flag = Arc::clone(&got_error);
         let meta_flag = Arc::clone(&got_metadata);
 
-        let callback: Callback = Box::new(move |metadata, exception| {
+        let callback: Callback = Box::new(move |metadata, error| {
             inv.fetch_add(1, Ordering::SeqCst);
-            *err_flag.lock().unwrap() = exception.is_some();
+            *err_flag.lock().unwrap() = error.is_some();
             *meta_flag.lock().unwrap() = metadata.is_some();
         });
 

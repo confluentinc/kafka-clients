@@ -24,14 +24,6 @@ use std::sync::{LazyLock, Mutex};
 
 use crate::common::record::internal::CompressionType;
 
-/// The constant speed to increase compression ratio when a batch compresses
-/// better than expected.
-pub const COMPRESSION_RATIO_IMPROVING_STEP: f32 = 0.005;
-
-/// The minimum speed to decrease compression ratio when a batch compresses
-/// worse than expected.
-pub const COMPRESSION_RATIO_DETERIORATE_STEP: f32 = 0.05;
-
 /// Process-wide global compression ratio estimator instance.
 ///
 /// Matches the Java behavior where `CompressionRatioEstimator` has static
@@ -53,6 +45,14 @@ pub struct CompressionRatioEstimator {
 }
 
 impl CompressionRatioEstimator {
+    /// The constant speed to increase compression ratio when a batch compresses
+    /// better than expected.
+    pub const COMPRESSION_RATIO_IMPROVING_STEP: f32 = 0.005;
+
+    /// The minimum speed to decrease compression ratio when a batch compresses
+    /// worse than expected.
+    pub const COMPRESSION_RATIO_DETERIORATE_STEP: f32 = 0.05;
+
     /// Create a new empty estimator instance (private).
     fn new_instance() -> Self {
         Self { compression_ratio: Mutex::new(HashMap::new()) }
@@ -69,9 +69,15 @@ impl CompressionRatioEstimator {
         let current_estimation = ratios[idx];
 
         if observed_ratio > current_estimation {
-            ratios[idx] = f32::max(current_estimation + COMPRESSION_RATIO_DETERIORATE_STEP, observed_ratio);
+            ratios[idx] = f32::max(
+                current_estimation + CompressionRatioEstimator::COMPRESSION_RATIO_DETERIORATE_STEP,
+                observed_ratio,
+            );
         } else if observed_ratio < current_estimation {
-            ratios[idx] = f32::max(current_estimation - COMPRESSION_RATIO_IMPROVING_STEP, observed_ratio);
+            ratios[idx] = f32::max(
+                current_estimation - CompressionRatioEstimator::COMPRESSION_RATIO_IMPROVING_STEP,
+                observed_ratio,
+            );
         }
 
         ratios[idx]

@@ -19,6 +19,7 @@
 
 use std::fmt;
 
+use crate::common::Error;
 use crate::common::requests::{ConcreteResponse, RequestHeader};
 
 use super::RequestCompletionHandler;
@@ -45,13 +46,19 @@ pub struct ClientResponse {
     /// Error message if there was a version mismatch that prevented sending the request.
     ///
     /// In Java this is an `UnsupportedVersionException`. We represent it as an
-    /// optional error string since `KafkaError` is the primary error type.
+    /// optional error string since `Error` is the primary error type.
     version_mismatch: Option<String>,
-    /// Error message if there was an authentication error.
+    /// The authentication error, if there was one.
     ///
-    /// In Java this is an `AuthenticationException`. We represent it as an
-    /// optional error string since `KafkaError` is the primary error type.
-    authentication_error: Option<String>,
+    /// Java's `AuthenticationException authenticationException`
+    /// (`ClientResponse.java:38`) — the object, so the subclass the channel
+    /// raised survives to `NetworkClientDelegate.FutureCompletionHandler`, which
+    /// completes the request's future with it verbatim
+    /// (`NetworkClientDelegate.java:443-444`). Rust's flat [`Error`] cannot name
+    /// the intermediate `AuthenticationException` class in a type; whatever is
+    /// carried here answers `true` to
+    /// [`is_authentication_error`](Error::is_authentication_error).
+    authentication_error: Option<Error>,
     /// The response contents, or `None` if we disconnected, no response was expected,
     /// or if there was a version mismatch.
     response_body: Option<ConcreteResponse>,
@@ -69,7 +76,7 @@ impl ClientResponse {
     /// * `received_time_ms` - The unix timestamp when this response was received
     /// * `disconnected` - Whether the client disconnected before fully reading a response
     /// * `version_mismatch` - Error message if there was a version mismatch
-    /// * `authentication_error` - Error message if there was an authentication error
+    /// * `authentication_error` - The authentication error, if there was one
     /// * `response_body` - The response contents (or `None`)
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -80,10 +87,10 @@ impl ClientResponse {
         received_time_ms: i64,
         disconnected: bool,
         version_mismatch: Option<String>,
-        authentication_error: Option<String>,
+        authentication_error: Option<Error>,
         response_body: Option<ConcreteResponse>,
     ) -> Self {
-        Self::with_timeout(
+        Self::with_timed_out(
             request_header,
             callback,
             destination,
@@ -115,10 +122,10 @@ impl ClientResponse {
     /// * `timed_out` - Whether the client was disconnected because of a timeout;
     ///   when `true`, `disconnected` must also be `true`
     /// * `version_mismatch` - Error message if there was a version mismatch
-    /// * `authentication_error` - Error message if there was an authentication error
+    /// * `authentication_error` - The authentication error, if there was one
     /// * `response_body` - The response contents (or `None`)
     #[allow(clippy::too_many_arguments)]
-    pub fn with_timeout(
+    pub fn with_timed_out(
         request_header: RequestHeader,
         callback: Option<RequestCompletionHandler>,
         destination: &str,
@@ -127,7 +134,7 @@ impl ClientResponse {
         disconnected: bool,
         timed_out: bool,
         version_mismatch: Option<String>,
-        authentication_error: Option<String>,
+        authentication_error: Option<Error>,
         response_body: Option<ConcreteResponse>,
     ) -> Self {
         assert!(
@@ -169,9 +176,10 @@ impl ClientResponse {
         self.version_mismatch.as_deref()
     }
 
-    /// Returns the authentication error error message, if any.
-    pub fn authentication_error(&self) -> Option<&str> {
-        self.authentication_error.as_deref()
+    /// Returns the authentication error, if any. Java's
+    /// `authenticationException()` (`ClientResponse.java:128`).
+    pub fn authentication_error(&self) -> Option<&Error> {
+        self.authentication_error.as_ref()
     }
 
     /// Returns a reference to the request header.

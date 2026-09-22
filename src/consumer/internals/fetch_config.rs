@@ -23,9 +23,9 @@
 
 use std::fmt;
 
+use crate::common::Error;
 use crate::common::IsolationLevel;
-use crate::common::KafkaError;
-use crate::consumer::consumer_config::ConsumerConfig;
+use crate::consumer::ConsumerConfig;
 
 /// Immutable bundle of fetch settings derived from [`ConsumerConfig`].
 ///
@@ -85,12 +85,12 @@ impl FetchConfig {
     ///
     /// Returns an error if `isolation.level` is not one of `read_uncommitted`
     /// or `read_committed`.
-    pub(crate) fn from_consumer_config(config: &ConsumerConfig) -> Result<Self, KafkaError> {
+    pub(crate) fn with_consumer_config(config: &ConsumerConfig) -> Result<Self, Error> {
         let isolation_level = match config.isolation_level.as_str() {
             "read_uncommitted" => IsolationLevel::ReadUncommitted,
             "read_committed" => IsolationLevel::ReadCommitted,
             other => {
-                return Err(KafkaError::illegal_argument(format!(
+                return Err(Error::local_illegal_argument(format!(
                     "Invalid value '{other}' for configuration isolation.level: must be one of \
                      'read_uncommitted' or 'read_committed'"
                 )));
@@ -163,7 +163,7 @@ mod tests {
     #[test]
     fn test_basic_from_consumer_config() {
         let consumer_config = ConsumerConfig::default();
-        let fetch_config = FetchConfig::from_consumer_config(&consumer_config).unwrap();
+        let fetch_config = FetchConfig::with_consumer_config(&consumer_config).unwrap();
         // Same as the explicit-values test — defaults agree.
         assert_eq!(1, fetch_config.min_bytes);
         assert_eq!(50 * 1024 * 1024, fetch_config.max_bytes);
@@ -177,19 +177,19 @@ mod tests {
 
     /// `from_consumer_config` honors a non-default isolation level.
     #[test]
-    fn test_from_consumer_config_read_committed() {
+    fn test_new_consumer_config_read_committed() {
         let consumer_config =
             ConsumerConfig { isolation_level: "read_committed".to_string(), ..ConsumerConfig::default() };
-        let fetch_config = FetchConfig::from_consumer_config(&consumer_config).unwrap();
+        let fetch_config = FetchConfig::with_consumer_config(&consumer_config).unwrap();
         assert_eq!(IsolationLevel::ReadCommitted, fetch_config.isolation_level);
     }
 
     /// `from_consumer_config` rejects unknown isolation levels.
     #[test]
-    fn test_from_consumer_config_rejects_unknown_isolation_level() {
+    fn test_new_consumer_config_rejects_unknown_isolation_level() {
         let consumer_config =
             ConsumerConfig { isolation_level: "not_a_level".to_string(), ..ConsumerConfig::default() };
-        let err = FetchConfig::from_consumer_config(&consumer_config).unwrap_err();
+        let err = FetchConfig::with_consumer_config(&consumer_config).unwrap_err();
         let msg = err.message();
         assert!(msg.contains("isolation.level"), "{msg}");
         assert!(msg.contains("not_a_level"), "{msg}");

@@ -22,171 +22,178 @@ use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 use log::warn;
 
 use super::HostResolver;
-use crate::common::KafkaError;
+use crate::common::Error;
 
-/// Resolves a hostname using the given resolver and filters preferred addresses.
-///
-/// Returns a list containing the first address and subsequent addresses of the same
-/// type (IPv4 or IPv6) as the first address.
-///
-/// # Errors
-/// Returns an `io::Error` if the hostname cannot be resolved.
-pub async fn resolve<H: HostResolver>(host: &str, host_resolver: &H) -> io::Result<Vec<IpAddr>> {
-    let addresses = host_resolver.resolve(host).await?;
-    let result = filter_preferred_addresses(&addresses);
-    log::debug!("Resolved host {} as {:?}", host, result);
-    Ok(result)
-}
+/// Translates the Java static-utility class `org.apache.kafka.clients.ClientUtils`,
+/// which has no instance state, so it becomes a unit struct hosting its
+/// statics as associated items.
+pub struct ClientUtils;
 
-/// Return a list containing the first address and subsequent addresses
-/// that are the same type (IPv4 or IPv6) as the first address.
-///
-/// The outcome is that all returned addresses are either IPv4 or IPv6.
-fn filter_preferred_addresses(all_addresses: &[IpAddr]) -> Vec<IpAddr> {
-    if all_addresses.is_empty() {
-        return Vec::new();
+impl ClientUtils {
+    /// Resolves a hostname using the given resolver and filters preferred addresses.
+    ///
+    /// Returns a list containing the first address and subsequent addresses of the same
+    /// type (IPv4 or IPv6) as the first address.
+    ///
+    /// # Errors
+    /// Returns an `io::Error` if the hostname cannot be resolved.
+    pub async fn resolve<H: HostResolver>(host: &str, host_resolver: &H) -> io::Result<Vec<IpAddr>> {
+        let addresses = host_resolver.resolve(host).await?;
+        let result = Self::filter_preferred_addresses(&addresses);
+        log::debug!("Resolved host {} as {:?}", host, result);
+        Ok(result)
     }
-    let first = all_addresses[0];
-    let is_ipv4 = first.is_ipv4();
-    all_addresses.iter().filter(|addr| addr.is_ipv4() == is_ipv4).copied().collect()
-}
 
-/// Parse and validate a list of bootstrap server URLs into socket addresses.
-///
-/// Each entry should be a `"host:port"` string. Hostnames are resolved via DNS.
-/// Invalid entries (embedded whitespace, missing or invalid port) cause an
-/// immediate error, matching Java's `ConfigException` behavior.
-///
-/// Translated from `ClientUtils.parseAndValidateAddresses(List<String>, ClientDnsLookup)`.
-///
-/// # Errors
-///
-/// Returns [`KafkaError::IllegalArgument`] if:
-/// - Any URL contains embedded whitespace (newlines, spaces, tabs) after trimming
-///   leading/trailing whitespace — these indicate user error (e.g., space-separated
-///   or newline-separated addresses in a single string).
-/// - Any URL is missing a port or has an invalid port number (not 0-65535).
-/// - No valid addresses can be resolved after validation.
-///
-/// These correspond to Java's `ConfigException`.
-pub fn parse_and_validate_addresses(urls: &[String]) -> Result<Vec<(String, SocketAddr)>, KafkaError> {
-    let mut addresses = Vec::new();
-    for url in urls {
-        let trimmed = url.trim();
-        if trimmed.is_empty() {
-            continue;
+    /// Return a list containing the first address and subsequent addresses
+    /// that are the same type (IPv4 or IPv6) as the first address.
+    ///
+    /// The outcome is that all returned addresses are either IPv4 or IPv6.
+    fn filter_preferred_addresses(all_addresses: &[IpAddr]) -> Vec<IpAddr> {
+        if all_addresses.is_empty() {
+            return Vec::new();
         }
+        let first = all_addresses[0];
+        let is_ipv4 = first.is_ipv4();
+        all_addresses.iter().filter(|addr| addr.is_ipv4() == is_ipv4).copied().collect()
+    }
 
-        // Reject addresses containing embedded whitespace (spaces, newlines, tabs).
-        // Java's HOST_PORT_PATTERN regex rejects these because it anchors the entire
-        // string and only allows alphanumeric, -%._: and bracket characters.
-        if trimmed.chars().any(|c| c.is_ascii_whitespace()) {
-            return Err(KafkaError::illegal_argument(format!(
-                "Invalid url in {}: {}",
-                super::common_client_configs::BOOTSTRAP_SERVERS_CONFIG,
-                url
-            )));
-        }
+    /// Parse and validate a list of bootstrap server URLs into socket addresses.
+    ///
+    /// Each entry should be a `"host:port"` string. Hostnames are resolved via DNS.
+    /// Invalid entries (embedded whitespace, missing or invalid port) cause an
+    /// immediate error, matching Java's `ConfigException` behavior.
+    ///
+    /// Translated from `ClientUtils.parseAndValidateAddresses(List<String>, ClientDnsLookup)`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::LocalIllegalArgument`] if:
+    /// - Any URL contains embedded whitespace (newlines, spaces, tabs) after trimming
+    ///   leading/trailing whitespace — these indicate user error (e.g., space-separated
+    ///   or newline-separated addresses in a single string).
+    /// - Any URL is missing a port or has an invalid port number (not 0-65535).
+    /// - No valid addresses can be resolved after validation.
+    ///
+    /// These correspond to Java's `ConfigException`.
+    pub fn parse_and_validate_addresses(urls: &[String]) -> Result<Vec<(String, SocketAddr)>, Error> {
+        let mut addresses = Vec::new();
+        for url in urls {
+            let trimmed = url.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
 
-        // Parse host and port. Java uses Utils.getHost/getPort with a regex;
-        // we parse manually to support IPv4 (host:port) and IPv6 ([host]:port).
-        let (host, port) = parse_host_port(trimmed).ok_or_else(|| {
-            KafkaError::illegal_argument(format!(
-                "Invalid url in {}: {}",
-                super::common_client_configs::BOOTSTRAP_SERVERS_CONFIG,
-                url
-            ))
-        })?;
+            // Reject addresses containing embedded whitespace (spaces, newlines, tabs).
+            // Java's HOST_PORT_PATTERN regex rejects these because it anchors the entire
+            // string and only allows alphanumeric, -%._: and bracket characters.
+            if trimmed.chars().any(|c| c.is_ascii_whitespace()) {
+                return Err(Error::local_illegal_argument(format!(
+                    "Invalid url in {}: {}",
+                    crate::CommonClientConfigs::BOOTSTRAP_SERVERS_CONFIG,
+                    url
+                )));
+            }
 
-        // Validate port range (Java's InetSocketAddress constructor throws
-        // IllegalArgumentException for ports outside 0-65535).
-        if port > 65535 {
-            return Err(KafkaError::illegal_argument(format!(
-                "Invalid port in {}: {}",
-                super::common_client_configs::BOOTSTRAP_SERVERS_CONFIG,
-                url
-            )));
-        }
+            // Parse host and port. Java uses Utils.getHost/getPort with a regex;
+            // we parse manually to support IPv4 (host:port) and IPv6 ([host]:port).
+            let (host, port) = Self::parse_host_port(trimmed).ok_or_else(|| {
+                Error::local_illegal_argument(format!(
+                    "Invalid url in {}: {}",
+                    crate::CommonClientConfigs::BOOTSTRAP_SERVERS_CONFIG,
+                    url
+                ))
+            })?;
 
-        // Resolve the host:port to socket addresses via DNS.
-        // Preserve the original hostname for TLS SNI (Java's InetSocketAddress
-        // does this via getHostString()).
-        let addr_str = if host.contains(':') {
-            // IPv6: must be bracketed for to_socket_addrs
-            format!("[{}]:{}", host, port)
-        } else {
-            format!("{}:{}", host, port)
-        };
+            // Validate port range (Java's InetSocketAddress constructor throws
+            // IllegalArgumentException for ports outside 0-65535).
+            if port > 65535 {
+                return Err(Error::local_illegal_argument(format!(
+                    "Invalid port in {}: {}",
+                    crate::CommonClientConfigs::BOOTSTRAP_SERVERS_CONFIG,
+                    url
+                )));
+            }
 
-        match addr_str.to_socket_addrs() {
-            Ok(addrs) => {
-                let resolved: Vec<SocketAddr> = addrs.collect();
-                if resolved.is_empty() {
+            // Resolve the host:port to socket addresses via DNS.
+            // Preserve the original hostname for TLS SNI (Java's InetSocketAddress
+            // does this via getHostString()).
+            let addr_str = if host.contains(':') {
+                // IPv6: must be bracketed for to_socket_addrs
+                format!("[{}]:{}", host, port)
+            } else {
+                format!("{}:{}", host, port)
+            };
+
+            match addr_str.to_socket_addrs() {
+                Ok(addrs) => {
+                    let resolved: Vec<SocketAddr> = addrs.collect();
+                    if resolved.is_empty() {
+                        warn!(
+                            "Couldn't resolve server {} from {} as DNS resolution failed for {}",
+                            url,
+                            crate::CommonClientConfigs::BOOTSTRAP_SERVERS_CONFIG,
+                            host
+                        );
+                    } else {
+                        for addr in resolved {
+                            addresses.push((host.to_string(), addr));
+                        }
+                    }
+                },
+                Err(_) => {
                     warn!(
                         "Couldn't resolve server {} from {} as DNS resolution failed for {}",
                         url,
-                        super::common_client_configs::BOOTSTRAP_SERVERS_CONFIG,
+                        crate::CommonClientConfigs::BOOTSTRAP_SERVERS_CONFIG,
                         host
                     );
-                } else {
-                    for addr in resolved {
-                        addresses.push((host.to_string(), addr));
-                    }
-                }
-            },
-            Err(_) => {
-                warn!(
-                    "Couldn't resolve server {} from {} as DNS resolution failed for {}",
-                    url,
-                    super::common_client_configs::BOOTSTRAP_SERVERS_CONFIG,
-                    host
-                );
-            },
+                },
+            }
         }
-    }
-    if addresses.is_empty() {
-        return Err(KafkaError::illegal_argument(format!(
-            "No resolvable bootstrap urls given in {}",
-            super::common_client_configs::BOOTSTRAP_SERVERS_CONFIG
-        )));
-    }
-    Ok(addresses)
-}
-
-/// Parse a `"host:port"` or `"[ipv6]:port"` string into its components.
-///
-/// Returns `None` if the string doesn't match the expected format
-/// (no port, or no host).
-///
-/// Translated from Java's `Utils.getHost()` / `Utils.getPort()` which use the
-/// `HOST_PORT_PATTERN` regex.
-fn parse_host_port(url: &str) -> Option<(&str, u32)> {
-    // Strip optional protocol prefix (e.g., "http://")
-    let s = if let Some(idx) = url.find("://") {
-        &url[idx + 3..]
-    } else {
-        url
-    };
-
-    if s.starts_with('[') {
-        // IPv6 bracket notation: [host]:port
-        let close_bracket = s.find(']')?;
-        let host = &s[1..close_bracket];
-        let rest = &s[close_bracket + 1..];
-        // Must be followed by :port
-        let port_str = rest.strip_prefix(':')?;
-        let port: u32 = port_str.parse().ok()?;
-        Some((host, port))
-    } else {
-        // IPv4 or hostname: host:port — find the last colon
-        let colon_idx = s.rfind(':')?;
-        let host = &s[..colon_idx];
-        if host.is_empty() {
-            return None;
+        if addresses.is_empty() {
+            return Err(Error::local_illegal_argument(format!(
+                "No resolvable bootstrap urls given in {}",
+                crate::CommonClientConfigs::BOOTSTRAP_SERVERS_CONFIG
+            )));
         }
-        let port_str = &s[colon_idx + 1..];
-        let port: u32 = port_str.parse().ok()?;
-        Some((host, port))
+        Ok(addresses)
+    }
+
+    /// Parse a `"host:port"` or `"[ipv6]:port"` string into its components.
+    ///
+    /// Returns `None` if the string doesn't match the expected format
+    /// (no port, or no host).
+    ///
+    /// Translated from Java's `Utils.getHost()` / `Utils.getPort()` which use the
+    /// `HOST_PORT_PATTERN` regex.
+    fn parse_host_port(url: &str) -> Option<(&str, u32)> {
+        // Strip optional protocol prefix (e.g., "http://")
+        let s = if let Some(idx) = url.find("://") {
+            &url[idx + 3..]
+        } else {
+            url
+        };
+
+        if s.starts_with('[') {
+            // IPv6 bracket notation: [host]:port
+            let close_bracket = s.find(']')?;
+            let host = &s[1..close_bracket];
+            let rest = &s[close_bracket + 1..];
+            // Must be followed by :port
+            let port_str = rest.strip_prefix(':')?;
+            let port: u32 = port_str.parse().ok()?;
+            Some((host, port))
+        } else {
+            // IPv4 or hostname: host:port — find the last colon
+            let colon_idx = s.rfind(':')?;
+            let host = &s[..colon_idx];
+            if host.is_empty() {
+                return None;
+            }
+            let port_str = &s[colon_idx + 1..];
+            let port: u32 = port_str.parse().ok()?;
+            Some((host, port))
+        }
     }
 }
 
@@ -202,7 +209,7 @@ mod tests {
             IpAddr::V6(Ipv6Addr::LOCALHOST),
             IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
         ];
-        let filtered = filter_preferred_addresses(&addrs);
+        let filtered = ClientUtils::filter_preferred_addresses(&addrs);
         assert_eq!(filtered.len(), 2);
         assert!(filtered.iter().all(|a| a.is_ipv4()));
     }
@@ -214,14 +221,14 @@ mod tests {
             IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
             IpAddr::V6(Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 2)),
         ];
-        let filtered = filter_preferred_addresses(&addrs);
+        let filtered = ClientUtils::filter_preferred_addresses(&addrs);
         assert_eq!(filtered.len(), 2);
         assert!(filtered.iter().all(|a| a.is_ipv6()));
     }
 
     #[test]
     fn test_filter_preferred_addresses_empty() {
-        let filtered = filter_preferred_addresses(&[]);
+        let filtered = ClientUtils::filter_preferred_addresses(&[]);
         assert!(filtered.is_empty());
     }
 
@@ -229,7 +236,7 @@ mod tests {
     #[test]
     fn test_parse_and_validate_addresses_ip_port() {
         let urls = vec!["127.0.0.1:9092".to_string()];
-        let result = parse_and_validate_addresses(&urls);
+        let result = ClientUtils::parse_and_validate_addresses(&urls);
         assert!(result.is_ok());
         let addrs = result.unwrap();
         assert!(!addrs.is_empty());
@@ -240,7 +247,7 @@ mod tests {
     #[test]
     fn test_parse_and_validate_addresses_multiple() {
         let urls = vec!["127.0.0.1:9092".to_string(), "127.0.0.1:9093".to_string()];
-        let result = parse_and_validate_addresses(&urls);
+        let result = ClientUtils::parse_and_validate_addresses(&urls);
         assert!(result.is_ok());
         let addrs = result.unwrap();
         assert_eq!(addrs.len(), 2);
@@ -250,7 +257,7 @@ mod tests {
     #[test]
     fn test_parse_and_validate_addresses_empty() {
         let urls: Vec<String> = Vec::new();
-        let result = parse_and_validate_addresses(&urls);
+        let result = ClientUtils::parse_and_validate_addresses(&urls);
         assert!(result.is_err());
     }
 
@@ -258,7 +265,7 @@ mod tests {
     #[test]
     fn test_parse_and_validate_addresses_unresolvable() {
         let urls = vec!["this.host.does.not.exist.ever.kafka.test:9092".to_string()];
-        let result = parse_and_validate_addresses(&urls);
+        let result = ClientUtils::parse_and_validate_addresses(&urls);
         assert!(result.is_err());
     }
 
@@ -266,7 +273,7 @@ mod tests {
     #[test]
     fn test_parse_and_validate_addresses_whitespace_only() {
         let urls = vec!["  ".to_string(), "".to_string()];
-        let result = parse_and_validate_addresses(&urls);
+        let result = ClientUtils::parse_and_validate_addresses(&urls);
         assert!(result.is_err());
     }
 
@@ -274,7 +281,7 @@ mod tests {
     #[test]
     fn test_parse_and_validate_addresses_localhost() {
         let urls = vec!["localhost:9092".to_string()];
-        let result = parse_and_validate_addresses(&urls);
+        let result = ClientUtils::parse_and_validate_addresses(&urls);
         assert!(result.is_ok());
         let addrs = result.unwrap();
         assert!(!addrs.is_empty());
@@ -287,7 +294,7 @@ mod tests {
     #[test]
     fn test_parse_and_validate_addresses_ipv6() {
         let urls = vec!["[::1]:8000".to_string()];
-        let result = parse_and_validate_addresses(&urls);
+        let result = ClientUtils::parse_and_validate_addresses(&urls);
         assert!(result.is_ok());
         let addrs = result.unwrap();
         assert!(!addrs.is_empty());
@@ -302,7 +309,7 @@ mod tests {
             "[2001:db8:85a3:8d3:1319:8a2e:370:7348]:1234".to_string(),
             "localhost:10000".to_string(),
         ];
-        let result = parse_and_validate_addresses(&urls);
+        let result = ClientUtils::parse_and_validate_addresses(&urls);
         assert!(result.is_ok());
         let addrs = result.unwrap();
         // Should have at least 2 addresses (one IPv6 + at least one for localhost)
@@ -316,7 +323,7 @@ mod tests {
     #[test]
     fn test_parse_and_validate_addresses_hostname_port_preserved() {
         let urls = vec!["localhost:10000".to_string()];
-        let result = parse_and_validate_addresses(&urls);
+        let result = ClientUtils::parse_and_validate_addresses(&urls);
         assert!(result.is_ok());
         let addrs = result.unwrap();
         assert!(!addrs.is_empty());
@@ -332,12 +339,12 @@ mod tests {
     #[test]
     fn test_no_port() {
         let urls = vec!["127.0.0.1".to_string()];
-        let result = parse_and_validate_addresses(&urls);
+        let result = ClientUtils::parse_and_validate_addresses(&urls);
         assert!(result.is_err(), "Address without port should be rejected");
         match result.unwrap_err() {
-            KafkaError::IllegalArgument(msg) => {
+            Error::LocalIllegalArgument(msg) => {
                 assert!(
-                    msg.contains("Invalid url") || msg.contains("No resolvable"),
+                    msg.message().contains("Invalid url") || msg.message().contains("No resolvable"),
                     "Error should indicate invalid URL: {}",
                     msg
                 );
@@ -352,11 +359,15 @@ mod tests {
     #[test]
     fn test_invalid_port() {
         let urls = vec!["localhost:70000".to_string()];
-        let result = parse_and_validate_addresses(&urls);
+        let result = ClientUtils::parse_and_validate_addresses(&urls);
         assert!(result.is_err(), "Port 70000 should be rejected");
         match result.unwrap_err() {
-            KafkaError::IllegalArgument(msg) => {
-                assert!(msg.contains("Invalid port"), "Error should indicate invalid port: {}", msg);
+            Error::LocalIllegalArgument(msg) => {
+                assert!(
+                    msg.message().contains("Invalid port"),
+                    "Error should indicate invalid port: {}",
+                    msg
+                );
             },
             other => panic!("Expected IllegalArgument error, got: {:?}", other),
         }
@@ -368,7 +379,7 @@ mod tests {
     #[test]
     fn test_invalid_broker_address_embedded_newlines() {
         let urls = vec!["localhost:9997\nlocalhost:9998\nlocalhost:9999".to_string()];
-        let result = parse_and_validate_addresses(&urls);
+        let result = ClientUtils::parse_and_validate_addresses(&urls);
         assert!(result.is_err(), "Address with embedded newlines should be rejected");
     }
 
@@ -396,7 +407,7 @@ mod tests {
             "localhost:9998".to_string(),
             " localhost:9999".to_string(),
         ];
-        let result = parse_and_validate_addresses(&urls);
+        let result = ClientUtils::parse_and_validate_addresses(&urls);
         // Rust trims leading whitespace, so this succeeds (unlike Java).
         // This is a documented behavioral difference — Rust is more lenient.
         assert!(result.is_ok(), "Leading whitespace should be trimmed");
@@ -408,7 +419,7 @@ mod tests {
     #[test]
     fn test_invalid_broker_address_space_separated() {
         let urls = vec!["localhost:9997 localhost:9998 localhost:9999".to_string()];
-        let result = parse_and_validate_addresses(&urls);
+        let result = ClientUtils::parse_and_validate_addresses(&urls);
         assert!(
             result.is_err(),
             "Space-separated addresses in a single string should be rejected"
@@ -425,7 +436,7 @@ mod tests {
             "localhost:9998".to_string(),
             "localhost:9999".to_string(),
         ];
-        let result = parse_and_validate_addresses(&urls);
+        let result = ClientUtils::parse_and_validate_addresses(&urls);
         assert!(result.is_ok());
         let addrs = result.unwrap();
         // Each localhost may resolve to multiple addresses (IPv4 + IPv6),

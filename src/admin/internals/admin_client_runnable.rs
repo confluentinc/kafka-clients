@@ -26,26 +26,18 @@ use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 
 use tokio::sync::mpsc;
 
-use crate::client_response::ClientResponse;
-use crate::common::protocol::Errors;
+use crate::ClientResponse;
+use crate::KafkaClient;
+use crate::admin::KafkaAdminClient;
+use crate::common::Errors;
+use crate::common::errors::{DisconnectError, TimeoutError};
 use crate::common::requests::{ConcreteResponse, MetadataRequestBuilder, RequestBuilder};
 use crate::common::utils::{ExponentialBackoff, LogContext};
-use crate::common::{KafkaError, Node};
-use crate::kafka_client::KafkaClient;
-use crate::{kafka_debug, kafka_info, kafka_trace};
+use crate::common::{Error, Node};
+use crate::{kafka_debug, kafka_error, kafka_info, kafka_trace};
 
-use super::admin_metadata_manager::AdminMetadataManager;
-use super::call::{Call, HandleResult, MaybeRetryOutcome, NodeProvider};
-
-/// Sentinel for "no hard-shutdown deadline set".
-///
-/// Plays the role of Java's `KafkaAdminClient.INVALID_SHUTDOWN_TIME`: it is
-/// lower than every reachable deadline, so the "is an earlier deadline already
-/// installed?" comparison in `KafkaAdminClient::close` orders the same way.
-pub(crate) const NO_HARD_SHUTDOWN: i64 = i64::MIN;
-
-/// The base poll timeout cap, mirroring Java's `1_200_000` upper bound.
-const MAX_POLL_TIMEOUT_MS: i64 = 1_200_000;
+use super::AdminMetadataManager;
+use super::{Call, HandleResult, MaybeRetryOutcome, NodeProvider};
 
 /// Computes the remaining time until `deadline`, clamped to the `i32` range.
 ///
@@ -71,7 +63,7 @@ struct InFlightCall {
 pub(crate) struct ShutdownSignal {
     /// Set once `close` has begun.
     pub(crate) closing: AtomicBool,
-    /// The hard-shutdown deadline in epoch ms, or [`NO_HARD_SHUTDOWN`].
+    /// The hard-shutdown deadline in epoch ms, or [`KafkaAdminClient::NO_HARD_SHUTDOWN`].
     pub(crate) hard_shutdown_deadline_ms: AtomicI64,
 }
 
@@ -80,7 +72,7 @@ impl ShutdownSignal {
     pub(crate) fn new() -> Self {
         Self {
             closing: AtomicBool::new(false),
-            hard_shutdown_deadline_ms: AtomicI64::new(NO_HARD_SHUTDOWN),
+            hard_shutdown_deadline_ms: AtomicI64::new(KafkaAdminClient::NO_HARD_SHUTDOWN),
         }
     }
 }
@@ -115,6 +107,12 @@ pub(crate) struct AdminClientRunnable<C: KafkaClient> {
 }
 
 impl<C: KafkaClient> AdminClientRunnable<C> {
+    /// The base poll timeout cap, mirroring Java's `1_200_000` upper bound.
+    ///
+    /// Java writes the literal inline in `AdminClientRunnable.run()`
+    /// (`KafkaAdminClient.java:1512`) rather than naming a static.
+    const MAX_POLL_TIMEOUT_MS: i64 = 1_200_000;
+
     /// Creates a new runnable.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
@@ -154,6 +152,13 @@ impl<C: KafkaClient> AdminClientRunnable<C> {
         &mut self.client
     }
 
+    /// The metadata manager (visible for testing), so a test can force a refresh
+    /// and observe the state the internal metadata call leaves it in.
+    #[cfg(test)]
+    pub(crate) fn metadata_manager(&self) -> &AdminMetadataManager {
+        &self.metadata_manager
+    }
+
     /// Whether the loop would terminate now (visible for testing).
     #[cfg(test)]
     pub(crate) fn should_exit_for_test(&self, now: i64) -> bool {
@@ -177,7 +182,41 @@ impl<C: KafkaClient> AdminClientRunnable<C> {
     /// The main run loop. Translated from `AdminClientRunnable.run` /
     /// `processRequests`.
     pub(crate) async fn run(&mut self) {
+        use futures_util::FutureExt;
+
         kafka_debug!(self.log_context, "Starting the Kafka admin client I/O task.");
+
+        // Java wraps the loop in `try { processRequests(); } finally { ... }`
+        // (`KafkaAdminClient.java:1459-1476`), and it is the `finally` that
+        // guarantees every pending call is failed — however `processRequests`
+        // terminated. Straight-line code after the loop is NOT that guarantee: a
+        // panic anywhere inside `run_once` skipped both `fail_all_remaining` and
+        // `client.close()`, leaving every outstanding `KafkaFuture` hanging forever
+        // with no error ever delivered and the socket open.
+        //
+        // `AssertUnwindSafe` is needed because `&mut Self` is not `UnwindSafe`; the
+        // only thing done with `self` afterwards is the cleanup Java's `finally`
+        // does, which is what must run on this path.
+        let outcome = std::panic::AssertUnwindSafe(self.process_requests()).catch_unwind().await;
+        if let Err(payload) = outcome {
+            kafka_error!(
+                self.log_context,
+                "Uncaught error in the Kafka admin client I/O task: {:?}",
+                payload
+            );
+        }
+
+        // finally: time out any remaining calls, then close the client.
+        let now = (self.time_provider)();
+        self.fail_all_remaining(now);
+        self.client.close().await;
+        kafka_debug!(self.log_context, "Shutdown of the Kafka admin client I/O task has completed.");
+    }
+
+    /// The `try` body of Java's `AdminClientRunnable.run` — `processRequests()`
+    /// (`KafkaAdminClient.java:1461`). Split out so [`run`](Self::run) can wrap it
+    /// and still reach its `finally` after a panic.
+    async fn process_requests(&mut self) {
         loop {
             self.run_once().await;
             let now = (self.time_provider)();
@@ -185,11 +224,6 @@ impl<C: KafkaClient> AdminClientRunnable<C> {
                 break;
             }
         }
-        // finally: time out any remaining calls, then close the client.
-        let now = (self.time_provider)();
-        self.fail_all_remaining(now);
-        self.client.close().await;
-        kafka_debug!(self.log_context, "Shutdown of the Kafka admin client I/O task has completed.");
     }
 
     /// Whether the loop should terminate. Translated from
@@ -206,7 +240,7 @@ impl<C: KafkaClient> AdminClientRunnable<C> {
             return true;
         }
         let deadline = self.shutdown.hard_shutdown_deadline_ms.load(Ordering::Acquire);
-        if deadline != NO_HARD_SHUTDOWN && now >= deadline {
+        if deadline != KafkaAdminClient::NO_HARD_SHUTDOWN && now >= deadline {
             kafka_info!(
                 self.log_context,
                 "Forcing a hard I/O task shutdown. Requests in progress will be aborted."
@@ -246,7 +280,7 @@ impl<C: KafkaClient> AdminClientRunnable<C> {
         let now = (self.time_provider)();
 
         // 2. Time out expired calls; base poll timeout.
-        let mut poll_timeout = MAX_POLL_TIMEOUT_MS.min(self.handle_timeouts(now).await);
+        let mut poll_timeout = Self::MAX_POLL_TIMEOUT_MS.min(self.handle_timeouts(now).await);
 
         // Once `close()` has been called, bound the poll by the time remaining
         // to the hard-shutdown deadline, so the loop is guaranteed to reach
@@ -255,7 +289,7 @@ impl<C: KafkaClient> AdminClientRunnable<C> {
         // the (far larger) call deadline, and `close(timeout)` overruns by up to
         // `request.timeout.ms`. Mirrors `KafkaAdminClient.java:1500-1502`.
         let hard_shutdown_deadline_ms = self.shutdown.hard_shutdown_deadline_ms.load(Ordering::Acquire);
-        if hard_shutdown_deadline_ms != NO_HARD_SHUTDOWN {
+        if hard_shutdown_deadline_ms != KafkaAdminClient::NO_HARD_SHUTDOWN {
             poll_timeout = poll_timeout.min(hard_shutdown_deadline_ms.saturating_sub(now));
         }
 
@@ -363,7 +397,7 @@ impl<C: KafkaClient> AdminClientRunnable<C> {
         for call in calls {
             let remaining = calc_timeout_ms_remaining_as_int(now, call.deadline_ms);
             if remaining < 0 {
-                let err = KafkaError::timeout(format!("{} Call: {}", msg, call.call_name));
+                let err = Error::timeout(format!("{} Call: {}", msg, call.call_name));
                 self.fail_call(call, now, err);
             } else {
                 *next_timeout = (*next_timeout).min(remaining);
@@ -481,12 +515,17 @@ impl<C: KafkaClient> AdminClientRunnable<C> {
                 let request_builder = match call.create_request(timeout_ms) {
                     Ok(rb) => rb,
                     Err(err) => {
-                        let wrapped = KafkaError::illegal_state(format!(
-                            "Internal error sending {} to {}. {}",
-                            call.call_name,
-                            node,
-                            err.message()
-                        ));
+                        // `new KafkaException(String.format("Internal error sending %s
+                        // to %s.", call.callName, node), t)`
+                        // (`KafkaAdminClient.java:1295-1297`): a bare `KafkaException`
+                        // — so `is_kafka_error()` is `true` and `is_api_error()` is
+                        // `false` — carrying the original as its cause. Neither the
+                        // class nor the cause survived being flattened into an
+                        // `LocalIllegalState` with the message text appended.
+                        let wrapped = Error::kafka_message_source(
+                            format!("Internal error sending {} to {}.", call.call_name, node),
+                            err,
+                        );
                         self.fail_call(call, now, wrapped);
                         continue;
                     },
@@ -563,19 +602,30 @@ impl<C: KafkaClient> AdminClientRunnable<C> {
             self.calls_in_flight.remove(&node_id_string);
 
             if let Some(version_mismatch) = response.version_mismatch() {
-                let err = KafkaError::unsupported_version(version_mismatch.to_string());
+                let err = Error::unsupported_version(version_mismatch.to_string());
                 self.fail_call(call, now, err);
             } else if response.was_disconnected() {
                 let auth_error = call.cur_node.as_ref().and_then(|node| self.client.authentication_error(node));
                 let err = match auth_error {
-                    Some(msg) => KafkaError::with_message(Errors::SaslAuthenticationFailed, msg),
-                    None => KafkaError::with_message(
-                        Errors::NetworkException,
-                        format!(
-                            "Cancelled {} request with correlation id {} due to node {} being disconnected",
-                            call.call_name, correlation_id, node_id_string
-                        ),
-                    ),
+                    // Java: `call.fail(now, client.authenticationException(node))`
+                    // (`KafkaAdminClient.java:1373-1376`) — the object the channel
+                    // raised, whichever `AuthenticationException` subclass that was.
+                    // `KafkaClient::authentication_error` now hands that object
+                    // over, so it is forwarded unchanged: rebuilding it here as the
+                    // base class (or worse, hardcoding `SaslAuthenticationFailed`,
+                    // finding 242) reported code 58 for a TLS certificate rejection
+                    // on a connection that never performed a SASL exchange.
+                    Some(error) => error,
+                    // `new DisconnectException(...)`
+                    // (`KafkaAdminClient.java:1377-1379`). Not `Errors::NetworkError`:
+                    // this is a purely client-side event, and `DisconnectError`'s own
+                    // file documents that it therefore carries no protocol code.
+                    // Reporting code 13 to the user meant a caller matching
+                    // `Error::Disconnect(_)` never fired.
+                    None => Error::Disconnect(DisconnectError::new(format!(
+                        "Cancelled {} request with correlation id {} due to node {} being disconnected",
+                        call.call_name, correlation_id, node_id_string
+                    ))),
                 };
                 self.fail_call(call, now, err);
             } else {
@@ -598,7 +648,7 @@ impl<C: KafkaClient> AdminClientRunnable<C> {
                         }
                     },
                     None => {
-                        let err = KafkaError::illegal_state(format!(
+                        let err = Error::local_illegal_state(format!(
                             "Received an empty response body for {} request with correlation id {}",
                             call.call_name, correlation_id
                         ));
@@ -610,7 +660,7 @@ impl<C: KafkaClient> AdminClientRunnable<C> {
     }
 
     /// The central retry decision. Translated verbatim from `Call.fail`.
-    fn fail_call(&mut self, mut call: Call, now: i64, error: KafkaError) {
+    fn fail_call(&mut self, mut call: Call, now: i64, error: Error) {
         if let Some(node) = call.cur_node.take() {
             self.node_ready_deadlines.remove(&node.id());
         }
@@ -639,7 +689,7 @@ impl<C: KafkaClient> AdminClientRunnable<C> {
             return;
         }
         // If the exception is not retriable, fail.
-        if !error.is_retriable() {
+        if !error.is_retriable_error() {
             call.handle_failure(&error);
             return;
         }
@@ -660,17 +710,20 @@ impl<C: KafkaClient> AdminClientRunnable<C> {
     /// Wraps a non-timeout cause as a timeout and fails the call terminally.
     ///
     /// Translated from `Call.handleTimeoutFailure`.
-    fn handle_timeout_failure(&mut self, mut call: Call, now: i64, cause: KafkaError) {
+    fn handle_timeout_failure(&mut self, mut call: Call, now: i64, cause: Error) {
         let error = if cause.error() == Errors::RequestTimedOut {
             cause
         } else {
-            KafkaError::timeout(format!(
-                "Aborted due to timeout: {} timed out at {} after {} attempt(s). {}",
-                call.call_name,
-                now,
-                call.tries,
-                cause.message()
-            ))
+            // `new TimeoutException(this + " timed out at " + now + " after " + tries
+            // + " attempt(s)", cause)` (`KafkaAdminClient.java:962-963`), where `this`
+            // renders through `Call.toString()` (`:1001-1004`).
+            //
+            // The message used to gain an invented `"Aborted due to timeout: "`
+            // prefix (a string that appears nowhere in the Kafka tree), drop the
+            // `Call(...)` rendering, and append the cause as text — which left
+            // `Error::source()` empty where Java's `getCause()` is populated.
+            let message = format!("{} timed out at {} after {} attempt(s)", call, now, call.tries);
+            Error::Timeout(TimeoutError::with_source(message, cause))
         };
         call.handle_failure(&error);
     }
@@ -685,19 +738,19 @@ impl<C: KafkaClient> AdminClientRunnable<C> {
         let pending = std::mem::take(&mut self.pending_calls);
         for call in pending {
             let mut call = call;
-            call.handle_failure(&KafkaError::timeout(format!("{} Call: {}", msg, call.call_name)));
+            call.handle_failure(&Error::timeout(format!("{} Call: {}", msg, call.call_name)));
         }
         let calls_to_send = std::mem::take(&mut self.calls_to_send);
         for (_node_id, nc) in calls_to_send {
             for mut call in nc.calls {
-                call.handle_failure(&KafkaError::timeout(format!("{} Call: {}", msg, call.call_name)));
+                call.handle_failure(&Error::timeout(format!("{} Call: {}", msg, call.call_name)));
             }
         }
         let in_flight = std::mem::take(&mut self.correlation_id_to_calls);
         for (_cid, mut in_flight) in in_flight {
             in_flight
                 .call
-                .handle_failure(&KafkaError::timeout(format!("{} Call: {}", msg, in_flight.call.call_name)));
+                .handle_failure(&Error::timeout(format!("{} Call: {}", msg, in_flight.call.call_name)));
         }
         let _ = now;
     }
@@ -716,12 +769,30 @@ impl<C: KafkaClient> AdminClientRunnable<C> {
             NodeProvider::MetadataUpdate,
             Box::new(|_timeout_ms| {
                 // Empty topic list: request brokers + controller only, matching Java.
-                Ok(Box::new(MetadataRequestBuilder::new(Some(&[]), true)) as Box<dyn RequestBuilder>)
+                Ok(
+                    Box::new(MetadataRequestBuilder::with_topics_allow_auto_topic_creation(Some(&[]), true))
+                        as Box<dyn RequestBuilder>,
+                )
             }),
             Box::new(move |response, now, _cur_node| {
-                if let ConcreteResponse::Metadata(metadata_response) = response {
-                    mm_ok.update(metadata_response.build_cluster(), now);
-                }
+                // Java does `(MetadataResponse) abstractResponse` unguarded
+                // (`KafkaAdminClient.java:1668`) and relies on the `:1387`
+                // `catch (Throwable t)` → `call.fail(now, t)` →
+                // `metadataManager.updateFailed(e)` to leave `UPDATE_PENDING`.
+                //
+                // Swallowing the mismatch ran neither `update` nor `update_failed`,
+                // while `run_once` had already called
+                // `transition_to_update_pending`. `metadata_fetch_delay_ms` returns
+                // `i64::MAX` in that state, so the client never refreshed metadata
+                // again for its whole lifetime — and `HandleResult::Done` on an
+                // internal call also re-queues the pending calls against the
+                // permanently stale metadata.
+                let ConcreteResponse::Metadata(metadata_response) = response else {
+                    return HandleResult::Retry(Error::local_illegal_state(
+                        "Expected a Metadata response for the internal metadata call",
+                    ));
+                };
+                mm_ok.update(metadata_response.build_cluster(), now);
                 HandleResult::Done
             }),
             Box::new(move |error| {

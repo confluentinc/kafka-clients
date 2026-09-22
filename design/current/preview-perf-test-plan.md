@@ -69,8 +69,9 @@ A case gets both regimes only when the librdkafka knobs could plausibly change t
 | `retries` | MAX_INT | MAX_INT | MAX_INT |
 | `buffer.memory` | 32 MB | — | 32 MB |
 | `compression.type` | none | none | none |
+| `partitioner` (keyed) | **murmur2** | consistent_random (CRC-32) | consistent_random (CRC-32) |
 
-Rust matches Java exactly. Only 3 knobs differ from librdkafka: `enable.idempotence`, `max.in.flight`, `batch.size` — a three-line config snippet, not a vague "defaults differ." *(Verified against the vendored Apache Kafka 4.2 source, librdkafka's published `CONFIGURATION.md`, and this repo's config modules — not from memory.)*
+Rust matches Java on every knob above **except the keyed `partitioner`**: there it deliberately matches librdkafka's `consistent_random` (CRC-32) rather than Java's murmur2 — the one place Rust tracks librdkafka and diverges from Java, the opposite direction from the three librdkafka-divergent rows. Those 3 knobs still differ from librdkafka: `enable.idempotence`, `max.in.flight`, `batch.size` — a three-line config snippet, not a vague "defaults differ." The keyed partitioner is selectable back to murmur2 via `partitioner.class` for exact Java parity; see `design/current/partitioner.md` for the rationale and the mixed-fleet warning. *(Verified against the vendored Apache Kafka 4.2 source, librdkafka's published `CONFIGURATION.md`, and this repo's config modules — not from memory.)*
 
 ### Producer core — 17 cells, Regime J
 
@@ -298,7 +299,7 @@ The existing tooling is close but cannot run a matrix unattended.
 | 2 | Consumer librdkafka and Java arms exist only as ad-hoc shell scripts | Promote the `*_drive.sh` scripts under `consumer-perf/cloud-benchmarks/2026-06-18-use1-intel/` to first-class `--test` targets |
 | 3 | **No transactional producer arm exists in any harness** | The C perf test already has `ENABLE_IDEMPOTENCE` and `MAX_IN_FLIGHT`, but nothing for `transactional.id`, records per transaction, or abort rate. Needed on all three arms. `examples/txn_eos_pipeline.rs` and `examples/txn_producer.rs` from #142 are the starting point for the Rust arm |
 | 4 | **No `read_committed` consumer arm** | `consumer-perf` does not plumb `isolation.level` and cannot report LSO lag |
-| 5 | `consumer-perf` does not plumb `fetch.min.bytes`, `max.poll.records`, commit mode, or consumer count | The README claims these need config builders that are "not yet exposed". That is stale — `ConsumerConfig::from_properties` already handles all of them. This is a CLI plumbing gap, not a client gap |
+| 5 | `consumer-perf` does not plumb `fetch.min.bytes`, `max.poll.records`, commit mode, or consumer count | The README claims these need config builders that are "not yet exposed". That is stale — `ConsumerConfig::new` already handles all of them. This is a CLI plumbing gap, not a client gap |
 | 6 | CPU sampling | Always use the `/proc` sampler. The `sysinfo` self-report reads 0% on aarch64 |
 | 7 | No comparator | Read the run's summary JSONL, diff against a committed baseline, exit non-zero on threshold breach, emit a one-page digest. This is what makes "trigger overnight, read results in the morning" work |
 | 8 | Coordinated omission | Emit the intended send timestamp |

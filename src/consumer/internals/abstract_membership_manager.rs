@@ -28,14 +28,14 @@
 //! Composition over inheritance: this struct holds the shared
 //! membership-state fields (group ID, member ID / epoch, current /
 //! target assignments, listener registrations). The composing
-//! [`super::consumer_membership_manager::ConsumerMembershipManager`]
+//! [`super::ConsumerMembershipManager`]
 //! wraps an `Arc<Mutex<MembershipInner>>` and provides Consumer-specific
 //! configuration (group instance ID, server assignor, rack ID, commit
 //! manager, ...).
 //!
 //! The state is shared via `Arc<Mutex<MembershipInner>>` between the
 //! membership manager itself and
-//! [`super::consumer_heartbeat_request_manager::ConsumerHeartbeatRequestManager`]
+//! [`super::ConsumerHeartbeatRequestManager`]
 //! — both touch the state from the bg task (Java models the same shape
 //! with both managers holding plain references). Per
 //! `consumer-threading.md` §16, the lock is `std::sync::Mutex` (short
@@ -44,7 +44,7 @@
 //! # §31 — the critical contract
 //!
 //! [`reconcile`] enqueues `BackgroundEvent::PartitionsRemoved`
-//! events with `oneshot::Sender<Result<(), KafkaError>>` and awaits the
+//! events with `oneshot::Sender<Result<(), Error>>` and awaits the
 //! matching receiver before advancing the membership state machine.
 //! `MutexGuard`s on `MembershipInner` are scoped tightly so they are
 //! ALWAYS dropped before any `.await`.
@@ -58,16 +58,16 @@ use std::sync::Mutex;
 use tokio::sync::oneshot;
 
 use crate::common::metrics::Time;
-use crate::common::{KafkaError, TopicPartition, Uuid};
-use crate::consumer::consumer_rebalance_listener_method_name::ConsumerRebalanceListenerMethodName;
-use crate::consumer::internals::consumer_rebalance_metrics_manager::ConsumerRebalanceMetricsManager;
-use crate::consumer::internals::events::background_event::BackgroundEvent;
-use crate::consumer::internals::events::background_event_handler::BackgroundEventHandler;
+use crate::common::{Error, TopicPartition, Uuid};
+use crate::consumer::ConsumerRebalanceListenerMethodName;
+use crate::consumer::internals::ConsumerRebalanceMetricsManager;
+use crate::consumer::internals::events::BackgroundEvent;
+use crate::consumer::internals::events::BackgroundEventHandler;
 
-use super::consumer_metadata::ConsumerMetadata;
-use super::member_state::MemberState;
-use super::member_state_listener::MemberStateListener;
-use super::subscription_state::SubscriptionState;
+use super::ConsumerMetadata;
+use super::MemberState;
+use super::MemberStateListener;
+use super::SubscriptionState;
 
 /// A member's reconciled (or target) assignment, keyed by topic ID, with
 /// a local epoch that bumps every time the value changes.
@@ -95,9 +95,9 @@ impl LocalAssignment {
     /// public API; we return `Result` and let the caller propagate.
     ///
     /// Java: `new LocalAssignment(localEpoch, partitions)`.
-    pub(crate) fn new(local_epoch: i64, partitions: HashMap<Uuid, Vec<i32>>) -> Result<Self, KafkaError> {
+    pub(crate) fn new(local_epoch: i64, partitions: HashMap<Uuid, Vec<i32>>) -> Result<Self, Error> {
         if local_epoch == Self::NONE_EPOCH && !partitions.is_empty() {
-            return Err(KafkaError::illegal_argument("Local epoch must be set if there are partitions"));
+            return Err(Error::local_illegal_argument("Local epoch must be set if there are partitions"));
         }
         Ok(Self { local_epoch, partitions })
     }
@@ -187,9 +187,9 @@ impl MembershipInner {
     /// it is a valid transition.
     ///
     /// Java: `transitionTo(MemberState)`.
-    pub(crate) fn transition_to(&mut self, next_state: MemberState) -> Result<(), KafkaError> {
+    pub(crate) fn transition_to(&mut self, next_state: MemberState) -> Result<(), Error> {
         if self.state != next_state && !next_state.previous_valid_states().contains(&self.state) {
-            return Err(KafkaError::illegal_state(format!(
+            return Err(Error::local_illegal_state(format!(
                 "Invalid state transition from {} to {}",
                 self.state, next_state
             )));
@@ -379,7 +379,7 @@ impl AbstractMembershipManager {
     /// `RECONCILING` or `JOINING`.
     ///
     /// Java: `processAssignmentReceived(Map<Uuid, SortedSet<Integer>>)`.
-    pub(crate) fn process_assignment_received(&self, assignment: HashMap<Uuid, Vec<i32>>) -> Result<(), KafkaError> {
+    pub(crate) fn process_assignment_received(&self, assignment: HashMap<Uuid, Vec<i32>>) -> Result<(), Error> {
         // Compute new target & whether we transition to RECONCILING.
         let (assigned_topic_ids, must_reconcile, state_after) = {
             let mut guard = match self.inner.lock() {
@@ -589,7 +589,7 @@ impl AbstractMembershipManager {
 
     /// Java: `onConsumerPoll()`. If a subscription update is pending
     /// and we're UNSUBSCRIBED, transition to JOINING.
-    pub(crate) fn on_consumer_poll(&self, join_group_epoch: i32) -> Result<(), KafkaError> {
+    pub(crate) fn on_consumer_poll(&self, join_group_epoch: i32) -> Result<(), Error> {
         let should_join = {
             let mut guard = match self.inner.lock() {
                 Ok(g) => g,
@@ -615,7 +615,7 @@ impl AbstractMembershipManager {
 
     /// Java: `transitionToJoining()`. The Consumer subclass supplies
     /// the join epoch via `joinGroupEpoch()`.
-    pub(crate) fn transition_to_joining(&self, join_group_epoch: i32) -> Result<(), KafkaError> {
+    pub(crate) fn transition_to_joining(&self, join_group_epoch: i32) -> Result<(), Error> {
         let mut guard = match self.inner.lock() {
             Ok(g) => g,
             Err(p) => p.into_inner(),
@@ -643,7 +643,7 @@ impl AbstractMembershipManager {
         &self,
         leave_group_epoch: i32,
         due_to_expired_poll_timer: bool,
-    ) -> Result<(), KafkaError> {
+    ) -> Result<(), Error> {
         let mut guard = match self.inner.lock() {
             Ok(g) => g,
             Err(p) => p.into_inner(),
@@ -674,7 +674,7 @@ impl AbstractMembershipManager {
     }
 
     /// Java: `onHeartbeatRequestSkipped()`.
-    pub(crate) fn on_heartbeat_request_skipped(&self) -> Result<(), KafkaError> {
+    pub(crate) fn on_heartbeat_request_skipped(&self) -> Result<(), Error> {
         let mut guard = match self.inner.lock() {
             Ok(g) => g,
             Err(p) => p.into_inner(),
@@ -692,7 +692,7 @@ impl AbstractMembershipManager {
     }
 
     /// Java: `onHeartbeatRequestGenerated()`.
-    pub(crate) fn on_heartbeat_request_generated(&self) -> Result<(), KafkaError> {
+    pub(crate) fn on_heartbeat_request_generated(&self) -> Result<(), Error> {
         let mut guard = match self.inner.lock() {
             Ok(g) => g,
             Err(p) => p.into_inner(),
@@ -749,7 +749,7 @@ impl AbstractMembershipManager {
     ///
     /// `join_group_epoch` is supplied by the caller — Phase 10's AEP
     /// `AsyncPoll` arm reads it via
-    /// [`crate::consumer::internals::consumer_membership_manager::ConsumerMembershipManager::join_group_epoch`]
+    /// [`crate::consumer::internals::ConsumerMembershipManager::join_group_epoch`]
     /// just before invoking this method.
     pub(crate) fn maybe_rejoin_stale_member(&self, join_group_epoch: i32) {
         let should_transition_to_joining = {
@@ -786,7 +786,7 @@ impl AbstractMembershipManager {
     }
 
     /// Java: `transitionToFatal()`.
-    pub(crate) fn transition_to_fatal(&self) -> Result<MemberState, KafkaError> {
+    pub(crate) fn transition_to_fatal(&self) -> Result<MemberState, Error> {
         let previous_state = {
             let mut guard = match self.inner.lock() {
                 Ok(g) => g,
@@ -862,7 +862,7 @@ impl AbstractMembershipManager {
         method: ConsumerRebalanceListenerMethodName,
         partitions: Vec<TopicPartition>,
         current_time_ms: i64,
-    ) -> Result<Option<oneshot::Receiver<Result<(), KafkaError>>>, KafkaError> {
+    ) -> Result<Option<oneshot::Receiver<Result<(), Error>>>, Error> {
         let listener_present = {
             let subs = match self.subscriptions.lock() {
                 Ok(g) => g,
@@ -874,7 +874,7 @@ impl AbstractMembershipManager {
             return Ok(None);
         }
 
-        let (ack_tx, ack_rx) = oneshot::channel::<Result<(), KafkaError>>();
+        let (ack_tx, ack_rx) = oneshot::channel::<Result<(), Error>>();
         let event = BackgroundEvent::PartitionsRemoved { method_name: method, partitions, ack: ack_tx };
         self.background_event_handler.add(event, current_time_ms)?;
         Ok(Some(ack_rx))
@@ -903,8 +903,8 @@ impl AbstractMembershipManager {
         assigned_partitions: Vec<TopicPartition>,
         added_partitions: Vec<TopicPartition>,
         current_time_ms: i64,
-    ) -> Result<oneshot::Receiver<Result<(), KafkaError>>, KafkaError> {
-        let (ack_tx, ack_rx) = oneshot::channel::<Result<(), KafkaError>>();
+    ) -> Result<oneshot::Receiver<Result<(), Error>>, Error> {
+        let (ack_tx, ack_rx) = oneshot::channel::<Result<(), Error>>();
         let event = BackgroundEvent::PartitionsAssigned { assigned_partitions, added_partitions, ack: ack_tx };
         self.background_event_handler.add(event, current_time_ms)?;
         log::debug!(
@@ -919,7 +919,7 @@ impl AbstractMembershipManager {
         method: ConsumerRebalanceListenerMethodName,
         partitions: Vec<TopicPartition>,
         current_time_ms: i64,
-    ) -> Result<(), KafkaError> {
+    ) -> Result<(), Error> {
         // Step 1: listener-presence short-circuit, matching Java's
         // `subscriptions.rebalanceListener().isPresent()` guard. Drop
         // the guard immediately to satisfy §16.
@@ -934,7 +934,7 @@ impl AbstractMembershipManager {
             return Ok(());
         }
 
-        let (ack_tx, ack_rx) = oneshot::channel::<Result<(), KafkaError>>();
+        let (ack_tx, ack_rx) = oneshot::channel::<Result<(), Error>>();
         let event = BackgroundEvent::PartitionsRemoved { method_name: method, partitions, ack: ack_tx };
         // Enqueue. If the receiver is gone (consumer shutting down) we
         // surface the error like Java would on a closed queue.
@@ -959,7 +959,7 @@ impl AbstractMembershipManager {
             Err(_recv_err) => {
                 // App side dropped the receiver before responding —
                 // treat as fatal listener failure.
-                Err(KafkaError::illegal_state(
+                Err(Error::local_illegal_state(
                     "Rebalance listener ack receiver dropped before completion",
                 ))
             },
@@ -971,9 +971,9 @@ impl AbstractMembershipManager {
 mod tests {
     use super::*;
     use crate::common::internals::ClusterResourceListeners;
+    use crate::consumer::AutoOffsetResetStrategy;
     use crate::consumer::ConsumerConfig;
     use crate::consumer::ConsumerRebalanceListener;
-    use crate::consumer::internals::auto_offset_reset_strategy::AutoOffsetResetStrategy;
     use async_trait::async_trait;
     use std::collections::HashSet;
     use tokio::sync::mpsc;
@@ -983,10 +983,10 @@ mod tests {
     struct NoopListener;
     #[async_trait]
     impl ConsumerRebalanceListener for NoopListener {
-        async fn on_partitions_revoked(&self, _partitions: &[TopicPartition]) -> Result<(), KafkaError> {
+        async fn on_partitions_revoked(&self, _partitions: &[TopicPartition]) -> Result<(), Error> {
             Ok(())
         }
-        async fn on_partitions_assigned(&self, _partitions: &[TopicPartition]) -> Result<(), KafkaError> {
+        async fn on_partitions_assigned(&self, _partitions: &[TopicPartition]) -> Result<(), Error> {
             Ok(())
         }
     }
@@ -995,17 +995,17 @@ mod tests {
         Arc<Mutex<SubscriptionState>>,
         Arc<ConsumerMetadata>,
         Arc<BackgroundEventHandler>,
-        mpsc::UnboundedReceiver<crate::consumer::internals::events::background_event::BackgroundEventEnvelope>,
+        mpsc::UnboundedReceiver<crate::consumer::internals::events::BackgroundEventEnvelope>,
     ) {
         let subs = Arc::new(Mutex::new(SubscriptionState::new(AutoOffsetResetStrategy::LATEST)));
         // Register a no-op listener so the §31 short-circuit allows
         // the handshake to enqueue an event in these tests.
         subs.lock()
             .unwrap()
-            .subscribe_topics(HashSet::new(), Some(Arc::new(NoopListener)))
+            .subscribe_with_topics(HashSet::new(), Some(Arc::new(NoopListener)))
             .unwrap();
-        let config = ConsumerConfig::new(vec!["localhost:9092".to_string()]);
-        let metadata = Arc::new(ConsumerMetadata::from_config(
+        let config = ConsumerConfig { bootstrap_servers: vec!["localhost:9092".to_string()], ..Default::default() };
+        let metadata = Arc::new(ConsumerMetadata::with_config(
             &config,
             subs.clone(),
             ClusterResourceListeners::new(),
@@ -1025,7 +1025,7 @@ mod tests {
             beh,
             true,
             None,
-            Arc::new(crate::common::metrics::time::SystemTime),
+            Arc::new(crate::common::metrics::SystemTime),
         );
         let inner = mgr.inner.lock().unwrap();
         assert_eq!(inner.state, MemberState::Unsubscribed);
@@ -1044,12 +1044,12 @@ mod tests {
             beh,
             true,
             None,
-            Arc::new(crate::common::metrics::time::SystemTime),
+            Arc::new(crate::common::metrics::SystemTime),
         );
         let mut inner = mgr.inner.lock().unwrap();
         // UNSUBSCRIBED → STABLE is invalid.
         let err = inner.transition_to(MemberState::Stable).unwrap_err();
-        assert!(matches!(err, KafkaError::IllegalState(_)));
+        assert!(matches!(err, Error::LocalIllegalState(_)));
     }
 
     #[test]
@@ -1062,7 +1062,7 @@ mod tests {
             beh,
             true,
             None,
-            Arc::new(crate::common::metrics::time::SystemTime),
+            Arc::new(crate::common::metrics::SystemTime),
         );
         let mut inner = mgr.inner.lock().unwrap();
         // UNSUBSCRIBED → PREPARE_LEAVING valid.
@@ -1094,7 +1094,7 @@ mod tests {
         let mut partitions = HashMap::new();
         partitions.insert(Uuid::random_uuid(), vec![0, 1]);
         let err = LocalAssignment::new(LocalAssignment::NONE_EPOCH, partitions).unwrap_err();
-        assert!(matches!(err, KafkaError::IllegalArgument(_)));
+        assert!(matches!(err, Error::LocalIllegalArgument(_)));
     }
 
     /// §31 handshake regression: enqueueing a callback then sending
@@ -1109,7 +1109,7 @@ mod tests {
             beh,
             true,
             None,
-            Arc::new(crate::common::metrics::time::SystemTime),
+            Arc::new(crate::common::metrics::SystemTime),
         );
 
         // Spawn the bg-side invocation.
@@ -1140,7 +1140,7 @@ mod tests {
     }
 
     /// §31 handshake: if the app side drops the receiver, the bg call
-    /// returns an `IllegalState` error.
+    /// returns an `LocalIllegalState` error.
     #[tokio::test]
     async fn invoke_rebalance_callback_ack_dropped() {
         let (subs, metadata, beh, mut rx) = setup();
@@ -1151,7 +1151,7 @@ mod tests {
             beh,
             true,
             None,
-            Arc::new(crate::common::metrics::time::SystemTime),
+            Arc::new(crate::common::metrics::SystemTime),
         );
 
         let mgr_for_bg = Arc::new(mgr);
@@ -1172,7 +1172,7 @@ mod tests {
         }
 
         let result = bg.await.unwrap();
-        assert!(matches!(result, Err(KafkaError::IllegalState(_))));
+        assert!(matches!(result, Err(Error::LocalIllegalState(_))));
     }
 
     /// §31 short-circuit (COMMENTS.1.md fix #1): when no rebalance
@@ -1183,8 +1183,8 @@ mod tests {
     async fn invoke_rebalance_callback_no_listener_short_circuits() {
         // Build a subscription state WITHOUT a registered listener.
         let subs = Arc::new(Mutex::new(SubscriptionState::new(AutoOffsetResetStrategy::LATEST)));
-        let config = ConsumerConfig::new(vec!["localhost:9092".to_string()]);
-        let metadata = Arc::new(ConsumerMetadata::from_config(
+        let config = ConsumerConfig { bootstrap_servers: vec!["localhost:9092".to_string()], ..Default::default() };
+        let metadata = Arc::new(ConsumerMetadata::with_config(
             &config,
             subs.clone(),
             ClusterResourceListeners::new(),
@@ -1198,7 +1198,7 @@ mod tests {
             beh,
             true,
             None,
-            Arc::new(crate::common::metrics::time::SystemTime),
+            Arc::new(crate::common::metrics::SystemTime),
         );
 
         // Without a listener, the handshake must complete immediately
@@ -1228,7 +1228,7 @@ mod tests {
             beh,
             true,
             None,
-            Arc::new(crate::common::metrics::time::SystemTime),
+            Arc::new(crate::common::metrics::SystemTime),
         );
 
         let mgr_for_bg = Arc::new(mgr);
@@ -1242,12 +1242,12 @@ mod tests {
         let env = rx.recv().await.expect("event must arrive");
         match env.event {
             BackgroundEvent::PartitionsRemoved { ack, .. } => {
-                ack.send(Err(KafkaError::timeout("listener slow"))).unwrap();
+                ack.send(Err(Error::timeout("listener slow"))).unwrap();
             },
             _ => panic!("unexpected event"),
         }
 
         let result = bg.await.unwrap();
-        assert!(matches!(result, Err(KafkaError::Timeout(_))));
+        assert!(matches!(result, Err(Error::Timeout(_))));
     }
 }

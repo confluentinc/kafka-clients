@@ -105,24 +105,16 @@ use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 
 use tokio::sync::{Mutex as AsyncMutex, mpsc};
 
-use crate::kafka_client::KafkaClient;
+use crate::KafkaClient;
 
-use super::consumer_membership_manager::ConsumerMembershipManager;
-use super::events::application_event::ApplicationEventEnvelope;
-use super::events::application_event_processor::ApplicationEventProcessor;
-use super::events::completable_event_reaper::CompletableEventReaper;
-use super::events::event_processor::EventProcessor;
-use super::network_client_delegate::NetworkClientDelegate;
-use super::request_managers::RequestManagers;
-use super::wakeup_trigger::WakeupTrigger;
-
-/// `consumer-threading.md` §11 / Java
-/// `ConsumerNetworkThread.MAX_POLL_TIMEOUT_MS`.
-pub(crate) const MAX_POLL_TIMEOUT_MS: i64 = 5_000;
-
-/// Default close-timeout in ms. Mirrors Java's
-/// `ConsumerUtils.DEFAULT_CLOSE_TIMEOUT_MS`.
-pub(crate) const DEFAULT_CLOSE_TIMEOUT_MS: i64 = 30_000;
+use super::ConsumerMembershipManager;
+use super::NetworkClientDelegate;
+use super::RequestManagers;
+use super::WakeupTrigger;
+use super::events::ApplicationEventEnvelope;
+use super::events::ApplicationEventProcessor;
+use super::events::CompletableEventReaper;
+use super::events::EventProcessor;
 
 /// Time source used by `ConsumerNetworkThread` for the `current_time_ms`
 /// argument to `runOnce` and `cleanup`. Mirrors Java's `Time` interface
@@ -188,7 +180,7 @@ impl ThreadTime for SystemThreadTime {
 /// network client delegate, the application event processor, the event
 /// reaper, and the membership manager. The application event channel
 /// (receiver half) is also owned here; the sender lives on the app side
-/// in [`super::events::application_event_handler::ApplicationEventHandler`].
+/// in [`super::events::ApplicationEventHandler`].
 ///
 /// # Concurrency
 ///
@@ -254,7 +246,7 @@ pub(crate) struct ConsumerNetworkThread<K: KafkaClient + Send + 'static> {
     /// subset of `applicationEventReaper.uncompletedEvents()` that Java
     /// passes to `maybeFailOnMetadataError(uncompletedEvents)` — see
     /// the module docstring.
-    notifiable_handles: Vec<Arc<dyn super::events::completable_event::CompletableEventErasedHandle>>,
+    notifiable_handles: Vec<Arc<dyn super::events::CompletableEventErasedHandle>>,
     /// Scratch buffers reused across `run_once` iterations (Phase 28):
     /// the PollResult before/after batches and the application-event
     /// drain buffer. Java's `entries` is a final List built once in the
@@ -262,15 +254,15 @@ pub(crate) struct ConsumerNetworkThread<K: KafkaClient + Send + 'static> {
     /// GC-nursery LinkedList — per-iteration heap allocation here was a
     /// translation artifact (~7k iterations/s on the bg hot loop).
     /// Always left empty between iterations; capacity is retained.
-    poll_results_before_scratch: Vec<super::network_client_delegate::PollResult>,
-    poll_results_after_scratch: Vec<super::network_client_delegate::PollResult>,
+    poll_results_before_scratch: Vec<super::PollResult>,
+    poll_results_after_scratch: Vec<super::PollResult>,
     app_event_drain_scratch: Vec<ApplicationEventEnvelope>,
     /// Async-consumer metrics (`AsyncConsumerMetrics`). `None` until wired
     /// post-construction by the live consumer (M4/M5 setter precedent);
     /// tests leave it unset and the bg-loop record points are no-ops.
-    async_consumer_metrics: Option<Arc<super::async_consumer_metrics::AsyncConsumerMetrics>>,
+    async_consumer_metrics: Option<Arc<super::AsyncConsumerMetrics>>,
     /// Shared mirror of the application-event queue depth, written by
-    /// [`super::events::application_event_handler::ApplicationEventHandler::add`]
+    /// [`super::events::ApplicationEventHandler::add`]
     /// and reset to 0 by `process_application_events` (Java's
     /// `recordApplicationEventQueueSize(0)` after `drainTo`). `None` when
     /// metrics are not wired.
@@ -278,6 +270,14 @@ pub(crate) struct ConsumerNetworkThread<K: KafkaClient + Send + 'static> {
 }
 
 impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
+    /// `consumer-threading.md` §11 / Java
+    /// `ConsumerNetworkThread.MAX_POLL_TIMEOUT_MS`.
+    pub(crate) const MAX_POLL_TIMEOUT_MS: i64 = 5_000;
+
+    /// Default close-timeout in ms. Mirrors Java's
+    /// `ConsumerUtils.DEFAULT_CLOSE_TIMEOUT_MS`.
+    pub(crate) const DEFAULT_CLOSE_TIMEOUT_MS: i64 = 30_000;
+
     /// Java constructor. Drops `LogContext` (Rust uses `log`) and the three
     /// `Supplier<...>` indirections (Rust takes the already-constructed
     /// values directly). The Java `AsyncConsumerMetrics` parameter is wired
@@ -300,7 +300,7 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
         // the bg-task here writes a tighter bound on each iteration, so we
         // seed with `MAX_POLL_TIMEOUT_MS` (the safer "wake at least this
         // often" default).
-        cached_max_time_to_wait_ms.store(MAX_POLL_TIMEOUT_MS, Ordering::Release);
+        cached_max_time_to_wait_ms.store(Self::MAX_POLL_TIMEOUT_MS, Ordering::Release);
         Self {
             application_event_rx,
             application_event_reaper,
@@ -310,7 +310,7 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
             wakeup,
             running: Arc::new(AtomicBool::new(true)),
             cached_max_time_to_wait_ms,
-            close_timeout_ms: AtomicI64::new(DEFAULT_CLOSE_TIMEOUT_MS),
+            close_timeout_ms: AtomicI64::new(Self::DEFAULT_CLOSE_TIMEOUT_MS),
             last_poll_time_ms: 0,
             time,
             membership,
@@ -329,7 +329,7 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
     /// Java passes `AsyncConsumerMetrics` to the constructor.
     pub(crate) fn set_async_consumer_metrics(
         &mut self,
-        metrics: Arc<super::async_consumer_metrics::AsyncConsumerMetrics>,
+        metrics: Arc<super::AsyncConsumerMetrics>,
         application_event_queue_size: Arc<AtomicI64>,
     ) {
         self.async_consumer_metrics = Some(metrics);
@@ -459,7 +459,7 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
         // delegate. This keeps the `std::sync::Mutex` over
         // `request_managers` from being held across any `.await`
         // (`consumer-threading.md` §16).
-        let mut poll_wait_time_ms: i64 = MAX_POLL_TIMEOUT_MS;
+        let mut poll_wait_time_ms: i64 = Self::MAX_POLL_TIMEOUT_MS;
         // Phase 28: the two PollResult batches are accumulated in scratch
         // buffers reused across iterations (taken here, restored cleared at
         // the end of `run_once`) — the previous shape allocated three Vecs
@@ -733,7 +733,7 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
             return;
         };
 
-        // Step 3: notify every live handle. KafkaError is Clone so we
+        // Step 3: notify every live handle. Error is Clone so we
         // can fan it out faithfully (Java passes the same exception
         // instance to each `onMetadataError` call).
         for handle in &self.notifiable_handles {
@@ -744,7 +744,7 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
             // `tx.send(Err(err))` on the inner oneshot — identical
             // semantics. The method is misnamed in Rust for historical
             // reasons (it was originally only used by the reaper); the
-            // generic implementation accepts any `KafkaError`.
+            // generic implementation accepts any `Error`.
             handle.fail_with_timeout(err.clone());
         }
         // The handles will be pruned on the next iteration's
@@ -894,7 +894,7 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
     #[cfg(test)]
     pub(crate) fn push_notifiable_handle_for_test(
         &mut self,
-        handle: Arc<dyn super::events::completable_event::CompletableEventErasedHandle>,
+        handle: Arc<dyn super::events::CompletableEventErasedHandle>,
     ) {
         self.notifiable_handles.push(handle);
     }
@@ -994,8 +994,7 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
         while let Ok(env) = self.application_event_rx.try_recv() {
             leftover_envelopes.push(env);
         }
-        let mut leftover_erased: Vec<Arc<dyn super::events::completable_event::CompletableEventErasedHandle>> =
-            Vec::new();
+        let mut leftover_erased: Vec<Arc<dyn super::events::CompletableEventErasedHandle>> = Vec::new();
         for env in leftover_envelopes {
             if let Some(erased) = env.event.erased_handle() {
                 leftover_erased.push(erased);
@@ -1083,27 +1082,31 @@ mod tests {
     use std::sync::atomic::{AtomicI64, AtomicUsize};
     use std::time::Duration;
 
-    use crate::api_versions::ApiVersions;
+    use crate::ApiVersions;
+    use crate::MockClient;
+    use crate::common::Error;
     use crate::common::IsolationLevel;
-    use crate::common::KafkaError;
     use crate::common::Node;
     use crate::common::internals::ClusterResourceListeners;
+    use crate::consumer::AutoOffsetResetStrategy;
     use crate::consumer::ConsumerConfig;
     use crate::consumer::GroupMembershipOperation;
-    use crate::consumer::internals::auto_offset_reset_strategy::AutoOffsetResetStrategy;
-    use crate::consumer::internals::consumer_membership_manager::ConsumerMembershipManager;
-    use crate::consumer::internals::consumer_metadata::ConsumerMetadata;
-    use crate::consumer::internals::events::application_event::{ApplicationEvent, ApplicationEventEnvelope};
-    use crate::consumer::internals::events::application_event_processor::ApplicationEventProcessor;
-    use crate::consumer::internals::events::background_event_handler::BackgroundEventHandler;
-    use crate::consumer::internals::events::completable_event::make_completable_event;
-    use crate::consumer::internals::events::completable_event_reaper::CompletableEventReaper;
-    use crate::consumer::internals::network_client_delegate::{NetworkClientDelegate, PollResult};
-    use crate::consumer::internals::offsets_request_manager::OffsetsRequestManager;
-    use crate::consumer::internals::request_manager::RequestManager;
-    use crate::consumer::internals::request_managers::RequestManagers;
-    use crate::consumer::internals::subscription_state::SubscriptionState;
-    use crate::mock_client::MockClient;
+    use crate::consumer::internals::ConsumerMembershipManager;
+    use crate::consumer::internals::ConsumerMetadata;
+    use crate::consumer::internals::OffsetsRequestManager;
+    use crate::consumer::internals::RequestManager;
+    use crate::consumer::internals::RequestManagers;
+    use crate::consumer::internals::SubscriptionState;
+    use crate::consumer::internals::events::ApplicationEventProcessor;
+    use crate::consumer::internals::events::BackgroundEventHandler;
+    use crate::consumer::internals::events::CompletableEvent;
+    use crate::consumer::internals::events::CompletableEventReaper;
+    use crate::consumer::internals::events::{ApplicationEvent, ApplicationEventEnvelope};
+    use crate::consumer::internals::{NetworkClientDelegate, PollResult};
+
+    /// A concrete instantiation used purely to name the associated constants.
+    /// They do not depend on `K`, but a generic type cannot infer it (E0282).
+    type NetThread = ConsumerNetworkThread<CountingClient>;
 
     use super::*;
 
@@ -1170,7 +1173,7 @@ mod tests {
     impl RequestManager for SpyRequestManager {
         fn poll(&mut self, _current_time_ms: i64) -> PollResult {
             self.poll_calls.fetch_add(1, Ordering::SeqCst);
-            PollResult::from_wait(self.poll_return_ms)
+            PollResult::with_time_until_next_poll_ms(self.poll_return_ms)
         }
 
         fn maximum_time_to_wait(&self, _current_time_ms: i64) -> i64 {
@@ -1253,7 +1256,7 @@ mod tests {
         fn connection_failed(&self, node: &Node) -> bool {
             self.inner.connection_failed(node)
         }
-        fn authentication_error(&self, node: &Node) -> Option<String> {
+        fn authentication_error(&self, node: &Node) -> Option<Error> {
             self.inner.authentication_error(node)
         }
         fn send(&mut self, request: crate::ClientRequest, now: i64) {
@@ -1355,16 +1358,16 @@ mod tests {
     }
 
     fn make_config() -> ConsumerConfig {
-        ConsumerConfig::new(vec!["localhost:9092".to_string()])
+        ConsumerConfig { bootstrap_servers: vec!["localhost:9092".to_string()], ..Default::default() }
     }
 
     fn make_metadata(config: &ConsumerConfig, subs: Arc<Mutex<SubscriptionState>>) -> Arc<ConsumerMetadata> {
-        Arc::new(ConsumerMetadata::from_config(config, subs, ClusterResourceListeners::new()))
+        Arc::new(ConsumerMetadata::with_config(config, subs, ClusterResourceListeners::new()))
     }
 
     fn make_delegate(config: &ConsumerConfig, metadata: Arc<ConsumerMetadata>) -> NetworkClientDelegate<MockClient> {
         let time_provider: Arc<dyn Fn() -> i64 + Send + Sync> = Arc::new(|| 0);
-        let client = MockClient::new(Vec::<Node>::new(), time_provider);
+        let client = MockClient::with_static_nodes(Vec::<Node>::new(), time_provider);
         let (tx, _rx) = mpsc::unbounded_channel();
         let beh = Arc::new(BackgroundEventHandler::new(tx));
         let raw_metadata = metadata.metadata_arc();
@@ -1376,7 +1379,7 @@ mod tests {
         metadata: Arc<ConsumerMetadata>,
     ) -> NetworkClientDelegate<CountingClient> {
         let time_provider: Arc<dyn Fn() -> i64 + Send + Sync> = Arc::new(|| 0);
-        let client = CountingClient::new(MockClient::new(Vec::<Node>::new(), time_provider));
+        let client = CountingClient::new(MockClient::with_static_nodes(Vec::<Node>::new(), time_provider));
         let (tx, _rx) = mpsc::unbounded_channel();
         let beh = Arc::new(BackgroundEventHandler::new(tx));
         let raw_metadata = metadata.metadata_arc();
@@ -1432,7 +1435,7 @@ mod tests {
             request_managers,
             None,
             wakeup,
-            Arc::new(AtomicI64::new(MAX_POLL_TIMEOUT_MS)),
+            Arc::new(AtomicI64::new(NetThread::MAX_POLL_TIMEOUT_MS)),
         );
         (
             CountingFixture { thread, time, delegate, reaper, tx },
@@ -1493,7 +1496,7 @@ mod tests {
             request_managers,
             None,
             wakeup,
-            Arc::new(AtomicI64::new(MAX_POLL_TIMEOUT_MS)),
+            Arc::new(AtomicI64::new(NetThread::MAX_POLL_TIMEOUT_MS)),
         );
 
         // Mirror `ApplicationEventHandler::add`, which pokes this handle after
@@ -1510,6 +1513,10 @@ mod tests {
         subs: Arc<Mutex<SubscriptionState>>,
         metadata: Arc<ConsumerMetadata>,
     ) -> OffsetsRequestManager {
+        let positions_validator = Arc::new(crate::consumer::internals::PositionsValidator::new(
+            subs.clone(),
+            metadata.clone(),
+        ));
         OffsetsRequestManager::new(
             subs,
             metadata,
@@ -1519,6 +1526,7 @@ mod tests {
             60_000,
             Arc::new(ApiVersions::new()),
             None,
+            positions_validator,
         )
     }
 
@@ -1565,7 +1573,7 @@ mod tests {
             request_managers.clone(),
             None,
             wakeup,
-            Arc::new(AtomicI64::new(MAX_POLL_TIMEOUT_MS)),
+            Arc::new(AtomicI64::new(NetThread::MAX_POLL_TIMEOUT_MS)),
         );
         (thread, tx, reaper, time, request_managers)
     }
@@ -1591,7 +1599,7 @@ mod tests {
             beh,
             false,
             None,
-            Arc::new(crate::common::metrics::time::SystemTime),
+            Arc::new(crate::common::metrics::SystemTime),
         ));
 
         let request_managers = Arc::new(Mutex::new(RequestManagers::new(
@@ -1619,7 +1627,7 @@ mod tests {
             request_managers,
             Some(membership.clone()),
             wakeup,
-            Arc::new(AtomicI64::new(MAX_POLL_TIMEOUT_MS)),
+            Arc::new(AtomicI64::new(NetThread::MAX_POLL_TIMEOUT_MS)),
         );
         (thread, membership)
     }
@@ -1657,17 +1665,17 @@ mod tests {
     ///     the two `maximumTimeToWait` returns).
     #[tokio::test]
     async fn test_consumer_network_thread_poll_time_computations_below_max() {
-        run_poll_time_computations_case(MAX_POLL_TIMEOUT_MS - 1).await;
+        run_poll_time_computations_case(NetThread::MAX_POLL_TIMEOUT_MS - 1).await;
     }
 
     #[tokio::test]
     async fn test_consumer_network_thread_poll_time_computations_at_max() {
-        run_poll_time_computations_case(MAX_POLL_TIMEOUT_MS).await;
+        run_poll_time_computations_case(NetThread::MAX_POLL_TIMEOUT_MS).await;
     }
 
     #[tokio::test]
     async fn test_consumer_network_thread_poll_time_computations_above_max() {
-        run_poll_time_computations_case(MAX_POLL_TIMEOUT_MS + 1).await;
+        run_poll_time_computations_case(NetThread::MAX_POLL_TIMEOUT_MS + 1).await;
     }
 
     async fn run_poll_time_computations_case(example_time: i64) {
@@ -1687,7 +1695,7 @@ mod tests {
         // was called with the expected timeout. We assert the timeout
         // passed to the FIRST poll call (run_once executes exactly one
         // network poll per iteration).
-        let expected_timeout = example_time.min(MAX_POLL_TIMEOUT_MS);
+        let expected_timeout = example_time.min(NetThread::MAX_POLL_TIMEOUT_MS);
         let timeouts = poll_timeouts.lock().unwrap();
         assert!(!timeouts.is_empty(), "delegate.poll(...) must be called at least once");
         assert_eq!(
@@ -1791,14 +1799,14 @@ mod tests {
     async fn test_maximum_time_to_wait() {
         const DEFAULT_HEARTBEAT_INTERVAL_MS: i64 = 1_000;
 
-        let heartbeat_spy = SpyRequestManager::new(MAX_POLL_TIMEOUT_MS, DEFAULT_HEARTBEAT_INTERVAL_MS);
+        let heartbeat_spy = SpyRequestManager::new(NetThread::MAX_POLL_TIMEOUT_MS, DEFAULT_HEARTBEAT_INTERVAL_MS);
         let dyn_managers: Vec<Box<dyn RequestManager>> = vec![Box::new(heartbeat_spy)];
         let (mut fixture, _poll, _to, _hi) = make_thread_with_dyn_managers(dyn_managers);
 
         // Initial value before runOnce has been called.
         assert_eq!(
             fixture.thread.maximum_time_to_wait(),
-            MAX_POLL_TIMEOUT_MS,
+            NetThread::MAX_POLL_TIMEOUT_MS,
             "initial cached maximumTimeToWait must equal MAX_POLL_TIMEOUT_MS"
         );
 
@@ -1821,7 +1829,7 @@ mod tests {
         let (mut thread, _tx, reaper, _time, _rm) = make_thread_no_membership();
         // Add a deadline-zero completable event so reap-on-close
         // expires it.
-        let (_h, mut rx, erased) = make_completable_event::<()>(0);
+        let (_h, mut rx, erased) = CompletableEvent::make_completable_event::<()>(0);
         reaper.lock().unwrap().add(erased);
 
         thread.cleanup().await;
@@ -1829,7 +1837,7 @@ mod tests {
         // The reaper observed the tracked event and timed it out —
         // proves `reap_on_close(...)` was called inside `cleanup()`.
         assert!(
-            matches!(rx.try_recv().expect("sender used"), Err(KafkaError::Timeout(_))),
+            matches!(rx.try_recv().expect("sender used"), Err(Error::Timeout(_))),
             "reaper.reap(...) must complete tracked event with Timeout"
         );
     }
@@ -1843,7 +1851,7 @@ mod tests {
         let (mut thread, _tx, reaper, time, _rm) = make_thread_no_membership();
         // Register a deadline-zero event; clock starts at 1_000, so
         // every reap iteration past-due will fire `Timeout` on rx.
-        let (_h, mut rx, erased) = make_completable_event::<()>(0);
+        let (_h, mut rx, erased) = CompletableEvent::make_completable_event::<()>(0);
         reaper.lock().unwrap().add(erased);
 
         // Drive a single iteration. The reap step at Phase 6 must
@@ -1852,7 +1860,7 @@ mod tests {
         thread.run_once().await;
 
         assert!(
-            matches!(rx.try_recv().expect("sender used"), Err(KafkaError::Timeout(_))),
+            matches!(rx.try_recv().expect("sender used"), Err(Error::Timeout(_))),
             "runOnce must call reaper.reap(now) and expire the past-due event"
         );
     }
@@ -1935,7 +1943,7 @@ mod tests {
     #[tokio::test]
     async fn process_events_registers_completable_with_reaper() {
         let (mut thread, tx, reaper, _time, _rm) = make_thread_no_membership();
-        let (handle, _rx, erased_external) = make_completable_event::<()>(60_000);
+        let (handle, _rx, erased_external) = CompletableEvent::make_completable_event::<()>(60_000);
         let event = ApplicationEvent::AssignmentChange { handle, current_time_ms: 1_000, partitions: HashSet::new() };
         tx.send(ApplicationEventEnvelope { event, enqueued_ms: 1_000 })
             .expect("send ok");
@@ -2074,21 +2082,18 @@ mod tests {
             request_managers,
             None,
             wakeup,
-            Arc::new(AtomicI64::new(MAX_POLL_TIMEOUT_MS)),
+            Arc::new(AtomicI64::new(NetThread::MAX_POLL_TIMEOUT_MS)),
         );
 
         // 1. Notifiable handle with a large deadline so the reaper
         // doesn't expire it before the metadata-error arm fires.
-        let (h, mut event_rx) =
-            crate::consumer::internals::events::completable_event::CompletableEventHandle::<()>::new(60_000);
+        let (h, mut event_rx) = crate::consumer::internals::events::CompletableEventHandle::<()>::new(60_000);
         thread.push_notifiable_handle_for_test(h.erased());
 
         // 2. Plant the metadata error on the cluster.
         metadata
             .metadata_arc()
-            .fatal_error(KafkaError::topic_authorization(std::collections::HashSet::from([
-                "t".to_string()
-            ])));
+            .fatal_error(Error::topic_authorization(std::collections::HashSet::from(["t".to_string()])));
 
         // 3. Drive one runOnce iteration.
         thread.run_once().await;
@@ -2098,7 +2103,7 @@ mod tests {
         let received = event_rx.try_recv().expect("sender used");
         let err = received.expect_err("post-poll arm must fail the handle");
         assert!(
-            matches!(err, KafkaError::TopicAuthorization(_)),
+            matches!(err, Error::TopicAuthorization(_)),
             "expected TopicAuthorization, got: {err:?}"
         );
     }
@@ -2140,15 +2145,13 @@ mod tests {
             request_managers,
             None,
             wakeup,
-            Arc::new(AtomicI64::new(MAX_POLL_TIMEOUT_MS)),
+            Arc::new(AtomicI64::new(NetThread::MAX_POLL_TIMEOUT_MS)),
         );
 
         // Plant the metadata error.
         metadata
             .metadata_arc()
-            .fatal_error(KafkaError::topic_authorization(std::collections::HashSet::from([
-                "t".to_string()
-            ])));
+            .fatal_error(Error::topic_authorization(std::collections::HashSet::from(["t".to_string()])));
 
         // No notifiable handles tracked. run_once must NOT consume the
         // delegate's metadata_error.
@@ -2164,12 +2167,12 @@ mod tests {
     }
 
     /// `LeaveGroupOnClose` is a completable variant. Confirms the
-    /// completable-arm coverage of [`super::ApplicationEvent::erased_handle`]
+    /// completable-arm coverage of [`super::events::ApplicationEvent::erased_handle`]
     /// extends beyond `AssignmentChange`.
     #[tokio::test]
     async fn leave_group_event_registered_with_reaper() {
         let (mut thread, tx, reaper, _time, _rm) = make_thread_no_membership();
-        let (handle, _rx, erased_external) = make_completable_event::<()>(60_000);
+        let (handle, _rx, erased_external) = CompletableEvent::make_completable_event::<()>(60_000);
         let event =
             ApplicationEvent::LeaveGroupOnClose { handle, membership_operation: GroupMembershipOperation::Default };
         tx.send(ApplicationEventEnvelope { event, enqueued_ms: 1_000 })
@@ -2181,21 +2184,24 @@ mod tests {
 
     // ─── Java `ConsumerNetworkThreadTest` metric tests (Phase M6) ───
 
-    use crate::common::metric::Metric;
+    use crate::common::Metric;
     use crate::common::metrics::Metrics;
-    use crate::consumer::internals::async_consumer_metrics::AsyncConsumerMetrics;
-    use crate::consumer::internals::consumer_utils::{CONSUMER_METRIC_GROUP, CONSUMER_SHARE_METRIC_GROUP};
-    use crate::consumer::internals::events::application_event::AsyncPollState;
+    use crate::consumer::internals::AsyncConsumerMetrics;
+    use crate::consumer::internals::ConsumerUtils;
+    use crate::consumer::internals::events::AsyncPollState;
 
     /// Java parameterizes both metric tests over
     /// `AsyncConsumerMetricsTest#groupNameProvider`; we loop the same two groups.
     fn metric_group_name_provider() -> [&'static str; 2] {
-        [CONSUMER_METRIC_GROUP, CONSUMER_SHARE_METRIC_GROUP]
+        [
+            ConsumerUtils::CONSUMER_METRIC_GROUP,
+            ConsumerUtils::CONSUMER_SHARE_METRIC_GROUP,
+        ]
     }
 
     /// Read a registered metric's value as `f64`.
     fn read_metric(metrics: &Metrics, name: &str, group: &str) -> f64 {
-        let mn = metrics.metric_name_group(name, group);
+        let mn = metrics.metric_name(name, group);
         metrics
             .metric(&mn)
             .expect("metric present")
@@ -2210,7 +2216,7 @@ mod tests {
     /// `@ParameterizedTest` over the two metric groups is unrolled into a
     /// loop (DoD §3). No public `metrics()` accessor is needed: the test
     /// constructs the `Metrics` registry directly and reads via
-    /// `metrics.metric(metrics.metric_name_group(...))`, exactly like Java.
+    /// `metrics.metric(metrics.metric_name(...))`, exactly like Java.
     #[tokio::test]
     async fn run_once_records_time_between_network_thread_poll() {
         for group_name in metric_group_name_provider() {
@@ -2363,8 +2369,8 @@ mod tests {
         use crate::common::Node;
         use crate::common::TopicPartition;
         use crate::consumer::OffsetAndMetadata;
-        use crate::consumer::internals::commit_request_manager::CommitRequestManager;
-        use crate::consumer::internals::coordinator_request_manager::CoordinatorRequestManager;
+        use crate::consumer::internals::CommitRequestManager;
+        use crate::consumer::internals::CoordinatorRequestManager;
 
         let mut config = make_config();
         config.group_id = Some("g".to_string());
@@ -2385,7 +2391,7 @@ mod tests {
             subs.clone(),
             "g".to_string(),
             None,
-            Arc::new(crate::common::metrics::time::SystemTime),
+            Arc::new(crate::common::metrics::SystemTime),
             0,
         ));
 
@@ -2422,7 +2428,7 @@ mod tests {
             request_managers,
             None,
             wakeup,
-            Arc::new(AtomicI64::new(MAX_POLL_TIMEOUT_MS)),
+            Arc::new(AtomicI64::new(NetThread::MAX_POLL_TIMEOUT_MS)),
         );
 
         // Drive one iteration. `run_once` must call

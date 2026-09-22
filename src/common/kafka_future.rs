@@ -24,12 +24,10 @@
 //! internal implementations behind a public, type-erased interface.
 
 use std::pin::Pin;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::sync::Notify;
-
-use crate::common::KafkaError;
+use crate::common::Error;
 
 /// Internal trait representing the abstract methods of `KafkaFuture`.
 ///
@@ -38,13 +36,13 @@ use crate::common::KafkaError;
 /// implement this trait and are wrapped in a `KafkaFuture<T>`.
 pub(crate) trait KafkaFutureOps<T: Send>: Send + Sync {
     /// Await the result of this future.
-    fn get(&self) -> Pin<Box<dyn std::future::Future<Output = Result<T, KafkaError>> + Send + '_>>;
+    fn get(&self) -> Pin<Box<dyn std::future::Future<Output = Result<T, Error>> + Send + '_>>;
 
     /// Await the result of this future with a timeout.
-    fn get_timeout(
+    fn get_with_timeout(
         &self,
         timeout: Duration,
-    ) -> Pin<Box<dyn std::future::Future<Output = Result<T, KafkaError>> + Send + '_>>;
+    ) -> Pin<Box<dyn std::future::Future<Output = Result<T, Error>> + Send + '_>>;
 
     /// Whether this future is complete.
     fn is_done(&self) -> bool;
@@ -79,10 +77,10 @@ impl<T: Send + 'static> KafkaFuture<T> {
     /// trait by awaiting a remote call and wrapping the response in a future
     /// to satisfy the trait's return type. Analogous to [`std::future::ready`].
     ///
-    /// Both [`get`](Self::get) and [`get_timeout`](Self::get_timeout) resolve
+    /// Both [`get`](Self::get) and [`get_with_timeout`](Self::get_with_timeout) resolve
     /// immediately with a clone of the result; [`is_done`](Self::is_done)
     /// returns `true`.
-    pub fn completed(result: Result<T, KafkaError>) -> Self
+    pub fn completed(result: Result<T, Error>) -> Self
     where
         T: Clone + Sync,
     {
@@ -96,7 +94,7 @@ impl<T: Send + 'static> KafkaFuture<T> {
     /// # Errors
     ///
     /// Returns the error from the underlying operation if it failed.
-    pub async fn get(&self) -> Result<T, KafkaError> {
+    pub async fn get(&self) -> Result<T, Error> {
         self.inner.get().await
     }
 
@@ -110,10 +108,13 @@ impl<T: Send + 'static> KafkaFuture<T> {
     ///
     /// # Errors
     ///
-    /// Returns [`KafkaError::Timeout`] if the timeout elapses before the result
-    /// is available. Returns the error from the underlying operation if it failed.
-    pub async fn get_timeout(&self, timeout: Duration) -> Result<T, KafkaError> {
-        self.inner.get_timeout(timeout).await
+    /// Returns [`Error::LocalTimeout`] if the timeout elapses before the
+    /// result is available — Java's `java.util.concurrent.TimeoutException`,
+    /// which `Future.get(timeout, unit)` declares, not the retriable
+    /// `org.apache.kafka.common.errors.TimeoutException`. Returns the error from
+    /// the underlying operation if it failed.
+    pub async fn get_with_timeout(&self, timeout: Duration) -> Result<T, Error> {
+        self.inner.get_with_timeout(timeout).await
     }
 
     /// Whether this future is complete.
@@ -191,7 +192,7 @@ impl<T: Send + 'static> KafkaFuture<T> {
     /// remaining keys on the first error.
     pub fn join_map_results<K>(
         entries: Vec<(K, KafkaFuture<T>)>,
-    ) -> KafkaFuture<std::collections::HashMap<K, Result<T, KafkaError>>>
+    ) -> KafkaFuture<std::collections::HashMap<K, Result<T, Error>>>
     where
         T: Clone + Sync,
         K: std::hash::Hash + Eq + Clone + Send + Sync + 'static,
@@ -209,7 +210,7 @@ impl<T: Send + 'static> KafkaFuture<T> {
     where
         T: Clone + Sync,
         R: Clone + Send + Sync + 'static,
-        F: Fn(T) -> Result<R, KafkaError> + Send + Sync + 'static,
+        F: Fn(T) -> Result<R, Error> + Send + Sync + 'static,
     {
         KafkaFuture::new(Arc::new(ThenApplyFuture { source: self.clone(), function: Arc::new(function) }))
     }
@@ -233,209 +234,25 @@ impl<T: Send + 'static> std::fmt::Debug for KafkaFuture<T> {
 /// when the future is constructed. The result is cloned on each `get` call
 /// so the future is reusable, matching Java's `Future` semantics.
 struct CompletedFuture<T: Clone + Send + Sync + 'static> {
-    result: Result<T, KafkaError>,
+    result: Result<T, Error>,
 }
 
 impl<T: Clone + Send + Sync + 'static> KafkaFutureOps<T> for CompletedFuture<T> {
-    fn get(&self) -> Pin<Box<dyn std::future::Future<Output = Result<T, KafkaError>> + Send + '_>> {
+    fn get(&self) -> Pin<Box<dyn std::future::Future<Output = Result<T, Error>> + Send + '_>> {
         let result = self.result.clone();
         Box::pin(async move { result })
     }
 
-    fn get_timeout(
+    fn get_with_timeout(
         &self,
         _timeout: Duration,
-    ) -> Pin<Box<dyn std::future::Future<Output = Result<T, KafkaError>> + Send + '_>> {
+    ) -> Pin<Box<dyn std::future::Future<Output = Result<T, Error>> + Send + '_>> {
         let result = self.result.clone();
         Box::pin(async move { result })
     }
 
     fn is_done(&self) -> bool {
         true
-    }
-}
-
-/// The shared, completable state behind a [`KafkaFutureImpl`].
-///
-/// This is the Rust equivalent of the `CompletableFuture` that backs Java's
-/// `org.apache.kafka.common.internals.KafkaFutureImpl`. The value is set once
-/// (first writer wins) and can be awaited by any number of consumers any
-/// number of times, matching Java `Future.get()` semantics. A [`Notify`] wakes
-/// awaiters; registered completion callbacks fire eagerly on completion.
-struct Completable<T: Clone + Send + Sync + 'static> {
-    inner: Mutex<CompletableInner<T>>,
-    notify: Notify,
-}
-
-/// A completion callback registered on a [`Completable`], invoked with a
-/// reference to the result when the future completes.
-type CompletionCallback<T> = Box<dyn FnOnce(&Result<T, KafkaError>) + Send>;
-
-struct CompletableInner<T: Clone + Send + Sync + 'static> {
-    result: Option<Result<T, KafkaError>>,
-    callbacks: Vec<CompletionCallback<T>>,
-}
-
-impl<T: Clone + Send + Sync + 'static> Completable<T> {
-    fn new() -> Self {
-        Self {
-            inner: Mutex::new(CompletableInner { result: None, callbacks: Vec::new() }),
-            notify: Notify::new(),
-        }
-    }
-
-    /// Set the result if not already set. Returns `true` if this call
-    /// completed the future, `false` if it was already complete.
-    fn set(&self, result: Result<T, KafkaError>) -> bool {
-        let callbacks = {
-            let mut guard = self.inner.lock().unwrap();
-            if guard.result.is_some() {
-                return false;
-            }
-            guard.result = Some(result);
-            std::mem::take(&mut guard.callbacks)
-        };
-        // Wake awaiters, then fire completion callbacks with a snapshot of the
-        // result (cloned so we don't hold the lock across callback execution).
-        self.notify.notify_waiters();
-        if !callbacks.is_empty() {
-            let snapshot = self.inner.lock().unwrap().result.clone().unwrap();
-            for callback in callbacks {
-                callback(&snapshot);
-            }
-        }
-        true
-    }
-
-    /// Register a callback to run when this future completes. If the future is
-    /// already complete, the callback runs immediately on the calling task.
-    ///
-    /// Only reached via [`KafkaFutureImpl::when_complete`], whose sole consumer
-    /// (the `AdminApiDriver` `describeCluster().nodes()` chaining) arrives with
-    /// a later admin tier.
-    #[allow(dead_code)]
-    fn on_complete(&self, callback: CompletionCallback<T>) {
-        let mut guard = self.inner.lock().unwrap();
-        if let Some(result) = guard.result.clone() {
-            drop(guard);
-            callback(&result);
-        } else {
-            guard.callbacks.push(callback);
-        }
-    }
-}
-
-impl<T: Clone + Send + Sync + 'static> KafkaFutureOps<T> for Completable<T> {
-    fn get(&self) -> Pin<Box<dyn std::future::Future<Output = Result<T, KafkaError>> + Send + '_>> {
-        Box::pin(async move {
-            loop {
-                // Register interest before checking so a completion racing with
-                // this check still wakes us (no lost wakeup).
-                let notified = self.notify.notified();
-                if let Some(result) = self.inner.lock().unwrap().result.clone() {
-                    return result;
-                }
-                notified.await;
-            }
-        })
-    }
-
-    fn get_timeout(
-        &self,
-        timeout: Duration,
-    ) -> Pin<Box<dyn std::future::Future<Output = Result<T, KafkaError>> + Send + '_>> {
-        Box::pin(async move {
-            match tokio::time::timeout(timeout, self.get()).await {
-                Ok(result) => result,
-                Err(_) => Err(KafkaError::Timeout(format!(
-                    "Timed out waiting for KafkaFuture after {} ms",
-                    timeout.as_millis()
-                ))),
-            }
-        })
-    }
-
-    fn is_done(&self) -> bool {
-        self.inner.lock().unwrap().result.is_some()
-    }
-}
-
-/// A completable future handle.
-///
-/// Translated from `org.apache.kafka.common.internals.KafkaFutureImpl`. The
-/// admin client creates one of these per result key, hands the caller the
-/// public [`KafkaFuture`] view via [`future`](Self::future), and later
-/// completes it from the background task when the response arrives.
-///
-/// Per CLAUDE.md (classes in an `internal`/`internals` package use only
-/// `pub(crate)`), this handle is crate-internal; only the public
-/// [`KafkaFuture`] view crosses the API boundary.
-// `KafkaFutureImpl` is a foundational prerequisite for the admin client
-// (Milestone 11): admin RPCs create these handles, return the public
-// `KafkaFuture` view synchronously, and complete them later from the
-// background task (see `src/admin`).
-pub(crate) struct KafkaFutureImpl<T: Clone + Send + Sync + 'static> {
-    state: Arc<Completable<T>>,
-}
-
-impl<T: Clone + Send + Sync + 'static> KafkaFutureImpl<T> {
-    /// Create a new, uncompleted future handle.
-    pub(crate) fn new() -> Self {
-        Self { state: Arc::new(Completable::new()) }
-    }
-
-    /// If not already completed, sets the value returned by `get()` and related
-    /// methods. Returns `true` if this call completed the future.
-    ///
-    /// Translated from `KafkaFutureImpl.complete`.
-    pub(crate) fn complete(&self, value: T) -> bool {
-        self.state.set(Ok(value))
-    }
-
-    /// If not already completed, causes `get()` and related methods to return
-    /// the given error. Returns `true` if this call completed the future.
-    ///
-    /// Translated from `KafkaFutureImpl.completeExceptionally`.
-    pub(crate) fn complete_exceptionally(&self, error: KafkaError) -> bool {
-        self.state.set(Err(error))
-    }
-
-    /// Whether this future is complete.
-    pub(crate) fn is_done(&self) -> bool {
-        self.state.is_done()
-    }
-
-    /// Register an action to run when this future completes (with a reference
-    /// to the result). If already complete, the action runs immediately.
-    ///
-    /// Translated from the eager side of `KafkaFuture.whenComplete` — used by
-    /// the admin client to chain a follow-up `Call` when a prerequisite future
-    /// (e.g. `describeCluster().nodes()`) resolves. That chaining arrives with a
-    /// later admin tier (Phase-1 topic RPCs do not chain calls).
-    #[allow(dead_code)]
-    pub(crate) fn when_complete<F>(&self, action: F)
-    where
-        F: FnOnce(&Result<T, KafkaError>) + Send + 'static,
-    {
-        self.state.on_complete(Box::new(action));
-    }
-
-    /// The public [`KafkaFuture`] view of this handle. Cloneable and awaitable
-    /// independently of the handle; both share the same completion state.
-    pub(crate) fn future(&self) -> KafkaFuture<T> {
-        KafkaFuture::new(Arc::clone(&self.state) as Arc<dyn KafkaFutureOps<T>>)
-    }
-}
-
-impl<T: Clone + Send + Sync + 'static> Clone for KafkaFutureImpl<T> {
-    fn clone(&self) -> Self {
-        Self { state: Arc::clone(&self.state) }
-    }
-}
-
-impl<T: Clone + Send + Sync + 'static> Default for KafkaFutureImpl<T> {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
@@ -449,7 +266,7 @@ struct AllOfFuture<T: Clone + Send + Sync + 'static> {
 }
 
 impl<T: Clone + Send + Sync + 'static> KafkaFutureOps<()> for AllOfFuture<T> {
-    fn get(&self) -> Pin<Box<dyn std::future::Future<Output = Result<(), KafkaError>> + Send + '_>> {
+    fn get(&self) -> Pin<Box<dyn std::future::Future<Output = Result<(), Error>> + Send + '_>> {
         Box::pin(async move {
             for future in &self.futures {
                 future.get().await?;
@@ -458,14 +275,18 @@ impl<T: Clone + Send + Sync + 'static> KafkaFutureOps<()> for AllOfFuture<T> {
         })
     }
 
-    fn get_timeout(
+    fn get_with_timeout(
         &self,
         timeout: Duration,
-    ) -> Pin<Box<dyn std::future::Future<Output = Result<(), KafkaError>> + Send + '_>> {
+    ) -> Pin<Box<dyn std::future::Future<Output = Result<(), Error>> + Send + '_>> {
         Box::pin(async move {
             match tokio::time::timeout(timeout, self.get()).await {
                 Ok(result) => result,
-                Err(_) => Err(KafkaError::Timeout(format!(
+                // `java.util.concurrent.TimeoutException`, which is what
+                // `Future.get(timeout, unit)` declares and what `KafkaFuture`
+                // imports (`KafkaFuture.java:27`) — not the retriable
+                // `org.apache.kafka.common.errors.TimeoutException`.
+                Err(_) => Err(Error::local_timeout(format!(
                     "Timed out waiting for KafkaFuture.all_of after {} ms",
                     timeout.as_millis()
                 ))),
@@ -487,7 +308,7 @@ where
 {
     source: KafkaFuture<T>,
     #[allow(clippy::type_complexity)]
-    function: Arc<dyn Fn(T) -> Result<R, KafkaError> + Send + Sync>,
+    function: Arc<dyn Fn(T) -> Result<R, Error> + Send + Sync>,
 }
 
 impl<T, R> KafkaFutureOps<R> for ThenApplyFuture<T, R>
@@ -495,21 +316,25 @@ where
     T: Clone + Send + Sync + 'static,
     R: Clone + Send + Sync + 'static,
 {
-    fn get(&self) -> Pin<Box<dyn std::future::Future<Output = Result<R, KafkaError>> + Send + '_>> {
+    fn get(&self) -> Pin<Box<dyn std::future::Future<Output = Result<R, Error>> + Send + '_>> {
         Box::pin(async move {
             let value = self.source.get().await?;
             (self.function)(value)
         })
     }
 
-    fn get_timeout(
+    fn get_with_timeout(
         &self,
         timeout: Duration,
-    ) -> Pin<Box<dyn std::future::Future<Output = Result<R, KafkaError>> + Send + '_>> {
+    ) -> Pin<Box<dyn std::future::Future<Output = Result<R, Error>> + Send + '_>> {
         Box::pin(async move {
             match tokio::time::timeout(timeout, self.get()).await {
                 Ok(result) => result,
-                Err(_) => Err(KafkaError::Timeout(format!(
+                // `java.util.concurrent.TimeoutException`, which is what
+                // `Future.get(timeout, unit)` declares and what `KafkaFuture`
+                // imports (`KafkaFuture.java:27`) — not the retriable
+                // `org.apache.kafka.common.errors.TimeoutException`.
+                Err(_) => Err(Error::local_timeout(format!(
                     "Timed out waiting for KafkaFuture.then_apply after {} ms",
                     timeout.as_millis()
                 ))),
@@ -538,8 +363,7 @@ where
 {
     fn get(
         &self,
-    ) -> Pin<Box<dyn std::future::Future<Output = Result<std::collections::HashMap<K, T>, KafkaError>> + Send + '_>>
-    {
+    ) -> Pin<Box<dyn std::future::Future<Output = Result<std::collections::HashMap<K, T>, Error>> + Send + '_>> {
         Box::pin(async move {
             let mut map = std::collections::HashMap::with_capacity(self.entries.len());
             for (key, future) in &self.entries {
@@ -549,15 +373,18 @@ where
         })
     }
 
-    fn get_timeout(
+    fn get_with_timeout(
         &self,
         timeout: Duration,
-    ) -> Pin<Box<dyn std::future::Future<Output = Result<std::collections::HashMap<K, T>, KafkaError>> + Send + '_>>
-    {
+    ) -> Pin<Box<dyn std::future::Future<Output = Result<std::collections::HashMap<K, T>, Error>> + Send + '_>> {
         Box::pin(async move {
             match tokio::time::timeout(timeout, self.get()).await {
                 Ok(result) => result,
-                Err(_) => Err(KafkaError::Timeout(format!(
+                // `java.util.concurrent.TimeoutException`, which is what
+                // `Future.get(timeout, unit)` declares and what `KafkaFuture`
+                // imports (`KafkaFuture.java:27`) — not the retriable
+                // `org.apache.kafka.common.errors.TimeoutException`.
+                Err(_) => Err(Error::local_timeout(format!(
                     "Timed out waiting for KafkaFuture.join_map after {} ms",
                     timeout.as_millis()
                 ))),
@@ -584,14 +411,14 @@ where
 }
 
 /// Shorthand for the per-key outcome map produced by [`JoinMapResultsFuture`].
-type ResultMap<K, T> = std::collections::HashMap<K, Result<T, KafkaError>>;
+type ResultMap<K, T> = std::collections::HashMap<K, Result<T, Error>>;
 
 impl<K, T> KafkaFutureOps<ResultMap<K, T>> for JoinMapResultsFuture<K, T>
 where
     K: std::hash::Hash + Eq + Clone + Send + Sync + 'static,
     T: Clone + Send + Sync + 'static,
 {
-    fn get(&self) -> Pin<Box<dyn std::future::Future<Output = Result<ResultMap<K, T>, KafkaError>> + Send + '_>> {
+    fn get(&self) -> Pin<Box<dyn std::future::Future<Output = Result<ResultMap<K, T>, Error>> + Send + '_>> {
         Box::pin(async move {
             let mut map: ResultMap<K, T> = std::collections::HashMap::with_capacity(self.entries.len());
             for (key, future) in &self.entries {
@@ -602,14 +429,14 @@ where
         })
     }
 
-    fn get_timeout(
+    fn get_with_timeout(
         &self,
         timeout: Duration,
-    ) -> Pin<Box<dyn std::future::Future<Output = Result<ResultMap<K, T>, KafkaError>> + Send + '_>> {
+    ) -> Pin<Box<dyn std::future::Future<Output = Result<ResultMap<K, T>, Error>> + Send + '_>> {
         Box::pin(async move {
             match tokio::time::timeout(timeout, self.get()).await {
                 Ok(result) => result,
-                Err(_) => Err(KafkaError::Timeout(format!(
+                Err(_) => Err(Error::timeout(format!(
                     "Timed out waiting for KafkaFuture.join_map_results after {} ms",
                     timeout.as_millis()
                 ))),
@@ -625,6 +452,9 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::common::Errors;
+    use crate::common::internals::KafkaFutureImpl;
+    use std::sync::Mutex;
 
     #[tokio::test]
     async fn completed_resolves_with_ok_value() {
@@ -633,17 +463,17 @@ mod tests {
         assert_eq!(f.get().await.unwrap(), 42);
         // Reusable across multiple gets, matching Java Future semantics.
         assert_eq!(f.get().await.unwrap(), 42);
-        assert_eq!(f.get_timeout(Duration::from_secs(1)).await.unwrap(), 42);
+        assert_eq!(f.get_with_timeout(Duration::from_secs(1)).await.unwrap(), 42);
     }
 
     #[tokio::test]
     async fn completed_resolves_with_err_value() {
-        let f: KafkaFuture<i32> = KafkaFuture::completed(Err(KafkaError::IllegalArgument("test".to_string())));
+        let f: KafkaFuture<i32> = KafkaFuture::completed(Err(Error::local_illegal_argument("test".to_string())));
         assert!(f.is_done());
-        assert!(matches!(f.get().await, Err(KafkaError::IllegalArgument(_))));
+        assert!(matches!(f.get().await, Err(Error::LocalIllegalArgument(_))));
         assert!(matches!(
-            f.get_timeout(Duration::from_secs(1)).await,
-            Err(KafkaError::IllegalArgument(_))
+            f.get_with_timeout(Duration::from_secs(1)).await,
+            Err(Error::LocalIllegalArgument(_))
         ));
     }
 
@@ -674,12 +504,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn impl_completes_exceptionally() {
+    async fn impl_completes_with_error() {
         let handle: KafkaFutureImpl<i32> = KafkaFutureImpl::new();
         let future = handle.future();
-        assert!(handle.complete_exceptionally(KafkaError::IllegalArgument("boom".to_string())));
+        assert!(handle.complete_with_error(Error::local_illegal_argument("boom".to_string())));
         match future.get().await {
-            Err(KafkaError::IllegalArgument(msg)) => assert_eq!(msg, "boom"),
+            Err(Error::LocalIllegalArgument(msg)) => assert_eq!(msg.message(), "boom"),
             other => panic!("expected IllegalArgument, got {other:?}"),
         }
     }
@@ -688,10 +518,21 @@ mod tests {
     async fn impl_get_timeout_elapses_when_never_completed() {
         let handle: KafkaFutureImpl<i32> = KafkaFutureImpl::new();
         let future = handle.future();
-        match future.get_timeout(Duration::from_millis(20)).await {
-            Err(KafkaError::Timeout(_)) => {},
-            other => panic!("expected Timeout, got {other:?}"),
-        }
+        let err = match future.get_with_timeout(Duration::from_millis(20)).await {
+            Err(e) => e,
+            other => panic!("expected a timeout, got {other:?}"),
+        };
+        // Java throws `java.util.concurrent.TimeoutException`
+        // (`KafkaFuture.java:27`), a checked exception beside the Kafka
+        // hierarchy — so none of the predicates hold and there is no wire code.
+        // `Error::Timeout` would be
+        // `org.apache.kafka.common.errors.TimeoutException`: retriable, an
+        // api error, and code 7.
+        assert!(matches!(err, Error::LocalTimeout(_)), "got {err:?}");
+        assert!(!err.is_retriable_error());
+        assert!(!err.is_api_error());
+        assert!(!err.is_kafka_error());
+        assert_eq!(Errors::UnknownServerError, err.error());
     }
 
     #[tokio::test]
@@ -735,8 +576,8 @@ mod tests {
         let h2: KafkaFutureImpl<i32> = KafkaFutureImpl::new();
         let all = KafkaFuture::all_of(vec![h1.future(), h2.future()]);
         h1.complete(1);
-        h2.complete_exceptionally(KafkaError::IllegalArgument("nope".to_string()));
-        assert!(matches!(all.get().await, Err(KafkaError::IllegalArgument(_))));
+        h2.complete_with_error(Error::local_illegal_argument("nope".to_string()));
+        assert!(matches!(all.get().await, Err(Error::LocalIllegalArgument(_))));
     }
 
     #[tokio::test]
@@ -751,8 +592,8 @@ mod tests {
     async fn then_apply_propagates_source_error() {
         let handle: KafkaFutureImpl<i32> = KafkaFutureImpl::new();
         let mapped = handle.future().then_apply(|v| v * 2);
-        handle.complete_exceptionally(KafkaError::IllegalArgument("src".to_string()));
-        assert!(matches!(mapped.get().await, Err(KafkaError::IllegalArgument(_))));
+        handle.complete_with_error(Error::local_illegal_argument("src".to_string()));
+        assert!(matches!(mapped.get().await, Err(Error::LocalIllegalArgument(_))));
     }
 
     #[tokio::test]
@@ -782,7 +623,7 @@ mod tests {
         let ok: KafkaFutureImpl<i32> = KafkaFutureImpl::new();
         let never: KafkaFutureImpl<i32> = KafkaFutureImpl::new();
         let joined = KafkaFuture::join_map(vec![("bad", bad.future()), ("ok", ok.future()), ("never", never.future())]);
-        bad.complete_exceptionally(KafkaError::IllegalArgument("a failed".to_string()));
+        bad.complete_with_error(Error::local_illegal_argument("a failed"));
         ok.complete(2);
         // `never` is deliberately left pending.
 
@@ -790,7 +631,7 @@ mod tests {
             .await
             .expect("join_map must abandon the keys after the failing one, not await them");
         match outcome {
-            Err(KafkaError::IllegalArgument(msg)) => assert_eq!(msg, "a failed"),
+            Err(Error::LocalIllegalArgument(e)) => assert_eq!(e.message(), "a failed"),
             other => panic!("expected IllegalArgument, got {other:?}"),
         }
     }
@@ -820,14 +661,14 @@ mod tests {
         // implementation would drop the two that follow.
         let joined =
             KafkaFuture::join_map_results(vec![("bad", bad.future()), ("ok", ok.future()), ("last", last.future())]);
-        bad.complete_exceptionally(KafkaError::IllegalArgument("boom".to_string()));
+        bad.complete_with_error(Error::local_illegal_argument("boom"));
         ok.complete(7);
         last.complete(9);
 
         let map = joined.get().await.unwrap();
         assert_eq!(map.len(), 3);
         match map["bad"].as_ref() {
-            Err(KafkaError::IllegalArgument(msg)) => assert_eq!(msg, "boom"),
+            Err(Error::LocalIllegalArgument(e)) => assert_eq!(e.message(), "boom"),
             other => panic!("expected IllegalArgument for `bad`, got {other:?}"),
         }
         assert_eq!(*map["ok"].as_ref().unwrap(), 7);
@@ -839,16 +680,16 @@ mod tests {
         let h1: KafkaFutureImpl<i32> = KafkaFutureImpl::new();
         let h2: KafkaFutureImpl<i32> = KafkaFutureImpl::new();
         let joined = KafkaFuture::join_map_results(vec![("a", h1.future()), ("b", h2.future())]);
-        h1.complete_exceptionally(KafkaError::IllegalArgument("a".to_string()));
-        h2.complete_exceptionally(KafkaError::IllegalState("b".to_string()));
+        h1.complete_with_error(Error::local_illegal_argument("a"));
+        h2.complete_with_error(Error::local_illegal_state("b"));
         let map = joined.get().await.unwrap();
-        assert!(matches!(map["a"].as_ref(), Err(KafkaError::IllegalArgument(_))));
-        assert!(matches!(map["b"].as_ref(), Err(KafkaError::IllegalState(_))));
+        assert!(matches!(map["a"].as_ref(), Err(Error::LocalIllegalArgument(_))));
+        assert!(matches!(map["b"].as_ref(), Err(Error::LocalIllegalState(_))));
     }
 
     #[tokio::test]
     async fn join_map_results_empty_is_done_and_yields_empty_map() {
-        let joined: KafkaFuture<std::collections::HashMap<&str, Result<i32, KafkaError>>> =
+        let joined: KafkaFuture<std::collections::HashMap<&str, Result<i32, Error>>> =
             KafkaFuture::join_map_results(Vec::new());
         assert!(joined.is_done());
         assert!(joined.get().await.unwrap().is_empty());
@@ -860,8 +701,8 @@ mod tests {
         let h2: KafkaFutureImpl<i32> = KafkaFutureImpl::new();
         let joined = KafkaFuture::join_map_results(vec![("a", h1.future()), ("b", h2.future())]);
         h1.complete(1);
-        match joined.get_timeout(Duration::from_millis(20)).await {
-            Err(KafkaError::Timeout(msg)) => assert!(msg.contains("join_map_results"), "unexpected message: {msg}"),
+        match joined.get_with_timeout(Duration::from_millis(20)).await {
+            Err(Error::Timeout(e)) => assert!(e.message().contains("join_map_results"), "unexpected message: {e}"),
             other => panic!("expected Timeout, got {other:?}"),
         }
     }
@@ -871,8 +712,8 @@ mod tests {
         let handle: KafkaFutureImpl<i32> = KafkaFutureImpl::new();
         let mapped = handle
             .future()
-            .then_apply_try(|_v| Err::<i32, _>(KafkaError::IllegalState("bad".to_string())));
+            .then_apply_try(|_v| Err::<i32, _>(Error::local_illegal_state("bad".to_string())));
         handle.complete(1);
-        assert!(matches!(mapped.get().await, Err(KafkaError::IllegalState(_))));
+        assert!(matches!(mapped.get().await, Err(Error::LocalIllegalState(_))));
     }
 }

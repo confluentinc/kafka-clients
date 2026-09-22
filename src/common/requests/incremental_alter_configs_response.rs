@@ -19,11 +19,11 @@
 use std::collections::HashMap;
 use std::io;
 
+use crate::IncrementalAlterConfigsResponseData;
 use crate::common::config::{ConfigResource, ConfigResourceType};
 use crate::common::protocol::{ApiKeys, Errors, Readable};
-use crate::incremental_alter_configs_response_data::IncrementalAlterConfigsResponseData;
 
-use super::abstract_response::update_error_counts;
+use super::AbstractResponse;
 
 /// An IncrementalAlterConfigs response.
 ///
@@ -70,7 +70,7 @@ impl IncrementalAlterConfigsResponse {
     /// Corresponds to `IncrementalAlterConfigsResponse.fromResponseData` (Java
     /// returns `Map<ConfigResource, ApiError>`; there is no `ApiError` type in
     /// this client, so the mapped value is the raw `(error_code, error_message)`
-    /// pair the admin client turns into a `KafkaError`).
+    /// pair the admin client turns into a `Error`).
     pub fn errors_by_resource(&self) -> HashMap<ConfigResource, (i16, Option<String>)> {
         self.data
             .responses
@@ -91,7 +91,7 @@ impl IncrementalAlterConfigsResponse {
     pub fn error_counts(&self) -> HashMap<Errors, i32> {
         let mut counts = HashMap::new();
         for response in &self.data.responses {
-            update_error_counts(&mut counts, Errors::for_code(response.error_code));
+            AbstractResponse::update_error_counts(&mut counts, Errors::for_code(response.error_code));
         }
         counts
     }

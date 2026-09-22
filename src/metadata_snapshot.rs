@@ -64,7 +64,7 @@ impl MetadataSnapshot {
         controller: Option<Node>,
         topic_ids: HashMap<String, Uuid>,
     ) -> Self {
-        Self::new_with_cluster(
+        Self::with_cluster(
             cluster_id,
             nodes,
             partitions,
@@ -81,7 +81,7 @@ impl MetadataSnapshot {
     ///
     /// Visible for testing.
     #[allow(clippy::too_many_arguments)]
-    pub fn new_with_cluster(
+    pub fn with_cluster(
         cluster_id: Option<String>,
         nodes: HashMap<i32, Node>,
         partitions: Vec<PartitionMetadata>,
@@ -247,7 +247,7 @@ impl MetadataSnapshot {
             nodes.insert(node_id, Node::new(node_id, host.clone(), address.port() as i32));
             node_id -= 1;
         }
-        Self::new_with_cluster(
+        Self::with_cluster(
             None,
             nodes,
             Vec::new(),
@@ -262,7 +262,7 @@ impl MetadataSnapshot {
 
     /// Creates an empty metadata snapshot.
     pub fn empty() -> Self {
-        Self::new_with_cluster(
+        Self::with_cluster(
             None,
             HashMap::new(),
             Vec::new(),
@@ -306,7 +306,7 @@ impl MetadataSnapshot {
             .map(|metadata| MetadataResponse::to_partition_info(metadata, nodes))
             .collect();
 
-        Cluster::new(
+        Cluster::with_invalid_topics_controller_topic_ids(
             cluster_id.clone(),
             nodes.values().cloned().collect(),
             partition_infos,
@@ -335,7 +335,7 @@ impl fmt::Display for MetadataSnapshot {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::protocol::Errors;
+    use crate::common::Errors;
 
     /// Translated from `MetadataSnapshotTest.testMissingLeaderEndpoint`.
     #[test]

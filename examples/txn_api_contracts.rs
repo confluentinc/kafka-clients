@@ -23,7 +23,7 @@
 //! 3. The javadoc's canonical recovery loop: an abortable error → abort →
 //!    retry the same batch → commit; exactly one copy lands (javadoc example
 //!    plus `testBumpTransactionalEpochWithTV2Enabled`). Also asserts the
-//!    abortable error's `txn_requires_abort()` flag (CLAUDE.md §10.3).
+//!    error is a `KafkaException`, which the javadoc says to answer by aborting.
 //! 4. Commit surfaces an *unawaited* send failure — no `.get()`/callback
 //!    needed, per the javadoc's "exceptions to communicate error states".
 //! 5. Abort resolves pending sends: with `linger.ms=5000` nothing drains, so
@@ -37,10 +37,11 @@
 //!    `txn_buffer_probe`.
 //! 8. KIP-939 2PC probes: `transaction.two.phase.commit.enable=true` with an
 //!    explicit `transaction.timeout.ms` is rejected at build; 2PC alone
-//!    against a broker with 2PC disabled is *observed* — Java refuses to
-//!    serialize the non-ignorable `Enable2Pc` field below InitProducerId v6,
-//!    so anything but a clean error is a divergence worth reporting.
-//! 9. A connect timeout's `is_retriable()` flag is true (CLAUDE.md §10.3).
+//!    against a broker with 2PC disabled is *observed* — the config is
+//!    currently accepted and inert (the `Enable2Pc` request field is never
+//!    set, matching Java), so a silent success records wave-3 finding 4
+//!    rather than a wire-encoding fault. See the note at the probe.
+//! 9. A connect timeout reports `is_retriable_error()` (Java `RetriableException`).
 //!
 //! Broker setup: see `examples/README.md`. Exit code 0 = every check ✅.
 
@@ -49,7 +50,7 @@ mod txn_common;
 use std::collections::HashMap;
 use std::time::Duration;
 
-use confluent_kafka::common::KafkaError;
+use confluent_kafka::common::Error;
 use confluent_kafka::common::serialization::StringSerializer;
 use confluent_kafka::producer::KafkaProducer;
 use confluent_kafka::producer::Producer;
@@ -198,8 +199,8 @@ async fn recovery_loop_case(bootstrap: &str, suffix: &str) -> Result<bool, Strin
     match send_expect_failure(&producer, &topic, &giant).await {
         Ok(failure) => {
             let error = failure.error();
-            send_flag = error.txn_requires_abort();
-            send_detail = format!("send error {:?}: requires_abort={send_flag}", error.error());
+            send_flag = error.is_kafka_error();
+            send_detail = format!("send error {:?}: is_kafka_error={send_flag}", error.error());
         },
         Err(unexpected) => ok &= report(false, "the oversized record was rejected", unexpected),
     }
@@ -207,22 +208,23 @@ async fn recovery_loop_case(bootstrap: &str, suffix: &str) -> Result<bool, Strin
     let (commit_failed, commit_flag, commit_detail) = match commit {
         Err(error) => (
             true,
-            error.txn_requires_abort(),
+            error.is_kafka_error(),
             format!(
-                "commit error: {} (requires_abort={})",
-                first_line(&error.to_string()),
-                error.txn_requires_abort()
+                "commit error: {} (is_kafka_error={})",
+                first_line(error.message()),
+                error.is_kafka_error()
             ),
         ),
         Ok(()) => (false, false, "commit unexpectedly succeeded".to_string()),
     };
     ok &= report(commit_failed, "commit of the failed attempt is refused", commit_detail.clone());
-    // librdkafka marks this situation err_txn_requires_abort() on the surfaced
-    // error so the application knows abort (not retry/close) is the way out;
-    // CLAUDE.md §10.3 asks for flags "similar to librdkafka".
+    // Java gives the application no per-error "requires abort" flag: the producer
+    // records the ABORTABLE_ERROR state internally and `commitTransaction()` throws
+    // `KafkaException`, whose javadoc says to answer by aborting (done just below).
     ok &= report(
         send_flag || commit_flag,
-        "txn_requires_abort() is set on the send or the commit error",
+        // Java surfaces a bare `KafkaException` here.
+        "the surfaced error is a bare Kafka error, so the javadoc's answer is abort",
         format!("{send_detail}; {commit_detail}"),
     );
     // The javadoc's `catch (KafkaException e)` branch: abort and try again.
@@ -362,13 +364,13 @@ async fn abort_pending_case(bootstrap: &str, suffix: &str) -> Result<bool, Strin
     let mut aborted = 0usize;
     let mut acked = 0usize;
     let mut other_count = 0usize;
-    let mut first_other: Option<KafkaError> = None;
+    let mut first_other: Option<Error> = None;
     let mut unresolved = 0usize;
     for future in &futures {
-        match future.get_timeout(Duration::from_secs(10)).await {
+        match future.get_with_timeout(Duration::from_secs(10)).await {
             Ok(_) => acked += 1,
-            Err(KafkaError::TransactionAborted(_)) => aborted += 1,
-            // get_timeout wraps an unresolved future in its own timeout error;
+            Err(Error::TransactionAborted(_)) => aborted += 1,
+            // get_with_timeout wraps an unresolved future in its own timeout error;
             // a resolved-but-failed future keeps its original error above.
             Err(e) if e.to_string().contains("Timeout expired") => unresolved += 1,
             Err(e) => {
@@ -477,10 +479,9 @@ async fn buffer_limit_case(bootstrap: &str) -> Result<bool, String> {
         ("max.request.size".to_string(), "5242880".to_string()),
         ("max.block.ms".to_string(), "10000".to_string()),
     ]);
-    let config = ProducerConfig::from_properties(&props).map_err(|e| format!("buffer config: {e}"))?;
-    let producer: StringProducer =
-        KafkaProducer::from_config(config, Box::new(StringSerializer), Box::new(StringSerializer))
-            .map_err(|e| format!("building the buffer producer: {e}"))?;
+    let config = ProducerConfig::new(&props).map_err(|e| format!("buffer config: {e}"))?;
+    let producer: StringProducer = KafkaProducer::new(config, Box::new(StringSerializer), Box::new(StringSerializer))
+        .map_err(|e| format!("building the buffer producer: {e}"))?;
 
     // 100 KB into a 64 KiB budget: unsatisfiable no matter how long we wait, so
     // Java rejects it outright rather than blocking (`BufferPool.allocate`'s
@@ -531,6 +532,19 @@ async fn two_phase_commit_case(bootstrap: &str, suffix: &str) -> Result<bool, St
     // is not settled in this client, so the outcome here is NOT asserted — we
     // print whatever init_transactions() does (clean error / success / timeout)
     // as informational output and do not fold it into `ok`.
+    //
+    // NOTE: an earlier version of this comment blamed the version gate — "Java
+    // refuses to serialize the non-ignorable Enable2Pc field below InitProducerId
+    // v6, so a silent success here means the flag was dropped on the wire". That
+    // is wrong and was retracted with PLAN §9.1. `Enable2Pc` is never set on the
+    // request at all: `initialize_transactions_internal` in
+    // `transaction_manager.rs` is the only production construction site and it
+    // sets four fields, none of them this one. It is also moot on the wire, since
+    // `InitProducerIdRequestBuilder` caps at v5. This is faithful to Java, which
+    // likewise never calls `setEnable2Pc`.
+    //
+    // So a silent success here means the config is **accepted and inert**, which
+    // is what this probe actually observes. That is wave-3 finding 4, still open.
     let props = HashMap::from([
         ("bootstrap.servers".to_string(), bootstrap.to_string()),
         ("transactional.id".to_string(), format!("txn-manual-api-2pc-{suffix}")),
@@ -539,10 +553,9 @@ async fn two_phase_commit_case(bootstrap: &str, suffix: &str) -> Result<bool, St
         ("max.block.ms".to_string(), "10000".to_string()),
         ("transaction.two.phase.commit.enable".to_string(), "true".to_string()),
     ]);
-    let config = ProducerConfig::from_properties(&props).map_err(|e| format!("2pc config: {e}"))?;
-    let producer: StringProducer =
-        KafkaProducer::from_config(config, Box::new(StringSerializer), Box::new(StringSerializer))
-            .map_err(|e| format!("building the 2pc producer: {e}"))?;
+    let config = ProducerConfig::new(&props).map_err(|e| format!("2pc config: {e}"))?;
+    let producer: StringProducer = KafkaProducer::new(config, Box::new(StringSerializer), Box::new(StringSerializer))
+        .map_err(|e| format!("building the 2pc producer: {e}"))?;
     let observation = match tokio::time::timeout(Duration::from_secs(15), producer.init_transactions()).await {
         Ok(Err(error)) => format!("returned an error: {:?}: {}", error.error(), first_line(&error.to_string())),
         Ok(Ok(())) => "succeeded".to_string(),
@@ -557,7 +570,7 @@ async fn two_phase_commit_case(bootstrap: &str, suffix: &str) -> Result<bool, St
 /// Case 9: a connect timeout is a retriable error.
 async fn retriable_flag_case() -> bool {
     println!();
-    println!("--- case 9: is_retriable() on a connect timeout ---");
+    println!("--- case 9: is_retriable_error() on a connect timeout ---");
     let producer =
         match transactional_producer_with("localhost:1", "txn-manual-api-retriable", &[("max.block.ms", "2500")]) {
             Ok(producer) => producer,
@@ -565,13 +578,15 @@ async fn retriable_flag_case() -> bool {
         };
     match tokio::time::timeout(Duration::from_secs(10), producer.init_transactions()).await {
         Ok(Err(error)) => report(
-            error.is_retriable(),
-            "the timeout error reports is_retriable()",
+            error.is_retriable_error(),
+            "the timeout error reports is_retriable_error()",
             format!(
                 "{} (retriable={} fatal={})",
-                first_line(&error.to_string()),
-                error.is_retriable(),
-                error.is_fatal()
+                first_line(error.message()),
+                error.is_retriable_error(),
+                // Java's `RequestUtils.isFatalException` static — fatality is a
+                // classification over an error, not a flag carried by it.
+                confluent_kafka::common::requests::RequestUtils::is_fatal_error(&error)
             ),
         ),
         Ok(Ok(())) => report(

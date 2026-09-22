@@ -19,13 +19,14 @@
 use std::collections::HashMap;
 use std::io;
 
-use crate::common::KafkaError;
+use crate::DeleteAclsResponseData;
+use crate::common::Error;
 use crate::common::acl::{AccessControlEntry, AclBinding, AclOperation, AclPermissionType};
 use crate::common::protocol::{ApiKeys, Errors, Readable};
 use crate::common::resource::{PatternType, ResourcePattern, ResourceType};
-use crate::delete_acls_response_data::{DeleteAclsFilterResult, DeleteAclsMatchingAcl, DeleteAclsResponseData};
+use crate::delete_acls_response_data::{DeleteAclsFilterResult, DeleteAclsMatchingAcl};
 
-use super::abstract_response::update_error_counts;
+use super::AbstractResponse;
 
 /// A DeleteAcls response.
 ///
@@ -79,7 +80,7 @@ impl DeleteAclsResponse {
     pub fn error_counts(&self) -> HashMap<Errors, i32> {
         let mut counts = HashMap::new();
         for result in &self.data.filter_results {
-            update_error_counts(&mut counts, Errors::for_code(result.error_code));
+            AbstractResponse::update_error_counts(&mut counts, Errors::for_code(result.error_code));
         }
         counts
     }
@@ -125,7 +126,7 @@ impl DeleteAclsResponse {
     ///
     /// Returns an error if the matching ACL carries invalid pattern/permission
     /// components (mirrors Java's constructor exceptions).
-    pub fn acl_binding(matching_acl: &DeleteAclsMatchingAcl) -> Result<AclBinding, KafkaError> {
+    pub fn acl_binding(matching_acl: &DeleteAclsMatchingAcl) -> Result<AclBinding, Error> {
         let pattern = ResourcePattern::new(
             ResourceType::from_code(matching_acl.resource_type),
             matching_acl.resource_name.clone(),
