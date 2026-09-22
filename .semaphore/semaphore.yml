@@ -99,13 +99,17 @@ blocks:
     # agent.
     #
     # The three jobs below each run on a dedicated VM in parallel, following
-    # the same pattern as the "Verify language bindings" block:
-    #   - PLAINTEXT: `make verify-rust` runs format and lint checks, the full
-    #     unit and functional integration suite over the default PLAINTEXT
-    #     protocol, and the performance tests.
-    #   - SSL / SASL_SSL: re-run the functional integration suite with each
-    #     native client connecting over the broker's SSL listener (:9096) or
-    #     its SASL_SSL listener (:9097, SASL/PLAIN, admin / admin-secret).
+    # the same pattern as the "Verify language bindings" block. All three run
+    # the whole native-Rust test suite (unit tests + the functional integration
+    # suite + the `__rust` multilanguage arms); they differ only in which broker
+    # listener the clients connect over:
+    #   - PLAINTEXT: `make verify-rust` — the full suite over the default
+    #     PLAINTEXT listener, plus the protocol-independent checks that run only
+    #     here: format-check, clippy, and the performance tests.
+    #   - SSL / SASL_SSL: the same suite over the broker's SSL listener (:9096)
+    #     or its SASL_SSL listener (:9097, SASL/PLAIN, admin / admin-secret),
+    #     WITHOUT format-check / clippy / perf — those are protocol-independent,
+    #     so running them once in the PLAINTEXT job is enough.
     #
     # Each job provisions its own broker, so the jobs do not contend for
     # Docker resources. See tests/common/test_context.rs
@@ -122,10 +126,10 @@ blocks:
             - make verify-rust
         - name: "Verify Rust (Linux amd64) — SSL"
           commands:
-            - make test-integration-ssl
+            - make test-rust-all-features-ssl
         - name: "Verify Rust (Linux amd64) — SASL_SSL (PLAIN)"
           commands:
-            - make test-integration-sasl-ssl
+            - make test-rust-all-features-sasl-ssl
 
   - name: "Verify language bindings (Linux amd64)"
     # `dependencies: []` so this starts alongside "Verify Rust" rather than

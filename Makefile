@@ -182,6 +182,26 @@ test-integration-ssl: build-rust-integration-tests
 test-integration-sasl-ssl: build-rust-integration-tests
 	INTEGRATION_TEST_PROTOCOL=sasl_ssl cargo test --features integration-tests --test integration
 
+# ── Whole native-Rust test suite, per protocol (no format/lint/perf) ──────
+#
+# The same test selection as `test-rust-all-features` (unit tests + the
+# functional integration suite + the `__rust` multilanguage arms; perf is
+# `test = false` so it is never scheduled), but with the client connections
+# driven over the SSL / SASL_SSL listener via INTEGRATION_TEST_PROTOCOL.
+#
+# These are what the SSL / SASL_SSL CI blocks run, so those blocks exercise the
+# entire suite over their listener rather than only the `integration` binary.
+# They deliberately OMIT format-check, clippy and the performance tail that
+# `verify-rust` wraps around `test-rust-all-features`: those checks are
+# protocol-independent, so running them once in the PLAINTEXT block is enough.
+# (The unit tests are protocol-independent too and so overlap the PLAINTEXT
+# run; they are kept here so a block failure points at one whole suite, not a
+# subset.)
+test-rust-all-features-ssl:
+	INTEGRATION_TEST_PROTOCOL=ssl $(MAKE) test-rust-all-features
+test-rust-all-features-sasl-ssl:
+	INTEGRATION_TEST_PROTOCOL=sasl_ssl $(MAKE) test-rust-all-features
+
 # ── Per-backend multilanguage integration tests ──────────────────────────
 #
 # The `multilanguage_test!` / `multilanguage_consumer_test!` macros expand each
