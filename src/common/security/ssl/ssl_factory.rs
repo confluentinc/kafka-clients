@@ -34,6 +34,7 @@ use std::io;
 use std::sync::Arc;
 
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
+use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName};
 use rustls::{ClientConfig, DigitallySignedStruct, RootCertStore, SignatureScheme};
 
@@ -187,13 +188,14 @@ fn build_root_cert_store(ssl_config: &SslConfig) -> io::Result<RootCertStore> {
     if let Some(ref path) = ssl_config.truststore_location {
         let file = std::fs::File::open(path)
             .map_err(|e| io::Error::new(e.kind(), format!("Failed to open truststore file '{path}': {e}")))?;
-        let mut reader = io::BufReader::new(file);
-        let certs = rustls_pemfile::certs(&mut reader).collect::<Result<Vec<_>, _>>().map_err(|e| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("Failed to parse certificates from truststore file '{path}': {e}"),
-            )
-        })?;
+        let certs = CertificateDer::pem_reader_iter(file)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("Failed to parse certificates from truststore file '{path}': {e}"),
+                )
+            })?;
         if certs.is_empty() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -209,13 +211,14 @@ fn build_root_cert_store(ssl_config: &SslConfig) -> io::Result<RootCertStore> {
             })?;
         }
     } else if let Some(ref pem_data) = ssl_config.truststore_certificates {
-        let mut reader = io::BufReader::new(pem_data.as_bytes());
-        let certs = rustls_pemfile::certs(&mut reader).collect::<Result<Vec<_>, _>>().map_err(|e| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("Failed to parse inline truststore certificates: {e}"),
-            )
-        })?;
+        let certs = CertificateDer::pem_slice_iter(pem_data.as_bytes())
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("Failed to parse inline truststore certificates: {e}"),
+                )
+            })?;
         if certs.is_empty() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -246,13 +249,14 @@ fn load_client_identity(
 ) -> io::Result<Option<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>)>> {
     // Check for inline PEM cert chain + key
     let certs = if let Some(ref chain_pem) = ssl_config.keystore_certificate_chain {
-        let mut reader = io::BufReader::new(chain_pem.as_bytes());
-        let certs = rustls_pemfile::certs(&mut reader).collect::<Result<Vec<_>, _>>().map_err(|e| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("Failed to parse inline keystore certificate chain: {e}"),
-            )
-        })?;
+        let certs = CertificateDer::pem_slice_iter(chain_pem.as_bytes())
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("Failed to parse inline keystore certificate chain: {e}"),
+                )
+            })?;
         if certs.is_empty() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -263,13 +267,14 @@ fn load_client_identity(
     } else if let Some(ref path) = ssl_config.keystore_location {
         let file = std::fs::File::open(path)
             .map_err(|e| io::Error::new(e.kind(), format!("Failed to open keystore file '{path}': {e}")))?;
-        let mut reader = io::BufReader::new(file);
-        let certs = rustls_pemfile::certs(&mut reader).collect::<Result<Vec<_>, _>>().map_err(|e| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("Failed to parse certificates from keystore file '{path}': {e}"),
-            )
-        })?;
+        let certs = CertificateDer::pem_reader_iter(file)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("Failed to parse certificates from keystore file '{path}': {e}"),
+                )
+            })?;
         if certs.is_empty() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -282,8 +287,13 @@ fn load_client_identity(
     };
 
     let key = if let Some(ref key_pem) = ssl_config.keystore_key {
-        let mut reader = io::BufReader::new(key_pem.as_bytes());
-        let key = rustls_pemfile::private_key(&mut reader)
+        // `.next().transpose()` yields `Result<Option<PrivateKeyDer>, pem::Error>` —
+        // the same shape the old `rustls_pemfile::private_key` returned — so a PEM
+        // with no key section stays `Ok(None)` and produces the "No private key
+        // found" message below rather than a parse error.
+        let key = PrivateKeyDer::pem_slice_iter(key_pem.as_bytes())
+            .next()
+            .transpose()
             .map_err(|e| {
                 io::Error::new(
                     io::ErrorKind::InvalidData,
@@ -296,8 +306,9 @@ fn load_client_identity(
         // When keystore_location is used, key is expected in the same file
         let file = std::fs::File::open(path)
             .map_err(|e| io::Error::new(e.kind(), format!("Failed to open keystore file for key '{path}': {e}")))?;
-        let mut reader = io::BufReader::new(file);
-        let key = rustls_pemfile::private_key(&mut reader)
+        let key = PrivateKeyDer::pem_reader_iter(file)
+            .next()
+            .transpose()
             .map_err(|e| {
                 io::Error::new(
                     io::ErrorKind::InvalidData,
@@ -679,6 +690,148 @@ B2V9lhUZNk+pRjtJw9unpXsM
         );
     }
 
+    /// PKCS#1 (traditional) RSA private key in a `RSA PRIVATE KEY` section.
+    /// Test-only throwaway key generated once with `openssl genrsa -traditional
+    /// 2048`; never used outside these tests. Exercises the PKCS#1 branch of
+    /// `PrivateKeyDer`'s `PemObject` impl.
+    const TEST_CLIENT_KEY_PKCS1: &str = "\
+-----BEGIN RSA PRIVATE KEY-----
+MIIEowIBAAKCAQEAubuKKSCCpGdlIjRDTtqMh9PA/kqJqnlZP7XdM7gmOkS+ZJmv
+VpHVN3J/+L4jlX1UeyCqjC9U/035FMO7WHdQuRwuCkUsjdSgzUnnJQhTAZva8Rro
+cfweMnYf2l81RH2+L3D8PWhfX6Rr5GdaCenfXypzvW8wpP73WrNsFpakP01MMJ/6
+nGdAkzl06FI0U3EMFTJIHygs8NV5XEBbK9F7E9dxKOQ82y0n2EaN6bKWiSaXYX48
+ln5fJP3xXEEciUJW8xWcz0hfuq+fv89S1QloXLtuKL6MZxj0NH3T5DPX7MokTtQm
+ip+3o6aHBzhMxUmdxtlc1iwF/E5otu1WrxoX7QIDAQABAoIBACscl0gPGgwHzP+Y
+woPf8m1Hz30nN5fItZj2gasy5DqzwL7wtnShgqytaPuHxRI6xnyTG0tRZEkjo/y4
+Jzk0btoc6qnrHxmn4JBuRlc//KZ7syEyhgCJTUgYx7GEVoS4rEfuUbp+St8UNxAM
+FmgFL5pzK+ztjYzK+wcEbUM8AdGIXcVHbpX2jOETUQ2EH/wr6krPPlq+bA2RUnU2
+FW+pDXoOfbKs/6t8Elc8BpywdaO0PCEAkTZX0Yw1pas5zmvtdrSl2uT2+r21sSZf
+eOiX741i4DwwiG7xvoQqerllbDbxd3q4YhtvZMeWjdFBXG4lcSK8J677Tz95cefm
+nuYrxTkCgYEA7+dIEGCfPBXDliuarkLmpYFZHyacg9TBAQtNLHhnRucWIBgTI8bo
+rRbQbQkSOfO4W86PjrGqcOPsTvKw+k2cxKH7L/7EJaRYX2Dtu7jPcPsWBF+y7P1A
+zo0UqJx8ppCrwHpNwuo68UcD/mNEgMpNQt5VZukvhcbcnjV8UmP8tfUCgYEAxjHJ
+2LMvmqUUdtySASKagZeLtlspDY4jM/Qy3yxnYw2X6xpa8oZ3VHP33uOcvgBbaJlT
+/e1+eRStFf9EFUM+GVjfbpBCQ5NMT6D6Ox7A2mJ3viMmOgA2eMNiVql5biFFPFn6
+ROrhh5ZlwCpLuQouDJxJI0n6DXeMR/tZ5/hkJxkCgYBLwXYBLfG6kIjVp+lNc/TP
+eJwC+TddbdaQlNgG3fKG8jwLYG7S0mHxHo4skDvALxUdcInmnnXa9i5N89ctA0so
+0Jm4WzPnSxFY9Qu9RqvC2pbmRK4EpihL0UMfx2KZWn/R5Q0fKsX4INvC/efI35ks
+L3c6axJFpTlPgEZE4iwP7QKBgQC2kx7x9P8hYnkblc0aJppWTxhxAEEtL4bWUVqb
+o/gJk3gjJ8AoMh6zObFZLiwyC3opPTXWcXVUbOuVm/VH8Q2/o9MPsuyX+5UMtapN
+0+KsSpEsIo0QWSnUzYhFdRFblmKFWg3mdskTckSBZXUkHHCXRVFKpNcomLwtgyor
+OvJn4QKBgBnSC1Xv9gZTyryVZGlHrJ8cM4rRKk6G3bCFSMAVHT618THe7MNNBaBu
+IKmDn39m0ACwVR/L3Mniml8IbRSJO4+DesGGNHOKpXw2XaKlEUsuhXN1ilpC/pfC
+E3avyzZb2N0jTRBQXmC0k1x6FCcofIg6QP/+E/QfFFyuC3CbjmsE
+-----END RSA PRIVATE KEY-----";
+
+    /// SEC1 EC private key in an `EC PRIVATE KEY` section. Test-only throwaway
+    /// key generated once with `openssl ecparam -name prime256v1 -genkey
+    /// -noout`; never used outside these tests. Exercises the SEC1 branch of
+    /// `PrivateKeyDer`'s `PemObject` impl.
+    const TEST_CLIENT_KEY_SEC1: &str = "\
+-----BEGIN EC PRIVATE KEY-----
+MHcCAQEEIAmY54vNSbYzPMGQBAio3CeIhAGQi0gyMfWUAZ9xm4wzoAoGCCqGSM49
+AwEHoUQDQgAE90/rEfdSHQxK8WDAhYBjwSAJIfP1IZzU7Rt3A4Gtk6b0GCmzArRT
+uviKbp188irqAMaMg47Y9WVEjN8mjQM5ag==
+-----END EC PRIVATE KEY-----";
+
+    #[test]
+    fn test_load_client_identity_from_keystore_file() {
+        // A single PEM file holding both the client cert and its key exercises
+        // the `keystore_location` path, where certs are read skipping the key
+        // section and the key is read skipping the cert section — the semantics
+        // the removed rustls-pemfile crate provided, now provided directly by
+        // `PemObject`'s iterators.
+        let dir = std::env::temp_dir().join("kafka_ssl_test_keystore_file");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // Cert first, then key.
+        let cert_then_key = dir.join("cert_then_key.pem");
+        std::fs::write(&cert_then_key, format!("{TEST_CLIENT_CERT}\n{TEST_CLIENT_KEY}")).unwrap();
+        let config = SslConfig {
+            keystore_location: Some(cert_then_key.to_str().unwrap().to_string()),
+            ..SslConfig::default()
+        };
+        let (certs, _key) = load_client_identity(&config)
+            .unwrap()
+            .expect("cert+key file should yield a client identity");
+        assert_eq!(certs.len(), 1, "should read exactly one cert, skipping the key section");
+
+        // Key first, then cert (reverse order) — reading must be order-independent.
+        let key_then_cert = dir.join("key_then_cert.pem");
+        std::fs::write(&key_then_cert, format!("{TEST_CLIENT_KEY}\n{TEST_CLIENT_CERT}")).unwrap();
+        let config = SslConfig {
+            keystore_location: Some(key_then_cert.to_str().unwrap().to_string()),
+            ..SslConfig::default()
+        };
+        let (certs, _key) = load_client_identity(&config)
+            .unwrap()
+            .expect("key+cert file should yield a client identity");
+        assert_eq!(certs.len(), 1, "cert reading must skip the key section regardless of order");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_malformed_pem_missing_end_marker() {
+        // A BEGIN line with no matching END line is a parse error (not an empty
+        // result), so it exercises the `map_err` branch rather than the
+        // `is_empty()` branch.
+        let malformed = "-----BEGIN CERTIFICATE-----\nMIIC+jCCAeKgAwIBAgIUH4OJqMpyw6s1/MSNeTBVyyZ3tAww\n";
+        let config = SslConfig { truststore_certificates: Some(malformed.to_string()), ..SslConfig::default() };
+        let err = SslFactory::new(&config).unwrap_err().to_string();
+        // Our prefix is byte-identical to the pre-migration message; only the
+        // interpolated suffix is library-owned text, now sourced from
+        // `rustls::pki_types::pem::Error` ("missing section end marker").
+        assert!(
+            err.starts_with("Failed to parse inline truststore certificates: "),
+            "unexpected error prefix: {err}"
+        );
+        assert!(
+            err.contains("missing section end marker"),
+            "expected pki-types 'missing section end marker' text: {err}"
+        );
+    }
+
+    #[test]
+    fn test_keystore_key_with_no_key_section() {
+        // Passing a cert PEM as the key must skip the cert section, find no key,
+        // and produce our exact "No private key found" message — the `Ok(None)`
+        // path that `.next().transpose()` preserves (not a parse error).
+        let config = SslConfig {
+            keystore_certificate_chain: Some(TEST_CLIENT_CERT.to_string()),
+            keystore_key: Some(TEST_CLIENT_CERT.to_string()),
+            ..SslConfig::default()
+        };
+        let err = load_client_identity(&config).unwrap_err();
+        assert_eq!(err.to_string(), "No private key found in inline keystore key");
+    }
+
+    #[test]
+    fn test_all_private_key_encodings_accepted() {
+        // PKCS#8, PKCS#1 and SEC1 keys must each load into the matching
+        // `PrivateKeyDer` variant — the same three kinds the old
+        // `rustls_pemfile::private_key` accepted. Parsing does not check the key
+        // against the cert chain, so any cert works as the chain.
+        let load = |key_pem: &str| -> PrivateKeyDer<'static> {
+            let config = SslConfig {
+                keystore_certificate_chain: Some(TEST_CLIENT_CERT.to_string()),
+                keystore_key: Some(key_pem.to_string()),
+                ..SslConfig::default()
+            };
+            let (_certs, key) = load_client_identity(&config).unwrap().unwrap();
+            key
+        };
+        assert!(matches!(load(TEST_CLIENT_KEY), PrivateKeyDer::Pkcs8(_)), "PKCS#8 (PRIVATE KEY)");
+        assert!(
+            matches!(load(TEST_CLIENT_KEY_PKCS1), PrivateKeyDer::Pkcs1(_)),
+            "PKCS#1 (RSA PRIVATE KEY)"
+        );
+        assert!(
+            matches!(load(TEST_CLIENT_KEY_SEC1), PrivateKeyDer::Sec1(_)),
+            "SEC1 (EC PRIVATE KEY)"
+        );
+    }
+
     /// CA certificate for hostname verification tests.
     /// This CA signs the server certificate below.
     const TEST_SERVER_CA_CERT: &str = "\
@@ -730,8 +883,9 @@ Tk/mn3Nd0C3DIaEo6yDUzcUuD+qqrqyOZ3g1XzpDSet+L7UPEW6s8hgqeAr5XjMw
 
     /// Parses PEM-encoded certificates into `CertificateDer` values.
     fn parse_certs(pem: &str) -> Vec<CertificateDer<'static>> {
-        let mut reader = io::BufReader::new(pem.as_bytes());
-        rustls_pemfile::certs(&mut reader).collect::<Result<Vec<_>, _>>().unwrap()
+        CertificateDer::pem_slice_iter(pem.as_bytes())
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
     }
 
     #[test]
