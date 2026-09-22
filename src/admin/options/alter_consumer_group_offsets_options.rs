@@ -33,13 +33,13 @@ impl AlterConsumerGroupOffsetsOptions {
 
     /// Set the operation timeout in milliseconds (or `None` for the default).
     #[must_use]
-    pub fn timeout_ms(mut self, timeout_ms: Option<i32>) -> Self {
+    pub fn set_timeout_ms(mut self, timeout_ms: Option<i32>) -> Self {
         self.timeout_ms = timeout_ms;
         self
     }
 
     /// The operation timeout in milliseconds, or `None` for the default.
-    pub fn timeout(&self) -> Option<i32> {
+    pub fn timeout_ms(&self) -> Option<i32> {
         self.timeout_ms
     }
 }
@@ -51,8 +51,8 @@ mod tests {
     #[test]
     fn defaults_and_setter() {
         let options = AlterConsumerGroupOffsetsOptions::new();
-        assert_eq!(options.timeout(), None);
-        let options = options.timeout_ms(Some(100));
-        assert_eq!(options.timeout(), Some(100));
+        assert_eq!(options.timeout_ms(), None);
+        let options = options.set_timeout_ms(Some(100));
+        assert_eq!(options.timeout_ms(), Some(100));
     }
 }

@@ -31,23 +31,21 @@
 //!   - `UNKNOWN_MEMBER_ID`
 //!   - `STALE_MEMBER_EPOCH`
 
+use crate::common::requests::OffsetFetchRequest;
 use std::collections::HashMap;
 use std::io;
 use std::sync::Mutex;
 
+use crate::OffsetFetchResponseData;
 use crate::common::protocol::{ApiKeys, Errors, Readable};
 use crate::offset_fetch_request_data::OffsetFetchRequestGroup;
 use crate::offset_fetch_response_data::OffsetFetchResponseTopics;
 use crate::offset_fetch_response_data::{
-    OffsetFetchResponseData, OffsetFetchResponseGroup, OffsetFetchResponsePartition, OffsetFetchResponsePartitions,
-    OffsetFetchResponseTopic,
+    OffsetFetchResponseGroup, OffsetFetchResponsePartition, OffsetFetchResponsePartitions, OffsetFetchResponseTopic,
 };
 
+use super::AbstractResponse;
 use super::RECORD_BATCH_NO_PARTITION_LEADER_EPOCH;
-use super::abstract_response::update_error_counts;
-use super::offset_fetch_request::{
-    BATCH_MIN_VERSION, INVALID_OFFSET, NO_METADATA, TOP_LEVEL_ERROR_AND_NULL_TOPICS_MIN_VERSION,
-};
 
 /// Per-partition errors that should not be promoted to a group-level error
 /// when normalising the v<2 response. Mirrors Java's `PARTITION_ERRORS`.
@@ -121,10 +119,11 @@ impl OffsetFetchResponse {
     /// Returns `Err` when the requested group id is not present in a v8+
     /// response.
     pub fn group(&self, group_id: &str) -> Result<OffsetFetchResponseGroup, io::Error> {
-        if self.version < BATCH_MIN_VERSION {
+        if self.version < OffsetFetchRequest::BATCH_MIN_VERSION {
             // For v<2 there's no top-level error code; derive it from the
             // partition errors. For v2..7 use `data.error_code`.
-            let top_level_error_code = if self.version < TOP_LEVEL_ERROR_AND_NULL_TOPICS_MIN_VERSION {
+            let top_level_error_code = if self.version < OffsetFetchRequest::TOP_LEVEL_ERROR_AND_NULL_TOPICS_MIN_VERSION
+            {
                 Self::top_level_error(&self.data).code()
             } else {
                 self.data.error_code
@@ -201,21 +200,21 @@ impl OffsetFetchResponse {
     /// Returns the error counts aggregated across all partition responses.
     pub fn error_counts(&self) -> HashMap<Errors, i32> {
         let mut counts = HashMap::new();
-        if self.version < BATCH_MIN_VERSION {
-            if self.version >= TOP_LEVEL_ERROR_AND_NULL_TOPICS_MIN_VERSION {
-                update_error_counts(&mut counts, Errors::for_code(self.data.error_code));
+        if self.version < OffsetFetchRequest::BATCH_MIN_VERSION {
+            if self.version >= OffsetFetchRequest::TOP_LEVEL_ERROR_AND_NULL_TOPICS_MIN_VERSION {
+                AbstractResponse::update_error_counts(&mut counts, Errors::for_code(self.data.error_code));
             }
             for topic in &self.data.topics {
                 for partition in &topic.partitions {
-                    update_error_counts(&mut counts, Errors::for_code(partition.error_code));
+                    AbstractResponse::update_error_counts(&mut counts, Errors::for_code(partition.error_code));
                 }
             }
         } else {
             for group in &self.data.groups {
-                update_error_counts(&mut counts, Errors::for_code(group.error_code));
+                AbstractResponse::update_error_counts(&mut counts, Errors::for_code(group.error_code));
                 for topic in &group.topics {
                     for partition in &topic.partitions {
-                        update_error_counts(&mut counts, Errors::for_code(partition.error_code));
+                        AbstractResponse::update_error_counts(&mut counts, Errors::for_code(partition.error_code));
                     }
                 }
             }
@@ -245,7 +244,7 @@ impl OffsetFetchResponse {
     pub fn group_error(group: &OffsetFetchRequestGroup, error: Errors, version: i16) -> OffsetFetchResponseGroup {
         let mut response = OffsetFetchResponseGroup::new();
         response.set_group_id(group.group_id.clone());
-        if version >= TOP_LEVEL_ERROR_AND_NULL_TOPICS_MIN_VERSION as i32 as i16 {
+        if version >= OffsetFetchRequest::TOP_LEVEL_ERROR_AND_NULL_TOPICS_MIN_VERSION as i32 as i16 {
             response.set_error_code(error.code());
         } else {
             let topics: Vec<OffsetFetchResponseTopics> = group
@@ -264,8 +263,8 @@ impl OffsetFetchResponse {
                                     let mut p = OffsetFetchResponsePartitions::new();
                                     p.set_partition_index(partition_index);
                                     p.set_error_code(error.code());
-                                    p.set_committed_offset(INVALID_OFFSET);
-                                    p.set_metadata(Some(NO_METADATA.to_string()));
+                                    p.set_committed_offset(OffsetFetchRequest::INVALID_OFFSET);
+                                    p.set_metadata(Some(OffsetFetchRequest::NO_METADATA.to_string()));
                                     p.set_committed_leader_epoch(RECORD_BATCH_NO_PARTITION_LEADER_EPOCH);
                                     p
                                 })
@@ -292,14 +291,14 @@ impl OffsetFetchResponseBuilder {
     /// Construct a builder over a single group's response.
     ///
     /// Mirrors Java's `Builder(OffsetFetchResponseGroup)`.
-    pub fn single(group: OffsetFetchResponseGroup) -> Self {
+    pub fn with_group(group: OffsetFetchResponseGroup) -> Self {
         Self { groups: vec![group] }
     }
 
     /// Construct a builder over multiple groups (v8+ batched).
     ///
     /// Mirrors Java's `Builder(List<OffsetFetchResponseGroup>)`.
-    pub fn new(groups: Vec<OffsetFetchResponseGroup>) -> Self {
+    pub fn with_groups(groups: Vec<OffsetFetchResponseGroup>) -> Self {
         Self { groups }
     }
 
@@ -310,7 +309,7 @@ impl OffsetFetchResponseBuilder {
     /// Returns `Err` if a v<8 build receives more than one group.
     pub fn build(self, version: i16) -> io::Result<OffsetFetchResponse> {
         let mut data = OffsetFetchResponseData::new();
-        if version >= BATCH_MIN_VERSION {
+        if version >= OffsetFetchRequest::BATCH_MIN_VERSION {
             data.set_groups(self.groups);
         } else {
             if self.groups.len() != 1 {
@@ -467,7 +466,7 @@ mod tests {
             g.set_group_id("b".to_string());
             g
         };
-        let builder = OffsetFetchResponseBuilder::new(vec![g1, g2]);
+        let builder = OffsetFetchResponseBuilder::with_groups(vec![g1, g2]);
         let err = builder.build(7).unwrap_err();
         assert!(err.to_string().contains("only supports one group"));
     }
@@ -488,7 +487,7 @@ mod tests {
         topic.set_partitions(vec![partition]);
         group.set_topics(vec![topic]);
 
-        let response = OffsetFetchResponseBuilder::single(group).build(5).expect("build ok");
+        let response = OffsetFetchResponseBuilder::with_group(group).build(5).expect("build ok");
         assert_eq!(response.data().topics.len(), 1);
         assert_eq!(response.data().topics[0].partitions[0].committed_offset, 123);
     }

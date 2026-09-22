@@ -19,7 +19,7 @@
 use crate::common::TopicPartition;
 
 /// Specification of consumer group offsets to list using
-/// `Admin::list_consumer_group_offsets`.
+/// `Admin::list_consumer_group_offsets_with_group_specs`.
 ///
 /// Corresponds to `org.apache.kafka.clients.admin.ListConsumerGroupOffsetsSpec`.
 ///
@@ -40,7 +40,7 @@ impl ListConsumerGroupOffsetsSpec {
     ///
     /// Mirrors `topicPartitions(Collection<TopicPartition>)`.
     #[must_use]
-    pub fn topic_partitions(mut self, topic_partitions: Option<Vec<TopicPartition>>) -> Self {
+    pub fn set_topic_partitions(mut self, topic_partitions: Option<Vec<TopicPartition>>) -> Self {
         self.topic_partitions = topic_partitions;
         self
     }
@@ -50,7 +50,7 @@ impl ListConsumerGroupOffsetsSpec {
     /// group are to be listed.
     ///
     /// Mirrors `topicPartitions()`.
-    pub fn get_topic_partitions(&self) -> Option<&[TopicPartition]> {
+    pub fn topic_partitions(&self) -> Option<&[TopicPartition]> {
         self.topic_partitions.as_deref()
     }
 }
@@ -68,20 +68,20 @@ mod tests {
     #[test]
     fn defaults_to_all_partitions() {
         let spec = ListConsumerGroupOffsetsSpec::new();
-        assert_eq!(spec.get_topic_partitions(), None);
+        assert_eq!(spec.topic_partitions(), None);
     }
 
     #[test]
     fn carries_topic_partitions() {
         let tps = vec![TopicPartition::new("t", 0), TopicPartition::new("t", 1)];
-        let spec = ListConsumerGroupOffsetsSpec::new().topic_partitions(Some(tps.clone()));
-        assert_eq!(spec.get_topic_partitions(), Some(tps.as_slice()));
+        let spec = ListConsumerGroupOffsetsSpec::new().set_topic_partitions(Some(tps.clone()));
+        assert_eq!(spec.topic_partitions(), Some(tps.as_slice()));
     }
 
     #[test]
     fn equality_matches_java_semantics() {
-        let a = ListConsumerGroupOffsetsSpec::new().topic_partitions(Some(vec![TopicPartition::new("t", 0)]));
-        let b = ListConsumerGroupOffsetsSpec::new().topic_partitions(Some(vec![TopicPartition::new("t", 0)]));
+        let a = ListConsumerGroupOffsetsSpec::new().set_topic_partitions(Some(vec![TopicPartition::new("t", 0)]));
+        let b = ListConsumerGroupOffsetsSpec::new().set_topic_partitions(Some(vec![TopicPartition::new("t", 0)]));
         assert_eq!(a, b);
     }
 }

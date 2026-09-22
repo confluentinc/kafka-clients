@@ -20,10 +20,6 @@ use crate::common::Error;
 
 use super::{PatternType, ResourcePatternFilter, ResourceType};
 
-/// A special literal resource name that corresponds to 'all resources of a
-/// certain type'.
-pub const WILDCARD_RESOURCE: &str = "*";
-
 /// Represents a pattern that is used by ACLs to match zero or more
 /// [`Resource`](super::Resource)s.
 ///
@@ -36,11 +32,15 @@ pub struct ResourcePattern {
 }
 
 impl ResourcePattern {
+    /// A special literal resource name that corresponds to 'all resources of a
+    /// certain type'.
+    pub const WILDCARD_RESOURCE: &str = "*";
+
     /// Create a pattern using the supplied parameters.
     ///
     /// # Arguments
     /// * `resource_type` - specific resource type
-    /// * `name` - resource name, which can be the [`WILDCARD_RESOURCE`]
+    /// * `name` - resource name, which can be the [`Self::WILDCARD_RESOURCE`]
     /// * `pattern_type` - specific resource pattern type, which controls how the
     ///   pattern will match resource names
     ///

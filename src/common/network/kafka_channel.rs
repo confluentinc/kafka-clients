@@ -26,13 +26,13 @@
 
 use super::Authenticator;
 use super::ChannelMetadataRegistry;
+use super::ChannelState;
 use super::KafkaSend;
 use super::NetworkReceive;
 use super::NetworkSend;
 use super::Receive;
-use super::authentication_error::authentication_error_message;
+use super::authentication_error_message;
 use super::channel_state::State;
-use super::{ChannelState, channel_state};
 use super::{InterestOps, TransportLayer};
 
 use crate::common::Error;
@@ -150,7 +150,7 @@ impl KafkaChannel {
             send: None,
             disconnected: false,
             mute_state: ChannelMuteState::NotMuted,
-            state: channel_state::NOT_CONNECTED.clone(),
+            state: ChannelState::NOT_CONNECTED.clone(),
             remote_address: None,
             successful_authentications: 0,
             mid_write: false,
@@ -215,7 +215,8 @@ impl KafkaChannel {
                 // (`authentication_error.rs` documents the doubled prefix).
                 let error = Error::Authentication(AuthenticationError::new(message));
                 let remote_desc = self.remote_address.map(|a| a.to_string());
-                self.state = ChannelState::with_error(State::AuthenticationFailed, error, remote_desc.as_deref());
+                self.state =
+                    ChannelState::with_error_remote_address(State::AuthenticationFailed, error, remote_desc.as_deref());
                 if authenticating {
                     self.delay_close_on_authentication_failure();
                 }
@@ -225,7 +226,7 @@ impl KafkaChannel {
 
         if self.ready() {
             self.successful_authentications += 1;
-            self.state = channel_state::READY.clone();
+            self.state = ChannelState::READY.clone();
         }
         Ok(())
     }
@@ -233,7 +234,7 @@ impl KafkaChannel {
     /// Disconnects the channel.
     pub fn disconnect(&mut self) {
         self.disconnected = true;
-        if self.state == channel_state::NOT_CONNECTED
+        if self.state == ChannelState::NOT_CONNECTED
             && let Some(addr) = &self.remote_address
         {
             // If we captured the remote address we can provide more information
@@ -266,11 +267,11 @@ impl KafkaChannel {
         let connected = self.transport_layer.finish_connect().await?;
         if connected {
             if self.ready() {
-                self.state = channel_state::READY.clone();
+                self.state = ChannelState::READY.clone();
             } else if let Some(addr) = self.remote_address {
                 self.state = ChannelState::with_remote_address(State::Authenticate, &addr.to_string());
             } else {
-                self.state = channel_state::AUTHENTICATE.clone();
+                self.state = ChannelState::AUTHENTICATE.clone();
             }
         }
         Ok(connected)
@@ -492,14 +493,15 @@ impl KafkaChannel {
             // rebuilt from the payload rather than from `e.to_string()`.
             let error = Error::Authentication(AuthenticationError::new(message));
             let remote_desc = self.transport_layer.peer_addr().ok().map(|a| a.to_string());
-            self.state = ChannelState::with_error(State::AuthenticationFailed, error, remote_desc.as_deref());
+            self.state =
+                ChannelState::with_error_remote_address(State::AuthenticationFailed, error, remote_desc.as_deref());
         }
         e
     }
 
     pub async fn read(&mut self) -> io::Result<usize> {
         if self.receive.is_none() {
-            self.receive = Some(NetworkReceive::with_max_size(self.max_receive_size, &self.id));
+            self.receive = Some(NetworkReceive::with_max_size_source(self.max_receive_size, &self.id));
         }
 
         let bytes_received = {
@@ -537,7 +539,7 @@ impl KafkaChannel {
     /// and retries on the next selector iteration.
     pub fn try_read(&mut self) -> io::Result<usize> {
         if self.receive.is_none() {
-            self.receive = Some(NetworkReceive::with_max_size(self.max_receive_size, &self.id));
+            self.receive = Some(NetworkReceive::with_max_size_source(self.max_receive_size, &self.id));
         }
 
         let bytes_received = {
@@ -828,9 +830,9 @@ mod tests {
     use crate::common::network::ByteBufferSend;
     use crate::common::network::DefaultChannelMetadataRegistry;
     use crate::common::network::InterestOps;
-    use crate::common::network::authentication_error::auth_io_error;
-    use crate::common::network::authentication_error::is_authentication_error;
-    use crate::common::requests::request_utils;
+    use crate::common::network::auth_io_error;
+    use crate::common::network::is_authentication_error;
+    use crate::common::requests::RequestUtils;
 
     use std::future::Future;
     use std::io;
@@ -1217,7 +1219,7 @@ mod tests {
             "must classify as authentication: {state_error:?}"
         );
         assert!(
-            request_utils::is_fatal_error(state_error),
+            RequestUtils::is_fatal_error(state_error),
             "an authentication failure is fatal in Java: {state_error:?}"
         );
         assert_eq!(state_error.message(), "TLS handshake failed: invalid peer certificate");
@@ -1256,7 +1258,7 @@ mod tests {
             "must classify as authentication: {state_error:?}"
         );
         assert!(
-            request_utils::is_fatal_error(state_error),
+            RequestUtils::is_fatal_error(state_error),
             "an authentication failure is fatal in Java: {state_error:?}"
         );
         assert_eq!(state_error.message(), "Authentication failed: Invalid username or password");

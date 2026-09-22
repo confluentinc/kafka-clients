@@ -18,26 +18,18 @@
 
 use std::io;
 
+use crate::ProduceRequestData;
+use crate::ProduceResponseData;
 use crate::common::protocol::{ApiKeys, Errors, Readable};
 use crate::common::record::internal::BatchIterator;
 use crate::common::record::internal::CompressionType;
 use crate::common::record::internal::RecordBatch;
-use crate::produce_request_data::ProduceRequestData;
-use crate::produce_response_data::{PartitionProduceResponse, ProduceResponseData, TopicProduceResponse};
+use crate::produce_response_data::{PartitionProduceResponse, TopicProduceResponse};
 
 use super::ConcreteRequest;
 use super::ConcreteResponse;
 use super::ProduceResponse;
 use super::RequestBuilder;
-
-/// Sentinel value: last stable version before Transaction V2 protocol.
-///
-/// When using transaction V1 protocol, the request version upper limit is set to
-/// this value so that the broker knows the client is using transaction protocol V1.
-pub const LAST_STABLE_VERSION_BEFORE_TRANSACTION_V2: i16 = 11;
-
-/// Invalid offset sentinel for produce responses.
-pub const INVALID_OFFSET: i64 = -1;
 
 /// A Produce request.
 ///
@@ -55,6 +47,15 @@ pub struct ProduceRequest {
 }
 
 impl ProduceRequest {
+    /// Sentinel value: last stable version before Transaction V2 protocol.
+    ///
+    /// When using transaction V1 protocol, the request version upper limit is set to
+    /// this value so that the broker knows the client is using transaction protocol V1.
+    pub const LAST_STABLE_VERSION_BEFORE_TRANSACTION_V2: i16 = 11;
+
+    /// Invalid offset sentinel for produce responses.
+    pub const INVALID_OFFSET: i64 = -1;
+
     /// Creates a new `ProduceRequest` from data and version.
     pub fn new(data: ProduceRequestData, version: i16) -> Self {
         let acks = data.acks;
@@ -100,7 +101,7 @@ impl ProduceRequest {
 
     /// Whether the Transaction V2 protocol is being requested.
     pub fn is_transaction_v2_requested(version: i16) -> bool {
-        version > LAST_STABLE_VERSION_BEFORE_TRANSACTION_V2
+        version > ProduceRequest::LAST_STABLE_VERSION_BEFORE_TRANSACTION_V2
     }
 
     /// Creates an error response for this request.
@@ -126,9 +127,9 @@ impl ProduceRequest {
             for partition_data in &topic_data.partition_data {
                 let mut ppr = PartitionProduceResponse::new();
                 ppr.set_index(partition_data.index);
-                ppr.set_base_offset(INVALID_OFFSET);
+                ppr.set_base_offset(ProduceRequest::INVALID_OFFSET);
                 ppr.set_log_append_time_ms(RecordBatch::NO_TIMESTAMP);
-                ppr.set_log_start_offset(INVALID_OFFSET);
+                ppr.set_log_start_offset(ProduceRequest::INVALID_OFFSET);
                 ppr.set_error_code(error.code());
                 ppr.set_error_message(Some(error.message().to_string()));
                 partition_responses.push(ppr);
@@ -248,18 +249,22 @@ pub struct ProduceRequestBuilder {
 
 impl ProduceRequestBuilder {
     /// Creates a builder with default version range.
-    pub fn new(data: ProduceRequestData) -> Self {
-        Self::builder(data, false)
+    ///
+    /// Corresponds to Java's `ProduceRequest.builder(ProduceRequestData)`.
+    pub fn builder(data: ProduceRequestData) -> Self {
+        Self::builder_use_transaction_v1_version(data, false)
     }
 
     /// Creates a builder, optionally limiting the version to Transaction V1.
     ///
     /// When `use_transaction_v1_version` is true, the maximum version is capped at
-    /// [`LAST_STABLE_VERSION_BEFORE_TRANSACTION_V2`] so that the broker knows the
+    /// [`ProduceRequest::LAST_STABLE_VERSION_BEFORE_TRANSACTION_V2`] so that the broker knows the
     /// client is using transaction protocol V1.
-    pub fn builder(data: ProduceRequestData, use_transaction_v1_version: bool) -> Self {
+    ///
+    /// Corresponds to Java's `ProduceRequest.builder(ProduceRequestData, boolean)`.
+    pub fn builder_use_transaction_v1_version(data: ProduceRequestData, use_transaction_v1_version: bool) -> Self {
         let max_version = if use_transaction_v1_version {
-            LAST_STABLE_VERSION_BEFORE_TRANSACTION_V2
+            ProduceRequest::LAST_STABLE_VERSION_BEFORE_TRANSACTION_V2
         } else {
             ApiKeys::PRODUCE.latest_version()
         };
@@ -271,7 +276,9 @@ impl ProduceRequestBuilder {
     }
 
     /// Creates a builder with explicit version range.
-    pub fn from_data(min_version: i16, max_version: i16, data: ProduceRequestData) -> Self {
+    ///
+    /// Corresponds to Java's `ProduceRequest.Builder(short, short, ProduceRequestData)`.
+    pub fn new(min_version: i16, max_version: i16, data: ProduceRequestData) -> Self {
         Self { data, oldest_allowed_version: min_version, latest_allowed_version: max_version }
     }
 }
@@ -333,7 +340,7 @@ mod tests {
     #[test]
     fn test_builder_default_version_range() {
         let data = ProduceRequestData::new();
-        let builder = ProduceRequestBuilder::new(data);
+        let builder = ProduceRequestBuilder::builder(data);
         assert_eq!(builder.oldest_allowed_version(), ApiKeys::PRODUCE.oldest_version());
         assert_eq!(builder.latest_allowed_version(), ApiKeys::PRODUCE.latest_version());
     }
@@ -341,8 +348,11 @@ mod tests {
     #[test]
     fn test_builder_transaction_v1_version() {
         let data = ProduceRequestData::new();
-        let builder = ProduceRequestBuilder::builder(data, true);
-        assert_eq!(builder.latest_allowed_version(), LAST_STABLE_VERSION_BEFORE_TRANSACTION_V2);
+        let builder = ProduceRequestBuilder::builder_use_transaction_v1_version(data, true);
+        assert_eq!(
+            builder.latest_allowed_version(),
+            ProduceRequest::LAST_STABLE_VERSION_BEFORE_TRANSACTION_V2
+        );
     }
 
     #[test]
@@ -402,7 +412,7 @@ mod tests {
     /// built more than once and every result carries the records.
     ///
     /// Rust's `build_version` instead drains the builder with
-    /// `std::mem::replace(&mut self.data, ProduceRequestData::new())` (`:300`), so the
+    /// `std::mem::replace(&mut self.data, ProduceRequestData::new())` (`:307`), so the
     /// second build silently returns a request with no `topic_data`. It is the only one
     /// of this crate's 53 `RequestBuilder` impls that drains rather than clones.
     ///
@@ -422,7 +432,7 @@ mod tests {
         // `validate_records` requires a real magic-v2 batch (`:185-193`), so build one
         // rather than a sentinel payload — otherwise the build fails before reaching the
         // behaviour under test.
-        let mut records_builder = MemoryRecords::builder_with_buffer(
+        let mut records_builder = MemoryRecords::builder_with_buffer_magic(
             vec![0u8; 512],
             RecordBatch::MAGIC_VALUE_V2,
             Compression::none(),
@@ -444,7 +454,7 @@ mod tests {
         data.set_acks(-1);
         data.set_topic_data(vec![topic]);
 
-        let mut builder = ProduceRequestBuilder::from_data(3, 3, data);
+        let mut builder = ProduceRequestBuilder::new(3, 3, data);
 
         let ConcreteRequest::Produce(first) = builder.build_version(3).expect("first build") else {
             panic!("expected a produce request");

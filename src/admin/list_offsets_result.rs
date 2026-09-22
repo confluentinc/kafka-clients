@@ -103,7 +103,7 @@ impl std::fmt::Display for ListOffsetsResultInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::kafka_future::KafkaFutureImpl;
+    use crate::common::internals::KafkaFutureImpl;
 
     #[tokio::test]
     async fn partition_result_returns_future_or_errors() {

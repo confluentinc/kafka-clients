@@ -88,7 +88,7 @@ impl AccessControlEntry {
 
     /// Create a filter which matches only this `AccessControlEntry`.
     pub fn to_filter(&self) -> AccessControlEntryFilter {
-        AccessControlEntryFilter::from_data(self.data.clone())
+        AccessControlEntryFilter::with_data(self.data.clone())
     }
 
     /// Return true if this ACE has any UNKNOWN components.

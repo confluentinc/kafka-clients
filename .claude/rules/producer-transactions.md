@@ -508,7 +508,7 @@ A Rust request builder's `latest_allowed_version` MUST mirror whichever Java
 
 | Java `super(...)` | Rust `latest_allowed_version` |
 |---|---|
-| `super(apiKey)` | `latest_version_with_unstable(false)` |
+| `super(apiKey)` | `latest_version_enable_unstable_last_version(false)` |
 | `super(apiKey, enableUnstableLastVersion)` | pass the same flag through |
 | `super(apiKey, oldest, latest)` | translate the `latest` **expression** verbatim — a constant where Java passes a constant, `latest_version()` where Java passes `latestVersion()` |
 

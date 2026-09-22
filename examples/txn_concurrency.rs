@@ -197,7 +197,7 @@ async fn fencing_in_flight_case(bootstrap: &str, suffix: &str) -> Result<bool, S
     let mut unresolved = 0usize;
     let mut sample_error = String::new();
     for future in &futures {
-        match future.get_timeout(Duration::from_secs(15)).await {
+        match future.get_with_timeout(Duration::from_secs(15)).await {
             Ok(_) => resolved_ok += 1,
             Err(e) if e.to_string().contains("Timeout expired") => unresolved += 1,
             Err(e) => {
@@ -224,7 +224,7 @@ async fn fencing_in_flight_case(bootstrap: &str, suffix: &str) -> Result<bool, S
                     "{} (fatal={})",
                     first_line(error.message()),
                     // Java's `RequestUtils.isFatalException` static.
-                    confluent_kafka::common::requests::request_utils::is_fatal_error(&error)
+                    confluent_kafka::common::requests::RequestUtils::is_fatal_error(&error)
                 ),
             );
         },

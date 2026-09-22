@@ -36,18 +36,14 @@ impl UserScramCredentialUpsertion {
     ///
     /// Mirrors `UserScramCredentialUpsertion(String, ScramCredentialInfo, String)`,
     /// which encodes the password with UTF-8.
-    pub fn new(user: impl Into<String>, credential_info: ScramCredentialInfo, password: &str) -> Self {
-        Self::with_password_bytes(user, credential_info, password.as_bytes().to_vec())
+    pub fn with_str(user: impl Into<String>, credential_info: ScramCredentialInfo, password: &str) -> Self {
+        Self::with_bytes(user, credential_info, password.as_bytes().to_vec())
     }
 
     /// Constructor that accepts a byte password and generates a random salt.
     ///
     /// Mirrors `UserScramCredentialUpsertion(String, ScramCredentialInfo, byte[])`.
-    pub fn with_password_bytes(
-        user: impl Into<String>,
-        credential_info: ScramCredentialInfo,
-        password: Vec<u8>,
-    ) -> Self {
+    pub fn with_bytes(user: impl Into<String>, credential_info: ScramCredentialInfo, password: Vec<u8>) -> Self {
         let salt = generate_random_salt();
         Self::with_salt(user, credential_info, password, salt)
     }
@@ -108,7 +104,7 @@ mod tests {
 
     #[test]
     fn string_constructor_encodes_password_utf8_and_generates_salt() {
-        let upsertion = UserScramCredentialUpsertion::new(
+        let upsertion = UserScramCredentialUpsertion::with_str(
             "alice",
             ScramCredentialInfo::new(ScramMechanism::ScramSha256, 4096),
             "pw",

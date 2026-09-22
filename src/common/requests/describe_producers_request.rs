@@ -18,9 +18,10 @@
 
 use std::io;
 
+use crate::DescribeProducersRequestData;
+use crate::DescribeProducersResponseData;
 use crate::common::protocol::{ApiKeys, Errors, Readable};
-use crate::describe_producers_request_data::DescribeProducersRequestData;
-use crate::describe_producers_response_data::{DescribeProducersResponseData, PartitionResponse, TopicResponse};
+use crate::describe_producers_response_data::{PartitionResponse, TopicResponse};
 
 use super::{ConcreteRequest, ConcreteResponse, DescribeProducersResponse, RequestBuilder};
 
@@ -171,7 +172,7 @@ mod tests {
         let mut builder = DescribeProducersRequestBuilder::new(data);
         let mut request = builder.build_version(0).unwrap();
         let bytes = request.serialize().unwrap();
-        let mut readable = crate::common::ByteBufferAccessor::from_bytes(bytes.into_buffer());
+        let mut readable = crate::common::ByteBufferAccessor::new(bytes.into_buffer());
         let parsed = DescribeProducersRequest::parse(&mut readable, 0).unwrap();
         assert_eq!(parsed.data().topics.len(), 1);
         assert_eq!(parsed.data().topics[0].name, "foo");

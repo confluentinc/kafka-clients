@@ -16,7 +16,7 @@
 //! Kafka 4.2.0 broker.
 //!
 //! These tests exercise the production constructor wired in Phase 12
-//! (commit 4/N): `new_consumer::<K, V>(...)` returns a real
+//! (commit 4/N): `KafkaConsumer::new::<K, V>(...)` returns a real
 //! `AsyncKafkaConsumer` that spawns its bg task, opens a `NetworkClient`
 //! against the broker, and runs the KIP-848 group-protocol membership
 //! state machine end-to-end.
@@ -50,7 +50,7 @@ use confluent_kafka::common::serialization::Deserializer;
 use confluent_kafka::common::serialization::StringSerializer;
 use confluent_kafka::consumer::ConsumerConfig;
 use confluent_kafka::consumer::ConsumerRebalanceListener;
-use confluent_kafka::consumer::new_consumer;
+use confluent_kafka::consumer::KafkaConsumer;
 use confluent_kafka::producer::KafkaProducer;
 use confluent_kafka::producer::Producer;
 use confluent_kafka::producer::ProducerConfig;
@@ -101,7 +101,7 @@ fn make_consumer_config(bootstrap: &str, group_id: &str) -> ConsumerConfig {
         ("client.id".to_string(), "integration-test-consumer".to_string()),
         ("enable.auto.commit".to_string(), "false".to_string()),
     ]);
-    ConsumerConfig::from_properties(&props).expect("invalid test config")
+    ConsumerConfig::new(&props).expect("invalid test config")
 }
 
 /// Variant of `make_consumer_config` without a `group.id` — for the
@@ -114,7 +114,7 @@ fn make_consumer_config_groupless(bootstrap: &str) -> ConsumerConfig {
         ("client.id".to_string(), "integration-test-consumer-noassign".to_string()),
         ("enable.auto.commit".to_string(), "false".to_string()),
     ]);
-    ConsumerConfig::from_properties(&props).expect("invalid test config")
+    ConsumerConfig::new(&props).expect("invalid test config")
 }
 
 /// Build a `ProducerConfig` matching the existing producer integration
@@ -127,14 +127,14 @@ fn make_producer_config(bootstrap: &str) -> ProducerConfig {
         ("max.block.ms".to_string(), "30000".to_string()),
         ("linger.ms".to_string(), "0".to_string()),
     ]);
-    ProducerConfig::from_properties(&props).expect("invalid producer test config")
+    ProducerConfig::new(&props).expect("invalid producer test config")
 }
 
 /// Produce `count` records with deterministic keys `k0..k{count-1}` and
 /// values `v0..v{count-1}` to the given topic, blocking on each ack so
 /// the consumer is guaranteed to see them. Producer is closed on exit.
 async fn produce_deterministic_records(bootstrap: &str, topic: &str, count: usize) {
-    let producer: KafkaProducer<String, String> = KafkaProducer::from_config(
+    let producer: KafkaProducer<String, String> = KafkaProducer::new(
         make_producer_config(bootstrap),
         Box::new(StringSerializer),
         Box::new(StringSerializer),
@@ -145,7 +145,7 @@ async fn produce_deterministic_records(bootstrap: &str, topic: &str, count: usiz
         let rec = ProducerRecord::with_key(topic.to_string(), Some(format!("k{}", i)), Some(format!("v{}", i)));
         let future = producer.send(rec).await.expect("send should succeed");
         future
-            .get_timeout(Duration::from_secs(30))
+            .get_with_timeout(Duration::from_secs(30))
             .await
             .expect("produce should succeed");
     }
@@ -164,14 +164,17 @@ async fn test_subscribe_and_poll_records() {
 
     produce_deterministic_records(ctx.bootstrap_servers(), &topic, 10).await;
 
-    let mut consumer = new_consumer::<String, String>(
+    let mut consumer = KafkaConsumer::new::<String, String>(
         make_consumer_config(ctx.bootstrap_servers(), &group_id),
         Box::new(StringDeserializer),
         Box::new(StringDeserializer),
     )
-    .expect("new_consumer should succeed");
+    .expect("KafkaConsumer::new should succeed");
 
-    consumer.subscribe(vec![topic.clone()]).await.expect("subscribe should succeed");
+    consumer
+        .subscribe_with_topics(vec![topic.clone()])
+        .await
+        .expect("subscribe should succeed");
 
     let mut collected: Vec<(String, String, i32, i64)> = Vec::new();
     let start = Instant::now();
@@ -237,12 +240,12 @@ async fn test_assign_partitions_and_poll() {
 
     produce_deterministic_records(ctx.bootstrap_servers(), &topic, 5).await;
 
-    let mut consumer = new_consumer::<String, String>(
+    let mut consumer = KafkaConsumer::new::<String, String>(
         make_consumer_config_groupless(ctx.bootstrap_servers()),
         Box::new(StringDeserializer),
         Box::new(StringDeserializer),
     )
-    .expect("new_consumer should succeed for groupless consumer");
+    .expect("KafkaConsumer::new should succeed for groupless consumer");
 
     let tp = TopicPartition::new(topic.clone(), 0);
     consumer.assign(vec![tp.clone()]).await.expect("assign should succeed");
@@ -297,9 +300,9 @@ async fn test_commit_sync_then_resume_in_same_group() {
             ("enable.auto.commit".to_string(), "false".to_string()),
             ("max.poll.records".to_string(), "5".to_string()),
         ]);
-        let consumer1_config = ConsumerConfig::from_properties(&consumer1_props).expect("invalid test config");
+        let consumer1_config = ConsumerConfig::new(&consumer1_props).expect("invalid test config");
 
-        let mut consumer1 = new_consumer::<String, String>(
+        let mut consumer1 = KafkaConsumer::new::<String, String>(
             consumer1_config,
             Box::new(StringDeserializer),
             Box::new(StringDeserializer),
@@ -307,7 +310,7 @@ async fn test_commit_sync_then_resume_in_same_group() {
         .expect("consumer1 ctor should succeed");
 
         consumer1
-            .subscribe(vec![topic.clone()])
+            .subscribe_with_topics(vec![topic.clone()])
             .await
             .expect("subscribe should succeed");
 
@@ -332,7 +335,7 @@ async fn test_commit_sync_then_resume_in_same_group() {
 
     // Consumer 2: same group, polls only the remaining records.
     {
-        let mut consumer2 = new_consumer::<String, String>(
+        let mut consumer2 = KafkaConsumer::new::<String, String>(
             make_consumer_config(ctx.bootstrap_servers(), &group_id),
             Box::new(StringDeserializer),
             Box::new(StringDeserializer),
@@ -340,7 +343,7 @@ async fn test_commit_sync_then_resume_in_same_group() {
         .expect("consumer2 ctor should succeed");
 
         consumer2
-            .subscribe(vec![topic.clone()])
+            .subscribe_with_topics(vec![topic.clone()])
             .await
             .expect("subscribe should succeed");
 
@@ -382,14 +385,17 @@ async fn test_seek_to_beginning_re_reads_records() {
 
     produce_deterministic_records(ctx.bootstrap_servers(), &topic, 5).await;
 
-    let mut consumer = new_consumer::<String, String>(
+    let mut consumer = KafkaConsumer::new::<String, String>(
         make_consumer_config(ctx.bootstrap_servers(), &group_id),
         Box::new(StringDeserializer),
         Box::new(StringDeserializer),
     )
-    .expect("new_consumer should succeed");
+    .expect("KafkaConsumer::new should succeed");
 
-    consumer.subscribe(vec![topic.clone()]).await.expect("subscribe should succeed");
+    consumer
+        .subscribe_with_topics(vec![topic.clone()])
+        .await
+        .expect("subscribe should succeed");
 
     // First poll: wait for assignment to land, then drain at least one
     // batch to establish position.
@@ -489,19 +495,19 @@ async fn test_fetch_partitions_after_failed_listener() {
 
     produce_deterministic_records(ctx.bootstrap_servers(), &topic, 1).await;
 
-    let mut consumer = new_consumer::<String, String>(
+    let mut consumer = KafkaConsumer::new::<String, String>(
         make_consumer_config(ctx.bootstrap_servers(), &group_id),
         Box::new(StringDeserializer),
         Box::new(StringDeserializer),
     )
-    .expect("new_consumer should succeed");
+    .expect("KafkaConsumer::new should succeed");
 
     let count = Arc::new(AtomicUsize::new(0));
     let listener: Arc<dyn ConsumerRebalanceListener> = Arc::new(FailOnceAssignedListener { count: Arc::clone(&count) });
     consumer
-        .subscribe_with_listener(vec![topic.clone()], listener)
+        .subscribe_with_topics_listener(vec![topic.clone()], listener)
         .await
-        .expect("subscribe_with_listener should succeed");
+        .expect("subscribe_with_topics_listener should succeed");
 
     // Java: `waitForCondition(() -> consumer.poll(1s).count() == 1, 5000)`.
     // The first poll may surface the failed-callback error; tolerate it and
@@ -516,7 +522,7 @@ async fn test_fetch_partitions_after_failed_listener() {
             Err(err) => {
                 // The temporary listener error must not be fatal; keep polling.
                 assert!(
-                    !confluent_kafka::common::requests::request_utils::is_fatal_error(&err),
+                    !confluent_kafka::common::requests::RequestUtils::is_fatal_error(&err),
                     "first-listener failure should be recoverable, got fatal: {err}"
                 );
             },
@@ -564,18 +570,18 @@ async fn test_fetch_partitions_with_always_failed_listener() {
 
     produce_deterministic_records(ctx.bootstrap_servers(), &topic, 1).await;
 
-    let mut consumer = new_consumer::<String, String>(
+    let mut consumer = KafkaConsumer::new::<String, String>(
         make_consumer_config(ctx.bootstrap_servers(), &group_id),
         Box::new(StringDeserializer),
         Box::new(StringDeserializer),
     )
-    .expect("new_consumer should succeed");
+    .expect("KafkaConsumer::new should succeed");
 
     let listener: Arc<dyn ConsumerRebalanceListener> = Arc::new(AlwaysFailAssignedListener);
     consumer
-        .subscribe_with_listener(vec![topic.clone()], listener)
+        .subscribe_with_topics_listener(vec![topic.clone()], listener)
         .await
-        .expect("subscribe_with_listener should succeed");
+        .expect("subscribe_with_topics_listener should succeed");
 
     // Java loops for 3s asserting `poll().count() == 0` (or catching the
     // callback KafkaException). Mirror that window.

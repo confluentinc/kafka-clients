@@ -18,7 +18,7 @@ use std::fmt;
 use std::io;
 
 use crate::common::Error;
-use crate::common::kafka_error::{ErrorCode, ErrorHierarchy, ErrorMessage, ErrorSource};
+use crate::common::error::{ErrorCode, ErrorHierarchy, ErrorMessage, ErrorSource};
 
 /// The size header of a network receive is negative or exceeds the maximum
 /// allowed size.

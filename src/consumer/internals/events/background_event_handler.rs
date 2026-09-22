@@ -33,7 +33,7 @@
 //! handler is therefore **sender-only by design** — do NOT add a
 //! `drain_events` method here in Phase 10.
 //!
-//! As with [`super::application_event_handler::ApplicationEventHandler`],
+//! As with [`super::ApplicationEventHandler`],
 //! the channel is **unbounded** to match Java's `LinkedBlockingQueue`.
 
 use std::sync::Arc;
@@ -42,9 +42,9 @@ use std::sync::atomic::{AtomicI64, Ordering};
 use tokio::sync::mpsc;
 
 use crate::common::Error;
-use crate::consumer::internals::async_consumer_metrics::AsyncConsumerMetrics;
+use crate::consumer::internals::AsyncConsumerMetrics;
 
-use super::background_event::{BackgroundEvent, BackgroundEventEnvelope};
+use super::{BackgroundEvent, BackgroundEventEnvelope};
 
 /// Channel-side adapter: the bg task calls
 /// [`BackgroundEventHandler::add`] to enqueue an event; the matching
@@ -115,7 +115,7 @@ mod tests {
     use tokio::sync::oneshot;
 
     use crate::common::TopicPartition;
-    use crate::consumer::consumer_rebalance_listener_method_name::ConsumerRebalanceListenerMethodName;
+    use crate::consumer::ConsumerRebalanceListenerMethodName;
 
     use super::*;
 
@@ -190,14 +190,17 @@ mod tests {
     /// (Java records `backgroundEventQueue.size() + 1` before adding).
     #[tokio::test]
     async fn add_records_queue_size_when_metrics_wired() {
-        use crate::common::metric::Metric;
+        use crate::common::Metric;
         use crate::common::metrics::Metrics;
-        use crate::consumer::internals::async_consumer_metrics::AsyncConsumerMetrics;
-        use crate::consumer::internals::consumer_utils::CONSUMER_METRIC_GROUP;
+        use crate::consumer::internals::AsyncConsumerMetrics;
+        use crate::consumer::internals::ConsumerUtils;
 
         let (tx, mut rx) = mpsc::unbounded_channel();
         let metrics = Arc::new(Metrics::new());
-        let acm = Arc::new(AsyncConsumerMetrics::new(Arc::clone(&metrics), CONSUMER_METRIC_GROUP));
+        let acm = Arc::new(AsyncConsumerMetrics::new(
+            Arc::clone(&metrics),
+            ConsumerUtils::CONSUMER_METRIC_GROUP,
+        ));
         let queue_size = Arc::new(AtomicI64::new(0));
 
         let mut handler = BackgroundEventHandler::new(tx);
@@ -211,7 +214,7 @@ mod tests {
             .expect("send ok");
 
         assert_eq!(queue_size.load(Ordering::SeqCst), 2);
-        let mn = metrics.metric_name_group("background-event-queue-size", CONSUMER_METRIC_GROUP);
+        let mn = metrics.metric_name("background-event-queue-size", ConsumerUtils::CONSUMER_METRIC_GROUP);
         assert_eq!(metrics.metric(&mn).unwrap().metric_value().as_double(), Some(2.0));
 
         assert!(rx.recv().await.is_some());

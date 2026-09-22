@@ -19,9 +19,9 @@
 
 use std::io;
 
+use crate::CreateDelegationTokenRequestData;
 use crate::common::protocol::{ApiKeys, Errors, Readable};
 use crate::common::security::auth::KafkaPrincipal;
-use crate::create_delegation_token_request_data::CreateDelegationTokenRequestData;
 
 use super::{ConcreteRequest, ConcreteResponse, CreateDelegationTokenResponse, RequestBuilder};
 
@@ -66,7 +66,7 @@ impl CreateDelegationTokenRequest {
     /// Mirrors `CreateDelegationTokenRequest.getErrorResponse`, which prepares a
     /// response with the `ANONYMOUS` owner and requester principals.
     pub fn get_error_response(&self, throttle_time_ms: i32, error: &Errors) -> ConcreteResponse {
-        ConcreteResponse::CreateDelegationToken(CreateDelegationTokenResponse::prepare_error_response(
+        ConcreteResponse::CreateDelegationToken(CreateDelegationTokenResponse::prepare_response(
             self.version,
             throttle_time_ms,
             *error,
@@ -108,7 +108,7 @@ pub struct CreateDelegationTokenRequestBuilder {
 
 impl CreateDelegationTokenRequestBuilder {
     /// Creates a builder from existing data.
-    pub fn from_data(data: CreateDelegationTokenRequestData) -> Self {
+    pub fn new(data: CreateDelegationTokenRequestData) -> Self {
         Self {
             data,
             oldest_allowed_version: ApiKeys::CREATE_DELEGATION_TOKEN.oldest_version(),
@@ -173,7 +173,7 @@ mod tests {
         let mut request =
             ConcreteRequest::CreateDelegationToken(CreateDelegationTokenRequest::new(request_data(), version));
         let bytes = request.serialize().unwrap();
-        let mut readable = crate::common::ByteBufferAccessor::from_bytes(bytes.into_buffer());
+        let mut readable = crate::common::ByteBufferAccessor::new(bytes.into_buffer());
         let parsed = CreateDelegationTokenRequest::parse(&mut readable, version).unwrap();
         assert_eq!(parsed.data().max_lifetime_ms, 86_400_000);
         assert_eq!(parsed.data().renewers.len(), 1);

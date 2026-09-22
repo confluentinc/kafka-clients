@@ -88,7 +88,7 @@ _SOAK_DIR = os.path.dirname(os.path.abspath(__file__))
 #
 # The Rust client only *warns* on an unknown configuration key
 # (src/producer/producer_config.rs, src/consumer/consumer_config.rs, both end
-# their from_properties() match with a `warn!("Unknown ... key")` arm), so a
+# their new() match with a `warn!("Unknown ... key")` arm), so a
 # typo would silently start a soak with the default value — e.g. an
 # unauthenticated PLAINTEXT connection. A multi-day run must not begin that
 # way, so the soak validates its own configuration up front and refuses to
@@ -156,7 +156,6 @@ CONSUMER_CONFIG_KEYS = frozenset([
     "interceptor.classes",
     "internal.throw.on.fetch.stable.offset.unsupported",
     "isolation.level",
-    "key.deserializer",
     "max.partition.fetch.bytes",
     "max.poll.interval.ms",
     "max.poll.records",
@@ -184,7 +183,6 @@ CONSUMER_CONFIG_KEYS = frozenset([
     "share.acquire.mode",
     "socket.connection.setup.timeout.max.ms",
     "socket.connection.setup.timeout.ms",
-    "value.deserializer",
 ])
 
 # Both configs route every `ssl.*` key to apply_ssl_config_key() rather than

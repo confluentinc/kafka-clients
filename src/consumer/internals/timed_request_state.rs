@@ -25,7 +25,7 @@
 use std::fmt;
 use std::ops::{Deref, DerefMut};
 
-use super::request_state::{RETRY_BACKOFF_EXP_BASE, RETRY_BACKOFF_JITTER, RequestState};
+use super::RequestState;
 
 /// Wraps a [`RequestState`] with an absolute deadline (wall-clock
 /// millisecond timestamp) so callers can ask "is this request past its
@@ -69,9 +69,9 @@ impl TimedRequestState {
         Self::with_backoff_params(
             owner,
             retry_backoff_ms,
-            RETRY_BACKOFF_EXP_BASE,
+            RequestState::RETRY_BACKOFF_EXP_BASE,
             retry_backoff_max_ms,
-            RETRY_BACKOFF_JITTER,
+            RequestState::RETRY_BACKOFF_JITTER,
             deadline_ms,
         )
     }

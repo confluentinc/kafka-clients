@@ -75,16 +75,16 @@ async fn produce(ctx: &TestContext, topic: &str, records: &[(&str, &str)]) {
         ("acks".to_string(), "all".to_string()),
         ("linger.ms".to_string(), "0".to_string()),
     ]);
-    let config = ProducerConfig::from_properties(&props).expect("producer config");
+    let config = ProducerConfig::new(&props).expect("producer config");
     let producer: KafkaProducer<Vec<u8>, Vec<u8>> =
-        KafkaProducer::from_config(config, Box::new(ByteArraySerializer), Box::new(ByteArraySerializer))
+        KafkaProducer::new(config, Box::new(ByteArraySerializer), Box::new(ByteArraySerializer))
             .expect("create producer");
     for &(k, v) in records {
         let record = ProducerRecord::with_key(topic.to_string(), Some(b(k)), Some(b(v)));
         // Fully-qualified trait call: KafkaProducer also has an inherent
         // 2-arg send(record, callback) that would otherwise shadow this.
         let fut = Producer::send(&producer, record).await.expect("send");
-        fut.get_timeout(Duration::from_secs(30)).await.expect("produce");
+        fut.get_with_timeout(Duration::from_secs(30)).await.expect("produce");
     }
     producer.close().await.expect("close producer");
 }
@@ -169,7 +169,7 @@ async fn subscribe_and_consume<F: ConsumerBackendFactory>(ctx: &mut TestContext,
         .create(consumer_config(&bootstrap_for(factory, ctx), &format!("{topic}-grp")))
         .await
         .expect("create consumer");
-    consumer.subscribe(vec![topic.clone()]).await.expect("subscribe");
+    consumer.subscribe_with_topics(vec![topic.clone()]).await.expect("subscribe");
     assert_eq!(consumer.subscription(), [topic.clone()].into_iter().collect());
 
     let got = collect(&mut consumer, 1, Duration::from_secs(20)).await;
@@ -220,7 +220,7 @@ async fn seek_and_offsets<F: ConsumerBackendFactory>(ctx: &mut TestContext, fact
     assert_eq!(end.get(&tp), Some(&3), "{} backend", factory.name());
 
     // Seek to offset 1 and consume from there.
-    consumer.seek(tp.clone(), 1).await.expect("seek");
+    consumer.seek_with_offset(tp.clone(), 1).await.expect("seek");
     let got = collect(&mut consumer, 2, Duration::from_secs(20)).await;
     let values: Vec<Vec<u8>> = got.iter().map(|(_, v)| v.clone().unwrap()).collect();
     assert_eq!(values, vec![b("v1"), b("v2")], "{} backend", factory.name());
@@ -293,7 +293,7 @@ async fn unsubscribe_clears_subscription<F: ConsumerBackendFactory>(ctx: &mut Te
         .create(consumer_config(&bootstrap_for(factory, ctx), &format!("{topic}-grp")))
         .await
         .expect("create consumer");
-    consumer.subscribe(vec![topic.clone()]).await.expect("subscribe");
+    consumer.subscribe_with_topics(vec![topic.clone()]).await.expect("subscribe");
     // Poll once so the subscription takes effect, then unsubscribe.
     let _ = collect(&mut consumer, 1, Duration::from_secs(20)).await;
     consumer.unsubscribe().await.expect("unsubscribe");
@@ -371,7 +371,10 @@ async fn commit_explicit_offsets<F: ConsumerBackendFactory>(ctx: &mut TestContex
     consumer.assign(vec![tp.clone()]).await.expect("assign");
 
     let offsets = HashMap::from([(tp.clone(), OffsetAndMetadata::with_metadata(1, "ck").expect("oam"))]);
-    consumer.commit_sync_offsets(offsets).await.expect("commit_sync_offsets");
+    consumer
+        .commit_sync_with_offsets(offsets)
+        .await
+        .expect("commit_sync_with_offsets");
     let committed = consumer.committed(std::slice::from_ref(&tp)).await.expect("committed");
     let entry = committed.get(&tp).expect("committed entry");
     assert_eq!(entry.offset(), 1, "{} backend", factory.name());

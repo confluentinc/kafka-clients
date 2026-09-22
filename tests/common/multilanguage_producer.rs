@@ -38,6 +38,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use confluent_kafka::common::Error;
+use confluent_kafka::common::Errors;
 use confluent_kafka::common::KafkaFuture;
 use confluent_kafka::common::MetricName;
 use confluent_kafka::common::MetricValue;
@@ -55,7 +56,6 @@ use confluent_kafka::common::errors::SslAuthenticationError;
 use confluent_kafka::common::header::Header;
 use confluent_kafka::common::metrics::{ClosureGauge, KafkaMetric, MetricConfig, MetricValueProvider, SystemTime};
 use confluent_kafka::common::network::InvalidReceiveError;
-use confluent_kafka::common::protocol::Errors;
 use confluent_kafka::consumer::ConsumerCommitFailedError;
 use confluent_kafka::consumer::ConsumerGroupMetadata;
 use confluent_kafka::consumer::ConsumerRetriableCommitFailedError;
@@ -339,9 +339,13 @@ impl Producer<Vec<u8>, Vec<u8>> for MultilanguageProducer {
         }
     }
 
-    async fn close_timeout(&self, timeout: Duration) -> Result<(), Error> {
+    async fn close_with_timeout(&self, timeout: Duration) -> Result<(), Error> {
         let mut client = self.client.clone();
         let timeout_ms = i64::try_from(timeout.as_millis()).unwrap_or(i64::MAX);
+        // `close_timeout` here is the tonic-generated client method for
+        // `rpc CloseTimeout`, NOT the `Producer` trait method above — the
+        // proto RPC name is the wire contract and does not follow §2's
+        // `_with_` rule, so the two spellings differ deliberately.
         let response = client
             .close_timeout(CloseTimeoutRequest { producer_id: self.producer_id, timeout_ms })
             .await
@@ -438,16 +442,16 @@ pub(crate) fn kafka_error_from_proto(p: proto::KafkaError) -> Error {
     //
     // `is_retriable` / `is_fatal` are gone with it: both sides derive them from
     // the code (`Error::is_retriable_error`,
-    // `request_utils::is_fatal_error`), so carrying them over the wire only
+    // `request_utils::RequestUtils::is_fatal_error`), so carrying them over the wire only
     // created a second, divergeable source of truth.
     match p.code {
         // Classes whose payload the proto transports. Java's constructors take
         // the payload *and* a message, so both survive; the no-message
         // constructors would drop `p.message` on the floor.
         TOPIC_AUTHORIZATION_FAILED => {
-            Error::topic_authorization_with_message(p.unauthorized_topics.into_iter().collect(), p.message)
+            Error::topic_authorization_message(p.unauthorized_topics.into_iter().collect(), p.message)
         },
-        INVALID_TOPIC_ERROR => Error::invalid_topics_with_message(p.invalid_topics.into_iter().collect(), p.message),
+        INVALID_TOPIC_ERROR => Error::invalid_topics_message(p.invalid_topics.into_iter().collect(), p.message),
         GROUP_AUTHORIZATION_FAILED => {
             Error::group_authorization_with_message(p.group_id.unwrap_or_default(), p.message)
         },
@@ -463,14 +467,14 @@ pub(crate) fn kafka_error_from_proto(p: proto::KafkaError) -> Error {
         AUTHENTICATION => Error::Authentication(AuthenticationError::new(p.message)),
         AUTHORIZATION => Error::Authorization(AuthorizationError::new(p.message)),
         AUTHORIZER_NOT_READY => Error::AuthorizerNotReady(AuthorizerNotReadyError::new(p.message)),
-        CONFIG => Error::config(p.message),
+        CONFIG => Error::config_message(p.message),
         DISCONNECT => Error::Disconnect(DisconnectError::new(p.message)),
         INTERRUPT => Error::Interrupt(InterruptError::new(p.message)),
         INVALID_OFFSET => Error::InvalidOffset(InvalidOffsetError::new(p.message)),
         SCHEMA => Error::schema(p.message),
         SERIALIZATION => Error::serialization(p.message),
         SSL_AUTHENTICATION => Error::SslAuthentication(SslAuthenticationError::new(p.message)),
-        TRANSACTION_ABORTED => Error::transaction_aborted_with_message(p.message),
+        TRANSACTION_ABORTED => Error::transaction_aborted_message(p.message),
         WAKEUP => Error::wakeup(p.message),
         CONSUMER_COMMIT_FAILED => Error::ConsumerCommitFailed(ConsumerCommitFailedError::new(p.message)),
         CONSUMER_RETRIABLE_COMMIT_FAILED => {

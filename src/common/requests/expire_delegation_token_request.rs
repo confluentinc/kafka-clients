@@ -19,8 +19,8 @@
 
 use std::io;
 
+use crate::ExpireDelegationTokenRequestData;
 use crate::common::protocol::{ApiKeys, Errors, Readable};
-use crate::expire_delegation_token_request_data::ExpireDelegationTokenRequestData;
 
 use super::{ConcreteRequest, ConcreteResponse, ExpireDelegationTokenResponse, RequestBuilder};
 
@@ -116,7 +116,7 @@ pub struct ExpireDelegationTokenRequestBuilder {
 
 impl ExpireDelegationTokenRequestBuilder {
     /// Creates a builder from existing data.
-    pub fn from_data(data: ExpireDelegationTokenRequestData) -> Self {
+    pub fn new(data: ExpireDelegationTokenRequestData) -> Self {
         Self {
             data,
             oldest_allowed_version: ApiKeys::EXPIRE_DELEGATION_TOKEN.oldest_version(),
@@ -184,7 +184,7 @@ mod tests {
         let mut request =
             ConcreteRequest::ExpireDelegationToken(ExpireDelegationTokenRequest::new(request_data(), version));
         let bytes = request.serialize().unwrap();
-        let mut readable = crate::common::ByteBufferAccessor::from_bytes(bytes.into_buffer());
+        let mut readable = crate::common::ByteBufferAccessor::new(bytes.into_buffer());
         let parsed = ExpireDelegationTokenRequest::parse(&mut readable, version).unwrap();
         assert_eq!(parsed.data().hmac, b"the-hmac");
         assert_eq!(parsed.data().expiry_time_period_ms, -1);

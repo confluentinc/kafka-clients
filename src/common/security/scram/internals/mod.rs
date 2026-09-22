@@ -18,8 +18,8 @@
 //! Package name contains `internals`, so everything here is `pub(crate)`
 //! (CLAUDE.md naming conventions).
 
-pub(crate) mod scram_formatter;
-pub(crate) mod scram_mechanism;
+mod scram_formatter;
+mod scram_mechanism;
 
 pub(crate) use scram_formatter::ScramFormatter;
 pub(crate) use scram_mechanism::ScramMechanism;

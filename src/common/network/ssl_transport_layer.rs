@@ -47,7 +47,7 @@
 //! Closed
 //! ```
 
-use super::authentication_error::auth_io_error;
+use super::auth_io_error;
 use super::{InterestOps, TransportLayer};
 
 use std::future::Future;
@@ -869,7 +869,7 @@ impl io::Read for TryReadAdapter<'_> {
 mod tests {
     use super::*;
     use crate::common::config::SslConfig;
-    use crate::common::network::authentication_error::is_authentication_error;
+    use crate::common::network::is_authentication_error;
     use crate::common::security::SslFactory;
     use std::sync::Arc;
 
