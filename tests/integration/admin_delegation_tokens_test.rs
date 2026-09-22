@@ -82,7 +82,7 @@ use confluent_kafka::admin::{
 use confluent_kafka::common::Errors;
 use confluent_kafka::common::security::auth::KafkaPrincipal;
 
-use crate::common::admin_backend::{AdminBackend, admin_for};
+use crate::common::admin_backend::{AdminBackend, admin_for_plaintext};
 use crate::common::backend_factory::AdminBackendFactory;
 use crate::common::test_context::TestContext;
 use crate::multilanguage_admin_test;
@@ -124,7 +124,12 @@ async fn delegation_token_rpcs_are_rejected_on_a_plaintext_connection<F: AdminBa
     ctx: &mut TestContext,
     factory: &F,
 ) {
-    let admin = admin_for(factory, ctx).await;
+    // Pinned to PLAINTEXT: the broker's `allowTokenRequests` gate returns
+    // DELEGATION_TOKEN_REQUEST_NOT_ALLOWED *only* when the client's security
+    // protocol is PLAINTEXT (see module docs). Over the SSL / SASL_SSL runs the
+    // gate would pass and the RPC would answer DelegationTokenAuthDisabled
+    // instead, so this scenario asserts the same plaintext error in every run.
+    let admin = admin_for_plaintext(factory, ctx).await;
     let backend = factory.name();
 
     // createDelegationToken with a renewer and an explicit owner, so both
