@@ -18,6 +18,7 @@ endif
 	devel-build-c devel-build-python \
 	build-grpc-images build-grpc-images-python build-grpc-images-c init init-hooks \
 	test test-rust test-integration test-integration-python test-integration-c \
+	test-integration-plaintext test-integration-ssl test-integration-sasl-ssl \
 	test-c test-python test-rust-all-features \
 	test-c-macos-docker test-python-macos-docker \
 	test-integration-perf test-integration-perf-rust test-integration-perf-python \
@@ -161,6 +162,25 @@ test-rust-all-features: build-rust-all-features
 # integration` cannot schedule them alongside the functional suite.
 test-integration: build-rust-integration-tests
 	cargo test --features integration-tests --test integration
+
+# ── Protocol-parameterized functional integration runs ───────────────────
+#
+# Every broker the harness starts exposes PLAINTEXT / SSL / SASL_PLAINTEXT /
+# SASL_SSL listeners simultaneously, so INTEGRATION_TEST_PROTOCOL selects which
+# listener the whole suite's native clients connect over — the port and the
+# matching security keys are filled in centrally by TestContext::configure /
+# apply_security (tests/common/test_context.rs). This is the librdkafka-style
+# "run the whole suite once per protocol" model, adapted to our one-cluster,
+# all-listeners harness.
+#
+# `test-integration` above (no env var) is equivalent to the plaintext run.
+# Used by the Semaphore verify-plaintext / SSL / SASL_SSL blocks.
+test-integration-plaintext: build-rust-integration-tests
+	INTEGRATION_TEST_PROTOCOL=plaintext cargo test --features integration-tests --test integration
+test-integration-ssl: build-rust-integration-tests
+	INTEGRATION_TEST_PROTOCOL=ssl cargo test --features integration-tests --test integration
+test-integration-sasl-ssl: build-rust-integration-tests
+	INTEGRATION_TEST_PROTOCOL=sasl_ssl cargo test --features integration-tests --test integration
 
 # ── Per-backend multilanguage integration tests ──────────────────────────
 #
