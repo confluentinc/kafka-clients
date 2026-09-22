@@ -84,13 +84,14 @@ use crate::multilanguage_admin_test;
 /// scenario needs bytes on the broker's disk, and which language wrote them is
 /// not what these scenarios compare. `bootstrap` is therefore the host loopback
 /// address, not the container listener.
-async fn produce_records(bootstrap: &str, topic: &str, partition: i32, num: usize) {
-    let props = HashMap::from([
+async fn produce_records(ctx: &TestContext, bootstrap: &str, topic: &str, partition: i32, num: usize) {
+    let mut props = HashMap::from([
         ("bootstrap.servers".to_string(), bootstrap.to_string()),
         ("client.id".to_string(), "integration-test-log-dirs-producer".to_string()),
         ("acks".to_string(), "all".to_string()),
         ("max.block.ms".to_string(), "30000".to_string()),
     ]);
+    ctx.apply_security(&mut props);
     let config = ProducerConfig::new(&props).expect("valid producer config");
     let producer: KafkaProducer<Vec<u8>, Vec<u8>> =
         KafkaProducer::new(config, Box::new(ByteArraySerializer), Box::new(ByteArraySerializer))
@@ -154,7 +155,7 @@ async fn describe_log_dirs_returns_dirs_with_replica_sizes<F: AdminBackendFactor
 
     let topic = ctx.topic("admin_describe_log_dirs");
     create_topic(&admin, &topic, 1, 1).await;
-    produce_records(ctx.bootstrap_servers(), &topic, 0, 10).await;
+    produce_records(ctx, ctx.protocol_bootstrap_servers(), &topic, 0, 10).await;
 
     let broker_id = first_broker_id(&admin).await;
     let described = admin
@@ -215,7 +216,7 @@ async fn describe_replica_log_dirs_returns_current_dir<F: AdminBackendFactory>(c
 
     let topic = ctx.topic("admin_describe_replica_log_dirs");
     create_topic(&admin, &topic, 1, 1).await;
-    produce_records(ctx.bootstrap_servers(), &topic, 0, 5).await;
+    produce_records(ctx, ctx.protocol_bootstrap_servers(), &topic, 0, 5).await;
 
     let broker_id = first_broker_id(&admin).await;
     let replica = TopicPartitionReplica::new(topic.clone(), 0, broker_id);
@@ -288,7 +289,7 @@ async fn alter_replica_log_dirs_cross_dir_move<F: AdminBackendFactory>(ctx: &mut
 
     let topic = ctx.topic("admin_alter_replica_log_dirs_move");
     create_topic(&admin, &topic, 1, 1).await;
-    produce_records(ctx.bootstrap_servers(), &topic, 0, 10).await;
+    produce_records(ctx, ctx.protocol_bootstrap_servers(), &topic, 0, 10).await;
 
     let broker_id = first_broker_id(&admin).await;
     let replica = TopicPartitionReplica::new(topic.clone(), 0, broker_id);

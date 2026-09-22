@@ -95,18 +95,41 @@ blocks:
             - r2 code-review --verbose --timeout=15m || true
 
   - name: "Verify Rust (Linux amd64)"
-    # Verification that happens on every new commit, whether created manually
-    # or by the translation agent. The agent runs in a detached worktree and
-    # pushes new commits when promotions run either manually or automatically.
+    # Runs on every new commit, whether created manually or by the translation
+    # agent.
+    #
+    # The three jobs below each run on a dedicated VM in parallel, following
+    # the same pattern as the "Verify language bindings" block. All three run
+    # the whole native-Rust test suite (unit tests + the functional integration
+    # suite + the `__rust` multilanguage arms); they differ only in which broker
+    # listener the clients connect over:
+    #   - PLAINTEXT: `make verify-rust` — the full suite over the default
+    #     PLAINTEXT listener, plus the protocol-independent checks that run only
+    #     here: format-check, clippy, and the performance tests.
+    #   - SSL / SASL_SSL: the same suite over the broker's SSL listener (:9096)
+    #     or its SASL_SSL listener (:9097, SASL/PLAIN, admin / admin-secret),
+    #     WITHOUT format-check / clippy / perf — those are protocol-independent,
+    #     so running them once in the PLAINTEXT job is enough.
+    #
+    # Each job provisions its own broker, so the jobs do not contend for
+    # Docker resources. See tests/common/test_context.rs
+    # (INTEGRATION_TEST_PROTOCOL / TestProtocol) for how a cluster's four
+    # listeners are selected per run.
     dependencies: []
     task:
       prologue:
         commands:
           - ./.semaphore/dependencies.sh
       jobs:
-        - name: "verify-rust (Linux amd64)"
+        - name: "Verify Rust (Linux amd64) — PLAINTEXT"
           commands:
             - make verify-rust
+        - name: "Verify Rust (Linux amd64) — SSL"
+          commands:
+            - make test-rust-all-features-ssl
+        - name: "Verify Rust (Linux amd64) — SASL_SSL (PLAIN)"
+          commands:
+            - make test-rust-all-features-sasl-ssl
 
   - name: "Verify language bindings (Linux amd64)"
     # `dependencies: []` so this starts alongside "Verify Rust" rather than
@@ -115,20 +138,48 @@ blocks:
     # (target/debug is ~12x target/release, and ~48% of it is rustc incremental
     # caches that CI never reuses), so pushing it once and pulling it twice cost
     # more than the builds it replaced.
+    #
+    # Each binding runs across the three protocols, following the same pattern
+    # as the "Verify Rust" block. The gRPC multilanguage container arm
+    # (__grpc_c / __grpc_python) connects to the broker over the CONTAINER
+    # listener for the active protocol:
+    #   - PLAINTEXT: `make verify-c` / `make verify-python` — the full binding
+    #     gate (ctest / pytest unit tests, the PLAINTEXT gRPC arm, check-bindings,
+    #     and the Python perf suite).
+    #   - SSL / SASL_SSL: only the gRPC container arm re-run over the SSL
+    #     (CTLSONLY :9100) or SASL_SSL (CSASLTLS :9101) CONTAINER listener. The
+    #     ctest / pytest unit tests, check-bindings and perf are
+    #     protocol-independent, so running them once in the PLAINTEXT job is
+    #     enough.
+    #
+    # Each job is a separate VM with its own broker, so the six jobs do not
+    # contend for Docker resources.
     dependencies: []
     task:
       prologue:
-        # Runs before EACH job in this block; verify-c and verify-python are
-        # separate VMs with their own checkout.
+        # Runs before EACH job in this block; every job is a separate VM with
+        # its own checkout.
         commands:
           - ./.semaphore/dependencies.sh
       jobs:
-        - name: "verify-c (Linux amd64)"
+        - name: "verify-c (Linux amd64) — PLAINTEXT"
           commands:
             - make verify-c
-        - name: "verify-python (Linux amd64)"
+        - name: "verify-c (Linux amd64) — SSL"
+          commands:
+            - make test-integration-c-ssl
+        - name: "verify-c (Linux amd64) — SASL_SSL (PLAIN)"
+          commands:
+            - make test-integration-c-sasl-ssl
+        - name: "verify-python (Linux amd64) — PLAINTEXT"
           commands:
             - make verify-python
+        - name: "verify-python (Linux amd64) — SSL"
+          commands:
+            - make test-integration-python-ssl
+        - name: "verify-python (Linux amd64) — SASL_SSL (PLAIN)"
+          commands:
+            - make test-integration-python-sasl-ssl
 
   - name: "Verify Rust (macOS arm64)"
     dependencies: []
