@@ -130,15 +130,16 @@ impl Deserializer<Vec<u8>> for ByteArrayDeserializer {
 /// `enable.auto.commit=false` (no `group.id` override in the Java helper,
 /// so a random one is supplied per test). Default
 /// `auto.offset.reset=earliest`.
-fn make_consumer_config_bytes(bootstrap: &str, group_id: &str) -> ConsumerConfig {
-    let props = HashMap::from([
-        ("bootstrap.servers".to_string(), bootstrap.to_string()),
+fn make_consumer_config_bytes(ctx: &TestContext, group_id: &str) -> ConsumerConfig {
+    let mut props = HashMap::from([
+        ("bootstrap.servers".to_string(), ctx.protocol_bootstrap_servers().to_string()),
         ("group.protocol".to_string(), "consumer".to_string()),
         ("auto.offset.reset".to_string(), "earliest".to_string()),
         ("client.id".to_string(), "integration-test-consumer".to_string()),
         ("enable.auto.commit".to_string(), "false".to_string()),
         ("group.id".to_string(), group_id.to_string()),
     ]);
+    ctx.apply_security(&mut props);
     ConsumerConfig::new(&props).expect("invalid test config")
 }
 
@@ -147,20 +148,21 @@ fn new_bytes_consumer(config: ConsumerConfig) -> Box<dyn Consumer<Vec<u8>, Vec<u
         .expect("KafkaConsumer::new should succeed")
 }
 
-fn make_producer_config(bootstrap: &str) -> ProducerConfig {
-    let props = HashMap::from([
-        ("bootstrap.servers".to_string(), bootstrap.to_string()),
+fn make_producer_config(ctx: &TestContext) -> ProducerConfig {
+    let mut props = HashMap::from([
+        ("bootstrap.servers".to_string(), ctx.protocol_bootstrap_servers().to_string()),
         ("client.id".to_string(), "integration-test-producer".to_string()),
         ("acks".to_string(), "all".to_string()),
         ("max.block.ms".to_string(), "30000".to_string()),
         ("linger.ms".to_string(), "5".to_string()),
     ]);
+    ctx.apply_security(&mut props);
     ProducerConfig::new(&props).expect("invalid producer test config")
 }
 
-fn build_producer_bytes(bootstrap: &str) -> KafkaProducer<Vec<u8>, Vec<u8>> {
+fn build_producer_bytes(ctx: &TestContext) -> KafkaProducer<Vec<u8>, Vec<u8>> {
     KafkaProducer::new(
-        make_producer_config(bootstrap),
+        make_producer_config(ctx),
         Box::new(ByteArraySerializer),
         Box::new(ByteArraySerializer),
     )
@@ -249,12 +251,12 @@ async fn test_on_partitions_assigned_called_with_new_partitions_only() {
     let tp = TopicPartition::new(topic.clone(), 0);
     let added = TopicPartition::new(new_topic.clone(), 0);
 
-    let producer = build_producer_bytes(ctx.bootstrap_servers());
+    let producer = build_producer_bytes(&ctx);
     ensure_topic(&producer, &topic).await;
     ensure_topic(&producer, &new_topic).await;
     producer.close().await.expect("producer close should succeed");
 
-    let mut consumer = new_bytes_consumer(make_consumer_config_bytes(ctx.bootstrap_servers(), &group_id));
+    let mut consumer = new_bytes_consumer(make_consumer_config_bytes(&ctx, &group_id));
 
     // First subscription: expect `tp` in the callback.
     let captured1: Arc<Mutex<Option<Vec<TopicPartition>>>> = Arc::new(Mutex::new(None));
@@ -533,11 +535,11 @@ async fn test_rebalance_listener_assign_on_partitions_assigned() {
     let group_id = ctx.group_id("g_assign_on_assigned");
     let tp = TopicPartition::new(topic.clone(), 0);
 
-    let producer = build_producer_bytes(ctx.bootstrap_servers());
+    let producer = build_producer_bytes(&ctx);
     ensure_topic(&producer, &topic).await;
     producer.close().await.expect("producer close should succeed");
 
-    let mut consumer = new_bytes_consumer(make_consumer_config_bytes(ctx.bootstrap_servers(), &group_id));
+    let mut consumer = new_bytes_consumer(make_consumer_config_bytes(&ctx, &group_id));
     let result: Arc<Mutex<Option<Result<(), Error>>>> = Arc::new(Mutex::new(None));
     trigger_on_partitions_assigned(
         consumer.as_mut(),
@@ -569,11 +571,11 @@ async fn test_rebalance_listener_assignment_on_partitions_assigned() {
     let group_id = ctx.group_id("g_assignment_on_assigned");
     let tp = TopicPartition::new(topic.clone(), 0);
 
-    let producer = build_producer_bytes(ctx.bootstrap_servers());
+    let producer = build_producer_bytes(&ctx);
     ensure_topic(&producer, &topic).await;
     producer.close().await.expect("producer close should succeed");
 
-    let mut consumer = new_bytes_consumer(make_consumer_config_bytes(ctx.bootstrap_servers(), &group_id));
+    let mut consumer = new_bytes_consumer(make_consumer_config_bytes(&ctx, &group_id));
     let captured: Arc<Mutex<Option<HashSet<TopicPartition>>>> = Arc::new(Mutex::new(None));
     trigger_on_partitions_assigned(
         consumer.as_mut(),
@@ -600,11 +602,11 @@ async fn test_rebalance_listener_beginning_offsets_on_partitions_assigned() {
     let group_id = ctx.group_id("g_begin_on_assigned");
     let tp = TopicPartition::new(topic.clone(), 0);
 
-    let producer = build_producer_bytes(ctx.bootstrap_servers());
+    let producer = build_producer_bytes(&ctx);
     ensure_topic(&producer, &topic).await;
     producer.close().await.expect("producer close should succeed");
 
-    let mut consumer = new_bytes_consumer(make_consumer_config_bytes(ctx.bootstrap_servers(), &group_id));
+    let mut consumer = new_bytes_consumer(make_consumer_config_bytes(&ctx, &group_id));
     let captured: Arc<Mutex<Option<HashMap<TopicPartition, i64>>>> = Arc::new(Mutex::new(None));
     trigger_on_partitions_assigned(
         consumer.as_mut(),
@@ -629,11 +631,11 @@ async fn test_rebalance_listener_assign_on_partitions_revoked() {
     let group_id = ctx.group_id("g_assign_on_revoked");
     let tp = TopicPartition::new(topic.clone(), 0);
 
-    let producer = build_producer_bytes(ctx.bootstrap_servers());
+    let producer = build_producer_bytes(&ctx);
     ensure_topic(&producer, &topic).await;
     producer.close().await.expect("producer close should succeed");
 
-    let mut consumer = new_bytes_consumer(make_consumer_config_bytes(ctx.bootstrap_servers(), &group_id));
+    let mut consumer = new_bytes_consumer(make_consumer_config_bytes(&ctx, &group_id));
     let result: Arc<Mutex<Option<Result<(), Error>>>> = Arc::new(Mutex::new(None));
     trigger_on_partitions_revoked(
         consumer.as_mut(),
@@ -665,11 +667,11 @@ async fn test_rebalance_listener_assignment_on_partitions_revoked() {
     let group_id = ctx.group_id("g_assignment_on_revoked");
     let tp = TopicPartition::new(topic.clone(), 0);
 
-    let producer = build_producer_bytes(ctx.bootstrap_servers());
+    let producer = build_producer_bytes(&ctx);
     ensure_topic(&producer, &topic).await;
     producer.close().await.expect("producer close should succeed");
 
-    let mut consumer = new_bytes_consumer(make_consumer_config_bytes(ctx.bootstrap_servers(), &group_id));
+    let mut consumer = new_bytes_consumer(make_consumer_config_bytes(&ctx, &group_id));
     let captured: Arc<Mutex<Option<HashSet<TopicPartition>>>> = Arc::new(Mutex::new(None));
     trigger_on_partitions_revoked(
         consumer.as_mut(),
@@ -696,11 +698,11 @@ async fn test_rebalance_listener_beginning_offsets_on_partitions_revoked() {
     let group_id = ctx.group_id("g_begin_on_revoked");
     let tp = TopicPartition::new(topic.clone(), 0);
 
-    let producer = build_producer_bytes(ctx.bootstrap_servers());
+    let producer = build_producer_bytes(&ctx);
     ensure_topic(&producer, &topic).await;
     producer.close().await.expect("producer close should succeed");
 
-    let mut consumer = new_bytes_consumer(make_consumer_config_bytes(ctx.bootstrap_servers(), &group_id));
+    let mut consumer = new_bytes_consumer(make_consumer_config_bytes(&ctx, &group_id));
     let captured: Arc<Mutex<Option<HashMap<TopicPartition, i64>>>> = Arc::new(Mutex::new(None));
     trigger_on_partitions_revoked(
         consumer.as_mut(),
@@ -725,11 +727,11 @@ async fn test_get_position_of_newly_assigned_partition_on_partitions_assigned_ca
     let group_id = ctx.group_id("g_position_on_assigned");
     let tp = TopicPartition::new(topic.clone(), 0);
 
-    let producer = build_producer_bytes(ctx.bootstrap_servers());
+    let producer = build_producer_bytes(&ctx);
     ensure_topic(&producer, &topic).await;
     producer.close().await.expect("producer close should succeed");
 
-    let mut consumer = new_bytes_consumer(make_consumer_config_bytes(ctx.bootstrap_servers(), &group_id));
+    let mut consumer = new_bytes_consumer(make_consumer_config_bytes(&ctx, &group_id));
     let result: Arc<Mutex<Option<Result<i64, Error>>>> = Arc::new(Mutex::new(None));
     trigger_on_partitions_assigned(
         consumer.as_mut(),
@@ -760,7 +762,7 @@ async fn test_seek_position_and_pause_newly_assigned_partition_on_partitions_ass
     let starting_offset: i64 = 100;
     let total_records: usize = 120;
 
-    let producer = build_producer_bytes(ctx.bootstrap_servers());
+    let producer = build_producer_bytes(&ctx);
     for i in 0..total_records {
         let record = ProducerRecord::with_partition_key(
             topic.clone(),
@@ -777,7 +779,7 @@ async fn test_seek_position_and_pause_newly_assigned_partition_on_partitions_ass
     producer.flush().await.expect("producer.flush should succeed");
     producer.close().await.expect("producer close should succeed");
 
-    let mut consumer = new_bytes_consumer(make_consumer_config_bytes(ctx.bootstrap_servers(), &group_id));
+    let mut consumer = new_bytes_consumer(make_consumer_config_bytes(&ctx, &group_id));
     let result: Arc<Mutex<Option<Result<(), Error>>>> = Arc::new(Mutex::new(None));
     trigger_on_partitions_assigned(
         consumer.as_mut(),
