@@ -94,55 +94,36 @@ blocks:
             # || true: code review failures are unrelated to the codebase and should not block CI. Please report issues to Slack channel #r2.
             - r2 code-review --verbose --timeout=15m || true
 
-  - name: "Verify Rust (Linux amd64) — PLAINTEXT"
-    # Verification that happens on every new commit, whether created manually
-    # or by the translation agent. The agent runs in a detached worktree and
-    # pushes new commits when promotions run either manually or automatically.
+  - name: "Verify Rust (Linux amd64)"
+    # Runs on every new commit, whether created manually or by the translation
+    # agent.
     #
-    # `make verify-rust` runs format/lint + the full unit and functional
-    # integration suite (the latter over the default PLAINTEXT protocol) + the
-    # perf tail. The two blocks below re-run only the functional integration
-    # suite over SSL and SASL_SSL, and depend on this one so they run only once
-    # the PLAINTEXT baseline is green (and never race it for Docker). See
-    # tests/common/test_context.rs (INTEGRATION_TEST_PROTOCOL / TestProtocol)
-    # for how one cluster's four listeners are selected per run.
+    # The three jobs below each run on a dedicated VM in parallel, following
+    # the same pattern as the "Verify language bindings" block:
+    #   - PLAINTEXT: `make verify-rust` runs format and lint checks, the full
+    #     unit and functional integration suite over the default PLAINTEXT
+    #     protocol, and the performance tests.
+    #   - SSL / SASL_SSL: re-run the functional integration suite with each
+    #     native client connecting over the broker's SSL listener (:9096) or
+    #     its SASL_SSL listener (:9097, SASL/PLAIN, admin / admin-secret).
+    #
+    # Each job provisions its own broker, so the jobs do not contend for
+    # Docker resources. See tests/common/test_context.rs
+    # (INTEGRATION_TEST_PROTOCOL / TestProtocol) for how a cluster's four
+    # listeners are selected per run.
     dependencies: []
     task:
       prologue:
         commands:
           - ./.semaphore/dependencies.sh
       jobs:
-        - name: "verify-rust (Linux amd64)"
+        - name: "Verify Rust (Linux amd64) — PLAINTEXT"
           commands:
             - make verify-rust
-
-  - name: "Verify Rust (Linux amd64) — SSL"
-    # Re-runs the functional integration suite with every native client
-    # connecting over the broker's SSL listener (:9096). Attached to the
-    # PLAINTEXT block so it starts only after that baseline passes.
-    dependencies:
-      - "Verify Rust (Linux amd64) — PLAINTEXT"
-    task:
-      prologue:
-        commands:
-          - ./.semaphore/dependencies.sh
-      jobs:
-        - name: "integration-ssl (Linux amd64)"
+        - name: "Verify Rust (Linux amd64) — SSL"
           commands:
             - make test-integration-ssl
-
-  - name: "Verify Rust (Linux amd64) — SASL_SSL (PLAIN)"
-    # Re-runs the functional integration suite with every native client
-    # connecting over the broker's SASL_SSL listener (:9097) using SASL/PLAIN
-    # (admin/admin-secret). Attached to the PLAINTEXT block, like the SSL one.
-    dependencies:
-      - "Verify Rust (Linux amd64) — PLAINTEXT"
-    task:
-      prologue:
-        commands:
-          - ./.semaphore/dependencies.sh
-      jobs:
-        - name: "integration-sasl-ssl (Linux amd64)"
+        - name: "Verify Rust (Linux amd64) — SASL_SSL (PLAIN)"
           commands:
             - make test-integration-sasl-ssl
 
