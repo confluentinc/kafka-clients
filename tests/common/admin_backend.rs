@@ -1926,15 +1926,69 @@ pub fn bootstrap_for<F: AdminBackendFactory>(factory: &F, ctx: &TestContext) -> 
     if factory.needs_container_bootstrap() {
         ctx.container_bootstrap_servers().to_string()
     } else {
-        ctx.bootstrap_servers().to_string()
+        ctx.protocol_bootstrap_servers().to_string()
     }
+}
+
+/// Inject the selected protocol's security keys into `config`, but only for a
+/// native (in-process) backend. The gRPC/container backends reach the broker
+/// over its PLAINTEXT container listener and must stay plaintext.
+pub fn apply_backend_security<F: AdminBackendFactory>(
+    factory: &F,
+    ctx: &TestContext,
+    config: &mut HashMap<String, String>,
+) {
+    if !factory.needs_container_bootstrap() {
+        ctx.apply_security(config);
+    }
+}
+
+/// [`admin_config`] for the factory's reachable bootstrap, with the selected
+/// protocol's security keys injected for a native backend.
+pub fn admin_config_for<F: AdminBackendFactory>(factory: &F, ctx: &TestContext) -> HashMap<String, String> {
+    let mut config = admin_config(&bootstrap_for(factory, ctx));
+    apply_backend_security(factory, ctx, &mut config);
+    config
 }
 
 /// Build the admin client for the backend under test, panicking with the
 /// backend's name on failure.
 pub async fn admin_for<F: AdminBackendFactory>(factory: &F, ctx: &TestContext) -> F::Admin {
     factory
-        .create(admin_config(&bootstrap_for(factory, ctx)))
+        .create(admin_config_for(factory, ctx))
+        .await
+        .unwrap_or_else(|e| panic!("{} backend: create admin client: {e}", factory.name()))
+}
+
+/// Bootstrap address pinned to the broker's PLAINTEXT listener, ignoring the
+/// run's `INTEGRATION_TEST_PROTOCOL`. Container backends already reach the broker
+/// over its PLAINTEXT container listener; native rust uses the host PLAINTEXT
+/// loopback rather than [`TestContext::protocol_bootstrap_servers`].
+pub fn plaintext_bootstrap_for<F: AdminBackendFactory>(factory: &F, ctx: &TestContext) -> String {
+    if factory.needs_container_bootstrap() {
+        ctx.container_bootstrap_servers().to_string()
+    } else {
+        ctx.bootstrap_servers().to_string()
+    }
+}
+
+/// [`admin_config`] pinned to the PLAINTEXT listener with no security keys.
+///
+/// For scenarios whose assertion is specific to a plaintext connection — the
+/// broker's delegation-token gate fires only over PLAINTEXT, and the anonymous
+/// principal a DENY rule targets exists only over PLAINTEXT. Unlike
+/// [`admin_config_for`] this ignores the run's protocol selector, so the test
+/// asserts the same behaviour in the PLAINTEXT, SSL and SASL_SSL runs alike.
+pub fn admin_config_for_plaintext<F: AdminBackendFactory>(factory: &F, ctx: &TestContext) -> HashMap<String, String> {
+    admin_config(&plaintext_bootstrap_for(factory, ctx))
+}
+
+/// Build an admin client pinned to the PLAINTEXT listener. See
+/// [`admin_config_for_plaintext`] for when this is the right choice over
+/// [`admin_for`].
+pub async fn admin_for_plaintext<F: AdminBackendFactory>(factory: &F, ctx: &TestContext) -> F::Admin {
+    factory
+        .create(admin_config_for_plaintext(factory, ctx))
         .await
         .unwrap_or_else(|e| panic!("{} backend: create admin client: {e}", factory.name()))
 }
