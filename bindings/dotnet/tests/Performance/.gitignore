@@ -1,0 +1,8 @@
+# Build output (staged explicitly per-path; this is belt-and-suspenders).
+bin/
+obj/
+
+# Perf-run artifacts written to the working directory by the console apps.
+metrics.jsonl
+results.json
+producer.log
