@@ -33,6 +33,11 @@
 //! `tests/consumer/async_kafka_consumer_test.rs` exercises the
 //! production ctor (channels + NetworkClient + bg-task spawn + clean
 //! close) without requiring a broker.
+//!
+//! `ConsumerIntegrationTest.testAsyncConsumerWithConsumerProtocolDisabled`
+//! (line 69) is translated as
+//! [`test_async_consumer_with_consumer_protocol_disabled`] on its own
+//! single-broker cluster with `group.version` downgraded to 0.
 
 use std::collections::BTreeMap;
 use std::collections::HashMap;
@@ -614,4 +619,119 @@ async fn test_fetch_partitions_with_always_failed_listener() {
     }
 
     consumer.close().await.expect("consumer close should succeed");
+}
+
+/// `AbstractHeartbeatRequestManager.CONSUMER_PROTOCOL_NOT_SUPPORTED_MSG` — the
+/// crate constant is `pub(crate)`, so the exact Java text is pinned here.
+const CONSUMER_PROTOCOL_NOT_SUPPORTED_MSG: &str = "The cluster does not support the new CONSUMER group protocol. \
+     Set group.protocol=classic on the consumer configs to revert to the CLASSIC protocol \
+     until the cluster is upgraded.";
+
+/// Cluster for [`test_async_consumer_with_consumer_protocol_disabled`]: Java's
+/// `serverProperties` (`offsets.topic.num.partitions=1`,
+/// `offsets.topic.replication.factor=1`) on one broker.
+///
+/// Java also sets `@ClusterFeature(feature = GROUP_VERSION, version = 0)`, which
+/// formats the cluster with `group.version=0`. The pooled `apache/kafka` image
+/// is formatted by its stock entrypoint with no feature overrides, so the test
+/// downgrades `group.version` to 0 through `Admin::update_features` instead —
+/// the same end state (`KafkaApis.isConsumerGroupProtocolEnabled()` is false, so
+/// every `ConsumerGroupHeartbeat` is answered `UNSUPPORTED_VERSION`,
+/// `KafkaApis.scala:2607-2610`). Because that mutates cluster-wide state, this
+/// property set must stay unique to this test so the pool never hands the
+/// downgraded container to another suite.
+fn consumer_protocol_disabled_cluster_config() -> ClusterConfig {
+    let mut props = BTreeMap::new();
+    props.insert("KAFKA_OFFSETS_TOPIC_NUM_PARTITIONS".to_string(), "1".to_string());
+    props.insert("KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR".to_string(), "1".to_string());
+    ClusterConfig::with_properties(props)
+}
+
+/// Translates `testAsyncConsumerWithConsumerProtocolDisabled`
+/// (`ConsumerIntegrationTest.java:69`).
+///
+/// With the consumer rebalance protocol disabled on the cluster, polling a
+/// `group.protocol=consumer` consumer must eventually fail with an
+/// `UnsupportedVersionException` whose message is exactly
+/// `CONSUMER_PROTOCOL_NOT_SUPPORTED_MSG`.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_async_consumer_with_consumer_protocol_disabled() {
+    use confluent_kafka::admin::Admin;
+    use confluent_kafka::admin::AdminClientConfig;
+    use confluent_kafka::admin::FeatureUpdate;
+    use confluent_kafka::admin::KafkaAdminClient;
+    use confluent_kafka::admin::UpgradeType;
+    use confluent_kafka::common::Errors;
+
+    use crate::common::test_utils;
+
+    let mut ctx = TestContext::new(consumer_protocol_disabled_cluster_config()).await;
+    let admin = KafkaAdminClient::new(
+        AdminClientConfig::new(&HashMap::from([(
+            "bootstrap.servers".to_string(),
+            ctx.bootstrap_servers().to_string(),
+        )]))
+        .expect("valid admin config"),
+    )
+    .expect("admin client");
+
+    // `@ClusterFeature(feature = Feature.GROUP_VERSION, version = 0)` — see
+    // `consumer_protocol_disabled_cluster_config`. Idempotent: re-running on a
+    // pooled, already-downgraded container is a no-op update.
+    let updates = HashMap::from([(
+        "group.version".to_string(),
+        FeatureUpdate::new(0, UpgradeType::SafeDowngrade).expect("valid feature update"),
+    )]);
+    admin
+        .update_features(&updates)
+        .expect("update_features should enqueue")
+        .all()
+        .get_with_timeout(Duration::from_secs(30))
+        .await
+        .expect("downgrading group.version to 0 should succeed");
+
+    let topic = ctx.topic("test-topic");
+    test_utils::create_topic(&admin, &topic, 1, 1).await;
+
+    let props = HashMap::from([
+        ("bootstrap.servers".to_string(), ctx.bootstrap_servers().to_string()),
+        ("group.id".to_string(), ctx.group_id("test-group")),
+        ("group.protocol".to_string(), "CONSUMER".to_string()),
+    ]);
+    let mut consumer = KafkaConsumer::new::<String, String>(
+        ConsumerConfig::new(&props).expect("valid consumer config"),
+        Box::new(StringDeserializer),
+        Box::new(StringDeserializer),
+    )
+    .expect("KafkaConsumer::new should succeed");
+    consumer
+        .subscribe_with_topics(vec![topic])
+        .await
+        .expect("subscribe should succeed");
+
+    // `TestUtils.waitForCondition` (default 15 s): a successful poll keeps
+    // waiting, an `UnsupportedVersionException` ends the wait iff its message
+    // is exactly the protocol-not-supported text, and any other error escapes
+    // the lambda and fails the test.
+    let deadline = Instant::now() + Duration::from_millis(15_000);
+    loop {
+        match consumer.poll(Duration::from_millis(1000)).await {
+            Ok(_) => {},
+            Err(err) if err.error() == Errors::UnsupportedVersion => {
+                if err.message() == CONSUMER_PROTOCOL_NOT_SUPPORTED_MSG {
+                    break;
+                }
+            },
+            Err(err) => panic!("unexpected poll error: {err:?}"),
+        }
+        assert!(
+            Instant::now() < deadline,
+            "Should get UnsupportedVersionException and how to revert to classic protocol"
+        );
+    }
+
+    // try-with-resources: a close failure would fail the Java test too.
+    consumer.close().await.expect("consumer close should succeed");
+    admin.close().await;
+    ctx.cleanup().await;
 }
