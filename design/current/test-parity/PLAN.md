@@ -48,7 +48,84 @@ Targets:
   → `tests/integration/plaintext_consumer_assign_test.rs`. Same 4.3-broker caveat.
 - Update both files' headers from "Apache Kafka 4.2" to list these tests.
 
-## Phase 2 — Group limits & server assignors (Actor/Critic 66)
+## Phase 2 — Producer send basics (Actor/Critic 66)
+
+From `core/.../BaseProducerSendTest.scala` / `PlaintextProducerSendTest.scala`
+→ `tests/integration/producer_test.rs` (native `rust_only_fallback` at minimum;
+multilanguage where the backend supports it):
+- `testSendOffset`: full shape — null value / null key / null partition,
+  `serialized_key_size` / `serialized_value_size`, 100 non-awaited sends then
+  last offset == 104, callback assertions. Extend or replace
+  `produce_multiple_records_ordering`.
+- `testSendToPartition`: 2-partition topic via admin, send to partition 1,
+  consume back and verify key/value/timestamp/offset.
+- `testSendBeforeAndAfterPartitionExpansion` via `Admin::create_partitions`.
+- `testBatchSizeZero` full shape (`linger.ms=MAX`) and
+  `testBatchSizeZeroNoPartitionNoRecordKey`.
+- `testCloseWithZeroTimeoutFromSenderThread` (native, `close` from inside a send callback).
+
+## Phase 3 — Producer timestamps (Actor/Critic 67)
+
+→ `producer_test.rs`, topics configured via admin `NewTopic` configs:
+- `testSendCompressedMessageWithCreateTime`, `testSendNonCompressedMessageWithCreateTime`.
+- `testSendCompressedMessageWithLogAppendTime`, `testSendNonCompressedMessageWithLogAppendTime`.
+- `testSendWithInvalidBeforeAndAfterTimestamp`, `testValidBeforeAndAfterTimestampsAtThreshold`,
+  `testValidBeforeAndAfterTimestampsWithinThreshold` (each ×2 timestamp configs).
+
+## Phase 4 — Producer failure handling (Actor/Critic 68)
+
+- `ProducerCompressionTest.testCompression`: Java shape (2000×3 records with/without
+  key and headers, fixed timestamp, sequential offsets) + consume-back verification,
+  all codecs.
+- `PlaintextProducerSendTest.testSendRecordBatchWithMaxRequestSizeAndHigher` (exact boundary).
+- `ProducerFailureHandlingTest`: `testCannotSendToInternalTopic`,
+  `testPartitionTooLargeForReplicationWithAckAll`, `testResponseTooLargeForReplicationWithAckAll`
+  (2-broker config), and run `testTooLargeRecordWithAckZero` on the small-max-bytes cluster.
+- `testNonBlockingProducer`: add the send-until-queued and `BufferExhausted` halves (native).
+
+## Phase 5 — Transaction fencing & state errors (Actor/Critic 69)
+
+From `core/.../TransactionsTest.scala` (consumer arm) → `tests/integration/producer_transactions_test.rs`
+(native-only; the multilanguage harness has one producer per id):
+`testFencingOnCommit`, `testFencingOnSendOffsets`, `testFencingOnSend`
+(fenced while p1's txn is open), `testConsecutivelyRunInitTransactions`,
+`testEmptyAbortAfterCommit`.
+
+## Phase 6 — Transaction happy paths (Actor/Critic 70)
+
+- `ProducerIntegrationTest.testTransactionWithAndWithoutSend`,
+  `testTransactionWithInvalidSendAndEndTxnRequestSent` (TV2 arm only; note TV0/TV1).
+- `TransactionsTest.testOffsetMetadataInSendOffsetsToTransaction`.
+- `TransactionsWithMaxInFlightOneTest.testTransactionalProducerSingleBrokerMaxInFlightOne`.
+- Add the `listTransactions()` COMPLETE_COMMIT check to the existing
+  `consume_transform_produce_with_offsets` (Java `testTransactionWithSendOffset`).
+
+## Phase 7 — Extended transactions (Actor/Critic 71)
+
+From `TransactionsTest.scala` / `AdminFenceProducersTest.java` → `producer_transactions_test.rs`:
+- `testSendOffsetsWithGroupMetadata` full shape (500 records, alternating aborts,
+  reset to committed positions, exactly-once assertion).
+- `testReadCommittedConsumerShouldNotSeeUndecidedData`: two interleaved producers,
+  LSO position check, `offsets_for_times` null for undecided data.
+- `testDelayedFetchIncludesAbortedTransaction`, `testMultipleMarkersOneLeader`,
+  `testFencingOnTransactionExpiration` (dedicated broker props).
+- `AdminFenceProducersTest.testFenceAfterProducerCommit` / `testFenceBeforeProducerCommit`.
+
+## Phase 8 — Send while topic deletion (Actor/Critic 72)
+
+`ProducerSendWhileDeletionTest` (4 tests) → `producer_test.rs` or a new file:
+2-broker config, admin replica assignment / reassignment / delete / recreate;
+replace broker-internal checks with admin polling.
+
+## Phase 9 — Producer-id / transaction expiration (Actor/Critic 73)
+
+- `ProducerIdExpirationTest.testProducerIdExpirationWithNoTransactions`,
+  `testTransactionAfterTransactionIdExpiresButProducerIdRemains`.
+- `TransactionsExpirationTest` TV2 arms (2 tests).
+Dedicated ClusterConfigs with short expiry props; `describe_producers` /
+`list_transactions` / `describe_transactions`. Note TV1 arms as blocked.
+
+## Phase 10 — Group limits & server assignors (Actor/Critic 74)
 
 - `ConsumerBounceTest.testAsyncConsumerReceivesFatalExceptionWhenGroupPassesMaxSize`
   (no broker bounce needed): dedicated config `group.consumer.max.size=5`, 6th
@@ -59,7 +136,7 @@ Targets:
   → a new or existing consumer integration file. Exact message prefix
   `"ServerAssignor invalid is not supported. Supported assignors: "`.
 
-## Phase 3 — Consumer close timing & protocol-disabled (Actor/Critic 67)
+## Phase 11 — Consumer close timing & protocol-disabled (Actor/Critic 75)
 
 - `PlaintextConsumerCloseTest` CONSUMER arm (2 tests) → new
   `tests/integration/plaintext_consumer_close_test.rs` (wire into `main.rs`).
@@ -67,24 +144,7 @@ Targets:
   `consumer_test.rs`, dedicated cluster config disabling the consumer protocol;
   assert exact message/variant.
 
-## Phase 4 — Transaction fencing & state errors (Actor/Critic 68)
-
-From `core/.../TransactionsTest.scala` (consumer arm) → `tests/integration/producer_transactions_test.rs`
-(native-only; the multilanguage harness has one producer per id):
-`testFencingOnCommit`, `testFencingOnSendOffsets`, `testFencingOnSend`
-(fenced while p1's txn is open), `testConsecutivelyRunInitTransactions`,
-`testEmptyAbortAfterCommit`.
-
-## Phase 5 — Transaction happy paths (Actor/Critic 69)
-
-- `ProducerIntegrationTest.testTransactionWithAndWithoutSend`,
-  `testTransactionWithInvalidSendAndEndTxnRequestSent` (TV2 arm only; note TV0/TV1).
-- `TransactionsTest.testOffsetMetadataInSendOffsetsToTransaction`.
-- `TransactionsWithMaxInFlightOneTest.testTransactionalProducerSingleBrokerMaxInFlightOne`.
-- Add the `listTransactions()` COMPLETE_COMMIT check to the existing
-  `consume_transform_produce_with_offsets` (Java `testTransactionWithSendOffset`).
-
-## Phase 6 — Vacuous / weakened tests (Actor/Critic 70)
+## Phase 12 — Vacuous / weakened tests (Actor/Critic 76)
 
 - `producer_test.rs` `flush_sends_pending_records`: `linger.ms` large, assert
   futures not done before `flush` (Java `BaseProducerSendTest.testFlush`), where
@@ -95,7 +155,7 @@ From `core/.../TransactionsTest.scala` (consumer arm) → `tests/integration/pro
   drop the `committed()` warm-up, pre-create `__consumer_offsets` via admin as Java does.
 - `test_produce_partitions_for`: also instantiate in `rust_only_fallback`.
 
-## Phase 7 — Exact error assertions (Actor/Critic 71)
+## Phase 13 — Exact error assertions (Actor/Critic 77)
 
 Replace substring/loose-OR checks with exact message + typed variant:
 `plaintext_consumer_fetch_test.rs` (fetch invalid offset: `ConsumerNoOffsetForPartition`,
@@ -106,12 +166,13 @@ Replace substring/loose-OR checks with exact message + typed variant:
 invalid regex variant), `producer_test.rs` (non-existent topic / invalid
 partition exact timeout messages; add `testPartitionsForTimeoutErrorWhenTopicDoesNotExist`).
 
-## Phase 8 — SSL / SASL-PLAIN clients (Actor/Critic 72)
+## Phase 14 — SSL / SASL-PLAIN clients (Actor/Critic 78)
 
 - `SaslPlainPlaintextConsumerTest.testAsyncConsumerSimpleConsumption` over
   `sasl_plaintext_bootstrap_servers()`.
 - `BaseConsumerTest.testSimpleConsumption` over SSL.
 - A small `SslProducerSendTest` subset (send offset, close, flush) over SSL.
+
 
 ## Later (not yet scheduled)
 
