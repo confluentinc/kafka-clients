@@ -23,7 +23,15 @@
 //!   `testBatchSizeZero`, `testBatchSizeZeroNoPartitionNoRecordKey`,
 //!   `testCloseWithZeroTimeoutFromSenderThread` (native only),
 //!   `testCloseWithZeroTimeoutFromCallerThread` (native only),
-//!   `testWrongSerializer` (native only).
+//!   `testWrongSerializer` (native only),
+//!   `testSendCompressedMessageWithCreateTime`,
+//!   `testSendNonCompressedMessageWithCreateTime`,
+//!   `testSendCompressedMessageWithLogAppendTime`,
+//!   `testSendNonCompressedMessageWithLogAppendTime`,
+//!   `testSendWithInvalidBeforeAndAfterTimestamp`,
+//!   `testValidBeforeAndAfterTimestampsAtThreshold`,
+//!   `testValidBeforeAndAfterTimestampsWithinThreshold` (each of the last three
+//!   runs both `timestampConfigProvider` cases in one test).
 //!
 //! When the `multilanguage-tests` feature is enabled, each test is
 //! instantiated three times via [`multilanguage_test!`] — once per
@@ -34,6 +42,7 @@
 //!
 //! See `design/history/MILESTONE-6/DESIGN-multilanguage-tests.md`.
 
+use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -47,6 +56,7 @@ use confluent_kafka::admin::NewPartitions;
 use confluent_kafka::admin::OffsetSpec;
 use confluent_kafka::common::Error;
 use confluent_kafka::common::TopicPartition;
+use confluent_kafka::common::record::TimestampType;
 use confluent_kafka::common::serialization::ByteArrayDeserializer;
 use confluent_kafka::consumer::Consumer;
 use confluent_kafka::consumer::ConsumerConfig;
@@ -187,6 +197,7 @@ struct SendTestProducerOpts {
     linger_ms: i64,
     delivery_timeout_ms: i64,
     batch_size: i32,
+    compression_type: &'static str,
     max_block_ms: i64,
 }
 
@@ -196,6 +207,7 @@ impl Default for SendTestProducerOpts {
             linger_ms: 0,
             delivery_timeout_ms: 2 * 60 * 1000,
             batch_size: 16384,
+            compression_type: "none",
             max_block_ms: 60 * 1000,
         }
     }
@@ -208,7 +220,7 @@ const INT_MAX_VALUE: i64 = i32::MAX as i64;
 /// `TestUtils.createProducer` (`TestUtils.scala:516-545`), including the
 /// defaults `createProducer` does not override: `acks=-1`,
 /// `buffer.memory=1 MiB`, `retries=Int.MaxValue`, `request.timeout.ms=20000`,
-/// `compression.type=none`, `enable.idempotence=false`.
+/// `enable.idempotence=false`.
 fn send_test_producer_config(bootstrap_servers: &str, opts: &SendTestProducerOpts) -> HashMap<String, String> {
     HashMap::from([
         ("bootstrap.servers".to_string(), bootstrap_servers.to_string()),
@@ -220,7 +232,7 @@ fn send_test_producer_config(bootstrap_servers: &str, opts: &SendTestProducerOpt
         ("request.timeout.ms".to_string(), "20000".to_string()),
         ("linger.ms".to_string(), opts.linger_ms.to_string()),
         ("batch.size".to_string(), opts.batch_size.to_string()),
-        ("compression.type".to_string(), "none".to_string()),
+        ("compression.type".to_string(), opts.compression_type.to_string()),
         ("enable.idempotence".to_string(), "false".to_string()),
     ])
 }
@@ -252,7 +264,19 @@ fn send_test_admin(ctx: &TestContext) -> Box<dyn Admin> {
 /// consecutive-offset assertions (observed: offsets `[7, 8, 5, 6, 3, 4, 1, 2, 0, 9, ..]`).
 /// See [`wait_for_partition_leaders`] for how the missing half is recovered.
 async fn create_topic_with_admin(admin: &dyn Admin, topic: &str, num_partitions: i32, replication_factor: i16) {
-    test_utils::create_topic(admin, topic, num_partitions, replication_factor).await;
+    create_topic_with_admin_config(admin, topic, num_partitions, replication_factor, BTreeMap::new()).await;
+}
+
+/// [`create_topic_with_admin`] with the `topicConfig` argument of Java's
+/// `TestUtils.createTopicWithAdmin`.
+async fn create_topic_with_admin_config(
+    admin: &dyn Admin,
+    topic: &str,
+    num_partitions: i32,
+    replication_factor: i16,
+    topic_config: BTreeMap<String, String>,
+) {
+    test_utils::create_topic_with_configs(admin, topic, num_partitions, replication_factor, topic_config).await;
     wait_for_partition_leaders(admin, topic, 0..num_partitions).await;
 }
 
@@ -1151,6 +1175,379 @@ async fn batch_size_zero_no_partition_no_record_key_inner<F: ProducerBackendFact
     .expect("testBatchSizeZeroNoPartitionNoRecordKey exceeded its 15 s @Timeout");
 }
 
+// ---------------------------------------------------------------------------
+// Producer timestamps (BaseProducerSendTest / PlaintextProducerSendTest)
+// ---------------------------------------------------------------------------
+
+/// Java's `TopicConfig.MESSAGE_TIMESTAMP_TYPE_CONFIG`. `TopicConfig` is not
+/// translated (topic configs are broker-side), so the key is spelled out.
+const MESSAGE_TIMESTAMP_TYPE_CONFIG: &str = "message.timestamp.type";
+/// Java's `TopicConfig.MESSAGE_TIMESTAMP_BEFORE_MAX_MS_CONFIG`.
+const MESSAGE_TIMESTAMP_BEFORE_MAX_MS_CONFIG: &str = "message.timestamp.before.max.ms";
+/// Java's `TopicConfig.MESSAGE_TIMESTAMP_AFTER_MAX_MS_CONFIG`.
+const MESSAGE_TIMESTAMP_AFTER_MAX_MS_CONFIG: &str = "message.timestamp.after.max.ms";
+
+/// State of the Scala `object callback` in `sendAndVerifyTimestamp`
+/// (`BaseProducerSendTest.scala:245-263`). As in [`SendOffsetCallbackState`],
+/// would-be assertion failures inside the callback are recorded and checked on
+/// the test task, so they bind (Java's assertions in `onCompletion` run on the
+/// I/O thread, where the producer catches and logs them).
+struct SendTimestampCallbackState {
+    offset: i64,
+    timestamp_diff: i64,
+    failures: Vec<String>,
+}
+
+/// `BaseProducerSendTest.sendAndVerifyTimestamp`
+/// (`BaseProducerSendTest.scala:239-297`): sends `NUM_RECORDS` records with
+/// explicit timestamps `123456 + i` to partition 0 of a topic whose
+/// `message.timestamp.type` is `timestamp_type`, and checks both the callback's
+/// and the future's metadata timestamp — the record's own timestamp for
+/// `CreateTime`, a broker time within `[startTime, now]` for `LogAppendTime`.
+async fn send_and_verify_timestamp<F: ProducerBackendFactory>(
+    ctx: &mut TestContext,
+    factory: &F,
+    compression_type: &'static str,
+    timestamp_type: TimestampType,
+) {
+    let topic = ctx.topic("topic");
+    let producer = factory
+        .create(send_test_producer_config(
+            &bootstrap_for(factory, ctx),
+            &SendTestProducerOpts {
+                compression_type,
+                linger_ms: INT_MAX_VALUE,
+                delivery_timeout_ms: INT_MAX_VALUE,
+                ..SendTestProducerOpts::default()
+            },
+        ))
+        .await
+        .expect("Failed to create producer");
+    let partition = 0;
+
+    let base_timestamp = 123456i64;
+    let start_time = current_time_ms();
+
+    let state = Arc::new(Mutex::new(SendTimestampCallbackState {
+        offset: 0,
+        timestamp_diff: 1,
+        failures: Vec::new(),
+    }));
+    let callback = || -> Option<Callback> {
+        let state = state.clone();
+        let topic = topic.clone();
+        Some(Box::new(move |metadata, error| {
+            let mut st = state.lock().unwrap();
+            // Java: `if (exception == null) ... else fail(...)`.
+            if let Some(e) = error {
+                st.failures
+                    .push(format!("Send callback returns the following exception: {e:?}"));
+                return;
+            }
+            let Some(m) = metadata else {
+                st.failures
+                    .push("Send callback invoked with neither metadata nor error".to_string());
+                return;
+            };
+            let (offset, timestamp_diff) = (st.offset, st.timestamp_diff);
+            if m.offset() != offset {
+                st.failures.push(format!("expected offset {offset}, got {}", m.offset()));
+            }
+            if m.topic() != topic {
+                st.failures.push(format!("expected topic {topic}, got {}", m.topic()));
+            }
+            if timestamp_type == TimestampType::CreateTime {
+                if m.timestamp() != base_timestamp + timestamp_diff {
+                    st.failures.push(format!(
+                        "offset {offset}: expected timestamp {}, got {}",
+                        base_timestamp + timestamp_diff,
+                        m.timestamp()
+                    ));
+                }
+            } else {
+                let now = current_time_ms();
+                if !(m.timestamp() >= start_time && m.timestamp() <= now) {
+                    st.failures.push(format!(
+                        "offset {offset}: log-append timestamp {} not within [{start_time}, {now}]",
+                        m.timestamp()
+                    ));
+                }
+            }
+            if m.partition() != partition {
+                st.failures
+                    .push(format!("expected partition {partition}, got {}", m.partition()));
+            }
+            st.offset += 1;
+            st.timestamp_diff += 1;
+        }))
+    };
+
+    // create topic
+    let admin = send_test_admin(ctx);
+    let timestamp_type_config = if timestamp_type == TimestampType::LogAppendTime {
+        "LogAppendTime"
+    } else {
+        "CreateTime"
+    };
+    create_topic_with_admin_config(
+        admin.as_ref(),
+        &topic,
+        1,
+        2,
+        BTreeMap::from([(MESSAGE_TIMESTAMP_TYPE_CONFIG.to_string(), timestamp_type_config.to_string())]),
+    )
+    .await;
+
+    let mut record_and_futures = Vec::with_capacity(NUM_RECORDS);
+    for i in 1..=NUM_RECORDS {
+        let record_timestamp = base_timestamp + i as i64;
+        let record = ProducerRecord::with_partition_timestamp_key(
+            topic.clone(),
+            Some(partition),
+            Some(record_timestamp),
+            Some(b(&format!("key{i}"))),
+            Some(b(&format!("value{i}"))),
+        )
+        .expect("valid record");
+        let future = producer
+            .send_with_callback(record, callback())
+            .await
+            .expect("send should succeed");
+        record_and_futures.push((record_timestamp, future));
+    }
+    producer
+        .close_with_timeout(Duration::from_secs(20))
+        .await
+        .expect("close should succeed");
+    for (record_timestamp, future) in &record_and_futures {
+        let record_metadata = future
+            .get_with_timeout(UNBOUNDED_GET_TIMEOUT)
+            .await
+            .expect("produce should succeed");
+        if timestamp_type == TimestampType::LogAppendTime {
+            let now = current_time_ms();
+            assert!(
+                record_metadata.timestamp() >= start_time && record_metadata.timestamp() <= now,
+                "log-append timestamp {} not within [{start_time}, {now}]",
+                record_metadata.timestamp()
+            );
+        } else {
+            assert_eq!(*record_timestamp, record_metadata.timestamp());
+        }
+    }
+    {
+        let st = state.lock().unwrap();
+        assert!(st.failures.is_empty(), "callback assertions failed: {:?}", st.failures);
+        assert_eq!(
+            NUM_RECORDS as i64, st.offset,
+            "Should have offset {NUM_RECORDS} but only successfully sent {}",
+            st.offset
+        );
+    }
+    // Java's `finally { producer.close() }` is a no-op on the already-closed
+    // producer, so it is not repeated here.
+    admin.close_with_timeout(Duration::from_secs(5)).await;
+}
+
+/// Translated from `BaseProducerSendTest.testSendCompressedMessageWithCreateTime`
+/// (`BaseProducerSendTest.scala:196-204`).
+async fn send_compressed_message_with_create_time_inner<F: ProducerBackendFactory>(ctx: &mut TestContext, factory: &F) {
+    send_and_verify_timestamp(ctx, factory, "gzip", TimestampType::CreateTime).await;
+}
+
+/// Translated from `BaseProducerSendTest.testSendNonCompressedMessageWithCreateTime`
+/// (`BaseProducerSendTest.scala:206-211`).
+async fn send_non_compressed_message_with_create_time_inner<F: ProducerBackendFactory>(
+    ctx: &mut TestContext,
+    factory: &F,
+) {
+    send_and_verify_timestamp(ctx, factory, "none", TimestampType::CreateTime).await;
+}
+
+/// Translated from `PlaintextProducerSendTest.testSendCompressedMessageWithLogAppendTime`
+/// (`PlaintextProducerSendTest.scala:103-111`).
+async fn send_compressed_message_with_log_append_time_inner<F: ProducerBackendFactory>(
+    ctx: &mut TestContext,
+    factory: &F,
+) {
+    send_and_verify_timestamp(ctx, factory, "gzip", TimestampType::LogAppendTime).await;
+}
+
+/// Translated from `PlaintextProducerSendTest.testSendNonCompressedMessageWithLogAppendTime`
+/// (`PlaintextProducerSendTest.scala:113-119`).
+async fn send_non_compressed_message_with_log_append_time_inner<F: ProducerBackendFactory>(
+    ctx: &mut TestContext,
+    factory: &F,
+) {
+    send_and_verify_timestamp(ctx, factory, "none", TimestampType::LogAppendTime).await;
+}
+
+/// `PlaintextProducerSendTest.timestampConfigProvider`
+/// (`PlaintextProducerSendTest.scala:341-350`), CONSUMER arm only: the
+/// before-max config with a record timestamp `now - 5h`, and the after-max
+/// config with `now + 5h`. (Java names the constant `fiveMinutesInMs`, but its
+/// value is five hours; the value is kept.)
+fn timestamp_config_provider() -> [(&'static str, i64); 2] {
+    let now = current_time_ms();
+    let five_minutes_in_ms: i64 = 5 * 60 * 60 * 1000;
+    [
+        (MESSAGE_TIMESTAMP_BEFORE_MAX_MS_CONFIG, now - five_minutes_in_ms),
+        (MESSAGE_TIMESTAMP_AFTER_MAX_MS_CONFIG, now + five_minutes_in_ms),
+    ]
+}
+
+/// Creates a fresh single-partition, RF-2 topic per `timestampConfigProvider`
+/// case, with `message_timestamp_config = threshold(record_timestamp)`.
+///
+/// Java's `@ParameterizedTest` runs each case on a fresh cluster with the
+/// fixed topic name `"topic"`; clusters are pooled here, so each case gets its
+/// own topic instead.
+async fn create_timestamp_validation_topic(
+    ctx: &mut TestContext,
+    admin: &dyn Admin,
+    case: usize,
+    message_timestamp_config: &str,
+    threshold_ms: i64,
+) -> String {
+    let topic = ctx.topic(&format!("topic_case{case}"));
+    create_topic_with_admin_config(
+        admin,
+        &topic,
+        1,
+        2,
+        BTreeMap::from([(message_timestamp_config.to_string(), threshold_ms.to_string())]),
+    )
+    .await;
+    topic
+}
+
+fn timestamped_record(topic: &str, record_timestamp: i64) -> ProducerRecord<Vec<u8>, Vec<u8>> {
+    ProducerRecord::with_partition_timestamp_key(
+        topic.to_string(),
+        Some(0),
+        Some(record_timestamp),
+        Some(b("key")),
+        Some(b("value")),
+    )
+    .expect("valid record")
+}
+
+/// Translated from `PlaintextProducerSendTest.testSendWithInvalidBeforeAndAfterTimestamp`
+/// (`PlaintextProducerSendTest.scala:187-214`), both `timestampConfigProvider`
+/// cases: a record 5 h outside a 1 h threshold is rejected with
+/// `InvalidTimestampException`, uncompressed and gzip-compressed.
+async fn send_with_invalid_before_and_after_timestamp_inner<F: ProducerBackendFactory>(
+    ctx: &mut TestContext,
+    factory: &F,
+) {
+    let admin = send_test_admin(ctx);
+    for (case, (message_timestamp_config, record_timestamp)) in timestamp_config_provider().into_iter().enumerate() {
+        // set the TopicConfig for timestamp validation to have 1 minute threshold. Note that recordTimestamp has 5 minutes diff
+        // (Java's `oneMinuteInMs` is one hour; the value is kept.)
+        let one_minute_in_ms: i64 = 60 * 60 * 1000;
+        let topic =
+            create_timestamp_validation_topic(ctx, admin.as_ref(), case, message_timestamp_config, one_minute_in_ms)
+                .await;
+
+        // First uncompressed, then "Test compressed messages."
+        for compression_type in ["none", "gzip"] {
+            let producer = factory
+                .create(send_test_producer_config(
+                    &bootstrap_for(factory, ctx),
+                    &SendTestProducerOpts { compression_type, ..SendTestProducerOpts::default() },
+                ))
+                .await
+                .expect("Failed to create producer");
+            let result = producer
+                .send(timestamped_record(&topic, record_timestamp))
+                .await
+                .expect("send should succeed")
+                .get_with_timeout(UNBOUNDED_GET_TIMEOUT)
+                .await;
+            assert!(
+                matches!(result, Err(Error::InvalidTimestamp(_))),
+                "{message_timestamp_config}, compression {compression_type}: expected InvalidTimestamp, got {result:?}"
+            );
+            producer.close().await.expect("close should succeed");
+        }
+    }
+    admin.close_with_timeout(Duration::from_secs(5)).await;
+}
+
+/// Shared body of `testValidBeforeAndAfterTimestampsAtThreshold` and
+/// `testValidBeforeAndAfterTimestampsWithinThreshold`: for each
+/// `timestampConfigProvider` case, the threshold is `threshold(record_timestamp)`
+/// and a send of that record, uncompressed then gzip-compressed, does not fail.
+///
+/// Java asserts only that `send` does not throw (`assertDoesNotThrow`). Its
+/// future is also awaited here: `send` is asynchronous, so a broker-side
+/// `InvalidTimestampException` — the failure these tests guard against —
+/// surfaces only through the future, and Java's `close()` would swallow it.
+async fn send_with_valid_timestamp<F: ProducerBackendFactory>(
+    ctx: &mut TestContext,
+    factory: &F,
+    threshold: fn(i64) -> i64,
+) {
+    let admin = send_test_admin(ctx);
+    for (case, (message_timestamp_config, record_timestamp)) in timestamp_config_provider().into_iter().enumerate() {
+        let topic = create_timestamp_validation_topic(
+            ctx,
+            admin.as_ref(),
+            case,
+            message_timestamp_config,
+            threshold(record_timestamp),
+        )
+        .await;
+
+        // First uncompressed, then "Test compressed messages."
+        for compression_type in ["none", "gzip"] {
+            let producer = factory
+                .create(send_test_producer_config(
+                    &bootstrap_for(factory, ctx),
+                    &SendTestProducerOpts { compression_type, ..SendTestProducerOpts::default() },
+                ))
+                .await
+                .expect("Failed to create producer");
+            let future = producer
+                .send(timestamped_record(&topic, record_timestamp))
+                .await
+                .unwrap_or_else(|e| {
+                    panic!("{message_timestamp_config}, compression {compression_type}: send failed: {e:?}")
+                });
+            let result = future.get_with_timeout(UNBOUNDED_GET_TIMEOUT).await;
+            assert!(
+                result.is_ok(),
+                "{message_timestamp_config}, compression {compression_type}: expected a valid timestamp, got {result:?}"
+            );
+            producer.close().await.expect("close should succeed");
+        }
+    }
+    admin.close_with_timeout(Duration::from_secs(5)).await;
+}
+
+/// Translated from `PlaintextProducerSendTest.testValidBeforeAndAfterTimestampsAtThreshold`
+/// (`PlaintextProducerSendTest.scala:216-234`), both `timestampConfigProvider`
+/// cases.
+async fn valid_before_and_after_timestamps_at_threshold_inner<F: ProducerBackendFactory>(
+    ctx: &mut TestContext,
+    factory: &F,
+) {
+    // set the TopicConfig for timestamp validation to be the same as the record timestamp
+    send_with_valid_timestamp(ctx, factory, |record_timestamp| record_timestamp).await;
+}
+
+/// Translated from `PlaintextProducerSendTest.testValidBeforeAndAfterTimestampsWithinThreshold`
+/// (`PlaintextProducerSendTest.scala:236-254`), both `timestampConfigProvider`
+/// cases.
+async fn valid_before_and_after_timestamps_within_threshold_inner<F: ProducerBackendFactory>(
+    ctx: &mut TestContext,
+    factory: &F,
+) {
+    // set the TopicConfig for timestamp validation to have 10 minute threshold. Note that recordTimestamp has 5 minutes diff
+    // (Java's `tenMinutesInMs` is ten hours; the value is kept.)
+    send_with_valid_timestamp(ctx, factory, |_| 10 * 60 * 60 * 1000).await;
+}
+
 /// Translated (simplified) from `PlaintextProducerSendTest.testNonBlockingProducer`.
 /// With max.block.ms=0 and cold metadata, the first send returns a
 /// future that's immediately done with Timeout. The buffer-exhaustion
@@ -1388,6 +1785,48 @@ crate::multilanguage_test!(test_batch_size_zero, batch_size_zero_inner, producer
 crate::multilanguage_test!(
     test_batch_size_zero_no_partition_no_record_key,
     batch_size_zero_no_partition_no_record_key_inner,
+    producer_send_cluster_config()
+);
+#[cfg(feature = "multilanguage-tests")]
+crate::multilanguage_test!(
+    test_send_compressed_message_with_create_time,
+    send_compressed_message_with_create_time_inner,
+    producer_send_cluster_config()
+);
+#[cfg(feature = "multilanguage-tests")]
+crate::multilanguage_test!(
+    test_send_non_compressed_message_with_create_time,
+    send_non_compressed_message_with_create_time_inner,
+    producer_send_cluster_config()
+);
+#[cfg(feature = "multilanguage-tests")]
+crate::multilanguage_test!(
+    test_send_compressed_message_with_log_append_time,
+    send_compressed_message_with_log_append_time_inner,
+    producer_send_cluster_config()
+);
+#[cfg(feature = "multilanguage-tests")]
+crate::multilanguage_test!(
+    test_send_non_compressed_message_with_log_append_time,
+    send_non_compressed_message_with_log_append_time_inner,
+    producer_send_cluster_config()
+);
+#[cfg(feature = "multilanguage-tests")]
+crate::multilanguage_test!(
+    test_send_with_invalid_before_and_after_timestamp,
+    send_with_invalid_before_and_after_timestamp_inner,
+    producer_send_cluster_config()
+);
+#[cfg(feature = "multilanguage-tests")]
+crate::multilanguage_test!(
+    test_valid_before_and_after_timestamps_at_threshold,
+    valid_before_and_after_timestamps_at_threshold_inner,
+    producer_send_cluster_config()
+);
+#[cfg(feature = "multilanguage-tests")]
+crate::multilanguage_test!(
+    test_valid_before_and_after_timestamps_within_threshold,
+    valid_before_and_after_timestamps_within_threshold_inner,
     producer_send_cluster_config()
 );
 #[cfg(feature = "multilanguage-tests")]
@@ -1813,6 +2252,34 @@ mod rust_only_fallback {
     #[tokio::test(flavor = "multi_thread")]
     async fn test_batch_size_zero_no_partition_no_record_key() {
         batch_size_zero_no_partition_no_record_key_inner(&mut send_ctx().await, &RustNativeFactory).await;
+    }
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_send_compressed_message_with_create_time() {
+        send_compressed_message_with_create_time_inner(&mut send_ctx().await, &RustNativeFactory).await;
+    }
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_send_non_compressed_message_with_create_time() {
+        send_non_compressed_message_with_create_time_inner(&mut send_ctx().await, &RustNativeFactory).await;
+    }
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_send_compressed_message_with_log_append_time() {
+        send_compressed_message_with_log_append_time_inner(&mut send_ctx().await, &RustNativeFactory).await;
+    }
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_send_non_compressed_message_with_log_append_time() {
+        send_non_compressed_message_with_log_append_time_inner(&mut send_ctx().await, &RustNativeFactory).await;
+    }
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_send_with_invalid_before_and_after_timestamp() {
+        send_with_invalid_before_and_after_timestamp_inner(&mut send_ctx().await, &RustNativeFactory).await;
+    }
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_valid_before_and_after_timestamps_at_threshold() {
+        valid_before_and_after_timestamps_at_threshold_inner(&mut send_ctx().await, &RustNativeFactory).await;
+    }
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_valid_before_and_after_timestamps_within_threshold() {
+        valid_before_and_after_timestamps_within_threshold_inner(&mut send_ctx().await, &RustNativeFactory).await;
     }
     #[tokio::test(flavor = "multi_thread")]
     async fn test_produce_non_blocking_max_block_zero() {
