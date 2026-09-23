@@ -4620,6 +4620,9 @@ class AdminServiceImpl final : public AdminService::Service {
     if (total >= 0) dst->set_total_bytes(total);
     const int64_t usable = kafka_admin_LogDirDescription_usable_bytes(description);
     if (usable >= 0) dst->set_usable_bytes(usable);
+    // Java's isCordoned() (KIP-1066): a plain bool, always sent (no -1 sentinel
+    // like the volume sizes above).
+    dst->set_is_cordoned(kafka_admin_LogDirDescription_is_cordoned(description));
     const int32_t replicas = kafka_admin_LogDirDescription_replica_count(description);
     for (int32_t i = 0; i < replicas; i++) {
       ReplicaInfoEntry* replica = dst->add_replica_infos();

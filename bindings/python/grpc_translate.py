@@ -560,6 +560,45 @@ def _admin_partition_key(topic, partition):
     return apb.ResultKey(partition=cpb.TopicPartition(topic=topic, partition=partition))
 
 
+def _resolve_admin_futures(futures):
+    """``{key: concurrent.futures.Future}`` -> ``{key: value | KafkaError}``.
+
+    admin.py's per-key RPCs (Phase A: create_topics, delete_topics[_by_ids],
+    describe_topics[_by_ids], create_partitions, delete_records; Phase B:
+    describe_configs, incremental_alter_configs; Phase C: describe_log_dirs,
+    alter_replica_log_dirs, describe_replica_log_dirs; Phase D:
+    alter_partition_reassignments, list_offsets) return a dict of ``Future``s
+    immediately, one per key, resolving independently - rather than the
+    already-resolved ``{key: value | KafkaError}`` dict every *_response
+    translator below still expects (built for the RPCs that never changed,
+    plus these twelve before their respective phases). Blocking on every key's
+    Future here — the gRPC harness is a synchronous, single-call-at-a-time
+    test driver, not a low-latency production client — keeps those
+    translators unchanged rather than teaching each one to await/resolve a
+    Future itself.
+    """
+    out = {}
+    for key, fut in futures.items():
+        try:
+            out[key] = fut.result()
+        except kp.KafkaError as e:
+            out[key] = e
+    return out
+
+
+async def _resolve_admin_futures_async(futures):
+    """``{key: asyncio.Future}`` -> ``{key: value | KafkaError}``, the async
+    counterpart of :func:`_resolve_admin_futures` for ``AsyncAdminClient`` and
+    ``AsyncMockAdminClient``, awaiting each per-key ``Future`` in turn."""
+    out = {}
+    for key, fut in futures.items():
+        try:
+            out[key] = await fut
+        except kp.KafkaError as e:
+            out[key] = e
+    return out
+
+
 def _admin_void_response(outcomes, key_fn):
     """`{key: None | KafkaError}` -> VoidKeyedResponse. An absent per-key error
     is the success signal, there being no value for a KafkaFuture<Void>."""
@@ -570,6 +609,26 @@ def _admin_void_response(outcomes, key_fn):
             entry.error.CopyFrom(_kafka_error_to_proto(outcome))
         entries.append(entry)
     return apb.VoidKeyedResponse(entries=entries)
+
+
+def _admin_remove_members_response(outcomes):
+    """Build the ``RemoveMembersFromConsumerGroup`` VoidKeyedResponse.
+
+    In ``removeAll`` mode admin.py returns a single whole-operation entry keyed
+    by ``None`` (Java's ``all()`` observable, which has no per-member key). The
+    harness has already awaited that entry via ``_resolve_admin_futures`` (so the
+    operation has run to completion before this response is built — unlike the
+    old fire-and-forget behavior). A whole-op failure becomes the top-level
+    response error, matching Java's ``all()`` semantics; a whole-op success
+    yields no per-member entries (so the caller observes an empty map). Per-member
+    outcomes (non-removeAll) go through :func:`_admin_void_response` unchanged.
+    """
+    if None in outcomes:
+        whole_op = outcomes.pop(None)
+        if isinstance(whole_op, kp.KafkaError):
+            return apb.VoidKeyedResponse(error=_kafka_error_to_proto(whole_op))
+        # removeAll success: no per-member outcome to report.
+    return _admin_void_response(outcomes, _admin_name_key)
 
 
 def _admin_new_topics(protos):
@@ -867,7 +926,8 @@ def _admin_log_dir_description_to_proto(description):
     `error` is the log dir's own error (offline, unreadable): the broker
     answered, so it is *not* the per-broker error, which arrives as the entry's
     error arm instead of a value. `total_bytes` / `usable_bytes` are Java's
-    OptionalLong, absent when the broker did not report them."""
+    OptionalLong, absent when the broker did not report them. `is_cordoned` is
+    Java's `isCordoned()` (KIP-1066): a plain bool, always carried."""
     out = apb.LogDirDescription()
     if description.error is not None:
         out.error.CopyFrom(_kafka_error_to_proto(description.error))
@@ -875,6 +935,7 @@ def _admin_log_dir_description_to_proto(description):
         out.total_bytes = description.total_bytes
     if description.usable_bytes is not None:
         out.usable_bytes = description.usable_bytes
+    out.is_cordoned = bool(description.is_cordoned)
     for (topic, partition), info in description.replica_infos.items():
         out.replica_infos.append(apb.ReplicaInfoEntry(
             partition=cpb.TopicPartition(topic=topic, partition=partition),

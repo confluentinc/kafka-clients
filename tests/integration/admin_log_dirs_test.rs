@@ -201,6 +201,20 @@ async fn describe_log_dirs_returns_dirs_with_replica_sizes<F: AdminBackendFactor
         info.size()
     );
     assert!(!info.is_future(), "{backend} backend: current replica is not a future replica");
+    // `isCordoned()` (KIP-1066) is plumbed through every backend (native FFI, and
+    // the C++/Python gRPC servers -> proto -> reconstruction) and reconstructs to
+    // the broker's honest value. This is a smoke/default-value check only: a
+    // healthy test broker never cordons a directory, and the proto->Rust
+    // reconstruction defaults an absent field to `false`, so a `false` here does
+    // NOT distinguish "carried" from "silently dropped". The TRUE-value path — the
+    // one that would catch a dropped field — is covered by the constructor and
+    // accessor unit tests instead (log_dir_description.rs, the
+    // `kafka_admin_LogDirDescription_is_cordoned` test in ffi/admin.rs,
+    // test_mock_admin.c, test_admin.py), since a cordoned dir is not seedable here.
+    assert!(
+        !description.is_cordoned(),
+        "{backend} backend: a healthy log directory is not cordoned"
+    );
 
     admin
         .close(Some(Duration::from_secs(5)))
