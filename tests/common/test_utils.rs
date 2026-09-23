@@ -26,9 +26,10 @@ use std::future::Future;
 use std::time::{Duration, Instant};
 
 use confluent_kafka::admin::{
-    Admin, AdminClientConfig, CreateTopicsOptions, DescribeTopicsOptions, KafkaAdminClient, NewTopic,
+    Admin, AdminClientConfig, CreateTopicsOptions, DescribeTopicsOptions, KafkaAdminClient, NewTopic, OffsetSpec,
 };
 use confluent_kafka::common::TopicCollection;
+use confluent_kafka::common::TopicPartition;
 
 use super::test_context::TestContext;
 
@@ -248,4 +249,31 @@ pub async fn create_topic_with_configs(
         .expect("create topic");
 
     wait_for_all_partitions_metadata(admin, topic, num_partitions as usize).await;
+}
+
+/// Waits until the leader of each of `partitions` answers a leader-only
+/// request — the client-observable half of Java's
+/// `TestUtils.waitForPartitionMetadata` / `waitForAllPartitionsMetadata`
+/// that matters to a producer.
+///
+/// `ListOffsets` is routed to the partition leader, which rejects it with
+/// `NOT_LEADER_OR_FOLLOWER` until it has applied its leadership — the same
+/// check a `Produce` request hits — and it writes nothing, so the offsets the
+/// tests assert on are unaffected.
+pub async fn wait_for_partition_leaders(admin: &dyn Admin, topic: &str, partitions: std::ops::Range<i32>) {
+    let specs: HashMap<TopicPartition, OffsetSpec> = partitions
+        .map(|p| (TopicPartition::new(topic.to_string(), p), OffsetSpec::latest()))
+        .collect();
+    retry_on_error_with_timeout(Duration::from_millis(TOPIC_METADATA_PROPAGATION_WAIT_MS), || {
+        let result = admin.list_offsets(&specs);
+        async move {
+            result
+                .all()
+                .get()
+                .await
+                .map(|_| ())
+                .map_err(|e| format!("partition leaders of {topic} not ready: {e:?}"))
+        }
+    })
+    .await;
 }

@@ -27,12 +27,22 @@
 //! 4. consume-transform-produce with `send_offsets_to_transaction`
 //!    → [`consume_transform_produce_with_offsets_inner`]
 //!
-//! # Why these are not translations
+//! It also holds translations from `TransactionsTest.scala` (AK 4.3.1, CONSUMER
+//! arm only; native-only because fencing needs two producers sharing a
+//! `transactional.id`):
 //!
-//! Unlike every other file in this directory, these have no Java counterpart to
+//! - `testFencingOnCommit` → [`test_fencing_on_commit`]
+//! - `testFencingOnSendOffsets` → [`test_fencing_on_send_offsets`]
+//! - `testFencingOnSend` → [`test_fencing_on_send`]
+//! - `testConsecutivelyRunInitTransactions` → [`test_consecutively_run_init_transactions`]
+//! - `testEmptyAbortAfterCommit` → [`test_empty_abort_after_commit`]
+//!
+//! # Why the four Phase-8 scenarios are not translations
+//!
+//! Unlike the translated tests above, these four have no Java counterpart to
 //! cite. Apache Kafka's transactional broker-integration coverage lives in the
 //! Scala suites (`core/src/test/scala/integration/kafka/api/TransactionsTest.scala`
-//! and friends), which are out of scope for a Java-client port — the client-side
+//! and friends), which were out of scope for the Phase-8 client port — the client-side
 //! Java tests are `TransactionManagerTest` / `SenderTest` / `KafkaProducerTest`,
 //! all of which drive a `MockClient` and are translated as unit tests. So these
 //! four are specified by PLAN §Phase-8 rather than derived from a Java method, and
@@ -57,27 +67,39 @@
 //! subscribes, because `send_offsets_to_transaction` needs real group metadata
 //! (a generation and member id) for the broker to accept the `TxnOffsetCommit`.
 
+use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::time::Duration;
 use std::time::Instant;
 
+use confluent_kafka::admin::Admin;
+use confluent_kafka::admin::AdminClientConfig;
+use confluent_kafka::admin::KafkaAdminClient;
 use confluent_kafka::common::Error;
 use confluent_kafka::common::Errors;
+use confluent_kafka::common::KafkaFuture;
 use confluent_kafka::common::TopicPartition;
+use confluent_kafka::common::header::Header;
+use confluent_kafka::common::header::Headers;
+use confluent_kafka::common::header::RecordHeaders;
 use confluent_kafka::common::serialization::ByteArraySerializer;
 use confluent_kafka::common::serialization::Deserializer;
 use confluent_kafka::consumer::Consumer;
 use confluent_kafka::consumer::ConsumerConfig;
+use confluent_kafka::consumer::ConsumerGroupMetadata;
+use confluent_kafka::consumer::ConsumerRecord;
 use confluent_kafka::consumer::KafkaConsumer;
 use confluent_kafka::consumer::OffsetAndMetadata;
 use confluent_kafka::producer::KafkaProducer;
 use confluent_kafka::producer::Producer;
 use confluent_kafka::producer::ProducerConfig;
+use confluent_kafka::producer::RecordMetadata;
 use confluent_kafka::producer::{ProducerRecord, ProducerRecordOptionsBuilder};
 
 use crate::common::backend_factory::ProducerBackendFactory;
 use crate::common::cluster_config::{ClusterConfig, kip848_3_broker};
 use crate::common::test_context::TestContext;
+use crate::common::test_utils;
 
 /// How long a read_committed consumer is given to surface records that should be
 /// there. Generous because a commit has to be replicated to `__transaction_state`
@@ -651,6 +673,491 @@ async fn consume_transform_produce_with_offsets_inner<F: ProducerBackendFactory>
     input_consumer.close().await.expect("close");
     output_consumer.close().await.expect("close");
     offset_reader.close().await.expect("close");
+    ctx.cleanup().await;
+}
+
+// ---------------------------------------------------------------------------
+// TransactionsTest.scala translations (consumer arm): fencing & state errors
+// ---------------------------------------------------------------------------
+//
+// These five are translations of `core/src/test/scala/integration/kafka/api/
+// TransactionsTest.scala` (AK 4.3.1), CONSUMER (KIP-848) arm only. They are
+// native-only: fencing needs two producers sharing a `transactional.id`, which
+// the multilanguage harness does not model (one producer per id).
+//
+// Deviations shared by all five, each forced by the pooled harness:
+//
+//   - Java's fixed `topic1` / `topic2`, `"transactional-producer"`,
+//     `"normalProducer"` and `"transactional-group"` become per-test names
+//     (`ctx.topic` for topics, `ctx.group_id` for groups and transactional ids), because the cluster is pooled across tests
+//     here and is not in Java.
+//   - The cluster is the shared [`kip848_3_broker`] config rather than Java's
+//     `overridingProps()` (`TransactionsTest.scala:60-74`). The differences do not
+//     reach these tests: auto-create is irrelevant because the topics are created
+//     explicitly through the admin client, and `__transaction_state` keeps the
+//     broker defaults (50 partitions, RF 3, min ISR 2) instead of Java's
+//     (3, 2, 2) — a coordinator placement detail, not an observable contract.
+//   - Java's `setUp` pre-creates `transactionalProducerCount` producers and
+//     `transactionalConsumerCount` consumers (`TransactionsTest.scala:93-104`);
+//     each test here builds the ones it uses.
+
+/// Java's `numPartitions` (`TransactionsTest.scala:55`).
+const TXN_TEST_NUM_PARTITIONS: i32 = 4;
+/// Java's `brokerCount` (`TransactionsTest.scala:47`), used as the replication
+/// factor of `topic1` / `topic2` (`TransactionsTest.scala:95-96`).
+const TXN_TEST_REPLICATION_FACTOR: i16 = 3;
+
+/// `TestUtils.transactionStatusKey` / `committedValue` / `abortedValue`
+/// (`TestUtils.scala:103-105`).
+const TRANSACTION_STATUS_KEY: &str = "transactionStatus";
+const COMMITTED_VALUE: &[u8] = b"committed";
+const ABORTED_VALUE: &[u8] = b"aborted";
+
+/// Admin client for topic provisioning. Always native: it is harness
+/// infrastructure, not the client under test.
+fn txn_test_admin(ctx: &TestContext) -> Box<dyn Admin> {
+    let props = HashMap::from([
+        ("bootstrap.servers".to_string(), ctx.bootstrap_servers().to_string()),
+        ("client.id".to_string(), "transactions-test-admin".to_string()),
+        ("request.timeout.ms".to_string(), "30000".to_string()),
+        ("default.api.timeout.ms".to_string(), "30000".to_string()),
+    ]);
+    Box::new(KafkaAdminClient::new(AdminClientConfig::new(&props).expect("valid admin config")).expect("admin client"))
+}
+
+/// `TransactionsTest.setUp`'s topic creation (`TransactionsTest.scala:95-96`):
+/// `createTopic(topic, numPartitions, brokerCount, topicConfig())` with
+/// `min.insync.replicas=2` (`topicConfig`, `TransactionsTest.scala:85-89`).
+///
+/// Java's `createTopic` returns only once every broker knows every partition's
+/// leader; [`test_utils::wait_for_partition_leaders`] recovers that half, which
+/// [`test_utils::create_topic_with_configs`] alone cannot prove.
+async fn create_txn_test_topics(ctx: &mut TestContext) -> (String, String) {
+    let topic1 = ctx.topic("topic1");
+    let topic2 = ctx.topic("topic2");
+    let admin = txn_test_admin(ctx);
+    for topic in [&topic1, &topic2] {
+        let topic_config = BTreeMap::from([("min.insync.replicas".to_string(), "2".to_string())]);
+        test_utils::create_topic_with_configs(
+            admin.as_ref(),
+            topic,
+            TXN_TEST_NUM_PARTITIONS,
+            TXN_TEST_REPLICATION_FACTOR,
+            topic_config,
+        )
+        .await;
+        test_utils::wait_for_partition_leaders(admin.as_ref(), topic, 0..TXN_TEST_NUM_PARTITIONS).await;
+    }
+    admin.close().await;
+    (topic1, topic2)
+}
+
+/// `TestUtils.createTransactionalProducer` with `TransactionsTest`'s defaults
+/// (`TransactionsTest.scala:1089-1104`, `TestUtils.scala:1206-1227`).
+fn create_transactional_producer(bootstrap: &str, transactional_id: &str) -> KafkaProducer<Vec<u8>, Vec<u8>> {
+    let props = HashMap::from([
+        ("bootstrap.servers".to_string(), bootstrap.to_string()),
+        ("acks".to_string(), "all".to_string()),
+        ("batch.size".to_string(), "16384".to_string()),
+        ("transactional.id".to_string(), transactional_id.to_string()),
+        ("enable.idempotence".to_string(), "true".to_string()),
+        ("transaction.timeout.ms".to_string(), "60000".to_string()),
+        ("max.block.ms".to_string(), "60000".to_string()),
+        ("delivery.timeout.ms".to_string(), "120000".to_string()),
+        ("request.timeout.ms".to_string(), "30000".to_string()),
+        ("max.in.flight.requests.per.connection".to_string(), "5".to_string()),
+    ]);
+    KafkaProducer::new(
+        ProducerConfig::new(&props).expect("invalid transactional producer config"),
+        Box::new(ByteArraySerializer),
+        Box::new(ByteArraySerializer),
+    )
+    .expect("failed to build a transactional producer")
+}
+
+/// `TransactionsTest.createReadCommittedConsumer` (`TransactionsTest.scala:1067-1078`)
+/// → `TestUtils.createConsumer(..., enableAutoCommit = false, readCommitted = true)`
+/// (`TestUtils.scala:551-573`): `auto.offset.reset=earliest`, the CONSUMER arm.
+fn create_read_committed_consumer(bootstrap: &str, group_id: &str) -> Box<dyn Consumer<Vec<u8>, Vec<u8>>> {
+    assigned_consumer(bootstrap, group_id, "read_committed")
+}
+
+/// `TestUtils.producerRecordWithExpectedTransactionStatus(topic, partition, key,
+/// value, willBeCommitted)` (`TestUtils.scala:1270-1282`): a record carrying a
+/// `transactionStatus` header naming the outcome the test expects.
+fn producer_record_with_expected_transaction_status(
+    topic: &str,
+    partition: Option<i32>,
+    key: &str,
+    value: &str,
+    will_be_committed: bool,
+) -> ProducerRecord<Vec<u8>, Vec<u8>> {
+    let mut headers = RecordHeaders::new();
+    let status = if will_be_committed {
+        COMMITTED_VALUE
+    } else {
+        ABORTED_VALUE
+    };
+    headers.add_key_value(TRANSACTION_STATUS_KEY, Some(status)).expect("add header");
+    ProducerRecord::with_partition_key_headers(
+        topic.to_string(),
+        partition,
+        Some(key.as_bytes().to_vec()),
+        Some(value.as_bytes().to_vec()),
+        headers,
+    )
+    .expect("ProducerRecord::with_partition_key_headers should succeed")
+}
+
+/// `KafkaProducer::send` through the `Producer` trait (the inherent method of the
+/// same name would otherwise shadow it).
+async fn send_record(
+    producer: &KafkaProducer<Vec<u8>, Vec<u8>>,
+    record: ProducerRecord<Vec<u8>, Vec<u8>>,
+) -> Result<KafkaFuture<RecordMetadata>, Error> {
+    <KafkaProducer<Vec<u8>, Vec<u8>> as Producer<Vec<u8>, Vec<u8>>>::send(producer, record).await
+}
+
+/// `TestUtils.consumeRecords(consumer, numRecords)` (`TestUtils.scala:1198-1204`):
+/// poll until at least `num_records` arrive within `DEFAULT_MAX_WAIT_MS`, then
+/// assert exactly that many were consumed.
+async fn consume_records(
+    consumer: &mut Box<dyn Consumer<Vec<u8>, Vec<u8>>>,
+    num_records: usize,
+) -> Vec<ConsumerRecord<Vec<u8>, Vec<u8>>> {
+    let deadline = Duration::from_millis(test_utils::DEFAULT_MAX_WAIT_MS);
+    let start = Instant::now();
+    let mut records = Vec::new();
+    while records.len() < num_records {
+        assert!(
+            start.elapsed() < deadline,
+            "Consumed {} records before timeout instead of the expected {num_records} records",
+            records.len()
+        );
+        records.extend(consumer.poll(Duration::from_millis(100)).await.expect("poll should not fail"));
+    }
+    assert_eq!(num_records, records.len(), "Consumed more records than expected");
+    records
+}
+
+/// `TestUtils.assertCommittedAndGetValue` (`TestUtils.scala:1255-1264`).
+fn assert_committed_and_get_value(record: &ConsumerRecord<Vec<u8>, Vec<u8>>) -> String {
+    match record.headers().headers(TRANSACTION_STATUS_KEY).first() {
+        Some(header) => assert_eq!(
+            String::from_utf8_lossy(COMMITTED_VALUE),
+            String::from_utf8_lossy(header.value().unwrap_or_default()),
+            "Got {} but expected the value to indicate committed status.",
+            String::from_utf8_lossy(header.value().unwrap_or_default())
+        ),
+        None => panic!("expected the record header to include an expected transaction status, but received nothing."),
+    }
+    String::from_utf8(record.value().expect("the test always sends a value").clone()).expect("the test sends UTF-8")
+}
+
+/// Java's `assertThrows(classOf[ProducerFencedException], ...)`. Java asserts the
+/// class only; the message is the error code's fixed default text (the broker sends
+/// no custom one), so it is asserted too.
+fn assert_producer_fenced(error: &Error) {
+    assert!(
+        matches!(error, Error::ProducerFenced(_)),
+        "expected ProducerFenced, got {error:?}"
+    );
+    assert_eq!(error.message(), Errors::ProducerFenced.message());
+}
+
+/// The fencing prologue shared by `testFencingOnCommit` / `testFencingOnSendOffsets`
+/// (`TransactionsTest.scala:385-404` / `417-436`): p1 opens a transaction and
+/// flushes two records that must end up aborted, then p2 (same
+/// `transactional.id`) initializes — fencing p1 and aborting its open
+/// transaction — begins its own and sends the two records that will commit.
+async fn fence_p1_with_p2(
+    producer1: &KafkaProducer<Vec<u8>, Vec<u8>>,
+    producer2: &KafkaProducer<Vec<u8>, Vec<u8>>,
+    topic1: &str,
+    topic2: &str,
+) {
+    producer1.init_transactions().await.expect("producer1.initTransactions");
+
+    producer1.begin_transaction().expect("producer1.beginTransaction");
+    send_record(
+        producer1,
+        producer_record_with_expected_transaction_status(topic1, None, "1", "1", false),
+    )
+    .await
+    .expect("producer1 send");
+    send_record(
+        producer1,
+        producer_record_with_expected_transaction_status(topic2, None, "3", "3", false),
+    )
+    .await
+    .expect("producer1 send");
+    producer1.flush().await.expect("producer1.flush");
+
+    producer2
+        .init_transactions()
+        .await
+        .expect("producer2.initTransactions: ok, will abort the open transaction.");
+    producer2.begin_transaction().expect("producer2.beginTransaction");
+    send_record(
+        producer2,
+        producer_record_with_expected_transaction_status(topic1, None, "2", "4", true),
+    )
+    .await
+    .expect("producer2 send");
+    send_record(
+        producer2,
+        producer_record_with_expected_transaction_status(topic2, None, "2", "4", true),
+    )
+    .await
+    .expect("producer2 send");
+}
+
+/// A fenced producer's `commitTransaction` fails with `ProducerFencedException`;
+/// the fencing producer's commit succeeds and only its records are visible.
+///
+/// Translates `TransactionsTest.testFencingOnCommit` (`TransactionsTest.scala:383-409`).
+#[tokio::test]
+async fn test_fencing_on_commit() {
+    let mut ctx = TestContext::new(cluster_config()).await;
+    let (topic1, topic2) = create_txn_test_topics(&mut ctx).await;
+    let bootstrap = ctx.bootstrap_servers().to_string();
+    let txn_id = ctx.group_id("transactional-producer");
+    let producer1 = create_transactional_producer(&bootstrap, &txn_id);
+    let producer2 = create_transactional_producer(&bootstrap, &txn_id);
+    let mut consumer = create_read_committed_consumer(&bootstrap, &ctx.group_id("transactional-group"));
+
+    consumer
+        .subscribe_with_topics(vec![topic1.clone(), topic2.clone()])
+        .await
+        .expect("subscribe");
+
+    fence_p1_with_p2(&producer1, &producer2, &topic1, &topic2).await;
+
+    let fenced = producer1
+        .commit_transaction()
+        .await
+        .expect_err("a fenced producer's commitTransaction must fail");
+    assert_producer_fenced(&fenced);
+
+    producer2.commit_transaction().await.expect("producer2.commitTransaction: ok");
+
+    let records = consume_records(&mut consumer, 2).await;
+    for record in &records {
+        assert_committed_and_get_value(record);
+    }
+
+    consumer.close().await.expect("consumer close");
+    producer1.close().await.expect("producer1 close");
+    producer2.close().await.expect("producer2 close");
+    ctx.cleanup().await;
+}
+
+/// A fenced producer's `sendOffsetsToTransaction` fails with
+/// `ProducerFencedException`; the fencing producer's commit succeeds.
+///
+/// Translates `TransactionsTest.testFencingOnSendOffsets` (`TransactionsTest.scala:415-443`).
+///
+/// `ConsumerGroupMetadata::new` is deprecated exactly as Java's constructor is;
+/// Java suppresses the warning with `@SuppressWarnings(Array("removal"))`.
+#[tokio::test]
+#[allow(deprecated)]
+async fn test_fencing_on_send_offsets() {
+    let mut ctx = TestContext::new(cluster_config()).await;
+    let (topic1, topic2) = create_txn_test_topics(&mut ctx).await;
+    let bootstrap = ctx.bootstrap_servers().to_string();
+    let txn_id = ctx.group_id("transactional-producer");
+    let producer1 = create_transactional_producer(&bootstrap, &txn_id);
+    let producer2 = create_transactional_producer(&bootstrap, &txn_id);
+    let mut consumer = create_read_committed_consumer(&bootstrap, &ctx.group_id("transactional-group"));
+
+    consumer
+        .subscribe_with_topics(vec![topic1.clone(), topic2.clone()])
+        .await
+        .expect("subscribe");
+
+    fence_p1_with_p2(&producer1, &producer2, &topic1, &topic2).await;
+
+    let fenced = producer1
+        .send_offsets_to_transaction(
+            HashMap::from([(
+                TopicPartition::new(topic1.clone(), 0),
+                OffsetAndMetadata::new(110).expect("valid offset"),
+            )]),
+            ConsumerGroupMetadata::new("foobarGroup"),
+        )
+        .await
+        .expect_err("a fenced producer's sendOffsetsToTransaction must fail");
+    assert_producer_fenced(&fenced);
+
+    producer2.commit_transaction().await.expect("producer2.commitTransaction: ok");
+
+    let records = consume_records(&mut consumer, 2).await;
+    for record in &records {
+        assert_committed_and_get_value(record);
+    }
+
+    consumer.close().await.expect("consumer close");
+    producer1.close().await.expect("producer1 close");
+    producer2.close().await.expect("producer2 close");
+    ctx.cleanup().await;
+}
+
+/// A producer fenced while its transaction is open cannot send: the failure is
+/// either a synchronous `ProducerFencedException` or an `InvalidProducerEpochException`
+/// through the record's future. The fencing producer's commit succeeds.
+///
+/// Translates `TransactionsTest.testFencingOnSend` (`TransactionsTest.scala:515-555`).
+#[tokio::test]
+async fn test_fencing_on_send() {
+    let mut ctx = TestContext::new(cluster_config()).await;
+    let (topic1, topic2) = create_txn_test_topics(&mut ctx).await;
+    let bootstrap = ctx.bootstrap_servers().to_string();
+    let txn_id = ctx.group_id("transactional-producer");
+    let producer1 = create_transactional_producer(&bootstrap, &txn_id);
+    let producer2 = create_transactional_producer(&bootstrap, &txn_id);
+    let mut consumer = create_read_committed_consumer(&bootstrap, &ctx.group_id("transactional-group"));
+
+    consumer
+        .subscribe_with_topics(vec![topic1.clone(), topic2.clone()])
+        .await
+        .expect("subscribe");
+
+    producer1.init_transactions().await.expect("producer1.initTransactions");
+
+    producer1.begin_transaction().expect("producer1.beginTransaction");
+    send_record(
+        &producer1,
+        producer_record_with_expected_transaction_status(&topic1, None, "1", "1", false),
+    )
+    .await
+    .expect("producer1 send");
+    send_record(
+        &producer1,
+        producer_record_with_expected_transaction_status(&topic2, None, "3", "3", false),
+    )
+    .await
+    .expect("producer1 send");
+
+    producer2
+        .init_transactions()
+        .await
+        .expect("producer2.initTransactions: ok, will abort the open transaction.");
+    producer2.begin_transaction().expect("producer2.beginTransaction");
+    for topic in [&topic1, &topic2] {
+        send_record(
+            &producer2,
+            producer_record_with_expected_transaction_status(topic, None, "2", "4", true),
+        )
+        .await
+        .expect("producer2 send")
+        .get()
+        .await
+        .expect("producer2's record is acked");
+    }
+
+    // Java: `producer1.send(...)` then `result.get()`, catching
+    // `ProducerFencedException` (thrown by `send` itself) or an
+    // `ExecutionException` whose cause must be `InvalidProducerEpochException`;
+    // a successful send or any other error fails the test.
+    match send_record(
+        &producer1,
+        producer_record_with_expected_transaction_status(&topic1, None, "1", "5", false),
+    )
+    .await
+    {
+        Err(error @ Error::ProducerFenced(_)) => assert_producer_fenced(&error),
+        Err(other) => panic!("Got an unexpected error from a fenced producer: {other:?}"),
+        Ok(future) => match future.get().await {
+            Ok(metadata) => panic!(
+                "Should not be able to send messages from a fenced producer. Missed a producer fenced error \
+                 when writing to {}-{}.",
+                metadata.topic(),
+                metadata.partition()
+            ),
+            Err(error) => {
+                assert!(
+                    matches!(error, Error::InvalidProducerEpoch(_)),
+                    "expected the send future to fail with InvalidProducerEpoch, got {error:?}"
+                );
+                assert_eq!(error.message(), Errors::InvalidProducerEpoch.message());
+            },
+        },
+    }
+
+    producer2.commit_transaction().await.expect("producer2.commitTransaction: ok");
+
+    let records = consume_records(&mut consumer, 2).await;
+    for record in &records {
+        assert_committed_and_get_value(record);
+    }
+
+    consumer.close().await.expect("consumer close");
+    producer1.close().await.expect("producer1 close");
+    producer2.close().await.expect("producer2 close");
+    ctx.cleanup().await;
+}
+
+/// A second `initTransactions` on an already-initialized producer fails with
+/// `IllegalStateException` (the READY → INITIALIZING transition is invalid).
+///
+/// Translates `TransactionsTest.testConsecutivelyRunInitTransactions`
+/// (`TransactionsTest.scala:692-698`). Java asserts only the class; the message is
+/// `TransactionManager.transitionTo`'s deterministic text, so it is asserted too.
+#[tokio::test]
+async fn test_consecutively_run_init_transactions() {
+    let mut ctx = TestContext::new(cluster_config()).await;
+    let bootstrap = ctx.bootstrap_servers().to_string();
+    let txn_id = ctx.group_id("normalProducer");
+    let producer = create_transactional_producer(&bootstrap, &txn_id);
+
+    producer.init_transactions().await.expect("initTransactions");
+    let error = producer
+        .init_transactions()
+        .await
+        .expect_err("a second initTransactions must fail");
+    match &error {
+        Error::LocalIllegalState(e) => assert_eq!(
+            e.message(),
+            format!("TransactionalId {txn_id}: Invalid transition attempted from state READY to state INITIALIZING"),
+        ),
+        other => panic!("expected LocalIllegalState, got {other:?}"),
+    }
+
+    producer.close().await.expect("producer close");
+    ctx.cleanup().await;
+}
+
+/// An empty transaction can be aborted right after a committed one.
+///
+/// Translates `TransactionsTest.testEmptyAbortAfterCommit`
+/// (`TransactionsTest.scala:1047-1057`). Java runs only the `consumer, true`
+/// (`isTV2Enabled`) row; the pooled `apache/kafka:4.2.0` KRaft brokers are formatted
+/// at the latest metadata version, which finalizes `transaction.version=2`.
+#[tokio::test]
+async fn test_empty_abort_after_commit() {
+    let mut ctx = TestContext::new(cluster_config()).await;
+    let (topic1, _topic2) = create_txn_test_topics(&mut ctx).await;
+    let bootstrap = ctx.bootstrap_servers().to_string();
+    let txn_id = ctx.group_id("transactional-producer");
+    let producer = create_transactional_producer(&bootstrap, &txn_id);
+
+    producer.init_transactions().await.expect("initTransactions");
+    producer.begin_transaction().expect("beginTransaction");
+    send_record(
+        &producer,
+        producer_record_with_expected_transaction_status(&topic1, Some(1), "4", "4", false),
+    )
+    .await
+    .expect("send");
+    producer.commit_transaction().await.expect("commitTransaction");
+
+    producer.begin_transaction().expect("beginTransaction");
+    producer
+        .abort_transaction()
+        .await
+        .expect("abortTransaction of an empty transaction");
+
+    producer.close().await.expect("producer close");
     ctx.cleanup().await;
 }
 

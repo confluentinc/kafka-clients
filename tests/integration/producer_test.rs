@@ -61,7 +61,6 @@ use confluent_kafka::admin::AdminClientConfig;
 use confluent_kafka::admin::KafkaAdminClient;
 use confluent_kafka::admin::NewPartitions;
 use confluent_kafka::admin::NewTopic;
-use confluent_kafka::admin::OffsetSpec;
 use confluent_kafka::common::Error;
 use confluent_kafka::common::KafkaFuture;
 use confluent_kafka::common::TopicPartition;
@@ -278,7 +277,7 @@ fn send_test_admin(ctx: &TestContext) -> Box<dyn Admin> {
 /// get `NOT_LEADER_OR_FOLLOWER`, and since these producers are non-idempotent
 /// with 5 in-flight requests, the retries reorder records and break the
 /// consecutive-offset assertions (observed: offsets `[7, 8, 5, 6, 3, 4, 1, 2, 0, 9, ..]`).
-/// See [`wait_for_partition_leaders`] for how the missing half is recovered.
+/// See [`test_utils::wait_for_partition_leaders`] for how the missing half is recovered.
 async fn create_topic_with_admin(admin: &dyn Admin, topic: &str, num_partitions: i32, replication_factor: i16) {
     create_topic_with_admin_config(admin, topic, num_partitions, replication_factor, BTreeMap::new()).await;
 }
@@ -293,37 +292,7 @@ async fn create_topic_with_admin_config(
     topic_config: BTreeMap<String, String>,
 ) {
     test_utils::create_topic_with_configs(admin, topic, num_partitions, replication_factor, topic_config).await;
-    wait_for_partition_leaders(admin, topic, 0..num_partitions).await;
-}
-
-/// Waits until the leader of each of `partitions` answers a leader-only
-/// request — the client-observable half of Java's
-/// `TestUtils.waitForPartitionMetadata` / `waitForAllPartitionsMetadata`
-/// that matters to a producer.
-///
-/// `ListOffsets` is routed to the partition leader, which rejects it with
-/// `NOT_LEADER_OR_FOLLOWER` until it has applied its leadership — the same
-/// check a `Produce` request hits — and it writes nothing, so the offsets the
-/// tests assert on are unaffected.
-async fn wait_for_partition_leaders(admin: &dyn Admin, topic: &str, partitions: std::ops::Range<i32>) {
-    let specs: HashMap<TopicPartition, OffsetSpec> = partitions
-        .map(|p| (TopicPartition::new(topic.to_string(), p), OffsetSpec::latest()))
-        .collect();
-    test_utils::retry_on_error_with_timeout(
-        Duration::from_millis(test_utils::TOPIC_METADATA_PROPAGATION_WAIT_MS),
-        || {
-            let result = admin.list_offsets(&specs);
-            async move {
-                result
-                    .all()
-                    .get()
-                    .await
-                    .map(|_| ())
-                    .map_err(|e| format!("partition leaders of {topic} not ready: {e:?}"))
-            }
-        },
-    )
-    .await;
+    test_utils::wait_for_partition_leaders(admin, topic, 0..num_partitions).await;
 }
 
 /// The suite's verification consumer — `TestUtils.createConsumer(bootstrap,
@@ -728,7 +697,7 @@ async fn send_before_and_after_partition_expansion_inner<F: ProducerBackendFacto
 
     // read metadata from a broker and verify the new topic partitions exist
     test_utils::wait_for_all_partitions_metadata(admin.as_ref(), &topic, 2).await;
-    wait_for_partition_leaders(admin.as_ref(), &topic, 0..2).await;
+    test_utils::wait_for_partition_leaders(admin.as_ref(), &topic, 0..2).await;
 
     // send records to the newly added partition after confirming that metadata have been updated.
     send_and_verify_partition(&producer, &topic, partition1, 0).await;
