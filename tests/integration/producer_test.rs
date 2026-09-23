@@ -501,11 +501,12 @@ async fn send_offset_inner<F: ProducerBackendFactory>(ctx: &mut TestContext, fac
 
     producer.close().await.expect("close should succeed");
 
-    let st = state.lock().unwrap();
-    assert!(st.failures.is_empty(), "callback assertions failed: {:?}", st.failures);
-    assert_eq!(st.invocations, NUM_RECORDS + 5, "every send's callback must fire exactly once");
-    assert_eq!(st.offset, NUM_RECORDS as i64 + 5);
-    drop(st);
+    {
+        let st = state.lock().unwrap();
+        assert!(st.failures.is_empty(), "callback assertions failed: {:?}", st.failures);
+        assert_eq!(st.invocations, NUM_RECORDS + 5, "every send's callback must fire exactly once");
+        assert_eq!(st.offset, NUM_RECORDS as i64 + 5);
+    }
     admin.close_with_timeout(Duration::from_secs(5)).await;
 }
 
