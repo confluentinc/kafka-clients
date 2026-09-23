@@ -1891,6 +1891,28 @@ def test_delete_consumer_group_offsets_reports_unsupported_per_partition():
             assert str(future.exception(timeout=5.0)) == "Not implemented yet"
 
 
+def test_delete_consumer_group_offsets_dedups_a_repeated_partition():
+    """Copilot re-review finding: delete_consumer_group_offsets is documented as
+    accepting an ITERABLE of (topic, partition), so a caller may repeat one.
+    Java's deleteConsumerGroupOffsets takes a Set<TopicPartition> (inherently
+    unique), so a repeated (topic, partition) must collapse to ONE outcome
+    future. Before the fix the helper did `keys = list(partitions)` with no
+    dedup: the futures dict (keyed by (topic, partition)) collapsed to one entry
+    while the native spec kept both rows, so admin_async_per_key_op treated the
+    second occurrence as a missing key and resolved the shared Future with a
+    synthetic error (or hung). After the fix exactly one Future, keyed by the
+    single distinct (topic, partition), resolves to the REAL outcome (the mock's
+    "Not implemented yet"), never the synthetic error."""
+    with MockAdminClient(1) as admin:
+        futures = admin.delete_consumer_group_offsets(
+            "dcg", [("dc", 0), ("dc", 0)])
+        # Exactly one Future, keyed by the single distinct (topic, partition).
+        assert set(futures) == {("dc", 0)}
+        # The REAL per-partition outcome, never the synthetic
+        # "the requested key was not present in the admin RPC's response".
+        assert str(futures[("dc", 0)].exception(timeout=5.0)) == "Not implemented yet"
+
+
 def test_delete_consumer_groups_reports_unsupported_per_group():
     with MockAdminClient(1) as admin:
         futures = admin.delete_consumer_groups(["z-group", "a-group"])

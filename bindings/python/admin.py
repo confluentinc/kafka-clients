@@ -3086,15 +3086,29 @@ class _AdminBase:
 
     @staticmethod
     def _delete_consumer_group_offsets_keys_and_spec(partitions):
-        """``{(topic, partition)}`` -> the per-partition key list plus the
-        ``(topic, partition)`` rows the C extension unpacks. ``partitions`` is
-        a set, already unique by construction.
+        """``(topic, partition)`` iterable -> the per-partition key list plus
+        the ``(topic, partition)`` rows the C extension unpacks.
+
+        De-duplicate by ``(topic, partition)``, FIRST occurrence wins:
+        ``delete_consumer_group_offsets`` is documented as accepting an
+        *iterable*, so callers may pass a list with repeats, but Java's
+        ``deleteConsumerGroupOffsets`` takes a ``Set<TopicPartition>`` and is
+        inherently unique. Deduplication is required, not optional, for the
+        same reason as the sibling raw-iterable helpers
+        (``_describe_log_dirs_keys_and_spec`` / ``_string_keyed_names``): the
+        native layer keys its per-partition future map on ``(topic,
+        partition)``, so a duplicate collapses to ONE callback invocation.
+        Without dedup, the ``futures`` dict (also keyed) would have one entry
+        while ``spec`` kept both, and ``admin_async_per_key_op`` would treat
+        the second occurrence as a missing key and resolve the shared Future
+        with a synthetic error (or hang). ``dict.fromkeys`` preserves
+        first-occurrence order.
 
         Java's ``MockAdminClient.deleteConsumerGroupOffsets`` throws
         (`MockAdminClient.java:783`), so the column order is not observable end
         to end.
         """
-        keys = list(partitions)
+        keys = list(dict.fromkeys(partitions))
         return keys, [(str(t), int(p)) for t, p in keys]
 
     @staticmethod
