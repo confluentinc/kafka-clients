@@ -33,14 +33,21 @@ namespace Confluent.Kafka.Soak;
 /// string values — so a coercion helper would have nothing to coerce.
 /// </para>
 /// <para>
-/// ⚠ The JAAS helpers (<c>jaas_field</c> / <c>jaas_credentials</c> /
-/// <c>librdkafka_admin_config</c>, ~85 lines plus their tests) are deliberately NOT
-/// ported either (PLAN D6). They exist in Python only because its topic creation goes
-/// through librdkafka's AdminClient, whose configuration namespace has no
-/// <c>sasl.jaas.config</c> and errors on unknown keys. This binding's
-/// <c>KafkaAdminClient</c> takes the SAME Java-shaped config the producer and consumer
-/// take, so <c>sasl.jaas.config</c> flows through untouched and there is nothing to
-/// translate.
+/// ⚠ <c>librdkafka_admin_config</c> (the config <i>translator</i>) is deliberately NOT
+/// ported (PLAN D6). It exists in Python only because its topic creation used to go
+/// through librdkafka's AdminClient, whose configuration namespace had no
+/// <c>sasl.jaas.config</c> and errored on unknown keys. This binding's
+/// <c>KafkaAdminClient</c> — like the Python soak's admin client today — takes the SAME
+/// Java-shaped config the producer and consumer take, so <c>sasl.jaas.config</c> flows
+/// through untouched and there is nothing to translate.
+/// </para>
+/// <para>
+/// <c>JaasField</c> / <c>JaasCredentials</c> / <c>CheckAdminCredentials</c>, by
+/// contrast, ARE ported: they don't translate anything, they <i>validate</i> that a
+/// SASL-configured admin config actually carries usable credentials — the same
+/// fail-fast the Python soak added once it moved onto the Rust-backed admin client,
+/// which silently defaults to PLAINTEXT on a protocol/credential mismatch rather than
+/// rejecting it.
 /// </para>
 /// </summary>
 internal static class SoakConfig
@@ -280,5 +287,241 @@ internal static class SoakConfig
         }
 
         return conf;
+    }
+
+    /// <summary>
+    /// Extracts one field's value from a Java JAAS login-module string.
+    /// <para>
+    /// Accepts the spacing and quoting variants a JAAS string legally carries:
+    /// <c>username="k"</c>, <c>username = "k"</c>, <c>username='k'</c> and bare
+    /// <c>username=k</c>. Returns <c>null</c> only when the field is genuinely absent.
+    /// </para>
+    /// <para>
+    /// This mirrors the Rust parser (<c>SaslConfig::parse_jaas_option</c>) byte for byte
+    /// so the client and this validator never disagree: the key is recognized only at
+    /// an <b>option start</b> (beginning of string or after whitespace), quoted regions
+    /// are skipped wholesale <b>honoring backslash escapes</b>, and the value may be
+    /// double-quoted, single-quoted, or bare. A <c>name=</c> sequence living inside
+    /// another option's quoted value is therefore never mistaken for the option (e.g.
+    /// <c>password="username=x" username="right"</c> resolves <c>username</c> to
+    /// <c>right</c>, not <c>x</c>) — a naive scan could make that mistake and let a
+    /// missing-username config pass the fast-fail. The returned value is the raw inner
+    /// content between the quotes (escapes are honored for boundary detection but not
+    /// expanded), matching the Rust parser.
+    /// </para>
+    /// </summary>
+    internal static string? JaasField(string jaasConfig, string name)
+    {
+        string s = jaasConfig;
+        int n = s.Length;
+
+        int idx = 0;
+        while (idx < n)
+        {
+            char c = s[idx];
+            if (c == '"' || c == '\'')
+            {
+                idx = SkipQuoted(s, idx);
+                continue;
+            }
+
+            bool atOptionStart = idx == 0 || char.IsWhiteSpace(s[idx - 1]);
+            if (atOptionStart && StartsWithAt(s, idx, name))
+            {
+                int j = idx + name.Length;
+                while (j < n && char.IsWhiteSpace(s[j]))
+                {
+                    j += 1;
+                }
+
+                if (j < n && s[j] == '=')
+                {
+                    j += 1;
+                    while (j < n && char.IsWhiteSpace(s[j]))
+                    {
+                        j += 1;
+                    }
+
+                    if (j >= n)
+                    {
+                        return null;
+                    }
+
+                    char quote = s[j];
+                    if (quote == '"' || quote == '\'')
+                    {
+                        int start = j + 1;
+                        int k = start;
+                        while (k < n)
+                        {
+                            if (s[k] == '\\')
+                            {
+                                k += 2;
+                                continue;
+                            }
+
+                            if (s[k] == quote)
+                            {
+                                return s.Substring(start, k - start);
+                            }
+
+                            k += 1;
+                        }
+
+                        return null; // unterminated quote — malformed
+                    }
+
+                    // Bare value: read until whitespace or ';'.
+                    int bareEnd = j;
+                    while (bareEnd < n && !char.IsWhiteSpace(s[bareEnd]) && s[bareEnd] != ';')
+                    {
+                        bareEnd += 1;
+                    }
+
+                    return s.Substring(j, bareEnd - j);
+                }
+            }
+
+            idx += 1;
+        }
+
+        return null;
+    }
+
+    /// <summary>Advances past a quoted region opening at <c>s[i]</c>, honoring '\' escapes.</summary>
+    private static int SkipQuoted(string s, int i)
+    {
+        int n = s.Length;
+        char quote = s[i];
+        i += 1;
+        while (i < n)
+        {
+            if (s[i] == '\\')
+            {
+                i += 2;
+                continue;
+            }
+
+            if (s[i] == quote)
+            {
+                return i + 1;
+            }
+
+            i += 1;
+        }
+
+        return i;
+    }
+
+    /// <summary>Whether <paramref name="s"/> starts with <paramref name="value"/> at <paramref name="index"/>.</summary>
+    private static bool StartsWithAt(string s, int index, string value)
+    {
+        if (index + value.Length > s.Length)
+        {
+            return false;
+        }
+
+        return string.CompareOrdinal(s, index, value, 0, value.Length) == 0;
+    }
+
+    /// <summary>
+    /// Extracts <c>(username, password)</c> from a Java JAAS login-module string. Either
+    /// element is <c>null</c> when that field is absent. Used only to <i>validate</i> the
+    /// soak's admin credentials at startup (<see cref="CheckAdminCredentials"/>) — the
+    /// Rust admin client takes <c>sasl.jaas.config</c> verbatim and parses it itself, so
+    /// these values are never forwarded anywhere.
+    /// </summary>
+    internal static (string? Username, string? Password) JaasCredentials(string jaasConfig)
+    {
+        return (JaasField(jaasConfig, "username"), JaasField(jaasConfig, "password"));
+    }
+
+    /// <summary>
+    /// Fails fast at startup when SASL is configured but credentials cannot be recovered
+    /// from <c>sasl.jaas.config</c>.
+    /// <para>
+    /// The Rust admin client parses <c>sasl.jaas.config</c> itself, so this does NOT
+    /// translate the config — it only <i>validates</i> that a username and password are
+    /// present. Silently proceeding with no usable credentials is the one outcome worth
+    /// refusing: it turns a typo into an authentication error from the broker minutes
+    /// later, or — with an unauthenticated listener — into a soak that runs for two weeks
+    /// against the wrong thing. PLAINTEXT (no SASL) requires no credentials and passes
+    /// untouched.
+    /// </para>
+    /// <para>
+    /// A second, symmetric misconfiguration is refused just as fast: SASL credentials or
+    /// a mechanism are configured, but <c>security.protocol</c> is not a SASL protocol
+    /// (does not contain <c>"SASL"</c>). The Rust client defaults to PLAINTEXT, so it
+    /// would connect <i>unauthenticated</i> while the operator believes SASL is in force
+    /// — exactly the "runs for two weeks against the wrong thing" failure, in the
+    /// opposite direction. Naming it at startup beats discovering it from an
+    /// unauthenticated listener later.
+    /// </para>
+    /// </summary>
+    /// <exception cref="SoakFatalStartupException">
+    /// A restart cannot fix a bad credential or a protocol mismatch, so it names the
+    /// missing piece. Maps to <see cref="SoakExitCodes.Fatal"/>.
+    /// </exception>
+    internal static void CheckAdminCredentials(IReadOnlyDictionary<string, string> conf)
+    {
+        string protocol = conf.TryGetValue("security.protocol", out string? protocolValue) ? protocolValue : string.Empty;
+        bool protocolIsSasl = protocol.IndexOf("SASL", StringComparison.OrdinalIgnoreCase) >= 0;
+        string mechanism = conf.TryGetValue("sasl.mechanism", out string? mechanismValue) ? mechanismValue : string.Empty;
+        string? jaas = conf.TryGetValue("sasl.jaas.config", out string? jaasValue) ? jaasValue : null;
+
+        (string? username, string? password) = !string.IsNullOrEmpty(jaas)
+            ? JaasCredentials(jaas)
+            : (null, null);
+        bool saslCredsPresent = username is not null || password is not null;
+        bool saslConfigured = mechanism.Length > 0 || saslCredsPresent;
+
+        // SASL is configured, but the protocol would not actually use it: the client
+        // connects as PLAINTEXT (the Rust default) — silently unauthenticated. A restart
+        // cannot fix a protocol mismatch, so refuse before the run begins.
+        if (saslConfigured && !protocolIsSasl)
+        {
+            throw new SoakFatalStartupException(string.Format(
+                CultureInfo.InvariantCulture,
+                "sasl.mechanism='{0}' / sasl.jaas.config {1}, but security.protocol='{2}' is not a "
+                + "SASL protocol, so the client would connect WITHOUT SASL (PLAINTEXT, the Rust "
+                + "default) — silently unauthenticated. Set security.protocol to a SASL protocol "
+                + "(e.g. SASL_SSL or SASL_PLAINTEXT). Restarting will not fix this.",
+                mechanism,
+                saslCredsPresent ? "has credentials" : "has no credentials",
+                protocol));
+        }
+
+        bool saslExpected = protocolIsSasl || mechanism.Length > 0;
+        if (!saslExpected)
+        {
+            return;
+        }
+
+        if (username is not null && password is not null)
+        {
+            return;
+        }
+
+        var missing = new List<string>();
+        if (username is null)
+        {
+            missing.Add("username");
+        }
+
+        if (password is null)
+        {
+            missing.Add("password");
+        }
+
+        throw new SoakFatalStartupException(string.Format(
+            CultureInfo.InvariantCulture,
+            "security.protocol='{0}' / sasl.mechanism='{1}' require credentials, but "
+            + "sasl.jaas.config {2}: could not extract {3}. Expected Java JAAS form: "
+            + "sasl.jaas.config=org.apache.kafka.common.security.plain.PlainLoginModule required "
+            + "username=\"KEY\" password=\"SECRET\"; Restarting will not fix this.",
+            protocol,
+            mechanism,
+            string.IsNullOrEmpty(jaas) ? "is not set" : "is set but unparseable",
+            string.Join(" and ", missing)));
     }
 }

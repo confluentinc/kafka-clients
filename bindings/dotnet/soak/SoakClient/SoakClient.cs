@@ -288,8 +288,11 @@ internal sealed class SoakClient : IDisposable
             // admin config is routed but NOT strict-validated against a key catalog (only
             // the producer and consumer are). KafkaAdminClient takes the same Java-shaped
             // config those two take, so there is no translation layer either — PLAN D6
-            // deletes Python's jaas_field / jaas_credentials / librdkafka_admin_config
-            // outright, and `sasl.jaas.config` flows through untouched.
+            // deletes Python's librdkafka_admin_config outright, and `sasl.jaas.config`
+            // flows through untouched. What IS ported is the fail-fast credential check
+            // (SoakConfig.CheckAdminCredentials, below) — Python's jaas_field /
+            // jaas_credentials / check_admin_credentials, added once its admin client
+            // moved onto the same Rust core this binding already uses.
             var aconf = SoakConfig.FilterConfig(conf, new[] { "consumer.", "producer." }, "admin.");
             aconf["client.id"] = options.TestId;
 
@@ -314,6 +317,13 @@ internal sealed class SoakClient : IDisposable
             }
 
             SoakConfig.ValidateConfig(cconf, SoakConfig.ConsumerConfigKeys, "consumer");
+
+            // Fail fast — before the long run begins — if SASL is configured but no
+            // credentials can be recovered from sasl.jaas.config, or if credentials/a
+            // mechanism are set but security.protocol would not actually use them (the
+            // Rust client silently defaults to PLAINTEXT). PLAINTEXT-with-no-SASL passes
+            // untouched.
+            SoakConfig.CheckAdminCredentials(aconf);
 
             await CreateTopicAsync(aconf, options, logger).ConfigureAwait(false);
 

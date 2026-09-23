@@ -207,4 +207,179 @@ public sealed class SoakConfigTests
         using var reader = new StringReader("=value\n");
         Assert.Throws<ArgumentException>(() => SoakConfig.ParseConfigFile(reader));
     }
+
+    // -----------------------------------------------------------------------------------
+    // JAAS field / credential parsing + the startup credential check.
+    // -----------------------------------------------------------------------------------
+
+    [Fact]
+    public void JaasCredentialsExtraction()
+    {
+        const string Jaas = "org.apache.kafka.common.security.plain.PlainLoginModule required \n\t"
+            + "username=\"API_KEY\" \n\tpassword=\"API_SECRET\";";
+
+        (string? username, string? password) = SoakConfig.JaasCredentials(Jaas);
+        Assert.Equal("API_KEY", username);
+        Assert.Equal("API_SECRET", password);
+    }
+
+    [Fact]
+    public void JaasCredentialsAcceptsSingleQuotesAndBareValues()
+    {
+        Assert.Equal("k", SoakConfig.JaasField("required username='k' password=p;", "username"));
+        Assert.Equal("p", SoakConfig.JaasField("required username='k' password=p;", "password"));
+        Assert.Equal("k", SoakConfig.JaasField("required username = \"k\";", "username"));
+    }
+
+    [Fact]
+    public void JaasCredentialsDoesNotMatchALongerFieldName()
+    {
+        // `serviceName=` / `foo.username=` must not be mistaken for `username=`.
+        string jaas = "required serviceName=\"wrong\" username=\"right\";";
+        Assert.Equal("right", SoakConfig.JaasField(jaas, "username"));
+    }
+
+    [Fact]
+    public void JaasCredentialsDoesNotMatchAKeyInsideAQuotedValue()
+    {
+        // A `username=` sequence embedded in another option's quoted value must not be
+        // picked up. The real `username` option must win, matching the Rust parser, so
+        // the fast-fail cannot be fooled into passing a config whose real username is
+        // absent.
+        const string Jaas = "PlainLoginModule required password=\"username=x\" username=\"right\";";
+        (string? username, string? password) = SoakConfig.JaasCredentials(Jaas);
+        Assert.Equal("right", username);
+        Assert.Equal("username=x", password);
+    }
+
+    [Fact]
+    public void JaasCredentialsHandlesEscapedQuoteInValue()
+    {
+        // An escaped quote inside a value must not terminate it or misalign later
+        // options; `username` after it still resolves. Value is returned raw (escapes
+        // not expanded), matching the Rust parser.
+        const string Jaas = "PlainLoginModule required password=\"a\\\"b\" username=\"right\";";
+        (string? username, string? password) = SoakConfig.JaasCredentials(Jaas);
+        Assert.Equal("right", username);
+        Assert.Equal("a\\\"b", password);
+    }
+
+    [Fact]
+    public void JaasCredentialsAbsent()
+    {
+        (string? username, string? password) = SoakConfig.JaasCredentials("org.apache...PlainLoginModule required;");
+        Assert.Null(username);
+        Assert.Null(password);
+    }
+
+    [Fact]
+    public void JaasCredentialsPreservesSpecialCharactersInTheSecret()
+    {
+        const string Jaas = "required username=\"K/EY+1\" password=\"a+b/c=d==\";";
+        (string? username, string? password) = SoakConfig.JaasCredentials(Jaas);
+        Assert.Equal("K/EY+1", username);
+        Assert.Equal("a+b/c=d==", password);
+    }
+
+    [Fact]
+    public void CheckAdminCredentialsRefusesSaslWithoutCredentials()
+    {
+        // A SASL config whose credentials cannot be recovered must fail loudly at
+        // startup — the one outcome worth refusing turns a typo into an opaque broker
+        // auth error minutes later, or a two-week soak against the wrong thing.
+        SoakFatalStartupException ex = Assert.Throws<SoakFatalStartupException>(() => SoakConfig.CheckAdminCredentials(
+            Conf(
+                ("bootstrap.servers", "host:9092"),
+                ("security.protocol", "SASL_SSL"),
+                ("sasl.mechanism", "PLAIN"))));
+
+        Assert.NotNull(ex.Message);
+        Assert.Contains("sasl.jaas.config", ex.Message, StringComparison.Ordinal);
+        Assert.Contains("username and password", ex.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void CheckAdminCredentialsRefusesAHalfParsedJaas()
+    {
+        SoakFatalStartupException ex = Assert.Throws<SoakFatalStartupException>(() => SoakConfig.CheckAdminCredentials(
+            Conf(
+                ("bootstrap.servers", "host:9092"),
+                ("security.protocol", "SASL_SSL"),
+                ("sasl.mechanism", "PLAIN"),
+                ("sasl.jaas.config", "org.apache...PlainLoginModule required username=\"only\";"))));
+
+        Assert.Contains("password", ex.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void CheckAdminCredentialsTriggersOnSaslMechanismAlone()
+    {
+        // SASL implied by sasl.mechanism even when security.protocol is unset.
+        Assert.Throws<SoakFatalStartupException>(() => SoakConfig.CheckAdminCredentials(
+            Conf(("bootstrap.servers", "host:9092"), ("sasl.mechanism", "PLAIN"))));
+    }
+
+    [Fact]
+    public void CheckAdminCredentialsRefusesSaslMechanismWithPlaintextProtocol()
+    {
+        // SASL is configured (mechanism set) but security.protocol=PLAINTEXT, so the
+        // client would connect unauthenticated — refuse, even though credentials happen
+        // to be present, because the protocol would not use them.
+        SoakFatalStartupException ex = Assert.Throws<SoakFatalStartupException>(() => SoakConfig.CheckAdminCredentials(
+            Conf(
+                ("bootstrap.servers", "host:9092"),
+                ("security.protocol", "PLAINTEXT"),
+                ("sasl.mechanism", "PLAIN"),
+                ("sasl.jaas.config", "org.apache.kafka.common.security.plain.PlainLoginModule required "
+                    + "username=\"u\" password=\"p\";"))));
+
+        Assert.Contains("not a SASL protocol", ex.Message, StringComparison.Ordinal);
+        Assert.Contains("WITHOUT SASL", ex.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void CheckAdminCredentialsRefusesSaslMechanismWithoutProtocol()
+    {
+        // sasl.mechanism set but security.protocol absent: the Rust default is
+        // PLAINTEXT, so this too would connect unauthenticated and must be refused.
+        SoakFatalStartupException ex = Assert.Throws<SoakFatalStartupException>(() => SoakConfig.CheckAdminCredentials(
+            Conf(("bootstrap.servers", "host:9092"), ("sasl.mechanism", "PLAIN"))));
+
+        Assert.Contains("not a SASL protocol", ex.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void CheckAdminCredentialsRefusesJaasCredsWithPlaintextProtocol()
+    {
+        // Credentials via sasl.jaas.config but security.protocol=PLAINTEXT (no
+        // mechanism): still a SASL-configured-but-PLAINTEXT mismatch to refuse.
+        SoakFatalStartupException ex = Assert.Throws<SoakFatalStartupException>(() => SoakConfig.CheckAdminCredentials(
+            Conf(
+                ("bootstrap.servers", "host:9092"),
+                ("security.protocol", "PLAINTEXT"),
+                ("sasl.jaas.config", "org.apache.kafka.common.security.plain.PlainLoginModule required "
+                    + "username=\"u\" password=\"p\";"))));
+
+        Assert.Contains("not a SASL protocol", ex.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void CheckAdminCredentialsAllowsPlaintextWithoutCredentials()
+    {
+        // The common case: no SASL configured at all — must pass untouched.
+        SoakConfig.CheckAdminCredentials(Conf(("bootstrap.servers", "host:9092")));
+        SoakConfig.CheckAdminCredentials(Conf(
+            ("bootstrap.servers", "host:9092"), ("security.protocol", "PLAINTEXT")));
+    }
+
+    [Fact]
+    public void CheckAdminCredentialsAllowsSaslWithFullCredentials()
+    {
+        SoakConfig.CheckAdminCredentials(Conf(
+            ("bootstrap.servers", "host:9092"),
+            ("security.protocol", "SASL_SSL"),
+            ("sasl.mechanism", "PLAIN"),
+            ("sasl.jaas.config", "org.apache.kafka.common.security.plain.PlainLoginModule required "
+                + "username=\"u\" password=\"p\";")));
+    }
 }
