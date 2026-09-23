@@ -191,3 +191,4 @@ null value as `b""` (Phase 2 / Critic 66).
 - Phase 1 / Actor 65: 67fe726b (prod fix: wake bg task on OffsetFetch retry re-enqueue, KAFKA-20165 committed() timed out) + fd77ba85 (3 tests, all green on 4.2.0). Critic 65 reviewing.
 - Phase 1 / Critic 65: 1 finding (same missing wake in commit retry drivers) → fixed in f2f5d080; re-review clean. Phase 1 DONE.
 - Phase 2 / Actor 66: 8135b2ce + 5e059541 (6 tests, native green; harness waits for all partition leaders). Critic 66: 1 finding (gRPC arms: sizes -1, null value) → fixing.
+- Phase 2: fixup bbd0ff4f (gRPC-arm gating); Critic 66 re-review clean. Phase 2 DONE.
