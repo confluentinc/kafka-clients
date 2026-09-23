@@ -3048,6 +3048,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "verifiable-clients"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "confluent-kafka-rust",
+ "env_logger",
+ "indexmap 2.14.0",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "want"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"

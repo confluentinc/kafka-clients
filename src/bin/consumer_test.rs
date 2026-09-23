@@ -30,25 +30,13 @@ use std::io::Write;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use confluent_kafka::common::Error;
-use confluent_kafka::common::serialization::Deserializer;
+use confluent_kafka::common::serialization::StringDeserializer;
 use confluent_kafka::consumer::{ConsumerConfig, KafkaConsumer};
 
 const BOOTSTRAP_SERVERS: &str = "localhost:9092";
 const TOPIC: &str = "test-topic-consumer";
 const GROUP_ID: &str = "consumer-test-group";
 const POLL_TIMEOUT: Duration = Duration::from_millis(1000);
-
-/// Decodes record bytes as a UTF-8 `String`, lossily. Equivalent to Java's
-/// `org.apache.kafka.common.serialization.StringDeserializer`, minus the
-/// configurable encoding (UTF-8 only). Defined inline because the client
-/// does not yet ship concrete `Deserializer` implementations.
-struct StringDeserializer;
-
-impl Deserializer<String> for StringDeserializer {
-    fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<String, Error> {
-        Ok(String::from_utf8_lossy(data).into_owned())
-    }
-}
 
 /// Wall-clock milliseconds since the Unix epoch, for tagging each printed
 /// record so real-time delivery can be verified against the producer.
