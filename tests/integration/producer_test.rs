@@ -15,7 +15,8 @@
 //! Integration tests for the KafkaProducer against a real Kafka 4.2.0 broker.
 //!
 //! Translated from:
-//! - `org.apache.kafka.clients.producer.ProducerCompressionTest`
+//! - `org.apache.kafka.clients.producer.ProducerCompressionTest`: `testCompression`
+//!   (native only)
 //! - `org.apache.kafka.clients.producer.ProducerFailureHandlingTest`
 //! - `kafka.api.BaseProducerSendTest` / `kafka.api.PlaintextProducerSendTest`
 //!   (`core/src/test/scala/integration/kafka/api/`): `testSendOffset`,
@@ -56,6 +57,9 @@ use confluent_kafka::admin::NewPartitions;
 use confluent_kafka::admin::OffsetSpec;
 use confluent_kafka::common::Error;
 use confluent_kafka::common::TopicPartition;
+use confluent_kafka::common::header::Headers;
+use confluent_kafka::common::header::RecordHeader;
+use confluent_kafka::common::header::RecordHeaders;
 use confluent_kafka::common::record::TimestampType;
 use confluent_kafka::common::serialization::ByteArrayDeserializer;
 use confluent_kafka::consumer::Consumer;
@@ -64,6 +68,7 @@ use confluent_kafka::consumer::KafkaConsumer;
 use confluent_kafka::producer::Callback;
 use confluent_kafka::producer::Producer;
 use confluent_kafka::producer::ProducerRecord;
+use confluent_kafka::producer::ProducerRecordOptionsBuilder;
 
 use crate::common::backend_factory::ProducerBackendFactory;
 use crate::common::callback_log::KIND_DELIVERY;
@@ -342,6 +347,7 @@ struct ConsumedRecord {
     timestamp: i64,
     key: Option<Vec<u8>>,
     value: Option<Vec<u8>>,
+    headers: Vec<RecordHeader>,
 }
 
 /// `TestUtils.pollUntilAtLeastNumRecords` (`TestUtils.scala:1184-1196`) over
@@ -363,6 +369,7 @@ async fn poll_until_at_least_num_records(
                 timestamp: record.timestamp(),
                 key: record.key().cloned(),
                 value: record.value().cloned(),
+                headers: record.headers().to_array().to_vec(),
             });
         }
         if records.len() >= num_records {
@@ -751,6 +758,187 @@ async fn produce_with_compression_inner<F: ProducerBackendFactory>(ctx: &mut Tes
         assert_eq!(metadata.topic(), topic, "Topic should match for compression '{name}'");
 
         producer.close().await.expect("close should succeed");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ProducerCompressionTest
+// ---------------------------------------------------------------------------
+
+/// `ProducerCompressionTest.numRecords` (`ProducerCompressionTest.java:56`).
+const COMPRESSION_NUM_RECORDS: usize = 2000;
+
+/// Java's `org.apache.kafka.test.TestUtils.LETTERS_AND_DIGITS`.
+const LETTERS_AND_DIGITS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+
+/// `ProducerCompressionTest.messageValue` (`ProducerCompressionTest.java:165-172`):
+/// `length` random letters and digits.
+fn compression_message_value(length: usize) -> String {
+    use rand::Rng;
+    let mut rng = rand::rng();
+    (0..length)
+        .map(|_| LETTERS_AND_DIGITS[rng.random_range(0..LETTERS_AND_DIGITS.len())] as char)
+        .collect()
+}
+
+/// `ProducerCompressionTest.errorMessage` (`ProducerCompressionTest.java:174-176`).
+fn compression_error_message(compression: &str) -> String {
+    format!("Compression type: {compression} - Assertion failed")
+}
+
+/// Translated from `ProducerCompressionTest.testCompression`
+/// (`ProducerCompressionTest.java:63-68`): compressed messages should be able
+/// to be sent and consumed correctly, for every `CompressionType`.
+///
+/// Native only, also under `multilanguage-tests`: the body sends 6000 records
+/// per codec with `linger.ms=200` and only then waits on the futures. The gRPC
+/// `Send` RPC blocks until delivery, so every record would wait out the full
+/// linger on its own (~20 minutes per codec) instead of sharing batches.
+async fn compression_inner<F: ProducerBackendFactory>(ctx: &mut TestContext, factory: &F) {
+    // `CompressionType.values()`, in declaration order.
+    for compression in ["none", "gzip", "snappy", "lz4", "zstd"] {
+        process_compression_test(ctx, factory, compression).await;
+    }
+}
+
+/// `ProducerCompressionTest.processCompressionTest`
+/// (`ProducerCompressionTest.java:71-114`).
+///
+/// Deviations: the topic name is per-test (pooled clusters), and only the
+/// CONSUMER-protocol verification consumer is translated — the `classic` one
+/// is out of scope (`consumer-threading.md` §20).
+async fn process_compression_test<F: ProducerBackendFactory>(ctx: &mut TestContext, factory: &F, compression: &str) {
+    let compression_topic = ctx.topic(&format!("topic_{compression}"));
+    let admin = send_test_admin(ctx);
+    test_utils::create_topic(admin.as_ref(), &compression_topic, 1, 1).await;
+
+    // `cluster.producer(producerProps)`: bootstrap plus the three overrides.
+    let producer_props = HashMap::from([
+        ("bootstrap.servers".to_string(), bootstrap_for(factory, ctx)),
+        ("compression.type".to_string(), compression.to_string()),
+        ("batch.size".to_string(), "66000".to_string()),
+        ("linger.ms".to_string(), "200".to_string()),
+    ]);
+    let mut consumer = send_test_consumer(ctx);
+    let producer = factory.create(producer_props).await.expect("Failed to create producer");
+
+    let partition = 0;
+    // prepare the messages
+    let messages: Vec<String> = (0..COMPRESSION_NUM_RECORDS).map(compression_message_value).collect();
+    let header_arr = [RecordHeader::new("key".to_string(), Some(b("value")))];
+    let headers = RecordHeaders::with_header_slice(&header_arr);
+
+    // make sure the returned messages are correct
+    let now = current_time_ms();
+    let mut responses = Vec::with_capacity(COMPRESSION_NUM_RECORDS * 3);
+    for message in &messages {
+        let key = message.len().to_string().into_bytes();
+        // 1. send message without key and header
+        let record = ProducerRecord::with_partition_timestamp_key(
+            compression_topic.clone(),
+            None,
+            Some(now),
+            None,
+            Some(message.as_bytes().to_vec()),
+        )
+        .expect("valid record");
+        responses.push(producer.send(record).await.expect("send should succeed"));
+        // 2. send message with key, without header
+        let record = ProducerRecord::with_partition_timestamp_key(
+            compression_topic.clone(),
+            None,
+            Some(now),
+            Some(key.clone()),
+            Some(message.as_bytes().to_vec()),
+        )
+        .expect("valid record");
+        responses.push(producer.send(record).await.expect("send should succeed"));
+        // 3. send message with key and header
+        let record = ProducerRecord::with_options(
+            ProducerRecordOptionsBuilder::new()
+                .set_topic(compression_topic.clone())
+                .set_timestamp(Some(now))
+                .set_key(Some(key))
+                .set_value(Some(message.as_bytes().to_vec()))
+                .set_headers(Some(headers.clone()))
+                .build()
+                .expect("every mandatory parameter is set"),
+        )
+        .expect("valid record");
+        responses.push(producer.send(record).await.expect("send should succeed"));
+    }
+    for (offset, response) in responses.iter().enumerate() {
+        let metadata = response
+            .get_with_timeout(UNBOUNDED_GET_TIMEOUT)
+            .await
+            .unwrap_or_else(|e| panic!("{compression}: send {offset} failed: {e:?}"));
+        assert_eq!(offset as i64, metadata.offset(), "{compression}");
+    }
+    verify_compression_consumer_records(
+        consumer.as_mut(),
+        &messages,
+        now,
+        &header_arr,
+        partition,
+        &compression_topic,
+        compression,
+    )
+    .await;
+
+    producer.close().await.expect("close should succeed");
+    // "This consumer close very slowly, which may cause the entire test to time
+    // out, and we can't wait for it to auto close" (`ProducerCompressionTest.java:109-111`).
+    let _ = consumer
+        .close_with_options(confluent_kafka::consumer::CloseOptions::new_timeout(Duration::from_secs(1)))
+        .await;
+}
+
+/// `ProducerCompressionTest.verifyConsumerRecords`
+/// (`ProducerCompressionTest.java:116-154`), with `flagLoop` (`:156-163`)
+/// folded into the record index: record `i` is message `i / 3`, flavour `i % 3`.
+async fn verify_compression_consumer_records(
+    consumer: &mut dyn Consumer<Vec<u8>, Vec<u8>>,
+    messages: &[String],
+    now: i64,
+    header_arr: &[RecordHeader],
+    partition: i32,
+    topic: &str,
+    compression: &str,
+) {
+    let tp = TopicPartition::new(topic.to_string(), partition);
+    consumer.assign(vec![tp.clone()]).await.expect("assign should succeed");
+    consumer.seek_with_offset(tp, 0).await.expect("seek should succeed");
+    let error_message = compression_error_message(compression);
+    let records = consume_records(consumer, COMPRESSION_NUM_RECORDS * 3).await;
+    for (i, record) in records.iter().enumerate() {
+        let (num, flag) = (i / 3, i % 3);
+        let message_value = &messages[num];
+        let offset = (num * 3 + flag) as i64;
+        let value = String::from_utf8(record.value.clone().expect("value")).expect("utf-8 value");
+        let key = record.key.as_ref().map(|k| String::from_utf8(k.clone()).expect("utf-8 key"));
+        match flag {
+            0 => {
+                // verify message without key and header
+                assert_eq!(None, key, "{error_message}");
+                assert_eq!(*message_value, value, "{error_message}");
+                assert_eq!(0, record.headers.len(), "{error_message}");
+            },
+            1 => {
+                // verify message with key, without header
+                assert_eq!(Some(message_value.len().to_string()), key, "{error_message}");
+                assert_eq!(*message_value, value, "{error_message}");
+                assert_eq!(0, record.headers.len(), "{error_message}");
+            },
+            _ => {
+                // verify message with key and header
+                assert_eq!(Some(message_value.len().to_string()), key, "{error_message}");
+                assert_eq!(*message_value, value, "{error_message}");
+                assert_eq!(1, record.headers.len(), "{error_message}");
+                assert_eq!(header_arr[0], record.headers[0], "{error_message}");
+            },
+        }
+        assert_eq!(now, record.timestamp, "{error_message}");
+        assert_eq!(offset, record.offset, "{error_message}");
     }
 }
 
@@ -1870,6 +2058,15 @@ crate::multilanguage_test!(
 );
 #[cfg(feature = "multilanguage-tests")]
 crate::multilanguage_test!(test_produce_partitions_for, produce_partitions_for_inner);
+// `testCompression` is native-only, also under `multilanguage-tests` — see
+// `compression_inner` for why the gRPC backends cannot run it.
+#[cfg(feature = "multilanguage-tests")]
+#[allow(non_snake_case)] // `__rust` suffix matches `multilanguage_test!` naming.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_compression__rust() {
+    let mut ctx = TestContext::new(ClusterConfig::default()).await;
+    compression_inner(&mut ctx, &crate::common::backend_factory::RustNativeFactory).await;
+}
 
 // ---------------------------------------------------------------------------
 // Rust-native-only tests — the Producer trait surface they exercise
@@ -2318,6 +2515,10 @@ mod rust_only_fallback {
     #[tokio::test(flavor = "multi_thread")]
     async fn test_produce_non_blocking_max_block_zero() {
         produce_non_blocking_max_block_zero_inner(&mut ctx().await, &RustNativeFactory).await;
+    }
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_compression() {
+        compression_inner(&mut ctx().await, &RustNativeFactory).await;
     }
     #[tokio::test(flavor = "multi_thread")]
     async fn test_delivery_callback_logs_metadata() {
