@@ -17,7 +17,11 @@
 //! Translated from:
 //! - `org.apache.kafka.clients.producer.ProducerCompressionTest`: `testCompression`
 //!   (native only)
-//! - `org.apache.kafka.clients.producer.ProducerFailureHandlingTest`
+//! - `org.apache.kafka.clients.producer.ProducerFailureHandlingTest`: among
+//!   others `testTooLargeRecordWithAckZero`,
+//!   `testPartitionTooLargeForReplicationWithAckAll`,
+//!   `testResponseTooLargeForReplicationWithAckAll`,
+//!   `testCannotSendToInternalTopic`
 //! - `kafka.api.BaseProducerSendTest` / `kafka.api.PlaintextProducerSendTest`
 //!   (`core/src/test/scala/integration/kafka/api/`): `testSendOffset`,
 //!   `testSendToPartition`, `testSendBeforeAndAfterPartitionExpansion`,
@@ -54,6 +58,7 @@ use confluent_kafka::admin::Admin;
 use confluent_kafka::admin::AdminClientConfig;
 use confluent_kafka::admin::KafkaAdminClient;
 use confluent_kafka::admin::NewPartitions;
+use confluent_kafka::admin::NewTopic;
 use confluent_kafka::admin::OffsetSpec;
 use confluent_kafka::common::Error;
 use confluent_kafka::common::TopicPartition;
@@ -1074,26 +1079,205 @@ fn small_max_bytes_cluster_config() -> ClusterConfig {
     ClusterConfig::with_properties(props)
 }
 
-/// Translated from `ProducerFailureHandlingTest.testTooLargeRecordWithAckZero`.
-/// With acks=0 the broker doesn't ack, so the producer returns a
-/// completed future with `offset == -1` regardless of payload size.
-async fn produce_too_large_record_acks_zero_inner<F: ProducerBackendFactory>(ctx: &mut TestContext, factory: &F) {
-    let topic = ctx.topic("ack0_too_large");
-    let mut config = make_config(&bootstrap_for(factory, ctx));
-    config.insert("acks".to_string(), "0".to_string());
-    let producer = factory.create(config).await.expect("Failed to create producer");
+// ---------------------------------------------------------------------------
+// ProducerFailureHandlingTest fixtures
+// ---------------------------------------------------------------------------
 
-    // Any record under acks=0 returns offset=-1; the "too large" framing in
-    // the Java test is incidental.
-    let record = ProducerRecord::with_key(topic.clone(), Some(b("key")), Some(vec![0u8; 16_000]));
-    let future = producer.send(record).await.expect("send should succeed");
-    let metadata = future
-        .get_with_timeout(Duration::from_secs(30))
+/// `ProducerFailureHandlingTest.producerBufferSize` (`ProducerFailureHandlingTest.java:79`).
+const FAILURE_PRODUCER_BUFFER_SIZE: i32 = 30000;
+/// `serverMessageMaxBytes` (`ProducerFailureHandlingTest.java:80`).
+const FAILURE_SERVER_MESSAGE_MAX_BYTES: i32 = FAILURE_PRODUCER_BUFFER_SIZE / 2;
+/// `replicaFetchMaxPartitionBytes` (`ProducerFailureHandlingTest.java:81`).
+const FAILURE_REPLICA_FETCH_MAX_PARTITION_BYTES: i32 = FAILURE_SERVER_MESSAGE_MAX_BYTES + 200;
+/// `replicaFetchMaxResponseBytes` (`ProducerFailureHandlingTest.java:82`).
+const FAILURE_REPLICA_FETCH_MAX_RESPONSE_BYTES: i32 = FAILURE_REPLICA_FETCH_MAX_PARTITION_BYTES + 200;
+
+/// Java's `DefaultRecordBatch.RECORD_BATCH_OVERHEAD` (the Rust constant lives
+/// in the crate-private `common::record::internal`).
+const RECORD_BATCH_OVERHEAD: i32 = 61;
+/// Java's `DefaultRecord.MAX_RECORD_OVERHEAD` (crate-private in Rust, as above).
+const MAX_RECORD_OVERHEAD: i32 = 21;
+
+/// Broker shape of `ProducerFailureHandlingTest`'s `@ClusterTestDefaults`
+/// (`ProducerFailureHandlingTest.java:61-76`): two brokers, topic
+/// auto-creation off, `message.max.bytes=15000`,
+/// `replica.fetch.max.bytes=15200`, `offsets.topic.num.partitions=1`.
+///
+/// Java's third property uses `REPLICA_FETCH_RESPONSE_MAX_BYTES_DOC` — the
+/// config's *documentation string* — as the key, so the broker receives an
+/// unknown property and `replica.fetch.response.max.bytes` keeps its default.
+/// Omitting it here is the equivalent broker configuration.
+fn producer_failure_handling_cluster_config() -> ClusterConfig {
+    let mut cfg = ClusterConfig::with_brokers(2);
+    for (key, value) in [
+        ("KAFKA_AUTO_CREATE_TOPICS_ENABLE", "false".to_string()),
+        ("KAFKA_MESSAGE_MAX_BYTES", FAILURE_SERVER_MESSAGE_MAX_BYTES.to_string()),
+        (
+            "KAFKA_REPLICA_FETCH_MAX_BYTES",
+            FAILURE_REPLICA_FETCH_MAX_PARTITION_BYTES.to_string(),
+        ),
+        ("KAFKA_OFFSETS_TOPIC_NUM_PARTITIONS", "1".to_string()),
+    ] {
+        cfg.server_properties.insert(key.to_string(), value);
+    }
+    cfg
+}
+
+/// `ProducerFailureHandlingTest.producerConfig(acks)`
+/// (`ProducerFailureHandlingTest.java:291-298`) plus the bootstrap servers
+/// `clusterInstance.producer(..)` adds.
+fn failure_producer_config(bootstrap_servers: &str, acks: i32) -> HashMap<String, String> {
+    HashMap::from([
+        ("bootstrap.servers".to_string(), bootstrap_servers.to_string()),
+        ("acks".to_string(), acks.to_string()),
+        ("retries".to_string(), "0".to_string()),
+        ("request.timeout.ms".to_string(), "30000".to_string()),
+        ("max.block.ms".to_string(), "10000".to_string()),
+        ("buffer.memory".to_string(), FAILURE_PRODUCER_BUFFER_SIZE.to_string()),
+    ])
+}
+
+/// Translated from `ProducerFailureHandlingTest.testPartitionTooLargeForReplicationWithAckAll`
+/// (`ProducerFailureHandlingTest.java:125-129`): this should succeed as the
+/// replica fetcher can handle oversized messages since KIP-74.
+async fn partition_too_large_for_replication_with_ack_all_inner<F: ProducerBackendFactory>(
+    ctx: &mut TestContext,
+    factory: &F,
+) {
+    check_too_large_record_for_replication_with_ack_all(ctx, factory, FAILURE_REPLICA_FETCH_MAX_PARTITION_BYTES).await;
+}
+
+/// Translated from `ProducerFailureHandlingTest.testResponseTooLargeForReplicationWithAckAll`
+/// (`ProducerFailureHandlingTest.java:134-138`): this should succeed as the
+/// replica fetcher can handle oversized messages since KIP-74.
+async fn response_too_large_for_replication_with_ack_all_inner<F: ProducerBackendFactory>(
+    ctx: &mut TestContext,
+    factory: &F,
+) {
+    check_too_large_record_for_replication_with_ack_all(ctx, factory, FAILURE_REPLICA_FETCH_MAX_RESPONSE_BYTES).await;
+}
+
+/// `ProducerFailureHandlingTest.checkTooLargeRecordForReplicationWithAckAll`
+/// (`ProducerFailureHandlingTest.java:270-289`). The topic name is per-test
+/// (pooled clusters) instead of Java's fixed `topic10`.
+async fn check_too_large_record_for_replication_with_ack_all<F: ProducerBackendFactory>(
+    ctx: &mut TestContext,
+    factory: &F,
+    max_fetch_size: i32,
+) {
+    let max_message_size = max_fetch_size + 100;
+    let broker_size = 2;
+    let topic_config = BTreeMap::from([
+        ("min.insync.replicas".to_string(), broker_size.to_string()),
+        ("max.message.bytes".to_string(), max_message_size.to_string()),
+    ]);
+
+    // create topic
+    let topic10 = ctx.topic("topic10");
+    let admin = send_test_admin(ctx);
+    create_topic_with_admin_config(admin.as_ref(), &topic10, broker_size, broker_size as i16, topic_config).await;
+
+    // send a record that is too large for replication, but within the broker max message limit
+    let value = vec![0u8; (max_message_size - RECORD_BATCH_OVERHEAD - MAX_RECORD_OVERHEAD) as usize];
+    let producer = factory
+        .create(failure_producer_config(&bootstrap_for(factory, ctx), -1))
+        .await
+        .expect("Failed to create producer");
+    let producer_record = ProducerRecord::new(topic10.clone(), Some(value));
+    let record_metadata = producer
+        .send(producer_record)
+        .await
+        .expect("send should succeed")
+        .get_with_timeout(UNBOUNDED_GET_TIMEOUT)
+        .await
+        .expect("an oversized-for-replication record should still be acknowledged (KIP-74)");
+
+    assert_eq!(topic10, record_metadata.topic());
+    producer.close().await.expect("close should succeed");
+}
+
+/// Translated from `ProducerFailureHandlingTest.testCannotSendToInternalTopic`
+/// (`ProducerFailureHandlingTest.java:218-237`).
+///
+/// Java asks the admin to create `__consumer_offsets` with the group
+/// coordinator's topic configs, without looking at the (rejected) result, and
+/// then `waitTopicDeletion` proves through broker internals (metadata cache,
+/// replica and log managers) that no such topic exists. Those internals are not
+/// observable from a client, so that wait is omitted; the admin result is
+/// awaited only so the request has reached the controller before the produce,
+/// and is ignored exactly like Java's.
+async fn cannot_send_to_internal_topic_inner<F: ProducerBackendFactory>(ctx: &mut TestContext, factory: &F) {
+    const GROUP_METADATA_TOPIC_NAME: &str = "__consumer_offsets";
+    {
+        let admin = send_test_admin(ctx);
+        // `groupCoordinator().groupMetadataTopicConfigs()`
+        // (`GroupCoordinatorService.java:2324-2330`) with the default
+        // `offsets.topic.segment.bytes`.
+        let topic_config = BTreeMap::from([
+            ("cleanup.policy".to_string(), "compact".to_string()),
+            ("compression.type".to_string(), "producer".to_string()),
+            ("segment.bytes".to_string(), (100 * 1024 * 1024).to_string()),
+        ]);
+        let new_topic =
+            NewTopic::with_num_partitions_replication_factor(GROUP_METADATA_TOPIC_NAME.to_string(), Some(1), Some(1))
+                .set_configs(topic_config);
+        let _ = admin.create_topics(&[new_topic]).all().get().await;
+    }
+
+    let producer = factory
+        .create(failure_producer_config(&bootstrap_for(factory, ctx), 1))
+        .await
+        .expect("Failed to create producer");
+    let record = ProducerRecord::with_key(GROUP_METADATA_TOPIC_NAME.to_string(), Some(b("test")), Some(b("test")));
+    let thrown = producer
+        .send(record)
+        .await
+        .expect("send should accept the request")
+        .get_with_timeout(UNBOUNDED_GET_TIMEOUT)
+        .await
+        .expect_err("sending to an internal topic should fail");
+    assert!(
+        matches!(thrown, Error::InvalidTopic(_)),
+        "Unexpected exception while sending to an invalid topic {thrown:?}"
+    );
+    producer.close().await.expect("close should succeed");
+}
+
+/// Translated from `ProducerFailureHandlingTest.testTooLargeRecordWithAckZero`
+/// (`ProducerFailureHandlingTest.java:87-104`): with ack == 0 the future
+/// metadata will have no errors, with offset -1.
+///
+/// Runs on [`small_max_bytes_cluster_config`], whose `message.max.bytes`
+/// (15000) is Java's `serverMessageMaxBytes`, so the record really is over the
+/// broker limit. That cluster has one broker, so `brokers().size()` is 1.
+async fn produce_too_large_record_acks_zero_inner<F: ProducerBackendFactory>(ctx: &mut TestContext, factory: &F) {
+    let topic1 = ctx.topic("topic-1");
+    let admin = send_test_admin(ctx);
+    create_topic_with_admin(admin.as_ref(), &topic1, 1, 1).await;
+
+    let producer = factory
+        .create(failure_producer_config(&bootstrap_for(factory, ctx), 0))
+        .await
+        .expect("Failed to create producer");
+
+    // send a too-large record
+    let record = ProducerRecord::with_partition_key(
+        topic1,
+        None,
+        Some(b("key")),
+        Some(vec![0u8; (FAILURE_SERVER_MESSAGE_MAX_BYTES + 1) as usize]),
+    )
+    .expect("valid record");
+    let record_metadata = producer
+        .send(record)
+        .await
+        .expect("send should succeed")
+        .get_with_timeout(UNBOUNDED_GET_TIMEOUT)
         .await
         .expect("ack=0 produce should not error");
 
-    assert!(!metadata.has_offset(), "acks=0 metadata.has_offset() should be false");
-    assert_eq!(metadata.offset(), -1, "acks=0 metadata.offset() should be -1");
+    assert!(!record_metadata.has_offset(), "acks=0 metadata.has_offset() should be false");
+    assert_eq!(-1, record_metadata.offset(), "acks=0 metadata.offset() should be -1");
 
     producer.close().await.expect("close should succeed");
 }
@@ -1962,7 +2146,26 @@ crate::multilanguage_test!(test_close_flushes_pending, close_flushes_pending_inn
 #[cfg(feature = "multilanguage-tests")]
 crate::multilanguage_test!(
     test_produce_too_large_record_acks_zero,
-    produce_too_large_record_acks_zero_inner
+    produce_too_large_record_acks_zero_inner,
+    small_max_bytes_cluster_config()
+);
+#[cfg(feature = "multilanguage-tests")]
+crate::multilanguage_test!(
+    test_partition_too_large_for_replication_with_ack_all,
+    partition_too_large_for_replication_with_ack_all_inner,
+    producer_failure_handling_cluster_config()
+);
+#[cfg(feature = "multilanguage-tests")]
+crate::multilanguage_test!(
+    test_response_too_large_for_replication_with_ack_all,
+    response_too_large_for_replication_with_ack_all_inner,
+    producer_failure_handling_cluster_config()
+);
+#[cfg(feature = "multilanguage-tests")]
+crate::multilanguage_test!(
+    test_cannot_send_to_internal_topic,
+    cannot_send_to_internal_topic_inner,
+    producer_failure_handling_cluster_config()
 );
 #[cfg(feature = "multilanguage-tests")]
 crate::multilanguage_test!(
@@ -2404,6 +2607,10 @@ mod rust_only_fallback {
         TestContext::new(producer_send_cluster_config()).await
     }
 
+    async fn failure_handling_ctx() -> TestContext {
+        TestContext::new(producer_failure_handling_cluster_config()).await
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn test_produce_single_record() {
         produce_single_record_inner(&mut ctx().await, &RustNativeFactory).await;
@@ -2454,7 +2661,21 @@ mod rust_only_fallback {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_produce_too_large_record_acks_zero() {
-        produce_too_large_record_acks_zero_inner(&mut ctx().await, &RustNativeFactory).await;
+        produce_too_large_record_acks_zero_inner(&mut small_max_bytes_ctx().await, &RustNativeFactory).await;
+    }
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_partition_too_large_for_replication_with_ack_all() {
+        partition_too_large_for_replication_with_ack_all_inner(&mut failure_handling_ctx().await, &RustNativeFactory)
+            .await;
+    }
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_response_too_large_for_replication_with_ack_all() {
+        response_too_large_for_replication_with_ack_all_inner(&mut failure_handling_ctx().await, &RustNativeFactory)
+            .await;
+    }
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_cannot_send_to_internal_topic() {
+        cannot_send_to_internal_topic_inner(&mut failure_handling_ctx().await, &RustNativeFactory).await;
     }
     #[tokio::test(flavor = "multi_thread")]
     async fn test_produce_too_large_record_acks_one() {
