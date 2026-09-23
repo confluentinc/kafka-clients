@@ -174,6 +174,55 @@ partition exact timeout messages; add `testPartitionsForTimeoutErrorWhenTopicDoe
 - A small `SslProducerSendTest` subset (send offset, close, flush) over SSL.
 
 
+## Phase 15 — Harness: broker lifecycle (Actor/Critic 79)
+
+Goal: let integration tests stop/start individual brokers, mirroring Java's
+`ClusterInstance` (`kafka/test-common/test-common-runtime/src/main/java/org/apache/kafka/common/test/ClusterInstance.java`:
+`shutdownBroker(id)`, `startBroker(id)`, `brokers()` / `aliveBrokers()`,
+`brokerIds()`, `controllers()`, `waitForReadyBrokers()`, `type()`), as close to
+Java as the Docker harness allows.
+- **Isolated controllers (Java `Type.KRAFT`).** Current nodes are combined
+  broker+controller, so stopping one can lose the KRaft quorum. Add a cluster
+  mode with dedicated controller container(s) and broker-only containers (Java
+  default for `@ClusterTest` is KRAFT with 1 controller). Keep the existing
+  combined mode (`CO_KRAFT`) for existing tests unchanged.
+- **Dedicated (non-pooled) clusters** for any test that stops brokers, so a
+  stopped broker never leaks into other tests; torn down when the test ends.
+- **Restart fidelity:** same broker id, same host ports (bootstrap addresses
+  stay valid), same data dir (no reformat) — testcontainers `stop`/`start` on
+  the held `ContainerAsync`, or equivalent.
+- `wait_for_ready_brokers()` after start (admin `describe_cluster` shows it).
+- Smoke integration tests: stop a broker → admin shows it gone and ISR shrinks;
+  start it → rejoins and ISR recovers; controller stays available.
+- Must not slow down or change existing pooled tests.
+
+## Phase 16 — Consumer fault injection (Actor/Critic 80)
+
+Using Phase 15: `PlaintextConsumerTest.testAsyncConsumerCloseOnBrokerShutdown`,
+`testAsyncConsumeCoordinatorFailover`; `ConsumerIntegrationTest.testLeaderEpoch`;
+un-ignore `plaintext_consumer_commit_test.rs` `test_commit_async_fails_when_coordinator_unavailable_during_close`
+and give it the real broker shutdown Java performs.
+
+## Phase 17 — ConsumerBounceTest CONSUMER arms (Actor/Critic 81)
+
+`testAsyncConsumerConsumptionWithBrokerFailures`,
+`testAsyncConsumerSeekAndCommitWithBrokerFailures` (high watermark via admin
+`list_offsets` instead of replicaManager), `testAsyncSubscribeWhenTopicUnavailable`,
+`testAsyncClose` → `consumer_bounce_test.rs`.
+
+## Phase 18 — Producer fault injection (Actor/Critic 82)
+
+`ProducerFailureHandlingTest.testNotEnoughReplicasAfterBrokerShutdown`;
+`BaseProducerSendTest.testSendToPartitionWithFollowerShutdownShouldNotTimeout`;
+`TransactionsTest` `testInitTransactionsTimeout`, `testSendOffsetsToTransactionTimeout`,
+`testCommitTransactionTimeout`, `testAbortTransactionTimeout`, `testFailureToFenceEpoch`.
+
+## Phase 19 — Rebootstrap & bounce (Actor/Critic 83)
+
+`ClientRebootstrapTest` producer + consumer (enabled / disabled);
+`TransactionsBounceTest.testWithGroupMetadata` (scale down only if needed, documented);
+`TransactionsTest.testBumpTransactionalEpochWithTV2Enabled` if Phase 15 supports it.
+
 ## Later (not yet scheduled)
 
 Stale-rationale skips (consumer metrics tests, compressed halves, rebalance
@@ -200,3 +249,5 @@ null value as `b""` (Phase 2 / Critic 66).
 - Phase 8 / Actor 72: e9fa1395 (4 ProducerSendWhileDeletion tests, 5/5 runs each; new file). Critic 72: clean. Phase 8 DONE.
 - Phase 9 / Actor 73: 3af420c2, 5a4853bc (4 expiration tests; stale idempotent-PID comment fixed). Critic 73: 1 finding (describe_producers race, 1/20 flake) → fixed af96b13b (10/10). Phase 9 DONE. Producer block (2-9) complete.
 - Checkpoint after phase 9: format-check + lint + cargo test --features integration-tests all green (unit 4034, integration 248 passed / 1 pre-existing ignore).
+- Phase 10 / Actor 74: 002aa2c0 (group max size + remote assignors; ConsumerAssignmentPoller fixture; 4.3 arms #[ignore]). Critic 74: clean. Phase 10 DONE.
+- User (2026-09-24): continue all phases unattended; then solve broker-lifecycle harness as close to Java as possible → added Phases 15-19.
