@@ -1976,9 +1976,9 @@ pub fn plaintext_bootstrap_for<F: AdminBackendFactory>(factory: &F, ctx: &TestCo
 
 /// [`admin_config`] pinned to the PLAINTEXT listener with no security keys.
 ///
-/// For scenarios whose assertion is specific to a plaintext connection — the
-/// broker's delegation-token gate fires only over PLAINTEXT, and the anonymous
-/// principal a DENY rule targets exists only over PLAINTEXT. Unlike
+/// For scenarios whose assertion depends on an unauthenticated connection: the
+/// broker's delegation-token gate rejects PLAINTEXT and 1-way SSL, and a DENY
+/// rule targeting `User:ANONYMOUS` would not match the SASL_SSL principal. Unlike
 /// [`admin_config_for`] this ignores the run's protocol selector, so the test
 /// asserts the same behaviour in the PLAINTEXT, SSL and SASL_SSL runs alike.
 pub fn admin_config_for_plaintext<F: AdminBackendFactory>(factory: &F, ctx: &TestContext) -> HashMap<String, String> {

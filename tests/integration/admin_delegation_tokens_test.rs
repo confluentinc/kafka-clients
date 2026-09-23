@@ -127,10 +127,10 @@ async fn delegation_token_rpcs_are_rejected_on_a_plaintext_connection<F: AdminBa
     factory: &F,
 ) {
     // Pinned to PLAINTEXT: the broker's `allowTokenRequests` gate returns
-    // DELEGATION_TOKEN_REQUEST_NOT_ALLOWED *only* when the client's security
-    // protocol is PLAINTEXT (see module docs). Over the SSL / SASL_SSL runs the
-    // gate would pass and the RPC would answer DelegationTokenAuthDisabled
-    // instead, so this scenario asserts the same plaintext error in every run.
+    // DELEGATION_TOKEN_REQUEST_NOT_ALLOWED over PLAINTEXT and 1-way SSL (see
+    // module docs). Over SASL_SSL the gate would pass and the RPC would answer
+    // DelegationTokenAuthDisabled instead, so pinning keeps the code-64
+    // assertion identical in every run.
     let admin = admin_for_plaintext(factory, ctx).await;
     let backend = factory.name();
 

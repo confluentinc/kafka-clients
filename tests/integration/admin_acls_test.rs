@@ -399,11 +399,11 @@ async fn deny_binding_round_trip<F: AdminBackendFactory>(ctx: &mut TestContext, 
 /// alternative explanation that the topic became permanently unreadable.
 async fn explicit_deny_is_enforced_by_the_authorizer<F: AdminBackendFactory>(ctx: &mut TestContext, factory: &F) {
     // Pinned to PLAINTEXT: the DENY rule below targets `User:ANONYMOUS`, the
-    // principal this client authenticates as over the PLAINTEXT listener. Over
-    // the SSL / SASL_SSL runs the client would authenticate as a different
-    // principal (`User:{SASL_USERNAME}` for SASL_SSL) that the rule does not
-    // name, so the enforcement step would no longer exercise an explicit-DENY
-    // match. Connecting over PLAINTEXT keeps the assertion meaningful in every run.
+    // principal this client authenticates as over PLAINTEXT and over 1-way SSL
+    // (no client certificate). Over SASL_SSL the client would authenticate as
+    // `User:{SASL_USERNAME}` instead, which the rule does not name, so the
+    // enforcement step would no longer exercise an explicit-DENY match. Pinning
+    // keeps the assertion identical in every run.
     let admin = admin_for_plaintext(factory, ctx).await;
     let backend = factory.name();
 

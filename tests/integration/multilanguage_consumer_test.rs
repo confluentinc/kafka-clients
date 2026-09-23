@@ -86,13 +86,14 @@ fn bootstrap_for<F: ConsumerBackendFactory>(factory: &F, ctx: &TestContext) -> S
 }
 
 /// Produce `records` to `topic` with a native in-process Rust producer on the
-/// host-loopback bootstrap (the producer always runs in this process).
+/// host-loopback bootstrap (the producer always runs in this process), over the
+/// run's selected protocol.
 async fn produce(ctx: &TestContext, topic: &str, records: &[(&str, &str)]) {
-    let props = HashMap::from([
-        ("bootstrap.servers".to_string(), ctx.bootstrap_servers().to_string()),
+    let mut props = HashMap::from([
         ("acks".to_string(), "all".to_string()),
         ("linger.ms".to_string(), "0".to_string()),
     ]);
+    ctx.configure(&mut props);
     let config = ProducerConfig::new(&props).expect("producer config");
     let producer: KafkaProducer<Vec<u8>, Vec<u8>> =
         KafkaProducer::new(config, Box::new(ByteArraySerializer), Box::new(ByteArraySerializer))
