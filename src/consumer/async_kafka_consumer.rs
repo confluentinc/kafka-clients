@@ -2082,6 +2082,13 @@ where
         // `mark_coordinator_unknown` on `NotCoordinator` /
         // `CoordinatorNotAvailable` errors — which is what drives the
         // bg-task's next `poll(now)` to re-issue `FindCoordinator`.
+        // Wake the bg task when the OffsetFetch retry driver (a spawned task)
+        // re-enqueues a retry, so it is sent after its backoff rather than
+        // after the network poll's own timeout. Reuses the same
+        // `event_notify` the application-event enqueue path pokes.
+        if let Some(commit_arc) = commit.as_ref() {
+            commit_arc.set_completion_notify(Arc::clone(&event_notify));
+        }
         if let (Some(coord_arc), Some(commit_arc)) = (coordinator.as_ref(), commit.as_ref()) {
             commit_arc.set_coordinator(Arc::clone(coord_arc));
         }
