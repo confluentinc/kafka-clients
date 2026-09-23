@@ -5500,7 +5500,13 @@ static void admin_remove_members_trampoline(const char* group_instance_id,
     kafka_common_Error_t* error, void* user_data) {
     PyObject* cb = (PyObject*)user_data;
     PyGILState_STATE g = PyGILState_Ensure();
-    PyObject* r = PyObject_CallFunction(cb, "sK", group_instance_id,
+    // "z" is the documented nullable-string code: in `removeAll` mode the FFI
+    // fires with group_instance_id == NULL (intended as Python None). "z" makes
+    // that intent explicit. Note "s" would behave identically HERE: in the
+    // PyObject_CallFunction / Py_BuildValue value-building family 's' and 'z'
+    // share one do_mkvalue case and both map NULL -> None (only the PyArg_Parse*
+    // parsing family requires "s" to be non-NULL). "z" is chosen for clarity.
+    PyObject* r = PyObject_CallFunction(cb, "zK", group_instance_id,
         (unsigned long long)(uintptr_t)error);
     if (r) Py_DECREF(r); else PyErr_Print();
     Py_DECREF(cb);
