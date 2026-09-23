@@ -63,7 +63,12 @@ pub(crate) trait KafkaFutureOps<T: Send + 'static>: Send + Sync {
     /// instead, with no task hop, matching Java's `KafkaFutureImpl`. The
     /// combinator futures below (`all_of`/`then_apply`/`join_map`/
     /// `join_map_results`) keep the default: they have no eager completion hook
-    /// of their own, and nothing currently calls `when_complete` on one of them.
+    /// of their own. In `ffi` builds this spawned-task fallback IS exercised:
+    /// the C-FFI per-key path (`ffi::admin::admin_async_per_key_op`) calls
+    /// [`KafkaFuture::when_complete`] on every per-key future, and the
+    /// shared-future consumer-group paths hand it combinator-backed futures
+    /// (`then_apply`/`join_map`/...), which therefore hit this default and
+    /// require a Tokio runtime context to run the spawned task.
     fn register_completion(self: Arc<Self>, callback: CompletionCallback<T>)
     where
         Self: 'static,
@@ -267,14 +272,21 @@ impl<T: Send + 'static> KafkaFuture<T> {
     /// fallback described above. Callers inside the crate always run inside a
     /// runtime context.
     ///
-    /// `allow(dead_code)`: this public-view hook mirrors Java's
-    /// `KafkaFuture.whenComplete` (required by `admin-client.md` §4), but the
-    /// crate's own completion paths — the FFI per-key delivery and the
-    /// group-describe chain (`kafka_admin_client.rs`) — register their callbacks
-    /// on the `KafkaFutureImpl` handle instead (see
-    /// [`KafkaFutureImpl::when_complete`]), so this method currently has no
-    /// in-tree caller in any build configuration. It is retained as the mandated
-    /// public-mirror completion hook.
+    /// This public-view hook mirrors Java's `KafkaFuture.whenComplete`
+    /// (required by `admin-client.md` §4). In `ffi` builds it has a real
+    /// in-tree caller: `ffi::admin::admin_async_per_key_op` calls it on every
+    /// per-key `KafkaFuture` to deliver results to the C callback, and the
+    /// shared-future consumer-group paths hand it combinator-backed futures
+    /// (`then_apply`/`join_map`/...), so the spawned-task fallback (which needs
+    /// a Tokio runtime context) is genuinely exercised there — not only the
+    /// eager `KafkaFutureImpl`-backed path. The group-describe chain in
+    /// `kafka_admin_client.rs` instead registers on the `KafkaFutureImpl`
+    /// handle directly (see [`KafkaFutureImpl::when_complete`]).
+    ///
+    /// `allow(dead_code)`: the `ffi` feature gates the only caller, so in
+    /// non-`ffi` builds this method is genuinely uncalled; the attribute keeps
+    /// those builds warning-free. It is retained as the mandated public-mirror
+    /// completion hook regardless.
     #[allow(dead_code)]
     pub(crate) fn when_complete<F>(&self, action: F)
     where

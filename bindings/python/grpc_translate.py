@@ -563,19 +563,32 @@ def _admin_partition_key(topic, partition):
 def _resolve_admin_futures(futures):
     """``{key: concurrent.futures.Future}`` -> ``{key: value | KafkaError}``.
 
-    admin.py's per-key RPCs (Phase A: create_topics, delete_topics[_by_ids],
-    describe_topics[_by_ids], create_partitions, delete_records; Phase B:
-    describe_configs, incremental_alter_configs; Phase C: describe_log_dirs,
-    alter_replica_log_dirs, describe_replica_log_dirs; Phase D:
-    alter_partition_reassignments, list_offsets) return a dict of ``Future``s
-    immediately, one per key, resolving independently - rather than the
-    already-resolved ``{key: value | KafkaError}`` dict every *_response
-    translator below still expects (built for the RPCs that never changed,
-    plus these twelve before their respective phases). Blocking on every key's
-    Future here — the gRPC harness is a synchronous, single-call-at-a-time
-    test driver, not a low-latency production client — keeps those
-    translators unchanged rather than teaching each one to await/resolve a
-    Future itself.
+    admin.py's per-key RPCs return a dict of ``Future``s immediately, one per
+    key, resolving independently - rather than the already-resolved
+    ``{key: value | KafkaError}`` dict every *_response translator below still
+    expects (built for the RPCs that never changed, plus these before their
+    respective phases). The per-key RPCs now span every phase A-G:
+
+      - Phase A: create_topics, delete_topics[_by_ids],
+        describe_topics[_by_ids], create_partitions, delete_records.
+      - Phase B: describe_configs, incremental_alter_configs.
+      - Phase C: describe_log_dirs, alter_replica_log_dirs,
+        describe_replica_log_dirs.
+      - Phase D: alter_partition_reassignments, list_offsets.
+      - Phase E (consumer groups): describe_consumer_groups,
+        describe_classic_groups, list_consumer_group_offsets,
+        alter_consumer_group_offsets, delete_consumer_group_offsets,
+        delete_consumer_groups, remove_members_from_consumer_group.
+      - Phase F (ACLs / quotas / features): create_acls, delete_acls,
+        alter_client_quotas, alter_user_scram_credentials, update_features.
+      - Phase G (producers / transactions): fence_producers.
+
+    (This is a snapshot; the module's per-key helpers -- the
+    ``_*_keys_and_spec`` methods on ``MockAdminClient`` -- are the complete
+    inventory.) Blocking on every key's Future here — the gRPC harness is a
+    synchronous, single-call-at-a-time test driver, not a low-latency
+    production client — keeps those translators unchanged rather than teaching
+    each one to await/resolve a Future itself.
     """
     out = {}
     for key, fut in futures.items():
