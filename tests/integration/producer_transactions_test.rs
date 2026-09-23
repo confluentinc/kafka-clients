@@ -2787,11 +2787,26 @@ async fn test_transaction_after_transaction_id_expires_but_producer_id_remains()
     .expect("send");
 
     // Producer IDs should be retained.
-    let retained = producer_states(admin.as_ref(), &tp0).await;
-    assert!(
-        retained.as_ref().is_ok_and(|states| !states.is_empty()),
-        "expected the producer IDs to be retained, got {retained:?}"
-    );
+    //
+    // Deviation from Java's single `assertFalse(producerStates(admin).isEmpty())`
+    // (`ProducerIdExpirationTest.java:165-166`): the old producer id's entry
+    // expires ~10-10.5 s after the abort marker, and the two sends above are not
+    // flushed, so a single check can land in the gap between that expiry and the
+    // new records' append and see `Ok([])` — Java has the same race, it just
+    // reaches this line faster. Waiting (like `waitUntilTrue`) until a
+    // successful, non-empty result closes the gap without adding a `flush()`
+    // Java does not make.
+    test_utils::wait_until_true_with_timeout(
+        || async {
+            producer_states(admin.as_ref(), &tp0)
+                .await
+                .is_ok_and(|states| !states.is_empty())
+        },
+        "Producer IDs were not retained.",
+        test_utils::DEFAULT_MAX_WAIT_MS,
+        100,
+    )
+    .await;
 
     producer.commit_transaction().await.expect("commitTransaction");
 
