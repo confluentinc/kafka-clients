@@ -101,7 +101,6 @@ use crate::common::requests::{
     IncrementalAlterConfigsRequestBuilder, ListConfigResourcesRequestBuilder, ListGroupsRequestBuilder,
     MetadataRequestBuilder, RenewDelegationTokenRequestBuilder, RequestBuilder,
 };
-use crate::common::security::SecurityProtocol;
 use crate::common::security::auth::KafkaPrincipal;
 use crate::common::security::scram::internals::{ScramFormatter, ScramMechanism as InternalScramMechanism};
 use crate::common::security::token::delegation::{DelegationToken, TokenInformation};
@@ -279,8 +278,9 @@ impl KafkaAdminClient {
     /// Creates a network-backed admin client from configuration, spawning the
     /// background I/O task.
     ///
-    /// Mirrors `KafkaAdminClient.createInternal`. Phase 1 supports the PLAINTEXT
-    /// security protocol only.
+    /// Mirrors `KafkaAdminClient.createInternal`. Selects the channel builder
+    /// from `security.protocol` + `ssl.*` / `sasl.*` (PLAINTEXT / SSL /
+    /// SASL_PLAINTEXT / SASL_SSL); SASL mechanism PLAIN only.
     ///
     /// # Errors
     ///
@@ -327,10 +327,14 @@ impl KafkaAdminClient {
         let now = (time_provider)();
         metadata_manager.update(Cluster::bootstrap(&addresses), now);
 
+        // Selects the channel builder from `security.protocol` + `ssl.*` /
+        // `sasl.*` (PLAINTEXT / SSL / SASL_PLAINTEXT / SASL_SSL); SASL mechanism
+        // PLAIN only. Mirrors `ClientUtils.createChannelBuilder(config, time,
+        // logContext)` as used by `KafkaAdminClient.createInternal`.
         let channel_builder = ChannelBuilders::client_channel_builder(
-            SecurityProtocol::Plaintext,
-            None,
-            None,
+            config.security_protocol(),
+            Some(config.ssl_config()),
+            Some(config.sasl_config()),
             None,
             config.client_id(),
             log_context.clone(),
