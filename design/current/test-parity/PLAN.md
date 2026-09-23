@@ -195,3 +195,4 @@ null value as `b""` (Phase 2 / Critic 66).
 - Phase 3 / Actor 67: e3be241d (7 timestamp tests, native green). Critic 67: 2 findings (linger=MAX hangs gRPC arms; LogAppendTime needs 50ms skew slack) → fixed b12144f5; re-review clean. Phase 3 DONE.
 - Phase 4 / Actor 68: b151cc5e, eb51f2c0, ee3f602f (compression, failure-handling, non-blocking, max-request-size; 36 native producer tests green). Critic 68: clean. Phase 4 DONE. NOTE: local gRPC images predate a8205c5c — rebuild (make build-grpc-images) and re-run gRPC arms before merge.
 - Phase 5 / Actor 69: 69323353 (5 TransactionsTest fencing/state tests, green 3x; wait_for_partition_leaders moved to test_utils). Critic 69: clean. Phase 5 DONE.
+- Phase 6 / Actor 70: 3db40d8c (4 txn happy-path tests + listTransactions check; txn_single_broker moved to cluster_config). Critic 70: clean. Phase 6 DONE.
