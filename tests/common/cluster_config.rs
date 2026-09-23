@@ -142,6 +142,21 @@ pub fn authorizer_deny_reachable_single_broker() -> ClusterConfig {
     ClusterConfig::with_properties(props)
 }
 
+/// A single-broker cluster whose transaction-state log is replicated with a
+/// factor of 1, so the transaction coordinator is usable on one node (the
+/// defaults require three replicas).
+///
+/// Shared by the admin transaction RPC tests and the single-broker producer
+/// transaction translations (`ProducerIntegrationTest`,
+/// `TransactionsWithMaxInFlightOneTest`), which all key transaction state on
+/// per-test transactional ids and so can share one pooled container.
+pub fn txn_single_broker() -> ClusterConfig {
+    let mut props = BTreeMap::new();
+    props.insert("KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR".to_string(), "1".to_string());
+    props.insert("KAFKA_TRANSACTION_STATE_LOG_MIN_ISR".to_string(), "1".to_string());
+    ClusterConfig::with_properties(props)
+}
+
 pub fn kip848_3_broker(num_partitions: u16) -> ClusterConfig {
     let mut props = BTreeMap::new();
     props.insert(

@@ -36,6 +36,21 @@
 //! - `testFencingOnSend` → [`test_fencing_on_send`]
 //! - `testConsecutivelyRunInitTransactions` → [`test_consecutively_run_init_transactions`]
 //! - `testEmptyAbortAfterCommit` → [`test_empty_abort_after_commit`]
+//! - `testOffsetMetadataInSendOffsetsToTransaction` →
+//!   [`test_offset_metadata_in_send_offsets_to_transaction`]
+//!
+//! and from the Java `clients-integration-tests` module (AK 4.3.1):
+//!
+//! - `ProducerIntegrationTest.testTransactionWithAndWithoutSend` →
+//!   [`test_transaction_with_and_without_send`]
+//! - `ProducerIntegrationTest.testTransactionWithInvalidSendAndEndTxnRequestSent` →
+//!   [`test_transaction_with_invalid_send_and_end_txn_request_sent`]
+//! - `ProducerIntegrationTest.testTransactionWithSendOffset` → its
+//!   `listTransactions()` `COMPLETE_COMMIT` check is folded into
+//!   [`consume_transform_produce_with_offsets_inner`], which already covers the
+//!   rest of that scenario
+//! - `TransactionsWithMaxInFlightOneTest.testTransactionalProducerSingleBrokerMaxInFlightOne` →
+//!   [`test_transactional_producer_single_broker_max_in_flight_one`]
 //!
 //! # Why the four Phase-8 scenarios are not translations
 //!
@@ -75,6 +90,7 @@ use std::time::Instant;
 use confluent_kafka::admin::Admin;
 use confluent_kafka::admin::AdminClientConfig;
 use confluent_kafka::admin::KafkaAdminClient;
+use confluent_kafka::admin::TransactionState;
 use confluent_kafka::common::Error;
 use confluent_kafka::common::Errors;
 use confluent_kafka::common::KafkaFuture;
@@ -97,7 +113,7 @@ use confluent_kafka::producer::RecordMetadata;
 use confluent_kafka::producer::{ProducerRecord, ProducerRecordOptionsBuilder};
 
 use crate::common::backend_factory::ProducerBackendFactory;
-use crate::common::cluster_config::{ClusterConfig, kip848_3_broker};
+use crate::common::cluster_config::{ClusterConfig, kip848_3_broker, txn_single_broker};
 use crate::common::test_context::TestContext;
 use crate::common::test_utils;
 
@@ -585,6 +601,10 @@ async fn aborted_transaction_records_are_discarded_inner<F: ProducerBackendFacto
 /// what was consumed. The second is the half that only
 /// `send_offsets_to_transaction` can deliver — a plain `commit_sync` would also
 /// move it, but not atomically with the output records.
+///
+/// It also carries `ProducerIntegrationTest.testTransactionWithSendOffset`'s
+/// final check (`ProducerIntegrationTest.java:194-199`): the admin client
+/// eventually lists the transactional id in `COMPLETE_COMMIT`.
 async fn consume_transform_produce_with_offsets_inner<F: ProducerBackendFactory>(ctx: &mut TestContext, factory: &F) {
     let input_topic = ctx.topic("txn-ctp-input");
     let output_topic = ctx.topic("txn-ctp-output");
@@ -619,8 +639,9 @@ async fn consume_transform_produce_with_offsets_inner<F: ProducerBackendFactory>
     // with it. Only the transactional producer crosses the gRPC boundary; the
     // input transform-consumer (whose group_metadata() feeds
     // send_offsets_to_transaction) and every verification consumer stay native.
+    let txn_id = format!("{output_topic}-txn-id");
     let producer = factory
-        .create(make_txn_config(&producer_bootstrap, &format!("{output_topic}-txn-id")))
+        .create(make_txn_config(&producer_bootstrap, &txn_id))
         .await
         .expect("create transactional producer");
     producer.init_transactions().await.expect("initTransactions");
@@ -639,6 +660,31 @@ async fn consume_transform_produce_with_offsets_inner<F: ProducerBackendFactory>
         .await
         .expect("sendOffsetsToTransaction");
     producer.commit_transaction().await.expect("commitTransaction");
+
+    // Java `ProducerIntegrationTest.testTransactionWithSendOffset`
+    // (`ProducerIntegrationTest.java:194-199`): the committed transaction is
+    // eventually listed by the coordinator in `COMPLETE_COMMIT`. The admin client
+    // is native harness infrastructure, so this holds for every backend arm.
+    let admin = txn_test_admin(ctx);
+    test_utils::wait_until_true_with_timeout(
+        || {
+            let listing = admin.list_transactions().all();
+            let txn_id = txn_id.clone();
+            async move {
+                listing.get().await.is_ok_and(|listings| {
+                    listings
+                        .iter()
+                        .filter(|txn| txn.transactional_id() == txn_id)
+                        .any(|txn| txn.state() == TransactionState::CompleteCommit)
+                })
+            }
+        },
+        "transaction is not in COMPLETE_COMMIT state",
+        test_utils::DEFAULT_MAX_WAIT_MS,
+        test_utils::DEFAULT_PAUSE_MS,
+    )
+    .await;
+    admin.close().await;
 
     // The transformed records are visible to read_committed.
     let output_group = ctx.group_id("txn-ctp-output-verify");
@@ -1156,6 +1202,314 @@ async fn test_empty_abort_after_commit() {
         .abort_transaction()
         .await
         .expect("abortTransaction of an empty transaction");
+
+    producer.close().await.expect("producer close");
+    ctx.cleanup().await;
+}
+
+/// The consumed `committed` offset carries the leader epoch and metadata that
+/// `sendOffsetsToTransaction` committed.
+///
+/// Translates `TransactionsTest.testOffsetMetadataInSendOffsetsToTransaction`
+/// (`TransactionsTest.scala:445-470`), CONSUMER arm. Java's two
+/// `transactionalProducers` share the `"transactional-producer"` id
+/// (`TransactionsTest.scala:98-99`), so `producer2.initTransactions()` is what
+/// guarantees the first transaction has completed before the read-back.
+///
+/// `ConsumerGroupMetadata::new` is deprecated exactly as Java's constructor is;
+/// Java suppresses the warning with `@SuppressWarnings(Array("removal"))`.
+#[tokio::test]
+#[allow(deprecated)]
+async fn test_offset_metadata_in_send_offsets_to_transaction() {
+    let mut ctx = TestContext::new(cluster_config()).await;
+    let (topic1, _topic2) = create_txn_test_topics(&mut ctx).await;
+    let bootstrap = ctx.bootstrap_servers().to_string();
+    let tp = TopicPartition::new(topic1.clone(), 0);
+    let group_id = ctx.group_id("group");
+    let txn_id = ctx.group_id("transactional-producer");
+
+    let producer = create_transactional_producer(&bootstrap, &txn_id);
+    let mut consumer = create_read_committed_consumer(&bootstrap, &group_id);
+
+    consumer.subscribe_with_topics(vec![topic1.clone()]).await.expect("subscribe");
+
+    producer.init_transactions().await.expect("initTransactions");
+
+    producer.begin_transaction().expect("beginTransaction");
+    let offset_and_metadata =
+        OffsetAndMetadata::with_leader_epoch_metadata(110, Some(15), "some metadata").expect("valid offset");
+    producer
+        .send_offsets_to_transaction(
+            HashMap::from([(tp.clone(), offset_and_metadata.clone())]),
+            ConsumerGroupMetadata::new(group_id.clone()),
+        )
+        .await
+        .expect("sendOffsetsToTransaction");
+    producer.commit_transaction().await.expect("commitTransaction: ok");
+
+    // The call to commit the transaction may return before all markers are visible, so we initialize a second
+    // producer to ensure the transaction completes and the committed offsets are visible.
+    let producer2 = create_transactional_producer(&bootstrap, &txn_id);
+    producer2.init_transactions().await.expect("producer2.initTransactions");
+
+    // `TestUtils.waitUntilTrue(condition, msg)` with its defaults (15 s, 100 ms
+    // pause), inlined because the condition borrows the consumer mutably, which
+    // `test_utils::wait_until_true_with_timeout`'s `FnMut` closure cannot hand out.
+    let start = Instant::now();
+    loop {
+        let committed = consumer.committed(std::slice::from_ref(&tp)).await;
+        if committed.is_ok_and(|committed| committed.get(&tp) == Some(&offset_and_metadata)) {
+            break;
+        }
+        assert!(
+            start.elapsed() <= Duration::from_millis(test_utils::DEFAULT_MAX_WAIT_MS),
+            "cannot read committed offset"
+        );
+        tokio::time::sleep(Duration::from_millis(test_utils::DEFAULT_PAUSE_MS)).await;
+    }
+
+    consumer.close().await.expect("consumer close");
+    producer.close().await.expect("producer close");
+    producer2.close().await.expect("producer2 close");
+    ctx.cleanup().await;
+}
+
+// ---------------------------------------------------------------------------
+// ProducerIntegrationTest / TransactionsWithMaxInFlightOneTest translations
+// ---------------------------------------------------------------------------
+//
+// Both Java classes run on a single KRaft broker with the transaction-state log
+// at replication factor 1 (`ProducerIntegrationTest.java:62-68`,
+// `TransactionsWithMaxInFlightOneTest.java:53-68`); [`txn_single_broker`] is
+// that cluster. Deviations shared by these tests, each forced by the pooled
+// harness:
+//
+//   - Java's fixed topic names and transactional ids become per-test names
+//     (`ctx.topic` / `ctx.group_id`), because the cluster is pooled here.
+//   - Topics are created explicitly through the admin client and awaited until
+//     every partition has a leader. Java relies on auto-creation (`"test"`) or
+//     fires `createTopics` without awaiting it; neither is observable in the
+//     assertions.
+//   - The remaining broker overrides Java sets (`__transaction_state` /
+//     `__consumer_offsets` partition counts, auto-create disabled, controlled
+//     shutdown, abort-cleanup interval, ...) are not reproduced: none reaches an
+//     assertion here, and each would fork the pooled container.
+//   - `ProducerIntegrationTest` runs each test at `transaction.version` 0, 1 and
+//     2 (`@ClusterFeature`). The pooled `apache/kafka:4.2.0` brokers are
+//     formatted at the latest metadata version, which finalizes
+//     `transaction.version=2`, and the harness cannot re-format them at a lower
+//     feature level — so only the TV2 row is translated; TV0/TV1 are not
+//     reachable here.
+
+/// `ClusterInstance.producer(configs)` (`ClusterInstance.java:150-156`):
+/// `configs` plus byte-array serializers and the cluster's bootstrap servers.
+fn cluster_producer(bootstrap: &str, configs: &[(&str, &str)]) -> KafkaProducer<Vec<u8>, Vec<u8>> {
+    let mut props: HashMap<String, String> = configs
+        .iter()
+        .map(|(key, value)| (key.to_string(), value.to_string()))
+        .collect();
+    props
+        .entry("bootstrap.servers".to_string())
+        .or_insert_with(|| bootstrap.to_string());
+    KafkaProducer::new(
+        ProducerConfig::new(&props).expect("invalid producer config"),
+        Box::new(ByteArraySerializer),
+        Box::new(ByteArraySerializer),
+    )
+    .expect("failed to build a producer")
+}
+
+/// Creates `topic` on the single-broker cluster and waits until every partition
+/// has a leader (see the shared deviations above).
+async fn create_single_broker_topic(
+    ctx: &TestContext,
+    topic: &str,
+    num_partitions: i32,
+    topic_config: BTreeMap<String, String>,
+) {
+    let admin = txn_test_admin(ctx);
+    test_utils::create_topic_with_configs(admin.as_ref(), topic, num_partitions, 1, topic_config).await;
+    test_utils::wait_for_partition_leaders(admin.as_ref(), topic, 0..num_partitions).await;
+    admin.close().await;
+}
+
+/// A transaction with a send and an empty transaction both commit.
+///
+/// Translates `ProducerIntegrationTest.testTransactionWithAndWithoutSend`
+/// (`ProducerIntegrationTest.java:92-114`), TV2 row only (see above).
+#[tokio::test]
+async fn test_transaction_with_and_without_send() {
+    let mut ctx = TestContext::new(txn_single_broker()).await;
+    let topic = ctx.topic("test");
+    create_single_broker_topic(&ctx, &topic, 1, BTreeMap::new()).await;
+    let bootstrap = ctx.bootstrap_servers().to_string();
+    let txn_id = ctx.group_id("foobar");
+
+    let producer = cluster_producer(
+        &bootstrap,
+        &[
+            ("transactional.id", &txn_id),
+            ("client.id", "test"),
+            ("enable.idempotence", "true"),
+        ],
+    );
+    producer.init_transactions().await.expect("initTransactions");
+    producer.begin_transaction().expect("beginTransaction");
+    // Java does not await the record's future; the commit flushes it.
+    send_record(
+        &producer,
+        ProducerRecord::with_key(topic.clone(), Some(b"key".to_vec()), Some(b"value".to_vec())),
+    )
+    .await
+    .expect("send");
+    producer.commit_transaction().await.expect("commitTransaction with a send");
+
+    producer.begin_transaction().expect("beginTransaction");
+    producer.commit_transaction().await.expect("commitTransaction without a send");
+
+    producer.close().await.expect("producer close");
+    ctx.cleanup().await;
+}
+
+/// A record the broker rejects as too large fails with `RecordTooLargeException`,
+/// and the transaction can still be aborted (the `EndTxn` request is sent).
+///
+/// Translates `ProducerIntegrationTest.testTransactionWithInvalidSendAndEndTxnRequestSent`
+/// (`ProducerIntegrationTest.java:116-146`), TV2 row only (see above). Java asserts
+/// only the cause's class; the message is broker-generated text that embeds the
+/// batch size, so only the variant is asserted here too.
+#[tokio::test]
+async fn test_transaction_with_invalid_send_and_end_txn_request_sent() {
+    let mut ctx = TestContext::new(txn_single_broker()).await;
+    let topic = ctx.topic("foobar");
+    create_single_broker_topic(
+        &ctx,
+        &topic,
+        1,
+        BTreeMap::from([("max.message.bytes".to_string(), "100".to_string())]),
+    )
+    .await;
+    let bootstrap = ctx.bootstrap_servers().to_string();
+    let txn_id = ctx.group_id("test-txn");
+
+    let producer = cluster_producer(
+        &bootstrap,
+        &[
+            ("transactional.id", &txn_id),
+            ("client.id", "test"),
+            ("enable.idempotence", "true"),
+        ],
+    );
+    producer.init_transactions().await.expect("initTransactions");
+    producer.begin_transaction().expect("beginTransaction");
+    let error = send_record(
+        &producer,
+        ProducerRecord::with_key(topic.clone(), Some(vec![0u8; 100]), Some(vec![0u8; 100])),
+    )
+    .await
+    .expect("send is accepted; the broker rejects the batch")
+    .get()
+    .await
+    .expect_err("a record larger than max.message.bytes must fail");
+    assert!(
+        matches!(error, Error::RecordTooLarge(_)),
+        "expected RecordTooLarge, got {error:?}"
+    );
+
+    producer.abort_transaction().await.expect("abortTransaction");
+
+    producer.close().await.expect("producer close");
+    ctx.cleanup().await;
+}
+
+/// With `max.in.flight.requests.per.connection=1` on a single broker, multiple
+/// transactional requests queue on one connection; an aborted and a committed
+/// transaction still yield exactly the committed records.
+///
+/// Translates `TransactionsWithMaxInFlightOneTest.testTransactionalProducerSingleBrokerMaxInFlightOne`
+/// (`TransactionsWithMaxInFlightOneTest.java:76-125`). Java loops over
+/// `supportedGroupProtocols()`; only the CONSUMER arm is translated
+/// (`consumer-threading.md` §20).
+#[tokio::test]
+async fn test_transactional_producer_single_broker_max_in_flight_one() {
+    let mut ctx = TestContext::new(txn_single_broker()).await;
+    // We want to test with one broker to verify multiple requests queued on a connection
+    assert_eq!(1, txn_single_broker().brokers);
+
+    let topic1 = ctx.topic("topic1");
+    let topic2 = ctx.topic("topic2");
+    create_single_broker_topic(&ctx, &topic1, 4, BTreeMap::new()).await;
+    create_single_broker_topic(&ctx, &topic2, 4, BTreeMap::new()).await;
+    let bootstrap = ctx.bootstrap_servers().to_string();
+    let txn_id = ctx.group_id("transactional-producer");
+
+    let producer = cluster_producer(
+        &bootstrap,
+        &[
+            ("transactional.id", &txn_id),
+            ("max.in.flight.requests.per.connection", "1"),
+        ],
+    );
+    producer.init_transactions().await.expect("initTransactions");
+
+    producer.begin_transaction().expect("beginTransaction");
+    for (topic, value) in [(&topic2, "2"), (&topic1, "4")] {
+        send_record(
+            &producer,
+            producer_record_with_expected_transaction_status(topic, None, value, value, false),
+        )
+        .await
+        .expect("send");
+    }
+    producer.flush().await.expect("flush");
+    producer.abort_transaction().await.expect("abortTransaction");
+
+    producer.begin_transaction().expect("beginTransaction");
+    for (topic, value) in [(&topic1, "1"), (&topic2, "3")] {
+        send_record(
+            &producer,
+            producer_record_with_expected_transaction_status(topic, None, value, value, true),
+        )
+        .await
+        .expect("send");
+    }
+    producer.commit_transaction().await.expect("commitTransaction");
+
+    let mut consumer_records: Vec<ConsumerRecord<Vec<u8>, Vec<u8>>> = Vec::new();
+    {
+        // `ClusterInstance.consumer` defaults plus Java's overrides:
+        // `group.protocol=CONSUMER`, `enable.auto.commit=false`,
+        // `isolation.level=read_committed`.
+        let mut consumer = assigned_consumer(&bootstrap, &ctx.group_id("group"), "read_committed");
+        consumer
+            .subscribe_with_topics(vec![topic1.clone(), topic2.clone()])
+            .await
+            .expect("subscribe");
+        let start = Instant::now();
+        loop {
+            let records = consumer.poll(Duration::from_millis(100)).await.expect("poll");
+            consumer_records.extend(records);
+            if consumer_records.len() == 2 {
+                break;
+            }
+            assert!(
+                start.elapsed() <= Duration::from_millis(15_000),
+                "Consumer with protocol CONSUMER should consume 2 records, but get {}",
+                consumer_records.len()
+            );
+            tokio::time::sleep(Duration::from_millis(test_utils::DEFAULT_PAUSE_MS)).await;
+        }
+        consumer.close().await.expect("consumer close");
+    }
+    for record in &consumer_records {
+        let headers = record.headers().headers(TRANSACTION_STATUS_KEY);
+        let header = headers.first().expect("the record carries a transactionStatus header");
+        assert_eq!(
+            Some(COMMITTED_VALUE),
+            header.value(),
+            "Record does not have the expected header value"
+        );
+    }
 
     producer.close().await.expect("producer close");
     ctx.cleanup().await;

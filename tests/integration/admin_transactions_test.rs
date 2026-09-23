@@ -91,19 +91,9 @@ use confluent_kafka::common::TopicPartition;
 
 use crate::common::admin_backend::{AdminBackend, Outcomes, admin_for, all_of_exactly, create_topic};
 use crate::common::backend_factory::AdminBackendFactory;
-use crate::common::cluster_config::ClusterConfig;
+use crate::common::cluster_config::{ClusterConfig, txn_single_broker};
 use crate::common::test_context::TestContext;
 use crate::multilanguage_admin_test;
-
-/// A single-broker cluster whose transaction-state log is replicated with a
-/// factor of 1, so the transaction coordinator is usable on one node (the
-/// defaults require three replicas).
-fn txn_single_broker() -> ClusterConfig {
-    let mut props = BTreeMap::new();
-    props.insert("KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR".to_string(), "1".to_string());
-    props.insert("KAFKA_TRANSACTION_STATE_LOG_MIN_ISR".to_string(), "1".to_string());
-    ClusterConfig::with_properties(props)
-}
 
 /// A transaction-capable single-broker cluster that is *isolated* from the one
 /// returned by [`txn_single_broker`].
