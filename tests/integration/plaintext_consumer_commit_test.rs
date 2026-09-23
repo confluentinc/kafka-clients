@@ -14,7 +14,8 @@
 
 //! Integration tests translated from
 //! `kafka/clients/clients-integration-tests/src/test/java/org/apache/kafka/clients/consumer/PlaintextConsumerCommitTest.java`
-//! (Apache Kafka 4.2).
+//! (Apache Kafka 4.2; the two tests under "Added in Apache Kafka 4.3.1" follow
+//! the 4.3.1 source and cite its line numbers).
 //!
 //! These exercise the consumer **commit path**: auto-commit-on-close,
 //! commit metadata round-trip, async commit + callback success counts,
@@ -46,6 +47,13 @@
 //!   → `test_commit_async_completed_before_consumer_closes`
 //! - `testCommitAsyncCompletedBeforeCommitSyncReturns` (line 519)
 //!   → `test_commit_async_completed_before_commit_sync_returns`
+//!
+//! # Added in Apache Kafka 4.3.1
+//!
+//! - `testAsyncConsumerNoCommittedOffsets` (line 187)
+//!   → `test_async_consumer_no_committed_offsets`
+//! - `testAsyncConsumerCommittedDeletedTopic` (line 225, KAFKA-20165)
+//!   → `test_async_consumer_committed_deleted_topic`
 //!
 //! # `#[ignore]`-gated translation
 //!
@@ -85,6 +93,8 @@
 //! - SKIP: `testClassicConsumerAutoCommitOnRebalance` — classic-protocol-only
 //! - SKIP: `testClassicConsumerSubscribeAndCommitSync` — classic-protocol-only
 //! - SKIP: `testClassicConsumerPositionAndCommit` — classic-protocol-only
+//! - SKIP: `testClassicConsumerNoCommittedOffsets` — classic-protocol-only
+//! - SKIP: `testClassicConsumerCommittedDeletedTopic` — classic-protocol-only
 
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -97,7 +107,11 @@ use std::time::Instant;
 
 use async_trait::async_trait;
 
+use confluent_kafka::admin::Admin;
+use confluent_kafka::admin::AdminClientConfig;
+use confluent_kafka::admin::KafkaAdminClient;
 use confluent_kafka::common::Error;
+use confluent_kafka::common::TopicCollection;
 use confluent_kafka::common::TopicPartition;
 use confluent_kafka::common::serialization::ByteArraySerializer;
 use confluent_kafka::common::serialization::Deserializer;
@@ -113,6 +127,7 @@ use confluent_kafka::producer::ProducerRecord;
 
 use crate::common::cluster_config::{ClusterConfig, kip848_3_broker};
 use crate::common::test_context::TestContext;
+use crate::common::test_utils;
 
 // Type alias matching the bytes-typed `Consumer` trait object returned
 // by `KafkaConsumer::new::<Vec<u8>, Vec<u8>>`. Used in helper signatures so
@@ -1169,4 +1184,152 @@ async fn test_commit_async_fails_when_coordinator_unavailable_during_close() {
         "Failed to commit offsets: Coordinator unknown and consumer is closing"
     );
     assert_eq!(cb.error_count(), 1);
+}
+
+// ── Tests added in Apache Kafka 4.3.1 ─────────────────────────────────
+
+/// Builds an admin client for topic provisioning / deletion. Mirrors the
+/// per-file `admin_for` helper the other integration tests use (Java's
+/// `cluster.admin()`).
+fn admin_for(bootstrap_servers: &str) -> Box<dyn Admin> {
+    let props = HashMap::from([
+        ("bootstrap.servers".to_string(), bootstrap_servers.to_string()),
+        ("client.id".to_string(), "commit-test-admin".to_string()),
+        ("request.timeout.ms".to_string(), "30000".to_string()),
+        ("default.api.timeout.ms".to_string(), "30000".to_string()),
+    ]);
+    let config = AdminClientConfig::new(&props).expect("valid admin config");
+    Box::new(KafkaAdminClient::new(config).expect("admin client"))
+}
+
+/// Translates Java's `testAsyncConsumerNoCommittedOffsets`
+/// (`PlaintextConsumerCommitTest.java:187`, body `testNoCommittedOffsets` :191).
+///
+/// Fetches committed offsets for three partitions: `tp` (committed), `tp1`
+/// (exists, never committed) and `tp2` (partition 2 of a 2-partition topic —
+/// does not exist).
+///
+/// **Deviation (representation only):** Java asserts `committed.size() == 3`
+/// with `null` values for `tp1`/`tp2`. The Rust `committed` API returns
+/// `HashMap<TopicPartition, OffsetAndMetadata>`, where "no committed offset"
+/// is represented by *absence* (the `null`s of Java's
+/// `toOffsetMapWithNulls()` are stripped in
+/// `ApplicationEventProcessor::process_fetch_committed_offsets`). So the
+/// Rust assertions are: exactly one entry (`tp`), and `tp1`/`tp2` absent —
+/// the same observable contract `committed.get(tpN) == null` checks in Java.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_async_consumer_no_committed_offsets() {
+    let mut ctx = TestContext::new(cluster_config_with_kip848_3brokers()).await;
+    let topic = ctx.topic("topic");
+    let group_id = ctx.group_id("g_no_committed_offsets");
+    let tp = TopicPartition::new(topic.clone(), 0);
+    let tp1 = TopicPartition::new(topic.clone(), 1);
+
+    // Java `@BeforeEach`: `cluster.createTopic(topic, 2, BROKER_COUNT)`.
+    let admin = admin_for(ctx.bootstrap_servers());
+    test_utils::create_topic(admin.as_ref(), &topic, 2, 3).await;
+    admin.close_with_timeout(Duration::from_secs(5)).await;
+
+    // Java: `createConsumer(groupProtocol, true)`.
+    let mut consumer = new_bytes_consumer(make_consumer_config_bytes(ctx.bootstrap_servers(), &group_id, true, &[]));
+    consumer.assign(vec![tp.clone()]).await.expect("assign should succeed");
+
+    // commit for one partition
+    let metadata = OffsetAndMetadata::with_leader_epoch_metadata(5, Some(15), "foo").expect("OffsetAndMetadata");
+    consumer
+        .commit_sync_with_offsets(HashMap::from([(tp.clone(), metadata.clone())]))
+        .await
+        .expect("commit_sync_with_offsets should succeed");
+
+    let tp2 = TopicPartition::new(topic.clone(), 2);
+    // fetch offset for three partitions:
+    // 1. tp: exists and has committed offset
+    // 2. tp1: exists but has NO committed offset
+    // 3. tp2: does not exist
+    let committed = consumer
+        .committed(&[tp.clone(), tp1.clone(), tp2.clone()])
+        .await
+        .expect("committed should succeed");
+    // Java: `assertEquals(3, committed.size())` — see the deviation note above.
+    assert_eq!(1, committed.len(), "unexpected committed map: {committed:?}");
+    assert_eq!(Some(&metadata), committed.get(&tp));
+    assert_eq!(None, committed.get(&tp1));
+    assert_eq!(None, committed.get(&tp2));
+
+    consumer.close().await.expect("consumer close should succeed");
+}
+
+/// Translates Java's `testAsyncConsumerCommittedDeletedTopic`
+/// (`PlaintextConsumerCommitTest.java:225`, body
+/// `testConsumerCommittedDeletedTopic` :242) — validates KAFKA-20165.
+///
+/// Calling `committed()` for a deleted topic eventually returns "no offset"
+/// (Java `null`, Rust absent entry) for the partition: the group coordinator
+/// answers `UNKNOWN_TOPIC_ID` for the deleted topic when the client uses topic
+/// ids, which the consumer handles as a retriable partition error and reports
+/// as no committed offset.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_async_consumer_committed_deleted_topic() {
+    let mut ctx = TestContext::new(cluster_config_with_kip848_3brokers()).await;
+    let topic_to_delete = ctx.topic("topic-to-delete");
+    let group_id = ctx.group_id("g_committed_deleted_topic");
+    // Java: `cluster.createTopic(topicToDelete, 1, (short) BROKER_COUNT)`.
+    let admin = admin_for(ctx.bootstrap_servers());
+    test_utils::create_topic(admin.as_ref(), &topic_to_delete, 1, 3).await;
+    let tp_to_delete = TopicPartition::new(topic_to_delete.clone(), 0);
+
+    // Java: `createConsumer(groupProtocol, false)`.
+    let mut consumer = new_bytes_consumer(make_consumer_config_bytes(ctx.bootstrap_servers(), &group_id, false, &[]));
+    consumer
+        .assign(vec![tp_to_delete.clone()])
+        .await
+        .expect("assign should succeed");
+
+    // Commit an offset to ensure the consumer has the topic ID cached and there's data to fetch
+    consumer
+        .commit_sync_with_offsets(HashMap::from([(
+            tp_to_delete.clone(),
+            OffsetAndMetadata::new(0).expect("OffsetAndMetadata"),
+        )]))
+        .await
+        .expect("commit_sync_with_offsets should succeed");
+
+    // Verify the commit was successful
+    let committed = consumer
+        .committed(std::slice::from_ref(&tp_to_delete))
+        .await
+        .expect("committed should succeed");
+    assert_eq!(0, committed.get(&tp_to_delete).expect("committed entry present").offset());
+
+    // Delete the topic
+    admin
+        .delete_topics(TopicCollection::of_topic_names(vec![topic_to_delete.clone()]))
+        .all()
+        .get()
+        .await
+        .expect("delete_topics should succeed");
+
+    // Eventually, the response should return null for the deleted topic partition.
+    // Java: `TestUtils.waitForCondition(..., 10000, ...)`, which retries on both
+    // a false condition and an exception thrown by `committed(...)`.
+    let expected_end = Instant::now() + Duration::from_millis(10_000);
+    loop {
+        let failure = match consumer
+            .committed_with_timeout(std::slice::from_ref(&tp_to_delete), Duration::from_millis(5000))
+            .await
+        {
+            Ok(committed) if !committed.contains_key(&tp_to_delete) => break,
+            Ok(committed) => format!(
+                "Condition not met within timeout 10000. Expected null for deleted topic partition (got {committed:?})"
+            ),
+            Err(err) => format!("committed() failed: {err}"),
+        };
+        if Instant::now() >= expected_end {
+            panic!("Assertion failed after 10000ms: {failure}");
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    consumer.close().await.expect("consumer close should succeed");
+    admin.close_with_timeout(Duration::from_secs(5)).await;
 }

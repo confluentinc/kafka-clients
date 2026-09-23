@@ -48,9 +48,14 @@
 //! - `testAsyncAssignAndRetrievingCommittedOffsetsMultipleTimes`
 //!   → `test_async_assign_and_retrieving_committed_offsets_multiple_times`
 //!
+//! # Added in Apache Kafka 4.3.1
+//!
+//! - `testAsyncPollAfterTopicDeleted` (4.3.1 line 304, KAFKA-20165)
+//!   → `test_async_poll_after_topic_deleted`
+//!
 //! # SKIPped methods
 //!
-//! The 8 `testClassic*` twin methods are SKIPped — the project targets
+//! The 9 `testClassic*` twin methods are SKIPped — the project targets
 //! KIP-848 only per `.claude/rules/consumer-threading.md` §20. They are
 //! enumerated here for traceability:
 //!
@@ -62,6 +67,7 @@
 //! - SKIP: `testClassicAssignAndFetchCommittedOffsets` — classic-protocol-only
 //! - SKIP: `testClassicAssignAndConsumeFromCommittedOffsets` — classic-protocol-only
 //! - SKIP: `testClassicAssignAndRetrievingCommittedOffsetsMultipleTimes` — classic-protocol-only
+//! - SKIP: `testClassicPollAfterTopicDeleted` — classic-protocol-only
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -73,7 +79,11 @@ use std::time::Instant;
 
 use async_trait::async_trait;
 
+use confluent_kafka::admin::Admin;
+use confluent_kafka::admin::AdminClientConfig;
+use confluent_kafka::admin::KafkaAdminClient;
 use confluent_kafka::common::Error;
+use confluent_kafka::common::TopicCollection;
 use confluent_kafka::common::TopicPartition;
 use confluent_kafka::common::record::TimestampType;
 use confluent_kafka::common::serialization::ByteArraySerializer;
@@ -90,6 +100,7 @@ use confluent_kafka::producer::ProducerRecord;
 
 use crate::common::cluster_config::{ClusterConfig, kip848_3_broker};
 use crate::common::test_context::TestContext;
+use crate::common::test_utils;
 
 // Type alias matching the bytes-typed `Consumer` trait object returned
 // by `KafkaConsumer::new::<Vec<u8>, Vec<u8>>`. Used in helper signatures so
@@ -937,6 +948,117 @@ async fn test_async_assign_and_retrieving_committed_offsets_multiple_times() {
     );
 
     consumer.close().await.expect("consumer close should succeed");
+}
+
+/// Translates Java's `testAsyncPollAfterTopicDeleted`
+/// (`PlaintextConsumerAssignTest.java:304`, body `testPollAfterTopicDeleted`
+/// :317) — validates KAFKA-20165.
+///
+/// `poll()` must not fail to retrieve committed offsets after the assigned
+/// topic is deleted: the consumer still has the topic id cached, so the
+/// OffsetFetch it issues on the re-assignment gets `UNKNOWN_TOPIC_ID`, which
+/// it must treat as a retriable partition error and recover from.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_async_poll_after_topic_deleted() {
+    let mut ctx = TestContext::new(cluster_config_with_kip848_3brokers()).await;
+    let topic_to_delete = ctx.topic("topic-to-delete-assign");
+    // Java: `GROUP_ID_CONFIG, "test-group"` (namespaced per test run here).
+    let group_id = ctx.group_id("test-group");
+
+    // Java: `clusterInstance.createTopic(topicToDelete, 1, (short) BROKER_COUNT)`.
+    let admin = admin_for(ctx.bootstrap_servers());
+    test_utils::create_topic(admin.as_ref(), &topic_to_delete, 1, 3).await;
+    let tp_to_delete = TopicPartition::new(topic_to_delete.clone(), 0);
+
+    let num_records: usize = 10;
+    let starting_timestamp = current_time_ms();
+
+    // Java: `clusterInstance.consumer(Map.of(GROUP_PROTOCOL_CONFIG, ...,
+    // GROUP_ID_CONFIG, "test-group", AUTO_OFFSET_RESET_CONFIG, "earliest"))`.
+    // Unlike this file's `make_consumer_config_bytes`, Java does NOT disable
+    // auto-commit here, so `enable.auto.commit` is left at its default (true).
+    let props = HashMap::from([
+        ("bootstrap.servers".to_string(), ctx.bootstrap_servers().to_string()),
+        ("group.protocol".to_string(), "consumer".to_string()),
+        ("group.id".to_string(), group_id.clone()),
+        ("auto.offset.reset".to_string(), "earliest".to_string()),
+        ("client.id".to_string(), "integration-test-consumer".to_string()),
+    ]);
+    let mut consumer = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
+        ConsumerConfig::new(&props).expect("invalid test config"),
+        Box::new(ByteArrayDeserializer),
+        Box::new(ByteArrayDeserializer),
+    )
+    .expect("KafkaConsumer::new should succeed");
+
+    // Send records and consume them (this caches the topic ID in the consumer)
+    send_records_bytes(ctx.bootstrap_servers(), &tp_to_delete, num_records, starting_timestamp).await;
+    consumer
+        .assign(vec![tp_to_delete.clone()])
+        .await
+        .expect("assign should succeed");
+    consumer
+        .seek_with_offset(tp_to_delete.clone(), 0)
+        .await
+        .expect("seek should succeed");
+    consume_and_verify_records_bytes(consumer.as_mut(), &tp_to_delete, num_records, 0, 0, starting_timestamp).await;
+    consumer.commit_sync().await.expect("commit_sync should succeed");
+
+    // Delete the topic and wait for deletion to propagate to metadata
+    admin
+        .delete_topics(TopicCollection::of_topic_names(vec![topic_to_delete.clone()]))
+        .all()
+        .get()
+        .await
+        .expect("delete_topics should succeed");
+    test_utils::wait_until_true_with_timeout(
+        || async {
+            // Java's `waitForCondition` retries when `listTopics()` throws;
+            // an error here is treated as "not yet" for the same reason.
+            match admin.list_topics().names().get().await {
+                Ok(names) => !names.contains(&topic_to_delete),
+                Err(_) => false,
+            }
+        },
+        "Condition not met within timeout 10000. Topic should be removed from metadata",
+        10_000,
+        test_utils::DEFAULT_PAUSE_MS,
+    )
+    .await;
+
+    // Change assignment to force the consumer to fetch committed offsets on next poll()
+    // The consumer still has the topic ID cached, so it will use version 10+
+    // and get UNKNOWN_TOPIC_ID from the broker
+    consumer.unsubscribe().await.expect("unsubscribe should succeed");
+    consumer
+        .assign(vec![tp_to_delete.clone()])
+        .await
+        .expect("assign should succeed");
+
+    // poll() should not throw - internally fetches committed offsets for deleted topic and recovers
+    let result = consumer.poll(Duration::from_millis(5000)).await;
+    assert!(
+        result.is_ok(),
+        "poll() after topic deletion should not fail: {:?}",
+        result.err()
+    );
+
+    consumer.close().await.expect("consumer close should succeed");
+    admin.close_with_timeout(Duration::from_secs(5)).await;
+}
+
+/// Builds an admin client for topic provisioning / deletion (Java's
+/// `clusterInstance.admin()`). Mirrors the per-file `admin_for` helper the
+/// other integration tests use.
+fn admin_for(bootstrap_servers: &str) -> Box<dyn Admin> {
+    let props = HashMap::from([
+        ("bootstrap.servers".to_string(), bootstrap_servers.to_string()),
+        ("client.id".to_string(), "assign-test-admin".to_string()),
+        ("request.timeout.ms".to_string(), "30000".to_string()),
+        ("default.api.timeout.ms".to_string(), "30000".to_string()),
+    ]);
+    let config = AdminClientConfig::new(&props).expect("valid admin config");
+    Box::new(KafkaAdminClient::new(config).expect("admin client"))
 }
 
 // ── Local utilities ────────────────────────────────────────────────────
