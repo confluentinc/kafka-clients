@@ -192,3 +192,4 @@ null value as `b""` (Phase 2 / Critic 66).
 - Phase 1 / Critic 65: 1 finding (same missing wake in commit retry drivers) → fixed in f2f5d080; re-review clean. Phase 1 DONE.
 - Phase 2 / Actor 66: 8135b2ce + 5e059541 (6 tests, native green; harness waits for all partition leaders). Critic 66: 1 finding (gRPC arms: sizes -1, null value) → fixing.
 - Phase 2: fixup bbd0ff4f (gRPC-arm gating); Critic 66 re-review clean. Phase 2 DONE.
+- Phase 3 / Actor 67: e3be241d (7 timestamp tests, native green). Critic 67: 2 findings (linger=MAX hangs gRPC arms; LogAppendTime needs 50ms skew slack) → fixed b12144f5; re-review clean. Phase 3 DONE.
