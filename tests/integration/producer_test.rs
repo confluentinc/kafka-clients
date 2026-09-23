@@ -381,7 +381,15 @@ struct SendOffsetCallbackState {
     failures: Vec<String>,
 }
 
-fn send_offset_callback(state: Arc<Mutex<SendOffsetCallbackState>>, topic: String, partition: i32) -> Callback {
+/// `check_serialized_sizes` gates the size assertions (and the null-value
+/// check derived from them) to backends that report real serialized sizes; see
+/// [`send_offset_inner`] for the binding gap.
+fn send_offset_callback(
+    state: Arc<Mutex<SendOffsetCallbackState>>,
+    topic: String,
+    partition: i32,
+    check_serialized_sizes: bool,
+) -> Callback {
     Box::new(move |metadata, error| {
         let mut st = state.lock().unwrap();
         st.invocations += 1;
@@ -411,11 +419,14 @@ fn send_offset_callback(state: Arc<Mutex<SendOffsetCallbackState>>, topic: Strin
         let value_len = "value".len() as i32;
         let size_ok = match offset {
             0 => m.serialized_key_size() + m.serialized_value_size() == key_len + value_len,
-            1 => m.serialized_key_size() == key_len,
+            // Java checks only the key size here. The value size is also checked
+            // (-1 means a null value) because it is the only observable proof that
+            // record1 really was sent with a null value, not an empty one.
+            1 => m.serialized_key_size() == key_len && m.serialized_value_size() == -1,
             2 => m.serialized_value_size() == value_len,
             _ => m.serialized_value_size() > 0,
         };
-        if !size_ok {
+        if check_serialized_sizes && !size_ok {
             st.failures.push(format!(
                 "offset {offset}: unexpected serialized sizes key={} value={}",
                 m.serialized_key_size(),
@@ -445,7 +456,22 @@ async fn send_offset_inner<F: ProducerBackendFactory>(ctx: &mut TestContext, fac
         .expect("Failed to create producer");
     let partition = 0;
     let state = Arc::new(Mutex::new(SendOffsetCallbackState::default()));
-    let callback = || Some(send_offset_callback(state.clone(), topic.clone(), partition));
+    // Binding gap: both gRPC servers hardcode the serialized sizes in the
+    // returned metadata to -1 (`bindings/python/grpc_translate.py`
+    // `_record_metadata_to_proto`, `bindings/c/grpc_server/server.cc` ~704), and
+    // the Python servers turn an absent value into `b""`
+    // (`_proto_to_producer_record`), so record1 is not a null-value send there.
+    // The size and null-value checks therefore run only on the native backend.
+    // Everything else runs on every backend.
+    let check_serialized_sizes = factory.name() == "rust";
+    let callback = || {
+        Some(send_offset_callback(
+            state.clone(),
+            topic.clone(),
+            partition,
+            check_serialized_sizes,
+        ))
+    };
 
     let admin = send_test_admin(ctx);
     create_topic_with_admin(admin.as_ref(), &topic, 1, 2).await;
