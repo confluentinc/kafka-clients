@@ -2193,6 +2193,10 @@ static void test_mock_admin_describe_log_dirs(void) {
     /* The mock reports no volume sizes, i.e. Java's empty OptionalLong. */
     TEST_ASSERT_EQUAL_INT64(-1, kafka_admin_LogDirDescription_total_bytes(dir));
     TEST_ASSERT_EQUAL_INT64(-1, kafka_admin_LogDirDescription_usable_bytes(dir));
+    /* KIP-1066 isCordoned(): the mock never cordons a dir, mirroring Java's
+     * MockAdminClient, so the seeded value is false. This still exercises the
+     * exported C ABI symbol end to end. */
+    TEST_ASSERT_FALSE(kafka_admin_LogDirDescription_is_cordoned(dir));
     TEST_ASSERT_EQUAL_INT32(2, kafka_admin_LogDirDescription_replica_count(dir));
     /* Replicas are sorted by (topic, partition). */
     TEST_ASSERT_EQUAL_STRING("ld-topic", kafka_admin_LogDirDescription_replica_topic(dir, 0));

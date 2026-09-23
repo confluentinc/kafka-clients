@@ -4811,7 +4811,7 @@ static PyObject* py_ListClientMetricsResourcesResult_drain(PyObject* self, PyObj
     return out;
 }
 
-// (error, total_bytes, usable_bytes, [(topic, partition, size, offset_lag, is_future)])
+// (error, total_bytes, usable_bytes, is_cordoned, [(topic, partition, size, offset_lag, is_future)])
 static PyObject* log_dir_description_to_py(const kafka_admin_LogDirDescription_t* dir) {
     int32_t n = kafka_admin_LogDirDescription_replica_count(dir);
     PyObject* replicas = PyList_New(n < 0 ? 0 : n);
@@ -4829,9 +4829,14 @@ static PyObject* log_dir_description_to_py(const kafka_admin_LogDirDescription_t
     }
     PyObject* err = borrowed_error_to_py(kafka_admin_LogDirDescription_error(dir));
     if (err == NULL) { Py_DECREF(replicas); return NULL; }
-    return Py_BuildValue("(NLLN)", err,
+    // KIP-1066 isCordoned(): a real Python bool, not a 0/1 int.
+    PyObject* cordoned = PyBool_FromLong(
+        kafka_admin_LogDirDescription_is_cordoned(dir) ? 1 : 0);
+    if (cordoned == NULL) { Py_DECREF(replicas); Py_DECREF(err); return NULL; }
+    return Py_BuildValue("(NLLNN)", err,
                          (long long)kafka_admin_LogDirDescription_total_bytes(dir),
                          (long long)kafka_admin_LogDirDescription_usable_bytes(dir),
+                         cordoned,
                          replicas);
 }
 

@@ -1227,13 +1227,15 @@ def test_to_full_config_entry_preserves_nulls_and_empty_synonyms():
 
 
 def test_to_log_dir_description_carries_error_and_volume_bytes():
+    # The 4th tuple field is KIP-1066 is_cordoned (finding 2).
     description = _to_log_dir_description(
-        ((KAFKA_STORAGE_ERROR, "offline", 0, 0), 2000, 1000,
+        ((KAFKA_STORAGE_ERROR, "offline", 0, 0), 2000, 1000, True,
          [("t", 0, 100, 5, 0), ("t", 1, 200, 0, 1)]))
     assert isinstance(description.error, KafkaError)
     assert description.error.code == KAFKA_STORAGE_ERROR
     assert description.total_bytes == 2000
     assert description.usable_bytes == 1000
+    assert description.is_cordoned is True
     assert description.replica_infos[("t", 0)].size == 100
     assert description.replica_infos[("t", 0)].offset_lag == 5
     assert description.replica_infos[("t", 0)].is_future is False
@@ -1242,10 +1244,12 @@ def test_to_log_dir_description_carries_error_and_volume_bytes():
 
 def test_to_log_dir_description_maps_unknown_volume_bytes_to_none():
     """-1 is the wire's UNKNOWN_VOLUME_BYTES, i.e. Java's empty OptionalLong."""
-    description = _to_log_dir_description((None, -1, -1, []))
+    description = _to_log_dir_description((None, -1, -1, False, []))
     assert description.error is None
     assert description.total_bytes is None
     assert description.usable_bytes is None
+    # KIP-1066 is_cordoned defaults false when the dir is not cordoned.
+    assert description.is_cordoned is False
     assert description.replica_infos == {}
 
 

@@ -491,15 +491,18 @@ class LogDirDescription:
     distinct from a per-broker failure, which appears as a :class:`KafkaError`
     *instead of* this object. ``total_bytes`` / ``usable_bytes`` are ``None``
     when the broker did not report them (Java's empty ``OptionalLong``).
+    ``is_cordoned`` is Java's ``isCordoned()`` (KIP-1066): whether an operator
+    has marked this directory so the broker stops placing new partitions on it.
     ``replica_infos`` is keyed by ``(topic, partition)``.
     """
 
-    __slots__ = ("error", "total_bytes", "usable_bytes", "replica_infos")
+    __slots__ = ("error", "total_bytes", "usable_bytes", "is_cordoned", "replica_infos")
 
-    def __init__(self, error, total_bytes, usable_bytes, replica_infos):
+    def __init__(self, error, total_bytes, usable_bytes, replica_infos, is_cordoned=False):
         self.error = error
         self.total_bytes = total_bytes
         self.usable_bytes = usable_bytes
+        self.is_cordoned = is_cordoned
         self.replica_infos = replica_infos
 
     def __repr__(self):
@@ -2010,8 +2013,9 @@ def _to_client_metrics_resources(raw):
 
 
 def _to_log_dir_description(raw):
-    """(error, total_bytes, usable_bytes, [replica]) -> LogDirDescription"""
-    error, total_bytes, usable_bytes, replicas = raw
+    """(error, total_bytes, usable_bytes, is_cordoned, [replica])
+    -> LogDirDescription"""
+    error, total_bytes, usable_bytes, is_cordoned, replicas = raw
     # -1 is the wire's UNKNOWN_VOLUME_BYTES, i.e. Java's empty OptionalLong.
     return LogDirDescription(
         _to_error(error),
@@ -2019,6 +2023,7 @@ def _to_log_dir_description(raw):
         None if usable_bytes < 0 else usable_bytes,
         {(topic, partition): ReplicaInfo(size, offset_lag, bool(is_future))
          for topic, partition, size, offset_lag, is_future in replicas},
+        is_cordoned,
     )
 
 

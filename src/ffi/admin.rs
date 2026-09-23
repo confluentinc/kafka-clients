@@ -4856,6 +4856,8 @@ struct LogDirDescriptionInner {
     error: Option<ErrorInner>,
     total_bytes: i64,
     usable_bytes: i64,
+    /// Java's `LogDirDescription.isCordoned()` (KIP-1066).
+    is_cordoned: bool,
     replicas: Vec<ReplicaInfoC>,
 }
 
@@ -4878,6 +4880,7 @@ impl LogDirDescriptionInner {
             error: description.error().cloned().map(error_inner),
             total_bytes: description.total_bytes().unwrap_or(UNKNOWN_VOLUME_BYTES),
             usable_bytes: description.usable_bytes().unwrap_or(UNKNOWN_VOLUME_BYTES),
+            is_cordoned: description.is_cordoned(),
             replicas,
         }
     }
@@ -4933,6 +4936,22 @@ pub unsafe extern "C" fn kafka_admin_LogDirDescription_usable_bytes(
     description: *const kafka_admin_LogDirDescription_t,
 ) -> i64 {
     unsafe { log_dir_ref(description) }.usable_bytes
+}
+
+/// Returns whether this log directory is cordoned.
+///
+/// This is Java's `LogDirDescription.isCordoned()` (KIP-1066). A cordoned
+/// directory is one an operator has marked so the broker stops placing new
+/// partitions on it, typically ahead of decommissioning the volume.
+///
+/// # Safety
+///
+/// `description` must be a valid borrowed pointer from a log-dir map getter.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_LogDirDescription_is_cordoned(
+    description: *const kafka_admin_LogDirDescription_t,
+) -> bool {
+    unsafe { log_dir_ref(description) }.is_cordoned
 }
 
 /// Returns the number of replicas hosted in this log dir.
@@ -22312,6 +22331,25 @@ mod tests {
         assert_eq!(flat.total_bytes, UNKNOWN_VOLUME_BYTES);
         assert_eq!(flat.usable_bytes, UNKNOWN_VOLUME_BYTES);
         assert!(flat.replicas.is_empty());
+    }
+
+    #[test]
+    fn log_dir_description_carries_the_cordoned_flag_through_the_c_accessor() {
+        // KIP-1066: Java's `LogDirDescription.isCordoned()`. The five-argument
+        // constructor seeds the flag; the default constructor leaves it false.
+        let cordoned =
+            LogDirDescription::with_total_bytes_usable_bytes_is_cordoned(None, HashMap::new(), 2_000, 1_000, true);
+        let flat = LogDirDescriptionInner::new(&cordoned);
+        assert!(flat.is_cordoned);
+        // Exercise the exported C ABI accessor over the same handle bytes a
+        // `DescribeLogDirsResult` map getter would hand a C caller.
+        let handle = &flat as *const LogDirDescriptionInner as *const kafka_admin_LogDirDescription_t;
+        assert!(unsafe { kafka_admin_LogDirDescription_is_cordoned(handle) });
+
+        // The default (two-argument) constructor defaults the flag to false.
+        let uncordoned = LogDirDescriptionInner::new(&LogDirDescription::new(None, HashMap::new()));
+        let uncordoned_handle = &uncordoned as *const LogDirDescriptionInner as *const kafka_admin_LogDirDescription_t;
+        assert!(!unsafe { kafka_admin_LogDirDescription_is_cordoned(uncordoned_handle) });
     }
 
     #[test]
