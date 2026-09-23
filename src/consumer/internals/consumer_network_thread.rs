@@ -225,9 +225,12 @@ pub(crate) struct ConsumerNetworkThread<K: KafkaClient + Send + 'static> {
     /// [`Self::maximum_time_to_wait`]. Updated by `run_once` after each
     /// pass through the request managers.
     cached_max_time_to_wait_ms: Arc<AtomicI64>,
-    /// Close timeout (millis). Set by [`Self::set_close_timeout_ms`]
-    /// before `close()`.
-    close_timeout_ms: AtomicI64,
+    /// Close timeout (millis) — Java's `volatile Duration closeTimeout`
+    /// (`ConsumerNetworkThread.java:84`). Written by the app side's close
+    /// path through the shared [`Self::close_timeout_handle`] (Java's
+    /// `closeInternal(timeout)` assigns `closeTimeout = timeout`, line 380)
+    /// and read by [`Self::cleanup`].
+    close_timeout_ms: Arc<AtomicI64>,
     /// Wall-clock timestamp of the last `run_once` call. Feeds Java's
     /// `recordTimeBetweenNetworkThreadPoll(currentTimeMs - lastPollTimeMs)`
     /// metric (wired in `run_once` when `async_consumer_metrics` is set).
@@ -310,7 +313,7 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
             wakeup,
             running: Arc::new(AtomicBool::new(true)),
             cached_max_time_to_wait_ms,
-            close_timeout_ms: AtomicI64::new(Self::DEFAULT_CLOSE_TIMEOUT_MS),
+            close_timeout_ms: Arc::new(AtomicI64::new(Self::DEFAULT_CLOSE_TIMEOUT_MS)),
             last_poll_time_ms: 0,
             time,
             membership,
@@ -382,6 +385,13 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
     pub(crate) fn signal_close(&self) {
         self.running.store(false, Ordering::Release);
         self.wakeup.wakeup();
+    }
+
+    /// Shared handle to the close timeout read by [`Self::cleanup`], captured
+    /// by the production close closure before `self` moves onto the bg task
+    /// (same pattern as [`Self::running_handle`]).
+    pub(crate) fn close_timeout_handle(&self) -> Arc<AtomicI64> {
+        Arc::clone(&self.close_timeout_ms)
     }
 
     /// Sets the close timeout used by [`Self::cleanup`].

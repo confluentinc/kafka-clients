@@ -971,9 +971,25 @@ impl AsyncConsumerHandleState {
 /// Erased so the close handle does not carry the consumer's `K`/`V` types.
 type LifecycleFn = Box<dyn Fn() + Send + Sync>;
 
+/// The type-erased close hook: Java's `ConsumerNetworkThread.close(Duration)`
+/// state change (`closeInternal`, `ConsumerNetworkThread.java:376-381`), which
+/// carries the close timeout the bg task's `cleanup()` is bounded by.
+type SignalCloseFn = Box<dyn Fn(Duration) + Send + Sync>;
+
 /// Builds the two lifecycle closures a [`NetworkThreadCloseHandle`] needs:
-/// `signal_close_fn` (clear the running flag, then nudge the bg task) and
-/// `wakeup_fn` (nudge the bg task).
+/// `signal_close_fn` (publish the close timeout, clear the running flag, then
+/// nudge the bg task) and `wakeup_fn` (nudge the bg task).
+///
+/// `signal_close_fn` stores its timeout into `close_timeout_ms` — the bg
+/// task's [`ConsumerNetworkThread::close_timeout_handle`] — mirroring Java's
+/// `closeTimeout = timeout` (`ConsumerNetworkThread.java:380`). Without it the
+/// bg task's `cleanup()` kept its 30 s default and a `close(CloseOptions
+/// .timeout(100ms))` waited out any in-flight fetch (up to
+/// `fetch.max.wait.ms`), which `PlaintextConsumerCloseTest
+/// .testAsyncConsumerCloseWithTimeoutIgnoresFetchMaxWaitMs` forbids. The
+/// timeout is stored *before* the running flag is cleared (Java assigns it
+/// after `running = false`), so the bg loop can never observe the shutdown
+/// and enter `cleanup()` ahead of the new timeout.
 ///
 /// Both nudge the **transport** primitive — the notify the bg loop's poll
 /// `select!` waits on — and NOT the [`WakeupTrigger`]. That distinction is the
@@ -1000,10 +1016,12 @@ type LifecycleFn = Box<dyn Fn() + Send + Sync>;
 /// the trigger's `disabled` short-circuit.
 fn build_close_handle_fns(
     running: Arc<std::sync::atomic::AtomicBool>,
+    close_timeout_ms: Arc<AtomicI64>,
     notify: Arc<tokio::sync::Notify>,
-) -> (LifecycleFn, LifecycleFn) {
+) -> (SignalCloseFn, LifecycleFn) {
     let close_notify = Arc::clone(&notify);
-    let signal_close_fn: Box<dyn Fn() + Send + Sync> = Box::new(move || {
+    let signal_close_fn: SignalCloseFn = Box::new(move |timeout: Duration| {
+        close_timeout_ms.store(timeout.as_millis().min(i64::MAX as u128) as i64, Ordering::Release);
         running.store(false, Ordering::Release);
         close_notify.notify_one();
     });
@@ -1016,9 +1034,9 @@ fn build_close_handle_fns(
 /// Held by [`AsyncKafkaConsumer`] for the lifetime of the consumer
 /// instance; dropped (with `signal_close`) on close.
 pub(crate) struct NetworkThreadCloseHandle {
-    /// Cancels the bg-task `run_once` loop and wakes the trigger so the
-    /// next iteration observes the shutdown.
-    signal_close_fn: Box<dyn Fn() + Send + Sync>,
+    /// Publishes the close timeout, cancels the bg-task `run_once` loop and
+    /// wakes it so the next iteration observes the shutdown.
+    signal_close_fn: SignalCloseFn,
     /// Wakes the bg-task's `select!` on the wakeup token. Held as an
     /// `Arc` (not `Box`) so a clone can be handed to a shareable
     /// [`ConsumerHandle`] (so cross-task `wakeup()` — a first-class Java
@@ -1035,7 +1053,7 @@ impl NetworkThreadCloseHandle {
     /// of the close / wakeup state so the outer struct can stay
     /// non-generic over `K`. The bg loop runs as a `tokio::spawn`ed task.
     pub(crate) fn new(
-        signal_close_fn: Box<dyn Fn() + Send + Sync>,
+        signal_close_fn: SignalCloseFn,
         wakeup_fn: Box<dyn Fn() + Send + Sync>,
         join_handle: JoinHandle<()>,
     ) -> Self {
@@ -1052,7 +1070,7 @@ impl NetworkThreadCloseHandle {
     /// the bg loop has finished `cleanup()`, and `thread` is the OS
     /// thread handle reaped afterwards.
     pub(crate) fn with_dedicated(
-        signal_close_fn: Box<dyn Fn() + Send + Sync>,
+        signal_close_fn: SignalCloseFn,
         wakeup_fn: Box<dyn Fn() + Send + Sync>,
         done: tokio::sync::oneshot::Receiver<()>,
         thread: std::thread::JoinHandle<()>,
@@ -1072,9 +1090,12 @@ impl NetworkThreadCloseHandle {
     }
 
     /// Signals the bg task to exit and wakes it from its current
-    /// `select!`. Idempotent.
-    pub(crate) fn signal_close(&self) {
-        (self.signal_close_fn)();
+    /// `select!`, bounding its `cleanup()` by `timeout` — Java's
+    /// `ConsumerNetworkThread.close(Duration timeout)` state change
+    /// (`closeInternal`, `ConsumerNetworkThread.java:376-381`; the join is
+    /// [`Self::await_join`]). Idempotent.
+    pub(crate) fn signal_close(&self, timeout: Duration) {
+        (self.signal_close_fn)(timeout);
     }
 
     /// Wakes the bg task's `select!` without signalling shutdown. Used
@@ -2467,8 +2488,11 @@ where
         // `network_thread` into `tokio::spawn`. The erased closures
         // call these to signal close / wake the bg task without
         // holding a reference to the concrete `K` type.
-        let (signal_close_fn, wakeup_fn) =
-            build_close_handle_fns(network_thread.running_handle(), Arc::clone(&event_notify));
+        let (signal_close_fn, wakeup_fn) = build_close_handle_fns(
+            network_thread.running_handle(),
+            network_thread.close_timeout_handle(),
+            Arc::clone(&event_notify),
+        );
 
         // The `max_time_to_wait_ms` slot is seeded with
         // `MAX_POLL_TIMEOUT_MS` at ctor time (line above) and the bg task
@@ -5630,8 +5654,13 @@ where
             );
         }
 
-        // Step 7 & 8: shut down the network thread.
-        self.network_thread_close.signal_close();
+        // Step 7 & 8: shut down the network thread, bounding its cleanup by
+        // what is left of the close timer — Java's
+        // `applicationEventHandler.close(Duration.ofMillis(closeTimer.remainingMs()))`
+        // (`AsyncKafkaConsumer.java:1652`).
+        let remaining_ms = close_deadline_ms.saturating_sub(self.time.milliseconds()).max(0);
+        self.network_thread_close
+            .signal_close(Duration::from_millis(remaining_ms as u64));
         self.network_thread_close.wakeup();
         if let Err(err) = self.network_thread_close.await_join().await {
             record(&mut first_error, "Failed shutting down network thread", err);
@@ -6205,6 +6234,9 @@ mod tests {
         /// Handle on the shared `SubscriptionState` so tests can inspect /
         /// pre-populate it.
         subscriptions: Arc<Mutex<SubscriptionState>>,
+        /// The close timeout (millis) `close()` handed the bg task through
+        /// `NetworkThreadCloseHandle::signal_close`; `-1` until signalled.
+        signal_close_timeout_ms: Arc<AtomicI64>,
         /// Set to `true` whenever the consumer's bg-task wakeup fn is invoked
         /// (Phase 41 Issue 3 observability). Lets a `&mut self`-level component
         /// test assert that the ack-send path in `process_background_events`
@@ -6251,8 +6283,9 @@ mod tests {
         // Stub join handle — spawn a noop task. Tests do not assert on
         // the bg task's behavior in this commit.
         let join_handle: JoinHandle<()> = tokio::spawn(async move {});
-        let signal_close_called = Arc::new(AtomicBool::new(false));
-        let signal_close_flag = Arc::clone(&signal_close_called);
+        // Records the timeout `close()` hands the bg task (-1 = never signalled).
+        let signal_close_timeout_ms = Arc::new(AtomicI64::new(-1));
+        let signal_close_slot = Arc::clone(&signal_close_timeout_ms);
         let wakeup_called = Arc::new(AtomicBool::new(false));
         let wakeup_flag = Arc::clone(&wakeup_called);
         // Production's `wakeup_fn` fires the `WakeupTrigger` (see the ctor);
@@ -6260,8 +6293,8 @@ mod tests {
         // "no wakeup is pending" really exercises what the app would observe.
         let wakeup_trigger_for_fn = wakeup.clone();
         let close_handle = NetworkThreadCloseHandle::new(
-            Box::new(move || {
-                signal_close_flag.store(true, Ordering::Release);
+            Box::new(move |timeout: Duration| {
+                signal_close_slot.store(timeout.as_millis() as i64, Ordering::Release);
             }),
             Box::new(move || {
                 wakeup_flag.store(true, Ordering::Release);
@@ -6367,6 +6400,7 @@ mod tests {
                 app_event_rx,
                 bg_event_tx,
                 subscriptions: subs,
+                signal_close_timeout_ms,
                 bg_wakeup_called: wakeup_called,
                 event_notify,
             },
@@ -8181,7 +8215,9 @@ mod tests {
 
         let running = Arc::new(AtomicBool::new(true));
         let notify = Arc::new(tokio::sync::Notify::new());
-        let (signal_close_fn, wakeup_fn) = build_close_handle_fns(Arc::clone(&running), Arc::clone(&notify));
+        let close_timeout_ms = Arc::new(AtomicI64::new(-1));
+        let (signal_close_fn, wakeup_fn) =
+            build_close_handle_fns(Arc::clone(&running), Arc::clone(&close_timeout_ms), Arc::clone(&notify));
 
         // `wakeup_fn` alone: nudge only, running flag untouched.
         wakeup_fn();
@@ -8192,8 +8228,13 @@ mod tests {
 
         // `signal_close_fn`: clears the flag AND nudges, so the bg task wakes
         // from its poll and observes the flag on the next loop check.
-        signal_close_fn();
+        signal_close_fn(Duration::from_millis(100));
         assert!(!running.load(Ordering::Acquire), "signal_close must clear the running flag");
+        assert_eq!(
+            100,
+            close_timeout_ms.load(Ordering::Acquire),
+            "signal_close must publish the close timeout the bg task's cleanup() reads"
+        );
         tokio::time::timeout(Duration::from_secs(1), notify.notified())
             .await
             .expect("signal_close_fn must nudge the transport notify");
@@ -9902,6 +9943,46 @@ mod tests {
     /// the timeout, so this compares the *deadline* carried on the
     /// `LeaveGroupOnClose` event — the only place the timeout is observable —
     /// between the two forms.
+    /// `close(CloseOptions.timeout(t))` must bound the bg task's `cleanup()`
+    /// by what is left of the close timer: Java hands
+    /// `Duration.ofMillis(closeTimer.remainingMs())` to
+    /// `applicationEventHandler.close(..)` (`AsyncKafkaConsumer.java:1652`),
+    /// which assigns it to `ConsumerNetworkThread.closeTimeout`
+    /// (`ConsumerNetworkThread.java:380`). Before the fix the Rust close path
+    /// signalled shutdown without a timeout, so `cleanup()` kept its 30 s
+    /// default and a 100 ms close waited out any in-flight fetch.
+    #[tokio::test]
+    async fn close_with_options_bounds_network_thread_cleanup_by_remaining_close_timer() {
+        use crate::consumer::CloseOptions;
+
+        let (mut consumer, mut handles) = make_test_consumer_with_channels();
+        let drainer = tokio::spawn(async move {
+            while let Some(env) = handles.app_event_rx.recv().await {
+                match env.event {
+                    ApplicationEvent::LeaveGroupOnClose { handle, .. } => {
+                        handle.complete(());
+                    },
+                    ApplicationEvent::CommitSync { handle, offsets_ready, .. } => {
+                        offsets_ready.complete(());
+                        handle.complete(HashMap::new());
+                    },
+                    _ => {},
+                }
+            }
+        });
+        consumer
+            .close_with_options(CloseOptions::new_timeout(Duration::from_millis(100)))
+            .await
+            .expect("close ok");
+        drainer.abort();
+
+        let signalled = handles.signal_close_timeout_ms.load(Ordering::Acquire);
+        assert!(
+            (0..=100).contains(&signalled),
+            "close must hand the bg task the remaining close timer (<= 100 ms), got {signalled} ms"
+        );
+    }
+
     #[tokio::test]
     async fn close_timeout_agrees_with_close_options_timeout() {
         use crate::consumer::CloseOptions;
@@ -11213,7 +11294,7 @@ mod tests {
 
         let close_running = Arc::clone(&running);
         let close_wake = Arc::clone(&wake);
-        let signal_close_fn: Box<dyn Fn() + Send + Sync> = Box::new(move || {
+        let signal_close_fn: SignalCloseFn = Box::new(move |_timeout: Duration| {
             close_running.store(false, Ordering::Release);
             close_wake.notify_one();
         });
@@ -11233,7 +11314,7 @@ mod tests {
     async fn dedicated_close_handle_joins_cleanly() {
         let (mut handle, running, _wake) = spawn_dedicated_bg();
 
-        handle.signal_close();
+        handle.signal_close(Duration::from_secs(30));
         handle.wakeup();
 
         let result = tokio::time::timeout(Duration::from_secs(5), handle.await_join())
@@ -11249,7 +11330,7 @@ mod tests {
     async fn dedicated_await_join_is_idempotent() {
         let (mut handle, _running, _wake) = spawn_dedicated_bg();
 
-        handle.signal_close();
+        handle.signal_close(Duration::from_secs(30));
         handle.wakeup();
 
         tokio::time::timeout(Duration::from_secs(5), handle.await_join())
@@ -11282,7 +11363,7 @@ mod tests {
             .expect("spawn panicking test io thread");
 
         let mut handle =
-            NetworkThreadCloseHandle::with_dedicated(Box::new(|| {}), Box::new(|| {}), done_rx, thread_handle);
+            NetworkThreadCloseHandle::with_dedicated(Box::new(|_| {}), Box::new(|| {}), done_rx, thread_handle);
 
         let result = tokio::time::timeout(Duration::from_secs(5), handle.await_join())
             .await
