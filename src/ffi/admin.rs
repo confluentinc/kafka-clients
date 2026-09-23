@@ -15872,8 +15872,17 @@ pub type kafka_admin_AdminClient_create_acls_callback_t =
 ///   rejected.
 /// - `timeout_ms`: per-request timeout, or negative for the client default.
 ///
-/// An unrecognised enum code becomes UNKNOWN, exactly as Java's `fromCode`
-/// does, and UNKNOWN is accepted by the constructors — the broker rejects it.
+/// An unrecognised enum code marshals to UNKNOWN, exactly as Java's `fromCode`
+/// does, and UNKNOWN passes the marshaling. It is **not** sent to the broker,
+/// though: `createAcls` then rejects any binding whose filter has an indefinite
+/// field — ANY, UNKNOWN, or NULL (`ResourcePatternFilter.findIndefiniteField` /
+/// `AccessControlEntryData.findIndefiniteField`) — **locally, per binding**,
+/// completing that binding's future with an `INVALID_REQUEST` error
+/// `"Invalid ACL creation: <field>"` and never issuing a request for it. This
+/// mirrors `KafkaAdminClient.createAcls` (`acl.toFilter().findIndefiniteField()`,
+/// `KafkaAdminClient.java:2615-2622`). The up-front constructor rejections above
+/// (ANY resource-type, ANY / MATCH pattern-type, ANY operation, ANY
+/// permission-type) are separate and happen before submission.
 ///
 /// # Safety
 ///
@@ -15914,6 +15923,12 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_create_acls(
 
 /// Creates ACL bindings asynchronously. See
 /// [`kafka_admin_AdminClient_create_acls`].
+///
+/// As there, an unrecognised enum code marshals to UNKNOWN but is not sent to
+/// the broker: a binding whose filter has an indefinite field (ANY, UNKNOWN, or
+/// NULL) is rejected **locally, per binding**, with an `INVALID_REQUEST`
+/// `"Invalid ACL creation: <field>"` error delivered through that binding's own
+/// callback — mirroring `KafkaAdminClient.createAcls`.
 ///
 /// Unlike the synchronous entry point, the callback fires **once per binding,
 /// as that binding's future resolves**, not once for the whole batch — a fast
@@ -24188,8 +24203,12 @@ mod tests {
     #[test]
     fn read_acl_bindings_maps_an_unrecognised_code_to_unknown_as_java_does() {
         // Java's `fromCode` returns UNKNOWN rather than throwing, and the
-        // constructors accept UNKNOWN (only ANY is rejected). The broker is
-        // what refuses it.
+        // constructors accept UNKNOWN (only ANY is rejected), so the marshaling
+        // here accepts it. It is NOT the broker that refuses it: `createAcls`
+        // rejects any binding with an indefinite field (ANY / UNKNOWN / NULL)
+        // LOCALLY, per binding, with an INVALID_REQUEST "Invalid ACL creation:
+        // ..." error (`acl.toFilter().findIndefiniteField()`) and never sends
+        // it. This test covers only the marshaling step, which does accept it.
         let (_names, name_ptrs) = c_array(&["t"]);
         let (_principals, principal_ptrs) = c_array(&["User:a"]);
         let (_hosts, host_ptrs) = c_array(&["*"]);
