@@ -314,7 +314,7 @@ impl<P: Producer<String, String>> VerifiableProducer<P> {
         // recoverable path); `numSent` is left un-incremented,
         // matching Java's ordering (the increment follows construction).
         let record = if let Some(create_time) = self.create_time {
-            let record = ProducerRecord::with_timestamp(
+            let record = ProducerRecord::with_partition_timestamp_key(
                 self.topic.clone(),
                 None,
                 Some(create_time),
@@ -652,9 +652,9 @@ pub async fn create_from_args(args: &[String]) -> Result<VerifiableProducer<Kafk
         }
     }
 
-    let config = ProducerConfig::from_properties(&props)?;
+    let config = ProducerConfig::new(&props)?;
     let producer =
-        KafkaProducer::<String, String>::from_config(config, Box::new(StringSerializer), Box::new(StringSerializer))?;
+        KafkaProducer::<String, String>::new(config, Box::new(StringSerializer), Box::new(StringSerializer))?;
 
     Ok(VerifiableProducer::new(
         producer,

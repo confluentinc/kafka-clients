@@ -57,7 +57,7 @@ use confluent_kafka::common::TopicPartition;
 use confluent_kafka::common::serialization::StringDeserializer;
 use confluent_kafka::consumer::{
     Consumer, ConsumerConfig, ConsumerHandle, ConsumerRebalanceListener, ConsumerRecord, ConsumerRecords,
-    GroupProtocol, OffsetAndMetadata, OffsetCommitCallback, new_consumer,
+    GroupProtocol, KafkaConsumer, OffsetAndMetadata, OffsetCommitCallback,
 };
 
 /// Wall-clock milliseconds since the Unix epoch. The Rust analog of Java's
@@ -343,8 +343,8 @@ impl OffsetsCommitted {
 /// the listener/callback, because a Java object reference is freely shareable.
 /// In Rust the driver ([`VerifiableConsumer`]) needs `&mut self` to call
 /// `poll`/`commit`/`close`, while the client's
-/// [`Consumer::subscribe_with_listener`] and
-/// [`Consumer::commit_async_offsets_with_callback`] take
+/// [`Consumer::subscribe_with_topics_listener`] and
+/// [`Consumer::commit_async_with_offsets_callback`] take
 /// `Arc<dyn ConsumerRebalanceListener>` / `Arc<dyn OffsetCommitCallback>` shared
 /// across the caller task. A single `&mut` owner
 /// cannot also be an `Arc<dyn …>`, so the shareable half is split out here.
@@ -485,10 +485,10 @@ impl VerifiableConsumer {
         let mut summaries: Vec<RecordSetSummary> = Vec::new();
 
         // Collect partitions up front so the immutable borrow of `records` for
-        // `partitions()` does not overlap the later `records_for_partition`.
+        // `partitions()` does not overlap the later `records_partition`.
         let partitions: Vec<TopicPartition> = records.partitions().cloned().collect();
         for tp in &partitions {
-            let all = records.records_for_partition(tp);
+            let all = records.records_partition(tp);
 
             // Java `subList(0, maxMessages - consumedMessages)` truncation.
             let partition_records: &[ConsumerRecord<String, String>] = if self.has_message_limit()
@@ -544,7 +544,7 @@ impl VerifiableConsumer {
     /// "we only call wakeup() once to close the consumer, so this recursion
     /// should be safe."
     async fn commit_sync(&mut self, offsets: HashMap<TopicPartition, OffsetAndMetadata>) -> Result<(), Error> {
-        match self.consumer.commit_sync_offsets(offsets.clone()).await {
+        match self.consumer.commit_sync_with_offsets(offsets.clone()).await {
             Ok(()) => {
                 self.reporter.on_complete(&offsets, None).await;
                 Ok(())
@@ -613,7 +613,7 @@ impl VerifiableConsumer {
     async fn run_loop(&mut self) -> Result<(), Error> {
         print_json(&StartupComplete::new());
         self.consumer
-            .subscribe_with_listener(
+            .subscribe_with_topics_listener(
                 vec![self.topic.clone()],
                 Arc::clone(&self.reporter) as Arc<dyn ConsumerRebalanceListener>,
             )
@@ -628,7 +628,7 @@ impl VerifiableConsumer {
             if !self.use_auto_commit {
                 if self.use_async_commit {
                     self.consumer
-                        .commit_async_offsets_with_callback(
+                        .commit_async_with_offsets_callback(
                             offsets,
                             Arc::clone(&self.reporter) as Arc<dyn OffsetCommitCallback>,
                         )
@@ -828,7 +828,7 @@ fn parse_properties(contents: &str) -> Vec<(String, String)> {
 /// Returns `Err` for any argument-parsing failure, an unreadable config file, an
 /// invalid group protocol, an invalid consumer configuration, or a consumer that
 /// cannot be constructed. In particular, `--group-protocol classic` fails at
-/// [`new_consumer`] with an `unsupported_version` error.
+/// [`KafkaConsumer::new`] with an `unsupported_version` error.
 pub fn create_from_args(args: &[String]) -> Result<VerifiableConsumer, Error> {
     let parsed = parse_args(args)?;
 
@@ -897,8 +897,9 @@ pub fn create_from_args(args: &[String]) -> Result<VerifiableConsumer, Error> {
         parsed.reset_policy.clone(),
     );
 
-    let config = ConsumerConfig::from_properties(&props)?;
-    let consumer = new_consumer::<String, String>(config, Box::new(StringDeserializer), Box::new(StringDeserializer))?;
+    let config = ConsumerConfig::new(&props)?;
+    let consumer =
+        KafkaConsumer::new::<String, String>(config, Box::new(StringDeserializer), Box::new(StringDeserializer))?;
 
     // Java always constructs with `useAsyncCommit = false` (createFromArgs line
     // 716), so async commit is never taken even though the field exists.
@@ -976,7 +977,7 @@ mod tests {
         for (tp, recs) in entries {
             map.insert(tp, recs);
         }
-        ConsumerRecords::new(map, HashMap::new())
+        ConsumerRecords::with_next_offsets(map, HashMap::new())
     }
 
     // ---- has_message_limit / is_finished -----------------------------------
@@ -1314,7 +1315,7 @@ mod tests {
 
     #[test]
     fn create_from_args_classic_protocol_is_unsupported() {
-        // The client is KIP-848-only; classic fails at `new_consumer`. (The
+        // The client is KIP-848-only; classic fails at `KafkaConsumer::new`. (The
         // default protocol is `classic`, so the minimal args already select it.)
         // `VerifiableConsumer` (the Ok type) is not `Debug`, so match rather
         // than `unwrap_err`.
