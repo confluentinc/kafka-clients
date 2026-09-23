@@ -63,6 +63,19 @@
 //!   [`test_fence_after_producer_commit`]
 //! - `AdminFenceProducersTest.testFenceBeforeProducerCommit` →
 //!   [`test_fence_before_producer_commit`]
+//! - `ProducerIdExpirationTest.testProducerIdExpirationWithNoTransactions` →
+//!   [`test_producer_id_expiration_with_no_transactions`]
+//! - `ProducerIdExpirationTest.testTransactionAfterTransactionIdExpiresButProducerIdRemains` →
+//!   [`test_transaction_after_transaction_id_expires_but_producer_id_remains`]
+//! - `TransactionsExpirationTest.testFatalErrorAfterInvalidProducerIdMappingWithTV2` →
+//!   [`test_fatal_error_after_invalid_producer_id_mapping_with_tv2`]
+//! - `TransactionsExpirationTest.testTransactionAfterProducerIdExpiresWithTV2` →
+//!   [`test_transaction_after_producer_id_expires_with_tv2`]
+//!
+//! (the TV1 rows of `TransactionsExpirationTest` and
+//! `ProducerIdExpirationTest.testDynamicProducerIdExpirationMs` are not reachable
+//! on the pooled harness — see the section note above
+//! [`producer_id_expiration_cluster`]).
 //!
 //! # Why the four Phase-8 scenarios are not translations
 //!
@@ -103,6 +116,7 @@ use confluent_kafka::admin::Admin;
 use confluent_kafka::admin::AdminClientConfig;
 use confluent_kafka::admin::KafkaAdminClient;
 use confluent_kafka::admin::OffsetSpec;
+use confluent_kafka::admin::ProducerState;
 use confluent_kafka::admin::TransactionState;
 use confluent_kafka::common::Error;
 use confluent_kafka::common::Errors;
@@ -113,6 +127,7 @@ use confluent_kafka::common::header::Headers;
 use confluent_kafka::common::header::RecordHeaders;
 use confluent_kafka::common::serialization::ByteArraySerializer;
 use confluent_kafka::common::serialization::Deserializer;
+use confluent_kafka::consumer::CloseOptions;
 use confluent_kafka::consumer::Consumer;
 use confluent_kafka::consumer::ConsumerConfig;
 use confluent_kafka::consumer::ConsumerGroupMetadata;
@@ -2419,6 +2434,620 @@ async fn test_fence_before_producer_commit() {
         "expected ProducerFenced or InvalidProducerEpoch, got {exception_during_commit:?}"
     );
 
+    producer.close().await.expect("producer close");
+    ctx.cleanup().await;
+}
+
+// ---------------------------------------------------------------------------
+// ProducerIdExpirationTest / TransactionsExpirationTest translations
+// ---------------------------------------------------------------------------
+//
+// Both Java classes run on three brokers with short producer-id and
+// transactional-id expiration intervals (`ProducerIdExpirationTest.java:76-100`,
+// `TransactionsExpirationTest.java:65-86`). The two differ only in which of the
+// two expires first, so each gets its own pooled cluster
+// ([`producer_id_expiration_cluster`] / [`transactions_expiration_cluster`]).
+// Deviations shared by these tests, each forced by the pooled harness:
+//
+//   - Java's fixed topic names (`topic1` / `topic2`) and transactional id
+//     (`transactionalProducer`) become per-test names (`ctx.topic` /
+//     `ctx.group_id`), because the cluster is pooled and both classes' tests
+//     share it (concurrently, and across repeated runs of the same test).
+//   - `TransactionsExpirationTest` runs each scenario at `transaction.version` 1
+//     and 2 (`@ClusterFeature`). The pooled `apache/kafka:4.2.0` brokers are
+//     formatted at the latest metadata version, which finalizes
+//     `transaction.version=2`, and the harness cannot re-format them at a lower
+//     feature level — so only the TV2 rows are translated;
+//     `testFatalErrorAfterInvalidProducerIdMappingWithTV1` and
+//     `testTransactionAfterProducerIdExpiresWithTV1` are not reachable here.
+//   - `ProducerIdExpirationTest.testDynamicProducerIdExpirationMs` is not
+//     translated: its second half restarts a broker (`kafkaBroker.shutdown()` /
+//     `startup()`, `ProducerIdExpirationTest.java:196-200`), which the harness
+//     cannot do, and its first half reads the broker's in-memory
+//     `logManager().producerStateManagerConfig()` to prove the dynamic update
+//     landed — neither is observable from a client.
+//   - `assertConsumeRecords` iterates `supportedGroupProtocols()`
+//     (`TransactionsExpirationTest.java:243`); only the CONSUMER (KIP-848) arm is
+//     translated (`consumer-threading.md` §20).
+
+/// The broker overrides both expiration suites share
+/// (`ProducerIdExpirationTest.java:76-100` / `TransactionsExpirationTest.java:65-86`)
+/// on top of [`kip848_3_broker`]'s KIP-848 settings (which already give
+/// `__consumer_offsets` Java's single partition). Only the two expiration
+/// intervals differ between the suites.
+fn expiration_cluster(transactional_id_expiration_ms: &str, producer_id_expiration_ms: &str) -> ClusterConfig {
+    let mut config = kip848_3_broker(1);
+    for (key, value) in [
+        ("KAFKA_AUTO_CREATE_TOPICS_ENABLE", "false"),
+        ("KAFKA_TRANSACTION_STATE_LOG_NUM_PARTITIONS", "3"),
+        ("KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR", "2"),
+        ("KAFKA_TRANSACTION_STATE_LOG_MIN_ISR", "2"),
+        ("KAFKA_CONTROLLED_SHUTDOWN_ENABLE", "true"),
+        ("KAFKA_UNCLEAN_LEADER_ELECTION_ENABLE", "false"),
+        ("KAFKA_AUTO_LEADER_REBALANCE_ENABLE", "false"),
+        ("KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS", "0"),
+        ("KAFKA_TRANSACTION_ABORT_TIMED_OUT_TRANSACTION_CLEANUP_INTERVAL_MS", "200"),
+        ("KAFKA_TRANSACTIONAL_ID_EXPIRATION_MS", transactional_id_expiration_ms),
+        ("KAFKA_TRANSACTION_REMOVE_EXPIRED_TRANSACTION_CLEANUP_INTERVAL_MS", "500"),
+        ("KAFKA_PRODUCER_ID_EXPIRATION_MS", producer_id_expiration_ms),
+        ("KAFKA_PRODUCER_ID_EXPIRATION_CHECK_INTERVAL_MS", "500"),
+    ] {
+        config.server_properties.insert(key.to_string(), value.to_string());
+    }
+    config
+}
+
+/// `ProducerIdExpirationTest`'s cluster (`ProducerIdExpirationTest.java:76-100`):
+/// the transactional id (5 s) expires before the producer id (10 s).
+fn producer_id_expiration_cluster() -> ClusterConfig {
+    expiration_cluster("5000", "10000")
+}
+
+/// `TransactionsExpirationTest`'s cluster (`TransactionsExpirationTest.java:65-86`):
+/// the producer id (5 s) expires before the transactional id (10 s).
+/// (Java sets `log.unclean.leader.election.enable` here and
+/// `unclean.leader.election.enable` in `ProducerIdExpirationTest`; both are the
+/// broker default `false`, so the one key [`expiration_cluster`] sets covers both.)
+fn transactions_expiration_cluster() -> ClusterConfig {
+    expiration_cluster("10000", "5000")
+}
+
+/// `ClusterInstance.consumer(configs)` (`ClusterInstance.java:161-169`): `configs`
+/// plus byte-array deserializers, `auto.offset.reset=earliest`, a random group id
+/// and the cluster's bootstrap servers — CONSUMER (KIP-848) arm.
+fn cluster_consumer(ctx: &TestContext, configs: &[(&str, &str)]) -> Box<dyn Consumer<Vec<u8>, Vec<u8>>> {
+    let mut props: HashMap<String, String> = configs
+        .iter()
+        .map(|(key, value)| (key.to_string(), value.to_string()))
+        .collect();
+    for (key, value) in [
+        ("group.protocol", "consumer".to_string()),
+        ("auto.offset.reset", "earliest".to_string()),
+        ("group.id", ctx.group_id("group")),
+        ("bootstrap.servers", ctx.bootstrap_servers().to_string()),
+    ] {
+        props.entry(key.to_string()).or_insert(value);
+    }
+    KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
+        ConsumerConfig::new(&props).expect("invalid consumer config"),
+        Box::new(ByteArrayDeserializer),
+        Box::new(ByteArrayDeserializer),
+    )
+    .expect("KafkaConsumer::new should succeed")
+}
+
+/// Creates `topic` with `num_partitions` partitions at replication factor 3 and
+/// waits until every partition has a leader — `ClusterInstance.createTopic`
+/// (which returns once the topic's metadata has propagated).
+async fn create_expiration_topic(ctx: &TestContext, topic: &str, num_partitions: i32) {
+    let admin = txn_test_admin(ctx);
+    test_utils::create_topic(admin.as_ref(), topic, num_partitions, 3).await;
+    test_utils::wait_for_partition_leaders(admin.as_ref(), topic, 0..num_partitions).await;
+    admin.close().await;
+}
+
+/// `admin.describeProducers(List.of(tp)).partitionResult(tp).get().activeProducers()`
+/// (`ProducerIdExpirationTest.java:261-266`, `TransactionsExpirationTest.java:232-236`).
+async fn producer_states(admin: &dyn Admin, tp: &TopicPartition) -> Result<Vec<ProducerState>, Error> {
+    let states = admin
+        .describe_producers(std::slice::from_ref(tp))
+        .partition_result(tp)?
+        .get()
+        .await?;
+    Ok(states.active_producers().to_vec())
+}
+
+/// Whether `admin.describeTransactions(List.of(id)).description(id).get()` fails
+/// with `TransactionalIdNotFoundException` — the condition of both suites'
+/// `waitUntilTransactionalStateExpires` (`ProducerIdExpirationTest.java:237-250`,
+/// `TransactionsExpirationTest.java:218-230`). Any other outcome is "not yet".
+async fn transactional_state_expired(admin: &dyn Admin, transactional_id: &str) -> bool {
+    let description = admin
+        .describe_transactions(&[transactional_id.to_string()])
+        .description(transactional_id);
+    match description {
+        Ok(future) => matches!(future.get().await, Err(Error::TransactionalIdNotFound(_))),
+        Err(_) => false,
+    }
+}
+
+/// `waitUntilTransactionalStateExpires(admin)` (`ProducerIdExpirationTest.java:237-250`,
+/// `TransactionsExpirationTest.java:218-230`).
+async fn wait_until_transactional_state_expires(admin: &dyn Admin, transactional_id: &str) {
+    test_utils::wait_until_true_with_timeout(
+        || transactional_state_expired(admin, transactional_id),
+        "Transaction state never expired.",
+        test_utils::DEFAULT_MAX_WAIT_MS,
+        test_utils::DEFAULT_PAUSE_MS,
+    )
+    .await;
+}
+
+/// `TransactionsExpirationTest.waitUntilTransactionalStateExists`
+/// (`TransactionsExpirationTest.java:205-216`).
+async fn wait_until_transactional_state_exists(ctx: &TestContext, transactional_id: &str) {
+    let admin = txn_test_admin(ctx);
+    test_utils::wait_until_true_with_timeout(
+        || async {
+            match admin
+                .describe_transactions(&[transactional_id.to_string()])
+                .description(transactional_id)
+            {
+                Ok(future) => future.get().await.is_ok(),
+                Err(_) => false,
+            }
+        },
+        "Transactional state was never added.",
+        test_utils::DEFAULT_MAX_WAIT_MS,
+        test_utils::DEFAULT_PAUSE_MS,
+    )
+    .await;
+    admin.close().await;
+}
+
+/// `ProducerIdExpirationTest.waitProducerIdExpire(admin)`
+/// (`ProducerIdExpirationTest.java:219-231`). Java rethrows a `describeProducers`
+/// failure out of the condition, failing the test; so does this.
+async fn wait_producer_id_expire(admin: &dyn Admin, tp: &TopicPartition) {
+    test_utils::wait_until_true_with_timeout(
+        || async { producer_states(admin, tp).await.expect("describeProducers").is_empty() },
+        "Producer ID expired.",
+        test_utils::DEFAULT_MAX_WAIT_MS,
+        test_utils::DEFAULT_PAUSE_MS,
+    )
+    .await;
+}
+
+/// The send that follows an expired mapping fails through its future with
+/// `InvalidPidMappingException`, and the producer is then in a fatal state, so
+/// `abortTransaction` fails with a `KafkaException`
+/// (`ProducerIdExpirationTest.java:143-153`, `TransactionsExpirationTest.java:124-132`).
+///
+/// Java's `assertFutureThrows(InvalidPidMappingException.class, ...)` and
+/// `assertThrows(KafkaException.class, ...)` check classes only; the variant, the
+/// predicate and the exact messages are asserted here as well.
+async fn assert_send_fails_with_invalid_pid_mapping_then_abort_is_fatal(
+    producer: &KafkaProducer<Vec<u8>, Vec<u8>>,
+    record: ProducerRecord<Vec<u8>, Vec<u8>>,
+) {
+    let failed_future = send_record(producer, record).await.expect("send registers the record");
+    test_utils::wait_until_true_with_timeout(
+        || async { failed_future.is_done() },
+        "Producer future never completed.",
+        test_utils::DEFAULT_MAX_WAIT_MS,
+        test_utils::DEFAULT_PAUSE_MS,
+    )
+    .await;
+    let error = failed_future.get().await.expect_err("the send must fail");
+    assert!(
+        matches!(error, Error::InvalidPidMapping(_)),
+        "expected InvalidPidMapping, got {error:?}"
+    );
+    assert_eq!(error.message(), Errors::InvalidProducerIdMapping.message());
+
+    let abort_error = producer
+        .abort_transaction()
+        .await
+        .expect_err("abortTransaction must fail after the fatal error");
+    // `TransactionManager.maybeFailWithError` throws a bare
+    // `KafkaException("Cannot execute transactional method because we are in an
+    // error state", lastError)` (`TransactionManager.java:1189`), so the variant is the
+    // bare `KafkaError` and its source is the fatal `InvalidPidMapping`.
+    assert!(abort_error.is_kafka_error(), "expected a KafkaException, got {abort_error:?}");
+    assert!(
+        matches!(abort_error, Error::KafkaError(_)),
+        "expected a bare KafkaException, got {abort_error:?}"
+    );
+    assert_eq!(
+        abort_error.message(),
+        "Cannot execute transactional method because we are in an error state"
+    );
+    assert!(
+        matches!(abort_error.source(), Some(Error::InvalidPidMapping(_))),
+        "expected the InvalidPidMapping cause, got {:?}",
+        abort_error.source()
+    );
+}
+
+/// An idempotent producer's id expires from the partition's producer state once
+/// it stops writing, and reappears when it writes again.
+///
+/// Translates `ProducerIdExpirationTest.testProducerIdExpirationWithNoTransactions`
+/// (`ProducerIdExpirationTest.java:110-129`).
+#[tokio::test]
+async fn test_producer_id_expiration_with_no_transactions() {
+    let mut ctx = TestContext::new(producer_id_expiration_cluster()).await;
+    let topic1 = ctx.topic("topic1");
+    let tp0 = TopicPartition::new(topic1.clone(), 0);
+    create_expiration_topic(&ctx, &topic1, 1).await;
+    let producer = cluster_producer(ctx.bootstrap_servers(), &[("enable.idempotence", "true")]);
+    let record = || {
+        ProducerRecord::with_partition_key(topic1.clone(), Some(0), Some(b"key".to_vec()), Some(b"value".to_vec()))
+            .expect("record")
+    };
+
+    // Send records to populate producer state cache.
+    send_record(&producer, record()).await.expect("send");
+    producer.flush().await.expect("flush");
+    let admin = txn_test_admin(&ctx);
+    assert_eq!(1, producer_states(admin.as_ref(), &tp0).await.expect("describeProducers").len());
+
+    wait_producer_id_expire(admin.as_ref(), &tp0).await;
+
+    // Send more records to send producer ID back to brokers.
+    send_record(&producer, record()).await.expect("send");
+    producer.flush().await.expect("flush");
+
+    // Producer IDs should repopulate.
+    assert_eq!(1, producer_states(admin.as_ref(), &tp0).await.expect("describeProducers").len());
+
+    admin.close().await;
+    producer.close().await.expect("producer close");
+    ctx.cleanup().await;
+}
+
+/// A transactional id that expires while its producer id is still in the
+/// partition's producer state makes the next transactional send fail with
+/// `InvalidPidMappingException` (fatal); a fresh producer recovers and commits.
+///
+/// Translates `ProducerIdExpirationTest.testTransactionAfterTransactionIdExpiresButProducerIdRemains`
+/// (`ProducerIdExpirationTest.java:131-175`).
+#[tokio::test]
+async fn test_transaction_after_transaction_id_expires_but_producer_id_remains() {
+    let mut ctx = TestContext::new(producer_id_expiration_cluster()).await;
+    let topic1 = ctx.topic("topic1");
+    let tp0 = TopicPartition::new(topic1.clone(), 0);
+    let transactional_id = ctx.group_id("transactionalProducer");
+    create_expiration_topic(&ctx, &topic1, 1).await;
+    // `transactionalProducerConfig()` (`ProducerIdExpirationTest.java:252-257`).
+    let transactional_producer_config = [
+        ("transactional.id", transactional_id.as_str()),
+        ("enable.idempotence", "true"),
+        ("acks", "all"),
+    ];
+    let producer = cluster_producer(ctx.bootstrap_servers(), &transactional_producer_config);
+    producer.init_transactions().await.expect("initTransactions");
+
+    // Start and then abort a transaction to allow the producer ID to expire.
+    producer.begin_transaction().expect("beginTransaction");
+    send_record(
+        &producer,
+        producer_record_with_expected_transaction_status(&topic1, Some(0), "2", "2", false),
+    )
+    .await
+    .expect("send");
+    producer.flush().await.expect("flush");
+    let mut consumer = cluster_consumer(&ctx, &[("isolation.level", "read_committed")]);
+
+    let admin = txn_test_admin(&ctx);
+    // Ensure producer IDs are added.
+    test_utils::wait_until_true_with_timeout(
+        || async { producer_states(admin.as_ref(), &tp0).await.expect("describeProducers").len() == 1 },
+        "Producer IDs were not added.",
+        test_utils::DEFAULT_MAX_WAIT_MS,
+        100,
+    )
+    .await;
+
+    producer.abort_transaction().await.expect("abortTransaction");
+
+    // Wait for the transactional ID to expire.
+    wait_until_transactional_state_expires(admin.as_ref(), &transactional_id).await;
+
+    // Producer IDs should be retained.
+    assert_eq!(1, producer_states(admin.as_ref(), &tp0).await.expect("describeProducers").len());
+
+    // Start a new transaction and attempt to send, triggering an
+    // AddPartitionsToTxnRequest that will fail due to the expired transactional
+    // ID, resulting in a fatal error.
+    producer.begin_transaction().expect("beginTransaction");
+    assert_send_fails_with_invalid_pid_mapping_then_abort_is_fatal(
+        &producer,
+        producer_record_with_expected_transaction_status(&topic1, Some(0), "1", "1", false),
+    )
+    .await;
+
+    // Close the producer and reinitialize to recover from the fatal error.
+    producer.close().await.expect("producer close");
+    let producer = cluster_producer(ctx.bootstrap_servers(), &transactional_producer_config);
+    producer.init_transactions().await.expect("initTransactions");
+
+    producer.begin_transaction().expect("beginTransaction");
+    send_record(
+        &producer,
+        producer_record_with_expected_transaction_status(&topic1, Some(0), "4", "4", true),
+    )
+    .await
+    .expect("send");
+    send_record(
+        &producer,
+        producer_record_with_expected_transaction_status(&topic1, Some(0), "3", "3", true),
+    )
+    .await
+    .expect("send");
+
+    // Producer IDs should be retained.
+    let retained = producer_states(admin.as_ref(), &tp0).await;
+    assert!(
+        retained.as_ref().is_ok_and(|states| !states.is_empty()),
+        "expected the producer IDs to be retained, got {retained:?}"
+    );
+
+    producer.commit_transaction().await.expect("commitTransaction");
+
+    // Check we can still consume the transaction.
+    consumer.subscribe_with_topics(vec![topic1.clone()]).await.expect("subscribe");
+    for record in consume_records(&mut consumer, 2).await {
+        assert_committed_and_get_value(&record);
+    }
+
+    admin.close().await;
+    producer.close().await.expect("producer close");
+    consumer
+        .close_with_options(CloseOptions::new_timeout(Duration::from_secs(1)))
+        .await
+        .expect("consumer close");
+    ctx.cleanup().await;
+}
+
+/// `new ProducerRecord<>(topic, partition, key, value, Set.of(new RecordHeader(HEADER_KEY, value)))`
+/// as `TransactionsExpirationTest` builds its records inline
+/// (`TransactionsExpirationTest.java:119-120`, ...).
+fn expiration_record(
+    topic: &str,
+    partition: Option<i32>,
+    key_and_value: &str,
+    header_value: &[u8],
+) -> ProducerRecord<Vec<u8>, Vec<u8>> {
+    producer_record_with_expected_transaction_status(
+        topic,
+        partition,
+        key_and_value,
+        key_and_value,
+        header_value == COMMITTED_VALUE,
+    )
+}
+
+/// `TransactionsExpirationTest.assertConsumeRecords` (`TransactionsExpirationTest.java:238-263`),
+/// CONSUMER arm: a read_committed consumer subscribed to `topics` sees exactly
+/// `expected_count` records within 15 s, each carrying the committed header.
+async fn assert_consume_records(ctx: &TestContext, topics: &[String], expected_count: usize) {
+    let mut consumer = cluster_consumer(ctx, &[("enable.auto.commit", "false"), ("isolation.level", "read_committed")]);
+    consumer.subscribe_with_topics(topics.to_vec()).await.expect("subscribe");
+    let mut consumer_records = Vec::new();
+    let start = Instant::now();
+    loop {
+        consumer_records.extend(consumer.poll(Duration::from_millis(100)).await.expect("poll"));
+        if consumer_records.len() == expected_count {
+            break;
+        }
+        assert!(
+            start.elapsed() <= Duration::from_millis(15_000),
+            "Consumer with protocol CONSUMER should consume {expected_count} records, but get {}",
+            consumer_records.len()
+        );
+        tokio::time::sleep(Duration::from_millis(test_utils::DEFAULT_PAUSE_MS)).await;
+    }
+    consumer.close().await.expect("consumer close");
+    for record in &consumer_records {
+        let header = record
+            .headers()
+            .headers(TRANSACTION_STATUS_KEY)
+            .first()
+            .cloned()
+            .expect("the record carries a transactionStatus header");
+        assert_eq!(
+            Some(COMMITTED_VALUE),
+            header.value(),
+            "Record does not have the expected header value."
+        );
+    }
+}
+
+/// Once the transactional id has expired, the next transactional send fails with
+/// `InvalidPidMappingException` (fatal); a reinitialized producer with the same id
+/// commits a new transaction across two topics.
+///
+/// Translates `TransactionsExpirationTest.testFatalErrorAfterInvalidProducerIdMappingWithTV2`
+/// (`TransactionsExpirationTest.java:94-97`, body `:109-153`). The TV1 row is not
+/// reachable (see the section note).
+#[tokio::test]
+async fn test_fatal_error_after_invalid_producer_id_mapping_with_tv2() {
+    let mut ctx = TestContext::new(transactions_expiration_cluster()).await;
+    let topic1 = ctx.topic("topic1");
+    let topic2 = ctx.topic("topic2");
+    let transaction_id = ctx.group_id("transactionalProducer");
+    create_expiration_topic(&ctx, &topic1, 4).await;
+    create_expiration_topic(&ctx, &topic2, 4).await;
+    let bootstrap = ctx.bootstrap_servers().to_string();
+
+    {
+        let producer = cluster_producer(&bootstrap, &[("transactional.id", transaction_id.as_str())]);
+        producer.init_transactions().await.expect("initTransactions");
+        // Start and then abort a transaction to allow the transactional ID to expire.
+        producer.begin_transaction().expect("beginTransaction");
+        send_record(&producer, expiration_record(&topic1, Some(0), "2", ABORTED_VALUE))
+            .await
+            .expect("send");
+        send_record(&producer, expiration_record(&topic2, Some(0), "4", ABORTED_VALUE))
+            .await
+            .expect("send");
+        producer.abort_transaction().await.expect("abortTransaction");
+
+        // Check the transactional state exists and then wait for it to expire.
+        wait_until_transactional_state_exists(&ctx, &transaction_id).await;
+        let admin = txn_test_admin(&ctx);
+        wait_until_transactional_state_expires(admin.as_ref(), &transaction_id).await;
+        admin.close().await;
+
+        // Start a new transaction and attempt to send, triggering an
+        // AddPartitionsToTxnRequest that will fail due to the expired
+        // transactional ID, resulting in a fatal error.
+        producer.begin_transaction().expect("beginTransaction");
+        assert_send_fails_with_invalid_pid_mapping_then_abort_is_fatal(
+            &producer,
+            expiration_record(&topic1, Some(3), "1", ABORTED_VALUE),
+        )
+        .await;
+        producer.close().await.expect("producer close");
+    }
+
+    // Reinitialize to recover from the fatal error.
+    {
+        let producer = cluster_producer(&bootstrap, &[("transactional.id", transaction_id.as_str())]);
+        producer.init_transactions().await.expect("initTransactions");
+        // Proceed with a new transaction after reinitializing.
+        producer.begin_transaction().expect("beginTransaction");
+        for record in [
+            expiration_record(&topic2, None, "2", COMMITTED_VALUE),
+            expiration_record(&topic1, Some(2), "4", COMMITTED_VALUE),
+            expiration_record(&topic2, None, "1", COMMITTED_VALUE),
+            expiration_record(&topic1, Some(3), "3", COMMITTED_VALUE),
+        ] {
+            send_record(&producer, record).await.expect("send");
+        }
+        producer.commit_transaction().await.expect("commitTransaction");
+
+        wait_until_transactional_state_exists(&ctx, &transaction_id).await;
+        producer.close().await.expect("producer close");
+    }
+
+    assert_consume_records(&ctx, &[topic1, topic2], 4).await;
+    ctx.cleanup().await;
+}
+
+/// `TransactionsExpirationTest`'s "Ensure producer IDs are added" / "Producer IDs
+/// should repopulate" wait (`TransactionsExpirationTest.java:167-177`, `:201-211`):
+/// accumulate `describeProducers` results until non-empty, treating a failed call
+/// as "not yet", then assert exactly one producer was seen.
+async fn wait_for_single_producer_state(ctx: &TestContext, tp: &TopicPartition) -> ProducerState {
+    let admin = txn_test_admin(ctx);
+    // Java's `producerStates.addAll(...)` into a list the lambda captures; the
+    // `RefCell` borrow is taken only after the await.
+    let producer_states_seen = std::cell::RefCell::new(Vec::new());
+    test_utils::wait_until_true_with_timeout(
+        || async {
+            if let Ok(states) = producer_states(admin.as_ref(), tp).await {
+                producer_states_seen.borrow_mut().extend(states);
+            }
+            !producer_states_seen.borrow().is_empty()
+        },
+        &format!("Producer IDs for {tp} did not propagate quickly"),
+        test_utils::DEFAULT_MAX_WAIT_MS,
+        test_utils::DEFAULT_PAUSE_MS,
+    )
+    .await;
+    admin.close().await;
+    let mut producer_states_seen = producer_states_seen.into_inner();
+    assert_eq!(1, producer_states_seen.len(), "Unexpected producer to {tp}");
+    producer_states_seen.remove(0)
+}
+
+/// After the producer id expires from the partition's producer state, the
+/// transactional id still maps to it: a new producer with the same id reuses the
+/// producer id with a bumped epoch, and its transaction commits.
+///
+/// Translates `TransactionsExpirationTest.testTransactionAfterProducerIdExpiresWithTV2`
+/// (`TransactionsExpirationTest.java:104-107`, body `:155-203`). The TV1 row is
+/// not reachable (see the section note).
+#[tokio::test]
+async fn test_transaction_after_producer_id_expires_with_tv2() {
+    let mut ctx = TestContext::new(transactions_expiration_cluster()).await;
+    let topic1 = ctx.topic("topic1");
+    let topic1_partition0 = TopicPartition::new(topic1.clone(), 0);
+    let transaction_id = ctx.group_id("transactionalProducer");
+    create_expiration_topic(&ctx, &topic1, 4).await;
+    let bootstrap = ctx.bootstrap_servers().to_string();
+
+    let (old_producer_id, old_producer_epoch) = {
+        let producer = cluster_producer(&bootstrap, &[("transactional.id", transaction_id.as_str())]);
+        producer.init_transactions().await.expect("initTransactions");
+
+        // Start and then abort a transaction to allow the producer ID to expire.
+        producer.begin_transaction().expect("beginTransaction");
+        send_record(&producer, expiration_record(&topic1, Some(0), "2", ABORTED_VALUE))
+            .await
+            .expect("send");
+        producer.flush().await.expect("flush");
+
+        // Ensure producer IDs are added.
+        let producer_state = wait_for_single_producer_state(&ctx, &topic1_partition0).await;
+
+        producer.abort_transaction().await.expect("abortTransaction");
+
+        // Wait for the producer ID to expire.
+        let admin = txn_test_admin(&ctx);
+        test_utils::wait_until_true_with_timeout(
+            || async {
+                producer_states(admin.as_ref(), &topic1_partition0)
+                    .await
+                    .is_ok_and(|states| states.is_empty())
+            },
+            &format!("Producer IDs for {topic1_partition0} did not expire."),
+            test_utils::DEFAULT_MAX_WAIT_MS,
+            test_utils::DEFAULT_PAUSE_MS,
+        )
+        .await;
+        admin.close().await;
+        producer.close().await.expect("producer close");
+        (producer_state.producer_id(), producer_state.producer_epoch())
+    };
+
+    // Create a new producer to check that we retain the producer ID in
+    // transactional state.
+    let producer = cluster_producer(&bootstrap, &[("transactional.id", transaction_id.as_str())]);
+    producer.init_transactions().await.expect("initTransactions");
+
+    // Start a new transaction and attempt to send. This should work since only
+    // the producer ID was removed from its mapping in ProducerStateManager.
+    producer.begin_transaction().expect("beginTransaction");
+    send_record(&producer, expiration_record(&topic1, Some(0), "4", COMMITTED_VALUE))
+        .await
+        .expect("send");
+    send_record(&producer, expiration_record(&topic1, Some(3), "3", COMMITTED_VALUE))
+        .await
+        .expect("send");
+    producer.commit_transaction().await.expect("commitTransaction");
+
+    // Producer IDs should repopulate.
+    let producer_state = wait_for_single_producer_state(&ctx, &topic1_partition0).await;
+    let new_producer_id = producer_state.producer_id();
+    let new_producer_epoch = producer_state.producer_epoch();
+
+    // Because the transaction IDs outlive the producer IDs, creating a producer
+    // with the same transactional id soon after the first will re-use the same
+    // producerId, while bumping the epoch to indicate that they are distinct.
+    assert_eq!(old_producer_id, new_producer_id);
+    // TV2 bumps epoch on EndTxn, and the final commit may or may not have bumped
+    // the epoch in the producer state. The epoch should be at least
+    // oldProducerEpoch + 2 for the first commit and the restarted producer.
+    assert!(
+        old_producer_epoch + 2 <= new_producer_epoch,
+        "expected epoch >= {} but was {new_producer_epoch}",
+        old_producer_epoch + 2
+    );
+
+    assert_consume_records(&ctx, &[topic1], 2).await;
     producer.close().await.expect("producer close");
     ctx.cleanup().await;
 }
