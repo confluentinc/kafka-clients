@@ -185,3 +185,4 @@ stop/restart harness + fault-injection tests; stale doc/comment cleanup.
 ## Run log
 
 (Manager appends one line per loop iteration.)
+- Phase 1 / Actor 65: 67fe726b (prod fix: wake bg task on OffsetFetch retry re-enqueue, KAFKA-20165 committed() timed out) + fd77ba85 (3 tests, all green on 4.2.0). Critic 65 reviewing.
