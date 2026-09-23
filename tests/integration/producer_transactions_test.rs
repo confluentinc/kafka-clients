@@ -41,6 +41,11 @@
 //! - `testSendOffsetsWithGroupMetadata` → [`test_send_offsets_with_group_metadata`]
 //! - `testReadCommittedConsumerShouldNotSeeUndecidedData` →
 //!   [`test_read_committed_consumer_should_not_see_undecided_data`]
+//! - `testDelayedFetchIncludesAbortedTransaction` →
+//!   [`test_delayed_fetch_includes_aborted_transaction`]
+//! - `testMultipleMarkersOneLeader` → [`test_multiple_markers_one_leader`]
+//! - `testFencingOnTransactionExpiration` → [`test_fencing_on_transaction_expiration`]
+//!   (on its own cluster config, for the abort-cleanup interval)
 //!
 //! and from the Java `clients-integration-tests` module (AK 4.3.1):
 //!
@@ -93,6 +98,7 @@ use std::time::Instant;
 use confluent_kafka::admin::Admin;
 use confluent_kafka::admin::AdminClientConfig;
 use confluent_kafka::admin::KafkaAdminClient;
+use confluent_kafka::admin::OffsetSpec;
 use confluent_kafka::admin::TransactionState;
 use confluent_kafka::common::Error;
 use confluent_kafka::common::Errors;
@@ -1628,6 +1634,365 @@ async fn test_read_committed_consumer_should_not_see_undecided_data() {
     read_uncommitted_consumer.close().await.expect("consumer close");
     producer1.close().await.expect("producer1 close");
     producer2.close().await.expect("producer2 close");
+    ctx.cleanup().await;
+}
+
+// ---------------------------------------------------------------------------
+// TransactionsTest: markers, delayed fetch and transaction expiration
+// ---------------------------------------------------------------------------
+
+/// `TransactionsTest.verifyLogStartOffsets` (`TransactionsTest.scala:1109-1121`):
+/// wait until each partition's log start offset equals the expected one.
+///
+/// Deviation: Java reads `replicaManager.localLog(partition).logStartOffset` on
+/// every broker. A client cannot inspect replicas, so this waits on the log
+/// start offset the leader reports through `ListOffsets(EARLIEST)` — the value a
+/// client observes.
+async fn verify_log_start_offsets(ctx: &TestContext, partition_start_offsets: &[(TopicPartition, i64)]) {
+    let admin = txn_test_admin(ctx);
+    let specs: HashMap<TopicPartition, OffsetSpec> = partition_start_offsets
+        .iter()
+        .map(|(partition, _)| (partition.clone(), OffsetSpec::earliest()))
+        .collect();
+    let current = std::sync::Mutex::new(HashMap::new());
+    test_utils::wait_until_true_with_timeout(
+        || async {
+            let Ok(offsets) = admin.list_offsets(&specs).all().get().await else {
+                return false;
+            };
+            let matches = partition_start_offsets
+                .iter()
+                .all(|(partition, offset)| offsets.get(partition).map(|info| info.offset()) == Some(*offset));
+            *current.lock().unwrap() = offsets.into_iter().map(|(tp, info)| (tp, info.offset())).collect();
+            matches
+        },
+        &format!("log start offset doesn't change to the expected position: {partition_start_offsets:?}"),
+        test_utils::DEFAULT_MAX_WAIT_MS,
+        test_utils::DEFAULT_PAUSE_MS,
+    )
+    .await;
+    admin.close().await;
+}
+
+/// A read_committed fetch parked in purgatory (`fetch.min.bytes` far above the
+/// data size) still carries the aborted-transaction index, so the consumer skips
+/// the aborted records and returns only the committed ones, at their offsets.
+///
+/// Translates `TransactionsTest.testDelayedFetchIncludesAbortedTransaction`
+/// (`TransactionsTest.scala:245-299`). `maybeVerifyLocalLogStartOffsets` and
+/// `maybeWaitForAtLeastOneSegmentUpload` are no-ops in Java outside the
+/// tiered-storage subclass and are omitted.
+#[tokio::test]
+async fn test_delayed_fetch_includes_aborted_transaction() {
+    let mut ctx = TestContext::new(cluster_config()).await;
+    let (topic1, _topic2) = create_txn_test_topics(&mut ctx).await;
+    let bootstrap = ctx.bootstrap_servers().to_string();
+    let producer1 = create_transactional_producer(&bootstrap, &ctx.group_id("transactional-producer"));
+    let producer2 = create_transactional_producer(&bootstrap, &ctx.group_id("other"));
+    let tp10 = TopicPartition::new(topic1.clone(), 0);
+
+    producer1.init_transactions().await.expect("producer1.initTransactions");
+    producer2.init_transactions().await.expect("producer2.initTransactions");
+
+    let record = |key: &str, value: &str| {
+        ProducerRecord::with_partition_key(
+            topic1.clone(),
+            Some(0),
+            Some(key.as_bytes().to_vec()),
+            Some(value.as_bytes().to_vec()),
+        )
+        .expect("valid record")
+    };
+
+    producer1.begin_transaction().expect("producer1.beginTransaction");
+    producer2.begin_transaction().expect("producer2.beginTransaction");
+    send_record(&producer2, record("x", "1")).await.expect("producer2 send");
+    producer2.flush().await.expect("producer2.flush");
+
+    send_record(&producer1, record("y", "1")).await.expect("producer1 send");
+    send_record(&producer1, record("y", "2")).await.expect("producer1 send");
+    producer1.flush().await.expect("producer1.flush");
+
+    send_record(&producer2, record("x", "2")).await.expect("producer2 send");
+    producer2.flush().await.expect("producer2.flush");
+
+    // Since we haven't committed/aborted any records, the last stable offset is
+    // still 0, no segments should be offloaded to remote storage
+    verify_log_start_offsets(&ctx, &[(tp10.clone(), 0)]).await;
+
+    producer1.abort_transaction().await.expect("producer1.abortTransaction");
+    producer2.commit_transaction().await.expect("producer2.commitTransaction");
+
+    // We've sent 4 records + 1 abort mark + 1 commit mark; the log start offset
+    // is still 0.
+    verify_log_start_offsets(&ctx, &[(tp10.clone(), 0)]).await;
+
+    // ensure that the consumer's fetch will sit in purgatory
+    let mut read_committed_consumer = create_consumer(
+        &bootstrap,
+        &ctx.group_id("group"),
+        true,
+        500,
+        &[("fetch.min.bytes", "100000"), ("fetch.max.wait.ms", "100")],
+    );
+
+    read_committed_consumer.assign(vec![tp10.clone()]).await.expect("assign");
+    let records = consume_records(&mut read_committed_consumer, 2).await;
+    assert_eq!(2, records.len());
+
+    let first = &records[0];
+    assert_eq!(b"x".as_slice(), first.key().expect("key").as_slice());
+    assert_eq!(b"1".as_slice(), first.value().expect("value").as_slice());
+    assert_eq!(0, first.offset());
+
+    let second = &records[1];
+    assert_eq!(b"x".as_slice(), second.key().expect("key").as_slice());
+    assert_eq!(b"2".as_slice(), second.value().expect("value").as_slice());
+    assert_eq!(3, second.offset());
+
+    read_committed_consumer.close().await.expect("consumer close");
+    producer1.close().await.expect("producer1 close");
+    producer2.close().await.expect("producer2 close");
+    ctx.cleanup().await;
+}
+
+/// `TransactionsTest.sendTransactionalMessagesWithValueRange`
+/// (`TransactionsTest.scala:1059-1065`): keys and values `start .. end` with the
+/// expected-status header, then `flush`.
+async fn send_transactional_messages_with_value_range(
+    producer: &KafkaProducer<Vec<u8>, Vec<u8>>,
+    topic: &str,
+    start: i32,
+    end: i32,
+    will_be_committed: bool,
+) {
+    for i in start..end {
+        let value = i.to_string();
+        send_record(
+            producer,
+            producer_record_with_expected_transaction_status(topic, None, &value, &value, will_be_committed),
+        )
+        .await
+        .expect("send");
+    }
+    producer.flush().await.expect("flush");
+}
+
+/// One transaction spanning twenty partitions — half of them on single-replica
+/// partitions, so several markers go to the same leader in one
+/// `WriteTxnMarkers` — is aborted, a second is committed; read_committed sees
+/// exactly the 1000 committed records and read_uncommitted all 11000.
+///
+/// Translates `TransactionsTest.testMultipleMarkersOneLeader`
+/// (`TransactionsTest.scala:654-688`).
+#[tokio::test]
+async fn test_multiple_markers_one_leader() {
+    let mut ctx = TestContext::new(cluster_config()).await;
+    let bootstrap = ctx.bootstrap_servers().to_string();
+    let first_producer = create_transactional_producer(&bootstrap, &ctx.group_id("transactional-producer"));
+    let mut consumer = create_read_committed_consumer(&bootstrap, &ctx.group_id("transactional-group"));
+    let mut un_committed_consumer =
+        create_read_uncommitted_consumer(&bootstrap, &ctx.group_id("non-transactional-group"));
+    let topic_with_10_partitions = ctx.topic("largeTopic");
+    let topic_with_10_partitions_and_one_replica = ctx.topic("largeTopicOneReplica");
+
+    let admin = txn_test_admin(&ctx);
+    test_utils::create_topic_with_configs(
+        admin.as_ref(),
+        &topic_with_10_partitions,
+        10,
+        TXN_TEST_REPLICATION_FACTOR,
+        BTreeMap::from([("min.insync.replicas".to_string(), "2".to_string())]),
+    )
+    .await;
+    test_utils::wait_for_partition_leaders(admin.as_ref(), &topic_with_10_partitions, 0..10).await;
+    test_utils::create_topic_with_configs(
+        admin.as_ref(),
+        &topic_with_10_partitions_and_one_replica,
+        10,
+        1,
+        BTreeMap::new(),
+    )
+    .await;
+    test_utils::wait_for_partition_leaders(admin.as_ref(), &topic_with_10_partitions_and_one_replica, 0..10).await;
+    admin.close().await;
+
+    first_producer.init_transactions().await.expect("initTransactions");
+
+    first_producer.begin_transaction().expect("beginTransaction");
+    send_transactional_messages_with_value_range(&first_producer, &topic_with_10_partitions, 0, 5000, false).await;
+    send_transactional_messages_with_value_range(
+        &first_producer,
+        &topic_with_10_partitions_and_one_replica,
+        5000,
+        10000,
+        false,
+    )
+    .await;
+    first_producer.abort_transaction().await.expect("abortTransaction");
+
+    first_producer.begin_transaction().expect("beginTransaction");
+    send_transactional_messages_with_value_range(&first_producer, &topic_with_10_partitions, 10000, 11000, true).await;
+    first_producer.commit_transaction().await.expect("commitTransaction");
+
+    let topics = vec![
+        topic_with_10_partitions_and_one_replica.clone(),
+        topic_with_10_partitions.clone(),
+    ];
+    consumer.subscribe_with_topics(topics.clone()).await.expect("subscribe");
+    un_committed_consumer.subscribe_with_topics(topics).await.expect("subscribe");
+
+    let records = consume_records(&mut consumer, 1000).await;
+    for record in &records {
+        assert_committed_and_get_value(record);
+    }
+
+    let all_records = consume_records(&mut un_committed_consumer, 11000).await;
+    let expected_values: std::collections::HashSet<String> = (0..11000).map(|i| i.to_string()).collect();
+    for record in &all_records {
+        let value = String::from_utf8_lossy(record.value().expect("value")).into_owned();
+        assert!(expected_values.contains(&value), "unexpected value {value}");
+    }
+
+    consumer.close().await.expect("consumer close");
+    un_committed_consumer.close().await.expect("consumer close");
+    first_producer.close().await.expect("producer close");
+    ctx.cleanup().await;
+}
+
+/// `TransactionsTest`'s cluster with its abort-cleanup interval
+/// (`TransactionsTest.scala:61-75`), for the one test that depends on it.
+///
+/// The other `TransactionsTest` translations share [`kip848_3_broker`]'s pooled
+/// container (see the deviations above), but
+/// `transaction.abort.timed.out.transaction.cleanup.interval.ms=200` is what lets
+/// the coordinator expire a 300 ms transaction inside
+/// [`test_fencing_on_transaction_expiration`]'s 600 ms sleep — at the broker
+/// default (10 s) the transaction would still be open. So this config adds that
+/// property, plus Java's `__transaction_state` shape (3 partitions, RF 2, min ISR
+/// 2) and disabled auto-creation, on top of the KIP-848 settings, and gets its
+/// own pooled container.
+fn transactions_test_expiration_cluster() -> ClusterConfig {
+    let mut config = kip848_3_broker(2);
+    for (key, value) in [
+        ("KAFKA_AUTO_CREATE_TOPICS_ENABLE", "false"),
+        ("KAFKA_TRANSACTION_STATE_LOG_NUM_PARTITIONS", "3"),
+        ("KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR", "2"),
+        ("KAFKA_TRANSACTION_STATE_LOG_MIN_ISR", "2"),
+        ("KAFKA_TRANSACTION_ABORT_TIMED_OUT_TRANSACTION_CLEANUP_INTERVAL_MS", "200"),
+    ] {
+        config.server_properties.insert(key.to_string(), value.to_string());
+    }
+    config
+}
+
+/// `TransactionsTest.consumeRecordsFor(consumer)` (`TransactionsTest.scala:1131-1141`):
+/// everything the consumer returns while polling (50 ms each) for one second.
+async fn consume_records_for(
+    consumer: &mut Box<dyn Consumer<Vec<u8>, Vec<u8>>>,
+) -> Vec<ConsumerRecord<Vec<u8>, Vec<u8>>> {
+    let duration = Duration::from_millis(1000);
+    let start = Instant::now();
+    let mut records = Vec::new();
+    loop {
+        records.extend(consumer.poll(Duration::from_millis(50)).await.expect("poll should not fail"));
+        if start.elapsed() > duration {
+            return records;
+        }
+    }
+}
+
+/// A transaction left open past `transaction.timeout.ms` is aborted by the
+/// coordinator, which bumps the epoch: the next send fails with
+/// `InvalidProducerEpochException` (or `ConcurrentTransactionsException` while the
+/// abort completes), the first record ends up aborted and the second is never
+/// written.
+///
+/// Translates `TransactionsTest.testFencingOnTransactionExpiration`
+/// (`TransactionsTest.scala:610-650`).
+#[tokio::test]
+async fn test_fencing_on_transaction_expiration() {
+    let mut ctx = TestContext::new(transactions_test_expiration_cluster()).await;
+    let (topic1, _topic2) = create_txn_test_topics(&mut ctx).await;
+    let bootstrap = ctx.bootstrap_servers().to_string();
+    let producer =
+        create_transactional_producer_with_transaction_timeout_ms(&bootstrap, &ctx.group_id("expiringProducer"), 300);
+
+    producer.init_transactions().await.expect("initTransactions");
+    producer.begin_transaction().expect("beginTransaction");
+
+    // The first message and hence the first AddPartitions request should be
+    // successfully sent.
+    let first_message_result = send_record(
+        &producer,
+        producer_record_with_expected_transaction_status(&topic1, None, "1", "1", false),
+    )
+    .await
+    .expect("first send")
+    .get()
+    .await
+    .expect("the first record is acked");
+    assert!(first_message_result.has_offset());
+
+    // Wait for the expiration cycle to kick in.
+    tokio::time::sleep(Duration::from_millis(600)).await;
+
+    // Now that the transaction has expired, the second send should fail with an
+    // InvalidProducerEpochException. We may see some ConcurrentTransactionsExceptions.
+    match send_record(
+        &producer,
+        producer_record_with_expected_transaction_status(&topic1, None, "2", "2", false),
+    )
+    .await
+    {
+        // Java's bare `catch` arms: the exception escapes `send(...)` / `get()`
+        // unwrapped.
+        Err(Error::ConcurrentTransactions(_)) | Err(Error::InvalidProducerEpoch(_)) => {},
+        Err(other) => panic!("Error was {other:?} and not InvalidProducerEpochException"),
+        Ok(future) => match future.get().await {
+            Ok(_) => panic!("should have raised an error due to concurrent transactions or invalid producer epoch"),
+            Err(error) => {
+                assert!(
+                    matches!(error, Error::InvalidProducerEpoch(_)),
+                    "Error was {error:?} and not InvalidProducerEpochException"
+                );
+                assert_eq!(error.message(), Errors::InvalidProducerEpoch.message());
+            },
+        },
+    }
+
+    // Verify that the first message was aborted and the second one was never
+    // written at all.
+    let mut non_transactional_consumer =
+        create_read_uncommitted_consumer(&bootstrap, &ctx.group_id("non-transactional-group"));
+    non_transactional_consumer
+        .subscribe_with_topics(vec![topic1.clone()])
+        .await
+        .expect("subscribe");
+
+    // Attempt to consume the one written record. We should not see the second.
+    // The assertion does not strictly guarantee that the record wasn't written,
+    // but the data is small enough that had it been written, it would have been
+    // in the first fetch.
+    let records = consume_records(&mut non_transactional_consumer, 1).await;
+    assert_eq!(1, records.len());
+    assert_eq!(b"1".as_slice(), records[0].value().expect("value").as_slice());
+
+    let mut transactional_consumer = create_read_committed_consumer(&bootstrap, &ctx.group_id("transactional-group"));
+    transactional_consumer
+        .subscribe_with_topics(vec![topic1.clone()])
+        .await
+        .expect("subscribe");
+
+    let transactional_records = consume_records_for(&mut transactional_consumer).await;
+    assert!(
+        transactional_records.is_empty(),
+        "the expired transaction's record must not be visible to read_committed"
+    );
+
+    non_transactional_consumer.close().await.expect("consumer close");
+    transactional_consumer.close().await.expect("consumer close");
+    producer.close().await.expect("producer close");
     ctx.cleanup().await;
 }
 
