@@ -59,6 +59,10 @@
 //!   rest of that scenario
 //! - `TransactionsWithMaxInFlightOneTest.testTransactionalProducerSingleBrokerMaxInFlightOne` →
 //!   [`test_transactional_producer_single_broker_max_in_flight_one`]
+//! - `AdminFenceProducersTest.testFenceAfterProducerCommit` →
+//!   [`test_fence_after_producer_commit`]
+//! - `AdminFenceProducersTest.testFenceBeforeProducerCommit` →
+//!   [`test_fence_before_producer_commit`]
 //!
 //! # Why the four Phase-8 scenarios are not translations
 //!
@@ -2232,6 +2236,188 @@ async fn test_transactional_producer_single_broker_max_in_flight_one() {
             "Record does not have the expected header value"
         );
     }
+
+    producer.close().await.expect("producer close");
+    ctx.cleanup().await;
+}
+
+// ---------------------------------------------------------------------------
+// AdminFenceProducersTest translations
+// ---------------------------------------------------------------------------
+//
+// `AdminFenceProducersTest` (clients-integration-tests, AK 4.3.1) drives a real
+// transactional producer against `Admin.fenceProducers`, so it lives next to the
+// other transactional-producer translations rather than in
+// `admin_transactions_test.rs`. It is native-only: the multilanguage harness
+// has no admin + transactional-producer pairing. `testFenceProducerTimeoutMs`
+// uses no producer and is not part of this slice.
+//
+// Deviations forced by the pooled harness: the fixed `TOPIC_NAME` / `TXN_ID`
+// become per-test names (`ctx.topic` / `ctx.group_id`), and the topic is created
+// through the admin client and awaited until its partition has a leader.
+
+/// `AdminFenceProducersTest`'s `@ClusterTestDefaults` broker
+/// (`AdminFenceProducersTest.java:44-50`): one broker, auto-create disabled, a
+/// one-partition RF-1 `__transaction_state`, and a 2 s abort-cleanup interval.
+/// The interval differs from every other config here, so this is its own pooled
+/// container.
+fn admin_fence_producers_cluster() -> ClusterConfig {
+    let props = BTreeMap::from([
+        ("KAFKA_AUTO_CREATE_TOPICS_ENABLE".to_string(), "false".to_string()),
+        ("KAFKA_TRANSACTION_STATE_LOG_NUM_PARTITIONS".to_string(), "1".to_string()),
+        ("KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR".to_string(), "1".to_string()),
+        ("KAFKA_TRANSACTION_STATE_LOG_MIN_ISR".to_string(), "1".to_string()),
+        (
+            "KAFKA_TRANSACTION_ABORT_TIMED_OUT_TRANSACTION_CLEANUP_INTERVAL_MS".to_string(),
+            "2000".to_string(),
+        ),
+    ]);
+    ClusterConfig::with_properties(props)
+}
+
+/// `AdminFenceProducersTest.createProducer()` (`AdminFenceProducersTest.java:63-66`).
+fn admin_fence_producers_producer(bootstrap: &str, txn_id: &str) -> KafkaProducer<Vec<u8>, Vec<u8>> {
+    cluster_producer(bootstrap, &[("transactional.id", txn_id), ("transaction.timeout.ms", "2000")])
+}
+
+/// `AdminFenceProducersTest.RECORD` (`AdminFenceProducersTest.java:59`): no key,
+/// a one-byte value.
+fn admin_fence_producers_record(topic: &str) -> ProducerRecord<Vec<u8>, Vec<u8>> {
+    ProducerRecord::with_key(topic.to_string(), None, Some(vec![0u8]))
+}
+
+/// `adminClient.fenceProducers(List.of(txnId)).all().get()`.
+async fn fence_producer(ctx: &TestContext, txn_id: &str) {
+    let admin = txn_test_admin(ctx);
+    admin
+        .fence_producers(&[txn_id.to_string()])
+        .all()
+        .get()
+        .await
+        .expect("fenceProducers");
+    admin.close().await;
+}
+
+/// Fencing a producer between transactions: its next send fails through the
+/// future with `InvalidProducerEpochException` (Transaction V2 converts the
+/// coordinator's `ProducerFencedException`), and `commitTransaction` returns that
+/// same fatal error.
+///
+/// Translates `AdminFenceProducersTest.testFenceAfterProducerCommit`
+/// (`AdminFenceProducersTest.java:68-96`). Java asserts the classes only; the
+/// message is the error code's fixed default text, so it is asserted too.
+#[tokio::test]
+async fn test_fence_after_producer_commit() {
+    let mut ctx = TestContext::new(admin_fence_producers_cluster()).await;
+    let topic = ctx.topic("mytopic");
+    create_single_broker_topic(&ctx, &topic, 1, BTreeMap::new()).await;
+    let bootstrap = ctx.bootstrap_servers().to_string();
+    let txn_id = ctx.group_id("mytxnid");
+    let producer = admin_fence_producers_producer(&bootstrap, &txn_id);
+
+    producer.init_transactions().await.expect("initTransactions");
+    producer.begin_transaction().expect("beginTransaction");
+    send_record(&producer, admin_fence_producers_record(&topic))
+        .await
+        .expect("send")
+        .get()
+        .await
+        .expect("the first record is acked");
+    producer.commit_transaction().await.expect("commitTransaction");
+
+    fence_producer(&ctx, &txn_id).await;
+
+    producer.begin_transaction().expect("beginTransaction");
+    let exception_during_send = send_record(&producer, admin_fence_producers_record(&topic))
+        .await
+        .expect("send is accepted; the failure arrives through the future")
+        .get()
+        .await
+        .expect_err("expected InvalidProducerEpochException");
+
+    // In Transaction V2, the ProducerFencedException will be converted to
+    // InvalidProducerEpochException when coordinator handles AddPartitionRequest.
+    assert!(
+        matches!(exception_during_send, Error::InvalidProducerEpoch(_)),
+        "expected InvalidProducerEpoch, got {exception_during_send:?}"
+    );
+    assert_eq!(exception_during_send.message(), Errors::InvalidProducerEpoch.message());
+
+    // InvalidProducerEpochException is treated as fatal error. The
+    // commitTransaction will return this last fatal error.
+    let commit_error = producer
+        .commit_transaction()
+        .await
+        .expect_err("commitTransaction must return the fatal error");
+    assert!(
+        matches!(commit_error, Error::InvalidProducerEpoch(_)),
+        "expected InvalidProducerEpoch, got {commit_error:?}"
+    );
+    // `TransactionManager.maybeFailWithError` (`TransactionManager.java:1181-1184`)
+    // rethrows a fresh InvalidProducerEpochException naming the transactional id
+    // and the producer id / epoch; the latter two are broker-assigned, so only
+    // the fixed parts are asserted.
+    let commit_message = commit_error.message();
+    let expected_prefix = format!("Producer with transactionalId '{txn_id}' and (producerId=");
+    assert!(
+        commit_message.starts_with(&expected_prefix)
+            && commit_message.ends_with(") attempted to produce with an old epoch"),
+        "unexpected commitTransaction message: {commit_message}"
+    );
+
+    producer.close().await.expect("producer close");
+    ctx.cleanup().await;
+}
+
+/// Fencing a producer inside an open transaction: its next send fails through
+/// the future with `ProducerFencedException` or `InvalidProducerEpochException`,
+/// and `commitTransaction` fails with an `ApiException` of one of those two.
+///
+/// Translates `AdminFenceProducersTest.testFenceBeforeProducerCommit`
+/// (`AdminFenceProducersTest.java:111-137`).
+#[tokio::test]
+async fn test_fence_before_producer_commit() {
+    let mut ctx = TestContext::new(admin_fence_producers_cluster()).await;
+    let topic = ctx.topic("mytopic");
+    create_single_broker_topic(&ctx, &topic, 1, BTreeMap::new()).await;
+    let bootstrap = ctx.bootstrap_servers().to_string();
+    let txn_id = ctx.group_id("mytxnid");
+    let producer = admin_fence_producers_producer(&bootstrap, &txn_id);
+
+    producer.init_transactions().await.expect("initTransactions");
+    producer.begin_transaction().expect("beginTransaction");
+    send_record(&producer, admin_fence_producers_record(&topic))
+        .await
+        .expect("send")
+        .get()
+        .await
+        .expect("the first record is acked");
+
+    fence_producer(&ctx, &txn_id).await;
+
+    let exception_during_send = send_record(&producer, admin_fence_producers_record(&topic))
+        .await
+        .expect("send is accepted; the failure arrives through the future")
+        .get()
+        .await
+        .expect_err("expected ProducerFencedException");
+    assert!(
+        matches!(exception_during_send, Error::ProducerFenced(_) | Error::InvalidProducerEpoch(_)),
+        "expected ProducerFenced or InvalidProducerEpoch, got {exception_during_send:?}"
+    );
+
+    let exception_during_commit = producer.commit_transaction().await.expect_err("Expected Exception");
+    assert!(
+        exception_during_commit.is_api_error(),
+        "expected an ApiException, got {exception_during_commit:?}"
+    );
+    assert!(
+        matches!(
+            exception_during_commit,
+            Error::ProducerFenced(_) | Error::InvalidProducerEpoch(_)
+        ),
+        "expected ProducerFenced or InvalidProducerEpoch, got {exception_during_commit:?}"
+    );
 
     producer.close().await.expect("producer close");
     ctx.cleanup().await;

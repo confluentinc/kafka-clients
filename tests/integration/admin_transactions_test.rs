@@ -24,16 +24,14 @@
 //! the C FFI. With only `integration-tests` enabled the `__rust` arm is the whole
 //! expansion.
 //!
-//! # What a client with no transactional producer can and cannot reach
+//! # What these admin-only scenarios can and cannot reach
 //!
-//! The Rust `Producer` trait does not implement the transactional API
-//! (`init_transactions` / `begin_transaction` / ... — see
-//! `src/producer/producer.rs`), and `enable.idempotence` defaults to `true`
-//! in `ProducerConfig` but nothing on the send path ever calls
-//! `ProducerBatch::set_producer_state`, so every record this client produces
-//! carries `RecordBatch::NO_PRODUCER_ID` (`src/producer/internals/sender.rs`).
-//! The earlier revision of this file concluded from that that five of its six
-//! scenarios could only be error paths and left `abortTransaction` as an
+//! None of these scenarios starts a transactional producer. (The client has one
+//! — `KafkaProducer::init_transactions` / `begin_transaction` / ... — and the
+//! `AdminFenceProducersTest` translations that pair it with `fenceProducers`
+//! live in `producer_transactions_test.rs`.) An earlier revision of this file,
+//! written before the transactional producer existed, concluded that five of its
+//! six scenarios could only be error paths and left `abortTransaction` as an
 //! `#[ignore]`d skeleton. Measured against a real broker, most of that was wrong:
 //!
 //!   - **`fenceProducers` on a fresh transactional id creates a transaction.**
@@ -62,7 +60,8 @@
 //!     populated only while a transaction is **in progress**
 //!     (`ProducerStateEntry.currentTxnFirstOffset` is set by an
 //!     `addPartitionsToTxn` + append sequence). Those need a transactional
-//!     producer, so they are exercised on their `None` / empty side only. A
+//!     producer, which these scenarios do not start, so they are exercised on
+//!     their `None` / empty side only. A
 //!     dropped field is still caught, because `None` is what the assertions
 //!     demand and a backend reporting `Some(0)` fails.
 //!   - `TransactionState::{Ongoing, PrepareAbort, PrepareCommit, CompleteAbort,
