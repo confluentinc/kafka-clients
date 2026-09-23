@@ -481,8 +481,8 @@ impl MultilanguageAdmin {
         Ok(ConfigResource::new(config_resource::Type::for_id(id), resource.name))
     }
 
-    /// Rebuilds a [`LogDirDescription`], preserving the log dir's own error and
-    /// the two `OptionalLong` volume sizes.
+    /// Rebuilds a [`LogDirDescription`], preserving the log dir's own error, the
+    /// two `OptionalLong` volume sizes and the `isCordoned()` flag (KIP-1066).
     fn log_dir_description(&self, description: proto::LogDirDescription) -> Result<LogDirDescription, Error> {
         let mut replica_infos = HashMap::with_capacity(description.replica_infos.len());
         for replica in description.replica_infos {
@@ -494,21 +494,31 @@ impl MultilanguageAdmin {
                 ReplicaInfo::new(replica.size, replica.offset_lag, replica.is_future),
             );
         }
-        // `LogDirDescription::new` is the two-argument Java constructor, which
-        // records both volume sizes as absent; `with_total_bytes_usable_bytes` is the
-        // four-argument one. Java has no constructor for one present and the
-        // other absent, and no broker sends that, so the mixed case is a
-        // protocol error rather than a guess.
+        // Java's `isCordoned()` is a plain bool; an absent proto field (a server
+        // that predates the flag) is false, matching the Java default.
+        let is_cordoned = description.is_cordoned.unwrap_or(false);
+        // The five-argument constructor is the KIP-1066 one; passing
+        // `UNKNOWN_VOLUME_BYTES` (-1) for a volume size records it as absent,
+        // exactly as the two-argument Java constructor does. Java has no
+        // constructor for one volume size present and the other absent, and no
+        // broker sends that, so the mixed case is a protocol error rather than a
+        // guess. Java's `DescribeLogDirsResponse.UNKNOWN_VOLUME_BYTES`, spelled
+        // out because `common::requests` is not public API.
+        const UNKNOWN: i64 = -1;
         match (description.total_bytes, description.usable_bytes) {
-            (None, None) => Ok(LogDirDescription::new(
+            (None, None) => Ok(LogDirDescription::with_total_bytes_usable_bytes_is_cordoned(
                 description.error.map(kafka_error_from_proto),
                 replica_infos,
+                UNKNOWN,
+                UNKNOWN,
+                is_cordoned,
             )),
-            (Some(total), Some(usable)) => Ok(LogDirDescription::with_total_bytes_usable_bytes(
+            (Some(total), Some(usable)) => Ok(LogDirDescription::with_total_bytes_usable_bytes_is_cordoned(
                 description.error.map(kafka_error_from_proto),
                 replica_infos,
                 total,
                 usable,
+                is_cordoned,
             )),
             (total, usable) => Err(self.protocol_error(format!(
                 "LogDirDescription reported totalBytes={} and usableBytes={}; Java has no constructor for one \
