@@ -514,8 +514,10 @@ struct CommitRequestManagerInner {
     auto_commit_interceptor_hook: Mutex<Option<Arc<dyn AutoCommitInterceptorHook>>>,
     /// The bg task's wakeup `Notify` (a clone of the consumer's
     /// `event_notify`, i.e. the selector wakeup — Java's `Selector.wakeup()`),
-    /// poked whenever [`fetch_offsets_with_retries`] re-enqueues an
-    /// `OffsetFetch` retry.
+    /// poked whenever a spawned retry driver ([`fetch_offsets_with_retries`],
+    /// [`commit_sync_with_retries`],
+    /// [`auto_commit_sync_before_rebalance_with_retries`]) re-enqueues an
+    /// `OffsetFetch` / `OffsetCommit` retry.
     ///
     /// Java retries inside the `whenComplete` continuation, which runs on the
     /// network thread itself, so the retry is visible to the very next
@@ -524,7 +526,10 @@ struct CommitRequestManagerInner {
     /// loop has already computed its poll timeout, so without this wake the
     /// retry sits unsent until the network poll times out on its own (up to
     /// ~5s), past the `committed()` deadline — turning Java's partial result
-    /// (KAFKA-20165, `CommitRequestManager.java:629`) into a `TimeoutError`.
+    /// (KAFKA-20165, `CommitRequestManager.java:629`) into a `TimeoutError`,
+    /// and delaying each `OffsetCommit` retry (including the pre-revocation
+    /// auto-commit on the reconcile path) by a full poll timeout instead of
+    /// its backoff.
     /// Empty until the production wiring installs it via
     /// [`CommitRequestManager::set_completion_notify`]; unit tests that do not
     /// drive a real bg task leave it unset.
@@ -636,8 +641,8 @@ impl CommitRequestManager {
     }
 
     /// Installs the bg task's wakeup `Notify` (a clone of `event_notify`) so
-    /// the `OffsetFetch` retry driver can wake the network poll when it
-    /// re-enqueues a retry. See `CommitRequestManagerInner::completion_notify`.
+    /// the spawned `OffsetFetch` / `OffsetCommit` retry drivers can wake the
+    /// network poll when they re-enqueue a retry. See `CommitRequestManagerInner::completion_notify`.
     /// Mirrors [`FetchRequestManager::set_completion_notify`]; the first
     /// installed handle wins (it is wired exactly once, at construction).
     ///
@@ -2256,6 +2261,7 @@ async fn commit_sync_with_retries(
                     let mut guard = inner.state.lock().expect("commit manager state poisoned");
                     guard.pending.unsent_offset_commits.push_back(retry_request);
                 }
+                wake_background_task(&inner);
                 request_rx = retry_rx;
             },
             Err(_) => break Err(Error::new(Errors::NetworkError)),
@@ -2402,6 +2408,7 @@ async fn auto_commit_sync_before_rebalance_with_retries(
                     let mut guard = inner.state.lock().expect("commit manager state poisoned");
                     guard.pending.unsent_offset_commits.push_back(retry_request);
                 }
+                wake_background_task(&inner);
                 request_rx = retry_rx;
             },
             Err(_) => break Err(Error::new(Errors::NetworkError)),
@@ -2462,8 +2469,9 @@ async fn auto_commit_sync_before_rebalance_with_retries(
 ///
 /// Deadline expiry (Java's `maybeWrapAsTimeoutException`) surfaces as
 /// [`Error::timeout`] wrapping the original error message.
-/// Wakes the bg task's network poll after [`fetch_offsets_with_retries`]
-/// re-enqueues an `OffsetFetch` retry, so the next `poll` sees the retry and
+/// Wakes the bg task's network poll after a spawned retry driver
+/// ([`fetch_offsets_with_retries`], [`commit_sync_with_retries`],
+/// [`auto_commit_sync_before_rebalance_with_retries`]) re-enqueues a retry, so the next `poll` sees the retry and
 /// sleeps only for its backoff. See
 /// `CommitRequestManagerInner::completion_notify` for why Java needs no
 /// equivalent (its retry is enqueued on the network thread itself). The guard
@@ -5180,6 +5188,71 @@ mod tests {
             .expect("retry driver must wake the bg task after re-enqueueing the retry");
         assert_eq!(
             manager.inner_state_for_test(),
+            1,
+            "the retry must be queued when the wake fires"
+        );
+    }
+
+    /// Same wake requirement as
+    /// `offset_fetch_retry_on_retriable_partition_error_wakes_background_task`
+    /// for the spawned `commit_sync_with_retries` driver: re-enqueueing an
+    /// `OffsetCommit` retry after a retriable error must poke the bg task, or
+    /// the retry waits a full poll timeout instead of its backoff (Java
+    /// re-enqueues on the network thread, `CommitRequestManager.commitSyncWithRetries`).
+    #[tokio::test(flavor = "current_thread")]
+    async fn offset_commit_sync_retry_on_retriable_error_wakes_background_task() {
+        let manager = make_manager(0, false);
+        let notify = Arc::new(tokio::sync::Notify::new());
+        manager.set_completion_notify(Arc::clone(&notify));
+        let coordinator = coordinator_with_node();
+        let tp = topic_partition("topic", 1);
+        let _public_rx = manager.commit_sync(singleton_offset(tp.clone(), 0), i64::MAX, 0);
+
+        let unsent = poll_one_unsent(&manager, &coordinator, 0);
+        let woken = notify.notified();
+        unsent
+            .handler()
+            .on_complete(offset_commit_response_single(&tp, Errors::CoordinatorLoadInProgress));
+
+        tokio::time::timeout(std::time::Duration::from_secs(5), woken)
+            .await
+            .expect("commit-sync retry driver must wake the bg task after re-enqueueing the retry");
+        assert_eq!(
+            manager.unsent_offset_commits_len_for_test(),
+            1,
+            "the retry must be queued when the wake fires"
+        );
+    }
+
+    /// Wake requirement for the spawned
+    /// `auto_commit_sync_before_rebalance_with_retries` driver (the
+    /// pre-revocation auto-commit on the reconcile path): a retriable error
+    /// re-enqueues the commit and must poke the bg task.
+    #[tokio::test(flavor = "current_thread")]
+    async fn auto_commit_before_rebalance_retry_on_retriable_error_wakes_background_task() {
+        let (manager, subs) = make_manager_with_subs(0, true);
+        let notify = Arc::new(tokio::sync::Notify::new());
+        manager.set_completion_notify(Arc::clone(&notify));
+        let tp = TopicPartition::new("t".to_string(), 0);
+        {
+            let mut s = subs.lock().unwrap();
+            s.assign_from_user(HashSet::from([tp.clone()])).expect("assign_from_user");
+            s.seek(&tp, 100).expect("seek");
+        }
+        let _public_rx = manager.maybe_auto_commit_sync_before_rebalance(i64::MAX, 0);
+
+        let coordinator = coordinator_with_node();
+        let unsent = poll_one_unsent(&manager, &coordinator, 0);
+        let woken = notify.notified();
+        unsent
+            .handler()
+            .on_complete(offset_commit_response_single(&tp, Errors::CoordinatorLoadInProgress));
+
+        tokio::time::timeout(std::time::Duration::from_secs(5), woken)
+            .await
+            .expect("rebalance auto-commit retry driver must wake the bg task after re-enqueueing the retry");
+        assert_eq!(
+            manager.unsent_offset_commits_len_for_test(),
             1,
             "the retry must be queued when the wake fires"
         );
