@@ -193,3 +193,4 @@ null value as `b""` (Phase 2 / Critic 66).
 - Phase 2 / Actor 66: 8135b2ce + 5e059541 (6 tests, native green; harness waits for all partition leaders). Critic 66: 1 finding (gRPC arms: sizes -1, null value) → fixing.
 - Phase 2: fixup bbd0ff4f (gRPC-arm gating); Critic 66 re-review clean. Phase 2 DONE.
 - Phase 3 / Actor 67: e3be241d (7 timestamp tests, native green). Critic 67: 2 findings (linger=MAX hangs gRPC arms; LogAppendTime needs 50ms skew slack) → fixed b12144f5; re-review clean. Phase 3 DONE.
+- Phase 4 / Actor 68: b151cc5e, eb51f2c0, ee3f602f (compression, failure-handling, non-blocking, max-request-size; 36 native producer tests green). Critic 68: clean. Phase 4 DONE. NOTE: local gRPC images predate a8205c5c — rebuild (make build-grpc-images) and re-run gRPC arms before merge.
