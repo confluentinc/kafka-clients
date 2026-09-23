@@ -1,0 +1,77 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <!--
+    The .NET gRPC backend for the Rust multilanguage integration-test harness
+    (consumer M8/P1+P2; producer M12/P1). NOT part of the shipped Confluent.Kafka
+    package — it is a test-harness artifact that exposes the binding's generic
+    KafkaProducer/MockProducer and KafkaConsumer/MockConsumer (both
+    <byte[],byte[]> with Serdes.ByteArray) over the ProducerService +
+    ConsumerService gRPC contracts, so the repo's producer AND consumer
+    integration tests can run against the .NET binding (the .NET twin of the
+    Python / C backends). One server per flavor hosts BOTH services
+    (Python-parity), flavor-selected by CONSUMER_FLAVOR (Program.cs). See
+    design/history/M8/P1-sync-consumer-grpc-backend/PLAN.md and
+    design/history/M12/P1-producer-grpc-backend/PLAN.md.
+
+    Framework choice (PLAN item B): Grpc.AspNetCore (Kestrel) on net8.0 — the
+    supported, pure-managed HTTP/2 server path (Grpc.Core is EOL). Serves h2c
+    (cleartext HTTP/2, no TLS) because the Rust client dials http:// (Program.cs).
+
+    Directory.Build.props (at bindings/dotnet/) auto-applies: #nullable enable,
+    the dotnet/runtime code style, TreatWarningsAsErrors, and strong-name
+    signing. The generated protobuf/gRPC stubs are auto-generated code and are
+    skipped by the code-style/CA analyzers; NoWarn below relaxes the two
+    compiler/CA rules that clash with the faithful Python-parity port (a broad
+    catch that mirrors grpc_server.py; generated-code warnings).
+  -->
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <RootNamespace>Confluent.Kafka.GrpcServer</RootNamespace>
+    <AssemblyName>Confluent.Kafka.GrpcServer</AssemblyName>
+    <Nullable>enable</Nullable>
+    <!-- Test-harness executable — never packed, no XML doc file (so no CS1591). -->
+    <IsPackable>false</IsPackable>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <!--
+      CA1031: the servicer catches System.Exception broadly on purpose — it is
+      a faithful port of grpc_server.py's `except Exception` that funnels every
+      failure into a proto KafkaError (Translate.ToProto). This is the harness
+      contract, not a defect, so the rule is relaxed for this project only.
+    -->
+    <NoWarn>$(NoWarn);CA1031</NoWarn>
+  </PropertyGroup>
+
+  <!--
+    Proto codegen (PLAN item A; M12/P1 producer). Single source of truth = the
+    proto crate at multilanguage-test-server/proto (3 dir levels up: grpc-server
+    -> dotnet -> bindings -> repo). ProtoRoot puts the proto dir on protoc's
+    import path so `import "producer_service.proto"` resolves. Both services are
+    compiled with GrpcServices="Server": consumer_service.proto (M8) and now
+    producer_service.proto (M12/P1) — the .NET backend hosts BOTH ProducerService
+    and ConsumerService from one server (Python-parity, PLAN §3). The shared
+    messages (KafkaError / PartitionInfo / Node / Header / StatusResponse /
+    PartitionsForResponse) are defined once in producer_service.proto and reused
+    by the consumer service. Flipping producer_service.proto from
+    GrpcServices="None" to "Server" is a binding-local BUILD-CONFIG change — it
+    emits the ProducerService server base into the same assembly; the proto
+    CONTENT is untouched. Grpc.Tools flows in transitively via Grpc.AspNetCore.
+  -->
+  <PropertyGroup>
+    <ProtoRoot>$(MSBuildProjectDirectory)/../../../multilanguage-test-server/proto</ProtoRoot>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Protobuf Include="$(ProtoRoot)/producer_service.proto" ProtoRoot="$(ProtoRoot)" GrpcServices="Server" />
+    <Protobuf Include="$(ProtoRoot)/consumer_service.proto" ProtoRoot="$(ProtoRoot)" GrpcServices="Server" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Grpc.AspNetCore" Version="2.71.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../src/Confluent.Kafka/Confluent.Kafka.csproj" />
+  </ItemGroup>
+
+</Project>
