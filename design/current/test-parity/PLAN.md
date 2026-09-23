@@ -198,3 +198,4 @@ null value as `b""` (Phase 2 / Critic 66).
 - Phase 6 / Actor 70: 3db40d8c (4 txn happy-path tests + listTransactions check; txn_single_broker moved to cluster_config). Critic 70: clean. Phase 6 DONE.
 - Phase 7 / Actor 71: 4f91fd6c, 5bb64773, c795b089 (7 extended txn + AdminFence tests; 31 txn+admin-txn green). Critic 71: clean. Phase 7 DONE.
 - Phase 8 / Actor 72: e9fa1395 (4 ProducerSendWhileDeletion tests, 5/5 runs each; new file). Critic 72: clean. Phase 8 DONE.
+- Phase 9 / Actor 73: 3af420c2, 5a4853bc (4 expiration tests; stale idempotent-PID comment fixed). Critic 73: 1 finding (describe_producers race, 1/20 flake) → fixed af96b13b (10/10). Phase 9 DONE. Producer block (2-9) complete.
