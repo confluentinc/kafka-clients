@@ -926,7 +926,8 @@ def _admin_log_dir_description_to_proto(description):
     `error` is the log dir's own error (offline, unreadable): the broker
     answered, so it is *not* the per-broker error, which arrives as the entry's
     error arm instead of a value. `total_bytes` / `usable_bytes` are Java's
-    OptionalLong, absent when the broker did not report them."""
+    OptionalLong, absent when the broker did not report them. `is_cordoned` is
+    Java's `isCordoned()` (KIP-1066): a plain bool, always carried."""
     out = apb.LogDirDescription()
     if description.error is not None:
         out.error.CopyFrom(_kafka_error_to_proto(description.error))
@@ -934,6 +935,7 @@ def _admin_log_dir_description_to_proto(description):
         out.total_bytes = description.total_bytes
     if description.usable_bytes is not None:
         out.usable_bytes = description.usable_bytes
+    out.is_cordoned = bool(description.is_cordoned)
     for (topic, partition), info in description.replica_infos.items():
         out.replica_infos.append(apb.ReplicaInfoEntry(
             partition=cpb.TopicPartition(topic=topic, partition=partition),
