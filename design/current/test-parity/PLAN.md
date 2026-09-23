@@ -181,9 +181,13 @@ pause via `ConsumerHandle`, static-member new-partition, 4.3.1 revocation
 shape); GroupAuthorizer consumer tests; ProducerSendWhileDeletion; expiration
 suites; broker image bump to 4.3.x (+ assignment-interval arms); broker
 stop/restart harness + fault-injection tests; stale doc/comment cleanup.
+Binding gaps found: gRPC servers (python `grpc_translate.py`, C `server.cc`) return
+`serialized_key_size`/`serialized_value_size` = -1, and the Python server sends a
+null value as `b""` (Phase 2 / Critic 66).
 
 ## Run log
 
 (Manager appends one line per loop iteration.)
 - Phase 1 / Actor 65: 67fe726b (prod fix: wake bg task on OffsetFetch retry re-enqueue, KAFKA-20165 committed() timed out) + fd77ba85 (3 tests, all green on 4.2.0). Critic 65 reviewing.
 - Phase 1 / Critic 65: 1 finding (same missing wake in commit retry drivers) → fixed in f2f5d080; re-review clean. Phase 1 DONE.
+- Phase 2 / Actor 66: 8135b2ce + 5e059541 (6 tests, native green; harness waits for all partition leaders). Critic 66: 1 finding (gRPC arms: sizes -1, null value) → fixing.
