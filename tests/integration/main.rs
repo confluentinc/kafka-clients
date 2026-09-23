@@ -51,6 +51,7 @@ mod plaintext_consumer_fetch_test;
 mod plaintext_consumer_poll_test;
 mod plaintext_consumer_subscription_test;
 mod plaintext_consumer_test;
+mod producer_send_while_deletion_test;
 // Gated on `integration-tests`, NOT `multilanguage-tests`: the module holds two
 // rust-only tests (`test_close_with_zero_timeout_aborts_pending`,
 // `test_wrong_serializer_errors_send`) whose own attributes are
