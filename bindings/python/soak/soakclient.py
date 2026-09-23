@@ -44,7 +44,6 @@ import argparse
 import json
 import logging
 import os
-import re
 import resource
 import signal
 import socket
@@ -280,6 +279,7 @@ def _bindings():
     global _BINDINGS
     if _BINDINGS is None:
         try:
+            import admin as _admin
             import consumer as _consumer
             import producer as _producer
         except ImportError as ex:
@@ -297,6 +297,8 @@ def _bindings():
             KafkaConsumer=_consumer.KafkaConsumer,
             TopicPartition=_consumer.TopicPartition,
             OffsetAndMetadata=_consumer.OffsetAndMetadata,
+            AdminClient=_admin.AdminClient,
+            NewTopic=_admin.NewTopic,
         )
     return _BINDINGS
 
@@ -536,82 +538,154 @@ def jaas_field(jaas_config, name):
     ``username="k"``, ``username = "k"``, ``username='k'`` and bare
     ``username=k``. Returns ``None`` only when the field is genuinely absent.
 
-    The previous hand-rolled scanner required ``name="`` with no space and double
-    quotes, so ``username = "k"`` silently yielded no credentials at all — the
-    admin client then attempted SASL PLAIN unauthenticated and the failure
-    surfaced as an opaque broker error. Hence both the tolerance here and the
-    hard failure in :func:`librdkafka_admin_config`.
+    This mirrors the Rust parser (``SaslConfig::parse_jaas_option``) byte for
+    byte so the client and this validator never disagree: the key is recognized
+    only at an **option start** (beginning of string or after whitespace), quoted
+    regions are skipped wholesale **honoring backslash escapes**, and the value
+    may be double-quoted, single-quoted, or bare. A ``name=`` sequence that lives
+    inside another option's quoted value is therefore never mistaken for the
+    option (e.g. ``password="username=x" username="right"`` resolves ``username``
+    to ``right``, not ``x``) — a regex ``search`` did make that mistake and let a
+    missing-username config pass the fast-fail. The returned value is the raw
+    inner content between the quotes (escapes are honored for boundary detection
+    but not expanded), matching the Rust parser.
+
+    A hand-rolled scanner (rather than a regex) is required precisely because a
+    regex cannot skip escaped quotes / balanced quoting the way the Rust lexer
+    does; the two must agree so the hard failure in
+    :func:`check_admin_credentials` is reliable.
     """
-    # (?<![\w.]) so `serviceName=` / `foo.username=` cannot match `username=`.
-    pattern = re.compile(
-        r'(?<![\w.])' + re.escape(name) + r'\s*=\s*'
-        r'(?:"([^"]*)"|\'([^\']*)\'|([^\s;]+))')
-    match = pattern.search(jaas_config)
-    if match is None:
-        return None
-    for group in match.groups():
-        if group is not None:
-            return group
+    s = jaas_config
+    n = len(s)
+
+    def skip_quoted(i):
+        # Advance past a quoted region opening at s[i], honoring '\' escapes.
+        quote = s[i]
+        i += 1
+        while i < n:
+            if s[i] == '\\':
+                i += 2
+                continue
+            if s[i] == quote:
+                return i + 1
+            i += 1
+        return i
+
+    i = 0
+    while i < n:
+        c = s[i]
+        if c == '"' or c == "'":
+            i = skip_quoted(i)
+            continue
+        at_option_start = i == 0 or s[i - 1].isspace()
+        if at_option_start and s.startswith(name, i):
+            j = i + len(name)
+            while j < n and s[j].isspace():
+                j += 1
+            if j < n and s[j] == '=':
+                j += 1
+                while j < n and s[j].isspace():
+                    j += 1
+                if j >= n:
+                    return None
+                quote = s[j]
+                if quote == '"' or quote == "'":
+                    start = j + 1
+                    k = start
+                    while k < n:
+                        if s[k] == '\\':
+                            k += 2
+                            continue
+                        if s[k] == quote:
+                            return s[start:k]
+                        k += 1
+                    return None  # unterminated quote — malformed
+                # Bare value: read until whitespace or ';'.
+                k = j
+                while k < n and not s[k].isspace() and s[k] != ';':
+                    k += 1
+                return s[j:k]
+        i += 1
     return None
 
 
 def jaas_credentials(jaas_config):
     """Extract ``(username, password)`` from a Java JAAS login-module string.
 
-    Only used to drive librdkafka's AdminClient (topic creation), which takes
-    ``sasl.username`` / ``sasl.password`` instead. Either element is ``None``
-    when that field is absent.
+    Either element is ``None`` when that field is absent. Used only to *validate*
+    the soak's admin credentials at startup (:func:`check_admin_credentials`) —
+    the Rust admin client takes ``sasl.jaas.config`` verbatim and parses it
+    itself, so these values are never forwarded anywhere.
     """
     return jaas_field(jaas_config, "username"), jaas_field(jaas_config, "password")
 
 
-def librdkafka_admin_config(conf):
-    """Translate a soak (Java-style) config into a librdkafka AdminClient one.
+def check_admin_credentials(conf):
+    """Fail fast at startup when SASL is configured but credentials cannot be
+    recovered from ``sasl.jaas.config``.
 
-    Topic creation goes through confluent-kafka's AdminClient, whose
-    configuration namespace differs: it has no ``sasl.jaas.config`` and *errors*
-    on unknown keys. So only the keys it certainly understands are forwarded,
-    and the JAAS credentials are unpacked into username/password.
-
-    Raises ``ValueError`` when a SASL mechanism is configured but credentials
-    cannot be recovered. Silently forwarding no credentials is the one outcome
+    The Rust admin client parses ``sasl.jaas.config`` itself, so this does NOT
+    translate the config — it only *validates* that a username and password are
+    present. Silently proceeding with no usable credentials is the one outcome
     worth refusing: it turns a typo into an authentication error from the broker
     minutes later, or — with an unauthenticated listener — into a soak that runs
-    for two weeks against the wrong thing.
+    for two weeks against the wrong thing. PLAINTEXT (no SASL) requires no
+    credentials and passes untouched.
+
+    A second, symmetric misconfiguration is refused just as fast: SASL
+    credentials or a mechanism are configured, but ``security.protocol`` is not a
+    SASL protocol (does not contain ``"SASL"``). The Rust client defaults to
+    PLAINTEXT, so it would connect *unauthenticated* while the operator believes
+    SASL is in force — exactly the "runs for two weeks against the wrong thing"
+    failure, in the opposite direction. Naming it at startup beats discovering it
+    from an unauthenticated listener later.
+
+    Raises :class:`FatalStartupError` (mapped to ``EXIT_FATAL``: a restart cannot
+    fix a bad credential), naming the missing piece.
     """
-    passthrough = ("bootstrap.servers", "security.protocol", "sasl.mechanism",
-                   "client.id", "ssl.ca.location", "ssl.certificate.location",
-                   "ssl.key.location", "ssl.endpoint.identification.algorithm")
-    out = {k: v for k, v in conf.items() if k in passthrough}
-
-    sasl_expected = ("SASL" in out.get("security.protocol", "").upper()
-                     or bool(out.get("sasl.mechanism")))
+    protocol = conf.get("security.protocol", "")
+    protocol_is_sasl = "SASL" in protocol.upper()
+    mechanism = conf.get("sasl.mechanism", "")
     jaas = conf.get("sasl.jaas.config")
-    username = password = None
-    if jaas:
-        username, password = jaas_credentials(jaas)
-        if username is not None:
-            out["sasl.username"] = username
-        if password is not None:
-            out["sasl.password"] = password
+    username, password = jaas_credentials(jaas) if jaas else (None, None)
+    sasl_creds_present = username is not None or password is not None
+    sasl_configured = bool(mechanism) or sasl_creds_present
 
-    if sasl_expected and (username is None or password is None):
-        missing = [
-            name
-            for name, value in (("username", username), ("password", password))
-            if value is None
-        ]
-        raise ValueError(
-            "security.protocol={!r} / sasl.mechanism={!r} require credentials, but "
-            "sasl.jaas.config {}: could not extract {}. Expected Java JAAS form: "
-            "sasl.jaas.config=org.apache.kafka.common.security.plain."
-            "PlainLoginModule required username=\"KEY\" password=\"SECRET\"; "
-            "(note sasl.username/sasl.password are NOT config keys of this "
-            "client)".format(
-                out.get("security.protocol", ""), out.get("sasl.mechanism", ""),
-                "is not set" if not jaas else "is set but unparseable",
-                " and ".join(missing)))
-    return out
+    # SASL is configured, but the protocol would not actually use it: the client
+    # connects as PLAINTEXT (the Rust default) — silently unauthenticated. A
+    # restart cannot fix a protocol mismatch, so refuse before the run begins.
+    if sasl_configured and not protocol_is_sasl:
+        raise FatalStartupError(
+            "sasl.mechanism={!r} / sasl.jaas.config {}, but security.protocol={!r} "
+            "is not a SASL protocol, so the client would connect WITHOUT SASL "
+            "(PLAINTEXT, the Rust default) — silently unauthenticated. Set "
+            "security.protocol to a SASL protocol (e.g. SASL_SSL or "
+            "SASL_PLAINTEXT). Restarting will not fix this.".format(
+                mechanism,
+                "has credentials" if sasl_creds_present else "has no credentials",
+                protocol))
+
+    sasl_expected = protocol_is_sasl or bool(mechanism)
+    if not sasl_expected:
+        return
+
+    if username is not None and password is not None:
+        return
+
+    missing = [
+        name
+        for name, value in (("username", username), ("password", password))
+        if value is None
+    ]
+    raise FatalStartupError(
+        "security.protocol={!r} / sasl.mechanism={!r} require credentials, but "
+        "sasl.jaas.config {}: could not extract {}. Expected Java JAAS form: "
+        "sasl.jaas.config=org.apache.kafka.common.security.plain."
+        "PlainLoginModule required username=\"KEY\" password=\"SECRET\"; "
+        "Restarting will not fix this.".format(
+            conf.get("security.protocol", ""), conf.get("sasl.mechanism", ""),
+            "is not set" if not jaas else "is set but unparseable",
+            " and ".join(missing)))
 
 
 class LastValueGauges(object):
@@ -1149,17 +1223,27 @@ class SoakClient(object):
                              "producer only: %s", ", ".join(routed))
         validate_config(cconf, CONSUMER_CONFIG_KEYS, "consumer")
 
-        # Topic creation goes through librdkafka's AdminClient (this binding
-        # ships no admin module). Create-if-absent by default: run.sh restarts
-        # the client repeatedly and a restart must never discard the topic.
-        admin_conf = librdkafka_admin_config(stringify_config(aconf))
-        if "sasl.username" in admin_conf:
-            # Log the principal — never the secret — so a config that parsed to
-            # the wrong user is visible in the first lines of the log rather than
-            # as an authorization error later.
-            self.logger.info("SASL %s as user %s",
-                             admin_conf.get("sasl.mechanism", "?"),
-                             admin_conf["sasl.username"])
+        # Topic creation goes through this repo's Rust-backed AdminClient
+        # (bindings/python/admin.py), which takes the same Java-style config
+        # namespace as the producer/consumer — no librdkafka translation. The
+        # security.protocol fix on this branch makes it work against SASL/SSL
+        # clusters (Confluent Cloud). Create-if-absent by default: run.sh
+        # restarts the client repeatedly and a restart must never discard the
+        # topic.
+        admin_conf = stringify_config(aconf)
+        # Fail fast — before the long run begins — if SASL is configured but no
+        # credentials can be recovered from sasl.jaas.config, so a typo surfaces
+        # here rather than as a broker auth error minutes later (or a two-week
+        # soak against the wrong thing). PLAINTEXT passes untouched.
+        check_admin_credentials(admin_conf)
+        if admin_conf.get("sasl.mechanism"):
+            # Log the mechanism — never the secret — so a SASL misconfiguration
+            # is visible in the first lines of the log rather than as an
+            # authorization error later. The Rust admin parses sasl.jaas.config
+            # itself, so there is no username/password to unpack here.
+            self.logger.info("admin: SASL %s (security.protocol=%s)",
+                             admin_conf.get("sasl.mechanism"),
+                             admin_conf.get("security.protocol", "?"))
         self.create_topic(self.topic, admin_conf,
                           partitions=args.partitions,
                           replication_factor=args.replication_factor,
@@ -1246,59 +1330,75 @@ class SoakClient(object):
     def create_topic(self, topic, aconf, partitions, replication_factor, recreate):
         """Create the topic if it doesn't already exist.
 
-        Uses confluent-kafka's AdminClient: this binding exposes no admin API to
-        Python. ``recreate`` (``--recreate-topic``) additionally deletes it
-        first, which is destructive and must never be the default — run.sh
-        restarts the soak in a loop.
+        Uses this repo's Rust-backed AdminClient (bindings/python/admin.py),
+        which accepts the same Java-style config namespace as the
+        producer/consumer (bootstrap.servers, security.protocol, sasl.mechanism,
+        sasl.jaas.config, ssl.*). ``recreate`` (``--recreate-topic``)
+        additionally deletes it first, which is destructive and must never be
+        the default — run.sh restarts the soak in a loop.
         """
-        from confluent_kafka.admin import AdminClient, NewTopic
-        from confluent_kafka import KafkaException
-        from confluent_kafka import KafkaError as CKafkaError
+        bindings = _bindings()
+        KafkaError = bindings.KafkaError
 
         if recreate:
             from soak_metrics import recreate_topic
             self.logger.warning("--recreate-topic: deleting and re-creating %s", topic)
-            sasl_conf = {k: v for k, v in aconf.items() if k != "bootstrap.servers"}
-            recreate_topic(aconf["bootstrap.servers"], topic,
-                           sasl_conf=sasl_conf, partitions=partitions)
+            recreate_topic(aconf, topic, partitions=partitions)
             return
 
+        # `Errors` wire codes (src/common/protocol/errors.rs). The admin binding
+        # returns ``create_topics([...])`` -> ``{name: TopicMetadataAndConfig |
+        # KafkaError}`` (each value is already the per-key result or a
+        # ``KafkaError`` whose ``.code`` is the wire code), and the whole call
+        # itself raises a ``KafkaError`` on a call-level failure.
         # Authentication / authorization failures will never clear by retrying;
         # everything else here (broker unreachable, metadata timeout) might.
-        # Names are looked up defensively because the set differs across
-        # confluent-kafka versions.
+        TOPIC_ALREADY_EXISTS = 36
         auth_codes = {
-            getattr(CKafkaError, name) for name in (
-                "_AUTHENTICATION", "SASL_AUTHENTICATION_FAILED",
-                "TOPIC_AUTHORIZATION_FAILED", "CLUSTER_AUTHORIZATION_FAILED",
-                "GROUP_AUTHORIZATION_FAILED", "UNSUPPORTED_SASL_MECHANISM",
-                "ILLEGAL_SASL_STATE",
-            ) if hasattr(CKafkaError, name)
+            29,   # TOPIC_AUTHORIZATION_FAILED
+            30,   # GROUP_AUTHORIZATION_FAILED
+            31,   # CLUSTER_AUTHORIZATION_FAILED
+            33,   # UNSUPPORTED_SASL_MECHANISM
+            34,   # ILLEGAL_SASL_STATE
+            58,   # SASL_AUTHENTICATION_FAILED
         }
 
-        admin = AdminClient(aconf)
-        new_topic = NewTopic(topic, num_partitions=partitions,
-                             replication_factor=replication_factor)
-        for _topic, fut in admin.create_topics([new_topic]).items():
-            try:
-                fut.result()
-                self.logger.info("Created topic %s (partitions=%d, rf=%d)",
-                                 _topic, partitions, replication_factor)
-            except KafkaException as ex:
-                code = ex.args[0].code()
-                if code == CKafkaError.TOPIC_ALREADY_EXISTS:
+        admin = bindings.AdminClient(dict(aconf))
+        try:
+            new_topic = bindings.NewTopic(topic, num_partitions=partitions,
+                                          replication_factor=replication_factor)
+
+            def _handle_create_error(_topic, ex):
+                code = ex.code
+                if code == TOPIC_ALREADY_EXISTS:
                     self.logger.info("Topic %s already exists: good", _topic)
                 elif code in auth_codes:
                     raise FatalStartupError(
                         "authentication/authorization failed creating topic {!r}: {}. "
                         "Check sasl.jaas.config (username/password) and the API "
                         "key's ACLs. Restarting will not fix this.".format(
-                            _topic, ex.args[0].str())) from ex
+                            _topic, ex.message)) from ex
                 else:
                     raise TransientStartupError(
                         "could not create or verify topic {!r}: {}. If the cluster "
                         "is reachable this may clear on retry.".format(
-                            _topic, ex.args[0].str())) from ex
+                            _topic, ex.message)) from ex
+
+            try:
+                results = admin.create_topics([new_topic])
+            except KafkaError as ex:
+                # The old admin interface raises a whole-call KafkaError from
+                # the call itself; classify it the same way as a per-key error.
+                _handle_create_error(topic, ex)
+            else:
+                for _topic, result in results.items():
+                    if isinstance(result, KafkaError):
+                        _handle_create_error(_topic, result)
+                    else:
+                        self.logger.info("Created topic %s (partitions=%d, rf=%d)",
+                                         _topic, partitions, replication_factor)
+        finally:
+            admin.close()
 
     # -- instrumentation ----------------------------------------------------
     def incr_counter(self, metric_name, incrval, tags=None):

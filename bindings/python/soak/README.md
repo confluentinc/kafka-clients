@@ -516,12 +516,24 @@ client repeatedly and a restart must not discard the soak's history.
 `--recreate-topic` deletes and re-creates it, for a deliberate fresh start
 only.
 
-Topic creation goes through **librdkafka's** `AdminClient` (hence
-`confluent-kafka` in `requirements.txt`) because this binding exposes no admin
-API to Python. It is not on the produce or consume path — the soak drives the
-Rust client for both. `librdkafka_admin_config()` translates the Java-style
-config into librdkafka's namespace, unpacking the JAAS credentials into
-`sasl.username`/`sasl.password` and dropping keys librdkafka would reject.
+Topic creation goes through **this repo's Rust-backed** `AdminClient`
+(`bindings/python/admin.py`) — the soak now drives the Rust client for admin,
+produce and consume alike. The admin client takes the **same Java-style config
+namespace** as the producer/consumer (`bootstrap.servers`, `security.protocol`,
+`sasl.mechanism`, `sasl.jaas.config`, `ssl.*`), so the soak passes its admin
+config through verbatim: no `sasl.jaas.config` → `sasl.username`/`sasl.password`
+translation, and no `confluent-kafka` dependency. The security-protocol support
+on the client makes this work against SASL/SSL clusters (Confluent Cloud). Each
+multi-key RPC returns one **already-resolved** result per key: `create_topics()`
+yields `{name: TopicMetadataAndConfig | KafkaError}` and `delete_topics()` yields
+`{name: None | KafkaError}`, and the whole call raises a `KafkaError` on a
+call-level failure. A per-key value that `isinstance(v, KafkaError)` marks that
+key's failure (its numeric `.code` is the wire error code); otherwise it is the
+success value — so the soak iterates
+`for _t, result in ....items(): if isinstance(result, KafkaError): ...`.
+(The Python per-key `Future` interface — `{name: Future}` with `fut.result()`,
+matching Java's `KafkaFuture` and librdkafka's dict-of-futures — lands in the
+follow-up PR that reworks the admin binding.)
 
 ## Threading
 
