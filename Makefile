@@ -18,7 +18,11 @@ endif
 	devel-build-c devel-build-python \
 	build-grpc-images build-grpc-images-python build-grpc-images-c init init-hooks \
 	test test-rust test-integration test-integration-python test-integration-c \
+	test-integration-python-ssl test-integration-python-sasl-ssl \
+	test-integration-c-ssl test-integration-c-sasl-ssl \
+	test-integration-plaintext test-integration-ssl test-integration-sasl-ssl \
 	test-c test-python test-rust-all-features \
+	test-rust-all-features-ssl test-rust-all-features-sasl-ssl \
 	test-c-macos-docker test-python-macos-docker \
 	test-integration-perf test-integration-perf-rust test-integration-perf-python \
 	producer-perf-test producer-perf-test-c \
@@ -162,6 +166,45 @@ test-rust-all-features: build-rust-all-features
 test-integration: build-rust-integration-tests
 	cargo test --features integration-tests --test integration
 
+# ── Protocol-parameterized functional integration runs ───────────────────
+#
+# Every broker the harness starts exposes PLAINTEXT / SSL / SASL_PLAINTEXT /
+# SASL_SSL listeners simultaneously, so INTEGRATION_TEST_PROTOCOL selects which
+# listener the whole suite's native clients connect over — the port and the
+# matching security keys are filled in centrally by TestContext::configure /
+# apply_security (tests/common/test_context.rs). This is the librdkafka-style
+# "run the whole suite once per protocol" model, adapted to our one-cluster,
+# all-listeners harness.
+#
+# `test-integration` above (no env var) is equivalent to the plaintext run.
+# Used by the Semaphore verify-plaintext / SSL / SASL_SSL blocks.
+test-integration-plaintext: build-rust-integration-tests
+	INTEGRATION_TEST_PROTOCOL=plaintext cargo test --features integration-tests --test integration
+test-integration-ssl: build-rust-integration-tests
+	INTEGRATION_TEST_PROTOCOL=ssl cargo test --features integration-tests --test integration
+test-integration-sasl-ssl: build-rust-integration-tests
+	INTEGRATION_TEST_PROTOCOL=sasl_ssl cargo test --features integration-tests --test integration
+
+# ── Whole native-Rust test suite, per protocol (no format/lint/perf) ──────
+#
+# The same test selection as `test-rust-all-features` (unit tests + the
+# functional integration suite + the `__rust` multilanguage arms; perf is
+# `test = false` so it is never scheduled), but with the client connections
+# driven over the SSL / SASL_SSL listener via INTEGRATION_TEST_PROTOCOL.
+#
+# These are what the SSL / SASL_SSL CI blocks run, so those blocks exercise the
+# entire suite over their listener rather than only the `integration` binary.
+# They deliberately OMIT format-check, clippy and the performance tail that
+# `verify-rust` wraps around `test-rust-all-features`: those checks are
+# protocol-independent, so running them once in the PLAINTEXT block is enough.
+# (The unit tests are protocol-independent too and so overlap the PLAINTEXT
+# run; they are kept here so a block failure points at one whole suite, not a
+# subset.)
+test-rust-all-features-ssl:
+	INTEGRATION_TEST_PROTOCOL=ssl $(MAKE) test-rust-all-features
+test-rust-all-features-sasl-ssl:
+	INTEGRATION_TEST_PROTOCOL=sasl_ssl $(MAKE) test-rust-all-features
+
 # ── Per-backend multilanguage integration tests ──────────────────────────
 #
 # The `multilanguage_test!` / `multilanguage_consumer_test!` macros expand each
@@ -233,6 +276,26 @@ test-integration-c:
 		$(MAKE) build-grpc-images-c && \
 		cargo test --features integration-tests,multilanguage-tests --test integration -- __grpc_c; \
 	fi
+
+# ── Protocol-scoped container-backed multilanguage arms ──────────────────
+#
+# The gRPC Python/C arms above default to the PLAINTEXT CONTAINER listener.
+# These variants drive the same arm over the SSL / SASL_SSL CONTAINER
+# listeners (CTLSONLY :9100 / CSASLTLS :9101 — the container-reachable twins
+# of the client SSL/SASL_SSL listeners, advertised on the container hostname
+# so a sibling gRPC container can reach them). INTEGRATION_TEST_PROTOCOL is
+# read by TestProtocol::from_env(); the harness injects the matching
+# security.protocol / TLS truststore / SASL settings into the config it
+# forwards verbatim to the gRPC server's client constructor. They inherit the
+# non-Linux SELF-SKIP from the targets they delegate to.
+test-integration-python-ssl:
+	INTEGRATION_TEST_PROTOCOL=ssl $(MAKE) test-integration-python
+test-integration-python-sasl-ssl:
+	INTEGRATION_TEST_PROTOCOL=sasl_ssl $(MAKE) test-integration-python
+test-integration-c-ssl:
+	INTEGRATION_TEST_PROTOCOL=ssl $(MAKE) test-integration-c
+test-integration-c-sasl-ssl:
+	INTEGRATION_TEST_PROTOCOL=sasl_ssl $(MAKE) test-integration-c
 
 # ── Performance integration tests ────────────────────────────────────────
 #
