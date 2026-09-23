@@ -197,3 +197,4 @@ null value as `b""` (Phase 2 / Critic 66).
 - Phase 5 / Actor 69: 69323353 (5 TransactionsTest fencing/state tests, green 3x; wait_for_partition_leaders moved to test_utils). Critic 69: clean. Phase 5 DONE.
 - Phase 6 / Actor 70: 3db40d8c (4 txn happy-path tests + listTransactions check; txn_single_broker moved to cluster_config). Critic 70: clean. Phase 6 DONE.
 - Phase 7 / Actor 71: 4f91fd6c, 5bb64773, c795b089 (7 extended txn + AdminFence tests; 31 txn+admin-txn green). Critic 71: clean. Phase 7 DONE.
+- Phase 8 / Actor 72: e9fa1395 (4 ProducerSendWhileDeletion tests, 5/5 runs each; new file). Critic 72: clean. Phase 8 DONE.
