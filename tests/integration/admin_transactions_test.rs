@@ -169,13 +169,21 @@ fn lists_id(listings: &[TransactionListing], transactional_id: &str) -> bool {
 /// # Why this is a `docker exec` rather than a Rust producer
 ///
 /// A producer state entry exists only for a producer that appends with a real
-/// producer id, i.e. an idempotent or transactional one. This client does neither
-/// (see the module note), and no other admin RPC creates one: the transaction
-/// coordinator's own writes to `__transaction_state` and the group coordinator's
-/// to `__consumer_offsets` carry no producer id. So the only way to make
-/// `describeProducers`' value non-empty is a producer from outside this client,
-/// and the broker image already ships one —
-/// `kafka-console-producer.sh --producer-property enable.idempotence=true`.
+/// producer id, i.e. an idempotent or transactional one, and no admin RPC creates
+/// one: the transaction coordinator's own writes to `__transaction_state` and the
+/// group coordinator's to `__consumer_offsets` carry no producer id.
+///
+/// An earlier revision of this note claimed this client's producer never appends
+/// with a producer id, so an outside producer was the only option. That is no
+/// longer true: the native `KafkaProducer` with `enable.idempotence=true` does
+/// populate the partition's producer state, and `describeProducers` reports it —
+/// `producer_transactions_test.rs`'s
+/// `test_producer_id_expiration_with_no_transactions` asserts exactly that against
+/// a real broker. The `docker exec` of the image's
+/// `kafka-console-producer.sh --producer-property enable.idempotence=true` is
+/// kept because it keeps these admin scenarios independent of the producer under
+/// test: a producer regression then fails the producer suites, not the admin
+/// `describeProducers` value arms.
 ///
 /// The container is found by Docker network rather than by image tag so the
 /// helper does not restate `KAFKA_TAG`, and the *container* listener is used for
