@@ -37,7 +37,7 @@ from admin import (
     ClientQuotaOp,
     DelegationToken, FeatureUpdate, FinalizedVersionRange, KafkaPrincipal, ScramCredentialInfo,
     ScramMechanism, SupportedVersionRange, UpgradeType, UserScramCredentialDeletion,
-    UserScramCredentialUpsertion,
+    UserScramCredentialUpsertion, UserScramCredentialsDescription,
     AbortTransactionSpec, PartitionProducerState, ProducerIdAndEpoch, ProducerState,
     TransactionDescription, TransactionListing, TransactionState,
     _to_delegation_token, _to_describe_producers, _to_describe_transactions,
@@ -2834,21 +2834,31 @@ def test_to_delegation_token_unpacks_the_whole_chain():
 
 
 def test_to_describe_user_scram_credentials_splits_errors_from_descriptions():
-    """The mock throws before any of this is reachable end to end."""
+    """The mock throws before any of this is reachable end to end.
+
+    The C layer now delivers a RESOURCE_NOT_FOUND user as a per-user error row
+    (finding 1), mirroring Java's ``description(user)``. This transform must keep
+    the three cases apart: a real user with credentials, a real user with zero
+    credentials, and a non-existent (RESOURCE_NOT_FOUND) user.
+    """
     raw = {
         "alice": (None, [(ScramMechanism.SCRAM_SHA_256, 4096),
                          (ScramMechanism.SCRAM_SHA_512, 8192)]),
         "bob": (None, []),
-        "carol": ((87, "No such user: carol", 0, 0), []),
+        # 91 == RESOURCE_NOT_FOUND. The error tuple is (code, message, ...), as
+        # the C extension builds it from the per-user error accessor.
+        "carol": ((91, "No such user: carol", 0, 0), []),
     }
     out = _to_describe_user_scram_credentials(raw)
     assert out["alice"].credential_infos == [
         ScramCredentialInfo(ScramMechanism.SCRAM_SHA_256, 4096),
         ScramCredentialInfo(ScramMechanism.SCRAM_SHA_512, 8192),
     ]
-    # A user with no credential is a description, not an error: Java's `all()`
-    # folds RESOURCE_NOT_FOUND into an empty list.
+    # A real user that exists with no credential is a description with an empty
+    # list -- NOT an error, and thus distinguishable from `carol` below.
+    assert isinstance(out["bob"], UserScramCredentialsDescription)
     assert out["bob"].credential_infos == []
+    # A RESOURCE_NOT_FOUND user is an error, never an empty-credential success.
     assert isinstance(out["carol"], KafkaError)
     assert str(out["carol"]) == "No such user: carol"
 

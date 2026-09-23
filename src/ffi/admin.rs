@@ -163,17 +163,17 @@ use crate::admin::{
     DescribeClientQuotasOptions, DescribeClusterOptions, DescribeConfigsOptions, DescribeConsumerGroupsOptions,
     DescribeDelegationTokenOptions, DescribeFeaturesOptions, DescribeLogDirsOptions, DescribeProducersOptions,
     DescribeReplicaLogDirsOptions, DescribeTopicsOptions, DescribeTransactionsOptions,
-    DescribeUserScramCredentialsOptions, ElectLeadersOptions, ExpireDelegationTokenOptions, FeatureMetadata,
-    FeatureUpdate, FenceProducersOptions, FilterResults, GroupListing, GroupOffsets, ListConfigResourcesOptions,
-    ListConsumerGroupOffsetsOptions, ListConsumerGroupOffsetsSpec, ListGroupsOptions, ListOffsetsOptions,
-    ListOffsetsResultInfo, ListPartitionReassignmentsOptions, ListTopicsOptions, ListTransactionsOptions,
-    LogDirDescription, MemberAssignment, MemberDescription, MemberToRemove, MockAdminClient, NewPartitionReassignment,
-    NewPartitions, NewTopic, OffsetSpec, OpType, PartitionProducerState, PartitionReassignment, RecordsToDelete,
-    RemoveMembersFromConsumerGroupOptions, RenewDelegationTokenOptions, ReplicaLogDirInfo, ScramCredentialInfo,
-    ScramMechanism, TerminateTransactionOptions, TopicDescription, TopicListing, TopicMetadataAndConfig,
-    TransactionDescription, TransactionListing, TransactionState, UpdateFeaturesOptions, UpgradeType,
-    UserScramCredentialAlteration, UserScramCredentialDeletion, UserScramCredentialUpsertion,
-    UserScramCredentialsDescription,
+    DescribeUserScramCredentialsOptions, DescribeUserScramCredentialsResult, ElectLeadersOptions,
+    ExpireDelegationTokenOptions, FeatureMetadata, FeatureUpdate, FenceProducersOptions, FilterResults, GroupListing,
+    GroupOffsets, ListConfigResourcesOptions, ListConsumerGroupOffsetsOptions, ListConsumerGroupOffsetsSpec,
+    ListGroupsOptions, ListOffsetsOptions, ListOffsetsResultInfo, ListPartitionReassignmentsOptions, ListTopicsOptions,
+    ListTransactionsOptions, LogDirDescription, MemberAssignment, MemberDescription, MemberToRemove, MockAdminClient,
+    NewPartitionReassignment, NewPartitions, NewTopic, OffsetSpec, OpType, PartitionProducerState,
+    PartitionReassignment, RecordsToDelete, RemoveMembersFromConsumerGroupOptions, RenewDelegationTokenOptions,
+    ReplicaLogDirInfo, ScramCredentialInfo, ScramMechanism, TerminateTransactionOptions, TopicDescription,
+    TopicListing, TopicMetadataAndConfig, TransactionDescription, TransactionListing, TransactionState,
+    UpdateFeaturesOptions, UpgradeType, UserScramCredentialAlteration, UserScramCredentialDeletion,
+    UserScramCredentialUpsertion, UserScramCredentialsDescription,
 };
 // `listClientMetricsResources` (superseded by `listConfigResources` filtered to
 // CLIENT_METRICS) and `listConsumerGroups` (superseded by `listGroups`) are both
@@ -17546,48 +17546,73 @@ unsafe fn read_feature_updates(
 }
 
 /// Submits `describeUserScramCredentials` and returns a future over its
-/// per-user outcomes.
-///
-/// Java exposes three views over one response future — `all()`, `users()` and
-/// `description(user)` — and C has room for one result handle, so this
-/// composes them into the per-user shape that subsumes all three:
-///
-///   - `all()` succeeds only when every user's error code is NONE or
-///     RESOURCE_NOT_FOUND, so when it does, its keys are the complete user set
-///     and no row carries an error;
-///   - when it fails, `users()` still lists every user whose error is not
-///     RESOURCE_NOT_FOUND — which necessarily includes the one that failed
-///     `all()` — and `description(user)` yields that user's own error. Users
-///     omitted at that point are exactly the ones Java's `all()` also declines
-///     to report, so nothing Java can reach is lost.
-///
-/// If the response future itself failed, all three fail with the same error and
-/// it becomes the call's error. If the composition somehow yields no rows at
-/// all, the `all()` error is returned rather than dropped — the empty-key-set
-/// trap B4 hit with `removeMembersFromConsumerGroup`.
+/// per-user outcomes. Thin wrapper: it makes the `Admin` call and hands the
+/// result to [`compose_scram_description_outcomes`], which does the composition.
 fn submit_describe_user_scram_credentials(
     admin: &dyn Admin,
     users: &[String],
     options: DescribeUserScramCredentialsOptions,
 ) -> impl std::future::Future<Output = Result<ScramDescriptionOutcomes, Error>> + Send + use<> {
     let result = admin.describe_user_scram_credentials_with_users_options(users, options);
-    async move {
-        let all_error = match result.all().get().await {
-            Ok(map) => {
-                return Ok(map.into_iter().map(|(user, description)| (user, Ok(description))).collect());
-            },
-            Err(e) => e,
-        };
-        let listed = result.users().get().await?;
-        let mut rows: ScramDescriptionOutcomes = Vec::with_capacity(listed.len());
-        for user in listed {
-            let outcome = result.description(&user).get().await;
-            rows.push((user, outcome));
-        }
-        if rows.is_empty() {
-            return Err(all_error);
-        }
-        Ok(rows)
+    compose_scram_description_outcomes(result)
+}
+
+/// Composes Java's three `describeUserScramCredentials` views — `all()`,
+/// `users()` and `description(user)` — into one row per described user, each
+/// row carrying **exactly what Java's `description(user)` yields** for that
+/// user:
+///
+///   - `NONE`               -> `Ok(description)` with its credentials;
+///   - `RESOURCE_NOT_FOUND`  -> `Err` (`Errors::ResourceNotFound`,
+///     `"No such user: <user>"`), so a user that does not exist is
+///     distinguishable from a real user that exists with zero credentials
+///     (the latter is `Ok` with an empty credential list). This is the whole
+///     point of the composition: a C caller has no `description()` /`users()`
+///     to fall back on, so the RESOURCE_NOT_FOUND signal must live in the row.
+///   - any other code        -> `Err(that error)`.
+///
+/// A single user's error code is a **per-row** error, never a whole-call
+/// failure. The whole call fails ONLY when the response/data future itself
+/// failed (auth / timeout / disconnect) — exactly when Java's `users()` future
+/// fails.
+///
+/// The user set to report is taken from `all()` when it succeeds — its keys are
+/// the complete set, `RESOURCE_NOT_FOUND` users included — and from `users()`
+/// when a *hard* user error makes `all()` fail. On that failure path `users()`,
+/// like Java, cannot enumerate the `RESOURCE_NOT_FOUND` users (Java's `all()`
+/// declines to report them too), so they are the one thing not represented
+/// there; no user is ever wrongly delivered as an empty-credential `Ok`.
+///
+/// Rows are emitted sorted by user name, never in `HashMap` iteration order. If
+/// the composition somehow yields no rows at all on the failure path, the
+/// `all()` error is returned rather than dropped — the empty-key-set trap B4
+/// hit with `removeMembersFromConsumerGroup`.
+async fn compose_scram_description_outcomes(
+    result: DescribeUserScramCredentialsResult,
+) -> Result<ScramDescriptionOutcomes, Error> {
+    // The set of users to report, one description() outcome per user.
+    let (mut user_set, all_error) = match result.all().get().await {
+        // all() success: its keys are the complete user set (RESOURCE_NOT_FOUND
+        // users included). Every row still carries description(user)'s own
+        // outcome below, so a RESOURCE_NOT_FOUND user becomes an Err row, not an
+        // empty-credential Ok.
+        Ok(map) => (map.into_keys().collect::<Vec<String>>(), None),
+        // all() failed for one of two reasons: the data future itself failed
+        // (auth/timeout/disconnect), or a user has a hard error (not NONE, not
+        // RESOURCE_NOT_FOUND). users() distinguishes them — it fails only when
+        // the data future failed. So a users() error is the whole-call error.
+        Err(all_error) => (result.users().get().await?, Some(all_error)),
+    };
+    // Deterministic order: never rely on HashMap iteration order.
+    user_set.sort();
+    let mut rows: ScramDescriptionOutcomes = Vec::with_capacity(user_set.len());
+    for user in user_set {
+        let outcome = result.description(&user).get().await;
+        rows.push((user, outcome));
+    }
+    match (rows.is_empty(), all_error) {
+        (true, Some(all_error)) => Err(all_error),
+        _ => Ok(rows),
     }
 }
 
@@ -18984,9 +19009,11 @@ pub unsafe extern "C" fn kafka_admin_DescribeUserScramCredentialsResult_get_user
 /// Returns the error for the user at `index` (borrowed), or null if the user was
 /// described successfully or `index` is out of range. Do not destroy it.
 ///
-/// A user the broker reports as `RESOURCE_NOT_FOUND` is *not* an error here: it
-/// is a successfully described user with zero credentials, which is what Java's
-/// `all()` also does.
+/// A user the broker reports as `RESOURCE_NOT_FOUND` **is** an error here — the
+/// row carries `Errors::ResourceNotFound` ("No such user: <user>"), mirroring
+/// Java's `description(user)`. This is what lets a C caller distinguish a
+/// non-existent user from a real user that exists with zero credentials (the
+/// latter is a null error with a credential count of 0).
 ///
 /// # Safety
 ///
@@ -25314,6 +25341,132 @@ mod tests {
             assert!(kafka_admin_DescribeUserScramCredentialsResult_get_error(result, 3).is_null());
             kafka_admin_DescribeUserScramCredentialsResult_destroy(result);
         }
+    }
+
+    /// Builds a completed-data-future SCRAM result with the given
+    /// `(user, error_code, error_message, credential_iterations)` rows,
+    /// mirroring the fixtures in `describe_user_scram_credentials_result.rs`.
+    fn scram_result_from_rows(rows: Vec<(&str, i16, Option<&str>, Vec<i32>)>) -> DescribeUserScramCredentialsResult {
+        use crate::DescribeUserScramCredentialsResponseData;
+        use crate::describe_user_scram_credentials_response_data::{
+            CredentialInfo, DescribeUserScramCredentialsResult as WireUserResult,
+        };
+        let results = rows
+            .into_iter()
+            .map(|(user, code, error_message, iterations)| {
+                let mut r = WireUserResult::new();
+                r.set_user(user.to_string())
+                    .set_error_code(code)
+                    .set_error_message(error_message.map(str::to_string));
+                r.set_credential_infos(
+                    iterations
+                        .into_iter()
+                        .map(|it| {
+                            let mut ci = CredentialInfo::new();
+                            ci.set_mechanism(ScramMechanism::ScramSha256.r#type()).set_iterations(it);
+                            ci
+                        })
+                        .collect(),
+                );
+                r
+            })
+            .collect();
+        let mut data = DescribeUserScramCredentialsResponseData::new();
+        data.set_error_code(Errors::None.code()).set_results(results);
+        DescribeUserScramCredentialsResult::new(KafkaFuture::completed(Ok(data)))
+    }
+
+    /// The composition the sync and async FFI entry points share MUST keep the
+    /// three per-user shapes distinguishable: a real user with credentials
+    /// (`Ok` non-empty), a real user with zero credentials (`Ok` empty), and a
+    /// `RESOURCE_NOT_FOUND` user (`Err`, "No such user: <user>"). Before the
+    /// fix, the `all()`-success path mapped every user to `Ok`, collapsing the
+    /// third case into an indistinguishable empty-credential success.
+    #[tokio::test]
+    async fn compose_scram_outcomes_distinguishes_rnf_from_a_zero_credential_user() {
+        // `carol` is present in the response with a RESOURCE_NOT_FOUND code (as
+        // the broker reports a requested user with no credentials), so — like
+        // Java's `all()` — she reaches `all().keys()`. The old FFI mapped every
+        // `all()` key to `Ok`, making her indistinguishable from `bob` (a NONE
+        // user with zero credentials). Now her row carries `description(user)`'s
+        // per-user error verbatim.
+        //
+        // Her wire `error_message` is deliberately DISTINCT from the synthesized
+        // "No such user: <user>" text: `description(user)` returns
+        // `Errors.forCode(RESOURCE_NOT_FOUND).exception(errorMessage)` — the wire
+        // message — for a present-but-RNF user, and only the "No such user"
+        // string for a user ABSENT from the response. Asserting the distinct
+        // string proves the wire message is carried, not the absent-user text.
+        let result = scram_result_from_rows(vec![
+            ("alice", Errors::None.code(), None, vec![4_096]),
+            ("bob", Errors::None.code(), None, vec![]),
+            (
+                "carol",
+                Errors::ResourceNotFound.code(),
+                Some("carol has no SCRAM credentials on this broker"),
+                vec![],
+            ),
+        ]);
+        let mut rows = compose_scram_description_outcomes(result).await.expect("data future succeeds");
+        // Rows come out sorted by user name, deterministically.
+        rows.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(rows.len(), 3);
+
+        // (a) real user with a credential -> Ok, non-empty.
+        assert_eq!(rows[0].0, "alice");
+        let alice = rows[0].1.as_ref().expect("alice described");
+        assert_eq!(alice.credential_infos().len(), 1);
+
+        // (b) real user with zero credentials -> Ok, empty. This is the case a
+        // RESOURCE_NOT_FOUND user used to be indistinguishable from.
+        assert_eq!(rows[1].0, "bob");
+        let bob = rows[1].1.as_ref().expect("bob described");
+        assert!(bob.credential_infos().is_empty());
+
+        // (c) RESOURCE_NOT_FOUND -> Err, mirroring Java's description(user):
+        // `Errors.forCode(code).exception(message)` carries the code and the
+        // broker's WIRE message verbatim — not the synthesized "No such user"
+        // text an ABSENT user would get.
+        assert_eq!(rows[2].0, "carol");
+        let carol_err = rows[2].1.as_ref().expect_err("carol is RESOURCE_NOT_FOUND");
+        assert_eq!(carol_err.code(), Errors::ResourceNotFound.code());
+        assert_eq!(carol_err.message(), "carol has no SCRAM credentials on this broker");
+        assert_ne!(carol_err.message(), "No such user: carol");
+    }
+
+    /// Same composition, but with a *hard* error present so `all()` fails and
+    /// the failure path (driven by `users()`) runs. The hard-error user is an
+    /// `Err` row; the good user is `Ok`; a single user's error code never fails
+    /// the whole call.
+    #[tokio::test]
+    async fn compose_scram_outcomes_reports_a_hard_user_error_per_row_not_as_a_call_failure() {
+        let result = scram_result_from_rows(vec![
+            ("good", Errors::None.code(), None, vec![4_096]),
+            ("failed", Errors::DuplicateResource.code(), None, vec![]),
+        ]);
+        let mut rows = compose_scram_description_outcomes(result).await.expect("data future succeeds");
+        rows.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].0, "failed");
+        assert_eq!(
+            rows[0].1.as_ref().expect_err("hard error").code(),
+            Errors::DuplicateResource.code()
+        );
+        assert_eq!(rows[1].0, "good");
+        assert!(rows[1].1.is_ok());
+    }
+
+    /// A failed response/data future (auth/timeout/disconnect) IS a whole-call
+    /// failure — exactly when Java's `users()` future fails.
+    #[tokio::test]
+    async fn compose_scram_outcomes_fails_the_whole_call_on_a_data_future_error() {
+        let data_future: KafkaFuture<crate::DescribeUserScramCredentialsResponseData> =
+            KafkaFuture::completed(Err(Error::new(Errors::ClusterAuthorizationFailed)));
+        let result = DescribeUserScramCredentialsResult::new(data_future);
+        let err = compose_scram_description_outcomes(result)
+            .await
+            .expect_err("data future failed");
+        assert_eq!(err.code(), Errors::ClusterAuthorizationFailed.code());
     }
 
     #[test]
