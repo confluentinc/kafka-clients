@@ -48,6 +48,7 @@ mod multilanguage_consumer_test;
 mod plaintext_consumer_assign_test;
 mod plaintext_consumer_assignors_test;
 mod plaintext_consumer_callback_test;
+mod plaintext_consumer_close_test;
 mod plaintext_consumer_commit_test;
 mod plaintext_consumer_fetch_test;
 mod plaintext_consumer_poll_test;
