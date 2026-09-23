@@ -154,8 +154,8 @@ impl Deserializer<Vec<u8>> for ByteArrayDeserializer {
 type BytesConsumer = Box<dyn Consumer<Vec<u8>, Vec<u8>>>;
 
 /// Build a KIP-848 (`group.protocol=consumer`) `ConsumerConfig`.
-fn consumer_config(bootstrap: &str, group_id: &str) -> ConsumerConfig {
-    let props = HashMap::from([
+fn consumer_config(ctx: &TestContext, bootstrap: &str, group_id: &str) -> ConsumerConfig {
+    let mut props = HashMap::from([
         ("bootstrap.servers".to_string(), bootstrap.to_string()),
         ("group.protocol".to_string(), "consumer".to_string()),
         ("auto.offset.reset".to_string(), "earliest".to_string()),
@@ -163,14 +163,15 @@ fn consumer_config(bootstrap: &str, group_id: &str) -> ConsumerConfig {
         ("enable.auto.commit".to_string(), "false".to_string()),
         ("group.id".to_string(), group_id.to_string()),
     ]);
+    ctx.apply_security(&mut props);
     ConsumerConfig::new(&props).expect("invalid consumer test config")
 }
 
 /// Build a KIP-848 `ConsumerConfig` for a static member (with a
 /// `group.instance.id`), so it can be targeted by
 /// `remove_members_from_consumer_group`.
-fn static_consumer_config(bootstrap: &str, group_id: &str, instance_id: &str) -> ConsumerConfig {
-    let props = HashMap::from([
+fn static_consumer_config(ctx: &TestContext, bootstrap: &str, group_id: &str, instance_id: &str) -> ConsumerConfig {
+    let mut props = HashMap::from([
         ("bootstrap.servers".to_string(), bootstrap.to_string()),
         ("group.protocol".to_string(), "consumer".to_string()),
         ("auto.offset.reset".to_string(), "earliest".to_string()),
@@ -179,21 +180,22 @@ fn static_consumer_config(bootstrap: &str, group_id: &str, instance_id: &str) ->
         ("group.id".to_string(), group_id.to_string()),
         ("group.instance.id".to_string(), instance_id.to_string()),
     ]);
+    ctx.apply_security(&mut props);
     ConsumerConfig::new(&props).expect("invalid consumer test config")
 }
 
-fn new_bytes_consumer(bootstrap: &str, group_id: &str) -> BytesConsumer {
+fn new_bytes_consumer(ctx: &TestContext, bootstrap: &str, group_id: &str) -> BytesConsumer {
     KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
-        consumer_config(bootstrap, group_id),
+        consumer_config(ctx, bootstrap, group_id),
         Box::new(ByteArrayDeserializer),
         Box::new(ByteArrayDeserializer),
     )
     .expect("KafkaConsumer::new should succeed")
 }
 
-fn new_static_bytes_consumer(bootstrap: &str, group_id: &str, instance_id: &str) -> BytesConsumer {
+fn new_static_bytes_consumer(ctx: &TestContext, bootstrap: &str, group_id: &str, instance_id: &str) -> BytesConsumer {
     KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
-        static_consumer_config(bootstrap, group_id, instance_id),
+        static_consumer_config(ctx, bootstrap, group_id, instance_id),
         Box::new(ByteArrayDeserializer),
         Box::new(ByteArrayDeserializer),
     )
@@ -279,14 +281,14 @@ async fn list_groups_and_list_consumer_groups_show_live_group<F: AdminBackendFac
 ) {
     let admin = admin_for(factory, ctx).await;
     let backend = admin.name();
-    let bootstrap = ctx.bootstrap_servers().to_string();
+    let bootstrap = ctx.protocol_bootstrap_servers().to_string();
     let topic = ctx.topic("admin_groups_list");
     let group_id = ctx.group_id("g_list");
 
     // Create the topic explicitly so the assignment is deterministic.
     create_topic(&admin, &topic, NUM_PARTITIONS, 1).await;
 
-    let mut consumer = new_bytes_consumer(&bootstrap, &group_id);
+    let mut consumer = new_bytes_consumer(ctx, &bootstrap, &group_id);
     subscribe_and_join(&mut consumer, &topic).await;
 
     // (a) list_groups: the created group appears with type Consumer, state Stable.
@@ -362,12 +364,12 @@ async fn list_groups_and_list_consumer_groups_show_live_group<F: AdminBackendFac
 async fn list_groups_filters_restrict_the_listing<F: AdminBackendFactory>(ctx: &mut TestContext, factory: &F) {
     let admin = admin_for(factory, ctx).await;
     let backend = admin.name();
-    let bootstrap = ctx.bootstrap_servers().to_string();
+    let bootstrap = ctx.protocol_bootstrap_servers().to_string();
     let topic = ctx.topic("admin_groups_filters");
     let group_id = ctx.group_id("g_filters");
 
     create_topic(&admin, &topic, NUM_PARTITIONS, 1).await;
-    let mut consumer = new_bytes_consumer(&bootstrap, &group_id);
+    let mut consumer = new_bytes_consumer(ctx, &bootstrap, &group_id);
     subscribe_and_join(&mut consumer, &topic).await;
 
     // Wait for Stable, then read the group's own protocol type off the listing.
@@ -488,13 +490,13 @@ async fn list_groups_filters_restrict_the_listing<F: AdminBackendFactory>(ctx: &
 async fn describe_consumer_groups_live_group<F: AdminBackendFactory>(ctx: &mut TestContext, factory: &F) {
     let admin = admin_for(factory, ctx).await;
     let backend = admin.name();
-    let bootstrap = ctx.bootstrap_servers().to_string();
+    let bootstrap = ctx.protocol_bootstrap_servers().to_string();
     let topic = ctx.topic("admin_groups_describe");
     let group_id = ctx.group_id("g_describe");
 
     create_topic(&admin, &topic, NUM_PARTITIONS, 1).await;
 
-    let mut consumer = new_bytes_consumer(&bootstrap, &group_id);
+    let mut consumer = new_bytes_consumer(ctx, &bootstrap, &group_id);
     let assigned = subscribe_and_join(&mut consumer, &topic).await;
     assert_eq!(
         assigned, NUM_PARTITIONS as usize,
@@ -598,12 +600,12 @@ async fn describe_consumer_groups_reports_operations_and_epochs<F: AdminBackendF
 ) {
     let admin = admin_for(factory, ctx).await;
     let backend = admin.name();
-    let bootstrap = ctx.bootstrap_servers().to_string();
+    let bootstrap = ctx.protocol_bootstrap_servers().to_string();
     let topic = ctx.topic("admin_groups_ops");
     let group_id = ctx.group_id("g_ops");
 
     create_topic(&admin, &topic, NUM_PARTITIONS, 1).await;
-    let mut consumer = new_bytes_consumer(&bootstrap, &group_id);
+    let mut consumer = new_bytes_consumer(ctx, &bootstrap, &group_id);
     subscribe_and_join(&mut consumer, &topic).await;
 
     let mut described = None;
@@ -693,7 +695,7 @@ async fn describe_consumer_groups_reports_operations_and_epochs<F: AdminBackendF
 async fn describe_consumer_groups_batches_several_groups<F: AdminBackendFactory>(ctx: &mut TestContext, factory: &F) {
     let admin = admin_for(factory, ctx).await;
     let backend = admin.name();
-    let bootstrap = ctx.bootstrap_servers().to_string();
+    let bootstrap = ctx.protocol_bootstrap_servers().to_string();
     let topic = ctx.topic("admin_groups_batch");
 
     create_topic(&admin, &topic, NUM_PARTITIONS, 1).await;
@@ -701,7 +703,7 @@ async fn describe_consumer_groups_batches_several_groups<F: AdminBackendFactory>
     let group_ids: Vec<String> = (0..3).map(|i| ctx.group_id(&format!("g_batch_{i}"))).collect();
     let mut consumers = Vec::new();
     for group_id in &group_ids {
-        let mut consumer = new_bytes_consumer(&bootstrap, group_id);
+        let mut consumer = new_bytes_consumer(ctx, &bootstrap, group_id);
         subscribe_and_join(&mut consumer, &topic).await;
         consumers.push(consumer);
     }
@@ -816,12 +818,12 @@ async fn describe_consumer_groups_nonexistent_group<F: AdminBackendFactory>(ctx:
 async fn describe_classic_groups_rejects_a_kip848_group<F: AdminBackendFactory>(ctx: &mut TestContext, factory: &F) {
     let admin = admin_for(factory, ctx).await;
     let backend = admin.name();
-    let bootstrap = ctx.bootstrap_servers().to_string();
+    let bootstrap = ctx.protocol_bootstrap_servers().to_string();
     let topic = ctx.topic("admin_classic_describe");
     let group_id = ctx.group_id("g_classic");
 
     create_topic(&admin, &topic, NUM_PARTITIONS, 1).await;
-    let mut consumer = new_bytes_consumer(&bootstrap, &group_id);
+    let mut consumer = new_bytes_consumer(ctx, &bootstrap, &group_id);
     subscribe_and_join(&mut consumer, &topic).await;
     let _ = consumer.poll(Duration::from_millis(200)).await;
 
@@ -1074,7 +1076,7 @@ async fn describe_a_simple_classic_group<F: AdminBackendFactory>(ctx: &mut TestC
 async fn delete_consumer_groups_empty_and_non_empty<F: AdminBackendFactory>(ctx: &mut TestContext, factory: &F) {
     let admin = admin_for(factory, ctx).await;
     let backend = admin.name();
-    let bootstrap = ctx.bootstrap_servers().to_string();
+    let bootstrap = ctx.protocol_bootstrap_servers().to_string();
     let topic = ctx.topic("admin_delete_groups");
     let empty_group = ctx.group_id("g_delete_empty");
     let live_group = ctx.group_id("g_delete_live");
@@ -1084,7 +1086,7 @@ async fn delete_consumer_groups_empty_and_non_empty<F: AdminBackendFactory>(ctx:
     // Bring a group up, commit an offset so it is retained, then close the
     // consumer so the group becomes empty (member-less) but still exists.
     {
-        let mut consumer = new_bytes_consumer(&bootstrap, &empty_group);
+        let mut consumer = new_bytes_consumer(ctx, &bootstrap, &empty_group);
         subscribe_and_join(&mut consumer, &topic).await;
         let _ = consumer.poll(Duration::from_millis(500)).await;
         consumer.commit_sync().await.expect("commit offsets");
@@ -1092,7 +1094,7 @@ async fn delete_consumer_groups_empty_and_non_empty<F: AdminBackendFactory>(ctx:
     }
 
     // (b) A group with an active member cannot be deleted (NON_EMPTY_GROUP).
-    let mut live_consumer = new_bytes_consumer(&bootstrap, &live_group);
+    let mut live_consumer = new_bytes_consumer(ctx, &bootstrap, &live_group);
     subscribe_and_join(&mut live_consumer, &topic).await;
     let _ = live_consumer.poll(Duration::from_millis(200)).await;
 
@@ -1165,15 +1167,15 @@ async fn delete_consumer_groups_empty_and_non_empty<F: AdminBackendFactory>(ctx:
 async fn remove_one_member_from_consumer_group<F: AdminBackendFactory>(ctx: &mut TestContext, factory: &F) {
     let admin = admin_for(factory, ctx).await;
     let backend = admin.name();
-    let bootstrap = ctx.bootstrap_servers().to_string();
+    let bootstrap = ctx.protocol_bootstrap_servers().to_string();
     let topic = ctx.topic("admin_remove_member");
     let group_id = ctx.group_id("g_remove_one");
 
     create_topic(&admin, &topic, NUM_PARTITIONS, 1).await;
 
     // Two static members share the topic's partitions.
-    let mut member_one = new_static_bytes_consumer(&bootstrap, &group_id, "instance-1");
-    let mut member_two = new_static_bytes_consumer(&bootstrap, &group_id, "instance-2");
+    let mut member_one = new_static_bytes_consumer(ctx, &bootstrap, &group_id, "instance-1");
+    let mut member_two = new_static_bytes_consumer(ctx, &bootstrap, &group_id, "instance-2");
     member_one
         .subscribe_with_topics(vec![topic.clone()])
         .await
@@ -1245,13 +1247,13 @@ async fn remove_one_member_from_consumer_group<F: AdminBackendFactory>(ctx: &mut
 async fn remove_all_members_from_consumer_group<F: AdminBackendFactory>(ctx: &mut TestContext, factory: &F) {
     let admin = admin_for(factory, ctx).await;
     let backend = admin.name();
-    let bootstrap = ctx.bootstrap_servers().to_string();
+    let bootstrap = ctx.protocol_bootstrap_servers().to_string();
     let topic = ctx.topic("admin_remove_all");
     let group_id = ctx.group_id("g_remove_all");
 
     create_topic(&admin, &topic, NUM_PARTITIONS, 1).await;
 
-    let mut consumer = new_static_bytes_consumer(&bootstrap, &group_id, "instance-1");
+    let mut consumer = new_static_bytes_consumer(ctx, &bootstrap, &group_id, "instance-1");
     subscribe_and_join(&mut consumer, &topic).await;
 
     // removeAll: no specific members provided.

@@ -21,13 +21,8 @@
 use std::net::SocketAddr;
 
 use confluent_kafka::common::network::NetworkSend;
-use confluent_kafka::common::network::PlaintextChannelBuilder;
 use confluent_kafka::common::network::Selectable;
 use confluent_kafka::common::network::Selector;
-
-/// Java writes `Selectable.USE_DEFAULT_BUFFER_SIZE`; Rust cannot name a trait
-/// constant without a `Self` type (E0790), so bind it once per file.
-const USE_DEFAULT_BUFFER_SIZE: i32 = <Selector as Selectable>::USE_DEFAULT_BUFFER_SIZE;
 use confluent_kafka::common::protocol::{ApiKeys, ByteBufferAccessor, Errors};
 use confluent_kafka::common::requests::ConcreteResponse;
 use confluent_kafka::common::requests::{
@@ -37,6 +32,7 @@ use confluent_kafka::common::requests::{
 
 use crate::common::cluster_config::ClusterConfig;
 use crate::common::test_context::TestContext;
+use crate::common::test_utils::{connect_until_ready, protocol_selector};
 
 /// Maximum time to wait for a poll to make progress, in milliseconds.
 const POLL_TIMEOUT_MS: i64 = 5000;
@@ -47,36 +43,11 @@ const MAX_POLL_ITERATIONS: usize = 100;
 /// Node ID used for the connection to the broker.
 const NODE_ID: &str = "0";
 
-/// Helper: create a Selector with PlaintextChannelBuilder.
-fn create_selector() -> Selector {
-    let channel_builder = Box::new(PlaintextChannelBuilder::new(None));
-    Selector::with_defaults(Selector::NO_IDLE_TIMEOUT_MS, channel_builder)
-}
-
 /// Helper: parse address from bootstrap servers string.
 fn parse_bootstrap_addr(bootstrap_servers: &str) -> SocketAddr {
     bootstrap_servers
         .parse::<SocketAddr>()
         .unwrap_or_else(|_| panic!("Failed to parse: {bootstrap_servers}"))
-}
-
-/// Helper: connect and wait until connected.
-async fn connect_and_wait(selector: &mut Selector, addr: SocketAddr) {
-    selector
-        .connect(NODE_ID, addr, "localhost", USE_DEFAULT_BUFFER_SIZE, USE_DEFAULT_BUFFER_SIZE)
-        .await
-        .expect("Failed to connect");
-
-    for _ in 0..MAX_POLL_ITERATIONS {
-        selector.poll(POLL_TIMEOUT_MS).await.expect("poll failed");
-        if !selector.connected().is_empty() {
-            return;
-        }
-        if !selector.disconnected().is_empty() {
-            panic!("Broker disconnected during connect: {:?}", selector.disconnected());
-        }
-    }
-    panic!("Timed out waiting for connection");
 }
 
 /// Helper: send a request and wait for a response, returning the payload.
@@ -171,9 +142,9 @@ async fn send_metadata_request(
 async fn test_cluster_metadata_brokers() {
     let ctx = TestContext::new(ClusterConfig::default()).await;
 
-    let mut selector = create_selector();
-    let addr = parse_bootstrap_addr(ctx.bootstrap_servers());
-    connect_and_wait(&mut selector, addr).await;
+    let mut selector = protocol_selector(&ctx);
+    let addr = parse_bootstrap_addr(ctx.protocol_bootstrap_servers());
+    connect_until_ready(&mut selector, &ctx, NODE_ID, addr).await;
 
     let metadata_version = handshake_and_get_metadata_version(&mut selector).await;
     let metadata = send_metadata_request(&mut selector, metadata_version, None, 2).await;
@@ -195,9 +166,9 @@ async fn test_cluster_metadata_brokers() {
 async fn test_cluster_metadata_controller() {
     let ctx = TestContext::new(ClusterConfig::default()).await;
 
-    let mut selector = create_selector();
-    let addr = parse_bootstrap_addr(ctx.bootstrap_servers());
-    connect_and_wait(&mut selector, addr).await;
+    let mut selector = protocol_selector(&ctx);
+    let addr = parse_bootstrap_addr(ctx.protocol_bootstrap_servers());
+    connect_until_ready(&mut selector, &ctx, NODE_ID, addr).await;
 
     let metadata_version = handshake_and_get_metadata_version(&mut selector).await;
     let metadata = send_metadata_request(&mut selector, metadata_version, None, 2).await;
@@ -227,9 +198,9 @@ async fn test_cluster_metadata_controller() {
 async fn test_metadata_for_specific_topic() {
     let mut ctx = TestContext::new(ClusterConfig::default()).await;
 
-    let mut selector = create_selector();
-    let addr = parse_bootstrap_addr(ctx.bootstrap_servers());
-    connect_and_wait(&mut selector, addr).await;
+    let mut selector = protocol_selector(&ctx);
+    let addr = parse_bootstrap_addr(ctx.protocol_bootstrap_servers());
+    connect_until_ready(&mut selector, &ctx, NODE_ID, addr).await;
 
     let metadata_version = handshake_and_get_metadata_version(&mut selector).await;
 
@@ -265,9 +236,9 @@ async fn test_metadata_for_specific_topic() {
 async fn test_metadata_all_topics() {
     let ctx = TestContext::new(ClusterConfig::default()).await;
 
-    let mut selector = create_selector();
-    let addr = parse_bootstrap_addr(ctx.bootstrap_servers());
-    connect_and_wait(&mut selector, addr).await;
+    let mut selector = protocol_selector(&ctx);
+    let addr = parse_bootstrap_addr(ctx.protocol_bootstrap_servers());
+    connect_until_ready(&mut selector, &ctx, NODE_ID, addr).await;
 
     let metadata_version = handshake_and_get_metadata_version(&mut selector).await;
 

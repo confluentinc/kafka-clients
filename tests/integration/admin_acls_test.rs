@@ -71,7 +71,7 @@ use confluent_kafka::common::acl::{
 };
 use confluent_kafka::common::resource::{PatternType, ResourcePattern, ResourcePatternFilter, ResourceType};
 
-use crate::common::admin_backend::{AdminBackend, admin_for, all_of_exactly, create_topic};
+use crate::common::admin_backend::{AdminBackend, admin_for, admin_for_plaintext, all_of_exactly, create_topic};
 use crate::common::backend_factory::AdminBackendFactory;
 use crate::common::cluster_config::{authorizer_deny_reachable_single_broker, authorizer_single_broker};
 use crate::common::test_context::TestContext;
@@ -398,7 +398,13 @@ async fn deny_binding_round_trip<F: AdminBackendFactory>(ctx: &mut TestContext, 
 /// *enforces* them, not just one that echoes them back — and step 4 rules out the
 /// alternative explanation that the topic became permanently unreadable.
 async fn explicit_deny_is_enforced_by_the_authorizer<F: AdminBackendFactory>(ctx: &mut TestContext, factory: &F) {
-    let admin = admin_for(factory, ctx).await;
+    // Pinned to PLAINTEXT: the DENY rule below targets `User:ANONYMOUS`, the
+    // principal this client authenticates as over PLAINTEXT and over 1-way SSL
+    // (no client certificate). Over SASL_SSL the client would authenticate as
+    // `User:{SASL_USERNAME}` instead, which the rule does not name, so the
+    // enforcement step would no longer exercise an explicit-DENY match. Pinning
+    // keeps the assertion identical in every run.
+    let admin = admin_for_plaintext(factory, ctx).await;
     let backend = factory.name();
 
     let topic = ctx.topic("acl_deny_enforced");

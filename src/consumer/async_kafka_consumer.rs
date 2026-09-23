@@ -4653,10 +4653,26 @@ where
         // analog uses a oneshot bridge: we spawn the continuation, the
         // continuation invokes the callback chain, and signals
         // `last_pending_completion_tx` when finished.
+        //
+        // Java completes async-commit futures in submission order on the
+        // single network thread and runs each `whenComplete` inline. Once
+        // `lastPendingAsyncCommit` completes, every earlier commit's callback
+        // is therefore already enqueued, which is why `commitSync` and `close`
+        // await only the most recent commit. In Rust each continuation is a
+        // separate task that the runtime may schedule in any order, so each
+        // continuation awaits its predecessor before enqueueing. This
+        // preserves two invariants: callbacks are enqueued in commit order, as
+        // the `commitAsync` javadoc requires, and completion of the last
+        // pending commit implies that all earlier callbacks are enqueued.
         let (pending_tx, pending_rx) = tokio::sync::oneshot::channel::<()>();
+        let previous_pending = self.last_pending_async_commit.take();
         let invoker = Arc::clone(&self.offset_commit_callback_invoker);
         tokio::spawn(async move {
             let result = receiver.await;
+            if let Some(previous) = previous_pending {
+                // A closed channel indicates the predecessor has already completed.
+                let _ = previous.await;
+            }
             match result {
                 Ok(Ok(committed)) => {
                     // Java: `if (throwable == null)
@@ -9766,6 +9782,77 @@ mod tests {
         let saw_msg = saw_error.lock().unwrap().clone().expect("callback observed error");
         let injected_msg = format!("{injected}");
         assert!(saw_msg == injected_msg, "callback error mismatch: {saw_msg} != {injected_msg}");
+    }
+
+    /// Verifies ordering when two async commits complete in reverse order.
+    /// The last pending commit must not resolve until the earlier commit's
+    /// callback has been enqueued, and callbacks must be invoked in commit
+    /// order. `close()` and `commit_sync()` depend on this invariant because
+    /// they await only the most recent pending async commit (Java's
+    /// `lastPendingAsyncCommit`).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn commit_async_last_pending_waits_for_earlier_callbacks() {
+        struct OrderCallback {
+            order: Arc<std::sync::Mutex<Vec<i64>>>,
+        }
+        #[async_trait::async_trait]
+        impl crate::consumer::OffsetCommitCallback for OrderCallback {
+            async fn on_complete(&self, offsets: &HashMap<TopicPartition, OffsetAndMetadata>, error: Option<&Error>) {
+                assert!(error.is_none(), "unexpected commit error: {error:?}");
+                let offset = offsets.values().next().expect("committed offsets").offset();
+                self.order.lock().unwrap().push(offset);
+            }
+        }
+
+        let (mut consumer, mut handles) = make_test_consumer_with_channels();
+        let tp = TopicPartition::new("my-topic".to_string(), 0);
+        let (release_first_tx, release_first_rx) = tokio::sync::oneshot::channel::<()>();
+
+        // Complete the second commit immediately and defer the first until the
+        // test releases it, reversing the submission order.
+        let completer = tokio::spawn(async move {
+            let mut first = None;
+            while let Some(env) = handles.app_event_rx.recv().await {
+                if let ApplicationEvent::CommitAsync { handle, offsets_ready, offsets, .. } = env.event {
+                    offsets_ready.complete(());
+                    let offsets = offsets.expect("explicit offsets");
+                    match first.take() {
+                        None => first = Some((handle, offsets)),
+                        Some((first_handle, first_offsets)) => {
+                            handle.complete(offsets);
+                            let _ = release_first_rx.await;
+                            first_handle.complete(first_offsets);
+                            return true;
+                        },
+                    }
+                }
+            }
+            false
+        });
+
+        let order = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let cb: Arc<dyn crate::consumer::OffsetCommitCallback> = Arc::new(OrderCallback { order: Arc::clone(&order) });
+        consumer
+            .commit_async_with_offsets_callback(singleton_offsets(tp.clone(), 1), Arc::clone(&cb))
+            .await
+            .expect("commit 1");
+        consumer
+            .commit_async_with_offsets_callback(singleton_offsets(tp, 2), cb)
+            .await
+            .expect("commit 2");
+
+        let mut last = consumer.last_pending_async_commit.take().expect("pending async commit");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), &mut last).await.is_err(),
+            "last pending commit must not resolve while an earlier commit is outstanding"
+        );
+
+        release_first_tx.send(()).expect("completer alive");
+        let _ = last.await;
+        consumer.offset_commit_callback_invoker.invoke_pending_callbacks().await;
+
+        assert!(completer.await.expect("task ok"));
+        assert_eq!(*order.lock().unwrap(), vec![1, 2], "callbacks must fire in commit order");
     }
 
     // ─── Close / lifecycle tests (commit 7/N) ───

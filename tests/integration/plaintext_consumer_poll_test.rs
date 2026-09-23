@@ -213,9 +213,9 @@ impl Deserializer<Vec<u8>> for ByteArrayDeserializer {
 /// Default `auto.offset.reset=earliest` and `enable.auto.commit=false`
 /// so the tests' explicit `seek` / `commit_sync` calls are the only
 /// offset-state transitions.
-fn make_consumer_config_bytes(bootstrap: &str, group_id: &str, overrides: &[(&str, &str)]) -> ConsumerConfig {
+fn make_consumer_config_bytes(ctx: &TestContext, group_id: &str, overrides: &[(&str, &str)]) -> ConsumerConfig {
     let mut props = HashMap::from([
-        ("bootstrap.servers".to_string(), bootstrap.to_string()),
+        ("bootstrap.servers".to_string(), ctx.protocol_bootstrap_servers().to_string()),
         ("group.protocol".to_string(), "consumer".to_string()),
         ("auto.offset.reset".to_string(), "earliest".to_string()),
         ("client.id".to_string(), "integration-test-consumer".to_string()),
@@ -225,6 +225,7 @@ fn make_consumer_config_bytes(bootstrap: &str, group_id: &str, overrides: &[(&st
     for (k, v) in overrides {
         props.insert((*k).to_string(), (*v).to_string());
     }
+    ctx.apply_security(&mut props);
     ConsumerConfig::new(&props).expect("invalid test config")
 }
 
@@ -233,22 +234,23 @@ fn make_consumer_config_bytes(bootstrap: &str, group_id: &str, overrides: &[(&st
 /// Build a `ProducerConfig` aligned with the existing producer
 /// integration tests (acks=all so produced records are durable before
 /// the consumer reads them).
-fn make_producer_config(bootstrap: &str) -> ProducerConfig {
-    let props = HashMap::from([
-        ("bootstrap.servers".to_string(), bootstrap.to_string()),
+fn make_producer_config(ctx: &TestContext) -> ProducerConfig {
+    let mut props = HashMap::from([
+        ("bootstrap.servers".to_string(), ctx.protocol_bootstrap_servers().to_string()),
         ("client.id".to_string(), "integration-test-producer".to_string()),
         ("acks".to_string(), "all".to_string()),
         ("max.block.ms".to_string(), "30000".to_string()),
         ("linger.ms".to_string(), "5".to_string()),
     ]);
+    ctx.apply_security(&mut props);
     ProducerConfig::new(&props).expect("invalid producer test config")
 }
 
 /// Build a [`KafkaProducer`] for byte-array keys/values matching what
 /// Java's `cluster.producer()` returns.
-fn build_producer_bytes(bootstrap: &str) -> KafkaProducer<Vec<u8>, Vec<u8>> {
+fn build_producer_bytes(ctx: &TestContext) -> KafkaProducer<Vec<u8>, Vec<u8>> {
     KafkaProducer::new(
-        make_producer_config(bootstrap),
+        make_producer_config(ctx),
         Box::new(ByteArraySerializer),
         Box::new(ByteArraySerializer),
     )
@@ -294,8 +296,8 @@ async fn send_records_with_producer(
 /// Translates Java's `ClientsTestUtils.sendRecords(cluster, tp, num,
 /// startingTimestamp)` shorthand. Creates a fresh producer, sends, then
 /// closes it.
-async fn send_records_bytes(bootstrap: &str, tp: &TopicPartition, num_records: usize, starting_timestamp: i64) {
-    let producer = build_producer_bytes(bootstrap);
+async fn send_records_bytes(ctx: &TestContext, tp: &TopicPartition, num_records: usize, starting_timestamp: i64) {
+    let producer = build_producer_bytes(ctx);
     send_records_with_producer(&producer, tp, num_records, starting_timestamp).await;
     producer.close().await.expect("producer close should succeed");
 }
@@ -668,14 +670,10 @@ async fn test_async_consumer_max_poll_records() {
     let max_poll_records: usize = 100;
     let num_records: usize = 5000;
     let starting_timestamp = current_time_ms();
-    send_records_bytes(ctx.bootstrap_servers(), &tp, num_records, starting_timestamp).await;
+    send_records_bytes(&ctx, &tp, num_records, starting_timestamp).await;
 
     let mut consumer = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
-        make_consumer_config_bytes(
-            ctx.bootstrap_servers(),
-            &group_id,
-            &[("max.poll.records", &max_poll_records.to_string())],
-        ),
+        make_consumer_config_bytes(&ctx, &group_id, &[("max.poll.records", &max_poll_records.to_string())]),
         Box::new(ByteArrayDeserializer),
         Box::new(ByteArrayDeserializer),
     )
@@ -715,7 +713,7 @@ async fn test_async_consumer_max_poll_interval_ms() {
 
     // Provision the topic via produce (the test does not need records
     // to be consumed — only assignment).
-    let producer = build_producer_bytes(ctx.bootstrap_servers());
+    let producer = build_producer_bytes(&ctx);
     ensure_topic_with_2_partitions(&producer, &topic).await;
     producer.close().await.expect("producer close should succeed");
 
@@ -728,7 +726,7 @@ async fn test_async_consumer_max_poll_interval_ms() {
     // interval elapses without a poll" — preserved here by using
     // max.poll.interval.ms=5000 + sleep 7s (still > interval).
     let mut consumer = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
-        make_consumer_config_bytes(ctx.bootstrap_servers(), &group_id, &[("max.poll.interval.ms", "5000")]),
+        make_consumer_config_bytes(&ctx, &group_id, &[("max.poll.interval.ms", "5000")]),
         Box::new(ByteArrayDeserializer),
         Box::new(ByteArrayDeserializer),
     )
@@ -903,14 +901,14 @@ async fn test_async_consumer_max_poll_interval_ms_delay_in_revocation() {
     // committedPosition.get())` holds only because the partition is genuinely
     // empty, and the comment in the callback says exactly that: "no records have
     // been consumed".
-    let admin = admin_for(ctx.bootstrap_servers());
+    let admin = admin_for(&ctx);
     create_topic(admin.as_ref(), &topic, 2, 1).await;
     create_topic(admin.as_ref(), &other_topic, 2, 1).await;
     admin.close_with_timeout(Duration::from_secs(5)).await;
 
     let mut consumer = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
         make_consumer_config_bytes(
-            ctx.bootstrap_servers(),
+            &ctx,
             &group_id,
             &[("max.poll.interval.ms", "5000"), ("enable.auto.commit", "false")],
         ),
@@ -1102,13 +1100,13 @@ async fn test_async_consumer_max_poll_interval_ms_delay_in_assignment() {
     // a second `on_partitions_assigned`. Java never races that, because the
     // admin create commits through the controller before anything subscribes.
     // Java also produces no records in this test at all.
-    let admin = admin_for(ctx.bootstrap_servers());
+    let admin = admin_for(&ctx);
     create_topic(admin.as_ref(), &topic, 2, 3).await;
     admin.close_with_timeout(Duration::from_secs(5)).await;
 
     let mut consumer = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
         make_consumer_config_bytes(
-            ctx.bootstrap_servers(),
+            &ctx,
             &group_id,
             &[("max.poll.interval.ms", "5000"), ("enable.auto.commit", "false")],
         ),
@@ -1148,12 +1146,12 @@ async fn test_async_consumer_max_poll_interval_ms_shorter_than_poll_timeout() {
     let topic = ctx.topic("topic");
     let group_id = ctx.group_id("g_max_poll_interval_shorter");
 
-    let producer = build_producer_bytes(ctx.bootstrap_servers());
+    let producer = build_producer_bytes(&ctx);
     ensure_topic_with_2_partitions(&producer, &topic).await;
     producer.close().await.expect("producer close should succeed");
 
     let mut consumer = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
-        make_consumer_config_bytes(ctx.bootstrap_servers(), &group_id, &[("max.poll.interval.ms", "1000")]),
+        make_consumer_config_bytes(&ctx, &group_id, &[("max.poll.interval.ms", "1000")]),
         Box::new(ByteArrayDeserializer),
         Box::new(ByteArrayDeserializer),
     )
@@ -1203,10 +1201,10 @@ async fn test_async_consumer_poll_eventually_returns_records_with_zero_timeout()
     let tp = TopicPartition::new(topic.clone(), 0);
 
     let num_messages: usize = 100;
-    send_records_bytes(ctx.bootstrap_servers(), &tp, num_messages, current_time_ms()).await;
+    send_records_bytes(&ctx, &tp, num_messages, current_time_ms()).await;
 
     let mut consumer = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
-        make_consumer_config_bytes(ctx.bootstrap_servers(), &group_id, &[]),
+        make_consumer_config_bytes(&ctx, &group_id, &[]),
         Box::new(ByteArrayDeserializer),
         Box::new(ByteArrayDeserializer),
     )
@@ -1277,12 +1275,12 @@ async fn test_async_consumer_no_offset_for_partition_error_on_poll_zero() {
     let tp = TopicPartition::new(topic.clone(), 0);
 
     // Ensure the topic exists so `assign(tp)` resolves a real partition.
-    let producer = build_producer_bytes(ctx.bootstrap_servers());
+    let producer = build_producer_bytes(&ctx);
     ensure_topic_with_2_partitions(&producer, &topic).await;
     producer.close().await.expect("producer close should succeed");
 
     let mut consumer = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
-        make_consumer_config_bytes(ctx.bootstrap_servers(), &group_id, &[("auto.offset.reset", "none")]),
+        make_consumer_config_bytes(&ctx, &group_id, &[("auto.offset.reset", "none")]),
         Box::new(ByteArrayDeserializer),
         Box::new(ByteArrayDeserializer),
     )
@@ -1372,7 +1370,7 @@ async fn test_async_consumer_recovery_on_poll_after_delayed_rebalance() {
 
     let rebalance_timeout = Duration::from_millis(1000);
 
-    let producer = build_producer_bytes(ctx.bootstrap_servers());
+    let producer = build_producer_bytes(&ctx);
     ensure_topic_with_2_partitions(&producer, &topic).await;
     ensure_topic_with_2_partitions(&producer, &other_topic).await;
     // Java sends `numMessages` to BOTH topics. We follow the same
@@ -1385,7 +1383,7 @@ async fn test_async_consumer_recovery_on_poll_after_delayed_rebalance() {
 
     let mut consumer = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
         make_consumer_config_bytes(
-            ctx.bootstrap_servers(),
+            &ctx,
             &group_id,
             &[("max.poll.interval.ms", "1000"), ("enable.auto.commit", "false")],
         ),
@@ -1472,13 +1470,14 @@ async fn test_async_consumer_recovery_on_poll_after_delayed_rebalance() {
 /// the topic with two partitions. Subsequent calls are idempotent
 /// Builds an admin client for topic provisioning. Mirrors the per-file
 /// `admin_for` helper the `admin_*` integration tests use.
-fn admin_for(bootstrap_servers: &str) -> Box<dyn Admin> {
-    let props = HashMap::from([
-        ("bootstrap.servers".to_string(), bootstrap_servers.to_string()),
+fn admin_for(ctx: &TestContext) -> Box<dyn Admin> {
+    let mut props = HashMap::from([
+        ("bootstrap.servers".to_string(), ctx.protocol_bootstrap_servers().to_string()),
         ("client.id".to_string(), "poll-test-admin".to_string()),
         ("request.timeout.ms".to_string(), "30000".to_string()),
         ("default.api.timeout.ms".to_string(), "30000".to_string()),
     ]);
+    ctx.apply_security(&mut props);
     let config = AdminClientConfig::new(&props).expect("valid admin config");
     Box::new(KafkaAdminClient::new(config).expect("admin client"))
 }
