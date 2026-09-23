@@ -36,7 +36,9 @@
 //!   `testSendWithInvalidBeforeAndAfterTimestamp`,
 //!   `testValidBeforeAndAfterTimestampsAtThreshold`,
 //!   `testValidBeforeAndAfterTimestampsWithinThreshold` (each of the last three
-//!   runs both `timestampConfigProvider` cases in one test).
+//!   runs both `timestampConfigProvider` cases in one test),
+//!   `testNonBlockingProducer` (buffer-exhaustion half native only),
+//!   `testSendRecordBatchWithMaxRequestSizeAndHigher`.
 //!
 //! When the `multilanguage-tests` feature is enabled, each test is
 //! instantiated three times via [`multilanguage_test!`] — once per
@@ -61,6 +63,7 @@ use confluent_kafka::admin::NewPartitions;
 use confluent_kafka::admin::NewTopic;
 use confluent_kafka::admin::OffsetSpec;
 use confluent_kafka::common::Error;
+use confluent_kafka::common::KafkaFuture;
 use confluent_kafka::common::TopicPartition;
 use confluent_kafka::common::header::Headers;
 use confluent_kafka::common::header::RecordHeader;
@@ -74,6 +77,7 @@ use confluent_kafka::producer::Callback;
 use confluent_kafka::producer::Producer;
 use confluent_kafka::producer::ProducerRecord;
 use confluent_kafka::producer::ProducerRecordOptionsBuilder;
+use confluent_kafka::producer::RecordMetadata;
 
 use crate::common::backend_factory::ProducerBackendFactory;
 use crate::common::callback_log::KIND_DELIVERY;
@@ -209,6 +213,7 @@ struct SendTestProducerOpts {
     batch_size: i32,
     compression_type: &'static str,
     max_block_ms: i64,
+    buffer_size: i64,
 }
 
 impl Default for SendTestProducerOpts {
@@ -219,6 +224,7 @@ impl Default for SendTestProducerOpts {
             batch_size: 16384,
             compression_type: "none",
             max_block_ms: 60 * 1000,
+            buffer_size: 1024 * 1024,
         }
     }
 }
@@ -229,14 +235,14 @@ const INT_MAX_VALUE: i64 = i32::MAX as i64;
 /// The producer config `BaseProducerSendTest.createProducer` builds through
 /// `TestUtils.createProducer` (`TestUtils.scala:516-545`), including the
 /// defaults `createProducer` does not override: `acks=-1`,
-/// `buffer.memory=1 MiB`, `retries=Int.MaxValue`, `request.timeout.ms=20000`,
+/// `retries=Int.MaxValue`, `request.timeout.ms=20000`,
 /// `enable.idempotence=false`.
 fn send_test_producer_config(bootstrap_servers: &str, opts: &SendTestProducerOpts) -> HashMap<String, String> {
     HashMap::from([
         ("bootstrap.servers".to_string(), bootstrap_servers.to_string()),
         ("acks".to_string(), "-1".to_string()),
         ("max.block.ms".to_string(), opts.max_block_ms.to_string()),
-        ("buffer.memory".to_string(), (1024 * 1024).to_string()),
+        ("buffer.memory".to_string(), opts.buffer_size.to_string()),
         ("retries".to_string(), i32::MAX.to_string()),
         ("delivery.timeout.ms".to_string(), opts.delivery_timeout_ms.to_string()),
         ("request.timeout.ms".to_string(), "20000".to_string()),
@@ -1097,6 +1103,11 @@ const FAILURE_REPLICA_FETCH_MAX_RESPONSE_BYTES: i32 = FAILURE_REPLICA_FETCH_MAX_
 const RECORD_BATCH_OVERHEAD: i32 = 61;
 /// Java's `DefaultRecord.MAX_RECORD_OVERHEAD` (crate-private in Rust, as above).
 const MAX_RECORD_OVERHEAD: i32 = 21;
+/// Java's `Records.LOG_OVERHEAD` (crate-private in Rust, as above).
+const LOG_OVERHEAD: i32 = 12;
+/// Java's `ServerLogConfigs.MAX_MESSAGE_BYTES_DEFAULT` (`1024 * 1024 + LOG_OVERHEAD`),
+/// the broker's default `message.max.bytes`.
+const MAX_MESSAGE_BYTES_DEFAULT: i32 = 1024 * 1024 + LOG_OVERHEAD;
 
 /// Broker shape of `ProducerFailureHandlingTest`'s `@ClusterTestDefaults`
 /// (`ProducerFailureHandlingTest.java:61-76`): two brokers, topic
@@ -1935,34 +1946,194 @@ async fn valid_before_and_after_timestamps_within_threshold_inner<F: ProducerBac
     send_with_valid_timestamp(ctx, factory, |_| 10 * 60 * 60 * 1000).await;
 }
 
-/// Translated (simplified) from `PlaintextProducerSendTest.testNonBlockingProducer`.
-/// With max.block.ms=0 and cold metadata, the first send returns a
-/// future that's immediately done with Timeout. The buffer-exhaustion
-/// subtest from the Scala original isn't ported because gRPC sends are
-/// synchronous, eliminating the in-flight buffer accumulation pattern
-/// that subtest exercises.
-async fn produce_non_blocking_max_block_zero_inner<F: ProducerBackendFactory>(ctx: &mut TestContext, factory: &F) {
-    let topic = ctx.topic("non_blocking");
-    let mut config = make_config(&bootstrap_for(factory, ctx));
-    config.insert("max.block.ms".to_string(), "0".to_string());
-    let producer = factory.create(config).await.expect("Failed to create producer");
+/// `testNonBlockingProducer`'s `send` (`PlaintextProducerSendTest.scala:264-266`).
+async fn non_blocking_send<P: Producer<Vec<u8>, Vec<u8>>>(producer: &P, topic: &str) -> KafkaFuture<RecordMetadata> {
+    let record = ProducerRecord::with_partition_key(topic.to_string(), Some(0), Some(b("key")), Some(vec![0u8; 1000]))
+        .expect("valid record");
+    producer.send(record).await.expect("send should hand back a future")
+}
 
-    // Cold metadata + max.block.ms=0 → producer can't wait, send fails
-    // immediately with Timeout (the future is already resolved).
-    let record = ProducerRecord::with_key(topic, Some(b("key")), Some(b("value")));
-    let future = producer.send(record).await.expect("send should accept the request");
-    assert!(future.is_done(), "max.block.ms=0 future should be immediately done");
-    let result = future.get().await;
-    assert!(
-        result.is_err(),
-        "max.block.ms=0 with cold metadata should error, got: {result:?}"
-    );
-    let err = result.unwrap_err();
-    assert!(
-        matches!(err, confluent_kafka::common::Error::Timeout(_)),
-        "Expected Timeout for cold metadata under max.block.ms=0, got: {err:?}"
-    );
+/// `testNonBlockingProducer`'s `sendUntilQueued`
+/// (`PlaintextProducerSendTest.scala:268-281`) over `TestUtils.computeUntilTrue`
+/// (15 s budget, 100 ms pause): send until a send is queued — its future is
+/// still pending, or it already completed successfully. Like Java, the last
+/// future is returned even when the budget runs out; the caller's
+/// verification then fails.
+async fn non_blocking_send_until_queued<P: Producer<Vec<u8>, Vec<u8>>>(
+    producer: &P,
+    topic: &str,
+) -> KafkaFuture<RecordMetadata> {
+    let deadline = Instant::now() + Duration::from_millis(test_utils::DEFAULT_MAX_WAIT_MS);
+    loop {
+        let future = non_blocking_send(producer, topic).await;
+        let queued = if future.is_done() {
+            // Send was queued and completed successfully
+            future.get().await.is_ok()
+        } else {
+            // Send future not yet complete, so it has been queued to be sent
+            true
+        };
+        if queued || Instant::now() >= deadline {
+            return future;
+        }
+        tokio::time::sleep(Duration::from_millis(test_utils::DEFAULT_PAUSE_MS)).await;
+    }
+}
 
+/// `testNonBlockingProducer`'s `verifySendSuccess`
+/// (`PlaintextProducerSendTest.scala:283-288`).
+async fn non_blocking_verify_send_success(future: &KafkaFuture<RecordMetadata>, topic: &str) {
+    let record_metadata = future
+        .get_with_timeout(Duration::from_secs(30))
+        .await
+        .expect("queued send should succeed");
+    assert_eq!(topic, record_metadata.topic());
+    assert_eq!(0, record_metadata.partition());
+    assert!(record_metadata.offset() >= 0, "Invalid offset {record_metadata:?}");
+}
+
+/// Translated from `PlaintextProducerSendTest.testNonBlockingProducer`
+/// (`PlaintextProducerSendTest.scala:258-313`): requests are failed immediately
+/// without blocking if metadata is not available or the buffer is full.
+///
+/// The buffer-exhaustion half runs on the native backend only: it needs the
+/// first record to sit in a lingering batch (`linger.ms=15000`) while the
+/// second send finds the buffer full, but the gRPC `Send` RPC blocks until
+/// delivery, so the first batch has already been sent — and its buffer freed —
+/// by the time the second send is issued.
+///
+/// Deviation: Java's topic `topic` is auto-created by the producer's first
+/// metadata request; here it is created with the admin client beforehand. The
+/// producer's metadata cache is still cold, so the first send still finds no
+/// metadata available.
+async fn non_blocking_producer_inner<F: ProducerBackendFactory>(ctx: &mut TestContext, factory: &F) {
+    let topic = ctx.topic("topic");
+    let admin = send_test_admin(ctx);
+    // Auto-creation's shape: `num.partitions=4`, `default.replication.factor=1`.
+    create_topic_with_admin(admin.as_ref(), &topic, 4, 1).await;
+    let bootstrap = bootstrap_for(factory, ctx);
+
+    // Topic metadata not available, send should fail without blocking
+    let producer = factory
+        .create(send_test_producer_config(
+            &bootstrap,
+            &SendTestProducerOpts { max_block_ms: 0, ..SendTestProducerOpts::default() },
+        ))
+        .await
+        .expect("Failed to create producer");
+    // verifyMetadataNotAvailable
+    let future = non_blocking_send(&producer, &topic).await;
+    assert!(future.is_done(), "verify future was completed immediately");
+    let err = future.get().await.expect_err("send without metadata should fail");
+    assert!(matches!(err, Error::Timeout(_)), "Expected Timeout, got: {err:?}");
+
+    // Test that send starts succeeding once metadata is available
+    let future = non_blocking_send_until_queued(&producer, &topic).await;
+    non_blocking_verify_send_success(&future, &topic).await;
+    producer.close().await.expect("close should succeed");
+
+    if factory.name() != "rust" {
+        return;
+    }
+
+    // Verify that send fails immediately without blocking when there is no space left in the buffer
+    let producer2 = factory
+        .create(send_test_producer_config(
+            &bootstrap,
+            &SendTestProducerOpts {
+                max_block_ms: 0,
+                linger_ms: 15000,
+                batch_size: 1100,
+                buffer_size: 1500,
+                ..SendTestProducerOpts::default()
+            },
+        ))
+        .await
+        .expect("Failed to create producer");
+    // wait until metadata is available and one record is queued
+    let future2 = non_blocking_send_until_queued(&producer2, &topic).await;
+    // should fail send since buffer is full (verifyBufferExhausted)
+    let future = non_blocking_send(&producer2, &topic).await;
+    assert!(future.is_done(), "verify future was completed immediately");
+    let err = future.get().await.expect_err("send with a full buffer should fail");
+    match &err {
+        Error::ProducerBufferExhausted(e) => assert!(
+            e.message().starts_with("Failed to allocate ") && e.message().contains("Total memory: 1500 bytes."),
+            "unexpected BufferExhausted message: {}",
+            e.message()
+        ),
+        _ => panic!("Expected BufferExhausted, got: {err:?}"),
+    }
+    // previous batch should be completed and sent now
+    non_blocking_verify_send_success(&future2, &topic).await;
+    producer2.close().await.expect("close should succeed");
+}
+
+/// Translated from `PlaintextProducerSendTest.testSendRecordBatchWithMaxRequestSizeAndHigher`
+/// (`PlaintextProducerSendTest.scala:316-336`): a record whose batch is exactly
+/// the broker's default `max.message.bytes` is accepted, and one byte more is
+/// rejected with `RecordTooLarge` (the client's `max.request.size` bound, which
+/// the estimated batch then exceeds by one byte).
+///
+/// `serializedValueSize` and the error message are checked on the native
+/// backend only: the gRPC servers report serialized sizes as -1 and surface
+/// only the error code.
+async fn send_record_batch_with_max_request_size_and_higher_inner<F: ProducerBackendFactory>(
+    ctx: &mut TestContext,
+    factory: &F,
+) {
+    // Java's `topic` is auto-created by the first send; it is created with the
+    // admin client here, in auto-creation's shape (`num.partitions=4`,
+    // `default.replication.factor=1`).
+    let topic = ctx.topic("topic");
+    let admin = send_test_admin(ctx);
+    create_topic_with_admin(admin.as_ref(), &topic, 4, 1).await;
+    let producer_props = HashMap::from([("bootstrap.servers".to_string(), bootstrap_for(factory, ctx))]);
+    let producer = factory.create(producer_props).await.expect("Failed to create producer");
+
+    let key_length_size = 1;
+    let header_length_size = 1;
+    let value_length_size = 3;
+    let overhead = LOG_OVERHEAD
+        + RECORD_BATCH_OVERHEAD
+        + MAX_RECORD_OVERHEAD
+        + key_length_size
+        + header_length_size
+        + value_length_size;
+    let value_size = MAX_MESSAGE_BYTES_DEFAULT - overhead;
+
+    let record0 = ProducerRecord::with_key(topic.clone(), Some(Vec::new()), Some(vec![0u8; value_size as usize]));
+    let metadata = producer
+        .send(record0)
+        .await
+        .expect("send should hand back a future")
+        .get_with_timeout(UNBOUNDED_GET_TIMEOUT)
+        .await
+        .expect("a record of exactly the maximum size should be accepted");
+    if factory.name() == "rust" {
+        assert_eq!(value_size, metadata.serialized_value_size());
+    }
+
+    let record1 = ProducerRecord::with_key(topic, Some(Vec::new()), Some(vec![0u8; (value_size + 1) as usize]));
+    let err = producer
+        .send(record1)
+        .await
+        .expect("send should hand back a future")
+        .get_with_timeout(UNBOUNDED_GET_TIMEOUT)
+        .await
+        .expect_err("a record one byte over the maximum size should be rejected");
+    match &err {
+        Error::RecordTooLarge(e) => {
+            if factory.name() == "rust" {
+                assert_eq!(
+                    "The message is 1048577 bytes when serialized which is larger than 1048576, which is the value \
+                     of the max.request.size configuration.",
+                    e.message()
+                );
+            }
+        },
+        _ => panic!("Expected RecordTooLarge, got: {err:?}"),
+    }
     producer.close().await.expect("close should succeed");
 }
 
@@ -2256,8 +2427,15 @@ crate::multilanguage_test!(
 );
 #[cfg(feature = "multilanguage-tests")]
 crate::multilanguage_test!(
-    test_produce_non_blocking_max_block_zero,
-    produce_non_blocking_max_block_zero_inner
+    test_non_blocking_producer,
+    non_blocking_producer_inner,
+    producer_send_cluster_config()
+);
+#[cfg(feature = "multilanguage-tests")]
+crate::multilanguage_test!(
+    test_send_record_batch_with_max_request_size_and_higher,
+    send_record_batch_with_max_request_size_and_higher_inner,
+    producer_send_cluster_config()
 );
 #[cfg(feature = "multilanguage-tests")]
 crate::multilanguage_test!(test_produce_partitions_for, produce_partitions_for_inner);
@@ -2734,8 +2912,12 @@ mod rust_only_fallback {
         valid_before_and_after_timestamps_within_threshold_inner(&mut send_ctx().await, &RustNativeFactory).await;
     }
     #[tokio::test(flavor = "multi_thread")]
-    async fn test_produce_non_blocking_max_block_zero() {
-        produce_non_blocking_max_block_zero_inner(&mut ctx().await, &RustNativeFactory).await;
+    async fn test_non_blocking_producer() {
+        non_blocking_producer_inner(&mut send_ctx().await, &RustNativeFactory).await;
+    }
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_send_record_batch_with_max_request_size_and_higher() {
+        send_record_batch_with_max_request_size_and_higher_inner(&mut send_ctx().await, &RustNativeFactory).await;
     }
     #[tokio::test(flavor = "multi_thread")]
     async fn test_compression() {
