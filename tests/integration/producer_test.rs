@@ -24,10 +24,10 @@
 //!   `testCloseWithZeroTimeoutFromSenderThread` (native only),
 //!   `testCloseWithZeroTimeoutFromCallerThread` (native only),
 //!   `testWrongSerializer` (native only),
-//!   `testSendCompressedMessageWithCreateTime`,
-//!   `testSendNonCompressedMessageWithCreateTime`,
-//!   `testSendCompressedMessageWithLogAppendTime`,
-//!   `testSendNonCompressedMessageWithLogAppendTime`,
+//!   `testSendCompressedMessageWithCreateTime` (native only),
+//!   `testSendNonCompressedMessageWithCreateTime` (native only),
+//!   `testSendCompressedMessageWithLogAppendTime` (native only),
+//!   `testSendNonCompressedMessageWithLogAppendTime` (native only),
 //!   `testSendWithInvalidBeforeAndAfterTimestamp`,
 //!   `testValidBeforeAndAfterTimestampsAtThreshold`,
 //!   `testValidBeforeAndAfterTimestampsWithinThreshold` (each of the last three
@@ -1187,6 +1187,19 @@ const MESSAGE_TIMESTAMP_BEFORE_MAX_MS_CONFIG: &str = "message.timestamp.before.m
 /// Java's `TopicConfig.MESSAGE_TIMESTAMP_AFTER_MAX_MS_CONFIG`.
 const MESSAGE_TIMESTAMP_AFTER_MAX_MS_CONFIG: &str = "message.timestamp.after.max.ms";
 
+/// Clock-skew slack for the `LogAppendTime` range checks in
+/// [`send_and_verify_timestamp`].
+///
+/// Translation deviation: Java bounds the broker's append timestamp by
+/// `[startTime, now]` with zero tolerance (`BaseProducerSendTest.scala:256,286`),
+/// which holds only because its brokers run in-process on the client's clock.
+/// Here they run in Docker, where a VM-backed daemon's clock can differ from
+/// the host's by milliseconds. Same slack and rationale as
+/// `CLOCK_SKEW_SLACK_MS` in `plaintext_consumer_test.rs`
+/// (`consume_and_verify_records_with_time_type_log_append`), which records the
+/// observed 2 ms overshoot that motivated it.
+const CLOCK_SKEW_SLACK_MS: i64 = 50;
+
 /// State of the Scala `object callback` in `sendAndVerifyTimestamp`
 /// (`BaseProducerSendTest.scala:245-263`). As in [`SendOffsetCallbackState`],
 /// would-be assertion failures inside the callback are recorded and checked on
@@ -1266,9 +1279,10 @@ async fn send_and_verify_timestamp<F: ProducerBackendFactory>(
                 }
             } else {
                 let now = current_time_ms();
-                if !(m.timestamp() >= start_time && m.timestamp() <= now) {
+                if !(m.timestamp() >= start_time - CLOCK_SKEW_SLACK_MS && m.timestamp() <= now + CLOCK_SKEW_SLACK_MS) {
                     st.failures.push(format!(
-                        "offset {offset}: log-append timestamp {} not within [{start_time}, {now}]",
+                        "offset {offset}: log-append timestamp {} not within [{start_time}, {now}] \
+                         +/- {CLOCK_SKEW_SLACK_MS} ms clock-skew slack",
                         m.timestamp()
                     ));
                 }
@@ -1327,8 +1341,9 @@ async fn send_and_verify_timestamp<F: ProducerBackendFactory>(
         if timestamp_type == TimestampType::LogAppendTime {
             let now = current_time_ms();
             assert!(
-                record_metadata.timestamp() >= start_time && record_metadata.timestamp() <= now,
-                "log-append timestamp {} not within [{start_time}, {now}]",
+                record_metadata.timestamp() >= start_time - CLOCK_SKEW_SLACK_MS
+                    && record_metadata.timestamp() <= now + CLOCK_SKEW_SLACK_MS,
+                "log-append timestamp {} not within [{start_time}, {now}] +/- {CLOCK_SKEW_SLACK_MS} ms clock-skew slack",
                 record_metadata.timestamp()
             );
         } else {
@@ -1787,30 +1802,49 @@ crate::multilanguage_test!(
     batch_size_zero_no_partition_no_record_key_inner,
     producer_send_cluster_config()
 );
+// The four `sendAndVerifyTimestamp` tests are native-only, also under
+// `multilanguage-tests`. They keep Java's producer shape (`linger.ms` and
+// `delivery.timeout.ms` = Int.MaxValue, default `batch.size`), which relies on
+// `send()` returning an unresolved future so `close(20s)` can drain the
+// lingering batch. The gRPC `Send` RPC is synchronous per record: it blocks
+// until delivery (`bindings/c/grpc_server/server.cc` calls
+// `kafka_producer_FutureRecordMetadata_get`; `bindings/python/grpc_server.py`
+// calls `future.result(timeout=120)`). So the first record's partial batch
+// never ships and `close` is never reached on the python / c backends.
 #[cfg(feature = "multilanguage-tests")]
-crate::multilanguage_test!(
-    test_send_compressed_message_with_create_time,
-    send_compressed_message_with_create_time_inner,
-    producer_send_cluster_config()
-);
+#[allow(non_snake_case)] // `__rust` suffix matches `multilanguage_test!` naming.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_send_compressed_message_with_create_time__rust() {
+    let mut ctx = TestContext::new(producer_send_cluster_config()).await;
+    send_compressed_message_with_create_time_inner(&mut ctx, &crate::common::backend_factory::RustNativeFactory).await;
+}
 #[cfg(feature = "multilanguage-tests")]
-crate::multilanguage_test!(
-    test_send_non_compressed_message_with_create_time,
-    send_non_compressed_message_with_create_time_inner,
-    producer_send_cluster_config()
-);
+#[allow(non_snake_case)] // `__rust` suffix matches `multilanguage_test!` naming.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_send_non_compressed_message_with_create_time__rust() {
+    let mut ctx = TestContext::new(producer_send_cluster_config()).await;
+    send_non_compressed_message_with_create_time_inner(&mut ctx, &crate::common::backend_factory::RustNativeFactory)
+        .await;
+}
 #[cfg(feature = "multilanguage-tests")]
-crate::multilanguage_test!(
-    test_send_compressed_message_with_log_append_time,
-    send_compressed_message_with_log_append_time_inner,
-    producer_send_cluster_config()
-);
+#[allow(non_snake_case)] // `__rust` suffix matches `multilanguage_test!` naming.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_send_compressed_message_with_log_append_time__rust() {
+    let mut ctx = TestContext::new(producer_send_cluster_config()).await;
+    send_compressed_message_with_log_append_time_inner(&mut ctx, &crate::common::backend_factory::RustNativeFactory)
+        .await;
+}
 #[cfg(feature = "multilanguage-tests")]
-crate::multilanguage_test!(
-    test_send_non_compressed_message_with_log_append_time,
-    send_non_compressed_message_with_log_append_time_inner,
-    producer_send_cluster_config()
-);
+#[allow(non_snake_case)] // `__rust` suffix matches `multilanguage_test!` naming.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_send_non_compressed_message_with_log_append_time__rust() {
+    let mut ctx = TestContext::new(producer_send_cluster_config()).await;
+    send_non_compressed_message_with_log_append_time_inner(
+        &mut ctx,
+        &crate::common::backend_factory::RustNativeFactory,
+    )
+    .await;
+}
 #[cfg(feature = "multilanguage-tests")]
 crate::multilanguage_test!(
     test_send_with_invalid_before_and_after_timestamp,
