@@ -17,6 +17,13 @@
 //! Translated from:
 //! - `org.apache.kafka.clients.producer.ProducerCompressionTest`
 //! - `org.apache.kafka.clients.producer.ProducerFailureHandlingTest`
+//! - `kafka.api.BaseProducerSendTest` / `kafka.api.PlaintextProducerSendTest`
+//!   (`core/src/test/scala/integration/kafka/api/`): `testSendOffset`,
+//!   `testSendToPartition`, `testSendBeforeAndAfterPartitionExpansion`,
+//!   `testBatchSizeZero`, `testBatchSizeZeroNoPartitionNoRecordKey`,
+//!   `testCloseWithZeroTimeoutFromSenderThread` (native only),
+//!   `testCloseWithZeroTimeoutFromCallerThread` (native only),
+//!   `testWrongSerializer` (native only).
 //!
 //! When the `multilanguage-tests` feature is enabled, each test is
 //! instantiated three times via [`multilanguage_test!`] — once per
@@ -28,8 +35,23 @@
 //! See `design/history/MILESTONE-6/DESIGN-multilanguage-tests.md`.
 
 use std::collections::HashMap;
+use std::sync::Arc;
+use std::sync::Mutex;
 use std::time::Duration;
+use std::time::Instant;
 
+use confluent_kafka::admin::Admin;
+use confluent_kafka::admin::AdminClientConfig;
+use confluent_kafka::admin::KafkaAdminClient;
+use confluent_kafka::admin::NewPartitions;
+use confluent_kafka::admin::OffsetSpec;
+use confluent_kafka::common::Error;
+use confluent_kafka::common::TopicPartition;
+use confluent_kafka::common::serialization::ByteArrayDeserializer;
+use confluent_kafka::consumer::Consumer;
+use confluent_kafka::consumer::ConsumerConfig;
+use confluent_kafka::consumer::KafkaConsumer;
+use confluent_kafka::producer::Callback;
 use confluent_kafka::producer::Producer;
 use confluent_kafka::producer::ProducerRecord;
 
@@ -37,6 +59,7 @@ use crate::common::backend_factory::ProducerBackendFactory;
 use crate::common::callback_log::KIND_DELIVERY;
 use crate::common::cluster_config::ClusterConfig;
 use crate::common::test_context::TestContext;
+use crate::common::test_utils;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -136,43 +159,517 @@ async fn produce_with_key_inner<F: ProducerBackendFactory>(ctx: &mut TestContext
     producer.close().await.expect("close should succeed");
 }
 
-/// Test: Send multiple records to the same partition, verify offsets are
-/// sequential.
-async fn produce_multiple_records_ordering_inner<F: ProducerBackendFactory>(ctx: &mut TestContext, factory: &F) {
-    let topic = ctx.topic("ordering");
+// ---------------------------------------------------------------------------
+// BaseProducerSendTest / PlaintextProducerSendTest fixtures
+// ---------------------------------------------------------------------------
+
+/// `BaseProducerSendTest.numRecords` (`BaseProducerSendTest.scala:73`).
+const NUM_RECORDS: usize = 100;
+
+/// Bound substituted for Java's unbounded `Future.get()`, so a regression fails
+/// the test instead of hanging the whole binary.
+const UNBOUNDED_GET_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// Broker shape of `BaseProducerSendTest.generateConfigs` / `brokerOverrides`
+/// (`BaseProducerSendTest.scala:50-65`): two brokers, `num.partitions=4`, and
+/// `offsets.topic.replication.factor=2` (the harness already sets it to
+/// `min(brokers, 3)` = 2, see `kafka_cluster.rs`).
+fn producer_send_cluster_config() -> ClusterConfig {
+    let mut cfg = ClusterConfig::with_brokers(2);
+    cfg.server_properties
+        .insert("KAFKA_NUM_PARTITIONS".to_string(), "4".to_string());
+    cfg
+}
+
+/// The parameters of `BaseProducerSendTest.createProducer`
+/// (`BaseProducerSendTest.scala:103-108`), with the same defaults.
+struct SendTestProducerOpts {
+    linger_ms: i64,
+    delivery_timeout_ms: i64,
+    batch_size: i32,
+    max_block_ms: i64,
+}
+
+impl Default for SendTestProducerOpts {
+    fn default() -> Self {
+        Self {
+            linger_ms: 0,
+            delivery_timeout_ms: 2 * 60 * 1000,
+            batch_size: 16384,
+            max_block_ms: 60 * 1000,
+        }
+    }
+}
+
+/// Java's `Int.MaxValue`, as passed for `lingerMs` / `deliveryTimeoutMs`.
+const INT_MAX_VALUE: i64 = i32::MAX as i64;
+
+/// The producer config `BaseProducerSendTest.createProducer` builds through
+/// `TestUtils.createProducer` (`TestUtils.scala:516-545`), including the
+/// defaults `createProducer` does not override: `acks=-1`,
+/// `buffer.memory=1 MiB`, `retries=Int.MaxValue`, `request.timeout.ms=20000`,
+/// `compression.type=none`, `enable.idempotence=false`.
+fn send_test_producer_config(bootstrap_servers: &str, opts: &SendTestProducerOpts) -> HashMap<String, String> {
+    HashMap::from([
+        ("bootstrap.servers".to_string(), bootstrap_servers.to_string()),
+        ("acks".to_string(), "-1".to_string()),
+        ("max.block.ms".to_string(), opts.max_block_ms.to_string()),
+        ("buffer.memory".to_string(), (1024 * 1024).to_string()),
+        ("retries".to_string(), i32::MAX.to_string()),
+        ("delivery.timeout.ms".to_string(), opts.delivery_timeout_ms.to_string()),
+        ("request.timeout.ms".to_string(), "20000".to_string()),
+        ("linger.ms".to_string(), opts.linger_ms.to_string()),
+        ("batch.size".to_string(), opts.batch_size.to_string()),
+        ("compression.type".to_string(), "none".to_string()),
+        ("enable.idempotence".to_string(), "false".to_string()),
+    ])
+}
+
+/// Admin client for topic provisioning — the suite's `admin`
+/// (`BaseProducerSendTest.scala:78`). Always native: it is harness
+/// infrastructure, not the client under test.
+fn send_test_admin(ctx: &TestContext) -> Box<dyn Admin> {
+    let props = HashMap::from([
+        ("bootstrap.servers".to_string(), ctx.bootstrap_servers().to_string()),
+        ("client.id".to_string(), "producer-send-test-admin".to_string()),
+        ("request.timeout.ms".to_string(), "30000".to_string()),
+        ("default.api.timeout.ms".to_string(), "30000".to_string()),
+    ]);
+    let config = AdminClientConfig::new(&props).expect("valid admin config");
+    Box::new(KafkaAdminClient::new(config).expect("admin client"))
+}
+
+/// `TestUtils.createTopicWithAdmin` plus a wait until every partition's leader
+/// serves requests for it.
+///
+/// Java's `createTopicWithAdmin` returns only after `waitForAllPartitionsMetadata`
+/// sees the topic in **every** broker's metadata cache (`TestUtils.scala:832-853`),
+/// so the leader has applied its leadership before the first produce.
+/// [`test_utils::create_topic`] can only prove that one broker knows the topic;
+/// on this two-broker cluster the first produce requests then intermittently
+/// get `NOT_LEADER_OR_FOLLOWER`, and since these producers are non-idempotent
+/// with 5 in-flight requests, the retries reorder records and break the
+/// consecutive-offset assertions (observed: offsets `[7, 8, 5, 6, 3, 4, 1, 2, 0, 9, ..]`).
+/// See [`wait_for_partition_leaders`] for how the missing half is recovered.
+async fn create_topic_with_admin(admin: &dyn Admin, topic: &str, num_partitions: i32, replication_factor: i16) {
+    test_utils::create_topic(admin, topic, num_partitions, replication_factor).await;
+    wait_for_partition_leaders(admin, topic, 0..num_partitions).await;
+}
+
+/// Waits until the leader of each of `partitions` answers a leader-only
+/// request — the client-observable half of Java's
+/// `TestUtils.waitForPartitionMetadata` / `waitForAllPartitionsMetadata`
+/// that matters to a producer.
+///
+/// `ListOffsets` is routed to the partition leader, which rejects it with
+/// `NOT_LEADER_OR_FOLLOWER` until it has applied its leadership — the same
+/// check a `Produce` request hits — and it writes nothing, so the offsets the
+/// tests assert on are unaffected.
+async fn wait_for_partition_leaders(admin: &dyn Admin, topic: &str, partitions: std::ops::Range<i32>) {
+    let specs: HashMap<TopicPartition, OffsetSpec> = partitions
+        .map(|p| (TopicPartition::new(topic.to_string(), p), OffsetSpec::latest()))
+        .collect();
+    test_utils::retry_on_error_with_timeout(
+        Duration::from_millis(test_utils::TOPIC_METADATA_PROPAGATION_WAIT_MS),
+        || {
+            let result = admin.list_offsets(&specs);
+            async move {
+                result
+                    .all()
+                    .get()
+                    .await
+                    .map(|_| ())
+                    .map_err(|e| format!("partition leaders of {topic} not ready: {e:?}"))
+            }
+        },
+    )
+    .await;
+}
+
+/// The suite's verification consumer — `TestUtils.createConsumer(bootstrap,
+/// groupProtocol)` (`BaseProducerSendTest.scala:86-90`, `TestUtils.scala:551`):
+/// `auto.offset.reset=earliest`, `enable.auto.commit=true`, CONSUMER (KIP-848)
+/// arm only. Always native, like the admin client.
+///
+/// Deviation: Java's fixed group id `"group"` becomes a per-test id, because
+/// clusters are pooled across tests here and Java's are not.
+fn send_test_consumer(ctx: &TestContext) -> Box<dyn Consumer<Vec<u8>, Vec<u8>>> {
+    let props = HashMap::from([
+        ("bootstrap.servers".to_string(), ctx.bootstrap_servers().to_string()),
+        ("group.protocol".to_string(), "consumer".to_string()),
+        ("group.id".to_string(), ctx.group_id("group")),
+        ("auto.offset.reset".to_string(), "earliest".to_string()),
+        ("enable.auto.commit".to_string(), "true".to_string()),
+    ]);
+    KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
+        ConsumerConfig::new(&props).expect("valid consumer config"),
+        Box::new(ByteArrayDeserializer::new()),
+        Box::new(ByteArrayDeserializer::new()),
+    )
+    .expect("KafkaConsumer::new should succeed")
+}
+
+/// The fields of a consumed record the suite asserts on (`ConsumerRecord` is
+/// not `Clone`).
+struct ConsumedRecord {
+    topic: String,
+    partition: i32,
+    offset: i64,
+    timestamp: i64,
+    key: Option<Vec<u8>>,
+    value: Option<Vec<u8>>,
+}
+
+/// `TestUtils.pollUntilAtLeastNumRecords` (`TestUtils.scala:1184-1196`) over
+/// `pollRecordsUntilTrue` (`:709-718`): 100 ms polls, 15 s budget
+/// (`DEFAULT_MAX_WAIT_MS`), same failure message.
+async fn poll_until_at_least_num_records(
+    consumer: &mut dyn Consumer<Vec<u8>, Vec<u8>>,
+    num_records: usize,
+) -> Vec<ConsumedRecord> {
+    let deadline = Instant::now() + Duration::from_millis(15_000);
+    let mut records = Vec::new();
+    loop {
+        let polled = consumer.poll(Duration::from_millis(100)).await.expect("poll should succeed");
+        for record in polled {
+            records.push(ConsumedRecord {
+                topic: record.topic().to_string(),
+                partition: record.partition(),
+                offset: record.offset(),
+                timestamp: record.timestamp(),
+                key: record.key().cloned(),
+                value: record.value().cloned(),
+            });
+        }
+        if records.len() >= num_records {
+            return records;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "Consumed {} records before timeout instead of the expected {num_records} records",
+            records.len()
+        );
+    }
+}
+
+/// `TestUtils.consumeRecords` (`TestUtils.scala:1198-1204`).
+async fn consume_records(consumer: &mut dyn Consumer<Vec<u8>, Vec<u8>>, num_records: usize) -> Vec<ConsumedRecord> {
+    let records = poll_until_at_least_num_records(consumer, num_records).await;
+    assert_eq!(num_records, records.len(), "Consumed more records than expected");
+    records
+}
+
+/// Java's `System.currentTimeMillis()`.
+fn current_time_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock after epoch")
+        .as_millis() as i64
+}
+
+/// State of the Scala `object callback` in `testSendOffset`
+/// (`BaseProducerSendTest.scala:140-160`).
+///
+/// Java asserts inside `onCompletion`, which runs on the producer's I/O thread,
+/// where a failed assertion is caught and logged by the producer rather than
+/// failing the test. Here each would-be assertion failure is recorded and
+/// checked on the test task, so the callback checks actually bind.
+#[derive(Default)]
+struct SendOffsetCallbackState {
+    offset: i64,
+    invocations: usize,
+    failures: Vec<String>,
+}
+
+fn send_offset_callback(state: Arc<Mutex<SendOffsetCallbackState>>, topic: String, partition: i32) -> Callback {
+    Box::new(move |metadata, error| {
+        let mut st = state.lock().unwrap();
+        st.invocations += 1;
+        // Java: `if (exception == null) ... else fail(...)`.
+        if let Some(e) = error {
+            st.failures
+                .push(format!("Send callback returns the following exception: {e:?}"));
+            return;
+        }
+        let Some(m) = metadata else {
+            st.failures
+                .push("Send callback invoked with neither metadata nor error".to_string());
+            return;
+        };
+        let offset = st.offset;
+        if m.offset() != offset {
+            st.failures.push(format!("expected offset {offset}, got {}", m.offset()));
+        }
+        if m.topic() != topic {
+            st.failures.push(format!("expected topic {topic}, got {}", m.topic()));
+        }
+        if m.partition() != partition {
+            st.failures
+                .push(format!("expected partition {partition}, got {}", m.partition()));
+        }
+        let key_len = "key".len() as i32;
+        let value_len = "value".len() as i32;
+        let size_ok = match offset {
+            0 => m.serialized_key_size() + m.serialized_value_size() == key_len + value_len,
+            1 => m.serialized_key_size() == key_len,
+            2 => m.serialized_value_size() == value_len,
+            _ => m.serialized_value_size() > 0,
+        };
+        if !size_ok {
+            st.failures.push(format!(
+                "offset {offset}: unexpected serialized sizes key={} value={}",
+                m.serialized_key_size(),
+                m.serialized_value_size()
+            ));
+        }
+        st.offset += 1;
+    })
+}
+
+/// Translated from `BaseProducerSendTest.testSendOffset`
+/// (`BaseProducerSendTest.scala:127-194`).
+///
+/// 1. Sends with a null value, null key, or null partition are accepted.
+/// 2. The last of 100 non-blocking sends reports the correct offset.
+///
+/// (The Scala doc also mentions a null topic being rejected; the test body has
+/// no such case, and Rust's `ProducerRecord` cannot hold a null topic.)
+async fn send_offset_inner<F: ProducerBackendFactory>(ctx: &mut TestContext, factory: &F) {
+    let topic = ctx.topic("topic");
     let producer = factory
-        .create(make_config(&bootstrap_for(factory, ctx)))
+        .create(send_test_producer_config(
+            &bootstrap_for(factory, ctx),
+            &SendTestProducerOpts::default(),
+        ))
         .await
         .expect("Failed to create producer");
+    let partition = 0;
+    let state = Arc::new(Mutex::new(SendOffsetCallbackState::default()));
+    let callback = || Some(send_offset_callback(state.clone(), topic.clone(), partition));
 
-    let mut offsets = Vec::new();
-    for i in 0..5 {
-        let record = ProducerRecord::with_partition_key(
+    let admin = send_test_admin(ctx);
+    create_topic_with_admin(admin.as_ref(), &topic, 1, 2).await;
+
+    let record0 = || {
+        ProducerRecord::with_partition_key(topic.clone(), Some(partition), Some(b("key")), Some(b("value")))
+            .expect("valid record")
+    };
+    let send_and_get = |record: ProducerRecord<Vec<u8>, Vec<u8>>| {
+        let producer = &producer;
+        let callback = callback();
+        async move {
+            producer
+                .send_with_callback(record, callback)
+                .await
+                .expect("send should succeed")
+                .get_with_timeout(UNBOUNDED_GET_TIMEOUT)
+                .await
+                .expect("produce should succeed")
+                .offset()
+        }
+    };
+
+    // send a normal record
+    assert_eq!(0, send_and_get(record0()).await, "Should have offset 0");
+
+    // send a record with null value should be ok
+    let record1 =
+        ProducerRecord::with_partition_key(topic.clone(), Some(partition), Some(b("key")), None).expect("valid record");
+    assert_eq!(1, send_and_get(record1).await, "Should have offset 1");
+
+    // send a record with null key should be ok
+    let record2 = ProducerRecord::with_partition_key(topic.clone(), Some(partition), None, Some(b("value")))
+        .expect("valid record");
+    assert_eq!(2, send_and_get(record2).await, "Should have offset 2");
+
+    // send a record with null part id should be ok
+    let record3 = ProducerRecord::with_partition_key(topic.clone(), None, Some(b("key")), Some(b("value")))
+        .expect("valid record");
+    assert_eq!(3, send_and_get(record3).await, "Should have offset 3");
+
+    // non-blocking send a list of records
+    for _ in 0..NUM_RECORDS {
+        producer
+            .send_with_callback(record0(), callback())
+            .await
+            .expect("send should succeed");
+    }
+
+    // check that all messages have been acked via offset
+    let expected = NUM_RECORDS as i64 + 4;
+    assert_eq!(expected, send_and_get(record0()).await, "Should have offset {expected}");
+
+    producer.close().await.expect("close should succeed");
+
+    let st = state.lock().unwrap();
+    assert!(st.failures.is_empty(), "callback assertions failed: {:?}", st.failures);
+    assert_eq!(st.invocations, NUM_RECORDS + 5, "every send's callback must fire exactly once");
+    assert_eq!(st.offset, NUM_RECORDS as i64 + 5);
+    drop(st);
+    admin.close_with_timeout(Duration::from_secs(5)).await;
+}
+
+/// Translated from `BaseProducerSendTest.testSendToPartition`
+/// (`BaseProducerSendTest.scala:329-371`): the specified partition id is
+/// respected, and the consumed records keep the partition, ordering, null key,
+/// value, and explicit timestamp.
+async fn send_to_partition_inner<F: ProducerBackendFactory>(ctx: &mut TestContext, factory: &F) {
+    let topic = ctx.topic("topic");
+    let producer = factory
+        .create(send_test_producer_config(
+            &bootstrap_for(factory, ctx),
+            &SendTestProducerOpts::default(),
+        ))
+        .await
+        .expect("Failed to create producer");
+    let admin = send_test_admin(ctx);
+    create_topic_with_admin(admin.as_ref(), &topic, 2, 2).await;
+    let partition = 1;
+
+    let now = current_time_ms();
+    let mut futures = Vec::with_capacity(NUM_RECORDS);
+    for i in 1..=NUM_RECORDS {
+        let record = ProducerRecord::with_partition_timestamp_key(
             topic.clone(),
-            Some(0),
-            Some(b(&format!("key-{i}"))),
-            Some(b(&format!("value-{i}"))),
+            Some(partition),
+            Some(now),
+            None,
+            Some(b(&format!("value{i}"))),
         )
-        .expect("record creation should succeed");
-        let future = producer.send(record).await.expect("send should succeed");
+        .expect("valid record");
+        futures.push(producer.send(record).await.expect("send should succeed"));
+    }
+    let mut metadatas = Vec::with_capacity(NUM_RECORDS);
+    for future in &futures {
+        metadatas.push(
+            future
+                .get_with_timeout(Duration::from_secs(30))
+                .await
+                .expect("produce should succeed"),
+        );
+    }
+
+    // make sure all of them end up in the same partition with increasing offset values
+    for (offset, metadata) in metadatas.iter().enumerate() {
+        assert_eq!(offset as i64, metadata.offset());
+        assert_eq!(topic, metadata.topic());
+        assert_eq!(partition, metadata.partition());
+    }
+
+    let mut consumer = send_test_consumer(ctx);
+    consumer
+        .assign(vec![TopicPartition::new(topic.clone(), partition)])
+        .await
+        .expect("assign should succeed");
+
+    // make sure the fetched messages also respect the partitioning and ordering
+    let records = consume_records(consumer.as_mut(), NUM_RECORDS).await;
+    for (i, record) in records.iter().enumerate() {
+        assert_eq!(topic, record.topic);
+        assert_eq!(partition, record.partition);
+        assert_eq!(i as i64, record.offset);
+        assert_eq!(None, record.key);
+        assert_eq!(Some(b(&format!("value{}", i + 1))), record.value);
+        assert_eq!(now, record.timestamp);
+    }
+
+    producer.close().await.expect("close should succeed");
+    consumer.close().await.expect("consumer close should succeed");
+    admin.close_with_timeout(Duration::from_secs(5)).await;
+}
+
+/// Sends `NUM_RECORDS` records with a null key and `value{i}` to `partition`,
+/// awaiting each future for 30 s, and asserts they land at consecutive offsets
+/// starting at `first_offset` — the repeated block of
+/// `testSendBeforeAndAfterPartitionExpansion`.
+async fn send_and_verify_partition<P: Producer<Vec<u8>, Vec<u8>>>(
+    producer: &P,
+    topic: &str,
+    partition: i32,
+    first_offset: i64,
+) {
+    let mut futures = Vec::with_capacity(NUM_RECORDS);
+    for i in 1..=NUM_RECORDS {
+        let record =
+            ProducerRecord::with_partition_key(topic.to_string(), Some(partition), None, Some(b(&format!("value{i}"))))
+                .expect("valid record");
+        futures.push(producer.send(record).await.expect("send should succeed"));
+    }
+    for (i, future) in futures.iter().enumerate() {
         let metadata = future
             .get_with_timeout(Duration::from_secs(30))
             .await
             .expect("produce should succeed");
-        offsets.push(metadata.offset());
+        assert_eq!(first_offset + i as i64, metadata.offset());
+        assert_eq!(topic, metadata.topic());
+        assert_eq!(partition, metadata.partition());
     }
+}
 
-    for i in 1..offsets.len() {
-        assert_eq!(
-            offsets[i],
-            offsets[i - 1] + 1,
-            "Offset {i} should be sequential: expected {}, got {}",
-            offsets[i - 1] + 1,
-            offsets[i]
-        );
-    }
+/// Translated from `BaseProducerSendTest.testSendBeforeAndAfterPartitionExpansion`
+/// (`BaseProducerSendTest.scala:426-481`).
+async fn send_before_and_after_partition_expansion_inner<F: ProducerBackendFactory>(
+    ctx: &mut TestContext,
+    factory: &F,
+) {
+    let topic = ctx.topic("topic");
+    let producer = factory
+        .create(send_test_producer_config(
+            &bootstrap_for(factory, ctx),
+            &SendTestProducerOpts { max_block_ms: 5 * 1000, ..SendTestProducerOpts::default() },
+        ))
+        .await
+        .expect("Failed to create producer");
 
+    // create topic
+    let admin = send_test_admin(ctx);
+    create_topic_with_admin(admin.as_ref(), &topic, 1, 2).await;
+
+    let partition0 = 0;
+    send_and_verify_partition(&producer, &topic, partition0, 0).await;
+
+    // Trying to send a record to a partition beyond topic's partition range before adding the partition should fail.
+    let partition1 = 1;
+    let record = ProducerRecord::with_partition_key(topic.clone(), Some(partition1), None, Some(b("value")))
+        .expect("valid record");
+    let err = producer
+        .send(record)
+        .await
+        .expect("send should return a future (Java: the failure surfaces from get())")
+        .get_with_timeout(UNBOUNDED_GET_TIMEOUT)
+        .await
+        .expect_err("send to a not-yet-existing partition should fail");
+    assert!(matches!(err, Error::Timeout(_)), "Expected Timeout, got: {err:?}");
+    // Java asserts only the class; the message is `KafkaProducer.waitOnMetadata`'s
+    // (`KafkaProducer.java`, "Partition %d of topic %s with partition count %d ...").
+    let expected_message = format!(
+        "Partition {partition1} of topic {topic} with partition count 1 is not present in metadata after 5000 ms."
+    );
+    assert!(
+        err.to_string().contains(&expected_message),
+        "Expected message {expected_message:?}, got: {err}"
+    );
+
+    admin
+        .create_partitions(&HashMap::from([(topic.clone(), NewPartitions::increase_to(2))]))
+        .all()
+        .get()
+        .await
+        .expect("create partitions");
+
+    // read metadata from a broker and verify the new topic partitions exist
+    test_utils::wait_for_all_partitions_metadata(admin.as_ref(), &topic, 2).await;
+    wait_for_partition_leaders(admin.as_ref(), &topic, 0..2).await;
+
+    // send records to the newly added partition after confirming that metadata have been updated.
+    send_and_verify_partition(&producer, &topic, partition1, 0).await;
+
+    // make sure all of them end up in the same partition with increasing offset values starting where previous
+    send_and_verify_partition(&producer, &topic, partition0, NUM_RECORDS as i64).await;
+
+    // Java leaves the close to `tearDown` (`BaseProducerSendTest.scala:97`).
     producer.close().await.expect("close should succeed");
+    admin.close_with_timeout(Duration::from_secs(5)).await;
 }
 
 /// Test: Verify each compression type produces successfully.
@@ -526,27 +1023,105 @@ async fn send_after_closed_inner<F: ProducerBackendFactory>(ctx: &mut TestContex
     );
 }
 
-/// Translated from `PlaintextProducerSendTest.testBatchSizeZero`.
-/// With batch.size=0, each record is its own batch and gets dispatched
-/// immediately. Sends should succeed without needing flush.
-async fn produce_batch_size_zero_inner<F: ProducerBackendFactory>(ctx: &mut TestContext, factory: &F) {
-    let topic = ctx.topic("batch_zero");
-    let mut config = make_config(&bootstrap_for(factory, ctx));
-    config.insert("batch.size".to_string(), "0".to_string());
-    let producer = factory.create(config).await.expect("Failed to create producer");
+/// Translated from `PlaintextProducerSendTest.testBatchSizeZero`
+/// (`PlaintextProducerSendTest.scala:69-78`) and the `sendAndVerify` helper it
+/// calls (`BaseProducerSendTest.scala:213-237`).
+///
+/// With `batch.size=0` every record is its own full batch, so the records are
+/// sent even though `linger.ms=Int.MaxValue`; `close(20 s)` must deliver all of
+/// them at consecutive offsets.
+async fn batch_size_zero_inner<F: ProducerBackendFactory>(ctx: &mut TestContext, factory: &F) {
+    let topic = ctx.topic("topic");
+    let producer = factory
+        .create(send_test_producer_config(
+            &bootstrap_for(factory, ctx),
+            &SendTestProducerOpts {
+                linger_ms: INT_MAX_VALUE,
+                delivery_timeout_ms: INT_MAX_VALUE,
+                batch_size: 0,
+                ..SendTestProducerOpts::default()
+            },
+        ))
+        .await
+        .expect("Failed to create producer");
 
-    for i in 0..5 {
-        let record =
-            ProducerRecord::with_key(topic.clone(), Some(b(&format!("key-{i}"))), Some(b(&format!("value-{i}"))));
-        let future = producer.send(record).await.expect("send should succeed");
-        let metadata = future
-            .get_with_timeout(Duration::from_secs(30))
-            .await
-            .unwrap_or_else(|e| panic!("send {i} with batch.size=0 should succeed, got: {e:?}"));
-        assert!(metadata.offset() >= 0, "Record {i} should have a valid offset");
+    // sendAndVerify(producer, numRecords = 100, timeoutMs = 20000)
+    let partition = 0;
+    let admin = send_test_admin(ctx);
+    create_topic_with_admin(admin.as_ref(), &topic, 1, 2).await;
+
+    let mut futures = Vec::with_capacity(NUM_RECORDS);
+    for i in 1..=NUM_RECORDS {
+        let record = ProducerRecord::with_partition_key(
+            topic.clone(),
+            Some(partition),
+            Some(b(&format!("key{i}"))),
+            Some(b(&format!("value{i}"))),
+        )
+        .expect("valid record");
+        futures.push(producer.send(record).await.expect("send should succeed"));
     }
+    producer
+        .close_with_timeout(Duration::from_millis(20_000))
+        .await
+        .expect("close should succeed");
+    let mut last_offset = 0i64;
+    for future in &futures {
+        let metadata = future
+            .get_with_timeout(UNBOUNDED_GET_TIMEOUT)
+            .await
+            .expect("produce should succeed");
+        assert_eq!(topic, metadata.topic());
+        assert_eq!(partition, metadata.partition());
+        assert_eq!(last_offset, metadata.offset());
+        last_offset += 1;
+    }
+    assert_eq!(NUM_RECORDS as i64, last_offset);
+    // Java's `finally { producer.close() }` is a no-op on the already-closed
+    // producer, so it is not repeated here.
+    admin.close_with_timeout(Duration::from_secs(5)).await;
+}
 
-    producer.close().await.expect("close should succeed");
+/// Translated from `PlaintextProducerSendTest.testBatchSizeZeroNoPartitionNoRecordKey`
+/// (`PlaintextProducerSendTest.scala:80-101`), including its 15 s `@Timeout`.
+async fn batch_size_zero_no_partition_no_record_key_inner<F: ProducerBackendFactory>(
+    ctx: &mut TestContext,
+    factory: &F,
+) {
+    tokio::time::timeout(Duration::from_secs(15), async {
+        let topic = ctx.topic("topic");
+        let producer = factory
+            .create(send_test_producer_config(
+                &bootstrap_for(factory, ctx),
+                &SendTestProducerOpts { batch_size: 0, ..SendTestProducerOpts::default() },
+            ))
+            .await
+            .expect("Failed to create producer");
+        let num_records = 10;
+        // `createTopicWithAdmin(admin, topic, brokers, controllerServers, 2)`:
+        // two partitions, default replication factor 1.
+        let admin = send_test_admin(ctx);
+        create_topic_with_admin(admin.as_ref(), &topic, 2, 1).await;
+
+        let mut futures = Vec::with_capacity(num_records);
+        for i in 1..=num_records {
+            let record = ProducerRecord::new(topic.clone(), Some(b(&format!("value{i}"))));
+            futures.push(producer.send(record).await.expect("send should succeed"));
+        }
+        producer.flush().await.expect("flush should succeed");
+        let mut last_offset = 0;
+        for future in &futures {
+            let metadata = future.get().await.expect("produce should succeed");
+            assert_eq!(topic, metadata.topic());
+            last_offset += 1;
+        }
+        assert_eq!(num_records, last_offset);
+
+        producer.close().await.expect("close should succeed");
+        admin.close_with_timeout(Duration::from_secs(5)).await;
+    })
+    .await
+    .expect("testBatchSizeZeroNoPartitionNoRecordKey exceeded its 15 s @Timeout");
 }
 
 /// Translated (simplified) from `PlaintextProducerSendTest.testNonBlockingProducer`.
@@ -593,7 +1168,15 @@ crate::multilanguage_test!(test_produce_single_record, produce_single_record_inn
 #[cfg(feature = "multilanguage-tests")]
 crate::multilanguage_test!(test_produce_with_key, produce_with_key_inner);
 #[cfg(feature = "multilanguage-tests")]
-crate::multilanguage_test!(test_produce_multiple_records_ordering, produce_multiple_records_ordering_inner);
+crate::multilanguage_test!(test_send_offset, send_offset_inner, producer_send_cluster_config());
+#[cfg(feature = "multilanguage-tests")]
+crate::multilanguage_test!(test_send_to_partition, send_to_partition_inner, producer_send_cluster_config());
+#[cfg(feature = "multilanguage-tests")]
+crate::multilanguage_test!(
+    test_send_before_and_after_partition_expansion,
+    send_before_and_after_partition_expansion_inner,
+    producer_send_cluster_config()
+);
 #[cfg(feature = "multilanguage-tests")]
 crate::multilanguage_test!(test_produce_with_compression, produce_with_compression_inner);
 #[cfg(feature = "multilanguage-tests")]
@@ -773,7 +1356,13 @@ crate::multilanguage_test!(test_produce_invalid_partition, produce_invalid_parti
 #[cfg(feature = "multilanguage-tests")]
 crate::multilanguage_test!(test_send_after_closed, send_after_closed_inner);
 #[cfg(feature = "multilanguage-tests")]
-crate::multilanguage_test!(test_produce_batch_size_zero, produce_batch_size_zero_inner);
+crate::multilanguage_test!(test_batch_size_zero, batch_size_zero_inner, producer_send_cluster_config());
+#[cfg(feature = "multilanguage-tests")]
+crate::multilanguage_test!(
+    test_batch_size_zero_no_partition_no_record_key,
+    batch_size_zero_no_partition_no_record_key_inner,
+    producer_send_cluster_config()
+);
 #[cfg(feature = "multilanguage-tests")]
 crate::multilanguage_test!(
     test_produce_non_blocking_max_block_zero,
@@ -896,6 +1485,136 @@ async fn test_wrong_serializer_errors_send() {
     Producer::close(&producer).await.expect("close should succeed");
 }
 
+/// Translated from `BaseProducerSendTest.testCloseWithZeroTimeoutFromSenderThread`
+/// (`BaseProducerSendTest.scala:527-567`): closing the producer from its own
+/// send callbacks — `close(0)` then `close()`, repeated by every callback —
+/// neither deadlocks nor blocks, and the originally sent records are delivered.
+///
+/// Deviation (Rust has no synchronous `close`/`send`): the callback is a sync
+/// `FnOnce` running on the producer's sender task, while `close` and `send` are
+/// `async`. Awaiting them there would need `block_on` on the sender task, which
+/// is the very self-join Java's `invokedFromCallback` check
+/// (`KafkaProducer.java:1398-1403`) exists to avoid. Per CLAUDE.md §9.3 the
+/// callback instead hands its work to a detached task. To keep Java's
+/// sequential semantics — callbacks run one after another on the single I/O
+/// thread, so the first callback's sends precede every `close` — each callback
+/// enqueues its work on one channel drained in callback order by a single
+/// worker task, rather than spawning one task per callback.
+///
+/// Native only: it needs `send_with_callback` closures that call back into the
+/// same producer, which cannot cross the gRPC boundary.
+#[cfg(feature = "integration-tests")]
+#[tokio::test(flavor = "multi_thread")]
+async fn test_close_with_zero_timeout_from_sender_thread() {
+    use std::sync::Arc;
+
+    use confluent_kafka::producer::KafkaProducer;
+
+    use crate::common::backend_factory::RustNativeFactory;
+
+    type NativeProducer = KafkaProducer<Vec<u8>, Vec<u8>>;
+
+    let mut ctx = TestContext::new(producer_send_cluster_config()).await;
+    let topic = ctx.topic("topic");
+    let admin = send_test_admin(&ctx);
+    create_topic_with_admin(admin.as_ref(), &topic, 1, 2).await;
+    let partition = 0;
+    let mut consumer = send_test_consumer(&ctx);
+    consumer
+        .assign(vec![TopicPartition::new(topic.clone(), partition)])
+        .await
+        .expect("assign should succeed");
+    let record = {
+        let topic = topic.clone();
+        move || {
+            ProducerRecord::with_partition_key(topic.clone(), Some(partition), None, Some(b("value")))
+                .expect("valid record")
+        }
+    };
+
+    // Test closing from sender thread.
+    for _ in 0..50 {
+        let producer: Arc<NativeProducer> = Arc::new(
+            ProducerBackendFactory::create(
+                &RustNativeFactory,
+                send_test_producer_config(
+                    ctx.bootstrap_servers(),
+                    &SendTestProducerOpts {
+                        linger_ms: INT_MAX_VALUE,
+                        delivery_timeout_ms: INT_MAX_VALUE,
+                        ..SendTestProducerOpts::default()
+                    },
+                ),
+            )
+            .await
+            .expect("Failed to create producer"),
+        );
+
+        // The `CloseCallback` body, run in callback order by one worker task.
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<bool>();
+        let worker = {
+            let producer = Arc::clone(&producer);
+            let record = record.clone();
+            tokio::spawn(async move {
+                while let Some(send_records) = rx.recv().await {
+                    // Trigger another batch in accumulator before close the producer. These messages should
+                    // not be sent.
+                    if send_records {
+                        for _ in 0..NUM_RECORDS {
+                            <NativeProducer as Producer<Vec<u8>, Vec<u8>>>::send(&producer, record())
+                                .await
+                                .expect("send before the first close should be accepted");
+                        }
+                    }
+                    // The close call will be called by all the message callbacks. This tests idempotence of the close call.
+                    Producer::close_with_timeout(producer.as_ref(), Duration::ZERO)
+                        .await
+                        .expect("close(0) should succeed");
+                    // Test close with non zero timeout. Should not block at all.
+                    tokio::time::timeout(Duration::from_secs(30), Producer::close(producer.as_ref()))
+                        .await
+                        .expect("close() after close(0) should not block")
+                        .expect("close() should succeed");
+                }
+            })
+        };
+
+        // send message to partition 0
+        // Only send the records in the first callback since we close the producer in the callback and no records
+        // can be sent afterwards.
+        let mut responses = Vec::with_capacity(NUM_RECORDS);
+        for i in 0..NUM_RECORDS {
+            let tx = tx.clone();
+            let callback: Callback = Box::new(move |_metadata, _error| {
+                let _ = tx.send(i == 0);
+            });
+            responses.push(
+                Producer::send_with_callback(producer.as_ref(), record(), Some(callback))
+                    .await
+                    .expect("send should succeed"),
+            );
+        }
+        drop(tx);
+        assert!(responses.iter().all(|f| !f.is_done()), "No request is complete.");
+        // flush the messages.
+        Producer::flush(producer.as_ref()).await.expect("flush should succeed");
+        assert!(responses.iter().all(|f| f.is_done()), "All requests are complete.");
+        // Check the messages received by broker.
+        poll_until_at_least_num_records(consumer.as_mut(), NUM_RECORDS).await;
+
+        // Every callback has fired (all responses are done), so the worker's
+        // channel is closed and it finishes once its queued closes return.
+        tokio::time::timeout(Duration::from_secs(60), worker)
+            .await
+            .expect("callback worker should finish")
+            .expect("callback worker should not panic");
+        Producer::close(producer.as_ref()).await.expect("close should succeed");
+    }
+
+    consumer.close().await.expect("consumer close should succeed");
+    admin.close_with_timeout(Duration::from_secs(5)).await;
+}
+
 /// Test: a delivery callback registered through each backend's own binding is
 /// invoked exactly once, with metadata matching the send future's.
 ///
@@ -984,6 +1703,10 @@ mod rust_only_fallback {
         TestContext::new(small_max_bytes_cluster_config()).await
     }
 
+    async fn send_ctx() -> TestContext {
+        TestContext::new(producer_send_cluster_config()).await
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn test_produce_single_record() {
         produce_single_record_inner(&mut ctx().await, &RustNativeFactory).await;
@@ -993,8 +1716,16 @@ mod rust_only_fallback {
         produce_with_key_inner(&mut ctx().await, &RustNativeFactory).await;
     }
     #[tokio::test(flavor = "multi_thread")]
-    async fn test_produce_multiple_records_ordering() {
-        produce_multiple_records_ordering_inner(&mut ctx().await, &RustNativeFactory).await;
+    async fn test_send_offset() {
+        send_offset_inner(&mut send_ctx().await, &RustNativeFactory).await;
+    }
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_send_to_partition() {
+        send_to_partition_inner(&mut send_ctx().await, &RustNativeFactory).await;
+    }
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_send_before_and_after_partition_expansion() {
+        send_before_and_after_partition_expansion_inner(&mut send_ctx().await, &RustNativeFactory).await;
     }
     #[tokio::test(flavor = "multi_thread")]
     async fn test_produce_with_compression() {
@@ -1049,8 +1780,12 @@ mod rust_only_fallback {
         send_after_closed_inner(&mut ctx().await, &RustNativeFactory).await;
     }
     #[tokio::test(flavor = "multi_thread")]
-    async fn test_produce_batch_size_zero() {
-        produce_batch_size_zero_inner(&mut ctx().await, &RustNativeFactory).await;
+    async fn test_batch_size_zero() {
+        batch_size_zero_inner(&mut send_ctx().await, &RustNativeFactory).await;
+    }
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_batch_size_zero_no_partition_no_record_key() {
+        batch_size_zero_no_partition_no_record_key_inner(&mut send_ctx().await, &RustNativeFactory).await;
     }
     #[tokio::test(flavor = "multi_thread")]
     async fn test_produce_non_blocking_max_block_zero() {
