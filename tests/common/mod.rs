@@ -75,6 +75,9 @@ pub mod backend_factory;
 #[cfg(feature = "integration-tests")]
 #[allow(dead_code)]
 pub mod callback_log;
+#[cfg(feature = "integration-tests")]
+#[allow(dead_code)]
+pub mod consumer_assignment_poller;
 
 // Error-code constants generated from `kafka_common_ErrorCode_t`
 // (`cargo xtask generate-error-codes`). The harness decodes a proto

@@ -37,6 +37,7 @@ mod admin_topics_test;
 mod admin_transactions_test;
 mod api_versions_test;
 mod connection_test;
+mod consumer_bounce_test;
 mod consumer_test;
 mod consumer_topic_creation_test;
 mod metadata_test;
@@ -45,6 +46,7 @@ mod multilanguage_admin_test;
 #[cfg(feature = "multilanguage-tests")]
 mod multilanguage_consumer_test;
 mod plaintext_consumer_assign_test;
+mod plaintext_consumer_assignors_test;
 mod plaintext_consumer_callback_test;
 mod plaintext_consumer_commit_test;
 mod plaintext_consumer_fetch_test;
