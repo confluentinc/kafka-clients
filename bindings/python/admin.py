@@ -1112,11 +1112,9 @@ class UserScramCredentialDeletion:
 class UserScramCredentialsDescription:
     """A user's SCRAM credentials (Java ``UserScramCredentialsDescription``).
 
-    A real user that exists with no SCRAM credential is described with an empty
-    ``credential_infos``. A user the broker reports as ``RESOURCE_NOT_FOUND``
-    (no such user) is **not** described -- it maps to a ``KafkaError`` instead,
-    mirroring Java's ``description(user)`` -- so an existing-but-empty user is
-    distinguishable from a non-existent one.
+    A user the broker reports as having no credential is described with an empty
+    ``credential_infos``, not as an error -- Java's ``all()`` treats
+    ``RESOURCE_NOT_FOUND`` the same way.
     """
 
     __slots__ = ("name", "credential_infos")
@@ -2224,11 +2222,9 @@ def _to_describe_user_scram_credentials(raw):
     """``{user: (error, [(mechanism, iterations)])}``
     -> ``{user: UserScramCredentialsDescription | KafkaError}``.
 
-    A user whose own description carried an error -- ``RESOURCE_NOT_FOUND`` (no
-    such user) included -- maps to that error, mirroring Java's
-    ``description(user)``. Every other user maps to its credentials, which may
-    be an empty list for a real user that exists with no SCRAM credential; that
-    empty-but-present case is thus distinguishable from a non-existent user.
+    A user whose own description failed maps to its error; every other user maps
+    to its credentials, which may be an empty list when the broker reports it as
+    having none.
     """
     out = {}
     for user, (error, infos) in raw.items():
@@ -4133,12 +4129,10 @@ class Admin(_AdminBase):
         ``{user: UserScramCredentialsDescription | KafkaError}``.
 
         ``users`` of ``None`` (or an empty list) describes every user, mirroring
-        Java's null/empty list. A real user that exists with no SCRAM credential
-        is described with an empty ``credential_infos``; a user the broker
-        reports as ``RESOURCE_NOT_FOUND`` (no such user), or one whose
-        description otherwise failed, maps to its ``KafkaError`` instead --
-        mirroring Java's ``description(user)`` -- so the two cases are
-        distinguishable.
+        Java's null/empty list. A user the broker reports as having no
+        credential is described with an empty ``credential_infos``, not as an
+        error -- Java's ``all()`` treats ``RESOURCE_NOT_FOUND`` the same way; a
+        user whose description genuinely failed maps to its error.
         """
         self._check_closed()
         return self._run_sync(*self._describe_user_scram_credentials_spec(users, timeout))
