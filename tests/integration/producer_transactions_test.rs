@@ -38,6 +38,9 @@
 //! - `testEmptyAbortAfterCommit` → [`test_empty_abort_after_commit`]
 //! - `testOffsetMetadataInSendOffsetsToTransaction` →
 //!   [`test_offset_metadata_in_send_offsets_to_transaction`]
+//! - `testSendOffsetsWithGroupMetadata` → [`test_send_offsets_with_group_metadata`]
+//! - `testReadCommittedConsumerShouldNotSeeUndecidedData` →
+//!   [`test_read_committed_consumer_should_not_see_undecided_data`]
 //!
 //! and from the Java `clients-integration-tests` module (AK 4.3.1):
 //!
@@ -801,13 +804,23 @@ async fn create_txn_test_topics(ctx: &mut TestContext) -> (String, String) {
 /// `TestUtils.createTransactionalProducer` with `TransactionsTest`'s defaults
 /// (`TransactionsTest.scala:1089-1104`, `TestUtils.scala:1206-1227`).
 fn create_transactional_producer(bootstrap: &str, transactional_id: &str) -> KafkaProducer<Vec<u8>, Vec<u8>> {
+    create_transactional_producer_with_transaction_timeout_ms(bootstrap, transactional_id, 60000)
+}
+
+/// [`create_transactional_producer`] with Java's `transactionTimeoutMs` parameter
+/// (`TransactionsTest.scala:1090`) overridden.
+fn create_transactional_producer_with_transaction_timeout_ms(
+    bootstrap: &str,
+    transactional_id: &str,
+    transaction_timeout_ms: u64,
+) -> KafkaProducer<Vec<u8>, Vec<u8>> {
     let props = HashMap::from([
         ("bootstrap.servers".to_string(), bootstrap.to_string()),
         ("acks".to_string(), "all".to_string()),
         ("batch.size".to_string(), "16384".to_string()),
         ("transactional.id".to_string(), transactional_id.to_string()),
         ("enable.idempotence".to_string(), "true".to_string()),
-        ("transaction.timeout.ms".to_string(), "60000".to_string()),
+        ("transaction.timeout.ms".to_string(), transaction_timeout_ms.to_string()),
         ("max.block.ms".to_string(), "60000".to_string()),
         ("delivery.timeout.ms".to_string(), "120000".to_string()),
         ("request.timeout.ms".to_string(), "30000".to_string()),
@@ -826,6 +839,51 @@ fn create_transactional_producer(bootstrap: &str, transactional_id: &str) -> Kaf
 /// (`TestUtils.scala:551-573`): `auto.offset.reset=earliest`, the CONSUMER arm.
 fn create_read_committed_consumer(bootstrap: &str, group_id: &str) -> Box<dyn Consumer<Vec<u8>, Vec<u8>>> {
     assigned_consumer(bootstrap, group_id, "read_committed")
+}
+
+/// `TestUtils.createConsumer(bootstrapServers, groupProtocol, groupId,
+/// enableAutoCommit = false, readCommitted, maxPollRecords)` plus `extra`
+/// properties (`TestUtils.scala:551-573`), CONSUMER arm. This is the full shape
+/// `TransactionsTest.createReadCommittedConsumer(group, maxPollRecords, props)`
+/// (`TransactionsTest.scala:1067-1078`) and `createReadUncommittedConsumer`
+/// (`TransactionsTest.scala:1080-1087`) reduce to.
+fn create_consumer(
+    bootstrap: &str,
+    group_id: &str,
+    read_committed: bool,
+    max_poll_records: usize,
+    extra: &[(&str, &str)],
+) -> Box<dyn Consumer<Vec<u8>, Vec<u8>>> {
+    let mut props = HashMap::from([
+        ("bootstrap.servers".to_string(), bootstrap.to_string()),
+        ("group.protocol".to_string(), "consumer".to_string()),
+        ("auto.offset.reset".to_string(), "earliest".to_string()),
+        ("group.id".to_string(), group_id.to_string()),
+        ("enable.auto.commit".to_string(), "false".to_string()),
+        ("max.poll.records".to_string(), max_poll_records.to_string()),
+        (
+            "isolation.level".to_string(),
+            if read_committed {
+                "read_committed"
+            } else {
+                "read_uncommitted"
+            }
+            .to_string(),
+        ),
+    ]);
+    props.extend(extra.iter().map(|(key, value)| (key.to_string(), value.to_string())));
+    KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
+        ConsumerConfig::new(&props).expect("invalid consumer config"),
+        Box::new(ByteArrayDeserializer),
+        Box::new(ByteArrayDeserializer),
+    )
+    .expect("KafkaConsumer::new should succeed")
+}
+
+/// `TransactionsTest.createReadUncommittedConsumer(group)`
+/// (`TransactionsTest.scala:1080-1087`).
+fn create_read_uncommitted_consumer(bootstrap: &str, group_id: &str) -> Box<dyn Consumer<Vec<u8>, Vec<u8>>> {
+    create_consumer(bootstrap, group_id, false, 500, &[])
 }
 
 /// `TestUtils.producerRecordWithExpectedTransactionStatus(topic, partition, key,
@@ -871,6 +929,18 @@ async fn consume_records(
     consumer: &mut Box<dyn Consumer<Vec<u8>, Vec<u8>>>,
     num_records: usize,
 ) -> Vec<ConsumerRecord<Vec<u8>, Vec<u8>>> {
+    let records = poll_until_at_least_num_records(consumer, num_records).await;
+    assert_eq!(num_records, records.len(), "Consumed more records than expected");
+    records
+}
+
+/// `TestUtils.pollUntilAtLeastNumRecords(consumer, numRecords)`
+/// (`TestUtils.scala:1184-1196`): poll (100 ms each, `pollRecordsUntilTrue`'s
+/// default) until at least `num_records` arrive within `DEFAULT_MAX_WAIT_MS`.
+async fn poll_until_at_least_num_records(
+    consumer: &mut Box<dyn Consumer<Vec<u8>, Vec<u8>>>,
+    num_records: usize,
+) -> Vec<ConsumerRecord<Vec<u8>, Vec<u8>>> {
     let deadline = Duration::from_millis(test_utils::DEFAULT_MAX_WAIT_MS);
     let start = Instant::now();
     let mut records = Vec::new();
@@ -882,7 +952,6 @@ async fn consume_records(
         );
         records.extend(consumer.poll(Duration::from_millis(100)).await.expect("poll should not fail"));
     }
-    assert_eq!(num_records, records.len(), "Consumed more records than expected");
     records
 }
 
@@ -1270,6 +1339,294 @@ async fn test_offset_metadata_in_send_offsets_to_transaction() {
 
     consumer.close().await.expect("consumer close");
     producer.close().await.expect("producer close");
+    producer2.close().await.expect("producer2 close");
+    ctx.cleanup().await;
+}
+
+// ---------------------------------------------------------------------------
+// TransactionsTest: exactly-once copy and read_committed visibility
+// ---------------------------------------------------------------------------
+
+/// `TestUtils.seedTopicWithNumberedRecords(topic, numRecords, brokers)`
+/// (`TestUtils.scala:1229-1246`): an idempotent producer writes keys and values
+/// `"0" .. numRecords` (no partition, so the default partitioner spreads them),
+/// then flushes and closes.
+async fn seed_topic_with_numbered_records(bootstrap: &str, topic: &str, num_records: usize) {
+    let producer = cluster_producer(bootstrap, &[("enable.idempotence", "true")]);
+    for i in 0..num_records {
+        let value = i.to_string().into_bytes();
+        send_record(
+            &producer,
+            ProducerRecord::with_key(topic.to_string(), Some(value.clone()), Some(value)),
+        )
+        .await
+        .expect("seed send");
+    }
+    producer.flush().await.expect("seed flush");
+    producer.close().await.expect("seed producer close");
+}
+
+/// `TestUtils.consumerPositions(consumer)` (`TestUtils.scala:1284-1291`): the
+/// current position of every assigned partition, as offsets to commit.
+async fn consumer_positions(
+    consumer: &mut Box<dyn Consumer<Vec<u8>, Vec<u8>>>,
+) -> HashMap<TopicPartition, OffsetAndMetadata> {
+    let mut offsets_to_commit = HashMap::new();
+    for topic_partition in consumer.assignment() {
+        let position = consumer.position(&topic_partition).await.expect("position");
+        offsets_to_commit.insert(topic_partition, OffsetAndMetadata::new(position).expect("valid offset"));
+    }
+    offsets_to_commit
+}
+
+/// `TestUtils.resetToCommittedPositions(consumer)` (`TestUtils.scala:1293-1303`):
+/// seek every assigned partition to its committed offset, or to the beginning if
+/// it has none. (Java filters `null` values out of `committed`; the Rust map omits
+/// partitions without a committed offset, which is the same set.)
+async fn reset_to_committed_positions(consumer: &mut Box<dyn Consumer<Vec<u8>, Vec<u8>>>) {
+    let assignment: Vec<TopicPartition> = consumer.assignment().into_iter().collect();
+    let committed = consumer.committed(&assignment).await.expect("committed");
+    for topic_partition in assignment {
+        match committed.get(&topic_partition) {
+            Some(offset) => consumer.seek_with_offset(topic_partition, offset.offset()).await.expect("seek"),
+            None => consumer
+                .seek_to_beginning(std::slice::from_ref(&topic_partition))
+                .await
+                .expect("seekToBeginning"),
+        }
+    }
+}
+
+/// Wall-clock milliseconds, Java's `System.currentTimeMillis()`.
+fn current_time_millis() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("the clock is after the epoch")
+        .as_millis() as i64
+}
+
+/// A consume/process/produce loop copies 500 records from `topic1` to `topic2`,
+/// committing the consumed offsets in each transaction and aborting every other
+/// transaction (rewinding the consumer to its committed positions); `topic2` then
+/// holds exactly the 500 values, each once and each committed.
+///
+/// Translates `TransactionsTest.testSendOffsetsWithGroupMetadata`
+/// (`TransactionsTest.scala:303-379`, including the `sendOffset` body).
+///
+/// Java's "randomly abort" is in fact strict alternation (`shouldCommit =
+/// !shouldCommit`), reproduced as is. `maybeWaitForAtLeastOneSegmentUpload` is a
+/// no-op in Java outside the tiered-storage subclass and is omitted.
+#[tokio::test]
+async fn test_send_offsets_with_group_metadata() {
+    let mut ctx = TestContext::new(cluster_config()).await;
+    let (topic1, topic2) = create_txn_test_topics(&mut ctx).await;
+    let bootstrap = ctx.bootstrap_servers().to_string();
+
+    let consumer_group_id = ctx.group_id("foobar-consumer-group");
+    let num_seed_messages = 500;
+
+    seed_topic_with_numbered_records(&bootstrap, &topic1, num_seed_messages).await;
+
+    let producer = create_transactional_producer(&bootstrap, &ctx.group_id("transactional-producer"));
+
+    let mut consumer = create_consumer(&bootstrap, &consumer_group_id, true, num_seed_messages / 4, &[]);
+    consumer.subscribe_with_topics(vec![topic1.clone()]).await.expect("subscribe");
+    producer.init_transactions().await.expect("initTransactions");
+
+    let mut should_commit = false;
+    let mut records_processed = 0;
+    while records_processed < num_seed_messages {
+        let records =
+            poll_until_at_least_num_records(&mut consumer, 10.min(num_seed_messages - records_processed)).await;
+
+        producer.begin_transaction().expect("beginTransaction");
+        should_commit = !should_commit;
+
+        for record in &records {
+            let key = String::from_utf8(record.key().expect("seeded with a key").clone()).expect("UTF-8 key");
+            let value = String::from_utf8(record.value().expect("seeded with a value").clone()).expect("UTF-8 value");
+            send_record(
+                &producer,
+                producer_record_with_expected_transaction_status(&topic2, None, &key, &value, should_commit),
+            )
+            .await
+            .expect("send");
+        }
+
+        // The `commit` lambda of `testSendOffsetsWithGroupMetadata`.
+        let offsets = consumer_positions(&mut consumer).await;
+        producer
+            .send_offsets_to_transaction(offsets, consumer.group_metadata())
+            .await
+            .expect("sendOffsetsToTransaction");
+        if should_commit {
+            producer.commit_transaction().await.expect("commitTransaction");
+            records_processed += records.len();
+        } else {
+            producer.abort_transaction().await.expect("abortTransaction");
+            reset_to_committed_positions(&mut consumer).await;
+        }
+    }
+    consumer.close().await.expect("consumer close");
+
+    // In spite of the aborts, we should still have exactly 500 messages in topic2.
+    // I.e. we should not re-copy or miss any messages from topic1, since the
+    // consumed offsets were committed transactionally.
+    let mut verifying_consumer = create_read_committed_consumer(&bootstrap, &ctx.group_id("transactional-group"));
+    verifying_consumer
+        .subscribe_with_topics(vec![topic2.clone()])
+        .await
+        .expect("subscribe");
+    let value_seq: Vec<i32> = poll_until_at_least_num_records(&mut verifying_consumer, num_seed_messages)
+        .await
+        .iter()
+        .map(|record| assert_committed_and_get_value(record).parse().expect("a numbered value"))
+        .collect();
+    let value_set: std::collections::HashSet<i32> = value_seq.iter().copied().collect();
+    assert_eq!(
+        num_seed_messages,
+        value_seq.len(),
+        "Expected {num_seed_messages} values in {topic2}."
+    );
+    assert_eq!(
+        value_seq.len(),
+        value_set.len(),
+        "Expected {} unique messages in {topic2}.",
+        value_seq.len()
+    );
+
+    verifying_consumer.close().await.expect("verifying consumer close");
+    producer.close().await.expect("producer close");
+    ctx.cleanup().await;
+}
+
+/// A read_committed consumer stops at the last stable offset: it sees only the
+/// records before an undecided transaction, `seekToEnd` lands on the LSO, and
+/// `offsetsForTimes` finds nothing among the undecided records — while a
+/// read_uncommitted consumer sees everything.
+///
+/// Translates `TransactionsTest.testReadCommittedConsumerShouldNotSeeUndecidedData`
+/// (`TransactionsTest.scala:177-241`).
+///
+/// Deviation: Java asserts `offsetsForTimes(...).get(tp)` is `null` for the
+/// undecided partitions. The Rust `offsets_for_times` omits an unresolved
+/// partition instead of mapping it to `null` (see `Consumer::offsets_for_times`),
+/// so the assertion is that the key is absent.
+#[tokio::test]
+async fn test_read_committed_consumer_should_not_see_undecided_data() {
+    let mut ctx = TestContext::new(cluster_config()).await;
+    let (topic1, topic2) = create_txn_test_topics(&mut ctx).await;
+    let bootstrap = ctx.bootstrap_servers().to_string();
+    let producer1 = create_transactional_producer(&bootstrap, &ctx.group_id("transactional-producer"));
+    let producer2 = create_transactional_producer(&bootstrap, &ctx.group_id("other"));
+    let mut read_committed_consumer = create_read_committed_consumer(&bootstrap, &ctx.group_id("transactional-group"));
+    let mut read_uncommitted_consumer =
+        create_read_uncommitted_consumer(&bootstrap, &ctx.group_id("non-transactional-group"));
+
+    producer1.init_transactions().await.expect("producer1.initTransactions");
+    producer2.init_transactions().await.expect("producer2.initTransactions");
+
+    producer1.begin_transaction().expect("producer1.beginTransaction");
+    producer2.begin_transaction().expect("producer2.beginTransaction");
+
+    let record = |topic: &str, timestamp: i64, key: &str, value: &str| {
+        ProducerRecord::with_partition_timestamp_key(
+            topic.to_string(),
+            Some(0),
+            Some(timestamp),
+            Some(key.as_bytes().to_vec()),
+            Some(value.as_bytes().to_vec()),
+        )
+        .expect("valid record")
+    };
+
+    let latest_visible_timestamp = current_time_millis();
+    for topic in [&topic1, &topic2] {
+        send_record(&producer2, record(topic, latest_visible_timestamp, "x", "1"))
+            .await
+            .expect("producer2 send");
+    }
+    producer2.flush().await.expect("producer2.flush");
+
+    let latest_written_timestamp = latest_visible_timestamp + 1;
+    for (topic, key, value) in [
+        (&topic1, "a", "1"),
+        (&topic1, "b", "2"),
+        (&topic2, "c", "3"),
+        (&topic2, "d", "4"),
+    ] {
+        send_record(&producer1, record(topic, latest_written_timestamp, key, value))
+            .await
+            .expect("producer1 send");
+    }
+    producer1.flush().await.expect("producer1.flush");
+
+    for topic in [&topic1, &topic2] {
+        send_record(&producer2, record(topic, latest_written_timestamp, "x", "2"))
+            .await
+            .expect("producer2 send");
+    }
+    producer2.commit_transaction().await.expect("producer2.commitTransaction");
+
+    // ensure the records are visible to the read uncommitted consumer
+    let tp1 = TopicPartition::new(topic1.clone(), 0);
+    let tp2 = TopicPartition::new(topic2.clone(), 0);
+    read_uncommitted_consumer
+        .assign(vec![tp1.clone(), tp2.clone()])
+        .await
+        .expect("assign");
+    consume_records(&mut read_uncommitted_consumer, 8).await;
+    let read_uncommitted_offsets_for_times = read_uncommitted_consumer
+        .offsets_for_times(HashMap::from([
+            (tp1.clone(), latest_written_timestamp),
+            (tp2.clone(), latest_written_timestamp),
+        ]))
+        .await
+        .expect("offsetsForTimes");
+    assert_eq!(2, read_uncommitted_offsets_for_times.len());
+    assert_eq!(latest_written_timestamp, read_uncommitted_offsets_for_times[&tp1].timestamp());
+    assert_eq!(latest_written_timestamp, read_uncommitted_offsets_for_times[&tp2].timestamp());
+    read_uncommitted_consumer.unsubscribe().await.expect("unsubscribe");
+
+    // we should only see the first two records which come before the undecided second transaction
+    read_committed_consumer
+        .assign(vec![tp1.clone(), tp2.clone()])
+        .await
+        .expect("assign");
+    let records = consume_records(&mut read_committed_consumer, 2).await;
+    for record in &records {
+        assert_eq!(b"x".as_slice(), record.key().expect("key").as_slice());
+        assert_eq!(b"1".as_slice(), record.value().expect("value").as_slice());
+    }
+
+    // even if we seek to the end, we should not be able to see the undecided data
+    let assignment: Vec<TopicPartition> = read_committed_consumer.assignment().into_iter().collect();
+    assert_eq!(2, assignment.len());
+    read_committed_consumer.seek_to_end(&assignment).await.expect("seekToEnd");
+    for tp in &assignment {
+        assert_eq!(1, read_committed_consumer.position(tp).await.expect("position"));
+    }
+
+    // undecided timestamps should not be searchable either
+    let read_committed_offsets_for_times = read_committed_consumer
+        .offsets_for_times(HashMap::from([
+            (tp1.clone(), latest_written_timestamp),
+            (tp2.clone(), latest_written_timestamp),
+        ]))
+        .await
+        .expect("offsetsForTimes");
+    assert!(
+        !read_committed_offsets_for_times.contains_key(&tp1),
+        "undecided data in {tp1:?} must not be searchable: {read_committed_offsets_for_times:?}"
+    );
+    assert!(
+        !read_committed_offsets_for_times.contains_key(&tp2),
+        "undecided data in {tp2:?} must not be searchable: {read_committed_offsets_for_times:?}"
+    );
+
+    read_committed_consumer.close().await.expect("consumer close");
+    read_uncommitted_consumer.close().await.expect("consumer close");
+    producer1.close().await.expect("producer1 close");
     producer2.close().await.expect("producer2 close");
     ctx.cleanup().await;
 }
