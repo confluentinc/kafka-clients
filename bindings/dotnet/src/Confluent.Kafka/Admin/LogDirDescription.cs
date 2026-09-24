@@ -35,28 +35,13 @@ namespace Confluent.Kafka.Admin;
 /// the task here would be a behavioural divergence — the broker answered.
 /// </para>
 /// <para>
-/// ⚠⚠ <b><c>IsCordoned</c> is DELIBERATELY ABSENT (M15/P3 decision D15, §15
-/// Gap 1).</b> Java has <c>isCordoned()</c> (<c>:94</c>) and the Rust core implements it
-/// (<c>src/admin/log_dir_description.rs:113</c>), but the C ABI exports no accessor for it
-/// — verified: <c>grep -ci "cordoned"</c> over the header is <b>0</b>, against a
-/// control-positive <c>kafka_admin_LogDirDescription_total_bytes</c> of <b>1</b>. It is
-/// <b>not faked</b>: a stubbed <c>false</c> would assert <em>"this log directory is not
-/// cordoned"</em> when the truth is <em>"the binding cannot know"</em>, and a wrong answer
-/// is worse than an absent one. <b>Absence is the honest encoding</b>, and a test pins that
-/// no such member exists so a later refactor cannot quietly add a fake one. This makes the
-/// type knowingly incomplete against Java (<c>definition-of-done.md</c> §2), which is
-/// recorded rather than hidden.
-/// </para>
-/// <para>
 /// <b>Accessors are properties</b> (decision D18) — each is a pure managed field read.
 /// </para>
 /// </remarks>
 public sealed class LogDirDescription
 {
     /// <summary>
-    /// Initializes a description — the shape of Java's constructors
-    /// (<c>:38</c>, <c>:42</c>, <c>:46</c>), minus the <c>isCordoned</c> flag the ABI does
-    /// not expose.
+    /// Initializes a description — the shape of Java's 5-arg constructor (<c>:46</c>).
     /// </summary>
     /// <param name="error">
     /// The directory-level error, or <see langword="null"/> if the directory is healthy.
@@ -68,22 +53,23 @@ public sealed class LogDirDescription
     /// <param name="usableBytes">
     /// The volume's usable size, or <see langword="null"/> if the broker did not report it.
     /// </param>
+    /// <param name="isCordoned">Whether this log directory is cordoned.</param>
     /// <remarks>
-    /// <see langword="internal"/> because the only producer is the result marshaller.
-    /// Java's constructors are public, but they take the <c>isCordoned</c> flag this type
-    /// cannot carry (directly, or by defaulting it) — publishing a constructor that
-    /// silently drops it would put the fake back in through the other door.
+    /// <see langword="internal"/> because the only producer is the result marshaller,
+    /// consistent with the sibling admin result types.
     /// </remarks>
     internal LogDirDescription(
         KafkaException? error,
         IReadOnlyDictionary<TopicPartition, ReplicaInfo> replicaInfos,
         long? totalBytes,
-        long? usableBytes)
+        long? usableBytes,
+        bool isCordoned)
     {
         Error = error;
         ReplicaInfos = replicaInfos;
         TotalBytes = totalBytes;
         UsableBytes = usableBytes;
+        IsCordoned = isCordoned;
     }
 
     /// <summary>
@@ -131,15 +117,15 @@ public sealed class LogDirDescription
     public long? UsableBytes { get; }
 
     /// <summary>
+    /// Whether this log directory is cordoned — Java's <c>isCordoned()</c> (<c>:94</c>),
+    /// a plain <c>boolean</c>.
+    /// </summary>
+    public bool IsCordoned { get; }
+
+    /// <summary>
     /// A diagnostic rendering following Java's <c>toString()</c> (<c>:98</c>).
     /// </summary>
     /// <returns>The rendering.</returns>
-    /// <remarks>
-    /// ⚠ Java's rendering ends with <c>, isCordoned=…)</c> (<c>:105</c>). That field is
-    /// omitted here for the same reason the accessor is (D15): rendering a value the
-    /// binding cannot know would be a fabrication in diagnostic output, which is exactly
-    /// where a reader would trust it.
-    /// </remarks>
     public override string ToString()
     {
         StringBuilder replicas = new StringBuilder("{");
@@ -159,10 +145,12 @@ public sealed class LogDirDescription
 
         return string.Format(
             CultureInfo.InvariantCulture,
-            "LogDirDescription(replicaInfos={0}, error={1}, totalBytes={2}, usableBytes={3})",
+            "LogDirDescription(replicaInfos={0}, error={1}, totalBytes={2}, usableBytes={3}, isCordoned={4})",
             replicas,
             Error is null ? "null" : Error.Message,
             TotalBytes is null ? "empty" : TotalBytes.Value.ToString(CultureInfo.InvariantCulture),
-            UsableBytes is null ? "empty" : UsableBytes.Value.ToString(CultureInfo.InvariantCulture));
+            UsableBytes is null ? "empty" : UsableBytes.Value.ToString(CultureInfo.InvariantCulture),
+            // Java renders the Boolean lowercase; C#'s bool.ToString() would give "True"/"False".
+            IsCordoned ? "true" : "false");
     }
 }

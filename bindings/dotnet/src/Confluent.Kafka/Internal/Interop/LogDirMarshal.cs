@@ -154,7 +154,12 @@ internal static class LogDirMarshal
                 NativeMethods.LogDirDescriptionReplicaIsFuture(description, index));
         }
 
-        return new LogDirDescription(error, replicas, totalBytes, usableBytes);
+        return new LogDirDescription(
+            error,
+            replicas,
+            totalBytes,
+            usableBytes,
+            NativeMethods.LogDirDescriptionIsCordoned(description));
     }
 
     /// <summary>

@@ -1250,6 +1250,14 @@ internal static partial class NativeMethods
     [DllImport(DllName, EntryPoint = "kafka_admin_LogDirDescription_usable_bytes", CallingConvention = CallingConvention.Cdecl)]
     internal static extern long LogDirDescriptionUsableBytes(IntPtr description);
 
+    /// <summary>
+    /// <c>kafka_admin_LogDirDescription_is_cordoned</c> — whether this log directory is
+    /// cordoned (Java's <c>isCordoned()</c>). A plain flag, no sentinel.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_LogDirDescription_is_cordoned", CallingConvention = CallingConvention.Cdecl)]
+    [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool LogDirDescriptionIsCordoned(IntPtr description);
+
     [DllImport(DllName, EntryPoint = "kafka_admin_LogDirDescription_replica_count", CallingConvention = CallingConvention.Cdecl)]
     internal static extern int LogDirDescriptionReplicaCount(IntPtr description);
 

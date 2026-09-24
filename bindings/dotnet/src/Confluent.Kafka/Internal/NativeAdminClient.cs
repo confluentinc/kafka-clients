@@ -2511,8 +2511,7 @@ internal sealed class NativeAdminClient : IDisposable
     /// naming it. That is deliberately <b>not</b> smoothed over by completing locally with a
     /// default: unlike the Stage-2 zero-op case, the key here is genuinely sent and the
     /// answer genuinely absent, so fabricating an "empty" description would report data the
-    /// binding does not have — the same reasoning that keeps
-    /// <see cref="LogDirDescription"/> free of a faked <c>IsCordoned</c>.
+    /// binding does not have.
     /// </para>
     /// </remarks>
     internal DescribeReplicaLogDirsResult DescribeReplicaLogDirs(
