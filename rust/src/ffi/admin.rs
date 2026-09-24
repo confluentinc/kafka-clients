@@ -164,17 +164,17 @@ use crate::admin::{
     DescribeClientQuotasOptions, DescribeClusterOptions, DescribeConfigsOptions, DescribeConsumerGroupsOptions,
     DescribeDelegationTokenOptions, DescribeFeaturesOptions, DescribeLogDirsOptions, DescribeProducersOptions,
     DescribeReplicaLogDirsOptions, DescribeTopicsOptions, DescribeTransactionsOptions,
-    DescribeUserScramCredentialsOptions, ElectLeadersOptions, ExpireDelegationTokenOptions, FeatureMetadata,
-    FeatureUpdate, FenceProducersOptions, FilterResults, GroupListing, GroupOffsets, ListConfigResourcesOptions,
-    ListConsumerGroupOffsetsOptions, ListConsumerGroupOffsetsSpec, ListGroupsOptions, ListOffsetsOptions,
-    ListOffsetsResultInfo, ListPartitionReassignmentsOptions, ListTopicsOptions, ListTransactionsOptions,
-    LogDirDescription, MemberAssignment, MemberDescription, MemberToRemove, MockAdminClient, NewPartitionReassignment,
-    NewPartitions, NewTopic, OffsetSpec, OpType, PartitionProducerState, PartitionReassignment, RecordsToDelete,
-    RemoveMembersFromConsumerGroupOptions, RenewDelegationTokenOptions, ReplicaLogDirInfo, ScramCredentialInfo,
-    ScramMechanism, TerminateTransactionOptions, TopicDescription, TopicListing, TopicMetadataAndConfig,
-    TransactionDescription, TransactionListing, TransactionState, UpdateFeaturesOptions, UpgradeType,
-    UserScramCredentialAlteration, UserScramCredentialDeletion, UserScramCredentialUpsertion,
-    UserScramCredentialsDescription,
+    DescribeUserScramCredentialsOptions, DescribeUserScramCredentialsResult, ElectLeadersOptions,
+    ExpireDelegationTokenOptions, FeatureMetadata, FeatureUpdate, FenceProducersOptions, FilterResults, GroupListing,
+    GroupOffsets, ListConfigResourcesOptions, ListConsumerGroupOffsetsOptions, ListConsumerGroupOffsetsSpec,
+    ListGroupsOptions, ListOffsetsOptions, ListOffsetsResultInfo, ListPartitionReassignmentsOptions, ListTopicsOptions,
+    ListTransactionsOptions, LogDirDescription, MemberAssignment, MemberDescription, MemberToRemove, MockAdminClient,
+    NewPartitionReassignment, NewPartitions, NewTopic, OffsetSpec, OpType, PartitionProducerState,
+    PartitionReassignment, RecordsToDelete, RemoveMembersFromConsumerGroupOptions, RenewDelegationTokenOptions,
+    ReplicaLogDirInfo, ScramCredentialInfo, ScramMechanism, TerminateTransactionOptions, TopicDescription,
+    TopicListing, TopicMetadataAndConfig, TransactionDescription, TransactionListing, TransactionState,
+    UpdateFeaturesOptions, UpgradeType, UserScramCredentialAlteration, UserScramCredentialDeletion,
+    UserScramCredentialUpsertion, UserScramCredentialsDescription,
 };
 use crate::common::acl::{
     AccessControlEntry, AccessControlEntryFilter, AclBinding, AclBindingFilter, AclOperation, AclPermissionType,
@@ -16824,10 +16824,6 @@ pub unsafe extern "C" fn kafka_common_security_token_delegation_DelegationToken_
 //     generating constructor.)
 // ---------------------------------------------------------------------------
 
-/// Per-user outcomes of `describeUserScramCredentials`, in Java's own
-/// `description(user)` shape.
-type ScramDescriptionOutcomes = Vec<(String, Result<UserScramCredentialsDescription, Error>)>;
-
 /// Per-user outcomes of `alterUserScramCredentials`.
 type AlterScramOutcomes = HashMap<String, Result<(), Error>>;
 
@@ -17021,49 +17017,37 @@ unsafe fn read_feature_updates(
     Ok(out)
 }
 
-/// Submits `describeUserScramCredentials` and returns a future over its
-/// per-user outcomes.
+/// Submits `describeUserScramCredentials` and returns the core result once its
+/// shared data future has resolved.
 ///
-/// Java exposes three views over one response future — `all()`, `users()` and
-/// `description(user)` — and C has room for one result handle, so this
-/// composes them into the per-user shape that subsumes all three:
+/// Java's `DescribeUserScramCredentialsResult` exposes three distinct views over
+/// one response future — `all()`
+/// (`DescribeUserScramCredentialsResult.java:54-80`), `users()` (`:92-104`) and
+/// `description(user)` (`:114-138`), each with different RESOURCE_NOT_FOUND
+/// semantics. The C handle backs all three faithfully (see
+/// [`DescribeUserScramCredentialsResultInner`]), so this keeps the whole core
+/// result object rather than flattening it into one lossy per-user shape.
 ///
-///   - `all()` succeeds only when every user's error code is NONE or
-///     RESOURCE_NOT_FOUND, so when it does, its keys are the complete user set
-///     and no row carries an error;
-///   - when it fails, `users()` still lists every user whose error is not
-///     RESOURCE_NOT_FOUND — which necessarily includes the one that failed
-///     `all()` — and `description(user)` yields that user's own error. Users
-///     omitted at that point are exactly the ones Java's `all()` also declines
-///     to report, so nothing Java can reach is lost.
-///
-/// If the response future itself failed, all three fail with the same error and
-/// it becomes the call's error. If the composition somehow yields no rows at
-/// all, the `all()` error is returned rather than dropped — the empty-key-set
-/// trap B4 hit with `removeMembersFromConsumerGroup`.
+/// A top-level failure of the data future (auth/timeout) surfaces here and
+/// becomes the call's error: awaiting `users()` both drives the shared future to
+/// completion and propagates such a failure. `users()`
+/// (`DescribeUserScramCredentialsResult.java:92-104`) completes exceptionally
+/// **only** when the data future itself did (its `whenComplete`'s
+/// `throwable != null` branch) — a user-level RESOURCE_NOT_FOUND never faults it —
+/// so an error awaiting it is exactly Java's top-level-failure case, and every
+/// view (built from a now-resolved future) is ready on the first poll thereafter.
 fn submit_describe_user_scram_credentials(
     admin: &dyn Admin,
     users: &[String],
     options: DescribeUserScramCredentialsOptions,
-) -> impl std::future::Future<Output = Result<ScramDescriptionOutcomes, Error>> + Send + use<> {
+) -> impl std::future::Future<Output = Result<DescribeUserScramCredentialsResult, Error>> + Send + use<> {
     let result = admin.describe_user_scram_credentials_with_users_options(users, options);
     async move {
-        let all_error = match result.all().get().await {
-            Ok(map) => {
-                return Ok(map.into_iter().map(|(user, description)| (user, Ok(description))).collect());
-            },
-            Err(e) => e,
-        };
-        let listed = result.users().get().await?;
-        let mut rows: ScramDescriptionOutcomes = Vec::with_capacity(listed.len());
-        for user in listed {
-            let outcome = result.description(&user).get().await;
-            rows.push((user, outcome));
-        }
-        if rows.is_empty() {
-            return Err(all_error);
-        }
-        Ok(rows)
+        // Drive the shared data future to completion and surface a top-level
+        // failure as the call's error, mirroring Java's `whenComplete` completing
+        // every view exceptionally when `throwable != null`.
+        result.users().get().await?;
+        Ok(result)
     }
 }
 
@@ -17242,8 +17226,10 @@ fn describe_user_scram_credentials_options(timeout_ms: i32) -> DescribeUserScram
 ///
 /// Exactly one of `result` / `error` is non-null and the callback owns it: free
 /// `result` with [`kafka_admin_DescribeUserScramCredentialsResult_destroy`] or
-/// `error` with `kafka_common_Error_destroy`. A per-user failure arrives
-/// inside `result`, not as `error`.
+/// `error` with `kafka_common_Error_destroy`. `error` is non-null **only** when
+/// the underlying data future itself failed (auth/timeout — Java's top-level
+/// `whenComplete` throwable); a user-level failure is not a call failure and is
+/// reported through the result's `description(user)` view, not as `error`.
 pub type kafka_admin_AdminClient_describe_user_scram_credentials_callback_t =
     unsafe extern "C" fn(*mut kafka_admin_DescribeUserScramCredentialsResult_t, *mut kafka_common_Error_t, *mut c_void);
 
@@ -17256,10 +17242,15 @@ pub type kafka_admin_AdminClient_describe_user_scram_credentials_callback_t =
 /// On success writes a
 /// [`kafka_admin_DescribeUserScramCredentialsResult_t`] to `*out_result` (free
 /// it with [`kafka_admin_DescribeUserScramCredentialsResult_destroy`]) and
-/// returns null. **A per-user failure is not a call failure**: it is reported by
-/// [`kafka_admin_DescribeUserScramCredentialsResult_get_error`] for that user. A
-/// non-null return means the request could not be submitted or the whole
-/// response failed, and `*out_result` is left untouched.
+/// returns null. The handle backs Java's three views:
+/// [`kafka_admin_DescribeUserScramCredentialsResult_all_error`] /
+/// `..._all_count` / `..._all_get_user` / `..._all_get_description`,
+/// `..._users_count` / `..._users_get`, and
+/// [`kafka_admin_DescribeUserScramCredentialsResult_description`]. **A user-level
+/// failure is not a call failure**: it is reported through the `description(user)`
+/// view (which faults on RESOURCE_NOT_FOUND, Java-faithfully). A non-null return
+/// means the request could not be submitted or the whole response failed
+/// (auth/timeout), and `*out_result` is left untouched.
 ///
 /// # Parameters
 ///
@@ -17324,7 +17315,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_user_scram_credentials
             move |a| Ok(submit_describe_user_scram_credentials(a, &users, options)),
             move |outcome, ud| {
                 let (result, error) = match outcome {
-                    Ok(rows) => (box_describe_user_scram_credentials_result(rows), std::ptr::null_mut()),
+                    Ok(core) => (box_describe_user_scram_credentials_result(core), std::ptr::null_mut()),
                     Err(e) => (std::ptr::null_mut(), box_error(e)),
                 };
                 callback(result, error, ud);
@@ -18335,9 +18326,10 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_update_features_async(
 //
 //   - `Map<K, KafkaFuture<Void>>`             -> `_count` / key / `_get_error(i)`,
 //     no value (`alterUserScramCredentials`, `updateFeatures`)
-//   - a per-key value **and** error, composed from Java's three views
-//     (`describeUserScramCredentials`; see
-//     `submit_describe_user_scram_credentials`)
+//   - a bespoke multi-view result -> a handle backing each Java view with its own
+//     accessors (`describeUserScramCredentials`, whose `all()` / `users()` /
+//     `description(user)` views have different RESOURCE_NOT_FOUND semantics; see
+//     [`DescribeUserScramCredentialsResultInner`])
 //   - one `KafkaFuture<V>` for the whole call -> value accessors and **no**
 //     `_get_error`, because a failure is the call's error
 //     (`createDelegationToken`, `renewDelegationToken`,
@@ -18349,53 +18341,269 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_update_features_async(
 // 46 RPCs is worth more than saving an allocation on two of them.
 // ---------------------------------------------------------------------------
 
-/// Opaque handle to a flattened `DescribeUserScramCredentialsResult`.
+/// Drives an already-resolvable future to completion synchronously, off any
+/// async runtime.
+///
+/// The SCRAM result handle stores the core `DescribeUserScramCredentialsResult`,
+/// whose shared data future is already resolved by the time the handle is built
+/// (`submit_describe_user_scram_credentials` awaited it). Its `all()` / `users()`
+/// / `description()` views are `then_apply` refinements over that resolved
+/// future, so each is ready on the **first** poll; this parks only defensively
+/// and never actually blocks, and needs no Tokio runtime context (a C accessor
+/// may call it from any thread).
+fn block_on_ready<F: std::future::Future>(future: F) -> F::Output {
+    use std::sync::Arc;
+    use std::task::{Context, Poll, Wake, Waker};
+
+    struct ThreadWaker(std::thread::Thread);
+    impl Wake for ThreadWaker {
+        fn wake(self: Arc<Self>) {
+            self.0.unpark();
+        }
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.0.unpark();
+        }
+    }
+
+    let mut future = Box::pin(future);
+    let waker = Waker::from(Arc::new(ThreadWaker(std::thread::current())));
+    let mut cx = Context::from_waker(&waker);
+    loop {
+        match future.as_mut().poll(&mut cx) {
+            Poll::Ready(value) => return value,
+            Poll::Pending => std::thread::park(),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// UserScramCredentialsDescription — an owned description handle
+//
+// Corresponds to
+// `org.apache.kafka.clients.admin.UserScramCredentialsDescription`. Minted as
+// its own handle (unlike the two-scalar leaf types flattened per D2's fifth
+// rule) because `describeUserScramCredentials`'s three views each hand one back:
+// `all()` borrows one per user from the result, and `description(user)` hands
+// out an owned one.
+// ---------------------------------------------------------------------------
+
+/// Opaque handle to a `UserScramCredentialsDescription`.
+#[repr(C)]
+pub struct kafka_admin_UserScramCredentialsDescription_t {
+    _private: [u8; 0],
+}
+
+/// Backing state for [`kafka_admin_UserScramCredentialsDescription_t`].
+///
+/// `ScramCredentialInfo` is two scalars (mechanism type + iteration count), so it
+/// is flattened into parallel indices rather than minted as its own handle
+/// (`PLAN-bindings.md` §7 D2, fifth rule).
+struct UserScramCredentialsDescriptionInner {
+    name_c: CString,
+    mechanisms: Vec<i32>,
+    iterations: Vec<i32>,
+}
+
+impl UserScramCredentialsDescriptionInner {
+    /// Materializes the C-side view of a core `UserScramCredentialsDescription`.
+    fn from_description(description: &UserScramCredentialsDescription) -> Self {
+        let mechanisms = description
+            .credential_infos()
+            .iter()
+            .map(|i| i32::from(i.mechanism().r#type()))
+            .collect();
+        let iterations = description.credential_infos().iter().map(|i| i.iterations()).collect();
+        Self { name_c: to_cstring(description.name()), mechanisms, iterations }
+    }
+
+    /// Heap-allocates an owned handle transferred to the C caller (freed with
+    /// [`kafka_admin_UserScramCredentialsDescription_destroy`]).
+    fn into_owned_handle(self) -> *mut kafka_admin_UserScramCredentialsDescription_t {
+        Box::into_raw(Box::new(self)) as *mut kafka_admin_UserScramCredentialsDescription_t
+    }
+}
+
+/// Casts a `*const kafka_admin_UserScramCredentialsDescription_t` to a reference.
+///
+/// # Safety
+///
+/// `description` must be a non-null handle from a SCRAM describe view.
+unsafe fn user_scram_credentials_description_ref(
+    description: *const kafka_admin_UserScramCredentialsDescription_t,
+) -> &'static UserScramCredentialsDescriptionInner {
+    unsafe { &*(description as *const UserScramCredentialsDescriptionInner) }
+}
+
+/// Returns the user name (borrowed). Do not free it.
+///
+/// Mirrors `UserScramCredentialsDescription.name()`.
+///
+/// # Safety
+///
+/// `description` must be a valid `UserScramCredentialsDescription` handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_UserScramCredentialsDescription_name(
+    description: *const kafka_admin_UserScramCredentialsDescription_t,
+) -> *const c_char {
+    unsafe { user_scram_credentials_description_ref(description) }.name_c.as_ptr()
+}
+
+/// Returns the number of `ScramCredentialInfo`s. May be 0 (a user the broker
+/// reports as having no credential is described with an empty list, not an
+/// error).
+///
+/// Mirrors `UserScramCredentialsDescription.credentialInfos().size()`.
+///
+/// # Safety
+///
+/// `description` must be a valid `UserScramCredentialsDescription` handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_UserScramCredentialsDescription_credential_count(
+    description: *const kafka_admin_UserScramCredentialsDescription_t,
+) -> i32 {
+    unsafe { user_scram_credentials_description_ref(description) }.mechanisms.len() as i32
+}
+
+/// Returns `ScramMechanism.type()` for credential `credential_index`: UNKNOWN=0,
+/// SCRAM_SHA_256=1, SCRAM_SHA_512=2. Returns -1 when `credential_index` is out of
+/// range, which is not a legal type indicator.
+///
+/// # Safety
+///
+/// `description` must be a valid `UserScramCredentialsDescription` handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_UserScramCredentialsDescription_credential_mechanism(
+    description: *const kafka_admin_UserScramCredentialsDescription_t,
+    credential_index: i32,
+) -> i32 {
+    indexed_i32_at(
+        Some(
+            unsafe { user_scram_credentials_description_ref(description) }
+                .mechanisms
+                .as_slice(),
+        ),
+        credential_index,
+    )
+}
+
+/// Returns the iteration count for credential `credential_index`, or -1 when it
+/// is out of range.
+///
+/// # Safety
+///
+/// `description` must be a valid `UserScramCredentialsDescription` handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_UserScramCredentialsDescription_credential_iterations(
+    description: *const kafka_admin_UserScramCredentialsDescription_t,
+    credential_index: i32,
+) -> i32 {
+    indexed_i32_at(
+        Some(
+            unsafe { user_scram_credentials_description_ref(description) }
+                .iterations
+                .as_slice(),
+        ),
+        credential_index,
+    )
+}
+
+/// Destroys an **owned** `UserScramCredentialsDescription` handle — i.e. one
+/// obtained from
+/// [`kafka_admin_DescribeUserScramCredentialsResult_description`]. Safe with null
+/// (no-op).
+///
+/// Do NOT pass a description **borrowed** from the `all()` view
+/// ([`kafka_admin_DescribeUserScramCredentialsResult_all_get_description`]); the
+/// result handle owns those and frees them on its own destroy.
+///
+/// # Safety
+///
+/// `description` must be null or an owned `UserScramCredentialsDescription`
+/// handle, freed at most once.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_UserScramCredentialsDescription_destroy(
+    description: *mut kafka_admin_UserScramCredentialsDescription_t,
+) {
+    if !description.is_null() {
+        unsafe { drop(Box::from_raw(description as *mut UserScramCredentialsDescriptionInner)) };
+    }
+}
+
+// ---------------------------------------------------------------------------
+// DescribeUserScramCredentialsResult — Java's three views over one response
+// ---------------------------------------------------------------------------
+
+/// Opaque handle to a `DescribeUserScramCredentialsResult`, backing Java's three
+/// views over one response.
 #[repr(C)]
 pub struct kafka_admin_DescribeUserScramCredentialsResult_t {
     _private: [u8; 0],
 }
 
-/// One user's row in [`kafka_admin_DescribeUserScramCredentialsResult_t`].
-///
-/// `ScramCredentialInfo` is two scalars, so it is flattened into a second index
-/// rather than minted as a handle (`PLAN-bindings.md` §7 D2, fifth rule).
-struct ScramUserRow {
+/// One row of the `all()` view: a user and its (owned, borrowed-out) description.
+struct ScramAllRow {
     user_c: CString,
-    mechanisms: Vec<i32>,
-    iterations: Vec<i32>,
-    error: Option<ErrorInner>,
+    description: UserScramCredentialsDescriptionInner,
 }
 
 /// Backing state for [`kafka_admin_DescribeUserScramCredentialsResult_t`].
+///
+/// The three views are computed **once** at handle construction from the
+/// resolved core result (`box_describe_user_scram_credentials_result`), mirroring
+/// `DescribeUserScramCredentialsResult`'s three methods:
+///
+///   - `all_view` — Java `all()`
+///     (`DescribeUserScramCredentialsResult.java:54-80`): `Ok` rows key every
+///     described user (RESOURCE_NOT_FOUND users **included**, with empty
+///     credentials — a successful description); `Err` is the first user-level
+///     error whose code is neither NONE nor RESOURCE_NOT_FOUND, which faults the
+///     whole view.
+///   - `users_view` — Java `users()` (`:92-104`): the distinct users whose error
+///     is not RESOURCE_NOT_FOUND (so RNF users are **excluded**, hard-error users
+///     are included), in response order.
+///   - `description(user)` is served on demand from `core` (Java `:114-138`): it
+///     **faults** with RESOURCE_NOT_FOUND for an RNF user (":128 RESOURCE_NOT_FOUND
+///     is included here") and for a user not present ("No such user: <user>").
+///     The core's data future is already resolved, so each `description()` view is
+///     ready on the first poll.
 struct DescribeUserScramCredentialsResultInner {
-    users: Vec<ScramUserRow>,
+    all_view: Result<Vec<ScramAllRow>, ErrorInner>,
+    users_view: Vec<CString>,
+    core: DescribeUserScramCredentialsResult,
 }
 
-/// Flattens the per-user `describeUserScramCredentials` outcomes into the C
-/// handle.
+/// Builds the C handle from the resolved core result, precomputing the `all()`
+/// and `users()` views and retaining the core for on-demand `description(user)`.
 fn box_describe_user_scram_credentials_result(
-    outcomes: ScramDescriptionOutcomes,
+    core: DescribeUserScramCredentialsResult,
 ) -> *mut kafka_admin_DescribeUserScramCredentialsResult_t {
-    let mut users: Vec<ScramUserRow> = outcomes
-        .into_iter()
-        .map(|(user, outcome)| {
-            let (mechanisms, iterations, error) = match outcome {
-                Ok(description) => {
-                    let mechanisms = description
-                        .credential_infos()
-                        .iter()
-                        .map(|i| i32::from(i.mechanism().r#type()))
-                        .collect();
-                    let iterations = description.credential_infos().iter().map(|i| i.iterations()).collect();
-                    (mechanisms, iterations, None)
-                },
-                Err(e) => (Vec::new(), Vec::new(), Some(error_inner(e))),
-            };
-            ScramUserRow { user_c: to_cstring(&user), mechanisms, iterations, error }
-        })
+    // The shared data future is resolved (the submit awaited `users()`), so both
+    // views below are ready on the first poll.
+    let all_view = match block_on_ready(core.all().get()) {
+        Ok(map) => {
+            let mut rows: Vec<ScramAllRow> = map
+                .into_iter()
+                .map(|(user, description)| ScramAllRow {
+                    user_c: to_cstring(&user),
+                    description: UserScramCredentialsDescriptionInner::from_description(&description),
+                })
+                .collect();
+            // `all()` is a Map in Java (unordered); sort for deterministic C-side
+            // indexing.
+            rows.sort_by(|a, b| a.user_c.cmp(&b.user_c));
+            Ok(rows)
+        },
+        Err(e) => Err(error_inner(e)),
+    };
+    // `users()` cannot fault now (the data future resolved); the `unwrap_or_default`
+    // is only for the impossible top-level-error case. Response order is preserved
+    // (Java returns a `List`).
+    let users_view: Vec<CString> = block_on_ready(core.users().get())
+        .unwrap_or_default()
+        .iter()
+        .map(|u| to_cstring(u))
         .collect();
-    users.sort_by(|a, b| a.user_c.cmp(&b.user_c));
-    Box::into_raw(Box::new(DescribeUserScramCredentialsResultInner { users }))
+    Box::into_raw(Box::new(DescribeUserScramCredentialsResultInner { all_view, users_view, core }))
         as *mut kafka_admin_DescribeUserScramCredentialsResult_t
 }
 
@@ -18412,118 +18620,156 @@ unsafe fn describe_user_scram_credentials_result_ref(
     unsafe { &*(result as *const DescribeUserScramCredentialsResultInner) }
 }
 
-/// Returns the row at `index`, or `None` when it is out of range.
-fn scram_user_row_at(inner: &DescribeUserScramCredentialsResultInner, index: i32) -> Option<&ScramUserRow> {
-    if index < 0 {
-        return None;
-    }
-    inner.users.get(index as usize)
-}
-
-/// Returns the number of described users. Users are sorted by name.
+/// `all()` view: returns a newly allocated error handle iff `all()` faults
+/// (caller frees it with `kafka_common_Error_destroy`), or null on success.
+///
+/// Mirrors `DescribeUserScramCredentialsResult.all()`
+/// (`DescribeUserScramCredentialsResult.java:54-80`), which completes
+/// exceptionally with the first user-level error whose code is neither NONE nor
+/// RESOURCE_NOT_FOUND.
 ///
 /// # Safety
 ///
 /// `result` must be a valid `describe_user_scram_credentials` result handle.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_admin_DescribeUserScramCredentialsResult_count(
+pub unsafe extern "C" fn kafka_admin_DescribeUserScramCredentialsResult_all_error(
+    result: *const kafka_admin_DescribeUserScramCredentialsResult_t,
+) -> *mut kafka_common_Error_t {
+    match &unsafe { describe_user_scram_credentials_result_ref(result) }.all_view {
+        Ok(_) => std::ptr::null_mut(),
+        Err(inner) => box_error(inner.error.clone()),
+    }
+}
+
+/// `all()` view: number of described users, or 0 when `all()` faults (i.e. when
+/// [`kafka_admin_DescribeUserScramCredentialsResult_all_error`] is non-null).
+/// Users are sorted by name.
+///
+/// # Safety
+///
+/// `result` must be a valid `describe_user_scram_credentials` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DescribeUserScramCredentialsResult_all_count(
     result: *const kafka_admin_DescribeUserScramCredentialsResult_t,
 ) -> i32 {
-    unsafe { describe_user_scram_credentials_result_ref(result) }.users.len() as i32
+    match &unsafe { describe_user_scram_credentials_result_ref(result) }.all_view {
+        Ok(rows) => rows.len() as i32,
+        Err(_) => 0,
+    }
 }
 
-/// Returns the user name at `index` (borrowed), or null if out of range. Do not
-/// free it.
+/// `all()` view: the user name at `index` (borrowed), or null if out of range or
+/// `all()` faulted. Do not free it.
 ///
 /// # Safety
 ///
 /// `result` must be a valid `describe_user_scram_credentials` result handle.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_admin_DescribeUserScramCredentialsResult_get_user(
+pub unsafe extern "C" fn kafka_admin_DescribeUserScramCredentialsResult_all_get_user(
     result: *const kafka_admin_DescribeUserScramCredentialsResult_t,
     index: i32,
 ) -> *const c_char {
-    match scram_user_row_at(unsafe { describe_user_scram_credentials_result_ref(result) }, index) {
-        Some(row) => row.user_c.as_ptr(),
-        None => std::ptr::null(),
+    if index < 0 {
+        return std::ptr::null();
+    }
+    match &unsafe { describe_user_scram_credentials_result_ref(result) }.all_view {
+        Ok(rows) => rows.get(index as usize).map_or(std::ptr::null(), |row| row.user_c.as_ptr()),
+        Err(_) => std::ptr::null(),
     }
 }
 
-/// Returns the error for the user at `index` (borrowed), or null if the user was
-/// described successfully or `index` is out of range. Do not destroy it.
-///
-/// A user the broker reports as `RESOURCE_NOT_FOUND` is *not* an error here: it
-/// is a successfully described user with zero credentials, which is what Java's
-/// `all()` also does.
+/// `all()` view: the description at `index` (**borrowed** from the result; valid
+/// until the result is destroyed), or null if out of range or `all()` faulted.
+/// Do NOT pass it to
+/// [`kafka_admin_UserScramCredentialsDescription_destroy`] — the result owns it.
 ///
 /// # Safety
 ///
 /// `result` must be a valid `describe_user_scram_credentials` result handle.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_admin_DescribeUserScramCredentialsResult_get_error(
+pub unsafe extern "C" fn kafka_admin_DescribeUserScramCredentialsResult_all_get_description(
     result: *const kafka_admin_DescribeUserScramCredentialsResult_t,
     index: i32,
-) -> *const kafka_common_Error_t {
-    match scram_user_row_at(unsafe { describe_user_scram_credentials_result_ref(result) }, index) {
-        Some(row) => error_ptr(row.error.as_ref()),
-        None => std::ptr::null(),
+) -> *const kafka_admin_UserScramCredentialsDescription_t {
+    if index < 0 {
+        return std::ptr::null();
+    }
+    match &unsafe { describe_user_scram_credentials_result_ref(result) }.all_view {
+        Ok(rows) => rows.get(index as usize).map_or(std::ptr::null(), |row| {
+            &row.description as *const UserScramCredentialsDescriptionInner
+                as *const kafka_admin_UserScramCredentialsDescription_t
+        }),
+        Err(_) => std::ptr::null(),
     }
 }
 
-/// Returns the number of `ScramCredentialInfo`s for the user at `index`, or 0
-/// if out of range or the user failed.
+/// `users()` view: number of distinct users with at least one credential (Java
+/// `users()`, RESOURCE_NOT_FOUND users excluded).
 ///
 /// # Safety
 ///
 /// `result` must be a valid `describe_user_scram_credentials` result handle.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_admin_DescribeUserScramCredentialsResult_get_credential_count(
+pub unsafe extern "C" fn kafka_admin_DescribeUserScramCredentialsResult_users_count(
+    result: *const kafka_admin_DescribeUserScramCredentialsResult_t,
+) -> i32 {
+    unsafe { describe_user_scram_credentials_result_ref(result) }.users_view.len() as i32
+}
+
+/// `users()` view: the user name at `index` (borrowed), or null if out of range.
+/// Do not free it.
+///
+/// # Safety
+///
+/// `result` must be a valid `describe_user_scram_credentials` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DescribeUserScramCredentialsResult_users_get(
     result: *const kafka_admin_DescribeUserScramCredentialsResult_t,
     index: i32,
-) -> i32 {
-    match scram_user_row_at(unsafe { describe_user_scram_credentials_result_ref(result) }, index) {
-        Some(row) => row.mechanisms.len() as i32,
-        None => 0,
+) -> *const c_char {
+    cstring_at(&unsafe { describe_user_scram_credentials_result_ref(result) }.users_view, index)
+}
+
+/// `description(user)` view: on success returns null and writes an **owned**
+/// [`kafka_admin_UserScramCredentialsDescription_t`] to `*out_description` (free
+/// it with [`kafka_admin_UserScramCredentialsDescription_destroy`]); on fault
+/// returns a newly allocated error handle (caller frees it) and leaves
+/// `*out_description` untouched.
+///
+/// Mirrors `DescribeUserScramCredentialsResult.description(String)`
+/// (`DescribeUserScramCredentialsResult.java:114-138`): it **faults** with
+/// RESOURCE_NOT_FOUND for an RNF user (":128 RESOURCE_NOT_FOUND is included
+/// here") — carrying the broker's own error message — and for a user absent from
+/// the response ("No such user: <user>"). This is the capability the old
+/// flattened handle could not express: an RNF user was reported there as a
+/// successful empty-credential row.
+///
+/// # Safety
+///
+/// `result` must be a valid `describe_user_scram_credentials` result handle;
+/// `user` must be a valid C string; `out_description` must be null or writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DescribeUserScramCredentialsResult_description(
+    result: *const kafka_admin_DescribeUserScramCredentialsResult_t,
+    user: *const c_char,
+    out_description: *mut *mut kafka_admin_UserScramCredentialsDescription_t,
+) -> *mut kafka_common_Error_t {
+    let inner = unsafe { describe_user_scram_credentials_result_ref(result) };
+    let user = unsafe { CStr::from_ptr(user) }.to_string_lossy().to_string();
+    // The core's data future is resolved, so `description(user)` is ready on the
+    // first poll (no runtime needed).
+    match block_on_ready(inner.core.description(&user).get()) {
+        Ok(description) => {
+            if !out_description.is_null() {
+                unsafe {
+                    *out_description =
+                        UserScramCredentialsDescriptionInner::from_description(&description).into_owned_handle();
+                }
+            }
+            std::ptr::null_mut()
+        },
+        Err(e) => box_error(e),
     }
-}
-
-/// Returns `ScramMechanism.type()` for credential `credential_index` of the
-/// user at `index`: UNKNOWN=0, SCRAM_SHA_256=1, SCRAM_SHA_512=2. Returns -1 when
-/// either index is out of range, which is not a legal type indicator.
-///
-/// # Safety
-///
-/// `result` must be a valid `describe_user_scram_credentials` result handle.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_admin_DescribeUserScramCredentialsResult_get_credential_mechanism(
-    result: *const kafka_admin_DescribeUserScramCredentialsResult_t,
-    index: i32,
-    credential_index: i32,
-) -> i32 {
-    indexed_i32_at(
-        scram_user_row_at(unsafe { describe_user_scram_credentials_result_ref(result) }, index)
-            .map(|row| row.mechanisms.as_slice()),
-        credential_index,
-    )
-}
-
-/// Returns the iteration count for credential `credential_index` of the user at
-/// `index`, or -1 when either index is out of range.
-///
-/// # Safety
-///
-/// `result` must be a valid `describe_user_scram_credentials` result handle.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_admin_DescribeUserScramCredentialsResult_get_credential_iterations(
-    result: *const kafka_admin_DescribeUserScramCredentialsResult_t,
-    index: i32,
-    credential_index: i32,
-) -> i32 {
-    indexed_i32_at(
-        scram_user_row_at(unsafe { describe_user_scram_credentials_result_ref(result) }, index)
-            .map(|row| row.iterations.as_slice()),
-        credential_index,
-    )
 }
 
 /// Destroys a `describe_user_scram_credentials` result handle. Safe with null
@@ -24677,86 +24923,221 @@ mod tests {
         }
     }
 
+    /// One wire per-user row for [`seed_scram_result`]:
+    /// `(user, wire error code, [(mechanism type, iterations)])`.
+    type SeedRow<'a> = (&'a str, i16, Vec<(i8, i32)>);
+
+    /// Seeds a core `DescribeUserScramCredentialsResult` from wire per-user rows
+    /// `(user, wire error code, [(mechanism type, iterations)])`, exactly as the
+    /// core's own tests do — the C handle is then built from this via
+    /// `box_describe_user_scram_credentials_result`.
+    fn seed_scram_result(rows: Vec<SeedRow<'_>>) -> *mut kafka_admin_DescribeUserScramCredentialsResult_t {
+        use crate::DescribeUserScramCredentialsResponseData;
+        use crate::common::KafkaFuture;
+        use crate::describe_user_scram_credentials_response_data::{
+            CredentialInfo, DescribeUserScramCredentialsResult as WireUserResult,
+        };
+
+        let results: Vec<WireUserResult> = rows
+            .into_iter()
+            .map(|(user, code, infos)| {
+                let mut r = WireUserResult::new();
+                r.set_user(user.to_string()).set_error_code(code);
+                r.set_credential_infos(
+                    infos
+                        .into_iter()
+                        .map(|(mech, it)| {
+                            let mut ci = CredentialInfo::new();
+                            ci.set_mechanism(mech).set_iterations(it);
+                            ci
+                        })
+                        .collect(),
+                );
+                r
+            })
+            .collect();
+        let mut data = DescribeUserScramCredentialsResponseData::new();
+        data.set_error_code(Errors::None.code()).set_results(results);
+        let core = DescribeUserScramCredentialsResult::new(KafkaFuture::completed(Ok(data)));
+        box_describe_user_scram_credentials_result(core)
+    }
+
+    /// Resolves the `description(user)` view of a C handle to an owned handle or
+    /// an error pointer, mirroring how a C caller uses it.
+    unsafe fn describe_scram_user(
+        result: *const kafka_admin_DescribeUserScramCredentialsResult_t,
+        user: &str,
+    ) -> (*mut kafka_admin_UserScramCredentialsDescription_t, *mut kafka_common_Error_t) {
+        let user_c = CString::new(user).unwrap();
+        let mut out: *mut kafka_admin_UserScramCredentialsDescription_t = std::ptr::null_mut();
+        let error =
+            unsafe { kafka_admin_DescribeUserScramCredentialsResult_description(result, user_c.as_ptr(), &mut out) };
+        (out, error)
+    }
+
+    // The `all()` view keeps a RESOURCE_NOT_FOUND user as a successful, empty
+    // credential description, `users()` excludes them, and `description()` faults
+    // on them — the three-view interface the flattened dict could not express.
+    // The ragged credential arrays (two for one user, one for the next, distinct
+    // mechanisms and iterations) also catch a transposition of the two arrays.
     #[test]
-    fn describe_user_scram_credentials_result_flattens_credentials_at_a_second_index() {
-        // Ragged on purpose: two credentials for one user, one for the next and
-        // a failure for the third. The mechanisms and iteration counts are all
-        // distinct, so transposing the two arrays is caught.
-        let rows: ScramDescriptionOutcomes = vec![
+    fn describe_user_scram_credentials_backs_all_users_and_description_views() {
+        let sha256 = ScramMechanism::ScramSha256;
+        let sha512 = ScramMechanism::ScramSha512;
+        let result = seed_scram_result(vec![
             (
-                "alice".to_string(),
-                Ok(UserScramCredentialsDescription::new(
-                    "alice",
-                    vec![
-                        ScramCredentialInfo::new(ScramMechanism::ScramSha256, 4_096),
-                        ScramCredentialInfo::new(ScramMechanism::ScramSha512, 8_192),
-                    ],
-                )),
+                "alice",
+                Errors::None.code(),
+                vec![(sha256.r#type(), 4_096), (sha512.r#type(), 8_192)],
             ),
-            (
-                "bob".to_string(),
-                Ok(UserScramCredentialsDescription::new(
-                    "bob",
-                    vec![ScramCredentialInfo::new(ScramMechanism::ScramSha512, 16_384)],
-                )),
-            ),
-            (
-                "carol".to_string(),
-                Err(Error::with_message(Errors::ResourceNotFound, "No such user: carol")),
-            ),
-        ];
-        let result = box_describe_user_scram_credentials_result(rows);
+            ("bob", Errors::None.code(), vec![(sha512.r#type(), 16_384)]),
+            // Requested but absent on the broker: RESOURCE_NOT_FOUND.
+            ("carol", Errors::ResourceNotFound.code(), vec![]),
+        ]);
         unsafe {
-            assert_eq!(kafka_admin_DescribeUserScramCredentialsResult_count(result), 3);
-            let user0 = CStr::from_ptr(kafka_admin_DescribeUserScramCredentialsResult_get_user(result, 0));
-            assert_eq!(user0.to_str().expect("utf8"), "alice");
-            assert!(kafka_admin_DescribeUserScramCredentialsResult_get_error(result, 0).is_null());
+            // -- all() view: every user is present (RNF included, empty creds),
+            //    sorted by name, no error --------------------------------------
+            assert!(kafka_admin_DescribeUserScramCredentialsResult_all_error(result).is_null());
+            assert_eq!(kafka_admin_DescribeUserScramCredentialsResult_all_count(result), 3);
+
+            let alice = kafka_admin_DescribeUserScramCredentialsResult_all_get_description(result, 0);
             assert_eq!(
-                kafka_admin_DescribeUserScramCredentialsResult_get_credential_count(result, 0),
-                2
+                CStr::from_ptr(kafka_admin_UserScramCredentialsDescription_name(alice)).to_str(),
+                Ok("alice")
+            );
+            assert_eq!(kafka_admin_UserScramCredentialsDescription_credential_count(alice), 2);
+            assert_eq!(
+                kafka_admin_UserScramCredentialsDescription_credential_mechanism(alice, 0),
+                i32::from(sha256.r#type())
             );
             assert_eq!(
-                kafka_admin_DescribeUserScramCredentialsResult_get_credential_mechanism(result, 0, 0),
-                i32::from(ScramMechanism::ScramSha256.r#type())
-            );
-            assert_eq!(
-                kafka_admin_DescribeUserScramCredentialsResult_get_credential_iterations(result, 0, 0),
+                kafka_admin_UserScramCredentialsDescription_credential_iterations(alice, 0),
                 4_096
             );
             assert_eq!(
-                kafka_admin_DescribeUserScramCredentialsResult_get_credential_mechanism(result, 0, 1),
-                i32::from(ScramMechanism::ScramSha512.r#type())
+                kafka_admin_UserScramCredentialsDescription_credential_mechanism(alice, 1),
+                i32::from(sha512.r#type())
             );
             assert_eq!(
-                kafka_admin_DescribeUserScramCredentialsResult_get_credential_iterations(result, 0, 1),
+                kafka_admin_UserScramCredentialsDescription_credential_iterations(alice, 1),
                 8_192
             );
 
+            let bob = kafka_admin_DescribeUserScramCredentialsResult_all_get_description(result, 1);
+            assert_eq!(kafka_admin_UserScramCredentialsDescription_credential_count(bob), 1);
             assert_eq!(
-                kafka_admin_DescribeUserScramCredentialsResult_get_credential_count(result, 1),
-                1
-            );
-            assert_eq!(
-                kafka_admin_DescribeUserScramCredentialsResult_get_credential_iterations(result, 1, 0),
+                kafka_admin_UserScramCredentialsDescription_credential_iterations(bob, 0),
                 16_384
             );
-            // Row 1 has no second credential, even though row 0 does.
-            assert_eq!(
-                kafka_admin_DescribeUserScramCredentialsResult_get_credential_iterations(result, 1, 1),
-                -1
-            );
+            // Bob has no second credential even though alice does.
+            assert_eq!(kafka_admin_UserScramCredentialsDescription_credential_iterations(bob, 1), -1);
 
-            let error = kafka_admin_DescribeUserScramCredentialsResult_get_error(result, 2);
-            assert!(!error.is_null());
-            let message = CStr::from_ptr(common::kafka_common_Error_message(error));
-            assert_eq!(message.to_str().expect("utf8"), "No such user: carol");
+            // carol (RNF) IS in all(), with zero credentials — a successful,
+            // empty description, exactly as Java's all() treats it.
+            let carol = kafka_admin_DescribeUserScramCredentialsResult_all_get_description(result, 2);
             assert_eq!(
-                kafka_admin_DescribeUserScramCredentialsResult_get_credential_count(result, 2),
-                0
+                CStr::from_ptr(kafka_admin_UserScramCredentialsDescription_name(carol)).to_str(),
+                Ok("carol")
             );
+            assert_eq!(kafka_admin_UserScramCredentialsDescription_credential_count(carol), 0);
+            assert!(kafka_admin_DescribeUserScramCredentialsResult_all_get_description(result, 3).is_null());
+            assert!(kafka_admin_DescribeUserScramCredentialsResult_all_get_user(result, 3).is_null());
 
-            assert!(kafka_admin_DescribeUserScramCredentialsResult_get_user(result, 3).is_null());
-            assert!(kafka_admin_DescribeUserScramCredentialsResult_get_error(result, 3).is_null());
+            // -- users() view: RNF (carol) excluded --------------------------
+            assert_eq!(kafka_admin_DescribeUserScramCredentialsResult_users_count(result), 2);
+            let listed: Vec<&str> = (0..2)
+                .map(|i| {
+                    CStr::from_ptr(kafka_admin_DescribeUserScramCredentialsResult_users_get(result, i))
+                        .to_str()
+                        .unwrap()
+                })
+                .collect();
+            assert!(listed.contains(&"alice") && listed.contains(&"bob"), "users(): {listed:?}");
+            assert!(!listed.contains(&"carol"), "users() must exclude the RNF user, got {listed:?}");
+            assert!(kafka_admin_DescribeUserScramCredentialsResult_users_get(result, 2).is_null());
+
+            // -- description() view: real user succeeds -----------------------
+            let (alice_desc, alice_err) = describe_scram_user(result, "alice");
+            assert!(alice_err.is_null());
+            assert_eq!(kafka_admin_UserScramCredentialsDescription_credential_count(alice_desc), 2);
+            kafka_admin_UserScramCredentialsDescription_destroy(alice_desc);
+
+            // -- description() view: RNF user FAULTS (the new capability) ------
+            let (carol_desc, carol_err) = describe_scram_user(result, "carol");
+            assert!(carol_desc.is_null());
+            assert!(!carol_err.is_null(), "description() must fault on a RESOURCE_NOT_FOUND user");
+            assert_eq!(
+                common::kafka_common_Error_code(carol_err) as i32,
+                Errors::ResourceNotFound.code() as i32
+            );
+            common::kafka_common_Error_destroy(carol_err);
+
+            // -- description() view: absent user -> "No such user: ..." -------
+            let (absent_desc, absent_err) = describe_scram_user(result, "nobody");
+            assert!(absent_desc.is_null());
+            assert!(!absent_err.is_null());
+            assert_eq!(
+                common::kafka_common_Error_code(absent_err) as i32,
+                Errors::ResourceNotFound.code() as i32
+            );
+            assert_eq!(
+                CStr::from_ptr(common::kafka_common_Error_message(absent_err)).to_str(),
+                Ok("No such user: nobody")
+            );
+            common::kafka_common_Error_destroy(absent_err);
+
+            kafka_admin_DescribeUserScramCredentialsResult_destroy(result);
+        }
+    }
+
+    // A hard user-level error (neither NONE nor RESOURCE_NOT_FOUND) faults the
+    // all() view, while users() still lists the non-RNF users (including the
+    // failed one) and description() reports each user's own error.
+    #[test]
+    fn describe_user_scram_credentials_all_view_faults_on_a_hard_user_error() {
+        let sha256 = ScramMechanism::ScramSha256;
+        let result = seed_scram_result(vec![
+            ("goodUser", Errors::None.code(), vec![(sha256.r#type(), 4_096)]),
+            ("failedUser", Errors::DuplicateResource.code(), vec![]),
+            ("unknownUser", Errors::ResourceNotFound.code(), vec![]),
+        ]);
+        unsafe {
+            // all() faults with the hard error; count is 0.
+            let all_error = kafka_admin_DescribeUserScramCredentialsResult_all_error(result);
+            assert!(!all_error.is_null(), "all() must fault on a hard user-level error");
+            assert_eq!(
+                common::kafka_common_Error_code(all_error) as i32,
+                Errors::DuplicateResource.code() as i32
+            );
+            common::kafka_common_Error_destroy(all_error);
+            assert_eq!(kafka_admin_DescribeUserScramCredentialsResult_all_count(result), 0);
+            assert!(kafka_admin_DescribeUserScramCredentialsResult_all_get_user(result, 0).is_null());
+
+            // users(): goodUser + failedUser (RNF excluded, hard-error included).
+            assert_eq!(kafka_admin_DescribeUserScramCredentialsResult_users_count(result), 2);
+
+            // description() reports each user's own outcome.
+            let (good_desc, good_err) = describe_scram_user(result, "goodUser");
+            assert!(good_err.is_null());
+            assert_eq!(kafka_admin_UserScramCredentialsDescription_credential_count(good_desc), 1);
+            kafka_admin_UserScramCredentialsDescription_destroy(good_desc);
+
+            let (_, failed_err) = describe_scram_user(result, "failedUser");
+            assert!(!failed_err.is_null());
+            assert_eq!(
+                common::kafka_common_Error_code(failed_err) as i32,
+                Errors::DuplicateResource.code() as i32
+            );
+            common::kafka_common_Error_destroy(failed_err);
+
+            let (_, unknown_err) = describe_scram_user(result, "unknownUser");
+            assert!(!unknown_err.is_null());
+            assert_eq!(
+                common::kafka_common_Error_code(unknown_err) as i32,
+                Errors::ResourceNotFound.code() as i32
+            );
+            common::kafka_common_Error_destroy(unknown_err);
+
             kafka_admin_DescribeUserScramCredentialsResult_destroy(result);
         }
     }
