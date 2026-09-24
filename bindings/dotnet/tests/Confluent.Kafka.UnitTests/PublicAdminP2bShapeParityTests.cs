@@ -156,7 +156,12 @@ public sealed class PublicAdminP2bShapeParityTests
         TopicListing listing = new TopicListing("t", new Uuid(1L, 2L), isInternal: true);
         Assert.Equal("t", listing.Name);
         Assert.True(listing.IsInternal);
-        Assert.Equal("(name=t, topicId=" + listing.TopicId + ", internal=True)", listing.ToString());
+        // ⚠ Java renders the boolean LOWERCASE (TopicListing.java:67); C#'s bool.ToString()
+        // would give "True". The literal text is asserted rather than re-derived.
+        Assert.Equal("(name=t, topicId=" + listing.TopicId + ", internal=true)", listing.ToString());
+        Assert.Equal(
+            "(name=t, topicId=" + listing.TopicId + ", internal=false)",
+            new TopicListing("t", new Uuid(1L, 2L), isInternal: false).ToString());
 
         Assert.Throws<ArgumentNullException>(() => new TopicListing(null!, Uuid.Zero, false));
     }

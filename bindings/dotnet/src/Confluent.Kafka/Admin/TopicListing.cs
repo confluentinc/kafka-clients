@@ -66,5 +66,6 @@ public sealed class TopicListing
             "(name={0}, topicId={1}, internal={2})",
             Name,
             TopicId,
-            IsInternal);
+            // Java renders a boolean lowercase; bool.ToString() would give True/False.
+            IsInternal ? "true" : "false");
 }

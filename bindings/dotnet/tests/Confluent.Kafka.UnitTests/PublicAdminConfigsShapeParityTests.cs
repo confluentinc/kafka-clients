@@ -303,6 +303,23 @@ public sealed class PublicAdminConfigsShapeParityTests
         Assert.NotEqual(new AlterConfigOp(new ConfigEntry("k", "other"), AlterConfigOpType.Set), op);
 
         Assert.StartsWith("AlterConfigOp{opType=Set, configEntry=ConfigEntry(", op.ToString(), StringComparison.Ordinal);
+
+        // ⚠ Java renders both booleans LOWERCASE (ConfigEntry.java:305-313); C#'s
+        // bool.ToString() would give "True"/"False". The literal text is asserted rather
+        // than re-derived from the implementation.
+        Assert.Contains("isSensitive=false, isReadOnly=false", entry.ToString(), StringComparison.Ordinal);
+        Assert.Contains(
+            "isSensitive=true, isReadOnly=true",
+            new ConfigEntry(
+                "k",
+                "v",
+                ConfigEntry.ConfigSource.Unknown,
+                isSensitive: true,
+                isReadOnly: true,
+                synonyms: Array.Empty<ConfigEntry.ConfigSynonym>(),
+                type: ConfigEntry.ConfigType.Unknown,
+                documentation: null).ToString(),
+            StringComparison.Ordinal);
     }
 
     /// <summary>

@@ -172,7 +172,8 @@ public sealed class TopicDescription
             CultureInfo.InvariantCulture,
             "(name={0}, internal={1}, partitions={2}, authorizedOperations={3})",
             Name,
-            IsInternal,
+            // Java renders a boolean lowercase; bool.ToString() would give True/False.
+            IsInternal ? "true" : "false",
             string.Join(",", _partitions.Select(static partition => partition.ToString())),
             _authorizedOperations is null ? "null" : "[" + string.Join(", ", _authorizedOperations) + "]");
 }

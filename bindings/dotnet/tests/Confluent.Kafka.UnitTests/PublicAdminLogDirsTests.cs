@@ -284,7 +284,8 @@ public sealed class PublicAdminLogDirsTests
     public void TheRenderings_MatchJavas()
     {
         Assert.Equal("logdir-topic-4-9", new TopicPartitionReplica("logdir-topic", 4, 9).ToString());
-        Assert.Equal("ReplicaInfo(size=12, offsetLag=3, isFuture=True)", new ReplicaInfo(12, 3, true).ToString());
+        Assert.Equal("ReplicaInfo(size=12, offsetLag=3, isFuture=true)", new ReplicaInfo(12, 3, true).ToString());
+        Assert.Equal("ReplicaInfo(size=12, offsetLag=3, isFuture=false)", new ReplicaInfo(12, 3, false).ToString());
 
         LogDirDescription empty = new LogDirDescription(
             error: null,
@@ -304,7 +305,7 @@ public sealed class PublicAdminLogDirsTests
             usableBytes: 0,
             isCordoned: true);
         Assert.Equal(
-            "LogDirDescription(replicaInfos={t-0=ReplicaInfo(size=1, offsetLag=2, isFuture=False)}, "
+            "LogDirDescription(replicaInfos={t-0=ReplicaInfo(size=1, offsetLag=2, isFuture=false)}, "
                 + "error=null, totalBytes=100, usableBytes=0, isCordoned=true)",
             sized.ToString());
     }

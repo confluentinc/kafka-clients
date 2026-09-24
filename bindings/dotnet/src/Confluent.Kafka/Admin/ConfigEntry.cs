@@ -291,8 +291,9 @@ public sealed class ConfigEntry
             Name,
             IsSensitive ? "Redacted" : Value,
             Source,
-            IsSensitive,
-            IsReadOnly,
+            // Java renders a boolean lowercase; bool.ToString() would give True/False.
+            IsSensitive ? "true" : "false",
+            IsReadOnly ? "true" : "false",
             synonyms,
             Type,
             Documentation);

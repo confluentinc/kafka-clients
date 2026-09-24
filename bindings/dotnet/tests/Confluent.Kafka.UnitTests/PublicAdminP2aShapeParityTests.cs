@@ -237,6 +237,15 @@ public sealed class PublicAdminP2aShapeParityTests
         Assert.Empty(bare.AuthorizedOperations!);
         Assert.Equal(Uuid.Zero, bare.TopicId);
 
+        // ⚠ Java renders the boolean LOWERCASE (TopicDescription.java:150); C#'s
+        // bool.ToString() would give "True"/"False". The literal text is asserted rather
+        // than re-derived from the implementation.
+        Assert.StartsWith("(name=t, internal=false, ", bare.ToString(), StringComparison.Ordinal);
+        Assert.StartsWith(
+            "(name=t, internal=true, ",
+            new TopicDescription("t", true, Array.Empty<TopicPartitionInfo>()).ToString(),
+            StringComparison.Ordinal);
+
         // Java's 4-arg TopicPartitionInfo leaves elr/lastKnownElr NULL.
         TopicPartitionInfo four = new TopicPartitionInfo(
             0, null, Array.Empty<Node>(), Array.Empty<Node>());

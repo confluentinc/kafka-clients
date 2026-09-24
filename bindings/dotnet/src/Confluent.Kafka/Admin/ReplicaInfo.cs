@@ -75,5 +75,6 @@ public sealed class ReplicaInfo
             "ReplicaInfo(size={0}, offsetLag={1}, isFuture={2})",
             Size,
             OffsetLag,
-            IsFuture);
+            // Java renders a boolean lowercase; bool.ToString() would give True/False.
+            IsFuture ? "true" : "false");
 }
