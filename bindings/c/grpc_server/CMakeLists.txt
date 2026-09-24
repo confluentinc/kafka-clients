@@ -35,6 +35,7 @@ set(PROTO_NAMES producer_service consumer_service admin_service)
 find_package(Protobuf REQUIRED)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(GRPCPP REQUIRED grpc++)
+pkg_check_modules(PROTOBUF_PC protobuf)
 
 # Generate proto + grpc stubs at configure time.
 set(GENERATED_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated")
@@ -72,9 +73,14 @@ add_executable(kafka_grpc_server
     ${GENERATED_SRCS}
 )
 
+# The protobuf include directories are listed explicitly: Debian installs the
+# headers in /usr/include, which the compiler searches by default, but Homebrew
+# installs them under its own prefix, which it does not.
 target_include_directories(kafka_grpc_server PRIVATE
     ${RUST_INCLUDE_DIR}
     ${GENERATED_DIR}
+    ${Protobuf_INCLUDE_DIRS}
+    ${PROTOBUF_PC_INCLUDE_DIRS}
 )
 
 # Link the static Rust lib + grpc++ + protobuf + system libs.
@@ -83,7 +89,8 @@ target_link_libraries(kafka_grpc_server PRIVATE
     "${RUST_LIB_DIR}/libconfluent_kafka.a"
     ${GRPCPP_LIBRARIES}
     ${Protobuf_LIBRARIES}
+    ${PROTOBUF_PC_LIBRARIES}
     pthread dl m
 )
-target_compile_options(kafka_grpc_server PRIVATE ${GRPCPP_CFLAGS_OTHER})
-target_link_directories(kafka_grpc_server PRIVATE ${GRPCPP_LIBRARY_DIRS})
+target_compile_options(kafka_grpc_server PRIVATE ${GRPCPP_CFLAGS_OTHER} ${PROTOBUF_PC_CFLAGS_OTHER})
+target_link_directories(kafka_grpc_server PRIVATE ${GRPCPP_LIBRARY_DIRS} ${PROTOBUF_PC_LIBRARY_DIRS})
