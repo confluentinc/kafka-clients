@@ -46,6 +46,13 @@
 //! - `testMultipleMarkersOneLeader` → [`test_multiple_markers_one_leader`]
 //! - `testFencingOnTransactionExpiration` → [`test_fencing_on_transaction_expiration`]
 //!   (on its own cluster config, for the abort-cleanup interval)
+//! - `testInitTransactionsTimeout` → [`test_init_transactions_timeout`],
+//!   `testSendOffsetsToTransactionTimeout` → [`test_send_offsets_to_transaction_timeout`],
+//!   `testCommitTransactionTimeout` → [`test_commit_transaction_timeout`],
+//!   `testAbortTransactionTimeout` → [`test_abort_transaction_timeout`] and
+//!   `testFailureToFenceEpoch` (TV2 row) → [`test_failure_to_fence_epoch`]
+//!   (each on a dedicated cluster, since they stop brokers — see
+//!   [`transactions_test_dedicated_cluster`])
 //!
 //! and from the Java `clients-integration-tests` module (AK 4.3.1):
 //!
@@ -839,6 +846,37 @@ fn create_transactional_producer_with_transaction_timeout_ms(
     transactional_id: &str,
     transaction_timeout_ms: u64,
 ) -> KafkaProducer<Vec<u8>, Vec<u8>> {
+    create_transactional_producer_with_transaction_timeout_ms_max_block_ms(
+        bootstrap,
+        transactional_id,
+        transaction_timeout_ms,
+        60000,
+    )
+}
+
+/// [`create_transactional_producer`] with Java's `maxBlockMs` parameter
+/// (`TransactionsTest.scala:1091`) overridden.
+fn create_transactional_producer_with_max_block_ms(
+    bootstrap: &str,
+    transactional_id: &str,
+    max_block_ms: u64,
+) -> KafkaProducer<Vec<u8>, Vec<u8>> {
+    create_transactional_producer_with_transaction_timeout_ms_max_block_ms(
+        bootstrap,
+        transactional_id,
+        60000,
+        max_block_ms,
+    )
+}
+
+/// [`create_transactional_producer`] with Java's `transactionTimeoutMs` and
+/// `maxBlockMs` parameters (`TransactionsTest.scala:1090-1091`) overridden.
+fn create_transactional_producer_with_transaction_timeout_ms_max_block_ms(
+    bootstrap: &str,
+    transactional_id: &str,
+    transaction_timeout_ms: u64,
+    max_block_ms: u64,
+) -> KafkaProducer<Vec<u8>, Vec<u8>> {
     let props = HashMap::from([
         ("bootstrap.servers".to_string(), bootstrap.to_string()),
         ("acks".to_string(), "all".to_string()),
@@ -846,7 +884,7 @@ fn create_transactional_producer_with_transaction_timeout_ms(
         ("transactional.id".to_string(), transactional_id.to_string()),
         ("enable.idempotence".to_string(), "true".to_string()),
         ("transaction.timeout.ms".to_string(), transaction_timeout_ms.to_string()),
-        ("max.block.ms".to_string(), "60000".to_string()),
+        ("max.block.ms".to_string(), max_block_ms.to_string()),
         ("delivery.timeout.ms".to_string(), "120000".to_string()),
         ("request.timeout.ms".to_string(), "30000".to_string()),
         ("max.in.flight.requests.per.connection".to_string(), "5".to_string()),
@@ -3064,6 +3102,240 @@ async fn test_transaction_after_producer_id_expires_with_tv2() {
 
     assert_consume_records(&ctx, &[topic1], 2).await;
     producer.close().await.expect("producer close");
+    ctx.cleanup().await;
+}
+
+// ---------------------------------------------------------------------------
+// TransactionsTest broker fault injection
+// ---------------------------------------------------------------------------
+//
+// These `TransactionsTest` translations stop brokers, so they cannot share the
+// pooled [`kip848_3_broker`] container the other translations use: each starts a
+// dedicated `Type::Kraft` cluster of Java's shape — `brokerCount = 3`
+// (`TransactionsTest.scala:47`) plus one isolated controller — carrying the full
+// `overridingProps` (`TransactionsTest.scala:61-76`). Native only.
+
+/// `TransactionsTest.overridingProps` (`TransactionsTest.scala:61-76`) on a
+/// dedicated `Type::Kraft` cluster of `brokerCount = 3` brokers and one
+/// controller. Java also hands the properties to the controllers
+/// (`kraftControllerConfigs`, `:82-85`), as the harness does with every
+/// server property.
+fn transactions_test_dedicated_cluster() -> ClusterConfig {
+    let props = [
+        ("KAFKA_AUTO_CREATE_TOPICS_ENABLE", "false"),
+        ("KAFKA_OFFSETS_TOPIC_NUM_PARTITIONS", "1"),
+        ("KAFKA_TRANSACTION_STATE_LOG_NUM_PARTITIONS", "3"),
+        ("KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR", "2"),
+        ("KAFKA_TRANSACTION_STATE_LOG_MIN_ISR", "2"),
+        ("KAFKA_CONTROLLED_SHUTDOWN_ENABLE", "true"),
+        ("KAFKA_UNCLEAN_LEADER_ELECTION_ENABLE", "false"),
+        ("KAFKA_AUTO_LEADER_REBALANCE_ENABLE", "false"),
+        ("KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS", "0"),
+        ("KAFKA_TRANSACTION_ABORT_TIMED_OUT_TRANSACTION_CLEANUP_INTERVAL_MS", "200"),
+    ]
+    .into_iter()
+    .map(|(key, value)| (key.to_string(), value.to_string()))
+    .collect();
+    ClusterConfig::kraft_dedicated(TXN_TEST_REPLICATION_FACTOR as u16, 1).set_server_properties(props)
+}
+
+/// The transactional operation `TransactionsTest.testTimeout` runs with every
+/// broker down — Java's `timeoutProcess` lambda (`TransactionsTest.scala:498-499`).
+enum TimeoutProcess {
+    InitTransactions,
+    SendOffsetsToTransaction,
+    CommitTransaction,
+    AbortTransaction,
+}
+
+/// `TransactionsTest.testTimeout(needInitAndSendMsg, timeoutProcess)`
+/// (`TransactionsTest.scala:498-511`): with every broker killed, the
+/// transactional operation fails with `TimeoutException` after the producer's
+/// `max.block.ms` of 3000.
+///
+/// Java asserts the exception class only; the message prefix the client builds
+/// from `max.block.ms` (`TransactionalRequestResult.await(long, TimeUnit)`) is
+/// asserted too.
+#[allow(deprecated)]
+async fn test_timeout(need_init_and_send_msg: bool, timeout_process: TimeoutProcess) {
+    let mut ctx = TestContext::new(transactions_test_dedicated_cluster()).await;
+    let (topic1, _topic2) = create_txn_test_topics(&mut ctx).await;
+    let bootstrap = ctx.bootstrap_servers().to_string();
+    let producer =
+        create_transactional_producer_with_max_block_ms(&bootstrap, &ctx.group_id("transactionProducer"), 3000);
+    if need_init_and_send_msg {
+        producer.init_transactions().await.expect("initTransactions");
+        producer.begin_transaction().expect("beginTransaction");
+        send_record(
+            &producer,
+            ProducerRecord::with_key(topic1.clone(), Some(b"foo".to_vec()), Some(b"bar".to_vec())),
+        )
+        .await
+        .expect("send");
+    }
+
+    for id in ctx.cluster().broker_ids() {
+        ctx.cluster().shutdown_broker(id).await;
+    }
+
+    let result = match timeout_process {
+        TimeoutProcess::InitTransactions => producer.init_transactions().await,
+        TimeoutProcess::SendOffsetsToTransaction => {
+            producer
+                .send_offsets_to_transaction(
+                    HashMap::from([(
+                        TopicPartition::new(topic1.clone(), 0),
+                        OffsetAndMetadata::new(0).expect("valid offset"),
+                    )]),
+                    ConsumerGroupMetadata::new("test-group"),
+                )
+                .await
+        },
+        TimeoutProcess::CommitTransaction => producer.commit_transaction().await,
+        TimeoutProcess::AbortTransaction => producer.abort_transaction().await,
+    };
+    let e = result.expect_err("the transactional operation must time out with every broker down");
+    assert!(matches!(e, Error::Timeout(_)), "expected TimeoutException, got {e:?}");
+    assert!(
+        e.message().starts_with("Timeout expired after 3000ms while awaiting "),
+        "unexpected timeout message: {}",
+        e.message()
+    );
+    <KafkaProducer<Vec<u8>, Vec<u8>> as Producer<Vec<u8>, Vec<u8>>>::close_with_timeout(&producer, Duration::ZERO)
+        .await
+        .expect("producer close(Duration.ZERO)");
+    ctx.cleanup().await;
+}
+
+/// `initTransactions` times out when every broker is down.
+///
+/// Translates `TransactionsTest.testInitTransactionsTimeout` (`TransactionsTest.scala:472-475`).
+#[tokio::test(flavor = "multi_thread")]
+async fn test_init_transactions_timeout() {
+    test_timeout(false, TimeoutProcess::InitTransactions).await;
+}
+
+/// `sendOffsetsToTransaction` times out when every broker is down.
+///
+/// Translates `TransactionsTest.testSendOffsetsToTransactionTimeout`
+/// (`TransactionsTest.scala:477-484`).
+#[tokio::test(flavor = "multi_thread")]
+async fn test_send_offsets_to_transaction_timeout() {
+    test_timeout(true, TimeoutProcess::SendOffsetsToTransaction).await;
+}
+
+/// `commitTransaction` times out when every broker is down.
+///
+/// Translates `TransactionsTest.testCommitTransactionTimeout` (`TransactionsTest.scala:486-490`).
+#[tokio::test(flavor = "multi_thread")]
+async fn test_commit_transaction_timeout() {
+    test_timeout(true, TimeoutProcess::CommitTransaction).await;
+}
+
+/// `abortTransaction` times out when every broker is down.
+///
+/// Translates `TransactionsTest.testAbortTransactionTimeout` (`TransactionsTest.scala:492-496`).
+#[tokio::test(flavor = "multi_thread")]
+async fn test_abort_transaction_timeout() {
+    test_timeout(true, TimeoutProcess::AbortTransaction).await;
+}
+
+/// With the transaction log under min-ISR, a new producer's `initTransactions`
+/// times out, yet the coordinator has bumped the epoch in memory: after the
+/// brokers return, the old producer is fenced, and a third producer with the
+/// same `transactional.id` initializes and commits with a bumped epoch.
+///
+/// Translates `TransactionsTest.testFailureToFenceEpoch`
+/// (`TransactionsTest.scala:970-1041`), the `consumer, true` row. The
+/// `isTV2Enabled = false` rows are not reachable: the 4.2.0 broker finalizes
+/// `transaction.version=2` and the harness cannot downgrade it per test.
+///
+/// Deviation: Java reads the partition leader's `producerStateManager` in
+/// process; here the same active-producer entry (id and epoch) comes from
+/// `Admin.describeProducers` on the partition, which reports that state.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_failure_to_fence_epoch() {
+    let mut ctx = TestContext::new(transactions_test_dedicated_cluster()).await;
+    let (topic1, _topic2) = create_txn_test_topics(&mut ctx).await;
+    let bootstrap = ctx.bootstrap_servers().to_string();
+    let txn_id = ctx.group_id("transactional-producer");
+    let producer1 = create_transactional_producer(&bootstrap, &txn_id);
+    let producer2 = create_transactional_producer_with_max_block_ms(&bootstrap, &txn_id, 1000);
+    let initial_producer_epoch: i32 = 0;
+
+    producer1.init_transactions().await.expect("producer1.initTransactions");
+
+    producer1.begin_transaction().expect("producer1.beginTransaction");
+    send_record(
+        &producer1,
+        producer_record_with_expected_transaction_status(&topic1, Some(0), "4", "4", true),
+    )
+    .await
+    .expect("producer1 send");
+    producer1.commit_transaction().await.expect("producer1.commitTransaction");
+
+    let tp = TopicPartition::new(topic1.clone(), 0);
+    let producer_id = wait_for_single_producer_state(&ctx, &tp).await.producer_id();
+
+    // Kill two brokers to bring the transaction log under min-ISR
+    ctx.cluster().shutdown_broker(0).await;
+    ctx.cluster().shutdown_broker(1).await;
+
+    // Java: a `TimeoutException` is good, any other exception fails the test.
+    if let Err(e) = producer2.init_transactions().await {
+        assert!(
+            matches!(e, Error::Timeout(_)),
+            "Got an unexpected exception from initTransactions: {e:?}"
+        );
+    }
+    producer2.close().await.expect("producer2 close");
+
+    for id in [0, 1] {
+        ctx.cluster().start_broker(id).await;
+    }
+
+    // Because the epoch was bumped in memory, attempting to begin a transaction with producer 1 should fail
+    if let Err(e) = producer1.begin_transaction() {
+        assert!(
+            matches!(e, Error::ProducerFenced(_)),
+            "Got an unexpected exception from commitTransaction: {e:?}"
+        );
+    }
+    producer1.close().await.expect("producer1 close");
+
+    // Make sure to leave this producer enough time before request timeout. The broker restart can take some time.
+    let producer3 = create_transactional_producer(&bootstrap, &txn_id);
+    producer3.init_transactions().await.expect("producer3.initTransactions");
+
+    producer3.begin_transaction().expect("producer3.beginTransaction");
+    send_record(
+        &producer3,
+        producer_record_with_expected_transaction_status(&topic1, Some(0), "4", "4", true),
+    )
+    .await
+    .expect("producer3 send");
+    producer3.commit_transaction().await.expect("producer3.commitTransaction");
+
+    // With TV2 and the latest EndTxnRequest version, the epoch will be bumped at the end of every transaction aka
+    // three times (once after each commit and once after the timeout exception). The last bump is less consistent,
+    // so ensure the first two happen.
+    let admin = txn_test_admin(&ctx);
+    let producer_state_entry = producer_states(admin.as_ref(), &tp)
+        .await
+        .expect("describeProducers")
+        .into_iter()
+        .find(|state| state.producer_id() == producer_id);
+    admin.close().await;
+    let producer_state_entry = producer_state_entry.expect("the producer id must still be active on the partition");
+    // Java's `(initialProducerEpoch + 1) <= producerEpoch`, as clippy's `int_plus_one` wants it.
+    assert!(
+        initial_producer_epoch < producer_state_entry.producer_epoch(),
+        "expected epoch >= {} but was {}",
+        initial_producer_epoch + 1,
+        producer_state_entry.producer_epoch()
+    );
+
+    producer3.close().await.expect("producer3 close");
     ctx.cleanup().await;
 }
 
