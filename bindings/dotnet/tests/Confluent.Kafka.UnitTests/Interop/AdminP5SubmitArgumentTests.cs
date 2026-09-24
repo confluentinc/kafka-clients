@@ -360,6 +360,24 @@ public sealed class AdminP5SubmitArgumentTests
         return error;
     }
 
+    /// <summary>
+    /// Settles a shape-4a operation by firing one per-key failure for every key the submit
+    /// carried. The <c>value</c> slot is NULL on a failing key; each error is <b>owned</b>
+    /// and the trampoline frees it.
+    /// </summary>
+    /// <param name="fire">The production trampoline for this RPC.</param>
+    /// <param name="keys">Every key the submit sent, in submit order.</param>
+    /// <param name="userData">The operation's <c>GCHandle</c> pointer.</param>
+    private static void FirePerKeyFailures(
+        Action<IntPtr, IntPtr, IntPtr, IntPtr> fire, IEnumerable<string> keys, IntPtr userData)
+    {
+        foreach (string key in keys)
+        {
+            using Utf8Marshal.PinnedUtf8String pinnedKey = Utf8Marshal.Pin(key);
+            fire(pinnedKey.Pointer, IntPtr.Zero, CapturedError(), userData);
+        }
+    }
+
     /// <summary>One filter axis as it crossed the seam: its own count, its own names.</summary>
     private sealed class CapturedAxis
     {
@@ -863,7 +881,8 @@ public sealed class AdminP5SubmitArgumentTests
                 captured.UserData = userData;
             });
 
-        AdminCallbacks.DescribeConsumerGroups(IntPtr.Zero, CapturedError(), captured.UserData);
+        FirePerKeyFailures(
+            AdminCallbacks.DescribeConsumerGroups.Invoke, groupIds, captured.UserData);
 
         Assert.NotEmpty(result.DescribedGroups);
         Assert.All(result.DescribedGroups.Values, task => Assert.NotNull(task.Exception));
@@ -1021,7 +1040,8 @@ public sealed class AdminP5SubmitArgumentTests
 
         // ⚠ This RPC's own trampoline, not the consumer one: a submit-level error is OWNED,
         // and routing it through the wrong trampoline is what the split delegate prevents.
-        AdminCallbacks.DescribeClassicGroups(IntPtr.Zero, CapturedError(), captured.UserData);
+        FirePerKeyFailures(
+            AdminCallbacks.DescribeClassicGroups.Invoke, groupIds, captured.UserData);
 
         Assert.NotEmpty(result.DescribedGroups);
         Assert.All(result.DescribedGroups.Values, task => Assert.NotNull(task.Exception));
@@ -1332,7 +1352,8 @@ public sealed class AdminP5SubmitArgumentTests
                 captured.Selections = selections;
             });
 
-        AdminCallbacks.ListConsumerGroupOffsets(IntPtr.Zero, CapturedError(), captured.UserData);
+        FirePerKeyFailures(
+            AdminCallbacks.ListConsumerGroupOffsets.Invoke, captured.GroupIds, captured.UserData);
 
         Assert.NotEmpty(captured.GroupIds);
         Assert.All(

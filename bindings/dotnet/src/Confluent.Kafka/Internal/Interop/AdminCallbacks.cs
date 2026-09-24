@@ -88,34 +88,47 @@ internal static class AdminCallbacks
 
     /// <summary>
     /// The C signature for <c>kafka_admin_AdminClient_create_topics_callback_t</c>:
-    /// <c>void (*)(kafka_admin_CreateTopicsResult_t* result,
-    /// kafka_common_KafkaError_t* error, void* user_data)</c>. Exactly one of the two is
-    /// non-null and the callback owns it. ⚠ A <b>per-topic</b> failure arrives inside
-    /// <paramref name="result"/>, not as <paramref name="error"/>: a non-null
-    /// <paramref name="error"/> means the request could not be submitted at all.
+    /// <c>void (*)(const char* key, kafka_admin_TopicMetadataAndConfig_t* value,
+    /// kafka_common_KafkaError_t* error, void* user_data)</c> — result shape <b>4a</b>,
+    /// fired <b>once per topic</b> as that topic's own future resolves, possibly
+    /// concurrently and in any order.
     /// </summary>
+    /// <remarks>
+    /// ⚠ There is no result root. <paramref name="key"/> is borrowed for the call only;
+    /// exactly one of <paramref name="value"/> / <paramref name="error"/> is non-null and
+    /// both are <b>owned</b> by this callback.
+    /// </remarks>
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-    internal delegate void CreateTopicsCallback(IntPtr result, IntPtr error, IntPtr userData);
+    internal delegate void CreateTopicsCallback(IntPtr key, IntPtr value, IntPtr error, IntPtr userData);
 
     /// <summary>
     /// The C signature for <c>kafka_admin_AdminClient_delete_topics_callback_t</c>:
-    /// <c>void (*)(kafka_admin_DeleteTopicsResult_t* result,
-    /// kafka_common_KafkaError_t* error, void* user_data)</c>. Shared by <b>both</b>
-    /// delete entry points — the by-name and the by-id one — because they produce the same
-    /// result type. ⚠ A <b>per-topic</b> failure arrives inside
-    /// <paramref name="result"/>; a non-null <paramref name="error"/> means the request
-    /// could not be submitted at all.
+    /// <c>void (*)(const char* key, kafka_common_KafkaError_t* error, void* user_data)</c>
+    /// — result shape <b>4b</b>, fired <b>once per topic</b>; a null
+    /// <paramref name="error"/> <em>is</em> the success value. Shared by <b>both</b> delete
+    /// entry points, the by-name and the by-id one.
     /// </summary>
+    /// <remarks>
+    /// ⚠ <paramref name="key"/> is borrowed for the call only (the topic name, or the
+    /// base64 topic id); <paramref name="error"/> is <b>owned</b> by this callback.
+    /// </remarks>
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-    internal delegate void DeleteTopicsCallback(IntPtr result, IntPtr error, IntPtr userData);
+    internal delegate void DeleteTopicsCallback(IntPtr key, IntPtr error, IntPtr userData);
 
     /// <summary>
-    /// The C signature for <c>kafka_admin_AdminClient_describe_topics_callback_t</c>,
-    /// shared by both describe entry points for the same reason as
-    /// <see cref="DeleteTopicsCallback"/>.
+    /// The C signature for <c>kafka_admin_AdminClient_describe_topics_callback_t</c>:
+    /// <c>void (*)(const char* key, kafka_admin_TopicDescription_t* value,
+    /// kafka_common_KafkaError_t* error, void* user_data)</c> — result shape <b>4a</b>,
+    /// fired <b>once per topic</b>. Shared by both describe entry points for the same
+    /// reason as <see cref="DeleteTopicsCallback"/>; by id the key is the base64 topic id.
     /// </summary>
+    /// <remarks>
+    /// ⚠ No result root. <paramref name="key"/> is borrowed for the call only; exactly one
+    /// of <paramref name="value"/> / <paramref name="error"/> is non-null and both are
+    /// <b>owned</b> by this callback.
+    /// </remarks>
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-    internal delegate void DescribeTopicsCallback(IntPtr result, IntPtr error, IntPtr userData);
+    internal delegate void DescribeTopicsCallback(IntPtr key, IntPtr value, IntPtr error, IntPtr userData);
 
     /// <summary>
     /// The C signature for <c>kafka_admin_AdminClient_list_topics_callback_t</c>.
@@ -127,20 +140,31 @@ internal static class AdminCallbacks
     internal delegate void ListTopicsCallback(IntPtr result, IntPtr error, IntPtr userData);
 
     /// <summary>
-    /// The C signature for <c>kafka_admin_AdminClient_create_partitions_callback_t</c>.
-    /// ⚠ A <b>per-topic</b> failure arrives inside <paramref name="result"/>; a non-null
-    /// <paramref name="error"/> means the request could not be submitted at all.
+    /// The C signature for <c>kafka_admin_AdminClient_create_partitions_callback_t</c>:
+    /// <c>void (*)(const char* key, kafka_common_KafkaError_t* error, void* user_data)</c>
+    /// — result shape <b>4b</b>, fired <b>once per topic</b>; a null
+    /// <paramref name="error"/> <em>is</em> the success value.
     /// </summary>
+    /// <remarks>
+    /// ⚠ <paramref name="key"/> is borrowed for the call only;
+    /// <paramref name="error"/> is <b>owned</b> by this callback.
+    /// </remarks>
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-    internal delegate void CreatePartitionsCallback(IntPtr result, IntPtr error, IntPtr userData);
+    internal delegate void CreatePartitionsCallback(IntPtr key, IntPtr error, IntPtr userData);
 
     /// <summary>
-    /// The C signature for <c>kafka_admin_AdminClient_delete_records_callback_t</c>.
-    /// ⚠ A <b>per-partition</b> failure arrives inside <paramref name="result"/>; a
-    /// non-null <paramref name="error"/> means the request could not be submitted at all.
+    /// The C signature for <c>kafka_admin_AdminClient_delete_records_callback_t</c>:
+    /// <c>void (*)(const char* topic, int32_t partition, kafka_admin_DeletedRecords_t* value,
+    /// kafka_common_KafkaError_t* error, void* user_data)</c> — result shape <b>4a</b>,
+    /// fired <b>once per distinct partition</b>, with the key decomposed into two scalars.
     /// </summary>
+    /// <remarks>
+    /// ⚠ No result root. <paramref name="topic"/> is borrowed for the call only;
+    /// <paramref name="value"/> and <paramref name="error"/> are both <b>owned</b>.
+    /// </remarks>
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-    internal delegate void DeleteRecordsCallback(IntPtr result, IntPtr error, IntPtr userData);
+    internal delegate void DeleteRecordsCallback(
+        IntPtr topic, int partition, IntPtr value, IntPtr error, IntPtr userData);
 
     /// <summary>
     /// The C signature for <c>kafka_admin_AdminClient_describe_cluster_callback_t</c>
@@ -171,44 +195,84 @@ internal static class AdminCallbacks
     internal delegate void ListClientMetricsResourcesCallback(IntPtr result, IntPtr error, IntPtr userData);
 
     /// <summary>
-    /// The C signature for <c>kafka_admin_AdminClient_describe_configs_callback_t</c>.
-    /// ⚠ A <b>per-resource</b> failure arrives inside <paramref name="result"/>, borrowed;
-    /// a non-null <paramref name="error"/> means the request could not be submitted at all
-    /// and is owned.
+    /// The C signature for <c>kafka_admin_AdminClient_describe_configs_callback_t</c>:
+    /// <c>void (*)(int32_t resource_type, const char* resource_name,
+    /// kafka_admin_Config_t* value, kafka_common_KafkaError_t* error, void* user_data)</c>
+    /// — result shape <b>4a</b>, fired <b>once per distinct resource</b>. The only CP3 key
+    /// that is composite: the <see cref="ConfigResource"/> Java keys the map by is
+    /// reassembled from the two leading arguments.
     /// </summary>
+    /// <remarks>
+    /// ⚠ No result root. <paramref name="resourceName"/> is borrowed for the call only;
+    /// exactly one of <paramref name="value"/> / <paramref name="error"/> is non-null and
+    /// both are <b>owned</b> by this callback.
+    /// </remarks>
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-    internal delegate void DescribeConfigsCallback(IntPtr result, IntPtr error, IntPtr userData);
+    internal delegate void DescribeConfigsCallback(
+        int resourceType, IntPtr resourceName, IntPtr value, IntPtr error, IntPtr userData);
 
     /// <summary>
     /// The C signature for
-    /// <c>kafka_admin_AdminClient_incremental_alter_configs_callback_t</c>.
-    /// ⚠ A <b>per-resource</b> failure arrives inside <paramref name="result"/>; a non-null
-    /// <paramref name="error"/> means the request could not be submitted at all — which for
-    /// this RPC includes an <b>unknown op-type code</b>, delivered on the inline path.
+    /// <c>kafka_admin_AdminClient_incremental_alter_configs_callback_t</c>:
+    /// <c>void (*)(int32_t resource_type, const char* resource_name,
+    /// kafka_common_KafkaError_t* error, void* user_data)</c> — result shape <b>4b</b>,
+    /// fired <b>once per distinct resource named across the input rows</b> (not once per
+    /// row); a null <paramref name="error"/> <em>is</em> the success value.
     /// </summary>
+    /// <remarks>
+    /// ⚠ <paramref name="resourceName"/> is borrowed for the call only;
+    /// <paramref name="error"/> is <b>owned</b> by this callback. An <b>unknown op-type
+    /// code</b> still fans out over every named resource, on the inline path.
+    /// </remarks>
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-    internal delegate void IncrementalAlterConfigsCallback(IntPtr result, IntPtr error, IntPtr userData);
+    internal delegate void IncrementalAlterConfigsCallback(
+        int resourceType, IntPtr resourceName, IntPtr error, IntPtr userData);
 
     /// <summary>
-    /// The C signature for <c>kafka_admin_AdminClient_describe_log_dirs_callback_t</c>.
-    /// ⚠ A <b>per-broker</b> failure arrives inside <paramref name="result"/>, borrowed —
-    /// and so does a <b>per-log-directory</b> one, which is a different thing that does not
-    /// fault anything. A non-null <paramref name="error"/> is owned.
+    /// The C signature for <c>kafka_admin_AdminClient_describe_log_dirs_callback_t</c>:
+    /// <c>void (*)(int32_t broker, kafka_admin_LogDirDescriptionMap_t* value,
+    /// kafka_common_KafkaError_t* error, void* user_data)</c> — result shape <b>4a</b>,
+    /// fired <b>once per distinct broker</b>, with a bare scalar key.
     /// </summary>
+    /// <remarks>
+    /// ⚠ No result root; <paramref name="value"/> and <paramref name="error"/> are both
+    /// <b>owned</b> by this callback. A <b>per-log-directory</b> error still arrives inside
+    /// <paramref name="value"/> and does not fault anything.
+    /// </remarks>
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-    internal delegate void DescribeLogDirsCallback(IntPtr result, IntPtr error, IntPtr userData);
+    internal delegate void DescribeLogDirsCallback(int broker, IntPtr value, IntPtr error, IntPtr userData);
 
     /// <summary>
     /// The C signature for
-    /// <c>kafka_admin_AdminClient_alter_replica_log_dirs_callback_t</c>. ⚠ A
-    /// <b>per-replica</b> failure arrives inside <paramref name="result"/>, borrowed.
+    /// <c>kafka_admin_AdminClient_alter_replica_log_dirs_callback_t</c>:
+    /// <c>void (*)(const char* topic, int32_t partition, int32_t broker_id,
+    /// kafka_common_KafkaError_t* error, void* user_data)</c> — result shape <b>4b</b>,
+    /// fired <b>once per replica</b>; a null <paramref name="error"/> <em>is</em> the
+    /// success value.
     /// </summary>
+    /// <remarks>
+    /// ⚠ <paramref name="topic"/> is borrowed for the call only;
+    /// <paramref name="error"/> is <b>owned</b> by this callback.
+    /// </remarks>
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-    internal delegate void AlterReplicaLogDirsCallback(IntPtr result, IntPtr error, IntPtr userData);
+    internal delegate void AlterReplicaLogDirsCallback(
+        IntPtr topic, int partition, int brokerId, IntPtr error, IntPtr userData);
 
-    /// <inheritdoc cref="AlterReplicaLogDirsCallback"/>
+    /// <summary>
+    /// The C signature for
+    /// <c>kafka_admin_AdminClient_describe_replica_log_dirs_callback_t</c>:
+    /// <c>void (*)(const char* topic, int32_t partition, int32_t broker_id,
+    /// kafka_admin_ReplicaLogDirInfo_t* value, kafka_common_KafkaError_t* error,
+    /// void* user_data)</c> — result shape <b>4a</b>, fired <b>once per distinct replica</b>,
+    /// with the <c>TopicPartitionReplica</c> key decomposed into three scalars.
+    /// </summary>
+    /// <remarks>
+    /// ⚠ No result root. <paramref name="topic"/> is borrowed for the call only;
+    /// <paramref name="value"/> and <paramref name="error"/> are both <b>owned</b>.
+    /// </remarks>
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-    internal delegate void DescribeReplicaLogDirsCallback(IntPtr result, IntPtr error, IntPtr userData);
+    internal delegate void DescribeReplicaLogDirsCallback(
+        IntPtr topic, int partition, int brokerId, IntPtr value, IntPtr error, IntPtr userData);
 
     /// <summary>
     /// The C signature for <c>kafka_admin_AdminClient_elect_leaders_callback_t</c>
@@ -225,44 +289,40 @@ internal static class AdminCallbacks
     /// <summary>
     /// The C signature for
     /// <c>kafka_admin_AdminClient_alter_consumer_group_offsets_callback_t</c> (result
-    /// shape 3 — one aggregate future over the map, the same shape as
-    /// <see cref="ElectLeadersCallback"/>).
-    /// ⚠⚠ <paramref name="error"/> is the <b>only</b> failure channel here, even though
-    /// <c>kafka_admin_AlterConsumerGroupOffsetsResult_t</c> does declare a <c>get_error</c>:
-    /// that accessor carries the map's per-partition <em>value</em>
-    /// (<see cref="AlterConsumerGroupOffsetsOptionalError"/>), not a failure. A non-null
-    /// <paramref name="error"/> means the request could not be submitted at all, and is
-    /// <b>owned</b>.
+    /// shape <b>4c</b> — one independent callback per partition fanned in to Java's
+    /// <b>single</b> <c>KafkaFuture&lt;Map&lt;TopicPartition, Errors&gt;&gt;</c>).
+    /// ⚠⚠ <paramref name="error"/> is that partition's map <b>VALUE</b>, not a fault, and
+    /// is <b>owned</b>. <paramref name="topic"/> is borrowed for the call only.
     /// </summary>
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-    internal delegate void AlterConsumerGroupOffsetsCallback(IntPtr result, IntPtr error, IntPtr userData);
+    internal delegate void AlterConsumerGroupOffsetsCallback(
+        IntPtr topic, int partition, IntPtr error, IntPtr userData);
 
     /// <summary>
     /// The C signature for
-    /// <c>kafka_admin_AdminClient_delete_consumer_group_offsets_callback_t</c> (result
-    /// shape 3 — one aggregate future over the map, the same shape as
-    /// <see cref="AlterConsumerGroupOffsetsCallback"/>).
-    /// ⚠⚠ <paramref name="error"/> is the <b>only</b> failure channel here, even though
-    /// <c>kafka_admin_DeleteConsumerGroupOffsetsResult_t</c> does declare a <c>get_error</c>:
-    /// that accessor carries the map's per-partition <em>value</em>
-    /// (<see cref="DeleteConsumerGroupOffsetsOptionalError"/>), not a failure. A non-null
-    /// <paramref name="error"/> means the request could not be submitted at all, and is
-    /// <b>owned</b>.
+    /// <c>kafka_admin_AdminClient_delete_consumer_group_offsets_callback_t</c> — result
+    /// shape <b>4c</b>, identical to <see cref="AlterConsumerGroupOffsetsCallback"/>.
     /// </summary>
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-    internal delegate void DeleteConsumerGroupOffsetsCallback(IntPtr result, IntPtr error, IntPtr userData);
+    internal delegate void DeleteConsumerGroupOffsetsCallback(
+        IntPtr topic, int partition, IntPtr error, IntPtr userData);
 
     /// <summary>
     /// The C signature for
-    /// <c>kafka_admin_AdminClient_alter_partition_reassignments_callback_t</c> (result
-    /// shape 2). ⚠ A <b>per-partition</b> failure arrives inside
-    /// <paramref name="result"/>, borrowed; a non-null <paramref name="error"/> means the
-    /// request could not be submitted at all — which for this RPC includes a
-    /// <b>non-cancelled entry with no target replicas</b>, delivered on the inline path —
-    /// and is owned.
+    /// <c>kafka_admin_AdminClient_alter_partition_reassignments_callback_t</c>:
+    /// <c>void (*)(const char* topic, int32_t partition,
+    /// kafka_common_KafkaError_t* error, void* user_data)</c> — result shape <b>4b</b>,
+    /// fired <b>once per partition</b>; a null <paramref name="error"/> <em>is</em> the
+    /// success value.
     /// </summary>
+    /// <remarks>
+    /// ⚠ <paramref name="topic"/> is borrowed for the call only;
+    /// <paramref name="error"/> is <b>owned</b> by this callback. A <b>non-cancelled entry
+    /// with no target replicas</b> fans out over every key, on the inline path.
+    /// </remarks>
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-    internal delegate void AlterPartitionReassignmentsCallback(IntPtr result, IntPtr error, IntPtr userData);
+    internal delegate void AlterPartitionReassignmentsCallback(
+        IntPtr topic, int partition, IntPtr error, IntPtr userData);
 
     /// <summary>
     /// The C signature for
@@ -275,15 +335,21 @@ internal static class AdminCallbacks
     internal delegate void ListPartitionReassignmentsCallback(IntPtr result, IntPtr error, IntPtr userData);
 
     /// <summary>
-    /// The C signature for <c>kafka_admin_AdminClient_list_offsets_callback_t</c> (result
-    /// shape 1). ⚠ A <b>per-partition</b> failure arrives inside
-    /// <paramref name="result"/>, borrowed; a non-null <paramref name="error"/> means the
-    /// request could not be submitted at all — which for this RPC includes an unknown
-    /// isolation level or an unrecognised offset sentinel, both delivered on the inline
-    /// path — and is <b>owned</b>.
+    /// The C signature for <c>kafka_admin_AdminClient_list_offsets_callback_t</c>:
+    /// <c>void (*)(const char* topic, int32_t partition,
+    /// kafka_admin_ListOffsetsResultInfo_t* value, kafka_common_KafkaError_t* error,
+    /// void* user_data)</c> — result shape <b>4a</b>, fired <b>once per distinct
+    /// partition</b>, with the key decomposed into two scalars.
     /// </summary>
+    /// <remarks>
+    /// ⚠ No result root. <paramref name="topic"/> is borrowed for the call only;
+    /// <paramref name="value"/> and <paramref name="error"/> are both <b>owned</b>. An
+    /// unknown isolation level or an unrecognised offset sentinel still fails the whole
+    /// call, delivered inline as that same owned per-key error for every key.
+    /// </remarks>
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-    internal delegate void ListOffsetsCallback(IntPtr result, IntPtr error, IntPtr userData);
+    internal delegate void ListOffsetsCallback(
+        IntPtr topic, int partition, IntPtr value, IntPtr error, IntPtr userData);
 
     /// <summary>
     /// The C signature for <c>kafka_admin_AdminClient_list_groups_callback_t</c> (result
@@ -314,103 +380,119 @@ internal static class AdminCallbacks
 
     /// <summary>
     /// The C signature for
-    /// <c>kafka_admin_AdminClient_describe_consumer_groups_callback_t</c> (result shape 1).
-    /// ⚠ A <b>per-group</b> failure arrives inside <paramref name="result"/>
-    /// (<c>kafka_admin_DescribeConsumerGroupsResult_get_error</c>), borrowed; a non-null
-    /// <paramref name="error"/> means the request could not be submitted at all and is
-    /// <b>owned</b>.
+    /// <c>kafka_admin_AdminClient_describe_consumer_groups_callback_t</c>:
+    /// <c>void (*)(const char* group_id, kafka_admin_ConsumerGroupDescription_t* value,
+    /// kafka_common_KafkaError_t* error, void* user_data)</c> — result shape <b>4a</b>,
+    /// fired <b>once per group</b>.
     /// </summary>
     /// <remarks>
     /// Its own delegate type, for the reason stated on
     /// <see cref="ListConsumerGroupsCallback"/>: each is the managed spelling of one C
-    /// typedef, and the result roots they carry are different native types destroyed by
-    /// different functions. Sharing one would let a <c>describeConsumerGroups</c> root
+    /// typedef, and the values they carry are different native types destroyed by
+    /// different functions. Sharing one would let a <c>describeConsumerGroups</c> value
     /// reach another RPC's destroy.
+    /// ⚠ No result root. <paramref name="key"/> is borrowed for the call only;
+    /// <paramref name="value"/> and <paramref name="error"/> are both <b>owned</b>.
     /// </remarks>
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-    internal delegate void DescribeConsumerGroupsCallback(IntPtr result, IntPtr error, IntPtr userData);
+    internal delegate void DescribeConsumerGroupsCallback(
+        IntPtr key, IntPtr value, IntPtr error, IntPtr userData);
 
     /// <summary>
     /// The C signature for
-    /// <c>kafka_admin_AdminClient_describe_classic_groups_callback_t</c> (result shape 1).
-    /// ⚠ A <b>per-group</b> failure arrives inside <paramref name="result"/>
-    /// (<c>kafka_admin_DescribeClassicGroupsResult_get_error</c>), borrowed; a non-null
-    /// <paramref name="error"/> means the request could not be submitted at all and is
-    /// <b>owned</b>.
+    /// <c>kafka_admin_AdminClient_describe_classic_groups_callback_t</c>:
+    /// <c>void (*)(const char* group_id, kafka_admin_ClassicGroupDescription_t* value,
+    /// kafka_common_KafkaError_t* error, void* user_data)</c> — result shape <b>4a</b>,
+    /// fired <b>once per group</b>.
     /// </summary>
     /// <remarks>
     /// Its own delegate type, for the reason stated on
-    /// <see cref="ListConsumerGroupsCallback"/>: each is the managed spelling of one C
-    /// typedef, and the result roots they carry are different native types destroyed by
-    /// different functions. Sharing the structurally identical
-    /// <see cref="DescribeConsumerGroupsCallback"/> would let a <c>describeClassicGroups</c>
-    /// root reach <c>kafka_admin_DescribeConsumerGroupsResult_destroy</c>.
+    /// <see cref="ListConsumerGroupsCallback"/>. Sharing the structurally identical
+    /// <see cref="DescribeConsumerGroupsCallback"/> would let a
+    /// <c>ClassicGroupDescription_t</c> reach
+    /// <c>kafka_admin_ConsumerGroupDescription_destroy</c>.
+    /// ⚠ No result root. <paramref name="key"/> is borrowed for the call only;
+    /// <paramref name="value"/> and <paramref name="error"/> are both <b>owned</b>.
     /// </remarks>
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-    internal delegate void DescribeClassicGroupsCallback(IntPtr result, IntPtr error, IntPtr userData);
+    internal delegate void DescribeClassicGroupsCallback(
+        IntPtr key, IntPtr value, IntPtr error, IntPtr userData);
 
     /// <summary>
     /// The C signature for
-    /// <c>kafka_admin_AdminClient_list_consumer_group_offsets_callback_t</c> (result shape 1).
-    /// ⚠ A <b>per-group</b> failure arrives inside <paramref name="result"/>
-    /// (<c>kafka_admin_ListConsumerGroupOffsetsResult_get_error</c>), borrowed; a non-null
-    /// <paramref name="error"/> means the request could not be submitted at all and is
-    /// <b>owned</b>.
+    /// <c>kafka_admin_AdminClient_list_consumer_group_offsets_callback_t</c>:
+    /// <c>void (*)(const char* group_id, kafka_admin_OffsetAndMetadataMap_t* value,
+    /// kafka_common_KafkaError_t* error, void* user_data)</c> — result shape <b>4a</b>,
+    /// fired <b>once per group</b>.
     /// </summary>
     /// <remarks>
     /// Its own delegate type, for the reason stated on
-    /// <see cref="ListConsumerGroupsCallback"/>: each is the managed spelling of one C
-    /// typedef, and the result roots they carry are different native types destroyed by
-    /// different functions. Sharing a structurally identical sibling would let a
-    /// <c>listConsumerGroupOffsets</c> root reach some other RPC's destroy.
+    /// <see cref="ListConsumerGroupsCallback"/>: sharing a structurally identical sibling
+    /// would let an <c>OffsetAndMetadataMap_t</c> reach some other RPC's destroy.
+    /// ⚠ No result root. <paramref name="key"/> is borrowed for the call only;
+    /// <paramref name="value"/> and <paramref name="error"/> are both <b>owned</b>.
     /// </remarks>
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-    internal delegate void ListConsumerGroupOffsetsCallback(IntPtr result, IntPtr error, IntPtr userData);
+    internal delegate void ListConsumerGroupOffsetsCallback(
+        IntPtr key, IntPtr value, IntPtr error, IntPtr userData);
 
     /// <summary>
     /// The C signature for <c>kafka_admin_AdminClient_delete_consumer_groups_callback_t</c>
-    /// (result shape 2, like <see cref="DeleteTopicsCallback"/>). ⚠ A <b>per-group</b>
-    /// failure arrives inside <paramref name="result"/>, borrowed; a non-null
-    /// <paramref name="error"/> means the request could not be submitted at all and is
-    /// <b>owned</b>.
+    /// — result shape <b>4b</b>, byte-identical to <see cref="DeleteTopicsCallback"/>,
+    /// fired <b>once per group</b>; a null <paramref name="error"/> <em>is</em> the success
+    /// value.
     /// </summary>
+    /// <remarks>
+    /// ⚠ <paramref name="key"/> is borrowed for the call only;
+    /// <paramref name="error"/> is <b>owned</b> by this callback.
+    /// </remarks>
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-    internal delegate void DeleteConsumerGroupsCallback(IntPtr result, IntPtr error, IntPtr userData);
+    internal delegate void DeleteConsumerGroupsCallback(IntPtr key, IntPtr error, IntPtr userData);
 
     /// <summary>
     /// The C signature for
-    /// <c>kafka_admin_AdminClient_remove_members_from_consumer_group_callback_t</c> (result
-    /// shape 3 — one aggregate future over the whole map, the same shape as
-    /// <see cref="AlterConsumerGroupOffsetsCallback"/>).
-    /// ⚠⚠ <paramref name="error"/> is the <b>only</b> failure channel here, even though
-    /// <c>kafka_admin_RemoveMembersFromConsumerGroupResult_t</c> does declare a
-    /// <c>get_error</c>: that accessor carries the map's per-member <em>value</em>
-    /// (<see cref="RemoveMembersFromConsumerGroupOptionalError"/>), not a failure. A
-    /// non-null <paramref name="error"/> means the request could not be submitted at all,
-    /// and is <b>owned</b>. In <b>removeAll</b> mode the result handle always has zero
-    /// rows — see <see cref="NativeMethods.AdminClientRemoveMembersFromConsumerGroupAsync"/>.
+    /// <c>kafka_admin_AdminClient_remove_members_from_consumer_group_callback_t</c> — result
+    /// shape <b>4c</b>, like <see cref="AlterConsumerGroupOffsetsCallback"/>, with a
+    /// <b>mode-dependent</b> key.
     /// </summary>
+    /// <remarks>
+    /// ⚠⚠ <b>Same arity as the aggregate callback it replaced — only the first parameter's
+    /// meaning changed</b> (result root → key), so the compiler cannot catch a stale wiring.
+    /// Non-removeAll: one call per distinct <c>group.instance.id</c>, whose
+    /// <paramref name="error"/> is that member's map <b>VALUE</b>. removeAll: exactly one
+    /// call with a <b>NULL</b> <paramref name="groupInstanceId"/> carrying the whole
+    /// operation's outcome — a null error resolves the aggregate task with an <b>empty</b>
+    /// map, a non-null one <b>faults</b> it (§3.0.3; no sentinel key is ever mapped).
+    /// <paramref name="error"/> is <b>owned</b> on both paths.
+    /// </remarks>
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-    internal delegate void RemoveMembersFromConsumerGroupCallback(IntPtr result, IntPtr error, IntPtr userData);
+    internal delegate void RemoveMembersFromConsumerGroupCallback(
+        IntPtr groupInstanceId, IntPtr error, IntPtr userData);
 
     /// <summary>
-    /// The C signature for <c>kafka_admin_AdminClient_create_acls_callback_t</c>.
-    /// ⚠ A <b>per-binding</b> failure arrives inside <paramref name="result"/>, borrowed; a
-    /// non-null <paramref name="error"/> means the request could not be submitted at all and
-    /// is <b>owned</b>. This callback reaches the inline path for ordinary bad input — see
-    /// <see cref="NativeMethods.AdminClientCreateAclsAsync"/>.
+    /// The C signature for <c>kafka_admin_AdminClient_create_acls_callback_t</c>:
+    /// <c>void (*)(kafka_common_AclBinding_t* binding, kafka_common_KafkaError_t* error,
+    /// void* user_data)</c> — result shape <b>4b</b>, fired <b>exactly <c>count</c>
+    /// times</b>; a null <paramref name="error"/> <em>is</em> the success value.
     /// </summary>
+    /// <remarks>
+    /// ⚠ <b>Both</b> <paramref name="binding"/> and <paramref name="error"/> are
+    /// <b>owned</b> by this callback — one of the three RPCs whose key must be destroyed.
+    /// A binding the core rejects locally still arrives here with an
+    /// <c>INVALID_REQUEST</c> error, on the inline path.
+    /// </remarks>
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-    internal delegate void CreateAclsCallback(IntPtr result, IntPtr error, IntPtr userData);
+    internal delegate void CreateAclsCallback(IntPtr binding, IntPtr error, IntPtr userData);
 
     /// <summary>
     /// The C signature for <c>kafka_admin_AdminClient_delete_acls_callback_t</c>.
-    /// ⚠ A <b>per-filter</b> failure arrives inside <paramref name="result"/>, borrowed; a
-    /// non-null <paramref name="error"/> means the request could not be submitted at all and
-    /// is <b>owned</b>.
+    /// ⚠ No result root: <paramref name="filter"/>, <paramref name="value"/> and
+    /// <paramref name="error"/> are <b>all three owned</b> by this callback — the key
+    /// included, which no other per-key RPC has.
     /// </summary>
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-    internal delegate void DeleteAclsCallback(IntPtr result, IntPtr error, IntPtr userData);
+    internal delegate void DeleteAclsCallback(
+        IntPtr filter, IntPtr value, IntPtr error, IntPtr userData);
 
     /// <summary>
     /// The C signature for <c>kafka_admin_AdminClient_describe_acls_callback_t</c>.
@@ -431,13 +513,18 @@ internal static class AdminCallbacks
     internal delegate void DescribeClientQuotasCallback(IntPtr result, IntPtr error, IntPtr userData);
 
     /// <summary>
-    /// The C signature for <c>kafka_admin_AdminClient_alter_client_quotas_callback_t</c>.
-    /// ⚠ A <b>per-entity</b> failure arrives inside <paramref name="result"/>, borrowed; a
-    /// non-null <paramref name="error"/> means the request could not be submitted at all and
-    /// is <b>owned</b> (<c>confluent_kafka.h:1123-1131</c>).
+    /// The C signature for <c>kafka_admin_AdminClient_alter_client_quotas_callback_t</c>:
+    /// <c>void (*)(kafka_common_ClientQuotaEntity_t* entity,
+    /// kafka_common_KafkaError_t* error, void* user_data)</c> — result shape <b>4b</b>,
+    /// fired <b>once per entity</b>; a null <paramref name="error"/> <em>is</em> the
+    /// success value.
     /// </summary>
+    /// <remarks>
+    /// ⚠ <b>Both</b> <paramref name="entity"/> and <paramref name="error"/> are
+    /// <b>owned</b> by this callback — one of the three RPCs whose key must be destroyed.
+    /// </remarks>
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-    internal delegate void AlterClientQuotasCallback(IntPtr result, IntPtr error, IntPtr userData);
+    internal delegate void AlterClientQuotasCallback(IntPtr entity, IntPtr error, IntPtr userData);
 
     /// <summary>
     /// The single rooted instance passed to every <c>close_async</c> submission. Rooted
@@ -450,21 +537,6 @@ internal static class AdminCallbacks
     /// submission.
     /// </summary>
     internal static readonly CreateTopicsCallback CreateTopics = OnCreateTopics;
-
-    /// <summary>
-    /// <c>createTopics</c>' universal accessors — <c>count</c> and the borrowed per-key
-    /// <c>get_error</c>. Built once, so walking a result allocates no delegates.
-    /// </summary>
-    /// <remarks>
-    /// Internal rather than private so a test can walk a real result with the <b>same</b>
-    /// accessor set production uses (<c>definition-of-done.md</c> §12): a test that
-    /// assembled its own could keep passing after production started pointing at a
-    /// different function.
-    /// </remarks>
-    internal static readonly KeyedResultMarshal.Accessors CreateTopicsAccessors =
-        new KeyedResultMarshal.Accessors(
-            NativeMethods.CreateTopicsResultCount,
-            NativeMethods.CreateTopicsResultGetError);
 
     /// <summary>
     /// Builds a per-key reader over a <b>borrowed</b> <c>*Result_get_error(result, i)</c>,
@@ -526,16 +598,6 @@ internal static class AdminCallbacks
             KeyedResultMarshal.ReadStringKey(getTopic(result, index)), getPartition(result, index));
 
     /// <summary>
-    /// <c>createTopics</c>' key reader — Java keys this result by topic <b>name</b>
-    /// (<c>Map&lt;String, KafkaFuture&lt;Void&gt;&gt; values()</c>), so the borrowed
-    /// <c>get_key(i)</c> string is the key with no parsing. Hoisted for the same reason
-    /// as <see cref="CreateTopicsAccessors"/>: no delegate is allocated per walk.
-    /// </summary>
-    internal static readonly Func<IntPtr, int, string> CreateTopicsKey =
-        static (result, index) =>
-            KeyedResultMarshal.ReadStringKey(NativeMethods.CreateTopicsResultGetKey(result, index));
-
-    /// <summary>
     /// <c>createTopics</c>' per-key value reader: <c>get_value(i)</c> yields a
     /// <b>borrowed child handle</b>, which is copied out into an owned managed object
     /// before the root dies. Hoisted for the same reason as the accessors — and shared
@@ -544,6 +606,127 @@ internal static class AdminCallbacks
     internal static readonly Func<IntPtr, int, TopicMetadataAndConfig> TopicMetadataAndConfigValue =
         static (result, index) =>
             TopicMetadataAndConfigMarshal.CopyOut(NativeMethods.CreateTopicsResultGetValue(result, index));
+
+    /// <summary>
+    /// The <b>shape-4</b> key reader: the callback's <c>key</c> parameter <em>is</em> the
+    /// borrowed <c>const char*</c>, with no result root and no index to go through.
+    /// Hoisted so a per-key callback allocates no delegate.
+    /// </summary>
+    private static readonly Func<IntPtr, string> s_stringKey = KeyedResultMarshal.ReadStringKey;
+
+    /// <summary>
+    /// <c>createTopics</c>' <b>shape-4a</b> value reader. The same copy-out as
+    /// <see cref="TopicMetadataAndConfigValue"/>, over the <b>owned</b> handle the
+    /// callback is handed directly instead of a borrowed child of a result root.
+    /// </summary>
+    internal static readonly Func<IntPtr, TopicMetadataAndConfig> TopicMetadataAndConfigPerKeyValue =
+        TopicMetadataAndConfigMarshal.CopyOut;
+
+    /// <summary>
+    /// The <b>shape-4</b> by-id key reader: the callback's <c>key</c> is the same base64
+    /// topic id the request supplied, parsed straight back into a <see cref="Uuid"/>.
+    /// </summary>
+    private static readonly Func<IntPtr, Uuid> s_uuidKey =
+        static key => Uuid.Parse(KeyedResultMarshal.ReadStringKey(key));
+
+    /// <summary>
+    /// The <b>shape-4</b> scalar key reader — <c>describeLogDirs</c>' broker id arrives as
+    /// an <c>int32_t</c> argument, so there is nothing to copy out.
+    /// </summary>
+    private static readonly Func<int, int> s_int32Key = static key => key;
+
+    /// <summary>
+    /// The <b>shape-4</b> <b>composite</b> key reader: <c>describeConfigs</c>' callback
+    /// delivers the key as <c>(resource_type, resource_name)</c>, reassembled into the
+    /// <see cref="ConfigResource"/> Java keys the map by. The type id goes through
+    /// <see cref="ConfigResourceMarshal.TypeFromId"/> so an unknown id degrades as Java's
+    /// <c>Type.forId</c> does.
+    /// </summary>
+    /// <remarks>
+    /// The two parts travel in a <see cref="KeyValuePair{TKey, TValue}"/> so the reader can
+    /// stay a hoisted static — a lambda closing over the callback's own arguments would
+    /// allocate a delegate per key.
+    /// </remarks>
+    private static readonly Func<KeyValuePair<int, IntPtr>, ConfigResource> s_configResourceKey =
+        static key => new ConfigResource(
+            ConfigResourceMarshal.TypeFromId(key.Key), KeyedResultMarshal.ReadStringKey(key.Value));
+
+    /// <summary>
+    /// <c>describeTopics</c>' <b>shape-4a</b> value reader, over the <b>owned</b> handle the
+    /// callback is handed directly instead of a borrowed child of a result root.
+    /// </summary>
+    internal static readonly Func<IntPtr, TopicDescription> TopicDescriptionPerKeyValue =
+        TopicDescriptionMarshal.CopyOut;
+
+    /// <inheritdoc cref="TopicDescriptionPerKeyValue"/>
+    internal static readonly Func<IntPtr, Config> ConfigPerKeyValue = ConfigMarshal.CopyOut;
+
+    /// <inheritdoc cref="TopicDescriptionPerKeyValue"/>
+    internal static readonly Func<IntPtr, IReadOnlyDictionary<string, LogDirDescription>>
+        LogDirDescriptionsPerKeyValue = LogDirMarshal.CopyOutMap;
+
+    /// <summary>
+    /// The <b>shape-4</b> key source for the partition- and replica-keyed RPCs, whose key
+    /// arrives decomposed into two or three scalar arguments.
+    /// </summary>
+    /// <remarks>
+    /// A named struct rather than nested <see cref="KeyValuePair{TKey, TValue}"/>s, for the
+    /// same reason <see cref="s_configResourceKey"/> uses one pair: it keeps the reader a
+    /// hoisted static instead of a per-key closure. <see cref="BrokerId"/> is unused by the
+    /// two-part partition keys.
+    /// </remarks>
+    private readonly struct PartitionKeySource
+    {
+        internal PartitionKeySource(IntPtr topic, int partition, int brokerId = 0)
+        {
+            Topic = topic;
+            Partition = partition;
+            BrokerId = brokerId;
+        }
+
+        /// <summary>The borrowed topic pointer, valid for the callback only.</summary>
+        internal IntPtr Topic { get; }
+
+        internal int Partition { get; }
+
+        internal int BrokerId { get; }
+    }
+
+    /// <summary>
+    /// The <b>shape-4</b> <c>(topic, partition)</c> key reader, reassembling the
+    /// <see cref="TopicPartition"/> Java keys the map by.
+    /// </summary>
+    private static readonly Func<PartitionKeySource, TopicPartition> s_topicPartitionKey =
+        static key => new TopicPartition(KeyedResultMarshal.ReadStringKey(key.Topic), key.Partition);
+
+    /// <summary>
+    /// The <b>shape-4</b> <c>(topic, partition, broker)</c> key reader, reassembling the
+    /// <see cref="TopicPartitionReplica"/> Java keys the map by.
+    /// </summary>
+    private static readonly Func<PartitionKeySource, TopicPartitionReplica> s_replicaKey =
+        static key => new TopicPartitionReplica(
+            KeyedResultMarshal.ReadStringKey(key.Topic), key.Partition, key.BrokerId);
+
+    /// <summary>
+    /// <c>deleteRecords</c>' <b>shape-4a</b> value reader: the low watermark is read off
+    /// the owned per-key handle, so the <c>-1</c> overload the flattened result had
+    /// ("that partition failed" / "index out of range") cannot arise — a failing key
+    /// arrives with a NULL value and a non-null error instead.
+    /// </summary>
+    internal static readonly Func<IntPtr, DeletedRecords> DeletedRecordsPerKeyValue =
+        static value => new DeletedRecords(NativeMethods.DeletedRecordsLowWatermark(value));
+
+    /// <inheritdoc cref="TopicDescriptionPerKeyValue"/>
+    internal static readonly Func<IntPtr, DescribeReplicaLogDirsResult.ReplicaLogDirInfo>
+        ReplicaLogDirInfoPerKeyValue = LogDirMarshal.CopyOutReplicaInfo;
+
+    /// <inheritdoc cref="TopicDescriptionPerKeyValue"/>
+    internal static readonly Func<IntPtr, ListOffsetsResult.ListOffsetsResultInfo>
+        ListOffsetsInfoPerKeyValue =
+            static value => ListOffsetsResultInfoMarshal.CopyOut(value)
+                ?? throw new KafkaException(
+                    "The listOffsets result produced no offset information for a partition that "
+                    + "reported no error.");
 
     /// <summary>
     /// The single rooted instance passed to <b>both</b> <c>delete_topics_async</c> and
@@ -584,63 +767,6 @@ internal static class AdminCallbacks
     internal static readonly DeleteRecordsCallback DeleteRecords = OnDeleteRecords;
 
     /// <summary>
-    /// <c>deleteTopics</c>' universal accessors. Result <b>shape 2</b>: the ABI declares
-    /// no <c>DeleteTopicsResult_get_value</c>, because Java's per-key future is
-    /// <c>KafkaFuture&lt;Void&gt;</c> and a null error <em>is</em> the success value —
-    /// which is stated by routing through the value-less <c>Complete</c> overload, not by
-    /// nulling anything here.
-    /// </summary>
-    internal static readonly KeyedResultMarshal.Accessors DeleteTopicsAccessors =
-        new KeyedResultMarshal.Accessors(
-            NativeMethods.DeleteTopicsResultCount,
-            NativeMethods.DeleteTopicsResultGetError);
-
-    /// <summary>
-    /// <c>describeTopics</c>' universal accessors — result shape 1 (a value per key).
-    /// </summary>
-    internal static readonly KeyedResultMarshal.Accessors DescribeTopicsAccessors =
-        new KeyedResultMarshal.Accessors(
-            NativeMethods.DescribeTopicsResultCount,
-            NativeMethods.DescribeTopicsResultGetError);
-
-    /// <summary>
-    /// <c>deleteTopics</c>' by-<b>name</b> key reader: the borrowed <c>get_key(i)</c>
-    /// string is the key, as it is for <c>createTopics</c>.
-    /// </summary>
-    internal static readonly Func<IntPtr, int, string> DeleteTopicsNameKey =
-        static (result, index) =>
-            KeyedResultMarshal.ReadStringKey(NativeMethods.DeleteTopicsResultGetKey(result, index));
-
-    /// <summary>
-    /// <c>deleteTopics</c>' by-<b>id</b> key reader — the other half of the base64
-    /// topic-id round trip. The header is explicit that "result keys are the same base64"
-    /// strings the request supplied, so the key is <c>get_key(i)</c> parsed back through
-    /// <see cref="Uuid.Parse"/>; a caller who passed <c>Uuid</c>s gets <c>Uuid</c>s back.
-    /// This is what <c>KeyedAdminOperation</c>'s generic key exists for.
-    /// </summary>
-    internal static readonly Func<IntPtr, int, Uuid> DeleteTopicsIdKey =
-        static (result, index) =>
-            Uuid.Parse(KeyedResultMarshal.ReadStringKey(NativeMethods.DeleteTopicsResultGetKey(result, index)));
-
-    /// <inheritdoc cref="DeleteTopicsNameKey"/>
-    internal static readonly Func<IntPtr, int, string> DescribeTopicsNameKey =
-        static (result, index) =>
-            KeyedResultMarshal.ReadStringKey(NativeMethods.DescribeTopicsResultGetKey(result, index));
-
-    /// <inheritdoc cref="DeleteTopicsIdKey"/>
-    internal static readonly Func<IntPtr, int, Uuid> DescribeTopicsIdKey =
-        static (result, index) =>
-            Uuid.Parse(KeyedResultMarshal.ReadStringKey(NativeMethods.DescribeTopicsResultGetKey(result, index)));
-
-    /// <summary>
-    /// The per-key value reader for <c>describeTopics</c>, hoisted for the same reason
-    /// as <see cref="TopicMetadataAndConfigValue"/>.
-    /// </summary>
-    internal static readonly Func<IntPtr, int, TopicDescription> TopicDescriptionValue =
-        static (result, index) =>
-            TopicDescriptionMarshal.CopyOut(NativeMethods.DescribeTopicsResultGetValue(result, index));
-
-    /// <summary>
     /// <c>listTopics</c>' key reader (result shape 3). The map is keyed by topic name,
     /// exactly as Java's <c>Map&lt;String, TopicListing&gt;</c> is.
     /// </summary>
@@ -657,31 +783,6 @@ internal static class AdminCallbacks
             TopicListingMarshal.CopyOut(NativeMethods.ListTopicsResultGetValue(result, index));
 
     /// <summary>
-    /// <c>createPartitions</c>' universal accessors — result <b>shape 2</b>, like
-    /// <c>deleteTopics</c>: Java's per-topic future is <c>KafkaFuture&lt;Void&gt;</c> and
-    /// the ABI declares no <c>_get_value</c>.
-    /// </summary>
-    internal static readonly KeyedResultMarshal.Accessors CreatePartitionsAccessors =
-        new KeyedResultMarshal.Accessors(
-            NativeMethods.CreatePartitionsResultCount,
-            NativeMethods.CreatePartitionsResultGetError);
-
-    /// <summary><c>createPartitions</c>' key reader — the topic name.</summary>
-    internal static readonly Func<IntPtr, int, string> CreatePartitionsKey =
-        static (result, index) =>
-            KeyedResultMarshal.ReadStringKey(NativeMethods.CreatePartitionsResultGetKey(result, index));
-
-    /// <summary>
-    /// <c>deleteRecords</c>' universal accessors. The <c>get_error</c> here is the
-    /// <b>authoritative</b> success/failure signal for the whole RPC — see
-    /// <see cref="DeletedRecordsValue"/>.
-    /// </summary>
-    internal static readonly KeyedResultMarshal.Accessors DeleteRecordsAccessors =
-        new KeyedResultMarshal.Accessors(
-            NativeMethods.DeleteRecordsResultCount,
-            NativeMethods.DeleteRecordsResultGetError);
-
-    /// <summary>
     /// <c>deleteRecords</c>' <b>composite</b> key reader — the sub-shape M15/P2a's
     /// <c>(result, index)</c> key seam exists for. This result declares no
     /// <c>get_key</c>; the key is <c>(get_topic(i), get_partition(i))</c>, reassembled
@@ -690,23 +791,6 @@ internal static class AdminCallbacks
     internal static readonly Func<IntPtr, int, TopicPartition> DeleteRecordsKey =
         TopicPartitionKey(
             NativeMethods.DeleteRecordsResultGetTopic, NativeMethods.DeleteRecordsResultGetPartition);
-
-    /// <summary>
-    /// <c>deleteRecords</c>' <b>inline-scalar</b> value reader — the sub-shape M15/P2b's
-    /// value seam exists for. There is no borrowed child handle to copy out of:
-    /// <c>get_low_watermark(i)</c> <em>is</em> the value, an <c>int64_t</c>.
-    /// </summary>
-    /// <remarks>
-    /// ⚠ <b>This reader is reached only when the entry's <c>get_error</c> was null</b> —
-    /// the walker checks the error first, so the <c>-1</c> the header mentions is never
-    /// interpreted here. That matters because <c>-1</c> is overloaded three ways
-    /// ("that partition failed", "index out of range", and a genuine watermark of
-    /// <c>-1</c>), so it cannot serve as a verdict. A <c>-1</c> reaching this reader is a
-    /// <b>success</b> carrying <c>-1</c>.
-    /// </remarks>
-    internal static readonly Func<IntPtr, int, DeletedRecords> DeletedRecordsValue =
-        static (result, index) =>
-            new DeletedRecords(NativeMethods.DeleteRecordsResultGetLowWatermark(result, index));
 
     /// <summary>
     /// The rooted instance passed to every <c>describe_cluster_async</c> submission
@@ -741,44 +825,6 @@ internal static class AdminCallbacks
         OnIncrementalAlterConfigs;
 
     /// <summary>
-    /// <c>describeConfigs</c>' universal accessors — result <b>shape 1</b>, with a
-    /// <b>borrowed</b> per-resource <c>get_error</c>.
-    /// </summary>
-    internal static readonly KeyedResultMarshal.Accessors DescribeConfigsAccessors =
-        new KeyedResultMarshal.Accessors(
-            NativeMethods.DescribeConfigsResultCount,
-            NativeMethods.DescribeConfigsResultGetError);
-
-    /// <summary>
-    /// <c>incrementalAlterConfigs</c>' universal accessors — result <b>shape 2</b>: the
-    /// ABI declares no <c>_get_value</c>, so a null per-resource error <em>is</em> the
-    /// success value.
-    /// </summary>
-    internal static readonly KeyedResultMarshal.Accessors AlterConfigsAccessors =
-        new KeyedResultMarshal.Accessors(
-            NativeMethods.AlterConfigsResultCount,
-            NativeMethods.AlterConfigsResultGetError);
-
-    /// <summary>
-    /// <c>describeConfigs</c>' <b>composite</b> key reader — neither result declares a
-    /// <c>get_key</c>; the key is <c>(get_key_type(i), get_key_name(i))</c>, reassembled
-    /// into the <see cref="ConfigResource"/> Java keys the map by. The type id goes through
-    /// <see cref="ConfigResourceMarshal.TypeFromId"/> rather than a raw cast, so an id this
-    /// client has no member for degrades to <see cref="ConfigResourceType.Unknown"/> as
-    /// Java's <c>Type.forId</c> does.
-    /// </summary>
-    internal static readonly Func<IntPtr, int, ConfigResource> DescribeConfigsKey =
-        static (result, index) => new ConfigResource(
-            ConfigResourceMarshal.TypeFromId(NativeMethods.DescribeConfigsResultGetKeyType(result, index)),
-            KeyedResultMarshal.ReadStringKey(NativeMethods.DescribeConfigsResultGetKeyName(result, index)));
-
-    /// <inheritdoc cref="DescribeConfigsKey"/>
-    internal static readonly Func<IntPtr, int, ConfigResource> AlterConfigsKey =
-        static (result, index) => new ConfigResource(
-            ConfigResourceMarshal.TypeFromId(NativeMethods.AlterConfigsResultGetKeyType(result, index)),
-            KeyedResultMarshal.ReadStringKey(NativeMethods.AlterConfigsResultGetKeyName(result, index)));
-
-    /// <summary>
     /// The rooted instance passed to every <c>describe_log_dirs_async</c> submission
     /// (result shape 1, scalar key).
     /// </summary>
@@ -797,69 +843,6 @@ internal static class AdminCallbacks
     internal static readonly DescribeReplicaLogDirsCallback DescribeReplicaLogDirs = OnDescribeReplicaLogDirs;
 
     /// <summary>
-    /// <c>describeLogDirs</c>' universal accessors — result <b>shape 1</b>, with a
-    /// <b>borrowed</b> per-broker <c>get_error</c>. ⚠ That is the FIRST of this RPC's two
-    /// borrowed errors; the second is nested in the value tree
-    /// (<see cref="LogDirMarshal"/>).
-    /// </summary>
-    internal static readonly KeyedResultMarshal.Accessors DescribeLogDirsAccessors =
-        new KeyedResultMarshal.Accessors(
-            NativeMethods.DescribeLogDirsResultCount,
-            NativeMethods.DescribeLogDirsResultGetError);
-
-    /// <summary>
-    /// <c>alterReplicaLogDirs</c>' universal accessors — result <b>shape 2</b>: the ABI
-    /// declares no <c>_get_value</c>, so a null per-replica error <em>is</em> the success
-    /// value.
-    /// </summary>
-    internal static readonly KeyedResultMarshal.Accessors AlterReplicaLogDirsAccessors =
-        new KeyedResultMarshal.Accessors(
-            NativeMethods.AlterReplicaLogDirsResultCount,
-            NativeMethods.AlterReplicaLogDirsResultGetError);
-
-    /// <inheritdoc cref="DescribeLogDirsAccessors"/>
-    internal static readonly KeyedResultMarshal.Accessors DescribeReplicaLogDirsAccessors =
-        new KeyedResultMarshal.Accessors(
-            NativeMethods.DescribeReplicaLogDirsResultCount,
-            NativeMethods.DescribeReplicaLogDirsResultGetError);
-
-    /// <summary>
-    /// <c>describeLogDirs</c>' key reader — a <b>bare scalar</b> broker id, the first such
-    /// key in M15. The <c>(result, index)</c> seam takes it unchanged, with no parsing and
-    /// no composition.
-    /// </summary>
-    internal static readonly Func<IntPtr, int, int> DescribeLogDirsKey =
-        static (result, index) => NativeMethods.DescribeLogDirsResultGetBroker(result, index);
-
-    /// <summary>
-    /// <c>describeLogDirs</c>' value reader: <c>get_value(i)</c> yields a borrowed
-    /// <c>LogDirDescriptionMap_t</c>, whose whole description-and-replica tree is copied out
-    /// before the root dies.
-    /// </summary>
-    internal static readonly Func<IntPtr, int, IReadOnlyDictionary<string, LogDirDescription>> LogDirDescriptionsValue =
-        static (result, index) =>
-            LogDirMarshal.CopyOutMap(NativeMethods.DescribeLogDirsResultGetValue(result, index));
-
-    /// <summary>
-    /// <c>alterReplicaLogDirs</c>' <b>3-part composite</b> key reader — this result declares
-    /// no <c>get_key</c>; the key is
-    /// <c>(get_topic(i), get_partition(i), get_broker_id(i))</c>, reassembled into the
-    /// <see cref="TopicPartitionReplica"/> Java keys the map by.
-    /// </summary>
-    internal static readonly Func<IntPtr, int, TopicPartitionReplica> AlterReplicaLogDirsKey =
-        static (result, index) => new TopicPartitionReplica(
-            KeyedResultMarshal.ReadStringKey(NativeMethods.AlterReplicaLogDirsResultGetTopic(result, index)),
-            NativeMethods.AlterReplicaLogDirsResultGetPartition(result, index),
-            NativeMethods.AlterReplicaLogDirsResultGetBrokerId(result, index));
-
-    /// <inheritdoc cref="AlterReplicaLogDirsKey"/>
-    internal static readonly Func<IntPtr, int, TopicPartitionReplica> DescribeReplicaLogDirsKey =
-        static (result, index) => new TopicPartitionReplica(
-            KeyedResultMarshal.ReadStringKey(NativeMethods.DescribeReplicaLogDirsResultGetTopic(result, index)),
-            NativeMethods.DescribeReplicaLogDirsResultGetPartition(result, index),
-            NativeMethods.DescribeReplicaLogDirsResultGetBrokerId(result, index));
-
-    /// <summary>
     /// <c>describeReplicaLogDirs</c>' value reader: <c>get_value(i)</c> yields a borrowed
     /// <c>ReplicaLogDirInfo_t</c>, copied out before the root dies.
     /// </summary>
@@ -868,20 +851,6 @@ internal static class AdminCallbacks
             static (result, index) =>
                 LogDirMarshal.CopyOutReplicaInfo(
                     NativeMethods.DescribeReplicaLogDirsResultGetValue(result, index));
-
-    /// <summary>
-    /// <c>describeConfigs</c>' value reader: <c>get_value(i)</c> yields a borrowed
-    /// <c>Config_t</c>, whose whole entry-and-synonym tree is copied out before the root
-    /// dies.
-    /// </summary>
-    /// <remarks>
-    /// ⚠ Reached only when the entry's <c>get_error</c> was null — the walker checks the
-    /// error first — which is why the header's "null value if that resource failed" case
-    /// cannot arrive here.
-    /// </remarks>
-    internal static readonly Func<IntPtr, int, Config> ConfigValue =
-        static (result, index) =>
-            ConfigMarshal.CopyOut(NativeMethods.DescribeConfigsResultGetValue(result, index));
 
     /// <summary>
     /// <c>listConfigResources</c>' element reader — sub-shape 3b, so this is a <b>value</b>
@@ -930,15 +899,15 @@ internal static class AdminCallbacks
 
     /// <summary>
     /// The rooted instance passed to every <c>alter_consumer_group_offsets_async</c>
-    /// submission (result shape 3 — one aggregate future, the same shape as
-    /// <see cref="ElectLeaders"/>).
+    /// submission (result shape 4c — per-partition callbacks fanned in to one aggregate
+    /// task).
     /// </summary>
     internal static readonly AlterConsumerGroupOffsetsCallback AlterConsumerGroupOffsets =
         OnAlterConsumerGroupOffsets;
 
     /// <summary>
     /// The rooted instance passed to every <c>delete_consumer_group_offsets_async</c>
-    /// submission (result shape 3 — one aggregate future, the same shape as
+    /// submission (result shape 4c, the same shape as
     /// <see cref="AlterConsumerGroupOffsets"/>).
     /// </summary>
     internal static readonly DeleteConsumerGroupOffsetsCallback DeleteConsumerGroupOffsets =
@@ -952,8 +921,8 @@ internal static class AdminCallbacks
 
     /// <summary>
     /// The rooted instance passed to every
-    /// <c>remove_members_from_consumer_group_async</c> submission (result shape 3 — one
-    /// aggregate future, the same shape as <see cref="AlterConsumerGroupOffsets"/>).
+    /// <c>remove_members_from_consumer_group_async</c> submission (result shape 4c, with
+    /// the mode-dependent key of <see cref="RemoveMembersFromConsumerGroupCallback"/>).
     /// </summary>
     internal static readonly RemoveMembersFromConsumerGroupCallback RemoveMembersFromConsumerGroup =
         OnRemoveMembersFromConsumerGroup;
@@ -964,72 +933,46 @@ internal static class AdminCallbacks
     internal static readonly CreateAclsCallback CreateAcls = OnCreateAcls;
 
     /// <summary>
-    /// <c>createAcls</c>' universal accessors — result <b>shape 2</b>: Java stores
-    /// <c>Map&lt;AclBinding, KafkaFuture&lt;Void&gt;&gt;</c>
-    /// (<c>CreateAclsResult.java:30</c>), so the ABI declares no <c>_get_value</c> and a
-    /// null per-binding error <em>is</em> the success value.
-    /// </summary>
-    internal static readonly KeyedResultMarshal.Accessors CreateAclsAccessors =
-        new KeyedResultMarshal.Accessors(
-            NativeMethods.CreateAclsResultCount,
-            NativeMethods.CreateAclsResultGetError);
-
-    /// <summary>
-    /// <c>createAcls</c>' key reader: the borrowed <c>get_binding(i)</c>, copied out into the
-    /// nested managed <see cref="AclBinding"/> before the root dies.
-    /// </summary>
-    /// <remarks>
-    /// ⚠ Built over <b><c>createAcls</c>'</b> own <c>get_binding</c>. The ACL result types
-    /// expose byte-identical accessor sets, so a cross-wired reader returns a plausible
-    /// answer rather than failing — <c>AdminP4ReaderWiringTests</c> reads the captured symbol
-    /// back off this closure for exactly that reason.
-    /// </remarks>
-    internal static readonly Func<IntPtr, int, AclBinding> CreateAclsKey =
-        AclRowMarshal.BindingReader(NativeMethods.CreateAclsResultGetBinding);
-
-    /// <summary>
     /// The rooted instance passed to every <c>delete_acls_async</c> submission.
     /// </summary>
     internal static readonly DeleteAclsCallback DeleteAcls = OnDeleteAcls;
 
     /// <summary>
-    /// <c>deleteAcls</c>' universal accessors — result <b>shape 1</b>: Java stores
-    /// <c>Map&lt;AclBindingFilter, KafkaFuture&lt;FilterResults&gt;&gt;</c>
-    /// (<c>DeleteAclsResult.java:91</c>), so each filter carries a value <em>and</em> a fault
-    /// channel.
+    /// <c>deleteAcls</c>' per-key <b>key</b> reader: the OWNED
+    /// <c>kafka_common_AclBindingFilter_t</c> the callback is handed, copied out before
+    /// <see cref="CompletePerKeyOwnedKey{TKey, TValue}"/>'s <c>finally</c> destroys it.
     /// </summary>
-    /// <remarks>
-    /// ⚠ <c>GetError</c> here is <c>get_error(i)</c> — the <b>filter's</b> future failing. The
-    /// inner <c>get_result_error(i, j)</c> is a stored value and is read by
-    /// <see cref="DeleteAclsFilterResults"/> instead; the two are independent.
-    /// </remarks>
-    internal static readonly KeyedResultMarshal.Accessors DeleteAclsAccessors =
-        new KeyedResultMarshal.Accessors(
-            NativeMethods.DeleteAclsResultCount,
-            NativeMethods.DeleteAclsResultGetError);
+    internal static readonly Func<IntPtr, AclBindingFilter> DeleteAclsPerKeyKey =
+        AclRowMarshal.ReadFilter;
 
     /// <summary>
-    /// <c>deleteAcls</c>' key reader: the borrowed <c>get_filter(i)</c>, copied out into the
-    /// nested managed <see cref="AclBindingFilter"/> before the root dies.
+    /// <c>createAcls</c>' per-key <b>key</b> reader: the OWNED
+    /// <c>kafka_common_AclBinding_t</c> the callback is handed, copied out before
+    /// <see cref="CompletePerKeyVoidOwnedKey{TKey}"/>'s <c>finally</c> destroys it.
     /// </summary>
-    /// <remarks>
-    /// ⚠ Built over <b><c>deleteAcls</c>'</b> own <c>get_filter</c> — the ACL results expose
-    /// byte-identical accessor sets, so a cross-wired reader returns a plausible answer rather
-    /// than failing (<c>AdminP4ReaderWiringTests</c>).
-    /// </remarks>
-    internal static readonly Func<IntPtr, int, AclBindingFilter> DeleteAclsKey =
-        AclRowMarshal.FilterReader(NativeMethods.DeleteAclsResultGetFilter);
+    internal static readonly Func<IntPtr, AclBinding> CreateAclsPerKeyKey =
+        AclRowMarshal.ReadBinding;
 
     /// <summary>
-    /// <c>deleteAcls</c>' value reader: the whole inner <c>(i, j)</c> axis, walked inside the
-    /// reader so the keyed walker needs no second index.
+    /// <c>alterClientQuotas</c>' per-key <b>key</b> reader: the OWNED
+    /// <c>kafka_common_ClientQuotaEntity_t</c> the callback is handed, copied out before
+    /// <see cref="CompletePerKeyVoidOwnedKey{TKey}"/>'s <c>finally</c> destroys it.
     /// </summary>
-    internal static readonly Func<IntPtr, int, DeleteAclsResult.FilterResults> DeleteAclsFilterResults =
-        DeleteAclsResultMarshal.FilterResultsReader(
-            NativeMethods.DeleteAclsResultGetResultCount,
-            NativeMethods.DeleteAclsResultGetBinding,
-            NativeMethods.DeleteAclsResultGetResultError,
-            AclRowMarshal.ReadBinding);
+    internal static readonly Func<IntPtr, ClientQuotaEntity> AlterClientQuotasPerKeyKey =
+        ClientQuotaMarshal.ReadEntity;
+
+    /// <summary>
+    /// <c>deleteAcls</c>' per-key value reader, over the owned
+    /// <c>kafka_admin_DeleteAclsFilterResults_t</c> rather than the retired root's
+    /// <c>(i, j)</c> pair.
+    /// </summary>
+    internal static readonly Func<IntPtr, DeleteAclsResult.FilterResults>
+        DeleteAclsFilterResultsPerKeyValue =
+            DeleteAclsResultMarshal.FilterResultsPerKeyReader(
+                NativeMethods.DeleteAclsFilterResultsCount,
+                NativeMethods.DeleteAclsFilterResultsGetBinding,
+                NativeMethods.DeleteAclsFilterResultsGetError,
+                AclRowMarshal.ReadBinding);
 
     /// <summary>
     /// The rooted instance passed to every <c>describe_acls_async</c> submission.
@@ -1080,31 +1023,6 @@ internal static class AdminCallbacks
     /// </summary>
     internal static readonly AlterClientQuotasCallback AlterClientQuotas = OnAlterClientQuotas;
 
-    /// <summary>
-    /// <c>alterClientQuotas</c>' universal accessors — result <b>shape 2</b>: Java stores
-    /// <c>Map&lt;ClientQuotaEntity, KafkaFuture&lt;Void&gt;&gt;</c>
-    /// (<c>AlterClientQuotasResult.java:31</c>), so the ABI declares no <c>_get_value</c> and
-    /// a null per-entity error <em>is</em> the success value.
-    /// </summary>
-    internal static readonly KeyedResultMarshal.Accessors AlterClientQuotasAccessors =
-        new KeyedResultMarshal.Accessors(
-            NativeMethods.AlterClientQuotasResultCount,
-            NativeMethods.AlterClientQuotasResultGetError);
-
-    /// <summary>
-    /// <c>alterClientQuotas</c>' key reader: the borrowed <c>get_entity(i)</c>, copied out
-    /// into the managed <see cref="ClientQuotaEntity"/> before the root dies.
-    /// </summary>
-    /// <remarks>
-    /// ⚠ Built over <b><c>alterClientQuotas</c>'</b> own <c>get_entity</c>.
-    /// <c>kafka_admin_CreateAclsResult_t</c> declares a byte-identical accessor set
-    /// (<c>count</c> / <c>get_X</c> / <c>get_error</c> / <c>destroy</c>), so a cross-wired
-    /// reader returns a plausible answer rather than failing — <c>AdminP4ReaderWiringTests</c>
-    /// reads the captured symbol back off this closure for exactly that reason.
-    /// </remarks>
-    internal static readonly Func<IntPtr, int, ClientQuotaEntity> AlterClientQuotasKey =
-        ClientQuotaMarshal.EntityReader(NativeMethods.AlterClientQuotasResultGetEntity);
-
     // ====================================================================================
     // M15/P7 — SCRAM credentials, delegation tokens, features.
     //
@@ -1123,11 +1041,17 @@ internal static class AdminCallbacks
     internal delegate void DescribeUserScramCredentialsCallback(IntPtr result, IntPtr error, IntPtr userData);
 
     /// <summary>
-    /// <c>kafka_admin_AdminClient_alter_user_scram_credentials_callback_t</c>. Same ownership
-    /// split as above.
+    /// <c>kafka_admin_AdminClient_alter_user_scram_credentials_callback_t</c>:
+    /// <c>void (*)(const char* user, kafka_common_KafkaError_t* error, void* user_data)</c>
+    /// — result shape <b>4b</b>, fired <b>once per distinct user</b> (several alterations
+    /// may name one user); a null <paramref name="error"/> <em>is</em> the success value.
     /// </summary>
+    /// <remarks>
+    /// ⚠ <paramref name="user"/> is borrowed for the call only;
+    /// <paramref name="error"/> is <b>owned</b> by this callback.
+    /// </remarks>
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-    internal delegate void AlterUserScramCredentialsCallback(IntPtr result, IntPtr error, IntPtr userData);
+    internal delegate void AlterUserScramCredentialsCallback(IntPtr user, IntPtr error, IntPtr userData);
 
     /// <summary>
     /// <c>kafka_admin_AdminClient_create_delegation_token_callback_t</c>. ⚠ No per-key error
@@ -1165,12 +1089,18 @@ internal static class AdminCallbacks
     internal delegate void DescribeFeaturesCallback(IntPtr result, IntPtr error, IntPtr userData);
 
     /// <summary>
-    /// <c>kafka_admin_AdminClient_update_features_callback_t</c>. ⚠ A <b>per-feature</b> failure
-    /// arrives inside <paramref name="result"/>, borrowed; <paramref name="error"/> is
-    /// <b>owned</b>.
+    /// <c>kafka_admin_AdminClient_update_features_callback_t</c>:
+    /// <c>void (*)(const char* feature, kafka_common_KafkaError_t* error,
+    /// void* user_data)</c> — result shape <b>4b</b>, fired <b>once per feature</b>; a null
+    /// <paramref name="error"/> <em>is</em> the success value.
     /// </summary>
+    /// <remarks>
+    /// ⚠ <paramref name="feature"/> is borrowed for the call only;
+    /// <paramref name="error"/> is <b>owned</b> by this callback. With <c>count == 0</c>
+    /// the callback is <b>never</b> invoked, which the submit token covers.
+    /// </remarks>
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-    internal delegate void UpdateFeaturesCallback(IntPtr result, IntPtr error, IntPtr userData);
+    internal delegate void UpdateFeaturesCallback(IntPtr feature, IntPtr error, IntPtr userData);
 
     /// <summary>The rooted instance passed to every <c>describe_user_scram_credentials_async</c> submission.</summary>
     internal static readonly DescribeUserScramCredentialsCallback DescribeUserScramCredentials =
@@ -1212,58 +1142,14 @@ internal static class AdminCallbacks
         UserScramCredentialMarshal.ReadEntry;
 
     /// <summary>
-    /// <c>alterUserScramCredentials</c>' universal accessors — result <b>shape 2</b>: Java's
-    /// per-user future is <c>KafkaFuture&lt;Void&gt;</c>
-    /// (<c>AlterUserScramCredentialsResult.java:31</c>), so a null per-user error <em>is</em>
-    /// the success value.
-    /// </summary>
-    internal static readonly KeyedResultMarshal.Accessors AlterUserScramCredentialsAccessors =
-        new KeyedResultMarshal.Accessors(
-            NativeMethods.AlterUserScramCredentialsResultCount,
-            NativeMethods.AlterUserScramCredentialsResultGetError);
-
-    /// <summary>
-    /// <c>alterUserScramCredentials</c>' key reader, built over <b>its own</b>
-    /// <c>get_user(i)</c>.
-    /// </summary>
-    /// <remarks>
-    /// ⚠ <c>kafka_admin_UpdateFeaturesResult_t</c> (and P6's <c>CreateAclsResult</c>) declare a
-    /// byte-identical accessor set, so a cross-wired reader returns a plausible answer rather
-    /// than failing. Built through <see cref="KeyedResultMarshal.StringKeyReader"/> so it
-    /// <b>captures</b> that symbol and the wiring guard can read it back — as an inline lambda
-    /// it was invisible to the guard's discovery, and a swap went undetected (M15/P7, 77.3).
-    /// </remarks>
-    internal static readonly Func<IntPtr, int, string> AlterUserScramCredentialsKey =
-        KeyedResultMarshal.StringKeyReader(NativeMethods.AlterUserScramCredentialsResultGetUser);
-
-    /// <summary>
     /// <c>describeDelegationToken</c>' element reader — sub-shape 3b, one collection, no key
     /// and no per-element error.
     /// </summary>
     internal static readonly Func<IntPtr, int, Confluent.Kafka.DelegationToken> DescribeDelegationTokenValue =
         DelegationTokenMarshal.TokenReader(NativeMethods.DescribeDelegationTokenResultGetToken);
 
-    /// <summary>
-    /// <c>updateFeatures</c>' universal accessors — result <b>shape 2</b>
-    /// (<c>UpdateFeaturesResult.java:29</c>).
-    /// </summary>
-    internal static readonly KeyedResultMarshal.Accessors UpdateFeaturesAccessors =
-        new KeyedResultMarshal.Accessors(
-            NativeMethods.UpdateFeaturesResultCount,
-            NativeMethods.UpdateFeaturesResultGetError);
-
-    /// <summary>
-    /// <c>updateFeatures</c>' key reader, built over <b>its own</b> <c>get_feature(i)</c>. ⚠ See
-    /// <see cref="AlterUserScramCredentialsKey"/> on the byte-identical twin.
-    /// </summary>
-    internal static readonly Func<IntPtr, int, string> UpdateFeaturesKey =
-        KeyedResultMarshal.StringKeyReader(NativeMethods.UpdateFeaturesResultGetFeature);
-
     private static readonly Action<IntPtr> s_destroyDescribeUserScramCredentialsResult =
         NativeMethods.DescribeUserScramCredentialsResultDestroy;
-
-    private static readonly Action<IntPtr> s_destroyAlterUserScramCredentialsResult =
-        NativeMethods.AlterUserScramCredentialsResultDestroy;
 
     private static readonly Action<IntPtr> s_destroyCreateDelegationTokenResult =
         NativeMethods.CreateDelegationTokenResultDestroy;
@@ -1279,9 +1165,6 @@ internal static class AdminCallbacks
 
     private static readonly Action<IntPtr> s_destroyDescribeFeaturesResult =
         NativeMethods.DescribeFeaturesResultDestroy;
-
-    private static readonly Action<IntPtr> s_destroyUpdateFeaturesResult =
-        NativeMethods.UpdateFeaturesResultDestroy;
 
     private static readonly KeyedResultMarshal.CountAccessor s_describeUserScramCredentialsCount =
         NativeMethods.DescribeUserScramCredentialsResultCount;
@@ -1345,14 +1228,8 @@ internal static class AdminCallbacks
             DescribeUserScramCredentialsEntry,
             s_destroyDescribeUserScramCredentialsResult);
 
-    private static void OnAlterUserScramCredentials(IntPtr result, IntPtr error, IntPtr userData) =>
-        CompleteKeyedVoid(
-            result,
-            error,
-            userData,
-            AlterUserScramCredentialsAccessors,
-            AlterUserScramCredentialsKey,
-            s_destroyAlterUserScramCredentialsResult);
+    private static void OnAlterUserScramCredentials(IntPtr key, IntPtr error, IntPtr userData) =>
+        CompletePerKeyVoid(key, error, userData, s_stringKey);
 
     private static void OnCreateDelegationToken(IntPtr result, IntPtr error, IntPtr userData) =>
         CompleteRootValueRpc(
@@ -1395,14 +1272,8 @@ internal static class AdminCallbacks
             FeatureMetadataMarshal.CopyOut,
             s_destroyDescribeFeaturesResult);
 
-    private static void OnUpdateFeatures(IntPtr result, IntPtr error, IntPtr userData) =>
-        CompleteKeyedVoid(
-            result,
-            error,
-            userData,
-            UpdateFeaturesAccessors,
-            UpdateFeaturesKey,
-            s_destroyUpdateFeaturesResult);
+    private static void OnUpdateFeatures(IntPtr key, IntPtr error, IntPtr userData) =>
+        CompletePerKeyVoid(key, error, userData, s_stringKey);
 
     // ---- M15/P8: producers & transactions ----
 
@@ -1480,32 +1351,25 @@ internal static class AdminCallbacks
         CompleteVoidRpc(error, userData);
 
     /// <summary>
-    /// <c>kafka_admin_AdminClient_fence_producers_callback_t</c> (<c>h:1414</c>). ⚠ A
-    /// <b>per-id</b> failure arrives inside <paramref name="result"/>, borrowed;
-    /// <paramref name="error"/> is <b>owned</b>.
+    /// <c>kafka_admin_AdminClient_fence_producers_callback_t</c>:
+    /// <c>void (*)(const char* transactional_id, kafka_admin_FenceProducersResult_t* value,
+    /// kafka_common_KafkaError_t* error, void* user_data)</c> — result shape <b>4a</b>,
+    /// fired <b>once per distinct id</b>.
     /// </summary>
+    /// <remarks>
+    /// ⚠⚠ <b>This RPC has no standalone per-key value handle</b>, so the ABI reuses the
+    /// flattened result type as the single-key value: <paramref name="value"/> is a
+    /// <c>FenceProducersResult_t</c> carrying exactly this one id, readable at
+    /// <b>index 0</b>, and it is <b>owned</b> — freed with
+    /// <c>kafka_admin_FenceProducersResult_destroy</c>, the same function the synchronous
+    /// path uses. It is <em>not</em> a result root to walk. <paramref name="key"/> is
+    /// borrowed for the call only; <paramref name="error"/> is owned too.
+    /// </remarks>
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-    internal delegate void FenceProducersCallback(IntPtr result, IntPtr error, IntPtr userData);
+    internal delegate void FenceProducersCallback(IntPtr key, IntPtr value, IntPtr error, IntPtr userData);
 
     /// <summary>The rooted instance passed to every <c>fence_producers_async</c> submission.</summary>
     internal static readonly FenceProducersCallback FenceProducers = OnFenceProducers;
-
-    /// <summary>
-    /// <c>fenceProducers</c>' universal accessors — result <b>shape 1</b>: Java's per-id future
-    /// carries a <c>ProducerIdAndEpoch</c> (<c>FenceProducersResult.java:33</c>).
-    /// </summary>
-    internal static readonly KeyedResultMarshal.Accessors FenceProducersAccessors =
-        new KeyedResultMarshal.Accessors(
-            NativeMethods.FenceProducersResultCount,
-            NativeMethods.FenceProducersResultGetError);
-
-    /// <summary>
-    /// <c>fenceProducers</c>' key reader, built over <b>its own</b>
-    /// <c>get_transactional_id(i)</c>. ⚠ See <see cref="AlterUserScramCredentialsKey"/> on
-    /// byte-identical twins.
-    /// </summary>
-    internal static readonly Func<IntPtr, int, string> FenceProducersKey =
-        KeyedResultMarshal.StringKeyReader(NativeMethods.FenceProducersResultGetTransactionalId);
 
     /// <summary>
     /// <c>fenceProducers</c>' value reader — the two inline scalars, read together so the pair
@@ -1525,6 +1389,14 @@ internal static class AdminCallbacks
         NativeMethods.FenceProducersResultDestroy;
 
     /// <summary>
+    /// <c>fenceProducers</c>' <b>shape-4a</b> value reader: the per-key value is a
+    /// single-id <c>FenceProducersResult_t</c>, so the table reader is reused at
+    /// <b>index 0</b>.
+    /// </summary>
+    internal static readonly Func<IntPtr, ProducerIdAndEpoch> FenceProducersPerKeyValue =
+        static value => FenceProducersValue(value, 0);
+
+    /// <summary>
     /// Builds <see cref="FenceProducersValue"/> from its two accessors so that the wiring guard
     /// can read them back off the closure (the <see cref="KeyedResultMarshal.StringKeyReader"/>
     /// rationale, applied to a two-accessor bundle).
@@ -1538,42 +1410,34 @@ internal static class AdminCallbacks
         (result, index) =>
             new ProducerIdAndEpoch(getProducerId(result, index), getEpochId(result, index));
 
-    private static void OnFenceProducers(IntPtr result, IntPtr error, IntPtr userData) =>
-        CompleteKeyed(
-            result,
+    private static void OnFenceProducers(IntPtr key, IntPtr value, IntPtr error, IntPtr userData) =>
+        CompletePerKey(
+            key,
+            value,
             error,
             userData,
-            FenceProducersAccessors,
-            FenceProducersKey,
-            FenceProducersValue,
+            s_stringKey,
+            FenceProducersPerKeyValue,
             s_destroyFenceProducersResult);
 
     /// <summary>
-    /// <c>kafka_admin_AdminClient_describe_transactions_callback_t</c> (<c>h:1378</c>). ⚠ A
-    /// <b>per-id</b> failure arrives inside <paramref name="result"/>, borrowed;
-    /// <paramref name="error"/> is <b>owned</b>.
+    /// <c>kafka_admin_AdminClient_describe_transactions_callback_t</c>:
+    /// <c>void (*)(const char* transactional_id,
+    /// kafka_admin_DescribeTransactionsResult_t* value, kafka_common_KafkaError_t* error,
+    /// void* user_data)</c> — result shape <b>4a</b>, fired <b>once per distinct id</b>.
     /// </summary>
+    /// <remarks>
+    /// ⚠⚠ Same shape as <see cref="FenceProducersCallback"/>: no standalone per-key value
+    /// handle exists, so <paramref name="value"/> is a
+    /// <c>DescribeTransactionsResult_t</c> carrying exactly this one id at <b>index 0</b>,
+    /// <b>owned</b> and freed with <c>kafka_admin_DescribeTransactionsResult_destroy</c>.
+    /// </remarks>
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-    internal delegate void DescribeTransactionsCallback(IntPtr result, IntPtr error, IntPtr userData);
+    internal delegate void DescribeTransactionsCallback(
+        IntPtr key, IntPtr value, IntPtr error, IntPtr userData);
 
     /// <summary>The rooted instance passed to every <c>describe_transactions_async</c> submission.</summary>
     internal static readonly DescribeTransactionsCallback DescribeTransactions = OnDescribeTransactions;
-
-    /// <summary>
-    /// <c>describeTransactions</c>' universal accessors — result <b>shape 1</b>: Java's per-id
-    /// future carries a <c>TransactionDescription</c> (<c>DescribeTransactionsResult.java:28</c>).
-    /// </summary>
-    internal static readonly KeyedResultMarshal.Accessors DescribeTransactionsAccessors =
-        new KeyedResultMarshal.Accessors(
-            NativeMethods.DescribeTransactionsResultCount,
-            NativeMethods.DescribeTransactionsResultGetError);
-
-    /// <summary>
-    /// <c>describeTransactions</c>' key reader, built over <b>its own</b>
-    /// <c>get_transactional_id(i)</c> — not <c>fenceProducers</c>' byte-identical twin.
-    /// </summary>
-    internal static readonly Func<IntPtr, int, string> DescribeTransactionsKey =
-        KeyedResultMarshal.StringKeyReader(NativeMethods.DescribeTransactionsResultGetTransactionalId);
 
     /// <summary>
     /// <c>describeTransactions</c>' row reader: six inline scalars plus the nested
@@ -1589,45 +1453,45 @@ internal static class AdminCallbacks
     private static readonly Action<IntPtr> s_destroyDescribeTransactionsResult =
         NativeMethods.DescribeTransactionsResultDestroy;
 
-    private static void OnDescribeTransactions(IntPtr result, IntPtr error, IntPtr userData) =>
-        CompleteKeyed(
-            result,
+    /// <inheritdoc cref="FenceProducersPerKeyValue"/>
+    internal static readonly Func<IntPtr, TransactionDescription> DescribeTransactionsPerKeyValue =
+        static value => DescribeTransactionsValue(value, 0);
+
+    private static void OnDescribeTransactions(IntPtr key, IntPtr value, IntPtr error, IntPtr userData) =>
+        CompletePerKey(
+            key,
+            value,
             error,
             userData,
-            DescribeTransactionsAccessors,
-            DescribeTransactionsKey,
-            DescribeTransactionsValue,
+            s_stringKey,
+            DescribeTransactionsPerKeyValue,
             s_destroyDescribeTransactionsResult);
 
     /// <summary>
-    /// <c>kafka_admin_AdminClient_describe_producers_callback_t</c> (<c>h:1365</c>). ⚠ A
-    /// <b>per-partition</b> failure arrives inside <paramref name="result"/>, borrowed;
-    /// <paramref name="error"/> is <b>owned</b>.
+    /// <c>kafka_admin_AdminClient_describe_producers_callback_t</c>:
+    /// <c>void (*)(const char* topic, int32_t partition,
+    /// kafka_admin_DescribeProducersResult_t* value, kafka_common_KafkaError_t* error,
+    /// void* user_data)</c> — result shape <b>4a</b>, fired <b>once per distinct
+    /// partition</b>, with the key decomposed into two scalars.
     /// </summary>
+    /// <remarks>
+    /// ⚠⚠ <b>This RPC has no standalone per-key value handle</b> (plan §1.1 item 4, the
+    /// third such case after <see cref="DescribeTransactionsCallback"/> and
+    /// <see cref="FenceProducersCallback"/>), so the ABI reuses the flattened result type
+    /// as the single-key value: <paramref name="value"/> is a
+    /// <c>DescribeProducersResult_t</c> carrying exactly this one partition, readable at
+    /// <b>index 0</b>, and it is <b>owned</b> — freed with
+    /// <c>kafka_admin_DescribeProducersResult_destroy</c>, the same function the
+    /// synchronous path uses. It is <em>not</em> a result root to walk.
+    /// <paramref name="topic"/> is borrowed for the call only; <paramref name="error"/> is
+    /// owned too.
+    /// </remarks>
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-    internal delegate void DescribeProducersCallback(IntPtr result, IntPtr error, IntPtr userData);
+    internal delegate void DescribeProducersCallback(
+        IntPtr topic, int partition, IntPtr value, IntPtr error, IntPtr userData);
 
     /// <summary>The rooted instance passed to every <c>describe_producers_async</c> submission.</summary>
     internal static readonly DescribeProducersCallback DescribeProducers = OnDescribeProducers;
-
-    /// <summary>
-    /// <c>describeProducers</c>' universal accessors — result <b>shape 1</b>: Java's
-    /// per-partition future carries a <c>PartitionProducerState</c>
-    /// (<c>DescribeProducersResult.java:30</c>).
-    /// </summary>
-    internal static readonly KeyedResultMarshal.Accessors DescribeProducersAccessors =
-        new KeyedResultMarshal.Accessors(
-            NativeMethods.DescribeProducersResultCount,
-            NativeMethods.DescribeProducersResultGetError);
-
-    /// <summary>
-    /// <c>describeProducers</c>' composite key reader, built over <b>its own</b>
-    /// <c>get_topic</c>/<c>get_partition</c> pair.
-    /// </summary>
-    internal static readonly Func<IntPtr, int, TopicPartition> DescribeProducersKey =
-        TopicPartitionKey(
-            NativeMethods.DescribeProducersResultGetTopic,
-            NativeMethods.DescribeProducersResultGetPartition);
 
     /// <summary>
     /// <c>describeProducers</c>' row reader: the nested <c>(i, j)</c> walk over that
@@ -1640,17 +1504,22 @@ internal static class AdminCallbacks
     internal static readonly Func<IntPtr, int, DescribeProducersResult.PartitionProducerState>
         DescribeProducersValue = PartitionProducerStateMarshal.ReadPartitionProducerState;
 
+    /// <inheritdoc cref="FenceProducersPerKeyValue"/>
+    internal static readonly Func<IntPtr, DescribeProducersResult.PartitionProducerState>
+        DescribeProducersPerKeyValue = static value => DescribeProducersValue(value, 0);
+
     private static readonly Action<IntPtr> s_destroyDescribeProducersResult =
         NativeMethods.DescribeProducersResultDestroy;
 
-    private static void OnDescribeProducers(IntPtr result, IntPtr error, IntPtr userData) =>
-        CompleteKeyed(
-            result,
+    private static void OnDescribeProducers(
+        IntPtr topic, int partition, IntPtr value, IntPtr error, IntPtr userData) =>
+        CompletePerKey(
+            new PartitionKeySource(topic, partition),
+            value,
             error,
             userData,
-            DescribeProducersAccessors,
-            DescribeProducersKey,
-            DescribeProducersValue,
+            s_topicPartitionKey,
+            DescribeProducersPerKeyValue,
             s_destroyDescribeProducersResult);
 
     /// <summary>
@@ -1732,35 +1601,6 @@ internal static class AdminCallbacks
     }
 
     /// <summary>
-    /// <c>deleteConsumerGroups</c>' universal accessors — result <b>shape 2</b>: Java's
-    /// per-group future is <c>KafkaFuture&lt;Void&gt;</c>
-    /// (<c>DeleteConsumerGroupsResult.java:30</c>), so the ABI declares no
-    /// <c>_get_value</c> and a null per-group error <em>is</em> the success value.
-    /// </summary>
-    internal static readonly KeyedResultMarshal.Accessors DeleteConsumerGroupsAccessors =
-        new KeyedResultMarshal.Accessors(
-            NativeMethods.DeleteConsumerGroupsResultCount,
-            NativeMethods.DeleteConsumerGroupsResultGetError);
-
-    /// <summary><c>deleteConsumerGroups</c>' key reader — the group id.</summary>
-    internal static readonly Func<IntPtr, int, string> DeleteConsumerGroupsKey =
-        static (result, index) =>
-            KeyedResultMarshal.ReadStringKey(NativeMethods.DeleteConsumerGroupsResultGetGroupId(result, index));
-
-    /// <summary>
-    /// <c>removeMembersFromConsumerGroup</c>' key reader — the member's group instance id.
-    /// Java keys the resolved map by <c>MemberIdentity</c>
-    /// (<c>RemoveMembersFromConsumerGroupResult.java:35</c>), whose only distinguishing
-    /// field the ABI carries back is the group instance id
-    /// (<c>MemberToRemove.java</c> has no <c>toString()</c> override, so there is no
-    /// Java-mandated string form to preserve here).
-    /// </summary>
-    internal static readonly Func<IntPtr, int, string> RemoveMembersFromConsumerGroupKey =
-        static (result, index) =>
-            KeyedResultMarshal.ReadStringKey(
-                NativeMethods.RemoveMembersFromConsumerGroupResultGetGroupInstanceId(result, index));
-
-    /// <summary>
     /// ⚠⚠ <c>removeMembersFromConsumerGroup</c>' per-member <b>VALUE</b> reader — and it
     /// reads <c>get_error(i)</c>. Same shape as
     /// <see cref="AlterConsumerGroupOffsetsOptionalError"/>, for the same reason: Java's
@@ -1824,17 +1664,6 @@ internal static class AdminCallbacks
         BorrowedOptionalError(NativeMethods.ElectLeadersResultGetError);
 
     /// <summary>
-    /// <c>alterConsumerGroupOffsets</c>' <b>composite</b> key reader — this result declares
-    /// no <c>get_key</c>; the key is <c>(get_topic(i), get_partition(i))</c>, reassembled
-    /// into the <see cref="TopicPartition"/> Java's map is keyed by. Same reader shape as
-    /// <see cref="ElectLeadersKey"/>.
-    /// </summary>
-    internal static readonly Func<IntPtr, int, TopicPartition> AlterConsumerGroupOffsetsKey =
-        TopicPartitionKey(
-            NativeMethods.AlterConsumerGroupOffsetsResultGetTopic,
-            NativeMethods.AlterConsumerGroupOffsetsResultGetPartition);
-
-    /// <summary>
     /// ⚠⚠ <c>alterConsumerGroupOffsets</c>' per-partition <b>VALUE</b> reader — and it reads
     /// <c>get_error(i)</c>. Same shape as <see cref="ElectLeadersOptionalError"/>, for the
     /// same reason.
@@ -1866,17 +1695,6 @@ internal static class AdminCallbacks
         BorrowedOptionalError(NativeMethods.AlterConsumerGroupOffsetsResultGetError);
 
     /// <summary>
-    /// <c>deleteConsumerGroupOffsets</c>' <b>composite</b> key reader — this result declares
-    /// no <c>get_key</c>; the key is <c>(get_topic(i), get_partition(i))</c>, reassembled
-    /// into the <see cref="TopicPartition"/> Java's map is keyed by. Same reader shape as
-    /// <see cref="AlterConsumerGroupOffsetsKey"/>.
-    /// </summary>
-    internal static readonly Func<IntPtr, int, TopicPartition> DeleteConsumerGroupOffsetsKey =
-        TopicPartitionKey(
-            NativeMethods.DeleteConsumerGroupOffsetsResultGetTopic,
-            NativeMethods.DeleteConsumerGroupOffsetsResultGetPartition);
-
-    /// <summary>
     /// ⚠⚠ <c>deleteConsumerGroupOffsets</c>' per-partition <b>VALUE</b> reader — and it reads
     /// <c>get_error(i)</c>. Same shape as <see cref="AlterConsumerGroupOffsetsOptionalError"/>,
     /// for the same reason.
@@ -1905,12 +1723,6 @@ internal static class AdminCallbacks
         new KeyedResultMarshal.Accessors(
             NativeMethods.AlterPartitionReassignmentsResultCount,
             NativeMethods.AlterPartitionReassignmentsResultGetError);
-
-    /// <inheritdoc cref="ElectLeadersKey"/>
-    internal static readonly Func<IntPtr, int, TopicPartition> AlterPartitionReassignmentsKey =
-        TopicPartitionKey(
-            NativeMethods.AlterPartitionReassignmentsResultGetTopic,
-            NativeMethods.AlterPartitionReassignmentsResultGetPartition);
 
     /// <summary>
     /// The rooted instance passed to every <c>list_partition_reassignments_async</c>
@@ -1987,43 +1799,6 @@ internal static class AdminCallbacks
             ?? throw new KafkaException(
                 "The listPartitionReassignments result produced no reassignment for an index "
                 + "within its own count.");
-
-    /// <summary>
-    /// <c>listOffsets</c>' universal accessors — result <b>shape 1</b>, with a
-    /// <b>borrowed</b> per-partition <c>get_error</c>.
-    /// </summary>
-    /// <remarks>
-    /// ⚠ This RPC declares <b>both</b> a <c>get_error</c> and a <c>get_value</c>, which is
-    /// what separates it from its similarly-named Stage-2 sibling
-    /// (<c>listPartitionReassignments</c>, which declares only a <c>get_value</c>) and from
-    /// its Stage-1 near-namesake (<c>alterPartitionReassignments</c>, which declares only a
-    /// <c>get_error</c>). Three names in one family, three shapes.
-    /// </remarks>
-    internal static readonly KeyedResultMarshal.Accessors ListOffsetsAccessors =
-        new KeyedResultMarshal.Accessors(
-            NativeMethods.ListOffsetsResultCount,
-            NativeMethods.ListOffsetsResultGetError);
-
-    /// <inheritdoc cref="ElectLeadersKey"/>
-    internal static readonly Func<IntPtr, int, TopicPartition> ListOffsetsKey =
-        TopicPartitionKey(
-            NativeMethods.ListOffsetsResultGetTopic, NativeMethods.ListOffsetsResultGetPartition);
-
-    /// <summary>
-    /// <c>listOffsets</c>' value reader: <c>get_value(i)</c> yields a borrowed
-    /// <c>ListOffsetsResultInfo_t</c>, copied out before the root dies.
-    /// </summary>
-    /// <remarks>
-    /// ⚠ Reached only when the entry's <c>get_error</c> was null — the walker checks the
-    /// error first — which is why the header's "null value if that partition failed" case
-    /// cannot arrive here.
-    /// </remarks>
-    internal static readonly Func<IntPtr, int, ListOffsetsResult.ListOffsetsResultInfo> ListOffsetsInfoValue =
-        static (result, index) =>
-            ListOffsetsResultInfoMarshal.CopyOut(NativeMethods.ListOffsetsResultGetValue(result, index))
-            ?? throw new KafkaException(
-                "The listOffsets result produced no offset information for a partition that "
-                + "reported no error.");
 
     /// <summary>
     /// <c>listGroups</c>' <b>first</b>-list reader: <c>get_valid(i)</c> yields a borrowed
@@ -2158,22 +1933,6 @@ internal static class AdminCallbacks
                 "The listConsumerGroups result produced no error for an index within its own error count.");
 
     /// <summary>
-    /// <c>describeConsumerGroups</c>' universal accessors — the count and the per-key
-    /// <c>get_error</c>, the two every <b>keyed</b> shape has.
-    /// </summary>
-    /// <remarks>
-    /// ⚠ A keyed map, <em>not</em> the two-independent-lists sub-shape its
-    /// <c>listConsumerGroups</c> neighbour uses: there is one count here, and index
-    /// <c>i</c> of the key, value and error walks all name the same group. So this goes
-    /// through <see cref="KeyedResultMarshal.Complete{TKey, TValue}"/> unchanged, and no
-    /// new walker is needed.
-    /// </remarks>
-    internal static readonly KeyedResultMarshal.Accessors DescribeConsumerGroupsAccessors =
-        new KeyedResultMarshal.Accessors(
-            NativeMethods.DescribeConsumerGroupsResultCount,
-            NativeMethods.DescribeConsumerGroupsResultGetError);
-
-    /// <summary>
     /// <c>describeConsumerGroups</c>' key reader: the group id at one index.
     /// </summary>
     /// <remarks>
@@ -2190,47 +1949,13 @@ internal static class AdminCallbacks
                 NativeMethods.DescribeConsumerGroupsResultGetGroupId(result, index));
 
     /// <summary>
-    /// <c>describeConsumerGroups</c>' value reader: <c>get_value(i)</c> yields a borrowed
-    /// <c>ConsumerGroupDescription_t</c>, copied out in full — members, their assignments
-    /// and all — before the root dies.
+    /// <c>describeConsumerGroups</c>' <b>shape-4a</b> value reader — the same copy-out,
+    /// over the <b>owned</b> description the callback is handed directly. Nothing here
+    /// borrows from a result root any more, so the copy-out is what must complete before
+    /// the trampoline's <c>finally</c> destroys the description itself.
     /// </summary>
-    /// <remarks>
-    /// <para>
-    /// ⚠⚠ <b>Everything reachable from here is borrowed from the one result root</b>, three
-    /// levels deep: the description from the result, each member from the description, each
-    /// assignment from its member. None of it is owned, none of it is freed here, and all
-    /// of it dangles the moment
-    /// <see cref="NativeMethods.DescribeConsumerGroupsResultDestroy"/> runs — which is why
-    /// the copy-out completes inside the walk and the destroy is in the trampoline's
-    /// <c>finally</c>, strictly after.
-    /// </para>
-    /// <para>
-    /// ⚠ <c>group_type</c> and <c>group_state</c> are <b>non-optional on this class</b>
-    /// (the header says so of <c>type()</c>), unlike their <c>ConsumerGroupListing</c>
-    /// namesakes where null is Java's <c>Optional.empty()</c>. A null here is an ABI
-    /// contract violation, and it reads as <c>Unknown</c> — the same answer an unrecognised
-    /// name gets — because the managed properties are non-nullable.
-    /// </para>
-    /// </remarks>
-    internal static readonly Func<IntPtr, int, ConsumerGroupDescription> ConsumerGroupDescriptionValue =
-        static (result, index) =>
-            CopyOutConsumerGroupDescription(
-                NativeMethods.DescribeConsumerGroupsResultGetValue(result, index));
-
-    /// <summary>
-    /// <c>describeClassicGroups</c>' universal accessors — the count and the per-key
-    /// <c>get_error</c>, the two every <b>keyed</b> shape has.
-    /// </summary>
-    /// <remarks>
-    /// ⚠ A keyed map, the same shape <see cref="DescribeConsumerGroupsAccessors"/> has: one
-    /// count, and index <c>i</c> of the key, value and error walks all name the same group.
-    /// So this goes through <see cref="KeyedResultMarshal.Complete{TKey, TValue}"/>
-    /// unchanged, and no new walker callable is needed.
-    /// </remarks>
-    internal static readonly KeyedResultMarshal.Accessors DescribeClassicGroupsAccessors =
-        new KeyedResultMarshal.Accessors(
-            NativeMethods.DescribeClassicGroupsResultCount,
-            NativeMethods.DescribeClassicGroupsResultGetError);
+    internal static readonly Func<IntPtr, ConsumerGroupDescription> ConsumerGroupDescriptionPerKeyValue =
+        CopyOutConsumerGroupDescription;
 
     /// <summary>
     /// <c>describeClassicGroups</c>' key reader: the group id at one index.
@@ -2247,62 +1972,9 @@ internal static class AdminCallbacks
             KeyedResultMarshal.ReadStringKey(
                 NativeMethods.DescribeClassicGroupsResultGetGroupId(result, index));
 
-    /// <summary>
-    /// <c>describeClassicGroups</c>' value reader: <c>get_value(i)</c> yields a borrowed
-    /// <c>ClassicGroupDescription_t</c>, copied out in full — members, their assignments and
-    /// all — before the root dies.
-    /// </summary>
-    /// <remarks>
-    /// <para>
-    /// ⚠⚠ <b>Everything reachable from here is borrowed from the one result root</b>, three
-    /// levels deep: the description from the result, each member from the description, each
-    /// assignment from its member. None of it is owned, none of it is freed here, and all of
-    /// it dangles the moment
-    /// <see cref="NativeMethods.DescribeClassicGroupsResultDestroy"/> runs — which is why
-    /// the copy-out completes inside the walk and the destroy is in the trampoline's
-    /// <c>finally</c>, strictly after.
-    /// </para>
-    /// <para>
-    /// ⚠ <c>is_simple_consumer_group</c> is <b>not read</b>, although the ABI exports it:
-    /// Java derives it from <c>protocol</c> and so does the managed class. See the comment
-    /// beside <see cref="NativeMethods.ClassicGroupDescriptionProtocol"/>.
-    /// </para>
-    /// </remarks>
-    internal static readonly Func<IntPtr, int, ClassicGroupDescription> ClassicGroupDescriptionValue =
-        static (result, index) =>
-            CopyOutClassicGroupDescription(
-                NativeMethods.DescribeClassicGroupsResultGetValue(result, index));
-
-    /// <summary>
-    /// <c>listConsumerGroupOffsets</c>' universal accessors — the count and the per-key
-    /// <c>get_error</c>, the two every <b>keyed</b> shape has.
-    /// </summary>
-    /// <remarks>
-    /// ⚠ A keyed map, the same shape <see cref="DescribeClassicGroupsAccessors"/> has: one
-    /// count, and index <c>i</c> of the key, value and error walks all name the same group.
-    /// So this goes through <see cref="KeyedResultMarshal.Complete{TKey, TValue}"/>
-    /// unchanged, and no new walker callable is needed.
-    /// </remarks>
-    internal static readonly KeyedResultMarshal.Accessors ListConsumerGroupOffsetsAccessors =
-        new KeyedResultMarshal.Accessors(
-            NativeMethods.ListConsumerGroupOffsetsResultCount,
-            NativeMethods.ListConsumerGroupOffsetsResultGetError);
-
-    /// <summary>
-    /// <c>listConsumerGroupOffsets</c>' key reader: the group id at one index.
-    /// </summary>
-    /// <remarks>
-    /// ⚠ The bridge dictionary these keys resolve against must be built with
-    /// <see cref="StringComparer.Ordinal"/>, for the reason given on
-    /// <see cref="DescribeConsumerGroupsKey"/>: <c>ListConsumerGroupOffsetsResult</c>'s
-    /// aggregate hardcodes that comparer, and its <c>PartitionsToOffsetAndMetadata(groupId)</c>
-    /// lookup rejects a group id the map does not contain — so a comparer mismatch would
-    /// turn a returned group into an <see cref="ArgumentException"/>.
-    /// </remarks>
-    internal static readonly Func<IntPtr, int, string> ListConsumerGroupOffsetsKey =
-        static (result, index) =>
-            KeyedResultMarshal.ReadStringKey(
-                NativeMethods.ListConsumerGroupOffsetsResultGetGroupId(result, index));
+    /// <inheritdoc cref="ConsumerGroupDescriptionPerKeyValue"/>
+    internal static readonly Func<IntPtr, ClassicGroupDescription> ClassicGroupDescriptionPerKeyValue =
+        CopyOutClassicGroupDescription;
 
     /// <summary>
     /// <c>listConsumerGroupOffsets</c>' value reader: <c>get_value(i)</c> yields a borrowed
@@ -2322,26 +1994,65 @@ internal static class AdminCallbacks
                 CopyOutOffsetAndMetadataMap(
                     NativeMethods.ListConsumerGroupOffsetsResultGetValue(result, index));
 
+    /// <inheritdoc cref="ConsumerGroupDescriptionPerKeyValue"/>
+    internal static readonly Func<IntPtr, IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>>
+        ListConsumerGroupOffsetsPerKeyValue = CopyOutOffsetAndMetadataMap;
+
     /// <summary>
     /// The result-root destroys, hoisted for the same reason as the accessor sets: a
     /// method group converted at the call site would allocate a delegate per completion.
     /// All are null-safe, so the trampoline's <c>finally</c> can call them
     /// unconditionally.
     /// </summary>
+    /// <remarks>
+    /// This one has no remaining call site — <c>createTopics</c> moved to the per-key
+    /// shape below, which has no result root to free — and survives as the documentation
+    /// anchor every sibling destroy inherits from. It goes with the shape-1/2 walkers.
+    /// </remarks>
     private static readonly Action<IntPtr> s_destroyCreateTopicsResult = NativeMethods.CreateTopicsResultDestroy;
 
-    /// <inheritdoc cref="s_destroyCreateTopicsResult"/>
-    private static readonly Action<IntPtr> s_destroyDeleteTopicsResult = NativeMethods.DeleteTopicsResultDestroy;
+    /// <summary>
+    /// <c>createTopics</c>' <b>per-key</b> value destroy (shape 4a). ⚠ <b>Not</b>
+    /// <see cref="s_destroyCreateTopicsResult"/>, which frees a result root the per-key
+    /// path does not have.
+    /// </summary>
+    private static readonly Action<IntPtr> s_destroyTopicMetadataAndConfig =
+        NativeMethods.TopicMetadataAndConfigDestroy;
 
-    /// <inheritdoc cref="s_destroyCreateTopicsResult"/>
-    private static readonly Action<IntPtr> s_destroyDescribeTopicsResult = NativeMethods.DescribeTopicsResultDestroy;
+    /// <inheritdoc cref="s_destroyTopicMetadataAndConfig"/>
+    private static readonly Action<IntPtr> s_destroyTopicDescription =
+        NativeMethods.TopicDescriptionDestroy;
 
-    /// <inheritdoc cref="s_destroyCreateTopicsResult"/>
-    private static readonly Action<IntPtr> s_destroyCreatePartitionsResult =
-        NativeMethods.CreatePartitionsResultDestroy;
+    /// <inheritdoc cref="s_destroyTopicMetadataAndConfig"/>
+    private static readonly Action<IntPtr> s_destroyConfig = NativeMethods.ConfigDestroy;
 
-    /// <inheritdoc cref="s_destroyCreateTopicsResult"/>
-    private static readonly Action<IntPtr> s_destroyDeleteRecordsResult = NativeMethods.DeleteRecordsResultDestroy;
+    /// <inheritdoc cref="s_destroyTopicMetadataAndConfig"/>
+    private static readonly Action<IntPtr> s_destroyLogDirDescriptionMap =
+        NativeMethods.LogDirDescriptionMapDestroy;
+
+    /// <inheritdoc cref="s_destroyTopicMetadataAndConfig"/>
+    private static readonly Action<IntPtr> s_destroyConsumerGroupDescription =
+        NativeMethods.ConsumerGroupDescriptionDestroy;
+
+    /// <inheritdoc cref="s_destroyTopicMetadataAndConfig"/>
+    private static readonly Action<IntPtr> s_destroyClassicGroupDescription =
+        NativeMethods.ClassicGroupDescriptionDestroy;
+
+    /// <inheritdoc cref="s_destroyTopicMetadataAndConfig"/>
+    private static readonly Action<IntPtr> s_destroyOffsetAndMetadataMap =
+        NativeMethods.OffsetAndMetadataMapDestroy;
+
+    /// <inheritdoc cref="s_destroyTopicMetadataAndConfig"/>
+    private static readonly Action<IntPtr> s_destroyDeletedRecords =
+        NativeMethods.DeletedRecordsDestroy;
+
+    /// <inheritdoc cref="s_destroyTopicMetadataAndConfig"/>
+    private static readonly Action<IntPtr> s_destroyReplicaLogDirInfo =
+        NativeMethods.ReplicaLogDirInfoDestroy;
+
+    /// <inheritdoc cref="s_destroyTopicMetadataAndConfig"/>
+    private static readonly Action<IntPtr> s_destroyListOffsetsResultInfo =
+        NativeMethods.ListOffsetsResultInfoDestroy;
 
     /// <inheritdoc cref="s_destroyCreateTopicsResult"/>
     private static readonly Action<IntPtr> s_destroyListConfigResourcesResult =
@@ -2352,50 +2063,10 @@ internal static class AdminCallbacks
         NativeMethods.ListClientMetricsResourcesResultDestroy;
 
     /// <inheritdoc cref="s_destroyCreateTopicsResult"/>
-    private static readonly Action<IntPtr> s_destroyDescribeConfigsResult =
-        NativeMethods.DescribeConfigsResultDestroy;
-
-    /// <inheritdoc cref="s_destroyCreateTopicsResult"/>
-    private static readonly Action<IntPtr> s_destroyAlterConfigsResult =
-        NativeMethods.AlterConfigsResultDestroy;
-
-    /// <inheritdoc cref="s_destroyCreateTopicsResult"/>
-    private static readonly Action<IntPtr> s_destroyDescribeLogDirsResult =
-        NativeMethods.DescribeLogDirsResultDestroy;
-
-    /// <inheritdoc cref="s_destroyCreateTopicsResult"/>
-    private static readonly Action<IntPtr> s_destroyAlterReplicaLogDirsResult =
-        NativeMethods.AlterReplicaLogDirsResultDestroy;
-
-    /// <inheritdoc cref="s_destroyCreateTopicsResult"/>
-    private static readonly Action<IntPtr> s_destroyDescribeReplicaLogDirsResult =
-        NativeMethods.DescribeReplicaLogDirsResultDestroy;
-
-    /// <inheritdoc cref="s_destroyCreateTopicsResult"/>
     private static readonly Action<IntPtr> s_destroyListTopicsResult = NativeMethods.ListTopicsResultDestroy;
 
     /// <inheritdoc cref="s_destroyCreateTopicsResult"/>
     private static readonly Action<IntPtr> s_destroyElectLeadersResult = NativeMethods.ElectLeadersResultDestroy;
-
-    /// <inheritdoc cref="s_destroyCreateTopicsResult"/>
-    private static readonly Action<IntPtr> s_destroyAlterPartitionReassignmentsResult =
-        NativeMethods.AlterPartitionReassignmentsResultDestroy;
-
-    /// <inheritdoc cref="s_destroyCreateTopicsResult"/>
-    private static readonly Action<IntPtr> s_destroyAlterConsumerGroupOffsetsResult =
-        NativeMethods.AlterConsumerGroupOffsetsResultDestroy;
-
-    /// <inheritdoc cref="s_destroyCreateTopicsResult"/>
-    private static readonly Action<IntPtr> s_destroyDeleteConsumerGroupOffsetsResult =
-        NativeMethods.DeleteConsumerGroupOffsetsResultDestroy;
-
-    /// <inheritdoc cref="s_destroyCreateTopicsResult"/>
-    private static readonly Action<IntPtr> s_destroyDeleteConsumerGroupsResult =
-        NativeMethods.DeleteConsumerGroupsResultDestroy;
-
-    /// <inheritdoc cref="s_destroyCreateTopicsResult"/>
-    private static readonly Action<IntPtr> s_destroyRemoveMembersFromConsumerGroupResult =
-        NativeMethods.RemoveMembersFromConsumerGroupResultDestroy;
 
     /// <summary>
     /// The count accessors the two sub-shape-3b walks read, hoisted for the same reason as
@@ -2429,18 +2100,6 @@ internal static class AdminCallbacks
     /// <inheritdoc cref="s_listTopicsCount"/>
     private static readonly KeyedResultMarshal.CountAccessor s_listPartitionReassignmentsCount =
         NativeMethods.ListPartitionReassignmentsResultCount;
-
-    /// <inheritdoc cref="s_listTopicsCount"/>
-    private static readonly KeyedResultMarshal.CountAccessor s_alterConsumerGroupOffsetsCount =
-        NativeMethods.AlterConsumerGroupOffsetsResultCount;
-
-    /// <inheritdoc cref="s_listTopicsCount"/>
-    private static readonly KeyedResultMarshal.CountAccessor s_deleteConsumerGroupOffsetsCount =
-        NativeMethods.DeleteConsumerGroupOffsetsResultCount;
-
-    /// <inheritdoc cref="s_listTopicsCount"/>
-    private static readonly KeyedResultMarshal.CountAccessor s_removeMembersFromConsumerGroupCount =
-        NativeMethods.RemoveMembersFromConsumerGroupResultCount;
 
     /// <summary>
     /// The count bounding <c>listGroups</c>' <b>listing</b> walk, hoisted for the same
@@ -2483,10 +2142,6 @@ internal static class AdminCallbacks
     private static readonly KeyedResultMarshal.CountAccessor s_listConsumerGroupsErrorCount =
         NativeMethods.ListConsumerGroupsResultErrorCount;
 
-    /// <inheritdoc cref="s_destroyCreateTopicsResult"/>
-    private static readonly Action<IntPtr> s_destroyDescribeConsumerGroupsResult =
-        NativeMethods.DescribeConsumerGroupsResultDestroy;
-
     /// <summary>
     /// <c>ConsumerGroupDescription</c>'s three authorized-operation accessors, hoisted so a
     /// copy-out allocates no delegates. The <b>rule</b> they feed — that the boolean gate,
@@ -2505,10 +2160,6 @@ internal static class AdminCallbacks
     private static readonly Func<IntPtr, int, int> s_consumerGroupAuthorizedOperation =
         NativeMethods.ConsumerGroupDescriptionAuthorizedOperation;
 
-    /// <inheritdoc cref="s_destroyCreateTopicsResult"/>
-    private static readonly Action<IntPtr> s_destroyDescribeClassicGroupsResult =
-        NativeMethods.DescribeClassicGroupsResultDestroy;
-
     /// <summary>
     /// <c>ClassicGroupDescription</c>'s three authorized-operation accessors, hoisted so a
     /// copy-out allocates no delegates. They feed the same single
@@ -2526,10 +2177,6 @@ internal static class AdminCallbacks
     /// <inheritdoc cref="s_classicGroupHasAuthorizedOperations"/>
     private static readonly Func<IntPtr, int, int> s_classicGroupAuthorizedOperation =
         NativeMethods.ClassicGroupDescriptionAuthorizedOperation;
-
-    /// <inheritdoc cref="s_destroyCreateTopicsResult"/>
-    private static readonly Action<IntPtr> s_destroyListConsumerGroupOffsetsResult =
-        NativeMethods.ListConsumerGroupOffsetsResultDestroy;
 
     /// <summary>
     /// The production binding of the six <c>kafka_admin_OffsetAndMetadataMap_*</c> entry
@@ -2550,15 +2197,20 @@ internal static class AdminCallbacks
         NativeMethods.ListPartitionReassignmentsResultDestroy;
 
     /// <inheritdoc cref="s_destroyCreateTopicsResult"/>
-    private static readonly Action<IntPtr> s_destroyListOffsetsResult =
-        NativeMethods.ListOffsetsResultDestroy;
+    private static readonly Action<IntPtr> s_destroyDeleteAclsFilterResults =
+        NativeMethods.DeleteAclsFilterResultsDestroy;
 
-    /// <inheritdoc cref="s_destroyCreateTopicsResult"/>
-    private static readonly Action<IntPtr> s_destroyCreateAclsResult =
-        NativeMethods.CreateAclsResultDestroy;
+    /// <summary>The three per-key KEY destroys — the only RPCs whose key is owned.</summary>
+    private static readonly Action<IntPtr> s_destroyAclBindingFilter =
+        NativeMethods.AclBindingFilterDestroy;
 
-    private static readonly Action<IntPtr> s_destroyDeleteAclsResult =
-        NativeMethods.DeleteAclsResultDestroy;
+    /// <inheritdoc cref="s_destroyAclBindingFilter"/>
+    private static readonly Action<IntPtr> s_destroyAclBinding =
+        NativeMethods.AclBindingDestroy;
+
+    /// <inheritdoc cref="s_destroyAclBindingFilter"/>
+    private static readonly Action<IntPtr> s_destroyClientQuotaEntity =
+        NativeMethods.ClientQuotaEntityDestroy;
 
     private static readonly KeyedResultMarshal.CountAccessor s_describeAclsCount =
         NativeMethods.DescribeAclsResultCount;
@@ -2571,10 +2223,6 @@ internal static class AdminCallbacks
 
     private static readonly Action<IntPtr> s_destroyDescribeClientQuotasResult =
         NativeMethods.DescribeClientQuotasResultDestroy;
-
-    /// <inheritdoc cref="s_destroyCreateTopicsResult"/>
-    private static readonly Action<IntPtr> s_destroyAlterClientQuotasResult =
-        NativeMethods.AlterClientQuotasResultDestroy;
 
     private static void OnClose(IntPtr error, IntPtr userData)
     {
@@ -2600,242 +2248,389 @@ internal static class AdminCallbacks
     }
 
     /// <summary>
-    /// The one completion body every keyed admin trampoline delegates to, so the
-    /// ownership rules are stated once instead of once per RPC.
+    /// <b>Shape 4a</b> — the one body every per-key value-carrying trampoline delegates
+    /// to. Resolves <b>one</b> key and releases <b>one</b> countdown slot.
     /// </summary>
     /// <remarks>
-    /// The <c>finally</c> discharges three obligations on <b>every</b> path — including
-    /// the inline ones and the no-throw path: the owned result root is destroyed exactly
-    /// once (null-safe, so the top-level-error branch is a no-op); any awaiter the result
-    /// failed to account for is faulted, so no caller can be left holding a <c>Task</c>
-    /// that never completes; and the rooting <c>GCHandle</c> plus the span-the-op client
-    /// reference are released. The destroy runs strictly <em>after</em> the walk, because
-    /// every value the walk reads is borrowed from that root.
+    /// <para>
+    /// ⚠ <see cref="AdminOperation.ReleaseOne"/> runs in the <c>finally</c> on
+    /// <b>every</b> path. Skipping it on any path leaves the countdown short of zero
+    /// forever: the rooting <c>GCHandle</c> is never freed and
+    /// <c>AdminClient_destroy</c> is deferred for the process lifetime, with no managed
+    /// symptom.
+    /// </para>
+    /// <para>
+    /// ⚠ <paramref name="value"/> and <paramref name="error"/> are owned, and ownership
+    /// passes to <see cref="KeyedResultMarshal.CompleteKey{TKey, TValue}"/> the instant
+    /// it is called — which is what <c>resolved</c> tracks. Before that point (no
+    /// context, or an unreadable key) this body owes both frees itself; an unnameable key
+    /// has no source to resolve, and the countdown-zero <c>FailUncompleted</c> faults
+    /// whichever requested key went unaccounted for.
+    /// </para>
     /// </remarks>
-    /// <param name="result">The owned result root, or <c>IntPtr.Zero</c> on a submit failure.</param>
-    /// <param name="error">
-    /// The submit failure, or <c>IntPtr.Zero</c>. ⚠ <b>OWNED</b> — freed here with
-    /// <see cref="KafkaException.FromHandle(IntPtr)"/>, the mirror image of the per-key
-    /// errors inside a result, which are borrowed and must never be freed.
+    /// <param name="key">
+    /// This callback's raw key argument(s) — a borrowed <c>const char*</c>, a scalar, or a
+    /// struct bundling the parts of a composite key. Nothing native-backed in it outlives
+    /// the call, so <paramref name="readKey"/> must copy out.
     /// </param>
+    /// <param name="value">This key's owned value handle, or <c>IntPtr.Zero</c>.</param>
+    /// <param name="error">This key's owned error, or <c>IntPtr.Zero</c> on success.</param>
     /// <param name="userData">The per-operation <c>GCHandle</c>.</param>
-    /// <param name="accessors">That RPC's universal accessors.</param>
-    /// <param name="readKey">That RPC's key reader.</param>
-    /// <param name="readValue">That RPC's value reader.</param>
-    /// <param name="destroyResult">That RPC's <c>*Result_destroy</c>.</param>
-    private static void CompleteKeyed<TKey, TValue>(
-        IntPtr result,
+    /// <param name="readKey">That RPC's key reader over the raw key argument(s).</param>
+    /// <param name="readValue">That RPC's value reader over the owned value handle.</param>
+    /// <param name="destroyValue">That value type's own destroy.</param>
+    private static void CompletePerKey<TKeySource, TKey, TValue>(
+        TKeySource key,
+        IntPtr value,
         IntPtr error,
         IntPtr userData,
-        KeyedResultMarshal.Accessors accessors,
-        Func<IntPtr, int, TKey> readKey,
-        Func<IntPtr, int, TValue> readValue,
-        Action<IntPtr> destroyResult)
+        Func<TKeySource, TKey> readKey,
+        Func<IntPtr, TValue> readValue,
+        Action<IntPtr> destroyValue)
         where TKey : notnull
     {
         KeyedAdminOperation<TKey, TValue>? context = null;
+        bool resolved = false;
         try
         {
             GCHandle handle = GCHandle.FromIntPtr(userData);
             context = (KeyedAdminOperation<TKey, TValue>)handle.Target!;
 
-            if (error != IntPtr.Zero)
-            {
-                // The request could not be submitted at all: there is no result table, so
-                // every requested key fails with this one error.
-                context.FailAll(KafkaException.FromHandle(error)!);
-            }
-            else
-            {
-                KeyedResultMarshal.Complete(result, accessors, context, readKey, readValue);
-            }
+            TKey materialized = readKey(key);
+            resolved = true;
+            KeyedResultMarshal.CompleteKey(context, materialized, value, error, readValue, destroyValue);
         }
-        catch (Exception exception)
+        catch (Exception)
         {
-            // No-throw boundary. On the inline path there is not even a caller frame that
-            // would catch this, so it must be absorbed here and surfaced through the Tasks.
-            context?.FailAll(exception);
+            // Per-callback no-throw boundary: never unwind into native, and never fault
+            // the other N-1 keys, which have their own callbacks still to come.
         }
         finally
         {
-            destroyResult(result);
-            context?.FailUncompleted();
-            context?.FreeGcHandle();
+            if (!resolved)
+            {
+                destroyValue(value);
+                if (error != IntPtr.Zero)
+                {
+                    NativeMethods.ErrorDestroy(error);
+                }
+            }
+
+            context?.ReleaseOne();
         }
     }
 
     /// <summary>
-    /// The <b>shape-2</b> twin of <see cref="CompleteKeyed{TKey, TValue}"/>: identical in
-    /// every respect except that the walk carries no per-key value, because the RPC's
-    /// result type has no <c>_get_value</c> function.
+    /// <b>Shape 4a with an OWNED key</b> — <see cref="CompletePerKey{TKeySource, TKey, TValue}"/>
+    /// plus the one obligation it cannot carry: destroying the key handle.
     /// </summary>
     /// <remarks>
-    /// It exists as its own method rather than as a null argument so the shape is stated
-    /// by the type system: it accepts only a <see cref="VoidKeyedAdminOperation{TKey}"/>,
-    /// so a value-carrying operation cannot be routed here and have its value dropped.
+    /// A wrapper rather than a fourth parameter on <c>CompletePerKey</c>, so the borrowed-key
+    /// RPCs cannot accidentally acquire a key destroy and this one cannot silently lose it.
+    /// <c>CompletePerKey</c> is already a total no-throw boundary, so the <c>finally</c> below
+    /// is the entire difference; omitting it leaks one filter per key, with no managed symptom.
     /// </remarks>
-    /// <param name="result">The owned result root, or <c>IntPtr.Zero</c> on a submit failure.</param>
-    /// <param name="error">The submit failure, or <c>IntPtr.Zero</c>. <b>OWNED</b>.</param>
+    /// <param name="key">This key's <b>owned</b> handle.</param>
+    /// <param name="value">This key's owned value, or <c>IntPtr.Zero</c> on failure.</param>
+    /// <param name="error">This key's owned error, or <c>IntPtr.Zero</c> on success.</param>
     /// <param name="userData">The per-operation <c>GCHandle</c>.</param>
-    /// <param name="accessors">That RPC's universal accessors.</param>
-    /// <param name="readKey">That RPC's key reader.</param>
-    /// <param name="destroyResult">That RPC's <c>*Result_destroy</c>.</param>
-    private static void CompleteKeyedVoid<TKey>(
-        IntPtr result,
+    /// <param name="readKey">That RPC's key reader, which must copy out before returning.</param>
+    /// <param name="readValue">That RPC's value reader.</param>
+    /// <param name="destroyValue">That value type's <c>_destroy</c>.</param>
+    /// <param name="destroyKey">That key type's <c>_destroy</c>.</param>
+    private static void CompletePerKeyOwnedKey<TKey, TValue>(
+        IntPtr key,
+        IntPtr value,
         IntPtr error,
         IntPtr userData,
-        KeyedResultMarshal.Accessors accessors,
-        Func<IntPtr, int, TKey> readKey,
-        Action<IntPtr> destroyResult)
+        Func<IntPtr, TKey> readKey,
+        Func<IntPtr, TValue> readValue,
+        Action<IntPtr> destroyValue,
+        Action<IntPtr> destroyKey)
+        where TKey : notnull
+    {
+        try
+        {
+            CompletePerKey(key, value, error, userData, readKey, readValue, destroyValue);
+        }
+        finally
+        {
+            destroyKey(key);
+        }
+    }
+
+    /// <summary>
+    /// <b>Shape 4b</b> — the value-less twin of <see cref="CompletePerKey{TKeySource, TKey, TValue}"/>:
+    /// a null <paramref name="error"/> <em>is</em> the success value.
+    /// </summary>
+    /// <remarks>
+    /// Its own method rather than a null value reader, so a value-carrying operation
+    /// cannot be routed here and have its value dropped — and it accepts only a
+    /// <see cref="VoidKeyedAdminOperation{TKey}"/>. Every obligation in
+    /// <see cref="CompletePerKey{TKeySource, TKey, TValue}"/>'s remarks applies verbatim.
+    /// </remarks>
+    /// <param name="key">
+    /// This callback's raw key argument(s) — a borrowed <c>const char*</c>, an owned handle,
+    /// or a struct bundling the parts of a composite key, exactly as in
+    /// <see cref="CompletePerKey{TKeySource, TKey, TValue}"/>.
+    /// </param>
+    /// <param name="error">This key's owned error, or <c>IntPtr.Zero</c> on success.</param>
+    /// <param name="userData">The per-operation <c>GCHandle</c>.</param>
+    /// <param name="readKey">That RPC's key reader over the raw key argument(s).</param>
+    private static void CompletePerKeyVoid<TKeySource, TKey>(
+        TKeySource key,
+        IntPtr error,
+        IntPtr userData,
+        Func<TKeySource, TKey> readKey)
         where TKey : notnull
     {
         VoidKeyedAdminOperation<TKey>? context = null;
+        bool resolved = false;
         try
         {
             GCHandle handle = GCHandle.FromIntPtr(userData);
             context = (VoidKeyedAdminOperation<TKey>)handle.Target!;
 
-            if (error != IntPtr.Zero)
+            TKey materialized = readKey(key);
+            resolved = true;
+            KeyedResultMarshal.CompleteKey(context, materialized, error);
+        }
+        catch (Exception)
+        {
+            // Per-callback no-throw boundary. See CompletePerKey.
+        }
+        finally
+        {
+            if (!resolved && error != IntPtr.Zero)
             {
-                context.FailAll(KafkaException.FromHandle(error)!);
+                NativeMethods.ErrorDestroy(error);
             }
-            else
-            {
-                KeyedResultMarshal.Complete(result, accessors, context, readKey);
 
-                // Keys the ABI request could not carry are resolved here, after the walk and
-                // before FailUncompleted sees them. A no-op for every RPC that has none —
-                // see VoidKeyedAdminOperation.SetKeysWithNoRequest for the one shape that
-                // does, and why it is deliberately not reached on the failure branch above.
-                context.CompleteKeysWithNoRequest();
+            context?.ReleaseOne();
+        }
+    }
+
+    /// <summary>
+    /// <b>Shape 4b with an OWNED key</b> — the void twin of
+    /// <see cref="CompletePerKeyOwnedKey{TKey, TValue}"/>, a wrapper for the same reason.
+    /// </summary>
+    /// <param name="key">This key's <b>owned</b> handle.</param>
+    /// <param name="error">This key's owned error, or <c>IntPtr.Zero</c> on success.</param>
+    /// <param name="userData">The per-operation <c>GCHandle</c>.</param>
+    /// <param name="readKey">That RPC's key reader, which must copy out before returning.</param>
+    /// <param name="destroyKey">That key type's <c>_destroy</c>.</param>
+    private static void CompletePerKeyVoidOwnedKey<TKey>(
+        IntPtr key,
+        IntPtr error,
+        IntPtr userData,
+        Func<IntPtr, TKey> readKey,
+        Action<IntPtr> destroyKey)
+        where TKey : notnull
+    {
+        try
+        {
+            CompletePerKeyVoid(key, error, userData, readKey);
+        }
+        finally
+        {
+            destroyKey(key);
+        }
+    }
+
+    /// <summary>
+    /// <b>Shape 4c</b> — the one body every per-key <em>fan-in</em> trampoline delegates to:
+    /// the ABI fires once per key while Java holds <b>one</b>
+    /// <c>KafkaFuture&lt;Map&lt;K, Errors&gt;&gt;</c>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// ⚠⚠ <b>This key's <paramref name="error"/> becomes the map's VALUE, never a fault</b> —
+    /// the <c>ElectLeaders</c> lesson M15/P4 measured at 10 failing tests. Only the public
+    /// result type's <c>All</c>-style projection turns a non-null entry into a throw. It is
+    /// <b>owned</b>, so it goes through <see cref="KafkaException.FromHandle(IntPtr)"/>.
+    /// </para>
+    /// <para>
+    /// The single awaiter is faulted only by a failure of this body itself, because shape 4c
+    /// has no per-key fault channel to attribute one to.
+    /// <see cref="AdminOperation.ReleaseOne"/> runs in the <c>finally</c> on every path, and
+    /// the <see cref="FanInAdminOperation{TKey, TValue}.Add"/> happens before it — which is
+    /// what makes the countdown-zero snapshot complete.
+    /// </para>
+    /// </remarks>
+    /// <param name="key">This callback's raw key argument(s), borrowed for the call only.</param>
+    /// <param name="error">This key's owned error, or <c>IntPtr.Zero</c> for success.</param>
+    /// <param name="userData">The per-operation <c>GCHandle</c>.</param>
+    /// <param name="readKey">That RPC's key reader, which must copy out before returning.</param>
+    private static void CompletePerKeyFanIn<TKeySource, TKey>(
+        TKeySource key,
+        IntPtr error,
+        IntPtr userData,
+        Func<TKeySource, TKey> readKey)
+        where TKey : notnull
+    {
+        FanInAdminOperation<TKey, KafkaException?>? context = null;
+        bool errorConsumed = false;
+        try
+        {
+            GCHandle handle = GCHandle.FromIntPtr(userData);
+            context = (FanInAdminOperation<TKey, KafkaException?>)handle.Target!;
+
+            TKey materialized = readKey(key);
+            errorConsumed = true;
+            context.Add(materialized, KafkaException.FromHandle(error));
+        }
+        catch (Exception exception)
+        {
+            context?.SetException(exception);
+        }
+        finally
+        {
+            if (!errorConsumed && error != IntPtr.Zero)
+            {
+                NativeMethods.ErrorDestroy(error);
+            }
+
+            context?.ReleaseOne();
+        }
+    }
+
+    /// <summary>
+    /// <b>Shape 4c, whole-operation form</b> — one callback carrying the whole operation's
+    /// outcome instead of a key's, which is what <c>removeMembersFromConsumerGroup</c>'s
+    /// removeAll mode delivers through a NULL key (§3.0.3).
+    /// </summary>
+    /// <remarks>
+    /// ⚠ A null <paramref name="error"/> adds <b>nothing</b>, so countdown zero resolves the
+    /// aggregate task with an <b>empty</b> map — exactly what
+    /// <c>RemoveMembersFromConsumerGroupResult.All</c> already expects in that mode. A
+    /// non-null one faults the task; it is never mapped to a sentinel key.
+    /// </remarks>
+    private static void CompleteFanInWholeOperation<TKey>(IntPtr error, IntPtr userData)
+        where TKey : notnull
+    {
+        FanInAdminOperation<TKey, KafkaException?>? context = null;
+        bool errorConsumed = false;
+        try
+        {
+            GCHandle handle = GCHandle.FromIntPtr(userData);
+            context = (FanInAdminOperation<TKey, KafkaException?>)handle.Target!;
+
+            errorConsumed = true;
+            KafkaException? failure = KafkaException.FromHandle(error);
+            if (failure is not null)
+            {
+                context.SetException(failure);
             }
         }
         catch (Exception exception)
         {
-            context?.FailAll(exception);
+            context?.SetException(exception);
         }
         finally
         {
-            destroyResult(result);
-            context?.FailUncompleted();
-            context?.FreeGcHandle();
+            if (!errorConsumed && error != IntPtr.Zero)
+            {
+                NativeMethods.ErrorDestroy(error);
+            }
+
+            context?.ReleaseOne();
         }
     }
 
-    private static void OnCreateTopics(IntPtr result, IntPtr error, IntPtr userData) =>
-        CompleteKeyed(
-            result,
+    private static void OnCreateTopics(IntPtr key, IntPtr value, IntPtr error, IntPtr userData) =>
+        CompletePerKey(
+            key,
+            value,
             error,
             userData,
-            CreateTopicsAccessors,
-            CreateTopicsKey,
-            TopicMetadataAndConfigValue,
-            s_destroyCreateTopicsResult);
+            s_stringKey,
+            TopicMetadataAndConfigPerKeyValue,
+            s_destroyTopicMetadataAndConfig);
 
-    private static void OnDeleteTopicsByName(IntPtr result, IntPtr error, IntPtr userData) =>
-        CompleteKeyedVoid(
-            result,
-            error,
-            userData,
-            DeleteTopicsAccessors,
-            DeleteTopicsNameKey,
-            s_destroyDeleteTopicsResult);
+    private static void OnDeleteTopicsByName(IntPtr key, IntPtr error, IntPtr userData) =>
+        CompletePerKeyVoid(key, error, userData, s_stringKey);
 
-    private static void OnDeleteTopicsById(IntPtr result, IntPtr error, IntPtr userData) =>
-        CompleteKeyedVoid(
-            result,
-            error,
-            userData,
-            DeleteTopicsAccessors,
-            DeleteTopicsIdKey,
-            s_destroyDeleteTopicsResult);
+    private static void OnDeleteTopicsById(IntPtr key, IntPtr error, IntPtr userData) =>
+        CompletePerKeyVoid(key, error, userData, s_uuidKey);
 
-    private static void OnDescribeTopicsByName(IntPtr result, IntPtr error, IntPtr userData) =>
-        CompleteKeyed(
-            result,
+    private static void OnDescribeTopicsByName(IntPtr key, IntPtr value, IntPtr error, IntPtr userData) =>
+        CompletePerKey(
+            key,
+            value,
             error,
             userData,
-            DescribeTopicsAccessors,
-            DescribeTopicsNameKey,
-            TopicDescriptionValue,
-            s_destroyDescribeTopicsResult);
+            s_stringKey,
+            TopicDescriptionPerKeyValue,
+            s_destroyTopicDescription);
 
-    private static void OnDescribeTopicsById(IntPtr result, IntPtr error, IntPtr userData) =>
-        CompleteKeyed(
-            result,
+    private static void OnDescribeTopicsById(IntPtr key, IntPtr value, IntPtr error, IntPtr userData) =>
+        CompletePerKey(
+            key,
+            value,
             error,
             userData,
-            DescribeTopicsAccessors,
-            DescribeTopicsIdKey,
-            TopicDescriptionValue,
-            s_destroyDescribeTopicsResult);
+            s_uuidKey,
+            TopicDescriptionPerKeyValue,
+            s_destroyTopicDescription);
 
-    private static void OnCreatePartitions(IntPtr result, IntPtr error, IntPtr userData) =>
-        CompleteKeyedVoid(
-            result,
-            error,
-            userData,
-            CreatePartitionsAccessors,
-            CreatePartitionsKey,
-            s_destroyCreatePartitionsResult);
+    private static void OnCreatePartitions(IntPtr key, IntPtr error, IntPtr userData) =>
+        CompletePerKeyVoid(key, error, userData, s_stringKey);
 
-    private static void OnDeleteRecords(IntPtr result, IntPtr error, IntPtr userData) =>
-        CompleteKeyed(
-            result,
+    private static void OnDeleteRecords(
+        IntPtr topic, int partition, IntPtr value, IntPtr error, IntPtr userData) =>
+        CompletePerKey(
+            new PartitionKeySource(topic, partition),
+            value,
             error,
             userData,
-            DeleteRecordsAccessors,
-            DeleteRecordsKey,
-            DeletedRecordsValue,
-            s_destroyDeleteRecordsResult);
+            s_topicPartitionKey,
+            DeletedRecordsPerKeyValue,
+            s_destroyDeletedRecords);
 
-    private static void OnDescribeConfigs(IntPtr result, IntPtr error, IntPtr userData) =>
-        CompleteKeyed(
-            result,
+    private static void OnDescribeConfigs(
+        int resourceType, IntPtr resourceName, IntPtr value, IntPtr error, IntPtr userData) =>
+        CompletePerKey(
+            new KeyValuePair<int, IntPtr>(resourceType, resourceName),
+            value,
             error,
             userData,
-            DescribeConfigsAccessors,
-            DescribeConfigsKey,
-            ConfigValue,
-            s_destroyDescribeConfigsResult);
+            s_configResourceKey,
+            ConfigPerKeyValue,
+            s_destroyConfig);
 
-    private static void OnIncrementalAlterConfigs(IntPtr result, IntPtr error, IntPtr userData) =>
-        CompleteKeyedVoid(
-            result,
+    private static void OnIncrementalAlterConfigs(
+        int resourceType, IntPtr resourceName, IntPtr error, IntPtr userData) =>
+        CompletePerKeyVoid(
+            new KeyValuePair<int, IntPtr>(resourceType, resourceName),
             error,
             userData,
-            AlterConfigsAccessors,
-            AlterConfigsKey,
-            s_destroyAlterConfigsResult);
+            s_configResourceKey);
 
-    private static void OnDescribeLogDirs(IntPtr result, IntPtr error, IntPtr userData) =>
-        CompleteKeyed(
-            result,
+    private static void OnDescribeLogDirs(int broker, IntPtr value, IntPtr error, IntPtr userData) =>
+        CompletePerKey(
+            broker,
+            value,
             error,
             userData,
-            DescribeLogDirsAccessors,
-            DescribeLogDirsKey,
-            LogDirDescriptionsValue,
-            s_destroyDescribeLogDirsResult);
+            s_int32Key,
+            LogDirDescriptionsPerKeyValue,
+            s_destroyLogDirDescriptionMap);
 
-    private static void OnAlterReplicaLogDirs(IntPtr result, IntPtr error, IntPtr userData) =>
-        CompleteKeyedVoid(
-            result,
-            error,
-            userData,
-            AlterReplicaLogDirsAccessors,
-            AlterReplicaLogDirsKey,
-            s_destroyAlterReplicaLogDirsResult);
+    private static void OnAlterReplicaLogDirs(
+        IntPtr topic, int partition, int brokerId, IntPtr error, IntPtr userData) =>
+        CompletePerKeyVoid(
+            new PartitionKeySource(topic, partition, brokerId), error, userData, s_replicaKey);
 
-    private static void OnDescribeReplicaLogDirs(IntPtr result, IntPtr error, IntPtr userData) =>
-        CompleteKeyed(
-            result,
+    private static void OnDescribeReplicaLogDirs(
+        IntPtr topic, int partition, int brokerId, IntPtr value, IntPtr error, IntPtr userData) =>
+        CompletePerKey(
+            new PartitionKeySource(topic, partition, brokerId),
+            value,
             error,
             userData,
-            DescribeReplicaLogDirsAccessors,
-            DescribeReplicaLogDirsKey,
-            ReplicaLogDirInfoValue,
-            s_destroyDescribeReplicaLogDirsResult);
+            s_replicaKey,
+            ReplicaLogDirInfoPerKeyValue,
+            s_destroyReplicaLogDirInfo);
 
     /// <summary>
     /// The one completion body every <b>shape-3</b> trampoline delegates to: one awaiter
@@ -2945,8 +2740,9 @@ internal static class AdminCallbacks
     /// ⚠ <b>Reading the ABI accessor set alone gets this wrong.</b>
     /// <see cref="OnAlterPartitionReassignments"/> below sits on a byte-identical accessor
     /// set — <c>count</c>, <c>get_topic</c>, <c>get_partition</c>, <c>get_error</c>,
-    /// <c>destroy</c> — and correctly routes through <see cref="CompleteKeyedVoid"/>,
-    /// where <c>get_error(i)</c> faults that partition's own awaitable. Rewiring this
+    /// <c>destroy</c> — and correctly routes through
+    /// <see cref="CompletePerKeyVoid{TKeySource, TKey}"/>, where that partition's own error
+    /// faults its own awaitable. Rewiring this
     /// trampoline to match it compiles and is wrong: it would fault a partition Java
     /// reports as an ordinary map entry, and would replace one future with N.
     /// </para>
@@ -2963,137 +2759,91 @@ internal static class AdminCallbacks
             s_destroyElectLeadersResult);
 
     /// <summary>
-    /// ⚠⚠ <c>alterConsumerGroupOffsets</c>' shape-3 trampoline — <b>the aggregate walker,
-    /// with <c>get_error(i)</c> supplied as the VALUE reader.</b> Same walker as
-    /// <see cref="OnElectLeaders"/>, for the same reason.
-    /// </summary>
-    /// <remarks>
-    /// Java's <c>AlterConsumerGroupOffsetsResult</c> holds
+    /// ⚠⚠ <c>alterConsumerGroupOffsets</c>' shape-<b>4c</b> trampoline: one partition's
+    /// outcome fanned in to the single aggregate task, with the per-partition
+    /// <paramref name="error"/> as the map's <b>VALUE</b>. Java's
     /// <c>KafkaFuture&lt;Map&lt;TopicPartition, Errors&gt;&gt;</c>
-    /// (<c>AlterConsumerGroupOffsetsResult.java:33</c>) — one future over the whole map, so a
-    /// per-partition <c>Errors</c> code is an ordinary map value, not a per-partition fault.
-    /// ⚠ Its accessor set is byte-identical to <see cref="OnElectLeaders"/>'s and to
-    /// <see cref="OnAlterPartitionReassignments"/>'s, which routes through
-    /// <see cref="CompleteKeyedVoid"/> instead — the Java return type, not the ABI shape,
-    /// is what decides the walker.
-    /// </remarks>
-    private static void OnAlterConsumerGroupOffsets(IntPtr result, IntPtr error, IntPtr userData) =>
-        CompleteAggregateRpc(
-            result,
-            error,
-            userData,
-            s_alterConsumerGroupOffsetsCount,
-            AlterConsumerGroupOffsetsKey,
-            AlterConsumerGroupOffsetsOptionalError,
-            EqualityComparer<TopicPartition>.Default,
-            s_destroyAlterConsumerGroupOffsetsResult);
+    /// (<c>AlterConsumerGroupOffsetsResult.java:33</c>) is what decides this, not the
+    /// callback shape — <see cref="OnAlterPartitionReassignments"/> takes the same
+    /// <c>(topic, partition, error)</c> callback and fans out to N tasks instead.
+    /// </summary>
+    private static void OnAlterConsumerGroupOffsets(
+        IntPtr topic, int partition, IntPtr error, IntPtr userData) =>
+        CompletePerKeyFanIn(
+            new PartitionKeySource(topic, partition), error, userData, s_topicPartitionKey);
 
     /// <summary>
-    /// ⚠⚠ <c>deleteConsumerGroupOffsets</c>' shape-3 trampoline — <b>the aggregate walker,
-    /// with <c>get_error(i)</c> supplied as the VALUE reader.</b> Same walker as
-    /// <see cref="OnAlterConsumerGroupOffsets"/>, for the same reason.
+    /// <c>deleteConsumerGroupOffsets</c>' shape-4c trampoline — identical to
+    /// <see cref="OnAlterConsumerGroupOffsets"/>, for the same Java return type
+    /// (<c>DeleteConsumerGroupOffsetsResult.java:33</c>).
+    /// </summary>
+    private static void OnDeleteConsumerGroupOffsets(
+        IntPtr topic, int partition, IntPtr error, IntPtr userData) =>
+        CompletePerKeyFanIn(
+            new PartitionKeySource(topic, partition), error, userData, s_topicPartitionKey);
+
+    /// <summary>
+    /// <c>deleteConsumerGroups</c>' shape-4b trampoline: one awaiter per requested group id,
+    /// the same body as <see cref="OnCreatePartitions"/>.
+    /// </summary>
+    private static void OnDeleteConsumerGroups(IntPtr key, IntPtr error, IntPtr userData) =>
+        CompletePerKeyVoid(key, error, userData, s_stringKey);
+
+    /// <summary>
+    /// ⚠⚠ <c>removeMembersFromConsumerGroup</c>' shape-4c trampoline, with the
+    /// <b>mode-dependent</b> key of
+    /// <see cref="RemoveMembersFromConsumerGroupCallback"/>: a member's
+    /// <c>group.instance.id</c>, or <b>NULL</b> for removeAll's single whole-operation
+    /// callback (§3.0.3). Java's
+    /// <c>KafkaFuture&lt;Map&lt;MemberIdentity, Errors&gt;&gt;</c>
+    /// (<c>RemoveMembersFromConsumerGroupResult.java:35</c>) makes a per-member error an
+    /// ordinary map value.
+    /// </summary>
+    private static void OnRemoveMembersFromConsumerGroup(
+        IntPtr groupInstanceId, IntPtr error, IntPtr userData)
+    {
+        if (groupInstanceId == IntPtr.Zero)
+        {
+            CompleteFanInWholeOperation<string>(error, userData);
+            return;
+        }
+
+        CompletePerKeyFanIn(groupInstanceId, error, userData, s_stringKey);
+    }
+
+    /// <summary>
+    /// <c>createAcls</c>' shape-4b trampoline, whose <b>key</b> is owned.
+    /// </summary>
+    private static void OnCreateAcls(IntPtr binding, IntPtr error, IntPtr userData) =>
+        CompletePerKeyVoidOwnedKey(
+            binding, error, userData, CreateAclsPerKeyKey, s_destroyAclBinding);
+
+    /// <summary>
+    /// <c>alterClientQuotas</c>' <b>shape-4b</b> trampoline: one awaitable per entity, each
+    /// carrying only that entity's own outcome, and whose <b>key</b> is owned.
+    /// </summary>
+    private static void OnAlterClientQuotas(IntPtr entity, IntPtr error, IntPtr userData) =>
+        CompletePerKeyVoidOwnedKey(
+            entity, error, userData, AlterClientQuotasPerKeyKey, s_destroyClientQuotaEntity);
+
+    /// <summary>
+    /// <c>deleteAcls</c>' shape-4a trampoline, and the only one whose <b>key</b> is owned.
     /// </summary>
     /// <remarks>
-    /// Java's <c>DeleteConsumerGroupOffsetsResult</c> holds
-    /// <c>KafkaFuture&lt;Map&lt;TopicPartition, Errors&gt;&gt;</c>
-    /// (<c>DeleteConsumerGroupOffsetsResult.java:33</c>) — one future over the whole map, so a
-    /// per-partition <c>Errors</c> code is an ordinary map value, not a per-partition fault.
-    /// ⚠ Its accessor set is byte-identical to <see cref="OnAlterConsumerGroupOffsets"/>'s —
-    /// the Java return type, not the ABI shape, is what decides the walker.
+    /// ⚠ Three owned handles per callback — filter, value, error. The inner
+    /// <c>get_error(j)</c> the value reader reads stays borrowed and stays a stored value on
+    /// a successfully completed <c>FilterResults</c>; only the top-level error is a fault.
     /// </remarks>
-    private static void OnDeleteConsumerGroupOffsets(IntPtr result, IntPtr error, IntPtr userData) =>
-        CompleteAggregateRpc(
-            result,
+    private static void OnDeleteAcls(IntPtr filter, IntPtr value, IntPtr error, IntPtr userData) =>
+        CompletePerKeyOwnedKey(
+            filter,
+            value,
             error,
             userData,
-            s_deleteConsumerGroupOffsetsCount,
-            DeleteConsumerGroupOffsetsKey,
-            DeleteConsumerGroupOffsetsOptionalError,
-            EqualityComparer<TopicPartition>.Default,
-            s_destroyDeleteConsumerGroupOffsetsResult);
-
-    /// <summary>
-    /// <c>deleteConsumerGroups</c>' shape-2 trampoline: one awaiter per requested group id,
-    /// the same walker as <see cref="OnCreatePartitions"/>.
-    /// </summary>
-    private static void OnDeleteConsumerGroups(IntPtr result, IntPtr error, IntPtr userData) =>
-        CompleteKeyedVoid(
-            result,
-            error,
-            userData,
-            DeleteConsumerGroupsAccessors,
-            DeleteConsumerGroupsKey,
-            s_destroyDeleteConsumerGroupsResult);
-
-    /// <summary>
-    /// ⚠⚠ <c>removeMembersFromConsumerGroup</c>' shape-3 trampoline — <b>the aggregate
-    /// walker, with <c>get_error(i)</c> supplied as the VALUE reader.</b> Same walker as
-    /// <see cref="OnAlterConsumerGroupOffsets"/>, for the same reason.
-    /// </summary>
-    /// <remarks>
-    /// Java's <c>RemoveMembersFromConsumerGroupResult</c> holds
-    /// <c>KafkaFuture&lt;Map&lt;MemberIdentity, Errors&gt;&gt; future</c>
-    /// (<c>RemoveMembersFromConsumerGroupResult.java:35</c>) — one future over the whole
-    /// map, so a per-member <c>Errors</c> code is an ordinary map value, not a per-member
-    /// fault. In <b>removeAll</b> mode
-    /// (<c>NativeMethods.AdminClientRemoveMembersFromConsumerGroupAsync</c>) the result
-    /// handle always carries zero rows, so this walker resolves to an empty map and any
-    /// failure must have arrived through <paramref name="error"/> instead — matching
-    /// Java's <c>all()</c>, which in that mode reports only a call-level fault (see
-    /// <see cref="Admin.RemoveMembersFromConsumerGroupResult"/>'s remarks for the
-    /// documented deviation this forces on <c>All()</c>).
-    /// </remarks>
-    private static void OnRemoveMembersFromConsumerGroup(IntPtr result, IntPtr error, IntPtr userData) =>
-        CompleteAggregateRpc(
-            result,
-            error,
-            userData,
-            s_removeMembersFromConsumerGroupCount,
-            RemoveMembersFromConsumerGroupKey,
-            RemoveMembersFromConsumerGroupOptionalError,
-            StringComparer.Ordinal,
-            s_destroyRemoveMembersFromConsumerGroupResult);
-
-    private static void OnCreateAcls(IntPtr result, IntPtr error, IntPtr userData) =>
-        CompleteKeyedVoid(
-            result,
-            error,
-            userData,
-            CreateAclsAccessors,
-            CreateAclsKey,
-            s_destroyCreateAclsResult);
-
-    /// <summary>
-    /// <c>alterClientQuotas</c>' <b>shape-2</b> trampoline: one awaitable per entity, each
-    /// carrying only that entity's own outcome.
-    /// </summary>
-    private static void OnAlterClientQuotas(IntPtr result, IntPtr error, IntPtr userData) =>
-        CompleteKeyedVoid(
-            result,
-            error,
-            userData,
-            AlterClientQuotasAccessors,
-            AlterClientQuotasKey,
-            s_destroyAlterClientQuotasResult);
-
-    /// <summary>
-    /// <c>deleteAcls</c>' shape-1 trampoline: one awaitable per filter, each carrying that
-    /// filter's own <c>FilterResults</c>.
-    /// </summary>
-    /// <remarks>
-    /// ⚠ The accessor set's <c>get_error(i)</c> faults the filter's <c>Task</c>; the inner
-    /// <c>get_result_error(i, j)</c> the value reader reads is a stored value on a
-    /// successfully completed one. Both are borrowed; neither is destroyed.
-    /// </remarks>
-    private static void OnDeleteAcls(IntPtr result, IntPtr error, IntPtr userData) =>
-        CompleteKeyed(
-            result,
-            error,
-            userData,
-            DeleteAclsAccessors,
-            DeleteAclsKey,
-            DeleteAclsFilterResults,
-            s_destroyDeleteAclsResult);
+            DeleteAclsPerKeyKey,
+            DeleteAclsFilterResultsPerKeyValue,
+            s_destroyDeleteAclsFilterResults,
+            s_destroyAclBindingFilter);
 
     /// <summary>
     /// <c>listPartitionReassignments</c>' shape-3 trampoline: one awaiter over
@@ -3122,30 +2872,25 @@ internal static class AdminCallbacks
     /// <c>listOffsets</c>' shape-1 trampoline: one awaitable per partition, each carrying
     /// that partition's own value or its own borrowed error.
     /// </summary>
-    private static void OnListOffsets(IntPtr result, IntPtr error, IntPtr userData) =>
-        CompleteKeyed(
-            result,
+    private static void OnListOffsets(
+        IntPtr topic, int partition, IntPtr value, IntPtr error, IntPtr userData) =>
+        CompletePerKey(
+            new PartitionKeySource(topic, partition),
+            value,
             error,
             userData,
-            ListOffsetsAccessors,
-            ListOffsetsKey,
-            ListOffsetsInfoValue,
-            s_destroyListOffsetsResult);
+            s_topicPartitionKey,
+            ListOffsetsInfoPerKeyValue,
+            s_destroyListOffsetsResultInfo);
 
     /// <summary>
-    /// <c>alterPartitionReassignments</c>' shape-2 trampoline: one awaitable per
-    /// partition, faulted by that partition's own borrowed <c>get_error(i)</c>. ⚠⚠ Its
-    /// accessor set is byte-identical to <see cref="OnElectLeaders"/>'; the Java return
-    /// type is what separates them.
+    /// <c>alterPartitionReassignments</c>' shape-4b trampoline: one awaitable per
+    /// partition, faulted by that partition's own owned error.
     /// </summary>
-    private static void OnAlterPartitionReassignments(IntPtr result, IntPtr error, IntPtr userData) =>
-        CompleteKeyedVoid(
-            result,
-            error,
-            userData,
-            AlterPartitionReassignmentsAccessors,
-            AlterPartitionReassignmentsKey,
-            s_destroyAlterPartitionReassignmentsResult);
+    private static void OnAlterPartitionReassignments(
+        IntPtr topic, int partition, IntPtr error, IntPtr userData) =>
+        CompletePerKeyVoid(
+            new PartitionKeySource(topic, partition), error, userData, s_topicPartitionKey);
 
     /// <summary>
     /// The <b>shape-5</b> trampoline: one awaiter over four cluster attributes, and no
@@ -3442,31 +3187,30 @@ internal static class AdminCallbacks
 #pragma warning restore CS0618
 
     /// <summary>
-    /// <c>describeConsumerGroups</c>' <b>shape-1</b> trampoline: one future per requested
-    /// group id, each resolved with that group's description or faulted with that group's
-    /// own error.
+    /// <c>describeConsumerGroups</c>' <b>shape-4a</b> trampoline: one callback per group,
+    /// resolving that group's own future with its description or faulting it with its own
+    /// error.
     /// </summary>
     /// <remarks>
-    /// The two error directions meet here as in every keyed RPC:
-    /// <paramref name="error"/> is the callback's own parameter, non-const, meaning the
-    /// request could not be submitted at all — it is <b>OWNED</b> and fails every requested
-    /// key; the per-group errors <see cref="DescribeConsumerGroupsAccessors"/> reaches
-    /// through <c>get_error</c> are <b>BORROWED</b> from the result root and are read, never
-    /// freed. Both live in <see cref="CompleteKeyed{TKey, TValue}"/>, which also destroys
-    /// this RPC's own root in its <c>finally</c>, strictly after the copy-out.
+    /// ⚠ There is one error direction here, not two: <paramref name="error"/> is this
+    /// <em>key's</em> outcome and is <b>OWNED</b>, so it goes through
+    /// <c>KafkaException.FromHandle</c> — the inverse of the borrowed per-key errors the
+    /// shape-1 walk read out of a result root.
     /// </remarks>
-    /// <param name="result">The owned result root, or <c>IntPtr.Zero</c> on a submit failure.</param>
-    /// <param name="error">The submit failure, or <c>IntPtr.Zero</c>. <b>OWNED</b>.</param>
+    /// <param name="key">The borrowed group id.</param>
+    /// <param name="value">This group's owned description, or <c>IntPtr.Zero</c>.</param>
+    /// <param name="error">This group's owned error, or <c>IntPtr.Zero</c>.</param>
     /// <param name="userData">The per-operation <c>GCHandle</c>.</param>
-    private static void OnDescribeConsumerGroups(IntPtr result, IntPtr error, IntPtr userData) =>
-        CompleteKeyed(
-            result,
+    private static void OnDescribeConsumerGroups(
+        IntPtr key, IntPtr value, IntPtr error, IntPtr userData) =>
+        CompletePerKey(
+            key,
+            value,
             error,
             userData,
-            DescribeConsumerGroupsAccessors,
-            DescribeConsumerGroupsKey,
-            ConsumerGroupDescriptionValue,
-            s_destroyDescribeConsumerGroupsResult);
+            s_stringKey,
+            ConsumerGroupDescriptionPerKeyValue,
+            s_destroyConsumerGroupDescription);
 
     /// <summary>
     /// Copies one borrowed <c>ConsumerGroupDescription_t</c> out into an owned
@@ -3605,32 +3349,28 @@ internal static class AdminCallbacks
     }
 
     /// <summary>
-    /// <c>describeClassicGroups</c>' <b>shape-1</b> trampoline: one future per requested
-    /// group id, each resolved with that group's description or faulted with that group's
-    /// own error.
+    /// <c>describeClassicGroups</c>' <b>shape-4a</b> trampoline: one callback per group.
     /// </summary>
     /// <remarks>
-    /// The two error directions meet here as in every keyed RPC:
-    /// <paramref name="error"/> is the callback's own parameter, non-const, meaning the
-    /// request could not be submitted at all — it is <b>OWNED</b> and fails every requested
-    /// key; the per-group errors <see cref="DescribeClassicGroupsAccessors"/> reaches
-    /// through <c>get_error</c> are <b>BORROWED</b> from the result root and are read, never
-    /// freed. Both live in <see cref="CompleteKeyed{TKey, TValue}"/>, which also destroys
-    /// this RPC's own root — not <c>describeConsumerGroups</c>' — in its <c>finally</c>,
-    /// strictly after the copy-out.
+    /// ⚠ <paramref name="value"/> is destroyed with
+    /// <c>kafka_admin_ClassicGroupDescription_destroy</c> — not
+    /// <c>describeConsumerGroups</c>' namesake, which would free the wrong native type.
+    /// See <see cref="OnDescribeConsumerGroups"/> on the owned per-key error.
     /// </remarks>
-    /// <param name="result">The owned result root, or <c>IntPtr.Zero</c> on a submit failure.</param>
-    /// <param name="error">The submit failure, or <c>IntPtr.Zero</c>. <b>OWNED</b>.</param>
+    /// <param name="key">The borrowed group id.</param>
+    /// <param name="value">This group's owned description, or <c>IntPtr.Zero</c>.</param>
+    /// <param name="error">This group's owned error, or <c>IntPtr.Zero</c>.</param>
     /// <param name="userData">The per-operation <c>GCHandle</c>.</param>
-    private static void OnDescribeClassicGroups(IntPtr result, IntPtr error, IntPtr userData) =>
-        CompleteKeyed(
-            result,
+    private static void OnDescribeClassicGroups(
+        IntPtr key, IntPtr value, IntPtr error, IntPtr userData) =>
+        CompletePerKey(
+            key,
+            value,
             error,
             userData,
-            DescribeClassicGroupsAccessors,
-            DescribeClassicGroupsKey,
-            ClassicGroupDescriptionValue,
-            s_destroyDescribeClassicGroupsResult);
+            s_stringKey,
+            ClassicGroupDescriptionPerKeyValue,
+            s_destroyClassicGroupDescription);
 
     /// <summary>
     /// Copies one borrowed <c>ClassicGroupDescription_t</c> out into an owned
@@ -3702,31 +3442,27 @@ internal static class AdminCallbacks
     }
 
     /// <summary>
-    /// <c>listConsumerGroupOffsets</c>' <b>shape-1</b> trampoline: one future per requested
-    /// group id, each resolved with that group's committed offsets or faulted with that
-    /// group's own error.
+    /// <c>listConsumerGroupOffsets</c>' <b>shape-4a</b> trampoline: one callback per group,
+    /// carrying that group's committed offsets or its own error.
     /// </summary>
     /// <remarks>
-    /// The two error directions meet here as in every keyed RPC:
-    /// <paramref name="error"/> is the callback's own parameter, non-const, meaning the
-    /// request could not be submitted at all — it is <b>OWNED</b> and fails every requested
-    /// key; the per-group errors <see cref="ListConsumerGroupOffsetsAccessors"/> reaches
-    /// through <c>get_error</c> are <b>BORROWED</b> from the result root and are read, never
-    /// freed. Both live in <see cref="CompleteKeyed{TKey, TValue}"/>, which also destroys
-    /// this RPC's own root in its <c>finally</c>, strictly after the copy-out.
+    /// See <see cref="OnDescribeConsumerGroups"/> on the owned per-key error. The offsets
+    /// map is owned too and is destroyed after the copy-out completes.
     /// </remarks>
-    /// <param name="result">The owned result root, or <c>IntPtr.Zero</c> on a submit failure.</param>
-    /// <param name="error">The submit failure, or <c>IntPtr.Zero</c>. <b>OWNED</b>.</param>
+    /// <param name="key">The borrowed group id.</param>
+    /// <param name="value">This group's owned offsets map, or <c>IntPtr.Zero</c>.</param>
+    /// <param name="error">This group's owned error, or <c>IntPtr.Zero</c>.</param>
     /// <param name="userData">The per-operation <c>GCHandle</c>.</param>
-    private static void OnListConsumerGroupOffsets(IntPtr result, IntPtr error, IntPtr userData) =>
-        CompleteKeyed(
-            result,
+    private static void OnListConsumerGroupOffsets(
+        IntPtr key, IntPtr value, IntPtr error, IntPtr userData) =>
+        CompletePerKey(
+            key,
+            value,
             error,
             userData,
-            ListConsumerGroupOffsetsAccessors,
-            ListConsumerGroupOffsetsKey,
-            ListConsumerGroupOffsetsValue,
-            s_destroyListConsumerGroupOffsetsResult);
+            s_stringKey,
+            ListConsumerGroupOffsetsPerKeyValue,
+            s_destroyOffsetAndMetadataMap);
 
     /// <summary>
     /// Copies one group's <b>borrowed</b> <c>kafka_admin_OffsetAndMetadataMap_t</c> into an

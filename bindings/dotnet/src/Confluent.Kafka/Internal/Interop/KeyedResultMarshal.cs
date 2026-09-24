@@ -54,7 +54,7 @@ namespace Confluent.Kafka.Internal.Interop;
 /// <c>Map&lt;String, KafkaFuture&lt;Void&gt;&gt;</c> narrowed by
 /// <c>thenApply(v -&gt; null)</c> (<c>:43-45</c>), which reads as the shape-2 signature.
 /// The stored field decides: <c>createTopics</c> routes through
-/// <see cref="Complete{TKey, TValue}(IntPtr, Accessors, KeyedAdminOperation{TKey, TValue}, Func{IntPtr, int, TKey}, Func{IntPtr, int, TValue})"/>,
+/// <see cref="CompleteKey{TKey, TValue}"/>,
 /// and this binding mirrors Java's own erasure at the same place — its public
 /// <c>Values</c> is likewise an <c>IReadOnlyDictionary&lt;string, Task&gt;</c>, while
 /// <c>config()</c> / <c>topicId()</c> / <c>numPartitions()</c> /
@@ -71,7 +71,7 @@ namespace Confluent.Kafka.Internal.Interop;
 /// <b>Shape 1</b> — Java gives <b>one future per key, carrying a value</b>
 /// (<c>Map&lt;K, KafkaFuture&lt;V&gt;&gt;</c> with a non-<c>Void</c> <c>V</c>). Goes
 /// through
-/// <see cref="Complete{TKey, TValue}(IntPtr, Accessors, KeyedAdminOperation{TKey, TValue}, Func{IntPtr, int, TKey}, Func{IntPtr, int, TValue})"/>.
+/// <see cref="CompleteKey{TKey, TValue}"/>.
 /// ⚠ Do <b>not</b> read this as the accessor set <c>count</c> / <c>get_key</c> /
 /// <c>get_value</c> / <c>get_error</c>. <b>Declaring a <c>get_key</c> is the MINORITY
 /// case: 2 of the 7 bound shape-1 results do</b> (<c>createTopics</c>,
@@ -90,7 +90,7 @@ namespace Confluent.Kafka.Internal.Interop;
 /// <em>is</em> the success value. ⚠ "Holds", not "publishes":
 /// <c>CreateTopicsResult.values()</c> has this exact signature and is <b>shape 1</b> —
 /// see the stored-versus-derived paragraph above. Goes through
-/// <see cref="Complete{TKey}(IntPtr, Accessors, VoidKeyedAdminOperation{TKey}, Func{IntPtr, int, TKey})"/>,
+/// <see cref="CompleteKey{TKey}(VoidKeyedAdminOperation{TKey}, TKey, IntPtr)"/>,
 /// which has <b>no value parameter at all</b>. The ABI agrees today — no shape-2 result
 /// declares a <c>_get_value</c>, and the header says why: "Java's per-key future is
 /// <c>KafkaFuture&lt;Void&gt;</c>, so a null error <b>is</b> the success value" — but that
@@ -194,14 +194,6 @@ internal static class KeyedResultMarshal
     internal delegate IntPtr IndexedAccessor(IntPtr result, int index);
 
     /// <summary>
-    /// The success token for a shape-2 walk. Hoisted to a single instance so the
-    /// value-less overload allocates no delegate, and expressed as a reader like every
-    /// other value so that "success carries no value" is a value the walker
-    /// <em>produces</em> rather than a branch it <em>infers from a null</em>.
-    /// </summary>
-    private static readonly Func<IntPtr, int, bool> s_voidSuccess = static (result, index) => true;
-
-    /// <summary>
     /// One RPC's <b>universal</b> <c>*Result_t</c> accessors. Built once per RPC as a
     /// <c>static readonly</c> field (method groups bind directly to the delegate
     /// types), so walking a result allocates no delegates.
@@ -270,110 +262,104 @@ internal static class KeyedResultMarshal
         (result, index) => ReadStringKey(getKey(result, index));
 
     /// <summary>
-    /// <b>Shape 1 and the inline-scalar sub-shape.</b> Walks <paramref name="result"/> and
-    /// resolves every per-key awaiter on <paramref name="operation"/>, reading each key's
-    /// own value. Runs on whichever thread the completion callback fired on, and must
-    /// complete <b>before</b> the caller destroys the result root.
+    /// <b>Shape 4a — one independent per-key callback, carrying that key's own value.</b>
+    /// Resolves exactly one key from one callback invocation; there is <b>no result root</b>
+    /// in this shape, so both handles delivered here are independently <b>owned</b>.
     /// </summary>
-    /// <param name="result">
-    /// The owned result root. Never null on the path that reaches here (a non-null
-    /// callback <c>error</c> means there is no result and the caller faults every key
-    /// instead).
-    /// </param>
-    /// <param name="accessors">That RPC's universal accessors.</param>
+    /// <remarks>
+    /// <para>
+    /// ⚠ <b>The per-key error is OWNED here, the exact inverse of the shape-1 walk above.</b>
+    /// Nothing shares its lifetime, so it goes through
+    /// <see cref="KafkaException.FromHandle(IntPtr)"/>. Leaving a
+    /// <see cref="KafkaException.FromBorrowedHandle(IntPtr)"/> on this path leaks one error
+    /// per failing key.
+    /// </para>
+    /// <para>
+    /// ⚠ <b>The value is owned too</b>, and is destroyed in the <c>finally</c> with its own
+    /// <c>kafka_admin_*_destroy</c> — <em>not</em> the RPC's <c>*Result_destroy</c>, which
+    /// belongs to the synchronous flattened result.
+    /// </para>
+    /// <para>
+    /// The <c>catch</c> is the <b>per-callback</b> no-throw boundary: this key's marshalling
+    /// failure faults only this key, leaving the other N−1 to their own callbacks.
+    /// </para>
+    /// </remarks>
     /// <param name="operation">The per-key bridge holding one source per requested key.</param>
-    /// <param name="readKey">
-    /// Reads the key at one index straight out of the result root — see the reader note in
-    /// the class remarks.
-    /// </param>
-    /// <param name="readValue">
-    /// Reads the value at one index straight out of the result root and copies it into an
-    /// owned managed <typeparamref name="TValue"/>. <b>Required</b>: whether the value is
-    /// a borrowed child handle (<c>get_value(i)</c> then a copy-out) or an inline scalar
-    /// (<c>get_low_watermark(i)</c>) is the reader's business, not the walker's. See the
-    /// no-nullable-value-channel note in the class remarks.
-    /// </param>
+    /// <param name="key">This callback's key, already copied out of the borrowed key pointer.</param>
+    /// <param name="value">This key's owned value handle, or <see cref="IntPtr.Zero"/> on failure.</param>
+    /// <param name="error">This key's owned error, or <see cref="IntPtr.Zero"/> on success.</param>
+    /// <param name="readValue">Copies <paramref name="value"/> into an owned managed <typeparamref name="TValue"/>.</param>
+    /// <param name="destroyValue">That value type's own destroy. Null-safe, so it runs unconditionally.</param>
     /// <typeparam name="TKey">The managed per-key key type.</typeparam>
     /// <typeparam name="TValue">The managed per-key result type.</typeparam>
-    internal static void Complete<TKey, TValue>(
-        IntPtr result,
-        Accessors accessors,
+    internal static void CompleteKey<TKey, TValue>(
         KeyedAdminOperation<TKey, TValue> operation,
-        Func<IntPtr, int, TKey> readKey,
-        Func<IntPtr, int, TValue> readValue)
+        TKey key,
+        IntPtr value,
+        IntPtr error,
+        Func<IntPtr, TValue> readValue,
+        Action<IntPtr> destroyValue)
         where TKey : notnull
     {
-        int count = accessors.Count(result);
-        for (int index = 0; index < count; index++)
+        try
         {
-            TKey key;
-            try
+            KafkaException? failure = KafkaException.FromHandle(error);
+            if (failure is not null)
             {
-                key = readKey(result, index);
+                operation.SetException(key, failure);
             }
-            catch (Exception)
+            else
             {
-                // Defensive: the loop is bounded by `count`, so the ABI always has a key
-                // here. A key we cannot name has no source to resolve, and attributing the
-                // failure to some *other* key would be worse than not attributing it;
-                // FailUncompleted then faults whichever requested key went unaccounted for.
-                continue;
+                operation.SetResult(key, readValue(value));
             }
-
-            try
-            {
-                IntPtr error = accessors.GetError(result, index);
-                if (error != IntPtr.Zero)
-                {
-                    // ⚠ BORROWED — read, never destroy. See the class remarks.
-                    //
-                    // ⚠ This — not any in-band sentinel — is the authoritative
-                    // success/failure signal. `deleteRecords` documents "-1 if that
-                    // partition failed", but the very same sentence gives -1 a second
-                    // meaning ("or `index` is out of range"), and -1 is also a legitimate
-                    // low watermark. So the sentinel is read as a value, never as a
-                    // verdict: a -1 with a NULL error is a SUCCESS carrying -1.
-                    operation.SetException(key, KafkaException.FromBorrowedHandle(error)!);
-                    continue;
-                }
-
-                operation.SetResult(key, readValue(result, index));
-            }
-            catch (Exception exception)
-            {
-                // A marshalling failure belongs to THIS key: faulting only its own Task
-                // keeps every other key's outcome intact, which is the whole point of
-                // per-key granularity. The trampoline's no-throw boundary still stands
-                // above this as the last resort.
-                operation.SetException(key, exception);
-            }
+        }
+        catch (Exception exception)
+        {
+            operation.SetException(key, exception);
+        }
+        finally
+        {
+            destroyValue(value);
         }
     }
 
     /// <summary>
-    /// <b>Shape 2 — the per-key <c>KafkaFuture&lt;Void&gt;</c> form.</b> Identical walk,
-    /// except that a null per-key error <em>is</em> the success value: these RPCs have no
-    /// <c>_get_value</c> function to point at.
+    /// <b>Shape 4b — one independent per-key callback with no value.</b> Java's per-key
+    /// future is <c>KafkaFuture&lt;Void&gt;</c>, so a null <paramref name="error"/>
+    /// <em>is</em> the success value.
     /// </summary>
     /// <remarks>
-    /// This overload exists so that "this result has no per-key value" is stated by
-    /// <em>which method you call</em>, not by nulling a parameter out. It takes a
-    /// <see cref="VoidKeyedAdminOperation{TKey}"/> rather than the base type, so a
-    /// value-carrying operation cannot be routed here and have its value dropped — the
-    /// exact silent failure P2a's nullable value channel allowed.
+    /// Its own callable rather than a null value reader, for the reason stated in the class
+    /// remarks. ⚠ <paramref name="error"/> is <b>owned</b> — see
+    /// <see cref="CompleteKey{TKey, TValue}"/>.
     /// </remarks>
-    /// <param name="result">The owned result root.</param>
-    /// <param name="accessors">That RPC's universal accessors.</param>
     /// <param name="operation">The per-key void bridge.</param>
-    /// <param name="readKey">That RPC's key reader.</param>
+    /// <param name="key">This callback's key, already copied out.</param>
+    /// <param name="error">This key's owned error, or <see cref="IntPtr.Zero"/> on success.</param>
     /// <typeparam name="TKey">The managed per-key key type.</typeparam>
-    internal static void Complete<TKey>(
-        IntPtr result,
-        Accessors accessors,
+    internal static void CompleteKey<TKey>(
         VoidKeyedAdminOperation<TKey> operation,
-        Func<IntPtr, int, TKey> readKey)
-        where TKey : notnull =>
-        Complete(result, accessors, operation, readKey, s_voidSuccess);
+        TKey key,
+        IntPtr error)
+        where TKey : notnull
+    {
+        try
+        {
+            KafkaException? failure = KafkaException.FromHandle(error);
+            if (failure is not null)
+            {
+                operation.SetException(key, failure);
+            }
+            else
+            {
+                operation.SetResult(key, true);
+            }
+        }
+        catch (Exception exception)
+        {
+            operation.SetException(key, exception);
+        }
+    }
 
     /// <summary>
     /// <b>Shape 3 — one aggregate future over the whole map.</b> Builds the entire
@@ -400,7 +386,7 @@ internal static class KeyedResultMarshal
     /// <em>value</em>: it is passed as <paramref name="readValue"/>, not as an error
     /// channel. <b>The Java return type decides the shape; the header decides the
     /// mechanics.</b> "Correcting" <c>electLeaders</c> onto
-    /// <see cref="Complete{TKey}(IntPtr, Accessors, VoidKeyedAdminOperation{TKey}, Func{IntPtr, int, TKey})"/>
+    /// <see cref="CompleteKey{TKey}(VoidKeyedAdminOperation{TKey}, TKey, IntPtr)"/>
     /// on the strength of its accessor set compiles, and was measured at <b>10</b> failing
     /// tests. See <c>AdminCallbacks.ElectLeadersOptionalError</c>.
     /// </para>

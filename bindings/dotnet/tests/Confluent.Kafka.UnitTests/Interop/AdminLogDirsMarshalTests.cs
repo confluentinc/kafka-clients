@@ -42,12 +42,12 @@ namespace Confluent.Kafka.UnitTests.Interop;
 /// and only then read.
 /// </para>
 /// <para>
-/// ⚠⚠ <b>Stage 3 has TWO KINDS of borrowed <c>KafkaError</c>, and they are read at
-/// different depths.</b> The per-key one (<c>*Result_get_error(i)</c>) is read by the
-/// shared walker; the nested one (<c>LogDirDescription_error</c>) is read by
-/// <see cref="LogDirMarshal"/> inside the value tree. Both are <c>const</c> — borrowed,
-/// never destroyed — and both die with the one root. Their <em>reachability</em> differs
-/// sharply against the mock, which is measured rather than assumed and recorded on
+/// ⚠⚠ <b>Since M15/P9 the per-key <c>KafkaError</c> is OWNED and the nested one is still
+/// borrowed.</b> The per-key one arrives as its own callback argument and is destroyed by
+/// whoever reads it; the nested <c>LogDirDescription_error</c> is read by
+/// <see cref="LogDirMarshal"/> inside the value tree, is <c>const</c> — borrowed, never
+/// destroyed — and dies with the value root. Their <em>reachability</em> differs sharply
+/// against the mock, which is measured rather than assumed and recorded on
 /// <see cref="TheNestedDirectoryError_IsAFieldOnASuccessfulDescription"/>.
 /// </para>
 /// </remarks>
@@ -67,13 +67,15 @@ public sealed class AdminLogDirsMarshalTests
     /// Rooted for the process lifetime, as every callback handed to native must be
     /// (ffi §B6 keep-alive) — even a test's.
     /// </summary>
-    private static readonly AdminCallbacks.DescribeLogDirsCallback s_captureLogDirs = OnCapture;
+    private static readonly AdminCallbacks.DescribeLogDirsCallback s_captureLogDirs = OnCaptureLogDirs;
 
     /// <inheritdoc cref="s_captureLogDirs"/>
-    private static readonly AdminCallbacks.DescribeReplicaLogDirsCallback s_captureReplicas = OnCapture;
+    private static readonly AdminCallbacks.DescribeReplicaLogDirsCallback s_captureReplicas =
+        OnCaptureReplica;
 
     /// <inheritdoc cref="s_captureLogDirs"/>
-    private static readonly AdminCallbacks.AlterReplicaLogDirsCallback s_captureAlterReplicas = OnCapture;
+    private static readonly AdminCallbacks.AlterReplicaLogDirsCallback s_captureAlterReplicas =
+        OnCaptureAlterReplica;
 
     /// <summary>
     /// ⚠ <b>The test that catches a lazily-held borrowed pointer in the deepest Stage-3
@@ -81,7 +83,7 @@ public sealed class AdminLogDirsMarshalTests
     /// the root is still alive, which is why the read order below is inverted: the whole
     /// per-broker map — paths, descriptions,
     /// volume sizes and every replica — is read <em>after</em>
-    /// <c>DescribeLogDirsResult_destroy</c> has invalidated every pointer it came from.
+    /// <c>LogDirDescriptionMap_destroy</c> has invalidated every pointer it came from.
     /// </summary>
     [Fact]
     public async Task TheLogDirTree_IsCopiedOut_AndSurvivesTheRootsDestroy()
@@ -91,25 +93,24 @@ public sealed class AdminLogDirsMarshalTests
         await TestTimeout.Run(
             () => admin.CreateTopics(new[] { new NewTopic(Topic, 2, 1) }, options: null).All(), s_deadline);
 
-        IntPtr result = SubmitLogDirsAndCapture(admin, 0);
+        LogDirsCaptureState capture = SubmitLogDirsAndCapture(admin, 0);
 
         IReadOnlyDictionary<string, LogDirDescription> directories;
         try
         {
-            Assert.Equal(1, NativeMethods.DescribeLogDirsResultCount(result));
-            Assert.Equal(0, NativeMethods.DescribeLogDirsResultGetBroker(result, 0));
+            // The key crossed as a plain int32_t broker id, and there is no per-key error,
+            // so the value is present.
+            Assert.Equal(0, capture.Broker);
+            Assert.Equal(IntPtr.Zero, capture.Error);
 
-            // No per-broker error, so the value is present.
-            Assert.Equal(IntPtr.Zero, NativeMethods.DescribeLogDirsResultGetError(result, 0));
-
-            directories = AdminCallbacks.LogDirDescriptionsValue(result, 0);
+            directories = AdminCallbacks.LogDirDescriptionsPerKeyValue(capture.Value);
         }
         finally
         {
-            NativeMethods.DescribeLogDirsResultDestroy(result);
+            NativeMethods.LogDirDescriptionMapDestroy(capture.Value);
         }
 
-        // The root is gone. Everything below reads only owned managed state.
+        // The value is gone. Everything below reads only owned managed state.
         LogDirDescription description = Assert.Contains(DefaultLogDir, directories);
         Assert.Null(description.Error);
 
@@ -129,9 +130,9 @@ public sealed class AdminLogDirsMarshalTests
     }
 
     /// <summary>
-    /// The <c>describeReplicaLogDirs</c> value is copied out before its root dies too, with
-    /// the two genuinely-nullable directory strings preserved as
-    /// <see langword="null"/> rather than <c>""</c>.
+    /// The <c>describeReplicaLogDirs</c> value is copied out before it dies too, with the
+    /// two genuinely-nullable directory strings preserved as <see langword="null"/> rather
+    /// than <c>""</c>.
     /// </summary>
     [Fact]
     public async Task TheReplicaInfo_IsCopiedOut_AndSurvivesTheRootsDestroy()
@@ -142,28 +143,23 @@ public sealed class AdminLogDirsMarshalTests
             () => admin.CreateTopics(new[] { new NewTopic(Topic, 1, 1) }, options: null).All(), s_deadline);
 
         TopicPartitionReplica replica = new TopicPartitionReplica(Topic, 0, 0);
-        IntPtr result = SubmitReplicaLogDirsAndCapture(admin, replica);
+        ReplicaCaptureState capture = SubmitReplicaLogDirsAndCapture(admin, replica);
 
         DescribeReplicaLogDirsResult.ReplicaLogDirInfo info;
-        TopicPartitionReplica key;
         try
         {
-            Assert.Equal(1, NativeMethods.DescribeReplicaLogDirsResultCount(result));
-            Assert.Equal(IntPtr.Zero, NativeMethods.DescribeReplicaLogDirsResultGetError(result, 0));
+            // The 3-part key crossed as three scalar arguments, copied out in the callback
+            // because the topic pointer is borrowed for the call only. No per-key error, so
+            // the value is present.
+            Assert.Equal(replica, new TopicPartitionReplica(capture.Topic!, capture.Partition, capture.BrokerId));
+            Assert.Equal(IntPtr.Zero, capture.Error);
 
-            key = AdminCallbacks.DescribeReplicaLogDirsKey(result, 0);
-            info = AdminCallbacks.ReplicaLogDirInfoValue(result, 0);
+            info = AdminCallbacks.ReplicaLogDirInfoPerKeyValue(capture.Value);
         }
         finally
         {
-            NativeMethods.DescribeReplicaLogDirsResultDestroy(result);
+            NativeMethods.ReplicaLogDirInfoDestroy(capture.Value);
         }
-
-        // The 3-part composite key reassembled from three separate accessors.
-        Assert.Equal(replica, key);
-        Assert.Equal(Topic, key.Topic);
-        Assert.Equal(0, key.Partition);
-        Assert.Equal(0, key.BrokerId);
 
         Assert.Equal(DefaultLogDir, info.GetCurrentReplicaLogDir());
         Assert.Equal(0, info.GetCurrentReplicaOffsetLag());
@@ -174,26 +170,27 @@ public sealed class AdminLogDirsMarshalTests
     }
 
     /// <summary>
-    /// ⚠⚠ <b>THE INJECTION POINT for the per-key borrowed error in Stage 3.</b> Reading it
-    /// leaves it alive, so the single root destroy that follows is the only free — and the
-    /// message is the mock's, asserted exactly (<c>definition-of-done.md</c> §3).
+    /// ⚠⚠ <b>M15/P9 CP6 inverted this claim: the per-replica error is now OWNED.</b> The
+    /// per-key ABI hands each replica its own <c>kafka_common_KafkaError_t</c> and no result
+    /// root, so the callback is the only free site and
+    /// <see cref="KafkaException.FromHandle"/> — which destroys — is the only correct reader.
     /// </summary>
     /// <remarks>
-    /// Under the injection this guards against — teaching
-    /// <see cref="KafkaException.FromBorrowedHandle"/> (or this call site) to destroy — the
-    /// re-read below becomes a use-after-free and the destroy a double free, which aborts
-    /// the test host rather than failing an assertion.
+    /// Before CP6 this same error was a borrowed <c>const</c> field inside an aggregate
+    /// <c>AlterReplicaLogDirsResult_t</c>, read twice here to prove reading did not consume
+    /// it, with the root destroy as the single free. There is no root any more: reading the
+    /// handle twice would be a use-after-free, and a <c>FromBorrowedHandle</c> read would
+    /// leak it.
     /// <para>
     /// ⚠ <b><c>alterReplicaLogDirs</c> is the RPC used here because the mock completes its
     /// per-replica futures <em>exceptionally</em></b> (<c>mock_admin_client.rs:1300-1305</c>
-    /// and <c>:1327-1331</c>), which is what puts a non-null borrowed error into a result at
-    /// all. Where a mock completes every key successfully the same walker code still runs,
-    /// but with a null pointer — so an injection routed through such an RPC would be
-    /// measuring nothing.
+    /// and <c>:1327-1331</c>), which is what puts a non-null error into the callback at all.
+    /// Where a mock completes every key successfully the callback still fires, but with a
+    /// null pointer — so an injection routed through such an RPC would measure nothing.
     /// </para>
     /// </remarks>
     [Fact]
-    public async Task PerReplicaError_IsBorrowed_AndSurvivesTheWalk()
+    public async Task PerReplicaError_IsOwned_AndIsConsumedByTheCallback()
     {
         using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
 
@@ -201,28 +198,21 @@ public sealed class AdminLogDirsMarshalTests
             () => admin.CreateTopics(new[] { new NewTopic(Topic, 1, 1) }, options: null).All(), s_deadline);
 
         TopicPartitionReplica replica = new TopicPartitionReplica(Topic, 0, 0);
-        IntPtr result = SubmitAlterReplicaLogDirsAndCapture(admin, replica, "/not-a-configured-dir");
+        ReplicaCaptureState capture =
+            SubmitAlterReplicaLogDirsAndCapture(admin, replica, "/not-a-configured-dir");
 
-        try
-        {
-            IntPtr error = NativeMethods.AlterReplicaLogDirsResultGetError(result, 0);
-            Assert.NotEqual(IntPtr.Zero, error);
+        // The key crossed as its own three scalars, not as an index into a root.
+        Assert.Equal(Topic, capture.Topic);
+        Assert.Equal(0, capture.Partition);
+        Assert.Equal(0, capture.BrokerId);
 
-            KafkaException first = Assert.IsType<KafkaException>(KafkaException.FromBorrowedHandle(error));
+        Assert.NotEqual(IntPtr.Zero, capture.Error);
 
-            // The mock's exact message (mock_admin_client.rs:1304).
-            Assert.Equal("Log directory /not-a-configured-dir is offline", first.Message);
+        // FromHandle destroys the handle in its own finally — the single free.
+        KafkaException failure = Assert.IsType<KafkaException>(KafkaException.FromHandle(capture.Error));
 
-            // Borrowed: reading it did not consume it, so the same pointer still resolves.
-            KafkaException second = Assert.IsType<KafkaException>(KafkaException.FromBorrowedHandle(error));
-            Assert.Equal(first.Message, second.Message);
-            Assert.Equal(first.Code, second.Code);
-        }
-        finally
-        {
-            // The ONLY free: the root. The per-replica error dies with it.
-            NativeMethods.AlterReplicaLogDirsResultDestroy(result);
-        }
+        // The mock's exact message (mock_admin_client.rs:1304).
+        Assert.Equal("Log directory /not-a-configured-dir is offline", failure.Message);
     }
 
     /// <summary>
@@ -348,9 +338,9 @@ public sealed class AdminLogDirsMarshalTests
         }
     }
 
-    private static IntPtr SubmitLogDirsAndCapture(NativeAdminClient admin, params int[] brokers)
+    private static LogDirsCaptureState SubmitLogDirsAndCapture(NativeAdminClient admin, params int[] brokers)
     {
-        CaptureState capture = new CaptureState();
+        LogDirsCaptureState capture = new LogDirsCaptureState();
         GCHandle gcHandle = GCHandle.Alloc(capture, GCHandleType.Normal);
         try
         {
@@ -369,13 +359,14 @@ public sealed class AdminLogDirsMarshalTests
             gcHandle.Free();
         }
 
-        return capture.Take();
+        Assert.NotEqual(IntPtr.Zero, capture.Value);
+        return capture;
     }
 
-    private static IntPtr SubmitReplicaLogDirsAndCapture(
+    private static ReplicaCaptureState SubmitReplicaLogDirsAndCapture(
         NativeAdminClient admin, params TopicPartitionReplica[] replicas)
     {
-        CaptureState capture = new CaptureState();
+        ReplicaCaptureState capture = new ReplicaCaptureState();
         GCHandle gcHandle = GCHandle.Alloc(capture, GCHandleType.Normal);
         List<Utf8Marshal.PinnedUtf8String> pinned = new List<Utf8Marshal.PinnedUtf8String>(replicas.Length);
         try
@@ -414,18 +405,19 @@ public sealed class AdminLogDirsMarshalTests
             gcHandle.Free();
         }
 
-        return capture.Take();
+        Assert.NotEqual(IntPtr.Zero, capture.Value);
+        return capture;
     }
 
     /// <summary>
-    /// Submits one replica move through the <b>real</b> entry point and hands the caller the
-    /// owned result root, so the borrowed per-replica error inside it comes from native
-    /// rather than from a hand-built handle.
+    /// Submits one replica move through the <b>real</b> entry point and hands the caller what
+    /// that replica's own callback delivered, so the owned per-replica error comes from
+    /// native rather than from a hand-built handle.
     /// </summary>
-    private static IntPtr SubmitAlterReplicaLogDirsAndCapture(
+    private static ReplicaCaptureState SubmitAlterReplicaLogDirsAndCapture(
         NativeAdminClient admin, TopicPartitionReplica replica, string logDir)
     {
-        CaptureState capture = new CaptureState();
+        ReplicaCaptureState capture = new ReplicaCaptureState();
         GCHandle gcHandle = GCHandle.Alloc(capture, GCHandleType.Normal);
         try
         {
@@ -450,16 +442,21 @@ public sealed class AdminLogDirsMarshalTests
             gcHandle.Free();
         }
 
-        return capture.Take();
+        return capture;
     }
 
-    private static void OnCapture(IntPtr result, IntPtr error, IntPtr userData)
+    /// <summary>
+    /// The shape-4a twin of <see cref="OnCaptureAlterReplica"/>: <c>describeLogDirs</c> delivers one
+    /// callback per broker id, carrying that key's own <b>owned</b> value and error.
+    /// </summary>
+    private static void OnCaptureLogDirs(int broker, IntPtr value, IntPtr error, IntPtr userData)
     {
         // A callback entered from native is a no-throw boundary even in a test.
         try
         {
-            CaptureState capture = (CaptureState)GCHandle.FromIntPtr(userData).Target!;
-            capture.Result = result;
+            LogDirsCaptureState capture = (LogDirsCaptureState)GCHandle.FromIntPtr(userData).Target!;
+            capture.Broker = broker;
+            capture.Value = value;
             capture.Error = error;
             capture.Done.Set();
         }
@@ -470,29 +467,92 @@ public sealed class AdminLogDirsMarshalTests
         }
     }
 
-    private sealed class CaptureState
+    /// <summary>
+    /// The shape-4a twin of <see cref="OnCaptureAlterReplica"/> for <c>describeReplicaLogDirs</c>: one
+    /// callback per replica, carrying that key's three scalars plus its own <b>owned</b>
+    /// value and error.
+    /// </summary>
+    private static void OnCaptureReplica(
+        IntPtr topic, int partition, int brokerId, IntPtr value, IntPtr error, IntPtr userData)
     {
-        internal IntPtr Result;
+        // A callback entered from native is a no-throw boundary even in a test.
+        try
+        {
+            ReplicaCaptureState capture = (ReplicaCaptureState)GCHandle.FromIntPtr(userData).Target!;
+
+            // ⚠ Copied HERE: the topic is a borrowed const char*, valid for the call only.
+            capture.Topic = Utf8Marshal.PtrToString(topic);
+            capture.Partition = partition;
+            capture.BrokerId = brokerId;
+            capture.Value = value;
+            capture.Error = error;
+            capture.Done.Set();
+        }
+        catch (Exception)
+        {
+            // Swallow: an escaping exception would unwind into Rust. The Wait above then
+            // times out and fails the test with a clear message.
+        }
+    }
+
+    /// <summary>
+    /// The shape-4b form: <c>alterReplicaLogDirs</c> delivers one callback per replica,
+    /// carrying that key's three scalars and its own <b>owned</b> error — a null error being
+    /// that replica's success.
+    /// </summary>
+    private static void OnCaptureAlterReplica(
+        IntPtr topic, int partition, int brokerId, IntPtr error, IntPtr userData)
+    {
+        // A callback entered from native is a no-throw boundary even in a test.
+        try
+        {
+            ReplicaCaptureState capture = (ReplicaCaptureState)GCHandle.FromIntPtr(userData).Target!;
+
+            // ⚠ Copied HERE: the topic is a borrowed const char*, valid for the call only.
+            capture.Topic = Utf8Marshal.PtrToString(topic);
+            capture.Partition = partition;
+            capture.BrokerId = brokerId;
+            capture.Error = error;
+            capture.Done.Set();
+        }
+        catch (Exception)
+        {
+            // Swallow: an escaping exception would unwind into Rust. The Wait above then
+            // times out and fails the test with a clear message.
+        }
+    }
+
+    /// <summary>
+    /// What one shape-4a <c>describeReplicaLogDirs</c> callback delivered.
+    /// </summary>
+    private sealed class ReplicaCaptureState
+    {
+        internal string? Topic;
+
+        internal int Partition = int.MinValue;
+
+        internal int BrokerId = int.MinValue;
+
+        internal IntPtr Value;
 
         internal IntPtr Error;
 
         internal ManualResetEventSlim Done { get; } = new ManualResetEventSlim(false);
+    }
 
-        /// <summary>
-        /// Surfaces a submit failure as an exception and otherwise hands over the owned
-        /// root, which the capturing callback deliberately does not destroy — the callback
-        /// owns it, and here that owner is the test.
-        /// </summary>
-        internal IntPtr Take()
-        {
-            KafkaException? submitFailure = KafkaException.FromHandle(Error);
-            if (submitFailure is not null)
-            {
-                throw submitFailure;
-            }
+    /// <summary>
+    /// What one shape-4a <c>describeLogDirs</c> callback delivered. Its own type: the key is
+    /// a scalar broker id, so there is no result root to share with the two shape-1
+    /// neighbours.
+    /// </summary>
+    private sealed class LogDirsCaptureState
+    {
+        internal int Broker = int.MinValue;
 
-            Assert.NotEqual(IntPtr.Zero, Result);
-            return Result;
-        }
+        internal IntPtr Value;
+
+        internal IntPtr Error;
+
+        internal ManualResetEventSlim Done { get; } = new ManualResetEventSlim(false);
     }
 }

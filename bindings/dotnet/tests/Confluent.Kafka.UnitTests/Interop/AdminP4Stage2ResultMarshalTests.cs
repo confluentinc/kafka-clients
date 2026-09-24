@@ -33,12 +33,11 @@ namespace Confluent.Kafka.UnitTests.Interop;
 /// </summary>
 /// <remarks>
 /// <para>
-/// <b>Why these tests own the result handle.</b> The production trampoline destroys the
-/// root in its <c>finally</c>, so it never lets a caller inspect the borrowed pointers
-/// afterwards — and "everything was copied out before the root died" is exactly what has to
-/// be proven. Each test submits the <c>_async</c> entry point directly with its own
-/// capturing callback, walks the root with <em>production's</em> marshallers, and destroys
-/// it exactly once.
+/// <b>Why these tests own the delivered handle.</b> The production trampoline destroys it
+/// in its <c>finally</c>, so it never lets a caller inspect the borrowed pointers
+/// afterwards — and "everything was copied out before it died" is exactly what has to be
+/// proven. Each test submits the <c>_async</c> entry point directly with its own capturing
+/// callback, reads with <em>production's</em> marshallers, and destroys exactly once.
 /// </para>
 /// <para>
 /// ⚠⚠ <b>The leader epoch's PRESENT branch is unreachable through the mock</b> — the Rust
@@ -49,11 +48,10 @@ namespace Confluent.Kafka.UnitTests.Interop;
 /// that a "negative means absent" implementation gets wrong while passing every other test.
 /// </para>
 /// <para>
-/// ⚠ <b>The borrowed/owned split differs between the two RPCs.</b>
-/// <c>listOffsets</c> has a <c>const</c>/borrowed per-partition <c>get_error</c> →
-/// <see cref="KafkaException.FromBorrowedHandle"/>, never destroyed;
-/// <c>listPartitionReassignments</c> declares no per-key error at all, so its only error is
-/// the callback's own <b>owned</b> one.
+/// ⚠ <b>Under M15/P9's per-key ABI <c>listOffsets</c>' error is OWNED</b> — there is no
+/// result root to borrow it from, which inverts the shape-1 walk this file used to drive.
+/// <c>listPartitionReassignments</c> is unchanged (shape 3): its only error is the
+/// callback's own owned one.
 /// </para>
 /// </remarks>
 public sealed class AdminP4Stage2ResultMarshalTests
@@ -90,10 +88,13 @@ public sealed class AdminP4Stage2ResultMarshalTests
         using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
         TopicPartition partition = SeedTopic(admin, "p4s2-epoch");
 
-        IntPtr result = SubmitAndCaptureOffsets(admin, partition, OffsetSpec.Latest());
+        OffsetsCapture captured = Assert.Single(
+            SubmitAndCaptureOffsets(admin, partition, OffsetSpec.Latest()));
         try
         {
-            IntPtr info = NativeMethods.ListOffsetsResultGetValue(result, 0);
+            // Shape 4a: the per-key value IS the ListOffsetsResultInfo_t, owned outright.
+            Assert.Equal(IntPtr.Zero, captured.Error);
+            IntPtr info = captured.Value;
             Assert.NotEqual(IntPtr.Zero, info);
 
             // The real accessor: the mock always reports Optional.empty().
@@ -122,71 +123,70 @@ public sealed class AdminP4Stage2ResultMarshalTests
         }
         finally
         {
-            NativeMethods.ListOffsetsResultDestroy(result);
+            NativeMethods.ListOffsetsResultInfoDestroy(captured.Value);
         }
     }
 
     /// <summary>
-    /// <c>listOffsets</c>' per-partition error is <b>borrowed</b>, and its value is copied
-    /// out before the root dies.
+    /// <c>listOffsets</c>' per-partition error is <b>owned</b>, and its value is copied out
+    /// before that value dies.
     /// </summary>
     /// <remarks>
-    /// The mock supplies the mixed input for free: a <c>TimestampSpec</c> partition fails
-    /// with <c>unsupported_version</c> while a <c>Latest</c> one succeeds, so one root
-    /// carries both an error and a value.
+    /// ⚠ The inverse of what this test asserted against the shape-1 walk: there is no
+    /// result root, so <see cref="KafkaException.FromHandle"/> — which frees — is the only
+    /// correct reader, and a <see cref="KafkaException.FromBorrowedHandle"/> would leak the
+    /// error on every failing key. The mock supplies the mixed input for free: a
+    /// <c>TimestampSpec</c> partition fails with <c>unsupported_version</c> while a
+    /// <c>Latest</c> one succeeds, so the two callbacks differ in which slot is non-null.
     /// </remarks>
     [Fact]
-    public async Task ListOffsets_TheBorrowedPerPartitionError_IsReadNeverDestroyed_AndValuesSurvive()
+    public async Task ListOffsets_ThePerKeyError_IsOwned_AndValuesSurviveTheValuesDestroy()
     {
         using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
-        TopicPartition good = SeedTopic(admin, "p4s2-borrow", partitions: 2);
+        TopicPartition good = SeedTopic(admin, "p4s2-owned", partitions: 2);
         TopicPartition bad = new TopicPartition(good.Topic, 1);
 
-        IntPtr result = SubmitAndCaptureOffsets(
+        IReadOnlyList<OffsetsCapture> captures = SubmitAndCaptureOffsets(
             admin,
             new Dictionary<TopicPartition, OffsetSpec>
             {
                 [good] = OffsetSpec.Latest(),
                 [bad] = OffsetSpec.ForTimestamp(1),
             });
+        Assert.Equal(2, captures.Count);
 
         KeyedAdminOperation<TopicPartition, ListOffsetsResult.ListOffsetsResultInfo> operation =
             new KeyedAdminOperation<TopicPartition, ListOffsetsResult.ListOffsetsResultInfo>(
                 "listOffsets", new[] { good, bad }, EqualityComparer<TopicPartition>.Default);
-        try
-        {
-            Assert.Equal(2, NativeMethods.ListOffsetsResultCount(result));
 
-            // Re-reading the borrowed error many times neither frees nor corrupts it; a
-            // double free would abort the run rather than fail an assertion.
-            int badIndex = IndexOf(result, bad);
-            KafkaException first =
-                KafkaException.FromBorrowedHandle(NativeMethods.ListOffsetsResultGetError(result, badIndex))!;
-            for (int i = 0; i < 200; i++)
+        foreach (OffsetsCapture capture in captures)
+        {
+            TopicPartition key = new TopicPartition(capture.Topic!, capture.Partition);
+
+            // Exactly one slot per key, and which one depends on the spec — the mixed input.
+            if (key.Equals(bad))
             {
-                KafkaException again =
-                    KafkaException.FromBorrowedHandle(
-                        NativeMethods.ListOffsetsResultGetError(result, badIndex))!;
-                Assert.Equal(first.Code, again.Code);
-                Assert.Equal(first.Message, again.Message);
+                Assert.Equal(IntPtr.Zero, capture.Value);
+                Assert.NotEqual(IntPtr.Zero, capture.Error);
+            }
+            else
+            {
+                Assert.NotEqual(IntPtr.Zero, capture.Value);
+                Assert.Equal(IntPtr.Zero, capture.Error);
             }
 
-            Assert.Equal(UnsupportedVersionCode, first.Code);
-
-            // Walk with production's accessors and readers.
-            KeyedResultMarshal.Complete(
-                result,
-                AdminCallbacks.ListOffsetsAccessors,
+            // Production's reader and production's destroy, so the copy-out must complete
+            // before the value handle dies.
+            KeyedResultMarshal.CompleteKey(
                 operation,
-                AdminCallbacks.ListOffsetsKey,
-                AdminCallbacks.ListOffsetsInfoValue);
-        }
-        finally
-        {
-            NativeMethods.ListOffsetsResultDestroy(result);
+                key,
+                capture.Value,
+                capture.Error,
+                AdminCallbacks.ListOffsetsInfoPerKeyValue,
+                NativeMethods.ListOffsetsResultInfoDestroy);
         }
 
-        // The root is gone; everything below reads owned managed state only.
+        // The values are gone; everything below reads owned managed state only.
         ListOffsetsResult.ListOffsetsResultInfo info =
             await TestTimeout.Run(() => operation.Tasks[good], s_deadline);
         Assert.Equal(-1, info.Offset);
@@ -271,32 +271,34 @@ public sealed class AdminP4Stage2ResultMarshalTests
         TopicPartition partition = SeedTopic(admin, "p4s2-reject");
 
         // ---- control-positive: a recognised sentinel and a valid level SUCCEED ----
-        Capture ok = SubmitRawOffsets(admin, partition, isTimestamp: false, spec: -2, isolationLevel: 0);
+        OffsetsCapture ok = SubmitRawOffsets(admin, partition, isTimestamp: false, spec: -2, isolationLevel: 0);
         Assert.Equal(IntPtr.Zero, ok.Error);
-        Assert.NotEqual(IntPtr.Zero, ok.Result);
-        NativeMethods.ListOffsetsResultDestroy(ok.Result);
+        Assert.NotEqual(IntPtr.Zero, ok.Value);
+        NativeMethods.ListOffsetsResultInfoDestroy(ok.Value);
 
         // ---- an unrecognised sentinel with is_timestamp false is rejected ----
-        Capture badSentinel =
+        OffsetsCapture badSentinel =
             SubmitRawOffsets(admin, partition, isTimestamp: false, spec: -99, isolationLevel: 0);
-        Assert.Equal(IntPtr.Zero, badSentinel.Result);
-        Assert.NotEqual(IntPtr.Zero, badSentinel.Error);
-        Assert.NotNull(KafkaException.FromHandle(badSentinel.Error));
+        Assert.Equal(IntPtr.Zero, badSentinel.Value);
+        KafkaException rejected = KafkaException.FromHandle(badSentinel.Error)!;
+        Assert.Contains("is not a ListOffsets timestamp sentinel", rejected.Message);
 
-        // …and the very same value IS accepted when flagged as a timestamp, which is the
-        // flag's whole purpose.
-        Capture asTimestamp =
+        // …and the very same value IS accepted as a spec when flagged as a timestamp, which
+        // is the flag's whole purpose. Shape 4a leaves no result root to carry the mock's
+        // own per-partition refusal, so the discriminator is now WHICH error arrives: the
+        // mock's unsupported-version, not the argument rejection above.
+        OffsetsCapture asTimestamp =
             SubmitRawOffsets(admin, partition, isTimestamp: true, spec: -99, isolationLevel: 0);
-        Assert.Equal(IntPtr.Zero, asTimestamp.Error);
-        Assert.NotEqual(IntPtr.Zero, asTimestamp.Result);
-        NativeMethods.ListOffsetsResultDestroy(asTimestamp.Result);
+        Assert.Equal(IntPtr.Zero, asTimestamp.Value);
+        KafkaException accepted = KafkaException.FromHandle(asTimestamp.Error)!;
+        Assert.Equal(UnsupportedVersionCode, accepted.Code);
+        Assert.NotEqual(rejected.Code, accepted.Code);
 
         // ---- an unknown isolation level is rejected ----
-        Capture badLevel =
+        OffsetsCapture badLevel =
             SubmitRawOffsets(admin, partition, isTimestamp: false, spec: -2, isolationLevel: 7);
-        Assert.Equal(IntPtr.Zero, badLevel.Result);
-        Assert.NotEqual(IntPtr.Zero, badLevel.Error);
-        Assert.NotNull(KafkaException.FromHandle(badLevel.Error));
+        Assert.Equal(IntPtr.Zero, badLevel.Value);
+        Assert.Contains("isolation", KafkaException.FromHandle(badLevel.Error)!.Message);
     }
 
     private static ListOffsetsResultInfoMarshal.LeaderEpochAccessor PresenceStub(bool present, int epoch) =>
@@ -305,21 +307,6 @@ public sealed class AdminP4Stage2ResultMarshalTests
             written = epoch;
             return present;
         };
-
-    private static int IndexOf(IntPtr result, TopicPartition partition)
-    {
-        int count = NativeMethods.ListOffsetsResultCount(result);
-        for (int index = 0; index < count; index++)
-        {
-            if (AdminCallbacks.ListOffsetsKey(result, index).Equals(partition))
-            {
-                return index;
-            }
-        }
-
-        Assert.Fail($"the result carried no entry for {partition}");
-        return -1;
-    }
 
     private static TopicPartition SeedTopic(
         NativeAdminClient admin, string name, int partitions = 1, short replicationFactor = 1)
@@ -333,23 +320,23 @@ public sealed class AdminP4Stage2ResultMarshalTests
         return new TopicPartition(name, 0);
     }
 
-    private static IntPtr SubmitAndCaptureOffsets(
+    private static IReadOnlyList<OffsetsCapture> SubmitAndCaptureOffsets(
         NativeAdminClient admin, TopicPartition partition, OffsetSpec spec) =>
         SubmitAndCaptureOffsets(admin, new Dictionary<TopicPartition, OffsetSpec> { [partition] = spec });
 
     /// <summary>
-    /// Submits through <b>production's</b> encoder, capturing the owned root instead of
-    /// letting the trampoline destroy it.
+    /// Submits through <b>production's</b> encoder, capturing each owned per-key value
+    /// instead of letting the trampoline destroy it.
     /// </summary>
     /// <remarks>
     /// The submit is production's <c>ListOffsets</c> with the native call left real and only
     /// the callback replaced, so the (flag, value) encoding under test is the shipped one.
     /// </remarks>
-    private static IntPtr SubmitAndCaptureOffsets(
+    private static IReadOnlyList<OffsetsCapture> SubmitAndCaptureOffsets(
         NativeAdminClient admin, IReadOnlyDictionary<TopicPartition, OffsetSpec> request)
     {
-        Capture capture = new Capture();
-        GCHandle gcHandle = GCHandle.Alloc(capture, GCHandleType.Normal);
+        OffsetsCaptureSet captures = new OffsetsCaptureSet(request.Count);
+        GCHandle gcHandle = GCHandle.Alloc(captures, GCHandleType.Normal);
         try
         {
             admin.ListOffsets(
@@ -361,21 +348,14 @@ public sealed class AdminP4Stage2ResultMarshalTests
                         nativeHandle, topics, partitions, isTimestamp, specTimestamps, count, timeoutMs,
                         isolationLevel, s_captureOffsets, GCHandle.ToIntPtr(gcHandle)));
 
-            Assert.True(capture.Done.Wait(s_deadline), "the listOffsets callback never fired");
+            Assert.True(captures.Done.Wait(s_deadline), "the listOffsets callbacks never fired");
         }
         finally
         {
             gcHandle.Free();
         }
 
-        KafkaException? failure = KafkaException.FromHandle(capture.Error);
-        if (failure is not null)
-        {
-            throw failure;
-        }
-
-        Assert.NotEqual(IntPtr.Zero, capture.Result);
-        return capture.Result;
+        return captures.Captured;
     }
 
     private static IntPtr SubmitAndCaptureReassignments(NativeAdminClient admin, TopicPartition partition)
@@ -413,13 +393,13 @@ public sealed class AdminP4Stage2ResultMarshalTests
     /// Calls the ABI directly with an arbitrary (flag, value, level) triple — the only way
     /// to reach the rejections the managed guards prevent.
     /// </summary>
-    private static Capture SubmitRawOffsets(
+    private static OffsetsCapture SubmitRawOffsets(
         NativeAdminClient admin, TopicPartition partition, bool isTimestamp, long spec, int isolationLevel)
     {
         using Utf8Marshal.PinnedUtf8String topic = Utf8Marshal.Pin(partition.Topic);
 
-        Capture capture = new Capture();
-        GCHandle gcHandle = GCHandle.Alloc(capture, GCHandleType.Normal);
+        OffsetsCaptureSet captures = new OffsetsCaptureSet(1);
+        GCHandle gcHandle = GCHandle.Alloc(captures, GCHandleType.Normal);
         bool fired = false;
         try
         {
@@ -435,7 +415,7 @@ public sealed class AdminP4Stage2ResultMarshalTests
                 s_captureOffsets,
                 GCHandle.ToIntPtr(gcHandle));
 
-            fired = capture.Done.Wait(s_deadline);
+            fired = captures.Done.Wait(s_deadline);
         }
         finally
         {
@@ -448,14 +428,85 @@ public sealed class AdminP4Stage2ResultMarshalTests
         }
 
         Assert.True(fired, "the listOffsets callback never fired");
-        return capture;
+        return Assert.Single(captures.Captured);
     }
 
-    private static void OnCaptureOffsets(IntPtr result, IntPtr error, IntPtr userData) =>
-        Capture.Record(result, error, userData);
+    private static void OnCaptureOffsets(
+        IntPtr topic, int partition, IntPtr value, IntPtr error, IntPtr userData) =>
+        OffsetsCaptureSet.Record(topic, partition, value, error, userData);
 
     private static void OnCaptureReassignments(IntPtr result, IntPtr error, IntPtr userData) =>
         Capture.Record(result, error, userData);
+
+    /// <summary>One shape-4a per-key callback: the key, plus the two owned slots.</summary>
+    private sealed class OffsetsCapture
+    {
+        internal string? Topic;
+
+        internal int Partition;
+
+        internal IntPtr Value;
+
+        internal IntPtr Error;
+    }
+
+    private sealed class OffsetsCaptureSet
+    {
+        private readonly List<OffsetsCapture> _captured = new List<OffsetsCapture>();
+
+        private readonly int _expected;
+
+        internal OffsetsCaptureSet(int expected) => _expected = expected;
+
+        internal ManualResetEventSlim Done { get; } = new ManualResetEventSlim(false);
+
+        internal IReadOnlyList<OffsetsCapture> Captured
+        {
+            get
+            {
+                lock (_captured)
+                {
+                    return _captured.ToArray();
+                }
+            }
+        }
+
+        /// <summary>A callback entered from native is a no-throw boundary even in a test.</summary>
+        internal static void Record(
+            IntPtr topic, int partition, IntPtr value, IntPtr error, IntPtr userData)
+        {
+            try
+            {
+                OffsetsCaptureSet set = (OffsetsCaptureSet)GCHandle.FromIntPtr(userData).Target!;
+
+                // The topic borrows for the call only, so copy it out here.
+                OffsetsCapture capture = new OffsetsCapture
+                {
+                    Topic = KeyedResultMarshal.ReadStringKey(topic),
+                    Partition = partition,
+                    Value = value,
+                    Error = error,
+                };
+
+                bool complete;
+                lock (set._captured)
+                {
+                    set._captured.Add(capture);
+                    complete = set._captured.Count >= set._expected;
+                }
+
+                if (complete)
+                {
+                    set.Done.Set();
+                }
+            }
+            catch (Exception)
+            {
+                // Swallow: an escaping exception would unwind into Rust. The Wait then times
+                // out and fails the test with a clear message.
+            }
+        }
+    }
 
     private sealed class Capture
     {

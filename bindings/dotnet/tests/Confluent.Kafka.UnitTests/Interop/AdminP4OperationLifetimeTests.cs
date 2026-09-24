@@ -262,6 +262,13 @@ public sealed class AdminP4OperationLifetimeTests
     }
 
     /// <summary>
+    /// The single partition <see cref="SubmitCapturing"/> reassigns, shared with
+    /// <see cref="Complete"/> so the key the completion is fired under cannot drift from the
+    /// key the submit asked for (<c>definition-of-done.md</c> §12).
+    /// </summary>
+    private static readonly TopicPartition s_lifetimePartition = new TopicPartition("p4-lifetime", 0);
+
+    /// <summary>
     /// Submits one RPC with the native call replaced by <paramref name="onSubmit"/>, and
     /// returns a closure over an awaiter that RPC's result exposes — so the two shapes can
     /// be asserted uniformly.
@@ -283,7 +290,7 @@ public sealed class AdminP4OperationLifetimeTests
         AlterPartitionReassignmentsResult reassigned = admin.AlterPartitionReassignments(
             new Dictionary<TopicPartition, NewPartitionReassignment?>
             {
-                [new TopicPartition("p4-lifetime", 0)] = new NewPartitionReassignment(new[] { 0 }),
+                [s_lifetimePartition] = new NewPartitionReassignment(new[] { 0 }),
             },
             options: null,
             (nativeHandle, topics, partitions, cancel, targetReplicas, targetReplicaCounts, count, timeoutMs,
@@ -318,9 +325,10 @@ public sealed class AdminP4OperationLifetimeTests
     }
 
     /// <summary>
-    /// Drives the <b>production</b> trampoline for one RPC with a top-level submit failure
-    /// — the channel that means "the request could not be issued at all", as opposed to the
-    /// per-partition outcomes inside a result.
+    /// Drives the <b>production</b> trampoline for one RPC with a submit failure.
+    /// <c>electLeaders</c> still has a top-level channel — "the request could not be issued
+    /// at all"; since M15/P9 CP6 <c>alterPartitionReassignments</c> has none, so the same
+    /// failure arrives keyed by the one partition <see cref="SubmitCapturing"/> asked for.
     /// </summary>
     internal static void Complete(Rpc rpc, IntPtr userData, IntPtr error)
     {
@@ -330,7 +338,9 @@ public sealed class AdminP4OperationLifetimeTests
             return;
         }
 
-        AdminCallbacks.AlterPartitionReassignments(IntPtr.Zero, error, userData);
+        using Utf8Marshal.PinnedUtf8String topic = Utf8Marshal.Pin(s_lifetimePartition.Topic);
+        AdminCallbacks.AlterPartitionReassignments(
+            topic.Pointer, s_lifetimePartition.Partition, error, userData);
     }
 
     /// <summary>

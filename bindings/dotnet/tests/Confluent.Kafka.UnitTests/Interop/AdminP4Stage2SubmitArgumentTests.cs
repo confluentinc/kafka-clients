@@ -344,8 +344,7 @@ public sealed class AdminP4Stage2SubmitArgumentTests
         // Each production trampoline must be able to complete THAT context.
         AdminCallbacks.ListPartitionReassignments(
             IntPtr.Zero, AdminP4OperationLifetimeTests.MakeError(3, "routing"), listingUserData);
-        AdminCallbacks.ListOffsets(
-            IntPtr.Zero, AdminP4OperationLifetimeTests.MakeError(4, "routing"), offsetsUserData);
+        FireListOffsetsFailure(partition, 4, "routing", offsetsUserData);
 
         Assert.Equal(
             3,
@@ -356,6 +355,22 @@ public sealed class AdminP4Stage2SubmitArgumentTests
             (await TestTimeout.Run(
                 () => Assert.ThrowsAsync<KafkaException>(() => offsets.PartitionResult(partition)),
                 s_deadline)).Code);
+    }
+
+    /// <summary>
+    /// Settles one <c>listOffsets</c> key through the <b>production</b> trampoline: shape
+    /// 4a, so the value slot is NULL and the error is <b>owned</b> and freed by it.
+    /// </summary>
+    private static void FireListOffsetsFailure(
+        TopicPartition key, int code, string message, IntPtr userData)
+    {
+        using Utf8Marshal.PinnedUtf8String topic = Utf8Marshal.Pin(key.Topic);
+        AdminCallbacks.ListOffsets(
+            topic.Pointer,
+            key.Partition,
+            IntPtr.Zero,
+            AdminP4OperationLifetimeTests.MakeError(code, message),
+            userData);
     }
 
     private static OffsetSpec Spec(string kind) => kind switch
@@ -400,8 +415,14 @@ public sealed class AdminP4Stage2SubmitArgumentTests
                 toRelease = userData;
             });
 
-        AdminCallbacks.ListOffsets(
-            IntPtr.Zero, AdminP4OperationLifetimeTests.MakeError(1, "captured"), toRelease);
+        // Shape 4a: one per-key failure per requested (topic, partition) pair, read back
+        // off what the submit actually carried.
+        for (int i = 0; i < captured.Count; i++)
+        {
+            FireListOffsetsFailure(
+                new TopicPartition(captured.Topics![i], captured.Partitions![i]), 1, "captured", toRelease);
+        }
+
         return captured;
     }
 

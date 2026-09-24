@@ -944,30 +944,7 @@ public sealed class AdminP5ResultMarshalTests
                 keys,
                 StringComparer.Ordinal);
 
-        KeyedResultMarshal.Complete(
-            s_root,
-            new KeyedResultMarshal.Accessors(
-                root =>
-                {
-                    Assert.Equal(s_root, root);
-                    return count;
-                },
-                (root, index) =>
-                {
-                    Assert.Equal(s_root, root);
-                    return getError(index);
-                }),
-            operation,
-            (root, index) =>
-            {
-                Assert.Equal(s_root, root);
-                return readKey(index);
-            },
-            (root, index) =>
-            {
-                Assert.Equal(s_root, root);
-                return readValue(index);
-            });
+        SyntheticPerKeyWalk.Run(operation, count, readKey, getError, readValue);
 
         // The trampoline's rescue, mirrored: any key the walk did not name must still be
         // settled or its future would hang forever.
@@ -1305,30 +1282,7 @@ public sealed class AdminP5ResultMarshalTests
                 keys,
                 StringComparer.Ordinal);
 
-        KeyedResultMarshal.Complete(
-            s_root,
-            new KeyedResultMarshal.Accessors(
-                root =>
-                {
-                    Assert.Equal(s_root, root);
-                    return count;
-                },
-                (root, index) =>
-                {
-                    Assert.Equal(s_root, root);
-                    return getError(index);
-                }),
-            operation,
-            (root, index) =>
-            {
-                Assert.Equal(s_root, root);
-                return readKey(index);
-            },
-            (root, index) =>
-            {
-                Assert.Equal(s_root, root);
-                return readValue(index);
-            });
+        SyntheticPerKeyWalk.Run(operation, count, readKey, getError, readValue);
 
         // The trampoline's rescue, mirrored: any key the walk did not name must still be
         // settled or its future would hang forever.
@@ -1646,30 +1600,7 @@ public sealed class AdminP5ResultMarshalTests
                 keys,
                 StringComparer.Ordinal);
 
-        KeyedResultMarshal.Complete(
-            s_root,
-            new KeyedResultMarshal.Accessors(
-                root =>
-                {
-                    Assert.Equal(s_root, root);
-                    return count;
-                },
-                (root, index) =>
-                {
-                    Assert.Equal(s_root, root);
-                    return getError(index);
-                }),
-            operation,
-            (root, index) =>
-            {
-                Assert.Equal(s_root, root);
-                return readKey(index);
-            },
-            (root, index) =>
-            {
-                Assert.Equal(s_root, root);
-                return readValue(index);
-            });
+        SyntheticPerKeyWalk.Run(operation, count, readKey, getError, readValue);
 
         operation.FailUncompleted();
         return new ListConsumerGroupOffsetsResult(operation.Tasks);

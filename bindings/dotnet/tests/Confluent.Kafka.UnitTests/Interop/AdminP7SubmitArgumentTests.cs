@@ -177,7 +177,9 @@ public sealed class AdminP7SubmitArgumentTests
                 captured.UserData = userData;
             });
 
-        AdminCallbacks.AlterUserScramCredentials(IntPtr.Zero, CapturedError(), captured.UserData);
+        // M15/P9 CP6: one callback per DISTINCT user, which is the one thing the row count
+        // is not — two rows, one key, one callback.
+        CompleteDistinctUsers(captured);
 
         Assert.Equal(2, captured.Count);
         Assert.Equal(new[] { "dup", "dup" }, captured.Users);
@@ -459,8 +461,28 @@ public sealed class AdminP7SubmitArgumentTests
                 captured.UserData = userData;
             });
 
-        AdminCallbacks.AlterUserScramCredentials(IntPtr.Zero, CapturedError(), captured.UserData);
+        CompleteDistinctUsers(captured);
         return captured;
+    }
+
+    /// <summary>
+    /// Releases an <c>alterUserScramCredentials</c> operation by firing the production
+    /// trampoline once per <b>distinct</b> user the submit carried — the ABI's own key
+    /// count, which deliberately differs from the row count (<c>h:8875-8886</c>).
+    /// </summary>
+    private static void CompleteDistinctUsers(Captured captured)
+    {
+        HashSet<string> seen = new HashSet<string>(StringComparer.Ordinal);
+        foreach (string? user in captured.Users)
+        {
+            if (user is null || !seen.Add(user))
+            {
+                continue;
+            }
+
+            using Utf8Marshal.PinnedUtf8String pinned = Utf8Marshal.Pin(user);
+            AdminCallbacks.AlterUserScramCredentials(pinned.Pointer, CapturedError(), captured.UserData);
+        }
     }
 
     private static (int Count, IReadOnlyList<string?> Users, int TimeoutMs) CaptureDescribeUsers(
@@ -622,7 +644,13 @@ public sealed class AdminP7SubmitArgumentTests
                 captured.UserData = userData;
             });
 
-        AdminCallbacks.UpdateFeatures(IntPtr.Zero, CapturedError(), captured.UserData);
+        // M15/P9 CP6: one callback per feature name — the map's keys are already distinct.
+        foreach (string? feature in captured.Features)
+        {
+            using Utf8Marshal.PinnedUtf8String pinned = Utf8Marshal.Pin(feature!);
+            AdminCallbacks.UpdateFeatures(pinned.Pointer, CapturedError(), captured.UserData);
+        }
+
         return captured;
     }
 

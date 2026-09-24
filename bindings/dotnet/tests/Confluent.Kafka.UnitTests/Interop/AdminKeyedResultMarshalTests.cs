@@ -27,31 +27,36 @@ using Xunit;
 namespace Confluent.Kafka.UnitTests.Interop;
 
 /// <summary>
-/// Drives <see cref="KeyedResultMarshal"/> over a <b>real</b> native
-/// <c>CreateTopicsResult_t</c> — the highest-risk surface in M15/P1, because a per-key
-/// error is <b>borrowed</b> from the result root and destroying it is a double free:
-/// a process abort no managed assertion can catch.
+/// Drives <see cref="KeyedResultMarshal.CompleteKey{TKey, TValue}"/> over <b>real</b>
+/// native per-key payloads — the highest-risk surface in the migration, because under
+/// result shape 4 both the per-key <c>value</c> and the per-key <c>error</c> are
+/// <b>owned</b> by the callback invocation: consuming one twice is a double free (a
+/// process abort no managed assertion can catch), and not consuming it leaks.
 /// </summary>
 /// <remarks>
 /// <para>
-/// <b>Why these tests own the result handle instead of going through
-/// <c>MockAdminClient</c>.</b> The production trampoline destroys the result root in its
-/// <c>finally</c> — correctly — so it never lets a caller inspect the borrowed pointers
-/// afterwards. Here the test submits <c>create_topics_async</c> directly with its own
-/// capturing callback, so the result stays alive and the test can (a) walk it with the
-/// <em>production</em> accessors and marshaller, (b) prove the borrowed error is still
-/// readable <em>after</em> the walk, and (c) destroy the root exactly once. Under the
-/// injection this rule guards against — teaching
-/// <see cref="KafkaException.FromBorrowedHandle"/> to destroy — step (b) becomes a
-/// use-after-free read and step (c) becomes a double free, so the test goes red rather
-/// than passing while silently proving nothing.
+/// ⚠ <b>M15/P9 CP2 inverted this file's central claim.</b> Before the per-key ABI these
+/// tests proved the opposite ownership: the per-key error was <em>borrowed</em> from a
+/// <c>CreateTopicsResult_t</c> root, had to survive the walk, and died with the root. The
+/// root no longer exists — <c>create_topics_async</c> hands each key its own owned value
+/// and error — so <see cref="KafkaException.FromHandle"/> is now the correct read and a
+/// surviving <see cref="KafkaException.FromBorrowedHandle"/> would leak. The borrowed-error
+/// walk keeps its own coverage in <c>AdminP2bResultMarshalTests</c>,
+/// <c>AdminP4ResultMarshalTests</c>, <c>AdminP5ResultMarshalTests</c> and
+/// <c>AdminP6ResultMarshalTests</c> for as long as it has live callers.
 /// </para>
 /// <para>
-/// The accessor set and value marshaller come from
-/// <see cref="AdminCallbacks.CreateTopicsAccessors"/> /
-/// <see cref="AdminCallbacks.TopicMetadataAndConfigValue"/> — production's own
-/// (<c>definition-of-done.md</c> §12) — so a test-local copy cannot keep passing after
-/// production changes what it points at.
+/// The two tests that could only be expressed against a result table are gone with it: the
+/// shape-2 table walk (covered by <c>AdminP4ResultMarshalTests</c>, over a real
+/// <c>listOffsets</c> table) and the missing-key sweep, whose firing point moved to
+/// countdown zero and is asserted there by <c>AdminP9CountdownTests</c>.
+/// </para>
+/// <para>
+/// The key reader and value marshaller come from production —
+/// <see cref="KeyedResultMarshal.ReadStringKey"/> /
+/// <see cref="AdminCallbacks.TopicMetadataAndConfigPerKeyValue"/> — so a test-local copy
+/// cannot keep passing after production changes what it points at
+/// (<c>definition-of-done.md</c> §12). Only <c>destroyValue</c> is wrapped, to count it.
 /// </para>
 /// </remarks>
 public sealed class AdminKeyedResultMarshalTests
@@ -72,72 +77,48 @@ public sealed class AdminKeyedResultMarshalTests
     /// Rooted for the process lifetime, as every callback handed to native must be
     /// (ffi §B6 keep-alive) — even a test's.
     /// </summary>
-    private static readonly AdminCallbacks.CreateTopicsCallback s_capture = OnCapture;
+    private static readonly AdminCallbacks.CreateTopicsCallback s_perKey = OnPerKey;
 
     /// <summary>
-    /// The phase's central memory-safety claim, over real native memory: walking a
-    /// result with a per-key failure reads the borrowed error and leaves it
-    /// <b>alive</b>, so the single root destroy that follows is the only free.
+    /// The phase's central memory-safety claim, over real native memory: each key resolves
+    /// from its own callback, and that callback consumes its owned value exactly once — on
+    /// the success path <em>and</em> on the failure path, where the value is NULL.
     /// </summary>
     [Fact]
-    public void PerKeyError_IsBorrowed_AndSurvivesTheWalk()
+    public async Task PerKeyPayload_IsOwned_AndConsumedExactlyOnce()
     {
         using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
 
         // One topic the 1-broker mock can create, one it must reject (replication factor
-        // 5 > 1 broker) — so the same result carries both outcomes.
-        IntPtr result = SubmitAndCaptureResult(
+        // 5 > 1 broker) — so the same submit carries both outcomes.
+        Drive drive = DrivePerKey(
             admin,
+            new[] { GoodTopic, BadTopic },
             new NewTopic(GoodTopic, 1, 1),
             new NewTopic(BadTopic, 1, 5));
 
-        try
-        {
-            KeyedAdminOperation<string, TopicMetadataAndConfig> operation =
-                new KeyedAdminOperation<string, TopicMetadataAndConfig>(
-                    "createTopics", new[] { GoodTopic, BadTopic }, StringComparer.Ordinal);
+        // Each key carries its OWN outcome — the discriminator against an implementation
+        // that lets the last callback to arrive decide every key's fate.
+        await TestTimeout.Run(() => drive.Operation.Tasks[GoodTopic], s_deadline);
+        Assert.True(drive.Operation.Tasks[BadTopic].IsFaulted);
 
-            KeyedResultMarshal.Complete(
-                result,
-                AdminCallbacks.CreateTopicsAccessors,
-                operation,
-                AdminCallbacks.CreateTopicsKey,
-                AdminCallbacks.TopicMetadataAndConfigValue);
+        KafkaException failure = Assert.IsType<KafkaException>(
+            drive.Operation.Tasks[BadTopic].Exception!.InnerException);
+        Assert.Equal(InvalidReplicationFactorCode, failure.Code);
+        Assert.Equal("Replication factor: 5 is larger than brokers: 1", failure.Message);
 
-            // Each key carries its OWN outcome — the discriminator against an
-            // implementation that faults everything as soon as any key fails.
-            Assert.Equal(TaskStatus.RanToCompletion, operation.Tasks[GoodTopic].Status);
-            Assert.True(operation.Tasks[BadTopic].IsFaulted);
-
-            KafkaException failure = Assert.IsType<KafkaException>(
-                operation.Tasks[BadTopic].Exception!.InnerException);
-            Assert.Equal(InvalidReplicationFactorCode, failure.Code);
-            Assert.Equal("Replication factor: 5 is larger than brokers: 1", failure.Message);
-
-            // ⚠ THE INJECTION POINT. If FromBorrowedHandle destroyed what it read, this
-            // re-read would be a use-after-free and the destroy below a double free. The
-            // borrowed pointer must still resolve to the same values.
-            int badIndex = IndexOf(result, BadTopic);
-            IntPtr borrowedError = NativeMethods.CreateTopicsResultGetError(result, badIndex);
-            Assert.NotEqual(IntPtr.Zero, borrowedError);
-            Assert.Equal(InvalidReplicationFactorCode, NativeMethods.Code(borrowedError));
-            Assert.Equal(
-                "Replication factor: 5 is larger than brokers: 1",
-                Utf8Marshal.PtrToString(NativeMethods.Message(borrowedError)));
-        }
-        finally
-        {
-            // The ONLY free of the borrowed error, via its owning root — exactly once.
-            NativeMethods.CreateTopicsResultDestroy(result);
-        }
+        // ⚠ THE OWNERSHIP ASSERTION. The destroy runs once per callback — including the
+        // failed key, whose value is NULL — and never twice, which would abort the host.
+        Assert.Equal(2, drive.DestroyCalls);
+        Assert.Equal(1, drive.NonNullValues);
     }
 
     /// <summary>
-    /// The copied-out per-key value stays valid after the root — and everything it
-    /// carries — is destroyed. Nothing native-backed may survive the root (ffi §B4).
+    /// The copied-out per-key value stays valid after the owned native payload it was read
+    /// from is destroyed. Nothing native-backed may outlive its owner (ffi §B4).
     /// </summary>
     [Fact]
-    public async Task PerKeyValue_IsCopiedOut_AndOutlivesTheResultRoot()
+    public async Task PerKeyValue_IsCopiedOut_AndOutlivesTheNativePayload()
     {
         using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
 
@@ -146,28 +127,13 @@ public sealed class AdminKeyedResultMarshalTests
             Configs = new Dictionary<string, string> { ["cleanup.policy"] = "compact" },
         };
 
-        IntPtr result = SubmitAndCaptureResult(admin, topic);
+        Drive drive = DrivePerKey(admin, new[] { GoodTopic }, topic);
+        Assert.Equal(1, drive.DestroyCalls);
 
-        KeyedAdminOperation<string, TopicMetadataAndConfig> operation =
-            new KeyedAdminOperation<string, TopicMetadataAndConfig>(
-                "createTopics", new[] { GoodTopic }, StringComparer.Ordinal);
-        try
-        {
-            KeyedResultMarshal.Complete(
-                result,
-                AdminCallbacks.CreateTopicsAccessors,
-                operation,
-                AdminCallbacks.CreateTopicsKey,
-                AdminCallbacks.TopicMetadataAndConfigValue);
-        }
-        finally
-        {
-            NativeMethods.CreateTopicsResultDestroy(result);
-        }
-
-        // Read only AFTER the root is gone: every string and flag below must already be
+        // Read only AFTER the payload is gone: every string and flag below must already be
         // owned managed state, not a pointer into freed native memory.
-        TopicMetadataAndConfig value = await operation.Tasks[GoodTopic];
+        TopicMetadataAndConfig value = await TestTimeout.Run(
+            () => drive.Operation.Tasks[GoodTopic], s_deadline);
         Assert.True(value.HasMetadata);
         Assert.Equal(3, value.NumPartitions());
         Assert.Equal(1, value.ReplicationFactor());
@@ -178,66 +144,11 @@ public sealed class AdminKeyedResultMarshalTests
     }
 
     /// <summary>
-    /// <b>Result shape 2</b> — the per-key <c>KafkaFuture&lt;Void&gt;</c> form, where the
-    /// ABI exposes no <c>_get_value</c> at all and a null error <em>is</em> the success
-    /// value. P1 ships no shape-2 RPC (<c>deleteTopics</c> is M15/P2), so the shape is
-    /// exercised the only way it can be without inventing one: the production walker's
-    /// <b>value-less</b> <c>Complete</c> overload is driven over a real result table,
-    /// taking exactly the branch a shape-2 RPC will take — including the borrowed per-key
-    /// error.
-    /// </summary>
-    /// <remarks>
-    /// ⚠ M15/P2b re-pointed this at the value-less overload. Before P2b, shape 2 was
-    /// expressed by nulling out <c>getValue</c> <em>and</em> <c>marshalValue</c> — which
-    /// is exactly the misuse the phase removed, because an RPC whose value is an inline
-    /// scalar could be described the same way and have its value silently discarded.
-    /// There is now no null to pass: the shape is selected by which overload is called,
-    /// and that overload accepts only a <see cref="VoidKeyedAdminOperation{TKey}"/>.
-    /// Every assertion below is unchanged.
-    /// </remarks>
-    [Fact]
-    public async Task Shape2_TreatsANullPerKeyErrorAsTheSuccessValue()
-    {
-        using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
-
-        IntPtr result = SubmitAndCaptureResult(
-            admin,
-            new NewTopic(GoodTopic, 1, 1),
-            new NewTopic(BadTopic, 1, 5));
-
-        try
-        {
-            KeyedResultMarshal.Accessors voidShape = new KeyedResultMarshal.Accessors(
-                NativeMethods.CreateTopicsResultCount,
-                NativeMethods.CreateTopicsResultGetError);
-
-            VoidKeyedAdminOperation<string> operation = new VoidKeyedAdminOperation<string>(
-                "createTopics", new[] { GoodTopic, BadTopic }, StringComparer.Ordinal);
-
-            KeyedResultMarshal.Complete(
-                result, voidShape, operation, AdminCallbacks.CreateTopicsKey);
-
-            // Success carries no value: the Task simply completes.
-            Assert.Equal(TaskStatus.RanToCompletion, operation.Tasks[GoodTopic].Status);
-            Assert.True(await operation.Tasks[GoodTopic]);
-
-            // …and a per-key error still faults only its own key, borrowed as ever.
-            Assert.True(operation.Tasks[BadTopic].IsFaulted);
-            KafkaException failure = Assert.IsType<KafkaException>(
-                operation.Tasks[BadTopic].Exception!.InnerException);
-            Assert.Equal(InvalidReplicationFactorCode, failure.Code);
-        }
-        finally
-        {
-            NativeMethods.CreateTopicsResultDestroy(result);
-        }
-    }
-
-    /// <summary>
     /// A per-key error message with non-ASCII content round-trips through the borrowed
     /// NUL-terminated read — the <c>LPStr</c> guard (ffi §B3). The mock echoes the topic
     /// name into its "exists already" message, so a non-ASCII topic name proves both
-    /// directions of the UTF-8 marshalling in one call.
+    /// directions of the UTF-8 marshalling in one call: the key arrives as the callback's
+    /// own <c>const char*</c>, and a mis-read key would miss the lookup below entirely.
     /// </summary>
     [Fact]
     public void NonAsciiTopicName_RoundTripsThroughKeyAndErrorMessage()
@@ -248,92 +159,28 @@ public sealed class AdminKeyedResultMarshalTests
 
         // First call creates it; the second must fail with TOPIC_ALREADY_EXISTS, whose
         // message quotes the topic name back at us.
-        IntPtr created = SubmitAndCaptureResult(admin, new NewTopic(Topic, 1, 1));
-        NativeMethods.CreateTopicsResultDestroy(created);
+        DrivePerKey(admin, new[] { Topic }, new NewTopic(Topic, 1, 1));
 
-        IntPtr result = SubmitAndCaptureResult(admin, new NewTopic(Topic, 1, 1));
-        try
-        {
-            KeyedAdminOperation<string, TopicMetadataAndConfig> operation =
-                new KeyedAdminOperation<string, TopicMetadataAndConfig>(
-                    "createTopics", new[] { Topic }, StringComparer.Ordinal);
+        Drive drive = DrivePerKey(admin, new[] { Topic }, new NewTopic(Topic, 1, 1));
 
-            KeyedResultMarshal.Complete(
-                result,
-                AdminCallbacks.CreateTopicsAccessors,
-                operation,
-                AdminCallbacks.CreateTopicsKey,
-                AdminCallbacks.TopicMetadataAndConfigValue);
-
-            // The key itself round-tripped, or TryGetValue below would have missed.
-            Assert.True(operation.Tasks[Topic].IsFaulted);
-            KafkaException failure = Assert.IsType<KafkaException>(
-                operation.Tasks[Topic].Exception!.InnerException);
-            Assert.Equal(TopicAlreadyExistsCode, failure.Code);
-            Assert.Equal($"Topic {Topic} exists already.", failure.Message);
-        }
-        finally
-        {
-            NativeMethods.CreateTopicsResultDestroy(result);
-        }
+        Assert.True(drive.Operation.Tasks[Topic].IsFaulted);
+        KafkaException failure = Assert.IsType<KafkaException>(
+            drive.Operation.Tasks[Topic].Exception!.InnerException);
+        Assert.Equal(TopicAlreadyExistsCode, failure.Code);
+        Assert.Equal($"Topic {Topic} exists already.", failure.Message);
     }
 
     /// <summary>
-    /// A requested key the result never mentions must <b>fault</b>, not hang. The walker
-    /// leaves it untouched and <c>FailUncompleted</c> — which the production trampoline
-    /// calls in its <c>finally</c> — is what makes "no <c>Task</c> can ever hang" true.
+    /// Submits <c>create_topics_async</c> with a callback that runs the <em>production</em>
+    /// per-key marshaller, and returns once every key's callback has fired. The payload
+    /// pointers never escape the callback, because under shape 4 they are owned by it.
     /// </summary>
-    [Fact]
-    public void AKeyMissingFromTheResult_IsFaulted_NotLeftHanging()
-    {
-        using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
-
-        IntPtr result = SubmitAndCaptureResult(admin, new NewTopic(GoodTopic, 1, 1));
-        try
-        {
-            KeyedAdminOperation<string, TopicMetadataAndConfig> operation =
-                new KeyedAdminOperation<string, TopicMetadataAndConfig>(
-                    "createTopics",
-                    new[] { GoodTopic, "never-requested-of-the-core" },
-                    StringComparer.Ordinal);
-
-            KeyedResultMarshal.Complete(
-                result,
-                AdminCallbacks.CreateTopicsAccessors,
-                operation,
-                AdminCallbacks.CreateTopicsKey,
-                AdminCallbacks.TopicMetadataAndConfigValue);
-
-            Assert.False(operation.Tasks["never-requested-of-the-core"].IsCompleted);
-
-            operation.FailUncompleted();
-
-            Assert.True(operation.Tasks["never-requested-of-the-core"].IsFaulted);
-            KafkaException failure = Assert.IsType<KafkaException>(
-                operation.Tasks["never-requested-of-the-core"].Exception!.InnerException);
-            Assert.Equal(
-                "The createTopics result contained no entry for 'never-requested-of-the-core'.",
-                failure.Message);
-
-            // The key that WAS in the result is untouched by the sweep.
-            Assert.Equal(TaskStatus.RanToCompletion, operation.Tasks[GoodTopic].Status);
-        }
-        finally
-        {
-            NativeMethods.CreateTopicsResultDestroy(result);
-        }
-    }
-
-    /// <summary>
-    /// Submits <c>create_topics_async</c> directly and hands the caller the resulting
-    /// <b>owned</b> result root, which the callback deliberately does not destroy — the
-    /// callback owns it, and here that owner is the test.
-    /// </summary>
-    private static IntPtr SubmitAndCaptureResult(NativeAdminClient admin, params NewTopic[] topics)
+    private static Drive DrivePerKey(
+        NativeAdminClient admin, string[] keys, params NewTopic[] topics)
     {
         IntPtr[] handles = new IntPtr[topics.Length];
-        Capture capture = new Capture();
-        GCHandle gcHandle = GCHandle.Alloc(capture, GCHandleType.Normal);
+        Drive drive = new Drive(keys, topics.Length);
+        GCHandle gcHandle = GCHandle.Alloc(drive, GCHandleType.Normal);
         try
         {
             for (int i = 0; i < topics.Length; i++)
@@ -348,10 +195,13 @@ public sealed class AdminKeyedResultMarshalTests
                 -1,
                 false,
                 true,
-                s_capture,
+                s_perKey,
                 GCHandle.ToIntPtr(gcHandle));
 
-            Assert.True(capture.Done.Wait(s_deadline), "the createTopics callback never fired");
+            Assert.True(
+                drive.Done.Wait(s_deadline),
+                $"only {drive.Done.InitialCount - drive.Done.CurrentCount} of "
+                    + $"{drive.Done.InitialCount} per-key callbacks fired");
         }
         finally
         {
@@ -364,55 +214,66 @@ public sealed class AdminKeyedResultMarshalTests
             gcHandle.Free();
         }
 
-        // A top-level submit failure would mean there is nothing to walk; surface it
-        // rather than dereferencing a null result.
-        KafkaException? submitFailure = KafkaException.FromHandle(capture.Error);
-        if (submitFailure is not null)
-        {
-            throw submitFailure;
-        }
-
-        Assert.NotEqual(IntPtr.Zero, capture.Result);
-        return capture.Result;
+        return drive;
     }
 
-    private static int IndexOf(IntPtr result, string key)
-    {
-        int count = NativeMethods.CreateTopicsResultCount(result);
-        for (int i = 0; i < count; i++)
-        {
-            if (string.Equals(Utf8Marshal.PtrToString(NativeMethods.CreateTopicsResultGetKey(result, i)), key, StringComparison.Ordinal))
-            {
-                return i;
-            }
-        }
-
-        throw new InvalidOperationException($"The result has no entry for '{key}'.");
-    }
-
-    private static void OnCapture(IntPtr result, IntPtr error, IntPtr userData)
+    private static void OnPerKey(IntPtr key, IntPtr value, IntPtr error, IntPtr userData)
     {
         // A callback entered from native is a no-throw boundary even in a test.
+        Drive? drive = null;
         try
         {
-            Capture capture = (Capture)GCHandle.FromIntPtr(userData).Target!;
-            capture.Result = result;
-            capture.Error = error;
-            capture.Done.Set();
+            drive = (Drive)GCHandle.FromIntPtr(userData).Target!;
+            if (value != IntPtr.Zero)
+            {
+                Interlocked.Increment(ref drive.NonNullValues);
+            }
+
+            KeyedResultMarshal.CompleteKey(
+                drive.Operation,
+                KeyedResultMarshal.ReadStringKey(key),
+                value,
+                error,
+                AdminCallbacks.TopicMetadataAndConfigPerKeyValue,
+                drive.DestroyValue);
         }
         catch (Exception)
         {
             // Swallow: an escaping exception would unwind into Rust. The Wait above then
             // times out and fails the test with a clear message.
         }
+        finally
+        {
+            drive?.Done.Signal();
+        }
     }
 
-    private sealed class Capture
+    private sealed class Drive
     {
-        internal IntPtr Result;
+        internal int DestroyCalls;
 
-        internal IntPtr Error;
+        internal int NonNullValues;
 
-        internal ManualResetEventSlim Done { get; } = new ManualResetEventSlim(false);
+        internal Drive(string[] keys, int expectedCallbacks)
+        {
+            Operation = new KeyedAdminOperation<string, TopicMetadataAndConfig>(
+                "createTopics", keys, StringComparer.Ordinal);
+            Done = new CountdownEvent(expectedCallbacks);
+            DestroyValue = handle =>
+            {
+                Interlocked.Increment(ref DestroyCalls);
+                NativeMethods.TopicMetadataAndConfigDestroy(handle);
+            };
+        }
+
+        internal KeyedAdminOperation<string, TopicMetadataAndConfig> Operation { get; }
+
+        internal CountdownEvent Done { get; }
+
+        /// <summary>
+        /// Production's destroy, counted. Allocated once so the count is not confused by a
+        /// fresh delegate per callback.
+        /// </summary>
+        internal Action<IntPtr> DestroyValue { get; }
     }
 }

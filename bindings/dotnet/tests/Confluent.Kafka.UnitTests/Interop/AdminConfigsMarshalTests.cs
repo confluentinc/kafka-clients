@@ -29,25 +29,24 @@ using Xunit;
 namespace Confluent.Kafka.UnitTests.Interop;
 
 /// <summary>
-/// Drives M15/P3 Stage 2's value tree over a <b>real</b> native
-/// <c>DescribeConfigsResult_t</c> — three levels of borrowed pointers (result →
-/// <c>Config_t</c> → <c>ConfigEntry_t</c> → synonym arrays) that one
-/// <c>*Result_destroy</c> invalidates together.
+/// Drives M15/P3 Stage 2's value tree over a <b>real</b> native per-key <c>Config_t</c> —
+/// two levels of borrowed pointers (<c>Config_t</c> → <c>ConfigEntry_t</c> → synonym
+/// arrays) that one <c>Config_destroy</c> invalidates together.
 /// </summary>
 /// <remarks>
 /// <para>
-/// The production trampoline destroys the result root in its <c>finally</c> — correctly —
-/// so it never lets a caller inspect the borrowed pointers afterwards, and "everything was
-/// copied out before the root died" is exactly what has to be proven. So these tests
-/// submit <c>describe_configs_async</c> directly with a capturing callback, keep the root
-/// alive, walk it with <em>production's</em> marshaller, destroy the root, and only then
+/// The production trampoline destroys the value in its <c>finally</c> — correctly — so it
+/// never lets a caller inspect the borrowed pointers afterwards, and "everything was
+/// copied out before the value died" is exactly what has to be proven. So these tests
+/// submit <c>describe_configs_async</c> directly with a capturing callback, keep the value
+/// alive, walk it with <em>production's</em> marshaller, destroy the value, and only then
 /// read the result.
 /// </para>
 /// <para>
-/// ⚠ <b>The per-resource error is BORROWED</b> (<c>const</c>, and the header adds "do not
-/// destroy it"), which is the opposite of Stage 1's RPCs — they had no per-key error at
-/// all, so their only error was the callback's owned parameter. Carrying Stage 1's habit
-/// over would double-free here, and a double free aborts the host at exit code 0.
+/// ⚠ <b>Under M15/P9's per-key ABI both the value and the error are OWNED</b> — there is
+/// no result root to borrow either from. That inverts the shape-1 walk this file used to
+/// drive, where the per-resource error was <c>const</c> and died with the root. Reading
+/// the error with <see cref="KafkaException.FromBorrowedHandle"/> here would leak it.
 /// </para>
 /// </remarks>
 public sealed class AdminConfigsMarshalTests
@@ -62,10 +61,13 @@ public sealed class AdminConfigsMarshalTests
     /// </summary>
     private static readonly AdminCallbacks.DescribeConfigsCallback s_capture = OnCapture;
 
+    /// <inheritdoc cref="s_capture"/>
+    private static readonly AdminCallbacks.DescribeConfigsCallback s_perKey = OnPerKey;
+
     /// <summary>
     /// ⚠ <b>The test that catches a lazily-held borrowed pointer, and nothing else will.</b>
-    /// The whole <see cref="Config"/> is read <em>after</em>
-    /// <c>DescribeConfigsResult_destroy</c> has invalidated every pointer it came from.
+    /// The whole <see cref="Config"/> is read <em>after</em> <c>Config_destroy</c> has
+    /// invalidated every pointer it came from.
     /// </summary>
     [Fact]
     public async Task TheValueTree_IsCopiedOut_AndSurvivesTheRootsDestroy()
@@ -89,24 +91,25 @@ public sealed class AdminConfigsMarshalTests
             s_deadline);
 
         ConfigResource resource = new ConfigResource(ConfigResourceType.Topic, Topic);
-        IntPtr result = SubmitAndCapture(admin, resource);
+        CaptureState capture = SubmitAndCapture(admin, resource);
 
         Config config;
         try
         {
-            Assert.Equal(1, NativeMethods.DescribeConfigsResultCount(result));
+            // The key crossed as the composite (type id, name) scalar pair, and there is no
+            // per-key error, so the value is present.
+            Assert.Equal((int)ConfigResourceType.Topic, capture.ResourceType);
+            Assert.Equal(Topic, capture.ResourceName);
+            Assert.Equal(IntPtr.Zero, capture.Error);
 
-            // No per-resource error, so the value is present.
-            Assert.Equal(IntPtr.Zero, NativeMethods.DescribeConfigsResultGetError(result, 0));
-
-            config = AdminCallbacks.ConfigValue(result, 0);
+            config = AdminCallbacks.ConfigPerKeyValue(capture.Value);
         }
         finally
         {
-            NativeMethods.DescribeConfigsResultDestroy(result);
+            NativeMethods.ConfigDestroy(capture.Value);
         }
 
-        // The root is gone. Everything below reads only owned managed state.
+        // The value is gone. Everything below reads only owned managed state.
         Assert.Equal(2, config.Entries.Count);
 
         ConfigEntry cleanup = Assert.IsType<ConfigEntry>(config.Get("cleanup.policy"));
@@ -130,47 +133,35 @@ public sealed class AdminConfigsMarshalTests
     }
 
     /// <summary>
-    /// The per-resource error is <b>borrowed</b>: reading it leaves it alive, so the single
-    /// root destroy that follows is the only free — and the message is the mock's, asserted
-    /// exactly (<c>definition-of-done.md</c> §3).
+    /// A failing key arrives with an <b>owned</b> error and a NULL value, and the message is
+    /// the mock's, asserted exactly (<c>definition-of-done.md</c> §3).
     /// </summary>
     /// <remarks>
-    /// ⚠ THE INJECTION POINT for <c>describeConfigs</c>. Under the injection this guards
-    /// against — teaching <see cref="KafkaException.FromBorrowedHandle"/> to destroy — the
-    /// re-read below becomes a use-after-free and the destroy a double free, which aborts
-    /// the test host rather than failing an assertion.
+    /// ⚠ THE INJECTION POINT for <c>describeConfigs</c> under the per-key ABI, and the
+    /// inverse of what this test asserted against the shape-1 walk. There is no result root
+    /// to borrow from, so <see cref="KafkaException.FromHandle"/> — which frees — is the
+    /// only correct reader; a <see cref="KafkaException.FromBorrowedHandle"/> here leaks
+    /// the error on every failing key, which no managed assertion can see.
     /// </remarks>
     [Fact]
-    public void PerResourceError_IsBorrowed_AndSurvivesTheWalk()
+    public void PerKeyError_IsOwned_AndArrivesWithANullValue()
     {
         using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
 
         // A topic that does not exist: the mock reports UNKNOWN_TOPIC_OR_PARTITION for it.
         ConfigResource missing = new ConfigResource(ConfigResourceType.Topic, "cfg-absent-topic");
-        IntPtr result = SubmitAndCapture(admin, missing);
+        CaptureState capture = SubmitAndCapture(admin, missing);
 
-        try
-        {
-            IntPtr error = NativeMethods.DescribeConfigsResultGetError(result, 0);
-            Assert.NotEqual(IntPtr.Zero, error);
+        Assert.Equal(IntPtr.Zero, capture.Value);
+        Assert.NotEqual(IntPtr.Zero, capture.Error);
 
-            KafkaException first = Assert.IsType<KafkaException>(KafkaException.FromBorrowedHandle(error));
+        // FromHandle consumes the error, so this is its one and only free.
+        KafkaException failure = Assert.IsType<KafkaException>(KafkaException.FromHandle(capture.Error));
 
-            // The mock's exact message (definition-of-done.md §3), rendered by the Rust
-            // ConfigResource's own Display (config_resource.rs:106).
-            Assert.Equal(
-                "Resource ConfigResource(type=Topic, name='cfg-absent-topic') not found.", first.Message);
-
-            // Borrowed: reading it did not consume it, so the same pointer still resolves.
-            KafkaException second = Assert.IsType<KafkaException>(KafkaException.FromBorrowedHandle(error));
-            Assert.Equal(first.Message, second.Message);
-            Assert.Equal(first.Code, second.Code);
-        }
-        finally
-        {
-            // The ONLY free: the root. The per-resource error dies with it.
-            NativeMethods.DescribeConfigsResultDestroy(result);
-        }
+        // The mock's exact message (definition-of-done.md §3), rendered by the Rust
+        // ConfigResource's own Display (config_resource.rs:106).
+        Assert.Equal(
+            "Resource ConfigResource(type=Topic, name='cfg-absent-topic') not found.", failure.Message);
     }
 
     /// <summary>
@@ -337,11 +328,125 @@ public sealed class AdminConfigsMarshalTests
     }
 
     /// <summary>
-    /// Submits <c>describe_configs_async</c> directly and hands the caller the resulting
-    /// <b>owned</b> result root, which the capturing callback deliberately does not destroy
-    /// — the callback owns it, and here that owner is the test.
+    /// ⚠ <b>THE RE-ARMED VALUE-DESTROY GUARD (M15/P9 CP8).</b> Under shape 4 a wrong or
+    /// missing per-key <c>Config_destroy</c> only <em>leaks</em>, so the old injection
+    /// point had nothing to assert on. This counts production's own destroy seam instead:
+    /// exactly one destroy per callback, on the success path <b>and</b> on the failing
+    /// key whose value is NULL.
     /// </summary>
-    private static IntPtr SubmitAndCapture(NativeAdminClient admin, params ConfigResource[] resources)
+    [Fact]
+    public async Task PerKeyValue_IsDestroyedExactlyOncePerCallback()
+    {
+        using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+
+        await TestTimeout.Run(
+            () => admin.CreateTopics(new[] { new NewTopic(Topic, 1, 1) }, options: null).All(),
+            s_deadline);
+
+        ConfigResource present = new ConfigResource(ConfigResourceType.Topic, Topic);
+        ConfigResource missing = new ConfigResource(ConfigResourceType.Topic, "cfg-absent-topic");
+
+        Drive drive = DrivePerKey(admin, present, missing);
+
+        await TestTimeout.Run(() => drive.Operation.Tasks[present], s_deadline);
+        Assert.True(drive.Operation.Tasks[missing].IsFaulted);
+
+        Assert.Equal(2, drive.DestroyCalls);
+        Assert.Equal(1, drive.NonNullValues);
+    }
+
+    /// <summary>
+    /// Submits <c>describe_configs_async</c> with a callback that runs the
+    /// <em>production</em> per-key marshaller, wrapping only <c>destroyValue</c> so it can
+    /// be counted (<c>definition-of-done.md</c> §12), and returns once every key fired.
+    /// </summary>
+    private static Drive DrivePerKey(NativeAdminClient admin, params ConfigResource[] resources)
+    {
+        Drive drive = new Drive(resources);
+        GCHandle gcHandle = GCHandle.Alloc(drive, GCHandleType.Normal);
+        List<Utf8Marshal.PinnedUtf8String> pinned = new List<Utf8Marshal.PinnedUtf8String>(resources.Length);
+        try
+        {
+            int[] types = new int[resources.Length];
+            IntPtr[] names = new IntPtr[resources.Length];
+            for (int index = 0; index < resources.Length; index++)
+            {
+                types[index] = (int)resources[index].Type;
+                Utf8Marshal.PinnedUtf8String name = Utf8Marshal.Pin(resources[index].Name);
+                pinned.Add(name);
+                names[index] = name.Pointer;
+            }
+
+            NativeMethods.AdminClientDescribeConfigsAsync(
+                admin.Handle.DangerousGetHandle(),
+                types,
+                names,
+                resources.Length,
+                -1,
+                includeSynonyms: true,
+                includeDocumentation: true,
+                s_perKey,
+                GCHandle.ToIntPtr(gcHandle));
+
+            Assert.True(
+                drive.Done.Wait(s_deadline),
+                $"only {drive.Done.InitialCount - drive.Done.CurrentCount} of "
+                    + $"{drive.Done.InitialCount} per-key callbacks fired");
+        }
+        finally
+        {
+            foreach (Utf8Marshal.PinnedUtf8String name in pinned)
+            {
+                name.Dispose();
+            }
+
+            gcHandle.Free();
+        }
+
+        return drive;
+    }
+
+    private static void OnPerKey(
+        int resourceType, IntPtr resourceName, IntPtr value, IntPtr error, IntPtr userData)
+    {
+        // A callback entered from native is a no-throw boundary even in a test.
+        Drive? drive = null;
+        try
+        {
+            drive = (Drive)GCHandle.FromIntPtr(userData).Target!;
+            if (value != IntPtr.Zero)
+            {
+                Interlocked.Increment(ref drive.NonNullValues);
+            }
+
+            KeyedResultMarshal.CompleteKey(
+                drive.Operation,
+                new ConfigResource(
+                    ConfigResourceMarshal.TypeFromId(resourceType),
+                    KeyedResultMarshal.ReadStringKey(resourceName)),
+                value,
+                error,
+                AdminCallbacks.ConfigPerKeyValue,
+                drive.DestroyValue);
+        }
+        catch (Exception)
+        {
+            // Swallow: an escaping exception would unwind into Rust. The Wait above then
+            // times out and fails the test with a clear message.
+        }
+        finally
+        {
+            drive?.Done.Signal();
+        }
+    }
+
+    /// <summary>
+    /// Submits <c>describe_configs_async</c> directly for <b>one</b> resource and hands the
+    /// caller that key's <b>owned</b> value and error, which the capturing callback
+    /// deliberately does not destroy — the callback owns both, and here that owner is the
+    /// test.
+    /// </summary>
+    private static CaptureState SubmitAndCapture(NativeAdminClient admin, params ConfigResource[] resources)
     {
         CaptureState capture = new CaptureState();
         GCHandle gcHandle = GCHandle.Alloc(capture, GCHandleType.Normal);
@@ -381,23 +486,21 @@ public sealed class AdminConfigsMarshalTests
             gcHandle.Free();
         }
 
-        KafkaException? submitFailure = KafkaException.FromHandle(capture.Error);
-        if (submitFailure is not null)
-        {
-            throw submitFailure;
-        }
-
-        Assert.NotEqual(IntPtr.Zero, capture.Result);
-        return capture.Result;
+        return capture;
     }
 
-    private static void OnCapture(IntPtr result, IntPtr error, IntPtr userData)
+    private static void OnCapture(
+        int resourceType, IntPtr resourceName, IntPtr value, IntPtr error, IntPtr userData)
     {
         // A callback entered from native is a no-throw boundary even in a test.
         try
         {
             CaptureState capture = (CaptureState)GCHandle.FromIntPtr(userData).Target!;
-            capture.Result = result;
+            capture.ResourceType = resourceType;
+
+            // ⚠ Copied HERE: the key is a borrowed const char*, valid only for the call.
+            capture.ResourceName = Utf8Marshal.PtrToString(resourceName);
+            capture.Value = value;
             capture.Error = error;
             capture.Done.Set();
         }
@@ -408,9 +511,42 @@ public sealed class AdminConfigsMarshalTests
         }
     }
 
+    private sealed class Drive
+    {
+        internal int DestroyCalls;
+
+        internal int NonNullValues;
+
+        internal Drive(ConfigResource[] keys)
+        {
+            Operation = new KeyedAdminOperation<ConfigResource, Config>(
+                "describeConfigs", keys, EqualityComparer<ConfigResource>.Default);
+            Done = new CountdownEvent(keys.Length);
+            DestroyValue = handle =>
+            {
+                Interlocked.Increment(ref DestroyCalls);
+                NativeMethods.ConfigDestroy(handle);
+            };
+        }
+
+        internal KeyedAdminOperation<ConfigResource, Config> Operation { get; }
+
+        internal CountdownEvent Done { get; }
+
+        /// <summary>
+        /// Production's destroy, counted. Allocated once so the count is not confused by a
+        /// fresh delegate per callback.
+        /// </summary>
+        internal Action<IntPtr> DestroyValue { get; }
+    }
+
     private sealed class CaptureState
     {
-        internal IntPtr Result;
+        internal int ResourceType = int.MinValue;
+
+        internal string? ResourceName;
+
+        internal IntPtr Value;
 
         internal IntPtr Error;
 

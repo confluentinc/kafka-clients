@@ -1575,8 +1575,9 @@ internal static partial class NativeMethods
     /// <para>
     /// ⚠ "An entry with a NULL topic is skipped" — silently — so a null topic is rejected
     /// at the C# boundary (ffi §B5). A non-cancelled entry with no target replicas is
-    /// rejected by the ABI itself, and that rejection fires the completion callback
-    /// <b>inline on the submitting thread</b>.
+    /// rejected by the ABI itself, and since M15/P9 CP6 that rejection fires <b>one
+    /// callback per requested partition</b>, all carrying the same error, inline on the
+    /// submitting thread — the per-key fan-out keeps "exactly one callback per key" total.
     /// </para>
     /// </remarks>
     [DllImport(DllName, EntryPoint = "kafka_admin_AdminClient_alter_partition_reassignments_async", CallingConvention = CallingConvention.Cdecl)]
@@ -1592,6 +1593,32 @@ internal static partial class NativeMethods
         [MarshalAs(UnmanagedType.I1)] bool allowReplicationFactorChange,
         AdminCallbacks.AlterPartitionReassignmentsCallback callback,
         IntPtr userData);
+
+    /// <summary>
+    /// The <b>synchronous</b> twin of <see cref="AdminClientAlterPartitionReassignmentsAsync"/>,
+    /// which writes the aggregate <c>AlterPartitionReassignmentsResult_t</c> to
+    /// <paramref name="outResult"/> and returns null on success.
+    /// </summary>
+    /// <remarks>
+    /// ⚠ <b>Declared for the marshal tests, not for production</b> (M15/P9 CP6). Production
+    /// submits through the async entry point, which since CP6 delivers one callback per
+    /// partition and <em>no root at all</em> — so this is the only way to obtain a real
+    /// native aggregate root with the accessor set <c>electLeaders</c> shares, and
+    /// <c>electLeaders</c>' own root is unobtainable against the mock. Same parameters as
+    /// the async form, including <paramref name="cancel"/>'s spelled-out element type.
+    /// </remarks>
+    [DllImport(DllName, EntryPoint = "kafka_admin_AdminClient_alter_partition_reassignments", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr AdminClientAlterPartitionReassignments(
+        IntPtr admin,
+        IntPtr[] topics,
+        int[] partitions,
+        [MarshalAs(UnmanagedType.LPArray, ArraySubType = UnmanagedType.I1)] bool[] cancel,
+        IntPtr[] targetReplicas,
+        int[] targetReplicaCounts,
+        int count,
+        int timeoutMs,
+        [MarshalAs(UnmanagedType.I1)] bool allowReplicationFactorChange,
+        out IntPtr outResult);
 
     [DllImport(DllName, EntryPoint = "kafka_admin_AlterPartitionReassignmentsResult_count", CallingConvention = CallingConvention.Cdecl)]
     internal static extern int AlterPartitionReassignmentsResultCount(IntPtr result);
@@ -2966,10 +2993,10 @@ internal static partial class NativeMethods
     /// <remarks>
     /// ⚠ In <b>removeAll</b> mode Java exposes no per-member outcome at all, so the caller
     /// passes <paramref name="groupInstanceIds"/> as <see langword="null"/> and
-    /// <paramref name="memberCount"/> as <c>0</c>; the result handle then always carries
-    /// zero rows regardless of success or failure, and any failure is reported through the
-    /// completion's error instead — the ABI header's own doc comment on this function states
-    /// this explicitly ("the result handle is empty and any failure is returned here").
+    /// <paramref name="memberCount"/> as <c>0</c>; the ABI then fires <b>exactly one</b>
+    /// callback with a <b>NULL</b> group-instance-id carrying the whole operation's outcome,
+    /// instead of one per member — so this is the one RPC whose callback count depends on
+    /// the mode.
     /// </remarks>
     [DllImport(DllName, EntryPoint = "kafka_admin_AdminClient_remove_members_from_consumer_group_async", CallingConvention = CallingConvention.Cdecl)]
     internal static extern void AdminClientRemoveMembersFromConsumerGroupAsync(
@@ -3094,6 +3121,32 @@ internal static partial class NativeMethods
         int timeoutMs,
         AdminCallbacks.CreateAclsCallback callback,
         IntPtr userData);
+
+    /// <summary>
+    /// The <b>synchronous</b> twin of <see cref="AdminClientCreateAclsAsync"/>, which writes
+    /// the aggregate <c>CreateAclsResult_t</c> to <paramref name="outResult"/> and returns
+    /// null on success.
+    /// </summary>
+    /// <remarks>
+    /// ⚠ <b>Declared for the marshal tests, not for production</b> (M15/P9 CP6). Production
+    /// submits through the async entry point, which since CP6 delivers one callback per
+    /// binding and <em>no root at all</em> — so this is the only way to obtain live borrowed
+    /// <c>kafka_common_AclBinding_t</c> handles without a broker, which is what the
+    /// <c>describeAcls</c> element walk needs (the mock fails <c>describeAcls</c> outright).
+    /// </remarks>
+    [DllImport(DllName, EntryPoint = "kafka_admin_AdminClient_create_acls", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr AdminClientCreateAcls(
+        IntPtr admin,
+        int[] resourceTypes,
+        IntPtr[] resourceNames,
+        int[] patternTypes,
+        IntPtr[] principals,
+        IntPtr[] hosts,
+        int[] operations,
+        int[] permissionTypes,
+        int count,
+        int timeoutMs,
+        out IntPtr outResult);
 
     // ---- kafka_admin_CreateAclsResult_t — a Category-3 owned borrow-root ----
 
@@ -4070,4 +4123,83 @@ internal static partial class NativeMethods
 
     [DllImport(DllName, EntryPoint = "kafka_admin_ListTransactionsResult_destroy", CallingConvention = CallingConvention.Cdecl)]
     internal static extern void ListTransactionsResultDestroy(IntPtr result);
+
+    // ---- Per-key value destroys (result shape 4) ----
+    //
+    // ⚠ These free a value handed to ONE per-key callback, which owns it outright. They
+    // are NOT the RPC's *Result_destroy: that frees the synchronous flattened result, and
+    // no such root exists on the per-key path. All null-safe, so a callback's `finally`
+    // can call them unconditionally.
+
+    [DllImport(DllName, EntryPoint = "kafka_admin_TopicMetadataAndConfig_destroy", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void TopicMetadataAndConfigDestroy(IntPtr value);
+
+    [DllImport(DllName, EntryPoint = "kafka_admin_TopicDescription_destroy", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void TopicDescriptionDestroy(IntPtr value);
+
+    [DllImport(DllName, EntryPoint = "kafka_admin_DeletedRecords_destroy", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void DeletedRecordsDestroy(IntPtr value);
+
+    /// <summary><c>DeletedRecords.lowWatermark()</c> off the per-key value handle.</summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_DeletedRecords_low_watermark", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern long DeletedRecordsLowWatermark(IntPtr value);
+
+    [DllImport(DllName, EntryPoint = "kafka_admin_Config_destroy", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void ConfigDestroy(IntPtr value);
+
+    [DllImport(DllName, EntryPoint = "kafka_admin_LogDirDescriptionMap_destroy", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void LogDirDescriptionMapDestroy(IntPtr value);
+
+    [DllImport(DllName, EntryPoint = "kafka_admin_ReplicaLogDirInfo_destroy", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void ReplicaLogDirInfoDestroy(IntPtr value);
+
+    [DllImport(DllName, EntryPoint = "kafka_admin_ListOffsetsResultInfo_destroy", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void ListOffsetsResultInfoDestroy(IntPtr value);
+
+    [DllImport(DllName, EntryPoint = "kafka_admin_ConsumerGroupDescription_destroy", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void ConsumerGroupDescriptionDestroy(IntPtr value);
+
+    [DllImport(DllName, EntryPoint = "kafka_admin_ClassicGroupDescription_destroy", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void ClassicGroupDescriptionDestroy(IntPtr value);
+
+    [DllImport(DllName, EntryPoint = "kafka_admin_OffsetAndMetadataMap_destroy", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void OffsetAndMetadataMapDestroy(IntPtr value);
+
+    /// <summary>
+    /// <c>kafka_admin_DeleteAclsFilterResults_t</c> — <c>delete_acls</c>'s per-filter value.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_DeleteAclsFilterResults_destroy", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void DeleteAclsFilterResultsDestroy(IntPtr value);
+
+    [DllImport(DllName, EntryPoint = "kafka_admin_DeleteAclsFilterResults_count", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int DeleteAclsFilterResultsCount(IntPtr value);
+
+    /// <summary>Borrowed; dies with the filter-results handle. Never freed here.</summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_DeleteAclsFilterResults_get_binding", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr DeleteAclsFilterResultsGetBinding(IntPtr value, int index);
+
+    /// <inheritdoc cref="DeleteAclsFilterResultsGetBinding"/>
+    [DllImport(DllName, EntryPoint = "kafka_admin_DeleteAclsFilterResults_get_error", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr DeleteAclsFilterResultsGetError(IntPtr value, int index);
+
+    /// <summary>
+    /// Destroys a per-key <c>kafka_common_AclBindingFilter_t</c> KEY handed to a
+    /// <c>delete_acls</c> callback. Null-safe.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_common_AclBindingFilter_destroy", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void AclBindingFilterDestroy(IntPtr filter);
+
+    /// <summary>
+    /// Destroys a per-key <c>kafka_common_AclBinding_t</c> KEY handed to a
+    /// <c>create_acls</c> callback. Null-safe.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_common_AclBinding_destroy", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void AclBindingDestroy(IntPtr binding);
+
+    /// <summary>
+    /// Destroys a per-key <c>kafka_common_ClientQuotaEntity_t</c> KEY handed to an
+    /// <c>alter_client_quotas</c> callback. Null-safe.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_common_ClientQuotaEntity_destroy", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void ClientQuotaEntityDestroy(IntPtr entity);
 }

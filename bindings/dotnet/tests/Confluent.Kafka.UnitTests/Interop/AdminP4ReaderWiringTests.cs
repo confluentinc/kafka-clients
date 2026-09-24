@@ -53,8 +53,9 @@ namespace Confluent.Kafka.UnitTests.Interop;
 /// ⚠⚠ <b>EVERY reader built on a shared factory must appear here, and the obligation is
 /// now a pre-write checklist item (PLAN §6.1 item 9) rather than a review finding.</b>
 /// M15/P4 Stage 2 added two <see cref="AdminCallbacks.TopicPartitionKey"/> readers —
-/// <c>ListPartitionReassignmentsKey</c> and <c>ListOffsetsKey</c> — and did not extend
-/// this file, which reopened the exact gap it was written to close (finding 70.12).
+/// <c>ListPartitionReassignmentsKey</c> and <c>ListOffsetsKey</c> (the latter retired by
+/// M15/P9) — and did not extend this file, which reopened the exact gap it was written to
+/// close (finding 70.12).
 /// Measured before the fix: cross-wiring <c>ListOffsetsKey</c> to <c>deleteRecords</c>'
 /// accessors left the suite at <b>1297/1297 green</b>, because the sibling accessors are
 /// layout-compatible — the wrong call returns a plausible answer. A shared factory makes
@@ -158,10 +159,6 @@ public sealed class AdminP4ReaderWiringTests
         "kafka_admin_ElectLeadersResult_get_topic",
         "kafka_admin_ElectLeadersResult_get_partition")]
     [InlineData(
-        nameof(AdminCallbacks.AlterPartitionReassignmentsKey),
-        "kafka_admin_AlterPartitionReassignmentsResult_get_topic",
-        "kafka_admin_AlterPartitionReassignmentsResult_get_partition")]
-    [InlineData(
         nameof(AdminCallbacks.DeleteRecordsKey),
         "kafka_admin_DeleteRecordsResult_get_topic",
         "kafka_admin_DeleteRecordsResult_get_partition")]
@@ -169,22 +166,6 @@ public sealed class AdminP4ReaderWiringTests
         nameof(AdminCallbacks.ListPartitionReassignmentsKey),
         "kafka_admin_ListPartitionReassignmentsResult_get_topic",
         "kafka_admin_ListPartitionReassignmentsResult_get_partition")]
-    [InlineData(
-        nameof(AdminCallbacks.ListOffsetsKey),
-        "kafka_admin_ListOffsetsResult_get_topic",
-        "kafka_admin_ListOffsetsResult_get_partition")]
-    [InlineData(
-        nameof(AdminCallbacks.AlterConsumerGroupOffsetsKey),
-        "kafka_admin_AlterConsumerGroupOffsetsResult_get_topic",
-        "kafka_admin_AlterConsumerGroupOffsetsResult_get_partition")]
-    [InlineData(
-        nameof(AdminCallbacks.DeleteConsumerGroupOffsetsKey),
-        "kafka_admin_DeleteConsumerGroupOffsetsResult_get_topic",
-        "kafka_admin_DeleteConsumerGroupOffsetsResult_get_partition")]
-    [InlineData(
-        nameof(AdminCallbacks.DescribeProducersKey),
-        "kafka_admin_DescribeProducersResult_get_topic",
-        "kafka_admin_DescribeProducersResult_get_partition")]
     public void EachCompositeKeyReader_CapturesItsOwnAccessors(
         string readerName, string getTopic, string getPartition) =>
         Assert.Equal(
@@ -236,56 +217,20 @@ public sealed class AdminP4ReaderWiringTests
             CapturedEntryPoints(Reader(nameof(AdminCallbacks.RemoveMembersFromConsumerGroupOptionalError))));
 
     /// <summary>
-    /// <c>createAcls</c>' <b>key</b> reader captures
-    /// <c>kafka_admin_CreateAclsResult_get_binding</c> — its own, not another ACL result's
-    /// (M15/P6).
-    /// </summary>
-    /// <remarks>
-    /// ⚠ The ACL results expose byte-identical accessor sets, so a cross-wired
-    /// <c>get_binding</c> returns a plausible binding rather than failing; and the Rust mock
-    /// does not implement any of these RPCs, so no behavioural test can tell them apart
-    /// either. The seven <c>kafka_common_AclBinding_*</c> accessors the reader then calls are
-    /// <em>shared</em> by every ACL result and so are not cross-wirable — which is why
-    /// <c>get_binding</c> is the only symbol this reader has to capture, and the only one
-    /// worth asserting.
-    /// </remarks>
-    [Fact]
-    public void CreateAclsKey_CapturesCreateAclsOwnBindingAccessor() =>
-        Assert.Equal(
-            new[] { "kafka_admin_CreateAclsResult_get_binding" },
-            CapturedEntryPoints(Reader(nameof(AdminCallbacks.CreateAclsKey))));
-
-    /// <summary>
-    /// <c>deleteAcls</c>' <b>key</b> reader captures
-    /// <c>kafka_admin_DeleteAclsResult_get_filter</c> — its own, not another ACL result's
-    /// (M15/P6).
+    /// <c>deleteAcls</c>' <b>per-key</b> value reader captures the three accessors of the
+    /// OWNED <c>DeleteAclsFilterResults_t</c> it is handed — not the retired root's
+    /// two-index twins above, which take a filter index it no longer has (M15/P9 CP5).
     /// </summary>
     [Fact]
-    public void DeleteAclsKey_CapturesDeleteAclsOwnFilterAccessor() =>
-        Assert.Equal(
-            new[] { "kafka_admin_DeleteAclsResult_get_filter" },
-            CapturedEntryPoints(Reader(nameof(AdminCallbacks.DeleteAclsKey))));
-
-    /// <summary>
-    /// <c>deleteAcls</c>' <b>value</b> reader captures all three of its own inner-axis
-    /// accessors — the <c>(i, j)</c> walk lives inside the reader, so all three are wired
-    /// here rather than in the accessor set (M15/P6).
-    /// </summary>
-    /// <remarks>
-    /// ⚠ <c>get_result_error</c> is the <b>value</b> channel; the accessor set's
-    /// <c>get_error</c> is the fault channel. A reader wired to the latter would look
-    /// plausible and would silently turn every inner failure into a filter-level fault.
-    /// </remarks>
-    [Fact]
-    public void DeleteAclsFilterResults_CapturesItsOwnInnerAccessors() =>
+    public void DeleteAclsFilterResultsPerKeyValue_CapturesTheOwnedValuesAccessors() =>
         Assert.Equal(
             new[]
             {
-                "kafka_admin_DeleteAclsResult_get_binding",
-                "kafka_admin_DeleteAclsResult_get_result_count",
-                "kafka_admin_DeleteAclsResult_get_result_error",
+                "kafka_admin_DeleteAclsFilterResults_count",
+                "kafka_admin_DeleteAclsFilterResults_get_binding",
+                "kafka_admin_DeleteAclsFilterResults_get_error",
             },
-            CapturedEntryPoints(Reader(nameof(AdminCallbacks.DeleteAclsFilterResults))));
+            CapturedEntryPoints(Reader(nameof(AdminCallbacks.DeleteAclsFilterResultsPerKeyValue))));
 
     /// <summary>
     /// <c>describeAcls</c>' <b>element</b> reader captures
@@ -297,42 +242,6 @@ public sealed class AdminP4ReaderWiringTests
         Assert.Equal(
             new[] { "kafka_admin_DescribeAclsResult_get_binding" },
             CapturedEntryPoints(Reader(nameof(AdminCallbacks.DescribeAclsValue))));
-
-    /// <summary>
-    /// ⚠⚠ Each P7 <b>string-key</b> reader captures <b>its own</b> result's key accessor
-    /// (M15/P7, finding 77.3).
-    /// </summary>
-    /// <remarks>
-    /// <c>AlterUserScramCredentialsResult_get_user</c>, <c>UpdateFeaturesResult_get_feature</c>
-    /// and P6's <c>CreateAclsResult_get_binding</c> are byte-identical, so a cross-wired reader
-    /// returns a plausible name. Both were inline lambdas until this finding and were therefore
-    /// invisible to <see cref="TheTrackedSet_CoversEveryFactoryBuiltReader"/>'s scan;
-    /// re-measured on the reviewed commit, a throw planted in <c>UpdateFeaturesKey</c> left
-    /// <c>UpdateFeatures_SurfacesTheRejectionOnEveryKey</c> <b>green</b> — the reader was never
-    /// executed at all. They are now built through
-    /// <see cref="KeyedResultMarshal.StringKeyReader"/>, so the capture exists and the
-    /// discovery reaches them by construction rather than by a name list.
-    /// </remarks>
-    [Theory]
-    [InlineData(
-        nameof(AdminCallbacks.AlterUserScramCredentialsKey),
-        "kafka_admin_AlterUserScramCredentialsResult_get_user")]
-    [InlineData(
-        nameof(AdminCallbacks.UpdateFeaturesKey),
-        "kafka_admin_UpdateFeaturesResult_get_feature")]
-    public void EachP7StringKeyReader_CapturesItsOwnAccessor(string readerName, string entryPoint) =>
-        Assert.Equal(new[] { entryPoint }, CapturedEntryPoints(Reader(readerName)));
-
-    /// <summary>
-    /// <c>fenceProducers</c>' <b>key</b> reader captures
-    /// <c>kafka_admin_FenceProducersResult_get_transactional_id</c> — not
-    /// <c>describeTransactions</c>' byte-identical twin (M15/P8).
-    /// </summary>
-    [Fact]
-    public void FenceProducersKey_CapturesItsOwnTransactionalIdAccessor() =>
-        Assert.Equal(
-            new[] { "kafka_admin_FenceProducersResult_get_transactional_id" },
-            CapturedEntryPoints(Reader(nameof(AdminCallbacks.FenceProducersKey))));
 
     /// <summary>
     /// ⚠⚠ <c>fenceProducers</c>' <b>value</b> reader captures <b>both</b> of its own inline
@@ -369,17 +278,6 @@ public sealed class AdminP4ReaderWiringTests
         Assert.Equal(
             new[] { "kafka_admin_ListTransactionsResult_get_error" },
             CapturedEntryPoints(Reader(nameof(AdminCallbacks.ListTransactionsOptionalError))));
-
-    /// <summary>
-    /// <c>describeTransactions</c>' <b>key</b> reader captures
-    /// <c>kafka_admin_DescribeTransactionsResult_get_transactional_id</c> — not
-    /// <c>fenceProducers</c>' byte-identical twin (M15/P8).
-    /// </summary>
-    [Fact]
-    public void DescribeTransactionsKey_CapturesItsOwnTransactionalIdAccessor() =>
-        Assert.Equal(
-            new[] { "kafka_admin_DescribeTransactionsResult_get_transactional_id" },
-            CapturedEntryPoints(Reader(nameof(AdminCallbacks.DescribeTransactionsKey))));
 
     /// <summary>
     /// <c>describeDelegationToken</c>' <b>element</b> reader captures
@@ -423,24 +321,6 @@ public sealed class AdminP4ReaderWiringTests
             CapturedEntryPoints(Reader(nameof(AdminCallbacks.DescribeClientQuotasValue))));
 
     /// <summary>
-    /// ⚠⚠ <c>alterClientQuotas</c>' <b>key</b> reader captures
-    /// <c>kafka_admin_AlterClientQuotasResult_get_entity</c> — its own, not
-    /// <c>describeClientQuotas</c>' twin (M15/P6).
-    /// </summary>
-    /// <remarks>
-    /// <c>kafka_admin_CreateAclsResult_t</c> and <c>kafka_admin_AlterClientQuotasResult_t</c>
-    /// declare byte-identical accessor sets (<c>count</c> / <c>get_X</c> / <c>get_error</c> /
-    /// <c>destroy</c>), so a cross-wire between them compiles only for the <em>key</em>
-    /// reader's entity/binding types — but the quota pair does cross-wire silently, and both
-    /// are what this file exists for.
-    /// </remarks>
-    [Fact]
-    public void AlterClientQuotasKey_CapturesItsOwnEntityAccessor() =>
-        Assert.Equal(
-            new[] { "kafka_admin_AlterClientQuotasResult_get_entity" },
-            CapturedEntryPoints(Reader(nameof(AdminCallbacks.AlterClientQuotasKey))));
-
-    /// <summary>
     /// No two of the factory-built readers capture the same accessors — the control that
     /// makes the per-reader assertions above more than three restatements of one source
     /// line.
@@ -455,30 +335,18 @@ public sealed class AdminP4ReaderWiringTests
         string[] readers =
         {
             nameof(AdminCallbacks.ElectLeadersKey),
-            nameof(AdminCallbacks.AlterPartitionReassignmentsKey),
             nameof(AdminCallbacks.DeleteRecordsKey),
             nameof(AdminCallbacks.ListPartitionReassignmentsKey),
-            nameof(AdminCallbacks.ListOffsetsKey),
             nameof(AdminCallbacks.ElectLeadersOptionalError),
-            nameof(AdminCallbacks.AlterConsumerGroupOffsetsKey),
             nameof(AdminCallbacks.AlterConsumerGroupOffsetsOptionalError),
-            nameof(AdminCallbacks.DeleteConsumerGroupOffsetsKey),
             nameof(AdminCallbacks.DeleteConsumerGroupOffsetsOptionalError),
             nameof(AdminCallbacks.RemoveMembersFromConsumerGroupOptionalError),
-            nameof(AdminCallbacks.CreateAclsKey),
-            nameof(AdminCallbacks.DeleteAclsKey),
-            nameof(AdminCallbacks.DeleteAclsFilterResults),
+            nameof(AdminCallbacks.DeleteAclsFilterResultsPerKeyValue),
             nameof(AdminCallbacks.DescribeAclsValue),
             nameof(AdminCallbacks.DescribeClientQuotasKey),
             nameof(AdminCallbacks.DescribeClientQuotasValue),
-            nameof(AdminCallbacks.AlterClientQuotasKey),
             nameof(AdminCallbacks.DescribeDelegationTokenValue),
-            nameof(AdminCallbacks.AlterUserScramCredentialsKey),
-            nameof(AdminCallbacks.UpdateFeaturesKey),
-            nameof(AdminCallbacks.FenceProducersKey),
             nameof(AdminCallbacks.FenceProducersValue),
-            nameof(AdminCallbacks.DescribeTransactionsKey),
-            nameof(AdminCallbacks.DescribeProducersKey),
             nameof(AdminCallbacks.ListTransactionsOptionalError),
         };
 
@@ -531,32 +399,20 @@ public sealed class AdminP4ReaderWiringTests
         Assert.Equal(
             new[]
             {
-                nameof(AdminCallbacks.AlterClientQuotasKey),
-                nameof(AdminCallbacks.AlterConsumerGroupOffsetsKey),
                 nameof(AdminCallbacks.AlterConsumerGroupOffsetsOptionalError),
-                nameof(AdminCallbacks.AlterPartitionReassignmentsKey),
-                nameof(AdminCallbacks.AlterUserScramCredentialsKey),
-                nameof(AdminCallbacks.CreateAclsKey),
-                nameof(AdminCallbacks.DeleteAclsFilterResults),
-                nameof(AdminCallbacks.DeleteAclsKey),
-                nameof(AdminCallbacks.DeleteConsumerGroupOffsetsKey),
+                nameof(AdminCallbacks.DeleteAclsFilterResultsPerKeyValue),
                 nameof(AdminCallbacks.DeleteConsumerGroupOffsetsOptionalError),
                 nameof(AdminCallbacks.DeleteRecordsKey),
                 nameof(AdminCallbacks.DescribeAclsValue),
                 nameof(AdminCallbacks.DescribeClientQuotasKey),
                 nameof(AdminCallbacks.DescribeClientQuotasValue),
                 nameof(AdminCallbacks.DescribeDelegationTokenValue),
-                nameof(AdminCallbacks.DescribeProducersKey),
-                nameof(AdminCallbacks.DescribeTransactionsKey),
                 nameof(AdminCallbacks.ElectLeadersKey),
                 nameof(AdminCallbacks.ElectLeadersOptionalError),
-                nameof(AdminCallbacks.FenceProducersKey),
                 nameof(AdminCallbacks.FenceProducersValue),
-                nameof(AdminCallbacks.ListOffsetsKey),
                 nameof(AdminCallbacks.ListPartitionReassignmentsKey),
                 nameof(AdminCallbacks.ListTransactionsOptionalError),
                 nameof(AdminCallbacks.RemoveMembersFromConsumerGroupOptionalError),
-                nameof(AdminCallbacks.UpdateFeaturesKey),
             },
             discovered);
     }
@@ -892,12 +748,6 @@ public sealed class AdminP4ReaderWiringTests
     [InlineData(
         "s_destroyDescribeUserScramCredentialsResult",
         "kafka_admin_DescribeUserScramCredentialsResult_destroy")]
-    [InlineData(
-        "s_destroyAlterUserScramCredentialsResult",
-        "kafka_admin_AlterUserScramCredentialsResult_destroy")]
-    [InlineData(
-        "s_destroyUpdateFeaturesResult",
-        "kafka_admin_UpdateFeaturesResult_destroy")]
     public void EachP7Destroy_BindsItsOwnAbiSymbol(string fieldName, string entryPoint) =>
         Assert.Equal(entryPoint, EntryPointOf(Reader(fieldName)));
 

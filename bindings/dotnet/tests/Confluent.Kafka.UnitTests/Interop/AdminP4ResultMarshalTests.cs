@@ -37,9 +37,16 @@ namespace Confluent.Kafka.UnitTests.Interop;
 /// path.</b> The production trampoline destroys the result root in its <c>finally</c> —
 /// correctly — so it never lets a caller inspect the borrowed pointers afterwards, and
 /// "the per-partition error was copied out before the root died" is exactly what has to be
-/// proven. So the test submits the <c>_async</c> entry point directly with its own
-/// capturing callback, keeps the root alive, walks it with <em>production's</em> walker
-/// and readers (<c>definition-of-done.md</c> §12), and destroys it exactly once.
+/// proven. So the test crosses the P/Invoke itself, keeps the root alive, walks it with
+/// <em>production's</em> walker and readers (<c>definition-of-done.md</c> §12), and
+/// destroys it exactly once.
+/// </para>
+/// <para>
+/// ⚠ <b>The entry point used is the SYNCHRONOUS one, and M15/P9 CP6 forced that.</b>
+/// <c>alter_partition_reassignments_async</c> now delivers one callback per partition and
+/// <em>no result root</em>, so its <c>out_result</c>-bearing sync twin is the only source
+/// of a real native aggregate root for this accessor set. Production still submits through
+/// the async form; what is under test here is the <em>walker</em>, not the submit seam.
 /// </para>
 /// <para>
 /// ⚠⚠ <b>The behavioural half of the phase's swap detection is
@@ -90,12 +97,6 @@ public sealed class AdminP4ResultMarshalTests
     private const int UnknownTopicOrPartitionCode = 3;
 
     /// <summary>
-    /// Rooted for the process lifetime, as every callback handed to native must be
-    /// (ffi §B6 keep-alive) — even a test's.
-    /// </summary>
-    private static readonly AdminCallbacks.AlterPartitionReassignmentsCallback s_capture = OnCapture;
-
-    /// <summary>
     /// ⚠⚠ <b>THE discriminator for this phase.</b> The same borrowed per-partition error,
     /// read from the same root, is a <b>fault</b> under one walker and a <b>map value</b>
     /// under the other.
@@ -124,17 +125,17 @@ public sealed class AdminP4ResultMarshalTests
             Assert.NotEqual(IntPtr.Zero, NativeMethods.AlterPartitionReassignmentsResultGetError(result, missingIndex));
             Assert.Equal(IntPtr.Zero, NativeMethods.AlterPartitionReassignmentsResultGetError(result, presentIndex));
 
-            // ---- (A) shape 2 — production's own routing for THIS RPC: the error FAULTS
-            // that partition's task, and the other partition is untouched. ----
+            // ---- (A) shape 4b — the per-key routing this RPC uses since M15/P9 CP6: the
+            // error FAULTS that partition's task, and the other partition is untouched. ----
             VoidKeyedAdminOperation<TopicPartition> perKey = new VoidKeyedAdminOperation<TopicPartition>(
                 "alterPartitionReassignments",
                 new[] { present, missing },
                 EqualityComparer<TopicPartition>.Default);
-            KeyedResultMarshal.Complete(
-                result,
-                AdminCallbacks.AlterPartitionReassignmentsAccessors,
+            SyntheticPerKeyWalk.RunVoid(
                 perKey,
-                AdminCallbacks.AlterPartitionReassignmentsKey);
+                AdminCallbacks.AlterPartitionReassignmentsAccessors.Count(result),
+                index => s_reassignmentKey(result, index),
+                index => AdminCallbacks.AlterPartitionReassignmentsAccessors.GetError(result, index));
 
             Assert.True(await TestTimeout.Run(() => perKey.Tasks[present], s_deadline));
             KafkaException faulted = await TestTimeout.Run(
@@ -150,7 +151,7 @@ public sealed class AdminP4ResultMarshalTests
                 result,
                 NativeMethods.AlterPartitionReassignmentsResultCount,
                 aggregate,
-                AdminCallbacks.AlterPartitionReassignmentsKey,
+                s_reassignmentKey,
                 s_optionalError,
                 EqualityComparer<TopicPartition>.Default);
 
@@ -200,7 +201,7 @@ public sealed class AdminP4ResultMarshalTests
                 result,
                 NativeMethods.AlterPartitionReassignmentsResultCount,
                 aggregate,
-                AdminCallbacks.AlterPartitionReassignmentsKey,
+                s_reassignmentKey,
                 s_optionalError,
                 EqualityComparer<TopicPartition>.Default);
         }
@@ -281,17 +282,20 @@ public sealed class AdminP4ResultMarshalTests
     /// one-byte C <c>bool</c>s finds <c>0</c> at index 1 and takes the rejected path. A
     /// single-entry version of this test could not tell the two encodings apart at all —
     /// <c>true</c> occupies byte 0 either way — which is exactly the shape of a test that
-    /// only ever passes. <b>Measured</b>, by widening the declaration's <c>ArraySubType</c>
-    /// to <c>UnmanagedType.Bool</c>: three tests go red — this one, the public
+    /// only ever passes. <b>Measured</b>, by widening <c>ArraySubType</c> to
+    /// <c>UnmanagedType.Bool</c> on the declarations this path and production's use — since
+    /// M15/P9 CP6 those are two (the sync twin here, the async form in production): three
+    /// tests go red — this one, the public
     /// <c>AlterPartitionReassignments_CancelSucceeds_AlongsideAReassignment</c>, and the
     /// structural sweep that guards the attribute. So the widening is observable
     /// behaviourally and not only structurally, which is what distinguishes this array from
     /// the <em>scalar</em> <c>bool</c> case M15/P2b measured as behaviourally insensitive.
     /// </para>
     /// <para>
-    /// It also drives the ABI's <b>inline</b> callback path with ordinary bad input: the
-    /// header names "a non-cancelled entry with no target replicas" as a trigger that fires
-    /// the callback synchronously, before the entry point returns.
+    /// It also drives the ABI's rejection path with ordinary bad input: the header names "a
+    /// non-cancelled entry with no target replicas" as a trigger, which on this
+    /// synchronous entry point comes back as the returned error with
+    /// <c>out_result</c> left untouched.
     /// </para>
     /// </remarks>
     [Fact]
@@ -348,12 +352,23 @@ public sealed class AdminP4ResultMarshalTests
     private static readonly Func<IntPtr, int, KafkaException?> s_optionalError =
         AdminCallbacks.BorrowedOptionalError(NativeMethods.AlterPartitionReassignmentsResultGetError);
 
+    /// <summary>
+    /// Reads a key out of a real <c>AlterPartitionReassignmentsResult_t</c> root, which
+    /// production no longer does: under shape 4b the callback is handed the topic and the
+    /// partition directly. Built from production's own factory and accessors so it cannot
+    /// drift from how every other composite key is read (<c>definition-of-done.md</c> §12).
+    /// </summary>
+    private static readonly Func<IntPtr, int, TopicPartition> s_reassignmentKey =
+        AdminCallbacks.TopicPartitionKey(
+            NativeMethods.AlterPartitionReassignmentsResultGetTopic,
+            NativeMethods.AlterPartitionReassignmentsResultGetPartition);
+
     private static int IndexOf(IntPtr result, TopicPartition partition)
     {
         int count = NativeMethods.AlterPartitionReassignmentsResultCount(result);
         for (int index = 0; index < count; index++)
         {
-            if (AdminCallbacks.AlterPartitionReassignmentsKey(result, index).Equals(partition))
+            if (s_reassignmentKey(result, index).Equals(partition))
             {
                 return index;
             }
@@ -377,34 +392,23 @@ public sealed class AdminP4ResultMarshalTests
     }
 
     /// <summary>
-    /// Submits <c>alter_partition_reassignments_async</c> directly for one succeeding and
-    /// one failing partition, and hands the caller the resulting <b>owned</b> result root,
-    /// which the capturing callback deliberately does not destroy — the callback owns it,
-    /// and here that owner is the test.
+    /// Submits for one succeeding and one failing partition, and hands the caller the
+    /// resulting <b>owned</b> result root.
     /// </summary>
     private static IntPtr SubmitAndCapture(NativeAdminClient admin, TopicPartition present, TopicPartition missing)
     {
-        using Utf8Marshal.PinnedUtf8String presentTopic = Utf8Marshal.Pin(present.Topic);
-        using Utf8Marshal.PinnedUtf8String missingTopic = Utf8Marshal.Pin(missing.Topic);
-
         int[] replicas = { 0 };
         GCHandle pinnedReplicas = GCHandle.Alloc(replicas, GCHandleType.Pinned);
         try
         {
             IntPtr ids = pinnedReplicas.AddrOfPinnedObject();
-            Capture capture = Submit(
-                userData => NativeMethods.AdminClientAlterPartitionReassignmentsAsync(
-                    admin.Handle.DangerousGetHandle(),
-                    new[] { presentTopic.Pointer, missingTopic.Pointer },
-                    new[] { present.Partition, missing.Partition },
-                    new[] { false, false },
-                    new[] { ids, ids },
-                    new[] { replicas.Length, replicas.Length },
-                    2,
-                    -1,
-                    true,
-                    s_capture,
-                    userData));
+            Capture capture = SubmitSync(
+                admin,
+                present,
+                missing,
+                new[] { false, false },
+                new[] { ids, ids },
+                new[] { replicas.Length, replicas.Length });
 
             KafkaException? failure = KafkaException.FromHandle(capture.Error);
             if (failure is not null)
@@ -423,32 +427,22 @@ public sealed class AdminP4ResultMarshalTests
 
     /// <summary>
     /// Submits two entries — the first with replicas, the second with none — and chooses
-    /// the second's <c>cancel</c> flag, returning whichever of result / error the callback
-    /// was handed.
+    /// the second's <c>cancel</c> flag, returning whichever of result / error came back.
     /// </summary>
     private static Capture SubmitRaw(
         NativeAdminClient admin, TopicPartition first, TopicPartition second, bool cancelSecond)
     {
-        using Utf8Marshal.PinnedUtf8String firstTopic = Utf8Marshal.Pin(first.Topic);
-        using Utf8Marshal.PinnedUtf8String secondTopic = Utf8Marshal.Pin(second.Topic);
-
         int[] replicas = { 0 };
         GCHandle pinnedReplicas = GCHandle.Alloc(replicas, GCHandleType.Pinned);
         try
         {
-            return Submit(
-                userData => NativeMethods.AdminClientAlterPartitionReassignmentsAsync(
-                    admin.Handle.DangerousGetHandle(),
-                    new[] { firstTopic.Pointer, secondTopic.Pointer },
-                    new[] { first.Partition, second.Partition },
-                    new[] { false, cancelSecond },
-                    new[] { pinnedReplicas.AddrOfPinnedObject(), IntPtr.Zero },
-                    new[] { replicas.Length, 0 },
-                    2,
-                    -1,
-                    true,
-                    s_capture,
-                    userData));
+            return SubmitSync(
+                admin,
+                first,
+                second,
+                new[] { false, cancelSecond },
+                new[] { pinnedReplicas.AddrOfPinnedObject(), IntPtr.Zero },
+                new[] { replicas.Length, 0 });
         }
         finally
         {
@@ -457,58 +451,35 @@ public sealed class AdminP4ResultMarshalTests
     }
 
     /// <summary>
-    /// Submits and waits for the capturing callback, freeing the rooting
-    /// <see cref="GCHandle"/> <b>only once that callback has run</b>.
+    /// Crosses the P/Invoke through the <b>synchronous</b> entry point, whose
+    /// <c>out_result</c> is the only remaining source of a real native aggregate root for
+    /// this RPC (M15/P9 CP6 — see
+    /// <see cref="NativeMethods.AdminClientAlterPartitionReassignments"/>).
     /// </summary>
-    /// <remarks>
-    /// ⚠ <b>The unconditional <c>finally</c> this replaces would turn a legible failure
-    /// into a host abort (M15/P4 round 1, finding 70.7).</b> A callback that is merely
-    /// <em>late</em> rather than absent still fires: freeing the handle on the timeout path
-    /// hands the core's dispatcher a freed <see cref="GCHandle"/>, which it dereferences
-    /// and writes through. Leaking one handle in a test that is already failing is the
-    /// cheaper outcome, and it keeps the assertion message — which names the test — the
-    /// thing the run reports. This is the same reasoning production's
-    /// <c>AdminOperation.AbandonBeforeSubmit</c> is written from: free only where native
-    /// provably cannot still be holding the pointer.
-    /// </remarks>
-    private static Capture Submit(Action<IntPtr> submit)
+    private static Capture SubmitSync(
+        NativeAdminClient admin,
+        TopicPartition first,
+        TopicPartition second,
+        bool[] cancel,
+        IntPtr[] targetReplicas,
+        int[] targetReplicaCounts)
     {
-        Capture capture = new Capture();
-        GCHandle gcHandle = GCHandle.Alloc(capture, GCHandleType.Normal);
-        bool fired = false;
-        try
-        {
-            submit(GCHandle.ToIntPtr(gcHandle));
-            fired = capture.Done.Wait(s_deadline);
-        }
-        finally
-        {
-            // Deliberately NOT freed when the callback has not fired — see the remarks.
-            if (fired)
-            {
-                gcHandle.Free();
-            }
-        }
+        using Utf8Marshal.PinnedUtf8String firstTopic = Utf8Marshal.Pin(first.Topic);
+        using Utf8Marshal.PinnedUtf8String secondTopic = Utf8Marshal.Pin(second.Topic);
 
-        Assert.True(fired, "the alterPartitionReassignments callback never fired");
-        return capture;
-    }
+        IntPtr error = NativeMethods.AdminClientAlterPartitionReassignments(
+            admin.Handle.DangerousGetHandle(),
+            new[] { firstTopic.Pointer, secondTopic.Pointer },
+            new[] { first.Partition, second.Partition },
+            cancel,
+            targetReplicas,
+            targetReplicaCounts,
+            2,
+            -1,
+            true,
+            out IntPtr result);
 
-    private static void OnCapture(IntPtr result, IntPtr error, IntPtr userData)
-    {
-        // A callback entered from native is a no-throw boundary even in a test.
-        try
-        {
-            Capture capture = (Capture)GCHandle.FromIntPtr(userData).Target!;
-            capture.Result = result;
-            capture.Error = error;
-            capture.Done.Set();
-        }
-        catch (Exception)
-        {
-            // Swallow: an escaping exception would unwind into Rust. The Wait above then
-            // times out and fails the test with a clear message.
-        }
+        return new Capture { Result = result, Error = error };
     }
 
     private sealed class Capture
@@ -516,7 +487,5 @@ public sealed class AdminP4ResultMarshalTests
         internal IntPtr Result;
 
         internal IntPtr Error;
-
-        internal ManualResetEventSlim Done { get; } = new ManualResetEventSlim(false);
     }
 }

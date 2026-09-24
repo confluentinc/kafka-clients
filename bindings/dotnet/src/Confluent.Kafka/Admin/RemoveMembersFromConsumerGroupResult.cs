@@ -39,9 +39,10 @@ namespace Confluent.Kafka.Admin;
 /// and when it is true <see cref="All"/> iterates the <em>resolved</em> map instead of the
 /// original request set — because in real Java the broker still reports one outcome per
 /// member it actually removed. The Rust core has no per-member outcome model for "remove
-/// everyone": in removeAll mode the ABI result handle always carries <b>zero rows</b>, and
-/// any failure is delivered only as a call-level fault (see
-/// <c>kafka_admin_AdminClient_remove_members_from_consumer_group</c>'s doc comment). So
+/// everyone": in removeAll mode the ABI fires <b>one NULL-keyed callback</b> carrying the
+/// whole operation's outcome, which the binding resolves as an <b>empty</b> map on success
+/// and as a call-level fault on failure (see
+/// <c>kafka_admin_AdminClient_remove_members_from_consumer_group_async</c>'s doc comment). So
 /// <see cref="All"/> below is written in Java's exact shape — it still iterates the resolved
 /// map in removeAll mode — but that iteration is over a map the core guarantees is empty,
 /// so it can only ever find success there; the only way a removeAll request's own failure

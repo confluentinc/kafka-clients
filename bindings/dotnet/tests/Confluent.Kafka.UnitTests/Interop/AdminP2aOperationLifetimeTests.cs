@@ -81,7 +81,7 @@ public sealed class AdminP2aOperationLifetimeTests
             "an in-flight operation must defer AdminClient_destroy — the ABI does not protect this itself");
 
         // ---- (3) Completing the operation releases it. ----
-        AdminCallbacks.DeleteTopicsByName(IntPtr.Zero, MakeError(42, "submit failed"), capturedUserData);
+        FireDeleteByName(Topic, 42, "submit failed", capturedUserData);
 
         Assert.True(handle.IsClosed, "completing the in-flight operation must run the deferred release");
         Assert.NotNull(result.TopicNameValues![Topic].Exception);
@@ -115,7 +115,7 @@ public sealed class AdminP2aOperationLifetimeTests
         TestTimeout.Run(admin.Dispose, s_deadline);
         Assert.False(handle.IsClosed);
 
-        AdminCallbacks.DescribeTopicsByName(IntPtr.Zero, MakeError(42, "submit failed"), capturedUserData);
+        FireDescribeByName(Topic, 42, "submit failed", capturedUserData);
 
         Assert.True(handle.IsClosed);
         Assert.NotNull(result.TopicNameValues![Topic].Exception);
@@ -145,7 +145,7 @@ public sealed class AdminP2aOperationLifetimeTests
             (nativeHandle, keys, count, timeoutMs, retry, callback, userData) =>
             {
                 byNameKey = Utf8Marshal.PtrToString(keys[0]);
-                AdminCallbacks.DeleteTopicsByName(IntPtr.Zero, MakeError(1, "done"), userData);
+                AdminCallbacks.DeleteTopicsByName(keys[0], MakeError(1, "done"), userData);
             },
             (nativeHandle, keys, count, timeoutMs, retry, callback, userData) => byIdsCalled = true);
 
@@ -162,7 +162,7 @@ public sealed class AdminP2aOperationLifetimeTests
             (nativeHandle, keys, count, timeoutMs, retry, callback, userData) =>
             {
                 byIdKey = Utf8Marshal.PtrToString(keys[0]);
-                AdminCallbacks.DeleteTopicsById(IntPtr.Zero, MakeError(1, "done"), userData);
+                AdminCallbacks.DeleteTopicsById(keys[0], MakeError(1, "done"), userData);
             });
 
         Assert.False(byNameCalled, "an id collection must not drive the by-name entry point");
@@ -180,7 +180,7 @@ public sealed class AdminP2aOperationLifetimeTests
             (nativeHandle, keys, count, timeoutMs, includeAuthorized, limit, callback, userData) =>
             {
                 describeByNameKey = Utf8Marshal.PtrToString(keys[0]);
-                AdminCallbacks.DescribeTopicsByName(IntPtr.Zero, MakeError(1, "done"), userData);
+                AdminCallbacks.DescribeTopicsByName(keys[0], IntPtr.Zero, MakeError(1, "done"), userData);
             },
             (nativeHandle, keys, count, timeoutMs, includeAuthorized, limit, callback, userData) =>
                 describeByIdsCalled = true);
@@ -198,7 +198,7 @@ public sealed class AdminP2aOperationLifetimeTests
             (nativeHandle, keys, count, timeoutMs, includeAuthorized, limit, callback, userData) =>
             {
                 describeByIdKey = Utf8Marshal.PtrToString(keys[0]);
-                AdminCallbacks.DescribeTopicsById(IntPtr.Zero, MakeError(1, "done"), userData);
+                AdminCallbacks.DescribeTopicsById(keys[0], IntPtr.Zero, MakeError(1, "done"), userData);
             });
 
         Assert.False(describeByNameCalled);
@@ -223,7 +223,7 @@ public sealed class AdminP2aOperationLifetimeTests
             {
                 deleteTimeout = timeoutMs;
                 deleteRetry = retry;
-                AdminCallbacks.DeleteTopicsByName(IntPtr.Zero, MakeError(1, "done"), userData);
+                AdminCallbacks.DeleteTopicsByName(keys[0], MakeError(1, "done"), userData);
             },
             UnusedDeleteSubmit);
 
@@ -242,7 +242,7 @@ public sealed class AdminP2aOperationLifetimeTests
             {
                 defaultedTimeout = timeoutMs;
                 defaultedRetry = retry;
-                AdminCallbacks.DeleteTopicsByName(IntPtr.Zero, MakeError(1, "done"), userData);
+                AdminCallbacks.DeleteTopicsByName(keys[0], MakeError(1, "done"), userData);
             },
             UnusedDeleteSubmit);
 
@@ -265,7 +265,7 @@ public sealed class AdminP2aOperationLifetimeTests
                 describeTimeout = timeoutMs;
                 includeAuthorized = include;
                 limit = partitionLimit;
-                AdminCallbacks.DescribeTopicsByName(IntPtr.Zero, MakeError(1, "done"), userData);
+                AdminCallbacks.DescribeTopicsByName(keys[0], IntPtr.Zero, MakeError(1, "done"), userData);
             },
             UnusedDescribeSubmit);
 
@@ -281,7 +281,7 @@ public sealed class AdminP2aOperationLifetimeTests
             (nativeHandle, keys, count, timeoutMs, include, partitionLimit, callback, userData) =>
             {
                 defaultedLimit = partitionLimit;
-                AdminCallbacks.DescribeTopicsByName(IntPtr.Zero, MakeError(1, "done"), userData);
+                AdminCallbacks.DescribeTopicsByName(keys[0], IntPtr.Zero, MakeError(1, "done"), userData);
             },
             UnusedDescribeSubmit);
 
@@ -304,11 +304,20 @@ public sealed class AdminP2aOperationLifetimeTests
     /// <c>FreeGcHandle</c>) exactly as production runs it.
     /// </para>
     /// <para>
-    /// The three assertions after the call are made with <b>no await and no sleep</b>, and
-    /// that is the point: the awaiter is already faulted and the client handle already
+    /// The assertions after the call are made with <b>no await and no sleep</b>, and that
+    /// is the point: the awaiter is already faulted and the client handle already
     /// releasable, which can only be true if the callback ran to completion before the
     /// entry point returned. A leaked <c>GCHandle</c> or an unreleased reference would
     /// leave <c>IsClosed</c> false forever; a double free would abort the run.
+    /// </para>
+    /// <para>
+    /// ⚠ <b>M15/P9 CP6 changed WHICH failure arrives, and that is now the sharper claim.</b>
+    /// The unparseable text is the per-key ABI's own key, so the trampoline's
+    /// <c>Uuid.Parse</c> throws <em>inside</em> the no-throw boundary: the callback's owned
+    /// error is destroyed undelivered and no awaitable can be named from it. What must still
+    /// hold — and is what this test pins — is that the countdown reaches zero anyway, so the
+    /// caller's key faults through <c>FailUncompleted</c> rather than hanging, with the error
+    /// handle freed exactly once and the reference released.
     /// </para>
     /// </remarks>
     [Fact]
@@ -345,7 +354,14 @@ public sealed class AdminP2aOperationLifetimeTests
 
         KafkaException failure = Assert.IsType<KafkaException>(
             result.TopicIdValues![placeholder].Exception!.InnerException);
-        Assert.Contains("!!! not base64 !!!", failure.Message, StringComparison.Ordinal);
+
+        // ⚠ M15/P9 CP6 INVERTED this: the malformed text IS the per-key ABI's key, so the
+        // trampoline cannot name it (Uuid.Parse throws inside the no-throw boundary) and
+        // the error it carried is destroyed undelivered. The countdown still reaches zero,
+        // so FailUncompleted faults the caller's own key instead.
+        Assert.DoesNotContain("!!! not base64 !!!", failure.Message, StringComparison.Ordinal);
+        Assert.Equal(
+            $"The deleteTopics result contained no entry for '{placeholder}'.", failure.Message);
 
         // The GCHandle was freed and the span-the-op reference released by that same
         // inline callback — so the very next Dispose releases the handle.
@@ -376,7 +392,7 @@ public sealed class AdminP2aOperationLifetimeTests
                 (nativeHandle, keys, count, timeoutMs, retry, callback, userData) =>
                     deleteUserData = userData,
                 UnusedDeleteSubmit);
-            AdminCallbacks.DeleteTopicsByName(IntPtr.Zero, MakeError(9, "balance probe"), deleteUserData);
+            FireDeleteByName($"{Topic}-{i}", 9, "balance probe", deleteUserData);
             Assert.NotNull(deleted.TopicNameValues![$"{Topic}-{i}"].Exception);
 
             IntPtr describeUserData = IntPtr.Zero;
@@ -386,7 +402,7 @@ public sealed class AdminP2aOperationLifetimeTests
                 UnusedDescribeSubmit,
                 (nativeHandle, keys, count, timeoutMs, include, limit, callback, userData) =>
                     describeUserData = userData);
-            AdminCallbacks.DescribeTopicsById(IntPtr.Zero, MakeError(9, "balance probe"), describeUserData);
+            FireDescribeById(new Uuid(i, i), 9, "balance probe", describeUserData);
             Assert.NotNull(described.TopicIdValues![new Uuid(i, i)].Exception);
 
             Assert.False(handle.IsClosed, "the client is still alive between operations");
@@ -438,10 +454,10 @@ public sealed class AdminP2aOperationLifetimeTests
     }
 
     /// <summary>
-    /// A top-level submit failure — a non-null callback <c>error</c>, meaning the request
-    /// never reached the broker — faults <b>every</b> per-key awaiter and leaves none
-    /// hanging, for both key types. The error parameter is <b>owned</b>, so it is freed by
-    /// the trampoline (the mirror image of the borrowed per-key errors inside a result).
+    /// A submit failure faults <b>every</b> per-key awaiter and leaves none hanging, for
+    /// both key types. The error parameter is <b>owned</b>, so the trampoline frees it.
+    /// <c>deleteTopics</c>-by-name is result shape 4b and <c>describeTopics</c>-by-id is
+    /// shape 4a, so in both cases the failure arrives as one callback per key.
     /// </summary>
     [Fact]
     public async Task TopLevelSubmitFailure_FaultsEveryPerKeyTask_ForBothKeyTypes()
@@ -455,7 +471,10 @@ public sealed class AdminP2aOperationLifetimeTests
             (nativeHandle, keys, count, timeoutMs, retry, callback, userData) => nameUserData = userData,
             UnusedDeleteSubmit);
 
-        AdminCallbacks.DeleteTopicsByName(IntPtr.Zero, MakeError(7, "could not submit"), nameUserData);
+        foreach (string key in new[] { "alpha", "beta", "gamma" })
+        {
+            FireDeleteByName(key, 7, "could not submit", nameUserData);
+        }
 
         Assert.Equal(3, byName.TopicNameValues!.Count);
         foreach (KeyValuePair<string, Task> entry in byName.TopicNameValues!)
@@ -475,7 +494,10 @@ public sealed class AdminP2aOperationLifetimeTests
             UnusedDescribeSubmit,
             (nativeHandle, keys, count, timeoutMs, include, limit, callback, userData) => idUserData = userData);
 
-        AdminCallbacks.DescribeTopicsById(IntPtr.Zero, MakeError(8, "could not submit either"), idUserData);
+        foreach (Uuid id in new[] { new Uuid(1L, 1L), new Uuid(2L, 2L) })
+        {
+            FireDescribeById(id, 8, "could not submit either", idUserData);
+        }
 
         Assert.Equal(2, byId.TopicIdValues!.Count);
         foreach (KeyValuePair<Uuid, Task<TopicDescription>> entry in byId.TopicIdValues!)
@@ -515,7 +537,7 @@ public sealed class AdminP2aOperationLifetimeTests
 
         GC.Collect();
 
-        AdminCallbacks.DescribeTopicsByName(IntPtr.Zero, MakeError(3, "after gc"), capturedUserData);
+        FireDescribeByName(Topic, 3, "after gc", capturedUserData);
 
         Assert.NotNull(result.TopicNameValues![Topic].Exception);
     }
@@ -608,6 +630,39 @@ public sealed class AdminP2aOperationLifetimeTests
         AdminCallbacks.DescribeTopicsCallback callback,
         IntPtr userData) =>
         throw new InvalidOperationException("the wrong describeTopics entry point was selected");
+
+    /// <summary>
+    /// Fires one shape-4b per-key callback for <paramref name="key"/> through the
+    /// production trampoline. The <c>key</c> is a borrowed <c>const char*</c>, pinned only
+    /// for the call; the error is <b>owned</b> and the trampoline frees it.
+    /// </summary>
+    private static void FireDeleteByName(string key, int code, string message, IntPtr userData)
+    {
+        using Utf8Marshal.PinnedUtf8String pinnedKey = Utf8Marshal.Pin(key);
+        AdminCallbacks.DeleteTopicsByName(pinnedKey.Pointer, MakeError(code, message), userData);
+    }
+
+    /// <summary>
+    /// Fires one shape-4a per-key <c>describeTopics</c>-by-name failure. The <c>value</c>
+    /// slot is NULL on a failing key; the error is <b>owned</b> and the trampoline frees it.
+    /// </summary>
+    private static void FireDescribeByName(string key, int code, string message, IntPtr userData)
+    {
+        using Utf8Marshal.PinnedUtf8String pinnedKey = Utf8Marshal.Pin(key);
+        AdminCallbacks.DescribeTopicsByName(
+            pinnedKey.Pointer, IntPtr.Zero, MakeError(code, message), userData);
+    }
+
+    /// <summary>
+    /// The by-id twin of <see cref="FireDescribeByName"/>: the key crosses as Java's
+    /// <c>Uuid.toString()</c> base64 text, exactly as the submit sent it.
+    /// </summary>
+    private static void FireDescribeById(Uuid key, int code, string message, IntPtr userData)
+    {
+        using Utf8Marshal.PinnedUtf8String pinnedKey = Utf8Marshal.Pin(key.ToString());
+        AdminCallbacks.DescribeTopicsById(
+            pinnedKey.Pointer, IntPtr.Zero, MakeError(code, message), userData);
+    }
 
     /// <summary>
     /// Builds an <b>owned</b> <c>kafka_common_KafkaError_t</c> to stand in for the one

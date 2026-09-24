@@ -17,6 +17,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
 using System.Runtime.InteropServices;
+using System.Threading;
 using System.Threading.Tasks;
 
 using Confluent.Kafka.Admin;
@@ -341,15 +342,16 @@ public sealed class AdminP6SubmitArgumentTests
             Capture(new[] { Binding("tópico-café-日本") }, options: null).ResourceNames);
 
     /// <summary>
-    /// ⚠ <b>The inline-callback path (PLAN §4.5 case 2).</b> The ABI fires this RPC's
-    /// callback <b>synchronously on the calling thread, before the submit returns</b> when
-    /// the request cannot be submitted at all. Driving the production trampoline from inside
-    /// the stand-in reproduces that exactly: it must not deadlock, every binding's awaitable
-    /// must fault with the submit error, and the <c>GCHandle</c> must be freed once — which
-    /// the client's <see cref="NativeAdminClient.Dispose"/> below would hang on otherwise.
+    /// ⚠ <b>Submitted from inside the stand-in (PLAN §4.5 case 2).</b> Since M15/P9 CP6 this
+    /// RPC's key is an owned <c>kafka_common_AclBinding_t</c> only the core can mint, so the
+    /// callback cannot be hand-fired and a whole-call failure is fanned out <b>once per
+    /// binding</b> rather than delivered once. Issuing the real submit from inside the
+    /// stand-in must not deadlock, every binding's awaitable must fault, and the
+    /// <c>GCHandle</c> must be freed once — which the client's
+    /// <see cref="NativeAdminClient.Dispose"/> below would hang on otherwise.
     /// </summary>
     [Fact]
-    public void InlineCallback_FaultsEveryKey_AndReleasesTheRegistration()
+    public async Task PerKeyCallbacks_FaultEveryKey_AndReleaseTheRegistration()
     {
         using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
 
@@ -361,16 +363,17 @@ public sealed class AdminP6SubmitArgumentTests
             options: null,
             (handle, resourceTypes, resourceNames, patternTypes, principals, hosts,
              operations, permissionTypes, count, timeoutMs, callback, userData) =>
-                // Synchronously, on this thread, before the submit returns — as the ABI does.
-                callback(IntPtr.Zero, CapturedError(), userData));
+                NativeMethods.AdminClientCreateAclsAsync(
+                    handle, resourceTypes, resourceNames, patternTypes, principals, hosts,
+                    operations, permissionTypes, count, timeoutMs, callback, userData));
 
-        Assert.True(result.Values[alpha].IsFaulted);
-        Assert.True(result.Values[beta].IsFaulted);
-
-        KafkaException alphaFailure = Assert.IsType<KafkaException>(
-            result.Values[alpha].Exception!.InnerException);
-        Assert.Equal("captured", alphaFailure.Message);
-        Assert.Equal(1, alphaFailure.Code);
+        foreach (AclBinding binding in new[] { alpha, beta })
+        {
+            KafkaException failure = await Assert.ThrowsAsync<KafkaException>(
+                () => result.Values[binding]);
+            Assert.Equal(35, failure.Code);
+            Assert.Equal("Not implemented yet", failure.Message);
+        }
     }
 
     /// <summary>
@@ -488,33 +491,33 @@ public sealed class AdminP6SubmitArgumentTests
     }
 
     /// <summary>
-    /// ⚠ <b>The inline-callback path.</b> Driving the production trampoline from inside the
-    /// stand-in must not deadlock, must fault every filter's awaitable with the submit error,
-    /// and must free the <c>GCHandle</c> once — which the client's <c>Dispose</c> would hang
-    /// on otherwise.
+    /// ⚠ Every filter's awaitable faults independently and the <c>GCHandle</c> is freed once —
+    /// which the client's <c>Dispose</c> would hang on otherwise.
     /// </summary>
     [Fact]
-    public async Task DeleteInlineCallback_FaultsEveryKey_AndReleasesTheRegistration()
+    public async Task DeletePerKeyCallbacks_FaultEveryKey_AndReleaseTheRegistration()
     {
         using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
 
         AclBindingFilter alpha = DeleteFilter("inline-alpha");
         AclBindingFilter beta = DeleteFilter("inline-beta");
 
+        // ⚠ Shape 4a's KEY is an owned kafka_common_AclBindingFilter_t that only the core can
+        // mint, so the inline fan-out is driven through the REAL ABI rather than a hand-fired
+        // callback: the mock's submit fails, so every key completes on this thread before the
+        // call returns — which is the inline path this test is about.
         DeleteAclsResult result = admin.DeleteAcls(
             new[] { alpha, beta },
             options: null,
-            (handle, resourceTypes, resourceNames, patternTypes, principals, hosts,
-             operations, permissionTypes, count, timeoutMs, callback, userData) =>
-                // Synchronously, on this thread, before the submit returns — as the ABI does.
-                callback(IntPtr.Zero, CapturedError(), userData));
+            NativeMethods.AdminClientDeleteAclsAsync);
 
-        Assert.True(result.Values[alpha].IsFaulted);
-        Assert.True(result.Values[beta].IsFaulted);
+        // The mock completes each filter's own future exceptionally, so the callbacks arrive
+        // on the core's dispatcher thread rather than inline.
+        await Assert.ThrowsAsync<KafkaException>(() => result.Values[alpha]);
 
-        KafkaException failure = await Assert.ThrowsAsync<KafkaException>(() => result.All());
-        Assert.Equal("captured", failure.Message);
-        Assert.Equal(1, failure.Code);
+        KafkaException failure = await Assert.ThrowsAsync<KafkaException>(() => result.Values[beta]);
+        Assert.Equal("Not implemented yet", failure.Message);
+        Assert.Equal(35, failure.Code);
     }
 
     /// <summary>
@@ -1054,12 +1057,14 @@ public sealed class AdminP6SubmitArgumentTests
     }
 
     /// <summary>
-    /// ⚠ <b>The inline-callback path.</b> Driving the production trampoline from inside the
-    /// stand-in must not deadlock, must fault <b>every</b> per-entity awaitable with the
-    /// submit error, and must free the <c>GCHandle</c> once.
+    /// ⚠ <b>Submitted from inside the stand-in.</b> Since M15/P9 CP6 this RPC's key is an
+    /// owned <c>kafka_common_ClientQuotaEntity_t</c> only the core can mint, so the callback
+    /// cannot be hand-fired and a whole-call failure is fanned out <b>once per entity</b>.
+    /// Issuing the real submit from inside the stand-in must not deadlock, must fault
+    /// <b>every</b> per-entity awaitable, and must free the <c>GCHandle</c> once.
     /// </summary>
     [Fact]
-    public async Task AlterInlineCallback_FaultsEveryTask_AndReleasesTheRegistration()
+    public async Task AlterPerKeyCallbacks_FaultEveryTask_AndReleaseTheRegistration()
     {
         using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
 
@@ -1072,17 +1077,20 @@ public sealed class AdminP6SubmitArgumentTests
             options: null,
             (handle, entityTypes, entityNames, entityCounts, opKeys, opValues, opHasValues,
              opCounts, count, timeoutMs, validateOnly, callback, userData) =>
-                // Synchronously, on this thread, before the submit returns — as the ABI does.
-                callback(IntPtr.Zero, CapturedError(), userData));
+                NativeMethods.AdminClientAlterClientQuotasAsync(
+                    handle, entityTypes, entityNames, entityCounts, opKeys, opValues,
+                    opHasValues, opCounts, count, timeoutMs, validateOnly, callback, userData));
 
         Assert.Equal(2, result.Values.Count);
 
-        // A top-level submit failure faults EVERY per-key task: none is left hanging.
+        // Every per-key task settles: none is left hanging.
         foreach (Task task in result.Values.Values)
         {
             KafkaException failure = await Assert.ThrowsAsync<KafkaException>(() => task);
-            Assert.Equal("captured", failure.Message);
-            Assert.Equal(1, failure.Code);
+
+            // ⚠ The core's own wording, typo included (mock_admin_client.rs:1766).
+            Assert.Equal("Not implement yet", failure.Message);
+            Assert.Equal(35, failure.Code);
         }
     }
 
@@ -1141,13 +1149,24 @@ public sealed class AdminP6SubmitArgumentTests
                 captured.Principals = Decode(principals);
                 captured.Hosts = Decode(hosts);
                 captured.UserData = userData;
+
+                // Settled by the real ABI: since M15/P9 CP6 shape 4b's KEY here is an owned
+                // kafka_common_AclBinding_t that only the core can mint, so a hand-fired
+                // callback cannot supply one.
+                NativeMethods.AdminClientCreateAclsAsync(
+                    handle, resourceTypes, resourceNames, patternTypes, principals, hosts,
+                    operations, permissionTypes, count, timeoutMs, callback, userData);
             });
 
-        AdminCallbacks.CreateAcls(IntPtr.Zero, CapturedError(), captured.UserData);
-
-        // Observe the fault the trampoline just delivered. All() awaits already-faulted
-        // sources, so it completes synchronously and this read is race-free.
-        Assert.NotNull(result.All().Exception);
+        // Observe the faults the trampolines deliver, so nothing is left unobserved. The
+        // mock completes each binding's own future exceptionally, so they arrive on the
+        // core's dispatcher thread and this waits rather than asserting now.
+        using ManualResetEventSlim settled = new ManualResetEventSlim(false);
+        Task all = result.All();
+        all.ContinueWith(_ => settled.Set(), TaskScheduler.Default);
+        Assert.True(
+            settled.Wait(TimeSpan.FromSeconds(30)), "the create_acls per-key callbacks never fired");
+        Assert.NotNull(all.Exception);
         return captured;
     }
 
@@ -1214,12 +1233,22 @@ public sealed class AdminP6SubmitArgumentTests
                 captured.Principals = Decode(principals);
                 captured.Hosts = Decode(hosts);
                 captured.UserData = userData;
+
+                // Settled by the real ABI (shape 4a's key is core-minted), whose mock submit
+                // fails inline — so every key is complete before this returns.
+                NativeMethods.AdminClientDeleteAclsAsync(
+                    handle, resourceTypes, resourceNames, patternTypes, principals, hosts,
+                    operations, permissionTypes, count, timeoutMs, callback, userData);
             });
 
-        AdminCallbacks.DeleteAcls(IntPtr.Zero, CapturedError(), captured.UserData);
-
-        // Observe the fault the trampoline just delivered, so nothing is left unobserved.
-        Assert.NotNull(result.All().Exception);
+        // Observe the faults the trampolines deliver, so nothing is left unobserved. They
+        // arrive on the core's dispatcher thread, so this waits rather than asserting now.
+        using ManualResetEventSlim settled = new ManualResetEventSlim(false);
+        Task all = result.All();
+        all.ContinueWith(_ => settled.Set(), TaskScheduler.Default);
+        Assert.True(
+            settled.Wait(TimeSpan.FromSeconds(30)), "the delete_acls per-key callbacks never fired");
+        Assert.NotNull(all.Exception);
         return captured;
     }
 
@@ -1397,16 +1426,23 @@ public sealed class AdminP6SubmitArgumentTests
                 }
 
                 captured.UserData = userData;
+
+                // Settled by the real ABI: since M15/P9 CP6 shape 4b's KEY here is an owned
+                // kafka_common_ClientQuotaEntity_t that only the core can mint.
+                NativeMethods.AdminClientAlterClientQuotasAsync(
+                    handle, entityTypes, entityNames, entityCounts, opKeys, opValues,
+                    opHasValues, opCounts, count, timeoutMs, validateOnly, callback, userData);
             });
 
-        AdminCallbacks.AlterClientQuotas(IntPtr.Zero, CapturedError(), captured.UserData);
-
-        // Observe the faults the trampoline just delivered, so nothing is left unobserved.
-        foreach (Task task in result.Values.Values)
-        {
-            Assert.NotNull(task.Exception);
-        }
-
+        // Observe the faults the trampolines deliver, so nothing is left unobserved. They
+        // arrive on the core's dispatcher thread, so this waits rather than asserting now.
+        using ManualResetEventSlim settled = new ManualResetEventSlim(false);
+        Task all = result.All();
+        all.ContinueWith(_ => settled.Set(), TaskScheduler.Default);
+        Assert.True(
+            settled.Wait(TimeSpan.FromSeconds(30)),
+            "the alter_client_quotas per-key callbacks never fired");
+        Assert.NotNull(all.Exception);
         return captured;
     }
 

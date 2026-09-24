@@ -28,9 +28,8 @@ using Xunit;
 namespace Confluent.Kafka.UnitTests.Interop;
 
 /// <summary>
-/// Drives the M15/P2b walkers over a <b>real</b> native <c>DeleteRecordsResult_t</c> —
-/// the composite-key / inline-scalar sub-shape, which is the highest-risk surface in this
-/// phase.
+/// Drives the M15/P2b readers over <b>real</b> native per-key <c>deleteRecords</c>
+/// completions — the composite-key / inline-scalar sub-shape, now shape <b>4a</b>.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -77,112 +76,80 @@ public sealed class AdminP2bResultMarshalTests
     private static readonly AdminCallbacks.DeleteRecordsCallback s_capture = OnCapture;
 
     /// <summary>
-    /// ⚠ <b>THE discriminator for this phase.</b> A <c>-1</c> low watermark whose entry
-    /// has a <b>null</b> error is a <b>success carrying -1</b>, not a failure.
+    /// A stand-in per-key value reader. The ABI exposes no way to construct a
+    /// <c>DeletedRecords_t</c> from managed code and the Rust mock faults every
+    /// <c>deleteRecords</c> key, so production's reader is unreachable from a managed test
+    /// (the plan §3.0 precedent); the claim under test is the <b>bridge's</b>, not the
+    /// accessor's.
     /// </summary>
+    private static readonly Func<IntPtr, DeletedRecords> s_minusOneValue =
+        static _ => new DeletedRecords(-1L);
+
+    /// <summary>
+    /// ⚠ <b>THE discriminator for this phase.</b> A <c>-1</c> low watermark delivered
+    /// with a <b>null</b> error is a <b>success carrying -1</b>, not a failure.
+    /// </summary>
+    /// <remarks>
+    /// Under shape 4a the two channels are separate handles, so the A/B this used to run
+    /// over one result root has no vehicle; the claim is asserted on the bridge with
+    /// <see cref="s_minusOneValue"/>, whose <c>-1</c> is the ambiguous input.
+    /// </remarks>
     [Fact]
     public async Task MinusOneWatermark_WithANullError_IsASuccess_NotAFailure()
     {
-        using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
-
         TopicPartition partition = new TopicPartition("p2b-sentinel", 0);
-        IntPtr result = SubmitAndCaptureResult(admin, partition);
 
-        try
-        {
-            // The input really is the ambiguous one: a non-null error AND a -1 watermark
-            // on the same entry. Without this the A/B below would prove nothing.
-            Assert.Equal(1, NativeMethods.DeleteRecordsResultCount(result));
-            Assert.NotEqual(IntPtr.Zero, NativeMethods.DeleteRecordsResultGetError(result, 0));
-            Assert.Equal(-1L, NativeMethods.DeleteRecordsResultGetLowWatermark(result, 0));
+        // ---- (A) a null error: the value decides, so this succeeds ----
+        KeyedAdminOperation<TopicPartition, DeletedRecords> withoutError = NewOperation(partition);
+        KeyedResultMarshal.CompleteKey(
+            withoutError, partition, IntPtr.Zero, IntPtr.Zero, s_minusOneValue, static _ => { });
 
-            // ---- (A) production's real accessors: the error decides, so this faults ----
-            KeyedAdminOperation<TopicPartition, DeletedRecords> withError = NewOperation(partition);
-            KeyedResultMarshal.Complete(
-                result,
-                AdminCallbacks.DeleteRecordsAccessors,
-                withError,
-                AdminCallbacks.DeleteRecordsKey,
-                AdminCallbacks.DeletedRecordsValue);
+        Assert.Equal(TaskStatus.RanToCompletion, withoutError.Tasks[partition].Status);
+        Assert.Equal(-1L, (await withoutError.Tasks[partition]).LowWatermark);
 
-            Assert.True(withError.Tasks[partition].IsFaulted);
+        // ---- (B) the SAME value reader with only the error non-null. Nothing else
+        // differs, so a difference in outcome can only come from the error signal. ----
+        KeyedAdminOperation<TopicPartition, DeletedRecords> withError = NewOperation(partition);
+        KeyedResultMarshal.CompleteKey(
+            withError, partition, IntPtr.Zero, MakeError(7, "failed"), s_minusOneValue, static _ => { });
 
-            // ---- (B) the SAME root, the SAME production key and value readers, with only
-            // the error accessor stubbed to null. Nothing else differs, so a difference in
-            // outcome can only come from the error signal. ----
-            KeyedResultMarshal.Accessors noError = new KeyedResultMarshal.Accessors(
-                NativeMethods.DeleteRecordsResultCount,
-                static (_, _) => IntPtr.Zero);
-
-            KeyedAdminOperation<TopicPartition, DeletedRecords> withoutError = NewOperation(partition);
-            KeyedResultMarshal.Complete(
-                result,
-                noError,
-                withoutError,
-                AdminCallbacks.DeleteRecordsKey,
-                AdminCallbacks.DeletedRecordsValue);
-
-            Assert.Equal(TaskStatus.RanToCompletion, withoutError.Tasks[partition].Status);
-
-            DeletedRecords deleted = await withoutError.Tasks[partition];
-            Assert.Equal(-1L, deleted.LowWatermark);
-        }
-        finally
-        {
-            NativeMethods.DeleteRecordsResultDestroy(result);
-        }
+        Assert.True(withError.Tasks[partition].IsFaulted);
+        Assert.Equal(
+            7, Assert.IsType<KafkaException>(withError.Tasks[partition].Exception!.InnerException).Code);
     }
 
     /// <summary>
-    /// The per-partition error is <b>borrowed</b> from the result root: reading it leaves
-    /// it alive, so the single root destroy that follows is the only free — and the
-    /// message is the mock's, asserted exactly (<c>definition-of-done.md</c> §3).
+    /// A failing key arrives with an <b>owned</b> error and a NULL value, and the message is
+    /// the mock's, asserted exactly (<c>definition-of-done.md</c> §3).
     /// </summary>
     /// <remarks>
-    /// ⚠ THE INJECTION POINT for <c>deleteRecords</c>. Under the injection this guards
-    /// against — teaching <see cref="KafkaException.FromBorrowedHandle"/> to destroy — the
-    /// re-read below becomes a use-after-free and the destroy a double free, which aborts
-    /// the test host rather than failing an assertion.
+    /// ⚠ THE INJECTION POINT for <c>deleteRecords</c> under the per-key ABI, and the inverse
+    /// of what this test asserted against the shape-1 walk. There is no result root to
+    /// borrow from, so <see cref="KafkaException.FromHandle"/> — which frees — is the only
+    /// correct reader; a <see cref="KafkaException.FromBorrowedHandle"/> here would leak the
+    /// error on every failing key, which no managed assertion can see.
     /// </remarks>
     [Fact]
-    public void PerPartitionError_IsBorrowed_AndSurvivesTheWalk()
+    public void PerKeyError_IsOwned_AndArrivesWithANullValue()
     {
         using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
 
-        TopicPartition partition = new TopicPartition("p2b-borrowed", 3);
-        IntPtr result = SubmitAndCaptureResult(admin, partition);
+        TopicPartition partition = new TopicPartition("p2b-owned", 3);
+        Capture capture = Assert.Single(SubmitAndCapture(admin, partition));
 
-        try
-        {
-            KeyedAdminOperation<TopicPartition, DeletedRecords> operation = NewOperation(partition);
-            KeyedResultMarshal.Complete(
-                result,
-                AdminCallbacks.DeleteRecordsAccessors,
-                operation,
-                AdminCallbacks.DeleteRecordsKey,
-                AdminCallbacks.DeletedRecordsValue);
+        Assert.Equal(partition, new TopicPartition(capture.Topic!, capture.Partition));
+        Assert.Equal(IntPtr.Zero, capture.Value);
+        Assert.NotEqual(IntPtr.Zero, capture.Error);
 
-            KafkaException failure = Assert.IsType<KafkaException>(
-                operation.Tasks[partition].Exception!.InnerException);
-            Assert.Equal(UnsupportedVersionCode, failure.Code);
-            Assert.Equal(NotImplemented, failure.Message);
-
-            // The borrowed pointer must still resolve to the same values after the walk.
-            IntPtr borrowed = NativeMethods.DeleteRecordsResultGetError(result, 0);
-            Assert.NotEqual(IntPtr.Zero, borrowed);
-            Assert.Equal(UnsupportedVersionCode, NativeMethods.Code(borrowed));
-            Assert.Equal(NotImplemented, Utf8Marshal.PtrToString(NativeMethods.Message(borrowed)));
-        }
-        finally
-        {
-            // The ONLY free of the borrowed error, via its owning root — exactly once.
-            NativeMethods.DeleteRecordsResultDestroy(result);
-        }
+        // FromHandle consumes the error, so this is its one and only free.
+        KafkaException failure = Assert.IsType<KafkaException>(KafkaException.FromHandle(capture.Error));
+        Assert.Equal(UnsupportedVersionCode, failure.Code);
+        Assert.Equal(NotImplemented, failure.Message);
     }
 
     /// <summary>
-    /// The composite key round-trips: <c>(get_topic(i), get_partition(i))</c> becomes the
-    /// right <see cref="TopicPartition"/>, including two partitions of the <b>same
+    /// The composite key round-trips: the callback's <c>(topic, partition)</c> pair becomes
+    /// the right <see cref="TopicPartition"/>, including two partitions of the <b>same
     /// topic</b> and the <b>same partition index</b> across two topics — the two shapes
     /// that collapse if either half of the key is dropped.
     /// </summary>
@@ -201,48 +168,40 @@ public sealed class AdminP2bResultMarshalTests
         TopicPartition a1 = new TopicPartition("p2b-composite-a", 1);
         TopicPartition b0 = new TopicPartition("p2b-composite-b", 0);
 
-        IntPtr result = SubmitAndCaptureResult(admin, a0, a1, b0);
+        IReadOnlyList<Capture> captures = SubmitAndCapture(admin, a0, a1, b0);
+        Assert.Equal(3, captures.Count);
 
-        try
+        // Read straight out of the callbacks, so the assertion is about the ABI's own
+        // pairing rather than about the request we made.
+        HashSet<TopicPartition> delivered = new HashSet<TopicPartition>(
+            captures.Select(capture => new TopicPartition(capture.Topic!, capture.Partition)));
+        Assert.Equal(new HashSet<TopicPartition> { a0, a1, b0 }, delivered);
+
+        KeyedAdminOperation<TopicPartition, DeletedRecords> operation = NewOperation(a0, a1, b0);
+        foreach (Capture capture in captures)
         {
-            Assert.Equal(3, NativeMethods.DeleteRecordsResultCount(result));
-
-            KeyedAdminOperation<TopicPartition, DeletedRecords> operation = NewOperation(a0, a1, b0);
-            KeyedResultMarshal.Complete(
-                result,
-                AdminCallbacks.DeleteRecordsAccessors,
+            KeyedResultMarshal.CompleteKey(
                 operation,
-                AdminCallbacks.DeleteRecordsKey,
-                AdminCallbacks.DeletedRecordsValue);
-
-            // Every requested key was accounted for by the walk itself — so none of them
-            // needs FailUncompleted, which is what a collapsed key would trigger.
-            foreach (TopicPartition key in new[] { a0, a1, b0 })
-            {
-                Assert.True(operation.Tasks[key].IsCompleted, $"{key} was not accounted for by the walk");
-                Assert.Equal(
-                    NotImplemented,
-                    Assert.IsType<KafkaException>(operation.Tasks[key].Exception!.InnerException).Message);
-            }
-
-            // And the three keys really are three distinct dictionary entries.
-            Assert.Equal(3, operation.Tasks.Count);
-            Assert.Equal(3, operation.Tasks.Keys.Distinct().Count());
-
-            // Read straight out of the root, so the assertion is about the ABI's own
-            // pairing rather than about the request we made.
-            HashSet<TopicPartition> fromResult = new HashSet<TopicPartition>();
-            for (int index = 0; index < 3; index++)
-            {
-                fromResult.Add(AdminCallbacks.DeleteRecordsKey(result, index));
-            }
-
-            Assert.Equal(new HashSet<TopicPartition> { a0, a1, b0 }, fromResult);
+                new TopicPartition(capture.Topic!, capture.Partition),
+                capture.Value,
+                capture.Error,
+                AdminCallbacks.DeletedRecordsPerKeyValue,
+                NativeMethods.DeletedRecordsDestroy);
         }
-        finally
+
+        // Every requested key was accounted for by its own callback — so none of them
+        // needs FailUncompleted, which is what a collapsed key would trigger.
+        foreach (TopicPartition key in new[] { a0, a1, b0 })
         {
-            NativeMethods.DeleteRecordsResultDestroy(result);
+            Assert.True(operation.Tasks[key].IsCompleted, $"{key} was not accounted for");
+            Assert.Equal(
+                NotImplemented,
+                Assert.IsType<KafkaException>(operation.Tasks[key].Exception!.InnerException).Message);
         }
+
+        // And the three keys really are three distinct dictionary entries.
+        Assert.Equal(3, operation.Tasks.Count);
+        Assert.Equal(3, operation.Tasks.Keys.Distinct().Count());
     }
 
     /// <summary>
@@ -332,13 +291,14 @@ public sealed class AdminP2bResultMarshalTests
             "deleteRecords", partitions, EqualityComparer<TopicPartition>.Default);
 
     /// <summary>
-    /// Submits <c>delete_records_async</c> directly and hands the caller the resulting
-    /// <b>owned</b> result root, which the callback deliberately does not destroy — the
-    /// callback owns it, and here that owner is the test.
+    /// Submits <c>delete_records_async</c> directly and hands the caller every per-key
+    /// completion, whose <b>owned</b> value and error the capturing callback deliberately
+    /// does not destroy — the callback owns both, and here that owner is the test.
     /// </summary>
-    private static IntPtr SubmitAndCaptureResult(NativeAdminClient admin, params TopicPartition[] partitions)
+    private static IReadOnlyList<Capture> SubmitAndCapture(
+        NativeAdminClient admin, params TopicPartition[] partitions)
     {
-        Capture capture = new Capture();
+        CaptureSet capture = new CaptureSet(partitions.Length);
         GCHandle gcHandle = GCHandle.Alloc(capture, GCHandleType.Normal);
         List<Utf8Marshal.PinnedUtf8String> pinned = new List<Utf8Marshal.PinnedUtf8String>(partitions.Length);
         try
@@ -365,7 +325,7 @@ public sealed class AdminP2bResultMarshalTests
                 s_capture,
                 GCHandle.ToIntPtr(gcHandle));
 
-            Assert.True(capture.Done.Wait(s_deadline), "the deleteRecords callback never fired");
+            Assert.True(capture.Done.Wait(s_deadline), "the deleteRecords callbacks never all fired");
         }
         finally
         {
@@ -377,14 +337,7 @@ public sealed class AdminP2bResultMarshalTests
             gcHandle.Free();
         }
 
-        KafkaException? submitFailure = KafkaException.FromHandle(capture.Error);
-        if (submitFailure is not null)
-        {
-            throw submitFailure;
-        }
-
-        Assert.NotEqual(IntPtr.Zero, capture.Result);
-        return capture.Result;
+        return capture.Captured;
     }
 
     /// <summary>
@@ -400,15 +353,23 @@ public sealed class AdminP2bResultMarshalTests
         return error;
     }
 
-    private static void OnCapture(IntPtr result, IntPtr error, IntPtr userData)
+    private static void OnCapture(
+        IntPtr topic, int partition, IntPtr value, IntPtr error, IntPtr userData)
     {
         // A callback entered from native is a no-throw boundary even in a test.
         try
         {
-            Capture capture = (Capture)GCHandle.FromIntPtr(userData).Target!;
-            capture.Result = result;
-            capture.Error = error;
-            capture.Done.Set();
+            CaptureSet capture = (CaptureSet)GCHandle.FromIntPtr(userData).Target!;
+
+            // ⚠ Copied HERE: the topic is a borrowed const char*, valid for the call only.
+            capture.Add(
+                new Capture
+                {
+                    Topic = Utf8Marshal.PtrToString(topic),
+                    Partition = partition,
+                    Value = value,
+                    Error = error,
+                });
         }
         catch (Exception)
         {
@@ -417,12 +378,44 @@ public sealed class AdminP2bResultMarshalTests
         }
     }
 
+    /// <summary>What one shape-4a <c>deleteRecords</c> callback delivered.</summary>
     private sealed class Capture
     {
-        internal IntPtr Result;
+        internal string? Topic { get; set; }
 
-        internal IntPtr Error;
+        internal int Partition { get; set; }
+
+        internal IntPtr Value { get; set; }
+
+        internal IntPtr Error { get; set; }
+    }
+
+    /// <summary>
+    /// Collects the N independent per-key callbacks. Locked because they may run
+    /// concurrently on different core threads.
+    /// </summary>
+    private sealed class CaptureSet
+    {
+        private readonly List<Capture> _captured = new List<Capture>();
+
+        private readonly int _expected;
+
+        internal CaptureSet(int expected) => _expected = expected;
 
         internal ManualResetEventSlim Done { get; } = new ManualResetEventSlim(false);
+
+        internal IReadOnlyList<Capture> Captured => _captured;
+
+        internal void Add(Capture capture)
+        {
+            lock (_captured)
+            {
+                _captured.Add(capture);
+                if (_captured.Count >= _expected)
+                {
+                    Done.Set();
+                }
+            }
+        }
     }
 }

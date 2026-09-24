@@ -196,15 +196,20 @@ public sealed class AdminConfigsSubmitArgumentTests
     /// request, while still getting a per-key awaitable — Java keys the result on the map.
     /// </summary>
     /// <remarks>
-    /// ⚠ <b>This asserts the request SHAPE only; it says nothing about the outcome.</b> An
-    /// earlier version completed the operation through the <em>submit-failure</em> path and
-    /// then asserted the awaitable had faulted — which every awaitable does on that path, so
-    /// it passed while the outcome was in fact wrong (M15/P3 round 3, finding 69.6). The
-    /// outcome now has its own success-path test,
-    /// <c>PublicAdminConfigsTests.IncrementalAlterConfigs_AResourceWithNoOps_CompletesSuccessfully</c>,
-    /// driven end to end through the mock with nothing injected. The completion below is
-    /// only here to release the operation's <c>GCHandle</c> and span-the-op reference before
-    /// the client is disposed.
+    /// <para>
+    /// ⚠ <b>This asserts the request SHAPE.</b> An earlier version completed the operation
+    /// through the <em>submit-failure</em> path and then asserted the awaitable had faulted
+    /// — which every awaitable did on that path, so it passed while the outcome was in fact
+    /// wrong (M15/P3 round 3, finding 69.6). The end-to-end outcome has its own success-path
+    /// test, <c>PublicAdminConfigsTests.IncrementalAlterConfigs_AResourceWithNoOps_CompletesSuccessfully</c>,
+    /// driven through the mock with nothing injected.
+    /// </para>
+    /// <para>
+    /// ⚠ <b>M15/P9 CP6 also makes this the <c>n == 0</c> submit-boundary test.</b> With no
+    /// row there is no named resource, so the whole countdown is the submit token and the
+    /// operation settles inside the injected submit's caller — the key resolving without any
+    /// callback at all is now asserted here, and no completion is (or may be) fired.
+    /// </para>
     /// </remarks>
     [Fact]
     public void IncrementalAlterConfigs_AResourceWithNoOps_ContributesNoRow()
@@ -223,7 +228,12 @@ public sealed class AdminConfigsSubmitArgumentTests
         Assert.Equal(0, captured.Count);
         Assert.True(result.Values.ContainsKey(s_topicResource));
 
-        AdminCallbacks.IncrementalAlterConfigs(IntPtr.Zero, CapturedError(), captured.UserData);
+        // ⚠ M15/P9 CP6: no row means no NAMED resource, so n == 0 and the submit token is
+        // the whole countdown — the operation settles, frees its GCHandle and releases its
+        // span-the-op reference before this call returns. Firing a callback here would be a
+        // use-after-free, and the key is already resolved without one.
+        Assert.True(result.Values[s_topicResource].IsCompleted);
+        Assert.Null(result.Values[s_topicResource].Exception);
     }
 
     /// <summary>A repeated resource is one entry, because Java's result is a map.</summary>
@@ -250,7 +260,13 @@ public sealed class AdminConfigsSubmitArgumentTests
             options,
             captured.RecordDescribe);
 
-        AdminCallbacks.DescribeConfigs(IntPtr.Zero, CapturedError(), captured.UserData);
+        // Shape 4a: one callback per key, keyed by the composite (type id, name) pair.
+        foreach (ConfigResource resource in result.Values.Keys)
+        {
+            using Utf8Marshal.PinnedUtf8String pinnedName = Utf8Marshal.Pin(resource.Name);
+            AdminCallbacks.DescribeConfigs(
+                (int)resource.Type, pinnedName.Pointer, IntPtr.Zero, CapturedError(), captured.UserData);
+        }
 
         // Values[] hands back the bridge's own task, so this read is synchronous.
         foreach (KeyValuePair<ConfigResource, System.Threading.Tasks.Task<Config>> entry in result.Values)
@@ -284,11 +300,31 @@ public sealed class AdminConfigsSubmitArgumentTests
         Captured captured = new Captured();
         AlterConfigsResult result = admin.IncrementalAlterConfigs(configs, options, captured.RecordAlter);
 
-        AdminCallbacks.IncrementalAlterConfigs(IntPtr.Zero, CapturedError(), captured.UserData);
+        // One callback per NAMED resource (M15/P9 CP6): a zero-op resource contributes no
+        // row, so the per-key ABI never names it and it is completed locally instead.
+        foreach (KeyValuePair<ConfigResource, IReadOnlyCollection<AlterConfigOp>> entry in configs)
+        {
+            if (entry.Value.Count == 0)
+            {
+                continue;
+            }
+
+            using Utf8Marshal.PinnedUtf8String name = Utf8Marshal.Pin(entry.Key.Name);
+            AdminCallbacks.IncrementalAlterConfigs(
+                (int)entry.Key.Type, name.Pointer, CapturedError(), captured.UserData);
+        }
 
         foreach (KeyValuePair<ConfigResource, System.Threading.Tasks.Task> entry in result.Values)
         {
-            Assert.NotNull(entry.Value.Exception);
+            if (configs[entry.Key].Count == 0)
+            {
+                Assert.True(entry.Value.IsCompleted);
+                Assert.Null(entry.Value.Exception);
+            }
+            else
+            {
+                Assert.NotNull(entry.Value.Exception);
+            }
         }
 
         return captured;

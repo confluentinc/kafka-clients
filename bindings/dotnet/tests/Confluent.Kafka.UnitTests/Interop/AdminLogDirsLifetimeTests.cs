@@ -192,8 +192,14 @@ public sealed class AdminLogDirsLifetimeTests
     /// <see langword="null"/> — indistinguishable from the real client's answer for a
     /// replica the broker genuinely does not host — so the binding would be inventing data
     /// it does not have. The same reasoning keeps <see cref="LogDirDescription"/> free of a
-    /// faked <c>IsCordoned</c>. What is asserted is therefore that the message
-    /// <em>names the key</em>, so the caller can tell which replica went missing.
+    /// faked <c>IsCordoned</c>. What is asserted is therefore that the key <em>faults</em>
+    /// rather than hanging or being invented.
+    /// </para>
+    /// <para>
+    /// ⚠ <b>The message is the CORE's since the per-key ABI, and it no longer names the
+    /// key</b> — <c>admin_async_per_key_op</c> fires its own synthetic error for a key its
+    /// <c>entries</c> omitted, so the binding's <c>FailUncompleted</c> sweep never reaches
+    /// it. A diagnosability loss, accepted as core behaviour rather than papered over.
     /// </para>
     /// </remarks>
     [Fact]
@@ -217,9 +223,11 @@ public sealed class AdminLogDirsLifetimeTests
 
         KafkaException missing = await TestTimeout.Run(
             () => Assert.ThrowsAsync<KafkaException>(() => result.Values[unknown]), s_deadline);
-        Assert.Equal(
-            "The describeReplicaLogDirs result contained no entry for 'logdir-absent-topic-0-0'.",
-            missing.Message);
+
+        // ⚠ The CORE now supplies this message, not the binding: `admin_async_per_key_op`
+        // fires a synthetic error for a key its `entries` omitted, so the managed
+        // FailUncompleted sweep never sees the key and the message no longer names it.
+        Assert.Equal("the requested key was not present in the admin RPC's response", missing.Message);
 
         // …and All() therefore faults as well.
         await TestTimeout.Run(() => Assert.ThrowsAsync<KafkaException>(result.All), s_deadline);
@@ -340,23 +348,41 @@ public sealed class AdminLogDirsLifetimeTests
     }
 
     /// <summary>
-    /// Drives the <b>production</b> trampoline with a top-level submit failure — the path
-    /// where there is no result table, so every requested key fails with that one error.
+    /// Drives the <b>production</b> trampoline with a submit failure. <c>describeLogDirs</c>
+    /// is result shape 4a, so the failure arrives keyed by the broker id — a plain
+    /// <c>int32_t</c>, not a pointer — with a NULL <c>value</c> slot; so is
+    /// <c>describeReplicaLogDirs</c>, keyed by the replica's three scalars.
     /// </summary>
     private static void Complete(Rpc rpc, IntPtr userData, IntPtr error)
     {
         switch (rpc)
         {
             case Rpc.DescribeLogDirs:
-                AdminCallbacks.DescribeLogDirs(IntPtr.Zero, error, userData);
+                AdminCallbacks.DescribeLogDirs(0, IntPtr.Zero, error, userData);
                 return;
 
             case Rpc.AlterReplicaLogDirs:
-                AdminCallbacks.AlterReplicaLogDirs(IntPtr.Zero, error, userData);
+                using (Utf8Marshal.PinnedUtf8String altered = Utf8Marshal.Pin(s_replica.Topic))
+                {
+                    // Shape 4b: keyed by the replica's three scalars, no value slot.
+                    AdminCallbacks.AlterReplicaLogDirs(
+                        altered.Pointer, s_replica.Partition, s_replica.BrokerId, error, userData);
+                }
+
                 return;
 
             default:
-                AdminCallbacks.DescribeReplicaLogDirs(IntPtr.Zero, error, userData);
+                using (Utf8Marshal.PinnedUtf8String topic = Utf8Marshal.Pin(s_replica.Topic))
+                {
+                    AdminCallbacks.DescribeReplicaLogDirs(
+                        topic.Pointer,
+                        s_replica.Partition,
+                        s_replica.BrokerId,
+                        IntPtr.Zero,
+                        error,
+                        userData);
+                }
+
                 return;
         }
     }

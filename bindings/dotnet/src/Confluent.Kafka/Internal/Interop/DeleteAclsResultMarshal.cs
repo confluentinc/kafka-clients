@@ -101,4 +101,47 @@ internal static class DeleteAclsResultMarshal
 
             return new DeleteAclsResult.FilterResults(values);
         };
+
+    /// <summary>
+    /// The per-key twin of <see cref="FilterResultsReader"/>, over the OWNED
+    /// <c>kafka_admin_DeleteAclsFilterResults_t</c> a per-key callback is handed: one index
+    /// axis instead of two, and the accessors take the value handle itself.
+    /// </summary>
+    /// <param name="getCount">That value's <c>count()</c>.</param>
+    /// <param name="getBinding">That value's <c>get_binding(j)</c>.</param>
+    /// <param name="getError">That value's <c>get_error(j)</c>.</param>
+    /// <param name="readBinding">
+    /// The borrowed-binding copy-out — <see cref="AclRowMarshal.ReadBinding"/> in production.
+    /// </param>
+    /// <remarks>
+    /// ⚠ The inner error stays <b>borrowed</b> (<c>const</c>, dies with the value handle) and
+    /// stays a stored <em>value</em> rather than a fault: only the callback's own top-level
+    /// error became owned under the per-key ABI.
+    /// </remarks>
+    internal static Func<IntPtr, DeleteAclsResult.FilterResults> FilterResultsPerKeyReader(
+        KeyedResultMarshal.CountAccessor getCount,
+        KeyedResultMarshal.IndexedAccessor getBinding,
+        KeyedResultMarshal.IndexedAccessor getError,
+        Func<IntPtr, AclBinding> readBinding) =>
+        value =>
+        {
+            int count = getCount(value);
+            List<DeleteAclsResult.FilterResult> values =
+                new List<DeleteAclsResult.FilterResult>(count < 0 ? 0 : count);
+
+            for (int index = 0; index < count; index++)
+            {
+                IntPtr error = getError(value, index);
+                if (error != IntPtr.Zero)
+                {
+                    values.Add(
+                        new DeleteAclsResult.FilterResult(KafkaException.FromBorrowedHandle(error)!));
+                    continue;
+                }
+
+                values.Add(new DeleteAclsResult.FilterResult(readBinding(getBinding(value, index))));
+            }
+
+            return new DeleteAclsResult.FilterResults(values);
+        };
 }

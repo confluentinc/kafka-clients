@@ -170,47 +170,34 @@ public sealed class AdminConfigsLifetimeTests
     }
 
     /// <summary>
-    /// ⚠⚠ <b>A submit failure faults EVERY awaitable — including a zero-op resource's.</b>
-    /// The local completion of zero-op keys
-    /// (<c>VoidKeyedAdminOperation.CompleteKeysWithNoRequest</c>) must not override that,
-    /// which a comment alone cannot enforce (M15/P3 round 4, finding 69.7).
+    /// ⚠⚠ <b>M15/P9 CP6 INVERTED the zero-op resource's outcome on a submit failure, and
+    /// this test is the record of it.</b> A submit failure now fans out only over the
+    /// resources the request <em>named</em> — which a zero-op resource is not among — so it
+    /// completes <b>successfully</b> while every named resource faults.
     /// </summary>
     /// <remarks>
     /// <para>
-    /// A resource mapped to an empty operation collection is completed <em>locally</em>,
-    /// because the row-flattened request cannot carry it. It is placed on the successful
-    /// completion path, and what matters is that it does not run <b>before</b> the failure
-    /// branch. Java's failure path is explicit:
-    /// <c>KafkaAdminClient.java:2922-2924</c>'s <c>handleFailure</c> calls
-    /// <c>completeAllExceptionally(futures.values(), throwable)</c> — <em>all</em> of them,
-    /// and the zero-op resource's future is among them because Java keys the map on the
-    /// resource collection it sends (<c>:2893-2895</c>, <c>:2902</c>).
+    /// A resource mapped to an empty operation collection is completed <em>locally</em>
+    /// (<c>VoidKeyedAdminOperation.CompleteKeysWithNoRequest</c>), because the row-flattened
+    /// request cannot carry it. Under the aggregate callback that local completion ran on
+    /// the success path only, so a whole-call <c>FailAll</c> reached the zero-op key too and
+    /// faulted it with the rest — matching Java, whose <c>handleFailure</c> calls
+    /// <c>completeAllExceptionally(futures.values(), throwable)</c> over a map keyed on the
+    /// resource collection it sends (<c>KafkaAdminClient.java:2893-2895</c>, <c>:2902</c>,
+    /// <c>:2922-2924</c>).
     /// </para>
     /// <para>
-    /// ⚠ <b>Without this test the invariant is only a comment.</b> Completing those keys
-    /// <em>before</em> the failure branch makes <c>TrySetResult</c> win and
-    /// <c>FailAll</c>'s <c>TrySetException</c> a no-op — so a call that failed at submit
-    /// reports <b>success</b> for the zero-op resource. That is a wrong answer, and the
-    /// suite stays green everywhere else.
-    /// </para>
-    /// <para>
-    /// ⚠ <b>What is pinned is the ORDER relative to <c>FailAll</c>, not the lexical
-    /// position of the call — measured, not assumed.</b> Three placements were driven
-    /// against this test, each on a build reporting <c>0 Error(s)</c>: moving the call into
-    /// the <c>finally</c> beside <c>FailUncompleted</c> → <b>still green</b>; hoisting it
-    /// out of the <c>if</c>/<c>else</c> but leaving it <em>after</em> → <b>still green</b>;
-    /// hoisting it to <em>before</em> the failure branch → <b>RED</b>. The first two are
-    /// unobservable because <c>FailAll</c> has already completed those keys by then, so
-    /// <c>TrySetResult</c> cannot take effect. Of the three, the one that changes an answer
-    /// is the one this catches.
-    /// </para>
-    /// <para>
-    /// The non-zero-op resource is asserted alongside it as the control: if it did not fault
-    /// too, the test would be pinning a broken failure path rather than this invariant.
+    /// The per-key ABI has no whole-call channel: <c>n</c> is the count of
+    /// <em>distinct named</em> resources, and <c>CompleteKeysWithNoRequest</c> runs
+    /// unconditionally at countdown zero. So the zero-op key resolves successfully however
+    /// the named ones ended. This is the fourth item on the divergence list recorded at
+    /// <c>NativeAdminClient.IncrementalAlterConfigs</c>; the named resource is asserted
+    /// alongside it as the control, and <c>All()</c> still faults, which is what keeps the
+    /// call's overall outcome honest.
     /// </para>
     /// </remarks>
     [Fact]
-    public async Task ASubmitFailure_FaultsEveryAwaitable_IncludingAZeroOpResource()
+    public async Task ASubmitFailure_FaultsEveryNamedResource_AndLeavesAZeroOpResourceSuccessful()
     {
         using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
 
@@ -231,21 +218,23 @@ public sealed class AdminConfigsLifetimeTests
         // Only the one resource contributed a row; the other is the zero-op case.
         Assert.NotEqual(IntPtr.Zero, userData);
 
-        // The submit-failure path: no result table, so the production trampoline faults
-        // every requested key with this one owned error.
-        AdminCallbacks.IncrementalAlterConfigs(IntPtr.Zero, MakeError(61, "submit failed"), userData);
+        // The submit-failure path, fanned out per named resource — one callback, because
+        // exactly one resource was named.
+        using (Utf8Marshal.PinnedUtf8String named = Utf8Marshal.Pin(withOps.Name))
+        {
+            AdminCallbacks.IncrementalAlterConfigs(
+                (int)withOps.Type, named.Pointer, MakeError(61, "submit failed"), userData);
+        }
 
         KafkaException carrying = await TestTimeout.Run(
             () => Assert.ThrowsAsync<KafkaException>(() => result.Values[withOps]), s_deadline);
         Assert.Equal(61, carrying.Code);
+        Assert.Equal("submit failed", carrying.Message);
 
-        // ⚠ THE ASSERTION THIS TEST EXISTS FOR.
-        KafkaException empty = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<KafkaException>(() => result.Values[zeroOps]), s_deadline);
-        Assert.Equal(61, empty.Code);
-        Assert.Equal("submit failed", empty.Message);
+        // ⚠ THE ASSERTION THIS TEST EXISTS FOR — the inverted one.
+        await TestTimeout.Run(() => result.Values[zeroOps], s_deadline);
 
-        // …and All() therefore faults as well.
+        // …and All() still faults, because the named resource did.
         await TestTimeout.Run(() => Assert.ThrowsAsync<KafkaException>(result.All), s_deadline);
     }
 
@@ -350,18 +339,23 @@ public sealed class AdminConfigsLifetimeTests
     }
 
     /// <summary>
-    /// Drives the <b>production</b> trampoline with a top-level submit failure — the path
-    /// where there is no result table, so every requested key fails with that one error.
+    /// Drives the <b>production</b> trampoline with a submit failure. Both RPCs are keyed
+    /// by the resource — a composite <c>(type id, name)</c> scalar pair — with
+    /// <c>describeConfigs</c> (shape 4a) also carrying a NULL <c>value</c> slot and
+    /// <c>incrementalAlterConfigs</c> (shape 4b) carrying none.
     /// </summary>
     private static void Complete(Rpc rpc, IntPtr userData, IntPtr error)
     {
+        using Utf8Marshal.PinnedUtf8String pinnedName = Utf8Marshal.Pin(s_resource.Name);
         if (rpc == Rpc.DescribeConfigs)
         {
-            AdminCallbacks.DescribeConfigs(IntPtr.Zero, error, userData);
+            AdminCallbacks.DescribeConfigs(
+                (int)s_resource.Type, pinnedName.Pointer, IntPtr.Zero, error, userData);
         }
         else
         {
-            AdminCallbacks.IncrementalAlterConfigs(IntPtr.Zero, error, userData);
+            AdminCallbacks.IncrementalAlterConfigs(
+                (int)s_resource.Type, pinnedName.Pointer, error, userData);
         }
     }
 

@@ -268,7 +268,12 @@ public sealed class AdminLogDirsSubmitArgumentTests
         Captured captured = new Captured();
         DescribeLogDirsResult result = admin.DescribeLogDirs(brokers, options, captured.RecordDescribeLogDirs);
 
-        AdminCallbacks.DescribeLogDirs(IntPtr.Zero, CapturedError(), captured.UserData);
+        // Shape 4a: one callback per broker id, which crosses as a plain int32_t.
+        foreach (int broker in result.Descriptions.Keys)
+        {
+            AdminCallbacks.DescribeLogDirs(broker, IntPtr.Zero, CapturedError(), captured.UserData);
+        }
+
         AssertEveryAwaitableFaulted(result.Descriptions);
         return captured;
     }
@@ -289,7 +294,15 @@ public sealed class AdminLogDirsSubmitArgumentTests
         AlterReplicaLogDirsResult result =
             admin.AlterReplicaLogDirs(assignment, options, captured.RecordAlterReplicaLogDirs);
 
-        AdminCallbacks.AlterReplicaLogDirs(IntPtr.Zero, CapturedError(), captured.UserData);
+        // Shape 4b: one per-key failure per DISTINCT replica the submit carried, keyed by
+        // its three scalars, with an owned error the trampoline frees.
+        foreach (TopicPartitionReplica replica in assignment.Keys)
+        {
+            using Utf8Marshal.PinnedUtf8String topic = Utf8Marshal.Pin(replica.Topic);
+            AdminCallbacks.AlterReplicaLogDirs(
+                topic.Pointer, replica.Partition, replica.BrokerId, CapturedError(), captured.UserData);
+        }
+
         AssertEveryAwaitableFaulted(result.Values);
         return captured;
     }
@@ -303,7 +316,20 @@ public sealed class AdminLogDirsSubmitArgumentTests
         DescribeReplicaLogDirsResult result =
             admin.DescribeReplicaLogDirs(replicas, options, captured.RecordDescribeReplicaLogDirs);
 
-        AdminCallbacks.DescribeReplicaLogDirs(IntPtr.Zero, CapturedError(), captured.UserData);
+        // Shape 4a: one per-key failure per DISTINCT replica the submit carried, with a
+        // NULL value slot and an owned error the trampoline frees.
+        foreach (TopicPartitionReplica replica in new HashSet<TopicPartitionReplica>(replicas))
+        {
+            using Utf8Marshal.PinnedUtf8String topic = Utf8Marshal.Pin(replica.Topic);
+            AdminCallbacks.DescribeReplicaLogDirs(
+                topic.Pointer,
+                replica.Partition,
+                replica.BrokerId,
+                IntPtr.Zero,
+                CapturedError(),
+                captured.UserData);
+        }
+
         AssertEveryAwaitableFaulted(result.Values);
         return captured;
     }

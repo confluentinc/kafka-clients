@@ -1974,7 +1974,7 @@ the precondition exceptions are unchanged.
 
 ## B6 Callback & delegate marshalling — completion callbacks
 
-**Decision:** Three callback *families* cross this boundary, and they have
+**Decision:** Four callback *families* cross this boundary, and they have
 **different lifetimes**. All marshal as a kept-alive
 `[UnmanagedFunctionPointer(Cdecl)]` delegate (classic — no function pointers on the
 floor) with a no-throw body and context passed via a `GCHandle` in `user_data`;
@@ -1999,6 +1999,18 @@ everything after that differs.
     *operation*, so by shape it belongs with the first family — but those entry
     points **do** take a `user_data_destroy`, and the callback is **not** invoked
     when the call fails. The `GCHandle` is freed by the hook, never by the callback.
+  - **N-shot per-operation fan-out — admin's per-key ABI ("shape 4", M15/P9).** One
+    submit, **N independent callbacks** that can run concurrently on different threads,
+    each carrying one key's **owned** value and **owned** error — there is no result
+    root to borrow from, so both go through `FromHandle` / their own `_destroy`, never
+    `FromBorrowedHandle`. Sub-shapes follow **Java's return type**, not the accessor
+    set: **4a** value-carrying → one `Task` per key; **4b** void → one `Task` per key,
+    where a null error *is* the success value; **4c** per-key fan-in → **one**
+    aggregate `Task` whose map *value* is the per-key error. Hookless, so the callback
+    family still owns the `GCHandle` free — but as a **countdown released by the last
+    of N**, armed at `n + 1` with a submit-owned token (which is what makes `n == 0`
+    releasable at all), where `n` is read from that RPC's own ABI doc comment and is
+    **not** uniformly the key count.
 
 ⚠ **The one-shot "sole owner is the callback" invariant does NOT generalize.**
 Everything §B6/§B7 says about freeing the per-op `GCHandle` is scoped to the

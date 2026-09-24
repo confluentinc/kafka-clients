@@ -1089,6 +1089,12 @@ internal sealed class NativeAdminClient : IDisposable
                 handles[i] = NewTopicMarshal.Build(requested[i]);
             }
 
+            // Result shape 4a: one callback per topic. The ABI fires "exactly `count`
+            // times (once per requested topic, minus NULL entries in `topics`)"; no entry
+            // is null here (a null NewTopic was rejected above), so `count` is the number.
+            // Armed before the submit — every key can fire inline on this thread.
+            operation.SetPendingCallbacks(handles.Length);
+
             submit(
                 _handle.DangerousGetHandle(),
                 handles,
@@ -1098,6 +1104,10 @@ internal sealed class NativeAdminClient : IDisposable
                 retryOnQuotaViolation,
                 AdminCallbacks.CreateTopics,
                 GCHandle.ToIntPtr(gcHandle));
+
+            // The submit's own countdown slot. Releasing it here is what makes an EMPTY
+            // topic collection — zero callbacks — release rather than leak.
+            operation.ReleaseSubmitToken();
         }
         catch
         {
@@ -1166,14 +1176,26 @@ internal sealed class NativeAdminClient : IDisposable
                     Submit(
                         operation,
                         keys,
-                        (admin, pinned, count, callbackUserData) => submitByName(
-                            admin,
-                            pinned,
-                            count,
-                            timeoutMs,
-                            retryOnQuotaViolation,
-                            AdminCallbacks.DeleteTopicsByName,
-                            callbackUserData));
+                        (admin, pinned, count, callbackUserData) =>
+                        {
+                            // Result shape 4b: one callback per topic. The ABI fires
+                            // "exactly `count` times (minus NULL entries in `names`)", and
+                            // a pinned key is never NULL — so `count` is the number. Armed
+                            // before the submit: every key can fire inline on this thread.
+                            operation.SetPendingCallbacks(count);
+                            submitByName(
+                                admin,
+                                pinned,
+                                count,
+                                timeoutMs,
+                                retryOnQuotaViolation,
+                                AdminCallbacks.DeleteTopicsByName,
+                                callbackUserData);
+
+                            // The submit's own slot — what makes an EMPTY name collection
+                            // (zero callbacks) release instead of leaking.
+                            operation.ReleaseSubmitToken();
+                        });
 
                     return DeleteTopicsResult.OfTopicNames(operation.Tasks, operation.KeyComparer);
                 }
@@ -1187,14 +1209,22 @@ internal sealed class NativeAdminClient : IDisposable
                     Submit(
                         operation,
                         ToBase64(keys),
-                        (admin, pinned, count, callbackUserData) => submitByIds(
-                            admin,
-                            pinned,
-                            count,
-                            timeoutMs,
-                            retryOnQuotaViolation,
-                            AdminCallbacks.DeleteTopicsById,
-                            callbackUserData));
+                        (admin, pinned, count, callbackUserData) =>
+                        {
+                            // Shape 4b: "exactly `count` times"; `keys` is already
+                            // DistinctIds, so `count` is the number.
+                            operation.SetPendingCallbacks(count);
+                            submitByIds(
+                                admin,
+                                pinned,
+                                count,
+                                timeoutMs,
+                                retryOnQuotaViolation,
+                                AdminCallbacks.DeleteTopicsById,
+                                callbackUserData);
+
+                            operation.ReleaseSubmitToken();
+                        });
 
                     return DeleteTopicsResult.OfTopicIds(operation.Tasks, operation.KeyComparer);
                 }
@@ -1259,15 +1289,26 @@ internal sealed class NativeAdminClient : IDisposable
                     Submit(
                         operation,
                         keys,
-                        (admin, pinned, count, callbackUserData) => submitByName(
-                            admin,
-                            pinned,
-                            count,
-                            timeoutMs,
-                            includeAuthorizedOperations,
-                            partitionSizeLimitPerResponse,
-                            AdminCallbacks.DescribeTopicsByName,
-                            callbackUserData));
+                        (admin, pinned, count, callbackUserData) =>
+                        {
+                            // Shape 4a: the ABI fires "exactly `count` times (minus NULL
+                            // entries in `names`)" and a pinned key is never NULL, so
+                            // `count` is the number. Armed before the submit — every key
+                            // can fire inline on this thread; the submit's own token is
+                            // released after, which is what makes an EMPTY collection
+                            // (zero callbacks) release instead of leaking.
+                            operation.SetPendingCallbacks(count);
+                            submitByName(
+                                admin,
+                                pinned,
+                                count,
+                                timeoutMs,
+                                includeAuthorizedOperations,
+                                partitionSizeLimitPerResponse,
+                                AdminCallbacks.DescribeTopicsByName,
+                                callbackUserData);
+                            operation.ReleaseSubmitToken();
+                        });
 
                     return DescribeTopicsResult.OfTopicNames(operation.Tasks, operation.KeyComparer);
                 }
@@ -1282,15 +1323,23 @@ internal sealed class NativeAdminClient : IDisposable
                     Submit(
                         operation,
                         ToBase64(keys),
-                        (admin, pinned, count, callbackUserData) => submitByIds(
-                            admin,
-                            pinned,
-                            count,
-                            timeoutMs,
-                            includeAuthorizedOperations,
-                            partitionSizeLimitPerResponse,
-                            AdminCallbacks.DescribeTopicsById,
-                            callbackUserData));
+                        (admin, pinned, count, callbackUserData) =>
+                        {
+                            // Shape 4a: the ABI fires "exactly `count` times", including
+                            // when a base64 id fails to parse (the whole call then fails
+                            // and every key gets that error). See the by-name arm.
+                            operation.SetPendingCallbacks(count);
+                            submitByIds(
+                                admin,
+                                pinned,
+                                count,
+                                timeoutMs,
+                                includeAuthorizedOperations,
+                                partitionSizeLimitPerResponse,
+                                AdminCallbacks.DescribeTopicsById,
+                                callbackUserData);
+                            operation.ReleaseSubmitToken();
+                        });
 
                     return DescribeTopicsResult.OfTopicIds(operation.Tasks, operation.KeyComparer);
                 }
@@ -1456,6 +1505,11 @@ internal sealed class NativeAdminClient : IDisposable
                 handles[i] = NewPartitionsMarshal.Build(requested[i]);
             }
 
+            // Shape 4b: one callback per distinct topic, skipping NULL-paired entries —
+            // and neither side can be null here (both are rejected above), so the row
+            // count is the number. `newPartitions` is a map, so its keys are distinct.
+            operation.SetPendingCallbacks(handles.Length);
+
             submit(
                 _handle.DangerousGetHandle(),
                 topics,
@@ -1466,6 +1520,8 @@ internal sealed class NativeAdminClient : IDisposable
                 retryOnQuotaViolation,
                 AdminCallbacks.CreatePartitions,
                 GCHandle.ToIntPtr(gcHandle));
+
+            operation.ReleaseSubmitToken();
         }
         catch
         {
@@ -1595,6 +1651,14 @@ internal sealed class NativeAdminClient : IDisposable
                 topics[i] = topic.Pointer;
             }
 
+            // Shape 4a: the ABI fires once per distinct (topic, partition) pair, skipping
+            // NULL topics — and `keys` is already distinct (a map's key set) with no null
+            // topic (rejected above), so that is keys.Count. Armed before the submit —
+            // every key can fire inline on this thread; the submit's own token is released
+            // after, which is what makes an EMPTY map (zero callbacks) release instead of
+            // leaking.
+            operation.SetPendingCallbacks(keys.Count);
+
             // The blittable int[] / long[] are pinned by the interop marshaller for the
             // duration of the call; the ABI copies out during it (ffi §A4 call-scoped).
             submit(
@@ -1606,6 +1670,8 @@ internal sealed class NativeAdminClient : IDisposable
                 timeoutMs,
                 AdminCallbacks.DeleteRecords,
                 GCHandle.ToIntPtr(gcHandle));
+
+            operation.ReleaseSubmitToken();
         }
         catch
         {
@@ -1894,6 +1960,12 @@ internal sealed class NativeAdminClient : IDisposable
                 resourceNames[i] = name.Pointer;
             }
 
+            // Shape 4a: the ABI fires "exactly once per DISTINCT requested resource",
+            // and `keys` is already distinct (DistinctResources above), so that is
+            // keys.Count. Armed before the submit; the submit's own token is released
+            // after, which is what makes an empty collection release instead of leaking.
+            operation.SetPendingCallbacks(keys.Count);
+
             submit(
                 _handle.DangerousGetHandle(),
                 resourceTypes,
@@ -1904,6 +1976,8 @@ internal sealed class NativeAdminClient : IDisposable
                 includeDocumentation,
                 AdminCallbacks.DescribeConfigs,
                 GCHandle.ToIntPtr(gcHandle));
+
+            operation.ReleaseSubmitToken();
         }
         catch
         {
@@ -1970,7 +2044,7 @@ internal sealed class NativeAdminClient : IDisposable
     /// <b>The root of the divergence is single and stated once: the resource is never
     /// sent, so any answer the broker would have given for it is lost.</b> Local completion
     /// therefore reproduces Java's outcome for a resource that exists and is authorized.
-    /// Three instances where it does not, each independently checkable — this is a list of
+    /// Four instances where it does not, each independently checkable — this is a list of
     /// what was found, not a claim that nothing else follows from the root:
     /// </para>
     /// <list type="number">
@@ -1991,6 +2065,12 @@ internal sealed class NativeAdminClient : IDisposable
     /// caller most plausibly reaches with an empty collection — "validate this resource,
     /// change nothing" — and it is the case local completion answers without validating
     /// anything.
+    /// </item>
+    /// <item>
+    /// <b>The call itself cannot be submitted</b> (M15/P9 CP6). The per-key ABI fans a
+    /// submit failure out over the resources it named, which a zero-op resource is not
+    /// among — so it completes successfully while every other key faults. Under the
+    /// aggregate callback this key faulted with the rest.
     /// </item>
     /// </list>
     /// <para>
@@ -2129,6 +2209,14 @@ internal sealed class NativeAdminClient : IDisposable
                 }
             }
 
+            // ⚠ Shape 4b, and the ONE RPC in the phase whose callback count is neither the
+            // key count nor the row count: the ABI fires once per DISTINCT RESOURCE NAMED
+            // ACROSS THE ROWS (`distinct_config_resources`). Every resource is named by at
+            // least one row except the zero-op ones, which contribute none — so the count
+            // is exactly the keys minus those, and they are resolved locally at countdown
+            // zero (VoidKeyedAdminOperation.OnAllCallbacksComplete) instead.
+            operation.SetPendingCallbacks(keys.Count - keysWithNoRequest.Count);
+
             submit(
                 _handle.DangerousGetHandle(),
                 resourceTypes,
@@ -2141,6 +2229,8 @@ internal sealed class NativeAdminClient : IDisposable
                 validateOnly,
                 AdminCallbacks.IncrementalAlterConfigs,
                 GCHandle.ToIntPtr(gcHandle));
+
+            operation.ReleaseSubmitToken();
         }
         catch
         {
@@ -2217,6 +2307,11 @@ internal sealed class NativeAdminClient : IDisposable
                 operation.SetHandleRef(_handle);
             }
 
+            // Shape 4a: the ABI fires once per DISTINCT broker id, and `keys` is already
+            // distinct (the HashSet above), so that is keys.Count. The submit's own token
+            // is released after, so an empty collection releases instead of leaking.
+            operation.SetPendingCallbacks(keys.Count);
+
             // The blittable int[] is pinned by the interop marshaller for the duration of
             // the call; the ABI copies out during it (ffi §A4 call-scoped).
             submit(
@@ -2226,6 +2321,8 @@ internal sealed class NativeAdminClient : IDisposable
                 timeoutMs,
                 AdminCallbacks.DescribeLogDirs,
                 GCHandle.ToIntPtr(gcHandle));
+
+            operation.ReleaseSubmitToken();
         }
         catch
         {
@@ -2342,6 +2439,11 @@ internal sealed class NativeAdminClient : IDisposable
                 directories[i] = directory.Pointer;
             }
 
+            // Shape 4b: one callback per distinct (topic, partition, broker) triple,
+            // skipping entries with a NULL topic or log dir — neither is possible here, and
+            // `replicaAssignment` is a map, so the key count is the number.
+            operation.SetPendingCallbacks(keys.Count);
+
             submit(
                 _handle.DangerousGetHandle(),
                 topics,
@@ -2352,6 +2454,8 @@ internal sealed class NativeAdminClient : IDisposable
                 timeoutMs,
                 AdminCallbacks.AlterReplicaLogDirs,
                 GCHandle.ToIntPtr(gcHandle));
+
+            operation.ReleaseSubmitToken();
         }
         catch
         {
@@ -2475,6 +2579,11 @@ internal sealed class NativeAdminClient : IDisposable
                 brokerIds[i] = keys[i].BrokerId;
             }
 
+            // Shape 4a: the ABI fires once per DISTINCT replica, and `keys` is already
+            // distinct (the HashSet above), so that is keys.Count. The submit's own token
+            // is released after, so an empty collection releases instead of leaking.
+            operation.SetPendingCallbacks(keys.Count);
+
             submit(
                 _handle.DangerousGetHandle(),
                 topics,
@@ -2484,6 +2593,8 @@ internal sealed class NativeAdminClient : IDisposable
                 timeoutMs,
                 AdminCallbacks.DescribeReplicaLogDirs,
                 GCHandle.ToIntPtr(gcHandle));
+
+            operation.ReleaseSubmitToken();
         }
         catch
         {
@@ -2776,6 +2887,10 @@ internal sealed class NativeAdminClient : IDisposable
                 replicaPointers[i] = pin.AddrOfPinnedObject();
             }
 
+            // Shape 4b: one callback per distinct (topic, partition) pair, skipping entries
+            // with a NULL topic — rejected above — and `reassignments` is a map.
+            operation.SetPendingCallbacks(keys.Count);
+
             submit(
                 _handle.DangerousGetHandle(),
                 topics,
@@ -2788,6 +2903,8 @@ internal sealed class NativeAdminClient : IDisposable
                 allowReplicationFactorChange,
                 AdminCallbacks.AlterPartitionReassignments,
                 GCHandle.ToIntPtr(gcHandle));
+
+            operation.ReleaseSubmitToken();
         }
         catch
         {
@@ -2832,10 +2949,9 @@ internal sealed class NativeAdminClient : IDisposable
     /// <para>
     /// ⚠ <b>One awaitable, and the per-partition outcomes are its map's VALUES.</b> Java's
     /// future resolves to <c>Map&lt;TopicPartition, Errors&gt;</c>
-    /// (<c>AlterConsumerGroupOffsetsResult.java:33</c>), so this uses
-    /// <see cref="SingleAdminOperation{TValue}"/> rather than the per-key bridge even though
-    /// the ABI result declares a <c>get_error</c> — the same shape as
-    /// <see cref="ElectLeaders(ElectionType, IReadOnlyCollection{TopicPartition}?, ElectLeadersOptions?, NativeElectLeadersSubmit)"/>.
+    /// (<c>AlterConsumerGroupOffsetsResult.java:33</c>) while the ABI fires one callback per
+    /// partition, so this uses <see cref="FanInAdminOperation{TKey, TValue}"/> — result
+    /// shape 4c.
     /// </para>
     /// </remarks>
     internal AlterConsumerGroupOffsetsResult AlterConsumerGroupOffsets(
@@ -2893,9 +3009,9 @@ internal sealed class NativeAdminClient : IDisposable
         }
 
         // ---- Publish everything the callback needs BEFORE the call ----
-        SingleAdminOperation<IReadOnlyDictionary<TopicPartition, KafkaException?>> operation =
-            new SingleAdminOperation<IReadOnlyDictionary<TopicPartition, KafkaException?>>(
-                "alterConsumerGroupOffsets");
+        FanInAdminOperation<TopicPartition, KafkaException?> operation =
+            new FanInAdminOperation<TopicPartition, KafkaException?>(
+                keys.Count, EqualityComparer<TopicPartition>.Default);
         GCHandle gcHandle = GCHandle.Alloc(operation, GCHandleType.Normal);
         operation.SetGcHandle(gcHandle);
 
@@ -2929,6 +3045,10 @@ internal sealed class NativeAdminClient : IDisposable
                 metadataPointers[i] = metadata.Pointer;
             }
 
+            // Shape 4c: the ABI fires once per (topic, partition) key it was handed, and
+            // `offsets` is a dictionary, so `keys` is already distinct.
+            operation.SetPendingCallbacks(keys.Count);
+
             submit(
                 _handle.DangerousGetHandle(),
                 pinnedGroupId.Pointer,
@@ -2942,6 +3062,8 @@ internal sealed class NativeAdminClient : IDisposable
                 timeoutMs,
                 AdminCallbacks.AlterConsumerGroupOffsets,
                 GCHandle.ToIntPtr(gcHandle));
+
+            operation.ReleaseSubmitToken();
         }
         catch
         {
@@ -2992,9 +3114,9 @@ internal sealed class NativeAdminClient : IDisposable
     /// <remarks>
     /// ⚠ <b>One awaitable, and the per-partition outcomes are its map's VALUES.</b> Java's
     /// future resolves to <c>Map&lt;TopicPartition, Errors&gt;</c>
-    /// (<c>DeleteConsumerGroupOffsetsResult.java:33</c>), so this uses
-    /// <see cref="SingleAdminOperation{TValue}"/> rather than the per-key bridge even though
-    /// the ABI result declares a <c>get_error</c> — the same shape as
+    /// (<c>DeleteConsumerGroupOffsetsResult.java:33</c>) while the ABI fires one callback per
+    /// partition, so this uses <see cref="FanInAdminOperation{TKey, TValue}"/> — result
+    /// shape 4c, the same as
     /// <see cref="AlterConsumerGroupOffsets(string, IReadOnlyDictionary{TopicPartition, OffsetAndMetadata}, AlterConsumerGroupOffsetsOptions?, NativeAlterConsumerGroupOffsetsSubmit)"/>.
     /// </remarks>
     internal DeleteConsumerGroupOffsetsResult DeleteConsumerGroupOffsets(
@@ -3021,9 +3143,10 @@ internal sealed class NativeAdminClient : IDisposable
             timeoutMs = ValidateTimeoutMs(options.TimeoutMs, nameof(DeleteConsumerGroupOffsetsOptions));
         }
 
+        // De-duplicated (Java's parameter is a Set): the ABI fires once per key it was
+        // handed, so a repeat would draw a second callback the accumulator cannot key.
         List<TopicPartition> keys = new List<TopicPartition>(partitions.Count);
-        int[] partitionValues = new int[partitions.Count];
-        int next = 0;
+        HashSet<TopicPartition> seen = new HashSet<TopicPartition>();
         foreach (TopicPartition partition in partitions)
         {
             if (partition.Topic is null)
@@ -3033,15 +3156,22 @@ internal sealed class NativeAdminClient : IDisposable
                     nameof(partitions));
             }
 
-            keys.Add(partition);
-            partitionValues[next] = partition.Partition;
-            next++;
+            if (seen.Add(partition))
+            {
+                keys.Add(partition);
+            }
+        }
+
+        int[] partitionValues = new int[keys.Count];
+        for (int i = 0; i < keys.Count; i++)
+        {
+            partitionValues[i] = keys[i].Partition;
         }
 
         // ---- Publish everything the callback needs BEFORE the call ----
-        SingleAdminOperation<IReadOnlyDictionary<TopicPartition, KafkaException?>> operation =
-            new SingleAdminOperation<IReadOnlyDictionary<TopicPartition, KafkaException?>>(
-                "deleteConsumerGroupOffsets");
+        FanInAdminOperation<TopicPartition, KafkaException?> operation =
+            new FanInAdminOperation<TopicPartition, KafkaException?>(
+                keys.Count, EqualityComparer<TopicPartition>.Default);
         GCHandle gcHandle = GCHandle.Alloc(operation, GCHandleType.Normal);
         operation.SetGcHandle(gcHandle);
 
@@ -3068,6 +3198,9 @@ internal sealed class NativeAdminClient : IDisposable
                 topics[i] = topic.Pointer;
             }
 
+            // Shape 4c: one callback per key handed over, and `keys` is distinct above.
+            operation.SetPendingCallbacks(keys.Count);
+
             submit(
                 _handle.DangerousGetHandle(),
                 pinnedGroupId.Pointer,
@@ -3077,6 +3210,8 @@ internal sealed class NativeAdminClient : IDisposable
                 timeoutMs,
                 AdminCallbacks.DeleteConsumerGroupOffsets,
                 GCHandle.ToIntPtr(gcHandle));
+
+            operation.ReleaseSubmitToken();
         }
         catch
         {
@@ -3149,13 +3284,21 @@ internal sealed class NativeAdminClient : IDisposable
         Submit(
             operation,
             keys,
-            (admin, pinned, count, callbackUserData) => submit(
-                admin,
-                pinned,
-                count,
-                timeoutMs,
-                AdminCallbacks.DeleteConsumerGroups,
-                callbackUserData));
+            (admin, pinned, count, callbackUserData) =>
+            {
+                // Shape 4b: one callback per distinct group id, skipping NULL entries —
+                // a pinned key is never NULL and `keys` is already DistinctNames.
+                operation.SetPendingCallbacks(count);
+                submit(
+                    admin,
+                    pinned,
+                    count,
+                    timeoutMs,
+                    AdminCallbacks.DeleteConsumerGroups,
+                    callbackUserData);
+
+                operation.ReleaseSubmitToken();
+            });
 
         return new DeleteConsumerGroupsResult(operation.Tasks, operation.KeyComparer);
     }
@@ -3168,7 +3311,7 @@ internal sealed class NativeAdminClient : IDisposable
     /// <summary>
     /// Submits <c>removeMembersFromConsumerGroup</c> and returns immediately with the
     /// <b>single</b> awaitable Java's <c>RemoveMembersFromConsumerGroupResult</c> wraps
-    /// (<c>future</c>, <c>RemoveMembersFromConsumerGroupResult.java:35</c>, result shape 3) —
+    /// (<c>future</c>, <c>RemoveMembersFromConsumerGroupResult.java:35</c>, result shape 4c) —
     /// plus the original request's member collection, the second stored field Java carries
     /// (<c>memberInfos</c>, <c>:36</c>), the same two-field pattern as
     /// <see cref="DeleteConsumerGroupOffsets(string, IReadOnlyCollection{TopicPartition}, DeleteConsumerGroupOffsetsOptions?, NativeDeleteConsumerGroupOffsetsSubmit)"/>.
@@ -3176,18 +3319,18 @@ internal sealed class NativeAdminClient : IDisposable
     /// <remarks>
     /// <para>
     /// ⚠ <b>One awaitable, and the per-member outcomes are its map's VALUES</b> — Java's future
-    /// resolves to <c>Map&lt;MemberIdentity, Errors&gt;</c>, so this uses
-    /// <see cref="SingleAdminOperation{TValue}"/> rather than the per-key bridge, the same shape
-    /// as <see cref="AlterConsumerGroupOffsets(string, IReadOnlyDictionary{TopicPartition, OffsetAndMetadata}, AlterConsumerGroupOffsetsOptions?, NativeAlterConsumerGroupOffsetsSubmit)"/>.
+    /// resolves to <c>Map&lt;MemberIdentity, Errors&gt;</c> while the ABI fires one callback per
+    /// member, so this uses <see cref="FanInAdminOperation{TKey, TValue}"/> — result shape 4c,
+    /// the same as <see cref="AlterConsumerGroupOffsets(string, IReadOnlyDictionary{TopicPartition, OffsetAndMetadata}, AlterConsumerGroupOffsetsOptions?, NativeAlterConsumerGroupOffsetsSubmit)"/>.
     /// </para>
     /// <para>
-    /// ⚠⚠ <b>removeAll mode passes no member array at all.</b> When
-    /// <see cref="RemoveMembersFromConsumerGroupOptions.RemoveAll"/> is <see langword="true"/>,
-    /// Java has no per-member request to send — the broker removes every member — so
-    /// <paramref name="submit"/> is called with a <see langword="null"/> group-instance-id array
-    /// and a count of 0. See <see cref="NativeRemoveMembersFromConsumerGroupSubmit"/> and
-    /// <see cref="RemoveMembersFromConsumerGroupResult"/> for the resulting zero-row / <c>All()</c>
-    /// deviation this forces at the ABI.
+    /// ⚠⚠ <b>removeAll mode passes no member array at all, and its callback count is 1.</b>
+    /// When <see cref="RemoveMembersFromConsumerGroupOptions.RemoveAll"/> is
+    /// <see langword="true"/>, Java has no per-member request to send, so
+    /// <paramref name="submit"/> gets a <see langword="null"/> group-instance-id array and a
+    /// count of 0 — and the ABI answers with <b>one</b> NULL-keyed whole-operation callback
+    /// instead of one per member. This is the only RPC in the phase whose <c>n</c> is
+    /// mode-dependent.
     /// </para>
     /// </remarks>
     internal RemoveMembersFromConsumerGroupResult RemoveMembersFromConsumerGroup(
@@ -3223,9 +3366,13 @@ internal sealed class NativeAdminClient : IDisposable
         }
 
         // ---- Publish everything the callback needs BEFORE the call ----
-        SingleAdminOperation<IReadOnlyDictionary<string, KafkaException?>> operation =
-            new SingleAdminOperation<IReadOnlyDictionary<string, KafkaException?>>(
-                "removeMembersFromConsumerGroup");
+        // Shape 4c, MODE-DEPENDENT n: one NULL-keyed whole-operation callback in removeAll
+        // mode, else one per distinct group.instance.id — and `options.Members` is a set of
+        // non-null ids, so `keys` carries no duplicate and no NULL the core would skip.
+        int pendingCallbacks = removeAll ? 1 : keys!.Count;
+        FanInAdminOperation<string, KafkaException?> operation =
+            new FanInAdminOperation<string, KafkaException?>(
+                keys?.Count ?? 0, StringComparer.Ordinal);
         GCHandle gcHandle = GCHandle.Alloc(operation, GCHandleType.Normal);
         operation.SetGcHandle(gcHandle);
 
@@ -3260,6 +3407,8 @@ internal sealed class NativeAdminClient : IDisposable
                 memberCount = keys.Count;
             }
 
+            operation.SetPendingCallbacks(pendingCallbacks);
+
             submit(
                 _handle.DangerousGetHandle(),
                 pinnedGroupId.Pointer,
@@ -3270,6 +3419,8 @@ internal sealed class NativeAdminClient : IDisposable
                 timeoutMs,
                 AdminCallbacks.RemoveMembersFromConsumerGroup,
                 GCHandle.ToIntPtr(gcHandle));
+
+            operation.ReleaseSubmitToken();
         }
         catch
         {
@@ -3352,6 +3503,11 @@ internal sealed class NativeAdminClient : IDisposable
 
             rows = AclRowMarshal.Pin(keys);
 
+            // Shape 4b, owned key: "exactly `count` times", and `keys` is already
+            // DistinctBindings, so the row count is the number. A binding the core rejects
+            // locally still arrives as its own callback carrying an INVALID_REQUEST error.
+            operation.SetPendingCallbacks(rows.Count);
+
             submit(
                 _handle.DangerousGetHandle(),
                 rows.ResourceTypes,
@@ -3365,6 +3521,8 @@ internal sealed class NativeAdminClient : IDisposable
                 timeoutMs,
                 AdminCallbacks.CreateAcls,
                 GCHandle.ToIntPtr(gcHandle));
+
+            operation.ReleaseSubmitToken();
         }
         catch
         {
@@ -3439,6 +3597,14 @@ internal sealed class NativeAdminClient : IDisposable
 
             rows = AclRowMarshal.Pin(keys);
 
+            // Shape 4a: one callback per DISTINCT filter. ⚠ delete_acls_async's own doc says
+            // "exactly `count` times", but its body de-duplicates before the fan-out — and
+            // `keys` is already DistinctFilters, so the two agree here. Armed before the
+            // submit (every key can fire inline on this thread); the submit's own token is
+            // released after, which is what makes an EMPTY filter list release rather than
+            // leak.
+            operation.SetPendingCallbacks(rows.Count);
+
             submit(
                 _handle.DangerousGetHandle(),
                 rows.ResourceTypes,
@@ -3452,6 +3618,8 @@ internal sealed class NativeAdminClient : IDisposable
                 timeoutMs,
                 AdminCallbacks.DeleteAcls,
                 GCHandle.ToIntPtr(gcHandle));
+
+            operation.ReleaseSubmitToken();
         }
         catch
         {
@@ -3739,6 +3907,10 @@ internal sealed class NativeAdminClient : IDisposable
 
             rows = ClientQuotaMarshal.PinAlterations(alterations);
 
+            // Shape 4b, owned key: one callback per distinct entity, and a repeated entity
+            // is rejected above, so the row count is the number.
+            operation.SetPendingCallbacks(rows.Count);
+
             submit(
                 _handle.DangerousGetHandle(),
                 rows.EntityTypes,
@@ -3753,6 +3925,8 @@ internal sealed class NativeAdminClient : IDisposable
                 validateOnly,
                 AdminCallbacks.AlterClientQuotas,
                 GCHandle.ToIntPtr(gcHandle));
+
+            operation.ReleaseSubmitToken();
         }
         catch
         {
@@ -3914,6 +4088,11 @@ internal sealed class NativeAdminClient : IDisposable
 
             pinned = AlterUserScramCredentialsMarshal.Pin(rows);
 
+            // ⚠ Shape 4b: the ABI fires once per DISTINCT USER, not once per row — two
+            // alterations naming one user collapse to one outcome, which is why `keys` is
+            // already the distinct-user list while `rows` may be longer.
+            operation.SetPendingCallbacks(keys.Count);
+
             submit(
                 _handle.DangerousGetHandle(),
                 pinned.Users,
@@ -3929,6 +4108,8 @@ internal sealed class NativeAdminClient : IDisposable
                 timeoutMs,
                 AdminCallbacks.AlterUserScramCredentials,
                 GCHandle.ToIntPtr(gcHandle));
+
+            operation.ReleaseSubmitToken();
         }
         catch
         {
@@ -4386,6 +4567,11 @@ internal sealed class NativeAdminClient : IDisposable
                 operation.SetHandleRef(_handle);
             }
 
+            // Shape 4b: one callback per feature. `featureUpdates` is a map, and an empty
+            // one is rejected above, so the key count is the number and the ABI's
+            // never-invoked `count == 0` case is unreachable through this surface.
+            operation.SetPendingCallbacks(keys.Count);
+
             submit(
                 _handle.DangerousGetHandle(),
                 PinNames(keys, pinned),
@@ -4396,6 +4582,8 @@ internal sealed class NativeAdminClient : IDisposable
                 validateOnly,
                 AdminCallbacks.UpdateFeatures,
                 GCHandle.ToIntPtr(gcHandle));
+
+            operation.ReleaseSubmitToken();
         }
         catch
         {
@@ -4467,6 +4655,11 @@ internal sealed class NativeAdminClient : IDisposable
                 operation.SetHandleRef(_handle);
             }
 
+            // Shape 4a: the ABI fires "exactly once per DISTINCT requested id", never at
+            // all for zero distinct ids, and `keys` is already distinct (DistinctNames
+            // above) — so that is keys.Count, with the submit's own token released after.
+            operation.SetPendingCallbacks(keys.Count);
+
             submit(
                 _handle.DangerousGetHandle(),
                 PinNames(keys, pinned),
@@ -4474,6 +4667,8 @@ internal sealed class NativeAdminClient : IDisposable
                 timeoutMs,
                 AdminCallbacks.FenceProducers,
                 GCHandle.ToIntPtr(gcHandle));
+
+            operation.ReleaseSubmitToken();
         }
         catch
         {
@@ -4541,6 +4736,10 @@ internal sealed class NativeAdminClient : IDisposable
                 operation.SetHandleRef(_handle);
             }
 
+            // Shape 4a, same countdown as fenceProducers: once per distinct id, and
+            // `keys` is already distinct.
+            operation.SetPendingCallbacks(keys.Count);
+
             submit(
                 _handle.DangerousGetHandle(),
                 PinNames(keys, pinned),
@@ -4548,6 +4747,8 @@ internal sealed class NativeAdminClient : IDisposable
                 timeoutMs,
                 AdminCallbacks.DescribeTransactions,
                 GCHandle.ToIntPtr(gcHandle));
+
+            operation.ReleaseSubmitToken();
         }
         catch
         {
@@ -4633,6 +4834,11 @@ internal sealed class NativeAdminClient : IDisposable
                 partitionIds[i] = keys[i].Partition;
             }
 
+            // Shape 4a: the ABI fires once per DISTINCT (topic, partition) pair, and
+            // `keys` is already distinct (DistinctPartitions above), so that is keys.Count.
+            // The submit's own token is released after, so an empty collection releases.
+            operation.SetPendingCallbacks(keys.Count);
+
             submit(
                 _handle.DangerousGetHandle(),
                 topics,
@@ -4643,6 +4849,8 @@ internal sealed class NativeAdminClient : IDisposable
                 timeoutMs,
                 AdminCallbacks.DescribeProducers,
                 GCHandle.ToIntPtr(gcHandle));
+
+            operation.ReleaseSubmitToken();
         }
         catch
         {
@@ -5188,6 +5396,13 @@ internal sealed class NativeAdminClient : IDisposable
                 topics[i] = topic.Pointer;
             }
 
+            // Shape 4a: the ABI fires once per (topic, partition) pair in the input —
+            // including on the inline whole-call failure (an unknown isolation level or an
+            // unrecognised sentinel), which fires for every key — and `keys` is already
+            // distinct (a map's key set) with no null topic, so that is keys.Count. The
+            // submit's own token is released after, so an empty map releases.
+            operation.SetPendingCallbacks(keys.Count);
+
             submit(
                 _handle.DangerousGetHandle(),
                 topics,
@@ -5199,6 +5414,8 @@ internal sealed class NativeAdminClient : IDisposable
                 (int)isolationLevel,
                 AdminCallbacks.ListOffsets,
                 GCHandle.ToIntPtr(gcHandle));
+
+            operation.ReleaseSubmitToken();
         }
         catch
         {
@@ -5548,14 +5765,22 @@ internal sealed class NativeAdminClient : IDisposable
         Submit(
             operation,
             keys,
-            (admin, pinned, count, callbackUserData) => submit(
-                admin,
-                pinned,
-                count,
-                timeoutMs,
-                includeAuthorizedOperations,
-                AdminCallbacks.DescribeConsumerGroups,
-                callbackUserData));
+            (admin, pinned, count, callbackUserData) =>
+            {
+                // Shape 4a: once per distinct group id, and `keys` is already distinct
+                // (DistinctNames above). The submit's own token is released after, so an
+                // empty collection (zero callbacks) releases instead of leaking.
+                operation.SetPendingCallbacks(count);
+                submit(
+                    admin,
+                    pinned,
+                    count,
+                    timeoutMs,
+                    includeAuthorizedOperations,
+                    AdminCallbacks.DescribeConsumerGroups,
+                    callbackUserData);
+                operation.ReleaseSubmitToken();
+            });
 
         return new DescribeConsumerGroupsResult(operation.Tasks);
     }
@@ -5626,14 +5851,20 @@ internal sealed class NativeAdminClient : IDisposable
         Submit(
             operation,
             keys,
-            (admin, pinned, count, callbackUserData) => submit(
-                admin,
-                pinned,
-                count,
-                timeoutMs,
-                includeAuthorizedOperations,
-                AdminCallbacks.DescribeClassicGroups,
-                callbackUserData));
+            (admin, pinned, count, callbackUserData) =>
+            {
+                // Shape 4a, same countdown as describeConsumerGroups.
+                operation.SetPendingCallbacks(count);
+                submit(
+                    admin,
+                    pinned,
+                    count,
+                    timeoutMs,
+                    includeAuthorizedOperations,
+                    AdminCallbacks.DescribeClassicGroups,
+                    callbackUserData);
+                operation.ReleaseSubmitToken();
+            });
 
         return new DescribeClassicGroupsResult(operation.Tasks);
     }
@@ -5829,6 +6060,12 @@ internal sealed class NativeAdminClient : IDisposable
                 partitions[i] = partitionPin.AddrOfPinnedObject();
             }
 
+            // Shape 4a: the ABI fires once per group id in the input — including on the
+            // inline whole-call failure, which fires for every key — and the loop above
+            // rejects both a null and a repeated group id, so that is keys.Count. The
+            // submit's own token is released after, so an empty map releases.
+            operation.SetPendingCallbacks(keys.Count);
+
             submit(
                 _handle.DangerousGetHandle(),
                 groupIds,
@@ -5841,6 +6078,8 @@ internal sealed class NativeAdminClient : IDisposable
                 requireStable,
                 AdminCallbacks.ListConsumerGroupOffsets,
                 GCHandle.ToIntPtr(gcHandle));
+
+            operation.ReleaseSubmitToken();
         }
         catch
         {

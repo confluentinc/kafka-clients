@@ -40,122 +40,6 @@ namespace Confluent.Kafka.UnitTests.Interop;
 public sealed class AdminKeySeamShapeTests
 {
     /// <summary>
-    /// The walker exposes <b>exactly two</b> <c>Complete</c> overloads, and <b>both</b>
-    /// read the key from the <b>result handle and the index</b>, not from a string.
-    /// </summary>
-    /// <remarks>
-    /// <para>
-    /// The narrower <c>Func&lt;string, TKey&gt;</c> is the obvious seam and fits
-    /// <c>createTopics</c>, <c>deleteTopics</c>, <c>describeTopics</c>,
-    /// <c>createPartitions</c> and <c>listTopics</c> — every RPC keyed by a single
-    /// <c>get_key(i)</c> string. It cannot fit <c>deleteRecords</c>:
-    /// <c>kafka_admin_DeleteRecordsResult_t</c> declares <b>no</b> <c>get_key</c> at all
-    /// (its accessors are <c>count</c> / <c>get_topic</c> / <c>get_partition</c> /
-    /// <c>get_low_watermark</c> / <c>get_error</c> / <c>destroy</c>), so its key is
-    /// composed from two accessors and there is no string to parse.
-    /// </para>
-    /// <para>
-    /// ⚠ <b>The count is asserted, not sidestepped.</b> M15/P2b added the second overload
-    /// and this assertion was <c>.Single(…)</c> before — the correct reaction is to pin
-    /// <em>both</em>, never to relax the predicate to <c>.First(…)</c> or to filter down
-    /// to the old signature, either of which would quietly stop protecting the seam that
-    /// P2a paid a generality cost for.
-    /// </para>
-    /// </remarks>
-    [Fact]
-    public void EveryCompleteOverload_ReadsTheKeyFromTheResultHandleAndIndex_NotAString()
-    {
-        MethodInfo[] overloads = CompleteOverloads();
-
-        Assert.Equal(2, overloads.Length);
-
-        foreach (MethodInfo overload in overloads)
-        {
-            ParameterInfo reader = Assert.Single(
-                overload.GetParameters(), parameter => parameter.Name == "readKey");
-
-            Type[] typeArguments = reader.ParameterType.GetGenericArguments();
-
-            Assert.Equal(typeof(Func<,,>), reader.ParameterType.GetGenericTypeDefinition());
-            Assert.Equal(typeof(IntPtr), typeArguments[0]);
-            Assert.Equal(typeof(int), typeArguments[1]);
-
-            // The third argument is the method's own TKey, so it is an open generic
-            // parameter rather than a closed type — which is what makes the seam key-type
-            // agnostic.
-            Assert.True(typeArguments[2].IsGenericParameter);
-            Assert.Equal("TKey", typeArguments[2].Name);
-        }
-    }
-
-    /// <summary>
-    /// The <b>value</b> axis is symmetric with the key axis — a reader over
-    /// <c>(result, index)</c> — and it is <b>not nullable</b>.
-    /// </summary>
-    /// <remarks>
-    /// ⚠ <b>This is the M15/P2b trap, pinned.</b> Before P2b the value channel was
-    /// <c>Func&lt;IntPtr, TValue&gt;?</c> paired with a nullable <c>Accessors.GetValue</c>,
-    /// and a <see langword="null"/> meant "result shape 2". An RPC whose per-key value is
-    /// an <b>inline scalar</b> — <c>deleteRecords</c>' <c>int64_t get_low_watermark(i)</c>
-    /// — cannot be named by a pointer-returning accessor, so the obvious way to describe
-    /// it was to null the channel out; the walker would then have taken the shape-2 branch
-    /// and <em>silently discarded the watermark</em>. No exception, no failing test, a
-    /// wrong answer returned to the caller. Two properties make that unrepresentable and
-    /// both are asserted here: the reader takes <c>(result, index)</c> so an inline scalar
-    /// <em>is</em> expressible, and it is non-nullable so "no value" cannot be spelled on
-    /// this overload at all.
-    /// </remarks>
-    [Fact]
-    public void TheValueCarryingOverload_ReadsTheValueFromTheResultHandleAndIndex_AndIsNotNullable()
-    {
-        MethodInfo valueCarrying = ValueCarryingComplete();
-
-        ParameterInfo reader = Assert.Single(
-            valueCarrying.GetParameters(), parameter => parameter.Name == "readValue");
-
-        Type[] typeArguments = reader.ParameterType.GetGenericArguments();
-
-        Assert.Equal(typeof(Func<,,>), reader.ParameterType.GetGenericTypeDefinition());
-        Assert.Equal(typeof(IntPtr), typeArguments[0]);
-        Assert.Equal(typeof(int), typeArguments[1]);
-        Assert.True(typeArguments[2].IsGenericParameter);
-        Assert.Equal("TValue", typeArguments[2].Name);
-
-        Assert.False(
-            IsNullableAnnotated(reader),
-            "a nullable value reader re-opens the silent-discard misuse M15/P2b removed");
-    }
-
-    /// <summary>
-    /// The <b>shape-2</b> overload has no value channel <em>at all</em>, and accepts only
-    /// a <see cref="VoidKeyedAdminOperation{TKey}"/>.
-    /// </summary>
-    /// <remarks>
-    /// This is the other half of making the misuse unrepresentable. "This result has no
-    /// per-key value" is stated by <em>which overload you call</em> rather than by nulling
-    /// a parameter, and the operation parameter is narrowed so a value-carrying
-    /// <see cref="KeyedAdminOperation{TKey, TValue}"/> cannot be routed down the
-    /// value-dropping path in the first place — the compiler rejects it.
-    /// </remarks>
-    [Fact]
-    public void TheVoidOverload_HasNoValueChannel_AndAcceptsOnlyTheVoidOperation()
-    {
-        MethodInfo voidShape = Assert.Single(
-            CompleteOverloads(), method => method.GetGenericArguments().Length == 1);
-
-        Assert.DoesNotContain(
-            voidShape.GetParameters(),
-            parameter => parameter.Name!.IndexOf("value", StringComparison.OrdinalIgnoreCase) >= 0);
-
-        ParameterInfo operation = Assert.Single(
-            voidShape.GetParameters(), parameter => parameter.Name == "operation");
-
-        Assert.Equal(
-            typeof(VoidKeyedAdminOperation<>),
-            operation.ParameterType.GetGenericTypeDefinition());
-    }
-
-    /// <summary>
     /// The <b>shape-3</b> walker has no per-key <b>error</b> channel at all, because in
     /// that shape no per-key outcome faults anything.
     /// </summary>
@@ -249,6 +133,12 @@ public sealed class AdminKeySeamShapeTests
     /// <c>AdminP4ReaderWiringTests</c>'s closure scan, so two P7 readers went unpinned; the
     /// factory makes the capture exist. The five walk callables are unchanged.
     /// </para>
+    /// <para>
+    /// M15/P9 CP1 added the two <see cref="KeyedResultMarshal.CompleteKey{TKey, TValue}"/>
+    /// overloads — <b>result shape 4</b>, which resolves one key from one callback with no
+    /// result root at all — and this went red as designed. They are walk callables and do
+    /// belong in D40's set; the five table walkers above are untouched.
+    /// </para>
     /// </remarks>
     [Fact]
     public void TheWalker_ExposesExactlyTheKnownCallables()
@@ -263,9 +153,9 @@ public sealed class AdminKeySeamShapeTests
         Assert.Equal(
             new[]
             {
-                nameof(KeyedResultMarshal.Complete),
-                nameof(KeyedResultMarshal.Complete),
                 nameof(KeyedResultMarshal.CompleteAggregate),
+                nameof(KeyedResultMarshal.CompleteKey),
+                nameof(KeyedResultMarshal.CompleteKey),
                 nameof(KeyedResultMarshal.CompleteList),
                 nameof(KeyedResultMarshal.CompleteTwoLists),
                 nameof(KeyedResultMarshal.ReadStringKey),
@@ -414,18 +304,10 @@ public sealed class AdminKeySeamShapeTests
     /// rather than a look-alike that could keep passing after production changed.
     /// </summary>
     [Theory]
-    [InlineData(nameof(AdminCallbacks.CreateTopicsKey))]
     [InlineData(nameof(AdminCallbacks.TopicMetadataAndConfigValue))]
-    [InlineData(nameof(AdminCallbacks.DeleteTopicsNameKey))]
-    [InlineData(nameof(AdminCallbacks.DeleteTopicsIdKey))]
-    [InlineData(nameof(AdminCallbacks.DescribeTopicsNameKey))]
-    [InlineData(nameof(AdminCallbacks.DescribeTopicsIdKey))]
-    [InlineData(nameof(AdminCallbacks.TopicDescriptionValue))]
     [InlineData(nameof(AdminCallbacks.ListTopicsKey))]
     [InlineData(nameof(AdminCallbacks.TopicListingValue))]
-    [InlineData(nameof(AdminCallbacks.CreatePartitionsKey))]
     [InlineData(nameof(AdminCallbacks.DeleteRecordsKey))]
-    [InlineData(nameof(AdminCallbacks.DeletedRecordsValue))]
     [InlineData(nameof(AdminCallbacks.ConfigResourceValue))]
     [InlineData(nameof(AdminCallbacks.ClientMetricsResourceListingValue))]
     public void EveryReader_IsAHoistedStaticReadonlyField(string fieldName)
@@ -439,15 +321,6 @@ public sealed class AdminKeySeamShapeTests
         Assert.Equal(typeof(int), field.FieldType.GetGenericArguments()[1]);
         Assert.NotNull(field.GetValue(null));
     }
-
-    private static MethodInfo[] CompleteOverloads() =>
-        typeof(KeyedResultMarshal)
-            .GetMethods(BindingFlags.NonPublic | BindingFlags.Static)
-            .Where(method => method.Name == nameof(KeyedResultMarshal.Complete))
-            .ToArray();
-
-    private static MethodInfo ValueCarryingComplete() =>
-        Assert.Single(CompleteOverloads(), method => method.GetGenericArguments().Length == 2);
 
     /// <summary>
     /// Whether a parameter's own type is annotated <c>?</c> under <c>#nullable enable</c>.

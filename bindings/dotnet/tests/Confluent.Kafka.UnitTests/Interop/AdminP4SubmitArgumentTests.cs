@@ -151,8 +151,16 @@ public sealed class AdminP4SubmitArgumentTests
         Assert.True(result.Values.ContainsKey(new TopicPartition("p4-routing", 0)));
         Assert.True(result.Values.ContainsKey(new TopicPartition("p4-routing", 1)));
 
-        AdminCallbacks.AlterPartitionReassignments(
-            IntPtr.Zero, AdminP4OperationLifetimeTests.MakeError(4, "routing"), captured);
+        // M15/P9 CP6: one callback per requested partition, each with its own owned error.
+        foreach (TopicPartition partition in result.Values.Keys)
+        {
+            using Utf8Marshal.PinnedUtf8String topic = Utf8Marshal.Pin(partition.Topic);
+            AdminCallbacks.AlterPartitionReassignments(
+                topic.Pointer,
+                partition.Partition,
+                AdminP4OperationLifetimeTests.MakeError(4, "routing"),
+                captured);
+        }
 
         foreach (Task task in result.Values.Values)
         {
@@ -513,8 +521,19 @@ public sealed class AdminP4SubmitArgumentTests
                 userDataToRelease = userData;
             });
 
-        AdminCallbacks.AlterPartitionReassignments(
-            IntPtr.Zero, AdminP4OperationLifetimeTests.MakeError(1, "captured"), userDataToRelease);
+        // Release the operation rather than leaking its GCHandle and the client reference —
+        // one callback per requested partition, since M15/P9 CP6 gives this RPC no
+        // whole-call channel.
+        foreach (TopicPartition partition in reassignments.Keys)
+        {
+            using Utf8Marshal.PinnedUtf8String topic = Utf8Marshal.Pin(partition.Topic);
+            AdminCallbacks.AlterPartitionReassignments(
+                topic.Pointer,
+                partition.Partition,
+                AdminP4OperationLifetimeTests.MakeError(1, "captured"),
+                userDataToRelease);
+        }
+
         return captured;
     }
 

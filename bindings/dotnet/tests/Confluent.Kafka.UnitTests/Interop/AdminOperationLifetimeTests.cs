@@ -108,7 +108,7 @@ public sealed class AdminOperationLifetimeTests
 
         // ---- (3) Completing the operation releases it. ----
         // Through the production trampoline, so the release under test is production's.
-        AdminCallbacks.CreateTopics(IntPtr.Zero, MakeError(42, "submit failed"), capturedUserData);
+        FireKeyFailure(Topic, 42, "submit failed", capturedUserData);
 
         Assert.True(
             handle.IsClosed,
@@ -119,10 +119,9 @@ public sealed class AdminOperationLifetimeTests
     }
 
     /// <summary>
-    /// A top-level submit failure — a non-null callback <c>error</c>, which means the
-    /// request never reached the broker at all — faults <b>every</b> per-key awaiter and
-    /// leaves none hanging. The error parameter is <b>owned</b>, so it is freed here (the
-    /// mirror image of the borrowed per-key errors inside a result).
+    /// A submit failure faults <b>every</b> per-key awaiter and leaves none hanging. Under
+    /// result shape 4 the ABI delivers it as one callback <em>per key</em>, each carrying
+    /// its own <b>owned</b> error, so that is how it is driven here.
     /// </summary>
     [Fact]
     public async Task TopLevelSubmitFailure_FaultsEveryPerKeyTask()
@@ -136,7 +135,10 @@ public sealed class AdminOperationLifetimeTests
             (nativeHandle, topics, count, timeoutMs, validateOnly, retryOnQuotaViolation, callback, userData) =>
                 capturedUserData = userData);
 
-        AdminCallbacks.CreateTopics(IntPtr.Zero, MakeError(7, "could not submit"), capturedUserData);
+        foreach (string key in new[] { "alpha", "beta", "gamma" })
+        {
+            FireKeyFailure(key, 7, "could not submit", capturedUserData);
+        }
 
         Assert.Equal(3, result.Values.Count);
         foreach (KeyValuePair<string, Task> entry in result.Values)
@@ -208,7 +210,7 @@ public sealed class AdminOperationLifetimeTests
         try
         {
             // Fire the completion right here — the inline case, on this very thread.
-            AdminCallbacks.CreateTopics(IntPtr.Zero, MakeError(1, "inline"), capturedUserData);
+            FireKeyFailure(Topic, 1, "inline", capturedUserData);
         }
         finally
         {
@@ -248,7 +250,7 @@ public sealed class AdminOperationLifetimeTests
 
         // If the context had been collected the trampoline's GCHandle.Target would be
         // null and this would throw rather than complete the awaiter.
-        AdminCallbacks.CreateTopics(IntPtr.Zero, MakeError(3, "after gc"), capturedUserData);
+        FireKeyFailure(Topic, 3, "after gc", capturedUserData);
 
         Assert.NotNull(result.Values[Topic].Exception);
     }
@@ -275,7 +277,7 @@ public sealed class AdminOperationLifetimeTests
                 (nativeHandle, topics, count, timeoutMs, validateOnly, retryOnQuotaViolation, callback, userData) =>
                     capturedUserData = userData);
 
-            AdminCallbacks.CreateTopics(IntPtr.Zero, MakeError(9, "balance probe"), capturedUserData);
+            FireKeyFailure($"{Topic}-{i}", 9, "balance probe", capturedUserData);
 
             // Reading Exception observes the fault, so no awaiter is left unobserved.
             Assert.NotNull(result.Values[$"{Topic}-{i}"].Exception);
@@ -308,6 +310,18 @@ public sealed class AdminOperationLifetimeTests
         Assert.True(
             handle.IsClosed,
             "a submit that never reached native must not leave the operation's reference held");
+    }
+
+    /// <summary>
+    /// Fires one shape-4a per-key callback carrying a failure for <paramref name="key"/>,
+    /// through the production trampoline. The <c>key</c> is a borrowed <c>const char*</c>
+    /// (pinned only for the call); the error is <b>owned</b> and the trampoline frees it.
+    /// </summary>
+    private static void FireKeyFailure(string key, int code, string message, IntPtr userData)
+    {
+        using Utf8Marshal.PinnedUtf8String pinnedKey = Utf8Marshal.Pin(key);
+        AdminCallbacks.CreateTopics(
+            pinnedKey.Pointer, IntPtr.Zero, MakeError(code, message), userData);
     }
 
     /// <summary>

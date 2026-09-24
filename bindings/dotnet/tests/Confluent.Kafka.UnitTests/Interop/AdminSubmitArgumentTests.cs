@@ -132,9 +132,13 @@ public sealed class AdminSubmitArgumentTests
         // Complete it so the operation's GCHandle and span-the-op reference are released
         // before the client is disposed.
         using (Utf8Marshal.PinnedUtf8String message = Utf8Marshal.Pin("captured"))
+        using (Utf8Marshal.PinnedUtf8String key = Utf8Marshal.Pin(Topic))
         {
             AdminCallbacks.CreateTopics(
-                IntPtr.Zero, NativeMethods.KafkaErrorNew(1, message.Pointer), captured.UserData);
+                key.Pointer,
+                IntPtr.Zero,
+                NativeMethods.KafkaErrorNew(1, message.Pointer),
+                captured.UserData);
         }
 
         Assert.NotNull(result.Values[Topic].Exception);

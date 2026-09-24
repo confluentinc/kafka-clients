@@ -394,11 +394,23 @@ public sealed class AdminP2bOperationLifetimeTests
                 break;
 
             case Rpc.CreatePartitions:
-                AdminCallbacks.CreatePartitions(IntPtr.Zero, error, userData);
+                // Shape 4b: the failure arrives keyed by the one topic SubmitCapturing
+                // submits, and a null error would be that key's SUCCESS.
+                using (Utf8Marshal.PinnedUtf8String partitionsTopic = Utf8Marshal.Pin(Topic))
+                {
+                    AdminCallbacks.CreatePartitions(partitionsTopic.Pointer, error, userData);
+                }
+
                 break;
 
             default:
-                AdminCallbacks.DeleteRecords(IntPtr.Zero, error, userData);
+                // Shape 4a: the failure arrives keyed by the one (topic, partition) pair
+                // SubmitCapturing submits, with a NULL value slot.
+                using (Utf8Marshal.PinnedUtf8String topic = Utf8Marshal.Pin(Topic))
+                {
+                    AdminCallbacks.DeleteRecords(topic.Pointer, 0, IntPtr.Zero, error, userData);
+                }
+
                 break;
         }
     }

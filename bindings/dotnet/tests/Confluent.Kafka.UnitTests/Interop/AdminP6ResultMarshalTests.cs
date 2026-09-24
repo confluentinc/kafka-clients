@@ -426,40 +426,31 @@ public sealed class AdminP6ResultMarshalTests
     /// </summary>
     private static IntPtr SubmitAndCaptureCreateAcls(NativeAdminClient admin, AclBinding[] acls)
     {
-        CreateAclsCapture capture = new CreateAclsCapture();
-        GCHandle gcHandle = GCHandle.Alloc(capture, GCHandleType.Normal);
         using AclRowMarshal.Rows rows = AclRowMarshal.Pin(acls);
-        try
-        {
-            NativeMethods.AdminClientCreateAclsAsync(
-                admin.Handle.DangerousGetHandle(),
-                rows.ResourceTypes,
-                rows.ResourceNames,
-                rows.PatternTypes,
-                rows.Principals,
-                rows.Hosts,
-                rows.Operations,
-                rows.PermissionTypes,
-                rows.Count,
-                -1,
-                s_captureCreateAcls,
-                GCHandle.ToIntPtr(gcHandle));
 
-            Assert.True(capture.Done.Wait(s_deadline), "the createAcls callback never fired");
-        }
-        finally
-        {
-            gcHandle.Free();
-        }
+        // ⚠ The SYNCHRONOUS entry point, since M15/P9 CP6 moved the async one onto per-key
+        // callbacks with no result root at all.
+        IntPtr error = NativeMethods.AdminClientCreateAcls(
+            admin.Handle.DangerousGetHandle(),
+            rows.ResourceTypes,
+            rows.ResourceNames,
+            rows.PatternTypes,
+            rows.Principals,
+            rows.Hosts,
+            rows.Operations,
+            rows.PermissionTypes,
+            rows.Count,
+            -1,
+            out IntPtr result);
 
-        KafkaException? submitFailure = KafkaException.FromHandle(capture.Error);
+        KafkaException? submitFailure = KafkaException.FromHandle(error);
         if (submitFailure is not null)
         {
             throw submitFailure;
         }
 
-        Assert.NotEqual(IntPtr.Zero, capture.Result);
-        return capture.Result;
+        Assert.NotEqual(IntPtr.Zero, result);
+        return result;
     }
 
     /// <summary>An <b>owned</b> error for a trampoline to consume, as native would hand it.</summary>
@@ -780,27 +771,6 @@ public sealed class AdminP6ResultMarshalTests
         }
     }
 
-    /// <summary>Rooted for the process lifetime, so the native thunk never dangles.</summary>
-    private static readonly AdminCallbacks.CreateAclsCallback s_captureCreateAcls = OnCreateAclsCaptured;
-
-    private static void OnCreateAclsCaptured(IntPtr result, IntPtr error, IntPtr userData)
-    {
-        CreateAclsCapture capture = (CreateAclsCapture)GCHandle.FromIntPtr(userData).Target!;
-        capture.Result = result;
-        capture.Error = error;
-        capture.Done.Set();
-    }
-
-    /// <summary>The owned root (or error) one raw <c>create_acls</c> submit produced.</summary>
-    private sealed class CreateAclsCapture
-    {
-        internal ManualResetEventSlim Done { get; } = new ManualResetEventSlim(false);
-
-        internal IntPtr Result { get; set; }
-
-        internal IntPtr Error { get; set; }
-    }
-
     private static AclBindingFilter Filter(string name) =>
         new AclBindingFilter(
             new ResourcePatternFilter(ResourceType.Topic, name, PatternType.Literal),
@@ -921,27 +891,13 @@ public sealed class AdminP6ResultMarshalTests
                     },
                     pointer => _bindings[(int)pointer - BindingPointerBase]);
 
-            KeyedResultMarshal.Complete(
-                s_root,
-                new KeyedResultMarshal.Accessors(
-                    root =>
-                    {
-                        Assert.Equal(s_root, root);
-                        return _rows.Count;
-                    },
-                    (root, index) =>
-                    {
-                        Assert.Equal(s_root, root);
-                        return _rows[index].FilterError;
-                    }),
+            SyntheticPerKeyWalk.Run(
                 operation,
-                (root, index) =>
-                {
-                    Assert.Equal(s_root, root);
-                    return AclRowMarshal.ReadFilter(
-                        new IntPtr(FilterPointerBase + index), FilterAccessors);
-                },
-                readValue);
+                _rows.Count,
+                index => AclRowMarshal.ReadFilter(
+                    new IntPtr(FilterPointerBase + index), FilterAccessors),
+                index => _rows[index].FilterError,
+                index => readValue(s_root, index));
 
             // The trampoline's rescue, mirrored: an unnamed key would hang forever.
             operation.FailUncompleted();

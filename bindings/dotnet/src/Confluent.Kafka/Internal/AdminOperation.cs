@@ -34,7 +34,7 @@ namespace Confluent.Kafka.Internal;
 /// <b>Why admin needs its own rooting type at all.</b> The consumer's
 /// <see cref="OperationCompletionSource{TResult}"/> couples the same rooting
 /// machinery to a <em>single</em> <see cref="TaskCompletionSource{TResult}"/>; an
-/// admin RPC resolves <b>N</b> awaiters — one per key — from one aggregate callback,
+/// admin RPC resolves <b>N</b> awaiters — one per key — from N independent callbacks,
 /// so the completion half differs even though every rooting invariant is identical.
 /// (The admin <c>close</c>, which really is a single void completion, reuses
 /// <see cref="OperationCompletionSource"/> unchanged rather than duplicating it here.)
@@ -72,6 +72,7 @@ internal abstract class AdminOperation
 {
     private GCHandle _gcHandle;
     private int _gcHandleFreed;
+    private int _pendingCallbacks;
     private SafeHandle? _handleRef;
 
     /// <summary>
@@ -91,6 +92,57 @@ internal abstract class AdminOperation
     internal void SetHandleRef(SafeHandle handle) => _handleRef = handle;
 
     /// <summary>
+    /// Arms the per-key countdown with the number of callbacks native will make, plus
+    /// <b>one token for the submit itself</b>. Called before the P/Invoke, like
+    /// <see cref="SetGcHandle"/>.
+    /// </summary>
+    /// <param name="callbacks">
+    /// The callback count taken from <em>that RPC's own ABI doc comment</em> — not the key
+    /// count and not blindly the request-array length (<c>incremental_alter_configs</c>
+    /// fires once per distinct resource; <c>create_topics</c> fires <c>count</c> times
+    /// minus NULL entries).
+    /// </param>
+    /// <remarks>
+    /// ⚠ <b>The submit token is how <paramref name="callbacks"/> == 0 is made safe, once,
+    /// here</b> — an empty key collection means native never calls back, so a bare
+    /// countdown would never reach zero and the <see cref="GCHandle"/> plus the
+    /// span-the-op reference would be held for the process lifetime, deferring
+    /// <c>AdminClient_destroy</c> forever. The submitter always owns one release
+    /// (<see cref="ReleaseSubmitToken"/>, after the P/Invoke returns), so zero callbacks
+    /// releases at the submit boundary and no per-RPC call site decides anything. It also
+    /// keeps the client reference held across the submit when every callback fires inline
+    /// on the submitting thread.
+    /// </remarks>
+    internal void SetPendingCallbacks(int callbacks) =>
+        Volatile.Write(ref _pendingCallbacks, (callbacks < 0 ? 0 : callbacks) + 1);
+
+    /// <summary>
+    /// One per-key callback has finished resolving its own key. At zero — the last of the
+    /// N callbacks and the submit token, in whatever order they land — the operation is
+    /// finalized (<see cref="OnAllCallbacksComplete"/>) and then released.
+    /// </summary>
+    internal void ReleaseOne()
+    {
+        if (Interlocked.Decrement(ref _pendingCallbacks) == 0)
+        {
+            try
+            {
+                OnAllCallbacksComplete();
+            }
+            finally
+            {
+                FreeGcHandle();
+            }
+        }
+    }
+
+    /// <summary>
+    /// The submitter's own release, owed <b>after the P/Invoke returns</b> on the
+    /// non-throwing path. See <see cref="SetPendingCallbacks"/> for why it exists.
+    /// </summary>
+    internal void ReleaseSubmitToken() => ReleaseOne();
+
+    /// <summary>
     /// Cleanup for the case where the submitting P/Invoke threw before native could
     /// have fired the callback (so ownership never transferred): frees the
     /// <see cref="GCHandle"/> and releases the span-the-op reference. The awaiters are
@@ -102,11 +154,15 @@ internal abstract class AdminOperation
     /// <summary>
     /// Frees the rooting <see cref="GCHandle"/> and releases the span-the-op client
     /// reference exactly once, on every completion path. Idempotent
-    /// (<see cref="Interlocked"/>-guarded), so the inline-callback and
-    /// <see cref="AbandonBeforeSubmit"/> paths cannot double-free. Releasing the
-    /// reference here — at operation completion — is what lets a deferred
-    /// <c>AdminClient_destroy</c> finally run.
+    /// (<see cref="Interlocked"/>-guarded), so the inline-callback,
+    /// <see cref="ReleaseOne"/>-countdown and <see cref="AbandonBeforeSubmit"/> paths
+    /// cannot double-free. Releasing the reference here — at operation completion — is
+    /// what lets a deferred <c>AdminClient_destroy</c> finally run.
     /// </summary>
+    /// <remarks>
+    /// Still the direct free site for every aggregate-callback RPC, whose single callback
+    /// is its own countdown of one.
+    /// </remarks>
     internal void FreeGcHandle()
     {
         if (Interlocked.Exchange(ref _gcHandleFreed, 1) == 0)
@@ -119,6 +175,15 @@ internal abstract class AdminOperation
             _handleRef?.DangerousRelease();
             _handleRef = null;
         }
+    }
+
+    /// <summary>
+    /// Runs once, when the last per-key callback and the submit token have both landed —
+    /// the only point at which "a key has no outcome" can be distinguished from "a key's
+    /// callback has not arrived yet".
+    /// </summary>
+    protected virtual void OnAllCallbacksComplete()
+    {
     }
 }
 
@@ -157,14 +222,12 @@ internal abstract class AdminOperation
 /// one.
 /// </para>
 /// <para>
-/// <b>Deviation, recorded (<c>definition-of-done.md</c> §7).</b> Per-key
-/// <em>granularity</em> is fully preserved: each <see cref="Task"/> carries exactly
-/// that key's value or that key's error. Per-key <em>timing independence</em> is not —
-/// all N complete at the same instant, because the ABI resolved them together and the
-/// C ABI has no <c>KafkaFuture</c> type to express independent timing. In Java a fast
-/// topic's future can complete before a slow one's. Nothing observable depends on this
-/// for correctness, and the Python sibling has the identical limitation for the
-/// identical reason.
+/// Per-key <em>granularity</em> and per-key <em>timing independence</em> are both
+/// preserved: each <see cref="Task"/> carries exactly that key's value or that key's
+/// error, and it resolves when that key's own callback fires — so a fast topic's
+/// awaiter completes before a slow one's, as in Java. (Before M15/P9 the ABI resolved
+/// every key from one aggregate callback and the timing half was a recorded deviation;
+/// the per-key ABI removed it.)
 /// </para>
 /// <para>
 /// <b>Foreign-thread completion.</b> Every source is built with
@@ -289,6 +352,12 @@ internal class KeyedAdminOperation<TKey, TValue> : AdminOperation
             }
         }
     }
+
+    /// <summary>
+    /// ⚠ <b>Countdown zero, never per callback.</b> Faulting an unaccounted key while other
+    /// keys' callbacks are still in flight would fault keys that are merely late.
+    /// </summary>
+    protected override void OnAllCallbacksComplete() => FailUncompleted();
 }
 
 /// <summary>
@@ -348,10 +417,12 @@ internal sealed class VoidKeyedAdminOperation<TKey> : KeyedAdminOperation<TKey, 
     /// success token.
     /// </summary>
     /// <remarks>
-    /// ⚠ <b>Called only on the successful-completion path.</b> When the call itself failed
-    /// there is no result table and <c>FailAll</c> has already faulted every awaitable,
-    /// including these — which is Java's outcome too, since the resource really is in the
-    /// request it sends and a transport failure fails its future with the rest.
+    /// ⚠ On the <b>aggregate</b> path this is called only when the call succeeded: a failed
+    /// call has no result table and <c>FailAll</c> has already faulted every awaitable,
+    /// including these — Java's outcome too, since the resource really is in the request it
+    /// sends. Under the <b>per-key</b> ABI there is no whole-call channel, so it runs
+    /// unconditionally at countdown zero and these keys succeed even when every requested
+    /// key faulted; that divergence is enumerated at the registering call site.
     /// </remarks>
     internal void CompleteKeysWithNoRequest()
     {
@@ -359,6 +430,17 @@ internal sealed class VoidKeyedAdminOperation<TKey> : KeyedAdminOperation<TKey, 
         {
             SetResult(key, true);
         }
+    }
+
+    /// <summary>
+    /// ⚠ <b>Countdown zero, never per callback</b> — and before the base's
+    /// <c>FailUncompleted</c> sees the no-request keys, exactly as the aggregate
+    /// trampoline orders the two.
+    /// </summary>
+    protected override void OnAllCallbacksComplete()
+    {
+        CompleteKeysWithNoRequest();
+        base.OnAllCallbacksComplete();
     }
 }
 
@@ -440,5 +522,92 @@ internal sealed class SingleAdminOperation<TValue> : AdminOperation
                     "The {0} call completed without delivering a result.",
                     _operationName)));
         }
+    }
+}
+
+/// <summary>
+/// The completion bridge for result shape <b>4c</b>: the ABI fans out <b>one callback per
+/// key</b> while Java holds <b>one</b> <c>KafkaFuture&lt;Map&lt;K, V&gt;&gt;</c>. Per-key
+/// arrivals are accumulated and the single awaiter is resolved once, when the last key has
+/// landed.
+/// </summary>
+/// <remarks>
+/// <para>
+/// ⚠ <b>A per-key error is the map's VALUE here, not a fault</b> — the caller chooses
+/// <typeparamref name="TValue"/> accordingly. Routing it as a fault is the
+/// <c>ElectLeaders</c> mistake M15/P4 measured at 10 failing tests; the Java return type
+/// decides, as always (see <see cref="Interop.KeyedResultMarshal"/>).
+/// </para>
+/// <para>
+/// ⚠ <b>The accumulator is mutated from N callback threads, so it is locked.</b> Every
+/// callback must <see cref="Add"/> <em>before</em> its
+/// <see cref="AdminOperation.ReleaseOne"/>, which is what makes the countdown-zero
+/// snapshot complete.
+/// </para>
+/// </remarks>
+/// <typeparam name="TKey">The managed key type.</typeparam>
+/// <typeparam name="TValue">The managed map-value type.</typeparam>
+internal sealed class FanInAdminOperation<TKey, TValue> : AdminOperation
+    where TKey : notnull
+{
+    private readonly TaskCompletionSource<IReadOnlyDictionary<TKey, TValue>> _source =
+        new TaskCompletionSource<IReadOnlyDictionary<TKey, TValue>>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+
+    private readonly Dictionary<TKey, TValue> _entries;
+    private readonly IEqualityComparer<TKey> _keyComparer;
+    private readonly object _gate = new object();
+
+    /// <summary>Creates the single source, before anything is submitted.</summary>
+    /// <param name="expectedKeys">The requested key count, used only to size the accumulator.</param>
+    /// <param name="keyComparer">
+    /// The comparer the assembled map is keyed by — required for the same reason
+    /// <see cref="KeyedAdminOperation{TKey, TValue}"/>'s is.
+    /// </param>
+    internal FanInAdminOperation(int expectedKeys, IEqualityComparer<TKey> keyComparer)
+    {
+        _keyComparer = keyComparer;
+        _entries = new Dictionary<TKey, TValue>(Math.Max(expectedKeys, 0), keyComparer);
+    }
+
+    /// <summary>
+    /// The awaitable, in the Java <c>KafkaFuture&lt;Map&lt;K, V&gt;&gt;</c> shape.
+    /// Available before the submit.
+    /// </summary>
+    internal Task<IReadOnlyDictionary<TKey, TValue>> Task => _source.Task;
+
+    /// <summary>Records one key's outcome. Thread-safe; call before <see cref="AdminOperation.ReleaseOne"/>.</summary>
+    /// <remarks>
+    /// <c>Add</c>, not the indexer: a repeated key means the ABI fired twice for it, and
+    /// faulting the one awaiter loudly beats collapsing two outcomes into one — the
+    /// <see cref="Interop.KeyedResultMarshal.CompleteAggregate{TKey, TValue}"/> precedent.
+    /// </remarks>
+    internal void Add(TKey key, TValue value)
+    {
+        lock (_gate)
+        {
+            _entries.Add(key, value);
+        }
+    }
+
+    /// <summary>
+    /// Faults the one awaiter. Shape 4c has no per-key fault channel, so every failure —
+    /// a submit failure or a marshalling throw — is a call failure.
+    /// </summary>
+    internal void SetException(Exception exception) => _source.TrySetException(exception);
+
+    /// <summary>
+    /// Resolves the single awaiter with everything accumulated. Runs once, at countdown
+    /// zero, so the <see cref="Task"/> cannot hang even when native reports nothing.
+    /// </summary>
+    protected override void OnAllCallbacksComplete()
+    {
+        Dictionary<TKey, TValue> snapshot;
+        lock (_gate)
+        {
+            snapshot = new Dictionary<TKey, TValue>(_entries, _keyComparer);
+        }
+
+        _source.TrySetResult(snapshot);
     }
 }

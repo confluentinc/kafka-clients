@@ -471,7 +471,16 @@ public sealed class AdminP8SubmitArgumentTests
                 captured.UserData = data;
             });
 
-        AdminCallbacks.DescribeProducers(IntPtr.Zero, CapturedError(), captured.UserData);
+        // Shape 4a: one per-key failure per DISTINCT (topic, partition) pair, read back off
+        // what the submit actually carried. The value slot is NULL on a failing key and
+        // each error is owned, so the trampoline frees it.
+        for (int i = 0; i < captured.Count; i++)
+        {
+            using Utf8Marshal.PinnedUtf8String topic = Utf8Marshal.Pin(captured.Topics![i]!);
+            AdminCallbacks.DescribeProducers(
+                topic.Pointer, captured.Partitions![i], IntPtr.Zero, CapturedError(), captured.UserData);
+        }
+
         return captured;
     }
 
@@ -496,7 +505,7 @@ public sealed class AdminP8SubmitArgumentTests
                 userData = data;
             });
 
-        AdminCallbacks.DescribeTransactions(IntPtr.Zero, CapturedError(), userData);
+        FirePerKeyFailures(AdminCallbacks.DescribeTransactions.Invoke, transactionalIds, userData);
         return (ids, count, timeout);
     }
 
@@ -521,7 +530,7 @@ public sealed class AdminP8SubmitArgumentTests
                 userData = data;
             });
 
-        AdminCallbacks.FenceProducers(IntPtr.Zero, CapturedError(), userData);
+        FirePerKeyFailures(AdminCallbacks.FenceProducers.Invoke, transactionalIds, userData);
         return (ids, count, timeout);
     }
 
@@ -572,6 +581,21 @@ public sealed class AdminP8SubmitArgumentTests
 
         AdminCallbacks.ForceTerminateTransaction(CapturedError(), userData);
         return (id, timeout);
+    }
+
+    /// <summary>
+    /// Settles a shape-4a operation by firing one per-key failure for every key the submit
+    /// carried. The <c>value</c> slot is NULL on a failing key; each error is <b>owned</b>
+    /// and the trampoline frees it.
+    /// </summary>
+    private static void FirePerKeyFailures(
+        Action<IntPtr, IntPtr, IntPtr, IntPtr> fire, IEnumerable<string> keys, IntPtr userData)
+    {
+        foreach (string key in keys)
+        {
+            using Utf8Marshal.PinnedUtf8String pinnedKey = Utf8Marshal.Pin(key);
+            fire(pinnedKey.Pointer, IntPtr.Zero, CapturedError(), userData);
+        }
     }
 
     private static IntPtr CapturedError()

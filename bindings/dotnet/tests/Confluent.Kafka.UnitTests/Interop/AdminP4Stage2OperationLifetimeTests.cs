@@ -35,6 +35,9 @@ public sealed class AdminP4Stage2OperationLifetimeTests
 {
     private static readonly TimeSpan s_deadline = TimeSpan.FromSeconds(30);
 
+    /// <summary>The topic <see cref="SubmitCapturing"/> submits and <see cref="Complete"/> settles.</summary>
+    private const string LifetimeTopic = "p4s2-lifetime";
+
     /// <summary>
     /// The three-way differential for both new submits: nothing in flight →
     /// <c>Dispose</c> releases; one in flight → it does <b>not</b>; the operation completes
@@ -62,7 +65,7 @@ public sealed class AdminP4Stage2OperationLifetimeTests
             handle.IsClosed,
             "an in-flight operation must defer AdminClient_destroy — the ABI does not protect this itself");
 
-        Complete(rpc, capturedUserData, AdminP4OperationLifetimeTests.MakeError(42, "submit failed"));
+        Complete(rpc, capturedUserData, 42, "submit failed");
         Assert.True(handle.IsClosed, "completing the in-flight operation must run the deferred release");
 
         // AWAITED, not read synchronously: every source uses RunContinuationsAsynchronously.
@@ -84,7 +87,7 @@ public sealed class AdminP4Stage2OperationLifetimeTests
             {
                 IntPtr userData = IntPtr.Zero;
                 Func<Task> outcome = SubmitCapturing(admin, rpc, captured => userData = captured);
-                Complete(rpc, userData, AdminP4OperationLifetimeTests.MakeError(9, "balance probe"));
+                Complete(rpc, userData, 9, "balance probe");
                 await TestTimeout.Run(() => Assert.ThrowsAsync<KafkaException>(outcome), s_deadline);
             }
 
@@ -136,7 +139,7 @@ public sealed class AdminP4Stage2OperationLifetimeTests
         Func<Task> outcome = SubmitCapturing(
             admin,
             rpc,
-            userData => Complete(rpc, userData, AdminP4OperationLifetimeTests.MakeError(11, "inline failure")));
+            userData => Complete(rpc, userData, 11, "inline failure"));
 
         Assert.True(outcome().IsFaulted, "the callback must have fired inline, before the submit returned");
 
@@ -166,7 +169,7 @@ public sealed class AdminP4Stage2OperationLifetimeTests
         {
             string message = $"owned error {i} — não ascii";
             Func<Task> outcome = SubmitCapturing(
-                admin, rpc, userData => Complete(rpc, userData, AdminP4OperationLifetimeTests.MakeError(70 + i, message)));
+                admin, rpc, userData => Complete(rpc, userData, 70 + i, message));
 
             KafkaException failure =
                 await TestTimeout.Run(() => Assert.ThrowsAsync<KafkaException>(outcome), s_deadline);
@@ -188,7 +191,7 @@ public sealed class AdminP4Stage2OperationLifetimeTests
         {
             // The assertion is the absence of a throw: an escaping exception here would be
             // UB on the inline path rather than a failed test.
-            Complete(rpc, GCHandle.ToIntPtr(wrongType), AdminP4OperationLifetimeTests.MakeError(5, "absorbed"));
+            Complete(rpc, GCHandle.ToIntPtr(wrongType), 5, "absorbed");
         }
         finally
         {
@@ -202,7 +205,7 @@ public sealed class AdminP4Stage2OperationLifetimeTests
         /// <summary>Result shape 3 — one aggregate awaiter, and no per-key error at all.</summary>
         ListPartitionReassignments,
 
-        /// <summary>Result shape 1 — one awaiter per partition, with a value AND an error.</summary>
+        /// <summary>Result shape 4a — one awaiter per partition, each with its own callback.</summary>
         ListOffsets,
     }
 
@@ -211,7 +214,7 @@ public sealed class AdminP4Stage2OperationLifetimeTests
         if (rpc == Rpc.ListPartitionReassignments)
         {
             ListPartitionReassignmentsResult result = admin.ListPartitionReassignments(
-                new[] { new TopicPartition("p4s2-lifetime", 0) },
+                new[] { new TopicPartition(LifetimeTopic, 0) },
                 options: null,
                 (nativeHandle, allPartitions, topics, partitions, count, timeoutMs, callback, userData) =>
                     onSubmit(userData));
@@ -219,7 +222,7 @@ public sealed class AdminP4Stage2OperationLifetimeTests
             return result.Reassignments;
         }
 
-        TopicPartition partition = new TopicPartition("p4s2-lifetime", 0);
+        TopicPartition partition = new TopicPartition(LifetimeTopic, 0);
         ListOffsetsResult offsets = admin.ListOffsets(
             new Dictionary<TopicPartition, OffsetSpec> { [partition] = OffsetSpec.Latest() },
             options: null,
@@ -252,14 +255,24 @@ public sealed class AdminP4Stage2OperationLifetimeTests
                 callback, userData) => throw new InvalidOperationException("submit failed"));
     }
 
-    private static void Complete(Rpc rpc, IntPtr userData, IntPtr error)
+    /// <summary>
+    /// Settles one operation through the <b>production</b> trampoline. <c>listOffsets</c> is
+    /// result shape 4a, so the failure arrives as one callback per key with a NULL value
+    /// slot — hence a freshly minted owned error per key rather than one shared handle.
+    /// </summary>
+    private static void Complete(Rpc rpc, IntPtr userData, int code, string message)
     {
         if (rpc == Rpc.ListPartitionReassignments)
         {
-            AdminCallbacks.ListPartitionReassignments(IntPtr.Zero, error, userData);
+            AdminCallbacks.ListPartitionReassignments(
+                IntPtr.Zero, AdminP4OperationLifetimeTests.MakeError(code, message), userData);
             return;
         }
 
-        AdminCallbacks.ListOffsets(IntPtr.Zero, error, userData);
+        // The one key SubmitCapturing submits; a shape-4a operation is settled only when
+        // every key has fired, so this must match it.
+        using Utf8Marshal.PinnedUtf8String topic = Utf8Marshal.Pin(LifetimeTopic);
+        AdminCallbacks.ListOffsets(
+            topic.Pointer, 0, IntPtr.Zero, AdminP4OperationLifetimeTests.MakeError(code, message), userData);
     }
 }
