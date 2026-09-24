@@ -16,15 +16,10 @@
 #include <unistd.h>
 #endif
 
-#define PRODUCER_RECORD_SLOT_THRESHOLD 1000
-#define PRODUCER_RECORD_SLOT_CAPACITY (PRODUCER_RECORD_SLOT_THRESHOLD + 100)
-
-// Backpressure bound: once this many records are accumulated but not yet taken
-// by the send task, the producer is "full" and further enqueuing should wait
-// until the send task drains a batch. One complete batch beyond the one being
-// filled — mirrors Java's send() blocking once buffer.memory is full, applied
-// here at batch granularity in front of the Rust accumulator.
-#define PRODUCER_MAX_ACCUMULATED_RECORDS PRODUCER_RECORD_SLOT_THRESHOLD
+// Delivery reports are handed to Python in bursts of at most this many under a
+// single GIL acquisition (see Producer_callback_thread). Bounds how long one
+// burst can hold the GIL away from the event loop / the sending thread.
+#define PRODUCER_CALLBACK_CHUNK 1000
 
 // ProducerRecord C extension type
 typedef struct {
@@ -357,343 +352,192 @@ static PyTypeObject ConsumerGroupMetadataType = {
     .tp_repr = (reprfunc)ConsumerGroupMetadata_repr,
 };
 
-// Linked list node for tracking pending batches
-typedef struct BatchNode {
-    int count;
-    ProducerRecordObject* producer_records[PRODUCER_RECORD_SLOT_CAPACITY];
-    kafka_producer_ProducerRecord_t* producer_structs[PRODUCER_RECORD_SLOT_CAPACITY];
-    PyObject* complete_cbs[PRODUCER_RECORD_SLOT_CAPACITY];
-    kafka_producer_FutureRecordMetadata_t* futures[PRODUCER_RECORD_SLOT_CAPACITY];
-    kafka_common_Error_t* batch_errors[PRODUCER_RECORD_SLOT_CAPACITY];
-    struct BatchNode* next_batch;
-} BatchNode;
+// One completed record waiting to be reported to Python: the handles the Rust
+// dispatcher handed us (ownership transfers to the Python callback, which
+// destroys them) and the (record, callback) tuple pinned by py_Producer_send.
+typedef struct {
+    kafka_producer_RecordMetadata_t* metadata;
+    kafka_common_Error_t* error;
+    PyObject* user_data;
+} PendingCompletion;
 
-// Producer with background batch sending
+// Producer over the Rust outbox (`kafka_producer_Producer_send_async`).
+//
+// Sends are queued to Rust without releasing the GIL — the door is a channel
+// push, not I/O — and the Rust submission task hands them to the producer.
+// Delivery reports arrive on the Rust dispatcher thread via
+// send_direct_trampoline, which only appends to `pending` (no GIL); the
+// callback thread below then drains `pending` in bursts and invokes the Python
+// callbacks under one GIL acquisition per burst. Per-record GIL handoffs
+// between the dispatcher and a busy sending thread are what made the naive
+// "call Python from the dispatcher" shape slow; batching them here is the fix.
 typedef struct {
     PyObject *py_producer;
     kafka_producer_Producer_t *producer;
     int closed;
-    int send_completed;
-    BatchNode *next_batches_to_send;
-    BatchNode *last_accumulating_batch;
-    BatchNode* next_pending_batch;
-    BatchNode* last_pending_batch;
-    cnd_t record_batches_new_record_cnd;
-    mtx_t record_batches_mutex;
-    cnd_t pending_batches_available_cnd;
-    mtx_t pending_batches_mutex;
-    thrd_t send_thread;
-    thrd_t poll_futures_thread;
-    // Backpressure: records accumulated but not yet taken by the send task,
-    // and the "space available" callbacks waiting for the next take. Both are
-    // guarded by record_batches_mutex.
-    int64_t accumulated_records;
-    PyObject** space_cbs;
-    int space_cbs_count;
-    int space_cbs_capacity;
-    // Test-only: when set, the send task stops draining accumulated batches so
-    // backpressure can be exercised deterministically (the mock otherwise
-    // accepts instantly and never fills). Always 0 in production.
-    int test_paused;
+    // Completed records not yet reported to Python. Guarded by pending_mutex;
+    // pending_cnd is signalled on every append and on shutdown.
+    PendingCompletion* pending;
+    int pending_count;
+    int pending_capacity;
+    mtx_t pending_mutex;
+    cnd_t pending_cnd;
+    thrd_t callback_thread;
+    int stop_callback_thread;
 } Producer;
 
-
-static void Producer_complete_callback(PyObject* cb,
-    ProducerRecordObject *record_obj,
-    kafka_producer_RecordMetadata_t *metadata,
-    kafka_common_Error_t *error) {
-    // Pass raw pointers as Python ints — the Python wrapper
-    // calls accessor/destroy functions on them.
-    PyObject *result_long = PyLong_FromUnsignedLongLong((unsigned long long)(uintptr_t)metadata);
-    PyObject *error_long  = PyLong_FromUnsignedLongLong((unsigned long long)(uintptr_t)error);
-    PyObject* result = PyObject_CallFunctionObjArgs(cb,
-        result_long, error_long, NULL);
-    Py_DECREF(cb);
-    Py_DECREF(result_long);
-    Py_DECREF(error_long);
-    if (result) {
-        Py_DECREF(result);
+// Report one completion to Python. The GIL must be held. Consumes the
+// (record, callback) tuple reference taken by py_Producer_send; ownership of
+// the metadata / error handles passes to the Python callback (it destroys them).
+static void Producer_report_completion(PendingCompletion* pc) {
+    PyObject* cb = PyTuple_GET_ITEM(pc->user_data, 1);  // borrowed from the tuple
+    // Keep the historical contract: on error the Python side receives
+    // metadata=None, not the Java-style placeholder (offset/partition -1).
+    if (pc->error != NULL && pc->metadata != NULL) {
+        kafka_producer_RecordMetadata_destroy(pc->metadata);
+        pc->metadata = NULL;
+    }
+    PyObject* r = PyObject_CallFunction(cb, "KK",
+        (unsigned long long)(uintptr_t)pc->metadata,
+        (unsigned long long)(uintptr_t)pc->error);
+    if (r) {
+        Py_DECREF(r);
     } else {
-        PyErr_Print();
+        PyErr_WriteUnraisable(cb);
     }
-    Py_DECREF(record_obj);
+    // Drops the record too (the key/value buffers Rust borrowed until now).
+    Py_DECREF(pc->user_data);
 }
 
-static void Producer_complete_callbacks(
-    PyObject **complete_cbs,
-    ProducerRecordObject **result_objs,
-    kafka_producer_FutureRecordMetadata_t **futures,
-    int count) {
-    // Phase 1: Block on all futures at once WITHOUT the GIL.
-    // Uses a single tokio runtime for the entire batch.
-    kafka_producer_RecordMetadata_t *metadata_ptrs[PRODUCER_RECORD_SLOT_CAPACITY];
-    kafka_common_Error_t *error_ptrs[PRODUCER_RECORD_SLOT_CAPACITY];
-    kafka_producer_FutureRecordMetadata_get_all(
-        futures, count, metadata_ptrs, error_ptrs);
-    kafka_producer_FutureRecordMetadata_destroy_all(futures, count);
-
-    // Phase 2: Acquire GIL and dispatch Python callbacks.
-    // Ownership of metadata/error handles transfers to the callback.
-    PyGILState_STATE gstate = PyGILState_Ensure();
-    for (int i = 0; i < count; i++) {
-        Producer_complete_callback(complete_cbs[i], result_objs[i],
-                                   metadata_ptrs[i], error_ptrs[i]);
-    }
-    PyGILState_Release(gstate);
-}
-
-
-// Invoke each pending "space available" callback (resolving the Python-side
-// space Future) and release the array. The caller must have detached the array
-// from the producer under record_batches_mutex first, so this runs without that
-// lock held. Acquires the GIL to call into Python.
-static void Producer_fire_and_free_space_cbs(PyObject** cbs, int count) {
-    if (cbs == NULL) {
-        return;
-    }
-    PyGILState_STATE gstate = PyGILState_Ensure();
-    for (int i = 0; i < count; i++) {
-        PyObject* result = PyObject_CallFunctionObjArgs(cbs[i], NULL);
-        if (result) {
-            Py_DECREF(result);
-        } else {
-            PyErr_Print();
+// Report a detached batch of completions in chunks of PRODUCER_CALLBACK_CHUNK,
+// each chunk under a single GIL acquisition, then free the array. Runs on the
+// callback thread, and on destroy for whatever is left.
+static void Producer_report_completions(PendingCompletion* items, int count) {
+    for (int start = 0; start < count; start += PRODUCER_CALLBACK_CHUNK) {
+        int end = start + PRODUCER_CALLBACK_CHUNK;
+        if (end > count) {
+            end = count;
         }
-        Py_DECREF(cbs[i]);
+        PyGILState_STATE gstate = PyGILState_Ensure();
+        for (int i = start; i < end; i++) {
+            Producer_report_completion(&items[i]);
+        }
+        PyGILState_Release(gstate);
     }
-    PyGILState_Release(gstate);
-    PyMem_RawFree(cbs);
+    PyMem_RawFree(items);
 }
 
-// Detach the pending space-callback array under record_batches_mutex. Returns
-// the array (caller owns it) via out params and resets the producer's fields.
-// The mutex MUST be held by the caller.
-static void Producer_take_space_cbs_locked(Producer* producer,
-    PyObject*** out_cbs, int* out_count) {
-    *out_cbs = producer->space_cbs;
-    *out_count = producer->space_cbs_count;
-    producer->space_cbs = NULL;
-    producer->space_cbs_count = 0;
-    producer->space_cbs_capacity = 0;
+// Delivery report from the Rust dispatcher thread. Deliberately GIL-free:
+// append to `pending` and wake the callback thread, so the dispatcher never
+// contends with the sending thread for the interpreter.
+static void send_direct_trampoline(kafka_producer_RecordMetadata_t* md,
+                                   kafka_common_Error_t* err, void* ud) {
+    PyObject* tuple = (PyObject*)ud;
+    // The producer struct is reachable from the tuple: item 0 is the record,
+    // item 1 the Python callback, item 2 the Producer* as a PyLong.
+    Producer* producer = (Producer*)PyLong_AsVoidPtr(PyTuple_GET_ITEM(tuple, 2));
+    mtx_lock(&producer->pending_mutex);
+    if (producer->pending_count == producer->pending_capacity) {
+        int new_capacity = producer->pending_capacity ? producer->pending_capacity * 2 : 64;
+        PendingCompletion* grown = (PendingCompletion*)PyMem_RawRealloc(
+            producer->pending, (size_t)new_capacity * sizeof(PendingCompletion));
+        if (grown == NULL) {
+            // Out of memory: report this one inline rather than lose it. Rare
+            // enough that the per-record GIL cost is irrelevant here.
+            mtx_unlock(&producer->pending_mutex);
+            PendingCompletion pc = { md, err, tuple };
+            PyGILState_STATE gstate = PyGILState_Ensure();
+            Producer_report_completion(&pc);
+            PyGILState_Release(gstate);
+            return;
+        }
+        producer->pending = grown;
+        producer->pending_capacity = new_capacity;
+    }
+    PendingCompletion* slot = &producer->pending[producer->pending_count++];
+    slot->metadata = md;
+    slot->error = err;
+    slot->user_data = tuple;
+    cnd_signal(&producer->pending_cnd);
+    mtx_unlock(&producer->pending_mutex);
 }
 
-static int Producer_poll_futures_thread(void* arg) {
+// The one C thread per producer that reports completions to Python. Waits for
+// the dispatcher to append, swaps the whole pending array out under the lock,
+// then reports it in GIL-batched chunks. Exits once asked to stop AND nothing
+// is pending, so every completion the dispatcher appended before the stop is
+// still reported here (destroy drains any late arrivals itself).
+static int Producer_callback_thread(void* arg) {
     Producer* producer = (Producer*)arg;
+    for (;;) {
+        mtx_lock(&producer->pending_mutex);
+        while (producer->pending_count == 0 && !producer->stop_callback_thread) {
+            cnd_wait(&producer->pending_cnd, &producer->pending_mutex);
+        }
+        if (producer->pending_count == 0) {
+            // Stopped and drained.
+            mtx_unlock(&producer->pending_mutex);
+            break;
+        }
+        PendingCompletion* items = producer->pending;
+        int count = producer->pending_count;
+        producer->pending = NULL;
+        producer->pending_count = 0;
+        producer->pending_capacity = 0;
+        mtx_unlock(&producer->pending_mutex);
 
-    BatchNode* current_pending_batch = NULL;
-    while (!producer->send_completed || current_pending_batch != NULL)
-    {
-        BatchNode* batch_to_free = NULL;
-        if (current_pending_batch != NULL) {
-            Producer_complete_callbacks(
-                &current_pending_batch->complete_cbs[0],
-                &current_pending_batch->producer_records[0],
-                &current_pending_batch->futures[0],
-                current_pending_batch->count
-            );
-            batch_to_free = current_pending_batch;
-        }
-
-        mtx_lock(&producer->pending_batches_mutex);
-        if (current_pending_batch != NULL) {
-            if (current_pending_batch == producer->last_pending_batch)
-                producer->last_pending_batch = NULL;
-            producer->next_pending_batch = current_pending_batch->next_batch;
-        }
-        
-        while (producer->next_pending_batch == NULL && !producer->send_completed) {
-            cnd_wait(&producer->pending_batches_available_cnd,
-                     &producer->pending_batches_mutex);
-        }
-        current_pending_batch = producer->next_pending_batch;
-        mtx_unlock(&producer->pending_batches_mutex);
-        PyMem_RawFree(batch_to_free);
+        Producer_report_completions(items, count);
     }
-
     return thrd_success;
 }
 
-static int64_t current_time_ns() {
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (ts.tv_sec * 1000000000L) + ts.tv_nsec;
-}
-
-
-static int Producer_send_thread(void* arg) {
-    Producer* producer = (Producer*)arg;
-
-    thrd_create(&producer->poll_futures_thread,
-        Producer_poll_futures_thread, producer);
-
-    while (!producer->closed) {
-        int64_t timeout, now;
-        BatchNode *batch_node, *head_batch_node = NULL, *tail_batch_node = NULL;
-
-        mtx_lock(&producer->record_batches_mutex);
-        now = current_time_ns();
-        timeout = now + 10000000; // 10ms
-        while ((
-            producer->next_batches_to_send == NULL
-            || producer->next_batches_to_send->count < PRODUCER_RECORD_SLOT_THRESHOLD
-        ) && timeout > now && !producer->closed) {
-            struct timespec ts;
-
-            timespec_get(&ts, TIME_UTC);
-            ts.tv_nsec += timeout + 1000 - now;
-            if (ts.tv_nsec >= 1000000000) {
-                ts.tv_sec += 1;
-                ts.tv_nsec -= 1000000000;
-            }
-            cnd_timedwait(&producer->record_batches_new_record_cnd,
-                          &producer->record_batches_mutex, &ts);
-            now = current_time_ns();
-        }
-
-        // Test-only: while paused, do not drain — let accumulation build so
-        // backpressure (py_Producer_on_space_available) can be tested.
-        if (producer->test_paused) {
-            mtx_unlock(&producer->record_batches_mutex);
-            struct timespec pause_ts = {0, 5000000};  // 5ms
-            thrd_sleep(&pause_ts, NULL);
-            continue;
-        }
-
-        if (producer->next_batches_to_send == NULL) {
-            mtx_unlock(&producer->record_batches_mutex);
-            continue;
-        }
-
-        head_batch_node = producer->next_batches_to_send;
-        tail_batch_node = producer->last_accumulating_batch;
-        producer->next_batches_to_send = NULL;
-        producer->last_accumulating_batch = NULL;
-        // Accumulation has been taken: capacity is free again. Reset the
-        // backpressure counter and wake any senders waiting for space.
-        producer->accumulated_records = 0;
-        PyObject** space_cbs;
-        int space_cbs_count;
-        Producer_take_space_cbs_locked(producer, &space_cbs, &space_cbs_count);
-        mtx_unlock(&producer->record_batches_mutex);
-
-        Producer_fire_and_free_space_cbs(space_cbs, space_cbs_count);
-
-        batch_node = head_batch_node;
-
-        while (batch_node != NULL) {
-            // Build a flat array of records for send_batch
-            kafka_producer_ProducerRecord_t flat_records[PRODUCER_RECORD_SLOT_CAPACITY];
-            for (int i = 0; i < batch_node->count; i++) {
-                flat_records[i] = *batch_node->producer_structs[i];
-            }
-
-            memset(batch_node->futures, 0, sizeof(batch_node->futures[0]) * batch_node->count);
-            memset(batch_node->batch_errors, 0, sizeof(batch_node->batch_errors[0]) * batch_node->count);
-
-            kafka_producer_Producer_send_batch(
-                producer->producer,
-                flat_records,
-                batch_node->count,
-                batch_node->futures,
-                batch_node->batch_errors);
-
-            // Handle immediate errors from send_batch
-            int errors_found = 0;
-            {
-                PyGILState_STATE gstate = PyGILState_Ensure();
-                for (int i = 0; i < batch_node->count; i++) {
-                    if (batch_node->batch_errors[i] != NULL) {
-                        if (batch_node->futures[i] != NULL) {
-                            kafka_producer_FutureRecordMetadata_destroy(batch_node->futures[i]);
-                            batch_node->futures[i] = NULL;
-                        }
-                        // Pass error pointer to callback; ownership transfers
-                        Producer_complete_callback(batch_node->complete_cbs[i],
-                            batch_node->producer_records[i],
-                            NULL, batch_node->batch_errors[i]);
-                        batch_node->batch_errors[i] = NULL;
-                        errors_found++;
-                    } else if (errors_found > 0) {
-                        batch_node->complete_cbs[i - errors_found] = batch_node->complete_cbs[i];
-                        batch_node->producer_records[i - errors_found] = batch_node->producer_records[i];
-                        batch_node->producer_structs[i - errors_found] = batch_node->producer_structs[i];
-                        batch_node->futures[i - errors_found] = batch_node->futures[i];
-                    }
-                }
-                batch_node->count -= errors_found;
-                PyGILState_Release(gstate);
-            }
-
-            batch_node = batch_node->next_batch;
-        }
-        mtx_lock(&producer->pending_batches_mutex);
-        if (producer->last_pending_batch) {
-            producer->last_pending_batch->next_batch = head_batch_node;
-            producer->last_pending_batch = tail_batch_node;
-        } else {
-            producer->next_pending_batch = head_batch_node;
-            producer->last_pending_batch = tail_batch_node;
-        }
-        cnd_signal(&producer->pending_batches_available_cnd);
-        mtx_unlock(&producer->pending_batches_mutex);
-    }
-    mtx_lock(&producer->pending_batches_mutex);
-    producer->send_completed = 1;
-    cnd_signal(&producer->pending_batches_available_cnd);
-    mtx_unlock(&producer->pending_batches_mutex);
-    // Flush so every in-flight record resolves before we join the poll-futures
-    // task. Without this the poll task can block forever in
-    // FutureRecordMetadata_get_all on a record that never completes on its own
-    // (e.g. a MockProducer with auto_complete disabled), deadlocking the join
-    // below. Java's flush() likewise completes outstanding records. We hold no
-    // GIL here (background C task), so the blocking flush does not stall the
-    // event loop.
-    kafka_producer_Producer_flush(producer->producer, NULL);
-    thrd_join(producer->poll_futures_thread, NULL);
-
-    return thrd_success;
-}
-
-// Batching Producer functions
-static PyObject* py_Producer_new(PyObject* self, PyObject* args) {
-    int auto_complete;
-    PyObject *producer_obj;
+// Shared tail of the two constructors: pin the Python-side wrapper, wrap the
+// Rust handle and start the callback thread.
+static PyObject* Producer_wrap(kafka_producer_Producer_t* rust_producer, PyObject* producer_obj) {
     Producer* producer = (Producer*)PyMem_Malloc(sizeof(Producer));
     if (!producer) {
+        kafka_producer_Producer_close(rust_producer, NULL);
+        kafka_producer_Producer_destroy(rust_producer);
         return PyErr_NoMemory();
     }
-
-    if (!PyArg_ParseTuple(args, "pO", &auto_complete, &producer_obj)) {
-        PyMem_Free(producer);
-        return NULL;
-    }
-
     memset(producer, 0, sizeof(Producer));
     producer->closed = 0;
-
-    mtx_init(&producer->record_batches_mutex, mtx_plain);
-    cnd_init(&producer->record_batches_new_record_cnd);
-
-    mtx_init(&producer->pending_batches_mutex, mtx_plain);
-    cnd_init(&producer->pending_batches_available_cnd);
-    producer->next_batches_to_send = NULL;
-    producer->last_accumulating_batch = NULL;
-    producer->next_pending_batch = NULL;
-    producer->last_pending_batch = NULL;
+    producer->producer = rust_producer;
     producer->py_producer = producer_obj;
     Py_INCREF(producer->py_producer);
 
-    producer->producer = kafka_producer_MockProducer_new(auto_complete ? true : false);
-    if (producer->producer == NULL) {
+    mtx_init(&producer->pending_mutex, mtx_plain);
+    cnd_init(&producer->pending_cnd);
+    if (thrd_create(&producer->callback_thread, Producer_callback_thread, producer) != thrd_success) {
+        cnd_destroy(&producer->pending_cnd);
+        mtx_destroy(&producer->pending_mutex);
         Py_DECREF(producer->py_producer);
         PyMem_Free(producer);
+        kafka_producer_Producer_close(rust_producer, NULL);
+        kafka_producer_Producer_destroy(rust_producer);
+        PyErr_SetString(PyExc_RuntimeError, "Failed to start the producer callback thread");
+        return NULL;
+    }
+
+    return PyLong_FromVoidPtr(producer);
+}
+
+// Producer functions
+static PyObject* py_Producer_new(PyObject* self, PyObject* args) {
+    int auto_complete;
+    PyObject *producer_obj;
+
+    if (!PyArg_ParseTuple(args, "pO", &auto_complete, &producer_obj)) {
+        return NULL;
+    }
+
+    kafka_producer_Producer_t* mock = kafka_producer_MockProducer_new(auto_complete ? true : false);
+    if (mock == NULL) {
         PyErr_SetString(PyExc_RuntimeError, "Failed to create MockProducer");
         return NULL;
     }
 
-    thrd_create(&producer->send_thread, Producer_send_thread, producer);
-
-    return PyLong_FromVoidPtr(producer);
+    return Producer_wrap(mock, producer_obj);
 }
 
 static PyObject* py_KafkaProducer_new(PyObject* self, PyObject* args) {
@@ -745,35 +589,18 @@ static PyObject* py_KafkaProducer_new(PyObject* self, PyObject* args) {
         return NULL;
     }
 
-    Producer* producer = (Producer*)PyMem_Malloc(sizeof(Producer));
-    if (!producer) {
-        kafka_producer_Producer_close(kafka_producer, NULL);
-        kafka_producer_Producer_destroy(kafka_producer);
-        return PyErr_NoMemory();
-    }
-
-    memset(producer, 0, sizeof(Producer));
-    producer->closed = 0;
-
-    mtx_init(&producer->record_batches_mutex, mtx_plain);
-    cnd_init(&producer->record_batches_new_record_cnd);
-
-    mtx_init(&producer->pending_batches_mutex, mtx_plain);
-    cnd_init(&producer->pending_batches_available_cnd);
-    producer->next_batches_to_send = NULL;
-    producer->last_accumulating_batch = NULL;
-    producer->next_pending_batch = NULL;
-    producer->last_pending_batch = NULL;
-    producer->py_producer = producer_obj;
-    Py_INCREF(producer->py_producer);
-
-    producer->producer = kafka_producer;
-
-    thrd_create(&producer->send_thread, Producer_send_thread, producer);
-
-    return PyLong_FromVoidPtr(producer);
+    return Producer_wrap(kafka_producer, producer_obj);
 }
 
+// Queue one record on the Rust outbox. Returns True when this record brought
+// the outbox to its bound (the Python side then waits on
+// Producer_on_space_available before sending more), False otherwise.
+//
+// Runs entirely under the GIL: send_async is a channel push plus record
+// validation, not I/O, so releasing the GIL would cost more than it saves. The
+// record object is pinned (via the (record, callback, producer) tuple passed as
+// user_data) until its completion is reported, because send_async borrows the
+// record's key/value buffers until the callback fires.
 static PyObject* py_Producer_send(PyObject* self, PyObject* args) {
     unsigned long long producer_ptr;
     PyObject *record_obj, *complete_cb;
@@ -794,52 +621,59 @@ static PyObject* py_Producer_send(PyObject* self, PyObject* args) {
         return NULL;
     }
 
+    PyObject* producer_long = PyLong_FromVoidPtr(producer);
+    if (producer_long == NULL) {
+        return NULL;
+    }
+    // Pins record + callback until the completion is reported (INCREFs both).
+    PyObject* ud = PyTuple_Pack(3, record_obj, complete_cb, producer_long);
+    Py_DECREF(producer_long);
+    if (ud == NULL) {
+        return NULL;
+    }
+
     ProducerRecordObject* record = (ProducerRecordObject*)record_obj;
+    kafka_producer_ProducerRecord_t* rs = &record->record_struct;
+    kafka_common_Error_t* err = NULL;
+    bool full = kafka_producer_Producer_send_async(
+        producer->producer,
+        rs->topic, rs->partition, rs->timestamp,
+        rs->key, rs->key_len, rs->value, rs->value_len,
+        send_direct_trampoline, ud, &err);
 
-    // Increment refcounts while we still hold the GIL
-    Py_INCREF(record);
-    Py_INCREF(complete_cb);
-
-    int full = 0;
-    Py_BEGIN_ALLOW_THREADS
-    mtx_lock(&producer->record_batches_mutex);
-    if (!producer->last_accumulating_batch || producer->last_accumulating_batch->count == PRODUCER_RECORD_SLOT_CAPACITY) {
-        BatchNode* new_batch = (BatchNode*)PyMem_RawMalloc(sizeof(BatchNode));
-        new_batch->count = 0;
-        new_batch->next_batch = NULL;
-        if (producer->last_accumulating_batch) {
-            producer->last_accumulating_batch->next_batch = new_batch;
-            producer->last_accumulating_batch = new_batch;
-        } else {
-            producer->next_batches_to_send = new_batch;
-            producer->last_accumulating_batch = new_batch;
-        }
+    if (err != NULL) {                 // sync failure: cb will NOT fire
+        Py_DECREF(ud);
+        const char* msg = kafka_common_Error_message(err);
+        PyErr_SetString(PyExc_RuntimeError, msg ? msg : "send failed");
+        kafka_common_Error_destroy(err);
+        return NULL;
     }
-
-    producer->last_accumulating_batch->producer_records[producer->last_accumulating_batch->count] = record;
-    producer->last_accumulating_batch->complete_cbs[producer->last_accumulating_batch->count] = complete_cb;
-    producer->last_accumulating_batch->producer_structs[producer->last_accumulating_batch->count] = &record->record_struct;
-    producer->last_accumulating_batch->count++;
-    producer->accumulated_records++;
-
-    if (producer->last_accumulating_batch->count >= PRODUCER_RECORD_SLOT_THRESHOLD) {
-        cnd_signal(&producer->record_batches_new_record_cnd);
-    }
-    // Report whether the producer is now over the backpressure bound, so the
-    // caller can wait for space (see py_Producer_on_space_available).
-    full = producer->accumulated_records >= PRODUCER_MAX_ACCUMULATED_RECORDS;
-    mtx_unlock(&producer->record_batches_mutex);
-    Py_END_ALLOW_THREADS
-    return PyBool_FromLong(full ? 1 : 0);
+    return PyBool_FromLong(full);
 }
 
-// Register a "space available" callback to be invoked when the send task next
-// drains accumulated batches (freeing capacity). Returns True if space is
-// already available (the caller need not wait), False if `space_cb` was
-// registered and will be called later. The check-and-register is done under
-// record_batches_mutex — the same lock the send task holds when it takes
-// batches — so there is no lost-wakeup window. Called by the Python `send`
-// only after `Producer_send` reported the producer full.
+// Bell fired by Rust (on its dispatcher thread) once the outbox has room again.
+// Resolves the Python-side space Future through `cb`, then drops the reference
+// py_Producer_on_space_available took.
+static void space_trampoline(void* ud) {
+    PyObject* cb = (PyObject*)ud;
+    PyGILState_STATE g = PyGILState_Ensure();
+    PyObject* r = PyObject_CallFunctionObjArgs(cb, NULL);
+    if (r) {
+        Py_DECREF(r);
+    } else {
+        PyErr_WriteUnraisable(cb);
+    }
+    Py_DECREF(cb);
+    PyGILState_Release(g);
+}
+
+// Register a "space available" callback with Rust. Returns True if the outbox
+// already has room (the caller need not wait; `space_cb` is not kept), False if
+// `space_cb` was registered and will be called exactly once, later, from the
+// dispatcher thread — or from destroy, if the producer is torn down first.
+// Check-and-register happens under the Rust-side lock shared with the outbox
+// drain, so there is no lost-wakeup window. Called by the Python `send` only
+// after `Producer_send` reported the outbox full.
 static PyObject* py_Producer_on_space_available(PyObject* self, PyObject* args) {
     unsigned long long producer_ptr;
     PyObject* space_cb;
@@ -850,27 +684,9 @@ static PyObject* py_Producer_on_space_available(PyObject* self, PyObject* args) 
 
     Producer* producer = (Producer*)producer_ptr;
 
-    int available = 0;
     Py_INCREF(space_cb);
-    Py_BEGIN_ALLOW_THREADS
-    mtx_lock(&producer->record_batches_mutex);
-    if (producer->closed
-        || producer->accumulated_records < PRODUCER_MAX_ACCUMULATED_RECORDS) {
-        // Space already freed (or producer closing): don't make the caller wait.
-        available = 1;
-    } else {
-        if (producer->space_cbs_count == producer->space_cbs_capacity) {
-            int new_capacity = producer->space_cbs_capacity
-                ? producer->space_cbs_capacity * 2 : 8;
-            producer->space_cbs = (PyObject**)PyMem_RawRealloc(
-                producer->space_cbs, new_capacity * sizeof(PyObject*));
-            producer->space_cbs_capacity = new_capacity;
-        }
-        producer->space_cbs[producer->space_cbs_count++] = space_cb;
-    }
-    mtx_unlock(&producer->record_batches_mutex);
-    Py_END_ALLOW_THREADS
-
+    bool available = kafka_producer_Producer_on_space_available(
+        producer->producer, space_trampoline, space_cb);
     if (available) {
         Py_DECREF(space_cb);  // not stored
         Py_RETURN_TRUE;
@@ -878,9 +694,9 @@ static PyObject* py_Producer_on_space_available(PyObject* self, PyObject* args) 
     Py_RETURN_FALSE;
 }
 
-// Test-only: pause/resume the send task's draining so backpressure can be
-// exercised deterministically (the mock accepts instantly and would never
-// fill the buffer otherwise). Not part of the public API.
+// Test-only: pause/resume the Rust submission task so records pile up in the
+// outbox and backpressure can be exercised deterministically (the mock accepts
+// instantly and would never fill otherwise). Not part of the public API.
 static PyObject* py_Producer_test_set_paused(PyObject* self, PyObject* args) {
     unsigned long long producer_ptr;
     int paused;
@@ -890,10 +706,7 @@ static PyObject* py_Producer_test_set_paused(PyObject* self, PyObject* args) {
     }
 
     Producer* producer = (Producer*)producer_ptr;
-    mtx_lock(&producer->record_batches_mutex);
-    producer->test_paused = paused ? 1 : 0;
-    cnd_signal(&producer->record_batches_new_record_cnd);
-    mtx_unlock(&producer->record_batches_mutex);
+    kafka_producer_Producer_test_set_paused(producer->producer, paused ? true : false);
     Py_RETURN_NONE;
 }
 
@@ -931,14 +744,19 @@ static void producer_partitions_for_trampoline(kafka_consumer_PartitionInfoList_
 // Close is split into three Python-visible steps so the Rust-side close can be
 // awaited/interrupted from Python exactly like flush, instead of blocking in a
 // C-level wait:
-//   1. Producer_shutdown   — stop + join the C batching threads (blocking C
-//                            join; GIL released), fire pending space waiters,
-//                            tear down the C mutexes/cnds, drop the py_producer
-//                            self-reference. Does NOT touch the Rust producer.
-//   2. Producer_close_async — drive kafka_producer_Producer_close_async; the
+//   1. Producer_shutdown   — mark the C wrapper closed so later `send`s are
+//                            rejected. Does NOT touch the Rust producer.
+//   2. Producer_close_async — drive kafka_producer_Producer_close_async, which
+//                            first drains the outbox (every send that had
+//                            returned is produced) and then closes; the
 //                            Python wrapper waits on it via _run_sync /
-//                            _run_async (interruptible), like flush.
-//   3. Producer_destroy    — free the Rust producer handle and the C struct.
+//                            _run_async (interruptible), like flush. Space
+//                            waiters are rung by Rust as the outbox drains.
+//   3. Producer_destroy    — free the Rust producer handle (its dispatcher
+//                            has by then delivered every completion to
+//                            send_direct_trampoline), stop and join the C
+//                            callback thread, report anything still pending,
+//                            and free the C struct.
 // The Python Producer.close() / AsyncProducer.close() orchestrate the three in
 // order (idempotency is guarded Python-side by self.closed).
 
@@ -948,43 +766,14 @@ static PyObject* py_Producer_shutdown(PyObject* self, PyObject* args) {
         return NULL;
     }
     Producer* producer = (Producer*)producer_ptr;
-
-    if (producer->closed) {
-        Py_RETURN_NONE;
-    }
-
-    // Signal the send thread to stop, then join it (releasing the GIL
-    // so the background threads can acquire it for callbacks).
-    PyObject** space_cbs = NULL;
-    int space_cbs_count = 0;
-    Py_BEGIN_ALLOW_THREADS
-    mtx_lock(&producer->record_batches_mutex);
     producer->closed = 1;
-    // Take any pending space waiters so blocked senders unblock on close
-    // instead of hanging (whoever wins the lock — here or the send task's
-    // final take — fires them once).
-    Producer_take_space_cbs_locked(producer, &space_cbs, &space_cbs_count);
-    cnd_signal(&producer->record_batches_new_record_cnd);
-    mtx_unlock(&producer->record_batches_mutex);
-    thrd_join(producer->send_thread, NULL);
-    Py_END_ALLOW_THREADS
-
-    Producer_fire_and_free_space_cbs(space_cbs, space_cbs_count);
-
-    // Clean up after threads have stopped
-    cnd_destroy(&producer->record_batches_new_record_cnd);
-    mtx_destroy(&producer->record_batches_mutex);
-    cnd_destroy(&producer->pending_batches_available_cnd);
-    mtx_destroy(&producer->pending_batches_mutex);
-    Py_DECREF(producer->py_producer);
-
     Py_RETURN_NONE;
 }
 
 // Drive the Rust-side close asynchronously; cb(error_int) fires on the
 // dispatcher thread. The Python wrapper waits via _run_sync / _run_async so a
 // stuck close stays interruptible on the main thread (like flush). Must be
-// called after Producer_shutdown (the C batching threads are already joined).
+// called after Producer_shutdown.
 static PyObject* py_Producer_close_async(PyObject* self, PyObject* args) {
     unsigned long long producer_ptr;
     PyObject* cb;
@@ -997,8 +786,14 @@ static PyObject* py_Producer_close_async(PyObject* self, PyObject* args) {
     Py_RETURN_NONE;
 }
 
-// Free the Rust producer handle and the C struct. Call after the close future
-// (Producer_close_async) has completed.
+// Free the Rust producer handle, stop the C callback thread and free the C
+// struct. Call after the close future (Producer_close_async) has completed.
+//
+// Order matters: the Rust destroy joins the dispatcher, so once it returns no
+// further send_direct_trampoline call can happen; only then is it safe to stop
+// the callback thread, join it and report whatever it had not yet taken. Both
+// blocking waits run with the GIL released, since the callback thread needs
+// the GIL to report.
 static PyObject* py_Producer_destroy(PyObject* self, PyObject* args) {
     unsigned long long producer_ptr;
     if (!PyArg_ParseTuple(args, "K", &producer_ptr)) {
@@ -1007,7 +802,29 @@ static PyObject* py_Producer_destroy(PyObject* self, PyObject* args) {
     Producer* producer = (Producer*)producer_ptr;
     Py_BEGIN_ALLOW_THREADS
     kafka_producer_Producer_destroy(producer->producer);
+    mtx_lock(&producer->pending_mutex);
+    producer->stop_callback_thread = 1;
+    cnd_signal(&producer->pending_cnd);
+    mtx_unlock(&producer->pending_mutex);
+    thrd_join(producer->callback_thread, NULL);
     Py_END_ALLOW_THREADS
+
+    // The thread exits only when `pending` is empty, and nothing can append
+    // after the Rust destroy; report defensively anyway rather than leak.
+    if (producer->pending_count > 0) {
+        PendingCompletion* items = producer->pending;
+        int count = producer->pending_count;
+        producer->pending = NULL;
+        producer->pending_count = 0;
+        producer->pending_capacity = 0;
+        Producer_report_completions(items, count);
+    } else {
+        PyMem_RawFree(producer->pending);
+    }
+
+    cnd_destroy(&producer->pending_cnd);
+    mtx_destroy(&producer->pending_mutex);
+    Py_DECREF(producer->py_producer);
     PyMem_Free(producer);
     Py_RETURN_NONE;
 }
@@ -7119,20 +6936,22 @@ static PyObject* py_ListTransactionsResult_drain(PyObject* self, PyObject* args)
 }
 
 static PyMethodDef ProducerNativeMethods[] = {
-    {"Producer_new", py_Producer_new, METH_VARARGS, "Create batching mock producer"},
-    {"KafkaProducer_new", py_KafkaProducer_new, METH_VARARGS, "Create batching Kafka producer"},
-    {"Producer_send", py_Producer_send, METH_VARARGS, "Send record to batch"},
+    {"Producer_new", py_Producer_new, METH_VARARGS, "Create mock producer"},
+    {"KafkaProducer_new", py_KafkaProducer_new, METH_VARARGS, "Create Kafka producer"},
+    {"Producer_send", py_Producer_send, METH_VARARGS,
+     "Queue record on the Rust outbox; returns True if the outbox is now full"},
     {"Producer_on_space_available", py_Producer_on_space_available, METH_VARARGS,
-     "Register a callback fired when buffer space frees; returns True if "
+     "Register a callback fired when outbox space frees; returns True if "
      "space is already available"},
     {"Producer_test_set_paused", py_Producer_test_set_paused, METH_VARARGS,
-     "Test-only: pause/resume the send task to exercise backpressure"},
+     "Test-only: pause/resume the Rust submission task to exercise backpressure"},
     {"Producer_shutdown", py_Producer_shutdown, METH_VARARGS,
-     "Stop/join the C batching threads (step 1 of close)"},
+     "Reject further sends (step 1 of close)"},
     {"Producer_close_async", py_Producer_close_async, METH_VARARGS,
      "Async Rust-side close; cb(error_int) (step 2 of close)"},
     {"Producer_destroy", py_Producer_destroy, METH_VARARGS,
-     "Free the Rust handle + C struct (step 3 of close)"},
+     "Free the Rust handle, join the C callback thread, free the C struct "
+     "(step 3 of close)"},
     {"Producer_flush", py_Producer_flush, METH_VARARGS, "Flush producer"},
     {"Producer_metrics", py_Producer_metrics, METH_VARARGS,
      "Point-in-time metrics snapshot; returns list[dict] or None"},

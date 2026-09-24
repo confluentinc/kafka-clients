@@ -136,9 +136,9 @@ def _invoke_on_delivery(on_delivery, metadata, exception):
     cancelled or resolved, where the future itself is left untouched.
 
     An exception raised by the callback is logged and swallowed. It must not
-    propagate: the caller is a C completion thread, where the only handling
-    available is ``PyErr_Print``, and the record's ``Future`` has already been
-    resolved by then."""
+    propagate: the caller is the C callback thread, where the only handling
+    available is ``PyErr_WriteUnraisable``, and the record's ``Future`` has
+    already been resolved by then."""
     if on_delivery is None:
         return
     try:
@@ -166,11 +166,15 @@ class _ProducerBase:
     """State and helpers shared by the sync and async producers.
 
     The C extension (`_confluentkafka.c`) owns all the asynchronous work:
-    two background threads batch records and poll their completion futures,
-    then invoke a Python callback ``cb(result, error)`` with the GIL held.
-    Both the sync :class:`Producer` and the async :class:`AsyncProducer`
-    reuse the same C entry points and differ only in the future type the
-    callback resolves and how (see their respective ``send``).
+    ``send`` queues the record on the Rust producer's outbox (the
+    ``send_async`` FFI, a channel push that never blocks the calling thread),
+    a Rust task hands queued records to the producer, and one C callback
+    thread per producer reports completions by invoking a Python callback
+    ``cb(result, error)`` with the GIL held — taking the GIL once per burst of
+    completions rather than once per record. Both the sync :class:`Producer`
+    and the async :class:`AsyncProducer` reuse the same C entry points and
+    differ only in the future type the callback resolves and how (see their
+    respective ``send``).
     """
 
     def __init__(self):
@@ -358,7 +362,7 @@ class Producer(_ProducerBase):
         ret = Future()
 
         def cb(result, error):
-            # Runs on the C completion thread with the GIL held. Convert the
+            # Runs on the C callback thread with the GIL held. Convert the
             # handles once up front, then resolve the future (unless the caller
             # cancelled it or it is already done) and honor the callback
             # obligation on every path.
@@ -373,11 +377,12 @@ class Producer(_ProducerBase):
         full = _lib.Producer_send(self.c_producer, producer_record, cb)
         fut = self._add_future(ret)
         if full:
-            # Buffer is full: block until the send task frees capacity so a
-            # fast producer cannot accumulate records without bound. Mirrors
-            # Java's send() blocking when buffer.memory is exhausted.
-            # concurrent.futures.Future.result() releases the GIL while waiting,
-            # so the C send task can still run the space callback.
+            # Outbox is full: block until the Rust submission task drains it
+            # below the bound so a fast producer cannot queue records without
+            # limit. Mirrors Java's send() blocking when buffer.memory is
+            # exhausted. concurrent.futures.Future.result() releases the GIL
+            # while waiting, so the Rust dispatcher thread can run the space
+            # callback.
             space = Future()
             if not _lib.Producer_on_space_available(
                     self.c_producer, lambda: space.set_result(None)):
@@ -429,11 +434,12 @@ class Producer(_ProducerBase):
     # KeyboardInterrupt on the main thread. _resolve_void raises KafkaError on a
     # non-null completion error (0 = success).
     #
-    # Records produced inside a transaction use send(): Python's send() calls
-    # the synchronous send FFI, which registers the record before it returns, so
-    # every record produced between begin_transaction() and commit/abort is part
-    # of the transaction (committed on commit, discarded on abort). Python does
-    # not expose an async/outbox send path.
+    # Records produced inside a transaction use send(): Python's send() queues
+    # the record on the Rust outbox (send_async), and every transaction-control
+    # op drains the outbox before it runs -- the same guarantee flush()/close()
+    # give -- so every send() that had returned before commit/abort is part of
+    # the transaction (committed on commit, discarded on abort). A send() racing
+    # the control call on another thread is not ordered against it, as in Java.
 
     def init_transactions(self):
         """Initialize transactions (Java ``initTransactions()``).
@@ -443,8 +449,9 @@ class Producer(_ProducerBase):
         coordinator is ready; a timeout error is safe to retry. Driven through
         the async FFI so the wait stays interruptible on the main thread.
 
-        Produce records inside a transaction with :meth:`send`, which registers
-        each record before it returns, so the record is part of the transaction.
+        Produce records inside a transaction with :meth:`send`, which queues the
+        record on the outbox; every ``send`` that returned before commit/abort is
+        part of the transaction.
 
         Raises:
             KafkaError: if the call fails.
@@ -462,8 +469,9 @@ class Producer(_ProducerBase):
         have completed successfully first. Routed through the async FFI (like
         the other four control ops) for a uniform, interruptible path.
 
-        Produce records into this transaction with :meth:`send`, which registers
-        each record before it returns, so the record is part of the transaction.
+        Produce records into this transaction with :meth:`send`, which queues the
+        record on the outbox; every ``send`` that returned before commit/abort is
+        part of the transaction.
 
         Raises:
             KafkaError: if the call fails.
@@ -490,9 +498,9 @@ class Producer(_ProducerBase):
                 ``consumer.group_metadata()`` (it owns the live handle the FFI
                 needs).
 
-        Produce records inside the transaction with :meth:`send`, which
-        registers each record before it returns, so the record is part of the
-        transaction.
+        Produce records inside the transaction with :meth:`send`, which queues
+        the record on the outbox; every ``send`` that returned before
+        commit/abort is part of the transaction.
 
         Raises:
             KafkaError: if the call fails. If ``err.txn_requires_abort`` is
@@ -514,9 +522,9 @@ class Producer(_ProducerBase):
         committed. Driven through the async FFI so the wait stays interruptible
         on the main thread.
 
-        Produce records inside the transaction with :meth:`send`, which
-        registers each record before it returns, so the record is part of the
-        transaction.
+        Produce records inside the transaction with :meth:`send`, which queues
+        the record on the outbox; every ``send`` that returned before
+        commit/abort is part of the transaction.
 
         Raises:
             KafkaError: if the commit fails. If ``err.txn_requires_abort`` is
@@ -536,8 +544,9 @@ class Producer(_ProducerBase):
         the abort completes. Driven through the async FFI so the wait stays
         interruptible on the main thread.
 
-        Produce records inside a transaction with :meth:`send`, which registers
-        each record before it returns, so the record is part of the transaction.
+        Produce records inside a transaction with :meth:`send`, which queues the
+        record on the outbox; every ``send`` that returned before commit/abort is
+        part of the transaction.
 
         Raises:
             KafkaError: if the abort fails.
@@ -553,11 +562,14 @@ class Producer(_ProducerBase):
             return
         self.closed = True
         self._cancel()
-        # Split teardown (see _confluentkafka.c): join the C batching threads,
-        # then drive the Rust-side close through the interruptible _run_sync
-        # path (same as flush), then free. Keeping the Rust close in _run_sync
-        # means a stuck close stays responsive to KeyboardInterrupt on the main
-        # thread rather than blocking in a native wait.
+        # Split teardown (see _confluentkafka.c): reject further sends, then
+        # drive the Rust-side close (which first drains the outbox, so every
+        # send() that returned is produced) through the interruptible _run_sync
+        # path (same as flush), then free -- destroy also joins the C callback
+        # thread once Rust has delivered every completion. Keeping the Rust
+        # close in _run_sync means a stuck close stays responsive to
+        # KeyboardInterrupt on the main thread rather than blocking in a native
+        # wait.
         _lib.Producer_shutdown(self.c_producer)
         self._run_sync(
             lambda cb: _lib.Producer_close_async(self.c_producer, cb),
@@ -578,12 +590,12 @@ class AsyncProducer(_ProducerBase):
     completion drain, so a flooding ``await producer.send(...)`` loop does not
     starve completions.
 
-    Completions from the C background thread are marshalled back onto the event
+    Completions from the C callback thread are marshalled back onto the event
     loop (an ``asyncio.Future`` is not thread-safe).
 
-    Completions are *coalesced*: the C poll task invokes the callback once per
-    record, but rather than waking the event loop once per record (one
-    ``call_soon_threadsafe`` each), each callback buffers its
+    Completions are *coalesced*: the C callback thread invokes the callback
+    once per record, but rather than waking the event loop once per record
+    (one ``call_soon_threadsafe`` each), each callback buffers its
     ``(future, result, error)`` and schedules a single drain only when one is
     not already pending. The drain then resolves the whole accumulated batch in
     one event-loop wakeup. This keeps the per-record cross-thread signalling
@@ -592,9 +604,9 @@ class AsyncProducer(_ProducerBase):
 
     def __init__(self):
         super().__init__()
-        # Completions buffered by the C poll task (producer thread), drained on
-        # the event loop. Guarded by a lock since the two run on different
-        # threads; the critical sections are tiny (append / list swap).
+        # Completions buffered by the C callback thread, drained on the event
+        # loop. Guarded by a lock since the two run on different threads; the
+        # critical sections are tiny (append / list swap).
         self._pending = []
         self._drain_scheduled = False
         self._pending_lock = threading.Lock()
@@ -623,7 +635,7 @@ class AsyncProducer(_ProducerBase):
     @staticmethod
     def _resolve_space(space):
         """Resolve a space-available future. Runs on the event loop thread
-        (scheduled via call_soon_threadsafe from the C send task)."""
+        (scheduled via call_soon_threadsafe from the Rust dispatcher thread)."""
         if not space.done():
             space.set_result(None)
 
@@ -655,7 +667,7 @@ class AsyncProducer(_ProducerBase):
         :meth:`Producer.send` argument — a plain (non-coroutine)
         ``callback(metadata, exception)`` invoked exactly once per record. It
         runs **on the event loop thread** (inside the completion drain), not on
-        the C completion thread, so it may safely touch loop state; it must not
+        the C callback thread, so it may safely touch loop state; it must not
         block the loop.
         """
         self._check_closed()
@@ -663,13 +675,13 @@ class AsyncProducer(_ProducerBase):
         loop = asyncio.get_running_loop()
         ret = loop.create_future()
 
-        # Runs on the C background (poll) thread with the GIL held. asyncio
-        # futures must only be mutated on the loop thread, so buffer the
-        # completion and wake the loop once per drain (coalescing) rather than
-        # once per record. If the loop is already closed we can't schedule
-        # anything — convert (and thereby free) the C handles here, and still
-        # honor the callback obligation, noting that in this teardown case
-        # on_delivery necessarily runs on the completion thread.
+        # Runs on the C callback thread with the GIL held. asyncio futures
+        # must only be mutated on the loop thread, so buffer the completion and
+        # wake the loop once per drain (coalescing) rather than once per
+        # record. If the loop is already closed we can't schedule anything —
+        # convert (and thereby free) the C handles here, and still honor the
+        # callback obligation, noting that in this teardown case on_delivery
+        # necessarily runs on the callback thread.
         def cb(result, error):
             if loop.is_closed():
                 metadata, exception = _completion_to_python(result, error)
@@ -685,11 +697,11 @@ class AsyncProducer(_ProducerBase):
         full = _lib.Producer_send(self.c_producer, producer_record, cb)
         self._add_future(ret)
         if full:
-            # Buffer is full: await (yielding the loop, non-blocking) until the
-            # send task frees capacity, bounding accumulation — Java's send()
+            # Outbox is full: await (yielding the loop, non-blocking) until the
+            # Rust submission task drains it below the bound — Java's send()
             # blocks on buffer.memory here. Awaiting also yields to the
-            # completion drain. The space callback runs on the C send task, so
-            # it hops onto the loop via call_soon_threadsafe.
+            # completion drain. The space callback runs on the Rust dispatcher
+            # thread, so it hops onto the loop via call_soon_threadsafe.
             space = loop.create_future()
 
             def space_cb():
@@ -762,11 +774,12 @@ class AsyncProducer(_ProducerBase):
     # handle if the loop is gone before delivery.
     #
     # Records produced inside a transaction use send() (``await
-    # producer.send(rec)``): Python's send() calls the synchronous send FFI,
-    # which registers the record before it returns, so every record produced
-    # between begin_transaction() and commit/abort is part of the transaction
-    # (committed on commit, discarded on abort). Python does not expose an
-    # async/outbox send path.
+    # producer.send(rec)``): Python's send() queues the record on the Rust
+    # outbox (send_async), and every transaction-control op drains the outbox
+    # before it runs -- the same guarantee flush()/close() give -- so every
+    # send() that had returned before commit/abort is part of the transaction
+    # (committed on commit, discarded on abort). A send() racing the control
+    # call from another task is not ordered against it, as in Java.
 
     async def init_transactions(self):
         """Initialize transactions (Java ``initTransactions()``).
@@ -775,8 +788,9 @@ class AsyncProducer(_ProducerBase):
         ``transactional.id`` is configured. Awaits the coordinator handshake on
         the event loop (no executor thread); a timeout error is safe to retry.
 
-        Produce records inside a transaction with :meth:`send`, which registers
-        each record before it returns, so the record is part of the transaction.
+        Produce records inside a transaction with :meth:`send`, which queues the
+        record on the outbox; every ``send`` that returned before commit/abort is
+        part of the transaction.
 
         Raises:
             KafkaError: if the call fails.
@@ -795,8 +809,9 @@ class AsyncProducer(_ProducerBase):
         have completed first. Awaited through the async FFI (like the other four
         control ops) for a uniform, cancellable path.
 
-        Produce records into this transaction with :meth:`send`, which registers
-        each record before it returns, so the record is part of the transaction.
+        Produce records into this transaction with :meth:`send`, which queues the
+        record on the outbox; every ``send`` that returned before commit/abort is
+        part of the transaction.
 
         Raises:
             KafkaError: if the call fails.
@@ -824,9 +839,9 @@ class AsyncProducer(_ProducerBase):
                 ``consumer.group_metadata()`` (it owns the live handle the FFI
                 needs).
 
-        Produce records inside the transaction with :meth:`send`, which
-        registers each record before it returns, so the record is part of the
-        transaction.
+        Produce records inside the transaction with :meth:`send`, which queues
+        the record on the outbox; every ``send`` that returned before
+        commit/abort is part of the transaction.
 
         Raises:
             KafkaError: if the call fails. If ``err.txn_requires_abort`` is
@@ -849,9 +864,9 @@ class AsyncProducer(_ProducerBase):
         (no executor thread), so the coroutine is cancellable and the loop is
         never frozen.
 
-        Produce records inside the transaction with :meth:`send`, which
-        registers each record before it returns, so the record is part of the
-        transaction.
+        Produce records inside the transaction with :meth:`send`, which queues
+        the record on the outbox; every ``send`` that returned before
+        commit/abort is part of the transaction.
 
         Raises:
             KafkaError: if the commit fails. If ``err.txn_requires_abort`` is
@@ -871,8 +886,9 @@ class AsyncProducer(_ProducerBase):
         Discards the transaction's records and staged offsets, then awaits the
         abort on the event loop (no executor thread).
 
-        Produce records inside a transaction with :meth:`send`, which registers
-        each record before it returns, so the record is part of the transaction.
+        Produce records inside a transaction with :meth:`send`, which queues the
+        record on the outbox; every ``send`` that returned before commit/abort is
+        part of the transaction.
 
         Raises:
             KafkaError: if the abort fails.
@@ -890,11 +906,13 @@ class AsyncProducer(_ProducerBase):
         self.closed = True
         self._cancel()
         loop = asyncio.get_running_loop()
-        # Split teardown (see _confluentkafka.c): the C batching-thread join and
-        # the final free are blocking C calls, so run them off the event loop;
-        # the Rust-side close is awaited via the async FFI (_run_async) so it is
-        # cooperative with the loop and cancellable, like flush.
-        await loop.run_in_executor(None, _lib.Producer_shutdown, self.c_producer)
+        # Split teardown (see _confluentkafka.c): reject further sends (a flag
+        # flip, so it runs inline); the Rust-side close -- which first drains
+        # the outbox, so every send() that returned is produced -- is awaited
+        # via the async FFI (_run_async) so it is cooperative with the loop and
+        # cancellable, like flush; the final destroy joins the Rust dispatcher
+        # and the C callback thread, a blocking C call, so it runs off the loop.
+        _lib.Producer_shutdown(self.c_producer)
         await self._run_async(
             lambda cb: _lib.Producer_close_async(self.c_producer, cb),
             self._resolve_void,

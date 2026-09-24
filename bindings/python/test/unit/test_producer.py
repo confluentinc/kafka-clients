@@ -792,10 +792,11 @@ async def test_async_kafka_producer_config_not_dict():
 # =============================================================================
 # Backpressure tests
 #
-# Once BACKPRESSURE_BOUND records are accumulated but not yet taken by the send
-# task, the producer is "full" and further enqueuing waits for capacity. The
-# mock accepts instantly and would never fill, so a test-only hook
-# (`Producer_test_set_paused`) stalls the send task to build accumulation.
+# Once BACKPRESSURE_BOUND records are queued on the Rust outbox but not yet
+# handed to the producer by its submission task, the producer is "full" and
+# further enqueuing waits for capacity. The mock accepts instantly and would
+# never fill, so a test-only hook (`Producer_test_set_paused`) stalls the
+# submission task to let the outbox fill.
 # =============================================================================
 
 
@@ -896,11 +897,12 @@ async def test_backpressure_does_not_trigger_when_draining():
 # Producer transaction tests (mock-backed)
 #
 # Translated from Java MockProducerTest transaction tests. Every transactional
-# test produces with send(): Python's send() calls the synchronous send FFI,
-# which registers the record before it returns, so an in-transaction record is
-# part of the transaction. Python does not expose an async/outbox send path.
-# (The transaction-control ops themselves are async-first -- they drive the
-# *_async FFI variants -- but that is invisible to the public API.)
+# test produces with send(): Python's send() queues the record on the Rust
+# outbox (send_async), and every transaction-control op drains the outbox
+# before it runs, so a send() that returned before commit/abort is part of the
+# transaction (committed on commit, discarded on abort). (The transaction-
+# control ops themselves are async-first -- they drive the *_async FFI
+# variants -- but that is invisible to the public API.)
 #
 # The offset-lifecycle behaviour (sent-offsets flag, publish-on-commit,
 # drop-on-abort) IS observable through the exposed

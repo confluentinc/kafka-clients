@@ -59,6 +59,17 @@
 //! (Removing that serialization is a change to the blocking send path, out of
 //! scope here.)
 //!
+//! The submission channel is unbounded, so the async pair never blocks — but a
+//! caller that keeps queuing faster than the submission task hands records to the
+//! producer would grow the queue without limit. [`kafka_producer_Producer_send_async`]
+//! therefore reports, through its `bool` return, when the accepted record brought
+//! the number of queued-but-unsent async records to `MAX_QUEUED_SENDS` (1000) or
+//! more, and [`kafka_producer_Producer_on_space_available`] lets the caller register
+//! a one-shot bell that rings — on the dispatcher thread — once the depth drops back
+//! below that bound. Together they give a language binding cooperative
+//! backpressure (Java's `send()` blocking on a full accumulator, re-expressed for a
+//! non-blocking door) without the FFI ever parking the caller's thread.
+//!
 //! Java's *transaction-control* methods are the exception: `initTransactions`,
 //! `beginTransaction`, `sendOffsetsToTransaction`, `commitTransaction` and
 //! `abortTransaction` are **not** safe to call concurrently with each other. The
@@ -511,6 +522,10 @@ pub type kafka_producer_Producer_send_callback_t =
 /// Per-record completion callback for [`kafka_producer_Producer_send_batch_async`].
 pub type kafka_producer_Producer_send_batch_callback_t =
     unsafe extern "C" fn(*mut kafka_producer_RecordMetadata_t, *mut kafka_common_Error_t, *mut std::ffi::c_void);
+/// One-shot "space available" bell registered through
+/// [`kafka_producer_Producer_on_space_available`]. Receives only the caller's
+/// `user_data`; there is no result to deliver.
+pub type kafka_producer_Producer_on_space_available_callback_t = unsafe extern "C" fn(*mut std::ffi::c_void);
 /// Completion callback for [`kafka_producer_FutureRecordMetadata_get_async`].
 pub type kafka_producer_FutureRecordMetadata_get_callback_t =
     unsafe extern "C" fn(*mut kafka_producer_RecordMetadata_t, *mut kafka_common_Error_t, *mut std::ffi::c_void);
@@ -622,6 +637,25 @@ struct RecordBatchCallbackTarget {
 }
 // SAFETY: see `RecordCallbackTarget`.
 unsafe impl Send for RecordBatchCallbackTarget {}
+
+/// Upper bound on records queued by `send_async` / `send_batch_async` but not yet
+/// handed to the producer by the submission task, above which
+/// [`kafka_producer_Producer_send_async`] reports the queue as full. The queue
+/// itself stays unbounded — the bound is advisory backpressure for the caller (see
+/// the module-level "Concurrency model" docs), matching the depth at which the
+/// previous C-side accumulation reported `full`.
+const MAX_QUEUED_SENDS: usize = 1000;
+
+/// A registered "space available" bell (function pointer + opaque `user_data`),
+/// stored until the queue depth drops below [`MAX_QUEUED_SENDS`] and then fired
+/// once on the dispatcher thread. See [`RecordCallbackTarget`] for the wrapping.
+#[derive(Clone, Copy)]
+struct SpaceWaiter {
+    callback: kafka_producer_Producer_on_space_available_callback_t,
+    user_data: *mut std::ffi::c_void,
+}
+// SAFETY: see `RecordCallbackTarget`.
+unsafe impl Send for SpaceWaiter {}
 
 /// Builds a native producer [`Callback`] that, when fired on completion,
 /// converts the borrowed metadata/error into owned C handles and enqueues a
@@ -754,17 +788,66 @@ unsafe fn producer_static_ref(ptr: usize) -> ProducerStaticRef {
 /// with a request, whether it was produced, discarded, or panicked on. Keeping it
 /// in a `Drop` means the counter cannot drift, and a drifted counter would make
 /// every later barrier wait for a request that no longer exists.
+///
+/// It also rings the "space available" bell: when the decrement brings the depth
+/// back below [`MAX_QUEUED_SENDS`], every waiter registered through
+/// [`kafka_producer_Producer_on_space_available`] is taken and fired once on the
+/// dispatcher thread. Registration and this check both hold `space_waiters` while
+/// reading the counter, so a waiter can never be registered against a depth that
+/// has already dropped without someone firing it (no lost wakeup): either the
+/// registrant sees the low depth and is told to proceed, or it stores the waiter
+/// before this guard re-reads the depth under the same lock and takes it.
 struct QueueDepthGuard<'a>(&'a ProducerHandle);
 impl Drop for QueueDepthGuard<'_> {
     fn drop(&mut self) {
-        self.0.queued_sends.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+        let handle = self.0;
+        let depth_after = handle.queued_sends.fetch_sub(1, std::sync::atomic::Ordering::AcqRel) - 1;
+        if depth_after >= MAX_QUEUED_SENDS {
+            return;
+        }
+        let waiters = {
+            let mut waiters = handle.space_waiters.lock().unwrap();
+            // Re-read under the lock: a burst of `send_async` calls may have refilled
+            // the queue since the decrement above, in which case the waiters stay
+            // registered and the drop that next crosses the bound fires them.
+            if waiters.is_empty() || handle.queued_sends.load(std::sync::atomic::Ordering::Acquire) >= MAX_QUEUED_SENDS
+            {
+                return;
+            }
+            std::mem::take(&mut *waiters)
+        };
+        for waiter in waiters {
+            let job: CompletionJob = Box::new(move || {
+                let waiter = waiter;
+                unsafe { (waiter.callback)(waiter.user_data) }
+            });
+            enqueue_or_run_inline(&handle.completion_tx, job);
+        }
     }
 }
 
 /// The shared submission task: drives non-blocking sends to enqueue off the
 /// caller's thread. One task per producer (not a per-message spawn, §11).
 async fn submission_loop(ptr: usize, mut rx: tokio::sync::mpsc::UnboundedReceiver<SubmitRequest>) {
-    while let Some(request) = rx.recv().await {
+    // SAFETY: the handle outlives the submission task — `destroy` joins this
+    // task (registered via `register_pending_task`) before freeing the handle and
+    // dropping the producer it borrows from.
+    let handle = unsafe { &*(ptr as *const ProducerHandle) };
+    loop {
+        let Some(request) = rx.recv().await else {
+            break;
+        };
+        // Test-only stall (`kafka_producer_Producer_test_set_paused`): hold the
+        // item just taken until resumed, so queued sends accumulate and the depth
+        // bound can be exercised. Checked *after* `recv()`: a task already parked
+        // in `recv()` when the pause is set would otherwise hand over the record
+        // that wakes it before ever seeing the flag, leaving the depth one short.
+        // The held item stays counted in `queued_sends` (its `QueueDepthGuard` is
+        // created only below). `notify_one` stores a permit, so an un-pause racing
+        // this check is never lost; a stale permit merely re-runs the check.
+        while handle.test_paused.load(std::sync::atomic::Ordering::Acquire) {
+            handle.pause_notify.notified().await;
+        }
         let SendRequest { record, target } = match request {
             SubmitRequest::Send(send) => send,
             SubmitRequest::Barrier { ack } => {
@@ -778,11 +861,6 @@ async fn submission_loop(ptr: usize, mut rx: tokio::sync::mpsc::UnboundedReceive
                 continue;
             },
         };
-        // SAFETY: the handle outlives the submission task — `destroy` joins this
-        // task (registered via `register_pending_task`) before dropping the
-        // producer it borrows from. Reached on the send path only, exactly where
-        // `producer_static_ref(ptr)` below already dereferences the same handle.
-        let handle = unsafe { &*(ptr as *const ProducerHandle) };
         // Decremented only once the send below has fully completed, so the counter
         // means "queued or in flight": a barrier has to wait for an in-flight
         // handover too, not merely for the queue to empty.
@@ -876,6 +954,20 @@ struct ProducerHandle {
     /// costs `flush`/`close` one atomic load instead of a channel round-trip
     /// through the submission task. See [`drain_submitted_sends_await`].
     queued_sends: std::sync::atomic::AtomicUsize,
+    /// "Space available" bells registered while `queued_sends` was at or above
+    /// [`MAX_QUEUED_SENDS`]; fired once and cleared by [`QueueDepthGuard`] when the
+    /// depth drops back below the bound (or by `destroy`, so no waiter is leaked).
+    /// The lock is also what makes registration race-free against the decrement —
+    /// see [`QueueDepthGuard`].
+    space_waiters: std::sync::Mutex<Vec<SpaceWaiter>>,
+    /// Test-only stall flag for the submission task
+    /// ([`kafka_producer_Producer_test_set_paused`]). While `true` the task stops
+    /// taking items off the channel, so queued sends accumulate and the depth
+    /// bound can be exercised deterministically. Cleared by `close` /
+    /// `close_async` / `destroy` so a paused producer can still be torn down.
+    test_paused: std::sync::atomic::AtomicBool,
+    /// Wakes the submission task when `test_paused` is cleared.
+    pause_notify: tokio::sync::Notify,
 }
 
 /// Registers `task` so `destroy` will join it before the producer is freed,
@@ -904,6 +996,9 @@ fn build_producer_handle(kind: ProducerKind) -> *mut kafka_producer_Producer_t {
         pending_tasks: Mutex::new(Vec::new()),
         txn_control_busy: std::sync::atomic::AtomicBool::new(false),
         queued_sends: std::sync::atomic::AtomicUsize::new(0),
+        space_waiters: std::sync::Mutex::new(Vec::new()),
+        test_paused: std::sync::atomic::AtomicBool::new(false),
+        pause_notify: tokio::sync::Notify::new(),
     });
     let ptr = Box::into_raw(handle);
 
@@ -1173,6 +1268,11 @@ pub unsafe extern "C" fn kafka_producer_Producer_destroy(producer: *mut kafka_pr
         return;
     }
     let handle = unsafe { Box::from_raw(producer as *mut ProducerHandle) };
+    // 0. Release the test-only stall, in place, before anything below waits on
+    //    the submission task: a paused task would never drain the channel and
+    //    the join in step 2 would hang. Done through the box (the task reads the
+    //    same location) rather than on a moved-out copy of the flag.
+    release_test_pause(&handle);
     let ProducerHandle {
         kind,
         completion_tx,
@@ -1183,6 +1283,11 @@ pub unsafe extern "C" fn kafka_producer_Producer_destroy(producer: *mut kafka_pr
         // meant "queued sends outstanding", which drop(submit_tx) below drains.
         txn_control_busy: _,
         queued_sends: _,
+        // Left in place (not moved) — the submission task may still lock it while
+        // it drains in step 2; leftovers are fired in step 3 once the task is gone.
+        space_waiters: _,
+        test_paused: _,
+        pause_notify: _,
     } = *handle;
 
     // 1. Stop accepting new sends; the submission task's `recv()` returns `None`
@@ -1202,12 +1307,24 @@ pub unsafe extern "C" fn kafka_producer_Producer_destroy(producer: *mut kafka_pr
             }
         });
     }
-    // 3. Drop the producer and its runtime. The producer's `Drop` force-closes;
+    // 3. Ring any "space available" bell still registered. With the submission
+    //    task joined nothing else touches `space_waiters`, and a waiter that never
+    //    fires would leave a caller parked forever (and leak its `user_data`).
+    //    Goes on the dispatcher, behind the record completions already queued.
+    let leftover_waiters = std::mem::take(&mut *handle.space_waiters.lock().unwrap());
+    for waiter in leftover_waiters {
+        let job: CompletionJob = Box::new(move || {
+            let waiter = waiter;
+            unsafe { (waiter.callback)(waiter.user_data) }
+        });
+        enqueue_or_run_inline(&completion_tx, job);
+    }
+    // 4. Drop the producer and its runtime. The producer's `Drop` force-closes;
     //    dropping the runtime waits for any other remaining tasks. Any
     //    in-flight record callbacks fire here and enqueue jobs onto the
     //    still-open completion channel (the clones live inside those callbacks).
     drop(kind);
-    // 4. Close the completion channel; the dispatcher drains remaining jobs
+    // 5. Close the completion channel; the dispatcher drains remaining jobs
     //    (firing their callbacks) and then exits. Join it.
     //
     // NOTE: every live future handle (`FfiFuture`) and in-flight callback holds
@@ -1659,6 +1776,18 @@ pub unsafe extern "C" fn kafka_producer_Producer_send_batch(
 /// submission task) and delivers the result through `callback` instead of a
 /// future.
 ///
+/// # Return value — cooperative backpressure
+///
+/// Returns `true` when the record was accepted **and** it brought the number of
+/// records queued for the submission task but not yet handed to the producer to
+/// the bound (`MAX_QUEUED_SENDS`, 1000) or above; `false` when the record was
+/// accepted below the bound, and `false` on every error path. The record is
+/// queued either way — the queue is unbounded — so `true` is advice, not a
+/// rejection: a caller that wants to bound its own memory registers a bell with
+/// [`kafka_producer_Producer_on_space_available`] and waits for it before queuing
+/// more. This is how a binding reproduces Java's `send()` blocking on a full
+/// accumulator without parking a native thread inside the FFI.
+///
 /// `callback` is invoked on the producer's dedicated dispatcher thread. On
 /// success, `metadata` is non-null and `error` is null. On failure, `error` is
 /// always non-null and `metadata` **may also be non-null**, carrying `-1` in
@@ -1702,12 +1831,12 @@ pub unsafe extern "C" fn kafka_producer_Producer_send_async(
     callback: kafka_producer_Producer_send_callback_t,
     user_data: *mut std::ffi::c_void,
     out_error: *mut *mut kafka_common_Error_t,
-) {
+) -> bool {
     if producer.is_null() || topic.is_null() {
         if !out_error.is_null() {
             unsafe { *out_error = box_error(Error::new(Errors::InvalidRequest)) };
         }
-        return;
+        return false;
     }
 
     let topic_str = unsafe { CStr::from_ptr(topic) }.to_string_lossy().into_owned();
@@ -1719,7 +1848,7 @@ pub unsafe extern "C" fn kafka_producer_Producer_send_async(
             if !out_error.is_null() {
                 unsafe { *out_error = box_error(Error::new(Errors::InvalidRequest)) };
             }
-            return;
+            return false;
         }
         Some(unsafe { std::slice::from_raw_parts(key, key_len as usize) })
     } else {
@@ -1731,7 +1860,7 @@ pub unsafe extern "C" fn kafka_producer_Producer_send_async(
             if !out_error.is_null() {
                 unsafe { *out_error = box_error(Error::new(Errors::InvalidRequest)) };
             }
-            return;
+            return false;
         }
         Some(unsafe { std::slice::from_raw_parts(value, value_len as usize) })
     } else {
@@ -1758,7 +1887,7 @@ pub unsafe extern "C" fn kafka_producer_Producer_send_async(
             if !out_error.is_null() {
                 unsafe { *out_error = box_error(e) };
             }
-            return;
+            return false;
         },
     };
 
@@ -1769,7 +1898,7 @@ pub unsafe extern "C" fn kafka_producer_Producer_send_async(
 
     // Count the send before it is visible on the channel, so a concurrent
     // flush/close drain can never observe a depth lower than reality.
-    handle.queued_sends.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+    let depth_before = handle.queued_sends.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
     if handle.submit_tx.send(request).is_err() {
         handle.queued_sends.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
         // Submission task gone (producer torn down): report synchronously. The
@@ -1777,12 +1906,99 @@ pub unsafe extern "C" fn kafka_producer_Producer_send_async(
         if !out_error.is_null() {
             unsafe { *out_error = box_error(Error::local_illegal_state("producer is closed")) };
         }
-        return;
+        return false;
     }
 
     if !out_error.is_null() {
         unsafe { *out_error = std::ptr::null_mut() };
     }
+    // "Full" is judged on the depth this send produced, not on the live counter:
+    // the submission task may already have drained below the bound again, but the
+    // caller asked whether *its* send crossed it, and `on_space_available` answers
+    // the live question when it is consulted.
+    depth_before + 1 >= MAX_QUEUED_SENDS
+}
+
+/// Registers a one-shot bell to ring once the number of records queued for the
+/// submission task drops below the bound that made
+/// [`kafka_producer_Producer_send_async`] return `true`.
+///
+/// Returns `true` — **without** storing `callback` — when space is already
+/// available (the depth is below `MAX_QUEUED_SENDS`), so the caller may queue
+/// again immediately and `callback` will **never** be invoked. Returns `false`
+/// when the caller must wait: `callback(user_data)` then fires **exactly once**,
+/// on the producer's dispatcher thread, as soon as a queued send is handed to the
+/// producer and the depth falls below the bound — or from
+/// [`kafka_producer_Producer_destroy`] if the producer is torn down first, so a
+/// registered bell is never leaked.
+///
+/// The check and the registration happen under one lock shared with the
+/// submission task's decrement, so there is no window in which the depth drops
+/// after the check but before the registration (no lost wakeup).
+///
+/// # Safety
+///
+/// `producer` must be a valid handle, or null (null reports space available, since
+/// there is nothing to wait for).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_producer_Producer_on_space_available(
+    producer: *mut kafka_producer_Producer_t,
+    callback: kafka_producer_Producer_on_space_available_callback_t,
+    user_data: *mut std::ffi::c_void,
+) -> bool {
+    if producer.is_null() {
+        return true;
+    }
+    let handle = unsafe { producer_handle(producer) };
+    let mut waiters = handle.space_waiters.lock().unwrap();
+    if handle.queued_sends.load(std::sync::atomic::Ordering::Acquire) < MAX_QUEUED_SENDS {
+        return true;
+    }
+    waiters.push(SpaceWaiter { callback, user_data });
+    false
+}
+
+/// **Test-only hook.** Pauses (`paused == true`) or resumes the producer's
+/// submission task, the task that hands records queued by
+/// [`kafka_producer_Producer_send_async`] / [`kafka_producer_Producer_send_batch_async`]
+/// to the producer.
+///
+/// While paused the task stops handing items to the producer (it holds at most
+/// the one item it has already taken off the submission channel), so async sends
+/// accumulate — counted in the depth that drives `send_async`'s `bool` return and
+/// [`kafka_producer_Producer_on_space_available`] — which lets a test build up
+/// backpressure deterministically against a mock that would otherwise accept
+/// every record instantly. Resuming drains the accumulated sends in order.
+///
+/// `close` / `close_async` / `destroy` clear the pause themselves, so a paused
+/// producer can still be torn down; `flush` and the transaction-control calls do
+/// **not**, and would wait for the resume. Not for production use.
+///
+/// # Safety
+///
+/// `producer` must be a valid handle, or null (no-op).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_producer_Producer_test_set_paused(
+    producer: *mut kafka_producer_Producer_t,
+    paused: bool,
+) {
+    if producer.is_null() {
+        return;
+    }
+    let handle = unsafe { producer_handle(producer) };
+    handle.test_paused.store(paused, std::sync::atomic::Ordering::Release);
+    if !paused {
+        handle.pause_notify.notify_one();
+    }
+}
+
+/// Clears the test-only submission-task pause so a teardown path (`close`,
+/// `close_async`, `destroy`) that waits on the task cannot hang behind it.
+/// `notify_one` stores a permit when the task is not currently parked, so the
+/// wake is never lost.
+fn release_test_pause(handle: &ProducerHandle) {
+    handle.test_paused.store(false, std::sync::atomic::Ordering::Release);
+    handle.pause_notify.notify_one();
 }
 
 /// Asynchronously sends a batch of records, invoking `callback` once per record
@@ -2770,6 +2986,8 @@ pub unsafe extern "C" fn kafka_producer_Producer_close(
     // shuts down, each queued `send` then fails `ensure_not_closed`, and the
     // record is lost. As in `flush`, drain without holding the `kind` lock.
     let handle = unsafe { producer_handle(producer) };
+    // A test-paused submission task would never reach the drain's barrier.
+    release_test_pause(handle);
     let producer_mtx = unsafe { producer_ref(producer) };
     let rt_handle = producer_mtx.lock().unwrap().runtime().handle().clone();
     if let Err(e) = drain_submitted_sends_via(&handle.queued_sends, &handle.submit_tx, &rt_handle) {
@@ -2815,6 +3033,11 @@ fn flush_or_close_async(
     }
 
     let handle = unsafe { producer_handle(producer) };
+    if is_close {
+        // As in the sync `close`: a test-paused submission task would never reach
+        // the drain's barrier below. `flush_async` deliberately does not resume it.
+        release_test_pause(handle);
+    }
     let completion = handle.completion_tx.clone();
     let runtime = handle.kind.lock().unwrap().runtime().handle().clone();
     let ptr = producer as usize;
@@ -4782,6 +5005,9 @@ mod tests {
             pending_tasks: Mutex::new(Vec::new()),
             txn_control_busy: std::sync::atomic::AtomicBool::new(false),
             queued_sends: std::sync::atomic::AtomicUsize::new(1),
+            space_waiters: std::sync::Mutex::new(Vec::new()),
+            test_paused: std::sync::atomic::AtomicBool::new(false),
+            pause_notify: tokio::sync::Notify::new(),
         });
         Box::into_raw(handle) as *mut kafka_producer_Producer_t
     }
