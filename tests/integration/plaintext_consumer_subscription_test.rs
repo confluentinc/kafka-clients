@@ -1034,6 +1034,7 @@ async fn setup_subscribe_invalid_topic(consumer: &mut BytesConsumer) {
 
     let deadline = Instant::now() + Duration::from_secs(5);
     let mut invalid_topic_err = None;
+    let mut last_other_err = None;
     while Instant::now() < deadline {
         match consumer.poll(Duration::from_millis(500)).await {
             Ok(_) => continue,
@@ -1041,12 +1042,19 @@ async fn setup_subscribe_invalid_topic(consumer: &mut BytesConsumer) {
                 invalid_topic_err = Some(e);
                 break;
             },
-            // Java: `fail("An InvalidTopicException should be thrown. But " +
-            // e.getClass() + " is thrown")`.
-            Err(other) => panic!("An InvalidTopicException should be thrown. But {other:?} is thrown"),
+            // Java's `fail("An InvalidTopicException should be thrown. But " +
+            // e.getClass() + " is thrown")` runs inside the `waitForCondition`
+            // lambda, and `retryOnExceptionWithTimeout` (TestUtils.java:486-507)
+            // catches that `AssertionError` and retries until the 5s deadline,
+            // rethrowing only the last one. So a non-InvalidTopic error is
+            // recorded and polling continues; it fails the test only on timeout.
+            Err(other) => last_other_err = Some(other),
         }
     }
-    let e = invalid_topic_err.expect("An InvalidTopicException should be thrown.");
+    let e = invalid_topic_err.unwrap_or_else(|| match last_other_err {
+        Some(other) => panic!("An InvalidTopicException should be thrown. But {other:?} is thrown"),
+        None => panic!("An InvalidTopicException should be thrown."),
+    });
     // Java line 691: `assertEquals("Invalid topics: [" + invalidTopicName + "]", ...)`.
     assert_eq!(e.kafka_error().message(), format!("Invalid topics: [{invalid_topic_name}]"));
     assert_eq!(e.invalid_topics(), &HashSet::from([invalid_topic_name.to_string()]));
