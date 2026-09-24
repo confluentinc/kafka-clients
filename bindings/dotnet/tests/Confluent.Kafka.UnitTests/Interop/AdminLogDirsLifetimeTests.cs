@@ -191,8 +191,7 @@ public sealed class AdminLogDirsLifetimeTests
     /// default <c>ReplicaLogDirInfo</c> would report a current log directory of
     /// <see langword="null"/> — indistinguishable from the real client's answer for a
     /// replica the broker genuinely does not host — so the binding would be inventing data
-    /// it does not have. The same reasoning keeps <see cref="LogDirDescription"/> free of a
-    /// faked <c>IsCordoned</c>. What is asserted is therefore that the key <em>faults</em>
+    /// it does not have. What is asserted is therefore that the key <em>faults</em>
     /// rather than hanging or being invented.
     /// </para>
     /// <para>

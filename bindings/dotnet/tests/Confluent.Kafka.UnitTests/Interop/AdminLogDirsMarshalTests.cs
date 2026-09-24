@@ -260,7 +260,8 @@ public sealed class AdminLogDirsMarshalTests
             offline,
             new Dictionary<TopicPartition, ReplicaInfo>(),
             totalBytes: null,
-            usableBytes: null);
+            usableBytes: null,
+            isCordoned: false);
 
         Assert.Same(offline, description.Error);
         Assert.Empty(description.ReplicaInfos);

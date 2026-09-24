@@ -330,41 +330,26 @@ public sealed class PublicAdminLogDirsShapeParityTests
     }
 
     /// <summary>
-    /// ⚠⚠ <b><c>IsCordoned</c> IS ABSENT, and this test is what keeps it absent</b>
-    /// (decision D15, §15 Gap 1).
+    /// <c>IsCordoned</c> is present and public — Java's <c>isCordoned()</c>
+    /// (<c>LogDirDescription.java:94</c>), carried by the C ABI's
+    /// <c>kafka_admin_LogDirDescription_is_cordoned</c>.
     /// </summary>
     /// <remarks>
     /// <para>
-    /// Java has <c>isCordoned()</c> (<c>LogDirDescription.java:94</c>) and the Rust core
-    /// implements it, but the C ABI exports no accessor for it, so the binding cannot know
-    /// the value. A stubbed <c>false</c> would assert <em>"this log directory is not
-    /// cordoned"</em> when the truth is <em>"the binding cannot know"</em> — and a wrong
-    /// answer is worse than an absent one, because a caller cannot tell it apart from a real
-    /// one. <b>Absence is the honest encoding.</b>
+    /// ⚠ <b>The sweep carries its own positive control.</b> An assertion over a member walk
+    /// is vacuously true if the walk finds nothing at all, so
+    /// <see cref="LogDirDescription.TotalBytes"/> and <see cref="LogDirDescription.Error"/>
+    /// are asserted to be found by the <em>same</em> walk.
     /// </para>
     /// <para>
-    /// ⚠ <b>The absence has to be pinned, because the natural "fix" is to add the fake.</b>
-    /// A later phase reading <c>definition-of-done.md</c> §2 ("are all methods implemented?")
-    /// would see a missing Java member and complete it with the only value available. This
-    /// turns that red.
-    /// </para>
-    /// <para>
-    /// ⚠ <b>The sweep carries its own positive control.</b> An absence assertion over a
-    /// member walk is vacuously true if the walk finds nothing at all, so
-    /// <see cref="LogDirDescription.TotalBytes"/> is asserted to be found by the <em>same</em>
-    /// walk. Without that, deleting the type's members would leave this test green.
-    /// </para>
-    /// <para>
-    /// ⚠ <b>The constructor is <see langword="internal"/> although Java's three are
-    /// public</b>, and that is part of the same decision rather than an oversight: Java's
-    /// two shorter constructors (<c>:38</c>, <c>:42</c>) default <c>isCordoned</c> to false,
-    /// so a public C# constructor would either take a parameter the type cannot store or
-    /// silently bake in the fake this decision exists to avoid. Only the result marshaller
-    /// builds one.
+    /// ⚠ <b>The constructor stays <see langword="internal"/> although Java's three are
+    /// public.</b> Only the result marshaller builds one, consistent with the sibling admin
+    /// result types; publishing it is a separate decision, not a consequence of this member
+    /// landing.
     /// </para>
     /// </remarks>
     [Fact]
-    public void LogDirDescription_HasNoCordonedMember_AndTheSweepThatProvesItFindsTheOthers()
+    public void LogDirDescription_HasTheCordonedMember_AndTheSweepThatProvesItFindsTheOthers()
     {
         const BindingFlags Everything =
             BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.Static
@@ -374,23 +359,21 @@ public sealed class PublicAdminLogDirsShapeParityTests
             .Select(member => member.Name)
             .ToArray();
 
-        // ⚠ THE ASSERTION THIS TEST EXISTS FOR — nothing named for the flag, in any casing,
-        // at any accessibility, including a backing field.
-        Assert.DoesNotContain(
-            members,
-            name => name.IndexOf("Cordon", StringComparison.OrdinalIgnoreCase) >= 0);
+        // ⚠ THE ASSERTION THIS TEST EXISTS FOR — the Java member is present, public, and a
+        // plain bool rather than a nullable one.
+        Assert.Contains(members, name => string.Equals(name, nameof(LogDirDescription.IsCordoned), StringComparison.Ordinal));
+        PropertyInfo? cordoned = typeof(LogDirDescription).GetProperty(
+            nameof(LogDirDescription.IsCordoned),
+            BindingFlags.Public | BindingFlags.Instance);
+        Assert.NotNull(cordoned);
+        Assert.Equal(typeof(bool), cordoned!.PropertyType);
 
-        // The positive control: the same walk does find the members that are there, so the
-        // assertion above is about absence rather than about an empty walk.
+        // The positive control: the same walk does find the other members, so the assertion
+        // above is about this member rather than about a walk that returns everything.
         Assert.Contains(members, name => string.Equals(name, nameof(LogDirDescription.TotalBytes), StringComparison.Ordinal));
         Assert.Contains(members, name => string.Equals(name, nameof(LogDirDescription.Error), StringComparison.Ordinal));
 
-        // Nor may it reappear anywhere else on the exported surface under another owner.
-        Assert.DoesNotContain(
-            typeof(IAdmin).Assembly.GetExportedTypes(),
-            type => type.Name.IndexOf("Cordon", StringComparison.OrdinalIgnoreCase) >= 0);
-
-        // The constructor's accessibility is part of the same decision — see the remarks.
+        // The constructor's accessibility is unchanged — see the remarks.
         Assert.Empty(typeof(LogDirDescription).GetConstructors());
     }
 
@@ -421,8 +404,11 @@ public sealed class PublicAdminLogDirsShapeParityTests
         Assert.Equal(typeof(bool), typeof(ReplicaInfo).GetProperty("IsFuture")!.PropertyType);
 
         Assert.Equal(
-            new[] { "Error", "ReplicaInfos", "TotalBytes", "UsableBytes" },
+            new[] { "Error", "IsCordoned", "ReplicaInfos", "TotalBytes", "UsableBytes" },
             PropertyNames(typeof(LogDirDescription)));
+
+        // ⚠ Java's isCordoned() (:94) is a plain boolean, not an Optional — so bool, not bool?.
+        Assert.Equal(typeof(bool), typeof(LogDirDescription).GetProperty("IsCordoned")!.PropertyType);
 
         // ⚠ Java's OptionalLong has no netstandard2.0 equivalent, so the mapping is long? —
         // and the ABI's -1 becomes null. A plain long would erase the empty case.

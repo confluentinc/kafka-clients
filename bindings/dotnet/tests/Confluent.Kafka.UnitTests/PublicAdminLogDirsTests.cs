@@ -68,6 +68,48 @@ public sealed class PublicAdminLogDirsTests
     }
 
     /// <summary>
+    /// <see cref="LogDirDescription.IsCordoned"/> arrives through the marshal path, read
+    /// from <c>kafka_admin_LogDirDescription_is_cordoned</c>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// ⚠ <b>Only the <c>false</c> value is reachable broker-free, and that is a property of
+    /// the mock rather than of this binding.</b> The Rust mock builds every description
+    /// through the four-argument constructor, which defaults the flag to <c>false</c>
+    /// (<c>mock_admin_client.rs:1266</c> → <c>log_dir_description.rs:65</c>), and Java's own
+    /// <c>MockAdminClient</c> has no cordon support either (<c>grep -ci cordon</c> over it is
+    /// <b>0</b>, against a control-positive <c>describeLogDirs</c> of <b>1</b>) — so the
+    /// Rust mock is faithful and seeding a <c>true</c> here would mean changing the core.
+    /// </para>
+    /// <para>
+    /// ⚠ A <c>false</c> read alone cannot distinguish "the accessor was read" from "the
+    /// field was never assigned", so the other two halves are pinned elsewhere: the
+    /// <c>[return: MarshalAs(UnmanagedType.I1)]</c> on the import by
+    /// <c>AdminNativeMethodsMarshallingTests.EveryAdminBoolReturn_IsMarshalledAsI1</c>, and
+    /// both values of the property and its rendering by
+    /// <see cref="TheRenderings_MatchJavas"/>. What this test adds is that the real walk
+    /// reads the accessor without throwing or mis-marshalling, on the same path a broker
+    /// would drive.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public async Task DescribeLogDirs_CarriesTheCordonedFlag()
+    {
+        using MockAdminClient admin = new MockAdminClient();
+
+        await TestTimeout.Run(() => admin.CreateTopics(new[] { new NewTopic(Topic, 1, 1) }).All(), s_deadline);
+
+        DescribeLogDirsResult result = admin.DescribeLogDirs(new[] { 0 });
+
+        IReadOnlyDictionary<string, LogDirDescription> directories =
+            await TestTimeout.Run(() => result.Descriptions[0], s_deadline);
+
+        LogDirDescription description = Assert.Contains(DefaultLogDir, directories);
+        Assert.False(description.IsCordoned);
+        Assert.Contains("isCordoned=false", description.ToString(), StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// ⚠ <b>A broker with nothing on it succeeds with an EMPTY map</b> — not a fault, and
     /// not a missing key. Java's result carries a future per requested broker either way.
     /// </summary>
@@ -232,11 +274,11 @@ public sealed class PublicAdminLogDirsTests
     /// <see cref="LogDirDescription"/>'s empty <c>OptionalLong</c>s.
     /// </summary>
     /// <remarks>
-    /// ⚠ Java's <c>LogDirDescription.toString()</c> ends with <c>, isCordoned=…)</c>
-    /// (<c>LogDirDescription.java:105</c>). It is omitted here for the same reason the
-    /// accessor is (decision D15, §15 Gap 1): rendering a value the binding cannot know
-    /// would be a fabrication in diagnostic output, which is exactly where a reader would
-    /// trust it.
+    /// ⚠ <c>isCordoned</c> is Java's <b>last</b> field (<c>LogDirDescription.java:105</c>),
+    /// after <c>usableBytes</c>, and Java renders a <c>boolean</c> <b>lowercase</b>. C#'s
+    /// <c>bool.ToString()</c> yields <c>True</c>/<c>False</c>, so the literal lowercase text
+    /// is asserted here for both values — formatting the raw <c>bool</c> compiles, reads
+    /// naturally, and is wrong.
     /// </remarks>
     [Fact]
     public void TheRenderings_MatchJavas()
@@ -248,19 +290,22 @@ public sealed class PublicAdminLogDirsTests
             error: null,
             new Dictionary<TopicPartition, ReplicaInfo>(),
             totalBytes: null,
-            usableBytes: null);
+            usableBytes: null,
+            isCordoned: false);
         Assert.Equal(
-            "LogDirDescription(replicaInfos={}, error=null, totalBytes=empty, usableBytes=empty)",
+            "LogDirDescription(replicaInfos={}, error=null, totalBytes=empty, usableBytes=empty, "
+                + "isCordoned=false)",
             empty.ToString());
 
         LogDirDescription sized = new LogDirDescription(
             error: null,
             new Dictionary<TopicPartition, ReplicaInfo> { [new TopicPartition("t", 0)] = new ReplicaInfo(1, 2, false) },
             totalBytes: 100,
-            usableBytes: 0);
+            usableBytes: 0,
+            isCordoned: true);
         Assert.Equal(
             "LogDirDescription(replicaInfos={t-0=ReplicaInfo(size=1, offsetLag=2, isFuture=False)}, "
-                + "error=null, totalBytes=100, usableBytes=0)",
+                + "error=null, totalBytes=100, usableBytes=0, isCordoned=true)",
             sized.ToString());
     }
 
