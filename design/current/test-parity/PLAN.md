@@ -237,6 +237,15 @@ Binding gaps found: gRPC servers (python `grpc_translate.py`, C `server.cc`) ret
 `serialized_key_size`/`serialized_value_size` = -1, and the Python server sends a
 null value as `b""` (Phase 2 / Critic 66).
 
+## Production divergences found (not fixed — need a decision)
+
+- **Background auto-commit (Phase 17 / Critic 81):** Rust `CommitRequestManager::poll`
+  (`src/consumer/internals/commit_request_manager.rs:1389`) calls `maybe_auto_commit_async`
+  on every background-loop iteration. Java's `CommitRequestManager.poll` never auto-commits;
+  auto-commit only fires from app-side `poll()` (`CommitRequestManager.java:181-203`, via the
+  app-thread poll event). Effect: Rust commits ~auto.commit.interval after construction even if
+  the app stops polling. Not changed on this branch (behaviour change outside test scope).
+
 ## Run log
 
 (Manager appends one line per loop iteration.)
@@ -261,3 +270,4 @@ null value as `b""` (Phase 2 / Critic 66).
 - Phase 15 / Actor 79: cd653ef1 (Kraft isolated controllers, dedicated clusters, lifecycle API), 1e630fe0 (smoke tests). Full suite 265 passed / 3 ignored x2. Critic 79 reviewing.
 - Phase 15: Critic 79 1 finding (wait_for_ready_brokers not pinned per broker) → fixed 1ba63a5c (raw Metadata v12 per broker); re-review clean. Phase 15 DONE.
 - Phase 16 / Actor 80: 5be6ef9c (un-ignored commit-async-during-close w/ real shutdown), 4be18e85 (testLeaderEpoch), 220e220b (harness BrokerProxy: stopped broker refuses/closes conns like in-JVM broker; fixes Docker Desktop forwarder hangs), 4f50cf28 (coordinator failover, close on broker shutdown). Full suite 269 passed / 2 ignored. Critic 80: clean (proxy not masking a client bug: Java close() default 30s timer). Phase 16 DONE.
+- Phase 17 / Actor 81: 0289681f, 738b9ba9, 7e16d75a (4 ConsumerBounceTest arms, 5/5 each). Critic 81: 1 finding (coordinator lookup relied on Rust-only background auto-commit) → fixing in test; production divergence logged above.
