@@ -63,10 +63,11 @@
 //!     cluster. Java may stop the broker half of a `CO_KRAFT` node; a combined
 //!     container cannot stop its broker without its controller. Pooled clusters
 //!     are a Rust-only optimization and must never carry a stopped broker.
-//!   - `start_broker` returns once the broker answers `DescribeCluster` listing
-//!     itself (Java's `startup()` returns once registered and unfenced), and
-//!     `wait_for_ready_brokers` checks the *alive* brokers from each alive
-//!     broker's view rather than reading metadata caches in-process.
+//!   - `start_broker` returns once the broker serves requests and is listed
+//!     alive by `DescribeCluster` (Java's `startup()` returns once registered
+//!     and unfenced), and `wait_for_ready_brokers` sends a `Metadata` request
+//!     directly to each alive broker instead of reading metadata caches
+//!     in-process, and expects the *alive* set rather than all brokers.
 //!   - `CO_KRAFT` node ids stay 1-based (pre-existing; Java uses 0-based).
 
 use std::borrow::Cow;
@@ -993,9 +994,10 @@ impl KafkaCluster {
     /// [`Self::shutdown_broker`] and returns once it is serving requests.
     ///
     /// Java's `BrokerServer.startup()` blocks until the broker has registered
-    /// and been unfenced; the equivalent wait here is until the restarted
-    /// broker, contacted on its own listener, reports itself alive in
-    /// `DescribeCluster`. The broker comes back with the same node id, host
+    /// and been unfenced; the equivalent wait here is until an admin client
+    /// bootstrapped only at the restarted broker — so its bootstrap `Metadata`
+    /// is answered by that broker, proving it serves requests — sees it alive
+    /// in `DescribeCluster` (which may be answered by any broker). The broker comes back with the same node id, host
     /// ports and log directory — see the module docs.
     ///
     /// # Panics
@@ -1027,9 +1029,10 @@ impl KafkaCluster {
     ///
     /// Java waits for the controller to count the brokers as ready and then for
     /// every broker's metadata cache to hold every broker alive. Over the wire
-    /// the same condition is: `DescribeCluster` — answered from the broker's
-    /// metadata cache, which lists only unfenced brokers — returns exactly
-    /// [`Self::alive_broker_ids`] from each alive broker. Java counts all
+    /// the same condition is: a `Metadata` request sent **directly to each
+    /// alive broker** (its own connection, not a least-loaded pick) returns
+    /// exactly [`Self::alive_broker_ids`] — a broker answers `Metadata` from its
+    /// metadata cache, which lists only unfenced brokers. Java counts all
     /// brokers because its callers only wait with every broker running; the
     /// alive set makes this also usable while some broker is stopped.
     ///
@@ -1038,17 +1041,98 @@ impl KafkaCluster {
     /// Panics if the brokers do not converge within [`BROKER_READY_TIMEOUT`].
     pub async fn wait_for_ready_brokers(&self) {
         let alive = self.alive_broker_ids();
+        let deadline = tokio::time::Instant::now() + BROKER_READY_TIMEOUT;
         for broker_id in &alive {
-            wait_until_broker_sees(&self.broker_bootstrap_servers(*broker_id), |view| *view == alive)
-                .await
-                .unwrap_or_else(|last| {
-                    panic!(
-                        "brokers {alive:?} not ready within {BROKER_READY_TIMEOUT:?}: \
-                         broker {broker_id} last saw {last}"
-                    )
-                });
+            let address = self.broker_bootstrap_servers(*broker_id);
+            loop {
+                let last = match broker_metadata_view(&address).await {
+                    Ok(view) if view == alive => break,
+                    Ok(view) => format!("{view:?}"),
+                    Err(err) => format!("error: {err}"),
+                };
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "brokers {alive:?} not ready within {BROKER_READY_TIMEOUT:?}: broker {broker_id} last saw {last}"
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            }
         }
     }
+}
+
+/// Metadata version for [`broker_metadata_view`]: v12 is inside the range
+/// every AK 4.x broker supports (v0-v3 were removed in 4.0), and with an empty
+/// topic list it asks for brokers only.
+const READY_CHECK_METADATA_VERSION: i16 = 12;
+
+/// The broker ids in the metadata cache of the broker at `address`, read with
+/// a `Metadata` request over a dedicated connection to that broker alone —
+/// the per-broker `metadataCache` check of Java's
+/// `KafkaClusterTestKit.waitForReadyBrokers`.
+async fn broker_metadata_view(address: &str) -> Result<BTreeSet<i32>, String> {
+    use confluent_kafka::common::network::{NetworkSend, PlaintextChannelBuilder, Selectable, Selector};
+    use confluent_kafka::common::protocol::ByteBufferAccessor;
+    use confluent_kafka::common::requests::{
+        ConcreteResponse, MetadataRequestBuilder, RequestBuilder, RequestHeader, RequestHeaderOptionsBuilder,
+    };
+
+    const NODE: &str = "ready-check";
+    const POLL_MS: i64 = 500;
+    const MAX_POLLS: usize = 20;
+    let buffer_size = <Selector as Selectable>::USE_DEFAULT_BUFFER_SIZE;
+
+    let addr: std::net::SocketAddr = address.parse().map_err(|err| format!("bad address {address}: {err}"))?;
+    let mut selector =
+        Selector::with_defaults(Selector::NO_IDLE_TIMEOUT_MS, Box::new(PlaintextChannelBuilder::new(None)));
+    let result = async {
+        selector
+            .connect(NODE, addr, "localhost", buffer_size, buffer_size)
+            .await
+            .map_err(|err| format!("connect: {err}"))?;
+
+        let mut builder = MetadataRequestBuilder::with_topics_allow_auto_topic_creation_version(
+            Some(&[]),
+            false,
+            READY_CHECK_METADATA_VERSION,
+        );
+        let mut request = builder
+            .build_version(READY_CHECK_METADATA_VERSION)
+            .map_err(|err| format!("build: {err}"))?;
+        let header = RequestHeader::with_options(
+            RequestHeaderOptionsBuilder::new()
+                .set_request_api_key(builder.api_key())
+                .set_request_version(READY_CHECK_METADATA_VERSION)
+                .set_client_id("cluster-lifecycle")
+                .set_correlation_id(1)
+                .build()
+                .map_err(|err| format!("header: {err}"))?,
+        )
+        .map_err(|err| format!("header: {err}"))?;
+        let send = request.to_send(&header).map_err(|err| format!("serialize: {err}"))?;
+        selector
+            .send(NetworkSend::new(NODE, Box::new(send)))
+            .map_err(|err| format!("send: {err}"))?;
+
+        for _ in 0..MAX_POLLS {
+            selector.poll(POLL_MS).await.map_err(|err| format!("poll: {err}"))?;
+            if let Some(receive) = selector.completed_receives().first() {
+                let payload = receive.payload().ok_or("response without payload")?.to_vec();
+                let response = ConcreteResponse::parse_response(&mut ByteBufferAccessor::new(payload), &header)
+                    .map_err(|err| format!("parse: {err}"))?;
+                let ConcreteResponse::Metadata(metadata) = response else {
+                    return Err("not a Metadata response".to_string());
+                };
+                return Ok(metadata.data().brokers.iter().map(|broker| broker.node_id).collect());
+            }
+            if !selector.disconnected().is_empty() {
+                return Err("disconnected".to_string());
+            }
+        }
+        Err("no response".to_string())
+    }
+    .await;
+    selector.close().await;
+    result
 }
 
 /// How long `docker stop` lets a broker run its controlled shutdown before
@@ -1064,6 +1148,10 @@ pub const BROKER_READY_TIMEOUT: std::time::Duration = CONTAINER_STARTUP_TIMEOUT;
 
 /// Polls `DescribeCluster` through an admin client bootstrapped **only** at
 /// `bootstrap` until `condition` holds for the set of broker ids it reports.
+///
+/// Only the bootstrap `Metadata` is pinned to `bootstrap`; each
+/// `DescribeCluster` goes to the least-loaded known broker. For a per-broker
+/// view use [`broker_metadata_view`].
 ///
 /// Returns `Err` with the last observed view (or error) on
 /// [`BROKER_READY_TIMEOUT`].
