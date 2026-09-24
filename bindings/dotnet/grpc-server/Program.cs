@@ -75,6 +75,11 @@ internal static class Program
         {
             builder.Services.AddSingleton<ProducerServiceImpl>();
             builder.Services.AddSingleton<ConsumerServiceImpl>();
+
+            // Admin is registered in the SYNC branch ONLY (M15/P12 D1): .NET has no
+            // IAsyncAdmin, so an async arm would drive the same AdminServiceImpl over the
+            // same single IAdmin — byte-identical managed code for zero extra coverage.
+            builder.Services.AddSingleton<AdminServiceImpl>();
         }
 
         WebApplication app = builder.Build();
@@ -87,6 +92,7 @@ internal static class Program
         {
             app.MapGrpcService<ProducerServiceImpl>();
             app.MapGrpcService<ConsumerServiceImpl>();
+            app.MapGrpcService<AdminServiceImpl>();
         }
 
         app.Start();
@@ -149,6 +155,7 @@ internal static class Program
             {
                 app.Services.GetRequiredService<ConsumerServiceImpl>().Dispose();
                 app.Services.GetRequiredService<ProducerServiceImpl>().Dispose();
+                app.Services.GetRequiredService<AdminServiceImpl>().Dispose();
             }
         }
         catch (Exception ex)

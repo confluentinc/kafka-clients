@@ -186,6 +186,18 @@ internal static class Translate
         Message = $"unknown producer_id {producerId}",
     };
 
+    /// <summary>
+    /// The admin sibling of <see cref="UnknownConsumer"/> / <see cref="UnknownProducer"/>
+    /// (M15/P12). Python parity — <c>grpc_server.py</c>'s <c>AdminService._unknown_admin</c>
+    /// returns the same <c>{code=LOCAL_ILLEGAL_STATE, "unknown admin_id N"}</c>, which the
+    /// envelope places in the response's top-level <c>error</c>.
+    /// </summary>
+    internal static Proto.KafkaError UnknownAdmin(ulong adminId) => new Proto.KafkaError
+    {
+        Code = LocalIllegalStateCode,
+        Message = $"unknown admin_id {adminId}",
+    };
+
     /// <summary>Proto <c>TopicPartition</c> -&gt; binding <see cref="TopicPartition"/>.</summary>
     internal static TopicPartition Tp(Proto.TopicPartition partition) =>
         new TopicPartition(partition.Topic, partition.Partition);
