@@ -226,6 +226,26 @@ and give it the real broker shutdown Java performs.
 `TransactionsBounceTest.testWithGroupMetadata` (scale down only if needed, documented);
 `TransactionsTest.testBumpTransactionalEpochWithTV2Enabled` if Phase 15 supports it.
 
+## Phase 20 — Harness hardening (Actor/Critic 84)
+
+- Cluster start sometimes panics at `kafka_cluster.rs` `start_with_config` on a non-retried
+  Docker API error (observed: "failed to list networks: Timeout"; once more with an
+  uncaptured error). Classify Docker daemon/API timeouts as transient and retry; include
+  the error text in the panic.
+- A failed start attempt can leave broker containers in Docker `Created` state — reap
+  them (and the attempt's network) on the failure path.
+- Verify with repeated dedicated-cluster starts.
+
+## Phase 21 — Transaction-version arms (Actor/Critic 85)
+
+`Admin::update_features(transaction.version, SafeDowngrade)` on a dedicated cluster works
+(Phase 18). Translate the skipped TV1 (and TV0 if the downgrade is accepted) arms:
+`ProducerIntegrationTest` testTransactionWithAndWithoutSend /
+testTransactionWithInvalidSendAndEndTxnRequestSent / testTransactionWithSendOffset (TV0, TV1),
+`TransactionsExpirationTest` TV1 arms, `TransactionsTest.testBumpTransactionalEpochWithTV2Disabled`
+if it needs no broker internals, `TransactionsTest.testEmptyAbortAfterCommit` TV1 row. Update
+the "TV2 only" comments left in Phases 5-9.
+
 ## Later (not yet scheduled)
 
 Stale-rationale skips (consumer metrics tests, compressed halves, rebalance
@@ -274,3 +294,4 @@ state (seen once in Phase 17; removed manually) — reap them on the failure pat
 - Phase 16 / Actor 80: 5be6ef9c (un-ignored commit-async-during-close w/ real shutdown), 4be18e85 (testLeaderEpoch), 220e220b (harness BrokerProxy: stopped broker refuses/closes conns like in-JVM broker; fixes Docker Desktop forwarder hangs), 4f50cf28 (coordinator failover, close on broker shutdown). Full suite 269 passed / 2 ignored. Critic 80: clean (proxy not masking a client bug: Java close() default 30s timer). Phase 16 DONE.
 - Phase 17 / Actor 81: 0289681f, 738b9ba9, 7e16d75a (4 ConsumerBounceTest arms, 5/5 each). Critic 81: 1 finding (coordinator lookup relied on Rust-only background auto-commit) → fixing in test; production divergence logged above.
 - Phase 17: fixup f2bdd189 (coordinator via __consumer_offsets p0 leader). Phase 17 DONE.
+- Phase 18 / Actor 82: 2f3771a9 (NotEnoughReplicas, follower shutdown), a6a2ecbb (4 txn timeouts, failure-to-fence TV2). Critic 82: 1 finding (TV2 fence row vacuous; TV1 reachable via update_features) → fixed 8370c280 (TV1 row added, downgrade works). Phase 18 DONE. Added Phases 20 (harness hardening) and 21 (TV0/TV1 arms).
