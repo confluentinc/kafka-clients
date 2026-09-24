@@ -130,6 +130,7 @@ impl WorkloadSpec {
         format!("{}-{}-{}", role, self.backend.label(), self.instance)
     }
 }
+pub type TopicIds = Arc<std::sync::Mutex<std::collections::HashMap<String, Uuid>>>;
 
 /// Immutable per-run context handed to every workload.
 #[derive(Clone)]
@@ -147,16 +148,12 @@ pub struct WorkloadContext {
     /// All topics in the run. Consumers subscribe to the full set (librdkafka
     /// passes every `-t` to each consumer); producers use only [`Self::topic`].
     pub topics: Vec<String>,
-    /// Current topic id, for the physical `(topic_id, partition, offset)`
-    /// verification key. `Uuid::zero()` if the harness could not resolve it.
-    /// After a topic recreate the id changes, so this is the id at workload
-    /// construction; the producer stamps the id it delivered against.
-    pub topic_id: Uuid,
-    /// Per-topic current topic id (all topics in the run), for the consumer's
-    /// physical key: a consumer reads from every topic, so it maps the record's
-    /// own topic name to that topic's id. `Uuid::zero()` for any topic the
-    /// harness could not resolve.
-    pub topic_ids: std::collections::HashMap<String, Uuid>,
+    /// Per-topic current topic id (all topics in the run), for the physical
+    /// `(topic_id, partition, offset)` verification key. This is the harness's
+    /// live map, not a copy: a topic recreate changes the id, and the verifier's
+    /// `DestroyedGeneration` excusal is only sound if records produced after the
+    /// recreate carry the NEW id. Read it through [`Self::topic_id_for`].
+    pub topic_ids: TopicIds,
     pub group: String,
     pub target_rps: u32,
     /// Producer value payload size in bytes (`--msg-size`).
@@ -173,6 +170,17 @@ impl WorkloadContext {
         } else {
             &self.bootstrap
         }
+    }
+
+    /// The current id of `topic`, or `Uuid::zero()` if the harness has not
+    /// resolved it.
+    fn topic_id_for(&self, topic: &str) -> Uuid {
+        self.topic_ids
+            .lock()
+            .expect("topic_ids poisoned")
+            .get(topic)
+            .copied()
+            .unwrap_or_else(Uuid::zero)
     }
 }
 
@@ -345,8 +353,8 @@ where
         };
 
         let topic = self.ctx.topic.clone();
-        let topic_id = self.ctx.topic_id;
         let msg_size = self.ctx.msg_size;
+        let producer_label = self.label();
         let mut index: u64 = 0;
         while !stop.load(Ordering::Relaxed) {
             // Key = the 8-byte big-endian logical index (the record's logical
@@ -357,6 +365,22 @@ where
             let key = index.to_be_bytes().to_vec();
             let value = build_value(index, msg_size);
             let record = ProducerRecord::with_key(topic.clone(), Some(key), Some(value));
+            // Stamp the generation current at SEND time, not at ack time: an ack
+            // from the old generation can land after the harness has re-resolved
+            // the new id (the async-ack race), and stamping it with the new id
+            // would score a legitimately destroyed record as loss. The cost: a
+            // record sent before the re-resolve but written to the new generation
+            // (the one in flight across the delete, plus any sent between the
+            // create and the re-resolve) keeps the old id and is excused if
+            // unconsumed — a handful per recreate, not the rest of the run.
+            let topic_id = self.ctx.topic_id_for(&topic);
+            // Open the record's in-flight window BEFORE handing it to the
+            // client; the `Delivered` / `SendFailed` below closes it. The
+            // verifier derives from these that this loop never has more than
+            // one record in flight — its contract (send, await the outcome,
+            // send the next) is checked in the verdict, not assumed.
+            self.verifier
+                .record(WorkloadEvent::Sent { index, topic: topic.clone(), producer: producer_label.clone() });
             let event = match producer.send_with_callback(record, None).await {
                 Ok(future) => match future.get_timeout(Duration::from_secs(120)).await {
                     Ok(meta) => WorkloadEvent::Delivered {
@@ -437,7 +461,7 @@ where
                     // Map the record's own topic to that topic's id (a consumer
                     // reads from every topic; ids differ per topic and per
                     // recreate generation). Falls back to zero if unresolved.
-                    let topic_id = self.ctx.topic_ids.get(topic).copied().unwrap_or_else(Uuid::zero);
+                    let topic_id = self.ctx.topic_id_for(topic);
                     self.verifier.record(WorkloadEvent::Consumed {
                         index: u64::from_be_bytes(arr),
                         topic: topic.to_string(),
@@ -461,5 +485,172 @@ where
 
         let _ = consumer.commit_sync().await;
         consumer.close().await.expect("chaos consumer close failed");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use confluent_kafka::common::KafkaError;
+    use confluent_kafka::producer::MockProducer;
+
+    use super::*;
+    use crate::common::callback_log::ProducerCallbackLog;
+    use crate::verifier::{ConservationVerifier, ExpectedLossHint};
+
+    fn ctx_with(topic_ids: TopicIds) -> WorkloadContext {
+        WorkloadContext {
+            bootstrap: String::new(),
+            container_bootstrap: String::new(),
+            topic: "t".into(),
+            topics: vec!["t".into()],
+            topic_ids,
+            group: String::new(),
+            target_rps: 0,
+            msg_size: 0,
+            commit_mode: CommitMode::Sync,
+        }
+    }
+
+    /// Backend factory over the crate's `MockProducer` (auto-complete: every
+    /// send is acked at once), so the REAL producer loop can be driven without
+    /// a broker.
+    struct MockFactory;
+
+    impl ProducerBackendFactory for MockFactory {
+        type Producer = MockProducer<Vec<u8>, Vec<u8>>;
+
+        fn name(&self) -> &'static str {
+            "mock"
+        }
+
+        async fn create(&self, _config: HashMap<String, String>) -> Result<Self::Producer, KafkaError> {
+            Ok(MockProducer::with_auto_complete(true))
+        }
+
+        async fn create_with_callback_log(
+            &self,
+            _config: HashMap<String, String>,
+        ) -> Result<(Self::Producer, ProducerCallbackLog), KafkaError> {
+            Err(KafkaError::illegal_state("not used by the chaos producer workload"))
+        }
+    }
+
+    /// Drives the actual `ProducerWorkload::run` loop against the verifier and
+    /// checks what the verdict derives from its events: every record was `Sent`
+    /// before it was `Delivered`, the peak in flight was exactly 1, and nothing
+    /// was left open at close. Guards the emission order in the loop — a `Sent`
+    /// moved after the send, or dropped, would surface here as peak 0 or as
+    /// unsettled sends.
+    #[tokio::test]
+    async fn producer_loop_keeps_one_record_in_flight_and_settles_every_send() {
+        let ids: TopicIds = Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let mut ctx = ctx_with(ids);
+        // A non-zero rate makes the loop yield to the runtime (its `sleep`),
+        // so the stop flag below can be set while it runs.
+        ctx.target_rps = 2000;
+        let verifier = Arc::new(ConservationVerifier::new());
+        let spec = WorkloadSpec { role: Role::Producer, backend: Backend::Rust, instance: 1 };
+        let workload = Box::new(ProducerWorkload { factory: MockFactory, spec, ctx, verifier: verifier.clone() });
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let stopper = {
+            let stop = stop.clone();
+            async move {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                stop.store(true, Ordering::Relaxed);
+            }
+        };
+        tokio::join!(workload.run(stop), stopper);
+
+        let verdict = verifier.verdict(0);
+        assert!(verdict.delivered > 0, "the loop must have produced: {verdict}");
+        assert_eq!(verdict.failed_sends, 0, "{verdict}");
+        assert_eq!(verdict.max_in_flight, 1, "one record in flight at a time: {verdict}");
+        assert_eq!(verdict.unsettled_sends, 0, "every Sent must have settled by close: {verdict}");
+        assert!(
+            !verdict
+                .reasons
+                .iter()
+                .any(|r| r.starts_with("in-flight bound") || r.starts_with("unsettled sends")),
+            "no in-flight failure expected, got {:?}",
+            verdict.reasons
+        );
+    }
+
+    /// A workload context built BEFORE a recreate must see the id the harness
+    /// re-resolves AFTER it. With a startup snapshot, every post-recreate record
+    /// kept the original id; once that id was marked a destroyed generation, all
+    /// unconsumed records on the topic were excused for the rest of the run and
+    /// real loss went undetected.
+    #[test]
+    fn records_after_recreate_are_stamped_with_new_generation_and_still_checked() {
+        let old_id = Uuid::from_bytes([7u8; 16]);
+        let new_id = Uuid::from_bytes([8u8; 16]);
+        let ids: TopicIds = Arc::new(std::sync::Mutex::new(std::collections::HashMap::from([(
+            "t".to_string(),
+            old_id,
+        )])));
+        // The workload captures its context once, at startup.
+        let ctx = ctx_with(ids.clone());
+        let v = ConservationVerifier::new();
+
+        // Before the recreate: stamped with the old generation, never consumed.
+        assert_eq!(ctx.topic_id_for("t"), old_id);
+        v.record(WorkloadEvent::Delivered {
+            index: 0,
+            topic: "t".into(),
+            topic_id: ctx.topic_id_for("t"),
+            partition: 0,
+            offset: 0,
+        });
+
+        // The harness recreates the topic: re-resolves the id into the shared map
+        // and marks the old generation destroyed.
+        ids.lock().unwrap().insert("t".to_string(), new_id);
+        v.note_expected_loss(ExpectedLossHint::DestroyedGeneration(old_id));
+
+        // After the recreate: the SAME context now stamps the new generation.
+        assert_eq!(ctx.topic_id_for("t"), new_id);
+        v.record(WorkloadEvent::Delivered {
+            index: 1,
+            topic: "t".into(),
+            topic_id: ctx.topic_id_for("t"),
+            partition: 0,
+            offset: 0,
+        });
+
+        let verdict = v.verdict(1);
+        assert_eq!(
+            verdict.lost,
+            vec![("t".to_string(), 1)],
+            "the old-generation record is excused, but an unconsumed record on the new \
+             generation must still be scored as loss: {verdict}"
+        );
+        assert_eq!(verdict.expected_lost, 1);
+        assert!(!verdict.is_pass());
+    }
+
+    /// The consumer keys each record under its own topic's live id, so a
+    /// multi-topic consumer picks up a recreate of one topic without touching
+    /// the other.
+    #[test]
+    fn topic_id_for_is_per_topic_and_zero_when_unresolved() {
+        let a = Uuid::from_bytes([1u8; 16]);
+        let b = Uuid::from_bytes([2u8; 16]);
+        let ids: TopicIds = Arc::new(std::sync::Mutex::new(std::collections::HashMap::from([
+            ("t0".to_string(), a),
+            ("t1".to_string(), b),
+        ])));
+        let ctx = ctx_with(ids.clone());
+        assert_eq!(ctx.topic_id_for("t0"), a);
+        assert_eq!(ctx.topic_id_for("t1"), b);
+        assert_eq!(ctx.topic_id_for("absent"), Uuid::zero());
+
+        let b2 = Uuid::from_bytes([3u8; 16]);
+        ids.lock().unwrap().insert("t1".to_string(), b2);
+        assert_eq!(ctx.topic_id_for("t0"), a, "recreating t1 must not change t0's id");
+        assert_eq!(ctx.topic_id_for("t1"), b2);
     }
 }
