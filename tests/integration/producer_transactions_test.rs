@@ -83,13 +83,16 @@
 //!   [`test_producer_id_expiration_with_no_transactions`]
 //! - `ProducerIdExpirationTest.testTransactionAfterTransactionIdExpiresButProducerIdRemains` →
 //!   [`test_transaction_after_transaction_id_expires_but_producer_id_remains`]
-//! - `TransactionsExpirationTest.testFatalErrorAfterInvalidProducerIdMappingWithTV2` →
+//! - `TransactionsExpirationTest.testFatalErrorAfterInvalidProducerIdMappingWithTV1` /
+//!   `...WithTV2` →
+//!   [`test_fatal_error_after_invalid_producer_id_mapping_with_tv1`] /
 //!   [`test_fatal_error_after_invalid_producer_id_mapping_with_tv2`]
-//! - `TransactionsExpirationTest.testTransactionAfterProducerIdExpiresWithTV2` →
+//! - `TransactionsExpirationTest.testTransactionAfterProducerIdExpiresWithTV1` /
+//!   `...WithTV2` →
+//!   [`test_transaction_after_producer_id_expires_with_tv1`] /
 //!   [`test_transaction_after_producer_id_expires_with_tv2`]
 //!
-//! (the TV1 rows of `TransactionsExpirationTest` and
-//! `ProducerIdExpirationTest.testDynamicProducerIdExpirationMs` are not reachable
+//! (`ProducerIdExpirationTest.testDynamicProducerIdExpirationMs` is not reachable
 //! on the pooled harness — see the section note above
 //! [`producer_id_expiration_cluster`]).
 //!
@@ -2597,12 +2600,12 @@ async fn test_fence_before_producer_commit() {
 //     `ctx.group_id`), because the cluster is pooled and both classes' tests
 //     share it (concurrently, and across repeated runs of the same test).
 //   - `TransactionsExpirationTest` runs each scenario at `transaction.version` 1
-//     and 2 (`@ClusterFeature`). The pooled `apache/kafka:4.2.0` brokers are
-//     formatted at the latest metadata version, which finalizes
-//     `transaction.version=2`, and the harness cannot re-format them at a lower
-//     feature level — so only the TV2 rows are translated;
-//     `testFatalErrorAfterInvalidProducerIdMappingWithTV1` and
-//     `testTransactionAfterProducerIdExpiresWithTV1` are not reachable here.
+//     and 2 (`@ClusterFeature`). The `apache/kafka:4.2.0` brokers are formatted
+//     at the latest metadata version, which finalizes `transaction.version=2`,
+//     and the harness cannot re-format them at a lower level. The TV2 rows run
+//     on the pooled cluster; the TV1 rows run the same body on a
+//     [`ClusterConfig::dedicated`] copy whose finalized `transaction.version` is
+//     first downgraded to 1 (see [`transactions_expiration_context`]).
 //   - `ProducerIdExpirationTest.testDynamicProducerIdExpirationMs` is not
 //     translated: its second half restarts a broker (`kafkaBroker.shutdown()` /
 //     `startup()`, `ProducerIdExpirationTest.java:196-200`), which the harness
@@ -2653,6 +2656,19 @@ fn producer_id_expiration_cluster() -> ClusterConfig {
 /// broker default `false`, so the one key [`expiration_cluster`] sets covers both.)
 fn transactions_expiration_cluster() -> ClusterConfig {
     expiration_cluster("10000", "5000")
+}
+
+/// The cluster for one `TransactionsExpirationTest` `@ClusterFeature` row: the
+/// pooled [`transactions_expiration_cluster`] for TV2 (the image default),
+/// otherwise a dedicated copy of it downgraded to `transaction_version` — the
+/// downgrade is cluster-wide, so it must never touch a pooled container.
+async fn transactions_expiration_context(transaction_version: i16) -> TestContext {
+    if transaction_version == 2 {
+        return TestContext::new(transactions_expiration_cluster()).await;
+    }
+    let ctx = TestContext::new(ClusterConfig { dedicated: true, ..transactions_expiration_cluster() }).await;
+    downgrade_transaction_version(&ctx, transaction_version).await;
+    ctx
 }
 
 /// `ClusterInstance.consumer(configs)` (`ClusterInstance.java:161-169`): `configs`
@@ -3026,12 +3042,11 @@ async fn assert_consume_records(ctx: &TestContext, topics: &[String], expected_c
 /// `InvalidPidMappingException` (fatal); a reinitialized producer with the same id
 /// commits a new transaction across two topics.
 ///
-/// Translates `TransactionsExpirationTest.testFatalErrorAfterInvalidProducerIdMappingWithTV2`
-/// (`TransactionsExpirationTest.java:94-97`, body `:109-153`). The TV1 row is not
-/// reachable (see the section note).
-#[tokio::test]
-async fn test_fatal_error_after_invalid_producer_id_mapping_with_tv2() {
-    let mut ctx = TestContext::new(transactions_expiration_cluster()).await;
+/// Translates `TransactionsExpirationTest.testFatalErrorAfterInvalidProducerIdMapping`
+/// (`TransactionsExpirationTest.java:116-164`), run by one `@ClusterFeature` row
+/// per `transaction_version` (see the section note).
+async fn fatal_error_after_invalid_producer_id_mapping(transaction_version: i16) {
+    let mut ctx = transactions_expiration_context(transaction_version).await;
     let topic1 = ctx.topic("topic1");
     let topic2 = ctx.topic("topic2");
     let transaction_id = ctx.group_id("transactionalProducer");
@@ -3094,6 +3109,20 @@ async fn test_fatal_error_after_invalid_producer_id_mapping_with_tv2() {
     ctx.cleanup().await;
 }
 
+/// `TransactionsExpirationTest.testFatalErrorAfterInvalidProducerIdMappingWithTV1`
+/// (`TransactionsExpirationTest.java:96-99`).
+#[tokio::test]
+async fn test_fatal_error_after_invalid_producer_id_mapping_with_tv1() {
+    fatal_error_after_invalid_producer_id_mapping(1).await;
+}
+
+/// `TransactionsExpirationTest.testFatalErrorAfterInvalidProducerIdMappingWithTV2`
+/// (`TransactionsExpirationTest.java:101-104`).
+#[tokio::test]
+async fn test_fatal_error_after_invalid_producer_id_mapping_with_tv2() {
+    fatal_error_after_invalid_producer_id_mapping(2).await;
+}
+
 /// `TransactionsExpirationTest`'s "Ensure producer IDs are added" / "Producer IDs
 /// should repopulate" wait (`TransactionsExpirationTest.java:167-177`, `:201-211`):
 /// accumulate `describeProducers` results until non-empty, treating a failed call
@@ -3125,12 +3154,11 @@ async fn wait_for_single_producer_state(ctx: &TestContext, tp: &TopicPartition) 
 /// transactional id still maps to it: a new producer with the same id reuses the
 /// producer id with a bumped epoch, and its transaction commits.
 ///
-/// Translates `TransactionsExpirationTest.testTransactionAfterProducerIdExpiresWithTV2`
-/// (`TransactionsExpirationTest.java:104-107`, body `:155-203`). The TV1 row is
-/// not reachable (see the section note).
-#[tokio::test]
-async fn test_transaction_after_producer_id_expires_with_tv2() {
-    let mut ctx = TestContext::new(transactions_expiration_cluster()).await;
+/// Translates `TransactionsExpirationTest.testTransactionAfterProducerIdExpires`
+/// (`TransactionsExpirationTest.java:166-247`), run by one `@ClusterFeature` row
+/// per `is_tv2_enabled` (see the section note).
+async fn transaction_after_producer_id_expires(is_tv2_enabled: bool) {
+    let mut ctx = transactions_expiration_context(if is_tv2_enabled { 2 } else { 1 }).await;
     let topic1 = ctx.topic("topic1");
     let topic1_partition0 = TopicPartition::new(topic1.clone(), 0);
     let transaction_id = ctx.group_id("transactionalProducer");
@@ -3196,18 +3224,36 @@ async fn test_transaction_after_producer_id_expires_with_tv2() {
     // with the same transactional id soon after the first will re-use the same
     // producerId, while bumping the epoch to indicate that they are distinct.
     assert_eq!(old_producer_id, new_producer_id);
-    // TV2 bumps epoch on EndTxn, and the final commit may or may not have bumped
-    // the epoch in the producer state. The epoch should be at least
-    // oldProducerEpoch + 2 for the first commit and the restarted producer.
-    assert!(
-        old_producer_epoch + 2 <= new_producer_epoch,
-        "expected epoch >= {} but was {new_producer_epoch}",
-        old_producer_epoch + 2
-    );
+    if is_tv2_enabled {
+        // TV2 bumps epoch on EndTxn, and the final commit may or may not have bumped
+        // the epoch in the producer state. The epoch should be at least
+        // oldProducerEpoch + 2 for the first commit and the restarted producer.
+        assert!(
+            old_producer_epoch + 2 <= new_producer_epoch,
+            "expected epoch >= {} but was {new_producer_epoch}",
+            old_producer_epoch + 2
+        );
+    } else {
+        assert_eq!(old_producer_epoch + 1, new_producer_epoch);
+    }
 
     assert_consume_records(&ctx, &[topic1], 2).await;
     producer.close().await.expect("producer close");
     ctx.cleanup().await;
+}
+
+/// `TransactionsExpirationTest.testTransactionAfterProducerIdExpiresWithTV1`
+/// (`TransactionsExpirationTest.java:106-109`).
+#[tokio::test]
+async fn test_transaction_after_producer_id_expires_with_tv1() {
+    transaction_after_producer_id_expires(false).await;
+}
+
+/// `TransactionsExpirationTest.testTransactionAfterProducerIdExpiresWithTV2`
+/// (`TransactionsExpirationTest.java:111-114`).
+#[tokio::test]
+async fn test_transaction_after_producer_id_expires_with_tv2() {
+    transaction_after_producer_id_expires(true).await;
 }
 
 // ---------------------------------------------------------------------------
