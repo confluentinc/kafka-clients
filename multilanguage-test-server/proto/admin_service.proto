@@ -222,16 +222,18 @@ service AdminService {
   //     `describeDelegationToken` (`KafkaFuture<Vec<DelegationToken>>`) and
   //     `describeFeatures` (`KafkaFuture<FeatureMetadata>`).
   //
-  //   - **Ordinary per-key `oneof`** for `describeUserScramCredentials`, keyed
-  //     by [ResultKey.name]. Its Java result holds one future over the raw
-  //     response data and exposes three views (`all()` / `users()` /
-  //     `description(user)`); the per-user shape that subsumes all three is what
-  //     the C FFI already composes (`src/ffi/admin.rs`'s
-  //     `submit_describe_user_scram_credentials`, whose doc comment states the
-  //     composition and why nothing Java can reach is lost) and what admin.py
-  //     returns (`{user: UserScramCredentialsDescription | KafkaError}`). It is
-  //     **not** the `listGroups` `valid()`/`errors()` split: every error here has
-  //     a user to hang on, so [Listings] does not apply.
+  //   - **Bespoke RAW per-user rows** for `describeUserScramCredentials` — the
+  //     one admin RPC whose Java `*Result` exposes multiple views with distinct
+  //     semantics. Its result holds one future over the raw response data and
+  //     exposes three views — `all()` (RESOURCE_NOT_FOUND users included as empty
+  //     successes), `users()` (RNF excluded) and `description(user)` (faults on
+  //     RNF). A single flattened per-user `oneof` cannot carry all three, so
+  //     [DescribeUserScramCredentialsEntry] carries the raw wire rows
+  //     (`user` + `error_code` + `credential_infos`) and the CLIENT rebuilds the
+  //     three views (`src/admin/describe_user_scram_credentials_result.rs` via
+  //     `multilanguage_admin.rs`), exactly as the C ABI and admin.py now expose
+  //     the full three-view result object. NOT the `listGroups`
+  //     `valid()`/`errors()` split.
   //
   //   - **The third value-carries-its-own-error RPC** (envelope exception 3) is
   //     `deleteAcls`: `HashMap<AclBindingFilter, KafkaFuture<FilterResults>>`
@@ -2310,17 +2312,32 @@ message DescribeUserScramCredentialsRequest {
   optional int32 timeout_ms = 3;
 }
 
+// One RAW per-user result of `describeUserScramCredentials`, i.e. one row of the
+// Java response data (`DescribeUserScramCredentialsResponseData.results`). Unlike
+// every other admin RPC's per-key entry, this is NOT a keyed `oneof` outcome:
+// Java's `DescribeUserScramCredentialsResult` exposes three views over one
+// response (`all()` / `users()` / `description(user)`) with different
+// RESOURCE_NOT_FOUND semantics, and the CLIENT rebuilds all three from these raw
+// rows (`multilanguage_admin.rs` / `src/admin/describe_user_scram_credentials_result.rs`).
+// So the row carries the wire error code AND the credentials together — a
+// RESOURCE_NOT_FOUND user has `error_code = RESOURCE_NOT_FOUND` and empty
+// `credential_infos`, both of which the three views need.
 message DescribeUserScramCredentialsEntry {
-  // Always the `name` variant: the user name.
-  ResultKey key = 1;
-  oneof outcome {
-    KafkaError error = 2;
-    UserScramCredentialsDescription value = 3;
-  }
+  reserved 1, 2, 3;  // were: ResultKey key; oneof { KafkaError error; UserScramCredentialsDescription value }
+  string user = 4;
+  // Wire `Errors` code for this user; 0 (NONE) is success. RESOURCE_NOT_FOUND
+  // (91) and any hard error (e.g. DUPLICATE_RESOURCE) are carried through so the
+  // client can reconstruct all()/users()/description() faithfully.
+  int32 error_code = 5;
+  // The broker's per-user error message, if any (Java's nullable `errorMessage`).
+  optional string error_message = 6;
+  repeated ScramCredentialInfo credential_infos = 7;
 }
 
 message DescribeUserScramCredentialsResponse {
   repeated DescribeUserScramCredentialsEntry entries = 1;
+  // A whole-response (data-future) failure — auth/timeout — NOT a per-user error.
+  // Mirrors Java's top-level `whenComplete` throwable that faults every view.
   optional KafkaError error = 2;
 }
 
