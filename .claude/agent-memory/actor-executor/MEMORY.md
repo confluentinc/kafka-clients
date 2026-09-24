@@ -176,3 +176,4 @@
 - [Nullable array default](generator_nullable_array_default.md) — a new guard's first failures are wrong defaults; Java's array default is empty, not null
 - [Docker wedged → --no-verify](workflow_docker_wedged_no_verify.md) — pre-commit runs make verify-sandbox (needs Docker); run the non-Docker gate and say the rest is owed
 - [APPSEC-7665 decode hardening](appsec7665_4520_decode_hardening_notes.md) — firstBatchSize≠hasNext; unsupported_version≠variant; alloc-bound tests
+- [Autosquash vs append-only logs](workflow_autosquash_append_only_logs.md) — fixups must not append to a list later commits extend; verify with a scratch-clone autosquash

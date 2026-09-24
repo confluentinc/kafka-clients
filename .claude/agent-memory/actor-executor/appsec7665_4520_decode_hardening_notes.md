@@ -54,3 +54,36 @@ discrepancy). Reusable, non-obvious findings:
    (style edition from Cargo's 2024) — see [[format-fix-without-cargo-fmt]].
    Clippy's `type_complexity` fires on `[(&str, Box<dyn Fn(..)>); N]` test
    tables; use non-capturing closures coerced to a `fn(..)` type alias.
+
+Round 2 (Critic 78 finding + four notes):
+
+9. **Java's `ByteUtils.readVarint(InputStream)` reads end-of-stream as a
+   continuation byte.** `(byte) in.read()` is `-1` at EOF (every codec stream is
+   a `ChunkedBytesStream`), so after five reads it throws
+   `IllegalArgumentException` and `StreamRecordIterator.readNext` reports
+   `Incorrect declared batch size, premature EOF reached` — not an
+   `EOFException` / "Failed to decompress record stream". The method's javadoc
+   mentions `DataInput`, which is stale (4.3.1 has no `readVarint(DataInput)`);
+   a Manager brief repeated that premise. **How to apply:** check a brief's
+   claim about Java behaviour against the source before implementing it; in
+   Rust, `read_exact`'s `UnexpectedEof` in a stream varint maps to the
+   premature-EOF text.
+
+10. **Two checks raising one message: test the earlier one where the later one
+    cannot fire.** The control-batch D3 check in `contains_abort_marker` was
+    hidden by the install-point D3 check (same text). Only a non-ABORT control
+    batch whose producer id is aborted makes the earlier check decisive (else it
+    is skipped as aborted). **How to apply:** for any duplicated check, build the
+    fixture that bypasses the later one, then mutation-test with `if false && ..`.
+
+11. **The SASL client authenticator's receive was the one production
+    `NetworkReceive` outside `KafkaChannel`'s `max_receive_size`** (pre-auth).
+    Now capped at 524288 (`BrokerSecurityConfigs.DEFAULT_SASL_SERVER_MAX_RECEIVE_SIZE`,
+    Java's broker-side policy). **How to apply:** in a receive-cap review, grep
+    `NetworkReceive::with_source|new()` outside tests.
+
+12. Three wrappers in `completed_fetch.rs` (`peek_current_record`,
+    `contains_abort_marker`, the headers wrap) had item 5's `Display` prefix;
+    Critic named two. **How to apply:** after fixing one instance of a
+    formatting defect, grep the file for the rest (`cause: {}` with `e`).
+    See [[workflow-autosquash-append-only-logs]] for committing the round.
