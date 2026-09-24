@@ -964,33 +964,37 @@ async fn check_closed_state(
 /// Java's `findCoordinators` (line 376): the ids of the brokers coordinating
 /// `groups`, retried until every group has one (default 15 s bound).
 ///
-/// Deviation: Java sends a raw `FindCoordinator` to the first broker; the
-/// admin client's `describeConsumerGroups` performs the same coordinator
-/// lookup and reports the node it found.
+/// Deviation: Java sends a raw `FindCoordinator`, which answers for any group
+/// key whether or not the group exists. The coordinator of a group is the
+/// leader of `__consumer_offsets` partition `abs(hash(groupId)) %
+/// offsets.topic.num.partitions`; with the class's
+/// `offsets.topic.num.partitions=1` that is partition 0 for every group, so
+/// its leader (per `describeTopics`) is exactly what `FindCoordinator`
+/// returns here. `describeConsumerGroups` is not used: it fails with
+/// `GROUP_ID_NOT_FOUND` for a group the coordinator does not know, such as a
+/// manual-assignment group that has not committed.
 async fn find_coordinators(admin: &KafkaAdminClient, groups: &[String]) -> BTreeSet<i32> {
+    const OFFSETS_TOPIC: &str = "__consumer_offsets";
     let deadline = std::time::Instant::now() + Duration::from_secs(15);
     loop {
-        let described = admin.describe_consumer_groups(groups).described_groups();
-        let mut nodes = BTreeSet::new();
-        let mut all_found = true;
-        for group in groups {
-            let coordinator = match described.get(group) {
-                Some(future) => future
-                    .get()
-                    .await
-                    .ok()
-                    .and_then(|description| description.coordinator().map(|node| node.id())),
-                None => None,
-            };
-            match coordinator {
-                Some(id) => {
-                    nodes.insert(id);
-                },
-                None => all_found = false,
-            }
-        }
-        if all_found {
-            return nodes;
+        let leader = match admin
+            .describe_topics_with_topic_names(&[OFFSETS_TOPIC.to_string()])
+            .all_topic_names()
+        {
+            Some(future) => future.get().await.ok().and_then(|topics| {
+                topics.get(OFFSETS_TOPIC).and_then(|description| {
+                    description
+                        .partitions()
+                        .iter()
+                        .find(|info| info.partition() == 0)
+                        .and_then(|info| info.leader().map(|node| node.id()))
+                })
+            }),
+            None => None,
+        };
+        if let Some(id) = leader {
+            // Every group in `groups` maps to this one coordinator.
+            return BTreeSet::from([id]);
         }
         assert!(
             std::time::Instant::now() < deadline,
