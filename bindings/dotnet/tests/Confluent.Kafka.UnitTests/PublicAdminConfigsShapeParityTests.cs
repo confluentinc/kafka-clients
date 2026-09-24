@@ -304,7 +304,7 @@ public sealed class PublicAdminConfigsShapeParityTests
 
         Assert.StartsWith("AlterConfigOp{opType=Set, configEntry=ConfigEntry(", op.ToString(), StringComparison.Ordinal);
 
-        // ⚠ Java renders both booleans LOWERCASE (ConfigEntry.java:305-313); C#'s
+        // ⚠ Java renders both booleans LOWERCASE (ConfigEntry.java:183-194); C#'s
         // bool.ToString() would give "True"/"False". The literal text is asserted rather
         // than re-derived from the implementation.
         Assert.Contains("isSensitive=false, isReadOnly=false", entry.ToString(), StringComparison.Ordinal);

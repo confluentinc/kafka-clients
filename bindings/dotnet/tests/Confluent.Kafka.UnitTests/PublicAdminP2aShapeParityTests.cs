@@ -237,7 +237,7 @@ public sealed class PublicAdminP2aShapeParityTests
         Assert.Empty(bare.AuthorizedOperations!);
         Assert.Equal(Uuid.Zero, bare.TopicId);
 
-        // ⚠ Java renders the boolean LOWERCASE (TopicDescription.java:150); C#'s
+        // ⚠ Java renders the boolean LOWERCASE (TopicDescription.java:136-139); C#'s
         // bool.ToString() would give "True"/"False". The literal text is asserted rather
         // than re-derived from the implementation.
         Assert.StartsWith("(name=t, internal=false, ", bare.ToString(), StringComparison.Ordinal);
