@@ -250,12 +250,21 @@ The default `ConservationVerifier` renders a verdict:
   duplicates (by index)     : 0      # redelivery of the same logical record
   duplicates (by offset)    : 0      # same physical (topic_id, partition, offset) seen twice
   partitions covered        : 6
+  in-flight peak (producer) : 1      # most records one producer had in flight at once → FAIL if > 1
   expected-lost (recreate)  : 0      # records legitimately destroyed by topic-recreate
   lost (delivered, unseen)  : 0      # acked-but-never-consumed  → FAIL if > 0
 ```
 
 The run **fails** if any acknowledged record is never consumed
 (`lost > 0`), or if partition coverage is below the expected minimum.
+
+It also **fails** if the producer workload broke its own contract of **one
+record in flight**: the producer emits a `Sent` event before each send and a
+`Delivered` / `SendFailed` after it, and the verifier derives the per-producer
+peak from that stream. A peak above 1 (a send issued before the previous one
+settled) or a `Sent` that never settled by verdict time (`unsettled sends`)
+is a failure, so the property is checked rather than assumed from the loop's
+shape.
 
 Duplicates are normally reported, not failed — redelivery is expected under
 churn. But like `chaos.py`, the verdict also enforces a **conservation ratio
