@@ -246,7 +246,7 @@ The default `ConservationVerifier` renders a verdict:
 ```
 === Chaos verdict: PASS ===
   delivered (acked) records : 1657
-  failed sends (not loss)   : 0      # unacked sends — never committed, not loss
+  failed sends              : 0      # sends rejected or unacked within the delivery timeout → FAIL if > 0
   duplicates (by index)     : 0      # redelivery of the same logical record
   duplicates (by offset)    : 0      # same physical (topic_id, partition, offset) seen twice
   duplicates (double write) : 0      # same logical record at 2+ offsets of one generation → FAIL if > 0
@@ -258,6 +258,20 @@ The default `ConservationVerifier` renders a verdict:
 
 The run **fails** if any acknowledged record is never consumed
 (`lost > 0`), or if partition coverage is below the expected minimum.
+
+It also **fails** on any **failed send** (`failed sends > 0`). The producer
+runs with `acks=all`, `enable.idempotence=true`, a 60 s `max.block.ms` and a
+120 s `delivery.timeout.ms`; no fault in the matrix keeps a partition
+unavailable for anywhere near that long, so a correct client retries through
+every fault and fails nothing. A send that is rejected, or not acknowledged
+within the delivery timeout, therefore indicates a client defect or an
+environment problem. A failure after the timeout is also ambiguous (the record
+may or may not have been written), which the verifier cannot resolve, so it
+does not pass on it. The `FAIL:` reason lists each failed record with the
+client's error text, and the producer prints the same line as it happens so it
+can be correlated with the fault in progress. A scenario that deliberately
+exceeds these timeouts (for example a topic-recreate `--dwell-s` longer than
+60 s) is expected to fail this check.
 
 It also **fails** if the producer workload violates its contract of **one
 record in flight**: the producer emits a `Sent` event before each send and a
@@ -300,7 +314,7 @@ chaos:   p0 leader Some(2)->Some(3)  replicas [2, 3, 1]->[3, 1, 2]     # per-act
 chaos: reassignment complete for topic chaos-run (6 partition(s) with changed replicas, 6 with changed leader)
 === Chaos verdict: PASS ===
   delivered (acked) records : 362
-  failed sends (not loss)   : 0
+  failed sends              : 0
   duplicates (by index)     : 0
   duplicates (by offset)    : 0
   partitions covered        : 6

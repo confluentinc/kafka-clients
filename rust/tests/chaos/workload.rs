@@ -394,6 +394,11 @@ where
                 },
                 Err(err) => WorkloadEvent::SendFailed { index, topic: topic.clone(), error: err.to_string() },
             };
+            if let WorkloadEvent::SendFailed { error, .. } = &event {
+                // Surface the failure as it happens so it can be correlated with
+                // the fault in progress; the verdict fails the run on any of these.
+                eprintln!("chaos: {producer_label} send of {topic}#{index} failed: {error}");
+            }
             self.verifier.record(event);
             index += 1;
             if !interval.is_zero() {
