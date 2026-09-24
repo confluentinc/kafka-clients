@@ -39,7 +39,7 @@ use confluent_kafka::admin::{
 use confluent_kafka::common::Errors;
 
 use crate::common::admin_backend::{
-    AdminBackend, admin_config, admin_for, all_of, bootstrap_for, create_topic, wait_for_all_partitions_metadata,
+    AdminBackend, admin_config_for, admin_for, all_of, create_topic, wait_for_all_partitions_metadata,
     wait_until_listed,
 };
 use crate::common::backend_factory::AdminBackendFactory;
@@ -556,7 +556,7 @@ async fn create_topics_against_unreachable_broker_fails<F: AdminBackendFactory>(
     // Port 1 is reserved and never listening; a short api timeout keeps the
     // scenario fast, since the failure is a timeout rather than a refusal (the
     // client retries metadata until the deadline, as Java does).
-    let mut config = admin_config(&bootstrap_for(factory, ctx));
+    let mut config = admin_config_for(factory, ctx);
     config.insert("bootstrap.servers".to_string(), "127.0.0.1:1".to_string());
     config.insert("default.api.timeout.ms".to_string(), "3000".to_string());
     config.insert("request.timeout.ms".to_string(), "1000".to_string());

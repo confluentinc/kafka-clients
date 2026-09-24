@@ -44,7 +44,7 @@ use tonic::transport::{Channel, Endpoint};
 const CONNECT_ATTEMPTS: u32 = 5;
 const CONNECT_RETRY_BACKOFF: Duration = Duration::from_millis(300);
 
-/// The two non-native backends. The native rust backend doesn't need a
+/// The two non-native backends. The native Rust backend doesn't need a
 /// container; tests instantiate it directly.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum BackendKind {
@@ -172,8 +172,10 @@ static CLEANUP_REGISTERED: Once = Once::new();
 /// Pool entries are keyed by `(kind, broker_network)`. First caller for
 /// a given pair triggers a `docker run`; subsequent callers share the
 /// same `BackendHandle`. The container is attached to `broker_network`
-/// so it can reach the Kafka broker via the CONTAINER listener
-/// (`<broker_container_name>:9099`). The container is removed at
+/// so it can reach the Kafka broker via the protocol-matched CONTAINER
+/// listener advertised on the broker's container hostname
+/// (`<broker_container_name>:9099` PLAINTEXT / `:9100` SSL / `:9101`
+/// SASL_SSL, per `INTEGRATION_TEST_PROTOCOL`). The container is removed at
 /// process exit by the atexit hook below.
 ///
 /// Caller (the `multilanguage_test!` macro) must ensure the broker

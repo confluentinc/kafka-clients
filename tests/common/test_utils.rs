@@ -22,14 +22,112 @@
 
 use std::collections::HashMap;
 use std::future::Future;
+use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
 use confluent_kafka::admin::{
     Admin, AdminClientConfig, CreateTopicsOptions, DescribeTopicsOptions, KafkaAdminClient, NewTopic,
 };
 use confluent_kafka::common::TopicCollection;
+use confluent_kafka::common::config::{SaslConfig, SslConfig};
+use confluent_kafka::common::network::{
+    PlaintextChannelBuilder, SaslChannelBuilder, Selectable, Selector, SslChannelBuilder,
+};
+use confluent_kafka::common::security::{SecurityProtocol, SslFactory};
+use confluent_kafka::common::utils::LogContext;
 
-use super::test_context::TestContext;
+use super::kafka_cluster::{SASL_PASSWORD, SASL_USERNAME};
+use super::test_context::{TestContext, TestProtocol};
+
+/// Poll timeout used by [`connect_until_ready`], in milliseconds.
+const SELECTOR_POLL_TIMEOUT_MS: i64 = 5000;
+
+/// Maximum number of polls [`connect_until_ready`] performs before giving up.
+const SELECTOR_MAX_POLL_ITERATIONS: usize = 100;
+
+/// Creates a [`Selector`] whose channel builder matches the protocol selected
+/// for this run (`INTEGRATION_TEST_PROTOCOL`), for tests that drive the network
+/// layer directly rather than through a client config.
+///
+/// PLAINTEXT uses a plain channel. SSL and SASL_SSL mirror the dedicated
+/// `ssl_sasl_test` helpers: the broker certificate is trusted through the
+/// cluster CA, hostname verification is disabled because tests connect via
+/// `127.0.0.1`, and SASL_SSL authenticates with SASL/PLAIN as
+/// `admin` / `admin-secret`.
+pub fn protocol_selector(ctx: &TestContext) -> Selector {
+    let ssl_factory = || {
+        let ssl_config = SslConfig {
+            truststore_certificates: Some(ctx.ca_cert_pem().to_string()),
+            endpoint_identification_algorithm: String::new(),
+            ..SslConfig::default()
+        };
+        SslFactory::new(&ssl_config).expect("valid test SSL config")
+    };
+    match ctx.protocol() {
+        TestProtocol::Plaintext => {
+            Selector::with_defaults(Selector::NO_IDLE_TIMEOUT_MS, Box::new(PlaintextChannelBuilder::new(None)))
+        },
+        TestProtocol::Ssl => Selector::with_defaults(
+            Selector::NO_IDLE_TIMEOUT_MS,
+            Box::new(SslChannelBuilder::new(ssl_factory(), None)),
+        ),
+        TestProtocol::SaslSsl => {
+            let sasl_config = SaslConfig {
+                mechanism: "PLAIN".to_string(),
+                username: Some(SASL_USERNAME.to_string()),
+                password: Some(SASL_PASSWORD.to_string()),
+                ..SaslConfig::default()
+            };
+            let channel_builder = SaslChannelBuilder::new(
+                SecurityProtocol::SaslSsl,
+                sasl_config,
+                Some(ssl_factory()),
+                None,
+                "integration-test",
+                LogContext::empty(),
+            )
+            .expect("valid test SASL config");
+            Selector::with_defaults(Selector::NO_IDLE_TIMEOUT_MS, Box::new(channel_builder))
+        },
+    }
+}
+
+/// Connects `selector` to `addr` as `node_id` and polls until the channel is
+/// ready to carry requests, panicking on disconnection or timeout.
+///
+/// Under PLAINTEXT the channel is ready once the TCP connection is established.
+/// Under SSL and SASL_SSL the TLS handshake (and, for SASL_SSL, authentication)
+/// completes over subsequent polls, so readiness is `is_channel_ready`, the same
+/// signal the dedicated `ssl_sasl_test` waits on.
+pub async fn connect_until_ready(selector: &mut Selector, ctx: &TestContext, node_id: &str, addr: SocketAddr) {
+    selector
+        .connect(
+            node_id,
+            addr,
+            "localhost",
+            <Selector as Selectable>::USE_DEFAULT_BUFFER_SIZE,
+            <Selector as Selectable>::USE_DEFAULT_BUFFER_SIZE,
+        )
+        .await
+        .expect("Failed to connect");
+
+    let plaintext = ctx.protocol() == TestProtocol::Plaintext;
+    for _ in 0..SELECTOR_MAX_POLL_ITERATIONS {
+        selector.poll(SELECTOR_POLL_TIMEOUT_MS).await.expect("poll failed");
+        let ready = if plaintext {
+            !selector.connected().is_empty()
+        } else {
+            selector.is_channel_ready(node_id)
+        };
+        if ready {
+            return;
+        }
+        if !selector.disconnected().is_empty() {
+            panic!("Broker disconnected during connect: {:?}", selector.disconnected());
+        }
+    }
+    panic!("Timed out waiting for connection to the broker");
+}
 
 /// Default maximum time to wait for a condition.
 ///
@@ -197,12 +295,12 @@ pub async fn wait_for_all_partitions_metadata_with_context(
     topic: &str,
     expected_num_partitions: usize,
 ) {
-    let props = HashMap::from([
-        ("bootstrap.servers".to_string(), ctx.bootstrap_servers().to_string()),
+    let mut props = HashMap::from([
         ("client.id".to_string(), "test-utils-metadata-wait".to_string()),
         ("request.timeout.ms".to_string(), "30000".to_string()),
         ("default.api.timeout.ms".to_string(), "30000".to_string()),
     ]);
+    ctx.configure(&mut props);
     let config = AdminClientConfig::new(&props).expect("valid admin config");
     let admin: Box<dyn Admin> = Box::new(KafkaAdminClient::new(config).expect("admin client"));
     wait_for_all_partitions_metadata(admin.as_ref(), topic, expected_num_partitions).await;
