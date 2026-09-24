@@ -7137,42 +7137,118 @@ static PyObject* py_MockAdminClient_set_feature_levels(PyObject* self, PyObject*
 
 // ---- drains -----------------------------------------------------------------
 
-// {user: (error_or_None, [(mechanism, iterations)])}
-static PyObject* py_DescribeUserScramCredentialsResult_drain(PyObject* self, PyObject* args) {
+// describeUserScramCredentials backs Java's three views over one response
+// (DescribeUserScramCredentialsResult.java:54-138). The Python
+// `DescribeUserScramCredentialsResult` object owns the C handle (freeing it on
+// __del__ via `..._destroy`), so unlike the old `_drain` these accessors do NOT
+// destroy the handle — they read one view each.
+
+// Reads an OWNED error handle into the (code, message, is_retriable, is_fatal)
+// tuple `_to_error` unpacks, then destroys it. None for a null handle.
+static PyObject* owned_error_to_py(kafka_common_Error_t* e) {
+    if (e == NULL) Py_RETURN_NONE;
+    PyObject* tuple = borrowed_error_to_py(e);
+    kafka_common_Error_destroy(e);
+    return tuple;
+}
+
+// [(mechanism, iterations), ...] for a UserScramCredentialsDescription handle.
+static PyObject* scram_description_infos(const kafka_admin_UserScramCredentialsDescription_t* d) {
+    int32_t n = kafka_admin_UserScramCredentialsDescription_credential_count(d);
+    PyObject* infos = PyList_New(n < 0 ? 0 : n);
+    if (infos == NULL) return NULL;
+    for (int32_t j = 0; j < n; j++) {
+        PyObject* info = Py_BuildValue(
+            "(ii)",
+            kafka_admin_UserScramCredentialsDescription_credential_mechanism(d, j),
+            kafka_admin_UserScramCredentialsDescription_credential_iterations(d, j));
+        // An unfilled slot stays NULL, which list_dealloc's Py_XDECREF handles.
+        if (info == NULL) break;
+        PyList_SET_ITEM(infos, j, info);
+    }
+    return infos;
+}
+
+// all() view -> (error_or_None, {user: [(mechanism, iterations)]}). The error is
+// non-None iff all() faults on a hard user-level error; the dict is then empty.
+// RESOURCE_NOT_FOUND users appear with an empty credential list (Java's all()
+// treats them as successful empty descriptions).
+static PyObject* py_DescribeUserScramCredentialsResult_all(PyObject* self, PyObject* args) {
     unsigned long long ptr;
     if (!PyArg_ParseTuple(args, "K", &ptr)) return NULL;
     kafka_admin_DescribeUserScramCredentialsResult_t* r =
         (kafka_admin_DescribeUserScramCredentialsResult_t*)(uintptr_t)ptr;
-    int32_t n = kafka_admin_DescribeUserScramCredentialsResult_count(r);
+    PyObject* err = owned_error_to_py(kafka_admin_DescribeUserScramCredentialsResult_all_error(r));
+    if (err == NULL) return NULL;
     PyObject* d = PyDict_New();
-    if (d == NULL) { kafka_admin_DescribeUserScramCredentialsResult_destroy(r); return NULL; }
+    if (d == NULL) { Py_DECREF(err); return NULL; }
+    int32_t n = kafka_admin_DescribeUserScramCredentialsResult_all_count(r);
     for (int32_t i = 0; i < n; i++) {
-        int32_t credentials = kafka_admin_DescribeUserScramCredentialsResult_get_credential_count(r, i);
-        PyObject* infos = PyList_New(credentials < 0 ? 0 : credentials);
-        if (infos == NULL) { Py_DECREF(d); kafka_admin_DescribeUserScramCredentialsResult_destroy(r); return NULL; }
-        for (int32_t j = 0; j < credentials; j++) {
-            PyObject* info = Py_BuildValue(
-                "(ii)",
-                kafka_admin_DescribeUserScramCredentialsResult_get_credential_mechanism(r, i, j),
-                kafka_admin_DescribeUserScramCredentialsResult_get_credential_iterations(r, i, j));
-            // An unfilled slot stays NULL, which list_dealloc's Py_XDECREF
-            // handles, so breaking out here leaks nothing.
-            if (info == NULL) { break; }
-            PyList_SET_ITEM(infos, j, info);
-        }
+        const kafka_admin_UserScramCredentialsDescription_t* desc =
+            kafka_admin_DescribeUserScramCredentialsResult_all_get_description(r, i);
+        PyObject* infos = scram_description_infos(desc);
         PyObject* key =
-            PyUnicode_FromString(kafka_admin_DescribeUserScramCredentialsResult_get_user(r, i));
-        PyObject* value = error_value_pair(
-            borrowed_error_to_py(kafka_admin_DescribeUserScramCredentialsResult_get_error(r, i)),
-            infos);
-        if (!key || !value || PyErr_Occurred() || PyDict_SetItem(d, key, value) < 0) {
-            Py_XDECREF(key); Py_XDECREF(value); Py_DECREF(d);
-            kafka_admin_DescribeUserScramCredentialsResult_destroy(r); return NULL;
+            PyUnicode_FromString(kafka_admin_DescribeUserScramCredentialsResult_all_get_user(r, i));
+        if (!key || !infos || PyErr_Occurred() || PyDict_SetItem(d, key, infos) < 0) {
+            Py_XDECREF(key); Py_XDECREF(infos); Py_DECREF(d); Py_DECREF(err); return NULL;
         }
-        Py_DECREF(key); Py_DECREF(value);
+        Py_DECREF(key); Py_DECREF(infos);
     }
-    kafka_admin_DescribeUserScramCredentialsResult_destroy(r);
-    return d;
+    return Py_BuildValue("(NN)", err, d);
+}
+
+// users() view -> [user, ...] (RESOURCE_NOT_FOUND users excluded).
+static PyObject* py_DescribeUserScramCredentialsResult_users(PyObject* self, PyObject* args) {
+    unsigned long long ptr;
+    if (!PyArg_ParseTuple(args, "K", &ptr)) return NULL;
+    kafka_admin_DescribeUserScramCredentialsResult_t* r =
+        (kafka_admin_DescribeUserScramCredentialsResult_t*)(uintptr_t)ptr;
+    int32_t n = kafka_admin_DescribeUserScramCredentialsResult_users_count(r);
+    PyObject* list = PyList_New(n < 0 ? 0 : n);
+    if (list == NULL) return NULL;
+    for (int32_t i = 0; i < n; i++) {
+        PyObject* user =
+            PyUnicode_FromString(kafka_admin_DescribeUserScramCredentialsResult_users_get(r, i));
+        if (user == NULL) { Py_DECREF(list); return NULL; }
+        PyList_SET_ITEM(list, i, user);
+    }
+    return list;
+}
+
+// description(user) view -> (error_or_None, (name, [(mechanism, iterations)]) or
+// None). The error is non-None (RESOURCE_NOT_FOUND) for a no-credential/absent
+// user, Java-faithfully; otherwise the value carries the description.
+static PyObject* py_DescribeUserScramCredentialsResult_description(PyObject* self, PyObject* args) {
+    unsigned long long ptr;
+    const char* user;
+    if (!PyArg_ParseTuple(args, "Ks", &ptr, &user)) return NULL;
+    kafka_admin_DescribeUserScramCredentialsResult_t* r =
+        (kafka_admin_DescribeUserScramCredentialsResult_t*)(uintptr_t)ptr;
+    kafka_admin_UserScramCredentialsDescription_t* desc = NULL;
+    kafka_common_Error_t* e =
+        kafka_admin_DescribeUserScramCredentialsResult_description(r, user, &desc);
+    if (e != NULL) {
+        PyObject* err = owned_error_to_py(e);
+        if (err == NULL) return NULL;
+        return Py_BuildValue("(NO)", err, Py_None);
+    }
+    PyObject* infos = scram_description_infos(desc);
+    PyObject* name = PyUnicode_FromString(kafka_admin_UserScramCredentialsDescription_name(desc));
+    kafka_admin_UserScramCredentialsDescription_destroy(desc);
+    if (!name || !infos || PyErr_Occurred()) {
+        Py_XDECREF(name); Py_XDECREF(infos); return NULL;
+    }
+    // (None, (name, infos))
+    return Py_BuildValue("(O(NN))", Py_None, name, infos);
+}
+
+// Frees the result handle (called from the Python object's __del__).
+static PyObject* py_DescribeUserScramCredentialsResult_destroy(PyObject* self, PyObject* args) {
+    unsigned long long ptr;
+    if (!PyArg_ParseTuple(args, "K", &ptr)) return NULL;
+    kafka_admin_DescribeUserScramCredentialsResult_destroy(
+        (kafka_admin_DescribeUserScramCredentialsResult_t*)(uintptr_t)ptr);
+    Py_RETURN_NONE;
 }
 
 // AlterUserScramCredentialsResult_drain (the whole-batch joined-callback
@@ -7978,8 +8054,14 @@ static PyMethodDef ProducerNativeMethods[] = {
      "Async updateFeatures; cb(feature, error_int) once per feature"},
     {"MockAdminClient_set_feature_levels", py_MockAdminClient_set_feature_levels, METH_VARARGS,
      "Mock: seed the feature-level maps; returns error_int"},
-    {"DescribeUserScramCredentialsResult_drain", py_DescribeUserScramCredentialsResult_drain,
-     METH_VARARGS, "Drain+destroy a DescribeUserScramCredentialsResult handle into a dict"},
+    {"DescribeUserScramCredentialsResult_all", py_DescribeUserScramCredentialsResult_all,
+     METH_VARARGS, "all() view -> (error_or_None, {user: [(mechanism, iterations)]})"},
+    {"DescribeUserScramCredentialsResult_users", py_DescribeUserScramCredentialsResult_users,
+     METH_VARARGS, "users() view -> [user, ...] (RESOURCE_NOT_FOUND excluded)"},
+    {"DescribeUserScramCredentialsResult_description", py_DescribeUserScramCredentialsResult_description,
+     METH_VARARGS, "description(user) view -> (error_or_None, (name, [(mechanism, iterations)]) or None)"},
+    {"DescribeUserScramCredentialsResult_destroy", py_DescribeUserScramCredentialsResult_destroy,
+     METH_VARARGS, "Free a DescribeUserScramCredentialsResult handle"},
     {"CreateDelegationTokenResult_drain", py_CreateDelegationTokenResult_drain, METH_VARARGS,
      "Drain+destroy a CreateDelegationTokenResult handle into a token tuple"},
     {"RenewDelegationTokenResult_drain", py_RenewDelegationTokenResult_drain, METH_VARARGS,
