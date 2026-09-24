@@ -55,22 +55,14 @@
 //! - `testAsyncConsumerCommittedDeletedTopic` (line 225, KAFKA-20165)
 //!   → `test_async_consumer_committed_deleted_topic`
 //!
-//! # `#[ignore]`-gated translation
+//! # Broker fault injection (Phase 16)
 //!
-//! - `testCommitAsyncFailsWhenCoordinatorUnavailableDuringClose` (line 461)
+//! - `testCommitAsyncFailsWhenCoordinatorUnavailableDuringClose`
+//!   (4.3.1 line 552)
 //!   → `test_commit_async_fails_when_coordinator_unavailable_during_close`
-//!   — `#[ignore]`d: requires `cluster.shutdownBroker()` on ALL brokers.
-//!   The Rust integration harness pools+shares clusters across tests
-//!   (`tests/common/cluster_pool.rs`) and exposes no broker-shutdown API;
-//!   killing brokers would break every co-resident pooled test. The exact
-//!   close-path contract — the message
-//!   `"Failed to commit offsets: Coordinator unknown and consumer is
-//!   closing"` (a `CommitFailedException`) and a sub-1s fast close — is
-//!   already unit-tested in
-//!   `src/consumer/internals/commit_request_manager.rs` (line 4217+,
-//!   `commit_async_fails_when_coordinator_unavailable_during_close`).
-//!   Kept here as an `#[ignore]`d body documenting the integration-level
-//!   gap, gated on harness broker-shutdown support.
+//!   — runs on its own dedicated `Type::Kraft` cluster (3 brokers + 1
+//!   isolated controller) because it stops every broker with
+//!   `KafkaCluster::shutdown_broker`, which a pooled cluster must never do.
 //!
 //! # SKIPped (CONSUMER-arm)
 //!
@@ -96,6 +88,7 @@
 //! - SKIP: `testClassicConsumerNoCommittedOffsets` — classic-protocol-only
 //! - SKIP: `testClassicConsumerCommittedDeletedTopic` — classic-protocol-only
 
+use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -1116,54 +1109,70 @@ async fn test_commit_async_completed_before_commit_sync_returns() {
     consumer.close().await.expect("consumer close should succeed");
 }
 
+/// Cluster for [`test_commit_async_fails_when_coordinator_unavailable_during_close`]:
+/// the suite's `@ClusterTestDefaults` shape (`types = {Type.KRAFT}`,
+/// `brokers = BROKER_COUNT` = 3, offsets topic 1 partition / RF 3,
+/// `group.min.session.timeout.ms=100`) as a **dedicated** cluster with an
+/// isolated controller, since the test stops every broker.
+fn dedicated_kraft_3brokers() -> ClusterConfig {
+    let props = BTreeMap::from([
+        (
+            "KAFKA_GROUP_COORDINATOR_REBALANCE_PROTOCOLS".to_string(),
+            "classic,consumer".to_string(),
+        ),
+        ("KAFKA_OFFSETS_TOPIC_NUM_PARTITIONS".to_string(), "1".to_string()),
+        ("KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR".to_string(), "3".to_string()),
+        ("KAFKA_GROUP_MIN_SESSION_TIMEOUT_MS".to_string(), "100".to_string()),
+    ]);
+    ClusterConfig::kraft_dedicated(3, 1).set_server_properties(props)
+}
+
 /// Translates Java's `testCommitAsyncFailsWhenCoordinatorUnavailableDuringClose`
-/// (line 461).
+/// (`PlaintextConsumerCommitTest.java:552`, AK 4.3.1).
 ///
-/// `#[ignore]`d: the Java test calls `cluster.brokerIds().forEach(
-/// cluster::shutdownBroker)` to make the coordinator unavailable, then
-/// asserts the async-commit callback fails with a `CommitFailedException`
-/// whose message is exactly `"Failed to commit offsets: Coordinator
-/// unknown and consumer is closing"` and that close completes in under 1s.
-///
-/// The Rust integration harness pools and shares clusters across tests
-/// (`tests/common/cluster_pool.rs`, keyed by `ClusterConfig`) and exposes
-/// no broker-shutdown API on `KafkaCluster`. Killing brokers in a pooled
-/// cluster would break every co-resident test, and the capability does
-/// not exist. The exact close-path contract is already covered by the
-/// unit test
-/// `commit_request_manager::tests::commit_async_fails_when_coordinator_unavailable_during_close`
-/// (`src/consumer/internals/commit_request_manager.rs:4217+`), which
-/// asserts the same `CommitFailedException` message string.
-///
-/// This body is kept (and wired into CI as `#[ignore]`d) to document the
-/// integration-level gap and to be ready to run once the harness gains a
-/// per-test isolated cluster with broker-shutdown support.
+/// Every broker is stopped before the consumer ever looks up its coordinator
+/// (it only `assign`s), so the async commit issued afterwards can never find
+/// one; closing with a 500 ms timeout must fail that commit with a
+/// `CommitFailedException` carrying the exact message
+/// `"Failed to commit offsets: Coordinator unknown and consumer is closing"`,
+/// fire the callback exactly once, and return in under 1 s.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "Requires cluster.shutdownBroker() on all brokers; the pooled \
-            test harness has no broker-shutdown API. The exact close-path \
-            commit-failed message is unit-tested in \
-            commit_request_manager.rs:4217+."]
 async fn test_commit_async_fails_when_coordinator_unavailable_during_close() {
-    let mut ctx = TestContext::new(cluster_config_with_kip848_3brokers()).await;
+    let mut ctx = TestContext::new(dedicated_kraft_3brokers()).await;
     let topic = ctx.topic("topic");
     let group_id = ctx.group_id("g_coordinator_unavailable_during_close");
     let tp = TopicPartition::new(topic.clone(), 0);
 
+    // Java `@BeforeEach`: `cluster.createTopic(topic, 2, (short) BROKER_COUNT)`.
+    let admin = admin_for(ctx.bootstrap_servers());
+    test_utils::create_topic(admin.as_ref(), &topic, 2, 3).await;
+    admin.close_with_timeout(Duration::from_secs(5)).await;
+
     let mut consumer = new_bytes_consumer(make_consumer_config_bytes(ctx.bootstrap_servers(), &group_id, false, &[]));
-    ensure_topic_with_2_partitions(consumer.as_mut(), &topic).await;
     let producer = build_producer_bytes(ctx.bootstrap_servers());
     send_records_with_producer(&producer, &tp, 3, current_time_ms()).await;
     producer.close().await.expect("producer close should succeed");
 
     consumer.assign(vec![tp.clone()]).await.expect("assign should succeed");
 
-    // NOTE: the Java step `cluster.brokerIds().forEach(cluster::shutdownBroker)`
-    // has no Rust equivalent in the pooled harness — see the `#[ignore]`
-    // rationale above. The assertions below document the contract.
+    // Close the coordinator before committing because otherwise the commit
+    // will fail to find the coordinator.
+    // Java: `cluster.brokerIds().forEach(cluster::shutdownBroker)`.
+    for broker_id in ctx.cluster().broker_ids() {
+        ctx.cluster().shutdown_broker(broker_id).await;
+    }
+    // Java: `waitForCondition(() -> cluster.aliveBrokers().isEmpty(), ...)`.
+    // `shutdown_broker` returns once the container has stopped, so the alive
+    // set is already empty here.
+    assert!(ctx.cluster().alive_broker_ids().is_empty(), "All brokers should be shut down");
+
     let cb = CountConsumerCommitCallback::new();
     let cb_arc: Arc<dyn OffsetCommitCallback> = Arc::new(cb.clone());
 
-    let _ = consumer.poll(Duration::from_millis(500)).await;
+    consumer
+        .poll(Duration::from_millis(500))
+        .await
+        .expect("poll with every broker down should not fail");
     let mut offsets = HashMap::new();
     offsets.insert(tp.clone(), OffsetAndMetadata::new(1).expect("OffsetAndMetadata"));
     consumer
