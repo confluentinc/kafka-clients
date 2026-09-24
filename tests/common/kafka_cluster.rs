@@ -1622,6 +1622,26 @@ mod tests {
         ));
     }
 
+    /// Removes whatever the reap test staged, however the test ends — a
+    /// leaked `kafka-net-*` network costs one of Docker's ~30 default subnets
+    /// for good. Synchronous `docker` calls, since `Drop` cannot await.
+    struct StagedAttemptCleanup {
+        suffix: String,
+    }
+
+    impl Drop for StagedAttemptCleanup {
+        fn drop(&mut self) {
+            let docker = |args: &[&str]| std::process::Command::new("docker").args(args).output().ok();
+            let name_filter = format!("name={}", self.suffix);
+            if let Some(out) = docker(&["ps", "-aq", "--filter", &name_filter]) {
+                for id in String::from_utf8_lossy(&out.stdout).split_whitespace() {
+                    let _ = docker(&["rm", "-f", id]);
+                }
+            }
+            let _ = docker(&["network", "rm", &attempt_network_name(&self.suffix)]);
+        }
+    }
+
     /// A failed attempt can leave a container that was created but never
     /// started, still attached to the attempt's network (PLAN Phase 20).
     /// Stage exactly that with the broker image (`docker create` does not
@@ -1631,14 +1651,38 @@ mod tests {
         let suffix = random_suffix(8);
         let network = attempt_network_name(&suffix);
         let image = format!("apache/kafka:{KAFKA_TAG}");
+        // Pull up front, without `DOCKER_CLI_TIMEOUT`: a cold pull can take
+        // longer than 30 s. The creates below then use `--pull never`, so
+        // none of the bounded calls can turn into a pull.
+        if docker_cli(&["image", "inspect", &image]).await.is_err() {
+            let pull_image = image.clone();
+            let pulled = tokio::task::spawn_blocking(move || {
+                std::process::Command::new("docker").args(["pull", &pull_image]).status()
+            })
+            .await
+            .expect("pull task");
+            assert!(pulled.is_ok_and(|status| status.success()), "could not pull {image}");
+        }
+
+        // Created before anything is staged, so every exit path cleans up.
+        let _cleanup = StagedAttemptCleanup { suffix: suffix.clone() };
         docker_cli(&["network", "create", &network]).await.expect("create network");
         for name in [
             format!("kafka-broker-0-{suffix}"),
             format!("kafka-controller-3000-{suffix}"),
         ] {
-            docker_cli(&["create", "--name", &name, "--network", &network, &image])
-                .await
-                .expect("create container");
+            docker_cli(&[
+                "create",
+                "--pull",
+                "never",
+                "--name",
+                &name,
+                "--network",
+                &network,
+                &image,
+            ])
+            .await
+            .expect("create container");
         }
 
         reap_failed_attempt(&suffix).await;
