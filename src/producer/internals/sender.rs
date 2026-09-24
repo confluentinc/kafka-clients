@@ -8760,7 +8760,7 @@ mod tests {
         // retry backoffs `0`.
         let accumulator = Arc::new(RecordAccumulator::new_for_test(
             batch_size,
-            Compression::gzip(),
+            Compression::gzip().build(),
             0,
             0,
             0,

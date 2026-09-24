@@ -15,6 +15,7 @@
 //! Producer types (org.apache.kafka.clients.producer)
 
 mod callback;
+mod dyn_producer;
 pub(crate) mod internals;
 mod kafka_producer;
 #[cfg(test)]
@@ -33,6 +34,7 @@ mod record_metadata;
 mod round_robin_partitioner;
 
 pub use callback::Callback;
+pub use dyn_producer::DynProducer;
 pub use kafka_producer::KafkaProducer;
 #[cfg(test)]
 pub(crate) use mock_partitioner::MockPartitioner;

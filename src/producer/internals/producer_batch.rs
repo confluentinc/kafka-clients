@@ -1331,7 +1331,7 @@ mod tests {
         let builder = MemoryRecords::builder_with_buffer_magic(
             vec![0u8; 1024],
             magic,
-            Compression::none(),
+            Compression::none().build(),
             TimestampType::CreateTime,
             0,
         );
@@ -1391,7 +1391,7 @@ mod tests {
             let builder = MemoryRecords::builder_with_buffer_magic(
                 vec![0u8; 4096],
                 RecordBatch::CURRENT_MAGIC_VALUE,
-                Compression::none(),
+                Compression::none().build(),
                 TimestampType::CreateTime,
                 0,
             );
