@@ -268,6 +268,12 @@ state (seen once in Phase 17; removed manually) — reap them on the failure pat
   app-thread poll event). Effect: Rust commits ~auto.commit.interval after construction even if
   the app stops polling. Not changed on this branch (behaviour change outside test scope).
 
+- **Admin client ignores `metadata.recovery.strategy` (Phase 19 / Critic 83):**
+  `src/admin/kafka_admin_client.rs:368` hardcodes `MetadataRecoveryStrategy::None`;
+  `AdminClientConfig` doesn't parse the recovery keys; Java reads it at
+  `KafkaAdminClient.java:635` and rebootstraps at `:731`. Producer/consumer were fixed in
+  891571d0. Blocks `ClientRebootstrapTest.testAdminRebootstrap{,Disabled}` (admin scope).
+
 ## Run log
 
 (Manager appends one line per loop iteration.)
@@ -296,3 +302,4 @@ state (seen once in Phase 17; removed manually) — reap them on the failure pat
 - Phase 17: fixup f2bdd189 (coordinator via __consumer_offsets p0 leader). Phase 17 DONE.
 - Phase 18 / Actor 82: 2f3771a9 (NotEnoughReplicas, follower shutdown), a6a2ecbb (4 txn timeouts, failure-to-fence TV2). Critic 82: 1 finding (TV2 fence row vacuous; TV1 reachable via update_features) → fixed 8370c280 (TV1 row added, downgrade works). Phase 18 DONE. Added Phases 20 (harness hardening) and 21 (TV0/TV1 arms).
 - Phase 20 / Actor 84: 69376c92 (retry transient Docker API errors w/ backoff; reap failed-attempt containers+network). Critic 84: 1 finding (reap test leaked on failure) → fixed e003e32e. Phase 20 DONE.
+- Phase 19 / Actor 83: 891571d0 (PROD fix: producer/consumer honor metadata.recovery.strategy + trigger, Java defaults), 63cca50d (4 rebootstrap tests), 24e03b13 (TransactionsBounceTest full scale), 97d7686f (epoch bump TV2). Critic 83 (2nd run; 1st stalled): 1 finding (admin ignores recovery strategy) → logged as divergence (admin scope). Phase 19 DONE.
