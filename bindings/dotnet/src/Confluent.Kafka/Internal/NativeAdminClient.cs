@@ -3960,7 +3960,7 @@ internal sealed class NativeAdminClient : IDisposable
     /// ⚠ A <see langword="null"/> or empty <paramref name="users"/> describes <b>every</b> user
     /// (<c>confluent_kafka.h:8784-8785</c>), which is why this cannot use a per-key bridge: the
     /// keys are discovered from the response. That matches Java, whose stored field is one
-    /// future over raw response data — see <see cref="UserScramCredentialEntry"/>.
+    /// future over raw response data — see <see cref="DescribeUserScramCredentialsViews"/>.
     /// </remarks>
     internal DescribeUserScramCredentialsResult DescribeUserScramCredentials(
         IReadOnlyCollection<string>? users,
@@ -3977,8 +3977,8 @@ internal sealed class NativeAdminClient : IDisposable
             ? new List<string>()
             : DistinctNames(users, "users", nameof(users));
 
-        SingleAdminOperation<IReadOnlyCollection<UserScramCredentialEntry>> operation =
-            new SingleAdminOperation<IReadOnlyCollection<UserScramCredentialEntry>>(
+        SingleAdminOperation<DescribeUserScramCredentialsViews> operation =
+            new SingleAdminOperation<DescribeUserScramCredentialsViews>(
                 "describeUserScramCredentials");
         GCHandle gcHandle = GCHandle.Alloc(operation, GCHandleType.Normal);
         operation.SetGcHandle(gcHandle);

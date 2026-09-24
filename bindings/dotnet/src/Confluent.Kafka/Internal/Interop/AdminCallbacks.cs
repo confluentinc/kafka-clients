@@ -1130,18 +1130,6 @@ internal static class AdminCallbacks
     internal static readonly UpdateFeaturesCallback UpdateFeatures = OnUpdateFeatures;
 
     /// <summary>
-    /// <c>describeUserScramCredentials</c>' row reader: the user, that user's <b>borrowed</b>
-    /// error, and the user's credential infos.
-    /// </summary>
-    /// <remarks>
-    /// ⚠ The inner walk is bounded by <c>get_credential_count(i)</c> — <b>never</b> by the
-    /// outer <c>count</c>; the two are unrelated, and the inner count is <c>0</c> for a failed
-    /// user (<c>confluent_kafka.h:9424-9425</c>).
-    /// </remarks>
-    internal static readonly Func<IntPtr, int, UserScramCredentialEntry> DescribeUserScramCredentialsEntry =
-        UserScramCredentialMarshal.ReadEntry;
-
-    /// <summary>
     /// <c>describeDelegationToken</c>' element reader — sub-shape 3b, one collection, no key
     /// and no per-element error.
     /// </summary>
@@ -1165,9 +1153,6 @@ internal static class AdminCallbacks
 
     private static readonly Action<IntPtr> s_destroyDescribeFeaturesResult =
         NativeMethods.DescribeFeaturesResultDestroy;
-
-    private static readonly KeyedResultMarshal.CountAccessor s_describeUserScramCredentialsCount =
-        NativeMethods.DescribeUserScramCredentialsResultCount;
 
     private static readonly KeyedResultMarshal.CountAccessor s_describeDelegationTokenCount =
         NativeMethods.DescribeDelegationTokenResultCount;
@@ -1219,14 +1204,100 @@ internal static class AdminCallbacks
         }
     }
 
-    private static void OnDescribeUserScramCredentials(IntPtr result, IntPtr error, IntPtr userData) =>
-        CompleteListRpc(
-            result,
-            error,
-            userData,
-            s_describeUserScramCredentialsCount,
-            DescribeUserScramCredentialsEntry,
-            s_destroyDescribeUserScramCredentialsResult);
+    /// <summary>
+    /// <c>describeUserScramCredentials</c>' own trampoline: it copies out the <c>all()</c> and
+    /// <c>users()</c> views and then <b>retains</b> the root for on-demand
+    /// <c>description(user)</c>, so it no longer fits the shared flattening helper.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// ⚠ Two ownership inversions relative to the accessor set this replaced, neither of
+    /// which has a managed symptom. <c>all_error</c> is <b>OWNED</b> —
+    /// <see cref="KafkaException.FromHandle"/>, never <c>FromBorrowedHandle</c>, which would
+    /// leak one error per faulting <c>All()</c>. The <c>all_get_description</c> pointers are
+    /// <b>BORROWED</b> from the root — the plain
+    /// <see cref="UserScramCredentialMarshal.Read(IntPtr)"/>, never the destroying twin.
+    /// </para>
+    /// <para>
+    /// ⚠ <paramref name="result"/> is tracked by an ownership <b>baton</b> zeroed only once
+    /// the <see cref="SafeDescribeUserScramCredentialsResultHandle"/> has adopted it, and the
+    /// <c>finally</c> destroys whatever the baton still holds (ffi §B6). So a throw anywhere
+    /// in the copy-out destroys the root exactly once, and a successful adoption never
+    /// double-destroys — the destroy is null-safe, which also covers the submit-error path
+    /// where the root may be null.
+    /// </para>
+    /// </remarks>
+    /// <param name="result">The result root, owned by this callback until adopted.</param>
+    /// <param name="error">The submit's own error, <b>owned</b>; null on success.</param>
+    /// <param name="userData">The operation's <see cref="GCHandle"/>.</param>
+    private static void OnDescribeUserScramCredentials(IntPtr result, IntPtr error, IntPtr userData)
+    {
+        SingleAdminOperation<DescribeUserScramCredentialsViews>? context = null;
+        IntPtr rootBaton = result;
+        try
+        {
+            GCHandle handle = GCHandle.FromIntPtr(userData);
+            context = (SingleAdminOperation<DescribeUserScramCredentialsViews>)handle.Target!;
+
+            if (error != IntPtr.Zero)
+            {
+                context.SetException(KafkaException.FromHandle(error)!);
+                return;
+            }
+
+            // ⚠ OWNED — FromHandle frees it exactly once.
+            KafkaException? allError = KafkaException.FromHandle(
+                NativeMethods.DescribeUserScramCredentialsResultAllError(result));
+
+            Dictionary<string, UserScramCredentialsDescription> all;
+            if (allError is null)
+            {
+                int allCount = NativeMethods.DescribeUserScramCredentialsResultAllCount(result);
+                all = new Dictionary<string, UserScramCredentialsDescription>(
+                    Math.Max(allCount, 0), StringComparer.Ordinal);
+                for (int row = 0; row < allCount; row++)
+                {
+                    string user = KeyedResultMarshal.ReadStringKey(
+                        NativeMethods.DescribeUserScramCredentialsResultAllGetUser(result, row));
+
+                    // ⚠ BORROWED description — the plain read, never ReadAndDestroy.
+                    all[user] = UserScramCredentialMarshal.Read(
+                        NativeMethods.DescribeUserScramCredentialsResultAllGetDescription(result, row));
+                }
+            }
+            else
+            {
+                // `all()` faulted, so its rows are unavailable (count is 0, getters null).
+                all = new Dictionary<string, UserScramCredentialsDescription>(StringComparer.Ordinal);
+            }
+
+            int usersCount = NativeMethods.DescribeUserScramCredentialsResultUsersCount(result);
+            List<string> users = new List<string>(Math.Max(usersCount, 0));
+            for (int index = 0; index < usersCount; index++)
+            {
+                users.Add(KeyedResultMarshal.ReadStringKey(
+                    NativeMethods.DescribeUserScramCredentialsResultUsersGet(result, index)));
+            }
+
+            SafeDescribeUserScramCredentialsResultHandle root =
+                SafeDescribeUserScramCredentialsResultHandle.Adopt(result);
+            rootBaton = IntPtr.Zero;
+
+            context.SetResult(new DescribeUserScramCredentialsViews(allError, all, users, root));
+        }
+        catch (Exception exception)
+        {
+            // No-throw boundary. On the inline path there is not even a caller frame that
+            // would catch this, so it must be absorbed here and surfaced through the Task.
+            context?.SetException(exception);
+        }
+        finally
+        {
+            s_destroyDescribeUserScramCredentialsResult(rootBaton);
+            context?.FailUncompleted();
+            context?.FreeGcHandle();
+        }
+    }
 
     private static void OnAlterUserScramCredentials(IntPtr key, IntPtr error, IntPtr userData) =>
         CompletePerKeyVoid(key, error, userData, s_stringKey);
