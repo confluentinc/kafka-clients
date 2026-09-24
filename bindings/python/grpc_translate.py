@@ -1694,28 +1694,46 @@ def _admin_scram_alterations(protos):
     return out
 
 
-def _admin_describe_user_scram_credentials_response(outcomes):
-    """`{user: UserScramCredentialsDescription | KafkaError}` ->
-    DescribeUserScramCredentialsResponse.
+def _admin_describe_user_scram_credentials_response(result):
+    """`DescribeUserScramCredentialsResult` -> DescribeUserScramCredentialsResponse
+    as RAW per-user rows, so the client can rebuild Java's three views (all() /
+    users() / description(user)).
 
-    A user with an *empty* credential_infos is a successful description ("the
-    broker reports no credential"), not an error — Java's `all()` treats
-    RESOURCE_NOT_FOUND that way. The broker never returns the salted password or
-    the salt, so neither has a field to carry.
+    The result object exposes the three views; a data-future (auth/timeout)
+    failure has already been raised by the client call (the handler turns it into
+    the response's top-level `error`), so here the response resolved. Each raw
+    row carries the wire error code AND the credentials: a RESOURCE_NOT_FOUND user
+    is `error_code = RESOURCE_NOT_FOUND` with empty `credential_infos`, and a hard
+    per-user error carries its code. The broker never returns the salt or salted
+    password, so neither has a field to carry.
+
+    Present users are enumerated from users() (non-RNF) plus all()'s keys (which
+    add the RNF users, available whenever all() does not itself fault on a hard
+    error). Each user's own outcome is read via description(user).
     """
+    candidates = list(result.users())
+    try:
+        for user in result.all().keys():
+            if user not in candidates:
+                candidates.append(user)
+    except kp.KafkaError:
+        # all() faults on a hard user-level error; RNF users are then not
+        # enumerable, but every non-RNF user is already in `candidates`.
+        pass
     entries = []
-    for user, outcome in outcomes.items():
-        entry = apb.DescribeUserScramCredentialsEntry(key=_admin_name_key(user))
-        if isinstance(outcome, kp.KafkaError):
-            entry.error.CopyFrom(_kafka_error_to_proto(outcome))
-        else:
-            entry.value.CopyFrom(apb.UserScramCredentialsDescription(
-                name=outcome.name,
+    for user in candidates:
+        try:
+            description = result.description(user)
+            entries.append(apb.DescribeUserScramCredentialsEntry(
+                user=user,
+                error_code=0,
                 credential_infos=[
                     apb.ScramCredentialInfo(mechanism=info.mechanism, iterations=info.iterations)
-                    for info in outcome.credential_infos
+                    for info in description.credential_infos
                 ]))
-        entries.append(entry)
+        except kp.KafkaError as e:
+            entries.append(apb.DescribeUserScramCredentialsEntry(
+                user=user, error_code=e.code, error_message=e.message or ""))
     return apb.DescribeUserScramCredentialsResponse(entries=entries)
 
 

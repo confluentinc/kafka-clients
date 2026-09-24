@@ -38,17 +38,16 @@ use confluent_kafka::admin::{
     DeletedRecords, DescribeAclsOptions, DescribeClassicGroupsOptions, DescribeClientQuotasOptions,
     DescribeClusterOptions, DescribeConfigsOptions, DescribeConsumerGroupsOptions, DescribeDelegationTokenOptions,
     DescribeFeaturesOptions, DescribeLogDirsOptions, DescribeProducersOptions, DescribeReplicaLogDirsOptions,
-    DescribeTopicsOptions, DescribeTransactionsOptions, DescribeUserScramCredentialsOptions, ElectLeadersOptions,
-    ExpireDelegationTokenOptions, FeatureUpdate, FenceProducersOptions, FilterResult, FilterResults,
-    FinalizedVersionRange, GroupListing, GroupOffsets, ListConfigResourcesOptions, ListConsumerGroupOffsetsOptions,
-    ListConsumerGroupOffsetsSpec, ListGroupsOptions, ListOffsetsOptions, ListOffsetsResultInfo,
-    ListPartitionReassignmentsOptions, ListTopicsOptions, ListTransactionsOptions, LogDirDescription, MemberAssignment,
-    MemberDescription, NewPartitionReassignment, NewPartitions, NewTopic, OffsetSpec, PartitionProducerState,
-    PartitionReassignment, ProducerState, RecordsToDelete, RemoveMembersFromConsumerGroupOptions,
-    RenewDelegationTokenOptions, ReplicaInfo, ScramCredentialInfo, ScramMechanism, SupportedVersionRange,
-    TerminateTransactionOptions, TopicDescription, TopicListing, TopicMetadataAndConfig, TransactionDescription,
-    TransactionListing, TransactionState, UpdateFeaturesOptions, UserScramCredentialAlteration,
-    UserScramCredentialsDescription,
+    DescribeTopicsOptions, DescribeTransactionsOptions, DescribeUserScramCredentialsOptions,
+    DescribeUserScramCredentialsResult, ElectLeadersOptions, ExpireDelegationTokenOptions, FeatureUpdate,
+    FenceProducersOptions, FilterResult, FilterResults, FinalizedVersionRange, GroupListing, GroupOffsets,
+    ListConfigResourcesOptions, ListConsumerGroupOffsetsOptions, ListConsumerGroupOffsetsSpec, ListGroupsOptions,
+    ListOffsetsOptions, ListOffsetsResultInfo, ListPartitionReassignmentsOptions, ListTopicsOptions,
+    ListTransactionsOptions, LogDirDescription, MemberAssignment, MemberDescription, NewPartitionReassignment,
+    NewPartitions, NewTopic, OffsetSpec, PartitionProducerState, PartitionReassignment, ProducerState, RecordsToDelete,
+    RemoveMembersFromConsumerGroupOptions, RenewDelegationTokenOptions, ReplicaInfo, ScramMechanism,
+    SupportedVersionRange, TerminateTransactionOptions, TopicDescription, TopicListing, TopicMetadataAndConfig,
+    TransactionDescription, TransactionListing, TransactionState, UpdateFeaturesOptions, UserScramCredentialAlteration,
 };
 #[allow(deprecated)]
 use confluent_kafka::admin::{
@@ -66,10 +65,16 @@ use confluent_kafka::common::security::auth::KafkaPrincipal;
 use confluent_kafka::common::security::token::delegation::{DelegationToken, TokenInformation};
 use confluent_kafka::common::utils::ProducerIdAndEpoch;
 use confluent_kafka::common::{
-    ClassicGroupState, ElectionType, Error, GroupState, GroupType, Node, TopicPartition, TopicPartitionInfo,
-    TopicPartitionReplica, Uuid,
+    ClassicGroupState, ElectionType, Error, GroupState, GroupType, KafkaFuture, Node, TopicPartition,
+    TopicPartitionInfo, TopicPartitionReplica, Uuid,
 };
 use confluent_kafka::consumer::OffsetAndMetadata;
+// Wire response-data types used to reconstruct the core
+// `DescribeUserScramCredentialsResult` from the harness's raw per-user rows.
+use confluent_kafka::DescribeUserScramCredentialsResponseData;
+use confluent_kafka::describe_user_scram_credentials_response_data::{
+    CredentialInfo as ScramWireCredentialInfo, DescribeUserScramCredentialsResult as ScramWireUserResult,
+};
 use multilanguage_test_server::proto::admin_service_client::AdminServiceClient;
 use multilanguage_test_server::proto::{self};
 use tonic::transport::Channel;
@@ -402,18 +407,6 @@ impl MultilanguageAdmin {
             )));
         }
         Ok(rebuilt)
-    }
-
-    /// Rebuilds a [`UserScramCredentialsDescription`].
-    fn scram_description(
-        &self,
-        description: proto::UserScramCredentialsDescription,
-    ) -> Result<UserScramCredentialsDescription, Error> {
-        let mut infos = Vec::with_capacity(description.credential_infos.len());
-        for info in description.credential_infos {
-            infos.push(ScramCredentialInfo::new(self.scram_mechanism(info.mechanism)?, info.iterations));
-        }
-        Ok(UserScramCredentialsDescription::new(description.name, infos))
     }
 
     /// Rebuilds a [`FeatureMetadataView`].
@@ -2256,7 +2249,7 @@ impl AdminBackend for MultilanguageAdmin {
         &self,
         users: &[String],
         options: DescribeUserScramCredentialsOptions,
-    ) -> Result<Outcomes<String, UserScramCredentialsDescription>, Error> {
+    ) -> Result<DescribeUserScramCredentialsResult, Error> {
         let request = proto::DescribeUserScramCredentialsRequest {
             admin_id: self.admin_id,
             users: users.to_vec(),
@@ -2265,15 +2258,36 @@ impl AdminBackend for MultilanguageAdmin {
         let response = self
             .call(|mut c| async move { c.describe_user_scram_credentials(request).await })
             .await?;
-        keyed(response.error, response.entries, |entry| {
-            let key = self.name_key(entry.key, "describeUserScramCredentials")?;
-            let outcome = match entry.outcome {
-                Some(proto::describe_user_scram_credentials_entry::Outcome::Error(e)) => Err(kafka_error_from_proto(e)),
-                Some(proto::describe_user_scram_credentials_entry::Outcome::Value(v)) => Ok(self.scram_description(v)?),
-                None => return Err(self.protocol_error("DescribeUserScramCredentialsEntry with no outcome")),
-            };
-            Ok((key, outcome))
-        })
+        // A whole-response (data-future) failure faults every view — mirrors
+        // Java's top-level `whenComplete` throwable.
+        if let Some(error) = response.error {
+            return Err(kafka_error_from_proto(error));
+        }
+        // Rebuild the raw response data from the per-user rows and hand it to the
+        // crate's own `DescribeUserScramCredentialsResult`, so the harness answers
+        // all()/users()/description() with the exact same logic the native backend
+        // does (`src/admin/describe_user_scram_credentials_result.rs`).
+        let mut results = Vec::with_capacity(response.entries.len());
+        for entry in response.entries {
+            let mut result = ScramWireUserResult::new();
+            result.set_user(entry.user).set_error_code(entry.error_code as i16);
+            if let Some(message) = entry.error_message {
+                result.set_error_message(Some(message));
+            }
+            let mut infos = Vec::with_capacity(entry.credential_infos.len());
+            for info in entry.credential_infos {
+                // Reuse the mechanism-indicator validation the other SCRAM paths use.
+                self.scram_mechanism(info.mechanism)?;
+                let mut credential = ScramWireCredentialInfo::new();
+                credential.set_mechanism(info.mechanism as i8).set_iterations(info.iterations);
+                infos.push(credential);
+            }
+            result.set_credential_infos(infos);
+            results.push(result);
+        }
+        let mut data = DescribeUserScramCredentialsResponseData::new();
+        data.set_results(results);
+        Ok(DescribeUserScramCredentialsResult::new(KafkaFuture::completed(Ok(data))))
     }
 
     async fn alter_user_scram_credentials(

@@ -1290,9 +1290,11 @@ class AdminService(apb_grpc.AdminServiceServicer):
         try:
             # An empty `users` is Java's no-argument overload: describe every
             # user. admin.py takes None for the same thing and [] is equivalent.
-            outcomes = client.describe_user_scram_credentials(
+            # Returns a DescribeUserScramCredentialsResult (the three views);
+            # a data-future failure raises here and becomes the top-level error.
+            result = client.describe_user_scram_credentials(
                 list(request.users), timeout=_admin_timeout(request))
-            return _admin_describe_user_scram_credentials_response(outcomes)
+            return _admin_describe_user_scram_credentials_response(result)
         except Exception as e:  # noqa: BLE001
             LOG.exception("describe_user_scram_credentials raised")
             return apb.DescribeUserScramCredentialsResponse(error=_kafka_error_to_proto(e))
