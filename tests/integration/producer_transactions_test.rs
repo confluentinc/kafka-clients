@@ -53,7 +53,9 @@
 //!   `testFailureToFenceEpoch` (CONSUMER rows) → [`test_failure_to_fence_epoch_tv1`] /
 //!   [`test_failure_to_fence_epoch_tv2`] and
 //!   `testBumpTransactionalEpochWithTV2Enabled` (CONSUMER row) →
-//!   [`test_bump_transactional_epoch_with_tv2_enabled`]
+//!   [`test_bump_transactional_epoch_with_tv2_enabled`] and
+//!   `testBumpTransactionalEpochWithTV2Disabled` (CONSUMER row) →
+//!   [`test_bump_transactional_epoch_with_tv2_disabled`]
 //!   (each on a dedicated cluster, since they stop brokers — see
 //!   [`transactions_test_dedicated_cluster`])
 //!
@@ -1359,9 +1361,10 @@ async fn test_consecutively_run_init_transactions() {
 /// An empty transaction can be aborted right after a committed one.
 ///
 /// Translates `TransactionsTest.testEmptyAbortAfterCommit`
-/// (`TransactionsTest.scala:1047-1057`). Java runs only the `consumer, true`
-/// (`isTV2Enabled`) row; the pooled `apache/kafka:4.2.0` KRaft brokers are formatted
-/// at the latest metadata version, which finalizes `transaction.version=2`.
+/// (`TransactionsTest.scala:1043-1057`). Java's `@CsvSource` lists only the
+/// `consumer, true` (`isTV2Enabled`) row — there is no TV1 row to translate — and
+/// the pooled `apache/kafka:4.2.0` KRaft brokers finalize `transaction.version=2`,
+/// so no downgrade is needed.
 #[tokio::test]
 async fn test_empty_abort_after_commit() {
     let mut ctx = TestContext::new(cluster_config()).await;
@@ -3782,6 +3785,173 @@ async fn bump_transactional_epoch_with_tv2_enabled() {
 #[tokio::test(flavor = "multi_thread")]
 async fn test_bump_transactional_epoch_with_tv2_enabled() {
     bump_transactional_epoch_with_tv2_enabled().await;
+}
+
+/// With TV2 disabled, a delivery timeout moves the producer to an abortable
+/// error, sends then fail with a `KafkaException` until the abort, and after the
+/// abort the next transaction commits with the producer epoch bumped.
+///
+/// Translates `TransactionsTest.testBumpTransactionalEpochWithTV2Disabled`
+/// (`TransactionsTest.scala:815-893`), row `consumer, false`. Java runs the
+/// `isTV2Enabled = false` row on a cluster formatted at `transaction.version=1`
+/// (`QuorumTestHarness.scala:284-286`); the harness image formats at TV2, so the
+/// dedicated cluster is downgraded to 1 before any producer exists (as
+/// [`failure_to_fence_epoch`] does).
+///
+/// Deviation: Java reads the partition leader's `producerStateManager` in
+/// process; here the same active-producer entries (id and epoch) come from
+/// `Admin.describeProducers` on `test-topic-0`, which reports that state.
+async fn bump_transactional_epoch_with_tv2_disabled() {
+    let mut ctx = TestContext::new(transactions_test_dedicated_cluster()).await;
+    downgrade_transaction_version_to_1(&ctx).await;
+    let (topic1, topic2) = create_txn_test_topics(&mut ctx).await;
+    let bootstrap = ctx.bootstrap_servers().to_string();
+    let default_linger: u64 = 5;
+    let producer = create_transactional_producer_with_delivery_timeout_ms_request_timeout_ms(
+        &bootstrap,
+        &ctx.group_id("transactionalProducer"),
+        5000 + default_linger,
+        5000,
+    );
+    let mut consumer = create_read_committed_consumer(&bootstrap, &ctx.group_id("transactional-group"));
+
+    // Create a topic with RF=1 so that a single broker failure will render it unavailable
+    let test_topic = ctx.topic("test-topic");
+    {
+        let admin = txn_test_admin(&ctx);
+        test_utils::create_topic(admin.as_ref(), &test_topic, TXN_TEST_NUM_PARTITIONS, 1).await;
+        admin.close().await;
+    }
+    let partition_leader = partition_zero_leader(&ctx, &test_topic).await;
+    let test_tp = TopicPartition::new(test_topic.clone(), 0);
+
+    producer.init_transactions().await.expect("initTransactions");
+
+    producer.begin_transaction().expect("beginTransaction");
+    send_record(
+        &producer,
+        producer_record_with_expected_transaction_status(&test_topic, Some(0), "4", "4", true),
+    )
+    .await
+    .expect("send");
+    producer.commit_transaction().await.expect("commitTransaction");
+
+    // Java's `activeProducers` iterator (`assertTrue(activeProducersIter.hasNext)`).
+    let producer_state_entry = wait_for_single_producer_state(&ctx, &test_tp).await;
+    let producer_id = producer_state_entry.producer_id();
+    let initial_producer_epoch = producer_state_entry.producer_epoch();
+
+    producer.begin_transaction().expect("beginTransaction");
+    let successful_future = send_record(
+        &producer,
+        producer_record_with_expected_transaction_status(&topic1, None, "2", "2", false),
+    )
+    .await
+    .expect("send");
+    successful_future
+        .get_with_timeout(Duration::from_secs(20))
+        .await
+        .expect("successfulFuture.get(20, SECONDS)");
+
+    ctx.cluster().shutdown_broker(partition_leader).await; // kill the partition leader to prevent the batch from being submitted
+    let failed_future = send_record(
+        &producer,
+        producer_record_with_expected_transaction_status(&test_topic, Some(0), "3", "3", false),
+    )
+    .await
+    .expect("send");
+    tokio::time::sleep(Duration::from_millis(6000)).await; // Wait for the record to time out
+    ctx.cluster().start_broker(partition_leader).await;
+
+    // `assertFutureThrows(classOf[TimeoutException], failedFuture)`: the class is
+    // Java's contract; the message prefix `ProducerBatch` builds is asserted too.
+    let e = failed_future.get().await.expect_err("the batch must expire");
+    assert!(matches!(e, Error::Timeout(_)), "expected TimeoutException, got {e:?}");
+    assert!(
+        e.message().starts_with(&format!("Expiring 1 record(s) for {test_topic}-0:")),
+        "unexpected expiry message: {}",
+        e.message()
+    );
+    // Ensure the producer transitions to abortable_error state.
+    test_utils::wait_until_true_with_timeout(
+        || async {
+            // Java: `failed = true` only when the thrown exception is a `KafkaException`.
+            send_record(
+                &producer,
+                producer_record_with_expected_transaction_status(&test_topic, Some(0), "3", "3", false),
+            )
+            .await
+            .is_err_and(|e| e.is_kafka_error())
+        },
+        "The send request never failed as expected.",
+        test_utils::DEFAULT_MAX_WAIT_MS,
+        test_utils::DEFAULT_PAUSE_MS,
+    )
+    .await;
+    // `assertThrows(classOf[KafkaException], () => producer.send(...))`.
+    let e = send_record(
+        &producer,
+        producer_record_with_expected_transaction_status(&test_topic, Some(0), "3", "3", false),
+    )
+    .await
+    .expect_err("send must fail while the transaction is in an abortable error state");
+    assert!(e.is_kafka_error(), "expected a KafkaException, got {e:?}");
+    producer.abort_transaction().await.expect("abortTransaction");
+
+    producer.begin_transaction().expect("beginTransaction");
+    for (topic, partition, value) in [
+        (&topic2, None, "2"),
+        (&topic1, None, "4"),
+        (&test_topic, Some(0), "1"),
+        (&test_topic, Some(0), "3"),
+    ] {
+        send_record(
+            &producer,
+            producer_record_with_expected_transaction_status(topic, partition, value, value, true),
+        )
+        .await
+        .expect("send");
+    }
+    producer.commit_transaction().await.expect("commitTransaction");
+
+    consumer
+        .subscribe_with_topics(vec![topic1.clone(), topic2.clone(), test_topic.clone()])
+        .await
+        .expect("subscribe");
+
+    let records = consume_records(&mut consumer, 5).await;
+    for record in &records {
+        assert_committed_and_get_value(record);
+    }
+
+    // Producers can safely abort and continue after the last record of a transaction timing out, so it's possible to
+    // get here without having bumped the epoch. If bumping the epoch is possible, the producer will attempt to, so
+    // check there that the epoch has actually increased
+    let admin = txn_test_admin(&ctx);
+    let producer_state_entry = producer_states(admin.as_ref(), &test_tp)
+        .await
+        .expect("describeProducers")
+        .into_iter()
+        .find(|state| state.producer_id() == producer_id);
+    admin.close().await;
+    let producer_state_entry = producer_state_entry.expect("assertNotNull(producerStateEntry)");
+    assert!(
+        producer_state_entry.producer_epoch() > initial_producer_epoch,
+        "InitialProduceEpoch: {initial_producer_epoch} ProducerStateEntry: {producer_state_entry:?}"
+    );
+
+    consumer.close().await.expect("consumer close");
+    <KafkaProducer<Vec<u8>, Vec<u8>> as Producer<Vec<u8>, Vec<u8>>>::close_with_timeout(&producer, Duration::ZERO)
+        .await
+        .expect("producer close(Duration.ZERO)");
+    ctx.cleanup().await;
+}
+
+/// `testBumpTransactionalEpochWithTV2Disabled`, row `consumer,false`
+/// (`TransactionsTest.scala:818`).
+#[tokio::test(flavor = "multi_thread")]
+async fn test_bump_transactional_epoch_with_tv2_disabled() {
+    bump_transactional_epoch_with_tv2_disabled().await;
 }
 
 // ---------------------------------------------------------------------------
