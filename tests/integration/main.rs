@@ -72,3 +72,4 @@ mod sasl_plain_plaintext_consumer_test;
 mod sasl_ssl_consumer_test;
 mod ssl_consumer_test;
 mod ssl_sasl_test;
+mod transactions_bounce_test;

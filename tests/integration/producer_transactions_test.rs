@@ -953,7 +953,7 @@ fn create_read_uncommitted_consumer(bootstrap: &str, group_id: &str) -> Box<dyn 
 /// `TestUtils.producerRecordWithExpectedTransactionStatus(topic, partition, key,
 /// value, willBeCommitted)` (`TestUtils.scala:1270-1282`): a record carrying a
 /// `transactionStatus` header naming the outcome the test expects.
-fn producer_record_with_expected_transaction_status(
+pub(crate) fn producer_record_with_expected_transaction_status(
     topic: &str,
     partition: Option<i32>,
     key: &str,
@@ -979,7 +979,7 @@ fn producer_record_with_expected_transaction_status(
 
 /// `KafkaProducer::send` through the `Producer` trait (the inherent method of the
 /// same name would otherwise shadow it).
-async fn send_record(
+pub(crate) async fn send_record(
     producer: &KafkaProducer<Vec<u8>, Vec<u8>>,
     record: ProducerRecord<Vec<u8>, Vec<u8>>,
 ) -> Result<KafkaFuture<RecordMetadata>, Error> {
@@ -1020,7 +1020,7 @@ async fn poll_until_at_least_num_records(
 }
 
 /// `TestUtils.assertCommittedAndGetValue` (`TestUtils.scala:1255-1264`).
-fn assert_committed_and_get_value(record: &ConsumerRecord<Vec<u8>, Vec<u8>>) -> String {
+pub(crate) fn assert_committed_and_get_value(record: &ConsumerRecord<Vec<u8>, Vec<u8>>) -> String {
     match record.headers().headers(TRANSACTION_STATUS_KEY).first() {
         Some(header) => assert_eq!(
             String::from_utf8_lossy(COMMITTED_VALUE),
@@ -1415,7 +1415,7 @@ async fn test_offset_metadata_in_send_offsets_to_transaction() {
 /// (`TestUtils.scala:1229-1246`): an idempotent producer writes keys and values
 /// `"0" .. numRecords` (no partition, so the default partitioner spreads them),
 /// then flushes and closes.
-async fn seed_topic_with_numbered_records(bootstrap: &str, topic: &str, num_records: usize) {
+pub(crate) async fn seed_topic_with_numbered_records(bootstrap: &str, topic: &str, num_records: usize) {
     let producer = cluster_producer(bootstrap, &[("enable.idempotence", "true")]);
     for i in 0..num_records {
         let value = i.to_string().into_bytes();
@@ -1432,7 +1432,7 @@ async fn seed_topic_with_numbered_records(bootstrap: &str, topic: &str, num_reco
 
 /// `TestUtils.consumerPositions(consumer)` (`TestUtils.scala:1284-1291`): the
 /// current position of every assigned partition, as offsets to commit.
-async fn consumer_positions(
+pub(crate) async fn consumer_positions(
     consumer: &mut Box<dyn Consumer<Vec<u8>, Vec<u8>>>,
 ) -> HashMap<TopicPartition, OffsetAndMetadata> {
     let mut offsets_to_commit = HashMap::new();
@@ -1447,7 +1447,7 @@ async fn consumer_positions(
 /// seek every assigned partition to its committed offset, or to the beginning if
 /// it has none. (Java filters `null` values out of `committed`; the Rust map omits
 /// partitions without a committed offset, which is the same set.)
-async fn reset_to_committed_positions(consumer: &mut Box<dyn Consumer<Vec<u8>, Vec<u8>>>) {
+pub(crate) async fn reset_to_committed_positions(consumer: &mut Box<dyn Consumer<Vec<u8>, Vec<u8>>>) {
     let assignment: Vec<TopicPartition> = consumer.assignment().into_iter().collect();
     let committed = consumer.committed(&assignment).await.expect("committed");
     for topic_partition in assignment {
