@@ -92,6 +92,7 @@ use std::collections::HashSet;
 use std::time::Duration;
 use std::time::Instant;
 
+use confluent_kafka::admin::{Admin, AdminClientConfig, KafkaAdminClient};
 use confluent_kafka::common::Error;
 use confluent_kafka::common::Errors;
 use confluent_kafka::common::TopicPartition;
@@ -109,6 +110,8 @@ use confluent_kafka::producer::ProducerRecord;
 
 use crate::common::cluster_config::{ClusterConfig, kip848_3_broker};
 use crate::common::test_context::TestContext;
+use crate::common::test_utils::create_topic;
+use crate::common::test_utils::wait_for_partition_leaders;
 
 // Type alias matching the bytes-typed `Consumer` trait object returned
 // by `KafkaConsumer::new::<Vec<u8>, Vec<u8>>`. Used in helper signatures so
@@ -131,17 +134,11 @@ type BytesConsumer = dyn Consumer<Vec<u8>, Vec<u8>>;
 /// group.initial.rebalance.delay.ms = 10
 /// ```
 ///
-/// Additionally, `num.partitions=2` is set so auto-created topics get
-/// 2 partitions — matching Java's `cluster.createTopic(topicN, 2,
-/// BROKER_COUNT)`. The Rust harness has no admin client, so we rely
-/// on broker-side auto-create-topics (enabled by default in Kafka 4.2)
-/// with the default partition count set to 2. This keeps the expected
-/// assignment sets identical to Java's.
+/// Every topic is created explicitly by [`create_test_topic`], as Java
+/// does with `cluster.createTopic(topicN, 2, BROKER_COUNT)`;
+/// `num.partitions=2` only matters for auto-created topics.
 fn cluster_config_with_kip848_3brokers() -> ClusterConfig {
-    // Java parity: every dynamically-created topic uses
-    // `cluster.createTopic(name, 2, BROKER_COUNT)`. Auto-create with
-    // 2 partitions reproduces that contract from Rust (no admin client); the
-    // canonical helper supplies the shared KIP-848 broker tuning.
+    // The canonical helper supplies the shared KIP-848 broker tuning.
     kip848_3_broker(2)
 }
 
@@ -247,41 +244,38 @@ async fn send_records_with_producer(
 
 // Note: a `send_records_bytes(bootstrap, ...)` shorthand was considered
 // but is unused in this suite — every test in this file builds its own
-// long-lived producer to provision topics + produce data, so the
+// long-lived producer to produce data, so the
 // shorthand would duplicate inline logic. Suite 2 (fetch) keeps that
 // shorthand; we don't.
 
 // ── Topic provisioning helpers ────────────────────────────────────────
 
-/// Equivalent of Java's `cluster.createTopic(name, 2, BROKER_COUNT)`.
+/// Java `PlaintextConsumerSubscriptionTest.BROKER_COUNT`
+/// (`PlaintextConsumerSubscriptionTest.java:74`).
+const BROKER_COUNT: i16 = 3;
+
+/// Translates `cluster.createTopic(name, numPartitions, (short) BROKER_COUNT)`
+/// — the suite's `@BeforeEach` for `topic`
+/// (`PlaintextConsumerSubscriptionTest.java:83-86`) and every per-test topic.
+/// Creates the topic EMPTY, so the first produced record lands at offset 0.
 ///
-/// The Rust integration harness has no admin client. We force broker
-/// auto-create by producing one no-op record per partition; with
-/// `num.partitions=2` on the broker, the first produce auto-creates
-/// the topic with two partitions. Subsequent calls are idempotent
-/// (a no-op record is just appended).
-///
-/// This is a faithful equivalent of `cluster.createTopic(...)` for
-/// these tests because every test that creates a topic also produces
-/// to it (or asserts the consumer's auto-assignment, which equally
-/// relies on the topic existing in the cluster metadata).
-async fn ensure_topic_with_2_partitions(producer: &KafkaProducer<Vec<u8>, Vec<u8>>, topic: &str) {
-    for partition in 0..2 {
-        let record = ProducerRecord::with_partition_key(
-            topic.to_string(),
-            Some(partition),
-            Some(b"__provisioner__".to_vec()),
-            Some(b"__provisioner__".to_vec()),
-        )
-        .expect("ProducerRecord::with_partition_key should succeed");
-        let fut = <KafkaProducer<Vec<u8>, Vec<u8>> as Producer<Vec<u8>, Vec<u8>>>::send(producer, record)
-            .await
-            .expect("provisioner send should succeed");
-        fut.get_with_timeout(Duration::from_secs(30))
-            .await
-            .expect("provisioner send should ack");
-    }
-    producer.flush().await.expect("producer.flush should succeed");
+/// Creates the topic through the admin client and then waits until every
+/// partition leader accepts leader-only requests, before the test produces.
+/// Auto-creating the topic by producing instead races leader election on the
+/// 3-broker cluster: `NOT_LEADER_OR_FOLLOWER` retries reorder the
+/// non-idempotent sends.
+async fn create_test_topic(bootstrap_servers: &str, topic: &str, num_partitions: i32) {
+    let props = HashMap::from([
+        ("bootstrap.servers".to_string(), bootstrap_servers.to_string()),
+        ("client.id".to_string(), "subscription-test-admin".to_string()),
+        ("request.timeout.ms".to_string(), "30000".to_string()),
+        ("default.api.timeout.ms".to_string(), "30000".to_string()),
+    ]);
+    let config = AdminClientConfig::new(&props).expect("valid admin config");
+    let admin: Box<dyn Admin> = Box::new(KafkaAdminClient::new(config).expect("admin client"));
+    create_topic(admin.as_ref(), topic, num_partitions, BROKER_COUNT).await;
+    wait_for_partition_leaders(admin.as_ref(), topic, 0..num_partitions).await;
+    admin.close_with_timeout(Duration::from_secs(5)).await;
 }
 
 // ── Consumer test helpers ─────────────────────────────────────────────
@@ -411,10 +405,10 @@ async fn test_async_consumer_re2j_pattern_subscription() {
 
     let producer = build_producer_bytes(ctx.bootstrap_servers());
     // Java `@BeforeEach`: createTopic("topic", 2, ...).
-    ensure_topic_with_2_partitions(&producer, &topic).await;
-    ensure_topic_with_2_partitions(&producer, &topic1).await;
-    ensure_topic_with_2_partitions(&producer, &topic2).await;
-    ensure_topic_with_2_partitions(&producer, &topic3).await;
+    create_test_topic(ctx.bootstrap_servers(), &topic, 2).await;
+    create_test_topic(ctx.bootstrap_servers(), &topic1, 2).await;
+    create_test_topic(ctx.bootstrap_servers(), &topic2, 2).await;
+    create_test_topic(ctx.bootstrap_servers(), &topic3, 2).await;
     producer.close().await.expect("producer close should succeed");
 
     let mut consumer = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
@@ -465,16 +459,6 @@ async fn test_async_consumer_re2j_pattern_subscription() {
 /// Translates Java's `testAsyncConsumerRe2JPatternSubscriptionFetch`
 /// (line 316). Subscribes via Re2J pattern, awaits assignment,
 /// produces records to one partition, and verifies they are consumed.
-///
-/// Translation deviation: Java's `cluster.createTopic(name, 2, ...)` is
-/// a synchronous admin op that creates the topic with no records. The
-/// Rust harness has no admin client, so [`ensure_topic_with_2_partitions`]
-/// provisions via produce → 1 record per partition. The provisioner
-/// record offsets are then 0, and the test's records start at offset
-/// `provisioner_count`. We compute the starting offset from
-/// `end_offsets(tp)` BEFORE producing the test records, so the
-/// verification mirrors Java's semantics regardless of the
-/// auto-create-vs-admin distinction.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_async_consumer_re2j_pattern_subscription_fetch() {
     let mut ctx = TestContext::new(cluster_config_with_kip848_3brokers()).await;
@@ -483,8 +467,8 @@ async fn test_async_consumer_re2j_pattern_subscription_fetch() {
     let group_id = ctx.group_id("g_re2j_pattern_subscription_fetch");
 
     let producer = build_producer_bytes(ctx.bootstrap_servers());
-    ensure_topic_with_2_partitions(&producer, &topic).await;
-    ensure_topic_with_2_partitions(&producer, &topic1).await;
+    create_test_topic(ctx.bootstrap_servers(), &topic, 2).await;
+    create_test_topic(ctx.bootstrap_servers(), &topic1, 2).await;
 
     let mut consumer = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
         make_consumer_config_bytes(ctx.bootstrap_servers(), &group_id, &[]),
@@ -509,18 +493,13 @@ async fn test_async_consumer_re2j_pattern_subscription_fetch() {
     await_assignment_with_deadline(consumer.as_mut(), &expected, Duration::from_secs(90)).await;
 
     let tp = TopicPartition::new(topic1.clone(), 0);
-    // Probe the partition's current high watermark BEFORE producing
-    // test records — this is the offset the test's records will start
-    // at (post-provisioner).
-    let starting_offset = end_offset_with_retry(consumer.as_mut(), &tp, Duration::from_secs(30)).await;
 
     let total_records: usize = 10;
     let starting_timestamp = current_time_ms();
     send_records_with_producer(&producer, &tp, total_records, starting_timestamp).await;
     producer.close().await.expect("producer close should succeed");
 
-    consume_and_verify_records_bytes(consumer.as_mut(), &tp, total_records, starting_offset, 0, starting_timestamp)
-        .await;
+    consume_and_verify_records_bytes(consumer.as_mut(), &tp, total_records, 0, 0, starting_timestamp).await;
 
     consumer.close().await.expect("consumer close should succeed");
 }
@@ -536,8 +515,8 @@ async fn test_async_consumer_re2j_pattern_expand_subscription() {
     let group_id = ctx.group_id("g_re2j_pattern_expand");
 
     let producer = build_producer_bytes(ctx.bootstrap_servers());
-    ensure_topic_with_2_partitions(&producer, &topic1).await;
-    ensure_topic_with_2_partitions(&producer, &topic2).await;
+    create_test_topic(ctx.bootstrap_servers(), &topic1, 2).await;
+    create_test_topic(ctx.bootstrap_servers(), &topic2, 2).await;
     producer.close().await.expect("producer close should succeed");
 
     let mut consumer = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
@@ -583,23 +562,7 @@ async fn test_async_consumer_re2j_pattern_expand_subscription() {
 /// Subscribes via Re2J pattern, verifies assignment, produces and
 /// consumes records, calls `end_offsets` for known + unknown partitions,
 /// then produces and consumes another batch.
-///
-/// Translation deviation: like
-/// [`test_async_consumer_re2j_pattern_subscription_fetch`], the Rust
-/// harness has no admin client, so [`ensure_topic_with_2_partitions`]
-/// provisions via produce-1-record-per-partition. The test uses
-/// `end_offsets(tp)` to compute the test-records' starting offset
-/// rather than assuming the topic was created empty as Java does.
-///
-/// The Java assertion `unassigned_partition -> 0L` is replaced by
-/// "the end_offsets call succeeds and includes the assigned partition":
-/// Java's contract is that `endOffsets(...)` returns one entry per
-/// requested partition (its high watermark) or raises. With the
-/// `OffsetAndTimestampInternal`-payload fix landed in
-/// COMMENTS.DONE.1.md Issue 6 the Rust translation now matches that
-/// contract for any assigned partition; we still defensively drop
-/// `None` entries (which can only arise from a broker bug) rather
-/// than surface them.
+
 #[tokio::test(flavor = "multi_thread")]
 async fn test_topic_id_subscription_with_re2j_regex_and_offsets_fetch() {
     let mut ctx = TestContext::new(cluster_config_with_kip848_3brokers()).await;
@@ -609,8 +572,8 @@ async fn test_topic_id_subscription_with_re2j_regex_and_offsets_fetch() {
     let group_id = ctx.group_id("g_topic_id_re2j_offsets");
 
     let producer = build_producer_bytes(ctx.bootstrap_servers());
-    ensure_topic_with_2_partitions(&producer, &topic).await;
-    ensure_topic_with_2_partitions(&producer, &topic1).await;
+    create_test_topic(ctx.bootstrap_servers(), &topic, 2).await;
+    create_test_topic(ctx.bootstrap_servers(), &topic1, 2).await;
 
     let mut consumer = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
         make_consumer_config_bytes(ctx.bootstrap_servers(), &group_id, &[]),
@@ -636,46 +599,20 @@ async fn test_topic_id_subscription_with_re2j_regex_and_offsets_fetch() {
 
     let tp = TopicPartition::new(topic1.clone(), 0);
 
-    // Probe the partition's high watermark before producing test
-    // records — this is where the test's records will start.
-    let starting_offset_round1 = end_offset_with_retry(consumer.as_mut(), &tp, Duration::from_secs(30)).await;
-
     let total_records: usize = 10;
     let starting_timestamp = current_time_ms();
     send_records_with_producer(&producer, &tp, total_records, starting_timestamp).await;
-    consume_and_verify_records_bytes(
-        consumer.as_mut(),
-        &tp,
-        total_records,
-        starting_offset_round1,
-        0,
-        starting_timestamp,
-    )
-    .await;
+    consume_and_verify_records_bytes(consumer.as_mut(), &tp, total_records, 0, 0, starting_timestamp).await;
 
     // Provision topic2 (unassigned — does not match the `<prefix>_topic.*`
     // pattern because the per-test prefix is `<prefix>_newTopic2`).
-    ensure_topic_with_2_partitions(&producer, &topic2).await;
+    create_test_topic(ctx.bootstrap_servers(), &topic2, 2).await;
     let unassigned_partition = TopicPartition::new(topic2.clone(), 0);
     let parts = vec![unassigned_partition.clone(), tp.clone()];
     let offsets = consumer.end_offsets(&parts).await.expect("end_offsets should succeed");
 
-    // Assigned partition's end_offset is reliably the cumulative
-    // produced count.
-    assert_eq!(
-        offsets.get(&tp).copied(),
-        Some(starting_offset_round1 + total_records as i64),
-        "end_offsets for tp should match starting_offset + total_records"
-    );
-    // For the unassigned partition, Java asserts `0L` (empty topic);
-    // Rust either gets `Some(1)` (provisioner record was acked) or
-    // omits the entry if broker metadata hasn't yet caught up. Accept
-    // either to keep the test stable across metadata-refresh races.
-    let unassigned_end = offsets.get(&unassigned_partition).copied();
-    assert!(
-        matches!(unassigned_end, None | Some(0) | Some(1)),
-        "end_offsets for unassigned partition should be 0, 1, or absent (got {unassigned_end:?})"
-    );
+    let expected_offsets = HashMap::from([(unassigned_partition, 0i64), (tp.clone(), total_records as i64)]);
+    assert_eq!(offsets, expected_offsets);
 
     // Fetch records again with the regex subscription.
     send_records_with_producer(&producer, &tp, total_records, starting_timestamp).await;
@@ -683,7 +620,7 @@ async fn test_topic_id_subscription_with_re2j_regex_and_offsets_fetch() {
         consumer.as_mut(),
         &tp,
         total_records,
-        starting_offset_round1 + total_records as i64,
+        total_records as i64,
         0,
         starting_timestamp,
     )
@@ -705,9 +642,9 @@ async fn test_re2j_pattern_subscription_and_topic_subscription() {
     let group_id = ctx.group_id("g_pattern_and_topic");
 
     let producer = build_producer_bytes(ctx.bootstrap_servers());
-    ensure_topic_with_2_partitions(&producer, &topic1).await;
-    ensure_topic_with_2_partitions(&producer, &topic11).await;
-    ensure_topic_with_2_partitions(&producer, &topic2).await;
+    create_test_topic(ctx.bootstrap_servers(), &topic1, 2).await;
+    create_test_topic(ctx.bootstrap_servers(), &topic11, 2).await;
+    create_test_topic(ctx.bootstrap_servers(), &topic2, 2).await;
     producer.close().await.expect("producer close should succeed");
 
     let mut consumer = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
@@ -824,7 +761,7 @@ async fn test_async_consumer_expanding_topic_subscriptions() {
     let group_id = ctx.group_id("g_expanding");
 
     let producer = build_producer_bytes(ctx.bootstrap_servers());
-    ensure_topic_with_2_partitions(&producer, &topic).await;
+    create_test_topic(ctx.bootstrap_servers(), &topic, 2).await;
     // Note: Java creates the `other` topic AFTER the first
     // `awaitAssignment` call. We mirror that ordering below.
 
@@ -846,7 +783,7 @@ async fn test_async_consumer_expanding_topic_subscriptions() {
     await_assignment_with_deadline(consumer.as_mut(), &initial_assignment, Duration::from_secs(90)).await;
 
     // Create the other topic now (Java: `cluster.createTopic(otherTopic, 2, BROKER_COUNT)`).
-    ensure_topic_with_2_partitions(&producer, &other_topic).await;
+    create_test_topic(ctx.bootstrap_servers(), &other_topic, 2).await;
     producer.close().await.expect("producer close should succeed");
 
     let mut expanded_assignment: HashSet<TopicPartition> = initial_assignment.clone();
@@ -873,8 +810,8 @@ async fn test_async_consumer_shrinking_topic_subscriptions() {
     let group_id = ctx.group_id("g_shrinking");
 
     let producer = build_producer_bytes(ctx.bootstrap_servers());
-    ensure_topic_with_2_partitions(&producer, &topic).await;
-    ensure_topic_with_2_partitions(&producer, &other_topic).await;
+    create_test_topic(ctx.bootstrap_servers(), &topic, 2).await;
+    create_test_topic(ctx.bootstrap_servers(), &other_topic, 2).await;
     producer.close().await.expect("producer close should succeed");
 
     let mut consumer = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
@@ -926,7 +863,7 @@ async fn test_async_consumer_unsubscribe_topic() {
     let group_id = ctx.group_id("g_unsubscribe_topic");
 
     let producer = build_producer_bytes(ctx.bootstrap_servers());
-    ensure_topic_with_2_partitions(&producer, &topic).await;
+    create_test_topic(ctx.bootstrap_servers(), &topic, 2).await;
     producer.close().await.expect("producer close should succeed");
 
     let mut consumer = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
@@ -1081,33 +1018,4 @@ fn ctx_prefix<'a>(prefixed_topic: &'a str, base: &str) -> &'a str {
     prefixed_topic
         .strip_suffix(&suffix)
         .expect("prefixed_topic must end with `_<base>`")
-}
-
-/// Calls `consumer.end_offsets(&[tp])` and retries while the result
-/// map omits `tp`. Issue 6 (COMMENTS.DONE.1.md) closed the root-cause
-/// path that silently elided every assigned-partition entry; the
-/// retry loop is retained because freshly-provisioned topics still
-/// have a brief metadata-propagation window in which the broker can
-/// legitimately return no leader yet.
-///
-/// Returns the resolved end_offset value, or panics on timeout.
-async fn end_offset_with_retry(consumer: &mut BytesConsumer, tp: &TopicPartition, deadline_duration: Duration) -> i64 {
-    let deadline = Instant::now() + deadline_duration;
-    while Instant::now() < deadline {
-        match consumer.end_offsets(std::slice::from_ref(tp)).await {
-            Ok(map) => {
-                if let Some(v) = map.get(tp).copied() {
-                    return v;
-                }
-            },
-            Err(err) => {
-                // Surface any error other than the silent-omit path.
-                panic!("end_offsets({tp}) failed: {err}");
-            },
-        }
-        // Drive a single poll so any pending metadata refresh /
-        // ListOffsets reply can land on the consumer.
-        let _ = consumer.poll(Duration::from_millis(100)).await;
-    }
-    panic!("end_offsets({tp}) never returned a value within {deadline_duration:?}");
 }
