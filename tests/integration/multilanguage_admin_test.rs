@@ -36,7 +36,7 @@ use crate::common::test_context::TestContext;
 use crate::multilanguage_admin_test;
 
 /// Admin config for the backend under test. `bootstrap` must be reachable from
-/// the backend (container listener for python/c, host loopback for rust).
+/// the backend (container listener for Python/C, host loopback for Rust).
 fn admin_config(bootstrap: &str) -> HashMap<String, String> {
     HashMap::from([
         ("bootstrap.servers".to_string(), bootstrap.to_string()),
@@ -46,10 +46,23 @@ fn admin_config(bootstrap: &str) -> HashMap<String, String> {
 
 fn bootstrap_for<F: AdminBackendFactory>(factory: &F, ctx: &TestContext) -> String {
     if factory.needs_container_bootstrap() {
-        ctx.container_bootstrap_servers().to_string()
+        // Container backends (Python/C gRPC) reach the broker over the
+        // protocol-specific CONTAINER listener (plaintext/ssl/sasl_ssl).
+        ctx.container_protocol_bootstrap_servers().to_string()
     } else {
-        ctx.bootstrap_servers().to_string()
+        // The in-process Rust backend uses the host-loopback listener for the
+        // active protocol.
+        ctx.protocol_bootstrap_servers().to_string()
     }
+}
+
+/// Admin config for the backend under test, with the active protocol's security
+/// settings (TLS truststore / SASL) applied. Under PLAINTEXT the config is left
+/// unchanged.
+fn admin_config_for<F: AdminBackendFactory>(factory: &F, ctx: &TestContext) -> HashMap<String, String> {
+    let mut config = admin_config(&bootstrap_for(factory, ctx));
+    ctx.apply_security(&mut config);
+    config
 }
 
 // ---------------------------------------------------------------------------
@@ -65,7 +78,7 @@ fn bootstrap_for<F: AdminBackendFactory>(factory: &F, ctx: &TestContext) -> Stri
 /// cases a single PLAINTEXT broker cannot).
 async fn create_and_close<F: AdminBackendFactory>(ctx: &mut TestContext, factory: &F) {
     let admin = factory
-        .create(admin_config(&bootstrap_for(factory, ctx)))
+        .create(admin_config_for(factory, ctx))
         .await
         .unwrap_or_else(|e| panic!("{} backend: create admin client: {e}", factory.name()));
     assert_eq!(admin.name(), factory.name(), "backend label must match the factory");
