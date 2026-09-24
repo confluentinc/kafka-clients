@@ -118,9 +118,25 @@ pub const SASL_PASSWORD: &str = "admin-secret";
 /// Static cluster ID for KRaft. All brokers in the same cluster share this.
 const CLUSTER_ID: &str = "5L6g3nShT-eMCtK--X86sw";
 
-/// Bootstrap retries for a lost reserve-then-bind port race. Each attempt
-/// draws fresh ports, so the all-collide probability drops fast.
+/// Bootstrap attempts for a retryable failure (`is_retryable_start_error`):
+/// a lost reserve-then-bind port race, a broker that died during startup, or
+/// a transient Docker API failure. Each attempt draws fresh ports, so the
+/// all-collide probability drops fast.
 const MAX_START_ATTEMPTS: u32 = 6;
+
+/// Pause before bootstrap attempt `attempt + 1`: 1 s, 2 s, 4 s, … capped at
+/// [`MAX_START_RETRY_BACKOFF`].
+fn start_retry_backoff(attempt: u32) -> std::time::Duration {
+    let secs = 1u64 << attempt.saturating_sub(1).min(4);
+    std::time::Duration::from_secs(secs).min(MAX_START_RETRY_BACKOFF)
+}
+
+/// Upper bound of [`start_retry_backoff`].
+const MAX_START_RETRY_BACKOFF: std::time::Duration = std::time::Duration::from_secs(8);
+
+/// Deadline for a `docker` CLI call made while reaping a failed bootstrap
+/// attempt, so a wedged daemon cannot hang cluster start forever.
+const DOCKER_CLI_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Deadline for a broker container to report readiness. Comfortably above a
 /// healthy KRaft quorum formation (seconds) but finite, so a container that
@@ -497,18 +513,18 @@ fn truncate_container_error(err: &str) -> String {
     out
 }
 
-/// `true` when a container start failed because the host port we reserved was
-/// claimed by something else before Docker could bind it — the one failure
-/// that a retry with fresh ports can fix.
-///
-/// Docker reports this as `port is already allocated` on Linux, and as
-/// `address already in use` on Colima (macOS CI).
 /// Whether `config` builds a cluster that supports broker lifecycle
 /// ([`KafkaCluster::shutdown_broker`] / [`KafkaCluster::start_broker`]).
 fn supports_lifecycle(config: &ClusterConfig) -> bool {
     config.dedicated && config.cluster_type == Type::Kraft
 }
 
+/// `true` when a container start failed because the host port we reserved was
+/// claimed by something else before Docker could bind it — a failure that a
+/// retry with fresh ports can fix.
+///
+/// Docker reports this as `port is already allocated` on Linux, and as
+/// `address already in use` on Colima (macOS CI).
 fn is_port_allocation_error(err: &str) -> bool {
     err.contains("port is already allocated") || err.contains("address already in use")
 }
@@ -522,6 +538,59 @@ fn is_port_allocation_error(err: &str) -> bool {
 fn is_transient_broker_startup_error(err: &str) -> bool {
     err.contains("End of stream reached before finding message")
         || err.contains("unable to register with the controller quorum")
+}
+
+/// Docker's default address pool is exhausted. Never retried: every attempt
+/// creates a fresh network, so a retry only burns more subnets (see
+/// [`KafkaCluster::start_with_config`]).
+fn is_address_pool_exhausted_error(err: &str) -> bool {
+    err.contains("all predefined address pools have been fully subnetted")
+}
+
+/// The Docker daemon or its API failed transiently — the request never got a
+/// meaningful answer, so the same request on a fresh attempt normally
+/// succeeds. Seen on Docker Desktop for macOS when the VM is busy, e.g.
+/// `failed to list networks: Timeout error` while testcontainers checks
+/// whether the attempt's network exists.
+///
+/// Matches the wording of the error types that reach us: bollard's
+/// `RequestTimeoutError` ("Timeout error"), its transport errors
+/// ("Error in the hyper legacy client: …", covering a daemon connection that
+/// was refused or reset), a daemon socket that briefly vanished ("Socket not
+/// found"), and any 5xx `DockerResponseServerError` ("Docker responded with
+/// status code 5xx"). A 5xx also carries deterministic failures, notably the
+/// address-pool exhaustion, which is excluded by [`is_retryable_start_error`].
+fn is_transient_docker_api_error(err: &str) -> bool {
+    const TRANSPORT_MARKERS: [&str; 7] = [
+        "Timeout error",
+        ": Timeout",
+        "Error in the hyper legacy client",
+        "Socket not found",
+        "onnection refused",
+        "onnection reset",
+        "roken pipe",
+    ];
+    if TRANSPORT_MARKERS.iter().any(|marker| err.contains(marker)) {
+        return true;
+    }
+    const STATUS_PREFIX: &str = "Docker responded with status code ";
+    err.match_indices(STATUS_PREFIX).any(|(at, _)| {
+        err[at + STATUS_PREFIX.len()..]
+            .split(|c: char| !c.is_ascii_digit())
+            .next()
+            .and_then(|code| code.parse::<u16>().ok())
+            .is_some_and(|code| (500..600).contains(&code))
+    })
+}
+
+/// Whether a failed bootstrap attempt is worth another one: a lost port race,
+/// a broker that died during startup, or a transient Docker API failure — but
+/// never an exhausted address pool, whatever else the error says.
+fn is_retryable_start_error(err: &str) -> bool {
+    !is_address_pool_exhausted_error(err)
+        && (is_port_allocation_error(err)
+            || is_transient_broker_startup_error(err)
+            || is_transient_docker_api_error(err))
 }
 
 /// Kafka image configured for one broker in a KRaft cluster.
@@ -774,9 +843,11 @@ impl KafkaCluster {
     ///
     /// Called by [`super::cluster_pool`], not by tests directly.
     ///
-    /// A bootstrap that fails because a reserved host port was taken between
-    /// reservation and Docker's bind is retried with fresh ports
-    /// ([`MAX_START_ATTEMPTS`]).
+    /// A bootstrap attempt that fails retryably (`is_retryable_start_error`:
+    /// a reserved host port taken before Docker's bind, a broker that died
+    /// during startup, or a transient Docker API failure) is retried with
+    /// fresh ports after a short backoff ([`MAX_START_ATTEMPTS`]). Every failed
+    /// attempt removes its containers and network before returning.
     ///
     /// # Panics
     ///
@@ -788,22 +859,28 @@ impl KafkaCluster {
             match Self::try_start_with_config(config).await {
                 Ok(cluster) => return cluster,
                 Err(err) => {
-                    // Only a lost port race or a transient broker-startup
-                    // failure is worth retrying. Every attempt also creates a
-                    // fresh Docker network, and Docker's default address pool
-                    // holds only ~30 of them — retrying an unrelated failure
-                    // (notably "all predefined address pools have been fully
-                    // subnetted") burns two more subnets and makes the real
+                    // Only a lost port race, a transient broker-startup
+                    // failure or a transient Docker API failure is worth
+                    // retrying. Every attempt also creates a fresh Docker
+                    // network, and Docker's default address pool holds only
+                    // ~30 of them — retrying an unrelated failure (notably
+                    // "all predefined address pools have been fully
+                    // subnetted") burns more subnets and makes the real
                     // problem worse.
-                    if !is_port_allocation_error(&err) && !is_transient_broker_startup_error(&err) {
-                        panic!("Failed to start Kafka cluster: {err}");
+                    if !is_retryable_start_error(&err) {
+                        panic!("Failed to start Kafka cluster (not retryable) on attempt {attempt}: {err}");
                     }
-                    // Partially-started containers are dropped with the failed
-                    // attempt, so testcontainers reaps them; the next attempt
+                    // The failed attempt already removed its containers and
+                    // network (`try_start_with_config`); the next attempt
                     // reserves a disjoint set of ports (the failed ones stay in
                     // `RESERVED_PORTS`).
                     eprintln!("WARN: Kafka cluster start attempt {attempt}/{MAX_START_ATTEMPTS} failed: {err}");
                     last_error = err;
+                    if attempt < MAX_START_ATTEMPTS {
+                        // Give a busy Docker daemon room to recover before the
+                        // next attempt hits it with a burst of API calls.
+                        tokio::time::sleep(start_retry_backoff(attempt)).await;
+                    }
                 },
             }
         }
@@ -821,18 +898,36 @@ impl KafkaCluster {
             .await
             .map_err(|err| format!("Cluster bootstrap semaphore closed: {err}"))?;
 
-        let num_brokers = config.brokers;
-        assert!(num_brokers >= 1, "Cluster must have at least 1 broker");
+        assert!(config.brokers >= 1, "Cluster must have at least 1 broker");
 
         // Generate unique names to avoid collisions between concurrent test processes
         let suffix = random_suffix(8);
-        let network_name = format!("kafka-net-{suffix}");
+
+        let result = Self::start_attempt(config, &suffix).await;
+        if result.is_err() {
+            // Every container handle of the attempt has been dropped by now,
+            // which removes the containers testcontainers got to start. It
+            // does not remove one whose `create` succeeded but whose `start`
+            // failed (e.g. a lost port race): that container stays in Docker's
+            // `Created` state, still attached to the attempt's network, so the
+            // network's own removal fails too. Reap both by name.
+            reap_failed_attempt(&suffix).await;
+        }
+        result
+    }
+
+    /// Creates the attempt's network and nodes and waits for them. Every
+    /// container and the network carry `suffix` in their names, which is how
+    /// [`reap_failed_attempt`] finds what a failed attempt left behind.
+    async fn start_attempt(config: &ClusterConfig, suffix: &str) -> Result<Self, String> {
+        let num_brokers = config.brokers;
+        let network_name = attempt_network_name(suffix);
 
         // Reserve host ports for each broker before starting containers
         // (inside `node_specs`). This lets us set correct advertised.listeners
         // from the start, which is required because KRaft does not allow
         // dynamic updates to advertised.listeners.
-        let nodes = node_specs(config, &suffix);
+        let nodes = node_specs(config, suffix);
 
         // Quorum voters: every node with the controller role.
         let voters: String = nodes
@@ -914,12 +1009,17 @@ impl KafkaCluster {
         let mut containers = BTreeMap::new();
         let mut start_error: Option<String> = None;
         for handle in handles {
-            match handle.await.expect("Broker start task panicked") {
-                Ok((node_id, container)) => {
+            match handle.await {
+                Ok(Ok((node_id, container))) => {
                     containers.insert(node_id, container);
                 },
-                Err(err) => {
+                Ok(Err(err)) => {
                     start_error.get_or_insert(err);
+                },
+                Err(join_err) => {
+                    // Surface as an attempt failure (not a panic here) so the
+                    // attempt is still reaped; not retryable.
+                    start_error.get_or_insert(format!("Broker start task panicked: {join_err}"));
                 },
             }
         }
@@ -1333,6 +1433,74 @@ async fn wait_until_broker_sees(bootstrap: &str, condition: impl Fn(&BTreeSet<i3
     outcome
 }
 
+/// Docker network name of the bootstrap attempt identified by `suffix`.
+fn attempt_network_name(suffix: &str) -> String {
+    format!("kafka-net-{suffix}")
+}
+
+/// Removes everything a failed bootstrap attempt left in Docker: every
+/// container whose name carries the attempt's `suffix` — including ones that
+/// were created but never started — and then the attempt's network.
+///
+/// Best effort: failures are logged, not returned, because the attempt's own
+/// error is the one worth reporting. Containers go first, since Docker refuses
+/// to remove a network that still has endpoints.
+async fn reap_failed_attempt(suffix: &str) {
+    let name_filter = format!("name={suffix}");
+    let ids = match docker_cli(&["ps", "-aq", "--filter", &name_filter]).await {
+        Ok(stdout) => stdout,
+        Err(err) => {
+            eprintln!("WARN: could not list containers of failed cluster attempt {suffix}: {err}");
+            String::new()
+        },
+    };
+    let ids: Vec<&str> = ids.split_whitespace().collect();
+    if !ids.is_empty() {
+        let mut args = vec!["rm", "-f"];
+        args.extend(&ids);
+        match docker_cli(&args).await {
+            Ok(_) => eprintln!(
+                "WARN: reaped {} leftover container(s) of failed cluster attempt {suffix}",
+                ids.len()
+            ),
+            Err(err) => eprintln!("WARN: could not remove containers {ids:?} of failed cluster attempt: {err}"),
+        }
+    }
+
+    let network = attempt_network_name(suffix);
+    let network_filter = format!("name=^{network}$");
+    match docker_cli(&["network", "ls", "-q", "--filter", &network_filter]).await {
+        Ok(found) if found.trim().is_empty() => {},
+        Ok(_) => {
+            if let Err(err) = docker_cli(&["network", "rm", &network]).await {
+                eprintln!("WARN: could not remove network {network} of failed cluster attempt: {err}");
+            }
+        },
+        Err(err) => eprintln!("WARN: could not look up network {network} of failed cluster attempt: {err}"),
+    }
+}
+
+/// Runs `docker <args>` off the async runtime, bounded by
+/// [`DOCKER_CLI_TIMEOUT`], returning stdout on success.
+async fn docker_cli(args: &[&str]) -> Result<String, String> {
+    let owned: Vec<String> = args.iter().map(|arg| (*arg).to_string()).collect();
+    let run = tokio::task::spawn_blocking(move || std::process::Command::new("docker").args(&owned).output());
+    let output = tokio::time::timeout(DOCKER_CLI_TIMEOUT, run)
+        .await
+        .map_err(|_| format!("`docker {}` timed out after {DOCKER_CLI_TIMEOUT:?}", args.join(" ")))?
+        .map_err(|err| format!("`docker {}` task failed: {err}", args.join(" ")))?
+        .map_err(|err| format!("could not run `docker {}`: {err}", args.join(" ")))?;
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    } else {
+        Err(format!(
+            "`docker {}` failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr).trim()
+        ))
+    }
+}
+
 /// Generates a random hexadecimal suffix of the given byte length
 /// (producing `2 * len` hex characters).
 fn random_suffix(len: usize) -> String {
@@ -1346,7 +1514,11 @@ fn random_suffix(len: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::is_port_allocation_error;
+    use super::{
+        KAFKA_TAG, MAX_START_ATTEMPTS, attempt_network_name, docker_cli, is_port_allocation_error,
+        is_retryable_start_error, is_transient_docker_api_error, random_suffix, reap_failed_attempt,
+        start_retry_backoff,
+    };
 
     #[test]
     fn recognizes_linux_docker_wording() {
@@ -1370,5 +1542,124 @@ mod tests {
         assert!(!is_port_allocation_error(
             "all predefined address pools have been fully subnetted"
         ));
+    }
+
+    /// The error observed on Docker Desktop for macOS (PLAN Phase 20), as
+    /// testcontainers formats a bollard `RequestTimeoutError` from the
+    /// network-exists check, in both the observed and the full wording.
+    #[test]
+    fn retries_docker_api_timeouts() {
+        assert!(is_retryable_start_error(
+            "Failed to start Kafka container kafka-broker-0-abc: failed to list networks: Timeout"
+        ));
+        assert!(is_retryable_start_error(
+            "Failed to start Kafka container kafka-broker-0-abc: failed to list networks: Timeout error"
+        ));
+        assert!(is_retryable_start_error(
+            "Failed to start Kafka container kafka-controller-3000-abc: failed to create a container: Timeout error"
+        ));
+    }
+
+    #[test]
+    fn retries_daemon_connection_failures() {
+        assert!(is_retryable_start_error(
+            "Failed to start Kafka container kafka-1-abc: failed to create a network: Error in the hyper legacy \
+             client: client error (Connect)"
+        ));
+        assert!(is_retryable_start_error(
+            "Failed to start Kafka container kafka-1-abc: failed to inspect a container: Connection reset by peer \
+             (os error 54)"
+        ));
+        assert!(is_retryable_start_error(
+            "Failed to start Kafka container kafka-1-abc: failed to start a container: Connection refused (os error 61)"
+        ));
+        assert!(is_retryable_start_error(
+            "Failed to start Kafka container kafka-1-abc: failed to initialize a docker client: Socket not found: \
+             /var/run/docker.sock"
+        ));
+    }
+
+    #[test]
+    fn retries_docker_api_server_errors() {
+        assert!(is_retryable_start_error(
+            "Failed to start Kafka container kafka-1-abc: failed to start a container: Docker responded with \
+             status code 500: context deadline exceeded"
+        ));
+        assert!(is_retryable_start_error(
+            "Failed to start Kafka container kafka-1-abc: failed to list networks: Docker responded with status \
+             code 503: service unavailable"
+        ));
+        assert!(!is_transient_docker_api_error(
+            "Failed to start Kafka container kafka-1-abc: failed to create a container: Docker responded with \
+             status code 409: Conflict. The container name is already in use"
+        ));
+        assert!(!is_transient_docker_api_error(
+            "failed to create a container: Docker responded with status code 404: No such image"
+        ));
+    }
+
+    /// The subnet-exhaustion guard wins over every retryable class: the
+    /// error arrives as a 500, which would otherwise be retried.
+    #[test]
+    fn never_retries_address_pool_exhaustion() {
+        assert!(!is_retryable_start_error(
+            "Failed to start Kafka container kafka-1-abc: failed to create a network: Docker responded with \
+             status code 500: all predefined address pools have been fully subnetted"
+        ));
+    }
+
+    #[test]
+    fn keeps_existing_retry_classes() {
+        assert!(is_retryable_start_error(
+            "Bind for 0.0.0.0:54321 failed: port is already allocated"
+        ));
+        assert!(is_retryable_start_error(
+            "container is not ready: End of stream reached before finding message: Kafka Server started"
+        ));
+        assert!(!is_retryable_start_error(
+            "Failed to start Kafka container kafka-1-abc: failed to pull the image 'apache/kafka:4.2.0', error: \
+             unauthorized"
+        ));
+    }
+
+    /// A failed attempt can leave a container that was created but never
+    /// started, still attached to the attempt's network (PLAN Phase 20).
+    /// Stage exactly that with the broker image (`docker create` does not
+    /// start it) and check both are gone after the reap.
+    #[tokio::test]
+    async fn reap_removes_created_containers_and_network() {
+        let suffix = random_suffix(8);
+        let network = attempt_network_name(&suffix);
+        let image = format!("apache/kafka:{KAFKA_TAG}");
+        docker_cli(&["network", "create", &network]).await.expect("create network");
+        for name in [
+            format!("kafka-broker-0-{suffix}"),
+            format!("kafka-controller-3000-{suffix}"),
+        ] {
+            docker_cli(&["create", "--name", &name, "--network", &network, &image])
+                .await
+                .expect("create container");
+        }
+
+        reap_failed_attempt(&suffix).await;
+
+        let name_filter = format!("name={suffix}");
+        let left = docker_cli(&["ps", "-aq", "--filter", &name_filter])
+            .await
+            .expect("list containers");
+        assert!(left.trim().is_empty(), "containers left behind: {left}");
+        let network_filter = format!("name=^{network}$");
+        let left = docker_cli(&["network", "ls", "-q", "--filter", &network_filter])
+            .await
+            .expect("list networks");
+        assert!(left.trim().is_empty(), "network left behind: {left}");
+    }
+
+    #[test]
+    fn backoff_grows_and_is_capped() {
+        let secs: Vec<u64> = (1..=MAX_START_ATTEMPTS)
+            .map(|attempt| start_retry_backoff(attempt).as_secs())
+            .collect();
+        assert_eq!(secs, vec![1, 2, 4, 8, 8, 8]);
     }
 }
