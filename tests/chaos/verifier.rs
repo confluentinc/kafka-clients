@@ -220,8 +220,15 @@ struct ConservationState {
     /// At verdict, an unobserved delivered record whose physical `topic_id` is in
     /// this set is expected-lost. See [`ExpectedLossHint::DestroyedGeneration`].
     destroyed_generations: BTreeSet<Uuid>,
-    /// Count of producer sends that failed (context, not loss).
-    failed_sends: usize,
+    /// Producer sends that failed, with the client's error text. Any entry fails
+    /// the run: the producer runs with `acks=all`, idempotence, a 60 s metadata
+    /// block and a 120 s delivery timeout, and no fault in the matrix keeps a
+    /// partition unavailable for anywhere near that long, so a correct client
+    /// retries through every fault and fails nothing. A failure therefore
+    /// indicates a client defect or an environment problem, and a failure after
+    /// the delivery timeout is also ambiguous (the record may or may not have
+    /// been written), which the verifier cannot resolve.
+    failed_sends: Vec<(LogicalKey, String)>,
     /// Total consume events seen (incl. redeliveries) — the drain-progress
     /// signal read by `consumed_progress`.
     consumed_events: u64,
@@ -364,9 +371,10 @@ impl Verifier for ConservationVerifier {
                 s.settle(&key);
                 s.delivered.insert(key, (topic_id, partition, offset));
             },
-            WorkloadEvent::SendFailed { index, topic, .. } => {
-                s.settle(&(topic, index));
-                s.failed_sends += 1;
+            WorkloadEvent::SendFailed { index, topic, error } => {
+                let key = (topic, index);
+                s.settle(&key);
+                s.failed_sends.push((key, error));
             },
             WorkloadEvent::Consumed { index, topic, topic_id, partition, offset } => {
                 *s.observed.entry((topic.clone(), index)).or_insert(0) += 1;
@@ -482,6 +490,21 @@ impl Verifier for ConservationVerifier {
             ));
         }
 
+        // Failed sends: any is a failure (see `ConservationState::failed_sends`).
+        // The sample carries the client's error text so the two failure paths
+        // (rejected before enqueue vs. timed out after) can be told apart.
+        if !s.failed_sends.is_empty() {
+            let mut sample: Vec<&(LogicalKey, String)> = s.failed_sends.iter().collect();
+            sample.sort_unstable();
+            sample.truncate(20);
+            let sample_str: Vec<String> = sample.iter().map(|((t, idx), err)| format!("{t}#{idx}: {err}")).collect();
+            reasons.push(format!(
+                "failed sends: {} record(s) rejected or not acknowledged within the delivery timeout \
+                 (sample: {sample_str:?})",
+                s.failed_sends.len()
+            ));
+        }
+
         // Conservation ratio bound (librdkafka: fail on consumed > 2x
         // delivered). Redeliveries are expected under churn, but a consume
         // *event* count far above the delivered-record count signals runaway
@@ -549,7 +572,7 @@ impl Verifier for ConservationVerifier {
         ChaosVerdict {
             delivered: s.delivered.len(),
             expected_lost,
-            failed_sends: s.failed_sends,
+            failed_sends: s.failed_sends.len(),
             logical_duplicates,
             physical_duplicates,
             producer_duplicates,
@@ -568,6 +591,8 @@ impl Verifier for ConservationVerifier {
 pub struct ChaosVerdict {
     pub delivered: usize,
     pub expected_lost: usize,
+    /// Producer sends that were rejected or not acknowledged within the
+    /// delivery timeout. Non-zero fails the run.
     pub failed_sends: usize,
     /// Same logical `index` observed more than once (redelivery).
     pub logical_duplicates: u64,
@@ -606,7 +631,7 @@ impl std::fmt::Display for ChaosVerdict {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         writeln!(f, "=== Chaos verdict: {} ===", if self.is_pass() { "PASS" } else { "FAIL" })?;
         writeln!(f, "  delivered (acked) records : {}", self.delivered)?;
-        writeln!(f, "  failed sends (not loss)   : {}", self.failed_sends)?;
+        writeln!(f, "  failed sends              : {}", self.failed_sends)?;
         writeln!(f, "  duplicates (by index)     : {}", self.logical_duplicates)?;
         writeln!(f, "  duplicates (by offset)    : {}", self.physical_duplicates)?;
         writeln!(f, "  duplicates (double write) : {}", self.producer_duplicates.len())?;
@@ -977,7 +1002,8 @@ mod tests {
     }
 
     /// A failed send closes the window in the same way as an acknowledgement:
-    /// sending again after a `SendFailed` is still one record in flight.
+    /// sending again after a `SendFailed` is still one record in flight. The
+    /// run still fails, but for the failed send itself, not the in-flight bound.
     #[test]
     fn failed_send_closes_the_in_flight_window() {
         let v = ConservationVerifier::new();
@@ -987,9 +1013,61 @@ mod tests {
         v.record(delivered(1));
         v.record(consumed(1));
         let verdict = v.verdict(1);
-        assert!(verdict.is_pass(), "{verdict}");
         assert_eq!(verdict.max_in_flight, 1);
+        assert_eq!(verdict.unsettled_sends, 0);
+        assert!(
+            !verdict
+                .reasons
+                .iter()
+                .any(|r| r.starts_with("in-flight bound") || r.starts_with("unsettled sends")),
+            "{verdict}"
+        );
         assert_eq!(verdict.failed_sends, 1);
+        assert!(!verdict.is_pass(), "{verdict}");
+    }
+
+    /// Any failed send fails the run. The producer's configuration retries
+    /// through every fault in the matrix, so a failure indicates a defect, and
+    /// a failure after the delivery timeout leaves the record's fate unknown.
+    /// The reason carries the record and the client's error text.
+    #[test]
+    fn any_failed_send_fails_the_run() {
+        let v = ConservationVerifier::new();
+        for i in 0..3 {
+            v.record(delivered(i));
+            v.record(consumed(i));
+        }
+        v.record(WorkloadEvent::SendFailed {
+            index: 3,
+            topic: "t".into(),
+            error: "Timeout: Timeout expired after 120000ms".into(),
+        });
+        let verdict = v.verdict(1);
+        assert!(!verdict.is_pass(), "{verdict}");
+        assert_eq!(verdict.failed_sends, 1);
+        assert_eq!(verdict.lost.len(), 0, "the failure is the failed send, not loss");
+        let reason = verdict
+            .reasons
+            .iter()
+            .find(|r| r.starts_with("failed sends"))
+            .unwrap_or_else(|| panic!("expected a failed-sends reason: {verdict}"));
+        assert!(
+            reason.contains("1 record(s)") && reason.contains("t#3: Timeout: Timeout expired after 120000ms"),
+            "reason must name the record and the error: {reason}"
+        );
+    }
+
+    /// A run with no failed sends does not carry a failed-sends reason.
+    #[test]
+    fn zero_failed_sends_passes() {
+        let v = ConservationVerifier::new();
+        for i in 0..3 {
+            v.record(delivered(i));
+            v.record(consumed(i));
+        }
+        let verdict = v.verdict(1);
+        assert!(verdict.is_pass(), "{verdict}");
+        assert_eq!(verdict.failed_sends, 0);
     }
 
     /// The bound is per producer, not global: two producers with one record in
