@@ -28,6 +28,7 @@
 //!   `testBatchSizeZero`, `testBatchSizeZeroNoPartitionNoRecordKey`,
 //!   `testCloseWithZeroTimeoutFromSenderThread` (native only),
 //!   `testCloseWithZeroTimeoutFromCallerThread` (native only),
+//!   `testFlush` (as `test_flush_sends_pending_records`; not-done half native only),
 //!   `testWrongSerializer` (native only),
 //!   `testSendCompressedMessageWithCreateTime` (native only),
 //!   `testSendNonCompressedMessageWithCreateTime` (native only),
@@ -967,32 +968,52 @@ async fn produce_record_too_large_inner<F: ProducerBackendFactory>(ctx: &mut Tes
     producer.close().await.expect("close should succeed");
 }
 
-/// Test: Send records, call flush(), verify all futures are complete after
-/// flush returns.
+/// Translated from `BaseProducerSendTest.testFlush`
+/// (`BaseProducerSendTest.scala:483-500`): with `linger.ms=Int.MaxValue` no
+/// record is sent on its own, so none of the futures is complete until
+/// `flush()` forces the accumulated batches out, after which all are.
+///
+/// Deviation for the gRPC backends (python / c): their `Send` RPC blocks until
+/// the record is delivered, so with `linger.ms=Int.MaxValue` the first send
+/// would never return, and every returned future is already complete — the
+/// "no request is complete" half cannot be observed through them. They run with
+/// `linger.ms=0` and a single round, checking only that `flush()` succeeds and
+/// every future is complete afterwards. The native backend runs Java's exact
+/// shape: 50 rounds of `numRecords` sends, not-done before `flush()`, done after.
 async fn flush_sends_pending_records_inner<F: ProducerBackendFactory>(ctx: &mut TestContext, factory: &F) {
-    let topic = ctx.topic("flush_test");
+    let native = factory.name() == "rust";
+    let topic = ctx.topic("topic");
+    let linger_ms = if native { INT_MAX_VALUE } else { 0 };
     let producer = factory
-        .create(make_config(&bootstrap_for(factory, ctx)))
+        .create(send_test_producer_config(
+            &bootstrap_for(factory, ctx),
+            &SendTestProducerOpts { linger_ms, delivery_timeout_ms: INT_MAX_VALUE, ..SendTestProducerOpts::default() },
+        ))
         .await
         .expect("Failed to create producer");
 
-    let mut futures = Vec::new();
-    for i in 0..5 {
-        let record =
-            ProducerRecord::with_key(topic.clone(), Some(b(&format!("key-{i}"))), Some(b(&format!("value-{i}"))));
-        let future = producer.send(record).await.expect("send should succeed");
-        futures.push(future);
-    }
+    let admin = send_test_admin(ctx);
+    create_topic_with_admin(admin.as_ref(), &topic, 2, 2).await;
+    admin.close_with_timeout(Duration::from_secs(5)).await;
 
-    producer.flush().await.expect("flush should succeed");
-
-    for (i, future) in futures.iter().enumerate() {
-        assert!(future.is_done(), "Future {i} should be done after flush");
-        let metadata = future
-            .get()
-            .await
-            .unwrap_or_else(|e| panic!("Future {i} should succeed after flush, got: {e:?}"));
-        assert!(metadata.offset() >= 0, "Record {i} should have a valid offset");
+    let rounds = if native { 50 } else { 1 };
+    for round in 0..rounds {
+        let mut responses = Vec::with_capacity(NUM_RECORDS);
+        for _ in 0..NUM_RECORDS {
+            let record = ProducerRecord::new(topic.clone(), Some(b("value")));
+            responses.push(producer.send(record).await.expect("send should succeed"));
+        }
+        if native {
+            assert!(
+                responses.iter().all(|f| !f.is_done()),
+                "No request is complete. (round {round})"
+            );
+        }
+        producer.flush().await.expect("flush should succeed");
+        assert!(
+            responses.iter().all(|f| f.is_done()),
+            "All requests are complete. (round {round})"
+        );
     }
 
     producer.close().await.expect("close should succeed");
@@ -2134,7 +2155,6 @@ crate::multilanguage_test!(test_produce_with_compression, produce_with_compressi
 crate::multilanguage_test!(test_produce_to_invalid_topic, produce_to_invalid_topic_inner);
 #[cfg(feature = "multilanguage-tests")]
 crate::multilanguage_test!(test_produce_record_too_large, produce_record_too_large_inner);
-#[cfg(feature = "multilanguage-tests")]
 /// Test: partitionsFor returns metadata for an existing topic. Exercises the
 /// producer PartitionsFor RPC across all backends (the C/Python servers now
 /// expose partitions_for).
@@ -2275,7 +2295,11 @@ async fn produce_and_check_metrics_inner<F: ProducerBackendFactory>(ctx: &mut Te
 #[cfg(feature = "multilanguage-tests")]
 crate::multilanguage_test!(test_produce_and_check_metrics, produce_and_check_metrics_inner);
 #[cfg(feature = "multilanguage-tests")]
-crate::multilanguage_test!(test_flush_sends_pending_records, flush_sends_pending_records_inner);
+crate::multilanguage_test!(
+    test_flush_sends_pending_records,
+    flush_sends_pending_records_inner,
+    producer_send_cluster_config()
+);
 #[cfg(feature = "multilanguage-tests")]
 crate::multilanguage_test!(test_close_flushes_pending, close_flushes_pending_inner);
 
@@ -2442,53 +2466,70 @@ impl confluent_kafka::common::serialization::Serializer<Vec<u8>> for FailingSeri
     }
 }
 
-/// Translated from `BaseProducerSendTest.testCloseWithZeroTimeoutFromCallerThread`.
-/// linger.ms=MAX makes records sit in the accumulator; close_with_timeout(0)
-/// must abort them so all the futures complete with an error.
+/// Translated from `BaseProducerSendTest.testCloseWithZeroTimeoutFromCallerThread`
+/// (`BaseProducerSendTest.scala:505-525`): 50 times, a producer with
+/// `linger.ms=Int.MaxValue` sends `numRecords` records to partition 0, none of
+/// which may be complete yet; `close(Duration.ZERO)` must then abort every one
+/// of them with a bare `KafkaException` (`Error::KafkaError`, message
+/// `"Producer is closed forcefully."`, `RecordAccumulator.java:1146`).
+///
+/// Native only: the gRPC backends' `Send` RPC blocks until delivery, which with
+/// `linger.ms=Int.MaxValue` never happens.
 #[cfg(feature = "integration-tests")]
 #[tokio::test(flavor = "multi_thread")]
 async fn test_close_with_zero_timeout_aborts_pending() {
-    use confluent_kafka::common::serialization::ByteArraySerializer;
-    use confluent_kafka::producer::{KafkaProducer, ProducerConfig};
+    close_with_zero_timeout_from_caller_thread_inner(&crate::common::backend_factory::RustNativeFactory).await;
+}
 
-    let mut ctx = TestContext::new(ClusterConfig::default()).await;
-    let topic = ctx.topic("close_zero");
+/// Body of [`test_close_with_zero_timeout_aborts_pending`], generic so the
+/// `Producer` trait's `send` is used rather than `KafkaProducer`'s inherent one.
+#[cfg(feature = "integration-tests")]
+async fn close_with_zero_timeout_from_caller_thread_inner<F: ProducerBackendFactory>(factory: &F) {
+    let mut ctx = TestContext::new(producer_send_cluster_config()).await;
+    let topic = ctx.topic("topic");
+    let admin = send_test_admin(&ctx);
+    create_topic_with_admin(admin.as_ref(), &topic, 2, 2).await;
+    admin.close_with_timeout(Duration::from_secs(5)).await;
+    let partition = 0;
 
-    let mut props = make_config(ctx.bootstrap_servers());
-    // Pin everything in the accumulator so close_with_timeout(0) has work to abort.
-    props.insert("linger.ms".to_string(), "60000".to_string());
-    props.insert("delivery.timeout.ms".to_string(), "120000".to_string());
-    let producer_config = ProducerConfig::new(&props).expect("Invalid test config");
-    let producer = KafkaProducer::new(producer_config, Box::new(ByteArraySerializer), Box::new(ByteArraySerializer))
-        .expect("Failed to create producer");
-
-    let mut futures = Vec::new();
-    for i in 0..5 {
-        let record = ProducerRecord::with_partition_key(
-            topic.clone(),
-            Some(0),
-            Some(b(&format!("key-{i}"))),
-            Some(b(&format!("value-{i}"))),
-        )
-        .expect("record creation should succeed");
-        // KafkaProducer<Vec<u8>, Vec<u8>> has an inherent send() that
-        // shadows the trait method; call via UFCS to use the trait.
-        let future = <KafkaProducer<Vec<u8>, Vec<u8>> as Producer<Vec<u8>, Vec<u8>>>::send(&producer, record)
+    // Test closing from caller thread.
+    for round in 0..50 {
+        let producer = factory
+            .create(send_test_producer_config(
+                ctx.bootstrap_servers(),
+                &SendTestProducerOpts {
+                    linger_ms: INT_MAX_VALUE,
+                    delivery_timeout_ms: INT_MAX_VALUE,
+                    ..SendTestProducerOpts::default()
+                },
+            ))
             .await
-            .expect("send should accept the request");
-        futures.push(future);
-    }
-
-    Producer::close_with_timeout(&producer, Duration::ZERO)
-        .await
-        .expect("close_with_timeout(0) should return Ok");
-
-    for (i, future) in futures.iter().enumerate() {
-        let result = future.get_with_timeout(Duration::from_secs(5)).await;
+            .expect("Failed to create producer");
+        let mut responses = Vec::with_capacity(NUM_RECORDS);
+        for _ in 0..NUM_RECORDS {
+            let record0 = ProducerRecord::with_partition_key(topic.clone(), Some(partition), None, Some(b("value")))
+                .expect("valid record");
+            responses.push(producer.send(record0).await.expect("send should succeed"));
+        }
         assert!(
-            result.is_err(),
-            "Future {i} should have been aborted by close_with_timeout(0), got Ok: {result:?}"
+            responses.iter().all(|f| !f.is_done()),
+            "No request is complete. (round {round})"
         );
+        producer
+            .close_with_timeout(Duration::ZERO)
+            .await
+            .expect("close(Duration.ZERO) should succeed");
+        for future in &responses {
+            let err = future
+                .get_with_timeout(UNBOUNDED_GET_TIMEOUT)
+                .await
+                .expect_err("future should be aborted by close(Duration.ZERO)");
+            assert!(
+                matches!(err, confluent_kafka::common::Error::KafkaError(_)),
+                "Expected a bare KafkaError, got: {err:?}"
+            );
+            assert_eq!("Producer is closed forcefully.", err.message());
+        }
     }
 }
 
@@ -2792,7 +2833,11 @@ mod rust_only_fallback {
     }
     #[tokio::test(flavor = "multi_thread")]
     async fn test_flush_sends_pending_records() {
-        flush_sends_pending_records_inner(&mut ctx().await, &RustNativeFactory).await;
+        flush_sends_pending_records_inner(&mut send_ctx().await, &RustNativeFactory).await;
+    }
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_produce_partitions_for() {
+        produce_partitions_for_inner(&mut ctx().await, &RustNativeFactory).await;
     }
     #[tokio::test(flavor = "multi_thread")]
     async fn test_produce_and_check_metrics() {
