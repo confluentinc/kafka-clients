@@ -961,7 +961,7 @@ async fn test_async_consumer_position_and_commit() {
 }
 
 /// Translates Java's `testCommitAsyncCompletedBeforeConsumerCloses`
-/// (line 492).
+/// (`PlaintextConsumerCommitTest.java:583-606`).
 ///
 /// Contract: async offset commits complete before the consumer is closed,
 /// even when no commit-sync is performed as part of close (auto-commit
@@ -973,6 +973,28 @@ async fn test_commit_async_completed_before_consumer_closes() {
     let group_id = ctx.group_id("g_async_completed_before_close");
     let tp = TopicPartition::new(topic.clone(), 0);
     let tp1 = TopicPartition::new(topic.clone(), 1);
+
+    // Create offsets topic to ensure coordinator is available during close:
+    // `cluster.createTopic(Topic.GROUP_METADATA_TOPIC_NAME,
+    // OFFSETS_TOPIC_PARTITIONS = 1, OFFSETS_TOPIC_REPLICATION = 3)`
+    // (`PlaintextConsumerCommitTest.java:589-590`, `:74-75`). Java gets a fresh
+    // cluster per test; the pooled cluster may already hold the topic from an
+    // earlier test, in which case `TopicExists` means the precondition holds.
+    {
+        const GROUP_METADATA_TOPIC_NAME: &str = "__consumer_offsets";
+        let admin = admin_for(ctx.bootstrap_servers());
+        let new_topic = confluent_kafka::admin::NewTopic::with_num_partitions_replication_factor(
+            GROUP_METADATA_TOPIC_NAME.to_string(),
+            Some(1),
+            Some(3),
+        );
+        match admin.create_topics(&[new_topic]).all().get().await {
+            Ok(()) | Err(Error::TopicExists(_)) => {},
+            Err(e) => panic!("creating {GROUP_METADATA_TOPIC_NAME} failed: {e:?}"),
+        }
+        test_utils::wait_for_all_partitions_metadata(admin.as_ref(), GROUP_METADATA_TOPIC_NAME, 1).await;
+        admin.close_with_timeout(Duration::from_secs(5)).await;
+    }
 
     let cb = CountConsumerCommitCallback::new();
     {
@@ -990,17 +1012,6 @@ async fn test_commit_async_completed_before_consumer_closes() {
             .assign(vec![tp.clone(), tp1.clone()])
             .await
             .expect("assign should succeed");
-
-        // Java pre-creates the GROUP_METADATA_TOPIC_NAME (offsets) topic so
-        // the coordinator is available during close
-        // (`PlaintextConsumerCommitTest.java:484-485`). The Rust harness has
-        // no admin client; the equivalent is to discover the coordinator and
-        // materialize the offsets topic up front via a `committed()` query, so
-        // the two async commits below can complete during the (bounded) close.
-        let _ = consumer
-            .committed(std::slice::from_ref(&tp))
-            .await
-            .expect("committed (coordinator readiness) should succeed");
 
         let cb_arc: Arc<dyn OffsetCommitCallback> = Arc::new(cb.clone());
         // Try without looking up the coordinator first.
