@@ -29,9 +29,10 @@ namespace Confluent.Kafka.GrpcServer;
 /// <summary>
 /// Maps the <c>AdminService</c> RPCs onto the binding's <see cref="KafkaAdminClient"/> /
 /// <see cref="MockAdminClient"/> — the .NET port of <c>grpc_server.py</c>'s
-/// <c>AdminService</c> (M15/P12). Slices G1 (topics &amp; partitions) and G2 (cluster,
-/// configs, log dirs) are implemented here; G3-G6 are added additively by later
-/// checkpoints and answer from the generated base until then.
+/// <c>AdminService</c> (M15/P12). Slices G1 (topics &amp; partitions), G2 (cluster, configs,
+/// log dirs), G3 (elections, reassignments, offsets) and G6 (producers &amp; transactions) are
+/// implemented here; G4 (groups) and G5 (acls, quotas, scram, tokens, features) are added
+/// additively by later checkpoints and answer from the generated base until then.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -749,6 +750,486 @@ internal sealed class AdminServiceImpl : Proto.AdminService.AdminServiceBase, ID
         catch (Exception ex)
         {
             return new Proto.DescribeReplicaLogDirsResponse { Error = Translate.ToProto(ex) };
+        }
+    }
+
+    // -- Elections, reassignments & offsets (slice G3) ------------------------------------
+
+    /// <inheritdoc/>
+    public override async Task<Proto.VoidKeyedResponse> ElectLeaders(Proto.ElectLeadersRequest request, ServerCallContext context)
+    {
+        IAdmin? admin = Get(request.AdminId);
+        if (admin is null)
+        {
+            return new Proto.VoidKeyedResponse { Error = Translate.UnknownAdmin(request.AdminId) };
+        }
+
+        try
+        {
+            ElectLeadersResult result = admin.ElectLeaders(
+                (ElectionType)request.ElectionType,
+                TranslateAdmin.OptionalPartitions(request.Partitions),
+                new ElectLeadersOptions
+                {
+                    TimeoutMs = TranslateAdmin.Timeout(request.HasTimeoutMs, request.TimeoutMs),
+                });
+
+            // Both error levels differ from the other void RPCs. Java holds a SINGLE future
+            // over the whole map, so its failure is a whole-call failure; the per-entry error
+            // is the Optional<Throwable> inside the resolved map, absent meaning that
+            // partition's election succeeded.
+            (IReadOnlyDictionary<TopicPartition, KafkaException?> partitions, Proto.KafkaError? error) =
+                await TranslateAdmin.Resolve(result.Partitions()).ConfigureAwait(false);
+            if (error is not null)
+            {
+                return new Proto.VoidKeyedResponse { Error = error };
+            }
+
+            Proto.VoidKeyedResponse response = new Proto.VoidKeyedResponse();
+            foreach (KeyValuePair<TopicPartition, KafkaException?> pair in partitions)
+            {
+                Proto.VoidResultEntry entry = new Proto.VoidResultEntry
+                {
+                    Key = TranslateAdmin.PartitionKey(pair.Key),
+                };
+                if (pair.Value is not null)
+                {
+                    entry.Error = Translate.ToProto(pair.Value);
+                }
+
+                response.Entries.Add(entry);
+            }
+
+            return response;
+        }
+        catch (Exception ex)
+        {
+            return new Proto.VoidKeyedResponse { Error = Translate.ToProto(ex) };
+        }
+    }
+
+    /// <inheritdoc/>
+    public override async Task<Proto.VoidKeyedResponse> AlterPartitionReassignments(Proto.AlterPartitionReassignmentsRequest request, ServerCallContext context)
+    {
+        IAdmin? admin = Get(request.AdminId);
+        if (admin is null)
+        {
+            return new Proto.VoidKeyedResponse { Error = Translate.UnknownAdmin(request.AdminId) };
+        }
+
+        try
+        {
+            AlterPartitionReassignmentsResult result = admin.AlterPartitionReassignments(
+                TranslateAdmin.Reassignments(request.Reassignments),
+                new AlterPartitionReassignmentsOptions
+                {
+                    TimeoutMs = TranslateAdmin.Timeout(request.HasTimeoutMs, request.TimeoutMs),
+                    // Java's default is true, hence the presence flag rather than a bare bool.
+                    AllowReplicationFactorChange = !request.HasAllowReplicationFactorChange
+                        || request.AllowReplicationFactorChange,
+                });
+
+            // Genuinely per-key futures here, so the top-level error keeps its ordinary
+            // narrow meaning (unlike ElectLeaders above).
+            return await TranslateAdmin.VoidResponse(result.Values, TranslateAdmin.PartitionKey)
+                .ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            return new Proto.VoidKeyedResponse { Error = Translate.ToProto(ex) };
+        }
+    }
+
+    /// <inheritdoc/>
+    public override async Task<Proto.ListPartitionReassignmentsResponse> ListPartitionReassignments(Proto.ListPartitionReassignmentsRequest request, ServerCallContext context)
+    {
+        IAdmin? admin = Get(request.AdminId);
+        if (admin is null)
+        {
+            return new Proto.ListPartitionReassignmentsResponse { Error = Translate.UnknownAdmin(request.AdminId) };
+        }
+
+        try
+        {
+            // Whole-value response (envelope addendum (a)): one future over the entire map, so
+            // no individual reassignment carries an error.
+            ListPartitionReassignmentsResult result = admin.ListPartitionReassignments(
+                TranslateAdmin.OptionalPartitions(request.Partitions),
+                new ListPartitionReassignmentsOptions
+                {
+                    TimeoutMs = TranslateAdmin.Timeout(request.HasTimeoutMs, request.TimeoutMs),
+                });
+
+            IReadOnlyDictionary<TopicPartition, PartitionReassignment> reassignments =
+                await result.Reassignments().ConfigureAwait(false);
+            Proto.ListPartitionReassignmentsResponse response = new Proto.ListPartitionReassignmentsResponse();
+            foreach (KeyValuePair<TopicPartition, PartitionReassignment> pair in reassignments)
+            {
+                response.Reassignments.Add(new Proto.OngoingPartitionReassignment
+                {
+                    Partition = Translate.TpToProto(pair.Key),
+                    Reassignment = TranslateAdmin.ReassignmentToProto(pair.Value),
+                });
+            }
+
+            return response;
+        }
+        catch (Exception ex)
+        {
+            return new Proto.ListPartitionReassignmentsResponse { Error = Translate.ToProto(ex) };
+        }
+    }
+
+    /// <inheritdoc/>
+    public override async Task<Proto.ListOffsetsResponse> ListOffsets(Proto.ListOffsetsRequest request, ServerCallContext context)
+    {
+        IAdmin? admin = Get(request.AdminId);
+        if (admin is null)
+        {
+            return new Proto.ListOffsetsResponse { Error = Translate.UnknownAdmin(request.AdminId) };
+        }
+
+        Dictionary<TopicPartition, OffsetSpec>? specs =
+            TranslateAdmin.OffsetSpecs(request.Specs, out string? invalid);
+        if (specs is null)
+        {
+            return new Proto.ListOffsetsResponse { Error = TranslateAdmin.RequestError(invalid!) };
+        }
+
+        try
+        {
+            ListOffsetsResult result = admin.ListOffsets(
+                specs,
+                new ListOffsetsOptions
+                {
+                    TimeoutMs = TranslateAdmin.Timeout(request.HasTimeoutMs, request.TimeoutMs),
+                    IsolationLevel = (IsolationLevel)request.IsolationLevel,
+                });
+
+            // The result exposes no keyed future map, so the requested keys drive the walk —
+            // Java's own PartitionResult(tp) pattern. The Dictionary already de-duplicates.
+            Proto.ListOffsetsResponse response = new Proto.ListOffsetsResponse();
+            foreach (TopicPartition partition in specs.Keys)
+            {
+                (ListOffsetsResult.ListOffsetsResultInfo info, Proto.KafkaError? error) =
+                    await TranslateAdmin.Resolve(result.PartitionResult(partition)).ConfigureAwait(false);
+                Proto.ListOffsetsEntry entry = new Proto.ListOffsetsEntry
+                {
+                    Key = TranslateAdmin.PartitionKey(partition),
+                };
+                if (error is not null)
+                {
+                    entry.Error = error;
+                }
+                else
+                {
+                    entry.Value = TranslateAdmin.OffsetInfoToProto(info);
+                }
+
+                response.Entries.Add(entry);
+            }
+
+            return response;
+        }
+        catch (Exception ex)
+        {
+            return new Proto.ListOffsetsResponse { Error = Translate.ToProto(ex) };
+        }
+    }
+
+    // -- Producers & transactions (slice G6) ---------------------------------------------
+
+    /// <inheritdoc/>
+    public override async Task<Proto.DescribeProducersResponse> DescribeProducers(Proto.DescribeProducersRequest request, ServerCallContext context)
+    {
+        IAdmin? admin = Get(request.AdminId);
+        if (admin is null)
+        {
+            return new Proto.DescribeProducersResponse { Error = Translate.UnknownAdmin(request.AdminId) };
+        }
+
+        try
+        {
+            List<TopicPartition> partitions = TranslateAdmin.DistinctKeys(PartitionsOf(request.Partitions));
+            DescribeProducersOptions options = new DescribeProducersOptions
+            {
+                TimeoutMs = TranslateAdmin.Timeout(request.HasTimeoutMs, request.TimeoutMs),
+            };
+
+            // An absent broker_id is Java's empty OptionalInt (query each partition's leader);
+            // broker 0 is legal, so the presence flag carries the distinction.
+            if (request.HasBrokerId)
+            {
+                options.BrokerId = request.BrokerId;
+            }
+
+            DescribeProducersResult result = admin.DescribeProducers(partitions, options);
+
+            Proto.DescribeProducersResponse response = new Proto.DescribeProducersResponse();
+            foreach (TopicPartition partition in partitions)
+            {
+                (DescribeProducersResult.PartitionProducerState state, Proto.KafkaError? error) =
+                    await TranslateAdmin.Resolve(result.PartitionResult(partition)).ConfigureAwait(false);
+                Proto.DescribeProducersEntry entry = new Proto.DescribeProducersEntry
+                {
+                    Key = TranslateAdmin.PartitionKey(partition),
+                };
+                if (error is not null)
+                {
+                    entry.Error = error;
+                }
+                else
+                {
+                    entry.Value = TranslateAdmin.PartitionProducerStateToProto(state);
+                }
+
+                response.Entries.Add(entry);
+            }
+
+            return response;
+        }
+        catch (Exception ex)
+        {
+            return new Proto.DescribeProducersResponse { Error = Translate.ToProto(ex) };
+        }
+    }
+
+    /// <inheritdoc/>
+    public override async Task<Proto.DescribeTransactionsResponse> DescribeTransactions(Proto.DescribeTransactionsRequest request, ServerCallContext context)
+    {
+        IAdmin? admin = Get(request.AdminId);
+        if (admin is null)
+        {
+            return new Proto.DescribeTransactionsResponse { Error = Translate.UnknownAdmin(request.AdminId) };
+        }
+
+        try
+        {
+            List<string> ids = TranslateAdmin.DistinctKeys(request.TransactionalIds);
+            DescribeTransactionsResult result = admin.DescribeTransactions(
+                ids,
+                new DescribeTransactionsOptions
+                {
+                    TimeoutMs = TranslateAdmin.Timeout(request.HasTimeoutMs, request.TimeoutMs),
+                });
+
+            Proto.DescribeTransactionsResponse response = new Proto.DescribeTransactionsResponse();
+            foreach (string id in ids)
+            {
+                (TransactionDescription description, Proto.KafkaError? error) =
+                    await TranslateAdmin.Resolve(result.Description(id)).ConfigureAwait(false);
+                Proto.DescribeTransactionsEntry entry = new Proto.DescribeTransactionsEntry
+                {
+                    Key = TranslateAdmin.NameKey(id),
+                };
+                if (error is not null)
+                {
+                    entry.Error = error;
+                }
+                else
+                {
+                    entry.Value = TranslateAdmin.TransactionDescriptionToProto(description);
+                }
+
+                response.Entries.Add(entry);
+            }
+
+            return response;
+        }
+        catch (Exception ex)
+        {
+            return new Proto.DescribeTransactionsResponse { Error = Translate.ToProto(ex) };
+        }
+    }
+
+    /// <inheritdoc/>
+    public override async Task<Proto.StatusResponse> AbortTransaction(Proto.AbortTransactionRequest request, ServerCallContext context)
+    {
+        IAdmin? admin = Get(request.AdminId);
+        if (admin is null)
+        {
+            return new Proto.StatusResponse { Error = Translate.UnknownAdmin(request.AdminId) };
+        }
+
+        AbortTransactionSpec? spec = TranslateAdmin.AbortSpec(request, out string? invalid);
+        if (spec is null)
+        {
+            return new Proto.StatusResponse { Error = TranslateAdmin.RequestError(invalid!) };
+        }
+
+        try
+        {
+            // Java's AbortTransactionResult carries no data and no per-key granularity, so
+            // success is simply an absent error.
+            await admin.AbortTransaction(
+                spec,
+                new AbortTransactionOptions
+                {
+                    TimeoutMs = TranslateAdmin.Timeout(request.HasTimeoutMs, request.TimeoutMs),
+                }).All().ConfigureAwait(false);
+
+            return new Proto.StatusResponse();
+        }
+        catch (Exception ex)
+        {
+            return new Proto.StatusResponse { Error = Translate.ToProto(ex) };
+        }
+    }
+
+    /// <inheritdoc/>
+    public override async Task<Proto.StatusResponse> ForceTerminateTransaction(Proto.ForceTerminateTransactionRequest request, ServerCallContext context)
+    {
+        IAdmin? admin = Get(request.AdminId);
+        if (admin is null)
+        {
+            return new Proto.StatusResponse { Error = Translate.UnknownAdmin(request.AdminId) };
+        }
+
+        try
+        {
+            await admin.ForceTerminateTransaction(
+                request.TransactionalId,
+                new TerminateTransactionOptions
+                {
+                    TimeoutMs = TranslateAdmin.Timeout(request.HasTimeoutMs, request.TimeoutMs),
+                }).Result().ConfigureAwait(false);
+
+            return new Proto.StatusResponse();
+        }
+        catch (Exception ex)
+        {
+            return new Proto.StatusResponse { Error = Translate.ToProto(ex) };
+        }
+    }
+
+    /// <inheritdoc/>
+    public override async Task<Proto.ListTransactionsResponse> ListTransactions(Proto.ListTransactionsRequest request, ServerCallContext context)
+    {
+        IAdmin? admin = Get(request.AdminId);
+        if (admin is null)
+        {
+            return new Proto.ListTransactionsResponse { Error = Translate.UnknownAdmin(request.AdminId) };
+        }
+
+        try
+        {
+            ListTransactionsResult result = admin.ListTransactions(new ListTransactionsOptions
+            {
+                TimeoutMs = TranslateAdmin.Timeout(request.HasTimeoutMs, request.TimeoutMs),
+                // Java's default for both collections is an empty set meaning "no filter", so
+                // empty needs no null form.
+                FilteredStates = TranslateAdmin.TransactionStates(request.States),
+                FilteredProducerIds = new List<long>(request.ProducerIds),
+                // Java's own -1 sentinel: negative means no duration filter.
+                FilteredDuration = request.DurationMs,
+                FilteredTransactionalIdPattern =
+                    request.HasTransactionalIdPattern ? request.TransactionalIdPattern : null,
+            });
+
+            // Keyed by broker: byBrokerId() is the only one of Java's three views that keeps a
+            // per-broker error, so a partial listing survives. Only the broker-DISCOVERY
+            // future's failure is a whole-call failure.
+            (IReadOnlyDictionary<int, Task<IReadOnlyCollection<TransactionListing>>> brokers,
+                Proto.KafkaError? error) =
+                await TranslateAdmin.Resolve(result.ByBrokerId()).ConfigureAwait(false);
+            if (error is not null)
+            {
+                return new Proto.ListTransactionsResponse { Error = error };
+            }
+
+            Proto.ListTransactionsResponse response = new Proto.ListTransactionsResponse();
+            foreach (KeyValuePair<int, Task<IReadOnlyCollection<TransactionListing>>> broker in brokers)
+            {
+                (IReadOnlyCollection<TransactionListing> listings, Proto.KafkaError? brokerError) =
+                    await TranslateAdmin.Resolve(broker.Value).ConfigureAwait(false);
+                Proto.ListTransactionsEntry entry = new Proto.ListTransactionsEntry
+                {
+                    Key = TranslateAdmin.BrokerIdKey(broker.Key),
+                };
+                if (brokerError is not null)
+                {
+                    entry.Error = brokerError;
+                }
+                else
+                {
+                    Proto.TransactionListingList value = new Proto.TransactionListingList();
+                    foreach (TransactionListing listing in listings)
+                    {
+                        value.Listings.Add(TranslateAdmin.TransactionListingToProto(listing));
+                    }
+
+                    entry.Value = value;
+                }
+
+                response.Entries.Add(entry);
+            }
+
+            return response;
+        }
+        catch (Exception ex)
+        {
+            return new Proto.ListTransactionsResponse { Error = Translate.ToProto(ex) };
+        }
+    }
+
+    /// <inheritdoc/>
+    public override async Task<Proto.FenceProducersResponse> FenceProducers(Proto.FenceProducersRequest request, ServerCallContext context)
+    {
+        IAdmin? admin = Get(request.AdminId);
+        if (admin is null)
+        {
+            return new Proto.FenceProducersResponse { Error = Translate.UnknownAdmin(request.AdminId) };
+        }
+
+        try
+        {
+            FenceProducersResult result = admin.FenceProducers(
+                TranslateAdmin.DistinctKeys(request.TransactionalIds),
+                new FenceProducersOptions
+                {
+                    TimeoutMs = TranslateAdmin.Timeout(request.HasTimeoutMs, request.TimeoutMs),
+                });
+
+            Proto.FenceProducersResponse response = new Proto.FenceProducersResponse();
+            foreach (string id in result.FencedProducers.Keys)
+            {
+                // Both accessors project the same underlying per-id future, so they resolve
+                // identically; (-1, -1) is Java's ProducerIdAndEpoch.NONE, a legal value.
+                (long producerId, Proto.KafkaError? idError) =
+                    await TranslateAdmin.Resolve(result.ProducerId(id)).ConfigureAwait(false);
+                (short epoch, Proto.KafkaError? epochError) =
+                    await TranslateAdmin.Resolve(result.EpochId(id)).ConfigureAwait(false);
+                Proto.FenceProducersEntry entry = new Proto.FenceProducersEntry
+                {
+                    Key = TranslateAdmin.NameKey(id),
+                };
+                Proto.KafkaError? error = idError ?? epochError;
+                if (error is not null)
+                {
+                    entry.Error = error;
+                }
+                else
+                {
+                    entry.Value = new Proto.ProducerIdAndEpoch { ProducerId = producerId, Epoch = epoch };
+                }
+
+                response.Entries.Add(entry);
+            }
+
+            return response;
+        }
+        catch (Exception ex)
+        {
+            return new Proto.FenceProducersResponse { Error = Translate.ToProto(ex) };
+        }
+    }
+
+    /// <summary>Proto <c>TopicPartition</c>s -&gt; binding ones.</summary>
+    private static IEnumerable<TopicPartition> PartitionsOf(IEnumerable<Proto.TopicPartition> protos)
+    {
+        foreach (Proto.TopicPartition proto in protos)
+        {
+            yield return Translate.Tp(proto);
         }
     }
 

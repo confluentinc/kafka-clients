@@ -35,6 +35,10 @@ internal static class TranslateAdmin
     /// </summary>
     private const int LocalIllegalArgumentCode = -3;
 
+    /// <summary>Java's <c>NAME_TO_ENUM</c>, keyed by the <c>toString()</c> spelling.</summary>
+    private static readonly Dictionary<string, TransactionState> s_transactionStatesByName =
+        BuildTransactionStateTable();
+
     /// <summary>
     /// The normative mock-selection rule of <c>admin_service.proto</c>'s
     /// <c>CreateAdminRequest</c>: an empty config, or one whose every value is empty, selects
@@ -583,6 +587,327 @@ internal static class TranslateAdmin
         TopicId = listing.TopicId.ToString(),
         IsInternal = listing.IsInternal,
     };
+
+    // -- Elections, reassignments & offsets (slice G3) -------------------------------------
+
+    /// <summary>
+    /// A malformed <em>request</em> error — Python's <c>AdminRequestError</c>, which crosses as
+    /// <c>LOCAL_ILLEGAL_ARGUMENT</c> rather than the generic branch's
+    /// <c>LOCAL_ILLEGAL_STATE</c>: <c>code</c> is the field the Rust client matches on.
+    /// </summary>
+    internal static Proto.KafkaError RequestError(string message) => new Proto.KafkaError
+    {
+        Code = LocalIllegalArgumentCode,
+        Message = $"dotnet server: AdminRequestError: {message}",
+    };
+
+    /// <summary>
+    /// <c>optional TopicPartitionList partitions</c> -&gt; Java's <b>nullable</b>
+    /// <c>Set&lt;TopicPartition&gt;</c> (port of <c>_admin_optional_partitions</c>). An absent
+    /// message is null — every partition in the cluster; present-but-empty is an empty
+    /// selection, a different broker request. Emptiness of the repeated field must not be the
+    /// discriminant.
+    /// </summary>
+    internal static IReadOnlyCollection<TopicPartition>? OptionalPartitions(Proto.TopicPartitionList? partitions)
+    {
+        if (partitions is null)
+        {
+            return null;
+        }
+
+        List<TopicPartition> selection = new List<TopicPartition>(partitions.Partitions.Count);
+        foreach (Proto.TopicPartition partition in partitions.Partitions)
+        {
+            selection.Add(Translate.Tp(partition));
+        }
+
+        return selection;
+    }
+
+    /// <summary>
+    /// Proto <c>PartitionReassignmentSpec</c>s -&gt; the map
+    /// <see cref="IAdmin.AlterPartitionReassignments"/> takes (<c>_admin_reassignments</c>). An
+    /// absent <c>reassignment</c> is Java's empty <c>Optional</c>, which <em>cancels</em> the
+    /// partition's ongoing move; it must not become a present wrapper over an empty replica
+    /// list, which Java rejects outright.
+    /// </summary>
+    internal static Dictionary<TopicPartition, NewPartitionReassignment?> Reassignments(
+        IEnumerable<Proto.PartitionReassignmentSpec> protos)
+    {
+        Dictionary<TopicPartition, NewPartitionReassignment?> map =
+            new Dictionary<TopicPartition, NewPartitionReassignment?>();
+        foreach (Proto.PartitionReassignmentSpec proto in protos)
+        {
+            map[Translate.Tp(proto.Partition)] = proto.Reassignment is null
+                ? null
+                : new NewPartitionReassignment(new List<int>(proto.Reassignment.TargetReplicas));
+        }
+
+        return map;
+    }
+
+    /// <summary>Binding <see cref="PartitionReassignment"/> -&gt; proto.</summary>
+    internal static Proto.PartitionReassignment ReassignmentToProto(PartitionReassignment reassignment)
+    {
+        Proto.PartitionReassignment proto = new Proto.PartitionReassignment();
+        proto.Replicas.AddRange(reassignment.Replicas);
+        proto.AddingReplicas.AddRange(reassignment.AddingReplicas);
+        proto.RemovingReplicas.AddRange(reassignment.RemovingReplicas);
+        return proto;
+    }
+
+    /// <summary>
+    /// Proto <c>OffsetSpecEntry</c>s -&gt; the map <see cref="IAdmin.ListOffsets"/> takes (port
+    /// of <c>_admin_offset_specs</c>). Each variant is reached through the binding's <b>named
+    /// factory</b>, so the six <c>ListOffsets</c> sentinels come from this binding's own table
+    /// rather than from one written in the harness.
+    /// </summary>
+    /// <returns>
+    /// The map, or <see langword="null"/> with <paramref name="invalid"/> set.
+    /// <c>KIND_UNSPECIFIED</c> and <c>FOR_TIMESTAMP</c> without a timestamp are protocol
+    /// errors, never a defaulted variant: a dropped <c>kind</c> must fail the call rather than
+    /// silently become <c>earliest()</c> and pass.
+    /// </returns>
+    internal static Dictionary<TopicPartition, OffsetSpec>? OffsetSpecs(
+        IEnumerable<Proto.OffsetSpecEntry> protos, out string? invalid)
+    {
+        Dictionary<TopicPartition, OffsetSpec> map = new Dictionary<TopicPartition, OffsetSpec>();
+        foreach (Proto.OffsetSpecEntry proto in protos)
+        {
+            TopicPartition partition = Translate.Tp(proto.Partition);
+            Proto.OffsetSpec spec = proto.Spec;
+            switch (spec.Kind)
+            {
+                case Proto.OffsetSpec.Types.Kind.Earliest:
+                    map[partition] = OffsetSpec.Earliest();
+                    break;
+                case Proto.OffsetSpec.Types.Kind.Latest:
+                    map[partition] = OffsetSpec.Latest();
+                    break;
+                case Proto.OffsetSpec.Types.Kind.MaxTimestamp:
+                    map[partition] = OffsetSpec.MaxTimestamp();
+                    break;
+                case Proto.OffsetSpec.Types.Kind.EarliestLocal:
+                    map[partition] = OffsetSpec.EarliestLocal();
+                    break;
+                case Proto.OffsetSpec.Types.Kind.LatestTiered:
+                    map[partition] = OffsetSpec.LatestTiered();
+                    break;
+                case Proto.OffsetSpec.Types.Kind.EarliestPendingUpload:
+                    map[partition] = OffsetSpec.EarliestPendingUpload();
+                    break;
+                case Proto.OffsetSpec.Types.Kind.ForTimestamp:
+                    if (!spec.HasTimestamp)
+                    {
+                        invalid = $"OffsetSpec FOR_TIMESTAMP for {partition} carries no timestamp";
+                        return null;
+                    }
+
+                    map[partition] = OffsetSpec.ForTimestamp(spec.Timestamp);
+                    break;
+                default:
+                    invalid = $"OffsetSpec for {partition} has kind {(int)spec.Kind}, not a Java OffsetSpec variant";
+                    return null;
+            }
+        }
+
+        invalid = null;
+        return map;
+    }
+
+    /// <summary>
+    /// Binding <see cref="ListOffsetsResult.ListOffsetsResultInfo"/> -&gt; proto. Java reports
+    /// <c>-1</c> for a timestamp the broker did not send, and that sentinel crosses as-is;
+    /// <c>leaderEpoch</c> is a real <c>Optional</c>, so absent is not epoch 0.
+    /// </summary>
+    internal static Proto.ListOffsetsResultInfo OffsetInfoToProto(ListOffsetsResult.ListOffsetsResultInfo info)
+    {
+        Proto.ListOffsetsResultInfo proto = new Proto.ListOffsetsResultInfo
+        {
+            Offset = info.Offset,
+            Timestamp = info.Timestamp,
+        };
+        if (info.LeaderEpoch.HasValue)
+        {
+            proto.LeaderEpoch = info.LeaderEpoch.Value;
+        }
+
+        return proto;
+    }
+
+    // -- Producers & transactions (slice G6) ----------------------------------------------
+
+    /// <summary>
+    /// Binding <see cref="ProducerState"/> -&gt; proto. Both <c>Optional</c> columns stay
+    /// absent when null: every <see langword="long"/> / <see langword="int"/> — 0 and -1
+    /// included — is a legal coordinator epoch or transaction start offset.
+    /// </summary>
+    internal static Proto.ProducerState ProducerStateToProto(ProducerState state)
+    {
+        Proto.ProducerState proto = new Proto.ProducerState
+        {
+            ProducerId = state.ProducerId,
+            ProducerEpoch = state.ProducerEpoch,
+            LastSequence = state.LastSequence,
+            LastTimestamp = state.LastTimestamp,
+        };
+        if (state.CoordinatorEpoch.HasValue)
+        {
+            proto.CoordinatorEpoch = state.CoordinatorEpoch.Value;
+        }
+
+        if (state.CurrentTransactionStartOffset.HasValue)
+        {
+            proto.CurrentTransactionStartOffset = state.CurrentTransactionStartOffset.Value;
+        }
+
+        return proto;
+    }
+
+    /// <summary>
+    /// One partition's <c>activeProducers()</c> -&gt; proto. An <b>empty</b> list is a
+    /// successful description of a partition with no producer state — not an error and not an
+    /// absent value.
+    /// </summary>
+    internal static Proto.PartitionProducerState PartitionProducerStateToProto(
+        DescribeProducersResult.PartitionProducerState value)
+    {
+        Proto.PartitionProducerState proto = new Proto.PartitionProducerState();
+        foreach (ProducerState state in value.ActiveProducers)
+        {
+            proto.ActiveProducers.Add(ProducerStateToProto(state));
+        }
+
+        return proto;
+    }
+
+    /// <summary>
+    /// Binding <see cref="TransactionDescription"/> -&gt; proto. <c>state</c> crosses as Java's
+    /// <c>toString()</c> spelling (<see cref="TransactionStateName"/>);
+    /// <c>transactionStartTimeMs</c> stays absent for a transaction that is not in progress,
+    /// which is not start time 0.
+    /// </summary>
+    internal static Proto.TransactionDescription TransactionDescriptionToProto(TransactionDescription description)
+    {
+        Proto.TransactionDescription proto = new Proto.TransactionDescription
+        {
+            CoordinatorId = description.CoordinatorId,
+            State = TransactionStateName(description.State),
+            ProducerId = description.ProducerId,
+            ProducerEpoch = description.ProducerEpoch,
+            TransactionTimeoutMs = description.TransactionTimeoutMs,
+        };
+        if (description.TransactionStartTimeMs.HasValue)
+        {
+            proto.TransactionStartTimeMs = description.TransactionStartTimeMs.Value;
+        }
+
+        foreach (TopicPartition partition in description.TopicPartitions)
+        {
+            proto.TopicPartitions.Add(Translate.TpToProto(partition));
+        }
+
+        return proto;
+    }
+
+    /// <summary>Binding <see cref="TransactionListing"/> -&gt; proto.</summary>
+    internal static Proto.TransactionListing TransactionListingToProto(TransactionListing listing) =>
+        new Proto.TransactionListing
+        {
+            TransactionalId = listing.TransactionalId,
+            ProducerId = listing.ProducerId,
+            State = TransactionStateName(listing.State),
+        };
+
+    /// <summary>
+    /// <c>repeated string states</c> -&gt; <see cref="ListTransactionsOptions.FilteredStates"/>
+    /// (port of <c>_admin_transaction_states</c>). Java's own default is an empty set meaning
+    /// "every state", so an empty list needs no null form. Matching is <b>case-sensitive</b> and
+    /// an unrecognised name decodes to <see cref="TransactionState.Unknown"/>, exactly as Java's
+    /// <c>TransactionState.parse</c> does.
+    /// </summary>
+    internal static List<TransactionState> TransactionStates(IEnumerable<string> names)
+    {
+        List<TransactionState> states = new List<TransactionState>();
+        foreach (string name in names)
+        {
+            states.Add(s_transactionStatesByName.TryGetValue(name, out TransactionState state)
+                ? state
+                : TransactionState.Unknown);
+        }
+
+        return states;
+    }
+
+    /// <summary>
+    /// <c>AbortTransactionRequest</c> -&gt; <see cref="AbortTransactionSpec"/> (port of
+    /// <c>_admin_abort_transaction_spec</c>).
+    /// </summary>
+    /// <returns>
+    /// The spec, or <see langword="null"/> with <paramref name="invalid"/> set. The partition is
+    /// required — Java's <c>TopicPartition</c> has no null-topic form — and a
+    /// <c>producer_epoch</c> outside <see langword="short"/> is a protocol error rather than
+    /// something to truncate.
+    /// </returns>
+    internal static AbortTransactionSpec? AbortSpec(Proto.AbortTransactionRequest request, out string? invalid)
+    {
+        if (request.TopicPartition is null)
+        {
+            invalid = "abort_transaction requires a topic_partition";
+            return null;
+        }
+
+        if (request.ProducerEpoch < short.MinValue || request.ProducerEpoch > short.MaxValue)
+        {
+            invalid = $"abort_transaction producer_epoch {request.ProducerEpoch} is outside int16";
+            return null;
+        }
+
+        invalid = null;
+        return new AbortTransactionSpec(
+            Translate.Tp(request.TopicPartition),
+            request.ProducerId,
+            (short)request.ProducerEpoch,
+            request.CoordinatorEpoch);
+    }
+
+    /// <summary>
+    /// The de-duplicated request keys, in request order: the per-key result accessors
+    /// (<c>PartitionResult</c> / <c>Description</c>) are keyed lookups, so a duplicated request
+    /// key would otherwise emit a duplicated entry where Python's resolved map emits one.
+    /// </summary>
+    internal static List<T> DistinctKeys<T>(IEnumerable<T> keys)
+    {
+        List<T> ordered = new List<T>();
+        HashSet<T> seen = new HashSet<T>();
+        foreach (T key in keys)
+        {
+            if (seen.Add(key))
+            {
+                ordered.Add(key);
+            }
+        }
+
+        return ordered;
+    }
+
+    /// <summary>
+    /// Java's <c>TransactionState.toString()</c> display spelling, which is the wire value. The
+    /// enum members are spelled to match, so <see cref="Enum.ToString()"/> is that table.
+    /// </summary>
+    private static string TransactionStateName(TransactionState state) => state.ToString();
+
+    private static Dictionary<string, TransactionState> BuildTransactionStateTable()
+    {
+        Dictionary<string, TransactionState> table =
+            new Dictionary<string, TransactionState>(StringComparer.Ordinal);
+        foreach (TransactionState state in (TransactionState[])Enum.GetValues(typeof(TransactionState)))
+        {
+            table[TransactionStateName(state)] = state;
+        }
+
+        return table;
+    }
 
     private static Proto.NodeList NodeListToProto(IEnumerable<Node> nodes)
     {
