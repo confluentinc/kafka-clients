@@ -78,6 +78,7 @@ use std::collections::HashSet;
 use std::time::Duration;
 use std::time::Instant;
 
+use confluent_kafka::admin::{Admin, AdminClientConfig, KafkaAdminClient};
 use confluent_kafka::common::Error;
 use confluent_kafka::common::TopicPartition;
 use confluent_kafka::common::record::TimestampType;
@@ -95,7 +96,8 @@ use confluent_kafka::producer::ProducerRecord;
 use crate::common::cluster_config::{ClusterConfig, kip848_3_broker};
 
 use crate::common::test_context::TestContext;
-use crate::common::test_utils::wait_for_all_partitions_metadata_with_context;
+use crate::common::test_utils::create_topic;
+use crate::common::test_utils::wait_for_partition_leaders;
 
 // Type alias matching the bytes-typed `Consumer` trait object returned
 // by `KafkaConsumer::new::<Vec<u8>, Vec<u8>>`. Used in helper signatures so
@@ -121,32 +123,16 @@ type RecordsByPartition<'a> = HashMap<TopicPartition, Vec<&'a ConsumerRecord<Vec
 /// group.min.session.timeout.ms     = 100
 /// ```
 ///
-/// Additionally, `num.partitions=2` is set so auto-created topics get
-/// 2 partitions — matching the Java `@BeforeEach`
-/// `cluster.createTopic(topic, 2, BROKER_COUNT)`. This is required by
-/// [`test_async_consumer_fetch_out_of_range_offset_reset_config_by_duration`]
-/// which writes to both `topic-0` and `topic-1`. Other tests use only
-/// partition 0 and are unaffected.
+/// The suite's `@BeforeEach` topic is created explicitly by
+/// [`create_test_topic`]; `num.partitions=2` only matters for auto-created
+/// topics.
 ///
-/// All tests except `test_async_consumer_low_max_fetch_size_for_request_and_partition`
-/// share this cluster config so the pool in `tests/common/cluster_pool.rs`
-/// materializes one 3-broker cluster and amortizes its 30–60s startup
-/// across the suite. The low-max-fetch-size test needs `num.partitions=30`
-/// for auto-created topics and therefore uses a distinct config.
+/// All tests share this cluster config so the pool in
+/// `tests/common/cluster_pool.rs` materializes one 3-broker cluster and
+/// amortizes its 30–60s startup across the suite.
 fn cluster_config_with_kip848_3brokers() -> ClusterConfig {
-    // Java parity: `@BeforeEach setup() { cluster.createTopic(topic, 2, BROKER_COUNT); }`,
-    // so auto-created topics get 2 partitions; the canonical helper supplies
-    // the shared KIP-848 broker tuning.
+    // The canonical helper supplies the shared KIP-848 broker tuning.
     kip848_3_broker(2)
-}
-
-/// Variant of [`cluster_config_with_kip848_3brokers`] with
-/// `num.partitions=30` — the default partition count for auto-created
-/// topics. Required by
-/// [`test_async_consumer_low_max_fetch_size_for_request_and_partition`]
-/// which exercises 30 partitions × 3 topics.
-fn cluster_config_with_kip848_3brokers_30parts() -> ClusterConfig {
-    kip848_3_broker(30)
 }
 
 // ── Byte-array deserializer (Java uses `byte[]` keys and values) ──────
@@ -431,6 +417,7 @@ async fn await_assignment(consumer: &mut BytesConsumer, expected: &HashSet<Topic
 async fn test_async_consumer_fetch_invalid_offset() {
     let mut ctx = TestContext::new(cluster_config_with_kip848_3brokers()).await;
     let topic = ctx.topic("topic");
+    create_test_topic(ctx.bootstrap_servers(), &topic, 2).await;
     let group_id = ctx.group_id("g_fetch_invalid_offset");
     let tp = TopicPartition::new(topic.clone(), 0);
 
@@ -513,6 +500,7 @@ async fn test_async_consumer_fetch_invalid_offset() {
 async fn test_async_consumer_fetch_out_of_range_offset_reset_config_earliest() {
     let mut ctx = TestContext::new(cluster_config_with_kip848_3brokers()).await;
     let topic = ctx.topic("topic");
+    create_test_topic(ctx.bootstrap_servers(), &topic, 2).await;
     let group_id = ctx.group_id("g_fetch_oor_earliest");
     let tp = TopicPartition::new(topic.clone(), 0);
 
@@ -559,6 +547,7 @@ async fn test_async_consumer_fetch_out_of_range_offset_reset_config_earliest() {
 async fn test_async_consumer_fetch_out_of_range_offset_reset_config_latest() {
     let mut ctx = TestContext::new(cluster_config_with_kip848_3brokers()).await;
     let topic = ctx.topic("topic");
+    create_test_topic(ctx.bootstrap_servers(), &topic, 2).await;
     let group_id = ctx.group_id("g_fetch_oor_latest");
     let tp = TopicPartition::new(topic.clone(), 0);
 
@@ -652,6 +641,7 @@ async fn test_async_consumer_fetch_out_of_range_offset_reset_config_latest() {
 async fn test_async_consumer_fetch_out_of_range_offset_reset_config_by_duration() {
     let mut ctx = TestContext::new(cluster_config_with_kip848_3brokers()).await;
     let topic = ctx.topic("topic");
+    create_test_topic(ctx.bootstrap_servers(), &topic, 2).await;
     let group_id_1 = ctx.group_id("g_fetch_oor_by_duration_1");
     let group_id_2 = ctx.group_id("g_fetch_oor_by_duration_2");
     let tp = TopicPartition::new(topic.clone(), 0);
@@ -784,6 +774,7 @@ async fn test_async_consumer_fetch_record_larger_than_max_partition_fetch_bytes(
 async fn check_large_record(consumer_overrides: &[(&str, &str)], producer_record_size: usize, group_base_name: &str) {
     let mut ctx = TestContext::new(cluster_config_with_kip848_3brokers()).await;
     let topic = ctx.topic("topic");
+    create_test_topic(ctx.bootstrap_servers(), &topic, 2).await;
     let group_id = ctx.group_id(group_base_name);
     let tp = TopicPartition::new(topic.clone(), 0);
 
@@ -868,6 +859,7 @@ async fn check_fetch_honours_size_if_large_record_not_first(
 ) {
     let mut ctx = TestContext::new(cluster_config_with_kip848_3brokers()).await;
     let topic = ctx.topic("topic");
+    create_test_topic(ctx.bootstrap_servers(), &topic, 2).await;
     let group_id = ctx.group_id(group_base_name);
     let tp = TopicPartition::new(topic.clone(), 0);
 
@@ -915,21 +907,6 @@ async fn check_fetch_honours_size_if_large_record_not_first(
         .await
         .expect("large send should succeed");
 
-    // The topic was auto-created by the sends above, so it exists on the leader
-    // that acked them — but not necessarily in every broker's metadata cache yet.
-    // `assign` with a group.id configured issues an `OffsetFetch` to the group
-    // coordinator, and a coordinator that has not caught up answers
-    // `UNKNOWN_TOPIC_OR_PARTITION`, which the commit manager turns into a hard
-    // `KafkaException("Topic does not exist")` out of `poll()`
-    // (`CommitRequestManager.java:1156`) — an intermittent failure, not a retry.
-    //
-    // Java never races here because its fixture creates the topic up front with
-    // `cluster.createTopic(topic, 2, BROKER_COUNT)` in `@BeforeEach`. Waiting for
-    // propagation is the equivalent guarantee; 2 partitions because this cluster
-    // sets `num.partitions=2` for exactly that parity (see
-    // `cluster_config_with_kip848_3brokers`).
-    wait_for_all_partitions_metadata_with_context(&ctx, &topic, 2).await;
-
     // we should only get the small record in the first `poll`
     consumer.assign(vec![tp.clone()]).await.expect("assign should succeed");
 
@@ -955,20 +932,21 @@ async fn check_fetch_honours_size_if_large_record_not_first(
 /// fairness path.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_async_consumer_low_max_fetch_size_for_request_and_partition() {
-    // Different cluster config: needs num.partitions=30 for auto-created
-    // topics (Java explicitly creates each topic with 30 partitions via
-    // `cluster.createTopic(name, partitionCount, BROKER_COUNT)`).
-    let mut ctx = TestContext::new(cluster_config_with_kip848_3brokers_30parts()).await;
+    let mut ctx = TestContext::new(cluster_config_with_kip848_3brokers()).await;
     let group_id = ctx.group_id("g_low_max_fetch_size");
 
-    // Three distinct topics, each with 30 partitions (defaulted via
-    // broker num.partitions=30).
+    // Three distinct topics, each with 30 partitions. Java:
+    // `cluster.createTopic(topicName, partitionCount, (short) BROKER_COUNT)`
+    // (`PlaintextConsumerFetchTest.java:441`).
     let topic1 = ctx.topic("topic1");
     let topic2 = ctx.topic("topic2");
     let topic3 = ctx.topic("topic3");
     let topics: Vec<String> = vec![topic1.clone(), topic2.clone(), topic3.clone()];
 
     let partition_count: i32 = 30;
+    for topic in &topics {
+        create_test_topic(ctx.bootstrap_servers(), topic, partition_count).await;
+    }
     let mut partitions: HashSet<TopicPartition> = HashSet::new();
     for topic in &topics {
         for i in 0..partition_count {
@@ -1076,6 +1054,35 @@ async fn test_async_consumer_low_max_fetch_size_for_request_and_partition() {
     }
 
     consumer.close().await.expect("consumer close should succeed");
+}
+
+// ── Topic provisioning helpers ────────────────────────────────────────
+
+/// Java `PlaintextConsumerFetchTest.BROKER_COUNT` (`PlaintextConsumerFetchTest.java:71`).
+const BROKER_COUNT: i16 = 3;
+
+/// Translates `cluster.createTopic(topic, numPartitions, (short) BROKER_COUNT)`,
+/// as the suite's `@BeforeEach` does for `topic`
+/// (`PlaintextConsumerFetchTest.java:81-84`).
+///
+/// Creates the topic through the admin client and then waits until every
+/// partition leader accepts leader-only requests, before the test produces or
+/// assigns. Auto-creating the topic by producing instead races leader election
+/// and metadata propagation on the 3-broker cluster (`NOT_LEADER_OR_FOLLOWER`
+/// retries reorder non-idempotent sends; a coordinator that has not caught up
+/// answers `OffsetFetch` with `UNKNOWN_TOPIC_OR_PARTITION`).
+async fn create_test_topic(bootstrap_servers: &str, topic: &str, num_partitions: i32) {
+    let props = HashMap::from([
+        ("bootstrap.servers".to_string(), bootstrap_servers.to_string()),
+        ("client.id".to_string(), "fetch-test-admin".to_string()),
+        ("request.timeout.ms".to_string(), "30000".to_string()),
+        ("default.api.timeout.ms".to_string(), "30000".to_string()),
+    ]);
+    let config = AdminClientConfig::new(&props).expect("valid admin config");
+    let admin: Box<dyn Admin> = Box::new(KafkaAdminClient::new(config).expect("admin client"));
+    create_topic(admin.as_ref(), topic, num_partitions, BROKER_COUNT).await;
+    wait_for_partition_leaders(admin.as_ref(), topic, 0..num_partitions).await;
+    admin.close_with_timeout(Duration::from_secs(5)).await;
 }
 
 // ── Local utilities ────────────────────────────────────────────────────
