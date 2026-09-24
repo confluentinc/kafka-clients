@@ -1122,8 +1122,7 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// <param name="options">Request options, or <see langword="null"/> for Java's defaults.</param>
     /// <returns>
     /// The three derived accessors Java publishes. See
-    /// <see cref="DescribeUserScramCredentialsResult"/>, including its recorded
-    /// <c>RESOURCE_NOT_FOUND</c> divergence.
+    /// <see cref="DescribeUserScramCredentialsResult"/>.
     /// </returns>
     /// <exception cref="ArgumentException"><paramref name="users"/> contains a null element.</exception>
     /// <exception cref="ArgumentOutOfRangeException">
