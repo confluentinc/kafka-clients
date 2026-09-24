@@ -374,11 +374,11 @@ where
             // create and the re-resolve) keeps the old id and is excused if
             // unconsumed — a handful per recreate, not the rest of the run.
             let topic_id = self.ctx.topic_id_for(&topic);
-            // Open the record's in-flight window BEFORE handing it to the
+            // Open the record's in-flight window before handing it to the
             // client; the `Delivered` / `SendFailed` below closes it. The
-            // verifier derives from these that this loop never has more than
-            // one record in flight — its contract (send, await the outcome,
-            // send the next) is checked in the verdict, not assumed.
+            // verifier uses these events to verify that this loop never has
+            // more than one record in flight, which is its contract (send,
+            // await the outcome, send the next).
             self.verifier
                 .record(WorkloadEvent::Sent { index, topic: topic.clone(), producer: producer_label.clone() });
             let event = match producer.send_with_callback(record, None).await {
@@ -514,8 +514,8 @@ mod tests {
     }
 
     /// Backend factory over the crate's `MockProducer` (auto-complete: every
-    /// send is acked at once), so the REAL producer loop can be driven without
-    /// a broker.
+    /// send is acknowledged immediately), so the production producer loop can
+    /// be driven without a broker.
     struct MockFactory;
 
     impl ProducerBackendFactory for MockFactory {
@@ -537,12 +537,12 @@ mod tests {
         }
     }
 
-    /// Drives the actual `ProducerWorkload::run` loop against the verifier and
-    /// checks what the verdict derives from its events: every record was `Sent`
-    /// before it was `Delivered`, the peak in flight was exactly 1, and nothing
-    /// was left open at close. Guards the emission order in the loop — a `Sent`
-    /// moved after the send, or dropped, would surface here as peak 0 or as
-    /// unsettled sends.
+    /// Drives the production `ProducerWorkload::run` loop against the verifier
+    /// and checks what the verdict derives from its events: every record was
+    /// `Sent` before it was `Delivered`, the peak in flight was exactly 1, and
+    /// no window was left open at close. This guards the emission order in the
+    /// loop: a `Sent` emitted after the send, or omitted, would appear here as a
+    /// peak of 0 or as unsettled sends.
     #[tokio::test]
     async fn producer_loop_keeps_one_record_in_flight_and_settles_every_send() {
         let ids: TopicIds = Arc::new(std::sync::Mutex::new(HashMap::new()));

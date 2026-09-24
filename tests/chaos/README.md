@@ -249,6 +249,7 @@ The default `ConservationVerifier` renders a verdict:
   failed sends (not loss)   : 0      # unacked sends — never committed, not loss
   duplicates (by index)     : 0      # redelivery of the same logical record
   duplicates (by offset)    : 0      # same physical (topic_id, partition, offset) seen twice
+  duplicates (double write) : 0      # same logical record at 2+ offsets of one generation → FAIL if > 0
   partitions covered        : 6
   in-flight peak (producer) : 1      # most records one producer had in flight at once → FAIL if > 1
   expected-lost (recreate)  : 0      # records legitimately destroyed by topic-recreate
@@ -258,20 +259,31 @@ The default `ConservationVerifier` renders a verdict:
 The run **fails** if any acknowledged record is never consumed
 (`lost > 0`), or if partition coverage is below the expected minimum.
 
-It also **fails** if the producer workload broke its own contract of **one
+It also **fails** if the producer workload violates its contract of **one
 record in flight**: the producer emits a `Sent` event before each send and a
-`Delivered` / `SendFailed` after it, and the verifier derives the per-producer
-peak from that stream. A peak above 1 (a send issued before the previous one
-settled) or a `Sent` that never settled by verdict time (`unsettled sends`)
-is a failure, so the property is checked rather than assumed from the loop's
-shape.
+`Delivered` / `SendFailed` event after it, and the verifier derives the
+per-producer peak from that stream. A peak above 1 (a send issued before the
+previous one settled) or a `Sent` that has not settled by verdict time
+(`unsettled sends`) fails the run, so the property is verified rather than
+inferred from the structure of the loop.
 
-Duplicates are normally reported, not failed — redelivery is expected under
-churn. But like `chaos.py`, the verdict also enforces a **conservation ratio
-bound**: it FAILs when total consume events exceed **2× delivered** (guarded by
-≥100 delivered records, so a tiny run cannot trip it). This catches a broker or
-client stuck redelivering endlessly, which the per-record duplicate counters
-alone would only report, never fail on.
+**Consumer re-reads** (`by index` / `by offset`) are reported, not failed;
+redelivery is expected under churn. Like `chaos.py`, the verdict also enforces
+a **conservation ratio bound**: it fails when total consume events exceed
+**2× delivered** (guarded by ≥100 delivered records, so a small run cannot
+trip it). This catches a broker or client that redelivers endlessly, which the
+per-record duplicate counters alone would report but never fail on.
+
+**Producer double writes** (`double write`) fail the run. The verifier keeps
+every distinct `(topic_id, partition, offset)` at which a logical record was
+consumed; a record observed at two or more addresses **within one topic
+generation** was committed twice by the producer, which
+`enable.idempotence=true` must prevent. The `FAIL:` reason lists the record
+and each offset. A record observed in two *different* generations
+(`cross-generation repeats`) is excused and only reported: a topic recreate
+destroys the broker's idempotent-producer state together with the old
+generation, so a retry whose acknowledgement was lost in the delete window is
+legitimately committed again in the new one.
 
 ## What a run prints
 
