@@ -4866,7 +4866,14 @@ int main(int /*argc*/, char** /*argv*/) {
   if (const char* env = std::getenv("GRPC_PORT")) {
     port = std::atoi(env);
   }
-  const std::string address = "0.0.0.0:" + std::to_string(port);
+  // Defaults to 0.0.0.0 for the Docker image. The test harness's native
+  // (non-container) mode sets GRPC_HOST=127.0.0.1 to restrict the server to
+  // local connections.
+  std::string host = "0.0.0.0";
+  if (const char* env = std::getenv("GRPC_HOST")) {
+    host = env;
+  }
+  const std::string address = host + ":" + std::to_string(port);
 
   grpc::ServerBuilder builder;
   builder.AddListeningPort(address, grpc::InsecureServerCredentials());

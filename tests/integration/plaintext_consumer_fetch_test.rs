@@ -170,9 +170,9 @@ impl Deserializer<Vec<u8>> for ByteArrayDeserializer {
 ///
 /// Default `auto.offset.reset=earliest` so the tests' explicit `seek` /
 /// reset-policy calls are the only offset-state transitions.
-fn make_consumer_config_bytes(bootstrap: &str, group_id: &str, overrides: &[(&str, &str)]) -> ConsumerConfig {
+fn make_consumer_config_bytes(ctx: &TestContext, group_id: &str, overrides: &[(&str, &str)]) -> ConsumerConfig {
     let mut props = HashMap::from([
-        ("bootstrap.servers".to_string(), bootstrap.to_string()),
+        ("bootstrap.servers".to_string(), ctx.protocol_bootstrap_servers().to_string()),
         ("group.protocol".to_string(), "consumer".to_string()),
         ("auto.offset.reset".to_string(), "earliest".to_string()),
         ("client.id".to_string(), "integration-test-consumer".to_string()),
@@ -182,6 +182,7 @@ fn make_consumer_config_bytes(bootstrap: &str, group_id: &str, overrides: &[(&st
     for (k, v) in overrides {
         props.insert((*k).to_string(), (*v).to_string());
     }
+    ctx.apply_security(&mut props);
     ConsumerConfig::new(&props).expect("invalid test config")
 }
 
@@ -190,22 +191,23 @@ fn make_consumer_config_bytes(bootstrap: &str, group_id: &str, overrides: &[(&st
 /// Build a `ProducerConfig` aligned with the existing producer
 /// integration tests (acks=all so produced records are durable before
 /// the consumer reads them).
-fn make_producer_config(bootstrap: &str) -> ProducerConfig {
-    let props = HashMap::from([
-        ("bootstrap.servers".to_string(), bootstrap.to_string()),
+fn make_producer_config(ctx: &TestContext) -> ProducerConfig {
+    let mut props = HashMap::from([
+        ("bootstrap.servers".to_string(), ctx.protocol_bootstrap_servers().to_string()),
         ("client.id".to_string(), "integration-test-producer".to_string()),
         ("acks".to_string(), "all".to_string()),
         ("max.block.ms".to_string(), "30000".to_string()),
         ("linger.ms".to_string(), "5".to_string()),
     ]);
+    ctx.apply_security(&mut props);
     ProducerConfig::new(&props).expect("invalid producer test config")
 }
 
 /// Build a [`KafkaProducer`] for byte-array keys/values matching what
 /// Java's `cluster.producer()` returns.
-fn build_producer_bytes(bootstrap: &str) -> KafkaProducer<Vec<u8>, Vec<u8>> {
+fn build_producer_bytes(ctx: &TestContext) -> KafkaProducer<Vec<u8>, Vec<u8>> {
     KafkaProducer::new(
-        make_producer_config(bootstrap),
+        make_producer_config(ctx),
         Box::new(ByteArraySerializer),
         Box::new(ByteArraySerializer),
     )
@@ -266,8 +268,8 @@ async fn send_records_with_producer(
 /// Translates Java's `ClientsTestUtils.sendRecords(cluster, tp, num,
 /// startingTimestamp)` shorthand. Creates a fresh producer, sends, then
 /// closes it.
-async fn send_records_bytes(bootstrap: &str, tp: &TopicPartition, num_records: usize, starting_timestamp: i64) {
-    let producer = build_producer_bytes(bootstrap);
+async fn send_records_bytes(ctx: &TestContext, tp: &TopicPartition, num_records: usize, starting_timestamp: i64) {
+    let producer = build_producer_bytes(ctx);
     send_records_with_producer(&producer, tp, num_records, starting_timestamp, -1).await;
     producer.close().await.expect("producer close should succeed");
 }
@@ -435,7 +437,7 @@ async fn test_async_consumer_fetch_invalid_offset() {
     let tp = TopicPartition::new(topic.clone(), 0);
 
     let mut consumer = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
-        make_consumer_config_bytes(ctx.bootstrap_servers(), &group_id, &[("auto.offset.reset", "none")]),
+        make_consumer_config_bytes(&ctx, &group_id, &[("auto.offset.reset", "none")]),
         Box::new(ByteArrayDeserializer),
         Box::new(ByteArrayDeserializer),
     )
@@ -443,7 +445,7 @@ async fn test_async_consumer_fetch_invalid_offset() {
 
     // produce two records
     let total_records: usize = 2;
-    send_records_bytes(ctx.bootstrap_servers(), &tp, total_records, 0).await;
+    send_records_bytes(&ctx, &tp, total_records, 0).await;
     consumer.assign(vec![tp.clone()]).await.expect("assign should succeed");
 
     // poll should fail because there is no offset reset strategy set.
@@ -502,7 +504,7 @@ async fn test_async_consumer_fetch_out_of_range_offset_reset_config_earliest() {
 
     let mut consumer = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
         make_consumer_config_bytes(
-            ctx.bootstrap_servers(),
+            &ctx,
             &group_id,
             // ensure no in-flight fetch request so that the offset can be
             // reset immediately
@@ -515,7 +517,7 @@ async fn test_async_consumer_fetch_out_of_range_offset_reset_config_earliest() {
 
     let total_records: usize = 10;
     let starting_timestamp: i64 = 0;
-    send_records_bytes(ctx.bootstrap_servers(), &tp, total_records, starting_timestamp).await;
+    send_records_bytes(&ctx, &tp, total_records, starting_timestamp).await;
     consumer.assign(vec![tp.clone()]).await.expect("assign should succeed");
     consume_and_verify_records_bytes(consumer.as_mut(), &tp, total_records, 0, 0, starting_timestamp, -1).await;
 
@@ -548,7 +550,7 @@ async fn test_async_consumer_fetch_out_of_range_offset_reset_config_latest() {
 
     let mut consumer = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
         make_consumer_config_bytes(
-            ctx.bootstrap_servers(),
+            &ctx,
             &group_id,
             &[
                 ("auto.offset.reset", "latest"),
@@ -562,7 +564,7 @@ async fn test_async_consumer_fetch_out_of_range_offset_reset_config_latest() {
     )
     .expect("KafkaConsumer::new should succeed");
 
-    let producer = build_producer_bytes(ctx.bootstrap_servers());
+    let producer = build_producer_bytes(&ctx);
     let total_records: usize = 10;
     let starting_timestamp: i64 = 0;
     send_records_with_producer(&producer, &tp, total_records, starting_timestamp, -1).await;
@@ -643,7 +645,7 @@ async fn test_async_consumer_fetch_out_of_range_offset_reset_config_by_duration(
 
     let mut consumer1 = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
         make_consumer_config_bytes(
-            ctx.bootstrap_servers(),
+            &ctx,
             &group_id_1,
             &[("auto.offset.reset", "by_duration:PT1H"), ("fetch.max.wait.ms", "0")],
         ),
@@ -654,7 +656,7 @@ async fn test_async_consumer_fetch_out_of_range_offset_reset_config_by_duration(
 
     let total_records: usize = 10;
     let starting_timestamp_1 = current_time_ms();
-    send_records_bytes(ctx.bootstrap_servers(), &tp, total_records, starting_timestamp_1).await;
+    send_records_bytes(&ctx, &tp, total_records, starting_timestamp_1).await;
     consumer1
         .assign(vec![tp.clone()])
         .await
@@ -677,7 +679,7 @@ async fn test_async_consumer_fetch_out_of_range_offset_reset_config_by_duration(
     // duration. Generate records with 1 hour interval for 1 day.
     let mut consumer2 = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
         make_consumer_config_bytes(
-            ctx.bootstrap_servers(),
+            &ctx,
             &group_id_2,
             &[("auto.offset.reset", "by_duration:PT1H"), ("fetch.max.wait.ms", "0")],
         ),
@@ -690,7 +692,7 @@ async fn test_async_consumer_fetch_out_of_range_offset_reset_config_by_duration(
     let starting_timestamp_2 = current_time_ms() - Duration::from_secs(24 * 60 * 60).as_millis() as i64;
     let hour_millis = Duration::from_secs(60 * 60).as_millis() as i64;
 
-    let producer = build_producer_bytes(ctx.bootstrap_servers());
+    let producer = build_producer_bytes(&ctx);
     send_records_with_producer(&producer, &tp2, total_records_2, starting_timestamp_2, hour_millis).await;
     producer.close().await.expect("producer close should succeed");
 
@@ -772,13 +774,13 @@ async fn check_large_record(consumer_overrides: &[(&str, &str)], producer_record
     let tp = TopicPartition::new(topic.clone(), 0);
 
     let mut consumer = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
-        make_consumer_config_bytes(ctx.bootstrap_servers(), &group_id, consumer_overrides),
+        make_consumer_config_bytes(&ctx, &group_id, consumer_overrides),
         Box::new(ByteArrayDeserializer),
         Box::new(ByteArrayDeserializer),
     )
     .expect("KafkaConsumer::new should succeed");
 
-    let producer = build_producer_bytes(ctx.bootstrap_servers());
+    let producer = build_producer_bytes(&ctx);
     // produce a record that is larger than the configured fetch size
     let expected_key = b"key".to_vec();
     let expected_value = vec![0u8; producer_record_size];
@@ -856,13 +858,13 @@ async fn check_fetch_honours_size_if_large_record_not_first(
     let tp = TopicPartition::new(topic.clone(), 0);
 
     let mut consumer = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
-        make_consumer_config_bytes(ctx.bootstrap_servers(), &group_id, consumer_overrides),
+        make_consumer_config_bytes(&ctx, &group_id, consumer_overrides),
         Box::new(ByteArrayDeserializer),
         Box::new(ByteArrayDeserializer),
     )
     .expect("KafkaConsumer::new should succeed");
 
-    let producer = build_producer_bytes(ctx.bootstrap_servers());
+    let producer = build_producer_bytes(&ctx);
 
     let small_key = b"small".to_vec();
     let small_value = b"value".to_vec();
@@ -962,7 +964,7 @@ async fn test_async_consumer_low_max_fetch_size_for_request_and_partition() {
 
     let mut consumer = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
         make_consumer_config_bytes(
-            ctx.bootstrap_servers(),
+            &ctx,
             &group_id,
             &[
                 // one of the effects of this is that there will be some
@@ -990,7 +992,7 @@ async fn test_async_consumer_low_max_fetch_size_for_request_and_partition() {
     await_assignment(consumer.as_mut(), &partitions).await;
 
     // Produce `partition_count` records per partition.
-    let producer = build_producer_bytes(ctx.bootstrap_servers());
+    let producer = build_producer_bytes(&ctx);
     let now = current_time_ms();
     // Java iterates `partitions` (a HashSet) and produces 30 records
     // per partition. The total record count is partition_count * 90.

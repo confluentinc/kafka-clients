@@ -12,26 +12,42 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Process-global pool of gRPC backend containers used by the
-//! multilanguage integration tests.
+//! Process-global pool of gRPC backends used by the multilanguage
+//! integration tests.
 //!
 //! Mirrors the existing [`cluster_pool`](super::cluster_pool) pattern:
-//! the first test that needs the python or c backend triggers a Docker
-//! container start; subsequent tests share the same container via a
-//! `OnceCell`. An `atexit` hook forcibly removes the containers on
-//! process exit because Rust does not run destructors for `LazyLock`
-//! statics.
+//! the first test that needs the python or c backend starts it; subsequent
+//! tests share it via a `OnceCell`. An `atexit` hook forcibly stops the
+//! backends on process exit because Rust does not run destructors for
+//! `LazyLock` statics.
 //!
-//! Each container exposes a fixed internal port (50051 python / 50052 c)
-//! that testcontainers maps to a **random** host port, returned via
-//! `get_host_port_ipv4()`. This is what makes parallel test runs safe
-//! against port collisions.
+//! # Backend modes
+//!
+//! [`BackendMode`] selects how a backend runs, via `MULTILANG_BACKEND_MODE`:
+//!
+//! - **`container`** (default on Linux) — a Docker container attached to the
+//!   broker's network, exposing a fixed internal port (50051 python / 50052 c)
+//!   that testcontainers maps to a **random** host port. The server reaches the
+//!   broker through its CONTAINER-family listener.
+//! - **`native`** (default on all other platforms, e.g. macOS) — the same gRPC
+//!   server run as a child process on the host, bound to `127.0.0.1` on a free
+//!   port. The server connects to the broker through the host-loopback
+//!   listener, as the `__rust` arm does. This mode tests the host platform's
+//!   build of the bindings: containers on macOS run Linux, so container mode
+//!   can only test the Linux build and cannot load the host's Mach-O artifacts.
+//!
+//! In both modes each backend listens on its own port, so parallel test runs
+//! do not collide.
 //!
 //! See `design/history/MILESTONE-6/DESIGN-multilanguage-tests.md` for
 //! the full architecture.
 
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex, Once};
+use std::collections::{HashMap, VecDeque};
+use std::io::{BufRead, BufReader, Read};
+use std::net::TcpListener;
+use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Stdio};
+use std::sync::{Arc, LazyLock, Mutex, Once, mpsc};
 use std::time::Duration;
 
 use testcontainers::core::{ContainerPort, IntoContainerPort, WaitFor};
@@ -44,7 +60,47 @@ use tonic::transport::{Channel, Endpoint};
 const CONNECT_ATTEMPTS: u32 = 5;
 const CONNECT_RETRY_BACKOFF: Duration = Duration::from_millis(300);
 
-/// The two non-native backends. The native rust backend doesn't need a
+/// How long a native backend may take to print its "listening" line. Covers the
+/// Python interpreter importing grpcio and the extension module on a cold start.
+const NATIVE_START_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Lines of a native backend's output kept for failure messages, matching the
+/// `docker logs --tail 200` the container mode reports.
+const NATIVE_OUTPUT_LINES: usize = 200;
+
+/// How the gRPC backends run. See the module docs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BackendMode {
+    /// A Docker container on the broker's network.
+    Container,
+    /// A child process on the host.
+    Native,
+}
+
+/// `MULTILANG_BACKEND_MODE=container|native`; unset means `container` on Linux
+/// and `native` elsewhere. Read once, so every test in the process agrees.
+static BACKEND_MODE: LazyLock<BackendMode> =
+    LazyLock::new(|| match std::env::var("MULTILANG_BACKEND_MODE").as_deref() {
+        Ok("container") => BackendMode::Container,
+        Ok("native") => BackendMode::Native,
+        Ok(other) => panic!("MULTILANG_BACKEND_MODE must be `container` or `native`, got `{other}`"),
+        Err(_) if cfg!(target_os = "linux") => BackendMode::Container,
+        Err(_) => BackendMode::Native,
+    });
+
+/// The mode every gRPC backend in this process runs in.
+pub fn backend_mode() -> BackendMode {
+    *BACKEND_MODE
+}
+
+/// Whether the gRPC backends run in containers, and therefore need the
+/// broker's container-internal bootstrap addresses. The gRPC factories'
+/// `needs_container_bootstrap()` return this.
+pub fn uses_containers() -> bool {
+    backend_mode() == BackendMode::Container
+}
+
+/// The two non-native backends. The native Rust backend doesn't need a
 /// container; tests instantiate it directly.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum BackendKind {
@@ -83,25 +139,122 @@ impl BackendKind {
             BackendKind::C => "c",
         }
     }
+
+    /// The command that runs this backend's server natively, and the make
+    /// target that builds what it needs.
+    ///
+    /// Python runs the checked-in server script with the venv interpreter
+    /// (`MULTILANG_PYTHON` overrides it); the generated gRPC stubs live under
+    /// `target/grpc-native/python` and are put on `PYTHONPATH`. C runs the
+    /// server binary built by CMake (`MULTILANG_C_GRPC_SERVER` overrides it).
+    fn native_command(self) -> (Command, &'static str) {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        match self {
+            BackendKind::Python | BackendKind::PythonAsync => {
+                let python = std::env::var_os("MULTILANG_PYTHON")
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|| root.join("venv/bin/python"));
+                let script = match self {
+                    BackendKind::Python => "grpc_server.py",
+                    _ => "grpc_server_async.py",
+                };
+                let stubs = root.join("target/grpc-native/python");
+                require_native_artifact(self, &python, "build-grpc-native-python");
+                require_native_artifact(self, &stubs.join("admin_service_pb2.py"), "build-grpc-native-python");
+
+                let mut python_path = std::ffi::OsString::from(stubs);
+                if let Some(existing) = std::env::var_os("PYTHONPATH") {
+                    python_path.push(":");
+                    python_path.push(existing);
+                }
+                let mut command = Command::new(python);
+                command
+                    .arg(root.join("bindings/python").join(script))
+                    .env("PYTHONPATH", python_path);
+                (command, "build-grpc-native-python")
+            },
+            BackendKind::C => {
+                let server = std::env::var_os("MULTILANG_C_GRPC_SERVER")
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|| root.join("target/grpc-native/c/kafka_grpc_server"));
+                require_native_artifact(self, &server, "build-grpc-native-c");
+                (Command::new(server), "build-grpc-native-c")
+            },
+        }
+    }
 }
 
-/// Handle to a running gRPC backend container. Holding this keeps the
-/// container alive (testcontainers' `ContainerAsync` `Drop` removes it,
-/// but in practice the atexit hook below catches LazyLock leaks).
+/// Panics with a build hint when a native backend's artifact is missing, rather
+/// than letting the spawn fail with an unexplained "No such file or directory".
+fn require_native_artifact(kind: BackendKind, path: &Path, make_target: &str) {
+    assert!(
+        path.exists(),
+        "{} native gRPC backend: {} does not exist. Build it with `make {make_target}`.",
+        kind.label(),
+        path.display(),
+    );
+}
+
+/// Handle to a running gRPC backend. The backend stays alive while this handle
+/// is held. Dropping it stops the backend (testcontainers' `ContainerAsync`
+/// removes the container; [`NativeProcess`] kills the process). Handles held by
+/// the `LazyLock` pool are never dropped, so the atexit hook below stops those.
 pub struct BackendHandle {
-    _container: ContainerAsync<GenericImage>,
-    container_id: String,
-    /// `http://127.0.0.1:<random_port>` reachable from the test process.
+    runtime: BackendRuntime,
+    /// `http://127.0.0.1:<port>` reachable from the test process.
     endpoint: String,
+}
+
+/// What a [`BackendHandle`] is running on, per [`BackendMode`].
+enum BackendRuntime {
+    Container {
+        // Boxed to keep the enum small: `ContainerAsync` is roughly 870 bytes,
+        // while the native variant is a few words.
+        _container: Box<ContainerAsync<GenericImage>>,
+        id: String,
+    },
+    Native(NativeProcess),
+}
+
+/// A backend server running as a child process of the test binary.
+struct NativeProcess {
+    child: Mutex<Child>,
+    /// The last [`NATIVE_OUTPUT_LINES`] lines of the server's stdout and
+    /// stderr, for failure messages (the native counterpart of `docker logs`).
+    output: Arc<Mutex<VecDeque<String>>>,
+}
+
+impl NativeProcess {
+    /// Kill the server and reap it. Idempotent: a second call finds it
+    /// already exited.
+    fn terminate(&self) {
+        let mut child = self.child.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
+    /// Exit status (if it has exited) plus the captured output.
+    fn describe(&self) -> String {
+        let status = match self.child.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).try_wait() {
+            Ok(Some(status)) => format!("exited: {status}"),
+            Ok(None) => "still running".to_string(),
+            Err(e) => format!("<could not query process: {e}>"),
+        };
+        let output = self.output.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let lines: Vec<&str> = output.iter().map(String::as_str).collect();
+        format!("process {status}\n{}", lines.join("\n"))
+    }
+}
+
+impl Drop for NativeProcess {
+    fn drop(&mut self) {
+        self.terminate();
+    }
 }
 
 impl BackendHandle {
     pub fn endpoint(&self) -> &str {
         &self.endpoint
-    }
-
-    pub fn container_id(&self) -> &str {
-        &self.container_id
     }
 
     /// Build a tonic [`Channel`] pointing at this backend. Channels are
@@ -128,31 +281,53 @@ impl BackendHandle {
             }
         }
         panic!(
-            "failed to connect to {} backend after {CONNECT_ATTEMPTS} attempts: {}\n--- docker logs {} (last 200 lines) ---\n{}",
+            "failed to connect to {} backend after {CONNECT_ATTEMPTS} attempts: {}\n{}",
             self.endpoint,
             last_err.expect("loop records an error before exiting"),
-            self.container_id,
-            self.container_logs()
+            self.logs()
         );
     }
 
-    /// `docker logs` for this container, captured here rather than from CI
-    /// afterward: the atexit hook below removes the container as soon as
-    /// the test binary exits, before any CI-level `docker logs` step runs.
-    fn container_logs(&self) -> String {
-        match std::process::Command::new("docker")
-            .args(["logs", "--tail", "200", &self.container_id])
-            .output()
-        {
-            Ok(output) => {
+    /// The backend's recent output. It is collected here because the atexit
+    /// hook below stops the backend when the test binary exits, before any
+    /// CI-level `docker logs` step could run.
+    fn logs(&self) -> String {
+        match &self.runtime {
+            BackendRuntime::Container { id, .. } => {
+                format!("--- docker logs {id} (last 200 lines) ---\n{}", container_logs(id))
+            },
+            BackendRuntime::Native(process) => {
                 format!(
-                    "{}{}",
-                    String::from_utf8_lossy(&output.stdout),
-                    String::from_utf8_lossy(&output.stderr)
+                    "--- native backend output (last {NATIVE_OUTPUT_LINES} lines) ---\n{}",
+                    process.describe()
                 )
             },
-            Err(e) => format!("(failed to run `docker logs`: {e})"),
         }
+    }
+
+    /// Stop the backend: `docker rm -f` for a container, kill for a native
+    /// process. Every teardown path in this module goes through this method.
+    fn terminate(&self) {
+        match &self.runtime {
+            BackendRuntime::Container { id, .. } => {
+                let _ = Command::new("docker").args(["rm", "-f", id]).output();
+            },
+            BackendRuntime::Native(process) => process.terminate(),
+        }
+    }
+}
+
+/// `docker logs --tail 200` for container `id`.
+fn container_logs(id: &str) -> String {
+    match Command::new("docker").args(["logs", "--tail", "200", id]).output() {
+        Ok(output) => {
+            format!(
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            )
+        },
+        Err(e) => format!("(failed to run `docker logs`: {e})"),
     }
 }
 
@@ -161,7 +336,9 @@ type BackendCell = Arc<OnceCell<Arc<BackendHandle>>>;
 /// Pool key includes the broker network — a gRPC client container is
 /// pinned to one Docker network at start time, so tests using
 /// different `ClusterConfig`s (which spawn brokers on different
-/// networks) need their own backend container.
+/// networks) need their own backend container. A native backend is not
+/// attached to any network, but keeps the same key so it shares the
+/// container's lifecycle: it is stopped when the cluster it served is evicted.
 static BACKEND_POOL: std::sync::LazyLock<Mutex<HashMap<(BackendKind, String), BackendCell>>> =
     std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
 
@@ -170,11 +347,17 @@ static CLEANUP_REGISTERED: Once = Once::new();
 /// Get or start the requested backend, returning a shared handle.
 ///
 /// Pool entries are keyed by `(kind, broker_network)`. First caller for
-/// a given pair triggers a `docker run`; subsequent callers share the
-/// same `BackendHandle`. The container is attached to `broker_network`
-/// so it can reach the Kafka broker via the CONTAINER listener
-/// (`<broker_container_name>:9099`). The container is removed at
-/// process exit by the atexit hook below.
+/// a given pair starts the backend; subsequent callers share the same
+/// `BackendHandle`.
+///
+/// In [`BackendMode::Container`] that is a `docker run` attached to
+/// `broker_network`, so the server can reach the Kafka broker via the
+/// protocol-matched CONTAINER listener advertised on the broker's container
+/// hostname (`<broker_container_name>:9099` PLAINTEXT / `:9100` SSL / `:9101`
+/// SASL_SSL, per `INTEGRATION_TEST_PROTOCOL`). In [`BackendMode::Native`] it is
+/// a host process, and the tests hand it the host-loopback listener instead
+/// (the gRPC factories' `needs_container_bootstrap()` follows the mode).
+/// Either way the backend is stopped at process exit by the atexit hook below.
 ///
 /// Caller (the `multilanguage_test!` macro) must ensure the broker
 /// network exists — typically by creating the `TestContext` first.
@@ -189,9 +372,19 @@ pub async fn get_or_start(kind: BackendKind, broker_network: &str) -> Arc<Backen
     };
 
     let network = broker_network.to_string();
-    cell.get_or_init(|| async move { Arc::new(start_container(kind, network).await) })
-        .await
-        .clone()
+    cell.get_or_init(|| async move {
+        let handle = match backend_mode() {
+            BackendMode::Container => start_container(kind, network).await,
+            // Waiting for the "listening" line blocks, so keep it off the
+            // runtime's worker threads.
+            BackendMode::Native => tokio::task::spawn_blocking(move || start_native(kind))
+                .await
+                .unwrap_or_else(|e| std::panic::resume_unwind(e.into_panic())),
+        };
+        Arc::new(handle)
+    })
+    .await
+    .clone()
 }
 
 async fn start_container(kind: BackendKind, broker_network: String) -> BackendHandle {
@@ -224,10 +417,100 @@ async fn start_container(kind: BackendKind, broker_network: String) -> BackendHa
             describe_container_state(container.id())
         ),
     };
-    let container_id = container.id().to_string();
+    let id = container.id().to_string();
     let endpoint = format!("http://127.0.0.1:{host_port}");
 
-    BackendHandle { _container: container, container_id, endpoint }
+    BackendHandle {
+        runtime: BackendRuntime::Container { _container: Box::new(container), id },
+        endpoint,
+    }
+}
+
+/// Start `kind`'s server as a child process bound to `127.0.0.1` on a free
+/// port, and wait for its "listening" line — the same readiness signal the
+/// container mode waits for.
+///
+/// The port is chosen by binding port 0 and releasing it, so another process
+/// could claim it before the server binds. In that case the server fails to
+/// start and the panic below includes its output. Stdout and stderr are drained
+/// for the lifetime of the process, so the server never blocks on a full pipe.
+fn start_native(kind: BackendKind) -> BackendHandle {
+    let port = TcpListener::bind("127.0.0.1:0")
+        .and_then(|listener| listener.local_addr())
+        .map(|addr| addr.port())
+        .unwrap_or_else(|e| panic!("{} native backend: could not pick a free port: {e}", kind.label()));
+
+    let (mut command, make_target) = kind.native_command();
+    let mut child = command
+        .env("GRPC_HOST", "127.0.0.1")
+        .env("GRPC_PORT", port.to_string())
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap_or_else(|e| {
+            panic!(
+                "failed to spawn {} native gRPC backend: {e}\nBuild it with `make {make_target}`.",
+                kind.label()
+            )
+        });
+
+    let output = Arc::new(Mutex::new(VecDeque::with_capacity(NATIVE_OUTPUT_LINES)));
+    let (ready_tx, ready_rx) = mpsc::channel();
+    let stdout = child.stdout.take().expect("stdout is piped");
+    let stderr = child.stderr.take().expect("stderr is piped");
+    drain_output(stdout, Arc::clone(&output), None);
+    drain_output(stderr, Arc::clone(&output), Some(ready_tx));
+
+    let process = NativeProcess { child: Mutex::new(child), output };
+    match ready_rx.recv_timeout(NATIVE_START_TIMEOUT) {
+        Ok(()) => {},
+        // Disconnected: stderr reached EOF before "listening", meaning the
+        // server exited. Timeout: the server is still starting or has hung.
+        // Both are treated as fatal.
+        Err(e) => {
+            let reason = match e {
+                mpsc::RecvTimeoutError::Timeout => format!("did not start within {NATIVE_START_TIMEOUT:?}"),
+                mpsc::RecvTimeoutError::Disconnected => "exited before it was listening".to_string(),
+            };
+            // Allow the drain threads time to capture the final output lines.
+            std::thread::sleep(Duration::from_millis(200));
+            let details = process.describe();
+            process.terminate();
+            panic!("{} native gRPC backend {reason}\n{details}", kind.label());
+        },
+    }
+
+    BackendHandle {
+        runtime: BackendRuntime::Native(process),
+        endpoint: format!("http://127.0.0.1:{port}"),
+    }
+}
+
+/// Copy `stream`'s lines into `output`, keeping the last [`NATIVE_OUTPUT_LINES`],
+/// until the stream closes. With `ready`, signals it on the first line
+/// containing "listening".
+fn drain_output(
+    stream: impl Read + Send + 'static,
+    output: Arc<Mutex<VecDeque<String>>>,
+    ready: Option<mpsc::Sender<()>>,
+) {
+    std::thread::spawn(move || {
+        let mut ready = ready;
+        for line in BufReader::new(stream).lines() {
+            let Ok(line) = line else { break };
+            if line.contains("listening")
+                && let Some(ready) = ready.take()
+            {
+                let _ = ready.send(());
+            }
+            let mut output = output.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            if output.len() == NATIVE_OUTPUT_LINES {
+                output.pop_front();
+            }
+            output.push_back(line);
+        }
+    });
 }
 
 /// Docker's view of `id` — status, exit code, OOM flag, port bindings and the
@@ -254,7 +537,7 @@ async fn start_container(kind: BackendKind, broker_network: String) -> BackendHa
 /// to a confusing connect error. Retrying would be wrong for a container that
 /// has exited, which is a crash to report rather than to wait out.
 fn describe_container_state(id: &str) -> String {
-    let inspect = std::process::Command::new("docker")
+    let inspect = Command::new("docker")
         .args([
             "inspect",
             "--format",
@@ -269,7 +552,7 @@ fn describe_container_state(id: &str) -> String {
         Err(e) => format!("<could not run docker inspect: {e}>"),
     };
 
-    let logs = std::process::Command::new("docker").args(["logs", "--tail", "20", id]).output();
+    let logs = Command::new("docker").args(["logs", "--tail", "20", id]).output();
     let logs = match logs {
         Ok(out) => {
             let mut combined = String::from_utf8_lossy(&out.stdout).to_string();
@@ -287,20 +570,13 @@ fn describe_container_state(id: &str) -> String {
     format!("  container {id}\n  {state}\n  last 20 log lines:\n{logs}")
 }
 
-/// `docker rm -f` one backend container. The single shell-out used by every
-/// teardown path here, so there is exactly one of them.
-fn remove_container(handle: &BackendHandle) {
-    let _ = std::process::Command::new("docker")
-        .args(["rm", "-f", handle.container_id()])
-        .output();
-}
-
 /// True while a test still holds — or is in the middle of starting — a backend
 /// container attached to `broker_network`.
 ///
 /// Read by [`cluster_pool`](super::cluster_pool) before evicting a cluster: a
 /// backend container is a *child* of the network its cluster owns, so evicting
-/// the cluster destroys the network out from under it.
+/// the cluster destroys the network out from under it. (A native backend is
+/// not attached to the network, but it still serves that cluster's brokers.)
 ///
 /// Both halves matter, and they mirror the two idle checks `cluster_pool`
 /// already applies to its own entries:
@@ -324,15 +600,17 @@ pub fn has_live_handles_on_network(broker_network: &str) -> bool {
     })
 }
 
-/// De-pools and removes every backend container attached to `broker_network`,
-/// returning how many were removed.
+/// De-pools and stops every backend attached to `broker_network`, returning how
+/// many were stopped.
 ///
 /// Called by [`cluster_pool`](super::cluster_pool) when it evicts the cluster
 /// that owns `broker_network`. Without this the eviction's `docker network rm`
 /// fails — Docker refuses to remove a network with active endpoints — so the
 /// network leaks for the rest of the process (measured: 8 orphaned
 /// `kafka-net-*` networks after a full run) and the backend container stays
-/// resident pointing at brokers that no longer exist.
+/// resident pointing at brokers that no longer exist. A native backend is not
+/// attached to the network, but it is stopped as well; otherwise it would remain
+/// idle until the process exits.
 ///
 /// # Must be called from a blocking thread
 ///
@@ -352,13 +630,13 @@ pub fn take_and_remove_handles_on_network(broker_network: &str) -> usize {
     };
 
     for handle in &removed {
-        remove_container(handle);
+        handle.terminate();
     }
     removed.len()
 }
 
-/// `docker rm -f` every backend container in the pool, **leaving the pool
-/// entries in place**.
+/// Stop every backend in the pool (`docker rm -f` a container, kill a native
+/// process), **leaving the pool entries in place**.
 ///
 /// Deliberately does not de-pool: keeping the pool's `Arc` alive means no
 /// `ContainerAsync::drop` runs, which is what makes this safe to call from an
@@ -370,13 +648,13 @@ pub fn force_remove_all_containers() {
     drop(pool);
 
     for handle in &handles {
-        remove_container(handle);
+        handle.terminate();
     }
 }
 
-/// Forcibly `docker rm -f` every backend container in the pool when the
-/// process exits. The same trick `cluster_pool` uses for the broker
-/// containers — `LazyLock` statics never run their `Drop`.
+/// Forcibly stop every backend in the pool when the process exits. The same trick
+/// `cluster_pool` uses for the broker containers — `LazyLock` statics never run
+/// their `Drop`.
 fn register_cleanup_hook() {
     CLEANUP_REGISTERED.call_once(|| {
         unsafe extern "C" {

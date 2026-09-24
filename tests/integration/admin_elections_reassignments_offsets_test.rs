@@ -65,13 +65,21 @@ const NUM_RECORDS: usize = 10;
 /// Always native and always against the *host* listener: the record producer is
 /// not the object under test, so it does not go through the backend under test
 /// (which for the container backends could not reach the host loopback anyway).
-async fn produce_records(bootstrap: &str, topic: &str, partition: i32, num: usize, value_len: usize) {
-    let props = HashMap::from([
+async fn produce_records(
+    ctx: &TestContext,
+    bootstrap: &str,
+    topic: &str,
+    partition: i32,
+    num: usize,
+    value_len: usize,
+) {
+    let mut props = HashMap::from([
         ("bootstrap.servers".to_string(), bootstrap.to_string()),
         ("client.id".to_string(), "integration-test-offsets-producer".to_string()),
         ("acks".to_string(), "all".to_string()),
         ("max.block.ms".to_string(), "30000".to_string()),
     ]);
+    ctx.apply_security(&mut props);
     let config = ProducerConfig::new(&props).expect("valid producer config");
     let producer: KafkaProducer<Vec<u8>, Vec<u8>> =
         KafkaProducer::new(config, Box::new(ByteArraySerializer), Box::new(ByteArraySerializer))
@@ -279,12 +287,12 @@ async fn set_config<B: AdminBackend>(admin: &B, resource: &ConfigResource, name:
 /// `PartitionLeaderStrategy` lookup→fulfillment path end to end.
 async fn list_offsets_earliest_latest_max_timestamp<F: AdminBackendFactory>(ctx: &mut TestContext, factory: &F) {
     let admin = admin_for(factory, ctx).await;
-    let bootstrap = ctx.bootstrap_servers().to_string();
+    let bootstrap = ctx.protocol_bootstrap_servers().to_string();
     let backend = admin.name();
 
     let topic = ctx.topic("admin_list_offsets");
     create_topic(&admin, &topic, 1, 1).await;
-    produce_records(&bootstrap, &topic, 0, NUM_RECORDS, 16).await;
+    produce_records(ctx, &bootstrap, &topic, 0, NUM_RECORDS, 16).await;
 
     let tp = TopicPartition::new(topic.clone(), 0);
 
@@ -354,12 +362,12 @@ async fn list_offsets_earliest_latest_max_timestamp<F: AdminBackendFactory>(ctx:
 /// state of that coverage gap.
 async fn list_offsets_covers_every_offset_spec_variant<F: AdminBackendFactory>(ctx: &mut TestContext, factory: &F) {
     let admin = admin_for(factory, ctx).await;
-    let bootstrap = ctx.bootstrap_servers().to_string();
+    let bootstrap = ctx.protocol_bootstrap_servers().to_string();
     let backend = admin.name();
 
     let topic = ctx.topic("admin_offset_specs");
     create_topic(&admin, &topic, 1, 1).await;
-    produce_records(&bootstrap, &topic, 0, NUM_RECORDS, 16).await;
+    produce_records(ctx, &bootstrap, &topic, 0, NUM_RECORDS, 16).await;
     let tp = TopicPartition::new(topic.clone(), 0);
 
     // earliestLocal is the local log start offset. With no remote storage
@@ -515,12 +523,12 @@ async fn list_offsets_covers_every_offset_spec_variant<F: AdminBackendFactory>(c
 /// dropped the field or sent a different one.
 async fn list_offsets_honours_isolation_level_and_timeout<F: AdminBackendFactory>(ctx: &mut TestContext, factory: &F) {
     let admin = admin_for(factory, ctx).await;
-    let bootstrap = ctx.bootstrap_servers().to_string();
+    let bootstrap = ctx.protocol_bootstrap_servers().to_string();
     let backend = admin.name();
 
     let topic = ctx.topic("admin_offsets_options");
     create_topic(&admin, &topic, 1, 1).await;
-    produce_records(&bootstrap, &topic, 0, NUM_RECORDS, 16).await;
+    produce_records(ctx, &bootstrap, &topic, 0, NUM_RECORDS, 16).await;
     let tp = TopicPartition::new(topic.clone(), 0);
 
     // A deliberately odd millisecond count, so the value is not one a truncating
@@ -849,7 +857,7 @@ async fn list_partition_reassignments_reports_an_ongoing_move<F: AdminBackendFac
     factory: &F,
 ) {
     let admin = admin_for(factory, ctx).await;
-    let bootstrap = ctx.bootstrap_servers().to_string();
+    let bootstrap = ctx.protocol_bootstrap_servers().to_string();
     let backend = admin.name();
 
     let ids = broker_ids(&admin).await;
@@ -870,7 +878,7 @@ async fn list_partition_reassignments_reports_an_ongoing_move<F: AdminBackendFac
     }
 
     // ~2 MiB at 1 KiB/s. The move cannot finish while the scenario runs.
-    produce_records(&bootstrap, &topic, 0, 200, 10_240).await;
+    produce_records(ctx, &bootstrap, &topic, 0, 200, 10_240).await;
 
     let source = sole_leader_of(&admin, &topic).await;
     let target = *ids

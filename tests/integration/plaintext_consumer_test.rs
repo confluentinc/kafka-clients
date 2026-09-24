@@ -168,9 +168,9 @@ impl Deserializer<Vec<u8>> for ByteArrayDeserializer {
 /// Build a `ConsumerConfig` matching Java's
 /// `cluster.consumer(Map.of(GROUP_PROTOCOL_CONFIG, "consumer", ...))`.
 /// Caller-supplied overrides win over the defaults.
-fn make_consumer_config(bootstrap: &str, group_id: &str, overrides: &[(&str, &str)]) -> ConsumerConfig {
+fn make_consumer_config(ctx: &TestContext, group_id: &str, overrides: &[(&str, &str)]) -> ConsumerConfig {
     let mut props = HashMap::from([
-        ("bootstrap.servers".to_string(), bootstrap.to_string()),
+        ("bootstrap.servers".to_string(), ctx.protocol_bootstrap_servers().to_string()),
         ("group.protocol".to_string(), "consumer".to_string()),
         ("auto.offset.reset".to_string(), "earliest".to_string()),
         ("client.id".to_string(), "integration-test-consumer".to_string()),
@@ -180,15 +180,16 @@ fn make_consumer_config(bootstrap: &str, group_id: &str, overrides: &[(&str, &st
     for (k, v) in overrides {
         props.insert((*k).to_string(), (*v).to_string());
     }
+    ctx.apply_security(&mut props);
     ConsumerConfig::new(&props).expect("invalid test config")
 }
 
 /// Build a *groupless* `ConsumerConfig` — `group.id` is intentionally
 /// absent, mirroring Java's `testConsumingWithNullGroupId` which omits
 /// `GROUP_ID_CONFIG`.
-fn make_groupless_consumer_config(bootstrap: &str, overrides: &[(&str, &str)]) -> ConsumerConfig {
+fn make_groupless_consumer_config(ctx: &TestContext, overrides: &[(&str, &str)]) -> ConsumerConfig {
     let mut props = HashMap::from([
-        ("bootstrap.servers".to_string(), bootstrap.to_string()),
+        ("bootstrap.servers".to_string(), ctx.protocol_bootstrap_servers().to_string()),
         ("group.protocol".to_string(), "consumer".to_string()),
         ("client.id".to_string(), "integration-test-consumer".to_string()),
         ("enable.auto.commit".to_string(), "false".to_string()),
@@ -196,32 +197,34 @@ fn make_groupless_consumer_config(bootstrap: &str, overrides: &[(&str, &str)]) -
     for (k, v) in overrides {
         props.insert((*k).to_string(), (*v).to_string());
     }
+    ctx.apply_security(&mut props);
     ConsumerConfig::new(&props).expect("invalid test config")
 }
 
-fn make_producer_config(bootstrap: &str) -> ProducerConfig {
-    let props = HashMap::from([
-        ("bootstrap.servers".to_string(), bootstrap.to_string()),
+fn make_producer_config(ctx: &TestContext) -> ProducerConfig {
+    let mut props = HashMap::from([
+        ("bootstrap.servers".to_string(), ctx.protocol_bootstrap_servers().to_string()),
         ("client.id".to_string(), "integration-test-producer".to_string()),
         ("acks".to_string(), "all".to_string()),
         ("max.block.ms".to_string(), "30000".to_string()),
         ("linger.ms".to_string(), "5".to_string()),
     ]);
+    ctx.apply_security(&mut props);
     ProducerConfig::new(&props).expect("invalid producer test config")
 }
 
-fn build_producer(bootstrap: &str) -> KafkaProducer<Vec<u8>, Vec<u8>> {
+fn build_producer(ctx: &TestContext) -> KafkaProducer<Vec<u8>, Vec<u8>> {
     KafkaProducer::new(
-        make_producer_config(bootstrap),
+        make_producer_config(ctx),
         Box::new(ByteArraySerializer),
         Box::new(ByteArraySerializer),
     )
     .expect("Failed to build test producer")
 }
 
-fn make_consumer(bootstrap: &str, group_id: &str, overrides: &[(&str, &str)]) -> Box<BytesConsumer> {
+fn make_consumer(ctx: &TestContext, group_id: &str, overrides: &[(&str, &str)]) -> Box<BytesConsumer> {
     KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
-        make_consumer_config(bootstrap, group_id, overrides),
+        make_consumer_config(ctx, group_id, overrides),
         Box::new(ByteArrayDeserializer),
         Box::new(ByteArrayDeserializer),
     )
@@ -426,7 +429,7 @@ async fn test_async_consumer_headers() {
     let tp = TopicPartition::new(topic.clone(), 0);
     let group_id = ctx.group_id("g_headers");
 
-    let producer = build_producer(ctx.bootstrap_servers());
+    let producer = build_producer(&ctx);
 
     // Java: `new ProducerRecord<>(TP.topic(), TP.partition(), null, "key", "value")`
     // then `record.headers().add(...)` thrice. Java relies on producer-driven
@@ -449,7 +452,7 @@ async fn test_async_consumer_headers() {
     fut.get_with_timeout(Duration::from_secs(30)).await.expect("send should ack");
     producer.close().await.expect("producer close");
 
-    let mut consumer = make_consumer(ctx.bootstrap_servers(), &group_id, &[]);
+    let mut consumer = make_consumer(&ctx, &group_id, &[]);
     assert_eq!(consumer.assignment().len(), 0);
     consumer.assign(vec![tp.clone()]).await.expect("assign should succeed");
     assert_eq!(consumer.assignment().len(), 1);
@@ -487,8 +490,8 @@ async fn test_async_consumer_partition_pause_and_resume() {
     let tp = TopicPartition::new(topic.clone(), 0);
     let group_id = ctx.group_id("g_pause_resume");
 
-    let producer = build_producer(ctx.bootstrap_servers());
-    let mut consumer = make_consumer(ctx.bootstrap_servers(), &group_id, &[]);
+    let producer = build_producer(&ctx);
+    let mut consumer = make_consumer(&ctx, &group_id, &[]);
     // Empty topic so the first produced record lands at offset 0 (Java parity).
     create_topic(consumer.as_mut(), &topic, 2).await;
 
@@ -524,8 +527,8 @@ async fn test_async_consumer_pause_state_not_preserved_by_rebalance() {
     let tp = TopicPartition::new(topic.clone(), 0);
     let group_id = ctx.group_id("g_pause_rebalance");
 
-    let producer = build_producer(ctx.bootstrap_servers());
-    let mut consumer = make_consumer(ctx.bootstrap_servers(), &group_id, &[]);
+    let producer = build_producer(&ctx);
+    let mut consumer = make_consumer(&ctx, &group_id, &[]);
     // Empty topics so the first produced record lands at offset 0 (Java parity).
     create_topic(consumer.as_mut(), &topic, 2).await;
     create_topic(consumer.as_mut(), &topic2, 2).await;
@@ -561,7 +564,7 @@ async fn test_async_consumer_partitions_for() {
     let topic = ctx.topic("topic");
     let group_id = ctx.group_id("g_partitions_for");
 
-    let mut consumer = make_consumer(ctx.bootstrap_servers(), &group_id, &[]);
+    let mut consumer = make_consumer(&ctx, &group_id, &[]);
     // The topic may take a moment to appear in fresh metadata; poll a few
     // times if needed (Java relies on createTopic being synchronous).
     let deadline = Instant::now() + Duration::from_secs(30);
@@ -583,7 +586,7 @@ async fn test_async_consumer_partitions_for_auto_create() {
     let non_exist = ctx.topic("non-exist-topic");
     let group_id = ctx.group_id("g_partitions_for_autocreate");
 
-    let mut consumer = make_consumer(ctx.bootstrap_servers(), &group_id, &[]);
+    let mut consumer = make_consumer(&ctx, &group_id, &[]);
     // First call would create the topic.
     let _ = consumer.partitions_for(&non_exist).await.expect("partitions_for");
     let deadline = Instant::now() + Duration::from_secs(30);
@@ -609,7 +612,7 @@ async fn test_async_consumer_partitions_for_invalid_topic() {
     let ctx = TestContext::new(cluster_config_kip848()).await;
     let group_id = ctx.group_id("g_partitions_for_invalid");
 
-    let mut consumer = make_consumer(ctx.bootstrap_servers(), &group_id, &[]);
+    let mut consumer = make_consumer(&ctx, &group_id, &[]);
     let err = consumer
         .partitions_for(";3# ads,{234")
         .await
@@ -632,8 +635,8 @@ async fn test_async_consumer_list_topics() {
     let topic3 = ctx.topic("part-test-topic-3");
     let group_id = ctx.group_id("g_list_topics");
 
-    let producer = build_producer(ctx.bootstrap_servers());
-    let mut consumer = make_consumer(ctx.bootstrap_servers(), &group_id, &[]);
+    let producer = build_producer(&ctx);
+    let mut consumer = make_consumer(&ctx, &group_id, &[]);
     create_topic(consumer.as_mut(), &topic1, 2).await;
     create_topic(consumer.as_mut(), &topic2, 2).await;
     create_topic(consumer.as_mut(), &topic3, 2).await;
@@ -689,8 +692,8 @@ async fn test_async_consumer_seek() {
     let total_records: usize = 50;
     let mid: usize = total_records / 2;
 
-    let producer = build_producer(ctx.bootstrap_servers());
-    let mut consumer = make_consumer(ctx.bootstrap_servers(), &group_id, &[]);
+    let producer = build_producer(&ctx);
+    let mut consumer = make_consumer(&ctx, &group_id, &[]);
     // Java uses `startingTimestamp = 0`. Empty topic so records start at
     // offset 0, matching Java's offset==index expectation.
     create_topic(consumer.as_mut(), &topic, 2).await;
@@ -730,7 +733,7 @@ async fn test_async_consumer_seek_throws_illegal_state_if_partitions_not_assigne
     let tp = TopicPartition::new(topic.clone(), 0);
     let group_id = ctx.group_id("g_seek_illegal_state");
 
-    let mut consumer = make_consumer(ctx.bootstrap_servers(), &group_id, &[]);
+    let mut consumer = make_consumer(&ctx, &group_id, &[]);
     create_topic(consumer.as_mut(), &topic, 2).await;
     let err = consumer
         .seek_to_end(std::slice::from_ref(&tp))
@@ -767,8 +770,8 @@ async fn test_async_consumer_consume_messages_with_log_append_time() {
     let start_time = current_time_ms();
     let num_records = 50usize;
 
-    let producer = build_producer(ctx.bootstrap_servers());
-    let mut consumer = make_consumer(ctx.bootstrap_servers(), &group_id, &[]);
+    let producer = build_producer(&ctx);
+    let mut consumer = make_consumer(&ctx, &group_id, &[]);
     // Empty topic so records start at offset 0 (Java parity).
     create_topic(consumer.as_mut(), &topic, 2).await;
     // Producer-supplied timestamps are IGNORED by a LogAppendTime topic;
@@ -861,8 +864,8 @@ async fn test_async_consumer_end_offsets() {
     let group_id = ctx.group_id("g_end_offsets");
 
     let num_records = 200usize;
-    let producer = build_producer(ctx.bootstrap_servers());
-    let mut consumer = make_consumer(ctx.bootstrap_servers(), &group_id, &[]);
+    let producer = build_producer(&ctx);
+    let mut consumer = make_consumer(&ctx, &group_id, &[]);
     // Empty topic so records start at offset 0 (Java parity).
     create_topic(consumer.as_mut(), &topic, 2).await;
     send_records(&producer, &tp, num_records, current_time_ms()).await;
@@ -899,7 +902,7 @@ async fn test_async_consumer_fetch_offsets_for_time() {
     let tp1 = TopicPartition::new(topic.clone(), 1);
     let group_id = ctx.group_id("g_offsets_for_time");
 
-    let producer = build_producer(ctx.bootstrap_servers());
+    let producer = build_producer(&ctx);
     // Do NOT provision: the `__provisioner__` record at offset 0 carries a
     // broker wall-clock `CreateTime` timestamp, which is `>=` any small
     // search target, so `offsets_for_times(ts=0/20)` would resolve to the
@@ -919,7 +922,7 @@ async fn test_async_consumer_fetch_offsets_for_time() {
     let base0 = 0i64;
     let base1 = 0i64;
 
-    let mut consumer = make_consumer(ctx.bootstrap_servers(), &group_id, &[]);
+    let mut consumer = make_consumer(&ctx, &group_id, &[]);
 
     // Java: negative target time → IllegalArgumentException.
     let neg_err = consumer
@@ -963,24 +966,23 @@ async fn test_async_consumer_consuming_with_null_group_id() {
     let topic = ctx.topic("topic-null-group");
     let tp = TopicPartition::new(topic.clone(), 0);
 
-    let producer = build_producer(ctx.bootstrap_servers());
-    let bootstrap = ctx.bootstrap_servers().to_string();
+    let producer = build_producer(&ctx);
     // consumer1: groupless, earliest. consumer2: groupless, latest.
     // consumer3: groupless, explicit seek.
     let mut consumer1 = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
-        make_groupless_consumer_config(&bootstrap, &[("auto.offset.reset", "earliest"), ("client.id", "consumer1")]),
+        make_groupless_consumer_config(&ctx, &[("auto.offset.reset", "earliest"), ("client.id", "consumer1")]),
         Box::new(ByteArrayDeserializer),
         Box::new(ByteArrayDeserializer),
     )
     .expect("consumer1");
     let mut consumer2 = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
-        make_groupless_consumer_config(&bootstrap, &[("auto.offset.reset", "latest"), ("client.id", "consumer2")]),
+        make_groupless_consumer_config(&ctx, &[("auto.offset.reset", "latest"), ("client.id", "consumer2")]),
         Box::new(ByteArrayDeserializer),
         Box::new(ByteArrayDeserializer),
     )
     .expect("consumer2");
     let mut consumer3 = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
-        make_groupless_consumer_config(&bootstrap, &[("auto.offset.reset", "earliest"), ("client.id", "consumer3")]),
+        make_groupless_consumer_config(&ctx, &[("auto.offset.reset", "earliest"), ("client.id", "consumer3")]),
         Box::new(ByteArrayDeserializer),
         Box::new(ByteArrayDeserializer),
     )
@@ -1050,9 +1052,8 @@ async fn test_async_consumer_null_group_id_not_supported_if_committing() {
     let topic = ctx.topic("topic");
     let tp = TopicPartition::new(topic.clone(), 0);
 
-    let bootstrap = ctx.bootstrap_servers().to_string();
     let mut consumer = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
-        make_groupless_consumer_config(&bootstrap, &[("auto.offset.reset", "earliest"), ("client.id", "consumer1")]),
+        make_groupless_consumer_config(&ctx, &[("auto.offset.reset", "earliest"), ("client.id", "consumer1")]),
         Box::new(ByteArrayDeserializer),
         Box::new(ByteArrayDeserializer),
     )
@@ -1083,7 +1084,7 @@ async fn test_async_consumer_position_respects_timeout() {
     let tp = TopicPartition::new(topic.clone(), 15);
     let group_id = ctx.group_id("g_position_timeout");
 
-    let mut consumer = make_consumer(ctx.bootstrap_servers(), &group_id, &[]);
+    let mut consumer = make_consumer(&ctx, &group_id, &[]);
     create_topic(consumer.as_mut(), &topic, 2).await;
     consumer.assign(vec![tp.clone()]).await.expect("assign");
 
@@ -1105,7 +1106,7 @@ async fn test_async_consumer_position_respects_wakeup() {
     let tp = TopicPartition::new(topic.clone(), 15);
     let group_id = ctx.group_id("g_position_wakeup");
 
-    let mut consumer = make_consumer(ctx.bootstrap_servers(), &group_id, &[]);
+    let mut consumer = make_consumer(&ctx, &group_id, &[]);
     create_topic(consumer.as_mut(), &topic, 2).await;
     consumer.assign(vec![tp.clone()]).await.expect("assign");
 
@@ -1136,8 +1137,20 @@ async fn test_async_consumer_position_respects_wakeup() {
 #[tokio::test(flavor = "multi_thread")]
 async fn test_async_consumer_position_with_error_connection_respects_wakeup() {
     // bootstrap points at an unreachable address (Java: "localhost:12345").
+    // This is a dead-broker negative test: the address never accepts a
+    // connection, so the security protocol is irrelevant (no handshake ever
+    // starts) — keep the explicit dead address rather than the protocol
+    // bootstrap, and build the config inline since there is no `TestContext`.
+    let props = HashMap::from([
+        ("bootstrap.servers".to_string(), "localhost:12345".to_string()),
+        ("group.protocol".to_string(), "consumer".to_string()),
+        ("auto.offset.reset".to_string(), "earliest".to_string()),
+        ("client.id".to_string(), "integration-test-consumer".to_string()),
+        ("enable.auto.commit".to_string(), "false".to_string()),
+        ("group.id".to_string(), "g_position_err_wakeup".to_string()),
+    ]);
     let mut consumer = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
-        make_consumer_config("localhost:12345", "g_position_err_wakeup", &[]),
+        ConsumerConfig::new(&props).expect("invalid test config"),
         Box::new(ByteArrayDeserializer),
         Box::new(ByteArrayDeserializer),
     )
@@ -1174,7 +1187,7 @@ async fn test_async_consumer_offset_related_when_timeout_zero() {
     let tp = TopicPartition::new(topic.clone(), 0);
     let group_id = ctx.group_id("g_timeout_zero");
 
-    let mut consumer = make_consumer(ctx.bootstrap_servers(), &group_id, &[]);
+    let mut consumer = make_consumer(&ctx, &group_id, &[]);
     create_topic(consumer.as_mut(), &topic, 2).await;
 
     let result1 = consumer

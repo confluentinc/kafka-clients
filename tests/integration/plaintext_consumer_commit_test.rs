@@ -161,13 +161,13 @@ impl Deserializer<Vec<u8>> for ByteArrayDeserializer {
 /// `group.protocol=consumer`, and `enable.auto.commit`. Default
 /// `auto.offset.reset=earliest`. Caller overrides win.
 fn make_consumer_config_bytes(
-    bootstrap: &str,
+    ctx: &TestContext,
     group_id: &str,
     enable_auto_commit: bool,
     overrides: &[(&str, &str)],
 ) -> ConsumerConfig {
     let mut props = HashMap::from([
-        ("bootstrap.servers".to_string(), bootstrap.to_string()),
+        ("bootstrap.servers".to_string(), ctx.protocol_bootstrap_servers().to_string()),
         ("group.protocol".to_string(), "consumer".to_string()),
         ("auto.offset.reset".to_string(), "earliest".to_string()),
         ("client.id".to_string(), "integration-test-consumer".to_string()),
@@ -177,6 +177,7 @@ fn make_consumer_config_bytes(
     for (k, v) in overrides {
         props.insert((*k).to_string(), (*v).to_string());
     }
+    ctx.apply_security(&mut props);
     ConsumerConfig::new(&props).expect("invalid test config")
 }
 
@@ -187,20 +188,21 @@ fn new_bytes_consumer(config: ConsumerConfig) -> Box<dyn Consumer<Vec<u8>, Vec<u
 
 // ── Producer helpers (mirror Java's ClientsTestUtils.sendRecords) ─────
 
-fn make_producer_config(bootstrap: &str) -> ProducerConfig {
-    let props = HashMap::from([
-        ("bootstrap.servers".to_string(), bootstrap.to_string()),
+fn make_producer_config(ctx: &TestContext) -> ProducerConfig {
+    let mut props = HashMap::from([
+        ("bootstrap.servers".to_string(), ctx.protocol_bootstrap_servers().to_string()),
         ("client.id".to_string(), "integration-test-producer".to_string()),
         ("acks".to_string(), "all".to_string()),
         ("max.block.ms".to_string(), "30000".to_string()),
         ("linger.ms".to_string(), "5".to_string()),
     ]);
+    ctx.apply_security(&mut props);
     ProducerConfig::new(&props).expect("invalid producer test config")
 }
 
-fn build_producer_bytes(bootstrap: &str) -> KafkaProducer<Vec<u8>, Vec<u8>> {
+fn build_producer_bytes(ctx: &TestContext) -> KafkaProducer<Vec<u8>, Vec<u8>> {
     KafkaProducer::new(
-        make_producer_config(bootstrap),
+        make_producer_config(ctx),
         Box::new(ByteArraySerializer),
         Box::new(ByteArraySerializer),
     )
@@ -244,8 +246,8 @@ async fn send_records_with_producer(
 
 /// Translates `ClientsTestUtils.sendRecords(cluster, tp, num,
 /// startingTimestamp)` — fresh producer, send, close.
-async fn send_records_bytes(bootstrap: &str, tp: &TopicPartition, num_records: usize, starting_timestamp: i64) {
-    let producer = build_producer_bytes(bootstrap);
+async fn send_records_bytes(ctx: &TestContext, tp: &TopicPartition, num_records: usize, starting_timestamp: i64) {
+    let producer = build_producer_bytes(ctx);
     send_records_with_producer(&producer, tp, num_records, starting_timestamp).await;
     producer.close().await.expect("producer close should succeed");
 }
@@ -489,12 +491,11 @@ async fn test_async_consumer_auto_commit_on_close() {
     let tp1 = TopicPartition::new(topic.clone(), 1);
 
     {
-        let mut consumer =
-            new_bytes_consumer(make_consumer_config_bytes(ctx.bootstrap_servers(), &group_id, true, &[]));
+        let mut consumer = new_bytes_consumer(make_consumer_config_bytes(&ctx, &group_id, true, &[]));
         // Empty topic (both partitions), so seeks define the committed
         // positions deterministically; producing to tp also auto-creates it.
         create_topic(consumer.as_mut(), &topic, 2).await;
-        send_records_bytes(ctx.bootstrap_servers(), &tp, 1000, current_time_ms()).await;
+        send_records_bytes(&ctx, &tp, 1000, current_time_ms()).await;
 
         consumer
             .subscribe_with_topics(vec![topic.clone()])
@@ -515,7 +516,7 @@ async fn test_async_consumer_auto_commit_on_close() {
     }
 
     // Now we should see the committed positions from another consumer.
-    let mut another = new_bytes_consumer(make_consumer_config_bytes(ctx.bootstrap_servers(), &group_id, true, &[]));
+    let mut another = new_bytes_consumer(make_consumer_config_bytes(&ctx, &group_id, true, &[]));
     let committed = another
         .committed(&[tp.clone(), tp1.clone()])
         .await
@@ -538,11 +539,10 @@ async fn test_async_consumer_auto_commit_on_close_after_wakeup() {
     let tp1 = TopicPartition::new(topic.clone(), 1);
 
     {
-        let mut consumer =
-            new_bytes_consumer(make_consumer_config_bytes(ctx.bootstrap_servers(), &group_id, true, &[]));
+        let mut consumer = new_bytes_consumer(make_consumer_config_bytes(&ctx, &group_id, true, &[]));
         // Empty topic (both partitions); producing to tp also auto-creates it.
         create_topic(consumer.as_mut(), &topic, 2).await;
-        send_records_bytes(ctx.bootstrap_servers(), &tp, 1000, current_time_ms()).await;
+        send_records_bytes(&ctx, &tp, 1000, current_time_ms()).await;
 
         consumer
             .subscribe_with_topics(vec![topic.clone()])
@@ -565,7 +565,7 @@ async fn test_async_consumer_auto_commit_on_close_after_wakeup() {
         consumer.close().await.expect("consumer close should succeed after wakeup");
     }
 
-    let mut another = new_bytes_consumer(make_consumer_config_bytes(ctx.bootstrap_servers(), &group_id, true, &[]));
+    let mut another = new_bytes_consumer(make_consumer_config_bytes(&ctx, &group_id, true, &[]));
     let committed = another
         .committed(&[tp.clone(), tp1.clone()])
         .await
@@ -586,7 +586,7 @@ async fn test_async_consumer_commit_metadata() {
     let group_id = ctx.group_id("g_commit_metadata");
     let tp = TopicPartition::new(topic.clone(), 0);
 
-    let mut consumer = new_bytes_consumer(make_consumer_config_bytes(ctx.bootstrap_servers(), &group_id, true, &[]));
+    let mut consumer = new_bytes_consumer(make_consumer_config_bytes(&ctx, &group_id, true, &[]));
     // Ensure the topic exists so assign() resolves a real partition.
     ensure_topic_with_2_partitions(consumer.as_mut(), &topic).await;
     consumer.assign(vec![tp.clone()]).await.expect("assign should succeed");
@@ -647,9 +647,20 @@ async fn test_async_consumer_async_commit() {
     let group_id = ctx.group_id("g_async_commit");
     let tp = TopicPartition::new(topic.clone(), 0);
 
-    let mut consumer = new_bytes_consumer(make_consumer_config_bytes(ctx.bootstrap_servers(), &group_id, false, &[]));
+    let mut consumer = new_bytes_consumer(make_consumer_config_bytes(&ctx, &group_id, false, &[]));
     ensure_topic_with_2_partitions(consumer.as_mut(), &topic).await;
     consumer.assign(vec![tp.clone()]).await.expect("assign should succeed");
+
+    // Java pre-creates the GROUP_METADATA_TOPIC_NAME (offsets) topic up front to
+    // prevent transient RetriableCommitFailed errors during the async commits
+    // below (`PlaintextConsumerCommitTest.java:192-198`). The Rust harness has no
+    // admin client; the equivalent is to discover the coordinator and materialize
+    // the offsets topic via a `committed()` query before committing, so the five
+    // async commits all succeed rather than racing coordinator load.
+    let _ = consumer
+        .committed(std::slice::from_ref(&tp))
+        .await
+        .expect("committed (coordinator readiness) should succeed");
 
     let cb = CountConsumerCommitCallback::new();
     let cb_arc: Arc<dyn OffsetCommitCallback> = Arc::new(cb.clone());
@@ -694,9 +705,9 @@ async fn test_async_consumer_commit_specified_offsets() {
     let tp = TopicPartition::new(topic.clone(), 0);
     let tp1 = TopicPartition::new(topic.clone(), 1);
 
-    let mut consumer = new_bytes_consumer(make_consumer_config_bytes(ctx.bootstrap_servers(), &group_id, false, &[]));
+    let mut consumer = new_bytes_consumer(make_consumer_config_bytes(&ctx, &group_id, false, &[]));
     ensure_topic_with_2_partitions(consumer.as_mut(), &topic).await;
-    let producer = build_producer_bytes(ctx.bootstrap_servers());
+    let producer = build_producer_bytes(&ctx);
     let now = current_time_ms();
     send_records_with_producer(&producer, &tp, 5, now).await;
     send_records_with_producer(&producer, &tp1, 7, now).await;
@@ -779,7 +790,7 @@ async fn test_async_consumer_auto_commit_on_rebalance() {
     let tp = TopicPartition::new(topic.clone(), 0);
     let tp1 = TopicPartition::new(topic.clone(), 1);
 
-    let mut consumer = new_bytes_consumer(make_consumer_config_bytes(ctx.bootstrap_servers(), &group_id, true, &[]));
+    let mut consumer = new_bytes_consumer(make_consumer_config_bytes(&ctx, &group_id, true, &[]));
     // Empty topics so produced records start at offset 0 (Java parity).
     ensure_topic_with_2_partitions(consumer.as_mut(), &topic).await;
     ensure_topic_with_2_partitions(consumer.as_mut(), &topic2).await;
@@ -787,7 +798,7 @@ async fn test_async_consumer_auto_commit_on_rebalance() {
     // Produce up to each seek target so the seeks below are in-range (log
     // end), so no fetch advances or resets the position — see the
     // pause-free deviation note above.
-    let producer = build_producer_bytes(ctx.bootstrap_servers());
+    let producer = build_producer_bytes(&ctx);
     let now = current_time_ms();
     send_records_with_producer(&producer, &tp, 300, now).await;
     send_records_with_producer(&producer, &tp1, 500, now).await;
@@ -844,7 +855,7 @@ async fn test_async_consumer_subscribe_and_commit_sync() {
     let tp = TopicPartition::new(topic.clone(), 0);
     let tp1 = TopicPartition::new(topic.clone(), 1);
 
-    let mut consumer = new_bytes_consumer(make_consumer_config_bytes(ctx.bootstrap_servers(), &group_id, false, &[]));
+    let mut consumer = new_bytes_consumer(make_consumer_config_bytes(&ctx, &group_id, false, &[]));
     ensure_topic_with_2_partitions(consumer.as_mut(), &topic).await;
     assert_eq!(consumer.assignment().len(), 0);
     consumer
@@ -872,12 +883,12 @@ async fn test_async_consumer_position_and_commit() {
     let group_id = ctx.group_id("g_position_and_commit");
     let tp = TopicPartition::new(topic.clone(), 0);
 
-    let mut consumer = new_bytes_consumer(make_consumer_config_bytes(ctx.bootstrap_servers(), &group_id, false, &[]));
-    let mut other = new_bytes_consumer(make_consumer_config_bytes(ctx.bootstrap_servers(), &group_id, false, &[]));
+    let mut consumer = new_bytes_consumer(make_consumer_config_bytes(&ctx, &group_id, false, &[]));
+    let mut other = new_bytes_consumer(make_consumer_config_bytes(&ctx, &group_id, false, &[]));
 
     // Empty topic so produced records start at offset 0 (Java parity).
     ensure_topic_with_2_partitions(consumer.as_mut(), &topic).await;
-    let producer = build_producer_bytes(ctx.bootstrap_servers());
+    let producer = build_producer_bytes(&ctx);
     let starting_timestamp = current_time_ms();
     send_records_with_producer(&producer, &tp, 5, starting_timestamp).await;
 
@@ -961,11 +972,10 @@ async fn test_commit_async_completed_before_consumer_closes() {
 
     let cb = CountConsumerCommitCallback::new();
     {
-        let mut consumer =
-            new_bytes_consumer(make_consumer_config_bytes(ctx.bootstrap_servers(), &group_id, false, &[]));
+        let mut consumer = new_bytes_consumer(make_consumer_config_bytes(&ctx, &group_id, false, &[]));
         ensure_topic_with_2_partitions(consumer.as_mut(), &topic).await;
 
-        let producer = build_producer_bytes(ctx.bootstrap_servers());
+        let producer = build_producer_bytes(&ctx);
         let now = current_time_ms();
         send_records_with_producer(&producer, &tp, 3, now).await;
         send_records_with_producer(&producer, &tp1, 3, now).await;
@@ -1021,9 +1031,9 @@ async fn test_commit_async_completed_before_commit_sync_returns() {
     let tp = TopicPartition::new(topic.clone(), 0);
     let tp1 = TopicPartition::new(topic.clone(), 1);
 
-    let mut consumer = new_bytes_consumer(make_consumer_config_bytes(ctx.bootstrap_servers(), &group_id, false, &[]));
+    let mut consumer = new_bytes_consumer(make_consumer_config_bytes(&ctx, &group_id, false, &[]));
     ensure_topic_with_2_partitions(consumer.as_mut(), &topic).await;
-    let producer = build_producer_bytes(ctx.bootstrap_servers());
+    let producer = build_producer_bytes(&ctx);
     let now = current_time_ms();
     send_records_with_producer(&producer, &tp, 3, now).await;
     send_records_with_producer(&producer, &tp1, 3, now).await;
@@ -1123,9 +1133,9 @@ async fn test_commit_async_fails_when_coordinator_unavailable_during_close() {
     let group_id = ctx.group_id("g_coordinator_unavailable_during_close");
     let tp = TopicPartition::new(topic.clone(), 0);
 
-    let mut consumer = new_bytes_consumer(make_consumer_config_bytes(ctx.bootstrap_servers(), &group_id, false, &[]));
+    let mut consumer = new_bytes_consumer(make_consumer_config_bytes(&ctx, &group_id, false, &[]));
     ensure_topic_with_2_partitions(consumer.as_mut(), &topic).await;
-    let producer = build_producer_bytes(ctx.bootstrap_servers());
+    let producer = build_producer_bytes(&ctx);
     send_records_with_producer(&producer, &tp, 3, current_time_ms()).await;
     producer.close().await.expect("producer close should succeed");
 
