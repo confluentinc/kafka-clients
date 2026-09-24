@@ -901,15 +901,26 @@ impl Drop for MemoryRecordsBuilder {
 #[derive(Clone, Debug)]
 pub struct RecordsInfo {
     /// The maximum timestamp in the batch.
-    pub max_timestamp: i64,
+    pub(crate) max_timestamp: i64,
     /// The shallow offset of the record with the maximum timestamp.
-    pub shallow_offset_of_max_timestamp: i64,
+    pub(crate) shallow_offset_of_max_timestamp: i64,
 }
 
 impl RecordsInfo {
     /// Create a new `RecordsInfo`.
     pub fn new(max_timestamp: i64, shallow_offset_of_max_timestamp: i64) -> Self {
         Self { max_timestamp, shallow_offset_of_max_timestamp }
+    }
+
+    /// The maximum timestamp in the batch. Java's public `RecordsInfo.maxTimestamp`.
+    pub fn max_timestamp(&self) -> i64 {
+        self.max_timestamp
+    }
+
+    /// The shallow offset of the record with the maximum timestamp. Java's public
+    /// `RecordsInfo.shallowOffsetOfMaxTimestamp`.
+    pub fn shallow_offset_of_max_timestamp(&self) -> i64 {
+        self.shallow_offset_of_max_timestamp
     }
 }
 

@@ -228,23 +228,24 @@ impl Measurable for SampledStat {
 
 /// A single sample within a [`SampledStat`].
 ///
-/// Mirrors `SampledStat.Sample`. Fields are public to the crate so subclass
-/// `update`/`combine` implementations can read/write them exactly as Java does.
+/// Mirrors `SampledStat.Sample`. Java exposes the fields publicly to
+/// `SampledStat` subclasses; here a [`SampledStatKind`] implementation reads
+/// them through getters and writes the ones Java's stats write through setters.
 #[derive(Clone, Debug)]
 #[non_exhaustive]
 pub struct Sample {
     /// The initial (reset) value of this sample.
-    pub initial_value: f64,
+    pub(crate) initial_value: f64,
     /// The number of events recorded into this sample.
-    pub event_count: i64,
+    pub(crate) event_count: i64,
     /// The time the sample started.
-    pub start_time_ms: i64,
+    pub(crate) start_time_ms: i64,
     /// The time of the last event recorded into the sample.
-    pub last_event_ms: i64,
+    pub(crate) last_event_ms: i64,
     /// The accumulated value of the sample.
-    pub value: f64,
+    pub(crate) value: f64,
     /// The per-sample time window (or `-1` to use the config's window).
-    pub time_window_ms: i64,
+    pub(crate) time_window_ms: i64,
 }
 
 impl Sample {
@@ -298,6 +299,66 @@ impl Sample {
             config.time_window_ms()
         };
         time_ms - self.start_time_ms >= window_ms || self.event_count >= config.event_window()
+    }
+
+    /// The initial (reset) value of this sample.
+    ///
+    /// Java's public `Sample.initialValue`.
+    pub fn initial_value(&self) -> f64 {
+        self.initial_value
+    }
+
+    /// The number of events recorded into this sample.
+    ///
+    /// Java's public `Sample.eventCount`.
+    pub fn event_count(&self) -> i64 {
+        self.event_count
+    }
+
+    /// The time the sample started.
+    ///
+    /// Java's public `Sample.startTimeMs`.
+    pub fn start_time_ms(&self) -> i64 {
+        self.start_time_ms
+    }
+
+    /// The time of the last event recorded into the sample.
+    ///
+    /// Java's public `Sample.lastEventMs`.
+    pub fn last_event_ms(&self) -> i64 {
+        self.last_event_ms
+    }
+
+    /// The accumulated value of the sample.
+    ///
+    /// Java's public `Sample.value`.
+    pub fn value(&self) -> f64 {
+        self.value
+    }
+
+    /// The per-sample time window (or `-1` to use the config's window).
+    ///
+    /// Java's public `Sample.timeWindowMs`.
+    pub fn time_window_ms(&self) -> i64 {
+        self.time_window_ms
+    }
+
+    /// Sets the number of events recorded into this sample, as Java's
+    /// `SampledStat.record` does through the public `Sample.eventCount`.
+    pub fn set_event_count(&mut self, event_count: i64) {
+        self.event_count = event_count;
+    }
+
+    /// Sets the time of the last event recorded into the sample, as Java's
+    /// `SampledStat.record` does through the public `Sample.lastEventMs`.
+    pub fn set_last_event_ms(&mut self, last_event_ms: i64) {
+        self.last_event_ms = last_event_ms;
+    }
+
+    /// Sets the accumulated value of the sample, as Java's `Avg`, `Max`, `Min`
+    /// and `WindowedSum` do through the public `Sample.value`.
+    pub fn set_value(&mut self, value: f64) {
+        self.value = value;
     }
 }
 

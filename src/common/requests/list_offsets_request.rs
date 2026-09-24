@@ -234,18 +234,18 @@ pub struct ListOffsetsRequestBuilder {
 #[non_exhaustive]
 pub struct ListOffsetsRequestBuilderOptions {
     /// Java's `requireTimestamp`.
-    pub require_timestamp: bool,
+    pub(crate) require_timestamp: bool,
     /// Java's `isolationLevel`.
-    pub isolation_level: IsolationLevel,
+    pub(crate) isolation_level: IsolationLevel,
     /// Java's `requireMaxTimestamp`. Starts as `false`, as in `:61`.
-    pub require_max_timestamp: bool,
+    pub(crate) require_max_timestamp: bool,
     /// Java's `requireEarliestLocalTimestamp`. Starts as `false`, as in `:61`.
-    pub require_earliest_local_timestamp: bool,
+    pub(crate) require_earliest_local_timestamp: bool,
     /// Java's `requireTieredStorageTimestamp`. Starts as `false`, as in `:61`.
-    pub require_tiered_storage_timestamp: bool,
+    pub(crate) require_tiered_storage_timestamp: bool,
     /// Java's `requireEarliestPendingUploadTimestamp`. Starts as `false`, as in
     /// `:61`.
-    pub require_earliest_pending_upload_timestamp: bool,
+    pub(crate) require_earliest_pending_upload_timestamp: bool,
 }
 
 /// Fluent builder for [`ListOffsetsRequestBuilderOptions`].

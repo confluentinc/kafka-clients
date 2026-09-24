@@ -98,7 +98,7 @@ type PostUpdateFn = dyn Fn(&MetadataResponse, bool, i64) + Send + Sync;
 pub struct MetadataOverrides {
     /// Optional function to override topic retention behavior.
     /// When `None`, the default (retain all topics) is used.
-    pub retain_topic_fn: Option<Box<RetainTopicFn>>,
+    pub(crate) retain_topic_fn: Option<Box<RetainTopicFn>>,
     /// Optional topic-id-aware retain function. Corresponds to Java's
     /// `retainTopic(topicName, topicId, isInternal, nowMs)`.
     ///
@@ -106,16 +106,16 @@ pub struct MetadataOverrides {
     /// topic id (if any) carried by the response — used by `ConsumerMetadata`
     /// to retain topics received as topic ids in a broker-side regex
     /// assignment. When `None`, `retain_topic_fn` is used.
-    pub retain_topic_with_id_fn: Option<Box<RetainTopicWithIdFn>>,
+    pub(crate) retain_topic_with_id_fn: Option<Box<RetainTopicWithIdFn>>,
     /// When `true`, `new_metadata_request_builder_for_new_topics()` returns a
     /// builder, enabling partial metadata requests.
-    pub enable_partial_updates: bool,
+    pub(crate) enable_partial_updates: bool,
     /// Optional function to override metadata request construction.
-    pub request_builder_fn: Option<Box<MetadataRequestBuilderFn>>,
+    pub(crate) request_builder_fn: Option<Box<MetadataRequestBuilderFn>>,
     /// Optional function to override metadata request construction for new topics.
-    pub new_topics_request_builder_fn: Option<Box<MetadataRequestBuilderFn>>,
+    pub(crate) new_topics_request_builder_fn: Option<Box<MetadataRequestBuilderFn>>,
     /// Optional post-update callback invoked at the end of `update()`.
-    pub post_update_fn: Option<Box<PostUpdateFn>>,
+    pub(crate) post_update_fn: Option<Box<PostUpdateFn>>,
 }
 
 /// A class encapsulating some of the logic around metadata.
@@ -212,11 +212,34 @@ struct MetadataInner {
 #[non_exhaustive]
 pub struct MetadataRequestAndVersion {
     /// The request builder.
-    pub request_builder: MetadataRequestBuilder,
+    pub(crate) request_builder: MetadataRequestBuilder,
     /// The request version at the time of creation.
-    pub request_version: i32,
+    pub(crate) request_version: i32,
     /// Whether this is a partial update.
-    pub is_partial_update: bool,
+    pub(crate) is_partial_update: bool,
+}
+
+impl MetadataRequestAndVersion {
+    /// The request builder.
+    ///
+    /// Java's public `MetadataRequestAndVersion.requestBuilder`.
+    pub fn request_builder(&self) -> &MetadataRequestBuilder {
+        &self.request_builder
+    }
+
+    /// The request version at the time of creation.
+    ///
+    /// Java's public `MetadataRequestAndVersion.requestVersion`.
+    pub fn request_version(&self) -> i32 {
+        self.request_version
+    }
+
+    /// Whether this is a partial update.
+    ///
+    /// Java's public `MetadataRequestAndVersion.isPartialUpdate`.
+    pub fn is_partial_update(&self) -> bool {
+        self.is_partial_update
+    }
 }
 
 /// Represents current leader state known in metadata.
@@ -229,9 +252,9 @@ pub struct MetadataRequestAndVersion {
 #[non_exhaustive]
 pub struct LeaderAndEpoch {
     /// The leader node, if known.
-    pub leader: Option<Node>,
+    pub(crate) leader: Option<Node>,
     /// The leader epoch, if known.
-    pub epoch: Option<i32>,
+    pub(crate) epoch: Option<i32>,
 }
 
 impl LeaderAndEpoch {
@@ -243,6 +266,20 @@ impl LeaderAndEpoch {
     /// Returns a `LeaderAndEpoch` with no leader and no epoch.
     pub fn no_leader_or_epoch() -> Self {
         Self { leader: None, epoch: None }
+    }
+
+    /// The leader node, if known.
+    ///
+    /// Java's public `LeaderAndEpoch.leader`.
+    pub fn leader(&self) -> Option<&Node> {
+        self.leader.as_ref()
+    }
+
+    /// The leader epoch, if known.
+    ///
+    /// Java's public `LeaderAndEpoch.epoch`.
+    pub fn epoch(&self) -> Option<i32> {
+        self.epoch
     }
 }
 
@@ -264,15 +301,29 @@ impl fmt::Display for LeaderAndEpoch {
 #[non_exhaustive]
 pub struct LeaderIdAndEpoch {
     /// The leader node ID, if known.
-    pub leader_id: Option<i32>,
+    pub(crate) leader_id: Option<i32>,
     /// The leader epoch, if known.
-    pub epoch: Option<i32>,
+    pub(crate) epoch: Option<i32>,
 }
 
 impl LeaderIdAndEpoch {
     /// Creates a new `LeaderIdAndEpoch`.
     pub fn new(leader_id: Option<i32>, epoch: Option<i32>) -> Self {
         Self { leader_id, epoch }
+    }
+
+    /// The leader node ID, if known.
+    ///
+    /// Java's public `LeaderIdAndEpoch.leaderId`.
+    pub fn leader_id(&self) -> Option<i32> {
+        self.leader_id
+    }
+
+    /// The leader epoch, if known.
+    ///
+    /// Java's public `LeaderIdAndEpoch.epoch`.
+    pub fn epoch(&self) -> Option<i32> {
+        self.epoch
     }
 }
 

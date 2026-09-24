@@ -36,23 +36,25 @@ use super::RequestCompletionHandler;
 /// Translated from `NetworkClient.InFlightRequest` inner class in Java.
 pub struct InFlightRequest {
     /// The request header.
-    pub header: RequestHeader,
+    pub(crate) header: RequestHeader,
     /// The request timeout in milliseconds.
-    pub request_timeout_ms: i64,
+    pub(crate) request_timeout_ms: i64,
     /// The unix timestamp when the request was created.
-    pub created_time_ms: i64,
+    pub(crate) created_time_ms: i64,
     /// The destination node id.
-    pub destination: String,
+    pub(crate) destination: String,
     /// The completion callback, if any.
     callback: Option<RequestCompletionHandler>,
     /// Whether we expect a response message or this request is complete once sent.
-    pub expect_response: bool,
+    pub(crate) expect_response: bool,
     /// Whether this request is initiated internally by the `NetworkClient`.
-    pub is_internal_request: bool,
+    pub(crate) is_internal_request: bool,
     /// The built request.
-    pub request: Option<ConcreteRequest>,
+    pub(crate) request: Option<ConcreteRequest>,
     /// The network send associated with this request.
-    pub send: NetworkSend,
+    // Java only ever assigns `InFlightRequest.send` (`NetworkClient.java:1557`).
+    #[allow(dead_code)]
+    pub(crate) send: NetworkSend,
     /// Whether the network send has been completed (confirmed by the selector).
     ///
     /// In Java, the same `Send` object is shared between `InFlightRequest` and
@@ -61,7 +63,7 @@ pub struct InFlightRequest {
     /// the selector reports a completed send for this destination.
     send_completed: bool,
     /// The unix timestamp when this request was sent.
-    pub send_time_ms: i64,
+    pub(crate) send_time_ms: i64,
     /// Accumulated throttle time in milliseconds.
     throttle_time_ms: i64,
 }

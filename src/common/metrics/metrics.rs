@@ -119,18 +119,18 @@ pub struct Metrics {
 #[non_exhaustive]
 pub struct SensorOptions<'a> {
     /// Java's `name`, the sensor's unique registry key.
-    pub name: &'a str,
+    pub(crate) name: &'a str,
     /// Java's `config`. Starts as `None`, meaning the registry's own config,
     /// as in `Metrics.java:325,336,348,360`.
-    pub config: Option<Arc<MetricConfig>>,
+    pub(crate) config: Option<Arc<MetricConfig>>,
     /// Java's `inactiveSensorExpirationTimeSeconds`. Starts as `i64::MAX`, as
     /// in `Metrics.java:325,336,348,360,372,386`.
-    pub inactive_sensor_expiration_time_seconds: i64,
+    pub(crate) inactive_sensor_expiration_time_seconds: i64,
     /// Java's `recordingLevel`. Starts as `INFO`, as in
     /// `Metrics.java:325,348,372,427`.
-    pub recording_level: RecordingLevel,
+    pub(crate) recording_level: RecordingLevel,
     /// Java's `parents` varargs. Starts empty, as in `Metrics.java:325,336`.
-    pub parents: &'a [Arc<Sensor>],
+    pub(crate) parents: &'a [Arc<Sensor>],
 }
 
 /// Fluent builder for [`SensorOptions`].

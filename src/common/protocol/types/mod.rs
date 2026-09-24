@@ -55,11 +55,11 @@ pub enum SchemaType {
 #[non_exhaustive]
 pub struct Field {
     /// The name of the field (snake_case).
-    pub name: &'static str,
+    pub(crate) name: &'static str,
     /// The type of the field.
-    pub field_type: SchemaType,
+    pub(crate) field_type: SchemaType,
     /// Documentation string for the field.
-    pub about: &'static str,
+    pub(crate) about: &'static str,
 }
 
 impl Field {
@@ -71,20 +71,21 @@ impl Field {
     pub const fn new(name: &'static str, field_type: SchemaType, about: &'static str) -> Self {
         Field { name, field_type, about }
     }
-}
 
-/// A tagged field definition in a schema.
-#[derive(Debug, Clone)]
-#[non_exhaustive]
-pub struct TaggedField {
-    /// The tag number.
-    pub tag: i32,
-    /// The name of the field (snake_case).
-    pub name: &'static str,
-    /// The type of the field.
-    pub field_type: SchemaType,
-    /// Documentation string for the field.
-    pub about: &'static str,
+    /// The name of the field (snake_case). Java's public `Field.name`.
+    pub fn name(&self) -> &'static str {
+        self.name
+    }
+
+    /// The type of the field. Java's public `Field.type`.
+    pub fn field_type(&self) -> SchemaType {
+        self.field_type
+    }
+
+    /// Documentation string for the field. Java's public `Field.docString`.
+    pub fn about(&self) -> &'static str {
+        self.about
+    }
 }
 
 /// A field definition bound to a particular schema.
@@ -92,9 +93,19 @@ pub struct TaggedField {
 #[non_exhaustive]
 pub struct BoundField {
     /// The field definition.
-    pub def: Field,
+    pub(crate) def: Field,
     /// The index of this field in the schema.
-    pub index: usize,
+    // Package-private in Java, where only `Struct` reads it; `Struct` is not
+    // translated, so nothing reads it here yet.
+    #[allow(dead_code)]
+    pub(crate) index: usize,
+}
+
+impl BoundField {
+    /// The field definition. Java's public `BoundField.def`.
+    pub fn def(&self) -> &Field {
+        &self.def
+    }
 }
 
 /// A schema describing the fields in a Kafka protocol message at a particular version.

@@ -44,17 +44,17 @@ use crate::fetch_request_data::{FetchPartition, FetchTopic, ForgottenTopic};
 #[non_exhaustive]
 pub struct PartitionData {
     /// Topic ID (may be the zero UUID for versions that don't support it).
-    pub topic_id: Uuid,
+    pub(crate) topic_id: Uuid,
     /// Offset at which to start fetching.
-    pub fetch_offset: i64,
+    pub(crate) fetch_offset: i64,
     /// Earliest offset the broker should keep. -1 disables.
-    pub log_start_offset: i64,
+    pub(crate) log_start_offset: i64,
     /// Maximum bytes to return for this partition.
-    pub max_bytes: i32,
+    pub(crate) max_bytes: i32,
     /// Current leader epoch known to the client, or `None` if unknown.
-    pub current_leader_epoch: Option<i32>,
+    pub(crate) current_leader_epoch: Option<i32>,
     /// Last leader epoch the client read from, or `None` if unknown.
-    pub last_fetched_epoch: Option<i32>,
+    pub(crate) last_fetched_epoch: Option<i32>,
 }
 
 impl PartitionData {
@@ -97,6 +97,48 @@ impl PartitionData {
             current_leader_epoch,
             last_fetched_epoch,
         }
+    }
+
+    /// Topic ID (may be the zero UUID for versions that don't support it).
+    ///
+    /// Java's public `PartitionData.topicId`.
+    pub fn topic_id(&self) -> Uuid {
+        self.topic_id
+    }
+
+    /// Offset at which to start fetching.
+    ///
+    /// Java's public `PartitionData.fetchOffset`.
+    pub fn fetch_offset(&self) -> i64 {
+        self.fetch_offset
+    }
+
+    /// Earliest offset the broker should keep.
+    ///
+    /// Java's public `PartitionData.logStartOffset`.
+    pub fn log_start_offset(&self) -> i64 {
+        self.log_start_offset
+    }
+
+    /// Maximum bytes to fetch for this partition.
+    ///
+    /// Java's public `PartitionData.maxBytes`.
+    pub fn max_bytes(&self) -> i32 {
+        self.max_bytes
+    }
+
+    /// Current leader epoch known to the client, or `None` if unknown.
+    ///
+    /// Java's public `PartitionData.currentLeaderEpoch`.
+    pub fn current_leader_epoch(&self) -> Option<i32> {
+        self.current_leader_epoch
+    }
+
+    /// Last leader epoch the client read from, or `None` if unknown.
+    ///
+    /// Java's public `PartitionData.lastFetchedEpoch`.
+    pub fn last_fetched_epoch(&self) -> Option<i32> {
+        self.last_fetched_epoch
     }
 }
 

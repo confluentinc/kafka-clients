@@ -59,16 +59,16 @@ pub const DEFAULT_GENERATION: i32 = -1;
 #[non_exhaustive]
 pub struct SubscriptionOptions {
     /// Java's `topics`.
-    pub topics: Vec<String>,
+    pub(crate) topics: Vec<String>,
     /// Java's `userData`. Starts as `None`, as in `:130`.
-    pub user_data: Option<Vec<u8>>,
+    pub(crate) user_data: Option<Vec<u8>>,
     /// Java's `ownedPartitions`. Starts empty, as in `:130`
     /// (`Collections.emptyList()`).
-    pub owned_partitions: Vec<TopicPartition>,
+    pub(crate) owned_partitions: Vec<TopicPartition>,
     /// Java's `generationId`. Starts as [`DEFAULT_GENERATION`], as in `:130`.
-    pub generation_id: i32,
+    pub(crate) generation_id: i32,
     /// Java's `rackId`. Starts as `None`, as in `:130`'s `Optional.empty()`.
-    pub rack_id: Option<String>,
+    pub(crate) rack_id: Option<String>,
 }
 
 /// Fluent builder for [`SubscriptionOptions`].

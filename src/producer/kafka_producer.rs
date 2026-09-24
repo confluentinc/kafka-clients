@@ -821,8 +821,8 @@ impl<K, V> KafkaProducer<K, V> {
     ///
     /// let producer = KafkaProducer::<String, String>::new(
     ///     config,
-    ///     Box::new(StringSerializer),
-    ///     Box::new(StringSerializer),
+    ///     Box::new(StringSerializer::default()),
+    ///     Box::new(StringSerializer::default()),
     /// ).expect("Failed to create producer");
     /// ```
     pub fn new(

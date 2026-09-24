@@ -25,14 +25,24 @@ use super::ConcreteRequest;
 #[non_exhaustive]
 pub struct RequestAndSize {
     /// The parsed request.
-    pub request: ConcreteRequest,
+    pub(crate) request: ConcreteRequest,
     /// The number of bytes consumed during parsing.
-    pub size: usize,
+    pub(crate) size: usize,
 }
 
 impl RequestAndSize {
     /// Creates a new `RequestAndSize`.
     pub fn new(request: ConcreteRequest, size: usize) -> Self {
         Self { request, size }
+    }
+
+    /// The parsed request. Java's public `RequestAndSize.request`.
+    pub fn request(&self) -> &ConcreteRequest {
+        &self.request
+    }
+
+    /// The number of bytes consumed during parsing. Java's public `RequestAndSize.size`.
+    pub fn size(&self) -> usize {
+        self.size
     }
 }

@@ -99,7 +99,7 @@ impl ChannelBuilder for SslChannelBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::config::SslConfig;
+    use crate::common::config::SslConfigs;
     use crate::common::network::DefaultChannelMetadataRegistry;
 
     /// Test that SslChannelBuilder creates a channel that is not immediately ready
@@ -111,7 +111,7 @@ mod tests {
 
         let stream = TcpStream::connect(addr).await.unwrap();
 
-        let ssl_factory = SslFactory::new(&SslConfig::default()).unwrap();
+        let ssl_factory = SslFactory::new(&SslConfigs::default()).unwrap();
         let builder = SslChannelBuilder::new(ssl_factory, None);
         let metadata_registry = Box::new(DefaultChannelMetadataRegistry::new());
 
@@ -132,7 +132,7 @@ mod tests {
 
         let stream = TcpStream::connect(addr).await.unwrap();
 
-        let ssl_factory = SslFactory::new(&SslConfig::default()).unwrap();
+        let ssl_factory = SslFactory::new(&SslConfigs::default()).unwrap();
         let builder = SslChannelBuilder::new(ssl_factory, None);
         let metadata_registry = Box::new(DefaultChannelMetadataRegistry::new());
 

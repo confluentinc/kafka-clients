@@ -19,7 +19,7 @@
 //!
 //! In Java, `SslFactory` delegates to `SslEngineFactory` which creates `SSLEngine`
 //! instances from a `SSLContext`. In Rust, this is simplified to build an
-//! `Arc<rustls::ClientConfig>` from [`SslConfig`], using `rustls` for TLS.
+//! `Arc<rustls::ClientConfig>` from [`SslConfigs`], using `rustls` for TLS.
 //!
 //! Key differences:
 //! - Only PEM format is supported. JKS and PKCS12 return an error.
@@ -28,7 +28,7 @@
 //!   when empty, a custom `ServerCertVerifier` validates the cert chain but skips
 //!   hostname matching.
 
-use crate::common::config::SslConfig;
+use crate::common::config::SslConfigs;
 
 use std::io;
 use std::sync::Arc;
@@ -38,7 +38,7 @@ use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName};
 use rustls::{ClientConfig, DigitallySignedStruct, RootCertStore, SignatureScheme};
 
-/// SSL/TLS factory that builds `Arc<rustls::ClientConfig>` from [`SslConfig`].
+/// SSL/TLS factory that builds `Arc<rustls::ClientConfig>` from [`SslConfigs`].
 ///
 /// Translated from `org.apache.kafka.common.security.ssl.SslFactory`.
 ///
@@ -61,7 +61,7 @@ impl std::fmt::Debug for SslFactory {
 }
 
 impl SslFactory {
-    /// Creates a new `SslFactory` from the given [`SslConfig`].
+    /// Creates a new `SslFactory` from the given [`SslConfigs`].
     ///
     /// Loads trust anchors (CA certificates), optionally loads client certificate
     /// and private key for mTLS, and configures TLS protocol versions.
@@ -74,7 +74,7 @@ impl SslFactory {
     /// - No valid certificates are found in the truststore
     /// - The private key cannot be loaded or is missing when a client cert is provided
     /// - TLS protocol configuration is invalid
-    pub fn new(ssl_config: &SslConfig) -> io::Result<Self> {
+    pub fn new(ssl_config: &SslConfigs) -> io::Result<Self> {
         // Install the aws-lc-rs crypto provider if not already installed.
         // This is idempotent — subsequent calls are no-ops.
         let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
@@ -182,7 +182,7 @@ fn validate_store_format(format: &str, store_name: &str) -> io::Result<()> {
 /// 1. `truststore_location` — PEM file path
 /// 2. `truststore_certificates` — inline PEM string
 /// 3. System roots via `webpki-roots` (fallback when neither 1 nor 2 is set)
-fn build_root_cert_store(ssl_config: &SslConfig) -> io::Result<RootCertStore> {
+fn build_root_cert_store(ssl_config: &SslConfigs) -> io::Result<RootCertStore> {
     let mut root_store = RootCertStore::empty();
 
     if let Some(ref path) = ssl_config.truststore_location {
@@ -245,7 +245,7 @@ fn build_root_cert_store(ssl_config: &SslConfig) -> io::Result<RootCertStore> {
 ///
 /// Returns `None` if no client identity is configured.
 fn load_client_identity(
-    ssl_config: &SslConfig,
+    ssl_config: &SslConfigs,
 ) -> io::Result<Option<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>)>> {
     // Check for inline PEM cert chain + key
     let certs = if let Some(ref chain_pem) = ssl_config.keystore_certificate_chain {
@@ -455,7 +455,7 @@ impl ServerCertVerifier for NoHostnameVerifier {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::config::SslConfig;
+    use crate::common::config::SslConfigs;
 
     /// Self-signed CA certificate for testing (generated with openssl).
     const TEST_CA_CERT: &str = "\
@@ -533,14 +533,14 @@ B2V9lhUZNk+pRjtJw9unpXsM
 
     #[test]
     fn test_build_with_system_roots() {
-        let config = SslConfig::default();
+        let config = SslConfigs::default();
         let factory = SslFactory::new(&config).unwrap();
         assert!(factory.hostname_verification());
     }
 
     #[test]
     fn test_build_with_inline_truststore() {
-        let config = SslConfig { truststore_certificates: Some(TEST_CA_CERT.to_string()), ..SslConfig::default() };
+        let config = SslConfigs { truststore_certificates: Some(TEST_CA_CERT.to_string()), ..SslConfigs::default() };
         let factory = SslFactory::new(&config).unwrap();
         assert!(factory.hostname_verification());
     }
@@ -553,9 +553,9 @@ B2V9lhUZNk+pRjtJw9unpXsM
         let cert_path = dir.join("test_ca.pem");
         std::fs::write(&cert_path, TEST_CA_CERT).unwrap();
 
-        let config = SslConfig {
+        let config = SslConfigs {
             truststore_location: Some(cert_path.to_str().unwrap().to_string()),
-            ..SslConfig::default()
+            ..SslConfigs::default()
         };
         let factory = SslFactory::new(&config).unwrap();
         assert!(factory.hostname_verification());
@@ -566,11 +566,11 @@ B2V9lhUZNk+pRjtJw9unpXsM
 
     #[test]
     fn test_build_with_client_cert() {
-        let config = SslConfig {
+        let config = SslConfigs {
             truststore_certificates: Some(TEST_CA_CERT.to_string()),
             keystore_certificate_chain: Some(TEST_CLIENT_CERT.to_string()),
             keystore_key: Some(TEST_CLIENT_KEY.to_string()),
-            ..SslConfig::default()
+            ..SslConfigs::default()
         };
         let factory = SslFactory::new(&config);
         assert!(factory.is_ok(), "Should build with client cert: {:?}", factory.err());
@@ -578,7 +578,7 @@ B2V9lhUZNk+pRjtJw9unpXsM
 
     #[test]
     fn test_unsupported_jks_format() {
-        let config = SslConfig { truststore_type: "JKS".to_string(), ..SslConfig::default() };
+        let config = SslConfigs { truststore_type: "JKS".to_string(), ..SslConfigs::default() };
         let result = SslFactory::new(&config);
         assert!(result.is_err());
         let err = result.unwrap_err();
@@ -591,7 +591,7 @@ B2V9lhUZNk+pRjtJw9unpXsM
 
     #[test]
     fn test_unsupported_pkcs12_format() {
-        let config = SslConfig { keystore_type: "PKCS12".to_string(), ..SslConfig::default() };
+        let config = SslConfigs { keystore_type: "PKCS12".to_string(), ..SslConfigs::default() };
         let result = SslFactory::new(&config);
         assert!(result.is_err());
         let err = result.unwrap_err();
@@ -604,14 +604,14 @@ B2V9lhUZNk+pRjtJw9unpXsM
 
     #[test]
     fn test_hostname_verification_enabled() {
-        let config = SslConfig { endpoint_identification_algorithm: "https".to_string(), ..SslConfig::default() };
+        let config = SslConfigs { endpoint_identification_algorithm: "https".to_string(), ..SslConfigs::default() };
         let factory = SslFactory::new(&config).unwrap();
         assert!(factory.hostname_verification());
     }
 
     #[test]
     fn test_hostname_verification_disabled() {
-        let config = SslConfig { endpoint_identification_algorithm: String::new(), ..SslConfig::default() };
+        let config = SslConfigs { endpoint_identification_algorithm: String::new(), ..SslConfigs::default() };
         let factory = SslFactory::new(&config).unwrap();
         assert!(!factory.hostname_verification());
     }
@@ -631,17 +631,17 @@ B2V9lhUZNk+pRjtJw9unpXsM
     #[test]
     fn test_tls_version_configuration() {
         // Only TLSv1.3
-        let config = SslConfig { enabled_protocols: vec!["TLSv1.3".to_string()], ..SslConfig::default() };
+        let config = SslConfigs { enabled_protocols: vec!["TLSv1.3".to_string()], ..SslConfigs::default() };
         let factory = SslFactory::new(&config);
         assert!(factory.is_ok());
 
         // Only TLSv1.2
-        let config = SslConfig { enabled_protocols: vec!["TLSv1.2".to_string()], ..SslConfig::default() };
+        let config = SslConfigs { enabled_protocols: vec!["TLSv1.2".to_string()], ..SslConfigs::default() };
         let factory = SslFactory::new(&config);
         assert!(factory.is_ok());
 
         // Unsupported version
-        let config = SslConfig { enabled_protocols: vec!["TLSv1.1".to_string()], ..SslConfig::default() };
+        let config = SslConfigs { enabled_protocols: vec!["TLSv1.1".to_string()], ..SslConfigs::default() };
         let result = SslFactory::new(&config);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("Unsupported TLS protocol version"));
@@ -649,9 +649,9 @@ B2V9lhUZNk+pRjtJw9unpXsM
 
     #[test]
     fn test_invalid_pem_truststore() {
-        let config = SslConfig {
+        let config = SslConfigs {
             truststore_certificates: Some("not a valid PEM".to_string()),
-            ..SslConfig::default()
+            ..SslConfigs::default()
         };
         let result = SslFactory::new(&config);
         assert!(result.is_err());
@@ -663,10 +663,10 @@ B2V9lhUZNk+pRjtJw9unpXsM
 
     #[test]
     fn test_cert_without_key_error() {
-        let config = SslConfig {
+        let config = SslConfigs {
             keystore_certificate_chain: Some(TEST_CLIENT_CERT.to_string()),
             // No key provided
-            ..SslConfig::default()
+            ..SslConfigs::default()
         };
         let result = SslFactory::new(&config);
         assert!(result.is_err());
@@ -678,9 +678,9 @@ B2V9lhUZNk+pRjtJw9unpXsM
 
     #[test]
     fn test_missing_truststore_file() {
-        let config = SslConfig {
+        let config = SslConfigs {
             truststore_location: Some("/nonexistent/path/truststore.pem".to_string()),
-            ..SslConfig::default()
+            ..SslConfigs::default()
         };
         let result = SslFactory::new(&config);
         assert!(result.is_err());

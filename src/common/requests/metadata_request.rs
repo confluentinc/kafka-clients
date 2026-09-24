@@ -207,15 +207,15 @@ pub struct MetadataRequestBuilder {
 #[non_exhaustive]
 pub struct MetadataRequestBuilderOptions<'a> {
     /// Java's `topics`. `None` requests every topic, as in Java's `null`.
-    pub topics: Option<&'a [&'a str]>,
+    pub(crate) topics: Option<&'a [&'a str]>,
     /// Java's `allowAutoTopicCreation`.
-    pub allow_auto_topic_creation: bool,
+    pub(crate) allow_auto_topic_creation: bool,
     /// Java's `minVersion`. Starts as `ApiKeys.METADATA.oldestVersion()`, as in
     /// `:79`.
-    pub min_version: i16,
+    pub(crate) min_version: i16,
     /// Java's `maxVersion`. Starts as `ApiKeys.METADATA.latestVersion()`, as in
     /// `:79`.
-    pub max_version: i16,
+    pub(crate) max_version: i16,
 }
 
 /// Fluent builder for [`MetadataRequestBuilderOptions`].

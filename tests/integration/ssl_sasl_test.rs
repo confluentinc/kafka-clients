@@ -21,9 +21,11 @@
 //! 4. SASL authentication failure with wrong credentials
 //! 5. SASL unsupported mechanism rejection
 
+use std::collections::HashMap;
 use std::net::SocketAddr;
 
-use confluent_kafka::common::config::{SaslConfig, SslConfig};
+use confluent_kafka::admin::AdminClientConfig;
+use confluent_kafka::common::config::{SaslConfigs, SslConfigs};
 use confluent_kafka::common::network::NetworkSend;
 use confluent_kafka::common::network::SaslChannelBuilder;
 use confluent_kafka::common::network::Selectable;
@@ -59,29 +61,54 @@ fn parse_bootstrap_addr(bootstrap_servers: &str) -> SocketAddr {
         .unwrap_or_else(|_| panic!("Failed to parse bootstrap servers address: {bootstrap_servers}"))
 }
 
+/// Helper: parses `ssl.*` / `sasl.*` properties the way a client does.
+///
+/// `SslConfigs` / `SaslConfigs` fields are crate-private, so — as in Java, where
+/// they travel as a `Map<String, ?>` — they are populated from config properties.
+/// `bootstrap.servers` is required by the parser but unused by these helpers.
+fn client_config(props: &[(&str, &str)]) -> AdminClientConfig {
+    let mut map: HashMap<String, String> = props.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+    map.insert(
+        AdminClientConfig::BOOTSTRAP_SERVERS_CONFIG.to_string(),
+        "unused:9092".to_string(),
+    );
+    AdminClientConfig::new(&map).unwrap()
+}
+
+/// Helper: SSL config trusting `ca_cert_pem`, hostname verification disabled
+/// (tests connect via 127.0.0.1).
+fn ssl_configs(ca_cert_pem: &str) -> SslConfigs {
+    client_config(&[
+        (SslConfigs::SSL_TRUSTSTORE_CERTIFICATES_CONFIG, ca_cert_pem),
+        (SslConfigs::SSL_ENDPOINT_IDENTIFICATION_ALGORITHM_CONFIG, ""),
+    ])
+    .ssl_config()
+    .clone()
+}
+
+/// Helper: SASL config for `mechanism` with credentials in `sasl.jaas.config`.
+fn sasl_configs(mechanism: &str, login_module: &str, username: &str, password: &str) -> SaslConfigs {
+    let jaas = format!("{login_module} required username=\"{username}\" password=\"{password}\";");
+    client_config(&[
+        (SaslConfigs::SASL_MECHANISM, mechanism),
+        (SaslConfigs::SASL_JAAS_CONFIG, &jaas),
+    ])
+    .sasl_config()
+    .clone()
+}
+
+const PLAIN_LOGIN_MODULE: &str = "org.apache.kafka.common.security.plain.PlainLoginModule";
+
 /// Helper: create a Selector with SslChannelBuilder.
 fn create_ssl_selector(ca_cert_pem: &str) -> Selector {
-    // `SslConfig` is `#[non_exhaustive]`, so a struct expression — including the
-    // `..default()` functional-update form — only compiles inside the crate.
-    // The fields stay `pub`, so assign them onto a `default()` instead.
-    let mut ssl_config = SslConfig::default();
-    ssl_config.truststore_certificates = Some(ca_cert_pem.to_string());
-    // Disable hostname verification for tests (connect via 127.0.0.1)
-    ssl_config.endpoint_identification_algorithm = String::new();
-    let ssl_factory = SslFactory::new(&ssl_config).unwrap();
+    let ssl_factory = SslFactory::new(&ssl_configs(ca_cert_pem)).unwrap();
     let channel_builder = Box::new(SslChannelBuilder::new(ssl_factory, None));
     Selector::with_defaults(Selector::NO_IDLE_TIMEOUT_MS, channel_builder)
 }
 
 /// Helper: create a Selector with SaslChannelBuilder for SASL_PLAINTEXT.
 fn create_sasl_plaintext_selector(username: &str, password: &str) -> Selector {
-    // `SaslConfig` is `#[non_exhaustive]`, so a struct expression — including the
-    // `..default()` functional-update form — only compiles inside the crate.
-    // The fields stay `pub`, so assign them onto a `default()` instead.
-    let mut sasl_config = SaslConfig::default();
-    sasl_config.mechanism = "PLAIN".to_string();
-    sasl_config.username = Some(username.to_string());
-    sasl_config.password = Some(password.to_string());
+    let sasl_config = sasl_configs("PLAIN", PLAIN_LOGIN_MODULE, username, password);
     let channel_builder = SaslChannelBuilder::new(
         SecurityProtocol::SaslPlaintext,
         sasl_config,
@@ -96,20 +123,8 @@ fn create_sasl_plaintext_selector(username: &str, password: &str) -> Selector {
 
 /// Helper: create a Selector with SaslChannelBuilder for SASL_SSL.
 fn create_sasl_ssl_selector(username: &str, password: &str, ca_cert_pem: &str) -> Selector {
-    // `SslConfig` is `#[non_exhaustive]`, so a struct expression — including the
-    // `..default()` functional-update form — only compiles inside the crate.
-    // The fields stay `pub`, so assign them onto a `default()` instead.
-    let mut ssl_config = SslConfig::default();
-    ssl_config.truststore_certificates = Some(ca_cert_pem.to_string());
-    ssl_config.endpoint_identification_algorithm = String::new();
-    let ssl_factory = SslFactory::new(&ssl_config).unwrap();
-    // `SaslConfig` is `#[non_exhaustive]`, so a struct expression — including the
-    // `..default()` functional-update form — only compiles inside the crate.
-    // The fields stay `pub`, so assign them onto a `default()` instead.
-    let mut sasl_config = SaslConfig::default();
-    sasl_config.mechanism = "PLAIN".to_string();
-    sasl_config.username = Some(username.to_string());
-    sasl_config.password = Some(password.to_string());
+    let ssl_factory = SslFactory::new(&ssl_configs(ca_cert_pem)).unwrap();
+    let sasl_config = sasl_configs("PLAIN", PLAIN_LOGIN_MODULE, username, password);
     let channel_builder = SaslChannelBuilder::new(
         SecurityProtocol::SaslSsl,
         sasl_config,
@@ -322,13 +337,12 @@ async fn test_sasl_wrong_credentials() {
 async fn test_sasl_unsupported_mechanism() {
     let ctx = TestContext::new(ClusterConfig::default()).await;
     // Use SCRAM-SHA-256 mechanism which the broker doesn't have enabled
-    // `SaslConfig` is `#[non_exhaustive]`, so a struct expression — including the
-    // `..default()` functional-update form — only compiles inside the crate.
-    // The fields stay `pub`, so assign them onto a `default()` instead.
-    let mut sasl_config = SaslConfig::default();
-    sasl_config.mechanism = "SCRAM-SHA-256".to_string();
-    sasl_config.username = Some(SASL_USERNAME.to_string());
-    sasl_config.password = Some(SASL_PASSWORD.to_string());
+    let sasl_config = sasl_configs(
+        "SCRAM-SHA-256",
+        "org.apache.kafka.common.security.scram.ScramLoginModule",
+        SASL_USERNAME,
+        SASL_PASSWORD,
+    );
     let channel_builder = SaslChannelBuilder::new(
         SecurityProtocol::SaslPlaintext,
         sasl_config,

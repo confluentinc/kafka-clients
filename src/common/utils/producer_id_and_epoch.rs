@@ -32,9 +32,9 @@ use crate::common::record::internal::RecordBatch;
 #[non_exhaustive]
 pub struct ProducerIdAndEpoch {
     /// The producer ID assigned by the broker, or `RecordBatch::NO_PRODUCER_ID`.
-    pub producer_id: i64,
+    pub(crate) producer_id: i64,
     /// The producer epoch, or `RecordBatch::NO_PRODUCER_EPOCH`.
-    pub epoch: i16,
+    pub(crate) epoch: i16,
 }
 
 impl ProducerIdAndEpoch {
@@ -55,6 +55,20 @@ impl ProducerIdAndEpoch {
     /// producer ID above `NO_PRODUCER_ID` is valid regardless of epoch.
     pub fn is_valid(&self) -> bool {
         RecordBatch::NO_PRODUCER_ID < self.producer_id
+    }
+
+    /// The producer ID assigned by the broker, or `RecordBatch::NO_PRODUCER_ID`.
+    ///
+    /// Java's public `ProducerIdAndEpoch.producerId`.
+    pub fn producer_id(&self) -> i64 {
+        self.producer_id
+    }
+
+    /// The producer epoch, or `RecordBatch::NO_PRODUCER_EPOCH`.
+    ///
+    /// Java's public `ProducerIdAndEpoch.epoch`.
+    pub fn epoch(&self) -> i16 {
+        self.epoch
     }
 }
 

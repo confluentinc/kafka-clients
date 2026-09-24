@@ -42,7 +42,7 @@ pub struct ConsumerOffsetOutOfRangeError {
     /// The underlying cause — Java's `OffsetOutOfRangeException(String, Throwable)`.
     source: Option<Box<Error>>,
     /// The out-of-range offset per partition.
-    pub offset_out_of_range_partitions: HashMap<TopicPartition, i64>,
+    pub(crate) offset_out_of_range_partitions: HashMap<TopicPartition, i64>,
 }
 
 impl ConsumerOffsetOutOfRangeError {
