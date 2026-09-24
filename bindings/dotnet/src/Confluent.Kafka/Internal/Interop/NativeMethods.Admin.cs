@@ -3660,7 +3660,7 @@ internal static partial class NativeMethods
     /// </summary>
     [DllImport(DllName, EntryPoint = "kafka_admin_DescribeUserScramCredentialsResult_description", CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr DescribeUserScramCredentialsResultDescription(
-        IntPtr result, IntPtr user, out IntPtr outDescription);
+        SafeDescribeUserScramCredentialsResultHandle result, IntPtr user, out IntPtr outDescription);
 
     [DllImport(DllName, EntryPoint = "kafka_admin_DescribeUserScramCredentialsResult_destroy", CallingConvention = CallingConvention.Cdecl)]
     internal static extern void DescribeUserScramCredentialsResultDestroy(IntPtr result);

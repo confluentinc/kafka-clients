@@ -14,10 +14,10 @@
 
 using System;
 using System.Collections.Generic;
-using System.Globalization;
 using System.Threading.Tasks;
 
 using Confluent.Kafka.Internal;
+using Confluent.Kafka.Internal.Interop;
 
 namespace Confluent.Kafka.Admin;
 
@@ -27,32 +27,13 @@ namespace Confluent.Kafka.Admin;
 /// derived from one underlying response (<c>:37</c>), each treating a per-user failure
 /// differently.
 /// </summary>
-/// <remarks>
-/// <para>
-/// ⚠ <b>Known divergence (M15/P7 D44), carried to M15/P9 — the canonical statement.</b> The
-/// ABI collapses Java's <c>RESOURCE_NOT_FOUND</c> case into "a successfully described user
-/// with zero credentials" (<c>confluent_kafka.h:9411-9413</c>) and exposes <b>no</b>
-/// discriminant, so a not-found user is indistinguishable here from one that genuinely has no
-/// credentials. The binding ships the ABI's behaviour unchanged: a managed heuristic would be
-/// a guess, and closing it properly needs a discriminant at the ABI (a Rust-core change).
-/// </para>
-/// <para>
-/// <b>Two of the three accessors diverge, not all three.</b> <see cref="Users"/> includes a
-/// user Java filters out (<c>:98-100</c>), and <see cref="Description"/> succeeds with zero
-/// credentials where Java faults (<c>:128-130</c> — "RESOURCE_NOT_FOUND is included here").
-/// ⚠ <see cref="All"/> <b>matches</b> Java: its <c>RESOURCE_NOT_FOUND</c> exclusion is only
-/// from the <em>first-failure</em> scan (<c>:65-67</c>), after which the map is built from
-/// <b>every</b> row (<c>:72-74</c>), so such a user is a key in Java's map too. Java's own
-/// javadoc at <c>:60-64</c> says the opposite of its code; the code is the contract.
-/// </para>
-/// </remarks>
 public sealed class DescribeUserScramCredentialsResult
 {
-    private readonly Task<IReadOnlyCollection<UserScramCredentialEntry>> _entries;
+    private readonly Task<DescribeUserScramCredentialsViews> _views;
 
-    internal DescribeUserScramCredentialsResult(Task<IReadOnlyCollection<UserScramCredentialEntry>> entries)
+    internal DescribeUserScramCredentialsResult(Task<DescribeUserScramCredentialsViews> views)
     {
-        _entries = entries;
+        _views = views;
     }
 
     /// <summary>
@@ -60,7 +41,11 @@ public sealed class DescribeUserScramCredentialsResult
     /// <b>first</b> per-user failure if any user could not be described (<c>:68-69</c>).
     /// </summary>
     /// <returns>An awaitable over the whole map.</returns>
-    public Task<IReadOnlyDictionary<string, UserScramCredentialsDescription>> All() => BuildAll();
+    public async Task<IReadOnlyDictionary<string, UserScramCredentialsDescription>> All()
+    {
+        DescribeUserScramCredentialsViews views = await _views.ConfigureAwait(false);
+        return views.AllError is null ? views.All : throw views.AllError;
+    }
 
     /// <summary>
     /// The users the response carried — Java's <c>users()</c> (<c>:92</c>).
@@ -71,7 +56,11 @@ public sealed class DescribeUserScramCredentialsResult
     /// (<c>:89-90</c>). Only a failure of the call itself faults it.
     /// </remarks>
     /// <returns>An awaitable over the user names.</returns>
-    public Task<IReadOnlyList<string>> Users() => BuildUsers();
+    public async Task<IReadOnlyList<string>> Users()
+    {
+        DescribeUserScramCredentialsViews views = await _views.ConfigureAwait(false);
+        return views.Users;
+    }
 
     /// <summary>
     /// One user's credentials — Java's <c>description(String)</c> (<c>:114</c>). Faults when
@@ -81,58 +70,29 @@ public sealed class DescribeUserScramCredentialsResult
     /// <param name="userName">The user to look up.</param>
     /// <returns>An awaitable over that user's description.</returns>
     /// <exception cref="ArgumentNullException"><paramref name="userName"/> is null.</exception>
-    public Task<UserScramCredentialsDescription> Description(string userName)
+    public async Task<UserScramCredentialsDescription> Description(string userName)
     {
         if (userName is null)
         {
             throw new ArgumentNullException(nameof(userName));
         }
 
-        return BuildDescription(userName);
-    }
+        DescribeUserScramCredentialsViews views = await _views.ConfigureAwait(false);
 
-    private async Task<IReadOnlyDictionary<string, UserScramCredentialsDescription>> BuildAll()
-    {
-        IReadOnlyCollection<UserScramCredentialEntry> entries = await _entries.ConfigureAwait(false);
-        Dictionary<string, UserScramCredentialsDescription> described =
-            new Dictionary<string, UserScramCredentialsDescription>(entries.Count, StringComparer.Ordinal);
-        foreach (UserScramCredentialEntry entry in entries)
+        using (Utf8Marshal.PinnedUtf8String pinnedUser = Utf8Marshal.Pin(userName))
         {
-            if (entry.Error is not null)
+            // ⚠ The error is OWNED, and so is the written description — the opposite of the
+            // all() view's borrowed one, hence ReadAndDestroy rather than the plain read.
+            IntPtr error = NativeMethods.DescribeUserScramCredentialsResultDescription(
+                views.Root, pinnedUser.Pointer, out IntPtr description);
+
+            KafkaException? failure = KafkaException.FromHandle(error);
+            if (failure is not null)
             {
-                throw entry.Error;
+                throw failure;
             }
 
-            described[entry.User] = entry.Description;
+            return UserScramCredentialMarshal.ReadAndDestroy(description);
         }
-
-        return described;
-    }
-
-    private async Task<IReadOnlyList<string>> BuildUsers()
-    {
-        IReadOnlyCollection<UserScramCredentialEntry> entries = await _entries.ConfigureAwait(false);
-        List<string> users = new List<string>(entries.Count);
-        foreach (UserScramCredentialEntry entry in entries)
-        {
-            users.Add(entry.User);
-        }
-
-        return users;
-    }
-
-    private async Task<UserScramCredentialsDescription> BuildDescription(string userName)
-    {
-        IReadOnlyCollection<UserScramCredentialEntry> entries = await _entries.ConfigureAwait(false);
-        foreach (UserScramCredentialEntry entry in entries)
-        {
-            if (string.Equals(entry.User, userName, StringComparison.Ordinal))
-            {
-                return entry.Error is null ? entry.Description : throw entry.Error;
-            }
-        }
-
-        throw new KafkaException(
-            string.Format(CultureInfo.InvariantCulture, "No such user: {0}", userName));
     }
 }
