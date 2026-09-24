@@ -1193,6 +1193,8 @@ async fn remove_one_member_from_consumer_group<F: AdminBackendFactory>(ctx: &mut
         }
     }
 
+    member_one.close().await.expect("close m1");
+
     // Remove instance-1 by its group.instance.id.
     let options =
         RemoveMembersFromConsumerGroupOptions::new([MemberToRemove::new("instance-1")]).expect("non-empty members");
@@ -1228,7 +1230,6 @@ async fn remove_one_member_from_consumer_group<F: AdminBackendFactory>(ctx: &mut
         "{backend} backend: the remaining member should be reassigned all partitions after removal"
     );
 
-    drop(member_one);
     drop(member_two);
     admin.close(Some(Duration::from_secs(5))).await.expect("close");
     ctx.cleanup().await;
