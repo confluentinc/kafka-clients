@@ -435,7 +435,7 @@ mod tests {
         let mut records_builder = MemoryRecords::builder_with_buffer_magic(
             vec![0u8; 512],
             RecordBatch::MAGIC_VALUE_V2,
-            Compression::none(),
+            Compression::none().build(),
             TimestampType::CreateTime,
             0,
         );

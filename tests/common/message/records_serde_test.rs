@@ -164,13 +164,11 @@ fn test_non_nullable_records_write_does_not_mutate_the_message() {
     let records = records_of(&["foo", "bar"]);
 
     let mut partition = PartitionSnapshot::new();
-    partition.index = 0;
-    partition.unaligned_records = records.clone();
+    partition.set_index(0).set_unaligned_records(records.clone());
     let mut topic = TopicSnapshot::new();
-    topic.name = "foo".to_string();
-    topic.partitions = vec![partition];
+    topic.set_name("foo".to_string()).set_partitions(vec![partition]);
     let mut message = FetchSnapshotResponseData::new();
-    message.topics = vec![topic];
+    message.set_topics(vec![topic]);
 
     let version = 0;
 
@@ -183,7 +181,8 @@ fn test_non_nullable_records_write_does_not_mutate_the_message() {
     // The write must NOT have emptied the (non-nullable) records field — the exact
     // side effect `std::mem::take` produced.
     assert_eq!(
-        message.topics[0].partitions[0].unaligned_records, records,
+        *message.topics()[0].partitions()[0].unaligned_records(),
+        records,
         "writing a non-nullable records field must not mutate it (no std::mem::take)"
     );
 

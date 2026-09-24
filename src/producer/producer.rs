@@ -35,8 +35,13 @@ use crate::producer::RecordMetadata;
 /// The interface for the [`KafkaProducer`](super::KafkaProducer).
 ///
 /// Translated from `org.apache.kafka.clients.producer.Producer`.
-#[allow(async_fn_in_trait)]
-pub trait Producer<K, V> {
+///
+/// Every asynchronous method returns `impl Future + Send` rather than being
+/// declared `async fn`, so that generic code can move the returned futures
+/// across tasks and box them as `dyn Future + Send`. That guarantee is what lets
+/// [`DynProducer`](super::DynProducer) be blanket-implemented for every
+/// `Producer`. Implementations may still be written with `async fn`.
+pub trait Producer<K, V>: Send + Sync {
     /// Needs to be called before any other method when the `transactional.id` is
     /// set in the configuration.
     ///
@@ -54,7 +59,7 @@ pub trait Producer<K, V> {
     /// - The producer has encountered a previous fatal error
     /// - Initialization does not complete within `max.block.ms`
     ///   ([`Timeout`](Error::Timeout))
-    async fn init_transactions(&self) -> Result<(), Error>;
+    fn init_transactions(&self) -> impl Future<Output = Result<(), Error>> + Send;
 
     /// Should be called before the start of each new transaction.
     ///
@@ -83,11 +88,11 @@ pub trait Producer<K, V> {
     /// transaction has been started, if `group_metadata` is invalid, if the
     /// commit failed and cannot be retried, or if the offsets are not sent
     /// within `max.block.ms` ([`Timeout`](Error::Timeout)).
-    async fn send_offsets_to_transaction(
+    fn send_offsets_to_transaction(
         &self,
         offsets: HashMap<TopicPartition, OffsetAndMetadata>,
         group_metadata: ConsumerGroupMetadata,
-    ) -> Result<(), Error>;
+    ) -> impl Future<Output = Result<(), Error>> + Send;
 
     /// Commits the ongoing transaction.
     ///
@@ -99,7 +104,7 @@ pub trait Producer<K, V> {
     /// transaction has been started, if the producer has encountered a previous
     /// fatal or abortable error, or if the commit does not complete within
     /// `max.block.ms` ([`Timeout`](Error::Timeout)).
-    async fn commit_transaction(&self) -> Result<(), Error>;
+    fn commit_transaction(&self) -> impl Future<Output = Result<(), Error>> + Send;
 
     /// Aborts the ongoing transaction.
     ///
@@ -111,13 +116,16 @@ pub trait Producer<K, V> {
     /// transaction has been started, if the producer has encountered a previous
     /// fatal error, or if the abort does not complete within `max.block.ms`
     /// ([`Timeout`](Error::Timeout)).
-    async fn abort_transaction(&self) -> Result<(), Error>;
+    fn abort_transaction(&self) -> impl Future<Output = Result<(), Error>> + Send;
 
     /// Asynchronously send a record to a topic. Equivalent to
     /// `send_with_callback(record, None)`.
     ///
     /// See [`send_with_callback`](Producer::send_with_callback) for details.
-    async fn send(&self, record: ProducerRecord<K, V>) -> Result<KafkaFuture<RecordMetadata>, Error>;
+    fn send(
+        &self,
+        record: ProducerRecord<K, V>,
+    ) -> impl Future<Output = Result<KafkaFuture<RecordMetadata>, Error>> + Send;
 
     /// Asynchronously send a record to a topic and invoke the provided callback
     /// when the send has been acknowledged.
@@ -138,11 +146,11 @@ pub trait Producer<K, V> {
     /// - The producer has already been closed ([`LocalIllegalState`](Error::LocalIllegalState))
     /// - The key or value cannot be serialized ([`Serialization`](Error::Serialization))
     /// - A Kafka-related error occurs
-    async fn send_with_callback(
+    fn send_with_callback(
         &self,
         record: ProducerRecord<K, V>,
         callback: Option<Callback>,
-    ) -> Result<KafkaFuture<RecordMetadata>, Error>;
+    ) -> impl Future<Output = Result<KafkaFuture<RecordMetadata>, Error>> + Send;
 
     /// Invoking this method makes all buffered records immediately available to send
     /// and awaits the completion of the requests associated with these records.
@@ -150,7 +158,7 @@ pub trait Producer<K, V> {
     /// # Errors
     ///
     /// Returns `Err` if an error occurs during flushing.
-    async fn flush(&self) -> Result<(), Error>;
+    fn flush(&self) -> impl Future<Output = Result<(), Error>> + Send;
 
     /// Get the partition metadata for the given topic.
     ///
@@ -161,7 +169,7 @@ pub trait Producer<K, V> {
     /// Returns `Err` if:
     /// - The topic cannot be found within `max.block.ms` ([`Timeout`](Error::Timeout))
     /// - The producer has been closed
-    async fn partitions_for(&self, topic: &str) -> Result<Vec<PartitionInfo>, Error>;
+    fn partitions_for(&self, topic: &str) -> impl Future<Output = Result<Vec<PartitionInfo>, Error>> + Send;
 
     /// Get the full set of producer metrics maintained by this producer.
     ///
@@ -181,7 +189,7 @@ pub trait Producer<K, V> {
     /// # Errors
     ///
     /// Returns `Err` if an error occurs during closing.
-    async fn close(&self) -> Result<(), Error>;
+    fn close(&self) -> impl Future<Output = Result<(), Error>> + Send;
 
     /// Close this producer, waiting up to the given timeout for pending requests
     /// to complete.
@@ -193,5 +201,5 @@ pub trait Producer<K, V> {
     /// # Errors
     ///
     /// Returns `Err` if an error occurs during closing.
-    async fn close_with_timeout(&self, timeout: Duration) -> Result<(), Error>;
+    fn close_with_timeout(&self, timeout: Duration) -> impl Future<Output = Result<(), Error>> + Send;
 }
