@@ -295,3 +295,4 @@ state (seen once in Phase 17; removed manually) — reap them on the failure pat
 - Phase 17 / Actor 81: 0289681f, 738b9ba9, 7e16d75a (4 ConsumerBounceTest arms, 5/5 each). Critic 81: 1 finding (coordinator lookup relied on Rust-only background auto-commit) → fixing in test; production divergence logged above.
 - Phase 17: fixup f2bdd189 (coordinator via __consumer_offsets p0 leader). Phase 17 DONE.
 - Phase 18 / Actor 82: 2f3771a9 (NotEnoughReplicas, follower shutdown), a6a2ecbb (4 txn timeouts, failure-to-fence TV2). Critic 82: 1 finding (TV2 fence row vacuous; TV1 reachable via update_features) → fixed 8370c280 (TV1 row added, downgrade works). Phase 18 DONE. Added Phases 20 (harness hardening) and 21 (TV0/TV1 arms).
+- Phase 20 / Actor 84: 69376c92 (retry transient Docker API errors w/ backoff; reap failed-attempt containers+network). Critic 84: 1 finding (reap test leaked on failure) → fixed e003e32e. Phase 20 DONE.
