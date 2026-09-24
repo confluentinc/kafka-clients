@@ -27,6 +27,7 @@ use crate::common::{ConsumerGroupState, GroupState, GroupType};
 /// (deprecated since 4.1).
 #[deprecated(since = "4.1.0", note = "Use Admin::list_groups and GroupListing instead")]
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[doc(alias = "org.apache.kafka.clients.admin.ConsumerGroupListing")]
 pub struct ConsumerGroupListing {
     group_id: String,
     is_simple_consumer_group: bool,
@@ -45,6 +46,7 @@ impl ConsumerGroupListing {
     /// across Java's five overloads is `{groupId, isSimpleConsumerGroup}`, and
     /// the overload matching it (`ConsumerGroupListing.java:45`) is not
     /// translated (CLAUDE.md §2).
+    #[doc(alias = "org.apache.kafka.clients.admin.ConsumerGroupListing#ConsumerGroupListing")]
     pub fn with_group_state_group_type(
         group_id: impl Into<String>,
         group_state: Option<GroupState>,
@@ -60,6 +62,7 @@ impl ConsumerGroupListing {
     /// Mirrors the deprecated
     /// `ConsumerGroupListing(String, boolean, Optional<ConsumerGroupState>)`
     /// constructor, which maps the state via `GroupState.parse(state.toString())`.
+    #[doc(alias = "org.apache.kafka.clients.admin.ConsumerGroupListing#ConsumerGroupListing")]
     pub fn with_state(
         group_id: impl Into<String>,
         is_simple_consumer_group: bool,
@@ -74,22 +77,26 @@ impl ConsumerGroupListing {
     }
 
     /// The consumer group id. Mirrors `groupId()`.
+    #[doc(alias = "org.apache.kafka.clients.admin.ConsumerGroupListing#groupId")]
     pub fn group_id(&self) -> &str {
         &self.group_id
     }
 
     /// Whether the consumer group is simple. Mirrors `isSimpleConsumerGroup()`.
+    #[doc(alias = "org.apache.kafka.clients.admin.ConsumerGroupListing#isSimpleConsumerGroup")]
     pub fn is_simple_consumer_group(&self) -> bool {
         self.is_simple_consumer_group
     }
 
     /// The group state. Mirrors `groupState()`.
+    #[doc(alias = "org.apache.kafka.clients.admin.ConsumerGroupListing#groupState")]
     pub fn group_state(&self) -> Option<GroupState> {
         self.group_state
     }
 
     /// The consumer group state (deprecated). Mirrors `state()`, mapping the
     /// group state via `ConsumerGroupState.parse(groupState.toString())`.
+    #[doc(alias = "org.apache.kafka.clients.admin.ConsumerGroupListing#state")]
     pub fn state(&self) -> Option<ConsumerGroupState> {
         self.group_state.map(|s| ConsumerGroupState::parse(s.name()))
     }
@@ -116,6 +123,7 @@ mod tests {
 
     /// Translated from `ConsumerGroupListingTest.testState`.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.admin.ConsumerGroupListingTest#testState")]
     fn test_state() {
         for state in [
             ConsumerGroupState::Unknown,

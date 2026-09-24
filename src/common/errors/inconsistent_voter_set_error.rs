@@ -25,6 +25,7 @@ kafka_error_class! {
     ///
     /// Java `extends` chain:
     ///    `InconsistentVoterSetException` -> `ApiException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.InconsistentVoterSetException")]
     InconsistentVoterSetError,
     code: Errors::InconsistentVoterSet,
     extends: [

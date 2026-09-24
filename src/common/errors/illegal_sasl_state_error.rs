@@ -25,6 +25,7 @@ kafka_error_class! {
     /// Java `extends` chain:
     ///    `IllegalSaslStateException` -> `AuthenticationException` ->
     ///   `InvalidConfigurationException` -> `ApiException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.IllegalSaslStateException")]
     IllegalSaslStateError,
     code: Errors::IllegalSaslState,
     extends: [

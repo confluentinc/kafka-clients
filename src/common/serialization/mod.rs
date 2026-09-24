@@ -40,6 +40,7 @@ use crate::common::header::RecordHeaders;
 ///
 /// * `T` - Type to be serialized from. Use `?Sized` bounds to accept both
 ///   owned and borrowed forms (e.g., `Serializer<str>` accepts `&str`).
+#[doc(alias = "org.apache.kafka.common.serialization.Serializer")]
 pub trait Serializer<T: ?Sized> {
     /// Convert `data` into a byte array.
     ///
@@ -53,6 +54,7 @@ pub trait Serializer<T: ?Sized> {
     /// # Returns
     ///
     /// Serialized bytes; may be `None`.
+    #[doc(alias = "org.apache.kafka.common.serialization.Serializer#serialize")]
     fn serialize(&self, topic: &str, data: Option<&T>) -> Result<Option<Vec<u8>>, Error>;
 
     /// Convert `data` into a byte array, with access to the record headers.

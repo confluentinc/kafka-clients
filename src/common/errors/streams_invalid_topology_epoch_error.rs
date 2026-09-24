@@ -25,6 +25,7 @@ kafka_error_class! {
     /// Java `extends` chain:
     ///    `StreamsInvalidTopologyEpochException` -> `ApiException` ->
     ///   `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.StreamsInvalidTopologyEpochException")]
     StreamsInvalidTopologyEpochError,
     code: Errors::StreamsInvalidTopologyEpoch,
     extends: [

@@ -24,6 +24,7 @@ kafka_error_class! {
     ///
     /// Java `extends` chain:
     ///    `GroupIdNotFoundException` -> `ApiException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.GroupIdNotFoundException")]
     GroupIdNotFoundError,
     code: Errors::GroupIdNotFound,
     extends: [

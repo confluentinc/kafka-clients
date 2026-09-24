@@ -39,6 +39,7 @@ use crate::common::serialization::Deserializer;
 /// [`Bytes::copy_from_slice`], matching the §27 "safe copy fallback" contract.
 #[derive(Clone, Debug, Default)]
 #[non_exhaustive]
+#[doc(alias = "org.apache.kafka.common.serialization.BytesDeserializer")]
 pub struct BytesDeserializer;
 
 impl BytesDeserializer {

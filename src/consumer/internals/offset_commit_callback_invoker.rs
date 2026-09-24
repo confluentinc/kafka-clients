@@ -47,6 +47,7 @@ use super::ConsumerInterceptors;
 /// `kind` is `Interceptor` when the task is to invoke the interceptor
 /// chain's `on_commit` (the chain itself is owned by the invoker), and
 /// `User { callback }` when it is a user-supplied commit callback.
+#[doc(alias = "org.apache.kafka.clients.consumer.internals.OffsetCommitCallbackInvoker$OffsetCommitCallbackTask")]
 enum CallbackKind {
     /// Invoke the interceptor chain's `on_commit(offsets)`. The chain is
     /// owned by the invoker (see [`OffsetCommitCallbackInvoker`]).
@@ -85,6 +86,7 @@ struct PendingCallback {
 /// a `&ConsumerInterceptors` across tasks; one task must hold the chain
 /// exclusively during `on_commit`. The lock is acquired only inside
 /// `invoke_pending_callbacks` and is never held across an `.await`.
+#[doc(alias = "org.apache.kafka.clients.consumer.internals.OffsetCommitCallbackInvoker")]
 pub(crate) struct OffsetCommitCallbackInvoker<K: 'static, V: 'static> {
     interceptors: Mutex<ConsumerInterceptors<K, V>>,
     /// Thread-safe queue of pending callbacks. Java uses
@@ -152,6 +154,9 @@ where
     ///
     /// Mirrors Java's package-private constructor
     /// `OffsetCommitCallbackInvoker(ConsumerInterceptors<?, ?>)`.
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.OffsetCommitCallbackInvoker#OffsetCommitCallbackInvoker"
+    )]
     pub(crate) fn new(interceptors: ConsumerInterceptors<K, V>) -> Self {
         let interceptors_empty = interceptors.is_empty();
         Self {
@@ -166,6 +171,9 @@ where
     /// mirrors Java's guard `if (!interceptors.isEmpty())`.
     ///
     /// Mirrors Java's `enqueueInterceptorInvocation(Map)`.
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.OffsetCommitCallbackInvoker#enqueueInterceptorInvocation"
+    )]
     pub(crate) fn enqueue_interceptor_invocation(&self, offsets: HashMap<TopicPartition, OffsetAndMetadata>) {
         if self.interceptors_empty {
             return;
@@ -182,6 +190,9 @@ where
     /// next call to [`Self::invoke_pending_callbacks`].
     ///
     /// Mirrors Java's `enqueueUserCallbackInvocation(OffsetCommitCallback, Map, Exception)`.
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.OffsetCommitCallbackInvoker#enqueueUserCallbackInvocation"
+    )]
     pub(crate) fn enqueue_user_callback_invocation(
         &self,
         callback: Arc<dyn OffsetCommitCallback>,
@@ -315,6 +326,9 @@ mod tests {
     /// Multiple user callbacks are invoked in FIFO order on
     /// `invoke_pending_callbacks` and not re-invoked on subsequent calls.
     #[tokio::test(flavor = "current_thread")]
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.OffsetCommitCallbackInvokerTest#testMultipleUserCallbacksInvoked"
+    )]
     async fn test_multiple_user_callbacks_invoked() {
         let tp = TopicPartition::new("t0".to_string(), 2);
         let offsets1 = singleton_offset(tp.clone(), 10);
@@ -354,6 +368,9 @@ mod tests {
     /// entries) and (b) re-draining produces no more invocations
     /// (proves no stale interceptor tasks were retained).
     #[tokio::test(flavor = "current_thread")]
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.OffsetCommitCallbackInvokerTest#testNoOnCommitOnEmptyInterceptors"
+    )]
     async fn test_no_on_commit_on_empty_interceptors() {
         let tp = TopicPartition::new("t0".to_string(), 2);
         let offsets1 = singleton_offset(tp.clone(), 10);
@@ -385,6 +402,7 @@ mod tests {
     /// interceptor chain's `on_commit` is invoked for each enqueued
     /// invocation in FIFO order.
     #[tokio::test(flavor = "current_thread")]
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.OffsetCommitCallbackInvokerTest#testOnlyInterceptors")]
     async fn test_only_interceptors() {
         let tp = TopicPartition::new("t0".to_string(), 2);
         let offsets1 = singleton_offset(tp.clone(), 10);
@@ -416,6 +434,9 @@ mod tests {
     /// Mixed enqueue order is preserved: interceptors fire before the
     /// user callback because they were enqueued first.
     #[tokio::test(flavor = "current_thread")]
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.OffsetCommitCallbackInvokerTest#testMixedCallbacksInterceptorsInvoked"
+    )]
     async fn test_mixed_callbacks_interceptors_invoked() {
         let tp = TopicPartition::new("t0".to_string(), 2);
         let offsets1 = singleton_offset(tp.clone(), 10);

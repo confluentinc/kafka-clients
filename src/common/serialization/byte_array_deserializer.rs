@@ -35,6 +35,7 @@ use crate::common::serialization::Deserializer;
 /// budget per §27 and is unavoidable for an owned-`Vec<u8>` value type.
 #[derive(Clone, Debug, Default)]
 #[non_exhaustive]
+#[doc(alias = "org.apache.kafka.common.serialization.ByteArrayDeserializer")]
 pub struct ByteArrayDeserializer;
 
 impl ByteArrayDeserializer {

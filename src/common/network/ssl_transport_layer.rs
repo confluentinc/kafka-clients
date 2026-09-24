@@ -109,6 +109,7 @@ enum SslState {
 ///   fast path: encrypt synchronously, push as much ciphertext as the kernel
 ///   accepts, and surface `OP_WRITE` interest via `has_pending_writes()` for
 ///   the remainder.
+#[doc(alias = "org.apache.kafka.common.network.SslTransportLayer")]
 pub struct SslTransportLayer {
     /// Current state of the TLS connection.
     state: SslState,
@@ -134,6 +135,7 @@ impl SslTransportLayer {
     ///   shared `Arc<ClientConfig>`); must be in handshaking state
     /// * `_server_name` - The server name used to construct `conn`. Retained
     ///   for symmetry with the Java API; rustls already records it on `conn`.
+    #[doc(alias = "org.apache.kafka.common.network.SslTransportLayer#SslTransportLayer")]
     pub fn new(tcp: TcpStream, conn: rustls::ClientConnection, _server_name: ServerName<'static>) -> Self {
         let peer_addr = tcp.peer_addr().ok();
         Self {

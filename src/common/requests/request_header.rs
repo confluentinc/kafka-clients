@@ -35,6 +35,7 @@ const SIZE_NOT_INITIALIZED: i32 = -1;
 /// Wraps the generated [`RequestHeaderData`] and provides convenience methods
 /// for serialization, size computation, and parsing.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.RequestHeader")]
 pub struct RequestHeader {
     data: RequestHeaderData,
     header_version: i16,
@@ -165,6 +166,7 @@ impl RequestHeader {
     /// # Errors
     ///
     /// Returns an error if the API key is not recognized.
+    #[doc(alias = "org.apache.kafka.common.requests.RequestHeader#RequestHeader")]
     pub fn with_options(options: RequestHeaderOptions<'_>) -> io::Result<Self> {
         let RequestHeaderOptions { request_api_key, request_version, client_id, correlation_id } = options;
         let mut data = RequestHeaderData::new();
@@ -180,6 +182,7 @@ impl RequestHeader {
     ///
     /// Corresponds to Java's `RequestHeader(RequestHeaderData, short)`
     /// (`RequestHeader.java:47`).
+    #[doc(alias = "org.apache.kafka.common.requests.RequestHeader#RequestHeader")]
     pub fn with_data_header_version(data: RequestHeaderData, header_version: i16) -> Self {
         Self { data, header_version, size: SIZE_NOT_INITIALIZED }
     }
@@ -190,16 +193,19 @@ impl RequestHeader {
     ///
     /// Panics if the stored API key id does not correspond to a known API key.
     /// This should never happen for a properly constructed `RequestHeader`.
+    #[doc(alias = "org.apache.kafka.common.requests.RequestHeader#apiKey")]
     pub fn api_key(&self) -> &'static ApiKeys {
         ApiKeys::for_id(self.data.request_api_key).expect("RequestHeader contains an unknown API key id")
     }
 
     /// Returns the API version of this request.
+    #[doc(alias = "org.apache.kafka.common.requests.RequestHeader#apiVersion")]
     pub fn api_version(&self) -> i16 {
         self.data.request_api_version
     }
 
     /// Returns the header version.
+    #[doc(alias = "org.apache.kafka.common.requests.RequestHeader#headerVersion")]
     pub fn header_version(&self) -> i16 {
         self.header_version
     }
@@ -207,32 +213,38 @@ impl RequestHeader {
     /// Returns the client id string.
     ///
     /// Returns an empty string if the client id is `None`.
+    #[doc(alias = "org.apache.kafka.common.requests.RequestHeader#clientId")]
     pub fn client_id(&self) -> &str {
         self.data.client_id.as_deref().unwrap_or("")
     }
 
     /// Returns the correlation id of this request.
+    #[doc(alias = "org.apache.kafka.common.requests.RequestHeader#correlationId")]
     pub fn correlation_id(&self) -> i32 {
         self.data.correlation_id
     }
 
     /// Returns a reference to the underlying data.
+    #[doc(alias = "org.apache.kafka.common.requests.RequestHeader#data")]
     pub fn data(&self) -> &RequestHeaderData {
         &self.data
     }
 
     /// Returns whether the API version is within the supported range.
+    #[doc(alias = "org.apache.kafka.common.requests.RequestHeader#isApiVersionSupported")]
     pub fn is_api_version_supported(&self) -> bool {
         self.api_key().is_version_supported(self.api_version())
     }
 
     /// Returns whether the API version is deprecated.
+    #[doc(alias = "org.apache.kafka.common.requests.RequestHeader#isApiVersionDeprecated")]
     pub fn is_api_version_deprecated(&self) -> bool {
         self.api_key().is_version_deprecated(self.api_version())
     }
 
     /// Creates a corresponding response header with the same correlation id
     /// and the appropriate response header version.
+    #[doc(alias = "org.apache.kafka.common.requests.RequestHeader#toResponseHeader")]
     pub fn to_response_header(&self) -> ResponseHeader {
         ResponseHeader::with_correlation_id(
             self.data.correlation_id,
@@ -249,6 +261,7 @@ impl RequestHeader {
     /// # Errors
     ///
     /// Returns an error if size calculation fails.
+    #[doc(alias = "org.apache.kafka.common.requests.RequestHeader#size")]
     pub fn size_with_cache(&mut self, cache: &mut ObjectSerializationCache) -> io::Result<i32> {
         let s = Message::size(&self.data, cache, self.header_version)?;
         self.size = s;
@@ -262,6 +275,7 @@ impl RequestHeader {
     /// # Errors
     ///
     /// Returns an error if size calculation fails.
+    #[doc(alias = "org.apache.kafka.common.requests.RequestHeader#size")]
     pub fn size(&mut self) -> io::Result<i32> {
         if self.size == SIZE_NOT_INITIALIZED {
             let mut cache = ObjectSerializationCache::new();
@@ -275,6 +289,7 @@ impl RequestHeader {
     /// # Errors
     ///
     /// Returns an error if writing fails.
+    #[doc(alias = "org.apache.kafka.common.requests.RequestHeader#write")]
     pub fn write(&mut self, buffer: &mut ByteBufferAccessor, cache: &ObjectSerializationCache) -> io::Result<()> {
         Message::write(&mut self.data, buffer, cache, self.header_version)
     }
@@ -290,6 +305,7 @@ impl RequestHeader {
     /// - The API key id is not recognized
     /// - The API key has no valid versions
     /// - The header data cannot be parsed
+    #[doc(alias = "org.apache.kafka.common.requests.RequestHeader#parse")]
     pub fn parse(buffer: &mut ByteBufferAccessor) -> io::Result<Self> {
         let start_position = buffer.position();
 
@@ -379,6 +395,7 @@ mod tests {
 
     /// Translated from Java `RequestHeaderTest.testRequestHeaderV1`.
     #[test]
+    #[doc(alias = "org.apache.kafka.common.requests.RequestHeaderTest#testRequestHeaderV1")]
     fn test_request_header_v1() {
         let mut header = RequestHeader::with_options(
             RequestHeaderOptionsBuilder::new()
@@ -400,6 +417,7 @@ mod tests {
 
     /// Translated from Java `RequestHeaderTest.testRequestHeaderV2`.
     #[test]
+    #[doc(alias = "org.apache.kafka.common.requests.RequestHeaderTest#testRequestHeaderV2")]
     fn test_request_header_v2() {
         let mut header = RequestHeader::with_options(
             RequestHeaderOptionsBuilder::new()

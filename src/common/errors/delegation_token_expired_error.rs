@@ -24,6 +24,7 @@ kafka_error_class! {
     ///
     /// Java `extends` chain:
     ///    `DelegationTokenExpiredException` -> `ApiException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.DelegationTokenExpiredException")]
     DelegationTokenExpiredError,
     code: Errors::DelegationTokenExpired,
     extends: [

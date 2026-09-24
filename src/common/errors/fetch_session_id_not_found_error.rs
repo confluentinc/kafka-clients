@@ -25,6 +25,7 @@ kafka_error_class! {
     /// Java `extends` chain:
     ///    `FetchSessionIdNotFoundException` -> `RetriableException` ->
     ///   `ApiException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.FetchSessionIdNotFoundException")]
     FetchSessionIdNotFoundError,
     code: Errors::FetchSessionIdNotFound,
     extends: [

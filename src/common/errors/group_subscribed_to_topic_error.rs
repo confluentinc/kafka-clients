@@ -25,6 +25,7 @@ kafka_error_class! {
     ///
     /// Java `extends` chain:
     ///    `GroupSubscribedToTopicException` -> `ApiException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.GroupSubscribedToTopicException")]
     GroupSubscribedToTopicError,
     code: Errors::GroupSubscribedToTopic,
     extends: [

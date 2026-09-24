@@ -22,6 +22,7 @@ use crate::common::Uuid;
 ///
 /// Corresponds to `org.apache.kafka.clients.admin.TopicListing`.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[doc(alias = "org.apache.kafka.clients.admin.TopicListing")]
 pub struct TopicListing {
     name: String,
     topic_id: Uuid,
@@ -34,22 +35,26 @@ impl TopicListing {
     /// * `name` - the topic name
     /// * `topic_id` - the topic id
     /// * `internal` - whether the topic is internal to Kafka
+    #[doc(alias = "org.apache.kafka.clients.admin.TopicListing#TopicListing")]
     pub fn new(name: impl Into<String>, topic_id: Uuid, internal: bool) -> Self {
         Self { name: name.into(), topic_id, internal }
     }
 
     /// The id of the topic.
+    #[doc(alias = "org.apache.kafka.clients.admin.TopicListing#topicId")]
     pub fn topic_id(&self) -> Uuid {
         self.topic_id
     }
 
     /// The name of the topic.
+    #[doc(alias = "org.apache.kafka.clients.admin.TopicListing#name")]
     pub fn name(&self) -> &str {
         &self.name
     }
 
     /// Whether the topic is internal to Kafka. An example of an internal topic
     /// is the offsets and group management topic: `__consumer_offsets`.
+    #[doc(alias = "org.apache.kafka.clients.admin.TopicListing#isInternal")]
     pub fn is_internal(&self) -> bool {
         self.internal
     }

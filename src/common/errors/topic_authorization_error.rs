@@ -46,6 +46,7 @@ use super::format_java_set;
 #[delegate(ErrorMessage, target = "kafka_error")]
 #[delegate(ErrorSource, target = "kafka_error")]
 #[delegate(ErrorCode, target = "kafka_error")]
+#[doc(alias = "org.apache.kafka.common.errors.TopicAuthorizationException")]
 pub struct TopicAuthorizationError {
     /// Base error fields.
     kafka_error: KafkaError,
@@ -59,6 +60,7 @@ impl TopicAuthorizationError {
     ///
     /// Mirrors Java's `TopicAuthorizationException(Set<String> unauthorizedTopics)`:
     /// `this("Not authorized to access topics: " + unauthorizedTopics, unauthorizedTopics)`.
+    #[doc(alias = "org.apache.kafka.common.errors.TopicAuthorizationException#TopicAuthorizationException")]
     pub fn new(unauthorized_topics: HashSet<String>) -> Self {
         let message = format!("Not authorized to access topics: {}", format_java_set(&unauthorized_topics));
         Self {
@@ -73,6 +75,7 @@ impl TopicAuthorizationError {
     /// Mirrors Java's `TopicAuthorizationException(String message)` reached via
     /// the `Errors.TOPIC_AUTHORIZATION_FAILED` builder (`exception()`), where the
     /// message is the default constant and the topic set is empty.
+    #[doc(alias = "org.apache.kafka.common.errors.TopicAuthorizationException#TopicAuthorizationException")]
     pub fn with_default_message() -> Self {
         Self {
             kafka_error: KafkaError::new(Errors::TopicAuthorizationFailed),
@@ -90,6 +93,7 @@ impl TopicAuthorizationError {
     /// is exactly `TopicAuthorizationException(Set<String>)` (`:30`) — so
     /// [`new`](Self::new) keeps the plain name and this one is suffixed with the
     /// parameter beyond the intersection (CLAUDE.md §2).
+    #[doc(alias = "org.apache.kafka.common.errors.TopicAuthorizationException#TopicAuthorizationException")]
     pub fn with_message(unauthorized_topics: HashSet<String>, message: impl Into<String>) -> Self {
         Self {
             kafka_error: KafkaError::with_message(Errors::TopicAuthorizationFailed, message),
@@ -104,6 +108,7 @@ impl TopicAuthorizationError {
 
     /// The set of unauthorized topics. Mirrors Java's
     /// `TopicAuthorizationException.unauthorizedTopics()`.
+    #[doc(alias = "org.apache.kafka.common.errors.TopicAuthorizationException#unauthorizedTopics")]
     pub fn unauthorized_topics(&self) -> &HashSet<String> {
         &self.unauthorized_topics
     }

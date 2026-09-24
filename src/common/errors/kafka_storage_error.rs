@@ -26,6 +26,7 @@ kafka_error_class! {
     ///    `KafkaStorageException` -> `InvalidMetadataException` ->
     ///   `RefreshRetriableException` -> `RetriableException` -> `ApiException` ->
     ///   `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.KafkaStorageException")]
     KafkaStorageError,
     code: Errors::KafkaStorageError,
     extends: [

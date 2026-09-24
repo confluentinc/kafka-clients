@@ -33,6 +33,7 @@ const SIZE_NOT_INITIALIZED: i32 = -1;
 /// Wraps the generated [`ResponseHeaderData`] and provides convenience methods
 /// for serialization, size computation, and parsing.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.ResponseHeader")]
 pub struct ResponseHeader {
     data: ResponseHeaderData,
     header_version: i16,
@@ -41,6 +42,7 @@ pub struct ResponseHeader {
 
 impl ResponseHeader {
     /// Creates a new `ResponseHeader` with the given correlation id and header version.
+    #[doc(alias = "org.apache.kafka.common.requests.ResponseHeader#ResponseHeader")]
     pub fn with_correlation_id(correlation_id: i32, header_version: i16) -> Self {
         let mut data = ResponseHeaderData::new();
         data.set_correlation_id(correlation_id);
@@ -48,21 +50,25 @@ impl ResponseHeader {
     }
 
     /// Creates a new `ResponseHeader` from existing data and a header version.
+    #[doc(alias = "org.apache.kafka.common.requests.ResponseHeader#ResponseHeader")]
     pub fn with_data(data: ResponseHeaderData, header_version: i16) -> Self {
         Self { data, header_version, size: SIZE_NOT_INITIALIZED }
     }
 
     /// Returns the correlation id of this response.
+    #[doc(alias = "org.apache.kafka.common.requests.ResponseHeader#correlationId")]
     pub fn correlation_id(&self) -> i32 {
         self.data.correlation_id
     }
 
     /// Returns the header version.
+    #[doc(alias = "org.apache.kafka.common.requests.ResponseHeader#headerVersion")]
     pub fn header_version(&self) -> i16 {
         self.header_version
     }
 
     /// Returns a reference to the underlying data.
+    #[doc(alias = "org.apache.kafka.common.requests.ResponseHeader#data")]
     pub fn data(&self) -> &ResponseHeaderData {
         &self.data
     }
@@ -81,6 +87,7 @@ impl ResponseHeader {
     /// # Errors
     ///
     /// Returns an error if size calculation fails.
+    #[doc(alias = "org.apache.kafka.common.requests.ResponseHeader#size")]
     pub fn size_with_cache(&mut self, cache: &mut ObjectSerializationCache) -> io::Result<i32> {
         let s = Message::size(&self.data, cache, self.header_version)?;
         self.size = s;
@@ -94,6 +101,7 @@ impl ResponseHeader {
     /// # Errors
     ///
     /// Returns an error if size calculation fails.
+    #[doc(alias = "org.apache.kafka.common.requests.ResponseHeader#size")]
     pub fn size(&mut self) -> io::Result<i32> {
         if self.size == SIZE_NOT_INITIALIZED {
             let mut cache = ObjectSerializationCache::new();
@@ -107,6 +115,7 @@ impl ResponseHeader {
     /// # Errors
     ///
     /// Returns an error if writing fails.
+    #[doc(alias = "org.apache.kafka.common.requests.ResponseHeader#write")]
     pub fn write(&mut self, buffer: &mut ByteBufferAccessor, cache: &ObjectSerializationCache) -> io::Result<()> {
         Message::write(&mut self.data, buffer, cache, self.header_version)
     }
@@ -118,6 +127,7 @@ impl ResponseHeader {
     /// # Errors
     ///
     /// Returns an error if parsing fails.
+    #[doc(alias = "org.apache.kafka.common.requests.ResponseHeader#parse")]
     pub fn parse(buffer: &mut dyn Readable, header_version: i16) -> io::Result<Self> {
         // Track consumed bytes via `remaining()` (on the `Readable` trait)
         // rather than `position()` (a concrete accessor method), so the header

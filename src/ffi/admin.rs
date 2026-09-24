@@ -285,6 +285,7 @@ unsafe fn handle_ref(admin: *const kafka_admin_AdminClient_t) -> &'static AdminH
 /// `kafka_admin_AdminClient_<method>`; the mock's own driver methods are named
 /// `kafka_admin_MockAdminClient_<method>` and take the same handle.
 #[repr(C)]
+#[doc(alias = "org.apache.kafka.clients.admin.AdminClient")]
 pub struct kafka_admin_AdminClient_t {
     _private: [u8; 0],
 }
@@ -1009,6 +1010,7 @@ fn sorted_entries<K: Ord, V>(map: HashMap<K, V>) -> Vec<(K, V)> {
 /// `configs(...)`; C cannot express overloads, so this handle accumulates the
 /// fields and [`NewTopicBuilder::build`] picks the matching Java constructor.
 #[repr(C)]
+#[doc(alias = "org.apache.kafka.clients.admin.NewTopic")]
 pub struct kafka_admin_NewTopic_t {
     _private: [u8; 0],
 }
@@ -1078,6 +1080,7 @@ unsafe fn new_topic_mut(topic: *mut kafka_admin_NewTopic_t) -> &'static mut NewT
 ///
 /// `name` must be NULL or a valid, null-terminated C string.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.clients.admin.NewTopic#NewTopic")]
 pub unsafe extern "C" fn kafka_admin_NewTopic_new(
     name: *const c_char,
     num_partitions: i32,
@@ -1201,6 +1204,7 @@ unsafe fn read_new_topics(topics: *const *const kafka_admin_NewTopic_t, count: i
 /// empty, because `CreatePartitionsRequest.json:36` marks `Assignments`
 /// `"nullableVersions": "0+"`.
 #[repr(C)]
+#[doc(alias = "org.apache.kafka.clients.admin.NewPartitions")]
 pub struct kafka_admin_NewPartitions_t {
     _private: [u8; 0],
 }
@@ -1278,6 +1282,7 @@ unsafe fn new_partitions_mut(partitions: *mut kafka_admin_NewPartitions_t) -> &'
 ///
 /// A non-null handle. Free it with [`kafka_admin_NewPartitions_destroy`].
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.clients.admin.NewPartitions#NewPartitions")]
 pub extern "C" fn kafka_admin_NewPartitions_new(
     total_count: i32,
     has_assignments: bool,
@@ -1521,12 +1526,14 @@ impl ConfigEntryC {
 /// Opaque handle to a `Config` (the set of configuration entries of one
 /// resource).
 #[repr(C)]
+#[doc(alias = "org.apache.kafka.clients.admin.Config")]
 pub struct kafka_admin_Config_t {
     _private: [u8; 0],
 }
 
 /// Opaque handle to a `ConfigEntry`.
 #[repr(C)]
+#[doc(alias = "org.apache.kafka.clients.admin.ConfigEntry")]
 pub struct kafka_admin_ConfigEntry_t {
     _private: [u8; 0],
 }
@@ -1623,6 +1630,7 @@ pub unsafe extern "C" fn kafka_admin_Config_find_entry(
 ///
 /// `entry` must be a valid borrowed pointer from a `Config` getter.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.clients.admin.ConfigEntry#name")]
 pub unsafe extern "C" fn kafka_admin_ConfigEntry_name(entry: *const kafka_admin_ConfigEntry_t) -> *const c_char {
     unsafe { config_entry_ref(entry) }.name_c.as_ptr()
 }
@@ -1634,6 +1642,7 @@ pub unsafe extern "C" fn kafka_admin_ConfigEntry_name(entry: *const kafka_admin_
 ///
 /// `entry` must be a valid borrowed pointer from a `Config` getter.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.clients.admin.ConfigEntry#value")]
 pub unsafe extern "C" fn kafka_admin_ConfigEntry_value(entry: *const kafka_admin_ConfigEntry_t) -> *const c_char {
     match &unsafe { config_entry_ref(entry) }.value_c {
         Some(value) => value.as_ptr(),
@@ -1651,6 +1660,7 @@ pub unsafe extern "C" fn kafka_admin_ConfigEntry_value(entry: *const kafka_admin
 ///
 /// `entry` must be a valid borrowed pointer from a `Config` getter.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.clients.admin.ConfigEntry#source")]
 pub unsafe extern "C" fn kafka_admin_ConfigEntry_source(entry: *const kafka_admin_ConfigEntry_t) -> *const c_char {
     unsafe { config_entry_ref(entry) }.source_c.as_ptr()
 }
@@ -1661,6 +1671,7 @@ pub unsafe extern "C" fn kafka_admin_ConfigEntry_source(entry: *const kafka_admi
 ///
 /// `entry` must be a valid borrowed pointer from a `Config` getter.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.clients.admin.ConfigEntry#isDefault")]
 pub unsafe extern "C" fn kafka_admin_ConfigEntry_is_default(entry: *const kafka_admin_ConfigEntry_t) -> bool {
     unsafe { config_entry_ref(entry) }.is_default
 }
@@ -1671,6 +1682,7 @@ pub unsafe extern "C" fn kafka_admin_ConfigEntry_is_default(entry: *const kafka_
 ///
 /// `entry` must be a valid borrowed pointer from a `Config` getter.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.clients.admin.ConfigEntry#isSensitive")]
 pub unsafe extern "C" fn kafka_admin_ConfigEntry_is_sensitive(entry: *const kafka_admin_ConfigEntry_t) -> bool {
     unsafe { config_entry_ref(entry) }.is_sensitive
 }
@@ -1681,6 +1693,7 @@ pub unsafe extern "C" fn kafka_admin_ConfigEntry_is_sensitive(entry: *const kafk
 ///
 /// `entry` must be a valid borrowed pointer from a `Config` getter.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.clients.admin.ConfigEntry#isReadOnly")]
 pub unsafe extern "C" fn kafka_admin_ConfigEntry_is_read_only(entry: *const kafka_admin_ConfigEntry_t) -> bool {
     unsafe { config_entry_ref(entry) }.is_read_only
 }
@@ -1695,6 +1708,7 @@ pub unsafe extern "C" fn kafka_admin_ConfigEntry_is_read_only(entry: *const kafk
 ///
 /// `entry` must be a valid borrowed pointer from a `Config` getter.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.clients.admin.ConfigEntry#type")]
 pub unsafe extern "C" fn kafka_admin_ConfigEntry_type(entry: *const kafka_admin_ConfigEntry_t) -> *const c_char {
     unsafe { config_entry_ref(entry) }.config_type_c.as_ptr()
 }
@@ -1706,6 +1720,7 @@ pub unsafe extern "C" fn kafka_admin_ConfigEntry_type(entry: *const kafka_admin_
 ///
 /// `entry` must be a valid borrowed pointer from a `Config` getter.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.clients.admin.ConfigEntry#documentation")]
 pub unsafe extern "C" fn kafka_admin_ConfigEntry_documentation(
     entry: *const kafka_admin_ConfigEntry_t,
 ) -> *const c_char {
@@ -1789,6 +1804,7 @@ fn synonym_at(entry: &ConfigEntryC, index: i32) -> Option<&ConfigSynonymC> {
 
 /// Opaque handle to a `CreateTopicsResult.TopicMetadataAndConfig`.
 #[repr(C)]
+#[doc(alias = "org.apache.kafka.clients.admin.CreateTopicsResult$TopicMetadataAndConfig")]
 pub struct kafka_admin_TopicMetadataAndConfig_t {
     _private: [u8; 0],
 }
@@ -1867,6 +1883,7 @@ pub unsafe extern "C" fn kafka_admin_TopicMetadataAndConfig_error(
 ///
 /// `mc` must be a valid borrowed pointer from a result-handle getter.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.clients.admin.CreateTopicsResult$TopicMetadataAndConfig#topicId")]
 pub unsafe extern "C" fn kafka_admin_TopicMetadataAndConfig_topic_id(
     mc: *const kafka_admin_TopicMetadataAndConfig_t,
 ) -> *const c_char {
@@ -1879,6 +1896,7 @@ pub unsafe extern "C" fn kafka_admin_TopicMetadataAndConfig_topic_id(
 ///
 /// `mc` must be a valid borrowed pointer from a result-handle getter.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.clients.admin.CreateTopicsResult$TopicMetadataAndConfig#numPartitions")]
 pub unsafe extern "C" fn kafka_admin_TopicMetadataAndConfig_num_partitions(
     mc: *const kafka_admin_TopicMetadataAndConfig_t,
 ) -> i32 {
@@ -1891,6 +1909,7 @@ pub unsafe extern "C" fn kafka_admin_TopicMetadataAndConfig_num_partitions(
 ///
 /// `mc` must be a valid borrowed pointer from a result-handle getter.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.clients.admin.CreateTopicsResult$TopicMetadataAndConfig#replicationFactor")]
 pub unsafe extern "C" fn kafka_admin_TopicMetadataAndConfig_replication_factor(
     mc: *const kafka_admin_TopicMetadataAndConfig_t,
 ) -> i32 {
@@ -1997,6 +2016,7 @@ fn config_entry_at(inner: &TopicMetadataAndConfigInner, index: i32) -> Option<&C
 
 /// Opaque handle to a `TopicPartitionInfo`.
 #[repr(C)]
+#[doc(alias = "org.apache.kafka.common.TopicPartitionInfo")]
 pub struct kafka_admin_TopicPartitionInfo_t {
     _private: [u8; 0],
 }
@@ -2056,6 +2076,7 @@ fn node_at(nodes: &[Node], index: i32) -> *const kafka_common_Node_t {
 ///
 /// `info` must be a valid borrowed pointer from a `TopicDescription` getter.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.common.TopicPartitionInfo#partition")]
 pub unsafe extern "C" fn kafka_admin_TopicPartitionInfo_partition(
     info: *const kafka_admin_TopicPartitionInfo_t,
 ) -> i32 {
@@ -2068,6 +2089,7 @@ pub unsafe extern "C" fn kafka_admin_TopicPartitionInfo_partition(
 ///
 /// `info` must be a valid borrowed pointer from a `TopicDescription` getter.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.common.TopicPartitionInfo#leader")]
 pub unsafe extern "C" fn kafka_admin_TopicPartitionInfo_leader(
     info: *const kafka_admin_TopicPartitionInfo_t,
 ) -> *const kafka_common_Node_t {
@@ -2120,6 +2142,7 @@ pub unsafe extern "C" fn kafka_admin_TopicPartitionInfo_isr_count(
 ///
 /// `info` must be a valid borrowed pointer from a `TopicDescription` getter.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.common.TopicPartitionInfo#isr")]
 pub unsafe extern "C" fn kafka_admin_TopicPartitionInfo_isr(
     info: *const kafka_admin_TopicPartitionInfo_t,
     index: i32,
@@ -2162,6 +2185,7 @@ pub unsafe extern "C" fn kafka_admin_TopicPartitionInfo_has_elr(info: *const kaf
 ///
 /// `info` must be a valid borrowed pointer from a `TopicDescription` getter.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.common.TopicPartitionInfo#elr")]
 pub unsafe extern "C" fn kafka_admin_TopicPartitionInfo_elr(
     info: *const kafka_admin_TopicPartitionInfo_t,
     index: i32,
@@ -2210,6 +2234,7 @@ pub unsafe extern "C" fn kafka_admin_TopicPartitionInfo_has_last_known_elr(
 ///
 /// `info` must be a valid borrowed pointer from a `TopicDescription` getter.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.common.TopicPartitionInfo#lastKnownElr")]
 pub unsafe extern "C" fn kafka_admin_TopicPartitionInfo_last_known_elr(
     info: *const kafka_admin_TopicPartitionInfo_t,
     index: i32,
@@ -2222,6 +2247,7 @@ pub unsafe extern "C" fn kafka_admin_TopicPartitionInfo_last_known_elr(
 
 /// Opaque handle to a `TopicDescription`.
 #[repr(C)]
+#[doc(alias = "org.apache.kafka.clients.admin.TopicDescription")]
 pub struct kafka_admin_TopicDescription_t {
     _private: [u8; 0],
 }
@@ -2266,6 +2292,7 @@ unsafe fn description_ref(description: *const kafka_admin_TopicDescription_t) ->
 ///
 /// `description` must be a valid borrowed pointer from a result-handle getter.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.clients.admin.TopicDescription#name")]
 pub unsafe extern "C" fn kafka_admin_TopicDescription_name(
     description: *const kafka_admin_TopicDescription_t,
 ) -> *const c_char {
@@ -2278,6 +2305,7 @@ pub unsafe extern "C" fn kafka_admin_TopicDescription_name(
 ///
 /// `description` must be a valid borrowed pointer from a result-handle getter.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.clients.admin.TopicDescription#topicId")]
 pub unsafe extern "C" fn kafka_admin_TopicDescription_topic_id(
     description: *const kafka_admin_TopicDescription_t,
 ) -> *const c_char {
@@ -2290,6 +2318,7 @@ pub unsafe extern "C" fn kafka_admin_TopicDescription_topic_id(
 ///
 /// `description` must be a valid borrowed pointer from a result-handle getter.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.clients.admin.TopicDescription#isInternal")]
 pub unsafe extern "C" fn kafka_admin_TopicDescription_is_internal(
     description: *const kafka_admin_TopicDescription_t,
 ) -> bool {
@@ -2377,6 +2406,7 @@ pub unsafe extern "C" fn kafka_admin_TopicDescription_authorized_operation(
 
 /// Opaque handle to a `TopicListing`.
 #[repr(C)]
+#[doc(alias = "org.apache.kafka.clients.admin.TopicListing")]
 pub struct kafka_admin_TopicListing_t {
     _private: [u8; 0],
 }
@@ -2413,6 +2443,7 @@ unsafe fn listing_ref(listing: *const kafka_admin_TopicListing_t) -> &'static To
 ///
 /// `listing` must be a valid borrowed pointer from a result-handle getter.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.clients.admin.TopicListing#name")]
 pub unsafe extern "C" fn kafka_admin_TopicListing_name(listing: *const kafka_admin_TopicListing_t) -> *const c_char {
     unsafe { listing_ref(listing) }.name_c.as_ptr()
 }
@@ -2423,6 +2454,7 @@ pub unsafe extern "C" fn kafka_admin_TopicListing_name(listing: *const kafka_adm
 ///
 /// `listing` must be a valid borrowed pointer from a result-handle getter.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.clients.admin.TopicListing#topicId")]
 pub unsafe extern "C" fn kafka_admin_TopicListing_topic_id(
     listing: *const kafka_admin_TopicListing_t,
 ) -> *const c_char {
@@ -2435,6 +2467,7 @@ pub unsafe extern "C" fn kafka_admin_TopicListing_topic_id(
 ///
 /// `listing` must be a valid borrowed pointer from a result-handle getter.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.clients.admin.TopicListing#isInternal")]
 pub unsafe extern "C" fn kafka_admin_TopicListing_is_internal(listing: *const kafka_admin_TopicListing_t) -> bool {
     unsafe { listing_ref(listing) }.internal
 }
@@ -2450,6 +2483,7 @@ pub unsafe extern "C" fn kafka_admin_TopicListing_is_internal(listing: *const ka
 
 /// Opaque handle to a flattened `CreateTopicsResult`, keyed by topic name.
 #[repr(C)]
+#[doc(alias = "org.apache.kafka.clients.admin.CreateTopicsResult")]
 pub struct kafka_admin_CreateTopicsResult_t {
     _private: [u8; 0],
 }
@@ -2581,6 +2615,7 @@ pub unsafe extern "C" fn kafka_admin_CreateTopicsResult_destroy(result: *mut kaf
 
 /// Opaque handle to a flattened `DeleteTopicsResult`.
 #[repr(C)]
+#[doc(alias = "org.apache.kafka.clients.admin.DeleteTopicsResult")]
 pub struct kafka_admin_DeleteTopicsResult_t {
     _private: [u8; 0],
 }
@@ -2684,6 +2719,7 @@ pub unsafe extern "C" fn kafka_admin_DeleteTopicsResult_destroy(result: *mut kaf
 
 /// Opaque handle to a `ListTopicsResult`, keyed by topic name.
 #[repr(C)]
+#[doc(alias = "org.apache.kafka.clients.admin.ListTopicsResult")]
 pub struct kafka_admin_ListTopicsResult_t {
     _private: [u8; 0],
 }
@@ -2776,6 +2812,7 @@ pub unsafe extern "C" fn kafka_admin_ListTopicsResult_destroy(result: *mut kafka
 
 /// Opaque handle to a flattened `DescribeTopicsResult`.
 #[repr(C)]
+#[doc(alias = "org.apache.kafka.clients.admin.DescribeTopicsResult")]
 pub struct kafka_admin_DescribeTopicsResult_t {
     _private: [u8; 0],
 }
@@ -2907,6 +2944,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeTopicsResult_destroy(result: *mut k
 
 /// Opaque handle to a flattened `CreatePartitionsResult`, keyed by topic name.
 #[repr(C)]
+#[doc(alias = "org.apache.kafka.clients.admin.CreatePartitionsResult")]
 pub struct kafka_admin_CreatePartitionsResult_t {
     _private: [u8; 0],
 }
@@ -3009,6 +3047,7 @@ pub unsafe extern "C" fn kafka_admin_CreatePartitionsResult_destroy(result: *mut
 
 /// Opaque handle to a flattened `DeleteRecordsResult`, keyed by topic partition.
 #[repr(C)]
+#[doc(alias = "org.apache.kafka.clients.admin.DeleteRecordsResult")]
 pub struct kafka_admin_DeleteRecordsResult_t {
     _private: [u8; 0],
 }
@@ -4321,6 +4360,7 @@ struct ReplicaInfoC {
 
 /// Opaque handle to a `LogDirDescription`.
 #[repr(C)]
+#[doc(alias = "org.apache.kafka.clients.admin.LogDirDescription")]
 pub struct kafka_admin_LogDirDescription_t {
     _private: [u8; 0],
 }
@@ -4379,6 +4419,7 @@ unsafe fn log_dir_ref(description: *const kafka_admin_LogDirDescription_t) -> &'
 ///
 /// `description` must be a valid borrowed pointer from a log-dir map getter.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.clients.admin.LogDirDescription#error")]
 pub unsafe extern "C" fn kafka_admin_LogDirDescription_error(
     description: *const kafka_admin_LogDirDescription_t,
 ) -> *const kafka_common_Error_t {
@@ -4392,6 +4433,7 @@ pub unsafe extern "C" fn kafka_admin_LogDirDescription_error(
 ///
 /// `description` must be a valid borrowed pointer from a log-dir map getter.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.clients.admin.LogDirDescription#totalBytes")]
 pub unsafe extern "C" fn kafka_admin_LogDirDescription_total_bytes(
     description: *const kafka_admin_LogDirDescription_t,
 ) -> i64 {
@@ -4405,6 +4447,7 @@ pub unsafe extern "C" fn kafka_admin_LogDirDescription_total_bytes(
 ///
 /// `description` must be a valid borrowed pointer from a log-dir map getter.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.clients.admin.LogDirDescription#usableBytes")]
 pub unsafe extern "C" fn kafka_admin_LogDirDescription_usable_bytes(
     description: *const kafka_admin_LogDirDescription_t,
 ) -> i64 {
@@ -4599,6 +4642,7 @@ pub unsafe extern "C" fn kafka_admin_LogDirDescriptionMap_get_value(
 
 /// Opaque handle to a `DescribeReplicaLogDirsResult.ReplicaLogDirInfo`.
 #[repr(C)]
+#[doc(alias = "org.apache.kafka.clients.admin.DescribeReplicaLogDirsResult$ReplicaLogDirInfo")]
 pub struct kafka_admin_ReplicaLogDirInfo_t {
     _private: [u8; 0],
 }
@@ -4641,6 +4685,7 @@ unsafe fn replica_log_dir_info_ref(info: *const kafka_admin_ReplicaLogDirInfo_t)
 ///
 /// `info` must be a valid borrowed pointer from a result-handle getter.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.clients.admin.DescribeReplicaLogDirsResult$ReplicaLogDirInfo#getCurrentReplicaLogDir")]
 pub unsafe extern "C" fn kafka_admin_ReplicaLogDirInfo_current_replica_log_dir(
     info: *const kafka_admin_ReplicaLogDirInfo_t,
 ) -> *const c_char {
@@ -4657,6 +4702,9 @@ pub unsafe extern "C" fn kafka_admin_ReplicaLogDirInfo_current_replica_log_dir(
 ///
 /// `info` must be a valid borrowed pointer from a result-handle getter.
 #[unsafe(no_mangle)]
+#[doc(
+    alias = "org.apache.kafka.clients.admin.DescribeReplicaLogDirsResult$ReplicaLogDirInfo#getCurrentReplicaOffsetLag"
+)]
 pub unsafe extern "C" fn kafka_admin_ReplicaLogDirInfo_current_replica_offset_lag(
     info: *const kafka_admin_ReplicaLogDirInfo_t,
 ) -> i64 {
@@ -4670,6 +4718,7 @@ pub unsafe extern "C" fn kafka_admin_ReplicaLogDirInfo_current_replica_offset_la
 ///
 /// `info` must be a valid borrowed pointer from a result-handle getter.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.clients.admin.DescribeReplicaLogDirsResult$ReplicaLogDirInfo#getFutureReplicaLogDir")]
 pub unsafe extern "C" fn kafka_admin_ReplicaLogDirInfo_future_replica_log_dir(
     info: *const kafka_admin_ReplicaLogDirInfo_t,
 ) -> *const c_char {
@@ -4685,6 +4734,9 @@ pub unsafe extern "C" fn kafka_admin_ReplicaLogDirInfo_future_replica_log_dir(
 ///
 /// `info` must be a valid borrowed pointer from a result-handle getter.
 #[unsafe(no_mangle)]
+#[doc(
+    alias = "org.apache.kafka.clients.admin.DescribeReplicaLogDirsResult$ReplicaLogDirInfo#getFutureReplicaOffsetLag"
+)]
 pub unsafe extern "C" fn kafka_admin_ReplicaLogDirInfo_future_replica_offset_lag(
     info: *const kafka_admin_ReplicaLogDirInfo_t,
 ) -> i64 {
@@ -4708,6 +4760,7 @@ struct DescribeClusterOutcome {
 
 /// Opaque handle to a `DescribeClusterResult`.
 #[repr(C)]
+#[doc(alias = "org.apache.kafka.clients.admin.DescribeClusterResult")]
 pub struct kafka_admin_DescribeClusterResult_t {
     _private: [u8; 0],
 }
@@ -4758,6 +4811,7 @@ unsafe fn describe_cluster_result_ref(
 ///
 /// `result` must be a valid `describe_cluster` result handle.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.clients.admin.DescribeClusterResult#clusterId")]
 pub unsafe extern "C" fn kafka_admin_DescribeClusterResult_cluster_id(
     result: *const kafka_admin_DescribeClusterResult_t,
 ) -> *const c_char {
@@ -4797,6 +4851,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeClusterResult_get_node(
 ///
 /// `result` must be a valid `describe_cluster` result handle.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.clients.admin.DescribeClusterResult#controller")]
 pub unsafe extern "C" fn kafka_admin_DescribeClusterResult_controller(
     result: *const kafka_admin_DescribeClusterResult_t,
 ) -> *const kafka_common_Node_t {
@@ -5003,6 +5058,7 @@ type DescribeConfigsOutcomes = HashMap<ConfigResource, Result<Config, Error>>;
 /// Opaque handle to a flattened `DescribeConfigsResult`, keyed by config
 /// resource.
 #[repr(C)]
+#[doc(alias = "org.apache.kafka.clients.admin.DescribeConfigsResult")]
 pub struct kafka_admin_DescribeConfigsResult_t {
     _private: [u8; 0],
 }
@@ -5292,6 +5348,7 @@ type AlterConfigsOutcomes = HashMap<ConfigResource, Result<(), Error>>;
 
 /// Opaque handle to a flattened `AlterConfigsResult`, keyed by config resource.
 #[repr(C)]
+#[doc(alias = "org.apache.kafka.clients.admin.AlterConfigsResult")]
 pub struct kafka_admin_AlterConfigsResult_t {
     _private: [u8; 0],
 }
@@ -5555,6 +5612,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_incremental_alter_configs_async
 
 /// Opaque handle to a `ListConfigResourcesResult`.
 #[repr(C)]
+#[doc(alias = "org.apache.kafka.clients.admin.ListConfigResourcesResult")]
 pub struct kafka_admin_ListConfigResourcesResult_t {
     _private: [u8; 0],
 }
@@ -5765,6 +5823,7 @@ unsafe fn read_config_resource_types(type_codes: *const i32, count: i32) -> Hash
 
 /// Opaque handle to a `ListClientMetricsResourcesResult`.
 #[repr(C)]
+#[doc(alias = "org.apache.kafka.clients.admin.ListClientMetricsResourcesResult")]
 pub struct kafka_admin_ListClientMetricsResourcesResult_t {
     _private: [u8; 0],
 }
@@ -5932,6 +5991,7 @@ type DescribeLogDirsOutcomes = HashMap<i32, Result<HashMap<String, LogDirDescrip
 
 /// Opaque handle to a flattened `DescribeLogDirsResult`, keyed by broker id.
 #[repr(C)]
+#[doc(alias = "org.apache.kafka.clients.admin.DescribeLogDirsResult")]
 pub struct kafka_admin_DescribeLogDirsResult_t {
     _private: [u8; 0],
 }
@@ -6178,6 +6238,7 @@ type AlterReplicaLogDirsOutcomes = HashMap<TopicPartitionReplica, Result<(), Err
 
 /// Opaque handle to a flattened `AlterReplicaLogDirsResult`, keyed by replica.
 #[repr(C)]
+#[doc(alias = "org.apache.kafka.clients.admin.AlterReplicaLogDirsResult")]
 pub struct kafka_admin_AlterReplicaLogDirsResult_t {
     _private: [u8; 0],
 }
@@ -6486,6 +6547,7 @@ type DescribeReplicaLogDirsOutcomes = HashMap<TopicPartitionReplica, Result<Repl
 /// Opaque handle to a flattened `DescribeReplicaLogDirsResult`, keyed by
 /// replica.
 #[repr(C)]
+#[doc(alias = "org.apache.kafka.clients.admin.DescribeReplicaLogDirsResult")]
 pub struct kafka_admin_DescribeReplicaLogDirsResult_t {
     _private: [u8; 0],
 }
@@ -6809,6 +6871,7 @@ const UNKNOWN_BROKER_ID: i32 = -1;
 /// Borrowed from the owning `listPartitionReassignments` result handle; valid
 /// until that handle is destroyed. Do not free it.
 #[repr(C)]
+#[doc(alias = "org.apache.kafka.clients.admin.PartitionReassignment")]
 pub struct kafka_admin_PartitionReassignment_t {
     _private: [u8; 0],
 }
@@ -6936,6 +6999,7 @@ pub unsafe extern "C" fn kafka_admin_PartitionReassignment_removing_replica(
 /// Borrowed from the owning `listOffsets` result handle; valid until that handle
 /// is destroyed. Do not free it.
 #[repr(C)]
+#[doc(alias = "org.apache.kafka.clients.admin.ListOffsetsResult$ListOffsetsResultInfo")]
 pub struct kafka_admin_ListOffsetsResultInfo_t {
     _private: [u8; 0],
 }
@@ -6967,6 +7031,7 @@ unsafe fn list_offsets_info_ref(
 ///
 /// `info` must be a valid borrowed list-offsets info pointer.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.clients.admin.ListOffsetsResult$ListOffsetsResultInfo#offset")]
 pub unsafe extern "C" fn kafka_admin_ListOffsetsResultInfo_offset(
     info: *const kafka_admin_ListOffsetsResultInfo_t,
 ) -> i64 {
@@ -6981,6 +7046,7 @@ pub unsafe extern "C" fn kafka_admin_ListOffsetsResultInfo_offset(
 ///
 /// `info` must be a valid borrowed list-offsets info pointer.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.clients.admin.ListOffsetsResult$ListOffsetsResultInfo#timestamp")]
 pub unsafe extern "C" fn kafka_admin_ListOffsetsResultInfo_timestamp(
     info: *const kafka_admin_ListOffsetsResultInfo_t,
 ) -> i64 {
@@ -6995,6 +7061,7 @@ pub unsafe extern "C" fn kafka_admin_ListOffsetsResultInfo_timestamp(
 /// `info` must be a valid borrowed list-offsets info pointer; `out_epoch` must
 /// be null or writable.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.clients.admin.ListOffsetsResult$ListOffsetsResultInfo#leaderEpoch")]
 pub unsafe extern "C" fn kafka_admin_ListOffsetsResultInfo_leader_epoch(
     info: *const kafka_admin_ListOffsetsResultInfo_t,
     out_epoch: *mut i32,
@@ -7285,6 +7352,7 @@ fn sorted_partition_entries<V>(map: HashMap<TopicPartition, V>) -> Vec<(TopicPar
 
 /// Opaque handle to a flattened `ElectLeadersResult`, keyed by topic partition.
 #[repr(C)]
+#[doc(alias = "org.apache.kafka.clients.admin.ElectLeadersResult")]
 pub struct kafka_admin_ElectLeadersResult_t {
     _private: [u8; 0],
 }
@@ -7406,6 +7474,7 @@ pub unsafe extern "C" fn kafka_admin_ElectLeadersResult_destroy(result: *mut kaf
 /// Opaque handle to a flattened `AlterPartitionReassignmentsResult`, keyed by
 /// topic partition.
 #[repr(C)]
+#[doc(alias = "org.apache.kafka.clients.admin.AlterPartitionReassignmentsResult")]
 pub struct kafka_admin_AlterPartitionReassignmentsResult_t {
     _private: [u8; 0],
 }
@@ -7539,6 +7608,7 @@ pub unsafe extern "C" fn kafka_admin_AlterPartitionReassignmentsResult_destroy(
 /// Opaque handle to a flattened `ListPartitionReassignmentsResult`, keyed by
 /// topic partition.
 #[repr(C)]
+#[doc(alias = "org.apache.kafka.clients.admin.ListPartitionReassignmentsResult")]
 pub struct kafka_admin_ListPartitionReassignmentsResult_t {
     _private: [u8; 0],
 }
@@ -7672,6 +7742,7 @@ pub unsafe extern "C" fn kafka_admin_ListPartitionReassignmentsResult_destroy(
 
 /// Opaque handle to a flattened `ListOffsetsResult`, keyed by topic partition.
 #[repr(C)]
+#[doc(alias = "org.apache.kafka.clients.admin.ListOffsetsResult")]
 pub struct kafka_admin_ListOffsetsResult_t {
     _private: [u8; 0],
 }
@@ -8455,6 +8526,7 @@ unsafe fn write_optional<T: Copy>(value: Option<T>, out: *mut T) -> bool {
 /// Borrowed from the owning `list_groups` result handle; valid until that
 /// handle is destroyed. Do not free it.
 #[repr(C)]
+#[doc(alias = "org.apache.kafka.clients.admin.GroupListing")]
 pub struct kafka_admin_GroupListing_t {
     _private: [u8; 0],
 }
@@ -8501,6 +8573,7 @@ unsafe fn group_listing_ref(listing: *const kafka_admin_GroupListing_t) -> &'sta
 ///
 /// `listing` must be a valid borrowed group-listing pointer.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.clients.admin.GroupListing#groupId")]
 pub unsafe extern "C" fn kafka_admin_GroupListing_group_id(
     listing: *const kafka_admin_GroupListing_t,
 ) -> *const c_char {
@@ -8531,6 +8604,7 @@ pub unsafe extern "C" fn kafka_admin_GroupListing_group_type(
 ///
 /// `listing` must be a valid borrowed group-listing pointer.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.clients.admin.GroupListing#protocol")]
 pub unsafe extern "C" fn kafka_admin_GroupListing_protocol(
     listing: *const kafka_admin_GroupListing_t,
 ) -> *const c_char {
@@ -8547,6 +8621,7 @@ pub unsafe extern "C" fn kafka_admin_GroupListing_protocol(
 ///
 /// `listing` must be a valid borrowed group-listing pointer.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.clients.admin.GroupListing#groupState")]
 pub unsafe extern "C" fn kafka_admin_GroupListing_group_state(
     listing: *const kafka_admin_GroupListing_t,
 ) -> *const c_char {
@@ -8560,6 +8635,7 @@ pub unsafe extern "C" fn kafka_admin_GroupListing_group_state(
 ///
 /// `listing` must be a valid borrowed group-listing pointer.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.clients.admin.GroupListing#isSimpleConsumerGroup")]
 pub unsafe extern "C" fn kafka_admin_GroupListing_is_simple_consumer_group(
     listing: *const kafka_admin_GroupListing_t,
 ) -> bool {
@@ -8573,6 +8649,7 @@ pub unsafe extern "C" fn kafka_admin_GroupListing_is_simple_consumer_group(
 /// Borrowed from the owning `list_consumer_groups` result handle; valid until
 /// that handle is destroyed. Do not free it.
 #[repr(C)]
+#[doc(alias = "org.apache.kafka.clients.admin.ConsumerGroupListing")]
 pub struct kafka_admin_ConsumerGroupListing_t {
     _private: [u8; 0],
 }
@@ -8617,6 +8694,7 @@ unsafe fn consumer_group_listing_ref(
 ///
 /// `listing` must be a valid borrowed consumer-group-listing pointer.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.clients.admin.ConsumerGroupListing#groupId")]
 pub unsafe extern "C" fn kafka_admin_ConsumerGroupListing_group_id(
     listing: *const kafka_admin_ConsumerGroupListing_t,
 ) -> *const c_char {
@@ -8629,6 +8707,7 @@ pub unsafe extern "C" fn kafka_admin_ConsumerGroupListing_group_id(
 ///
 /// `listing` must be a valid borrowed consumer-group-listing pointer.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.clients.admin.ConsumerGroupListing#isSimpleConsumerGroup")]
 pub unsafe extern "C" fn kafka_admin_ConsumerGroupListing_is_simple_consumer_group(
     listing: *const kafka_admin_ConsumerGroupListing_t,
 ) -> bool {
@@ -8642,6 +8721,7 @@ pub unsafe extern "C" fn kafka_admin_ConsumerGroupListing_is_simple_consumer_gro
 ///
 /// `listing` must be a valid borrowed consumer-group-listing pointer.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.clients.admin.ConsumerGroupListing#groupState")]
 pub unsafe extern "C" fn kafka_admin_ConsumerGroupListing_group_state(
     listing: *const kafka_admin_ConsumerGroupListing_t,
 ) -> *const c_char {
@@ -8659,6 +8739,7 @@ pub unsafe extern "C" fn kafka_admin_ConsumerGroupListing_group_state(
 ///
 /// `listing` must be a valid borrowed consumer-group-listing pointer.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.clients.admin.ConsumerGroupListing#state")]
 pub unsafe extern "C" fn kafka_admin_ConsumerGroupListing_state(
     listing: *const kafka_admin_ConsumerGroupListing_t,
 ) -> *const c_char {
@@ -8684,6 +8765,7 @@ pub unsafe extern "C" fn kafka_admin_ConsumerGroupListing_group_type(
 /// Borrowed from the owning `MemberDescription`; valid until the enclosing
 /// result handle is destroyed. Do not free it.
 #[repr(C)]
+#[doc(alias = "org.apache.kafka.clients.admin.MemberAssignment")]
 pub struct kafka_admin_MemberAssignment_t {
     _private: [u8; 0],
 }
@@ -8768,6 +8850,7 @@ pub unsafe extern "C" fn kafka_admin_MemberAssignment_get_partition(
 /// Borrowed from the owning group description; valid until the enclosing result
 /// handle is destroyed. Do not free it.
 #[repr(C)]
+#[doc(alias = "org.apache.kafka.clients.admin.MemberDescription")]
 pub struct kafka_admin_MemberDescription_t {
     _private: [u8; 0],
 }
@@ -8817,6 +8900,7 @@ unsafe fn member_description_ref(member: *const kafka_admin_MemberDescription_t)
 ///
 /// `member` must be a valid borrowed member-description pointer.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.clients.admin.MemberDescription#consumerId")]
 pub unsafe extern "C" fn kafka_admin_MemberDescription_consumer_id(
     member: *const kafka_admin_MemberDescription_t,
 ) -> *const c_char {
@@ -8831,6 +8915,7 @@ pub unsafe extern "C" fn kafka_admin_MemberDescription_consumer_id(
 ///
 /// `member` must be a valid borrowed member-description pointer.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.clients.admin.MemberDescription#groupInstanceId")]
 pub unsafe extern "C" fn kafka_admin_MemberDescription_group_instance_id(
     member: *const kafka_admin_MemberDescription_t,
 ) -> *const c_char {
@@ -8844,6 +8929,7 @@ pub unsafe extern "C" fn kafka_admin_MemberDescription_group_instance_id(
 ///
 /// `member` must be a valid borrowed member-description pointer.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.clients.admin.MemberDescription#rackId")]
 pub unsafe extern "C" fn kafka_admin_MemberDescription_rack_id(
     member: *const kafka_admin_MemberDescription_t,
 ) -> *const c_char {
@@ -8856,6 +8942,7 @@ pub unsafe extern "C" fn kafka_admin_MemberDescription_rack_id(
 ///
 /// `member` must be a valid borrowed member-description pointer.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.clients.admin.MemberDescription#clientId")]
 pub unsafe extern "C" fn kafka_admin_MemberDescription_client_id(
     member: *const kafka_admin_MemberDescription_t,
 ) -> *const c_char {
@@ -8868,6 +8955,7 @@ pub unsafe extern "C" fn kafka_admin_MemberDescription_client_id(
 ///
 /// `member` must be a valid borrowed member-description pointer.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.clients.admin.MemberDescription#host")]
 pub unsafe extern "C" fn kafka_admin_MemberDescription_host(
     member: *const kafka_admin_MemberDescription_t,
 ) -> *const c_char {
@@ -8882,6 +8970,7 @@ pub unsafe extern "C" fn kafka_admin_MemberDescription_host(
 ///
 /// `member` must be a valid borrowed member-description pointer.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.clients.admin.MemberDescription#assignment")]
 pub unsafe extern "C" fn kafka_admin_MemberDescription_assignment(
     member: *const kafka_admin_MemberDescription_t,
 ) -> *const kafka_admin_MemberAssignment_t {
@@ -8898,6 +8987,7 @@ pub unsafe extern "C" fn kafka_admin_MemberDescription_assignment(
 ///
 /// `member` must be a valid borrowed member-description pointer.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.clients.admin.MemberDescription#targetAssignment")]
 pub unsafe extern "C" fn kafka_admin_MemberDescription_target_assignment(
     member: *const kafka_admin_MemberDescription_t,
 ) -> *const kafka_admin_MemberAssignment_t {
@@ -8915,6 +9005,7 @@ pub unsafe extern "C" fn kafka_admin_MemberDescription_target_assignment(
 /// `member` must be a valid borrowed member-description pointer; `out_epoch`
 /// must be null or writable.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.clients.admin.MemberDescription#memberEpoch")]
 pub unsafe extern "C" fn kafka_admin_MemberDescription_member_epoch(
     member: *const kafka_admin_MemberDescription_t,
     out_epoch: *mut i32,
@@ -8931,6 +9022,7 @@ pub unsafe extern "C" fn kafka_admin_MemberDescription_member_epoch(
 /// `member` must be a valid borrowed member-description pointer;
 /// `out_upgraded` must be null or writable.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.clients.admin.MemberDescription#upgraded")]
 pub unsafe extern "C" fn kafka_admin_MemberDescription_upgraded(
     member: *const kafka_admin_MemberDescription_t,
     out_upgraded: *mut bool,
@@ -8980,6 +9072,7 @@ fn optional_node_ptr(node: Option<&Node>) -> *const kafka_common_Node_t {
 /// Borrowed from the owning `describe_consumer_groups` result handle; valid
 /// until that handle is destroyed. Do not free it.
 #[repr(C)]
+#[doc(alias = "org.apache.kafka.clients.admin.ConsumerGroupDescription")]
 pub struct kafka_admin_ConsumerGroupDescription_t {
     _private: [u8; 0],
 }
@@ -9039,6 +9132,7 @@ unsafe fn consumer_group_description_ref(
 ///
 /// `description` must be a valid borrowed consumer-group-description pointer.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.clients.admin.ConsumerGroupDescription#groupId")]
 pub unsafe extern "C" fn kafka_admin_ConsumerGroupDescription_group_id(
     description: *const kafka_admin_ConsumerGroupDescription_t,
 ) -> *const c_char {
@@ -9051,6 +9145,7 @@ pub unsafe extern "C" fn kafka_admin_ConsumerGroupDescription_group_id(
 ///
 /// `description` must be a valid borrowed consumer-group-description pointer.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.clients.admin.ConsumerGroupDescription#isSimpleConsumerGroup")]
 pub unsafe extern "C" fn kafka_admin_ConsumerGroupDescription_is_simple_consumer_group(
     description: *const kafka_admin_ConsumerGroupDescription_t,
 ) -> bool {
@@ -9091,6 +9186,7 @@ pub unsafe extern "C" fn kafka_admin_ConsumerGroupDescription_get_member(
 ///
 /// `description` must be a valid borrowed consumer-group-description pointer.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.clients.admin.ConsumerGroupDescription#partitionAssignor")]
 pub unsafe extern "C" fn kafka_admin_ConsumerGroupDescription_partition_assignor(
     description: *const kafka_admin_ConsumerGroupDescription_t,
 ) -> *const c_char {
@@ -9121,6 +9217,7 @@ pub unsafe extern "C" fn kafka_admin_ConsumerGroupDescription_group_type(
 ///
 /// `description` must be a valid borrowed consumer-group-description pointer.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.clients.admin.ConsumerGroupDescription#state")]
 pub unsafe extern "C" fn kafka_admin_ConsumerGroupDescription_state(
     description: *const kafka_admin_ConsumerGroupDescription_t,
 ) -> *const c_char {
@@ -9134,6 +9231,7 @@ pub unsafe extern "C" fn kafka_admin_ConsumerGroupDescription_state(
 ///
 /// `description` must be a valid borrowed consumer-group-description pointer.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.clients.admin.ConsumerGroupDescription#groupState")]
 pub unsafe extern "C" fn kafka_admin_ConsumerGroupDescription_group_state(
     description: *const kafka_admin_ConsumerGroupDescription_t,
 ) -> *const c_char {
@@ -9147,6 +9245,7 @@ pub unsafe extern "C" fn kafka_admin_ConsumerGroupDescription_group_state(
 ///
 /// `description` must be a valid borrowed consumer-group-description pointer.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.clients.admin.ConsumerGroupDescription#coordinator")]
 pub unsafe extern "C" fn kafka_admin_ConsumerGroupDescription_coordinator(
     description: *const kafka_admin_ConsumerGroupDescription_t,
 ) -> *const kafka_common_Node_t {
@@ -9217,6 +9316,7 @@ pub unsafe extern "C" fn kafka_admin_ConsumerGroupDescription_authorized_operati
 /// `description` must be a valid borrowed consumer-group-description pointer;
 /// `out_epoch` must be null or writable.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.clients.admin.ConsumerGroupDescription#groupEpoch")]
 pub unsafe extern "C" fn kafka_admin_ConsumerGroupDescription_group_epoch(
     description: *const kafka_admin_ConsumerGroupDescription_t,
     out_epoch: *mut i32,
@@ -9232,6 +9332,7 @@ pub unsafe extern "C" fn kafka_admin_ConsumerGroupDescription_group_epoch(
 /// `description` must be a valid borrowed consumer-group-description pointer;
 /// `out_epoch` must be null or writable.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.clients.admin.ConsumerGroupDescription#targetAssignmentEpoch")]
 pub unsafe extern "C" fn kafka_admin_ConsumerGroupDescription_target_assignment_epoch(
     description: *const kafka_admin_ConsumerGroupDescription_t,
     out_epoch: *mut i32,
@@ -9245,6 +9346,7 @@ pub unsafe extern "C" fn kafka_admin_ConsumerGroupDescription_target_assignment_
 /// Borrowed from the owning `describe_classic_groups` result handle; valid
 /// until that handle is destroyed. Do not free it.
 #[repr(C)]
+#[doc(alias = "org.apache.kafka.clients.admin.ClassicGroupDescription")]
 pub struct kafka_admin_ClassicGroupDescription_t {
     _private: [u8; 0],
 }
@@ -9298,6 +9400,7 @@ unsafe fn classic_group_description_ref(
 ///
 /// `description` must be a valid borrowed classic-group-description pointer.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.clients.admin.ClassicGroupDescription#groupId")]
 pub unsafe extern "C" fn kafka_admin_ClassicGroupDescription_group_id(
     description: *const kafka_admin_ClassicGroupDescription_t,
 ) -> *const c_char {
@@ -9310,6 +9413,7 @@ pub unsafe extern "C" fn kafka_admin_ClassicGroupDescription_group_id(
 ///
 /// `description` must be a valid borrowed classic-group-description pointer.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.clients.admin.ClassicGroupDescription#protocol")]
 pub unsafe extern "C" fn kafka_admin_ClassicGroupDescription_protocol(
     description: *const kafka_admin_ClassicGroupDescription_t,
 ) -> *const c_char {
@@ -9323,6 +9427,7 @@ pub unsafe extern "C" fn kafka_admin_ClassicGroupDescription_protocol(
 ///
 /// `description` must be a valid borrowed classic-group-description pointer.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.clients.admin.ClassicGroupDescription#protocolData")]
 pub unsafe extern "C" fn kafka_admin_ClassicGroupDescription_protocol_data(
     description: *const kafka_admin_ClassicGroupDescription_t,
 ) -> *const c_char {
@@ -9335,6 +9440,7 @@ pub unsafe extern "C" fn kafka_admin_ClassicGroupDescription_protocol_data(
 ///
 /// `description` must be a valid borrowed classic-group-description pointer.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.clients.admin.ClassicGroupDescription#isSimpleConsumerGroup")]
 pub unsafe extern "C" fn kafka_admin_ClassicGroupDescription_is_simple_consumer_group(
     description: *const kafka_admin_ClassicGroupDescription_t,
 ) -> bool {
@@ -9373,6 +9479,7 @@ pub unsafe extern "C" fn kafka_admin_ClassicGroupDescription_get_member(
 ///
 /// `description` must be a valid borrowed classic-group-description pointer.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.clients.admin.ClassicGroupDescription#state")]
 pub unsafe extern "C" fn kafka_admin_ClassicGroupDescription_state(
     description: *const kafka_admin_ClassicGroupDescription_t,
 ) -> *const c_char {
@@ -9386,6 +9493,7 @@ pub unsafe extern "C" fn kafka_admin_ClassicGroupDescription_state(
 ///
 /// `description` must be a valid borrowed classic-group-description pointer.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.clients.admin.ClassicGroupDescription#coordinator")]
 pub unsafe extern "C" fn kafka_admin_ClassicGroupDescription_coordinator(
     description: *const kafka_admin_ClassicGroupDescription_t,
 ) -> *const kafka_common_Node_t {
@@ -10247,6 +10355,7 @@ fn submit_remove_members_from_consumer_group(
 
 /// Opaque handle to a flattened `ListGroupsResult`.
 #[repr(C)]
+#[doc(alias = "org.apache.kafka.clients.admin.ListGroupsResult")]
 pub struct kafka_admin_ListGroupsResult_t {
     _private: [u8; 0],
 }
@@ -10365,6 +10474,7 @@ pub unsafe extern "C" fn kafka_admin_ListGroupsResult_destroy(result: *mut kafka
 
 /// Opaque handle to a flattened `ListConsumerGroupsResult`.
 #[repr(C)]
+#[doc(alias = "org.apache.kafka.clients.admin.ListConsumerGroupsResult")]
 pub struct kafka_admin_ListConsumerGroupsResult_t {
     _private: [u8; 0],
 }
@@ -10477,6 +10587,7 @@ pub unsafe extern "C" fn kafka_admin_ListConsumerGroupsResult_destroy(
 /// Opaque handle to a flattened `DescribeConsumerGroupsResult`, keyed by group
 /// id.
 #[repr(C)]
+#[doc(alias = "org.apache.kafka.clients.admin.DescribeConsumerGroupsResult")]
 pub struct kafka_admin_DescribeConsumerGroupsResult_t {
     _private: [u8; 0],
 }
@@ -10619,6 +10730,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeConsumerGroupsResult_destroy(
 /// Opaque handle to a flattened `DescribeClassicGroupsResult`, keyed by group
 /// id.
 #[repr(C)]
+#[doc(alias = "org.apache.kafka.clients.admin.DescribeClassicGroupsResult")]
 pub struct kafka_admin_DescribeClassicGroupsResult_t {
     _private: [u8; 0],
 }
@@ -10757,6 +10869,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeClassicGroupsResult_destroy(
 /// Opaque handle to a flattened `ListConsumerGroupOffsetsResult`, keyed by
 /// group id.
 #[repr(C)]
+#[doc(alias = "org.apache.kafka.clients.admin.ListConsumerGroupOffsetsResult")]
 pub struct kafka_admin_ListConsumerGroupOffsetsResult_t {
     _private: [u8; 0],
 }
@@ -10902,6 +11015,7 @@ pub unsafe extern "C" fn kafka_admin_ListConsumerGroupOffsetsResult_destroy(
 /// Opaque handle to a flattened `AlterConsumerGroupOffsetsResult`, keyed by
 /// topic partition.
 #[repr(C)]
+#[doc(alias = "org.apache.kafka.clients.admin.AlterConsumerGroupOffsetsResult")]
 pub struct kafka_admin_AlterConsumerGroupOffsetsResult_t {
     _private: [u8; 0],
 }
@@ -11012,6 +11126,7 @@ pub unsafe extern "C" fn kafka_admin_AlterConsumerGroupOffsetsResult_destroy(
 /// Opaque handle to a flattened `DeleteConsumerGroupOffsetsResult`, keyed by
 /// topic partition.
 #[repr(C)]
+#[doc(alias = "org.apache.kafka.clients.admin.DeleteConsumerGroupOffsetsResult")]
 pub struct kafka_admin_DeleteConsumerGroupOffsetsResult_t {
     _private: [u8; 0],
 }
@@ -11119,6 +11234,7 @@ pub unsafe extern "C" fn kafka_admin_DeleteConsumerGroupOffsetsResult_destroy(
 
 /// Opaque handle to a flattened `DeleteConsumerGroupsResult`, keyed by group id.
 #[repr(C)]
+#[doc(alias = "org.apache.kafka.clients.admin.DeleteConsumerGroupsResult")]
 pub struct kafka_admin_DeleteConsumerGroupsResult_t {
     _private: [u8; 0],
 }
@@ -11207,6 +11323,7 @@ pub unsafe extern "C" fn kafka_admin_DeleteConsumerGroupsResult_destroy(
 /// Opaque handle to a flattened `RemoveMembersFromConsumerGroupResult`, keyed
 /// by group instance id.
 #[repr(C)]
+#[doc(alias = "org.apache.kafka.clients.admin.RemoveMembersFromConsumerGroupResult")]
 pub struct kafka_admin_RemoveMembersFromConsumerGroupResult_t {
     _private: [u8; 0],
 }
@@ -12411,6 +12528,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_remove_members_from_consumer_gr
 /// Borrowed from the owning `create_acls` / `describe_acls` / `delete_acls`
 /// result handle; valid until that handle is destroyed. Do not free it.
 #[repr(C)]
+#[doc(alias = "org.apache.kafka.common.acl.AclBinding")]
 pub struct kafka_common_AclBinding_t {
     _private: [u8; 0],
 }
@@ -12570,6 +12688,7 @@ pub unsafe extern "C" fn kafka_common_AclBinding_permission_type(binding: *const
 /// Borrowed from the owning `delete_acls` result handle; valid until that
 /// handle is destroyed. Do not free it.
 #[repr(C)]
+#[doc(alias = "org.apache.kafka.common.acl.AclBindingFilter")]
 pub struct kafka_common_AclBindingFilter_t {
     _private: [u8; 0],
 }
@@ -12743,6 +12862,7 @@ pub unsafe extern "C" fn kafka_common_AclBindingFilter_permission_type(
 /// Borrowed from the owning `describe_client_quotas` / `alter_client_quotas`
 /// result handle; valid until that handle is destroyed. Do not free it.
 #[repr(C)]
+#[doc(alias = "org.apache.kafka.common.quota.ClientQuotaEntity")]
 pub struct kafka_common_ClientQuotaEntity_t {
     _private: [u8; 0],
 }
@@ -13412,6 +13532,7 @@ fn submit_alter_client_quotas(
 
 /// Opaque handle to a flattened `CreateAclsResult`.
 #[repr(C)]
+#[doc(alias = "org.apache.kafka.clients.admin.CreateAclsResult")]
 pub struct kafka_admin_CreateAclsResult_t {
     _private: [u8; 0],
 }
@@ -13506,6 +13627,7 @@ pub unsafe extern "C" fn kafka_admin_CreateAclsResult_destroy(result: *mut kafka
 
 /// Opaque handle to a flattened `DescribeAclsResult`.
 #[repr(C)]
+#[doc(alias = "org.apache.kafka.clients.admin.DescribeAclsResult")]
 pub struct kafka_admin_DescribeAclsResult_t {
     _private: [u8; 0],
 }
@@ -13582,6 +13704,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeAclsResult_destroy(result: *mut kaf
 
 /// Opaque handle to a flattened `DeleteAclsResult`.
 #[repr(C)]
+#[doc(alias = "org.apache.kafka.clients.admin.DeleteAclsResult")]
 pub struct kafka_admin_DeleteAclsResult_t {
     _private: [u8; 0],
 }
@@ -13805,6 +13928,7 @@ pub unsafe extern "C" fn kafka_admin_DeleteAclsResult_destroy(result: *mut kafka
 
 /// Opaque handle to a flattened `DescribeClientQuotasResult`.
 #[repr(C)]
+#[doc(alias = "org.apache.kafka.clients.admin.DescribeClientQuotasResult")]
 pub struct kafka_admin_DescribeClientQuotasResult_t {
     _private: [u8; 0],
 }
@@ -13991,6 +14115,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeClientQuotasResult_destroy(
 
 /// Opaque handle to a flattened `AlterClientQuotasResult`.
 #[repr(C)]
+#[doc(alias = "org.apache.kafka.clients.admin.AlterClientQuotasResult")]
 pub struct kafka_admin_AlterClientQuotasResult_t {
     _private: [u8; 0],
 }
@@ -15165,6 +15290,7 @@ unsafe fn read_partition_offsets(
 /// Borrowed from the owning delegation-token result handle; valid until that
 /// handle is destroyed. Do not free it.
 #[repr(C)]
+#[doc(alias = "org.apache.kafka.common.security.auth.KafkaPrincipal")]
 pub struct kafka_common_KafkaPrincipal_t {
     _private: [u8; 0],
 }
@@ -15205,6 +15331,7 @@ unsafe fn kafka_principal_ref(principal: *const kafka_common_KafkaPrincipal_t) -
 ///
 /// `principal` must be a valid borrowed principal pointer.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.common.security.auth.KafkaPrincipal#getPrincipalType")]
 pub unsafe extern "C" fn kafka_common_KafkaPrincipal_principal_type(
     principal: *const kafka_common_KafkaPrincipal_t,
 ) -> *const c_char {
@@ -15217,6 +15344,7 @@ pub unsafe extern "C" fn kafka_common_KafkaPrincipal_principal_type(
 ///
 /// `principal` must be a valid borrowed principal pointer.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.common.security.auth.KafkaPrincipal#getName")]
 pub unsafe extern "C" fn kafka_common_KafkaPrincipal_name(
     principal: *const kafka_common_KafkaPrincipal_t,
 ) -> *const c_char {
@@ -15230,6 +15358,7 @@ pub unsafe extern "C" fn kafka_common_KafkaPrincipal_name(
 ///
 /// `principal` must be a valid borrowed principal pointer.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.common.security.auth.KafkaPrincipal#tokenAuthenticated")]
 pub unsafe extern "C" fn kafka_common_KafkaPrincipal_token_authenticated(
     principal: *const kafka_common_KafkaPrincipal_t,
 ) -> bool {
@@ -15242,6 +15371,7 @@ pub unsafe extern "C" fn kafka_common_KafkaPrincipal_token_authenticated(
 /// Borrowed from the owning [`kafka_common_DelegationToken_t`]; valid until the
 /// result handle that owns the token is destroyed. Do not free it.
 #[repr(C)]
+#[doc(alias = "org.apache.kafka.common.security.token.delegation.TokenInformation")]
 pub struct kafka_common_TokenInformation_t {
     _private: [u8; 0],
 }
@@ -15291,6 +15421,7 @@ unsafe fn token_information_ref(info: *const kafka_common_TokenInformation_t) ->
 ///
 /// `info` must be a valid borrowed token-information pointer.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.common.security.token.delegation.TokenInformation#tokenId")]
 pub unsafe extern "C" fn kafka_common_TokenInformation_token_id(
     info: *const kafka_common_TokenInformation_t,
 ) -> *const c_char {
@@ -15304,6 +15435,7 @@ pub unsafe extern "C" fn kafka_common_TokenInformation_token_id(
 ///
 /// `info` must be a valid borrowed token-information pointer.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.common.security.token.delegation.TokenInformation#owner")]
 pub unsafe extern "C" fn kafka_common_TokenInformation_owner(
     info: *const kafka_common_TokenInformation_t,
 ) -> *const kafka_common_KafkaPrincipal_t {
@@ -15318,6 +15450,7 @@ pub unsafe extern "C" fn kafka_common_TokenInformation_owner(
 ///
 /// `info` must be a valid borrowed token-information pointer.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.common.security.token.delegation.TokenInformation#tokenRequester")]
 pub unsafe extern "C" fn kafka_common_TokenInformation_token_requester(
     info: *const kafka_common_TokenInformation_t,
 ) -> *const kafka_common_KafkaPrincipal_t {
@@ -15362,6 +15495,7 @@ pub unsafe extern "C" fn kafka_common_TokenInformation_get_renewer(
 ///
 /// `info` must be a valid borrowed token-information pointer.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.common.security.token.delegation.TokenInformation#issueTimestamp")]
 pub unsafe extern "C" fn kafka_common_TokenInformation_issue_timestamp(
     info: *const kafka_common_TokenInformation_t,
 ) -> i64 {
@@ -15374,6 +15508,7 @@ pub unsafe extern "C" fn kafka_common_TokenInformation_issue_timestamp(
 ///
 /// `info` must be a valid borrowed token-information pointer.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.common.security.token.delegation.TokenInformation#expiryTimestamp")]
 pub unsafe extern "C" fn kafka_common_TokenInformation_expiry_timestamp(
     info: *const kafka_common_TokenInformation_t,
 ) -> i64 {
@@ -15387,6 +15522,7 @@ pub unsafe extern "C" fn kafka_common_TokenInformation_expiry_timestamp(
 ///
 /// `info` must be a valid borrowed token-information pointer.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.common.security.token.delegation.TokenInformation#maxTimestamp")]
 pub unsafe extern "C" fn kafka_common_TokenInformation_max_timestamp(
     info: *const kafka_common_TokenInformation_t,
 ) -> i64 {
@@ -15400,6 +15536,7 @@ pub unsafe extern "C" fn kafka_common_TokenInformation_max_timestamp(
 /// `describe_delegation_token` result handle; valid until that handle is
 /// destroyed. Do not free it.
 #[repr(C)]
+#[doc(alias = "org.apache.kafka.common.security.token.delegation.DelegationToken")]
 pub struct kafka_common_DelegationToken_t {
     _private: [u8; 0],
 }
@@ -15447,6 +15584,7 @@ unsafe fn delegation_token_ref(token: *const kafka_common_DelegationToken_t) -> 
 ///
 /// `token` must be a valid borrowed delegation-token pointer.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.common.security.token.delegation.DelegationToken#tokenInfo")]
 pub unsafe extern "C" fn kafka_common_DelegationToken_token_info(
     token: *const kafka_common_DelegationToken_t,
 ) -> *const kafka_common_TokenInformation_t {
@@ -15466,6 +15604,7 @@ pub unsafe extern "C" fn kafka_common_DelegationToken_token_info(
 /// `token` must be a valid borrowed delegation-token pointer; `out_len` must be
 /// null or writable.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.common.security.token.delegation.DelegationToken#hmac")]
 pub unsafe extern "C" fn kafka_common_DelegationToken_hmac(
     token: *const kafka_common_DelegationToken_t,
     out_len: *mut i32,
@@ -15483,6 +15622,7 @@ pub unsafe extern "C" fn kafka_common_DelegationToken_hmac(
 ///
 /// `token` must be a valid borrowed delegation-token pointer.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.common.security.token.delegation.DelegationToken#hmacAsBase64String")]
 pub unsafe extern "C" fn kafka_common_DelegationToken_hmac_as_base64_string(
     token: *const kafka_common_DelegationToken_t,
 ) -> *const c_char {
@@ -16938,6 +17078,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_update_features_async(
 
 /// Opaque handle to a flattened `DescribeUserScramCredentialsResult`.
 #[repr(C)]
+#[doc(alias = "org.apache.kafka.clients.admin.DescribeUserScramCredentialsResult")]
 pub struct kafka_admin_DescribeUserScramCredentialsResult_t {
     _private: [u8; 0],
 }
@@ -17131,6 +17272,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeUserScramCredentialsResult_destroy(
 
 /// Opaque handle to a flattened `AlterUserScramCredentialsResult`.
 #[repr(C)]
+#[doc(alias = "org.apache.kafka.clients.admin.AlterUserScramCredentialsResult")]
 pub struct kafka_admin_AlterUserScramCredentialsResult_t {
     _private: [u8; 0],
 }
@@ -17226,6 +17368,7 @@ pub unsafe extern "C" fn kafka_admin_AlterUserScramCredentialsResult_destroy(
 
 /// Opaque handle to a flattened `CreateDelegationTokenResult`.
 #[repr(C)]
+#[doc(alias = "org.apache.kafka.clients.admin.CreateDelegationTokenResult")]
 pub struct kafka_admin_CreateDelegationTokenResult_t {
     _private: [u8; 0],
 }
@@ -17285,6 +17428,7 @@ pub unsafe extern "C" fn kafka_admin_CreateDelegationTokenResult_destroy(
 
 /// Opaque handle to a flattened `RenewDelegationTokenResult`.
 #[repr(C)]
+#[doc(alias = "org.apache.kafka.clients.admin.RenewDelegationTokenResult")]
 pub struct kafka_admin_RenewDelegationTokenResult_t {
     _private: [u8; 0],
 }
@@ -17307,6 +17451,7 @@ fn box_renew_delegation_token_result(expiry_timestamp: i64) -> *mut kafka_admin_
 ///
 /// `result` must be a valid `renew_delegation_token` result handle.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.clients.admin.RenewDelegationTokenResult#expiryTimestamp")]
 pub unsafe extern "C" fn kafka_admin_RenewDelegationTokenResult_expiry_timestamp(
     result: *const kafka_admin_RenewDelegationTokenResult_t,
 ) -> i64 {
@@ -17329,6 +17474,7 @@ pub unsafe extern "C" fn kafka_admin_RenewDelegationTokenResult_destroy(
 
 /// Opaque handle to a flattened `ExpireDelegationTokenResult`.
 #[repr(C)]
+#[doc(alias = "org.apache.kafka.clients.admin.ExpireDelegationTokenResult")]
 pub struct kafka_admin_ExpireDelegationTokenResult_t {
     _private: [u8; 0],
 }
@@ -17352,6 +17498,7 @@ fn box_expire_delegation_token_result(expiry_timestamp: i64) -> *mut kafka_admin
 ///
 /// `result` must be a valid `expire_delegation_token` result handle.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.clients.admin.ExpireDelegationTokenResult#expiryTimestamp")]
 pub unsafe extern "C" fn kafka_admin_ExpireDelegationTokenResult_expiry_timestamp(
     result: *const kafka_admin_ExpireDelegationTokenResult_t,
 ) -> i64 {
@@ -17374,6 +17521,7 @@ pub unsafe extern "C" fn kafka_admin_ExpireDelegationTokenResult_destroy(
 
 /// Opaque handle to a flattened `DescribeDelegationTokenResult`.
 #[repr(C)]
+#[doc(alias = "org.apache.kafka.clients.admin.DescribeDelegationTokenResult")]
 pub struct kafka_admin_DescribeDelegationTokenResult_t {
     _private: [u8; 0],
 }
@@ -17458,6 +17606,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeDelegationTokenResult_destroy(
 
 /// Opaque handle to a flattened `DescribeFeaturesResult`.
 #[repr(C)]
+#[doc(alias = "org.apache.kafka.clients.admin.DescribeFeaturesResult")]
 pub struct kafka_admin_DescribeFeaturesResult_t {
     _private: [u8; 0],
 }
@@ -17657,6 +17806,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeFeaturesResult_destroy(result: *mut
 
 /// Opaque handle to a flattened `UpdateFeaturesResult`.
 #[repr(C)]
+#[doc(alias = "org.apache.kafka.clients.admin.UpdateFeaturesResult")]
 pub struct kafka_admin_UpdateFeaturesResult_t {
     _private: [u8; 0],
 }
@@ -18115,6 +18265,7 @@ fn submit_list_transactions(
 /// Opaque handle to a flattened `DescribeProducersResult`, keyed by topic
 /// partition.
 #[repr(C)]
+#[doc(alias = "org.apache.kafka.clients.admin.DescribeProducersResult")]
 pub struct kafka_admin_DescribeProducersResult_t {
     _private: [u8; 0],
 }
@@ -18431,6 +18582,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeProducersResult_destroy(
 /// Opaque handle to a flattened `DescribeTransactionsResult`, keyed by
 /// transactional id.
 #[repr(C)]
+#[doc(alias = "org.apache.kafka.clients.admin.DescribeTransactionsResult")]
 pub struct kafka_admin_DescribeTransactionsResult_t {
     _private: [u8; 0],
 }
@@ -18758,6 +18910,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeTransactionsResult_destroy(
 /// Opaque handle to a flattened `FenceProducersResult`, keyed by transactional
 /// id.
 #[repr(C)]
+#[doc(alias = "org.apache.kafka.clients.admin.FenceProducersResult")]
 pub struct kafka_admin_FenceProducersResult_t {
     _private: [u8; 0],
 }
@@ -18908,6 +19061,7 @@ pub unsafe extern "C" fn kafka_admin_FenceProducersResult_destroy(result: *mut k
 
 /// Opaque handle to a flattened `ListTransactionsResult`, keyed by broker id.
 #[repr(C)]
+#[doc(alias = "org.apache.kafka.clients.admin.ListTransactionsResult")]
 pub struct kafka_admin_ListTransactionsResult_t {
     _private: [u8; 0],
 }

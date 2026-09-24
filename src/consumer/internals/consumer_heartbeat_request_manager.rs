@@ -90,6 +90,7 @@ pub(crate) enum PendingHeartbeatCompletion {
 /// changed in unscoped paths (rebalance timeout, regex pattern) on a
 /// per-request basis to keep the protocol compact.
 #[derive(Default)]
+#[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerHeartbeatRequestManager$HeartbeatState$SentFields")]
 struct SentFields {
     rebalance_timeout_ms: i32,
     /// Topic names sorted; `None` means "not yet sent".
@@ -100,10 +101,16 @@ struct SentFields {
 }
 
 impl SentFields {
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.ConsumerHeartbeatRequestManager$HeartbeatState$SentFields#SentFields"
+    )]
     fn new() -> Self {
         Self { rebalance_timeout_ms: -1, ..Default::default() }
     }
 
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.ConsumerHeartbeatRequestManager$HeartbeatState$SentFields#reset"
+    )]
     fn reset(&mut self) {
         self.subscribed_topic_names = None;
         self.rebalance_timeout_ms = -1;
@@ -115,6 +122,7 @@ impl SentFields {
 
 /// State for building `ConsumerGroupHeartbeatRequest`s with field
 /// diffing. Mirrors Java's `ConsumerHeartbeatRequestManager.HeartbeatState`.
+#[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerHeartbeatRequestManager$HeartbeatState")]
 struct HeartbeatState {
     subscriptions: Arc<Mutex<SubscriptionState>>,
     membership_manager: Arc<ConsumerMembershipManager>,
@@ -123,6 +131,9 @@ struct HeartbeatState {
 }
 
 impl HeartbeatState {
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.ConsumerHeartbeatRequestManager$HeartbeatState#HeartbeatState"
+    )]
     fn new(
         subscriptions: Arc<Mutex<SubscriptionState>>,
         membership_manager: Arc<ConsumerMembershipManager>,
@@ -136,6 +147,7 @@ impl HeartbeatState {
         }
     }
 
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerHeartbeatRequestManager$HeartbeatState#reset")]
     fn reset(&mut self) {
         self.sent_fields.reset();
     }
@@ -143,6 +155,9 @@ impl HeartbeatState {
     /// Java: `buildRequestData()`. Constructs the request data with
     /// field-level diffing so subsequent heartbeats only include
     /// changed fields.
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.ConsumerHeartbeatRequestManager$HeartbeatState#buildRequestData"
+    )]
     fn build_request_data(&mut self) -> ConsumerGroupHeartbeatRequestData {
         let mut data = ConsumerGroupHeartbeatRequestData::new();
 
@@ -252,6 +267,7 @@ fn build_topic_partitions_list(partitions: &std::collections::HashMap<Uuid, Vec<
 /// [`AbstractHeartbeatRequestManager`].
 ///
 /// Java: `ConsumerHeartbeatRequestManager extends AbstractHeartbeatRequestManager<ConsumerGroupHeartbeatResponse>`.
+#[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerHeartbeatRequestManager")]
 pub(crate) struct ConsumerHeartbeatRequestManager {
     inner: AbstractHeartbeatRequestManager,
     membership_manager: Arc<ConsumerMembershipManager>,
@@ -274,6 +290,9 @@ impl ConsumerHeartbeatRequestManager {
     /// Java: `ConsumerHeartbeatRequestManager(LogContext, Time, ConsumerConfig,
     /// CoordinatorRequestManager, SubscriptionState, ConsumerMembershipManager,
     /// BackgroundEventHandler, Metrics)`.
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.ConsumerHeartbeatRequestManager#ConsumerHeartbeatRequestManager"
+    )]
     pub(crate) fn new(
         current_time_ms: i64,
         config: &ConsumerConfig,
@@ -312,6 +331,7 @@ impl ConsumerHeartbeatRequestManager {
     }
 
     /// Java: `resetHeartbeatState()`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerHeartbeatRequestManager#resetHeartbeatState")]
     pub(crate) fn reset_heartbeat_state(&mut self) {
         self.heartbeat_state.reset();
     }
@@ -338,6 +358,9 @@ impl ConsumerHeartbeatRequestManager {
     }
 
     /// Java: `shouldSendLeaveHeartbeatNow()`.
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.ConsumerHeartbeatRequestManager#shouldSendLeaveHeartbeatNow"
+    )]
     fn should_send_leave_heartbeat_now(&self) -> bool {
         use crate::consumer::GroupMembershipOperation;
         if self.membership_manager.group_instance_id().is_none()
@@ -365,6 +388,7 @@ impl ConsumerHeartbeatRequestManager {
     /// completion silently instead of enqueueing it. Java's
     /// `logResponse(request)` path also drops the response side-effect
     /// without driving state machinery.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerHeartbeatRequestManager#buildHeartbeatRequest")]
     fn build_heartbeat_request(&mut self, ignore_response: bool) -> UnsentRequest {
         let data = self.heartbeat_state.build_request_data();
         let builder = Box::new(ConsumerGroupHeartbeatRequestBuilder::new(data));
@@ -657,6 +681,7 @@ impl ConsumerHeartbeatRequestManager {
     /// `current_time_ms` is threaded through to
     /// [`BackgroundEventHandler::add`] so the resulting `ErrorEvent` is
     /// attributed to the actual failure time rather than epoch zero.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerHeartbeatRequestManager#handleSpecificFailure")]
     pub(crate) fn handle_specific_failure(&mut self, error: &crate::common::Error, current_time_ms: i64) -> bool {
         use crate::common::Error;
         use crate::common::Errors;
@@ -688,6 +713,9 @@ impl ConsumerHeartbeatRequestManager {
     /// Wrap the shared `classify_response_error` dispatch with the
     /// Consumer-specific extras (UNSUPPORTED_VERSION, UNRELEASED_INSTANCE_ID,
     /// FENCED_INSTANCE_ID, GROUP_ID_NOT_FOUND).
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.ConsumerHeartbeatRequestManager#handleSpecificExceptionInResponse"
+    )]
     pub(crate) fn handle_specific_error_in_response(
         &mut self,
         error: crate::common::Errors,
@@ -829,6 +857,7 @@ impl ConsumerHeartbeatRequestManager {
     }
 
     /// Returns the wrapped membership manager.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerHeartbeatRequestManager#membershipManager")]
     pub(crate) fn membership_manager(&self) -> &Arc<ConsumerMembershipManager> {
         &self.membership_manager
     }

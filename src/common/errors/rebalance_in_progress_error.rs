@@ -24,6 +24,7 @@ kafka_error_class! {
     ///
     /// Java `extends` chain:
     ///    `RebalanceInProgressException` -> `ApiException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.RebalanceInProgressException")]
     RebalanceInProgressError,
     code: Errors::RebalanceInProgress,
     extends: [

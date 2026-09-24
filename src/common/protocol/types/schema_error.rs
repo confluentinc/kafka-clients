@@ -36,6 +36,7 @@ kafka_error_class! {
     /// site in the client that raises it: a buffer underflow while parsing a
     /// response, and a correlation-id mismatch on a response that is unrelated
     /// to a SASL request.
+    #[doc(alias = "org.apache.kafka.common.protocol.types.SchemaException")]
     SchemaError,
     extends: [
         is_kafka_error,

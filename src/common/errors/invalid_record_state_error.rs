@@ -24,6 +24,7 @@ kafka_error_class! {
     ///
     /// Java `extends` chain:
     ///    `InvalidRecordStateException` -> `ApiException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.InvalidRecordStateException")]
     InvalidRecordStateError,
     code: Errors::InvalidRecordState,
     extends: [

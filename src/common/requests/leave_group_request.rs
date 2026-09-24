@@ -35,6 +35,7 @@ use super::abstract_request::{ConcreteRequest, RequestBuilder};
 ///
 /// Corresponds to `org.apache.kafka.common.requests.LeaveGroupRequest`.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.LeaveGroupRequest")]
 pub struct LeaveGroupRequest {
     data: LeaveGroupRequestData,
     version: i16,
@@ -44,11 +45,13 @@ impl LeaveGroupRequest {
     /// Creates a new `LeaveGroupRequest` from data and version.
     ///
     /// Mirrors Java's constructor `LeaveGroupRequest(LeaveGroupRequestData, short)`.
+    #[doc(alias = "org.apache.kafka.common.requests.LeaveGroupRequest#LeaveGroupRequest")]
     pub fn new(data: LeaveGroupRequestData, version: i16) -> Self {
         Self { data, version }
     }
 
     /// Returns a reference to the underlying data.
+    #[doc(alias = "org.apache.kafka.common.requests.LeaveGroupRequest#data")]
     pub fn data(&self) -> &LeaveGroupRequestData {
         &self.data
     }
@@ -71,6 +74,7 @@ impl LeaveGroupRequest {
     /// The leaving members. Before version 3, the request is single-member and
     /// the member is reconstructed from the top-level `member_id`. Mirrors
     /// Java's `LeaveGroupRequest.members()`.
+    #[doc(alias = "org.apache.kafka.common.requests.LeaveGroupRequest#members")]
     pub fn members(&self) -> Vec<MemberIdentity> {
         if self.version <= 2 {
             let mut member = MemberIdentity::new();
@@ -84,6 +88,7 @@ impl LeaveGroupRequest {
     /// Builds the canonical error response for this request, matching Java's
     /// `LeaveGroupRequest.getErrorResponse(int, Throwable)`: a top-level error
     /// code (throttle time is populated for version 1+).
+    #[doc(alias = "org.apache.kafka.common.requests.LeaveGroupRequest#getErrorResponse")]
     pub fn get_error_response(&self, throttle_time_ms: i32, error: &Errors) -> ConcreteResponse {
         let mut data = LeaveGroupResponseData::new();
         data.set_error_code(error.code());
@@ -98,6 +103,7 @@ impl LeaveGroupRequest {
     /// # Errors
     ///
     /// Returns an error if parsing fails.
+    #[doc(alias = "org.apache.kafka.common.requests.LeaveGroupRequest#parse")]
     pub fn parse(readable: &mut dyn Readable, version: i16) -> io::Result<Self> {
         let data = LeaveGroupRequestData::read(readable, version)?;
         Ok(Self::new(data, version))
@@ -116,6 +122,7 @@ impl std::fmt::Display for LeaveGroupRequest {
 /// and the leaving member identities, then chooses the wire shape based on the
 /// negotiated version (single-member below v3, batched at v3+).
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.LeaveGroupRequest$Builder")]
 pub struct LeaveGroupRequestBuilder {
     group_id: String,
     members: Vec<MemberIdentity>,
@@ -125,6 +132,7 @@ impl LeaveGroupRequestBuilder {
     /// Creates a builder for the given group id and leaving members.
     ///
     /// Mirrors Java's `LeaveGroupRequest.Builder(String, List<MemberIdentity>)`.
+    #[doc(alias = "org.apache.kafka.common.requests.LeaveGroupRequest$Builder#Builder")]
     pub fn new(group_id: String, members: Vec<MemberIdentity>) -> Self {
         Self { group_id, members }
     }

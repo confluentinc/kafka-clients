@@ -42,6 +42,7 @@ use super::{PartitionLeaderFuture, PartitionLeaderStrategy};
 ///
 /// Corresponds to `ListOffsetsHandler` (a `Batched` handler over
 /// `TopicPartition` keys yielding [`ListOffsetsResultInfo`] values).
+#[doc(alias = "org.apache.kafka.clients.admin.internals.ListOffsetsHandler")]
 pub(crate) struct ListOffsetsHandler {
     offset_timestamps_by_partition: HashMap<TopicPartition, i64>,
     options: ListOffsetsOptions,
@@ -52,6 +53,7 @@ pub(crate) struct ListOffsetsHandler {
 
 impl ListOffsetsHandler {
     /// Creates a handler for the given per-partition offset timestamps.
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.ListOffsetsHandler#ListOffsetsHandler")]
     pub(crate) fn new(
         offset_timestamps_by_partition: HashMap<TopicPartition, i64>,
         options: ListOffsetsOptions,
@@ -74,6 +76,7 @@ impl ListOffsetsHandler {
     /// resolved.
     ///
     /// Mirrors `ListOffsetsHandler.newFuture`.
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.ListOffsetsHandler#newFuture")]
     pub(crate) fn new_future(
         topic_partitions: HashSet<TopicPartition>,
         partition_leader_cache: Arc<PartitionLeaderCache>,
@@ -85,6 +88,7 @@ impl ListOffsetsHandler {
     ///
     /// Mirrors `buildBatchedRequest`. Returns the concrete builder so the
     /// version-selection logic (`oldest_allowed_version`) can be inspected.
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.ListOffsetsHandler#buildBatchedRequest")]
     pub(crate) fn build_batched_request(
         &self,
         _broker_id: i32,
@@ -139,6 +143,7 @@ impl ListOffsetsHandler {
     /// (left out of the result to retry) or failed (fatal).
     ///
     /// Mirrors `handlePartitionError`.
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.ListOffsetsHandler#handlePartitionError")]
     fn handle_partition_error(
         &self,
         topic_partition: &TopicPartition,

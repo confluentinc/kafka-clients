@@ -87,6 +87,7 @@ use crate::consumer::internals::{FetchPosition, SubscriptionState};
 /// The processor lives on the bg task. It is constructed once (the Java
 /// `supplier` factory boils down to a constructor here) and called from
 /// the bg-task `run_once` loop after each event drain.
+#[doc(alias = "org.apache.kafka.clients.consumer.internals.events.ApplicationEventProcessor")]
 pub(crate) struct ApplicationEventProcessor {
     /// Shared `RequestManagers` container — Java holds it as a plain
     /// field on the bg-thread; Rust wraps in `Arc<Mutex<...>>` so the
@@ -125,6 +126,9 @@ impl ApplicationEventProcessor {
     /// deadline (mirroring Java's `Timer`-based `ConsumerUtils.getResult`
     /// wait that surfaces `TimeoutException` after the user-supplied
     /// timeout elapses).
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.events.ApplicationEventProcessor#ApplicationEventProcessor"
+    )]
     pub(crate) fn new(
         request_managers: Arc<Mutex<RequestManagers>>,
         metadata: Arc<ConsumerMetadata>,
@@ -142,6 +146,9 @@ impl ApplicationEventProcessor {
     }
 
     /// Java: `int metadataVersionSnapshot()` — visible-for-testing.
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.events.ApplicationEventProcessor#metadataVersionSnapshot"
+    )]
     pub(crate) fn metadata_version_snapshot(&self) -> i32 {
         self.metadata_version_snapshot
     }
@@ -633,6 +640,9 @@ impl ApplicationEventProcessor {
     /// Re-evaluates the subscribed regex only if (a) there IS a pattern
     /// subscription and (b) the metadata version has advanced since the
     /// last evaluation.
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.events.ApplicationEventProcessor#maybeUpdatePatternSubscription"
+    )]
     fn maybe_update_pattern_subscription(&mut self) {
         let has_pattern = {
             let guard = self.lock_subscriptions();
@@ -653,6 +663,9 @@ impl ApplicationEventProcessor {
     /// list, updates the subscription, and notifies the membership
     /// manager (so the consumer joins the group with the new
     /// subscription on the next poll).
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.events.ApplicationEventProcessor#updatePatternSubscription"
+    )]
     fn update_pattern_subscription(&mut self) {
         // Java: `cluster.topics().stream().filter(subscriptions::matchesSubscribedPattern).collect(...)`.
         let cluster = self.metadata.fetch();

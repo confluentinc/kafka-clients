@@ -83,6 +83,7 @@ pub(crate) struct TopicMetadataRequestManagerInner {
 /// `&self` and route through the interior `Mutex` slot.
 ///
 /// Java: `org.apache.kafka.clients.consumer.internals.TopicMetadataRequestManager`.
+#[doc(alias = "org.apache.kafka.clients.consumer.internals.TopicMetadataRequestManager")]
 pub(crate) struct TopicMetadataRequestManager {
     inner: Arc<TopicMetadataRequestManagerInner>,
 }
@@ -92,6 +93,7 @@ pub(crate) struct TopicMetadataRequestManager {
 /// [`TimedRequestState`] (which itself extends `RequestState` in Java) with
 /// the request's `topic` (or `None` for all-topics), the unique request
 /// id, and a one-shot ack channel used to resolve the caller's future.
+#[doc(alias = "org.apache.kafka.clients.consumer.internals.TopicMetadataRequestManager$TopicMetadataRequestState")]
 pub(crate) struct TopicMetadataRequestState {
     /// Unique id used to match responses back to this state object.
     id: u64,
@@ -106,6 +108,9 @@ pub(crate) struct TopicMetadataRequestState {
 impl TopicMetadataRequestState {
     /// Returns the topic this state was created for, or `None` for an
     /// all-topics request. Java: `topic()`.
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.TopicMetadataRequestManager$TopicMetadataRequestState#topic"
+    )]
     pub(crate) fn topic(&self) -> Option<&str> {
         self.topic.as_deref()
     }
@@ -148,6 +153,9 @@ impl TopicMetadataRequestState {
 impl TopicMetadataRequestManager {
     /// Constructs a new [`TopicMetadataRequestManager`]. Mirrors Java's
     /// `TopicMetadataRequestManager(LogContext, Time, ConsumerConfig)`.
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.TopicMetadataRequestManager#TopicMetadataRequestManager"
+    )]
     pub(crate) fn new(config: &ConsumerConfig) -> Self {
         let inner = Arc::new(TopicMetadataRequestManagerInner {
             inflight_requests: Mutex::new(Vec::new()),
@@ -197,6 +205,7 @@ impl TopicMetadataRequestManager {
     /// a receiver the caller awaits for the result.
     ///
     /// Java: `requestTopicMetadata(String topic, long deadlineMs)`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.TopicMetadataRequestManager#requestTopicMetadata")]
     pub(crate) fn request_topic_metadata(
         &self,
         topic: String,
@@ -209,6 +218,7 @@ impl TopicMetadataRequestManager {
     /// receiver the caller awaits for the result.
     ///
     /// Java: `requestAllTopicsMetadata(long deadlineMs)`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.TopicMetadataRequestManager#requestAllTopicsMetadata")]
     pub(crate) fn request_all_topics_metadata(&self, deadline_ms: i64) -> oneshot::Receiver<TopicMetadataResult> {
         Self::enqueue(&self.inner, None, deadline_ms)
     }
@@ -598,6 +608,9 @@ mod tests {
 
     /// Translated from `TopicMetadataRequestManagerTest.testPoll_SuccessfulRequestTopicMetadata`.
     #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.TopicMetadataRequestManagerTest#testPoll_SuccessfulRequestTopicMetadata"
+    )]
     async fn test_poll_successful_request_topic_metadata() {
         let mut manager = setup_manager();
         let _rx = manager.request_topic_metadata("hello".to_string(), i64::MAX);
@@ -607,6 +620,9 @@ mod tests {
 
     /// Translated from `TopicMetadataRequestManagerTest.testPoll_SuccessfulRequestAllTopicsMetadata`.
     #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.TopicMetadataRequestManagerTest#testPoll_SuccessfulRequestAllTopicsMetadata"
+    )]
     async fn test_poll_successful_request_all_topics_metadata() {
         let mut manager = setup_manager();
         let _rx = manager.request_all_topics_metadata(i64::MAX);
@@ -717,6 +733,7 @@ mod tests {
     /// error, sleep past the deadline, and observe both the inflight
     /// queue empty *and* the future completed exceptionally.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.TopicMetadataRequestManagerTest#testExpiringRequest")]
     async fn test_expiring_request() {
         let topic = "hello";
         let mut manager = setup_manager();
@@ -803,6 +820,7 @@ mod tests {
     /// Drives the `on_failure(TimeoutException)` path explicitly and
     /// verifies the exponential-backoff math.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.TopicMetadataRequestManagerTest#testNetworkTimeout")]
     async fn test_network_timeout() {
         let topic = "hello";
         let mut manager = setup_manager();

@@ -22,6 +22,7 @@ use super::ScramMechanism;
 ///
 /// See [KIP-554: Add Broker-side SCRAM Config API](https://cwiki.apache.org/confluence/display/KAFKA/KIP-554%3A+Add+Broker-side+SCRAM+Config+API).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[doc(alias = "org.apache.kafka.clients.admin.ScramCredentialInfo")]
 pub struct ScramCredentialInfo {
     mechanism: ScramMechanism,
     iterations: i32,
@@ -33,16 +34,19 @@ impl ScramCredentialInfo {
     /// * `mechanism` — the required mechanism
     /// * `iterations` — the number of iterations used when creating the
     ///   credential
+    #[doc(alias = "org.apache.kafka.clients.admin.ScramCredentialInfo#ScramCredentialInfo")]
     pub fn new(mechanism: ScramMechanism, iterations: i32) -> Self {
         Self { mechanism, iterations }
     }
 
     /// Returns the mechanism.
+    #[doc(alias = "org.apache.kafka.clients.admin.ScramCredentialInfo#mechanism")]
     pub fn mechanism(&self) -> ScramMechanism {
         self.mechanism
     }
 
     /// Returns the number of iterations used when creating the credential.
+    #[doc(alias = "org.apache.kafka.clients.admin.ScramCredentialInfo#iterations")]
     pub fn iterations(&self) -> i32 {
         self.iterations
     }

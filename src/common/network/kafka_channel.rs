@@ -56,6 +56,7 @@ const MIN_REAUTH_INTERVAL_ONE_SECOND_NANOS: u64 = 1_000_000_000;
 ///   throttling is in progress, and a response is pending.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
+#[doc(alias = "org.apache.kafka.common.network.KafkaChannel$ChannelMuteState")]
 pub enum ChannelMuteState {
     /// Channel is not muted.
     NotMuted,
@@ -80,6 +81,7 @@ pub enum ChannelMuteState {
 ///   `MutedAndThrottledAndResponsePending` => `MutedAndResponsePending`
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
+#[doc(alias = "org.apache.kafka.common.network.KafkaChannel$ChannelMuteEvent")]
 pub enum ChannelMuteEvent {
     /// A request has been received from the client.
     RequestReceived,
@@ -99,6 +101,7 @@ pub enum ChannelMuteEvent {
 /// - `selectionKey()` eliminated — Selector uses `HashMap<String, KafkaChannel>` keyed by ID
 /// - `read()`, `write()`, `prepare()`, `finish_connect()`, `close()` are `async fn`
 /// - No `MemoryPool` parameter on `NetworkReceive` creation (pooling deferred)
+#[doc(alias = "org.apache.kafka.common.network.KafkaChannel")]
 pub struct KafkaChannel {
     /// Unique channel identifier.
     id: String,
@@ -135,6 +138,7 @@ pub struct KafkaChannel {
 impl KafkaChannel {
     /// Creates a new `KafkaChannel` with the given ID, transport layer, authenticator,
     /// maximum receive size, and metadata registry.
+    #[doc(alias = "org.apache.kafka.common.network.KafkaChannel#KafkaChannel")]
     pub fn new(
         id: &str,
         transport_layer: Box<dyn TransportLayer>,
@@ -162,6 +166,7 @@ impl KafkaChannel {
     }
 
     /// Closes the channel.
+    #[doc(alias = "org.apache.kafka.common.network.KafkaChannel#close")]
     pub async fn close(&mut self) -> io::Result<()> {
         self.disconnected = true;
         // Close transport layer
@@ -181,6 +186,7 @@ impl KafkaChannel {
     /// # Errors
     ///
     /// Returns an error if the handshake or authentication fails.
+    #[doc(alias = "org.apache.kafka.common.network.KafkaChannel#prepare")]
     pub async fn prepare(&mut self) -> io::Result<()> {
         let mut authenticating = false;
         let result: io::Result<()> = async {
@@ -234,6 +240,7 @@ impl KafkaChannel {
     }
 
     /// Disconnects the channel.
+    #[doc(alias = "org.apache.kafka.common.network.KafkaChannel#disconnect")]
     pub fn disconnect(&mut self) {
         self.disconnected = true;
         if self.state == ChannelState::NOT_CONNECTED
@@ -251,6 +258,7 @@ impl KafkaChannel {
     }
 
     /// Returns the channel state.
+    #[doc(alias = "org.apache.kafka.common.network.KafkaChannel#state")]
     pub fn state(&self) -> &ChannelState {
         &self.state
     }
@@ -259,6 +267,7 @@ impl KafkaChannel {
     ///
     /// Captures the remote address before `finish_connect()` is called, since it
     /// becomes inaccessible if the connection was refused.
+    #[doc(alias = "org.apache.kafka.common.network.KafkaChannel#finishConnect")]
     pub async fn finish_connect(&mut self) -> io::Result<bool> {
         // Grab remote address before finishConnect() — it becomes
         // inaccessible if the connection was refused.
@@ -280,6 +289,7 @@ impl KafkaChannel {
     }
 
     /// Returns `true` if the underlying transport is connected.
+    #[doc(alias = "org.apache.kafka.common.network.KafkaChannel#isConnected")]
     pub fn is_connected(&self) -> bool {
         self.transport_layer.is_connected()
     }
@@ -297,12 +307,14 @@ impl KafkaChannel {
     }
 
     /// Returns the channel ID.
+    #[doc(alias = "org.apache.kafka.common.network.KafkaChannel#id")]
     pub fn id(&self) -> &str {
         &self.id
     }
 
     /// Externally muting a channel should be done via selector to ensure proper
     /// state handling.
+    #[doc(alias = "org.apache.kafka.common.network.KafkaChannel#mute")]
     pub(crate) fn mute(&mut self) {
         if self.mute_state == ChannelMuteState::NotMuted {
             if !self.disconnected {
@@ -317,6 +329,7 @@ impl KafkaChannel {
     ///
     /// Returns `true` if the channel is in the `NotMuted` state after the call.
     #[allow(dead_code)]
+    #[doc(alias = "org.apache.kafka.common.network.KafkaChannel#maybeUnmute")]
     pub(crate) fn maybe_unmute(&mut self) -> bool {
         if self.mute_state == ChannelMuteState::Muted {
             if !self.disconnected {
@@ -333,6 +346,7 @@ impl KafkaChannel {
     /// # Panics
     ///
     /// Panics if the event is not valid for the current state.
+    #[doc(alias = "org.apache.kafka.common.network.KafkaChannel#handleChannelMuteEvent")]
     pub fn handle_channel_mute_event(&mut self, event: ChannelMuteEvent) {
         let mut state_changed = false;
         match event {
@@ -375,6 +389,7 @@ impl KafkaChannel {
     }
 
     /// Returns the current mute state.
+    #[doc(alias = "org.apache.kafka.common.network.KafkaChannel#muteState")]
     pub fn mute_state(&self) -> ChannelMuteState {
         self.mute_state
     }
@@ -383,24 +398,28 @@ impl KafkaChannel {
     ///
     /// This removes the write interest from the channel until
     /// `complete_close_on_authentication_failure()` is called.
+    #[doc(alias = "org.apache.kafka.common.network.KafkaChannel#delayCloseOnAuthenticationFailure")]
     fn delay_close_on_authentication_failure(&mut self) {
         self.transport_layer.remove_interest_ops(InterestOps::OP_WRITE);
     }
 
     /// Finish up any processing on `prepare()` failure.
     #[allow(dead_code)]
+    #[doc(alias = "org.apache.kafka.common.network.KafkaChannel#completeCloseOnAuthenticationFailure")]
     pub(crate) fn complete_close_on_authentication_failure(&mut self) -> io::Result<()> {
         self.transport_layer.add_interest_ops(InterestOps::OP_WRITE);
         self.authenticator.handle_authentication_failure()
     }
 
     /// Returns `true` if this channel has been explicitly muted.
+    #[doc(alias = "org.apache.kafka.common.network.KafkaChannel#isMuted")]
     pub fn is_muted(&self) -> bool {
         self.mute_state != ChannelMuteState::NotMuted
     }
 
     /// Returns `true` if the channel is in a state where it could be muted
     /// due to memory pressure.
+    #[doc(alias = "org.apache.kafka.common.network.KafkaChannel#isInMutableState")]
     pub fn is_in_mutable_state(&self) -> bool {
         // Some requests do not require memory, so if we do not know what the
         // current (or future) request is (receive == None) we don't mute.
@@ -419,11 +438,13 @@ impl KafkaChannel {
     }
 
     /// Returns `true` if the channel is ready (transport ready and authentication complete).
+    #[doc(alias = "org.apache.kafka.common.network.KafkaChannel#ready")]
     pub fn ready(&self) -> bool {
         self.transport_layer.ready() && self.authenticator.complete()
     }
 
     /// Returns `true` if there is an in-progress send.
+    #[doc(alias = "org.apache.kafka.common.network.KafkaChannel#hasSend")]
     pub fn has_send(&self) -> bool {
         self.send.is_some()
     }
@@ -441,6 +462,7 @@ impl KafkaChannel {
     /// # Errors
     ///
     /// Returns an error if there is already an in-progress send.
+    #[doc(alias = "org.apache.kafka.common.network.KafkaChannel#setSend")]
     pub fn set_send(&mut self, send: NetworkSend) -> Result<(), String> {
         if self.send.is_some() {
             return Err(format!(
@@ -454,6 +476,7 @@ impl KafkaChannel {
     }
 
     /// If the current send is complete, returns it and clears the send state.
+    #[doc(alias = "org.apache.kafka.common.network.KafkaChannel#maybeCompleteSend")]
     pub fn maybe_complete_send(&mut self) -> Option<NetworkSend> {
         if self.send.as_ref().is_some_and(|s| s.completed()) {
             self.mid_write = false;
@@ -501,6 +524,7 @@ impl KafkaChannel {
         e
     }
 
+    #[doc(alias = "org.apache.kafka.common.network.KafkaChannel#read")]
     pub async fn read(&mut self) -> io::Result<usize> {
         if self.receive.is_none() {
             self.receive = Some(NetworkReceive::with_max_size_source(self.max_receive_size, &self.id));
@@ -566,11 +590,13 @@ impl KafkaChannel {
     }
 
     /// Returns the current in-progress receive, if any.
+    #[doc(alias = "org.apache.kafka.common.network.KafkaChannel#currentReceive")]
     pub fn current_receive(&self) -> Option<&NetworkReceive> {
         self.receive.as_ref()
     }
 
     /// If the current receive is complete, returns it and clears the receive state.
+    #[doc(alias = "org.apache.kafka.common.network.KafkaChannel#maybeCompleteReceive")]
     pub fn maybe_complete_receive(&mut self) -> Option<NetworkReceive> {
         if self.receive.as_ref().is_some_and(|r| r.complete()) {
             self.receive.take()
@@ -582,6 +608,7 @@ impl KafkaChannel {
     /// Writes data from the current send to the transport layer.
     ///
     /// Returns the number of bytes written.
+    #[doc(alias = "org.apache.kafka.common.network.KafkaChannel#write")]
     pub async fn write(&mut self) -> io::Result<usize> {
         if self.send.is_none() {
             return Ok(0);
@@ -641,12 +668,14 @@ impl KafkaChannel {
     }
 
     /// Accumulates network thread time for this channel.
+    #[doc(alias = "org.apache.kafka.common.network.KafkaChannel#addNetworkThreadTimeNanos")]
     pub fn add_network_thread_time_nanos(&mut self, nanos: u64) {
         self.network_thread_time_nanos += nanos;
     }
 
     /// Returns accumulated network thread time for this channel and resets
     /// the value to zero.
+    #[doc(alias = "org.apache.kafka.common.network.KafkaChannel#getAndResetNetworkThreadTimeNanos")]
     pub fn get_and_reset_network_thread_time_nanos(&mut self) -> u64 {
         let current = self.network_thread_time_nanos;
         self.network_thread_time_nanos = 0;
@@ -655,22 +684,26 @@ impl KafkaChannel {
 
     /// Returns `true` if the underlying transport has bytes remaining to be read
     /// from any intermediate buffers.
+    #[doc(alias = "org.apache.kafka.common.network.KafkaChannel#hasBytesBuffered")]
     pub fn has_bytes_buffered(&self) -> bool {
         self.transport_layer.has_bytes_buffered()
     }
 
     /// Returns the number of successful authentications.
+    #[doc(alias = "org.apache.kafka.common.network.KafkaChannel#successfulAuthentications")]
     pub fn successful_authentications(&self) -> u32 {
         self.successful_authentications
     }
 
     /// Returns the re-authentication latency in milliseconds, if applicable.
+    #[doc(alias = "org.apache.kafka.common.network.KafkaChannel#reauthenticationLatencyMs")]
     pub fn reauthentication_latency_ms(&self) -> Option<u64> {
         self.authenticator.reauthentication_latency_ms()
     }
 
     /// Returns `true` if this is a server-side channel and the given time is past
     /// the session expiration time.
+    #[doc(alias = "org.apache.kafka.common.network.KafkaChannel#serverAuthenticationSessionExpired")]
     pub fn server_authentication_session_expired(&self, now_nanos: u64) -> bool {
         if let Some(expiration) = self.authenticator.server_session_expiration_time_nanos() {
             now_nanos > expiration
@@ -681,23 +714,27 @@ impl KafkaChannel {
 
     /// Returns the client-side `NetworkReceive` response that arrived during
     /// re-authentication that is unrelated to re-authentication, if any.
+    #[doc(alias = "org.apache.kafka.common.network.KafkaChannel#pollResponseReceivedDuringReauthentication")]
     pub fn poll_response_received_during_reauthentication(&mut self) -> Option<NetworkReceive> {
         self.authenticator.poll_response_received_during_reauthentication()
     }
 
     /// Returns `true` if this is a server-side channel and the connected client
     /// has indicated that it supports re-authentication.
+    #[doc(alias = "org.apache.kafka.common.network.KafkaChannel#connectedClientSupportsReauthentication")]
     pub fn connected_client_supports_reauthentication(&self) -> bool {
         self.authenticator.connected_client_supports_reauthentication()
     }
 
     /// Returns a reference to the channel metadata registry.
+    #[doc(alias = "org.apache.kafka.common.network.KafkaChannel#channelMetadataRegistry")]
     pub fn channel_metadata_registry(&mut self) -> &mut dyn ChannelMetadataRegistry {
         &mut *self.metadata_registry
     }
 
     /// Maybe add write interest after re-authentication. This ensures that any
     /// pending write operation is resumed.
+    #[doc(alias = "org.apache.kafka.common.network.KafkaChannel#maybeAddWriteInterestAfterReauth")]
     pub fn maybe_add_write_interest_after_reauth(&mut self) {
         if self.send.is_some() {
             self.transport_layer.add_interest_ops(InterestOps::OP_WRITE);
@@ -705,6 +742,7 @@ impl KafkaChannel {
     }
 
     /// Returns a description of the socket for logging.
+    #[doc(alias = "org.apache.kafka.common.network.KafkaChannel#socketDescription")]
     pub fn socket_description(&self) -> String {
         match self.transport_layer.peer_addr() {
             Ok(addr) => addr.to_string(),
@@ -719,6 +757,7 @@ impl KafkaChannel {
     ///
     /// For PLAINTEXT, this always returns `false` since re-authentication does not
     /// apply.
+    #[doc(alias = "org.apache.kafka.common.network.KafkaChannel#maybeBeginServerReauthentication")]
     pub fn maybe_begin_server_reauthentication(
         &mut self,
         _sasl_handshake_network_receive: &NetworkReceive,
@@ -750,6 +789,7 @@ impl KafkaChannel {
     /// otherwise return false.
     ///
     /// For PLAINTEXT, this always returns `false`.
+    #[doc(alias = "org.apache.kafka.common.network.KafkaChannel#maybeBeginClientReauthentication")]
     pub fn maybe_begin_client_reauthentication(
         &mut self,
         now_nanos_supplier: impl FnOnce() -> u64,
@@ -1042,6 +1082,7 @@ mod tests {
     /// Translated from `KafkaChannelTest.testSending` in
     /// `org.apache.kafka.common.network.KafkaChannelTest`.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.common.network.KafkaChannelTest#testSending")]
     async fn test_sending() {
         let transport = MockTransportLayer::new().with_write_results(vec![
             Ok(4),  // First write: 4 bytes
@@ -1084,6 +1125,7 @@ mod tests {
     /// Translated from `KafkaChannelTest.testReceiving` in
     /// `org.apache.kafka.common.network.KafkaChannelTest`.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.common.network.KafkaChannelTest#testReceiving")]
     async fn test_receiving() {
         // Build read data: 4-byte size header (128) + 128 bytes of payload
         let mut read_data = Vec::new();

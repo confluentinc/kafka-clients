@@ -74,6 +74,7 @@ impl OffsetForEpochResult {
 ///
 /// Zero-sized; the Java equivalent's `client` and `logContext` fields
 /// don't carry per-request state and aren't needed in the KIP-848 wiring.
+#[doc(alias = "org.apache.kafka.clients.consumer.internals.OffsetsForLeaderEpochClient")]
 pub(crate) struct OffsetsForLeaderEpochClient;
 
 impl OffsetsForLeaderEpochClient {
@@ -84,6 +85,7 @@ impl OffsetsForLeaderEpochClient {
     ///
     /// Entries without an `offset_epoch` are skipped, matching Java's
     /// `fetchPosition.offsetEpoch.ifPresent(...)`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.OffsetsForLeaderEpochClient#prepareRequest")]
     pub(crate) fn prepare_request(
         request_data: &HashMap<TopicPartition, FetchPosition>,
     ) -> OffsetsForLeaderEpochRequestBuilder {
@@ -123,6 +125,7 @@ impl OffsetsForLeaderEpochClient {
     /// carried `TOPIC_AUTHORIZATION_FAILED`. Mirrors Java's `throw`.
     ///
     /// Mirrors `OffsetsForLeaderEpochUtils.handleResponse(Map<TopicPartition,FetchPosition>, OffsetsForLeaderEpochResponse)`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.OffsetsForLeaderEpochClient#handleResponse")]
     pub(crate) fn handle_response(
         request_data: &HashMap<TopicPartition, FetchPosition>,
         response: &OffsetsForLeaderEpochResponse,

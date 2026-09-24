@@ -35,6 +35,7 @@ use super::RequestBuilder;
 ///
 /// Corresponds to `org.apache.kafka.common.requests.ProduceRequest`.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.ProduceRequest")]
 pub struct ProduceRequest {
     data: ProduceRequestData,
     version: i16,
@@ -57,6 +58,7 @@ impl ProduceRequest {
     pub const INVALID_OFFSET: i64 = -1;
 
     /// Creates a new `ProduceRequest` from data and version.
+    #[doc(alias = "org.apache.kafka.common.requests.ProduceRequest#ProduceRequest")]
     pub fn new(data: ProduceRequestData, version: i16) -> Self {
         let acks = data.acks;
         let timeout = data.timeout_ms;
@@ -65,6 +67,7 @@ impl ProduceRequest {
     }
 
     /// Returns a reference to the underlying data.
+    #[doc(alias = "org.apache.kafka.common.requests.ProduceRequest#data")]
     pub fn data(&self) -> &ProduceRequestData {
         &self.data
     }
@@ -85,21 +88,25 @@ impl ProduceRequest {
     }
 
     /// The number of acknowledgments the producer requires.
+    #[doc(alias = "org.apache.kafka.common.requests.ProduceRequest#acks")]
     pub fn acks(&self) -> i16 {
         self.acks
     }
 
     /// The timeout to await a response in milliseconds.
+    #[doc(alias = "org.apache.kafka.common.requests.ProduceRequest#timeout")]
     pub fn timeout(&self) -> i32 {
         self.timeout
     }
 
     /// The transactional ID, or `None` if not transactional.
+    #[doc(alias = "org.apache.kafka.common.requests.ProduceRequest#transactionalId")]
     pub fn transactional_id(&self) -> Option<&str> {
         self.transactional_id.as_deref()
     }
 
     /// Whether the Transaction V2 protocol is being requested.
+    #[doc(alias = "org.apache.kafka.common.requests.ProduceRequest#isTransactionV2Requested")]
     pub fn is_transaction_v2_requested(version: i16) -> bool {
         version > ProduceRequest::LAST_STABLE_VERSION_BEFORE_TRANSACTION_V2
     }
@@ -109,6 +116,7 @@ impl ProduceRequest {
     /// Returns `None` when acks is 0 because the producer does not expect any
     /// response in that case. In Java, `getErrorResponse()` returns `null` for
     /// acks=0.
+    #[doc(alias = "org.apache.kafka.common.requests.ProduceRequest#getErrorResponse")]
     pub fn get_error_response(&self, throttle_time_ms: i32, error: &Errors) -> Option<ConcreteResponse> {
         // In case the producer doesn't actually want any response
         if self.acks == 0 {
@@ -154,6 +162,7 @@ impl ProduceRequest {
     /// # Errors
     ///
     /// Returns an error if validation fails.
+    #[doc(alias = "org.apache.kafka.common.requests.ProduceRequest#validateRecords")]
     pub fn validate_records(version: i16, records_bytes: &Option<bytes::Bytes>) -> io::Result<()> {
         let bytes: &[u8] = match records_bytes {
             Some(b) if !b.is_empty() => b,
@@ -221,6 +230,7 @@ impl ProduceRequest {
     /// # Errors
     ///
     /// Returns an error if parsing fails.
+    #[doc(alias = "org.apache.kafka.common.requests.ProduceRequest#parse")]
     pub fn parse(readable: &mut dyn Readable, version: i16) -> io::Result<Self> {
         let data = ProduceRequestData::read(readable, version)?;
         Ok(Self::new(data, version))
@@ -241,6 +251,7 @@ impl std::fmt::Display for ProduceRequest {
 ///
 /// Corresponds to `ProduceRequest.Builder` in Java.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.ProduceRequest$Builder")]
 pub struct ProduceRequestBuilder {
     data: ProduceRequestData,
     oldest_allowed_version: i16,
@@ -278,6 +289,7 @@ impl ProduceRequestBuilder {
     /// Creates a builder with explicit version range.
     ///
     /// Corresponds to Java's `ProduceRequest.Builder(short, short, ProduceRequestData)`.
+    #[doc(alias = "org.apache.kafka.common.requests.ProduceRequest$Builder#Builder")]
     pub fn new(min_version: i16, max_version: i16, data: ProduceRequestData) -> Self {
         Self { data, oldest_allowed_version: min_version, latest_allowed_version: max_version }
     }

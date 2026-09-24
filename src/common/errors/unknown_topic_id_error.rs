@@ -26,6 +26,7 @@ kafka_error_class! {
     ///    `UnknownTopicIdException` -> `InvalidMetadataException` ->
     ///   `RefreshRetriableException` -> `RetriableException` -> `ApiException` ->
     ///   `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.UnknownTopicIdException")]
     UnknownTopicIdError,
     code: Errors::UnknownTopicId,
     extends: [

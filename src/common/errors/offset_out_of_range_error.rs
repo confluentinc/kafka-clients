@@ -27,6 +27,7 @@ kafka_error_class! {
     /// Java `extends` chain:
     ///    `OffsetOutOfRangeException` -> `InvalidOffsetException` ->
     ///   `ApiException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.OffsetOutOfRangeException")]
     OffsetOutOfRangeError,
     code: Errors::OffsetOutOfRange,
     extends: [

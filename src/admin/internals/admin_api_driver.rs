@@ -43,6 +43,7 @@ use super::ApiRequestScope;
 /// Corresponds to `AdminApiDriver.RequestSpec`. Unlike Java, the built request
 /// builder is carried by value (moved into the `Call` created for the spec);
 /// the driver's [`RequestState`] tracks only whether a request is in flight.
+#[doc(alias = "org.apache.kafka.clients.admin.internals.AdminApiDriver$RequestSpec")]
 pub(crate) struct RequestSpec<K> {
     /// Human-readable name, e.g. `deleteRecords(api=DeleteRecords)`.
     pub(crate) name: String,
@@ -65,6 +66,7 @@ pub(crate) struct RequestSpec<K> {
 ///
 /// Corresponds to `AdminApiDriver.RequestState`. Java stores the in-flight
 /// `RequestSpec`, but only ever reads its presence, so a bool suffices here.
+#[doc(alias = "org.apache.kafka.clients.admin.internals.AdminApiDriver$RequestState")]
 struct RequestState {
     has_inflight: bool,
     tries: i32,
@@ -76,11 +78,13 @@ impl RequestState {
         Self { has_inflight: false, tries: 0, next_allowed_retry_ms: 0 }
     }
 
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.AdminApiDriver$RequestState#clearInflight")]
     fn clear_inflight(&mut self, next_allowed_retry_ms: i64) {
         self.has_inflight = false;
         self.next_allowed_retry_ms = next_allowed_retry_ms;
     }
 
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.AdminApiDriver$RequestState#setInflight")]
     fn set_inflight(&mut self) {
         self.has_inflight = true;
         self.tries += 1;
@@ -91,6 +95,7 @@ impl RequestState {
 /// to one and only one scope.
 ///
 /// Corresponds to `AdminApiDriver.BiMultimap`.
+#[doc(alias = "org.apache.kafka.clients.admin.internals.AdminApiDriver$BiMultimap")]
 struct BiMultimap<K> {
     reverse_map: HashMap<K, ApiRequestScope>,
     map: HashMap<ApiRequestScope, HashSet<K>>,
@@ -101,12 +106,14 @@ impl<K: Clone + Eq + Hash> BiMultimap<K> {
         Self { reverse_map: HashMap::new(), map: HashMap::new() }
     }
 
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.AdminApiDriver$BiMultimap#put")]
     fn put(&mut self, scope: ApiRequestScope, key: K) {
         self.remove(&key);
         self.reverse_map.insert(key.clone(), scope.clone());
         self.map.entry(scope).or_default().insert(key);
     }
 
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.AdminApiDriver$BiMultimap#remove")]
     fn remove(&mut self, key: &K) {
         if let Some(scope) = self.reverse_map.remove(key)
             && let Some(set) = self.map.get_mut(&scope)
@@ -129,6 +136,7 @@ impl<K: Clone + Eq + Hash> BiMultimap<K> {
 /// granularity, e.g. `TopicPartition`) and value type `V` (the per-key result).
 ///
 /// Corresponds to `AdminApiDriver<K, V>`.
+#[doc(alias = "org.apache.kafka.clients.admin.internals.AdminApiDriver")]
 pub(crate) struct AdminApiDriver<K, V> {
     handler: Box<dyn AdminApiHandler<K, V>>,
     future: Box<dyn AdminApiFuture<K, V>>,
@@ -147,6 +155,7 @@ where
 {
     /// Creates a driver, seeding the fulfillment/lookup maps from the future's
     /// cached key-to-broker mapping.
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.AdminApiDriver#AdminApiDriver")]
     pub(crate) fn new(
         handler: Box<dyn AdminApiHandler<K, V>>,
         future: Box<dyn AdminApiFuture<K, V>>,
@@ -179,6 +188,7 @@ where
     /// Associates a key with a broker id (after lookup reveals the mapping).
     ///
     /// Mirrors `map`.
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.AdminApiDriver#map")]
     fn map(&mut self, key: K, broker_id: i32) {
         self.lookup_map.remove(&key);
         self.fulfillment_map.put(ApiRequestScope::Fulfillment(broker_id), key);
@@ -187,6 +197,7 @@ where
     /// Disassociates a key from its broker, sending it back to lookup.
     ///
     /// Mirrors `unmap`.
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.AdminApiDriver#unmap")]
     fn unmap(&mut self, key: &K) {
         self.fulfillment_map.remove(key);
 
@@ -201,6 +212,7 @@ where
         }
     }
 
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.AdminApiDriver#clear")]
     fn clear(&mut self, keys: impl IntoIterator<Item = K>) {
         for key in keys {
             self.lookup_map.remove(&key);
@@ -211,6 +223,7 @@ where
     /// Completes the given keys exceptionally and removes them from both stages.
     ///
     /// Mirrors `completeExceptionally`.
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.AdminApiDriver#complete")]
     fn complete_with_error(&mut self, errors: HashMap<K, Error>) {
         if !errors.is_empty() {
             let keys: Vec<K> = errors.keys().cloned().collect();
@@ -219,6 +232,7 @@ where
         }
     }
 
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.AdminApiDriver#completeLookup")]
     fn complete_lookup_with_error(&mut self, errors: HashMap<K, Error>) {
         if !errors.is_empty() {
             let keys: Vec<K> = errors.keys().cloned().collect();
@@ -227,6 +241,7 @@ where
         }
     }
 
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.AdminApiDriver#retryLookup")]
     fn retry_lookup(&mut self, keys: impl IntoIterator<Item = K>) {
         for key in keys {
             self.unmap(&key);
@@ -255,6 +270,7 @@ where
     /// Mirrors `maybeRetryLookup`. Java takes the whole `RequestSpec`; the Rust
     /// caller has already destructured it, so the scope and keys are passed
     /// directly.
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.AdminApiDriver#maybeRetryLookup")]
     pub(crate) fn maybe_retry_lookup(
         &mut self,
         current_time_ms: i64,
@@ -279,6 +295,7 @@ where
     /// Completes the given keys and removes them from both stages.
     ///
     /// Mirrors `complete`.
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.AdminApiDriver#complete")]
     fn complete(&mut self, values: HashMap<K, V>) {
         if !values.is_empty() {
             let keys: Vec<K> = values.keys().cloned().collect();
@@ -287,6 +304,7 @@ where
         }
     }
 
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.AdminApiDriver#completeLookup")]
     fn complete_lookup(&mut self, broker_id_mapping: HashMap<K, i32>) {
         if !broker_id_mapping.is_empty() {
             self.future.complete_lookup(broker_id_mapping.clone());
@@ -300,6 +318,7 @@ where
     /// after each [`on_response`](Self::on_response) / [`on_failure`](Self::on_failure).
     ///
     /// Mirrors `poll`.
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.AdminApiDriver#poll")]
     pub(crate) fn poll(&mut self) -> Vec<RequestSpec<K>> {
         let mut requests = Vec::new();
         self.collect_lookup_requests(&mut requests);
@@ -307,6 +326,7 @@ where
         requests
     }
 
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.AdminApiDriver#collectLookupRequests")]
     fn collect_lookup_requests(&mut self, requests: &mut Vec<RequestSpec<K>>) {
         for (scope, keys) in self.lookup_map.entries_snapshot() {
             if keys.is_empty() {
@@ -332,6 +352,7 @@ where
         }
     }
 
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.AdminApiDriver#collectFulfillmentRequests")]
     fn collect_fulfillment_requests(&mut self, requests: &mut Vec<RequestSpec<K>>) {
         for (scope, keys) in self.fulfillment_map.entries_snapshot() {
             if keys.is_empty() {
@@ -371,6 +392,7 @@ where
     /// Callback invoked when a `Call` returns a response successfully.
     ///
     /// Mirrors `onResponse`.
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.AdminApiDriver#onResponse")]
     pub(crate) fn on_response(
         &mut self,
         now: i64,
@@ -405,6 +427,7 @@ where
     /// [`Error::Disconnect`]. It used to key off [`Errors::NetworkError`] instead —
     /// the wrong class the runnable happened to build, which also matched a genuine
     /// broker-reported `NETWORK_EXCEPTION` (code 13).
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.AdminApiDriver#onFailure")]
     pub(crate) fn on_failure(&mut self, now: i64, scope: &ApiRequestScope, keys: &HashSet<K>, error: &Error) {
         self.clear_inflight_request(now, scope);
 
@@ -455,6 +478,7 @@ where
         }
     }
 
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.AdminApiDriver#clearInflightRequest")]
     fn clear_inflight_request(&mut self, now: i64, scope: &ApiRequestScope) {
         let tries = match self.request_states.get(scope) {
             Some(state) => state.tries,
@@ -525,6 +549,7 @@ where
     /// Test-only accessor mirroring Java's `AdminApiDriver.keyToBrokerId`: the
     /// broker id a key is currently mapped to for fulfillment, or `None` if the
     /// key is (still / again) in the lookup stage.
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.AdminApiDriver#keyToBrokerId")]
     pub(crate) fn key_to_broker_id(&self, key: &K) -> Option<i32> {
         self.fulfillment_map
             .reverse_map

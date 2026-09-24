@@ -25,6 +25,7 @@ kafka_error_class! {
     ///
     /// Java `extends` chain:
     ///    `MemberIdRequiredException` -> `ApiException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.MemberIdRequiredException")]
     MemberIdRequiredError,
     code: Errors::MemberIdRequired,
     extends: [

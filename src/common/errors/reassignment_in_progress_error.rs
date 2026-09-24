@@ -24,6 +24,7 @@ kafka_error_class! {
     ///
     /// Java `extends` chain:
     ///    `ReassignmentInProgressException` -> `ApiException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.ReassignmentInProgressException")]
     ReassignmentInProgressError,
     code: Errors::ReassignmentInProgress,
     extends: [

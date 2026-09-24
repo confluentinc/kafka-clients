@@ -69,6 +69,7 @@ impl SaslConfigs {
 /// Currently supports PLAIN mechanism only.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
+#[doc(alias = "org.apache.kafka.common.config.SaslConfigs")]
 pub struct SaslConfigs {
     /// SASL mechanism. Default: `"GSSAPI"` (matches Java `DEFAULT_SASL_MECHANISM`).
     /// Corresponds to `sasl.mechanism`.

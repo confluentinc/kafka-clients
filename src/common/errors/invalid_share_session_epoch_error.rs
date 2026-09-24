@@ -25,6 +25,7 @@ kafka_error_class! {
     /// Java `extends` chain:
     ///    `InvalidShareSessionEpochException` -> `RetriableException` ->
     ///   `ApiException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.InvalidShareSessionEpochException")]
     InvalidShareSessionEpochError,
     code: Errors::InvalidShareSessionEpoch,
     extends: [

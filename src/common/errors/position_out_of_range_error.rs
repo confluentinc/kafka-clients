@@ -25,6 +25,7 @@ kafka_error_class! {
     ///
     /// Java `extends` chain:
     ///    `PositionOutOfRangeException` -> `ApiException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.PositionOutOfRangeException")]
     PositionOutOfRangeError,
     code: Errors::PositionOutOfRange,
     extends: [

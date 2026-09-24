@@ -25,6 +25,7 @@ kafka_error_class! {
     /// Java `extends` chain:
     ///    `DuplicateBrokerRegistrationException` -> `ApiException` ->
     ///   `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.DuplicateBrokerRegistrationException")]
     DuplicateBrokerRegistrationError,
     code: Errors::DuplicateBrokerRegistration,
     extends: [

@@ -20,6 +20,7 @@
 ///
 /// Corresponds to `org.apache.kafka.clients.admin.DeletedRecords`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[doc(alias = "org.apache.kafka.clients.admin.DeletedRecords")]
 pub struct DeletedRecords {
     low_watermark: i64,
 }
@@ -29,12 +30,14 @@ impl DeletedRecords {
     ///
     /// `low_watermark` is the "low watermark" for the topic partition on which
     /// the deletion was executed.
+    #[doc(alias = "org.apache.kafka.clients.admin.DeletedRecords#DeletedRecords")]
     pub fn new(low_watermark: i64) -> Self {
         Self { low_watermark }
     }
 
     /// Return the "low watermark" for the topic partition on which the deletion
     /// was executed.
+    #[doc(alias = "org.apache.kafka.clients.admin.DeletedRecords#lowWatermark")]
     pub fn low_watermark(&self) -> i64 {
         self.low_watermark
     }

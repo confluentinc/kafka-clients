@@ -37,6 +37,7 @@ use crate::consumer::internals::MemberState;
 ///
 /// Phase 8 ships only the trait definition; the Phase 9 worktree wires
 /// up `CommitRequestManager` to implement it (merge-time reconciliation).
+#[doc(alias = "org.apache.kafka.clients.consumer.internals.MemberStateListener")]
 pub(crate) trait MemberStateListener: Send + Sync + 'static {
     /// Called whenever the epoch changes with new values received from the
     /// broker or cleared if the member is not part of the group anymore
@@ -50,6 +51,7 @@ pub(crate) trait MemberStateListener: Send + Sync + 'static {
     ///   is terminated.
     ///
     /// Java: `void onMemberEpochUpdated(Optional<Integer>, String)`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.MemberStateListener#onMemberEpochUpdated")]
     fn on_member_epoch_updated(&self, member_epoch: Option<i32>, member_id: &str);
 
     /// Invoked when a group member's assigned set of partitions changes.
@@ -62,6 +64,7 @@ pub(crate) trait MemberStateListener: Send + Sync + 'static {
     ///
     /// Java: `default void onGroupAssignmentUpdated(Set<TopicPartition>) {}`.
     /// Default implementation is a no-op.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.MemberStateListener#onGroupAssignmentUpdated")]
     fn on_group_assignment_updated(&self, _partitions: &HashSet<TopicPartition>) {}
 
     /// Called whenever the member transitions to a new state (AK 4.3.1,
@@ -74,6 +77,7 @@ pub(crate) trait MemberStateListener: Send + Sync + 'static {
     ///
     /// Java: `default void onMemberStateChange(MemberState memberState) {}`.
     /// Default implementation is a no-op.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.MemberStateListener#onMemberStateChange")]
     fn on_member_state_change(&self, _member_state: MemberState) {}
 }
 

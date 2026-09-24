@@ -21,6 +21,7 @@
 /// Corresponds to `org.apache.kafka.clients.admin.TransactionState`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
+#[doc(alias = "org.apache.kafka.clients.admin.TransactionState")]
 pub enum TransactionState {
     /// A transaction is in progress.
     Ongoing,
@@ -60,6 +61,7 @@ impl TransactionState {
     /// unrecognized value.
     ///
     /// Mirrors `TransactionState.parse`.
+    #[doc(alias = "org.apache.kafka.clients.admin.TransactionState#parse")]
     pub fn parse(name: &str) -> TransactionState {
         match name {
             "Ongoing" => TransactionState::Ongoing,

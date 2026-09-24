@@ -36,6 +36,7 @@ use super::{ScramCredentialInfo, ScramMechanism, UserScramCredentialsDescription
 /// data future to complete new `KafkaFutureImpl`s — here `then_apply` /
 /// `then_apply_try` express the same transform-on-completion).
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.clients.admin.DescribeUserScramCredentialsResult")]
 pub struct DescribeUserScramCredentialsResult {
     data_future: KafkaFuture<DescribeUserScramCredentialsResponseData>,
 }
@@ -43,6 +44,9 @@ pub struct DescribeUserScramCredentialsResult {
 impl DescribeUserScramCredentialsResult {
     /// Creates a new result from the future indicating response data from the
     /// call.
+    #[doc(
+        alias = "org.apache.kafka.clients.admin.DescribeUserScramCredentialsResult#DescribeUserScramCredentialsResult"
+    )]
     pub fn new(data_future: KafkaFuture<DescribeUserScramCredentialsResponseData>) -> Self {
         Self { data_future }
     }
@@ -55,6 +59,7 @@ impl DescribeUserScramCredentialsResult {
     /// described user is one with *either* a `NONE` or a `RESOURCE_NOT_FOUND`
     /// error code; the first user with any other error code fails the whole
     /// future.
+    #[doc(alias = "org.apache.kafka.clients.admin.DescribeUserScramCredentialsResult#all")]
     pub fn all(&self) -> KafkaFuture<HashMap<String, UserScramCredentialsDescription>> {
         self.data_future.then_apply_try(|data| {
             if let Some(first_failed) = data.results.iter().find(|result| {
@@ -82,6 +87,7 @@ impl DescribeUserScramCredentialsResult {
     /// Mirrors `DescribeUserScramCredentialsResult.users()`. Users that do not
     /// exist / have no credential (`RESOURCE_NOT_FOUND`) are excluded; users that
     /// have a credential but could not be described are included.
+    #[doc(alias = "org.apache.kafka.clients.admin.DescribeUserScramCredentialsResult#users")]
     pub fn users(&self) -> KafkaFuture<Vec<String>> {
         self.data_future.then_apply(|data| {
             data.results
@@ -97,6 +103,7 @@ impl DescribeUserScramCredentialsResult {
     /// Mirrors `DescribeUserScramCredentialsResult.description(String)`. If the
     /// given user is not present in the described users, the future completes
     /// exceptionally with a `RESOURCE_NOT_FOUND` error ("No such user: ...").
+    #[doc(alias = "org.apache.kafka.clients.admin.DescribeUserScramCredentialsResult#description")]
     pub fn description(&self, user_name: &str) -> KafkaFuture<UserScramCredentialsDescription> {
         let user_name = user_name.to_string();
         self.data_future.then_apply_try(move |data| {
@@ -122,6 +129,7 @@ impl DescribeUserScramCredentialsResult {
 }
 
 /// Mirrors `DescribeUserScramCredentialsResult.getScramCredentialInfosFor`.
+#[doc(alias = "org.apache.kafka.clients.admin.DescribeUserScramCredentialsResult#getScramCredentialInfosFor")]
 fn scram_credential_infos_for(user_result: &WireUserResult) -> Vec<ScramCredentialInfo> {
     user_result
         .credential_infos
@@ -173,6 +181,7 @@ mod tests {
 
     // Mirrors `DescribeUserScramCredentialsResultTest.testTopLevelError`.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.admin.DescribeUserScramCredentialsResultTest#testTopLevelError")]
     async fn test_top_level_error() {
         let data_future: KafkaFuture<DescribeUserScramCredentialsResponseData> =
             KafkaFuture::completed(Err(Error::new(Errors::UnknownServerError)));
@@ -184,6 +193,7 @@ mod tests {
 
     // Mirrors `DescribeUserScramCredentialsResultTest.testUserLevelErrors`.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.admin.DescribeUserScramCredentialsResultTest#testUserLevelErrors")]
     async fn test_user_level_errors() {
         let good_user = "goodUser";
         let unknown_user = "unknownUser";
@@ -220,6 +230,7 @@ mod tests {
 
     // Mirrors `DescribeUserScramCredentialsResultTest.testSuccessfulDescription`.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.admin.DescribeUserScramCredentialsResultTest#testSuccessfulDescription")]
     async fn test_successful_description() {
         let good_user = "goodUser";
         let unknown_user = "unknownUser";

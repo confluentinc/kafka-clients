@@ -25,4 +25,5 @@ use crate::producer::RecordMetadata;
 /// `onCompletion(RecordMetadata, Exception)` method. We use `FnOnce` because
 /// each callback is invoked exactly once when the batch completes, fails, or
 /// is aborted.
+#[doc(alias = "org.apache.kafka.clients.producer.Callback")]
 pub type Callback = Box<dyn FnOnce(Option<&RecordMetadata>, Option<&Error>) + Send + Sync>;

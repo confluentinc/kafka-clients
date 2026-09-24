@@ -24,6 +24,7 @@ kafka_error_class! {
     ///
     /// Java `extends` chain:
     ///    `InvalidRegistrationException` -> `ApiException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.InvalidRegistrationException")]
     InvalidRegistrationError,
     code: Errors::InvalidRegistration,
     extends: [

@@ -41,6 +41,7 @@ use crate::producer::RecordMetadata;
 /// across tasks and box them as `dyn Future + Send`. That guarantee is what lets
 /// [`DynProducer`](super::DynProducer) be blanket-implemented for every
 /// `Producer`. Implementations may still be written with `async fn`.
+#[doc(alias = "org.apache.kafka.clients.producer.Producer")]
 pub trait Producer<K, V>: Send + Sync {
     /// Needs to be called before any other method when the `transactional.id` is
     /// set in the configuration.
@@ -59,6 +60,7 @@ pub trait Producer<K, V>: Send + Sync {
     /// - The producer has encountered a previous fatal error
     /// - Initialization does not complete within `max.block.ms`
     ///   ([`Timeout`](Error::Timeout))
+    #[doc(alias = "org.apache.kafka.clients.producer.Producer#initTransactions")]
     fn init_transactions(&self) -> impl Future<Output = Result<(), Error>> + Send;
 
     /// Should be called before the start of each new transaction.
@@ -75,6 +77,7 @@ pub trait Producer<K, V>: Send + Sync {
     /// `init_transactions` has not yet been invoked, if another producer with
     /// the same `transactional.id` has fenced this one, or if the producer has
     /// encountered a previous fatal error.
+    #[doc(alias = "org.apache.kafka.clients.producer.Producer#beginTransaction")]
     fn begin_transaction(&self) -> Result<(), Error>;
 
     /// Sends a list of specified offsets to the consumer group coordinator, and
@@ -88,6 +91,7 @@ pub trait Producer<K, V>: Send + Sync {
     /// transaction has been started, if `group_metadata` is invalid, if the
     /// commit failed and cannot be retried, or if the offsets are not sent
     /// within `max.block.ms` ([`Timeout`](Error::Timeout)).
+    #[doc(alias = "org.apache.kafka.clients.producer.Producer#sendOffsetsToTransaction")]
     fn send_offsets_to_transaction(
         &self,
         offsets: HashMap<TopicPartition, OffsetAndMetadata>,
@@ -104,6 +108,7 @@ pub trait Producer<K, V>: Send + Sync {
     /// transaction has been started, if the producer has encountered a previous
     /// fatal or abortable error, or if the commit does not complete within
     /// `max.block.ms` ([`Timeout`](Error::Timeout)).
+    #[doc(alias = "org.apache.kafka.clients.producer.Producer#commitTransaction")]
     fn commit_transaction(&self) -> impl Future<Output = Result<(), Error>> + Send;
 
     /// Aborts the ongoing transaction.
@@ -116,12 +121,14 @@ pub trait Producer<K, V>: Send + Sync {
     /// transaction has been started, if the producer has encountered a previous
     /// fatal error, or if the abort does not complete within `max.block.ms`
     /// ([`Timeout`](Error::Timeout)).
+    #[doc(alias = "org.apache.kafka.clients.producer.Producer#abortTransaction")]
     fn abort_transaction(&self) -> impl Future<Output = Result<(), Error>> + Send;
 
     /// Asynchronously send a record to a topic. Equivalent to
     /// `send_with_callback(record, None)`.
     ///
     /// See [`send_with_callback`](Producer::send_with_callback) for details.
+    #[doc(alias = "org.apache.kafka.clients.producer.Producer#send")]
     fn send(
         &self,
         record: ProducerRecord<K, V>,
@@ -146,6 +153,7 @@ pub trait Producer<K, V>: Send + Sync {
     /// - The producer has already been closed ([`LocalIllegalState`](Error::LocalIllegalState))
     /// - The key or value cannot be serialized ([`Serialization`](Error::Serialization))
     /// - A Kafka-related error occurs
+    #[doc(alias = "org.apache.kafka.clients.producer.Producer#send")]
     fn send_with_callback(
         &self,
         record: ProducerRecord<K, V>,
@@ -158,6 +166,7 @@ pub trait Producer<K, V>: Send + Sync {
     /// # Errors
     ///
     /// Returns `Err` if an error occurs during flushing.
+    #[doc(alias = "org.apache.kafka.clients.producer.Producer#flush")]
     fn flush(&self) -> impl Future<Output = Result<(), Error>> + Send;
 
     /// Get the partition metadata for the given topic.
@@ -169,6 +178,7 @@ pub trait Producer<K, V>: Send + Sync {
     /// Returns `Err` if:
     /// - The topic cannot be found within `max.block.ms` ([`Timeout`](Error::Timeout))
     /// - The producer has been closed
+    #[doc(alias = "org.apache.kafka.clients.producer.Producer#partitionsFor")]
     fn partitions_for(&self, topic: &str) -> impl Future<Output = Result<Vec<PartitionInfo>, Error>> + Send;
 
     /// Get the full set of producer metrics maintained by this producer.
@@ -181,6 +191,7 @@ pub trait Producer<K, V>: Send + Sync {
     /// The returned `HashMap` is a snapshot clone of `Arc<KafkaMetric>`
     /// handles; mutating it does not affect the registry (Java's
     /// `Collections.unmodifiableMap` analog).
+    #[doc(alias = "org.apache.kafka.clients.producer.Producer#metrics")]
     fn metrics(&self) -> HashMap<MetricName, Arc<KafkaMetric>>;
 
     /// Close this producer. This method awaits until all previously sent requests
@@ -189,6 +200,7 @@ pub trait Producer<K, V>: Send + Sync {
     /// # Errors
     ///
     /// Returns `Err` if an error occurs during closing.
+    #[doc(alias = "org.apache.kafka.clients.producer.Producer#close")]
     fn close(&self) -> impl Future<Output = Result<(), Error>> + Send;
 
     /// Close this producer, waiting up to the given timeout for pending requests
@@ -201,5 +213,6 @@ pub trait Producer<K, V>: Send + Sync {
     /// # Errors
     ///
     /// Returns `Err` if an error occurs during closing.
+    #[doc(alias = "org.apache.kafka.clients.producer.Producer#close")]
     fn close_with_timeout(&self, timeout: Duration) -> impl Future<Output = Result<(), Error>> + Send;
 }

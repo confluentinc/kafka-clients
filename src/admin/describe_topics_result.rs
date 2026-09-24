@@ -28,6 +28,7 @@ use crate::common::{KafkaFuture, Uuid};
 /// enum instead of Java's two nullable maps.
 #[derive(Clone, Debug)]
 #[non_exhaustive]
+#[doc(alias = "org.apache.kafka.clients.admin.DescribeTopicsResult")]
 pub enum DescribeTopicsResult {
     /// Result keyed by topic id (the request used a `TopicIdCollection`).
     ByTopicId(HashMap<Uuid, KafkaFuture<TopicDescription>>),
@@ -37,17 +38,20 @@ pub enum DescribeTopicsResult {
 
 impl DescribeTopicsResult {
     /// Creates a result keyed by topic id.
+    #[doc(alias = "org.apache.kafka.clients.admin.DescribeTopicsResult#ofTopicIds")]
     pub(crate) fn of_topic_ids(topic_id_futures: HashMap<Uuid, KafkaFuture<TopicDescription>>) -> Self {
         DescribeTopicsResult::ByTopicId(topic_id_futures)
     }
 
     /// Creates a result keyed by topic name.
+    #[doc(alias = "org.apache.kafka.clients.admin.DescribeTopicsResult#ofTopicNames")]
     pub(crate) fn of_topic_names(name_futures: HashMap<String, KafkaFuture<TopicDescription>>) -> Self {
         DescribeTopicsResult::ByTopicName(name_futures)
     }
 
     /// A map from topic IDs to futures if the request used topic IDs, otherwise
     /// `None`.
+    #[doc(alias = "org.apache.kafka.clients.admin.DescribeTopicsResult#topicIdValues")]
     pub fn topic_id_values(&self) -> Option<&HashMap<Uuid, KafkaFuture<TopicDescription>>> {
         match self {
             DescribeTopicsResult::ByTopicId(futures) => Some(futures),
@@ -57,6 +61,7 @@ impl DescribeTopicsResult {
 
     /// A map from topic names to futures if the request used topic names,
     /// otherwise `None`.
+    #[doc(alias = "org.apache.kafka.clients.admin.DescribeTopicsResult#topicNameValues")]
     pub fn topic_name_values(&self) -> Option<&HashMap<String, KafkaFuture<TopicDescription>>> {
         match self {
             DescribeTopicsResult::ByTopicName(futures) => Some(futures),
@@ -66,6 +71,7 @@ impl DescribeTopicsResult {
 
     /// A future map from topic names to descriptions if the request used topic
     /// names, otherwise `None`. Succeeds only if all descriptions succeed.
+    #[doc(alias = "org.apache.kafka.clients.admin.DescribeTopicsResult#allTopicNames")]
     pub fn all_topic_names(&self) -> Option<KafkaFuture<HashMap<String, TopicDescription>>> {
         match self {
             DescribeTopicsResult::ByTopicName(futures) => Some(KafkaFuture::join_map(
@@ -77,6 +83,7 @@ impl DescribeTopicsResult {
 
     /// A future map from topic ids to descriptions if the request used topic
     /// ids, otherwise `None`. Succeeds only if all descriptions succeed.
+    #[doc(alias = "org.apache.kafka.clients.admin.DescribeTopicsResult#allTopicIds")]
     pub fn all_topic_ids(&self) -> Option<KafkaFuture<HashMap<Uuid, TopicDescription>>> {
         match self {
             DescribeTopicsResult::ByTopicId(futures) => {

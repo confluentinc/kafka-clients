@@ -26,6 +26,7 @@ kafka_error_class! {
     ///    `NetworkException` -> `InvalidMetadataException` ->
     ///   `RefreshRetriableException` -> `RetriableException` -> `ApiException` ->
     ///   `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.NetworkException")]
     NetworkError,
     code: Errors::NetworkError,
     extends: [

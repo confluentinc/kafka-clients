@@ -50,6 +50,7 @@ use crate::common::Error;
 ///   interruption to translate, so the `InterruptedException` catch block is
 ///   intentionally absent.
 #[derive(Debug)]
+#[doc(alias = "org.apache.kafka.clients.producer.internals.TransactionalRequestResult")]
 pub(crate) struct TransactionalRequestResult {
     /// Replaces Java's `CountDownLatch(1)`. Note `notify_waiters()` does not
     /// store a permit, so awaiting must check `completed` first — see
@@ -69,6 +70,7 @@ pub(crate) struct TransactionalRequestResult {
 
 impl TransactionalRequestResult {
     /// Creates a pending result for the named operation.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.TransactionalRequestResult#TransactionalRequestResult")]
     pub(crate) fn new(operation: impl Into<String>) -> Self {
         Self {
             notify: Notify::new(),
@@ -82,6 +84,7 @@ impl TransactionalRequestResult {
     /// Completes the operation with an error.
     ///
     /// Corresponds to Java's `fail(RuntimeException)`.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.TransactionalRequestResult#fail")]
     pub(crate) fn fail(&self, error: Error) {
         *self.error.lock().expect("transactional request result error mutex poisoned") = Some(error);
         self.completed.store(true, Ordering::SeqCst);
@@ -91,6 +94,7 @@ impl TransactionalRequestResult {
     /// Completes the operation successfully.
     ///
     /// Corresponds to Java's `done()`.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.TransactionalRequestResult#done")]
     pub(crate) fn done(&self) {
         self.completed.store(true, Ordering::SeqCst);
         self.notify.notify_waiters();
@@ -157,6 +161,7 @@ impl TransactionalRequestResult {
     ///
     /// Corresponds to Java's `error()`. Returns an owned clone because
     /// [`Error`] is `Clone` and the result may be awaited more than once.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.TransactionalRequestResult#error")]
     pub(crate) fn error(&self) -> Option<Error> {
         self.error
             .lock()
@@ -169,6 +174,7 @@ impl TransactionalRequestResult {
     /// Corresponds to Java's `isSuccessful()`.
     // Retained for Java parity (DoD #2); exercised only by this crate's tests.
     #[allow(dead_code)]
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.TransactionalRequestResult#isSuccessful")]
     pub(crate) fn is_successful(&self) -> bool {
         self.is_completed() && self.error().is_none()
     }
@@ -176,6 +182,7 @@ impl TransactionalRequestResult {
     /// Whether the operation has completed, successfully or not.
     ///
     /// Corresponds to Java's `isCompleted()`. Non-blocking.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.TransactionalRequestResult#isCompleted")]
     pub(crate) fn is_completed(&self) -> bool {
         self.completed.load(Ordering::SeqCst)
     }
@@ -184,6 +191,7 @@ impl TransactionalRequestResult {
     ///
     /// Corresponds to Java's `isAcked()`. Distinct from [`Self::is_completed`]
     /// — see the type-level docs.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.TransactionalRequestResult#isAcked")]
     pub(crate) fn is_acked(&self) -> bool {
         self.acked.load(Ordering::SeqCst)
     }

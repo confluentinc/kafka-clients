@@ -90,6 +90,7 @@ impl KeyHasher {
 /// Information for the current sticky partition.
 ///
 /// Translated from `BuiltInPartitioner.StickyPartitionInfo`.
+#[doc(alias = "org.apache.kafka.clients.producer.internals.BuiltInPartitioner$StickyPartitionInfo")]
 pub struct StickyPartitionInfo {
     index: i32,
     produced_bytes: AtomicI32,
@@ -97,11 +98,15 @@ pub struct StickyPartitionInfo {
 
 impl StickyPartitionInfo {
     /// Creates a new `StickyPartitionInfo` for the given partition index.
+    #[doc(
+        alias = "org.apache.kafka.clients.producer.internals.BuiltInPartitioner$StickyPartitionInfo#StickyPartitionInfo"
+    )]
     pub fn new(index: i32) -> Self {
         Self { index, produced_bytes: AtomicI32::new(0) }
     }
 
     /// Returns the partition index.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.BuiltInPartitioner$StickyPartitionInfo#partition")]
     pub fn partition(&self) -> i32 {
         self.index
     }
@@ -111,6 +116,7 @@ impl StickyPartitionInfo {
 /// distribution.
 ///
 /// Translated from `BuiltInPartitioner.PartitionLoadStats`.
+#[doc(alias = "org.apache.kafka.clients.producer.internals.BuiltInPartitioner$PartitionLoadStats")]
 struct PartitionLoadStats {
     cumulative_frequency_table: Vec<i32>,
     partition_ids: Vec<i32>,
@@ -118,6 +124,9 @@ struct PartitionLoadStats {
 }
 
 impl PartitionLoadStats {
+    #[doc(
+        alias = "org.apache.kafka.clients.producer.internals.BuiltInPartitioner$PartitionLoadStats#PartitionLoadStats"
+    )]
     fn new(cumulative_frequency_table: Vec<i32>, partition_ids: Vec<i32>, length: usize) -> Self {
         debug_assert_eq!(cumulative_frequency_table.len(), partition_ids.len());
         debug_assert!(length <= cumulative_frequency_table.len());
@@ -132,6 +141,7 @@ impl PartitionLoadStats {
 /// There is one partitioner object per topic. The partitioner uses sticky
 /// partitioning to avoid switching partitions too frequently, and uses adaptive
 /// load stats to distribute records based on queue sizes.
+#[doc(alias = "org.apache.kafka.clients.producer.internals.BuiltInPartitioner")]
 pub struct BuiltInPartitioner {
     topic: Arc<str>,
     sticky_batch_size: i32,
@@ -150,11 +160,13 @@ impl BuiltInPartitioner {
     ///
     /// # Panics
     /// Panics if `sticky_batch_size` is less than 1.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.BuiltInPartitioner#BuiltInPartitioner")]
     pub fn new(topic: &Arc<str>, sticky_batch_size: i32) -> Self {
         Self::with_log_context(topic, sticky_batch_size, LogContext::empty())
     }
 
     /// Creates a new `BuiltInPartitioner` with a `LogContext`.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.BuiltInPartitioner#BuiltInPartitioner")]
     pub fn with_log_context(topic: &Arc<str>, sticky_batch_size: i32, log_context: LogContext) -> Self {
         assert!(
             sticky_batch_size >= 1,
@@ -171,6 +183,7 @@ impl BuiltInPartitioner {
     }
 
     /// Calculate the next partition for the topic based on the partition load stats.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.BuiltInPartitioner#nextPartition")]
     fn next_partition(&mut self, cluster: &Cluster) -> i32 {
         let random = self.random_partition();
 
@@ -216,12 +229,14 @@ impl BuiltInPartitioner {
     /// Generate a random positive integer for partition selection.
     ///
     /// This method can be overridden in tests to provide deterministic behavior.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.BuiltInPartitioner#randomPartition")]
     fn random_partition(&mut self) -> i32 {
         Utils::to_positive(rand::random::<i32>())
     }
 
     /// Test-only function. When partition load stats are defined, return the end
     /// of range for the random number.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.BuiltInPartitioner#loadStatsRangeEnd")]
     pub fn load_stats_range_end(&self) -> i32 {
         let stats = self.partition_load_stats.as_ref().expect("partition_load_stats must be set");
         debug_assert!(stats.length > 0);
@@ -244,6 +259,7 @@ impl BuiltInPartitioner {
     ///
     /// # Returns
     /// A reference to the sticky partition info.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.BuiltInPartitioner#peekCurrentPartitionInfo")]
     pub fn peek_current_partition_info(&mut self, cluster: &Cluster) -> &StickyPartitionInfo {
         if self.sticky_partition_info.is_none() {
             let partition = self.next_partition(cluster);
@@ -257,6 +273,7 @@ impl BuiltInPartitioner {
     ///
     /// In the Rust implementation, since we use `&mut self` for partition changes,
     /// this always returns `false`. The method is kept for API compatibility.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.BuiltInPartitioner#isPartitionChanged")]
     pub fn is_partition_changed(&self, partition_info: &StickyPartitionInfo) -> bool {
         // In Rust, since we use &mut self for modifications, there's no concurrent
         // race condition possible. We check pointer identity as in Java.
@@ -273,6 +290,7 @@ impl BuiltInPartitioner {
     /// # Arguments
     /// * `appended_bytes` - The number of bytes appended to this partition
     /// * `cluster` - The cluster information
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.BuiltInPartitioner#updatePartitionInfo")]
     pub fn update_partition_info(&mut self, appended_bytes: i32, cluster: &Cluster) {
         self.update_partition_info_with_switch(appended_bytes, cluster, true);
     }
@@ -285,6 +303,7 @@ impl BuiltInPartitioner {
     /// * `appended_bytes` - The number of bytes appended to this partition
     /// * `cluster` - The cluster information
     /// * `enable_switch` - If true, switch partition once produced enough bytes
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.BuiltInPartitioner#updatePartitionInfo")]
     pub fn update_partition_info_with_switch(&mut self, appended_bytes: i32, cluster: &Cluster, enable_switch: bool) {
         if self.sticky_partition_info.is_none() {
             return;
@@ -322,6 +341,7 @@ impl BuiltInPartitioner {
     /// * `queue_sizes` - The queue sizes, partitions without leaders are excluded. Modified in place.
     /// * `partition_ids` - The partition ids for the queues
     /// * `length` - The logical length of the arrays (could be less than actual length)
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.BuiltInPartitioner#updatePartitionLoadStats")]
     pub fn update_partition_load_stats(
         &mut self,
         queue_sizes: Option<&mut [i32]>,
@@ -410,6 +430,7 @@ impl BuiltInPartitioner {
     ///   set.
     /// - [`KeyHasher::Murmur2`]: `Utils.toPositive(Utils.murmur2(key)) %
     ///   num_partitions`, identical to the Java client.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.BuiltInPartitioner#partitionForKey")]
     pub fn partition_for_key(serialized_key: &[u8], num_partitions: i32, hasher: KeyHasher) -> i32 {
         match hasher {
             KeyHasher::Crc32 => (crc32fast::hash(serialized_key) % (num_partitions as u32)) as i32,
@@ -542,6 +563,7 @@ mod tests {
 
     /// Translated from `BuiltInPartitionerTest.testStickyPartitioning`.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.BuiltInPartitionerTest#testStickyPartitioning")]
     fn test_sticky_partitioning() {
         let nodes = make_nodes();
         let all_partitions = vec![
@@ -579,6 +601,7 @@ mod tests {
 
     /// Translated from `BuiltInPartitionerTest.unavailablePartitionsTest`.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.BuiltInPartitionerTest#unavailablePartitionsTest")]
     fn unavailable_partitions_test() {
         let nodes = make_nodes();
         // Partition 1 in topic A, partition 0 in topic B and partition 0 in topic C are unavailable.
@@ -653,6 +676,7 @@ mod tests {
 
     /// Translated from `BuiltInPartitionerTest.adaptivePartitionsTest`.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.BuiltInPartitionerTest#adaptivePartitionsTest")]
     fn adaptive_partitions_test() {
         let nodes = make_nodes();
         let mut partitioner = SequentialPartitioner::new(TOPIC_A, 1);

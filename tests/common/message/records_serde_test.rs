@@ -77,6 +77,7 @@ fn records_of(values: &[&str]) -> Bytes {
 }
 
 #[test]
+#[doc(alias = "org.apache.kafka.common.message.RecordsSerdeTest#testSerdeRecords")]
 fn test_serde_records() {
     let mut message = SimpleRecordsMessageData::new();
     message.topic = "foo".to_string();
@@ -86,6 +87,7 @@ fn test_serde_records() {
 }
 
 #[test]
+#[doc(alias = "org.apache.kafka.common.message.RecordsSerdeTest#testSerdeNullRecords")]
 fn test_serde_null_records() {
     let mut message = SimpleRecordsMessageData::new();
     message.topic = "foo".to_string();
@@ -104,6 +106,7 @@ fn test_serde_null_records() {
 }
 
 #[test]
+#[doc(alias = "org.apache.kafka.common.message.RecordsSerdeTest#testSerdeEmptyRecords")]
 fn test_serde_empty_records() {
     let mut message = SimpleRecordsMessageData::new();
     message.topic = "foo".to_string();

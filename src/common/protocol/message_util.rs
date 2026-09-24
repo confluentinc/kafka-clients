@@ -28,6 +28,7 @@ use super::RawTaggedField;
 /// which has no instance state, so it becomes a unit struct hosting its
 /// statics as associated items.
 #[non_exhaustive]
+#[doc(alias = "org.apache.kafka.common.protocol.MessageUtil")]
 pub struct MessageUtil;
 
 impl MessageUtil {
@@ -42,6 +43,7 @@ impl MessageUtil {
     /// An empty slice is considered equivalent to no tagged fields.
     /// This matches Java's `MessageUtil.compareRawTaggedFields` where
     /// `null` is equivalent to an empty list.
+    #[doc(alias = "org.apache.kafka.common.protocol.MessageUtil#compareRawTaggedFields")]
     pub fn compare_raw_tagged_fields(first: Option<&[RawTaggedField]>, second: Option<&[RawTaggedField]>) -> bool {
         let first = first.unwrap_or(&[]);
         let second = second.unwrap_or(&[]);
@@ -55,6 +57,7 @@ impl MessageUtil {
     /// 2. Allocates a buffer of that size
     /// 3. Writes the message to the buffer
     /// 4. Resets the buffer position to 0 for reading
+    #[doc(alias = "org.apache.kafka.common.protocol.MessageUtil#toByteBufferAccessor")]
     pub fn to_byte_buffer_accessor(message: &mut impl Message, version: i16) -> io::Result<ByteBufferAccessor> {
         let mut cache = ObjectSerializationCache::new();
         let message_size = message.size(&mut cache, version)?;
@@ -69,6 +72,7 @@ impl MessageUtil {
     /// Corresponds to `MessageUtil.toVersionPrefixedByteBuffer`. The returned
     /// buffer holds the version `short` followed by the message body, positioned at
     /// the beginning for reading.
+    #[doc(alias = "org.apache.kafka.common.protocol.MessageUtil#toVersionPrefixedByteBuffer")]
     pub fn to_version_prefixed_byte_buffer(version: i16, message: &mut impl Message) -> io::Result<ByteBufferAccessor> {
         use super::Writable;
 
@@ -139,6 +143,7 @@ mod tests {
     /// Verifies comparison semantics for RawTaggedField lists:
     /// None vs empty, different fields, matching fields.
     #[test]
+    #[doc(alias = "org.apache.kafka.common.protocol.MessageUtilTest#testCompareRawTaggedFields")]
     fn test_compare_raw_tagged_fields() {
         // null vs null
         assert!(MessageUtil::compare_raw_tagged_fields(None, None));
@@ -171,6 +176,7 @@ mod tests {
     /// Translated from Java MessageUtilTest.testConstants.
     /// Verifies UNSIGNED_SHORT_MAX and UNSIGNED_INT_MAX values.
     #[test]
+    #[doc(alias = "org.apache.kafka.common.protocol.MessageUtilTest#testConstants")]
     fn test_constants() {
         assert_eq!(MessageUtil::UNSIGNED_SHORT_MAX, 0xFFFF);
         assert_eq!(MessageUtil::UNSIGNED_INT_MAX, 0xFFFF_FFFF);

@@ -26,6 +26,7 @@ use std::fmt;
 #[deprecated(note = "Not required by Kafka client users; no replacement is provided.")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
+#[doc(alias = "org.apache.kafka.clients.consumer.OffsetResetStrategy")]
 pub enum OffsetResetStrategy {
     /// Reset to the latest offset.
     Latest,

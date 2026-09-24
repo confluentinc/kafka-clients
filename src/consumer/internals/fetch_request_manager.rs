@@ -111,6 +111,7 @@ pub(crate) enum PendingFetchCompletion {
 
 /// `FetchRequestManager` — owns an [`AbstractFetch`] and produces fetch
 /// `UnsentRequest`s in response to `RequestManager::poll`.
+#[doc(alias = "org.apache.kafka.clients.consumer.internals.FetchRequestManager")]
 pub(crate) struct FetchRequestManager {
     /// Shared state with the Phase 10 bg task (`AbstractFetch` from 7a).
     abstract_fetch: AbstractFetch,
@@ -175,6 +176,7 @@ impl FetchRequestManager {
     /// the `log` crate). Phase M3 plumbs the `FetchMetricsManager` (dropped by
     /// Phase 7a); Phase 37 re-introduced `ApiVersions`.
     #[allow(clippy::too_many_arguments)]
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.FetchRequestManager#FetchRequestManager")]
     pub(crate) fn new(
         metadata: Arc<ConsumerMetadata>,
         subscriptions: Arc<Mutex<SubscriptionState>>,
@@ -225,6 +227,7 @@ impl FetchRequestManager {
     /// so concurrent callers all complete on ONE `pollInternal`. The
     /// Rust port collects all acks in a single slot; the next `poll`
     /// completes them together.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.FetchRequestManager#createFetchRequests")]
     pub(crate) fn create_fetch_requests(&mut self) -> oneshot::Receiver<Result<(), Error>> {
         let (tx, rx) = oneshot::channel();
         self.pending_fetch_requests.get_or_insert_with(Vec::new).push(tx);
@@ -261,6 +264,7 @@ impl FetchRequestManager {
     ///
     /// `for_close = true` switches `prepare_fetch_requests` for
     /// `prepare_close_fetch_session_requests` (`poll_on_close` path).
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.FetchRequestManager#pollInternal")]
     fn poll_internal(&mut self, current_time_ms: i64, for_close: bool) -> PollResult {
         // Java's `pendingFetchRequestFuture` semantics: take the whole
         // slot out atomically; all callers' acks resolve together with
@@ -1734,6 +1738,7 @@ mod round_trip {
     /// round-trip — build request, deliver 3 records (offsets 1..3), collect
     /// them, and verify the position advances to 4.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.FetchRequestManagerTest#testFetchNormal")]
     fn test_fetch_normal() {
         let (topic_id, ids) = single_topic_id();
         let mut rt = RoundTrip::new(1, i32::MAX, IsolationLevel::ReadUncommitted, ids);
@@ -1782,6 +1787,7 @@ mod round_trip {
     /// non-zero topic-id negotiates the LATEST fetch version and carries the
     /// topic-id on the wire; records decode and the position advances.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.FetchRequestManagerTest#testFetchWithTopicId")]
     fn test_fetch_with_topic_id() {
         let (topic_id, ids) = single_topic_id();
         let mut rt = RoundTrip::new(1, i32::MAX, IsolationLevel::ReadUncommitted, ids);
@@ -1808,6 +1814,7 @@ mod round_trip {
     /// ZERO topic-id falls back to fetch version 12 (the topic-id-less wire
     /// format); records still decode and the position advances.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.FetchRequestManagerTest#testFetchWithNoTopicId")]
     fn test_fetch_with_no_topic_id() {
         // No topic-id seeded -> Uuid::zero() on the wire -> version 12.
         let mut rt = RoundTrip::new(1, i32::MAX, IsolationLevel::ReadUncommitted, HashMap::new());
@@ -1833,6 +1840,7 @@ mod round_trip {
     /// the outgoing FetchRequest carries the partition's current leader epoch
     /// (here 99 from the metadata update).
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.FetchRequestManagerTest#testEpochSetInFetchRequest")]
     fn test_epoch_set_in_fetch_request() {
         let (topic_id, ids) = single_topic_id();
         let mut rt = RoundTrip::new(1, i32::MAX, IsolationLevel::ReadUncommitted, ids);
@@ -1874,6 +1882,9 @@ mod round_trip {
     /// core assertion that the consumer position advances after a fetch (the
     /// metadata-epoch-divergence half is covered by the leadership tests).
     #[test]
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.FetchRequestManagerTest#testSubscriptionPositionUpdatedWithEpoch"
+    )]
     fn test_subscription_position_updated_with_epoch() {
         let (topic_id, ids) = single_topic_id();
         let mut rt = RoundTrip::new(1, i32::MAX, IsolationLevel::ReadUncommitted, ids);
@@ -1894,6 +1905,7 @@ mod round_trip {
     /// advance the position, and leaves the fetch handled (node removed from
     /// the pending set).
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.FetchRequestManagerTest#testFetchSessionIdError")]
     fn test_fetch_session_id_error() {
         let (topic_id, ids) = single_topic_id();
         let mut rt = RoundTrip::new(1, i32::MAX, IsolationLevel::ReadUncommitted, ids);
@@ -1922,6 +1934,9 @@ mod round_trip {
     /// partition is unassigned and a different one assigned, the next
     /// incremental fetch carries the old partition on the forget list.
     #[test]
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.FetchRequestManagerTest#testFetchForgetTopicIdWhenUnassigned"
+    )]
     fn test_fetch_forget_topic_id_when_unassigned() {
         let foo_id = Uuid::random_uuid();
         let bar_id = Uuid::random_uuid();
@@ -1963,6 +1978,9 @@ mod round_trip {
     /// partition's topic-id changes (foo old-id -> foo new-id), the next
     /// incremental fetch forgets the old topic-id.
     #[test]
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.FetchRequestManagerTest#testFetchForgetTopicIdWhenReplaced"
+    )]
     fn test_fetch_forget_topic_id_when_replaced() {
         let old_id = Uuid::random_uuid();
         let new_id = Uuid::random_uuid();
@@ -2006,6 +2024,9 @@ mod round_trip {
     /// that starts topic-id-less (v12) upgrades to topic-ids (latest version)
     /// and back, with the wire version tracking the topic-id presence.
     #[test]
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.FetchRequestManagerTest#testFetchTopicIdUpgradeDowngrade"
+    )]
     fn test_fetch_topic_id_upgrade_downgrade() {
         let new_id = Uuid::random_uuid();
         // Start with no topic-id for foo.
@@ -2062,6 +2083,9 @@ mod round_trip {
     /// position advances per partition and a partial buffered record is
     /// returned on a subsequent collect with no new fetch.
     #[test]
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.FetchRequestManagerTest#testConsumingViaIncrementalFetchRequests"
+    )]
     fn test_consuming_via_incremental_fetch_requests() {
         let (topic_id, ids) = single_topic_id();
         let mut rt = RoundTrip::new(1, 2, IsolationLevel::ReadUncommitted, ids);
@@ -2131,6 +2155,9 @@ mod round_trip {
     /// `prepare_fetch_requests` skips every node in that set — so every
     /// partition led by that broker would stall permanently.
     #[test]
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.FetchRequestManagerTest#testFetchCompletedBeforeHandlerAdded"
+    )]
     fn test_fetch_completed_before_handler_added() {
         let (topic_id, ids) = single_topic_id();
         let mut rt = RoundTrip::new(1, i32::MAX, IsolationLevel::ReadUncommitted, ids);
@@ -2252,6 +2279,7 @@ mod round_trip {
     /// a node inside the reconnect-backoff window (the `is_unavailable`
     /// predicate returns true) is excluded from the fetch-request build.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.FetchRequestManagerTest#testFetchSkipsBlackedOutNodes")]
     fn test_fetch_skips_blacked_out_nodes() {
         let (topic_id, ids) = single_topic_id();
         let mut rt = RoundTrip::new(1, i32::MAX, IsolationLevel::ReadUncommitted, ids);
@@ -2340,6 +2368,9 @@ mod round_trip {
     /// hosting buffered data is skipped; once collected, the node is fetched
     /// again. (Single-node simplification of the multi-node Java test.)
     #[test]
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.FetchRequestManagerTest#testFetchRequestWithBufferedPartitions"
+    )]
     fn test_fetch_request_with_buffered_partitions() {
         let (topic_id, ids) = single_topic_id();
         let mut rt = RoundTrip::new(1, i32::MAX, IsolationLevel::ReadUncommitted, ids);
@@ -2368,6 +2399,9 @@ mod round_trip {
     /// Translated from
     /// `FetchRequestManagerTest.testFetchRequestWithBufferedPartitionNotAssigned`.
     #[test]
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.FetchRequestManagerTest#testFetchRequestWithBufferedPartitionNotAssigned"
+    )]
     fn test_fetch_request_with_buffered_partition_not_assigned() {
         let (topic_id, ids) = single_topic_id();
         let mut rt = RoundTrip::new(1, i32::MAX, IsolationLevel::ReadUncommitted, ids);
@@ -2383,6 +2417,9 @@ mod round_trip {
     /// Translated from
     /// `FetchRequestManagerTest.testFetchRequestWithBufferedPartitionMissingLeader`.
     #[test]
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.FetchRequestManagerTest#testFetchRequestWithBufferedPartitionMissingLeader"
+    )]
     fn test_fetch_request_with_buffered_partition_missing_leader() {
         let (topic_id, ids) = single_topic_id();
         let mut rt = RoundTrip::new(1, i32::MAX, IsolationLevel::ReadUncommitted, ids);
@@ -2425,6 +2462,9 @@ mod round_trip {
     /// is fetched, tp1 is skipped, and NO error surfaces (the deliberate
     /// divergence from Java's IllegalState contract).
     #[test]
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.FetchRequestManagerTest#testFetchRequestWithBufferedPartitionMissingPosition"
+    )]
     fn test_fetch_request_with_buffered_partition_missing_position() {
         let (topic_id, ids) = single_topic_id();
         let mut rt = RoundTrip::new(1, i32::MAX, IsolationLevel::ReadUncommitted, ids);
@@ -2460,6 +2500,9 @@ mod round_trip {
     /// Translated from
     /// `FetchRequestManagerTest.testFetchRequestWithBufferedPartitionPaused`.
     #[test]
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.FetchRequestManagerTest#testFetchRequestWithBufferedPartitionPaused"
+    )]
     fn test_fetch_request_with_buffered_partition_paused() {
         let (topic_id, ids) = single_topic_id();
         let mut rt = RoundTrip::new(1, i32::MAX, IsolationLevel::ReadUncommitted, ids);
@@ -2471,6 +2514,9 @@ mod round_trip {
     /// Translated from
     /// `FetchRequestManagerTest.testFetchRequestWithBufferedPartitionPendingAssignment`.
     #[test]
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.FetchRequestManagerTest#testFetchRequestWithBufferedPartitionPendingAssignment"
+    )]
     fn test_fetch_request_with_buffered_partition_pending_assignment() {
         let (topic_id, ids) = single_topic_id();
         let mut rt = RoundTrip::new(1, i32::MAX, IsolationLevel::ReadUncommitted, ids);
@@ -2489,6 +2535,9 @@ mod round_trip {
     /// marked pending-revocation is unfetchable, so the next build excludes it
     /// and fetches only the collected partition.
     #[test]
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.FetchRequestManagerTest#testFetchRequestWithBufferedPartitionPendingRevocation"
+    )]
     fn test_fetch_request_with_buffered_partition_pending_revocation() {
         let (topic_id, ids) = single_topic_id();
         let mut rt = RoundTrip::new(1, i32::MAX, IsolationLevel::ReadUncommitted, ids);
@@ -2503,6 +2552,9 @@ mod round_trip {
     /// Translated from
     /// `FetchRequestManagerTest.testFetchRequestWithBufferedPartitionResetOffset`.
     #[test]
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.FetchRequestManagerTest#testFetchRequestWithBufferedPartitionResetOffset"
+    )]
     fn test_fetch_request_with_buffered_partition_reset_offset() {
         let (topic_id, ids) = single_topic_id();
         let mut rt = RoundTrip::new(1, i32::MAX, IsolationLevel::ReadUncommitted, ids);
@@ -2515,6 +2567,9 @@ mod round_trip {
     /// `FetchRequestManagerTest.testFetchRequestWithBufferedPartitionUnfetchable`
     /// (the shared helper; here exercised via pause as the unfetchable mutator).
     #[test]
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.FetchRequestManagerTest#testFetchRequestWithBufferedPartitionUnfetchable"
+    )]
     fn test_fetch_request_with_buffered_partition_unfetchable() {
         let (topic_id, ids) = single_topic_id();
         let mut rt = RoundTrip::new(1, i32::MAX, IsolationLevel::ReadUncommitted, ids);
@@ -2761,6 +2816,7 @@ mod round_trip {
     /// Translated from `FetchRequestManagerTest.testHeaders`: record headers
     /// survive decode into `ConsumerRecord` through the fetch path.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.FetchRequestManagerTest#testHeaders")]
     fn test_headers() {
         let (topic_id, ids) = single_topic_id();
         let mut rt = RoundTrip::new(1, i32::MAX, IsolationLevel::ReadUncommitted, ids);
@@ -2787,6 +2843,9 @@ mod round_trip {
     /// each record's `leader_epoch()` reflects its batch's partition leader
     /// epoch (three batches with epochs 1, 8, 13).
     #[test]
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.FetchRequestManagerTest#testLeaderEpochInConsumerRecord"
+    )]
     fn test_leader_epoch_in_consumer_record() {
         let (topic_id, ids) = single_topic_id();
         let mut rt = RoundTrip::new(1, i32::MAX, IsolationLevel::ReadUncommitted, ids);
@@ -2814,6 +2873,9 @@ mod round_trip {
     /// a batch with `NO_PARTITION_LEADER_EPOCH` yields records whose
     /// `leader_epoch()` is `None`.
     #[test]
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.FetchRequestManagerTest#testMissingLeaderEpochInRecords"
+    )]
     fn test_missing_leader_epoch_in_records() {
         let (topic_id, ids) = single_topic_id();
         let mut rt = RoundTrip::new(1, i32::MAX, IsolationLevel::ReadUncommitted, ids);
@@ -2834,6 +2896,7 @@ mod round_trip {
     /// max.poll.records=2, a 3-record fetch returns 2 then 1, advancing the
     /// position across each collect; a second fetch returns the next batch.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.FetchRequestManagerTest#testFetchMaxPollRecords")]
     fn test_fetch_max_poll_records() {
         let (topic_id, ids) = single_topic_id();
         let mut rt = RoundTrip::new(1, 2, IsolationLevel::ReadUncommitted, ids);
@@ -2870,6 +2933,7 @@ mod round_trip {
     /// a compacted topic with offset gaps (15, 20, 30) decodes all records and
     /// advances the position to last-offset + 1 (31).
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.FetchRequestManagerTest#testFetchNonContinuousRecords")]
     fn test_fetch_non_continuous_records() {
         let (topic_id, ids) = single_topic_id();
         let mut rt = RoundTrip::new(1, i32::MAX, IsolationLevel::ReadUncommitted, ids);
@@ -2892,6 +2956,7 @@ mod round_trip {
     /// an empty batch (no records) still advances the position to
     /// last-offset + 1.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.FetchRequestManagerTest#testUpdatePositionOnEmptyBatch")]
     fn test_update_position_on_empty_batch() {
         let (topic_id, ids) = single_topic_id();
         let mut rt = RoundTrip::new(1, i32::MAX, IsolationLevel::ReadUncommitted, ids);
@@ -2915,6 +2980,9 @@ mod round_trip {
     /// (compaction removed the tail) advances the position to the batch's
     /// next-offset, not the last present record + 1.
     #[test]
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.FetchRequestManagerTest#testUpdatePositionWithLastRecordMissingFromBatch"
+    )]
     fn test_update_position_with_last_record_missing_from_batch() {
         let (topic_id, ids) = single_topic_id();
         // check.crcs=false: build_records_with_missing_last overwrites the
@@ -2939,6 +3007,9 @@ mod round_trip {
     /// `FetchRequestManagerTest.testReturnAbortedTransactionsInUncommittedMode`:
     /// under READ_UNCOMMITTED, aborted-transaction records ARE returned.
     #[test]
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.FetchRequestManagerTest#testReturnAbortedTransactionsInUncommittedMode"
+    )]
     fn test_return_aborted_transactions_in_uncommitted_mode() {
         let (topic_id, ids) = single_topic_id();
         let mut rt = RoundTrip::new(1, i32::MAX, IsolationLevel::ReadUncommitted, ids);
@@ -2963,6 +3034,9 @@ mod round_trip {
     /// under READ_COMMITTED an all-aborted batch returns NO records but the
     /// consumer position still advances past it.
     #[test]
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.FetchRequestManagerTest#testConsumerPositionUpdatedWhenSkippingAbortedTransactions"
+    )]
     fn test_consumer_position_updated_when_skipping_aborted_transactions() {
         let (topic_id, ids) = single_topic_id();
         let mut rt = RoundTrip::new(1, i32::MAX, IsolationLevel::ReadCommitted, ids);
@@ -3025,6 +3099,9 @@ mod round_trip {
     /// interleaved committed/aborted transactional batches under READ_COMMITTED
     /// return only the committed records, in offset order.
     #[test]
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.FetchRequestManagerTest#testReadCommittedWithCompactedTopic"
+    )]
     fn test_read_committed_with_compacted_topic() {
         let (topic_id, ids) = single_topic_id();
         let mut rt = RoundTrip::new(1, i32::MAX, IsolationLevel::ReadCommitted, ids);
@@ -3052,6 +3129,9 @@ mod round_trip {
     /// advances; tp0's position is unchanged and the OOR error surfaces.
     /// Re-collecting does not lose records or re-advance.
     #[test]
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.FetchRequestManagerTest#testFetchPositionAfterException"
+    )]
     fn test_fetch_position_after_error() {
         let (topic_id, ids) = single_topic_id();
         // AutoOffsetReset NONE so OOR raises instead of silently resetting.
@@ -3159,6 +3239,7 @@ mod round_trip {
     /// OFFSET_OUT_OF_RANGE that arrives after a seek to a DIFFERENT offset is
     /// stale and must NOT reset the position or raise.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.FetchRequestManagerTest#testStaleOutOfRangeError")]
     fn test_stale_out_of_range_error() {
         let (topic_id, ids) = single_topic_id();
         let mut rt = RoundTrip::new(1, i32::MAX, IsolationLevel::ReadUncommitted, ids);
@@ -3187,6 +3268,7 @@ mod round_trip {
     /// (AutoOffsetReset NONE) an OOR followed by a seek past the fetched offset
     /// yields an empty fetch without raising.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.FetchRequestManagerTest#testFetchedRecordsAfterSeek")]
     fn test_fetched_records_after_seek() {
         let (topic_id, ids) = single_topic_id();
         let subscriptions = Arc::new(Mutex::new(SubscriptionState::new(AutoOffsetResetStrategy::NONE)));
@@ -3241,6 +3323,7 @@ mod round_trip {
     /// transport disconnect yields no records, does not reset, and leaves the
     /// partition fetchable at its original position.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.FetchRequestManagerTest#testFetchDisconnected")]
     fn test_fetch_disconnected() {
         let (topic_id, ids) = single_topic_id();
         let mut rt = RoundTrip::new(1, i32::MAX, IsolationLevel::ReadUncommitted, ids);
@@ -3263,6 +3346,9 @@ mod round_trip {
     /// a normal fetch buffers data, clearing buffered data for partitions not
     /// in the new assignment empties the buffer.
     #[test]
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.FetchRequestManagerTest#testClearBufferedDataForTopicPartitions"
+    )]
     fn test_clear_buffered_data_for_topic_partitions() {
         let (topic_id, ids) = single_topic_id();
         let mut rt = RoundTrip::new(1, i32::MAX, IsolationLevel::ReadUncommitted, ids);
@@ -3280,6 +3366,9 @@ mod round_trip {
     /// request is NOT issued for a partition awaiting an on-assigned callback
     /// (pending), even though it has a valid position.
     #[test]
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.FetchRequestManagerTest#testInflightFetchOnPendingPartitions"
+    )]
     fn test_inflight_fetch_on_pending_partitions() {
         let (topic_id, ids) = single_topic_id();
         let mut rt = RoundTrip::new(1, i32::MAX, IsolationLevel::ReadUncommitted, ids);
@@ -3321,6 +3410,9 @@ mod round_trip {
     /// completes for it; once the callback is enabled the partition resumes
     /// fetching.
     #[test]
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.FetchRequestManagerTest#testFetchResultNotProcessedForPartitionsAwaitingCallbackCompletion"
+    )]
     fn test_fetch_result_not_processed_for_partitions_awaiting_callback_completion() {
         let (topic_id, ids) = single_topic_id();
         let mut rt = RoundTrip::new(1, i32::MAX, IsolationLevel::ReadUncommitted, ids);
@@ -3349,6 +3441,9 @@ mod round_trip {
     /// tp0 is paused BEFORE the response arrives. On delivery + collect, no
     /// records are returned for the paused partition.
     #[test]
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.FetchRequestManagerTest#testInFlightFetchOnPausedPartition"
+    )]
     fn test_in_flight_fetch_on_paused_partition() {
         let (topic_id, ids) = single_topic_id();
         let mut rt = RoundTrip::new(1, i32::MAX, IsolationLevel::ReadUncommitted, ids);
@@ -3377,6 +3472,9 @@ mod round_trip {
     /// separate nodes), then tp0 is paused before collecting. Only tp1's
     /// records are returned; tp0's completed fetch is retained.
     #[test]
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.FetchRequestManagerTest#testFetchOnCompletedFetchesForSomePausedPartitions"
+    )]
     fn test_fetch_on_completed_fetches_for_some_paused_partitions() {
         let (topic_id, ids) = single_topic_id();
         // Two nodes so tp0 and tp1 have different leaders (Java uses 2 nodes).
@@ -3424,6 +3522,9 @@ mod round_trip {
     /// paused — the remaining record stays cached — then resumed, and the last
     /// record is returned.
     #[test]
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.FetchRequestManagerTest#testPartialFetchWithPausedPartitions"
+    )]
     fn test_partial_fetch_with_paused_partitions() {
         let (topic_id, ids) = single_topic_id();
         // maxPollRecords=2 (Java's buildFetcher(2)).
@@ -3475,6 +3576,9 @@ mod round_trip {
     /// a new offset and resumed. The buffered fetch is DISCARDED (its base
     /// offset no longer matches the position) and no records are returned.
     #[test]
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.FetchRequestManagerTest#testFetchDiscardedAfterPausedPartitionResumedAndSeekedToNewOffset"
+    )]
     fn test_fetch_discarded_after_paused_partition_resumed_and_seeked_to_new_offset() {
         let (topic_id, ids) = single_topic_id();
         let mut rt = RoundTrip::new(1, i32::MAX, IsolationLevel::ReadUncommitted, ids);
@@ -3512,6 +3616,7 @@ mod round_trip {
     /// on tp1 before collecting suppresses the OOR error so the subsequent
     /// collect returns no records and does not raise.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.FetchRequestManagerTest#testSeekBeforeException")]
     fn test_seek_before_error() {
         let (topic_id, ids) = single_topic_id();
         // AutoOffsetReset NONE so OOR would raise, maxPollRecords=2.
@@ -3628,6 +3733,7 @@ mod round_trip {
     /// preferred-read-replica is set from the response, honored, and reverts to
     /// the leader when the response names a replica absent from metadata.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.FetchRequestManagerTest#testPreferredReadReplica")]
     fn test_preferred_read_replica() {
         let (topic_id, ids) = single_topic_id();
         let mut rt = rt_two_nodes(ids);
@@ -3656,6 +3762,9 @@ mod round_trip {
     /// `FetchRequestManagerTest.testFetchDisconnectedShouldClearPreferredReadReplica`:
     /// a disconnect clears the preferred read replica.
     #[test]
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.FetchRequestManagerTest#testFetchDisconnectedShouldClearPreferredReadReplica"
+    )]
     fn test_fetch_disconnected_should_clear_preferred_read_replica() {
         let (topic_id, ids) = single_topic_id();
         let mut rt = rt_two_nodes(ids);
@@ -3678,6 +3787,9 @@ mod round_trip {
     /// a disconnect for an UNASSIGNED partition does not (and cannot) keep a
     /// preferred replica — once unassigned, the partition has no state.
     #[test]
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.FetchRequestManagerTest#testFetchDisconnectedShouldNotClearPreferredReadReplicaIfUnassigned"
+    )]
     fn test_fetch_disconnected_should_not_clear_preferred_read_replica_if_unassigned() {
         let (topic_id, ids) = single_topic_id();
         let mut rt = rt_two_nodes(ids);
@@ -3699,6 +3811,9 @@ mod round_trip {
     /// a per-partition NOT_LEADER_OR_FOLLOWER error clears the preferred read
     /// replica (via the metadata-refresh-errors path).
     #[test]
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.FetchRequestManagerTest#testFetchErrorShouldClearPreferredReadReplica"
+    )]
     fn test_fetch_error_should_clear_preferred_read_replica() {
         let (topic_id, ids) = single_topic_id();
         let mut rt = rt_two_nodes(ids);
@@ -3720,6 +3835,9 @@ mod round_trip {
     /// `FetchRequestManagerTest.testPreferredReadReplicaOffsetError`: an
     /// OFFSET_OUT_OF_RANGE error clears the preferred read replica.
     #[test]
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.FetchRequestManagerTest#testPreferredReadReplicaOffsetError"
+    )]
     fn test_preferred_read_replica_offset_error() {
         let (topic_id, ids) = single_topic_id();
         let mut rt = rt_two_nodes(ids);

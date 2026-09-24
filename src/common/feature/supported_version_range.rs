@@ -32,6 +32,7 @@ const MAX_VERSION_KEY_LABEL: &str = "max_version";
 /// - Both must be >= 0 (only non-negative version values are valid).
 /// - max must be >= min.
 #[derive(Debug, Clone, Copy)]
+#[doc(alias = "org.apache.kafka.common.feature.SupportedVersionRange")]
 pub struct SupportedVersionRange {
     min_value: i16,
     max_value: i16,
@@ -42,6 +43,7 @@ impl SupportedVersionRange {
     ///
     /// # Errors
     /// Returns an error if `min_version < 0`, `max_version < 0`, or `max_version < min_version`.
+    #[doc(alias = "org.apache.kafka.common.feature.SupportedVersionRange#SupportedVersionRange")]
     pub fn with_min_version(min_version: i16, max_version: i16) -> Result<Self, String> {
         if min_version < 0 || max_version < 0 || max_version < min_version {
             return Err(format!(
@@ -57,6 +59,7 @@ impl SupportedVersionRange {
     ///
     /// # Errors
     /// Returns an error if `max_version < 0`.
+    #[doc(alias = "org.apache.kafka.common.feature.SupportedVersionRange#SupportedVersionRange")]
     pub fn new(max_version: i16) -> Result<Self, String> {
         Self::with_min_version(0, max_version)
     }
@@ -65,6 +68,7 @@ impl SupportedVersionRange {
     ///
     /// # Errors
     /// Returns an error if required keys are missing or the values are invalid.
+    #[doc(alias = "org.apache.kafka.common.feature.SupportedVersionRange#fromMap")]
     pub fn from_map(version_range_map: &HashMap<&str, i16>) -> Result<Self, String> {
         let min = value_or_err(MIN_VERSION_KEY_LABEL, version_range_map)?;
         let max = value_or_err(MAX_VERSION_KEY_LABEL, version_range_map)?;
@@ -93,6 +97,7 @@ impl SupportedVersionRange {
     /// `SupportedVersionRange`.
     ///
     /// Returns `true` if the version is incompatible (outside the range), `false` otherwise.
+    #[doc(alias = "org.apache.kafka.common.feature.SupportedVersionRange#isIncompatibleWith")]
     pub fn is_incompatible_with(&self, version: i16) -> bool {
         self.min_value > version || self.max_value < version
     }
@@ -137,6 +142,7 @@ mod tests {
 
     /// Translated from `SupportedVersionRangeTest.testFailDueToInvalidParams`
     #[test]
+    #[doc(alias = "org.apache.kafka.common.feature.SupportedVersionRangeTest#testFailDueToInvalidParams")]
     fn test_fail_due_to_invalid_params() {
         // min and max can't be < 0.
         assert!(SupportedVersionRange::with_min_version(-1, -1).is_err());
@@ -150,6 +156,7 @@ mod tests {
 
     /// Translated from `SupportedVersionRangeTest.testFromToMap`
     #[test]
+    #[doc(alias = "org.apache.kafka.common.feature.SupportedVersionRangeTest#testFromToMap")]
     fn test_from_to_map() {
         let version_range = SupportedVersionRange::with_min_version(1, 2).unwrap();
         assert_eq!(1, version_range.min());
@@ -169,6 +176,7 @@ mod tests {
 
     /// Translated from `SupportedVersionRangeTest.testFromMapFailure`
     #[test]
+    #[doc(alias = "org.apache.kafka.common.feature.SupportedVersionRangeTest#testFromMapFailure")]
     fn test_from_map_failure() {
         // min_version can't be < 0.
         let mut invalid = HashMap::new();
@@ -207,6 +215,7 @@ mod tests {
 
     /// Translated from `SupportedVersionRangeTest.testToString`
     #[test]
+    #[doc(alias = "org.apache.kafka.common.feature.SupportedVersionRangeTest#testToString")]
     fn test_to_string() {
         assert_eq!(
             "SupportedVersionRange[min_version:1, max_version:1]",
@@ -220,6 +229,7 @@ mod tests {
 
     /// Translated from `SupportedVersionRangeTest.testEquals`
     #[test]
+    #[doc(alias = "org.apache.kafka.common.feature.SupportedVersionRangeTest#testEquals")]
     fn test_equals() {
         let tested = SupportedVersionRange::with_min_version(1, 1).unwrap();
         assert_eq!(tested, tested);
@@ -228,6 +238,7 @@ mod tests {
 
     /// Translated from `SupportedVersionRangeTest.testMinMax`
     #[test]
+    #[doc(alias = "org.apache.kafka.common.feature.SupportedVersionRangeTest#testMinMax")]
     fn test_min_max() {
         let version_range = SupportedVersionRange::with_min_version(1, 2).unwrap();
         assert_eq!(1, version_range.min());
@@ -236,6 +247,7 @@ mod tests {
 
     /// Translated from `SupportedVersionRangeTest.testIsIncompatibleWith`
     #[test]
+    #[doc(alias = "org.apache.kafka.common.feature.SupportedVersionRangeTest#testIsIncompatibleWith")]
     fn test_is_incompatible_with() {
         assert!(!SupportedVersionRange::with_min_version(1, 1).unwrap().is_incompatible_with(1));
         assert!(!SupportedVersionRange::with_min_version(1, 4).unwrap().is_incompatible_with(2));

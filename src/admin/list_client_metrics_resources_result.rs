@@ -27,12 +27,14 @@ use crate::common::KafkaFuture;
 /// (deprecated since 4.1 in favor of
 /// [`ListConfigResourcesResult`](crate::admin::ListConfigResourcesResult)).
 #[deprecated(since = "4.1.0", note = "Use Admin::list_config_resources instead")]
+#[doc(alias = "org.apache.kafka.clients.admin.ListClientMetricsResourcesResult")]
 pub struct ListClientMetricsResourcesResult {
     future: KafkaFuture<Vec<ClientMetricsResourceListing>>,
 }
 
 impl ListClientMetricsResourcesResult {
     /// Creates a new result from the client-metrics-listings future.
+    #[doc(alias = "org.apache.kafka.clients.admin.ListClientMetricsResourcesResult#ListClientMetricsResourcesResult")]
     pub(crate) fn new(future: KafkaFuture<Vec<ClientMetricsResourceListing>>) -> Self {
         Self { future }
     }
@@ -42,6 +44,7 @@ impl ListClientMetricsResourcesResult {
     ///
     /// In the event of a failure, the future yields nothing but the first
     /// exception which occurred.
+    #[doc(alias = "org.apache.kafka.clients.admin.ListClientMetricsResourcesResult#all")]
     pub fn all(&self) -> KafkaFuture<Vec<ClientMetricsResourceListing>> {
         self.future.clone()
     }

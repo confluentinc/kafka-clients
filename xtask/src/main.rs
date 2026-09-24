@@ -13,6 +13,7 @@
 // limitations under the License.
 
 mod check_bindings;
+mod java;
 mod lint_custom;
 
 use std::env;

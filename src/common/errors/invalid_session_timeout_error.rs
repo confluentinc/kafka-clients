@@ -26,6 +26,7 @@ kafka_error_class! {
     ///
     /// Java `extends` chain:
     ///    `InvalidSessionTimeoutException` -> `ApiException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.InvalidSessionTimeoutException")]
     InvalidSessionTimeoutError,
     code: Errors::InvalidSessionTimeout,
     extends: [

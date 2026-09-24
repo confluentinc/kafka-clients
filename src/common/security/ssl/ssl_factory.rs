@@ -44,6 +44,7 @@ use rustls::{ClientConfig, DigitallySignedStruct, RootCertStore, SignatureScheme
 /// Holds the compiled TLS client configuration and a flag indicating whether
 /// hostname verification is enabled. The configuration is built once and shared
 /// across all connections via `Arc`.
+#[doc(alias = "org.apache.kafka.common.security.ssl.SslFactory")]
 pub struct SslFactory {
     /// Compiled TLS client configuration.
     client_config: Arc<ClientConfig>,
@@ -73,6 +74,7 @@ impl SslFactory {
     /// - No valid certificates are found in the truststore
     /// - The private key cannot be loaded or is missing when a client cert is provided
     /// - TLS protocol configuration is invalid
+    #[doc(alias = "org.apache.kafka.common.security.ssl.SslFactory#SslFactory")]
     pub fn new(ssl_config: &SslConfigs) -> io::Result<Self> {
         // Install the aws-lc-rs crypto provider if not already installed.
         // This is idempotent — subsequent calls are no-ops.

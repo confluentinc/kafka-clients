@@ -29,12 +29,14 @@ use crate::common::{Error, KafkaFuture};
 /// for the `Vec<Result<..>>` modeling of Java's mixed `Collection<Object>`.
 #[deprecated(since = "4.1.0", note = "Use Admin::list_groups instead")]
 #[derive(Clone, Debug)]
+#[doc(alias = "org.apache.kafka.clients.admin.ListConsumerGroupsResult")]
 pub struct ListConsumerGroupsResult {
     source: KafkaFuture<Vec<Result<ConsumerGroupListing, Error>>>,
 }
 
 impl ListConsumerGroupsResult {
     /// Creates a result from the combined per-broker listings-or-errors future.
+    #[doc(alias = "org.apache.kafka.clients.admin.ListConsumerGroupsResult#ListConsumerGroupsResult")]
     pub(crate) fn new(source: KafkaFuture<Vec<Result<ConsumerGroupListing, Error>>>) -> Self {
         Self { source }
     }
@@ -42,6 +44,7 @@ impl ListConsumerGroupsResult {
     /// A future yielding either the first error, or the full set of listings.
     ///
     /// Mirrors `all()`.
+    #[doc(alias = "org.apache.kafka.clients.admin.ListConsumerGroupsResult#all")]
     pub fn all(&self) -> KafkaFuture<Vec<ConsumerGroupListing>> {
         self.source.then_apply_try(|results| {
             let mut valid = Vec::new();
@@ -56,12 +59,14 @@ impl ListConsumerGroupsResult {
     }
 
     /// A future yielding just the valid listings (never fails). Mirrors `valid()`.
+    #[doc(alias = "org.apache.kafka.clients.admin.ListConsumerGroupsResult#valid")]
     pub fn valid(&self) -> KafkaFuture<Vec<ConsumerGroupListing>> {
         self.source
             .then_apply(|results| results.into_iter().filter_map(Result::ok).collect())
     }
 
     /// A future yielding just the errors (never fails). Mirrors `errors()`.
+    #[doc(alias = "org.apache.kafka.clients.admin.ListConsumerGroupsResult#errors")]
     pub fn errors(&self) -> KafkaFuture<Vec<Error>> {
         self.source
             .then_apply(|results| results.into_iter().filter_map(Result::err).collect())

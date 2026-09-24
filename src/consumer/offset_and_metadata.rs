@@ -28,6 +28,7 @@ use crate::common::Error;
 ///
 /// Corresponds to Java's `org.apache.kafka.clients.consumer.OffsetAndMetadata`.
 #[derive(Clone, Debug)]
+#[doc(alias = "org.apache.kafka.clients.consumer.OffsetAndMetadata")]
 pub struct OffsetAndMetadata {
     offset: i64,
     /// Internal leader epoch (raw); the public getter normalizes negative
@@ -46,6 +47,7 @@ impl OffsetAndMetadata {
     ///
     /// Returns [`Error::LocalIllegalArgument`] if `offset` is negative
     /// (matching Java's `IllegalArgumentException`).
+    #[doc(alias = "org.apache.kafka.clients.consumer.OffsetAndMetadata#OffsetAndMetadata")]
     pub fn new(offset: i64) -> Result<Self, Error> {
         Self::with_leader_epoch_metadata(offset, None, String::new())
     }
@@ -57,6 +59,7 @@ impl OffsetAndMetadata {
     /// # Errors
     ///
     /// Returns [`Error::LocalIllegalArgument`] if `offset` is negative.
+    #[doc(alias = "org.apache.kafka.clients.consumer.OffsetAndMetadata#OffsetAndMetadata")]
     pub fn with_metadata(offset: i64, metadata: impl Into<String>) -> Result<Self, Error> {
         Self::with_leader_epoch_metadata(offset, None, metadata)
     }
@@ -70,6 +73,7 @@ impl OffsetAndMetadata {
     /// # Errors
     ///
     /// Returns [`Error::LocalIllegalArgument`] if `offset` is negative.
+    #[doc(alias = "org.apache.kafka.clients.consumer.OffsetAndMetadata#OffsetAndMetadata")]
     pub fn with_leader_epoch_metadata(
         offset: i64,
         leader_epoch: Option<i32>,
@@ -85,12 +89,14 @@ impl OffsetAndMetadata {
     }
 
     /// The committed offset.
+    #[doc(alias = "org.apache.kafka.clients.consumer.OffsetAndMetadata#offset")]
     pub fn offset(&self) -> i64 {
         self.offset
     }
 
     /// Returns the metadata associated with the commit, or an empty string
     /// if no metadata was provided.
+    #[doc(alias = "org.apache.kafka.clients.consumer.OffsetAndMetadata#metadata")]
     pub fn metadata(&self) -> &str {
         &self.metadata
     }
@@ -98,6 +104,7 @@ impl OffsetAndMetadata {
     /// Get the leader epoch of the previously consumed record (if one is
     /// known). Negative epochs are filtered to `None` to match Java's
     /// `leaderEpoch()`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.OffsetAndMetadata#leaderEpoch")]
     pub fn leader_epoch(&self) -> Option<i32> {
         match self.leader_epoch {
             Some(e) if e >= 0 => Some(e),
@@ -174,6 +181,7 @@ mod tests {
     }
 
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.consumer.OffsetAndMetadataTest#testInvalidNegativeOffset")]
     fn test_invalid_negative_offset() {
         let err = OffsetAndMetadata::new(-1).unwrap_err();
         assert!(err.message().contains("Invalid negative offset"));
@@ -195,6 +203,7 @@ mod tests {
     }
 
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.consumer.OffsetAndMetadataTest#testEqualsWithNullAndNegativeLeaderEpoch")]
     fn test_equals_with_null_and_negative_leader_epoch() {
         let with_none = OffsetAndMetadata::with_leader_epoch_metadata(100, None, "metadata").unwrap();
         let with_neg = OffsetAndMetadata::with_leader_epoch_metadata(100, Some(-1), "metadata").unwrap();

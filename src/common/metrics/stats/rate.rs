@@ -27,6 +27,7 @@ use crate::common::metrics::{Measurable, MetricConfig, Stat};
 /// sample windows. Alternative [`SampledStat`] implementations can be provided,
 /// however, to record the rate of occurrences (e.g. the count of values measured
 /// over the time interval) or other such values.
+#[doc(alias = "org.apache.kafka.common.metrics.stats.Rate")]
 pub struct Rate {
     unit: TimeUnit,
     stat: Arc<SampledStat>,
@@ -35,21 +36,25 @@ pub struct Rate {
 
 impl Rate {
     /// Create a `Rate` over seconds backed by a [`WindowedSum`].
+    #[doc(alias = "org.apache.kafka.common.metrics.stats.Rate#Rate")]
     pub fn new() -> Self {
         Self::with_unit(TimeUnit::Seconds)
     }
 
     /// Create a `Rate` with the given unit backed by a [`WindowedSum`].
+    #[doc(alias = "org.apache.kafka.common.metrics.stats.Rate#Rate")]
     pub fn with_unit(unit: TimeUnit) -> Self {
         Self::with_unit_stat(unit, Arc::new(WindowedSum::new().into_sampled_stat()))
     }
 
     /// Create a `Rate` over seconds backed by the given sampled stat.
+    #[doc(alias = "org.apache.kafka.common.metrics.stats.Rate#Rate")]
     pub fn with_stat(stat: Arc<SampledStat>) -> Self {
         Self::with_unit_stat(TimeUnit::Seconds, stat)
     }
 
     /// Create a `Rate` with the given unit and sampled stat.
+    #[doc(alias = "org.apache.kafka.common.metrics.stats.Rate#Rate")]
     pub fn with_unit_stat(unit: TimeUnit, stat: Arc<SampledStat>) -> Self {
         Self::with_unit_stat_window(unit, stat, -1)
     }
@@ -58,6 +63,7 @@ impl Rate {
     ///
     /// `window` is expressed in `unit`; when positive it configures the stat's
     /// own time window (Java `stat.withTimeWindow(window, unit)`).
+    #[doc(alias = "org.apache.kafka.common.metrics.stats.Rate#Rate")]
     pub fn with_unit_stat_window(unit: TimeUnit, stat: Arc<SampledStat>, window: i64) -> Self {
         let time_window_ms = if window > 0 {
             let ms = unit.to_millis(window);
@@ -71,6 +77,7 @@ impl Rate {
 
     /// The lower-cased name of the rate's unit with the trailing "s" stripped
     /// (Java `unitName()`), e.g. `SECONDS` -> `second`.
+    #[doc(alias = "org.apache.kafka.common.metrics.stats.Rate#unitName")]
     pub fn unit_name(&self) -> String {
         let name = self.unit.name();
         name[..name.len() - 2].to_lowercase()
@@ -84,6 +91,7 @@ impl Rate {
     /// Compute the window size in milliseconds used for the rate calculation.
     ///
     /// Faithful translation of `Rate.windowSize`.
+    #[doc(alias = "org.apache.kafka.common.metrics.stats.Rate#windowSize")]
     pub fn window_size(&self, config: &MetricConfig, now: i64) -> i64 {
         // purge old samples before we compute the window size
         self.stat.purge_obsolete_samples(config, now);
@@ -150,6 +158,7 @@ mod tests {
 
     // RateTest.testRateWithNoPriorAvailableSamples (@ParameterizedTest CsvSource).
     #[test]
+    #[doc(alias = "org.apache.kafka.common.metrics.stats.RateTest#testRateWithNoPriorAvailableSamples")]
     fn test_rate_with_no_prior_available_samples() {
         // {numSample, sampleWindowSizeSec}
         for (num_sample, sample_window_size_sec) in [(1, 1), (1, 11), (11, 1), (11, 11)] {
@@ -182,6 +191,7 @@ mod tests {
 
     // RateTest.testRateIsConsistentAfterTheFirstWindow
     #[test]
+    #[doc(alias = "org.apache.kafka.common.metrics.stats.RateTest#testRateIsConsistentAfterTheFirstWindow")]
     fn test_rate_is_consistent_after_the_first_window() {
         let config = MetricConfig::new().set_time_window(1, TimeUnit::Seconds).set_samples(2);
         let rate = Rate::new();

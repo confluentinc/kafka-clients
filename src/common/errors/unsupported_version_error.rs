@@ -25,6 +25,7 @@ kafka_error_class! {
     /// Java `extends` chain:
     ///    `UnsupportedVersionException` -> `InvalidConfigurationException` ->
     ///   `ApiException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.UnsupportedVersionException")]
     UnsupportedVersionError,
     code: Errors::UnsupportedVersion,
     extends: [

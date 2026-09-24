@@ -236,6 +236,7 @@ struct RecordMetadataInner {
 /// Internally wraps a `Box<Mutex<ProducerKind>>`. The `Mutex` provides
 /// thread-safe access matching Java's `synchronized` methods.
 #[repr(C)]
+#[doc(alias = "org.apache.kafka.clients.producer.Producer")]
 pub struct kafka_producer_Producer_t {
     _private: [u8; 0],
 }
@@ -244,6 +245,7 @@ pub struct kafka_producer_Producer_t {
 ///
 /// Internally wraps a `Box<KafkaFuture<RecordMetadata>>`.
 #[repr(C)]
+#[doc(alias = "org.apache.kafka.clients.producer.internals.FutureRecordMetadata")]
 pub struct kafka_producer_FutureRecordMetadata_t {
     _private: [u8; 0],
 }
@@ -252,6 +254,7 @@ pub struct kafka_producer_FutureRecordMetadata_t {
 ///
 /// Internally wraps a `Box<RecordMetadataInner>`.
 #[repr(C)]
+#[doc(alias = "org.apache.kafka.clients.producer.RecordMetadata")]
 pub struct kafka_producer_RecordMetadata_t {
     _private: [u8; 0],
 }
@@ -281,6 +284,7 @@ pub struct kafka_producer_ProducerProperties_t {
 /// - `value_len`: Use `-1` to indicate no value. When `>= 0`, `value` must
 ///   point to a valid buffer of that length.
 #[repr(C)]
+#[doc(alias = "org.apache.kafka.clients.producer.ProducerRecord")]
 pub struct kafka_producer_ProducerRecord_t {
     /// Null-terminated UTF-8 topic name.
     pub(crate) topic: *const c_char,
@@ -1253,6 +1257,7 @@ pub unsafe extern "C" fn kafka_producer_Producer_destroy(producer: *mut kafka_pr
 /// - `key` must be valid for `key_len` bytes if `key_len >= 0`.
 /// - `value` must be valid for `value_len` bytes if `value_len >= 0`.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.clients.producer.Producer#send")]
 pub unsafe extern "C" fn kafka_producer_Producer_send(
     producer: *mut kafka_producer_Producer_t,
     topic: *const c_char,
@@ -1397,6 +1402,7 @@ pub unsafe extern "C" fn kafka_producer_Producer_send(
 /// - `key` must be valid for `key_len` bytes if `key_len >= 0`.
 /// - `value` must be valid for `value_len` bytes if `value_len >= 0`.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.clients.producer.Producer#send")]
 pub unsafe extern "C" fn kafka_producer_Producer_send_with_callback(
     producer: *mut kafka_producer_Producer_t,
     topic: *const c_char,
@@ -1912,6 +1918,7 @@ pub unsafe extern "C" fn kafka_producer_Producer_send_batch_async(
 ///
 /// `future` must be a valid handle from a send function, or null.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.clients.producer.internals.FutureRecordMetadata#isDone")]
 pub unsafe extern "C" fn kafka_producer_FutureRecordMetadata_is_done(
     future: *mut kafka_producer_FutureRecordMetadata_t,
 ) -> bool {
@@ -1941,6 +1948,7 @@ pub unsafe extern "C" fn kafka_producer_FutureRecordMetadata_is_done(
 ///
 /// - `future` must be a valid handle, or null.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.clients.producer.internals.FutureRecordMetadata#get")]
 pub unsafe extern "C" fn kafka_producer_FutureRecordMetadata_get(
     future: *mut kafka_producer_FutureRecordMetadata_t,
     out_error: *mut *mut kafka_common_Error_t,
@@ -2256,6 +2264,7 @@ pub unsafe extern "C" fn kafka_producer_FutureRecordMetadata_destroy_all(
 ///
 /// `metadata` must be a valid handle from [`kafka_producer_FutureRecordMetadata_get`], or null.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.clients.producer.RecordMetadata#offset")]
 pub unsafe extern "C" fn kafka_producer_RecordMetadata_offset(metadata: *const kafka_producer_RecordMetadata_t) -> i64 {
     if metadata.is_null() {
         return -1;
@@ -2282,6 +2291,7 @@ pub unsafe extern "C" fn kafka_producer_RecordMetadata_offset(metadata: *const k
 /// `metadata` must be a valid handle from [`kafka_producer_FutureRecordMetadata_get`], or null.
 /// The returned pointer must not be used after the metadata is destroyed.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.clients.producer.RecordMetadata#topic")]
 pub unsafe extern "C" fn kafka_producer_RecordMetadata_topic(
     metadata: *const kafka_producer_RecordMetadata_t,
 ) -> *const c_char {
@@ -2305,6 +2315,7 @@ pub unsafe extern "C" fn kafka_producer_RecordMetadata_topic(
 ///
 /// `metadata` must be a valid handle from [`kafka_producer_FutureRecordMetadata_get`], or null.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.clients.producer.RecordMetadata#partition")]
 pub unsafe extern "C" fn kafka_producer_RecordMetadata_partition(
     metadata: *const kafka_producer_RecordMetadata_t,
 ) -> i32 {
@@ -2329,6 +2340,7 @@ pub unsafe extern "C" fn kafka_producer_RecordMetadata_partition(
 ///
 /// `metadata` must be a valid handle from [`kafka_producer_FutureRecordMetadata_get`], or null.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.clients.producer.RecordMetadata#timestamp")]
 pub unsafe extern "C" fn kafka_producer_RecordMetadata_timestamp(
     metadata: *const kafka_producer_RecordMetadata_t,
 ) -> i64 {
@@ -2425,6 +2437,7 @@ pub unsafe extern "C" fn kafka_producer_RecordMetadata_destroy(metadata: *mut ka
 ///
 /// `producer` must be a valid handle, or null.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.clients.producer.Producer#flush")]
 pub unsafe extern "C" fn kafka_producer_Producer_flush(
     producer: *mut kafka_producer_Producer_t,
     out_error: *mut *mut kafka_common_Error_t,
@@ -2511,6 +2524,7 @@ pub struct kafka_producer_MetricMap_t {
 ///
 /// `producer` must be a valid handle.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.clients.producer.Producer#metrics")]
 pub unsafe extern "C" fn kafka_producer_Producer_metrics(
     producer: *mut kafka_producer_Producer_t,
 ) -> *mut kafka_producer_MetricMap_t {
@@ -2711,6 +2725,7 @@ pub unsafe extern "C" fn kafka_producer_MetricMap_destroy(map: *mut kafka_produc
 ///
 /// `producer` must be a valid handle; `topic` a valid C string; `out_list` valid.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.clients.producer.Producer#partitionsFor")]
 pub unsafe extern "C" fn kafka_producer_Producer_partitions_for(
     producer: *mut kafka_producer_Producer_t,
     topic: *const c_char,
@@ -2752,6 +2767,7 @@ pub unsafe extern "C" fn kafka_producer_Producer_partitions_for(
 ///
 /// `producer` must be a valid handle, or null.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.clients.producer.Producer#close")]
 pub unsafe extern "C" fn kafka_producer_Producer_close(
     producer: *mut kafka_producer_Producer_t,
     out_error: *mut *mut kafka_common_Error_t,
@@ -3257,6 +3273,7 @@ where
 ///
 /// `producer` must be a valid handle, or null.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.clients.producer.Producer#initTransactions")]
 pub unsafe extern "C" fn kafka_producer_Producer_init_transactions(
     producer: *mut kafka_producer_Producer_t,
 ) -> *mut kafka_common_Error_t {
@@ -3291,6 +3308,7 @@ pub unsafe extern "C" fn kafka_producer_Producer_init_transactions(
 ///
 /// `producer` must be a valid handle, or null.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.clients.producer.Producer#beginTransaction")]
 pub unsafe extern "C" fn kafka_producer_Producer_begin_transaction(
     producer: *mut kafka_producer_Producer_t,
 ) -> *mut kafka_common_Error_t {
@@ -3366,6 +3384,7 @@ pub unsafe extern "C" fn kafka_producer_Producer_begin_transaction(
 ///   all five may be null in that case.
 /// - `group_metadata` must be a valid group-metadata handle, or null.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.clients.producer.Producer#sendOffsetsToTransaction")]
 pub unsafe extern "C" fn kafka_producer_Producer_send_offsets_to_transaction(
     producer: *mut kafka_producer_Producer_t,
     topics: *const *const c_char,
@@ -3477,6 +3496,7 @@ unsafe fn send_offsets_to_transaction_inner(
 ///
 /// `producer` must be a valid handle, or null.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.clients.producer.Producer#commitTransaction")]
 pub unsafe extern "C" fn kafka_producer_Producer_commit_transaction(
     producer: *mut kafka_producer_Producer_t,
 ) -> *mut kafka_common_Error_t {
@@ -3524,6 +3544,7 @@ pub unsafe extern "C" fn kafka_producer_Producer_commit_transaction(
 ///
 /// `producer` must be a valid handle, or null.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.clients.producer.Producer#abortTransaction")]
 pub unsafe extern "C" fn kafka_producer_Producer_abort_transaction(
     producer: *mut kafka_producer_Producer_t,
 ) -> *mut kafka_common_Error_t {

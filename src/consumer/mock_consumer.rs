@@ -76,6 +76,7 @@ pub type PollTask<K, V> = Box<dyn FnOnce(&mut MockConsumer<K, V>) + Send>;
 /// `MockConsumer(OffsetResetStrategy)` constructors both collapse into
 /// [`MockConsumer::new`]. Callers needing string-based parsing use
 /// [`AutoOffsetResetStrategy::from_string`].
+#[doc(alias = "org.apache.kafka.clients.consumer.MockConsumer")]
 pub struct MockConsumer<K, V> {
     partitions: HashMap<String, Vec<PartitionInfo>>,
     /// Held directly (NOT `Arc<Mutex<...>>`). Per `consumer-threading.md` §16
@@ -117,6 +118,7 @@ impl<K, V> MockConsumer<K, V> {
     /// Translates Java's `MockConsumer(String)` and the deprecated
     /// `MockConsumer(OffsetResetStrategy)` into a single constructor that
     /// takes the typed [`AutoOffsetResetStrategy`] value.
+    #[doc(alias = "org.apache.kafka.clients.consumer.MockConsumer#MockConsumer")]
     pub fn new(offset_reset_strategy: AutoOffsetResetStrategy) -> Self {
         Self {
             partitions: HashMap::new(),
@@ -148,6 +150,7 @@ impl<K, V> MockConsumer<K, V> {
     /// (`MockConsumer.java:322`). Returns
     /// [`Error::LocalIllegalState`] if the partition is not assigned —
     /// Java throws `IllegalStateException` in that case.
+    #[doc(alias = "org.apache.kafka.clients.consumer.MockConsumer#addRecord")]
     pub fn add_record(&mut self, record: ConsumerRecord<K, V>) -> Result<(), Error> {
         self.ensure_not_closed()?;
         let tp = TopicPartition::new(record.topic().to_string(), record.partition());
@@ -163,6 +166,7 @@ impl<K, V> MockConsumer<K, V> {
     /// Update the beginning offsets used for `seekToBeginning` resets.
     ///
     /// Translates Java's `updateBeginningOffsets(Map<TopicPartition, Long>)`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.MockConsumer#updateBeginningOffsets")]
     pub fn update_beginning_offsets(&mut self, offsets: HashMap<TopicPartition, i64>) {
         self.beginning_offsets.extend(offsets);
     }
@@ -172,6 +176,7 @@ impl<K, V> MockConsumer<K, V> {
     /// [`Consumer::current_lag`].
     ///
     /// Translates Java's `updateEndOffsets(Map<TopicPartition, Long>)`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.MockConsumer#updateEndOffsets")]
     pub fn update_end_offsets(&mut self, offsets: HashMap<TopicPartition, i64>) {
         self.end_offsets.extend(offsets);
     }
@@ -180,6 +185,7 @@ impl<K, V> MockConsumer<K, V> {
     /// is `by_duration:<ISO-8601>`.
     ///
     /// Translates Java's `updateDurationOffsets(Map<TopicPartition, Long>)`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.MockConsumer#updateDurationOffsets")]
     pub fn update_duration_offsets(&mut self, offsets: HashMap<TopicPartition, i64>) {
         self.duration_reset_offsets.extend(offsets);
     }
@@ -189,6 +195,7 @@ impl<K, V> MockConsumer<K, V> {
     /// and [`Consumer::list_topics`].
     ///
     /// Translates Java's `updatePartitions(String, List<PartitionInfo>)`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.MockConsumer#updatePartitions")]
     pub fn update_partitions(&mut self, topic: &str, partitions: Vec<PartitionInfo>) -> Result<(), Error> {
         self.ensure_not_closed()?;
         self.partitions.insert(topic.to_string(), partitions);
@@ -200,6 +207,7 @@ impl<K, V> MockConsumer<K, V> {
     /// exception is taken (cleared) on use.
     ///
     /// Translates Java's `setPollException(KafkaException)`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.MockConsumer#setPollException")]
     pub fn set_poll_error(&mut self, error: Error) {
         self.poll_error = Some(error);
     }
@@ -210,6 +218,7 @@ impl<K, V> MockConsumer<K, V> {
     /// call. The exception is taken (cleared) on use.
     ///
     /// Translates Java's `setOffsetsException(KafkaException)`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.MockConsumer#setOffsetsException")]
     pub fn set_offsets_error(&mut self, error: Error) {
         self.offsets_error = Some(error);
     }
@@ -220,6 +229,7 @@ impl<K, V> MockConsumer<K, V> {
     /// Translates Java's `setMaxPollRecords(long)`. Returns
     /// [`Error::LocalIllegalArgument`] when `max_poll_records < 1`, matching
     /// Java's `IllegalArgumentException`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.MockConsumer#setMaxPollRecords")]
     pub fn set_max_poll_records(&mut self, max_poll_records: i64) -> Result<(), Error> {
         if max_poll_records < 1 {
             return Err(Error::local_illegal_argument("MaxPollRecords must be strictly superior to 0"));
@@ -237,6 +247,7 @@ impl<K, V> MockConsumer<K, V> {
     /// because the Rust listener methods are `async fn` (per
     /// `consumer-threading.md` §31 / Phase 2); Java's listener methods
     /// are sync.
+    #[doc(alias = "org.apache.kafka.clients.consumer.MockConsumer#rebalance")]
     pub async fn rebalance(&mut self, new_assignment: &[TopicPartition]) -> Result<(), Error> {
         let old_assignment_set = self.subscriptions.assigned_partitions();
         let new_assignment_set: HashSet<TopicPartition> = new_assignment.iter().cloned().collect();
@@ -285,6 +296,7 @@ impl<K, V> MockConsumer<K, V> {
     /// capture the outer struct safely, so the task is invoked with
     /// `&mut MockConsumer<K, V>` explicitly. Callers write
     /// `consumer.schedule_poll_task(Box::new(|c| { c.add_record(...).unwrap(); }));`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.MockConsumer#schedulePollTask")]
     pub fn schedule_poll_task(&mut self, task: PollTask<K, V>) {
         self.poll_tasks.push_back(task);
     }
@@ -292,6 +304,7 @@ impl<K, V> MockConsumer<K, V> {
     /// Return whether the consumer has been closed.
     ///
     /// Translates Java's `closed()`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.MockConsumer#closed")]
     pub fn closed(&self) -> bool {
         self.closed
     }
@@ -299,6 +312,7 @@ impl<K, V> MockConsumer<K, V> {
     /// Return whether an `enforceRebalance` request is pending.
     ///
     /// Translates Java's `shouldRebalance()`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.MockConsumer#shouldRebalance")]
     pub fn should_rebalance(&self) -> bool {
         self.should_rebalance
     }
@@ -306,6 +320,7 @@ impl<K, V> MockConsumer<K, V> {
     /// Reset the rebalance-pending flag after handling it.
     ///
     /// Translates Java's `resetShouldRebalance()`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.MockConsumer#resetShouldRebalance")]
     pub fn reset_should_rebalance(&mut self) {
         self.should_rebalance = false;
     }
@@ -315,6 +330,7 @@ impl<K, V> MockConsumer<K, V> {
     /// if `poll` has not been called yet.
     ///
     /// Translates Java's `lastPollTimeout()`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.MockConsumer#lastPollTimeout")]
     pub fn last_poll_timeout(&self) -> Option<Duration> {
         self.last_poll_timeout
     }
@@ -323,6 +339,7 @@ impl<K, V> MockConsumer<K, V> {
 
     /// Mirrors Java's `ensureNotClosed`. Java throws
     /// `IllegalStateException("This consumer has already been closed.")`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.MockConsumer#ensureNotClosed")]
     fn ensure_not_closed(&self) -> Result<(), Error> {
         if self.closed {
             Err(Error::local_illegal_state("This consumer has already been closed."))
@@ -375,6 +392,7 @@ impl<K, V> MockConsumer<K, V> {
 
     /// Mirrors Java's `updateFetchPosition(TopicPartition)`
     /// (`MockConsumer.java:622-631`).
+    #[doc(alias = "org.apache.kafka.clients.consumer.MockConsumer#updateFetchPosition")]
     fn update_fetch_position(&mut self, tp: &TopicPartition) -> Result<(), Error> {
         if self.subscriptions.is_offset_reset_needed(tp)? {
             self.reset_offset_position(tp)
@@ -395,6 +413,7 @@ impl<K, V> MockConsumer<K, V> {
     /// entry for the partition (Java throws `IllegalStateException`), or
     /// [`Error::ConsumerNoOffsetForPartition`](crate::common::Error::ConsumerNoOffsetForPartition)
     /// (Java's `NoOffsetForPartitionException`) when the strategy is `None`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.MockConsumer#resetOffsetPosition")]
     fn reset_offset_position(&mut self, tp: &TopicPartition) -> Result<(), Error> {
         let strategy = self.subscriptions.reset_strategy(tp)?.unwrap_or(AutoOffsetResetStrategy::NONE);
 

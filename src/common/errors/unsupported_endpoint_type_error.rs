@@ -24,6 +24,7 @@ kafka_error_class! {
     ///
     /// Java `extends` chain:
     ///    `UnsupportedEndpointTypeException` -> `ApiException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.UnsupportedEndpointTypeException")]
     UnsupportedEndpointTypeError,
     code: Errors::UnsupportedEndpointType,
     extends: [

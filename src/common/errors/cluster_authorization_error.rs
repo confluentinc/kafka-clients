@@ -25,6 +25,7 @@ kafka_error_class! {
     /// Java `extends` chain:
     ///    `ClusterAuthorizationException` -> `AuthorizationException` ->
     ///   `InvalidConfigurationException` -> `ApiException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.ClusterAuthorizationException")]
     ClusterAuthorizationError,
     code: Errors::ClusterAuthorizationFailed,
     extends: [

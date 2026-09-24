@@ -55,6 +55,7 @@ const PARTITION_ERRORS: &[Errors] = &[Errors::UnknownTopicOrPartition, Errors::T
 ///
 /// Corresponds to `org.apache.kafka.common.requests.OffsetFetchResponse`.
 #[derive(Debug)]
+#[doc(alias = "org.apache.kafka.common.requests.OffsetFetchResponse")]
 pub struct OffsetFetchResponse {
     version: i16,
     data: OffsetFetchResponseData,
@@ -74,6 +75,7 @@ impl Clone for OffsetFetchResponse {
 impl OffsetFetchResponse {
     /// Creates a new `OffsetFetchResponse` from the underlying data and
     /// version.
+    #[doc(alias = "org.apache.kafka.common.requests.OffsetFetchResponse#OffsetFetchResponse")]
     pub fn new(data: OffsetFetchResponseData, version: i16) -> Self {
         Self { version, data, groups_cache: Mutex::new(None) }
     }
@@ -84,6 +86,7 @@ impl OffsetFetchResponse {
     }
 
     /// Returns a reference to the underlying data.
+    #[doc(alias = "org.apache.kafka.common.requests.OffsetFetchResponse#data")]
     pub fn data(&self) -> &OffsetFetchResponseData {
         &self.data
     }
@@ -99,11 +102,13 @@ impl OffsetFetchResponse {
     }
 
     /// Returns the throttle time in milliseconds.
+    #[doc(alias = "org.apache.kafka.common.requests.OffsetFetchResponse#throttleTimeMs")]
     pub fn throttle_time_ms(&self) -> i32 {
         self.data.throttle_time_ms
     }
 
     /// Sets the throttle time in the response.
+    #[doc(alias = "org.apache.kafka.common.requests.OffsetFetchResponse#maybeSetThrottleTimeMs")]
     pub fn maybe_set_throttle_time_ms(&mut self, throttle_time_ms: i32) {
         self.data.set_throttle_time_ms(throttle_time_ms);
     }
@@ -118,6 +123,7 @@ impl OffsetFetchResponse {
     ///
     /// Returns `Err` when the requested group id is not present in a v8+
     /// response.
+    #[doc(alias = "org.apache.kafka.common.requests.OffsetFetchResponse#group")]
     pub fn group(&self, group_id: &str) -> Result<OffsetFetchResponseGroup, io::Error> {
         if self.version < OffsetFetchRequest::BATCH_MIN_VERSION {
             // For v<2 there's no top-level error code; derive it from the
@@ -185,6 +191,7 @@ impl OffsetFetchResponse {
     /// Walks the v<2 partition error codes and returns the first
     /// non-partition-level error (i.e. group / coordinator error). Mirrors
     /// Java's static `topLevelError(OffsetFetchResponseData)`.
+    #[doc(alias = "org.apache.kafka.common.requests.OffsetFetchResponse#topLevelError")]
     fn top_level_error(data: &OffsetFetchResponseData) -> Errors {
         for topic in &data.topics {
             for partition in &topic.partitions {
@@ -198,6 +205,7 @@ impl OffsetFetchResponse {
     }
 
     /// Returns the error counts aggregated across all partition responses.
+    #[doc(alias = "org.apache.kafka.common.requests.OffsetFetchResponse#errorCounts")]
     pub fn error_counts(&self) -> HashMap<Errors, i32> {
         let mut counts = HashMap::new();
         if self.version < OffsetFetchRequest::BATCH_MIN_VERSION {
@@ -228,12 +236,14 @@ impl OffsetFetchResponse {
     /// # Errors
     ///
     /// Returns an error if parsing fails.
+    #[doc(alias = "org.apache.kafka.common.requests.OffsetFetchResponse#parse")]
     pub fn parse(readable: &mut dyn Readable, version: i16) -> io::Result<Self> {
         let data = OffsetFetchResponseData::read(readable, version)?;
         Ok(Self::new(data, version))
     }
 
     /// Whether the client should throttle on this response (v4+).
+    #[doc(alias = "org.apache.kafka.common.requests.OffsetFetchResponse#shouldClientThrottle")]
     pub fn should_client_throttle(&self, version: i16) -> bool {
         version >= 4
     }
@@ -241,6 +251,7 @@ impl OffsetFetchResponse {
     /// Constructs an `OffsetFetchResponseGroup` carrying the given error for
     /// every topic-partition in the request group. Mirrors Java's static
     /// `groupError(OffsetFetchRequestGroup, Errors, int)`.
+    #[doc(alias = "org.apache.kafka.common.requests.OffsetFetchResponse#groupError")]
     pub fn group_error(group: &OffsetFetchRequestGroup, error: Errors, version: i16) -> OffsetFetchResponseGroup {
         let mut response = OffsetFetchResponseGroup::new();
         response.set_group_id(group.group_id.clone());
@@ -283,6 +294,7 @@ impl OffsetFetchResponse {
 
 /// Builder for [`OffsetFetchResponse`] when constructing from a list of
 /// per-group response payloads. Mirrors Java's `OffsetFetchResponse.Builder`.
+#[doc(alias = "org.apache.kafka.common.requests.OffsetFetchResponse$Builder")]
 pub struct OffsetFetchResponseBuilder {
     groups: Vec<OffsetFetchResponseGroup>,
 }
@@ -291,6 +303,7 @@ impl OffsetFetchResponseBuilder {
     /// Construct a builder over a single group's response.
     ///
     /// Mirrors Java's `Builder(OffsetFetchResponseGroup)`.
+    #[doc(alias = "org.apache.kafka.common.requests.OffsetFetchResponse$Builder#Builder")]
     pub fn with_group(group: OffsetFetchResponseGroup) -> Self {
         Self { groups: vec![group] }
     }
@@ -298,6 +311,7 @@ impl OffsetFetchResponseBuilder {
     /// Construct a builder over multiple groups (v8+ batched).
     ///
     /// Mirrors Java's `Builder(List<OffsetFetchResponseGroup>)`.
+    #[doc(alias = "org.apache.kafka.common.requests.OffsetFetchResponse$Builder#Builder")]
     pub fn with_groups(groups: Vec<OffsetFetchResponseGroup>) -> Self {
         Self { groups }
     }
@@ -307,6 +321,7 @@ impl OffsetFetchResponseBuilder {
     /// # Errors
     ///
     /// Returns `Err` if a v<8 build receives more than one group.
+    #[doc(alias = "org.apache.kafka.common.requests.OffsetFetchResponse$Builder#build")]
     pub fn build(self, version: i16) -> io::Result<OffsetFetchResponse> {
         let mut data = OffsetFetchResponseData::new();
         if version >= OffsetFetchRequest::BATCH_MIN_VERSION {

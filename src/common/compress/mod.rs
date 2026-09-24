@@ -208,6 +208,7 @@ impl<R: Read> Read for XerialSnappyReader<R> {
 ///    has no overloading.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
+#[doc(alias = "org.apache.kafka.common.compress.Compression")]
 pub enum Compression {
     /// No compression. Translates Java's `NoCompression`, which holds no state.
     None,
@@ -229,6 +230,7 @@ pub enum Compression {
 /// read only when wrapping an output stream. Build one with
 /// [`Compression::gzip`].
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[doc(alias = "org.apache.kafka.common.compress.GzipCompression")]
 pub struct GzipCompression {
     level: i32,
 }
@@ -238,6 +240,7 @@ pub struct GzipCompression {
 /// Translates Java's `Lz4Compression`. See [`GzipCompression`] for why `level`
 /// is private. Build one with [`Compression::lz4`].
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[doc(alias = "org.apache.kafka.common.compress.Lz4Compression")]
 pub struct Lz4Compression {
     level: i32,
 }
@@ -247,12 +250,14 @@ pub struct Lz4Compression {
 /// Translates Java's `ZstdCompression`. See [`GzipCompression`] for why `level`
 /// is private. Build one with [`Compression::zstd`].
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[doc(alias = "org.apache.kafka.common.compress.ZstdCompression")]
 pub struct ZstdCompression {
     level: i32,
 }
 
 /// Builder for [`GzipCompression`]. Translates Java's `GzipCompression.Builder`.
 #[derive(Clone, Debug)]
+#[doc(alias = "org.apache.kafka.common.compress.GzipCompression$Builder")]
 pub struct GzipCompressionBuilder {
     level: i32,
 }
@@ -262,6 +267,7 @@ impl GzipCompressionBuilder {
     ///
     /// Java throws `IllegalArgumentException` for an out-of-range level; per
     /// CLAUDE.md §10.2 that becomes an `Err` here, carrying Java's message.
+    #[doc(alias = "org.apache.kafka.common.compress.GzipCompression$Builder#level")]
     pub fn level(mut self, level: i32) -> Result<Self, Error> {
         let min = CompressionType::Gzip.min_level().unwrap();
         let max = CompressionType::Gzip.max_level().unwrap();
@@ -276,6 +282,7 @@ impl GzipCompressionBuilder {
     }
 
     /// Build the compression codec.
+    #[doc(alias = "org.apache.kafka.common.compress.GzipCompression$Builder#build")]
     pub fn build(self) -> Compression {
         Compression::Gzip(GzipCompression { level: self.level })
     }
@@ -283,6 +290,7 @@ impl GzipCompressionBuilder {
 
 /// Builder for [`Lz4Compression`]. Translates Java's `Lz4Compression.Builder`.
 #[derive(Clone, Debug)]
+#[doc(alias = "org.apache.kafka.common.compress.Lz4Compression$Builder")]
 pub struct Lz4CompressionBuilder {
     level: i32,
 }
@@ -290,6 +298,7 @@ pub struct Lz4CompressionBuilder {
 impl Lz4CompressionBuilder {
     /// Set the compression level. See [`GzipCompressionBuilder::level`] for the
     /// throw-to-`Err` translation.
+    #[doc(alias = "org.apache.kafka.common.compress.Lz4Compression$Builder#level")]
     pub fn level(mut self, level: i32) -> Result<Self, Error> {
         let min = CompressionType::Lz4.min_level().unwrap();
         let max = CompressionType::Lz4.max_level().unwrap();
@@ -303,6 +312,7 @@ impl Lz4CompressionBuilder {
     }
 
     /// Build the compression codec.
+    #[doc(alias = "org.apache.kafka.common.compress.Lz4Compression$Builder#build")]
     pub fn build(self) -> Compression {
         Compression::Lz4(Lz4Compression { level: self.level })
     }
@@ -310,6 +320,7 @@ impl Lz4CompressionBuilder {
 
 /// Builder for [`ZstdCompression`]. Translates Java's `ZstdCompression.Builder`.
 #[derive(Clone, Debug)]
+#[doc(alias = "org.apache.kafka.common.compress.ZstdCompression$Builder")]
 pub struct ZstdCompressionBuilder {
     level: i32,
 }
@@ -317,6 +328,7 @@ pub struct ZstdCompressionBuilder {
 impl ZstdCompressionBuilder {
     /// Set the compression level. See [`GzipCompressionBuilder::level`] for the
     /// throw-to-`Err` translation.
+    #[doc(alias = "org.apache.kafka.common.compress.ZstdCompression$Builder#level")]
     pub fn level(mut self, level: i32) -> Result<Self, Error> {
         let min = CompressionType::Zstd.min_level().unwrap();
         let max = CompressionType::Zstd.max_level().unwrap();
@@ -330,6 +342,7 @@ impl ZstdCompressionBuilder {
     }
 
     /// Build the compression codec.
+    #[doc(alias = "org.apache.kafka.common.compress.ZstdCompression$Builder#build")]
     pub fn build(self) -> Compression {
         Compression::Zstd(ZstdCompression { level: self.level })
     }
@@ -359,6 +372,7 @@ impl StatelessCompressionBuilder {
 /// standing in for Java's `Builder<? extends Compression>` wildcard.
 #[derive(Clone, Debug)]
 #[non_exhaustive]
+#[doc(alias = "org.apache.kafka.common.compress.Compression$Builder")]
 pub enum CompressionBuilder {
     /// A codec with no settings (none / snappy).
     Stateless(StatelessCompressionBuilder),
@@ -372,6 +386,7 @@ pub enum CompressionBuilder {
 
 impl CompressionBuilder {
     /// Build the compression codec.
+    #[doc(alias = "org.apache.kafka.common.compress.Compression$Builder#build")]
     pub fn build(self) -> Compression {
         match self {
             Self::Stateless(b) => b.build(),
@@ -391,31 +406,37 @@ impl Compression {
     pub const NONE: Compression = Compression::none().build();
 
     /// Create a builder for no compression.
+    #[doc(alias = "org.apache.kafka.common.compress.Compression#none")]
     pub const fn none() -> StatelessCompressionBuilder {
         StatelessCompressionBuilder { compression: Self::None }
     }
 
     /// Create a builder for gzip compression, defaulted to gzip's default level.
+    #[doc(alias = "org.apache.kafka.common.compress.Compression#gzip")]
     pub fn gzip() -> GzipCompressionBuilder {
         GzipCompressionBuilder { level: CompressionType::Gzip.default_level().unwrap() }
     }
 
     /// Create a builder for snappy compression.
+    #[doc(alias = "org.apache.kafka.common.compress.Compression#snappy")]
     pub const fn snappy() -> StatelessCompressionBuilder {
         StatelessCompressionBuilder { compression: Self::Snappy }
     }
 
     /// Create a builder for LZ4 compression, defaulted to LZ4's default level.
+    #[doc(alias = "org.apache.kafka.common.compress.Compression#lz4")]
     pub fn lz4() -> Lz4CompressionBuilder {
         Lz4CompressionBuilder { level: CompressionType::Lz4.default_level().unwrap() }
     }
 
     /// Create a builder for zstd compression, defaulted to zstd's default level.
+    #[doc(alias = "org.apache.kafka.common.compress.Compression#zstd")]
     pub fn zstd() -> ZstdCompressionBuilder {
         ZstdCompressionBuilder { level: CompressionType::Zstd.default_level().unwrap() }
     }
 
     /// Create a builder for the given compression type, with default settings.
+    #[doc(alias = "org.apache.kafka.common.compress.Compression#of")]
     pub fn of(compression_type: CompressionType) -> CompressionBuilder {
         match compression_type {
             CompressionType::None => CompressionBuilder::Stateless(Self::none()),
@@ -459,6 +480,7 @@ impl Compression {
     ///   is implemented; the parameter is accepted for forward compatibility so
     ///   that later phases (consumer reading v0/v1 records) do not need to
     ///   change the public API.
+    #[doc(alias = "org.apache.kafka.common.compress.Compression#wrapForOutput")]
     pub fn wrap_for_output<W: Write>(&self, writer: W, _message_version: i8) -> io::Result<CompressingWriter<W>> {
         match self {
             Self::None => Ok(CompressingWriter::None(writer)),
@@ -501,6 +523,7 @@ impl Compression {
     ///   `message_version == RecordBatch::MAGIC_VALUE_V0`, Java uses a broken
     ///   flag-descriptor checksum for compatibility. Currently only v2 behavior
     ///   is implemented; the parameter is accepted for forward compatibility.
+    #[doc(alias = "org.apache.kafka.common.compress.Compression#wrapForInput")]
     pub fn wrap_for_input<R: Read>(&self, reader: R, _message_version: i8) -> io::Result<DecompressingReader<R>> {
         match self {
             Self::None => Ok(DecompressingReader::None(reader)),

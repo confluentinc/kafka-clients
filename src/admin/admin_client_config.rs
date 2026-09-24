@@ -28,6 +28,7 @@ use crate::common::security::SecurityProtocol;
 /// Corresponds to `org.apache.kafka.clients.admin.AdminClientConfig`. Unknown
 /// keys are accepted silently, matching Java's `AbstractConfig` behavior.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[doc(alias = "org.apache.kafka.clients.admin.AdminClientConfig")]
 pub struct AdminClientConfig {
     bootstrap_servers: Vec<String>,
     client_id: String,
@@ -92,6 +93,7 @@ impl AdminClientConfig {
     ///
     /// Returns [`Error::LocalIllegalArgument`] if `bootstrap.servers` is missing
     /// or a numeric value fails to parse.
+    #[doc(alias = "org.apache.kafka.clients.admin.AdminClientConfig#AdminClientConfig")]
     pub fn new(props: &HashMap<String, String>) -> Result<Self, Error> {
         let mut config = Self::default();
         let mut bootstrap_set = false;

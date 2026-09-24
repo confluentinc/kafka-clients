@@ -31,6 +31,7 @@ use super::{ConcreteRequest, ConcreteResponse, DescribeDelegationTokenResponse, 
 /// Corresponds to
 /// `org.apache.kafka.common.requests.DescribeDelegationTokenRequest`.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.DescribeDelegationTokenRequest")]
 pub struct DescribeDelegationTokenRequest {
     data: DescribeDelegationTokenRequestData,
     version: i16,
@@ -38,11 +39,13 @@ pub struct DescribeDelegationTokenRequest {
 
 impl DescribeDelegationTokenRequest {
     /// Creates a new `DescribeDelegationTokenRequest` from data and version.
+    #[doc(alias = "org.apache.kafka.common.requests.DescribeDelegationTokenRequest#DescribeDelegationTokenRequest")]
     pub fn new(data: DescribeDelegationTokenRequestData, version: i16) -> Self {
         Self { data, version }
     }
 
     /// Returns a reference to the underlying data.
+    #[doc(alias = "org.apache.kafka.common.requests.DescribeDelegationTokenRequest#data")]
     pub fn data(&self) -> &DescribeDelegationTokenRequestData {
         &self.data
     }
@@ -65,6 +68,7 @@ impl DescribeDelegationTokenRequest {
     /// Whether the owners list is present and empty.
     ///
     /// Mirrors `DescribeDelegationTokenRequest.ownersListEmpty`.
+    #[doc(alias = "org.apache.kafka.common.requests.DescribeDelegationTokenRequest#ownersListEmpty")]
     pub fn owners_list_empty(&self) -> bool {
         self.data.owners.as_ref().is_some_and(std::vec::Vec::is_empty)
     }
@@ -72,6 +76,7 @@ impl DescribeDelegationTokenRequest {
     /// Creates an error response for this request.
     ///
     /// Mirrors `DescribeDelegationTokenRequest.getErrorResponse`.
+    #[doc(alias = "org.apache.kafka.common.requests.DescribeDelegationTokenRequest#getErrorResponse")]
     pub fn get_error_response(&self, throttle_time_ms: i32, error: &Errors) -> ConcreteResponse {
         ConcreteResponse::DescribeDelegationToken(DescribeDelegationTokenResponse::with_version_throttle_time_ms_error(
             self.version,
@@ -85,6 +90,7 @@ impl DescribeDelegationTokenRequest {
     /// # Errors
     ///
     /// Returns an error if parsing fails.
+    #[doc(alias = "org.apache.kafka.common.requests.DescribeDelegationTokenRequest#parse")]
     pub fn parse(readable: &mut dyn Readable, version: i16) -> io::Result<Self> {
         let data = DescribeDelegationTokenRequestData::read(readable, version)?;
         Ok(Self::new(data, version))
@@ -105,6 +111,7 @@ impl std::fmt::Display for DescribeDelegationTokenRequest {
 ///
 /// Corresponds to `DescribeDelegationTokenRequest.Builder` in Java.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.DescribeDelegationTokenRequest$Builder")]
 pub struct DescribeDelegationTokenRequestBuilder {
     data: DescribeDelegationTokenRequestData,
     oldest_allowed_version: i16,
@@ -118,6 +125,7 @@ impl DescribeDelegationTokenRequestBuilder {
     /// a `None` owners filter maps to a null owners field (describe all tokens
     /// the user is authorized for), while a present filter maps each principal
     /// to a `DescribeDelegationTokenOwner`.
+    #[doc(alias = "org.apache.kafka.common.requests.DescribeDelegationTokenRequest$Builder#Builder")]
     pub fn new(owners: Option<&[KafkaPrincipal]>) -> Self {
         let mut data = DescribeDelegationTokenRequestData::new();
         data.owners = owners.map(|owners| {

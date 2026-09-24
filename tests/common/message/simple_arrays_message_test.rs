@@ -22,6 +22,7 @@ use crate::common::simple_arrays_message_data::SimpleArraysMessageData;
 use confluent_kafka::common::ByteBufferAccessor;
 
 #[test]
+#[doc(alias = "org.apache.kafka.common.message.SimpleArraysMessageTest#testArrayBoundsChecking")]
 fn test_array_bounds_checking() {
     // SimpleArraysMessageData takes 2 arrays
     let buf: Vec<u8> = vec![
@@ -38,6 +39,7 @@ fn test_array_bounds_checking() {
 }
 
 #[test]
+#[doc(alias = "org.apache.kafka.common.message.SimpleArraysMessageTest#testArrayBoundsCheckingOtherArray")]
 fn test_array_bounds_checking_other_array() {
     // SimpleArraysMessageData takes 2 arrays
     let buf: Vec<u8> = vec![

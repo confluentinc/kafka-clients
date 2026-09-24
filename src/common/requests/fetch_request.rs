@@ -42,6 +42,7 @@ use crate::fetch_request_data::{FetchPartition, FetchTopic, ForgottenTopic};
 /// Corresponds to `FetchRequest.PartitionData` in Java.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
+#[doc(alias = "org.apache.kafka.common.requests.FetchRequest$PartitionData")]
 pub struct PartitionData {
     /// Topic ID (may be the zero UUID for versions that don't support it).
     pub(crate) topic_id: Uuid,
@@ -61,6 +62,7 @@ impl PartitionData {
     /// Constructs a partition entry without a `last_fetched_epoch`.
     ///
     /// Translates the 5-arg Java constructor.
+    #[doc(alias = "org.apache.kafka.common.requests.FetchRequest$PartitionData#PartitionData")]
     pub fn new(
         topic_id: Uuid,
         fetch_offset: i64,
@@ -81,6 +83,7 @@ impl PartitionData {
     /// Constructs a partition entry with all fields explicit.
     ///
     /// Translates the 6-arg Java constructor.
+    #[doc(alias = "org.apache.kafka.common.requests.FetchRequest$PartitionData#PartitionData")]
     pub fn with_last_fetched_epoch(
         topic_id: Uuid,
         fetch_offset: i64,
@@ -147,6 +150,7 @@ impl PartitionData {
 ///
 /// Corresponds to `org.apache.kafka.common.requests.FetchRequest`.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.FetchRequest")]
 pub struct FetchRequest {
     data: FetchRequestData,
     version: i16,
@@ -199,6 +203,7 @@ impl FetchRequest {
     }
 
     /// Returns true if the broker id is non-negative.
+    #[doc(alias = "org.apache.kafka.common.requests.FetchRequest#isValidBrokerId")]
     pub fn is_valid_broker_id(broker_id: i32) -> bool {
         broker_id >= 0
     }
@@ -207,6 +212,7 @@ impl FetchRequest {
     /// follower or future-local replica).
     ///
     /// Mirrors Java's `FetchRequest.isConsumer(int)`.
+    #[doc(alias = "org.apache.kafka.common.requests.FetchRequest#isConsumer")]
     pub fn is_consumer(replica_id: i32) -> bool {
         const FUTURE_LOCAL_REPLICA_ID: i32 = -3;
         replica_id < 0 && replica_id != FUTURE_LOCAL_REPLICA_ID
@@ -215,6 +221,7 @@ impl FetchRequest {
     /// Returns a human-readable description of a replica id.
     ///
     /// Mirrors Java's `FetchRequest.describeReplicaId(int)`.
+    #[doc(alias = "org.apache.kafka.common.requests.FetchRequest#describeReplicaId")]
     pub fn describe_replica_id(replica_id: i32) -> String {
         const ORDINARY_CONSUMER_ID: i32 = -1;
         const DEBUGGING_CONSUMER_ID: i32 = -2;
@@ -260,18 +267,21 @@ impl FetchRequest {
         out
     }
 
+    #[doc(alias = "org.apache.kafka.common.requests.FetchRequest#optionalEpoch")]
     fn optional_epoch(raw: i32) -> Option<i32> {
         if raw < 0 { None } else { Some(raw) }
     }
 
     /// Constructs a `FetchRequest` from data + version. The fetch-session
     /// metadata is derived from `data.session_id()` / `data.session_epoch()`.
+    #[doc(alias = "org.apache.kafka.common.requests.FetchRequest#FetchRequest")]
     pub fn new(data: FetchRequestData, version: i16) -> Self {
         let metadata = FetchMetadata::new(data.session_id, data.session_epoch);
         Self { data, version, metadata }
     }
 
     /// Returns a reference to the underlying data.
+    #[doc(alias = "org.apache.kafka.common.requests.FetchRequest#data")]
     pub fn data(&self) -> &FetchRequestData {
         &self.data
     }
@@ -293,16 +303,19 @@ impl FetchRequest {
 
     /// Returns the maximum wait time the server should hold the response
     /// (`max.wait.ms` parity).
+    #[doc(alias = "org.apache.kafka.common.requests.FetchRequest#maxWait")]
     pub fn max_wait(&self) -> i32 {
         self.data.max_wait_ms
     }
 
     /// Returns the minimum number of bytes the server should return.
+    #[doc(alias = "org.apache.kafka.common.requests.FetchRequest#minBytes")]
     pub fn min_bytes(&self) -> i32 {
         self.data.min_bytes
     }
 
     /// Returns the maximum number of bytes the server should return.
+    #[doc(alias = "org.apache.kafka.common.requests.FetchRequest#maxBytes")]
     pub fn max_bytes(&self) -> i32 {
         self.data.max_bytes
     }
@@ -310,6 +323,7 @@ impl FetchRequest {
     /// Returns the replica id of this fetch request.
     ///
     /// On v15+, the `replicaId` lives inside `replica_state`.
+    #[doc(alias = "org.apache.kafka.common.requests.FetchRequest#replicaId")]
     pub fn replica_id(&self) -> i32 {
         if self.version < 15 {
             self.data.replica_id
@@ -319,6 +333,7 @@ impl FetchRequest {
     }
 
     /// Returns whether this request comes from a broker follower.
+    #[doc(alias = "org.apache.kafka.common.requests.FetchRequest#isFromFollower")]
     pub fn is_from_follower(&self) -> bool {
         self.replica_id() >= 0
     }
@@ -328,17 +343,20 @@ impl FetchRequest {
     /// # Errors
     ///
     /// Returns an error if the encoded isolation level is unknown.
+    #[doc(alias = "org.apache.kafka.common.requests.FetchRequest#isolationLevel")]
     pub fn isolation_level(&self) -> Result<IsolationLevel, crate::common::Error> {
         IsolationLevel::for_id(self.data.isolation_level as u8)
     }
 
     /// Returns the fetch session metadata derived from `session_id` and
     /// `session_epoch`.
+    #[doc(alias = "org.apache.kafka.common.requests.FetchRequest#metadata")]
     pub fn metadata(&self) -> FetchMetadata {
         self.metadata
     }
 
     /// Returns the rack id carried in the request.
+    #[doc(alias = "org.apache.kafka.common.requests.FetchRequest#rackId")]
     pub fn rack_id(&self) -> &str {
         &self.data.rack_id
     }
@@ -354,6 +372,7 @@ impl FetchRequest {
     /// (the per-partition status is already absent on the wire). If a
     /// caller ever needs to construct error responses for v<13 wire,
     /// translate the per-partition walk at that point.
+    #[doc(alias = "org.apache.kafka.common.requests.FetchRequest#getErrorResponse")]
     pub fn get_error_response(
         &self,
         throttle_time_ms: i32,
@@ -379,6 +398,7 @@ impl std::fmt::Display for FetchRequest {
 /// translated; `forReplica` and `SimpleBuilder` are out of scope per
 /// `consumer-threading.md` §20.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.FetchRequest$Builder")]
 pub struct FetchRequestBuilder {
     oldest_allowed_version: i16,
     latest_allowed_version: i16,
@@ -402,6 +422,7 @@ impl FetchRequestBuilder {
     /// Creates a builder configured for a consumer fetch.
     ///
     /// Translates `FetchRequest.Builder.forConsumer(maxVersion, maxWait, minBytes, fetchData)`.
+    #[doc(alias = "org.apache.kafka.common.requests.FetchRequest$Builder#forConsumer")]
     pub fn for_consumer(
         max_version: i16,
         max_wait: i32,
@@ -432,6 +453,7 @@ impl FetchRequestBuilder {
     }
 
     /// Returns the current metadata. Visible for testing.
+    #[doc(alias = "org.apache.kafka.common.requests.FetchRequest$Builder#metadata")]
     pub fn metadata(&self) -> FetchMetadata {
         self.metadata
     }
@@ -449,11 +471,13 @@ impl FetchRequestBuilder {
     }
 
     /// Returns a reference to the fetch-data map.
+    #[doc(alias = "org.apache.kafka.common.requests.FetchRequest$Builder#fetchData")]
     pub fn fetch_data(&self) -> &IndexMap<TopicPartition, PartitionData> {
         &self.to_fetch
     }
 
     /// Sets the per-request response cap.
+    #[doc(alias = "org.apache.kafka.common.requests.FetchRequest$Builder#setMaxBytes")]
     pub fn set_max_bytes(mut self, max_bytes: i32) -> Self {
         self.max_bytes = max_bytes;
         self
@@ -462,6 +486,7 @@ impl FetchRequestBuilder {
     /// Returns the removed-partitions list.
     ///
     /// Translates `FetchRequest.Builder.removed()`.
+    #[doc(alias = "org.apache.kafka.common.requests.FetchRequest$Builder#removed")]
     pub fn removed(&self) -> &[TopicIdPartition] {
         &self.removed
     }
@@ -475,6 +500,7 @@ impl FetchRequestBuilder {
     /// Returns the replaced-partitions list.
     ///
     /// Translates `FetchRequest.Builder.replaced()`.
+    #[doc(alias = "org.apache.kafka.common.requests.FetchRequest$Builder#replaced")]
     pub fn replaced(&self) -> &[TopicIdPartition] {
         &self.replaced
     }
@@ -496,6 +522,7 @@ impl FetchRequestBuilder {
     }
 
     /// Builds the request at the latest allowed version.
+    #[doc(alias = "org.apache.kafka.common.requests.FetchRequest$Builder#build")]
     pub fn build(&self) -> FetchRequest {
         self.build_version(self.latest_allowed_version)
     }

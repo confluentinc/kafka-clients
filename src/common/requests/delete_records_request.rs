@@ -29,6 +29,7 @@ use super::{ConcreteRequest, ConcreteResponse, DeleteRecordsResponse, RequestBui
 ///
 /// Corresponds to `org.apache.kafka.common.requests.DeleteRecordsRequest`.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.DeleteRecordsRequest")]
 pub struct DeleteRecordsRequest {
     data: DeleteRecordsRequestData,
     version: i16,
@@ -36,11 +37,13 @@ pub struct DeleteRecordsRequest {
 
 impl DeleteRecordsRequest {
     /// Creates a new `DeleteRecordsRequest` from data and version.
+    #[doc(alias = "org.apache.kafka.common.requests.DeleteRecordsRequest#DeleteRecordsRequest")]
     pub fn new(data: DeleteRecordsRequestData, version: i16) -> Self {
         Self { data, version }
     }
 
     /// Returns a reference to the underlying data.
+    #[doc(alias = "org.apache.kafka.common.requests.DeleteRecordsRequest#data")]
     pub fn data(&self) -> &DeleteRecordsRequestData {
         &self.data
     }
@@ -66,6 +69,7 @@ impl DeleteRecordsRequest {
     /// Mirrors `DeleteRecordsRequest.getErrorResponse` (which uses
     /// `Errors.forException`); the enum-dispatch caller supplies the mapped
     /// [`Errors`] directly.
+    #[doc(alias = "org.apache.kafka.common.requests.DeleteRecordsRequest#getErrorResponse")]
     pub fn get_error_response(&self, throttle_time_ms: i32, error: &Errors) -> ConcreteResponse {
         let mut result = DeleteRecordsResponseData::new();
         result.set_throttle_time_ms(throttle_time_ms);
@@ -94,6 +98,7 @@ impl DeleteRecordsRequest {
     /// # Errors
     ///
     /// Returns an error if parsing fails.
+    #[doc(alias = "org.apache.kafka.common.requests.DeleteRecordsRequest#parse")]
     pub fn parse(readable: &mut dyn Readable, version: i16) -> io::Result<Self> {
         let data = DeleteRecordsRequestData::read(readable, version)?;
         Ok(Self::new(data, version))
@@ -110,6 +115,7 @@ impl std::fmt::Display for DeleteRecordsRequest {
 ///
 /// Corresponds to `DeleteRecordsRequest.Builder` in Java.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.DeleteRecordsRequest$Builder")]
 pub struct DeleteRecordsRequestBuilder {
     data: DeleteRecordsRequestData,
     oldest_allowed_version: i16,
@@ -118,6 +124,7 @@ pub struct DeleteRecordsRequestBuilder {
 
 impl DeleteRecordsRequestBuilder {
     /// Creates a builder from existing data.
+    #[doc(alias = "org.apache.kafka.common.requests.DeleteRecordsRequest$Builder#Builder")]
     pub fn new(data: DeleteRecordsRequestData) -> Self {
         Self {
             data,

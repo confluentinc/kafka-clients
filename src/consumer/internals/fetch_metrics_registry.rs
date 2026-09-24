@@ -28,6 +28,7 @@ metric with actual topic name instead.";
 /// topic-level (adds the `topic` tag), and partition-level (adds the
 /// `partition` tag) metrics.
 #[derive(Clone, Debug)]
+#[doc(alias = "org.apache.kafka.clients.consumer.internals.FetchMetricsRegistry")]
 pub(crate) struct FetchMetricsRegistry {
     pub(crate) fetch_size_avg: MetricNameTemplate,
     pub(crate) fetch_size_max: MetricNameTemplate,
@@ -64,6 +65,7 @@ impl FetchMetricsRegistry {
     /// Creates the registry with the given default tag set and group prefix.
     /// Translates Java's `FetchMetricsRegistry(Set<String> tags, String
     /// metricGrpPrefix)`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.FetchMetricsRegistry#FetchMetricsRegistry")]
     pub(crate) fn new(tags: IndexSet<String>, metric_grp_prefix: &str) -> Self {
         // Client level.
         let group_name = format!("{metric_grp_prefix}-fetch-manager-metrics");
@@ -293,6 +295,7 @@ impl FetchMetricsRegistry {
 
     /// Returns every template, mirroring Java's `getAllTemplates()`.
     #[cfg(test)]
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.FetchMetricsRegistry#getAllTemplates")]
     pub(crate) fn get_all_templates(&self) -> Vec<&MetricNameTemplate> {
         vec![
             &self.fetch_size_avg,

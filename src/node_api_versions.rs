@@ -27,6 +27,7 @@ use crate::common::requests::ApiVersionsResponse;
 
 /// An internal class which represents the API versions supported by a particular node.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.clients.NodeApiVersions")]
 pub struct NodeApiVersions {
     /// A map of the usable versions of each API, keyed by the ApiKeys instance.
     supported_versions: HashMap<ApiKeys, ApiVersion>,
@@ -42,6 +43,7 @@ pub struct NodeApiVersions {
 
 impl NodeApiVersions {
     /// Create a `NodeApiVersions` object with the current ApiVersions.
+    #[doc(alias = "org.apache.kafka.clients.NodeApiVersions#create")]
     pub fn create() -> Self {
         Self::create_with_overrides(&[])
     }
@@ -49,6 +51,7 @@ impl NodeApiVersions {
     /// Create a `NodeApiVersions` object.
     ///
     /// Any ApiVersion not specified in `overrides` will be set to the current client value.
+    #[doc(alias = "org.apache.kafka.clients.NodeApiVersions#create")]
     pub fn create_with_overrides(overrides: &[ApiVersion]) -> Self {
         let mut api_versions: Vec<ApiVersion> = overrides.to_vec();
         for api_key in ApiKeys::client_apis() {
@@ -70,12 +73,14 @@ impl NodeApiVersions {
     }
 
     /// Create a `NodeApiVersions` from API versions and supported features.
+    #[doc(alias = "org.apache.kafka.clients.NodeApiVersions#NodeApiVersions")]
     pub fn new(node_api_versions: &[ApiVersion], node_supported_features: &[SupportedFeatureKey]) -> Self {
         Self::with_node_finalized_features_finalized_features_epoch(node_api_versions, node_supported_features, &[], -1)
     }
 
     /// Create a `NodeApiVersions` from API versions, supported features,
     /// finalized features, and epoch.
+    #[doc(alias = "org.apache.kafka.clients.NodeApiVersions#NodeApiVersions")]
     pub fn with_node_finalized_features_finalized_features_epoch(
         node_api_versions: &[ApiVersion],
         node_supported_features: &[SupportedFeatureKey],
@@ -123,6 +128,7 @@ impl NodeApiVersions {
     ///
     /// # Errors
     /// Returns an error if the node does not support the given API key.
+    #[doc(alias = "org.apache.kafka.clients.NodeApiVersions#latestUsableVersion")]
     pub fn latest_usable_version(&self, api_key: &ApiKeys) -> Result<i16, Error> {
         self.latest_usable_version_in_range(api_key, api_key.oldest_version(), api_key.latest_version())
     }
@@ -172,6 +178,7 @@ impl NodeApiVersions {
     /// Convert the object to a string.
     ///
     /// If `line_breaks` is true, a linebreak is added after each API.
+    #[doc(alias = "org.apache.kafka.clients.NodeApiVersions#toString")]
     pub fn to_string_with_line_breaks(&self, line_breaks: bool) -> String {
         // The apiVersion collection may not be in sorted order. We put it into
         // a BTreeMap before printing it out to ensure ascending order.
@@ -208,6 +215,7 @@ impl NodeApiVersions {
     }
 
     /// Format a single API version entry as a human-readable string.
+    #[doc(alias = "org.apache.kafka.clients.NodeApiVersions#apiVersionToText")]
     fn api_version_to_text(&self, api_version: &ApiVersion) -> String {
         let mut bld = String::new();
         let api_key = ApiKeys::for_id(api_version.api_key);
@@ -250,26 +258,31 @@ impl NodeApiVersions {
     /// Get the version information for a given API.
     ///
     /// Returns `None` if the API is unsupported by this node.
+    #[doc(alias = "org.apache.kafka.clients.NodeApiVersions#apiVersion")]
     pub fn api_version(&self, api_key: &ApiKeys) -> Option<&ApiVersion> {
         self.supported_versions.get(api_key)
     }
 
     /// Returns all supported API versions.
+    #[doc(alias = "org.apache.kafka.clients.NodeApiVersions#allSupportedApiVersions")]
     pub fn all_supported_api_versions(&self) -> &HashMap<ApiKeys, ApiVersion> {
         &self.supported_versions
     }
 
     /// Returns the supported features.
+    #[doc(alias = "org.apache.kafka.clients.NodeApiVersions#supportedFeatures")]
     pub fn supported_features(&self) -> &HashMap<String, SupportedVersionRange> {
         &self.supported_features
     }
 
     /// Returns the finalized features.
+    #[doc(alias = "org.apache.kafka.clients.NodeApiVersions#finalizedFeatures")]
     pub fn finalized_features(&self) -> &HashMap<String, i16> {
         &self.finalized_features
     }
 
     /// Returns the finalized features epoch.
+    #[doc(alias = "org.apache.kafka.clients.NodeApiVersions#finalizedFeaturesEpoch")]
     pub fn finalized_features_epoch(&self) -> i64 {
         self.finalized_features_epoch
     }
@@ -288,6 +301,7 @@ mod tests {
 
     /// Translated from `NodeApiVersionsTest.testUnsupportedVersionsToString`
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.NodeApiVersionsTest#testUnsupportedVersionsToString")]
     fn test_unsupported_versions_to_string() {
         let versions = NodeApiVersions::new(&[], &[]);
         let mut bld = String::new();
@@ -306,6 +320,7 @@ mod tests {
 
     /// Translated from `NodeApiVersionsTest.testUnknownApiVersionsToString`
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.NodeApiVersionsTest#testUnknownApiVersionsToString")]
     fn test_unknown_api_versions_to_string() {
         let versions = NodeApiVersions::create_single(337, 0, 1);
         assert!(
@@ -317,6 +332,7 @@ mod tests {
 
     /// Translated from `NodeApiVersionsTest.testVersionsToString`
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.NodeApiVersionsTest#testVersionsToString")]
     fn test_versions_to_string() {
         let mut version_list = Vec::new();
         for api_key in ApiKeys::ALL {
@@ -367,6 +383,7 @@ mod tests {
 
     /// Translated from `NodeApiVersionsTest.testLatestUsableVersion`
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.NodeApiVersionsTest#testLatestUsableVersion")]
     fn test_latest_usable_version() {
         let api_versions = NodeApiVersions::create_single(ApiKeys::PRODUCE.id(), 8, 10);
         assert_eq!(10, api_versions.latest_usable_version(&ApiKeys::PRODUCE).unwrap());
@@ -394,6 +411,7 @@ mod tests {
 
     /// Translated from `NodeApiVersionsTest.testLatestUsableVersionOutOfRangeLow`
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.NodeApiVersionsTest#testLatestUsableVersionOutOfRangeLow")]
     fn test_latest_usable_version_out_of_range_low() {
         let api_versions = NodeApiVersions::create_single(ApiKeys::PRODUCE.id(), 1, 2);
         assert!(api_versions.latest_usable_version_in_range(&ApiKeys::PRODUCE, 3, 4).is_err());
@@ -401,6 +419,7 @@ mod tests {
 
     /// Translated from `NodeApiVersionsTest.testLatestUsableVersionOutOfRangeHigh`
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.NodeApiVersionsTest#testLatestUsableVersionOutOfRangeHigh")]
     fn test_latest_usable_version_out_of_range_high() {
         let api_versions = NodeApiVersions::create_single(ApiKeys::PRODUCE.id(), 2, 3);
         assert!(api_versions.latest_usable_version_in_range(&ApiKeys::PRODUCE, 0, 1).is_err());
@@ -408,6 +427,7 @@ mod tests {
 
     /// Translated from `NodeApiVersionsTest.testUsableVersionCalculationNoKnownVersions`
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.NodeApiVersionsTest#testUsableVersionCalculationNoKnownVersions")]
     fn test_usable_version_calculation_no_known_versions() {
         let versions = NodeApiVersions::new(&[], &[]);
         assert!(versions.latest_usable_version(&ApiKeys::FETCH).is_err());
@@ -439,6 +459,7 @@ mod tests {
 
     /// Translated from `NodeApiVersionsTest.testLatestUsableVersionOutOfRange`
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.NodeApiVersionsTest#testLatestUsableVersionOutOfRange")]
     fn test_latest_usable_version_out_of_range() {
         let api_versions = NodeApiVersions::create_single(ApiKeys::PRODUCE.id(), 300, 300);
         assert!(api_versions.latest_usable_version(&ApiKeys::PRODUCE).is_err());
@@ -505,6 +526,7 @@ mod tests {
 
     /// Translated from `NodeApiVersionsTest.testFeatures`
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.NodeApiVersionsTest#testFeatures")]
     fn test_features() {
         let mut supported_feature = SupportedFeatureKey::new();
         supported_feature.set_name("transaction.version".to_string());

@@ -29,6 +29,7 @@ use super::{ConcreteRequest, ConcreteResponse, ExpireDelegationTokenResponse, Re
 /// Corresponds to
 /// `org.apache.kafka.common.requests.ExpireDelegationTokenRequest`.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.ExpireDelegationTokenRequest")]
 pub struct ExpireDelegationTokenRequest {
     data: ExpireDelegationTokenRequestData,
     version: i16,
@@ -36,11 +37,13 @@ pub struct ExpireDelegationTokenRequest {
 
 impl ExpireDelegationTokenRequest {
     /// Creates a new `ExpireDelegationTokenRequest` from data and version.
+    #[doc(alias = "org.apache.kafka.common.requests.ExpireDelegationTokenRequest#ExpireDelegationTokenRequest")]
     pub fn new(data: ExpireDelegationTokenRequestData, version: i16) -> Self {
         Self { data, version }
     }
 
     /// Returns a reference to the underlying data.
+    #[doc(alias = "org.apache.kafka.common.requests.ExpireDelegationTokenRequest#data")]
     pub fn data(&self) -> &ExpireDelegationTokenRequestData {
         &self.data
     }
@@ -53,6 +56,7 @@ impl ExpireDelegationTokenRequest {
     /// Returns the HMAC bytes.
     ///
     /// Mirrors `ExpireDelegationTokenRequest.hmac`.
+    #[doc(alias = "org.apache.kafka.common.requests.ExpireDelegationTokenRequest#hmac")]
     pub fn hmac(&self) -> &[u8] {
         &self.data.hmac
     }
@@ -60,6 +64,7 @@ impl ExpireDelegationTokenRequest {
     /// Returns the expiry time period in milliseconds.
     ///
     /// Mirrors `ExpireDelegationTokenRequest.expiryTimePeriod`.
+    #[doc(alias = "org.apache.kafka.common.requests.ExpireDelegationTokenRequest#expiryTimePeriod")]
     pub fn expiry_time_period(&self) -> i64 {
         self.data.expiry_time_period_ms
     }
@@ -77,6 +82,7 @@ impl ExpireDelegationTokenRequest {
     /// Creates an error response for this request.
     ///
     /// Mirrors `ExpireDelegationTokenRequest.getErrorResponse`.
+    #[doc(alias = "org.apache.kafka.common.requests.ExpireDelegationTokenRequest#getErrorResponse")]
     pub fn get_error_response(&self, throttle_time_ms: i32, error: &Errors) -> ConcreteResponse {
         ConcreteResponse::ExpireDelegationToken(ExpireDelegationTokenResponse::prepare_response(
             throttle_time_ms,
@@ -89,6 +95,7 @@ impl ExpireDelegationTokenRequest {
     /// # Errors
     ///
     /// Returns an error if parsing fails.
+    #[doc(alias = "org.apache.kafka.common.requests.ExpireDelegationTokenRequest#parse")]
     pub fn parse(readable: &mut dyn Readable, version: i16) -> io::Result<Self> {
         let data = ExpireDelegationTokenRequestData::read(readable, version)?;
         Ok(Self::new(data, version))
@@ -108,6 +115,7 @@ impl std::fmt::Display for ExpireDelegationTokenRequest {
 ///
 /// Corresponds to `ExpireDelegationTokenRequest.Builder` in Java.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.ExpireDelegationTokenRequest$Builder")]
 pub struct ExpireDelegationTokenRequestBuilder {
     data: ExpireDelegationTokenRequestData,
     oldest_allowed_version: i16,
@@ -116,6 +124,7 @@ pub struct ExpireDelegationTokenRequestBuilder {
 
 impl ExpireDelegationTokenRequestBuilder {
     /// Creates a builder from existing data.
+    #[doc(alias = "org.apache.kafka.common.requests.ExpireDelegationTokenRequest$Builder#Builder")]
     pub fn new(data: ExpireDelegationTokenRequestData) -> Self {
         Self {
             data,

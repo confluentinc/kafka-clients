@@ -31,6 +31,7 @@ use super::{AlterReplicaLogDirsResponse, ConcreteRequest, ConcreteResponse, Requ
 ///
 /// Corresponds to `org.apache.kafka.common.requests.AlterReplicaLogDirsRequest`.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.AlterReplicaLogDirsRequest")]
 pub struct AlterReplicaLogDirsRequest {
     data: AlterReplicaLogDirsRequestData,
     version: i16,
@@ -38,11 +39,13 @@ pub struct AlterReplicaLogDirsRequest {
 
 impl AlterReplicaLogDirsRequest {
     /// Creates a new `AlterReplicaLogDirsRequest` from data and version.
+    #[doc(alias = "org.apache.kafka.common.requests.AlterReplicaLogDirsRequest#AlterReplicaLogDirsRequest")]
     pub fn new(data: AlterReplicaLogDirsRequestData, version: i16) -> Self {
         Self { data, version }
     }
 
     /// Returns a reference to the underlying data.
+    #[doc(alias = "org.apache.kafka.common.requests.AlterReplicaLogDirsRequest#data")]
     pub fn data(&self) -> &AlterReplicaLogDirsRequestData {
         &self.data
     }
@@ -65,6 +68,7 @@ impl AlterReplicaLogDirsRequest {
     /// Returns the requested destination log directory per topic partition.
     ///
     /// Mirrors `AlterReplicaLogDirsRequest.partitionDirs`.
+    #[doc(alias = "org.apache.kafka.common.requests.AlterReplicaLogDirsRequest#partitionDirs")]
     pub fn partition_dirs(&self) -> HashMap<TopicPartition, String> {
         let mut result = HashMap::new();
         for alter_dir in &self.data.dirs {
@@ -81,6 +85,7 @@ impl AlterReplicaLogDirsRequest {
     /// partition of every topic with the given error.
     ///
     /// Mirrors `AlterReplicaLogDirsRequest.getErrorResponse`.
+    #[doc(alias = "org.apache.kafka.common.requests.AlterReplicaLogDirsRequest#getErrorResponse")]
     pub fn get_error_response(&self, throttle_time_ms: i32, error: &Errors) -> ConcreteResponse {
         let mut response = AlterReplicaLogDirsResponseData::new();
         let mut results = Vec::new();
@@ -113,6 +118,7 @@ impl AlterReplicaLogDirsRequest {
     /// # Errors
     ///
     /// Returns an error if parsing fails.
+    #[doc(alias = "org.apache.kafka.common.requests.AlterReplicaLogDirsRequest#parse")]
     pub fn parse(readable: &mut dyn Readable, version: i16) -> io::Result<Self> {
         let data = AlterReplicaLogDirsRequestData::read(readable, version)?;
         Ok(Self::new(data, version))
@@ -129,6 +135,7 @@ impl std::fmt::Display for AlterReplicaLogDirsRequest {
 ///
 /// Corresponds to `AlterReplicaLogDirsRequest.Builder` in Java.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.AlterReplicaLogDirsRequest$Builder")]
 pub struct AlterReplicaLogDirsRequestBuilder {
     data: AlterReplicaLogDirsRequestData,
     oldest_allowed_version: i16,
@@ -137,6 +144,7 @@ pub struct AlterReplicaLogDirsRequestBuilder {
 
 impl AlterReplicaLogDirsRequestBuilder {
     /// Creates a builder from existing data.
+    #[doc(alias = "org.apache.kafka.common.requests.AlterReplicaLogDirsRequest$Builder#Builder")]
     pub fn new(data: AlterReplicaLogDirsRequestData) -> Self {
         Self {
             data,
@@ -188,6 +196,7 @@ mod tests {
 
     /// Mirrors `AlterReplicaLogDirsRequestTest.testErrorResponse`.
     #[test]
+    #[doc(alias = "org.apache.kafka.common.requests.AlterReplicaLogDirsRequestTest#testErrorResponse")]
     fn test_error_response() {
         let mut data = AlterReplicaLogDirsRequestData::new();
         data.set_dirs(vec![dir("/data0", vec![topic("topic", vec![0, 1, 2])])]);
@@ -209,6 +218,7 @@ mod tests {
 
     /// Mirrors `AlterReplicaLogDirsRequestTest.testPartitionDir`.
     #[test]
+    #[doc(alias = "org.apache.kafka.common.requests.AlterReplicaLogDirsRequestTest#testPartitionDir")]
     fn test_partition_dir() {
         let mut data = AlterReplicaLogDirsRequestData::new();
         data.set_dirs(vec![

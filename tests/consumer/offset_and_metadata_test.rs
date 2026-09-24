@@ -36,6 +36,7 @@ fn hash_of<T: Hash>(v: &T) -> u64 {
 
 /// Translated from `OffsetAndMetadataTest.testInvalidNegativeOffset`.
 #[test]
+#[doc(alias = "org.apache.kafka.clients.consumer.OffsetAndMetadataTest#testInvalidNegativeOffset")]
 fn test_invalid_negative_offset() {
     let err = OffsetAndMetadata::with_leader_epoch_metadata(-239, Some(15), String::new()).unwrap_err();
     assert!(err.message().contains("Invalid negative offset"), "got: {}", err.message());
@@ -43,6 +44,7 @@ fn test_invalid_negative_offset() {
 
 /// Translated from `OffsetAndMetadataTest.testEqualsWithNullAndNegativeLeaderEpoch`.
 #[test]
+#[doc(alias = "org.apache.kafka.clients.consumer.OffsetAndMetadataTest#testEqualsWithNullAndNegativeLeaderEpoch")]
 fn test_equals_with_null_and_negative_leader_epoch() {
     let metadata_with_null = OffsetAndMetadata::with_leader_epoch_metadata(100, None, "metadata").unwrap();
     let metadata_with_negative = OffsetAndMetadata::with_leader_epoch_metadata(100, Some(-1), "metadata").unwrap();
@@ -57,6 +59,7 @@ fn test_equals_with_null_and_negative_leader_epoch() {
 /// pass it explicitly). The behavioral assertion — that empty-string metadata
 /// equals empty-string metadata — is preserved.
 #[test]
+#[doc(alias = "org.apache.kafka.clients.consumer.OffsetAndMetadataTest#testEqualsWithNullAndEmptyMetadata")]
 fn test_equals_with_null_and_empty_metadata() {
     // The Rust equivalent of passing `null` is passing `""` (the same value
     // Java normalizes null to). Both forms should be equal and have the

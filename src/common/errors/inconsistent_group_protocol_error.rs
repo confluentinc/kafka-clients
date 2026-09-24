@@ -26,6 +26,7 @@ kafka_error_class! {
     ///
     /// Java `extends` chain:
     ///    `InconsistentGroupProtocolException` -> `ApiException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.InconsistentGroupProtocolException")]
     InconsistentGroupProtocolError,
     code: Errors::InconsistentGroupProtocol,
     extends: [

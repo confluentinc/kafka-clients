@@ -26,6 +26,7 @@ kafka_error_class! {
     ///
     /// Java `extends` chain:
     ///    `InvalidRequestException` -> `ApiException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.InvalidRequestException")]
     InvalidRequestError,
     code: Errors::InvalidRequest,
     extends: [

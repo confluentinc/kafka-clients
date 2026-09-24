@@ -24,6 +24,7 @@
 /// which has no instance state, so it becomes a unit struct hosting its
 /// statics as associated items.
 #[non_exhaustive]
+#[doc(alias = "org.apache.kafka.common.requests.JoinGroupRequest")]
 pub struct JoinGroupRequest;
 
 impl JoinGroupRequest {
@@ -43,6 +44,7 @@ impl JoinGroupRequest {
     /// Corresponds to `JoinGroupRequest.maybeTruncateReason`. Java measures length
     /// in UTF-16 code units; we measure in Unicode scalar values, which agrees for
     /// the ASCII reasons the admin client produces and never splits a code point.
+    #[doc(alias = "org.apache.kafka.common.requests.JoinGroupRequest#maybeTruncateReason")]
     pub fn maybe_truncate_reason(reason: &str) -> String {
         if reason.chars().count() > Self::MAX_REASON_LENGTH {
             reason.chars().take(Self::MAX_REASON_LENGTH).collect()

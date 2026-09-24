@@ -26,6 +26,7 @@ kafka_error_class! {
     ///    `PreferredLeaderNotAvailableException` -> `InvalidMetadataException` ->
     ///   `RefreshRetriableException` -> `RetriableException` -> `ApiException` ->
     ///   `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.PreferredLeaderNotAvailableException")]
     PreferredLeaderNotAvailableError,
     code: Errors::PreferredLeaderNotAvailable,
     extends: [

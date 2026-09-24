@@ -30,6 +30,7 @@ use super::{AlterPartitionReassignmentsResponse, ConcreteRequest, ConcreteRespon
 /// Corresponds to
 /// `org.apache.kafka.common.requests.AlterPartitionReassignmentsRequest`.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.AlterPartitionReassignmentsRequest")]
 pub struct AlterPartitionReassignmentsRequest {
     data: AlterPartitionReassignmentsRequestData,
     version: i16,
@@ -37,11 +38,15 @@ pub struct AlterPartitionReassignmentsRequest {
 
 impl AlterPartitionReassignmentsRequest {
     /// Creates a new `AlterPartitionReassignmentsRequest` from data and version.
+    #[doc(
+        alias = "org.apache.kafka.common.requests.AlterPartitionReassignmentsRequest#AlterPartitionReassignmentsRequest"
+    )]
     pub fn new(data: AlterPartitionReassignmentsRequestData, version: i16) -> Self {
         Self { data, version }
     }
 
     /// Returns a reference to the underlying data.
+    #[doc(alias = "org.apache.kafka.common.requests.AlterPartitionReassignmentsRequest#data")]
     pub fn data(&self) -> &AlterPartitionReassignmentsRequestData {
         &self.data
     }
@@ -66,6 +71,7 @@ impl AlterPartitionReassignmentsRequest {
     /// Mirrors `AlterPartitionReassignmentsRequest.getErrorResponse`, which sets
     /// only the top-level error code and message and returns no per-partition
     /// results.
+    #[doc(alias = "org.apache.kafka.common.requests.AlterPartitionReassignmentsRequest#getErrorResponse")]
     pub fn get_error_response(&self, throttle_time_ms: i32, error: &Errors) -> ConcreteResponse {
         let mut data = AlterPartitionReassignmentsResponseData::new();
         data.set_throttle_time_ms(throttle_time_ms);
@@ -79,6 +85,7 @@ impl AlterPartitionReassignmentsRequest {
     /// # Errors
     ///
     /// Returns an error if parsing fails.
+    #[doc(alias = "org.apache.kafka.common.requests.AlterPartitionReassignmentsRequest#parse")]
     pub fn parse(readable: &mut dyn Readable, version: i16) -> io::Result<Self> {
         let data = AlterPartitionReassignmentsRequestData::read(readable, version)?;
         Ok(Self::new(data, version))
@@ -99,6 +106,7 @@ impl std::fmt::Display for AlterPartitionReassignmentsRequest {
 ///
 /// Corresponds to `AlterPartitionReassignmentsRequest.Builder` in Java.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.AlterPartitionReassignmentsRequest$Builder")]
 pub struct AlterPartitionReassignmentsRequestBuilder {
     data: AlterPartitionReassignmentsRequestData,
     oldest_allowed_version: i16,
@@ -107,6 +115,7 @@ pub struct AlterPartitionReassignmentsRequestBuilder {
 
 impl AlterPartitionReassignmentsRequestBuilder {
     /// Creates a builder from existing data.
+    #[doc(alias = "org.apache.kafka.common.requests.AlterPartitionReassignmentsRequest$Builder#Builder")]
     pub fn new(data: AlterPartitionReassignmentsRequestData) -> Self {
         Self {
             data,

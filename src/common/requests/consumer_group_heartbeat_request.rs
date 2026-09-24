@@ -31,6 +31,7 @@ use super::RequestBuilder;
 ///
 /// Corresponds to `org.apache.kafka.common.requests.ConsumerGroupHeartbeatRequest`.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.ConsumerGroupHeartbeatRequest")]
 pub struct ConsumerGroupHeartbeatRequest {
     data: ConsumerGroupHeartbeatRequestData,
     version: i16,
@@ -68,11 +69,13 @@ impl ConsumerGroupHeartbeatRequest {
          subscribe to a SubscriptionPattern.";
 
     /// Creates a new `ConsumerGroupHeartbeatRequest` from data and version.
+    #[doc(alias = "org.apache.kafka.common.requests.ConsumerGroupHeartbeatRequest#ConsumerGroupHeartbeatRequest")]
     pub fn new(data: ConsumerGroupHeartbeatRequestData, version: i16) -> Self {
         Self { data, version }
     }
 
     /// Returns a reference to the underlying data.
+    #[doc(alias = "org.apache.kafka.common.requests.ConsumerGroupHeartbeatRequest#data")]
     pub fn data(&self) -> &ConsumerGroupHeartbeatRequestData {
         &self.data
     }
@@ -94,6 +97,7 @@ impl ConsumerGroupHeartbeatRequest {
 
     /// Builds the canonical error response for this request, matching Java's
     /// `ConsumerGroupHeartbeatRequest.getErrorResponse(throttleTimeMs, Throwable)`.
+    #[doc(alias = "org.apache.kafka.common.requests.ConsumerGroupHeartbeatRequest#getErrorResponse")]
     pub fn get_error_response(&self, throttle_time_ms: i32, error: &Errors) -> ConcreteResponse {
         let mut response = ConsumerGroupHeartbeatResponseData::new();
         response.set_throttle_time_ms(throttle_time_ms).set_error_code(error.code());
@@ -106,6 +110,7 @@ impl ConsumerGroupHeartbeatRequest {
     /// # Errors
     ///
     /// Returns an error if parsing fails.
+    #[doc(alias = "org.apache.kafka.common.requests.ConsumerGroupHeartbeatRequest#parse")]
     pub fn parse(readable: &mut dyn Readable, version: i16) -> io::Result<Self> {
         let data = ConsumerGroupHeartbeatRequestData::read(readable, version)?;
         Ok(Self::new(data, version))
@@ -122,6 +127,7 @@ impl std::fmt::Display for ConsumerGroupHeartbeatRequest {
 ///
 /// Corresponds to `ConsumerGroupHeartbeatRequest.Builder` in Java.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.ConsumerGroupHeartbeatRequest$Builder")]
 pub struct ConsumerGroupHeartbeatRequestBuilder {
     data: ConsumerGroupHeartbeatRequestData,
     oldest_allowed_version: i16,
@@ -131,6 +137,7 @@ pub struct ConsumerGroupHeartbeatRequestBuilder {
 impl ConsumerGroupHeartbeatRequestBuilder {
     /// Creates a builder wrapping the given data with the full supported
     /// version range.
+    #[doc(alias = "org.apache.kafka.common.requests.ConsumerGroupHeartbeatRequest$Builder#Builder")]
     pub fn new(data: ConsumerGroupHeartbeatRequestData) -> Self {
         Self {
             data,

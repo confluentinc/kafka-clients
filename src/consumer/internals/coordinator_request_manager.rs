@@ -74,6 +74,7 @@ pub(crate) struct CoordinatorRequestManagerInner {
 /// methods take `&self` and route through the interior `Mutex` slots.
 ///
 /// Java: `org.apache.kafka.clients.consumer.internals.CoordinatorRequestManager`.
+#[doc(alias = "org.apache.kafka.clients.consumer.internals.CoordinatorRequestManager")]
 pub(crate) struct CoordinatorRequestManager {
     inner: Arc<CoordinatorRequestManagerInner>,
 }
@@ -92,6 +93,7 @@ impl CoordinatorRequestManager {
     /// Panics if `group_id` is empty — Java's constructor takes a
     /// `requireNonNull(groupId)` check; an empty string is treated as a
     /// programmer error here.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.CoordinatorRequestManager#CoordinatorRequestManager")]
     pub(crate) fn new(retry_backoff_ms: i64, retry_backoff_max_ms: i64, group_id: impl Into<String>) -> Self {
         let group_id = group_id.into();
         assert!(!group_id.is_empty(), "group_id must not be empty");
@@ -113,6 +115,7 @@ impl CoordinatorRequestManager {
     ///
     /// Java: `coordinator()`. Clones the node because the interior
     /// `Mutex` cannot lend out a borrow that outlives the guard.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.CoordinatorRequestManager#coordinator")]
     pub(crate) fn coordinator(&self) -> Option<Node> {
         self.inner.coordinator.lock().expect("coordinator poisoned").clone()
     }
@@ -131,6 +134,7 @@ impl CoordinatorRequestManager {
     /// `fatalError()` (which returns the field reference; the Rust
     /// translation clones to avoid handing out a `MutexGuard`-borrowed
     /// reference).
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.CoordinatorRequestManager#fatalError")]
     pub(crate) fn fatal_error(&self) -> Option<Error> {
         self.inner.fatal_error.lock().expect("fatal_error poisoned").clone()
     }
@@ -138,6 +142,7 @@ impl CoordinatorRequestManager {
     /// Returns and clears the most recent fatal error.
     ///
     /// Java: `getAndClearFatalError()`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.CoordinatorRequestManager#getAndClearFatalError")]
     pub(crate) fn get_and_clear_fatal_error(&self) -> Option<Error> {
         self.inner.fatal_error.lock().expect("fatal_error poisoned").take()
     }
@@ -159,6 +164,7 @@ impl CoordinatorRequestManager {
     /// Java: `handleCoordinatorDisconnect(Throwable, long)`. Matches
     /// against `Errors::NetworkError` (the Rust analog of
     /// `DisconnectException`).
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.CoordinatorRequestManager#handleCoordinatorDisconnect")]
     pub(crate) fn handle_coordinator_disconnect(&self, error: &Error, current_time_ms: i64) {
         if matches!(error.error(), Errors::NetworkError) {
             self.mark_coordinator_unknown(error.message(), current_time_ms);
@@ -172,6 +178,7 @@ impl CoordinatorRequestManager {
     /// since the last warning.
     ///
     /// Java: `markCoordinatorUnknown(String, long)`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.CoordinatorRequestManager#markCoordinatorUnknown")]
     pub(crate) fn mark_coordinator_unknown(&self, cause: &str, current_time_ms: i64) {
         Self::mark_coordinator_unknown_inner(&self.inner, cause, current_time_ms);
     }
@@ -241,6 +248,7 @@ impl CoordinatorRequestManager {
     /// response arrives. Dispatches on the per-key error code.
     ///
     /// Java: private `onResponse(long, FindCoordinatorResponse)`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.CoordinatorRequestManager#onResponse")]
     pub(crate) fn on_response(&self, current_time_ms: i64, response: &FindCoordinatorResponse) {
         Self::on_response_inner(&self.inner, current_time_ms, response);
     }
@@ -296,6 +304,7 @@ impl CoordinatorRequestManager {
     /// fatal authorization error, etc.).
     ///
     /// Java: private `onFailedResponse(long, Throwable)`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.CoordinatorRequestManager#onFailedResponse")]
     pub(crate) fn on_failed_response(&self, current_time_ms: i64, error: Error) {
         Self::on_failed_response_inner(&self.inner, current_time_ms, error);
     }
@@ -335,6 +344,7 @@ impl CoordinatorRequestManager {
     /// `unsent.whenComplete((clientResponse, throwable) -> { ... })`
     /// callback (Java: `makeFindCoordinatorRequest(long)`, lines
     /// 113-132).
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.CoordinatorRequestManager#makeFindCoordinatorRequest")]
     fn make_find_coordinator_request(
         inner: &Arc<CoordinatorRequestManagerInner>,
         current_time_ms: i64,
@@ -565,6 +575,7 @@ mod tests {
     /// running runtime even when the test does not depend on the
     /// forwarder's effect.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.CoordinatorRequestManagerTest#testSuccessfulResponse")]
     async fn test_successful_response() {
         let mut manager = setup_manager();
         expect_find_coordinator_request(&mut manager, Errors::None, 0);
@@ -612,6 +623,9 @@ mod tests {
     /// `60000`, and at two minutes it reports `120000` — exactly what Java's
     /// `firstLogMs`/`secondLogMs` assertions check.
     #[test]
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.CoordinatorRequestManagerTest#testMarkCoordinatorUnknownLoggingAccuracy"
+    )]
     fn test_mark_coordinator_unknown_logging_accuracy() {
         let one_minute = CoordinatorRequestManager::COORDINATOR_DISCONNECT_LOGGING_INTERVAL_MS;
         let manager = setup_manager();
@@ -714,6 +728,9 @@ mod tests {
 
     /// Translated from `CoordinatorRequestManagerTest.testMarkCoordinatorUnknown`.
     #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.CoordinatorRequestManagerTest#testMarkCoordinatorUnknown"
+    )]
     async fn test_mark_coordinator_unknown() {
         let mut manager = setup_manager();
         expect_find_coordinator_request(&mut manager, Errors::None, 0);
@@ -731,6 +748,9 @@ mod tests {
 
     /// Translated from `CoordinatorRequestManagerTest.testBackoffAfterRetriableFailure`.
     #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.CoordinatorRequestManagerTest#testBackoffAfterRetriableFailure"
+    )]
     async fn test_backoff_after_retriable_failure() {
         let mut manager = setup_manager();
         expect_find_coordinator_request(&mut manager, Errors::CoordinatorLoadInProgress, 0);
@@ -756,6 +776,9 @@ mod tests {
 
     /// Translated from `CoordinatorRequestManagerTest.testBackoffAfterFatalError`.
     #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.CoordinatorRequestManagerTest#testBackoffAfterFatalError"
+    )]
     async fn test_backoff_after_fatal_error() {
         let mut manager = setup_manager();
         expect_find_coordinator_request(&mut manager, Errors::GroupAuthorizationFailed, 0);
@@ -787,6 +810,9 @@ mod tests {
     /// the manager — but the Java test lives in this file, so we
     /// mirror it here.
     #[test]
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.CoordinatorRequestManagerTest#testFindCoordinatorResponseVersions"
+    )]
     fn test_find_coordinator_response_versions() {
         // v4+
         let resp_new = FindCoordinatorResponse::prepare_response(Errors::None, GROUP_ID, &node());
@@ -804,6 +830,7 @@ mod tests {
     /// Drives a `TimeoutException` through the request's handler and
     /// asserts the backoff path.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.CoordinatorRequestManagerTest#testNetworkTimeout")]
     async fn test_network_timeout() {
         let mut manager = setup_manager();
         let result = manager.poll(0);

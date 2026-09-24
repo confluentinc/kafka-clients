@@ -26,18 +26,21 @@ use super::Config;
 /// The result of the `Admin::describe_configs` call.
 ///
 /// Corresponds to `org.apache.kafka.clients.admin.DescribeConfigsResult`.
+#[doc(alias = "org.apache.kafka.clients.admin.DescribeConfigsResult")]
 pub struct DescribeConfigsResult {
     futures: HashMap<ConfigResource, KafkaFuture<Config>>,
 }
 
 impl DescribeConfigsResult {
     /// Creates a new result from the per-resource futures.
+    #[doc(alias = "org.apache.kafka.clients.admin.DescribeConfigsResult#DescribeConfigsResult")]
     pub(crate) fn new(futures: HashMap<ConfigResource, KafkaFuture<Config>>) -> Self {
         Self { futures }
     }
 
     /// Returns a map from resources to futures which can be used to check the
     /// status of the configuration for each resource.
+    #[doc(alias = "org.apache.kafka.clients.admin.DescribeConfigsResult#values")]
     pub fn values(&self) -> &HashMap<ConfigResource, KafkaFuture<Config>> {
         &self.futures
     }
@@ -46,6 +49,7 @@ impl DescribeConfigsResult {
     /// succeed, yielding a map from each resource to its config.
     ///
     /// Corresponds to `DescribeConfigsResult.all`.
+    #[doc(alias = "org.apache.kafka.clients.admin.DescribeConfigsResult#all")]
     pub fn all(&self) -> KafkaFuture<HashMap<ConfigResource, Config>> {
         let entries: Vec<(ConfigResource, KafkaFuture<Config>)> =
             self.futures.iter().map(|(k, v)| (k.clone(), v.clone())).collect();

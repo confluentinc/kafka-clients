@@ -24,6 +24,7 @@ kafka_error_class! {
     ///
     /// Java `extends` chain:
     ///    `PrincipalDeserializationException` -> `ApiException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.PrincipalDeserializationException")]
     PrincipalDeserializationError,
     code: Errors::PrincipalDeserializationFailure,
     extends: [

@@ -57,6 +57,7 @@ use super::{FetchPosition, SubscriptionState};
 ///   `Error` is not a pointer-sized value, so there is no atomic swap to
 ///   mirror. The critical sections are a single `take()` / `is_none()`
 ///   test and never `.await` (CLAUDE.md §9.6).
+#[doc(alias = "org.apache.kafka.clients.consumer.internals.PositionsValidator")]
 pub(crate) struct PositionsValidator {
     metadata: Arc<ConsumerMetadata>,
     subscriptions: Arc<Mutex<SubscriptionState>>,
@@ -72,6 +73,7 @@ pub(crate) struct PositionsValidator {
 impl PositionsValidator {
     /// Java: `PositionsValidator(LogContext, Time, SubscriptionState, ConsumerMetadata)`
     /// (`PositionsValidator.java:63`).
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.PositionsValidator#PositionsValidator")]
     pub(crate) fn new(subscriptions: Arc<Mutex<SubscriptionState>>, metadata: Arc<ConsumerMetadata>) -> Self {
         Self {
             metadata,
@@ -89,6 +91,7 @@ impl PositionsValidator {
     /// # Errors
     ///
     /// Propagates any error cached by [`Self::maybe_set_error`].
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.PositionsValidator#refreshAndGetPartitionsToValidate")]
     pub(crate) fn refresh_and_get_partitions_to_validate(
         &self,
         api_versions: &ApiVersions,
@@ -110,6 +113,7 @@ impl PositionsValidator {
     /// then we should check that all the assignments have a valid position.
     ///
     /// Mirrors `PositionsValidator.validatePositionsOnMetadataChange`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.PositionsValidator#validatePositionsOnMetadataChange")]
     pub(crate) fn validate_positions_on_metadata_change(&self, api_versions: &ApiVersions) {
         let metadata_arc = self.metadata.metadata_arc();
         let new_metadata_update_version = metadata_arc.update_version();
@@ -137,6 +141,7 @@ impl PositionsValidator {
     /// Mirrors `PositionsValidator.maybeSetError`. Stores `error` for
     /// propagation on the next [`Self::maybe_return_error`]; a second error
     /// arriving while one is pending is discarded, as in Java.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.PositionsValidator#maybeSetError")]
     pub(crate) fn maybe_set_error(&self, error: Error) {
         let mut guard = self.cached_validate_positions_error.lock().expect("validate cache poisoned");
         if guard.is_none() {
@@ -153,6 +158,7 @@ impl PositionsValidator {
     /// # Errors
     ///
     /// Returns the cached validate-positions error, clearing it.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.PositionsValidator#maybeThrowError")]
     pub(crate) fn maybe_return_error(&self) -> Result<(), Error> {
         let cached = self
             .cached_validate_positions_error
@@ -189,6 +195,7 @@ impl PositionsValidator {
     /// # Errors
     ///
     /// Returns the cached validate-positions error, clearing it.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.PositionsValidator#canSkipUpdateFetchPositions")]
     pub(crate) fn can_skip_update_fetch_positions(&self) -> Result<bool, Error> {
         self.maybe_return_error()?;
 

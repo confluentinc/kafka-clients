@@ -26,6 +26,7 @@ kafka_error_class! {
     /// Java `extends` chain:
     ///    `UnsupportedCompressionTypeException` -> `ApiException` ->
     ///   `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.UnsupportedCompressionTypeException")]
     UnsupportedCompressionTypeError,
     code: Errors::UnsupportedCompressionType,
     extends: [

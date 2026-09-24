@@ -50,6 +50,7 @@ fn round_trip(message: &mut NullableStructMessageData, version: i16) -> Nullable
 
 /// Translated from: testDefaultValues
 #[test]
+#[doc(alias = "org.apache.kafka.common.message.NullableStructMessageTest#testDefaultValues")]
 fn test_default_values() {
     let mut message = NullableStructMessageData::new();
     assert!(message.nullable_struct.is_none());
@@ -70,6 +71,7 @@ fn test_default_values() {
 
 /// Translated from: testRoundTrip
 #[test]
+#[doc(alias = "org.apache.kafka.common.message.NullableStructMessageTest#testRoundTrip")]
 fn test_round_trip() {
     let mut message = NullableStructMessageData::new();
     message.set_nullable_struct(Some(MyStruct::new().set_my_int(1).set_my_string("1".to_string()).clone()));
@@ -83,6 +85,7 @@ fn test_round_trip() {
 
 /// Translated from: testNullForAllFields
 #[test]
+#[doc(alias = "org.apache.kafka.common.message.NullableStructMessageTest#testNullForAllFields")]
 fn test_null_for_all_fields() {
     let mut message = NullableStructMessageData::new();
     message.set_nullable_struct(None);
@@ -110,6 +113,7 @@ fn test_null_for_all_fields() {
 /// 1. Produces an error during write/read (matching Java's NPE), or
 /// 2. Produces incorrect deserialization (demonstrating the issue)
 #[test]
+#[doc(alias = "org.apache.kafka.common.message.NullableStructMessageTest#testNullableStruct2CanNotBeNullInVersion0")]
 fn test_nullable_struct2_can_not_be_null_in_version0() {
     let mut message = NullableStructMessageData::new();
     message.set_nullable_struct2(None);
@@ -144,6 +148,7 @@ fn test_nullable_struct2_can_not_be_null_in_version0() {
 
 /// Translated from: testToStringWithNullStructs
 #[test]
+#[doc(alias = "org.apache.kafka.common.message.NullableStructMessageTest#testToStringWithNullStructs")]
 fn test_to_string_with_null_structs() {
     let mut message = NullableStructMessageData::new();
     message.set_nullable_struct(None);
@@ -161,6 +166,7 @@ fn test_to_string_with_null_structs() {
 /// Regression test for KAFKA-18199. Tests that the size of the varint encoding a tagged
 /// nullable struct's size is calculated correctly.
 #[test]
+#[doc(alias = "org.apache.kafka.common.message.NullableStructMessageTest#testTaggedStructSize")]
 fn test_tagged_struct_size() {
     let mut message = NullableStructMessageData::new();
     message.set_nullable_struct(None);

@@ -24,6 +24,7 @@ kafka_error_class! {
     ///
     /// Java `extends` chain:
     ///    `InconsistentClusterIdException` -> `ApiException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.InconsistentClusterIdException")]
     InconsistentClusterIdError,
     code: Errors::InconsistentClusterId,
     extends: [

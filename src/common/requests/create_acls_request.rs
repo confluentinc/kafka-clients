@@ -33,6 +33,7 @@ use super::{ConcreteRequest, ConcreteResponse, CreateAclsResponse, RequestBuilde
 ///
 /// Corresponds to `org.apache.kafka.common.requests.CreateAclsRequest`.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.CreateAclsRequest")]
 pub struct CreateAclsRequest {
     data: CreateAclsRequestData,
     version: i16,
@@ -40,11 +41,13 @@ pub struct CreateAclsRequest {
 
 impl CreateAclsRequest {
     /// Creates a new `CreateAclsRequest` from data and version.
+    #[doc(alias = "org.apache.kafka.common.requests.CreateAclsRequest#CreateAclsRequest")]
     pub fn new(data: CreateAclsRequestData, version: i16) -> Self {
         Self { data, version }
     }
 
     /// Returns a reference to the underlying data.
+    #[doc(alias = "org.apache.kafka.common.requests.CreateAclsRequest#data")]
     pub fn data(&self) -> &CreateAclsRequestData {
         &self.data
     }
@@ -65,6 +68,7 @@ impl CreateAclsRequest {
     }
 
     /// Returns the ACL creations in this request.
+    #[doc(alias = "org.apache.kafka.common.requests.CreateAclsRequest#aclCreations")]
     pub fn acl_creations(&self) -> &[AclCreation] {
         &self.data.creations
     }
@@ -73,6 +77,7 @@ impl CreateAclsRequest {
     /// the given error.
     ///
     /// Mirrors `CreateAclsRequest.getErrorResponse`.
+    #[doc(alias = "org.apache.kafka.common.requests.CreateAclsRequest#getErrorResponse")]
     pub fn get_error_response(&self, throttle_time_ms: i32, error: &Errors) -> ConcreteResponse {
         let mut result = AclCreationResult::new();
         result.set_error_code(error.code());
@@ -89,6 +94,7 @@ impl CreateAclsRequest {
     /// # Errors
     ///
     /// Returns an error if parsing fails.
+    #[doc(alias = "org.apache.kafka.common.requests.CreateAclsRequest#parse")]
     pub fn parse(readable: &mut dyn Readable, version: i16) -> io::Result<Self> {
         let data = CreateAclsRequestData::read(readable, version)?;
         Ok(Self::new(data, version))
@@ -102,6 +108,7 @@ impl CreateAclsRequest {
     ///
     /// Returns an error if the creation carries invalid pattern/permission
     /// components (mirrors Java's constructor exceptions).
+    #[doc(alias = "org.apache.kafka.common.requests.CreateAclsRequest#aclBinding")]
     pub fn acl_binding(acl: &AclCreation) -> Result<AclBinding, Error> {
         let pattern = ResourcePattern::new(
             ResourceType::from_code(acl.resource_type),
@@ -120,6 +127,7 @@ impl CreateAclsRequest {
     /// Builds a wire [`AclCreation`] from an [`AclBinding`].
     ///
     /// Mirrors `CreateAclsRequest.aclCreation`.
+    #[doc(alias = "org.apache.kafka.common.requests.CreateAclsRequest#aclCreation")]
     pub fn acl_creation(binding: &AclBinding) -> AclCreation {
         let mut creation = AclCreation::new();
         creation
@@ -144,6 +152,7 @@ impl std::fmt::Display for CreateAclsRequest {
 ///
 /// Corresponds to `CreateAclsRequest.Builder` in Java.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.CreateAclsRequest$Builder")]
 pub struct CreateAclsRequestBuilder {
     data: CreateAclsRequestData,
     oldest_allowed_version: i16,
@@ -152,6 +161,7 @@ pub struct CreateAclsRequestBuilder {
 
 impl CreateAclsRequestBuilder {
     /// Creates a builder from existing data.
+    #[doc(alias = "org.apache.kafka.common.requests.CreateAclsRequest$Builder#Builder")]
     pub fn new(data: CreateAclsRequestData) -> Self {
         Self {
             data,

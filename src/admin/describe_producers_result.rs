@@ -25,17 +25,22 @@ use crate::common::{Error, KafkaFuture, TopicPartition};
 ///
 /// Corresponds to `DescribeProducersResult.PartitionProducerState`.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[doc(alias = "org.apache.kafka.clients.admin.DescribeProducersResult$PartitionProducerState")]
 pub struct PartitionProducerState {
     active_producers: Vec<ProducerState>,
 }
 
 impl PartitionProducerState {
     /// Creates a new `PartitionProducerState` from the active producers.
+    #[doc(
+        alias = "org.apache.kafka.clients.admin.DescribeProducersResult$PartitionProducerState#PartitionProducerState"
+    )]
     pub fn new(active_producers: Vec<ProducerState>) -> Self {
         Self { active_producers }
     }
 
     /// The active producers for this partition.
+    #[doc(alias = "org.apache.kafka.clients.admin.DescribeProducersResult$PartitionProducerState#activeProducers")]
     pub fn active_producers(&self) -> &[ProducerState] {
         &self.active_producers
     }
@@ -51,12 +56,14 @@ impl std::fmt::Display for PartitionProducerState {
 ///
 /// Corresponds to `org.apache.kafka.clients.admin.DescribeProducersResult`.
 #[derive(Clone, Debug)]
+#[doc(alias = "org.apache.kafka.clients.admin.DescribeProducersResult")]
 pub struct DescribeProducersResult {
     futures: HashMap<TopicPartition, KafkaFuture<PartitionProducerState>>,
 }
 
 impl DescribeProducersResult {
     /// Creates a result from the per-partition futures.
+    #[doc(alias = "org.apache.kafka.clients.admin.DescribeProducersResult#DescribeProducersResult")]
     pub(crate) fn new(futures: HashMap<TopicPartition, KafkaFuture<PartitionProducerState>>) -> Self {
         Self { futures }
     }
@@ -70,6 +77,7 @@ impl DescribeProducersResult {
     /// # Errors
     ///
     /// Returns [`Error::local_illegal_argument`] if `partition` was not requested.
+    #[doc(alias = "org.apache.kafka.clients.admin.DescribeProducersResult#partitionResult")]
     pub fn partition_result(&self, partition: &TopicPartition) -> Result<KafkaFuture<PartitionProducerState>, Error> {
         self.futures.get(partition).cloned().ok_or_else(|| {
             Error::local_illegal_argument(format!("Topic partition {partition} was not included in the request"))
@@ -80,6 +88,7 @@ impl DescribeProducersResult {
     /// state. Fails if any partition's request fails.
     ///
     /// Mirrors `DescribeProducersResult.all`.
+    #[doc(alias = "org.apache.kafka.clients.admin.DescribeProducersResult#all")]
     pub fn all(&self) -> KafkaFuture<HashMap<TopicPartition, PartitionProducerState>> {
         KafkaFuture::join_map(self.futures.iter().map(|(tp, f)| (tp.clone(), f.clone())).collect())
     }

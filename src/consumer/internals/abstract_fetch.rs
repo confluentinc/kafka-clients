@@ -88,6 +88,7 @@ use crate::fetch_session_handler::{FetchSessionHandler, FetchSessionRequestData}
 /// [`crate::consumer::internals::RequestManager`]
 /// implementation in Phase 7b can read / write them. This matches Java's
 /// `protected` semantics on the abstract base.
+#[doc(alias = "org.apache.kafka.clients.consumer.internals.AbstractFetch")]
 pub(crate) struct AbstractFetch {
     /// Cluster metadata.
     pub(crate) metadata: Arc<ConsumerMetadata>,
@@ -160,6 +161,7 @@ impl AbstractFetch {
     /// single supplier and passes it both here and into ad-hoc
     /// decompression). Callers that don't need sharing can pass
     /// `Arc::new(BufferSupplier::create())`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.AbstractFetch#AbstractFetch")]
     pub(crate) fn new(
         metadata: Arc<ConsumerMetadata>,
         subscriptions: Arc<Mutex<SubscriptionState>>,
@@ -188,6 +190,7 @@ impl AbstractFetch {
     /// return to the user.
     ///
     /// Translates `boolean hasCompletedFetches()`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.AbstractFetch#hasCompletedFetches")]
     pub(crate) fn has_completed_fetches(&self) -> bool {
         !self.fetch_buffer.is_empty()
     }
@@ -197,6 +200,7 @@ impl AbstractFetch {
     /// perspective.
     ///
     /// Translates `boolean hasAvailableFetches()`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.AbstractFetch#hasAvailableFetches")]
     pub(crate) fn has_available_fetches(&self) -> bool {
         let subs = self.subscriptions.clone();
         self.fetch_buffer.has_completed_fetches(|cf| {
@@ -210,6 +214,7 @@ impl AbstractFetch {
     ///
     /// Visible for testing; mirrors Java's `protected FetchSessionHandler
     /// sessionHandler(int node)`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.AbstractFetch#sessionHandler")]
     pub(crate) fn session_handler(&self, node: i32) -> Option<&FetchSessionHandler> {
         self.session_handlers.get(&node)
     }
@@ -238,6 +243,7 @@ impl AbstractFetch {
     /// failure) is observed.
     ///
     /// Mirrors Java's `removePendingFetchRequest`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.AbstractFetch#removePendingFetchRequest")]
     pub(crate) fn remove_pending_fetch_request(&mut self, fetch_target: &Node, session_id: i32) {
         debug!(
             "Removing pending request for fetch session: {} for node: {}",
@@ -258,6 +264,7 @@ impl AbstractFetch {
     /// Skipping the resolution into a parameter keeps the cluster
     /// lookup out of this struct's responsibilities (Phase 7b will do
     /// the lookup before calling).
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.AbstractFetch#prepareCloseFetchSessionRequests")]
     pub(crate) fn prepare_close_fetch_session_requests(
         &mut self,
         nodes: &HashMap<i32, Node>,
@@ -291,6 +298,7 @@ impl AbstractFetch {
     ///
     /// Translates `protected FetchRequest.Builder createFetchRequest(Node,
     /// FetchSessionHandler.FetchRequestData)`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.AbstractFetch#createFetchRequest")]
     pub(crate) fn create_fetch_request(
         &mut self,
         fetch_target: &Node,
@@ -335,6 +343,7 @@ impl AbstractFetch {
     /// `CompletedFetch`es into the fetch buffer.
     ///
     /// Translates `protected void handleFetchSuccess(Node, FetchRequestData, ClientResponse)`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.AbstractFetch#handleFetchSuccess")]
     pub(crate) fn handle_fetch_success(
         &mut self,
         fetch_target: &Node,
@@ -579,6 +588,7 @@ impl AbstractFetch {
     /// Translates `protected void handleCloseFetchSessionSuccess(Node,
     /// FetchSessionHandler.FetchRequestData, ClientResponse)`. Drops the
     /// node from the pending-fetch set and logs at debug.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.AbstractFetch#handleCloseFetchSessionSuccess")]
     pub(crate) fn handle_close_fetch_session_success(
         &mut self,
         fetch_target: &Node,
@@ -599,6 +609,7 @@ impl AbstractFetch {
     /// FetchSessionHandler.FetchRequestData, Throwable)`. Drops the node
     /// from the pending-fetch set and logs at debug (Java logs the
     /// throwable; we log the `Error` message).
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.AbstractFetch#handleCloseFetchSessionFailure")]
     pub(crate) fn handle_close_fetch_session_failure(
         &mut self,
         fetch_target: &Node,
@@ -619,6 +630,7 @@ impl AbstractFetch {
     /// Handles a fetch-request failure.
     ///
     /// Translates `protected void handleFetchFailure(Node, FetchRequestData, Throwable)`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.AbstractFetch#handleFetchFailure")]
     pub(crate) fn handle_fetch_failure(
         &mut self,
         fetch_target: &Node,
@@ -642,6 +654,7 @@ impl AbstractFetch {
     /// Closes the fetch buffer and decompression supplier. Idempotent.
     ///
     /// Translates `void close(Timer)` (Java's `IdempotentCloser`).
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.AbstractFetch#close")]
     pub(crate) fn close(&mut self) {
         if self.closed {
             return;
@@ -689,6 +702,7 @@ impl AbstractFetch {
     /// `NetworkClientDelegate` (which it does not own — Phase 7b's
     /// `FetchRequestManager` owns the delegate and supplies the
     /// closures).
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.AbstractFetch#prepareFetchRequests")]
     pub(crate) fn prepare_fetch_requests(
         &mut self,
         current_time_ms: i64,

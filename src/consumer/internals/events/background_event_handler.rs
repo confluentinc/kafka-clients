@@ -53,6 +53,7 @@ use super::{BackgroundEvent, BackgroundEventEnvelope};
 ///
 /// **Sender-only by design** — see the module-level docs for why
 /// `drain_events` is not provided.
+#[doc(alias = "org.apache.kafka.clients.consumer.internals.events.BackgroundEventHandler")]
 pub(crate) struct BackgroundEventHandler {
     sender: mpsc::UnboundedSender<BackgroundEventEnvelope>,
     /// Async-consumer metrics (`AsyncConsumerMetrics`). `None` until wired
@@ -70,6 +71,7 @@ impl BackgroundEventHandler {
     /// Constructor. Takes the **sender** half of the unbounded channel —
     /// the app side owns the receiver and drains it via
     /// `process_background_events` in Phase 10.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.events.BackgroundEventHandler#BackgroundEventHandler")]
     pub(crate) fn new(sender: mpsc::UnboundedSender<BackgroundEventEnvelope>) -> Self {
         Self { sender, async_consumer_metrics: None, queue_size: None }
     }
@@ -91,6 +93,7 @@ impl BackgroundEventHandler {
     /// Returns `Err(Error::local_illegal_state(...))` if the receiver has
     /// already been dropped — equivalent to Java's `IllegalStateException`
     /// thrown by a closed queue.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.events.BackgroundEventHandler#add")]
     pub(crate) fn add(&self, event: BackgroundEvent, now_ms: i64) -> Result<(), Error> {
         let envelope = BackgroundEventEnvelope { event, enqueued_ms: now_ms };
         // Java records `backgroundEventQueue.size() + 1` before adding.

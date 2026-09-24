@@ -47,6 +47,7 @@ use super::RequestUtils;
 ///
 /// Corresponds to `org.apache.kafka.common.requests.MetadataResponse`.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.MetadataResponse")]
 pub struct MetadataResponse {
     data: MetadataResponseData,
     has_reliable_leader_epochs: bool,
@@ -64,11 +65,13 @@ impl MetadataResponse {
     pub const AUTHORIZED_OPERATIONS_OMITTED: i32 = i32::MIN;
 
     /// Creates a new `MetadataResponse` from data and version.
+    #[doc(alias = "org.apache.kafka.common.requests.MetadataResponse#MetadataResponse")]
     pub fn with_version(data: MetadataResponseData, version: i16) -> Self {
         Self::with_has_reliable_leader_epochs(data, has_reliable_leader_epochs(version))
     }
 
     /// Creates a new `MetadataResponse` from data with explicit epoch reliability flag.
+    #[doc(alias = "org.apache.kafka.common.requests.MetadataResponse#MetadataResponse")]
     pub fn with_has_reliable_leader_epochs(data: MetadataResponseData, has_reliable_leader_epochs: bool) -> Self {
         Self { data, has_reliable_leader_epochs, holder: OnceLock::new() }
     }
@@ -79,6 +82,7 @@ impl MetadataResponse {
     }
 
     /// Returns a reference to the underlying data.
+    #[doc(alias = "org.apache.kafka.common.requests.MetadataResponse#data")]
     pub fn data(&self) -> &MetadataResponseData {
         &self.data
     }
@@ -91,11 +95,13 @@ impl MetadataResponse {
     }
 
     /// Returns the throttle time in milliseconds.
+    #[doc(alias = "org.apache.kafka.common.requests.MetadataResponse#throttleTimeMs")]
     pub fn throttle_time_ms(&self) -> i32 {
         self.data.throttle_time_ms
     }
 
     /// Sets the throttle time in the response.
+    #[doc(alias = "org.apache.kafka.common.requests.MetadataResponse#maybeSetThrottleTimeMs")]
     pub fn maybe_set_throttle_time_ms(&mut self, throttle_time_ms: i32) {
         self.data.set_throttle_time_ms(throttle_time_ms);
     }
@@ -105,6 +111,7 @@ impl MetadataResponse {
     /// # Panics
     ///
     /// Panics if any topic has a `None` name (use `errors_by_topic_id()` instead).
+    #[doc(alias = "org.apache.kafka.common.requests.MetadataResponse#errors")]
     pub fn errors(&self) -> HashMap<String, Errors> {
         let mut errors = HashMap::new();
         for metadata in &self.data.topics {
@@ -120,6 +127,7 @@ impl MetadataResponse {
     }
 
     /// Returns the top-level error.
+    #[doc(alias = "org.apache.kafka.common.requests.MetadataResponse#topLevelError")]
     pub fn top_level_error(&self) -> Errors {
         Errors::for_code(self.data.error_code)
     }
@@ -129,6 +137,7 @@ impl MetadataResponse {
     /// # Panics
     ///
     /// Panics if any topic has a zero UUID (use `errors()` instead).
+    #[doc(alias = "org.apache.kafka.common.requests.MetadataResponse#errorsByTopicId")]
     pub fn errors_by_topic_id(&self) -> HashMap<Uuid, Errors> {
         let mut errors = HashMap::new();
         for metadata in &self.data.topics {
@@ -144,6 +153,7 @@ impl MetadataResponse {
     }
 
     /// Returns error counts aggregating both topic-level and partition-level errors.
+    #[doc(alias = "org.apache.kafka.common.requests.MetadataResponse#errorCounts")]
     pub fn error_counts(&self) -> HashMap<Errors, i32> {
         let mut error_counts = HashMap::new();
         for metadata in &self.data.topics {
@@ -156,6 +166,7 @@ impl MetadataResponse {
     }
 
     /// Returns the set of topics with the specified error.
+    #[doc(alias = "org.apache.kafka.common.requests.MetadataResponse#topicsByError")]
     pub fn topics_by_error(&self, error: Errors) -> HashSet<String> {
         let mut error_topics = HashSet::new();
         for metadata in &self.data.topics {
@@ -169,6 +180,7 @@ impl MetadataResponse {
     }
 
     /// Builds a snapshot of the cluster metadata from this response.
+    #[doc(alias = "org.apache.kafka.common.requests.MetadataResponse#buildCluster")]
     pub fn build_cluster(&self) -> Cluster {
         let mut internal_topics = HashSet::new();
         let mut partitions = Vec::new();
@@ -200,6 +212,7 @@ impl MetadataResponse {
     }
 
     /// Converts a `PartitionMetadata` to a `PartitionInfo`.
+    #[doc(alias = "org.apache.kafka.common.requests.MetadataResponse#toPartitionInfo")]
     pub fn to_partition_info(metadata: &PartitionMetadata, nodes_by_id: &HashMap<i32, Node>) -> PartitionInfo {
         let leader = metadata.leader_id.and_then(|id| nodes_by_id.get(&id)).cloned();
 
@@ -218,6 +231,7 @@ impl MetadataResponse {
     }
 
     /// Returns a 32-bit bitfield representing authorized operations for a topic.
+    #[doc(alias = "org.apache.kafka.common.requests.MetadataResponse#topicAuthorizedOperations")]
     pub fn topic_authorized_operations(&self, topic_name: &str) -> Option<i32> {
         self.data
             .topics
@@ -227,41 +241,49 @@ impl MetadataResponse {
     }
 
     /// Returns a 32-bit bitfield representing authorized operations for this cluster.
+    #[doc(alias = "org.apache.kafka.common.requests.MetadataResponse#clusterAuthorizedOperations")]
     pub fn cluster_authorized_operations(&self) -> i32 {
         self.data.cluster_authorized_operations
     }
 
+    #[doc(alias = "org.apache.kafka.common.requests.MetadataResponse#holder")]
     fn holder(&self) -> &Holder {
         self.holder.get_or_init(|| Holder::new(&self.data))
     }
 
     /// Returns all brokers returned in the metadata response.
+    #[doc(alias = "org.apache.kafka.common.requests.MetadataResponse#brokers")]
     pub fn brokers(&self) -> &[Node] {
         &self.holder().broker_list
     }
 
     /// Returns brokers indexed by id.
+    #[doc(alias = "org.apache.kafka.common.requests.MetadataResponse#brokersById")]
     pub fn brokers_by_id(&self) -> &HashMap<i32, Node> {
         &self.holder().brokers
     }
 
     /// Returns all topic metadata returned in the metadata response.
+    #[doc(alias = "org.apache.kafka.common.requests.MetadataResponse#topicMetadata")]
     pub fn topic_metadata(&self) -> &[TopicMetadata] {
         &self.holder().topic_metadata
     }
 
     /// The controller node returned in metadata response, or `None` if not known.
+    #[doc(alias = "org.apache.kafka.common.requests.MetadataResponse#controller")]
     pub fn controller(&self) -> Option<&Node> {
         self.holder().controller.as_ref()
     }
 
     /// The cluster identifier returned in the metadata response.
+    #[doc(alias = "org.apache.kafka.common.requests.MetadataResponse#clusterId")]
     pub fn cluster_id(&self) -> Option<&str> {
         self.data.cluster_id.as_deref()
     }
 
     /// Check whether the leader epochs returned from the response can be relied on
     /// for epoch validation in Fetch, ListOffsets, and OffsetsForLeaderEpoch requests.
+    #[doc(alias = "org.apache.kafka.common.requests.MetadataResponse#hasReliableLeaderEpochs")]
     pub fn has_reliable_leader_epochs(&self) -> bool {
         self.has_reliable_leader_epochs
     }
@@ -271,12 +293,14 @@ impl MetadataResponse {
     /// # Errors
     ///
     /// Returns an error if parsing fails.
+    #[doc(alias = "org.apache.kafka.common.requests.MetadataResponse#parse")]
     pub fn parse(readable: &mut dyn Readable, version: i16) -> std::io::Result<Self> {
         let data = MetadataResponseData::read(readable, version)?;
         Ok(Self::with_has_reliable_leader_epochs(data, has_reliable_leader_epochs(version)))
     }
 
     /// Returns whether the client should throttle upon receiving this response.
+    #[doc(alias = "org.apache.kafka.common.requests.MetadataResponse#shouldClientThrottle")]
     pub fn should_client_throttle(&self, version: i16) -> bool {
         version >= 6
     }
@@ -349,6 +373,7 @@ impl std::fmt::Display for MetadataResponse {
 /// does not propagate leader epoch information accurately while a reassignment is in
 /// progress. Relying on a stale epoch can lead to FENCED_LEADER_EPOCH errors which
 /// can prevent consumption throughout the course of a reassignment.
+#[doc(alias = "org.apache.kafka.common.requests.MetadataResponse#hasReliableLeaderEpochs")]
 fn has_reliable_leader_epochs(version: i16) -> bool {
     version >= 9
 }
@@ -367,6 +392,7 @@ fn convert_to_node_vec(replica_ids: &[i32], nodes_by_id: &HashMap<i32, Node>) ->
 
 /// Lazy holder for computed broker/topic metadata.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.MetadataResponse$Holder")]
 struct Holder {
     brokers: HashMap<i32, Node>,
     broker_list: Vec<Node>,
@@ -375,6 +401,7 @@ struct Holder {
 }
 
 impl Holder {
+    #[doc(alias = "org.apache.kafka.common.requests.MetadataResponse$Holder#Holder")]
     fn new(data: &MetadataResponseData) -> Self {
         let brokers = Self::create_brokers(data);
         let broker_list: Vec<Node> = brokers.values().cloned().collect();
@@ -383,6 +410,7 @@ impl Holder {
         Self { brokers, broker_list, controller, topic_metadata }
     }
 
+    #[doc(alias = "org.apache.kafka.common.requests.MetadataResponse$Holder#createBrokers")]
     fn create_brokers(data: &MetadataResponseData) -> HashMap<i32, Node> {
         let mut map = HashMap::new();
         for b in &data.brokers {
@@ -392,6 +420,7 @@ impl Holder {
         map
     }
 
+    #[doc(alias = "org.apache.kafka.common.requests.MetadataResponse$Holder#createTopicMetadata")]
     fn create_topic_metadata(data: &MetadataResponseData) -> Vec<TopicMetadata> {
         let mut topic_metadata_list = Vec::new();
         for topic_meta in &data.topics {
@@ -439,6 +468,7 @@ impl Holder {
 /// Corresponds to `MetadataResponse.TopicMetadata` in Java.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
+#[doc(alias = "org.apache.kafka.common.requests.MetadataResponse$TopicMetadata")]
 pub struct TopicMetadata {
     /// The topic-level error.
     pub(crate) error: Errors,
@@ -456,6 +486,7 @@ pub struct TopicMetadata {
 
 impl TopicMetadata {
     /// Creates a new `TopicMetadata` with default authorized operations.
+    #[doc(alias = "org.apache.kafka.common.requests.MetadataResponse$TopicMetadata#TopicMetadata")]
     pub fn new(error: Errors, topic: String, is_internal: bool, partition_metadata: Vec<PartitionMetadata>) -> Self {
         Self {
             error,
@@ -468,31 +499,37 @@ impl TopicMetadata {
     }
 
     /// Returns the topic-level error.
+    #[doc(alias = "org.apache.kafka.common.requests.MetadataResponse$TopicMetadata#error")]
     pub fn error(&self) -> Errors {
         self.error
     }
 
     /// Returns the topic name.
+    #[doc(alias = "org.apache.kafka.common.requests.MetadataResponse$TopicMetadata#topic")]
     pub fn topic(&self) -> &str {
         &self.topic
     }
 
     /// Returns the topic ID.
+    #[doc(alias = "org.apache.kafka.common.requests.MetadataResponse$TopicMetadata#topicId")]
     pub fn topic_id(&self) -> Uuid {
         self.topic_id
     }
 
     /// Returns whether this is an internal topic.
+    #[doc(alias = "org.apache.kafka.common.requests.MetadataResponse$TopicMetadata#isInternal")]
     pub fn is_internal(&self) -> bool {
         self.is_internal
     }
 
     /// Returns the partition metadata.
+    #[doc(alias = "org.apache.kafka.common.requests.MetadataResponse$TopicMetadata#partitionMetadata")]
     pub fn partition_metadata(&self) -> &[PartitionMetadata] {
         &self.partition_metadata
     }
 
     /// Returns the authorized operations bitfield.
+    #[doc(alias = "org.apache.kafka.common.requests.MetadataResponse$TopicMetadata#authorizedOperations")]
     pub fn authorized_operations(&self) -> i32 {
         self.authorized_operations
     }
@@ -533,6 +570,7 @@ impl std::hash::Hash for TopicMetadata {
 /// Corresponds to `MetadataResponse.PartitionMetadata` in Java.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[non_exhaustive]
+#[doc(alias = "org.apache.kafka.common.requests.MetadataResponse$PartitionMetadata")]
 pub struct PartitionMetadata {
     /// The partition-level error.
     pub(crate) error: Errors,
@@ -552,16 +590,19 @@ pub struct PartitionMetadata {
 
 impl PartitionMetadata {
     /// Returns the partition index.
+    #[doc(alias = "org.apache.kafka.common.requests.MetadataResponse$PartitionMetadata#partition")]
     pub fn partition(&self) -> i32 {
         self.topic_partition.partition()
     }
 
     /// Returns the topic name.
+    #[doc(alias = "org.apache.kafka.common.requests.MetadataResponse$PartitionMetadata#topic")]
     pub fn topic(&self) -> &str {
         self.topic_partition.topic()
     }
 
     /// Returns a copy of this partition metadata without leader epoch information.
+    #[doc(alias = "org.apache.kafka.common.requests.MetadataResponse$PartitionMetadata#withoutLeaderEpoch")]
     pub fn without_leader_epoch(&self) -> Self {
         Self {
             error: self.error,

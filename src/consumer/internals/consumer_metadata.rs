@@ -59,6 +59,7 @@ struct ConsumerMetadataInner {
 /// - Honour `include.internal.topics` and `allow.auto.create.topics`.
 ///
 /// Translated from `org.apache.kafka.clients.consumer.internals.ConsumerMetadata`.
+#[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerMetadata")]
 pub(crate) struct ConsumerMetadata {
     /// Underlying [`Metadata`], wrapped in `Arc` so it can be shared with
     /// `NetworkClient` (and other downstream consumers) just like
@@ -76,6 +77,7 @@ pub(crate) struct ConsumerMetadata {
 impl ConsumerMetadata {
     /// Full constructor mirroring Java's primary `ConsumerMetadata(...)`
     /// constructor.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerMetadata#ConsumerMetadata")]
     pub(crate) fn new(
         refresh_backoff_ms: i64,
         refresh_backoff_max_ms: i64,
@@ -180,6 +182,7 @@ impl ConsumerMetadata {
     /// `allow_auto_create_topics` via the `pub(crate)` fields on
     /// `ConsumerConfig` (no public getters currently exist for these — the
     /// fields are accessed directly within the crate).
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerMetadata#ConsumerMetadata")]
     pub(crate) fn with_config(
         config: &ConsumerConfig,
         subscription: Arc<Mutex<SubscriptionState>>,
@@ -197,6 +200,7 @@ impl ConsumerMetadata {
     }
 
     /// Translates Java's `allowAutoTopicCreation()`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerMetadata#allowAutoTopicCreation")]
     pub(crate) fn allow_auto_topic_creation(&self) -> bool {
         self.allow_auto_topic_creation
     }
@@ -206,6 +210,7 @@ impl ConsumerMetadata {
     /// Adds topics to the transient set. If the resulting set introduces
     /// topics not yet in the metadata cache, schedule a partial update so
     /// the next refresh covers them.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerMetadata#addTransientTopics")]
     pub(crate) fn add_transient_topics(&self, topics: HashSet<String>) {
         let mut inner = self.inner.lock().unwrap();
         inner.transient_topics.extend(topics);
@@ -222,6 +227,7 @@ impl ConsumerMetadata {
     }
 
     /// Translates Java's `clearTransientTopics()`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerMetadata#clearTransientTopics")]
     pub(crate) fn clear_transient_topics(&self) {
         self.inner.lock().unwrap().transient_topics.clear();
     }
@@ -346,6 +352,7 @@ mod tests {
     /// Translated from `ConsumerMetadataTest.testPatternSubscriptionNoInternalTopics` and
     /// `testPatternSubscriptionIncludeInternalTopics`.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerMetadataTest#testPatternSubscription")]
     fn test_pattern_subscription() {
         // Compile the regex once outside the loop to satisfy
         // `regex_creation_in_loops`. `Regex::clone` is cheap (Arc'd).
@@ -382,6 +389,9 @@ mod tests {
 
     /// Translated from `ConsumerMetadataTest.testSubscriptionToBrokerRegexDoesNotRequestAllTopicsMetadata`.
     #[test]
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.ConsumerMetadataTest#testSubscriptionToBrokerRegexDoesNotRequestAllTopicsMetadata"
+    )]
     fn test_subscription_to_broker_regex_does_not_request_all_topics_metadata() {
         let sub = new_subscription();
         sub.lock()
@@ -403,6 +413,9 @@ mod tests {
     /// This is the *behavioral gate* the plan flagged for verifying the
     /// `retain_topic_with_id_fn` plumbing.
     #[test]
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.ConsumerMetadataTest#testSubscriptionToBrokerRegexRetainsAssignedTopics"
+    )]
     fn test_subscription_to_broker_regex_retains_assigned_topics() {
         let sub = new_subscription();
         sub.lock()
@@ -432,6 +445,9 @@ mod tests {
 
     /// Translated from `ConsumerMetadataTest.testSubscriptionToBrokerRegexAllowsTransientTopics`.
     #[test]
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.ConsumerMetadataTest#testSubscriptionToBrokerRegexAllowsTransientTopics"
+    )]
     fn test_subscription_to_broker_regex_allows_transient_topics() {
         let sub = new_subscription();
         sub.lock()
@@ -463,6 +479,7 @@ mod tests {
 
     /// Translated from `ConsumerMetadataTest.testUserAssignment`.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerMetadataTest#testUserAssignment")]
     fn test_user_assignment() {
         let sub = new_subscription();
         let tp_foo_0 = TopicPartition::new("foo".to_string(), 0);
@@ -496,6 +513,7 @@ mod tests {
 
     /// Translated from `ConsumerMetadataTest.testNormalSubscription`.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerMetadataTest#testNormalSubscription")]
     fn test_normal_subscription() {
         let sub = new_subscription();
         sub.lock()
@@ -530,6 +548,7 @@ mod tests {
 
     /// Translated from `ConsumerMetadataTest.testTransientTopics`.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerMetadataTest#testTransientTopics")]
     fn test_transient_topics() {
         let sub = new_subscription();
         sub.lock()

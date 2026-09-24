@@ -29,12 +29,14 @@ use super::AbstractResponse;
 ///
 /// Corresponds to `org.apache.kafka.common.requests.ListConfigResourcesResponse`.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.ListConfigResourcesResponse")]
 pub struct ListConfigResourcesResponse {
     data: ListConfigResourcesResponseData,
 }
 
 impl ListConfigResourcesResponse {
     /// Creates a new `ListConfigResourcesResponse` from the underlying data.
+    #[doc(alias = "org.apache.kafka.common.requests.ListConfigResourcesResponse#ListConfigResourcesResponse")]
     pub fn new(data: ListConfigResourcesResponseData) -> Self {
         Self { data }
     }
@@ -45,6 +47,7 @@ impl ListConfigResourcesResponse {
     }
 
     /// Returns a reference to the underlying data.
+    #[doc(alias = "org.apache.kafka.common.requests.ListConfigResourcesResponse#data")]
     pub fn data(&self) -> &ListConfigResourcesResponseData {
         &self.data
     }
@@ -55,11 +58,13 @@ impl ListConfigResourcesResponse {
     }
 
     /// Returns the throttle time in milliseconds.
+    #[doc(alias = "org.apache.kafka.common.requests.ListConfigResourcesResponse#throttleTimeMs")]
     pub fn throttle_time_ms(&self) -> i32 {
         self.data.throttle_time_ms
     }
 
     /// Sets the throttle time in the response.
+    #[doc(alias = "org.apache.kafka.common.requests.ListConfigResourcesResponse#maybeSetThrottleTimeMs")]
     pub fn maybe_set_throttle_time_ms(&mut self, throttle_time_ms: i32) {
         self.data.set_throttle_time_ms(throttle_time_ms);
     }
@@ -67,6 +72,7 @@ impl ListConfigResourcesResponse {
     /// Returns the top-level error of this response.
     ///
     /// Corresponds to `ListConfigResourcesResponse.error`.
+    #[doc(alias = "org.apache.kafka.common.requests.ListConfigResourcesResponse#error")]
     pub fn error(&self) -> Errors {
         Errors::for_code(self.data.error_code)
     }
@@ -74,6 +80,7 @@ impl ListConfigResourcesResponse {
     /// Returns the listed config resources.
     ///
     /// Corresponds to `ListConfigResourcesResponse.configResources`.
+    #[doc(alias = "org.apache.kafka.common.requests.ListConfigResourcesResponse#configResources")]
     pub fn config_resources(&self) -> Vec<ConfigResource> {
         self.data
             .config_resources
@@ -85,6 +92,7 @@ impl ListConfigResourcesResponse {
     }
 
     /// Returns the error counts for this response.
+    #[doc(alias = "org.apache.kafka.common.requests.ListConfigResourcesResponse#errorCounts")]
     pub fn error_counts(&self) -> HashMap<Errors, i32> {
         AbstractResponse::single_error_count(Errors::for_code(self.data.error_code))
     }
@@ -95,6 +103,7 @@ impl ListConfigResourcesResponse {
     /// # Errors
     ///
     /// Returns an error if parsing fails.
+    #[doc(alias = "org.apache.kafka.common.requests.ListConfigResourcesResponse#parse")]
     pub fn parse(readable: &mut dyn Readable, version: i16) -> io::Result<Self> {
         let data = ListConfigResourcesResponseData::read(readable, version)?;
         Ok(Self::new(data))

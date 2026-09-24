@@ -27,6 +27,7 @@ kafka_error_class! {
     ///
     /// Java `extends` chain:
     ///    `InterruptException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.InterruptException")]
     InterruptError,
     extends: [
         is_kafka_error,

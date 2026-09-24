@@ -37,6 +37,7 @@ use super::RequestBuilder;
 ///
 /// Corresponds to `org.apache.kafka.common.requests.ListGroupsRequest`.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.ListGroupsRequest")]
 pub struct ListGroupsRequest {
     data: ListGroupsRequestData,
     version: i16,
@@ -44,11 +45,13 @@ pub struct ListGroupsRequest {
 
 impl ListGroupsRequest {
     /// Creates a new `ListGroupsRequest` from data and version.
+    #[doc(alias = "org.apache.kafka.common.requests.ListGroupsRequest#ListGroupsRequest")]
     pub fn new(data: ListGroupsRequestData, version: i16) -> Self {
         Self { data, version }
     }
 
     /// Returns a reference to the underlying data.
+    #[doc(alias = "org.apache.kafka.common.requests.ListGroupsRequest#data")]
     pub fn data(&self) -> &ListGroupsRequestData {
         &self.data
     }
@@ -70,6 +73,7 @@ impl ListGroupsRequest {
 
     /// Builds the canonical error response for this request, matching Java's
     /// `ListGroupsRequest.getErrorResponse(throttleTimeMs, Throwable)`.
+    #[doc(alias = "org.apache.kafka.common.requests.ListGroupsRequest#getErrorResponse")]
     pub fn get_error_response(&self, throttle_time_ms: i32, error: &Errors) -> ConcreteResponse {
         let mut data = ListGroupsResponseData::new();
         data.set_groups(Vec::new()).set_error_code(error.code());
@@ -84,6 +88,7 @@ impl ListGroupsRequest {
     /// # Errors
     ///
     /// Returns an error if parsing fails.
+    #[doc(alias = "org.apache.kafka.common.requests.ListGroupsRequest#parse")]
     pub fn parse(readable: &mut dyn Readable, version: i16) -> io::Result<Self> {
         let data = ListGroupsRequestData::read(readable, version)?;
         Ok(Self::new(data, version))
@@ -100,6 +105,7 @@ impl std::fmt::Display for ListGroupsRequest {
 ///
 /// Corresponds to `ListGroupsRequest.Builder` in Java.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.ListGroupsRequest$Builder")]
 pub struct ListGroupsRequestBuilder {
     data: ListGroupsRequestData,
     oldest_allowed_version: i16,
@@ -109,6 +115,7 @@ pub struct ListGroupsRequestBuilder {
 impl ListGroupsRequestBuilder {
     /// Creates a builder wrapping the given data with the full supported
     /// version range.
+    #[doc(alias = "org.apache.kafka.common.requests.ListGroupsRequest$Builder#Builder")]
     pub fn new(data: ListGroupsRequestData) -> Self {
         Self {
             data,

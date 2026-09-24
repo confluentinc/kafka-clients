@@ -32,6 +32,7 @@ kafka_error_class! {
     /// [`Errors::RequestTimedOut`]: it has no entry in `Errors` itself, and
     /// Java's `Errors.forException` walks up the superclass chain, finding
     /// `TimeoutException`'s.
+    #[doc(alias = "org.apache.kafka.clients.producer.BufferExhaustedException")]
     ProducerBufferExhaustedError,
     code: Errors::RequestTimedOut,
     extends: [

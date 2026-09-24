@@ -24,6 +24,7 @@ kafka_error_class! {
     ///
     /// Java `extends` chain:
     ///    `InvalidPrincipalTypeException` -> `ApiException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.InvalidPrincipalTypeException")]
     InvalidPrincipalTypeError,
     code: Errors::InvalidPrincipalType,
     extends: [

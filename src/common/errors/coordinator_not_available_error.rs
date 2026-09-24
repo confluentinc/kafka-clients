@@ -25,6 +25,7 @@ kafka_error_class! {
     /// Java `extends` chain:
     ///    `CoordinatorNotAvailableException` -> `RefreshRetriableException` ->
     ///   `RetriableException` -> `ApiException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.CoordinatorNotAvailableException")]
     CoordinatorNotAvailableError,
     code: Errors::CoordinatorNotAvailable,
     extends: [

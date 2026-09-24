@@ -29,6 +29,7 @@ kafka_error_class! {
     ///    `NotLeaderOrFollowerException` -> `InvalidMetadataException` ->
     ///   `RefreshRetriableException` -> `RetriableException` -> `ApiException` ->
     ///   `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.NotLeaderOrFollowerException")]
     NotLeaderOrFollowerError,
     code: Errors::NotLeaderOrFollower,
     extends: [

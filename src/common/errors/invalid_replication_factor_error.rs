@@ -26,6 +26,7 @@ kafka_error_class! {
     /// Java `extends` chain:
     ///    `InvalidReplicationFactorException` -> `InvalidConfigurationException` ->
     ///   `ApiException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.InvalidReplicationFactorException")]
     InvalidReplicationFactorError,
     code: Errors::InvalidReplicationFactor,
     extends: [

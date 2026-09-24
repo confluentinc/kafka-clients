@@ -27,6 +27,7 @@ kafka_error_class! {
     ///    `ListenerNotFoundException` -> `InvalidMetadataException` ->
     ///   `RefreshRetriableException` -> `RetriableException` -> `ApiException` ->
     ///   `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.ListenerNotFoundException")]
     ListenerNotFoundError,
     code: Errors::ListenerNotFound,
     extends: [

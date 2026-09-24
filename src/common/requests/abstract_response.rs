@@ -90,6 +90,7 @@ use super::WriteTxnMarkersResponse;
 /// which has no instance state, so it becomes a unit struct hosting its
 /// statics as associated items.
 #[non_exhaustive]
+#[doc(alias = "org.apache.kafka.common.requests.AbstractResponse")]
 pub struct AbstractResponse;
 
 impl AbstractResponse {
@@ -104,6 +105,7 @@ impl AbstractResponse {
     }
 
     /// Helper: increments the count for the given error in the map.
+    #[doc(alias = "org.apache.kafka.common.requests.AbstractResponse#updateErrorCounts")]
     pub fn update_error_counts(error_counts: &mut HashMap<Errors, i32>, error: Errors) {
         *error_counts.entry(error).or_insert(0) += 1;
     }

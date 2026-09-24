@@ -26,6 +26,7 @@ use crate::HostResolver;
 /// Translates `org.apache.kafka.clients.DefaultHostResolver`.
 #[derive(Debug, Default, Clone)]
 #[non_exhaustive]
+#[doc(alias = "org.apache.kafka.clients.DefaultHostResolver")]
 pub struct DefaultHostResolver;
 
 impl DefaultHostResolver {

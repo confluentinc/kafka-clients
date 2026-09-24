@@ -35,12 +35,14 @@ type BrokerFutures = HashMap<i32, KafkaFuture<Vec<TransactionListing>>>;
 /// from broker id to that broker's per-request future (mirroring Java's
 /// `KafkaFuture<Map<Integer, KafkaFutureImpl<Collection<TransactionListing>>>>`).
 #[derive(Clone, Debug)]
+#[doc(alias = "org.apache.kafka.clients.admin.ListTransactionsResult")]
 pub struct ListTransactionsResult {
     future: KafkaFuture<BrokerFutures>,
 }
 
 impl ListTransactionsResult {
     /// Creates a result wrapping the top-level broker-discovery future.
+    #[doc(alias = "org.apache.kafka.clients.admin.ListTransactionsResult#ListTransactionsResult")]
     pub(crate) fn new(future: KafkaFuture<BrokerFutures>) -> Self {
         Self { future }
     }
@@ -49,6 +51,7 @@ impl ListTransactionsResult {
     /// the returned future also fails with the first encountered error.
     ///
     /// Mirrors `ListTransactionsResult.all`.
+    #[doc(alias = "org.apache.kafka.clients.admin.ListTransactionsResult#all")]
     pub fn all(&self) -> KafkaFuture<Vec<TransactionListing>> {
         self.all_by_broker_id()
             .then_apply(|map: HashMap<i32, Vec<TransactionListing>>| {
@@ -60,6 +63,7 @@ impl ListTransactionsResult {
     /// partial listing or more granular error details.
     ///
     /// Mirrors `ListTransactionsResult.byBrokerId`.
+    #[doc(alias = "org.apache.kafka.clients.admin.ListTransactionsResult#byBrokerId")]
     pub fn by_broker_id(&self) -> KafkaFuture<BrokerFutures> {
         self.future.clone()
     }
@@ -68,6 +72,7 @@ impl ListTransactionsResult {
     /// them. If any underlying request fails, the returned future also fails.
     ///
     /// Mirrors `ListTransactionsResult.allByBrokerId`.
+    #[doc(alias = "org.apache.kafka.clients.admin.ListTransactionsResult#allByBrokerId")]
     pub fn all_by_broker_id(&self) -> KafkaFuture<HashMap<i32, Vec<TransactionListing>>> {
         KafkaFuture::new(std::sync::Arc::new(AllByBrokerIdFuture { source: self.future.clone() }))
     }

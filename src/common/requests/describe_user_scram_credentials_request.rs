@@ -31,6 +31,7 @@ use super::{ConcreteRequest, ConcreteResponse, DescribeUserScramCredentialsRespo
 /// Corresponds to
 /// `org.apache.kafka.common.requests.DescribeUserScramCredentialsRequest`.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.DescribeUserScramCredentialsRequest")]
 pub struct DescribeUserScramCredentialsRequest {
     data: DescribeUserScramCredentialsRequestData,
     version: i16,
@@ -38,11 +39,15 @@ pub struct DescribeUserScramCredentialsRequest {
 
 impl DescribeUserScramCredentialsRequest {
     /// Creates a new request from data and version.
+    #[doc(
+        alias = "org.apache.kafka.common.requests.DescribeUserScramCredentialsRequest#DescribeUserScramCredentialsRequest"
+    )]
     pub fn new(data: DescribeUserScramCredentialsRequestData, version: i16) -> Self {
         Self { data, version }
     }
 
     /// Returns a reference to the underlying data.
+    #[doc(alias = "org.apache.kafka.common.requests.DescribeUserScramCredentialsRequest#data")]
     pub fn data(&self) -> &DescribeUserScramCredentialsRequestData {
         &self.data
     }
@@ -66,6 +71,7 @@ impl DescribeUserScramCredentialsRequest {
     ///
     /// Mirrors `DescribeUserScramCredentialsRequest.getErrorResponse`: a
     /// message-level error plus one errored result per requested user.
+    #[doc(alias = "org.apache.kafka.common.requests.DescribeUserScramCredentialsRequest#getErrorResponse")]
     pub fn get_error_response(&self, throttle_time_ms: i32, error: &Errors) -> ConcreteResponse {
         let mut response = DescribeUserScramCredentialsResponseData::new();
         response
@@ -94,6 +100,7 @@ impl DescribeUserScramCredentialsRequest {
     /// # Errors
     ///
     /// Returns an error if parsing fails.
+    #[doc(alias = "org.apache.kafka.common.requests.DescribeUserScramCredentialsRequest#parse")]
     pub fn parse(readable: &mut dyn Readable, version: i16) -> io::Result<Self> {
         let data = DescribeUserScramCredentialsRequestData::read(readable, version)?;
         Ok(Self::new(data, version))
@@ -114,6 +121,7 @@ impl std::fmt::Display for DescribeUserScramCredentialsRequest {
 ///
 /// Corresponds to `DescribeUserScramCredentialsRequest.Builder`.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.DescribeUserScramCredentialsRequest$Builder")]
 pub struct DescribeUserScramCredentialsRequestBuilder {
     data: DescribeUserScramCredentialsRequestData,
     oldest_allowed_version: i16,
@@ -122,6 +130,7 @@ pub struct DescribeUserScramCredentialsRequestBuilder {
 
 impl DescribeUserScramCredentialsRequestBuilder {
     /// Creates a builder wrapping the given request data.
+    #[doc(alias = "org.apache.kafka.common.requests.DescribeUserScramCredentialsRequest$Builder#Builder")]
     pub fn new(data: DescribeUserScramCredentialsRequestData) -> Self {
         Self {
             data,

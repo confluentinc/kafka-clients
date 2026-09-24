@@ -24,6 +24,7 @@ kafka_error_class! {
     ///
     /// Java `extends` chain:
     ///    `ControllerMovedException` -> `ApiException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.ControllerMovedException")]
     ControllerMovedError,
     code: Errors::StaleControllerEpoch,
     extends: [

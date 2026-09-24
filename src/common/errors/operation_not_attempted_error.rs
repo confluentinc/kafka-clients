@@ -26,6 +26,7 @@ kafka_error_class! {
     ///
     /// Java `extends` chain:
     ///    `OperationNotAttemptedException` -> `ApiException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.OperationNotAttemptedException")]
     OperationNotAttemptedError,
     code: Errors::OperationNotAttempted,
     extends: [

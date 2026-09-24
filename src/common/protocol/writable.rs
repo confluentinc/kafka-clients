@@ -23,35 +23,46 @@ use std::io;
 ///
 /// This trait provides methods for writing primitive types and Kafka-specific
 /// types like varints, UUIDs, and byte arrays.
+#[doc(alias = "org.apache.kafka.common.protocol.Writable")]
 pub trait Writable {
     /// Write a single byte.
+    #[doc(alias = "org.apache.kafka.common.protocol.Writable#writeByte")]
     fn write_byte(&mut self, val: i8) -> io::Result<()>;
 
     /// Write a 16-bit signed integer (big-endian).
+    #[doc(alias = "org.apache.kafka.common.protocol.Writable#writeShort")]
     fn write_short(&mut self, val: i16) -> io::Result<()>;
 
     /// Write a 32-bit signed integer (big-endian).
+    #[doc(alias = "org.apache.kafka.common.protocol.Writable#writeInt")]
     fn write_int(&mut self, val: i32) -> io::Result<()>;
 
     /// Write a 64-bit signed integer (big-endian).
+    #[doc(alias = "org.apache.kafka.common.protocol.Writable#writeLong")]
     fn write_long(&mut self, val: i64) -> io::Result<()>;
 
     /// Write a 64-bit floating point number (big-endian).
+    #[doc(alias = "org.apache.kafka.common.protocol.Writable#writeDouble")]
     fn write_double(&mut self, val: f64) -> io::Result<()>;
 
     /// Write a byte array.
+    #[doc(alias = "org.apache.kafka.common.protocol.Writable#writeByteArray")]
     fn write_byte_array(&mut self, arr: &[u8]) -> io::Result<()>;
 
     /// Write an unsigned varint (for sizes, lengths, counts).
+    #[doc(alias = "org.apache.kafka.common.protocol.Writable#writeUnsignedVarint")]
     fn write_unsigned_varint(&mut self, val: u32) -> io::Result<()>;
 
     /// Write a signed varint (zig-zag encoded).
+    #[doc(alias = "org.apache.kafka.common.protocol.Writable#writeVarint")]
     fn write_varint(&mut self, val: i32) -> io::Result<()>;
 
     /// Write a signed varlong (zig-zag encoded).
+    #[doc(alias = "org.apache.kafka.common.protocol.Writable#writeVarlong")]
     fn write_varlong(&mut self, val: i64) -> io::Result<()>;
 
     /// Write a UUID (128-bit value, most significant bits first).
+    #[doc(alias = "org.apache.kafka.common.protocol.Writable#writeUuid")]
     fn write_uuid(&mut self, uuid: &Uuid) -> io::Result<()> {
         self.write_long(uuid.most_sig_bits() as i64)?;
         self.write_long(uuid.least_sig_bits() as i64)?;
@@ -64,11 +75,13 @@ pub trait Writable {
     }
 
     /// Write an unsigned 16-bit integer.
+    #[doc(alias = "org.apache.kafka.common.protocol.Writable#writeUnsignedShort")]
     fn write_unsigned_short(&mut self, val: u16) -> io::Result<()> {
         self.write_short(val as i16)
     }
 
     /// Write an unsigned 32-bit integer.
+    #[doc(alias = "org.apache.kafka.common.protocol.Writable#writeUnsignedInt")]
     fn write_unsigned_int(&mut self, val: u32) -> io::Result<()> {
         self.write_int(val as i32)
     }
@@ -82,6 +95,7 @@ pub trait Writable {
     /// [`MemoryRecords`] buffer to the wire without an intermediate copy.
     ///
     /// [`MemoryRecords`]: crate::common::record::MemoryRecords
+    #[doc(alias = "org.apache.kafka.common.protocol.Writable#writeRecords")]
     fn write_records(&mut self, data: bytes::Bytes) -> io::Result<()> {
         self.write_byte_array(&data)
     }

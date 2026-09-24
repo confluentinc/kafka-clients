@@ -29,6 +29,7 @@ use super::{ConcreteRequest, ConcreteResponse, DescribeProducersResponse, Reques
 ///
 /// Corresponds to `org.apache.kafka.common.requests.DescribeProducersRequest`.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.DescribeProducersRequest")]
 pub struct DescribeProducersRequest {
     data: DescribeProducersRequestData,
     version: i16,
@@ -36,11 +37,13 @@ pub struct DescribeProducersRequest {
 
 impl DescribeProducersRequest {
     /// Creates a new `DescribeProducersRequest` from data and version.
+    #[doc(alias = "org.apache.kafka.common.requests.DescribeProducersRequest#DescribeProducersRequest")]
     pub fn new(data: DescribeProducersRequestData, version: i16) -> Self {
         Self { data, version }
     }
 
     /// Returns a reference to the underlying data.
+    #[doc(alias = "org.apache.kafka.common.requests.DescribeProducersRequest#data")]
     pub fn data(&self) -> &DescribeProducersRequestData {
         &self.data
     }
@@ -63,6 +66,7 @@ impl DescribeProducersRequest {
     /// Creates an error response for this request.
     ///
     /// Mirrors `DescribeProducersRequest.getErrorResponse`.
+    #[doc(alias = "org.apache.kafka.common.requests.DescribeProducersRequest#getErrorResponse")]
     pub fn get_error_response(&self, _throttle_time_ms: i32, error: &Errors) -> ConcreteResponse {
         let mut response = DescribeProducersResponseData::new();
         let mut topics = Vec::new();
@@ -89,6 +93,7 @@ impl DescribeProducersRequest {
     /// # Errors
     ///
     /// Returns an error if parsing fails.
+    #[doc(alias = "org.apache.kafka.common.requests.DescribeProducersRequest#parse")]
     pub fn parse(readable: &mut dyn Readable, version: i16) -> io::Result<Self> {
         let data = DescribeProducersRequestData::read(readable, version)?;
         Ok(Self::new(data, version))
@@ -105,12 +110,14 @@ impl std::fmt::Display for DescribeProducersRequest {
 ///
 /// Corresponds to `DescribeProducersRequest.Builder`.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.DescribeProducersRequest$Builder")]
 pub struct DescribeProducersRequestBuilder {
     data: DescribeProducersRequestData,
 }
 
 impl DescribeProducersRequestBuilder {
     /// Creates a builder from the given request data.
+    #[doc(alias = "org.apache.kafka.common.requests.DescribeProducersRequest$Builder#Builder")]
     pub fn new(data: DescribeProducersRequestData) -> Self {
         Self { data }
     }

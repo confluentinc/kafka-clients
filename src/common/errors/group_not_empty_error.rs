@@ -24,6 +24,7 @@ kafka_error_class! {
     ///
     /// Java `extends` chain:
     ///    `GroupNotEmptyException` -> `ApiException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.GroupNotEmptyException")]
     GroupNotEmptyError,
     code: Errors::NonEmptyGroup,
     extends: [

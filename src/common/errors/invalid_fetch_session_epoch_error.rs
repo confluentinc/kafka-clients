@@ -25,6 +25,7 @@ kafka_error_class! {
     /// Java `extends` chain:
     ///    `InvalidFetchSessionEpochException` -> `RetriableException` ->
     ///   `ApiException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.InvalidFetchSessionEpochException")]
     InvalidFetchSessionEpochError,
     code: Errors::InvalidFetchSessionEpoch,
     extends: [

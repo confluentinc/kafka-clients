@@ -63,6 +63,7 @@ use super::{AbstractMembershipManager, LocalAssignment};
 /// - `commit_request_manager: Option<Arc<CommitRequestManager>>` — used
 ///   by the auto-commit-before-rebalance step. Wrapping in `Option` so
 ///   constructor can wire it up later (and so tests can pass `None`).
+#[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerMembershipManager")]
 pub(crate) struct ConsumerMembershipManager {
     pub(crate) abstract_mm: AbstractMembershipManager,
     /// Java: `Optional<String> groupInstanceId`. If present this is a
@@ -236,6 +237,7 @@ impl ConsumerMembershipManager {
     /// (M5): `None` in tests that don't exercise rebalance metrics; the live
     /// consumer always supplies them.
     #[allow(clippy::too_many_arguments)]
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerMembershipManager#ConsumerMembershipManager")]
     pub(crate) fn new(
         group_id: impl Into<String>,
         group_instance_id: Option<String>,
@@ -311,16 +313,19 @@ impl ConsumerMembershipManager {
     }
 
     /// Java: `groupInstanceId()`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerMembershipManager#groupInstanceId")]
     pub(crate) fn group_instance_id(&self) -> Option<&str> {
         self.group_instance_id.as_deref()
     }
 
     /// Java: `rackId()`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerMembershipManager#rackId")]
     pub(crate) fn rack_id(&self) -> Option<&str> {
         self.rack_id.as_deref()
     }
 
     /// Java: `serverAssignor()`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerMembershipManager#serverAssignor")]
     pub(crate) fn server_assignor(&self) -> Option<&str> {
         self.server_assignor.as_deref()
     }
@@ -354,6 +359,7 @@ impl ConsumerMembershipManager {
     }
 
     /// Java: `joinGroupEpoch()` — 0 for the consumer group protocol.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerMembershipManager#joinGroupEpoch")]
     pub(crate) fn join_group_epoch(&self) -> i32 {
         ConsumerGroupHeartbeatRequest::JOIN_GROUP_MEMBER_EPOCH
     }
@@ -361,6 +367,7 @@ impl ConsumerMembershipManager {
     /// Java: `leaveGroupEpoch()`. For static members + `LEAVE_GROUP`
     /// operation: -1 (force fence). Otherwise: -1 for dynamic members,
     /// -2 for static members.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerMembershipManager#leaveGroupEpoch")]
     pub(crate) fn leave_group_epoch(&self) -> i32 {
         let is_static_member = self.group_instance_id.is_some();
         if matches!(self.leave_group_operation(), GroupMembershipOperation::LeaveGroup) {
@@ -389,6 +396,7 @@ impl ConsumerMembershipManager {
     ///
     /// Returns `Err(Error)` for unexpected errors in the response
     /// body — Java throws `IllegalArgumentException`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerMembershipManager#onHeartbeatSuccess")]
     pub(crate) fn on_heartbeat_success(&self, response: &ConsumerGroupHeartbeatResponse) -> Result<(), Error> {
         let data = response.data();
         if data.error_code != Errors::None.code() {
@@ -1187,6 +1195,7 @@ impl ConsumerMembershipManager {
     /// the `notify_assignment_change` listeners. Any error is returned so the
     /// AEP can complete the `ApplyAssignmentEvent` handle exceptionally
     /// (mirroring Java's try/catch → `event.future().completeExceptionally(e)`).
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerMembershipManager#applyAssignment")]
     pub(crate) fn apply_assignment(
         &self,
         assigned_partitions: &HashSet<TopicPartition>,
@@ -1736,6 +1745,7 @@ impl ConsumerMembershipManager {
     }
 
     /// Java: `isLeavingGroup()` (override).
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerMembershipManager#isLeavingGroup")]
     pub(crate) fn is_leaving_group(&self) -> bool {
         let leave_op = self.leave_group_operation();
         if matches!(leave_op, GroupMembershipOperation::RemainInGroup) && self.group_instance_id.is_none() {
@@ -1763,6 +1773,7 @@ impl ConsumerMembershipManager {
     /// Translated as `pub(crate)` because the Java method is
     /// `protected`-on-subclass and the test module reaches into it via
     /// the §31 event channel.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerMembershipManager#signalMemberLeavingGroup")]
     pub(crate) async fn signal_member_leaving_group(&self, current_time_ms: i64) -> Result<(), Error> {
         // Snapshot the dropped partitions + epoch under a single short
         // lock; drop both guards before any .await.

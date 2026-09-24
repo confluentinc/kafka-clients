@@ -25,6 +25,7 @@ kafka_error_class! {
     ///
     /// Java `extends` chain:
     ///    `RebootstrapRequiredException` -> `ApiException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.RebootstrapRequiredException")]
     RebootstrapRequiredError,
     code: Errors::RebootstrapRequired,
     extends: [

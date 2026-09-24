@@ -26,6 +26,7 @@ kafka_error_class! {
     ///    `ElectionNotNeededException` -> `InvalidMetadataException` ->
     ///   `RefreshRetriableException` -> `RetriableException` -> `ApiException` ->
     ///   `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.ElectionNotNeededException")]
     ElectionNotNeededError,
     code: Errors::ElectionNotNeeded,
     extends: [

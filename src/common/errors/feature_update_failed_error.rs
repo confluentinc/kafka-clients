@@ -24,6 +24,7 @@ kafka_error_class! {
     ///
     /// Java `extends` chain:
     ///    `FeatureUpdateFailedException` -> `ApiException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.FeatureUpdateFailedException")]
     FeatureUpdateFailedError,
     code: Errors::FeatureUpdateFailed,
     extends: [

@@ -66,6 +66,7 @@ use crate::common::Error;
 ///
 /// **Cheap to clone** — clones share state via `Arc`.
 #[derive(Clone)]
+#[doc(alias = "org.apache.kafka.clients.consumer.internals.WakeupTrigger")]
 pub(crate) struct WakeupTrigger {
     inner: Arc<WakeupTriggerInner>,
 }
@@ -114,6 +115,7 @@ impl WakeupTrigger {
     /// cancelled).
     ///
     /// Safe to call from any task; `&self`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.WakeupTrigger#wakeup")]
     pub(crate) fn wakeup(&self) {
         if self.inner.disabled.load(Ordering::Acquire) {
             return;
@@ -175,6 +177,7 @@ impl WakeupTrigger {
     /// cancelled (i.e. a prior `wakeup()` is pending). Does NOT consume
     /// the wakeup state — the caller is expected to [`Self::rotate`]
     /// after raising the error to the user.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.WakeupTrigger#maybeTriggerWakeup")]
     pub(crate) fn maybe_trigger_wakeup(&self) -> Result<(), Error> {
         if self.inner.disabled.load(Ordering::Acquire) {
             return Ok(());

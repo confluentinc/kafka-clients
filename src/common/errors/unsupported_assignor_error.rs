@@ -24,6 +24,7 @@ kafka_error_class! {
     ///
     /// Java `extends` chain:
     ///    `UnsupportedAssignorException` -> `ApiException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.UnsupportedAssignorException")]
     UnsupportedAssignorError,
     code: Errors::UnsupportedAssignor,
     extends: [

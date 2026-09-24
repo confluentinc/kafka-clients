@@ -25,6 +25,7 @@ kafka_error_class! {
     ///
     /// Java `extends` chain:
     ///    `FencedStateEpochException` -> `ApiException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.FencedStateEpochException")]
     FencedStateEpochError,
     code: Errors::FencedStateEpoch,
     extends: [

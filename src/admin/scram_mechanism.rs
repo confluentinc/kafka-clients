@@ -27,6 +27,7 @@
 /// `UserScramCredentialRecord`. Do not change the type field.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
+#[doc(alias = "org.apache.kafka.clients.admin.ScramMechanism")]
 pub enum ScramMechanism {
     /// An unknown / unsupported mechanism (type indicator `0`).
     Unknown,
@@ -48,6 +49,7 @@ impl ScramMechanism {
     /// [`ScramMechanism::Unknown`].
     ///
     /// Mirrors `ScramMechanism.fromType(byte)`.
+    #[doc(alias = "org.apache.kafka.clients.admin.ScramMechanism#fromType")]
     pub fn from_type(r#type: i8) -> ScramMechanism {
         for mechanism in ScramMechanism::VALUES {
             if mechanism.r#type() == r#type {
@@ -61,6 +63,7 @@ impl ScramMechanism {
     /// otherwise [`ScramMechanism::Unknown`].
     ///
     /// Mirrors `ScramMechanism.fromMechanismName(String)`.
+    #[doc(alias = "org.apache.kafka.clients.admin.ScramMechanism#fromMechanismName")]
     pub fn from_mechanism_name(mechanism_name: &str) -> ScramMechanism {
         ScramMechanism::VALUES
             .into_iter()
@@ -74,6 +77,7 @@ impl ScramMechanism {
     /// `toString().replace('_', '-')`.
     ///
     /// Mirrors `ScramMechanism.mechanismName()`.
+    #[doc(alias = "org.apache.kafka.clients.admin.ScramMechanism#mechanismName")]
     pub fn mechanism_name(self) -> &'static str {
         match self {
             ScramMechanism::Unknown => "UNKNOWN",
@@ -100,6 +104,7 @@ mod tests {
 
     // Mirrors `ScramMechanismTest.testFromMechanismName`.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.admin.ScramMechanismTest#testFromMechanismName")]
     fn test_from_mechanism_name() {
         assert_eq!(ScramMechanism::Unknown, ScramMechanism::from_mechanism_name("UNKNOWN"));
         assert_eq!(

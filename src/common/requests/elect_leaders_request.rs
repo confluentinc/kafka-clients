@@ -33,6 +33,7 @@ use super::{
 ///
 /// Corresponds to `org.apache.kafka.common.requests.ElectLeadersRequest`.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.ElectLeadersRequest")]
 pub struct ElectLeadersRequest {
     data: ElectLeadersRequestData,
     version: i16,
@@ -40,11 +41,13 @@ pub struct ElectLeadersRequest {
 
 impl ElectLeadersRequest {
     /// Creates a new `ElectLeadersRequest` from data and version.
+    #[doc(alias = "org.apache.kafka.common.requests.ElectLeadersRequest#ElectLeadersRequest")]
     pub fn new(data: ElectLeadersRequestData, version: i16) -> Self {
         Self { data, version }
     }
 
     /// Returns a reference to the underlying data.
+    #[doc(alias = "org.apache.kafka.common.requests.ElectLeadersRequest#data")]
     pub fn data(&self) -> &ElectLeadersRequestData {
         &self.data
     }
@@ -67,6 +70,7 @@ impl ElectLeadersRequest {
     /// Returns the set of topic partitions in this request.
     ///
     /// Mirrors `ElectLeadersRequest.topicPartitions()`.
+    #[doc(alias = "org.apache.kafka.common.requests.ElectLeadersRequest#topicPartitions")]
     pub fn topic_partitions(&self) -> HashSet<TopicPartition> {
         match &self.data.topic_partitions {
             None => HashSet::new(),
@@ -81,6 +85,7 @@ impl ElectLeadersRequest {
     /// partition with the given error.
     ///
     /// Mirrors `ElectLeadersRequest.getErrorResponse`.
+    #[doc(alias = "org.apache.kafka.common.requests.ElectLeadersRequest#getErrorResponse")]
     pub fn get_error_response(&self, throttle_time_ms: i32, error: &Errors) -> ConcreteResponse {
         let mut election_results = Vec::new();
         if let Some(topic_partitions) = &self.data.topic_partitions {
@@ -114,6 +119,7 @@ impl ElectLeadersRequest {
     /// # Errors
     ///
     /// Returns an error if parsing fails.
+    #[doc(alias = "org.apache.kafka.common.requests.ElectLeadersRequest#parse")]
     pub fn parse(readable: &mut dyn Readable, version: i16) -> io::Result<Self> {
         let data = ElectLeadersRequestData::read(readable, version)?;
         Ok(Self::new(data, version))
@@ -130,6 +136,7 @@ impl std::fmt::Display for ElectLeadersRequest {
 ///
 /// Corresponds to `ElectLeadersRequest.Builder` in Java.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.ElectLeadersRequest$Builder")]
 pub struct ElectLeadersRequestBuilder {
     election_type: ElectionType,
     topic_partitions: Option<Vec<TopicPartition>>,
@@ -144,6 +151,7 @@ impl ElectLeadersRequestBuilder {
     /// A `None` `topic_partitions` requests election for all partitions.
     ///
     /// Mirrors `ElectLeadersRequest.Builder(ElectionType, Collection, int)`.
+    #[doc(alias = "org.apache.kafka.common.requests.ElectLeadersRequest$Builder#Builder")]
     pub fn new(election_type: ElectionType, topic_partitions: Option<Vec<TopicPartition>>, timeout_ms: i32) -> Self {
         Self {
             election_type,
@@ -162,6 +170,7 @@ impl ElectLeadersRequestBuilder {
     ///
     /// Returns an error if a non-`PREFERRED` election type is requested at
     /// version 0, mirroring Java's `UnsupportedVersionException`.
+    #[doc(alias = "org.apache.kafka.common.requests.ElectLeadersRequest$Builder#toRequestData")]
     fn to_request_data(&self, version: i16) -> Result<ElectLeadersRequestData, Error> {
         if self.election_type != ElectionType::Preferred && version == 0 {
             return Err(Error::unsupported_version(

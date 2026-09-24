@@ -55,6 +55,7 @@ use super::TxnOffsetCommitResponse;
 /// Corresponds to the nested `TxnOffsetCommitRequest.CommittedOffset`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[non_exhaustive]
+#[doc(alias = "org.apache.kafka.common.requests.TxnOffsetCommitRequest$CommittedOffset")]
 pub struct CommittedOffset {
     /// The offset to commit.
     pub(crate) offset: i64,
@@ -66,6 +67,7 @@ pub struct CommittedOffset {
 
 impl CommittedOffset {
     /// Creates a committed offset.
+    #[doc(alias = "org.apache.kafka.common.requests.TxnOffsetCommitRequest$CommittedOffset#CommittedOffset")]
     pub fn new(offset: i64, metadata: Option<String>, leader_epoch: Option<i32>) -> Self {
         Self { offset, metadata, leader_epoch }
     }
@@ -113,6 +115,7 @@ impl fmt::Display for CommittedOffset {
 ///
 /// Corresponds to `org.apache.kafka.common.requests.TxnOffsetCommitRequest`.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.TxnOffsetCommitRequest")]
 pub struct TxnOffsetCommitRequest {
     data: TxnOffsetCommitRequestData,
     version: i16,
@@ -139,11 +142,13 @@ impl TxnOffsetCommitRequest {
     pub const UNKNOWN_GENERATION_ID: i32 = -1;
 
     /// Creates a new `TxnOffsetCommitRequest` from data and version.
+    #[doc(alias = "org.apache.kafka.common.requests.TxnOffsetCommitRequest#TxnOffsetCommitRequest")]
     pub fn new(data: TxnOffsetCommitRequestData, version: i16) -> Self {
         Self { data, version }
     }
 
     /// Returns a reference to the underlying data.
+    #[doc(alias = "org.apache.kafka.common.requests.TxnOffsetCommitRequest#data")]
     pub fn data(&self) -> &TxnOffsetCommitRequestData {
         &self.data
     }
@@ -168,6 +173,7 @@ impl TxnOffsetCommitRequest {
     /// Corresponds to Java's `offsets()`. The leader epoch goes through
     /// [`RequestUtils::get_leader_epoch`], which maps the
     /// `NO_PARTITION_LEADER_EPOCH` sentinel to `None`.
+    #[doc(alias = "org.apache.kafka.common.requests.TxnOffsetCommitRequest#offsets")]
     pub fn offsets(&self) -> HashMap<TopicPartition, CommittedOffset> {
         let mut offset_map = HashMap::new();
         for topic in &self.data.topics {
@@ -191,6 +197,7 @@ impl TxnOffsetCommitRequest {
     /// and so has unspecified order; this sorts by topic name and then partition
     /// index for a deterministic encoding — see
     /// `.claude/rules/producer-transactions.md` §10.
+    #[doc(alias = "org.apache.kafka.common.requests.TxnOffsetCommitRequest#getTopics")]
     pub fn get_topics(
         pending_txn_offset_commits: &HashMap<TopicPartition, CommittedOffset>,
     ) -> Vec<TxnOffsetCommitRequestTopic> {
@@ -237,6 +244,7 @@ impl TxnOffsetCommitRequest {
     /// partition.
     ///
     /// Corresponds to Java's static `getErrorResponseTopics`.
+    #[doc(alias = "org.apache.kafka.common.requests.TxnOffsetCommitRequest#getErrorResponseTopics")]
     pub fn get_error_response_topics(
         request_topics: &[TxnOffsetCommitRequestTopic],
         error: &Errors,
@@ -267,6 +275,7 @@ impl TxnOffsetCommitRequest {
     ///
     /// The error is reported per partition — this response has no top-level error
     /// code at any version.
+    #[doc(alias = "org.apache.kafka.common.requests.TxnOffsetCommitRequest#getErrorResponse")]
     pub fn get_error_response(&self, throttle_time_ms: i32, error: &Errors) -> ConcreteResponse {
         let mut response = TxnOffsetCommitResponseData::new();
         response
@@ -281,6 +290,7 @@ impl TxnOffsetCommitRequest {
     /// # Errors
     ///
     /// Returns an error if parsing fails.
+    #[doc(alias = "org.apache.kafka.common.requests.TxnOffsetCommitRequest#parse")]
     pub fn parse(readable: &mut dyn Readable, version: i16) -> io::Result<Self> {
         let data = TxnOffsetCommitRequestData::read(readable, version)?;
         Ok(Self::new(data, version))
@@ -297,6 +307,7 @@ impl fmt::Display for TxnOffsetCommitRequest {
 ///
 /// Corresponds to `TxnOffsetCommitRequest.Builder` in Java.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.TxnOffsetCommitRequest$Builder")]
 pub struct TxnOffsetCommitRequestBuilder {
     data: TxnOffsetCommitRequestData,
     is_transaction_v2_enabled: bool,
@@ -498,6 +509,7 @@ impl TxnOffsetCommitRequestBuilder {
     /// `:50`'s behaviour leave the options' `member_id`, `generation_id` and
     /// `group_instance_id` at their initial values — exactly what its Java body
     /// forwards.
+    #[doc(alias = "org.apache.kafka.common.requests.TxnOffsetCommitRequest$Builder#Builder")]
     pub fn with_options(options: TxnOffsetCommitRequestBuilderOptions<'_>) -> Self {
         let TxnOffsetCommitRequestBuilderOptions {
             transactional_id,
@@ -535,6 +547,7 @@ impl TxnOffsetCommitRequestBuilder {
     /// Corresponds to Java's single-argument `Builder(TxnOffsetCommitRequestData)`
     /// (`TxnOffsetCommitRequest.java:89`), which hardcodes
     /// `isTransactionV2Enabled = true`.
+    #[doc(alias = "org.apache.kafka.common.requests.TxnOffsetCommitRequest$Builder#Builder")]
     pub fn with_data(data: TxnOffsetCommitRequestData) -> Self {
         Self {
             data,
@@ -560,6 +573,7 @@ impl TxnOffsetCommitRequestBuilder {
     ///
     /// Corresponds to Java's private `groupMetadataSet()`. Note it is an **OR**
     /// across all three fields, so setting any one of them requires v3+.
+    #[doc(alias = "org.apache.kafka.common.requests.TxnOffsetCommitRequest$Builder#groupMetadataSet")]
     fn group_metadata_set(&self) -> bool {
         self.data.member_id != TxnOffsetCommitRequest::UNKNOWN_MEMBER_ID
             || self.data.generation_id != TxnOffsetCommitRequest::UNKNOWN_GENERATION_ID
@@ -1003,6 +1017,7 @@ mod tests {
     /// `test_serialization_round_trip_all_versions`). `build_version` wraps the
     /// data with a version, it does not encode it.
     #[test]
+    #[doc(alias = "org.apache.kafka.common.requests.TxnOffsetCommitRequestTest#testConstructor")]
     fn test_constructor() {
         const THROTTLE_TIME_MS: i32 = 10;
         let offsets_map = HashMap::from([
@@ -1076,6 +1091,7 @@ mod tests {
     /// The metadata-free builder works at every version; the metadata-carrying one
     /// only from v3, with the exact message asserted below that.
     #[test]
+    #[doc(alias = "org.apache.kafka.common.requests.TxnOffsetCommitRequestTest#testVersionSupportForGroupMetadata")]
     fn test_version_support_for_group_metadata() {
         for version in ApiKeys::TXN_OFFSET_COMMIT.oldest_version()..=ApiKeys::TXN_OFFSET_COMMIT.latest_version() {
             TxnOffsetCommitRequestBuilder::with_options(

@@ -24,6 +24,7 @@ kafka_error_class! {
     ///
     /// Java `extends` chain:
     ///    `InvalidTimestampException` -> `ApiException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.InvalidTimestampException")]
     InvalidTimestampError,
     code: Errors::InvalidTimestamp,
     extends: [

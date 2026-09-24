@@ -24,6 +24,7 @@ kafka_error_class! {
     ///
     /// Java `extends` chain:
     ///    `TopicExistsException` -> `ApiException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.TopicExistsException")]
     TopicExistsError,
     code: Errors::TopicAlreadyExists,
     extends: [

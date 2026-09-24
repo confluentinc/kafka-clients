@@ -26,6 +26,7 @@ kafka_error_class! {
     ///    `ReplicaNotAvailableException` -> `InvalidMetadataException` ->
     ///   `RefreshRetriableException` -> `RetriableException` -> `ApiException` ->
     ///   `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.ReplicaNotAvailableException")]
     ReplicaNotAvailableError,
     code: Errors::ReplicaNotAvailable,
     extends: [

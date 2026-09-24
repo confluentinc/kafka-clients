@@ -85,6 +85,7 @@ impl MetricsShared {
 /// relevant subset of Java's `Metrics`; JMX, the sensor-expiry scheduler thread,
 /// and quota machinery are omitted (the expiry mechanism is exposed via
 /// [`Metrics::expire_sensors`] so the consumer/tests can drive it explicitly).
+#[doc(alias = "org.apache.kafka.common.metrics.Metrics")]
 pub struct Metrics {
     config: Arc<MetricConfig>,
     shared: Arc<MetricsShared>,
@@ -248,24 +249,28 @@ impl Metrics {
     /// Create a metrics repository with the supplied default config and clock,
     /// no reporters. Mirrors Java's `Metrics(MetricConfig defaultConfig, Time time)`
     /// (`:101`).
+    #[doc(alias = "org.apache.kafka.common.metrics.Metrics#Metrics")]
     pub fn with_default_config_time(default_config: Arc<MetricConfig>, time: Arc<dyn Time>) -> Self {
         Self::with_default_config_reporters_time(default_config, Vec::new(), time)
     }
 
     /// Create a metrics repository with a default config, no reporters, and the
     /// system clock. Mirrors Java's `Metrics()` (`Metrics.java:85`).
+    #[doc(alias = "org.apache.kafka.common.metrics.Metrics#Metrics")]
     pub fn new() -> Self {
         Self::with_default_config_reporters_time(Arc::new(MetricConfig::new()), Vec::new(), Arc::new(SystemTime))
     }
 
     /// Create a metrics repository with the supplied default config.
     /// Mirrors Java's `Metrics(MetricConfig defaultConfig)` (`:111`).
+    #[doc(alias = "org.apache.kafka.common.metrics.Metrics#Metrics")]
     pub fn with_default_config(default_config: Arc<MetricConfig>) -> Self {
         Self::with_default_config_reporters_time(default_config, Vec::new(), Arc::new(SystemTime))
     }
 
     /// Create a metrics repository with the supplied clock.
     /// Mirrors Java's `Metrics(Time time)` (`:93`).
+    #[doc(alias = "org.apache.kafka.common.metrics.Metrics#Metrics")]
     pub fn with_time(time: Arc<dyn Time>) -> Self {
         Self::with_default_config_reporters_time(Arc::new(MetricConfig::new()), Vec::new(), time)
     }
@@ -274,6 +279,7 @@ impl Metrics {
     /// Mirrors Java's
     /// `Metrics(MetricConfig defaultConfig, List<MetricsReporter> reporters, Time time)`
     /// (`:122`).
+    #[doc(alias = "org.apache.kafka.common.metrics.Metrics#Metrics")]
     pub fn with_default_config_reporters_time(
         default_config: Arc<MetricConfig>,
         reporters: Vec<Arc<dyn MetricsReporter>>,
@@ -367,6 +373,7 @@ impl Metrics {
     ///
     /// Mirrors Java's `metricName(String name, String group)` (`:218`), whose
     /// parameters are the group's intersection — hence the plain name.
+    #[doc(alias = "org.apache.kafka.common.metrics.Metrics#metricName")]
     pub fn metric_name(&self, name: impl Into<String>, group: impl Into<String>) -> MetricName {
         self.metric_name_description_tags(name, group, "", BTreeMap::new())
     }
@@ -389,11 +396,13 @@ impl Metrics {
     }
 
     /// The default config of this registry.
+    #[doc(alias = "org.apache.kafka.common.metrics.Metrics#config")]
     pub fn config(&self) -> &Arc<MetricConfig> {
         &self.config
     }
 
     /// Get the sensor with the given name if it exists.
+    #[doc(alias = "org.apache.kafka.common.metrics.Metrics#getSensor")]
     pub fn get_sensor(&self, name: &str) -> Option<Arc<Sensor>> {
         self.sensors.lock().expect("sensors mutex poisoned").get(name).cloned()
     }
@@ -410,6 +419,7 @@ impl Metrics {
 
     /// Get or create a sensor with the given unique name and no parents at INFO
     /// recording level. Mirrors Java's `sensor(String name)` (`:325`).
+    #[doc(alias = "org.apache.kafka.common.metrics.Metrics#getSensor")]
     pub fn sensor(&self, name: &str) -> Result<Arc<Sensor>, Error> {
         self.sensor_options(SensorOptionsBuilder::new().set_name(name).build()?)
     }
@@ -539,6 +549,7 @@ impl Metrics {
     }
 
     /// Remove a sensor (if it exists), its associated metrics, and its children.
+    #[doc(alias = "org.apache.kafka.common.metrics.Metrics#removeSensor")]
     pub fn remove_sensor(&self, name: &str) {
         let sensor = self.get_sensor(name);
         let Some(sensor) = sensor else {
@@ -631,6 +642,7 @@ impl Metrics {
     /// `Metrics.addMetricIfAbsent(MetricName, MetricConfig, MetricValueProvider)`
     /// — idempotent registration (the consumer's preferred-read-replica gauge
     /// re-registers across assignment updates without error).
+    #[doc(alias = "org.apache.kafka.common.metrics.Metrics#addMetricIfAbsent")]
     pub fn add_metric_if_absent(
         &self,
         metric_name: MetricName,
@@ -647,11 +659,13 @@ impl Metrics {
 
     /// Remove a metric if it exists and return it. `metric_removal` is invoked
     /// on each reporter when a metric is removed.
+    #[doc(alias = "org.apache.kafka.common.metrics.Metrics#removeMetric")]
     pub fn remove_metric(&self, metric_name: &MetricName) -> Option<Arc<KafkaMetric>> {
         self.shared.remove_metric(metric_name)
     }
 
     /// Add a metrics reporter, initializing it with all existing metrics.
+    #[doc(alias = "org.apache.kafka.common.metrics.Metrics#addReporter")]
     pub fn add_reporter(&self, reporter: Arc<dyn MetricsReporter>) {
         let existing: Vec<Arc<KafkaMetric>> = self
             .shared
@@ -666,11 +680,13 @@ impl Metrics {
     }
 
     /// Get all the metrics currently maintained, indexed by metric name.
+    #[doc(alias = "org.apache.kafka.common.metrics.Metrics#metrics")]
     pub fn metrics(&self) -> HashMap<MetricName, Arc<KafkaMetric>> {
         self.shared.metrics.lock().expect("metrics mutex poisoned").clone()
     }
 
     /// Get a single metric by name.
+    #[doc(alias = "org.apache.kafka.common.metrics.Metrics#metric")]
     pub fn metric(&self, metric_name: &MetricName) -> Option<Arc<KafkaMetric>> {
         self.shared
             .metrics
@@ -683,6 +699,7 @@ impl Metrics {
     /// The children of a parent sensor, keyed by the parent sensor.
     /// For testing use only (mirrors Java's package-private `childrenSensors()`).
     #[cfg(test)]
+    #[doc(alias = "org.apache.kafka.common.metrics.Metrics#childrenSensors")]
     pub(crate) fn children_sensors(&self, parent: &Arc<Sensor>) -> Option<Vec<Arc<Sensor>>> {
         self.children_sensors
             .lock()
@@ -742,6 +759,7 @@ impl Metrics {
     }
 
     /// Close this metrics repository, closing all reporters.
+    #[doc(alias = "org.apache.kafka.common.metrics.Metrics#close")]
     pub fn close(&self) {
         let reporters = self.shared.reporters.lock().expect("reporters mutex poisoned");
         for reporter in reporters.iter() {
@@ -785,6 +803,7 @@ mod tests {
 
     // MetricsTest.testMetricName
     #[test]
+    #[doc(alias = "org.apache.kafka.common.metrics.MetricsTest#testMetricName")]
     fn test_metric_name() {
         let metrics = Metrics::new();
         let n1 = metrics
@@ -815,6 +834,7 @@ mod tests {
     // is out of scope (see the `Metrics` struct docs) and is incidental to the
     // assertions, which are all about template/runtime tag reconciliation.
     #[test]
+    #[doc(alias = "org.apache.kafka.common.metrics.MetricsTest#testMetricInstances")]
     fn test_metric_instances() {
         use indexmap::IndexSet;
 
@@ -938,6 +958,7 @@ mod tests {
 
     // MetricsTest.testHierarchicalSensors (WindowedCount substituted with CumulativeCount)
     #[test]
+    #[doc(alias = "org.apache.kafka.common.metrics.MetricsTest#testHierarchicalSensors")]
     fn test_hierarchical_sensors() {
         let metrics = Metrics::new();
         let parent1 = metrics.sensor("test.parent1").unwrap();
@@ -1010,6 +1031,7 @@ mod tests {
 
     // MetricsTest.testBadSensorHierarchy
     #[test]
+    #[doc(alias = "org.apache.kafka.common.metrics.MetricsTest#testBadSensorHierarchy")]
     fn test_bad_sensor_hierarchy() {
         let metrics = Metrics::new();
         let p = metrics.sensor("parent").unwrap();
@@ -1023,6 +1045,7 @@ mod tests {
 
     // MetricsTest.testRemoveChildSensor
     #[test]
+    #[doc(alias = "org.apache.kafka.common.metrics.MetricsTest#testRemoveChildSensor")]
     fn test_remove_child_sensor() {
         let metrics = Metrics::new();
         let parent = metrics.sensor("parent").unwrap();
@@ -1039,6 +1062,7 @@ mod tests {
 
     // MetricsTest.testRemoveSensor (WindowedCount substituted with CumulativeCount)
     #[test]
+    #[doc(alias = "org.apache.kafka.common.metrics.MetricsTest#testRemoveSensor")]
     fn test_remove_sensor() {
         let metrics = Metrics::new();
         let size = metrics.metrics().len();
@@ -1112,6 +1136,7 @@ mod tests {
 
     // MetricsTest.testRemoveMetric (WindowedCount substituted with CumulativeCount)
     #[test]
+    #[doc(alias = "org.apache.kafka.common.metrics.MetricsTest#testRemoveMetric")]
     fn test_remove_metric() {
         let metrics = Metrics::new();
         let size = metrics.metrics().len();
@@ -1134,6 +1159,7 @@ mod tests {
 
     // MetricsTest.testDuplicateMetricName (Avg/CumulativeSum substituted)
     #[test]
+    #[doc(alias = "org.apache.kafka.common.metrics.MetricsTest#testDuplicateMetricName")]
     fn test_duplicate_metric_name() {
         let metrics = Metrics::new();
         metrics
@@ -1151,6 +1177,7 @@ mod tests {
 
     // MetricsTest.testRemoveInactiveMetrics (WindowedCount substituted; ExpireSensorTask → expire_sensors)
     #[test]
+    #[doc(alias = "org.apache.kafka.common.metrics.MetricsTest#testRemoveInactiveMetrics")]
     fn test_remove_inactive_metrics() {
         let (metrics, time) = metrics_with_mock();
 
@@ -1260,6 +1287,7 @@ mod tests {
     // method. The Percentiles row is OUT OF SCOPE (consumer doesn't use them; see
     // Phase M2 PLAN Skips) and is therefore omitted.
     #[test]
+    #[doc(alias = "org.apache.kafka.common.metrics.MetricsTest#testSimpleStats")]
     fn test_simple_stats() {
         use crate::common::metrics::internals::TimeUnit;
         use crate::common::metrics::stats::{Avg, Max, Meter, Min, WindowedCount};
@@ -1357,6 +1385,7 @@ mod tests {
 
     // MetricsTest.testRateWindowing
     #[test]
+    #[doc(alias = "org.apache.kafka.common.metrics.MetricsTest#testRateWindowing")]
     fn test_rate_windowing() {
         use crate::common::metrics::internals::{MetricsUtils, TimeUnit};
         use crate::common::metrics::stats::{Meter, WindowedCount};

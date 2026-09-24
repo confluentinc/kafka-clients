@@ -34,6 +34,7 @@ const GROUP_ID: &str = "group";
 
 /// Translated from `ConsumerGroupMetadataTest.testAssignmentConstructor`.
 #[test]
+#[doc(alias = "org.apache.kafka.clients.consumer.ConsumerGroupMetadataTest#testAssignmentConstructor")]
 fn test_assignment_constructor() {
     let member_id = "member";
     let generation_id = 2;
@@ -58,6 +59,7 @@ fn test_assignment_constructor() {
 /// `JoinGroupRequest.UNKNOWN_GENERATION_ID = -1` and
 /// `JoinGroupRequest.UNKNOWN_MEMBER_ID = ""` per the Java request module.
 #[test]
+#[doc(alias = "org.apache.kafka.clients.consumer.ConsumerGroupMetadataTest#testGroupIdConstructor")]
 fn test_group_id_constructor() {
     let group_metadata = ConsumerGroupMetadata::new(GROUP_ID);
 

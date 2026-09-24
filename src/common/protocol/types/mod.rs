@@ -53,6 +53,7 @@ pub enum SchemaType {
 /// A field definition in a schema.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
+#[doc(alias = "org.apache.kafka.common.protocol.types.Field")]
 pub struct Field {
     /// The name of the field (snake_case).
     pub(crate) name: &'static str,
@@ -68,6 +69,7 @@ impl Field {
     /// `Field` is `#[non_exhaustive]`, so a struct literal only compiles inside
     /// this crate. The generated `fn schema()` bodies compile into the external
     /// test crates too, so they go through this constructor instead.
+    #[doc(alias = "org.apache.kafka.common.protocol.types.Field#Field")]
     pub const fn new(name: &'static str, field_type: SchemaType, about: &'static str) -> Self {
         Field { name, field_type, about }
     }
@@ -91,6 +93,7 @@ impl Field {
 /// A field definition bound to a particular schema.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
+#[doc(alias = "org.apache.kafka.common.protocol.types.BoundField")]
 pub struct BoundField {
     /// The field definition.
     pub(crate) def: Field,
@@ -110,6 +113,7 @@ impl BoundField {
 
 /// A schema describing the fields in a Kafka protocol message at a particular version.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.protocol.types.Schema")]
 pub struct Schema {
     /// The fields in this schema.
     fields: Vec<Field>,
@@ -119,6 +123,7 @@ pub struct Schema {
 
 impl Schema {
     /// Create a new schema from a list of fields.
+    #[doc(alias = "org.apache.kafka.common.protocol.types.Schema#Schema")]
     pub fn new(fields: Vec<Field>) -> Self {
         let mut fields_by_name = HashMap::with_capacity(fields.len());
         for (i, field) in fields.iter().enumerate() {
@@ -128,6 +133,7 @@ impl Schema {
     }
 
     /// Get a bound field by its name, or `None` if not found.
+    #[doc(alias = "org.apache.kafka.common.protocol.types.Schema#get")]
     pub fn get(&self, name: &str) -> Option<BoundField> {
         self.fields_by_name
             .get(name)
@@ -140,16 +146,19 @@ impl Schema {
     }
 
     /// The fields in this schema.
+    #[doc(alias = "org.apache.kafka.common.protocol.types.Schema#fields")]
     pub fn fields(&self) -> &[Field] {
         &self.fields
     }
 
     /// The number of fields in this schema.
+    #[doc(alias = "org.apache.kafka.common.protocol.types.Schema#numFields")]
     pub fn num_fields(&self) -> usize {
         self.fields.len()
     }
 
     /// Walk the schema with a visitor, calling `visit` for each field type.
+    #[doc(alias = "org.apache.kafka.common.protocol.types.Schema#walk")]
     pub fn walk<F: FnMut(&SchemaType)>(&self, mut visitor: F) {
         for field in &self.fields {
             visitor(&field.field_type);

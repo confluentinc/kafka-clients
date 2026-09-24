@@ -170,6 +170,7 @@ struct BatchMetadata {
 ///
 /// Corresponds to
 /// `org.apache.kafka.clients.consumer.internals.CompletedFetch`.
+#[doc(alias = "org.apache.kafka.clients.consumer.internals.CompletedFetch")]
 pub(crate) struct CompletedFetch {
     /// The partition this batch belongs to.
     pub(crate) partition: TopicPartition,
@@ -293,6 +294,7 @@ impl CompletedFetch {
     ///   TopicPartition, PartitionData, FetchMetricsAggregator, Long)` —
     /// minus the logger (we use the `log` crate). Phase M3 plumbs the
     /// `FetchMetricsAggregator` (dropped by Phase 7a).
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.CompletedFetch#CompletedFetch")]
     pub(crate) fn with_full(
         subscriptions: Arc<Mutex<SubscriptionState>>,
         decompression_buffer_supplier: Arc<BufferSupplier>,
@@ -328,6 +330,7 @@ impl CompletedFetch {
 
     /// Lightweight constructor used by tests / [`FetchBuffer`] when the
     /// subscription state and buffer supplier are not yet wired.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.CompletedFetch#CompletedFetch")]
     pub(crate) fn new(partition: TopicPartition, partition_data: PartitionData) -> Self {
         let aborted_transactions = build_aborted_transactions(&partition_data);
         let topic_arc: Arc<str> = Arc::from(partition.topic());
@@ -354,6 +357,7 @@ impl CompletedFetch {
     }
 
     /// Returns the offset the next fetch round should start at.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.CompletedFetch#nextFetchOffset")]
     pub(crate) fn next_fetch_offset(&self) -> i64 {
         self.next_fetch_offset
     }
@@ -370,28 +374,33 @@ impl CompletedFetch {
     }
 
     /// Returns the most recent partition-leader epoch observed in a batch.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.CompletedFetch#lastEpoch")]
     pub(crate) fn last_epoch(&self) -> Option<i32> {
         self.last_epoch
     }
 
     /// Returns whether this fetch has been initialized (i.e. the cursor
     /// has been positioned at the first batch).
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.CompletedFetch#isInitialized")]
     pub(crate) fn is_initialized(&self) -> bool {
         self.initialized
     }
 
     /// Marks this fetch as initialized. Called by Phase 7b's
     /// `FetchCollector` after position validation.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.CompletedFetch#setInitialized")]
     pub(crate) fn set_initialized(&mut self) {
         self.initialized = true;
     }
 
     /// Returns whether the fetch has been fully consumed (or drained).
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.CompletedFetch#isConsumed")]
     pub(crate) fn is_consumed(&self) -> bool {
         self.is_consumed
     }
 
     /// Drops iteration state and marks the fetch consumed. Idempotent.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.CompletedFetch#drain")]
     pub(crate) fn drain(&mut self) {
         if self.is_consumed {
             return;
@@ -464,6 +473,7 @@ impl CompletedFetch {
     /// (Java's `corruptLastRecord` re-raise path), or a fresh
     /// deserialization error if a record fails to decode and no records
     /// were successfully decoded in this call.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.CompletedFetch#fetchRecords")]
     pub(crate) fn fetch_records<K, V>(
         &mut self,
         config: &FetchConfig,
@@ -1030,6 +1040,7 @@ impl CompletedFetch {
     /// recoverable error — the same treatment [`Self::peek_current_record`] gives a
     /// malformed data record. Java throws `InvalidRecordException` from
     /// `ControlRecordType.parse`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.CompletedFetch#containsAbortMarker")]
     fn contains_abort_marker(&self, batch: &BatchMetadata, source: &RecordSource) -> Result<bool, Error> {
         if !batch.is_control_batch {
             return Ok(false);
@@ -1232,6 +1243,7 @@ impl CompletedFetch {
 
     /// Drains aborted-transaction entries up to and including `offset`,
     /// recording their producer IDs in `aborted_producer_ids`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.CompletedFetch#consumeAbortedTransactionsUpTo")]
     fn consume_aborted_transactions_up_to(&mut self, offset: i64) {
         while let Some(top) = self.aborted_transactions.peek() {
             if top.0.first_offset <= offset {
@@ -1318,6 +1330,7 @@ fn wrap_deserialization_error(
     ))
 }
 
+#[doc(alias = "org.apache.kafka.clients.consumer.internals.CompletedFetch#maybeLeaderEpoch")]
 fn maybe_leader_epoch(epoch: i32) -> Option<i32> {
     if epoch == NO_PARTITION_LEADER_EPOCH {
         None
@@ -1658,6 +1671,7 @@ mod tests {
 
     /// Translated from `CompletedFetchTest.testSimple`.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.CompletedFetchTest#testSimple")]
     fn test_simple() {
         let fetch_offset = 5;
         let starting_offset = 10;
@@ -2087,6 +2101,7 @@ mod tests {
 
     /// Translated from `CompletedFetchTest.testNegativeFetchCount`.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.CompletedFetchTest#testNegativeFetchCount")]
     fn test_negative_fetch_count() {
         let bytes = new_records(0, 10, 0);
         let mut cf = new_completed_fetch(0, bytes);
@@ -2101,6 +2116,7 @@ mod tests {
 
     /// Translated from `CompletedFetchTest.testNoRecordsInFetch`.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.CompletedFetchTest#testNoRecordsInFetch")]
     fn test_no_records_in_fetch() {
         let mut partition_data = PartitionData::new();
         partition_data.set_partition_index(0);

@@ -32,6 +32,7 @@ use super::{ConcreteRequest, ConcreteResponse, DeleteAclsResponse, RequestBuilde
 ///
 /// Corresponds to `org.apache.kafka.common.requests.DeleteAclsRequest`.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.DeleteAclsRequest")]
 pub struct DeleteAclsRequest {
     data: DeleteAclsRequestData,
     version: i16,
@@ -39,11 +40,13 @@ pub struct DeleteAclsRequest {
 
 impl DeleteAclsRequest {
     /// Creates a new `DeleteAclsRequest` from data and version.
+    #[doc(alias = "org.apache.kafka.common.requests.DeleteAclsRequest#DeleteAclsRequest")]
     pub fn new(data: DeleteAclsRequestData, version: i16) -> Self {
         Self { data, version }
     }
 
     /// Returns a reference to the underlying data.
+    #[doc(alias = "org.apache.kafka.common.requests.DeleteAclsRequest#data")]
     pub fn data(&self) -> &DeleteAclsRequestData {
         &self.data
     }
@@ -66,6 +69,7 @@ impl DeleteAclsRequest {
     /// Reconstructs the [`AclBindingFilter`]s from the wire data.
     ///
     /// Mirrors `DeleteAclsRequest.filters()`.
+    #[doc(alias = "org.apache.kafka.common.requests.DeleteAclsRequest#filters")]
     pub fn filters(&self) -> Vec<AclBindingFilter> {
         self.data.filters.iter().map(Self::acl_binding_filter).collect()
     }
@@ -74,6 +78,7 @@ impl DeleteAclsRequest {
     /// given error.
     ///
     /// Mirrors `DeleteAclsRequest.getErrorResponse`.
+    #[doc(alias = "org.apache.kafka.common.requests.DeleteAclsRequest#getErrorResponse")]
     pub fn get_error_response(&self, throttle_time_ms: i32, error: &Errors) -> ConcreteResponse {
         let mut filter_result = DeleteAclsFilterResult::new();
         filter_result.set_error_code(error.code());
@@ -90,6 +95,7 @@ impl DeleteAclsRequest {
     /// # Errors
     ///
     /// Returns an error if parsing fails.
+    #[doc(alias = "org.apache.kafka.common.requests.DeleteAclsRequest#parse")]
     pub fn parse(readable: &mut dyn Readable, version: i16) -> io::Result<Self> {
         let data = DeleteAclsRequestData::read(readable, version)?;
         Ok(Self::new(data, version))
@@ -98,6 +104,7 @@ impl DeleteAclsRequest {
     /// Builds a wire [`DeleteAclsFilter`] from an [`AclBindingFilter`].
     ///
     /// Mirrors `DeleteAclsRequest.deleteAclsFilter`.
+    #[doc(alias = "org.apache.kafka.common.requests.DeleteAclsRequest#deleteAclsFilter")]
     pub fn delete_acls_filter(filter: &AclBindingFilter) -> DeleteAclsFilter {
         let mut wire = DeleteAclsFilter::new();
         wire.set_resource_name_filter(filter.pattern_filter().name().map(str::to_string))
@@ -113,6 +120,7 @@ impl DeleteAclsRequest {
     /// Reconstructs an [`AclBindingFilter`] from a wire [`DeleteAclsFilter`].
     ///
     /// Mirrors `DeleteAclsRequest.aclBindingFilter`.
+    #[doc(alias = "org.apache.kafka.common.requests.DeleteAclsRequest#aclBindingFilter")]
     fn acl_binding_filter(filter: &DeleteAclsFilter) -> AclBindingFilter {
         let pattern_filter = ResourcePatternFilter::new(
             ResourceType::from_code(filter.resource_type_filter),
@@ -139,6 +147,7 @@ impl std::fmt::Display for DeleteAclsRequest {
 ///
 /// Corresponds to `DeleteAclsRequest.Builder` in Java.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.DeleteAclsRequest$Builder")]
 pub struct DeleteAclsRequestBuilder {
     data: DeleteAclsRequestData,
     oldest_allowed_version: i16,
@@ -147,6 +156,7 @@ pub struct DeleteAclsRequestBuilder {
 
 impl DeleteAclsRequestBuilder {
     /// Creates a builder from existing data.
+    #[doc(alias = "org.apache.kafka.common.requests.DeleteAclsRequest$Builder#Builder")]
     pub fn new(data: DeleteAclsRequestData) -> Self {
         Self {
             data,

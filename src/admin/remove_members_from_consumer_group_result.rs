@@ -32,6 +32,7 @@ type MemberErrors = HashMap<MemberIdentity, Errors>;
 /// Corresponds to
 /// `org.apache.kafka.clients.admin.RemoveMembersFromConsumerGroupResult`.
 #[derive(Clone, Debug)]
+#[doc(alias = "org.apache.kafka.clients.admin.RemoveMembersFromConsumerGroupResult")]
 pub struct RemoveMembersFromConsumerGroupResult {
     future: KafkaFuture<MemberErrors>,
     member_infos: HashSet<MemberToRemove>,
@@ -40,11 +41,15 @@ pub struct RemoveMembersFromConsumerGroupResult {
 impl RemoveMembersFromConsumerGroupResult {
     /// Creates a result wrapping the per-member-error future and the set of
     /// members from the original request (empty in `removeAll` mode).
+    #[doc(
+        alias = "org.apache.kafka.clients.admin.RemoveMembersFromConsumerGroupResult#RemoveMembersFromConsumerGroupResult"
+    )]
     pub(crate) fn new(future: KafkaFuture<MemberErrors>, member_infos: HashSet<MemberToRemove>) -> Self {
         Self { future, member_infos }
     }
 
     /// Whether all members were removed (no specific members were provided).
+    #[doc(alias = "org.apache.kafka.clients.admin.RemoveMembersFromConsumerGroupResult#removeAll")]
     fn remove_all(&self) -> bool {
         self.member_infos.is_empty()
     }
@@ -54,6 +59,7 @@ impl RemoveMembersFromConsumerGroupResult {
     /// is returned.
     ///
     /// Mirrors `all()`.
+    #[doc(alias = "org.apache.kafka.clients.admin.RemoveMembersFromConsumerGroupResult#all")]
     pub fn all(&self) -> KafkaFuture<()> {
         // Stable iteration order for a deterministic "first error" (Java relies
         // on unspecified set/map iteration order anyway).
@@ -97,6 +103,7 @@ impl RemoveMembersFromConsumerGroupResult {
     /// called in `removeAll` mode, or when `member` was not part of the original
     /// request. The returned future fails if the member's removal failed (or the
     /// member is missing from the response).
+    #[doc(alias = "org.apache.kafka.clients.admin.RemoveMembersFromConsumerGroupResult#memberResult")]
     pub fn member_result(&self, member: &MemberToRemove) -> Result<KafkaFuture<()>, Error> {
         if self.remove_all() {
             return Err(Error::local_illegal_argument(

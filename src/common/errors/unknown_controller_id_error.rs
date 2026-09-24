@@ -24,6 +24,7 @@ kafka_error_class! {
     ///
     /// Java `extends` chain:
     ///    `UnknownControllerIdException` -> `ApiException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.UnknownControllerIdException")]
     UnknownControllerIdError,
     code: Errors::UnknownControllerId,
     extends: [

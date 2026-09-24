@@ -25,6 +25,7 @@ kafka_error_class! {
     ///
     /// Java `extends` chain:
     ///    `InvalidTxnTimeoutException` -> `ApiException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.InvalidTxnTimeoutException")]
     InvalidTxnTimeoutError,
     code: Errors::InvalidTransactionTimeout,
     extends: [

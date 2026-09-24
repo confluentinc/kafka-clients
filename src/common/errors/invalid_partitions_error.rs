@@ -24,6 +24,7 @@ kafka_error_class! {
     ///
     /// Java `extends` chain:
     ///    `InvalidPartitionsException` -> `ApiException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.InvalidPartitionsException")]
     InvalidPartitionsError,
     code: Errors::InvalidPartitions,
     extends: [

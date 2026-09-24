@@ -33,6 +33,7 @@ use crate::consumer::internals::SubscriptionState;
 /// per-response `FetchMetricsAggregator`. Sensors record through interior
 /// mutability (`&self`); the assignment-tracking fields are mutated only from
 /// the bg task's `maybe_update_assignment` (`&mut self`).
+#[doc(alias = "org.apache.kafka.clients.consumer.internals.FetchMetricsManager")]
 pub(crate) struct FetchMetricsManager {
     metrics: Arc<Metrics>,
     metrics_registry: FetchMetricsRegistry,
@@ -56,26 +57,32 @@ struct AssignmentTracking {
 }
 
 impl FetchMetricsManager {
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.FetchMetricsManager#topicBytesFetchedMetricName")]
     fn topic_bytes_fetched_metric_name(topic: &str) -> String {
         format!("topic.{topic}.bytes-fetched")
     }
 
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.FetchMetricsManager#topicRecordsFetchedMetricName")]
     fn topic_records_fetched_metric_name(topic: &str) -> String {
         format!("topic.{topic}.records-fetched")
     }
 
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.FetchMetricsManager#partitionRecordsLeadMetricName")]
     fn partition_records_lead_metric_name(tp: &TopicPartition) -> String {
         format!("{tp}.records-lead")
     }
 
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.FetchMetricsManager#partitionRecordsLagMetricName")]
     fn partition_records_lag_metric_name(tp: &TopicPartition) -> String {
         format!("{tp}.records-lag")
     }
 
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.FetchMetricsManager#deprecatedMetricName")]
     fn deprecated_metric_name(name: &str) -> String {
         format!("{name}.deprecated")
     }
 
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.FetchMetricsManager#shouldReportDeprecatedMetric")]
     fn should_report_deprecated_metric(topic: &str) -> bool {
         topic.contains('.')
     }
@@ -129,12 +136,14 @@ impl FetchMetricsManager {
 
     /// Deprecated topic tag: periods replaced with underscores
     /// (Java `topicTags`).
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.FetchMetricsManager#topicTags")]
     pub(crate) fn topic_tags(topic: &str) -> BTreeMap<String, String> {
         Self::single_tag("topic", &topic.replace('.', "_"))
     }
 
     /// Deprecated `{topic, partition}` tags: topic periods replaced with
     /// underscores (Java `topicPartitionTags`).
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.FetchMetricsManager#topicPartitionTags")]
     pub(crate) fn topic_partition_tags(tp: &TopicPartition) -> BTreeMap<String, String> {
         let mut tags = BTreeMap::new();
         tags.insert("topic".to_string(), tp.topic().replace('.', "_"));
@@ -160,6 +169,7 @@ impl FetchMetricsManager {
     /// fetch metrics, so we record the full per-partition metric set per
     /// partition per poll at the default INFO level — the accepted Java-parity
     /// cost (to be measured in M8). The metric VALUES are Java-identical.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.FetchMetricsManager#FetchMetricsManager")]
     pub(crate) fn new(metrics: Arc<Metrics>, metrics_registry: FetchMetricsRegistry) -> Self {
         // Each `build_*` closure registers one sensor and returns it (or the
         // registration error). Sensor registration only fails on a duplicate
@@ -271,12 +281,14 @@ impl FetchMetricsManager {
     /// documented carry-over for the network-client metrics pass. Exercised by
     /// the manager test, which records through this sensor directly.
     #[cfg_attr(not(test), allow(dead_code))]
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.FetchMetricsManager#throttleTimeSensor")]
     pub(crate) fn throttle_time_sensor(&self) -> Arc<Sensor> {
         Arc::clone(&self.throttle_time)
     }
 
     /// Records the latency of a fetch request against the client-level sensor
     /// and, if present, the per-node latency sensor.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.FetchMetricsManager#recordLatency")]
     pub(crate) fn record_latency(&self, node: &str, request_latency_ms: i64) {
         self.fetch_latency.record_value(request_latency_ms as f64);
         if !node.is_empty() {
@@ -288,11 +300,13 @@ impl FetchMetricsManager {
     }
 
     /// Records the number of bytes fetched at the client level.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.FetchMetricsManager#recordBytesFetched")]
     pub(crate) fn record_bytes_fetched(&self, bytes: i32) {
         self.bytes_fetched.record_value(bytes as f64);
     }
 
     /// Records the number of records fetched at the client level.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.FetchMetricsManager#recordRecordsFetched")]
     pub(crate) fn record_records_fetched(&self, records: i32) {
         self.records_fetched.record_value(records as f64);
     }
@@ -352,6 +366,7 @@ impl FetchMetricsManager {
     /// as Java does (`FetchMetricsManager.recordPartitionLag`). There is no
     /// DEBUG gating: a default (INFO) consumer records the full per-partition
     /// metric set per partition per poll — the accepted Java-parity cost.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.FetchMetricsManager#recordPartitionLag")]
     pub(crate) fn record_partition_lag(&self, tp: &TopicPartition, lag: i64) {
         self.records_lag.record_value(lag as f64);
 
@@ -378,6 +393,7 @@ impl FetchMetricsManager {
     /// Both the client-level `records-lead-min` sensor and the DETAILED
     /// per-partition lead sensors are INFO and recorded unconditionally, exactly
     /// as Java does (see [`Self::record_partition_lag`]).
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.FetchMetricsManager#recordPartitionLead")]
     pub(crate) fn record_partition_lead(&self, tp: &TopicPartition, lead: i64) {
         self.records_lead.record_value(lead as f64);
 
@@ -407,6 +423,7 @@ impl FetchMetricsManager {
     /// (the caller holds the bg-task lock). The preferred-read-replica gauge
     /// closure captures an `Arc<Mutex<SubscriptionState>>` so it can read the
     /// preferred replica lazily when the metric is measured.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.FetchMetricsManager#maybeUpdateAssignment")]
     pub(crate) fn maybe_update_assignment(&self, subscription: &Arc<Mutex<SubscriptionState>>) {
         // Mirror Java's lazy ordering (`maybeUpdateAssignment`): read only the
         // cheap `assignmentId()` first, and acquire the (allocating)
@@ -480,6 +497,7 @@ impl FetchMetricsManager {
     }
 
     // To be removed in Kafka 5.0 release.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.FetchMetricsManager#maybeRecordDeprecatedBytesFetched")]
     fn maybe_record_deprecated_bytes_fetched(&self, name: &str, topic: &str, bytes: i32) {
         if !FetchMetricsManager::should_report_deprecated_metric(topic) {
             return;
@@ -507,6 +525,9 @@ impl FetchMetricsManager {
     }
 
     // To be removed in Kafka 5.0 release.
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.FetchMetricsManager#maybeRecordDeprecatedRecordsFetched"
+    )]
     fn maybe_record_deprecated_records_fetched(&self, name: &str, topic: &str, records: i32) {
         if !FetchMetricsManager::should_report_deprecated_metric(topic) {
             return;
@@ -534,6 +555,7 @@ impl FetchMetricsManager {
     }
 
     // To be removed in Kafka 5.0 release.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.FetchMetricsManager#maybeRecordDeprecatedPartitionLag")]
     fn maybe_record_deprecated_partition_lag(&self, name: &str, tp: &TopicPartition, lag: i64) {
         if !FetchMetricsManager::should_report_deprecated_metric(tp.topic()) {
             return;
@@ -559,6 +581,7 @@ impl FetchMetricsManager {
     }
 
     // To be removed in Kafka 5.0 release.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.FetchMetricsManager#maybeRecordDeprecatedPartitionLead")]
     fn maybe_record_deprecated_partition_lead(&self, name: &str, tp: &TopicPartition, lead: f64) {
         if !FetchMetricsManager::should_report_deprecated_metric(tp.topic()) {
             return;
@@ -584,6 +607,9 @@ impl FetchMetricsManager {
     }
 
     // To be removed in Kafka 5.0 release.
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.FetchMetricsManager#maybeRecordDeprecatedPreferredReadReplica"
+    )]
     fn maybe_record_deprecated_preferred_read_replica(
         &self,
         tp: &TopicPartition,
@@ -610,6 +636,9 @@ impl FetchMetricsManager {
         }
     }
 
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.FetchMetricsManager#partitionPreferredReadReplicaMetricName"
+    )]
     fn partition_preferred_read_replica_metric_name(&self, tp: &TopicPartition) -> Option<crate::common::MetricName> {
         let tags = FetchMetricsManager::topic_partition_tags_raw(tp);
         self.metrics
@@ -617,6 +646,9 @@ impl FetchMetricsManager {
             .ok()
     }
 
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.FetchMetricsManager#deprecatedPartitionPreferredReadReplicaMetricName"
+    )]
     fn deprecated_partition_preferred_read_replica_metric_name(
         &self,
         tp: &TopicPartition,
@@ -715,6 +747,7 @@ mod tests {
 
     /// `FetchMetricsManagerTest.testLatency`
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.FetchMetricsManagerTest#testLatency")]
     fn test_latency() {
         let f = setup();
         f.manager.record_latency("", 123);
@@ -727,6 +760,7 @@ mod tests {
 
     /// `FetchMetricsManagerTest.testNodeLatency`
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.FetchMetricsManagerTest#testNodeLatency")]
     fn test_node_latency() {
         let f = setup();
         let connection_id = "0";
@@ -756,6 +790,7 @@ mod tests {
 
     /// `FetchMetricsManagerTest.testBytesFetched`
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.FetchMetricsManagerTest#testBytesFetched")]
     fn test_bytes_fetched() {
         let f = setup();
         f.manager.record_bytes_fetched(2);
@@ -768,6 +803,7 @@ mod tests {
 
     /// `FetchMetricsManagerTest.testBytesFetchedTopic`
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.FetchMetricsManagerTest#testBytesFetchedTopic")]
     fn test_bytes_fetched_topic() {
         let f = setup();
         let topic_name1 = TOPIC_NAME;
@@ -813,6 +849,7 @@ mod tests {
 
     /// `FetchMetricsManagerTest.testRecordsFetched`
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.FetchMetricsManagerTest#testRecordsFetched")]
     fn test_records_fetched() {
         let f = setup();
         f.manager.record_records_fetched(3);
@@ -824,6 +861,7 @@ mod tests {
 
     /// `FetchMetricsManagerTest.testRecordsFetchedTopic`
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.FetchMetricsManagerTest#testRecordsFetchedTopic")]
     fn test_records_fetched_topic() {
         let f = setup();
         let topic_name1 = TOPIC_NAME;
@@ -870,6 +908,7 @@ mod tests {
     /// level, exactly like the Java test: the per-partition lag sensors are INFO
     /// (full Java parity, no DEBUG gating — see `FetchMetricsManager` ctor doc).
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.FetchMetricsManagerTest#testPartitionLag")]
     fn test_partition_lag() {
         let f = setup();
         let tp1 = TopicPartition::new(TOPIC_NAME, 0);
@@ -920,6 +959,7 @@ mod tests {
 
     /// `FetchMetricsManagerTest.testPartitionLead` (default INFO, see `test_partition_lag`).
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.FetchMetricsManagerTest#testPartitionLead")]
     fn test_partition_lead() {
         let f = setup();
         let tp1 = TopicPartition::new(TOPIC_NAME, 0);
@@ -974,6 +1014,7 @@ mod tests {
 
     /// `FetchMetricsManagerTest.testMaybeUpdateAssignment`
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.FetchMetricsManagerTest#testMaybeUpdateAssignment")]
     fn test_maybe_update_assignment() {
         let f = setup();
         let tp1 = TopicPartition::new(TOPIC_NAME, 0);
@@ -1048,6 +1089,9 @@ mod tests {
     /// so the per-partition lag/lead sensors register", which was never true of
     /// this test or of the sensors.)
     #[test]
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.FetchMetricsManagerTest#testMaybeUpdateAssignmentWithAdditionalRegisteredMetrics"
+    )]
     fn test_maybe_update_assignment_with_additional_registered_metrics() {
         let f = setup();
         let tp1 = TopicPartition::new(TOPIC_NAME, 0);

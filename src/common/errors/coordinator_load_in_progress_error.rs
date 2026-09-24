@@ -25,6 +25,7 @@ kafka_error_class! {
     /// Java `extends` chain:
     ///    `CoordinatorLoadInProgressException` -> `RetriableException` ->
     ///   `ApiException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.CoordinatorLoadInProgressException")]
     CoordinatorLoadInProgressError,
     code: Errors::CoordinatorLoadInProgress,
     extends: [

@@ -29,6 +29,7 @@ use super::{ConcreteRequest, ConcreteResponse, IncrementalAlterConfigsResponse, 
 ///
 /// Corresponds to `org.apache.kafka.common.requests.IncrementalAlterConfigsRequest`.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.IncrementalAlterConfigsRequest")]
 pub struct IncrementalAlterConfigsRequest {
     data: IncrementalAlterConfigsRequestData,
     version: i16,
@@ -36,11 +37,13 @@ pub struct IncrementalAlterConfigsRequest {
 
 impl IncrementalAlterConfigsRequest {
     /// Creates a new `IncrementalAlterConfigsRequest` from data and version.
+    #[doc(alias = "org.apache.kafka.common.requests.IncrementalAlterConfigsRequest#IncrementalAlterConfigsRequest")]
     pub fn new(data: IncrementalAlterConfigsRequestData, version: i16) -> Self {
         Self { data, version }
     }
 
     /// Returns a reference to the underlying data.
+    #[doc(alias = "org.apache.kafka.common.requests.IncrementalAlterConfigsRequest#data")]
     pub fn data(&self) -> &IncrementalAlterConfigsRequestData {
         &self.data
     }
@@ -66,6 +69,7 @@ impl IncrementalAlterConfigsRequest {
     /// Mirrors `IncrementalAlterConfigsRequest.getErrorResponse` (Java uses
     /// `ApiError.fromThrowable`); the enum-dispatch caller supplies the mapped
     /// [`Errors`] directly.
+    #[doc(alias = "org.apache.kafka.common.requests.IncrementalAlterConfigsRequest#getErrorResponse")]
     pub fn get_error_response(&self, throttle_time_ms: i32, error: &Errors) -> ConcreteResponse {
         let mut data = IncrementalAlterConfigsResponseData::new();
         data.set_throttle_time_ms(throttle_time_ms);
@@ -92,6 +96,7 @@ impl IncrementalAlterConfigsRequest {
     /// # Errors
     ///
     /// Returns an error if parsing fails.
+    #[doc(alias = "org.apache.kafka.common.requests.IncrementalAlterConfigsRequest#parse")]
     pub fn parse(readable: &mut dyn Readable, version: i16) -> io::Result<Self> {
         let data = IncrementalAlterConfigsRequestData::read(readable, version)?;
         Ok(Self::new(data, version))
@@ -120,6 +125,7 @@ impl std::fmt::Display for IncrementalAlterConfigsRequest {
 /// and this builder only wraps the pre-built data (`common::requests` must not
 /// depend on the `admin` module).
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.IncrementalAlterConfigsRequest$Builder")]
 pub struct IncrementalAlterConfigsRequestBuilder {
     data: IncrementalAlterConfigsRequestData,
     oldest_allowed_version: i16,
@@ -128,6 +134,7 @@ pub struct IncrementalAlterConfigsRequestBuilder {
 
 impl IncrementalAlterConfigsRequestBuilder {
     /// Creates a builder from existing data.
+    #[doc(alias = "org.apache.kafka.common.requests.IncrementalAlterConfigsRequest$Builder#Builder")]
     pub fn with_data(data: IncrementalAlterConfigsRequestData) -> Self {
         Self {
             data,

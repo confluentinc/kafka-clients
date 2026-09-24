@@ -23,6 +23,7 @@ use std::cmp::Ordering;
 /// The toString() method prints using base64 URL encoding without padding (matching Java's implementation).
 /// Likewise, the from_string method expects a base64 URL encoded string.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[doc(alias = "org.apache.kafka.common.Uuid")]
 pub struct Uuid {
     /// The most significant 64 bits of the UUID
     most_sig_bits: u64,
@@ -42,6 +43,7 @@ impl Uuid {
 
     /// Constructs a 128-bit UUID where the first u64 represents the most significant 64 bits
     /// and the second u64 represents the least significant 64 bits.
+    #[doc(alias = "org.apache.kafka.common.Uuid#Uuid")]
     pub const fn new(most_sig_bits: u64, least_sig_bits: u64) -> Self {
         Uuid { most_sig_bits, least_sig_bits }
     }
@@ -55,6 +57,7 @@ impl Uuid {
     ///
     /// This will not generate a UUID equal to `ZERO_UUID`, `ONE_UUID`, or one whose
     /// string representation starts with a dash ("-").
+    #[doc(alias = "org.apache.kafka.common.Uuid#randomUuid")]
     pub fn random_uuid() -> Self {
         loop {
             let ju = uuid::Uuid::new_v4();
@@ -86,6 +89,7 @@ impl Uuid {
     }
 
     /// Creates a UUID from a 16-byte array in big-endian order.
+    #[doc(alias = "org.apache.kafka.common.Uuid#Uuid")]
     pub fn with_bytes(bytes: [u8; 16]) -> Self {
         let most_sig_bits = u64::from_be_bytes([
             bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
@@ -106,6 +110,7 @@ impl Uuid {
 
     /// Creates a UUID based on a base64 URL encoded string (without padding).
     /// This matches the Java implementation's fromString() method.
+    #[doc(alias = "org.apache.kafka.common.Uuid#fromString")]
     pub fn from_string(s: &str) -> Result<Self, String> {
         if s.len() > 24 {
             return Err(format!(
@@ -366,6 +371,7 @@ mod tests {
     /// We verify hash consistency: equal UUIDs produce equal hashes,
     /// different UUIDs produce different hashes.
     #[test]
+    #[doc(alias = "org.apache.kafka.common.UuidTest#testHashCode")]
     fn test_hash_code() {
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
@@ -396,6 +402,7 @@ mod tests {
     /// Verifies that random UUIDs are not ZERO_UUID, not METADATA_TOPIC_ID,
     /// and do not start with a dash.
     #[test]
+    #[doc(alias = "org.apache.kafka.common.UuidTest#testRandomUuid")]
     fn test_random_uuid() {
         for _ in 0..100 {
             let random_id = Uuid::random_uuid();
@@ -408,6 +415,7 @@ mod tests {
     /// Translated from Java UuidTest.testCompareUuids.
     /// Verifies all 9 comparison combinations of UUIDs (0,0), (0,1), (1,0).
     #[test]
+    #[doc(alias = "org.apache.kafka.common.UuidTest#testCompareUuids")]
     fn test_compare_uuids() {
         let id00 = Uuid::new(0, 0);
         let id01 = Uuid::new(0, 1);

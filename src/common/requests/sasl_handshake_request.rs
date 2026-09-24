@@ -39,6 +39,7 @@ use super::SaslHandshakeResponse;
 ///
 /// Corresponds to `org.apache.kafka.common.requests.SaslHandshakeRequest`.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.SaslHandshakeRequest")]
 pub struct SaslHandshakeRequest {
     data: SaslHandshakeRequestData,
     version: i16,
@@ -46,11 +47,13 @@ pub struct SaslHandshakeRequest {
 
 impl SaslHandshakeRequest {
     /// Creates a new `SaslHandshakeRequest` from data and version.
+    #[doc(alias = "org.apache.kafka.common.requests.SaslHandshakeRequest#SaslHandshakeRequest")]
     pub fn new(data: SaslHandshakeRequestData, version: i16) -> Self {
         Self { data, version }
     }
 
     /// Returns a reference to the underlying data.
+    #[doc(alias = "org.apache.kafka.common.requests.SaslHandshakeRequest#data")]
     pub fn data(&self) -> &SaslHandshakeRequestData {
         &self.data
     }
@@ -74,6 +77,7 @@ impl SaslHandshakeRequest {
     ///
     /// The `throttle_time_ms` parameter is ignored because the SaslHandshake schema
     /// does not include a throttle time field.
+    #[doc(alias = "org.apache.kafka.common.requests.SaslHandshakeRequest#getErrorResponse")]
     pub fn get_error_response(&self, _throttle_time_ms: i32, error: &Errors) -> ConcreteResponse {
         let mut response = SaslHandshakeResponseData::new();
         response.set_error_code(error.code());
@@ -85,6 +89,7 @@ impl SaslHandshakeRequest {
     /// # Errors
     ///
     /// Returns an error if parsing fails.
+    #[doc(alias = "org.apache.kafka.common.requests.SaslHandshakeRequest#parse")]
     pub fn parse(readable: &mut dyn Readable, version: i16) -> io::Result<Self> {
         let data = SaslHandshakeRequestData::read(readable, version)?;
         Ok(Self::new(data, version))
@@ -101,6 +106,7 @@ impl std::fmt::Display for SaslHandshakeRequest {
 ///
 /// Corresponds to `SaslHandshakeRequest.Builder` in Java.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.SaslHandshakeRequest$Builder")]
 pub struct SaslHandshakeRequestBuilder {
     data: SaslHandshakeRequestData,
     oldest_allowed_version: i16,
@@ -109,6 +115,7 @@ pub struct SaslHandshakeRequestBuilder {
 
 impl SaslHandshakeRequestBuilder {
     /// Creates a new builder from the given data.
+    #[doc(alias = "org.apache.kafka.common.requests.SaslHandshakeRequest$Builder#Builder")]
     pub fn new(data: SaslHandshakeRequestData) -> Self {
         Self {
             data,

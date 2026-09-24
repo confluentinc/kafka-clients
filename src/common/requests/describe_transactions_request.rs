@@ -29,6 +29,7 @@ use super::{ConcreteRequest, ConcreteResponse, DescribeTransactionsResponse, Req
 ///
 /// Corresponds to `org.apache.kafka.common.requests.DescribeTransactionsRequest`.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.DescribeTransactionsRequest")]
 pub struct DescribeTransactionsRequest {
     data: DescribeTransactionsRequestData,
     version: i16,
@@ -36,11 +37,13 @@ pub struct DescribeTransactionsRequest {
 
 impl DescribeTransactionsRequest {
     /// Creates a new `DescribeTransactionsRequest` from data and version.
+    #[doc(alias = "org.apache.kafka.common.requests.DescribeTransactionsRequest#DescribeTransactionsRequest")]
     pub fn new(data: DescribeTransactionsRequestData, version: i16) -> Self {
         Self { data, version }
     }
 
     /// Returns a reference to the underlying data.
+    #[doc(alias = "org.apache.kafka.common.requests.DescribeTransactionsRequest#data")]
     pub fn data(&self) -> &DescribeTransactionsRequestData {
         &self.data
     }
@@ -63,6 +66,7 @@ impl DescribeTransactionsRequest {
     /// Creates an error response for this request.
     ///
     /// Mirrors `DescribeTransactionsRequest.getErrorResponse`.
+    #[doc(alias = "org.apache.kafka.common.requests.DescribeTransactionsRequest#getErrorResponse")]
     pub fn get_error_response(&self, throttle_time_ms: i32, error: &Errors) -> ConcreteResponse {
         let mut response = DescribeTransactionsResponseData::new();
         response.set_throttle_time_ms(throttle_time_ms);
@@ -83,6 +87,7 @@ impl DescribeTransactionsRequest {
     /// # Errors
     ///
     /// Returns an error if parsing fails.
+    #[doc(alias = "org.apache.kafka.common.requests.DescribeTransactionsRequest#parse")]
     pub fn parse(readable: &mut dyn Readable, version: i16) -> io::Result<Self> {
         let data = DescribeTransactionsRequestData::read(readable, version)?;
         Ok(Self::new(data, version))
@@ -99,12 +104,14 @@ impl std::fmt::Display for DescribeTransactionsRequest {
 ///
 /// Corresponds to `DescribeTransactionsRequest.Builder`.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.DescribeTransactionsRequest$Builder")]
 pub struct DescribeTransactionsRequestBuilder {
     data: DescribeTransactionsRequestData,
 }
 
 impl DescribeTransactionsRequestBuilder {
     /// Creates a builder from the given request data.
+    #[doc(alias = "org.apache.kafka.common.requests.DescribeTransactionsRequest$Builder#Builder")]
     pub fn new(data: DescribeTransactionsRequestData) -> Self {
         Self { data }
     }

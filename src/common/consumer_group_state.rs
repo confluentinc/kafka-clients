@@ -28,6 +28,7 @@ use std::fmt;
 #[deprecated(since = "4.0.0", note = "Use GroupState instead")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
+#[doc(alias = "org.apache.kafka.common.ConsumerGroupState")]
 pub enum ConsumerGroupState {
     /// An unrecognized consumer group state.
     Unknown,
@@ -69,6 +70,7 @@ impl ConsumerGroupState {
     ///
     /// Returns [`ConsumerGroupState::Unknown`] if the name is unrecognized,
     /// mirroring Java's `parse`.
+    #[doc(alias = "org.apache.kafka.common.ConsumerGroupState#parse")]
     pub fn parse(name: &str) -> Self {
         match name.to_uppercase().as_str() {
             "UNKNOWN" => Self::Unknown,

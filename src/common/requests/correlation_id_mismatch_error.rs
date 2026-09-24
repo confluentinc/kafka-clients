@@ -43,6 +43,7 @@ use crate::common::error::{ErrorCode, ErrorHierarchy, ErrorMessage, ErrorSource}
 /// is read by `NetworkClient.parseResponse` to decide whether the response is
 /// unrelated to a SASL request.
 #[derive(Clone, Debug)]
+#[doc(alias = "org.apache.kafka.common.requests.CorrelationIdMismatchException")]
 pub struct CorrelationIdMismatchError {
     message: String,
     request_correlation_id: i32,
@@ -85,6 +86,7 @@ impl CorrelationIdMismatchError {
 
     /// Create the error, mirroring Java's
     /// `CorrelationIdMismatchException(String message, int requestCorrelationId, int responseCorrelationId)`.
+    #[doc(alias = "org.apache.kafka.common.requests.CorrelationIdMismatchException#CorrelationIdMismatchException")]
     pub fn new(message: impl Into<String>, request_correlation_id: i32, response_correlation_id: i32) -> Self {
         Self {
             message: message.into(),
@@ -95,11 +97,13 @@ impl CorrelationIdMismatchError {
     }
 
     /// The correlation id the request carried. Java's `requestCorrelationId()`.
+    #[doc(alias = "org.apache.kafka.common.requests.CorrelationIdMismatchException#requestCorrelationId")]
     pub fn request_correlation_id(&self) -> i32 {
         self.request_correlation_id
     }
 
     /// The correlation id the response carried. Java's `responseCorrelationId()`.
+    #[doc(alias = "org.apache.kafka.common.requests.CorrelationIdMismatchException#responseCorrelationId")]
     pub fn response_correlation_id(&self) -> i32 {
         self.response_correlation_id
     }

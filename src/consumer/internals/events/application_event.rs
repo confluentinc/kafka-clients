@@ -50,6 +50,7 @@ use super::CompletableEventHandle;
 /// `enqueued_ms` is stored on the [`ApplicationEventEnvelope`] wrapper
 /// rather than on each variant, so the bg-task pattern matches stay free
 /// of bookkeeping fields.
+#[doc(alias = "org.apache.kafka.clients.consumer.internals.events.ApplicationEvent")]
 pub(crate) enum ApplicationEvent {
     // ─── Non-completable events ───
     /// `CommitOnCloseEvent` — fire-and-forget commit during close.

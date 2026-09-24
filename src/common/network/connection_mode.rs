@@ -19,6 +19,7 @@
 /// Connection mode for SSL and SASL connections.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
+#[doc(alias = "org.apache.kafka.common.network.ConnectionMode")]
 pub enum ConnectionMode {
     /// Client-side connection.
     Client,

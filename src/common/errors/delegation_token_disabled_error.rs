@@ -24,6 +24,7 @@ kafka_error_class! {
     ///
     /// Java `extends` chain:
     ///    `DelegationTokenDisabledException` -> `ApiException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.DelegationTokenDisabledException")]
     DelegationTokenDisabledError,
     code: Errors::DelegationTokenAuthDisabled,
     extends: [

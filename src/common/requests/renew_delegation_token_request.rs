@@ -29,6 +29,7 @@ use super::{ConcreteRequest, ConcreteResponse, RenewDelegationTokenResponse, Req
 /// Corresponds to
 /// `org.apache.kafka.common.requests.RenewDelegationTokenRequest`.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.RenewDelegationTokenRequest")]
 pub struct RenewDelegationTokenRequest {
     data: RenewDelegationTokenRequestData,
     version: i16,
@@ -36,11 +37,13 @@ pub struct RenewDelegationTokenRequest {
 
 impl RenewDelegationTokenRequest {
     /// Creates a new `RenewDelegationTokenRequest` from data and version.
+    #[doc(alias = "org.apache.kafka.common.requests.RenewDelegationTokenRequest#RenewDelegationTokenRequest")]
     pub fn new(data: RenewDelegationTokenRequestData, version: i16) -> Self {
         Self { data, version }
     }
 
     /// Returns a reference to the underlying data.
+    #[doc(alias = "org.apache.kafka.common.requests.RenewDelegationTokenRequest#data")]
     pub fn data(&self) -> &RenewDelegationTokenRequestData {
         &self.data
     }
@@ -63,6 +66,7 @@ impl RenewDelegationTokenRequest {
     /// Creates an error response for this request.
     ///
     /// Mirrors `RenewDelegationTokenRequest.getErrorResponse`.
+    #[doc(alias = "org.apache.kafka.common.requests.RenewDelegationTokenRequest#getErrorResponse")]
     pub fn get_error_response(&self, throttle_time_ms: i32, error: &Errors) -> ConcreteResponse {
         ConcreteResponse::RenewDelegationToken(RenewDelegationTokenResponse::prepare_response(throttle_time_ms, *error))
     }
@@ -72,6 +76,7 @@ impl RenewDelegationTokenRequest {
     /// # Errors
     ///
     /// Returns an error if parsing fails.
+    #[doc(alias = "org.apache.kafka.common.requests.RenewDelegationTokenRequest#parse")]
     pub fn parse(readable: &mut dyn Readable, version: i16) -> io::Result<Self> {
         let data = RenewDelegationTokenRequestData::read(readable, version)?;
         Ok(Self::new(data, version))
@@ -91,6 +96,7 @@ impl std::fmt::Display for RenewDelegationTokenRequest {
 ///
 /// Corresponds to `RenewDelegationTokenRequest.Builder` in Java.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.RenewDelegationTokenRequest$Builder")]
 pub struct RenewDelegationTokenRequestBuilder {
     data: RenewDelegationTokenRequestData,
     oldest_allowed_version: i16,
@@ -99,6 +105,7 @@ pub struct RenewDelegationTokenRequestBuilder {
 
 impl RenewDelegationTokenRequestBuilder {
     /// Creates a builder from existing data.
+    #[doc(alias = "org.apache.kafka.common.requests.RenewDelegationTokenRequest$Builder#Builder")]
     pub fn new(data: RenewDelegationTokenRequestData) -> Self {
         Self {
             data,

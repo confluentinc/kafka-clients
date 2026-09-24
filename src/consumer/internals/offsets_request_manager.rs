@@ -123,6 +123,7 @@ type FetchOffsetsWaiter = oneshot::Sender<Result<HashMap<TopicPartition, Option<
 /// call from the same set of timestamps can fail with `StaleMetadataException`
 /// and be parked on `requests_to_retry`, where it's replayed when
 /// `OffsetsClusterListener::on_update` fires.
+#[doc(alias = "org.apache.kafka.clients.consumer.internals.OffsetsRequestManager$ListOffsetsRequestState")]
 pub(crate) struct ListOffsetsRequestState {
     /// The input timestamps the caller asked us to resolve. Java:
     /// `ListOffsetsRequestState.timestampsToSearch`.
@@ -151,6 +152,9 @@ pub(crate) struct ListOffsetsRequestState {
 }
 
 impl ListOffsetsRequestState {
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.OffsetsRequestManager$ListOffsetsRequestState#ListOffsetsRequestState"
+    )]
     fn new(timestamps_to_search: HashMap<TopicPartition, i64>, require_timestamps: bool) -> Self {
         Self {
             timestamps_to_search,
@@ -166,6 +170,9 @@ impl ListOffsetsRequestState {
     /// Java: `addPartitionsToRetry`. Records the input timestamp for each
     /// partition that the broker couldn't serve (retriable error / unknown
     /// leader) so the metadata-update replay can rebuild requests.
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.OffsetsRequestManager$ListOffsetsRequestState#addPartitionsToRetry"
+    )]
     fn add_partitions_to_retry(&mut self, partitions: &HashSet<TopicPartition>) {
         for tp in partitions {
             if let Some(ts) = self.timestamps_to_search.get(tp) {
@@ -535,6 +542,7 @@ fn partial_fetched_for_node<'a>(
 /// the callback with `Metadata::add_cluster_update_listener` without
 /// binding the listener's lifetime to the manager's `&mut`. The
 /// callback-shared state lives in [`OffsetsManagerShared`].
+#[doc(alias = "org.apache.kafka.clients.consumer.internals.OffsetsRequestManager")]
 pub(crate) struct OffsetsRequestManager {
     /// Shared state accessible to the [`OffsetsClusterListener`] and to
     /// per-response spawned tasks.
@@ -591,6 +599,7 @@ pub(crate) struct OffsetsRequestManager {
 /// Java holds a `CompletableFuture` whose downstream `whenComplete`
 /// handlers form a chain; Rust uses a `Vec<oneshot::Sender>` because
 /// `oneshot::Receiver` is single-consumer.
+#[doc(alias = "org.apache.kafka.clients.consumer.internals.OffsetsRequestManager$PendingFetchCommittedRequest")]
 struct PendingFetchCommittedRequest {
     requested_partitions: HashSet<TopicPartition>,
     /// Senders waiting for the in-flight fetch to resolve. The first
@@ -643,6 +652,7 @@ impl OffsetsRequestManager {
     /// requires the commit manager non-null and short-circuits the
     /// `initWithCommittedOffsetsIfNeeded` path internally.
     #[allow(clippy::too_many_arguments)] // Mirrors Java constructor argument list.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.OffsetsRequestManager#OffsetsRequestManager")]
     pub(crate) fn new(
         subscription_state: Arc<Mutex<SubscriptionState>>,
         metadata: Arc<ConsumerMetadata>,
@@ -709,6 +719,7 @@ impl OffsetsRequestManager {
     /// call (e.g. `TopicAuthorizationException`), or any
     /// `NoOffsetForPartitionException` raised when a partition needs
     /// reset but no strategy is configured.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.OffsetsRequestManager#resetPositionsIfNeeded")]
     pub(crate) fn reset_positions_if_needed(&mut self, current_time_ms: i64) -> Result<(), Error> {
         let partition_strategies = self
             .shared
@@ -731,6 +742,7 @@ impl OffsetsRequestManager {
     ///
     /// Propagates the cached validate-positions exception from a previous
     /// call (e.g. a saved `LogTruncationException`).
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.OffsetsRequestManager#validatePositionsIfNeeded")]
     pub(crate) fn validate_positions_if_needed(&mut self, current_time_ms: i64) -> Result<(), Error> {
         let partitions_to_validate = self
             .shared
@@ -760,6 +772,7 @@ impl OffsetsRequestManager {
     /// [`OffsetsClusterListener::on_update`]).
     ///
     /// Used by `ListOffsetsEvent` and `CurrentLagEvent`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.OffsetsRequestManager#fetchOffsets")]
     pub(crate) fn fetch_offsets(
         &mut self,
         timestamps_to_search: HashMap<TopicPartition, i64>,
@@ -838,6 +851,9 @@ impl OffsetsRequestManager {
     /// into a tokio task that forwards the result into the manager's
     /// `pending_completions` channel; `poll` drains the channel and
     /// applies success/failure handlers via `OffsetFetcherUtils`.
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.OffsetsRequestManager#sendListOffsetsRequestsAndResetPositions"
+    )]
     fn send_list_offsets_requests_and_reset_positions(
         &mut self,
         partition_strategies: HashMap<TopicPartition, AutoOffsetResetStrategy>,
@@ -917,6 +933,9 @@ impl OffsetsRequestManager {
     }
 
     /// Mirrors Java's `sendOffsetsForLeaderEpochRequestsAndValidatePositions`.
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.OffsetsRequestManager#sendOffsetsForLeaderEpochRequestsAndValidatePositions"
+    )]
     fn send_offsets_for_leader_epoch_requests_and_validate_positions(
         &mut self,
         partitions_to_validate: HashMap<TopicPartition, FetchPosition>,
@@ -1002,6 +1021,7 @@ impl OffsetsRequestManager {
     /// 4. On fetch completion: apply offsets via [`Self::refresh_offsets`]
     ///    (mirrors Java's `refreshOffsets` + `ConsumerUtils.refreshCommittedOffsets`)
     ///    and fan the result out to every waiter on the pending event.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.OffsetsRequestManager#initWithCommittedOffsetsIfNeeded")]
     pub(crate) fn init_with_committed_offsets_if_needed(
         &self,
         initializing_partitions: HashSet<TopicPartition>,
@@ -1144,6 +1164,7 @@ impl OffsetsRequestManager {
     /// `update_fetch_positions` until `has_all_fetch_positions()`
     /// returns true. This matches Java's caller pattern in
     /// `AsyncKafkaConsumer.poll`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.OffsetsRequestManager#updateFetchPositions")]
     pub(crate) fn update_fetch_positions(
         &mut self,
         deadline_ms: i64,
@@ -1264,6 +1285,7 @@ impl OffsetsRequestManager {
     /// the captured set so partitions added mid-flight are NOT reset) and
     /// then enqueues `ListOffsets` requests via
     /// [`Self::reset_positions_if_needed`].
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.OffsetsRequestManager#initWithPartitionOffsetsIfNeeded")]
     fn init_with_partition_offsets_if_needed(
         &mut self,
         initializing_partitions: &HashSet<TopicPartition>,
@@ -1635,6 +1657,7 @@ fn downcast_offsets_for_leader_epoch(response: &ClientResponse) -> Option<&Offse
 /// manually via `seek` between the time the OffsetFetch was issued and
 /// the response arrived; Java does the same in
 /// `OffsetsRequestManager.offsetsForInitializingPartitions`.
+#[doc(alias = "org.apache.kafka.clients.consumer.internals.OffsetsRequestManager#refreshOffsets")]
 fn refresh_offsets(
     offsets: &HashMap<TopicPartition, Option<OffsetAndMetadata>>,
     subscription_state: &Mutex<SubscriptionState>,
@@ -1856,6 +1879,9 @@ mod tests {
     /// land, the next `validate_positions_if_needed` produces the
     /// expected request and the `try_connect` queue is empty.
     #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.OffsetsRequestManagerTest#testValidatePositionsAbortIfNoApiVersionsToCheckAgainstThenRecovers"
+    )]
     async fn test_validate_positions_abort_if_no_api_versions_to_check_against_then_recovers() {
         // Build the manager around a controllable `ApiVersions` so the
         // test can withhold/install entries; the rest of the wiring

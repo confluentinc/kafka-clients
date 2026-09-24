@@ -49,6 +49,7 @@ fn type_name(coordinator_type: CoordinatorType) -> &'static str {
 ///
 /// Corresponds to `CoordinatorStrategy`. Generic over coordinator type
 /// (`GROUP` now; `TRANSACTION` reused in Tier 3).
+#[doc(alias = "org.apache.kafka.clients.admin.internals.CoordinatorStrategy")]
 pub(crate) struct CoordinatorStrategy {
     log_context: LogContext,
     coordinator_type: CoordinatorType,
@@ -60,11 +61,13 @@ pub(crate) struct CoordinatorStrategy {
 
 impl CoordinatorStrategy {
     /// Creates a strategy for the given coordinator type.
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.CoordinatorStrategy#CoordinatorStrategy")]
     pub(crate) fn new(coordinator_type: CoordinatorType, log_context: LogContext) -> Self {
         Self { log_context, coordinator_type, batch: AtomicBool::new(true) }
     }
 
     /// Whether batched lookups are enabled. Mirrors `CoordinatorStrategy.batch`.
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.CoordinatorStrategy#batch")]
     pub(crate) fn batch(&self) -> bool {
         self.batch.load(Ordering::Acquire)
     }
@@ -134,6 +137,7 @@ impl CoordinatorStrategy {
         Ok(LookupResult::new(failed_keys, mapped_keys))
     }
 
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.CoordinatorStrategy#requireSingletonAndType")]
     fn require_singleton_and_type<'a>(&self, keys: &'a HashSet<CoordinatorKey>) -> Result<&'a CoordinatorKey, Error> {
         if keys.len() != 1 {
             return Err(Error::local_illegal_argument(format!(
@@ -152,6 +156,7 @@ impl CoordinatorStrategy {
         Ok(key)
     }
 
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.CoordinatorStrategy#ensureSameType")]
     fn ensure_same_type(&self, keys: &HashSet<CoordinatorKey>) -> Result<(), Error> {
         if keys.is_empty() {
             return Err(Error::local_illegal_argument(
@@ -167,6 +172,7 @@ impl CoordinatorStrategy {
         Ok(())
     }
 
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.CoordinatorStrategy#handleError")]
     fn handle_error(
         &self,
         error: Errors,
@@ -339,6 +345,7 @@ mod tests {
 
     /// Translated from `testBuildOldLookupRequest`.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.CoordinatorStrategyTest#testBuildOldLookupRequest")]
     fn test_build_old_lookup_request() {
         let s = strategy(CoordinatorType::Group);
         s.disable_batch();
@@ -349,6 +356,7 @@ mod tests {
 
     /// Translated from `testBuildLookupRequest`.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.CoordinatorStrategyTest#testBuildLookupRequest")]
     fn test_build_lookup_request() {
         let s = strategy(CoordinatorType::Group);
         let builder = s
@@ -374,6 +382,9 @@ mod tests {
 
     /// Translated from `testBuildOldLookupRequestRequiresOneKey`.
     #[test]
+    #[doc(
+        alias = "org.apache.kafka.clients.admin.internals.CoordinatorStrategyTest#testBuildOldLookupRequestRequiresOneKey"
+    )]
     fn test_build_old_lookup_request_requires_one_key() {
         let s = strategy(CoordinatorType::Group);
         s.disable_batch();
@@ -393,6 +404,9 @@ mod tests {
 
     /// Translated from `testBuildLookupRequestRequiresAtLeastOneKey`.
     #[test]
+    #[doc(
+        alias = "org.apache.kafka.clients.admin.internals.CoordinatorStrategyTest#testBuildLookupRequestRequiresAtLeastOneKey"
+    )]
     fn test_build_lookup_request_requires_at_least_one_key() {
         let s = strategy(CoordinatorType::Group);
         assert!(s.build_lookup_request(&HashSet::new()).is_err());
@@ -400,6 +414,9 @@ mod tests {
 
     /// Translated from `testBuildLookupRequestRequiresKeySameType`.
     #[test]
+    #[doc(
+        alias = "org.apache.kafka.clients.admin.internals.CoordinatorStrategyTest#testBuildLookupRequestRequiresKeySameType"
+    )]
     fn test_build_lookup_request_requires_key_same_type() {
         let s = strategy(CoordinatorType::Group);
         let mixed = keys(&[
@@ -415,6 +432,9 @@ mod tests {
 
     /// Translated from `testHandleOldResponseRequiresOneKey`.
     #[test]
+    #[doc(
+        alias = "org.apache.kafka.clients.admin.internals.CoordinatorStrategyTest#testHandleOldResponseRequiresOneKey"
+    )]
     fn test_handle_old_response_requires_one_key() {
         let mut data = FindCoordinatorResponseData::new();
         data.set_error_code(Errors::None.code());
@@ -441,6 +461,9 @@ mod tests {
 
     /// Translated from `testSuccessfulOldCoordinatorLookup`.
     #[test]
+    #[doc(
+        alias = "org.apache.kafka.clients.admin.internals.CoordinatorStrategyTest#testSuccessfulOldCoordinatorLookup"
+    )]
     fn test_successful_old_coordinator_lookup() {
         let group = CoordinatorKey::by_group_id("foo");
         let mut data = FindCoordinatorResponseData::new();
@@ -465,6 +488,7 @@ mod tests {
 
     /// Translated from `testSuccessfulCoordinatorLookup`.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.CoordinatorStrategyTest#testSuccessfulCoordinatorLookup")]
     fn test_successful_coordinator_lookup() {
         let group1 = CoordinatorKey::by_group_id("foo");
         let group2 = CoordinatorKey::by_group_id("bar");
@@ -477,6 +501,7 @@ mod tests {
 
     /// Translated from `testRetriableOldCoordinatorLookup`.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.CoordinatorStrategyTest#testRetriableOldCoordinatorLookup")]
     fn test_retriable_old_coordinator_lookup() {
         for error in [Errors::CoordinatorLoadInProgress, Errors::CoordinatorNotAvailable] {
             let mut data = FindCoordinatorResponseData::new();
@@ -489,6 +514,7 @@ mod tests {
 
     /// Translated from `testRetriableCoordinatorLookup`.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.CoordinatorStrategyTest#testRetriableCoordinatorLookup")]
     fn test_retriable_coordinator_lookup() {
         for error in [Errors::CoordinatorLoadInProgress, Errors::CoordinatorNotAvailable] {
             let group1 = CoordinatorKey::by_group_id("foo");
@@ -517,6 +543,7 @@ mod tests {
 
     /// Translated from `testFatalErrorOldLookupResponses`.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.CoordinatorStrategyTest#testFatalErrorOldLookupResponses")]
     fn test_fatal_error_old_lookup_responses() {
         let group = CoordinatorKey::by_transactional_id("foo");
         assert_eq!(
@@ -550,6 +577,7 @@ mod tests {
 
     /// Translated from `testFatalErrorLookupResponses`.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.CoordinatorStrategyTest#testFatalErrorLookupResponses")]
     fn test_fatal_error_lookup_responses() {
         let group = CoordinatorKey::by_transactional_id("foo");
         assert_eq!(

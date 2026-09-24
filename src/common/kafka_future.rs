@@ -60,6 +60,7 @@ pub(crate) trait KafkaFutureOps<T: Send>: Send + Sync {
 /// internal `FutureRecordMetadata` behind a public interface — matching how
 /// Java's `Producer.send()` returns `Future<RecordMetadata>` rather than the
 /// internal implementation type.
+#[doc(alias = "org.apache.kafka.common.KafkaFuture")]
 pub struct KafkaFuture<T: Send + 'static> {
     inner: Arc<dyn KafkaFutureOps<T>>,
 }
@@ -94,6 +95,7 @@ impl<T: Send + 'static> KafkaFuture<T> {
     /// # Errors
     ///
     /// Returns the error from the underlying operation if it failed.
+    #[doc(alias = "org.apache.kafka.common.KafkaFuture#get")]
     pub async fn get(&self) -> Result<T, Error> {
         self.inner.get().await
     }
@@ -113,6 +115,7 @@ impl<T: Send + 'static> KafkaFuture<T> {
     /// which `Future.get(timeout, unit)` declares, not the retriable
     /// `org.apache.kafka.common.errors.TimeoutException`. Returns the error from
     /// the underlying operation if it failed.
+    #[doc(alias = "org.apache.kafka.common.KafkaFuture#get")]
     pub async fn get_with_timeout(&self, timeout: Duration) -> Result<T, Error> {
         self.inner.get_with_timeout(timeout).await
     }
@@ -120,6 +123,7 @@ impl<T: Send + 'static> KafkaFuture<T> {
     /// Whether this future is complete.
     ///
     /// This is the Rust equivalent of Java's `Future.isDone()`.
+    #[doc(alias = "org.apache.kafka.common.KafkaFuture#isDone")]
     pub fn is_done(&self) -> bool {
         self.inner.is_done()
     }
@@ -134,6 +138,7 @@ impl<T: Send + 'static> KafkaFuture<T> {
     /// Java's variadic `allOf(KafkaFuture<?>...)`, this Rust version is
     /// homogeneous (`Vec<KafkaFuture<T>>`), which is all the admin `*Result`
     /// types require (they combine per-key futures of a single type).
+    #[doc(alias = "org.apache.kafka.common.KafkaFuture#allOf")]
     pub fn all_of(futures: Vec<KafkaFuture<T>>) -> KafkaFuture<()>
     where
         T: Clone + Sync,
@@ -148,6 +153,7 @@ impl<T: Send + 'static> KafkaFuture<T> {
     ///
     /// Translated from `org.apache.kafka.common.KafkaFuture.thenApply`, for the
     /// common case where the transform cannot fail.
+    #[doc(alias = "org.apache.kafka.common.KafkaFuture#thenApply")]
     pub fn then_apply<R, F>(&self, function: F) -> KafkaFuture<R>
     where
         T: Clone + Sync,

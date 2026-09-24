@@ -40,6 +40,7 @@ use super::abstract_request::{ConcreteRequest, RequestBuilder};
 ///
 /// Corresponds to `org.apache.kafka.common.requests.ListOffsetsRequest`.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.ListOffsetsRequest")]
 pub struct ListOffsetsRequest {
     data: ListOffsetsRequestData,
     version: i16,
@@ -75,6 +76,7 @@ impl ListOffsetsRequest {
     ///
     /// Mirrors Java's private constructor that scans the data to build the
     /// duplicate-partitions set.
+    #[doc(alias = "org.apache.kafka.common.requests.ListOffsetsRequest#ListOffsetsRequest")]
     pub fn new(data: ListOffsetsRequestData, version: i16) -> Self {
         let mut duplicate_partitions = HashSet::new();
         let mut seen: HashSet<TopicPartition> = HashSet::new();
@@ -90,6 +92,7 @@ impl ListOffsetsRequest {
     }
 
     /// Returns a reference to the underlying data.
+    #[doc(alias = "org.apache.kafka.common.requests.ListOffsetsRequest#data")]
     pub fn data(&self) -> &ListOffsetsRequestData {
         &self.data
     }
@@ -110,6 +113,7 @@ impl ListOffsetsRequest {
     }
 
     /// Returns the wire replica id.
+    #[doc(alias = "org.apache.kafka.common.requests.ListOffsetsRequest#replicaId")]
     pub fn replica_id(&self) -> i32 {
         self.data.replica_id
     }
@@ -120,27 +124,32 @@ impl ListOffsetsRequest {
     ///
     /// Returns an error if the wire byte does not correspond to a known
     /// isolation level.
+    #[doc(alias = "org.apache.kafka.common.requests.ListOffsetsRequest#isolationLevel")]
     pub fn isolation_level(&self) -> Result<IsolationLevel, crate::common::Error> {
         IsolationLevel::for_id(self.data.isolation_level as u8)
     }
 
     /// Returns the list of topic-level requests.
+    #[doc(alias = "org.apache.kafka.common.requests.ListOffsetsRequest#topics")]
     pub fn topics(&self) -> &[ListOffsetsTopic] {
         &self.data.topics
     }
 
     /// Returns the set of partitions that appear more than once in the data.
+    #[doc(alias = "org.apache.kafka.common.requests.ListOffsetsRequest#duplicatePartitions")]
     pub fn duplicate_partitions(&self) -> &HashSet<TopicPartition> {
         &self.duplicate_partitions
     }
 
     /// Returns the request timeout in milliseconds (v10+).
+    #[doc(alias = "org.apache.kafka.common.requests.ListOffsetsRequest#timeoutMs")]
     pub fn timeout_ms(&self) -> i32 {
         self.data.timeout_ms
     }
 
     /// Builds the canonical error response for this request, matching Java's
     /// `ListOffsetsRequest.getErrorResponse(int, Throwable)`.
+    #[doc(alias = "org.apache.kafka.common.requests.ListOffsetsRequest#getErrorResponse")]
     pub fn get_error_response(&self, throttle_time_ms: i32, error: &Errors) -> ConcreteResponse {
         let error_code = error.code();
         let mut response_topics = Vec::with_capacity(self.data.topics.len());
@@ -171,6 +180,7 @@ impl ListOffsetsRequest {
     /// # Errors
     ///
     /// Returns an error if parsing fails.
+    #[doc(alias = "org.apache.kafka.common.requests.ListOffsetsRequest#parse")]
     pub fn parse(readable: &mut dyn Readable, version: i16) -> io::Result<Self> {
         let data = ListOffsetsRequestData::read(readable, version)?;
         Ok(Self::new(data, version))
@@ -181,6 +191,7 @@ impl ListOffsetsRequest {
     /// the way Java's `computeIfAbsent` does.
     ///
     /// Mirrors Java's `toListOffsetsTopics(Map<TopicPartition, ListOffsetsPartition>)`.
+    #[doc(alias = "org.apache.kafka.common.requests.ListOffsetsRequest#toListOffsetsTopics")]
     pub fn to_list_offsets_topics(
         timestamps_to_search: &HashMap<TopicPartition, ListOffsetsPartition>,
     ) -> Vec<ListOffsetsTopic> {
@@ -207,6 +218,7 @@ impl std::fmt::Display for ListOffsetsRequest {
 ///
 /// Corresponds to `ListOffsetsRequest.Builder` in Java.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.ListOffsetsRequest$Builder")]
 pub struct ListOffsetsRequestBuilder {
     data: ListOffsetsRequestData,
     oldest_allowed_version: i16,
@@ -358,6 +370,7 @@ impl ListOffsetsRequestBuilder {
     /// Corresponds to Java's
     /// `ListOffsetsRequest.Builder.forConsumer(boolean, IsolationLevel)`
     /// (`ListOffsetsRequest.java:61`).
+    #[doc(alias = "org.apache.kafka.common.requests.ListOffsetsRequest$Builder#forConsumer")]
     pub fn for_consumer(require_timestamp: bool, isolation_level: IsolationLevel) -> Self {
         Self::for_consumer_options(
             ListOffsetsRequestBuilderOptionsBuilder::new()
@@ -407,6 +420,7 @@ impl ListOffsetsRequestBuilder {
     /// Constructs a replica-side builder targeting the supplied broker id.
     ///
     /// Mirrors `ListOffsetsRequest.Builder.forReplica(short, int)`.
+    #[doc(alias = "org.apache.kafka.common.requests.ListOffsetsRequest$Builder#forReplica")]
     pub fn for_replica(allowed_version: i16, replica_id: i32) -> Self {
         Self::new(
             ApiKeys::LIST_OFFSETS.oldest_version(),
@@ -416,6 +430,7 @@ impl ListOffsetsRequestBuilder {
         )
     }
 
+    #[doc(alias = "org.apache.kafka.common.requests.ListOffsetsRequest$Builder#Builder")]
     fn new(
         oldest_allowed_version: i16,
         latest_allowed_version: i16,
@@ -431,6 +446,7 @@ impl ListOffsetsRequestBuilder {
     /// Sets the topic-partition timestamps to search.
     ///
     /// Mirrors `Builder.setTargetTimes(List<ListOffsetsTopic>)`.
+    #[doc(alias = "org.apache.kafka.common.requests.ListOffsetsRequest$Builder#setTargetTimes")]
     pub fn set_target_times(&mut self, topics: Vec<ListOffsetsTopic>) -> &mut Self {
         self.data.set_topics(topics);
         self
@@ -439,6 +455,7 @@ impl ListOffsetsRequestBuilder {
     /// Sets the broker-side timeout for tiered-storage reads (v10+).
     ///
     /// Mirrors `Builder.setTimeoutMs(int)`.
+    #[doc(alias = "org.apache.kafka.common.requests.ListOffsetsRequest$Builder#setTimeoutMs")]
     pub fn set_timeout_ms(&mut self, timeout_ms: i32) -> &mut Self {
         self.data.set_timeout_ms(timeout_ms);
         self

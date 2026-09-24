@@ -43,6 +43,7 @@ use super::{PartitionLeaderFuture, PartitionLeaderStrategy};
 ///
 /// Corresponds to `DescribeProducersHandler` (a `Batched` handler over
 /// `TopicPartition` keys yielding [`PartitionProducerState`] values).
+#[doc(alias = "org.apache.kafka.clients.admin.internals.DescribeProducersHandler")]
 pub(crate) struct DescribeProducersHandler {
     log_context: LogContext,
     options: DescribeProducersOptions,
@@ -53,6 +54,7 @@ impl DescribeProducersHandler {
     /// Creates a handler. When `options.broker_id` is set, a
     /// [`StaticBrokerStrategy`] targets that broker directly; otherwise a
     /// [`PartitionLeaderStrategy`] looks up each partition's leader.
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.DescribeProducersHandler#DescribeProducersHandler")]
     pub(crate) fn new(options: DescribeProducersOptions, log_context: LogContext) -> Self {
         let lookup_strategy: Box<dyn AdminApiLookupStrategy<TopicPartition>> = match options.broker_id() {
             Some(broker_id) => Box::new(StaticBrokerStrategy::new(broker_id)),
@@ -65,6 +67,7 @@ impl DescribeProducersHandler {
     /// resolved.
     ///
     /// Mirrors `DescribeProducersHandler.newFuture`.
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.DescribeProducersHandler#newFuture")]
     pub(crate) fn new_future(
         topic_partitions: HashSet<TopicPartition>,
         partition_leader_cache: Arc<PartitionLeaderCache>,
@@ -75,6 +78,7 @@ impl DescribeProducersHandler {
     /// Builds a single batched `DescribeProducers` request for the given keys.
     ///
     /// Mirrors `buildBatchedRequest`.
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.DescribeProducersHandler#buildBatchedRequest")]
     fn build_batched_request(&self, topic_partitions: &HashSet<TopicPartition>) -> DescribeProducersRequestData {
         let mut topics: HashMap<String, TopicRequest> = HashMap::new();
         for tp in topic_partitions {
@@ -95,6 +99,7 @@ impl DescribeProducersHandler {
     /// result so the driver retries.
     ///
     /// Mirrors `handlePartitionError`.
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.DescribeProducersHandler#handlePartitionError")]
     fn handle_partition_error(
         &self,
         topic_partition: &TopicPartition,

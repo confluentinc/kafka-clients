@@ -24,6 +24,7 @@ kafka_error_class! {
     ///
     /// Java `extends` chain:
     ///    `BrokerNotAvailableException` -> `ApiException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.BrokerNotAvailableException")]
     BrokerNotAvailableError,
     code: Errors::BrokerNotAvailable,
     extends: [

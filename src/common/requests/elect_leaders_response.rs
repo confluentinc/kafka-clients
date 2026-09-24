@@ -30,6 +30,7 @@ use super::AbstractResponse;
 ///
 /// Corresponds to `org.apache.kafka.common.requests.ElectLeadersResponse`.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.ElectLeadersResponse")]
 pub struct ElectLeadersResponse {
     data: ElectLeadersResponseData,
 }
@@ -148,6 +149,7 @@ impl ElectLeadersResponse {
     ///
     /// Corresponds to Java's `ElectLeadersResponse(ElectLeadersResponseData)`
     /// (`ElectLeadersResponse.java:37`).
+    #[doc(alias = "org.apache.kafka.common.requests.ElectLeadersResponse#ElectLeadersResponse")]
     pub fn with_data(data: ElectLeadersResponseData) -> Self {
         Self { data }
     }
@@ -158,6 +160,7 @@ impl ElectLeadersResponse {
     /// Corresponds to Java's
     /// `ElectLeadersResponse(int, short, List<ReplicaElectionResult>, short)`
     /// (`ElectLeadersResponse.java:42`) — the error code is only encoded for v1+.
+    #[doc(alias = "org.apache.kafka.common.requests.ElectLeadersResponse#ElectLeadersResponse")]
     pub fn with_options(options: ElectLeadersResponseOptions) -> Self {
         let ElectLeadersResponseOptions { throttle_time_ms, error_code, election_results, version } = options;
         let mut data = ElectLeadersResponseData::new();
@@ -175,6 +178,7 @@ impl ElectLeadersResponse {
     }
 
     /// Returns a reference to the underlying data.
+    #[doc(alias = "org.apache.kafka.common.requests.ElectLeadersResponse#data")]
     pub fn data(&self) -> &ElectLeadersResponseData {
         &self.data
     }
@@ -185,17 +189,20 @@ impl ElectLeadersResponse {
     }
 
     /// Returns the throttle time in milliseconds.
+    #[doc(alias = "org.apache.kafka.common.requests.ElectLeadersResponse#throttleTimeMs")]
     pub fn throttle_time_ms(&self) -> i32 {
         self.data.throttle_time_ms
     }
 
     /// Sets the throttle time in the response.
+    #[doc(alias = "org.apache.kafka.common.requests.ElectLeadersResponse#maybeSetThrottleTimeMs")]
     pub fn maybe_set_throttle_time_ms(&mut self, throttle_time_ms: i32) {
         self.data.set_throttle_time_ms(throttle_time_ms);
     }
 
     /// Returns the error counts aggregated across the top-level error and all
     /// partition results.
+    #[doc(alias = "org.apache.kafka.common.requests.ElectLeadersResponse#errorCounts")]
     pub fn error_counts(&self) -> HashMap<Errors, i32> {
         let mut counts = HashMap::new();
         AbstractResponse::update_error_counts(&mut counts, Errors::for_code(self.data.error_code));
@@ -213,12 +220,14 @@ impl ElectLeadersResponse {
     /// # Errors
     ///
     /// Returns an error if parsing fails.
+    #[doc(alias = "org.apache.kafka.common.requests.ElectLeadersResponse#parse")]
     pub fn parse(readable: &mut dyn Readable, version: i16) -> io::Result<Self> {
         let data = ElectLeadersResponseData::read(readable, version)?;
         Ok(Self::with_data(data))
     }
 
     /// Whether the client should throttle on this response (always true).
+    #[doc(alias = "org.apache.kafka.common.requests.ElectLeadersResponse#shouldClientThrottle")]
     pub fn should_client_throttle(&self, _version: i16) -> bool {
         true
     }
@@ -229,6 +238,7 @@ impl ElectLeadersResponse {
     /// error otherwise.
     ///
     /// Mirrors `ElectLeadersResponse.electLeadersResult(ElectLeadersResponseData)`.
+    #[doc(alias = "org.apache.kafka.common.requests.ElectLeadersResponse#electLeadersResult")]
     pub fn elect_leaders_result(data: &ElectLeadersResponseData) -> HashMap<TopicPartition, Option<Error>> {
         let mut map = HashMap::new();
         for topic_results in &data.replica_election_results {

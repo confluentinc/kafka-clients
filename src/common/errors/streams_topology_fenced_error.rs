@@ -24,6 +24,7 @@ kafka_error_class! {
     ///
     /// Java `extends` chain:
     ///    `StreamsTopologyFencedException` -> `ApiException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.StreamsTopologyFencedException")]
     StreamsTopologyFencedError,
     code: Errors::StreamsTopologyFenced,
     extends: [

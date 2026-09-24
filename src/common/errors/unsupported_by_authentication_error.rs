@@ -26,6 +26,7 @@ kafka_error_class! {
     /// Java `extends` chain:
     ///    `UnsupportedByAuthenticationException` -> `ApiException` ->
     ///   `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.UnsupportedByAuthenticationException")]
     UnsupportedByAuthenticationError,
     code: Errors::DelegationTokenRequestNotAllowed,
     extends: [

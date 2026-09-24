@@ -33,6 +33,7 @@ use super::ScramMechanism;
 ///
 /// Mirrors `new ScramFormatter(ScramMechanism)`: the mechanism selects the hash
 /// / MAC algorithm used by [`ScramFormatter::hi`].
+#[doc(alias = "org.apache.kafka.common.security.scram.internals.ScramFormatter")]
 pub(crate) struct ScramFormatter {
     mechanism: ScramMechanism,
 }
@@ -43,6 +44,7 @@ impl ScramFormatter {
     /// Mirrors the Java constructor, minus the `NoSuchAlgorithmException` throw:
     /// both supported mechanisms map to algorithms `aws-lc-rs` always provides,
     /// so construction is infallible.
+    #[doc(alias = "org.apache.kafka.common.security.scram.internals.ScramFormatter#ScramFormatter")]
     pub(crate) fn new(mechanism: ScramMechanism) -> Self {
         Self { mechanism }
     }
@@ -62,6 +64,7 @@ impl ScramFormatter {
     /// we clamp `iterations` to a minimum of 1 to preserve Java's behavior for
     /// zero/negative counts while satisfying PBKDF2's `c >= 1` requirement (and
     /// keeping `NonZeroU32::new(..).unwrap()` panic-free).
+    #[doc(alias = "org.apache.kafka.common.security.scram.internals.ScramFormatter#hi")]
     pub(crate) fn hi(&self, str: &[u8], salt: &[u8], iterations: i32) -> Vec<u8> {
         let (algorithm, digest_len) = match self.mechanism {
             ScramMechanism::ScramSha256 => (pbkdf2::PBKDF2_HMAC_SHA256, 32),

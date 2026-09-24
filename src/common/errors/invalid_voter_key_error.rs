@@ -24,6 +24,7 @@ kafka_error_class! {
     ///
     /// Java `extends` chain:
     ///    `InvalidVoterKeyException` -> `ApiException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.InvalidVoterKeyException")]
     InvalidVoterKeyError,
     code: Errors::InvalidVoterKey,
     extends: [

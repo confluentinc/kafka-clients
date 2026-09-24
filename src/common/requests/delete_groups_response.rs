@@ -37,6 +37,7 @@ use super::AbstractResponse;
 ///
 /// Corresponds to `org.apache.kafka.common.requests.DeleteGroupsResponse`.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.DeleteGroupsResponse")]
 pub struct DeleteGroupsResponse {
     data: DeleteGroupsResponseData,
 }
@@ -45,6 +46,7 @@ impl DeleteGroupsResponse {
     /// Creates a new `DeleteGroupsResponse` from the underlying data.
     ///
     /// Mirrors Java's constructor `DeleteGroupsResponse(DeleteGroupsResponseData)`.
+    #[doc(alias = "org.apache.kafka.common.requests.DeleteGroupsResponse#DeleteGroupsResponse")]
     pub fn new(data: DeleteGroupsResponseData) -> Self {
         Self { data }
     }
@@ -55,6 +57,7 @@ impl DeleteGroupsResponse {
     }
 
     /// Returns a reference to the underlying data.
+    #[doc(alias = "org.apache.kafka.common.requests.DeleteGroupsResponse#data")]
     pub fn data(&self) -> &DeleteGroupsResponseData {
         &self.data
     }
@@ -65,17 +68,20 @@ impl DeleteGroupsResponse {
     }
 
     /// Returns the throttle time in milliseconds.
+    #[doc(alias = "org.apache.kafka.common.requests.DeleteGroupsResponse#throttleTimeMs")]
     pub fn throttle_time_ms(&self) -> i32 {
         self.data.throttle_time_ms
     }
 
     /// Sets the throttle time in the response.
+    #[doc(alias = "org.apache.kafka.common.requests.DeleteGroupsResponse#maybeSetThrottleTimeMs")]
     pub fn maybe_set_throttle_time_ms(&mut self, throttle_time_ms: i32) {
         self.data.set_throttle_time_ms(throttle_time_ms);
     }
 
     /// Returns a map from each group id to its deletion error. Mirrors Java's
     /// `DeleteGroupsResponse.errors()`.
+    #[doc(alias = "org.apache.kafka.common.requests.DeleteGroupsResponse#errors")]
     pub fn errors(&self) -> HashMap<String, Errors> {
         self.data
             .results
@@ -86,6 +92,7 @@ impl DeleteGroupsResponse {
 
     /// Returns the error counts aggregated across all per-group results.
     /// Mirrors Java's `errorCounts`.
+    #[doc(alias = "org.apache.kafka.common.requests.DeleteGroupsResponse#errorCounts")]
     pub fn error_counts(&self) -> HashMap<Errors, i32> {
         let mut counts = HashMap::new();
         for result in &self.data.results {
@@ -100,12 +107,14 @@ impl DeleteGroupsResponse {
     /// # Errors
     ///
     /// Returns an error if parsing fails.
+    #[doc(alias = "org.apache.kafka.common.requests.DeleteGroupsResponse#parse")]
     pub fn parse(readable: &mut dyn Readable, version: i16) -> io::Result<Self> {
         let data = DeleteGroupsResponseData::read(readable, version)?;
         Ok(Self::new(data))
     }
 
     /// Whether the client should throttle on this response (version 1+).
+    #[doc(alias = "org.apache.kafka.common.requests.DeleteGroupsResponse#shouldClientThrottle")]
     pub fn should_client_throttle(&self, version: i16) -> bool {
         version >= 1
     }

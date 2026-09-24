@@ -24,6 +24,7 @@ kafka_error_class! {
     ///
     /// Java `extends` chain:
     ///    `InvalidReplicaAssignmentException` -> `ApiException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.InvalidReplicaAssignmentException")]
     InvalidReplicaAssignmentError,
     code: Errors::InvalidReplicaAssignment,
     extends: [

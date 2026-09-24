@@ -24,6 +24,7 @@ kafka_error_class! {
     ///
     /// Java `extends` chain:
     ///    `TopicDeletionDisabledException`
+    #[doc(alias = "org.apache.kafka.common.errors.TopicDeletionDisabledException")]
     TopicDeletionDisabledError,
     code: Errors::TopicDeletionDisabled,
     extends: [

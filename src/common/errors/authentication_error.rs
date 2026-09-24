@@ -40,6 +40,7 @@ kafka_error_class! {
     /// class itself has no entry of its own. `InvalidConfigurationError` remains
     /// the code's owner: `Errors::error(InvalidConfig)` names that class, not this
     /// one.
+    #[doc(alias = "org.apache.kafka.common.errors.AuthenticationException")]
     AuthenticationError,
     code: Errors::InvalidConfig,
     extends: [

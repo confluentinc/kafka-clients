@@ -79,6 +79,7 @@ use super::{Error, Errors};
 // `unconditional_recursion` lint turns that into a compile error under
 // `#![deny(warnings)]`.
 #[delegate(ErrorMessage, target = "self")]
+#[doc(alias = "org.apache.kafka.common.KafkaException")]
 pub struct KafkaError {
     /// The protocol error code.
     error: Errors,
@@ -102,24 +103,28 @@ impl KafkaError {
 
     /// Create a `KafkaError` from an error code with the default message.
     /// Mirrors Java's no-arg `KafkaException()`.
+    #[doc(alias = "org.apache.kafka.common.KafkaException#KafkaException")]
     pub fn new(error: Errors) -> Self {
         Self { error, custom_message: None, source: None }
     }
 
     /// Create a `KafkaError` from an error code with a custom message.
     /// Mirrors Java's `KafkaException(String message)`.
+    #[doc(alias = "org.apache.kafka.common.KafkaException#KafkaException")]
     pub fn with_message(error: Errors, message: impl Into<String>) -> Self {
         Self { error, custom_message: Some(message.into()), source: None }
     }
 
     /// Create a `KafkaError` from an error code, a custom message, and the error
     /// that caused it. Mirrors Java's `KafkaException(String message, Throwable cause)`.
+    #[doc(alias = "org.apache.kafka.common.KafkaException#KafkaException")]
     pub fn with_message_source(error: Errors, message: impl Into<String>, source: Error) -> Self {
         Self { error, custom_message: Some(message.into()), source: Some(Box::new(source)) }
     }
 
     /// Create a `KafkaError` from an error code and the error that caused it,
     /// keeping the code's default message. Mirrors `KafkaException(Throwable cause)`.
+    #[doc(alias = "org.apache.kafka.common.KafkaException#KafkaException")]
     pub fn with_source(error: Errors, source: Error) -> Self {
         Self { error, custom_message: None, source: Some(Box::new(source)) }
     }

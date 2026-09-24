@@ -26,6 +26,7 @@ kafka_error_class! {
     /// Java `extends` chain:
     ///    `ConcurrentTransactionsException` -> `RetriableException` ->
     ///   `ApiException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.ConcurrentTransactionsException")]
     ConcurrentTransactionsError,
     code: Errors::ConcurrentTransactions,
     extends: [

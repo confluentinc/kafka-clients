@@ -37,6 +37,7 @@ use crate::common::error::{ErrorCode, ErrorHierarchy, ErrorMessage, ErrorSource}
 /// Java `extends` chain:
 ///    `OffsetOutOfRangeException` -> `InvalidOffsetException` -> `KafkaException`
 #[derive(Clone, Debug)]
+#[doc(alias = "org.apache.kafka.clients.consumer.OffsetOutOfRangeException")]
 pub struct ConsumerOffsetOutOfRangeError {
     message: String,
     /// The underlying cause — Java's `OffsetOutOfRangeException(String, Throwable)`.
@@ -48,6 +49,7 @@ pub struct ConsumerOffsetOutOfRangeError {
 impl ConsumerOffsetOutOfRangeError {
     /// Create the error, mirroring Java's
     /// `OffsetOutOfRangeException(Map<TopicPartition, Long>)`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.OffsetOutOfRangeException#OffsetOutOfRangeException")]
     pub fn new(offset_out_of_range_partitions: HashMap<TopicPartition, i64>) -> Self {
         let mut items: Vec<String> = offset_out_of_range_partitions.iter().map(|(k, v)| format!("{k}={v}")).collect();
         items.sort();
@@ -60,6 +62,7 @@ impl ConsumerOffsetOutOfRangeError {
 
     /// Create the error with a caller-supplied message, mirroring Java's
     /// `OffsetOutOfRangeException(String, Map<TopicPartition, Long>)`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.OffsetOutOfRangeException#OffsetOutOfRangeException")]
     pub fn with_message(
         message: impl Into<String>,
         offset_out_of_range_partitions: HashMap<TopicPartition, i64>,
@@ -68,6 +71,7 @@ impl ConsumerOffsetOutOfRangeError {
     }
 
     /// The out-of-range offset per partition.
+    #[doc(alias = "org.apache.kafka.clients.consumer.OffsetOutOfRangeException#offsetOutOfRangePartitions")]
     pub fn offset_out_of_range_partitions(&self) -> &HashMap<TopicPartition, i64> {
         &self.offset_out_of_range_partitions
     }
@@ -86,6 +90,7 @@ impl ConsumerOffsetOutOfRangeError {
     /// Returns an iterator rather than a `HashSet`: Java's `keySet()` is a
     /// *view* over the map, so materialising a set here would allocate where
     /// Java does not (CLAUDE.md §11/§12).
+    #[doc(alias = "org.apache.kafka.clients.consumer.OffsetOutOfRangeException#partitions")]
     pub fn partitions(&self) -> impl Iterator<Item = &TopicPartition> {
         self.offset_out_of_range_partitions.keys()
     }

@@ -26,6 +26,7 @@ kafka_error_class! {
     ///    `InconsistentTopicIdException` -> `InvalidMetadataException` ->
     ///   `RefreshRetriableException` -> `RetriableException` -> `ApiException` ->
     ///   `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.InconsistentTopicIdException")]
     InconsistentTopicIdError,
     code: Errors::InconsistentTopicId,
     extends: [

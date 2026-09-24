@@ -388,6 +388,7 @@ impl Caller {
 /// can only reach five of them (see [`State::is_transition_valid`] for why the
 /// transition table is translated whole).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[doc(alias = "org.apache.kafka.clients.producer.internals.TransactionManager$State")]
 pub(crate) enum State {
     /// No producer id has been requested yet.
     Uninitialized,
@@ -422,6 +423,7 @@ impl State {
     /// are easy to get wrong: [`Self::AbortableError`] permits itself as a
     /// source (a self-loop), and [`Self::Ready`] does **not** — `READY → READY`
     /// is invalid.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.TransactionManager$State#isTransitionValid")]
     fn is_transition_valid(&self, source: State) -> bool {
         match self {
             Self::Uninitialized => source == Self::Ready || source == Self::AbortableError,
@@ -485,6 +487,7 @@ impl fmt::Display for State {
 /// The endTxn request must always go last, unless we are bumping the epoch (a special case of InitProducerId) as
 /// part of ending the transaction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[doc(alias = "org.apache.kafka.clients.producer.internals.TransactionManager$Priority")]
 pub(crate) enum Priority {
     /// `FindCoordinator`.
     FindCoordinator = 0,
@@ -506,6 +509,7 @@ pub(crate) enum Priority {
 /// `throwIfPendingState` in place of a raw `String`; its `toString()` returns the
 /// `displayName`, so the rejection message text is unchanged.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[doc(alias = "org.apache.kafka.clients.producer.internals.TransactionManager$TransactionOperation")]
 enum TransactionOperation {
     /// `send` — `maybeAddPartition`.
     Send,
@@ -600,6 +604,7 @@ pub(crate) enum TxnRequestHandlerKind {
 /// Translated from the abstract inner class `TxnRequestHandler`
 /// (Java 1345-1459). See [`TxnRequestHandlerKind`] for why the subclass
 /// hierarchy became an enum.
+#[doc(alias = "org.apache.kafka.clients.producer.internals.TransactionManager$TxnRequestHandler")]
 pub(crate) struct TxnRequestHandler {
     /// The handle the application awaits.
     ///
@@ -623,6 +628,7 @@ impl TxnRequestHandler {
     /// Creates a handler with a fresh result for `operation`.
     ///
     /// Corresponds to `TxnRequestHandler(String operation)` (Java 1353).
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.TransactionManager$TxnRequestHandler#TxnRequestHandler")]
     fn new(operation: &str, retry_backoff_ms: i64, kind: TxnRequestHandlerKind) -> Self {
         Self {
             result: Arc::new(TransactionalRequestResult::new(operation)),
@@ -638,6 +644,7 @@ impl TxnRequestHandler {
     /// (Java 1349), whose only user is `TxnOffsetCommitHandler` (Java 1860): the
     /// `AddOffsetsToTxn` that preceded it owns the result the application awaits, and
     /// the commit must complete *that* handle rather than a new one.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.TransactionManager$TxnRequestHandler#TxnRequestHandler")]
     fn with_result(
         result: Arc<TransactionalRequestResult>,
         retry_backoff_ms: i64,
@@ -761,6 +768,7 @@ impl TxnRequestHandler {
     /// Corresponds to the abstract `priority()` (Java 1458). Note
     /// `InitProducerIdHandler.priority()` (Java 1477) is *dynamic*: an epoch
     /// bump sorts after `EndTxn`, an initial acquisition before it.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.TransactionManager$TxnRequestHandler#priority")]
     pub(crate) fn priority(&self) -> Priority {
         match &self.kind {
             TxnRequestHandlerKind::InitProducerId { is_epoch_bump, .. } => {
@@ -788,6 +796,7 @@ impl TxnRequestHandler {
     ///
     /// Corresponds to `isEndTxn()` (Java 1450), whose base implementation
     /// returns `false`; only `EndTxnHandler` overrides it (Java 1744).
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.TransactionManager$TxnRequestHandler#isEndTxn")]
     pub(crate) fn is_end_txn(&self) -> bool {
         match &self.kind {
             TxnRequestHandlerKind::InitProducerId { .. }
@@ -810,6 +819,7 @@ impl TxnRequestHandler {
     /// Whether this request has already been retried.
     ///
     /// Corresponds to `isRetry()` (Java 1446).
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.TransactionManager$TxnRequestHandler#isRetry")]
     pub(crate) fn is_retry(&self) -> bool {
         self.is_retry
     }
@@ -817,6 +827,7 @@ impl TxnRequestHandler {
     /// Marks this request as a retry.
     ///
     /// Corresponds to `setRetry()` (Java 1442).
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.TransactionManager$TxnRequestHandler#setRetry")]
     fn set_retry(&mut self) {
         self.is_retry = true;
     }
@@ -828,6 +839,7 @@ impl TxnRequestHandler {
     /// one: `Math.min(TransactionManager.this.retryBackoffMs, this.retryBackoffMs)`.
     /// `self.retry_backoff_ms` is the manager's value, snapshotted at construction
     /// because Java's field is `final`.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.TransactionManager$TxnRequestHandler#retryBackoffMs")]
     pub(crate) fn retry_backoff_ms(&self) -> i64 {
         match &self.kind {
             TxnRequestHandlerKind::AddPartitionsToTxn { retry_backoff_ms, .. } => {
@@ -868,6 +880,7 @@ impl TxnRequestHandler {
     /// unsynchronized half of `TxnRequestHandler.onComplete` (Java 1406-1420).
     ///
     /// [`Sender`]: crate::producer::internals::Sender
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.TransactionManager$TxnRequestHandler#fail")]
     pub(crate) fn fail(&self, error: Error) {
         self.result.fail(error);
     }
@@ -904,6 +917,7 @@ impl fmt::Debug for TxnRequestHandler {
 /// whole point of the mechanism, and it is what
 /// `.claude/rules/producer-transactions.md` §5 means by "return the same result
 /// object". Java gets it for free from reference semantics.
+#[doc(alias = "org.apache.kafka.clients.producer.internals.TransactionManager$PendingStateTransition")]
 struct PendingStateTransition {
     result: Arc<TransactionalRequestResult>,
     state: State,
@@ -911,6 +925,9 @@ struct PendingStateTransition {
 }
 
 impl PendingStateTransition {
+    #[doc(
+        alias = "org.apache.kafka.clients.producer.internals.TransactionManager$PendingStateTransition#PendingStateTransition"
+    )]
     fn new(result: Arc<TransactionalRequestResult>, state: State, operation: &str) -> Self {
         Self { result, state, operation: operation.to_string() }
     }
@@ -1075,6 +1092,7 @@ impl PendingStateTransition {
 /// [`Self::maybe_resolve_sequences`]), because the loop bodies need `&mut self`.
 /// Both run once per `Sender.runOnce`, i.e. per network poll, and only over
 /// partitions in an error state.
+#[doc(alias = "org.apache.kafka.clients.producer.internals.TransactionManager")]
 pub(crate) struct TransactionManager {
     log_context: LogContext,
     /// `None` for a purely idempotent producer.
@@ -1270,6 +1288,7 @@ impl TransactionManager {
     /// any more. `KafkaProducer::new` keeps its own guard on
     /// `transactional.id` until Phase 6 wires the public API (PLAN §7.1), so the
     /// only way to build a transactional manager today is directly.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.TransactionManager#TransactionManager")]
     pub(crate) fn new(
         log_context: LogContext,
         transactional_id: Option<String>,
@@ -1331,6 +1350,7 @@ impl TransactionManager {
     ///   unacknowledged, or when `UNINITIALIZED → INITIALIZING` is not a valid
     ///   transition — which is what rejects a second `initTransactions` after the
     ///   first has been acknowledged (`testInitializeTransactionsTwiceRaisesError`).
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.TransactionManager#initializeTransactions")]
     pub(crate) fn initialize_transactions(
         &mut self,
         keep_prepared_txn: bool,
@@ -1354,6 +1374,7 @@ impl TransactionManager {
     /// request carries them, no `INITIALIZING` transition happens here (the
     /// `EndTxn` response drives it), and the handler sorts at
     /// [`Priority::EpochBump`].
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.TransactionManager#initializeTransactions")]
     pub(crate) fn initialize_transactions_with_producer_id_and_epoch(
         &mut self,
         producer_id_and_epoch: ProducerIdAndEpoch,
@@ -1451,6 +1472,7 @@ impl TransactionManager {
     /// state; and from `READY → IN_TRANSACTION` being the table's only arm into
     /// [`State::InTransaction`], which is what rejects `beginTransaction` before
     /// `initTransactions` completes.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.TransactionManager#beginTransaction")]
     pub(crate) fn begin_transaction(&mut self) -> Result<(), Error> {
         self.ensure_transactional()?;
         self.return_error_if_pending_state(TransactionOperation::BeginTransaction)?;
@@ -1485,6 +1507,7 @@ impl TransactionManager {
     // Java `prepareTransaction` (KIP-939, Java 342). Retained for parity (DoD #2);
     // exercised only by this crate's tests.
     #[allow(dead_code)]
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.TransactionManager#prepareTransaction")]
     pub(crate) fn prepare_transaction(&mut self) -> Result<(), Error> {
         self.ensure_transactional()?;
         self.return_error_if_pending_state(TransactionOperation::PrepareTransaction)?;
@@ -1517,6 +1540,7 @@ impl TransactionManager {
     /// in an error state (`maybeFailWithError`), or when
     /// `→ COMMITTING_TRANSACTION` is not a valid transition — which is what rejects
     /// a commit outside a transaction.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.TransactionManager#beginCommit")]
     pub(crate) fn begin_commit(
         &mut self,
         pending_requests: &mut PendingRequests,
@@ -1592,6 +1616,7 @@ impl TransactionManager {
     /// in [`State::FatalError`].
     ///
     /// [`Sender::begin_abort`]: crate::producer::internals::Sender
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.TransactionManager#beginAbort")]
     pub(crate) fn begin_abort(
         &mut self,
         pending_requests: &mut PendingRequests,
@@ -1643,6 +1668,7 @@ impl TransactionManager {
     /// [`Error::LocalIllegalState`] on a non-transactional producer, while another
     /// operation's result is unacknowledged, when the manager is in an error state,
     /// or when no transaction is in progress.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.TransactionManager#sendOffsetsToTransaction")]
     pub(crate) fn send_offsets_to_transaction(
         &mut self,
         offsets: HashMap<TopicPartition, OffsetAndMetadata>,
@@ -1711,6 +1737,7 @@ impl TransactionManager {
     /// `result` is `None` where Java passes `null`, which it does on the Transaction
     /// V2 path only (Java 417): there is no `AddOffsetsToTxn` whose result the
     /// commit must complete, so the handler gets a fresh one.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.TransactionManager#txnOffsetCommitHandler")]
     fn txn_offset_commit_handler(
         &mut self,
         result: Option<Arc<TransactionalRequestResult>>,
@@ -1772,6 +1799,7 @@ impl TransactionManager {
     /// Only through the `clientSideEpochBumpRequired` tail, which re-enters
     /// [`Self::initialize_transactions_with_producer_id_and_epoch`]; that path's own
     /// `maybeFailWithError` can reject.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.TransactionManager#beginCompletingTransaction")]
     fn begin_completing_transaction(
         &mut self,
         transaction_result: TransactionResult,
@@ -1823,6 +1851,7 @@ impl TransactionManager {
     /// The configured transactional id, or `None` for an idempotent producer.
     ///
     /// Corresponds to `transactionalId()` (Java 472).
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.TransactionManager#transactionalId")]
     pub(crate) fn transactional_id(&self) -> Option<&str> {
         self.transactional_id.as_deref()
     }
@@ -1830,6 +1859,7 @@ impl TransactionManager {
     /// Whether a producer id has been acquired.
     ///
     /// Corresponds to `hasProducerId()` (Java 476).
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.TransactionManager#hasProducerId")]
     pub(crate) fn has_producer_id(&self) -> bool {
         self.producer_id_and_epoch.is_valid()
     }
@@ -1837,6 +1867,7 @@ impl TransactionManager {
     /// Whether this producer is transactional.
     ///
     /// Corresponds to `isTransactional()` (Java 480).
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.TransactionManager#isTransactional")]
     pub(crate) fn is_transactional(&self) -> bool {
         self.transactional_id.is_some()
     }
@@ -1863,6 +1894,7 @@ impl TransactionManager {
     /// the map and the epoch together (`ApiVersions.java:47-50`). This crate models
     /// the field as an `Option`, and treats `None` as an empty map: the same answer
     /// (`transaction.version` absent ⇒ V2 off) without a panic (CLAUDE.md §10.1).
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.TransactionManager#maybeUpdateTransactionV2Enabled")]
     pub(crate) fn maybe_update_transaction_v2_enabled(&mut self, on_initialization: bool) {
         if self.latest_finalized_features_epoch >= self.api_versions.max_finalized_features_epoch() {
             return;
@@ -1892,6 +1924,7 @@ impl TransactionManager {
     /// [`Self::maybe_update_transaction_v2_enabled`] is the only writer, and
     /// `Sender.sendProduceRequest` (`Sender.java:924-926`) reads it from outside
     /// this module in Phase 6.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.TransactionManager#isTransactionV2Enabled")]
     pub(crate) fn is_transaction_v2_enabled(&self) -> bool {
         self.is_transaction_v2_enabled
     }
@@ -1934,6 +1967,7 @@ impl TransactionManager {
     /// The error that moved this manager into an error state, if any.
     ///
     /// Corresponds to `lastError()` (Java 462).
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.TransactionManager#lastError")]
     pub(crate) fn last_error(&self) -> Option<&Error> {
         self.last_error.as_ref()
     }
@@ -1941,6 +1975,7 @@ impl TransactionManager {
     /// Whether the manager is in either error state.
     ///
     /// Corresponds to `hasError()` (Java 522).
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.TransactionManager#hasError")]
     pub(crate) fn has_error(&self) -> bool {
         self.current_state == State::AbortableError || self.current_state == State::FatalError
     }
@@ -1948,6 +1983,7 @@ impl TransactionManager {
     /// Whether the manager is in an unrecoverable error state.
     ///
     /// Corresponds to `hasFatalError()` (Java 986).
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.TransactionManager#hasFatalError")]
     pub(crate) fn has_fatal_error(&self) -> bool {
         self.current_state == State::FatalError
     }
@@ -1955,6 +1991,7 @@ impl TransactionManager {
     /// Whether the manager is in an abortable error state.
     ///
     /// Corresponds to `hasAbortableError()` (Java 991).
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.TransactionManager#hasAbortableError")]
     pub(crate) fn has_abortable_error(&self) -> bool {
         self.current_state == State::AbortableError
     }
@@ -1968,6 +2005,7 @@ impl TransactionManager {
     /// for a purely idempotent producer — see [`Self::has_ongoing_transaction`].
     /// Always `false` idempotently: neither `COMMITTING_TRANSACTION` nor
     /// `ABORTING_TRANSACTION` is reachable without a transactional id.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.TransactionManager#isCompleting")]
     pub(crate) fn is_completing(&self) -> bool {
         self.current_state == State::CommittingTransaction || self.current_state == State::AbortingTransaction
     }
@@ -1978,6 +2016,7 @@ impl TransactionManager {
     /// `maybeSendAndPollTransactionalRequest` (`Sender.java:468`), which Phase 4
     /// translates. Always `false` idempotently, for the same reason as
     /// [`Self::is_completing`].
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.TransactionManager#isAborting")]
     pub(crate) fn is_aborting(&self) -> bool {
         self.current_state == State::AbortingTransaction
     }
@@ -2001,6 +2040,7 @@ impl TransactionManager {
     ///   - the second shutdown loop's own condition at `:267`, whose body calls
     ///     `beginAbort()` — see [`Self::begin_abort`] for what Java does with the
     ///     `IllegalStateException` that produces.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.TransactionManager#hasOngoingTransaction")]
     pub(crate) fn has_ongoing_transaction(&self) -> bool {
         self.current_state == State::InTransaction || self.is_completing() || self.has_abortable_error()
     }
@@ -2056,6 +2096,7 @@ impl TransactionManager {
     /// from both sides: `TxnRequestHandler.fatalError` (Java 1359) runs on the
     /// Sender, while `KafkaProducer`'s transactional API (Phase 6) reaches it
     /// from the application task.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.TransactionManager#transitionToFatalError")]
     pub(crate) fn transition_to_fatal_error(&mut self, error: Error, caller: Caller) -> Result<(), Error> {
         // Fatality is recorded by the transition itself, not on the error: Java
         // keeps it in `currentState` (`hasFatalError()` == `currentState ==
@@ -2085,6 +2126,7 @@ impl TransactionManager {
     /// transition itself is permitted because the manager is in
     /// [`State::Initializing`] when the response arrives, and
     /// `INITIALIZING → ABORTABLE_ERROR` is a valid arm of the table (Java 180).
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.TransactionManager#transitionToAbortableError")]
     pub(crate) fn transition_to_abortable_error(&mut self, error: Error, caller: Caller) -> Result<(), Error> {
         if self.current_state == State::AbortingTransaction {
             kafka_debug!(
@@ -2113,6 +2155,9 @@ impl TransactionManager {
     /// abortable path; if Transaction V2 handles it server-side, take the
     /// abortable path without requesting anything; otherwise there is no way back
     /// and the error is fatal.
+    #[doc(
+        alias = "org.apache.kafka.clients.producer.internals.TransactionManager#transitionToAbortableErrorOrFatalError"
+    )]
     fn transition_to_abortable_error_or_fatal_error(
         &mut self,
         abortable_error: Error,
@@ -2145,6 +2190,7 @@ impl TransactionManager {
     /// 3. **Server-Triggered Only**: when Transaction V2 is enabled, epoch bumping
     ///    is handled automatically by the server in `EndTxn`, so manual epoch
     ///    bumping is not required, returns false.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.TransactionManager#needToTriggerEpochBumpFromClient")]
     pub(crate) fn need_to_trigger_epoch_bump_from_client(&self) -> bool {
         self.coordinator_supports_bumping_epoch && !self.is_transaction_v2_enabled
     }
@@ -2161,6 +2207,7 @@ impl TransactionManager {
     ///
     /// **NOTE:** This method should only be used for transactional producers.
     /// There is no concept of abortable errors for idempotent producers.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.TransactionManager#canHandleAbortableError")]
     fn can_handle_abortable_error(&self) -> bool {
         self.coordinator_supports_bumping_epoch || self.is_transaction_v2_enabled
     }
@@ -2177,6 +2224,7 @@ impl TransactionManager {
     /// Phase 5a because it is the only writer that clears the per-transaction sets
     /// and `prepared_txn_state`, and splitting it from the state machine would have
     /// meant writing it twice.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.TransactionManager#resetTransactionState")]
     fn reset_transaction_state(&mut self) -> Result<(), Error> {
         if self.client_side_epoch_bump_required {
             self.transition_to(State::Initializing, None, Caller::Sender)?;
@@ -2223,6 +2271,7 @@ impl TransactionManager {
     /// (`Sender.java:356`), not the `new AuthenticationException(exception)`
     /// wrapper it hands to [`Self::fail_pending_requests`] one line earlier
     /// (`:354`). Preserved.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.TransactionManager#transitionToUninitialized")]
     pub(crate) fn transition_to_uninitialized(&mut self, error: &Error, caller: Caller) -> Result<(), Error> {
         self.transition_to(State::Uninitialized, None, caller)?;
         // Java 758-760.
@@ -2250,6 +2299,7 @@ impl TransactionManager {
     /// field on this struct, so the loop had to go by index to leave `&mut self`
     /// free for [`Self::transition_to_abortable_error`]; with the queue passed in
     /// the two borrows are disjoint.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.TransactionManager#failPendingRequests")]
     pub(crate) fn fail_pending_requests(
         &mut self,
         pending_requests: &mut PendingRequests,
@@ -2282,6 +2332,7 @@ impl TransactionManager {
     /// carried inside an `io::Error` at the transport layer — so the parameter is
     /// a plain [`Error`] and the caller supplies it. The body treats it as a
     /// `RuntimeException` in Java too.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.TransactionManager#authenticationFailed")]
     pub(crate) fn authentication_failed(
         &mut self,
         pending_requests: &mut PendingRequests,
@@ -2355,6 +2406,7 @@ impl TransactionManager {
     /// false, the second refuted by the twenty lines of `Sender.run` around the
     /// call site it cited. Recorded because the pull toward inventing a
     /// present-tense payoff is what produced both.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.TransactionManager#close")]
     pub(crate) fn close(&mut self, pending_requests: &mut PendingRequests, caller: Caller) -> Result<(), Error> {
         #[cfg(test)]
         {
@@ -2394,6 +2446,7 @@ impl TransactionManager {
     ///   ("poisons" itself).
     /// - [`Error::LocalIllegalArgument`] when moving to an error state without
     ///   an error, mirroring Java's `IllegalArgumentException` (Java 1133).
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.TransactionManager#transitionTo")]
     fn transition_to(&mut self, target: State, error: Option<Error>, caller: Caller) -> Result<(), Error> {
         if !target.is_transition_valid(self.current_state) {
             let id_string = match &self.transactional_id {
@@ -2494,6 +2547,9 @@ impl TransactionManager {
     /// Java's suppliers can throw: `initializeTransactions`'s calls `transitionTo`
     /// (`:308`) and `beginCommit`'s calls `maybeFailWithError` (`:354`). When it
     /// does, `pendingTransition` is left unset, exactly as in Java.
+    #[doc(
+        alias = "org.apache.kafka.clients.producer.internals.TransactionManager#handleCachedTransactionRequestResult"
+    )]
     fn handle_cached_transaction_request_result<F>(
         &mut self,
         supplier: F,
@@ -2527,6 +2583,7 @@ impl TransactionManager {
     /// Rejects a transactional operation on a non-transactional producer.
     ///
     /// Corresponds to `ensureTransactional()` (Java 1147).
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.TransactionManager#ensureTransactional")]
     fn ensure_transactional(&self) -> Result<(), Error> {
         if !self.is_transactional() {
             return Err(Error::local_illegal_state(
@@ -2545,6 +2602,7 @@ impl TransactionManager {
     /// [`Error`] has no cause chain, and Java's `getMessage()` does not
     /// include the cause either, so the message text is reproduced exactly and
     /// the cause stays reachable through [`Self::last_error`].
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.TransactionManager#maybeFailWithError")]
     fn maybe_fail_with_error(&self) -> Result<(), Error> {
         if !self.has_error() {
             return Ok(());
@@ -2622,6 +2680,7 @@ impl TransactionManager {
     /// `ProducerFencedException` → [`Errors::ProducerFenced`],
     /// `UnsupportedVersionException` → [`Errors::UnsupportedVersion`],
     /// `InvalidPidMappingException` → [`Errors::InvalidProducerIdMapping`].
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.TransactionManager#maybeTransitionToErrorState")]
     pub(crate) fn maybe_transition_to_error_state(&mut self, error: &Error, caller: Caller) -> Result<(), Error> {
         if matches!(
             error.error(),
@@ -2675,6 +2734,7 @@ impl TransactionManager {
     /// `partitions_in_transaction` — through `AddPartitionsToTxnHandler`, or directly
     /// under Transaction V2 — the set lookup discriminates rather than always
     /// refusing.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.TransactionManager#isSendToPartitionAllowed")]
     pub(crate) fn is_send_to_partition_allowed(&self, topic_partition: &TopicPartition) -> bool {
         if self.has_fatal_error() {
             return false;
@@ -2688,6 +2748,7 @@ impl TransactionManager {
     /// "visible for testing".
     // Java `hasPendingOffsetCommits`. Retained for parity (DoD #2); exercised only by this crate's tests.
     #[allow(dead_code)]
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.TransactionManager#hasPendingOffsetCommits")]
     pub(crate) fn has_pending_offset_commits(&self) -> bool {
         !self.pending_txn_offset_commits.is_empty()
     }
@@ -2697,6 +2758,7 @@ impl TransactionManager {
     /// Corresponds to `hasPartitionsToAdd()` (Java 514).
     // Java `hasPartitionsToAdd`. Retained for parity (DoD #2); exercised only by this crate's tests.
     #[allow(dead_code)]
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.TransactionManager#hasPartitionsToAdd")]
     pub(crate) fn has_partitions_to_add(&self) -> bool {
         !self.new_partitions_in_transaction.is_empty() || !self.pending_partitions_in_transaction.is_empty()
     }
@@ -2705,6 +2767,7 @@ impl TransactionManager {
     /// confirmed by the coordinator.
     ///
     /// Corresponds to `isPartitionPendingAdd(TopicPartition)` (Java 571).
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.TransactionManager#isPartitionPendingAdd")]
     pub(crate) fn is_partition_pending_add(&self, partition: &TopicPartition) -> bool {
         self.new_partitions_in_transaction.contains(partition)
             || self.pending_partitions_in_transaction.contains(partition)
@@ -2714,6 +2777,7 @@ impl TransactionManager {
     /// transaction.
     ///
     /// Corresponds to `transactionContainsPartition(TopicPartition)` (Java 993).
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.TransactionManager#transactionContainsPartition")]
     pub(crate) fn transaction_contains_partition(&self, topic_partition: &TopicPartition) -> bool {
         self.partitions_in_transaction.contains(topic_partition)
     }
@@ -2726,6 +2790,7 @@ impl TransactionManager {
     /// (`definition-of-done.md` §2).
     // Java `isReady`. Retained for parity (DoD #2); no caller in this crate yet.
     #[allow(dead_code)]
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.TransactionManager#isReady")]
     pub(crate) fn is_ready(&self) -> bool {
         self.is_transactional() && self.current_state == State::Ready
     }
@@ -2737,6 +2802,7 @@ impl TransactionManager {
     /// (`definition-of-done.md` §2).
     // Java `isInitializing`. Retained for parity (DoD #2); exercised only by this crate's tests.
     #[allow(dead_code)]
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.TransactionManager#isInitializing")]
     pub(crate) fn is_initializing(&self) -> bool {
         self.is_transactional() && self.current_state == State::Initializing
     }
@@ -2750,6 +2816,7 @@ impl TransactionManager {
     // production 2PC caller was reverted in AK 4.3.1 (milestone 12), the same
     // reason its sibling `prepared_transaction_state` carries this allow.
     #[allow(dead_code)]
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.TransactionManager#isPrepared")]
     pub(crate) fn is_prepared(&self) -> bool {
         self.current_state == State::PreparedTransaction
     }
@@ -2764,6 +2831,7 @@ impl TransactionManager {
     // Java `preparedTransactionState` (KIP-939). Retained for parity (DoD #2);
     // exercised only by this crate's tests.
     #[allow(dead_code)]
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.TransactionManager#preparedTransactionState")]
     pub(crate) fn prepared_transaction_state(&self) -> ProducerIdAndEpoch {
         self.prepared_txn_state
     }
@@ -2774,6 +2842,7 @@ impl TransactionManager {
     /// verify that the result is valid.
     ///
     /// Corresponds to `producerIdAndEpoch()` (Java 581).
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.TransactionManager#producerIdAndEpoch")]
     pub(crate) fn producer_id_and_epoch(&self) -> ProducerIdAndEpoch {
         self.producer_id_and_epoch
     }
@@ -2789,6 +2858,7 @@ impl TransactionManager {
     /// point, so an empty slice is always correct here. It is still a parameter
     /// because [`TxnPartitionMap::start_sequences_at_beginning`] requires the
     /// pool by contract (rules §7).
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.TransactionManager#maybeUpdateProducerIdAndEpoch")]
     pub(crate) fn maybe_update_producer_id_and_epoch(
         &mut self,
         topic_partition: &TopicPartition,
@@ -2822,6 +2892,7 @@ impl TransactionManager {
     /// Set the producer id and epoch atomically.
     ///
     /// Corresponds to `setProducerIdAndEpoch(ProducerIdAndEpoch)` (Java 603).
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.TransactionManager#setProducerIdAndEpoch")]
     fn set_producer_id_and_epoch(&mut self, producer_id_and_epoch: ProducerIdAndEpoch) {
         // With TV2, the epoch bump is common and frequent. Only log if it is at debug level or the producer ID is
         // changed.
@@ -2851,6 +2922,7 @@ impl TransactionManager {
     /// the epoch instead.
     ///
     /// Corresponds to `resetIdempotentProducerId()` (Java 618).
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.TransactionManager#resetIdempotentProducerId")]
     fn reset_idempotent_producer_id(&mut self, caller: Caller) -> Result<(), Error> {
         if self.is_transactional() {
             return Err(Error::local_illegal_state(
@@ -2870,6 +2942,7 @@ impl TransactionManager {
     /// Drops all sequence bookkeeping for `topic_partition`.
     ///
     /// Corresponds to `resetSequenceForPartition(TopicPartition)` (Java 627).
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.TransactionManager#resetSequenceForPartition")]
     fn reset_sequence_for_partition(&mut self, topic_partition: &TopicPartition) {
         self.txn_partition_map.remove(topic_partition);
         self.partitions_with_unresolved_sequences.remove(topic_partition);
@@ -2878,6 +2951,7 @@ impl TransactionManager {
     /// Drops all sequence bookkeeping for every partition.
     ///
     /// Corresponds to `resetSequenceNumbers()` (Java 632).
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.TransactionManager#resetSequenceNumbers")]
     fn reset_sequence_numbers(&mut self) {
         self.txn_partition_map.reset();
         self.partitions_with_unresolved_sequences.clear();
@@ -2887,6 +2961,9 @@ impl TransactionManager {
     ///
     /// Corresponds to `requestIdempotentEpochBumpForPartition(TopicPartition)`
     /// (Java 640).
+    #[doc(
+        alias = "org.apache.kafka.clients.producer.internals.TransactionManager#requestIdempotentEpochBumpForPartition"
+    )]
     pub(crate) fn request_idempotent_epoch_bump_for_partition(&mut self, topic_partition: &TopicPartition) {
         self.client_side_epoch_bump_required = true;
         self.partitions_to_rewrite_sequences.insert(topic_partition.clone());
@@ -2921,6 +2998,7 @@ impl TransactionManager {
     /// an entry is `handleFailedBatch`'s `UnknownProducerId` arm, and rules §9
     /// routes an idempotent `UnknownProducerId` to the epoch-bump branch
     /// instead.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.TransactionManager#bumpIdempotentProducerEpoch")]
     fn bump_idempotent_producer_epoch(
         &mut self,
         batches: &mut InFlightBatchPool<'_>,
@@ -2973,6 +3051,9 @@ impl TransactionManager {
     /// Translated from `bumpIdempotentEpochAndResetIdIfNeeded()` (Java 663).
     /// Called once per `Sender.runOnce` (`Sender.java:331`), hence
     /// [`Caller::Sender`] at the production call site.
+    #[doc(
+        alias = "org.apache.kafka.clients.producer.internals.TransactionManager#bumpIdempotentEpochAndResetIdIfNeeded"
+    )]
     pub(crate) fn bump_idempotent_epoch_and_reset_id_if_needed(
         &mut self,
         batches: &mut InFlightBatchPool<'_>,
@@ -3032,6 +3113,7 @@ impl TransactionManager {
     /// Returns the next sequence number to be written to the given `TopicPartition`.
     ///
     /// Corresponds to `sequenceNumber(TopicPartition)` (Java 682).
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.TransactionManager#sequenceNumber")]
     pub(crate) fn sequence_number(&mut self, topic_partition: &TopicPartition) -> i32 {
         self.txn_partition_map.get_or_create(topic_partition).next_sequence()
     }
@@ -3054,6 +3136,7 @@ impl TransactionManager {
     ///
     /// Corresponds to `incrementSequenceNumber(TopicPartition, int)`
     /// (Java 693).
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.TransactionManager#incrementSequenceNumber")]
     pub(crate) fn increment_sequence_number(
         &mut self,
         topic_partition: &TopicPartition,
@@ -3066,6 +3149,7 @@ impl TransactionManager {
     /// Records `batch` as in flight.
     ///
     /// Corresponds to `addInFlightBatch(ProducerBatch)` (Java 697).
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.TransactionManager#addInFlightBatch")]
     pub(crate) fn add_in_flight_batch(&mut self, batch: &ProducerBatch) -> Result<(), Error> {
         if !batch.has_sequence() {
             return Err(Error::local_illegal_state(format!(
@@ -3087,6 +3171,7 @@ impl TransactionManager {
     /// Returns the lowest inflight sequence if the transaction manager is tracking inflight requests for this
     /// partition. If there are no inflight requests being tracked for this partition, this method will return
     /// [`RecordBatch::NO_SEQUENCE`].
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.TransactionManager#firstInFlightSequence")]
     pub(crate) fn first_in_flight_sequence(&mut self, topic_partition: &TopicPartition) -> Result<i32, Error> {
         if !self.has_inflight_batches(topic_partition) {
             return Ok(RecordBatch::NO_SEQUENCE);
@@ -3101,6 +3186,7 @@ impl TransactionManager {
     /// Corresponds to `nextBatchBySequence(TopicPartition)` (Java 717). Java
     /// returns the `ProducerBatch`; this returns its ordering key, because this
     /// type does not own the batches (rules §7).
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.TransactionManager#nextBatchBySequence")]
     pub(crate) fn next_batch_by_sequence(
         &self,
         topic_partition: &TopicPartition,
@@ -3111,6 +3197,7 @@ impl TransactionManager {
     /// Removes `batch` from the in-flight set.
     ///
     /// Corresponds to `removeInFlightBatch(ProducerBatch)` (Java 721).
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.TransactionManager#removeInFlightBatch")]
     pub(crate) fn remove_in_flight_batch(&mut self, batch: &ProducerBatch) -> Result<(), Error> {
         if self.has_inflight_batches(&batch.topic_partition) {
             self.txn_partition_map.remove_in_flight_batch(batch)?;
@@ -3122,6 +3209,7 @@ impl TransactionManager {
     ///
     /// Corresponds to `maybeUpdateLastAckedSequence(TopicPartition, int)`
     /// (Java 726).
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.TransactionManager#maybeUpdateLastAckedSequence")]
     fn maybe_update_last_acked_sequence(&mut self, topic_partition: &TopicPartition, sequence: i32) -> i32 {
         self.txn_partition_map
             .maybe_update_last_acked_sequence(topic_partition, sequence)
@@ -3130,6 +3218,7 @@ impl TransactionManager {
     /// The last acknowledged sequence for `topic_partition`.
     ///
     /// Corresponds to `lastAckedSequence(TopicPartition)` (Java 730).
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.TransactionManager#lastAckedSequence")]
     pub(crate) fn last_acked_sequence(&self, topic_partition: &TopicPartition) -> Option<i32> {
         self.txn_partition_map.last_acked_sequence(topic_partition)
     }
@@ -3137,6 +3226,7 @@ impl TransactionManager {
     /// The last acknowledged offset for `topic_partition`.
     ///
     /// Corresponds to `lastAckedOffset(TopicPartition)` (Java 734).
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.TransactionManager#lastAckedOffset")]
     pub(crate) fn last_acked_offset(&self, topic_partition: &TopicPartition) -> Option<i64> {
         self.txn_partition_map.last_acked_offset(topic_partition)
     }
@@ -3145,6 +3235,7 @@ impl TransactionManager {
     ///
     /// Corresponds to `updateLastAckedOffset(PartitionResponse, ProducerBatch)`
     /// (Java 738).
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.TransactionManager#updateLastAckedOffset")]
     fn update_last_acked_offset(&mut self, response: &PartitionResponse, batch: &ProducerBatch) -> Result<(), Error> {
         if response.base_offset == ProduceResponse::INVALID_OFFSET {
             return Ok(());
@@ -3159,6 +3250,7 @@ impl TransactionManager {
     ///
     /// Corresponds to `handleCompletedBatch(ProducerBatch, PartitionResponse)`
     /// (Java 745).
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.TransactionManager#handleCompletedBatch")]
     pub(crate) fn handle_completed_batch(
         &mut self,
         batch: &ProducerBatch,
@@ -3196,6 +3288,7 @@ impl TransactionManager {
     /// relation is recovered by [`Error::is_out_of_order_sequence_error`], the
     /// single predicate encoding that `extends` edge (CLAUDE.md §10.4) — see
     /// `.claude/rules/producer-transactions.md` §9.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.TransactionManager#handleFailedBatch")]
     pub(crate) fn handle_failed_batch(
         &mut self,
         batch: &ProducerBatch,
@@ -3258,6 +3351,7 @@ impl TransactionManager {
     /// Whether any batches are in flight for `topic_partition`.
     ///
     /// Corresponds to `hasInflightBatches(TopicPartition)` (Java 824).
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.TransactionManager#hasInflightBatches")]
     pub(crate) fn has_inflight_batches(&mut self, topic_partition: &TopicPartition) -> bool {
         self.txn_partition_map.get_or_create(topic_partition).has_inflight_batches()
     }
@@ -3266,6 +3360,7 @@ impl TransactionManager {
     /// id/epoch than the manager's current one.
     ///
     /// Corresponds to `hasStaleProducerIdAndEpoch(TopicPartition)` (Java 828).
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.TransactionManager#hasStaleProducerIdAndEpoch")]
     pub(crate) fn has_stale_producer_id_and_epoch(&mut self, topic_partition: &TopicPartition) -> bool {
         let producer_id_and_epoch = self.producer_id_and_epoch;
         producer_id_and_epoch != self.txn_partition_map.get_or_create(topic_partition).producer_id_and_epoch()
@@ -3276,6 +3371,7 @@ impl TransactionManager {
     /// Corresponds to `hasUnresolvedSequences()` (Java 832).
     // Java `hasUnresolvedSequences`. Retained for parity (DoD #2); exercised only by this crate's tests.
     #[allow(dead_code)]
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.TransactionManager#hasUnresolvedSequences")]
     pub(crate) fn has_unresolved_sequences(&self) -> bool {
         !self.partitions_with_unresolved_sequences.is_empty()
     }
@@ -3283,6 +3379,7 @@ impl TransactionManager {
     /// Whether `topic_partition` has an unresolved sequence.
     ///
     /// Corresponds to `hasUnresolvedSequence(TopicPartition)` (Java 836).
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.TransactionManager#hasUnresolvedSequence")]
     pub(crate) fn has_unresolved_sequence(&self, topic_partition: &TopicPartition) -> bool {
         self.partitions_with_unresolved_sequences.contains_key(topic_partition)
     }
@@ -3290,6 +3387,7 @@ impl TransactionManager {
     /// Marks `batch`'s partition unresolved after the batch expired locally.
     ///
     /// Corresponds to `markSequenceUnresolved(ProducerBatch)` (Java 840).
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.TransactionManager#markSequenceUnresolved")]
     pub(crate) fn mark_sequence_unresolved(&mut self, batch: &ProducerBatch) {
         let next_sequence = batch.last_sequence() + 1;
         let recorded = self
@@ -3315,6 +3413,7 @@ impl TransactionManager {
     /// transition, but the transactional arm reaches
     /// [`Self::transition_to_abortable_error_or_fatal_error`] and so needs it
     /// (PLAN §10.5 deviation 6 said this phase would add it).
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.TransactionManager#maybeResolveSequences")]
     pub(crate) fn maybe_resolve_sequences(&mut self, caller: Caller) -> Result<(), Error> {
         // Java removes through the key-set iterator. Collected here because the
         // loop body needs `&mut self`; each partition is handled independently,
@@ -3374,6 +3473,7 @@ impl TransactionManager {
     /// acknowledged sequence.
     ///
     /// Corresponds to `isNextSequence(TopicPartition, int)` (Java 885).
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.TransactionManager#isNextSequence")]
     fn is_next_sequence(&self, topic_partition: &TopicPartition, sequence: i32) -> bool {
         sequence
             - self
@@ -3387,6 +3487,9 @@ impl TransactionManager {
     ///
     /// Corresponds to `isNextSequenceForUnresolvedPartition(TopicPartition, int)`
     /// (Java 889).
+    #[doc(
+        alias = "org.apache.kafka.clients.producer.internals.TransactionManager#isNextSequenceForUnresolvedPartition"
+    )]
     fn is_next_sequence_for_unresolved_partition(&self, topic_partition: &TopicPartition, sequence: i32) -> bool {
         self.has_unresolved_sequence(topic_partition)
             && self.partitions_with_unresolved_sequences.get(topic_partition) == Some(&sequence)
@@ -3399,6 +3502,7 @@ impl TransactionManager {
     /// Corresponds to `enqueueRequest(TxnRequestHandler)` (Java 1186). Takes the
     /// queue from its owner (rules §2, see [`PendingRequests`]); `&self` is only
     /// needed for the log prefix.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.TransactionManager#enqueueRequest")]
     fn enqueue_request(&self, pending_requests: &mut PendingRequests, handler: TxnRequestHandler) {
         kafka_debug!(self.log_context, "Enqueuing transactional request {:?}", handler);
         pending_requests.add(handler);
@@ -3415,6 +3519,7 @@ impl TransactionManager {
     /// that never started" path (Java 923). `Result` carries that, so the outer
     /// `Option` keeps meaning "nothing to send" rather than doubling as an error
     /// channel.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.TransactionManager#nextRequest")]
     pub(crate) fn next_request(
         &mut self,
         pending_requests: &mut PendingRequests,
@@ -3492,6 +3597,7 @@ impl TransactionManager {
     /// `FindCoordinatorHandler`: a coordinator lookup is still allowed to go out
     /// while the producer is heading for an abort, because the abort itself needs
     /// the coordinator (`testFindCoordinatorAllowedInAbortableErrorState`).
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.TransactionManager#maybeTerminateRequestWithError")]
     fn maybe_terminate_request_with_error(&self, handler: &TxnRequestHandler) -> bool {
         if self.has_error() {
             if self.has_abortable_error() && handler.is_find_coordinator() {
@@ -3547,6 +3653,7 @@ impl TransactionManager {
     /// Takes both the coordinator record and the request queue from their owner,
     /// because Java touches both from this unsynchronized method (rules §2) — see
     /// [`CoordinatorNodes`] and [`PendingRequests`].
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.TransactionManager#lookupCoordinator")]
     pub(crate) fn lookup_coordinator(
         &self,
         coordinators: &mut CoordinatorNodes,
@@ -3577,6 +3684,7 @@ impl TransactionManager {
     /// (rules §10) — the wire builder's own `build_txn_topic_collection` already
     /// sorts by topic name, and this settles the partition order within a topic,
     /// which that grouping preserves.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.TransactionManager#addPartitionsToTransactionHandler")]
     fn add_partitions_to_transaction_handler(&mut self) -> TxnRequestHandler {
         self.pending_partitions_in_transaction
             .extend(self.new_partitions_in_transaction.iter().cloned());
@@ -3615,6 +3723,7 @@ impl TransactionManager {
     /// `coordinator_supports_bumping_epoch` here, because it also reads
     /// `api_versions` — a manager field. See that field's docs for why it is not
     /// Sender-owned.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.TransactionManager#handleCoordinatorReady")]
     pub(crate) fn handle_coordinator_ready(&mut self, coordinators: &CoordinatorNodes) {
         // `coordinator(TRANSACTION)` cannot error, so the node is read directly.
         let node_api_versions = coordinators
@@ -3633,6 +3742,7 @@ impl TransactionManager {
     /// Corresponds to `retry(TxnRequestHandler)` (Java 934), which is what
     /// `Sender` calls; `TxnRequestHandler.reenqueue()` (Java 1394) is the same
     /// two statements reached from the response path.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.TransactionManager#retry")]
     pub(crate) fn retry(&self, pending_requests: &mut PendingRequests, mut handler: TxnRequestHandler) {
         handler.set_retry();
         self.enqueue_request(pending_requests, handler);
@@ -4589,6 +4699,7 @@ impl TransactionManager {
     /// disagree, and a `contains`-guard would then skip a `get_or_create` Java
     /// performs. Trading a correctness edge for two atomic increments is the wrong
     /// way round.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.TransactionManager#maybeAddPartition")]
     pub(crate) fn maybe_add_partition(&mut self, topic_partition: &TopicPartition) -> Result<(), Error> {
         self.maybe_fail_with_error()?;
         self.return_error_if_pending_state(TransactionOperation::Send)?;
@@ -4645,6 +4756,7 @@ impl TransactionManager {
     /// `batches` is the partition's full in-flight pool — accumulator deques,
     /// `Sender::in_flight_batches`, and the failing batch. The idempotent path never
     /// reads it, but the transactional log-truncation rewrite does.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.TransactionManager#canRetry")]
     pub(crate) fn can_retry(
         &mut self,
         response: &PartitionResponse,
@@ -6589,6 +6701,9 @@ mod tests {
     /// Translated from `testFailIfNotReadyForSendIdempotentProducer`
     /// (Java 267-273).
     #[test]
+    #[doc(
+        alias = "org.apache.kafka.clients.producer.internals.TransactionManagerTest#testFailIfNotReadyForSendIdempotentProducer"
+    )]
     fn test_fail_if_not_ready_for_send_idempotent_producer() {
         for transaction_v2_enabled in [true, false] {
             let mut manager = idempotent_manager(transaction_v2_enabled);
@@ -6601,6 +6716,9 @@ mod tests {
     /// Translated from `testFailIfNotReadyForSendIdempotentProducerFatalError`
     /// (Java 275-281).
     #[test]
+    #[doc(
+        alias = "org.apache.kafka.clients.producer.internals.TransactionManagerTest#testFailIfNotReadyForSendIdempotentProducerFatalError"
+    )]
     fn test_fail_if_not_ready_for_send_idempotent_producer_fatal_error() {
         for transaction_v2_enabled in [true, false] {
             let mut manager = idempotent_manager(transaction_v2_enabled);
@@ -6625,6 +6743,9 @@ mod tests {
     /// the pair rather than duplicating it (`definition-of-done.md` §6), and the
     /// accounting records the pairing.
     #[test]
+    #[doc(
+        alias = "org.apache.kafka.clients.producer.internals.TransactionManagerTest#testFailIfNotReadyForSendNoProducerId"
+    )]
     fn test_fail_if_not_ready_for_send_no_producer_id() {
         let mut manager = transactional_manager(false);
         let error = manager
@@ -6644,6 +6765,9 @@ mod tests {
     /// (Java 282-286), which is character-identical to
     /// `testNotReadyForSendBeforeBeginTransaction` (Java 510-514).
     #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.producer.internals.TransactionManagerTest#testFailIfNotReadyForSendNoOngoingTransaction"
+    )]
     async fn test_fail_if_not_ready_for_send_no_ongoing_transaction() {
         let mut manager = transactional_manager(false);
         let mut pending = PendingRequests::new();
@@ -6662,6 +6786,9 @@ mod tests {
     /// (Java 288-295), which is character-identical to
     /// `testNotReadyForSendAfterAbortableError` (Java 516-523).
     #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.producer.internals.TransactionManagerTest#testFailIfNotReadyForSendAfterAbortableError"
+    )]
     async fn test_fail_if_not_ready_for_send_after_abortable_error() {
         let mut manager = transactional_manager(false);
         let mut pending = PendingRequests::new();
@@ -6684,6 +6811,9 @@ mod tests {
     /// (Java 296-302), which is character-identical to
     /// `testNotReadyForSendAfterFatalError` (Java 524-530).
     #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.producer.internals.TransactionManagerTest#testFailIfNotReadyForSendAfterFatalError"
+    )]
     async fn test_fail_if_not_ready_for_send_after_fatal_error() {
         let mut manager = transactional_manager(false);
         let mut pending = PendingRequests::new();
@@ -6918,6 +7048,9 @@ mod tests {
     /// Translated from `testHandlingOfUnknownTopicPartitionErrorOnTxnOffsetCommit`
     /// (Java 2472-2475).
     #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.producer.internals.TransactionManagerTest#testHandlingOfUnknownTopicPartitionErrorOnTxnOffsetCommit"
+    )]
     async fn test_handling_of_unknown_topic_partition_error_on_txn_offset_commit() {
         retriable_error_in_txn_offset_commit(Errors::UnknownTopicOrPartition).await;
     }
@@ -6925,6 +7058,9 @@ mod tests {
     /// Translated from `testHandlingOfCoordinatorLoadingErrorOnTxnOffsetCommit`
     /// (Java 2477-2480).
     #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.producer.internals.TransactionManagerTest#testHandlingOfCoordinatorLoadingErrorOnTxnOffsetCommit"
+    )]
     async fn test_handling_of_coordinator_loading_error_on_txn_offset_commit() {
         retriable_error_in_txn_offset_commit(Errors::CoordinatorLoadInProgress).await;
     }
@@ -6932,6 +7068,9 @@ mod tests {
     /// Translated from `testHandlingOfNetworkExceptionOnTxnOffsetCommit`
     /// (Java 2482-2485).
     #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.producer.internals.TransactionManagerTest#testHandlingOfNetworkExceptionOnTxnOffsetCommit"
+    )]
     async fn test_handling_of_network_error_on_txn_offset_commit() {
         retriable_error_in_txn_offset_commit(Errors::NetworkError).await;
     }
@@ -6976,6 +7115,9 @@ mod tests {
     /// Translated from `testHandlingOfProducerFencedErrorOnTxnOffsetCommit`
     /// (Java 2522-2525).
     #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.producer.internals.TransactionManagerTest#testHandlingOfProducerFencedErrorOnTxnOffsetCommit"
+    )]
     async fn test_handling_of_producer_fenced_error_on_txn_offset_commit() {
         fatal_error_in_txn_offset_commit(Errors::ProducerFenced, Errors::ProducerFenced).await;
     }
@@ -6984,6 +7126,9 @@ mod tests {
     /// `testHandlingOfTransactionalIdAuthorizationFailedErrorOnTxnOffsetCommit`
     /// (Java 2527-2530).
     #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.producer.internals.TransactionManagerTest#testHandlingOfTransactionalIdAuthorizationFailedErrorOnTxnOffsetCommit"
+    )]
     async fn test_handling_of_transactional_id_authorization_failed_error_on_txn_offset_commit() {
         fatal_error_in_txn_offset_commit(
             Errors::TransactionalIdAuthorizationFailed,
@@ -6995,6 +7140,9 @@ mod tests {
     /// Translated from `testHandlingOfInvalidProducerEpochErrorOnTxnOffsetCommit`
     /// (Java 2532-2535).
     #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.producer.internals.TransactionManagerTest#testHandlingOfInvalidProducerEpochErrorOnTxnOffsetCommit"
+    )]
     async fn test_handling_of_invalid_producer_epoch_error_on_txn_offset_commit() {
         fatal_error_in_txn_offset_commit(Errors::InvalidProducerEpoch, Errors::ProducerFenced).await;
     }
@@ -7003,6 +7151,9 @@ mod tests {
     /// `testHandlingOfUnsupportedForMessageFormatErrorOnTxnOffsetCommit`
     /// (Java 2537-2540).
     #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.producer.internals.TransactionManagerTest#testHandlingOfUnsupportedForMessageFormatErrorOnTxnOffsetCommit"
+    )]
     async fn test_handling_of_unsupported_for_message_format_error_on_txn_offset_commit() {
         fatal_error_in_txn_offset_commit(Errors::UnsupportedForMessageFormat, Errors::UnsupportedForMessageFormat)
             .await;
@@ -7013,6 +7164,9 @@ mod tests {
     /// `beginCommit` / `beginAbort` pair — covered by
     /// [`assert_abortable_error`] in the tests that use it.
     #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.producer.internals.TransactionManagerTest#testFencedInstanceIdInTxnOffsetCommitByGroupMetadata"
+    )]
     async fn test_fenced_instance_id_in_txn_offset_commit_by_group_metadata() {
         let fenced_member_id = "fenced_member";
         let mut manager = transactional_manager(false);
@@ -7252,6 +7406,9 @@ mod tests {
     /// `nextRequest(true)` — incomplete batches outstanding — must withhold the
     /// `EndTxn` (Java 902-903); `nextRequest(false)` releases it.
     #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.producer.internals.TransactionManagerTest#testEndTxnNotSentIfIncompleteBatches"
+    )]
     async fn test_end_txn_not_sent_if_incomplete_batches() {
         let mut manager = transactional_manager(false);
         let mut pending = PendingRequests::new();
@@ -7283,6 +7440,9 @@ mod tests {
 
     /// Translated from `testHasOngoingTransactionSuccessfulCommit` (Java 327-350).
     #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.producer.internals.TransactionManagerTest#testHasOngoingTransactionSuccessfulCommit"
+    )]
     async fn test_has_ongoing_transaction_successful_commit() {
         let partition = TopicPartition::new("foo".to_string(), 0);
         let mut manager = transactional_manager(false);
@@ -7314,6 +7474,9 @@ mod tests {
 
     /// Translated from `testHasOngoingTransactionSuccessfulAbort` (Java 303-325).
     #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.producer.internals.TransactionManagerTest#testHasOngoingTransactionSuccessfulAbort"
+    )]
     async fn test_has_ongoing_transaction_successful_abort() {
         let partition = TopicPartition::new("foo".to_string(), 0);
         let mut manager = transactional_manager(false);
@@ -7345,6 +7508,9 @@ mod tests {
 
     /// Translated from `testHasOngoingTransactionAbortableError` (Java 351-377).
     #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.producer.internals.TransactionManagerTest#testHasOngoingTransactionAbortableError"
+    )]
     async fn test_has_ongoing_transaction_abortable_error() {
         let partition = TopicPartition::new("foo".to_string(), 0);
         let mut manager = transactional_manager(false);
@@ -7448,6 +7614,9 @@ mod tests {
 
     /// Translated from `testHasOngoingTransactionFatalError` (Java 378-397).
     #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.producer.internals.TransactionManagerTest#testHasOngoingTransactionFatalError"
+    )]
     async fn test_has_ongoing_transaction_fatal_error() {
         let partition = TopicPartition::new("foo".to_string(), 0);
         let mut manager = transactional_manager(false);
@@ -7475,6 +7644,9 @@ mod tests {
 
     /// Translated from `testMaybeAddPartitionToTransaction` (Java 399-422).
     #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.producer.internals.TransactionManagerTest#testMaybeAddPartitionToTransaction"
+    )]
     async fn test_maybe_add_partition_to_transaction() {
         let partition = TopicPartition::new("foo".to_string(), 0);
         let mut manager = transactional_manager(false);
@@ -7507,6 +7679,9 @@ mod tests {
     /// because the client sends no `AddPartitionsToTxn` under TV2 — so nothing is
     /// ever pending and the queue stays empty.
     #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.producer.internals.TransactionManagerTest#testMaybeAddPartitionToTransactionInTransactionV2"
+    )]
     async fn test_maybe_add_partition_to_transaction_in_transaction_v2() {
         let partition = TopicPartition::new("foo".to_string(), 0);
         let mut manager = transactional_manager(true);
@@ -7533,6 +7708,9 @@ mod tests {
     /// `testAddPartitionToTransactionOverridesRetryBackoffForConcurrentTransactions`
     /// (Java 444-461).
     #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.producer.internals.TransactionManagerTest#testAddPartitionToTransactionOverridesRetryBackoffForConcurrentTransactions"
+    )]
     async fn test_add_partition_to_transaction_overrides_retry_backoff_for_concurrent_transactions() {
         let partition = TopicPartition::new("foo".to_string(), 0);
         let mut manager = transactional_manager(false);
@@ -7569,6 +7747,9 @@ mod tests {
     /// retry, and Java's `nextRequest(false)` yields *that* one. Java asserts
     /// `DEFAULT_RETRY_BACKOFF_MS`, which is the value both handlers carry.
     #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.producer.internals.TransactionManagerTest#testAddPartitionToTransactionRetainsRetryBackoffForRegularRetriableError"
+    )]
     async fn test_add_partition_to_transaction_retains_retry_backoff_for_regular_retriable_error() {
         let partition = TopicPartition::new("foo".to_string(), 0);
         let mut manager = transactional_manager(false);
@@ -7609,6 +7790,9 @@ mod tests {
     /// first, so the assertion covers the post-override value as well, which is the
     /// point the test name makes.
     #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.producer.internals.TransactionManagerTest#testAddPartitionToTransactionRetainsRetryBackoffWhenPartitionsAlreadyAdded"
+    )]
     async fn test_add_partition_to_transaction_retains_retry_backoff_when_partitions_already_added() {
         let partition = TopicPartition::new("foo".to_string(), 0);
         let mut manager = transactional_manager(false);
@@ -7720,6 +7904,9 @@ mod tests {
     /// Translated from `testTransactionalIdAuthorizationFailureInInitProducerId`
     /// (Java 1365-1379).
     #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.producer.internals.TransactionManagerTest#testTransactionalIdAuthorizationFailureInInitProducerId"
+    )]
     async fn test_transactional_id_authorization_failure_in_init_producer_id() {
         let mut manager = transactional_manager(false);
         let mut pending = PendingRequests::new();
@@ -7760,6 +7947,9 @@ mod tests {
     /// Translated from `testTransactionAbortableExceptionInInitProducerId`
     /// (Java 3871-3885).
     #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.producer.internals.TransactionManagerTest#testTransactionAbortableExceptionInInitProducerId"
+    )]
     async fn test_transaction_abortable_error_in_init_producer_id() {
         let mut manager = transactional_manager(false);
         let mut pending = PendingRequests::new();
@@ -7825,6 +8015,9 @@ mod tests {
     /// Translated from `testTransactionalIdAuthorizationFailureInAddOffsetsToTxn`
     /// (Java 1450-1468).
     #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.producer.internals.TransactionManagerTest#testTransactionalIdAuthorizationFailureInAddOffsetsToTxn"
+    )]
     async fn test_transactional_id_authorization_failure_in_add_offsets_to_txn() {
         let (mut manager, mut pending, send_offsets_result) =
             add_offsets_to_txn_failure(Errors::TransactionalIdAuthorizationFailed).await;
@@ -7838,6 +8031,9 @@ mod tests {
     /// Translated from `testInvalidTxnStateFailureInAddOffsetsToTxn`
     /// (Java 1470-1488).
     #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.producer.internals.TransactionManagerTest#testInvalidTxnStateFailureInAddOffsetsToTxn"
+    )]
     async fn test_invalid_txn_state_failure_in_add_offsets_to_txn() {
         let (mut manager, mut pending, send_offsets_result) = add_offsets_to_txn_failure(Errors::InvalidTxnState).await;
         assert_eq!(
@@ -7850,6 +8046,9 @@ mod tests {
     /// Translated from `testTransactionAbortableExceptionInAddOffsetsToTxn`
     /// (Java 3949-3967).
     #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.producer.internals.TransactionManagerTest#testTransactionAbortableExceptionInAddOffsetsToTxn"
+    )]
     async fn test_transaction_abortable_error_in_add_offsets_to_txn() {
         let (mut manager, mut pending, send_offsets_result) =
             add_offsets_to_txn_failure(Errors::TransactionAbortable).await;
@@ -7915,6 +8114,9 @@ mod tests {
     /// Translated from `testUnsupportedForMessageFormatInTxnOffsetCommit`
     /// (Java 1136-1156).
     #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.producer.internals.TransactionManagerTest#testUnsupportedForMessageFormatInTxnOffsetCommit"
+    )]
     async fn test_unsupported_for_message_format_in_txn_offset_commit() {
         let (mut manager, mut pending, send_offsets_result) =
             txn_offset_commit_failure(Errors::UnsupportedForMessageFormat).await;
@@ -7928,6 +8130,9 @@ mod tests {
     /// Translated from `testTransactionalIdAuthorizationFailureInTxnOffsetCommit`
     /// (Java 1490-1513).
     #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.producer.internals.TransactionManagerTest#testTransactionalIdAuthorizationFailureInTxnOffsetCommit"
+    )]
     async fn test_transactional_id_authorization_failure_in_txn_offset_commit() {
         let (mut manager, mut pending, send_offsets_result) =
             txn_offset_commit_failure(Errors::TransactionalIdAuthorizationFailed).await;
@@ -7941,6 +8146,9 @@ mod tests {
     /// Translated from `testTransactionAbortableExceptionInTxnOffsetCommit`
     /// (Java 3969-3988).
     #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.producer.internals.TransactionManagerTest#testTransactionAbortableExceptionInTxnOffsetCommit"
+    )]
     async fn test_transaction_abortable_error_in_txn_offset_commit() {
         let (mut manager, mut pending, send_offsets_result) =
             txn_offset_commit_failure(Errors::TransactionAbortable).await;
@@ -7959,6 +8167,9 @@ mod tests {
     /// offsets are cleared — the `break` leaves `pendingTxnOffsetCommits` non-empty
     /// but the tail's `result.isCompleted()` arm clears it (Java 1945).
     #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.producer.internals.TransactionManagerTest#testGroupAuthorizationFailureInTxnOffsetCommit"
+    )]
     async fn test_group_authorization_failure_in_txn_offset_commit() {
         let (mut manager, mut pending, send_offsets_result) =
             txn_offset_commit_failure(Errors::GroupAuthorizationFailed).await;
@@ -8072,6 +8283,9 @@ mod tests {
     /// Translated from `testTransactionalIdAuthorizationFailureInAddPartitions`
     /// (Java 1862-1876).
     #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.producer.internals.TransactionManagerTest#testTransactionalIdAuthorizationFailureInAddPartitions"
+    )]
     async fn test_transactional_id_authorization_failure_in_add_partitions() {
         let (mut manager, mut pending) = add_partitions_failure(Errors::TransactionalIdAuthorizationFailed).await;
         assert_fatal_error(&mut manager, &mut pending, Errors::TransactionalIdAuthorizationFailed);
@@ -8079,6 +8293,9 @@ mod tests {
 
     /// Translated from `testInvalidTxnStateInAddPartitions` (Java 1878-1892).
     #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.producer.internals.TransactionManagerTest#testInvalidTxnStateInAddPartitions"
+    )]
     async fn test_invalid_txn_state_in_add_partitions() {
         let (mut manager, mut pending) = add_partitions_failure(Errors::InvalidTxnState).await;
         assert_fatal_error(&mut manager, &mut pending, Errors::InvalidTxnState);
@@ -8087,6 +8304,9 @@ mod tests {
     /// Translated from `testTransactionAbortableExceptionInAddPartitions`
     /// (Java 3886-3900).
     #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.producer.internals.TransactionManagerTest#testTransactionAbortableExceptionInAddPartitions"
+    )]
     async fn test_transaction_abortable_error_in_add_partitions() {
         let (mut manager, mut pending) = add_partitions_failure(Errors::TransactionAbortable).await;
         assert_abortable_error(&mut manager, &mut pending, Errors::TransactionAbortable);
@@ -8100,6 +8320,9 @@ mod tests {
     /// Java's `verifyProducerFenced` also asserts the produce future fails, which
     /// needs the accumulator; that half is owed with the `SenderTest` group.
     #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.producer.internals.TransactionManagerTest#testProducerFencedInAddPartitionToTxn"
+    )]
     async fn test_producer_fenced_in_add_partition_to_txn() {
         for triggered in [Errors::ProducerFenced, Errors::InvalidProducerEpoch] {
             let (manager, _pending) = add_partitions_failure(triggered).await;
@@ -8122,6 +8345,7 @@ mod tests {
     /// parameter is `CONCURRENT_TRANSACTIONS`, because that code takes the
     /// backoff-override arm (Java 1585) rather than the generic retriable one.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.TransactionManagerTest#testRetriableErrors")]
     async fn test_retriable_errors() {
         for error in [
             Errors::UnknownTopicOrPartition,
@@ -8386,6 +8610,9 @@ mod tests {
     /// An invalid transition attempted from the *application* side leaves the state
     /// machine untouched (rules §1), so a full transaction still runs afterwards.
     #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.producer.internals.TransactionManagerTest#testForegroundInvalidStateTransitionIsRecoverable"
+    )]
     async fn test_foreground_invalid_state_transition_is_recoverable() {
         let mut manager = transactional_manager(false);
         let mut pending = PendingRequests::new();
@@ -8437,6 +8664,7 @@ mod tests {
     /// Rust fixture starts at epoch 0, so the intermediate update is a no-op with
     /// respect to the feature level and is skipped.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.TransactionManagerTest#testTransactionManagerEnablesV2")]
     async fn test_transaction_manager_enables_v2() {
         let mut manager = transactional_manager(false);
         let mut pending = PendingRequests::new();
@@ -8498,6 +8726,9 @@ mod tests {
     /// two lines — with `transaction.version` finalized at 1, `doInitTransactions`'s
     /// `maybeUpdateTransactionV2Enabled(true)` leaves Transaction V2 off.
     #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.producer.internals.TransactionManagerTest#testTransactionManagerDisablesV2"
+    )]
     async fn test_transaction_manager_disables_v2() {
         let mut manager = transactional_manager(false);
         let mut pending = PendingRequests::new();
@@ -8514,6 +8745,9 @@ mod tests {
     /// skip their registration RPC: the partition is confirmed immediately, and the
     /// offsets go straight to `TxnOffsetCommit` with no `AddOffsetsToTxn`.
     #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.producer.internals.TransactionManagerTest#testTransactionV2AddPartitionAndOffsets"
+    )]
     async fn test_transaction_v2_add_partition_and_offsets() {
         let mut manager = transactional_manager(true);
         let mut pending = PendingRequests::new();
@@ -8581,6 +8815,9 @@ mod tests {
     /// `InitProducerId` rather than the `EndTxn`, and the producer is `READY` on a
     /// bumped epoch.
     #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.producer.internals.TransactionManagerTest#testBumpTransactionalEpochOnRecoverableAddPartitionRequestError"
+    )]
     async fn test_bump_transactional_epoch_on_recoverable_add_partition_request_error() {
         const INITIAL_EPOCH: i16 = 1;
         const BUMPED_EPOCH: i16 = 2;
@@ -8620,6 +8857,9 @@ mod tests {
     /// Translated from `testIsSendToPartitionAllowedWithPartitionNotAdded`
     /// (Java 616-621).
     #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.producer.internals.TransactionManagerTest#testIsSendToPartitionAllowedWithPartitionNotAdded"
+    )]
     async fn test_is_send_to_partition_allowed_with_partition_not_added() {
         let mut manager = transactional_manager(false);
         let mut pending = PendingRequests::new();
@@ -8636,6 +8876,9 @@ mod tests {
     /// result, so `handleCachedTransactionRequestResult` clears the slot and runs
     /// the supplier, whose `READY → INITIALIZING` is not a valid arm (Java 168).
     #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.producer.internals.TransactionManagerTest#testInitializeTransactionsTwiceRaisesError"
+    )]
     async fn test_initialize_transactions_twice_raises_error() {
         let mut manager = transactional_manager(false);
         let mut pending = PendingRequests::new();
@@ -8665,6 +8908,9 @@ mod tests {
     /// must (a) block every *other* operation, (b) hand back the **same** result
     /// object when retried, and (c) release the slot once acknowledged.
     #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.producer.internals.TransactionManagerTest#testRetryInitTransactionsAfterTimeout"
+    )]
     async fn test_retry_init_transactions_after_timeout() {
         let mut manager = transactional_manager(false);
         let mut pending = PendingRequests::new();
@@ -8905,6 +9151,9 @@ mod tests {
     /// rules §1 replaces the whole mechanism with an explicit [`Caller`], so
     /// passing [`Caller::Sender`] *is* the override.
     #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.producer.internals.TransactionManagerTest#testBackgroundInvalidStateTransitionIsFatal"
+    )]
     async fn test_background_invalid_state_transition_is_fatal() {
         let mut manager = transactional_manager(false);
         let mut pending = PendingRequests::new();
@@ -9215,6 +9464,7 @@ mod tests {
     /// `COORDINATOR_NOT_AVAILABLE` is retriable, so it takes the same arm as any
     /// other retriable code.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.TransactionManagerTest#testCoordinatorNotAvailable")]
     async fn test_coordinator_not_available() {
         let mut manager = transactional_manager(false);
         let mut pending = PendingRequests::new();
@@ -9300,6 +9550,9 @@ mod tests {
     /// Translated from `testTransactionalIdAuthorizationFailureInFindCoordinator`
     /// (Java 1350-1363).
     #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.producer.internals.TransactionManagerTest#testTransactionalIdAuthorizationFailureInFindCoordinator"
+    )]
     async fn test_transactional_id_authorization_failure_in_find_coordinator() {
         let mut manager = transactional_manager(false);
         let mut pending = PendingRequests::new();
@@ -9489,6 +9742,9 @@ mod tests {
     /// `InitProducerId` response forgets the coordinator and re-enqueues both
     /// requests (Java 1519-1521).
     #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.producer.internals.TransactionManagerTest#testLookupCoordinatorOnNotCoordinatorError"
+    )]
     async fn test_lookup_coordinator_on_not_coordinator_error() {
         for error_code in [Errors::NotCoordinator, Errors::CoordinatorNotAvailable] {
             let mut manager = transactional_manager(false);
@@ -9555,6 +9811,9 @@ mod tests {
     /// `AddPartitionsToTxn` response; the escape hatch itself is
     /// driven here. Without it the abort could never find its coordinator.
     #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.producer.internals.TransactionManagerTest#testFindCoordinatorAllowedInAbortableErrorState"
+    )]
     async fn test_find_coordinator_allowed_in_abortable_error_state() {
         let mut manager = transactional_manager(false);
         let mut pending = PendingRequests::new();
@@ -9651,6 +9910,9 @@ mod tests {
     /// abortable error even if the coordinator is momentarily unreachable
     /// (`Sender.java:565-567`).
     #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.producer.internals.TransactionManagerTest#testNeedToTriggerEpochBumpFromClientDuringCoordinatorDisconnect"
+    )]
     async fn test_need_to_trigger_epoch_bump_from_client_during_coordinator_disconnect() {
         let mut manager = transactional_manager(false);
         let mut coordinators = CoordinatorNodes::new();
@@ -9684,6 +9946,9 @@ mod tests {
     /// why the test accounting block lists that method as translated-with-a-named-gap
     /// rather than fully.
     #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.producer.internals.TransactionManagerTest#testMaybeResolveSequencesTransactionalProducer"
+    )]
     async fn test_maybe_resolve_sequences_transactional_producer() {
         const UNACKED: &str = "The client hasn't received acknowledgment for some previously sent messages and can \
                                no longer retry them. ";
@@ -9747,6 +10012,7 @@ mod tests {
 
     /// Translated from `testDefaultSequenceNumber` (Java 623-630).
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.TransactionManagerTest#testDefaultSequenceNumber")]
     fn test_default_sequence_number() {
         for transaction_v2_enabled in [true, false] {
             let mut manager = idempotent_manager(transaction_v2_enabled);
@@ -9760,6 +10026,9 @@ mod tests {
     /// `testBumpEpochAndResetSequenceNumbersAfterUnknownProducerId`
     /// (Java 632-668).
     #[test]
+    #[doc(
+        alias = "org.apache.kafka.clients.producer.internals.TransactionManagerTest#testBumpEpochAndResetSequenceNumbersAfterUnknownProducerId"
+    )]
     fn test_bump_epoch_and_reset_sequence_numbers_after_unknown_producer_id() {
         for transaction_v2_enabled in [true, false] {
             let mut manager = idempotent_manager(transaction_v2_enabled);
@@ -9845,6 +10114,9 @@ mod tests {
 
     /// Translated from `testBatchFailureAfterProducerReset` (Java 670-710).
     #[test]
+    #[doc(
+        alias = "org.apache.kafka.clients.producer.internals.TransactionManagerTest#testBatchFailureAfterProducerReset"
+    )]
     fn test_batch_failure_after_producer_reset() {
         // This tests a scenario where the producerId is reset while pending requests are still inflight.
         // The partition(s) that triggered the reset will have their sequence number reset, while any others will not
@@ -9967,6 +10239,9 @@ mod tests {
 
     /// Translated from `testBatchCompletedAfterProducerReset` (Java 712-747).
     #[test]
+    #[doc(
+        alias = "org.apache.kafka.clients.producer.internals.TransactionManagerTest#testBatchCompletedAfterProducerReset"
+    )]
     fn test_batch_completed_after_producer_reset() {
         for transaction_v2_enabled in [true, false] {
             let epoch = i16::MAX;
@@ -10053,6 +10328,7 @@ mod tests {
 
     /// Translated from `testSequenceNumberOverflow` (Java 849-861).
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.TransactionManagerTest#testSequenceNumberOverflow")]
     fn test_sequence_number_overflow() {
         for transaction_v2_enabled in [true, false] {
             let mut manager = idempotent_manager(transaction_v2_enabled);
@@ -10074,6 +10350,7 @@ mod tests {
     /// bump must still reset its sequence to 0 while leaving the unqueued `tp1`
     /// at 3. See [`TransactionManager::bump_idempotent_producer_epoch`].
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.TransactionManagerTest#testProducerIdReset")]
     fn test_producer_id_reset() {
         for transaction_v2_enabled in [true, false] {
             let mut manager = idempotent_manager(transaction_v2_enabled);
@@ -10099,6 +10376,9 @@ mod tests {
     /// Translated from `testBumpEpochAfterTimeoutWithoutPendingInflightRequests`
     /// (Java 3038-3081).
     #[test]
+    #[doc(
+        alias = "org.apache.kafka.clients.producer.internals.TransactionManagerTest#testBumpEpochAfterTimeoutWithoutPendingInflightRequests"
+    )]
     fn test_bump_epoch_after_timeout_without_pending_inflight_requests() {
         for transaction_v2_enabled in [true, false] {
             let mut manager = idempotent_manager(transaction_v2_enabled);
@@ -10174,6 +10454,9 @@ mod tests {
     /// Translated from `testNoProducerIdResetAfterLastInFlightBatchSucceeds`
     /// (Java 3083-3121).
     #[test]
+    #[doc(
+        alias = "org.apache.kafka.clients.producer.internals.TransactionManagerTest#testNoProducerIdResetAfterLastInFlightBatchSucceeds"
+    )]
     fn test_no_producer_id_reset_after_last_in_flight_batch_succeeds() {
         for transaction_v2_enabled in [true, false] {
             let mut manager = idempotent_manager(transaction_v2_enabled);
@@ -10244,6 +10527,9 @@ mod tests {
     /// `testEpochBumpAfterLastInFlightBatchFailsIdempotentProducer`
     /// (Java 3123-3155).
     #[test]
+    #[doc(
+        alias = "org.apache.kafka.clients.producer.internals.TransactionManagerTest#testEpochBumpAfterLastInFlightBatchFailsIdempotentProducer"
+    )]
     fn test_epoch_bump_after_last_in_flight_batch_fails_idempotent_producer() {
         for transaction_v2_enabled in [true, false] {
             let mut manager = idempotent_manager(transaction_v2_enabled);
@@ -10310,6 +10596,9 @@ mod tests {
     /// Translated from `testNoFailedBatchHandlingWhenTxnManagerIsInFatalError`
     /// (Java 3243-3266).
     #[test]
+    #[doc(
+        alias = "org.apache.kafka.clients.producer.internals.TransactionManagerTest#testNoFailedBatchHandlingWhenTxnManagerIsInFatalError"
+    )]
     fn test_no_failed_batch_handling_when_txn_manager_is_in_fatal_error() {
         for transaction_v2_enabled in [true, false] {
             let mut manager = idempotent_manager(transaction_v2_enabled);

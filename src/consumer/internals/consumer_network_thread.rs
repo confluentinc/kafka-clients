@@ -194,6 +194,7 @@ impl ThreadTime for SystemThreadTime {
 /// `request_managers` is wrapped in `Arc<std::sync::Mutex<...>>` to
 /// match the ownership scheme established in Phase 10 commit 4 (the
 /// `ApplicationEventProcessor` also borrows it).
+#[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerNetworkThread")]
 pub(crate) struct ConsumerNetworkThread<K: KafkaClient + Send + 'static> {
     /// Receiver half of the application event channel. Drained at the
     /// start of every `run_once` via non-blocking `try_recv`.
@@ -283,6 +284,7 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
     /// values directly). The Java `AsyncConsumerMetrics` parameter is wired
     /// post-construction via [`Self::set_async_consumer_metrics`] (Phase M6).
     #[allow(clippy::too_many_arguments)]
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerNetworkThread#ConsumerNetworkThread")]
     pub(crate) fn new(
         time: Arc<dyn ThreadTime>,
         application_event_rx: mpsc::UnboundedReceiver<ApplicationEventEnvelope>,
@@ -337,6 +339,7 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
     }
 
     /// Java: `isRunning()`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerNetworkThread#isRunning")]
     pub(crate) fn is_running(&self) -> bool {
         self.running.load(Ordering::Acquire)
     }
@@ -353,6 +356,7 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
 
     /// Java: `maximumTimeToWait()` — read-only accessor exposed to the
     /// app side.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerNetworkThread#maximumTimeToWait")]
     pub(crate) fn maximum_time_to_wait(&self) -> i64 {
         self.cached_max_time_to_wait_ms.load(Ordering::Acquire)
     }
@@ -362,6 +366,7 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
     /// `network_client_delegate.wakeup()` to unblock the underlying
     /// `KafkaClient::poll`. The trigger is shared with the app side
     /// (`AsyncKafkaConsumer::wakeup()` in Phase 11).
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerNetworkThread#wakeup")]
     pub(crate) async fn wakeup(&self) {
         self.wakeup.wakeup();
         // Java additionally calls `networkClientDelegate.wakeup()` to
@@ -392,6 +397,7 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
     /// One iteration of the bg-task loop. Mirrors Java's
     /// `ConsumerNetworkThread.runOnce()` line-for-line; see the
     /// module-level docstring for the phase-by-phase mapping.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerNetworkThread#runOnce")]
     pub(crate) async fn run_once(&mut self) {
         // ──── Phase 1: drain application events ────
         self.process_application_events();
@@ -764,6 +770,7 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
     ///
     /// We use `try_recv` in a `while let` loop instead of `recv().await`
     /// to mirror Java's `drainTo` (`consumer-threading.md` §10).
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerNetworkThread#processApplicationEvents")]
     fn process_application_events(&mut self) {
         // Phase 28: drain into a scratch buffer reused across iterations
         // (taken/restored so `&mut self` stays available to the dispatch
@@ -903,6 +910,7 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
     /// managers, drains any remaining unsent requests for up to the
     /// close-timeout, reaps any in-flight completable events, and closes
     /// the managers / delegate.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerNetworkThread#cleanup")]
     pub(crate) async fn cleanup(&mut self) {
         log::trace!("Closing the consumer network thread");
         let close_timeout_ms = self.close_timeout_ms.load(Ordering::Acquire);
@@ -1033,6 +1041,7 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
     /// and the wakeup-token shutdown signal, and calls `cleanup` on
     /// exit. Intended to be spawned via `tokio::spawn` from the Phase
     /// 11 consumer constructor.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerNetworkThread#run")]
     pub(crate) async fn run(mut self) {
         log::debug!("Consumer network thread started");
         while self.is_running() {
@@ -1640,6 +1649,9 @@ mod tests {
     /// is the caller's responsibility; the flag-flip semantics are
     /// identical.
     #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.ConsumerNetworkThreadTest#testEnsureCloseStopsRunningThread"
+    )]
     async fn test_ensure_close_stops_running_thread() {
         let (thread, _tx, _reaper, _time, _rm) = make_thread_no_membership();
         assert!(thread.is_running(), "ConsumerNetworkThread should start running when created");
@@ -1740,6 +1752,9 @@ mod tests {
     ///   `verify(networkClientDelegate).addAll(...);`
     ///   `verify(networkClientDelegate).poll(...)`.
     #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.ConsumerNetworkThreadTest#testRequestsTransferFromManagersToClientOnThreadRun"
+    )]
     async fn test_requests_transfer_from_managers_to_client_on_thread_run() {
         let coordinator_spy = SpyRequestManager::new(1_000, 1_000);
         let heartbeat_spy = SpyRequestManager::new(2_000, 2_000);
@@ -1796,6 +1811,7 @@ mod tests {
     ///      manager's `maximumTimeToWait(now)`. With a single heartbeat
     ///      spy returning 1_000, the cached value must be 1_000.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerNetworkThreadTest#testMaximumTimeToWait")]
     async fn test_maximum_time_to_wait() {
         const DEFAULT_HEARTBEAT_INTERVAL_MS: i64 = 1_000;
 
@@ -1825,6 +1841,7 @@ mod tests {
     /// Rust observes via a deadline-zero tracked event becoming
     /// `Err(Timeout)` on its receiver.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerNetworkThreadTest#testCleanupInvokesReaper")]
     async fn test_cleanup_invokes_reaper() {
         let (mut thread, _tx, reaper, _time, _rm) = make_thread_no_membership();
         // Add a deadline-zero completable event so reap-on-close
@@ -1847,6 +1864,7 @@ mod tests {
     /// Rust observes via a same-instant-deadline tracked event whose
     /// receiver becomes `Err(Timeout)` after `runOnce`.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerNetworkThreadTest#testRunOnceInvokesReaper")]
     async fn test_run_once_invokes_reaper() {
         let (mut thread, _tx, reaper, time, _rm) = make_thread_no_membership();
         // Register a deadline-zero event; clock starts at 1_000, so
@@ -1872,6 +1890,7 @@ mod tests {
     /// Verifies `delegate.poll(..., onClose=true)` is called exactly
     /// twice during cleanup.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerNetworkThreadTest#testSendUnsentRequests")]
     async fn test_send_unsent_requests() {
         let (mut fixture, poll_call_count, _poll_timeouts, has_in_flight_script) =
             make_thread_with_dyn_managers(Vec::new());

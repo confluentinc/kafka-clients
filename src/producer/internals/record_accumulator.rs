@@ -56,6 +56,7 @@ use crate::producer::internals::{InFlightBatchPool, TransactionManager};
 ///
 /// Translated from `RecordAccumulator.PartitionerConfig`.
 #[derive(Clone, Default)]
+#[doc(alias = "org.apache.kafka.clients.producer.internals.RecordAccumulator$PartitionerConfig")]
 pub struct PartitionerConfig {
     /// If true, partition switching adapts to broker load, otherwise partition
     /// switching is random.
@@ -122,6 +123,7 @@ impl std::fmt::Display for AppendFailure {
 /// Metadata about a record just appended to the record accumulator.
 ///
 /// Translated from `RecordAccumulator.RecordAppendResult`.
+#[doc(alias = "org.apache.kafka.clients.producer.internals.RecordAccumulator$RecordAppendResult")]
 pub struct RecordAppendResult {
     /// The future for the record metadata.
     pub future: Arc<FutureRecordMetadata>,
@@ -161,6 +163,7 @@ pub struct RecordAppendResult {
 /// accumulator.
 ///
 /// Translated from `RecordAccumulator.ReadyCheckResult`.
+#[doc(alias = "org.apache.kafka.clients.producer.internals.RecordAccumulator$ReadyCheckResult")]
 pub struct ReadyCheckResult {
     /// Nodes with ready batches.
     pub ready_nodes: HashSet<Node>,
@@ -173,8 +176,10 @@ pub struct ReadyCheckResult {
 /// Callbacks passed into append.
 ///
 /// Translated from `RecordAccumulator.AppendCallbacks`.
+#[doc(alias = "org.apache.kafka.clients.producer.internals.RecordAccumulator$AppendCallbacks")]
 pub trait AppendCallbacks: Send {
     /// Called to set the partition when it is resolved.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.RecordAccumulator$AppendCallbacks#setPartition")]
     fn set_partition(&mut self, partition: i32);
     /// Called when the record has been acknowledged or errored.
     fn on_completion(&self, metadata: Option<&crate::producer::RecordMetadata>, error: Option<&Error>);
@@ -184,6 +189,7 @@ pub trait AppendCallbacks: Send {
 /// distribution.
 ///
 /// Translated from `RecordAccumulator.NodeLatencyStats`.
+#[doc(alias = "org.apache.kafka.clients.producer.internals.RecordAccumulator$NodeLatencyStats")]
 pub struct NodeLatencyStats {
     /// Last time the node had batches ready to send.
     pub ready_time_ms: i64,
@@ -193,6 +199,7 @@ pub struct NodeLatencyStats {
 
 impl NodeLatencyStats {
     /// Creates new latency stats initialized to `now_ms`.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.RecordAccumulator$NodeLatencyStats#NodeLatencyStats")]
     pub fn new(now_ms: i64) -> Self {
         Self { ready_time_ms: now_ms, drain_time_ms: now_ms }
     }
@@ -209,6 +216,7 @@ type PartitionDequeRef<'a> = dashmap::mapref::one::Ref<'a, i32, Mutex<VecDeque<P
 /// Per topic info.
 ///
 /// Translated from `RecordAccumulator.TopicInfo`.
+#[doc(alias = "org.apache.kafka.clients.producer.internals.RecordAccumulator$TopicInfo")]
 struct TopicInfo {
     /// Map from partition id to the per-partition batch deque.
     batches: DashMap<i32, Mutex<VecDeque<ProducerBatch>>>,
@@ -217,6 +225,7 @@ struct TopicInfo {
 }
 
 impl TopicInfo {
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.RecordAccumulator$TopicInfo#TopicInfo")]
     fn new(built_in_partitioner: BuiltInPartitioner) -> Self {
         Self { batches: DashMap::new(), built_in_partitioner: Mutex::new(built_in_partitioner) }
     }
@@ -266,6 +275,7 @@ impl Drop for AppendGuard<'_> {
 /// Queue that accumulates records into [`MemoryRecords`] to be sent to the server.
 ///
 /// Translated from `org.apache.kafka.clients.producer.internals.RecordAccumulator`.
+#[doc(alias = "org.apache.kafka.clients.producer.internals.RecordAccumulator")]
 pub struct RecordAccumulator {
     closed: AtomicBool,
     flushes_in_progress: AtomicI32,
@@ -340,6 +350,7 @@ impl RecordAccumulator {
     // `ProducerBatch` / `ProducerMetadata` accessors look dead.
     #[allow(private_interfaces)]
     #[allow(clippy::too_many_arguments)]
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.RecordAccumulator#RecordAccumulator")]
     pub fn new(
         batch_size: i32,
         compression: crate::common::compress::Compression,
@@ -424,6 +435,7 @@ impl RecordAccumulator {
     // See [`Self::new`] for why `private_interfaces` is allowed here.
     #[allow(private_interfaces)]
     #[allow(clippy::too_many_arguments)]
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.RecordAccumulator#RecordAccumulator")]
     pub fn with_log_context(
         batch_size: i32,
         compression: crate::common::compress::Compression,
@@ -478,6 +490,7 @@ impl RecordAccumulator {
     /// the analog of Java's lambdas capturing the `free` field. Registration
     /// failure is a construction-time programming error (duplicate name), so it
     /// panics — Java's `registerMetrics` declares no checked throw.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.RecordAccumulator#registerMetrics")]
     fn register_metrics(free: &Arc<BufferPool>, metrics: &Arc<Metrics>, metric_grp_name: &str) {
         let free_waiting = Arc::clone(free);
         metrics
@@ -547,6 +560,7 @@ impl RecordAccumulator {
     /// exactly-once callback obligation, exactly as Java's
     /// `KafkaProducer.doSend` `catch (ApiException e)` arm does.
     #[allow(clippy::too_many_arguments)]
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.RecordAccumulator#append")]
     pub async fn append(
         &self,
         topic: &str,
@@ -777,6 +791,7 @@ impl RecordAccumulator {
 
     /// Append a new batch to the queue.
     #[allow(clippy::too_many_arguments)]
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.RecordAccumulator#appendNewBatch")]
     fn append_new_batch(
         &self,
         topic: &Arc<str>,
@@ -817,6 +832,7 @@ impl RecordAccumulator {
         }
     }
 
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.RecordAccumulator#recordsBuilder")]
     fn records_builder(&self, buffer: Vec<u8>) -> MemoryRecordsBuilder {
         MemoryRecords::builder_with_buffer_magic(
             buffer,
@@ -831,6 +847,7 @@ impl RecordAccumulator {
     /// If all batches are full (or the deque is empty after drain), try an
     /// eager switch with `enable_switch = true` so the partitioner can move
     /// to a new partition before we append the next record.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.RecordAccumulator#partitionChanged")]
     fn partition_changed(&self, topic_info: &TopicInfo, deque: &VecDeque<ProducerBatch>, cluster: &Cluster) -> bool {
         if Self::all_batches_full(deque) {
             let mut partitioner = topic_info.built_in_partitioner.lock().unwrap();
@@ -845,6 +862,7 @@ impl RecordAccumulator {
     }
 
     /// Check if all batches in the queue are full.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.RecordAccumulator#allBatchesFull")]
     fn all_batches_full(deque: &VecDeque<ProducerBatch>) -> bool {
         match deque.back() {
             None => true,
@@ -859,6 +877,7 @@ impl RecordAccumulator {
     /// pass it to `append_new_batch`. On error it is returned inside the
     /// [`AppendFailure`] for the same reason.
     #[allow(clippy::too_many_arguments, clippy::type_complexity)]
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.RecordAccumulator#tryAppend")]
     fn try_append(
         &self,
         timestamp: i64,
@@ -923,16 +942,19 @@ impl RecordAccumulator {
         Ok((None, callback))
     }
 
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.RecordAccumulator#isMuted")]
     fn is_muted(&self, tp: &TopicPartition) -> bool {
         self.muted.lock().unwrap().contains(tp)
     }
 
     /// Reset the next batch expiry time.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.RecordAccumulator#resetNextBatchExpiryTime")]
     pub fn reset_next_batch_expiry_time(&self) {
         *self.next_batch_expiry_time_ms.lock().unwrap() = i64::MAX;
     }
 
     /// Update the next batch expiry time if the given batch expires sooner.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.RecordAccumulator#maybeUpdateNextBatchExpiryTime")]
     pub fn maybe_update_next_batch_expiry_time(&self, batch: &ProducerBatch) {
         let expiry = batch.created_ms.saturating_add(self.delivery_timeout_ms as i64);
         if expiry > 0 {
@@ -951,6 +973,7 @@ impl RecordAccumulator {
 
     /// Get a list of batches which have been sitting in the accumulator too long
     /// and need to be expired.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.RecordAccumulator#expiredBatches")]
     pub fn expired_batches(&self, now: i64) -> Vec<ProducerBatch> {
         let mut expired = Vec::new();
         for topic_info_ref in self.topic_info_map.iter() {
@@ -974,6 +997,7 @@ impl RecordAccumulator {
     }
 
     /// Returns the delivery timeout in milliseconds.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.RecordAccumulator#getDeliveryTimeoutMs")]
     pub fn delivery_timeout_ms(&self) -> i32 {
         self.delivery_timeout_ms
     }
@@ -989,6 +1013,7 @@ impl RecordAccumulator {
     ///
     /// Propagates [`Self::insert_in_sequence_order`] when idempotence is enabled.
     /// Java's `IllegalStateException` escapes to `Sender.run`'s catch-and-log.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.RecordAccumulator#reenqueue")]
     pub fn reenqueue(&self, mut batch: ProducerBatch, now: i64) -> Result<(), Error> {
         batch.reenqueued(now);
         let tp = batch.topic_partition.clone();
@@ -1032,6 +1057,7 @@ impl RecordAccumulator {
     /// rules §7 cites as Java's proof that `reenqueueBatch` leaves a batch tracked:
     /// `Sender.reenqueueBatch` (`Sender.java:750-752`) deliberately does **not** call
     /// `removeInFlightBatch`, unlike the `MESSAGE_TOO_LARGE` split path at `:685`.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.RecordAccumulator#insertInSequenceOrder")]
     fn insert_in_sequence_order(&self, deque: &mut VecDeque<ProducerBatch>, batch: ProducerBatch) -> Result<(), Error> {
         // When we are re-enqueueing and have enabled idempotence, the re-enqueued batch must always have a sequence.
         if batch.base_sequence() == RecordBatch::NO_SEQUENCE {
@@ -1103,6 +1129,7 @@ impl RecordAccumulator {
 
     /// Determine if the given partition leader has ready batches.
     #[allow(clippy::too_many_arguments)]
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.RecordAccumulator#batchReady")]
     fn batch_ready(
         &self,
         exhausted: bool,
@@ -1144,6 +1171,7 @@ impl RecordAccumulator {
     /// Iterate over partitions of a topic to see which have batches ready and
     /// collect leaders of those partitions into the set of ready nodes.
     #[allow(clippy::too_many_arguments)]
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.RecordAccumulator#partitionReady")]
     fn partition_ready(
         &self,
         metadata_snapshot: &MetadataSnapshot,
@@ -1246,6 +1274,7 @@ impl RecordAccumulator {
 
     /// Get a list of nodes whose partitions are ready to be sent, and the
     /// earliest time at which any non-sendable partition will be ready.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.RecordAccumulator#ready")]
     pub fn ready(&self, metadata_snapshot: &MetadataSnapshot, now_ms: i64) -> ReadyCheckResult {
         let mut ready_nodes = HashSet::new();
         let mut next_ready_check_delay_ms = i64::MAX;
@@ -1282,6 +1311,7 @@ impl RecordAccumulator {
     }
 
     /// Check whether there are any batches which haven't been drained.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.RecordAccumulator#hasUndrained")]
     pub fn has_undrained(&self) -> bool {
         for topic_info_ref in self.topic_info_map.iter() {
             let topic_info = topic_info_ref.value();
@@ -1295,6 +1325,7 @@ impl RecordAccumulator {
         false
     }
 
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.RecordAccumulator#shouldBackoff")]
     fn should_backoff(&self, has_leader_changed: bool, batch: &ProducerBatch, waited_time_ms: i64) -> bool {
         let attempts = batch.attempts();
         let should_wait_more = attempts > 0 && waited_time_ms < self.retry_backoff.backoff(attempts as i64 - 1);
@@ -1330,6 +1361,7 @@ impl RecordAccumulator {
     ///
     /// Propagates [`TransactionManager::first_in_flight_sequence`]. Java's
     /// equivalent exception escapes `drain` to `Sender.run`'s catch-and-log.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.RecordAccumulator#shouldStopDrainBatchesForPartition")]
     fn should_stop_drain_batches_for_partition(
         &self,
         first: &ProducerBatch,
@@ -1451,6 +1483,7 @@ impl RecordAccumulator {
         manager.add_in_flight_batch(batch)
     }
 
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.RecordAccumulator#drainBatchesForOneNode")]
     fn drain_batches_for_one_node(
         &self,
         metadata_snapshot: &MetadataSnapshot,
@@ -1565,11 +1598,13 @@ impl RecordAccumulator {
         Ok(ready)
     }
 
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.RecordAccumulator#getDrainIndex")]
     fn get_drain_index(&self, node_id: i32) -> usize {
         let map = self.nodes_drain_index.lock().unwrap();
         map.get(&node_id).copied().unwrap_or(0)
     }
 
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.RecordAccumulator#updateDrainIndex")]
     fn update_drain_index(&self, node_id: i32, drain_index: usize) {
         let mut map = self.nodes_drain_index.lock().unwrap();
         map.insert(node_id, drain_index);
@@ -1577,6 +1612,7 @@ impl RecordAccumulator {
 
     /// Drain all the data for the given nodes and collate them into a list of
     /// batches that will fit within the specified size on a per-node basis.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.RecordAccumulator#drain")]
     pub fn drain(
         &self,
         metadata_snapshot: &MetadataSnapshot,
@@ -1596,6 +1632,7 @@ impl RecordAccumulator {
     }
 
     /// Update node latency stats.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.RecordAccumulator#updateNodeLatencyStats")]
     pub fn update_node_latency_stats(&self, node_id: i32, now_ms: i64, can_drain: bool) {
         if self.partition_availability_timeout_ms <= 0 {
             return;
@@ -1608,11 +1645,13 @@ impl RecordAccumulator {
     }
 
     /// Get the node latency stats for the given node. Visible for testing.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.RecordAccumulator#getNodeLatencyStats")]
     pub fn get_node_latency_stats(&self, node_id: i32) -> Option<dashmap::mapref::one::Ref<'_, i32, NodeLatencyStats>> {
         self.node_stats.get(&node_id)
     }
 
     /// The earliest absolute time a batch will expire (in milliseconds).
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.RecordAccumulator#nextExpiryTimeMs")]
     pub fn next_expiry_time_ms(&self) -> i64 {
         *self.next_batch_expiry_time_ms.lock().unwrap()
     }
@@ -1652,6 +1691,7 @@ impl RecordAccumulator {
     /// - Warns and skips if the buffer was already deallocated
     /// - Panics if the batch is still in-flight
     /// - Marks the buffer as deallocated to prevent double deallocation
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.RecordAccumulator#deallocate")]
     pub fn deallocate(&self, batch: &mut ProducerBatch) {
         // Only deallocate the batch if it is not a split batch because split batches
         // are allocated outside the buffer pool.
@@ -1681,31 +1721,37 @@ impl RecordAccumulator {
     }
 
     /// Buffer pool remaining size in bytes. Package private for unit test.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.RecordAccumulator#bufferPoolAvailableMemory")]
     pub fn buffer_pool_available_memory(&self) -> i64 {
         self.free.available_memory()
     }
 
     /// Are there any threads currently waiting on a flush?
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.RecordAccumulator#flushInProgress")]
     pub fn flush_in_progress(&self) -> bool {
         self.flushes_in_progress.load(Ordering::Relaxed) > 0
     }
 
     /// Initiate the flushing of data from the accumulator.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.RecordAccumulator#beginFlush")]
     pub fn begin_flush(&self) {
         self.flushes_in_progress.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Are there any threads currently appending messages?
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.RecordAccumulator#appendsInProgress")]
     fn appends_in_progress(&self) -> bool {
         self.appends_in_progress.load(Ordering::Relaxed) > 0
     }
 
     /// Check whether there are any pending batches.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.RecordAccumulator#hasIncomplete")]
     pub fn has_incomplete(&self) -> bool {
         !self.incomplete.is_empty()
     }
 
     /// Abort all incomplete batches.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.RecordAccumulator#abortIncompleteBatches")]
     pub fn abort_incomplete_batches(&self) {
         loop {
             // Java's no-argument `abortBatches()` (Java 1145-1147) supplies this
@@ -1753,6 +1799,7 @@ impl RecordAccumulator {
     /// in which case `Sender::complete_batch` / `fail_batch` deallocates it when the
     /// response arrives). Without that tail `has_incomplete()` would stay true
     /// forever and `Sender.maybeAbortBatches` would re-abort on every `runOnce`.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.RecordAccumulator#abortBatches")]
     pub(crate) fn abort_batches(&self, reason: Error) {
         for topic_info_ref in self.topic_info_map.iter() {
             let topic_info = topic_info_ref.value();
@@ -1789,16 +1836,19 @@ impl RecordAccumulator {
     }
 
     /// Mute a partition (prevent it from being drained).
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.RecordAccumulator#mutePartition")]
     pub fn mute_partition(&self, tp: TopicPartition) {
         self.muted.lock().unwrap().insert(tp);
     }
 
     /// Unmute a partition.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.RecordAccumulator#unmutePartition")]
     pub fn unmute_partition(&self, tp: &TopicPartition) {
         self.muted.lock().unwrap().remove(tp);
     }
 
     /// Close this accumulator and force all record buffers to be drained.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.RecordAccumulator#close")]
     pub fn close(&self) {
         self.closed.store(true, Ordering::Relaxed);
         self.free.close();
@@ -1812,6 +1862,7 @@ impl RecordAccumulator {
     /// Remove from the incomplete list and deallocate the batch buffer.
     ///
     /// Translated from `RecordAccumulator.completeAndDeallocateBatch`.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.RecordAccumulator#completeAndDeallocateBatch")]
     pub fn complete_and_deallocate_batch(&self, batch: &mut ProducerBatch) {
         self.complete_batch(batch);
         self.deallocate(batch);
@@ -1864,6 +1915,7 @@ impl RecordAccumulator {
     /// Remove from the incomplete list but do not free memory yet.
     ///
     /// Translated from `RecordAccumulator.completeBatch`.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.RecordAccumulator#completeBatch")]
     pub fn complete_batch(&self, batch: &ProducerBatch) {
         self.incomplete.remove(&batch.produce_future);
     }
@@ -1876,6 +1928,7 @@ impl RecordAccumulator {
     /// calls `awaitAllDependents()` on each one. We replicate the same blocking
     /// behavior here: obtain a snapshot of incomplete results, then `.await` each
     /// one (including its dependents from batch splitting).
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.RecordAccumulator#awaitFlushCompletion")]
     pub async fn await_flush_completion(&self) {
         // Java's `finally { this.flushesInProgress.decrementAndGet(); }`
         // (`RecordAccumulator.java:1111-1113`), which covers the
@@ -1922,6 +1975,7 @@ impl RecordAccumulator {
     /// `maybeSendAndPollTransactionalRequest` calls it whenever
     /// `hasAbortableError()` (`Sender.java:466-467`), which PLAN §9.15 shows an
     /// idempotent producer can reach.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.RecordAccumulator#abortUndrainedBatches")]
     pub fn abort_undrained_batches(&self, reason: Error) {
         let has_transaction_manager = self.transaction_manager.is_some();
         for topic_info_ref in self.topic_info_map.iter() {
@@ -2013,6 +2067,7 @@ impl RecordAccumulator {
     /// (`.claude/rules/producer-transactions.md` §7, PLAN §9.25). The caller MUST NOT
     /// supply a batch that is also in a deque or `sender_batches`, or the pool would
     /// hold two `&mut` to the same batch.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.RecordAccumulator#RecordAccumulator")]
     pub(crate) fn with_in_flight_batch_pool<R>(
         &self,
         partitions: &[TopicPartition],
@@ -2075,6 +2130,7 @@ impl RecordAccumulator {
     /// # Errors
     ///
     /// Propagates [`Self::insert_in_sequence_order`] when idempotence is enabled.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.RecordAccumulator#splitAndReenqueue")]
     pub fn split_and_reenqueue(&self, mut big_batch: ProducerBatch) -> Result<usize, Error> {
         // Reset the estimated compression ratio to the initial value or the big batch compression
         // ratio, whichever is bigger. There are several different ways to do the reset. We chose
@@ -2345,6 +2401,7 @@ mod tests {
 
     /// Translated from `RecordAccumulatorTest.testFull`.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.RecordAccumulatorTest#testFull")]
     async fn test_full() {
         let now: i64 = 0;
         let n1 = node1();
@@ -2386,6 +2443,7 @@ mod tests {
 
     /// Translated from `RecordAccumulatorTest.testAppendLargeCompressed`.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.RecordAccumulatorTest#testAppendLarge")]
     async fn test_append_large() {
         let now: i64 = 0;
         let n1 = node1();
@@ -2407,6 +2465,7 @@ mod tests {
 
     /// Translated from `RecordAccumulatorTest.testLinger`.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.RecordAccumulatorTest#testLinger")]
     async fn test_linger() {
         let now: i64 = 0;
         let n1 = node1();
@@ -2436,6 +2495,7 @@ mod tests {
 
     /// Translated from a subset of `RecordAccumulatorTest.testDrainBatches`.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.RecordAccumulatorTest#testDrainBatches")]
     async fn test_drain_batches() {
         let n1 = node1();
         let n2 = node2();
@@ -2550,6 +2610,7 @@ mod tests {
 
     /// Test expired batches.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.RecordAccumulatorTest#testExpiredBatches")]
     async fn test_expired_batches() {
         let n1 = node1();
         let delivery_timeout_ms = 100;
@@ -2619,6 +2680,7 @@ mod tests {
 
     /// Translated from `RecordAccumulatorTest.testPartialDrain`.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.RecordAccumulatorTest#testPartialDrain")]
     async fn test_partial_drain() {
         let n1 = node1();
         let now: i64 = 0;
@@ -2664,6 +2726,7 @@ mod tests {
 
     /// Translated from `RecordAccumulatorTest.testNextReadyCheckDelay`.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.RecordAccumulatorTest#testNextReadyCheckDelay")]
     async fn test_next_ready_check_delay() {
         let linger_ms = 10i32;
         // test case assumes that the records do not fill the batch completely
@@ -2733,6 +2796,7 @@ mod tests {
 
     /// Translated from `RecordAccumulatorTest.testRetryBackoff`.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.RecordAccumulatorTest#testRetryBackoff")]
     async fn test_retry_backoff() {
         let linger_ms = i32::MAX / 16;
         let retry_backoff_ms = i64::from(i32::MAX) / 8;
@@ -2827,6 +2891,7 @@ mod tests {
 
     /// Translated from `RecordAccumulatorTest.testFlush`.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.RecordAccumulatorTest#testFlush")]
     async fn test_flush() {
         let linger_ms = i32::MAX;
         let n1 = node1();
@@ -2875,6 +2940,7 @@ mod tests {
 
     /// Translated from `RecordAccumulatorTest.testMutedPartitions`.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.RecordAccumulatorTest#testMutedPartitions")]
     async fn test_muted_partitions() {
         let now: i64 = 0;
         let n1 = node1();
@@ -2939,6 +3005,9 @@ mod tests {
 
     /// Translated from `RecordAccumulatorTest.testSoonToExpireBatchesArePickedUpForExpiry`.
     #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.producer.internals.RecordAccumulatorTest#testSoonToExpireBatchesArePickedUpForExpiry"
+    )]
     async fn test_soon_to_expire_batches_are_picked_up_for_expiry() {
         let linger_ms = 500;
         let batch_size = 1025;
@@ -2986,6 +3055,7 @@ mod tests {
 
     /// Translated from `RecordAccumulatorTest.testExpiredBatchesRetry`.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.RecordAccumulatorTest#testExpiredBatchesRetry")]
     async fn test_expired_batches_retry() {
         let linger_ms = 3000;
         let rtt = 1000i64;
@@ -3055,6 +3125,9 @@ mod tests {
 
     /// Translated from `RecordAccumulatorTest.testDrainWithANodeThatDoesntHostAnyPartitions`.
     #[test]
+    #[doc(
+        alias = "org.apache.kafka.clients.producer.internals.RecordAccumulatorTest#testDrainWithANodeThatDoesntHostAnyPartitions"
+    )]
     fn test_drain_with_a_node_that_doesnt_host_any_partitions() {
         let batch_size = 10;
         let linger_ms = 10;
@@ -3077,12 +3150,14 @@ mod tests {
 
     /// Translated from `RecordAccumulatorTest.testExpiredBatchSingle` (deliveryTimeoutMs=3200).
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.RecordAccumulatorTest#testExpiredBatchSingle")]
     async fn test_expired_batch_single() {
         do_expire_batch_single(3200).await;
     }
 
     /// Translated from `RecordAccumulatorTest.testExpiredBatchSingleMaxValue`.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.RecordAccumulatorTest#testExpiredBatchSingleMaxValue")]
     async fn test_expired_batch_single_max_value() {
         do_expire_batch_single(i32::MAX).await;
     }
@@ -3160,6 +3235,7 @@ mod tests {
 
     /// Translated from `RecordAccumulatorTest.testStressfulSituation`.
     #[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.RecordAccumulatorTest#testStressfulSituation")]
     async fn test_stressful_situation() {
         let num_threads = 5;
         let msgs = 10000;
@@ -3235,6 +3311,9 @@ mod tests {
     /// Tests the has_room_for() behaviour of MemoryRecordsBuilder: it allows
     /// the first record no matter the size but does not allow the second record.
     #[test]
+    #[doc(
+        alias = "org.apache.kafka.clients.producer.internals.RecordAccumulatorTest#testHasRoomForAllowsOversizedFirstRecordButRejectsSubsequentRecords"
+    )]
     fn test_has_room_for_allows_oversized_first_record_but_rejects_subsequent_records() {
         let now: i64 = 0;
         let small_batch_size = 1024;
@@ -3405,6 +3484,7 @@ mod tests {
 
     /// Translated from `RecordAccumulatorTest.testExponentialRetryBackoff`.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.RecordAccumulatorTest#testExponentialRetryBackoff")]
     async fn test_exponential_retry_backoff() {
         let linger_ms = i32::MAX / 16;
         let retry_backoff_ms: i64 = 100;
@@ -3464,6 +3544,9 @@ mod tests {
 
     /// Translated from `RecordAccumulatorTest.testExponentialRetryBackoffLeaderChange`.
     #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.producer.internals.RecordAccumulatorTest#testExponentialRetryBackoffLeaderChange"
+    )]
     async fn test_exponential_retry_backoff_leader_change() {
         let linger_ms = i32::MAX / 16;
         let retry_backoff_ms: i64 = 100;
@@ -3551,6 +3634,7 @@ mod tests {
 
     /// Translated from `RecordAccumulatorTest.testAbortIncompleteBatches`.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.RecordAccumulatorTest#testAbortIncompleteBatches")]
     async fn test_abort_incomplete_batches() {
         let linger_ms = i32::MAX;
         let num_records: i32 = 100;
@@ -3619,6 +3703,7 @@ mod tests {
 
     /// Translated from `RecordAccumulatorTest.testAbortUnsentBatches`.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.RecordAccumulatorTest#testAbortUnsentBatches")]
     async fn test_abort_unsent_batches() {
         let linger_ms = i32::MAX;
         let num_records: i32 = 100;
@@ -3684,6 +3769,7 @@ mod tests {
     /// In our Rust implementation, we use NONE compression with a batch that exceeds the
     /// accumulator's batch size, then split it.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.RecordAccumulatorTest#testSplitAndReenqueue")]
     async fn test_split_and_reenqueue() {
         let now: i64 = 0;
         let n1 = node1();
@@ -3768,6 +3854,7 @@ mod tests {
     /// awaits all incomplete `ProduceRequestResult`s (including dependents from
     /// batch splitting), then decrements the counter. We verify the full lifecycle.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.RecordAccumulatorTest#testAwaitFlushComplete")]
     async fn test_await_flush_complete() {
         let n1 = node1();
         let now: i64 = 0;
@@ -3806,6 +3893,9 @@ mod tests {
 
     /// Translated from `RecordAccumulatorTest.testProduceRequestResultAwaitAllDependents`.
     #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.producer.internals.RecordAccumulatorTest#testProduceRequestResultAwaitAllDependents"
+    )]
     async fn test_produce_request_result_await_all_dependents() {
         use crate::producer::internals::ProduceRequestResult;
 
@@ -3873,6 +3963,7 @@ mod tests {
     /// Since the test focuses on buffer pool memory accounting, we simulate the scenario
     /// by creating an oversized batch manually.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.RecordAccumulatorTest#testSplitBatchOffAccumulator")]
     async fn test_split_batch_off_accumulator() {
         let batch_size = 1024;
         let buffer_capacity: i64 = 3 * 1024;
@@ -3942,6 +4033,9 @@ mod tests {
     /// Tests that the built-in partitioner avoids creating fractional batches by sticking
     /// to a partition until the batch is full.
     #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.producer.internals.RecordAccumulatorTest#testBuiltInPartitionerFractionalBatches"
+    )]
     async fn test_built_in_partitioner_fractional_batches() {
         let total_size: i64 = 1024 * 1024;
         let batch_size = 512;
@@ -4005,6 +4099,9 @@ mod tests {
     /// Tests that repeatedly splitting batches eventually produces single-record batches
     /// and does not recurse infinitely.
     #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.producer.internals.RecordAccumulatorTest#testSplitAndReenqueuePreventInfiniteRecursion"
+    )]
     async fn test_split_and_reenqueue_prevent_infinite_recursion() {
         let now: i64 = 0;
         let batch_size = 1024 * 1024; // 1MB batch size
