@@ -25,8 +25,8 @@
 //! `position` timeout + wakeup, and zero-timeout offset queries.
 //!
 //! KIP-848 (`GroupProtocol.CONSUMER`) arm only; classic twins, metrics /
-//! quota, coordinator-failover, broker-shutdown, and
-//! close-on-interrupt are OUT_OF_SCOPE per `consumer-threading.md` §20.
+//! quota, and close-on-interrupt are OUT_OF_SCOPE per
+//! `consumer-threading.md` §20.
 //!
 //! ## Translated (CONSUMER arm)
 //!
@@ -61,6 +61,12 @@
 //!   → `test_async_consumer_position_with_error_connection_respects_wakeup`
 //! - `testAsyncConsumerOffsetRelatedWhenTimeoutZero`
 //!   → `test_async_consumer_offset_related_when_timeout_zero`
+//! - `testAsyncConsumeCoordinatorFailover` (line 180)
+//!   → `test_async_consume_coordinator_failover` (Phase 16; dedicated
+//!   `Type::Kraft` cluster, stops the group coordinator)
+//! - `testAsyncConsumerCloseOnBrokerShutdown` (line 214)
+//!   → `test_async_consumer_close_on_broker_shutdown` (Phase 16; dedicated
+//!   single-broker `Type::Kraft` cluster, stops the broker)
 //!
 //! ## SKIPped (documented gaps — see PLAN.md)
 //!
@@ -89,15 +95,21 @@
 //!   covered by `consumer_test.rs` and the assign/fetch suites (subscribe /
 //!   assign / seek / poll / CreateTime full per-record field verification).
 //! - SKIP (OUT_OF_SCOPE §20): all `testClassicConsumer*` twins,
-//!   `*MetricsCleanUp*` / `QuotaMetrics*`, `testAsyncConsumeCoordinatorFailover`,
-//!   `testAsyncConsumerCloseOnBrokerShutdown`,
+//!   `*MetricsCleanUp*` / `QuotaMetrics*`,
 //!   `testAsyncConsumerCloseLeavesGroupOnInterrupt`,
 //!   `testAsyncConsumerClusterResourceListener`.
 
+use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 use std::time::Instant;
+
+use async_trait::async_trait;
 
 use confluent_kafka::common::Error;
 use confluent_kafka::common::Errors;
@@ -110,7 +122,10 @@ use confluent_kafka::common::serialization::ByteArraySerializer;
 use confluent_kafka::common::serialization::Deserializer;
 use confluent_kafka::consumer::Consumer;
 use confluent_kafka::consumer::ConsumerConfig;
+use confluent_kafka::consumer::ConsumerRebalanceListener;
 use confluent_kafka::consumer::KafkaConsumer;
+use confluent_kafka::consumer::OffsetAndMetadata;
+use confluent_kafka::consumer::OffsetCommitCallback;
 use confluent_kafka::producer::KafkaProducer;
 use confluent_kafka::producer::Producer;
 use confluent_kafka::producer::ProducerConfig;
@@ -1209,6 +1224,268 @@ async fn test_async_consumer_offset_related_when_timeout_zero() {
     );
 
     consumer.close().await.expect("consumer close");
+}
+
+// ── Broker fault injection (Phase 16) ─────────────────────────────────
+
+/// The class-level `@ClusterTestDefaults(serverProperties = ...)` of
+/// `PlaintextConsumerTest` (`PlaintextConsumerTest.java:120-129`), plus the
+/// KIP-848 opt-in the rest of this file's clusters carry.
+fn plaintext_consumer_test_defaults() -> BTreeMap<String, String> {
+    BTreeMap::from([
+        (
+            "KAFKA_GROUP_COORDINATOR_REBALANCE_PROTOCOLS".to_string(),
+            "classic,consumer".to_string(),
+        ),
+        ("KAFKA_OFFSETS_TOPIC_NUM_PARTITIONS".to_string(), "1".to_string()),
+        ("KAFKA_GROUP_MIN_SESSION_TIMEOUT_MS".to_string(), "100".to_string()),
+        ("KAFKA_GROUP_MAX_SESSION_TIMEOUT_MS".to_string(), "60000".to_string()),
+        ("KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS".to_string(), "10".to_string()),
+    ])
+}
+
+/// Mirrors Java's `ClientsTestUtils.TestConsumerReassignmentListener`: counts
+/// `on_partitions_assigned` / `on_partitions_revoked` invocations.
+#[derive(Clone, Default)]
+struct TestConsumerReassignmentListener {
+    calls_to_assigned: Arc<AtomicUsize>,
+    calls_to_revoked: Arc<AtomicUsize>,
+}
+
+impl TestConsumerReassignmentListener {
+    fn calls_to_assigned(&self) -> usize {
+        self.calls_to_assigned.load(Ordering::SeqCst)
+    }
+
+    fn calls_to_revoked(&self) -> usize {
+        self.calls_to_revoked.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl ConsumerRebalanceListener for TestConsumerReassignmentListener {
+    async fn on_partitions_revoked(&self, _partitions: &[TopicPartition]) -> Result<(), Error> {
+        self.calls_to_revoked.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+
+    async fn on_partitions_assigned(&self, _partitions: &[TopicPartition]) -> Result<(), Error> {
+        self.calls_to_assigned.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+/// Java's `TestUtils.waitForCondition` default bound.
+const DEFAULT_MAX_WAIT: Duration = Duration::from_secs(15);
+
+/// Translates `ClientsTestUtils.awaitRebalance(consumer, listener)`
+/// (`ClientsTestUtils.java:325`): `poll(100ms)` until `callsToAssigned`
+/// advances, within `waitForCondition`'s default 15 s.
+async fn await_rebalance(consumer: &mut BytesConsumer, listener: &TestConsumerReassignmentListener) {
+    let num_reassignments = listener.calls_to_assigned();
+    let deadline = Instant::now() + DEFAULT_MAX_WAIT;
+    loop {
+        consumer.poll(Duration::from_millis(100)).await.expect("poll should succeed");
+        if listener.calls_to_assigned() > num_reassignments {
+            return;
+        }
+        assert!(Instant::now() < deadline, "Timed out before expected rebalance completed");
+    }
+}
+
+/// Mirrors Java's `ClientsTestUtils.RetryCommitCallback`: a
+/// `RetriableCommitFailedException` asks for a resend, anything else completes
+/// the callback with that (possibly absent) error.
+///
+/// Java's callback holds the consumer and resends itself; a Rust callback
+/// cannot hold the consumer while the caller polls it, so it records the
+/// retriable failure and [`send_and_await_async_commit`] resends.
+#[derive(Clone, Default)]
+struct RetryCommitCallback {
+    is_complete: Arc<AtomicUsize>,
+    error: Arc<Mutex<Option<Error>>>,
+    retriable: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl OffsetCommitCallback for RetryCommitCallback {
+    async fn on_complete(&self, _offsets: &HashMap<TopicPartition, OffsetAndMetadata>, error: Option<&Error>) {
+        match error {
+            Some(Error::ConsumerRetriableCommitFailed(_)) => {
+                self.retriable.fetch_add(1, Ordering::SeqCst);
+            },
+            other => {
+                *self.error.lock().expect("commit error mutex poisoned") = other.cloned();
+                self.is_complete.fetch_add(1, Ordering::SeqCst);
+            },
+        }
+    }
+}
+
+/// Translates `ClientsTestUtils.sendAndAwaitAsyncCommit(consumer,
+/// Optional.empty())` (`ClientsTestUtils.java:309`): `commitAsync(callback)`,
+/// `poll(100ms)` until the callback completes (15 s), then assert no error.
+async fn send_and_await_async_commit(consumer: &mut BytesConsumer) {
+    let callback = RetryCommitCallback::default();
+    let handle: Arc<dyn OffsetCommitCallback> = Arc::new(callback.clone());
+    consumer
+        .commit_async_with_callback(Arc::clone(&handle))
+        .await
+        .expect("commitAsync should enqueue");
+    let deadline = Instant::now() + DEFAULT_MAX_WAIT;
+    loop {
+        consumer.poll(Duration::from_millis(100)).await.expect("poll should succeed");
+        if callback.is_complete.load(Ordering::SeqCst) > 0 {
+            break;
+        }
+        if callback.retriable.swap(0, Ordering::SeqCst) > 0 {
+            consumer
+                .commit_async_with_callback(Arc::clone(&handle))
+                .await
+                .expect("retriable resend should enqueue");
+        }
+        assert!(Instant::now() < deadline, "Failed to observe commit callback before timeout");
+    }
+    let error = callback.error.lock().expect("commit error mutex poisoned").clone();
+    assert!(error.is_none(), "async commit failed: {error:?}");
+}
+
+/// Translates `ClientsTestUtils.ensureNoRebalance(consumer, listener)`
+/// (`ClientsTestUtils.java:336`).
+async fn ensure_no_rebalance(consumer: &mut BytesConsumer, listener: &TestConsumerReassignmentListener) {
+    // The best way to verify that the current membership is still active is
+    // to commit offsets. This would fail if the group had rebalanced.
+    let initial_revoke_calls = listener.calls_to_revoked();
+    send_and_await_async_commit(consumer).await;
+    assert_eq!(initial_revoke_calls, listener.calls_to_revoked());
+}
+
+/// Translates `testAsyncConsumeCoordinatorFailover`
+/// (`PlaintextConsumerTest.java:180`, body
+/// `BaseConsumerTestcase.testCoordinatorFailover`, `ClientsTestUtils.java:422`)
+/// on the class shape: `Type.KRAFT`, `BROKER_COUNT` = 3 brokers, the
+/// `@ClusterTestDefaults` broker properties — as a dedicated cluster with an
+/// isolated controller, since the test stops a broker.
+///
+/// The consumer joins, then the broker leading the single `__consumer_offsets`
+/// partition (the group coordinator) is shut down; the consumer must find the
+/// new coordinator and keep its membership, proven by a successful async
+/// commit with no revocation.
+///
+/// **Deviation:** Java never creates `topic` (it relies on auto-creation, or
+/// on the empty first assignment firing the listener). The Rust test creates
+/// it the way the class's other tests do (`createTopic(TOPIC, 2,
+/// BROKER_COUNT)`) so the first assignment is deterministic.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_async_consume_coordinator_failover() {
+    use confluent_kafka::admin::Admin;
+    use confluent_kafka::admin::AdminClientConfig;
+    use confluent_kafka::admin::KafkaAdminClient;
+
+    use crate::common::test_utils;
+
+    let mut ctx = TestContext::new(
+        ClusterConfig::kraft_dedicated(3, 1).set_server_properties(plaintext_consumer_test_defaults()),
+    )
+    .await;
+    let bootstrap = ctx.bootstrap_servers().to_string();
+    let topic = ctx.topic("topic");
+    let admin = KafkaAdminClient::new(
+        AdminClientConfig::new(&HashMap::from([("bootstrap.servers".to_string(), bootstrap.clone())]))
+            .expect("valid admin config"),
+    )
+    .expect("admin client");
+    test_utils::create_topic(&admin, &topic, 2, 3).await;
+    admin.close_with_timeout(Duration::from_secs(5)).await;
+
+    // Use higher poll timeout to avoid consumer leaving the group due to timeout
+    let mut consumer = make_consumer(
+        &bootstrap,
+        &ctx.group_id("coordinator_failover"),
+        &[("max.poll.interval.ms", "15000")],
+    );
+    let listener = TestConsumerReassignmentListener::default();
+    consumer
+        .subscribe_with_topics_listener(vec![topic.clone()], Arc::new(listener.clone()))
+        .await
+        .expect("subscribe should succeed");
+    // the initial subscription should cause a callback execution
+    await_rebalance(consumer.as_mut(), &listener).await;
+    assert_eq!(1, listener.calls_to_assigned());
+
+    // get metadata for the topic. `Topic.GROUP_METADATA_TOPIC_NAME`; the Rust
+    // `Topic` lives in a crate-internal module, so the name is spelled out.
+    // Java loops while `partitionsFor` returns null; the Rust API returns a
+    // `Result`, so the loop retries a failed or empty lookup, bounded at 60 s.
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let parts = loop {
+        match consumer.partitions_for("__consumer_offsets").await {
+            Ok(parts) if !parts.is_empty() => break parts,
+            other => assert!(Instant::now() < deadline, "no metadata for __consumer_offsets: {other:?}"),
+        }
+    };
+    assert_eq!(1, parts.len());
+    let coordinator = parts[0].leader().expect("offsets partition has a leader").id();
+
+    // shutdown the coordinator
+    ctx.cluster().shutdown_broker(coordinator).await;
+
+    // the failover should not cause a rebalance
+    ensure_no_rebalance(consumer.as_mut(), &listener).await;
+
+    consumer.close().await.expect("consumer close should succeed");
+}
+
+/// Translates `testAsyncConsumerCloseOnBrokerShutdown`
+/// (`PlaintextConsumerTest.java:214`, body `testConsumerCloseOnBrokerShutdown`
+/// :223) on its `@ClusterTest(brokers = 1, ...)` shape — the class defaults
+/// merged with the method's `serverProperties` (offsets topic 1 partition /
+/// RF 1, transaction log RF 1 / min ISR 1) — as a dedicated `Type.KRAFT`
+/// cluster with an isolated controller.
+///
+/// After the consumer has polled once, the only broker is shut down; one more
+/// poll must not fail, and `close()` must return within 5 s instead of
+/// retrying the coordinator lookup for its full default timeout. Auto-commit
+/// is disabled so that commitSync() does not block the close timeout.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_async_consumer_close_on_broker_shutdown() {
+    let mut props = plaintext_consumer_test_defaults();
+    props.extend([
+        ("KAFKA_OFFSETS_TOPIC_NUM_PARTITIONS".to_string(), "1".to_string()),
+        ("KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR".to_string(), "1".to_string()),
+        ("KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR".to_string(), "1".to_string()),
+        ("KAFKA_TRANSACTION_STATE_LOG_MIN_ISR".to_string(), "1".to_string()),
+    ]);
+    let mut ctx = TestContext::new(ClusterConfig::kraft_dedicated(1, 1).set_server_properties(props)).await;
+    let topic = ctx.topic("topic");
+    // `make_consumer` already sets `enable.auto.commit=false`, as Java's config does.
+    let mut consumer = make_consumer(ctx.bootstrap_servers(), &ctx.group_id("close_on_broker_shutdown"), &[]);
+    consumer
+        .subscribe_with_topics(vec![topic])
+        .await
+        .expect("subscribe should succeed");
+
+    // Force consumer to discover coordinator by doing a poll
+    // This ensures coordinator is discovered before we shutdown the broker
+    consumer.poll(Duration::from_millis(100)).await.expect("poll should succeed");
+
+    // Now shutdown broker.
+    assert_eq!(1, ctx.cluster().broker_ids().len());
+    let broker = *ctx.cluster().broker_ids().first().expect("one broker");
+    ctx.cluster().shutdown_broker(broker).await;
+
+    // Do another poll to force the consumer to retry finding the coordinator.
+    consumer
+        .poll(Duration::from_millis(100))
+        .await
+        .expect("poll after broker shutdown should not fail");
+
+    // Close should not hang waiting for retries when broker is already down
+    // (Java: `assertTimeoutPreemptively(Duration.ofSeconds(5), () -> consumer.close(), ...)`).
+    tokio::time::timeout(Duration::from_secs(5), consumer.close())
+        .await
+        .expect("Consumer close should not wait for full timeout when broker is already shutdown")
+        .expect("consumer close should succeed");
 }
 
 // ── Local utilities ────────────────────────────────────────────────────
