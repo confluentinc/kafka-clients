@@ -300,7 +300,7 @@ mod tests {
     use crate::common::TopicPartition;
     use crate::common::metrics::MockTime;
     use crate::common::metrics::{Metrics, Time};
-    use crate::consumer::AutoOffsetResetStrategy;
+    use crate::consumer::internals::AutoOffsetResetStrategy;
 
     /// Build a manager over a `MockTime`-backed `Metrics` plus a fresh
     /// `SubscriptionState`. Mirrors the Java test's `@BeforeEach setUp`

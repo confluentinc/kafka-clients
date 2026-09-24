@@ -29,11 +29,11 @@ use std::collections::HashMap;
 use indexmap::IndexMap;
 
 use crate::FetchRequestData;
-use crate::common::ApiKeys;
 use crate::common::IsolationLevel;
 use crate::common::TopicIdPartition;
 use crate::common::TopicPartition;
 use crate::common::Uuid;
+use crate::common::protocol::ApiKeys;
 use crate::common::requests::FetchMetadata;
 use crate::fetch_request_data::{FetchPartition, FetchTopic, ForgottenTopic};
 
@@ -376,7 +376,7 @@ impl FetchRequest {
     pub fn get_error_response(
         &self,
         throttle_time_ms: i32,
-        error: &crate::common::Errors,
+        error: &crate::common::protocol::Errors,
     ) -> crate::common::requests::ConcreteResponse {
         let mut data = crate::FetchResponseData::new();
         data.set_throttle_time_ms(throttle_time_ms);

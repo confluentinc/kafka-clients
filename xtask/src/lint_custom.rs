@@ -712,16 +712,35 @@ fn module_path(module: &[String]) -> String {
     }
 }
 
-/// The first segment of each path a `use` tree imports, skipping a leading
-/// `self`: `use a::{b, c}` → `a`; `use {a::b, c}` → `a`, `c`.
-fn use_roots(tree: &syn::UseTree, out: &mut Vec<syn::Ident>) {
+/// Re-exports the re-export check allows, as `(module, lifted path)`.
+///
+/// `common.header.internals.{RecordHeader, RecordHeaders}` are the concrete
+/// types behind Java's public `Header` / `Headers` interfaces, and the Rust
+/// record APIs (`ProducerRecord`, `ConsumerRecord`,
+/// `RecordDeserializationError`) name them in their signatures to keep
+/// headers zero-copy and statically dispatched. `internals` stays
+/// `pub(crate)`, so `common::header` lifts exactly these two to make them
+/// reachable.
+const ALLOWED_REEXPORTS: &[(&str, &str)] = &[
+    ("crate::common::header", "internals::RecordHeader"),
+    ("crate::common::header", "internals::RecordHeaders"),
+];
+
+/// Each path a `use` tree imports, skipping a leading `self`:
+/// `use a::{b, c as d}` → `a::b`, `a::c`. Globs are skipped.
+fn use_paths(tree: &syn::UseTree, prefix: &mut Vec<String>, out: &mut Vec<Vec<String>>) {
     match tree {
-        syn::UseTree::Path(p) if p.ident == "self" => use_roots(&p.tree, out),
-        syn::UseTree::Path(p) => out.push(p.ident.clone()),
-        syn::UseTree::Name(n) => out.push(n.ident.clone()),
-        syn::UseTree::Rename(r) => out.push(r.ident.clone()),
+        syn::UseTree::Path(p) if p.ident == "self" && prefix.is_empty() => use_paths(&p.tree, prefix, out),
+        syn::UseTree::Path(p) => {
+            prefix.push(p.ident.to_string());
+            use_paths(&p.tree, prefix, out);
+            prefix.pop();
+        },
+        syn::UseTree::Name(n) if n.ident == "self" => out.push(prefix.clone()),
+        syn::UseTree::Name(n) => out.push([prefix.as_slice(), &[n.ident.to_string()]].concat()),
+        syn::UseTree::Rename(r) => out.push([prefix.as_slice(), &[r.ident.to_string()]].concat()),
         syn::UseTree::Glob(_) => {},
-        syn::UseTree::Group(g) => g.items.iter().for_each(|t| use_roots(t, out)),
+        syn::UseTree::Group(g) => g.items.iter().for_each(|t| use_paths(t, prefix, out)),
     }
 }
 
@@ -927,16 +946,19 @@ impl JavaName {
             if matches!(u.vis, syn::Visibility::Inherited) {
                 continue;
             }
-            let mut roots = Vec::new();
-            use_roots(&u.tree, &mut roots);
-            for root in roots {
+            let mut paths = Vec::new();
+            use_paths(&u.tree, &mut Vec::new(), &mut paths);
+            let into = module_path(module);
+            for path in paths {
                 checked += 1;
-                let name = root.to_string();
+                let name = &path[0];
+                let lifted = path.join("::");
                 let mut child = module.to_vec();
                 child.push(name.clone());
-                let foreign = if macros.contains(&name) {
+                let foreign = if macros.contains(name) || ALLOWED_REEXPORTS.contains(&(into.as_str(), lifted.as_str()))
+                {
                     None
-                } else if !children.contains(&name) {
+                } else if !children.contains(name) {
                     Some(format!("`{name}`, outside this module"))
                 } else if self.package_modules.contains(&child) {
                     Some(format!("package `{}`", module_path(&child)))
@@ -945,9 +967,7 @@ impl JavaName {
                 };
                 if let Some(from) = foreign {
                     findings.push(format!(
-                        "{file}: `{}` re-exports from {from} into `{}`; import it from its own package instead",
-                        u.to_token_stream().to_string().replace(" :: ", "::"),
-                        module_path(module)
+                        "{file}: `pub use {lifted}` re-exports from {from} into `{into}`; import it from its own package instead"
                     ));
                 }
             }

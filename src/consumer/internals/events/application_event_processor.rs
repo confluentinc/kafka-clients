@@ -1646,10 +1646,10 @@ mod tests {
     use crate::ApiVersions;
     use crate::common::internals::ClusterResourceListeners;
     use crate::common::{Error, IsolationLevel, TopicPartition};
-    use crate::consumer::AutoOffsetResetStrategy;
     use crate::consumer::ConsumerConfig;
     use crate::consumer::ConsumerRebalanceListenerMethodName;
     use crate::consumer::SubscriptionPattern;
+    use crate::consumer::internals::AutoOffsetResetStrategy;
     use crate::consumer::internals::CommitRequestManager;
     use crate::consumer::internals::ConsumerHeartbeatRequestManager;
     use crate::consumer::internals::ConsumerMembershipManager;
@@ -3668,9 +3668,9 @@ mod tests {
     /// `cluster.topics()` Mockito stubs.
     fn publish_topic_metadata(metadata: &ConsumerMetadata, topic_name: &str) {
         use crate::MetadataResponseData;
-        use crate::common::ApiKeys;
         use crate::common::Node;
         use crate::common::Uuid;
+        use crate::common::protocol::ApiKeys;
         use crate::common::requests::MetadataResponse;
         use crate::metadata_response_data::{MetadataResponseBroker, MetadataResponsePartition, MetadataResponseTopic};
         let node = Node::new(1, "localhost".to_string(), 9092);

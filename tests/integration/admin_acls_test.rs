@@ -65,10 +65,10 @@
 use std::time::Duration;
 
 use confluent_kafka::admin::{CreateAclsOptions, DeleteAclsOptions, DescribeAclsOptions, DescribeTopicsOptions};
-use confluent_kafka::common::Errors;
 use confluent_kafka::common::acl::{
     AccessControlEntry, AccessControlEntryFilter, AclBinding, AclBindingFilter, AclOperation, AclPermissionType,
 };
+use confluent_kafka::common::protocol::Errors;
 use confluent_kafka::common::resource::{PatternType, ResourcePattern, ResourcePatternFilter, ResourceType};
 
 use crate::common::admin_backend::{AdminBackend, admin_for, all_of_exactly, create_topic};

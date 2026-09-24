@@ -65,9 +65,9 @@ use std::time::Duration;
 use confluent_kafka::admin::{
     AlterReplicaLogDirsOptions, DescribeClusterOptions, DescribeLogDirsOptions, DescribeReplicaLogDirsOptions,
 };
-use confluent_kafka::common::Errors;
 use confluent_kafka::common::TopicPartition;
 use confluent_kafka::common::TopicPartitionReplica;
+use confluent_kafka::common::protocol::Errors;
 use confluent_kafka::common::serialization::ByteArraySerializer;
 use confluent_kafka::producer::{KafkaProducer, Producer, ProducerConfig, ProducerRecord};
 

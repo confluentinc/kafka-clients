@@ -215,11 +215,11 @@ mod tests {
     use super::*;
     use std::collections::HashSet;
 
-    use crate::common::Errors;
     use crate::common::Node;
     use crate::common::internals::ClusterResourceListeners;
-    use crate::consumer::AutoOffsetResetStrategy;
+    use crate::common::protocol::Errors;
     use crate::consumer::ConsumerConfig;
+    use crate::consumer::internals::AutoOffsetResetStrategy;
     use crate::metadata::LeaderAndEpoch;
 
     /// A validator over a fresh subscription state / metadata pair, plus the

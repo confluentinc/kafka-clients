@@ -44,9 +44,6 @@ pub use gauge::{ClosureGauge, Gauge};
 pub use kafka_metric::KafkaMetric;
 pub use measurable::{ClosureMeasurable, Measurable};
 pub use measurable_stat::MeasurableStat;
-// `Metric` and `MetricValue` live in `org.apache.kafka.common` (→ `common::metric`);
-// re-export `MetricValue` here for convenience since the stats/providers produce it.
-pub use crate::common::MetricValue;
 pub use metric_config::MetricConfig;
 pub use metric_value_provider::MetricValueProvider;
 pub(crate) use metrics::MetricsShared;

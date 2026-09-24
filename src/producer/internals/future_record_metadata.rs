@@ -421,7 +421,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_future_get_with_error() {
-        use crate::common::Errors;
+        use crate::common::protocol::Errors;
 
         let tp = TopicPartition::new("test-topic".to_string(), 0);
         let result = make_result(tp);

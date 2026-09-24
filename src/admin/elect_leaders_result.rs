@@ -63,8 +63,8 @@ impl ElectLeadersResult {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::Errors;
     use crate::common::internals::KafkaFutureImpl;
+    use crate::common::protocol::Errors;
 
     #[tokio::test]
     async fn all_succeeds_when_no_partition_has_error() {

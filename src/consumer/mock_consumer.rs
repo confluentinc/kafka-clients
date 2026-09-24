@@ -36,11 +36,12 @@ use indexmap::IndexMap;
 
 use crate::common::metrics::KafkaMetric;
 use crate::common::{Error, MetricName, PartitionInfo, TopicPartition};
-use crate::consumer::StrategyType;
+use crate::consumer::internals::AutoOffsetResetStrategy;
+use crate::consumer::internals::StrategyType;
 use crate::consumer::internals::{FetchPosition, SubscriptionState};
 use crate::consumer::{
-    AutoOffsetResetStrategy, CloseOptions, Consumer, ConsumerGroupMetadata, ConsumerHandle, ConsumerRebalanceListener,
-    ConsumerRecord, ConsumerRecords, OffsetAndMetadata, OffsetAndTimestamp, OffsetCommitCallback, SubscriptionPattern,
+    CloseOptions, Consumer, ConsumerGroupMetadata, ConsumerHandle, ConsumerRebalanceListener, ConsumerRecord,
+    ConsumerRecords, OffsetAndMetadata, OffsetAndTimestamp, OffsetCommitCallback, SubscriptionPattern,
 };
 use crate::consumer::{ConsumerNoOffsetForPartitionError, ConsumerOffsetOutOfRangeError};
 use crate::metadata::LeaderAndEpoch;
@@ -72,10 +73,10 @@ pub type PollTask<K, V> = Box<dyn FnOnce(&mut MockConsumer<K, V>) + Send>;
 ///
 /// # Java mapping
 ///
-/// Java's `MockConsumer(String offsetResetStrategy)` and the deprecated
-/// `MockConsumer(OffsetResetStrategy)` constructors both collapse into
-/// [`MockConsumer::new`]. Callers needing string-based parsing use
-/// [`AutoOffsetResetStrategy::from_string`].
+/// Java's `MockConsumer(String offsetResetStrategy)` is [`MockConsumer::new`].
+/// The deprecated `MockConsumer(OffsetResetStrategy)` only forwards
+/// `offsetResetStrategy.toString()` to it, so Rust callers pass
+/// `strategy.to_string()` to [`MockConsumer::new`] instead.
 #[doc(alias = "org.apache.kafka.clients.consumer.MockConsumer")]
 pub struct MockConsumer<K, V> {
     partitions: HashMap<String, Vec<PartitionInfo>>,
@@ -113,13 +114,23 @@ pub struct MockConsumer<K, V> {
 }
 
 impl<K, V> MockConsumer<K, V> {
-    /// Create a new mock consumer with the given offset-reset strategy.
+    /// A mock consumer is instantiated by providing
+    /// `ConsumerConfig::AUTO_OFFSET_RESET_CONFIG` value as the input.
     ///
-    /// Translates Java's `MockConsumer(String)` and the deprecated
-    /// `MockConsumer(OffsetResetStrategy)` into a single constructor that
-    /// takes the typed [`AutoOffsetResetStrategy`] value.
+    /// Returns an `IllegalArgumentError` when `offset_reset_strategy` is not
+    /// a valid `auto.offset.reset` value, as Java's
+    /// `AutoOffsetResetStrategy.fromString` throws.
     #[doc(alias = "org.apache.kafka.clients.consumer.MockConsumer#MockConsumer")]
-    pub fn new(offset_reset_strategy: AutoOffsetResetStrategy) -> Self {
+    pub fn new(offset_reset_strategy: &str) -> Result<Self, Error> {
+        Ok(Self::with_auto_offset_reset_strategy(AutoOffsetResetStrategy::from_string(
+            offset_reset_strategy,
+        )?))
+    }
+
+    /// Java's private `MockConsumer(AutoOffsetResetStrategy)`, which the public
+    /// constructors delegate to.
+    #[doc(alias = "org.apache.kafka.clients.consumer.MockConsumer#MockConsumer")]
+    pub(crate) fn with_auto_offset_reset_strategy(offset_reset_strategy: AutoOffsetResetStrategy) -> Self {
         Self {
             partitions: HashMap::new(),
             subscriptions: SubscriptionState::new(offset_reset_strategy),
@@ -1113,7 +1124,8 @@ mod tests {
 
     #[test]
     fn test_new_initial_state() {
-        let c: MockConsumer<String, String> = MockConsumer::new(AutoOffsetResetStrategy::EARLIEST);
+        let c: MockConsumer<String, String> =
+            MockConsumer::with_auto_offset_reset_strategy(AutoOffsetResetStrategy::EARLIEST);
         assert!(!c.closed());
         assert!(!c.should_rebalance());
         assert!(c.last_poll_timeout().is_none());
@@ -1122,7 +1134,8 @@ mod tests {
 
     #[test]
     fn test_set_max_poll_records_rejects_zero_and_negative() {
-        let mut c: MockConsumer<String, String> = MockConsumer::new(AutoOffsetResetStrategy::EARLIEST);
+        let mut c: MockConsumer<String, String> =
+            MockConsumer::with_auto_offset_reset_strategy(AutoOffsetResetStrategy::EARLIEST);
         assert!(c.set_max_poll_records(0).is_err());
         assert!(c.set_max_poll_records(-1).is_err());
         assert!(c.set_max_poll_records(1).is_ok());
@@ -1133,13 +1146,15 @@ mod tests {
     /// (`MockConsumer.java:496-499`). The Rust port returns an empty map.
     #[test]
     fn test_metrics_returns_empty_map() {
-        let c: MockConsumer<String, String> = MockConsumer::new(AutoOffsetResetStrategy::EARLIEST);
+        let c: MockConsumer<String, String> =
+            MockConsumer::with_auto_offset_reset_strategy(AutoOffsetResetStrategy::EARLIEST);
         assert!(Consumer::metrics(&c).is_empty());
     }
 
     #[test]
     fn test_reset_should_rebalance() {
-        let mut c: MockConsumer<String, String> = MockConsumer::new(AutoOffsetResetStrategy::EARLIEST);
+        let mut c: MockConsumer<String, String> =
+            MockConsumer::with_auto_offset_reset_strategy(AutoOffsetResetStrategy::EARLIEST);
         c.should_rebalance = true;
         assert!(c.should_rebalance());
         c.reset_should_rebalance();
@@ -1148,7 +1163,8 @@ mod tests {
 
     #[test]
     fn test_update_partitions_after_close_errors() {
-        let mut c: MockConsumer<String, String> = MockConsumer::new(AutoOffsetResetStrategy::EARLIEST);
+        let mut c: MockConsumer<String, String> =
+            MockConsumer::with_auto_offset_reset_strategy(AutoOffsetResetStrategy::EARLIEST);
         c.closed = true;
         let err = c.update_partitions("t", Vec::new()).unwrap_err();
         assert!(matches!(err, Error::LocalIllegalState(_)));
@@ -1158,7 +1174,8 @@ mod tests {
     /// flag as `wakeup()`: the next `poll` observes it and returns `Wakeup`.
     #[tokio::test]
     async fn handle_wakeup_wakes_next_poll() {
-        let mut c: MockConsumer<String, String> = MockConsumer::new(AutoOffsetResetStrategy::EARLIEST);
+        let mut c: MockConsumer<String, String> =
+            MockConsumer::with_auto_offset_reset_strategy(AutoOffsetResetStrategy::EARLIEST);
 
         // Handle is moved into another task — no reference to the consumer
         // crosses the boundary.
@@ -1182,7 +1199,8 @@ mod tests {
     /// restatement.
     #[tokio::test]
     async fn offsets_for_times_reports_javas_not_implemented_message() {
-        let mut consumer: MockConsumer<String, String> = MockConsumer::new(AutoOffsetResetStrategy::EARLIEST);
+        let mut consumer: MockConsumer<String, String> =
+            MockConsumer::with_auto_offset_reset_strategy(AutoOffsetResetStrategy::EARLIEST);
         let err = consumer
             .offsets_for_times(HashMap::new())
             .await

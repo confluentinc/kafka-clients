@@ -25,8 +25,8 @@ use std::ops::Deref;
 use std::sync::{Arc, Mutex};
 
 use crate::Metadata;
-use crate::common::Errors;
 use crate::common::internals::ClusterResourceListeners;
+use crate::common::protocol::Errors;
 use crate::common::requests::MetadataResponse;
 use crate::common::requests::metadata_request;
 use crate::common::utils::LogContext;
@@ -292,8 +292,8 @@ impl Deref for ProducerMetadata {
 mod tests {
     use super::*;
     use crate::MetadataResponseData;
-    use crate::common::ApiKeys;
     use crate::common::Node;
+    use crate::common::protocol::ApiKeys;
     use crate::metadata_response_data::{MetadataResponseBroker, MetadataResponseTopic};
 
     const REFRESH_BACKOFF_MS: i64 = 100;

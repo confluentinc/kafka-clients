@@ -15,7 +15,8 @@
 //! A gauge metric is an instantaneous reading of a particular value
 //! (`org.apache.kafka.common.metrics.Gauge`).
 
-use crate::common::metrics::{MetricConfig, MetricValue};
+use crate::common::MetricValue;
+use crate::common::metrics::MetricConfig;
 
 /// A gauge metric is an instantaneous reading of a particular value.
 ///

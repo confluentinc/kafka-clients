@@ -62,8 +62,8 @@ use std::time::Duration;
 use std::time::Instant;
 
 use confluent_kafka::common::Error;
-use confluent_kafka::common::Errors;
 use confluent_kafka::common::TopicPartition;
+use confluent_kafka::common::protocol::Errors;
 use confluent_kafka::common::serialization::ByteArraySerializer;
 use confluent_kafka::common::serialization::Deserializer;
 use confluent_kafka::consumer::Consumer;

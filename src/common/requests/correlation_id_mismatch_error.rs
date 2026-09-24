@@ -208,6 +208,6 @@ mod tests {
         assert_eq!(error.to_string(), "CorrelationIdMismatchError: ids disagree");
         // No entry in `Errors.java` and no coded superclass, so Java's
         // `Errors.forException` walk falls through to UNKNOWN_SERVER_ERROR.
-        assert_eq!(error.error(), crate::common::Errors::UnknownServerError);
+        assert_eq!(error.error(), crate::common::protocol::Errors::UnknownServerError);
     }
 }

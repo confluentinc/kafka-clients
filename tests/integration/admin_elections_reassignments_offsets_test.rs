@@ -42,8 +42,8 @@ use confluent_kafka::admin::{
     DescribeTopicsOptions, ElectLeadersOptions, ListOffsetsOptions, ListPartitionReassignmentsOptions,
     NewPartitionReassignment, OffsetSpec, OpType,
 };
-use confluent_kafka::common::Errors;
 use confluent_kafka::common::config::{ConfigResource, config_resource};
+use confluent_kafka::common::protocol::Errors;
 use confluent_kafka::common::serialization::ByteArraySerializer;
 use confluent_kafka::common::{ElectionType, IsolationLevel, TopicPartition, TopicPartitionInfo};
 use confluent_kafka::producer::{KafkaProducer, Producer, ProducerConfig, ProducerRecord};

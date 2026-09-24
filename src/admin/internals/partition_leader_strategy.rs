@@ -20,7 +20,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use crate::common::Errors;
+use crate::common::protocol::Errors;
 use crate::common::requests::{ConcreteResponse, RequestBuilder, metadata_request};
 use crate::common::utils::LogContext;
 use crate::common::{Error, TopicPartition};
@@ -352,7 +352,7 @@ impl<V: Clone + Send + Sync + 'static> AdminApiFuture<TopicPartition, V> for Par
 mod tests {
     use super::*;
     use crate::MetadataResponseData;
-    use crate::common::ApiKeys;
+    use crate::common::protocol::ApiKeys;
     use crate::common::requests::MetadataResponse;
     use crate::metadata_response_data::{MetadataResponsePartition, MetadataResponseTopic};
 

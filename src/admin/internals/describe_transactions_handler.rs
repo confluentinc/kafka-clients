@@ -22,7 +22,7 @@ use std::collections::{HashMap, HashSet};
 use crate::DescribeTransactionsRequestData;
 use crate::admin::TransactionDescription;
 use crate::admin::TransactionState;
-use crate::common::Errors;
+use crate::common::protocol::Errors;
 use crate::common::requests::{ConcreteResponse, CoordinatorType, RequestBuilder, describe_transactions_request};
 use crate::common::utils::LogContext;
 use crate::common::{Error, Node, TopicPartition};

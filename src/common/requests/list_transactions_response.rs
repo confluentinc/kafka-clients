@@ -124,7 +124,7 @@ mod tests {
         data.set_error_code(Errors::None.code());
         let mut concrete = super::super::ConcreteResponse::ListTransactions(ListTransactionsResponse::new(data));
         let bytes = concrete.serialize(1).unwrap();
-        let mut readable = crate::common::ByteBufferAccessor::new(bytes.into_buffer());
+        let mut readable = crate::common::protocol::ByteBufferAccessor::new(bytes.into_buffer());
         let parsed = ListTransactionsResponse::parse(&mut readable, 1).unwrap();
         assert_eq!(parsed.data().throttle_time_ms, 13);
         assert_eq!(parsed.data().error_code, Errors::None.code());

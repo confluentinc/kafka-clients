@@ -23,7 +23,7 @@
 //! The error code for each class lives in its
 //! [`ErrorCode`](crate::common::error::ErrorCode) impl — Java keeps the
 //! same association in `Errors`' `CLASS_TO_ERROR` map — while the default
-//! message strings stay in [`Errors`](crate::common::Errors), exactly
+//! message strings stay in [`Errors`](crate::common::protocol::Errors), exactly
 //! as Java stores them on the enum constant and passes them to the class's
 //! constructor.
 
@@ -340,8 +340,8 @@ pub use wakeup_error::WakeupError;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::Errors;
     use crate::common::error::{ErrorCode, ErrorHierarchy};
+    use crate::common::protocol::Errors;
     use crate::producer::ProducerBufferExhaustedError;
 
     /// `BufferExhaustedException extends TimeoutException` and has no entry of its

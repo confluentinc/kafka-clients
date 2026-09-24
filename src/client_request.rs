@@ -19,7 +19,7 @@
 use std::fmt;
 use std::io;
 
-use crate::common::ApiKeys;
+use crate::common::protocol::ApiKeys;
 use crate::common::requests::{RequestBuilder, RequestHeader, RequestHeaderOptionsBuilder};
 
 use super::RequestCompletionHandler;

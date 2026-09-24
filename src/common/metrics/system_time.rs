@@ -19,7 +19,7 @@
 //! Java keeps `SystemTime` in `org.apache.kafka.common.utils`, alongside
 //! `Time`; this crate hosts both under `common::metrics` because `Metrics` /
 //! `Sensor` / `KafkaMetric` are their only consumers. The package drift is
-//! pre-existing and shared with `ByteUtils` (`common::protocol::varint`).
+//! pre-existing and shared with `ByteUtils` (`common::utils::ByteUtils`).
 
 use super::Time;
 

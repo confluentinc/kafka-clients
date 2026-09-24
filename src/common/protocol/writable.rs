@@ -94,7 +94,7 @@ pub trait Writable {
     /// refcounted [`bytes::Bytes`] so the records payload travels from the
     /// [`MemoryRecords`] buffer to the wire without an intermediate copy.
     ///
-    /// [`MemoryRecords`]: crate::common::record::MemoryRecords
+    /// [`MemoryRecords`]: crate::common::record::internal::MemoryRecords
     #[doc(alias = "org.apache.kafka.common.protocol.Writable#writeRecords")]
     fn write_records(&mut self, data: bytes::Bytes) -> io::Result<()> {
         self.write_byte_array(&data)

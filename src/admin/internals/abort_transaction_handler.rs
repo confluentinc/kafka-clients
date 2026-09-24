@@ -23,7 +23,7 @@ use std::sync::Arc;
 
 use crate::WriteTxnMarkersRequestData;
 use crate::admin::AbortTransactionSpec;
-use crate::common::Errors;
+use crate::common::protocol::Errors;
 use crate::common::requests::{ConcreteResponse, RequestBuilder, write_txn_markers_request};
 use crate::common::utils::LogContext;
 use crate::common::{Error, Node, TopicPartition};

@@ -34,8 +34,8 @@ use confluent_kafka::admin::{
     CreatePartitionsOptions, DeleteRecordsOptions, DeleteTopicsOptions, DescribeTopicsOptions, NewPartitions,
     RecordsToDelete,
 };
-use confluent_kafka::common::Errors;
 use confluent_kafka::common::TopicPartition;
+use confluent_kafka::common::protocol::Errors;
 use confluent_kafka::common::serialization::ByteArraySerializer;
 use confluent_kafka::producer::{KafkaProducer, Producer, ProducerConfig, ProducerRecord};
 

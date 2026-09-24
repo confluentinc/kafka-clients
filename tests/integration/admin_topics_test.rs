@@ -36,7 +36,7 @@ use std::time::Duration;
 use confluent_kafka::admin::{
     CreateTopicsOptions, DeleteTopicsOptions, DescribeTopicsOptions, ListTopicsOptions, NewTopic,
 };
-use confluent_kafka::common::Errors;
+use confluent_kafka::common::protocol::Errors;
 
 use crate::common::admin_backend::{
     AdminBackend, admin_config, admin_for, all_of, bootstrap_for, create_topic, wait_for_all_partitions_metadata,

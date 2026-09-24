@@ -233,7 +233,7 @@ per-phase `design/history/Milestone-N/**/PLAN.md` files. For performance, use
 
 ### Supporting Infrastructure ✓
 - **Uuid** (`common/uuid.rs`): 128-bit UUID with base64 URL encoding and signed comparison matching Java
-- **varint** (`common/protocol/varint.rs`): Protocol Buffers varint/varlong encoding (unsigned and zig-zag)
+- **ByteUtils** (`common/utils/byte_utils.rs`): Protocol Buffers varint/varlong encoding (unsigned and zig-zag)
 - **MessageSizeAccumulator** (`common/protocol/message_size_accumulator.rs`): Two-pass size tracking
 - **ObjectSerializationCache** (`common/protocol/object_serialization_cache.rs`): Two-pass serialization cache
 - **MessageUtil** (`common/protocol/message_util.rs`): Helpers (to_byte_buffer_accessor, compare_raw_tagged_fields)

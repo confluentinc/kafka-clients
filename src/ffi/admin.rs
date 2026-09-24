@@ -19808,7 +19808,8 @@ mod tests {
     use crate::admin::ConfigEntryOptionsBuilder;
     use crate::admin::config_entry::ConfigSynonym;
     use crate::admin::{FilterResult, FinalizedVersionRange, ProducerState, ReplicaInfo, SupportedVersionRange};
-    use crate::common::{ClassicGroupState, Errors};
+    use crate::common::ClassicGroupState;
+    use crate::common::protocol::Errors;
 
     fn text(value: &CString) -> &str {
         value.to_str().expect("CString holds UTF-8")

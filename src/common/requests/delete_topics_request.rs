@@ -233,7 +233,7 @@ mod tests {
         data.set_timeout_ms(15000);
         let mut request = AbstractRequest::DeleteTopics(DeleteTopicsRequest::new(data, 5));
         let bytes = request.serialize().unwrap();
-        let mut readable = crate::common::ByteBufferAccessor::new(bytes.into_buffer());
+        let mut readable = crate::common::protocol::ByteBufferAccessor::new(bytes.into_buffer());
         let parsed = DeleteTopicsRequest::parse(&mut readable, 5).unwrap();
         assert_eq!(parsed.data().topic_names, vec!["to-delete".to_string()]);
         assert_eq!(parsed.data().timeout_ms, 15000);

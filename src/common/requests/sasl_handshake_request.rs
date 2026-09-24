@@ -223,7 +223,7 @@ mod tests {
     /// expected error about insufficient bytes.
     #[test]
     fn test_invalid_sasl_handshake_request() {
-        use crate::common::ByteBufferAccessor;
+        use crate::common::protocol::ByteBufferAccessor;
         use crate::common::requests::AbstractRequest;
 
         let mut data = SaslHandshakeRequestData::new();

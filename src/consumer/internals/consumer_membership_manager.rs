@@ -30,8 +30,8 @@ use std::sync::Mutex;
 
 use tokio::sync::oneshot;
 
-use crate::common::Errors;
 use crate::common::metrics::Time;
+use crate::common::protocol::Errors;
 use crate::common::requests::ConsumerGroupHeartbeatResponse;
 
 use crate::common::{Error, TopicPartition, Uuid};
@@ -2080,9 +2080,9 @@ impl std::fmt::Debug for ConsumerMembershipManager {
 mod tests {
     use super::*;
     use crate::common::internals::ClusterResourceListeners;
-    use crate::consumer::AutoOffsetResetStrategy;
     use crate::consumer::ConsumerConfig;
     use crate::consumer::ConsumerRebalanceListener;
+    use crate::consumer::internals::AutoOffsetResetStrategy;
     use async_trait::async_trait;
     use std::collections::HashSet;
     use tokio::sync::mpsc;
@@ -3042,9 +3042,9 @@ mod tests {
     // ===================================================================
 
     use crate::MetadataResponseData;
-    use crate::common::ApiKeys;
     use crate::common::Node;
     use crate::common::errors::InterruptError;
+    use crate::common::protocol::ApiKeys;
     use crate::common::requests::MetadataResponse;
     use crate::metadata_response_data::{MetadataResponseBroker, MetadataResponsePartition, MetadataResponseTopic};
 

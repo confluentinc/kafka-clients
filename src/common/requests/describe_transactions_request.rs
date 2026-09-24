@@ -165,7 +165,7 @@ mod tests {
         let mut builder = Builder::new(data);
         let mut request = builder.build_version(0).unwrap();
         let bytes = request.serialize().unwrap();
-        let mut readable = crate::common::ByteBufferAccessor::new(bytes.into_buffer());
+        let mut readable = crate::common::protocol::ByteBufferAccessor::new(bytes.into_buffer());
         let parsed = DescribeTransactionsRequest::parse(&mut readable, 0).unwrap();
         assert_eq!(parsed.data().transactional_ids, vec!["t1".to_string()]);
     }

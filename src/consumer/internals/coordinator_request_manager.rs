@@ -24,7 +24,7 @@
 use std::sync::{Arc, Mutex};
 
 use crate::FindCoordinatorRequestData;
-use crate::common::Errors;
+use crate::common::protocol::Errors;
 use crate::common::requests::{
     ConcreteResponse, CoordinatorType, FindCoordinatorResponse, RequestBuilder, find_coordinator_request,
 };
@@ -490,7 +490,7 @@ impl CoordinatorRequestManager {
 mod tests {
     use super::*;
     use crate::ClientResponse;
-    use crate::common::ApiKeys;
+    use crate::common::protocol::ApiKeys;
     use crate::common::requests::{AbstractRequest, ConcreteResponse, RequestHeader, RequestHeaderOptionsBuilder};
 
     const RETRY_BACKOFF_MS: i64 = 500;

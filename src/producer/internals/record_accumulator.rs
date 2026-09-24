@@ -2191,9 +2191,9 @@ impl RecordAccumulator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::Errors;
     use crate::common::Node;
     use crate::common::compress::Compression;
+    use crate::common::protocol::Errors;
     use crate::common::record::internal::CompressionType;
     use crate::common::record::internal::DefaultRecord;
     use crate::common::record::internal::RecordBatch;

@@ -220,7 +220,8 @@ impl AutoOffsetResetStrategy {
     }
 
     /// The configured duration for `by_duration` strategies; `None` for all
-    /// other strategies.
+    /// other strategies. As in Java, only the tests read it.
+    #[cfg_attr(not(test), allow(dead_code))]
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.AutoOffsetResetStrategy#duration")]
     pub fn duration(&self) -> Option<Duration> {
         self.duration

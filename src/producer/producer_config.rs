@@ -29,7 +29,7 @@ use crate::CommonClientConfigs;
 use crate::common::Error;
 use crate::common::config::{SaslConfigs, SslConfigs};
 use crate::common::record::internal::CompressionType;
-use crate::common::security::SecurityProtocol;
+use crate::common::security::auth::SecurityProtocol;
 use crate::producer::internals::KeyHasher;
 use crate::producer::{Partitioner, RoundRobinPartitioner};
 

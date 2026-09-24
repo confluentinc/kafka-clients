@@ -47,10 +47,10 @@ use std::collections::{HashMap, HashSet};
 use indexmap::IndexMap;
 use log::{debug, info, trace};
 
-use crate::common::Errors;
 use crate::common::TopicIdPartition;
 use crate::common::TopicPartition;
 use crate::common::Uuid;
+use crate::common::protocol::Errors;
 use crate::common::requests::FetchMetadata;
 use crate::common::requests::FetchResponse;
 use crate::common::requests::fetch_request::PartitionData;
@@ -543,7 +543,7 @@ fn join_ids(set: &HashSet<Uuid>) -> String {
 mod tests {
     use super::*;
     use crate::FetchResponseData;
-    use crate::common::ApiKeys;
+    use crate::common::protocol::ApiKeys;
     use crate::fetch_response_data::{FetchableTopicResponse, PartitionData as RespPartitionData};
 
     fn tp(name: &str, partition: i32) -> TopicPartition {

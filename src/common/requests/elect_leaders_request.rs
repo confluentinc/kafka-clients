@@ -287,7 +287,7 @@ mod tests {
         let mut builder = Builder::new(ElectionType::Preferred, Some(vec![TopicPartition::new("t", 3)]), 30000);
         let mut request = builder.build_version(2).unwrap();
         let bytes = request.serialize().unwrap();
-        let mut readable = crate::common::ByteBufferAccessor::new(bytes.into_buffer());
+        let mut readable = crate::common::protocol::ByteBufferAccessor::new(bytes.into_buffer());
         let parsed = ElectLeadersRequest::parse(&mut readable, 2).unwrap();
         assert_eq!(parsed.data().election_type, 0);
         assert_eq!(parsed.data().timeout_ms, 30000);

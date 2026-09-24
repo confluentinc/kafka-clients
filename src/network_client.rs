@@ -22,7 +22,7 @@
 //!
 //! This class is not thread-safe!
 
-use crate::common::security::SaslClientAuthenticator;
+use crate::common::security::authenticator::SaslClientAuthenticator;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, AtomicU8, Ordering};
@@ -222,7 +222,7 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
     /// (`protocol/types/ArrayOf.java:73,76`).
     #[doc(alias = "org.apache.kafka.clients.NetworkClient#parseResponse")]
     pub fn parse_response(
-        buffer: &mut dyn crate::common::Readable,
+        buffer: &mut dyn crate::common::protocol::Readable,
         request_header: &RequestHeader,
     ) -> Result<ConcreteResponse, Error> {
         let error = match ConcreteResponse::parse_response(buffer, request_header) {
@@ -4732,7 +4732,7 @@ mod tests {
         let all_metrics = metrics.metrics();
         let double_value = |name: &crate::common::MetricName| -> f64 {
             match all_metrics.get(name).expect("metric present").metric_value() {
-                crate::common::metrics::MetricValue::Double(v) => v,
+                crate::common::MetricValue::Double(v) => v,
                 other => panic!("expected a double metric value, got {other:?}"),
             }
         };

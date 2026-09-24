@@ -14,8 +14,8 @@
 
 //! Translated from `org.apache.kafka.common.errors.FetchSessionIdNotFoundException`.
 
-use crate::common::Errors;
 use crate::common::error::kafka_error_class;
+use crate::common::protocol::Errors;
 
 kafka_error_class! {
     /// The fetch session ID was not found.

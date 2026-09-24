@@ -300,7 +300,7 @@ impl std::fmt::Debug for ProduceRequestResult {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::Errors;
+    use crate::common::protocol::Errors;
 
     #[tokio::test]
     async fn test_set_and_done() {

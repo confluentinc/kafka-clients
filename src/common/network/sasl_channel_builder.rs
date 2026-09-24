@@ -31,9 +31,9 @@ use super::PlaintextTransportLayer;
 use super::SslTransportLayer;
 
 use crate::common::config::SaslConfigs;
-use crate::common::security::SaslClientAuthenticator;
-use crate::common::security::SecurityProtocol;
-use crate::common::security::SslFactory;
+use crate::common::security::auth::SecurityProtocol;
+use crate::common::security::authenticator::SaslClientAuthenticator;
+use crate::common::security::ssl::SslFactory;
 use crate::common::utils::LogContext;
 
 use std::io;

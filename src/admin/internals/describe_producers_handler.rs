@@ -26,7 +26,7 @@ use crate::admin::DescribeProducersOptions;
 use crate::admin::KafkaAdminClient;
 use crate::admin::PartitionProducerState;
 use crate::admin::ProducerState;
-use crate::common::Errors;
+use crate::common::protocol::Errors;
 use crate::common::requests::{ConcreteResponse, RequestBuilder, describe_producers_request};
 use crate::common::utils::LogContext;
 use crate::common::{Error, Node, TopicPartition};

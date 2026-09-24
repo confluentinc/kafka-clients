@@ -47,9 +47,9 @@ use confluent_kafka::admin::{
 use confluent_kafka::admin::{
     ClientMetricsResourceListing, ConsumerGroupListing, ListClientMetricsResourcesOptions, ListConsumerGroupsOptions,
 };
-use confluent_kafka::common::Errors;
 use confluent_kafka::common::acl::{AclBinding, AclBindingFilter, AclOperation};
 use confluent_kafka::common::config::{ConfigResource, config_resource};
+use confluent_kafka::common::protocol::Errors;
 use confluent_kafka::common::quota::{ClientQuotaAlteration, ClientQuotaEntity, ClientQuotaFilter};
 use confluent_kafka::common::security::token::delegation::DelegationToken;
 use confluent_kafka::common::utils::ProducerIdAndEpoch;

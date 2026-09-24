@@ -14,8 +14,8 @@
 
 //! Translated from `org.apache.kafka.common.errors.FencedStateEpochException`.
 
-use crate::common::Errors;
 use crate::common::error::kafka_error_class;
+use crate::common::protocol::Errors;
 
 kafka_error_class! {
     /// The share coordinator rejected the request because the share-group state

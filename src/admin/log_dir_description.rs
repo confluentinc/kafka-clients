@@ -143,7 +143,7 @@ impl std::fmt::Display for LogDirDescription {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::Errors;
+    use crate::common::protocol::Errors;
 
     #[test]
     fn unknown_volume_bytes_maps_to_none() {

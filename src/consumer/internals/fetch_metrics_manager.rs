@@ -18,8 +18,9 @@
 use std::collections::{BTreeMap, HashSet};
 use std::sync::{Arc, Mutex};
 
+use crate::common::MetricValue;
 use crate::common::metrics::stats::WindowedCount;
-use crate::common::metrics::{ClosureGauge, MetricValue, MetricValueProvider, Metrics, RecordingLevel, Sensor};
+use crate::common::metrics::{ClosureGauge, MetricValueProvider, Metrics, RecordingLevel, Sensor};
 use crate::common::{Error, TopicPartition};
 use crate::consumer::internals::FetchMetricsRegistry;
 use crate::consumer::internals::SensorBuilder;
@@ -668,7 +669,7 @@ mod tests {
     use crate::common::metrics::MockTime;
     use crate::common::metrics::stats::{Avg, Max};
     use crate::common::{MetricName, MetricNameTemplate};
-    use crate::consumer::AutoOffsetResetStrategy;
+    use crate::consumer::internals::AutoOffsetResetStrategy;
     use std::collections::HashSet;
     use std::sync::Arc;
 

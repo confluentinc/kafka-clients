@@ -23,7 +23,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::FindCoordinatorRequestData;
 use crate::common::Error;
-use crate::common::Errors;
+use crate::common::protocol::Errors;
 use crate::common::requests::{
     ConcreteResponse, CoordinatorType, FindCoordinatorResponse, RequestBuilder, find_coordinator_request,
 };

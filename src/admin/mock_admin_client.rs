@@ -69,11 +69,11 @@ use crate::admin::{
     ListClientMetricsResourcesResult, ListConsumerGroupsOptions, ListConsumerGroupsResult,
 };
 use crate::common::ElectionType;
-use crate::common::Errors;
 use crate::common::KafkaFuture;
 use crate::common::acl::{AclBinding, AclBindingFilter, AclOperation};
 use crate::common::config::{ConfigResource, config_resource};
 use crate::common::internals::KafkaFutureImpl;
+use crate::common::protocol::Errors;
 use crate::common::quota::{ClientQuotaAlteration, ClientQuotaEntity, ClientQuotaFilter};
 use crate::common::security::auth::KafkaPrincipal;
 use crate::common::security::token::delegation::{DelegationToken, TokenInformation};

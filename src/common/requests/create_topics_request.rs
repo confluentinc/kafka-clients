@@ -248,7 +248,7 @@ mod tests {
         data.set_timeout_ms(30000);
         let mut request = AbstractRequest::CreateTopics(CreateTopicsRequest::new(data, 7));
         let bytes = request.serialize().unwrap();
-        let mut readable = crate::common::ByteBufferAccessor::new(bytes.into_buffer());
+        let mut readable = crate::common::protocol::ByteBufferAccessor::new(bytes.into_buffer());
         let parsed = CreateTopicsRequest::parse(&mut readable, 7).unwrap();
         assert_eq!(parsed.data().topics.len(), 1);
         assert_eq!(parsed.data().topics[0].name, "round-trip-topic");

@@ -18,7 +18,7 @@
 
 use std::collections::HashMap;
 
-use crate::common::Errors;
+use crate::common::protocol::Errors;
 use crate::common::{Error, KafkaFuture, TopicPartition};
 
 /// The per-partition commit errors carried by the underlying future.

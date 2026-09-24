@@ -209,7 +209,7 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
-    use crate::common::Errors;
+    use crate::common::protocol::Errors;
 
     #[test]
     fn test_new_is_pending() {

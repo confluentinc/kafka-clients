@@ -224,7 +224,7 @@ mod tests {
         });
         let mut request = builder.build().unwrap();
         let bytes = request.serialize().unwrap();
-        let mut readable = crate::common::ByteBufferAccessor::new(bytes.into_buffer());
+        let mut readable = crate::common::protocol::ByteBufferAccessor::new(bytes.into_buffer());
         let parsed = DescribeUserScramCredentialsRequest::parse(&mut readable, version).unwrap();
         let users = parsed.data().users.as_ref().unwrap();
         assert_eq!(users.len(), 1);

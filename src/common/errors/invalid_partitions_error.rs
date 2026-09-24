@@ -14,8 +14,8 @@
 
 //! Translated from `org.apache.kafka.common.errors.InvalidPartitionsException`.
 
-use crate::common::Errors;
 use crate::common::error::kafka_error_class;
+use crate::common::protocol::Errors;
 
 kafka_error_class! {
     /// Number of partitions is below 1.

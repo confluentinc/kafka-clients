@@ -62,7 +62,7 @@ impl FetchUtils {
 mod tests {
     use super::*;
     use crate::common::internals::ClusterResourceListeners;
-    use crate::consumer::AutoOffsetResetStrategy;
+    use crate::consumer::internals::AutoOffsetResetStrategy;
 
     fn tp(topic: &str, partition: i32) -> TopicPartition {
         TopicPartition::new(topic.to_string(), partition)

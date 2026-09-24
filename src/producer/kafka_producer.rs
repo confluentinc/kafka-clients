@@ -2675,10 +2675,10 @@ mod tests {
 
     use super::*;
     use crate::MockClient;
-    use crate::common::Errors;
     use crate::common::Node;
     use crate::common::compress::Compression;
     use crate::common::internals::ClusterResourceListeners;
+    use crate::common::protocol::Errors;
     use crate::common::requests::ConcreteResponse;
     use crate::common::serialization::StringSerializer;
     use crate::common::utils::Utils;
@@ -2711,8 +2711,8 @@ mod tests {
 
     fn create_metadata_with_topic(topic: &str, num_partitions: i32) -> Arc<ProducerMetadata> {
         use crate::MetadataResponseData;
-        use crate::common::ApiKeys;
-        use crate::common::Errors;
+        use crate::common::protocol::ApiKeys;
+        use crate::common::protocol::Errors;
         use crate::common::requests::MetadataResponse;
         use crate::metadata_response_data::{MetadataResponseBroker, MetadataResponsePartition, MetadataResponseTopic};
 
@@ -2917,8 +2917,8 @@ mod tests {
     #[tokio::test]
     async fn wait_on_metadata_carries_the_topic_error_as_the_timeout_cause() {
         use crate::MetadataResponseData;
-        use crate::common::ApiKeys;
-        use crate::common::Errors;
+        use crate::common::protocol::ApiKeys;
+        use crate::common::protocol::Errors;
         use crate::common::requests::MetadataResponse;
         use crate::metadata_response_data::{MetadataResponseBroker, MetadataResponseTopic};
 
@@ -3022,8 +3022,8 @@ mod tests {
     #[doc(alias = "org.apache.kafka.clients.producer.KafkaProducerTest#testSendToInvalidTopic")]
     async fn test_send_to_invalid_topic() {
         use crate::MetadataResponseData;
-        use crate::common::ApiKeys;
-        use crate::common::Errors;
+        use crate::common::protocol::ApiKeys;
+        use crate::common::protocol::Errors;
         use crate::common::requests::MetadataResponse;
         use crate::metadata_response_data::{MetadataResponseBroker, MetadataResponseTopic};
 
@@ -4632,8 +4632,8 @@ mod tests {
     #[tokio::test]
     async fn test_callback_invoked_on_invalid_topic() {
         use crate::MetadataResponseData;
-        use crate::common::ApiKeys;
-        use crate::common::Errors;
+        use crate::common::protocol::ApiKeys;
+        use crate::common::protocol::Errors;
         use crate::common::requests::MetadataResponse;
         use crate::metadata_response_data::{MetadataResponseBroker, MetadataResponseTopic};
 
@@ -6159,7 +6159,7 @@ mod tests {
     #[doc(alias = "org.apache.kafka.clients.producer.KafkaProducerTest#testCommitTransactionWithSendToInvalidTopic")]
     async fn test_commit_transaction_with_send_to_invalid_topic() {
         use crate::MetadataResponseData;
-        use crate::common::ApiKeys;
+        use crate::common::protocol::ApiKeys;
         use crate::common::requests::MetadataResponse;
         use crate::metadata_response_data::{MetadataResponseBroker, MetadataResponseTopic};
 

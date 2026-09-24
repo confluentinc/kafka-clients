@@ -21,7 +21,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::OffsetFetchRequestData;
 use crate::admin::{GroupOffsets, ListConsumerGroupOffsetsSpec};
-use crate::common::Errors;
+use crate::common::protocol::Errors;
 use crate::common::requests::RequestUtils;
 use crate::common::requests::{ConcreteResponse, CoordinatorType, RequestBuilder, offset_fetch_request};
 use crate::common::utils::LogContext;
@@ -292,7 +292,7 @@ mod tests {
 
     use super::*;
     use crate::OffsetFetchResponseData;
-    use crate::common::ApiKeys;
+    use crate::common::protocol::ApiKeys;
     use crate::common::requests::{ConcreteResponse, OffsetFetchResponse};
     use crate::offset_fetch_response_data::{
         OffsetFetchResponseGroup, OffsetFetchResponsePartitions, OffsetFetchResponseTopics,

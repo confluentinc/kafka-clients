@@ -14,6 +14,7 @@
 
 //! Common utility classes (org.apache.kafka.common.utils)
 
+mod byte_utils;
 mod exponential_backoff;
 mod log_context;
 #[macro_use]
@@ -25,6 +26,7 @@ mod producer_id_and_epoch;
 #[allow(clippy::module_inception)]
 mod utils;
 
+pub use byte_utils::ByteUtils;
 pub use exponential_backoff::ExponentialBackoff;
 pub use log_context::LogContext;
 pub use producer_id_and_epoch::ProducerIdAndEpoch;

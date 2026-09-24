@@ -49,7 +49,7 @@ use confluent_kafka::admin::{
     AlterConsumerGroupOffsetsOptions, DeleteConsumerGroupOffsetsOptions, GroupOffsets, ListConsumerGroupOffsetsOptions,
     ListConsumerGroupOffsetsSpec,
 };
-use confluent_kafka::common::Errors;
+use confluent_kafka::common::protocol::Errors;
 use confluent_kafka::common::serialization::{ByteArraySerializer, Deserializer};
 use confluent_kafka::common::{Error, TopicPartition};
 use confluent_kafka::consumer::{Consumer, ConsumerConfig, KafkaConsumer, OffsetAndMetadata};

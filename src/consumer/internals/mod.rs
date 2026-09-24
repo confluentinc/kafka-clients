@@ -22,6 +22,8 @@ mod abstract_heartbeat_request_manager;
 pub(crate) mod abstract_membership_manager;
 mod async_consumer_metrics;
 pub(crate) mod auto_offset_reset_strategy;
+#[cfg(test)]
+mod auto_offset_reset_strategy_test;
 pub(crate) mod commit_request_manager;
 mod completed_fetch;
 mod consumer_heartbeat_request_manager;
@@ -68,17 +70,13 @@ mod timed_request_state;
 pub(crate) mod topic_metadata_request_manager;
 mod wakeup_trigger;
 
-// `pub use`, not `pub(crate) use`: `AutoOffsetResetStrategy` / `StrategyType` are
-// public API (`consumer::AutoOffsetResetStrategy`, consumer-threading.md §20) even
-// though they live in an `internals` package, so the re-export must carry that
-// visibility for `consumer/mod.rs` to forward it.
 pub(crate) use abstract_fetch::AbstractFetch;
 pub(crate) use abstract_heartbeat_request_manager::{
     AbstractHeartbeatRequestManager, HeartbeatErrorAction, HeartbeatFailureAction,
 };
 pub(crate) use abstract_membership_manager::{AbstractMembershipManager, LocalAssignment};
 pub(crate) use async_consumer_metrics::AsyncConsumerMetrics;
-pub use auto_offset_reset_strategy::{AutoOffsetResetStrategy, StrategyType};
+pub(crate) use auto_offset_reset_strategy::{AutoOffsetResetStrategy, StrategyType};
 pub(crate) use commit_request_manager::CommitRequestManager;
 pub(crate) use completed_fetch::CompletedFetch;
 pub(crate) use consumer_heartbeat_request_manager::ConsumerHeartbeatRequestManager;

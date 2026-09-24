@@ -20,10 +20,10 @@ use std::fmt;
 use std::io;
 
 use crate::ResponseHeaderData;
-use crate::common::ByteBufferAccessor;
-use crate::common::Readable;
+use crate::common::protocol::ByteBufferAccessor;
 use crate::common::protocol::Message;
 use crate::common::protocol::ObjectSerializationCache;
+use crate::common::protocol::Readable;
 
 /// Sentinel value indicating that the cached size has not been computed yet.
 const SIZE_NOT_INITIALIZED: i32 = -1;

@@ -30,7 +30,7 @@ use crate::ClientResponse;
 use crate::KafkaClient;
 use crate::Metadata;
 use crate::NetworkClientUtils;
-use crate::common::Errors;
+use crate::common::protocol::Errors;
 use crate::common::requests::RequestBuilder;
 use crate::common::{Error, Node};
 use crate::consumer::ConsumerConfig;
@@ -368,7 +368,7 @@ impl FutureCompletionHandler {
             return;
         }
         if response.was_disconnected() {
-            self.on_failure(completion_time_ms, Error::new(crate::common::Errors::NetworkError));
+            self.on_failure(completion_time_ms, Error::new(crate::common::protocol::Errors::NetworkError));
             return;
         }
         if let Some(msg) = response.version_mismatch() {
@@ -1199,7 +1199,7 @@ mod tests {
         // `received_time_ms` off the response and stores it.
         let header = crate::common::requests::RequestHeader::with_options(
             crate::common::requests::RequestHeaderOptionsBuilder::new()
-                .set_request_api_key(&crate::common::ApiKeys::FIND_COORDINATOR)
+                .set_request_api_key(&crate::common::protocol::ApiKeys::FIND_COORDINATOR)
                 .set_request_version(0)
                 .set_client_id("")
                 .set_correlation_id(1)

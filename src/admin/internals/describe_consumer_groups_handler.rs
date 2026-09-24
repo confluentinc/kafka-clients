@@ -28,7 +28,7 @@ use crate::ConsumerGroupDescribeRequestData;
 use crate::DescribeGroupsRequestData;
 use crate::admin::internals::AdminUtils;
 use crate::admin::{ConsumerGroupDescription, MemberAssignment, MemberDescription};
-use crate::common::Errors;
+use crate::common::protocol::Errors;
 use crate::common::requests::{
     ConcreteResponse, CoordinatorType, RequestBuilder, consumer_group_describe_request, describe_groups_request,
 };

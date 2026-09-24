@@ -385,7 +385,9 @@ async fn produce_too_large_record_acks_one_inner<F: ProducerBackendFactory>(ctx:
     // the response path as Error(MessageTooLarge). Accept either.
     let too_large = match &err {
         confluent_kafka::common::Error::RecordTooLarge(_) => true,
-        confluent_kafka::common::Error::KafkaError(g) => g.error() == confluent_kafka::common::Errors::MessageTooLarge,
+        confluent_kafka::common::Error::KafkaError(g) => {
+            g.error() == confluent_kafka::common::protocol::Errors::MessageTooLarge
+        },
         _ => false,
     };
     assert!(

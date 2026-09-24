@@ -37,8 +37,8 @@ use confluent_kafka::common::requests::ConcreteResponse;
 use confluent_kafka::common::requests::{
     RequestBuilder, RequestHeader, RequestHeaderOptionsBuilder, api_versions_request,
 };
-use confluent_kafka::common::security::SecurityProtocol;
-use confluent_kafka::common::security::SslFactory;
+use confluent_kafka::common::security::auth::SecurityProtocol;
+use confluent_kafka::common::security::ssl::SslFactory;
 use confluent_kafka::common::utils::LogContext;
 
 use crate::common::cluster_config::ClusterConfig;

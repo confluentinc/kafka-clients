@@ -22,9 +22,8 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 
 use confluent_kafka::common::Uuid;
 use confluent_kafka::common::protocol::MessageUtil;
-use confluent_kafka::common::protocol::{
-    ApiKeys, ByteBufferAccessor, Errors, Message, ObjectSerializationCache, RawTaggedField,
-};
+use confluent_kafka::common::protocol::types::RawTaggedField;
+use confluent_kafka::common::protocol::{ApiKeys, ByteBufferAccessor, Errors, Message, ObjectSerializationCache};
 
 // Re-export generated types
 use crate::common::simple_example_message_data::{MyStruct, SimpleExampleMessageData, StructArray, TaggedStruct};

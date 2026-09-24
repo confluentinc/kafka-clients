@@ -191,7 +191,7 @@ mod tests {
         data.set_resource_types(vec![config_resource::Type::Topic.id(), config_resource::Type::Broker.id()]);
         let mut request = AbstractRequest::ListConfigResources(ListConfigResourcesRequest::new(data, 1));
         let bytes = request.serialize().unwrap();
-        let mut readable = crate::common::ByteBufferAccessor::new(bytes.into_buffer());
+        let mut readable = crate::common::protocol::ByteBufferAccessor::new(bytes.into_buffer());
         let parsed = ListConfigResourcesRequest::parse(&mut readable, 1).unwrap();
         assert_eq!(parsed.data().resource_types, vec![2, 4]);
     }

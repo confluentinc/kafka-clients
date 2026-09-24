@@ -94,3 +94,12 @@ pub mod generated {
 }
 
 pub use generated::*;
+
+// Test-only message definitions from `generator/test-messages/`, for in-crate
+// tests that also need `pub(crate)` types (e.g. `common::message`'s
+// `RecordsSerdeTest`). `build.rs` always generates them.
+#[cfg(test)]
+#[allow(dead_code, unused_imports, clippy::all)]
+pub(crate) mod test_generated {
+    include!(concat!(env!("OUT_DIR"), "/test_generated/mod.rs"));
+}

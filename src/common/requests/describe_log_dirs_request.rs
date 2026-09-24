@@ -203,7 +203,7 @@ mod tests {
         data.set_topics(Some(vec![topic("round-trip-topic", vec![1, 2, 3])]));
         let mut request = AbstractRequest::DescribeLogDirs(DescribeLogDirsRequest::new(data, 2));
         let bytes = request.serialize().unwrap();
-        let mut readable = crate::common::ByteBufferAccessor::new(bytes.into_buffer());
+        let mut readable = crate::common::protocol::ByteBufferAccessor::new(bytes.into_buffer());
         let parsed = DescribeLogDirsRequest::parse(&mut readable, 2).unwrap();
         let topics = parsed.data().topics.as_ref().unwrap();
         assert_eq!(topics.len(), 1);

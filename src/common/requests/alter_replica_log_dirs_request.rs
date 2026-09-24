@@ -243,7 +243,7 @@ mod tests {
         data.set_dirs(vec![dir("/data0", vec![topic("round-trip-topic", vec![3, 4])])]);
         let mut request = AbstractRequest::AlterReplicaLogDirs(AlterReplicaLogDirsRequest::new(data, 2));
         let bytes = request.serialize().unwrap();
-        let mut readable = crate::common::ByteBufferAccessor::new(bytes.into_buffer());
+        let mut readable = crate::common::protocol::ByteBufferAccessor::new(bytes.into_buffer());
         let parsed = AlterReplicaLogDirsRequest::parse(&mut readable, 2).unwrap();
         assert_eq!(parsed.data().dirs.len(), 1);
         assert_eq!(parsed.data().dirs[0].path, "/data0");

@@ -19,7 +19,7 @@
 //! Translated from org.apache.kafka.common.message.SimpleArraysMessageTest
 
 use crate::common::simple_arrays_message_data::SimpleArraysMessageData;
-use confluent_kafka::common::ByteBufferAccessor;
+use confluent_kafka::common::protocol::ByteBufferAccessor;
 
 #[test]
 #[doc(alias = "org.apache.kafka.common.message.SimpleArraysMessageTest#testArrayBoundsChecking")]

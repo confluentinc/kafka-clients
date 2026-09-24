@@ -251,7 +251,7 @@ mod tests {
     /// fails with the expected error about insufficient bytes.
     #[test]
     fn test_invalid_sasl_authenticate_request() {
-        use crate::common::ByteBufferAccessor;
+        use crate::common::protocol::ByteBufferAccessor;
 
         let version: i16 = 1; // fixed-length encoding for simplicity
         let b: Vec<u8> = vec![
@@ -287,7 +287,8 @@ mod tests {
     /// unknown_tagged_fields are preserved.
     #[test]
     fn test_valid_tagged_fields_with_sasl_authenticate_request() {
-        use crate::common::protocol::{ByteBufferAccessor, RawTaggedField, Writable};
+        use crate::common::protocol::types::RawTaggedField;
+        use crate::common::protocol::{ByteBufferAccessor, Writable};
 
         let mut accessor = ByteBufferAccessor::new(Vec::with_capacity(11));
 
@@ -325,7 +326,8 @@ mod tests {
     /// verifies that parse fails with the expected error.
     #[test]
     fn test_invalid_tagged_fields_with_sasl_authenticate_request() {
-        use crate::common::protocol::{ByteBufferAccessor, RawTaggedField, Writable};
+        use crate::common::protocol::types::RawTaggedField;
+        use crate::common::protocol::{ByteBufferAccessor, Writable};
 
         let mut accessor = ByteBufferAccessor::new(Vec::with_capacity(13));
 

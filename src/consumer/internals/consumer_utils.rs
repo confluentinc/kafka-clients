@@ -55,11 +55,11 @@ use std::sync::{Arc, Mutex};
 
 use log::info;
 
-use crate::common::Errors;
+use crate::common::protocol::Errors;
 use crate::common::{Error, IsolationLevel, KafkaError, TopicPartition};
-use crate::consumer::AutoOffsetResetStrategy;
 use crate::consumer::ConsumerConfig;
 use crate::consumer::OffsetAndMetadata;
+use crate::consumer::internals::AutoOffsetResetStrategy;
 use crate::consumer::internals::ConsumerMetadata;
 use crate::consumer::internals::{FetchPosition, SubscriptionState};
 

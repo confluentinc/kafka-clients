@@ -208,7 +208,7 @@ mod tests {
         let mut builder = Builder::new(Some(&owners));
         let mut request = builder.build_version(version).unwrap();
         let bytes = request.serialize().unwrap();
-        let mut readable = crate::common::ByteBufferAccessor::new(bytes.into_buffer());
+        let mut readable = crate::common::protocol::ByteBufferAccessor::new(bytes.into_buffer());
         let parsed = DescribeDelegationTokenRequest::parse(&mut readable, version).unwrap();
         let parsed_owners = parsed.data().owners.as_ref().unwrap();
         assert_eq!(parsed_owners.len(), 1);

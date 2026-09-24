@@ -45,6 +45,8 @@ mod local_illegal_argument_error;
 mod local_illegal_state_error;
 mod local_timeout_error;
 pub mod memory;
+#[cfg(test)]
+mod message;
 mod metric;
 mod metric_name;
 mod metric_name_template;
@@ -98,7 +100,6 @@ pub use metric_name::MetricName;
 pub use metric_name_template::MetricNameTemplate;
 pub use node::Node;
 pub use partition_info::PartitionInfo;
-pub use protocol::{ApiKeys, ByteBufferAccessor, Errors, Readable, Writable};
 pub use topic_collection::TopicCollection;
 pub use topic_id_partition::TopicIdPartition;
 pub use topic_partition::TopicPartition;

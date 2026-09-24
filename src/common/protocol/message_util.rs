@@ -22,7 +22,7 @@ use std::io;
 use super::ByteBufferAccessor;
 use super::Message;
 use super::ObjectSerializationCache;
-use super::RawTaggedField;
+use super::types::RawTaggedField;
 
 /// Translates the Java static-utility class `org.apache.kafka.common.protocol.MessageUtil`,
 /// which has no instance state, so it becomes a unit struct hosting its
@@ -89,10 +89,10 @@ impl MessageUtil {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::Readable;
-    use crate::common::Writable;
     use crate::common::protocol::MessageSizeAccumulator;
-    use crate::common::protocol::RawTaggedField;
+    use crate::common::protocol::Readable;
+    use crate::common::protocol::Writable;
+    use crate::common::protocol::types::RawTaggedField;
 
     #[derive(Debug, Clone, PartialEq)]
     struct TestMsg {

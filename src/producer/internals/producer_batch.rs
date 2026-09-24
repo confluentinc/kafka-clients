@@ -933,8 +933,8 @@ impl std::fmt::Debug for ProducerBatch {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::Errors;
     use crate::common::compress::Compression;
+    use crate::common::protocol::Errors;
 
     const NOW: i64 = 1488748346917;
 

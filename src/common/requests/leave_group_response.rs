@@ -228,7 +228,7 @@ mod tests {
             0x00, 0x01, 0x69, // group_instance_id "i"
             0x00, 0x19, // error_code 25
         ];
-        let mut readable = crate::common::ByteBufferAccessor::new(bytes);
+        let mut readable = crate::common::protocol::ByteBufferAccessor::new(bytes);
         let response = LeaveGroupResponse::parse(&mut readable, 3).unwrap();
         assert_eq!(response.top_level_error(), Errors::None);
         assert_eq!(response.member_responses().len(), 1);
@@ -262,7 +262,7 @@ mod tests {
             0x00, // member tagged fields
             0x00, // top-level tagged fields
         ];
-        let mut readable = crate::common::ByteBufferAccessor::new(bytes);
+        let mut readable = crate::common::protocol::ByteBufferAccessor::new(bytes);
         let response = LeaveGroupResponse::parse(&mut readable, 5).unwrap();
         assert_eq!(response.top_level_error(), Errors::None);
         assert_eq!(response.member_responses().len(), 1);

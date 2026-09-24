@@ -15,7 +15,7 @@
 //! Tests for Kafka message tagged fields serialization/deserialization
 
 use confluent_kafka::FetchRequestData;
-use confluent_kafka::common::ByteBufferAccessor;
+use confluent_kafka::common::protocol::ByteBufferAccessor;
 use confluent_kafka::fetch_request_data::ReplicaState;
 
 #[test]

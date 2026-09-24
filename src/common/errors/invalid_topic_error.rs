@@ -23,8 +23,8 @@ use crate::common::error::{ErrorCode, ErrorHierarchy, ErrorMessage, ErrorSource}
 use crate::common::{Error, KafkaError};
 // Ambassador exports its generated helper macros at the crate root; a
 // `#[delegate]` outside the trait's own module has to import them.
-use crate::common::Errors;
 use crate::common::error::{ambassador_impl_ErrorCode, ambassador_impl_ErrorMessage, ambassador_impl_ErrorSource};
+use crate::common::protocol::Errors;
 
 use super::format_java_set;
 

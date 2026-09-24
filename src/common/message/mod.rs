@@ -12,10 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Security types and utilities (org.apache.kafka.common.security).
+//! In-crate tests of `org.apache.kafka.common.message`. The message types
+//! themselves are generated into [`crate::generated`]; the tests that need
+//! `pub(crate)` types (`common::record::internal`) live here rather than in
+//! `tests/common/message/`.
 
-pub mod auth;
-pub mod authenticator;
-pub mod scram;
-pub mod ssl;
-pub mod token;
+mod records_serde_test;

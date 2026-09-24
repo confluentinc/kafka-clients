@@ -202,7 +202,7 @@ mod tests {
         data.set_topics(Some(vec![topic("A", vec![0, 2])]));
         let mut request = AbstractRequest::ListPartitionReassignments(ListPartitionReassignmentsRequest::new(data, 0));
         let bytes = request.serialize().unwrap();
-        let mut readable = crate::common::ByteBufferAccessor::new(bytes.into_buffer());
+        let mut readable = crate::common::protocol::ByteBufferAccessor::new(bytes.into_buffer());
         let parsed = ListPartitionReassignmentsRequest::parse(&mut readable, 0).unwrap();
         assert_eq!(parsed.data().timeout_ms, 30000);
         let topics = parsed.data().topics.as_ref().unwrap();

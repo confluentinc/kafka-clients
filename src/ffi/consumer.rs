@@ -62,10 +62,10 @@ use crate::consumer::AsyncKafkaConsumer;
 // `crate::consumer::ConsumerHandle` is aliased because this module already has a
 // private `ConsumerHandle` (the state behind `kafka_consumer_Consumer_t`), which
 // is an unrelated concept.
+use crate::consumer::internals::AutoOffsetResetStrategy;
 use crate::consumer::{
-    AutoOffsetResetStrategy, CloseOptions, Consumer, ConsumerGroupMetadata, ConsumerHandle, ConsumerRebalanceListener,
-    ConsumerRecord, ConsumerRecords, GroupProtocol, MockConsumer, OffsetAndMetadata, OffsetAndTimestamp,
-    OffsetCommitCallback,
+    CloseOptions, Consumer, ConsumerGroupMetadata, ConsumerHandle, ConsumerRebalanceListener, ConsumerRecord,
+    ConsumerRecords, GroupProtocol, MockConsumer, OffsetAndMetadata, OffsetAndTimestamp, OffsetCommitCallback,
 };
 
 use super::common::{
@@ -497,7 +497,7 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer_new(
         let s = unsafe { CStr::from_ptr(auto_offset_reset) }.to_string_lossy().to_string();
         AutoOffsetResetStrategy::from_string(&s).unwrap_or(AutoOffsetResetStrategy::LATEST)
     };
-    let consumer: MockConsumer<Bytes, Bytes> = MockConsumer::new(strategy);
+    let consumer: MockConsumer<Bytes, Bytes> = MockConsumer::with_auto_offset_reset_strategy(strategy);
     // `MockConsumer` exposes a `ConsumerHandle` through the `Consumer` trait
     // (its `wakeup()` is backed by a shared flag observed by the next `poll`),
     // so we capture it here just like the async arm — no no-op handle is needed.

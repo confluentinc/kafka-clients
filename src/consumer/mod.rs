@@ -53,7 +53,6 @@ pub use consumer_record::{ConsumerRecord, ConsumerRecordOptions, ConsumerRecordO
 pub use consumer_records::ConsumerRecords;
 pub use group_protocol::GroupProtocol;
 pub use interceptor::ConsumerInterceptor;
-pub use internals::{AutoOffsetResetStrategy, StrategyType};
 pub use kafka_consumer::KafkaConsumer;
 pub use mock_consumer::MockConsumer;
 pub use offset_and_metadata::OffsetAndMetadata;
@@ -63,34 +62,14 @@ pub use offset_commit_callback::OffsetCommitCallback;
 pub use offset_reset_strategy::OffsetResetStrategy;
 pub use subscription_pattern::SubscriptionPattern;
 
-// Re-export [`Deserializer`] at the consumer module root for API ergonomics.
-// The canonical location is [`crate::common::serialization::Deserializer`]
-// (per CLAUDE.md §2, the trait lives in `common::serialization` because it
-// is shared by producer + consumer). This re-export mirrors the convenience
-// re-exports of [`ConsumerInterceptor`], [`ConsumerRebalanceListener`], and
-// [`OffsetCommitCallback`] so that consumer-side users can `use
-// confluent_kafka::consumer::Deserializer;` alongside their other consumer
-// imports — matching the PLAN's intent for `src/consumer/deserializer.rs`.
-pub use crate::common::serialization::Deserializer;
-
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
 
-use crate::common::{Error, PartitionInfo, TopicPartition};
-
-// Re-export the metric read types returned by [`Consumer::metrics`]. Java's
-// `Consumer.metrics()` returns `Map<MetricName, ? extends Metric>`; these are
-// the Rust counterparts. [`MetricName`] is the metric key, [`Metric`] the read
-// interface, [`KafkaMetric`] the concrete registry entry (which `impl Metric`),
-// and [`MetricValue`] the type-erased reading. Re-exported here so
-// consumer-side users can name the `metrics()` return type without reaching
-// into `crate::common`. These mirror Java's public metric types being
-// accessible from the consumer package.
-pub use crate::common::metrics::KafkaMetric;
-pub use crate::common::{Metric, MetricName, MetricValue};
+use crate::common::metrics::KafkaMetric;
+use crate::common::{Error, MetricName, PartitionInfo, TopicPartition};
 
 /// The single dispatch trait that `MockConsumer` (Phase 3) and
 /// `AsyncKafkaConsumer` (Phase 11) both implement. Translates Java's

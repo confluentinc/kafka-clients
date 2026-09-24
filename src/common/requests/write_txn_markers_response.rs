@@ -149,7 +149,7 @@ mod tests {
         data.set_markers(vec![marker_result(42, Errors::None)]);
         let mut concrete = super::super::ConcreteResponse::WriteTxnMarkers(WriteTxnMarkersResponse::new(data));
         let bytes = concrete.serialize(1).unwrap();
-        let mut readable = crate::common::ByteBufferAccessor::new(bytes.into_buffer());
+        let mut readable = crate::common::protocol::ByteBufferAccessor::new(bytes.into_buffer());
         let parsed = WriteTxnMarkersResponse::parse(&mut readable, 1).unwrap();
         assert_eq!(parsed.data().markers.len(), 1);
         assert_eq!(parsed.data().markers[0].producer_id, 42);

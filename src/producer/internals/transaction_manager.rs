@@ -4898,8 +4898,8 @@ mod tests {
     use crate::InitProducerIdResponseData;
     use crate::NodeApiVersions;
     use crate::api_versions_response_data::{ApiVersion, FinalizedFeatureKey, SupportedFeatureKey};
-    use crate::common::ApiKeys;
     use crate::common::compress::Compression;
+    use crate::common::protocol::ApiKeys;
     use crate::common::record::TimestampType;
     use crate::common::record::internal::MemoryRecords;
     use crate::common::requests::{

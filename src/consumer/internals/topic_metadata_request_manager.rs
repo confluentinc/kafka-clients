@@ -32,8 +32,8 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::oneshot;
 
 use crate::common::Error;
-use crate::common::Errors;
 use crate::common::PartitionInfo;
+use crate::common::protocol::Errors;
 use crate::common::requests::{ConcreteResponse, MetadataResponse, RequestBuilder, metadata_request};
 use crate::consumer::ConsumerConfig;
 
@@ -514,8 +514,8 @@ impl RequestManager for TopicMetadataRequestManager {
 mod tests {
     use crate::ClientResponse;
     use crate::MetadataResponseData;
-    use crate::common::ApiKeys;
     use crate::common::Node;
+    use crate::common::protocol::ApiKeys;
     use crate::common::requests::{ConcreteResponse, RequestHeader, RequestHeaderOptionsBuilder};
     use crate::metadata_response_data::{MetadataResponseBroker, MetadataResponseTopic};
 

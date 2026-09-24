@@ -35,8 +35,8 @@ use log::warn;
 
 use crate::common::Error;
 use crate::common::config::{SaslConfigs, SslConfigs};
-use crate::common::security::SecurityProtocol;
-use crate::consumer::AutoOffsetResetStrategy;
+use crate::common::security::auth::SecurityProtocol;
+use crate::consumer::internals::AutoOffsetResetStrategy;
 
 /// Configuration for the Kafka Consumer.
 ///

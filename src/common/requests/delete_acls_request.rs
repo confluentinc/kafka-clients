@@ -228,7 +228,7 @@ mod tests {
         let version = ApiKeys::DELETE_ACLS.latest_version();
         let mut request = AbstractRequest::DeleteAcls(DeleteAclsRequest::new(data, version));
         let bytes = request.serialize().unwrap();
-        let mut readable = crate::common::ByteBufferAccessor::new(bytes.into_buffer());
+        let mut readable = crate::common::protocol::ByteBufferAccessor::new(bytes.into_buffer());
         let parsed = DeleteAclsRequest::parse(&mut readable, version).unwrap();
         assert_eq!(parsed.filters(), vec![sample_filter()]);
     }

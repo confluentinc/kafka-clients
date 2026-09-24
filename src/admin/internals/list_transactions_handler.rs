@@ -23,7 +23,7 @@ use crate::ListTransactionsRequestData;
 use crate::admin::ListTransactionsOptions;
 use crate::admin::TransactionListing;
 use crate::admin::TransactionState;
-use crate::common::Errors;
+use crate::common::protocol::Errors;
 use crate::common::requests::{ConcreteResponse, RequestBuilder, list_transactions_request};
 use crate::common::utils::LogContext;
 use crate::common::{Error, Node};

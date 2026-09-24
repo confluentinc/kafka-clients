@@ -350,7 +350,7 @@ impl fmt::Display for MetadataSnapshot {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::Errors;
+    use crate::common::protocol::Errors;
 
     /// Translated from `MetadataSnapshotTest.testMissingLeaderEndpoint`.
     #[test]

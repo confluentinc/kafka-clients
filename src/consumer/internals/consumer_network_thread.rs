@@ -1097,9 +1097,9 @@ mod tests {
     use crate::common::IsolationLevel;
     use crate::common::Node;
     use crate::common::internals::ClusterResourceListeners;
-    use crate::consumer::AutoOffsetResetStrategy;
     use crate::consumer::ConsumerConfig;
     use crate::consumer::GroupMembershipOperation;
+    use crate::consumer::internals::AutoOffsetResetStrategy;
     use crate::consumer::internals::ConsumerMembershipManager;
     use crate::consumer::internals::ConsumerMetadata;
     use crate::consumer::internals::OffsetsRequestManager;

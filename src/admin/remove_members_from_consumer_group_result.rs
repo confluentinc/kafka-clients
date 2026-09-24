@@ -20,7 +20,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::admin::MemberToRemove;
-use crate::common::Errors;
+use crate::common::protocol::Errors;
 use crate::common::{Error, KafkaFuture};
 use crate::leave_group_request_data::MemberIdentity;
 

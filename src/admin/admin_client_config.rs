@@ -21,7 +21,7 @@ use std::collections::HashMap;
 use crate::CommonClientConfigs;
 use crate::common::Error;
 use crate::common::config::{SaslConfigs, SslConfigs};
-use crate::common::security::SecurityProtocol;
+use crate::common::security::auth::SecurityProtocol;
 
 /// Configuration for the admin client.
 ///

@@ -17,7 +17,8 @@
 
 use std::sync::{Arc, Mutex};
 
-use crate::common::metrics::{Measurable, MetricConfig, MetricValue, MetricValueProvider, Time};
+use crate::common::MetricValue;
+use crate::common::metrics::{Measurable, MetricConfig, MetricValueProvider, Time};
 use crate::common::{Error, Metric, MetricName};
 
 /// A metric tracked by the registry. Holds a [`MetricName`], a (mutable)

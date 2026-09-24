@@ -673,11 +673,11 @@ mod tests {
     use crate::SaslAuthenticateResponseData;
     use crate::SaslHandshakeResponseData;
     use crate::api_versions_response_data::ApiVersion;
-    use crate::common::Writable;
     use crate::common::network::InterestOps;
     use crate::common::network::is_authentication_error;
     use crate::common::protocol::Message;
     use crate::common::protocol::ObjectSerializationCache;
+    use crate::common::protocol::Writable;
     use crate::common::requests::ResponseHeader;
 
     use std::collections::VecDeque;

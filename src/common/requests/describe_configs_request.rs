@@ -192,7 +192,7 @@ mod tests {
         data.set_include_documentation(true);
         let mut request = AbstractRequest::DescribeConfigs(DescribeConfigsRequest::new(data, 4));
         let bytes = request.serialize().unwrap();
-        let mut readable = crate::common::ByteBufferAccessor::new(bytes.into_buffer());
+        let mut readable = crate::common::protocol::ByteBufferAccessor::new(bytes.into_buffer());
         let parsed = DescribeConfigsRequest::parse(&mut readable, 4).unwrap();
         assert_eq!(parsed.data().resources.len(), 1);
         assert_eq!(parsed.data().resources[0].resource_name, "topic");

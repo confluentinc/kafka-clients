@@ -23,7 +23,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::OffsetDeleteRequestData;
-use crate::common::Errors;
+use crate::common::protocol::Errors;
 use crate::common::requests::{ConcreteResponse, CoordinatorType, RequestBuilder, offset_delete_request};
 use crate::common::utils::LogContext;
 use crate::common::{Error, Node, TopicPartition};

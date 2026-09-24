@@ -96,7 +96,6 @@ use log::{debug, error};
 use rustc_hash::FxHashSet;
 
 use crate::common::Error;
-use crate::common::Errors;
 use crate::common::InvalidRecordError;
 use crate::common::IsolationLevel;
 use crate::common::KafkaError;
@@ -105,6 +104,7 @@ use crate::common::errors::DeserializationErrorOrigin;
 use crate::common::errors::RecordDeserializationError;
 use crate::common::header::RecordHeaders;
 use crate::common::memory::BufferSupplier;
+use crate::common::protocol::Errors;
 use crate::common::record::TimestampType;
 use crate::common::record::internal::AbstractRecords;
 use crate::common::record::internal::{
@@ -1368,7 +1368,7 @@ mod tests {
     use crate::common::compress::Compression;
     use crate::common::record::internal::{MemoryRecords, MemoryRecordsBuilderOptionsBuilder, SimpleRecord};
     use crate::common::serialization::Deserializer;
-    use crate::consumer::AutoOffsetResetStrategy;
+    use crate::consumer::internals::AutoOffsetResetStrategy;
     use crate::consumer::internals::FetchMetricsManager;
     use crate::fetch_response_data::PartitionData;
     use std::sync::{Arc, Mutex};

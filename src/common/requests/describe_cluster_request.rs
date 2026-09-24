@@ -166,7 +166,7 @@ mod tests {
         data.set_endpoint_type(DescribeClusterRequest::ENDPOINT_TYPE_BROKER);
         let mut request = AbstractRequest::DescribeCluster(DescribeClusterRequest::new(data, 1));
         let bytes = request.serialize().unwrap();
-        let mut readable = crate::common::ByteBufferAccessor::new(bytes.into_buffer());
+        let mut readable = crate::common::protocol::ByteBufferAccessor::new(bytes.into_buffer());
         let parsed = DescribeClusterRequest::parse(&mut readable, 1).unwrap();
         assert!(parsed.data().include_cluster_authorized_operations);
         assert_eq!(parsed.data().endpoint_type, DescribeClusterRequest::ENDPOINT_TYPE_BROKER);
