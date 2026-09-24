@@ -41,6 +41,8 @@
 //!   → `test_async_consumer_consumption_with_broker_failures`
 //! - `testAsyncConsumerSeekAndCommitWithBrokerFailures` (line 208)
 //!   → `test_async_consumer_seek_and_commit_with_broker_failures`
+//! - `testAsyncSubscribeWhenTopicUnavailable` (line 258)
+//!   → `test_async_subscribe_when_topic_unavailable`
 //!
 //! ## SKIPped
 //!
@@ -708,4 +710,98 @@ async fn seek_and_commit_with_broker_failures(num_iters: usize) {
 #[tokio::test(flavor = "multi_thread")]
 async fn test_async_consumer_seek_and_commit_with_broker_failures() {
     seek_and_commit_with_broker_failures(5).await;
+}
+
+/// Java's `receiveExactRecords(poller, numRecords, timeoutMs)` (line 778):
+/// wait until the poller has received exactly `num_records` records.
+async fn receive_exact_records(poller: &ConsumerAssignmentPoller, num_records: usize, timeout_ms: u64) {
+    test_utils::wait_until_true_with_timeout(
+        || {
+            let received = poller.received_messages() == num_records;
+            async move { received }
+        },
+        &format!("Consumer did not receive expected {num_records}."),
+        timeout_ms,
+        100,
+    )
+    .await;
+    // Java's lazy message also reports the count; the helper takes a fixed
+    // message, so report it here (the wait above already passed).
+    assert_eq!(
+        poller.received_messages(),
+        num_records,
+        "Consumer did not receive expected {num_records}. It received {}",
+        poller.received_messages()
+    );
+}
+
+/// Translates `testAsyncSubscribeWhenTopicUnavailable`
+/// (`ConsumerBounceTest.java:258`, body `testSubscribeWhenTopicUnavailable`
+/// :262): subscribe to a topic that does not exist yet, create it 2 s later,
+/// consume 1000 records; then stop every broker, restart them all, and consume
+/// 1000 more on the same consumer.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_async_subscribe_when_topic_unavailable() {
+    let mut ctx = TestContext::new(bounce_cluster_config()).await;
+    set_up(&mut ctx).await;
+    let new_topic = ctx.topic("new-topic");
+    let new_topic_partition = TopicPartition::new(new_topic.clone(), 0);
+    let num_records: usize = 1000;
+
+    let mut consumer = create_consumer(
+        &ctx,
+        &HashMap::from([
+            ("max.poll.interval.ms".to_string(), "6000".to_string()),
+            ("metadata.max.age.ms".to_string(), "100".to_string()),
+        ]),
+    );
+    consumer
+        .subscribe_with_topics(vec![new_topic.clone()])
+        .await
+        .expect("subscribe should succeed");
+    consumer.poll(Duration::ZERO).await.expect("poll should succeed");
+    // Schedule topic creation after 2 seconds
+    let create_new_topic = {
+        let bootstrap = ctx.bootstrap_servers().to_string();
+        let new_topic = new_topic.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            let props = HashMap::from([("bootstrap.servers".to_string(), bootstrap)]);
+            let admin = KafkaAdminClient::new(AdminClientConfig::new(&props).expect("valid admin config"))
+                .expect("admin client");
+            test_utils::create_topic(&admin, &new_topic, NUM_PARTITIONS, NUM_REPLICA).await;
+            admin.close_with_timeout(Duration::from_secs(5)).await;
+        })
+    };
+
+    // Start first poller
+    let mut poller = ConsumerAssignmentPoller::start(consumer, vec![new_topic.clone()]).await;
+    send_records(&ctx, &new_topic_partition, num_records).await;
+    receive_exact_records(&poller, num_records, 60_000).await;
+    let consumer = poller.shutdown().await.expect("first poller owned the consumer");
+    // Java's `assertDoesNotThrow` around the scheduled creation: surface a
+    // failure of the creation task (it finished before the records arrived).
+    tokio::time::timeout(Duration::from_secs(60), create_new_topic)
+        .await
+        .expect("topic creation task did not finish")
+        .expect("topic creation should not fail");
+
+    // Simulate broker failure and recovery
+    let cluster = ctx.cluster();
+    for id in cluster.broker_ids() {
+        cluster.shutdown_broker(id).await;
+    }
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    for id in cluster.broker_ids() {
+        cluster.start_broker(id).await;
+    }
+
+    // Start second poller after recovery
+    let mut poller2 = ConsumerAssignmentPoller::start(consumer, vec![new_topic.clone()]).await;
+
+    send_records(&ctx, &new_topic_partition, num_records).await;
+    receive_exact_records(&poller2, num_records, 60_000).await;
+
+    // Java's `tearDown`.
+    close_consumer(poller2.shutdown().await).await;
 }
