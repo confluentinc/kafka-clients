@@ -25,11 +25,13 @@
 //! name contains `internal` maps to a `pub(crate)` Rust module.
 
 pub(crate) mod abstract_records;
+pub(crate) mod byte_buffer_log_input_stream;
 pub(crate) mod compression_ratio_estimator;
 pub(crate) mod compression_type;
 pub(crate) mod control_record_type;
 pub(crate) mod default_record;
 pub(crate) mod default_record_batch;
+pub(crate) mod legacy_record;
 pub(crate) mod memory_records;
 pub(crate) mod memory_records_builder;
 pub(crate) mod record_batch;
@@ -37,12 +39,13 @@ pub(crate) mod record_trait;
 pub(crate) mod record_version;
 pub(crate) mod simple_record;
 
+pub(crate) use byte_buffer_log_input_stream::ByteBufferLogInputStream;
 pub(crate) use compression_ratio_estimator::CompressionRatioEstimator;
 pub(crate) use compression_type::CompressionType;
 pub(crate) use control_record_type::ControlRecordType;
 pub(crate) use default_record::{DefaultRecord, DefaultRecordRef};
 pub(crate) use default_record_batch::{DefaultRecordBatch, DefaultRecordBatchRef};
-pub(crate) use memory_records::{BatchIterator, MemoryRecords};
+pub(crate) use memory_records::MemoryRecords;
 pub(crate) use memory_records_builder::MemoryRecordsBuilder;
 pub(crate) use record_batch::RecordBatch;
 pub(crate) use record_trait::Record;

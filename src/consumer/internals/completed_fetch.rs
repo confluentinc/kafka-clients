@@ -106,10 +106,11 @@ use crate::common::header::internals::RecordHeaders;
 use crate::common::memory::buffer_supplier::BufferSupplier;
 use crate::common::protocol::Errors;
 use crate::common::record::TimestampType;
-use crate::common::record::internal::abstract_records::LOG_OVERHEAD;
+use crate::common::record::internal::byte_buffer_log_input_stream::unsupported_magic_error;
+use crate::common::record::internal::default_record_batch::invalid_record_count_error;
 use crate::common::record::internal::{
-    ControlRecordType, DefaultRecord, DefaultRecordBatchRef, DefaultRecordRef, MemoryRecords, RecordBatch,
-    RecordVersion,
+    ByteBufferLogInputStream, ControlRecordType, DefaultRecord, DefaultRecordBatchRef, DefaultRecordRef, MemoryRecords,
+    RecordBatch, RecordVersion,
 };
 use crate::common::serialization::Deserializer;
 use crate::consumer::ConsumerRecord;
@@ -1027,10 +1028,23 @@ impl CompletedFetch {
     /// A malformed control record is bad input, not a logic bug, so it becomes a
     /// recoverable error — the same treatment [`Self::peek_current_record`] gives a
     /// malformed data record. Java throws `InvalidRecordException` from
-    /// `ControlRecordType.parse`.
-    fn contains_abort_marker(&self, batch: &BatchMetadata, source: &RecordSource) -> Result<bool, Error> {
+    /// `ControlRecordType.parse`, and from the `RecordIterator` that
+    /// `batch.iterator()` builds when the header's `records_count` is negative.
+    fn contains_abort_marker(
+        &self,
+        batch: &BatchMetadata,
+        records_count: i32,
+        source: &RecordSource,
+    ) -> Result<bool, Error> {
         if !batch.is_control_batch {
             return Ok(false);
+        }
+        // `batch.iterator()` (`DefaultRecordBatch.java:321-337`) constructs a
+        // `RecordIterator`, whose constructor rejects a negative count before any
+        // record is read (`:584-587`) — the same check `load_next_batch` applies to
+        // a batch it installs (D3).
+        if records_count < 0 {
+            return Err(Error::InvalidRecord(invalid_record_count_error(records_count, batch.magic)));
         }
         let Some(cursor) = self.cursor.as_ref() else {
             return Ok(false);
@@ -1111,31 +1125,61 @@ impl CompletedFetch {
                 };
 
                 let buffer = cursor.memory_records.buffer();
-                // Need at least LOG_OVERHEAD bytes to read base_offset + length;
-                // mirrors `BatchIterator::next`'s bounds checks. A partial or
-                // trailing batch terminates iteration.
-                if batch_start + LOG_OVERHEAD > buffer.len() {
-                    cursor.next_batch_start = None;
-                    return Ok(false);
-                }
-                let batch = DefaultRecordBatchRef::new(&buffer[batch_start..]);
-                let batch_size = batch.size_in_bytes();
-                if batch_start + batch_size > buffer.len() {
-                    cursor.next_batch_start = None;
-                    return Ok(false);
+                // Java walks a fetch's batches with `ByteBufferLogInputStream.nextBatch()`
+                // (`ByteBufferLogInputStream.java:41-58`): every header goes through
+                // `nextBatchSize()` — sign, minimum size, magic — before the batch is
+                // handed out as a slice limited to exactly its declared size. The header
+                // is never trusted for where the next batch starts until it has passed.
+                // The stream borrows the cursor's buffer, so it is rebuilt over the unread
+                // tail per batch rather than stored in the cursor; it is a slice, a
+                // position and a limit on the stack, and allocates nothing.
+                let unread = buffer.get(batch_start..).unwrap_or_default();
+                // A corrupt size or magic propagates as the stream's `CORRUPT_MESSAGE`
+                // error, unwrapped, as Java's `batches.hasNext()` throws it
+                // (`CompletedFetch.java:187`) — it is not "no batch".
+                let batch_size = match ByteBufferLogInputStream::new(unread, i32::MAX).next_batch_size()? {
+                    Some(batch_size) if batch_size <= unread.len() => batch_size,
+                    // `batchSize == null || remaining < batchSize` → no batch (`:44-46`):
+                    // a partial trailing batch, as a broker cutting the response at
+                    // `max.partition.fetch.bytes` leaves, ends iteration without an error.
+                    _ => {
+                        cursor.next_batch_start = None;
+                        return Ok(false);
+                    },
+                };
+                let batch_bytes = &unread[..batch_size];
+
+                // D7 (APPSEC-7665): message formats v0 and v1 are refused by their
+                // magic before anything reads the header as a v2 one. In bounds:
+                // `next_batch_size` returns a size only once the magic byte is present.
+                let magic = batch_bytes[RecordBatch::MAGIC_OFFSET] as i8;
+                if magic < RecordBatch::MAGIC_VALUE_V2 {
+                    return Err(invalid_batch_error(
+                        &self.partition,
+                        raw_base_offset(batch_bytes),
+                        unsupported_magic_error(magic).message(),
+                    ));
                 }
 
-                // CRC validation per Java's maybeEnsureValid(batch).
+                // D2 (APPSEC-7665): the size half of Java's `ensureValid()`
+                // (`DefaultRecordBatch.java:152-154`), reported the way
+                // `maybeEnsureValid` reports it (`CompletedFetch.java:153-162`) but run
+                // unconditionally, where Java runs it only under `check.crcs`. Without
+                // `check.crcs` Java reads the header of a batch shorter than 61 bytes
+                // anyway and its absolute reads throw `IndexOutOfBoundsException`; in
+                // Rust those reads would be slice panics, which inside the C and Python
+                // bindings abort the process. The view is only built over a batch that passes, so no
+                // header accessor below can read past it.
+                let batch = DefaultRecordBatchRef::new(batch_bytes)
+                    .map_err(|e| invalid_batch_error(&self.partition, raw_base_offset(batch_bytes), e.message()))?;
+
+                // The checksum half of Java's `maybeEnsureValid(batch)`, still gated
+                // on `check.crcs` as in Java.
                 if config.check_crcs
                     && batch.magic() >= RecordVersion::V2.value()
                     && let Err(e) = batch.ensure_valid()
                 {
-                    return Err(Error::kafka(format!(
-                        "Record batch for partition {} at offset {} is invalid, cause: {}",
-                        self.partition,
-                        batch.base_offset(),
-                        e
-                    )));
+                    return Err(invalid_batch_error(&self.partition, batch.base_offset(), e.message()));
                 }
 
                 let meta = BatchMetadata {
@@ -1162,12 +1206,9 @@ impl CompletedFetch {
                 let source = if batch.try_is_compressed()? {
                     // Decompress once per batch into an owned buffer; records
                     // then borrow from it.
-                    let decompressed = batch.decompress_records().map_err(|e| {
-                        Error::kafka(format!(
-                            "Record batch for partition {} at offset {} is invalid, cause: {}",
-                            self.partition, meta.base_offset, e
-                        ))
-                    })?;
+                    let decompressed = batch
+                        .decompress_records()
+                        .map_err(|e| invalid_batch_error(&self.partition, meta.base_offset, e.message()))?;
                     // `Bytes::from(Vec<u8>)` adopts the decompressed allocation
                     // without copying; records then slice_ref from it (§27).
                     RecordSource::Owned(bytes::Bytes::from(decompressed))
@@ -1182,8 +1223,8 @@ impl CompletedFetch {
                 };
 
                 let records_count = batch.records_count();
-                // Advance the cursor's next-batch pointer by this batch's size
-                // (O(1)) so both the skip path and the load path move forward.
+                // Advance the cursor's next-batch pointer by this batch's validated
+                // size (O(1)) so both the skip path and the load path move forward.
                 cursor.next_batch_start = Some(batch_start + batch_size);
                 (meta, source, records_count)
             };
@@ -1199,7 +1240,7 @@ impl CompletedFetch {
                 // aborted. The order is load-bearing — a producer that aborts and
                 // then commits reuses the same producer id, so without the clear
                 // every later transaction from it would be skipped too.
-                if self.contains_abort_marker(&batch_meta, &source)? {
+                if self.contains_abort_marker(&batch_meta, records_count, &source)? {
                     self.aborted_producer_ids.remove(&batch_meta.producer_id);
                 } else if batch_meta.is_transactional && self.aborted_producer_ids.contains(&batch_meta.producer_id) {
                     // Java's `isBatchAborted`, which gates on `isTransactional()` —
@@ -1213,6 +1254,19 @@ impl CompletedFetch {
                     // here — we never decode this aborted batch's records.
                     continue;
                 }
+            }
+
+            // D3 (APPSEC-7665): Java's `RecordIterator` constructor rejects a
+            // negative record count (`DefaultRecordBatch.java:584-587`) when
+            // `currentBatch.streamingIterator(...)` builds it (`CompletedFetch.java:221`),
+            // unwrapped and after the READ_COMMITTED skip — so an aborted batch is
+            // dropped without its count being looked at. Installing it instead would
+            // treat the batch as empty.
+            if records_count < 0 {
+                return Err(Error::InvalidRecord(invalid_record_count_error(
+                    records_count,
+                    batch_meta.magic,
+                )));
             }
 
             // Install the batch as the current one. We use the batch
@@ -1316,6 +1370,31 @@ fn wrap_deserialization_error(
     ))
 }
 
+/// Java's `maybeEnsureValid(batch)` wrapper (`CompletedFetch.java:153-162`):
+/// `new KafkaException("Record batch for partition " + partition + " at offset " +
+/// batch.baseOffset() + " is invalid, cause: " + e.getMessage())`, a bare
+/// `KafkaException` carrying the cause's message and no cause.
+///
+/// Every per-batch check in [`CompletedFetch::load_next_batch`] reports through
+/// it: the magic (D7), the minimum size (D2), the checksum, and decompression.
+fn invalid_batch_error(partition: &TopicPartition, base_offset: i64, cause: &str) -> Error {
+    Error::kafka(format!(
+        "Record batch for partition {partition} at offset {base_offset} is invalid, cause: {cause}"
+    ))
+}
+
+/// The `BaseOffset` field — a batch's first eight bytes — read before its
+/// [`DefaultRecordBatchRef`] exists, so a batch refused by the magic or the size
+/// check is still reported at its offset, as Java's `batch.baseOffset()` reports
+/// it. The slice always has them: it passed `next_batch_size`, so it is at least
+/// `LOG_OVERHEAD + 14` bytes long, and the `-1` fallback would only mark that
+/// invariant broken in the message rather than panic.
+fn raw_base_offset(batch_bytes: &[u8]) -> i64 {
+    batch_bytes
+        .first_chunk::<{ RecordBatch::BASE_OFFSET_LENGTH }>()
+        .map_or(-1, |base_offset| i64::from_be_bytes(*base_offset))
+}
+
 fn maybe_leader_epoch(epoch: i32) -> Option<i32> {
     if epoch == NO_PARTITION_LEADER_EPOCH {
         None
@@ -1351,6 +1430,7 @@ fn build_aborted_transactions(partition_data: &PartitionData) -> BinaryHeap<Abor
 mod tests {
     use super::*;
     use crate::common::compress::Compression;
+    use crate::common::record::internal::abstract_records::LOG_OVERHEAD;
     use crate::common::record::internal::{MemoryRecords, SimpleRecord};
     use crate::common::serialization::Deserializer;
     use crate::consumer::internals::auto_offset_reset_strategy::AutoOffsetResetStrategy;
@@ -2467,5 +2547,315 @@ mod tests {
             .unwrap();
         assert_eq!(3, records.len());
         assert_eq!(3, value_calls.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    // ── APPSEC-7665 / NONJAVACLI-4520: every batch header is validated ──────
+    //
+    // Java walks a fetch with `ByteBufferLogInputStream.nextBatch()`, which runs
+    // `nextBatchSize()` on every batch and hands each out limited to its declared
+    // size. The cursor used to check only the first batch (in
+    // `FetchCollector::initialize`) and trust every later header, so these tests
+    // corrupt the SECOND batch of a payload whose first batch is intact.
+
+    const SEEK_PAST_MESSAGE: &str = "Received an error when fetching the next record from test-0. \
+                                     If needed, please seek past the record to continue consumption.";
+
+    /// Two uncompressed batches of two records each — offsets 0-1, then 2-3 —
+    /// and the position of the second.
+    fn two_batches() -> (Vec<u8>, usize) {
+        let buf = new_multi_batch_records(0, 2, 2, Compression::none());
+        let length = RecordBatch::LENGTH_OFFSET;
+        let first_batch_size = LOG_OVERHEAD + i32::from_be_bytes(buf[length..length + 4].try_into().unwrap()) as usize;
+        (buf, first_batch_size)
+    }
+
+    fn put_i32(buf: &mut [u8], at: usize, value: i32) {
+        buf[at..at + 4].copy_from_slice(&value.to_be_bytes());
+    }
+
+    /// Recomputes a batch's CRC over `ATTRIBUTES_OFFSET..` its end, so a
+    /// corruption the CRC covers can be driven under `check.crcs=true`.
+    fn recompute_crc(batch: &mut [u8]) {
+        let crc = crc32c::crc32c(&batch[RecordBatch::ATTRIBUTES_OFFSET..]);
+        batch[RecordBatch::CRC_OFFSET..RecordBatch::CRC_OFFSET + 4].copy_from_slice(&crc.to_be_bytes());
+    }
+
+    /// Drives `fetch_records` over a payload whose first batch is intact and
+    /// returns the error its second batch raises.
+    ///
+    /// The first call returns batch 1's records: Java's `catch (KafkaException e)`
+    /// caches a fault and returns the records already in hand
+    /// (`CompletedFetch.java:294-300`). The second call raises the cached fault
+    /// wrapped in the "seek past the record" message (`:256-259`).
+    fn fault_after_first_batch(buf: Vec<u8>, check_crcs: bool) -> Error {
+        let mut cf = new_completed_fetch(0, buf);
+        let config = make_fetch_config(IsolationLevel::ReadUncommitted, check_crcs);
+        let first = cf
+            .fetch_records::<String, String>(&config, &StringDeserializer, &StringDeserializer, 10)
+            .expect("the intact first batch's records are returned");
+        assert_eq!(vec![0, 1], first.iter().map(ConsumerRecord::offset).collect::<Vec<_>>());
+        let err = cf
+            .fetch_records::<String, String>(&config, &StringDeserializer, &StringDeserializer, 10)
+            .expect_err("the second batch's fault must surface");
+        assert_eq!(SEEK_PAST_MESSAGE, err.message());
+        assert!(err.is_kafka_error(), "{err:?}");
+        assert!(
+            !crate::common::requests::request_utils::is_fatal_error(&err),
+            "a corrupt batch is recoverable: {err:?}"
+        );
+        err
+    }
+
+    /// The fault `fetch_records` wrapped.
+    fn cause(err: &Error) -> &Error {
+        err.source().expect("the fault is the wrapper's cause")
+    }
+
+    /// A negative length was read as `i32 as usize` and wrapped; the stream
+    /// compares it signed (`ByteBufferLogInputStream.java:72-74`).
+    #[test]
+    fn test_negative_length_in_a_later_batch_is_corrupt() {
+        let (mut buf, second) = two_batches();
+        put_i32(&mut buf, second + RecordBatch::LENGTH_OFFSET, -5);
+        let err = fault_after_first_batch(buf, false);
+        let cause = cause(&err);
+        // Java's `CorruptRecordException`, unwrapped by `maybeEnsureValid`: it
+        // escapes `batches.hasNext()` before a batch exists.
+        assert!(matches!(cause, Error::CorruptRecord(_)), "{cause:?}");
+        assert_eq!(Errors::CorruptMessage, cause.error());
+        assert_eq!("Record size -5 is less than the minimum record overhead (14)", cause.message());
+    }
+
+    /// `ByteBufferLogInputStreamTest.iteratorRaisesOnTooSmallRecords`, through the cursor.
+    #[test]
+    fn test_too_small_length_in_a_later_batch_is_corrupt() {
+        let (mut buf, second) = two_batches();
+        put_i32(&mut buf, second + RecordBatch::LENGTH_OFFSET, 9);
+        let err = fault_after_first_batch(buf, false);
+        let cause = cause(&err);
+        assert_eq!(Errors::CorruptMessage, cause.error());
+        assert_eq!("Record size 9 is less than the minimum record overhead (14)", cause.message());
+    }
+
+    /// `ByteBufferLogInputStreamTest.iteratorRaisesOnInvalidMagic`, through the cursor.
+    #[test]
+    fn test_invalid_magic_in_a_later_batch_is_corrupt() {
+        let (mut buf, second) = two_batches();
+        buf[second + RecordBatch::MAGIC_OFFSET] = 37;
+        let err = fault_after_first_batch(buf, false);
+        let cause = cause(&err);
+        assert_eq!(Errors::CorruptMessage, cause.error());
+        assert_eq!("Invalid magic found in record: 37", cause.message());
+    }
+
+    /// D2: a length that passes `next_batch_size` but makes a batch shorter than
+    /// the 61-byte v2 header fails with Java's `ensureValid()` text under both
+    /// `check.crcs` settings. Before the fix `check.crcs=false` read the header
+    /// past the batch — into the next batch or off the end of the buffer.
+    #[test]
+    fn test_batch_below_the_header_size_is_invalid_regardless_of_check_crcs() {
+        for check_crcs in [false, true] {
+            let (mut buf, second) = two_batches();
+            // 30 + LOG_OVERHEAD = 42 bytes.
+            put_i32(&mut buf, second + RecordBatch::LENGTH_OFFSET, 30);
+            let err = fault_after_first_batch(buf, check_crcs);
+            let cause = cause(&err);
+            assert_eq!(
+                "Record batch for partition test-0 at offset 2 is invalid, cause: Record batch is corrupt \
+                 (the size 42 is smaller than the minimum allowed overhead 61)",
+                cause.message(),
+                "check.crcs={check_crcs}"
+            );
+            // Java's `maybeEnsureValid` throws a bare `KafkaException`.
+            assert!(matches!(cause, Error::KafkaError(_)), "{cause:?}");
+        }
+    }
+
+    /// D2 for the only batch: nothing is decoded first, so the first call fails.
+    #[test]
+    fn test_first_batch_below_the_header_size_is_invalid() {
+        let mut batch = vec![0u8; 42];
+        batch[..8].copy_from_slice(&7_i64.to_be_bytes());
+        put_i32(&mut batch, RecordBatch::LENGTH_OFFSET, 30);
+        batch[RecordBatch::MAGIC_OFFSET] = RecordBatch::MAGIC_VALUE_V2 as u8;
+        let mut cf = new_completed_fetch(7, batch);
+        let config = make_fetch_config(IsolationLevel::ReadUncommitted, false);
+        let err = cf
+            .fetch_records::<String, String>(&config, &StringDeserializer, &StringDeserializer, 10)
+            .expect_err("a 42-byte batch has no v2 header");
+        assert_eq!(SEEK_PAST_MESSAGE, err.message());
+        assert_eq!(
+            "Record batch for partition test-0 at offset 7 is invalid, cause: Record batch is corrupt \
+             (the size 42 is smaller than the minimum allowed overhead 61)",
+            cause(&err).message()
+        );
+    }
+
+    /// D7: a v0 or v1 batch is refused by its magic, under both `check.crcs`
+    /// settings, instead of being read as a v2 header.
+    #[test]
+    fn test_legacy_magic_in_a_later_batch_is_refused() {
+        for magic in [RecordBatch::MAGIC_VALUE_V0, RecordBatch::MAGIC_VALUE_V1] {
+            for check_crcs in [false, true] {
+                let (mut buf, second) = two_batches();
+                buf[second + RecordBatch::MAGIC_OFFSET] = magic as u8;
+                let err = fault_after_first_batch(buf, check_crcs);
+                assert_eq!(
+                    format!(
+                        "Record batch for partition test-0 at offset 2 is invalid, cause: Record batch magic v{magic} \
+                         is not supported: this client reads only magic v2 record batches (message formats v0 and v1 \
+                         were removed in Kafka 4.0 by KIP-724)"
+                    ),
+                    cause(&err).message(),
+                    "magic={magic} check.crcs={check_crcs}"
+                );
+            }
+        }
+    }
+
+    /// D7 wins over D2: a legacy batch small enough to fail the v2 size check
+    /// is reported by its magic, not as a corrupt v2 batch.
+    #[test]
+    fn test_short_legacy_batch_is_refused_by_its_magic() {
+        let (buf, second) = two_batches();
+        let mut buf = buf[..second].to_vec();
+        // A 34-byte v1 message: LOG_OVERHEAD plus a 22-byte record.
+        let mut legacy = vec![0u8; 34];
+        legacy[..8].copy_from_slice(&2_i64.to_be_bytes());
+        put_i32(&mut legacy, RecordBatch::LENGTH_OFFSET, 22);
+        legacy[RecordBatch::MAGIC_OFFSET] = RecordBatch::MAGIC_VALUE_V1 as u8;
+        buf.extend_from_slice(&legacy);
+        let err = fault_after_first_batch(buf, false);
+        assert_eq!(
+            "Record batch for partition test-0 at offset 2 is invalid, cause: Record batch magic v1 is not \
+             supported: this client reads only magic v2 record batches (message formats v0 and v1 were removed in \
+             Kafka 4.0 by KIP-724)",
+            cause(&err).message()
+        );
+    }
+
+    /// D3: a negative record count is rejected before the batch is installed,
+    /// with Java's `RecordIterator` text (`DefaultRecordBatch.java:584-587`),
+    /// unwrapped. It used to be installed as an empty batch.
+    #[test]
+    fn test_negative_record_count_in_a_later_batch_is_invalid() {
+        for check_crcs in [false, true] {
+            let (mut buf, second) = two_batches();
+            put_i32(&mut buf, second + RecordBatch::RECORDS_COUNT_OFFSET, -1);
+            if check_crcs {
+                recompute_crc(&mut buf[second..]);
+            }
+            let err = fault_after_first_batch(buf, check_crcs);
+            let cause = cause(&err);
+            assert!(matches!(cause, Error::InvalidRecord(_)), "{cause:?}");
+            assert_eq!("Found invalid record count -1 in magic v2 batch", cause.message());
+        }
+    }
+
+    /// D3 in Java's order: an aborted batch is skipped under READ_COMMITTED
+    /// before its iterator — and so its count check — is ever built
+    /// (`CompletedFetch.java:212-221`), so a negative count there is not an error.
+    #[test]
+    fn test_negative_record_count_in_an_aborted_batch_is_skipped() {
+        let aborted_pid = 42;
+        let mut buf = batch_full(0, 2, RecordBatch::NO_PRODUCER_ID, false, false);
+        let aborted_start = buf.len();
+        buf.extend_from_slice(&batch_full(2, 2, aborted_pid, true, false));
+        put_i32(&mut buf, aborted_start + RecordBatch::RECORDS_COUNT_OFFSET, -1);
+        recompute_crc(&mut buf[aborted_start..]);
+        buf.extend_from_slice(&batch_full(4, 2, RecordBatch::NO_PRODUCER_ID, false, false));
+
+        let mut cf = CompletedFetch::new_full(
+            make_subscriptions(),
+            Arc::new(BufferSupplier::create()),
+            tp("test", 0),
+            partition_data_with_aborted_txn(buf, aborted_pid, 2),
+            test_aggregator(),
+            0,
+        );
+        let config = make_fetch_config(IsolationLevel::ReadCommitted, true);
+        let records = cf
+            .fetch_records::<String, String>(&config, &StringDeserializer, &StringDeserializer, 10)
+            .expect("the aborted batch is skipped, not parsed");
+        assert_eq!(vec![0, 1, 4, 5], records.iter().map(ConsumerRecord::offset).collect::<Vec<_>>());
+    }
+
+    /// D3 on the control-batch path: Java's `containsAbortMarker` builds the
+    /// batch's iterator (`CompletedFetch.java:376-386`), so a negative count
+    /// fails there under READ_COMMITTED.
+    #[test]
+    fn test_negative_record_count_in_a_control_batch_is_invalid() {
+        let mut buf = batch_full(0, 2, RecordBatch::NO_PRODUCER_ID, false, false);
+        let control_start = buf.len();
+        buf.extend_from_slice(&control_batch(2, 1, 1000));
+        put_i32(&mut buf, control_start + RecordBatch::RECORDS_COUNT_OFFSET, -1);
+        recompute_crc(&mut buf[control_start..]);
+
+        let mut cf = new_completed_fetch(0, buf);
+        let config = make_fetch_config(IsolationLevel::ReadCommitted, true);
+        let first = cf
+            .fetch_records::<String, String>(&config, &StringDeserializer, &StringDeserializer, 10)
+            .expect("the first batch's records are returned");
+        assert_eq!(2, first.len());
+        let err = cf
+            .fetch_records::<String, String>(&config, &StringDeserializer, &StringDeserializer, 10)
+            .expect_err("the control batch's count is invalid");
+        assert_eq!(SEEK_PAST_MESSAGE, err.message());
+        let cause = cause(&err);
+        assert!(matches!(cause, Error::InvalidRecord(_)), "{cause:?}");
+        assert_eq!("Found invalid record count -1 in magic v2 batch", cause.message());
+    }
+
+    /// A header declaring more bytes than remain is no batch — Java's
+    /// `remaining < batchSize` (`ByteBufferLogInputStream.java:44-46`) — so
+    /// iteration ends without an error, at the end of the last complete batch.
+    #[test]
+    fn test_batch_declaring_more_bytes_than_remain_ends_iteration() {
+        let (mut buf, second) = two_batches();
+        let declared = (buf.len() - second - LOG_OVERHEAD) as i32 + 100;
+        put_i32(&mut buf, second + RecordBatch::LENGTH_OFFSET, declared);
+        let mut cf = new_completed_fetch(0, buf);
+        let config = make_fetch_config(IsolationLevel::ReadUncommitted, true);
+        let first = cf
+            .fetch_records::<String, String>(&config, &StringDeserializer, &StringDeserializer, 10)
+            .expect("a truncated batch is no batch, not an error");
+        assert_eq!(vec![0, 1], first.iter().map(ConsumerRecord::offset).collect::<Vec<_>>());
+        assert!(cf.is_consumed());
+        assert_eq!(2, cf.next_fetch_offset(), "the next fetch starts at the truncated batch");
+        let rest = cf
+            .fetch_records::<String, String>(&config, &StringDeserializer, &StringDeserializer, 10)
+            .unwrap();
+        assert!(rest.is_empty());
+    }
+
+    /// A trailing fragment of every size from `LOG_OVERHEAD` to one byte short of
+    /// a v2 header, whose length field declares exactly the fragment, fails with
+    /// the stream's or the D2 error — never a panic — under `check.crcs=false`,
+    /// the setting that used to let the header reads run off the end.
+    #[test]
+    fn test_trailing_fragment_below_the_header_size_errors_without_panicking() {
+        for fragment_len in LOG_OVERHEAD..RecordBatch::RECORD_BATCH_OVERHEAD {
+            let (buf, second) = two_batches();
+            let mut buf = buf[..second].to_vec();
+            let mut fragment = vec![0u8; fragment_len];
+            fragment[..8].copy_from_slice(&2_i64.to_be_bytes());
+            let length = (fragment_len - LOG_OVERHEAD) as i32;
+            put_i32(&mut fragment, RecordBatch::LENGTH_OFFSET, length);
+            if fragment_len > RecordBatch::MAGIC_OFFSET {
+                fragment[RecordBatch::MAGIC_OFFSET] = RecordBatch::MAGIC_VALUE_V2 as u8;
+            }
+            buf.extend_from_slice(&fragment);
+
+            let err = fault_after_first_batch(buf, false);
+            let expected = if length < 14 {
+                format!("Record size {length} is less than the minimum record overhead (14)")
+            } else {
+                format!(
+                    "Record batch for partition test-0 at offset 2 is invalid, cause: Record batch is corrupt \
+                     (the size {fragment_len} is smaller than the minimum allowed overhead 61)"
+                )
+            };
+            assert_eq!(expected, cause(&err).message(), "fragment of {fragment_len} bytes");
+        }
     }
 }

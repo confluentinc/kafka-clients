@@ -70,7 +70,13 @@ pub struct DefaultRecordBatch {
 impl DefaultRecordBatch {
     /// Create a new `DefaultRecordBatch` wrapping the given buffer.
     ///
-    /// The buffer must contain a complete record batch starting at index 0.
+    /// The buffer must contain exactly one complete v2 record batch starting at
+    /// index 0 — at least [`RecordBatch::RECORD_BATCH_OVERHEAD`] bytes, which
+    /// [`as_ref`](Self::as_ref)'s header accessors rely on. The only production
+    /// source is [`BatchIterator`](crate::common::record::internal::memory_records::BatchIterator),
+    /// which copies batches that
+    /// [`ByteBufferLogInputStream`](crate::common::record::internal::ByteBufferLogInputStream)
+    /// has already validated; the rest are this client's own builders.
     pub fn new(buffer: Vec<u8>) -> Self {
         Self { buffer }
     }
@@ -87,6 +93,10 @@ impl DefaultRecordBatch {
     /// lets the consumer receive path parse a batch header straight out of a
     /// `&[u8]` slice without a per-batch `to_vec` (see `consumer-threading.md`
     /// §27).
+    ///
+    /// Built directly rather than through the checked
+    /// [`DefaultRecordBatchRef::new`]: an owned batch's buffer already satisfies
+    /// the view's invariant (see [`new`](Self::new)).
     pub fn as_ref(&self) -> DefaultRecordBatchRef<'_> {
         DefaultRecordBatchRef { buffer: &self.buffer }
     }
@@ -333,11 +343,7 @@ impl DefaultRecordBatch {
         }
 
         if num_records < 0 {
-            return Err(InvalidRecordError::new(format!(
-                "Found invalid record count {} in magic v{} batch",
-                num_records,
-                self.magic()
-            )));
+            return Err(invalid_record_count_error(num_records, self.magic()));
         }
 
         let log_append_time = if self.timestamp_type() == TimestampType::LogAppendTime {
@@ -652,20 +658,43 @@ impl DefaultRecordBatch {
 /// [`DefaultRecordBatch`]'s own accessors delegate here to avoid duplicating
 /// the wire-format offset constants.
 ///
-/// The slice must begin at the batch's `BASE_OFFSET` and extend at least to the
-/// end of the batch (`size_in_bytes()` bytes); the cursor that constructs it
-/// already knows the batch boundary from the length field.
+/// The slice holds exactly one batch: it begins at the batch's `BASE_OFFSET`
+/// and ends at the batch's last byte, the shape of Java's
+/// `batchSlice.limit(batchSize)` (`ByteBufferLogInputStream.java:51`). The CRC
+/// and the records section are bounded by the slice, as Java bounds them by
+/// `buffer.limit()` (`DefaultRecordBatch.java:273-277`, `:399-401`), so they
+/// never reach into a following batch. The slice is also at least
+/// [`RecordBatch::RECORD_BATCH_OVERHEAD`] bytes long, which
+/// [`new`](Self::new) checks, so every fixed-offset header accessor is in
+/// bounds. [`ByteBufferLogInputStream`](crate::common::record::internal::ByteBufferLogInputStream)
+/// is what sizes the slice from a header it has validated.
 #[derive(Clone, Copy, Debug)]
 pub struct DefaultRecordBatchRef<'a> {
     buffer: &'a [u8],
 }
 
 impl<'a> DefaultRecordBatchRef<'a> {
-    /// Wraps a slice that begins at a batch header. The slice may extend past
-    /// the end of this batch (e.g. into following batches); size-bounded reads
-    /// use [`Self::size_in_bytes`].
-    pub fn new(buffer: &'a [u8]) -> Self {
-        Self { buffer }
+    /// Wraps a slice holding exactly one v2 record batch.
+    ///
+    /// # Errors
+    ///
+    /// Returns Java's `ensureValid()` size-check error
+    /// (`DefaultRecordBatch.java:152-154`) when the slice is shorter than
+    /// [`RecordBatch::RECORD_BATCH_OVERHEAD`]. For a slice holding exactly one
+    /// batch its length is the batch's size, so the message is the one Java
+    /// prints. Java builds such a batch anyway and fails at the first header
+    /// read past its end (an `IndexOutOfBoundsException`); in Rust that read
+    /// would be a slice panic, so the view is refused instead.
+    pub fn new(buffer: &'a [u8]) -> Result<Self, InvalidRecordError> {
+        if buffer.len() < RecordBatch::RECORD_BATCH_OVERHEAD {
+            return Err(batch_size_below_overhead_error(buffer.len() as i64));
+        }
+        Ok(Self { buffer })
+    }
+
+    /// The batch's bytes: exactly one batch, from its `BASE_OFFSET` to its last byte.
+    pub fn buffer(&self) -> &'a [u8] {
+        self.buffer
     }
 
     /// Returns the magic byte of this batch.
@@ -759,8 +788,24 @@ impl<'a> DefaultRecordBatchRef<'a> {
     }
 
     /// Returns the total size of this batch in bytes (including LOG_OVERHEAD).
+    ///
+    /// Java's `sizeInBytes()` (`DefaultRecordBatch.java:222-225`) reads the
+    /// header's length field. A view sized by `ByteBufferLogInputStream` carries
+    /// a length of at least 49 (a 61-byte header less `LOG_OVERHEAD`), and an
+    /// owned [`DefaultRecordBatch`] holds a buffer this client built or already
+    /// validated, so the field is never negative. The conversion is checked
+    /// anyway: a corrupt length reads as 0 — which every size check treats as too
+    /// small — instead of wrapping to a size near `usize::MAX`.
     pub fn size_in_bytes(&self) -> usize {
-        LOG_OVERHEAD + read_i32(self.buffer, RecordBatch::LENGTH_OFFSET) as usize
+        usize::try_from(self.declared_size_in_bytes()).unwrap_or(0)
+    }
+
+    /// Java's `sizeInBytes()` arithmetic (`LOG_OVERHEAD + length`) widened to
+    /// `i64`, so a corrupt length can neither overflow nor wrap.
+    /// [`ensure_valid`](Self::ensure_valid) and [`is_valid`](Self::is_valid)
+    /// compare this signed value, as Java compares its `int`.
+    fn declared_size_in_bytes(&self) -> i64 {
+        LOG_OVERHEAD as i64 + i64::from(read_i32(self.buffer, RecordBatch::LENGTH_OFFSET))
     }
 
     /// Returns the number of records declared in the batch header.
@@ -789,25 +834,26 @@ impl<'a> DefaultRecordBatchRef<'a> {
     }
 
     /// Compute the CRC32C over the attributes through the end of the batch.
+    ///
+    /// Java's `computeChecksum()` covers `ATTRIBUTES_OFFSET` to `buffer.limit()`
+    /// (`DefaultRecordBatch.java:399-401`); the slice ends where the batch does.
     fn compute_checksum(&self) -> u32 {
-        crc32c::crc32c(&self.buffer[RecordBatch::ATTRIBUTES_OFFSET..self.size_in_bytes()])
+        crc32c::crc32c(&self.buffer[RecordBatch::ATTRIBUTES_OFFSET..])
     }
 
     /// Returns whether the CRC matches the computed value.
     pub fn is_valid(&self) -> bool {
-        self.size_in_bytes() >= RecordBatch::RECORD_BATCH_OVERHEAD && self.checksum() == self.compute_checksum()
+        self.declared_size_in_bytes() >= RecordBatch::RECORD_BATCH_OVERHEAD as i64
+            && self.checksum() == self.compute_checksum()
     }
 
     /// Validate the record batch, returning an error if corrupt.
     ///
     /// Corresponds to Java's `ensureValid()`.
     pub fn ensure_valid(&self) -> Result<(), InvalidRecordError> {
-        if self.size_in_bytes() < RecordBatch::RECORD_BATCH_OVERHEAD {
-            return Err(InvalidRecordError::new(format!(
-                "Record batch is corrupt (the size {} is smaller than the minimum allowed overhead {})",
-                self.size_in_bytes(),
-                RecordBatch::RECORD_BATCH_OVERHEAD
-            )));
+        let size_in_bytes = self.declared_size_in_bytes();
+        if size_in_bytes < RecordBatch::RECORD_BATCH_OVERHEAD as i64 {
+            return Err(batch_size_below_overhead_error(size_in_bytes));
         }
 
         if !self.is_valid() {
@@ -837,10 +883,13 @@ impl<'a> DefaultRecordBatchRef<'a> {
     }
 
     /// The raw, possibly-compressed records section of this batch (the bytes
-    /// after the batch header), borrowed from the underlying buffer and bounded
-    /// to this batch's declared size.
+    /// after the batch header), borrowed from the underlying buffer.
+    ///
+    /// Java positions a duplicate of the batch buffer at `RECORDS_OFFSET` and
+    /// reads to its limit (`DefaultRecordBatch.java:273-277`, `:299-301`); the
+    /// slice ends where the batch does.
     pub fn records_section(&self) -> &'a [u8] {
-        &self.buffer[RecordBatch::RECORDS_OFFSET..self.size_in_bytes()]
+        &self.buffer[RecordBatch::RECORDS_OFFSET..]
     }
 
     /// Decompress this batch's records section into a fresh owned buffer.
@@ -951,6 +1000,26 @@ pub fn decrement_sequence(sequence: i32, decrement: i32) -> i32 {
     } else {
         sequence - decrement
     }
+}
+
+/// Java's `ensureValid()` size-check error (`DefaultRecordBatch.java:152-154`),
+/// for a batch whose size — `LOG_OVERHEAD` plus its length field — is below
+/// the v2 header.
+fn batch_size_below_overhead_error(size_in_bytes: i64) -> InvalidRecordError {
+    InvalidRecordError::new(format!(
+        "Record batch is corrupt (the size {size_in_bytes} is smaller than the minimum allowed overhead {})",
+        RecordBatch::RECORD_BATCH_OVERHEAD
+    ))
+}
+
+/// The error Java's `RecordIterator` constructor throws for a negative record
+/// count (`DefaultRecordBatch.java:584-587`), before a single record is read.
+///
+/// Shared by [`DefaultRecordBatch::iter_records`] and the consumer's receive
+/// path, which iterates a batch through its own cursor instead of a
+/// `RecordIterator` but must reject the count at the same point.
+pub(crate) fn invalid_record_count_error(num_records: i32, magic: i8) -> InvalidRecordError {
+    InvalidRecordError::new(format!("Found invalid record count {num_records} in magic v{magic} batch"))
 }
 
 // -- Big-endian read/write helpers --
