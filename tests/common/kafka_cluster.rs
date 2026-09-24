@@ -19,13 +19,61 @@
 //! SSL, SASL_PLAINTEXT, and SASL_SSL.
 //!
 //! Created by [`super::cluster_pool`], shared across tests with the same
-//! [`super::cluster_config::ClusterConfig`].
+//! [`super::cluster_config::ClusterConfig`] — or, for a
+//! [`ClusterConfig::dedicated`] config, started privately by
+//! [`super::test_context::TestContext`] and removed when the test ends.
+//!
+//! # Topologies and broker lifecycle (Java `ClusterInstance`)
+//!
+//! [`KafkaCluster`] plays the role of Java's
+//! `org.apache.kafka.common.test.ClusterInstance`
+//! (`test-common-runtime/.../ClusterInstance.java`), with one container per
+//! KRaft node instead of one in-JVM `BrokerServer`/`ControllerServer`:
+//!
+//! | Java `ClusterInstance`      | Rust `KafkaCluster`                  |
+//! |-----------------------------|--------------------------------------|
+//! | `type()`                    | [`KafkaCluster::cluster_type`]       |
+//! | `brokerIds()`               | [`KafkaCluster::broker_ids`]         |
+//! | `aliveBrokers().keySet()`   | [`KafkaCluster::alive_broker_ids`]   |
+//! | `controllerIds()`           | [`KafkaCluster::controller_ids`]     |
+//! | `brokerBoundPorts()`        | [`KafkaCluster::broker_bound_ports`] |
+//! | `shutdownBroker(id)`        | [`KafkaCluster::shutdown_broker`]    |
+//! | `startBroker(id)`           | [`KafkaCluster::start_broker`]       |
+//! | `waitForReadyBrokers()`     | [`KafkaCluster::wait_for_ready_brokers`] |
+//!
+//! [`Type::CoKraft`] (Java `CO_KRAFT`, the pooled default) runs every node as
+//! `broker,controller`. [`Type::Kraft`] (Java `KRAFT`, Java's default for
+//! `@ClusterTest`) runs `controllers` controller-only containers plus
+//! broker-only containers, with Java's `TestKitNodes` ids (brokers from 0,
+//! controllers from 3000), so stopping brokers never touches the quorum.
+//!
+//! **Restart fidelity.** `shutdown_broker` / `start_broker` `docker stop` and
+//! `docker start` the *same* held `ContainerAsync`, so a restarted broker keeps:
+//!   - its node id and `advertised.listeners` (same environment);
+//!   - its host ports — each client listener is pinned with
+//!     `with_mapped_port` to a pre-reserved host port, which Docker re-binds on
+//!     start, so bootstrap strings handed out earlier stay valid;
+//!   - its data — the log directory lives in the container's writable layer,
+//!     which survives a stop. The image's start-up script re-runs the storage
+//!     format on every start but tolerates "already formatted", and
+//!     [`CLUSTER_ID`] is fixed, so nothing is reformatted.
+//!
+//! **Deviations from Java.**
+//!   - Lifecycle requires a [`ClusterConfig::dedicated`] [`Type::Kraft`]
+//!     cluster. Java may stop the broker half of a `CO_KRAFT` node; a combined
+//!     container cannot stop its broker without its controller. Pooled clusters
+//!     are a Rust-only optimization and must never carry a stopped broker.
+//!   - `start_broker` returns once the broker answers `DescribeCluster` listing
+//!     itself (Java's `startup()` returns once registered and unfenced), and
+//!     `wait_for_ready_brokers` checks the *alive* brokers from each alive
+//!     broker's view rather than reading metadata caches in-process.
+//!   - `CO_KRAFT` node ids stay 1-based (pre-existing; Java uses 0-based).
 
 use std::borrow::Cow;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt::Write as _;
 
-use super::cluster_config::ClusterConfig;
+use super::cluster_config::{ClusterConfig, Type};
 use super::test_certs;
 
 use testcontainers::core::{ContainerPort, WaitFor};
@@ -108,6 +156,85 @@ impl BrokerPorts {
             sasl_plaintext: find_available_port(),
             sasl_ssl: find_available_port(),
         }
+    }
+}
+
+/// `process.roles` of one KRaft node.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ProcessRoles {
+    /// `broker,controller` — every node of a [`Type::CoKraft`] cluster.
+    Combined,
+    /// `broker` — a broker node of a [`Type::Kraft`] cluster.
+    Broker,
+    /// `controller` — a controller node of a [`Type::Kraft`] cluster.
+    Controller,
+}
+
+impl ProcessRoles {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Combined => "broker,controller",
+            Self::Broker => "broker",
+            Self::Controller => "controller",
+        }
+    }
+
+    fn is_broker(self) -> bool {
+        self != Self::Controller
+    }
+
+    fn is_controller(self) -> bool {
+        self != Self::Broker
+    }
+}
+
+/// Everything needed to create one node's container.
+struct NodeSpec {
+    node_id: i32,
+    roles: ProcessRoles,
+    container_name: String,
+    /// Host ports for the client listeners; `None` for a controller-only node.
+    ports: Option<BrokerPorts>,
+}
+
+/// Java `TestKitDefaults.BROKER_ID_OFFSET`: first broker id of a [`Type::Kraft`] cluster.
+const BROKER_ID_OFFSET: i32 = 0;
+/// Java `TestKitDefaults.CONTROLLER_ID_OFFSET`: first controller id of a [`Type::Kraft`] cluster.
+const CONTROLLER_ID_OFFSET: i32 = 3000;
+
+/// The nodes of a cluster of `config`'s shape, brokers first.
+///
+/// [`Type::CoKraft`] keeps the harness's historical 1-based combined ids;
+/// [`Type::Kraft`] numbers like Java's `TestKitNodes` (brokers from
+/// [`BROKER_ID_OFFSET`], controllers from [`CONTROLLER_ID_OFFSET`]).
+fn node_specs(config: &ClusterConfig, suffix: &str) -> Vec<NodeSpec> {
+    let brokers = i32::from(config.brokers);
+    match config.cluster_type {
+        Type::CoKraft => (1..=brokers)
+            .map(|id| NodeSpec {
+                node_id: id,
+                roles: ProcessRoles::Combined,
+                container_name: format!("kafka-{id}-{suffix}"),
+                ports: Some(BrokerPorts::reserve()),
+            })
+            .collect(),
+        Type::Kraft => {
+            assert!(config.controllers >= 1, "A KRAFT cluster must have at least 1 controller");
+            let broker_nodes = (BROKER_ID_OFFSET..BROKER_ID_OFFSET + brokers).map(|id| NodeSpec {
+                node_id: id,
+                roles: ProcessRoles::Broker,
+                container_name: format!("kafka-broker-{id}-{suffix}"),
+                ports: Some(BrokerPorts::reserve()),
+            });
+            let controller_nodes =
+                (CONTROLLER_ID_OFFSET..CONTROLLER_ID_OFFSET + i32::from(config.controllers)).map(|id| NodeSpec {
+                    node_id: id,
+                    roles: ProcessRoles::Controller,
+                    container_name: format!("kafka-controller-{id}-{suffix}"),
+                    ports: None,
+                });
+            broker_nodes.chain(controller_nodes).collect()
+        },
     }
 }
 
@@ -302,23 +429,15 @@ struct KafkaAllProtocols {
 }
 
 impl KafkaAllProtocols {
-    /// Create the image for one broker in a cluster.
+    /// Create the image for one node in a cluster.
     ///
-    /// - `node_id`: 1-based broker/controller node ID
-    /// - `container_names`: ordered list of all broker container names
-    ///   (index 0 = node 1, index 1 = node 2, etc.)
-    /// - `ports`: pre-reserved host ports for this broker's client listeners
-    /// - `certs`: shared SSL certificates (CA + broker cert with all
+    /// - `node`: this node's id, `process.roles`, container name and — for any
+    ///   node with the broker role — its pre-reserved host ports
+    /// - `voters`: the `controller.quorum.voters` value shared by every node
+    /// - `num_brokers`: number of broker-role nodes in the cluster
+    /// - `certs`: shared SSL certificates (CA + broker cert with all broker
     ///   container hostnames in SANs)
-    fn new(
-        node_id: u16,
-        container_names: &[String],
-        ports: &BrokerPorts,
-        certs: &test_certs::TestCertificates,
-    ) -> Self {
-        let num_brokers = container_names.len() as u16;
-        let this_container = &container_names[(node_id - 1) as usize];
-
+    fn new(node: &NodeSpec, voters: &str, num_brokers: u16, certs: &test_certs::TestCertificates) -> Self {
         let mut env_vars = HashMap::new();
 
         // KRaft configuration
@@ -336,19 +455,21 @@ impl KafkaAllProtocols {
         // is ample. `-Xms256m` keeps the initial commit low so idle brokers
         // cost less than active ones.
         env_vars.insert("KAFKA_HEAP_OPTS".into(), "-Xmx512m -Xms256m".into());
-        env_vars.insert("KAFKA_NODE_ID".into(), node_id.to_string());
-        env_vars.insert("KAFKA_PROCESS_ROLES".into(), "broker,controller".into());
+        env_vars.insert("KAFKA_NODE_ID".into(), node.node_id.to_string());
+        env_vars.insert("KAFKA_PROCESS_ROLES".into(), node.roles.as_str().into());
         env_vars.insert("KAFKA_CONTROLLER_LISTENER_NAMES".into(), "CONTROLLER".into());
-        env_vars.insert("KAFKA_INTER_BROKER_LISTENER_NAME".into(), "BROKER".into());
+        env_vars.insert("KAFKA_CONTROLLER_QUORUM_VOTERS".into(), voters.into());
 
-        // Quorum voters: all brokers participate as controllers
-        let voters: String = container_names
-            .iter()
-            .enumerate()
-            .map(|(i, name)| format!("{}@{}:9094", i + 1, name))
-            .collect::<Vec<_>>()
-            .join(",");
-        env_vars.insert("KAFKA_CONTROLLER_QUORUM_VOTERS".into(), voters);
+        let Some(ports) = node.ports.as_ref() else {
+            // Controller-only node (Java `Type.KRAFT`): just the CONTROLLER
+            // listener. The image's `configure` script rejects
+            // `KAFKA_ADVERTISED_LISTENERS` on a controller, so none is set.
+            env_vars.insert("KAFKA_LISTENERS".into(), "CONTROLLER://0.0.0.0:9094".into());
+            env_vars.insert("KAFKA_LISTENER_SECURITY_PROTOCOL_MAP".into(), "CONTROLLER:PLAINTEXT".into());
+            return Self { env_vars, copy_to_sources: Vec::new() };
+        };
+        let this_container = &node.container_name;
+        env_vars.insert("KAFKA_INTER_BROKER_LISTENER_NAME".into(), "BROKER".into());
         env_vars.insert("KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR".into(), num_brokers.min(3).to_string());
 
         // Listeners — custom names avoid the configure script's SSL check.
@@ -357,11 +478,19 @@ impl KafkaAllProtocols {
         // Using TLSONLY (for SSL) and SASLTLS (for SASL_SSL) avoids the
         // substring match. listener.security.protocol.map maps them to
         // the actual protocols.
+        // A broker-only node (Java `Type.KRAFT`) has no CONTROLLER listener; it
+        // still maps the CONTROLLER listener name below because
+        // `controller.listener.names` is how it reaches the quorum.
+        let controller_listener = if node.roles == ProcessRoles::Combined {
+            ",CONTROLLER://0.0.0.0:9094"
+        } else {
+            ""
+        };
         env_vars.insert(
             "KAFKA_LISTENERS".into(),
             format!(
                 "PLAINTEXT://0.0.0.0:9092,TLSONLY://0.0.0.0:9096,SASLPLAIN://0.0.0.0:9095,\
-                 SASLTLS://0.0.0.0:9097,BROKER://0.0.0.0:9093,CONTROLLER://0.0.0.0:9094,\
+                 SASLTLS://0.0.0.0:9097,BROKER://0.0.0.0:9093{controller_listener},\
                  CONTAINER://0.0.0.0:{CONTAINER_PORT_NUM}"
             ),
         );
@@ -467,16 +596,29 @@ impl Image for KafkaAllProtocols {
 
 /// Manages a real Kafka cluster in Docker for integration tests.
 ///
-/// One or more containers, each running a KRaft broker+controller,
-/// connected via a shared Docker network. All brokers expose all four
+/// One container per KRaft node — combined broker+controller nodes
+/// ([`Type::CoKraft`]) or separate broker and controller nodes
+/// ([`Type::Kraft`]) — connected via a shared Docker network. All brokers expose all four
 /// security protocols. Tests choose which listener to connect to via
 /// the protocol-specific bootstrap server accessors.
 ///
 /// Shared across tests with the same [`ClusterConfig`].
 pub struct KafkaCluster {
-    /// The running container handles. Kept alive for the duration of the pool entry.
-    _containers: Vec<ContainerAsync<KafkaAllProtocols>>,
-    /// Docker container IDs for all brokers, used for cleanup.
+    /// The running container handles keyed by node id, kept alive for the
+    /// lifetime of the cluster. Held (rather than only their ids) so
+    /// [`Self::shutdown_broker`] / [`Self::start_broker`] can stop and restart
+    /// the very same container.
+    containers: BTreeMap<i32, ContainerAsync<KafkaAllProtocols>>,
+    /// Ids of the nodes with the broker role — Java `ClusterInstance.brokerIds()`.
+    broker_ids: BTreeSet<i32>,
+    /// Ids of the nodes with the controller role — Java `ClusterInstance.controllerIds()`.
+    controller_ids: BTreeSet<i32>,
+    /// PLAINTEXT host port per broker id — Java `ClusterInstance.brokerBoundPorts()`.
+    broker_ports: BTreeMap<i32, u16>,
+    /// Brokers stopped by [`Self::shutdown_broker`] and not yet restarted — the
+    /// complement of Java's `aliveBrokers()` (`KafkaBroker.isShutdown()`).
+    shutdown_brokers: std::sync::Mutex<BTreeSet<i32>>,
+    /// Docker container IDs for all nodes (brokers first), used for cleanup.
     container_ids: Vec<String>,
     /// Docker network name, used for cleanup.
     network_name: String,
@@ -564,44 +706,58 @@ impl KafkaCluster {
         // Generate unique names to avoid collisions between concurrent test processes
         let suffix = random_suffix(8);
         let network_name = format!("kafka-net-{suffix}");
-        let container_names: Vec<String> = (1..=num_brokers).map(|id| format!("kafka-{id}-{suffix}")).collect();
 
-        // Reserve host ports for each broker before starting containers.
-        // This lets us set correct advertised.listeners from the start,
-        // which is required because KRaft does not allow dynamic updates
-        // to advertised.listeners.
-        let broker_ports: Vec<BrokerPorts> = (0..num_brokers).map(|_| BrokerPorts::reserve()).collect();
+        // Reserve host ports for each broker before starting containers
+        // (inside `node_specs`). This lets us set correct advertised.listeners
+        // from the start, which is required because KRaft does not allow
+        // dynamic updates to advertised.listeners.
+        let nodes = node_specs(config, &suffix);
+
+        // Quorum voters: every node with the controller role.
+        let voters: String = nodes
+            .iter()
+            .filter(|node| node.roles.is_controller())
+            .map(|node| format!("{}@{}:9094", node.node_id, node.container_name))
+            .collect::<Vec<_>>()
+            .join(",");
 
         // Generate SSL certificates with SANs covering all broker container names
-        let hostname_refs: Vec<&str> = container_names.iter().map(String::as_str).collect();
+        let hostname_refs: Vec<&str> = nodes
+            .iter()
+            .filter(|node| node.roles.is_broker())
+            .map(|node| node.container_name.as_str())
+            .collect();
         let certs = test_certs::generate_test_certificates(&hostname_refs);
         let ca_cert_pem = certs.ca_cert_pem.clone();
 
-        // Create and start all broker containers concurrently
-        let mut handles = Vec::with_capacity(num_brokers as usize);
-        for node_id in 1..=num_brokers {
-            let idx = (node_id - 1) as usize;
-            let kafka = KafkaAllProtocols::new(node_id, &container_names, &broker_ports[idx], &certs);
+        // Create and start all containers concurrently
+        let mut handles = Vec::with_capacity(nodes.len());
+        for node in &nodes {
+            let kafka = KafkaAllProtocols::new(node, &voters, num_brokers, &certs);
             let net = network_name.clone();
-            let name = container_names[idx].clone();
-            let ports = &broker_ports[idx];
+            let name = node.container_name.clone();
+            let node_id = node.node_id;
             let server_props: Vec<(String, String)> =
                 config.server_properties.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
 
-            // Bind pre-reserved host ports to container ports
-            let plaintext_port = ports.plaintext;
-            let ssl_port = ports.ssl;
-            let sasl_plaintext_port = ports.sasl_plaintext;
-            let sasl_ssl_port = ports.sasl_ssl;
+            // Pre-reserved host ports to bind to container ports (brokers only)
+            let mapped_ports: Vec<(u16, ContainerPort)> = node
+                .ports
+                .as_ref()
+                .map(|ports| {
+                    vec![
+                        (ports.plaintext, PLAINTEXT_PORT),
+                        (ports.ssl, SSL_PORT),
+                        (ports.sasl_plaintext, SASL_PLAINTEXT_PORT),
+                        (ports.sasl_ssl, SASL_SSL_PORT),
+                    ]
+                })
+                .unwrap_or_default();
 
             handles.push(tokio::spawn(async move {
                 let mut request = testcontainers::ContainerRequest::from(kafka)
                     .with_network(&net)
                     .with_container_name(&name)
-                    .with_mapped_port(plaintext_port, PLAINTEXT_PORT)
-                    .with_mapped_port(ssl_port, SSL_PORT)
-                    .with_mapped_port(sasl_plaintext_port, SASL_PLAINTEXT_PORT)
-                    .with_mapped_port(sasl_ssl_port, SASL_SSL_PORT)
                     // Bound the readiness wait. `ready_conditions` waits for
                     // "Kafka Server started" on stdout, which a container that
                     // failed to bind its ports never emits — without a deadline
@@ -609,12 +765,15 @@ impl KafkaCluster {
                     // built inside a `OnceCell` (`super::cluster_pool`) it parks
                     // every test sharing this config, forever.
                     .with_startup_timeout(CONTAINER_STARTUP_TIMEOUT);
+                for (host_port, container_port) in mapped_ports {
+                    request = request.with_mapped_port(host_port, container_port);
+                }
 
                 for (key, value) in &server_props {
                     request = request.with_env_var(key, value);
                 }
 
-                request.start().await.map_err(|err| {
+                request.start().await.map(|container| (node_id, container)).map_err(|err| {
                     // Trim the embedded container log — see
                     // `truncate_container_error`.
                     format!(
@@ -628,11 +787,13 @@ impl KafkaCluster {
         // Await all container starts (quorum forms once majority is up).
         // Collect every result before propagating a failure so the successful
         // containers land in `containers` and are reaped when it is dropped.
-        let mut containers = Vec::with_capacity(handles.len());
+        let mut containers = BTreeMap::new();
         let mut start_error: Option<String> = None;
         for handle in handles {
             match handle.await.expect("Broker start task panicked") {
-                Ok(container) => containers.push(container),
+                Ok((node_id, container)) => {
+                    containers.insert(node_id, container);
+                },
                 Err(err) => {
                     start_error.get_or_insert(err);
                 },
@@ -643,26 +804,37 @@ impl KafkaCluster {
         }
 
         // Collect container IDs and build bootstrap strings from the known ports
-        let mut container_ids = Vec::with_capacity(containers.len());
-        let mut plaintext_addrs = Vec::with_capacity(containers.len());
-        let mut ssl_addrs = Vec::with_capacity(containers.len());
-        let mut sasl_plaintext_addrs = Vec::with_capacity(containers.len());
-        let mut sasl_ssl_addrs = Vec::with_capacity(containers.len());
-
-        let mut container_addrs = Vec::with_capacity(containers.len());
-        for (i, container) in containers.iter().enumerate() {
-            container_ids.push(container.id().to_string());
-            let ports = &broker_ports[i];
-
+        let container_ids: Vec<String> = nodes.iter().map(|node| containers[&node.node_id].id().to_string()).collect();
+        let mut plaintext_addrs = Vec::with_capacity(nodes.len());
+        let mut ssl_addrs = Vec::with_capacity(nodes.len());
+        let mut sasl_plaintext_addrs = Vec::with_capacity(nodes.len());
+        let mut sasl_ssl_addrs = Vec::with_capacity(nodes.len());
+        let mut container_addrs = Vec::with_capacity(nodes.len());
+        let mut broker_ports = BTreeMap::new();
+        for node in &nodes {
+            let Some(ports) = node.ports.as_ref() else { continue };
             plaintext_addrs.push(format!("127.0.0.1:{}", ports.plaintext));
             ssl_addrs.push(format!("127.0.0.1:{}", ports.ssl));
             sasl_plaintext_addrs.push(format!("127.0.0.1:{}", ports.sasl_plaintext));
             sasl_ssl_addrs.push(format!("127.0.0.1:{}", ports.sasl_ssl));
-            container_addrs.push(format!("{}:{CONTAINER_PORT_NUM}", container_names[i]));
+            container_addrs.push(format!("{}:{CONTAINER_PORT_NUM}", node.container_name));
+            broker_ports.insert(node.node_id, ports.plaintext);
         }
 
         Ok(Self {
-            _containers: containers,
+            containers,
+            broker_ids: nodes
+                .iter()
+                .filter(|node| node.roles.is_broker())
+                .map(|node| node.node_id)
+                .collect(),
+            controller_ids: nodes
+                .iter()
+                .filter(|node| node.roles.is_controller())
+                .map(|node| node.node_id)
+                .collect(),
+            broker_ports,
+            shutdown_brokers: std::sync::Mutex::new(BTreeSet::new()),
             container_ids,
             network_name,
             bootstrap_servers: plaintext_addrs.join(","),
@@ -724,6 +896,209 @@ impl KafkaCluster {
     pub fn network_name(&self) -> &str {
         &self.network_name
     }
+
+    // -----------------------------------------------------------------------
+    // Topology and broker lifecycle — Java `ClusterInstance` (see module docs).
+    // -----------------------------------------------------------------------
+
+    /// Java `ClusterInstance.type()`.
+    pub fn cluster_type(&self) -> Type {
+        self.config.cluster_type
+    }
+
+    /// Java `ClusterInstance.brokerIds()`: every node with the broker role,
+    /// running or not.
+    pub fn broker_ids(&self) -> BTreeSet<i32> {
+        self.broker_ids.clone()
+    }
+
+    /// Java `ClusterInstance.aliveBrokers().keySet()`: the brokers not stopped by
+    /// [`Self::shutdown_broker`].
+    pub fn alive_broker_ids(&self) -> BTreeSet<i32> {
+        let shutdown = self.shutdown_brokers.lock().expect("shutdown-broker set poisoned");
+        self.broker_ids.difference(&shutdown).copied().collect()
+    }
+
+    /// Java `ClusterInstance.controllerIds()`: every node with the controller
+    /// role (for [`Type::CoKraft`] that is every node).
+    pub fn controller_ids(&self) -> BTreeSet<i32> {
+        self.controller_ids.clone()
+    }
+
+    /// Java `ClusterInstance.brokerBoundPorts()`: the PLAINTEXT host port of
+    /// each broker, in broker-id order.
+    pub fn broker_bound_ports(&self) -> Vec<u16> {
+        self.broker_ports.values().copied().collect()
+    }
+
+    /// `127.0.0.1:<port>` of `broker_id`'s PLAINTEXT listener — a bootstrap
+    /// address naming that one broker.
+    ///
+    /// # Panics
+    ///
+    /// Panics with Java's `"Unknown brokerId <id>"` if there is no such broker.
+    pub fn broker_bootstrap_servers(&self, broker_id: i32) -> String {
+        let port = self
+            .broker_ports
+            .get(&broker_id)
+            .unwrap_or_else(|| panic!("Unknown brokerId {broker_id}"));
+        format!("127.0.0.1:{port}")
+    }
+
+    /// The broker's container, after checking the lifecycle preconditions.
+    ///
+    /// Java's `findBrokerOrThrow` throws `IllegalArgumentException("Unknown
+    /// brokerId " + id)`; the two extra checks are Docker-harness constraints
+    /// (see module docs).
+    fn lifecycle_container(&self, broker_id: i32) -> &ContainerAsync<KafkaAllProtocols> {
+        assert!(self.broker_ids.contains(&broker_id), "Unknown brokerId {broker_id}");
+        assert!(
+            self.config.dedicated,
+            "broker lifecycle requires a dedicated cluster (ClusterConfig::dedicated): \
+             a stopped broker in a pooled cluster would leak into other tests"
+        );
+        assert_eq!(
+            self.config.cluster_type,
+            Type::Kraft,
+            "broker lifecycle requires Type::Kraft: a CO_KRAFT container also hosts a controller, \
+             and stopping it would stop that controller too"
+        );
+        &self.containers[&broker_id]
+    }
+
+    /// Java `ClusterInstance.shutdownBroker(brokerId)`: stops the broker and
+    /// returns once its process has exited.
+    ///
+    /// `docker stop` delivers `SIGTERM`, on which Kafka runs the same controlled
+    /// shutdown as Java's `BrokerServer.shutdown()`; the container (and with it
+    /// the broker's data) is kept for [`Self::start_broker`].
+    ///
+    /// # Panics
+    ///
+    /// Panics on an unknown broker id, on a pooled or [`Type::CoKraft`]
+    /// cluster, or if Docker fails to stop the container.
+    pub async fn shutdown_broker(&self, broker_id: i32) {
+        let container = self.lifecycle_container(broker_id);
+        container
+            .stop_with_timeout(Some(BROKER_SHUTDOWN_TIMEOUT_SECS))
+            .await
+            .unwrap_or_else(|err| panic!("failed to stop broker {broker_id}: {err}"));
+        self.shutdown_brokers
+            .lock()
+            .expect("shutdown-broker set poisoned")
+            .insert(broker_id);
+    }
+
+    /// Java `ClusterInstance.startBroker(brokerId)`: restarts a broker stopped by
+    /// [`Self::shutdown_broker`] and returns once it is serving requests.
+    ///
+    /// Java's `BrokerServer.startup()` blocks until the broker has registered
+    /// and been unfenced; the equivalent wait here is until the restarted
+    /// broker, contacted on its own listener, reports itself alive in
+    /// `DescribeCluster`. The broker comes back with the same node id, host
+    /// ports and log directory — see the module docs.
+    ///
+    /// # Panics
+    ///
+    /// Panics on an unknown broker id, on a pooled or [`Type::CoKraft`]
+    /// cluster, if Docker fails to start the container, or if the broker is not
+    /// serving within [`BROKER_READY_TIMEOUT`].
+    pub async fn start_broker(&self, broker_id: i32) {
+        let container = self.lifecycle_container(broker_id);
+        container
+            .start()
+            .await
+            .unwrap_or_else(|err| panic!("failed to start broker {broker_id}: {err}"));
+        self.shutdown_brokers
+            .lock()
+            .expect("shutdown-broker set poisoned")
+            .remove(&broker_id);
+
+        let expected = BTreeSet::from([broker_id]);
+        wait_until_broker_sees(&self.broker_bootstrap_servers(broker_id), |alive| alive.is_superset(&expected))
+            .await
+            .unwrap_or_else(|last| {
+                panic!("broker {broker_id} not serving within {BROKER_READY_TIMEOUT:?} of restart; last view: {last}")
+            });
+    }
+
+    /// Java `ClusterInstance.waitForReadyBrokers()`: waits until every alive
+    /// broker is registered and unfenced, **as seen by each alive broker**.
+    ///
+    /// Java waits for the controller to count the brokers as ready and then for
+    /// every broker's metadata cache to hold every broker alive. Over the wire
+    /// the same condition is: `DescribeCluster` — answered from the broker's
+    /// metadata cache, which lists only unfenced brokers — returns exactly
+    /// [`Self::alive_broker_ids`] from each alive broker. Java counts all
+    /// brokers because its callers only wait with every broker running; the
+    /// alive set makes this also usable while some broker is stopped.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the brokers do not converge within [`BROKER_READY_TIMEOUT`].
+    pub async fn wait_for_ready_brokers(&self) {
+        let alive = self.alive_broker_ids();
+        for broker_id in &alive {
+            wait_until_broker_sees(&self.broker_bootstrap_servers(*broker_id), |view| *view == alive)
+                .await
+                .unwrap_or_else(|last| {
+                    panic!(
+                        "brokers {alive:?} not ready within {BROKER_READY_TIMEOUT:?}: \
+                         broker {broker_id} last saw {last}"
+                    )
+                });
+        }
+    }
+}
+
+/// How long `docker stop` lets a broker run its controlled shutdown before
+/// `SIGKILL`. Docker's default is 10 s; a controlled shutdown with a live
+/// controller takes a second or two, so this only bounds a pathological hang.
+const BROKER_SHUTDOWN_TIMEOUT_SECS: i32 = 60;
+
+/// Bound for a broker to (re)join after a start, and for
+/// [`KafkaCluster::wait_for_ready_brokers`]. Same as the initial
+/// [`CONTAINER_STARTUP_TIMEOUT`]: a restart pays the same JVM start-up and
+/// quorum registration.
+pub const BROKER_READY_TIMEOUT: std::time::Duration = CONTAINER_STARTUP_TIMEOUT;
+
+/// Polls `DescribeCluster` through an admin client bootstrapped **only** at
+/// `bootstrap` until `condition` holds for the set of broker ids it reports.
+///
+/// Returns `Err` with the last observed view (or error) on
+/// [`BROKER_READY_TIMEOUT`].
+async fn wait_until_broker_sees(bootstrap: &str, condition: impl Fn(&BTreeSet<i32>) -> bool) -> Result<(), String> {
+    use confluent_kafka::admin::{Admin, AdminClientConfig, KafkaAdminClient};
+
+    let props = HashMap::from([
+        ("bootstrap.servers".to_string(), bootstrap.to_string()),
+        ("client.id".to_string(), "cluster-lifecycle".to_string()),
+        ("request.timeout.ms".to_string(), "5000".to_string()),
+        ("default.api.timeout.ms".to_string(), "5000".to_string()),
+        ("reconnect.backoff.max.ms".to_string(), "500".to_string()),
+    ]);
+    let config = AdminClientConfig::new(&props).expect("valid admin config");
+    let admin = KafkaAdminClient::new(config).expect("admin client");
+
+    let deadline = tokio::time::Instant::now() + BROKER_READY_TIMEOUT;
+    let outcome = loop {
+        let last = match admin.describe_cluster().nodes().get().await {
+            Ok(nodes) => {
+                let view: BTreeSet<i32> = nodes.iter().map(|node| node.id()).collect();
+                if condition(&view) {
+                    break Ok(());
+                }
+                format!("{view:?}")
+            },
+            Err(err) => format!("error: {err}"),
+        };
+        if tokio::time::Instant::now() >= deadline {
+            break Err(last);
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    };
+    admin.close_with_timeout(std::time::Duration::from_secs(5)).await;
+    outcome
 }
 
 /// Generates a random hexadecimal suffix of the given byte length
