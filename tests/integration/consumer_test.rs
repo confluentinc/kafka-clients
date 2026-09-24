@@ -38,6 +38,11 @@
 //! (line 69) is translated as
 //! [`test_async_consumer_with_consumer_protocol_disabled`] on its own
 //! single-broker cluster with `group.version` downgraded to 0.
+//!
+//! `ConsumerIntegrationTest.testLeaderEpoch` (line 196) is translated as
+//! [`test_leader_epoch`] on a dedicated `Type::Kraft` cluster (3 brokers +
+//! 1 isolated controller), stopping the partition leader with
+//! `KafkaCluster::shutdown_broker`.
 
 use std::collections::BTreeMap;
 use std::collections::HashMap;
@@ -734,4 +739,142 @@ async fn test_async_consumer_with_consumer_protocol_disabled() {
     consumer.close().await.expect("consumer close should succeed");
     admin.close().await;
     ctx.cleanup().await;
+}
+
+// ── Leader epoch across a leader failover (ConsumerIntegrationTest) ────
+
+/// Java's `sendMsg(clusterInstance, topic, sendMsgNum)`
+/// (`ConsumerIntegrationTest.java:408`): a String-serialized producer with
+/// `acks=-1` sends `key_i` / `value_i` for `i` in `0..send_msg_num`, then
+/// flushes.
+async fn send_msg(bootstrap: &str, topic: &str, send_msg_num: usize) {
+    let props = HashMap::from([
+        ("bootstrap.servers".to_string(), bootstrap.to_string()),
+        ("acks".to_string(), "-1".to_string()),
+    ]);
+    let producer: KafkaProducer<String, String> = KafkaProducer::new(
+        ProducerConfig::new(&props).expect("valid producer config"),
+        Box::new(StringSerializer),
+        Box::new(StringSerializer),
+    )
+    .expect("Failed to build test producer");
+    for i in 0..send_msg_num {
+        let record = ProducerRecord::with_key(topic.to_string(), Some(format!("key_{i}")), Some(format!("value_{i}")));
+        producer.send(record).await.expect("send should succeed");
+    }
+    producer.flush().await.expect("flush should succeed");
+    producer.close().await.expect("producer close should succeed");
+}
+
+/// Java's `ClusterInstance.getLeaderBrokerId(topicPartition)`
+/// (`ClusterInstance.java:406`): the current leader of `tp` per
+/// `describeTopics`.
+async fn leader_broker_id(admin: &dyn confluent_kafka::admin::Admin, tp: &TopicPartition) -> i32 {
+    let described = admin
+        .describe_topics_with_topic_names(&[tp.topic().to_string()])
+        .all_topic_names()
+        .expect("described by name")
+        .get()
+        .await
+        .expect("describeTopics should succeed");
+    described
+        .get(tp.topic())
+        .expect("topic described")
+        .partitions()
+        .iter()
+        .filter(|info| info.partition() == tp.partition())
+        .find_map(|info| info.leader().map(|leader| leader.id()))
+        .unwrap_or_else(|| panic!("Leader not found for tp {tp}"))
+}
+
+/// Polls `consumer` with `poll(1000ms)` until `msg_num` records arrived,
+/// asserting every record carries leader epoch `expected_epoch`.
+///
+/// Java loops `while (consumed < msgNum)` with no bound; the Rust loop is
+/// bounded at 60 s so a regression fails instead of hanging the suite.
+async fn consume_asserting_leader_epoch(
+    consumer: &mut dyn confluent_kafka::consumer::Consumer<Vec<u8>, Vec<u8>>,
+    msg_num: usize,
+    expected_epoch: i32,
+) {
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let mut consumed = 0;
+    while consumed < msg_num {
+        assert!(
+            Instant::now() < deadline,
+            "consumed only {consumed} of {msg_num} records with leader epoch {expected_epoch}"
+        );
+        let records = consumer.poll(Duration::from_millis(1000)).await.expect("poll should succeed");
+        for record in &records {
+            assert_eq!(
+                record.leader_epoch(),
+                Some(expected_epoch),
+                "record at offset {} has the wrong leader epoch",
+                record.offset()
+            );
+        }
+        consumed += records.count();
+    }
+}
+
+/// Translates `testLeaderEpoch` (`ConsumerIntegrationTest.java:196`), on the
+/// Java shape `@ClusterTest(types = {Type.KRAFT}, brokers = 3)` — a dedicated
+/// cluster with an isolated controller, since the test stops a broker.
+///
+/// Records written under the first leader carry leader epoch 0; after the
+/// leader broker is shut down the partition fails over to the other replica,
+/// and records written then carry leader epoch 1.
+///
+/// Java's `clusterInstance.consumer()` leaves `group.protocol` at its default;
+/// the test only `assign`s, so the group protocol is never exercised, and the
+/// KIP-848 `consumer` protocol is used here (`consumer-threading.md` §20).
+#[tokio::test(flavor = "multi_thread")]
+async fn test_leader_epoch() {
+    use confluent_kafka::admin::Admin;
+    use confluent_kafka::admin::AdminClientConfig;
+    use confluent_kafka::admin::KafkaAdminClient;
+    use confluent_kafka::common::serialization::ByteArrayDeserializer;
+
+    use crate::common::test_utils;
+
+    let mut ctx = TestContext::new(ClusterConfig::kraft_dedicated(3, 1)).await;
+    let bootstrap = ctx.bootstrap_servers().to_string();
+    let topic = ctx.topic("test-topic");
+    let admin = KafkaAdminClient::new(
+        AdminClientConfig::new(&HashMap::from([("bootstrap.servers".to_string(), bootstrap.clone())]))
+            .expect("valid admin config"),
+    )
+    .expect("admin client");
+    test_utils::create_topic(&admin, &topic, 1, 2).await;
+    let msg_num = 10;
+    send_msg(&bootstrap, &topic, msg_num).await;
+
+    let mut consumer = KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
+        make_consumer_config(&bootstrap, &ctx.group_id("group")),
+        Box::new(ByteArrayDeserializer),
+        Box::new(ByteArrayDeserializer),
+    )
+    .expect("KafkaConsumer::new should succeed");
+    let target_topic_partition = TopicPartition::new(topic.clone(), 0);
+    consumer
+        .assign(vec![target_topic_partition.clone()])
+        .await
+        .expect("assign should succeed");
+    consumer
+        .seek_to_beginning(std::slice::from_ref(&target_topic_partition))
+        .await
+        .expect("seekToBeginning should succeed");
+
+    consume_asserting_leader_epoch(consumer.as_mut(), msg_num, 0).await;
+
+    // make the leader epoch increment by shutdown the leader broker
+    let leader = leader_broker_id(&admin, &target_topic_partition).await;
+    ctx.cluster().shutdown_broker(leader).await;
+
+    send_msg(&bootstrap, &topic, msg_num).await;
+
+    consume_asserting_leader_epoch(consumer.as_mut(), msg_num, 1).await;
+
+    consumer.close().await.expect("consumer close should succeed");
+    admin.close_with_timeout(Duration::from_secs(5)).await;
 }
