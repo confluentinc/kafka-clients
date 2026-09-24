@@ -54,8 +54,9 @@ pub enum BackendKind {
     /// Distinct image from [`BackendKind::Python`]; see `Dockerfile.grpc.async`.
     PythonAsync,
     C,
-    /// The .NET binding's synchronous `KafkaConsumer` backend (M8/P1). Consumer-only:
-    /// the image serves `ConsumerService` only (see `bindings/dotnet/Dockerfile.grpc`).
+    /// The .NET binding's synchronous backend (consumer M8/P1, producer M12/P1, admin
+    /// M15/P12). The image serves `ConsumerService`, `ProducerService` and
+    /// `AdminService` (see `bindings/dotnet/Dockerfile.grpc`).
     Dotnet,
     /// The .NET binding's asynchronous `AsyncKafkaConsumer` backend (M8/P2). Distinct
     /// image from [`BackendKind::Dotnet`] (see `bindings/dotnet/Dockerfile.grpc.async`),

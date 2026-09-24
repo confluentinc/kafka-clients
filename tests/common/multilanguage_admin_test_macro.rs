@@ -15,16 +15,19 @@
 //! The `multilanguage_admin_test!` declarative macro — the admin twin of
 //! [`crate::multilanguage_test`] and [`crate::multilanguage_consumer_test`].
 //!
-//! Each invocation expands to four `#[tokio::test(flavor = "multi_thread")]`
+//! Each invocation expands to five `#[tokio::test(flavor = "multi_thread")]`
 //! wrappers (`name__rust`, `name__grpc_python`, `name__grpc_python_async`,
-//! `name__grpc_c`) calling the same generic body
+//! `name__grpc_c`, `name__grpc_dotnet`) calling the same generic body
 //! `async fn body<F: AdminBackendFactory>(ctx: &mut TestContext, factory: &F)`.
+//!
+//! There is no `__grpc_dotnet_async` arm: .NET has no async admin surface, so it
+//! would drive the same `AdminServiceImpl` over the same `IAdmin` (M15/P12 D1).
 //!
 //! The `__grpc_` infix is load-bearing: `make test-rust-all-features` excludes
 //! every container-backed arm across the producer, consumer and admin suites
 //! with a single `--skip __grpc`.
 //!
-//! Unlike `multilanguage_test!` and `multilanguage_consumer_test!`, the three
+//! Unlike `multilanguage_test!` and `multilanguage_consumer_test!`, the four
 //! container-backed arms are individually `#[cfg(feature =
 //! "multilanguage-tests")]` and the macro itself is available with only
 //! `integration-tests`. That is what lets the committed admin integration tests
@@ -40,9 +43,9 @@
 //! spawns its own background task and the gRPC backends block a tonic worker,
 //! so a current-thread runtime would be a needless constraint.
 
-/// Expand a generic admin test body into four `#[tokio::test]` wrappers, one per
-/// backend (rust / grpc_python / grpc_python_async / grpc_c). Two forms,
-/// mirroring `multilanguage_test!`: with or without an explicit
+/// Expand a generic admin test body into five `#[tokio::test]` wrappers, one per
+/// backend (rust / grpc_python / grpc_python_async / grpc_c / grpc_dotnet). Two
+/// forms, mirroring `multilanguage_test!`: with or without an explicit
 /// `ClusterConfig`.
 #[macro_export]
 macro_rules! multilanguage_admin_test {
@@ -101,6 +104,21 @@ macro_rules! multilanguage_admin_test {
                 .await;
                 let factory =
                     $crate::common::backend_factory::CGrpcFactory::new(handle.channel().await);
+                $body(&mut ctx, &factory).await;
+            }
+
+            #[cfg(feature = "multilanguage-tests")]
+            #[allow(non_snake_case)]
+            #[tokio::test(flavor = "multi_thread")]
+            async fn [<$name __ grpc_dotnet>]() {
+                let mut ctx = $crate::common::test_context::TestContext::new($cluster_config).await;
+                let handle = $crate::common::backend_pool::get_or_start(
+                    $crate::common::backend_pool::BackendKind::Dotnet,
+                    ctx.broker_network_name(),
+                )
+                .await;
+                let factory =
+                    $crate::common::backend_factory::DotnetGrpcFactory::new(handle.channel().await);
                 $body(&mut ctx, &factory).await;
             }
         }

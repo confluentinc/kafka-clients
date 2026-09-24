@@ -449,7 +449,7 @@ pub trait AdminBackend {
     /// In `removeAll` mode the returned map is **empty**: Java's `memberResult`
     /// refuses in that mode, so `all()` is the only observable and any failure is
     /// the outer `Err`. That is what `src/ffi/admin.rs`'s
-    /// `submit_remove_members_from_consumer_group` does, so all four backends
+    /// `submit_remove_members_from_consumer_group` does, so all five backends
     /// agree on it.
     async fn remove_members_from_consumer_group(
         &self,
@@ -527,7 +527,7 @@ pub trait AdminBackend {
     /// with their distinct RESOURCE_NOT_FOUND semantics — the RustNative backend
     /// hands back the real result, and the gRPC backends reconstruct an
     /// equivalent one from the raw per-user rows carried over the wire, so all
-    /// four backends answer the same on every view.
+    /// five backends answer the same on every view.
     ///
     /// The broker never returns the salted password or the salt, so a
     /// description carries only the mechanism and iteration count per credential.
@@ -719,7 +719,7 @@ impl<T> Listings<T> {
     ///
     /// Java's `all()` completes exceptionally with one of the failures without
     /// specifying which; this picks the first, and because the fold runs
-    /// identically for all four backends over the same pair it cannot make
+    /// identically for all five backends over the same pair it cannot make
     /// backends disagree. Same reasoning as [`all_of`].
     pub fn all(&self) -> Result<&[T], Error> {
         match self.errors.first() {
@@ -742,7 +742,7 @@ impl<T> Listings<T> {
 /// CompletionException holding this exception as its cause" for one of the
 /// failures, never which; and the Rust `KafkaFuture::all_of` polls a `Vec`
 /// whose order comes from `HashMap` iteration. Because this fold runs
-/// identically for all four backends over the same map, an unspecified choice
+/// identically for all five backends over the same map, an unspecified choice
 /// cannot make backends disagree — it only affects which message a failing
 /// assertion prints. A scenario that must assert a *particular* key's error
 /// reads that key out of the map instead, which every converted body that cares
@@ -915,7 +915,7 @@ pub struct ConfigEntryView {
     pub is_read_only: bool,
     /// Java `source()` as its enum constant name, e.g. `"STATIC_BROKER_CONFIG"`.
     /// `None` only if a backend failed to report it at all — `describeConfigs`
-    /// always carries a source on all four.
+    /// always carries a source on all five.
     pub source: Option<String>,
     /// Java `type()` as its enum constant name, e.g. `"LONG"`.
     pub config_type: Option<String>,
@@ -1025,7 +1025,7 @@ fn config_type_name(config_type: ConfigType) -> &'static str {
     }
 }
 
-/// Projects a production [`Config`] onto the [`ConfigView`] the four backends
+/// Projects a production [`Config`] onto the [`ConfigView`] the five backends
 /// are compared on. Every field is carried; only the two enums are rendered as
 /// the names the C boundary uses.
 fn config_view(config: &Config) -> ConfigView {
@@ -1195,7 +1195,7 @@ impl AdminBackend for RustNativeAdmin {
         // All four are awaited before any error is reported, so none is
         // abandoned; when more than one failed, the first in Java's declaration
         // order wins. Identical to the FFI's `submit_describe_cluster`, so the
-        // four backends pick the same error out of a multi-failure.
+        // five backends pick the same error out of a multi-failure.
         let nodes = result.nodes().get_with_timeout(NATIVE_FUTURE_TIMEOUT).await;
         let controller = result.controller().get_with_timeout(NATIVE_FUTURE_TIMEOUT).await;
         let cluster_id = result.cluster_id().get_with_timeout(NATIVE_FUTURE_TIMEOUT).await;
@@ -1353,7 +1353,7 @@ impl AdminBackend for RustNativeAdmin {
         // rather than as a map, so the *requested* keys drive the collection —
         // and a key the call did not attempt is a whole-call `Err`, not a
         // missing entry. Identical to the FFI's `submit_list_offsets`, so all
-        // four backends answer with the same key set.
+        // five backends answer with the same key set.
         let mut outcomes = HashMap::with_capacity(topic_partition_offsets.len());
         for tp in topic_partition_offsets.keys() {
             outcomes.insert(
@@ -1414,7 +1414,7 @@ impl AdminBackend for RustNativeAdmin {
         // did not attempt is a whole-call `Err` rather than a missing entry —
         // Java's `partitionsToOffsetAndMetadata(groupId)` throws
         // `IllegalArgumentException` there. Identical to the FFI's
-        // `submit_list_consumer_group_offsets`, so all four backends answer with
+        // `submit_list_consumer_group_offsets`, so all five backends answer with
         // the same key set.
         let mut outcomes = HashMap::with_capacity(group_specs.len());
         for group_id in group_specs.keys() {
@@ -1648,7 +1648,7 @@ impl AdminBackend for RustNativeAdmin {
         // map, so the *requested* keys drive the collection and a partition the
         // call did not attempt is a whole-call `Err`. A repeated partition
         // collapses to one key, as Java's `Map` does. Identical to the FFI's
-        // `submit_describe_producers`, so all four backends answer with the same
+        // `submit_describe_producers`, so all five backends answer with the same
         // key set.
         let mut outcomes = HashMap::with_capacity(partitions.len());
         for tp in partitions {
@@ -1783,7 +1783,7 @@ const NATIVE_FUTURE_TIMEOUT: Duration = Duration::from_secs(30);
 ///
 /// This is what both bindings do internally before handing a result back to
 /// their caller (`admin.py`'s `_run_sync`, the C `_async` entry points' result
-/// struct), so doing it here is what makes the four backends comparable. Each
+/// struct), so doing it here is what makes the five backends comparable. Each
 /// await is bounded — see [`NATIVE_FUTURE_TIMEOUT`].
 async fn resolve<K, V>(futures: impl Iterator<Item = (K, KafkaFuture<V>)>) -> Outcomes<K, V>
 where
@@ -1831,15 +1831,15 @@ async fn metadata_of(result: &CreateTopicsResult, topic: &str) -> TopicMetadataA
 }
 
 /// Projects a [`Config`] onto the five fields that survive *every* binding's
-/// `createTopics` result, so all four backends are compared on identical
+/// `createTopics` result, so all five backends are compared on identical
 /// information.
 ///
 /// `kafka_admin_TopicMetadataAndConfig_config_*` exposes name / value /
 /// is_default / is_sensitive / is_read_only and nothing else, and `admin.py`'s
 /// `_to_config_entry` mirrors that. The native client *does* know
 /// `ConfigEntry::source()` here, and leaving it in place would let a scenario
-/// assert on a field only one of the four backends can ever produce — a green
-/// `__rust` arm and three red ones, for no defect. Dropping it here makes that
+/// assert on a field only one of the five backends can ever produce — a green
+/// `__rust` arm and four red ones, for no defect. Dropping it here makes that
 /// trap unreachable. `is_default` is preserved by re-deriving the only source
 /// value it depends on (`ConfigSource::DefaultConfig`).
 fn comparable_config(config: &Config) -> Config {
