@@ -121,13 +121,13 @@ blocks:
         commands:
           - ./.semaphore/dependencies.sh
       jobs:
-        - name: "Verify Rust (Linux amd64) — PLAINTEXT"
+        - name: "Verify Rust (Linux amd64) — plaintext"
           commands:
             - make verify-rust
-        - name: "Verify Rust (Linux amd64) — SSL"
+        - name: "Verify Rust (Linux amd64) — ssl"
           commands:
             - make test-rust-all-features-ssl
-        - name: "Verify Rust (Linux amd64) — SASL_SSL (PLAIN)"
+        - name: "Verify Rust (Linux amd64) — sasl_ssl (plain)"
           commands:
             - make test-rust-all-features-sasl-ssl
 
@@ -162,22 +162,22 @@ blocks:
         commands:
           - ./.semaphore/dependencies.sh
       jobs:
-        - name: "verify-c (Linux amd64) — PLAINTEXT"
+        - name: "verify-c (Linux amd64) — plaintext"
           commands:
             - make verify-c
-        - name: "verify-c (Linux amd64) — SSL"
+        - name: "verify-c (Linux amd64) — ssl"
           commands:
             - make test-integration-c-ssl
-        - name: "verify-c (Linux amd64) — SASL_SSL (PLAIN)"
+        - name: "verify-c (Linux amd64) — sasl_ssl (plain)"
           commands:
             - make test-integration-c-sasl-ssl
-        - name: "verify-python (Linux amd64) — PLAINTEXT"
+        - name: "verify-python (Linux amd64) — plaintext"
           commands:
             - make verify-python
-        - name: "verify-python (Linux amd64) — SSL"
+        - name: "verify-python (Linux amd64) — ssl"
           commands:
             - make test-integration-python-ssl
-        - name: "verify-python (Linux amd64) — SASL_SSL (PLAIN)"
+        - name: "verify-python (Linux amd64) — sasl_ssl (plain)"
           commands:
             - make test-integration-python-sasl-ssl
 
