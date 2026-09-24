@@ -50,7 +50,8 @@
 //!   `testSendOffsetsToTransactionTimeout` → [`test_send_offsets_to_transaction_timeout`],
 //!   `testCommitTransactionTimeout` → [`test_commit_transaction_timeout`],
 //!   `testAbortTransactionTimeout` → [`test_abort_transaction_timeout`] and
-//!   `testFailureToFenceEpoch` (TV2 row) → [`test_failure_to_fence_epoch`]
+//!   `testFailureToFenceEpoch` (CONSUMER rows) → [`test_failure_to_fence_epoch_tv1`] /
+//!   [`test_failure_to_fence_epoch_tv2`]
 //!   (each on a dedicated cluster, since they stop brokers — see
 //!   [`transactions_test_dedicated_cluster`])
 //!
@@ -3246,16 +3247,26 @@ async fn test_abort_transaction_timeout() {
 /// same `transactional.id` initializes and commits with a bumped epoch.
 ///
 /// Translates `TransactionsTest.testFailureToFenceEpoch`
-/// (`TransactionsTest.scala:970-1041`), the `consumer, true` row. The
-/// `isTV2Enabled = false` rows are not reachable: the 4.2.0 broker finalizes
-/// `transaction.version=2` and the harness cannot downgrade it per test.
+/// (`TransactionsTest.scala:970-1041`), the `consumer, false` and
+/// `consumer, true` rows ([`test_failure_to_fence_epoch_tv1`] /
+/// [`test_failure_to_fence_epoch_tv2`]).
+///
+/// Java formats the `isTV2Enabled = false` cluster with `transaction.version=1`
+/// (`QuorumTestHarness.scala:284-286`); the harness image formats every
+/// cluster at the 4.2.0 default (`transaction.version=2`), so the TV1 row
+/// downgrades the finalized feature to 1 with `Admin::update_features` on its
+/// dedicated cluster before any producer exists — the approach
+/// `consumer_test.rs` uses for `group.version` — and waits until every broker
+/// reports it, since the producer reads the finalized level from `ApiVersions`.
 ///
 /// Deviation: Java reads the partition leader's `producerStateManager` in
 /// process; here the same active-producer entry (id and epoch) comes from
 /// `Admin.describeProducers` on the partition, which reports that state.
-#[tokio::test(flavor = "multi_thread")]
-async fn test_failure_to_fence_epoch() {
+async fn failure_to_fence_epoch(is_tv2_enabled: bool) {
     let mut ctx = TestContext::new(transactions_test_dedicated_cluster()).await;
+    if !is_tv2_enabled {
+        downgrade_transaction_version_to_1(&ctx).await;
+    }
     let (topic1, _topic2) = create_txn_test_topics(&mut ctx).await;
     let bootstrap = ctx.bootstrap_servers().to_string();
     let txn_id = ctx.group_id("transactional-producer");
@@ -3316,6 +3327,7 @@ async fn test_failure_to_fence_epoch() {
     .expect("producer3 send");
     producer3.commit_transaction().await.expect("producer3.commitTransaction");
 
+    // Check that the epoch only increased by 1 when TV2 is disabled.
     // With TV2 and the latest EndTxnRequest version, the epoch will be bumped at the end of every transaction aka
     // three times (once after each commit and once after the timeout exception). The last bump is less consistent,
     // so ensure the first two happen.
@@ -3327,16 +3339,86 @@ async fn test_failure_to_fence_epoch() {
         .find(|state| state.producer_id() == producer_id);
     admin.close().await;
     let producer_state_entry = producer_state_entry.expect("the producer id must still be active on the partition");
-    // Java's `(initialProducerEpoch + 1) <= producerEpoch`, as clippy's `int_plus_one` wants it.
-    assert!(
-        initial_producer_epoch < producer_state_entry.producer_epoch(),
-        "expected epoch >= {} but was {}",
-        initial_producer_epoch + 1,
-        producer_state_entry.producer_epoch()
-    );
+    if !is_tv2_enabled {
+        assert_eq!(initial_producer_epoch + 1, producer_state_entry.producer_epoch());
+    } else {
+        // Java's `(initialProducerEpoch + 1) <= producerEpoch`, as clippy's `int_plus_one` wants it.
+        assert!(
+            initial_producer_epoch < producer_state_entry.producer_epoch(),
+            "expected epoch >= {} but was {}",
+            initial_producer_epoch + 1,
+            producer_state_entry.producer_epoch()
+        );
+    }
 
     producer3.close().await.expect("producer3 close");
     ctx.cleanup().await;
+}
+
+/// `Admin.updateFeatures(transaction.version -> 1, SAFE_DOWNGRADE)`, then a wait
+/// until every broker's `DescribeFeatures` reports the finalized level 1 —
+/// the harness stand-in for Java formatting the cluster at `TV_1`
+/// (`QuorumTestHarness.scala:284-286`).
+async fn downgrade_transaction_version_to_1(ctx: &TestContext) {
+    use confluent_kafka::admin::FeatureUpdate;
+    use confluent_kafka::admin::UpgradeType;
+
+    let admin = txn_test_admin(ctx);
+    let updates = HashMap::from([(
+        "transaction.version".to_string(),
+        FeatureUpdate::new(1, UpgradeType::SafeDowngrade).expect("valid feature update"),
+    )]);
+    admin
+        .update_features(&updates)
+        .expect("update_features should enqueue")
+        .all()
+        .get_with_timeout(Duration::from_secs(30))
+        .await
+        .expect("downgrading transaction.version to 1 should succeed");
+    admin.close().await;
+
+    for broker_id in ctx.cluster().broker_ids() {
+        let props = HashMap::from([(
+            "bootstrap.servers".to_string(),
+            ctx.cluster().broker_bootstrap_servers(broker_id),
+        )]);
+        let broker_admin =
+            KafkaAdminClient::new(AdminClientConfig::new(&props).expect("valid admin config")).expect("admin client");
+        test_utils::wait_until_true_with_timeout(
+            || async {
+                broker_admin
+                    .describe_features()
+                    .feature_metadata()
+                    .get()
+                    .await
+                    .ok()
+                    .and_then(|metadata| {
+                        metadata
+                            .finalized_features()
+                            .get("transaction.version")
+                            .map(|range| range.max_version_level())
+                    })
+                    == Some(1)
+            },
+            &format!("broker {broker_id} did not finalize transaction.version=1"),
+            test_utils::DEFAULT_MAX_WAIT_MS,
+            test_utils::DEFAULT_PAUSE_MS,
+        )
+        .await;
+        broker_admin.close().await;
+    }
+}
+
+/// `testFailureToFenceEpoch`, row `consumer, false` (`TransactionsTest.scala:972`).
+#[tokio::test(flavor = "multi_thread")]
+async fn test_failure_to_fence_epoch_tv1() {
+    failure_to_fence_epoch(false).await;
+}
+
+/// `testFailureToFenceEpoch`, row `consumer, true` (`TransactionsTest.scala:974`).
+#[tokio::test(flavor = "multi_thread")]
+async fn test_failure_to_fence_epoch_tv2() {
+    failure_to_fence_epoch(true).await;
 }
 
 // ---------------------------------------------------------------------------
