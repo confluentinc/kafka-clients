@@ -33,9 +33,11 @@ name: build-test-release
 #   4. "Verify Rust (macOS arm64)" -- native Rust unit + integration + perf on
 #      s1-macos-15-arm64-8. dependencies-macos.sh brings up Docker via Colima
 #      for the broker the integration/perf tests need.
-#   5. "Build + unit test bindings (macOS)" -- verify-c (ctest) and
-#      verify-python (pytest test/unit). No container is used, so the block sets
-#      MACOS_SKIP_COLIMA=true and dependencies-macos.sh skips Colima.
+#   5. "Verify language bindings (macOS arm64)" -- verify-c (ctest) and
+#      verify-python (pytest test/unit), followed by the gRPC multilanguage arm
+#      with the gRPC servers running as native host processes
+#      (MULTILANG_BACKEND_MODE=native), which tests the macOS build of each
+#      binding. The broker runs in Docker via Colima.
 #
 # All blocks declare `dependencies: []`, so every job starts immediately
 # and runs in parallel. Each rebuilds the Rust library it needs. Sharing one
@@ -202,10 +204,16 @@ blocks:
           commands:
             - make verify-rust-macos-docker
 
-  - name: "Build + unit test bindings (macOS)"
-    # verify-c runs the C ctest suite; verify-python runs pytest test/unit. No
-    # container is used, so MACOS_SKIP_COLIMA=true tells dependencies-macos.sh
-    # to skip Colima. The gRPC multilanguage arm runs on Linux only.
+  - name: "Verify language bindings (macOS arm64)"
+    # verify-c runs the C ctest suite; verify-python runs pytest test/unit. Each
+    # job then runs its binding's gRPC multilanguage arm (__grpc_c /
+    # __grpc_python) with the gRPC server as a native host process rather than
+    # a container. Containers on macOS run Linux, so a container would only test
+    # the Linux build of the binding. The broker runs in Docker via Colima.
+    #
+    # These jobs use PLAINTEXT only. The SSL and SASL_SSL variants of this arm
+    # run on Linux; the TLS and SASL code they exercise is in the
+    # platform-independent Rust client.
     dependencies: []
     task:
       agent:
@@ -214,13 +222,19 @@ blocks:
       env_vars:
         - name: RUST_BACKTRACE
           value: full
-        - name: MACOS_SKIP_COLIMA
-          value: "true"
       prologue:
         commands:
           - source ./.semaphore/dependencies-macos.sh
+      epilogue:
+        always:
+          commands:
+            - colima stop || true
       jobs:
         - name: "verify-c (macOS arm64)"
+          env_vars:
+            # Installs gRPC C++, protobuf and pkg-config for the native C++ server.
+            - name: MACOS_INSTALL_GRPC_CPP
+              value: "true"
           commands:
             - make verify-c-macos-docker
         - name: "verify-python (macOS arm64)"

@@ -20,6 +20,8 @@ endif
 	test test-rust test-integration test-integration-python test-integration-c \
 	test-integration-python-ssl test-integration-python-sasl-ssl \
 	test-integration-c-ssl test-integration-c-sasl-ssl \
+	build-grpc-native-python build-grpc-native-c \
+	test-integration-python-native test-integration-c-native \
 	test-integration-plaintext test-integration-ssl test-integration-sasl-ssl \
 	test-c test-python test-rust-all-features \
 	test-rust-all-features-ssl test-rust-all-features-sasl-ssl \
@@ -241,6 +243,11 @@ test-rust-all-features-sasl-ssl:
 # skip is honest — it never claims the container arms passed, only that this
 # host cannot build the Linux images.
 #
+# To run the same gRPC arm on a non-Linux host, use
+# test-integration-{python,c}-native below. It runs each gRPC server as a
+# native host process and is what the macOS CI verify-c / verify-python jobs
+# run.
+#
 # The `build-grpc-images-*` image build is invoked *inside* the recipe (rather
 # than as a prerequisite) precisely so the skip also short-circuits the Docker
 # build: a prerequisite would run before the recipe and fire the failing image
@@ -255,6 +262,7 @@ test-integration-python:
 		printf 'into a Linux container and link it with GNU ld. On this host that\n'; \
 		printf 'artifact is Mach-O / absent (no ELF .so), so the image cannot build.\n'; \
 		printf 'This container arm runs only in CI'"'"'s Linux verify-python job.\n'; \
+		printf 'Run it natively on this host with: make test-integration-python-native\n'; \
 		printf '========================================================================\n\n'; \
 	else \
 		$(MAKE) build-grpc-images-python && \
@@ -271,6 +279,7 @@ test-integration-c:
 		printf 'into a Linux container and links it with GNU ld. On this host that\n'; \
 		printf 'artifact is Mach-O, so the image cannot build/link.\n'; \
 		printf 'This container arm runs only in CI'"'"'s Linux verify-c job.\n'; \
+		printf 'Run it natively on this host with: make test-integration-c-native\n'; \
 		printf '========================================================================\n\n'; \
 	else \
 		$(MAKE) build-grpc-images-c && \
@@ -296,6 +305,54 @@ test-integration-c-ssl:
 	INTEGRATION_TEST_PROTOCOL=ssl $(MAKE) test-integration-c
 test-integration-c-sasl-ssl:
 	INTEGRATION_TEST_PROTOCOL=sasl_ssl $(MAKE) test-integration-c
+
+# ── Native (non-container) gRPC multilanguage arms ───────────────────────
+#
+# The same `__grpc_python` / `__grpc_c` arms, but with each gRPC server run as a
+# host process instead of a Docker container (MULTILANG_BACKEND_MODE=native; see
+# tests/common/backend_pool.rs). Only the broker runs in Docker. These targets
+# are used on macOS, where containers run Linux: the container arms can only
+# test the Linux build of the bindings and cannot load the host's Mach-O
+# artifacts. Native mode is also supported on Linux.
+#
+# Build outputs are written under target/grpc-native/ to keep the source tree
+# clean:
+#   python/  generated gRPC stubs, put on PYTHONPATH by the harness
+#   c/       the kafka_grpc_server binary
+GRPC_NATIVE_DIR = $(RUST_PROJECT_ROOT)/target/grpc-native
+GRPC_PROTO_DIR = $(RUST_PROJECT_ROOT)/multilanguage-test-server/proto
+GRPC_PROTOS = $(GRPC_PROTO_DIR)/producer_service.proto $(GRPC_PROTO_DIR)/consumer_service.proto \
+	$(GRPC_PROTO_DIR)/admin_service.proto
+
+# Builds the Python extension (build-python), installs grpcio into the venv, and
+# generates the gRPC stubs.
+build-grpc-native-python: build-python
+	@(. venv/bin/activate && \
+	pip install "grpcio>=1.66" "grpcio-tools>=1.66" "protobuf>=4.0" && \
+	mkdir -p $(GRPC_NATIVE_DIR)/python && \
+	python -m grpc_tools.protoc -I$(GRPC_PROTO_DIR) \
+		--python_out=$(GRPC_NATIVE_DIR)/python --grpc_python_out=$(GRPC_NATIVE_DIR)/python \
+		$(GRPC_PROTOS))
+
+# Builds the C++ gRPC server, linked against the host's libconfluent_kafka.a.
+# Requires the gRPC C++ and protobuf development packages (headers, protoc,
+# grpc_cpp_plugin, pkg-config) on the host.
+build-grpc-native-c: build-rust-all-features
+	cmake -S bindings/c/grpc_server -B $(GRPC_NATIVE_DIR)/c-build -DCMAKE_BUILD_TYPE=Release \
+		-DRUST_LIB_DIR=$(RUST_PROJECT_ROOT)/target/release \
+		-DRUST_INCLUDE_DIR=$(RUST_PROJECT_ROOT)/target/include \
+		-DPROTO_DIR=$(GRPC_PROTO_DIR)
+	cmake --build $(GRPC_NATIVE_DIR)/c-build --parallel
+	mkdir -p $(GRPC_NATIVE_DIR)/c
+	cp $(GRPC_NATIVE_DIR)/c-build/kafka_grpc_server $(GRPC_NATIVE_DIR)/c/kafka_grpc_server
+
+test-integration-python-native: build-grpc-native-python
+	MULTILANG_BACKEND_MODE=native \
+		cargo test --features integration-tests,multilanguage-tests --test integration -- __grpc_python
+
+test-integration-c-native: build-grpc-native-c
+	MULTILANG_BACKEND_MODE=native \
+		cargo test --features integration-tests,multilanguage-tests --test integration -- __grpc_c
 
 # ── Performance integration tests ────────────────────────────────────────
 #
@@ -378,7 +435,11 @@ verify: build format-check lint test check-bindings
 
 verify-c: test-c
 
+# Also runs the gRPC multilanguage arm with the gRPC server as a native host
+# process (see test-integration-c-native), since the Linux container arm cannot
+# run on macOS.
 verify-c-macos-docker: test-c-macos-docker
+	$(MAKE) test-integration-c-native
 
 verify-python: test-python check-bindings
 	$(MAKE) test-integration-perf-python
@@ -387,7 +448,9 @@ verify-python: test-python check-bindings
 MACOS_P99_LIMIT_MS ?= 150
 
 # macOS verify-python: unit tests.
+# Also runs the gRPC multilanguage arm natively, as verify-c-macos-docker does.
 verify-python-macos-docker: test-python-macos-docker
+	$(MAKE) test-integration-python-native
 
 verify-rust: build-rust-all-features format-check lint test-rust-all-features
 	$(MAKE) test-integration-perf-rust
