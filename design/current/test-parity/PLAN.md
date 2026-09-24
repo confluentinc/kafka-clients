@@ -4,6 +4,27 @@ Branch: `test-parity/integration`. Manager-driven Actor/Critic loop, one small
 phase at a time. **Agents read only the "Common rules" and their own phase
 section** — do not load the other phases.
 
+## Status summary (2026-09-25, end of unattended run)
+
+- Phases 1-22 done (Actor/Critic 65-86). Integration tests: 248 → 305 (302 pass in the last
+  full run). Unit tests 4037 pass. format-check + lint clean.
+- Production fixes (each with unit tests + Critic review): 67fe726b/f2f5d080 (consumer
+  retry wakes bg task), 104c35d7/d2d489ea (consumer close bounded by close timer, polls once
+  at 0ms), 891571d0 (producer/consumer honor metadata.recovery.strategy).
+- Harness: broker lifecycle (Type::Kraft isolated controllers, dedicated clusters,
+  shutdown/start/wait_for_ready_brokers ≈ Java ClusterInstance), BrokerProxy, retry/reap
+  hardening, per-broker readiness checks.
+- Open items:
+  - Load-only flakes (pass alone): plaintext_consumer_poll_test
+    `test_async_consumer_max_poll_interval_ms_shorter_than_poll_timeout` (2 assigns instead
+    of 1 in the last full run — possible poll-timer/rejoin under load, needs investigation);
+    `test_bump_transactional_epoch_with_tv2_disabled` 1/30 ProducerFenced (before 8602c84b).
+  - Production divergences below (background auto-commit; admin ignores recovery strategy).
+  - gRPC/multilanguage arms not run locally (images predate a8205c5c) — rebuild + run on Linux.
+  - Broker image still 4.2.0 (4.3 assignment-interval arms #[ignore]d).
+  - Not done: interceptor/ClusterResourceListener/header-serializer API gaps, GroupAuthorizer
+    consumer tests, consumer metrics tests, stale-doc sweep.
+
 ## Common rules (all phases)
 
 - **Test-only.** Production code changes only if a test exposes a genuine
@@ -315,3 +336,4 @@ state (seen once in Phase 17; removed manually) — reap them on the failure pat
 - Phase 19 / Actor 83: 891571d0 (PROD fix: producer/consumer honor metadata.recovery.strategy + trigger, Java defaults), 63cca50d (4 rebootstrap tests), 24e03b13 (TransactionsBounceTest full scale), 97d7686f (epoch bump TV2). Critic 83 (2nd run; 1st stalled): 1 finding (admin ignores recovery strategy) → logged as divergence (admin scope). Phase 19 DONE.
 - Phase 21 / Actor 85: fa4da3ed, b0ee9451, e61fe83a (TV0/TV1 arms: ProducerIntegrationTest, TransactionsExpirationTest, BumpTransactionalEpochWithTV2Disabled; TV0 downgrade works). Critic 85: 1 finding (downgrade wait not pinned per broker) → fixed 8602c84b. Open: TV2Disabled 1/30 ProducerFenced flake before the fix (not reproduced since; likely broker-side race Java shares). Phase 21 DONE.
 - Phase 22 / Actor 86: 229f2ff5, 87295798, 8c41e7fb, 85cc188c, 5ab5b036, b5c2a0cb (admin-created topics + leader wait where Java pre-creates; exact subscription asserts restored). Critic 86: clean. Phase 22 DONE.
+- Final checkpoint after Phase 22: unit 4037 ok; integration 302 passed / 1 failed (max_poll_interval_ms_shorter_than_poll_timeout, passes 6/6 alone) / 2 ignored.
