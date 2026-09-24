@@ -5916,8 +5916,12 @@ static void test_mock_admin_b5a_null_out_result(void) {
  *
  * Two of these eight RPCs are declined by Java's own `MockAdminClient`
  * (`describeUserScramCredentials` / `alterUserScramCredentials`,
- * MockAdminClient.java:1251-1259), so their success drains are unreachable
- * here and are covered by the Rust FFI unit tests against hand-built fixtures.
+ * MockAdminClient.java:1251-1259), so only their whole-call refusal is
+ * reachable here. `describeUserScramCredentials` now returns a handle backing
+ * Java's three views (all() / users() / description(user), each with distinct
+ * RESOURCE_NOT_FOUND semantics); those success-path accessors need a resolved
+ * result the mock never produces, so they are covered by the Rust FFI unit
+ * tests against hand-built fixtures and by the broker-backed integration test.
  * The other six *are* implemented by the mock, so they are exercised end to
  * end: a token is created, described, renewed and expired using the HMAC the
  * broker handed back, and the feature levels are seeded and then read and
@@ -6059,7 +6063,11 @@ static void on_describe_user_scram_credentials(kafka_admin_DescribeUserScramCred
     acl_async_result_t *r = (acl_async_result_t *)user_data;
     r->had_result = result != NULL;
     if (result != NULL) {
-        r->count = kafka_admin_DescribeUserScramCredentialsResult_count(result);
+        /* The mock always faults describeUserScramCredentials so this branch is
+         * not reached here; the three views (all()/users()/description()) are
+         * exercised by the Rust FFI unit tests and the broker-backed integration
+         * test. */
+        r->count = kafka_admin_DescribeUserScramCredentialsResult_all_count(result);
         kafka_admin_DescribeUserScramCredentialsResult_destroy(result);
     }
     record_async_error(r, error);
