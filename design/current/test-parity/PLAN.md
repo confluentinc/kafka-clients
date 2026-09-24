@@ -246,6 +246,16 @@ testTransactionWithInvalidSendAndEndTxnRequestSent / testTransactionWithSendOffs
 if it needs no broker internals, `TransactionsTest.testEmptyAbortAfterCommit` TV1 row. Update
 the "TV2 only" comments left in Phases 5-9.
 
+## Phase 22 — Auto-create races in pre-existing consumer tests (Actor/Critic 86)
+
+Final checkpoint (after Phase 21): 302 passed / 1 failed —
+`plaintext_consumer_poll_test::test_async_consumer_max_poll_records` (record timestamp +1300ms
+→ reordered records; passes 5/5 alone). The test produces into an auto-created topic on the
+3-broker pooled cluster; Java's `@BeforeEach` creates the topic via `createTopic` (waits for
+all brokers). Same root cause as Phase 2 (NOT_LEADER retries reorder with idempotence off).
+Fix: in the plaintext_consumer_* suites, where Java pre-creates the topic, create it via
+admin + `wait_for_partition_leaders` before producing (shared helper per file).
+
 ## Later (not yet scheduled)
 
 Stale-rationale skips (consumer metrics tests, compressed halves, rebalance
