@@ -1255,10 +1255,8 @@ async fn test_async_consumer_poll_eventually_returns_records_with_zero_timeout()
 /// we drive `poll(Duration::ZERO)` in a loop and check for the error)
 /// eventually surfaces `NoOffsetForPartition`.
 ///
-/// The Rust error variant flattens through `Error::LocalIllegalState`
-/// per Phase-1 design (see `src/consumer/errors.rs:237-265`); we
-/// assert against the canonical message substring "Undefined offset
-/// with no reset policy", as the pilot assign test does.
+/// Asserts the typed `Error::ConsumerNoOffsetForPartition` variant with
+/// its exact message and partition set.
 ///
 /// Translation deviation: Java uses `poll(Duration.ZERO)` in a tight
 /// loop (`waitForPollThrowException`). Calling `poll(Duration::ZERO)`
@@ -1295,27 +1293,34 @@ async fn test_async_consumer_no_offset_for_partition_error_on_poll_zero() {
     // uses `poll(Duration.ZERO)` (Java `TestUtils.waitForCondition`
     // default 15s). The Rust translation uses a small non-zero
     // timeout per poll (see translation-deviation rustdoc above).
-    let deadline = Instant::now() + Duration::from_secs(60);
-    let mut saw_no_offset = false;
+    //
+    // `waitForPollThrowException` (ClientsTestUtils.java:348-360) runs under
+    // `TestUtils.waitForCondition`'s default 15s and returns `false` — i.e.
+    // keeps polling — on an exception that is not a
+    // `NoOffsetForPartitionException`, so a non-matching error is recorded
+    // and retried rather than failing immediately.
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let mut no_offset_err = None;
+    let mut last_other_err = None;
     while Instant::now() < deadline {
         match consumer.poll(Duration::from_millis(50)).await {
             Ok(_) => continue,
-            Err(err) => {
-                let msg = err.to_string();
-                if msg.contains("Undefined offset with no reset policy") {
-                    saw_no_offset = true;
-                    break;
-                }
-                // Re-surface any other error class — Java fails on
-                // anything other than `NoOffsetForPartitionException`.
-                panic!("expected NoOffsetForPartition error, got: {msg}");
+            Err(Error::ConsumerNoOffsetForPartition(e)) => {
+                no_offset_err = Some(e);
+                break;
             },
+            Err(other) => last_other_err = Some(other),
         }
     }
-    assert!(
-        saw_no_offset,
-        "expected poll() to surface NoOffsetForPartition within 60s deadline"
+    let e = no_offset_err
+        .unwrap_or_else(|| panic!("Continuous poll not fail (last non-matching error: {last_other_err:?})"));
+    // Raised by `SubscriptionState.resetInitializingPositions`
+    // (SubscriptionState.java:882) through the `Collection` constructor.
+    assert_eq!(
+        e.message(),
+        format!("Undefined offset with no reset policy for partitions: [{tp}]")
     );
+    assert_eq!(e.partitions(), &std::collections::HashSet::from([tp.clone()]));
 
     consumer.close().await.expect("consumer close should succeed");
 }
