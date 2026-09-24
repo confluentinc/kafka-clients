@@ -39,7 +39,11 @@
 //!   `testValidBeforeAndAfterTimestampsWithinThreshold` (each of the last three
 //!   runs both `timestampConfigProvider` cases in one test),
 //!   `testNonBlockingProducer` (buffer-exhaustion half native only),
-//!   `testSendRecordBatchWithMaxRequestSizeAndHigher`.
+//!   `testSendRecordBatchWithMaxRequestSizeAndHigher`,
+//!   `testPartitionsForTimeoutErrorWhenTopicDoesNotExist`. The exact
+//!   `waitOnMetadata` messages that `testSendTimeoutErrorMessageWhenTopicDoesNotExist`
+//!   and `testSendTimeoutErrorWhenPartitionDoesNotExist` pin are asserted by
+//!   `test_produce_to_non_existent_topic` / `test_produce_invalid_partition`.
 //!
 //! When the `multilanguage-tests` feature is enabled, each test is
 //! instantiated three times via [`multilanguage_test!`] — once per
@@ -684,10 +688,7 @@ async fn send_before_and_after_partition_expansion_inner<F: ProducerBackendFacto
     let expected_message = format!(
         "Partition {partition1} of topic {topic} with partition count 1 is not present in metadata after 5000 ms."
     );
-    assert!(
-        err.to_string().contains(&expected_message),
-        "Expected message {expected_message:?}, got: {err}"
-    );
+    assert_eq!(err.message(), expected_message);
 
     admin
         .create_partitions(&HashMap::from([(topic.clone(), NewPartitions::increase_to(2))]))
@@ -1327,7 +1328,7 @@ async fn produce_to_non_existent_topic_inner<F: ProducerBackendFactory>(ctx: &mu
     let producer = factory.create(config).await.expect("Failed to create producer");
 
     let topic = ctx.topic("never_existed");
-    let record = ProducerRecord::with_key(topic, Some(b("key")), Some(b("value")));
+    let record = ProducerRecord::with_key(topic.clone(), Some(b("key")), Some(b("value")));
     let future = producer.send(record).await.expect("send should accept the request");
     let result = future.get_with_timeout(Duration::from_secs(30)).await;
 
@@ -1337,6 +1338,11 @@ async fn produce_to_non_existent_topic_inner<F: ProducerBackendFactory>(ctx: &mu
         matches!(err, confluent_kafka::common::Error::Timeout(_)),
         "Expected Timeout for non-existent topic, got: {err:?}"
     );
+    // The message is `KafkaProducer.waitOnMetadata`'s, pinned exactly by
+    // `PlaintextProducerSendTest.testSendTimeoutErrorMessageWhenTopicDoesNotExist`
+    // (`PlaintextProducerSendTest.scala:152`) — here with this test's
+    // `max.block.ms` of 5000.
+    assert_eq!(err.message(), format!("Topic {topic} not present in metadata after 5000 ms."));
 
     producer.close().await.expect("close should succeed");
 }
@@ -1393,7 +1399,7 @@ async fn produce_invalid_partition_inner<F: ProducerBackendFactory>(ctx: &mut Te
         .expect("warmup send should succeed");
 
     // Now send to partition 99 which doesn't exist.
-    let record = ProducerRecord::with_partition_key(topic, Some(99), Some(b("k")), Some(b("v")))
+    let record = ProducerRecord::with_partition_key(topic.clone(), Some(99), Some(b("k")), Some(b("v")))
         .expect("record creation should succeed");
     let future = producer.send(record).await.expect("send should accept the request");
     let result = future.get_with_timeout(Duration::from_secs(30)).await;
@@ -1403,6 +1409,22 @@ async fn produce_invalid_partition_inner<F: ProducerBackendFactory>(ctx: &mut Te
     assert!(
         matches!(err, confluent_kafka::common::Error::Timeout(_)),
         "Expected Timeout for invalid partition, got: {err:?}"
+    );
+    // `KafkaProducer.waitOnMetadata`'s message, pinned exactly by
+    // `PlaintextProducerSendTest.testSendTimeoutErrorWhenPartitionDoesNotExist`
+    // (`PlaintextProducerSendTest.scala:171`). The topic was auto-created by
+    // the warmup send, so its partition count is the cluster's
+    // `num.partitions`; read it back rather than hard-coding the broker default.
+    let partition_count = producer
+        .partitions_for(&topic)
+        .await
+        .expect("partitions_for existing topic")
+        .len();
+    assert_eq!(
+        err.message(),
+        format!(
+            "Partition 99 of topic {topic} with partition count {partition_count} is not present in metadata after 5000 ms."
+        )
     );
 
     producer.close().await.expect("close should succeed");
@@ -2181,6 +2203,39 @@ async fn produce_partitions_for_inner<F: ProducerBackendFactory>(ctx: &mut TestC
     producer.close().await.expect("close");
 }
 
+/// Translated from `PlaintextProducerSendTest.testPartitionsForTimeoutErrorWhenTopicDoesNotExist`
+/// (`PlaintextProducerSendTest.scala:178-185`). Java's only parameter set is
+/// `("classic", "false")` (`protocolAndAutoCreateTopicProviders`,
+/// `PlaintextProducerSendTest.scala:352-356`), i.e. auto-topic-creation
+/// disabled, hence the `no_auto_create_cluster_config()` cluster. The
+/// group-protocol parameter is irrelevant to a producer.
+///
+/// `partitionsFor` on a topic that never appears waits `max.block.ms` (500)
+/// in `waitOnMetadata` and throws `TimeoutException` directly (not wrapped in
+/// an `ExecutionException`) with the exact message asserted below.
+async fn partitions_for_timeout_error_when_topic_does_not_exist_inner<F: ProducerBackendFactory>(
+    ctx: &mut TestContext,
+    factory: &F,
+) {
+    let mut config = make_config(&bootstrap_for(factory, ctx));
+    config.insert("max.block.ms".to_string(), "500".to_string());
+    let producer = factory.create(config).await.expect("Failed to create producer");
+
+    let topic = ctx.topic("unexisting-topic");
+    let err = producer
+        .partitions_for(&topic)
+        .await
+        .expect_err("partitions_for on a non-existent topic should fail");
+    assert!(
+        matches!(err, Error::Timeout(_)),
+        "{} backend: expected Timeout, got: {err:?}",
+        factory.name()
+    );
+    assert_eq!(err.message(), format!("Topic {topic} not present in metadata after 500 ms."));
+
+    producer.close().await.expect("close");
+}
+
 /// End-to-end check on the Milestone-12 producer `metrics()` wiring. For the
 /// Python / C backends the snapshot crosses the `Metrics` RPC, the binding, and
 /// the `kafka_producer_MetricMap_t` FFI surface before being rebuilt
@@ -2432,6 +2487,12 @@ crate::multilanguage_test!(
 );
 #[cfg(feature = "multilanguage-tests")]
 crate::multilanguage_test!(test_produce_partitions_for, produce_partitions_for_inner);
+#[cfg(feature = "multilanguage-tests")]
+crate::multilanguage_test!(
+    test_partitions_for_timeout_error_when_topic_does_not_exist,
+    partitions_for_timeout_error_when_topic_does_not_exist_inner,
+    no_auto_create_cluster_config()
+);
 // `testCompression` is native-only, also under `multilanguage-tests` — see
 // `compression_inner` for why the gRPC backends cannot run it.
 #[cfg(feature = "multilanguage-tests")]
@@ -2838,6 +2899,14 @@ mod rust_only_fallback {
     #[tokio::test(flavor = "multi_thread")]
     async fn test_produce_partitions_for() {
         produce_partitions_for_inner(&mut ctx().await, &RustNativeFactory).await;
+    }
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_partitions_for_timeout_error_when_topic_does_not_exist() {
+        partitions_for_timeout_error_when_topic_does_not_exist_inner(
+            &mut no_auto_create_ctx().await,
+            &RustNativeFactory,
+        )
+        .await;
     }
     #[tokio::test(flavor = "multi_thread")]
     async fn test_produce_and_check_metrics() {
