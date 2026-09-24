@@ -28,6 +28,7 @@ kafka_error_class! {
     ///
     /// Java `extends` chain:
     ///    `InvalidRecordException`
+    #[doc(alias = "org.apache.kafka.common.InvalidRecordException")]
     InvalidRecordError,
     code: Errors::InvalidRecord,
     extends: [

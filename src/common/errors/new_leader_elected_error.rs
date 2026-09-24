@@ -25,6 +25,7 @@ kafka_error_class! {
     ///
     /// Java `extends` chain:
     ///    `NewLeaderElectedException` -> `ApiException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.NewLeaderElectedException")]
     NewLeaderElectedError,
     code: Errors::NewLeaderElected,
     extends: [

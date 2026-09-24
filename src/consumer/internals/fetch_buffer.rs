@@ -54,6 +54,7 @@ use crate::consumer::internals::CompletedFetch;
 /// Corresponds to
 /// `org.apache.kafka.clients.consumer.internals.FetchBuffer`.
 #[derive(Debug)]
+#[doc(alias = "org.apache.kafka.clients.consumer.internals.FetchBuffer")]
 pub(crate) struct FetchBuffer {
     inner: Mutex<FetchBufferInner>,
     notify: Notify,
@@ -69,6 +70,7 @@ struct FetchBufferInner {
 
 impl FetchBuffer {
     /// Constructs an empty fetch buffer.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.FetchBuffer#FetchBuffer")]
     pub(crate) fn new() -> Self {
         Self {
             inner: Mutex::new(FetchBufferInner::default()),
@@ -81,6 +83,7 @@ impl FetchBuffer {
     /// the user.
     ///
     /// Translates `boolean isEmpty()`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.FetchBuffer#isEmpty")]
     pub(crate) fn is_empty(&self) -> bool {
         let guard = self.inner.lock().expect("FetchBuffer mutex poisoned");
         guard.completed_fetches.is_empty()
@@ -89,6 +92,7 @@ impl FetchBuffer {
     /// Returns true if any completed fetch matches the predicate.
     ///
     /// Translates `boolean hasCompletedFetches(Predicate)`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.FetchBuffer#hasCompletedFetches")]
     pub(crate) fn has_completed_fetches(&self, predicate: impl FnMut(&CompletedFetch) -> bool) -> bool {
         let guard = self.inner.lock().expect("FetchBuffer mutex poisoned");
         guard.completed_fetches.iter().any(predicate)
@@ -97,6 +101,7 @@ impl FetchBuffer {
     /// Adds a single completed fetch to the buffer.
     ///
     /// Translates `void add(CompletedFetch)`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.FetchBuffer#add")]
     pub(crate) fn add(&self, completed_fetch: CompletedFetch) {
         self.add_all_impl([completed_fetch]);
     }
@@ -104,6 +109,7 @@ impl FetchBuffer {
     /// Adds all completed fetches in the iterator to the buffer.
     ///
     /// Translates `void addAll(Collection<CompletedFetch>)`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.FetchBuffer#addAll")]
     pub(crate) fn add_all<I>(&self, completed_fetches: I)
     where
         I: IntoIterator<Item = CompletedFetch>,
@@ -135,6 +141,7 @@ impl FetchBuffer {
     /// `None` if the buffer is empty.
     ///
     /// Translates `CompletedFetch poll()`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.FetchBuffer#poll")]
     pub(crate) fn poll(&self) -> Option<CompletedFetch> {
         let mut guard = self.inner.lock().expect("FetchBuffer mutex poisoned");
         guard.completed_fetches.pop_front()
@@ -199,6 +206,7 @@ impl FetchBuffer {
     /// `move_partition_to_end` SubscriptionState nudge fires).
     ///
     /// Translates `void setNextInLineFetch(CompletedFetch)`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.FetchBuffer#setNextInLineFetch")]
     pub(crate) fn set_next_in_line_fetch(&self, fetch: Option<CompletedFetch>) {
         let mut guard = self.inner.lock().expect("FetchBuffer mutex poisoned");
         if let Some(prev) = guard.next_in_line_fetch.as_mut() {
@@ -228,6 +236,7 @@ impl FetchBuffer {
     ///    step 3 either set the flag, or fired `notify_waiters` which we
     ///    now hold a permit for),
     /// 4. Race the (already-registered) future against the timeout.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.FetchBuffer#awaitWakeup")]
     pub(crate) async fn await_wakeup(&self, timeout: Duration) {
         // Check / clear the woken flag first — short-circuit if a
         // wakeup happened before we got here.
@@ -254,6 +263,7 @@ impl FetchBuffer {
     /// Forces any thread waiting in [`Self::await_wakeup`] to return.
     ///
     /// Translates `void wakeup()`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.FetchBuffer#wakeup")]
     pub(crate) fn wakeup(&self) {
         self.wokenup.store(true, Ordering::SeqCst);
         self.notify.notify_waiters();
@@ -262,6 +272,7 @@ impl FetchBuffer {
     /// Drops every buffered fetch whose partition is not in the retain set.
     ///
     /// Translates `void retainAll(Set<TopicPartition>)`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.FetchBuffer#retainAll")]
     pub(crate) fn retain_all(&self, partitions: &HashSet<TopicPartition>) {
         let mut guard = self.inner.lock().expect("FetchBuffer mutex poisoned");
         guard.completed_fetches.retain_mut(|cf| {
@@ -288,6 +299,7 @@ impl FetchBuffer {
     /// either in the queue or the next-in-line slot.
     ///
     /// Translates `Set<TopicPartition> bufferedPartitions()`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.FetchBuffer#bufferedPartitions")]
     pub(crate) fn buffered_partitions(&self) -> HashSet<TopicPartition> {
         let guard = self.inner.lock().expect("FetchBuffer mutex poisoned");
         let mut out: HashSet<TopicPartition> = HashSet::new();
@@ -305,6 +317,7 @@ impl FetchBuffer {
     /// Drops all buffered data and marks the buffer closed. Idempotent.
     ///
     /// Translates `void close()` (Java's `IdempotentCloser`).
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.FetchBuffer#close")]
     pub(crate) fn close(&self) {
         let already_closed = {
             let mut guard = self.inner.lock().expect("FetchBuffer mutex poisoned");
@@ -356,6 +369,7 @@ mod tests {
     /// `has_completed_fetches(|_| true)` plus a `poll().unwrap()` that
     /// checks the popped value's partition.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.FetchBufferTest#testBasicPeekAndPoll")]
     fn test_basic_peek_and_poll() {
         let buffer = FetchBuffer::new();
         assert!(buffer.is_empty());
@@ -369,6 +383,7 @@ mod tests {
 
     /// Translated from `FetchBufferTest.testCloseClearsData`.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.FetchBufferTest#testCloseClearsData")]
     fn test_close_clears_data() {
         let buffer = FetchBuffer::new();
         assert!(!buffer.has_next_in_line_fetch());
@@ -387,6 +402,7 @@ mod tests {
 
     /// Translated from `FetchBufferTest.testBufferedPartitions`.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.FetchBufferTest#testBufferedPartitions")]
     fn test_buffered_partitions() {
         let buffer = FetchBuffer::new();
         buffer.set_next_in_line_fetch(Some(cf("topic-a", 0)));
@@ -415,6 +431,7 @@ mod tests {
 
     /// Translated from `FetchBufferTest.testAddAllAndRetainAll`.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.FetchBufferTest#testAddAllAndRetainAll")]
     fn test_add_all_and_retain_all() {
         let buffer = FetchBuffer::new();
         buffer.set_next_in_line_fetch(Some(cf("topic-a", 0)));
@@ -443,6 +460,7 @@ mod tests {
     /// Translated from `FetchBufferTest.testWakeup`. A separate tokio
     /// task awaits with a long timeout; the main task wakes it up.
     #[tokio::test(flavor = "current_thread")]
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.FetchBufferTest#testWakeup")]
     async fn test_wakeup() {
         let buffer = Arc::new(FetchBuffer::new());
         let buffer_for_task = Arc::clone(&buffer);

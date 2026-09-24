@@ -24,6 +24,7 @@ use std::io;
 /// A struct that implements both Readable and Writable traits for a byte buffer.
 ///
 /// This provides a mutable view into a byte slice with position tracking.
+#[doc(alias = "org.apache.kafka.common.protocol.ByteBufferAccessor")]
 pub struct ByteBufferAccessor {
     buffer: Vec<u8>,
     position: usize,
@@ -35,6 +36,7 @@ impl ByteBufferAccessor {
     /// Translates Java's sole constructor `ByteBufferAccessor(ByteBuffer buf)`
     /// (`ByteBufferAccessor.java:27`). A caller that wants Java's
     /// `ByteBuffer.allocate(n)` passes `Vec::with_capacity(n)`.
+    #[doc(alias = "org.apache.kafka.common.protocol.ByteBufferAccessor#ByteBufferAccessor")]
     pub fn new(bytes: Vec<u8>) -> Self {
         ByteBufferAccessor { buffer: bytes, position: 0 }
     }
@@ -60,6 +62,7 @@ impl ByteBufferAccessor {
     }
 
     /// Get a reference to the underlying buffer.
+    #[doc(alias = "org.apache.kafka.common.protocol.ByteBufferAccessor#buffer")]
     pub fn buffer(&self) -> &[u8] {
         &self.buffer
     }
@@ -80,6 +83,7 @@ impl ByteBufferAccessor {
     }
 
     /// Flip the buffer for reading - resets position to 0.
+    #[doc(alias = "org.apache.kafka.common.protocol.ByteBufferAccessor#flip")]
     pub fn flip(&mut self) {
         self.position = 0;
     }

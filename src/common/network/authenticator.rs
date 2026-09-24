@@ -36,6 +36,7 @@ use std::pin::Pin;
 /// the Java interface are omitted because they require `KafkaPrincipal` and
 /// `KafkaPrincipalBuilder` which are server-side constructs not needed for the
 /// client-only PLAINTEXT path.
+#[doc(alias = "org.apache.kafka.common.network.Authenticator")]
 pub trait Authenticator: Send + Sync {
     /// Implements any authentication mechanism.
     ///
@@ -50,6 +51,7 @@ pub trait Authenticator: Send + Sync {
     /// Returns an error if authentication fails due to invalid credentials or
     /// other security configuration errors, or if read/write fails due to an
     /// I/O error.
+    #[doc(alias = "org.apache.kafka.common.network.Authenticator#authenticate")]
     fn authenticate<'a>(
         &'a mut self,
         transport: &'a mut (dyn TransportLayer + Send),
@@ -61,11 +63,13 @@ pub trait Authenticator: Send + Sync {
     /// authentication error thrown from a prior `authenticate()` call.
     ///
     /// Default implementation is a no-op.
+    #[doc(alias = "org.apache.kafka.common.network.Authenticator#handleAuthenticationFailure")]
     fn handle_authentication_failure(&mut self) -> io::Result<()> {
         Ok(())
     }
 
     /// Returns `true` if authentication is complete.
+    #[doc(alias = "org.apache.kafka.common.network.Authenticator#complete")]
     fn complete(&self) -> bool;
 
     /// Begins re-authentication.
@@ -74,6 +78,7 @@ pub trait Authenticator: Send + Sync {
     /// apply/is not supported.
     ///
     /// Default implementation is a no-op.
+    #[doc(alias = "org.apache.kafka.common.network.Authenticator#reauthenticate")]
     fn reauthenticate(&mut self) -> io::Result<()> {
         Ok(())
     }
@@ -84,6 +89,7 @@ pub trait Authenticator: Send + Sync {
     /// only on the server-side.
     ///
     /// Default implementation returns `None`.
+    #[doc(alias = "org.apache.kafka.common.network.Authenticator#serverSessionExpirationTimeNanos")]
     fn server_session_expiration_time_nanos(&self) -> Option<u64> {
         None
     }
@@ -95,6 +101,7 @@ pub trait Authenticator: Send + Sync {
     /// client-side.
     ///
     /// Default implementation returns `None`.
+    #[doc(alias = "org.apache.kafka.common.network.Authenticator#clientSessionReauthenticationTimeNanos")]
     fn client_session_reauthentication_time_nanos(&self) -> Option<u64> {
         None
     }
@@ -103,6 +110,7 @@ pub trait Authenticator: Send + Sync {
     /// this session from the perspective of this instance, if applicable.
     ///
     /// Default implementation returns `None`.
+    #[doc(alias = "org.apache.kafka.common.network.Authenticator#reauthenticationLatencyMs")]
     fn reauthentication_latency_ms(&self) -> Option<u64> {
         None
     }
@@ -111,6 +119,7 @@ pub trait Authenticator: Send + Sync {
     /// re-authentication that is unrelated to re-authentication, if any.
     ///
     /// Default implementation returns `None`.
+    #[doc(alias = "org.apache.kafka.common.network.Authenticator#pollResponseReceivedDuringReauthentication")]
     fn poll_response_received_during_reauthentication(&mut self) -> Option<NetworkReceive> {
         None
     }
@@ -119,6 +128,7 @@ pub trait Authenticator: Send + Sync {
     /// client has indicated that it supports re-authentication.
     ///
     /// Default implementation returns `false`.
+    #[doc(alias = "org.apache.kafka.common.network.Authenticator#connectedClientSupportsReauthentication")]
     fn connected_client_supports_reauthentication(&self) -> bool {
         false
     }

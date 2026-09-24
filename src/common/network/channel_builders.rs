@@ -45,6 +45,7 @@ use crate::common::utils::LogContext;
 /// which has no instance state, so it becomes a unit struct hosting its
 /// statics as associated items.
 #[non_exhaustive]
+#[doc(alias = "org.apache.kafka.common.network.ChannelBuilders")]
 pub struct ChannelBuilders;
 
 impl ChannelBuilders {
@@ -64,6 +65,7 @@ impl ChannelBuilders {
     /// # Errors
     ///
     /// Returns an error if required configs are missing for the given protocol.
+    #[doc(alias = "org.apache.kafka.common.network.ChannelBuilders#clientChannelBuilder")]
     pub fn client_channel_builder(
         security_protocol: SecurityProtocol,
         ssl_config: Option<&SslConfigs>,

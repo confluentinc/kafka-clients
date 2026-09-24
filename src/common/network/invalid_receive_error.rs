@@ -36,12 +36,14 @@ use crate::common::error::{ErrorCode, ErrorHierarchy, ErrorMessage, ErrorSource}
 /// [`Error`](crate::common::Error) variant, so it answers `is_kafka_error()`
 /// like every other translated `KafkaException` descendant.
 #[derive(Clone, Debug)]
+#[doc(alias = "org.apache.kafka.common.network.InvalidReceiveException")]
 pub struct InvalidReceiveError {
     message: String,
 }
 
 impl InvalidReceiveError {
     /// Creates a new `InvalidReceiveError` with the given message.
+    #[doc(alias = "org.apache.kafka.common.network.InvalidReceiveException#InvalidReceiveException")]
     pub fn new(message: impl Into<String>) -> Self {
         Self { message: message.into() }
     }

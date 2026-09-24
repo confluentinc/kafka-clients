@@ -90,6 +90,7 @@ use crate::consumer::internals::SubscriptionState;
 /// methods. The struct holds `Arc<Mutex<SubscriptionState>>` only to
 /// reproduce Java's `pausedPartitions()` mutation that runs around
 /// `on_partitions_revoked` / `on_partitions_lost`.
+#[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerRebalanceListenerInvoker")]
 pub(crate) struct ConsumerRebalanceListenerInvoker {
     subscriptions: Arc<Mutex<SubscriptionState>>,
     /// Java: `RebalanceCallbackMetricsManager metricsManager`. `None` until
@@ -107,6 +108,9 @@ impl ConsumerRebalanceListenerInvoker {
     /// handled by the `log` crate). The `RebalanceCallbackMetricsManager` and
     /// `Time` are wired post-construction via [`Self::set_metrics`] (M4
     /// `set_*_metrics_manager` precedent); until then no latency is recorded.
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.ConsumerRebalanceListenerInvoker#ConsumerRebalanceListenerInvoker"
+    )]
     pub(crate) fn new(subscriptions: Arc<Mutex<SubscriptionState>>) -> Self {
         Self { subscriptions, metrics_manager: None, time: Arc::new(SystemTime) }
     }
@@ -132,6 +136,9 @@ impl ConsumerRebalanceListenerInvoker {
     /// call. The caller in `AsyncKafkaConsumer` is responsible for
     /// already having dropped the `SubscriptionState` guard before
     /// invoking this method (per §16 and §31).
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.ConsumerRebalanceListenerInvoker#invokePartitionsAssigned"
+    )]
     pub(crate) async fn invoke_partitions_assigned(
         &self,
         listener: &Arc<dyn ConsumerRebalanceListener>,
@@ -172,6 +179,9 @@ impl ConsumerRebalanceListenerInvoker {
     ///
     /// Mirrors Java's pre-callback bookkeeping: removes the paused flag
     /// from any partition being revoked, before invoking the listener.
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.ConsumerRebalanceListenerInvoker#invokePartitionsRevoked"
+    )]
     pub(crate) async fn invoke_partitions_revoked(
         &self,
         listener: &Arc<dyn ConsumerRebalanceListener>,
@@ -218,6 +228,7 @@ impl ConsumerRebalanceListenerInvoker {
     }
 
     /// Java: `Exception invokePartitionsLost(SortedSet<TopicPartition>)`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerRebalanceListenerInvoker#invokePartitionsLost")]
     pub(crate) async fn invoke_partitions_lost(
         &self,
         listener: &Arc<dyn ConsumerRebalanceListener>,

@@ -69,6 +69,7 @@ impl std::fmt::Debug for ProduceResult {
 /// This separation is critical because `ProducerBatch.completeFutureAndFireCallbacks()`
 /// calls `set()` first, then executes user callbacks, then calls `done()`. External
 /// waiters (e.g. `flush()`) are intentionally blocked until after all callbacks complete.
+#[doc(alias = "org.apache.kafka.clients.producer.internals.ProduceRequestResult")]
 pub struct ProduceRequestResult {
     /// The watch channel sender. Sends `true` when `done()` is called.
     tx: watch::Sender<bool>,
@@ -95,6 +96,7 @@ impl ProduceRequestResult {
     /// # Arguments
     ///
     /// * `topic_partition` - The topic and partition to which this record set was sent
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.ProduceRequestResult#ProduceRequestResult")]
     pub fn new(topic_partition: TopicPartition) -> Self {
         let (tx, rx) = watch::channel(false);
         Self {
@@ -119,6 +121,7 @@ impl ProduceRequestResult {
     /// * `log_append_time` - The log append time or -1 if CreateTime is being used
     /// * `errors_by_index` - Function mapping the batch index to a typed error,
     ///   or `None` if the response was successful
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.ProduceRequestResult#set")]
     pub fn set(
         &self,
         base_offset: i64,
@@ -138,6 +141,7 @@ impl ProduceRequestResult {
     /// # Panics
     ///
     /// Panics if `set` was not called before `done`.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.ProduceRequestResult#done")]
     pub fn done(&self) {
         {
             let guard = self.result.lock().unwrap();
@@ -152,6 +156,7 @@ impl ProduceRequestResult {
     /// This is used when a batch is split into multiple batches — in some cases
     /// like flush(), the original batch's result should not complete until all
     /// split batches have completed.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.ProduceRequestResult#addDependent")]
     pub fn add_dependent(&self, dependent_result: Arc<ProduceRequestResult>) {
         let mut deps = self.dependent_results.lock().unwrap();
         deps.push(dependent_result);
@@ -187,6 +192,7 @@ impl ProduceRequestResult {
     /// This method is used by flush() to ensure all split batches have completed
     /// before returning. This method waits for all dependent
     /// [`ProduceRequestResult`]s that were created when the batch was split.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.ProduceRequestResult#awaitAllDependents")]
     pub async fn await_all_dependents(self: &Arc<Self>) {
         let mut to_wait: VecDeque<Arc<ProduceRequestResult>> = VecDeque::new();
         to_wait.push_back(Arc::clone(self));
@@ -209,11 +215,13 @@ impl ProduceRequestResult {
     /// The base offset for the request (the first offset in the record set).
     ///
     /// Returns `None` if the result has not been set yet.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.ProduceRequestResult#baseOffset")]
     pub fn base_offset(&self) -> Option<i64> {
         self.result.lock().unwrap().as_ref().map(|r| r.base_offset)
     }
 
     /// Return true if log append time is being used for this topic.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.ProduceRequestResult#hasLogAppendTime")]
     pub fn has_log_append_time(&self) -> bool {
         self.result
             .lock()
@@ -223,6 +231,7 @@ impl ProduceRequestResult {
     }
 
     /// The log append time or -1 if CreateTime is being used.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.ProduceRequestResult#logAppendTime")]
     pub fn log_append_time(&self) -> i64 {
         self.result
             .lock()
@@ -236,6 +245,7 @@ impl ProduceRequestResult {
     /// Returns `None` if there was no error for the given batch index.
     /// Returns a typed [`Error`] preserving error code information
     /// needed by `FutureRecordMetadata.value_or_error()`.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.ProduceRequestResult#error")]
     pub fn error(&self, batch_index: i32) -> Option<Error> {
         let guard = self.result.lock().unwrap();
         match guard.as_ref() {
@@ -248,6 +258,7 @@ impl ProduceRequestResult {
     }
 
     /// The topic and partition to which the record was appended.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.ProduceRequestResult#topicPartition")]
     pub fn topic_partition(&self) -> &TopicPartition {
         &self.topic_partition
     }
@@ -256,6 +267,7 @@ impl ProduceRequestResult {
     ///
     /// This method only checks if THIS request has completed and not its dependent results.
     /// Completion means that `done()` has been called (not just `set()`).
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.ProduceRequestResult#completed")]
     pub fn completed(&self) -> bool {
         *self.rx.borrow()
     }

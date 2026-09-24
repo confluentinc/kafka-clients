@@ -35,6 +35,7 @@ use super::TransactionResult;
 ///
 /// Corresponds to `org.apache.kafka.common.requests.EndTxnRequest`.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.EndTxnRequest")]
 pub struct EndTxnRequest {
     data: EndTxnRequestData,
     version: i16,
@@ -54,11 +55,13 @@ impl EndTxnRequest {
     /// [`Self::parse`]. This is `pub` because the dispatch enum in
     /// `abstract_request.rs` constructs variants directly, as it does for every
     /// other request type.
+    #[doc(alias = "org.apache.kafka.common.requests.EndTxnRequest#EndTxnRequest")]
     pub fn new(data: EndTxnRequestData, version: i16) -> Self {
         Self { data, version }
     }
 
     /// Returns a reference to the underlying data.
+    #[doc(alias = "org.apache.kafka.common.requests.EndTxnRequest#data")]
     pub fn data(&self) -> &EndTxnRequestData {
         &self.data
     }
@@ -81,6 +84,7 @@ impl EndTxnRequest {
     /// Whether this request commits or aborts the transaction.
     ///
     /// Corresponds to Java's `result()`.
+    #[doc(alias = "org.apache.kafka.common.requests.EndTxnRequest#result")]
     pub fn result(&self) -> TransactionResult {
         if self.data.committed {
             TransactionResult::Commit
@@ -91,6 +95,7 @@ impl EndTxnRequest {
 
     /// Builds the canonical error response for this request, matching Java's
     /// `EndTxnRequest.getErrorResponse(throttleTimeMs, Throwable)`.
+    #[doc(alias = "org.apache.kafka.common.requests.EndTxnRequest#getErrorResponse")]
     pub fn get_error_response(&self, throttle_time_ms: i32, error: &Errors) -> ConcreteResponse {
         let mut response = EndTxnResponseData::new();
         response.set_error_code(error.code()).set_throttle_time_ms(throttle_time_ms);
@@ -102,6 +107,7 @@ impl EndTxnRequest {
     /// # Errors
     ///
     /// Returns an error if parsing fails.
+    #[doc(alias = "org.apache.kafka.common.requests.EndTxnRequest#parse")]
     pub fn parse(readable: &mut dyn Readable, version: i16) -> io::Result<Self> {
         let data = EndTxnRequestData::read(readable, version)?;
         Ok(Self::new(data, version))
@@ -118,6 +124,7 @@ impl std::fmt::Display for EndTxnRequest {
 ///
 /// Corresponds to `EndTxnRequest.Builder` in Java.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.EndTxnRequest$Builder")]
 pub struct EndTxnRequestBuilder {
     data: EndTxnRequestData,
     is_transaction_v2_enabled: bool,
@@ -137,6 +144,7 @@ impl EndTxnRequestBuilder {
     /// `AbstractRequest.Builder` machinery for gating unreleased API versions,
     /// which this codebase's `RequestBuilder` has no equivalent of; the two-arg
     /// form passes `false`, and that is the only form the producer uses.
+    #[doc(alias = "org.apache.kafka.common.requests.EndTxnRequest$Builder#Builder")]
     pub fn new(data: EndTxnRequestData, is_transaction_v2_enabled: bool) -> Self {
         Self {
             data,
@@ -313,6 +321,7 @@ mod tests {
     /// Java loops `ApiKeys.END_TXN.allVersions()` with Transaction V2 enabled, so
     /// no clamping occurs and every version is exercised.
     #[test]
+    #[doc(alias = "org.apache.kafka.common.requests.EndTxnRequestTest#testConstructor")]
     fn test_constructor() {
         const THROTTLE_TIME_MS: i32 = 10;
 
@@ -346,6 +355,9 @@ mod tests {
     /// [`EndTxnRequestBuilder::new`]) and Java passes `false`, which is the
     /// default the two-argument form gives.
     #[test]
+    #[doc(
+        alias = "org.apache.kafka.common.requests.EndTxnRequestTest#testEndTxnRequestWithParameterizedTransactionsV2"
+    )]
     fn test_end_txn_request_with_parameterized_transactions_v2() {
         let latest_version = ApiKeys::END_TXN.latest_version();
 

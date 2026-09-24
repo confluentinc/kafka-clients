@@ -25,6 +25,7 @@ kafka_error_class! {
     /// Java `extends` chain:
     ///    `UnsupportedSaslMechanismException` -> `AuthenticationException` ->
     ///   `InvalidConfigurationException` -> `ApiException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.UnsupportedSaslMechanismException")]
     UnsupportedSaslMechanismError,
     code: Errors::UnsupportedSaslMechanism,
     extends: [

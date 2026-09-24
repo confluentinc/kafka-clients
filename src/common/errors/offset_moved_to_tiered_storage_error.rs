@@ -25,6 +25,7 @@ kafka_error_class! {
     /// Java `extends` chain:
     ///    `OffsetMovedToTieredStorageException` -> `ApiException` ->
     ///   `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.OffsetMovedToTieredStorageException")]
     OffsetMovedToTieredStorageError,
     code: Errors::OffsetMovedToTieredStorage,
     extends: [

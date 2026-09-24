@@ -36,6 +36,7 @@ use super::RequestBuilder;
 ///
 /// Corresponds to `org.apache.kafka.common.requests.MetadataRequest`.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.MetadataRequest")]
 pub struct MetadataRequest {
     data: MetadataRequestData,
     version: i16,
@@ -43,11 +44,13 @@ pub struct MetadataRequest {
 
 impl MetadataRequest {
     /// Creates a new `MetadataRequest` from data and version.
+    #[doc(alias = "org.apache.kafka.common.requests.MetadataRequest#MetadataRequest")]
     pub fn new(data: MetadataRequestData, version: i16) -> Self {
         Self { data, version }
     }
 
     /// Returns a reference to the underlying data.
+    #[doc(alias = "org.apache.kafka.common.requests.MetadataRequest#data")]
     pub fn data(&self) -> &MetadataRequestData {
         &self.data
     }
@@ -70,6 +73,7 @@ impl MetadataRequest {
     /// Returns whether this is a request for all topics.
     ///
     /// In version 0, an empty topic list indicates "request metadata for all topics."
+    #[doc(alias = "org.apache.kafka.common.requests.MetadataRequest#isAllTopics")]
     pub fn is_all_topics(&self) -> bool {
         self.data.topics.is_none() || (self.data.topics.as_ref().is_some_and(|t| t.is_empty()) && self.version == 0)
     }
@@ -77,6 +81,7 @@ impl MetadataRequest {
     /// Returns the list of topic names in this request.
     ///
     /// Returns `None` if this is an "all topics" request.
+    #[doc(alias = "org.apache.kafka.common.requests.MetadataRequest#topics")]
     pub fn topics(&self) -> Option<Vec<&str>> {
         if self.is_all_topics() {
             // In version 0, we return None for empty topic list
@@ -97,6 +102,7 @@ impl MetadataRequest {
     /// Returns the list of topic IDs in this request.
     ///
     /// Returns empty if this is an all-topics request or version < 10.
+    #[doc(alias = "org.apache.kafka.common.requests.MetadataRequest#topicIds")]
     pub fn topic_ids(&self) -> Vec<Uuid> {
         if self.is_all_topics() || self.version < 10 {
             Vec::new()
@@ -106,11 +112,13 @@ impl MetadataRequest {
     }
 
     /// Returns whether auto-creation of topics is allowed.
+    #[doc(alias = "org.apache.kafka.common.requests.MetadataRequest#allowAutoTopicCreation")]
     pub fn allow_auto_topic_creation(&self) -> bool {
         self.data.allow_auto_topic_creation
     }
 
     /// Creates an error response for this request.
+    #[doc(alias = "org.apache.kafka.common.requests.MetadataRequest#getErrorResponse")]
     pub fn get_error_response(&self, throttle_time_ms: i32, error: &Errors) -> ConcreteResponse {
         let mut response_data = MetadataResponseData::new();
         if let Some(topics) = &self.data.topics {
@@ -139,12 +147,14 @@ impl MetadataRequest {
     /// # Errors
     ///
     /// Returns an error if parsing fails.
+    #[doc(alias = "org.apache.kafka.common.requests.MetadataRequest#parse")]
     pub fn parse(readable: &mut dyn Readable, version: i16) -> io::Result<Self> {
         let data = MetadataRequestData::read(readable, version)?;
         Ok(Self::new(data, version))
     }
 
     /// Converts a collection of topic names to `MetadataRequestTopic` entries.
+    #[doc(alias = "org.apache.kafka.common.requests.MetadataRequest#convertToMetadataRequestTopic")]
     pub fn convert_to_metadata_request_topic(topics: &[&str]) -> Vec<MetadataRequestTopic> {
         topics
             .iter()
@@ -157,6 +167,7 @@ impl MetadataRequest {
     }
 
     /// Converts a collection of topic IDs to `MetadataRequestTopic` entries.
+    #[doc(alias = "org.apache.kafka.common.requests.MetadataRequest#convertTopicIdsToMetadataRequestTopic")]
     pub fn convert_topic_ids_to_metadata_request_topic(topic_ids: &[Uuid]) -> Vec<MetadataRequestTopic> {
         topic_ids
             .iter()
@@ -179,6 +190,7 @@ impl std::fmt::Display for MetadataRequest {
 ///
 /// Corresponds to `MetadataRequest.Builder` in Java.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.MetadataRequest$Builder")]
 pub struct MetadataRequestBuilder {
     data: MetadataRequestData,
     oldest_allowed_version: i16,
@@ -310,6 +322,7 @@ impl MetadataRequestBuilder {
     ///
     /// Corresponds to Java's `MetadataRequest.Builder(MetadataRequestData)`
     /// (`MetadataRequest.java:43`).
+    #[doc(alias = "org.apache.kafka.common.requests.MetadataRequest$Builder#Builder")]
     pub fn with_data(data: MetadataRequestData) -> Self {
         Self {
             data,
@@ -322,6 +335,7 @@ impl MetadataRequestBuilder {
     ///
     /// Corresponds to Java's `MetadataRequest.Builder(List<String>, boolean)`
     /// (`MetadataRequest.java:79`).
+    #[doc(alias = "org.apache.kafka.common.requests.MetadataRequest$Builder#Builder")]
     pub fn with_topics_allow_auto_topic_creation(topics: Option<&[&str]>, allow_auto_topic_creation: bool) -> Self {
         Self::with_options(
             MetadataRequestBuilderOptionsBuilder::new()
@@ -337,6 +351,7 @@ impl MetadataRequestBuilder {
     /// Corresponds to Java's
     /// `MetadataRequest.Builder(List<String>, boolean, short allowedVersion)`
     /// (`MetadataRequest.java:48`).
+    #[doc(alias = "org.apache.kafka.common.requests.MetadataRequest$Builder#Builder")]
     pub fn with_topics_allow_auto_topic_creation_version(
         topics: Option<&[&str]>,
         allow_auto_topic_creation: bool,
@@ -358,12 +373,14 @@ impl MetadataRequestBuilder {
     /// Corresponds to Java's
     /// `MetadataRequest.Builder(List<String>, boolean, short minVersion, short maxVersion)`
     /// (`MetadataRequest.java:52`).
+    #[doc(alias = "org.apache.kafka.common.requests.MetadataRequest$Builder#Builder")]
     pub fn with_options(options: MetadataRequestBuilderOptions<'_>) -> Self {
         let MetadataRequestBuilderOptions { topics, allow_auto_topic_creation, min_version, max_version } = options;
         let data = Self::request_topic_names_or_all_topics(topics, allow_auto_topic_creation);
         Self { data, oldest_allowed_version: min_version, latest_allowed_version: max_version }
     }
 
+    #[doc(alias = "org.apache.kafka.common.requests.MetadataRequest$Builder#requestTopicNamesOrAllTopics")]
     fn request_topic_names_or_all_topics(
         topics: Option<&[&str]>,
         allow_auto_topic_creation: bool,
@@ -387,6 +404,7 @@ impl MetadataRequestBuilder {
         data
     }
 
+    #[doc(alias = "org.apache.kafka.common.requests.MetadataRequest$Builder#requestTopicIds")]
     fn request_topic_ids(topic_ids: &BTreeSet<Uuid>) -> MetadataRequestData {
         let mut data = MetadataRequestData::new();
         let topics: Vec<MetadataRequestTopic> = topic_ids
@@ -407,6 +425,7 @@ impl MetadataRequestBuilder {
     /// This never causes auto-creation, but we set the boolean to `true` because that is
     /// the default value when deserializing V2 and older. This way, the value is consistent
     /// after serialization and deserialization.
+    #[doc(alias = "org.apache.kafka.common.requests.MetadataRequest$Builder#allTopics")]
     pub fn all_topics() -> Self {
         let mut data = MetadataRequestData::new();
         data.set_topics(None);
@@ -415,6 +434,7 @@ impl MetadataRequestBuilder {
     }
 
     /// Creates a builder for metadata request using topic names.
+    #[doc(alias = "org.apache.kafka.common.requests.MetadataRequest$Builder#forTopicNames")]
     pub fn for_topic_names(topic_names: &[&str], allow_auto_topic_creation: bool) -> Self {
         Self::with_topics_allow_auto_topic_creation(Some(topic_names), allow_auto_topic_creation)
     }
@@ -426,21 +446,25 @@ impl MetadataRequestBuilder {
     /// `Set<Uuid>` and rewraps it in a `HashSet`, losing iteration order;
     /// the Rust port is stricter for reproducibility and easier wire-byte
     /// comparison against Java when input is a `TreeSet<Uuid>`.
+    #[doc(alias = "org.apache.kafka.common.requests.MetadataRequest$Builder#forTopicIds")]
     pub fn for_topic_ids(topic_ids: &BTreeSet<Uuid>) -> Self {
         Self::with_data(Self::request_topic_ids(topic_ids))
     }
 
     /// Returns whether this builder has an empty topic list.
+    #[doc(alias = "org.apache.kafka.common.requests.MetadataRequest$Builder#emptyTopicList")]
     pub fn empty_topic_list(&self) -> bool {
         self.data.topics.as_ref().is_some_and(|t| t.is_empty())
     }
 
     /// Returns whether this is an all-topics request.
+    #[doc(alias = "org.apache.kafka.common.requests.MetadataRequest$Builder#isAllTopics")]
     pub fn is_all_topics(&self) -> bool {
         self.data.topics.is_none()
     }
 
     /// Returns the list of topic IDs from the builder data.
+    #[doc(alias = "org.apache.kafka.common.requests.MetadataRequest$Builder#topicIds")]
     pub fn topic_ids(&self) -> Vec<Uuid> {
         self.data
             .topics
@@ -450,6 +474,7 @@ impl MetadataRequestBuilder {
     }
 
     /// Returns the list of topic names from the builder data.
+    #[doc(alias = "org.apache.kafka.common.requests.MetadataRequest$Builder#topics")]
     pub fn topics(&self) -> Vec<&str> {
         self.data
             .topics
@@ -511,6 +536,7 @@ mod tests {
 
     /// Translated from `MetadataRequestTest.testEmptyMeansAllTopicsV0`.
     #[test]
+    #[doc(alias = "org.apache.kafka.common.requests.MetadataRequestTest#testEmptyMeansAllTopicsV0")]
     fn test_empty_means_all_topics_v0() {
         let data = MetadataRequestData::new();
         let parsed_request = MetadataRequest::new(data, 0);
@@ -520,6 +546,7 @@ mod tests {
 
     /// Translated from `MetadataRequestTest.testEmptyMeansEmptyForVersionsAboveV0`.
     #[test]
+    #[doc(alias = "org.apache.kafka.common.requests.MetadataRequestTest#testEmptyMeansEmptyForVersionsAboveV0")]
     fn test_empty_means_empty_for_versions_above_v0() {
         for i in 1..=MetadataRequestData::HIGHEST_SUPPORTED_VERSION {
             let mut data = MetadataRequestData::new();
@@ -536,6 +563,7 @@ mod tests {
 
     /// Translated from `MetadataRequestTest.testMetadataRequestVersion`.
     #[test]
+    #[doc(alias = "org.apache.kafka.common.requests.MetadataRequestTest#testMetadataRequestVersion")]
     fn test_metadata_request_version() {
         let builder = MetadataRequestBuilder::with_topics_allow_auto_topic_creation(Some(&["topic"]), false);
         assert_eq!(ApiKeys::METADATA.oldest_version(), builder.oldest_allowed_version());
@@ -564,6 +592,7 @@ mod tests {
 
     /// Translated from `MetadataRequestTest.testTopicIdAndNullTopicNameRequests`.
     #[test]
+    #[doc(alias = "org.apache.kafka.common.requests.MetadataRequestTest#testTopicIdAndNullTopicNameRequests")]
     fn test_topic_id_and_null_topic_name_requests() {
         let uuid1 = Uuid::random_uuid();
         let uuid2 = Uuid::random_uuid();
@@ -633,6 +662,7 @@ mod tests {
 
     /// Translated from `MetadataRequestTest.testTopicIdWithZeroUuid`.
     #[test]
+    #[doc(alias = "org.apache.kafka.common.requests.MetadataRequestTest#testTopicIdWithZeroUuid")]
     fn test_topic_id_with_zero_uuid() {
         let topics = vec![
             {

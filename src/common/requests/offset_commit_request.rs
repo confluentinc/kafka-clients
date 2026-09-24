@@ -44,6 +44,7 @@ use super::abstract_request::{ConcreteRequest, RequestBuilder};
 ///
 /// Corresponds to `org.apache.kafka.common.requests.OffsetCommitRequest`.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.OffsetCommitRequest")]
 pub struct OffsetCommitRequest {
     data: OffsetCommitRequestData,
     version: i16,
@@ -69,11 +70,13 @@ impl OffsetCommitRequest {
     /// Creates a new `OffsetCommitRequest` from data and version.
     ///
     /// Mirrors Java's constructor `OffsetCommitRequest(OffsetCommitRequestData, short)`.
+    #[doc(alias = "org.apache.kafka.common.requests.OffsetCommitRequest#OffsetCommitRequest")]
     pub fn new(data: OffsetCommitRequestData, version: i16) -> Self {
         Self { data, version }
     }
 
     /// Returns a reference to the underlying data.
+    #[doc(alias = "org.apache.kafka.common.requests.OffsetCommitRequest#data")]
     pub fn data(&self) -> &OffsetCommitRequestData {
         &self.data
     }
@@ -95,6 +98,7 @@ impl OffsetCommitRequest {
 
     /// Returns a map of `TopicPartition -> committedOffset`, mirroring
     /// Java's `offsets()` accessor.
+    #[doc(alias = "org.apache.kafka.common.requests.OffsetCommitRequest#offsets")]
     pub fn offsets(&self) -> HashMap<TopicPartition, i64> {
         let mut offsets = HashMap::new();
         for topic in &self.data.topics {
@@ -110,6 +114,7 @@ impl OffsetCommitRequest {
 
     /// Builds the canonical error response for this request, matching Java's
     /// `OffsetCommitRequest.getErrorResponse(int, Throwable)`.
+    #[doc(alias = "org.apache.kafka.common.requests.OffsetCommitRequest#getErrorResponse")]
     pub fn get_error_response(&self, throttle_time_ms: i32, error: &Errors) -> ConcreteResponse {
         let mut data = Self::error_response_data(&self.data, *error);
         data.set_throttle_time_ms(throttle_time_ms);
@@ -146,6 +151,7 @@ impl OffsetCommitRequest {
     /// # Errors
     ///
     /// Returns an error if parsing fails.
+    #[doc(alias = "org.apache.kafka.common.requests.OffsetCommitRequest#parse")]
     pub fn parse(readable: &mut dyn Readable, version: i16) -> io::Result<Self> {
         let data = OffsetCommitRequestData::read(readable, version)?;
         Ok(Self::new(data, version))
@@ -168,6 +174,7 @@ impl std::fmt::Display for OffsetCommitRequest {
 /// - [`Self::for_topic_names`] — cap the version at v9 so the request is
 ///   guaranteed to use topic names.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.OffsetCommitRequest$Builder")]
 pub struct OffsetCommitRequestBuilder {
     data: OffsetCommitRequestData,
     oldest_allowed_version: i16,
@@ -178,6 +185,7 @@ impl OffsetCommitRequestBuilder {
     /// Build a request that can use either topic ids or topic names.
     ///
     /// Mirrors Java's `Builder.forTopicIdsOrNames(OffsetCommitRequestData)`.
+    #[doc(alias = "org.apache.kafka.common.requests.OffsetCommitRequest$Builder#forTopicIdsOrNames")]
     pub fn for_topic_ids_or_names(data: OffsetCommitRequestData) -> Self {
         Self {
             data,
@@ -189,6 +197,7 @@ impl OffsetCommitRequestBuilder {
     /// Build a request that uses topic names — capped at v9.
     ///
     /// Mirrors Java's `Builder.forTopicNames(OffsetCommitRequestData)`.
+    #[doc(alias = "org.apache.kafka.common.requests.OffsetCommitRequest$Builder#forTopicNames")]
     pub fn for_topic_names(data: OffsetCommitRequestData) -> Self {
         Self {
             data,

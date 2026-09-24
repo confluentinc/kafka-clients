@@ -26,6 +26,7 @@ kafka_error_class! {
     /// Java `extends` chain:
     ///    `TransactionCoordinatorFencedException` -> `ApiException` ->
     ///   `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.TransactionCoordinatorFencedException")]
     TransactionCoordinatorFencedError,
     code: Errors::TransactionCoordinatorFenced,
     extends: [

@@ -63,6 +63,7 @@ use crate::common::protocol::{ByteBufferAccessor, Readable};
 ///
 /// The schema for the value field is left to the control record type to specify.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[doc(alias = "org.apache.kafka.common.record.internal.ControlRecordType")]
 pub enum ControlRecordType {
     /// A transaction abort marker.
     Abort,
@@ -144,6 +145,7 @@ impl ControlRecordType {
     /// `IllegalArgumentException("Cannot serialize UNKNOWN control record type")`
     /// (a recoverable unchecked exception, so a `Result` here per CLAUDE.md §10.2).
     #[allow(dead_code)]
+    #[doc(alias = "org.apache.kafka.common.record.internal.ControlRecordType#recordKey")]
     pub fn record_key(self) -> Result<Vec<u8>, Error> {
         if self == Self::Unknown {
             return Err(Error::local_illegal_argument("Cannot serialize UNKNOWN control record type"));
@@ -160,6 +162,7 @@ impl ControlRecordType {
     /// `remaining()` is a constant read; returning the constant here mirrors
     /// that amortization instead of re-serializing the key per call.
     #[allow(dead_code)]
+    #[doc(alias = "org.apache.kafka.common.record.internal.ControlRecordType#controlRecordKeySize")]
     pub fn control_record_key_size(self) -> usize {
         CONTROL_RECORD_KEY_SIZE
     }
@@ -178,6 +181,7 @@ impl ControlRecordType {
     /// Returns [`InvalidRecordError`] — Java's `InvalidRecordException` — when the
     /// key is too short or carries a version below the lowest supported one. Java
     /// throws in both cases; CLAUDE.md §10.2 makes that a `Result` here.
+    #[doc(alias = "org.apache.kafka.common.record.internal.ControlRecordType#parseTypeId")]
     pub fn parse_type_id(key: &[u8]) -> Result<i16, InvalidRecordError> {
         // We should duplicate the original buffer since it will be read again in
         // some cases, for example, read by KafkaRaftClient and RaftClient.Listener.
@@ -215,6 +219,7 @@ impl ControlRecordType {
     /// [`Self::Unknown`].
     ///
     /// Translated from `fromTypeId(short typeId)` (Java 110-130).
+    #[doc(alias = "org.apache.kafka.common.record.internal.ControlRecordType#fromTypeId")]
     pub fn from_type_id(type_id: i16) -> Self {
         match type_id {
             0 => Self::Abort,
@@ -235,6 +240,7 @@ impl ControlRecordType {
     /// # Errors
     ///
     /// Propagates [`Self::parse_type_id`]'s errors.
+    #[doc(alias = "org.apache.kafka.common.record.internal.ControlRecordType#parse")]
     pub fn parse(key: &[u8]) -> Result<Self, InvalidRecordError> {
         Ok(Self::from_type_id(Self::parse_type_id(key)?))
     }
@@ -269,6 +275,7 @@ mod tests {
 
     /// Java: `testParseUnknownType`.
     #[test]
+    #[doc(alias = "org.apache.kafka.common.record.internal.ControlRecordTypeTest#testParseUnknownType")]
     fn test_parse_unknown_type() {
         let key = v0_key(ControlRecordTypeSchemaData::HIGHEST_SUPPORTED_VERSION, 337);
         assert_eq!(
@@ -281,6 +288,7 @@ mod tests {
     /// trailing field is parsed as the highest supported version, reading only the
     /// known `type` field.
     #[test]
+    #[doc(alias = "org.apache.kafka.common.record.internal.ControlRecordTypeTest#testParseUnknownVersion")]
     fn test_parse_unknown_version() {
         let mut key = v0_key(5, ControlRecordType::Abort.type_id());
         key.extend_from_slice(&23432i32.to_be_bytes()); // some field added in version 5
@@ -292,6 +300,7 @@ mod tests {
 
     /// Java: `testRoundTrip`. `UNKNOWN` is excluded (it cannot be serialized).
     #[test]
+    #[doc(alias = "org.apache.kafka.common.record.internal.ControlRecordTypeTest#testRoundTrip")]
     fn test_round_trip() {
         for expected in ALL_TYPES {
             if expected == ControlRecordType::Unknown {
@@ -309,6 +318,7 @@ mod tests {
     /// Java: `testValueControlRecordKeySize`. Every type — `UNKNOWN` included —
     /// has a 4-byte key.
     #[test]
+    #[doc(alias = "org.apache.kafka.common.record.internal.ControlRecordTypeTest#testValueControlRecordKeySize")]
     fn test_value_control_record_key_size() {
         for control_type in ALL_TYPES {
             for _version in ControlRecordTypeSchemaData::LOWEST_SUPPORTED_VERSION
@@ -322,6 +332,7 @@ mod tests {
     /// Java: `testBackwardDeserializeCompatibility`. A key written in the old
     /// hard-coded v0 format still parses to the right type.
     #[test]
+    #[doc(alias = "org.apache.kafka.common.record.internal.ControlRecordTypeTest#testBackwardDeserializeCompatibility")]
     fn test_backward_deserialize_compatibility() {
         for control_type in ALL_TYPES {
             for version in ControlRecordTypeSchemaData::LOWEST_SUPPORTED_VERSION
@@ -338,6 +349,7 @@ mod tests {
     /// schema is readable by the old v0 layout (`version` int16, `type` int16).
     /// `UNKNOWN` is excluded (it cannot be serialized).
     #[test]
+    #[doc(alias = "org.apache.kafka.common.record.internal.ControlRecordTypeTest#testForwardDeserializeCompatibility")]
     fn test_forward_deserialize_compatibility() {
         for control_type in ALL_TYPES {
             if control_type == ControlRecordType::Unknown {

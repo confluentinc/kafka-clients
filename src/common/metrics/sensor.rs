@@ -33,6 +33,7 @@ use crate::common::{Error, MetricName};
 /// must not change: INFO=0, DEBUG=1, TRACE=2.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
+#[doc(alias = "org.apache.kafka.common.metrics.Sensor$RecordingLevel")]
 pub enum RecordingLevel {
     /// INFO level (id 0).
     Info,
@@ -63,6 +64,7 @@ impl RecordingLevel {
 
     /// Lookup by id. Returns an error for an unknown id, mirroring Java's
     /// `IllegalArgumentException`.
+    #[doc(alias = "org.apache.kafka.common.metrics.Sensor$RecordingLevel#forId")]
     pub fn for_id(id: i16) -> Result<RecordingLevel, Error> {
         match id {
             0 => Ok(RecordingLevel::Info),
@@ -76,6 +78,7 @@ impl RecordingLevel {
 
     /// Case-insensitive lookup by name. Returns an error for an unknown name,
     /// mirroring Java's `valueOf` `IllegalArgumentException`.
+    #[doc(alias = "org.apache.kafka.common.metrics.Sensor$RecordingLevel#forName")]
     pub fn for_name(name: &str) -> Result<RecordingLevel, Error> {
         match name.to_uppercase().as_str() {
             "INFO" => Ok(RecordingLevel::Info),
@@ -88,6 +91,7 @@ impl RecordingLevel {
     }
 
     /// Whether a sensor at this level should record given the config's level id.
+    #[doc(alias = "org.apache.kafka.common.metrics.Sensor$RecordingLevel#shouldRecord")]
     pub fn should_record(&self, config_id: i16) -> bool {
         if config_id == RecordingLevel::Info.id() {
             self.id() == RecordingLevel::Info.id()
@@ -110,6 +114,7 @@ impl RecordingLevel {
 /// so the stat always reads the backing metric's (possibly updated) config; for
 /// the `add(CompoundStat, config)` path it is a constant `statConfig` supplier.
 /// Both are modelled by [`StatConfigSource`].
+#[doc(alias = "org.apache.kafka.common.metrics.Sensor$StatAndConfig")]
 struct StatAndConfig {
     stat: Box<dyn Stat>,
     config: StatConfigSource,
@@ -143,6 +148,7 @@ impl StatAndConfig {
 /// associated metrics. For example a sensor on message size would record a
 /// sequence of message sizes using the `record` api and would maintain a set of
 /// metrics about request sizes such as the average or max.
+#[doc(alias = "org.apache.kafka.common.metrics.Sensor")]
 pub struct Sensor {
     registry: Option<Arc<MetricsShared>>,
     name: String,
@@ -168,6 +174,7 @@ impl Sensor {
     /// `registry` is `None` for standalone sensors (mirroring Java's `null`
     /// registry in `SensorTest`), in which case `add` does not register metrics
     /// in a global repository.
+    #[doc(alias = "org.apache.kafka.common.metrics.Sensor#Sensor")]
     pub(crate) fn new(
         registry: Option<Arc<MetricsShared>>,
         name: impl Into<String>,
@@ -196,6 +203,7 @@ impl Sensor {
     }
 
     /// Validate that this sensor doesn't end up referencing itself.
+    #[doc(alias = "org.apache.kafka.common.metrics.Sensor#checkForest")]
     fn check_forest(&self, sensors: &mut HashSet<*const Sensor>) -> Result<(), Error> {
         if !sensors.insert(self as *const Sensor) {
             return Err(Error::local_illegal_argument(format!(
@@ -210,17 +218,20 @@ impl Sensor {
     }
 
     /// The name this sensor is registered with.
+    #[doc(alias = "org.apache.kafka.common.metrics.Sensor#name")]
     pub fn name(&self) -> &str {
         &self.name
     }
 
     /// The parents of this sensor.
+    #[doc(alias = "org.apache.kafka.common.metrics.Sensor#parents")]
     pub(crate) fn parents(&self) -> &[Arc<Sensor>] {
         &self.parents
     }
 
     /// Whether the sensor's record level indicates that the metric will be
     /// recorded.
+    #[doc(alias = "org.apache.kafka.common.metrics.Sensor#shouldRecord")]
     pub fn should_record(&self) -> bool {
         self.recording_level.should_record(self.config.record_level().id())
     }
@@ -260,6 +271,7 @@ impl Sensor {
         }
     }
 
+    #[doc(alias = "org.apache.kafka.common.metrics.Sensor#recordInternal")]
     fn record_internal(&self, value: f64, time_ms: i64) {
         self.last_record_time.store(time_ms, Ordering::SeqCst);
         {
@@ -298,6 +310,7 @@ impl Sensor {
     /// Mirrors Java's `checkQuotas()` (`Sensor.java:247-249`). The group's
     /// parameter-name intersection is empty and this no-arg form matches it, so
     /// it keeps the plain name and its sibling is suffixed (CLAUDE.md §2).
+    #[doc(alias = "org.apache.kafka.common.metrics.Sensor#checkQuotas")]
     pub fn check_quotas(&self) -> Result<(), Error> {
         self.check_quotas_time_ms(self.time.milliseconds())
     }
@@ -418,6 +431,7 @@ impl Sensor {
     /// Mirrors Java's `add(CompoundStat stat)` (`Sensor.java:279`), whose
     /// parameter list is exactly the `add` group's intersection `{stat}` — so
     /// this form keeps the plain name (CLAUDE.md §2).
+    #[doc(alias = "org.apache.kafka.common.metrics.Sensor#add")]
     pub fn add(&self, stat: Box<dyn CompoundStat>) -> Result<bool, Error> {
         self.add_config(stat, None)
     }
@@ -470,17 +484,20 @@ impl Sensor {
     }
 
     /// Return if metrics were registered with this sensor.
+    #[doc(alias = "org.apache.kafka.common.metrics.Sensor#hasMetrics")]
     pub fn has_metrics(&self) -> bool {
         !self.inner.lock().expect("sensor mutex poisoned").metrics.is_empty()
     }
 
     /// Return true if the sensor is eligible for removal due to inactivity.
+    #[doc(alias = "org.apache.kafka.common.metrics.Sensor#hasExpired")]
     pub fn has_expired(&self) -> bool {
         (self.time.milliseconds() - self.last_record_time.load(Ordering::SeqCst))
             > self.inactive_sensor_expiration_time_ms
     }
 
     /// The metrics registered with this sensor.
+    #[doc(alias = "org.apache.kafka.common.metrics.Sensor#metrics")]
     pub fn metrics(&self) -> Vec<Arc<KafkaMetric>> {
         self.inner
             .lock()
@@ -668,6 +685,7 @@ mod tests {
 
     // SensorTest.testRecordLevelEnum
     #[test]
+    #[doc(alias = "org.apache.kafka.common.metrics.SensorTest#testRecordLevelEnum")]
     fn test_record_level_enum() {
         let config_level = RecordingLevel::Info;
         assert!(RecordingLevel::Info.should_record(level_id(config_level)));
@@ -700,6 +718,7 @@ mod tests {
 
     // SensorTest.testShouldRecordForInfoLevelSensor
     #[test]
+    #[doc(alias = "org.apache.kafka.common.metrics.SensorTest#testShouldRecordForInfoLevelSensor")]
     fn test_should_record_for_info_level_sensor() {
         assert!(standalone(info_config(), 0, RecordingLevel::Info).should_record());
         assert!(standalone(debug_config(), 0, RecordingLevel::Info).should_record());
@@ -708,6 +727,7 @@ mod tests {
 
     // SensorTest.testShouldRecordForDebugLevelSensor
     #[test]
+    #[doc(alias = "org.apache.kafka.common.metrics.SensorTest#testShouldRecordForDebugLevelSensor")]
     fn test_should_record_for_debug_level_sensor() {
         assert!(!standalone(info_config(), 0, RecordingLevel::Debug).should_record());
         assert!(standalone(debug_config(), 0, RecordingLevel::Debug).should_record());
@@ -716,6 +736,7 @@ mod tests {
 
     // SensorTest.testShouldRecordForTraceLevelSensor
     #[test]
+    #[doc(alias = "org.apache.kafka.common.metrics.SensorTest#testShouldRecordForTraceLevelSensor")]
     fn test_should_record_for_trace_level_sensor() {
         assert!(!standalone(info_config(), 0, RecordingLevel::Trace).should_record());
         assert!(!standalone(debug_config(), 0, RecordingLevel::Trace).should_record());
@@ -724,6 +745,7 @@ mod tests {
 
     // SensorTest.shouldReturnPresenceOfMetrics (standalone-sensor part)
     #[test]
+    #[doc(alias = "org.apache.kafka.common.metrics.SensorTest#shouldReturnPresenceOfMetrics")]
     fn should_return_presence_of_metrics() {
         let sensor = standalone(Arc::new(MetricConfig::new()), i64::MAX, RecordingLevel::Info);
         assert!(!sensor.has_metrics());
@@ -746,6 +768,7 @@ mod tests {
     // driven by `MockTime`, which exercises the identical `has_expired()` /
     // `add`-returns-`false` path without needing the registry.
     #[test]
+    #[doc(alias = "org.apache.kafka.common.metrics.SensorTest#testExpiredSensor")]
     fn test_expired_sensor() {
         let time = Arc::new(MockTime::new());
         let inactive_sensor_expiration_time_seconds = 60i64;

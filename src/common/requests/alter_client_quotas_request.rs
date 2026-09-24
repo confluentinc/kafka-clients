@@ -33,6 +33,7 @@ use super::{AlterClientQuotasResponse, ConcreteRequest, ConcreteResponse, Reques
 ///
 /// Corresponds to `org.apache.kafka.common.requests.AlterClientQuotasRequest`.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.AlterClientQuotasRequest")]
 pub struct AlterClientQuotasRequest {
     data: AlterClientQuotasRequestData,
     version: i16,
@@ -40,11 +41,13 @@ pub struct AlterClientQuotasRequest {
 
 impl AlterClientQuotasRequest {
     /// Creates a new `AlterClientQuotasRequest` from data and version.
+    #[doc(alias = "org.apache.kafka.common.requests.AlterClientQuotasRequest#AlterClientQuotasRequest")]
     pub fn new(data: AlterClientQuotasRequestData, version: i16) -> Self {
         Self { data, version }
     }
 
     /// Returns a reference to the underlying data.
+    #[doc(alias = "org.apache.kafka.common.requests.AlterClientQuotasRequest#data")]
     pub fn data(&self) -> &AlterClientQuotasRequestData {
         &self.data
     }
@@ -68,6 +71,7 @@ impl AlterClientQuotasRequest {
     ///
     /// Mirrors `AlterClientQuotasRequest.entries()`. A `remove` op maps back to
     /// an [`Op`] with a `None` value (quota removal).
+    #[doc(alias = "org.apache.kafka.common.requests.AlterClientQuotasRequest#entries")]
     pub fn entries(&self) -> Vec<ClientQuotaAlteration> {
         let mut entries = Vec::with_capacity(self.data.entries.len());
         for entry_data in &self.data.entries {
@@ -90,6 +94,7 @@ impl AlterClientQuotasRequest {
     /// Returns whether this is a validate-only request.
     ///
     /// Mirrors `AlterClientQuotasRequest.validateOnly()`.
+    #[doc(alias = "org.apache.kafka.common.requests.AlterClientQuotasRequest#validateOnly")]
     pub fn validate_only(&self) -> bool {
         self.data.validate_only
     }
@@ -98,6 +103,7 @@ impl AlterClientQuotasRequest {
     ///
     /// Mirrors `AlterClientQuotasRequest.getErrorResponse`: every requested
     /// entity is echoed back with the given error code/message.
+    #[doc(alias = "org.apache.kafka.common.requests.AlterClientQuotasRequest#getErrorResponse")]
     pub fn get_error_response(&self, throttle_time_ms: i32, error: &Errors) -> ConcreteResponse {
         let mut response_entries = Vec::with_capacity(self.data.entries.len());
         for entry_data in &self.data.entries {
@@ -127,6 +133,7 @@ impl AlterClientQuotasRequest {
     /// # Errors
     ///
     /// Returns an error if parsing fails.
+    #[doc(alias = "org.apache.kafka.common.requests.AlterClientQuotasRequest#parse")]
     pub fn parse(readable: &mut dyn Readable, version: i16) -> io::Result<Self> {
         let data = AlterClientQuotasRequestData::read(readable, version)?;
         Ok(Self::new(data, version))
@@ -143,6 +150,7 @@ impl std::fmt::Display for AlterClientQuotasRequest {
 ///
 /// Corresponds to `AlterClientQuotasRequest.Builder` in Java.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.AlterClientQuotasRequest$Builder")]
 pub struct AlterClientQuotasRequestBuilder {
     data: AlterClientQuotasRequestData,
     oldest_allowed_version: i16,
@@ -155,6 +163,7 @@ impl AlterClientQuotasRequestBuilder {
     ///
     /// An [`Op`] with a `None` value is encoded as `remove=true` with a
     /// placeholder `value=0.0` (Java's `op.value() == null` handling).
+    #[doc(alias = "org.apache.kafka.common.requests.AlterClientQuotasRequest$Builder#Builder")]
     pub fn new(entries: &[ClientQuotaAlteration], validate_only: bool) -> Self {
         let mut entry_data = Vec::with_capacity(entries.len());
         for entry in entries {

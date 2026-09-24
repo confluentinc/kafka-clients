@@ -48,6 +48,7 @@ use super::{AdminApiHandler, ApiResult, RequestAndKeys};
 /// parallel. This is functionally equivalent (all keys still complete) and is
 /// not observable by the in-scope tests / `forceTerminateTransaction`, which
 /// each fence a single id.
+#[doc(alias = "org.apache.kafka.clients.admin.internals.FenceProducersHandler")]
 pub(crate) struct FenceProducersHandler {
     log_context: LogContext,
     lookup_strategy: CoordinatorStrategy,
@@ -57,6 +58,7 @@ pub(crate) struct FenceProducersHandler {
 impl FenceProducersHandler {
     /// Creates a handler. The transaction timeout is the option's timeout when
     /// set, otherwise the client's request timeout.
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.FenceProducersHandler#FenceProducersHandler")]
     pub(crate) fn new(options: &FenceProducersOptions, log_context: LogContext, request_timeout_ms: i32) -> Self {
         let txn_timeout_ms = options.timeout_ms().unwrap_or(request_timeout_ms);
         Self {
@@ -67,6 +69,7 @@ impl FenceProducersHandler {
     }
 
     /// Builds the key set for a collection of transactional ids.
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.FenceProducersHandler#buildKeySet")]
     fn build_key_set(transactional_ids: &[String]) -> HashSet<CoordinatorKey> {
         transactional_ids.iter().map(CoordinatorKey::by_transactional_id).collect()
     }
@@ -74,6 +77,7 @@ impl FenceProducersHandler {
     /// Creates the future bundle for the given transactional ids.
     ///
     /// Mirrors `FenceProducersHandler.newFuture`.
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.FenceProducersHandler#newFuture")]
     pub(crate) fn new_future(transactional_ids: &[String]) -> SimpleAdminApiFuture<CoordinatorKey, ProducerIdAndEpoch> {
         SimpleAdminApiFuture::for_keys(Self::build_key_set(transactional_ids))
     }
@@ -81,6 +85,7 @@ impl FenceProducersHandler {
     /// Builds a single `InitProducerId` request for the given key.
     ///
     /// Mirrors `buildSingleRequest`.
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.FenceProducersHandler#buildSingleRequest")]
     fn build_single_request(&self, key: &CoordinatorKey) -> InitProducerIdRequestData {
         assert!(
             key.coordinator_type == CoordinatorType::Transaction,
@@ -102,6 +107,7 @@ impl FenceProducersHandler {
     /// Classifies an `InitProducerId` error.
     ///
     /// Mirrors `handleError`.
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.FenceProducersHandler#handleError")]
     fn handle_error(&self, key: &CoordinatorKey, error: Errors) -> ApiResult<CoordinatorKey, ProducerIdAndEpoch> {
         match error {
             Errors::ClusterAuthorizationFailed => failed(

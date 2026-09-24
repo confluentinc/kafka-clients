@@ -27,6 +27,7 @@ use std::str::FromStr;
 /// Translated from `org.apache.kafka.common.security.auth.SecurityProtocol`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
+#[doc(alias = "org.apache.kafka.common.security.auth.SecurityProtocol")]
 pub enum SecurityProtocol {
     /// Un-authenticated, non-encrypted channel.
     Plaintext,
@@ -72,6 +73,7 @@ impl SecurityProtocol {
     /// Looks up a security protocol by its numeric ID.
     ///
     /// Returns `None` if no protocol has the given ID.
+    #[doc(alias = "org.apache.kafka.common.security.auth.SecurityProtocol#forId")]
     pub fn for_id(id: i16) -> Option<Self> {
         match id {
             0 => Some(SecurityProtocol::Plaintext),
@@ -85,12 +87,14 @@ impl SecurityProtocol {
     /// Case-insensitive lookup by protocol name.
     ///
     /// Returns `None` if no protocol matches the given name.
+    #[doc(alias = "org.apache.kafka.common.security.auth.SecurityProtocol#forName")]
     pub fn for_name(name: &str) -> Option<Self> {
         let upper = name.to_uppercase();
         Self::ALL.iter().find(|p| p.name() == upper).copied()
     }
 
     /// Returns the names of all security protocols.
+    #[doc(alias = "org.apache.kafka.common.security.auth.SecurityProtocol#names")]
     pub fn names() -> Vec<&'static str> {
         Self::ALL.iter().map(|p| p.name()).collect()
     }

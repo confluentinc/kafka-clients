@@ -25,6 +25,7 @@ kafka_error_class! {
     /// Java `extends` chain:
     ///    `UnsupportedForMessageFormatException` ->
     ///   `InvalidConfigurationException` -> `ApiException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.UnsupportedForMessageFormatException")]
     UnsupportedForMessageFormatError,
     code: Errors::UnsupportedForMessageFormat,
     extends: [

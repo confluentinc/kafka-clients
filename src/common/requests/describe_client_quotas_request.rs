@@ -30,6 +30,7 @@ use super::{ConcreteRequest, ConcreteResponse, DescribeClientQuotasResponse, Req
 ///
 /// Corresponds to `org.apache.kafka.common.requests.DescribeClientQuotasRequest`.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.DescribeClientQuotasRequest")]
 pub struct DescribeClientQuotasRequest {
     data: DescribeClientQuotasRequestData,
     version: i16,
@@ -46,11 +47,13 @@ impl DescribeClientQuotasRequest {
     pub const MATCH_TYPE_SPECIFIED: i8 = 2;
 
     /// Creates a new `DescribeClientQuotasRequest` from data and version.
+    #[doc(alias = "org.apache.kafka.common.requests.DescribeClientQuotasRequest#DescribeClientQuotasRequest")]
     pub fn new(data: DescribeClientQuotasRequestData, version: i16) -> Self {
         Self { data, version }
     }
 
     /// Returns a reference to the underlying data.
+    #[doc(alias = "org.apache.kafka.common.requests.DescribeClientQuotasRequest#data")]
     pub fn data(&self) -> &DescribeClientQuotasRequestData {
         &self.data
     }
@@ -78,6 +81,7 @@ impl DescribeClientQuotasRequest {
     ///
     /// Returns an error if a component carries an unexpected match type
     /// (mirrors Java's `IllegalArgumentException`).
+    #[doc(alias = "org.apache.kafka.common.requests.DescribeClientQuotasRequest#filter")]
     pub fn filter(&self) -> io::Result<ClientQuotaFilter> {
         let mut components = Vec::with_capacity(self.data.components.len());
         for component_data in &self.data.components {
@@ -111,6 +115,7 @@ impl DescribeClientQuotasRequest {
     /// Creates an error response for this request.
     ///
     /// Mirrors `DescribeClientQuotasRequest.getErrorResponse`.
+    #[doc(alias = "org.apache.kafka.common.requests.DescribeClientQuotasRequest#getErrorResponse")]
     pub fn get_error_response(&self, throttle_time_ms: i32, error: &Errors) -> ConcreteResponse {
         let mut response = DescribeClientQuotasResponseData::new();
         response.set_throttle_time_ms(throttle_time_ms);
@@ -126,6 +131,7 @@ impl DescribeClientQuotasRequest {
     /// # Errors
     ///
     /// Returns an error if parsing fails.
+    #[doc(alias = "org.apache.kafka.common.requests.DescribeClientQuotasRequest#parse")]
     pub fn parse(readable: &mut dyn Readable, version: i16) -> io::Result<Self> {
         let data = DescribeClientQuotasRequestData::read(readable, version)?;
         Ok(Self::new(data, version))
@@ -142,6 +148,7 @@ impl std::fmt::Display for DescribeClientQuotasRequest {
 ///
 /// Corresponds to `DescribeClientQuotasRequest.Builder` in Java.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.DescribeClientQuotasRequest$Builder")]
 pub struct DescribeClientQuotasRequestBuilder {
     data: DescribeClientQuotasRequestData,
     oldest_allowed_version: i16,
@@ -151,6 +158,7 @@ pub struct DescribeClientQuotasRequestBuilder {
 impl DescribeClientQuotasRequestBuilder {
     /// Creates a builder from a [`ClientQuotaFilter`], mirroring
     /// `DescribeClientQuotasRequest.Builder(ClientQuotaFilter)`.
+    #[doc(alias = "org.apache.kafka.common.requests.DescribeClientQuotasRequest$Builder#Builder")]
     pub fn new(filter: &ClientQuotaFilter) -> Self {
         let mut component_data = Vec::with_capacity(filter.components().len());
         for component in filter.components() {

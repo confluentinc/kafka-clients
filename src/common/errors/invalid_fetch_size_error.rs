@@ -24,6 +24,7 @@ kafka_error_class! {
     ///
     /// Java `extends` chain:
     ///    `InvalidFetchSizeException` -> `ApiException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.InvalidFetchSizeException")]
     InvalidFetchSizeError,
     code: Errors::InvalidFetchSize,
     extends: [

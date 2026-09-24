@@ -44,6 +44,7 @@ use super::format_java_set;
 #[delegate(ErrorMessage, target = "kafka_error")]
 #[delegate(ErrorSource, target = "kafka_error")]
 #[delegate(ErrorCode, target = "kafka_error")]
+#[doc(alias = "org.apache.kafka.common.errors.InvalidTopicException")]
 pub struct InvalidTopicError {
     /// Base error fields.
     kafka_error: KafkaError,
@@ -56,6 +57,7 @@ impl InvalidTopicError {
     ///
     /// Mirrors Java's `InvalidTopicException(Set<String> invalidTopics)`:
     /// `super("Invalid topics: " + invalidTopics)`.
+    #[doc(alias = "org.apache.kafka.common.errors.InvalidTopicException#InvalidTopicException")]
     pub fn new(invalid_topics: HashSet<String>) -> Self {
         let message = format!("Invalid topics: {}", format_java_set(&invalid_topics));
         Self {
@@ -70,6 +72,7 @@ impl InvalidTopicError {
     /// Mirrors Java's `InvalidTopicException(String message)` reached via the
     /// `Errors.INVALID_TOPIC_EXCEPTION` builder (`exception()`), where the
     /// message is the default constant and the topic set is empty.
+    #[doc(alias = "org.apache.kafka.common.errors.InvalidTopicException#InvalidTopicException")]
     pub fn with_default_message() -> Self {
         Self {
             kafka_error: KafkaError::new(Errors::InvalidTopicError),
@@ -86,6 +89,7 @@ impl InvalidTopicError {
     /// exactly `InvalidTopicException(Set<String>)` (`:55`) — so [`new`](Self::new)
     /// keeps the plain name and this one is suffixed with the parameter beyond the
     /// intersection (CLAUDE.md §2).
+    #[doc(alias = "org.apache.kafka.common.errors.InvalidTopicException#InvalidTopicException")]
     pub fn with_message(invalid_topics: HashSet<String>, message: impl Into<String>) -> Self {
         Self {
             kafka_error: KafkaError::with_message(Errors::InvalidTopicError, message),
@@ -100,6 +104,7 @@ impl InvalidTopicError {
 
     /// The set of invalid topics. Mirrors Java's
     /// `InvalidTopicException.invalidTopics()`.
+    #[doc(alias = "org.apache.kafka.common.errors.InvalidTopicException#invalidTopics")]
     pub fn invalid_topics(&self) -> &HashSet<String> {
         &self.invalid_topics
     }

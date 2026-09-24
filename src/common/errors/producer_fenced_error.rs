@@ -26,6 +26,7 @@ kafka_error_class! {
     /// Java `extends` chain:
     ///    `ProducerFencedException` -> `ApplicationRecoverableException` ->
     ///   `ApiException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.ProducerFencedException")]
     ProducerFencedError,
     code: Errors::ProducerFenced,
     extends: [

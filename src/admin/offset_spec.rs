@@ -24,6 +24,7 @@
 /// timestamp mapping (`getOffsetFromSpec`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
+#[doc(alias = "org.apache.kafka.clients.admin.OffsetSpec")]
 pub enum OffsetSpec {
     /// Retrieve the earliest offset of a partition.
     ///
@@ -60,6 +61,7 @@ impl OffsetSpec {
     /// Used to retrieve the latest offset of a partition.
     ///
     /// Mirrors `OffsetSpec.latest()`.
+    #[doc(alias = "org.apache.kafka.clients.admin.OffsetSpec#latest")]
     pub fn latest() -> Self {
         Self::Latest
     }
@@ -67,6 +69,7 @@ impl OffsetSpec {
     /// Used to retrieve the earliest offset of a partition.
     ///
     /// Mirrors `OffsetSpec.earliest()`.
+    #[doc(alias = "org.apache.kafka.clients.admin.OffsetSpec#earliest")]
     pub fn earliest() -> Self {
         Self::Earliest
     }
@@ -75,6 +78,7 @@ impl OffsetSpec {
     /// equal to the given timestamp (in milliseconds).
     ///
     /// Mirrors `OffsetSpec.forTimestamp(long)`.
+    #[doc(alias = "org.apache.kafka.clients.admin.OffsetSpec#forTimestamp")]
     pub fn for_timestamp(timestamp: i64) -> Self {
         Self::Timestamp(timestamp)
     }
@@ -82,6 +86,7 @@ impl OffsetSpec {
     /// Used to retrieve the offset with the largest timestamp of a partition.
     ///
     /// Mirrors `OffsetSpec.maxTimestamp()`.
+    #[doc(alias = "org.apache.kafka.clients.admin.OffsetSpec#maxTimestamp")]
     pub fn max_timestamp() -> Self {
         Self::MaxTimestamp
     }
@@ -89,6 +94,7 @@ impl OffsetSpec {
     /// Used to retrieve the local log start offset.
     ///
     /// Mirrors `OffsetSpec.earliestLocal()`.
+    #[doc(alias = "org.apache.kafka.clients.admin.OffsetSpec#earliestLocal")]
     pub fn earliest_local() -> Self {
         Self::EarliestLocal
     }
@@ -96,6 +102,7 @@ impl OffsetSpec {
     /// Used to retrieve the highest offset of data stored in remote storage.
     ///
     /// Mirrors `OffsetSpec.latestTiered()`.
+    #[doc(alias = "org.apache.kafka.clients.admin.OffsetSpec#latestTiered")]
     pub fn latest_tiered() -> Self {
         Self::LatestTiered
     }
@@ -104,6 +111,7 @@ impl OffsetSpec {
     /// storage.
     ///
     /// Mirrors `OffsetSpec.earliestPendingUpload()`.
+    #[doc(alias = "org.apache.kafka.clients.admin.OffsetSpec#earliestPendingUpload")]
     pub fn earliest_pending_upload() -> Self {
         Self::EarliestPendingUpload
     }

@@ -1162,6 +1162,7 @@ use crate::ffi::consumer::{
 
 /// `TopicAuthorizationException` -> `kafka_common_TopicAuthorizationError_t`.
 #[repr(C)]
+#[doc(alias = "org.apache.kafka.common.errors.TopicAuthorizationException")]
 pub struct kafka_common_TopicAuthorizationError_t {
     _private: [u8; 0],
 }
@@ -1192,6 +1193,7 @@ pub unsafe extern "C" fn kafka_common_Error_topic_authorization(
 ///
 /// `handle` must be a valid, non-null [`kafka_common_TopicAuthorizationError_t`].
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.common.errors.TopicAuthorizationException#unauthorizedTopics")]
 pub unsafe extern "C" fn kafka_common_TopicAuthorizationError_unauthorized_topics(
     handle: *const kafka_common_TopicAuthorizationError_t,
 ) -> *mut kafka_consumer_StringList_t {
@@ -1201,6 +1203,7 @@ pub unsafe extern "C" fn kafka_common_TopicAuthorizationError_unauthorized_topic
 
 /// `GroupAuthorizationException` -> `kafka_common_GroupAuthorizationError_t`.
 #[repr(C)]
+#[doc(alias = "org.apache.kafka.common.errors.GroupAuthorizationException")]
 pub struct kafka_common_GroupAuthorizationError_t {
     _private: [u8; 0],
 }
@@ -1231,6 +1234,7 @@ pub unsafe extern "C" fn kafka_common_Error_group_authorization(
 ///
 /// `handle` must be a valid, non-null [`kafka_common_GroupAuthorizationError_t`].
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.common.errors.GroupAuthorizationException#groupId")]
 pub unsafe extern "C" fn kafka_common_GroupAuthorizationError_group_id(
     handle: *const kafka_common_GroupAuthorizationError_t,
 ) -> *mut c_char {
@@ -1240,6 +1244,7 @@ pub unsafe extern "C" fn kafka_common_GroupAuthorizationError_group_id(
 
 /// `InvalidTopicException` -> `kafka_common_InvalidTopicError_t`.
 #[repr(C)]
+#[doc(alias = "org.apache.kafka.common.errors.InvalidTopicException")]
 pub struct kafka_common_InvalidTopicError_t {
     _private: [u8; 0],
 }
@@ -1270,6 +1275,7 @@ pub unsafe extern "C" fn kafka_common_Error_invalid_topic(
 ///
 /// `handle` must be a valid, non-null [`kafka_common_InvalidTopicError_t`].
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.common.errors.InvalidTopicException#invalidTopics")]
 pub unsafe extern "C" fn kafka_common_InvalidTopicError_invalid_topics(
     handle: *const kafka_common_InvalidTopicError_t,
 ) -> *mut kafka_consumer_StringList_t {
@@ -1279,6 +1285,7 @@ pub unsafe extern "C" fn kafka_common_InvalidTopicError_invalid_topics(
 
 /// `DuplicateResourceException` -> `kafka_common_DuplicateResourceError_t`.
 #[repr(C)]
+#[doc(alias = "org.apache.kafka.common.errors.DuplicateResourceException")]
 pub struct kafka_common_DuplicateResourceError_t {
     _private: [u8; 0],
 }
@@ -1310,6 +1317,7 @@ pub unsafe extern "C" fn kafka_common_Error_duplicate_resource(
 ///
 /// `handle` must be a valid, non-null [`kafka_common_DuplicateResourceError_t`].
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.common.errors.DuplicateResourceException#resource")]
 pub unsafe extern "C" fn kafka_common_DuplicateResourceError_resource(
     handle: *const kafka_common_DuplicateResourceError_t,
 ) -> *mut c_char {
@@ -1322,6 +1330,7 @@ pub unsafe extern "C" fn kafka_common_DuplicateResourceError_resource(
 
 /// `ResourceNotFoundException` -> `kafka_common_ResourceNotFoundError_t`.
 #[repr(C)]
+#[doc(alias = "org.apache.kafka.common.errors.ResourceNotFoundException")]
 pub struct kafka_common_ResourceNotFoundError_t {
     _private: [u8; 0],
 }
@@ -1353,6 +1362,7 @@ pub unsafe extern "C" fn kafka_common_Error_resource_not_found(
 ///
 /// `handle` must be a valid, non-null [`kafka_common_ResourceNotFoundError_t`].
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.common.errors.ResourceNotFoundException#resource")]
 pub unsafe extern "C" fn kafka_common_ResourceNotFoundError_resource(
     handle: *const kafka_common_ResourceNotFoundError_t,
 ) -> *mut c_char {
@@ -1365,6 +1375,7 @@ pub unsafe extern "C" fn kafka_common_ResourceNotFoundError_resource(
 
 /// `ThrottlingQuotaExceededException` -> `kafka_common_ThrottlingQuotaExceededError_t`.
 #[repr(C)]
+#[doc(alias = "org.apache.kafka.common.errors.ThrottlingQuotaExceededException")]
 pub struct kafka_common_ThrottlingQuotaExceededError_t {
     _private: [u8; 0],
 }
@@ -1394,6 +1405,7 @@ pub unsafe extern "C" fn kafka_common_Error_throttling_quota_exceeded(
 ///
 /// `handle` must be a valid, non-null [`kafka_common_ThrottlingQuotaExceededError_t`].
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.common.errors.ThrottlingQuotaExceededException#throttleTimeMs")]
 pub unsafe extern "C" fn kafka_common_ThrottlingQuotaExceededError_throttle_time_ms(
     handle: *const kafka_common_ThrottlingQuotaExceededError_t,
 ) -> i32 {
@@ -1403,6 +1415,7 @@ pub unsafe extern "C" fn kafka_common_ThrottlingQuotaExceededError_throttle_time
 
 /// `CorrelationIdMismatchException` -> `kafka_common_CorrelationIdMismatchError_t`.
 #[repr(C)]
+#[doc(alias = "org.apache.kafka.common.requests.CorrelationIdMismatchException")]
 pub struct kafka_common_CorrelationIdMismatchError_t {
     _private: [u8; 0],
 }
@@ -1432,6 +1445,7 @@ pub unsafe extern "C" fn kafka_common_Error_correlation_id_mismatch(
 ///
 /// `handle` must be a valid, non-null [`kafka_common_CorrelationIdMismatchError_t`].
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.common.requests.CorrelationIdMismatchException#requestCorrelationId")]
 pub unsafe extern "C" fn kafka_common_CorrelationIdMismatchError_request_correlation_id(
     handle: *const kafka_common_CorrelationIdMismatchError_t,
 ) -> i32 {
@@ -1445,6 +1459,7 @@ pub unsafe extern "C" fn kafka_common_CorrelationIdMismatchError_request_correla
 ///
 /// `handle` must be a valid, non-null [`kafka_common_CorrelationIdMismatchError_t`].
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.common.requests.CorrelationIdMismatchException#responseCorrelationId")]
 pub unsafe extern "C" fn kafka_common_CorrelationIdMismatchError_response_correlation_id(
     handle: *const kafka_common_CorrelationIdMismatchError_t,
 ) -> i32 {
@@ -1454,6 +1469,7 @@ pub unsafe extern "C" fn kafka_common_CorrelationIdMismatchError_response_correl
 
 /// `RecordDeserializationException` -> `kafka_common_RecordDeserializationError_t`.
 #[repr(C)]
+#[doc(alias = "org.apache.kafka.common.errors.RecordDeserializationException")]
 pub struct kafka_common_RecordDeserializationError_t {
     _private: [u8; 0],
 }
@@ -1487,6 +1503,7 @@ pub unsafe extern "C" fn kafka_common_Error_record_deserialization(
 /// `handle` must be a valid, non-null [`kafka_common_RecordDeserializationError_t`];
 /// `out_origin` must be a valid pointer.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.common.errors.RecordDeserializationException#origin")]
 pub unsafe extern "C" fn kafka_common_RecordDeserializationError_origin(
     handle: *const kafka_common_RecordDeserializationError_t,
     out_origin: *mut i32,
@@ -1527,6 +1544,7 @@ pub unsafe extern "C" fn kafka_common_RecordDeserializationError_partition(
 ///
 /// `handle` must be a valid, non-null [`kafka_common_RecordDeserializationError_t`].
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.common.errors.RecordDeserializationException#offset")]
 pub unsafe extern "C" fn kafka_common_RecordDeserializationError_offset(
     handle: *const kafka_common_RecordDeserializationError_t,
 ) -> i64 {
@@ -1540,6 +1558,7 @@ pub unsafe extern "C" fn kafka_common_RecordDeserializationError_offset(
 ///
 /// `handle` must be a valid, non-null [`kafka_common_RecordDeserializationError_t`].
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.common.errors.RecordDeserializationException#timestamp")]
 pub unsafe extern "C" fn kafka_common_RecordDeserializationError_timestamp(
     handle: *const kafka_common_RecordDeserializationError_t,
 ) -> i64 {
@@ -1555,6 +1574,7 @@ pub unsafe extern "C" fn kafka_common_RecordDeserializationError_timestamp(
 ///
 /// `handle` must be a valid, non-null [`kafka_common_RecordDeserializationError_t`].
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.common.errors.RecordDeserializationException#timestampType")]
 pub unsafe extern "C" fn kafka_common_RecordDeserializationError_timestamp_type(
     handle: *const kafka_common_RecordDeserializationError_t,
 ) -> i32 {
@@ -1571,6 +1591,7 @@ pub unsafe extern "C" fn kafka_common_RecordDeserializationError_timestamp_type(
 /// `handle` must be a valid, non-null [`kafka_common_RecordDeserializationError_t`];
 /// `out_len` must be a valid pointer.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.common.errors.RecordDeserializationException#keyBuffer")]
 pub unsafe extern "C" fn kafka_common_RecordDeserializationError_key_buffer(
     handle: *const kafka_common_RecordDeserializationError_t,
     out_len: *mut i32,
@@ -1601,6 +1622,7 @@ pub unsafe extern "C" fn kafka_common_RecordDeserializationError_key_buffer(
 /// `handle` must be a valid, non-null [`kafka_common_RecordDeserializationError_t`];
 /// `out_len` must be a valid pointer.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.common.errors.RecordDeserializationException#valueBuffer")]
 pub unsafe extern "C" fn kafka_common_RecordDeserializationError_value_buffer(
     handle: *const kafka_common_RecordDeserializationError_t,
     out_len: *mut i32,
@@ -1709,6 +1731,7 @@ pub unsafe extern "C" fn kafka_common_RecordDeserializationError_header_value(
 
 /// `QuotaViolationException` -> `kafka_common_QuotaViolationError_t`.
 #[repr(C)]
+#[doc(alias = "org.apache.kafka.common.metrics.QuotaViolationException")]
 pub struct kafka_common_QuotaViolationError_t {
     _private: [u8; 0],
 }
@@ -1769,6 +1792,7 @@ pub unsafe extern "C" fn kafka_common_QuotaViolationError_metric_group(
 ///
 /// `handle` must be a valid, non-null [`kafka_common_QuotaViolationError_t`].
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.common.metrics.QuotaViolationException#value")]
 pub unsafe extern "C" fn kafka_common_QuotaViolationError_value(
     handle: *const kafka_common_QuotaViolationError_t,
 ) -> f64 {
@@ -1782,6 +1806,7 @@ pub unsafe extern "C" fn kafka_common_QuotaViolationError_value(
 ///
 /// `handle` must be a valid, non-null [`kafka_common_QuotaViolationError_t`].
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.common.metrics.QuotaViolationException#bound")]
 pub unsafe extern "C" fn kafka_common_QuotaViolationError_bound(
     handle: *const kafka_common_QuotaViolationError_t,
 ) -> f64 {
@@ -1791,6 +1816,7 @@ pub unsafe extern "C" fn kafka_common_QuotaViolationError_bound(
 
 /// `LogTruncationException` -> `kafka_common_ConsumerLogTruncationError_t`.
 #[repr(C)]
+#[doc(alias = "org.apache.kafka.clients.consumer.LogTruncationException")]
 pub struct kafka_common_ConsumerLogTruncationError_t {
     _private: [u8; 0],
 }
@@ -1835,6 +1861,7 @@ pub unsafe extern "C" fn kafka_common_ConsumerLogTruncationError_offset_out_of_r
 ///
 /// `handle` must be a valid, non-null [`kafka_common_ConsumerLogTruncationError_t`].
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.clients.consumer.LogTruncationException#divergentOffsets")]
 pub unsafe extern "C" fn kafka_common_ConsumerLogTruncationError_divergent_offsets(
     handle: *const kafka_common_ConsumerLogTruncationError_t,
 ) -> *mut kafka_consumer_OffsetMap_t {
@@ -1844,6 +1871,7 @@ pub unsafe extern "C" fn kafka_common_ConsumerLogTruncationError_divergent_offse
 
 /// `NoOffsetForPartitionException` -> `kafka_common_ConsumerNoOffsetForPartitionError_t`.
 #[repr(C)]
+#[doc(alias = "org.apache.kafka.clients.consumer.NoOffsetForPartitionException")]
 pub struct kafka_common_ConsumerNoOffsetForPartitionError_t {
     _private: [u8; 0],
 }
@@ -1877,6 +1905,7 @@ pub unsafe extern "C" fn kafka_common_Error_consumer_no_offset_for_partition(
 ///
 /// `handle` must be a valid, non-null [`kafka_common_ConsumerNoOffsetForPartitionError_t`].
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.clients.consumer.NoOffsetForPartitionException#partitions")]
 pub unsafe extern "C" fn kafka_common_ConsumerNoOffsetForPartitionError_partitions(
     handle: *const kafka_common_ConsumerNoOffsetForPartitionError_t,
 ) -> *mut kafka_consumer_TopicPartitionList_t {
@@ -1886,6 +1915,7 @@ pub unsafe extern "C" fn kafka_common_ConsumerNoOffsetForPartitionError_partitio
 
 /// Consumer-package `OffsetOutOfRangeException` -> `kafka_common_ConsumerOffsetOutOfRangeError_t`.
 #[repr(C)]
+#[doc(alias = "org.apache.kafka.clients.consumer.OffsetOutOfRangeException")]
 pub struct kafka_common_ConsumerOffsetOutOfRangeError_t {
     _private: [u8; 0],
 }
@@ -1916,6 +1946,7 @@ pub unsafe extern "C" fn kafka_common_Error_consumer_offset_out_of_range(
 ///
 /// `handle` must be a valid, non-null [`kafka_common_ConsumerOffsetOutOfRangeError_t`].
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.clients.consumer.OffsetOutOfRangeException#offsetOutOfRangePartitions")]
 pub unsafe extern "C" fn kafka_common_ConsumerOffsetOutOfRangeError_offset_out_of_range_partitions(
     handle: *const kafka_common_ConsumerOffsetOutOfRangeError_t,
 ) -> *mut kafka_consumer_LongOffsetMap_t {
@@ -1925,6 +1956,7 @@ pub unsafe extern "C" fn kafka_common_ConsumerOffsetOutOfRangeError_offset_out_o
 
 /// `RecordTooLargeException` -> `kafka_common_RecordTooLargeError_t`.
 #[repr(C)]
+#[doc(alias = "org.apache.kafka.common.errors.RecordTooLargeException")]
 pub struct kafka_common_RecordTooLargeError_t {
     _private: [u8; 0],
 }
@@ -1958,6 +1990,7 @@ pub unsafe extern "C" fn kafka_common_Error_record_too_large(
 ///
 /// `handle` must be a valid, non-null [`kafka_common_RecordTooLargeError_t`].
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.common.errors.RecordTooLargeException#recordTooLargePartitions")]
 pub unsafe extern "C" fn kafka_common_RecordTooLargeError_record_too_large_partitions(
     handle: *const kafka_common_RecordTooLargeError_t,
 ) -> *mut kafka_consumer_LongOffsetMap_t {

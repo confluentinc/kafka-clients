@@ -25,6 +25,7 @@ kafka_error_class! {
     /// Java `extends` chain:
     ///    `UnknownMemberIdException` -> `ApplicationRecoverableException` ->
     ///   `ApiException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.UnknownMemberIdException")]
     UnknownMemberIdError,
     code: Errors::UnknownMemberId,
     extends: [

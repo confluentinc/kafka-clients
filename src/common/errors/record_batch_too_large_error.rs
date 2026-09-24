@@ -26,6 +26,7 @@ kafka_error_class! {
     /// Java `extends` chain:
     ///    `RecordBatchTooLargeException` -> `InvalidConfigurationException` ->
     ///   `ApiException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.RecordBatchTooLargeException")]
     RecordBatchTooLargeError,
     code: Errors::RecordListTooLarge,
     extends: [

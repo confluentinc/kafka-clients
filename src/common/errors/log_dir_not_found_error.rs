@@ -24,6 +24,7 @@ kafka_error_class! {
     ///
     /// Java `extends` chain:
     ///    `LogDirNotFoundException` -> `ApiException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.LogDirNotFoundException")]
     LogDirNotFoundError,
     code: Errors::LogDirNotFound,
     extends: [

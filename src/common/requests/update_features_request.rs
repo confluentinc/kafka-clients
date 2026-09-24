@@ -28,6 +28,7 @@ use super::{ConcreteRequest, ConcreteResponse, RequestBuilder, UpdateFeaturesRes
 ///
 /// Corresponds to `UpdateFeaturesRequest.FeatureUpdateItem`.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[doc(alias = "org.apache.kafka.common.requests.UpdateFeaturesRequest$FeatureUpdateItem")]
 pub struct FeatureUpdateItem {
     feature_name: String,
     feature_level: i16,
@@ -36,21 +37,25 @@ pub struct FeatureUpdateItem {
 
 impl FeatureUpdateItem {
     /// Creates a new `FeatureUpdateItem`.
+    #[doc(alias = "org.apache.kafka.common.requests.UpdateFeaturesRequest$FeatureUpdateItem#FeatureUpdateItem")]
     pub fn new(feature_name: String, feature_level: i16, upgrade_type: UpgradeType) -> Self {
         Self { feature_name, feature_level, upgrade_type }
     }
 
     /// The name of the finalized feature to be updated.
+    #[doc(alias = "org.apache.kafka.common.requests.UpdateFeaturesRequest$FeatureUpdateItem#feature")]
     pub fn feature(&self) -> &str {
         &self.feature_name
     }
 
     /// The new maximum version level for the finalized feature.
+    #[doc(alias = "org.apache.kafka.common.requests.UpdateFeaturesRequest$FeatureUpdateItem#versionLevel")]
     pub fn version_level(&self) -> i16 {
         self.feature_level
     }
 
     /// The upgrade type for this update.
+    #[doc(alias = "org.apache.kafka.common.requests.UpdateFeaturesRequest$FeatureUpdateItem#upgradeType")]
     pub fn upgrade_type(&self) -> UpgradeType {
         self.upgrade_type
     }
@@ -58,6 +63,7 @@ impl FeatureUpdateItem {
     /// Whether this update deletes the finalized feature.
     ///
     /// Mirrors `FeatureUpdateItem.isDeleteRequest`.
+    #[doc(alias = "org.apache.kafka.common.requests.UpdateFeaturesRequest$FeatureUpdateItem#isDeleteRequest")]
     pub fn is_delete_request(&self) -> bool {
         self.feature_level < 1 && self.upgrade_type != UpgradeType::Upgrade
     }
@@ -67,6 +73,7 @@ impl FeatureUpdateItem {
 ///
 /// Corresponds to `org.apache.kafka.common.requests.UpdateFeaturesRequest`.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.UpdateFeaturesRequest")]
 pub struct UpdateFeaturesRequest {
     data: UpdateFeaturesRequestData,
     version: i16,
@@ -74,11 +81,13 @@ pub struct UpdateFeaturesRequest {
 
 impl UpdateFeaturesRequest {
     /// Creates a new `UpdateFeaturesRequest` from data and version.
+    #[doc(alias = "org.apache.kafka.common.requests.UpdateFeaturesRequest#UpdateFeaturesRequest")]
     pub fn new(data: UpdateFeaturesRequestData, version: i16) -> Self {
         Self { data, version }
     }
 
     /// Returns a reference to the underlying data.
+    #[doc(alias = "org.apache.kafka.common.requests.UpdateFeaturesRequest#data")]
     pub fn data(&self) -> &UpdateFeaturesRequestData {
         &self.data
     }
@@ -108,6 +117,7 @@ impl UpdateFeaturesRequest {
     ///
     /// Panics if `name` is not present in the request (mirroring the Java
     /// contract, where `data.featureUpdates().find(name)` is assumed non-null).
+    #[doc(alias = "org.apache.kafka.common.requests.UpdateFeaturesRequest#getFeature")]
     pub fn get_feature(&self, name: &str) -> FeatureUpdateItem {
         let update = self
             .data
@@ -134,6 +144,7 @@ impl UpdateFeaturesRequest {
     /// Returns all feature updates in this request.
     ///
     /// Mirrors `UpdateFeaturesRequest.featureUpdates`.
+    #[doc(alias = "org.apache.kafka.common.requests.UpdateFeaturesRequest#featureUpdates")]
     pub fn feature_updates(&self) -> Vec<FeatureUpdateItem> {
         self.data.feature_updates.iter().map(|u| self.get_feature(&u.feature)).collect()
     }
@@ -141,6 +152,7 @@ impl UpdateFeaturesRequest {
     /// Creates an error response for this request.
     ///
     /// Mirrors `UpdateFeaturesRequest.getErrorResponse`.
+    #[doc(alias = "org.apache.kafka.common.requests.UpdateFeaturesRequest#getErrorResponse")]
     pub fn get_error_response(&self, throttle_time_ms: i32, error: &Errors) -> ConcreteResponse {
         ConcreteResponse::UpdateFeatures(UpdateFeaturesResponse::create_with_errors(
             *error,
@@ -156,6 +168,7 @@ impl UpdateFeaturesRequest {
     /// # Errors
     ///
     /// Returns an error if parsing fails.
+    #[doc(alias = "org.apache.kafka.common.requests.UpdateFeaturesRequest#parse")]
     pub fn parse(readable: &mut dyn Readable, version: i16) -> io::Result<Self> {
         let data = UpdateFeaturesRequestData::read(readable, version)?;
         Ok(Self::new(data, version))
@@ -172,6 +185,7 @@ impl std::fmt::Display for UpdateFeaturesRequest {
 ///
 /// Corresponds to `UpdateFeaturesRequest.Builder` in Java.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.UpdateFeaturesRequest$Builder")]
 pub struct UpdateFeaturesRequestBuilder {
     data: UpdateFeaturesRequestData,
     oldest_allowed_version: i16,
@@ -182,6 +196,7 @@ impl UpdateFeaturesRequestBuilder {
     /// Creates a builder from the given request data.
     ///
     /// Mirrors `UpdateFeaturesRequest.Builder(UpdateFeaturesRequestData)`.
+    #[doc(alias = "org.apache.kafka.common.requests.UpdateFeaturesRequest$Builder#Builder")]
     pub fn new(data: UpdateFeaturesRequestData) -> Self {
         Self {
             data,

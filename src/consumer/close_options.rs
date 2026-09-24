@@ -23,6 +23,7 @@ use std::time::Duration;
 /// Corresponds to Java's `CloseOptions.GroupMembershipOperation`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
+#[doc(alias = "org.apache.kafka.clients.consumer.CloseOptions$GroupMembershipOperation")]
 pub enum GroupMembershipOperation {
     /// The consumer will leave the group.
     LeaveGroup,
@@ -38,6 +39,7 @@ pub enum GroupMembershipOperation {
 ///
 /// Corresponds to Java's `org.apache.kafka.clients.consumer.CloseOptions`.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[doc(alias = "org.apache.kafka.clients.consumer.CloseOptions")]
 pub struct CloseOptions {
     operation: GroupMembershipOperation,
     timeout: Option<Duration>,
@@ -88,6 +90,7 @@ impl CloseOptions {
     /// after this call. Callers wanting "no timeout, use default" should
     /// leave the field at its default by skipping this setter (or via
     /// [`CloseOptions::default`]).
+    #[doc(alias = "org.apache.kafka.clients.consumer.CloseOptions#withTimeout")]
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = Some(timeout);
         self
@@ -98,12 +101,14 @@ impl CloseOptions {
     /// In Java, this method rejects a `null` operation via
     /// `Objects.requireNonNull`. In Rust the type system makes the
     /// non-null guarantee redundant.
+    #[doc(alias = "org.apache.kafka.clients.consumer.CloseOptions#withGroupMembershipOperation")]
     pub fn with_group_membership_operation(mut self, operation: GroupMembershipOperation) -> Self {
         self.operation = operation;
         self
     }
 
     /// The group membership operation to apply upon shutdown.
+    #[doc(alias = "org.apache.kafka.clients.consumer.CloseOptions#groupMembershipOperation")]
     pub fn group_membership_operation(&self) -> GroupMembershipOperation {
         self.operation
     }
@@ -111,6 +116,7 @@ impl CloseOptions {
     /// The maximum time to wait for the close process to complete.
     ///
     /// `None` means the default timeout will be used.
+    #[doc(alias = "org.apache.kafka.clients.consumer.CloseOptions#timeout")]
     pub fn timeout(&self) -> Option<Duration> {
         self.timeout
     }

@@ -44,6 +44,7 @@ use crate::common::{Error, MetricName};
 ///    quota violations are frequent and the trace is never read. Rust errors do
 ///    not capture one at all, so there is nothing to suppress.
 #[derive(Clone, Debug)]
+#[doc(alias = "org.apache.kafka.common.metrics.QuotaViolationException")]
 pub struct QuotaViolationError {
     metric_name: MetricName,
     value: f64,
@@ -54,6 +55,7 @@ pub struct QuotaViolationError {
 impl QuotaViolationError {
     /// Create the error, mirroring Java's
     /// `QuotaViolationException(KafkaMetric metric, double value, double bound)`.
+    #[doc(alias = "org.apache.kafka.common.metrics.QuotaViolationException#QuotaViolationException")]
     pub fn new(metric_name: MetricName, value: f64, bound: f64) -> Self {
         Self { metric_name, value, bound, source: None }
     }
@@ -66,11 +68,13 @@ impl QuotaViolationError {
     }
 
     /// The value that was recorded. Mirrors Java's `value()`.
+    #[doc(alias = "org.apache.kafka.common.metrics.QuotaViolationException#value")]
     pub fn value(&self) -> f64 {
         self.value
     }
 
     /// The quota bound that was crossed. Mirrors Java's `bound()`.
+    #[doc(alias = "org.apache.kafka.common.metrics.QuotaViolationException#bound")]
     pub fn bound(&self) -> f64 {
         self.bound
     }

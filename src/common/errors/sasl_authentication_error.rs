@@ -25,6 +25,7 @@ kafka_error_class! {
     /// Java `extends` chain:
     ///    `SaslAuthenticationException` -> `AuthenticationException` ->
     ///   `InvalidConfigurationException` -> `ApiException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.SaslAuthenticationException")]
     SaslAuthenticationError,
     code: Errors::SaslAuthenticationFailed,
     extends: [

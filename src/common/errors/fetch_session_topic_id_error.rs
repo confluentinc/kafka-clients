@@ -25,6 +25,7 @@ kafka_error_class! {
     /// Java `extends` chain:
     ///    `FetchSessionTopicIdException` -> `RetriableException` ->
     ///   `ApiException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.FetchSessionTopicIdException")]
     FetchSessionTopicIdError,
     code: Errors::FetchSessionTopicIdError,
     extends: [

@@ -26,6 +26,7 @@ kafka_error_class! {
     ///    `FencedLeaderEpochException` -> `InvalidMetadataException` ->
     ///   `RefreshRetriableException` -> `RetriableException` -> `ApiException` ->
     ///   `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.FencedLeaderEpochException")]
     FencedLeaderEpochError,
     code: Errors::FencedLeaderEpoch,
     extends: [

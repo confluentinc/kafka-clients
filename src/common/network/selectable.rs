@@ -51,6 +51,7 @@ pub const USE_DEFAULT_BUFFER_SIZE: i32 = -1;
 /// Translated from the Java `Selectable` interface.
 ///
 /// All I/O methods are `async` per CLAUDE.md rule 8.
+#[doc(alias = "org.apache.kafka.common.network.Selectable")]
 pub trait Selectable: Send {
     /// Begin establishing a socket connection to the given address identified by
     /// the given id.
@@ -68,6 +69,7 @@ pub trait Selectable: Send {
     /// # Errors
     ///
     /// Returns an error if we cannot begin connecting.
+    #[doc(alias = "org.apache.kafka.common.network.Selectable#connect")]
     fn connect(
         &mut self,
         id: &str,
@@ -78,6 +80,7 @@ pub trait Selectable: Send {
     ) -> impl std::future::Future<Output = io::Result<()>> + Send;
 
     /// Wakeup this selector if it is blocked on I/O.
+    #[doc(alias = "org.apache.kafka.common.network.Selectable#wakeup")]
     fn wakeup(&self);
 
     /// Returns a lock-free handle to this selector's wakeup primitive.
@@ -104,6 +107,7 @@ pub trait Selectable: Send {
     }
 
     /// Close this selector.
+    #[doc(alias = "org.apache.kafka.common.network.Selectable#close")]
     fn close(&mut self) -> impl std::future::Future<Output = ()> + Send;
 
     /// Close the connection identified by the given id.
@@ -114,6 +118,7 @@ pub trait Selectable: Send {
     /// # Errors
     ///
     /// Returns an error if the channel does not exist.
+    #[doc(alias = "org.apache.kafka.common.network.Selectable#send")]
     fn send(&mut self, send: NetworkSend) -> Result<(), String>;
 
     /// Do I/O. Reads, writes, connection establishment, etc.
@@ -125,12 +130,15 @@ pub trait Selectable: Send {
     /// # Errors
     ///
     /// Returns an error if I/O fails.
+    #[doc(alias = "org.apache.kafka.common.network.Selectable#poll")]
     fn poll(&mut self, timeout_ms: i64) -> impl std::future::Future<Output = io::Result<()>> + Send;
 
     /// The list of sends that completed on the last `poll()` call.
+    #[doc(alias = "org.apache.kafka.common.network.Selectable#completedSends")]
     fn completed_sends(&self) -> &[NetworkSend];
 
     /// The collection of receives that completed on the last `poll()` call.
+    #[doc(alias = "org.apache.kafka.common.network.Selectable#completedReceives")]
     fn completed_receives(&self) -> Vec<&NetworkReceive>;
 
     /// Drains the receives that completed on the last `poll()` call, returning
@@ -148,23 +156,30 @@ pub trait Selectable: Send {
 
     /// The connections that finished disconnecting on the last `poll()` call.
     /// Channel state indicates the local channel state at the time of disconnection.
+    #[doc(alias = "org.apache.kafka.common.network.Selectable#disconnected")]
     fn disconnected(&self) -> &HashMap<String, ChannelState>;
 
     /// The list of connections that completed their connection on the last `poll()` call.
+    #[doc(alias = "org.apache.kafka.common.network.Selectable#connected")]
     fn connected(&self) -> &[String];
 
     /// Disable reads from the given connection.
+    #[doc(alias = "org.apache.kafka.common.network.Selectable#mute")]
     fn mute(&mut self, id: &str);
 
     /// Re-enable reads from the given connection.
+    #[doc(alias = "org.apache.kafka.common.network.Selectable#unmute")]
     fn unmute(&mut self, id: &str);
 
     /// Disable reads from all connections.
+    #[doc(alias = "org.apache.kafka.common.network.Selectable#muteAll")]
     fn mute_all(&mut self);
 
     /// Re-enable reads from all connections.
+    #[doc(alias = "org.apache.kafka.common.network.Selectable#unmuteAll")]
     fn unmute_all(&mut self);
 
     /// Returns `true` if a channel is ready.
+    #[doc(alias = "org.apache.kafka.common.network.Selectable#isChannelReady")]
     fn is_channel_ready(&self, id: &str) -> bool;
 }

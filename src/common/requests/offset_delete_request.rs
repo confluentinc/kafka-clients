@@ -36,6 +36,7 @@ use super::abstract_request::{ConcreteRequest, RequestBuilder};
 ///
 /// Corresponds to `org.apache.kafka.common.requests.OffsetDeleteRequest`.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.OffsetDeleteRequest")]
 pub struct OffsetDeleteRequest {
     data: OffsetDeleteRequestData,
     version: i16,
@@ -45,11 +46,13 @@ impl OffsetDeleteRequest {
     /// Creates a new `OffsetDeleteRequest` from data and version.
     ///
     /// Mirrors Java's constructor `OffsetDeleteRequest(OffsetDeleteRequestData, short)`.
+    #[doc(alias = "org.apache.kafka.common.requests.OffsetDeleteRequest#OffsetDeleteRequest")]
     pub fn new(data: OffsetDeleteRequestData, version: i16) -> Self {
         Self { data, version }
     }
 
     /// Returns a reference to the underlying data.
+    #[doc(alias = "org.apache.kafka.common.requests.OffsetDeleteRequest#data")]
     pub fn data(&self) -> &OffsetDeleteRequestData {
         &self.data
     }
@@ -72,6 +75,7 @@ impl OffsetDeleteRequest {
     /// Builds the canonical error response for this request, matching Java's
     /// `OffsetDeleteRequest.getErrorResponse(int, Throwable)`: a top-level
     /// error code covering the whole request.
+    #[doc(alias = "org.apache.kafka.common.requests.OffsetDeleteRequest#getErrorResponse")]
     pub fn get_error_response(&self, throttle_time_ms: i32, error: &Errors) -> ConcreteResponse {
         let mut data = OffsetDeleteResponseData::new();
         data.set_throttle_time_ms(throttle_time_ms);
@@ -85,6 +89,7 @@ impl OffsetDeleteRequest {
     /// # Errors
     ///
     /// Returns an error if parsing fails.
+    #[doc(alias = "org.apache.kafka.common.requests.OffsetDeleteRequest#parse")]
     pub fn parse(readable: &mut dyn Readable, version: i16) -> io::Result<Self> {
         let data = OffsetDeleteRequestData::read(readable, version)?;
         Ok(Self::new(data, version))
@@ -101,6 +106,7 @@ impl std::fmt::Display for OffsetDeleteRequest {
 ///
 /// Corresponds to `OffsetDeleteRequest.Builder` in Java.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.OffsetDeleteRequest$Builder")]
 pub struct OffsetDeleteRequestBuilder {
     data: OffsetDeleteRequestData,
 }
@@ -109,6 +115,7 @@ impl OffsetDeleteRequestBuilder {
     /// Creates a builder over the given request data.
     ///
     /// Mirrors Java's `OffsetDeleteRequest.Builder(OffsetDeleteRequestData)`.
+    #[doc(alias = "org.apache.kafka.common.requests.OffsetDeleteRequest$Builder#Builder")]
     pub fn new(data: OffsetDeleteRequestData) -> Self {
         Self { data }
     }

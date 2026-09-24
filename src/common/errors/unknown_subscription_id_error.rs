@@ -25,6 +25,7 @@ kafka_error_class! {
     ///
     /// Java `extends` chain:
     ///    `UnknownSubscriptionIdException` -> `ApiException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.UnknownSubscriptionIdException")]
     UnknownSubscriptionIdError,
     code: Errors::UnknownSubscriptionId,
     extends: [

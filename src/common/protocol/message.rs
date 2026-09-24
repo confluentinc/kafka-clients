@@ -33,11 +33,14 @@ use super::Writable;
 /// It supports versioned serialization with a two-pass approach:
 /// 1. First pass: calculate size using [`size`](Message::size) (which calls [`add_size`](Message::add_size))
 /// 2. Second pass: serialize using [`write`](Message::write)
+#[doc(alias = "org.apache.kafka.common.protocol.Message")]
 pub trait Message: Clone {
     /// Returns the lowest supported version of this message, inclusive.
+    #[doc(alias = "org.apache.kafka.common.protocol.Message#lowestSupportedVersion")]
     fn lowest_supported_version(&self) -> i16;
 
     /// Returns the highest supported version of this message, inclusive.
+    #[doc(alias = "org.apache.kafka.common.protocol.Message#highestSupportedVersion")]
     fn highest_supported_version(&self) -> i16;
 
     /// Returns the number of bytes it would take to write out this message.
@@ -48,6 +51,7 @@ pub trait Message: Clone {
     /// # Errors
     ///
     /// Returns an error if the specified version is not supported.
+    #[doc(alias = "org.apache.kafka.common.protocol.Message#size")]
     fn size(&self, cache: &mut ObjectSerializationCache, version: i16) -> io::Result<i32> {
         let mut size = MessageSizeAccumulator::new();
         self.add_size(&mut size, cache, version)?;
@@ -59,6 +63,7 @@ pub trait Message: Clone {
     /// # Errors
     ///
     /// Returns an error if the specified version is not supported.
+    #[doc(alias = "org.apache.kafka.common.protocol.Message#addSize")]
     fn add_size(
         &self,
         size: &mut MessageSizeAccumulator,
@@ -73,6 +78,7 @@ pub trait Message: Clone {
     /// # Errors
     ///
     /// Returns an error if the specified version is not supported.
+    #[doc(alias = "org.apache.kafka.common.protocol.Message#write")]
     fn write(&mut self, writable: &mut dyn Writable, cache: &ObjectSerializationCache, version: i16) -> io::Result<()>;
 
     /// Reads this message from the given Readable. This will overwrite all
@@ -81,12 +87,15 @@ pub trait Message: Clone {
     /// # Errors
     ///
     /// Returns an error if the specified version is not supported.
+    #[doc(alias = "org.apache.kafka.common.protocol.Message#read")]
     fn read(&mut self, readable: &mut dyn Readable, version: i16) -> io::Result<()>;
 
     /// Returns a list of tagged fields which this software can't understand.
+    #[doc(alias = "org.apache.kafka.common.protocol.Message#unknownTaggedFields")]
     fn unknown_tagged_fields(&self) -> &[RawTaggedField];
 
     /// Make a deep copy of the message.
+    #[doc(alias = "org.apache.kafka.common.protocol.Message#duplicate")]
     fn duplicate(&self) -> Self {
         self.clone()
     }

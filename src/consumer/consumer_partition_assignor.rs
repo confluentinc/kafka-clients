@@ -167,6 +167,7 @@ impl SubscriptionOptionsBuilder {
 ///
 /// Corresponds to `ConsumerPartitionAssignor.Subscription`.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[doc(alias = "org.apache.kafka.clients.consumer.ConsumerPartitionAssignor$Subscription")]
 pub struct Subscription {
     topics: Vec<String>,
     user_data: Option<Vec<u8>>,
@@ -188,6 +189,7 @@ impl Subscription {
     /// Creates a subscription from topics only.
     ///
     /// Mirrors `Subscription(List)` (`:130`).
+    #[doc(alias = "org.apache.kafka.clients.consumer.ConsumerPartitionAssignor$Subscription#Subscription")]
     pub fn new(topics: Vec<String>) -> Self {
         Self::with_options(
             SubscriptionOptionsBuilder::new()
@@ -200,6 +202,7 @@ impl Subscription {
     /// Creates a subscription from topics and optional user data.
     ///
     /// Mirrors `Subscription(List, ByteBuffer)` (`:126`).
+    #[doc(alias = "org.apache.kafka.clients.consumer.ConsumerPartitionAssignor$Subscription#Subscription")]
     pub fn with_user_data(topics: Vec<String>, user_data: Option<Vec<u8>>) -> Self {
         Self::with_options(
             SubscriptionOptionsBuilder::new()
@@ -214,6 +217,7 @@ impl Subscription {
     /// partitions (default generation, no rack).
     ///
     /// Mirrors `Subscription(List, ByteBuffer, List)` (`:122`).
+    #[doc(alias = "org.apache.kafka.clients.consumer.ConsumerPartitionAssignor$Subscription#Subscription")]
     pub fn with_user_data_owned_partitions(
         topics: Vec<String>,
         user_data: Option<Vec<u8>>,
@@ -237,6 +241,7 @@ impl Subscription {
     ///
     /// A `generation_id` less than zero is mapped to `None`, matching Java's
     /// `generationId < 0 ? Optional.empty() : Optional.of(generationId)`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.ConsumerPartitionAssignor$Subscription#Subscription")]
     pub fn with_options(options: SubscriptionOptions) -> Self {
         let SubscriptionOptions { topics, user_data, owned_partitions, generation_id, rack_id } = options;
         Self {
@@ -250,36 +255,43 @@ impl Subscription {
     }
 
     /// The subscribed topics.
+    #[doc(alias = "org.apache.kafka.clients.consumer.ConsumerPartitionAssignor$Subscription#topics")]
     pub fn topics(&self) -> &[String] {
         &self.topics
     }
 
     /// The opaque user data attached to the subscription.
+    #[doc(alias = "org.apache.kafka.clients.consumer.ConsumerPartitionAssignor$Subscription#userData")]
     pub fn user_data(&self) -> Option<&[u8]> {
         self.user_data.as_deref()
     }
 
     /// The partitions currently owned by the member.
+    #[doc(alias = "org.apache.kafka.clients.consumer.ConsumerPartitionAssignor$Subscription#ownedPartitions")]
     pub fn owned_partitions(&self) -> &[TopicPartition] {
         &self.owned_partitions
     }
 
     /// The rack id of the member, if any.
+    #[doc(alias = "org.apache.kafka.clients.consumer.ConsumerPartitionAssignor$Subscription#rackId")]
     pub fn rack_id(&self) -> Option<&str> {
         self.rack_id.as_deref()
     }
 
     /// Sets the group instance id.
+    #[doc(alias = "org.apache.kafka.clients.consumer.ConsumerPartitionAssignor$Subscription#setGroupInstanceId")]
     pub fn set_group_instance_id(&mut self, group_instance_id: Option<String>) {
         self.group_instance_id = group_instance_id;
     }
 
     /// The group instance id of the member, if any.
+    #[doc(alias = "org.apache.kafka.clients.consumer.ConsumerPartitionAssignor$Subscription#groupInstanceId")]
     pub fn group_instance_id(&self) -> Option<&str> {
         self.group_instance_id.as_deref()
     }
 
     /// The generation id of the subscription, if any.
+    #[doc(alias = "org.apache.kafka.clients.consumer.ConsumerPartitionAssignor$Subscription#generationId")]
     pub fn generation_id(&self) -> Option<i32> {
         self.generation_id
     }
@@ -289,6 +301,7 @@ impl Subscription {
 ///
 /// Corresponds to `ConsumerPartitionAssignor.Assignment`.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[doc(alias = "org.apache.kafka.clients.consumer.ConsumerPartitionAssignor$Assignment")]
 pub struct Assignment {
     partitions: Vec<TopicPartition>,
     user_data: Option<Vec<u8>>,
@@ -303,6 +316,7 @@ impl Assignment {
     /// Creates an assignment from partitions only.
     ///
     /// Mirrors `Assignment(List)` (`:184`).
+    #[doc(alias = "org.apache.kafka.clients.consumer.ConsumerPartitionAssignor$Assignment#Assignment")]
     pub fn new(partitions: Vec<TopicPartition>) -> Self {
         Self::with_user_data(partitions, None)
     }
@@ -310,16 +324,19 @@ impl Assignment {
     /// Creates an assignment with partitions and optional user data.
     ///
     /// Mirrors `Assignment(List, ByteBuffer)` (`:179`).
+    #[doc(alias = "org.apache.kafka.clients.consumer.ConsumerPartitionAssignor$Assignment#Assignment")]
     pub fn with_user_data(partitions: Vec<TopicPartition>, user_data: Option<Vec<u8>>) -> Self {
         Self { partitions, user_data }
     }
 
     /// The assigned partitions.
+    #[doc(alias = "org.apache.kafka.clients.consumer.ConsumerPartitionAssignor$Assignment#partitions")]
     pub fn partitions(&self) -> &[TopicPartition] {
         &self.partitions
     }
 
     /// The opaque user data attached to the assignment.
+    #[doc(alias = "org.apache.kafka.clients.consumer.ConsumerPartitionAssignor$Assignment#userData")]
     pub fn user_data(&self) -> Option<&[u8]> {
         self.user_data.as_deref()
     }

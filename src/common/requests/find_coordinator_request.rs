@@ -39,6 +39,7 @@ use super::RequestBuilder;
 /// Corresponds to `FindCoordinatorRequest.CoordinatorType` in Java.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
+#[doc(alias = "org.apache.kafka.common.requests.FindCoordinatorRequest$CoordinatorType")]
 pub enum CoordinatorType {
     /// Group coordinator (consumer groups).
     Group,
@@ -65,6 +66,7 @@ impl CoordinatorType {
     }
 
     /// Returns the wire-format `i8` id for this coordinator type.
+    #[doc(alias = "org.apache.kafka.common.requests.FindCoordinatorRequest$CoordinatorType#id")]
     pub fn id(self) -> i8 {
         match self {
             Self::Group => 0,
@@ -78,6 +80,7 @@ impl CoordinatorType {
     /// # Errors
     ///
     /// Returns an error if the id is not recognized.
+    #[doc(alias = "org.apache.kafka.common.requests.FindCoordinatorRequest$CoordinatorType#forId")]
     pub fn for_id(id: i8) -> io::Result<Self> {
         match id {
             0 => Ok(Self::Group),
@@ -95,6 +98,7 @@ impl CoordinatorType {
 ///
 /// Corresponds to `org.apache.kafka.common.requests.FindCoordinatorRequest`.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.FindCoordinatorRequest")]
 pub struct FindCoordinatorRequest {
     data: FindCoordinatorRequestData,
     version: i16,
@@ -108,11 +112,13 @@ impl FindCoordinatorRequest {
     pub const MIN_BATCHED_VERSION: i16 = 4;
 
     /// Creates a new `FindCoordinatorRequest` from data and version.
+    #[doc(alias = "org.apache.kafka.common.requests.FindCoordinatorRequest#FindCoordinatorRequest")]
     pub fn new(data: FindCoordinatorRequestData, version: i16) -> Self {
         Self { data, version }
     }
 
     /// Returns a reference to the underlying data.
+    #[doc(alias = "org.apache.kafka.common.requests.FindCoordinatorRequest#data")]
     pub fn data(&self) -> &FindCoordinatorRequestData {
         &self.data
     }
@@ -134,6 +140,7 @@ impl FindCoordinatorRequest {
 
     /// Builds the canonical error response for this request, matching Java's
     /// `FindCoordinatorRequest.getErrorResponse(throttleTimeMs, Throwable)`.
+    #[doc(alias = "org.apache.kafka.common.requests.FindCoordinatorRequest#getErrorResponse")]
     pub fn get_error_response(&self, throttle_time_ms: i32, error: &Errors) -> ConcreteResponse {
         let mut response = FindCoordinatorResponseData::new();
         if self.version >= 2 {
@@ -177,6 +184,7 @@ impl FindCoordinatorRequest {
     /// # Errors
     ///
     /// Returns an error if parsing fails.
+    #[doc(alias = "org.apache.kafka.common.requests.FindCoordinatorRequest#parse")]
     pub fn parse(readable: &mut dyn Readable, version: i16) -> io::Result<Self> {
         let data = FindCoordinatorRequestData::read(readable, version)?;
         Ok(Self::new(data, version))
@@ -193,6 +201,7 @@ impl std::fmt::Display for FindCoordinatorRequest {
 ///
 /// Corresponds to `FindCoordinatorRequest.Builder` in Java.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.FindCoordinatorRequest$Builder")]
 pub struct FindCoordinatorRequestBuilder {
     data: FindCoordinatorRequestData,
     oldest_allowed_version: i16,
@@ -202,6 +211,7 @@ pub struct FindCoordinatorRequestBuilder {
 impl FindCoordinatorRequestBuilder {
     /// Creates a builder wrapping the given data with the full supported
     /// version range.
+    #[doc(alias = "org.apache.kafka.common.requests.FindCoordinatorRequest$Builder#Builder")]
     pub fn new(data: FindCoordinatorRequestData) -> Self {
         Self {
             data,
@@ -211,6 +221,7 @@ impl FindCoordinatorRequestBuilder {
     }
 
     /// Returns a reference to the underlying data.
+    #[doc(alias = "org.apache.kafka.common.requests.FindCoordinatorRequest$Builder#data")]
     pub fn data(&self) -> &FindCoordinatorRequestData {
         &self.data
     }

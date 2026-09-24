@@ -21,6 +21,7 @@ use crate::common::metrics::{Quota, RecordingLevel};
 
 /// Configuration values for metrics.
 #[derive(Clone, Debug)]
+#[doc(alias = "org.apache.kafka.common.metrics.MetricConfig")]
 pub struct MetricConfig {
     quota: Option<Quota>,
     samples: i32,
@@ -51,11 +52,13 @@ impl MetricConfig {
     const DEFAULT_TIME_WINDOW_MS: i64 = 30 * 1000;
 
     /// Create a `MetricConfig` with default values.
+    #[doc(alias = "org.apache.kafka.common.metrics.MetricConfig#MetricConfig")]
     pub fn new() -> Self {
         Self::default()
     }
 
     /// The configured quota, if any.
+    #[doc(alias = "org.apache.kafka.common.metrics.MetricConfig#quota")]
     pub fn quota(&self) -> Option<Quota> {
         self.quota
     }
@@ -67,6 +70,7 @@ impl MetricConfig {
     }
 
     /// The number of events in an event window.
+    #[doc(alias = "org.apache.kafka.common.metrics.MetricConfig#eventWindow")]
     pub fn event_window(&self) -> i64 {
         self.event_window
     }
@@ -78,6 +82,7 @@ impl MetricConfig {
     }
 
     /// The time window in milliseconds.
+    #[doc(alias = "org.apache.kafka.common.metrics.MetricConfig#timeWindowMs")]
     pub fn time_window_ms(&self) -> i64 {
         self.time_window_ms
     }
@@ -96,6 +101,7 @@ impl MetricConfig {
     }
 
     /// The default tags for metrics using this config.
+    #[doc(alias = "org.apache.kafka.common.metrics.MetricConfig#tags")]
     pub fn tags(&self) -> &BTreeMap<String, String> {
         &self.tags
     }
@@ -107,6 +113,7 @@ impl MetricConfig {
     }
 
     /// The number of samples for windowed stats.
+    #[doc(alias = "org.apache.kafka.common.metrics.MetricConfig#samples")]
     pub fn samples(&self) -> i32 {
         self.samples
     }
@@ -121,6 +128,7 @@ impl MetricConfig {
     }
 
     /// The recording level.
+    #[doc(alias = "org.apache.kafka.common.metrics.MetricConfig#recordLevel")]
     pub fn record_level(&self) -> RecordingLevel {
         self.recording_level
     }

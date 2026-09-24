@@ -24,6 +24,7 @@ kafka_error_class! {
     ///
     /// Java `extends` chain:
     ///    `StreamsInvalidTopologyException` -> `ApiException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.StreamsInvalidTopologyException")]
     StreamsInvalidTopologyError,
     code: Errors::StreamsInvalidTopology,
     extends: [

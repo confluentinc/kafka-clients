@@ -33,6 +33,7 @@ use crate::{kafka_debug, kafka_trace};
 /// No interior `Mutex`: Java relies on the caller holding the
 /// `TransactionManager` monitor, and Phase 3 wraps the whole manager. A lock
 /// here would nest for nothing.
+#[doc(alias = "org.apache.kafka.clients.producer.internals.TxnPartitionMap")]
 pub(crate) struct TxnPartitionMap {
     log_context: LogContext,
     topic_partitions: HashMap<TopicPartition, TxnPartitionEntry>,
@@ -40,6 +41,7 @@ pub(crate) struct TxnPartitionMap {
 
 impl TxnPartitionMap {
     /// Creates an empty map.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.TxnPartitionMap#TxnPartitionMap")]
     pub(crate) fn new(log_context: LogContext) -> Self {
         Self { log_context, topic_partitions: HashMap::new() }
     }
@@ -50,6 +52,7 @@ impl TxnPartitionMap {
     /// becomes an `Err`. Note the deliberate asymmetry with
     /// [`Self::get_or_create`] and the tolerant accessors below — see the
     /// comment on [`Self::last_acked_offset`].
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.TxnPartitionMap#get")]
     pub(crate) fn get(&self, topic_partition: &TopicPartition) -> Result<&TxnPartitionEntry, Error> {
         self.topic_partitions.get(topic_partition).ok_or_else(|| {
             Error::local_illegal_state(format!(
@@ -72,6 +75,7 @@ impl TxnPartitionMap {
     }
 
     /// The entry for `topic_partition`, creating it if absent.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.TxnPartitionMap#getOrCreate")]
     pub(crate) fn get_or_create(&mut self, topic_partition: &TopicPartition) -> &mut TxnPartitionEntry {
         self.topic_partitions
             .entry(topic_partition.clone())
@@ -79,11 +83,13 @@ impl TxnPartitionMap {
     }
 
     /// Whether an entry exists for `topic_partition`.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.TxnPartitionMap#contains")]
     pub(crate) fn contains(&self, topic_partition: &TopicPartition) -> bool {
         self.topic_partitions.contains_key(topic_partition)
     }
 
     /// Drops all entries.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.TxnPartitionMap#reset")]
     pub(crate) fn reset(&mut self) {
         self.topic_partitions.clear();
     }
@@ -96,6 +102,7 @@ impl TxnPartitionMap {
     /// [`Self::maybe_update_last_acked_sequence`]) treat absence as "nothing
     /// recorded yet", while `get` is used where the caller has already
     /// established that sequences are being tracked, so absence is a bug.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.TxnPartitionMap#lastAckedOffset")]
     pub(crate) fn last_acked_offset(&self, topic_partition: &TopicPartition) -> Option<i64> {
         self.topic_partitions
             .get(topic_partition)
@@ -104,6 +111,7 @@ impl TxnPartitionMap {
 
     /// The last acknowledged sequence for `topic_partition`, or `None` if the
     /// entry is absent or nothing has been acknowledged.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.TxnPartitionMap#lastAckedSequence")]
     pub(crate) fn last_acked_sequence(&self, topic_partition: &TopicPartition) -> Option<i32> {
         self.topic_partitions
             .get(topic_partition)
@@ -119,6 +127,7 @@ impl TxnPartitionMap {
     /// Java calls `get()` (which throws when absent) and *then* null-checks the
     /// result, so its null branch is unreachable. Only the reachable behavior is
     /// translated.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.TxnPartitionMap#startSequencesAtBeginning")]
     pub(crate) fn start_sequences_at_beginning(
         &mut self,
         topic_partition: &TopicPartition,
@@ -130,12 +139,14 @@ impl TxnPartitionMap {
     }
 
     /// Drops the entry for `topic_partition`.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.TxnPartitionMap#remove")]
     pub(crate) fn remove(&mut self, topic_partition: &TopicPartition) {
         self.topic_partitions.remove(topic_partition);
     }
 
     /// Raises the last acknowledged offset for `topic_partition` to
     /// `last_offset` if it is higher.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.TxnPartitionMap#updateLastAckedOffset")]
     pub(crate) fn update_last_acked_offset(
         &mut self,
         topic_partition: &TopicPartition,
@@ -176,6 +187,7 @@ impl TxnPartitionMap {
     /// accumulator's deque — a reenqueued batch stays tracked but lives in the
     /// latter) — see
     /// `.claude/rules/producer-transactions.md` §7.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.TxnPartitionMap#adjustSequencesDueToFailedBatch")]
     pub(crate) fn adjust_sequences_due_to_failed_batch(
         &mut self,
         batch: &ProducerBatch,
@@ -206,6 +218,7 @@ impl TxnPartitionMap {
     ///
     /// Returns [`TxnPartitionEntry::NO_LAST_ACKED_SEQUENCE_NUMBER`] when no
     /// entry exists, tolerating absence as Java does.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.TxnPartitionMap#maybeUpdateLastAckedSequence")]
     pub(crate) fn maybe_update_last_acked_sequence(&mut self, topic_partition: &TopicPartition, sequence: i32) -> i32 {
         match self.topic_partitions.get_mut(topic_partition) {
             Some(entry) => entry.maybe_update_last_acked_sequence(sequence),
@@ -214,6 +227,7 @@ impl TxnPartitionMap {
     }
 
     /// The key of the lowest-sequence in-flight batch for `topic_partition`.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.TxnPartitionMap#nextBatchBySequence")]
     pub(crate) fn next_batch_by_sequence(
         &self,
         topic_partition: &TopicPartition,
@@ -222,6 +236,7 @@ impl TxnPartitionMap {
     }
 
     /// Removes `batch` from the in-flight set for its partition.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.TxnPartitionMap#removeInFlightBatch")]
     pub(crate) fn remove_in_flight_batch(&mut self, batch: &ProducerBatch) -> Result<(), Error> {
         self.get_mut(&batch.topic_partition)?.remove_in_flight_batch(batch);
         Ok(())

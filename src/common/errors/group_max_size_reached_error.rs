@@ -24,6 +24,7 @@ kafka_error_class! {
     ///
     /// Java `extends` chain:
     ///    `GroupMaxSizeReachedException` -> `ApiException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.GroupMaxSizeReachedException")]
     GroupMaxSizeReachedError,
     code: Errors::GroupMaxSizeReached,
     extends: [

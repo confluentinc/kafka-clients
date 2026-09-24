@@ -29,6 +29,7 @@ use super::{ConcreteRequest, ConcreteResponse, CreatePartitionsResponse, Request
 ///
 /// Corresponds to `org.apache.kafka.common.requests.CreatePartitionsRequest`.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.CreatePartitionsRequest")]
 pub struct CreatePartitionsRequest {
     data: CreatePartitionsRequestData,
     version: i16,
@@ -36,11 +37,13 @@ pub struct CreatePartitionsRequest {
 
 impl CreatePartitionsRequest {
     /// Creates a new `CreatePartitionsRequest` from data and version.
+    #[doc(alias = "org.apache.kafka.common.requests.CreatePartitionsRequest#CreatePartitionsRequest")]
     pub fn new(data: CreatePartitionsRequestData, version: i16) -> Self {
         Self { data, version }
     }
 
     /// Returns a reference to the underlying data.
+    #[doc(alias = "org.apache.kafka.common.requests.CreatePartitionsRequest#data")]
     pub fn data(&self) -> &CreatePartitionsRequestData {
         &self.data
     }
@@ -66,6 +69,7 @@ impl CreatePartitionsRequest {
     /// Mirrors `CreatePartitionsRequest.getErrorResponse` (which uses
     /// `ApiError.fromThrowable`); the enum-dispatch caller supplies the mapped
     /// [`Errors`] directly.
+    #[doc(alias = "org.apache.kafka.common.requests.CreatePartitionsRequest#getErrorResponse")]
     pub fn get_error_response(&self, throttle_time_ms: i32, error: &Errors) -> ConcreteResponse {
         let mut response = CreatePartitionsResponseData::new();
         response.set_throttle_time_ms(throttle_time_ms);
@@ -87,6 +91,7 @@ impl CreatePartitionsRequest {
     /// # Errors
     ///
     /// Returns an error if parsing fails.
+    #[doc(alias = "org.apache.kafka.common.requests.CreatePartitionsRequest#parse")]
     pub fn parse(readable: &mut dyn Readable, version: i16) -> io::Result<Self> {
         let data = CreatePartitionsRequestData::read(readable, version)?;
         Ok(Self::new(data, version))
@@ -103,6 +108,7 @@ impl std::fmt::Display for CreatePartitionsRequest {
 ///
 /// Corresponds to `CreatePartitionsRequest.Builder` in Java.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.CreatePartitionsRequest$Builder")]
 pub struct CreatePartitionsRequestBuilder {
     data: CreatePartitionsRequestData,
     oldest_allowed_version: i16,
@@ -111,6 +117,7 @@ pub struct CreatePartitionsRequestBuilder {
 
 impl CreatePartitionsRequestBuilder {
     /// Creates a builder from existing data.
+    #[doc(alias = "org.apache.kafka.common.requests.CreatePartitionsRequest$Builder#Builder")]
     pub fn new(data: CreatePartitionsRequestData) -> Self {
         Self {
             data,

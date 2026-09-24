@@ -24,6 +24,7 @@ kafka_error_class! {
     ///
     /// Java `extends` chain:
     ///    `IneligibleReplicaException` -> `ApiException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.IneligibleReplicaException")]
     IneligibleReplicaError,
     code: Errors::IneligibleReplica,
     extends: [

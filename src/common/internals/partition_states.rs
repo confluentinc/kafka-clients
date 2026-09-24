@@ -44,6 +44,7 @@ use crate::common::TopicPartition;
 // of its only caller (`SubscriptionState`, commit 3+). The lint goes away
 // once `SubscriptionState` references this type.
 #[allow(dead_code)]
+#[doc(alias = "org.apache.kafka.common.internals.PartitionStates")]
 pub(crate) struct PartitionStates<S> {
     // FxHash (non-cryptographic) keyed by `TopicPartition`, which is internal
     // and not attacker-controlled. `IndexMap` preserves insertion order
@@ -55,6 +56,7 @@ pub(crate) struct PartitionStates<S> {
 #[allow(dead_code)]
 impl<S> PartitionStates<S> {
     /// Create an empty container.
+    #[doc(alias = "org.apache.kafka.common.internals.PartitionStates#PartitionStates")]
     pub(crate) fn new() -> Self {
         Self { map: IndexMap::with_hasher(FxBuildHasher) }
     }
@@ -66,6 +68,7 @@ impl<S> PartitionStates<S> {
     /// appears once), then inserted into the underlying ordered map in that
     /// batched order. The grouping yields a layout like
     /// `a0, a1, b1, b0, c0, c1` where `a*`, `b*`, `c*` are contiguous.
+    #[doc(alias = "org.apache.kafka.common.internals.PartitionStates#set")]
     pub(crate) fn set(&mut self, partition_to_state: HashMap<TopicPartition, S>) {
         self.map.clear();
         self.update_internal(partition_to_state);
@@ -93,6 +96,7 @@ impl<S> PartitionStates<S> {
 
     /// Move the entry for `tp` to the end of the iteration order (no-op if
     /// `tp` is not present).
+    #[doc(alias = "org.apache.kafka.common.internals.PartitionStates#moveToEnd")]
     pub(crate) fn move_to_end(&mut self, tp: &TopicPartition) {
         if let Some((idx, _, _)) = self.map.get_full(tp) {
             let last = self.map.len() - 1;
@@ -105,6 +109,7 @@ impl<S> PartitionStates<S> {
     /// Insert or update the state for `tp`. If the entry already exists, its
     /// position in the iteration order is preserved (matches Java's
     /// `LinkedHashMap.put` semantics).
+    #[doc(alias = "org.apache.kafka.common.internals.PartitionStates#update")]
     pub(crate) fn update(&mut self, tp: TopicPartition, state: S) {
         self.map.insert(tp, state);
     }
@@ -112,6 +117,7 @@ impl<S> PartitionStates<S> {
     /// Insert or update the state for `tp` and move the entry to the end of
     /// the iteration order. If `tp` is not yet present, it is appended at
     /// the end (since `IndexMap::insert` appends new keys).
+    #[doc(alias = "org.apache.kafka.common.internals.PartitionStates#updateAndMoveToEnd")]
     pub(crate) fn update_and_move_to_end(&mut self, tp: TopicPartition, state: S) {
         // Mirrors Java's `remove(tp); put(tp, state)` to ensure the entry ends
         // up at the tail regardless of whether it previously existed.
@@ -120,6 +126,7 @@ impl<S> PartitionStates<S> {
     }
 
     /// Remove the entry for `tp`, if any.
+    #[doc(alias = "org.apache.kafka.common.internals.PartitionStates#remove")]
     pub(crate) fn remove(&mut self, tp: &TopicPartition) {
         self.map.shift_remove(tp);
     }
@@ -137,16 +144,19 @@ impl<S> PartitionStates<S> {
     }
 
     /// Remove all entries.
+    #[doc(alias = "org.apache.kafka.common.internals.PartitionStates#clear")]
     pub(crate) fn clear(&mut self) {
         self.map.clear();
     }
 
     /// Whether `tp` has an entry.
+    #[doc(alias = "org.apache.kafka.common.internals.PartitionStates#contains")]
     pub(crate) fn contains(&self, tp: &TopicPartition) -> bool {
         self.map.contains_key(tp)
     }
 
     /// Borrowed state for `tp`, if any.
+    #[doc(alias = "org.apache.kafka.common.internals.PartitionStates#stateValue")]
     pub(crate) fn state_value(&self, tp: &TopicPartition) -> Option<&S> {
         self.map.get(tp)
     }
@@ -158,6 +168,7 @@ impl<S> PartitionStates<S> {
 
     /// Iterator over partitions in insertion order. Mirrors Java's
     /// `partitionSet()`.
+    #[doc(alias = "org.apache.kafka.common.internals.PartitionStates#partitionSet")]
     pub(crate) fn partition_set(&self) -> impl Iterator<Item = &TopicPartition> {
         self.map.keys()
     }
@@ -175,12 +186,14 @@ impl<S> PartitionStates<S> {
     }
 
     /// Number of entries.
+    #[doc(alias = "org.apache.kafka.common.internals.PartitionStates#size")]
     pub(crate) fn size(&self) -> usize {
         self.map.len()
     }
 
     /// Snapshot of state values as a `Vec`. Mirrors Java's
     /// `partitionStateValues()`.
+    #[doc(alias = "org.apache.kafka.common.internals.PartitionStates#partitionStateValues")]
     pub(crate) fn partition_state_values(&self) -> Vec<&S> {
         self.map.values().collect()
     }
@@ -272,6 +285,7 @@ mod tests {
 
     /// Translated from `PartitionStatesTest.testSet`.
     #[test]
+    #[doc(alias = "org.apache.kafka.common.internals.PartitionStatesTest#testSet")]
     fn test_set() {
         let mut states: PartitionStates<String> = PartitionStates::new();
         let map = create_map();
@@ -293,6 +307,7 @@ mod tests {
     /// and same-topic groupings remain contiguous (the only behaviors that
     /// matter for fetch-serialization fairness).
     #[test]
+    #[doc(alias = "org.apache.kafka.common.internals.PartitionStatesTest#testMoveToEnd")]
     fn test_move_to_end() {
         let mut states: PartitionStates<String> = PartitionStates::new();
         let map = create_map();
@@ -328,6 +343,7 @@ mod tests {
 
     /// Translated from `PartitionStatesTest.testUpdateAndMoveToEnd`.
     #[test]
+    #[doc(alias = "org.apache.kafka.common.internals.PartitionStatesTest#testUpdateAndMoveToEnd")]
     fn test_update_and_move_to_end() {
         let mut states: PartitionStates<String> = PartitionStates::new();
         states.set(create_map());
@@ -363,6 +379,7 @@ mod tests {
 
     /// Translated from `PartitionStatesTest.testPartitionValues`.
     #[test]
+    #[doc(alias = "org.apache.kafka.common.internals.PartitionStatesTest#testPartitionValues")]
     fn test_partition_values() {
         let mut states: PartitionStates<String> = PartitionStates::new();
         states.set(create_map());
@@ -388,6 +405,7 @@ mod tests {
 
     /// Translated from `PartitionStatesTest.testClear`.
     #[test]
+    #[doc(alias = "org.apache.kafka.common.internals.PartitionStatesTest#testClear")]
     fn test_clear() {
         let mut states: PartitionStates<String> = PartitionStates::new();
         states.set(create_map());
@@ -398,6 +416,7 @@ mod tests {
 
     /// Translated from `PartitionStatesTest.testRemove`.
     #[test]
+    #[doc(alias = "org.apache.kafka.common.internals.PartitionStatesTest#testRemove")]
     fn test_remove() {
         let mut states: PartitionStates<String> = PartitionStates::new();
         let map = create_map();

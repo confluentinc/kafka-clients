@@ -35,6 +35,7 @@ use super::abstract_request::{ConcreteRequest, RequestBuilder};
 ///
 /// Corresponds to `org.apache.kafka.common.requests.DeleteGroupsRequest`.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.DeleteGroupsRequest")]
 pub struct DeleteGroupsRequest {
     data: DeleteGroupsRequestData,
     version: i16,
@@ -44,11 +45,13 @@ impl DeleteGroupsRequest {
     /// Creates a new `DeleteGroupsRequest` from data and version.
     ///
     /// Mirrors Java's constructor `DeleteGroupsRequest(DeleteGroupsRequestData, short)`.
+    #[doc(alias = "org.apache.kafka.common.requests.DeleteGroupsRequest#DeleteGroupsRequest")]
     pub fn new(data: DeleteGroupsRequestData, version: i16) -> Self {
         Self { data, version }
     }
 
     /// Returns a reference to the underlying data.
+    #[doc(alias = "org.apache.kafka.common.requests.DeleteGroupsRequest#data")]
     pub fn data(&self) -> &DeleteGroupsRequestData {
         &self.data
     }
@@ -72,6 +75,7 @@ impl DeleteGroupsRequest {
     /// `DeleteGroupsRequest.getErrorResponse(int, Throwable)`: one
     /// `DeletableGroupResult` per requested group all carrying the same error
     /// code.
+    #[doc(alias = "org.apache.kafka.common.requests.DeleteGroupsRequest#getErrorResponse")]
     pub fn get_error_response(&self, throttle_time_ms: i32, error: &Errors) -> ConcreteResponse {
         let results: Vec<DeletableGroupResult> = self
             .data
@@ -95,6 +99,7 @@ impl DeleteGroupsRequest {
     /// # Errors
     ///
     /// Returns an error if parsing fails.
+    #[doc(alias = "org.apache.kafka.common.requests.DeleteGroupsRequest#parse")]
     pub fn parse(readable: &mut dyn Readable, version: i16) -> io::Result<Self> {
         let data = DeleteGroupsRequestData::read(readable, version)?;
         Ok(Self::new(data, version))
@@ -111,6 +116,7 @@ impl std::fmt::Display for DeleteGroupsRequest {
 ///
 /// Corresponds to `DeleteGroupsRequest.Builder` in Java.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.DeleteGroupsRequest$Builder")]
 pub struct DeleteGroupsRequestBuilder {
     data: DeleteGroupsRequestData,
 }
@@ -119,6 +125,7 @@ impl DeleteGroupsRequestBuilder {
     /// Creates a builder over the given request data.
     ///
     /// Mirrors Java's `DeleteGroupsRequest.Builder(DeleteGroupsRequestData)`.
+    #[doc(alias = "org.apache.kafka.common.requests.DeleteGroupsRequest$Builder#Builder")]
     pub fn new(data: DeleteGroupsRequestData) -> Self {
         Self { data }
     }

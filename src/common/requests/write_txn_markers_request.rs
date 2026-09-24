@@ -31,6 +31,7 @@ use super::{ConcreteRequest, ConcreteResponse, RequestBuilder, WriteTxnMarkersRe
 ///
 /// Corresponds to `org.apache.kafka.common.requests.WriteTxnMarkersRequest`.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.WriteTxnMarkersRequest")]
 pub struct WriteTxnMarkersRequest {
     data: WriteTxnMarkersRequestData,
     version: i16,
@@ -38,11 +39,13 @@ pub struct WriteTxnMarkersRequest {
 
 impl WriteTxnMarkersRequest {
     /// Creates a new `WriteTxnMarkersRequest` from data and version.
+    #[doc(alias = "org.apache.kafka.common.requests.WriteTxnMarkersRequest#WriteTxnMarkersRequest")]
     pub fn new(data: WriteTxnMarkersRequestData, version: i16) -> Self {
         Self { data, version }
     }
 
     /// Returns a reference to the underlying data.
+    #[doc(alias = "org.apache.kafka.common.requests.WriteTxnMarkersRequest#data")]
     pub fn data(&self) -> &WriteTxnMarkersRequestData {
         &self.data
     }
@@ -66,6 +69,7 @@ impl WriteTxnMarkersRequest {
     ///
     /// Mirrors `WriteTxnMarkersRequest.getErrorResponse`: every requested
     /// partition of every marker echoes the single error code.
+    #[doc(alias = "org.apache.kafka.common.requests.WriteTxnMarkersRequest#getErrorResponse")]
     pub fn get_error_response(&self, _throttle_time_ms: i32, error: &Errors) -> ConcreteResponse {
         let mut markers = Vec::new();
         for marker_entry in &self.data.markers {
@@ -99,6 +103,7 @@ impl WriteTxnMarkersRequest {
     /// # Errors
     ///
     /// Returns an error if parsing fails.
+    #[doc(alias = "org.apache.kafka.common.requests.WriteTxnMarkersRequest#parse")]
     pub fn parse(readable: &mut dyn Readable, version: i16) -> io::Result<Self> {
         let data = WriteTxnMarkersRequestData::read(readable, version)?;
         Ok(Self::new(data, version))
@@ -115,12 +120,14 @@ impl std::fmt::Display for WriteTxnMarkersRequest {
 ///
 /// Corresponds to `WriteTxnMarkersRequest.Builder`.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.WriteTxnMarkersRequest$Builder")]
 pub struct WriteTxnMarkersRequestBuilder {
     data: WriteTxnMarkersRequestData,
 }
 
 impl WriteTxnMarkersRequestBuilder {
     /// Creates a builder from the given request data.
+    #[doc(alias = "org.apache.kafka.common.requests.WriteTxnMarkersRequest$Builder#Builder")]
     pub fn new(data: WriteTxnMarkersRequestData) -> Self {
         Self { data }
     }

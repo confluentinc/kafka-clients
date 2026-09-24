@@ -23,6 +23,7 @@ use crate::common::metrics::{Measurable, MetricConfig, Stat};
 ///
 /// See also [`crate::common::metrics::stats::WindowedCount`] if you want to
 /// increment the value by 1 on each recording.
+#[doc(alias = "org.apache.kafka.common.metrics.stats.WindowedSum")]
 pub struct WindowedSum {
     inner: SampledStat,
 }
@@ -51,6 +52,7 @@ impl SampledStatKind for WindowedSumKind {
 
 impl WindowedSum {
     /// Create a `WindowedSum`.
+    #[doc(alias = "org.apache.kafka.common.metrics.stats.WindowedSum#WindowedSum")]
     pub fn new() -> Self {
         Self { inner: SampledStat::new(0.0, Box::new(WindowedSumKind)) }
     }

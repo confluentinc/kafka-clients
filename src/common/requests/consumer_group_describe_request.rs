@@ -32,6 +32,7 @@ use super::RequestBuilder;
 ///
 /// Corresponds to `org.apache.kafka.common.requests.ConsumerGroupDescribeRequest`.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.ConsumerGroupDescribeRequest")]
 pub struct ConsumerGroupDescribeRequest {
     data: ConsumerGroupDescribeRequestData,
     version: i16,
@@ -39,11 +40,13 @@ pub struct ConsumerGroupDescribeRequest {
 
 impl ConsumerGroupDescribeRequest {
     /// Creates a new `ConsumerGroupDescribeRequest` from data and version.
+    #[doc(alias = "org.apache.kafka.common.requests.ConsumerGroupDescribeRequest#ConsumerGroupDescribeRequest")]
     pub fn new(data: ConsumerGroupDescribeRequestData, version: i16) -> Self {
         Self { data, version }
     }
 
     /// Returns a reference to the underlying data.
+    #[doc(alias = "org.apache.kafka.common.requests.ConsumerGroupDescribeRequest#data")]
     pub fn data(&self) -> &ConsumerGroupDescribeRequestData {
         &self.data
     }
@@ -65,6 +68,7 @@ impl ConsumerGroupDescribeRequest {
 
     /// Builds the canonical error response for this request, matching Java's
     /// `ConsumerGroupDescribeRequest.getErrorResponse(throttleTimeMs, Throwable)`.
+    #[doc(alias = "org.apache.kafka.common.requests.ConsumerGroupDescribeRequest#getErrorResponse")]
     pub fn get_error_response(&self, throttle_time_ms: i32, error: &Errors) -> ConcreteResponse {
         let mut data = ConsumerGroupDescribeResponseData::new();
         data.set_throttle_time_ms(throttle_time_ms);
@@ -88,6 +92,7 @@ impl ConsumerGroupDescribeRequest {
     /// # Errors
     ///
     /// Returns an error if parsing fails.
+    #[doc(alias = "org.apache.kafka.common.requests.ConsumerGroupDescribeRequest#parse")]
     pub fn parse(readable: &mut dyn Readable, version: i16) -> io::Result<Self> {
         let data = ConsumerGroupDescribeRequestData::read(readable, version)?;
         Ok(Self::new(data, version))
@@ -104,6 +109,7 @@ impl std::fmt::Display for ConsumerGroupDescribeRequest {
 ///
 /// Corresponds to `ConsumerGroupDescribeRequest.Builder` in Java.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.ConsumerGroupDescribeRequest$Builder")]
 pub struct ConsumerGroupDescribeRequestBuilder {
     data: ConsumerGroupDescribeRequestData,
     oldest_allowed_version: i16,
@@ -113,6 +119,7 @@ pub struct ConsumerGroupDescribeRequestBuilder {
 impl ConsumerGroupDescribeRequestBuilder {
     /// Creates a builder wrapping the given data with the full supported
     /// version range.
+    #[doc(alias = "org.apache.kafka.common.requests.ConsumerGroupDescribeRequest$Builder#Builder")]
     pub fn new(data: ConsumerGroupDescribeRequestData) -> Self {
         Self {
             data,

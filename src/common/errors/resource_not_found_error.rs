@@ -30,6 +30,7 @@ use crate::common::error::{ErrorCode, ErrorHierarchy, ErrorMessage, ErrorSource}
 /// Hand-written rather than declared with `kafka_error_class!` because it
 /// carries Java's `resource` field and `resource()` accessor.
 #[derive(Clone, Debug)]
+#[doc(alias = "org.apache.kafka.common.errors.ResourceNotFoundException")]
 pub struct ResourceNotFoundError {
     message: String,
     resource: Option<String>,
@@ -44,12 +45,14 @@ impl ResourceNotFoundError {
     /// The three translated constructors intersect on `{message}`, which is
     /// exactly this one — so it keeps the plain name and the other two are
     /// suffixed with their parameters beyond the intersection (CLAUDE.md §2).
+    #[doc(alias = "org.apache.kafka.common.errors.ResourceNotFoundException#ResourceNotFoundException")]
     pub fn new(message: impl Into<String>) -> Self {
         Self { message: message.into(), resource: None, source: None }
     }
 
     /// Create the error with the code's default message — used by
     /// [`Errors::error`](crate::common::Errors::error).
+    #[doc(alias = "org.apache.kafka.common.errors.ResourceNotFoundException#ResourceNotFoundException")]
     pub fn with_default_message() -> Self {
         Self::new(Errors::ResourceNotFound.message())
     }
@@ -57,11 +60,13 @@ impl ResourceNotFoundError {
     /// Create the error naming the offending resource — Java's
     /// `ResourceNotFoundException(String resource, String message)`.
     /// Suffixed per [`new`](Self::new).
+    #[doc(alias = "org.apache.kafka.common.errors.ResourceNotFoundException#ResourceNotFoundException")]
     pub fn with_resource(resource: impl Into<String>, message: impl Into<String>) -> Self {
         Self { message: message.into(), resource: Some(resource.into()), source: None }
     }
 
     /// The offending resource, or `None` if not recorded.
+    #[doc(alias = "org.apache.kafka.common.errors.ResourceNotFoundException#resource")]
     pub fn resource(&self) -> Option<&str> {
         self.resource.as_deref()
     }
@@ -69,6 +74,7 @@ impl ResourceNotFoundError {
     /// Create the error with a resource, message, and underlying cause,
     /// mirroring Java's `ResourceNotFoundException(String resource, String message, Throwable cause)`.
     /// Suffixed per [`new`](Self::new).
+    #[doc(alias = "org.apache.kafka.common.errors.ResourceNotFoundException#ResourceNotFoundException")]
     pub fn with_resource_source(resource: impl Into<String>, message: impl Into<String>, source: Error) -> Self {
         Self {
             message: message.into(),

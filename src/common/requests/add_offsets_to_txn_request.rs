@@ -35,6 +35,7 @@ use super::RequestBuilder;
 ///
 /// Corresponds to `org.apache.kafka.common.requests.AddOffsetsToTxnRequest`.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.AddOffsetsToTxnRequest")]
 pub struct AddOffsetsToTxnRequest {
     data: AddOffsetsToTxnRequestData,
     version: i16,
@@ -42,11 +43,13 @@ pub struct AddOffsetsToTxnRequest {
 
 impl AddOffsetsToTxnRequest {
     /// Creates a new `AddOffsetsToTxnRequest` from data and version.
+    #[doc(alias = "org.apache.kafka.common.requests.AddOffsetsToTxnRequest#AddOffsetsToTxnRequest")]
     pub fn new(data: AddOffsetsToTxnRequestData, version: i16) -> Self {
         Self { data, version }
     }
 
     /// Returns a reference to the underlying data.
+    #[doc(alias = "org.apache.kafka.common.requests.AddOffsetsToTxnRequest#data")]
     pub fn data(&self) -> &AddOffsetsToTxnRequestData {
         &self.data
     }
@@ -68,6 +71,7 @@ impl AddOffsetsToTxnRequest {
 
     /// Builds the canonical error response for this request, matching Java's
     /// `AddOffsetsToTxnRequest.getErrorResponse(throttleTimeMs, Throwable)`.
+    #[doc(alias = "org.apache.kafka.common.requests.AddOffsetsToTxnRequest#getErrorResponse")]
     pub fn get_error_response(&self, throttle_time_ms: i32, error: &Errors) -> ConcreteResponse {
         let mut response = AddOffsetsToTxnResponseData::new();
         response.set_error_code(error.code()).set_throttle_time_ms(throttle_time_ms);
@@ -80,6 +84,7 @@ impl AddOffsetsToTxnRequest {
     /// # Errors
     ///
     /// Returns an error if parsing fails.
+    #[doc(alias = "org.apache.kafka.common.requests.AddOffsetsToTxnRequest#parse")]
     pub fn parse(readable: &mut dyn Readable, version: i16) -> io::Result<Self> {
         let data = AddOffsetsToTxnRequestData::read(readable, version)?;
         Ok(Self::new(data, version))
@@ -96,6 +101,7 @@ impl std::fmt::Display for AddOffsetsToTxnRequest {
 ///
 /// Corresponds to `AddOffsetsToTxnRequest.Builder` in Java.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.AddOffsetsToTxnRequest$Builder")]
 pub struct AddOffsetsToTxnRequestBuilder {
     data: AddOffsetsToTxnRequestData,
     oldest_allowed_version: i16,
@@ -105,6 +111,7 @@ pub struct AddOffsetsToTxnRequestBuilder {
 impl AddOffsetsToTxnRequestBuilder {
     /// Creates a builder wrapping the given data with the full supported
     /// version range.
+    #[doc(alias = "org.apache.kafka.common.requests.AddOffsetsToTxnRequest$Builder#Builder")]
     pub fn new(data: AddOffsetsToTxnRequestData) -> Self {
         Self {
             data,

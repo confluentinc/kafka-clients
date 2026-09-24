@@ -43,6 +43,7 @@ use super::{AdminApiHandler, ApiResult, RequestAndKeys};
 ///
 /// Corresponds to `DeleteGroupsHandler` (the abstract base of
 /// `DeleteConsumerGroupsHandler`).
+#[doc(alias = "org.apache.kafka.clients.admin.internals.DeleteGroupsHandler")]
 pub(crate) struct DeleteGroupsHandler {
     /// The `apiName()` of the concrete subclass (e.g. `"deleteConsumerGroups"`).
     api_name: &'static str,
@@ -57,6 +58,7 @@ impl DeleteGroupsHandler {
     ///
     /// Mirrors `DeleteGroupsHandler(LogContext, Class<?>)` plus the subclass's
     /// `apiName()` / `displayName()` overrides.
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.DeleteGroupsHandler#DeleteGroupsHandler")]
     pub(crate) fn new(api_name: &'static str, display_name: &'static str, log_context: LogContext) -> Self {
         Self {
             api_name,
@@ -68,6 +70,7 @@ impl DeleteGroupsHandler {
 
     /// The display name used in log messages. Mirrors `displayName()`.
     #[cfg(test)]
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.DeleteGroupsHandler#displayName")]
     pub(crate) fn display_name(&self) -> &str {
         self.display_name
     }
@@ -75,12 +78,14 @@ impl DeleteGroupsHandler {
     /// Creates the future bundle for the given group ids.
     ///
     /// Mirrors `DeleteGroupsHandler.newFuture`.
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.DeleteGroupsHandler#newFuture")]
     pub(crate) fn new_future(group_ids: &[String]) -> SimpleAdminApiFuture<CoordinatorKey, ()> {
         SimpleAdminApiFuture::for_keys(group_ids.iter().map(CoordinatorKey::by_group_id).collect())
     }
 
     /// Builds the single batched `DeleteGroups` request. Mirrors
     /// `buildBatchedRequest`.
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.DeleteGroupsHandler#buildBatchedRequest")]
     pub(crate) fn build_batched_request(
         &self,
         _coordinator_id: i32,
@@ -92,6 +97,7 @@ impl DeleteGroupsHandler {
         DeleteGroupsRequestBuilder::new(data)
     }
 
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.DeleteGroupsHandler#handleError")]
     fn handle_error(
         &self,
         group_id: CoordinatorKey,

@@ -45,6 +45,7 @@ use crate::consumer::AutoOffsetResetStrategy;
 ///
 /// Corresponds to `org.apache.kafka.clients.consumer.ConsumerConfig`.
 #[derive(Clone, Debug)]
+#[doc(alias = "org.apache.kafka.clients.consumer.ConsumerConfig")]
 pub struct ConsumerConfig {
     // --- Group ---
     /// `group.id` — the consumer group identifier. `None` means no group.
@@ -548,6 +549,7 @@ impl ConsumerConfig {
     ///
     /// Returns [`Error::LocalIllegalArgument`] if a value cannot be parsed
     /// for its expected type, or fails its validator.
+    #[doc(alias = "org.apache.kafka.clients.consumer.ConsumerConfig#ConsumerConfig")]
     pub fn new(props: &HashMap<String, String>) -> Result<Self, Error> {
         // NOTE: 14 of Java's per-field `atLeast(..)` numeric validators
         // (ConsumerConfig.java lines 415-710) are intentionally deferred to
@@ -1007,6 +1009,7 @@ mod tests {
     /// Invalid `security.protocol` → `illegal_argument` with asserted message
     /// content (DoD §3): the config key, the bad value, and the valid names.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.consumer.ConsumerConfigTest#testInvalidSecurityProtocol")]
     fn test_invalid_security_protocol() {
         let mut props = HashMap::new();
         props.insert("security.protocol".to_string(), "abc".to_string());

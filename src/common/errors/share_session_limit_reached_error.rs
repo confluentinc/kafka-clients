@@ -25,6 +25,7 @@ kafka_error_class! {
     /// Java `extends` chain:
     ///    `ShareSessionLimitReachedException` -> `RetriableException` ->
     ///   `ApiException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.ShareSessionLimitReachedException")]
     ShareSessionLimitReachedError,
     code: Errors::ShareSessionLimitReached,
     extends: [

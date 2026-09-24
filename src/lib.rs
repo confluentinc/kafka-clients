@@ -55,6 +55,7 @@ pub mod ffi;
 ///
 /// The callback receives a mutable reference to the [`client_response::ClientResponse`]
 /// so it can inspect the response (e.g., extract the response body).
+#[doc(alias = "org.apache.kafka.clients.RequestCompletionHandler")]
 pub type RequestCompletionHandler = Box<dyn FnOnce(&mut client_response::ClientResponse) + Send>;
 
 pub use api_versions::ApiVersions;

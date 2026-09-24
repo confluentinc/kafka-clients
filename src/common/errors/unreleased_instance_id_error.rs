@@ -24,6 +24,7 @@ kafka_error_class! {
     ///
     /// Java `extends` chain:
     ///    `UnreleasedInstanceIdException` -> `ApiException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.UnreleasedInstanceIdException")]
     UnreleasedInstanceIdError,
     code: Errors::UnreleasedInstanceId,
     extends: [

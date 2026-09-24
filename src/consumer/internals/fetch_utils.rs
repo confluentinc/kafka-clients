@@ -28,6 +28,7 @@ use crate::consumer::internals::SubscriptionState;
 /// Translates the Java static-utility class `org.apache.kafka.clients.consumer.internals.FetchUtils`,
 /// which has no instance state, so it becomes a unit struct hosting its
 /// statics as associated items.
+#[doc(alias = "org.apache.kafka.clients.consumer.internals.FetchUtils")]
 pub(crate) struct FetchUtils;
 
 impl FetchUtils {
@@ -45,6 +46,7 @@ impl FetchUtils {
     ///
     /// Translates `FetchUtils.requestMetadataUpdate(Metadata, SubscriptionState,
     /// TopicPartition)`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.FetchUtils#requestMetadataUpdate")]
     pub(crate) fn request_metadata_update(
         metadata: &ConsumerMetadata,
         subscriptions: &Arc<Mutex<SubscriptionState>>,

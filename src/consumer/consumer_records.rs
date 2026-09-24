@@ -47,6 +47,7 @@ use crate::consumer::OffsetAndMetadata;
 /// uses `assertEquals` on whole-batch values. The bounds are gated; users
 /// with non-`PartialEq` keys/values are unaffected.
 #[derive(Debug, PartialEq, Eq)]
+#[doc(alias = "org.apache.kafka.clients.consumer.ConsumerRecords")]
 pub struct ConsumerRecords<K, V> {
     records: IndexMap<TopicPartition, Vec<ConsumerRecord<K, V>>>,
     next_offsets: HashMap<TopicPartition, OffsetAndMetadata>,
@@ -100,6 +101,7 @@ impl<K, V> ConsumerRecords<K, V> {
         since = "4.0.0",
         note = "mirroring Java's `@Deprecated`; use `with_next_offsets` instead, which supplies next offsets"
     )]
+    #[doc(alias = "org.apache.kafka.clients.consumer.ConsumerRecords#ConsumerRecords")]
     pub fn new(records: IndexMap<TopicPartition, Vec<ConsumerRecord<K, V>>>) -> Self {
         Self { records, next_offsets: HashMap::new(), position_advanced: false, tainted: true }
     }
@@ -109,6 +111,7 @@ impl<K, V> ConsumerRecords<K, V> {
     ///
     /// Corresponds to Java's `ConsumerRecords(Map, Map)`
     /// (`ConsumerRecords.java:62`).
+    #[doc(alias = "org.apache.kafka.clients.consumer.ConsumerRecords#ConsumerRecords")]
     pub fn with_next_offsets(
         records: IndexMap<TopicPartition, Vec<ConsumerRecord<K, V>>>,
         next_offsets: HashMap<TopicPartition, OffsetAndMetadata>,
@@ -120,6 +123,7 @@ impl<K, V> ConsumerRecords<K, V> {
     /// advanced (Java's internal `Fetch.positionAdvanced`). Used by
     /// `FetchCollector::collect_fetch` so the poll loop can mirror Java's
     /// `Fetch.isEmpty()` semantics.
+    #[doc(alias = "org.apache.kafka.clients.consumer.ConsumerRecords#ConsumerRecords")]
     pub(crate) fn with_position_advanced(
         records: IndexMap<TopicPartition, Vec<ConsumerRecord<K, V>>>,
         next_offsets: HashMap<TopicPartition, OffsetAndMetadata>,
@@ -132,6 +136,7 @@ impl<K, V> ConsumerRecords<K, V> {
     ///
     /// Corresponds to Java's static `ConsumerRecords.empty()` /
     /// `ConsumerRecords.EMPTY`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.ConsumerRecords#empty")]
     pub fn empty() -> Self {
         Self {
             records: IndexMap::new(),
@@ -204,11 +209,13 @@ impl<K, V> ConsumerRecords<K, V> {
     /// set may be empty if no data was returned.
     ///
     /// Corresponds to Java's `ConsumerRecords.partitions()`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.ConsumerRecords#partitions")]
     pub fn partitions(&self) -> impl Iterator<Item = &TopicPartition> {
         self.records.keys()
     }
 
     /// The number of records across all topics and partitions in this set.
+    #[doc(alias = "org.apache.kafka.clients.consumer.ConsumerRecords#count")]
     pub fn count(&self) -> usize {
         self.records.values().map(Vec::len).sum()
     }
@@ -217,6 +224,7 @@ impl<K, V> ConsumerRecords<K, V> {
     ///
     /// Matches Java's `ConsumerRecords.isEmpty()` exactly (Java returns
     /// `records.isEmpty()`, not `count() == 0`).
+    #[doc(alias = "org.apache.kafka.clients.consumer.ConsumerRecords#isEmpty")]
     pub fn is_empty(&self) -> bool {
         self.records.is_empty()
     }
@@ -225,6 +233,7 @@ impl<K, V> ConsumerRecords<K, V> {
     /// the position has been advanced in this poll call.
     ///
     /// Corresponds to Java's `ConsumerRecords.nextOffsets()`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.ConsumerRecords#nextOffsets")]
     pub fn next_offsets(&self) -> &HashMap<TopicPartition, OffsetAndMetadata> {
         if self.tainted {
             let now = PROCESS_START.elapsed().as_nanos() as i64;
@@ -348,6 +357,9 @@ mod tests {
     /// Java makes, which is preserved as a comment on the `log::error!` call.
     #[test]
     #[allow(deprecated)]
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.ConsumerRecordsTest#testNextOffsetsLogsErrorPeriodicallyWhenConstructedWithDeprecatedConstructor"
+    )]
     fn test_next_offsets_logs_error_periodically_when_constructed_with_deprecated_constructor() {
         let _guard = RATE_LIMIT_LOCK.lock().unwrap();
         // Capture the global throttle state so it can be restored, to avoid
@@ -386,6 +398,9 @@ mod tests {
     /// Translated from
     /// `ConsumerRecordsTest.testNextOffsetsDoesNotLogErrorWhenConstructedWithNextOffsets`.
     #[test]
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.ConsumerRecordsTest#testNextOffsetsDoesNotLogErrorWhenConstructedWithNextOffsets"
+    )]
     fn test_next_offsets_does_not_log_error_when_constructed_with_next_offsets() {
         let _guard = RATE_LIMIT_LOCK.lock().unwrap();
         let records = one_record();
@@ -405,6 +420,9 @@ mod tests {
     /// Translated from
     /// `ConsumerRecordsTest.testNextOffsetsDoesNotLogErrorForEmptyRecords`.
     #[test]
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.ConsumerRecordsTest#testNextOffsetsDoesNotLogErrorForEmptyRecords"
+    )]
     fn test_next_offsets_does_not_log_error_for_empty_records() {
         let _guard = RATE_LIMIT_LOCK.lock().unwrap();
         let before = TAINTED_NEXT_OFFSETS_LAST_LOG_NS.load(Ordering::Relaxed);

@@ -24,6 +24,7 @@ kafka_error_class! {
     ///
     /// Java `extends` chain:
     ///    `DuplicateVoterException` -> `ApiException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.DuplicateVoterException")]
     DuplicateVoterError,
     code: Errors::DuplicateVoter,
     extends: [

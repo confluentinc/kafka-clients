@@ -24,6 +24,7 @@ kafka_error_class! {
     ///
     /// Java `extends` chain:
     ///    `VoterNotFoundException` -> `ApiException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.VoterNotFoundException")]
     VoterNotFoundError,
     code: Errors::VoterNotFound,
     extends: [

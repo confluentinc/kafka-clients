@@ -45,6 +45,7 @@ fn hash_of<T: Hash>(v: &T) -> u64 {
 
 /// Translated from `AutoOffsetResetStrategyTest.testFromString`.
 #[test]
+#[doc(alias = "org.apache.kafka.clients.consumer.internals.AutoOffsetResetStrategyTest#testFromString")]
 fn test_from_string() {
     assert_eq!(
         AutoOffsetResetStrategy::from_string("earliest").unwrap(),
@@ -74,6 +75,7 @@ fn test_from_string() {
 
 /// Translated from `AutoOffsetResetStrategyTest.testEqualsAndHashCode`.
 #[test]
+#[doc(alias = "org.apache.kafka.clients.consumer.internals.AutoOffsetResetStrategyTest#testEqualsAndHashCode")]
 fn test_equals_and_hash_code() {
     let earliest1 = AutoOffsetResetStrategy::from_string("earliest").unwrap();
     let earliest2 = AutoOffsetResetStrategy::from_string("earliest").unwrap();
@@ -93,6 +95,7 @@ fn test_equals_and_hash_code() {
 
 /// Translated from `AutoOffsetResetStrategyTest.testTimestamp`.
 #[test]
+#[doc(alias = "org.apache.kafka.clients.consumer.internals.AutoOffsetResetStrategyTest#testTimestamp")]
 fn test_timestamp() {
     let earliest1 = AutoOffsetResetStrategy::from_string("earliest").unwrap();
     let earliest2 = AutoOffsetResetStrategy::from_string("earliest").unwrap();

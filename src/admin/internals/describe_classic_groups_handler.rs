@@ -41,6 +41,7 @@ use super::{AdminApiHandler, ApiResult, RequestAndKeys};
 /// The `describeClassicGroups` handler.
 ///
 /// Corresponds to `DescribeClassicGroupsHandler` (an `AdminApiHandler.Batched`).
+#[doc(alias = "org.apache.kafka.clients.admin.internals.DescribeClassicGroupsHandler")]
 pub(crate) struct DescribeClassicGroupsHandler {
     include_authorized_operations: bool,
     log_context: LogContext,
@@ -49,6 +50,7 @@ pub(crate) struct DescribeClassicGroupsHandler {
 
 impl DescribeClassicGroupsHandler {
     /// Creates a handler.
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.DescribeClassicGroupsHandler#DescribeClassicGroupsHandler")]
     pub(crate) fn new(include_authorized_operations: bool, log_context: LogContext) -> Self {
         Self {
             include_authorized_operations,
@@ -57,6 +59,7 @@ impl DescribeClassicGroupsHandler {
         }
     }
 
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.DescribeClassicGroupsHandler#buildKeySet")]
     fn build_key_set(group_ids: &[String]) -> HashSet<CoordinatorKey> {
         group_ids.iter().map(CoordinatorKey::by_group_id).collect()
     }
@@ -64,6 +67,7 @@ impl DescribeClassicGroupsHandler {
     /// Creates the future bundle for the given group ids.
     ///
     /// Mirrors `DescribeClassicGroupsHandler.newFuture`.
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.DescribeClassicGroupsHandler#newFuture")]
     pub(crate) fn new_future(group_ids: &[String]) -> SimpleAdminApiFuture<CoordinatorKey, ClassicGroupDescription> {
         SimpleAdminApiFuture::for_keys(Self::build_key_set(group_ids))
     }
@@ -71,6 +75,7 @@ impl DescribeClassicGroupsHandler {
     /// Builds the single batched `DescribeGroups` request for all keys.
     ///
     /// Mirrors `DescribeClassicGroupsHandler.buildBatchedRequest`.
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.DescribeClassicGroupsHandler#buildBatchedRequest")]
     fn build_batched_request(&self, keys: &HashSet<CoordinatorKey>) -> DescribeGroupsRequestBuilder {
         let group_ids: Vec<String> = keys
             .iter()
@@ -88,6 +93,7 @@ impl DescribeClassicGroupsHandler {
         DescribeGroupsRequestBuilder::new(data)
     }
 
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.DescribeClassicGroupsHandler#handleError")]
     fn handle_error(
         &self,
         group_id: &CoordinatorKey,

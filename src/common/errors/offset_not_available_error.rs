@@ -26,6 +26,7 @@ kafka_error_class! {
     /// Java `extends` chain:
     ///    `OffsetNotAvailableException` -> `RetriableException` -> `ApiException` ->
     ///   `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.OffsetNotAvailableException")]
     OffsetNotAvailableError,
     code: Errors::OffsetNotAvailable,
     extends: [

@@ -23,6 +23,7 @@ use std::fmt;
 /// Each variant wraps the generated [`ApiMessageType`] enum to provide
 /// version ranges, header version logic, and listener information.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[doc(alias = "org.apache.kafka.common.protocol.ApiKeys")]
 pub struct ApiKeys {
     message_type: ApiMessageType,
     cluster_action: bool,
@@ -35,6 +36,7 @@ impl ApiKeys {
     // (see KAFKA-18659).
     pub const PRODUCE_API_VERSIONS_RESPONSE_MIN_VERSION: i16 = 0;
 
+    #[doc(alias = "org.apache.kafka.common.protocol.ApiKeys#ApiKeys")]
     const fn new(message_type: ApiMessageType) -> Self {
         Self { message_type, cluster_action: false, forwardable: false }
     }
@@ -271,6 +273,7 @@ impl ApiKeys {
     }
 
     /// The latest supported version of this API.
+    #[doc(alias = "org.apache.kafka.common.protocol.ApiKeys#latestVersion")]
     pub fn latest_version(&self) -> i16 {
         self.message_type.highest_supported_version(true)
     }
@@ -281,11 +284,13 @@ impl ApiKeys {
     }
 
     /// The oldest supported version of this API.
+    #[doc(alias = "org.apache.kafka.common.protocol.ApiKeys#oldestVersion")]
     pub fn oldest_version(&self) -> i16 {
         self.message_type.lowest_supported_version()
     }
 
     /// Whether the given API version is within the supported range.
+    #[doc(alias = "org.apache.kafka.common.protocol.ApiKeys#isVersionSupported")]
     pub fn is_version_supported(&self, api_version: i16) -> bool {
         api_version >= self.oldest_version() && api_version <= self.latest_version()
     }
@@ -294,6 +299,7 @@ impl ApiKeys {
     ///
     /// ApiVersions API is a special case — the client always sends the highest version
     /// it supports, and the server falls back to version 0 if it does not know it.
+    #[doc(alias = "org.apache.kafka.common.protocol.ApiKeys#isVersionEnabled")]
     pub fn is_version_enabled(&self, api_version: i16, enable_unstable_last_version: bool) -> bool {
         if *self == Self::API_VERSIONS {
             return true;
@@ -303,6 +309,7 @@ impl ApiKeys {
     }
 
     /// Whether the given version is deprecated.
+    #[doc(alias = "org.apache.kafka.common.protocol.ApiKeys#isVersionDeprecated")]
     pub fn is_version_deprecated(&self, api_version: i16) -> bool {
         api_version >= self.message_type.lowest_deprecated_version()
             && api_version <= self.message_type.highest_deprecated_version()
@@ -312,21 +319,25 @@ impl ApiKeys {
     ///
     /// When `false` is returned, it typically means that the protocol API is no longer
     /// supported, but the API key remains assigned so we do not accidentally reuse it.
+    #[doc(alias = "org.apache.kafka.common.protocol.ApiKeys#hasValidVersion")]
     pub fn has_valid_version(&self) -> bool {
         self.oldest_version() <= self.latest_version()
     }
 
     /// The request header version for a given API version.
+    #[doc(alias = "org.apache.kafka.common.protocol.ApiKeys#requestHeaderVersion")]
     pub fn request_header_version(&self, api_version: i16) -> i16 {
         self.message_type.request_header_version(api_version)
     }
 
     /// The response header version for a given API version.
+    #[doc(alias = "org.apache.kafka.common.protocol.ApiKeys#responseHeaderVersion")]
     pub fn response_header_version(&self, api_version: i16) -> i16 {
         self.message_type.response_header_version(api_version)
     }
 
     /// Returns a list of all supported versions for this API.
+    #[doc(alias = "org.apache.kafka.common.protocol.ApiKeys#allVersions")]
     pub fn all_versions(&self) -> Vec<i16> {
         (self.oldest_version()..=self.latest_version()).collect()
     }
@@ -336,6 +347,7 @@ impl ApiKeys {
     /// To workaround a critical bug in librdkafka, the api versions response is inconsistent with
     /// the actual versions supported by `produce` — this method handles that when a listener type
     /// is provided and equals `Broker`.
+    #[doc(alias = "org.apache.kafka.common.protocol.ApiKeys#toApiVersionForApiResponse")]
     pub fn to_api_version_for_api_response(
         self,
         enable_unstable_last_version: bool,
@@ -347,6 +359,7 @@ impl ApiKeys {
     /// Converts this API key to an `ApiVersion` with its version range.
     ///
     /// Returns `None` if the API is entirely disabled (latest version < oldest version).
+    #[doc(alias = "org.apache.kafka.common.protocol.ApiKeys#toApiVersion")]
     pub fn to_api_version(self, enable_unstable_last_version: bool) -> Option<ApiVersion> {
         self.to_api_version_internal(enable_unstable_last_version, None)
     }
@@ -388,36 +401,43 @@ impl ApiKeys {
     }
 
     /// Whether this API is in scope for the given listener type.
+    #[doc(alias = "org.apache.kafka.common.protocol.ApiKeys#inScope")]
     pub fn in_scope(&self, listener: ListenerType) -> bool {
         self.message_type.listeners().contains(&listener)
     }
 
     /// Look up an `ApiKeys` by its numeric API key id.
+    #[doc(alias = "org.apache.kafka.common.protocol.ApiKeys#forId")]
     pub fn for_id(id: i16) -> Option<&'static ApiKeys> {
         Self::ALL.iter().find(|k| k.id() == id)
     }
 
     /// Check if the given id corresponds to a known API key.
+    #[doc(alias = "org.apache.kafka.common.protocol.ApiKeys#hasId")]
     pub fn has_id(id: i16) -> bool {
         Self::ALL.iter().any(|k| k.id() == id)
     }
 
     /// Returns all API keys that are in scope for the broker listener.
+    #[doc(alias = "org.apache.kafka.common.protocol.ApiKeys#brokerApis")]
     pub fn broker_apis() -> Vec<&'static ApiKeys> {
         Self::apis_for_listener(ListenerType::Broker)
     }
 
     /// Returns all API keys that are in scope for the controller listener.
+    #[doc(alias = "org.apache.kafka.common.protocol.ApiKeys#controllerApis")]
     pub fn controller_apis() -> Vec<&'static ApiKeys> {
         Self::apis_for_listener(ListenerType::Controller)
     }
 
     /// Returns all API keys available to clients (same as broker APIs).
+    #[doc(alias = "org.apache.kafka.common.protocol.ApiKeys#clientApis")]
     pub fn client_apis() -> Vec<&'static ApiKeys> {
         Self::broker_apis()
     }
 
     /// Returns all API keys that are in scope for the given listener type.
+    #[doc(alias = "org.apache.kafka.common.protocol.ApiKeys#apisForListener")]
     pub fn apis_for_listener(listener: ListenerType) -> Vec<&'static ApiKeys> {
         Self::ALL.iter().filter(|k| k.in_scope(listener)).collect()
     }
@@ -584,21 +604,25 @@ mod tests {
     }
 
     #[test]
+    #[doc(alias = "org.apache.kafka.common.protocol.ApiKeysTest#testForIdWithInvalidIdLow")]
     fn test_for_id_with_invalid_id_low() {
         assert!(ApiKeys::for_id(-1).is_none());
     }
 
     #[test]
+    #[doc(alias = "org.apache.kafka.common.protocol.ApiKeysTest#testForIdWithInvalidIdHigh")]
     fn test_for_id_with_invalid_id_high() {
         assert!(ApiKeys::for_id(10000).is_none());
     }
 
     #[test]
+    #[doc(alias = "org.apache.kafka.common.protocol.ApiKeysTest#testAlterPartitionIsClusterAction")]
     fn test_alter_partition_is_cluster_action() {
         assert!(ApiKeys::ALTER_PARTITION.is_cluster_action());
     }
 
     #[test]
+    #[doc(alias = "org.apache.kafka.common.protocol.ApiKeysTest#testHasValidVersions")]
     fn test_has_valid_versions() {
         let no_valid_versions = [
             ApiKeys::LEADER_AND_ISR,
@@ -616,6 +640,7 @@ mod tests {
     }
 
     #[test]
+    #[doc(alias = "org.apache.kafka.common.protocol.ApiKeysTest#testApiScope")]
     fn test_api_scope() {
         use std::collections::HashSet;
         let mut apis_missing_scope = HashSet::new();
@@ -636,6 +661,7 @@ mod tests {
     /// - Cluster actions used only for inter-broker are throttled only if unauthorized
     /// - SASL_HANDSHAKE and SASL_AUTHENTICATE are not throttled when used for authentication
     #[test]
+    #[doc(alias = "org.apache.kafka.common.protocol.ApiKeysTest#testResponseThrottleTime")]
     fn test_response_throttle_time() {
         use std::collections::HashSet;
         let authentication_keys: HashSet<i16> = [ApiKeys::SASL_HANDSHAKE.id(), ApiKeys::SASL_AUTHENTICATE.id()]

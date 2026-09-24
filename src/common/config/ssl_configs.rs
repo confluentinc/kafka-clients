@@ -126,6 +126,7 @@ impl SslConfigs {
 /// so `truststore_type` and `keystore_type` default to `"PEM"`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
+#[doc(alias = "org.apache.kafka.common.config.SslConfigs")]
 pub struct SslConfigs {
     /// Path to the trust store file (CA certificates).
     /// Corresponds to `ssl.truststore.location`.

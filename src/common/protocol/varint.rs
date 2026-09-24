@@ -28,6 +28,7 @@ use std::io::{self, Write};
 /// which has no instance state, so it becomes a unit struct hosting its
 /// statics as associated items.
 #[non_exhaustive]
+#[doc(alias = "org.apache.kafka.common.utils.ByteUtils")]
 pub struct ByteUtils;
 
 impl ByteUtils {
@@ -38,6 +39,7 @@ impl ByteUtils {
     ///
     /// # Errors
     /// Returns an error if the varint doesn't terminate after 5 bytes.
+    #[doc(alias = "org.apache.kafka.common.utils.ByteUtils#readUnsignedVarint")]
     pub fn read_unsigned_varint(buffer: &[u8]) -> Result<(u32, usize), String> {
         // Fast path: when at least the maximum encoded length (5 bytes for a 32-bit
         // value) is available, a single up-front length check lets the loop read
@@ -142,6 +144,7 @@ impl ByteUtils {
     ///
     /// # Errors
     /// Returns an I/O error if writing fails.
+    #[doc(alias = "org.apache.kafka.common.utils.ByteUtils#writeUnsignedVarint")]
     pub fn write_unsigned_varint<W: Write>(value: u32, writer: &mut W) -> io::Result<()> {
         if (value & (0xFFFFFFFF << 7)) == 0 {
             writer.write_all(&[value as u8])?;
@@ -174,6 +177,7 @@ impl ByteUtils {
     ///
     /// # Errors
     /// Returns an error if the varint is malformed.
+    #[doc(alias = "org.apache.kafka.common.utils.ByteUtils#readVarint")]
     pub fn read_varint(buffer: &[u8]) -> Result<(i32, usize), String> {
         let (value, size) = Self::read_unsigned_varint(buffer)?;
         // Zig-zag decode: (n >>> 1) ^ -(n & 1)
@@ -185,6 +189,7 @@ impl ByteUtils {
     ///
     /// # Errors
     /// Returns an I/O error if writing fails.
+    #[doc(alias = "org.apache.kafka.common.utils.ByteUtils#writeVarint")]
     pub fn write_varint<W: Write>(value: i32, writer: &mut W) -> io::Result<()> {
         // Zig-zag encode: (n << 1) ^ (n >> 31)
         let encoded = ((value << 1) ^ (value >> 31)) as u32;
@@ -197,6 +202,7 @@ impl ByteUtils {
     ///
     /// # Errors
     /// Returns an error if the varlong doesn't terminate after 10 bytes.
+    #[doc(alias = "org.apache.kafka.common.utils.ByteUtils#readUnsignedVarlong")]
     pub fn read_unsigned_varlong(buffer: &[u8]) -> Result<(u64, usize), String> {
         let mut value = 0u64;
         let mut shift = 0;
@@ -252,6 +258,7 @@ impl ByteUtils {
     ///
     /// # Errors
     /// Returns an error if the varlong is malformed.
+    #[doc(alias = "org.apache.kafka.common.utils.ByteUtils#readVarlong")]
     pub fn read_varlong(buffer: &[u8]) -> Result<(i64, usize), String> {
         let (raw, size) = Self::read_unsigned_varlong(buffer)?;
         // Zig-zag decode: (n >>> 1) ^ -(n & 1)
@@ -263,6 +270,7 @@ impl ByteUtils {
     ///
     /// # Errors
     /// Returns an I/O error if writing fails.
+    #[doc(alias = "org.apache.kafka.common.utils.ByteUtils#writeUnsignedVarlong")]
     pub fn write_unsigned_varlong<W: Write>(mut value: u64, writer: &mut W) -> io::Result<()> {
         while (value & 0xFFFFFFFFFFFFFF80) != 0 {
             let b = ((value & 0x7F) | 0x80) as u8;
@@ -277,6 +285,7 @@ impl ByteUtils {
     ///
     /// # Errors
     /// Returns an I/O error if writing fails.
+    #[doc(alias = "org.apache.kafka.common.utils.ByteUtils#writeVarlong")]
     pub fn write_varlong<W: Write>(value: i64, writer: &mut W) -> io::Result<()> {
         // Zig-zag encode: (n << 1) ^ (n >> 63)
         let encoded = ((value << 1) ^ (value >> 63)) as u64;
@@ -286,6 +295,7 @@ impl ByteUtils {
     /// Returns the number of bytes needed to encode a value as an unsigned varint.
     ///
     /// Corresponds to Java's `ByteUtils.sizeOfUnsignedVarint()`.
+    #[doc(alias = "org.apache.kafka.common.utils.ByteUtils#sizeOfUnsignedVarint")]
     pub const fn size_of_unsigned_varint(value: u32) -> i32 {
         let leading_zeros = value.leading_zeros() as i32;
         // Equivalent to: ceil((32 - leading_zeros) / 7.0), min 1
@@ -296,6 +306,7 @@ impl ByteUtils {
     /// Returns the number of bytes needed to encode a signed varint (zig-zag encoded).
     ///
     /// Corresponds to Java's `ByteUtils.sizeOfVarint()`.
+    #[doc(alias = "org.apache.kafka.common.utils.ByteUtils#sizeOfVarint")]
     pub const fn size_of_varint(value: i32) -> i32 {
         let encoded = ((value << 1) ^ (value >> 31)) as u32;
         Self::size_of_unsigned_varint(encoded)
@@ -304,6 +315,7 @@ impl ByteUtils {
     /// Returns the number of bytes needed to encode an unsigned varlong.
     ///
     /// Corresponds to Java's `ByteUtils.sizeOfUnsignedVarlong()`.
+    #[doc(alias = "org.apache.kafka.common.utils.ByteUtils#sizeOfUnsignedVarlong")]
     pub const fn size_of_unsigned_varlong(v: u64) -> i32 {
         let leading_zeros = v.leading_zeros() as i32;
         let leading_zeros_below_70_divided_by_7 = ((70 - leading_zeros) * 0b10010010010010011i32) >> 19;
@@ -313,6 +325,7 @@ impl ByteUtils {
     /// Returns the number of bytes needed to encode a signed varlong (zig-zag encoded).
     ///
     /// Corresponds to Java's `ByteUtils.sizeOfVarlong()`.
+    #[doc(alias = "org.apache.kafka.common.utils.ByteUtils#sizeOfVarlong")]
     pub const fn size_of_varlong(value: i64) -> i32 {
         let encoded = ((value << 1) ^ (value >> 63)) as u64;
         Self::size_of_unsigned_varlong(encoded)

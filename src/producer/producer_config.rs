@@ -51,6 +51,7 @@ const MAX_IN_FLIGHT_REQUESTS_PER_CONNECTION_FOR_IDEMPOTENCE: i32 = 5;
 ///
 /// Corresponds to `org.apache.kafka.clients.producer.ProducerConfig`.
 #[derive(Clone, Debug)]
+#[doc(alias = "org.apache.kafka.clients.producer.ProducerConfig")]
 pub struct ProducerConfig {
     // --- Connection ---
     /// `bootstrap.servers` - A list of host/port pairs to use for establishing the
@@ -419,6 +420,7 @@ impl ProducerConfig {
     ///
     /// Returns [`Error::LocalIllegalArgument`] if a value cannot be parsed for its
     /// expected type (e.g., `"abc"` for an integer field).
+    #[doc(alias = "org.apache.kafka.clients.producer.ProducerConfig#ProducerConfig")]
     pub fn new(props: &HashMap<String, String>) -> Result<Self, Error> {
         // Java's `AbstractConfig.originals()` is the user-supplied map captured
         // verbatim, before any derived default (e.g. a generated `client.id`) is
@@ -711,6 +713,7 @@ impl ProducerConfig {
     /// `max.in.flight.requests.per.connection` it is **always** an error. The
     /// silent-disable path is what keeps existing non-idempotent configurations
     /// working, so removing it would be a breaking change.
+    #[doc(alias = "org.apache.kafka.clients.producer.ProducerConfig#postProcessAndValidateIdempotenceConfigs")]
     fn post_process_and_validate_idempotence_configs(&mut self) -> Result<(), Error> {
         let user_configured_idempotence = self.user_configured(Self::ENABLE_IDEMPOTENCE_CONFIG);
         let mut idempotence_enabled = self.enable_idempotence;
@@ -789,6 +792,7 @@ impl ProducerConfig {
     /// `producer-<transactional.id>` when a transactional id is set, otherwise
     /// `producer-<n>` from a process-wide counter starting at 1 — matching
     /// Java's `static AtomicInteger PRODUCER_CLIENT_ID_SEQUENCE`.
+    #[doc(alias = "org.apache.kafka.clients.producer.ProducerConfig#maybeOverrideClientId")]
     fn maybe_override_client_id(&mut self) {
         if self.user_configured(Self::CLIENT_ID_CONFIG) {
             return;
@@ -828,6 +832,7 @@ impl ProducerConfig {
     /// KafkaException`, so the error must stay inside the `KafkaException`
     /// hierarchy: returning a `String` here erased the class at the boundary and
     /// left the caller free to pick the wrong one.
+    #[doc(alias = "org.apache.kafka.clients.producer.ProducerConfig#parseAcks")]
     pub fn parse_acks(acks_string: &str) -> Result<i16, Error> {
         let trimmed = acks_string.trim();
         if trimmed.eq_ignore_ascii_case("all") {
@@ -1282,6 +1287,7 @@ mod tests {
 
     /// Translated from `ProducerConfigTest.testInvalidSecurityProtocol`.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.producer.ProducerConfigTest#testInvalidSecurityProtocol")]
     fn test_invalid_security_protocol() {
         let mut props = HashMap::new();
         props.insert("security.protocol".to_string(), "abc".to_string());
@@ -1332,6 +1338,7 @@ mod tests {
 
     /// Translated from `ProducerConfigTest.testCaseInsensitiveSecurityProtocol`.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.producer.ProducerConfigTest#testCaseInsensitiveSecurityProtocol")]
     fn test_case_insensitive_security_protocol() {
         let mut props = HashMap::new();
         props.insert("security.protocol".to_string(), "sasl_ssl".to_string());
@@ -1579,6 +1586,7 @@ mod tests {
 
     /// Translated from `ProducerConfigTest.testUpperboundCheckOfEnableIdempotence`.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.producer.ProducerConfigTest#testUpperboundCheckOfEnableIdempotence")]
     fn test_upperbound_check_of_enable_idempotence() {
         let error = ProducerConfig::new(&props_with(&[("max.in.flight.requests.per.connection", "6")]))
             .expect_err("6 exceeds the cap");
@@ -1594,6 +1602,9 @@ mod tests {
 
     /// Translated from `ProducerConfigTest.testTwoPhaseCommitIncompatibleWithTransactionTimeout`.
     #[test]
+    #[doc(
+        alias = "org.apache.kafka.clients.producer.ProducerConfigTest#testTwoPhaseCommitIncompatibleWithTransactionTimeout"
+    )]
     fn test_two_phase_commit_incompatible_with_transaction_timeout() {
         let both = props_with(&[
             ("enable.idempotence", "true"),

@@ -28,6 +28,7 @@ use super::{ConcreteRequest, ConcreteResponse, ListTransactionsResponse, Request
 ///
 /// Corresponds to `org.apache.kafka.common.requests.ListTransactionsRequest`.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.ListTransactionsRequest")]
 pub struct ListTransactionsRequest {
     data: ListTransactionsRequestData,
     version: i16,
@@ -35,11 +36,13 @@ pub struct ListTransactionsRequest {
 
 impl ListTransactionsRequest {
     /// Creates a new `ListTransactionsRequest` from data and version.
+    #[doc(alias = "org.apache.kafka.common.requests.ListTransactionsRequest#ListTransactionsRequest")]
     pub fn new(data: ListTransactionsRequestData, version: i16) -> Self {
         Self { data, version }
     }
 
     /// Returns a reference to the underlying data.
+    #[doc(alias = "org.apache.kafka.common.requests.ListTransactionsRequest#data")]
     pub fn data(&self) -> &ListTransactionsRequestData {
         &self.data
     }
@@ -62,6 +65,7 @@ impl ListTransactionsRequest {
     /// Creates an error response for this request.
     ///
     /// Mirrors `ListTransactionsRequest.getErrorResponse`.
+    #[doc(alias = "org.apache.kafka.common.requests.ListTransactionsRequest#getErrorResponse")]
     pub fn get_error_response(&self, throttle_time_ms: i32, error: &Errors) -> ConcreteResponse {
         let mut response = ListTransactionsResponseData::new();
         response.set_error_code(error.code());
@@ -75,6 +79,7 @@ impl ListTransactionsRequest {
     /// # Errors
     ///
     /// Returns an error if parsing fails.
+    #[doc(alias = "org.apache.kafka.common.requests.ListTransactionsRequest#parse")]
     pub fn parse(readable: &mut dyn Readable, version: i16) -> io::Result<Self> {
         let data = ListTransactionsRequestData::read(readable, version)?;
         Ok(Self::new(data, version))
@@ -91,12 +96,14 @@ impl std::fmt::Display for ListTransactionsRequest {
 ///
 /// Corresponds to `ListTransactionsRequest.Builder`.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.ListTransactionsRequest$Builder")]
 pub struct ListTransactionsRequestBuilder {
     data: ListTransactionsRequestData,
 }
 
 impl ListTransactionsRequestBuilder {
     /// Creates a builder from the given request data.
+    #[doc(alias = "org.apache.kafka.common.requests.ListTransactionsRequest$Builder#Builder")]
     pub fn new(data: ListTransactionsRequestData) -> Self {
         Self { data }
     }

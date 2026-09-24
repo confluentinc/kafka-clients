@@ -245,6 +245,7 @@ pub(crate) unsafe fn clone_core_handle(
 
 /// Opaque consumer handle.
 #[repr(C)]
+#[doc(alias = "org.apache.kafka.clients.consumer.Consumer")]
 pub struct kafka_consumer_Consumer_t {
     _private: [u8; 0],
 }
@@ -257,12 +258,14 @@ pub struct kafka_consumer_ConsumerProperties_t {
 
 /// Opaque handle to a polled batch of records (owns the buffers).
 #[repr(C)]
+#[doc(alias = "org.apache.kafka.clients.consumer.ConsumerRecords")]
 pub struct kafka_consumer_ConsumerRecords_t {
     _private: [u8; 0],
 }
 
 /// Opaque handle to a single consumer record (borrows from the owning batch).
 #[repr(C)]
+#[doc(alias = "org.apache.kafka.clients.consumer.ConsumerRecord")]
 pub struct kafka_consumer_ConsumerRecord_t {
     _private: [u8; 0],
 }
@@ -550,6 +553,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_destroy(consumer: *mut kafka_co
 ///
 /// `consumer` must be a valid handle from a consumer constructor.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.clients.consumer.Consumer#wakeup")]
 pub unsafe extern "C" fn kafka_consumer_Consumer_wakeup(consumer: *const kafka_consumer_Consumer_t) {
     if consumer.is_null() {
         return;
@@ -581,6 +585,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_wakeup(consumer: *const kafka_c
 ///
 /// `consumer` must be a valid handle from a consumer constructor.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.clients.consumer.Consumer#poll")]
 pub unsafe extern "C" fn kafka_consumer_Consumer_poll(
     consumer: *const kafka_consumer_Consumer_t,
     timeout_ms: i64,
@@ -770,6 +775,7 @@ unsafe fn records_ref(records: *const kafka_consumer_ConsumerRecords_t) -> &'sta
 ///
 /// `records` must be a valid records handle.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.clients.consumer.ConsumerRecords#count")]
 pub unsafe extern "C" fn kafka_consumer_ConsumerRecords_count(records: *const kafka_consumer_ConsumerRecords_t) -> i32 {
     if records.is_null() {
         return 0;
@@ -783,6 +789,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecords_count(records: *const ka
 ///
 /// `records` must be a valid records handle.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.clients.consumer.ConsumerRecords#isEmpty")]
 pub unsafe extern "C" fn kafka_consumer_ConsumerRecords_is_empty(
     records: *const kafka_consumer_ConsumerRecords_t,
 ) -> bool {
@@ -844,6 +851,7 @@ unsafe fn record_ref(record: *const kafka_consumer_ConsumerRecord_t) -> &'static
 ///
 /// `record` must be a valid record pointer.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.clients.consumer.ConsumerRecord#partition")]
 pub unsafe extern "C" fn kafka_consumer_ConsumerRecord_partition(
     record: *const kafka_consumer_ConsumerRecord_t,
 ) -> i32 {
@@ -856,6 +864,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecord_partition(
 ///
 /// `record` must be a valid record pointer.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.clients.consumer.ConsumerRecord#offset")]
 pub unsafe extern "C" fn kafka_consumer_ConsumerRecord_offset(record: *const kafka_consumer_ConsumerRecord_t) -> i64 {
     unsafe { record_ref(record) }.offset()
 }
@@ -867,6 +876,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecord_offset(record: *const kaf
 ///
 /// `record` must be a valid record pointer.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.clients.consumer.ConsumerRecord#timestamp")]
 pub unsafe extern "C" fn kafka_consumer_ConsumerRecord_timestamp(
     record: *const kafka_consumer_ConsumerRecord_t,
 ) -> i64 {
@@ -881,6 +891,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecord_timestamp(
 ///
 /// `record` must be a valid record pointer; `out_len` must be a valid pointer.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.clients.consumer.ConsumerRecord#topic")]
 pub unsafe extern "C" fn kafka_consumer_ConsumerRecord_topic(
     record: *const kafka_consumer_ConsumerRecord_t,
     out_len: *mut i32,
@@ -901,6 +912,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecord_topic(
 ///
 /// `record` must be a valid record pointer; `out_len` must be a valid pointer.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.clients.consumer.ConsumerRecord#key")]
 pub unsafe extern "C" fn kafka_consumer_ConsumerRecord_key(
     record: *const kafka_consumer_ConsumerRecord_t,
     out_len: *mut i32,
@@ -930,6 +942,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecord_key(
 ///
 /// `record` must be a valid record pointer; `out_len` must be a valid pointer.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.clients.consumer.ConsumerRecord#value")]
 pub unsafe extern "C" fn kafka_consumer_ConsumerRecord_value(
     record: *const kafka_consumer_ConsumerRecord_t,
     out_len: *mut i32,
@@ -958,6 +971,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecord_value(
 ///
 /// `record` must be a valid record pointer.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.clients.consumer.ConsumerRecord#timestampType")]
 pub unsafe extern "C" fn kafka_consumer_ConsumerRecord_timestamp_type(
     record: *const kafka_consumer_ConsumerRecord_t,
 ) -> i32 {
@@ -970,6 +984,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecord_timestamp_type(
 ///
 /// `record` must be a valid record pointer.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.clients.consumer.ConsumerRecord#serializedKeySize")]
 pub unsafe extern "C" fn kafka_consumer_ConsumerRecord_serialized_key_size(
     record: *const kafka_consumer_ConsumerRecord_t,
 ) -> i32 {
@@ -982,6 +997,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecord_serialized_key_size(
 ///
 /// `record` must be a valid record pointer.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.clients.consumer.ConsumerRecord#serializedValueSize")]
 pub unsafe extern "C" fn kafka_consumer_ConsumerRecord_serialized_value_size(
     record: *const kafka_consumer_ConsumerRecord_t,
 ) -> i32 {
@@ -996,6 +1012,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecord_serialized_value_size(
 ///
 /// `record` must be a valid record pointer; `out_epoch` a valid pointer.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.clients.consumer.ConsumerRecord#leaderEpoch")]
 pub unsafe extern "C" fn kafka_consumer_ConsumerRecord_leader_epoch(
     record: *const kafka_consumer_ConsumerRecord_t,
     out_epoch: *mut i32,
@@ -1019,6 +1036,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecord_leader_epoch(
 ///
 /// `record` must be a valid record pointer; `out_count` a valid pointer.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.clients.consumer.ConsumerRecord#deliveryCount")]
 pub unsafe extern "C" fn kafka_consumer_ConsumerRecord_delivery_count(
     record: *const kafka_consumer_ConsumerRecord_t,
     out_count: *mut i32,
@@ -1153,6 +1171,7 @@ unsafe fn mock_mut(h: &FfiConsumerHandle) -> Result<&mut MockConsumer<Bytes, Byt
 /// `topics` must point to `count` valid C strings; `partitions` to `count`
 /// `i32` values. `consumer` must be a valid handle.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.clients.consumer.Consumer#assign")]
 pub unsafe extern "C" fn kafka_consumer_Consumer_assign(
     consumer: *const kafka_consumer_Consumer_t,
     topics: *const *const c_char,
@@ -1471,6 +1490,7 @@ unsafe fn read_topics(topics: *const *const c_char, count: i32) -> Vec<String> {
 
 /// Opaque handle to a [`TopicPartition`].
 #[repr(C)]
+#[doc(alias = "org.apache.kafka.common.TopicPartition")]
 pub struct kafka_consumer_TopicPartition_t {
     _private: [u8; 0],
 }
@@ -1489,6 +1509,7 @@ struct TopicPartitionInner {
 ///
 /// `tp` must be a valid topic-partition handle.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.common.TopicPartition#topic")]
 pub unsafe extern "C" fn kafka_consumer_TopicPartition_topic(
     tp: *const kafka_consumer_TopicPartition_t,
 ) -> *const c_char {
@@ -1502,6 +1523,7 @@ pub unsafe extern "C" fn kafka_consumer_TopicPartition_topic(
 ///
 /// `tp` must be a valid topic-partition handle.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.common.TopicPartition#partition")]
 pub unsafe extern "C" fn kafka_consumer_TopicPartition_partition(tp: *const kafka_consumer_TopicPartition_t) -> i32 {
     let inner = unsafe { &*(tp as *const TopicPartitionInner) };
     inner.tp.partition()
@@ -1531,6 +1553,7 @@ pub(crate) fn box_topic_partition(tp: TopicPartition) -> *mut kafka_consumer_Top
 
 /// Opaque handle to an [`OffsetAndMetadata`].
 #[repr(C)]
+#[doc(alias = "org.apache.kafka.clients.consumer.OffsetAndMetadata")]
 pub struct kafka_consumer_OffsetAndMetadata_t {
     _private: [u8; 0],
 }
@@ -1548,6 +1571,7 @@ struct OffsetAndMetadataInner {
 ///
 /// `oam` must be a valid offset-and-metadata handle.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.clients.consumer.OffsetAndMetadata#offset")]
 pub unsafe extern "C" fn kafka_consumer_OffsetAndMetadata_offset(
     oam: *const kafka_consumer_OffsetAndMetadata_t,
 ) -> i64 {
@@ -1562,6 +1586,7 @@ pub unsafe extern "C" fn kafka_consumer_OffsetAndMetadata_offset(
 ///
 /// `oam` must be a valid offset-and-metadata handle.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.clients.consumer.OffsetAndMetadata#metadata")]
 pub unsafe extern "C" fn kafka_consumer_OffsetAndMetadata_metadata(
     oam: *const kafka_consumer_OffsetAndMetadata_t,
 ) -> *const c_char {
@@ -1575,6 +1600,7 @@ pub unsafe extern "C" fn kafka_consumer_OffsetAndMetadata_metadata(
 ///
 /// `oam` must be a valid handle; `out_epoch` a valid pointer.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.clients.consumer.OffsetAndMetadata#leaderEpoch")]
 pub unsafe extern "C" fn kafka_consumer_OffsetAndMetadata_leader_epoch(
     oam: *const kafka_consumer_OffsetAndMetadata_t,
     out_epoch: *mut i32,
@@ -1605,6 +1631,7 @@ pub unsafe extern "C" fn kafka_consumer_OffsetAndMetadata_destroy(oam: *mut kafk
 
 /// Opaque handle to an [`OffsetAndTimestamp`].
 #[repr(C)]
+#[doc(alias = "org.apache.kafka.clients.consumer.OffsetAndTimestamp")]
 pub struct kafka_consumer_OffsetAndTimestamp_t {
     _private: [u8; 0],
 }
@@ -1615,6 +1642,7 @@ pub struct kafka_consumer_OffsetAndTimestamp_t {
 ///
 /// `oat` must be a valid offset-and-timestamp handle.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.clients.consumer.OffsetAndTimestamp#offset")]
 pub unsafe extern "C" fn kafka_consumer_OffsetAndTimestamp_offset(
     oat: *const kafka_consumer_OffsetAndTimestamp_t,
 ) -> i64 {
@@ -1627,6 +1655,7 @@ pub unsafe extern "C" fn kafka_consumer_OffsetAndTimestamp_offset(
 ///
 /// `oat` must be a valid offset-and-timestamp handle.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.clients.consumer.OffsetAndTimestamp#timestamp")]
 pub unsafe extern "C" fn kafka_consumer_OffsetAndTimestamp_timestamp(
     oat: *const kafka_consumer_OffsetAndTimestamp_t,
 ) -> i64 {
@@ -1639,6 +1668,7 @@ pub unsafe extern "C" fn kafka_consumer_OffsetAndTimestamp_timestamp(
 ///
 /// `oat` must be a valid handle; `out_epoch` a valid pointer.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.clients.consumer.OffsetAndTimestamp#leaderEpoch")]
 pub unsafe extern "C" fn kafka_consumer_OffsetAndTimestamp_leader_epoch(
     oat: *const kafka_consumer_OffsetAndTimestamp_t,
     out_epoch: *mut i32,
@@ -1668,6 +1698,7 @@ pub unsafe extern "C" fn kafka_consumer_OffsetAndTimestamp_destroy(oat: *mut kaf
 
 /// Opaque handle to a [`ConsumerGroupMetadata`].
 #[repr(C)]
+#[doc(alias = "org.apache.kafka.clients.consumer.ConsumerGroupMetadata")]
 pub struct kafka_consumer_ConsumerGroupMetadata_t {
     _private: [u8; 0],
 }
@@ -1716,7 +1747,9 @@ fn box_group_metadata(meta: ConsumerGroupMetadata) -> *mut kafka_consumer_Consum
 /// - `group_id` and `member_id` must be valid NUL-terminated C strings.
 /// - `group_instance_id` must be null or a valid NUL-terminated C string.
 #[unsafe(no_mangle)]
-#[allow(deprecated)] // ConsumerGroupMetadata::with_generation_id_member_id_group_instance_id is deprecated in the public API but is the constructor the FFI must expose.
+#[allow(deprecated)]
+// ConsumerGroupMetadata::with_generation_id_member_id_group_instance_id is deprecated in the public API but is the constructor the FFI must expose.
+#[doc(alias = "org.apache.kafka.clients.consumer.ConsumerGroupMetadata#ConsumerGroupMetadata")]
 pub unsafe extern "C" fn kafka_consumer_ConsumerGroupMetadata_new(
     group_id: *const c_char,
     generation_id: i32,
@@ -1745,6 +1778,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerGroupMetadata_new(
 ///
 /// `meta` must be a valid group-metadata handle.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.clients.consumer.ConsumerGroupMetadata#groupId")]
 pub unsafe extern "C" fn kafka_consumer_ConsumerGroupMetadata_group_id(
     meta: *const kafka_consumer_ConsumerGroupMetadata_t,
 ) -> *const c_char {
@@ -1757,6 +1791,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerGroupMetadata_group_id(
 ///
 /// `meta` must be a valid group-metadata handle.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.clients.consumer.ConsumerGroupMetadata#generationId")]
 pub unsafe extern "C" fn kafka_consumer_ConsumerGroupMetadata_generation_id(
     meta: *const kafka_consumer_ConsumerGroupMetadata_t,
 ) -> i32 {
@@ -1769,6 +1804,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerGroupMetadata_generation_id(
 ///
 /// `meta` must be a valid group-metadata handle.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.clients.consumer.ConsumerGroupMetadata#memberId")]
 pub unsafe extern "C" fn kafka_consumer_ConsumerGroupMetadata_member_id(
     meta: *const kafka_consumer_ConsumerGroupMetadata_t,
 ) -> *const c_char {
@@ -1782,6 +1818,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerGroupMetadata_member_id(
 ///
 /// `meta` must be a valid group-metadata handle.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.clients.consumer.ConsumerGroupMetadata#groupInstanceId")]
 pub unsafe extern "C" fn kafka_consumer_ConsumerGroupMetadata_group_instance_id(
     meta: *const kafka_consumer_ConsumerGroupMetadata_t,
 ) -> *const c_char {
@@ -1823,6 +1860,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerGroupMetadata_destroy(
 
 /// Opaque handle to a [`Node`] (broker).
 #[repr(C)]
+#[doc(alias = "org.apache.kafka.common.Node")]
 pub struct kafka_common_Node_t {
     _private: [u8; 0],
 }
@@ -1833,6 +1871,7 @@ pub struct kafka_common_Node_t {
 ///
 /// `node` must be a valid node handle obtained from a `PartitionInfo` getter.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.common.Node#id")]
 pub unsafe extern "C" fn kafka_common_Node_id(node: *const kafka_common_Node_t) -> i32 {
     unsafe { &*(node as *const Node) }.id()
 }
@@ -1844,6 +1883,7 @@ pub unsafe extern "C" fn kafka_common_Node_id(node: *const kafka_common_Node_t) 
 ///
 /// `node` must be a valid node handle; `out_len` a valid pointer.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.common.Node#host")]
 pub unsafe extern "C" fn kafka_common_Node_host(node: *const kafka_common_Node_t, out_len: *mut i32) -> *const c_char {
     let host = unsafe { &*(node as *const Node) }.host();
     if !out_len.is_null() {
@@ -1858,6 +1898,7 @@ pub unsafe extern "C" fn kafka_common_Node_host(node: *const kafka_common_Node_t
 ///
 /// `node` must be a valid node handle.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.common.Node#port")]
 pub unsafe extern "C" fn kafka_common_Node_port(node: *const kafka_common_Node_t) -> i32 {
     unsafe { &*(node as *const Node) }.port()
 }
@@ -1868,6 +1909,7 @@ pub unsafe extern "C" fn kafka_common_Node_port(node: *const kafka_common_Node_t
 ///
 /// `node` must be a valid node handle; `out_len` a valid pointer.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.common.Node#rack")]
 pub unsafe extern "C" fn kafka_common_Node_rack(node: *const kafka_common_Node_t, out_len: *mut i32) -> *const c_char {
     match unsafe { &*(node as *const Node) }.rack() {
         Some(rack) => {
@@ -1887,6 +1929,7 @@ pub unsafe extern "C" fn kafka_common_Node_rack(node: *const kafka_common_Node_t
 
 /// Opaque handle to a [`PartitionInfo`].
 #[repr(C)]
+#[doc(alias = "org.apache.kafka.common.PartitionInfo")]
 pub struct kafka_consumer_PartitionInfo_t {
     _private: [u8; 0],
 }
@@ -1904,6 +1947,7 @@ struct PartitionInfoInner {
 ///
 /// `info` must be a valid partition-info handle.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.common.PartitionInfo#topic")]
 pub unsafe extern "C" fn kafka_consumer_PartitionInfo_topic(
     info: *const kafka_consumer_PartitionInfo_t,
 ) -> *const c_char {
@@ -1916,6 +1960,7 @@ pub unsafe extern "C" fn kafka_consumer_PartitionInfo_topic(
 ///
 /// `info` must be a valid partition-info handle.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.common.PartitionInfo#partition")]
 pub unsafe extern "C" fn kafka_consumer_PartitionInfo_partition(info: *const kafka_consumer_PartitionInfo_t) -> i32 {
     unsafe { &*(info as *const PartitionInfoInner) }.info.partition()
 }
@@ -1927,6 +1972,7 @@ pub unsafe extern "C" fn kafka_consumer_PartitionInfo_partition(info: *const kaf
 ///
 /// `info` must be a valid partition-info handle.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.common.PartitionInfo#leader")]
 pub unsafe extern "C" fn kafka_consumer_PartitionInfo_leader(
     info: *const kafka_consumer_PartitionInfo_t,
 ) -> *const kafka_common_Node_t {
@@ -2985,6 +3031,7 @@ unsafe fn async_value_op<T, Fut, F, C>(
 ///
 /// `consumer` must be a valid handle; `topics` `count` valid C strings.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.clients.consumer.Consumer#subscribe")]
 pub unsafe extern "C" fn kafka_consumer_Consumer_subscribe(
     consumer: *const kafka_consumer_Consumer_t,
     topics: *const *const c_char,
@@ -3134,6 +3181,7 @@ pub type kafka_consumer_ConsumerRebalanceListener_user_data_destroy_t = unsafe e
 /// if that call fails); [`kafka_consumer_ConsumerRebalanceListener_destroy`]
 /// exists only for a listener that is never subscribed.
 #[repr(C)]
+#[doc(alias = "org.apache.kafka.clients.consumer.ConsumerRebalanceListener")]
 pub struct kafka_consumer_ConsumerRebalanceListener_t {
     _private: [u8; 0],
 }
@@ -3382,6 +3430,7 @@ unsafe fn take_rebalance_listener(
 /// strings; `listener` must be a non-null, not-yet-consumed handle from
 /// [`kafka_consumer_ConsumerRebalanceListener_new`].
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.clients.consumer.Consumer#subscribe")]
 pub unsafe extern "C" fn kafka_consumer_Consumer_subscribe_with_listener(
     consumer: *const kafka_consumer_Consumer_t,
     topics: *const *const c_char,
@@ -3411,6 +3460,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_subscribe_with_listener(
 /// [`kafka_consumer_ConsumerRebalanceListener_new`]; `callback` must be a valid
 /// function pointer.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.clients.consumer.Consumer#subscribe")]
 pub unsafe extern "C" fn kafka_consumer_Consumer_subscribe_with_listener_async(
     consumer: *const kafka_consumer_Consumer_t,
     topics: *const *const c_char,
@@ -3437,6 +3487,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_subscribe_with_listener_async(
 ///
 /// `consumer` must be a valid handle.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.clients.consumer.Consumer#unsubscribe")]
 pub unsafe extern "C" fn kafka_consumer_Consumer_unsubscribe(
     consumer: *const kafka_consumer_Consumer_t,
 ) -> *mut kafka_common_Error_t {
@@ -3486,6 +3537,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_assign_async(
 ///
 /// `consumer` must be a valid handle; `topic` a valid C string.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.clients.consumer.Consumer#seek")]
 pub unsafe extern "C" fn kafka_consumer_Consumer_seek(
     consumer: *const kafka_consumer_Consumer_t,
     topic: *const c_char,
@@ -3525,6 +3577,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_seek_async(
 /// `consumer` must be a valid handle; `topic` a valid C string; `metadata` null
 /// or a valid C string.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.clients.consumer.Consumer#seek")]
 pub unsafe extern "C" fn kafka_consumer_Consumer_seek_with_metadata(
     consumer: *const kafka_consumer_Consumer_t,
     topic: *const c_char,
@@ -3557,6 +3610,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_seek_with_metadata(
 /// `consumer` must be a valid handle; `topic` a valid C string; `metadata` null
 /// or a valid C string.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.clients.consumer.Consumer#seek")]
 pub unsafe extern "C" fn kafka_consumer_Consumer_seek_with_metadata_async(
     consumer: *const kafka_consumer_Consumer_t,
     topic: *const c_char,
@@ -3592,6 +3646,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_seek_with_metadata_async(
 ///
 /// `consumer` must be a valid handle; `topics`/`partitions` `count` entries.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.clients.consumer.Consumer#seekToBeginning")]
 pub unsafe extern "C" fn kafka_consumer_Consumer_seek_to_beginning(
     consumer: *const kafka_consumer_Consumer_t,
     topics: *const *const c_char,
@@ -3630,6 +3685,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_seek_to_beginning_async(
 ///
 /// `consumer` must be a valid handle; `topics`/`partitions` `count` entries.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.clients.consumer.Consumer#seekToEnd")]
 pub unsafe extern "C" fn kafka_consumer_Consumer_seek_to_end(
     consumer: *const kafka_consumer_Consumer_t,
     topics: *const *const c_char,
@@ -3666,6 +3722,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_seek_to_end_async(
 ///
 /// `consumer` must be a valid handle; `topics`/`partitions` `count` entries.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.clients.consumer.Consumer#pause")]
 pub unsafe extern "C" fn kafka_consumer_Consumer_pause(
     consumer: *const kafka_consumer_Consumer_t,
     topics: *const *const c_char,
@@ -3700,6 +3757,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_pause_async(
 ///
 /// `consumer` must be a valid handle; `topics`/`partitions` `count` entries.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.clients.consumer.Consumer#resume")]
 pub unsafe extern "C" fn kafka_consumer_Consumer_resume(
     consumer: *const kafka_consumer_Consumer_t,
     topics: *const *const c_char,
@@ -3737,6 +3795,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_resume_async(
 ///
 /// `consumer` must be a valid handle.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.clients.consumer.Consumer#commitSync")]
 pub unsafe extern "C" fn kafka_consumer_Consumer_commit_sync(
     consumer: *const kafka_consumer_Consumer_t,
 ) -> *mut kafka_common_Error_t {
@@ -3872,6 +3931,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_commit_sync_offsets_async(
 ///
 /// `consumer` must be a valid handle.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.clients.consumer.Consumer#commitAsync")]
 pub unsafe extern "C" fn kafka_consumer_Consumer_commit_async(
     consumer: *const kafka_consumer_Consumer_t,
 ) -> *mut kafka_common_Error_t {
@@ -4033,6 +4093,7 @@ fn make_commit_callback(
 /// pointer and `user_data` must stay valid until `user_data_destroy` fires (or,
 /// with no destroy hook, until the callback has run).
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.clients.consumer.Consumer#commitAsync")]
 pub unsafe extern "C" fn kafka_consumer_Consumer_commit_async_with_callback(
     consumer: *const kafka_consumer_Consumer_t,
     callback: kafka_consumer_Consumer_commit_async_callback_t,
@@ -4096,6 +4157,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_commit_async_offsets_with_callb
 ///
 /// `consumer` a valid handle; `reason` null or a valid C string.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.clients.consumer.Consumer#enforceRebalance")]
 pub unsafe extern "C" fn kafka_consumer_Consumer_enforce_rebalance(
     consumer: *const kafka_consumer_Consumer_t,
     reason: *const c_char,
@@ -4127,6 +4189,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_enforce_rebalance(
 ///
 /// `consumer` must be a valid handle.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.clients.consumer.Consumer#close")]
 pub unsafe extern "C" fn kafka_consumer_Consumer_close(
     consumer: *const kafka_consumer_Consumer_t,
 ) -> *mut kafka_common_Error_t {
@@ -4139,6 +4202,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_close(
 ///
 /// `consumer` must be a valid handle.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.clients.consumer.Consumer#close")]
 pub unsafe extern "C" fn kafka_consumer_Consumer_close_with_timeout(
     consumer: *const kafka_consumer_Consumer_t,
     timeout_ms: i64,
@@ -4174,6 +4238,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_close_async(
 ///
 /// `consumer` a valid handle; `topic` a valid C string; `out_position` valid.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.clients.consumer.Consumer#position")]
 pub unsafe extern "C" fn kafka_consumer_Consumer_position(
     consumer: *const kafka_consumer_Consumer_t,
     topic: *const c_char,
@@ -4248,6 +4313,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_position_async(
 /// `consumer` a valid handle; `topics`/`partitions` `count` entries; `out_map`
 /// valid.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.clients.consumer.Consumer#committed")]
 pub unsafe extern "C" fn kafka_consumer_Consumer_committed(
     consumer: *const kafka_consumer_Consumer_t,
     topics: *const *const c_char,
@@ -4320,6 +4386,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_committed_async(
 ///
 /// `consumer` a valid handle; arrays `count` valid entries; `out_map` valid.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.clients.consumer.Consumer#offsetsForTimes")]
 pub unsafe extern "C" fn kafka_consumer_Consumer_offsets_for_times(
     consumer: *const kafka_consumer_Consumer_t,
     topics: *const *const c_char,
@@ -4426,6 +4493,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_offsets_for_times_async(
 /// `consumer` a valid handle; `topics`/`partitions` `count` entries; `out_map`
 /// valid.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.clients.consumer.Consumer#beginningOffsets")]
 pub unsafe extern "C" fn kafka_consumer_Consumer_beginning_offsets(
     consumer: *const kafka_consumer_Consumer_t,
     topics: *const *const c_char,
@@ -4498,6 +4566,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_beginning_offsets_async(
 /// `consumer` a valid handle; `topics`/`partitions` `count` entries; `out_map`
 /// valid.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.clients.consumer.Consumer#endOffsets")]
 pub unsafe extern "C" fn kafka_consumer_Consumer_end_offsets(
     consumer: *const kafka_consumer_Consumer_t,
     topics: *const *const c_char,
@@ -4561,6 +4630,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_end_offsets_async(
 ///
 /// `consumer` a valid handle; `topic` a valid C string; `out_list` valid.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.clients.consumer.Consumer#partitionsFor")]
 pub unsafe extern "C" fn kafka_consumer_Consumer_partitions_for(
     consumer: *const kafka_consumer_Consumer_t,
     topic: *const c_char,
@@ -4627,6 +4697,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_partitions_for_async(
 ///
 /// `consumer` a valid handle; `out_map` valid.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.clients.consumer.Consumer#listTopics")]
 pub unsafe extern "C" fn kafka_consumer_Consumer_list_topics(
     consumer: *const kafka_consumer_Consumer_t,
     out_map: *mut *mut kafka_consumer_TopicPartitionInfoMap_t,
@@ -4695,6 +4766,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_list_topics_async(
 ///
 /// `consumer` must be a valid handle.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.clients.consumer.Consumer#assignment")]
 pub unsafe extern "C" fn kafka_consumer_Consumer_assignment(
     consumer: *const kafka_consumer_Consumer_t,
 ) -> *mut kafka_consumer_TopicPartitionList_t {
@@ -4719,6 +4791,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_assignment(
 ///
 /// `consumer` must be a valid handle.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.clients.consumer.Consumer#metrics")]
 pub unsafe extern "C" fn kafka_consumer_Consumer_metrics(
     consumer: *const kafka_consumer_Consumer_t,
 ) -> *mut kafka_consumer_MetricMap_t {
@@ -4738,6 +4811,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_metrics(
 ///
 /// `consumer` must be a valid handle.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.clients.consumer.Consumer#subscription")]
 pub unsafe extern "C" fn kafka_consumer_Consumer_subscription(
     consumer: *const kafka_consumer_Consumer_t,
 ) -> *mut kafka_consumer_StringList_t {
@@ -4758,6 +4832,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_subscription(
 ///
 /// `consumer` must be a valid handle.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.clients.consumer.Consumer#paused")]
 pub unsafe extern "C" fn kafka_consumer_Consumer_paused(
     consumer: *const kafka_consumer_Consumer_t,
 ) -> *mut kafka_consumer_TopicPartitionList_t {
@@ -4778,6 +4853,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_paused(
 ///
 /// `consumer` must be a valid handle.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.clients.consumer.Consumer#groupMetadata")]
 pub unsafe extern "C" fn kafka_consumer_Consumer_group_metadata(
     consumer: *const kafka_consumer_Consumer_t,
 ) -> *mut kafka_consumer_ConsumerGroupMetadata_t {
@@ -4818,6 +4894,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_client_id(consumer: *const kafk
 ///
 /// `consumer` a valid handle; `topic` a valid C string; `out_lag` valid.
 #[unsafe(no_mangle)]
+#[doc(alias = "org.apache.kafka.clients.consumer.Consumer#currentLag")]
 pub unsafe extern "C" fn kafka_consumer_Consumer_current_lag(
     consumer: *const kafka_consumer_Consumer_t,
     topic: *const c_char,

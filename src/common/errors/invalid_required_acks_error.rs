@@ -25,6 +25,7 @@ kafka_error_class! {
     /// Java `extends` chain:
     ///    `InvalidRequiredAcksException` -> `InvalidConfigurationException` ->
     ///   `ApiException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.InvalidRequiredAcksException")]
     InvalidRequiredAcksError,
     code: Errors::InvalidRequiredAcks,
     extends: [

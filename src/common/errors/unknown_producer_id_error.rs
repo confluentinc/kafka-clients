@@ -30,6 +30,7 @@ kafka_error_class! {
     /// Java `extends` chain:
     ///    `UnknownProducerIdException` -> `OutOfOrderSequenceException` ->
     ///   `ApiException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.UnknownProducerIdException")]
     UnknownProducerIdError,
     code: Errors::UnknownProducerId,
     extends: [

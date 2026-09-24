@@ -32,6 +32,7 @@ use super::{AlterUserScramCredentialsResponse, ConcreteRequest, ConcreteResponse
 /// Corresponds to
 /// `org.apache.kafka.common.requests.AlterUserScramCredentialsRequest`.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.AlterUserScramCredentialsRequest")]
 pub struct AlterUserScramCredentialsRequest {
     data: AlterUserScramCredentialsRequestData,
     version: i16,
@@ -39,11 +40,13 @@ pub struct AlterUserScramCredentialsRequest {
 
 impl AlterUserScramCredentialsRequest {
     /// Creates a new request from data and version.
+    #[doc(alias = "org.apache.kafka.common.requests.AlterUserScramCredentialsRequest#AlterUserScramCredentialsRequest")]
     pub fn new(data: AlterUserScramCredentialsRequestData, version: i16) -> Self {
         Self { data, version }
     }
 
     /// Returns a reference to the underlying data.
+    #[doc(alias = "org.apache.kafka.common.requests.AlterUserScramCredentialsRequest#data")]
     pub fn data(&self) -> &AlterUserScramCredentialsRequestData {
         &self.data
     }
@@ -68,6 +71,7 @@ impl AlterUserScramCredentialsRequest {
     /// Mirrors `AlterUserScramCredentialsRequest.getErrorResponse`: one errored
     /// result per distinct affected user (deletions ∪ upsertions), sorted by
     /// user name.
+    #[doc(alias = "org.apache.kafka.common.requests.AlterUserScramCredentialsRequest#getErrorResponse")]
     pub fn get_error_response(&self, _throttle_time_ms: i32, error: &Errors) -> ConcreteResponse {
         let mut users: BTreeSet<&str> = BTreeSet::new();
         for deletion in &self.data.deletions {
@@ -97,6 +101,7 @@ impl AlterUserScramCredentialsRequest {
     /// # Errors
     ///
     /// Returns an error if parsing fails.
+    #[doc(alias = "org.apache.kafka.common.requests.AlterUserScramCredentialsRequest#parse")]
     pub fn parse(readable: &mut dyn Readable, version: i16) -> io::Result<Self> {
         let data = AlterUserScramCredentialsRequestData::read(readable, version)?;
         Ok(Self::new(data, version))
@@ -121,6 +126,7 @@ impl std::fmt::Display for AlterUserScramCredentialsRequest {
 ///
 /// Corresponds to `AlterUserScramCredentialsRequest.Builder`.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.AlterUserScramCredentialsRequest$Builder")]
 pub struct AlterUserScramCredentialsRequestBuilder {
     data: AlterUserScramCredentialsRequestData,
     oldest_allowed_version: i16,
@@ -129,6 +135,7 @@ pub struct AlterUserScramCredentialsRequestBuilder {
 
 impl AlterUserScramCredentialsRequestBuilder {
     /// Creates a builder wrapping the given request data.
+    #[doc(alias = "org.apache.kafka.common.requests.AlterUserScramCredentialsRequest$Builder#Builder")]
     pub fn new(data: AlterUserScramCredentialsRequestData) -> Self {
         Self {
             data,

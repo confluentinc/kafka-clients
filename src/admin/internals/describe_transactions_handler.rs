@@ -38,6 +38,7 @@ use super::{AdminApiHandler, ApiResult, RequestAndKeys};
 ///
 /// Corresponds to `DescribeTransactionsHandler` (a `Batched` handler over
 /// `CoordinatorKey` keys yielding [`TransactionDescription`] values).
+#[doc(alias = "org.apache.kafka.clients.admin.internals.DescribeTransactionsHandler")]
 pub(crate) struct DescribeTransactionsHandler {
     log_context: LogContext,
     lookup_strategy: CoordinatorStrategy,
@@ -45,6 +46,7 @@ pub(crate) struct DescribeTransactionsHandler {
 
 impl DescribeTransactionsHandler {
     /// Creates a handler backed by a transaction-coordinator lookup strategy.
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.DescribeTransactionsHandler#DescribeTransactionsHandler")]
     pub(crate) fn new(log_context: LogContext) -> Self {
         Self {
             lookup_strategy: CoordinatorStrategy::new(CoordinatorType::Transaction, log_context.clone()),
@@ -53,6 +55,7 @@ impl DescribeTransactionsHandler {
     }
 
     /// Builds the key set for a collection of transactional ids.
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.DescribeTransactionsHandler#buildKeySet")]
     fn build_key_set(transactional_ids: &[String]) -> HashSet<CoordinatorKey> {
         transactional_ids.iter().map(CoordinatorKey::by_transactional_id).collect()
     }
@@ -60,6 +63,7 @@ impl DescribeTransactionsHandler {
     /// Creates the future bundle for the given transactional ids.
     ///
     /// Mirrors `DescribeTransactionsHandler.newFuture`.
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.DescribeTransactionsHandler#newFuture")]
     pub(crate) fn new_future(
         transactional_ids: &[String],
     ) -> SimpleAdminApiFuture<CoordinatorKey, TransactionDescription> {
@@ -69,6 +73,7 @@ impl DescribeTransactionsHandler {
     /// Builds a batched `DescribeTransactions` request for the given keys.
     ///
     /// Mirrors `buildBatchedRequest`.
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.DescribeTransactionsHandler#buildBatchedRequest")]
     fn build_batched_request(&self, keys: &HashSet<CoordinatorKey>) -> DescribeTransactionsRequestData {
         let transactional_ids: Vec<String> = keys
             .iter()
@@ -88,6 +93,7 @@ impl DescribeTransactionsHandler {
     /// Classifies a transaction-level error.
     ///
     /// Mirrors `handleError`.
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.DescribeTransactionsHandler#handleError")]
     fn handle_error(
         &self,
         transactional_id_key: &CoordinatorKey,

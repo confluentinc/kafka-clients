@@ -35,12 +35,14 @@ use super::AbstractResponse;
 ///
 /// Corresponds to `org.apache.kafka.common.requests.UpdateFeaturesResponse`.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.UpdateFeaturesResponse")]
 pub struct UpdateFeaturesResponse {
     data: UpdateFeaturesResponseData,
 }
 
 impl UpdateFeaturesResponse {
     /// Creates a new `UpdateFeaturesResponse` from the underlying data.
+    #[doc(alias = "org.apache.kafka.common.requests.UpdateFeaturesResponse#UpdateFeaturesResponse")]
     pub fn new(data: UpdateFeaturesResponseData) -> Self {
         Self { data }
     }
@@ -50,6 +52,7 @@ impl UpdateFeaturesResponse {
     /// [`Errors::None`], mirroring `createWithErrors`).
     ///
     /// Mirrors `UpdateFeaturesResponse.createWithErrors`.
+    #[doc(alias = "org.apache.kafka.common.requests.UpdateFeaturesResponse#createWithErrors")]
     pub fn create_with_errors(
         top_level_error: Errors,
         top_level_message: Option<String>,
@@ -80,6 +83,7 @@ impl UpdateFeaturesResponse {
     }
 
     /// Returns a reference to the underlying data.
+    #[doc(alias = "org.apache.kafka.common.requests.UpdateFeaturesResponse#data")]
     pub fn data(&self) -> &UpdateFeaturesResponseData {
         &self.data
     }
@@ -100,11 +104,13 @@ impl UpdateFeaturesResponse {
     }
 
     /// Returns the throttle time in milliseconds.
+    #[doc(alias = "org.apache.kafka.common.requests.UpdateFeaturesResponse#throttleTimeMs")]
     pub fn throttle_time_ms(&self) -> i32 {
         self.data.throttle_time_ms
     }
 
     /// Sets the throttle time in the response.
+    #[doc(alias = "org.apache.kafka.common.requests.UpdateFeaturesResponse#maybeSetThrottleTimeMs")]
     pub fn maybe_set_throttle_time_ms(&mut self, throttle_time_ms: i32) {
         self.data.set_throttle_time_ms(throttle_time_ms);
     }
@@ -119,6 +125,7 @@ impl UpdateFeaturesResponse {
 
     /// Returns the error counts aggregated across the top-level error and all
     /// per-feature results.
+    #[doc(alias = "org.apache.kafka.common.requests.UpdateFeaturesResponse#errorCounts")]
     pub fn error_counts(&self) -> HashMap<Errors, i32> {
         let mut counts = HashMap::new();
         AbstractResponse::update_error_counts(&mut counts, Errors::for_code(self.data.error_code));
@@ -134,6 +141,7 @@ impl UpdateFeaturesResponse {
     /// # Errors
     ///
     /// Returns an error if parsing fails.
+    #[doc(alias = "org.apache.kafka.common.requests.UpdateFeaturesResponse#parse")]
     pub fn parse(readable: &mut dyn Readable, version: i16) -> io::Result<Self> {
         let data = UpdateFeaturesResponseData::read(readable, version)?;
         Ok(Self::new(data))

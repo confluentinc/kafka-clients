@@ -29,12 +29,14 @@ use super::AbstractResponse;
 ///
 /// Corresponds to `org.apache.kafka.common.requests.IncrementalAlterConfigsResponse`.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.IncrementalAlterConfigsResponse")]
 pub struct IncrementalAlterConfigsResponse {
     data: IncrementalAlterConfigsResponseData,
 }
 
 impl IncrementalAlterConfigsResponse {
     /// Creates a new `IncrementalAlterConfigsResponse` from the underlying data.
+    #[doc(alias = "org.apache.kafka.common.requests.IncrementalAlterConfigsResponse#IncrementalAlterConfigsResponse")]
     pub fn new(data: IncrementalAlterConfigsResponseData) -> Self {
         Self { data }
     }
@@ -45,6 +47,7 @@ impl IncrementalAlterConfigsResponse {
     }
 
     /// Returns a reference to the underlying data.
+    #[doc(alias = "org.apache.kafka.common.requests.IncrementalAlterConfigsResponse#data")]
     pub fn data(&self) -> &IncrementalAlterConfigsResponseData {
         &self.data
     }
@@ -55,11 +58,13 @@ impl IncrementalAlterConfigsResponse {
     }
 
     /// Returns the throttle time in milliseconds.
+    #[doc(alias = "org.apache.kafka.common.requests.IncrementalAlterConfigsResponse#throttleTimeMs")]
     pub fn throttle_time_ms(&self) -> i32 {
         self.data.throttle_time_ms
     }
 
     /// Sets the throttle time in the response.
+    #[doc(alias = "org.apache.kafka.common.requests.IncrementalAlterConfigsResponse#maybeSetThrottleTimeMs")]
     pub fn maybe_set_throttle_time_ms(&mut self, throttle_time_ms: i32) {
         self.data.set_throttle_time_ms(throttle_time_ms);
     }
@@ -88,6 +93,7 @@ impl IncrementalAlterConfigsResponse {
     }
 
     /// Returns the error counts aggregated across all resource responses.
+    #[doc(alias = "org.apache.kafka.common.requests.IncrementalAlterConfigsResponse#errorCounts")]
     pub fn error_counts(&self) -> HashMap<Errors, i32> {
         let mut counts = HashMap::new();
         for response in &self.data.responses {
@@ -102,12 +108,14 @@ impl IncrementalAlterConfigsResponse {
     /// # Errors
     ///
     /// Returns an error if parsing fails.
+    #[doc(alias = "org.apache.kafka.common.requests.IncrementalAlterConfigsResponse#parse")]
     pub fn parse(readable: &mut dyn Readable, version: i16) -> io::Result<Self> {
         let data = IncrementalAlterConfigsResponseData::read(readable, version)?;
         Ok(Self::new(data))
     }
 
     /// Whether the client should throttle on this response (always, v0+).
+    #[doc(alias = "org.apache.kafka.common.requests.IncrementalAlterConfigsResponse#shouldClientThrottle")]
     pub fn should_client_throttle(&self, _version: i16) -> bool {
         true
     }

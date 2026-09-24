@@ -252,10 +252,12 @@ use std::collections::HashSet;
 /// the returned future(s). The only `async fn` is [`close`](Admin::close),
 /// which (like Java's `close(Duration)`) joins the background task.
 #[async_trait]
+#[doc(alias = "org.apache.kafka.clients.admin.Admin")]
 pub trait Admin: Send + Sync {
     /// Create a batch of new topics.
     ///
     /// Corresponds to `Admin.createTopics(Collection<NewTopic>)`.
+    #[doc(alias = "org.apache.kafka.clients.admin.Admin#createTopics")]
     fn create_topics(&self, new_topics: &[NewTopic]) -> CreateTopicsResult {
         self.create_topics_with_options(new_topics, CreateTopicsOptions::default())
     }
@@ -263,11 +265,13 @@ pub trait Admin: Send + Sync {
     /// Create a batch of new topics.
     ///
     /// Corresponds to `Admin.createTopics(Collection<NewTopic>, CreateTopicsOptions)`.
+    #[doc(alias = "org.apache.kafka.clients.admin.Admin#createTopics")]
     fn create_topics_with_options(&self, new_topics: &[NewTopic], options: CreateTopicsOptions) -> CreateTopicsResult;
 
     /// Delete a batch of topics (by name or by id, per the `TopicCollection`).
     ///
     /// Corresponds to `Admin.deleteTopics(TopicCollection)`.
+    #[doc(alias = "org.apache.kafka.clients.admin.Admin#deleteTopics")]
     fn delete_topics(&self, topics: TopicCollection) -> DeleteTopicsResult {
         self.delete_topics_with_options(topics, DeleteTopicsOptions::default())
     }
@@ -275,11 +279,13 @@ pub trait Admin: Send + Sync {
     /// Delete a batch of topics (by name or by id, per the `TopicCollection`).
     ///
     /// Corresponds to `Admin.deleteTopics(TopicCollection, DeleteTopicsOptions)`.
+    #[doc(alias = "org.apache.kafka.clients.admin.Admin#deleteTopics")]
     fn delete_topics_with_options(&self, topics: TopicCollection, options: DeleteTopicsOptions) -> DeleteTopicsResult;
 
     /// List the topics available in the cluster.
     ///
     /// Corresponds to `Admin.listTopics()`.
+    #[doc(alias = "org.apache.kafka.clients.admin.Admin#listTopics")]
     fn list_topics(&self) -> ListTopicsResult {
         self.list_topics_with_options(ListTopicsOptions::default())
     }
@@ -287,11 +293,13 @@ pub trait Admin: Send + Sync {
     /// List the topics available in the cluster.
     ///
     /// Corresponds to `Admin.listTopics(ListTopicsOptions)`.
+    #[doc(alias = "org.apache.kafka.clients.admin.Admin#listTopics")]
     fn list_topics_with_options(&self, options: ListTopicsOptions) -> ListTopicsResult;
 
     /// Describe some topics in the cluster, by name.
     ///
     /// Corresponds to `Admin.describeTopics(Collection<String>)`.
+    #[doc(alias = "org.apache.kafka.clients.admin.Admin#describeTopics")]
     fn describe_topics_with_topic_names(&self, topic_names: &[String]) -> DescribeTopicsResult {
         self.describe_topics_with_topic_names_options(topic_names, DescribeTopicsOptions::default())
     }
@@ -300,6 +308,7 @@ pub trait Admin: Send + Sync {
     ///
     /// Corresponds to `Admin.describeTopics(Collection<String>, DescribeTopicsOptions)`,
     /// whose body wraps the names in a `TopicCollection`.
+    #[doc(alias = "org.apache.kafka.clients.admin.Admin#describeTopics")]
     fn describe_topics_with_topic_names_options(
         &self,
         topic_names: &[String],
@@ -312,6 +321,7 @@ pub trait Admin: Send + Sync {
     /// `TopicCollection`).
     ///
     /// Corresponds to `Admin.describeTopics(TopicCollection)`.
+    #[doc(alias = "org.apache.kafka.clients.admin.Admin#describeTopics")]
     fn describe_topics_with_topics(&self, topics: TopicCollection) -> DescribeTopicsResult {
         self.describe_topics_with_topics_options(topics, DescribeTopicsOptions::default())
     }
@@ -320,6 +330,7 @@ pub trait Admin: Send + Sync {
     /// `TopicCollection`).
     ///
     /// Corresponds to `Admin.describeTopics(TopicCollection, DescribeTopicsOptions)`.
+    #[doc(alias = "org.apache.kafka.clients.admin.Admin#describeTopics")]
     fn describe_topics_with_topics_options(
         &self,
         topics: TopicCollection,
@@ -333,6 +344,7 @@ pub trait Admin: Send + Sync {
     /// less than or equal to the current partition count.
     ///
     /// Corresponds to `Admin.createPartitions(Map<String, NewPartitions>)`.
+    #[doc(alias = "org.apache.kafka.clients.admin.Admin#createPartitions")]
     fn create_partitions(&self, new_partitions: &HashMap<String, NewPartitions>) -> CreatePartitionsResult {
         self.create_partitions_with_options(new_partitions, CreatePartitionsOptions::default())
     }
@@ -344,6 +356,7 @@ pub trait Admin: Send + Sync {
     /// less than or equal to the current partition count.
     ///
     /// Corresponds to `Admin.createPartitions(Map<String, NewPartitions>, CreatePartitionsOptions)`.
+    #[doc(alias = "org.apache.kafka.clients.admin.Admin#createPartitions")]
     fn create_partitions_with_options(
         &self,
         new_partitions: &HashMap<String, NewPartitions>,
@@ -354,6 +367,7 @@ pub trait Admin: Send + Sync {
     /// corresponding partition.
     ///
     /// Corresponds to `Admin.deleteRecords(Map<TopicPartition, RecordsToDelete>)`.
+    #[doc(alias = "org.apache.kafka.clients.admin.Admin#deleteRecords")]
     fn delete_records(&self, records_to_delete: &HashMap<TopicPartition, RecordsToDelete>) -> DeleteRecordsResult {
         self.delete_records_with_options(records_to_delete, DeleteRecordsOptions::default())
     }
@@ -362,6 +376,7 @@ pub trait Admin: Send + Sync {
     /// corresponding partition.
     ///
     /// Corresponds to `Admin.deleteRecords(Map<TopicPartition, RecordsToDelete>, DeleteRecordsOptions)`.
+    #[doc(alias = "org.apache.kafka.clients.admin.Admin#deleteRecords")]
     fn delete_records_with_options(
         &self,
         records_to_delete: &HashMap<TopicPartition, RecordsToDelete>,
@@ -371,6 +386,7 @@ pub trait Admin: Send + Sync {
     /// Describe the active producers for a set of topic partitions.
     ///
     /// Corresponds to `Admin.describeProducers(Collection<TopicPartition>)`.
+    #[doc(alias = "org.apache.kafka.clients.admin.Admin#describeProducers")]
     fn describe_producers(&self, partitions: &[TopicPartition]) -> DescribeProducersResult {
         self.describe_producers_with_options(partitions, DescribeProducersOptions::default())
     }
@@ -378,6 +394,7 @@ pub trait Admin: Send + Sync {
     /// Describe the active producers for a set of topic partitions.
     ///
     /// Corresponds to `Admin.describeProducers(Collection<TopicPartition>, DescribeProducersOptions)`.
+    #[doc(alias = "org.apache.kafka.clients.admin.Admin#describeProducers")]
     fn describe_producers_with_options(
         &self,
         partitions: &[TopicPartition],
@@ -387,6 +404,7 @@ pub trait Admin: Send + Sync {
     /// Forcefully abort a transaction which is open on a topic partition.
     ///
     /// Corresponds to `Admin.abortTransaction(AbortTransactionSpec)`.
+    #[doc(alias = "org.apache.kafka.clients.admin.Admin#abortTransaction")]
     fn abort_transaction(&self, spec: AbortTransactionSpec) -> AbortTransactionResult {
         self.abort_transaction_with_options(spec, AbortTransactionOptions::default())
     }
@@ -394,6 +412,7 @@ pub trait Admin: Send + Sync {
     /// Forcefully abort a transaction which is open on a topic partition.
     ///
     /// Corresponds to `Admin.abortTransaction(AbortTransactionSpec, AbortTransactionOptions)`.
+    #[doc(alias = "org.apache.kafka.clients.admin.Admin#abortTransaction")]
     fn abort_transaction_with_options(
         &self,
         spec: AbortTransactionSpec,
@@ -403,6 +422,7 @@ pub trait Admin: Send + Sync {
     /// List the transaction states of the given transactional ids.
     ///
     /// Corresponds to `Admin.describeTransactions(Collection<String>)`.
+    #[doc(alias = "org.apache.kafka.clients.admin.Admin#describeTransactions")]
     fn describe_transactions(&self, transactional_ids: &[String]) -> DescribeTransactionsResult {
         self.describe_transactions_with_options(transactional_ids, DescribeTransactionsOptions::default())
     }
@@ -410,6 +430,7 @@ pub trait Admin: Send + Sync {
     /// List the transaction states of the given transactional ids.
     ///
     /// Corresponds to `Admin.describeTransactions(Collection<String>, DescribeTransactionsOptions)`.
+    #[doc(alias = "org.apache.kafka.clients.admin.Admin#describeTransactions")]
     fn describe_transactions_with_options(
         &self,
         transactional_ids: &[String],
@@ -419,6 +440,7 @@ pub trait Admin: Send + Sync {
     /// Fence out all active producers that use any of the provided transactional ids.
     ///
     /// Corresponds to `Admin.fenceProducers(Collection<String>)`.
+    #[doc(alias = "org.apache.kafka.clients.admin.Admin#fenceProducers")]
     fn fence_producers(&self, transactional_ids: &[String]) -> FenceProducersResult {
         self.fence_producers_with_options(transactional_ids, FenceProducersOptions::default())
     }
@@ -426,6 +448,7 @@ pub trait Admin: Send + Sync {
     /// Fence out all active producers that use any of the provided transactional ids.
     ///
     /// Corresponds to `Admin.fenceProducers(Collection<String>, FenceProducersOptions)`.
+    #[doc(alias = "org.apache.kafka.clients.admin.Admin#fenceProducers")]
     fn fence_producers_with_options(
         &self,
         transactional_ids: &[String],
@@ -435,6 +458,7 @@ pub trait Admin: Send + Sync {
     /// List the transactions in the cluster (fans out to all brokers).
     ///
     /// Corresponds to `Admin.listTransactions()`.
+    #[doc(alias = "org.apache.kafka.clients.admin.Admin#listTransactions")]
     fn list_transactions(&self) -> ListTransactionsResult {
         self.list_transactions_with_options(ListTransactionsOptions::default())
     }
@@ -442,11 +466,13 @@ pub trait Admin: Send + Sync {
     /// List the transactions in the cluster (fans out to all brokers).
     ///
     /// Corresponds to `Admin.listTransactions(ListTransactionsOptions)`.
+    #[doc(alias = "org.apache.kafka.clients.admin.Admin#listTransactions")]
     fn list_transactions_with_options(&self, options: ListTransactionsOptions) -> ListTransactionsResult;
 
     /// Forcefully terminate an ongoing transaction for a given transactional id.
     ///
     /// Corresponds to `Admin.forceTerminateTransaction(String)`.
+    #[doc(alias = "org.apache.kafka.clients.admin.Admin#forceTerminateTransaction")]
     fn force_terminate_transaction(&self, transactional_id: &str) -> TerminateTransactionResult {
         self.force_terminate_transaction_with_options(transactional_id, TerminateTransactionOptions::default())
     }
@@ -454,6 +480,7 @@ pub trait Admin: Send + Sync {
     /// Forcefully terminate an ongoing transaction for a given transactional id.
     ///
     /// Corresponds to `Admin.forceTerminateTransaction(String, TerminateTransactionOptions)`.
+    #[doc(alias = "org.apache.kafka.clients.admin.Admin#forceTerminateTransaction")]
     fn force_terminate_transaction_with_options(
         &self,
         transactional_id: &str,
@@ -463,6 +490,7 @@ pub trait Admin: Send + Sync {
     /// Get information about the nodes in the cluster.
     ///
     /// Corresponds to `Admin.describeCluster()`.
+    #[doc(alias = "org.apache.kafka.clients.admin.Admin#describeCluster")]
     fn describe_cluster(&self) -> DescribeClusterResult {
         self.describe_cluster_with_options(DescribeClusterOptions::default())
     }
@@ -470,11 +498,13 @@ pub trait Admin: Send + Sync {
     /// Get information about the nodes in the cluster.
     ///
     /// Corresponds to `Admin.describeCluster(DescribeClusterOptions)`.
+    #[doc(alias = "org.apache.kafka.clients.admin.Admin#describeCluster")]
     fn describe_cluster_with_options(&self, options: DescribeClusterOptions) -> DescribeClusterResult;
 
     /// Get the configuration for the specified resources.
     ///
     /// Corresponds to `Admin.describeConfigs(Collection<ConfigResource>)`.
+    #[doc(alias = "org.apache.kafka.clients.admin.Admin#describeConfigs")]
     fn describe_configs(&self, config_resources: &[ConfigResource]) -> DescribeConfigsResult {
         self.describe_configs_with_options(config_resources, DescribeConfigsOptions::default())
     }
@@ -482,6 +512,7 @@ pub trait Admin: Send + Sync {
     /// Get the configuration for the specified resources.
     ///
     /// Corresponds to `Admin.describeConfigs(Collection<ConfigResource>, DescribeConfigsOptions)`.
+    #[doc(alias = "org.apache.kafka.clients.admin.Admin#describeConfigs")]
     fn describe_configs_with_options(
         &self,
         config_resources: &[ConfigResource],
@@ -491,6 +522,7 @@ pub trait Admin: Send + Sync {
     /// Incrementally update the configuration for the specified resources.
     ///
     /// Corresponds to `Admin.incrementalAlterConfigs(Map<ConfigResource, Collection<AlterConfigOp>>)`.
+    #[doc(alias = "org.apache.kafka.clients.admin.Admin#incrementalAlterConfigs")]
     fn incremental_alter_configs(&self, configs: &HashMap<ConfigResource, Vec<AlterConfigOp>>) -> AlterConfigsResult {
         self.incremental_alter_configs_with_options(configs, AlterConfigsOptions::default())
     }
@@ -498,6 +530,7 @@ pub trait Admin: Send + Sync {
     /// Incrementally update the configuration for the specified resources.
     ///
     /// Corresponds to `Admin.incrementalAlterConfigs(Map<ConfigResource, Collection<AlterConfigOp>>, AlterConfigsOptions)`.
+    #[doc(alias = "org.apache.kafka.clients.admin.Admin#incrementalAlterConfigs")]
     fn incremental_alter_configs_with_options(
         &self,
         configs: &HashMap<ConfigResource, Vec<AlterConfigOp>>,
@@ -509,6 +542,7 @@ pub trait Admin: Send + Sync {
     /// Corresponds to `Admin.listConfigResources()`. Java's body passes an
     /// empty type set — meaning "all supported types" — alongside the fresh
     /// options instance, so this is not a plain no-options forward.
+    #[doc(alias = "org.apache.kafka.clients.admin.Admin#listConfigResources")]
     fn list_config_resources(&self) -> ListConfigResourcesResult {
         self.list_config_resources_with_options(&HashSet::new(), ListConfigResourcesOptions::default())
     }
@@ -517,6 +551,7 @@ pub trait Admin: Send + Sync {
     /// given set (an empty set means all supported types).
     ///
     /// Corresponds to `Admin.listConfigResources(Set<ConfigResource.Type>, ListConfigResourcesOptions)`.
+    #[doc(alias = "org.apache.kafka.clients.admin.Admin#listConfigResources")]
     fn list_config_resources_with_options(
         &self,
         config_resource_types: &HashSet<ConfigResourceType>,
@@ -529,6 +564,7 @@ pub trait Admin: Send + Sync {
     /// (deprecated since 4.1 in favor of
     /// [`list_config_resources`](Admin::list_config_resources)).
     #[allow(deprecated)]
+    #[doc(alias = "org.apache.kafka.clients.admin.Admin#listClientMetricsResources")]
     fn list_client_metrics_resources(&self) -> ListClientMetricsResourcesResult {
         self.list_client_metrics_resources_with_options(ListClientMetricsResourcesOptions::default())
     }
@@ -539,6 +575,7 @@ pub trait Admin: Send + Sync {
     /// (deprecated since 4.1 in favor of
     /// [`list_config_resources`](Admin::list_config_resources)).
     #[allow(deprecated)]
+    #[doc(alias = "org.apache.kafka.clients.admin.Admin#listClientMetricsResources")]
     fn list_client_metrics_resources_with_options(
         &self,
         options: ListClientMetricsResourcesOptions,
@@ -548,6 +585,7 @@ pub trait Admin: Send + Sync {
     /// brokers.
     ///
     /// Corresponds to `Admin.describeLogDirs(Collection<Integer>)`.
+    #[doc(alias = "org.apache.kafka.clients.admin.Admin#describeLogDirs")]
     fn describe_log_dirs(&self, brokers: &[i32]) -> DescribeLogDirsResult {
         self.describe_log_dirs_with_options(brokers, DescribeLogDirsOptions::default())
     }
@@ -556,12 +594,14 @@ pub trait Admin: Send + Sync {
     /// brokers.
     ///
     /// Corresponds to `Admin.describeLogDirs(Collection<Integer>, DescribeLogDirsOptions)`.
+    #[doc(alias = "org.apache.kafka.clients.admin.Admin#describeLogDirs")]
     fn describe_log_dirs_with_options(&self, brokers: &[i32], options: DescribeLogDirsOptions)
     -> DescribeLogDirsResult;
 
     /// Change the log directory for the specified replicas.
     ///
     /// Corresponds to `Admin.alterReplicaLogDirs(Map<TopicPartitionReplica, String>)`.
+    #[doc(alias = "org.apache.kafka.clients.admin.Admin#alterReplicaLogDirs")]
     fn alter_replica_log_dirs(
         &self,
         replica_assignment: &HashMap<TopicPartitionReplica, String>,
@@ -572,6 +612,7 @@ pub trait Admin: Send + Sync {
     /// Change the log directory for the specified replicas.
     ///
     /// Corresponds to `Admin.alterReplicaLogDirs(Map<TopicPartitionReplica, String>, AlterReplicaLogDirsOptions)`.
+    #[doc(alias = "org.apache.kafka.clients.admin.Admin#alterReplicaLogDirs")]
     fn alter_replica_log_dirs_with_options(
         &self,
         replica_assignment: &HashMap<TopicPartitionReplica, String>,
@@ -581,6 +622,7 @@ pub trait Admin: Send + Sync {
     /// Query the replica log directory information for the specified replicas.
     ///
     /// Corresponds to `Admin.describeReplicaLogDirs(Collection<TopicPartitionReplica>)`.
+    #[doc(alias = "org.apache.kafka.clients.admin.Admin#describeReplicaLogDirs")]
     fn describe_replica_log_dirs(&self, replicas: &[TopicPartitionReplica]) -> DescribeReplicaLogDirsResult {
         self.describe_replica_log_dirs_with_options(replicas, DescribeReplicaLogDirsOptions::default())
     }
@@ -588,6 +630,7 @@ pub trait Admin: Send + Sync {
     /// Query the replica log directory information for the specified replicas.
     ///
     /// Corresponds to `Admin.describeReplicaLogDirs(Collection<TopicPartitionReplica>, DescribeReplicaLogDirsOptions)`.
+    #[doc(alias = "org.apache.kafka.clients.admin.Admin#describeReplicaLogDirs")]
     fn describe_replica_log_dirs_with_options(
         &self,
         replicas: &[TopicPartitionReplica],
@@ -598,6 +641,7 @@ pub trait Admin: Send + Sync {
     /// partitions if `partitions` is `None`.
     ///
     /// Corresponds to `Admin.electLeaders(ElectionType, Set<TopicPartition>)`.
+    #[doc(alias = "org.apache.kafka.clients.admin.Admin#electLeaders")]
     fn elect_leaders(
         &self,
         election_type: ElectionType,
@@ -610,6 +654,7 @@ pub trait Admin: Send + Sync {
     /// partitions if `partitions` is `None`.
     ///
     /// Corresponds to `Admin.electLeaders(ElectionType, Set<TopicPartition>, ElectLeadersOptions)`.
+    #[doc(alias = "org.apache.kafka.clients.admin.Admin#electLeaders")]
     fn elect_leaders_with_options(
         &self,
         election_type: ElectionType,
@@ -622,6 +667,7 @@ pub trait Admin: Send + Sync {
     /// A `None` value for a partition cancels an ongoing reassignment.
     ///
     /// Corresponds to `Admin.alterPartitionReassignments(Map<TopicPartition, Optional<NewPartitionReassignment>>)`.
+    #[doc(alias = "org.apache.kafka.clients.admin.Admin#alterPartitionReassignments")]
     fn alter_partition_reassignments(
         &self,
         reassignments: &HashMap<TopicPartition, Option<NewPartitionReassignment>>,
@@ -635,6 +681,7 @@ pub trait Admin: Send + Sync {
     ///
     /// Corresponds to
     /// `Admin.alterPartitionReassignments(Map<TopicPartition, Optional<NewPartitionReassignment>>, AlterPartitionReassignmentsOptions)`.
+    #[doc(alias = "org.apache.kafka.clients.admin.Admin#alterPartitionReassignments")]
     fn alter_partition_reassignments_with_options(
         &self,
         reassignments: &HashMap<TopicPartition, Option<NewPartitionReassignment>>,
@@ -644,6 +691,7 @@ pub trait Admin: Send + Sync {
     /// List all the current partition reassignments.
     ///
     /// Corresponds to `Admin.listPartitionReassignments()`.
+    #[doc(alias = "org.apache.kafka.clients.admin.Admin#listPartitionReassignments")]
     fn list_partition_reassignments(&self) -> ListPartitionReassignmentsResult {
         self.list_partition_reassignments_with_options(ListPartitionReassignmentsOptions::default())
     }
@@ -651,6 +699,7 @@ pub trait Admin: Send + Sync {
     /// List the current partition reassignments for the given partitions.
     ///
     /// Corresponds to `Admin.listPartitionReassignments(Set<TopicPartition>)`.
+    #[doc(alias = "org.apache.kafka.clients.admin.Admin#listPartitionReassignments")]
     fn list_partition_reassignments_with_partitions(
         &self,
         partitions: HashSet<TopicPartition>,
@@ -665,6 +714,7 @@ pub trait Admin: Send + Sync {
     ///
     /// Corresponds to `Admin.listPartitionReassignments(ListPartitionReassignmentsOptions)`,
     /// whose body passes `Optional.empty()` for the partition set.
+    #[doc(alias = "org.apache.kafka.clients.admin.Admin#listPartitionReassignments")]
     fn list_partition_reassignments_with_options(
         &self,
         options: ListPartitionReassignmentsOptions,
@@ -677,6 +727,7 @@ pub trait Admin: Send + Sync {
     ///
     /// Corresponds to
     /// `Admin.listPartitionReassignments(Optional<Set<TopicPartition>>, ListPartitionReassignmentsOptions)`.
+    #[doc(alias = "org.apache.kafka.clients.admin.Admin#listPartitionReassignments")]
     fn list_partition_reassignments_with_partitions_options(
         &self,
         partitions: Option<HashSet<TopicPartition>>,
@@ -686,6 +737,7 @@ pub trait Admin: Send + Sync {
     /// List the offsets for the given partitions and offset specifications.
     ///
     /// Corresponds to `Admin.listOffsets(Map<TopicPartition, OffsetSpec>)`.
+    #[doc(alias = "org.apache.kafka.clients.admin.Admin#listOffsets")]
     fn list_offsets(&self, topic_partition_offsets: &HashMap<TopicPartition, OffsetSpec>) -> ListOffsetsResult {
         self.list_offsets_with_options(topic_partition_offsets, ListOffsetsOptions::default())
     }
@@ -693,6 +745,7 @@ pub trait Admin: Send + Sync {
     /// List the offsets for the given partitions and offset specifications.
     ///
     /// Corresponds to `Admin.listOffsets(Map<TopicPartition, OffsetSpec>, ListOffsetsOptions)`.
+    #[doc(alias = "org.apache.kafka.clients.admin.Admin#listOffsets")]
     fn list_offsets_with_options(
         &self,
         topic_partition_offsets: &HashMap<TopicPartition, OffsetSpec>,
@@ -702,6 +755,7 @@ pub trait Admin: Send + Sync {
     /// List the groups available in the cluster.
     ///
     /// Corresponds to `Admin.listGroups()`.
+    #[doc(alias = "org.apache.kafka.clients.admin.Admin#listGroups")]
     fn list_groups(&self) -> ListGroupsResult {
         self.list_groups_with_options(ListGroupsOptions::default())
     }
@@ -709,6 +763,7 @@ pub trait Admin: Send + Sync {
     /// List the groups available in the cluster.
     ///
     /// Corresponds to `Admin.listGroups(ListGroupsOptions)`.
+    #[doc(alias = "org.apache.kafka.clients.admin.Admin#listGroups")]
     fn list_groups_with_options(&self, options: ListGroupsOptions) -> ListGroupsResult;
 
     /// List the consumer groups available in the cluster.
@@ -716,6 +771,7 @@ pub trait Admin: Send + Sync {
     /// Corresponds to `Admin.listConsumerGroups()`
     /// (deprecated since 4.1 in favor of [`list_groups`](Admin::list_groups)).
     #[allow(deprecated)]
+    #[doc(alias = "org.apache.kafka.clients.admin.Admin#listConsumerGroups")]
     fn list_consumer_groups(&self) -> ListConsumerGroupsResult {
         self.list_consumer_groups_with_options(ListConsumerGroupsOptions::default())
     }
@@ -725,11 +781,13 @@ pub trait Admin: Send + Sync {
     /// Corresponds to `Admin.listConsumerGroups(ListConsumerGroupsOptions)`
     /// (deprecated since 4.1 in favor of [`list_groups`](Admin::list_groups)).
     #[allow(deprecated)]
+    #[doc(alias = "org.apache.kafka.clients.admin.Admin#listConsumerGroups")]
     fn list_consumer_groups_with_options(&self, options: ListConsumerGroupsOptions) -> ListConsumerGroupsResult;
 
     /// Describe some consumer groups in the cluster.
     ///
     /// Corresponds to `Admin.describeConsumerGroups(Collection<String>)`.
+    #[doc(alias = "org.apache.kafka.clients.admin.Admin#describeConsumerGroups")]
     fn describe_consumer_groups(&self, group_ids: &[String]) -> DescribeConsumerGroupsResult {
         self.describe_consumer_groups_with_options(group_ids, DescribeConsumerGroupsOptions::default())
     }
@@ -737,6 +795,7 @@ pub trait Admin: Send + Sync {
     /// Describe some consumer groups in the cluster.
     ///
     /// Corresponds to `Admin.describeConsumerGroups(Collection<String>, DescribeConsumerGroupsOptions)`.
+    #[doc(alias = "org.apache.kafka.clients.admin.Admin#describeConsumerGroups")]
     fn describe_consumer_groups_with_options(
         &self,
         group_ids: &[String],
@@ -746,6 +805,7 @@ pub trait Admin: Send + Sync {
     /// Describe some classic groups in the cluster.
     ///
     /// Corresponds to `Admin.describeClassicGroups(Collection<String>)`.
+    #[doc(alias = "org.apache.kafka.clients.admin.Admin#describeClassicGroups")]
     fn describe_classic_groups(&self, group_ids: &[String]) -> DescribeClassicGroupsResult {
         self.describe_classic_groups_with_options(group_ids, DescribeClassicGroupsOptions::default())
     }
@@ -753,6 +813,7 @@ pub trait Admin: Send + Sync {
     /// Describe some classic groups in the cluster.
     ///
     /// Corresponds to `Admin.describeClassicGroups(Collection<String>, DescribeClassicGroupsOptions)`.
+    #[doc(alias = "org.apache.kafka.clients.admin.Admin#describeClassicGroups")]
     fn describe_classic_groups_with_options(
         &self,
         group_ids: &[String],
@@ -763,6 +824,7 @@ pub trait Admin: Send + Sync {
     /// group.
     ///
     /// Corresponds to `Admin.listConsumerGroupOffsets(String)`.
+    #[doc(alias = "org.apache.kafka.clients.admin.Admin#listConsumerGroupOffsets")]
     fn list_consumer_group_offsets_with_group_id(&self, group_id: &str) -> ListConsumerGroupOffsetsResult {
         self.list_consumer_group_offsets_with_group_id_options(group_id, ListConsumerGroupOffsetsOptions::default())
     }
@@ -771,6 +833,7 @@ pub trait Admin: Send + Sync {
     /// group, with options.
     ///
     /// Corresponds to `Admin.listConsumerGroupOffsets(String, ListConsumerGroupOffsetsOptions)`.
+    #[doc(alias = "org.apache.kafka.clients.admin.Admin#listConsumerGroupOffsets")]
     fn list_consumer_group_offsets_with_group_id_options(
         &self,
         group_id: &str,
@@ -790,6 +853,7 @@ pub trait Admin: Send + Sync {
     /// group specifications.
     ///
     /// Corresponds to `Admin.listConsumerGroupOffsets(Map<String, ListConsumerGroupOffsetsSpec>)`.
+    #[doc(alias = "org.apache.kafka.clients.admin.Admin#listConsumerGroupOffsets")]
     fn list_consumer_group_offsets_with_group_specs(
         &self,
         group_specs: &HashMap<String, ListConsumerGroupOffsetsSpec>,
@@ -805,6 +869,7 @@ pub trait Admin: Send + Sync {
     ///
     /// Corresponds to
     /// `Admin.listConsumerGroupOffsets(Map<String, ListConsumerGroupOffsetsSpec>, ListConsumerGroupOffsetsOptions)`.
+    #[doc(alias = "org.apache.kafka.clients.admin.Admin#listConsumerGroupOffsets")]
     fn list_consumer_group_offsets_with_group_specs_options(
         &self,
         group_specs: &HashMap<String, ListConsumerGroupOffsetsSpec>,
@@ -814,6 +879,7 @@ pub trait Admin: Send + Sync {
     /// Alter offsets for a consumer group.
     ///
     /// Corresponds to `Admin.alterConsumerGroupOffsets(String, Map<TopicPartition, OffsetAndMetadata>)`.
+    #[doc(alias = "org.apache.kafka.clients.admin.Admin#alterConsumerGroupOffsets")]
     fn alter_consumer_group_offsets(
         &self,
         group_id: &str,
@@ -826,6 +892,7 @@ pub trait Admin: Send + Sync {
     ///
     /// Corresponds to
     /// `Admin.alterConsumerGroupOffsets(String, Map<TopicPartition, OffsetAndMetadata>, AlterConsumerGroupOffsetsOptions)`.
+    #[doc(alias = "org.apache.kafka.clients.admin.Admin#alterConsumerGroupOffsets")]
     fn alter_consumer_group_offsets_with_options(
         &self,
         group_id: &str,
@@ -836,6 +903,7 @@ pub trait Admin: Send + Sync {
     /// Delete offsets for a set of partitions in a consumer group.
     ///
     /// Corresponds to `Admin.deleteConsumerGroupOffsets(String, Set<TopicPartition>)`.
+    #[doc(alias = "org.apache.kafka.clients.admin.Admin#deleteConsumerGroupOffsets")]
     fn delete_consumer_group_offsets(
         &self,
         group_id: &str,
@@ -852,6 +920,7 @@ pub trait Admin: Send + Sync {
     ///
     /// Corresponds to
     /// `Admin.deleteConsumerGroupOffsets(String, Set<TopicPartition>, DeleteConsumerGroupOffsetsOptions)`.
+    #[doc(alias = "org.apache.kafka.clients.admin.Admin#deleteConsumerGroupOffsets")]
     fn delete_consumer_group_offsets_with_options(
         &self,
         group_id: &str,
@@ -862,6 +931,7 @@ pub trait Admin: Send + Sync {
     /// Delete consumer groups from the cluster.
     ///
     /// Corresponds to `Admin.deleteConsumerGroups(Collection<String>)`.
+    #[doc(alias = "org.apache.kafka.clients.admin.Admin#deleteConsumerGroups")]
     fn delete_consumer_groups(&self, group_ids: &[String]) -> DeleteConsumerGroupsResult {
         self.delete_consumer_groups_with_options(group_ids, DeleteConsumerGroupsOptions::default())
     }
@@ -870,6 +940,7 @@ pub trait Admin: Send + Sync {
     ///
     /// Corresponds to
     /// `Admin.deleteConsumerGroups(Collection<String>, DeleteConsumerGroupsOptions)`.
+    #[doc(alias = "org.apache.kafka.clients.admin.Admin#deleteConsumerGroups")]
     fn delete_consumer_groups_with_options(
         &self,
         group_ids: &[String],
@@ -880,6 +951,7 @@ pub trait Admin: Send + Sync {
     ///
     /// Corresponds to
     /// `Admin.removeMembersFromConsumerGroup(String, RemoveMembersFromConsumerGroupOptions)`.
+    #[doc(alias = "org.apache.kafka.clients.admin.Admin#removeMembersFromConsumerGroup")]
     fn remove_members_from_consumer_group_with_options(
         &self,
         group_id: &str,
@@ -889,6 +961,7 @@ pub trait Admin: Send + Sync {
     /// Create ACLs.
     ///
     /// Corresponds to `Admin.createAcls(Collection<AclBinding>)`.
+    #[doc(alias = "org.apache.kafka.clients.admin.Admin#createAcls")]
     fn create_acls(&self, acls: &[AclBinding]) -> CreateAclsResult {
         self.create_acls_with_options(acls, CreateAclsOptions::default())
     }
@@ -896,11 +969,13 @@ pub trait Admin: Send + Sync {
     /// Create ACLs.
     ///
     /// Corresponds to `Admin.createAcls(Collection<AclBinding>, CreateAclsOptions)`.
+    #[doc(alias = "org.apache.kafka.clients.admin.Admin#createAcls")]
     fn create_acls_with_options(&self, acls: &[AclBinding], options: CreateAclsOptions) -> CreateAclsResult;
 
     /// Describe ACLs matching the provided filter.
     ///
     /// Corresponds to `Admin.describeAcls(AclBindingFilter)`.
+    #[doc(alias = "org.apache.kafka.clients.admin.Admin#describeAcls")]
     fn describe_acls(&self, filter: &AclBindingFilter) -> DescribeAclsResult {
         self.describe_acls_with_options(filter, DescribeAclsOptions::default())
     }
@@ -908,12 +983,14 @@ pub trait Admin: Send + Sync {
     /// Describe ACLs matching the provided filter.
     ///
     /// Corresponds to `Admin.describeAcls(AclBindingFilter, DescribeAclsOptions)`.
+    #[doc(alias = "org.apache.kafka.clients.admin.Admin#describeAcls")]
     fn describe_acls_with_options(&self, filter: &AclBindingFilter, options: DescribeAclsOptions)
     -> DescribeAclsResult;
 
     /// Delete ACLs matching the provided filters.
     ///
     /// Corresponds to `Admin.deleteAcls(Collection<AclBindingFilter>)`.
+    #[doc(alias = "org.apache.kafka.clients.admin.Admin#deleteAcls")]
     fn delete_acls(&self, filters: &[AclBindingFilter]) -> DeleteAclsResult {
         self.delete_acls_with_options(filters, DeleteAclsOptions::default())
     }
@@ -921,11 +998,13 @@ pub trait Admin: Send + Sync {
     /// Delete ACLs matching the provided filters.
     ///
     /// Corresponds to `Admin.deleteAcls(Collection<AclBindingFilter>, DeleteAclsOptions)`.
+    #[doc(alias = "org.apache.kafka.clients.admin.Admin#deleteAcls")]
     fn delete_acls_with_options(&self, filters: &[AclBindingFilter], options: DeleteAclsOptions) -> DeleteAclsResult;
 
     /// Describe the client quotas matching the provided filter.
     ///
     /// Corresponds to `Admin.describeClientQuotas(ClientQuotaFilter)`.
+    #[doc(alias = "org.apache.kafka.clients.admin.Admin#describeClientQuotas")]
     fn describe_client_quotas(&self, filter: &ClientQuotaFilter) -> DescribeClientQuotasResult {
         self.describe_client_quotas_with_options(filter, DescribeClientQuotasOptions::default())
     }
@@ -934,6 +1013,7 @@ pub trait Admin: Send + Sync {
     ///
     /// Corresponds to
     /// `Admin.describeClientQuotas(ClientQuotaFilter, DescribeClientQuotasOptions)`.
+    #[doc(alias = "org.apache.kafka.clients.admin.Admin#describeClientQuotas")]
     fn describe_client_quotas_with_options(
         &self,
         filter: &ClientQuotaFilter,
@@ -943,6 +1023,7 @@ pub trait Admin: Send + Sync {
     /// Alter the client quotas of one or more quota entities.
     ///
     /// Corresponds to `Admin.alterClientQuotas(Collection<ClientQuotaAlteration>)`.
+    #[doc(alias = "org.apache.kafka.clients.admin.Admin#alterClientQuotas")]
     fn alter_client_quotas(&self, entries: &[ClientQuotaAlteration]) -> AlterClientQuotasResult {
         self.alter_client_quotas_with_options(entries, AlterClientQuotasOptions::default())
     }
@@ -951,6 +1032,7 @@ pub trait Admin: Send + Sync {
     ///
     /// Corresponds to
     /// `Admin.alterClientQuotas(Collection<ClientQuotaAlteration>, AlterClientQuotasOptions)`.
+    #[doc(alias = "org.apache.kafka.clients.admin.Admin#alterClientQuotas")]
     fn alter_client_quotas_with_options(
         &self,
         entries: &[ClientQuotaAlteration],
@@ -962,6 +1044,7 @@ pub trait Admin: Send + Sync {
     /// Corresponds to `Admin.describeUserScramCredentials()`. Java's body
     /// passes a `null` user list; Rust spells "all users" as an empty slice —
     /// see [`describe_user_scram_credentials_with_users_options`](Admin::describe_user_scram_credentials_with_users_options).
+    #[doc(alias = "org.apache.kafka.clients.admin.Admin#describeUserScramCredentials")]
     fn describe_user_scram_credentials(&self) -> DescribeUserScramCredentialsResult {
         self.describe_user_scram_credentials_with_users_options(&[], DescribeUserScramCredentialsOptions::default())
     }
@@ -969,6 +1052,7 @@ pub trait Admin: Send + Sync {
     /// Describe the SASL/SCRAM credentials for the given users.
     ///
     /// Corresponds to `Admin.describeUserScramCredentials(List<String>)`.
+    #[doc(alias = "org.apache.kafka.clients.admin.Admin#describeUserScramCredentials")]
     fn describe_user_scram_credentials_with_users(&self, users: &[String]) -> DescribeUserScramCredentialsResult {
         self.describe_user_scram_credentials_with_users_options(users, DescribeUserScramCredentialsOptions::default())
     }
@@ -978,6 +1062,7 @@ pub trait Admin: Send + Sync {
     ///
     /// Corresponds to
     /// `Admin.describeUserScramCredentials(List<String>, DescribeUserScramCredentialsOptions)`.
+    #[doc(alias = "org.apache.kafka.clients.admin.Admin#describeUserScramCredentials")]
     fn describe_user_scram_credentials_with_users_options(
         &self,
         users: &[String],
@@ -987,6 +1072,7 @@ pub trait Admin: Send + Sync {
     /// Alter (upsert / delete) SASL/SCRAM credentials for one or more users.
     ///
     /// Corresponds to `Admin.alterUserScramCredentials(List<UserScramCredentialAlteration>)`.
+    #[doc(alias = "org.apache.kafka.clients.admin.Admin#alterUserScramCredentials")]
     fn alter_user_scram_credentials(
         &self,
         alterations: &[UserScramCredentialAlteration],
@@ -998,6 +1084,7 @@ pub trait Admin: Send + Sync {
     ///
     /// Corresponds to
     /// `Admin.alterUserScramCredentials(List<UserScramCredentialAlteration>, AlterUserScramCredentialsOptions)`.
+    #[doc(alias = "org.apache.kafka.clients.admin.Admin#alterUserScramCredentials")]
     fn alter_user_scram_credentials_with_options(
         &self,
         alterations: &[UserScramCredentialAlteration],
@@ -1007,6 +1094,7 @@ pub trait Admin: Send + Sync {
     /// Create a delegation token.
     ///
     /// Corresponds to `Admin.createDelegationToken()`.
+    #[doc(alias = "org.apache.kafka.clients.admin.Admin#createDelegationToken")]
     fn create_delegation_token(&self) -> CreateDelegationTokenResult {
         self.create_delegation_token_with_options(CreateDelegationTokenOptions::default())
     }
@@ -1015,6 +1103,7 @@ pub trait Admin: Send + Sync {
     ///
     /// Corresponds to
     /// `Admin.createDelegationToken(CreateDelegationTokenOptions)`.
+    #[doc(alias = "org.apache.kafka.clients.admin.Admin#createDelegationToken")]
     fn create_delegation_token_with_options(
         &self,
         options: CreateDelegationTokenOptions,
@@ -1023,6 +1112,7 @@ pub trait Admin: Send + Sync {
     /// Renew a delegation token identified by its HMAC.
     ///
     /// Corresponds to `Admin.renewDelegationToken(byte[])`.
+    #[doc(alias = "org.apache.kafka.clients.admin.Admin#renewDelegationToken")]
     fn renew_delegation_token(&self, hmac: &[u8]) -> RenewDelegationTokenResult {
         self.renew_delegation_token_with_options(hmac, RenewDelegationTokenOptions::default())
     }
@@ -1031,6 +1121,7 @@ pub trait Admin: Send + Sync {
     ///
     /// Corresponds to
     /// `Admin.renewDelegationToken(byte[], RenewDelegationTokenOptions)`.
+    #[doc(alias = "org.apache.kafka.clients.admin.Admin#renewDelegationToken")]
     fn renew_delegation_token_with_options(
         &self,
         hmac: &[u8],
@@ -1040,6 +1131,7 @@ pub trait Admin: Send + Sync {
     /// Expire a delegation token identified by its HMAC.
     ///
     /// Corresponds to `Admin.expireDelegationToken(byte[])`.
+    #[doc(alias = "org.apache.kafka.clients.admin.Admin#expireDelegationToken")]
     fn expire_delegation_token(&self, hmac: &[u8]) -> ExpireDelegationTokenResult {
         self.expire_delegation_token_with_options(hmac, ExpireDelegationTokenOptions::default())
     }
@@ -1048,6 +1140,7 @@ pub trait Admin: Send + Sync {
     ///
     /// Corresponds to
     /// `Admin.expireDelegationToken(byte[], ExpireDelegationTokenOptions)`.
+    #[doc(alias = "org.apache.kafka.clients.admin.Admin#expireDelegationToken")]
     fn expire_delegation_token_with_options(
         &self,
         hmac: &[u8],
@@ -1057,6 +1150,7 @@ pub trait Admin: Send + Sync {
     /// Describe the delegation tokens matching the provided owners filter.
     ///
     /// Corresponds to `Admin.describeDelegationToken()`.
+    #[doc(alias = "org.apache.kafka.clients.admin.Admin#describeDelegationToken")]
     fn describe_delegation_token(&self) -> DescribeDelegationTokenResult {
         self.describe_delegation_token_with_options(DescribeDelegationTokenOptions::default())
     }
@@ -1065,6 +1159,7 @@ pub trait Admin: Send + Sync {
     ///
     /// Corresponds to
     /// `Admin.describeDelegationToken(DescribeDelegationTokenOptions)`.
+    #[doc(alias = "org.apache.kafka.clients.admin.Admin#describeDelegationToken")]
     fn describe_delegation_token_with_options(
         &self,
         options: DescribeDelegationTokenOptions,
@@ -1073,6 +1168,7 @@ pub trait Admin: Send + Sync {
     /// Describe the finalized and supported features of the cluster.
     ///
     /// Corresponds to `Admin.describeFeatures()`.
+    #[doc(alias = "org.apache.kafka.clients.admin.Admin#describeFeatures")]
     fn describe_features(&self) -> DescribeFeaturesResult {
         self.describe_features_with_options(DescribeFeaturesOptions::default())
     }
@@ -1080,11 +1176,13 @@ pub trait Admin: Send + Sync {
     /// Describe the finalized and supported features of the cluster.
     ///
     /// Corresponds to `Admin.describeFeatures(DescribeFeaturesOptions)`.
+    #[doc(alias = "org.apache.kafka.clients.admin.Admin#describeFeatures")]
     fn describe_features_with_options(&self, options: DescribeFeaturesOptions) -> DescribeFeaturesResult;
 
     /// Apply the given feature updates.
     ///
     /// Corresponds to `Admin.updateFeatures(Map<String, FeatureUpdate>)`.
+    #[doc(alias = "org.apache.kafka.clients.admin.Admin#updateFeatures")]
     fn update_features(&self, feature_updates: &HashMap<String, FeatureUpdate>) -> Result<UpdateFeaturesResult, Error> {
         self.update_features_with_options(feature_updates, UpdateFeaturesOptions::default())
     }
@@ -1104,6 +1202,7 @@ pub trait Admin: Send + Sync {
     ///
     /// Returns [`Error::local_illegal_argument`] if `feature_updates` is empty or
     /// any feature name is blank.
+    #[doc(alias = "org.apache.kafka.clients.admin.Admin#updateFeatures")]
     fn update_features_with_options(
         &self,
         feature_updates: &HashMap<String, FeatureUpdate>,
@@ -1116,6 +1215,7 @@ pub trait Admin: Send + Sync {
     /// Corresponds to `Admin.close()`, whose body waits `Long.MAX_VALUE`
     /// milliseconds; [`close_with_timeout`](Admin::close_with_timeout) clamps that to the
     /// same 365-day ceiling Java's `close(Duration)` applies.
+    #[doc(alias = "org.apache.kafka.clients.admin.Admin#close")]
     async fn close(&self) {
         self.close_with_timeout(Duration::from_millis(i64::MAX as u64)).await
     }
@@ -1130,6 +1230,7 @@ pub trait Admin: Send + Sync {
     ///
     /// Corresponds to `Admin.close(Duration)`; blocking in Java, so `async` in
     /// Rust (CLAUDE.md §9.4).
+    #[doc(alias = "org.apache.kafka.clients.admin.Admin#close")]
     async fn close_with_timeout(&self, timeout: Duration);
 }
 

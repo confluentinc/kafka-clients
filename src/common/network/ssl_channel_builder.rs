@@ -46,6 +46,7 @@ use tokio::net::TcpStream;
 /// otherwise (client mode).
 ///
 /// Translated from `org.apache.kafka.common.network.SslChannelBuilder`.
+#[doc(alias = "org.apache.kafka.common.network.SslChannelBuilder")]
 pub struct SslChannelBuilder {
     /// SSL factory for creating TLS connectors.
     ssl_factory: SslFactory,
@@ -58,6 +59,7 @@ impl SslChannelBuilder {
     /// Creates a new `SslChannelBuilder` with the given SSL factory.
     ///
     /// `listener_name` is `Some` when instantiated in the broker and `None` otherwise.
+    #[doc(alias = "org.apache.kafka.common.network.SslChannelBuilder#SslChannelBuilder")]
     pub fn new(ssl_factory: SslFactory, listener_name: Option<ListenerName>) -> Self {
         Self { ssl_factory, listener_name }
     }

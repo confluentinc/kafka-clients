@@ -27,6 +27,7 @@ use std::str::FromStr;
 /// Translated from `org.apache.kafka.common.config.SslClientAuth`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[non_exhaustive]
+#[doc(alias = "org.apache.kafka.common.config.SslClientAuth")]
 pub enum SslClientAuth {
     /// Server requires client certificate.
     Required,
@@ -58,6 +59,7 @@ impl SslClientAuth {
     /// Matches Java's `SslClientAuth.forConfig(String)` behavior:
     /// - `null` maps to `NONE`
     /// - Unknown string returns `null` (here: `Option::None`)
+    #[doc(alias = "org.apache.kafka.common.config.SslClientAuth#forConfig")]
     pub fn for_config(key: Option<&str>) -> Option<Self> {
         match key {
             Option::None => Some(SslClientAuth::None),

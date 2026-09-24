@@ -32,6 +32,7 @@ use super::AbstractResponse;
 /// Corresponds to
 /// `org.apache.kafka.common.requests.CreateDelegationTokenResponse`.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.CreateDelegationTokenResponse")]
 pub struct CreateDelegationTokenResponse {
     data: CreateDelegationTokenResponseData,
 }
@@ -218,6 +219,7 @@ impl<'a> CreateDelegationTokenResponseOptionsBuilder<'a> {
 
 impl CreateDelegationTokenResponse {
     /// Creates a new `CreateDelegationTokenResponse` from the underlying data.
+    #[doc(alias = "org.apache.kafka.common.requests.CreateDelegationTokenResponse#CreateDelegationTokenResponse")]
     pub fn new(data: CreateDelegationTokenResponseData) -> Self {
         Self { data }
     }
@@ -262,6 +264,7 @@ impl CreateDelegationTokenResponse {
     /// Corresponds to Java's five-argument
     /// `CreateDelegationTokenResponse.prepareResponse(int, int, Errors,
     /// KafkaPrincipal, KafkaPrincipal)` (`CreateDelegationTokenResponse.java:69`).
+    #[doc(alias = "org.apache.kafka.common.requests.CreateDelegationTokenResponse#prepareResponse")]
     pub fn prepare_response(
         version: i16,
         throttle_time_ms: i32,
@@ -287,6 +290,7 @@ impl CreateDelegationTokenResponse {
     }
 
     /// Returns a reference to the underlying data.
+    #[doc(alias = "org.apache.kafka.common.requests.CreateDelegationTokenResponse#data")]
     pub fn data(&self) -> &CreateDelegationTokenResponseData {
         &self.data
     }
@@ -299,6 +303,7 @@ impl CreateDelegationTokenResponse {
     /// Returns the top-level error.
     ///
     /// Mirrors `CreateDelegationTokenResponse.error`.
+    #[doc(alias = "org.apache.kafka.common.requests.CreateDelegationTokenResponse#error")]
     pub fn error(&self) -> Errors {
         Errors::for_code(self.data.error_code)
     }
@@ -306,21 +311,25 @@ impl CreateDelegationTokenResponse {
     /// Whether this response carries an error.
     ///
     /// Mirrors `CreateDelegationTokenResponse.hasError`.
+    #[doc(alias = "org.apache.kafka.common.requests.CreateDelegationTokenResponse#hasError")]
     pub fn has_error(&self) -> bool {
         self.error() != Errors::None
     }
 
     /// Returns the throttle time in milliseconds.
+    #[doc(alias = "org.apache.kafka.common.requests.CreateDelegationTokenResponse#throttleTimeMs")]
     pub fn throttle_time_ms(&self) -> i32 {
         self.data.throttle_time_ms
     }
 
     /// Sets the throttle time in the response.
+    #[doc(alias = "org.apache.kafka.common.requests.CreateDelegationTokenResponse#maybeSetThrottleTimeMs")]
     pub fn maybe_set_throttle_time_ms(&mut self, throttle_time_ms: i32) {
         self.data.throttle_time_ms = throttle_time_ms;
     }
 
     /// Returns the error counts for this response.
+    #[doc(alias = "org.apache.kafka.common.requests.CreateDelegationTokenResponse#errorCounts")]
     pub fn error_counts(&self) -> HashMap<Errors, i32> {
         AbstractResponse::single_error_count(self.error())
     }
@@ -330,12 +339,14 @@ impl CreateDelegationTokenResponse {
     /// # Errors
     ///
     /// Returns an error if parsing fails.
+    #[doc(alias = "org.apache.kafka.common.requests.CreateDelegationTokenResponse#parse")]
     pub fn parse(readable: &mut dyn Readable, version: i16) -> io::Result<Self> {
         let data = CreateDelegationTokenResponseData::read(readable, version)?;
         Ok(Self::new(data))
     }
 
     /// Whether the client should throttle on this response (v1+).
+    #[doc(alias = "org.apache.kafka.common.requests.CreateDelegationTokenResponse#shouldClientThrottle")]
     pub fn should_client_throttle(&self, version: i16) -> bool {
         version >= 1
     }

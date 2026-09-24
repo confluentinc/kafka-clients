@@ -24,6 +24,7 @@ kafka_error_class! {
     ///
     /// Java `extends` chain:
     ///    `StaleBrokerEpochException` -> `ApiException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.StaleBrokerEpochException")]
     StaleBrokerEpochError,
     code: Errors::StaleBrokerEpoch,
     extends: [

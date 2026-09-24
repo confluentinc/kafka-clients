@@ -31,6 +31,7 @@ use super::{ConcreteRequest, ConcreteResponse, ListPartitionReassignmentsRespons
 /// Corresponds to
 /// `org.apache.kafka.common.requests.ListPartitionReassignmentsRequest`.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.ListPartitionReassignmentsRequest")]
 pub struct ListPartitionReassignmentsRequest {
     data: ListPartitionReassignmentsRequestData,
     version: i16,
@@ -38,11 +39,15 @@ pub struct ListPartitionReassignmentsRequest {
 
 impl ListPartitionReassignmentsRequest {
     /// Creates a new `ListPartitionReassignmentsRequest` from data and version.
+    #[doc(
+        alias = "org.apache.kafka.common.requests.ListPartitionReassignmentsRequest#ListPartitionReassignmentsRequest"
+    )]
     pub fn new(data: ListPartitionReassignmentsRequestData, version: i16) -> Self {
         Self { data, version }
     }
 
     /// Returns a reference to the underlying data.
+    #[doc(alias = "org.apache.kafka.common.requests.ListPartitionReassignmentsRequest#data")]
     pub fn data(&self) -> &ListPartitionReassignmentsRequestData {
         &self.data
     }
@@ -66,6 +71,7 @@ impl ListPartitionReassignmentsRequest {
     ///
     /// Mirrors `ListPartitionReassignmentsRequest.getErrorResponse`, echoing the
     /// requested topics/partitions with the top-level error code.
+    #[doc(alias = "org.apache.kafka.common.requests.ListPartitionReassignmentsRequest#getErrorResponse")]
     pub fn get_error_response(&self, throttle_time_ms: i32, error: &Errors) -> ConcreteResponse {
         let mut topics = Vec::new();
         if let Some(request_topics) = &self.data.topics {
@@ -99,6 +105,7 @@ impl ListPartitionReassignmentsRequest {
     /// # Errors
     ///
     /// Returns an error if parsing fails.
+    #[doc(alias = "org.apache.kafka.common.requests.ListPartitionReassignmentsRequest#parse")]
     pub fn parse(readable: &mut dyn Readable, version: i16) -> io::Result<Self> {
         let data = ListPartitionReassignmentsRequestData::read(readable, version)?;
         Ok(Self::new(data, version))
@@ -119,6 +126,7 @@ impl std::fmt::Display for ListPartitionReassignmentsRequest {
 ///
 /// Corresponds to `ListPartitionReassignmentsRequest.Builder` in Java.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.ListPartitionReassignmentsRequest$Builder")]
 pub struct ListPartitionReassignmentsRequestBuilder {
     data: ListPartitionReassignmentsRequestData,
     oldest_allowed_version: i16,
@@ -127,6 +135,7 @@ pub struct ListPartitionReassignmentsRequestBuilder {
 
 impl ListPartitionReassignmentsRequestBuilder {
     /// Creates a builder from existing data.
+    #[doc(alias = "org.apache.kafka.common.requests.ListPartitionReassignmentsRequest$Builder#Builder")]
     pub fn new(data: ListPartitionReassignmentsRequestData) -> Self {
         Self {
             data,

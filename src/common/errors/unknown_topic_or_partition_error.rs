@@ -26,6 +26,7 @@ kafka_error_class! {
     ///    `UnknownTopicOrPartitionException` -> `InvalidMetadataException` ->
     ///   `RefreshRetriableException` -> `RetriableException` -> `ApiException` ->
     ///   `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.UnknownTopicOrPartitionException")]
     UnknownTopicOrPartitionError,
     code: Errors::UnknownTopicOrPartition,
     extends: [

@@ -76,6 +76,7 @@ fn error_or_default_message(error: Errors, message: Option<&str>) -> Error {
 /// All fields are `pub(crate)` so the composing manager (single subclass
 /// in scope) can mutate them directly. This matches Java's `protected`
 /// semantics.
+#[doc(alias = "org.apache.kafka.clients.consumer.internals.AbstractHeartbeatRequestManager")]
 pub(crate) struct AbstractHeartbeatRequestManager {
     /// Max time allowed between invocations of `poll`, from
     /// `max.poll.interval.ms`. Sent on the first join heartbeat as the
@@ -182,6 +183,9 @@ impl AbstractHeartbeatRequestManager {
     ///
     /// Java: `AbstractHeartbeatRequestManager(LogContext, Time, ConsumerConfig,
     /// CoordinatorRequestManager, BackgroundEventHandler, HeartbeatMetricsManager)`.
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.AbstractHeartbeatRequestManager#AbstractHeartbeatRequestManager"
+    )]
     pub(crate) fn new(
         current_time_ms: i64,
         config: &ConsumerConfig,
@@ -221,6 +225,9 @@ impl AbstractHeartbeatRequestManager {
     /// Visible-for-testing constructor: lets callers supply a custom
     /// [`HeartbeatRequestState`] (mirrors Java's package-private second
     /// constructor).
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.AbstractHeartbeatRequestManager#AbstractHeartbeatRequestManager"
+    )]
     pub(crate) fn with_state(
         _current_time_ms: i64,
         config: &ConsumerConfig,
@@ -282,6 +289,7 @@ impl AbstractHeartbeatRequestManager {
     ///     membership_manager.maybe_rejoin_stale_member();
     /// }
     /// ```
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.AbstractHeartbeatRequestManager#resetPollTimer")]
     pub(crate) fn reset_poll_timer(&mut self, current_time_ms: i64) {
         self.poll_timer_expires_at_ms = current_time_ms + i64::from(self.max_poll_interval_ms);
     }
@@ -290,6 +298,9 @@ impl AbstractHeartbeatRequestManager {
     /// the background-event channel, if one has been recorded.
     ///
     /// Java: `maybePropagateCoordinatorFatalErrorEvent()`.
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.AbstractHeartbeatRequestManager#maybePropagateCoordinatorFatalErrorEvent"
+    )]
     pub(crate) fn maybe_propagate_coordinator_fatal_error_event(&self, current_time_ms: i64) {
         let fatal = self.coordinator_request_manager.get_and_clear_fatal_error();
         if let Some(err) = fatal {
@@ -462,6 +473,7 @@ impl AbstractHeartbeatRequestManager {
     /// `membership_manager().on_heartbeat_failure(retriable)` to mirror
     /// Java's `membershipManager().onHeartbeatFailure(...)` at the tail
     /// of `onFailure`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.AbstractHeartbeatRequestManager#onFailure")]
     pub(crate) fn on_failure(&mut self, error: &Error, current_time_ms: i64) -> HeartbeatFailureAction {
         self.heartbeat_request_state.on_failed_attempt(current_time_ms);
         if error.is_retriable_error() {

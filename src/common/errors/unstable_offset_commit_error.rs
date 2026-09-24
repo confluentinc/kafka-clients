@@ -25,6 +25,7 @@ kafka_error_class! {
     /// Java `extends` chain:
     ///    `UnstableOffsetCommitException` -> `RetriableException` ->
     ///   `ApiException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.UnstableOffsetCommitException")]
     UnstableOffsetCommitError,
     code: Errors::UnstableOffsetCommit,
     extends: [

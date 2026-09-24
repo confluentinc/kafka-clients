@@ -25,6 +25,8 @@ use std::path::{Path, PathBuf};
 
 use quote::ToTokens;
 
+use crate::java::{self, rust_method_bases, same_name, squash, JavaIndex};
+
 /// A module path from the crate root, e.g. `["producer", "producer_record"]`.
 type ModPath = Vec<String>;
 
@@ -39,11 +41,26 @@ trait Rule {
 
     /// How to fix a violation, printed once after the rule's findings.
     fn hint(&self) -> &'static str;
+
+    /// Why the rule cannot run in this checkout, if it cannot; it is then
+    /// reported as skipped instead of being run.
+    fn skip_reason(&self) -> Option<String> {
+        None
+    }
 }
 
 /// The rules `lint-custom` runs, in order.
 fn rules() -> Vec<Box<dyn Rule>> {
-    vec![Box::new(NoDataCarryingEnumVariants), Box::new(NoPublicField)]
+    vec![
+        Box::new(NoDataCarryingEnumVariants),
+        Box::new(NoPublicField),
+        Box::new(JavaName::new()),
+        // Disabled until every public struct is confirmed to need being public:
+        // making traits dyn-compatible is wasted on types that should become
+        // `pub(crate)`. The trait changes it requires are parked on branch
+        // `wip/dyn-compatible-traits`.
+        // Box::new(DynCompatible),
+    ]
 }
 
 /// Runs every rule and fails if any of them reports a finding.
@@ -65,6 +82,10 @@ pub fn lint_custom() -> anyhow::Result<()> {
     }
 
     for rule in rules() {
+        if let Some(reason) = rule.skip_reason() {
+            println!("⏭️  {}: skipped, {reason}", rule.name());
+            continue;
+        }
         let mut findings = Vec::new();
         let checked = rule.check(&krate, &mut findings);
         if findings.is_empty() {
@@ -207,7 +228,7 @@ impl Crate {
         Some(current)
     }
 
-    /// The `pub struct`s and `pub enum`s another crate can name, as (defining
+    /// The `pub struct`s, `pub enum`s and `pub trait`s another crate can name, as (defining
     /// module, name): defined `pub` in a reachable module, or re-exported by a
     /// `pub use` chain from one, e.g.
     /// `mod producer_record; pub use producer_record::ProducerRecord;`.
@@ -318,11 +339,12 @@ impl Crate {
     }
 }
 
-/// The name of a `pub struct` or `pub enum` item; `None` for any other item.
+/// The name of a `pub struct`, `pub enum` or `pub trait` item; `None` for any other item.
 fn pub_type_ident(item: &syn::Item) -> Option<&syn::Ident> {
     match item {
         syn::Item::Struct(s) if matches!(s.vis, syn::Visibility::Public(_)) => Some(&s.ident),
         syn::Item::Enum(e) if matches!(e.vis, syn::Visibility::Public(_)) => Some(&e.ident),
+        syn::Item::Trait(t) if matches!(t.vis, syn::Visibility::Public(_)) => Some(&t.ident),
         _ => None,
     }
 }
@@ -485,5 +507,531 @@ impl Rule for NoPublicField {
     fn hint(&self) -> &'static str {
         "   Make the field private or `pub(crate)`, and expose it the way Java does:
    a getter `field()`, a setter `set_field(..)`, or a builder."
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Rule: check-java-name
+// ---------------------------------------------------------------------------
+
+/// Checks that every item translated from Java carries the Java name, as
+/// adapted by the translation rules (CLAUDE.md §2, §3, §4).
+///
+/// An item declares what it translates with a marker (see [`crate::java`]):
+/// `#[doc(alias = "org.apache.kafka.<package>.<Class>[$Nested][#method]")]`.
+/// The marker is also the Java name rustdoc search finds the item under.
+/// Mentioning a Java class in a doc comment claims nothing, so helpers that
+/// cite the class they serve are not held to its name.
+///
+/// For every marker:
+///   - **class** (`..Class`, `..Outer$Nested`): the class exists in the Java
+///     sources, and the item is a type named as the class — `Exception` →
+///     `Error` with the package prefix outside `common`, acronyms in Rust
+///     casing (`SSLFactory` → `SslFactory`), a nested class under its bare
+///     name. Under `ffi`, the type is `kafka_<package>_<Name>_t` instead.
+///   - **method** (`..Class#method`): the class declares the method, and the
+///     function's name derives from it — snake_case, `Exception` → `Error`,
+///     `throw` → `return`, an optional dropped `get`, `_with_<params>` for an
+///     overload, `new` / `with_<params>` for a constructor. Under `ffi`, the
+///     function is `kafka_<package>_<Name>_<that name>`.
+///
+/// And for every file named after a Java class of its package
+/// (`producer/producer_record.rs` ↔ `clients.producer.ProducerRecord`,
+/// CLAUDE.md §2: one class per file), the file holds that class's marked type,
+/// or — when a rule keeps the outer class out of scope — its marked nested ones.
+///
+/// Scope: `src/` (without `src/bin`) and `tests/`, test modules included.
+/// Runs only when the `kafka` submodule is checked out.
+struct JavaName {
+    index: JavaIndex,
+}
+
+impl JavaName {
+    fn new() -> Self {
+        JavaName { index: JavaIndex::load() }
+    }
+}
+
+/// An item that may carry a marker.
+struct Marked {
+    kind: ItemKind,
+    name: String,
+    attrs: Vec<syn::Attribute>,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum ItemKind {
+    Type,
+    Fn,
+}
+
+/// Every type and function of `items`, recursively: module-level functions,
+/// inherent-impl and trait methods, and the error types of the error macros.
+fn marked_items(items: &[syn::Item], out: &mut Vec<Marked>) {
+    let push = |kind, ident: &syn::Ident, attrs: &[syn::Attribute], out: &mut Vec<Marked>| {
+        out.push(Marked { kind, name: ident.to_string(), attrs: attrs.to_vec() })
+    };
+    for item in items {
+        match item {
+            syn::Item::Struct(s) => push(ItemKind::Type, &s.ident, &s.attrs, out),
+            syn::Item::Enum(e) => push(ItemKind::Type, &e.ident, &e.attrs, out),
+            syn::Item::Union(u) => push(ItemKind::Type, &u.ident, &u.attrs, out),
+            syn::Item::Type(t) => push(ItemKind::Type, &t.ident, &t.attrs, out),
+            syn::Item::Trait(t) => {
+                push(ItemKind::Type, &t.ident, &t.attrs, out);
+                for it in &t.items {
+                    if let syn::TraitItem::Fn(f) = it {
+                        push(ItemKind::Fn, &f.sig.ident, &f.attrs, out);
+                    }
+                }
+            },
+            syn::Item::Fn(f) => push(ItemKind::Fn, &f.sig.ident, &f.attrs, out),
+            syn::Item::Impl(i) if i.trait_.is_none() => {
+                for it in &i.items {
+                    if let syn::ImplItem::Fn(f) = it {
+                        push(ItemKind::Fn, &f.sig.ident, &f.attrs, out);
+                    }
+                }
+            },
+            syn::Item::Mod(m) => {
+                if let Some((_, inner)) = &m.content {
+                    marked_items(inner, out);
+                }
+            },
+            syn::Item::Macro(m) => {
+                if let Some(def) = error_macro_type_def(m) {
+                    out.push(Marked { kind: ItemKind::Type, name: def.name, attrs: def.attrs });
+                }
+            },
+            _ => {},
+        }
+    }
+}
+
+/// A type defined by an error macro: its name and the attributes written
+/// inside the macro.
+struct TypeDef {
+    name: String,
+    attrs: Vec<syn::Attribute>,
+}
+
+/// The type a `kafka_error_class!` / `message_only_error!` invocation defines:
+/// the leading `#[..]* Name` of its body.
+fn error_macro_type_def(m: &syn::ItemMacro) -> Option<TypeDef> {
+    let is_error_macro = m
+        .mac
+        .path
+        .segments
+        .last()
+        .is_some_and(|s| s.ident == "kafka_error_class" || s.ident == "message_only_error");
+    if !is_error_macro {
+        return None;
+    }
+    m.mac
+        .parse_body_with(|input: syn::parse::ParseStream| {
+            let attrs = input.call(syn::Attribute::parse_outer)?;
+            let ident: syn::Ident = input.parse()?;
+            // The rest of the body (the `extends` list, ..) is not needed.
+            input.step(|cursor| {
+                let mut rest = *cursor;
+                while let Some((_, next)) = rest.token_tree() {
+                    rest = next;
+                }
+                Ok(((), rest))
+            })?;
+            Ok(TypeDef { name: ident.to_string(), attrs })
+        })
+        .ok()
+}
+
+/// The markers among `attrs`' `#[doc(alias = "..")]`s.
+fn java_markers(attrs: &[syn::Attribute]) -> Vec<String> {
+    let mut out = Vec::new();
+    for attr in attrs.iter().filter(|a| a.path().is_ident("doc")) {
+        let _ = attr.parse_nested_meta(|meta| {
+            if meta.path.is_ident("alias") {
+                let lit: syn::LitStr = meta.value()?.parse()?;
+                if lit.value().starts_with(java::MARKER_PREFIX) {
+                    out.push(lit.value());
+                }
+            } else if meta.input.peek(syn::Token![=]) {
+                // Skip the value of any other `doc(key = value)`.
+                let _: syn::Expr = meta.value()?.parse()?;
+            }
+            Ok(())
+        });
+    }
+    out
+}
+
+/// Every `.rs` file under `dir`, sorted.
+fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
+    let Ok(entries) = fs::read_dir(dir) else { return };
+    let mut entries: Vec<_> = entries.filter_map(Result::ok).collect();
+    entries.sort_by_key(|e| e.file_name());
+    for entry in entries {
+        let path = entry.path();
+        if path.is_dir() {
+            rust_files(&path, out);
+        } else if path.extension().is_some_and(|x| x == "rs") {
+            out.push(path);
+        }
+    }
+}
+
+impl JavaName {
+    /// Checks one marker on `item`, pushing a finding if its name does not follow.
+    fn check_marker(&self, file: &str, is_ffi: bool, item: &Marked, marker: &str, findings: &mut Vec<String>) {
+        let Some(class) = self.index.resolve(marker) else {
+            findings.push(format!(
+                "{file}: `{}` is marked `{marker}`, which is not a Java class",
+                item.name
+            ));
+            return;
+        };
+        let origin = format!("`{}`", marker.trim_start_matches(java::MARKER_PREFIX));
+        match (JavaIndex::marker_method(marker), item.kind) {
+            (None, ItemKind::Type) => {
+                let expected = if is_ffi { class.ffi_name() } else { class.rust_name() };
+                if !same_name(&item.name, &expected) {
+                    findings.push(format!(
+                        "{file}: `{}` translates {origin} and must be named `{expected}`",
+                        item.name
+                    ));
+                }
+            },
+            (Some(method), ItemKind::Fn) => {
+                if !class.methods.contains(method) {
+                    findings.push(format!(
+                        "{file}: `{}` is marked {origin}, but `{}` declares no `{method}`",
+                        item.name,
+                        class.name()
+                    ));
+                    return;
+                }
+                let rust = if is_ffi {
+                    let prefix = format!("{}_", class.ffi_prefix());
+                    match item.name.strip_prefix(&prefix) {
+                        Some(rest) => rest,
+                        None => {
+                            findings.push(format!(
+                                "{file}: `{}` translates {origin} and must be named `{prefix}<method>`",
+                                item.name
+                            ));
+                            return;
+                        },
+                    }
+                } else {
+                    item.name.as_str()
+                };
+                if !class.is_rust_name_of(method, rust) {
+                    let expected = if method == class.name() {
+                        "`new` or `with_<params>`".to_string()
+                    } else {
+                        rust_method_bases(method)
+                            .iter()
+                            .map(|b| format!("`{b}`"))
+                            .collect::<Vec<_>>()
+                            .join(" or ")
+                    };
+                    findings.push(format!(
+                        "{file}: `{}` translates {origin} and must be named {expected} (plus `_with_<params>` for an overload)",
+                        item.name
+                    ));
+                }
+            },
+            (None, ItemKind::Fn) => {
+                findings.push(format!(
+                    "{file}: function `{}` is marked with class {origin}; name the method",
+                    item.name
+                ));
+            },
+            (Some(_), ItemKind::Type) => {
+                findings.push(format!("{file}: type `{}` is marked with method {origin}", item.name));
+            },
+        }
+    }
+
+    /// The file check: a file named after a Java class of its package holds that
+    /// class's marked type (or its marked nested ones).
+    fn check_file(&self, path: &Path, items: &[Marked], findings: &mut Vec<String>) -> usize {
+        let Ok(rel) = path.strip_prefix("src") else { return 0 };
+        let mut package: Vec<String> = rel.iter().map(|s| s.to_string_lossy().into_owned()).collect();
+        let Some(stem) = package.pop().map(|f| f.trim_end_matches(".rs").to_string()) else {
+            return 0;
+        };
+        if matches!(stem.as_str(), "mod" | "lib" | "main") || package.first().is_some_and(|p| p == "ffi") {
+            return 0;
+        }
+        let mut checked = 0;
+        for class in self
+            .index
+            .classes
+            .iter()
+            .filter(|c| !c.is_test && c.path.len() == 1 && c.module == package)
+        {
+            if squash(&stem) == squash(&class.rust_name()) {
+                checked += 1;
+                let top = class.marker();
+                let nested = format!("{top}$");
+                let marked = |m: &Marked| java_markers(&m.attrs).iter().any(|k| *k == top || k.starts_with(&nested));
+                if !items.iter().any(|m| m.kind == ItemKind::Type && marked(m)) {
+                    let types: Vec<String> = items
+                        .iter()
+                        .filter(|m| m.kind == ItemKind::Type)
+                        .map(|m| format!("`{}`", m.name))
+                        .collect();
+                    findings.push(format!(
+                        "{}: named after `{}` but holds no type marked as it (found {})",
+                        path.display(),
+                        top.trim_start_matches(java::MARKER_PREFIX),
+                        if types.is_empty() {
+                            "none".to_string()
+                        } else {
+                            types.join(", ")
+                        }
+                    ));
+                }
+            } else if class.name().ends_with("Exception")
+                && squash(&stem) == squash(&class.name().replace("Exception", "Error"))
+            {
+                checked += 1;
+                findings.push(format!(
+                    "{}: translates `{}.{}`, which must be named `{}` in a file of that name",
+                    path.display(),
+                    class.package,
+                    class.name(),
+                    class.rust_name()
+                ));
+            }
+        }
+        checked
+    }
+}
+
+impl Rule for JavaName {
+    fn name(&self) -> &'static str {
+        "check-java-name"
+    }
+
+    fn skip_reason(&self) -> Option<String> {
+        self.index.is_empty().then(|| {
+            format!(
+                "no Java sources at `{}` (run `git submodule update --init kafka`)",
+                java::JAVA_MAIN_ROOT
+            )
+        })
+    }
+
+    fn check(&self, _krate: &Crate, findings: &mut Vec<String>) -> usize {
+        let mut files = Vec::new();
+        rust_files(Path::new("src"), &mut files);
+        rust_files(Path::new("tests"), &mut files);
+        let mut checked = 0usize;
+        for path in files.iter().filter(|p| !p.starts_with("src/bin")) {
+            let file = path.display().to_string();
+            let parsed = match fs::read_to_string(path).map(|s| syn::parse_file(&s)) {
+                Ok(Ok(parsed)) => parsed,
+                Ok(Err(e)) => {
+                    findings.push(format!("{file}: failed to parse: {e}"));
+                    continue;
+                },
+                Err(e) => {
+                    findings.push(format!("{file}: failed to read: {e}"));
+                    continue;
+                },
+            };
+            let is_ffi = path.starts_with("src/ffi");
+            let mut items = Vec::new();
+            marked_items(&parsed.items, &mut items);
+            for item in &items {
+                for marker in java_markers(&item.attrs) {
+                    checked += 1;
+                    self.check_marker(&file, is_ffi, item, &marker, findings);
+                }
+            }
+            checked += self.check_file(path, &items, findings);
+        }
+        checked
+    }
+
+    fn hint(&self) -> &'static str {
+        "   Name the item as Java does, adapted only by the translation rules
+   (CLAUDE.md §2: Exception -> Error with the package prefix outside `common`,
+   camelCase -> snake_case, `_with_<params>` for overloads, `new`/`with_..` for
+   constructors, a nested class under its bare name; §4:
+   `kafka_<java package without clients>_<Name>_t`). Fix the marker instead if
+   it names the wrong Java class or method; a Rust-only helper carries none."
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Rule: check-dyn-compatible
+// ---------------------------------------------------------------------------
+
+/// Checks that every public trait is dyn-compatible, or has a dyn-compatible
+/// `Dyn<Name>` companion (CLAUDE.md §3, forward compatibility).
+///
+/// Java code puts objects of different classes in one collection typed by the
+/// interface they implement (`List<Serializer<String>>`); the Rust equivalent is
+/// `Vec<Box<dyn Serializer<String>>>`, which only compiles for a dyn-compatible
+/// trait. A trait that is not dyn-compatible can never become one without a
+/// breaking change, so the property is checked up front.
+///
+/// The exception is a performance-oriented trait whose methods return
+/// `impl Future` (e.g. `Producer`, so a generic caller does not box a future per
+/// call): it must be paired with a public `Dyn<Name>` trait (e.g. `DynProducer`)
+/// that is dyn-compatible and blanket-implemented for it, so the boxing cost is
+/// paid only by callers who need dynamic dispatch.
+///
+/// The check mirrors the reference's dyn-compatibility rules on the syntax: no
+/// `Sized`-implying or `Self`-parameterized supertrait, no associated consts or
+/// generic associated types, and every method not opted out with
+/// `where Self: Sized` has a receiver, no type parameters, no `impl Trait` in
+/// argument or return position, is not a native `async fn` (an
+/// `#[async_trait]` one is boxed and fine), and does not mention `Self` outside
+/// the receiver except through a projection such as `Self::Item`.
+///
+/// Scope: the same public items as [`NoPublicField`], traits only.
+// Not run yet: see the commented-out entry in `rules()`.
+#[allow(dead_code)]
+struct DynCompatible;
+
+#[allow(dead_code)]
+impl DynCompatible {
+    /// The reasons `t` is not dyn-compatible; empty when it is.
+    fn violations(t: &syn::ItemTrait) -> Vec<String> {
+        let mut reasons = Vec::new();
+        let is_async_trait = t
+            .attrs
+            .iter()
+            .any(|a| a.path().segments.last().is_some_and(|s| s.ident == "async_trait"));
+
+        for bound in &t.supertraits {
+            let syn::TypeParamBound::Trait(tb) = bound else {
+                continue;
+            };
+            let Some(last) = tb.path.segments.last() else { continue };
+            let name = last.ident.to_string();
+            // These require `Self: Sized`, or default a type parameter to `Self`.
+            let self_param = matches!(name.as_str(), "PartialEq" | "PartialOrd")
+                && (last.arguments.is_empty() || mentions_bare_self(&last.arguments.to_token_stream().to_string()));
+            if matches!(name.as_str(), "Sized" | "Clone" | "Copy" | "Default" | "Eq" | "Ord" | "Hash") || self_param {
+                reasons.push(format!("supertrait `{name}`"));
+            }
+        }
+
+        for item in &t.items {
+            match item {
+                syn::TraitItem::Const(c) => reasons.push(format!("associated const `{}`", c.ident)),
+                syn::TraitItem::Type(ty) if !ty.generics.params.is_empty() => {
+                    reasons.push(format!("generic associated type `{}`", ty.ident));
+                },
+                syn::TraitItem::Fn(f) => {
+                    let sig = &f.sig;
+                    if requires_sized(&sig.generics) {
+                        continue;
+                    }
+                    let name = &sig.ident;
+                    if sig.receiver().is_none() {
+                        reasons.push(format!("`{name}` has no `self` receiver"));
+                    }
+                    if sig.generics.params.iter().any(|p| !matches!(p, syn::GenericParam::Lifetime(_))) {
+                        reasons.push(format!("`{name}` has type or const parameters"));
+                    }
+                    if sig.asyncness.is_some() && !is_async_trait {
+                        reasons.push(format!("`{name}` is a native `async fn`"));
+                    }
+                    for arg in &sig.inputs {
+                        let syn::FnArg::Typed(pt) = arg else { continue };
+                        let ty = pt.ty.to_token_stream().to_string();
+                        if ty.split_whitespace().any(|tok| tok == "impl") {
+                            reasons.push(format!("`{name}` takes `impl Trait`"));
+                        }
+                        if mentions_bare_self(&ty) {
+                            reasons.push(format!("`{name}` takes `Self`"));
+                        }
+                    }
+                    if let syn::ReturnType::Type(_, ret) = &sig.output {
+                        let ty = ret.to_token_stream().to_string();
+                        if ty.split_whitespace().any(|tok| tok == "impl") {
+                            reasons.push(format!("`{name}` returns `impl Trait`"));
+                        }
+                        if mentions_bare_self(&ty) {
+                            reasons.push(format!("`{name}` returns `Self`"));
+                        }
+                    }
+                },
+                _ => {},
+            }
+        }
+        reasons
+    }
+}
+
+/// Whether `generics` has a `where Self: Sized` bound, which exempts a method
+/// from the dyn-compatibility rules.
+#[allow(dead_code)]
+fn requires_sized(generics: &syn::Generics) -> bool {
+    generics.where_clause.as_ref().is_some_and(|w| {
+        w.predicates.iter().any(|p| {
+            let syn::WherePredicate::Type(pt) = p else { return false };
+            pt.bounded_ty.to_token_stream().to_string() == "Self"
+                && pt.bounds.iter().any(|b| b.to_token_stream().to_string() == "Sized")
+        })
+    })
+}
+
+/// Whether stringified `tokens` mention `Self` other than as a projection
+/// (`Self :: Item`).
+#[allow(dead_code)]
+fn mentions_bare_self(tokens: &str) -> bool {
+    let toks: Vec<&str> = tokens.split_whitespace().collect();
+    toks.iter()
+        .enumerate()
+        .any(|(i, tok)| *tok == "Self" && toks.get(i + 1) != Some(&"::"))
+}
+
+impl Rule for DynCompatible {
+    fn name(&self) -> &'static str {
+        "check-dyn-compatible"
+    }
+
+    fn check(&self, krate: &Crate, findings: &mut Vec<String>) -> usize {
+        let public = krate.public_types();
+        let traits: Vec<(&ModPath, &syn::ItemTrait)> = public
+            .iter()
+            .filter_map(|(path, name)| match krate.type_item(path, name) {
+                syn::Item::Trait(t) => Some((path, t)),
+                _ => None,
+            })
+            .collect();
+        let dyn_compatible: BTreeSet<String> = traits
+            .iter()
+            .filter(|(_, t)| Self::violations(t).is_empty())
+            .map(|(_, t)| t.ident.to_string())
+            .collect();
+
+        for (path, t) in &traits {
+            let reasons = Self::violations(t);
+            if reasons.is_empty() || dyn_compatible.contains(&format!("Dyn{}", t.ident)) {
+                continue;
+            }
+            findings.push(format!(
+                "{}: public trait `{}` is not dyn-compatible and has no dyn-compatible `Dyn{}`: {}",
+                krate.modules[*path].file.display(),
+                t.ident,
+                t.ident,
+                reasons.join(", ")
+            ));
+        }
+        traits.len()
+    }
+
+    fn hint(&self) -> &'static str {
+        "   Make the trait dyn-compatible (`where Self: Sized` on methods that cannot be,
+   `#[async_trait]` for async methods off the hot path), or — for a
+   performance-oriented trait — add a public dyn-compatible `Dyn<Name>` trait
+   blanket-implemented for it, as `DynProducer` is for `Producer`."
     }
 }

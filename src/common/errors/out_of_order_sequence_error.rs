@@ -24,6 +24,7 @@ kafka_error_class! {
     ///
     /// Java `extends` chain:
     ///    `OutOfOrderSequenceException` -> `ApiException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.OutOfOrderSequenceException")]
     OutOfOrderSequenceError,
     code: Errors::OutOfOrderSequenceNumber,
     extends: [

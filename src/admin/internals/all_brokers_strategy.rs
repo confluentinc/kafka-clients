@@ -49,6 +49,7 @@ use super::{AdminApiLookupStrategy, LookupResult};
 ///
 /// Corresponds to `AllBrokersStrategy.BrokerKey`.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[doc(alias = "org.apache.kafka.clients.admin.internals.AllBrokersStrategy$BrokerKey")]
 pub(crate) struct BrokerKey {
     /// The broker id, or `None` for the pre-lookup sentinel ([`AllBrokersStrategy::any_broker`]).
     pub(crate) broker_id: Option<i32>,
@@ -56,6 +57,7 @@ pub(crate) struct BrokerKey {
 
 impl BrokerKey {
     /// Creates a broker key for the given (optional) broker id.
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.AllBrokersStrategy$BrokerKey#BrokerKey")]
     pub(crate) fn new(broker_id: Option<i32>) -> Self {
         Self { broker_id }
     }
@@ -71,6 +73,7 @@ impl std::fmt::Display for BrokerKey {
 /// brokers in the cluster.
 ///
 /// Corresponds to `AllBrokersStrategy`.
+#[doc(alias = "org.apache.kafka.clients.admin.internals.AllBrokersStrategy")]
 pub(crate) struct AllBrokersStrategy {
     log_context: LogContext,
 }
@@ -91,6 +94,7 @@ impl AllBrokersStrategy {
     }
 
     /// Creates a strategy.
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.AllBrokersStrategy#AllBrokersStrategy")]
     pub(crate) fn new(log_context: LogContext) -> Self {
         Self { log_context }
     }
@@ -99,6 +103,7 @@ impl AllBrokersStrategy {
     /// `IllegalArgumentException`) if the key set is anything other than the
     /// singleton `{any_broker}` — a programming error the driver never triggers
     /// in production.
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.AllBrokersStrategy#validateLookupKeys")]
     fn validate_lookup_keys(keys: &HashSet<BrokerKey>) {
         assert!(keys.len() == 1, "Unexpected key set: {keys:?}");
         let key = keys.iter().next().expect("checked len == 1");
@@ -168,6 +173,7 @@ impl AdminApiLookupStrategy<BrokerKey> for AllBrokersStrategy {
 /// [`future`](Self::all) completes when the broker list is discovered, yielding
 /// a map from broker id to that broker's per-request future; each per-broker
 /// future completes when its fulfillment response arrives.
+#[doc(alias = "org.apache.kafka.clients.admin.internals.AllBrokersStrategy$AllBrokersFuture")]
 pub(crate) struct AllBrokersFuture<V: Clone + Send + Sync + 'static> {
     future: KafkaFutureImpl<HashMap<i32, KafkaFuture<V>>>,
     broker_futures: Mutex<HashMap<i32, KafkaFutureImpl<V>>>,
@@ -183,6 +189,7 @@ impl<V: Clone + Send + Sync + 'static> AllBrokersFuture<V> {
     /// list is discovered.
     ///
     /// Mirrors `AllBrokersFuture.all`.
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.AllBrokersStrategy$AllBrokersFuture#all")]
     pub(crate) fn all(&self) -> KafkaFuture<HashMap<i32, KafkaFuture<V>>> {
         self.future.future()
     }

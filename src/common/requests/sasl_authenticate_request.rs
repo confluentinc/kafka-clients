@@ -39,6 +39,7 @@ use super::SaslAuthenticateResponse;
 ///
 /// Corresponds to `org.apache.kafka.common.requests.SaslAuthenticateRequest`.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.SaslAuthenticateRequest")]
 pub struct SaslAuthenticateRequest {
     data: SaslAuthenticateRequestData,
     version: i16,
@@ -46,11 +47,13 @@ pub struct SaslAuthenticateRequest {
 
 impl SaslAuthenticateRequest {
     /// Creates a new `SaslAuthenticateRequest` from data and version.
+    #[doc(alias = "org.apache.kafka.common.requests.SaslAuthenticateRequest#SaslAuthenticateRequest")]
     pub fn new(data: SaslAuthenticateRequestData, version: i16) -> Self {
         Self { data, version }
     }
 
     /// Returns a reference to the underlying data.
+    #[doc(alias = "org.apache.kafka.common.requests.SaslAuthenticateRequest#data")]
     pub fn data(&self) -> &SaslAuthenticateRequestData {
         &self.data
     }
@@ -74,6 +77,7 @@ impl SaslAuthenticateRequest {
     ///
     /// The `throttle_time_ms` parameter is ignored because the SaslAuthenticate schema
     /// does not include a throttle time field.
+    #[doc(alias = "org.apache.kafka.common.requests.SaslAuthenticateRequest#getErrorResponse")]
     pub fn get_error_response(&self, _throttle_time_ms: i32, error: &Errors) -> ConcreteResponse {
         let mut response = SaslAuthenticateResponseData::new();
         response.set_error_code(error.code());
@@ -86,6 +90,7 @@ impl SaslAuthenticateRequest {
     /// # Errors
     ///
     /// Returns an error if parsing fails.
+    #[doc(alias = "org.apache.kafka.common.requests.SaslAuthenticateRequest#parse")]
     pub fn parse(readable: &mut dyn Readable, version: i16) -> io::Result<Self> {
         let data = SaslAuthenticateRequestData::read(readable, version)?;
         Ok(Self::new(data, version))
@@ -107,6 +112,7 @@ impl std::fmt::Display for SaslAuthenticateRequest {
 ///
 /// Corresponds to `SaslAuthenticateRequest.Builder` in Java.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.SaslAuthenticateRequest$Builder")]
 pub struct SaslAuthenticateRequestBuilder {
     data: SaslAuthenticateRequestData,
     oldest_allowed_version: i16,
@@ -115,6 +121,7 @@ pub struct SaslAuthenticateRequestBuilder {
 
 impl SaslAuthenticateRequestBuilder {
     /// Creates a new builder from the given data.
+    #[doc(alias = "org.apache.kafka.common.requests.SaslAuthenticateRequest$Builder#Builder")]
     pub fn new(data: SaslAuthenticateRequestData) -> Self {
         Self {
             data,

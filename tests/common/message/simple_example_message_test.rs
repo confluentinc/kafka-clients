@@ -224,6 +224,7 @@ fn test_should_implement_equals_and_hash_code() {
 
 /// Translated from: testMyTaggedIntArray
 #[test]
+#[doc(alias = "org.apache.kafka.common.message.SimpleExampleMessageTest#testMyTaggedIntArray")]
 fn test_my_tagged_int_array() {
     // Verify that the tagged int array reads as empty when not set.
     test_round_trip_default_version(&SimpleExampleMessageData::new(), &|message| {
@@ -240,6 +241,7 @@ fn test_my_tagged_int_array() {
 
 /// Translated from: testMyNullableString
 #[test]
+#[doc(alias = "org.apache.kafka.common.message.SimpleExampleMessageTest#testMyNullableString")]
 fn test_my_nullable_string() {
     // Verify that the tagged field reads as null when not set.
     test_round_trip_default_version(&SimpleExampleMessageData::new(), &|message| {
@@ -256,6 +258,7 @@ fn test_my_nullable_string() {
 
 /// Translated from: testMyInt16
 #[test]
+#[doc(alias = "org.apache.kafka.common.message.SimpleExampleMessageTest#testMyInt16")]
 fn test_my_int16() {
     // Verify that the tagged field reads as 123 when not set.
     test_round_trip_default_version(&SimpleExampleMessageData::new(), &|message| {
@@ -271,6 +274,7 @@ fn test_my_int16() {
 
 /// Translated from: testMyUint32
 #[test]
+#[doc(alias = "org.apache.kafka.common.message.SimpleExampleMessageTest#testMyUint32")]
 fn test_my_uint32() {
     // Verify that the uint32 field reads as 1234567 when not set.
     test_round_trip_default_version(&SimpleExampleMessageData::new(), &|message| {
@@ -292,6 +296,7 @@ fn test_my_uint32() {
 
 /// Translated from: testMyUint16
 #[test]
+#[doc(alias = "org.apache.kafka.common.message.SimpleExampleMessageTest#testMyUint16")]
 fn test_my_uint16() {
     // Verify that the uint16 field reads as 33000 when not set.
     test_round_trip_default_version(&SimpleExampleMessageData::new(), &|message| {
@@ -313,6 +318,7 @@ fn test_my_uint16() {
 
 /// Translated from: testMyString
 #[test]
+#[doc(alias = "org.apache.kafka.common.message.SimpleExampleMessageTest#testMyString")]
 fn test_my_string() {
     // Verify that the tagged field reads as empty when not set.
     test_round_trip_default_version(&SimpleExampleMessageData::new(), &|message| {
@@ -336,6 +342,7 @@ fn test_my_string() {
 /// Similarly for uint32: set_my_uint32 takes a u32.
 /// These 4 assertion tests are not translatable and are correctly prevented at compile time.
 #[test]
+#[doc(alias = "org.apache.kafka.common.message.SimpleExampleMessageTest#testMyBytes")]
 fn test_my_bytes() {
     // uint16/uint32 range validation: handled by Rust type system (u16 and u32 types).
     // Java tests:
@@ -368,6 +375,7 @@ fn test_my_bytes() {
 
 /// Translated from: testTaggedUuid
 #[test]
+#[doc(alias = "org.apache.kafka.common.message.SimpleExampleMessageTest#testTaggedUuid")]
 fn test_tagged_uuid() {
     test_round_trip_default_version(&SimpleExampleMessageData::new(), &|message| {
         assert_eq!(Uuid::from_string("H3KKO4NTRPaCWtEmm3vW7A").unwrap(), message.tagged_uuid);
@@ -383,6 +391,7 @@ fn test_tagged_uuid() {
 
 /// Translated from: testTaggedLong
 #[test]
+#[doc(alias = "org.apache.kafka.common.message.SimpleExampleMessageTest#testTaggedLong")]
 fn test_tagged_long() {
     test_round_trip_default_version(&SimpleExampleMessageData::new(), &|message| {
         assert_eq!(0x0caf_caca_fcac_afca_i64, message.tagged_long);
@@ -399,6 +408,7 @@ fn test_tagged_long() {
 
 /// Translated from: testMyStruct
 #[test]
+#[doc(alias = "org.apache.kafka.common.message.SimpleExampleMessageTest#testMyStruct")]
 fn test_my_struct() {
     // Verify that we can set and retrieve a struct object.
     let my_struct = MyStruct::new()
@@ -420,6 +430,7 @@ fn test_my_struct() {
 
 /// Translated from: testMyStructUnsupportedVersion
 #[test]
+#[doc(alias = "org.apache.kafka.common.message.SimpleExampleMessageTest#testMyStructUnsupportedVersion")]
 fn test_my_struct_unsupported_version() {
     let my_struct = MyStruct::new().set_struct_id(10).clone();
 
@@ -453,6 +464,7 @@ fn test_my_struct_unsupported_version() {
 /// 1. Tagged struct can be serialized/deserialized for version it is supported
 /// 2. Tagged struct doesn't matter for versions it is not declared.
 #[test]
+#[doc(alias = "org.apache.kafka.common.message.SimpleExampleMessageTest#testMyTaggedStruct")]
 fn test_my_tagged_struct() {
     // Verify that we can set and retrieve a tagged struct object.
     let my_struct = TaggedStruct::new().set_struct_id("abc".to_string()).clone();
@@ -491,6 +503,7 @@ fn test_my_tagged_struct() {
 
 /// Translated from: testCommonStruct
 #[test]
+#[doc(alias = "org.apache.kafka.common.message.SimpleExampleMessageTest#testCommonStruct")]
 fn test_common_struct() {
     let mut message = SimpleExampleMessageData::new();
     message.set_my_common_struct(TestCommonStruct::new().set_foo(1).set_bar(2).clone());
@@ -500,6 +513,9 @@ fn test_common_struct() {
 
 /// Translated from: testTaggedFieldsShouldSupportFlexibleVersionSubset
 #[test]
+#[doc(
+    alias = "org.apache.kafka.common.message.SimpleExampleMessageTest#testTaggedFieldsShouldSupportFlexibleVersionSubset"
+)]
 fn test_tagged_fields_should_support_flexible_version_subset() {
     let mut message = SimpleExampleMessageData::new();
     message.set_tagged_long_flexible_version_subset(15);
@@ -527,6 +543,7 @@ fn test_tagged_fields_should_support_flexible_version_subset() {
 ///   "SimpleExampleMessageData { process_id: ..., my_tagged_int_array: [], ... }"
 /// We verify the Display output contains the expected field values in Rust Debug format.
 #[test]
+#[doc(alias = "org.apache.kafka.common.message.SimpleExampleMessageTest#testToString")]
 fn test_to_string() {
     let mut message = SimpleExampleMessageData::new();
     message.set_my_uint16(65535);

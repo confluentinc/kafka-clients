@@ -23,6 +23,7 @@ use super::ConfigEntry;
 /// Corresponds to `AlterConfigOp.OpType`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
+#[doc(alias = "org.apache.kafka.clients.admin.AlterConfigOp$OpType")]
 pub enum OpType {
     /// Set the value of the configuration entry.
     Set,
@@ -44,6 +45,7 @@ impl OpType {
     /// Returns the wire id for this operation type.
     ///
     /// Corresponds to `AlterConfigOp.OpType.id()`.
+    #[doc(alias = "org.apache.kafka.clients.admin.AlterConfigOp$OpType#id")]
     pub fn id(&self) -> i8 {
         match self {
             OpType::Set => 0,
@@ -58,6 +60,7 @@ impl OpType {
     ///
     /// Corresponds to `AlterConfigOp.OpType.forId(byte)` (which returns `null`
     /// for an unknown id).
+    #[doc(alias = "org.apache.kafka.clients.admin.AlterConfigOp$OpType#forId")]
     pub fn for_id(id: i8) -> Option<OpType> {
         match id {
             0 => Some(OpType::Set),
@@ -74,6 +77,7 @@ impl OpType {
 ///
 /// Corresponds to `org.apache.kafka.clients.admin.AlterConfigOp`.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[doc(alias = "org.apache.kafka.clients.admin.AlterConfigOp")]
 pub struct AlterConfigOp {
     config_entry: ConfigEntry,
     op_type: OpType,
@@ -81,16 +85,19 @@ pub struct AlterConfigOp {
 
 impl AlterConfigOp {
     /// Creates a new alter config operation.
+    #[doc(alias = "org.apache.kafka.clients.admin.AlterConfigOp#AlterConfigOp")]
     pub fn new(config_entry: ConfigEntry, operation_type: OpType) -> Self {
         Self { config_entry, op_type: operation_type }
     }
 
     /// Returns the config entry.
+    #[doc(alias = "org.apache.kafka.clients.admin.AlterConfigOp#configEntry")]
     pub fn config_entry(&self) -> &ConfigEntry {
         &self.config_entry
     }
 
     /// Returns the operation type.
+    #[doc(alias = "org.apache.kafka.clients.admin.AlterConfigOp#opType")]
     pub fn op_type(&self) -> OpType {
         self.op_type
     }

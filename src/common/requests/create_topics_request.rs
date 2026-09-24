@@ -29,6 +29,7 @@ use super::{ConcreteRequest, ConcreteResponse, CreateTopicsResponse, RequestBuil
 ///
 /// Corresponds to `org.apache.kafka.common.requests.CreateTopicsRequest`.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.CreateTopicsRequest")]
 pub struct CreateTopicsRequest {
     data: CreateTopicsRequestData,
     version: i16,
@@ -44,11 +45,13 @@ impl CreateTopicsRequest {
     pub const NO_REPLICATION_FACTOR: i16 = -1;
 
     /// Creates a new `CreateTopicsRequest` from data and version.
+    #[doc(alias = "org.apache.kafka.common.requests.CreateTopicsRequest#CreateTopicsRequest")]
     pub fn new(data: CreateTopicsRequestData, version: i16) -> Self {
         Self { data, version }
     }
 
     /// Returns a reference to the underlying data.
+    #[doc(alias = "org.apache.kafka.common.requests.CreateTopicsRequest#data")]
     pub fn data(&self) -> &CreateTopicsRequestData {
         &self.data
     }
@@ -74,6 +77,7 @@ impl CreateTopicsRequest {
     /// Mirrors `CreateTopicsRequest.getErrorResponse` (which uses
     /// `ApiError.fromThrowable`); the enum-dispatch caller supplies the mapped
     /// [`Errors`] directly.
+    #[doc(alias = "org.apache.kafka.common.requests.CreateTopicsRequest#getErrorResponse")]
     pub fn get_error_response(&self, throttle_time_ms: i32, error: &Errors) -> ConcreteResponse {
         let mut response = CreateTopicsResponseData::new();
         if self.version >= 2 {
@@ -97,6 +101,7 @@ impl CreateTopicsRequest {
     /// # Errors
     ///
     /// Returns an error if parsing fails.
+    #[doc(alias = "org.apache.kafka.common.requests.CreateTopicsRequest#parse")]
     pub fn parse(readable: &mut dyn Readable, version: i16) -> io::Result<Self> {
         let data = CreateTopicsRequestData::read(readable, version)?;
         Ok(Self::new(data, version))
@@ -113,6 +118,7 @@ impl std::fmt::Display for CreateTopicsRequest {
 ///
 /// Corresponds to `CreateTopicsRequest.Builder` in Java.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.CreateTopicsRequest$Builder")]
 pub struct CreateTopicsRequestBuilder {
     data: CreateTopicsRequestData,
     oldest_allowed_version: i16,
@@ -121,6 +127,7 @@ pub struct CreateTopicsRequestBuilder {
 
 impl CreateTopicsRequestBuilder {
     /// Creates a builder from existing data.
+    #[doc(alias = "org.apache.kafka.common.requests.CreateTopicsRequest$Builder#Builder")]
     pub fn new(data: CreateTopicsRequestData) -> Self {
         Self {
             data,

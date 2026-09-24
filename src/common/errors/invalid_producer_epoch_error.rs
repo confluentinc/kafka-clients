@@ -25,6 +25,7 @@ kafka_error_class! {
     /// Java `extends` chain:
     ///    `InvalidProducerEpochException` -> `ApplicationRecoverableException` ->
     ///   `ApiException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.InvalidProducerEpochException")]
     InvalidProducerEpochError,
     code: Errors::InvalidProducerEpoch,
     extends: [

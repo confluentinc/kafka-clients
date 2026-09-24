@@ -23,6 +23,7 @@ use super::ConcreteRequest;
 /// Corresponds to `RequestAndSize` in Java.
 #[derive(Debug)]
 #[non_exhaustive]
+#[doc(alias = "org.apache.kafka.common.requests.RequestAndSize")]
 pub struct RequestAndSize {
     /// The parsed request.
     pub(crate) request: ConcreteRequest,
@@ -32,6 +33,7 @@ pub struct RequestAndSize {
 
 impl RequestAndSize {
     /// Creates a new `RequestAndSize`.
+    #[doc(alias = "org.apache.kafka.common.requests.RequestAndSize#RequestAndSize")]
     pub fn new(request: ConcreteRequest, size: usize) -> Self {
         Self { request, size }
     }

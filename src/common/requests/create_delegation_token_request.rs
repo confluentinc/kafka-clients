@@ -30,6 +30,7 @@ use super::{ConcreteRequest, ConcreteResponse, CreateDelegationTokenResponse, Re
 /// Corresponds to
 /// `org.apache.kafka.common.requests.CreateDelegationTokenRequest`.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.CreateDelegationTokenRequest")]
 pub struct CreateDelegationTokenRequest {
     data: CreateDelegationTokenRequestData,
     version: i16,
@@ -37,11 +38,13 @@ pub struct CreateDelegationTokenRequest {
 
 impl CreateDelegationTokenRequest {
     /// Creates a new `CreateDelegationTokenRequest` from data and version.
+    #[doc(alias = "org.apache.kafka.common.requests.CreateDelegationTokenRequest#CreateDelegationTokenRequest")]
     pub fn new(data: CreateDelegationTokenRequestData, version: i16) -> Self {
         Self { data, version }
     }
 
     /// Returns a reference to the underlying data.
+    #[doc(alias = "org.apache.kafka.common.requests.CreateDelegationTokenRequest#data")]
     pub fn data(&self) -> &CreateDelegationTokenRequestData {
         &self.data
     }
@@ -65,6 +68,7 @@ impl CreateDelegationTokenRequest {
     ///
     /// Mirrors `CreateDelegationTokenRequest.getErrorResponse`, which prepares a
     /// response with the `ANONYMOUS` owner and requester principals.
+    #[doc(alias = "org.apache.kafka.common.requests.CreateDelegationTokenRequest#getErrorResponse")]
     pub fn get_error_response(&self, throttle_time_ms: i32, error: &Errors) -> ConcreteResponse {
         ConcreteResponse::CreateDelegationToken(CreateDelegationTokenResponse::prepare_response(
             self.version,
@@ -80,6 +84,7 @@ impl CreateDelegationTokenRequest {
     /// # Errors
     ///
     /// Returns an error if parsing fails.
+    #[doc(alias = "org.apache.kafka.common.requests.CreateDelegationTokenRequest#parse")]
     pub fn parse(readable: &mut dyn Readable, version: i16) -> io::Result<Self> {
         let data = CreateDelegationTokenRequestData::read(readable, version)?;
         Ok(Self::new(data, version))
@@ -100,6 +105,7 @@ impl std::fmt::Display for CreateDelegationTokenRequest {
 ///
 /// Corresponds to `CreateDelegationTokenRequest.Builder` in Java.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.CreateDelegationTokenRequest$Builder")]
 pub struct CreateDelegationTokenRequestBuilder {
     data: CreateDelegationTokenRequestData,
     oldest_allowed_version: i16,
@@ -108,6 +114,7 @@ pub struct CreateDelegationTokenRequestBuilder {
 
 impl CreateDelegationTokenRequestBuilder {
     /// Creates a builder from existing data.
+    #[doc(alias = "org.apache.kafka.common.requests.CreateDelegationTokenRequest$Builder#Builder")]
     pub fn new(data: CreateDelegationTokenRequestData) -> Self {
         Self {
             data,

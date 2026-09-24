@@ -30,6 +30,7 @@ use super::KafkaClient;
 /// Translates the Java static-utility class `org.apache.kafka.clients.NetworkClientUtils`,
 /// which has no instance state, so it becomes a unit struct hosting its
 /// statics as associated items.
+#[doc(alias = "org.apache.kafka.clients.NetworkClientUtils")]
 pub struct NetworkClientUtils;
 
 impl NetworkClientUtils {
@@ -46,6 +47,7 @@ impl NetworkClientUtils {
     /// PLAN §9.28). Discarding the returned responses here would silently lose a
     /// produce/transactional response for a different in-flight request that lands on
     /// the shared selector during this poll.
+    #[doc(alias = "org.apache.kafka.clients.NetworkClientUtils#isReady")]
     pub async fn is_ready<C: KafkaClient>(
         client: &mut C,
         node: &Node,
@@ -91,6 +93,7 @@ impl NetworkClientUtils {
     ///   the `&dyn Fn()` reference must be `Send` — and a shared reference `&T` is `Send`
     ///   exactly when `T: Sync`. `+ Send` on the trait object itself would be redundant.
     /// * `timeout_ms` - The maximum time to wait in milliseconds
+    #[doc(alias = "org.apache.kafka.clients.NetworkClientUtils#awaitReady")]
     pub async fn await_ready<C: KafkaClient>(
         client: &mut C,
         node: &Node,
@@ -177,6 +180,7 @@ impl NetworkClientUtils {
     /// * `client` - The Kafka client to use
     /// * `request` - The request to send
     /// * `now_ms_fn` - A function that returns the current time in milliseconds
+    #[doc(alias = "org.apache.kafka.clients.NetworkClientUtils#sendAndReceive")]
     pub async fn send_and_receive<C: KafkaClient>(
         client: &mut C,
         request: ClientRequest,
@@ -221,12 +225,14 @@ impl NetworkClientUtils {
 
     /// Check if the node is disconnected and unavailable for immediate reconnection
     /// (i.e. if it is in reconnect backoff window following the disconnect).
+    #[doc(alias = "org.apache.kafka.clients.NetworkClientUtils#isUnavailable")]
     pub fn is_unavailable<C: KafkaClient>(client: &C, node: &Node, now: i64) -> bool {
         client.connection_failed(node) && client.connection_delay(node, now) > 0
     }
 
     /// Check for an authentication error on a given node and return the error if there
     /// is one.
+    #[doc(alias = "org.apache.kafka.clients.NetworkClientUtils#maybeThrowAuthFailure")]
     pub fn maybe_return_auth_failure<C: KafkaClient>(client: &C, node: &Node) -> io::Result<()> {
         if let Some(err) = client.authentication_error(node) {
             // Same carrier as `await_ready` above, and the same flattening for the
@@ -239,6 +245,7 @@ impl NetworkClientUtils {
 
     /// Initiate a connection if currently possible. This is only really useful for resetting
     /// the failed status of a socket.
+    #[doc(alias = "org.apache.kafka.clients.NetworkClientUtils#tryConnect")]
     pub async fn try_connect<C: KafkaClient>(client: &mut C, node: &Node, now: i64) {
         client.ready(node, now).await;
     }

@@ -22,18 +22,21 @@ use crate::common::config::ConfigResource;
 /// The result of the `Admin::list_config_resources` call.
 ///
 /// Corresponds to `org.apache.kafka.clients.admin.ListConfigResourcesResult`.
+#[doc(alias = "org.apache.kafka.clients.admin.ListConfigResourcesResult")]
 pub struct ListConfigResourcesResult {
     future: KafkaFuture<Vec<ConfigResource>>,
 }
 
 impl ListConfigResourcesResult {
     /// Creates a new result from the config-resources future.
+    #[doc(alias = "org.apache.kafka.clients.admin.ListConfigResourcesResult#ListConfigResourcesResult")]
     pub(crate) fn new(future: KafkaFuture<Vec<ConfigResource>>) -> Self {
         Self { future }
     }
 
     /// Returns a future that yields the collection of config resources in the
     /// cluster.
+    #[doc(alias = "org.apache.kafka.clients.admin.ListConfigResourcesResult#all")]
     pub fn all(&self) -> KafkaFuture<Vec<ConfigResource>> {
         self.future.clone()
     }

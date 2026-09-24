@@ -40,6 +40,7 @@ use super::{PartitionLeaderFuture, PartitionLeaderStrategy};
 ///
 /// Corresponds to `DeleteRecordsHandler` (a `Batched` handler over
 /// `TopicPartition` keys yielding [`DeletedRecords`] values).
+#[doc(alias = "org.apache.kafka.clients.admin.internals.DeleteRecordsHandler")]
 pub(crate) struct DeleteRecordsHandler {
     records_to_delete: HashMap<TopicPartition, RecordsToDelete>,
     log_context: LogContext,
@@ -49,6 +50,7 @@ pub(crate) struct DeleteRecordsHandler {
 
 impl DeleteRecordsHandler {
     /// Creates a handler for the given per-partition deletion offsets.
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.DeleteRecordsHandler#DeleteRecordsHandler")]
     pub(crate) fn new(
         records_to_delete: HashMap<TopicPartition, RecordsToDelete>,
         log_context: LogContext,
@@ -62,6 +64,7 @@ impl DeleteRecordsHandler {
     /// resolved.
     ///
     /// Mirrors `DeleteRecordsHandler.newFuture`.
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.DeleteRecordsHandler#newFuture")]
     pub(crate) fn new_future(
         topic_partitions: HashSet<TopicPartition>,
         partition_leader_cache: Arc<PartitionLeaderCache>,
@@ -72,6 +75,7 @@ impl DeleteRecordsHandler {
     /// Builds a single batched `DeleteRecords` request for the given keys.
     ///
     /// Mirrors `buildBatchedRequest`.
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.DeleteRecordsHandler#buildBatchedRequest")]
     pub(crate) fn build_batched_request(
         &self,
         _broker_id: i32,
@@ -103,6 +107,7 @@ impl DeleteRecordsHandler {
     /// (left out of the result to retry) or failed (fatal).
     ///
     /// Mirrors `handlePartitionError`.
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.DeleteRecordsHandler#handlePartitionError")]
     fn handle_partition_error(
         &self,
         topic_partition: &TopicPartition,

@@ -25,6 +25,7 @@ kafka_error_class! {
     ///
     /// Java `extends` chain:
     ///    `TransactionAbortableException` -> `ApiException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.TransactionAbortableException")]
     TransactionAbortableError,
     code: Errors::TransactionAbortable,
     extends: [

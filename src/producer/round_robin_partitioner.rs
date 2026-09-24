@@ -38,6 +38,7 @@ use crate::producer::Partitioner;
 /// counter is an [`AtomicI32`] inside a concurrent map — the direct translation
 /// of Java's `ConcurrentMap<String, AtomicInteger>`.
 #[derive(Default)]
+#[doc(alias = "org.apache.kafka.clients.producer.RoundRobinPartitioner")]
 pub struct RoundRobinPartitioner {
     /// Per-topic round-robin counter. Java: `topicCounterMap`.
     topic_counter_map: DashMap<String, AtomicI32>,
@@ -57,6 +58,7 @@ impl RoundRobinPartitioner {
     /// first record for a topic takes the `entry` slow path that allocates the
     /// key. Like Java's `getAndIncrement`, `fetch_add` wraps on overflow, and the
     /// negative wrap is folded back by [`to_positive`] at the call site.
+    #[doc(alias = "org.apache.kafka.clients.producer.RoundRobinPartitioner#nextValue")]
     fn next_value(&self, topic: &str) -> i32 {
         if let Some(counter) = self.topic_counter_map.get(topic) {
             return counter.fetch_add(1, Ordering::Relaxed);
@@ -122,6 +124,9 @@ mod tests {
 
     /// Translated from `RoundRobinPartitionerTest.testRoundRobinWithUnavailablePartitions`.
     #[test]
+    #[doc(
+        alias = "org.apache.kafka.clients.producer.RoundRobinPartitionerTest#testRoundRobinWithUnavailablePartitions"
+    )]
     fn test_round_robin_with_unavailable_partitions() {
         let n = nodes();
         // Intentionally make the partition list not in partition order to test the
@@ -168,6 +173,7 @@ mod tests {
 
     /// Translated from `RoundRobinPartitionerTest.testRoundRobinWithKeyBytes`.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.producer.RoundRobinPartitionerTest#testRoundRobinWithKeyBytes")]
     fn test_round_robin_with_key_bytes() {
         let topic_a = "topicA";
         let topic_b = "topicB";

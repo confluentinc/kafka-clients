@@ -60,6 +60,7 @@ impl std::fmt::Debug for SaslChannelBuilder {
     }
 }
 
+#[doc(alias = "org.apache.kafka.common.network.SaslChannelBuilder")]
 pub struct SaslChannelBuilder {
     /// The security protocol (SASL_PLAINTEXT or SASL_SSL).
     security_protocol: SecurityProtocol,
@@ -94,6 +95,7 @@ impl SaslChannelBuilder {
     /// - The security protocol is not `SASL_PLAINTEXT` or `SASL_SSL`
     /// - Username or password is missing in the SASL config
     /// - `SASL_SSL` is requested but no `ssl_factory` is provided
+    #[doc(alias = "org.apache.kafka.common.network.SaslChannelBuilder#SaslChannelBuilder")]
     pub fn new(
         security_protocol: SecurityProtocol,
         sasl_config: SaslConfigs,

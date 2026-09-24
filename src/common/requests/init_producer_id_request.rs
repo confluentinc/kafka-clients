@@ -36,6 +36,7 @@ use super::RequestBuilder;
 ///
 /// Corresponds to `org.apache.kafka.common.requests.InitProducerIdRequest`.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.InitProducerIdRequest")]
 pub struct InitProducerIdRequest {
     data: InitProducerIdRequestData,
     version: i16,
@@ -43,11 +44,13 @@ pub struct InitProducerIdRequest {
 
 impl InitProducerIdRequest {
     /// Creates a new `InitProducerIdRequest` from data and version.
+    #[doc(alias = "org.apache.kafka.common.requests.InitProducerIdRequest#InitProducerIdRequest")]
     pub fn new(data: InitProducerIdRequestData, version: i16) -> Self {
         Self { data, version }
     }
 
     /// Returns a reference to the underlying data.
+    #[doc(alias = "org.apache.kafka.common.requests.InitProducerIdRequest#data")]
     pub fn data(&self) -> &InitProducerIdRequestData {
         &self.data
     }
@@ -77,6 +80,7 @@ impl InitProducerIdRequest {
     /// Whether an ongoing prepared transaction should be kept (KIP-939).
     ///
     /// Corresponds to Java's `keepPreparedTxn()`.
+    #[doc(alias = "org.apache.kafka.common.requests.InitProducerIdRequest#keepPreparedTxn")]
     pub fn keep_prepared_txn(&self) -> bool {
         self.data.keep_prepared_txn
     }
@@ -87,6 +91,7 @@ impl InitProducerIdRequest {
     /// Note the producer id/epoch are always the sentinels regardless of
     /// version, and the throttle time is always set — Java does not
     /// version-gate either here.
+    #[doc(alias = "org.apache.kafka.common.requests.InitProducerIdRequest#getErrorResponse")]
     pub fn get_error_response(&self, throttle_time_ms: i32, error: &Errors) -> ConcreteResponse {
         let mut response = InitProducerIdResponseData::new();
         response
@@ -103,6 +108,7 @@ impl InitProducerIdRequest {
     /// # Errors
     ///
     /// Returns an error if parsing fails.
+    #[doc(alias = "org.apache.kafka.common.requests.InitProducerIdRequest#parse")]
     pub fn parse(readable: &mut dyn Readable, version: i16) -> io::Result<Self> {
         let data = InitProducerIdRequestData::read(readable, version)?;
         Ok(Self::new(data, version))
@@ -119,6 +125,7 @@ impl std::fmt::Display for InitProducerIdRequest {
 ///
 /// Corresponds to `InitProducerIdRequest.Builder` in Java.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.InitProducerIdRequest$Builder")]
 pub struct InitProducerIdRequestBuilder {
     data: InitProducerIdRequestData,
     oldest_allowed_version: i16,
@@ -128,6 +135,7 @@ pub struct InitProducerIdRequestBuilder {
 impl InitProducerIdRequestBuilder {
     /// Creates a builder wrapping the given data with the full supported
     /// version range.
+    #[doc(alias = "org.apache.kafka.common.requests.InitProducerIdRequest$Builder#Builder")]
     pub fn new(data: InitProducerIdRequestData) -> Self {
         Self {
             data,

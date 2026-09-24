@@ -25,6 +25,7 @@ kafka_error_class! {
     ///
     /// Java `extends` chain:
     ///    `TelemetryTooLargeException` -> `ApiException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.TelemetryTooLargeException")]
     TelemetryTooLargeError,
     code: Errors::TelemetryTooLarge,
     extends: [

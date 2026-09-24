@@ -24,23 +24,27 @@ use crate::common::KafkaFuture;
 ///
 /// Corresponds to `org.apache.kafka.clients.admin.CreatePartitionsResult`.
 #[derive(Clone, Debug)]
+#[doc(alias = "org.apache.kafka.clients.admin.CreatePartitionsResult")]
 pub struct CreatePartitionsResult {
     values: HashMap<String, KafkaFuture<()>>,
 }
 
 impl CreatePartitionsResult {
     /// Creates a result from the per-topic futures.
+    #[doc(alias = "org.apache.kafka.clients.admin.CreatePartitionsResult#CreatePartitionsResult")]
     pub(crate) fn new(values: HashMap<String, KafkaFuture<()>>) -> Self {
         Self { values }
     }
 
     /// Return a map from topic names to futures, which can be used to check the
     /// status of individual partition creations.
+    #[doc(alias = "org.apache.kafka.clients.admin.CreatePartitionsResult#values")]
     pub fn values(&self) -> &HashMap<String, KafkaFuture<()>> {
         &self.values
     }
 
     /// Return a future which succeeds if all the partition creations succeed.
+    #[doc(alias = "org.apache.kafka.clients.admin.CreatePartitionsResult#all")]
     pub fn all(&self) -> KafkaFuture<()> {
         KafkaFuture::all_of(self.values.values().cloned().collect())
     }

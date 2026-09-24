@@ -26,6 +26,7 @@ use crate::common::metrics::{Measurable, MetricConfig, Stat};
 ///
 /// See also [`crate::common::metrics::stats::CumulativeCount`] for a non-sampled
 /// version of this metric.
+#[doc(alias = "org.apache.kafka.common.metrics.stats.WindowedCount")]
 pub struct WindowedCount {
     inner: SampledStat,
 }

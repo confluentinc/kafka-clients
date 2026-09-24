@@ -124,6 +124,7 @@ pub struct MetadataOverrides {
 /// sender thread. Thread safety is ensured via a `Mutex`.
 ///
 /// Corresponds to `org.apache.kafka.clients.Metadata`.
+#[doc(alias = "org.apache.kafka.clients.Metadata")]
 pub struct Metadata {
     // The metadata snapshot is stored inside MetadataInner, protected by the mutex.
     // Java uses `volatile` for this field; in Rust we protect all mutable state
@@ -210,6 +211,7 @@ struct MetadataInner {
 
 /// Result of `new_metadata_request_and_version`.
 #[non_exhaustive]
+#[doc(alias = "org.apache.kafka.clients.Metadata$MetadataRequestAndVersion")]
 pub struct MetadataRequestAndVersion {
     /// The request builder.
     pub(crate) request_builder: MetadataRequestBuilder,
@@ -250,6 +252,7 @@ impl MetadataRequestAndVersion {
 /// is derived from an external source (e.g. a committed offset).
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
+#[doc(alias = "org.apache.kafka.clients.Metadata$LeaderAndEpoch")]
 pub struct LeaderAndEpoch {
     /// The leader node, if known.
     pub(crate) leader: Option<Node>,
@@ -259,11 +262,13 @@ pub struct LeaderAndEpoch {
 
 impl LeaderAndEpoch {
     /// Creates a new `LeaderAndEpoch`.
+    #[doc(alias = "org.apache.kafka.clients.Metadata$LeaderAndEpoch#LeaderAndEpoch")]
     pub fn new(leader: Option<Node>, epoch: Option<i32>) -> Self {
         Self { leader, epoch }
     }
 
     /// Returns a `LeaderAndEpoch` with no leader and no epoch.
+    #[doc(alias = "org.apache.kafka.clients.Metadata$LeaderAndEpoch#noLeaderOrEpoch")]
     pub fn no_leader_or_epoch() -> Self {
         Self { leader: None, epoch: None }
     }
@@ -299,6 +304,7 @@ impl fmt::Display for LeaderAndEpoch {
 /// Used by `update_partition_leadership`.
 #[derive(Clone, Debug)]
 #[non_exhaustive]
+#[doc(alias = "org.apache.kafka.clients.Metadata$LeaderIdAndEpoch")]
 pub struct LeaderIdAndEpoch {
     /// The leader node ID, if known.
     pub(crate) leader_id: Option<i32>,
@@ -308,6 +314,7 @@ pub struct LeaderIdAndEpoch {
 
 impl LeaderIdAndEpoch {
     /// Creates a new `LeaderIdAndEpoch`.
+    #[doc(alias = "org.apache.kafka.clients.Metadata$LeaderIdAndEpoch#LeaderIdAndEpoch")]
     pub fn new(leader_id: Option<i32>, epoch: Option<i32>) -> Self {
         Self { leader_id, epoch }
     }
@@ -349,6 +356,7 @@ impl Metadata {
     /// * `metadata_expire_ms` - The maximum amount of time that metadata can be retained
     ///   without refresh
     /// * `cluster_resource_listeners` - Listeners notified of cluster resource updates
+    #[doc(alias = "org.apache.kafka.clients.Metadata#Metadata")]
     pub fn new(
         refresh_backoff_ms: i64,
         refresh_backoff_max_ms: i64,
@@ -375,6 +383,7 @@ impl Metadata {
     ///   without refresh
     /// * `cluster_resource_listeners` - Listeners notified of cluster resource updates
     /// * `log_context` - Contextual log message prefix
+    #[doc(alias = "org.apache.kafka.clients.Metadata#Metadata")]
     pub fn with_log_context(
         refresh_backoff_ms: i64,
         refresh_backoff_max_ms: i64,
@@ -437,6 +446,7 @@ impl Metadata {
     /// * `metadata_expire_ms` - The maximum amount of time that metadata can be retained
     /// * `cluster_resource_listeners` - Listeners notified of cluster resource updates
     /// * `overrides` - Configuration for overriding default behavior
+    #[doc(alias = "org.apache.kafka.clients.Metadata#Metadata")]
     pub fn with_overrides(
         refresh_backoff_ms: i64,
         refresh_backoff_max_ms: i64,
@@ -488,12 +498,14 @@ impl Metadata {
     }
 
     /// Gets the current cluster info without blocking.
+    #[doc(alias = "org.apache.kafka.clients.Metadata#fetch")]
     pub fn fetch(&self) -> Arc<Cluster> {
         let inner = self.inner.lock().unwrap();
         inner.metadata_snapshot.cluster_arc()
     }
 
     /// Gets the current metadata snapshot.
+    #[doc(alias = "org.apache.kafka.clients.Metadata#fetchMetadataSnapshot")]
     pub fn fetch_metadata_snapshot(&self) -> Arc<MetadataSnapshot> {
         let inner = self.inner.lock().unwrap();
         Arc::clone(&inner.metadata_snapshot)
@@ -504,6 +516,7 @@ impl Metadata {
     /// There are two calculations for backing off based on how many attempts to retrieve
     /// metadata have been made since the last successful response, and how many equivalent
     /// metadata responses have been received.
+    #[doc(alias = "org.apache.kafka.clients.Metadata#timeToAllowUpdate")]
     pub fn time_to_allow_update(&self, now_ms: i64) -> i64 {
         let mut inner = self.inner.lock().unwrap();
         Self::time_to_allow_update_inner(&mut inner, now_ms)
@@ -540,6 +553,7 @@ impl Metadata {
     /// This is the maximum of the time the current info will expire and the time the
     /// current info can be updated (i.e. backoff time has elapsed). If an update has
     /// been requested, the metadata expiry time is now.
+    #[doc(alias = "org.apache.kafka.clients.Metadata#timeToNextUpdate")]
     pub fn time_to_next_update(&self, now_ms: i64) -> i64 {
         let mut inner = self.inner.lock().unwrap();
         Self::time_to_next_update_inner(&mut inner, now_ms)
@@ -556,6 +570,7 @@ impl Metadata {
     }
 
     /// Returns the metadata expiry time in milliseconds.
+    #[doc(alias = "org.apache.kafka.clients.Metadata#metadataExpireMs")]
     pub fn metadata_expire_ms(&self) -> i64 {
         let inner = self.inner.lock().unwrap();
         inner.metadata_expire_ms
@@ -569,6 +584,7 @@ impl Metadata {
     ///   changed) and `true` when new metadata is being requested (e.g. adding a topic).
     ///
     /// Returns the current `update_version` before the update.
+    #[doc(alias = "org.apache.kafka.clients.Metadata#requestUpdate")]
     pub fn request_update(&self, reset_equivalent_response_backoff: bool) -> i32 {
         let mut inner = self.inner.lock().unwrap();
         #[cfg(test)]
@@ -585,6 +601,7 @@ impl Metadata {
     /// Request an immediate update for newly requested topics.
     ///
     /// Returns the current `update_version` before the update.
+    #[doc(alias = "org.apache.kafka.clients.Metadata#requestUpdateForNewTopics")]
     pub fn request_update_for_new_topics(&self) -> i32 {
         let mut inner = self.inner.lock().unwrap();
         inner.last_refresh_ms = 0;
@@ -600,6 +617,7 @@ impl Metadata {
     ///
     /// # Errors
     /// Returns an error if `leader_epoch` is negative.
+    #[doc(alias = "org.apache.kafka.clients.Metadata#updateLastSeenEpochIfNewer")]
     pub fn update_last_seen_epoch_if_newer(
         &self,
         topic_partition: &TopicPartition,
@@ -665,12 +683,14 @@ impl Metadata {
     }
 
     /// Returns the last seen leader epoch for the given partition.
+    #[doc(alias = "org.apache.kafka.clients.Metadata#lastSeenLeaderEpoch")]
     pub fn last_seen_leader_epoch(&self, topic_partition: &TopicPartition) -> Option<i32> {
         let inner = self.inner.lock().unwrap();
         inner.last_seen_leader_epochs.get(topic_partition).copied()
     }
 
     /// Checks whether an update has been explicitly requested.
+    #[doc(alias = "org.apache.kafka.clients.Metadata#updateRequested")]
     pub fn update_requested(&self) -> bool {
         let inner = self.inner.lock().unwrap();
         inner.need_full_update || inner.need_partial_update
@@ -727,12 +747,14 @@ impl Metadata {
     }
 
     /// Adds a cluster update listener.
+    #[doc(alias = "org.apache.kafka.clients.Metadata#addClusterUpdateListener")]
     pub fn add_cluster_update_listener(&self, listener: Box<dyn crate::common::ClusterResourceListener>) {
         let mut inner = self.inner.lock().unwrap();
         inner.cluster_resource_listeners.maybe_add(listener);
     }
 
     /// Returns the cached partition info if it exists and a newer leader epoch isn't known about.
+    #[doc(alias = "org.apache.kafka.clients.Metadata#partitionMetadataIfCurrent")]
     pub fn partition_metadata_if_current(&self, topic_partition: &TopicPartition) -> Option<PartitionMetadata> {
         let inner = self.inner.lock().unwrap();
         Self::partition_metadata_if_current_inner(&inner, topic_partition)
@@ -757,18 +779,21 @@ impl Metadata {
     }
 
     /// Returns the topic IDs mapping (topic name -> topic ID).
+    #[doc(alias = "org.apache.kafka.clients.Metadata#topicIds")]
     pub fn topic_ids(&self) -> HashMap<String, Uuid> {
         let inner = self.inner.lock().unwrap();
         inner.metadata_snapshot.topic_ids().clone()
     }
 
     /// Returns the topic names mapping (topic ID -> topic name).
+    #[doc(alias = "org.apache.kafka.clients.Metadata#topicNames")]
     pub fn topic_names(&self) -> HashMap<Uuid, String> {
         let inner = self.inner.lock().unwrap();
         inner.metadata_snapshot.topic_names().clone()
     }
 
     /// Returns the current leader and epoch for the given partition.
+    #[doc(alias = "org.apache.kafka.clients.Metadata#currentLeader")]
     pub fn current_leader(&self, topic_partition: &TopicPartition) -> LeaderAndEpoch {
         let inner = self.inner.lock().unwrap();
         let maybe_metadata = Self::partition_metadata_if_current_inner(&inner, topic_partition);
@@ -786,6 +811,7 @@ impl Metadata {
     }
 
     /// Bootstraps the metadata with the given (hostname, address) pairs.
+    #[doc(alias = "org.apache.kafka.clients.Metadata#bootstrap")]
     pub fn bootstrap(&self, addresses: Vec<(String, SocketAddr)>) {
         let mut inner = self.inner.lock().unwrap();
         inner.need_full_update = true;
@@ -795,6 +821,7 @@ impl Metadata {
     }
 
     /// Rebootstraps the metadata with the original bootstrap addresses.
+    #[doc(alias = "org.apache.kafka.clients.Metadata#rebootstrap")]
     pub fn rebootstrap(&self) {
         let mut inner = self.inner.lock().unwrap();
         let addresses = inner.bootstrap_addresses.clone();
@@ -807,6 +834,7 @@ impl Metadata {
     /// Updates metadata assuming the current request version.
     ///
     /// For testing only.
+    #[doc(alias = "org.apache.kafka.clients.Metadata#updateWithCurrentRequestVersion")]
     pub fn update_with_current_request_version(
         &self,
         response: &MetadataResponse,
@@ -828,6 +856,7 @@ impl Metadata {
     /// # Panics
     /// Panics if metadata is closed or response is `None` (since response is a reference,
     /// this can't actually happen).
+    #[doc(alias = "org.apache.kafka.clients.Metadata#update")]
     pub fn update(&self, request_version: i32, response: &MetadataResponse, is_partial_update: bool, now_ms: i64) {
         let retain_fn = &self.retain_topic_fn;
         let retain_with_id_fn = &self.retain_topic_with_id_fn;
@@ -919,6 +948,7 @@ impl Metadata {
     /// Non-overlapping metadata is kept as-is.
     ///
     /// Returns the set of partitions for which leaders were updated.
+    #[doc(alias = "org.apache.kafka.clients.Metadata#updatePartitionLeadership")]
     pub fn update_partition_leadership(
         &self,
         partition_leaders: &HashMap<TopicPartition, LeaderIdAndEpoch>,
@@ -1048,12 +1078,14 @@ impl Metadata {
         updated_partitions
     }
 
+    #[doc(alias = "org.apache.kafka.clients.Metadata#maybeSetMetadataError")]
     fn maybe_set_metadata_error(inner: &mut MetadataInner, cluster: &Cluster, log_context: &LogContext) {
         Self::clear_recoverable_errors(inner);
         Self::check_invalid_topics(inner, cluster, log_context);
         Self::check_unauthorized_topics(inner, cluster, log_context);
     }
 
+    #[doc(alias = "org.apache.kafka.clients.Metadata#checkInvalidTopics")]
     fn check_invalid_topics(inner: &mut MetadataInner, cluster: &Cluster, log_context: &LogContext) {
         if !cluster.invalid_topics().is_empty() {
             kafka_error!(
@@ -1065,6 +1097,7 @@ impl Metadata {
         }
     }
 
+    #[doc(alias = "org.apache.kafka.clients.Metadata#checkUnauthorizedTopics")]
     fn check_unauthorized_topics(inner: &mut MetadataInner, cluster: &Cluster, log_context: &LogContext) {
         if !cluster.unauthorized_topics().is_empty() {
             kafka_error!(
@@ -1083,6 +1116,7 @@ impl Metadata {
     /// topic-id-aware retain matching Java's
     /// `retainTopic(topicName, topicId, isInternal, nowMs)` invoked on every
     /// topic in the response (mirrors `Metadata.java:511`).
+    #[doc(alias = "org.apache.kafka.clients.Metadata#handleMetadataResponse")]
     fn handle_metadata_response(
         inner: &mut MetadataInner,
         metadata_response: &MetadataResponse,
@@ -1205,6 +1239,7 @@ impl Metadata {
     }
 
     /// Compute the latest partition metadata to cache given ordering by leader epochs.
+    #[doc(alias = "org.apache.kafka.clients.Metadata#updateLatestMetadata")]
     fn update_latest_metadata(
         inner: &mut MetadataInner,
         partition_metadata: &PartitionMetadata,
@@ -1303,6 +1338,7 @@ impl Metadata {
 
     /// If any non-retriable errors were encountered during metadata update,
     /// clear and return the error.
+    #[doc(alias = "org.apache.kafka.clients.Metadata#maybeThrowAnyException")]
     pub fn maybe_return_any_error(&self) -> Result<(), Error> {
         let mut inner = self.inner.lock().unwrap();
         Self::clear_errors_and_maybe_return_error(&mut inner, Self::recoverable_error)
@@ -1310,6 +1346,7 @@ impl Metadata {
 
     /// If any non-retriable errors were encountered for the specified topic,
     /// return the error. All errors from the last metadata update are cleared.
+    #[doc(alias = "org.apache.kafka.clients.Metadata#maybeThrowExceptionForTopic")]
     pub fn maybe_return_error_for_topic(&self, topic: &str) -> Result<(), Error> {
         let topic = topic.to_string();
         let mut inner = self.inner.lock().unwrap();
@@ -1317,6 +1354,7 @@ impl Metadata {
     }
 
     /// If any fatal errors were encountered during metadata update, return the error.
+    #[doc(alias = "org.apache.kafka.clients.Metadata#maybeThrowFatalException")]
     pub fn maybe_return_fatal_error(&self) -> Result<(), Error> {
         let mut inner = self.inner.lock().unwrap();
         if let Some(err) = inner.fatal_err.take() {
@@ -1325,6 +1363,7 @@ impl Metadata {
         Ok(())
     }
 
+    #[doc(alias = "org.apache.kafka.clients.Metadata#clearErrorsAndMaybeThrowException")]
     fn clear_errors_and_maybe_return_error<F>(inner: &mut MetadataInner, recoverable_supplier: F) -> Result<(), Error>
     where
         F: FnOnce(&MetadataInner) -> Option<Error>,
@@ -1337,6 +1376,7 @@ impl Metadata {
         }
     }
 
+    #[doc(alias = "org.apache.kafka.clients.Metadata#recoverableException")]
     fn recoverable_error(inner: &MetadataInner) -> Option<Error> {
         if !inner.unauthorized_topics.is_empty() {
             Some(Error::topic_authorization(inner.unauthorized_topics.clone()))
@@ -1347,6 +1387,7 @@ impl Metadata {
         }
     }
 
+    #[doc(alias = "org.apache.kafka.clients.Metadata#recoverableExceptionForTopic")]
     fn recoverable_error_for_topic(inner: &MetadataInner, topic: &str) -> Option<Error> {
         if inner.unauthorized_topics.contains(topic) {
             Some(Error::topic_authorization([topic.to_string()].into_iter().collect()))
@@ -1357,12 +1398,14 @@ impl Metadata {
         }
     }
 
+    #[doc(alias = "org.apache.kafka.clients.Metadata#clearRecoverableErrors")]
     fn clear_recoverable_errors(inner: &mut MetadataInner) {
         inner.invalid_topics = HashSet::new();
         inner.unauthorized_topics = HashSet::new();
     }
 
     /// Record an attempt to update the metadata that failed.
+    #[doc(alias = "org.apache.kafka.clients.Metadata#failedUpdate")]
     pub fn failed_update(&self, now: i64) {
         let mut inner = self.inner.lock().unwrap();
         inner.last_refresh_ms = now;
@@ -1371,6 +1414,7 @@ impl Metadata {
     }
 
     /// Propagate a fatal error which affects the ability to fetch metadata.
+    #[doc(alias = "org.apache.kafka.clients.Metadata#fatalError")]
     pub fn fatal_error(&self, error: Error) {
         {
             let mut inner = self.inner.lock().unwrap();
@@ -1456,18 +1500,21 @@ impl Metadata {
     }
 
     /// Returns the current metadata update version.
+    #[doc(alias = "org.apache.kafka.clients.Metadata#updateVersion")]
     pub fn update_version(&self) -> i32 {
         let inner = self.inner.lock().unwrap();
         inner.update_version
     }
 
     /// The last time metadata was successfully updated.
+    #[doc(alias = "org.apache.kafka.clients.Metadata#lastSuccessfulUpdate")]
     pub fn last_successful_update(&self) -> i64 {
         let inner = self.inner.lock().unwrap();
         inner.last_successful_refresh_ms
     }
 
     /// Close this metadata instance to indicate that metadata updates are no longer possible.
+    #[doc(alias = "org.apache.kafka.clients.Metadata#close")]
     pub fn close(&self) {
         let mut inner = self.inner.lock().unwrap();
         inner.is_closed = true;
@@ -1481,12 +1528,14 @@ impl Metadata {
     }
 
     /// Check if this metadata instance has been closed.
+    #[doc(alias = "org.apache.kafka.clients.Metadata#isClosed")]
     pub fn is_closed(&self) -> bool {
         let inner = self.inner.lock().unwrap();
         inner.is_closed
     }
 
     /// Creates a new metadata request and version for sending.
+    #[doc(alias = "org.apache.kafka.clients.Metadata#newMetadataRequestAndVersion")]
     pub fn new_metadata_request_and_version(&self, now_ms: i64) -> MetadataRequestAndVersion {
         let inner = self.inner.lock().unwrap();
 
@@ -1517,6 +1566,7 @@ impl Metadata {
     /// When a custom `request_builder_fn` is set (e.g. by `ProducerMetadata`
     /// or `ConsumerMetadata`), that function is called instead of the
     /// default `all_topics()`.
+    #[doc(alias = "org.apache.kafka.clients.Metadata#newMetadataRequestBuilder")]
     pub(crate) fn new_metadata_request_builder(&self) -> MetadataRequestBuilder {
         if let Some(f) = &self.request_builder_fn {
             f()
@@ -1532,6 +1582,7 @@ impl Metadata {
     /// that function is called. When `enable_partial_updates` is set (e.g. by
     /// `ConsumerMetadata`), the default metadata request builder is returned.
     /// Otherwise returns `None`.
+    #[doc(alias = "org.apache.kafka.clients.Metadata#newMetadataRequestBuilderForNewTopics")]
     fn new_metadata_request_builder_for_new_topics(&self) -> Option<MetadataRequestBuilder> {
         if let Some(f) = &self.new_topics_request_builder_fn {
             Some(f())
@@ -1698,6 +1749,7 @@ mod tests {
     /// Translated from `MetadataTest.testMetadataUpdateAfterClose`.
     #[test]
     #[should_panic(expected = "Update requested after metadata close")]
+    #[doc(alias = "org.apache.kafka.clients.MetadataTest#testMetadataUpdateAfterClose")]
     fn test_metadata_update_after_close() {
         let metadata = new_metadata();
         metadata.close();
@@ -1746,6 +1798,7 @@ mod tests {
 
     /// Translated from `MetadataTest.testUpdateMetadataAllowedImmediatelyAfterBootstrap`.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.MetadataTest#testUpdateMetadataAllowedImmediatelyAfterBootstrap")]
     fn test_update_metadata_allowed_immediately_after_bootstrap() {
         let now: i64 = 10000;
         let metadata = Metadata::new(
@@ -1763,6 +1816,7 @@ mod tests {
 
     /// Translated from `MetadataTest.testTimeToNextUpdate`.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.MetadataTest#testTimeToNextUpdate")]
     fn test_time_to_next_update() {
         check_time_to_next_update(100, 1000);
         check_time_to_next_update(1000, 100);
@@ -1773,6 +1827,7 @@ mod tests {
 
     /// Translated from `MetadataTest.testTimeToNextUpdateRetryBackoff`.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.MetadataTest#testTimeToNextUpdateRetryBackoff")]
     fn test_time_to_next_update_retry_backoff() {
         let metadata = new_metadata();
         let mut now: i64 = 10000;
@@ -1814,6 +1869,7 @@ mod tests {
 
     /// Translated from `MetadataTest.testFailedUpdate`.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.MetadataTest#testFailedUpdate")]
     fn test_failed_update() {
         let metadata = new_metadata();
         let time: i64 = 100;
@@ -1849,6 +1905,7 @@ mod tests {
 
     /// Translated from `MetadataTest.testClusterListenerGetsNotifiedOfUpdate`.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.MetadataTest#testClusterListenerGetsNotifiedOfUpdate")]
     fn test_cluster_listener_gets_notified_of_update() {
         let on_update_called = Arc::new(AtomicBool::new(false));
         let cluster_id_holder: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
@@ -1903,6 +1960,7 @@ mod tests {
 
     /// Translated from `MetadataTest.testRequestUpdate`.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.MetadataTest#testRequestUpdate")]
     fn test_request_update() {
         let metadata = new_metadata();
         assert!(!metadata.update_requested());
@@ -1938,6 +1996,7 @@ mod tests {
 
     /// Translated from `MetadataTest.testUpdateLastEpoch`.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.MetadataTest#testUpdateLastEpoch")]
     fn test_update_last_epoch() {
         let metadata = new_metadata();
         let tp = TopicPartition::new("topic-1".to_string(), 0);
@@ -1997,6 +2056,7 @@ mod tests {
 
     /// Translated from `MetadataTest.testEpochUpdateAfterTopicDeletion`.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.MetadataTest#testEpochUpdateAfterTopicDeletion")]
     fn test_epoch_update_after_topic_deletion() {
         let metadata = new_metadata();
         let tp = TopicPartition::new("topic-1".to_string(), 0);
@@ -2043,6 +2103,7 @@ mod tests {
 
     /// Translated from `MetadataTest.testEpochUpdateOnChangedTopicIds`.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.MetadataTest#testEpochUpdateOnChangedTopicIds")]
     fn test_epoch_update_on_changed_topic_ids() {
         let metadata = new_metadata();
         let tp = TopicPartition::new("topic-1".to_string(), 0);
@@ -2127,6 +2188,7 @@ mod tests {
 
     /// Translated from `MetadataTest.testRejectOldMetadata`.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.MetadataTest#testRejectOldMetadata")]
     fn test_reject_old_metadata() {
         let metadata = new_metadata();
         let partition_counts: HashMap<String, i32> = [("topic-1".to_string(), 1)].into_iter().collect();
@@ -2230,6 +2292,7 @@ mod tests {
 
     /// Translated from `MetadataTest.testNoEpoch`.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.MetadataTest#testNoEpoch")]
     fn test_no_epoch() {
         let metadata = new_metadata();
         metadata.update_with_current_request_version(&empty_metadata_response(), false, 0);
@@ -2263,6 +2326,7 @@ mod tests {
 
     /// Translated from `MetadataTest.testClusterCopy`.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.MetadataTest#testClusterCopy")]
     fn test_cluster_copy() {
         let metadata = new_metadata();
         let mut counts = HashMap::new();
@@ -2318,6 +2382,7 @@ mod tests {
 
     /// Translated from `MetadataTest.testInvalidTopicError`.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.MetadataTest#testInvalidTopicError")]
     fn test_invalid_topic_error() {
         let metadata = new_metadata();
         let now: i64 = 10000;
@@ -2356,6 +2421,7 @@ mod tests {
 
     /// Translated from `MetadataTest.testTopicAuthorizationError`.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.MetadataTest#testTopicAuthorizationError")]
     fn test_topic_authorization_error() {
         let metadata = new_metadata();
         let now: i64 = 10000;
@@ -2396,6 +2462,7 @@ mod tests {
 
     /// Translated from `MetadataTest.testMetadataTopicErrors`.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.MetadataTest#testMetadataTopicErrors")]
     fn test_metadata_topic_errors() {
         let metadata = new_metadata();
         let now: i64 = 10000;
@@ -2460,6 +2527,7 @@ mod tests {
 
     /// Translated from `MetadataTest.testOutOfBandEpochUpdate`.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.MetadataTest#testOutOfBandEpochUpdate")]
     fn test_out_of_band_epoch_update() {
         let metadata = new_metadata();
         let mut partition_counts = HashMap::new();
@@ -2508,6 +2576,7 @@ mod tests {
 
     /// Translated from `MetadataTest.testRequestVersion`.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.MetadataTest#testRequestVersion")]
     fn test_request_version() {
         let metadata = new_metadata();
         let now: i64 = 10000;
@@ -2551,6 +2620,7 @@ mod tests {
 
     /// Translated from `MetadataTest.testNodeIfOffline`.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.MetadataTest#testNodeIfOffline")]
     fn test_node_if_offline() {
         let metadata = new_metadata();
         let mut partition_counts = HashMap::new();
@@ -2589,6 +2659,7 @@ mod tests {
 
     /// Translated from `MetadataTest.testTopicMetadataOnUpdatePartitionLeadership`.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.MetadataTest#testTopicMetadataOnUpdatePartitionLeadership")]
     fn test_topic_metadata_on_update_partition_leadership() {
         let metadata = new_metadata();
         let topic = "input-topic";
@@ -2657,6 +2728,7 @@ mod tests {
     /// does not propagate leader epoch information accurately while a reassignment is in
     /// progress, so we cannot rely on it.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.MetadataTest#testIgnoreLeaderEpochInOlderMetadataResponse")]
     fn test_ignore_leader_epoch_in_older_metadata_response() {
         use crate::MetadataResponseData;
         use crate::common::Readable;
@@ -2730,6 +2802,7 @@ mod tests {
 
     /// Translated from `MetadataTest.testStaleMetadata`.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.MetadataTest#testStaleMetadata")]
     fn test_stale_metadata() {
         use crate::MetadataResponseData;
         use crate::metadata_response_data::{MetadataResponsePartition, MetadataResponseTopic};
@@ -2793,6 +2866,7 @@ mod tests {
 
     /// Translated from `MetadataTest.testPartialMetadataUpdate`.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.MetadataTest#testPartialMetadataUpdate")]
     fn test_partial_metadata_update() {
         let now: i64 = 10000;
 
@@ -2883,6 +2957,7 @@ mod tests {
 
     /// Translated from `MetadataTest.testNodeIfOnlineWhenNotInReplicaSet`.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.MetadataTest#testNodeIfOnlineWhenNotInReplicaSet")]
     fn test_node_if_online_when_not_in_replica_set() {
         let metadata = new_metadata();
         let mut partition_counts = HashMap::new();
@@ -2918,6 +2993,7 @@ mod tests {
 
     /// Translated from `MetadataTest.testNodeIfOnlineNonExistentTopicPartition`.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.MetadataTest#testNodeIfOnlineNonExistentTopicPartition")]
     fn test_node_if_online_non_existent_topic_partition() {
         let metadata = new_metadata();
         let metadata_response = RequestTestUtils::metadata_update_with(2, &HashMap::new());
@@ -2936,6 +3012,7 @@ mod tests {
     /// A partition initially has one broker offline. That broker comes online and
     /// is elected leader. The client sees these two events in the opposite order.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.MetadataTest#testLeaderMetadataInconsistentWithBrokerMetadata")]
     fn test_leader_metadata_inconsistent_with_broker_metadata() {
         use crate::MetadataResponseData;
         use crate::metadata_response_data::{MetadataResponseBroker, MetadataResponsePartition, MetadataResponseTopic};
@@ -3016,6 +3093,7 @@ mod tests {
 
     /// Translated from `MetadataTest.testMetadataMerge`.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.MetadataTest#testMetadataMerge")]
     fn test_metadata_merge() {
         let now: i64 = 10000;
         let mut topic_ids = HashMap::new();
@@ -3219,6 +3297,7 @@ mod tests {
 
     /// Translated from `MetadataTest.testMetadataMergeOnIdDowngrade`.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.MetadataTest#testMetadataMergeOnIdDowngrade")]
     fn test_metadata_merge_on_id_downgrade() {
         let now: i64 = 10000;
         let mut topic_ids = HashMap::new();
@@ -3314,6 +3393,7 @@ mod tests {
     /// MetadataSnapshot and Cluster work as expected, i.e. snapshot and cluster contain
     /// the relevant updates.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.MetadataTest#testConcurrentUpdateAndFetchForSnapshotAndCluster")]
     fn test_concurrent_update_and_fetch_for_snapshot_and_cluster() {
         let now: i64 = 10000;
         let metadata = Arc::new(Metadata::new(

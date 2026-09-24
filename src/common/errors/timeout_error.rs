@@ -25,6 +25,7 @@ kafka_error_class! {
     /// Java `extends` chain:
     ///    `TimeoutException` -> `RetriableException` -> `ApiException` ->
     ///   `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.TimeoutException")]
     TimeoutError,
     code: Errors::RequestTimedOut,
     extends: [

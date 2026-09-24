@@ -28,12 +28,14 @@ use super::AbstractResponse;
 ///
 /// Corresponds to `org.apache.kafka.common.requests.ListTransactionsResponse`.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.ListTransactionsResponse")]
 pub struct ListTransactionsResponse {
     data: ListTransactionsResponseData,
 }
 
 impl ListTransactionsResponse {
     /// Creates a new `ListTransactionsResponse` from the underlying data.
+    #[doc(alias = "org.apache.kafka.common.requests.ListTransactionsResponse#ListTransactionsResponse")]
     pub fn new(data: ListTransactionsResponseData) -> Self {
         Self { data }
     }
@@ -44,6 +46,7 @@ impl ListTransactionsResponse {
     }
 
     /// Returns a reference to the underlying data.
+    #[doc(alias = "org.apache.kafka.common.requests.ListTransactionsResponse#data")]
     pub fn data(&self) -> &ListTransactionsResponseData {
         &self.data
     }
@@ -54,11 +57,13 @@ impl ListTransactionsResponse {
     }
 
     /// Returns the throttle time in milliseconds.
+    #[doc(alias = "org.apache.kafka.common.requests.ListTransactionsResponse#throttleTimeMs")]
     pub fn throttle_time_ms(&self) -> i32 {
         self.data.throttle_time_ms
     }
 
     /// Sets the throttle time in the response.
+    #[doc(alias = "org.apache.kafka.common.requests.ListTransactionsResponse#maybeSetThrottleTimeMs")]
     pub fn maybe_set_throttle_time_ms(&mut self, throttle_time_ms: i32) {
         self.data.set_throttle_time_ms(throttle_time_ms);
     }
@@ -74,6 +79,7 @@ impl ListTransactionsResponse {
     /// Returns the error counts for the single top-level error.
     ///
     /// Mirrors `ListTransactionsResponse.errorCounts`.
+    #[doc(alias = "org.apache.kafka.common.requests.ListTransactionsResponse#errorCounts")]
     pub fn error_counts(&self) -> HashMap<Errors, i32> {
         let mut counts = HashMap::new();
         AbstractResponse::update_error_counts(&mut counts, Errors::for_code(self.data.error_code));
@@ -86,6 +92,7 @@ impl ListTransactionsResponse {
     /// # Errors
     ///
     /// Returns an error if parsing fails.
+    #[doc(alias = "org.apache.kafka.common.requests.ListTransactionsResponse#parse")]
     pub fn parse(readable: &mut dyn Readable, version: i16) -> io::Result<Self> {
         let data = ListTransactionsResponseData::read(readable, version)?;
         Ok(Self::new(data))

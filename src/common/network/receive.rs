@@ -30,11 +30,14 @@ use std::pin::Pin;
 ///
 /// Data is read incrementally: [`read_from`](Receive::read_from) may need to be called
 /// multiple times before [`complete`](Receive::complete) returns `true`.
+#[doc(alias = "org.apache.kafka.common.network.Receive")]
 pub trait Receive: Send {
     /// The identifier of the source from which we are receiving data.
+    #[doc(alias = "org.apache.kafka.common.network.Receive#source")]
     fn source(&self) -> &str;
 
     /// Returns `true` if we are done receiving data.
+    #[doc(alias = "org.apache.kafka.common.network.Receive#complete")]
     fn complete(&self) -> bool;
 
     /// Reads bytes into this receive from the given channel.
@@ -54,14 +57,17 @@ pub trait Receive: Send {
     ///
     /// Returns an error if the reading fails, including `UnexpectedEof` if the
     /// remote end closes the connection before the receive is complete.
+    #[doc(alias = "org.apache.kafka.common.network.Receive#readFrom")]
     fn read_from<'a>(
         &'a mut self,
         channel: &'a mut dyn TransportLayer,
     ) -> Pin<Box<dyn Future<Output = io::Result<usize>> + Send + 'a>>;
 
     /// Returns `true` if we know how much memory is required to fully read this receive.
+    #[doc(alias = "org.apache.kafka.common.network.Receive#requiredMemoryAmountKnown")]
     fn required_memory_amount_known(&self) -> bool;
 
     /// Returns `true` if the underlying memory required to complete reading has been allocated.
+    #[doc(alias = "org.apache.kafka.common.network.Receive#memoryAllocated")]
     fn memory_allocated(&self) -> bool;
 }

@@ -28,6 +28,7 @@ use super::{ConcreteRequest, ConcreteResponse, DescribeLogDirsResponse, RequestB
 ///
 /// Corresponds to `org.apache.kafka.common.requests.DescribeLogDirsRequest`.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.DescribeLogDirsRequest")]
 pub struct DescribeLogDirsRequest {
     data: DescribeLogDirsRequestData,
     version: i16,
@@ -35,11 +36,13 @@ pub struct DescribeLogDirsRequest {
 
 impl DescribeLogDirsRequest {
     /// Creates a new `DescribeLogDirsRequest` from data and version.
+    #[doc(alias = "org.apache.kafka.common.requests.DescribeLogDirsRequest#DescribeLogDirsRequest")]
     pub fn new(data: DescribeLogDirsRequestData, version: i16) -> Self {
         Self { data, version }
     }
 
     /// Returns a reference to the underlying data.
+    #[doc(alias = "org.apache.kafka.common.requests.DescribeLogDirsRequest#data")]
     pub fn data(&self) -> &DescribeLogDirsRequestData {
         &self.data
     }
@@ -62,6 +65,7 @@ impl DescribeLogDirsRequest {
     /// Whether the request asks for all topic partitions in all log directories.
     ///
     /// Mirrors `DescribeLogDirsRequest.isAllTopicPartitions` (topics == null).
+    #[doc(alias = "org.apache.kafka.common.requests.DescribeLogDirsRequest#isAllTopicPartitions")]
     pub fn is_all_topic_partitions(&self) -> bool {
         self.data.topics.is_none()
     }
@@ -71,6 +75,7 @@ impl DescribeLogDirsRequest {
     /// Mirrors `DescribeLogDirsRequest.getErrorResponse`, which sets the
     /// top-level error code (v3+) to the mapped error and echoes the throttle
     /// time.
+    #[doc(alias = "org.apache.kafka.common.requests.DescribeLogDirsRequest#getErrorResponse")]
     pub fn get_error_response(&self, throttle_time_ms: i32, error: &Errors) -> ConcreteResponse {
         let mut response = DescribeLogDirsResponseData::new();
         response.set_throttle_time_ms(throttle_time_ms);
@@ -84,6 +89,7 @@ impl DescribeLogDirsRequest {
     /// # Errors
     ///
     /// Returns an error if parsing fails.
+    #[doc(alias = "org.apache.kafka.common.requests.DescribeLogDirsRequest#parse")]
     pub fn parse(readable: &mut dyn Readable, version: i16) -> io::Result<Self> {
         let data = DescribeLogDirsRequestData::read(readable, version)?;
         Ok(Self::new(data, version))
@@ -100,6 +106,7 @@ impl std::fmt::Display for DescribeLogDirsRequest {
 ///
 /// Corresponds to `DescribeLogDirsRequest.Builder` in Java.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.DescribeLogDirsRequest$Builder")]
 pub struct DescribeLogDirsRequestBuilder {
     data: DescribeLogDirsRequestData,
     oldest_allowed_version: i16,
@@ -108,6 +115,7 @@ pub struct DescribeLogDirsRequestBuilder {
 
 impl DescribeLogDirsRequestBuilder {
     /// Creates a builder from existing data.
+    #[doc(alias = "org.apache.kafka.common.requests.DescribeLogDirsRequest$Builder#Builder")]
     pub fn new(data: DescribeLogDirsRequestData) -> Self {
         Self {
             data,

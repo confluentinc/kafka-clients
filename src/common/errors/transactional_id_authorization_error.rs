@@ -25,6 +25,7 @@ kafka_error_class! {
     /// Java `extends` chain:
     ///    `TransactionalIdAuthorizationException` -> `AuthorizationException` ->
     ///   `InvalidConfigurationException` -> `ApiException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.TransactionalIdAuthorizationException")]
     TransactionalIdAuthorizationError,
     code: Errors::TransactionalIdAuthorizationFailed,
     extends: [

@@ -24,6 +24,7 @@ kafka_error_class! {
     ///
     /// Java `extends` chain:
     ///    `InvalidGroupIdException` -> `ApiException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.InvalidGroupIdException")]
     InvalidGroupIdError,
     code: Errors::InvalidGroupId,
     extends: [

@@ -24,6 +24,7 @@ use super::ScramCredentialInfo;
 ///
 /// See [KIP-554: Add Broker-side SCRAM Config API](https://cwiki.apache.org/confluence/display/KAFKA/KIP-554%3A+Add+Broker-side+SCRAM+Config+API).
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.clients.admin.UserScramCredentialUpsertion")]
 pub struct UserScramCredentialUpsertion {
     user: String,
     info: ScramCredentialInfo,
@@ -36,6 +37,7 @@ impl UserScramCredentialUpsertion {
     ///
     /// Mirrors `UserScramCredentialUpsertion(String, ScramCredentialInfo, String)`,
     /// which encodes the password with UTF-8.
+    #[doc(alias = "org.apache.kafka.clients.admin.UserScramCredentialUpsertion#UserScramCredentialUpsertion")]
     pub fn with_str(user: impl Into<String>, credential_info: ScramCredentialInfo, password: &str) -> Self {
         Self::with_bytes(user, credential_info, password.as_bytes().to_vec())
     }
@@ -43,6 +45,7 @@ impl UserScramCredentialUpsertion {
     /// Constructor that accepts a byte password and generates a random salt.
     ///
     /// Mirrors `UserScramCredentialUpsertion(String, ScramCredentialInfo, byte[])`.
+    #[doc(alias = "org.apache.kafka.clients.admin.UserScramCredentialUpsertion#UserScramCredentialUpsertion")]
     pub fn with_bytes(user: impl Into<String>, credential_info: ScramCredentialInfo, password: Vec<u8>) -> Self {
         let salt = generate_random_salt();
         Self::with_salt(user, credential_info, password, salt)
@@ -51,6 +54,7 @@ impl UserScramCredentialUpsertion {
     /// Constructor that accepts an explicit salt.
     ///
     /// Mirrors `UserScramCredentialUpsertion(String, ScramCredentialInfo, byte[], byte[])`.
+    #[doc(alias = "org.apache.kafka.clients.admin.UserScramCredentialUpsertion#UserScramCredentialUpsertion")]
     pub fn with_salt(
         user: impl Into<String>,
         credential_info: ScramCredentialInfo,
@@ -66,16 +70,19 @@ impl UserScramCredentialUpsertion {
     }
 
     /// Returns the mechanism and iterations.
+    #[doc(alias = "org.apache.kafka.clients.admin.UserScramCredentialUpsertion#credentialInfo")]
     pub fn credential_info(&self) -> &ScramCredentialInfo {
         &self.info
     }
 
     /// Returns the salt.
+    #[doc(alias = "org.apache.kafka.clients.admin.UserScramCredentialUpsertion#salt")]
     pub fn salt(&self) -> &[u8] {
         &self.salt
     }
 
     /// Returns the password.
+    #[doc(alias = "org.apache.kafka.clients.admin.UserScramCredentialUpsertion#password")]
     pub fn password(&self) -> &[u8] {
         &self.password
     }
@@ -89,6 +96,7 @@ impl UserScramCredentialUpsertion {
 /// we generate the equivalent: a random radix-36 string of the same magnitude.
 /// The salt is opaque random data sent verbatim to the broker, so any
 /// cryptographically-random value of adequate length is behavior-equivalent.
+#[doc(alias = "org.apache.kafka.clients.admin.UserScramCredentialUpsertion#generateRandomSalt")]
 fn generate_random_salt() -> Vec<u8> {
     const ALPHABET: &[u8] = b"0123456789abcdefghijklmnopqrstuvwxyz";
     // 26 base-36 characters is ~134 bits of entropy, matching Java's 130-bit

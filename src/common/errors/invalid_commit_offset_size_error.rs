@@ -24,6 +24,7 @@ kafka_error_class! {
     ///
     /// Java `extends` chain:
     ///    `InvalidCommitOffsetSizeException` -> `ApiException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.InvalidCommitOffsetSizeException")]
     InvalidCommitOffsetSizeError,
     code: Errors::InvalidCommitOffsetSize,
     extends: [

@@ -26,6 +26,7 @@ kafka_error_class! {
     /// Java `extends` chain:
     ///    `NotEnoughReplicasAfterAppendException` -> `RetriableException` ->
     ///   `ApiException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.NotEnoughReplicasAfterAppendException")]
     NotEnoughReplicasAfterAppendError,
     code: Errors::NotEnoughReplicasAfterAppend,
     extends: [

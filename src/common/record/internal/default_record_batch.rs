@@ -56,6 +56,7 @@ use crate::common::record::internal::SimpleRecord;
 ///
 /// Corresponds to Java's `org.apache.kafka.common.record.DefaultRecordBatch`.
 #[derive(Clone, Debug)]
+#[doc(alias = "org.apache.kafka.common.record.internal.DefaultRecordBatch")]
 pub struct DefaultRecordBatch {
     buffer: Vec<u8>,
 }
@@ -73,6 +74,7 @@ impl DefaultRecordBatch {
     const TIMESTAMP_TYPE_MASK: u8 = 0x08;
 
     /// Compute the attributes byte for a record batch header.
+    #[doc(alias = "org.apache.kafka.common.record.internal.DefaultRecordBatch#computeAttributes")]
     fn compute_attributes(
         compression_type: CompressionType,
         timestamp_type: TimestampType,
@@ -109,6 +111,7 @@ impl DefaultRecordBatch {
     /// Increment a sequence number, wrapping around at `i32::MAX`.
     ///
     /// Corresponds to Java's `DefaultRecordBatch.incrementSequence(int, int)`.
+    #[doc(alias = "org.apache.kafka.common.record.internal.DefaultRecordBatch#incrementSequence")]
     pub fn increment_sequence(sequence: i32, increment: i32) -> i32 {
         if sequence > i32::MAX - increment {
             increment - (i32::MAX - sequence) - 1
@@ -120,6 +123,7 @@ impl DefaultRecordBatch {
     /// Decrement a sequence number, wrapping around at 0.
     ///
     /// Corresponds to Java's `DefaultRecordBatch.decrementSequence(int, int)`.
+    #[doc(alias = "org.apache.kafka.common.record.internal.DefaultRecordBatch#decrementSequence")]
     pub fn decrement_sequence(sequence: i32, decrement: i32) -> i32 {
         if sequence < decrement {
             i32::MAX - (decrement - sequence) + 1
@@ -163,11 +167,13 @@ impl DefaultRecordBatch {
     /// Create a new `DefaultRecordBatch` wrapping the given buffer.
     ///
     /// The buffer must contain a complete record batch starting at index 0.
+    #[doc(alias = "org.apache.kafka.common.record.internal.DefaultRecordBatch#DefaultRecordBatch")]
     pub fn new(buffer: Vec<u8>) -> Self {
         Self { buffer }
     }
 
     /// Create a `DefaultRecordBatch` from a byte slice (copies the data).
+    #[doc(alias = "org.apache.kafka.common.record.internal.DefaultRecordBatch#DefaultRecordBatch")]
     pub fn with_slice(data: &[u8]) -> Self {
         Self { buffer: data.to_vec() }
     }
@@ -184,6 +190,7 @@ impl DefaultRecordBatch {
     }
 
     /// Returns the magic byte of this batch.
+    #[doc(alias = "org.apache.kafka.common.record.internal.DefaultRecordBatch#magic")]
     pub fn magic(&self) -> i8 {
         self.as_ref().magic()
     }
@@ -191,56 +198,67 @@ impl DefaultRecordBatch {
     /// Validate the record batch, returning an error if corrupt.
     ///
     /// Corresponds to Java's `ensureValid()`.
+    #[doc(alias = "org.apache.kafka.common.record.internal.DefaultRecordBatch#ensureValid")]
     pub fn ensure_valid(&self) -> Result<(), InvalidRecordError> {
         self.as_ref().ensure_valid()
     }
 
     /// Returns the base timestamp of the batch.
+    #[doc(alias = "org.apache.kafka.common.record.internal.DefaultRecordBatch#baseTimestamp")]
     pub fn base_timestamp(&self) -> i64 {
         self.as_ref().base_timestamp()
     }
 
     /// Returns the max timestamp of the batch.
+    #[doc(alias = "org.apache.kafka.common.record.internal.DefaultRecordBatch#maxTimestamp")]
     pub fn max_timestamp(&self) -> i64 {
         self.as_ref().max_timestamp()
     }
 
     /// Returns the timestamp type of this batch.
+    #[doc(alias = "org.apache.kafka.common.record.internal.DefaultRecordBatch#timestampType")]
     pub fn timestamp_type(&self) -> TimestampType {
         self.as_ref().timestamp_type()
     }
 
     /// Returns the base offset of this batch.
+    #[doc(alias = "org.apache.kafka.common.record.internal.DefaultRecordBatch#baseOffset")]
     pub fn base_offset(&self) -> i64 {
         self.as_ref().base_offset()
     }
 
     /// Returns the last offset of this batch.
+    #[doc(alias = "org.apache.kafka.common.record.internal.DefaultRecordBatch#lastOffset")]
     pub fn last_offset(&self) -> i64 {
         self.as_ref().last_offset()
     }
 
     /// Returns the producer ID of this batch.
+    #[doc(alias = "org.apache.kafka.common.record.internal.DefaultRecordBatch#producerId")]
     pub fn producer_id(&self) -> i64 {
         self.as_ref().producer_id()
     }
 
     /// Returns the producer epoch of this batch.
+    #[doc(alias = "org.apache.kafka.common.record.internal.DefaultRecordBatch#producerEpoch")]
     pub fn producer_epoch(&self) -> i16 {
         DefaultRecordBatch::read_i16(&self.buffer, RecordBatch::PRODUCER_EPOCH_OFFSET)
     }
 
     /// Returns the base sequence of this batch.
+    #[doc(alias = "org.apache.kafka.common.record.internal.DefaultRecordBatch#baseSequence")]
     pub fn base_sequence(&self) -> i32 {
         self.as_ref().base_sequence()
     }
 
     /// Returns the last offset delta of this batch.
+    #[doc(alias = "org.apache.kafka.common.record.internal.DefaultRecordBatch#lastOffsetDelta")]
     fn last_offset_delta(&self) -> i32 {
         self.as_ref().last_offset_delta()
     }
 
     /// Returns the last sequence number of this batch.
+    #[doc(alias = "org.apache.kafka.common.record.internal.DefaultRecordBatch#lastSequence")]
     pub fn last_sequence(&self) -> i32 {
         let base_sequence = self.base_sequence();
         if base_sequence == RecordBatch::NO_SEQUENCE {
@@ -251,6 +269,7 @@ impl DefaultRecordBatch {
     }
 
     /// Returns the compression type of this batch.
+    #[doc(alias = "org.apache.kafka.common.record.internal.DefaultRecordBatch#compressionType")]
     pub fn compression_type(&self) -> CompressionType {
         self.as_ref().compression_type()
     }
@@ -268,31 +287,37 @@ impl DefaultRecordBatch {
     }
 
     /// Returns the total size of this batch in bytes (including LOG_OVERHEAD).
+    #[doc(alias = "org.apache.kafka.common.record.internal.DefaultRecordBatch#sizeInBytes")]
     pub fn size_in_bytes(&self) -> usize {
         self.as_ref().size_in_bytes()
     }
 
     /// Returns the number of records in this batch.
+    #[doc(alias = "org.apache.kafka.common.record.internal.DefaultRecordBatch#count")]
     fn count(&self) -> i32 {
         self.as_ref().records_count()
     }
 
     /// Returns the record count, or `None` for legacy batches.
+    #[doc(alias = "org.apache.kafka.common.record.internal.DefaultRecordBatch#countOrNull")]
     pub fn count_or_null(&self) -> Option<i32> {
         Some(self.count())
     }
 
     /// Returns whether this batch is transactional.
+    #[doc(alias = "org.apache.kafka.common.record.internal.DefaultRecordBatch#isTransactional")]
     pub fn is_transactional(&self) -> bool {
         self.as_ref().is_transactional()
     }
 
     /// Returns whether the delete horizon flag is set.
+    #[doc(alias = "org.apache.kafka.common.record.internal.DefaultRecordBatch#hasDeleteHorizonMs")]
     fn has_delete_horizon_ms(&self) -> bool {
         (self.attributes() & DefaultRecordBatch::DELETE_HORIZON_FLAG_MASK) > 0
     }
 
     /// Returns the delete horizon timestamp if set, otherwise `None`.
+    #[doc(alias = "org.apache.kafka.common.record.internal.DefaultRecordBatch#deleteHorizonMs")]
     pub fn delete_horizon_ms(&self) -> Option<i64> {
         if self.has_delete_horizon_ms() {
             Some(DefaultRecordBatch::read_i64(&self.buffer, RecordBatch::BASE_TIMESTAMP_OFFSET))
@@ -302,41 +327,49 @@ impl DefaultRecordBatch {
     }
 
     /// Returns whether this is a control batch.
+    #[doc(alias = "org.apache.kafka.common.record.internal.DefaultRecordBatch#isControlBatch")]
     pub fn is_control_batch(&self) -> bool {
         self.as_ref().is_control_batch()
     }
 
     /// Returns the partition leader epoch.
+    #[doc(alias = "org.apache.kafka.common.record.internal.DefaultRecordBatch#partitionLeaderEpoch")]
     pub fn partition_leader_epoch(&self) -> i32 {
         self.as_ref().partition_leader_epoch()
     }
 
     /// Returns the stored CRC32C checksum.
+    #[doc(alias = "org.apache.kafka.common.record.internal.DefaultRecordBatch#checksum")]
     pub fn checksum(&self) -> u32 {
         self.as_ref().checksum()
     }
 
     /// Returns whether the CRC matches the computed value.
+    #[doc(alias = "org.apache.kafka.common.record.internal.DefaultRecordBatch#isValid")]
     pub fn is_valid(&self) -> bool {
         self.as_ref().is_valid()
     }
 
     /// Compute the CRC32C over the attributes through the end of the batch.
+    #[doc(alias = "org.apache.kafka.common.record.internal.DefaultRecordBatch#computeChecksum")]
     fn compute_checksum(&self) -> u32 {
         self.as_ref().compute_checksum()
     }
 
     /// Returns the attributes byte (lower byte of the 2-byte attributes field).
+    #[doc(alias = "org.apache.kafka.common.record.internal.DefaultRecordBatch#attributes")]
     fn attributes(&self) -> u8 {
         self.as_ref().attributes()
     }
 
     /// Write the batch data to a writer.
+    #[doc(alias = "org.apache.kafka.common.record.internal.DefaultRecordBatch#writeTo")]
     pub fn write_to<W: io::Write>(&self, writer: &mut W) -> io::Result<()> {
         writer.write_all(&self.buffer)
     }
 
     /// Set the last offset of this batch and recompute the base offset.
+    #[doc(alias = "org.apache.kafka.common.record.internal.DefaultRecordBatch#setLastOffset")]
     pub fn set_last_offset(&mut self, offset: i64) {
         let last_offset_delta = self.last_offset_delta();
         DefaultRecordBatch::write_i64(
@@ -347,6 +380,7 @@ impl DefaultRecordBatch {
     }
 
     /// Set the max timestamp and timestamp type, then recompute the CRC.
+    #[doc(alias = "org.apache.kafka.common.record.internal.DefaultRecordBatch#setMaxTimestamp")]
     pub fn set_max_timestamp(&mut self, timestamp_type: TimestampType, max_timestamp: i64) {
         let current_max_timestamp = self.max_timestamp();
         // We don't need to recompute crc if the timestamp is not updated.
@@ -368,6 +402,7 @@ impl DefaultRecordBatch {
     }
 
     /// Set the partition leader epoch.
+    #[doc(alias = "org.apache.kafka.common.record.internal.DefaultRecordBatch#setPartitionLeaderEpoch")]
     pub fn set_partition_leader_epoch(&mut self, epoch: i32) {
         DefaultRecordBatch::write_i32(&mut self.buffer, RecordBatch::PARTITION_LEADER_EPOCH_OFFSET, epoch);
     }
@@ -550,6 +585,7 @@ impl DefaultRecordBatch {
     ///
     /// This is only an estimate because it does not take into account
     /// overhead from the compression algorithm used.
+    #[doc(alias = "org.apache.kafka.common.record.internal.DefaultRecordBatch#estimateBatchSizeUpperBound")]
     pub fn estimate_batch_size_upper_bound(key: Option<&[u8]>, value: Option<&[u8]>, headers: &[RecordHeader]) -> i32 {
         RecordBatch::RECORD_BATCH_OVERHEAD as i32 + DefaultRecord::record_size_upper_bound(key, value, headers)
     }
@@ -558,6 +594,7 @@ impl DefaultRecordBatch {
     ///
     /// Corresponds to Java's `DefaultRecordBatch.writeEmptyHeader`.
     #[allow(clippy::too_many_arguments)]
+    #[doc(alias = "org.apache.kafka.common.record.internal.DefaultRecordBatch#writeEmptyHeader")]
     pub fn write_empty_header(
         buffer: &mut Vec<u8>,
         magic: i8,
@@ -601,6 +638,7 @@ impl DefaultRecordBatch {
     ///
     /// Corresponds to Java's `DefaultRecordBatch.writeHeader`.
     #[allow(clippy::too_many_arguments)]
+    #[doc(alias = "org.apache.kafka.common.record.internal.DefaultRecordBatch#writeHeader")]
     pub fn write_header(
         buffer: &mut Vec<u8>,
         base_offset: i64,
@@ -1009,6 +1047,7 @@ mod tests {
     use crate::common::record::internal::{SimpleRecord, SimpleRecordOptionsBuilder};
 
     #[test]
+    #[doc(alias = "org.apache.kafka.common.record.internal.DefaultRecordBatchTest#testIncrementSequence")]
     fn test_increment_sequence() {
         assert_eq!(DefaultRecordBatch::increment_sequence(0, 0), 0);
         assert_eq!(DefaultRecordBatch::increment_sequence(5, 5), 10);
@@ -1019,6 +1058,7 @@ mod tests {
     }
 
     #[test]
+    #[doc(alias = "org.apache.kafka.common.record.internal.DefaultRecordBatchTest#testDecrementSequence")]
     fn test_decrement_sequence() {
         assert_eq!(DefaultRecordBatch::decrement_sequence(5, 5), 0);
         assert_eq!(DefaultRecordBatch::decrement_sequence(0, 1), i32::MAX);
@@ -1097,6 +1137,7 @@ mod tests {
 
     /// Corresponds to Java's `DefaultRecordBatchTest.testWriteEmptyHeader`.
     #[test]
+    #[doc(alias = "org.apache.kafka.common.record.internal.DefaultRecordBatchTest#testWriteEmptyHeader")]
     fn test_write_empty_header() {
         let producer_id = 23423_i64;
         let producer_epoch = 145_i16;
@@ -1257,6 +1298,7 @@ mod tests {
 
     /// Corresponds to Java's `DefaultRecordBatchTest.testSizeInBytes`.
     #[test]
+    #[doc(alias = "org.apache.kafka.common.record.internal.DefaultRecordBatchTest#testSizeInBytes")]
     fn test_size_in_bytes() {
         use crate::common::header::RecordHeader;
 
@@ -1286,6 +1328,7 @@ mod tests {
 
     /// Corresponds to Java's `DefaultRecordBatchTest.testInvalidRecordSize`.
     #[test]
+    #[doc(alias = "org.apache.kafka.common.record.internal.DefaultRecordBatchTest#testInvalidRecordSize")]
     fn test_invalid_record_size() {
         let records = MemoryRecords::with_records_with_magic_initial_offset_timestamp_type(
             RecordBatch::MAGIC_VALUE_V2,
@@ -1417,6 +1460,9 @@ mod tests {
 
     /// Corresponds to Java's `DefaultRecordBatchTest.testInvalidRecordCountTooManyNonCompressedV2`.
     #[test]
+    #[doc(
+        alias = "org.apache.kafka.common.record.internal.DefaultRecordBatchTest#testInvalidRecordCountTooManyNonCompressedV2"
+    )]
     fn test_invalid_record_count_too_many_non_compressed_v2() {
         let now = 1_700_000_000_000_i64;
         let batch = records_with_invalid_record_count(now, CompressionType::None, 5);
@@ -1426,6 +1472,9 @@ mod tests {
 
     /// Corresponds to Java's `DefaultRecordBatchTest.testInvalidRecordCountTooLittleNonCompressedV2`.
     #[test]
+    #[doc(
+        alias = "org.apache.kafka.common.record.internal.DefaultRecordBatchTest#testInvalidRecordCountTooLittleNonCompressedV2"
+    )]
     fn test_invalid_record_count_too_little_non_compressed_v2() {
         let now = 1_700_000_000_000_i64;
         let batch = records_with_invalid_record_count(now, CompressionType::None, 2);
@@ -1435,6 +1484,9 @@ mod tests {
 
     /// Corresponds to Java's `DefaultRecordBatchTest.testInvalidRecordCountTooManyCompressedV2`.
     #[test]
+    #[doc(
+        alias = "org.apache.kafka.common.record.internal.DefaultRecordBatchTest#testInvalidRecordCountTooManyCompressedV2"
+    )]
     fn test_invalid_record_count_too_many_compressed_v2() {
         let now = 1_700_000_000_000_i64;
         let batch = records_with_invalid_record_count(now, CompressionType::Gzip, 5);
@@ -1444,6 +1496,9 @@ mod tests {
 
     /// Corresponds to Java's `DefaultRecordBatchTest.testInvalidRecordCountTooLittleCompressedV2`.
     #[test]
+    #[doc(
+        alias = "org.apache.kafka.common.record.internal.DefaultRecordBatchTest#testInvalidRecordCountTooLittleCompressedV2"
+    )]
     fn test_invalid_record_count_too_little_compressed_v2() {
         let now = 1_700_000_000_000_i64;
         let batch = records_with_invalid_record_count(now, CompressionType::Gzip, 2);
@@ -1453,6 +1508,7 @@ mod tests {
 
     /// Corresponds to Java's `DefaultRecordBatchTest.testInvalidCrc`.
     #[test]
+    #[doc(alias = "org.apache.kafka.common.record.internal.DefaultRecordBatchTest#testInvalidCrc")]
     fn test_invalid_crc() {
         let records = MemoryRecords::with_records_with_magic_initial_offset_timestamp_type(
             RecordBatch::MAGIC_VALUE_V2,
@@ -1478,6 +1534,7 @@ mod tests {
 
     /// Corresponds to Java's `DefaultRecordBatchTest.testSetLastOffset`.
     #[test]
+    #[doc(alias = "org.apache.kafka.common.record.internal.DefaultRecordBatchTest#testSetLastOffset")]
     fn test_set_last_offset() {
         let simple_records = vec![
             SimpleRecord::with_timestamp_key_value(1, Some(b"a".to_vec()), Some(b"1".to_vec())),
@@ -1515,6 +1572,7 @@ mod tests {
 
     /// Corresponds to Java's `DefaultRecordBatchTest.testSetPartitionLeaderEpoch`.
     #[test]
+    #[doc(alias = "org.apache.kafka.common.record.internal.DefaultRecordBatchTest#testSetPartitionLeaderEpoch")]
     fn test_set_partition_leader_epoch() {
         let records = MemoryRecords::with_records_with_magic_initial_offset_timestamp_type(
             RecordBatch::MAGIC_VALUE_V2,
@@ -1544,6 +1602,7 @@ mod tests {
 
     /// Corresponds to Java's `DefaultRecordBatchTest.testSetLogAppendTime`.
     #[test]
+    #[doc(alias = "org.apache.kafka.common.record.internal.DefaultRecordBatchTest#testSetLogAppendTime")]
     fn test_set_log_append_time() {
         let records = MemoryRecords::with_records_with_magic_initial_offset_timestamp_type(
             RecordBatch::MAGIC_VALUE_V2,
@@ -1581,6 +1640,7 @@ mod tests {
     /// Corresponds to Java's `DefaultRecordBatchTest.testSetNoTimestampTypeNotAllowed`.
     #[test]
     #[should_panic(expected = "Timestamp type must be provided")]
+    #[doc(alias = "org.apache.kafka.common.record.internal.DefaultRecordBatchTest#testSetNoTimestampTypeNotAllowed")]
     fn test_set_no_timestamp_type_not_allowed() {
         let records = MemoryRecords::with_records_with_magic_initial_offset_timestamp_type(
             RecordBatch::MAGIC_VALUE_V2,
@@ -1602,6 +1662,7 @@ mod tests {
     ///
     /// For each compression type, verifies that iterating records produces consistent results.
     #[test]
+    #[doc(alias = "org.apache.kafka.common.record.internal.DefaultRecordBatchTest#testStreamingIteratorConsistency")]
     fn test_streaming_iterator_consistency() {
         for compression_type in &[
             CompressionType::None,

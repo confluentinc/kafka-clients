@@ -25,6 +25,7 @@ kafka_error_class! {
     /// Java `extends` chain:
     ///    `UnknownLeaderEpochException` -> `RetriableException` -> `ApiException` ->
     ///   `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.UnknownLeaderEpochException")]
     UnknownLeaderEpochError,
     code: Errors::UnknownLeaderEpoch,
     extends: [

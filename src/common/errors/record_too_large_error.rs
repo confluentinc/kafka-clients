@@ -33,6 +33,7 @@ use crate::common::{Error, TopicPartition};
 /// Hand-written rather than declared with `kafka_error_class!` because it
 /// carries Java's `recordTooLargePartitions` field and accessor.
 #[derive(Clone, Debug)]
+#[doc(alias = "org.apache.kafka.common.errors.RecordTooLargeException")]
 pub struct RecordTooLargeError {
     message: String,
     record_too_large_partitions: Option<HashMap<TopicPartition, i64>>,
@@ -47,6 +48,7 @@ impl RecordTooLargeError {
     /// The three translated constructors intersect on `{message}`, which is
     /// exactly this one — so it keeps the plain name and the other two are
     /// suffixed with their parameters beyond the intersection (CLAUDE.md §2).
+    #[doc(alias = "org.apache.kafka.common.errors.RecordTooLargeException#RecordTooLargeException")]
     pub fn new(message: impl Into<String>) -> Self {
         Self { message: message.into(), record_too_large_partitions: None, source: None }
     }
@@ -54,6 +56,7 @@ impl RecordTooLargeError {
     /// Create the error with the given message and an underlying cause,
     /// mirroring Java's `RecordTooLargeException(String message, Throwable cause)`
     /// (`:35`). Suffixed per [`new`](Self::new).
+    #[doc(alias = "org.apache.kafka.common.errors.RecordTooLargeException#RecordTooLargeException")]
     pub fn with_source(message: impl Into<String>, source: Error) -> Self {
         Self {
             message: message.into(),
@@ -64,6 +67,7 @@ impl RecordTooLargeError {
 
     /// Create the error with the code's default message — used by
     /// [`Errors::error`](crate::common::Errors::error).
+    #[doc(alias = "org.apache.kafka.common.errors.RecordTooLargeException#RecordTooLargeException")]
     pub fn with_default_message() -> Self {
         Self::new(Errors::MessageTooLarge.message())
     }
@@ -71,6 +75,7 @@ impl RecordTooLargeError {
     /// Create the error naming the offending partitions, mirroring Java's
     /// `RecordTooLargeException(String message, Map<TopicPartition, Long> recordTooLargePartitions)`
     /// (`:47`). Suffixed per [`new`](Self::new).
+    #[doc(alias = "org.apache.kafka.common.errors.RecordTooLargeException#RecordTooLargeException")]
     pub fn with_record_too_large_partitions(
         message: impl Into<String>,
         record_too_large_partitions: HashMap<TopicPartition, i64>,
@@ -84,6 +89,7 @@ impl RecordTooLargeError {
 
     /// The per-partition record size that exceeded the limit, or `None` if
     /// not recorded. Mirrors Java's `recordTooLargePartitions()`.
+    #[doc(alias = "org.apache.kafka.common.errors.RecordTooLargeException#recordTooLargePartitions")]
     pub fn record_too_large_partitions(&self) -> Option<&HashMap<TopicPartition, i64>> {
         self.record_too_large_partitions.as_ref()
     }

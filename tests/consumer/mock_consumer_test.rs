@@ -65,6 +65,7 @@ fn build_null_record(topic: &str, partition: i32, offset: i64) -> ConsumerRecord
 
 /// Translated from `MockConsumerTest.testSimpleMock`.
 #[tokio::test]
+#[doc(alias = "org.apache.kafka.clients.consumer.MockConsumerTest#testSimpleMock")]
 async fn test_simple_mock() {
     let mut consumer: MockConsumer<String, String> = MockConsumer::new(AutoOffsetResetStrategy::EARLIEST);
 
@@ -117,6 +118,7 @@ async fn test_simple_mock() {
 
 /// Translated from `MockConsumerTest.testConsumerRecordsIsEmptyWhenReturningNoRecords`.
 #[tokio::test]
+#[doc(alias = "org.apache.kafka.clients.consumer.MockConsumerTest#testConsumerRecordsIsEmptyWhenReturningNoRecords")]
 async fn test_consumer_records_is_empty_when_returning_no_records() {
     let mut consumer: MockConsumer<String, String> = MockConsumer::new(AutoOffsetResetStrategy::EARLIEST);
     let partition = TopicPartition::new("test".to_string(), 0);
@@ -137,6 +139,7 @@ async fn test_consumer_records_is_empty_when_returning_no_records() {
 
 /// Translated from `MockConsumerTest.shouldNotClearRecordsForPausedPartitions`.
 #[tokio::test]
+#[doc(alias = "org.apache.kafka.clients.consumer.MockConsumerTest#shouldNotClearRecordsForPausedPartitions")]
 async fn should_not_clear_records_for_paused_partitions() {
     let mut consumer: MockConsumer<String, String> = MockConsumer::new(AutoOffsetResetStrategy::EARLIEST);
     let partition0 = TopicPartition::new("test".to_string(), 0);
@@ -169,6 +172,7 @@ async fn should_not_clear_records_for_paused_partitions() {
 
 /// Translated from `MockConsumerTest.endOffsetsShouldBeIdempotent`.
 #[tokio::test]
+#[doc(alias = "org.apache.kafka.clients.consumer.MockConsumerTest#endOffsetsShouldBeIdempotent")]
 async fn end_offsets_should_be_idempotent() {
     let mut consumer: MockConsumer<String, String> = MockConsumer::new(AutoOffsetResetStrategy::EARLIEST);
     let partition = TopicPartition::new("test".to_string(), 0);
@@ -195,6 +199,7 @@ async fn end_offsets_should_be_idempotent() {
 
 /// Translated from `MockConsumerTest.testDurationBasedOffsetReset`.
 #[tokio::test]
+#[doc(alias = "org.apache.kafka.clients.consumer.MockConsumerTest#testDurationBasedOffsetReset")]
 async fn test_duration_based_offset_reset() {
     let strategy = AutoOffsetResetStrategy::from_string("by_duration:PT1H").unwrap();
     let mut consumer: MockConsumer<String, String> = MockConsumer::new(strategy);
@@ -257,6 +262,7 @@ impl ConsumerRebalanceListener for RecorderListener {
 
 /// Translated from `MockConsumerTest.testRebalanceListener`.
 #[tokio::test]
+#[doc(alias = "org.apache.kafka.clients.consumer.MockConsumerTest#testRebalanceListener")]
 async fn test_rebalance_listener() {
     let mut consumer: MockConsumer<String, String> = MockConsumer::new(AutoOffsetResetStrategy::EARLIEST);
 
@@ -350,6 +356,7 @@ async fn test_re2j_pattern_subscription() {
 
 /// Translated from `MockConsumerTest.shouldReturnMaxPollRecords`.
 #[tokio::test]
+#[doc(alias = "org.apache.kafka.clients.consumer.MockConsumerTest#shouldReturnMaxPollRecords")]
 async fn should_return_max_poll_records() {
     let mut consumer: MockConsumer<String, String> = MockConsumer::new(AutoOffsetResetStrategy::EARLIEST);
     let partition = TopicPartition::new("test".to_string(), 0);

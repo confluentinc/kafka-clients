@@ -54,6 +54,7 @@ use crate::common::record::internal::RecordBatch;
 ///
 /// Corresponds to Java's `org.apache.kafka.common.record.DefaultRecord`.
 #[derive(Clone, Debug)]
+#[doc(alias = "org.apache.kafka.common.record.internal.DefaultRecord")]
 pub struct DefaultRecord {
     size_in_bytes: i32,
     attributes: i8,
@@ -69,6 +70,7 @@ impl DefaultRecord {
     /// Compute the size of the record body in bytes (excluding the length prefix).
     ///
     /// Corresponds to Java's `DefaultRecord.sizeOfBodyInBytes(int, long, int, int, Header[])`.
+    #[doc(alias = "org.apache.kafka.common.record.internal.DefaultRecord#sizeOfBodyInBytes")]
     pub fn size_of_body_in_bytes(
         offset_delta: i32,
         timestamp_delta: i64,
@@ -193,6 +195,7 @@ impl DefaultRecord {
 
     /// Create a new `DefaultRecord` with all fields.
     #[allow(clippy::too_many_arguments)]
+    #[doc(alias = "org.apache.kafka.common.record.internal.DefaultRecord#DefaultRecord")]
     pub(crate) fn new(
         size_in_bytes: i32,
         attributes: i8,
@@ -207,6 +210,7 @@ impl DefaultRecord {
     }
 
     /// Returns the record attributes byte.
+    #[doc(alias = "org.apache.kafka.common.record.internal.DefaultRecord#attributes")]
     pub fn attributes(&self) -> i8 {
         self.attributes
     }
@@ -218,6 +222,7 @@ impl DefaultRecord {
     ///
     /// # Errors
     /// Returns an I/O error if writing fails.
+    #[doc(alias = "org.apache.kafka.common.record.internal.DefaultRecord#writeTo")]
     pub fn write_to<W: Write>(
         out: &mut W,
         offset_delta: i32,
@@ -466,6 +471,7 @@ impl DefaultRecord {
     }
 
     /// Compute the total serialized size from key/value slices.
+    #[doc(alias = "org.apache.kafka.common.record.internal.DefaultRecord#sizeInBytes")]
     pub fn size_in_bytes_with_slices(
         offset_delta: i32,
         timestamp_delta: i64,
@@ -481,6 +487,7 @@ impl DefaultRecord {
     /// Compute the upper bound of the record size.
     ///
     /// Uses MAX_RECORD_OVERHEAD for the fixed overhead.
+    #[doc(alias = "org.apache.kafka.common.record.internal.DefaultRecord#recordSizeUpperBound")]
     pub fn record_size_upper_bound(key: Option<&[u8]>, value: Option<&[u8]>, headers: &[RecordHeader]) -> i32 {
         let key_size = key.map_or(-1, |k| k.len() as i32);
         let value_size = value.map_or(-1, |v| v.len() as i32);
@@ -845,6 +852,7 @@ mod tests {
     }
 
     #[test]
+    #[doc(alias = "org.apache.kafka.common.record.internal.DefaultRecordTest#testBasicSerde")]
     fn test_basic_serde() {
         let headers = vec![
             RecordHeader::new("foo".to_string(), Some(b"value".to_vec())),
@@ -894,6 +902,7 @@ mod tests {
     }
 
     #[test]
+    #[doc(alias = "org.apache.kafka.common.record.internal.DefaultRecordTest#testBasicSerdeInvalidHeaderCountTooHigh")]
     fn test_basic_serde_invalid_header_count_too_high() {
         let headers = vec![
             RecordHeader::new("foo".to_string(), Some(b"value".to_vec())),
@@ -925,6 +934,7 @@ mod tests {
     }
 
     #[test]
+    #[doc(alias = "org.apache.kafka.common.record.internal.DefaultRecordTest#testBasicSerdeInvalidHeaderCountTooLow")]
     fn test_basic_serde_invalid_header_count_too_low() {
         let headers = vec![
             RecordHeader::new("foo".to_string(), Some(b"value".to_vec())),
@@ -981,6 +991,7 @@ mod tests {
     }
 
     #[test]
+    #[doc(alias = "org.apache.kafka.common.record.internal.DefaultRecordTest#testInvalidKeySize")]
     fn test_invalid_key_size() {
         let attributes: u8 = 0;
         let timestamp_delta: i64 = 2;
@@ -999,6 +1010,7 @@ mod tests {
     }
 
     #[test]
+    #[doc(alias = "org.apache.kafka.common.record.internal.DefaultRecordTest#testInvalidValueSize")]
     fn test_invalid_value_size() {
         let attributes: u8 = 0;
         let timestamp_delta: i64 = 2;
@@ -1018,6 +1030,7 @@ mod tests {
     }
 
     #[test]
+    #[doc(alias = "org.apache.kafka.common.record.internal.DefaultRecordTest#testInvalidNumHeaders")]
     fn test_invalid_num_headers() {
         let attributes: u8 = 0;
         let timestamp_delta: i64 = 2;
@@ -1050,6 +1063,7 @@ mod tests {
     }
 
     #[test]
+    #[doc(alias = "org.apache.kafka.common.record.internal.DefaultRecordTest#testInvalidHeaderKey")]
     fn test_invalid_header_key() {
         let attributes: u8 = 0;
         let timestamp_delta: i64 = 2;
@@ -1070,6 +1084,7 @@ mod tests {
     }
 
     #[test]
+    #[doc(alias = "org.apache.kafka.common.record.internal.DefaultRecordTest#testNullHeaderKey")]
     fn test_null_header_key() {
         let attributes: u8 = 0;
         let timestamp_delta: i64 = 2;
@@ -1090,6 +1105,7 @@ mod tests {
     }
 
     #[test]
+    #[doc(alias = "org.apache.kafka.common.record.internal.DefaultRecordTest#testInvalidHeaderValue")]
     fn test_invalid_header_value() {
         let attributes: u8 = 0;
         let timestamp_delta: i64 = 2;
@@ -1112,6 +1128,7 @@ mod tests {
     }
 
     #[test]
+    #[doc(alias = "org.apache.kafka.common.record.internal.DefaultRecordTest#testUnderflowReadingTimestamp")]
     fn test_underflow_reading_timestamp() {
         let attributes: u8 = 0;
         let size_of_body: i32 = 1;
@@ -1125,6 +1142,7 @@ mod tests {
     }
 
     #[test]
+    #[doc(alias = "org.apache.kafka.common.record.internal.DefaultRecordTest#testUnderflowReadingVarlong")]
     fn test_underflow_reading_varlong() {
         let attributes: u8 = 0;
         let size_of_body: i32 = 2; // one byte for attributes, one byte for partial timestamp
@@ -1147,6 +1165,7 @@ mod tests {
     }
 
     #[test]
+    #[doc(alias = "org.apache.kafka.common.record.internal.DefaultRecordTest#testInvalidVarlong")]
     fn test_invalid_varlong() {
         let attributes: u8 = 0;
         let size_of_body: i32 = 11; // one byte for attributes, 10 bytes for max timestamp
@@ -1174,6 +1193,7 @@ mod tests {
     }
 
     #[test]
+    #[doc(alias = "org.apache.kafka.common.record.internal.DefaultRecordTest#testSerdeNoSequence")]
     fn test_serde_no_sequence() {
         let base_offset: i64 = 37;
         let offset_delta: i32 = 10;
@@ -1197,6 +1217,7 @@ mod tests {
     }
 
     #[test]
+    #[doc(alias = "org.apache.kafka.common.record.internal.DefaultRecordTest#testInvalidSizeOfBodyInBytes")]
     fn test_invalid_size_of_body_in_bytes() {
         // size_of_body = 10 but buffer only has 5 bytes total
         let size_of_body: i32 = 10;

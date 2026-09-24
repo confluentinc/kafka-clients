@@ -24,6 +24,7 @@ kafka_error_class! {
     ///
     /// Java `extends` chain:
     ///    `SecurityDisabledException` -> `ApiException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.SecurityDisabledException")]
     SecurityDisabledError,
     code: Errors::SecurityDisabled,
     extends: [

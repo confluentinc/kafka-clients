@@ -25,6 +25,7 @@ kafka_error_class! {
     /// Java `extends` chain:
     ///    `IllegalGenerationException` -> `ApplicationRecoverableException` ->
     ///   `ApiException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.IllegalGenerationException")]
     IllegalGenerationError,
     code: Errors::IllegalGeneration,
     extends: [

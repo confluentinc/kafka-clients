@@ -30,6 +30,7 @@ use super::{ConcreteRequest, ConcreteResponse, DescribeAclsResponse, RequestBuil
 ///
 /// Corresponds to `org.apache.kafka.common.requests.DescribeAclsRequest`.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.DescribeAclsRequest")]
 pub struct DescribeAclsRequest {
     data: DescribeAclsRequestData,
     version: i16,
@@ -37,11 +38,13 @@ pub struct DescribeAclsRequest {
 
 impl DescribeAclsRequest {
     /// Creates a new `DescribeAclsRequest` from data and version.
+    #[doc(alias = "org.apache.kafka.common.requests.DescribeAclsRequest#DescribeAclsRequest")]
     pub fn new(data: DescribeAclsRequestData, version: i16) -> Self {
         Self { data, version }
     }
 
     /// Returns a reference to the underlying data.
+    #[doc(alias = "org.apache.kafka.common.requests.DescribeAclsRequest#data")]
     pub fn data(&self) -> &DescribeAclsRequestData {
         &self.data
     }
@@ -64,6 +67,7 @@ impl DescribeAclsRequest {
     /// Reconstructs the [`AclBindingFilter`] from the wire data.
     ///
     /// Mirrors `DescribeAclsRequest.filter()`.
+    #[doc(alias = "org.apache.kafka.common.requests.DescribeAclsRequest#filter")]
     pub fn filter(&self) -> AclBindingFilter {
         let rpf = ResourcePatternFilter::new(
             ResourceType::from_code(self.data.resource_type_filter),
@@ -82,6 +86,7 @@ impl DescribeAclsRequest {
     /// Creates an error response for this request.
     ///
     /// Mirrors `DescribeAclsRequest.getErrorResponse`.
+    #[doc(alias = "org.apache.kafka.common.requests.DescribeAclsRequest#getErrorResponse")]
     pub fn get_error_response(&self, throttle_time_ms: i32, error: &Errors) -> ConcreteResponse {
         let mut response = DescribeAclsResponseData::new();
         response.set_throttle_time_ms(throttle_time_ms);
@@ -96,6 +101,7 @@ impl DescribeAclsRequest {
     /// # Errors
     ///
     /// Returns an error if parsing fails.
+    #[doc(alias = "org.apache.kafka.common.requests.DescribeAclsRequest#parse")]
     pub fn parse(readable: &mut dyn Readable, version: i16) -> io::Result<Self> {
         let data = DescribeAclsRequestData::read(readable, version)?;
         Ok(Self::new(data, version))
@@ -112,6 +118,7 @@ impl std::fmt::Display for DescribeAclsRequest {
 ///
 /// Corresponds to `DescribeAclsRequest.Builder` in Java.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.DescribeAclsRequest$Builder")]
 pub struct DescribeAclsRequestBuilder {
     data: DescribeAclsRequestData,
     oldest_allowed_version: i16,
@@ -121,6 +128,7 @@ pub struct DescribeAclsRequestBuilder {
 impl DescribeAclsRequestBuilder {
     /// Creates a builder from an [`AclBindingFilter`], mirroring
     /// `DescribeAclsRequest.Builder(AclBindingFilter)`.
+    #[doc(alias = "org.apache.kafka.common.requests.DescribeAclsRequest$Builder#Builder")]
     pub fn new(filter: &AclBindingFilter) -> Self {
         let pattern_filter = filter.pattern_filter();
         let entry_filter = filter.entry_filter();

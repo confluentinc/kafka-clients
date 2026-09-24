@@ -22,12 +22,14 @@ use crate::common::Error;
 /// Translates the Java static-utility class `org.apache.kafka.common.metrics.internals.MetricsUtils`,
 /// which has no instance state, so it becomes a unit struct hosting its
 /// statics as associated items.
+#[doc(alias = "org.apache.kafka.common.metrics.internals.MetricsUtils")]
 pub(crate) struct MetricsUtils;
 
 impl MetricsUtils {
     /// Convert the provided time from milliseconds to the requested time unit.
     ///
     /// Faithful translation of `MetricsUtils.convert(long timeMs, TimeUnit unit)`.
+    #[doc(alias = "org.apache.kafka.common.metrics.internals.MetricsUtils#convert")]
     pub fn convert(time_ms: i64, unit: TimeUnit) -> f64 {
         let time_ms = time_ms as f64;
         match unit {
@@ -45,6 +47,7 @@ impl MetricsUtils {
     ///
     /// Returns an error (Java throws `IllegalArgumentException`) if the number of
     /// elements is odd.
+    #[doc(alias = "org.apache.kafka.common.metrics.internals.MetricsUtils#getTags")]
     pub fn get_tags(key_value: &[&str]) -> Result<BTreeMap<String, String>, Error> {
         if !key_value.len().is_multiple_of(2) {
             return Err(Error::local_illegal_argument("keyValue needs to be specified in pairs"));

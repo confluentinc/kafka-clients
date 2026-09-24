@@ -66,6 +66,7 @@ use crate::common::serialization::Deserializer;
 ///
 /// Note: deliberately NOT `Clone`. Sharing happens at the outer
 /// `Arc<Deserializers<K, V>>` boundary, not on this struct.
+#[doc(alias = "org.apache.kafka.clients.consumer.internals.Deserializers")]
 pub(crate) struct Deserializers<K: 'static, V: 'static> {
     key: Box<dyn Deserializer<K>>,
     value: Box<dyn Deserializer<V>>,
@@ -85,6 +86,7 @@ impl<K, V> Deserializers<K, V> {
     /// `Deserializers(ConsumerConfig, ...)` is also not translated — Phase
     /// 11 wires the deserializers explicitly via the consumer config
     /// builder.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.Deserializers#Deserializers")]
     pub(crate) fn new(key: Box<dyn Deserializer<K>>, value: Box<dyn Deserializer<V>>) -> Self {
         Self { key, value }
     }
@@ -92,6 +94,7 @@ impl<K, V> Deserializers<K, V> {
     /// Returns a borrowed reference to the key deserializer.
     ///
     /// Translates Java's `Deserializer<K> keyDeserializer()`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.Deserializers#keyDeserializer")]
     pub(crate) fn key_deserializer(&self) -> &dyn Deserializer<K> {
         &*self.key
     }
@@ -99,6 +102,7 @@ impl<K, V> Deserializers<K, V> {
     /// Returns a borrowed reference to the value deserializer.
     ///
     /// Translates Java's `Deserializer<V> valueDeserializer()`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.Deserializers#valueDeserializer")]
     pub(crate) fn value_deserializer(&self) -> &dyn Deserializer<V> {
         &*self.value
     }

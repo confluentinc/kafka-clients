@@ -45,6 +45,7 @@ use crate::consumer::OffsetAndTimestamp;
 /// Translates `OffsetAndTimestampInternal` (Apache Kafka
 /// `clients/consumer/internals/OffsetAndTimestampInternal.java`).
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[doc(alias = "org.apache.kafka.clients.consumer.internals.OffsetAndTimestampInternal")]
 pub(crate) struct OffsetAndTimestampInternal {
     timestamp: i64,
     offset: i64,
@@ -56,11 +57,13 @@ impl OffsetAndTimestampInternal {
     /// for `offset` and `timestamp` are accepted (matching Java; the
     /// broker uses `-1` to indicate "no timestamp available" for
     /// `LATEST` / `EARLIEST` lookups).
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.OffsetAndTimestampInternal#OffsetAndTimestampInternal")]
     pub(crate) fn new(offset: i64, timestamp: i64, leader_epoch: Option<i32>) -> Self {
         Self { offset, timestamp, leader_epoch }
     }
 
     /// The offset value carried by this entry.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.OffsetAndTimestampInternal#offset")]
     pub(crate) fn offset(&self) -> i64 {
         self.offset
     }
@@ -69,12 +72,14 @@ impl OffsetAndTimestampInternal {
     /// `-1` is the broker's sentinel for "no timestamp" on
     /// `LATEST`/`EARLIEST` queries.
     #[allow(dead_code)] // Used by tests and future internal accessors.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.OffsetAndTimestampInternal#timestamp")]
     pub(crate) fn timestamp(&self) -> i64 {
         self.timestamp
     }
 
     /// The leader epoch associated with this offset, if any.
     #[allow(dead_code)] // Used by tests and future internal accessors.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.OffsetAndTimestampInternal#leaderEpoch")]
     pub(crate) fn leader_epoch(&self) -> Option<i32> {
         self.leader_epoch
     }
@@ -91,6 +96,7 @@ impl OffsetAndTimestampInternal {
     /// `LATEST` / `EARLIEST` ListOffsets must NOT call this — those
     /// values carry `timestamp == -1`. Use [`Self::offset`] directly
     /// for those flows.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.OffsetAndTimestampInternal#buildOffsetAndTimestamp")]
     pub(crate) fn build_offset_and_timestamp(&self) -> Result<OffsetAndTimestamp, crate::common::Error> {
         OffsetAndTimestamp::with_leader_epoch(self.offset, self.timestamp, self.leader_epoch)
     }

@@ -23,6 +23,7 @@
 /// `current_transaction_start_offset` are optional (Java `OptionalInt` /
 /// `OptionalLong`).
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[doc(alias = "org.apache.kafka.clients.admin.ProducerState")]
 pub struct ProducerState {
     producer_id: i64,
     producer_epoch: i32,
@@ -34,6 +35,7 @@ pub struct ProducerState {
 
 impl ProducerState {
     /// Creates a new `ProducerState`.
+    #[doc(alias = "org.apache.kafka.clients.admin.ProducerState#ProducerState")]
     pub fn new(
         producer_id: i64,
         producer_epoch: i32,
@@ -53,31 +55,37 @@ impl ProducerState {
     }
 
     /// The producer id.
+    #[doc(alias = "org.apache.kafka.clients.admin.ProducerState#producerId")]
     pub fn producer_id(&self) -> i64 {
         self.producer_id
     }
 
     /// The producer epoch.
+    #[doc(alias = "org.apache.kafka.clients.admin.ProducerState#producerEpoch")]
     pub fn producer_epoch(&self) -> i32 {
         self.producer_epoch
     }
 
     /// The last sequence number written by this producer.
+    #[doc(alias = "org.apache.kafka.clients.admin.ProducerState#lastSequence")]
     pub fn last_sequence(&self) -> i32 {
         self.last_sequence
     }
 
     /// The last timestamp written by this producer.
+    #[doc(alias = "org.apache.kafka.clients.admin.ProducerState#lastTimestamp")]
     pub fn last_timestamp(&self) -> i64 {
         self.last_timestamp
     }
 
     /// The offset of the first record in the current transaction, if any.
+    #[doc(alias = "org.apache.kafka.clients.admin.ProducerState#currentTransactionStartOffset")]
     pub fn current_transaction_start_offset(&self) -> Option<i64> {
         self.current_transaction_start_offset
     }
 
     /// The coordinator epoch, if any.
+    #[doc(alias = "org.apache.kafka.clients.admin.ProducerState#coordinatorEpoch")]
     pub fn coordinator_epoch(&self) -> Option<i32> {
         self.coordinator_epoch
     }

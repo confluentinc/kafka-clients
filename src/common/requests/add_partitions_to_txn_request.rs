@@ -63,6 +63,7 @@ use super::RequestBuilder;
 ///
 /// Corresponds to `org.apache.kafka.common.requests.AddPartitionsToTxnRequest`.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.AddPartitionsToTxnRequest")]
 pub struct AddPartitionsToTxnRequest {
     data: AddPartitionsToTxnRequestData,
     version: i16,
@@ -81,11 +82,13 @@ impl AddPartitionsToTxnRequest {
     pub const EARLIEST_BROKER_VERSION: i16 = 4;
 
     /// Creates a new `AddPartitionsToTxnRequest` from data and version.
+    #[doc(alias = "org.apache.kafka.common.requests.AddPartitionsToTxnRequest#AddPartitionsToTxnRequest")]
     pub fn new(data: AddPartitionsToTxnRequestData, version: i16) -> Self {
         Self { data, version }
     }
 
     /// Returns a reference to the underlying data.
+    #[doc(alias = "org.apache.kafka.common.requests.AddPartitionsToTxnRequest#data")]
     pub fn data(&self) -> &AddPartitionsToTxnRequestData {
         &self.data
     }
@@ -109,6 +112,7 @@ impl AddPartitionsToTxnRequest {
     ///
     /// Corresponds to Java's static
     /// `getPartitions(AddPartitionsToTxnTopicCollection)`.
+    #[doc(alias = "org.apache.kafka.common.requests.AddPartitionsToTxnRequest#getPartitions")]
     pub fn get_partitions(topics: &[AddPartitionsToTxnTopic]) -> Vec<TopicPartition> {
         topics
             .iter()
@@ -127,6 +131,7 @@ impl AddPartitionsToTxnRequest {
     /// Below [`Self::EARLIEST_BROKER_VERSION`] the error is reported per partition, in
     /// the `results_by_topic_v3_and_below` field; from v4 it is a single
     /// top-level `error_code`. The throttle time is set either way.
+    #[doc(alias = "org.apache.kafka.common.requests.AddPartitionsToTxnRequest#getErrorResponse")]
     pub fn get_error_response(&self, throttle_time_ms: i32, error: &Errors) -> ConcreteResponse {
         let mut response = AddPartitionsToTxnResponseData::new();
         if self.version < AddPartitionsToTxnRequest::EARLIEST_BROKER_VERSION {
@@ -144,6 +149,7 @@ impl AddPartitionsToTxnRequest {
     /// Builds a per-partition error result for every partition in `topics`.
     ///
     /// Corresponds to Java's private `errorResponseForTopics`.
+    #[doc(alias = "org.apache.kafka.common.requests.AddPartitionsToTxnRequest#errorResponseForTopics")]
     fn error_response_for_topics(
         topics: &[AddPartitionsToTxnTopic],
         error: &Errors,
@@ -173,6 +179,7 @@ impl AddPartitionsToTxnRequest {
     /// # Errors
     ///
     /// Returns an error if parsing fails.
+    #[doc(alias = "org.apache.kafka.common.requests.AddPartitionsToTxnRequest#parse")]
     pub fn parse(readable: &mut dyn Readable, version: i16) -> io::Result<Self> {
         let data = AddPartitionsToTxnRequestData::read(readable, version)?;
         Ok(Self::new(data, version))
@@ -190,6 +197,7 @@ impl std::fmt::Display for AddPartitionsToTxnRequest {
 /// Corresponds to `AddPartitionsToTxnRequest.Builder` in Java. Java exposes two
 /// named constructors; only the client one is translated (see the module docs).
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.AddPartitionsToTxnRequest$Builder")]
 pub struct AddPartitionsToTxnRequestBuilder {
     data: AddPartitionsToTxnRequestData,
     oldest_allowed_version: i16,
@@ -201,6 +209,7 @@ impl AddPartitionsToTxnRequestBuilder {
     /// [`AddPartitionsToTxnRequest::LAST_CLIENT_VERSION`].
     ///
     /// Corresponds to `AddPartitionsToTxnRequest.Builder.forClient`.
+    #[doc(alias = "org.apache.kafka.common.requests.AddPartitionsToTxnRequest$Builder#forClient")]
     pub fn for_client(
         transactional_id: impl Into<String>,
         producer_id: i64,
@@ -229,6 +238,7 @@ impl AddPartitionsToTxnRequestBuilder {
     /// exist yet for this type, tracked as PLAN §9.14. The sort is still correct
     /// and load-bearing: without it the encoding varies run to run, so the tests
     /// could not be written at all.
+    #[doc(alias = "org.apache.kafka.common.requests.AddPartitionsToTxnRequest$Builder#buildTxnTopicCollection")]
     fn build_txn_topic_collection(partitions: &[TopicPartition]) -> Vec<AddPartitionsToTxnTopic> {
         let mut partition_map: HashMap<&str, Vec<i32>> = HashMap::new();
         for topic_partition in partitions {
@@ -451,6 +461,7 @@ mod tests {
     /// Java parameterises over every API version via `@ApiKeyVersionsSource`;
     /// per `definition-of-done.md` §3 that becomes a loop.
     #[test]
+    #[doc(alias = "org.apache.kafka.common.requests.AddPartitionsToTxnRequestTest#testConstructor")]
     fn test_constructor() {
         const PRODUCER_ID: i64 = 10;
         const PRODUCER_EPOCH: i16 = 1;

@@ -40,6 +40,7 @@ use crate::consumer::{Consumer, ConsumerConfig, GroupProtocol, async_kafka_consu
 /// ("collapses to direct `Box::new(AsyncKafkaConsumer)`"); this type is where
 /// that collapsed creator lives.
 #[non_exhaustive]
+#[doc(alias = "org.apache.kafka.clients.consumer.KafkaConsumer")]
 pub struct KafkaConsumer;
 
 impl KafkaConsumer {
@@ -68,6 +69,7 @@ impl KafkaConsumer {
     // rather than re-wrapping it in a type whose only content is 55 forwarding
     // methods. See the type-level comment above.
     #[allow(clippy::new_ret_no_self)]
+    #[doc(alias = "org.apache.kafka.clients.consumer.KafkaConsumer#KafkaConsumer")]
     pub fn new<K, V>(
         config: ConsumerConfig,
         key_deserializer: Box<dyn Deserializer<K>>,

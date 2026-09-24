@@ -103,6 +103,7 @@ impl FetchCollectorTime for SystemFetchCollectorTime {
 ///
 /// Corresponds to
 /// `org.apache.kafka.clients.consumer.internals.FetchCollector<K, V>`.
+#[doc(alias = "org.apache.kafka.clients.consumer.internals.FetchCollector")]
 pub(crate) struct FetchCollector<K, V>
 where
     K: Send + Sync + 'static,
@@ -154,6 +155,7 @@ where
     /// FetchConfig, Deserializers, FetchMetricsManager, Time)`. The
     /// `LogContext` is dropped (we use the `log` crate). Phase M3 plumbs the
     /// `FetchMetricsManager` (dropped by Phase 7a) for per-partition lag/lead.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.FetchCollector#FetchCollector")]
     pub(crate) fn new(
         metadata: Arc<ConsumerMetadata>,
         subscriptions: Arc<Mutex<SubscriptionState>>,
@@ -215,6 +217,7 @@ where
     /// returning, otherwise the buffer slot will be permanently empty.
     /// The current implementation restores on every Err-path that took
     /// ownership; preserve this invariant.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.FetchCollector#collectFetch")]
     pub(crate) fn collect_fetch(&self, fetch_buffer: &FetchBuffer) -> Result<ConsumerRecords<K, V>, Error> {
         let mut records_by_partition: IndexMap<TopicPartition, Vec<ConsumerRecord<K, V>>> = IndexMap::new();
         let mut next_offsets: HashMap<TopicPartition, OffsetAndMetadata> = HashMap::new();
@@ -636,6 +639,7 @@ where
     /// push_front the entry on the queue.
     ///
     /// Translates Java's `CompletedFetch initialize(CompletedFetch)`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.FetchCollector#initialize")]
     fn initialize(&self, completed_fetch: CompletedFetch) -> Result<Option<CompletedFetch>, FetchFail> {
         // Test-only injection: reproduce Java's testErrorInInitialize, where
         // the anonymous subclass overrides initialize() to throw. Compiled
@@ -711,6 +715,7 @@ where
     }
 
     /// Translates Java's `CompletedFetch handleInitializeSuccess(CompletedFetch)`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.FetchCollector#handleInitializeSuccess")]
     fn handle_initialize_success(
         &self,
         mut completed_fetch: CompletedFetch,
@@ -790,6 +795,7 @@ where
 
     /// Translates Java's
     /// `boolean updatePartitionState(PartitionData, TopicPartition)`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.FetchCollector#updatePartitionState")]
     fn update_partition_state(&self, partition_data: &PartitionData, tp: &TopicPartition) -> bool {
         let high_watermark = partition_data.high_watermark;
         let log_start_offset = partition_data.log_start_offset;
@@ -833,6 +839,7 @@ where
 
     /// Translates Java's
     /// `void handleInitializeErrors(CompletedFetch, Errors)`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.FetchCollector#handleInitializeErrors")]
     fn handle_initialize_errors(
         &self,
         completed_fetch: CompletedFetch,
@@ -1138,6 +1145,7 @@ mod tests {
     /// Rust port uses `max_poll_records = recordCount` to reproduce the
     /// boundary exactly without generating 500 records.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.FetchCollectorTest#testFetchNormal")]
     fn test_fetch_normal() {
         let record_count = DEFAULT_RECORD_COUNT; // 10
         // Set max_poll_records == record_count so the collect_fetch loop
@@ -1180,6 +1188,7 @@ mod tests {
 
     /// Translated from `FetchCollectorTest.testNoResultsIfInitializing`.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.FetchCollectorTest#testNoResultsIfInitializing")]
     fn test_no_results_if_initializing() {
         let h = build_harness(DEFAULT_MAX_POLL_RECORDS, IsolationLevel::ReadUncommitted);
         let partition = tp("topic-a", 0);
@@ -1207,6 +1216,9 @@ mod tests {
 
     /// Translated from `FetchCollectorTest.testFetchingPausedPartitionsYieldsNoRecords`.
     #[test]
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.FetchCollectorTest#testFetchingPausedPartitionsYieldsNoRecords"
+    )]
     fn test_fetching_paused_partitions_yields_no_records() {
         let h = build_harness(DEFAULT_MAX_POLL_RECORDS, IsolationLevel::ReadUncommitted);
         let partition = tp("topic-a", 0);
@@ -1274,6 +1286,7 @@ mod tests {
     /// Translated from `FetchCollectorTest.testFetchWithOffsetOutOfRange` —
     /// with default reset policy: silent reset.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.FetchCollectorTest#testFetchWithOffsetOutOfRange")]
     fn test_fetch_with_offset_out_of_range_with_default_reset() {
         let h = build_harness(DEFAULT_MAX_POLL_RECORDS, IsolationLevel::ReadUncommitted);
         let partition = tp("topic-a", 0);
@@ -1289,6 +1302,9 @@ mod tests {
 
     /// Translated from `FetchCollectorTest.testFetchWithTopicAuthorizationFailed`.
     #[test]
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.FetchCollectorTest#testFetchWithTopicAuthorizationFailed"
+    )]
     fn test_fetch_with_topic_authorization_failed() {
         let h = build_harness(DEFAULT_MAX_POLL_RECORDS, IsolationLevel::ReadUncommitted);
         let partition = tp("topic-a", 0);
@@ -1308,6 +1324,7 @@ mod tests {
 
     /// Translated from `FetchCollectorTest.testFetchWithUnknownLeaderEpoch`.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.FetchCollectorTest#testFetchWithUnknownLeaderEpoch")]
     fn test_fetch_with_unknown_leader_epoch() {
         let h = build_harness(DEFAULT_MAX_POLL_RECORDS, IsolationLevel::ReadUncommitted);
         let partition = tp("topic-a", 0);
@@ -1323,6 +1340,7 @@ mod tests {
 
     /// Translated from `FetchCollectorTest.testFetchWithUnknownServerError`.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.FetchCollectorTest#testFetchWithUnknownServerError")]
     fn test_fetch_with_unknown_server_error() {
         let h = build_harness(DEFAULT_MAX_POLL_RECORDS, IsolationLevel::ReadUncommitted);
         let partition = tp("topic-a", 0);
@@ -1338,6 +1356,7 @@ mod tests {
 
     /// Translated from `FetchCollectorTest.testFetchWithCorruptMessage`.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.FetchCollectorTest#testFetchWithCorruptMessage")]
     fn test_fetch_with_corrupt_message() {
         let h = build_harness(DEFAULT_MAX_POLL_RECORDS, IsolationLevel::ReadUncommitted);
         let partition = tp("topic-a", 0);
@@ -1354,6 +1373,7 @@ mod tests {
     /// Translated from `FetchCollectorTest.testFetchWithMetadataRefreshErrors`
     /// (parameterized). Iterates the error set in a loop.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.FetchCollectorTest#testFetchWithMetadataRefreshErrors")]
     fn test_fetch_with_metadata_refresh_errors() {
         let errors = vec![
             Errors::NotLeaderOrFollower,
@@ -1405,6 +1425,7 @@ mod tests {
     /// corrupt arms). This is the full set, not a 3-error sample, so adding
     /// a new "other" error to the enum is automatically covered.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.FetchCollectorTest#testFetchWithOtherErrors")]
     fn test_fetch_with_other_errors() {
         // The errors that have dedicated handling and therefore do NOT take
         // the catch-all arm. Mirrors the `errors.removeAll(...)` list in
@@ -2009,6 +2030,9 @@ mod tests {
     /// only the literal offset values differ because no control marker occupies
     /// an offset slot.
     #[test]
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.FetchCollectorTest#testReadCommittedWithAbortedTransaction"
+    )]
     fn test_read_committed_with_aborted_transaction() {
         const ABORTED_PRODUCER_ID: i64 = 100;
         const COMMITTED_PRODUCER_ID: i64 = 200;
@@ -2069,6 +2093,7 @@ mod tests {
 
     /// Translated from `FetchCollectorTest.testFetchWithReadReplica`.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.FetchCollectorTest#testFetchWithReadReplica")]
     fn test_fetch_with_read_replica() {
         let h = build_harness(DEFAULT_MAX_POLL_RECORDS, IsolationLevel::ReadUncommitted);
         let partition = tp("topic-a", 0);
@@ -2093,6 +2118,7 @@ mod tests {
 
     /// Translated from `FetchCollectorTest.testFetchWithOffsetOutOfRangeWithPreferredReadReplica`.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.FetchCollectorTest#testFetchWithOffsetOutOfRange")]
     fn test_fetch_with_offset_out_of_range_with_preferred_replica() {
         let h = build_harness(10, IsolationLevel::ReadUncommitted);
         let partition = tp("topic-a", 0);

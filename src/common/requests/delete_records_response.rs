@@ -28,6 +28,7 @@ use super::AbstractResponse;
 ///
 /// Corresponds to `org.apache.kafka.common.requests.DeleteRecordsResponse`.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.DeleteRecordsResponse")]
 pub struct DeleteRecordsResponse {
     data: DeleteRecordsResponseData,
 }
@@ -39,6 +40,7 @@ impl DeleteRecordsResponse {
     pub const INVALID_LOW_WATERMARK: i64 = -1;
 
     /// Creates a new `DeleteRecordsResponse` from the underlying data.
+    #[doc(alias = "org.apache.kafka.common.requests.DeleteRecordsResponse#DeleteRecordsResponse")]
     pub fn new(data: DeleteRecordsResponseData) -> Self {
         Self { data }
     }
@@ -49,6 +51,7 @@ impl DeleteRecordsResponse {
     }
 
     /// Returns a reference to the underlying data.
+    #[doc(alias = "org.apache.kafka.common.requests.DeleteRecordsResponse#data")]
     pub fn data(&self) -> &DeleteRecordsResponseData {
         &self.data
     }
@@ -59,16 +62,19 @@ impl DeleteRecordsResponse {
     }
 
     /// Returns the throttle time in milliseconds.
+    #[doc(alias = "org.apache.kafka.common.requests.DeleteRecordsResponse#throttleTimeMs")]
     pub fn throttle_time_ms(&self) -> i32 {
         self.data.throttle_time_ms
     }
 
     /// Sets the throttle time in the response.
+    #[doc(alias = "org.apache.kafka.common.requests.DeleteRecordsResponse#maybeSetThrottleTimeMs")]
     pub fn maybe_set_throttle_time_ms(&mut self, throttle_time_ms: i32) {
         self.data.set_throttle_time_ms(throttle_time_ms);
     }
 
     /// Returns the error counts aggregated across all partition results.
+    #[doc(alias = "org.apache.kafka.common.requests.DeleteRecordsResponse#errorCounts")]
     pub fn error_counts(&self) -> HashMap<Errors, i32> {
         let mut counts = HashMap::new();
         for topic in &self.data.topics {
@@ -85,12 +91,14 @@ impl DeleteRecordsResponse {
     /// # Errors
     ///
     /// Returns an error if parsing fails.
+    #[doc(alias = "org.apache.kafka.common.requests.DeleteRecordsResponse#parse")]
     pub fn parse(readable: &mut dyn Readable, version: i16) -> io::Result<Self> {
         let data = DeleteRecordsResponseData::read(readable, version)?;
         Ok(Self::new(data))
     }
 
     /// Whether the client should throttle on this response (v1+).
+    #[doc(alias = "org.apache.kafka.common.requests.DeleteRecordsResponse#shouldClientThrottle")]
     pub fn should_client_throttle(&self, version: i16) -> bool {
         version >= 1
     }

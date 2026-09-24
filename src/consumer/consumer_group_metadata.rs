@@ -38,6 +38,7 @@ const UNKNOWN_MEMBER_ID: &str = "";
 /// Corresponds to Java's
 /// `org.apache.kafka.clients.consumer.ConsumerGroupMetadata`.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[doc(alias = "org.apache.kafka.clients.consumer.ConsumerGroupMetadata")]
 pub struct ConsumerGroupMetadata {
     group_id: String,
     generation_id: i32,
@@ -55,6 +56,7 @@ impl ConsumerGroupMetadata {
         since = "4.2.0",
         note = "Use Consumer::group_metadata() instead. This struct will become a trait in a future release."
     )]
+    #[doc(alias = "org.apache.kafka.clients.consumer.ConsumerGroupMetadata#ConsumerGroupMetadata")]
     pub fn new(group_id: impl Into<String>) -> Self {
         #[allow(deprecated)]
         Self::with_generation_id_member_id_group_instance_id(group_id, UNKNOWN_GENERATION_ID, UNKNOWN_MEMBER_ID, None)
@@ -68,6 +70,7 @@ impl ConsumerGroupMetadata {
         since = "4.2.0",
         note = "Use Consumer::group_metadata() instead. This struct will become a trait in a future release."
     )]
+    #[doc(alias = "org.apache.kafka.clients.consumer.ConsumerGroupMetadata#ConsumerGroupMetadata")]
     pub fn with_generation_id_member_id_group_instance_id(
         group_id: impl Into<String>,
         generation_id: i32,
@@ -83,21 +86,25 @@ impl ConsumerGroupMetadata {
     }
 
     /// The consumer group ID.
+    #[doc(alias = "org.apache.kafka.clients.consumer.ConsumerGroupMetadata#groupId")]
     pub fn group_id(&self) -> &str {
         &self.group_id
     }
 
     /// The current generation ID, or `-1` (`UNKNOWN_GENERATION_ID`) if unknown.
+    #[doc(alias = "org.apache.kafka.clients.consumer.ConsumerGroupMetadata#generationId")]
     pub fn generation_id(&self) -> i32 {
         self.generation_id
     }
 
     /// The member ID, or an empty string (`UNKNOWN_MEMBER_ID`) if unknown.
+    #[doc(alias = "org.apache.kafka.clients.consumer.ConsumerGroupMetadata#memberId")]
     pub fn member_id(&self) -> &str {
         &self.member_id
     }
 
     /// The group instance ID, if the consumer is a static member.
+    #[doc(alias = "org.apache.kafka.clients.consumer.ConsumerGroupMetadata#groupInstanceId")]
     pub fn group_instance_id(&self) -> Option<&str> {
         self.group_instance_id.as_deref()
     }

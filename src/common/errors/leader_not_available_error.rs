@@ -27,6 +27,7 @@ kafka_error_class! {
     ///    `LeaderNotAvailableException` -> `InvalidMetadataException` ->
     ///   `RefreshRetriableException` -> `RetriableException` -> `ApiException` ->
     ///   `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.LeaderNotAvailableException")]
     LeaderNotAvailableError,
     code: Errors::LeaderNotAvailable,
     extends: [

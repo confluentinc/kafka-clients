@@ -32,6 +32,7 @@ use super::{UserScramCredentialDeletion, UserScramCredentialUpsertion};
 /// See [KIP-554: Add Broker-side SCRAM Config API](https://cwiki.apache.org/confluence/display/KAFKA/KIP-554%3A+Add+Broker-side+SCRAM+Config+API).
 #[derive(Debug, Clone)]
 #[non_exhaustive]
+#[doc(alias = "org.apache.kafka.clients.admin.UserScramCredentialAlteration")]
 pub enum UserScramCredentialAlteration {
     /// An update/insertion of a credential ([`UserScramCredentialUpsertion`]).
     Upsertion(UserScramCredentialUpsertion),
@@ -43,6 +44,7 @@ impl UserScramCredentialAlteration {
     /// Returns the always non-null user.
     ///
     /// Mirrors `UserScramCredentialAlteration.user()`.
+    #[doc(alias = "org.apache.kafka.clients.admin.UserScramCredentialAlteration#user")]
     pub fn user(&self) -> &str {
         match self {
             UserScramCredentialAlteration::Upsertion(u) => u.user(),

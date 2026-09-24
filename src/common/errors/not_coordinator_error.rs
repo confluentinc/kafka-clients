@@ -25,6 +25,7 @@ kafka_error_class! {
     /// Java `extends` chain:
     ///    `NotCoordinatorException` -> `RefreshRetriableException` ->
     ///   `RetriableException` -> `ApiException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.NotCoordinatorException")]
     NotCoordinatorError,
     code: Errors::NotCoordinator,
     extends: [

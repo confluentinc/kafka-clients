@@ -31,6 +31,7 @@ use crate::consumer::ConsumerConfig;
 ///
 /// Corresponds to `org.apache.kafka.clients.consumer.internals.FetchConfig`.
 #[derive(Clone, Debug)]
+#[doc(alias = "org.apache.kafka.clients.consumer.internals.FetchConfig")]
 pub(crate) struct FetchConfig {
     /// `fetch.min.bytes`.
     pub min_bytes: i32,
@@ -55,6 +56,7 @@ impl FetchConfig {
     ///
     /// Translates the 8-arg Java constructor.
     #[allow(clippy::too_many_arguments)]
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.FetchConfig#FetchConfig")]
     pub(crate) fn new(
         min_bytes: i32,
         max_bytes: i32,
@@ -85,6 +87,7 @@ impl FetchConfig {
     ///
     /// Returns an error if `isolation.level` is not one of `read_uncommitted`
     /// or `read_committed`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.FetchConfig#FetchConfig")]
     pub(crate) fn with_consumer_config(config: &ConsumerConfig) -> Result<Self, Error> {
         let isolation_level = match config.isolation_level.as_str() {
             "read_uncommitted" => IsolationLevel::ReadUncommitted,
@@ -161,6 +164,7 @@ mod tests {
     /// `FetchConfigTest.newFetchConfigFromConsumerConfig`. Just exercises the
     /// `from_consumer_config` constructor with default settings.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.FetchConfigTest#testBasicFromConsumerConfig")]
     fn test_basic_from_consumer_config() {
         let consumer_config = ConsumerConfig::default();
         let fetch_config = FetchConfig::with_consumer_config(&consumer_config).unwrap();

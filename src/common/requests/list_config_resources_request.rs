@@ -29,6 +29,7 @@ use super::{ConcreteRequest, ConcreteResponse, ListConfigResourcesResponse, Requ
 ///
 /// Corresponds to `org.apache.kafka.common.requests.ListConfigResourcesRequest`.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.ListConfigResourcesRequest")]
 pub struct ListConfigResourcesRequest {
     data: ListConfigResourcesRequestData,
     version: i16,
@@ -36,11 +37,13 @@ pub struct ListConfigResourcesRequest {
 
 impl ListConfigResourcesRequest {
     /// Creates a new `ListConfigResourcesRequest` from data and version.
+    #[doc(alias = "org.apache.kafka.common.requests.ListConfigResourcesRequest#ListConfigResourcesRequest")]
     pub fn new(data: ListConfigResourcesRequestData, version: i16) -> Self {
         Self { data, version }
     }
 
     /// Returns a reference to the underlying data.
+    #[doc(alias = "org.apache.kafka.common.requests.ListConfigResourcesRequest#data")]
     pub fn data(&self) -> &ListConfigResourcesRequestData {
         &self.data
     }
@@ -63,6 +66,7 @@ impl ListConfigResourcesRequest {
     /// Creates an error response for this request.
     ///
     /// Mirrors `ListConfigResourcesRequest.getErrorResponse`.
+    #[doc(alias = "org.apache.kafka.common.requests.ListConfigResourcesRequest#getErrorResponse")]
     pub fn get_error_response(&self, throttle_time_ms: i32, error: &Errors) -> ConcreteResponse {
         let mut data = ListConfigResourcesResponseData::new();
         data.set_error_code(error.code());
@@ -76,6 +80,7 @@ impl ListConfigResourcesRequest {
     /// # Errors
     ///
     /// Returns an error if parsing fails.
+    #[doc(alias = "org.apache.kafka.common.requests.ListConfigResourcesRequest#parse")]
     pub fn parse(readable: &mut dyn Readable, version: i16) -> io::Result<Self> {
         let data = ListConfigResourcesRequestData::read(readable, version)?;
         Ok(Self::new(data, version))
@@ -92,6 +97,7 @@ impl std::fmt::Display for ListConfigResourcesRequest {
 ///
 /// Corresponds to `ListConfigResourcesRequest.Builder` in Java.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.ListConfigResourcesRequest$Builder")]
 pub struct ListConfigResourcesRequestBuilder {
     data: ListConfigResourcesRequestData,
     oldest_allowed_version: i16,
@@ -100,6 +106,7 @@ pub struct ListConfigResourcesRequestBuilder {
 
 impl ListConfigResourcesRequestBuilder {
     /// Creates a builder from existing data.
+    #[doc(alias = "org.apache.kafka.common.requests.ListConfigResourcesRequest$Builder#Builder")]
     pub fn new(data: ListConfigResourcesRequestData) -> Self {
         Self {
             data,

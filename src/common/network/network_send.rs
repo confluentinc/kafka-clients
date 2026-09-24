@@ -27,6 +27,7 @@ use std::pin::Pin;
 ///
 /// `NetworkSend` delegates all send operations to the inner send and adds
 /// a `destination_id` to identify the target broker/node.
+#[doc(alias = "org.apache.kafka.common.network.NetworkSend")]
 pub struct NetworkSend {
     /// The destination identifier (typically a broker node ID).
     destination_id: String,
@@ -50,11 +51,13 @@ impl NetworkSend {
     /// The send defaults to expecting a response (`fire_and_forget = false`);
     /// callers that know the request is fire-and-forget (producer `acks=0`) mark
     /// it via [`set_fire_and_forget`](Self::set_fire_and_forget).
+    #[doc(alias = "org.apache.kafka.common.network.NetworkSend#NetworkSend")]
     pub fn new(destination_id: &str, send: Box<dyn KafkaSend>) -> Self {
         Self { destination_id: destination_id.to_string(), send, fire_and_forget: false }
     }
 
     /// Returns the destination identifier.
+    #[doc(alias = "org.apache.kafka.common.network.NetworkSend#destinationId")]
     pub fn destination_id(&self) -> &str {
         &self.destination_id
     }
@@ -70,6 +73,7 @@ impl NetworkSend {
     }
 
     /// Returns a reference to the inner send.
+    #[doc(alias = "org.apache.kafka.common.network.NetworkSend#send")]
     pub fn send(&self) -> &dyn KafkaSend {
         self.send.as_ref()
     }

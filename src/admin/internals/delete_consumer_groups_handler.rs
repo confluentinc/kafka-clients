@@ -35,6 +35,7 @@ const DISPLAY_NAME: &str = "DeleteConsumerGroups";
 /// exposes a factory that configures the base [`DeleteGroupsHandler`] with the
 /// subclass's names rather than a distinct newtype (which would only forward
 /// every trait method).
+#[doc(alias = "org.apache.kafka.clients.admin.internals.DeleteConsumerGroupsHandler")]
 pub(crate) struct DeleteConsumerGroupsHandler;
 
 impl DeleteConsumerGroupsHandler {
@@ -46,6 +47,7 @@ impl DeleteConsumerGroupsHandler {
     /// (the subclass adds no state — see the module docs), so
     /// `clippy::new_ret_no_self` does not apply here.
     #[allow(clippy::new_ret_no_self)]
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.DeleteConsumerGroupsHandler#DeleteConsumerGroupsHandler")]
     pub(crate) fn new(log_context: LogContext) -> DeleteGroupsHandler {
         DeleteGroupsHandler::new(API_NAME, DISPLAY_NAME, log_context)
     }

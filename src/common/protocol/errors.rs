@@ -33,6 +33,7 @@ use crate::common::errors::*;
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 #[repr(i16)]
 #[non_exhaustive]
+#[doc(alias = "org.apache.kafka.common.protocol.Errors")]
 pub enum Errors {
     UnknownServerError = -1,
     None = 0,
@@ -173,6 +174,7 @@ pub enum Errors {
 
 impl Errors {
     /// The error code for this error.
+    #[doc(alias = "org.apache.kafka.common.protocol.Errors#code")]
     pub fn code(&self) -> i16 {
         *self as i16
     }
@@ -341,6 +343,7 @@ impl Errors {
     }
 
     /// Get a friendly description of the error.
+    #[doc(alias = "org.apache.kafka.common.protocol.Errors#message")]
     pub fn message(&self) -> &'static str {
         match self {
             Self::UnknownServerError => "The server experienced an unexpected error when processing the request.",
@@ -576,6 +579,7 @@ impl Errors {
     ///
     /// `None` for [`Errors::None`], which Java declares as
     /// `NONE(0, null, message -> null)`.
+    #[doc(alias = "org.apache.kafka.common.protocol.Errors#exception")]
     pub fn error(&self) -> Option<Error> {
         match self {
             Self::None => None,
@@ -900,6 +904,7 @@ impl Errors {
     /// (`log.debug("Error in fetch for partition {}: {}", tp,
     /// error.exceptionName())`), which names the class when a fetch response
     /// carries an error.
+    #[doc(alias = "org.apache.kafka.common.protocol.Errors#exceptionName")]
     pub fn error_name(&self) -> Option<&'static str> {
         // `ErrorName` is the per-class answer, so this does not repeat
         // `error()`'s 135-arm match — the class it resolves to answers for
@@ -920,6 +925,7 @@ impl Errors {
     /// Translates Java's `Errors.exception(String)`. Java returns the cached
     /// default instance when `message` is null; Rust expresses "no message" by
     /// calling [`error`](Self::error) instead, so this always builds a fresh one.
+    #[doc(alias = "org.apache.kafka.common.protocol.Errors#exception")]
     pub fn error_with_message(&self, message: impl Into<String>) -> Option<Error> {
         let message = message.into();
         match self {
@@ -1186,6 +1192,7 @@ impl Errors {
     /// that one code. Callers reach this from a response's error field, where
     /// they have already established the code is not `NONE` and want an
     /// [`Error`] rather than an `Option` to hand to a failed future.
+    #[doc(alias = "org.apache.kafka.common.protocol.Errors#exception")]
     pub fn error_with_optional_message(&self, message: Option<&str>) -> Error {
         match message {
             Some(message) => Error::with_message(*self, message),
@@ -1194,6 +1201,7 @@ impl Errors {
     }
 
     /// Look up an error by its code. Returns `UnknownServerError` for unknown codes.
+    #[doc(alias = "org.apache.kafka.common.protocol.Errors#forCode")]
     pub fn for_code(code: i16) -> Self {
         match code {
             -1 => Self::UnknownServerError,

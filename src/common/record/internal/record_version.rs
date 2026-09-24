@@ -27,6 +27,7 @@
 // crate-internal constructor now that the module is `internal`.
 #[allow(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[doc(alias = "org.apache.kafka.common.record.internal.RecordVersion")]
 pub enum RecordVersion {
     /// Record version 0 (oldest format).
     V0 = 0,
@@ -46,6 +47,7 @@ impl RecordVersion {
     ///
     /// Returns `None` if the value is not recognized.
     #[allow(dead_code)]
+    #[doc(alias = "org.apache.kafka.common.record.internal.RecordVersion#lookup")]
     pub fn lookup(value: i8) -> Option<Self> {
         match value {
             0 => Some(Self::V0),
@@ -57,6 +59,7 @@ impl RecordVersion {
 
     /// Returns the current (latest) record version.
     #[allow(dead_code)]
+    #[doc(alias = "org.apache.kafka.common.record.internal.RecordVersion#current")]
     pub fn current() -> Self {
         Self::V2
     }

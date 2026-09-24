@@ -37,6 +37,7 @@ use crate::common::error::{ErrorCode, ErrorHierarchy, ErrorMessage, ErrorSource}
 /// [`is_consumer_invalid_offset_error`](ErrorHierarchy::is_consumer_invalid_offset_error)
 /// rather than `is_invalid_offset_error`.
 #[derive(Clone, Debug)]
+#[doc(alias = "org.apache.kafka.clients.consumer.NoOffsetForPartitionException")]
 pub struct ConsumerNoOffsetForPartitionError {
     message: String,
     /// The partitions with no defined offset.
@@ -51,6 +52,7 @@ impl ConsumerNoOffsetForPartitionError {
     /// while the collection constructor renders "partitions:"; both forms are
     /// asserted by tests, so they are built separately rather than routed
     /// through one another.
+    #[doc(alias = "org.apache.kafka.clients.consumer.NoOffsetForPartitionException#NoOffsetForPartitionException")]
     pub fn new(partition: TopicPartition) -> Self {
         let message = format!("Undefined offset with no reset policy for partition: {partition}");
         Self { message, partitions: HashSet::from([partition]) }
@@ -67,6 +69,7 @@ impl ConsumerNoOffsetForPartitionError {
     }
 
     /// The partitions with no defined offset.
+    #[doc(alias = "org.apache.kafka.clients.consumer.NoOffsetForPartitionException#partitions")]
     pub fn partitions(&self) -> &HashSet<TopicPartition> {
         &self.partitions
     }

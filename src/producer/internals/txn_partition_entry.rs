@@ -64,6 +64,7 @@ pub(crate) type InFlightBatchKey = (i64, i16, i32);
 /// `TransactionManager` monitor, and Phase 3 wraps the whole manager. A lock
 /// here would nest for nothing.
 #[derive(Debug)]
+#[doc(alias = "org.apache.kafka.clients.producer.internals.TxnPartitionEntry")]
 pub(crate) struct TxnPartitionEntry {
     topic_partition: TopicPartition,
 
@@ -101,6 +102,7 @@ impl TxnPartitionEntry {
     pub(crate) const NO_LAST_ACKED_SEQUENCE_NUMBER: i32 = -1;
 
     /// Creates an entry for `topic_partition` with no producer state.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.TxnPartitionEntry#TxnPartitionEntry")]
     pub(crate) fn new(topic_partition: TopicPartition) -> Self {
         Self {
             topic_partition,
@@ -118,16 +120,19 @@ impl TxnPartitionEntry {
     }
 
     /// The producer id/epoch in use for this partition.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.TxnPartitionEntry#producerIdAndEpoch")]
     pub(crate) fn producer_id_and_epoch(&self) -> ProducerIdAndEpoch {
         self.producer_id_and_epoch
     }
 
     /// The base sequence of the next batch bound for this partition.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.TxnPartitionEntry#nextSequence")]
     pub(crate) fn next_sequence(&self) -> i32 {
         self.next_sequence
     }
 
     /// The last acknowledged offset, or `None` if none has been acknowledged.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.TxnPartitionEntry#lastAckedOffset")]
     pub(crate) fn last_acked_offset(&self) -> Option<i64> {
         if self.last_acked_offset != ProduceResponse::INVALID_OFFSET {
             Some(self.last_acked_offset)
@@ -137,6 +142,7 @@ impl TxnPartitionEntry {
     }
 
     /// The last acknowledged sequence, or `None` if none has been acknowledged.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.TxnPartitionEntry#lastAckedSequence")]
     pub(crate) fn last_acked_sequence(&self) -> Option<i32> {
         if self.last_acked_sequence != Self::NO_LAST_ACKED_SEQUENCE_NUMBER {
             Some(self.last_acked_sequence)
@@ -146,6 +152,7 @@ impl TxnPartitionEntry {
     }
 
     /// Whether any batches are in flight for this partition.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.TxnPartitionEntry#hasInflightBatches")]
     pub(crate) fn has_inflight_batches(&self) -> bool {
         !self.inflight_batches_by_sequence.is_empty()
     }
@@ -156,6 +163,7 @@ impl TxnPartitionEntry {
     /// Java returns the `ProducerBatch` itself (`TreeSet::first`); this returns
     /// the ordering key, and the caller — which owns the batches — resolves it.
     /// See the type-level deviation note.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.TxnPartitionEntry#nextBatchBySequence")]
     pub(crate) fn next_batch_by_sequence(&self) -> Option<InFlightBatchKey> {
         self.inflight_batches_by_sequence.first().copied()
     }
@@ -164,6 +172,7 @@ impl TxnPartitionEntry {
     ///
     /// Delegates to the shared wrapping helper, as Java delegates to
     /// `DefaultRecordBatch.incrementSequence`.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.TxnPartitionEntry#incrementSequence")]
     pub(crate) fn increment_sequence(&mut self, increment: i32) {
         self.next_sequence = DefaultRecordBatch::increment_sequence(self.next_sequence, increment);
     }
@@ -171,11 +180,13 @@ impl TxnPartitionEntry {
     /// Records `batch` as in flight for this partition.
     ///
     /// The batch is borrowed to derive its key, never stored.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.TxnPartitionEntry#addInflightBatch")]
     pub(crate) fn add_inflight_batch(&mut self, batch: &ProducerBatch) {
         self.inflight_batches_by_sequence.insert(Self::batch_key(batch));
     }
 
     /// Sets the last acknowledged offset.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.TxnPartitionEntry#setLastAckedOffset")]
     pub(crate) fn set_last_acked_offset(&mut self, last_acked_offset: i64) {
         self.last_acked_offset = last_acked_offset;
     }
@@ -183,6 +194,7 @@ impl TxnPartitionEntry {
     /// Removes `batch` from the in-flight set.
     ///
     /// The batch is borrowed to derive its key, never stored.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.TxnPartitionEntry#removeInFlightBatch")]
     pub(crate) fn remove_in_flight_batch(&mut self, batch: &ProducerBatch) {
         self.inflight_batches_by_sequence.remove(&Self::batch_key(batch));
     }
@@ -194,6 +206,7 @@ impl TxnPartitionEntry {
     /// their owner (see the type-level deviation note). They are visited in
     /// key order, matching Java's `TreeSet` iteration, because each batch's new
     /// base sequence depends on the record counts of the batches before it.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.TxnPartitionEntry#startSequencesAtBeginning")]
     pub(crate) fn start_sequences_at_beginning(
         &mut self,
         new_producer_id_and_epoch: ProducerIdAndEpoch,
@@ -221,6 +234,7 @@ impl TxnPartitionEntry {
 
     /// Raises the last acknowledged sequence to `sequence` if it is higher,
     /// returning the resulting value.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.TxnPartitionEntry#maybeUpdateLastAckedSequence")]
     pub(crate) fn maybe_update_last_acked_sequence(&mut self, sequence: i32) -> i32 {
         if sequence > self.last_acked_sequence {
             self.last_acked_sequence = sequence;
@@ -238,6 +252,7 @@ impl TxnPartitionEntry {
     ///
     /// `base_sequence` is `i64` to match Java's `long` parameter, even though it
     /// is compared against an `i32` base sequence.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.TxnPartitionEntry#adjustSequencesDueToFailedBatch")]
     pub(crate) fn adjust_sequences_due_to_failed_batch(
         &mut self,
         base_sequence: i64,
@@ -316,6 +331,7 @@ impl TxnPartitionEntry {
     /// (`TransactionManager.java:655`) exists precisely to rewrite it
     /// (`:652-653`). Supplying only the Sender's map there would hit the error
     /// below and break idempotent recovery.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.TxnPartitionEntry#resetSequenceNumbers")]
     fn reset_sequence_numbers<F>(&mut self, batches: &mut [&mut ProducerBatch], mut reset: F) -> Result<(), Error>
     where
         F: FnMut(&mut ProducerBatch) -> Result<(), Error>,
@@ -373,6 +389,7 @@ impl TxnPartitionEntry {
     /// `DefaultRecordBatch`. Wrapping here would silently produce a large
     /// positive sequence instead of an error. See
     /// `.claude/rules/producer-transactions.md` §8.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.TxnPartitionEntry#decrementSequence")]
     fn decrement_sequence(&mut self, decrement: i32) -> Result<(), Error> {
         let updated_sequence = self.next_sequence - decrement;
         if updated_sequence < 0 {

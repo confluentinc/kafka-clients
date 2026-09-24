@@ -29,6 +29,7 @@ use super::{ConcreteRequest, ConcreteResponse, DescribeConfigsResponse, RequestB
 ///
 /// Corresponds to `org.apache.kafka.common.requests.DescribeConfigsRequest`.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.DescribeConfigsRequest")]
 pub struct DescribeConfigsRequest {
     data: DescribeConfigsRequestData,
     version: i16,
@@ -36,11 +37,13 @@ pub struct DescribeConfigsRequest {
 
 impl DescribeConfigsRequest {
     /// Creates a new `DescribeConfigsRequest` from data and version.
+    #[doc(alias = "org.apache.kafka.common.requests.DescribeConfigsRequest#DescribeConfigsRequest")]
     pub fn new(data: DescribeConfigsRequestData, version: i16) -> Self {
         Self { data, version }
     }
 
     /// Returns a reference to the underlying data.
+    #[doc(alias = "org.apache.kafka.common.requests.DescribeConfigsRequest#data")]
     pub fn data(&self) -> &DescribeConfigsRequestData {
         &self.data
     }
@@ -66,6 +69,7 @@ impl DescribeConfigsRequest {
     /// Mirrors `DescribeConfigsRequest.getErrorResponse` (Java uses
     /// `Errors.forException`); the enum-dispatch caller supplies the mapped
     /// [`Errors`] directly.
+    #[doc(alias = "org.apache.kafka.common.requests.DescribeConfigsRequest#getErrorResponse")]
     pub fn get_error_response(&self, throttle_time_ms: i32, error: &Errors) -> ConcreteResponse {
         let mut data = DescribeConfigsResponseData::new();
         data.set_throttle_time_ms(throttle_time_ms);
@@ -92,6 +96,7 @@ impl DescribeConfigsRequest {
     /// # Errors
     ///
     /// Returns an error if parsing fails.
+    #[doc(alias = "org.apache.kafka.common.requests.DescribeConfigsRequest#parse")]
     pub fn parse(readable: &mut dyn Readable, version: i16) -> io::Result<Self> {
         let data = DescribeConfigsRequestData::read(readable, version)?;
         Ok(Self::new(data, version))
@@ -108,6 +113,7 @@ impl std::fmt::Display for DescribeConfigsRequest {
 ///
 /// Corresponds to `DescribeConfigsRequest.Builder` in Java.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.DescribeConfigsRequest$Builder")]
 pub struct DescribeConfigsRequestBuilder {
     data: DescribeConfigsRequestData,
     oldest_allowed_version: i16,
@@ -116,6 +122,7 @@ pub struct DescribeConfigsRequestBuilder {
 
 impl DescribeConfigsRequestBuilder {
     /// Creates a builder from existing data.
+    #[doc(alias = "org.apache.kafka.common.requests.DescribeConfigsRequest$Builder#Builder")]
     pub fn new(data: DescribeConfigsRequestData) -> Self {
         Self {
             data,

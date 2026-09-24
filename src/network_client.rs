@@ -77,6 +77,7 @@ const STATE_CLOSING: u8 = 1;
 const STATE_CLOSED: u8 = 2;
 
 /// Data for an in-progress metadata request.
+#[doc(alias = "org.apache.kafka.clients.NetworkClient$DefaultMetadataUpdater$InProgressData")]
 struct InProgressData {
     request_version: i32,
     is_partial_update: bool,
@@ -91,6 +92,7 @@ struct InProgressData {
 ///
 /// Translated from `org.apache.kafka.clients.NetworkClient`.
 #[allow(dead_code)]
+#[doc(alias = "org.apache.kafka.clients.NetworkClient")]
 pub struct NetworkClient<S: Selectable, H: HostResolver> {
     /// The selector used to perform network I/O.
     selector: S,
@@ -218,6 +220,7 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
     /// (`SaslClientAuthenticator.java:581`), and `Schema`/`ArrayOf`/`Struct` raise
     /// `SchemaException` for exactly these malformed-buffer cases
     /// (`protocol/types/ArrayOf.java:73,76`).
+    #[doc(alias = "org.apache.kafka.clients.NetworkClient#parseResponse")]
     pub fn parse_response(
         buffer: &mut dyn crate::common::Readable,
         request_header: &RequestHeader,
@@ -276,6 +279,7 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
     /// * `metadata_recovery_strategy` - Metadata recovery strategy
     /// * `log_context` - Contextual log prefix
     #[allow(clippy::too_many_arguments)]
+    #[doc(alias = "org.apache.kafka.clients.NetworkClient#NetworkClient")]
     pub fn with_metadata_rebootstrap_trigger_ms(
         selector: S,
         metadata: Arc<Metadata>,
@@ -353,6 +357,7 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
     /// * `metadata_recovery_strategy` - Metadata recovery strategy
     /// * `log_context` - Contextual log prefix
     #[allow(clippy::too_many_arguments)]
+    #[doc(alias = "org.apache.kafka.clients.NetworkClient#NetworkClient")]
     pub fn with_metadata_updater(
         selector: S,
         metadata_updater: Box<dyn MetadataUpdater>,
@@ -435,6 +440,7 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
     }
 
     /// Returns whether broker version discovery is enabled.
+    #[doc(alias = "org.apache.kafka.clients.NetworkClient#discoverBrokerVersions")]
     pub fn discover_broker_versions(&self) -> bool {
         self.discover_broker_versions
     }
@@ -454,6 +460,7 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
     /// Returns the next correlation ID to use.
     ///
     /// Visible for testing.
+    #[doc(alias = "org.apache.kafka.clients.NetworkClient#nextCorrelationId")]
     fn next_correlation_id(&mut self) -> i32 {
         let id = self.correlation;
         self.correlation += 1;
@@ -461,6 +468,7 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
     }
 
     /// Checks if we are connected and able to send more requests to the given node.
+    #[doc(alias = "org.apache.kafka.clients.NetworkClient#canSendRequest")]
     fn can_send_request(&self, node: &str, now: i64) -> bool {
         self.connection_states.is_ready(node, now)
             && self.selector.is_channel_ready(node)
@@ -468,17 +476,20 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
     }
 
     /// Visible for testing.
+    #[doc(alias = "org.apache.kafka.clients.NetworkClient#canConnect")]
     pub fn can_connect(&self, node_id: &str, now: i64) -> bool {
         self.connection_states.can_connect(node_id, now)
     }
 
     /// Returns the remaining throttling delay in milliseconds if throttling is in progress.
     /// Returns 0 otherwise. This is for testing.
+    #[doc(alias = "org.apache.kafka.clients.NetworkClient#throttleDelayMs")]
     pub fn throttle_delay_ms(&self, node: &crate::common::Node, now: i64) -> i64 {
         self.connection_states.throttle_delay_ms(node.id_string(), now)
     }
 
     /// Ensure the client is active.
+    #[doc(alias = "org.apache.kafka.clients.NetworkClient#ensureActive")]
     fn ensure_active(&self) {
         if !self.active() {
             panic!(
@@ -490,6 +501,7 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
 
     /// Initiate a connection to the given node.
     #[allow(dead_code)]
+    #[doc(alias = "org.apache.kafka.clients.NetworkClient#initiateConnect")]
     async fn initiate_connect(&mut self, node: &crate::common::Node, now: i64) {
         let node_connection_id = node.id_string();
         self.connection_states.connecting(node_connection_id, now, node.host());
@@ -529,6 +541,7 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
     /// Send an internal metadata request.
     ///
     /// Visible for testing.
+    #[doc(alias = "org.apache.kafka.clients.NetworkClient#sendInternalMetadataRequest")]
     pub fn send_internal_metadata_request(
         &mut self,
         builder: MetadataRequestBuilder,
@@ -540,6 +553,7 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
     }
 
     /// Queue up the given request for sending.
+    #[doc(alias = "org.apache.kafka.clients.NetworkClient#doSend")]
     fn do_send(&mut self, mut client_request: ClientRequest, is_internal_request: bool, now: i64) {
         self.ensure_active();
         let node_id = client_request.destination().to_string();
@@ -697,6 +711,7 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
         }
     }
 
+    #[doc(alias = "org.apache.kafka.clients.NetworkClient#doSend")]
     fn do_send_with_request(
         &mut self,
         client_request: &mut ClientRequest,
@@ -755,6 +770,7 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
     }
 
     /// Handle any completed request sends. If no response is expected, consider the request complete.
+    #[doc(alias = "org.apache.kafka.clients.NetworkClient#handleCompletedSends")]
     fn handle_completed_sends(&mut self, responses: &mut Vec<ClientResponse>, now: i64) {
         // Collect destination IDs first to avoid borrow conflicts.
         let destinations: Vec<String> = self
@@ -780,6 +796,7 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
     }
 
     /// Handle any completed receives and update the response list.
+    #[doc(alias = "org.apache.kafka.clients.NetworkClient#handleCompletedReceives")]
     async fn handle_completed_receives(&mut self, responses: &mut Vec<ClientResponse>, now: i64) {
         // Drain the completed receives BY MOVE so the payload Vec<u8> is taken
         // out of the selector without copying (§27 Phase 20 Fix #3), and the
@@ -854,6 +871,7 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
     }
 
     /// Handle an ApiVersions response.
+    #[doc(alias = "org.apache.kafka.clients.NetworkClient#handleApiVersionsResponse")]
     async fn handle_api_versions_response(
         &mut self,
         responses: &mut Vec<ClientResponse>,
@@ -916,6 +934,7 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
     }
 
     /// Handle disconnections.
+    #[doc(alias = "org.apache.kafka.clients.NetworkClient#handleDisconnections")]
     fn handle_disconnections(&mut self, responses: &mut Vec<ClientResponse>, now: i64) {
         // Collect disconnections to avoid borrow issues
         let disconnected: Vec<(String, ChannelState)> = self
@@ -936,6 +955,7 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
     }
 
     /// Handle new connections.
+    #[doc(alias = "org.apache.kafka.clients.NetworkClient#handleConnections")]
     fn handle_connections(&mut self) {
         let connected: Vec<String> = self.selector.connected().to_vec();
         for node in connected {
@@ -955,6 +975,7 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
     }
 
     /// Initiate ApiVersion requests for nodes that need them.
+    #[doc(alias = "org.apache.kafka.clients.NetworkClient#handleInitiateApiVersionRequests")]
     fn handle_initiate_api_version_requests(&mut self, now: i64) {
         let ready_nodes: Vec<(String, ApiVersionsRequestBuilder)> = self
             .nodes_needing_api_versions_fetch
@@ -973,6 +994,7 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
     }
 
     /// Handle connections that timed out.
+    #[doc(alias = "org.apache.kafka.clients.NetworkClient#handleTimedOutConnections")]
     async fn handle_timed_out_connections(&mut self, responses: &mut Vec<ClientResponse>, now: i64) {
         let nodes = self.connection_states.nodes_with_connection_setup_timeout(now);
         for node_id in nodes {
@@ -988,6 +1010,7 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
     }
 
     /// Handle requests that timed out.
+    #[doc(alias = "org.apache.kafka.clients.NetworkClient#handleTimedOutRequests")]
     async fn handle_timed_out_requests(&mut self, responses: &mut Vec<ClientResponse>, now: i64) {
         let node_ids = self.in_flight_requests.nodes_with_timed_out_requests(now);
         for node_id in node_ids {
@@ -998,11 +1021,13 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
     }
 
     /// Handle aborted sends.
+    #[doc(alias = "org.apache.kafka.clients.NetworkClient#handleAbortedSends")]
     fn handle_aborted_sends(&mut self, responses: &mut Vec<ClientResponse>) {
         responses.append(&mut self.aborted_sends);
     }
 
     /// Handle rebootstrap if needed.
+    #[doc(alias = "org.apache.kafka.clients.NetworkClient#handleRebootstrap")]
     async fn handle_rebootstrap(&mut self, responses: &mut Vec<ClientResponse>, now: i64) {
         if self.metadata_recovery_strategy == MetadataRecoveryStrategy::Rebootstrap && self.needs_rebootstrap(now) {
             let nodes = self.fetch_nodes();
@@ -1029,6 +1054,7 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
     }
 
     /// Complete all responses by invoking their callbacks.
+    #[doc(alias = "org.apache.kafka.clients.NetworkClient#completeResponses")]
     fn complete_responses(responses: &mut [ClientResponse], log_context: &LogContext) {
         for response in responses.iter_mut() {
             if let Err(e) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -1041,6 +1067,7 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
 
     /// If a response includes a non-zero throttle delay and client-side throttling
     /// has been enabled, throttle the connection.
+    #[doc(alias = "org.apache.kafka.clients.NetworkClient#maybeThrottle")]
     fn maybe_throttle(&mut self, response: &ConcreteResponse, api_version: i16, node_id: &str, now: i64) {
         let throttle_time_ms = response.throttle_time_ms();
         if throttle_time_ms > 0 && response.should_client_throttle(api_version) {
@@ -1058,6 +1085,7 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
     }
 
     /// Post-process disconnection of a node.
+    #[doc(alias = "org.apache.kafka.clients.NetworkClient#processDisconnection")]
     fn process_disconnection(
         &mut self,
         responses: &mut Vec<ClientResponse>,
@@ -1137,6 +1165,7 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
     }
 
     /// Post-process timeout disconnection.
+    #[doc(alias = "org.apache.kafka.clients.NetworkClient#processTimeoutDisconnection")]
     fn process_timeout_disconnection(&mut self, responses: &mut Vec<ClientResponse>, node_id: &str, now: i64) {
         self.process_disconnection(
             responses,
@@ -1148,6 +1177,7 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
     }
 
     /// Cancel in-flight requests for a given node.
+    #[doc(alias = "org.apache.kafka.clients.NetworkClient#cancelInFlightRequests")]
     fn cancel_in_flight_requests(
         &mut self,
         node_id: &str,
@@ -1204,6 +1234,7 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
     }
 
     /// Check if any node connection is currently underway.
+    #[doc(alias = "org.apache.kafka.clients.NetworkClient#isAnyNodeConnecting")]
     fn is_any_node_connecting(&self) -> bool {
         let nodes = self.fetch_nodes();
         for node in nodes {
@@ -2124,6 +2155,7 @@ mod tests {
 
     /// Translated from `NetworkClientTest.testClose`.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.NetworkClientTest#testClose")]
     async fn test_close() {
         let mut client = create_network_client(RECONNECT_BACKOFF_MAX_MS_TEST);
         let node = Node::new(0, "localhost".to_string(), 9092);
@@ -2166,6 +2198,7 @@ mod tests {
 
     /// Translated from `NetworkClientTest.testLeastLoadedNode`.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.NetworkClientTest#testLeastLoadedNode")]
     async fn test_least_loaded_node() {
         let mut client = create_network_client(RECONNECT_BACKOFF_MAX_MS_TEST);
         let node = Node::new(0, "localhost".to_string(), 9092);
@@ -2202,6 +2235,7 @@ mod tests {
 
     /// Translated from `NetworkClientTest.testConnectionDelay`.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.NetworkClientTest#testConnectionDelay")]
     async fn test_connection_delay() {
         let client = create_network_client(RECONNECT_BACKOFF_MAX_MS_TEST);
         let node = Node::new(0, "localhost".to_string(), 9092);
@@ -2213,6 +2247,7 @@ mod tests {
 
     /// Translated from `NetworkClientTest.testConnectionDelayConnected`.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.NetworkClientTest#testConnectionDelayConnected")]
     async fn test_connection_delay_connected() {
         let mut client = create_network_client(RECONNECT_BACKOFF_MAX_MS_TEST);
         let node = Node::new(0, "localhost".to_string(), 9092);
@@ -2226,6 +2261,7 @@ mod tests {
 
     /// Translated from `NetworkClientTest.testConnectionDelayDisconnected`.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.NetworkClientTest#testConnectionDelayDisconnected")]
     async fn test_connection_delay_disconnected() {
         let mut client = create_network_client(RECONNECT_BACKOFF_MAX_MS_TEST);
         let node = Node::new(0, "localhost".to_string(), 9092);
@@ -2252,6 +2288,7 @@ mod tests {
 
     /// Translated from `NetworkClientTest.testConnectionDelayWithNoExponentialBackoff`.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.NetworkClientTest#testConnectionDelayWithNoExponentialBackoff")]
     async fn test_connection_delay_with_no_exponential_backoff() {
         // Create client where backoff max = backoff (no exponential growth)
         let client = create_network_client(RECONNECT_BACKOFF_MS_TEST);
@@ -2264,6 +2301,7 @@ mod tests {
 
     /// Translated from `NetworkClientTest.testConnectionDelayConnectedWithNoExponentialBackoff`.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.NetworkClientTest#testConnectionDelayConnectedWithNoExponentialBackoff")]
     async fn test_connection_delay_connected_with_no_exponential_backoff() {
         let mut client = create_network_client(RECONNECT_BACKOFF_MS_TEST);
         let node = Node::new(0, "localhost".to_string(), 9092);
@@ -2278,6 +2316,7 @@ mod tests {
     /// Translated from `NetworkClientTest.testSendToUnreadyNode`.
     #[tokio::test]
     #[should_panic(expected = "Attempt to send a request to node")]
+    #[doc(alias = "org.apache.kafka.clients.NetworkClientTest#testSendToUnreadyNode")]
     async fn test_send_to_unready_node() {
         let mut client = create_network_client(RECONNECT_BACKOFF_MAX_MS_TEST);
         let now = 0_i64;
@@ -2342,6 +2381,7 @@ mod tests {
     /// Tests the full ApiVersions flow: initiate connection, send ApiVersionsRequest,
     /// receive response, become ready.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.NetworkClientTest#testApiVersionsRequest")]
     async fn test_api_versions_request() {
         let mut client = create_network_client(RECONNECT_BACKOFF_MAX_MS_TEST);
         let node = Node::new(0, "localhost".to_string(), 9092);
@@ -2381,6 +2421,7 @@ mod tests {
     /// Tests that an INVALID_REQUEST error in ApiVersions response causes the
     /// node to become not ready.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.NetworkClientTest#testInvalidApiVersionsRequest")]
     async fn test_invalid_api_versions_request() {
         let mut client = create_network_client(RECONNECT_BACKOFF_MAX_MS_TEST);
         let node = Node::new(0, "localhost".to_string(), 9092);
@@ -2423,6 +2464,7 @@ mod tests {
     ///
     /// Tests that version discovery followed by a metadata request/response works.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.NetworkClientTest#testSimpleRequestResponse")]
     async fn test_simple_request_response() {
         let mut client = create_network_client(RECONNECT_BACKOFF_MAX_MS_TEST);
         let node = Node::new(0, "localhost".to_string(), 9092);
@@ -2431,6 +2473,7 @@ mod tests {
 
     /// Translated from `NetworkClientTest.testSimpleRequestResponseWithStaticNodes`.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.NetworkClientTest#testSimpleRequestResponseWithStaticNodes")]
     async fn test_simple_request_response_with_static_nodes() {
         let mut client = create_network_client_with_static_nodes();
         let node = Node::new(0, "localhost".to_string(), 9092);
@@ -2439,6 +2482,7 @@ mod tests {
 
     /// Translated from `NetworkClientTest.testSimpleRequestResponseWithNoBrokerDiscovery`.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.NetworkClientTest#testSimpleRequestResponseWithNoBrokerDiscovery")]
     async fn test_simple_request_response_with_no_broker_discovery() {
         let mut client = create_network_client_with_no_version_discovery();
         let node = Node::new(0, "localhost".to_string(), 9092);
@@ -2503,6 +2547,7 @@ mod tests {
 
     /// Translated from `NetworkClientTest.testUnsupportedVersionDuringInternalMetadataRequest`.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.NetworkClientTest#testUnsupportedVersionDuringInternalMetadataRequest")]
     async fn test_unsupported_version_during_internal_metadata_request() {
         let mut client = create_network_client(RECONNECT_BACKOFF_MAX_MS_TEST);
         let node = Node::new(0, "localhost".to_string(), 9092);
@@ -2606,6 +2651,7 @@ mod tests {
     /// With max 1 in-flight request per connection, after sending a request,
     /// `least_loaded_node` should report no node but still have connection ready.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.NetworkClientTest#testHasNodeAvailableOrConnectionReady")]
     async fn test_has_node_available_or_connection_ready() {
         let mut client = create_network_client_with_max_in_flight(1, RECONNECT_BACKOFF_MAX_MS_TEST);
         let node = Node::new(0, "localhost".to_string(), 9092);
@@ -2631,6 +2677,7 @@ mod tests {
 
     /// Translated from `NetworkClientTest.testLeastLoadedNodeConsidersThrottledConnections`.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.NetworkClientTest#testLeastLoadedNodeConsidersThrottledConnections")]
     async fn test_least_loaded_node_considers_throttled_connections() {
         let mut client = create_network_client_with_no_version_discovery();
         let node = Node::new(0, "localhost".to_string(), 9092);
@@ -2673,6 +2720,7 @@ mod tests {
     /// Ensures that the default metadata updater does not intercept a user-initiated
     /// metadata request when the remote node disconnects with the request in-flight.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.NetworkClientTest#testDisconnectDuringUserMetadataRequest")]
     async fn test_disconnect_during_user_metadata_request() {
         let mut client = create_network_client(RECONNECT_BACKOFF_MAX_MS_TEST);
         let node = Node::new(0, "localhost".to_string(), 9092);
@@ -2699,6 +2747,7 @@ mod tests {
 
     /// Translated from `NetworkClientTest.testDisconnectWithMultipleInFlights`.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.NetworkClientTest#testDisconnectWithMultipleInFlights")]
     async fn test_disconnect_with_multiple_in_flights() {
         let mut client = create_network_client_with_no_version_discovery();
         let node = Node::new(0, "localhost".to_string(), 9092);
@@ -2776,6 +2825,7 @@ mod tests {
 
     /// Translated from `NetworkClientTest.testCorrelationId`.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.NetworkClientTest#testCorrelationId")]
     async fn test_correlation_id() {
         let mut client = create_network_client(RECONNECT_BACKOFF_MAX_MS_TEST);
         let count = 100;
@@ -2788,6 +2838,9 @@ mod tests {
 
     /// Translated from `NetworkClientTest.testLeastLoadedNodeProvideDisconnectedNodesPrioritizedByLastConnectionTimestamp`.
     #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.NetworkClientTest#testLeastLoadedNodeProvideDisconnectedNodesPrioritizedByLastConnectionTimestamp"
+    )]
     async fn test_least_loaded_node_provide_disconnected_nodes_prioritized_by_last_connection_timestamp() {
         let node_number = 3;
         let mut client = create_network_client_with_multiple_nodes(0, CONNECTION_SETUP_TIMEOUT_MS_TEST, node_number);
@@ -2820,6 +2873,7 @@ mod tests {
 
     /// Translated from `NetworkClientTest.testClientDisconnectAfterInternalApiVersionRequest`.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.NetworkClientTest#testClientDisconnectAfterInternalApiVersionRequest")]
     async fn test_client_disconnect_after_internal_api_version_request() {
         let mut client = create_network_client(RECONNECT_BACKOFF_MAX_MS_TEST);
         let node = Node::new(0, "localhost".to_string(), 9092);
@@ -2851,6 +2905,7 @@ mod tests {
 
     /// Translated from `NetworkClientTest.testServerDisconnectAfterInternalApiVersionRequest`.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.NetworkClientTest#testServerDisconnectAfterInternalApiVersionRequest")]
     async fn test_server_disconnect_after_internal_api_version_request() {
         let mut client = create_network_client(RECONNECT_BACKOFF_MAX_MS_TEST);
         let node = Node::new(0, "localhost".to_string(), 9092);
@@ -3117,12 +3172,14 @@ mod tests {
     /// timeout, results in the response being flagged as disconnected and timed out.
     /// Also verifies that a metadata update is requested after a timeout.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.NetworkClientTest#testRequestTimeout")]
     async fn test_request_timeout() {
         test_request_timeout_helper(DEFAULT_REQUEST_TIMEOUT_MS + 5000).await;
     }
 
     /// Translated from `NetworkClientTest.testDefaultRequestTimeout`.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.NetworkClientTest#testDefaultRequestTimeout")]
     async fn test_default_request_timeout() {
         test_request_timeout_helper(DEFAULT_REQUEST_TIMEOUT_MS).await;
     }
@@ -3171,6 +3228,7 @@ mod tests {
     /// Uses two nodes to ensure the logic iterates over a set of more than one
     /// element.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.NetworkClientTest#testConnectionSetupTimeout")]
     async fn test_connection_setup_timeout() {
         // Use a different TestMetadataUpdater with 2 nodes.
         // Since our create_network_client only has 1 node, we create a custom one.
@@ -3205,6 +3263,7 @@ mod tests {
     /// Verifies that a throttled response does not cause the connection to timeout
     /// prematurely -- the throttle time should not count towards the request timeout.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.NetworkClientTest#testConnectionTimeoutAfterThrottling")]
     async fn test_connection_timeout_after_throttling() {
         let mut client = create_network_client(RECONNECT_BACKOFF_MAX_MS_TEST);
         let node = Node::new(0, "localhost".to_string(), 9092);
@@ -3268,6 +3327,7 @@ mod tests {
     /// Verifies that a throttled connection is not ready during the throttle period
     /// and becomes ready again once the throttle expires.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.NetworkClientTest#testConnectionThrottling")]
     async fn test_connection_throttling() {
         let mut client = create_network_client(RECONNECT_BACKOFF_MAX_MS_TEST);
         let node = Node::new(0, "localhost".to_string(), 9092);
@@ -3334,6 +3394,7 @@ mod tests {
     /// In Rust we cannot subclass, so we check the observable metadata state instead
     /// (specifically the update_version increments caused by rebootstrap).
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.NetworkClientTest#testRebootstrap")]
     async fn test_rebootstrap() {
         let rebootstrap_trigger_ms: i64 = 1000;
         let metadata = Arc::new(Metadata::new(
@@ -3421,6 +3482,7 @@ mod tests {
     /// Tests that in-flight requests are aborted when rebootstrap is triggered.
     /// Since our ConcreteRequest doesn't support PRODUCE, we use METADATA requests.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.NetworkClientTest#testInflightRequestsDuringRebootstrap")]
     async fn test_inflight_requests_during_rebootstrap() {
         let refresh_backoff_ms: i64 = 50;
         let rebootstrap_trigger_ms: i64 = 1000;
@@ -3523,6 +3585,7 @@ mod tests {
     /// Verifies that when DNS lookup fails for a node, `ready()` returns false
     /// without panicking.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.NetworkClientTest#testDnsLookupFailure")]
     async fn test_dns_lookup_failure() {
         let mut client = create_network_client_with_failing_dns();
         let bad_node = Node::new(1234, "badhost".to_string(), 1234);
@@ -3767,6 +3830,7 @@ mod tests {
     /// Tests that an authentication failure on one node does not interfere with
     /// a pending metadata request on another node.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.NetworkClientTest#testAuthenticationFailureWithInFlightMetadataRequest")]
     async fn test_authentication_failure_with_in_flight_metadata_request() {
         let refresh_backoff_ms: i64 = 50;
 
@@ -3860,6 +3924,7 @@ mod tests {
     /// Tests that after a DNS address change, the client reconnects to the new
     /// address. Telemetry assertions are omitted as telemetry is deferred.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.NetworkClientTest#testReconnectAfterAddressChange")]
     async fn test_reconnect_after_address_change() {
         let initial_addresses: Vec<std::net::IpAddr> = vec![
             "10.200.20.100".parse().unwrap(),
@@ -3925,6 +3990,7 @@ mod tests {
     /// Tests that if the first connection attempt fails, the client retries with
     /// the next address from the same DNS resolution. Telemetry assertions omitted.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.NetworkClientTest#testFailedConnectionToFirstAddress")]
     async fn test_failed_connection_to_first_address() {
         let initial_addresses: Vec<std::net::IpAddr> = vec![
             "10.200.20.100".parse().unwrap(),
@@ -3986,6 +4052,7 @@ mod tests {
     /// connection to the new address fails, the client retries with the next new
     /// address. Telemetry assertions omitted.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.NetworkClientTest#testFailedConnectionToFirstAddressAfterReconnect")]
     async fn test_failed_connection_to_first_address_after_reconnect() {
         let initial_addresses: Vec<std::net::IpAddr> = vec![
             "10.200.20.100".parse().unwrap(),
@@ -4065,6 +4132,7 @@ mod tests {
     /// Tests that closing a connecting node works properly and allows
     /// new connections to other nodes and reconnection to the closed node.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.NetworkClientTest#testCloseConnectingNode")]
     async fn test_close_connecting_node() {
         let nodes = vec![
             Node::new(0, "localhost".to_string(), 9092),
@@ -4141,6 +4209,9 @@ mod tests {
     /// Tests that if a channel never becomes ready (i.e. stays in checking API
     /// versions state), the connection eventually times out.
     #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.NetworkClientTest#testConnectionDoesNotRemainStuckInCheckingApiVersionsStateIfChannelNeverBecomesReady"
+    )]
     async fn test_connection_does_not_remain_stuck_in_checking_api_versions_state_if_channel_never_becomes_ready() {
         let mut client = create_network_client(RECONNECT_BACKOFF_MAX_MS_TEST);
         let node = Node::new(0, "localhost".to_string(), 9092);
@@ -4174,6 +4245,9 @@ mod tests {
     /// with the supported version range provided, the client retries with the
     /// version indicated by the broker and eventually becomes ready.
     #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.NetworkClientTest#testUnsupportedApiVersionsRequestWithVersionProvidedByTheBroker"
+    )]
     async fn test_unsupported_api_versions_request_with_version_provided_by_the_broker() {
         let mut client = create_network_client(RECONNECT_BACKOFF_MAX_MS_TEST);
         let node = Node::new(0, "localhost".to_string(), 9092);
@@ -4254,6 +4328,9 @@ mod tests {
     /// without any version information, the client retries with version 0 and
     /// eventually becomes ready.
     #[tokio::test]
+    #[doc(
+        alias = "org.apache.kafka.clients.NetworkClientTest#testUnsupportedApiVersionsRequestWithoutVersionProvidedByTheBroker"
+    )]
     async fn test_unsupported_api_versions_request_without_version_provided_by_the_broker() {
         let mut client = create_network_client(RECONNECT_BACKOFF_MAX_MS_TEST);
         let node = Node::new(0, "localhost".to_string(), 9092);
@@ -4331,6 +4408,7 @@ mod tests {
     /// long the delay resets to 0. Also verifies a second disconnect has the same
     /// backoff (no exponential growth).
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.NetworkClientTest#testConnectionDelayDisconnectedWithNoExponentialBackoff")]
     async fn test_connection_delay_disconnected_with_no_exponential_backoff() {
         let mut client = create_network_client(RECONNECT_BACKOFF_MS_TEST);
         let node = Node::new(0, "localhost".to_string(), 9092);

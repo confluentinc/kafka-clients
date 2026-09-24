@@ -26,17 +26,20 @@ use std::fmt;
 /// (deprecated since 4.1).
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 #[deprecated(since = "4.1.0", note = "Use Admin::list_config_resources instead")]
+#[doc(alias = "org.apache.kafka.clients.admin.ClientMetricsResourceListing")]
 pub struct ClientMetricsResourceListing {
     name: String,
 }
 
 impl ClientMetricsResourceListing {
     /// Creates a new client metrics resource listing with the given name.
+    #[doc(alias = "org.apache.kafka.clients.admin.ClientMetricsResourceListing#ClientMetricsResourceListing")]
     pub fn new(name: impl Into<String>) -> Self {
         Self { name: name.into() }
     }
 
     /// The name of the client metrics resource.
+    #[doc(alias = "org.apache.kafka.clients.admin.ClientMetricsResourceListing#name")]
     pub fn name(&self) -> &str {
         &self.name
     }

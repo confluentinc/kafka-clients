@@ -41,6 +41,7 @@ use crate::fetch_response_data::PartitionData;
 ///
 /// Corresponds to `org.apache.kafka.common.requests.FetchResponse`.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.FetchResponse")]
 pub struct FetchResponse {
     data: FetchResponseData,
 }
@@ -73,6 +74,7 @@ impl FetchResponse {
     /// a refcount bump. `FetchCollector::initialize` takes that route; this helper
     /// exists to translate the Java method and for callers that only need to read
     /// the bytes in place.
+    #[doc(alias = "org.apache.kafka.common.requests.FetchResponse#recordsOrFail")]
     pub fn records_or_fail(partition: &PartitionData) -> &[u8] {
         partition.records.as_deref().unwrap_or(&[])
     }
@@ -80,6 +82,7 @@ impl FetchResponse {
     /// Returns the size in bytes of the partition's records, or 0 if absent.
     ///
     /// Translates `FetchResponse.recordsSize(PartitionData)`.
+    #[doc(alias = "org.apache.kafka.common.requests.FetchResponse#recordsSize")]
     pub fn records_size(partition: &PartitionData) -> i32 {
         partition.records.as_ref().map(|r| r.len() as i32).unwrap_or(0)
     }
@@ -88,6 +91,7 @@ impl FetchResponse {
     /// the client should act on.
     ///
     /// Translates `FetchResponse.isDivergingEpoch(PartitionData)`.
+    #[doc(alias = "org.apache.kafka.common.requests.FetchResponse#isDivergingEpoch")]
     pub fn is_diverging_epoch(partition: &PartitionData) -> bool {
         partition.diverging_epoch.epoch >= 0
     }
@@ -95,6 +99,7 @@ impl FetchResponse {
     /// Returns the diverging-epoch entry if present.
     ///
     /// Translates `FetchResponse.divergingEpoch(PartitionData)`.
+    #[doc(alias = "org.apache.kafka.common.requests.FetchResponse#divergingEpoch")]
     pub fn diverging_epoch(partition: &PartitionData) -> Option<&crate::fetch_response_data::EpochEndOffset> {
         if partition.diverging_epoch.epoch < 0 {
             None
@@ -106,6 +111,7 @@ impl FetchResponse {
     /// Returns the preferred read-replica id if the broker advertised one.
     ///
     /// Translates `FetchResponse.preferredReadReplica(PartitionData)`.
+    #[doc(alias = "org.apache.kafka.common.requests.FetchResponse#preferredReadReplica")]
     pub fn preferred_read_replica(partition: &PartitionData) -> Option<i32> {
         if partition.preferred_read_replica == Self::INVALID_PREFERRED_REPLICA_ID {
             None
@@ -118,6 +124,7 @@ impl FetchResponse {
     /// recommendation.
     ///
     /// Translates `FetchResponse.isPreferredReplica(PartitionData)`.
+    #[doc(alias = "org.apache.kafka.common.requests.FetchResponse#isPreferredReplica")]
     pub fn is_preferred_replica(partition: &PartitionData) -> bool {
         partition.preferred_read_replica != Self::INVALID_PREFERRED_REPLICA_ID
     }
@@ -125,6 +132,7 @@ impl FetchResponse {
     /// Builds an empty partition response carrying the given error code.
     ///
     /// Translates `FetchResponse.partitionResponse(int, Errors)`.
+    #[doc(alias = "org.apache.kafka.common.requests.FetchResponse#partitionResponse")]
     pub fn partition_response(partition: i32, error: Errors) -> PartitionData {
         let mut pd = PartitionData::new();
         pd.set_partition_index(partition);
@@ -140,11 +148,13 @@ impl FetchResponse {
     /// Constructs a `FetchResponse` from auto-generated data.
     ///
     /// Mirrors Java's private constructor (used by `parse` and `of`).
+    #[doc(alias = "org.apache.kafka.common.requests.FetchResponse#FetchResponse")]
     pub fn new(data: FetchResponseData) -> Self {
         Self { data }
     }
 
     /// Returns a reference to the underlying data.
+    #[doc(alias = "org.apache.kafka.common.requests.FetchResponse#data")]
     pub fn data(&self) -> &FetchResponseData {
         &self.data
     }
@@ -162,6 +172,7 @@ impl FetchResponse {
     /// Returns the top-level error code as an [`Errors`].
     ///
     /// Translates `FetchResponse.error()`.
+    #[doc(alias = "org.apache.kafka.common.requests.FetchResponse#error")]
     pub fn error(&self) -> Errors {
         Errors::for_code(self.data.error_code)
     }
@@ -169,12 +180,14 @@ impl FetchResponse {
     /// Returns the fetch session id.
     ///
     /// Translates `FetchResponse.sessionId()`.
+    #[doc(alias = "org.apache.kafka.common.requests.FetchResponse#sessionId")]
     pub fn session_id(&self) -> i32 {
         self.data.session_id
     }
 
     /// Returns the throttle time the broker recommends the client back off
     /// for, in milliseconds.
+    #[doc(alias = "org.apache.kafka.common.requests.FetchResponse#throttleTimeMs")]
     pub fn throttle_time_ms(&self) -> i32 {
         self.data.throttle_time_ms
     }
@@ -184,6 +197,7 @@ impl FetchResponse {
     /// `maybe_set_throttle_time_ms` to match Java's
     /// `FetchResponse.maybeSetThrottleTimeMs` and the rest of the
     /// `ConcreteResponse` dispatch surface.
+    #[doc(alias = "org.apache.kafka.common.requests.FetchResponse#maybeSetThrottleTimeMs")]
     pub fn maybe_set_throttle_time_ms(&mut self, throttle_time_ms: i32) {
         self.data.set_throttle_time_ms(throttle_time_ms);
     }
@@ -191,6 +205,7 @@ impl FetchResponse {
     /// Returns whether the client should throttle on this response.
     ///
     /// Java: `shouldClientThrottle(short version) { return version >= 8; }`.
+    #[doc(alias = "org.apache.kafka.common.requests.FetchResponse#shouldClientThrottle")]
     pub fn should_client_throttle(&self, version: i16) -> bool {
         version >= 8
     }
@@ -205,6 +220,7 @@ impl FetchResponse {
     /// (Java does the same — see `responseData(...)`).
     ///
     /// Translates `FetchResponse.responseData(Map<Uuid, String>, short)`.
+    #[doc(alias = "org.apache.kafka.common.requests.FetchResponse#responseData")]
     pub fn response_data(
         &self,
         topic_names: &HashMap<Uuid, String>,
@@ -304,6 +320,7 @@ impl FetchResponse {
     /// Java's behavior, which is also version-agnostic at this level.)
     ///
     /// Translates `FetchResponse.topicIds()`.
+    #[doc(alias = "org.apache.kafka.common.requests.FetchResponse#topicIds")]
     pub fn topic_ids(&self) -> HashSet<Uuid> {
         let zero = Uuid::zero();
         self.data
@@ -317,6 +334,7 @@ impl FetchResponse {
     /// Aggregates the response error counts: top-level plus per-partition.
     ///
     /// Translates `FetchResponse.errorCounts()`.
+    #[doc(alias = "org.apache.kafka.common.requests.FetchResponse#errorCounts")]
     pub fn error_counts(&self) -> HashMap<Errors, i32> {
         let mut counts: HashMap<Errors, i32> = HashMap::new();
         *counts.entry(self.error()).or_insert(0) += 1;

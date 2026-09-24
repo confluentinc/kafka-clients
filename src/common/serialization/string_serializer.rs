@@ -32,6 +32,7 @@ use crate::common::serialization::Serializer;
 /// Corresponds to Java's `org.apache.kafka.common.serialization.StringSerializer`.
 #[derive(Clone, Debug, Default)]
 #[non_exhaustive]
+#[doc(alias = "org.apache.kafka.common.serialization.StringSerializer")]
 pub struct StringSerializer;
 
 impl StringSerializer {

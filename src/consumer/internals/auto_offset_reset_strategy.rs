@@ -28,6 +28,7 @@ use crate::common::LocalIllegalArgumentError;
 /// Corresponds to Java's nested `AutoOffsetResetStrategy.StrategyType` enum.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
+#[doc(alias = "org.apache.kafka.clients.consumer.internals.AutoOffsetResetStrategy$StrategyType")]
 pub enum StrategyType {
     /// Reset to the latest available offset.
     Latest,
@@ -57,6 +58,7 @@ impl fmt::Display for StrategyType {
 /// Corresponds to Java's
 /// `org.apache.kafka.clients.consumer.internals.AutoOffsetResetStrategy`.
 #[derive(Clone, Debug)]
+#[doc(alias = "org.apache.kafka.clients.consumer.internals.AutoOffsetResetStrategy")]
 pub struct AutoOffsetResetStrategy {
     strategy_type: StrategyType,
     duration: Option<Duration>,
@@ -105,6 +107,7 @@ impl AutoOffsetResetStrategy {
     /// Returns [`Error::LocalIllegalArgument`] if the input does not match
     /// one of the accepted forms or if the ISO-8601 duration cannot be parsed
     /// or is negative.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.AutoOffsetResetStrategy#fromString")]
     pub fn from_string(s: &str) -> Result<Self, Error> {
         if s == "by_duration" {
             return Err(Error::local_illegal_argument(
@@ -178,6 +181,7 @@ impl AutoOffsetResetStrategy {
     }
 
     /// Returns the offset reset strategy type.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.AutoOffsetResetStrategy#type")]
     pub fn type_(&self) -> StrategyType {
         self.strategy_type
     }
@@ -186,6 +190,7 @@ impl AutoOffsetResetStrategy {
     ///
     /// Matches Java's `name()` which returns `type.toString()` (lower-case
     /// strategy-type identifier such as `"by_duration"`).
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.AutoOffsetResetStrategy#name")]
     pub fn name(&self) -> String {
         self.strategy_type.to_string()
     }
@@ -196,6 +201,7 @@ impl AutoOffsetResetStrategy {
     /// - [`StrategyType::Latest`] → `LATEST_TIMESTAMP` (`-1`)
     /// - [`StrategyType::ByDuration`] → `now - duration` in milliseconds
     /// - [`StrategyType::None_`] → `None`
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.AutoOffsetResetStrategy#timestamp")]
     pub fn timestamp(&self) -> Option<i64> {
         match self.strategy_type {
             StrategyType::Earliest => Some(AutoOffsetResetStrategy::EARLIEST_TIMESTAMP),
@@ -215,6 +221,7 @@ impl AutoOffsetResetStrategy {
 
     /// The configured duration for `by_duration` strategies; `None` for all
     /// other strategies.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.AutoOffsetResetStrategy#duration")]
     pub fn duration(&self) -> Option<Duration> {
         self.duration
     }

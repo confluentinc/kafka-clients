@@ -32,6 +32,7 @@ use super::AbstractResponse;
 ///
 /// Corresponds to `org.apache.kafka.common.requests.DescribeAclsResponse`.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.DescribeAclsResponse")]
 pub struct DescribeAclsResponse {
     data: DescribeAclsResponseData,
     #[allow(dead_code)]
@@ -41,6 +42,7 @@ pub struct DescribeAclsResponse {
 impl DescribeAclsResponse {
     /// Creates a new `DescribeAclsResponse` from the underlying data and
     /// version.
+    #[doc(alias = "org.apache.kafka.common.requests.DescribeAclsResponse#DescribeAclsResponse")]
     pub fn new(data: DescribeAclsResponseData, version: i16) -> Self {
         Self { data, version }
     }
@@ -51,6 +53,7 @@ impl DescribeAclsResponse {
     }
 
     /// Returns a reference to the underlying data.
+    #[doc(alias = "org.apache.kafka.common.requests.DescribeAclsResponse#data")]
     pub fn data(&self) -> &DescribeAclsResponseData {
         &self.data
     }
@@ -61,11 +64,13 @@ impl DescribeAclsResponse {
     }
 
     /// Returns the throttle time in milliseconds.
+    #[doc(alias = "org.apache.kafka.common.requests.DescribeAclsResponse#throttleTimeMs")]
     pub fn throttle_time_ms(&self) -> i32 {
         self.data.throttle_time_ms
     }
 
     /// Sets the throttle time in the response.
+    #[doc(alias = "org.apache.kafka.common.requests.DescribeAclsResponse#maybeSetThrottleTimeMs")]
     pub fn maybe_set_throttle_time_ms(&mut self, throttle_time_ms: i32) {
         self.data.set_throttle_time_ms(throttle_time_ms);
     }
@@ -83,11 +88,13 @@ impl DescribeAclsResponse {
     /// Returns the resources referenced in the response.
     ///
     /// Mirrors `DescribeAclsResponse.acls()`.
+    #[doc(alias = "org.apache.kafka.common.requests.DescribeAclsResponse#acls")]
     pub fn acls(&self) -> &[DescribeAclsResource] {
         &self.data.resources
     }
 
     /// Returns the error counts aggregated for this response.
+    #[doc(alias = "org.apache.kafka.common.requests.DescribeAclsResponse#errorCounts")]
     pub fn error_counts(&self) -> HashMap<Errors, i32> {
         let mut counts = HashMap::new();
         AbstractResponse::update_error_counts(&mut counts, Errors::for_code(self.data.error_code));
@@ -100,12 +107,14 @@ impl DescribeAclsResponse {
     /// # Errors
     ///
     /// Returns an error if parsing fails.
+    #[doc(alias = "org.apache.kafka.common.requests.DescribeAclsResponse#parse")]
     pub fn parse(readable: &mut dyn Readable, version: i16) -> io::Result<Self> {
         let data = DescribeAclsResponseData::read(readable, version)?;
         Ok(Self::new(data, version))
     }
 
     /// Whether the client should throttle on this response (v1+).
+    #[doc(alias = "org.apache.kafka.common.requests.DescribeAclsResponse#shouldClientThrottle")]
     pub fn should_client_throttle(&self, version: i16) -> bool {
         version >= 1
     }
@@ -119,6 +128,7 @@ impl DescribeAclsResponse {
     /// Returns an error if a resource carries pattern/permission combinations
     /// that are invalid for an [`AclBinding`] (mirrors the exceptions Java's
     /// `ResourcePattern`/`AccessControlEntry` constructors would throw).
+    #[doc(alias = "org.apache.kafka.common.requests.DescribeAclsResponse#aclBindings")]
     pub fn acl_bindings(resources: &[DescribeAclsResource]) -> Result<Vec<AclBinding>, Error> {
         let mut bindings = Vec::new();
         for resource in resources {
@@ -143,6 +153,7 @@ impl DescribeAclsResponse {
     /// Groups a set of [`AclBinding`]s into wire resources.
     ///
     /// Mirrors `DescribeAclsResponse.aclsResources(Iterable<AclBinding>)`.
+    #[doc(alias = "org.apache.kafka.common.requests.DescribeAclsResponse#aclsResources")]
     pub fn acls_resources(acls: &[AclBinding]) -> Vec<DescribeAclsResource> {
         // Preserve insertion order of first-seen patterns, mirroring Java's
         // per-pattern grouping (HashMap iteration order is unspecified in Java,

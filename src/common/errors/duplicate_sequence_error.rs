@@ -24,6 +24,7 @@ kafka_error_class! {
     ///
     /// Java `extends` chain:
     ///    `DuplicateSequenceException` -> `ApiException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.DuplicateSequenceException")]
     DuplicateSequenceError,
     code: Errors::DuplicateSequenceNumber,
     extends: [

@@ -25,6 +25,7 @@ kafka_error_class! {
     /// Java `extends` chain:
     ///    `DelegationTokenOwnerMismatchException` -> `ApiException` ->
     ///   `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.DelegationTokenOwnerMismatchException")]
     DelegationTokenOwnerMismatchError,
     code: Errors::DelegationTokenOwnerMismatch,
     extends: [

@@ -25,6 +25,7 @@ kafka_error_class! {
     ///
     /// Java `extends` chain:
     ///    `StaleMemberEpochException` -> `ApiException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.StaleMemberEpochException")]
     StaleMemberEpochError,
     code: Errors::StaleMemberEpoch,
     extends: [

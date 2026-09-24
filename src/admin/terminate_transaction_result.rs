@@ -22,12 +22,14 @@ use crate::common::KafkaFuture;
 ///
 /// Corresponds to `org.apache.kafka.clients.admin.TerminateTransactionResult`.
 #[derive(Clone, Debug)]
+#[doc(alias = "org.apache.kafka.clients.admin.TerminateTransactionResult")]
 pub struct TerminateTransactionResult {
     future: KafkaFuture<()>,
 }
 
 impl TerminateTransactionResult {
     /// Creates a result wrapping the terminating future.
+    #[doc(alias = "org.apache.kafka.clients.admin.TerminateTransactionResult#TerminateTransactionResult")]
     pub(crate) fn new(future: KafkaFuture<()>) -> Self {
         Self { future }
     }
@@ -36,6 +38,7 @@ impl TerminateTransactionResult {
     /// terminated.
     ///
     /// Mirrors `TerminateTransactionResult.result`.
+    #[doc(alias = "org.apache.kafka.clients.admin.TerminateTransactionResult#result")]
     pub fn result(&self) -> KafkaFuture<()> {
         self.future.clone()
     }

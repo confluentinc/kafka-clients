@@ -238,6 +238,7 @@ fn verify_write_succeeds<T: Message + std::fmt::Debug + Clone>(version: i16, mes
 // === Tests translated from MessageTest.java ===
 
 #[test]
+#[doc(alias = "org.apache.kafka.common.message.MessageTest#testAddOffsetsToTxnVersions")]
 fn test_add_offsets_to_txn_versions() {
     test_all_message_round_trips(
         AddOffsetsToTxnRequestData::new()
@@ -250,11 +251,13 @@ fn test_add_offsets_to_txn_versions() {
 }
 
 #[test]
+#[doc(alias = "org.apache.kafka.common.message.MessageTest#testCreateTopicsVersions")]
 fn test_create_topics_versions() {
     test_all_message_round_trips(CreateTopicsRequestData::new().set_timeout_ms(1000).set_topics(Vec::new()));
 }
 
 #[test]
+#[doc(alias = "org.apache.kafka.common.message.MessageTest#testDescribeAclsRequest")]
 fn test_describe_acls_request() {
     test_all_message_round_trips(
         DescribeAclsRequestData::new()
@@ -269,6 +272,7 @@ fn test_describe_acls_request() {
 }
 
 #[test]
+#[doc(alias = "org.apache.kafka.common.message.MessageTest#testMetadataVersions")]
 fn test_metadata_versions() {
     test_all_message_round_trips(MetadataRequestData::new().set_topics(Some(vec![
         metadata_request_data::MetadataRequestTopic::new().set_name(Some("foo".to_string())).clone(),
@@ -293,6 +297,7 @@ fn test_metadata_versions() {
 }
 
 #[test]
+#[doc(alias = "org.apache.kafka.common.message.MessageTest#testHeartbeatVersions")]
 fn test_heartbeat_versions() {
     let new_request = || {
         HeartbeatRequestData::new()
@@ -307,11 +312,13 @@ fn test_heartbeat_versions() {
 }
 
 #[test]
+#[doc(alias = "org.apache.kafka.common.message.MessageTest#testDescribeClusterRequestVersions")]
 fn test_describe_cluster_request_versions() {
     test_all_message_round_trips(DescribeClusterRequestData::new().set_include_cluster_authorized_operations(true));
 }
 
 #[test]
+#[doc(alias = "org.apache.kafka.common.message.MessageTest#testDescribeClusterResponseVersions")]
 fn test_describe_cluster_response_versions() {
     let data = DescribeClusterResponseData::new()
         .set_brokers(vec![
@@ -331,6 +338,7 @@ fn test_describe_cluster_response_versions() {
 }
 
 #[test]
+#[doc(alias = "org.apache.kafka.common.message.MessageTest#testDescribeGroupsResponseVersions")]
 fn test_describe_groups_response_versions() {
     let base_member = DescribedGroupMember::new().set_member_id("memberId".to_string()).clone();
 
@@ -370,6 +378,7 @@ fn test_default_value_should_be_writable() {
 }
 
 #[test]
+#[doc(alias = "org.apache.kafka.common.message.MessageTest#testSimpleMessage")]
 fn test_simple_message() {
     let mut message = SimpleExampleMessageData::new();
     message.set_my_struct(
@@ -397,6 +406,7 @@ fn test_simple_message() {
 }
 
 #[test]
+#[doc(alias = "org.apache.kafka.common.message.MessageTest#testLongTaggedString")]
 fn test_long_tagged_string() {
     let long_string: String = std::iter::repeat_n('a', 1024).collect();
     let mut message = SimpleExampleMessageData::new();
@@ -411,6 +421,7 @@ fn test_long_tagged_string() {
 }
 
 #[test]
+#[doc(alias = "org.apache.kafka.common.message.MessageTest#testUnknownTaggedFields")]
 fn test_unknown_tagged_fields() {
     let mut create_topics = CreateTopicsRequestData::new();
     verify_write_succeeds(6, &create_topics);
@@ -424,6 +435,7 @@ fn test_unknown_tagged_fields() {
 }
 
 #[test]
+#[doc(alias = "org.apache.kafka.common.message.MessageTest#testCompareWithUnknownTaggedFields")]
 fn test_compare_with_unknown_tagged_fields() {
     let mut create_topics = CreateTopicsRequestData::new();
     create_topics.set_timeout_ms(123);
@@ -471,6 +483,7 @@ macro_rules! assert_message_version {
 }
 
 #[test]
+#[doc(alias = "org.apache.kafka.common.message.MessageTest#testMessageVersions")]
 fn test_message_versions() {
     // Java test iterates ALL ApiKeys with valid versions and verifies that
     // highestSupportedVersion() >= apiKey.latestVersion() for both request and response.
@@ -954,6 +967,7 @@ fn test_message_versions() {
 }
 
 #[test]
+#[doc(alias = "org.apache.kafka.common.message.MessageTest#testAddPartitionsToTxnVersions")]
 fn test_add_partitions_to_txn_versions() {
     let v3_and_below_data = AddPartitionsToTxnRequestData::new()
         .set_v3_and_below_transactional_id("blah".to_string())
@@ -989,6 +1003,7 @@ fn test_add_partitions_to_txn_versions() {
 }
 
 #[test]
+#[doc(alias = "org.apache.kafka.common.message.MessageTest#testJoinGroupRequestVersions")]
 fn test_join_group_request_versions() {
     let new_request = || {
         JoinGroupRequestData::new()
@@ -1006,6 +1021,7 @@ fn test_join_group_request_versions() {
 }
 
 #[test]
+#[doc(alias = "org.apache.kafka.common.message.MessageTest#testJoinGroupResponseVersions")]
 fn test_join_group_response_versions() {
     let new_response = || {
         JoinGroupResponseData::new()
@@ -1032,6 +1048,7 @@ fn test_join_group_response_versions() {
 }
 
 #[test]
+#[doc(alias = "org.apache.kafka.common.message.MessageTest#testListOffsetsRequestVersions")]
 fn test_list_offsets_request_versions() {
     let topics = vec![
         ListOffsetsTopic::new()
@@ -1052,6 +1069,7 @@ fn test_list_offsets_request_versions() {
 }
 
 #[test]
+#[doc(alias = "org.apache.kafka.common.message.MessageTest#testListOffsetsResponseVersions")]
 fn test_list_offsets_response_versions() {
     let mut partition = ListOffsetsPartitionResponse::new()
         .set_error_code(Errors::None.code())
@@ -1080,6 +1098,7 @@ fn test_list_offsets_response_versions() {
 }
 
 #[test]
+#[doc(alias = "org.apache.kafka.common.message.MessageTest#testLeaveGroupResponseVersions")]
 fn test_leave_group_response_versions() {
     let new_response = || {
         LeaveGroupResponseData::new()
@@ -1100,6 +1119,7 @@ fn test_leave_group_response_versions() {
 }
 
 #[test]
+#[doc(alias = "org.apache.kafka.common.message.MessageTest#testSyncGroupDefaultGroupInstanceId")]
 fn test_sync_group_default_group_instance_id() {
     let new_request = || {
         SyncGroupRequestData::new()
@@ -1115,6 +1135,7 @@ fn test_sync_group_default_group_instance_id() {
 }
 
 #[test]
+#[doc(alias = "org.apache.kafka.common.message.MessageTest#testOffsetCommitDefaultGroupInstanceId")]
 fn test_offset_commit_default_group_instance_id() {
     test_all_message_round_trips(
         OffsetCommitRequestData::new()
@@ -1138,6 +1159,7 @@ fn test_offset_commit_default_group_instance_id() {
 }
 
 #[test]
+#[doc(alias = "org.apache.kafka.common.message.MessageTest#testDescribeGroupsRequestVersions")]
 fn test_describe_groups_request_versions() {
     test_all_message_round_trips(
         DescribeGroupsRequestData::new()
@@ -1147,6 +1169,7 @@ fn test_describe_groups_request_versions() {
 }
 
 #[test]
+#[doc(alias = "org.apache.kafka.common.message.MessageTest#testGroupInstanceIdIgnorableInDescribeGroupsResponse")]
 fn test_group_instance_id_ignorable_in_describe_groups_response() {
     let response_with_instance_id = DescribeGroupsResponseData::new()
         .set_groups(vec![
@@ -1173,6 +1196,7 @@ fn test_group_instance_id_ignorable_in_describe_groups_response() {
 }
 
 #[test]
+#[doc(alias = "org.apache.kafka.common.message.MessageTest#testThrottleTimeIgnorableInDescribeGroupsResponse")]
 fn test_throttle_time_ignorable_in_describe_groups_response() {
     let response_with_throttle = DescribeGroupsResponseData::new()
         .set_groups(vec![
@@ -1195,6 +1219,7 @@ fn test_throttle_time_ignorable_in_describe_groups_response() {
 }
 
 #[test]
+#[doc(alias = "org.apache.kafka.common.message.MessageTest#testOffsetForLeaderEpochVersions")]
 fn test_offset_for_leader_epoch_versions() {
     let partition_data_no_current_epoch = OffsetForLeaderPartition::new().set_partition(0).set_leader_epoch(3).clone();
     let partition_data_with_current_epoch = OffsetForLeaderPartition::new()
@@ -1237,6 +1262,7 @@ fn test_offset_for_leader_epoch_versions() {
 }
 
 #[test]
+#[doc(alias = "org.apache.kafka.common.message.MessageTest#testOffsetCommitRequestVersions")]
 fn test_offset_commit_request_versions() {
     for version in ApiKeys::OFFSET_COMMIT.oldest_version()..=ApiKeys::OFFSET_COMMIT.latest_version() {
         let mut request = OffsetCommitRequestData::new()
@@ -1279,6 +1305,7 @@ fn test_offset_commit_request_versions() {
 }
 
 #[test]
+#[doc(alias = "org.apache.kafka.common.message.MessageTest#testOffsetCommitResponseVersions")]
 fn test_offset_commit_response_versions() {
     for version in ApiKeys::OFFSET_COMMIT.oldest_version()..=ApiKeys::OFFSET_COMMIT.latest_version() {
         let mut response = OffsetCommitResponseData::new()
@@ -1311,6 +1338,7 @@ fn test_offset_commit_response_versions() {
 }
 
 #[test]
+#[doc(alias = "org.apache.kafka.common.message.MessageTest#testTxnOffsetCommitRequestVersions")]
 fn test_txn_offset_commit_request_versions() {
     let group_id = "groupId";
     let topic_name = "topic";
@@ -1387,6 +1415,7 @@ fn test_txn_offset_commit_request_versions() {
 }
 
 #[test]
+#[doc(alias = "org.apache.kafka.common.message.MessageTest#testTxnOffsetCommitResponseVersions")]
 fn test_txn_offset_commit_response_versions() {
     test_all_message_round_trips(
         TxnOffsetCommitResponseData::new()
@@ -1406,6 +1435,7 @@ fn test_txn_offset_commit_response_versions() {
 }
 
 #[test]
+#[doc(alias = "org.apache.kafka.common.message.MessageTest#testOffsetFetchRequestVersions")]
 fn test_offset_fetch_request_versions() {
     for version in ApiKeys::OFFSET_FETCH.oldest_version()..=ApiKeys::OFFSET_FETCH.latest_version() {
         let mut request = if version < 8 {
@@ -1453,6 +1483,7 @@ fn test_offset_fetch_request_versions() {
 }
 
 #[test]
+#[doc(alias = "org.apache.kafka.common.message.MessageTest#testOffsetFetchResponseVersions")]
 fn test_offset_fetch_response_versions() {
     for version in ApiKeys::OFFSET_FETCH.oldest_version()..=ApiKeys::OFFSET_FETCH.latest_version() {
         let mut response = if version < 8 {
@@ -1511,6 +1542,7 @@ fn test_offset_fetch_response_versions() {
 }
 
 #[test]
+#[doc(alias = "org.apache.kafka.common.message.MessageTest#testProduceResponseVersions")]
 fn test_produce_response_versions() {
     let topic_name = "topic";
     let topic_id = Uuid::new(0x9659_38da_b6ab_4a0b, 0xa826_2b09_7cc0_2c4d); // "klZ9sa2rSvig6QpgGXzALT"
@@ -1604,6 +1636,7 @@ fn test_produce_response_versions() {
 /// pre-`d0dd3b52` `None` default, null counts as non-default
 /// (`field == null || !field.isEmpty()`) and this line would raise.
 #[test]
+#[doc(alias = "org.apache.kafka.common.message.MessageTest#testDefaultValues")]
 fn test_default_values() {
     let mut offset_commit = OffsetCommitRequestData::new();
     offset_commit.set_retention_time_ms(123);
@@ -1628,6 +1661,7 @@ fn test_default_values() {
 /// both an explicit null and an unset field write cleanly there. The two negative
 /// cases are what stop the guard from being over-eager on a nullable field.
 #[test]
+#[doc(alias = "org.apache.kafka.common.message.MessageTest#testNonIgnorableFieldWithDefaultNull")]
 fn test_non_ignorable_field_with_default_null() {
     let member_id = "memberId".to_string();
     let instance_id = "instanceId".to_string();
@@ -1703,6 +1737,7 @@ fn test_tagged_non_ignorable_field_raises_uve_below_its_version() {
 /// Un-ignore to verify the fix. Do **not** weaken it to match current behaviour.
 #[test]
 #[ignore = "PLAN §9.32: generated write emits the null marker at versions outside nullableVersions, where Java throws"]
+#[doc(alias = "org.apache.kafka.common.message.MessageTest#testWriteNullForNonNullableFieldRaisesException")]
 fn test_write_null_for_non_nullable_field_raises_error() {
     let mut metadata = MetadataRequestData::new();
     metadata.set_topics(None);

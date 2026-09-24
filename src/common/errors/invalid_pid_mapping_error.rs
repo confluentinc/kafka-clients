@@ -26,6 +26,7 @@ kafka_error_class! {
     /// Java `extends` chain:
     ///    `InvalidPidMappingException` -> `ApplicationRecoverableException` ->
     ///   `ApiException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.InvalidPidMappingException")]
     InvalidPidMappingError,
     code: Errors::InvalidProducerIdMapping,
     extends: [

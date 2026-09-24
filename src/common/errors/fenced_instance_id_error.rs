@@ -26,6 +26,7 @@ kafka_error_class! {
     /// Java `extends` chain:
     ///    `FencedInstanceIdException` -> `ApplicationRecoverableException` ->
     ///   `ApiException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.FencedInstanceIdException")]
     FencedInstanceIdError,
     code: Errors::FencedInstanceId,
     extends: [

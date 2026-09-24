@@ -36,6 +36,7 @@ use crate::common::internals::KafkaFutureImpl;
 /// Base driver implementation for APIs which target partition leaders.
 ///
 /// Corresponds to `PartitionLeaderStrategy`.
+#[doc(alias = "org.apache.kafka.clients.admin.internals.PartitionLeaderStrategy")]
 pub(crate) struct PartitionLeaderStrategy {
     log_context: LogContext,
     tolerate_unknown_topics: bool,
@@ -43,12 +44,14 @@ pub(crate) struct PartitionLeaderStrategy {
 
 impl PartitionLeaderStrategy {
     /// Creates a strategy that tolerates unknown-topic errors (retries them).
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.PartitionLeaderStrategy#PartitionLeaderStrategy")]
     pub(crate) fn new(log_context: LogContext) -> Self {
         Self::with_tolerate_unknown_topics(log_context, true)
     }
 
     /// Creates a strategy, controlling whether unknown-topic errors are
     /// tolerated (retried) or treated as fatal.
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.PartitionLeaderStrategy#PartitionLeaderStrategy")]
     pub(crate) fn with_tolerate_unknown_topics(log_context: LogContext, tolerate_unknown_topics: bool) -> Self {
         Self { log_context, tolerate_unknown_topics }
     }
@@ -57,6 +60,7 @@ impl PartitionLeaderStrategy {
     /// topic when the error is fatal.
     ///
     /// Mirrors `handleTopicError`.
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.PartitionLeaderStrategy#handleTopicError")]
     fn handle_topic_error(
         &self,
         topic: &str,
@@ -140,6 +144,7 @@ impl PartitionLeaderStrategy {
     /// `error_generator`.
     ///
     /// Mirrors `failAllPartitionsForTopic`.
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.PartitionLeaderStrategy#failAllPartitionsForTopic")]
     fn fail_all_partitions_for_topic(
         &self,
         topic: &str,
@@ -158,6 +163,7 @@ impl PartitionLeaderStrategy {
     /// unexpected (retriable errors are left out of the result for retry).
     ///
     /// Mirrors `handlePartitionError`.
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.PartitionLeaderStrategy#handlePartitionError")]
     fn handle_partition_error(
         &self,
         topic_partition: &TopicPartition,
@@ -277,6 +283,7 @@ impl AdminApiLookupStrategy<TopicPartition> for PartitionLeaderStrategy {
 /// skip the lookup stage.
 ///
 /// Corresponds to `PartitionLeaderStrategy.PartitionLeaderFuture`.
+#[doc(alias = "org.apache.kafka.clients.admin.internals.PartitionLeaderStrategy$PartitionLeaderFuture")]
 pub(crate) struct PartitionLeaderFuture<V: Clone + Send + Sync + 'static> {
     request_keys: HashSet<TopicPartition>,
     partition_leader_cache: Arc<PartitionLeaderCache>,
@@ -286,6 +293,9 @@ pub(crate) struct PartitionLeaderFuture<V: Clone + Send + Sync + 'static> {
 impl<V: Clone + Send + Sync + 'static> PartitionLeaderFuture<V> {
     /// Creates a future bundle for the given request keys, backed by the shared
     /// leader cache.
+    #[doc(
+        alias = "org.apache.kafka.clients.admin.internals.PartitionLeaderStrategy$PartitionLeaderFuture#PartitionLeaderFuture"
+    )]
     pub(crate) fn new(
         request_keys: HashSet<TopicPartition>,
         partition_leader_cache: Arc<PartitionLeaderCache>,
@@ -297,6 +307,7 @@ impl<V: Clone + Send + Sync + 'static> PartitionLeaderFuture<V> {
     /// Returns the per-partition public futures (the `*Result` view).
     ///
     /// Mirrors `all`.
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.PartitionLeaderStrategy$PartitionLeaderFuture#all")]
     pub(crate) fn all(&self) -> HashMap<TopicPartition, KafkaFuture<V>> {
         self.futures.iter().map(|(tp, f)| (tp.clone(), f.future())).collect()
     }

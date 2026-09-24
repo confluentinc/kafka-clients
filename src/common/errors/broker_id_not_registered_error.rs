@@ -24,6 +24,7 @@ kafka_error_class! {
     ///
     /// Java `extends` chain:
     ///    `BrokerIdNotRegisteredException` -> `ApiException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.BrokerIdNotRegisteredException")]
     BrokerIdNotRegisteredError,
     code: Errors::BrokerIdNotRegistered,
     extends: [
