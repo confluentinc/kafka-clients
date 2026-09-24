@@ -57,11 +57,18 @@ use crate::common::record::internal::abstract_records::LOG_OVERHEAD;
 /// consumer iterates (`DefaultRecordBatch.java:279-297`), so a zip bomb costs it
 /// time, not memory. This client decompresses a batch once, into the buffer its
 /// records borrow from (`consumer-threading.md` §27), so without a bound a small
-/// compressed batch could demand gigabytes. 1 GiB is an order of magnitude above
-/// the largest request a broker accepts with its default `socket.request.max.bytes`
-/// (`100 * 1024 * 1024`, `SocketServerConfigs.java:96`), so no batch a default
-/// broker stored reaches it. A constant rather than a configuration key; promote
-/// it to one only if a user hits it.
+/// compressed batch could demand gigabytes.
+///
+/// A stored batch decompresses to its compressed size — at most the broker's
+/// `message.max.bytes`, by default 1 MiB + 12 bytes
+/// (`ServerLogConfigs.MAX_MESSAGE_BYTES_DEFAULT`, `ServerLogConfigs.java:177`) —
+/// times its compression ratio, and the ratio has no bound in principle.
+/// Reaching 1 GiB on a default broker takes a ratio of roughly 1000:1, which
+/// realistic data does not produce. A broker with a raised `message.max.bytes`
+/// serving highly compressible topics could reach it, and there a Java consumer
+/// streams the batch while this client fails it. That is the case for promoting
+/// this constant to a configuration key, which is to be done only if a user hits
+/// it.
 pub const MAX_DECOMPRESSED_BATCH_BYTES: usize = 1 << 30;
 
 /// The most bytes one `read` asks a decompressor for while a batch is
@@ -1524,8 +1531,8 @@ mod tests {
     fn test_invalid_record_count_too_many_non_compressed_v2() {
         let now = 1_700_000_000_000_i64;
         let batch = records_with_invalid_record_count(now, CompressionType::None, 5);
-        let result = batch.iter_records();
-        assert!(result.is_err());
+        let err = batch.iter_records().expect_err("5 declared, 3 present");
+        assert_eq!("Incorrect declared batch size, premature EOF reached", err.message());
     }
 
     /// Corresponds to Java's `DefaultRecordBatchTest.testInvalidRecordCountTooLittleNonCompressedV2`.
@@ -1542,8 +1549,8 @@ mod tests {
     fn test_invalid_record_count_too_many_compressed_v2() {
         let now = 1_700_000_000_000_i64;
         let batch = records_with_invalid_record_count(now, CompressionType::Gzip, 5);
-        let result = batch.iter_records();
-        assert!(result.is_err());
+        let err = batch.iter_records().expect_err("5 declared, 3 present");
+        assert_eq!("Incorrect declared batch size, premature EOF reached", err.message());
     }
 
     /// Corresponds to Java's `DefaultRecordBatchTest.testInvalidRecordCountTooLittleCompressedV2`.
@@ -1864,15 +1871,23 @@ mod tests {
 
     /// A declared count of `i32::MAX` no longer sizes the record list
     /// (`Vec::with_capacity(count)` would abort on capacity overflow): the batch
-    /// fails with Java's premature-EOF text once its real records run out.
+    /// fails with Java's premature-EOF text once its real records run out — the
+    /// uncompressed iterator's (`DefaultRecordBatch.java:307-308`), and for every
+    /// codec `StreamRecordIterator.readNext`'s (`:636-644`).
     #[test]
     fn test_iter_records_with_i32_max_record_count_errors_instead_of_aborting() {
         let uncompressed = records_with_invalid_record_count(1_700_000_000_000, CompressionType::None, i32::MAX);
         let err = uncompressed.iter_records().expect_err("3 records, not i32::MAX");
         assert_eq!("Incorrect declared batch size, premature EOF reached", err.message());
 
-        let compressed = records_with_invalid_record_count(1_700_000_000_000, CompressionType::Gzip, i32::MAX);
-        let err = compressed.iter_records().expect_err("3 records, not i32::MAX");
-        assert_eq!("Failed to read record size: failed to fill whole buffer", err.message());
+        for compression_type in COMPRESSED_TYPES {
+            let compressed = records_with_invalid_record_count(1_700_000_000_000, compression_type, i32::MAX);
+            let err = compressed.iter_records().expect_err("3 records, not i32::MAX");
+            assert_eq!(
+                "Incorrect declared batch size, premature EOF reached",
+                err.message(),
+                "{compression_type:?}"
+            );
+        }
     }
 }

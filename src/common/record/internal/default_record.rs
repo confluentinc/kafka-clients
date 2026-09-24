@@ -217,6 +217,8 @@ impl DefaultRecord {
     ///
     /// # Errors
     /// Returns `InvalidRecordError` if the record is malformed or the stream ends early.
+    /// A stream that ends before or inside the record's size fails with Java's
+    /// `Incorrect declared batch size, premature EOF reached`.
     pub fn read_from_stream<R: Read>(
         input: &mut R,
         base_offset: i64,
@@ -224,8 +226,22 @@ impl DefaultRecord {
         base_sequence: i32,
         log_append_time: Option<i64>,
     ) -> Result<DefaultRecord, InvalidRecordError> {
-        let size_of_body = varint::read_varint_reader(input)
-            .map_err(|e| InvalidRecordError::new(format!("Failed to read record size: {}", e)))?;
+        let size_of_body = varint::read_varint_reader(input).map_err(|e| {
+            // The stream ended before or inside the size: the batch declared more
+            // records than it holds. Java's `ByteUtils.readVarint(InputStream)` takes
+            // the `-1` that `read()` returns at the end of the stream for a
+            // continuation byte, so it throws `IllegalArgumentException`, which
+            // `StreamRecordIterator.readNext` reports as a premature EOF
+            // (`DefaultRecordBatch.java:636-644`). That iterator is Java's one caller
+            // of `DefaultRecord.readFrom(InputStream)`, as `DefaultRecordBatch::iter_records`
+            // is this function's; the iterator's text is chosen here because the
+            // `InvalidRecordError` it receives no longer carries the I/O error kind.
+            if e.kind() == io::ErrorKind::UnexpectedEof {
+                InvalidRecordError::new("Incorrect declared batch size, premature EOF reached")
+            } else {
+                InvalidRecordError::new(format!("Failed to read record size: {}", e))
+            }
+        })?;
 
         if size_of_body < 0 {
             return Err(InvalidRecordError::new(format!(
@@ -1386,5 +1402,25 @@ mod tests {
             err.message()
         );
         assert!(max_allocation < 1024, "allocated {max_allocation} bytes for a three-byte body");
+    }
+
+    /// A stream that ends where a record's size should be — before its first
+    /// byte, or after a continuation byte — fails with Java's premature-EOF text:
+    /// `ByteUtils.readVarint(InputStream)` reads an exhausted stream's `-1` as a
+    /// continuation byte and throws `IllegalArgumentException`, which
+    /// `StreamRecordIterator.readNext` reports this way
+    /// (`DefaultRecordBatch.java:636-644`). A size read in full that outruns the
+    /// body keeps Java's end-of-payload text (the test above).
+    #[test]
+    fn test_read_from_stream_ending_in_the_size_is_premature_eof() {
+        for stream in [&[][..], &[0x80][..]] {
+            let mut input = stream;
+            let err = DefaultRecord::read_from_stream(&mut input, 0, 0, 0, None).expect_err("no size to read");
+            assert_eq!(
+                "Incorrect declared batch size, premature EOF reached",
+                err.message(),
+                "stream {stream:?}"
+            );
+        }
     }
 }

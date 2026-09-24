@@ -74,3 +74,35 @@ deviation outside this ticket) and why the headers wrap has no test (its only
 trigger, a header key that is not UTF-8, is itself a pre-existing divergence:
 Java decodes it with replacement characters).
 
+### Note 1 — the D4 rationale measured the wrong quantity
+
+Handled in the `fixup!` of `1ebbed96`. The `MAX_DECOMPRESSED_BATCH_BYTES` doc and
+the plan's D4 row now argue from decompressed size: a stored batch decompresses
+to its compressed size, at most the broker's `message.max.bytes` (default
+1 MiB + 12, `ServerLogConfigs.java:177`), times a compression ratio that has no
+bound in principle. 1 GiB on a default broker takes a ratio of roughly 1000:1,
+which realistic data does not produce; a broker with a raised
+`message.max.bytes` serving highly compressible topics could reach it, and there
+a Java consumer streams the batch while this client fails it — the case the
+"promote to a config if a user hits it" escape hatch is for. The value is
+unchanged. The plan's D5 row, which called its constant "the same broker default
+as D4", now names `socket.request.max.bytes` directly.
+
+### Note 4 — the owned compressed path pinned a non-Java text
+
+Handled in the `fixup!` of `1ebbed96`: the code now produces Java's text. The
+condition the test hits is a compressed stream that ends where the next
+record's size should be. Java's codec streams (`ChunkedBytesStream`) return
+`-1` there; `ByteUtils.readVarint(InputStream)` reads it as a continuation byte
+and throws `IllegalArgumentException`, which `StreamRecordIterator.readNext`
+maps to `Incorrect declared batch size, premature EOF reached`
+(`DefaultRecordBatch.java:636-644`), not to `Failed to decompress record
+stream` (4.3.1 has no `readVarint(DataInput)`; the `DataInput` in the javadoc is
+stale). `DefaultRecord::read_from_stream` now maps an `UnexpectedEof` in the
+size to that text; `iter_records`'s return type is unchanged. The test covers
+every codec, the Java-translated `test_invalid_record_count_too_many_*_v2`
+tests now assert the message instead of `is_err()`, and a new unit test pins the
+mapping at its site. The three that exercise the mapping (the `i32::MAX` test,
+the compressed too-many test and the unit test) fail with it disabled. Plan §6 item 11
+lists the texts on this path that still differ from Java's (all pre-existing).
+
