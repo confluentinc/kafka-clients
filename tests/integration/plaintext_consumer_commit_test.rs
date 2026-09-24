@@ -142,13 +142,11 @@ type BytesConsumer = dyn Consumer<Vec<u8>, Vec<u8>>;
 /// group.min.session.timeout.ms     = 100
 /// ```
 ///
-/// Additionally `num.partitions=2` so auto-created topics get 2
-/// partitions — matching Java's `@BeforeEach`
-/// `cluster.createTopic(topic, 2, BROKER_COUNT)`.
+/// The suite's `@BeforeEach` topic is created explicitly by
+/// [`create_test_topic`]; `num.partitions=2` only matters for auto-created
+/// topics.
 fn cluster_config_with_kip848_3brokers() -> ClusterConfig {
-    // Java parity: `@BeforeEach setup() { cluster.createTopic(topic, 2, BROKER_COUNT); }`,
-    // so auto-created topics get 2 partitions; the canonical helper supplies
-    // the shared KIP-848 broker tuning.
+    // The canonical helper supplies the shared KIP-848 broker tuning.
     kip848_3_broker(2)
 }
 
@@ -258,34 +256,24 @@ async fn send_records_bytes(bootstrap: &str, tp: &TopicPartition, num_records: u
     producer.close().await.expect("producer close should succeed");
 }
 
-/// Creates `topic` EMPTY by triggering broker metadata auto-creation and
-/// waiting until it materializes with the expected partition count. Mirrors
-/// Java's `cluster.createTopic(name, partitions, replicationFactor)` (no data
-/// records, so the first produced record lands at offset 0).
-///
-/// The Rust harness has no admin client, but `partitions_for` over the
-/// METADATA path triggers broker auto-create (`auto.create.topics.enable` is
-/// on by default) with `num.partitions=2` — exactly an empty topic, matching
-/// Java. This replaces the earlier provisioner-record approach, which placed
-/// a record at offset 0 and shifted every real record by one.
-async fn create_topic(consumer: &mut BytesConsumer, topic: &str, partitions: usize) {
-    let deadline = Instant::now() + Duration::from_secs(30);
-    loop {
-        let parts = consumer.partitions_for(topic).await.expect("partitions_for");
-        if parts.len() >= partitions {
-            return;
-        }
-        if Instant::now() >= deadline {
-            panic!("topic {topic} not auto-created with >= {partitions} partitions within 30s");
-        }
-        tokio::time::sleep(Duration::from_millis(200)).await;
-    }
-}
+/// Java `PlaintextConsumerCommitTest.BROKER_COUNT` (`PlaintextConsumerCommitTest.java:73`).
+const BROKER_COUNT: i16 = 3;
 
-/// Equivalent of Java's `cluster.createTopic(name, 2, BROKER_COUNT)` — creates
-/// an EMPTY 2-partition topic via metadata auto-create (no records).
-async fn ensure_topic_with_2_partitions(consumer: &mut BytesConsumer, topic: &str) {
-    create_topic(consumer, topic, 2).await;
+/// Translates `cluster.createTopic(topic, numPartitions, (short) BROKER_COUNT)`,
+/// as the suite's `@BeforeEach` does for `topic`
+/// (`PlaintextConsumerCommitTest.java:85-88`). Creates the topic EMPTY (the
+/// first produced record lands at offset 0).
+///
+/// Creates the topic through the admin client and then waits until every
+/// partition leader accepts leader-only requests, before the test produces.
+/// Auto-creating the topic (by producing or via metadata) instead races leader
+/// election on the 3-broker cluster: `NOT_LEADER_OR_FOLLOWER` retries reorder
+/// the non-idempotent sends.
+async fn create_test_topic(bootstrap_servers: &str, topic: &str, num_partitions: i32) {
+    let admin = admin_for(bootstrap_servers);
+    test_utils::create_topic(admin.as_ref(), topic, num_partitions, BROKER_COUNT).await;
+    test_utils::wait_for_partition_leaders(admin.as_ref(), topic, 0..num_partitions).await;
+    admin.close_with_timeout(Duration::from_secs(5)).await;
 }
 
 // ── Consumer test helpers ─────────────────────────────────────────────
@@ -500,8 +488,8 @@ async fn test_async_consumer_auto_commit_on_close() {
         let mut consumer =
             new_bytes_consumer(make_consumer_config_bytes(ctx.bootstrap_servers(), &group_id, true, &[]));
         // Empty topic (both partitions), so seeks define the committed
-        // positions deterministically; producing to tp also auto-creates it.
-        create_topic(consumer.as_mut(), &topic, 2).await;
+        // positions deterministically.
+        create_test_topic(ctx.bootstrap_servers(), &topic, 2).await;
         send_records_bytes(ctx.bootstrap_servers(), &tp, 1000, current_time_ms()).await;
 
         consumer
@@ -548,8 +536,8 @@ async fn test_async_consumer_auto_commit_on_close_after_wakeup() {
     {
         let mut consumer =
             new_bytes_consumer(make_consumer_config_bytes(ctx.bootstrap_servers(), &group_id, true, &[]));
-        // Empty topic (both partitions); producing to tp also auto-creates it.
-        create_topic(consumer.as_mut(), &topic, 2).await;
+        // Empty topic (both partitions), as Java's `@BeforeEach` creates it.
+        create_test_topic(ctx.bootstrap_servers(), &topic, 2).await;
         send_records_bytes(ctx.bootstrap_servers(), &tp, 1000, current_time_ms()).await;
 
         consumer
@@ -596,7 +584,7 @@ async fn test_async_consumer_commit_metadata() {
 
     let mut consumer = new_bytes_consumer(make_consumer_config_bytes(ctx.bootstrap_servers(), &group_id, true, &[]));
     // Ensure the topic exists so assign() resolves a real partition.
-    ensure_topic_with_2_partitions(consumer.as_mut(), &topic).await;
+    create_test_topic(ctx.bootstrap_servers(), &topic, 2).await;
     consumer.assign(vec![tp.clone()]).await.expect("assign should succeed");
 
     // Sync commit: offset 5, leaderEpoch 15, metadata "foo".
@@ -656,7 +644,7 @@ async fn test_async_consumer_async_commit() {
     let tp = TopicPartition::new(topic.clone(), 0);
 
     let mut consumer = new_bytes_consumer(make_consumer_config_bytes(ctx.bootstrap_servers(), &group_id, false, &[]));
-    ensure_topic_with_2_partitions(consumer.as_mut(), &topic).await;
+    create_test_topic(ctx.bootstrap_servers(), &topic, 2).await;
     consumer.assign(vec![tp.clone()]).await.expect("assign should succeed");
 
     let cb = CountConsumerCommitCallback::new();
@@ -703,7 +691,7 @@ async fn test_async_consumer_commit_specified_offsets() {
     let tp1 = TopicPartition::new(topic.clone(), 1);
 
     let mut consumer = new_bytes_consumer(make_consumer_config_bytes(ctx.bootstrap_servers(), &group_id, false, &[]));
-    ensure_topic_with_2_partitions(consumer.as_mut(), &topic).await;
+    create_test_topic(ctx.bootstrap_servers(), &topic, 2).await;
     let producer = build_producer_bytes(ctx.bootstrap_servers());
     let now = current_time_ms();
     send_records_with_producer(&producer, &tp, 5, now).await;
@@ -789,8 +777,8 @@ async fn test_async_consumer_auto_commit_on_rebalance() {
 
     let mut consumer = new_bytes_consumer(make_consumer_config_bytes(ctx.bootstrap_servers(), &group_id, true, &[]));
     // Empty topics so produced records start at offset 0 (Java parity).
-    ensure_topic_with_2_partitions(consumer.as_mut(), &topic).await;
-    ensure_topic_with_2_partitions(consumer.as_mut(), &topic2).await;
+    create_test_topic(ctx.bootstrap_servers(), &topic, 2).await;
+    create_test_topic(ctx.bootstrap_servers(), &topic2, 2).await;
 
     // Produce up to each seek target so the seeks below are in-range (log
     // end), so no fetch advances or resets the position — see the
@@ -853,7 +841,7 @@ async fn test_async_consumer_subscribe_and_commit_sync() {
     let tp1 = TopicPartition::new(topic.clone(), 1);
 
     let mut consumer = new_bytes_consumer(make_consumer_config_bytes(ctx.bootstrap_servers(), &group_id, false, &[]));
-    ensure_topic_with_2_partitions(consumer.as_mut(), &topic).await;
+    create_test_topic(ctx.bootstrap_servers(), &topic, 2).await;
     assert_eq!(consumer.assignment().len(), 0);
     consumer
         .subscribe_with_topics(vec![topic.clone()])
@@ -884,7 +872,7 @@ async fn test_async_consumer_position_and_commit() {
     let mut other = new_bytes_consumer(make_consumer_config_bytes(ctx.bootstrap_servers(), &group_id, false, &[]));
 
     // Empty topic so produced records start at offset 0 (Java parity).
-    ensure_topic_with_2_partitions(consumer.as_mut(), &topic).await;
+    create_test_topic(ctx.bootstrap_servers(), &topic, 2).await;
     let producer = build_producer_bytes(ctx.bootstrap_servers());
     let starting_timestamp = current_time_ms();
     send_records_with_producer(&producer, &tp, 5, starting_timestamp).await;
@@ -993,7 +981,7 @@ async fn test_commit_async_completed_before_consumer_closes() {
     {
         let mut consumer =
             new_bytes_consumer(make_consumer_config_bytes(ctx.bootstrap_servers(), &group_id, false, &[]));
-        ensure_topic_with_2_partitions(consumer.as_mut(), &topic).await;
+        create_test_topic(ctx.bootstrap_servers(), &topic, 2).await;
 
         let producer = build_producer_bytes(ctx.bootstrap_servers());
         let now = current_time_ms();
@@ -1041,7 +1029,7 @@ async fn test_commit_async_completed_before_commit_sync_returns() {
     let tp1 = TopicPartition::new(topic.clone(), 1);
 
     let mut consumer = new_bytes_consumer(make_consumer_config_bytes(ctx.bootstrap_servers(), &group_id, false, &[]));
-    ensure_topic_with_2_partitions(consumer.as_mut(), &topic).await;
+    create_test_topic(ctx.bootstrap_servers(), &topic, 2).await;
     let producer = build_producer_bytes(ctx.bootstrap_servers());
     let now = current_time_ms();
     send_records_with_producer(&producer, &tp, 3, now).await;
@@ -1144,9 +1132,7 @@ async fn test_commit_async_fails_when_coordinator_unavailable_during_close() {
     let tp = TopicPartition::new(topic.clone(), 0);
 
     // Java `@BeforeEach`: `cluster.createTopic(topic, 2, (short) BROKER_COUNT)`.
-    let admin = admin_for(ctx.bootstrap_servers());
-    test_utils::create_topic(admin.as_ref(), &topic, 2, 3).await;
-    admin.close_with_timeout(Duration::from_secs(5)).await;
+    create_test_topic(ctx.bootstrap_servers(), &topic, 2).await;
 
     let mut consumer = new_bytes_consumer(make_consumer_config_bytes(ctx.bootstrap_servers(), &group_id, false, &[]));
     let producer = build_producer_bytes(ctx.bootstrap_servers());
@@ -1246,9 +1232,7 @@ async fn test_async_consumer_no_committed_offsets() {
     let tp1 = TopicPartition::new(topic.clone(), 1);
 
     // Java `@BeforeEach`: `cluster.createTopic(topic, 2, BROKER_COUNT)`.
-    let admin = admin_for(ctx.bootstrap_servers());
-    test_utils::create_topic(admin.as_ref(), &topic, 2, 3).await;
-    admin.close_with_timeout(Duration::from_secs(5)).await;
+    create_test_topic(ctx.bootstrap_servers(), &topic, 2).await;
 
     // Java: `createConsumer(groupProtocol, true)`.
     let mut consumer = new_bytes_consumer(make_consumer_config_bytes(ctx.bootstrap_servers(), &group_id, true, &[]));
