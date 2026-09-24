@@ -1346,11 +1346,9 @@ class SoakClient(object):
             recreate_topic(aconf, topic, partitions=partitions)
             return
 
-        # `Errors` wire codes (src/common/protocol/errors.rs). The admin binding
-        # returns ``create_topics([...])`` -> ``{name: TopicMetadataAndConfig |
-        # KafkaError}`` (each value is already the per-key result or a
-        # ``KafkaError`` whose ``.code`` is the wire code), and the whole call
-        # itself raises a ``KafkaError`` on a call-level failure.
+        # `Errors` wire codes (src/common/protocol/errors.rs). Each per-key
+        # Future's ``result()`` returns the value on success and raises a
+        # ``KafkaError`` (whose ``.code`` is the wire code) on failure.
         # Authentication / authorization failures will never clear by retrying;
         # everything else here (broker unreachable, metadata timeout) might.
         TOPIC_ALREADY_EXISTS = 36
@@ -1367,36 +1365,26 @@ class SoakClient(object):
         try:
             new_topic = bindings.NewTopic(topic, num_partitions=partitions,
                                           replication_factor=replication_factor)
-
-            def _handle_create_error(_topic, ex):
-                code = ex.code
-                if code == TOPIC_ALREADY_EXISTS:
-                    self.logger.info("Topic %s already exists: good", _topic)
-                elif code in auth_codes:
-                    raise FatalStartupError(
-                        "authentication/authorization failed creating topic {!r}: {}. "
-                        "Check sasl.jaas.config (username/password) and the API "
-                        "key's ACLs. Restarting will not fix this.".format(
-                            _topic, ex.message)) from ex
-                else:
-                    raise TransientStartupError(
-                        "could not create or verify topic {!r}: {}. If the cluster "
-                        "is reachable this may clear on retry.".format(
-                            _topic, ex.message)) from ex
-
-            try:
-                results = admin.create_topics([new_topic])
-            except KafkaError as ex:
-                # The old admin interface raises a whole-call KafkaError from
-                # the call itself; classify it the same way as a per-key error.
-                _handle_create_error(topic, ex)
-            else:
-                for _topic, result in results.items():
-                    if isinstance(result, KafkaError):
-                        _handle_create_error(_topic, result)
+            for _topic, fut in admin.create_topics([new_topic]).items():
+                try:
+                    fut.result()
+                    self.logger.info("Created topic %s (partitions=%d, rf=%d)",
+                                     _topic, partitions, replication_factor)
+                except KafkaError as ex:
+                    code = ex.code
+                    if code == TOPIC_ALREADY_EXISTS:
+                        self.logger.info("Topic %s already exists: good", _topic)
+                    elif code in auth_codes:
+                        raise FatalStartupError(
+                            "authentication/authorization failed creating topic {!r}: {}. "
+                            "Check sasl.jaas.config (username/password) and the API "
+                            "key's ACLs. Restarting will not fix this.".format(
+                                _topic, ex.message)) from ex
                     else:
-                        self.logger.info("Created topic %s (partitions=%d, rf=%d)",
-                                         _topic, partitions, replication_factor)
+                        raise TransientStartupError(
+                            "could not create or verify topic {!r}: {}. If the cluster "
+                            "is reachable this may clear on retry.".format(
+                                _topic, ex.message)) from ex
         finally:
             admin.close()
 
