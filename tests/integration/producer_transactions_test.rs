@@ -60,13 +60,19 @@
 //! and from the Java `clients-integration-tests` module (AK 4.3.1):
 //!
 //! - `ProducerIntegrationTest.testTransactionWithAndWithoutSend` →
-//!   [`test_transaction_with_and_without_send`]
+//!   [`test_transaction_with_and_without_send`] (TV2) and
+//!   [`test_transaction_with_and_without_send_tv0`] /
+//!   [`test_transaction_with_and_without_send_tv1`]
 //! - `ProducerIntegrationTest.testTransactionWithInvalidSendAndEndTxnRequestSent` →
-//!   [`test_transaction_with_invalid_send_and_end_txn_request_sent`]
+//!   [`test_transaction_with_invalid_send_and_end_txn_request_sent`] (TV2) and
+//!   [`test_transaction_with_invalid_send_and_end_txn_request_sent_tv0`] /
+//!   [`test_transaction_with_invalid_send_and_end_txn_request_sent_tv1`]
 //! - `ProducerIntegrationTest.testTransactionWithSendOffset` → its
 //!   `listTransactions()` `COMPLETE_COMMIT` check is folded into
 //!   [`consume_transform_produce_with_offsets_inner`], which already covers the
-//!   rest of that scenario
+//!   rest of that scenario (TV2 via `test_consume_transform_produce_with_offsets`,
+//!   TV0 / TV1 via [`test_consume_transform_produce_with_offsets_tv0`] /
+//!   [`test_consume_transform_produce_with_offsets_tv1`])
 //! - `TransactionsWithMaxInFlightOneTest.testTransactionalProducerSingleBrokerMaxInFlightOne` →
 //!   [`test_transactional_producer_single_broker_max_in_flight_one`]
 //! - `AdminFenceProducersTest.testFenceAfterProducerCommit` →
@@ -2116,11 +2122,26 @@ async fn test_fencing_on_transaction_expiration() {
 //     shutdown, abort-cleanup interval, ...) are not reproduced: none reaches an
 //     assertion here, and each would fork the pooled container.
 //   - `ProducerIntegrationTest` runs each test at `transaction.version` 0, 1 and
-//     2 (`@ClusterFeature`). The pooled `apache/kafka:4.2.0` brokers are
-//     formatted at the latest metadata version, which finalizes
-//     `transaction.version=2`, and the harness cannot re-format them at a lower
-//     feature level — so only the TV2 row is translated; TV0/TV1 are not
-//     reachable here.
+//     2 (`@ClusterFeature`). The `apache/kafka:4.2.0` brokers are formatted at
+//     the latest metadata version, which finalizes `transaction.version=2`, and
+//     the harness cannot re-format them at a lower level. The TV2 row runs on
+//     the pooled cluster; the TV0 / TV1 rows run the same body on a
+//     [`ClusterConfig::dedicated`] copy of that cluster whose finalized
+//     `transaction.version` is first downgraded with `Admin::update_features`
+//     (see [`producer_integration_cluster`]).
+
+/// The cluster for one `ProducerIntegrationTest` `@ClusterFeature` row: the
+/// pooled [`txn_single_broker`] for TV2 (the image default), otherwise a
+/// dedicated copy of it downgraded to `transaction_version` — the downgrade is
+/// cluster-wide, so it must never touch a pooled container.
+async fn producer_integration_cluster(transaction_version: i16) -> TestContext {
+    if transaction_version == 2 {
+        return TestContext::new(txn_single_broker()).await;
+    }
+    let ctx = TestContext::new(ClusterConfig { dedicated: true, ..txn_single_broker() }).await;
+    downgrade_transaction_version(&ctx, transaction_version).await;
+    ctx
+}
 
 /// `ClusterInstance.producer(configs)` (`ClusterInstance.java:150-156`):
 /// `configs` plus byte-array serializers and the cluster's bootstrap servers.
@@ -2157,10 +2178,10 @@ async fn create_single_broker_topic(
 /// A transaction with a send and an empty transaction both commit.
 ///
 /// Translates `ProducerIntegrationTest.testTransactionWithAndWithoutSend`
-/// (`ProducerIntegrationTest.java:92-114`), TV2 row only (see above).
-#[tokio::test]
-async fn test_transaction_with_and_without_send() {
-    let mut ctx = TestContext::new(txn_single_broker()).await;
+/// (`ProducerIntegrationTest.java:92-114`), one `@ClusterFeature` row per
+/// `transaction_version` (see above).
+async fn transaction_with_and_without_send(transaction_version: i16) {
+    let mut ctx = producer_integration_cluster(transaction_version).await;
     let topic = ctx.topic("test");
     create_single_broker_topic(&ctx, &topic, 1, BTreeMap::new()).await;
     let bootstrap = ctx.bootstrap_servers().to_string();
@@ -2192,16 +2213,37 @@ async fn test_transaction_with_and_without_send() {
     ctx.cleanup().await;
 }
 
+/// `testTransactionWithAndWithoutSend`, `TRANSACTION_VERSION = 0` row
+/// (`ProducerIntegrationTest.java:93-94`).
+#[tokio::test]
+async fn test_transaction_with_and_without_send_tv0() {
+    transaction_with_and_without_send(0).await;
+}
+
+/// `testTransactionWithAndWithoutSend`, `TRANSACTION_VERSION = 1` row
+/// (`ProducerIntegrationTest.java:95-96`).
+#[tokio::test]
+async fn test_transaction_with_and_without_send_tv1() {
+    transaction_with_and_without_send(1).await;
+}
+
+/// `testTransactionWithAndWithoutSend`, `TRANSACTION_VERSION = 2` row
+/// (`ProducerIntegrationTest.java:97-98`).
+#[tokio::test]
+async fn test_transaction_with_and_without_send() {
+    transaction_with_and_without_send(2).await;
+}
+
 /// A record the broker rejects as too large fails with `RecordTooLargeException`,
 /// and the transaction can still be aborted (the `EndTxn` request is sent).
 ///
 /// Translates `ProducerIntegrationTest.testTransactionWithInvalidSendAndEndTxnRequestSent`
-/// (`ProducerIntegrationTest.java:116-146`), TV2 row only (see above). Java asserts
-/// only the cause's class; the message is broker-generated text that embeds the
-/// batch size, so only the variant is asserted here too.
-#[tokio::test]
-async fn test_transaction_with_invalid_send_and_end_txn_request_sent() {
-    let mut ctx = TestContext::new(txn_single_broker()).await;
+/// (`ProducerIntegrationTest.java:116-146`), one `@ClusterFeature` row per
+/// `transaction_version` (see above). Java asserts only the cause's class; the
+/// message is broker-generated text that embeds the batch size, so only the
+/// variant is asserted here too.
+async fn transaction_with_invalid_send_and_end_txn_request_sent(transaction_version: i16) {
+    let mut ctx = producer_integration_cluster(transaction_version).await;
     let topic = ctx.topic("foobar");
     create_single_broker_topic(
         &ctx,
@@ -2241,6 +2283,27 @@ async fn test_transaction_with_invalid_send_and_end_txn_request_sent() {
 
     producer.close().await.expect("producer close");
     ctx.cleanup().await;
+}
+
+/// `testTransactionWithInvalidSendAndEndTxnRequestSent`, `TRANSACTION_VERSION = 0`
+/// row (`ProducerIntegrationTest.java:117-118`).
+#[tokio::test]
+async fn test_transaction_with_invalid_send_and_end_txn_request_sent_tv0() {
+    transaction_with_invalid_send_and_end_txn_request_sent(0).await;
+}
+
+/// `testTransactionWithInvalidSendAndEndTxnRequestSent`, `TRANSACTION_VERSION = 1`
+/// row (`ProducerIntegrationTest.java:119-120`).
+#[tokio::test]
+async fn test_transaction_with_invalid_send_and_end_txn_request_sent_tv1() {
+    transaction_with_invalid_send_and_end_txn_request_sent(1).await;
+}
+
+/// `testTransactionWithInvalidSendAndEndTxnRequestSent`, `TRANSACTION_VERSION = 2`
+/// row (`ProducerIntegrationTest.java:121-122`).
+#[tokio::test]
+async fn test_transaction_with_invalid_send_and_end_txn_request_sent() {
+    transaction_with_invalid_send_and_end_txn_request_sent(2).await;
 }
 
 /// With `max.in.flight.requests.per.connection=1` on a single broker, multiple
@@ -3401,13 +3464,27 @@ async fn failure_to_fence_epoch(is_tv2_enabled: bool) {
 /// the harness stand-in for Java formatting the cluster at `TV_1`
 /// (`QuorumTestHarness.scala:284-286`).
 async fn downgrade_transaction_version_to_1(ctx: &TestContext) {
+    downgrade_transaction_version(ctx, 1).await;
+}
+
+/// `Admin.updateFeatures(transaction.version -> level, SAFE_DOWNGRADE)`, then a
+/// wait until every broker's `DescribeFeatures` reports the finalized `level` —
+/// the harness stand-in for Java's `@ClusterFeature(feature =
+/// TRANSACTION_VERSION, version = level)`, which formats the cluster at that
+/// level. The harness image always formats at the 4.2.0 default (TV2), so the
+/// cluster must be [`ClusterConfig::dedicated`]: the downgrade is cluster-wide.
+async fn downgrade_transaction_version(ctx: &TestContext, level: i16) {
     use confluent_kafka::admin::FeatureUpdate;
     use confluent_kafka::admin::UpgradeType;
 
+    assert!(
+        ctx.cluster().config().dedicated,
+        "downgrading transaction.version needs a dedicated cluster"
+    );
     let admin = txn_test_admin(ctx);
     let updates = HashMap::from([(
         "transaction.version".to_string(),
-        FeatureUpdate::new(1, UpgradeType::SafeDowngrade).expect("valid feature update"),
+        FeatureUpdate::new(level, UpgradeType::SafeDowngrade).expect("valid feature update"),
     )]);
     admin
         .update_features(&updates)
@@ -3415,7 +3492,7 @@ async fn downgrade_transaction_version_to_1(ctx: &TestContext) {
         .all()
         .get_with_timeout(Duration::from_secs(30))
         .await
-        .expect("downgrading transaction.version to 1 should succeed");
+        .unwrap_or_else(|e| panic!("downgrading transaction.version to {level} should succeed: {e:?}"));
     admin.close().await;
 
     for broker_id in ctx.cluster().broker_ids() {
@@ -3433,15 +3510,17 @@ async fn downgrade_transaction_version_to_1(ctx: &TestContext) {
                     .get()
                     .await
                     .ok()
-                    .and_then(|metadata| {
+                    .map(|metadata| {
+                        // A feature finalized at level 0 is absent from the
+                        // finalized set (KIP-584), so absence reads as 0.
                         metadata
                             .finalized_features()
                             .get("transaction.version")
-                            .map(|range| range.max_version_level())
+                            .map_or(0, |range| range.max_version_level())
                     })
-                    == Some(1)
+                    == Some(level)
             },
-            &format!("broker {broker_id} did not finalize transaction.version=1"),
+            &format!("broker {broker_id} did not finalize transaction.version={level}"),
             test_utils::DEFAULT_MAX_WAIT_MS,
             test_utils::DEFAULT_PAUSE_MS,
         )
@@ -3727,4 +3806,32 @@ mod rust_only_fallback {
         let mut ctx = TestContext::new(cluster_config()).await;
         consume_transform_produce_with_offsets_inner(&mut ctx, &RustNativeFactory).await;
     }
+}
+
+/// `ProducerIntegrationTest.testTransactionWithSendOffset`'s TV0 / TV1
+/// `@ClusterFeature` rows (`ProducerIntegrationTest.java:149-152`), carried by
+/// [`consume_transform_produce_with_offsets_inner`] like its TV2 row
+/// (`test_consume_transform_produce_with_offsets`). The body runs on a
+/// [`ClusterConfig::dedicated`] copy of [`cluster_config`] whose finalized
+/// `transaction.version` is first downgraded (the image formats at TV2); the
+/// producer is native only, since the downgrade is a cluster property that does
+/// not vary by binding.
+async fn consume_transform_produce_with_offsets_at(transaction_version: i16) {
+    let mut ctx = TestContext::new(ClusterConfig { dedicated: true, ..cluster_config() }).await;
+    downgrade_transaction_version(&ctx, transaction_version).await;
+    consume_transform_produce_with_offsets_inner(&mut ctx, &crate::common::backend_factory::RustNativeFactory).await;
+}
+
+/// `testTransactionWithSendOffset`, `TRANSACTION_VERSION = 0` row
+/// (`ProducerIntegrationTest.java:149-150`).
+#[tokio::test(flavor = "multi_thread")]
+async fn test_consume_transform_produce_with_offsets_tv0() {
+    consume_transform_produce_with_offsets_at(0).await;
+}
+
+/// `testTransactionWithSendOffset`, `TRANSACTION_VERSION = 1` row
+/// (`ProducerIntegrationTest.java:151-152`).
+#[tokio::test(flavor = "multi_thread")]
+async fn test_consume_transform_produce_with_offsets_tv1() {
+    consume_transform_produce_with_offsets_at(1).await;
 }
