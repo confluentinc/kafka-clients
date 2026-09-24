@@ -1,0 +1,44 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    v3 perf executable (M13/P1, Slice 1) — the head-to-head benchmark run over OUR binding
+    (Confluent.Kafka). References the shared client-agnostic PerformanceCommon engine + our binding,
+    and adapts KafkaProducer/AsyncKafkaProducer and KafkaConsumer/AsyncKafkaConsumer (both
+    <byte[],byte[]> with Serdes.ByteArray) to the backend interfaces. MODE={producer,consumer} selects
+    the benchmark (D8 — the client dimension is the exe boundary, so producer/consumer collapse to a
+    MODE env inside one exe).
+
+    ⚠ Same-assembly collision (PLAN §1.1.1): this exe references our Confluent.Kafka; the v2 exe (Slice
+    2) references ckd's Confluent.Kafka. The two must NEVER share a project/sln — separate exes with
+    separate output dirs is what keeps the two Confluent.Kafka assemblies from colliding.
+
+    Two-stage build (CLAUDE.md §7.1): the `cargo build` ffi step must produce the native cdylib FIRST;
+    the ProjectReference to Confluent.Kafka carries the native (its Content copy) transitively into this
+    exe's output, where default [DllImport] probing resolves it.
+
+    Directory.Build.props (at bindings/dotnet/) auto-applies (#nullable enable, dotnet/runtime code
+    style, TreatWarningsAsErrors, strong-name signing). Kept OUT of Confluent.Kafka.sln (D4).
+  -->
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFrameworks>net8.0;net10.0</TargetFrameworks>
+    <RootNamespace>Confluent.Kafka.Performance.V3</RootNamespace>
+    <AssemblyName>PerfV3</AssemblyName>
+    <!-- Perf executable — never packed, no XML doc file (so no CS1591). -->
+    <IsPackable>false</IsPackable>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <!--
+      CA1031: the mode entry points catch System.Exception broadly on purpose — a faithful port of the
+      Python perf tests' `try/except Exception` around baseline capture / verification, which logs and
+      continues rather than aborting the whole run. Scoped to this project only (grpc-server precedent).
+    -->
+    <NoWarn>$(NoWarn);CA1031</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../PerformanceCommon/PerformanceCommon.csproj" />
+    <ProjectReference Include="../../../src/Confluent.Kafka/Confluent.Kafka.csproj" />
+  </ItemGroup>
+
+</Project>

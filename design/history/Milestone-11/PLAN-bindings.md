@@ -411,6 +411,392 @@ Java as possible."* That resolves D1–D3.
   per-key error — and would recur in B4 and B6. Following Java's result shape
   is the more faithful reading, is what B3 shipped, and still lets a C caller
   reach every outcome Java can.)*
+
+  **Addendum (2026-09-15) — superseded for the Topics-family `_async` entry
+  points.** D2's "one flattened result handle per RPC, delivered through one
+  callback" is no longer the shape for the seven Topics-family async entry
+  points: `kafka_admin_AdminClient_create_topics_async`,
+  `_delete_topics_async`, `_delete_topics_by_ids_async`,
+  `_describe_topics_async`, `_describe_topics_by_ids_async`,
+  `_create_partitions_async`, `_delete_records_async`. Their callback now
+  fires **once per key, independently, as that key's own future resolves** —
+  restoring the per-key *timing* granularity this section's closing paragraph
+  said C had no way to convey (it does, once the callback itself is
+  per-key rather than per-batch). There is no flattened result handle on this
+  path at all; each key's value (if any) arrives as its own small owned
+  handle (`kafka_admin_TopicMetadataAndConfig_t` / `kafka_admin_TopicDescription_t`
+  / the new `kafka_admin_DeletedRecords_t`), freed independently of any
+  `*Result_t`. The **synchronous** entry points for these same seven RPCs are
+  unaffected — they still return one flattened `kafka_admin_*Result_t`, a
+  faithful translation of Java's synchronous-style `KafkaFuture.allOf(...).get()`
+  usage, per `admin-client.md` §1. Every other RPC's `_async` entry point is
+  also unaffected and still follows D2 as written above.
+
+  The shared mechanism (`admin_async_per_key_op` in `src/ffi/admin.rs`,
+  registering `KafkaFuture::when_complete` per key instead of joining via
+  `KafkaFuture::join_map_results`) is designed to extend to the remaining
+  per-key RPCs in later phases; see the plan this addendum was written
+  against for the phase list. Motivation: the joined shape did not match
+  Java's per-key `KafkaFuture` contract (a slow or failed key held up every
+  other key in the same call), nor real `confluent_kafka`'s
+  `AdminClient.create_topics()`, which this repo's own
+  `bindings/python/test/performance/performance_common.py` already assumes.
+
+  **Addendum (2026-09-15, Phase B) — also superseded for the Configs-family
+  `_async` entry points.** `kafka_admin_AdminClient_describe_configs_async`
+  and `kafka_admin_AdminClient_incremental_alter_configs_async` now fire
+  their callback once per **resource** (`ConfigResource`), independently, via
+  the same `admin_async_per_key_op` mechanism, reusing the topics addendum's
+  reasoning verbatim. Two differences worth recording since this is the
+  mechanism's first reuse against a non-string key:
+    - `ConfigResource` is a composite key (a type code plus a name), delivered
+      as two parameters — `(resource_type: i32, resource_name: *const char)`
+      — rather than a single opaque key handle, matching how the pre-existing
+      *flattened* `DescribeConfigsResult`/`AlterConfigsResult` accessors
+      already expose this same key
+      (`kafka_admin_DescribeConfigsResult_get_key_type`/`_get_key_name`) —
+      the per-key callback did not invent a new representation for it.
+    - `incrementalAlterConfigs`'s C rows are one per *operation*
+      (`read_alter_config_ops`'s existing flattening — several config ops can
+      target the same resource), but Java's future is one per *resource*
+      (`KafkaAdminClient.java:2870`, iterating `configs.keySet()`). A new
+      `distinct_config_resources` helper de-dupes the flat rows down to the
+      resource set before fan-out, computed independently of the (fallible)
+      op-type parse so a bad op-type code still fans its error out over every
+      named resource rather than none. `describeConfigs`'s rows are already
+      one per resource, so it needs no such de-duplication.
+  `kafka_admin_Config_t` gains a standalone owned-handle destructor
+  (`kafka_admin_Config_destroy`), the Configs-family analog of
+  `kafka_admin_TopicMetadataAndConfig_destroy` — same dual-provenance pattern
+  (borrowed from a flattened `*Result_t` vs. owned from the per-key callback).
+  The **synchronous** entry points for both RPCs are unaffected, per the same
+  rule as the topics addendum.
+
+  **Addendum (2026-09-15, Phase C) — also superseded for the Log-dirs-family
+  `_async` entry points.** `kafka_admin_AdminClient_describe_log_dirs_async`,
+  `_alter_replica_log_dirs_async` and `_describe_replica_log_dirs_async` now
+  fire their callback once per **broker id** (`describeLogDirs`) or per
+  **replica** (`alterReplicaLogDirs`/`describeReplicaLogDirs`), independently,
+  via the same `admin_async_per_key_op` mechanism, reusing the Topics/Configs
+  addenda's reasoning verbatim. Notes specific to this family:
+    - `describeLogDirs`'s key is a plain broker id (`i32`), delivered as a
+      single scalar parameter, no composite-key handling needed.
+    - `alterReplicaLogDirs`/`describeReplicaLogDirs`'s key is a
+      `TopicPartitionReplica` — a *three*-part composite key — delivered as
+      `(topic: *const char, partition: i32, broker_id: i32)`, extending the
+      Configs addendum's two-part `ConfigResource` precedent by one field and
+      matching how the pre-existing *flattened*
+      `AlterReplicaLogDirsResult`/`DescribeReplicaLogDirsResult` accessors
+      already expose this same key (`_get_topic`/`_get_partition`/
+      `_get_broker_id`).
+    - Per §D2's fifth rule (mint a handle when the element itself contains a
+      collection), `describeLogDirs`'s per-broker value
+      (`Map<String, LogDirDescription>`) already had a nested handle
+      (`kafka_admin_LogDirDescriptionMap_t`) minted for the flattened sync
+      result path. Phase C changes only the OUTER per-broker delivery; that
+      inner handle type is reused as-is, just delivered individually and
+      owned (a new `kafka_admin_LogDirDescriptionMap_destroy`) instead of
+      embedded and borrowed inside a `kafka_admin_DescribeLogDirsResult_t` —
+      the same dual-provenance pattern as `kafka_admin_Config_t` /
+      `kafka_admin_Config_destroy` in the Phase B addendum.
+      `kafka_admin_ReplicaLogDirInfo_t` gets the same treatment
+      (`kafka_admin_ReplicaLogDirInfo_destroy`).
+    - `describeReplicaLogDirs` against `MockAdminClient` surfaced a real gap
+      in `admin_async_per_key_op` itself (COMMENTS.67): the mock
+      (`MockAdminClient.describeReplicaLogDirs`, mirroring Java's own mock's
+      `MockAdminClient.java:1112`) skips a replica of a topic it does not
+      know entirely, rather than reporting an error for it, so the Rust core
+      never creates a future for that key at all. Combined with the per-key
+      `Future`-dict-returned-immediately contract — every requested key
+      already has a caller-side `Future`/`Promise` before the native call
+      runs — that key's `Future` never resolved: an initial version of this
+      phase documented this as an accepted, Java-faithful mock limitation,
+      but a Critic review correctly rejected that framing. Java's own mock
+      never makes the "every key gets a `Future`" promise in the first
+      place — a missing key is simply absent from the returned `Map`,
+      detectable immediately by a Java caller — so the hang was entirely a
+      consequence of *this port's own wrapping design*, not something
+      inherited faithfully from Java.
+
+      **Fixed generically in `admin_async_per_key_op`**, not per-RPC: after
+      `submit` succeeds, any key present in the caller's `keys` list but
+      absent from the returned `entries` now gets an explicit synthetic
+      error (`Error::local_illegal_state`), fired synchronously before the
+      real entries are registered — extending the existing total-submission-
+      failure fan-out to also cover this partial-success gap. Since
+      `admin_async_per_key_op` is shared by every per-key RPC (Phases A-C so
+      far, D-G to come), this closes the gap for all of them at once; Phases
+      A and B's RPCs are unaffected in practice because none of their
+      `entries` builders can currently produce fewer entries than `keys`
+      (verified: full Rust/Python/C suites unchanged after the fix). The new
+      bound `K: PartialEq` on `admin_async_per_key_op` is satisfied by every
+      existing key type (`String`, `TopicPartition`, `ConfigResource`, `i32`,
+      `TopicPartitionReplica`), all already `Eq + Hash` for their `HashMap`
+      usage elsewhere.
+      `bindings/python/test/unit/test_admin.py`'s
+      `test_describe_replica_log_dirs_omits_unknown_topics` was rewritten
+      (COMMENTS.DONE.67) to assert the unknown-topic replica's `Future`
+      resolves with an explicit `KafkaError` within a bounded timeout,
+      replacing its old "proves the pending state" framing. Against a real
+      broker every requested key always resolves with a value regardless
+      (`KafkaAdminClient.java:3066-3068`, `:3141-3145`).
+  The **synchronous** entry points for all three RPCs are unaffected, per the
+  same rule as the Topics/Configs addenda.
+
+  **Addendum (2026-09-15, Phase D) — also superseded for the
+  Partitions/offsets-family `_async` entry points.**
+  `kafka_admin_AdminClient_alter_partition_reassignments_async` and
+  `_list_offsets_async` now fire their callback once per **partition**
+  (`TopicPartition`), independently, via the same `admin_async_per_key_op`
+  mechanism, reusing the Topics/Configs/Log-dirs addenda's reasoning
+  verbatim. Notes specific to this family:
+    - The key is a `TopicPartition` (a two-part composite: topic name plus
+      partition id), delivered as `(topic: *const char, partition: i32)` —
+      the same shape `delete_records` (Phase A) already established for this
+      exact key type — matching how the pre-existing *flattened*
+      `AlterPartitionReassignmentsResult`/`ListOffsetsResult` accessors
+      already expose it (`_get_topic`/`_get_partition`). No new key
+      representation was invented.
+    - `alterPartitionReassignments`'s per-partition future is
+      `KafkaFuture<Void>`, so its callback has no value parameter — the same
+      shape as `alter_replica_log_dirs` (Phase C).
+    - `listOffsets`'s per-partition future is `KafkaFuture<ListOffsetsResultInfo>`.
+      Per §D2's existing (already-minted) handle rule, the flattened sync
+      result already had a `kafka_admin_ListOffsetsResultInfo_t` handle type;
+      Phase D reuses `ListOffsetsResultInfoInner` as-is, just delivered
+      individually and owned (a new `kafka_admin_ListOffsetsResultInfo_destroy`)
+      instead of embedded and borrowed inside a `kafka_admin_ListOffsetsResult_t`
+      — the same dual-provenance pattern as `kafka_admin_Config_t` (Phase B)
+      and `kafka_admin_LogDirDescriptionMap_t` (Phase C).
+    - `listOffsets` is the first RPC in this file whose real (non-mock)
+      `Admin` implementation resolves its per-key futures through the
+      `AdminApiDriver`/`PartitionLeaderStrategy` machinery (`admin-client.md`
+      §2) rather than a single `Call` — partitions sharing a leader tend to
+      resolve together in practice on a real broker. This does not change
+      the per-key *contract* (`Admin::list_offsets` still returns one
+      `KafkaFuture` per partition, and `admin_async_per_key_op` still
+      registers one independent `when_complete` per entry); it only means a
+      genuinely independent completion *timing* between two partitions of
+      this RPC is harder to demonstrate end-to-end than for a `Call`-based
+      RPC. The direct `admin_async_per_key_op`-level Rust tests (driving two
+      hand-built `KafkaFutureImpl<ListOffsetsResultInfo>` instances, one
+      resolved and one left pending) are unaffected by this, since they
+      exercise the mechanism directly rather than through a real
+      leader-lookup round trip.
+    - Both RPCs' `keys` (for `admin_async_per_key_op`'s fan-out) are computed
+      independently of their respective fallible per-entry parses
+      (`read_reassignments`'s empty-replica-list check, `read_offset_specs`'s
+      sentinel check, and `list_offsets_options`'s isolation-level check) —
+      the same "keys computed independently of the fallible parse" pattern
+      `delete_topics_by_ids_entries` established in Phase A — so a
+      marshaling failure still fans an explicit error out to every requested
+      key rather than leaving any of them without a callback.
+  The **synchronous** entry points for both RPCs are unaffected, per the same
+  rule as the Topics/Configs/Log-dirs addenda.
+
+  **Addendum (2026-09-16, Phase E) — also superseded for the
+  Consumer-groups-family `_async` entry points.**
+  `kafka_admin_AdminClient_describe_consumer_groups_async`,
+  `_describe_classic_groups_async`, `_list_consumer_group_offsets_async`,
+  `_alter_consumer_group_offsets_async`, `_delete_consumer_group_offsets_async`,
+  `_delete_consumer_groups_async` and
+  `_remove_members_from_consumer_group_async` now fire their callback once per
+  key, independently, via the same `admin_async_per_key_op` mechanism, reusing
+  the Topics/Configs/Log-dirs/Partitions-offsets addenda's reasoning verbatim.
+  This family splits into two distinct Java key shapes, unlike the four prior
+  phases which were each uniform:
+    - **Map-of-groups** (a top-level `Map<String, KafkaFuture<...>>`, one
+      independent future per group id): `describeConsumerGroups`,
+      `describeClassicGroups`, `listConsumerGroupOffsets` and
+      `deleteConsumerGroups`. The key is a group id (`*const char`), the same
+      shape `create_topics`/`delete_consumer_groups` already established for a
+      plain string key.
+    - **Single-group, many-sub-key** (ONE Java `KafkaFutureImpl` underlying
+      every per-key view via `whenComplete`/`thenApply` —
+      `AlterConsumerGroupOffsetsResult.partitionResult`,
+      `DeleteConsumerGroupOffsetsResult.partitionResult`,
+      `RemoveMembersFromConsumerGroupResult.memberResult`):
+      `alterConsumerGroupOffsets` and `deleteConsumerGroupOffsets` (keyed by
+      `TopicPartition`, the same `(topic, partition)` shape as
+      `alter_partition_reassignments`/`list_offsets`), and
+      `removeMembersFromConsumerGroup` (keyed by group instance id). Because
+      every per-key view derives from the *same* source future, all of a
+      call's keys necessarily resolve at the exact same instant — there is no
+      genuine temporal independence to demonstrate for these three, unlike the
+      four map-of-groups RPCs above.
+  Notes specific to this family:
+    - `describeConsumerGroups`'s per-group future is
+      `KafkaFuture<ConsumerGroupDescription>` and `describeClassicGroups`'s is
+      `KafkaFuture<ClassicGroupDescription>`. Per §D2's existing handle rule,
+      both flattened sync results already had `kafka_admin_ConsumerGroupDescription_t`
+      / `kafka_admin_ClassicGroupDescription_t` handle types; Phase E reuses
+      each `Inner` struct as-is, just delivered individually and owned (new
+      `kafka_admin_ConsumerGroupDescription_destroy` /
+      `kafka_admin_ClassicGroupDescription_destroy`) instead of embedded and
+      borrowed inside the flattened result — the same dual-provenance pattern
+      as `kafka_admin_ListOffsetsResultInfo_t` (Phase D).
+    - `listConsumerGroupOffsets`'s per-group future is
+      `KafkaFuture<Map<TopicPartition, OffsetAndMetadata>>` — a *nested* value,
+      like `describeLogDirs` (Phase C). The existing flattened
+      `kafka_admin_OffsetAndMetadataMap_t` handle is reused as-is under the
+      same dual-provenance pattern, with a new
+      `kafka_admin_OffsetAndMetadataMap_destroy`.
+    - `deleteConsumerGroups`'s per-group future, and all three
+      single-group-many-sub-key RPCs' per-sub-key futures, are
+      `KafkaFuture<Void>`, so those four callbacks have no value parameter —
+      the same shape as `alter_partition_reassignments` (Phase D).
+    - `alterConsumerGroupOffsets` and `deleteConsumerGroupOffsets` with an
+      empty offsets/partitions argument, and `removeMembersFromConsumerGroup`
+      in `removeAll` mode (or with an empty non-`removeAll` member list, which
+      Java's options constructor itself rejects synchronously), have **no
+      per-key slot at all** — unlike the map-of-groups RPCs and unlike Phases
+      A/D's per-key RPCs, whose empty-input case is simply "zero keys, zero
+      callbacks" with no whole-call observable lost. Here Java's own `all()` is
+      the *only* observable in that case, and the per-key delivery model has no
+      channel to carry it: the callback fires zero times rather than reporting
+      the whole-call outcome. This is a deliberate, documented limitation (see
+      the callback typedef doc comments in `src/ffi/admin.rs` and the
+      `admin.py` module docstring), not an oversight.
+    - All seven RPCs' `keys` (for `admin_async_per_key_op`'s fan-out) are
+      computed independently of their respective fallible parses, the same
+      "keys computed independently of the fallible parse" pattern established
+      in Phase A and continued through Phase D — so a marshaling failure still
+      fans an explicit error out to every requested key (when any exist)
+      rather than leaving one without a callback.
+  The **synchronous** entry points for all seven RPCs are unaffected, per the
+  same rule as the Topics/Configs/Log-dirs/Partitions-offsets addenda.
+
+  **Addendum (2026-09-16, Phase F) — also superseded for the
+  ACLs/quotas/features-family `_async` entry points.**
+  `kafka_admin_AdminClient_create_acls_async`, `_delete_acls_async`,
+  `_alter_client_quotas_async`, `_alter_user_scram_credentials_async` and
+  `_update_features_async` now fire their callback once per key,
+  independently, via the same `admin_async_per_key_op` mechanism. Unlike
+  Phase E's split, all five of this family's Java `*Result` types are
+  genuine `Map<K, KafkaFuture<V>>` — none derives multiple per-key views from
+  one shared future — so there is no single-group-many-sub-key wrinkle here;
+  the interesting variation this phase adds is in the *key* shape itself:
+    - `createAcls` is keyed by `AclBinding`, whose constituent
+      `ResourcePattern`/`AccessControlEntry` **validate** (an ANY resource
+      type, an ANY/MATCH pattern type, etc. are rejected). A malformed row
+      therefore cannot be represented as a real `AclBinding` for the per-key
+      fan-out, so the key delivered to the callback is the raw `AclBindingKey`
+      tuple `(resource_type, resource_name, pattern_type, principal, host,
+      operation, permission_type)` — computed independently of the validated
+      parse (the by-now-standard "keys computed independently of the fallible
+      parse" pattern from Phase A onward), never through `AclBinding`'s
+      validating constructors — packaged into an **owned**
+      `kafka_common_AclBinding_t` handle (freed by a new
+      `kafka_common_AclBinding_destroy`), the same opaque type the existing
+      flattened sync result (`kafka_admin_CreateAclsResult_get_binding`)
+      already exposes borrowed — the dual-provenance pattern from
+      `kafka_admin_ListOffsetsResultInfo_t` (Phase D) applied to a *key*
+      rather than a value for the first time in this series.
+    - `deleteAcls` is keyed by `AclBindingFilter`, whose constructors are
+      infallible (a filter's ANY/MATCH values and nullable strings are the
+      whole point of a filter), so no raw-tuple stand-in is needed there — the
+      real `AclBindingFilter` doubles as the key, delivered as an owned
+      `kafka_common_AclBindingFilter_t` handle (new
+      `kafka_common_AclBindingFilter_destroy`), same dual-provenance pattern.
+      Its value, `FilterResults` (a `List<FilterResult>`, one row per matched
+      ACL, each carrying either a binding or its own exception), is a
+      genuinely *nested* value like `describeLogDirs` (Phase C) and
+      `listConsumerGroupOffsets` (Phase E) — but unlike those, there was no
+      existing "whole nested value" handle type to reuse under dual
+      provenance, since the old flattened sync result embedded its nested
+      rows directly (`kafka_admin_DeleteAclsResult_get_result_count`/
+      `_get_binding`/`_get_result_error`, addressed by the *outer* filter
+      index) rather than through a handle representing one filter's whole
+      `FilterResults`. Phase F mints that handle for the first time,
+      `kafka_admin_DeleteAclsFilterResults_t` (reusing the existing
+      `DeleteAclsFilterResultInner` per-row struct, still shared with the
+      synchronous path's own nested rows), with its own
+      `kafka_admin_DeleteAclsFilterResults_destroy`.
+    - `alterClientQuotas` is keyed by `ClientQuotaEntity`. Unlike
+      `AclBinding`, `ClientQuotaEntity::new` does not validate at all (it is a
+      bare `HashMap<String, Option<String>>` wrapper), so — like
+      `AclBindingFilter` — the real type doubles as the key with no raw-tuple
+      stand-in, computed independently of `read_client_quota_alterations`'s
+      validated (and duplicate-rejecting) parse. Delivered as an owned
+      `kafka_common_ClientQuotaEntity_t` handle (new
+      `kafka_common_ClientQuotaEntity_destroy`), the same opaque type the
+      existing flattened sync result already exposes borrowed.
+    - `alterUserScramCredentials` and `updateFeatures` are both keyed by a
+      plain string (username / feature name respectively) with a
+      `KafkaFuture<Void>` value — the same shape `delete_consumer_groups`
+      (Phase E) already established for a plain string key with no handle to
+      free; nothing new here beyond reusing that shape twice more.
+    - `updateFeatures` is the one RPC across all six phases so far whose
+      top-level `Admin` method call is itself fallible (Java's real
+      `KafkaAdminClient.updateFeatures` throws `IllegalArgumentException` for
+      an empty update map — `src/admin/mod.rs`'s `update_features` returns
+      `Result<UpdateFeaturesResult, Error>`, not a bare `UpdateFeaturesResult`,
+      to carry it). With a non-empty map this behaves like every other
+      fallible-submission RPC (the shared error fans out to every key via
+      `admin_async_per_key_op`'s existing "submission failed" branch). With an
+      **empty** map there are zero keys, so — like Phase E's
+      `alterConsumerGroupOffsets`/`removeMembersFromConsumerGroup` empty-input
+      cases — the callback fires zero times and this rejection has no channel
+      to travel through at all; a documented limitation (see the callback
+      typedef's doc comment in `src/ffi/admin.rs` and `update_features`'s
+      docstring in `admin.py`), not an oversight.
+  The **synchronous** entry points for all five RPCs are unaffected, per the
+  same rule as every prior addendum in this section.
+
+  **Addendum (2026-09-17, Phase G — final phase; completes the 28-RPC
+  rollout) — superseded for the producers/transactions-family `_async` entry
+  points.** `kafka_admin_AdminClient_describe_producers_async`,
+  `_describe_transactions_async` and `_fence_producers_async` now fire their
+  callback once per key, independently, via the same `admin_async_per_key_op`
+  mechanism. All three of their Java `*Result` types are genuine
+  `Map<K, KafkaFuture<V>>` (keyed by `TopicPartition` for describeProducers, by
+  the transactional id — Java's `CoordinatorKey` — for the other two), so there
+  is no single-key-many-view wrinkle. Two things are new to this phase:
+    - **The per-key value reuses the flattened result handle carrying a single
+      key**, rather than a dedicated value handle. Every prior rich-value phase
+      (Config in B, LogDirDescriptionMap in C, ConsumerGroupDescription in E,
+      DeleteAclsFilterResults in F) had — or minted — a *standalone* value
+      handle that the synchronous flattened result also exposed via
+      `_get_value`. These three RPCs are the only converted ones whose sync
+      result flattens the value directly into indexed getters with **no**
+      standalone value handle, and whose Java value types
+      (`PartitionProducerState`, `TransactionDescription`, `ProducerIdAndEpoch`)
+      have no C handle of their own. Rather than add new C types (DoD #7) or
+      destabilise the stable, tested synchronous getter API by refactoring it
+      onto a new value handle, the per-key callback boxes a single-key
+      `DescribeProducersResult_t` / `DescribeTransactionsResult_t` /
+      `FenceProducersResult_t` (one entry, readable at index 0) as the value,
+      freed by the *same* `_destroy` the synchronous path uses. This is
+      dual-provenance-safe like `kafka_admin_ListOffsetsResultInfo_t` (Phase D),
+      but with both provenances **owned** (sync multi-row, async single-row) and
+      one fresh box per firing — no borrowed aliasing at all. The Python drains
+      (`_drain_partition_producer_state` etc.) reuse the sync path's own
+      `DescribeProducersResult_drain` + `_to_describe_producers` unpacker, taking
+      the single value out of the resulting one-entry dict.
+    - **`fenceProducers`' per-key future needed a crate-internal accessor.**
+      Java exposes the per-id future only through its `producerId(id)` /
+      `epochId(id)` / `fencedProducers()` projections; the flattened sync path
+      joins the first two back into one `ProducerIdAndEpoch`. Per-key delivery
+      needs the whole `ProducerIdAndEpoch` as one future, so
+      `FenceProducersResult` gains a `pub(crate) fn futures()` accessor (the FFI
+      reads the underlying map those projections are built from — not a new
+      public API, and not visible to Java-mirroring callers).
+    - **`listTransactions` is deliberately LEFT JOINED** — the one RPC in the
+      B6 slice not converted, and the final joined exception of the whole
+      rollout. Java's `ListTransactionsResult` is a single
+      `KafkaFuture<Map<Integer, KafkaFuture<Collection<TransactionListing>>>>`
+      fanned across brokers via `byBrokerId()`/`all()`/`allByBrokerId()`, with
+      **no** per-transactional-id future map — the same category as `listTopics`
+      / `listGroups`, which §D2's original wording and Phase A left joined. It
+      keeps its whole-call `fire_handle_cb` callback and its `_run_sync` /
+      `_run_async` Python path; converting it would mean inventing a per-key
+      shape Java's result does not have.
+  The **synchronous** entry points for all three converted RPCs are unaffected,
+  per the same rule as every prior addendum. This completes the per-key reversal:
+  every admin RPC whose Java `*Result` is a genuine per-key `KafkaFuture` map is
+  now delivered per key; the RPCs that remain joined (the `list*` /
+  `describeCluster` family and `listTransactions`) are exactly those whose Java
+  `*Result` exposes a single whole-call future rather than a per-key map.
 - **D3 — Slice granularity: seven slices as tabled in §4**, B0 first.
 - **D4 — `admin-client.md` §11 and `PLAN.md`'s caveats.** Updating rules files is
   outside the Actor's remit — those changes go through the `agent-roles.md`
