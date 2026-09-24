@@ -82,6 +82,24 @@ pub const SASL_CLIENT_AUTHENTICATOR_MAX_RESERVED_CORRELATION_ID: i32 = i32::MAX;
 pub const SASL_CLIENT_AUTHENTICATOR_MIN_RESERVED_CORRELATION_ID: i32 =
     SASL_CLIENT_AUTHENTICATOR_MAX_RESERVED_CORRELATION_ID - 7;
 
+/// The most bytes one receive may declare while the client authenticates over
+/// SASL (APPSEC-7665 / NONJAVACLI-4520).
+///
+/// Java's client reads these responses with no limit — `new NetworkReceive(node)`
+/// is `UNLIMITED` (`SaslClientAuthenticator.java:475`, `:570`) — so before
+/// authentication completes, a broker's 4-byte size header alone decides how much
+/// the client allocates; the channel's own receive cap covers only the receives
+/// that follow authentication. The value is Java's policy for the same exchange
+/// seen from the broker: `sasl.server.max.receive.size`, the most a broker
+/// receives before and during SASL authentication, defaults to
+/// `BrokerSecurityConfigs.DEFAULT_SASL_SERVER_MAX_RECEIVE_SIZE`
+/// (`BrokerSecurityConfigs.java:118-119`). The responses a client receives in this
+/// phase (`ApiVersions`, `SaslHandshake`, `SaslAuthenticate`) are far smaller. A
+/// Rust-only constant rather than a configuration key. An oversized receive fails
+/// with an `InvalidReceiveError`, which closes the connection like any other
+/// oversized receive.
+pub(crate) const SASL_CLIENT_AUTHENTICATOR_MAX_RECEIVE_SIZE: i32 = 524_288;
+
 /// Returns `true` if the correlation ID is reserved for SASL requests.
 pub fn is_reserved(correlation_id: i32) -> bool {
     correlation_id >= SASL_CLIENT_AUTHENTICATOR_MIN_RESERVED_CORRELATION_ID
@@ -338,13 +356,19 @@ impl SaslClientAuthenticator {
     /// Reads a size-delimited response or token from the transport.
     ///
     /// Returns `None` if the read is incomplete (would block), `Some(bytes)`
-    /// when a complete message is available.
+    /// when a complete message is available. A receive declaring more than
+    /// [`SASL_CLIENT_AUTHENTICATOR_MAX_RECEIVE_SIZE`] bytes fails with an
+    /// `InvalidReceiveError` before any payload buffer is allocated.
     async fn receive_response_or_token(
         &mut self,
         transport: &mut (dyn TransportLayer + Send),
     ) -> io::Result<Option<Vec<u8>>> {
         if self.net_in_buffer.is_none() {
-            self.net_in_buffer = Some(NetworkReceive::with_source(&self.node));
+            // Java: `new NetworkReceive(node)`, unlimited; capped here (APPSEC-7665).
+            self.net_in_buffer = Some(NetworkReceive::with_max_size(
+                SASL_CLIENT_AUTHENTICATOR_MAX_RECEIVE_SIZE,
+                &self.node,
+            ));
         }
         let net_in = self.net_in_buffer.as_mut().unwrap();
         net_in.read_from(transport).await?;
@@ -640,6 +664,7 @@ mod tests {
     use super::*;
     use crate::api_versions_response_data::{ApiVersion, ApiVersionsResponseData};
     use crate::common::network::InterestOps;
+    use crate::common::network::InvalidReceiveError;
     use crate::common::network::authentication_error::is_authentication_error;
     use crate::common::protocol::Message;
     use crate::common::protocol::ObjectSerializationCache;
@@ -1339,5 +1364,61 @@ mod tests {
         // Java throws IllegalSaslStateException (an AuthenticationException) for
         // an unparseable SASL response — a fatal authentication failure.
         assert!(is_authentication_error(&err));
+    }
+
+    /// APPSEC-7665: a receive during SASL authentication is capped at
+    /// `SASL_CLIENT_AUTHENTICATOR_MAX_RECEIVE_SIZE`, Java's broker-side default for
+    /// the same exchange (Java's client has no limit here). One byte over is
+    /// refused with Java's `InvalidReceiveException` text before a payload buffer
+    /// exists, as a disconnect rather than an authentication failure — the
+    /// selector closes the connection as for any other oversized receive. A
+    /// receive of exactly the cap is read in full.
+    #[tokio::test]
+    async fn test_sasl_receive_is_capped() {
+        assert_eq!(524_288, SASL_CLIENT_AUTHENTICATOR_MAX_RECEIVE_SIZE);
+        let new_authenticator = || {
+            SaslClientAuthenticator::new(
+                "PLAIN",
+                "alice",
+                "secret",
+                "node-0",
+                "broker1",
+                "test-client",
+                LogContext::empty(),
+            )
+        };
+
+        // One byte over, declared by the ApiVersions response authentication waits for.
+        let mut auth = new_authenticator();
+        let mut transport = MockTransportLayer::new();
+        auth.authenticate_impl(&mut transport).await.unwrap();
+        assert_eq!(auth.sasl_state(), SaslState::ReceiveApiVersionsResponse);
+        transport.enqueue_read_data(&(SASL_CLIENT_AUTHENTICATOR_MAX_RECEIVE_SIZE + 1).to_be_bytes());
+        let err = auth.authenticate_impl(&mut transport).await.expect_err("one byte over the cap");
+        assert_eq!(io::ErrorKind::InvalidData, err.kind());
+        let invalid = err.get_ref().and_then(|e| e.downcast_ref::<InvalidReceiveError>());
+        assert_eq!(
+            Some("Invalid receive (size = 524289 larger than 524288)"),
+            invalid.map(InvalidReceiveError::message)
+        );
+        assert!(!is_authentication_error(&err), "an oversized receive is a disconnect: {err}");
+        assert_eq!(auth.sasl_state(), SaslState::ReceiveApiVersionsResponse);
+        assert!(
+            !auth.net_in_buffer.as_ref().is_some_and(|receive| receive.memory_allocated()),
+            "a refused receive allocates no payload buffer"
+        );
+
+        // Exactly the cap.
+        let mut auth = new_authenticator();
+        let mut transport = MockTransportLayer::new();
+        let at_cap = SASL_CLIENT_AUTHENTICATOR_MAX_RECEIVE_SIZE as usize;
+        transport.enqueue_read_data(&SASL_CLIENT_AUTHENTICATOR_MAX_RECEIVE_SIZE.to_be_bytes());
+        transport.enqueue_read_data(&vec![7u8; at_cap]);
+        let payload = auth
+            .receive_response_or_token(&mut transport)
+            .await
+            .expect("a receive of exactly the cap is accepted")
+            .expect("the whole payload was available");
+        assert_eq!(vec![7u8; at_cap], payload);
     }
 }

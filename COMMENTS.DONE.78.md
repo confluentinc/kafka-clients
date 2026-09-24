@@ -106,3 +106,21 @@ mapping at its site. The three that exercise the mapping (the `i32::MAX` test,
 the compressed too-many test and the unit test) fail with it disabled. Plan §6 item 11
 lists the texts on this path that still differ from Java's (all pre-existing).
 
+### Note 2 — the SASL client receive was still unlimited
+
+Handled in `fix(security): cap the SASL client receive (APPSEC-7665 /
+NONJAVACLI-4520)`, new behaviour rather than a fixup. `receive_response_or_token`
+now builds `NetworkReceive::with_max_size(SASL_CLIENT_AUTHENTICATOR_MAX_RECEIVE_SIZE,
+..)`, a `pub(crate)` constant of 524288 documented against Java's own policy for
+the same exchange, `BrokerSecurityConfigs.DEFAULT_SASL_SERVER_MAX_RECEIVE_SIZE`
+(`BrokerSecurityConfigs.java:118-119`, the `sasl.server.max.receive.size`
+default). It is the only production receive without a cap (every other one goes
+through `KafkaChannel`'s `max_receive_size`), and nothing else needed plumbing.
+An oversized receive is an `InvalidReceiveError`, which the selector treats as a
+disconnect and closes the connection, not as an authentication failure.
+`test_sasl_receive_is_capped` covers `524288 + 1` (rejected through
+`authenticate_impl` with `Invalid receive (size = 524289 larger than 524288)`,
+no payload buffer, not an authentication error) and exactly `524288` (read in
+full through `receive_response_or_token`); it fails with the unlimited receive
+put back. Recorded as a Rust-only deviation in plan §4 (Java's client is
+`UNLIMITED`, `SaslClientAuthenticator.java:475`, `:570`) and as §6 item 15.

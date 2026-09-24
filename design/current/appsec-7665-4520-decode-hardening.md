@@ -227,6 +227,11 @@ than silently diverging.
 - D6 infallible `batches()`: see the `records()` precedent.
 - D7 explicit legacy rejection: Java parses v0/v1; this client does not
   implement them and says so instead of misparsing.
+- SASL client receive cap (Actor 78 round 2, §6 item 15): Java's client reads
+  the responses of SASL authentication with `new NetworkReceive(node)`, which
+  is `UNLIMITED` (`SaslClientAuthenticator.java:475`, `:570`); this client caps
+  each at 524288 bytes, the broker-side default of
+  `sasl.server.max.receive.size` (`BrokerSecurityConfigs.java:118-119`).
 
 ## 5. Status
 
@@ -234,6 +239,12 @@ than silently diverging.
 - 2026-09-24: Actor 78, §2.1 landed (commit 1). Discrepancies in §6.
 - 2026-09-24: Actor 78, §2.2 landed (commit 2). Choices in §6, items 9-13.
 - 2026-09-24: Actor 78, §2.3 landed (commit 3). Note in §6, item 14.
+- 2026-09-24: Critic 78 reviewed commits 1-3: one finding (the control-batch
+  D3 test could not see its check) and four notes; resolutions in
+  `COMMENTS.DONE.78.md`.
+- 2026-09-24: Actor 78 round 2: fixups of commit 1 (§6 items 3 and 5) and
+  commit 2 (§1 D4, §6 item 11), and the SASL client receive capped (§4, §6
+  item 15).
 
 ## 6. Implementation notes (Actor 78)
 
@@ -362,3 +373,22 @@ followed and the difference is recorded here.
     `DEFAULT_MAX_RECEIVE_SIZE + 1` on both `NetworkReceive` read paths, with
     Java's message and no payload buffer allocated. The three call sites are
     direct `with_log_context(cap, ...)` calls.
+15. **The SASL client receive is capped** (Critic 78 note 2; the Manager
+    brought it into this ticket). D5 covers a channel's receives once it is
+    authenticated, but `SaslClientAuthenticator::receive_response_or_token` read
+    the responses before that with an unlimited `NetworkReceive`, as Java's
+    client does, so a hostile broker on a `SASL_*` listener could still force an
+    arbitrarily large allocation before authentication. It now uses
+    `SASL_CLIENT_AUTHENTICATOR_MAX_RECEIVE_SIZE` = 524288, Java's own limit for
+    the same exchange seen from the broker
+    (`BrokerSecurityConfigs.DEFAULT_SASL_SERVER_MAX_RECEIVE_SIZE`). Nothing else
+    is plumbed: `SaslChannelBuilder::build_channel` still passes its
+    `max_receive_size` only to `KafkaChannel::new`, which applies it after
+    authentication. An oversized receive is an `InvalidReceiveError` inside an
+    `io::Error`, which the selector treats as a disconnect, not an
+    authentication failure, and closes the connection, as for any other
+    oversized receive. `test_sasl_receive_is_capped` drives one byte over
+    through `authenticate_impl` (Java's
+    `Invalid receive (size = 524289 larger than 524288)`, no payload buffer)
+    and exactly the cap through `receive_response_or_token`; it fails with the
+    unlimited receive put back.
