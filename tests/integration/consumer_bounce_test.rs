@@ -43,18 +43,29 @@
 //!   → `test_async_consumer_seek_and_commit_with_broker_failures`
 //! - `testAsyncSubscribeWhenTopicUnavailable` (line 258)
 //!   → `test_async_subscribe_when_topic_unavailable`
+//! - `testAsyncClose` (line 306), including its coordinator-failure and
+//!   cluster-failure parts → `test_async_close`
 //!
 //! ## SKIPped
 //!
 //! - `testClassic*` twins — classic-protocol-only (`consumer-threading.md` §20).
+//! - `testAsyncCloseDuringRebalance` (line 618) — despite its name it runs the
+//!   classic protocol: `testCloseDuringRebalance` builds its consumers (and
+//!   `createConsumerToRebalance` its extra members) without
+//!   `group.protocol`, so `clusterInstance.consumer(...)` defaults to
+//!   `classic`, and only `heartbeat.interval.ms` is gated on the arm. The
+//!   classic protocol is out of scope (`consumer-threading.md` §20).
 
+use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
+use async_trait::async_trait;
 use confluent_kafka::admin::Admin;
 use confluent_kafka::admin::AdminClientConfig;
 use confluent_kafka::admin::KafkaAdminClient;
@@ -63,7 +74,9 @@ use confluent_kafka::common::Error;
 use confluent_kafka::common::TopicPartition;
 use confluent_kafka::common::serialization::ByteArrayDeserializer;
 use confluent_kafka::common::serialization::ByteArraySerializer;
+use confluent_kafka::consumer::CloseOptions;
 use confluent_kafka::consumer::ConsumerConfig;
+use confluent_kafka::consumer::ConsumerRebalanceListener;
 use confluent_kafka::consumer::KafkaConsumer;
 use confluent_kafka::producer::KafkaProducer;
 use confluent_kafka::producer::Producer;
@@ -804,4 +817,297 @@ async fn test_async_subscribe_when_topic_unavailable() {
 
     // Java's `tearDown`.
     close_consumer(poller2.shutdown().await).await;
+}
+
+/// Java's `gracefulCloseTimeMs` (line 111).
+const GRACEFUL_CLOSE_TIME_MS: u64 = 1000;
+/// Java's `Long.MAX_VALUE` close timeout, in milliseconds.
+const LONG_MAX_VALUE_MS: u64 = i64::MAX as u64;
+
+/// Java's `createConsumerAndReceive` (line 692): a consumer in `group_id`
+/// that either subscribes to `topic` or is manually assigned `topic_partition`,
+/// polled by a [`ConsumerAssignmentPoller`] until it has received exactly
+/// `num_records` records; the poller is then shut down and the consumer
+/// returned.
+async fn create_consumer_and_receive(
+    ctx: &TestContext,
+    topic: &str,
+    topic_partition: &TopicPartition,
+    group_id: &str,
+    manual_assign: bool,
+    num_records: usize,
+    consumer_config: &HashMap<String, String>,
+) -> BytesConsumer {
+    let mut configs = consumer_config.clone();
+    configs.insert("group.id".to_string(), group_id.to_string());
+    let consumer = create_consumer(ctx, &configs);
+    let mut poller = if manual_assign {
+        ConsumerAssignmentPoller::start_with_partitions_to_assign(consumer, vec![topic_partition.clone()]).await
+    } else {
+        ConsumerAssignmentPoller::start(consumer, vec![topic.to_string()]).await
+    };
+    receive_exact_records(&poller, num_records, 60_000).await;
+    poller.shutdown().await.expect("the poller owned the consumer")
+}
+
+/// Java's `submitCloseAndValidate` (line 752) followed by `.get()` — every
+/// Java call site waits for the close at once, so the executor hop is
+/// dropped: close with `close_timeout_ms` and check the elapsed time against
+/// the optional bounds (with Java's 2 s `closeGraceTimeMs` on the upper one).
+///
+/// A failing `close()` fails the test, as the rethrow from Java's `get()`
+/// does. The close is bounded by the upper limit, so a close that would take
+/// too long fails with Java's message instead of hanging the test.
+async fn close_and_validate(
+    mut consumer: BytesConsumer,
+    close_timeout_ms: u64,
+    min_close_time_ms: Option<u64>,
+    max_close_time_ms: Option<u64>,
+) {
+    const CLOSE_GRACE_TIME_MS: u64 = 2000;
+    let start = std::time::Instant::now();
+    eprintln!("Closing consumer with timeout {close_timeout_ms} ms.");
+    let close = consumer.close_with_options(CloseOptions::new_timeout(Duration::from_millis(close_timeout_ms)));
+    let result = match max_close_time_ms {
+        Some(ms) => tokio::time::timeout(Duration::from_millis(ms + CLOSE_GRACE_TIME_MS), close)
+            .await
+            .unwrap_or_else(|_| panic!("Close took too long {}", start.elapsed().as_millis())),
+        None => close.await,
+    };
+    let time_taken_ms = start.elapsed().as_millis() as u64;
+    result.expect("consumer close should succeed");
+
+    if let Some(ms) = max_close_time_ms {
+        assert!(time_taken_ms < ms + CLOSE_GRACE_TIME_MS, "Close took too long {time_taken_ms}");
+    }
+    if let Some(ms) = min_close_time_ms {
+        assert!(time_taken_ms >= ms, "Close finished too quickly {time_taken_ms}");
+    }
+    eprintln!("consumer.close() completed in {time_taken_ms} ms.");
+}
+
+/// The anonymous `ConsumerRebalanceListener` of Java's `checkClosedState`
+/// (line 727): releases a permit of `assignSemaphore` per assignment.
+struct AssignSemaphoreListener {
+    permits: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl ConsumerRebalanceListener for AssignSemaphoreListener {
+    async fn on_partitions_revoked(&self, _partitions: &[TopicPartition]) -> Result<(), Error> {
+        // Do nothing
+        Ok(())
+    }
+
+    async fn on_partitions_assigned(&self, _partitions: &[TopicPartition]) -> Result<(), Error> {
+        self.permits.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+/// Java's `checkClosedState` (line 721): a new consumer in `group_id` must be
+/// assigned partitions promptly and, when `committed_records > 0`, see that
+/// offset committed for `topic_partition`.
+///
+/// Deviation: Java's `clusterInstance.consumer(...)` here leaves
+/// `group.protocol` at its `classic` default; this client implements only the
+/// KIP-848 protocol (`consumer-threading.md` §20), so the checking consumer
+/// joins with `consumer`.
+async fn check_closed_state(
+    ctx: &TestContext,
+    topic: &str,
+    topic_partition: &TopicPartition,
+    group_id: &str,
+    committed_records: i64,
+) {
+    // Check that close was graceful with offsets committed and leave group sent.
+    // New instance of consumer should be assigned partitions immediately and should see committed offsets.
+    let assign_semaphore = Arc::new(AtomicUsize::new(0));
+    let mut consumer = create_consumer(ctx, &HashMap::from([("group.id".to_string(), group_id.to_string())]));
+    consumer
+        .subscribe_with_topics_listener(
+            vec![topic.to_string()],
+            Arc::new(AssignSemaphoreListener { permits: Arc::clone(&assign_semaphore) }),
+        )
+        .await
+        .expect("subscribe should succeed");
+
+    // Java: `TestUtils.waitForCondition(() -> { poll(100ms); return
+    // assignSemaphore.tryAcquire(); }, ...)` with the default 15 s bound.
+    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        consumer.poll(Duration::from_millis(100)).await.expect("poll should succeed");
+        if assign_semaphore
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |permits| permits.checked_sub(1))
+            .is_ok()
+        {
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline, "Assignment did not complete on time");
+    }
+
+    if committed_records > 0 {
+        let committed = consumer
+            .committed(std::slice::from_ref(topic_partition))
+            .await
+            .expect("committed should succeed");
+        let offset = committed
+            .get(topic_partition)
+            .expect("a committed offset for the partition")
+            .offset();
+        assert_eq!(committed_records, offset, "Committed offset does not match expected value.");
+    }
+    // Java's try-with-resources `close()`.
+    consumer.close().await.expect("consumer close should succeed");
+}
+
+/// Java's `findCoordinators` (line 376): the ids of the brokers coordinating
+/// `groups`, retried until every group has one (default 15 s bound).
+///
+/// Deviation: Java sends a raw `FindCoordinator` to the first broker; the
+/// admin client's `describeConsumerGroups` performs the same coordinator
+/// lookup and reports the node it found.
+async fn find_coordinators(admin: &KafkaAdminClient, groups: &[String]) -> BTreeSet<i32> {
+    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        let described = admin.describe_consumer_groups(groups).described_groups();
+        let mut nodes = BTreeSet::new();
+        let mut all_found = true;
+        for group in groups {
+            let coordinator = match described.get(group) {
+                Some(future) => future
+                    .get()
+                    .await
+                    .ok()
+                    .and_then(|description| description.coordinator().map(|node| node.id())),
+                None => None,
+            };
+            match coordinator {
+                Some(id) => {
+                    nodes.insert(id);
+                },
+                None => all_found = false,
+            }
+        }
+        if all_found {
+            return nodes;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "Failed to find coordinator for group {groups:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+/// Java's `checkCloseGoodPath` (line 324): closed while the cluster is
+/// healthy, the consumer commits and leaves; a new member joins at once and
+/// sees the committed offset.
+async fn check_close_good_path(
+    ctx: &TestContext,
+    topic: &str,
+    topic_partition: &TopicPartition,
+    num_records: usize,
+    group_id: &str,
+) {
+    let consumer =
+        create_consumer_and_receive(ctx, topic, topic_partition, group_id, false, num_records, &HashMap::new()).await;
+    close_and_validate(consumer, LONG_MAX_VALUE_MS, None, Some(GRACEFUL_CLOSE_TIME_MS)).await;
+    check_closed_state(ctx, topic, topic_partition, group_id, num_records as i64).await;
+}
+
+/// Java's `checkCloseWithCoordinatorFailure` (line 336): closed while the
+/// coordinator is down, the group-managed consumer's close completes after its
+/// commit attempt, and the manually assigned consumer's commit succeeds since
+/// a broker is available.
+async fn check_close_with_coordinator_failure(
+    ctx: &TestContext,
+    topic: &str,
+    topic_partition: &TopicPartition,
+    num_records: usize,
+    dynamic_group: &str,
+    manual_group: &str,
+) {
+    let dynamic_consumer =
+        create_consumer_and_receive(ctx, topic, topic_partition, dynamic_group, false, num_records, &HashMap::new())
+            .await;
+    let manual_consumer =
+        create_consumer_and_receive(ctx, topic, topic_partition, manual_group, true, num_records, &HashMap::new())
+            .await;
+
+    let admin = create_admin(ctx);
+    let coordinators = find_coordinators(&admin, &[dynamic_group.to_string(), manual_group.to_string()]).await;
+    admin.close_with_timeout(Duration::from_secs(5)).await;
+    for id in coordinators {
+        ctx.cluster().shutdown_broker(id).await;
+    }
+
+    close_and_validate(dynamic_consumer, LONG_MAX_VALUE_MS, None, Some(GRACEFUL_CLOSE_TIME_MS)).await;
+    close_and_validate(manual_consumer, LONG_MAX_VALUE_MS, None, Some(GRACEFUL_CLOSE_TIME_MS)).await;
+
+    restart_dead_brokers(ctx.cluster()).await;
+    check_closed_state(ctx, topic, topic_partition, dynamic_group, 0).await;
+    check_closed_state(ctx, topic, topic_partition, manual_group, num_records as i64).await;
+}
+
+/// Java's `checkCloseWithClusterFailure` (line 355): closed while every broker
+/// is down, nothing can be committed; close must honour a short timeout, and
+/// with a very large timeout return after the request timeout.
+async fn check_close_with_cluster_failure(
+    ctx: &TestContext,
+    topic: &str,
+    topic_partition: &TopicPartition,
+    num_records: usize,
+    group1: &str,
+    group2: &str,
+) {
+    let consumer1 =
+        create_consumer_and_receive(ctx, topic, topic_partition, group1, false, num_records, &HashMap::new()).await;
+
+    // Java also sets session/heartbeat timeouts for the CLASSIC arm only.
+    let request_timeout: u64 = 6000;
+    let consumer_config = HashMap::from([("request.timeout.ms".to_string(), request_timeout.to_string())]);
+    let consumer2 =
+        create_consumer_and_receive(ctx, topic, topic_partition, group2, true, num_records, &consumer_config).await;
+
+    let cluster = ctx.cluster();
+    for id in cluster.broker_ids() {
+        cluster.shutdown_broker(id).await;
+    }
+
+    let close_timeout: u64 = 2000;
+    close_and_validate(consumer1, close_timeout, None, Some(close_timeout)).await;
+    close_and_validate(consumer2, LONG_MAX_VALUE_MS, None, Some(request_timeout)).await;
+}
+
+/// Translates `testAsyncClose` (`ConsumerBounceTest.java:306`, body
+/// `testClose` :310): the good path, coordinator failure and whole-cluster
+/// failure close scenarios, in Java's order on one cluster.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_async_close() {
+    let mut ctx = TestContext::new(bounce_cluster_config()).await;
+    let topic = set_up(&mut ctx).await;
+    let topic_partition = TopicPartition::new(topic.clone(), 0);
+    let num_records: usize = 10;
+    send_records(&ctx, &topic_partition, num_records).await;
+
+    check_close_good_path(&ctx, &topic, &topic_partition, num_records, &ctx.group_id("group1")).await;
+    check_close_with_coordinator_failure(
+        &ctx,
+        &topic,
+        &topic_partition,
+        num_records,
+        &ctx.group_id("group2"),
+        &ctx.group_id("group3"),
+    )
+    .await;
+    check_close_with_cluster_failure(
+        &ctx,
+        &topic,
+        &topic_partition,
+        num_records,
+        &ctx.group_id("group4"),
+        &ctx.group_id("group5"),
+    )
+    .await;
 }
