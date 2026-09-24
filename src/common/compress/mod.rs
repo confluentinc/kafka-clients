@@ -46,6 +46,27 @@ const XERIAL_HEADER: [u8; 16] = [
 /// Default block size for xerial snappy (matches Java's default of 32KB).
 const XERIAL_BLOCK_SIZE: usize = 32 * 1024;
 
+/// Snappy's densest element is a 3-byte copy of up to 64 bytes (a copy with a
+/// 2-byte offset); a 2-byte copy yields at most 11 bytes, a 5-byte copy at most
+/// 64 and a literal at most one byte per input byte. So a block's output is at
+/// most `64 / 3` times its size, and a header declaring more cannot be valid.
+const MAX_SNAPPY_EXPANSION_NUMERATOR: u64 = 64;
+const MAX_SNAPPY_EXPANSION_DENOMINATOR: u64 = 3;
+
+/// The error a decompressing read returns once its output would pass
+/// `max_bytes` (APPSEC-7665 D4).
+///
+/// Shared by [`XerialSnappyReader`], which knows from a block's header that the
+/// block would pass the limit, and the record batch reader
+/// (`DefaultRecordBatchRef::decompress_records`), which counts every codec's
+/// output as it reads, so the limit reads the same whichever notices first.
+pub(crate) fn decompressed_size_limit_error(max_bytes: usize) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidData,
+        format!("decompressed size exceeds the limit of {max_bytes} bytes per record batch"),
+    )
+}
+
 /// A writer that compresses data using the xerial/snappy-java block format.
 ///
 /// Buffers input data and compresses in blocks when the buffer reaches
@@ -115,15 +136,35 @@ impl<W: Write> Write for XerialSnappyWriter<W> {
 /// A reader that decompresses data in the xerial/snappy-java block format.
 ///
 /// Reads the magic header, then decompresses blocks one at a time.
+///
+/// Each block carries two lengths read off the wire — its compressed length in
+/// the framing and its decompressed length in the snappy header — and neither
+/// sizes an allocation on trust (APPSEC-7665 D4). The compressed block grows
+/// with the bytes actually present, and the decompressed length is checked
+/// against both what the block's bytes can encode and the stream's remaining
+/// budget before its buffer is allocated, fallibly. snappy-java, which Java's
+/// client uses (1.1.10.7 in Kafka 4.3.1), bounds a chunk's compressed length
+/// likewise since CVE-2023-34455 (`SnappyInputStream.MAX_CHUNK_SIZE`).
 pub struct XerialSnappyReader<R: Read> {
     inner: R,
     decompressed: Cursor<Vec<u8>>,
     header_read: bool,
+    /// The most bytes the whole stream may decompress to; `usize::MAX` for no
+    /// limit beyond the per-block encoding bound.
+    max_decompressed_bytes: usize,
+    /// Bytes decompressed so far, over every block.
+    decompressed_bytes: usize,
 }
 
 impl<R: Read> XerialSnappyReader<R> {
-    fn new(inner: R) -> Self {
-        Self { inner, decompressed: Cursor::new(Vec::new()), header_read: false }
+    fn new(inner: R, max_decompressed_bytes: usize) -> Self {
+        Self {
+            inner,
+            decompressed: Cursor::new(Vec::new()),
+            header_read: false,
+            max_decompressed_bytes,
+            decompressed_bytes: 0,
+        }
     }
 
     fn ensure_header(&mut self) -> io::Result<()> {
@@ -145,14 +186,46 @@ impl<R: Read> XerialSnappyReader<R> {
             Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(false),
             Err(e) => return Err(e),
         }
-        let compressed_len = u32::from_be_bytes(len_buf) as usize;
-        let mut compressed = vec![0u8; compressed_len];
-        self.inner.read_exact(&mut compressed)?;
-        let mut decoder = snap::raw::Decoder::new();
-        let decompressed = decoder
-            .decompress_vec(&compressed)
+        let compressed_len = u32::from_be_bytes(len_buf);
+        // The declared length sizes nothing: the block grows with the bytes
+        // actually present, and a length past them is an early end of stream.
+        let mut compressed = Vec::new();
+        (&mut self.inner).take(u64::from(compressed_len)).read_to_end(&mut compressed)?;
+        if compressed.len() as u64 != u64::from(compressed_len) {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                format!(
+                    "Snappy block declares {compressed_len} compressed bytes, but the stream ends after {}",
+                    compressed.len()
+                ),
+            ));
+        }
+
+        let decompressed_len = snap::raw::decompress_len(&compressed).map_err(|e| io::Error::other(e.to_string()))?;
+        let max_encodable = compressed.len() as u64 * MAX_SNAPPY_EXPANSION_NUMERATOR / MAX_SNAPPY_EXPANSION_DENOMINATOR;
+        if decompressed_len as u64 > max_encodable {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "Snappy block declares {decompressed_len} decompressed bytes, more than its {} compressed bytes \
+                     can encode",
+                    compressed.len()
+                ),
+            ));
+        }
+        if decompressed_len > self.max_decompressed_bytes.saturating_sub(self.decompressed_bytes) {
+            return Err(decompressed_size_limit_error(self.max_decompressed_bytes));
+        }
+
+        let mut block = Vec::new();
+        block.try_reserve_exact(decompressed_len).map_err(io::Error::other)?;
+        block.resize(decompressed_len, 0);
+        let written = snap::raw::Decoder::new()
+            .decompress(&compressed, &mut block)
             .map_err(|e| io::Error::other(e.to_string()))?;
-        self.decompressed = Cursor::new(decompressed);
+        block.truncate(written);
+        self.decompressed_bytes += written;
+        self.decompressed = Cursor::new(block);
         Ok(true)
     }
 }
@@ -352,7 +425,27 @@ impl Compression {
     ///   `message_version == RecordBatch::MAGIC_VALUE_V0`, Java uses a broken
     ///   flag-descriptor checksum for compatibility. Currently only v2 behavior
     ///   is implemented; the parameter is accepted for forward compatibility.
-    pub fn wrap_for_input<R: Read>(&self, reader: R, _message_version: i8) -> io::Result<DecompressingReader<R>> {
+    pub fn wrap_for_input<R: Read>(&self, reader: R, message_version: i8) -> io::Result<DecompressingReader<R>> {
+        self.wrap_for_input_with_limit(reader, message_version, usize::MAX)
+    }
+
+    /// Like [`wrap_for_input`](Self::wrap_for_input), for a stream that may
+    /// decompress to at most `max_decompressed_bytes` (APPSEC-7665 D4).
+    ///
+    /// A Rust-only addition: Java decompresses a batch record by record and
+    /// needs no bound. Only the xerial snappy reader consumes the limit, because
+    /// only its blocks declare a decompressed length that would otherwise size
+    /// an allocation: a block that would take the stream past the limit is
+    /// refused before its buffer exists. The other codecs' own buffers are
+    /// bounded by the codec — gzip's 32 KiB window, lz4's 4 MiB maximum block
+    /// size, zstd's default window limit — and the caller bounds their output as
+    /// it reads it.
+    pub(crate) fn wrap_for_input_with_limit<R: Read>(
+        &self,
+        reader: R,
+        _message_version: i8,
+        max_decompressed_bytes: usize,
+    ) -> io::Result<DecompressingReader<R>> {
         match self {
             Self::None => Ok(DecompressingReader::None(reader)),
             Self::Gzip { .. } => {
@@ -360,7 +453,7 @@ impl Compression {
                 Ok(DecompressingReader::Gzip(decoder))
             },
             Self::Snappy => {
-                let decoder = XerialSnappyReader::new(reader);
+                let decoder = XerialSnappyReader::new(reader, max_decompressed_bytes);
                 Ok(DecompressingReader::Snappy(decoder))
             },
             Self::Lz4 { .. } => {
@@ -457,6 +550,7 @@ impl<R: Read> Read for DecompressingReader<R> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_alloc_tracker::AllocTrackingGuard;
     use std::io::{Read, Write};
 
     /// Use record batch magic v2 for tests — this is the only version the
@@ -587,5 +681,119 @@ mod tests {
             let result = round_trip(&compression, &data);
             assert_eq!(result, data, "Large data round-trip failed for {:?}", compression_type);
         }
+    }
+
+    // ── APPSEC-7665 D4: xerial block lengths do not size allocations ────────
+
+    /// The xerial framing of one snappy block: the header, then `block` behind a
+    /// declared compressed length of `compressed_len`.
+    fn xerial_stream(compressed_len: u32, block: &[u8]) -> Vec<u8> {
+        let mut stream = XERIAL_HEADER.to_vec();
+        stream.extend_from_slice(&compressed_len.to_be_bytes());
+        stream.extend_from_slice(block);
+        stream
+    }
+
+    fn read_all(reader: &mut impl Read) -> io::Result<Vec<u8>> {
+        let mut out = Vec::new();
+        reader.read_to_end(&mut out)?;
+        Ok(out)
+    }
+
+    /// A block length the stream does not hold is an early end of stream, and
+    /// the read allocates for the bytes present — it used to allocate the
+    /// declared 4 GiB up front.
+    #[test]
+    fn test_xerial_block_length_past_the_stream_is_an_early_end() {
+        let stream = xerial_stream(0xFFFF_FFFF, b"abc");
+        let (err, max_allocation) = {
+            let _guard = AllocTrackingGuard::new();
+            let mut reader = Compression::snappy()
+                .wrap_for_input(stream.as_slice(), TEST_MESSAGE_VERSION)
+                .unwrap();
+            let err = read_all(&mut reader).expect_err("the block is cut short");
+            (err, AllocTrackingGuard::max_allocation())
+        };
+        assert_eq!(io::ErrorKind::UnexpectedEof, err.kind());
+        assert_eq!(
+            "Snappy block declares 4294967295 compressed bytes, but the stream ends after 3",
+            err.to_string()
+        );
+        assert!(max_allocation < 1024, "allocated {max_allocation} bytes for a 3-byte block");
+    }
+
+    /// A snappy header declaring more than the block's bytes can encode is
+    /// refused before the output buffer exists, even with no stream limit —
+    /// `decompress_vec` used to allocate the declared length first.
+    #[test]
+    fn test_xerial_block_declaring_more_than_it_can_encode_is_refused() {
+        // A varint header declaring u32::MAX bytes (the most snap accepts), then
+        // a one-byte literal: 7 bytes that can encode at most 7 * 64 / 3 = 149.
+        let block = [0xFF, 0xFF, 0xFF, 0xFF, 0x0F, 0x00, b'x'];
+        let stream = xerial_stream(block.len() as u32, &block);
+        let (err, max_allocation) = {
+            let _guard = AllocTrackingGuard::new();
+            let mut reader = Compression::snappy()
+                .wrap_for_input(stream.as_slice(), TEST_MESSAGE_VERSION)
+                .unwrap();
+            let err = read_all(&mut reader).expect_err("the header is impossible");
+            (err, AllocTrackingGuard::max_allocation())
+        };
+        assert_eq!(io::ErrorKind::InvalidData, err.kind());
+        assert_eq!(
+            "Snappy block declares 4294967295 decompressed bytes, more than its 7 compressed bytes can encode",
+            err.to_string()
+        );
+        assert!(
+            max_allocation < 1024,
+            "allocated {max_allocation} bytes for an impossible block"
+        );
+    }
+
+    /// A block the encoding allows but the stream's limit does not is refused
+    /// with the shared limit error before its buffer is allocated, and the limit
+    /// counts every block of the stream.
+    #[test]
+    fn test_xerial_block_past_the_limit_is_refused() {
+        let data = vec![b'a'; 10_000];
+        let compressed = snap::raw::Encoder::new().compress_vec(&data).unwrap();
+        let stream = xerial_stream(compressed.len() as u32, &compressed);
+
+        let mut reader = Compression::snappy()
+            .wrap_for_input_with_limit(stream.as_slice(), TEST_MESSAGE_VERSION, data.len())
+            .unwrap();
+        assert_eq!(data, read_all(&mut reader).expect("exactly at the limit"));
+
+        let (err, max_allocation) = {
+            let _guard = AllocTrackingGuard::new();
+            let mut reader = Compression::snappy()
+                .wrap_for_input_with_limit(stream.as_slice(), TEST_MESSAGE_VERSION, data.len() - 1)
+                .unwrap();
+            let err = read_all(&mut reader).expect_err("one byte over the limit");
+            (err, AllocTrackingGuard::max_allocation())
+        };
+        assert_eq!(io::ErrorKind::InvalidData, err.kind());
+        assert_eq!(
+            "decompressed size exceeds the limit of 9999 bytes per record batch",
+            err.to_string()
+        );
+        assert!(
+            max_allocation < data.len(),
+            "allocated {max_allocation} bytes for a refused block"
+        );
+
+        // Two blocks of 100 under a limit of 150: the second one crosses it.
+        let block = snap::raw::Encoder::new().compress_vec(&[b'b'; 100]).unwrap();
+        let mut two_blocks = xerial_stream(block.len() as u32, &block);
+        two_blocks.extend_from_slice(&(block.len() as u32).to_be_bytes());
+        two_blocks.extend_from_slice(&block);
+        let mut reader = Compression::snappy()
+            .wrap_for_input_with_limit(two_blocks.as_slice(), TEST_MESSAGE_VERSION, 150)
+            .unwrap();
+        let err = read_all(&mut reader).expect_err("the second block crosses the limit");
+        assert_eq!(
+            "decompressed size exceeds the limit of 150 bytes per record batch",
+            err.to_string()
+        );
     }
 }

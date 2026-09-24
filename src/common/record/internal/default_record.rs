@@ -234,8 +234,16 @@ impl DefaultRecord {
             )));
         }
 
-        let mut record_buffer = vec![0u8; size_of_body as usize];
-        let bytes_read = read_fully(input, &mut record_buffer)?;
+        // Java allocates the declared body size before reading a byte of it
+        // (`DefaultRecord.java:286`). The size is read off the stream, so here the
+        // buffer grows with the bytes actually read instead — `take` stops the
+        // read at the declared size — and a record declaring 2 GiB over three
+        // bytes of payload allocates for three bytes, then fails as Java's does.
+        let mut record_buffer = Vec::new();
+        let bytes_read = (&mut *input)
+            .take(size_of_body as u64)
+            .read_to_end(&mut record_buffer)
+            .map_err(|e| InvalidRecordError::new(e.to_string()))?;
         if bytes_read != size_of_body as usize {
             return Err(InvalidRecordError::new(format!(
                 "Invalid record size: expected {} bytes in record payload, but the record payload reached EOF.",
@@ -705,22 +713,6 @@ fn parse_one_header<'a>(buffer: &'a [u8], pos: &mut usize) -> Result<(&'a [u8], 
     let header_value = slice_bytes(buffer, pos, header_value_size)?;
 
     Ok((header_key, header_value))
-}
-
-/// Read up to `buf.len()` bytes from `reader`, returning the number of bytes read.
-///
-/// Corresponds to Java's `Utils.readFully(InputStream, ByteBuffer)`.
-fn read_fully<R: Read>(reader: &mut R, buf: &mut [u8]) -> Result<usize, InvalidRecordError> {
-    let mut total = 0;
-    while total < buf.len() {
-        match reader.read(&mut buf[total..]) {
-            Ok(0) => break, // EOF
-            Ok(n) => total += n,
-            Err(ref e) if e.kind() == io::ErrorKind::Interrupted => continue,
-            Err(e) => return Err(InvalidRecordError::new(e.to_string())),
-        }
-    }
-    Ok(total)
 }
 
 /// Increment a sequence number, wrapping around at `i32::MAX`.
@@ -1371,5 +1363,28 @@ mod tests {
         assert!(!record.is_compressed());
         assert!(!record.has_timestamp_type(TimestampType::CreateTime));
         assert!(record.ensure_valid().is_ok());
+    }
+
+    /// APPSEC-7665 D4: a declared body size is not trusted to size the read
+    /// buffer (Java allocates it up front, `DefaultRecord.java:286`). A record
+    /// declaring `i32::MAX` bytes over a three-byte body allocates for the three
+    /// bytes, then fails with Java's end-of-payload message.
+    #[test]
+    fn test_read_from_stream_declared_size_does_not_size_the_buffer() {
+        let mut stream = Vec::new();
+        varint::write_varint(i32::MAX, &mut stream).unwrap();
+        stream.extend_from_slice(b"abc");
+
+        let (err, max_allocation) = {
+            let _guard = crate::test_alloc_tracker::AllocTrackingGuard::new();
+            let err = DefaultRecord::read_from_stream(&mut stream.as_slice(), 0, 0, 0, None)
+                .expect_err("three bytes are not 2 GiB");
+            (err, crate::test_alloc_tracker::AllocTrackingGuard::max_allocation())
+        };
+        assert_eq!(
+            "Invalid record size: expected 2147483647 bytes in record payload, but the record payload reached EOF.",
+            err.message()
+        );
+        assert!(max_allocation < 1024, "allocated {max_allocation} bytes for a three-byte body");
     }
 }

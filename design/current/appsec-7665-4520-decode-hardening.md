@@ -232,6 +232,7 @@ than silently diverging.
 
 - 2026-09-24: plan written; Actor 78 spawned.
 - 2026-09-24: Actor 78, §2.1 landed (commit 1). Discrepancies in §6.
+- 2026-09-24: Actor 78, §2.2 landed (commit 2). Choices in §6, items 9-13.
 
 ## 6. Implementation notes (Actor 78)
 
@@ -285,3 +286,34 @@ followed and the difference is recorded here.
    only when the batch's records section was empty; with records present the
    old cursor raised "records still remaining". Either way D3 now rejects it
    with Java's text.
+9. **The bounded read** (`default_record_batch.rs::read_decompressed`)
+   starts its capacity at the compressed size, doubles it, clamps it to
+   `max_bytes + DECOMPRESSION_READ_CHUNK_BYTES` (16 KiB) and offers each
+   `read` at most one chunk, so no capacity above that ceiling is ever
+   requested; every reservation is `try_reserve_exact`. The limit's text,
+   shared with the snappy reader so every codec reports it identically, is
+   `decompressed size exceeds the limit of {n} bytes per record batch`, under
+   the existing `Failed to decompress record stream: ` prefix.
+10. **How the xerial reader learns the budget** (§2.2 item 3, the Actor's
+    call): a constructor parameter, reached through a Rust-only
+    `pub(crate) Compression::wrap_for_input_with_limit`; the public
+    `wrap_for_input` keeps its signature and passes no limit. Independently of
+    any limit, every block's declared decompressed length is checked against
+    what its bytes can encode — snappy's densest element is a 3-byte copy of 64
+    bytes, so at most 64/3 of the block size — which rejects only headers that
+    would fail decompression anyway, and bounds the public path too. The
+    compressed block is read with `take(len).read_to_end`, so a declared
+    `0xFFFF_FFFF` over three bytes allocates for three.
+11. **The owned `iter_records` path gets its limit from `take` alone**, not
+    from the reader: a snappy reader refusing a block surfaces there as a
+    failed record read, which the path cannot tell from any other. Its snappy
+    blocks remain bounded by the encoding check, and owned batches are ones
+    this client built or validated. The limit is a parameter of a private
+    `iter_records_with_limit`, so a test drives it down.
+12. **`Vec::with_capacity(num_records)`** became
+    `min(num_records, records_section.len())` on both owned paths: a hard
+    bound for uncompressed records (each is at least one byte), a starting
+    capacity for compressed ones.
+13. Observation, not changed: zstd's decoder sizes its window from the frame
+    header up to libzstd's default `windowLogMax` (27, 128 MiB), as Java's
+    zstd-jni does; lz4 frames cap blocks at 4 MiB; gzip's window is fixed.
