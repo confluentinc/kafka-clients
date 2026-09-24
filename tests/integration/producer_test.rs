@@ -21,7 +21,8 @@
 //!   others `testTooLargeRecordWithAckZero`,
 //!   `testPartitionTooLargeForReplicationWithAckAll`,
 //!   `testResponseTooLargeForReplicationWithAckAll`,
-//!   `testCannotSendToInternalTopic`
+//!   `testCannotSendToInternalTopic`,
+//!   `testNotEnoughReplicasAfterBrokerShutdown` (native only, dedicated cluster)
 //! - `kafka.api.BaseProducerSendTest` / `kafka.api.PlaintextProducerSendTest`
 //!   (`core/src/test/scala/integration/kafka/api/`): `testSendOffset`,
 //!   `testSendToPartition`, `testSendBeforeAndAfterPartitionExpansion`,
@@ -41,7 +42,9 @@
 //!   runs both `timestampConfigProvider` cases in one test),
 //!   `testNonBlockingProducer` (buffer-exhaustion half native only),
 //!   `testSendRecordBatchWithMaxRequestSizeAndHigher`,
-//!   `testPartitionsForTimeoutErrorWhenTopicDoesNotExist`. The exact
+//!   `testPartitionsForTimeoutErrorWhenTopicDoesNotExist`,
+//!   `testSendToPartitionWithFollowerShutdownShouldNotTimeout` (native only,
+//!   dedicated cluster). The exact
 //!   `waitOnMetadata` messages that `testSendTimeoutErrorMessageWhenTopicDoesNotExist`
 //!   and `testSendTimeoutErrorWhenPartitionDoesNotExist` pin are asserted by
 //!   `test_produce_to_non_existent_topic` / `test_produce_invalid_partition`.
@@ -2530,6 +2533,204 @@ async fn test_ssl_flush() {
         SendTestSecurity::Ssl,
     )
     .await;
+}
+
+// ---------------------------------------------------------------------------
+// Broker fault injection (native only under both feature sets: the scenarios
+// stop brokers of a dedicated cluster, and the bindings add nothing to what the
+// native producer proves here).
+// ---------------------------------------------------------------------------
+
+/// [`producer_failure_handling_cluster_config`]'s broker properties on a
+/// dedicated `Type.KRAFT` cluster (two brokers plus one isolated controller) —
+/// the shape `ProducerFailureHandlingTest`'s `@ClusterTestDefaults(types =
+/// {Type.KRAFT}, brokers = 2)` (`ProducerFailureHandlingTest.java:61-76`)
+/// builds, required because the test stops a broker.
+fn producer_failure_handling_dedicated_cluster_config() -> ClusterConfig {
+    let props = producer_failure_handling_cluster_config().server_properties;
+    ClusterConfig::kraft_dedicated(2, 1).set_server_properties(props)
+}
+
+/// Translated from `ProducerFailureHandlingTest.testNotEnoughReplicasAfterBrokerShutdown`
+/// (`ProducerFailureHandlingTest.java:239-268`): with `min.insync.replicas`
+/// equal to the replication factor, a produce after one broker shuts down
+/// fails with not-enough-replicas (or times out).
+///
+/// Deviations: the topic name is per-test; Java fires `createTopics` without
+/// awaiting it (the admin's close drains it) and lets the first send wait for
+/// metadata, whereas here the creation is awaited together with the partition
+/// leader (`create_topic_with_admin_config`), so the first send cannot race
+/// the leader election.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_not_enough_replicas_after_broker_shutdown() {
+    let mut ctx = TestContext::new(producer_failure_handling_dedicated_cluster_config()).await;
+    not_enough_replicas_after_broker_shutdown_inner(&mut ctx, &crate::common::backend_factory::RustNativeFactory).await;
+    ctx.cleanup().await;
+}
+
+/// Body of [`test_not_enough_replicas_after_broker_shutdown`], generic so that
+/// `send` resolves to `Producer::send`.
+async fn not_enough_replicas_after_broker_shutdown_inner<F: ProducerBackendFactory>(
+    ctx: &mut TestContext,
+    factory: &F,
+) {
+    let topic_name = ctx.topic("minisrtest2");
+    let broker_num = ctx.cluster().broker_ids().len() as i32;
+    let topic_config = BTreeMap::from([("min.insync.replicas".to_string(), broker_num.to_string())]);
+    {
+        let admin = send_test_admin(ctx);
+        create_topic_with_admin_config(admin.as_ref(), &topic_name, 1, broker_num as i16, topic_config).await;
+        admin.close_with_timeout(Duration::from_secs(5)).await;
+    }
+
+    let record = || ProducerRecord::with_key(topic_name.clone(), Some(b("key")), Some(b("value")));
+
+    let producer = factory
+        .create(failure_producer_config(ctx.bootstrap_servers(), -1))
+        .await
+        .expect("Failed to create producer");
+    // this should work with all brokers up and running
+    producer
+        .send(record())
+        .await
+        .expect("send should succeed")
+        .get_with_timeout(UNBOUNDED_GET_TIMEOUT)
+        .await
+        .expect("the send should work with all brokers up and running");
+
+    // shut down one broker: Java's `clusterInstance.brokers().get(0)` is broker id 0
+    let one_broker = 0;
+    ctx.cluster().shutdown_broker(one_broker).await;
+
+    let e = producer
+        .send(record())
+        .await
+        .expect("send should accept the request")
+        .get_with_timeout(UNBOUNDED_GET_TIMEOUT)
+        .await
+        .expect_err("the send must fail with a broker down and min.insync.replicas = brokers");
+    assert!(
+        matches!(
+            e,
+            Error::NotEnoughReplicas(_) | Error::NotEnoughReplicasAfterAppend(_) | Error::Timeout(_)
+        ),
+        "expected NotEnoughReplicas, NotEnoughReplicasAfterAppend or Timeout, got {e:?}"
+    );
+
+    // restart the server
+    ctx.cluster().start_broker(one_broker).await;
+    producer.close().await.expect("close should succeed");
+}
+
+/// [`producer_send_cluster_config`]'s broker shape on a dedicated `Type.KRAFT`
+/// cluster (two brokers plus one isolated controller, as Scala's KRaft
+/// `KafkaServerTestHarness` builds), required because the test stops a broker.
+fn producer_send_dedicated_cluster_config() -> ClusterConfig {
+    let props = BTreeMap::from([
+        ("KAFKA_NUM_PARTITIONS".to_string(), "4".to_string()),
+        ("KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR".to_string(), "2".to_string()),
+    ]);
+    ClusterConfig::kraft_dedicated(2, 1).set_server_properties(props)
+}
+
+/// Translated from `BaseProducerSendTest.testSendToPartitionWithFollowerShutdownShouldNotTimeout`
+/// (`BaseProducerSendTest.scala:373-418`, CONSUMER arm of the verification
+/// consumer): produce to a leader whose follower is shutting down. The produce
+/// requests succeed, do not time out and do not need to be retried.
+///
+/// Java's `createTopicWithAdmin(.., numPartitions = 1, replicationFactor = 3,
+/// replicaAssignment = Map(0 -> List(0, 1)))` creates the topic from the
+/// assignment alone; [`NewTopic::with_replicas_assignments`] is the same request.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_send_to_partition_with_follower_shutdown_should_not_timeout() {
+    let mut ctx = TestContext::new(producer_send_dedicated_cluster_config()).await;
+    send_to_partition_with_follower_shutdown_should_not_timeout_inner(
+        &mut ctx,
+        &crate::common::backend_factory::RustNativeFactory,
+    )
+    .await;
+    ctx.cleanup().await;
+}
+
+/// Body of [`test_send_to_partition_with_follower_shutdown_should_not_timeout`],
+/// generic so that `send` resolves to `Producer::send`.
+async fn send_to_partition_with_follower_shutdown_should_not_timeout_inner<F: ProducerBackendFactory>(
+    ctx: &mut TestContext,
+    factory: &F,
+) {
+    let topic = ctx.topic("topic");
+    let producer = factory
+        .create(send_test_producer_config(
+            ctx.bootstrap_servers(),
+            &SendTestProducerOpts::default(),
+        ))
+        .await
+        .expect("Failed to create producer");
+    let follower = 1;
+    let replicas = vec![0, follower];
+
+    let admin = send_test_admin(ctx);
+    admin
+        .create_topics(&[NewTopic::with_replicas_assignments(
+            topic.clone(),
+            BTreeMap::from([(0, replicas)]),
+        )])
+        .all()
+        .get()
+        .await
+        .expect("create topic");
+    test_utils::wait_for_all_partitions_metadata(admin.as_ref(), &topic, 1).await;
+    test_utils::wait_for_partition_leaders(admin.as_ref(), &topic, 0..1).await;
+    let partition = 0;
+
+    let now = current_time_ms();
+    let mut futures = Vec::with_capacity(NUM_RECORDS);
+    for i in 1..=NUM_RECORDS {
+        let record = ProducerRecord::with_partition_timestamp_key(
+            topic.clone(),
+            Some(partition),
+            Some(now),
+            None,
+            Some(b(&format!("value{i}"))),
+        )
+        .expect("valid record");
+        futures.push(producer.send(record).await.expect("send should succeed"));
+    }
+
+    // Shutdown the follower
+    ctx.cluster().shutdown_broker(follower).await;
+
+    // make sure all of them end up in the same partition with increasing offset values
+    for (offset, future) in futures.iter().enumerate() {
+        let record_metadata = future
+            .get_with_timeout(Duration::from_secs(30))
+            .await
+            .expect("produce to a leader with a shutting-down follower should not time out");
+        assert_eq!(offset as i64, record_metadata.offset());
+        assert_eq!(topic, record_metadata.topic());
+        assert_eq!(partition, record_metadata.partition());
+    }
+
+    let mut consumer = send_test_consumer(ctx);
+    consumer
+        .assign(vec![TopicPartition::new(topic.clone(), partition)])
+        .await
+        .expect("assign should succeed");
+
+    // make sure the fetched messages also respect the partitioning and ordering
+    let records = consume_records(consumer.as_mut(), NUM_RECORDS).await;
+    for (i, record) in records.iter().enumerate() {
+        assert_eq!(topic, record.topic);
+        assert_eq!(partition, record.partition);
+        assert_eq!(i as i64, record.offset);
+        assert_eq!(None, record.key);
+        assert_eq!(Some(b(&format!("value{}", i + 1))), record.value);
+        assert_eq!(now, record.timestamp);
+    }
+
+    producer.close().await.expect("close should succeed");
+    consumer.close().await.expect("consumer close should succeed");
+    admin.close_with_timeout(Duration::from_secs(5)).await;
 }
 
 // New tests translated from Java/Scala sources (see COVERAGE-ASSESSMENT.md).
