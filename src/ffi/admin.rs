@@ -25535,13 +25535,14 @@ mod tests {
         }
     }
 
-    /// Seeds a core `DescribeUserScramCredentialsResult` from wire per-user rows
-    /// `(user, wire error code, [(mechanism type, iterations)])`, exactly as the
-    /// core's own tests do — the C handle is then built from this via
-    /// `box_describe_user_scram_credentials_result`.
-    fn seed_scram_result(
-        rows: Vec<(&str, i16, Vec<(i8, i32)>)>,
-    ) -> *mut kafka_admin_DescribeUserScramCredentialsResult_t {
+    /// One wire fixture row for [`seed_scram_result`]: `(user, wire error code,
+    /// [(mechanism type, iterations)])`.
+    type ScramResultRow<'a> = (&'a str, i16, Vec<(i8, i32)>);
+
+    /// Seeds a core `DescribeUserScramCredentialsResult` from wire per-user rows,
+    /// exactly as the core's own tests do — the C handle is then built from this
+    /// via `box_describe_user_scram_credentials_result`.
+    fn seed_scram_result(rows: Vec<ScramResultRow<'_>>) -> *mut kafka_admin_DescribeUserScramCredentialsResult_t {
         use crate::DescribeUserScramCredentialsResponseData;
         use crate::common::KafkaFuture;
         use crate::describe_user_scram_credentials_response_data::{
