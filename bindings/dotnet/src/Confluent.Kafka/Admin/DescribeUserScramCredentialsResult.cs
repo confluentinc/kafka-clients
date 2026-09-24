@@ -70,13 +70,23 @@ public sealed class DescribeUserScramCredentialsResult
     /// <param name="userName">The user to look up.</param>
     /// <returns>An awaitable over that user's description.</returns>
     /// <exception cref="ArgumentNullException"><paramref name="userName"/> is null.</exception>
-    public async Task<UserScramCredentialsDescription> Description(string userName)
+    /// <remarks>
+    /// The guard throws <b>synchronously</b> — this method is deliberately not <c>async</c>,
+    /// so a precondition failure is not deferred into the returned <see cref="Task"/>
+    /// (ffi §A5).
+    /// </remarks>
+    public Task<UserScramCredentialsDescription> Description(string userName)
     {
         if (userName is null)
         {
             throw new ArgumentNullException(nameof(userName));
         }
 
+        return DescriptionCore(userName);
+    }
+
+    private async Task<UserScramCredentialsDescription> DescriptionCore(string userName)
+    {
         DescribeUserScramCredentialsViews views = await _views.ConfigureAwait(false);
 
         using (Utf8Marshal.PinnedUtf8String pinnedUser = Utf8Marshal.Pin(userName))

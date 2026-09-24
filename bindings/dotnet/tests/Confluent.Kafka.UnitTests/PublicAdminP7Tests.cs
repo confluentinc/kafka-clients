@@ -342,6 +342,103 @@ public sealed class PublicAdminP7Tests
     }
 
     // ------------------------------------------------------------------------------------
+    // The three views are independent of one another (M15/P10).
+    // ------------------------------------------------------------------------------------
+
+    /// <summary>
+    /// ⚠⚠ <b>THE test for the three-view shape.</b> <c>all()</c> faulting is scoped to
+    /// <see cref="DescribeUserScramCredentialsResult.All"/> — it does <b>not</b> reach
+    /// <see cref="DescribeUserScramCredentialsResult.Users"/>, which Java answers from the
+    /// response regardless (<c>:92-104</c>).
+    /// </summary>
+    /// <remarks>
+    /// The code <b>and</b> the message are asserted: the code alone does not distinguish this
+    /// from any other fault reaching the same accessor.
+    /// </remarks>
+    [Fact]
+    public async Task DescribeUserScramCredentials_AllFaulting_DoesNotFaultUsers()
+    {
+        DescribeUserScramCredentialsResult result = ResultOver(
+            allError: new KafkaException(29, "cluster authorization failed", isRetriable: false),
+            all: new Dictionary<string, UserScramCredentialsDescription>(StringComparer.Ordinal),
+            users: new[] { "alice", "bob" });
+
+        KafkaException error = await Assert.ThrowsAsync<KafkaException>(() => result.All());
+        Assert.Equal(29, error.Code);
+        Assert.Equal("cluster authorization failed", error.Message);
+
+        Assert.Equal(new[] { "alice", "bob" }, await result.Users());
+    }
+
+    /// <summary>
+    /// ⚠⚠ <b>The D44-closing assertion.</b> A <c>RESOURCE_NOT_FOUND</c> user is a key in
+    /// <see cref="DescribeUserScramCredentialsResult.All"/> with <b>zero</b> credentials —
+    /// Java's map is built from every row (<c>:72-74</c>) — yet is <b>absent</b> from
+    /// <see cref="DescribeUserScramCredentialsResult.Users"/>, which Java filters
+    /// (<c>:98-100</c>). Before M15/P10 the binding could not tell the two views apart.
+    /// </summary>
+    [Fact]
+    public async Task DescribeUserScramCredentials_ResourceNotFoundUser_IsInAllButNotUsers()
+    {
+        UserScramCredentialsDescription notFound =
+            new UserScramCredentialsDescription("ghost", Array.Empty<ScramCredentialInfo>());
+        UserScramCredentialsDescription alice = new UserScramCredentialsDescription(
+            "alice", new[] { new ScramCredentialInfo(ScramMechanism.ScramSha256, 4096) });
+
+        DescribeUserScramCredentialsResult result = ResultOver(
+            allError: null,
+            all: new Dictionary<string, UserScramCredentialsDescription>(StringComparer.Ordinal)
+            {
+                ["alice"] = alice,
+                ["ghost"] = notFound,
+            },
+            users: new[] { "alice" });
+
+        IReadOnlyDictionary<string, UserScramCredentialsDescription> all = await result.All();
+        Assert.Equal(new[] { "alice", "ghost" }, all.Keys.OrderBy(name => name, StringComparer.Ordinal));
+        Assert.Empty(all["ghost"].CredentialInfos);
+
+        Assert.Equal(new[] { "alice" }, await result.Users());
+    }
+
+    /// <summary>
+    /// The <see cref="ArgumentNullException"/> guard fires <b>before</b> the views are
+    /// awaited, so a null user is rejected even on a result that would fault.
+    /// </summary>
+    [Fact]
+    public void DescribeUserScramCredentials_NullUser_ThrowsSynchronously()
+    {
+        DescribeUserScramCredentialsResult result = ResultOver(
+            allError: null,
+            all: new Dictionary<string, UserScramCredentialsDescription>(StringComparer.Ordinal),
+            users: Array.Empty<string>());
+
+        ArgumentNullException nullUser =
+            Assert.Throws<ArgumentNullException>(() => { _ = result.Description(null!); });
+        Assert.Equal("userName", nullUser.ParamName);
+    }
+
+    /// <summary>
+    /// Builds a result over the copied-out views the completion callback would have produced.
+    /// </summary>
+    /// <remarks>
+    /// ⚠ The retained root is the <b>invalid</b> (zero) handle, which <c>SafeHandle</c> never
+    /// releases — sound because no caller here reaches <c>Description</c>, whose P/Invoke is
+    /// the only member that touches the root. A populated root cannot be built in a unit
+    /// test: the ABI exports no constructor for one and the Rust mock faults this RPC.
+    /// </remarks>
+    private static DescribeUserScramCredentialsResult ResultOver(
+        KafkaException? allError,
+        IReadOnlyDictionary<string, UserScramCredentialsDescription> all,
+        IReadOnlyList<string> users) =>
+        new DescribeUserScramCredentialsResult(
+            Task.FromResult(new Internal.DescribeUserScramCredentialsViews(
+                allError,
+                all,
+                users,
+                Internal.Interop.SafeDescribeUserScramCredentialsResultHandle.Adopt(IntPtr.Zero))));
+
+    // ------------------------------------------------------------------------------------
     // Secrets never surface (T-N4).
     // ------------------------------------------------------------------------------------
 

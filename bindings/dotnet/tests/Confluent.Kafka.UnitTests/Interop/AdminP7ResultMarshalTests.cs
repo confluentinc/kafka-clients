@@ -47,84 +47,98 @@ namespace Confluent.Kafka.UnitTests.Interop;
 public sealed class AdminP7ResultMarshalTests
 {
     // ------------------------------------------------------------------------------------
-    // The nested (user, credential) walk (T-N1).
+    // The per-description credential walk, and the owned/borrowed reader pair (M15/P10).
     // ------------------------------------------------------------------------------------
 
     /// <summary>
-    /// ⚠⚠ <b>THE test for this slice.</b> Each user's credentials are walked by <b>its own</b>
-    /// <c>get_credential_count(i)</c>, not by the outer row count: a failed row reports
-    /// <c>0</c> credentials while a succeeding one reports two.
+    /// ⚠⚠ <b>THE test for this slice.</b> Each description's credentials are walked by
+    /// <b>its own</b> <c>credential_count()</c>, never by any outer count (the <c>all()</c>
+    /// row count, the <c>users()</c> count).
     /// </summary>
     /// <remarks>
-    /// The two counts are deliberately unequal in <em>both</em> directions here — 2 rows, and
-    /// inner counts of 0 and 3 — so a reader driven from the outer count over-reads on one row
-    /// and truncates on the other.
+    /// The two descriptions are deliberately unequal in <em>both</em> directions — inner
+    /// counts of 0 and 3 against an outer count of 2 — so a reader driven from an outer count
+    /// over-reads on one and truncates on the other.
     /// </remarks>
     [Fact]
-    public void NestedWalk_IsBoundedByEachUsersOwnCredentialCount()
+    public void CredentialWalk_IsBoundedByTheDescriptionsOwnCredentialCount()
     {
-        using StubRows stub = new StubRows(
-            new StubRow("failing", errorCode: 58, credentials: Array.Empty<(int, int)>()),
-            new StubRow("alice", errorCode: null, credentials: new[] { (1, 4096), (2, 8192), (1, 16384) }));
+        using StubDescriptions stub = new StubDescriptions(
+            new StubDescription("empty", Array.Empty<(int, int)>()),
+            new StubDescription("alice", new[] { (1, 4096), (2, 8192), (1, 16384) }));
 
-        UserScramCredentialEntry failing = UserScramCredentialMarshal.ReadEntry(IntPtr.Zero, 0, stub.Accessors);
-        UserScramCredentialEntry alice = UserScramCredentialMarshal.ReadEntry(IntPtr.Zero, 1, stub.Accessors);
+        UserScramCredentialsDescription empty =
+            UserScramCredentialMarshal.Read(stub.Pointer(0), stub.Accessors);
+        UserScramCredentialsDescription alice =
+            UserScramCredentialMarshal.Read(stub.Pointer(1), stub.Accessors);
 
-        Assert.Equal("failing", failing.User);
-        Assert.Empty(failing.Description.CredentialInfos);
+        Assert.Equal("empty", empty.Name);
+        Assert.Empty(empty.CredentialInfos);
 
-        Assert.Equal("alice", alice.User);
-        Assert.Equal(3, alice.Description.CredentialInfos.Count);
+        Assert.Equal("alice", alice.Name);
+        Assert.Equal(3, alice.CredentialInfos.Count);
         Assert.Equal(
             new[] { ScramMechanism.ScramSha256, ScramMechanism.ScramSha512, ScramMechanism.ScramSha256 },
-            alice.Description.CredentialInfos.Select(info => info.Mechanism));
+            alice.CredentialInfos.Select(info => info.Mechanism));
         Assert.Equal(
             new[] { 4096, 8192, 16384 },
-            alice.Description.CredentialInfos.Select(info => info.Iterations));
+            alice.CredentialInfos.Select(info => info.Iterations));
     }
 
     /// <summary>
-    /// A failing row carries its error and a succeeding one carries none — the per-row error
-    /// is row <em>data</em> here, not the call's outcome.
+    /// ⚠⚠ <b>The <c>all_get_description</c> pointer is BORROWED — the plain reader must never
+    /// destroy it</b> (ffi §B2 Category 4): the result root owns it and frees it on its own
+    /// destroy, so a destroy here is a double free with no managed symptom.
     /// </summary>
     [Fact]
-    public void PerRowError_IsCarried_AndOnlyOnTheFailingRow()
+    public void Read_NeverDestroysTheBorrowedDescription()
     {
-        using StubRows stub = new StubRows(
-            new StubRow("failing", errorCode: 58, credentials: Array.Empty<(int, int)>()),
-            new StubRow("alice", errorCode: null, credentials: new[] { (1, 4096) }));
+        using StubDescriptions stub = new StubDescriptions(
+            new StubDescription("alice", new[] { (1, 4096) }));
 
-        KafkaException? error = UserScramCredentialMarshal.ReadEntry(IntPtr.Zero, 0, stub.Accessors).Error;
+        UserScramCredentialMarshal.Read(stub.Pointer(0), stub.Accessors);
+        UserScramCredentialMarshal.Read(stub.Pointer(0), stub.Accessors);
 
-        Assert.NotNull(error);
-        Assert.Equal(58, error!.Code);
-        Assert.Equal("resource not found", error.Message);
-        Assert.Null(UserScramCredentialMarshal.ReadEntry(IntPtr.Zero, 1, stub.Accessors).Error);
+        Assert.Equal(0, stub.DestroyCount(0));
     }
 
     /// <summary>
-    /// ⚠⚠ <b>The per-row error is BORROWED — the reader must never destroy it</b> (ffi §B2
-    /// Category 4): it dies with the result root, which the trampoline's <c>finally</c> frees.
+    /// ⚠⚠ The owned twin destroys its description <b>exactly once</b> — the
+    /// <c>description(user)</c> side of the same type. Not destroying it leaks one per call.
+    /// </summary>
+    [Fact]
+    public void ReadAndDestroy_DestroysTheOwnedDescriptionExactlyOnce()
+    {
+        using StubDescriptions stub = new StubDescriptions(
+            new StubDescription("alice", new[] { (2, 8192) }));
+
+        UserScramCredentialsDescription alice =
+            UserScramCredentialMarshal.ReadAndDestroy(stub.Pointer(0), stub.Accessors);
+
+        Assert.Equal("alice", alice.Name);
+        Assert.Equal(ScramMechanism.ScramSha512, alice.CredentialInfos.Single().Mechanism);
+        Assert.Equal(1, stub.DestroyCount(0));
+    }
+
+    /// <summary>
+    /// ⚠⚠ …and <b>on the throwing path too</b> — the destroy is in a <c>finally</c>, so a read
+    /// that faults mid-walk still releases the handle exactly once rather than leaking it.
     /// </summary>
     /// <remarks>
-    /// Asserted by reading the handle again <em>after</em> the row was read, then destroying
-    /// it exactly once here. Swapping the reader's <c>FromBorrowedHandle</c> for
-    /// <c>FromHandle</c> makes this file's own destroy a double free, which aborts the test
-    /// host — <c>Test Run Aborted</c> in the output, not a failing assertion, and not a
-    /// non-zero exit code.
+    /// The probe is a null <c>name()</c>, which is a real ABI-reachable shape and makes
+    /// <c>ReadStringKey</c> throw — deliberately not an exception the reader itself could
+    /// produce and swallow, so a green result cannot come from the throw being normalized.
     /// </remarks>
     [Fact]
-    public void PerRowError_IsBorrowed_AndSurvivesTheRead()
+    public void ReadAndDestroy_DestroysExactlyOnce_WhenTheReadThrows()
     {
-        using StubRows stub = new StubRows(
-            new StubRow("failing", errorCode: 42, credentials: Array.Empty<(int, int)>()));
+        using StubDescriptions stub = new StubDescriptions(
+            new StubDescription(name: null, new[] { (1, 4096) }));
 
-        Assert.Equal(42, UserScramCredentialMarshal.ReadEntry(IntPtr.Zero, 0, stub.Accessors).Error!.Code);
+        Assert.Throws<KafkaException>(
+            () => UserScramCredentialMarshal.ReadAndDestroy(stub.Pointer(0), stub.Accessors));
 
-        // Still readable: the reader took a copy and left the handle alone.
-        IntPtr borrowed = stub.Accessors.GetError(IntPtr.Zero, 0);
-        Assert.NotEqual(IntPtr.Zero, borrowed);
-        Assert.Equal(42, NativeMethods.Code(borrowed));
+        Assert.Equal(1, stub.DestroyCount(0));
     }
 
     /// <summary>
@@ -135,13 +149,13 @@ public sealed class AdminP7ResultMarshalTests
     [Fact]
     public void UnknownMechanismCode_DecodesToUnknown()
     {
-        using StubRows stub = new StubRows(
-            new StubRow("u", errorCode: null, credentials: new[] { (99, 4096) }));
+        using StubDescriptions stub = new StubDescriptions(
+            new StubDescription("u", new[] { (99, 4096) }));
 
         Assert.Equal(
             ScramMechanism.Unknown,
-            UserScramCredentialMarshal.ReadEntry(IntPtr.Zero, 0, stub.Accessors)
-                .Description.CredentialInfos.Single().Mechanism);
+            UserScramCredentialMarshal.Read(stub.Pointer(0), stub.Accessors)
+                .CredentialInfos.Single().Mechanism);
     }
 
     // ------------------------------------------------------------------------------------
@@ -296,74 +310,73 @@ public sealed class AdminP7ResultMarshalTests
     /// One row of the <c>describeUserScramCredentials</c> table. A plain class rather than a
     /// positional <c>record</c>: the latter needs <c>IsExternalInit</c>, which net462 lacks.
     /// </summary>
-    private sealed class StubRow
+    private sealed class StubDescription
     {
-        internal StubRow(string user, int? errorCode, (int Mechanism, int Iterations)[] credentials)
+        internal StubDescription(string? name, (int Mechanism, int Iterations)[] credentials)
         {
-            User = user;
-            ErrorCode = errorCode;
+            Name = name;
             Credentials = credentials;
         }
 
-        internal string User { get; }
-
-        internal int? ErrorCode { get; }
+        /// <summary>The user name, or null to drive the reader's throwing path.</summary>
+        internal string? Name { get; }
 
         internal (int Mechanism, int Iterations)[] Credentials { get; }
     }
 
     /// <summary>
-    /// A stand-in <c>DescribeUserScramCredentialsResult_t</c>: the pinned user names and the
-    /// real <c>KafkaError_t</c> handles the rows borrow, plus the five accessors over them.
+    /// Stand-in <c>UserScramCredentialsDescription_t</c>s: the pinned names, the four read
+    /// accessors over them, and a <b>counting</b> destroy so each handle's release count is
+    /// assertable — the only way to see the owned/borrowed distinction, which has no other
+    /// managed symptom.
     /// </summary>
-    private sealed class StubRows : IDisposable
+    /// <remarks>
+    /// The stand-in pointer is the 1-based index, so <c>IntPtr.Zero</c> stays distinguishable
+    /// from a valid handle and the destroy counter can attribute a release to one description.
+    /// </remarks>
+    private sealed class StubDescriptions : IDisposable
     {
-        private readonly StubRow[] _rows;
+        private readonly StubDescription[] _descriptions;
         private readonly List<Utf8Marshal.PinnedUtf8String> _names = new List<Utf8Marshal.PinnedUtf8String>();
-        private readonly List<IntPtr> _errors = new List<IntPtr>();
+        private readonly int[] _destroyCounts;
 
-        internal StubRows(params StubRow[] rows)
+        internal StubDescriptions(params StubDescription[] descriptions)
         {
-            _rows = rows;
+            _descriptions = descriptions;
+            _destroyCounts = new int[descriptions.Length];
 
-            foreach (StubRow row in rows)
+            foreach (StubDescription description in descriptions)
             {
-                _names.Add(Utf8Marshal.Pin(row.User));
-                _errors.Add(row.ErrorCode is null ? IntPtr.Zero : NewError(row.ErrorCode.Value));
+                _names.Add(description.Name is null ? null! : Utf8Marshal.Pin(description.Name));
             }
 
             Accessors = new UserScramCredentialMarshal.Accessors(
-                (result, index) => _names[index].Pointer,
-                (result, index) => _errors[index],
-                (result, index) => _rows[index].Credentials.Length,
-                (result, index, credential) => _rows[index].Credentials[credential].Mechanism,
-                (result, index, credential) => _rows[index].Credentials[credential].Iterations);
+                description => _names[Index(description)]?.Pointer ?? IntPtr.Zero,
+                description => _descriptions[Index(description)].Credentials.Length,
+                (description, credential) =>
+                    _descriptions[Index(description)].Credentials[credential].Mechanism,
+                (description, credential) =>
+                    _descriptions[Index(description)].Credentials[credential].Iterations,
+                description => _destroyCounts[Index(description)]++);
         }
 
         internal UserScramCredentialMarshal.Accessors Accessors { get; }
+
+        /// <summary>The stand-in handle for description <paramref name="index"/>.</summary>
+        internal IntPtr Pointer(int index) => new IntPtr(index + 1);
+
+        /// <summary>How many times description <paramref name="index"/> was destroyed.</summary>
+        internal int DestroyCount(int index) => _destroyCounts[index];
 
         public void Dispose()
         {
             foreach (Utf8Marshal.PinnedUtf8String name in _names)
             {
-                name.Dispose();
-            }
-
-            foreach (IntPtr error in _errors)
-            {
-                // Exactly once, here — the rows BORROW these. A reader that freed them too
-                // makes this a double free.
-                NativeMethods.ErrorDestroy(error);
+                name?.Dispose();
             }
         }
 
-        private static IntPtr NewError(int code)
-        {
-            using Utf8Marshal.PinnedUtf8String message = Utf8Marshal.Pin("resource not found");
-            IntPtr error = NativeMethods.KafkaErrorNew(code, message.Pointer);
-            Assert.NotEqual(IntPtr.Zero, error);
-            return error;
-        }
+        private static int Index(IntPtr description) => description.ToInt32() - 1;
     }
 
     /// <summary>A pinned byte buffer plus a MAC accessor that hands it back with its length.</summary>

@@ -344,14 +344,25 @@ public sealed class PublicAdminP7ShapeParityTests
 
     /// <summary>
     /// Every P7 type the user can name is <c>public</c> and outside <c>Internal</c>
-    /// (CLAUDE.md §2) — the flattened row carrier stays internal.
+    /// (CLAUDE.md §2) — the three-view carrier stays internal.
     /// </summary>
     [Fact]
-    public void TheRowCarrier_StaysInternal() =>
+    public void TheViewCarrier_StaysInternal() =>
         Assert.Null(
-            typeof(IAdmin).Assembly.GetType("Confluent.Kafka.Internal.UserScramCredentialEntry")!
+            typeof(IAdmin).Assembly.GetType("Confluent.Kafka.Internal.DescribeUserScramCredentialsViews")!
                 .GetConstructors()
                 .FirstOrDefault(constructor => constructor.IsPublic));
+
+    /// <summary>
+    /// ⚠ The public result stays <b>non-disposable</b> although it now retains a native root
+    /// (M15/P10 Option L): Java's <c>DescribeUserScramCredentialsResult</c> is not closeable,
+    /// and the root is released by the <c>SafeHandle</c>'s critical finalizer.
+    /// </summary>
+    [Fact]
+    public void DescribeUserScramCredentialsResult_IsNotDisposable() =>
+        Assert.False(
+            typeof(IDisposable).IsAssignableFrom(typeof(DescribeUserScramCredentialsResult))
+            || typeof(IAsyncDisposable).IsAssignableFrom(typeof(DescribeUserScramCredentialsResult)));
 
     private static IEnumerable<Type> Required(string name) =>
         typeof(IAdmin).GetMethod(name)!.GetParameters()

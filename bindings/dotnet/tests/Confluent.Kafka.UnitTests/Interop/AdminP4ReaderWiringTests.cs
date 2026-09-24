@@ -528,15 +528,16 @@ public sealed class AdminP4ReaderWiringTests
     }
 
     /// <summary>
-    /// ⚠⚠ Every member of <c>describeUserScramCredentials</c>' bundle is bound to <b>its
-    /// own</b> ABI symbol, positionally (M15/P7).
+    /// ⚠⚠ Every member of <c>UserScramCredentialsDescription</c>' bundle is bound to <b>its
+    /// own</b> ABI symbol, positionally (M15/P10).
     /// </summary>
     /// <remarks>
-    /// Two same-typed pairs are transposable here, and each transposition is silent:
-    /// <c>GetUser</c>/<c>GetError</c> swaps a key for a borrowed error, and
-    /// <c>GetCredentialMechanism</c>/<c>GetCredentialIterations</c> swaps a mechanism code
-    /// for an iteration count — <c>4096</c> decoding to <see cref="ScramMechanism.Unknown"/>
-    /// rather than to an error.
+    /// <c>CredentialMechanism</c>/<c>CredentialIterations</c> are the same delegate type in
+    /// adjacent positions, so transposing them compiles and both still return plausible
+    /// <c>int</c>s — <c>4096</c> decoding to <see cref="ScramMechanism.Unknown"/> rather than
+    /// to an error. ⚠ <c>Destroy</c> is asserted here too: it is the member that decides
+    /// whether an owned description is released, and mis-binding it is either a leak or a
+    /// double free, neither with a managed symptom.
     /// </remarks>
     [Fact]
     public void UserScramCredentialAccessors_BindEveryMemberToItsOwnAbiSymbol()
@@ -546,19 +547,19 @@ public sealed class AdminP4ReaderWiringTests
         Assert.Equal(
             new[]
             {
-                "GetUser=kafka_admin_DescribeUserScramCredentialsResult_get_user",
-                "GetError=kafka_admin_DescribeUserScramCredentialsResult_get_error",
-                "GetCredentialCount=kafka_admin_DescribeUserScramCredentialsResult_get_credential_count",
-                "GetCredentialMechanism=kafka_admin_DescribeUserScramCredentialsResult_get_credential_mechanism",
-                "GetCredentialIterations=kafka_admin_DescribeUserScramCredentialsResult_get_credential_iterations",
+                "Name=kafka_admin_UserScramCredentialsDescription_name",
+                "CredentialCount=kafka_admin_UserScramCredentialsDescription_credential_count",
+                "CredentialMechanism=kafka_admin_UserScramCredentialsDescription_credential_mechanism",
+                "CredentialIterations=kafka_admin_UserScramCredentialsDescription_credential_iterations",
+                "Destroy=kafka_admin_UserScramCredentialsDescription_destroy",
             },
             new[]
             {
-                "GetUser=" + EntryPointOf(accessors.GetUser),
-                "GetError=" + EntryPointOf(accessors.GetError),
-                "GetCredentialCount=" + EntryPointOf(accessors.GetCredentialCount),
-                "GetCredentialMechanism=" + EntryPointOf(accessors.GetCredentialMechanism),
-                "GetCredentialIterations=" + EntryPointOf(accessors.GetCredentialIterations),
+                "Name=" + EntryPointOf(accessors.Name),
+                "CredentialCount=" + EntryPointOf(accessors.CredentialCount),
+                "CredentialMechanism=" + EntryPointOf(accessors.CredentialMechanism),
+                "CredentialIterations=" + EntryPointOf(accessors.CredentialIterations),
+                "Destroy=" + EntryPointOf(accessors.Destroy),
             });
     }
 

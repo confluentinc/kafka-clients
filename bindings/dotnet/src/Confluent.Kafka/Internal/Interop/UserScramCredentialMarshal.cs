@@ -55,7 +55,8 @@ internal static class UserScramCredentialMarshal
         NativeMethods.UserScramCredentialsDescriptionName,
         NativeMethods.UserScramCredentialsDescriptionCredentialCount,
         NativeMethods.UserScramCredentialsDescriptionCredentialMechanism,
-        NativeMethods.UserScramCredentialsDescriptionCredentialIterations);
+        NativeMethods.UserScramCredentialsDescriptionCredentialIterations,
+        NativeMethods.UserScramCredentialsDescriptionDestroy);
 
     /// <summary>
     /// Reads a <b>borrowed</b> description through the production accessors. Does <b>not</b>
@@ -117,7 +118,7 @@ internal static class UserScramCredentialMarshal
         finally
         {
             // Null-safe. Exactly once, on every path — including a throwing read.
-            NativeMethods.UserScramCredentialsDescriptionDestroy(description);
+            accessors.Destroy(description);
         }
     }
 
@@ -127,7 +128,11 @@ internal static class UserScramCredentialMarshal
     /// <returns>The value, or <c>-1</c> when the index is out of range.</returns>
     internal delegate int CredentialAccessor(IntPtr description, int credentialIndex);
 
-    /// <summary>The four per-description accessors, as one set.</summary>
+    /// <summary>
+    /// The five <c>kafka_admin_UserScramCredentialsDescription_*</c> accessors, as one set —
+    /// <c>destroy</c> included, because it belongs to this type's ABI bundle and is what
+    /// <see cref="ReadAndDestroy(IntPtr, Accessors)"/> discharges the owned handle through.
+    /// </summary>
     internal sealed class Accessors
     {
         /// <summary>Creates a set, in the ABI's own accessor order.</summary>
@@ -135,16 +140,19 @@ internal static class UserScramCredentialMarshal
         /// <param name="credentialCount">Its credential count — the walk's bound.</param>
         /// <param name="credentialMechanism">One credential's mechanism type code.</param>
         /// <param name="credentialIterations">One credential's iteration count.</param>
+        /// <param name="destroy">Releases an owned description; null-safe.</param>
         internal Accessors(
             Func<IntPtr, IntPtr> name,
             Func<IntPtr, int> credentialCount,
             CredentialAccessor credentialMechanism,
-            CredentialAccessor credentialIterations)
+            CredentialAccessor credentialIterations,
+            Action<IntPtr> destroy)
         {
             Name = name;
             CredentialCount = credentialCount;
             CredentialMechanism = credentialMechanism;
             CredentialIterations = credentialIterations;
+            Destroy = destroy;
         }
 
         /// <summary><c>name()</c>.</summary>
@@ -158,5 +166,8 @@ internal static class UserScramCredentialMarshal
 
         /// <summary><c>credential_iterations(j)</c>.</summary>
         internal CredentialAccessor CredentialIterations { get; }
+
+        /// <summary><c>destroy()</c> — only ever applied to an <b>owned</b> description.</summary>
+        internal Action<IntPtr> Destroy { get; }
     }
 }
