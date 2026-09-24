@@ -252,3 +252,4 @@ null value as `b""` (Phase 2 / Critic 66).
 - Phase 10 / Actor 74: 002aa2c0 (group max size + remote assignors; ConsumerAssignmentPoller fixture; 4.3 arms #[ignore]). Critic 74: clean. Phase 10 DONE.
 - User (2026-09-24): continue all phases unattended; then solve broker-lifecycle harness as close to Java as possible → added Phases 15-19.
 - Phase 11 / Actor 75: 104c35d7 (PROD fix: consumer close passes remaining close timer to bg cleanup, AsyncKafkaConsumer.java:1652), d17de23e (close tests), 4875d2fc (protocol disabled via update_features). Critic 75: 1 finding (cleanup must poll once at 0ms like sendUnsentRequests do-while) → fixed d2d489ea; re-review clean. Phase 11 DONE.
+- Phase 12 / Actor 76: 869659ce (flush / close-zero Java shape; partitions_for un-gated), 3e4a2fb9 (no coordinator warm-up; pre-create __consumer_offsets). Critic 76: clean. Phase 12 DONE.
