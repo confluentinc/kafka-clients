@@ -64,6 +64,12 @@
   <ItemGroup>
     <Protobuf Include="$(ProtoRoot)/producer_service.proto" ProtoRoot="$(ProtoRoot)" GrpcServices="Server" />
     <Protobuf Include="$(ProtoRoot)/consumer_service.proto" ProtoRoot="$(ProtoRoot)" GrpcServices="Server" />
+    <!--
+      M15/P12 CP2: admin_service.proto joins the two above, same build-config-only
+      flip (proto CONTENT untouched). It imports both of them for the shared
+      KafkaError / Node / StatusResponse / TopicPartition / StringList messages.
+    -->
+    <Protobuf Include="$(ProtoRoot)/admin_service.proto" ProtoRoot="$(ProtoRoot)" GrpcServices="Server" />
   </ItemGroup>
 
   <ItemGroup>
