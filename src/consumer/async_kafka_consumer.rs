@@ -1946,8 +1946,13 @@ where
             true, // discover_broker_versions — mirrors Java
             Arc::clone(&api_versions),
             DefaultHostResolver::new(),
-            config.metadata_max_age_ms, // rebootstrap_trigger_ms
-            MetadataRecoveryStrategy::None,
+            // `ClientUtils.createNetworkClient` (`ClientUtils.java:223-224`) reads
+            // both from the config; the default strategy is `rebootstrap`.
+            // `ConsumerConfig::new` already rejected any name other than
+            // `none` / `rebootstrap`, so `for_name` cannot fail here.
+            config.metadata_recovery_rebootstrap_trigger_ms,
+            MetadataRecoveryStrategy::for_name(config.metadata_recovery_strategy())
+                .map_err(Error::local_illegal_argument)?,
             log_context,
         );
         let mut network_client_delegate_inner = NetworkClientDelegate::new(
