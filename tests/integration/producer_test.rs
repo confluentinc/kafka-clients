@@ -29,6 +29,7 @@
 //!   `testCloseWithZeroTimeoutFromSenderThread` (native only),
 //!   `testCloseWithZeroTimeoutFromCallerThread` (native only),
 //!   `testFlush` (as `test_flush_sends_pending_records`; not-done half native only),
+//!   `testClose`,
 //!   `testWrongSerializer` (native only),
 //!   `testSendCompressedMessageWithCreateTime` (native only),
 //!   `testSendNonCompressedMessageWithCreateTime` (native only),
@@ -44,6 +45,9 @@
 //!   `waitOnMetadata` messages that `testSendTimeoutErrorMessageWhenTopicDoesNotExist`
 //!   and `testSendTimeoutErrorWhenPartitionDoesNotExist` pin are asserted by
 //!   `test_produce_to_non_existent_topic` / `test_produce_invalid_partition`.
+//! - `kafka.api.SslProducerSendTest` (the `BaseProducerSendTest` bodies over
+//!   the SSL listener, native only): `testSendOffset` (`test_ssl_send_offset`),
+//!   `testClose` (`test_ssl_close`), `testFlush` (`test_ssl_flush`).
 //!
 //! When the `multilanguage-tests` feature is enabled, each test is
 //! instantiated three times via [`multilanguage_test!`] — once per
@@ -257,16 +261,71 @@ fn send_test_producer_config(bootstrap_servers: &str, opts: &SendTestProducerOpt
     ])
 }
 
+/// `BaseProducerSendTest.securityProtocol`: PLAINTEXT for
+/// `PlaintextProducerSendTest`, SSL for `SslProducerSendTest`
+/// (`SslProducerSendTest.scala:24-27`). It selects the listener of the
+/// producer under test and of the suite's `admin`
+/// (`BaseProducerSendTest.scala:78-82, 103-115`); the verification consumer is
+/// always PLAINTEXT (`:86-90`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum SendTestSecurity {
+    Plaintext,
+    Ssl,
+}
+
+impl SendTestSecurity {
+    /// Points `props` at this protocol's listener. For SSL: the SSL bootstrap
+    /// servers, the cluster CA as truststore (Scala's generated
+    /// `trustStoreFile`), and no hostname verification because the tests reach
+    /// the broker via `127.0.0.1` (as in `ssl_sasl_test`).
+    ///
+    fn apply(self, ctx: &TestContext, mut props: HashMap<String, String>) -> HashMap<String, String> {
+        if self == SendTestSecurity::Ssl {
+            props.insert("bootstrap.servers".to_string(), ctx.ssl_bootstrap_servers().to_string());
+            props.insert("security.protocol".to_string(), "SSL".to_string());
+            props.insert("ssl.truststore.certificates".to_string(), ctx.ca_cert_pem().to_string());
+            props.insert("ssl.endpoint.identification.algorithm".to_string(), String::new());
+        }
+        props
+    }
+
+    /// The producer-under-test config for `factory`: [`send_test_producer_config`]
+    /// on this protocol's listener.
+    ///
+    /// SSL runs on the native backend only: the multilanguage gRPC servers
+    /// reach the broker over the container-internal PLAINTEXT listener, and
+    /// Java has no binding-specific variant of `SslProducerSendTest`.
+    fn producer_config<F: ProducerBackendFactory>(
+        self,
+        factory: &F,
+        ctx: &TestContext,
+        opts: &SendTestProducerOpts,
+    ) -> HashMap<String, String> {
+        assert!(
+            self == SendTestSecurity::Plaintext || !factory.needs_container_bootstrap(),
+            "SSL send tests run on the native backend only"
+        );
+        self.apply(ctx, send_test_producer_config(&bootstrap_for(factory, ctx), opts))
+    }
+}
+
 /// Admin client for topic provisioning — the suite's `admin`
 /// (`BaseProducerSendTest.scala:78`). Always native: it is harness
 /// infrastructure, not the client under test.
 fn send_test_admin(ctx: &TestContext) -> Box<dyn Admin> {
+    send_test_admin_with_security(ctx, SendTestSecurity::Plaintext)
+}
+
+/// [`send_test_admin`] over `security`'s listener, as Scala builds the suite's
+/// admin with `securityProtocol` (`BaseProducerSendTest.scala:78-82`).
+fn send_test_admin_with_security(ctx: &TestContext, security: SendTestSecurity) -> Box<dyn Admin> {
     let props = HashMap::from([
         ("bootstrap.servers".to_string(), ctx.bootstrap_servers().to_string()),
         ("client.id".to_string(), "producer-send-test-admin".to_string()),
         ("request.timeout.ms".to_string(), "30000".to_string()),
         ("default.api.timeout.ms".to_string(), "30000".to_string()),
     ]);
+    let props = security.apply(ctx, props);
     let config = AdminClientConfig::new(&props).expect("valid admin config");
     Box::new(KafkaAdminClient::new(config).expect("admin client"))
 }
@@ -462,12 +521,19 @@ fn send_offset_callback(
 /// (The Scala doc also mentions a null topic being rejected; the test body has
 /// no such case, and Rust's `ProducerRecord` cannot hold a null topic.)
 async fn send_offset_inner<F: ProducerBackendFactory>(ctx: &mut TestContext, factory: &F) {
+    send_offset_with_security(ctx, factory, SendTestSecurity::Plaintext).await;
+}
+
+/// [`send_offset_inner`] with the suite's `securityProtocol` (PLAINTEXT or,
+/// for `SslProducerSendTest`, SSL).
+async fn send_offset_with_security<F: ProducerBackendFactory>(
+    ctx: &mut TestContext,
+    factory: &F,
+    security: SendTestSecurity,
+) {
     let topic = ctx.topic("topic");
     let producer = factory
-        .create(send_test_producer_config(
-            &bootstrap_for(factory, ctx),
-            &SendTestProducerOpts::default(),
-        ))
+        .create(security.producer_config(factory, ctx, &SendTestProducerOpts::default()))
         .await
         .expect("Failed to create producer");
     let partition = 0;
@@ -489,7 +555,7 @@ async fn send_offset_inner<F: ProducerBackendFactory>(ctx: &mut TestContext, fac
         ))
     };
 
-    let admin = send_test_admin(ctx);
+    let admin = send_test_admin_with_security(ctx, security);
     create_topic_with_admin(admin.as_ref(), &topic, 1, 2).await;
 
     let record0 = || {
@@ -982,18 +1048,29 @@ async fn produce_record_too_large_inner<F: ProducerBackendFactory>(ctx: &mut Tes
 /// every future is complete afterwards. The native backend runs Java's exact
 /// shape: 50 rounds of `numRecords` sends, not-done before `flush()`, done after.
 async fn flush_sends_pending_records_inner<F: ProducerBackendFactory>(ctx: &mut TestContext, factory: &F) {
+    flush_with_security(ctx, factory, SendTestSecurity::Plaintext).await;
+}
+
+/// [`flush_sends_pending_records_inner`] with the suite's `securityProtocol`
+/// (PLAINTEXT or, for `SslProducerSendTest`, SSL).
+async fn flush_with_security<F: ProducerBackendFactory>(
+    ctx: &mut TestContext,
+    factory: &F,
+    security: SendTestSecurity,
+) {
     let native = factory.name() == "rust";
     let topic = ctx.topic("topic");
     let linger_ms = if native { INT_MAX_VALUE } else { 0 };
     let producer = factory
-        .create(send_test_producer_config(
-            &bootstrap_for(factory, ctx),
+        .create(security.producer_config(
+            factory,
+            ctx,
             &SendTestProducerOpts { linger_ms, delivery_timeout_ms: INT_MAX_VALUE, ..SendTestProducerOpts::default() },
         ))
         .await
         .expect("Failed to create producer");
 
-    let admin = send_test_admin(ctx);
+    let admin = send_test_admin_with_security(ctx, security);
     create_topic_with_admin(admin.as_ref(), &topic, 2, 2).await;
     admin.close_with_timeout(Duration::from_secs(5)).await;
 
@@ -1018,6 +1095,61 @@ async fn flush_sends_pending_records_inner<F: ProducerBackendFactory>(ctx: &mut 
     }
 
     producer.close().await.expect("close should succeed");
+}
+
+/// Translated from `BaseProducerSendTest.testClose`
+/// (`BaseProducerSendTest.scala:296-325`): after `close()` returns, every
+/// non-blocking send has been acked, and the last one carries offset
+/// `numRecords` (records with the same key go to the same partition).
+///
+/// On the gRPC backends `Send` blocks until delivery, so `response0` is already
+/// complete before `close()`; the assertions still hold and are kept.
+async fn close_inner<F: ProducerBackendFactory>(ctx: &mut TestContext, factory: &F) {
+    close_with_security(ctx, factory, SendTestSecurity::Plaintext).await;
+}
+
+/// [`close_inner`] with the suite's `securityProtocol` (PLAINTEXT or, for
+/// `SslProducerSendTest`, SSL).
+async fn close_with_security<F: ProducerBackendFactory>(
+    ctx: &mut TestContext,
+    factory: &F,
+    security: SendTestSecurity,
+) {
+    let topic = ctx.topic("topic");
+    let producer = factory
+        .create(security.producer_config(factory, ctx, &SendTestProducerOpts::default()))
+        .await
+        .expect("Failed to create producer");
+
+    // create topic
+    let admin = send_test_admin_with_security(ctx, security);
+    create_topic_with_admin(admin.as_ref(), &topic, 1, 2).await;
+    admin.close_with_timeout(Duration::from_secs(5)).await;
+
+    // non-blocking send a list of records
+    let record0 = || ProducerRecord::with_partition_key(topic.clone(), None, Some(b("key")), Some(b("value")));
+    for _ in 0..NUM_RECORDS {
+        producer
+            .send(record0().expect("valid record"))
+            .await
+            .expect("send should succeed");
+    }
+    let response0 = producer
+        .send(record0().expect("valid record"))
+        .await
+        .expect("send should succeed");
+
+    // close the producer
+    producer.close().await.expect("close should succeed");
+
+    // check that all messages have been acked via offset,
+    // this also checks that messages with same key go to the same partition
+    assert!(
+        response0.is_done(),
+        "The last message should be acked before producer is shutdown"
+    );
+    let offset = response0.get().await.expect("the last send should succeed").offset();
+    assert_eq!(NUM_RECORDS as i64, offset, "Should have offset {NUM_RECORDS}");
 }
 
 /// Test: Send records, call close(), verify records were delivered.
@@ -2357,6 +2489,48 @@ crate::multilanguage_test!(
 );
 #[cfg(feature = "multilanguage-tests")]
 crate::multilanguage_test!(test_close_flushes_pending, close_flushes_pending_inner);
+#[cfg(feature = "multilanguage-tests")]
+crate::multilanguage_test!(test_close, close_inner, producer_send_cluster_config());
+
+// `kafka.api.SslProducerSendTest` (`SslProducerSendTest.scala:24-27`): the
+// `BaseProducerSendTest` bodies over the SSL listener. Native backend only under
+// both feature sets — see `SendTestSecurity::producer_config`.
+
+/// `SslProducerSendTest.testSendOffset` (`BaseProducerSendTest.scala:127-194`).
+#[tokio::test(flavor = "multi_thread")]
+async fn test_ssl_send_offset() {
+    let mut ctx = TestContext::new(producer_send_cluster_config()).await;
+    send_offset_with_security(
+        &mut ctx,
+        &crate::common::backend_factory::RustNativeFactory,
+        SendTestSecurity::Ssl,
+    )
+    .await;
+}
+
+/// `SslProducerSendTest.testClose` (`BaseProducerSendTest.scala:296-325`).
+#[tokio::test(flavor = "multi_thread")]
+async fn test_ssl_close() {
+    let mut ctx = TestContext::new(producer_send_cluster_config()).await;
+    close_with_security(
+        &mut ctx,
+        &crate::common::backend_factory::RustNativeFactory,
+        SendTestSecurity::Ssl,
+    )
+    .await;
+}
+
+/// `SslProducerSendTest.testFlush` (`BaseProducerSendTest.scala:483-501`).
+#[tokio::test(flavor = "multi_thread")]
+async fn test_ssl_flush() {
+    let mut ctx = TestContext::new(producer_send_cluster_config()).await;
+    flush_with_security(
+        &mut ctx,
+        &crate::common::backend_factory::RustNativeFactory,
+        SendTestSecurity::Ssl,
+    )
+    .await;
+}
 
 // New tests translated from Java/Scala sources (see COVERAGE-ASSESSMENT.md).
 // Tests using the restrictive cluster (no auto-create + small message.max.bytes)
@@ -2915,6 +3089,10 @@ mod rust_only_fallback {
     #[tokio::test(flavor = "multi_thread")]
     async fn test_close_flushes_pending() {
         close_flushes_pending_inner(&mut ctx().await, &RustNativeFactory).await;
+    }
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_close() {
+        close_inner(&mut send_ctx().await, &RustNativeFactory).await;
     }
 
     // The 8 newly translated multi-language tests, run rust-only when
