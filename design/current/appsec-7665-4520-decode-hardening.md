@@ -266,6 +266,18 @@ followed and the difference is recorded here.
    `load_next_batch` (D7, D2, the checksum, decompression) now go through one
    `invalid_batch_error` that appends the message only, so D2's text is
    exactly Java's.
+
+   Three older wrappers outside `load_next_batch` had the same prefix (Critic
+   78 named the first two): `peek_current_record`, `contains_abort_marker` and
+   the headers wrap in `fetch_records`. They now append `message()` too, and
+   tests pin the first two texts exactly. The headers wrap has no such test:
+   its only trigger is a header key that is not UTF-8, which Java decodes with
+   replacement characters instead of failing (`RecordHeader.key()`), a
+   separate pre-existing divergence. The wrappers themselves are a
+   pre-existing structural deviation outside this ticket: Java propagates the
+   `InvalidRecordException` from `records.next()` / `batchIterator.next()`
+   unwrapped, where this client wraps it in a message naming the partition
+   and offset.
 4. **D7's error** is the crate's unsupported-path error
    (`Error::unsupported_version`, code `UNSUPPORTED_VERSION`) from
    `ByteBufferLogInputStream::next_batch`; `load_next_batch` reports the same
@@ -274,7 +286,12 @@ followed and the difference is recorded here.
    Java's `containsAbortMarker` builds `batch.iterator()` (`CompletedFetch.java:376-386`),
    whose `RecordIterator` rejects a negative count; `contains_abort_marker`
    now does the same. An aborted data batch is still skipped before its count
-   is read, in Java's order.
+   is read, in Java's order. The check changes the outcome only for a
+   non-ABORT control batch whose producer id is in the aborted set — any other
+   batch reaches the install-point check, which raises the same text — so its
+   test builds exactly that fetch; without the check the batch is silently
+   skipped as aborted (Critic 78; the test was shown to fail with the check
+   disabled).
 6. **`records_section` and the CRC are bounded by the view's slice**, which is
    Java's `buffer.limit()` (`DefaultRecordBatch.java:273-277`, `:399-401`),
    not by the declared size. With the slice limited to the declared size the

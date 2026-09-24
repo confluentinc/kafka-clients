@@ -660,12 +660,14 @@ impl CompletedFetch {
                 // The only owned copy of record payload on the happy path:
                 // the §27-sanctioned `RecordHeaders` (Milestone-8 holds
                 // owned headers on the emitted `ConsumerRecord`).
+                // By the cause's message, not its class-prefixed `Display`, as in
+                // `peek_current_record`.
                 let headers_vec = record.headers().map_err(|e| {
                     Error::InvalidRecord(InvalidRecordError::new(format!(
                         "Record for partition {} at offset {} has invalid headers, cause: {}",
                         self.partition,
                         record.offset(),
-                        e
+                        e.message()
                     )))
                 })?;
                 headers_owned = RecordHeaders::from_headers(headers_vec);
@@ -996,6 +998,12 @@ impl CompletedFetch {
         // or silently dropping the rest of the batch — matching Java
         // `DefaultRecordBatch.RecordIterator`, which throws
         // `InvalidRecordException` (CRC-independent).
+        //
+        // The cause is appended by its message, not its `Display`, which
+        // prefixes the class name (`InvalidRecordError: `) that Java's
+        // `getMessage()` does not carry. Java propagates this exception
+        // unwrapped; the wrapper that names the partition and offset is this
+        // client's.
         let (record, _consumed) = DefaultRecord::read_ref_from_buffer(
             &records_bytes[cursor.record_byte_offset..],
             batch_meta.base_offset,
@@ -1006,7 +1014,9 @@ impl CompletedFetch {
         .map_err(|e| {
             Error::InvalidRecord(InvalidRecordError::new(format!(
                 "Record batch for partition {} at offset {} is invalid, cause: {}",
-                self.partition, batch_meta.base_offset, e
+                self.partition,
+                batch_meta.base_offset,
+                e.message()
             )))
         })?;
         Ok(Some((record, batch_meta)))
@@ -1064,6 +1074,8 @@ impl CompletedFetch {
         } else {
             None
         };
+        // By the cause's message, as in `peek_current_record`: Java's
+        // `batchIterator.next()` throws the `InvalidRecordException` unwrapped.
         let (record, _consumed) = DefaultRecord::read_ref_from_buffer(
             records_bytes,
             batch.base_offset,
@@ -1074,7 +1086,9 @@ impl CompletedFetch {
         .map_err(|e| {
             Error::InvalidRecord(InvalidRecordError::new(format!(
                 "Control batch for partition {} at offset {} is invalid, cause: {}",
-                self.partition, batch.base_offset, e
+                self.partition,
+                batch.base_offset,
+                e.message()
             )))
         })?;
         // A control record always has a key; a control batch whose first record has
@@ -2783,22 +2797,39 @@ mod tests {
     }
 
     /// D3 on the control-batch path: Java's `containsAbortMarker` builds the
-    /// batch's iterator (`CompletedFetch.java:376-386`), so a negative count
-    /// fails there under READ_COMMITTED.
+    /// batch's iterator (`CompletedFetch.java:376-386`), whose `RecordIterator`
+    /// rejects a negative count (`DefaultRecordBatch.java:584-587`), so the
+    /// count fails there under READ_COMMITTED.
+    ///
+    /// The control batch's producer id is in the aborted set, so that check is
+    /// the only one that can raise the error. Were it missing,
+    /// `contains_abort_marker` would answer `false` (the fixture's record has no
+    /// key) and the next branch would skip the batch as aborted — where Java has
+    /// already thrown — ending the fetch with no error. With no aborted
+    /// transaction the batch would instead reach the install-point D3 check,
+    /// whose identical message would hide a missing control-batch check.
     #[test]
     fn test_negative_record_count_in_a_control_batch_is_invalid() {
+        const PRODUCER_ID: i64 = 1000;
         let mut buf = batch_full(0, 2, RecordBatch::NO_PRODUCER_ID, false, false);
         let control_start = buf.len();
-        buf.extend_from_slice(&control_batch(2, 1, 1000));
+        buf.extend_from_slice(&control_batch(2, 1, PRODUCER_ID));
         put_i32(&mut buf, control_start + RecordBatch::RECORDS_COUNT_OFFSET, -1);
         recompute_crc(&mut buf[control_start..]);
 
-        let mut cf = new_completed_fetch(0, buf);
+        let mut cf = CompletedFetch::new_full(
+            make_subscriptions(),
+            Arc::new(BufferSupplier::create()),
+            tp("test", 0),
+            partition_data_with_aborted_txn(buf, PRODUCER_ID, 2),
+            test_aggregator(),
+            0,
+        );
         let config = make_fetch_config(IsolationLevel::ReadCommitted, true);
         let first = cf
             .fetch_records::<String, String>(&config, &StringDeserializer, &StringDeserializer, 10)
             .expect("the first batch's records are returned");
-        assert_eq!(2, first.len());
+        assert_eq!(vec![0, 1], first.iter().map(ConsumerRecord::offset).collect::<Vec<_>>());
         let err = cf
             .fetch_records::<String, String>(&config, &StringDeserializer, &StringDeserializer, 10)
             .expect_err("the control batch's count is invalid");
@@ -2806,6 +2837,63 @@ mod tests {
         let cause = cause(&err);
         assert!(matches!(cause, Error::InvalidRecord(_)), "{cause:?}");
         assert_eq!("Found invalid record count -1 in magic v2 batch", cause.message());
+    }
+
+    /// Declares a batch's first record 63 bytes long where 13 remain, by
+    /// rewriting its one-byte size varint (zigzag 26 → 126), and re-signs the
+    /// batch so the fault is the record, not the checksum. The batch must hold
+    /// one record whose value is 7 bytes and whose key is null, as `batch_full`
+    /// and `control_batch` build it.
+    fn overstate_first_record_size(batch: &mut [u8]) {
+        assert_eq!(26, batch[RecordBatch::RECORD_BATCH_OVERHEAD], "a 13-byte record body");
+        batch[RecordBatch::RECORD_BATCH_OVERHEAD] = 126;
+        recompute_crc(batch);
+    }
+
+    /// Java's text for the overstated record (`DefaultRecord.java:312-315`).
+    const OVERSTATED_RECORD_CAUSE: &str =
+        "Invalid record size: expected 63 bytes in record payload, but instead the buffer has only 13 remaining bytes.";
+
+    /// A malformed record is reported with the cause's message after `cause: `,
+    /// as Java's `getMessage()` gives it, not with its `Display`, which prefixes
+    /// the class name (`InvalidRecordError: `).
+    #[test]
+    fn test_malformed_record_is_reported_by_the_cause_message() {
+        let mut buf = batch_full(0, 1, RecordBatch::NO_PRODUCER_ID, false, false);
+        overstate_first_record_size(&mut buf);
+        let mut cf = new_completed_fetch(0, buf);
+        let config = make_fetch_config(IsolationLevel::ReadUncommitted, true);
+        let err = cf
+            .fetch_records::<String, String>(&config, &StringDeserializer, &StringDeserializer, 10)
+            .expect_err("the record declares more bytes than its batch holds");
+        assert_eq!(SEEK_PAST_MESSAGE, err.message());
+        let cause = cause(&err);
+        assert!(matches!(cause, Error::InvalidRecord(_)), "{cause:?}");
+        assert_eq!(
+            format!("Record batch for partition test-0 at offset 0 is invalid, cause: {OVERSTATED_RECORD_CAUSE}"),
+            cause.message()
+        );
+    }
+
+    /// The same for a control batch's first record, read under READ_COMMITTED by
+    /// `contains_abort_marker` (Java's `batchIterator.next()`,
+    /// `CompletedFetch.java:384`).
+    #[test]
+    fn test_malformed_control_record_is_reported_by_the_cause_message() {
+        let mut buf = control_batch(2, 1, 1000);
+        overstate_first_record_size(&mut buf);
+        let mut cf = new_completed_fetch(2, buf);
+        let config = make_fetch_config(IsolationLevel::ReadCommitted, true);
+        let err = cf
+            .fetch_records::<String, String>(&config, &StringDeserializer, &StringDeserializer, 10)
+            .expect_err("the control record declares more bytes than its batch holds");
+        assert_eq!(SEEK_PAST_MESSAGE, err.message());
+        let cause = cause(&err);
+        assert!(matches!(cause, Error::InvalidRecord(_)), "{cause:?}");
+        assert_eq!(
+            format!("Control batch for partition test-0 at offset 2 is invalid, cause: {OVERSTATED_RECORD_CAUSE}"),
+            cause.message()
+        );
     }
 
     /// A header declaring more bytes than remain is no batch — Java's
