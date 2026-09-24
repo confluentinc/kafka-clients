@@ -37,7 +37,8 @@ namespace Confluent.Kafka.Admin;
 /// partition count is 1 and the default replication factor is
 /// <c>min(numBrokers, 3)</c>. <b>Clipped to today's ABI:</b> Java's mock also accepts an
 /// explicit broker list and controller; the ABI exposes only the broker count, so that
-/// is what this constructor takes.
+/// is what this constructor takes. Java's <c>addTopic</c>, <c>markTopicForDeletion</c>
+/// and the broker log-dir seeder are likewise clipped — they are not at the C ABI.
 /// </para>
 /// </remarks>
 public sealed class MockAdminClient : IAdmin
@@ -396,4 +397,75 @@ public sealed class MockAdminClient : IAdmin
 
     /// <inheritdoc/>
     public ValueTask DisposeAsync() => _native.DisposeAsync();
+
+    // ---- Seeding — inherent, never on IAdmin (admin-client.md §9) ----
+
+    /// <summary>
+    /// Makes the next <paramref name="numberOfRequests"/> operations fail with a timeout —
+    /// Java's <c>MockAdminClient.timeoutNextRequest(int)</c>.
+    /// </summary>
+    /// <param name="numberOfRequests">How many subsequent operations to time out.</param>
+    /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
+    public void TimeoutNextRequest(int numberOfRequests) =>
+        _native.TimeoutNextRequest(numberOfRequests);
+
+    /// <summary>
+    /// Seeds the offsets <see cref="ListOffsets"/> reports for <c>OffsetSpec.Earliest</c> —
+    /// Java's <c>MockAdminClient.updateBeginningOffsets(Map)</c>. <b>Merges</b> into what
+    /// was seeded before.
+    /// </summary>
+    /// <param name="offsets">The beginning offset per topic partition.</param>
+    /// <exception cref="ArgumentNullException"><paramref name="offsets"/> is null.</exception>
+    /// <exception cref="ArgumentException">A key has a null topic.</exception>
+    /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
+    public void UpdateBeginningOffsets(IReadOnlyDictionary<TopicPartition, long> offsets) =>
+        _native.UpdateBeginningOffsets(offsets);
+
+    /// <summary>
+    /// Seeds the offsets <see cref="ListOffsets"/> reports for every <c>OffsetSpec</c> other
+    /// than earliest and for-timestamp — Java's
+    /// <c>MockAdminClient.updateEndOffsets(Map)</c>. <b>Merges</b>.
+    /// </summary>
+    /// <param name="offsets">The end offset per topic partition.</param>
+    /// <exception cref="ArgumentNullException"><paramref name="offsets"/> is null.</exception>
+    /// <exception cref="ArgumentException">A key has a null topic.</exception>
+    /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
+    public void UpdateEndOffsets(IReadOnlyDictionary<TopicPartition, long> offsets) =>
+        _native.UpdateEndOffsets(offsets);
+
+    /// <summary>
+    /// Seeds the committed offsets <c>ListConsumerGroupOffsets</c> reports — Java's
+    /// <c>MockAdminClient.updateConsumerGroupOffsets(Map)</c>. <b>Merges</b>.
+    /// </summary>
+    /// <param name="offsets">The committed offset per topic partition.</param>
+    /// <remarks>
+    /// The mock keys these by partition only and ignores the group id, so there is no group
+    /// parameter; the real client has no such restriction.
+    /// </remarks>
+    /// <exception cref="ArgumentNullException"><paramref name="offsets"/> is null.</exception>
+    /// <exception cref="ArgumentException">A key has a null topic.</exception>
+    /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
+    public void UpdateConsumerGroupOffsets(IReadOnlyDictionary<TopicPartition, long> offsets) =>
+        _native.UpdateConsumerGroupOffsets(offsets);
+
+    /// <summary>
+    /// Seeds the feature levels <see cref="DescribeFeatures"/> reports and
+    /// <see cref="UpdateFeatures"/> validates against. <b>Replaces</b> what was seeded
+    /// before, unlike the offset setters.
+    /// </summary>
+    /// <param name="featureLevels">
+    /// The current, minimum-supported and maximum-supported level per feature.
+    /// </param>
+    /// <remarks>
+    /// Java takes these as three separate <c>MockAdminClient.Builder</c> setters
+    /// (<c>featureLevels</c> / <c>minSupportedFeatureLevels</c> /
+    /// <c>maxSupportedFeatureLevels</c>); the ABI exposes one setter over a shared key set,
+    /// so the three levels travel together per feature — the shape Python binds too.
+    /// </remarks>
+    /// <exception cref="ArgumentNullException"><paramref name="featureLevels"/> is null.</exception>
+    /// <exception cref="ArgumentException">A key is null.</exception>
+    /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
+    public void SetFeatureLevels(
+        IReadOnlyDictionary<string, (short Level, short MinSupported, short MaxSupported)> featureLevels) =>
+        _native.SetFeatureLevels(featureLevels);
 }

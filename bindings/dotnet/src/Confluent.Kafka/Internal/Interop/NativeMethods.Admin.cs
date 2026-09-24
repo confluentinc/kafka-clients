@@ -4252,4 +4252,61 @@ internal static partial class NativeMethods
     /// </summary>
     [DllImport(DllName, EntryPoint = "kafka_common_ClientQuotaEntity_destroy", CallingConvention = CallingConvention.Cdecl)]
     internal static extern void ClientQuotaEntityDestroy(IntPtr entity);
+
+    // ---- kafka_admin_MockAdminClient_t — mock-only seeding (M15/P12) ----
+    //
+    // All five are SYNCHRONOUS and return an OWNED kafka_common_Error_t* (null =
+    // success; non-null only when the handle does not wrap a mock), so each takes its
+    // SafeAdminHandle as the P/Invoke parameter per the sync convention (ffi §A2) and
+    // the caller frees the result through KafkaException.FromHandle (ffi §A5).
+    // Every array parameter is read element-by-element behind a null check on the
+    // core side, so a null or zero-length array is safe at count 0.
+
+    /// <summary>
+    /// <c>kafka_admin_MockAdminClient_timeout_next_request</c> — Java's
+    /// <c>MockAdminClient.timeoutNextRequest(int)</c>.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_MockAdminClient_timeout_next_request", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr MockAdminClientTimeoutNextRequest(SafeAdminHandle admin, int numberOfRequests);
+
+    /// <summary>
+    /// <c>kafka_admin_MockAdminClient_set_feature_levels</c> — the three
+    /// <c>MockAdminClient.Builder</c> feature setters collapsed into one, over a shared
+    /// key set. <b>Replaces</b> rather than merges.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_MockAdminClient_set_feature_levels", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr MockAdminClientSetFeatureLevels(
+        SafeAdminHandle admin,
+        IntPtr[] features,
+        short[] levels,
+        short[] minLevels,
+        short[] maxLevels,
+        int count);
+
+    /// <summary>
+    /// <c>kafka_admin_MockAdminClient_update_beginning_offsets</c> — Java's
+    /// <c>MockAdminClient.updateBeginningOffsets(Map)</c>. <b>Merges</b> into what was
+    /// seeded before.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_MockAdminClient_update_beginning_offsets", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr MockAdminClientUpdateBeginningOffsets(
+        SafeAdminHandle admin, IntPtr[] topics, int[] partitions, long[] offsets, int count);
+
+    /// <summary>
+    /// <c>kafka_admin_MockAdminClient_update_end_offsets</c> — Java's
+    /// <c>MockAdminClient.updateEndOffsets(Map)</c>. <b>Merges</b>.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_MockAdminClient_update_end_offsets", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr MockAdminClientUpdateEndOffsets(
+        SafeAdminHandle admin, IntPtr[] topics, int[] partitions, long[] offsets, int count);
+
+    /// <summary>
+    /// <c>kafka_admin_MockAdminClient_update_consumer_group_offsets</c> — Java's
+    /// <c>MockAdminClient.updateConsumerGroupOffsets(Map)</c>. <b>Merges</b>. The mock
+    /// keys these by partition only and ignores the group id, so there is no group
+    /// parameter.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_MockAdminClient_update_consumer_group_offsets", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr MockAdminClientUpdateConsumerGroupOffsets(
+        SafeAdminHandle admin, IntPtr[] topics, int[] partitions, long[] offsets, int count);
 }

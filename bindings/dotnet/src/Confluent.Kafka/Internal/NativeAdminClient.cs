@@ -6709,6 +6709,156 @@ internal sealed class NativeAdminClient : IDisposable
         }
     }
 
+    // ---- Mock-only seeding (M15/P12) ----
+    //
+    // Inherent on MockAdminClient, never on IAdmin (admin-client.md §9). Each is a
+    // SYNCHRONOUS ABI call returning an owned kafka_common_Error_t* — non-null only when
+    // the handle does not wrap a mock — so the handle goes through as the SafeAdminHandle
+    // (ffi §A2) and the result through KafkaException.FromHandle (ffi §A5). The pins are
+    // call-scoped: the core copies every string out during the call (ffi §A4).
+
+    /// <summary>
+    /// The shape the three partition-keyed offset setters share, so one marshalling body
+    /// serves all three.
+    /// </summary>
+    private delegate IntPtr NativeMockOffsetSeed(
+        SafeAdminHandle admin, IntPtr[] topics, int[] partitions, long[] offsets, int count);
+
+    /// <summary>Java's <c>MockAdminClient.timeoutNextRequest(int)</c>.</summary>
+    internal void TimeoutNextRequest(int numberOfRequests)
+    {
+        ThrowIfClosed();
+        ThrowIfError(NativeMethods.MockAdminClientTimeoutNextRequest(_handle, numberOfRequests));
+    }
+
+    /// <summary>Java's <c>MockAdminClient.updateBeginningOffsets(Map)</c>. Merges.</summary>
+    internal void UpdateBeginningOffsets(IReadOnlyDictionary<TopicPartition, long> offsets) =>
+        SeedOffsets(offsets, nameof(offsets), NativeMethods.MockAdminClientUpdateBeginningOffsets);
+
+    /// <summary>Java's <c>MockAdminClient.updateEndOffsets(Map)</c>. Merges.</summary>
+    internal void UpdateEndOffsets(IReadOnlyDictionary<TopicPartition, long> offsets) =>
+        SeedOffsets(offsets, nameof(offsets), NativeMethods.MockAdminClientUpdateEndOffsets);
+
+    /// <summary>Java's <c>MockAdminClient.updateConsumerGroupOffsets(Map)</c>. Merges.</summary>
+    internal void UpdateConsumerGroupOffsets(IReadOnlyDictionary<TopicPartition, long> offsets) =>
+        SeedOffsets(offsets, nameof(offsets), NativeMethods.MockAdminClientUpdateConsumerGroupOffsets);
+
+    /// <summary>
+    /// The three <c>MockAdminClient.Builder</c> feature setters, over one shared key set.
+    /// Replaces rather than merges.
+    /// </summary>
+    internal void SetFeatureLevels(
+        IReadOnlyDictionary<string, (short Level, short MinSupported, short MaxSupported)> featureLevels)
+    {
+        ThrowIfClosed();
+
+        if (featureLevels is null)
+        {
+            throw new ArgumentNullException(nameof(featureLevels));
+        }
+
+        IntPtr[] features = new IntPtr[featureLevels.Count];
+        short[] levels = new short[featureLevels.Count];
+        short[] minLevels = new short[featureLevels.Count];
+        short[] maxLevels = new short[featureLevels.Count];
+        List<Utf8Marshal.PinnedUtf8String> pinned =
+            new List<Utf8Marshal.PinnedUtf8String>(featureLevels.Count);
+        try
+        {
+            int next = 0;
+            foreach (KeyValuePair<string, (short Level, short MinSupported, short MaxSupported)> entry
+                in featureLevels)
+            {
+                // The core SKIPS a null name, silently dropping the row (ffi §B5).
+                if (entry.Key is null)
+                {
+                    throw new ArgumentException(
+                        "The feature-levels map must not contain a null feature name.",
+                        nameof(featureLevels));
+                }
+
+                Utf8Marshal.PinnedUtf8String feature = Utf8Marshal.Pin(entry.Key);
+                pinned.Add(feature);
+                features[next] = feature.Pointer;
+                levels[next] = entry.Value.Level;
+                minLevels[next] = entry.Value.MinSupported;
+                maxLevels[next] = entry.Value.MaxSupported;
+                next++;
+            }
+
+            ThrowIfError(NativeMethods.MockAdminClientSetFeatureLevels(
+                _handle, features, levels, minLevels, maxLevels, next));
+        }
+        finally
+        {
+            foreach (Utf8Marshal.PinnedUtf8String feature in pinned)
+            {
+                feature.Dispose();
+            }
+        }
+    }
+
+    /// <summary>The shared marshalling for the three partition-keyed offset setters.</summary>
+    private void SeedOffsets(
+        IReadOnlyDictionary<TopicPartition, long> offsets,
+        string parameterName,
+        NativeMockOffsetSeed seed)
+    {
+        ThrowIfClosed();
+
+        if (offsets is null)
+        {
+            throw new ArgumentNullException(parameterName);
+        }
+
+        IntPtr[] topics = new IntPtr[offsets.Count];
+        int[] partitions = new int[offsets.Count];
+        long[] values = new long[offsets.Count];
+        List<Utf8Marshal.PinnedUtf8String> pinned =
+            new List<Utf8Marshal.PinnedUtf8String>(offsets.Count);
+        try
+        {
+            int next = 0;
+            foreach (KeyValuePair<TopicPartition, long> entry in offsets)
+            {
+                // A `default(TopicPartition)` has a null Topic, which the core SKIPS —
+                // silently dropping the entry (ffi §B5), as DeleteRecords guards too.
+                if (entry.Key.Topic is null)
+                {
+                    throw new ArgumentException(
+                        "The offsets map must not contain a topic partition with a null topic.",
+                        parameterName);
+                }
+
+                Utf8Marshal.PinnedUtf8String topic = Utf8Marshal.Pin(entry.Key.Topic);
+                pinned.Add(topic);
+                topics[next] = topic.Pointer;
+                partitions[next] = entry.Key.Partition;
+                values[next] = entry.Value;
+                next++;
+            }
+
+            ThrowIfError(seed(_handle, topics, partitions, values, next));
+        }
+        finally
+        {
+            foreach (Utf8Marshal.PinnedUtf8String topic in pinned)
+            {
+                topic.Dispose();
+            }
+        }
+    }
+
+    /// <summary>Raises the owned error a synchronous mock-seeding call returned.</summary>
+    private static void ThrowIfError(IntPtr error)
+    {
+        KafkaException? failure = KafkaException.FromHandle(error);
+        if (failure is not null)
+        {
+            throw failure;
+        }
+    }
+
     /// <summary>
     /// The exhaustiveness arm for a <see cref="TopicCollection"/> switch. Unreachable by
     /// construction — the outer constructor is private and both subclasses are sealed, so
