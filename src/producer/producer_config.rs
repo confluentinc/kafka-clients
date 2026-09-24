@@ -25,6 +25,7 @@ use std::sync::atomic::{self, AtomicI32};
 
 use log::{info, warn};
 
+use crate::MetadataRecoveryStrategy;
 use crate::common::Error;
 use crate::common::config::config_def::ValidList;
 use crate::common::config::{SaslConfig, SaslConfigs, SslConfig};
@@ -175,6 +176,16 @@ pub struct ProducerConfig {
     /// an idle topic. Default: 300000 ms (5 minutes).
     pub(crate) metadata_max_idle_ms: i64,
 
+    /// `metadata.recovery.strategy` - How the client recovers when none of the
+    /// brokers known to it is available. Default: `rebootstrap`
+    /// (`ProducerConfig.java:548-554`).
+    pub(crate) metadata_recovery_strategy: MetadataRecoveryStrategy,
+
+    /// `metadata.recovery.rebootstrap.trigger.ms` - How long a client configured
+    /// to rebootstrap waits without obtaining metadata before it rebootstraps.
+    /// Default: 300000 ms (`ProducerConfig.java:555-560`).
+    pub(crate) metadata_recovery_rebootstrap_trigger_ms: i64,
+
     // --- Partitioning ---
     /// `partitioner.adaptive.partitioning.enable` - Adapt to broker performance.
     /// Default: true.
@@ -303,6 +314,8 @@ impl Default for ProducerConfig {
             socket_connection_setup_timeout_max_ms: 30_000,
             metadata_max_age_ms: 5 * 60 * 1000,
             metadata_max_idle_ms: 5 * 60 * 1000,
+            metadata_recovery_strategy: MetadataRecoveryStrategy::Rebootstrap,
+            metadata_recovery_rebootstrap_trigger_ms: 300 * 1000,
             partitioner_adaptive_partitioning_enable: true,
             partitioner_availability_timeout_ms: 0,
             partitioner_ignore_keys: false,
@@ -374,6 +387,11 @@ impl ProducerConfig {
     pub const METADATA_MAX_AGE_CONFIG: &'static str = "metadata.max.age.ms";
     /// Config key: `metadata.max.idle.ms`
     pub const METADATA_MAX_IDLE_CONFIG: &'static str = "metadata.max.idle.ms";
+    /// Config key: `metadata.recovery.strategy`
+    pub const METADATA_RECOVERY_STRATEGY_CONFIG: &'static str = "metadata.recovery.strategy";
+    /// Config key: `metadata.recovery.rebootstrap.trigger.ms`
+    pub const METADATA_RECOVERY_REBOOTSTRAP_TRIGGER_MS_CONFIG: &'static str =
+        "metadata.recovery.rebootstrap.trigger.ms";
     /// Config key: `partitioner.adaptive.partitioning.enable`
     pub const PARTITIONER_ADAPTIVE_PARTITIONING_ENABLE_CONFIG: &'static str =
         "partitioner.adaptive.partitioning.enable";
@@ -534,6 +552,15 @@ impl ProducerConfig {
                 },
                 Self::METADATA_MAX_IDLE_CONFIG => {
                     config.metadata_max_idle_ms = Self::parse_i64(key, value)?;
+                },
+                Self::METADATA_RECOVERY_STRATEGY_CONFIG => {
+                    // Java: `ConfigDef.CaseInsensitiveValidString.in("none", "rebootstrap")`
+                    // (`ProducerConfig.java:551`).
+                    config.metadata_recovery_strategy =
+                        MetadataRecoveryStrategy::for_name(value).map_err(|_| Error::config_name_value(key, value))?;
+                },
+                Self::METADATA_RECOVERY_REBOOTSTRAP_TRIGGER_MS_CONFIG => {
+                    config.metadata_recovery_rebootstrap_trigger_ms = Self::parse_i64(key, value)?;
                 },
                 Self::PARTITIONER_ADAPTIVE_PARTITIONING_ENABLE_CONFIG => {
                     config.partitioner_adaptive_partitioning_enable = Self::parse_bool(key, value)?;
@@ -902,6 +929,8 @@ mod tests {
         assert_eq!(config.receive_buffer_bytes, 32_768);
         assert_eq!(config.metadata_max_age_ms, 300_000);
         assert_eq!(config.metadata_max_idle_ms, 300_000);
+        assert_eq!(config.metadata_recovery_strategy, MetadataRecoveryStrategy::Rebootstrap);
+        assert_eq!(config.metadata_recovery_rebootstrap_trigger_ms, 300_000);
         assert!(config.partitioner_adaptive_partitioning_enable);
         assert_eq!(config.partitioner_availability_timeout_ms, 0);
         assert!(!config.partitioner_ignore_keys);
@@ -916,6 +945,34 @@ mod tests {
         assert_eq!(config.metrics_recording_level, "INFO");
         // Java's `originals()` on a config built with no user map is empty.
         assert!(config.originals.is_empty());
+    }
+
+    /// `metadata.recovery.strategy` is a case-insensitive `none` / `rebootstrap`
+    /// string (`ProducerConfig.java:548-554`) and
+    /// `metadata.recovery.rebootstrap.trigger.ms` a long (`:555-560`). Before
+    /// these keys were parsed the producer silently ignored them and never
+    /// rebootstrapped (`ClientRebootstrapTest.testProducerRebootstrap`).
+    #[test]
+    fn test_metadata_recovery_configs() {
+        let mut props = base_props();
+        props.insert("metadata.recovery.strategy".to_string(), "NONE".to_string());
+        props.insert("metadata.recovery.rebootstrap.trigger.ms".to_string(), "1234".to_string());
+        let c = ProducerConfig::new(&props).unwrap();
+        assert_eq!(c.metadata_recovery_strategy, MetadataRecoveryStrategy::None);
+        assert_eq!(c.metadata_recovery_rebootstrap_trigger_ms, 1234);
+
+        let mut props = base_props();
+        props.insert("metadata.recovery.strategy".to_string(), "rebootstrap".to_string());
+        let c = ProducerConfig::new(&props).unwrap();
+        assert_eq!(c.metadata_recovery_strategy, MetadataRecoveryStrategy::Rebootstrap);
+
+        let mut props = base_props();
+        props.insert("metadata.recovery.strategy".to_string(), "bogus".to_string());
+        let err = ProducerConfig::new(&props).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            Error::config_name_value("metadata.recovery.strategy", "bogus").to_string()
+        );
     }
 
     /// `metrics.num.samples` is `atLeast(1)` (Java ProducerConfig /
