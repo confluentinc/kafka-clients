@@ -49,11 +49,11 @@ use confluent_kafka::common::Uuid;
 #[derive(Debug, Clone)]
 #[allow(dead_code)] // Acked / DeliveryCount land with the share consumer.
 pub enum WorkloadEvent {
-    /// Producer `producer` is about to hand `index` to the client. Opens the
-    /// record's in-flight window; the matching `Delivered` or `SendFailed`
-    /// closes it. The verifier derives from these that no producer ever has
-    /// more than one record in flight — the workload's contract (send, await
-    /// the ack, send the next), checked rather than assumed.
+    /// Producer `producer` is about to hand `index` to the client. This opens
+    /// the record's in-flight window; the matching `Delivered` or `SendFailed`
+    /// closes it. The verifier uses these events to verify that no producer has
+    /// more than one record in flight at any time, which is the producer
+    /// workload's contract (send, await the outcome, send the next).
     Sent {
         index: u64,
         topic: String,
@@ -196,6 +196,13 @@ struct ConservationState {
     delivered: HashMap<LogicalKey, PhysKey>,
     /// (topic, index) -> times the consumer observed it (>1 = redelivery).
     observed: HashMap<LogicalKey, u32>,
+    /// (topic, index) -> the distinct physical addresses at which the consumer
+    /// observed it. A single address is the expected case, and a re-read of the
+    /// same address does not add one. Two addresses within one `topic_id`
+    /// indicate that the producer committed the record twice, which
+    /// `enable.idempotence=true` is required to prevent. See
+    /// [`ConservationState::double_writes`].
+    observed_at: HashMap<LogicalKey, Vec<PhysKey>>,
     /// Physical addresses the consumer has seen — a second sighting of the same
     /// (topic_id, partition, offset) is a physical duplicate.
     phys_seen: HashMap<PhysKey, u32>,
@@ -222,17 +229,18 @@ struct ConservationState {
     /// drain-progress signal read by `consumed_progress_for_topic`, used to
     /// detect that a just-recreated topic's consumer has resumed.
     consumed_events_by_topic: HashMap<String, u64>,
-    /// (topic, index) currently in flight — `Sent`, but not yet `Delivered` or
-    /// `SendFailed` — mapped to the producer that sent it. The settling event
-    /// carries no producer identity; it is attributed through this map, which
-    /// relies on the logical key being unique across producers — the same
-    /// invariant the conservation maps already rest on (see [`LogicalKey`]).
+    /// (topic, index) currently in flight (`Sent`, but not yet `Delivered` or
+    /// `SendFailed`), mapped to the producer that sent it. The settling event
+    /// carries no producer identity, so it is attributed through this map. This
+    /// relies on the logical key being unique across producers, the same
+    /// invariant the conservation maps depend on (see [`LogicalKey`]).
     in_flight: HashMap<LogicalKey, String>,
     /// producer -> records currently in flight.
     in_flight_by_producer: HashMap<String, u32>,
-    /// producer -> the most records it ever had in flight at once. The producer
-    /// workload's contract is ONE (send, await the ack or failure, then send the
-    /// next); anything above that means the workload is not the one described.
+    /// producer -> the maximum number of records it had in flight at any one
+    /// time. The producer workload's contract is one (send, await the
+    /// acknowledgement or failure, then send the next); a higher value indicates
+    /// that the workload did not behave as documented.
     max_in_flight_by_producer: HashMap<String, u32>,
 }
 
@@ -273,6 +281,48 @@ impl ConservationState {
                 (topic.as_str(), max_observed)
             })
             .collect()
+    }
+
+    /// Classify logical records that the consumer observed at more than one
+    /// physical address.
+    ///
+    /// Returns `(double_writes, cross_generation)`:
+    ///   - `double_writes`: records observed at two or more distinct addresses
+    ///     that share a `topic_id`. The producer committed the same record twice
+    ///     into one topic generation, which an idempotent producer must never
+    ///     do. Each entry carries every address the record was observed at,
+    ///     sorted, for the report.
+    ///   - `cross_generation`: records whose addresses differ only in
+    ///     `topic_id`. A topic recreate destroys the broker-side producer state
+    ///     together with the old generation, so a record whose acknowledgement
+    ///     was lost in the delete window is legitimately retried into the new
+    ///     generation; the client cannot deduplicate across that boundary.
+    ///     These are reported but do not fail the run.
+    ///
+    /// Consumer re-reads (the same address observed more than once) fall into
+    /// neither category; they are covered by the `duplicates (by index)` and
+    /// `duplicates (by offset)` counters and by the 2× ratio bound.
+    fn double_writes(&self) -> (Vec<(LogicalKey, Vec<PhysKey>)>, usize) {
+        let mut double_writes = Vec::new();
+        let mut cross_generation = 0usize;
+        for (key, addrs) in &self.observed_at {
+            if addrs.len() < 2 {
+                continue;
+            }
+            let mut per_generation: HashMap<Uuid, usize> = HashMap::new();
+            for (topic_id, _, _) in addrs {
+                *per_generation.entry(*topic_id).or_insert(0) += 1;
+            }
+            if per_generation.values().any(|&n| n >= 2) {
+                let mut sorted = addrs.clone();
+                sorted.sort_unstable();
+                double_writes.push((key.clone(), sorted));
+            } else {
+                cross_generation += 1;
+            }
+        }
+        double_writes.sort_unstable();
+        (double_writes, cross_generation)
     }
 
     /// Delivered records currently scored as loss (unobserved, not expected-lost,
@@ -320,7 +370,12 @@ impl Verifier for ConservationVerifier {
             },
             WorkloadEvent::Consumed { index, topic, topic_id, partition, offset } => {
                 *s.observed.entry((topic.clone(), index)).or_insert(0) += 1;
-                *s.phys_seen.entry((topic_id, partition, offset)).or_insert(0) += 1;
+                let addr = (topic_id, partition, offset);
+                let addrs = s.observed_at.entry((topic.clone(), index)).or_default();
+                if !addrs.contains(&addr) {
+                    addrs.push(addr);
+                }
+                *s.phys_seen.entry(addr).or_insert(0) += 1;
                 s.partitions_seen.insert(partition);
                 s.consumed_events += 1;
                 *s.consumed_events_by_topic.entry(topic).or_insert(0) += 1;
@@ -384,8 +439,31 @@ impl Verifier for ConservationVerifier {
         // Physical duplicates: the same (topic_id, partition, offset) seen more
         // than once — a broker/client double-delivery at a fixed address.
         let physical_duplicates: u64 = s.phys_seen.values().map(|&c| u64::from(c.saturating_sub(1))).sum();
+        // Producer double writes: the same logical record committed at two
+        // addresses within one topic generation. Unlike the two counters above,
+        // which count consumer re-reads, this indicates a producer defect and
+        // fails the run.
+        let (double_writes, cross_generation_duplicates) = s.double_writes();
 
         let mut reasons = Vec::new();
+        if !double_writes.is_empty() {
+            // Render as `topic#index@[p<partition>/<offset>,...]` so the offsets
+            // a record was committed at can be located in the broker logs.
+            let sample_str: Vec<String> = double_writes
+                .iter()
+                .take(20)
+                .map(|((t, idx), addrs)| {
+                    let at: Vec<String> = addrs.iter().map(|(_, p, o)| format!("p{p}/{o}")).collect();
+                    format!("{t}#{idx}@[{}]", at.join(","))
+                })
+                .collect();
+            reasons.push(format!(
+                "producer duplicates: {} record(s) committed at more than one offset within a topic generation \
+                 (idempotence violated; sample: {sample_str:?})",
+                double_writes.len()
+            ));
+        }
+        let producer_duplicates: Vec<LogicalKey> = double_writes.into_iter().map(|(key, _)| key).collect();
         if !lost.is_empty() {
             let mut sample = lost.clone();
             sample.sort_unstable();
@@ -454,7 +532,8 @@ impl Verifier for ConservationVerifier {
             sample.truncate(20);
             let sample_str: Vec<String> = sample.iter().map(|(t, idx)| format!("{t}#{idx}")).collect();
             reasons.push(format!(
-                "unsettled sends: {unsettled_sends} record(s) sent but never acked or failed (sample: {sample_str:?})"
+                "unsettled sends: {unsettled_sends} record(s) sent but never acknowledged or failed \
+                 (sample: {sample_str:?})"
             ));
         }
 
@@ -473,6 +552,8 @@ impl Verifier for ConservationVerifier {
             failed_sends: s.failed_sends,
             logical_duplicates,
             physical_duplicates,
+            producer_duplicates,
+            cross_generation_duplicates,
             partitions_covered: s.partitions_seen.len(),
             max_in_flight,
             unsettled_sends,
@@ -492,10 +573,18 @@ pub struct ChaosVerdict {
     pub logical_duplicates: u64,
     /// Same physical `(topic_id, partition, offset)` seen more than once.
     pub physical_duplicates: u64,
+    /// Logical records the producer committed at two or more offsets within one
+    /// topic generation (double writes; idempotence violated). Non-empty fails
+    /// the run. Consumer re-reads are not included.
+    pub producer_duplicates: Vec<LogicalKey>,
+    /// Logical records observed in more than one topic generation (a retry
+    /// committed again after a topic recreate destroyed the broker's producer
+    /// state). Excused; reported for context.
+    pub cross_generation_duplicates: usize,
     pub partitions_covered: usize,
-    /// The most records any single producer had in flight at once. The
-    /// workload's contract is 1; above that fails the run. 0 when the event
-    /// stream carried no `Sent` events.
+    /// The maximum number of records any single producer had in flight at one
+    /// time. The workload's contract is 1; a higher value fails the run. 0 when
+    /// the event stream carried no `Sent` events.
     pub max_in_flight: u32,
     /// Records `Sent` but neither `Delivered` nor `SendFailed` by verdict time.
     /// Non-zero fails the run.
@@ -520,6 +609,10 @@ impl std::fmt::Display for ChaosVerdict {
         writeln!(f, "  failed sends (not loss)   : {}", self.failed_sends)?;
         writeln!(f, "  duplicates (by index)     : {}", self.logical_duplicates)?;
         writeln!(f, "  duplicates (by offset)    : {}", self.physical_duplicates)?;
+        writeln!(f, "  duplicates (double write) : {}", self.producer_duplicates.len())?;
+        if self.cross_generation_duplicates > 0 {
+            writeln!(f, "  cross-generation repeats  : {}", self.cross_generation_duplicates)?;
+        }
         writeln!(f, "  partitions covered        : {}", self.partitions_covered)?;
         writeln!(f, "  in-flight peak (producer) : {}", self.max_in_flight)?;
         if self.unsettled_sends > 0 {
@@ -837,8 +930,9 @@ mod tests {
         WorkloadEvent::Consumed { index, topic: "t".into(), topic_id: zero(), partition: 0, offset: index as i64 }
     }
 
-    /// The contract the producer workload claims: one record in flight, each
-    /// send settled before the next is issued. Peak 1, nothing left open.
+    /// The producer workload's contract: one record in flight, with each send
+    /// settled before the next is issued. The peak is 1 and no window is left
+    /// open.
     #[test]
     fn one_record_in_flight_per_producer_passes() {
         let v = ConservationVerifier::new();
@@ -853,9 +947,10 @@ mod tests {
         assert_eq!(verdict.unsettled_sends, 0);
     }
 
-    /// A second send issued before the first settled breaks the one-in-flight
-    /// contract and FAILS the run, naming the producer and its peak — even
-    /// though every record was delivered and consumed (conservation is intact).
+    /// A second send issued before the first has settled violates the
+    /// one-in-flight contract and fails the run, naming the producer and its
+    /// peak, even though every record was delivered and consumed (conservation
+    /// is intact).
     #[test]
     fn two_records_in_flight_fails() {
         let v = ConservationVerifier::new();
@@ -868,7 +963,7 @@ mod tests {
         let verdict = v.verdict(1);
         assert!(!verdict.is_pass(), "pipelined sends must fail: {verdict}");
         assert_eq!(verdict.max_in_flight, 2);
-        assert_eq!(verdict.unsettled_sends, 0, "both sends did settle");
+        assert_eq!(verdict.unsettled_sends, 0, "both sends settled");
         assert_eq!(verdict.lost.len(), 0, "the failure is the in-flight bound, not loss");
         let reason = verdict
             .reasons
@@ -881,8 +976,8 @@ mod tests {
         );
     }
 
-    /// A failed send closes the window exactly like an ack does: sending again
-    /// after a `SendFailed` is still one in flight.
+    /// A failed send closes the window in the same way as an acknowledgement:
+    /// sending again after a `SendFailed` is still one record in flight.
     #[test]
     fn failed_send_closes_the_in_flight_window() {
         let v = ConservationVerifier::new();
@@ -897,8 +992,8 @@ mod tests {
         assert_eq!(verdict.failed_sends, 1);
     }
 
-    /// The bound is per producer, not global: two producers with one record
-    /// in flight each are within contract (a global count would read 2).
+    /// The bound is per producer, not global: two producers with one record in
+    /// flight each are within the contract (a global count would be 2).
     #[test]
     fn in_flight_bound_is_per_producer_not_global() {
         let v = ConservationVerifier::new();
@@ -925,8 +1020,9 @@ mod tests {
         assert_eq!(verdict.max_in_flight, 1);
     }
 
-    /// A `Sent` with no `Delivered` / `SendFailed` by verdict time is an outcome
-    /// the harness never recorded — fail, and say which record.
+    /// A `Sent` with no `Delivered` or `SendFailed` by verdict time is an
+    /// outcome the harness never recorded; the run fails and the reason names
+    /// the record.
     #[test]
     fn unsettled_send_at_verdict_fails() {
         let v = ConservationVerifier::new();
@@ -947,6 +1043,85 @@ mod tests {
             "expected an unsettled-sends reason naming t#1, got {:?}",
             verdict.reasons
         );
+    }
+
+    /// The same logical record at two offsets within one topic generation is a
+    /// producer double write, which `enable.idempotence=true` is required to
+    /// prevent. It fails the run although conservation is intact and the 2×
+    /// ratio bound is not approached. The reason names the record and both
+    /// offsets.
+    #[test]
+    fn double_write_within_a_generation_fails() {
+        let v = ConservationVerifier::new();
+        let id = Uuid::from_bytes([1u8; 16]);
+        v.record(WorkloadEvent::Delivered { index: 5, topic: "t".into(), topic_id: id, partition: 0, offset: 5 });
+        v.record(WorkloadEvent::Consumed { index: 5, topic: "t".into(), topic_id: id, partition: 0, offset: 5 });
+        v.record(WorkloadEvent::Consumed { index: 5, topic: "t".into(), topic_id: id, partition: 0, offset: 9 });
+        let verdict = v.verdict(1);
+        assert!(!verdict.is_pass(), "a double write must fail: {verdict}");
+        assert_eq!(verdict.producer_duplicates, vec![("t".to_string(), 5)]);
+        assert_eq!(verdict.cross_generation_duplicates, 0);
+        assert_eq!(verdict.lost.len(), 0, "the failure is the double write, not loss");
+        assert_eq!(verdict.logical_duplicates, 1, "also counted by the by-index counter");
+        assert_eq!(verdict.physical_duplicates, 0, "two distinct addresses, so not a re-read");
+        let reason = verdict
+            .reasons
+            .iter()
+            .find(|r| r.starts_with("producer duplicates: 1 record(s)"))
+            .unwrap_or_else(|| panic!("expected a producer-duplicates reason, got {:?}", verdict.reasons));
+        assert!(reason.contains("t#5@[p0/5,p0/9]"), "reason must list both offsets: {reason}");
+    }
+
+    /// A double write across partitions of the same generation is still a
+    /// double write: the record exists twice in the topic.
+    #[test]
+    fn double_write_across_partitions_of_one_generation_fails() {
+        let v = ConservationVerifier::new();
+        let id = Uuid::from_bytes([1u8; 16]);
+        v.record(WorkloadEvent::Consumed { index: 5, topic: "t".into(), topic_id: id, partition: 0, offset: 5 });
+        v.record(WorkloadEvent::Consumed { index: 5, topic: "t".into(), topic_id: id, partition: 1, offset: 2 });
+        let verdict = v.verdict(1);
+        assert_eq!(verdict.producer_duplicates, vec![("t".to_string(), 5)]);
+        assert!(!verdict.is_pass());
+    }
+
+    /// Reading the same record twice from the same address is a consumer
+    /// re-read (rebalance or failover). It is reported by both duplicate
+    /// counters, is not a double write, and the run passes (below the 2× ratio
+    /// bound).
+    #[test]
+    fn re_read_at_the_same_offset_is_not_a_double_write() {
+        let v = ConservationVerifier::new();
+        let id = Uuid::from_bytes([1u8; 16]);
+        v.record(WorkloadEvent::Delivered { index: 5, topic: "t".into(), topic_id: id, partition: 0, offset: 5 });
+        v.record(WorkloadEvent::Consumed { index: 5, topic: "t".into(), topic_id: id, partition: 0, offset: 5 });
+        v.record(WorkloadEvent::Consumed { index: 5, topic: "t".into(), topic_id: id, partition: 0, offset: 5 });
+        let verdict = v.verdict(1);
+        assert!(verdict.is_pass(), "a re-read is reported, not failed: {verdict}");
+        assert!(verdict.producer_duplicates.is_empty());
+        assert_eq!(verdict.logical_duplicates, 1);
+        assert_eq!(verdict.physical_duplicates, 1);
+    }
+
+    /// The same record in two topic generations is not a client fault: the
+    /// recreate destroyed the broker's idempotent-producer state together with
+    /// the old generation, so a retry whose acknowledgement was lost in the
+    /// delete window is committed again in the new one. Excused and reported;
+    /// never a failure.
+    #[test]
+    fn duplicate_across_generations_is_excused() {
+        let v = ConservationVerifier::new();
+        let old_id = Uuid::from_bytes([7u8; 16]);
+        let new_id = Uuid::from_bytes([8u8; 16]);
+        v.note_expected_loss(ExpectedLossHint::DestroyedGeneration(old_id));
+        v.record(WorkloadEvent::Delivered { index: 5, topic: "t".into(), topic_id: old_id, partition: 0, offset: 5 });
+        v.record(WorkloadEvent::Consumed { index: 5, topic: "t".into(), topic_id: old_id, partition: 0, offset: 5 });
+        v.record(WorkloadEvent::Consumed { index: 5, topic: "t".into(), topic_id: new_id, partition: 0, offset: 0 });
+        let verdict = v.verdict(1);
+        assert!(verdict.is_pass(), "a cross-generation repeat is excused: {verdict}");
+        assert!(verdict.producer_duplicates.is_empty());
+        assert_eq!(verdict.cross_generation_duplicates, 1);
+        assert_eq!(verdict.logical_duplicates, 1, "still visible in the by-index counter");
     }
 
     /// Event streams without `Sent` (the verifier's other tests, older workloads)
