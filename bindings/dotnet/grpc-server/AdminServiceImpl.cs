@@ -889,15 +889,18 @@ internal sealed class AdminServiceImpl : Proto.AdminService.AdminServiceBase, ID
             return new Proto.ListOffsetsResponse { Error = Translate.UnknownAdmin(request.AdminId) };
         }
 
-        Dictionary<TopicPartition, OffsetSpec>? specs =
-            TranslateAdmin.OffsetSpecs(request.Specs, out string? invalid);
-        if (specs is null)
-        {
-            return new Proto.ListOffsetsResponse { Error = TranslateAdmin.RequestError(invalid!) };
-        }
-
         try
         {
+            // Inside the try: proto3 C# reads an unset submessage as null (Python reads a
+            // default instance), so a malformed request must fault the top-level error rather
+            // than escape as a gRPC status.
+            Dictionary<TopicPartition, OffsetSpec>? specs =
+                TranslateAdmin.OffsetSpecs(request.Specs, out string? invalid);
+            if (specs is null)
+            {
+                return new Proto.ListOffsetsResponse { Error = TranslateAdmin.RequestError(invalid!) };
+            }
+
             ListOffsetsResult result = admin.ListOffsets(
                 specs,
                 new ListOffsetsOptions
@@ -1051,14 +1054,15 @@ internal sealed class AdminServiceImpl : Proto.AdminService.AdminServiceBase, ID
             return new Proto.StatusResponse { Error = Translate.UnknownAdmin(request.AdminId) };
         }
 
-        AbortTransactionSpec? spec = TranslateAdmin.AbortSpec(request, out string? invalid);
-        if (spec is null)
-        {
-            return new Proto.StatusResponse { Error = TranslateAdmin.RequestError(invalid!) };
-        }
-
         try
         {
+            // Inside the try, for the same reason as ListOffsets above.
+            AbortTransactionSpec? spec = TranslateAdmin.AbortSpec(request, out string? invalid);
+            if (spec is null)
+            {
+                return new Proto.StatusResponse { Error = TranslateAdmin.RequestError(invalid!) };
+            }
+
             // Java's AbortTransactionResult carries no data and no per-key granularity, so
             // success is simply an absent error.
             await admin.AbortTransaction(
