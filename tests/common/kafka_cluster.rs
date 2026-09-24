@@ -50,9 +50,13 @@
 //! **Restart fidelity.** `shutdown_broker` / `start_broker` `docker stop` and
 //! `docker start` the *same* held `ContainerAsync`, so a restarted broker keeps:
 //!   - its node id and `advertised.listeners` (same environment);
-//!   - its host ports — each client listener is pinned with
-//!     `with_mapped_port` to a pre-reserved host port, which Docker re-binds on
-//!     start, so bootstrap strings handed out earlier stay valid;
+//!   - its host ports — each advertised client port is bound by an
+//!     in-process `BrokerProxy` forwarding to a pre-reserved backend host port
+//!     pinned with `with_mapped_port` (which Docker re-binds on start); the
+//!     proxy rebinds the advertised ports on start, so bootstrap strings handed
+//!     out earlier stay valid. Stopping the proxy with the container closes
+//!     every client connection and refuses new ones, as a shut-down in-JVM
+//!     broker does (see [`KafkaCluster::shutdown_broker`]);
 //!   - its data — the log directory lives in the container's writable layer,
 //!     which survives a stop. The image's start-up script re-runs the storage
 //!     format on every start but tolerates "already formatted", and
@@ -196,6 +200,10 @@ struct NodeSpec {
     container_name: String,
     /// Host ports for the client listeners; `None` for a controller-only node.
     ports: Option<BrokerPorts>,
+    /// Host ports Docker maps the client listeners to when a [`BrokerProxy`]
+    /// fronts the broker (lifecycle-capable clusters only): `ports` are then
+    /// bound by the proxy, which forwards to these.
+    backend_ports: Option<BrokerPorts>,
 }
 
 /// Java `TestKitDefaults.BROKER_ID_OFFSET`: first broker id of a [`Type::Kraft`] cluster.
@@ -210,6 +218,7 @@ const CONTROLLER_ID_OFFSET: i32 = 3000;
 /// [`BROKER_ID_OFFSET`], controllers from [`CONTROLLER_ID_OFFSET`]).
 fn node_specs(config: &ClusterConfig, suffix: &str) -> Vec<NodeSpec> {
     let brokers = i32::from(config.brokers);
+    let proxied = supports_lifecycle(config);
     match config.cluster_type {
         Type::CoKraft => (1..=brokers)
             .map(|id| NodeSpec {
@@ -217,6 +226,7 @@ fn node_specs(config: &ClusterConfig, suffix: &str) -> Vec<NodeSpec> {
                 roles: ProcessRoles::Combined,
                 container_name: format!("kafka-{id}-{suffix}"),
                 ports: Some(BrokerPorts::reserve()),
+                backend_ports: None,
             })
             .collect(),
         Type::Kraft => {
@@ -226,6 +236,7 @@ fn node_specs(config: &ClusterConfig, suffix: &str) -> Vec<NodeSpec> {
                 roles: ProcessRoles::Broker,
                 container_name: format!("kafka-broker-{id}-{suffix}"),
                 ports: Some(BrokerPorts::reserve()),
+                backend_ports: proxied.then(BrokerPorts::reserve),
             });
             let controller_nodes =
                 (CONTROLLER_ID_OFFSET..CONTROLLER_ID_OFFSET + i32::from(config.controllers)).map(|id| NodeSpec {
@@ -233,9 +244,110 @@ fn node_specs(config: &ClusterConfig, suffix: &str) -> Vec<NodeSpec> {
                     roles: ProcessRoles::Controller,
                     container_name: format!("kafka-controller-{id}-{suffix}"),
                     ports: None,
+                    backend_ports: None,
                 });
             broker_nodes.chain(controller_nodes).collect()
         },
+    }
+}
+
+/// In-process TCP forwarder fronting one broker of a lifecycle-capable
+/// cluster: it binds the broker's advertised host ports and forwards each
+/// connection to the host ports Docker maps the container's listeners to.
+///
+/// It exists so [`KafkaCluster::shutdown_broker`] can give clients the view
+/// Java's in-JVM brokers give once shut down — every connection closed, new
+/// ones refused — which Docker's own host-port forwarder does not reliably do
+/// around a container stop (see `shutdown_broker`). Stopping the proxy drops
+/// its listeners and every forwarded connection; starting it rebinds the same
+/// ports, so bootstrap strings handed out earlier stay valid.
+struct BrokerProxy {
+    /// `(advertised host port, Docker-mapped backend host port)` per listener.
+    routes: Vec<(u16, u16)>,
+    /// The running accept loops and connections; `None` while stopped.
+    running: std::sync::Mutex<Option<ProxyRun>>,
+}
+
+/// One start..stop lifetime of a [`BrokerProxy`].
+struct ProxyRun {
+    cancel: tokio_util::sync::CancellationToken,
+    /// Every accept loop and connection task holds a clone of the matching
+    /// sender, so `recv()` yields `None` once all of them have exited.
+    exited: tokio::sync::mpsc::Receiver<()>,
+}
+
+impl BrokerProxy {
+    fn new(front: &BrokerPorts, backend: &BrokerPorts) -> Self {
+        Self {
+            routes: vec![
+                (front.plaintext, backend.plaintext),
+                (front.ssl, backend.ssl),
+                (front.sasl_plaintext, backend.sasl_plaintext),
+                (front.sasl_ssl, backend.sasl_ssl),
+            ],
+            running: std::sync::Mutex::new(None),
+        }
+    }
+
+    /// Binds every advertised port and starts forwarding. A bind failure is
+    /// reported with "address already in use" wording, so a cluster start that
+    /// lost a port race is retried (`is_port_allocation_error`).
+    async fn start(&self) -> Result<(), String> {
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let (alive, exited) = tokio::sync::mpsc::channel(1);
+        for &(front, backend) in &self.routes {
+            let listener = tokio::net::TcpListener::bind(("127.0.0.1", front)).await.map_err(|err| {
+                format!("broker proxy failed to bind 127.0.0.1:{front} (address already in use?): {err}")
+            })?;
+            tokio::spawn(Self::accept_loop(listener, backend, cancel.clone(), alive.clone()));
+        }
+        let previous = self
+            .running
+            .lock()
+            .expect("broker proxy state poisoned")
+            .replace(ProxyRun { cancel, exited });
+        assert!(previous.is_none(), "broker proxy started twice");
+        Ok(())
+    }
+
+    /// Closes the listeners and every forwarded connection, returning once
+    /// all of them are closed.
+    async fn stop(&self) {
+        let run = self.running.lock().expect("broker proxy state poisoned").take();
+        if let Some(ProxyRun { cancel, mut exited }) = run {
+            cancel.cancel();
+            while exited.recv().await.is_some() {}
+        }
+    }
+
+    async fn accept_loop(
+        listener: tokio::net::TcpListener,
+        backend: u16,
+        cancel: tokio_util::sync::CancellationToken,
+        alive: tokio::sync::mpsc::Sender<()>,
+    ) {
+        loop {
+            let accepted = tokio::select! {
+                _ = cancel.cancelled() => return,
+                accepted = listener.accept() => accepted,
+            };
+            let Ok((mut client, _)) = accepted else { continue };
+            let cancel = cancel.clone();
+            let alive = alive.clone();
+            tokio::spawn(async move {
+                let _alive = alive;
+                tokio::select! {
+                    _ = cancel.cancelled() => {},
+                    _ = async {
+                        // A refused backend (container stopping) just closes
+                        // the client connection, as a dead broker would.
+                        if let Ok(mut server) = tokio::net::TcpStream::connect(("127.0.0.1", backend)).await {
+                            let _ = tokio::io::copy_bidirectional(&mut client, &mut server).await;
+                        }
+                    } => {},
+                }
+            });
+        }
     }
 }
 
@@ -391,6 +503,12 @@ fn truncate_container_error(err: &str) -> String {
 ///
 /// Docker reports this as `port is already allocated` on Linux, and as
 /// `address already in use` on Colima (macOS CI).
+/// Whether `config` builds a cluster that supports broker lifecycle
+/// ([`KafkaCluster::shutdown_broker`] / [`KafkaCluster::start_broker`]).
+fn supports_lifecycle(config: &ClusterConfig) -> bool {
+    config.dedicated && config.cluster_type == Type::Kraft
+}
+
 fn is_port_allocation_error(err: &str) -> bool {
     err.contains("port is already allocated") || err.contains("address already in use")
 }
@@ -616,6 +734,8 @@ pub struct KafkaCluster {
     controller_ids: BTreeSet<i32>,
     /// PLAINTEXT host port per broker id — Java `ClusterInstance.brokerBoundPorts()`.
     broker_ports: BTreeMap<i32, u16>,
+    /// The [`BrokerProxy`] fronting each broker of a lifecycle-capable cluster.
+    proxies: BTreeMap<i32, BrokerProxy>,
     /// Brokers stopped by [`Self::shutdown_broker`] and not yet restarted — the
     /// complement of Java's `aliveBrokers()` (`KafkaBroker.isShutdown()`).
     shutdown_brokers: std::sync::Mutex<BTreeSet<i32>>,
@@ -741,10 +861,13 @@ impl KafkaCluster {
             let server_props: Vec<(String, String)> =
                 config.server_properties.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
 
-            // Pre-reserved host ports to bind to container ports (brokers only)
+            // Pre-reserved host ports to bind to container ports (brokers
+            // only). A proxied broker maps its backend ports; the advertised
+            // ports are bound by its `BrokerProxy`.
             let mapped_ports: Vec<(u16, ContainerPort)> = node
-                .ports
+                .backend_ports
                 .as_ref()
+                .or(node.ports.as_ref())
                 .map(|ports| {
                     vec![
                         (ports.plaintext, PLAINTEXT_PORT),
@@ -812,8 +935,14 @@ impl KafkaCluster {
         let mut sasl_ssl_addrs = Vec::with_capacity(nodes.len());
         let mut container_addrs = Vec::with_capacity(nodes.len());
         let mut broker_ports = BTreeMap::new();
+        let mut proxies = BTreeMap::new();
         for node in &nodes {
             let Some(ports) = node.ports.as_ref() else { continue };
+            if let Some(backend) = node.backend_ports.as_ref() {
+                let proxy = BrokerProxy::new(ports, backend);
+                proxy.start().await?;
+                proxies.insert(node.node_id, proxy);
+            }
             plaintext_addrs.push(format!("127.0.0.1:{}", ports.plaintext));
             ssl_addrs.push(format!("127.0.0.1:{}", ports.ssl));
             sasl_plaintext_addrs.push(format!("127.0.0.1:{}", ports.sasl_plaintext));
@@ -835,6 +964,7 @@ impl KafkaCluster {
                 .map(|node| node.node_id)
                 .collect(),
             broker_ports,
+            proxies,
             shutdown_brokers: std::sync::Mutex::new(BTreeSet::new()),
             container_ids,
             network_name,
@@ -974,6 +1104,15 @@ impl KafkaCluster {
     /// shutdown as Java's `BrokerServer.shutdown()`; the container (and with it
     /// the broker's data) is kept for [`Self::start_broker`].
     ///
+    /// It then stops the broker's [`BrokerProxy`], so on return every client
+    /// connection to the broker is closed and new connections are refused —
+    /// what a client sees once Java's `awaitShutdown()` has returned and the
+    /// broker's socket server is closed. Relying on `docker stop` alone is not
+    /// equivalent: Docker's host-port forwarder (notably Docker Desktop's) can
+    /// outlive the container briefly, accepting a connection it then holds for
+    /// ~15 s before resetting it — long enough to stall a client whose close
+    /// waits for in-flight requests.
+    ///
     /// # Panics
     ///
     /// Panics on an unknown broker id, on a pooled or [`Type::CoKraft`]
@@ -984,6 +1123,7 @@ impl KafkaCluster {
             .stop_with_timeout(Some(BROKER_SHUTDOWN_TIMEOUT_SECS))
             .await
             .unwrap_or_else(|err| panic!("failed to stop broker {broker_id}: {err}"));
+        self.proxies[&broker_id].stop().await;
         self.shutdown_brokers
             .lock()
             .expect("shutdown-broker set poisoned")
@@ -1011,6 +1151,10 @@ impl KafkaCluster {
             .start()
             .await
             .unwrap_or_else(|err| panic!("failed to start broker {broker_id}: {err}"));
+        self.proxies[&broker_id]
+            .start()
+            .await
+            .unwrap_or_else(|err| panic!("failed to restart the proxy of broker {broker_id}: {err}"));
         self.shutdown_brokers
             .lock()
             .expect("shutdown-broker set poisoned")
