@@ -29,9 +29,9 @@ namespace Confluent.Kafka.GrpcServer;
 /// <summary>
 /// Maps the <c>AdminService</c> RPCs onto the binding's <see cref="KafkaAdminClient"/> /
 /// <see cref="MockAdminClient"/> — the .NET port of <c>grpc_server.py</c>'s
-/// <c>AdminService</c> (M15/P12). Slice G1 (topics &amp; partitions) is implemented here;
-/// G2-G6 are added additively by later checkpoints and answer from the generated base
-/// until then.
+/// <c>AdminService</c> (M15/P12). Slices G1 (topics &amp; partitions) and G2 (cluster,
+/// configs, log dirs) are implemented here; G3-G6 are added additively by later
+/// checkpoints and answer from the generated base until then.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -379,6 +379,376 @@ internal sealed class AdminServiceImpl : Proto.AdminService.AdminServiceBase, ID
         catch (Exception ex)
         {
             return new Proto.DeleteRecordsResponse { Error = Translate.ToProto(ex) };
+        }
+    }
+
+    // -- Cluster, configs & log dirs (slice G2) ------------------------------------------
+
+    /// <inheritdoc/>
+    public override async Task<Proto.DescribeClusterResponse> DescribeCluster(Proto.DescribeClusterRequest request, ServerCallContext context)
+    {
+        IAdmin? admin = Get(request.AdminId);
+        if (admin is null)
+        {
+            return new Proto.DescribeClusterResponse { Error = Translate.UnknownAdmin(request.AdminId) };
+        }
+
+        try
+        {
+            DescribeClusterResult result = admin.DescribeCluster(new DescribeClusterOptions
+            {
+                TimeoutMs = TranslateAdmin.Timeout(request.HasTimeoutMs, request.TimeoutMs),
+                IncludeAuthorizedOperations = request.IncludeAuthorizedOperations,
+                IncludeFencedBrokers = request.IncludeFencedBrokers,
+            });
+
+            // Whole-value response: Java's four futures are over attributes of one cluster, so
+            // there is nothing to key. All four are awaited before any error is reported, so
+            // none is abandoned; when more than one failed the first in Java's declaration
+            // order wins.
+            (IReadOnlyCollection<Node> nodes, Proto.KafkaError? nodesError) =
+                await TranslateAdmin.Resolve(result.Nodes()).ConfigureAwait(false);
+            (Node? controller, Proto.KafkaError? controllerError) =
+                await TranslateAdmin.Resolve(result.Controller()).ConfigureAwait(false);
+            (string clusterId, Proto.KafkaError? clusterIdError) =
+                await TranslateAdmin.Resolve(result.ClusterId()).ConfigureAwait(false);
+            (IReadOnlyCollection<AclOperation>? operations, Proto.KafkaError? operationsError) =
+                await TranslateAdmin.Resolve(result.AuthorizedOperations()).ConfigureAwait(false);
+
+            Proto.KafkaError? error = nodesError ?? controllerError ?? clusterIdError ?? operationsError;
+            if (error is not null)
+            {
+                return new Proto.DescribeClusterResponse { Error = error };
+            }
+
+            Proto.ClusterDescription description = new Proto.ClusterDescription { ClusterId = clusterId };
+            foreach (Node node in nodes)
+            {
+                description.Nodes.Add(Translate.NodeToProto(node));
+            }
+
+            // Both are nullable in Java: no current controller, and "the broker did not report
+            // the operations" — which is not the same as reporting that none are authorized.
+            if (controller is not null)
+            {
+                description.Controller = Translate.NodeToProto(controller);
+            }
+
+            if (operations is not null)
+            {
+                Proto.AclOperationList list = new Proto.AclOperationList();
+                foreach (AclOperation operation in operations)
+                {
+                    list.Operations.Add((int)operation);
+                }
+
+                description.AuthorizedOperations = list;
+            }
+
+            return new Proto.DescribeClusterResponse { Description = description };
+        }
+        catch (Exception ex)
+        {
+            return new Proto.DescribeClusterResponse { Error = Translate.ToProto(ex) };
+        }
+    }
+
+    /// <inheritdoc/>
+    public override async Task<Proto.DescribeConfigsResponse> DescribeConfigs(Proto.DescribeConfigsRequest request, ServerCallContext context)
+    {
+        IAdmin? admin = Get(request.AdminId);
+        if (admin is null)
+        {
+            return new Proto.DescribeConfigsResponse { Error = Translate.UnknownAdmin(request.AdminId) };
+        }
+
+        try
+        {
+            DescribeConfigsResult result = admin.DescribeConfigs(
+                TranslateAdmin.ConfigResources(request.Resources),
+                new DescribeConfigsOptions
+                {
+                    TimeoutMs = TranslateAdmin.Timeout(request.HasTimeoutMs, request.TimeoutMs),
+                    IncludeSynonyms = request.IncludeSynonyms,
+                    IncludeDocumentation = request.IncludeDocumentation,
+                });
+
+            Proto.DescribeConfigsResponse response = new Proto.DescribeConfigsResponse();
+            foreach (KeyValuePair<ConfigResource, Task<Config>> pair in result.Values)
+            {
+                (Config config, Proto.KafkaError? error) =
+                    await TranslateAdmin.Resolve(pair.Value).ConfigureAwait(false);
+                Proto.DescribeConfigsEntry entry = new Proto.DescribeConfigsEntry
+                {
+                    Key = TranslateAdmin.ConfigResourceKey(pair.Key),
+                };
+                if (error is not null)
+                {
+                    entry.Error = error;
+                }
+                else
+                {
+                    entry.Value = TranslateAdmin.ConfigToProto(config);
+                }
+
+                response.Entries.Add(entry);
+            }
+
+            return response;
+        }
+        catch (Exception ex)
+        {
+            return new Proto.DescribeConfigsResponse { Error = Translate.ToProto(ex) };
+        }
+    }
+
+    /// <inheritdoc/>
+    public override async Task<Proto.VoidKeyedResponse> IncrementalAlterConfigs(Proto.IncrementalAlterConfigsRequest request, ServerCallContext context)
+    {
+        IAdmin? admin = Get(request.AdminId);
+        if (admin is null)
+        {
+            return new Proto.VoidKeyedResponse { Error = Translate.UnknownAdmin(request.AdminId) };
+        }
+
+        try
+        {
+            AlterConfigsResult result = admin.IncrementalAlterConfigs(
+                TranslateAdmin.AlterConfigsMap(request.Configs),
+                new AlterConfigsOptions
+                {
+                    TimeoutMs = TranslateAdmin.Timeout(request.HasTimeoutMs, request.TimeoutMs),
+                    ValidateOnly = request.ValidateOnly,
+                });
+
+            return await TranslateAdmin.VoidResponse(result.Values, TranslateAdmin.ConfigResourceKey)
+                .ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            return new Proto.VoidKeyedResponse { Error = Translate.ToProto(ex) };
+        }
+    }
+
+    /// <inheritdoc/>
+    public override async Task<Proto.ListConfigResourcesResponse> ListConfigResources(Proto.ListConfigResourcesRequest request, ServerCallContext context)
+    {
+        IAdmin? admin = Get(request.AdminId);
+        if (admin is null)
+        {
+            return new Proto.ListConfigResourcesResponse { Error = Translate.UnknownAdmin(request.AdminId) };
+        }
+
+        try
+        {
+            // An empty repeated field is Java's empty Set: every supported type. It is passed
+            // through — the binding treats empty and absent alike.
+            ListConfigResourcesResult result = admin.ListConfigResources(
+                TranslateAdmin.ConfigResourceTypes(request.ResourceTypes),
+                new ListConfigResourcesOptions
+                {
+                    TimeoutMs = TranslateAdmin.Timeout(request.HasTimeoutMs, request.TimeoutMs),
+                });
+
+            IReadOnlyCollection<ConfigResource> resources = await result.All().ConfigureAwait(false);
+            Proto.ListConfigResourcesResponse response = new Proto.ListConfigResourcesResponse();
+            foreach (ConfigResource resource in resources)
+            {
+                response.Resources.Add(TranslateAdmin.ConfigResourceToProto(resource));
+            }
+
+            return response;
+        }
+        catch (Exception ex)
+        {
+            return new Proto.ListConfigResourcesResponse { Error = Translate.ToProto(ex) };
+        }
+    }
+
+    /// <inheritdoc/>
+    public override async Task<Proto.ListClientMetricsResourcesResponse> ListClientMetricsResources(Proto.ListClientMetricsResourcesRequest request, ServerCallContext context)
+    {
+        IAdmin? admin = Get(request.AdminId);
+        if (admin is null)
+        {
+            return new Proto.ListClientMetricsResourcesResponse { Error = Translate.UnknownAdmin(request.AdminId) };
+        }
+
+        // Deprecated in Java since 4.1, but every binding still exposes it, so the harness
+        // exercises it — hence the local suppression rather than dropping the RPC. The
+        // listing type carries the attribute too, so the scope spans the whole body.
+#pragma warning disable CS0618 // Type or member is obsolete
+        try
+        {
+            ListClientMetricsResourcesResult result = admin.ListClientMetricsResources(
+                new ListClientMetricsResourcesOptions
+                {
+                    TimeoutMs = TranslateAdmin.Timeout(request.HasTimeoutMs, request.TimeoutMs),
+                });
+
+            IReadOnlyCollection<ClientMetricsResourceListing> resources =
+                await result.All().ConfigureAwait(false);
+            Proto.ListClientMetricsResourcesResponse response = new Proto.ListClientMetricsResourcesResponse();
+            foreach (ClientMetricsResourceListing listing in resources)
+            {
+                response.Resources.Add(new Proto.ClientMetricsResourceListing { Name = listing.Name });
+            }
+
+            return response;
+        }
+        catch (Exception ex)
+        {
+            return new Proto.ListClientMetricsResourcesResponse { Error = Translate.ToProto(ex) };
+        }
+#pragma warning restore CS0618
+    }
+
+    /// <inheritdoc/>
+    public override async Task<Proto.DescribeLogDirsResponse> DescribeLogDirs(Proto.DescribeLogDirsRequest request, ServerCallContext context)
+    {
+        IAdmin? admin = Get(request.AdminId);
+        if (admin is null)
+        {
+            return new Proto.DescribeLogDirsResponse { Error = Translate.UnknownAdmin(request.AdminId) };
+        }
+
+        try
+        {
+            DescribeLogDirsResult result = admin.DescribeLogDirs(
+                new List<int>(request.Brokers),
+                new DescribeLogDirsOptions
+                {
+                    TimeoutMs = TranslateAdmin.Timeout(request.HasTimeoutMs, request.TimeoutMs),
+                });
+
+            Proto.DescribeLogDirsResponse response = new Proto.DescribeLogDirsResponse();
+            foreach (KeyValuePair<int, Task<IReadOnlyDictionary<string, LogDirDescription>>> pair in
+                result.Descriptions)
+            {
+                (IReadOnlyDictionary<string, LogDirDescription> descriptions, Proto.KafkaError? error) =
+                    await TranslateAdmin.Resolve(pair.Value).ConfigureAwait(false);
+                Proto.DescribeLogDirsEntry entry = new Proto.DescribeLogDirsEntry
+                {
+                    Key = TranslateAdmin.BrokerIdKey(pair.Key),
+                };
+                if (error is not null)
+                {
+                    entry.Error = error;
+                }
+                else
+                {
+                    // The value is nested: one description per log-dir path, each with its own
+                    // error. Flattening broker and path into one key would make "the broker
+                    // answered with zero log dirs" unrepresentable.
+                    Proto.LogDirDescriptionMap value = new Proto.LogDirDescriptionMap();
+                    foreach (KeyValuePair<string, LogDirDescription> dir in descriptions)
+                    {
+                        value.LogDirs[dir.Key] = TranslateAdmin.LogDirDescriptionToProto(dir.Value);
+                    }
+
+                    entry.Value = value;
+                }
+
+                response.Entries.Add(entry);
+            }
+
+            return response;
+        }
+        catch (Exception ex)
+        {
+            return new Proto.DescribeLogDirsResponse { Error = Translate.ToProto(ex) };
+        }
+    }
+
+    /// <inheritdoc/>
+    public override async Task<Proto.VoidKeyedResponse> AlterReplicaLogDirs(Proto.AlterReplicaLogDirsRequest request, ServerCallContext context)
+    {
+        IAdmin? admin = Get(request.AdminId);
+        if (admin is null)
+        {
+            return new Proto.VoidKeyedResponse { Error = Translate.UnknownAdmin(request.AdminId) };
+        }
+
+        try
+        {
+            AlterReplicaLogDirsResult result = admin.AlterReplicaLogDirs(
+                TranslateAdmin.ReplicaLogDirAssignments(request.Assignments),
+                new AlterReplicaLogDirsOptions
+                {
+                    TimeoutMs = TranslateAdmin.Timeout(request.HasTimeoutMs, request.TimeoutMs),
+                });
+
+            return await TranslateAdmin.VoidResponse(result.Values, TranslateAdmin.ReplicaKey)
+                .ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            return new Proto.VoidKeyedResponse { Error = Translate.ToProto(ex) };
+        }
+    }
+
+    /// <inheritdoc/>
+    public override async Task<Proto.DescribeReplicaLogDirsResponse> DescribeReplicaLogDirs(Proto.DescribeReplicaLogDirsRequest request, ServerCallContext context)
+    {
+        IAdmin? admin = Get(request.AdminId);
+        if (admin is null)
+        {
+            return new Proto.DescribeReplicaLogDirsResponse { Error = Translate.UnknownAdmin(request.AdminId) };
+        }
+
+        try
+        {
+            DescribeReplicaLogDirsResult result = admin.DescribeReplicaLogDirs(
+                TranslateAdmin.Replicas(request.Replicas),
+                new DescribeReplicaLogDirsOptions
+                {
+                    TimeoutMs = TranslateAdmin.Timeout(request.HasTimeoutMs, request.TimeoutMs),
+                });
+
+            Proto.DescribeReplicaLogDirsResponse response = new Proto.DescribeReplicaLogDirsResponse();
+            foreach (KeyValuePair<TopicPartitionReplica, Task<DescribeReplicaLogDirsResult.ReplicaLogDirInfo>> pair
+                in result.Values)
+            {
+                (DescribeReplicaLogDirsResult.ReplicaLogDirInfo info, Proto.KafkaError? error) =
+                    await TranslateAdmin.Resolve(pair.Value).ConfigureAwait(false);
+                Proto.DescribeReplicaLogDirsEntry entry = new Proto.DescribeReplicaLogDirsEntry
+                {
+                    Key = TranslateAdmin.ReplicaKey(pair.Key),
+                };
+                if (error is not null)
+                {
+                    entry.Error = error;
+                }
+                else
+                {
+                    Proto.ReplicaLogDirInfo value = new Proto.ReplicaLogDirInfo
+                    {
+                        CurrentReplicaOffsetLag = info.GetCurrentReplicaOffsetLag(),
+                        FutureReplicaOffsetLag = info.GetFutureReplicaOffsetLag(),
+                    };
+
+                    // Both dirs are nullable: no replica hosted here, and no pending move.
+                    if (info.GetCurrentReplicaLogDir() is string current)
+                    {
+                        value.CurrentReplicaLogDir = current;
+                    }
+
+                    if (info.GetFutureReplicaLogDir() is string future)
+                    {
+                        value.FutureReplicaLogDir = future;
+                    }
+
+                    entry.Value = value;
+                }
+
+                response.Entries.Add(entry);
+            }
+
+            return response;
+        }
+        catch (Exception ex)
+        {
+            return new Proto.DescribeReplicaLogDirsResponse { Error = Translate.ToProto(ex) };
         }
     }
 

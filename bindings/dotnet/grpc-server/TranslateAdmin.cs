@@ -89,6 +89,19 @@ internal static class TranslateAdmin
     internal static Proto.ResultKey PartitionKey(TopicPartition partition) =>
         new Proto.ResultKey { Partition = Translate.TpToProto(partition) };
 
+    /// <summary>A <c>broker_id</c>-keyed <c>ResultKey</c>.</summary>
+    internal static Proto.ResultKey BrokerIdKey(int brokerId) => new Proto.ResultKey { BrokerId = brokerId };
+
+    /// <summary>
+    /// A <c>config_resource</c>-keyed <c>ResultKey</c> (<c>_admin_config_resource_key</c>).
+    /// </summary>
+    internal static Proto.ResultKey ConfigResourceKey(ConfigResource resource) =>
+        new Proto.ResultKey { ConfigResource = ConfigResourceToProto(resource) };
+
+    /// <summary>A <c>replica</c>-keyed <c>ResultKey</c> (<c>_admin_replica_key</c>).</summary>
+    internal static Proto.ResultKey ReplicaKey(TopicPartitionReplica replica) =>
+        new Proto.ResultKey { Replica = ReplicaToProto(replica) };
+
     /// <summary>
     /// Awaits one per-key future — the C# shape of <c>_resolve_admin_futures</c>. A
     /// <see cref="KafkaException"/> is <em>that key's</em> outcome; any other exception
@@ -277,6 +290,227 @@ internal static class TranslateAdmin
 
         return proto;
     }
+
+    // -- Cluster, configs & log dirs (slice G2) -------------------------------------------
+
+    /// <summary>
+    /// Binding <see cref="ConfigEntry"/> -&gt; proto <c>ConfigEntry</c>, <b>all nine fields</b>
+    /// (port of <c>_admin_full_config_entry_to_proto</c>). The <c>describeConfigs</c> twin of
+    /// <see cref="ConfigEntryToProto"/>. <c>source</c> / <c>config_type</c> cross as Java's
+    /// enum constant names — neither enum has a numeric id.
+    /// </summary>
+    internal static Proto.ConfigEntry FullConfigEntryToProto(ConfigEntry entry)
+    {
+        Proto.ConfigEntry proto = ConfigEntryToProto(entry);
+        proto.Source = ConfigSourceName(entry.Source);
+        proto.ConfigType = ConfigTypeName(entry.Type);
+        if (entry.Documentation is not null)
+        {
+            proto.Documentation = entry.Documentation;
+        }
+
+        // Java's precedence order is meaningful — do not sort.
+        foreach (ConfigEntry.ConfigSynonym synonym in entry.Synonyms)
+        {
+            Proto.ConfigSynonym protoSynonym = new Proto.ConfigSynonym
+            {
+                Name = synonym.Name,
+                Source = ConfigSourceName(synonym.Source),
+            };
+            if (synonym.Value is not null)
+            {
+                protoSynonym.Value = synonym.Value;
+            }
+
+            proto.Synonyms.Add(protoSynonym);
+        }
+
+        return proto;
+    }
+
+    /// <summary>Binding <see cref="Config"/> -&gt; proto <c>AdminConfig</c>.</summary>
+    internal static Proto.AdminConfig ConfigToProto(Config config)
+    {
+        Proto.AdminConfig proto = new Proto.AdminConfig();
+        foreach (ConfigEntry entry in config.Entries)
+        {
+            proto.Entries.Add(FullConfigEntryToProto(entry));
+        }
+
+        return proto;
+    }
+
+    /// <summary>
+    /// Binding <see cref="ConfigResource"/> -&gt; proto <c>ConfigResource</c>. The enum's values
+    /// <em>are</em> Java's <c>ConfigResource.Type.id()</c>, which is what the wire carries.
+    /// </summary>
+    internal static Proto.ConfigResource ConfigResourceToProto(ConfigResource resource) =>
+        new Proto.ConfigResource { ResourceType = (int)resource.Type, Name = resource.Name };
+
+    /// <summary>Proto <c>ConfigResource</c>s -&gt; binding ones (<c>_admin_config_resources</c>).</summary>
+    internal static List<ConfigResource> ConfigResources(IEnumerable<Proto.ConfigResource> protos)
+    {
+        List<ConfigResource> resources = new List<ConfigResource>();
+        foreach (Proto.ConfigResource proto in protos)
+        {
+            resources.Add(new ConfigResource((ConfigResourceType)proto.ResourceType, proto.Name));
+        }
+
+        return resources;
+    }
+
+    /// <summary>
+    /// Proto <c>ConfigResourceOps</c>s -&gt; the map <see cref="IAdmin.IncrementalAlterConfigs"/>
+    /// takes (port of <c>_admin_alter_configs</c>). An absent op value is Java's null, which is
+    /// what a DELETE carries.
+    /// </summary>
+    internal static Dictionary<ConfigResource, IReadOnlyCollection<AlterConfigOp>> AlterConfigsMap(
+        IEnumerable<Proto.ConfigResourceOps> protos)
+    {
+        Dictionary<ConfigResource, IReadOnlyCollection<AlterConfigOp>> map =
+            new Dictionary<ConfigResource, IReadOnlyCollection<AlterConfigOp>>();
+        foreach (Proto.ConfigResourceOps proto in protos)
+        {
+            List<AlterConfigOp> ops = new List<AlterConfigOp>();
+            foreach (Proto.AlterConfigOp op in proto.Ops)
+            {
+                ops.Add(new AlterConfigOp(
+                    new ConfigEntry(op.Name, op.HasValue ? op.Value : null),
+                    (AlterConfigOpType)op.OpType));
+            }
+
+            map[new ConfigResource((ConfigResourceType)proto.Resource.ResourceType, proto.Resource.Name)] = ops;
+        }
+
+        return map;
+    }
+
+    /// <summary>
+    /// Proto <c>resource_types</c> (Java <c>Type.id()</c> codes) -&gt; the filter
+    /// <see cref="IAdmin.ListConfigResources"/> takes. An empty list is Java's empty set —
+    /// "every supported type" — and is passed through, not turned into a rejection.
+    /// </summary>
+    internal static List<ConfigResourceType> ConfigResourceTypes(IEnumerable<int> ids)
+    {
+        List<ConfigResourceType> types = new List<ConfigResourceType>();
+        foreach (int id in ids)
+        {
+            types.Add((ConfigResourceType)id);
+        }
+
+        return types;
+    }
+
+    /// <summary>Binding <see cref="TopicPartitionReplica"/> -&gt; proto (<c>_admin_replica_to_proto</c>).</summary>
+    internal static Proto.TopicPartitionReplica ReplicaToProto(TopicPartitionReplica replica) =>
+        new Proto.TopicPartitionReplica
+        {
+            Topic = replica.Topic,
+            Partition = replica.Partition,
+            BrokerId = replica.BrokerId,
+        };
+
+    /// <summary>Proto <c>TopicPartitionReplica</c>s -&gt; binding ones (<c>_admin_replicas</c>).</summary>
+    internal static List<TopicPartitionReplica> Replicas(IEnumerable<Proto.TopicPartitionReplica> protos)
+    {
+        List<TopicPartitionReplica> replicas = new List<TopicPartitionReplica>();
+        foreach (Proto.TopicPartitionReplica proto in protos)
+        {
+            replicas.Add(new TopicPartitionReplica(proto.Topic, proto.Partition, proto.BrokerId));
+        }
+
+        return replicas;
+    }
+
+    /// <summary>
+    /// Proto <c>ReplicaLogDirAssignment</c>s -&gt; the map
+    /// <see cref="IAdmin.AlterReplicaLogDirs"/> takes
+    /// (<c>_admin_replica_log_dir_assignments</c>).
+    /// </summary>
+    internal static Dictionary<TopicPartitionReplica, string> ReplicaLogDirAssignments(
+        IEnumerable<Proto.ReplicaLogDirAssignment> protos)
+    {
+        Dictionary<TopicPartitionReplica, string> map = new Dictionary<TopicPartitionReplica, string>();
+        foreach (Proto.ReplicaLogDirAssignment proto in protos)
+        {
+            map[new TopicPartitionReplica(proto.Replica.Topic, proto.Replica.Partition, proto.Replica.BrokerId)] =
+                proto.LogDir;
+        }
+
+        return map;
+    }
+
+    /// <summary>
+    /// Binding <see cref="LogDirDescription"/> -&gt; proto (port of
+    /// <c>_admin_log_dir_description_to_proto</c>). <c>error</c> is this <em>directory's</em>
+    /// own error (offline / unreadable) — envelope exception 3 — never the per-broker error,
+    /// which arrives as the entry's error arm instead of a value.
+    /// </summary>
+    internal static Proto.LogDirDescription LogDirDescriptionToProto(LogDirDescription description)
+    {
+        Proto.LogDirDescription proto = new Proto.LogDirDescription { IsCordoned = description.IsCordoned };
+        if (description.Error is not null)
+        {
+            proto.Error = Translate.ToProto(description.Error);
+        }
+
+        // OptionalLong in Java: absent means the broker did not report it.
+        if (description.TotalBytes.HasValue)
+        {
+            proto.TotalBytes = description.TotalBytes.Value;
+        }
+
+        if (description.UsableBytes.HasValue)
+        {
+            proto.UsableBytes = description.UsableBytes.Value;
+        }
+
+        foreach (KeyValuePair<TopicPartition, ReplicaInfo> pair in description.ReplicaInfos)
+        {
+            proto.ReplicaInfos.Add(new Proto.ReplicaInfoEntry
+            {
+                Partition = Translate.TpToProto(pair.Key),
+                Size = pair.Value.Size,
+                OffsetLag = pair.Value.OffsetLag,
+                IsFuture = pair.Value.IsFuture,
+            });
+        }
+
+        return proto;
+    }
+
+    /// <summary>
+    /// Java's <c>ConfigEntry.ConfigSource</c> constant name. The enum has no numeric id, so the
+    /// name is the contract at the C boundary.
+    /// </summary>
+    internal static string ConfigSourceName(ConfigEntry.ConfigSource source) => source switch
+    {
+        ConfigEntry.ConfigSource.DynamicTopicConfig => "DYNAMIC_TOPIC_CONFIG",
+        ConfigEntry.ConfigSource.DynamicBrokerLoggerConfig => "DYNAMIC_BROKER_LOGGER_CONFIG",
+        ConfigEntry.ConfigSource.DynamicBrokerConfig => "DYNAMIC_BROKER_CONFIG",
+        ConfigEntry.ConfigSource.DynamicDefaultBrokerConfig => "DYNAMIC_DEFAULT_BROKER_CONFIG",
+        ConfigEntry.ConfigSource.DynamicClientMetricsConfig => "DYNAMIC_CLIENT_METRICS_CONFIG",
+        ConfigEntry.ConfigSource.DynamicGroupConfig => "DYNAMIC_GROUP_CONFIG",
+        ConfigEntry.ConfigSource.StaticBrokerConfig => "STATIC_BROKER_CONFIG",
+        ConfigEntry.ConfigSource.DefaultConfig => "DEFAULT_CONFIG",
+        _ => "UNKNOWN",
+    };
+
+    /// <summary>Java's <c>ConfigEntry.ConfigType</c> constant name. Same reasoning as
+    /// <see cref="ConfigSourceName"/>.</summary>
+    internal static string ConfigTypeName(ConfigEntry.ConfigType type) => type switch
+    {
+        ConfigEntry.ConfigType.Boolean => "BOOLEAN",
+        ConfigEntry.ConfigType.String => "STRING",
+        ConfigEntry.ConfigType.Int => "INT",
+        ConfigEntry.ConfigType.Short => "SHORT",
+        ConfigEntry.ConfigType.Long => "LONG",
+        ConfigEntry.ConfigType.Double => "DOUBLE",
+        ConfigEntry.ConfigType.List => "LIST",
+        ConfigEntry.ConfigType.Class => "CLASS",
+        ConfigEntry.ConfigType.Password => "PASSWORD",
+        _ => "UNKNOWN",
+    };
 
     /// <summary>Binding <see cref="TopicPartitionInfo"/> -&gt; proto <c>TopicPartitionInfo</c>.</summary>
     internal static Proto.TopicPartitionInfo PartitionInfoToProto(TopicPartitionInfo info)
