@@ -22,6 +22,7 @@ import threading
 import time
 
 import pytest
+import admin as _admin
 from admin import (
     MockAdminClient, AsyncMockAdminClient, AdminClient, AsyncAdminClient,
     NewTopic, NewPartitions, RecordsToDelete,
@@ -35,13 +36,14 @@ from admin import (
     AclBinding, AclBindingFilter, AclOperation, AclPermissionType, PatternType, ResourceType,
     ClientQuotaAlteration, ClientQuotaEntity, ClientQuotaFilter, ClientQuotaFilterComponent,
     ClientQuotaOp,
-    DelegationToken, FeatureUpdate, FinalizedVersionRange, KafkaPrincipal, ScramCredentialInfo,
+    DelegationToken, DescribeUserScramCredentialsResult, FeatureUpdate, FinalizedVersionRange,
+    KafkaPrincipal, ScramCredentialInfo, UserScramCredentialsDescription,
     ScramMechanism, SupportedVersionRange, UpgradeType, UserScramCredentialDeletion,
     UserScramCredentialUpsertion,
     AbortTransactionSpec, PartitionProducerState, ProducerIdAndEpoch, ProducerState,
     TransactionDescription, TransactionListing, TransactionState,
     _to_delegation_token, _to_describe_producers, _to_describe_transactions,
-    _to_describe_user_scram_credentials, _to_feature_metadata, _to_fence_producers,
+    _to_feature_metadata, _to_fence_producers,
     _to_list_transactions,
     _to_acl_binding, _to_acl_binding_filter, _to_client_quota_entity,
     _drain_delete_acls_filter_results, _to_describe_acls, _to_describe_client_quotas,
@@ -2834,24 +2836,99 @@ def test_to_delegation_token_unpacks_the_whole_chain():
     assert str(token.token_info.owner) == "User:owner"
 
 
-def test_to_describe_user_scram_credentials_splits_errors_from_descriptions():
-    """The mock throws before any of this is reachable end to end."""
-    raw = {
-        "alice": (None, [(ScramMechanism.SCRAM_SHA_256, 4096),
-                         (ScramMechanism.SCRAM_SHA_512, 8192)]),
-        "bob": (None, []),
-        "carol": ((87, "No such user: carol", 0, 0), []),
-    }
-    out = _to_describe_user_scram_credentials(raw)
-    assert out["alice"].credential_infos == [
+class _FakeScramLib:
+    """Stands in for the C extension so ``DescribeUserScramCredentialsResult``'s
+    three view methods can be unit-tested without a live handle (the mock throws
+    for describeUserScramCredentials, so the success path is otherwise
+    unreachable end to end). Each view returns exactly what the real C accessor
+    would; the handle argument is ignored and ``destroy`` is a no-op."""
+
+    RESOURCE_NOT_FOUND = 91
+
+    def DescribeUserScramCredentialsResult_all(self, _handle):
+        # all(): every user present, RNF (carol) included as empty creds.
+        return (None, {
+            "alice": [(ScramMechanism.SCRAM_SHA_256, 4096),
+                      (ScramMechanism.SCRAM_SHA_512, 8192)],
+            "bob": [(ScramMechanism.SCRAM_SHA_512, 16384)],
+            "carol": [],
+        })
+
+    def DescribeUserScramCredentialsResult_users(self, _handle):
+        # users(): RNF (carol) excluded.
+        return ["alice", "bob"]
+
+    def DescribeUserScramCredentialsResult_description(self, _handle, user):
+        if user == "alice":
+            return (None, ("alice", [(ScramMechanism.SCRAM_SHA_256, 4096),
+                                     (ScramMechanism.SCRAM_SHA_512, 8192)]))
+        if user == "carol":
+            # RNF user: description() faults, Java-faithfully.
+            return ((self.RESOURCE_NOT_FOUND, "Resource not found", 0, 0), None)
+        return ((self.RESOURCE_NOT_FOUND, f"No such user: {user}", 0, 0), None)
+
+    def DescribeUserScramCredentialsResult_destroy(self, _handle):
+        pass
+
+
+def test_describe_user_scram_credentials_result_exposes_three_views(monkeypatch):
+    """The three views have different RESOURCE_NOT_FOUND semantics: all()
+    includes the RNF user as an empty description, users() excludes it, and
+    description() faults on it (and on an absent user)."""
+    monkeypatch.setattr(_admin, "_lib", _FakeScramLib())
+    # Handle 0 so the object's __del__ no-ops after the monkeypatch reverts.
+    result = DescribeUserScramCredentialsResult(0)
+
+    all_view = result.all()
+    assert all_view["alice"] == UserScramCredentialsDescription(
+        "alice", [ScramCredentialInfo(ScramMechanism.SCRAM_SHA_256, 4096),
+                  ScramCredentialInfo(ScramMechanism.SCRAM_SHA_512, 8192)])
+    # carol (RESOURCE_NOT_FOUND) is a successful, empty description in all().
+    assert all_view["carol"] == UserScramCredentialsDescription("carol", [])
+
+    # users() excludes the RNF user.
+    assert result.users() == ["alice", "bob"]
+    assert "carol" not in result.users()
+
+    # description() returns a real user's description ...
+    assert result.description("alice").credential_infos == [
         ScramCredentialInfo(ScramMechanism.SCRAM_SHA_256, 4096),
         ScramCredentialInfo(ScramMechanism.SCRAM_SHA_512, 8192),
     ]
-    # A user with no credential is a description, not an error: Java's `all()`
-    # folds RESOURCE_NOT_FOUND into an empty list.
-    assert out["bob"].credential_infos == []
-    assert isinstance(out["carol"], KafkaError)
-    assert str(out["carol"]) == "No such user: carol"
+    # ... but FAULTS on the RNF user (the capability the flat dict could not
+    # express) and on an absent user.
+    with pytest.raises(KafkaError) as rnf:
+        result.description("carol")
+    assert rnf.value.code == _FakeScramLib.RESOURCE_NOT_FOUND
+    with pytest.raises(KafkaError):
+        result.description("nobody")
+
+
+def test_describe_user_scram_credentials_all_raises_on_a_hard_user_error(monkeypatch):
+    """all() raises when some user has an error that is neither NONE nor
+    RESOURCE_NOT_FOUND (Java's all() completes exceptionally)."""
+    class _FaultingAll(_FakeScramLib):
+        def DescribeUserScramCredentialsResult_all(self, _handle):
+            return ((92, "Duplicate resource", 0, 0), {})
+
+    monkeypatch.setattr(_admin, "_lib", _FaultingAll())
+    result = DescribeUserScramCredentialsResult(0)
+    with pytest.raises(KafkaError) as excinfo:
+        result.all()
+    assert excinfo.value.code == 92
+
+
+def test_describe_user_scram_credentials_raises_unsupported_via_mock():
+    """End-to-end through the spec + resolve: the mock throws
+    UnsupportedOperationException for describeUserScramCredentials
+    (MockAdminClient.java:1251-1254), which surfaces as a whole-call
+    KafkaError."""
+    admin = MockAdminClient(1)
+    try:
+        with pytest.raises(KafkaError):
+            admin.describe_user_scram_credentials(["alice"])
+    finally:
+        admin.close()
 
 
 def test_to_feature_metadata_keeps_the_two_maps_independent():

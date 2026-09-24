@@ -1063,9 +1063,8 @@ class UserScramCredentialDeletion:
 class UserScramCredentialsDescription:
     """A user's SCRAM credentials (Java ``UserScramCredentialsDescription``).
 
-    A user the broker reports as having no credential is described with an empty
-    ``credential_infos``, not as an error -- Java's ``all()`` treats
-    ``RESOURCE_NOT_FOUND`` the same way.
+    Carries only the mechanism and iteration count per credential: the broker
+    never returns the salted password or the salt.
     """
 
     __slots__ = ("name", "credential_infos")
@@ -1081,6 +1080,69 @@ class UserScramCredentialsDescription:
     def __repr__(self):
         return (f"UserScramCredentialsDescription(name={self.name!r}, "
                 f"credential_infos={self.credential_infos!r})")
+
+
+class DescribeUserScramCredentialsResult:
+    """The result of :meth:`Admin.describe_user_scram_credentials`, exposing
+    Java's three views over one response
+    (``DescribeUserScramCredentialsResult.java:54-138``). The three views have
+    **different** ``RESOURCE_NOT_FOUND`` (RNF) semantics, so they are not
+    interchangeable:
+
+    * :meth:`all` -- ``{user: UserScramCredentialsDescription}``. RNF users are
+      **included** as successful descriptions with an empty ``credential_infos``
+      (``all()`` treats a broker RNF as "the user exists with nothing
+      configured", not an error). Raises :class:`KafkaError` only if some user
+      has an error that is neither ``NONE`` nor ``RESOURCE_NOT_FOUND``.
+    * :meth:`users` -- ``[user, ...]``. RNF users are **excluded**.
+    * :meth:`description` -- one user's :class:`UserScramCredentialsDescription`.
+      **Faults** with :class:`KafkaError` (``RESOURCE_NOT_FOUND``) for an RNF or
+      absent user -- the capability the old flattened dict could not express.
+
+    Wraps the native result handle and frees it when garbage-collected.
+    """
+
+    __slots__ = ("_h",)
+
+    def __init__(self, handle):
+        self._h = handle
+
+    def all(self):
+        """``{user: UserScramCredentialsDescription}`` (RNF users included as
+        empty descriptions). Raises :class:`KafkaError` on a hard user-level
+        error. Mirrors ``DescribeUserScramCredentialsResult.all()``
+        (``:54-80``)."""
+        error, raw = _lib.DescribeUserScramCredentialsResult_all(self._h)
+        if error is not None:
+            raise _to_error(error)
+        return {user: UserScramCredentialsDescription(
+                    user, [ScramCredentialInfo(mechanism, iterations)
+                           for mechanism, iterations in infos])
+                for user, infos in raw.items()}
+
+    def users(self):
+        """``[user, ...]`` -- the distinct users with at least one credential
+        (RNF users excluded). Mirrors
+        ``DescribeUserScramCredentialsResult.users()`` (``:92-104``)."""
+        return list(_lib.DescribeUserScramCredentialsResult_users(self._h))
+
+    def description(self, user):
+        """This user's :class:`UserScramCredentialsDescription`. Raises
+        :class:`KafkaError` (``RESOURCE_NOT_FOUND``) for a no-credential or
+        absent user. Mirrors
+        ``DescribeUserScramCredentialsResult.description(String)``
+        (``:114-138``)."""
+        error, value = _lib.DescribeUserScramCredentialsResult_description(self._h, str(user))
+        if error is not None:
+            raise _to_error(error)
+        name, infos = value
+        return UserScramCredentialsDescription(
+            name, [ScramCredentialInfo(mechanism, iterations) for mechanism, iterations in infos])
+
+    def __del__(self):
+        handle, self._h = getattr(self, "_h", 0), 0
+        if handle:
+            _lib.DescribeUserScramCredentialsResult_destroy(handle)
 
 
 class KafkaPrincipal:
@@ -2156,24 +2218,6 @@ def _to_describe_delegation_token(raw):
     return [_to_delegation_token(t) for t in raw]
 
 
-def _to_describe_user_scram_credentials(raw):
-    """``{user: (error, [(mechanism, iterations)])}``
-    -> ``{user: UserScramCredentialsDescription | KafkaError}``.
-
-    A user whose own description failed maps to its error; every other user maps
-    to its credentials, which may be an empty list when the broker reports it as
-    having none.
-    """
-    out = {}
-    for user, (error, infos) in raw.items():
-        if error is not None:
-            out[user] = _to_error(error)
-        else:
-            out[user] = UserScramCredentialsDescription(
-                user, [ScramCredentialInfo(mechanism, iterations) for mechanism, iterations in infos])
-    return out
-
-
 def _to_feature_metadata(raw):
     """``([(feature, min, max)], epoch_or_None, [(feature, min, max)])``
     -> FeatureMetadata.
@@ -2380,6 +2424,29 @@ class _AdminBase:
             if handle:
                 drain(handle)  # drain destroys the handle
         return free
+
+    # ---- describeUserScramCredentials: a result object, not a flat value ----
+    #
+    # Unlike the whole-batch value RPCs above (which drain the handle into a
+    # Python value immediately), describeUserScramCredentials returns a
+    # `DescribeUserScramCredentialsResult` object that WRAPS the native handle
+    # (owning it, freeing it on __del__), so its three Java views -- all() /
+    # users() / description() -- can be read lazily against the live handle.
+
+    @staticmethod
+    def _resolve_scram_describe(payload):
+        handle, error = payload
+        if error:
+            raise KafkaError._from_c(error)
+        return DescribeUserScramCredentialsResult(handle)
+
+    @staticmethod
+    def _free_scram_describe(payload):
+        handle, error = payload
+        if error:
+            _lib.KafkaError_destroy(error)
+        if handle:
+            _lib.DescribeUserScramCredentialsResult_destroy(handle)
 
     # ---- per-key resolve/free (Phase A: the Topics-family RPCs) ------------
     #
@@ -3250,10 +3317,9 @@ class _AdminBase:
     def _describe_user_scram_credentials_spec(self, users, timeout):
         names = [] if users is None else [str(u) for u in users]
         ms = _ms(timeout)
-        drain = _lib.DescribeUserScramCredentialsResult_drain
         return (lambda cb: _lib.Admin_describe_user_scram_credentials_async(self._h, names, ms, cb),
-                self._resolve_value(drain, _to_describe_user_scram_credentials),
-                self._free_value(drain))
+                self._resolve_scram_describe,
+                self._free_scram_describe)
 
     def _alter_user_scram_credentials_keys_and_spec(self, alterations):
         """`alterations`' distinct usernames become the futures dict's keys.
@@ -4034,14 +4100,18 @@ class Admin(_AdminBase):
         return futures
 
     def describe_user_scram_credentials(self, users=None, timeout=None):
-        """Describe SASL/SCRAM credentials. Returns
-        ``{user: UserScramCredentialsDescription | KafkaError}``.
+        """Describe SASL/SCRAM credentials. Returns a
+        :class:`DescribeUserScramCredentialsResult`, exposing Java's three views:
+
+        * ``.all()`` -> ``{user: UserScramCredentialsDescription}`` --
+          ``RESOURCE_NOT_FOUND`` users are included as empty descriptions;
+        * ``.users()`` -> ``[user, ...]`` -- ``RESOURCE_NOT_FOUND`` excluded;
+        * ``.description(user)`` -> one description, **raising**
+          :class:`KafkaError` (``RESOURCE_NOT_FOUND``) for a no-credential or
+          absent user.
 
         ``users`` of ``None`` (or an empty list) describes every user, mirroring
-        Java's null/empty list. A user the broker reports as having no
-        credential is described with an empty ``credential_infos``, not as an
-        error -- Java's ``all()`` treats ``RESOURCE_NOT_FOUND`` the same way; a
-        user whose description genuinely failed maps to its error.
+        Java's null/empty list.
         """
         self._check_closed()
         return self._run_sync(*self._describe_user_scram_credentials_spec(users, timeout))
@@ -4702,6 +4772,9 @@ class AsyncAdmin(_AdminBase):
         return futures
 
     async def describe_user_scram_credentials(self, users=None, timeout=None):
+        """See :meth:`Admin.describe_user_scram_credentials`. Awaits and returns a
+        :class:`DescribeUserScramCredentialsResult` (the three Java views:
+        ``.all()`` / ``.users()`` / ``.description(user)``)."""
         self._check_closed()
         return await self._run_async(*self._describe_user_scram_credentials_spec(users, timeout))
 
