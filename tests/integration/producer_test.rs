@@ -56,15 +56,37 @@ fn make_config(bootstrap_servers: &str) -> HashMap<String, String> {
     ])
 }
 
-/// Pick the bootstrap address the factory's backend can actually reach.
-/// gRPC backends run in containers and need the broker's CONTAINER
-/// listener; native rust uses the host loopback.
+/// Pick the bootstrap address the factory's backend can actually reach, over the
+/// run's selected protocol. gRPC backends run in containers and reach the broker
+/// via its CONTAINER-family listener (PLAINTEXT / SSL / SASL_SSL by container
+/// hostname); native Rust uses the host loopback for the same protocol.
 fn bootstrap_for<F: ProducerBackendFactory>(factory: &F, ctx: &TestContext) -> String {
     if factory.needs_container_bootstrap() {
-        ctx.container_bootstrap_servers().to_string()
+        ctx.container_protocol_bootstrap_servers().to_string()
     } else {
-        ctx.bootstrap_servers().to_string()
+        ctx.protocol_bootstrap_servers().to_string()
     }
+}
+
+/// Inject the selected protocol's security keys into `config` for every backend.
+/// The gRPC/container backends reach the broker over its CONTAINER-family
+/// SSL / SASL_SSL listener, and the keys (the CA-cert PEM truststore and any
+/// SASL/PLAIN settings) travel through the gRPC config map to the containerized
+/// client — so no cert files need mounting.
+fn apply_backend_security<F: ProducerBackendFactory>(
+    _factory: &F,
+    ctx: &TestContext,
+    config: &mut HashMap<String, String>,
+) {
+    ctx.apply_security(config);
+}
+
+/// [`make_config`] for the factory's reachable bootstrap, with the selected
+/// protocol's security keys injected for a native backend.
+fn make_config_for<F: ProducerBackendFactory>(factory: &F, ctx: &TestContext) -> HashMap<String, String> {
+    let mut config = make_config(&bootstrap_for(factory, ctx));
+    apply_backend_security(factory, ctx, &mut config);
+    config
 }
 
 fn b(s: &str) -> Vec<u8> {
@@ -80,7 +102,7 @@ fn b(s: &str) -> Vec<u8> {
 async fn produce_single_record_inner<F: ProducerBackendFactory>(ctx: &mut TestContext, factory: &F) {
     let topic = ctx.topic("single_record");
     let producer = factory
-        .create(make_config(&bootstrap_for(factory, ctx)))
+        .create(make_config_for(factory, ctx))
         .await
         .expect("Failed to create producer");
 
@@ -108,7 +130,7 @@ async fn produce_single_record_inner<F: ProducerBackendFactory>(ctx: &mut TestCo
 async fn produce_with_key_inner<F: ProducerBackendFactory>(ctx: &mut TestContext, factory: &F) {
     let topic = ctx.topic("with_key");
     let producer = factory
-        .create(make_config(&bootstrap_for(factory, ctx)))
+        .create(make_config_for(factory, ctx))
         .await
         .expect("Failed to create producer");
 
@@ -141,7 +163,7 @@ async fn produce_with_key_inner<F: ProducerBackendFactory>(ctx: &mut TestContext
 async fn produce_multiple_records_ordering_inner<F: ProducerBackendFactory>(ctx: &mut TestContext, factory: &F) {
     let topic = ctx.topic("ordering");
     let producer = factory
-        .create(make_config(&bootstrap_for(factory, ctx)))
+        .create(make_config_for(factory, ctx))
         .await
         .expect("Failed to create producer");
 
@@ -177,12 +199,10 @@ async fn produce_multiple_records_ordering_inner<F: ProducerBackendFactory>(ctx:
 
 /// Test: Verify each compression type produces successfully.
 async fn produce_with_compression_inner<F: ProducerBackendFactory>(ctx: &mut TestContext, factory: &F) {
-    let bootstrap = bootstrap_for(factory, ctx);
-
     for name in ["none", "gzip", "snappy", "lz4", "zstd"] {
         let topic = ctx.topic(&format!("compress_{name}"));
 
-        let mut config = make_config(&bootstrap);
+        let mut config = make_config_for(factory, ctx);
         config.insert("compression.type".to_string(), name.to_string());
         let producer = factory.create(config).await.expect("Failed to create producer");
 
@@ -209,7 +229,7 @@ async fn produce_with_compression_inner<F: ProducerBackendFactory>(ctx: &mut Tes
 /// Test: Try to produce to a topic with invalid characters, expect an error.
 async fn produce_to_invalid_topic_inner<F: ProducerBackendFactory>(ctx: &mut TestContext, factory: &F) {
     let producer = factory
-        .create(make_config(&bootstrap_for(factory, ctx)))
+        .create(make_config_for(factory, ctx))
         .await
         .expect("Failed to create producer");
 
@@ -229,7 +249,7 @@ async fn produce_to_invalid_topic_inner<F: ProducerBackendFactory>(ctx: &mut Tes
 
 /// Test: Send a record larger than max.request.size, expect RecordTooLarge.
 async fn produce_record_too_large_inner<F: ProducerBackendFactory>(ctx: &mut TestContext, factory: &F) {
-    let mut config = make_config(&bootstrap_for(factory, ctx));
+    let mut config = make_config_for(factory, ctx);
     // Set a very small max request size to trigger the error
     config.insert("max.request.size".to_string(), "100".to_string());
     let producer = factory.create(config).await.expect("Failed to create producer");
@@ -256,7 +276,7 @@ async fn produce_record_too_large_inner<F: ProducerBackendFactory>(ctx: &mut Tes
 async fn flush_sends_pending_records_inner<F: ProducerBackendFactory>(ctx: &mut TestContext, factory: &F) {
     let topic = ctx.topic("flush_test");
     let producer = factory
-        .create(make_config(&bootstrap_for(factory, ctx)))
+        .create(make_config_for(factory, ctx))
         .await
         .expect("Failed to create producer");
 
@@ -286,7 +306,7 @@ async fn flush_sends_pending_records_inner<F: ProducerBackendFactory>(ctx: &mut 
 async fn close_flushes_pending_inner<F: ProducerBackendFactory>(ctx: &mut TestContext, factory: &F) {
     let topic = ctx.topic("close_flush");
     let producer = factory
-        .create(make_config(&bootstrap_for(factory, ctx)))
+        .create(make_config_for(factory, ctx))
         .await
         .expect("Failed to create producer");
 
@@ -343,7 +363,7 @@ fn small_max_bytes_cluster_config() -> ClusterConfig {
 /// completed future with `offset == -1` regardless of payload size.
 async fn produce_too_large_record_acks_zero_inner<F: ProducerBackendFactory>(ctx: &mut TestContext, factory: &F) {
     let topic = ctx.topic("ack0_too_large");
-    let mut config = make_config(&bootstrap_for(factory, ctx));
+    let mut config = make_config_for(factory, ctx);
     config.insert("acks".to_string(), "0".to_string());
     let producer = factory.create(config).await.expect("Failed to create producer");
 
@@ -368,7 +388,7 @@ async fn produce_too_large_record_acks_zero_inner<F: ProducerBackendFactory>(ctx
 /// producer surfaces RecordTooLarge.
 async fn produce_too_large_record_acks_one_inner<F: ProducerBackendFactory>(ctx: &mut TestContext, factory: &F) {
     let topic = ctx.topic("ack1_too_large");
-    let mut config = make_config(&bootstrap_for(factory, ctx));
+    let mut config = make_config_for(factory, ctx);
     config.insert("acks".to_string(), "1".to_string());
     let producer = factory.create(config).await.expect("Failed to create producer");
 
@@ -400,7 +420,7 @@ async fn produce_too_large_record_acks_one_inner<F: ProducerBackendFactory>(ctx:
 /// With `auto.create.topics.enable=false` (restrictive cluster), sending
 /// to a never-existed topic times out trying to fetch metadata.
 async fn produce_to_non_existent_topic_inner<F: ProducerBackendFactory>(ctx: &mut TestContext, factory: &F) {
-    let mut config = make_config(&bootstrap_for(factory, ctx));
+    let mut config = make_config_for(factory, ctx);
     // Short max.block.ms so the test doesn't sit on the default 30s.
     config.insert("max.block.ms".to_string(), "5000".to_string());
     let producer = factory.create(config).await.expect("Failed to create producer");
@@ -423,16 +443,19 @@ async fn produce_to_non_existent_topic_inner<F: ProducerBackendFactory>(ctx: &mu
 /// Translated from `ProducerFailureHandlingTest.testWrongBrokerList`.
 /// Producer with bootstrap pointing at non-existent brokers; metadata
 /// fetch times out within `max.block.ms`.
-async fn produce_with_wrong_broker_list_inner<F: ProducerBackendFactory>(_ctx: &mut TestContext, factory: &F) {
+async fn produce_with_wrong_broker_list_inner<F: ProducerBackendFactory>(ctx: &mut TestContext, factory: &F) {
     // Don't use ctx.bootstrap_servers — explicitly point at a dead
     // address. 127.0.0.1:1/2 are valid IP literals (so bootstrap
     // validation passes) but ports 1/2 are unused, so connection
     // attempts get RST'd and the producer hits max.block.ms. Same
-    // behavior for native rust (loopback on the test process) and the
+    // behavior for native Rust (loopback on the test process) and the
     // gRPC backends (loopback inside their container).
-    let _ = factory; // silence unused warning when no needs_container_bootstrap branch
     let bootstrap = "127.0.0.1:1,127.0.0.1:2";
     let mut config = make_config(bootstrap);
+    // Keep the explicit dead address; only add the selected protocol's security
+    // keys (a no-op under plaintext). The client still fails to connect, which
+    // is the intent.
+    apply_backend_security(factory, ctx, &mut config);
     config.insert("max.block.ms".to_string(), "3000".to_string());
     let producer = factory.create(config).await.expect("Failed to create producer");
 
@@ -456,7 +479,7 @@ async fn produce_with_wrong_broker_list_inner<F: ProducerBackendFactory>(_ctx: &
 /// requested partition and times out within `max.block.ms`.
 async fn produce_invalid_partition_inner<F: ProducerBackendFactory>(ctx: &mut TestContext, factory: &F) {
     let topic = ctx.topic("invalid_partition");
-    let mut config = make_config(&bootstrap_for(factory, ctx));
+    let mut config = make_config_for(factory, ctx);
     config.insert("max.block.ms".to_string(), "5000".to_string());
     let producer = factory.create(config).await.expect("Failed to create producer");
 
@@ -492,7 +515,7 @@ async fn produce_invalid_partition_inner<F: ProducerBackendFactory>(ctx: &mut Te
 async fn send_after_closed_inner<F: ProducerBackendFactory>(ctx: &mut TestContext, factory: &F) {
     let topic = ctx.topic("send_after_closed");
     let producer = factory
-        .create(make_config(&bootstrap_for(factory, ctx)))
+        .create(make_config_for(factory, ctx))
         .await
         .expect("Failed to create producer");
 
@@ -531,7 +554,7 @@ async fn send_after_closed_inner<F: ProducerBackendFactory>(ctx: &mut TestContex
 /// immediately. Sends should succeed without needing flush.
 async fn produce_batch_size_zero_inner<F: ProducerBackendFactory>(ctx: &mut TestContext, factory: &F) {
     let topic = ctx.topic("batch_zero");
-    let mut config = make_config(&bootstrap_for(factory, ctx));
+    let mut config = make_config_for(factory, ctx);
     config.insert("batch.size".to_string(), "0".to_string());
     let producer = factory.create(config).await.expect("Failed to create producer");
 
@@ -557,7 +580,7 @@ async fn produce_batch_size_zero_inner<F: ProducerBackendFactory>(ctx: &mut Test
 /// that subtest exercises.
 async fn produce_non_blocking_max_block_zero_inner<F: ProducerBackendFactory>(ctx: &mut TestContext, factory: &F) {
     let topic = ctx.topic("non_blocking");
-    let mut config = make_config(&bootstrap_for(factory, ctx));
+    let mut config = make_config_for(factory, ctx);
     config.insert("max.block.ms".to_string(), "0".to_string());
     let producer = factory.create(config).await.expect("Failed to create producer");
 
@@ -606,7 +629,7 @@ crate::multilanguage_test!(test_produce_record_too_large, produce_record_too_lar
 /// expose partitions_for).
 async fn produce_partitions_for_inner<F: ProducerBackendFactory>(ctx: &mut TestContext, factory: &F) {
     let topic = ctx.topic("partitions_for");
-    let producer = factory.create(make_config(&bootstrap_for(factory, ctx))).await.expect("create");
+    let producer = factory.create(make_config_for(factory, ctx)).await.expect("create");
     // Produce one record so the topic exists.
     let record = ProducerRecord::with_key(topic.clone(), Some(b("k")), Some(b("v")));
     producer
@@ -640,7 +663,7 @@ async fn produce_and_check_metrics_inner<F: ProducerBackendFactory>(ctx: &mut Te
 
     let topic = ctx.topic("producer_metrics");
     let producer = factory
-        .create(make_config(&bootstrap_for(factory, ctx)))
+        .create(make_config_for(factory, ctx))
         .await
         .expect("Failed to create producer");
 
@@ -818,7 +841,8 @@ async fn test_close_with_zero_timeout_aborts_pending() {
     let mut ctx = TestContext::new(ClusterConfig::default()).await;
     let topic = ctx.topic("close_zero");
 
-    let mut props = make_config(ctx.bootstrap_servers());
+    let mut props = make_config(ctx.protocol_bootstrap_servers());
+    ctx.apply_security(&mut props);
     // Pin everything in the accumulator so close_with_timeout(0) has work to abort.
     props.insert("linger.ms".to_string(), "60000".to_string());
     props.insert("delivery.timeout.ms".to_string(), "120000".to_string());
@@ -868,7 +892,8 @@ async fn test_wrong_serializer_errors_send() {
     use confluent_kafka::producer::{KafkaProducer, ProducerConfig};
 
     let ctx = TestContext::new(ClusterConfig::default()).await;
-    let props = make_config(ctx.bootstrap_servers());
+    let mut props = make_config(ctx.protocol_bootstrap_servers());
+    ctx.apply_security(&mut props);
     let producer_config = ProducerConfig::new(&props).expect("Invalid test config");
     let producer = KafkaProducer::new(producer_config, Box::new(ByteArraySerializer), Box::new(FailingSerializer))
         .expect("Failed to create producer");
@@ -913,7 +938,7 @@ async fn test_wrong_serializer_errors_send() {
 async fn delivery_callback_logs_metadata_inner<F: ProducerBackendFactory>(ctx: &mut TestContext, factory: &F) {
     let topic = ctx.topic("delivery_callback");
     let (producer, log) = factory
-        .create_with_callback_log(make_config(&bootstrap_for(factory, ctx)))
+        .create_with_callback_log(make_config_for(factory, ctx))
         .await
         .expect("create producer with callback log");
 
