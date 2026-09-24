@@ -68,24 +68,13 @@ fn bootstrap_for<F: ProducerBackendFactory>(factory: &F, ctx: &TestContext) -> S
     }
 }
 
-/// Inject the selected protocol's security keys into `config` for every backend.
-/// The gRPC/container backends reach the broker over its CONTAINER-family
-/// SSL / SASL_SSL listener, and the keys (the CA-cert PEM truststore and any
-/// SASL/PLAIN settings) travel through the gRPC config map to the containerized
-/// client — so no cert files need mounting.
-fn apply_backend_security<F: ProducerBackendFactory>(
-    _factory: &F,
-    ctx: &TestContext,
-    config: &mut HashMap<String, String>,
-) {
-    ctx.apply_security(config);
-}
-
 /// [`make_config`] for the factory's reachable bootstrap, with the selected
-/// protocol's security keys injected for a native backend.
+/// protocol's security keys injected. The keys are injected for every backend:
+/// the gRPC backends forward them through the config map to the client they
+/// create, so no cert files need mounting.
 fn make_config_for<F: ProducerBackendFactory>(factory: &F, ctx: &TestContext) -> HashMap<String, String> {
     let mut config = make_config(&bootstrap_for(factory, ctx));
-    apply_backend_security(factory, ctx, &mut config);
+    ctx.apply_security(&mut config);
     config
 }
 
@@ -455,7 +444,7 @@ async fn produce_with_wrong_broker_list_inner<F: ProducerBackendFactory>(ctx: &m
     // Keep the explicit dead address; only add the selected protocol's security
     // keys (a no-op under plaintext). The client still fails to connect, which
     // is the intent.
-    apply_backend_security(factory, ctx, &mut config);
+    ctx.apply_security(&mut config);
     config.insert("max.block.ms".to_string(), "3000".to_string());
     let producer = factory.create(config).await.expect("Failed to create producer");
 

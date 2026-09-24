@@ -53,11 +53,13 @@ git submodule update --init --depth=1 kafka
 # bottles for this agent's macOS version, so no source build is required. Only
 # the job that needs these packages sets this variable.
 if [ "${MACOS_INSTALL_GRPC_CPP:-}" = "true" ]; then
-  brew install grpc pkgconf
+  brew install grpc
+  command -v pkg-config >/dev/null || brew install pkgconf
 fi
 
 # MACOS_SKIP_COLIMA=true skips the Colima/Docker bring-up below (the toolchain
-# setup above always runs). Set by blocks whose tests need no container.
+# setup above always runs). Intended for blocks whose tests need no container;
+# no block currently sets it.
 if [ "${MACOS_SKIP_COLIMA:-}" = "true" ]; then
   echo "=== MACOS_SKIP_COLIMA=true -- skipping Colima/Docker setup (unit-tests-only block) ==="
 else

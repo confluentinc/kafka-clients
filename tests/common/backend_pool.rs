@@ -30,10 +30,10 @@
 //!   that testcontainers maps to a **random** host port. The server reaches the
 //!   broker through its CONTAINER-family listener.
 //! - **`native`** (default on all other platforms, e.g. macOS) — the same gRPC
-//!   server run as a child process on the host, bound to `127.0.0.1` on a free
-//!   port. The server connects to the broker through the host-loopback
-//!   listener, as the `__rust` arm does. This mode tests the host platform's
-//!   build of the bindings: containers on macOS run Linux, so container mode
+//!   server run as a child process on the host, bound to an ephemeral port on
+//!   `127.0.0.1` that it reports on startup. The server connects to the broker
+//!   through the host-loopback listener, as the `__rust` arm does. This mode
+//!   tests the host platform's build of the bindings: containers on macOS run Linux, so container mode
 //!   can only test the Linux build and cannot load the host's Mach-O artifacts.
 //!
 //! In both modes each backend listens on its own port, so parallel test runs
@@ -44,7 +44,6 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::io::{BufRead, BufReader, Read};
-use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, LazyLock, Mutex, Once, mpsc};
@@ -186,9 +185,14 @@ impl BackendKind {
 
 /// Panics with a build hint when a native backend's artifact is missing, rather
 /// than letting the spawn fail with an unexplained "No such file or directory".
+///
+/// A bare command name with no path separator (e.g. `MULTILANG_PYTHON=python3`)
+/// is not checked: [`Command`] resolves it through `PATH`, and a missing
+/// command still fails at spawn with the build hint.
 fn require_native_artifact(kind: BackendKind, path: &Path, make_target: &str) {
+    let is_bare_command = path.components().count() == 1 && !path.is_absolute();
     assert!(
-        path.exists(),
+        is_bare_command || path.exists(),
         "{} native gRPC backend: {} does not exist. Build it with `make {make_target}`.",
         kind.label(),
         path.display(),
@@ -426,24 +430,20 @@ async fn start_container(kind: BackendKind, broker_network: String) -> BackendHa
     }
 }
 
-/// Start `kind`'s server as a child process bound to `127.0.0.1` on a free
-/// port, and wait for its "listening" line — the same readiness signal the
-/// container mode waits for.
+/// Start `kind`'s server as a child process on `127.0.0.1`, and wait for its
+/// "listening" line — the same readiness signal the container mode waits for.
 ///
-/// The port is chosen by binding port 0 and releasing it, so another process
-/// could claim it before the server binds. In that case the server fails to
-/// start and the panic below includes its output. Stdout and stderr are drained
-/// for the lifetime of the process, so the server never blocks on a full pipe.
+/// The server is started with `GRPC_PORT=0`, so the OS assigns a free port at
+/// bind time and no other process can claim it first. The server reports the
+/// port it bound as the last `:`-separated field of the "listening" line
+/// (`... listening on 127.0.0.1:<port>`), which becomes the endpoint. Stdout
+/// and stderr are drained for the lifetime of the process, so the server never
+/// blocks on a full pipe.
 fn start_native(kind: BackendKind) -> BackendHandle {
-    let port = TcpListener::bind("127.0.0.1:0")
-        .and_then(|listener| listener.local_addr())
-        .map(|addr| addr.port())
-        .unwrap_or_else(|e| panic!("{} native backend: could not pick a free port: {e}", kind.label()));
-
     let (mut command, make_target) = kind.native_command();
     let mut child = command
         .env("GRPC_HOST", "127.0.0.1")
-        .env("GRPC_PORT", port.to_string())
+        .env("GRPC_PORT", "0")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -463,8 +463,8 @@ fn start_native(kind: BackendKind) -> BackendHandle {
     drain_output(stderr, Arc::clone(&output), Some(ready_tx));
 
     let process = NativeProcess { child: Mutex::new(child), output };
-    match ready_rx.recv_timeout(NATIVE_START_TIMEOUT) {
-        Ok(()) => {},
+    let listening_line = match ready_rx.recv_timeout(NATIVE_START_TIMEOUT) {
+        Ok(line) => line,
         // Disconnected: stderr reached EOF before "listening", meaning the
         // server exited. Timeout: the server is still starting or has hung.
         // Both are treated as fatal.
@@ -479,7 +479,16 @@ fn start_native(kind: BackendKind) -> BackendHandle {
             process.terminate();
             panic!("{} native gRPC backend {reason}\n{details}", kind.label());
         },
-    }
+    };
+    let Some(port) = parse_listening_port(&listening_line) else {
+        let details = process.describe();
+        process.terminate();
+        panic!(
+            "{} native gRPC backend: no bound port in its listening line `{listening_line}` \
+             (expected `listening on <host>:<port>`)\n{details}",
+            kind.label()
+        );
+    };
 
     BackendHandle {
         runtime: BackendRuntime::Native(process),
@@ -487,22 +496,38 @@ fn start_native(kind: BackendKind) -> BackendHandle {
     }
 }
 
+/// The port a native server reports in its "listening" line: the last
+/// `:`-separated field, which must be a non-zero `u16`.
+fn parse_listening_port(line: &str) -> Option<u16> {
+    let port: u16 = line.rsplit(':').next()?.trim().parse().ok()?;
+    (port != 0).then_some(port)
+}
+
 /// Copy `stream`'s lines into `output`, keeping the last [`NATIVE_OUTPUT_LINES`],
-/// until the stream closes. With `ready`, signals it on the first line
-/// containing "listening".
+/// until the stream reaches EOF or fails to read. Lines that are not valid UTF-8
+/// are kept lossily rather than ending the drain, which would leave the server to
+/// block on a full pipe. With `ready`, sends it the first line containing
+/// "listening".
 fn drain_output(
     stream: impl Read + Send + 'static,
     output: Arc<Mutex<VecDeque<String>>>,
-    ready: Option<mpsc::Sender<()>>,
+    ready: Option<mpsc::Sender<String>>,
 ) {
     std::thread::spawn(move || {
         let mut ready = ready;
-        for line in BufReader::new(stream).lines() {
-            let Ok(line) = line else { break };
+        let mut reader = BufReader::new(stream);
+        let mut buf = Vec::new();
+        loop {
+            buf.clear();
+            match reader.read_until(b'\n', &mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(_) => {},
+            }
+            let line = String::from_utf8_lossy(&buf).trim_end_matches(['\r', '\n']).to_string();
             if line.contains("listening")
                 && let Some(ready) = ready.take()
             {
-                let _ = ready.send(());
+                let _ = ready.send(line.clone());
             }
             let mut output = output.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             if output.len() == NATIVE_OUTPUT_LINES {
@@ -642,7 +667,7 @@ pub fn take_and_remove_handles_on_network(broker_network: &str) -> usize {
 /// `ContainerAsync::drop` runs, which is what makes this safe to call from an
 /// `atexit` handler where there is no tokio runtime to service that `Drop`.
 /// Idempotent, so calling it from both `atexit` hooks is harmless.
-pub fn force_remove_all_containers() {
+pub fn force_stop_all_backends() {
     let pool = BACKEND_POOL.lock().expect("backend pool lock poisoned");
     let handles: Vec<_> = pool.values().filter_map(|cell| cell.get().cloned()).collect();
     drop(pool);
@@ -661,10 +686,10 @@ fn register_cleanup_hook() {
             safe fn atexit(callback: extern "C" fn()) -> std::os::raw::c_int;
         }
 
-        extern "C" fn cleanup_backend_containers() {
-            force_remove_all_containers();
+        extern "C" fn cleanup_backends() {
+            force_stop_all_backends();
         }
 
-        atexit(cleanup_backend_containers);
+        atexit(cleanup_backends);
     });
 }

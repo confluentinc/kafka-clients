@@ -179,7 +179,8 @@ test-integration: build-rust-integration-tests
 # all-listeners harness.
 #
 # `test-integration` above (no env var) is equivalent to the plaintext run.
-# Used by the Semaphore verify-plaintext / SSL / SASL_SSL blocks.
+# These run only the `integration` test binary and are intended for local use.
+# CI runs the full suite through test-rust-all-features-{ssl,sasl-ssl} below.
 test-integration-plaintext: build-rust-integration-tests
 	INTEGRATION_TEST_PROTOCOL=plaintext cargo test --features integration-tests --test integration
 test-integration-ssl: build-rust-integration-tests
@@ -194,13 +195,13 @@ test-integration-sasl-ssl: build-rust-integration-tests
 # `test = false` so it is never scheduled), but with the client connections
 # driven over the SSL / SASL_SSL listener via INTEGRATION_TEST_PROTOCOL.
 #
-# These are what the SSL / SASL_SSL CI blocks run, so those blocks exercise the
+# These are what the SSL / SASL_SSL CI jobs run, so those jobs exercise the
 # entire suite over their listener rather than only the `integration` binary.
 # They deliberately OMIT format-check, clippy and the performance tail that
 # `verify-rust` wraps around `test-rust-all-features`: those checks are
-# protocol-independent, so running them once in the PLAINTEXT block is enough.
+# protocol-independent, so running them once in the PLAINTEXT job is enough.
 # (The unit tests are protocol-independent too and so overlap the PLAINTEXT
-# run; they are kept here so a block failure points at one whole suite, not a
+# run; they are kept here so a job failure points at one whole suite, not a
 # subset.)
 test-rust-all-features-ssl:
 	INTEGRATION_TEST_PROTOCOL=ssl $(MAKE) test-rust-all-features
@@ -262,7 +263,8 @@ test-integration-python:
 		printf 'into a Linux container and link it with GNU ld. On this host that\n'; \
 		printf 'artifact is Mach-O / absent (no ELF .so), so the image cannot build.\n'; \
 		printf 'This container arm runs only in CI'"'"'s Linux verify-python job.\n'; \
-		printf 'Run it natively on this host with: make test-integration-python-native\n'; \
+		printf 'Run it natively on this host with: %smake test-integration-python-native\n' \
+			"$${INTEGRATION_TEST_PROTOCOL:+INTEGRATION_TEST_PROTOCOL=$$INTEGRATION_TEST_PROTOCOL }"; \
 		printf '========================================================================\n\n'; \
 	else \
 		$(MAKE) build-grpc-images-python && \
@@ -279,7 +281,8 @@ test-integration-c:
 		printf 'into a Linux container and links it with GNU ld. On this host that\n'; \
 		printf 'artifact is Mach-O, so the image cannot build/link.\n'; \
 		printf 'This container arm runs only in CI'"'"'s Linux verify-c job.\n'; \
-		printf 'Run it natively on this host with: make test-integration-c-native\n'; \
+		printf 'Run it natively on this host with: %smake test-integration-c-native\n' \
+			"$${INTEGRATION_TEST_PROTOCOL:+INTEGRATION_TEST_PROTOCOL=$$INTEGRATION_TEST_PROTOCOL }"; \
 		printf '========================================================================\n\n'; \
 	else \
 		$(MAKE) build-grpc-images-c && \
@@ -324,11 +327,12 @@ GRPC_PROTO_DIR = $(RUST_PROJECT_ROOT)/multilanguage-test-server/proto
 GRPC_PROTOS = $(GRPC_PROTO_DIR)/producer_service.proto $(GRPC_PROTO_DIR)/consumer_service.proto \
 	$(GRPC_PROTO_DIR)/admin_service.proto
 
-# Builds the Python extension (build-python), installs grpcio into the venv, and
-# generates the gRPC stubs.
+# Builds the Python extension (build-python), installs the gRPC packages into the
+# venv, and generates the gRPC stubs. The versions are pinned in
+# bindings/python/requirements-grpc{,-tools}.txt, shared with the Docker images.
 build-grpc-native-python: build-python
 	@(. venv/bin/activate && \
-	pip install "grpcio>=1.66" "grpcio-tools>=1.66" "protobuf>=4.0" && \
+	pip install -r $(RUST_PROJECT_ROOT)/bindings/python/requirements-grpc-tools.txt && \
 	mkdir -p $(GRPC_NATIVE_DIR)/python && \
 	python -m grpc_tools.protoc -I$(GRPC_PROTO_DIR) \
 		--python_out=$(GRPC_NATIVE_DIR)/python --grpc_python_out=$(GRPC_NATIVE_DIR)/python \
@@ -414,8 +418,8 @@ producer-perf-test-python: build-python
 test-c: build-c
 	$(MAKE) -C bindings/c RUST_PROJECT_ROOT=$(RUST_PROJECT_ROOT) CFLAGS_EXTRA="$(CFLAGS_NATIVE)" test
 
-# macOS variant of test-c: C unit tests (ctest). The gRPC multilanguage arm
-# runs on Linux only (verify-c).
+# macOS variant of test-c: C unit tests (ctest) only. On macOS the gRPC
+# multilanguage arm runs natively instead (see verify-c-macos-docker).
 test-c-macos-docker: build-c
 	cd bindings/c/build && ctest --output-on-failure
 
@@ -423,8 +427,9 @@ test-python: build-python
 	@(. venv/bin/activate && \
 	$(MAKE) -C bindings/python RUST_PROJECT_ROOT=$(RUST_PROJECT_ROOT) PROFILE=release test)
 
-# macOS variant of test-python: Python unit tests (pytest test/unit). The gRPC
-# multilanguage arm runs on Linux only (verify-python).
+# macOS variant of test-python: Python unit tests (pytest test/unit) only. On
+# macOS the gRPC multilanguage arm runs natively instead (see
+# verify-python-macos-docker).
 test-python-macos-docker: build-python
 	@(. venv/bin/activate && \
 	cd $(RUST_PROJECT_ROOT)/bindings/python && \
@@ -447,8 +452,8 @@ verify-python: test-python check-bindings
 # macOS perf p99 budget (ms), used by verify-rust-macos-docker.
 MACOS_P99_LIMIT_MS ?= 150
 
-# macOS verify-python: unit tests.
-# Also runs the gRPC multilanguage arm natively, as verify-c-macos-docker does.
+# macOS verify-python: Python unit tests, then the gRPC multilanguage arm with
+# the gRPC server as a native host process, as verify-c-macos-docker does.
 verify-python-macos-docker: test-python-macos-docker
 	$(MAKE) test-integration-python-native
 

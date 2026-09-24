@@ -22,7 +22,7 @@
 //! addressed here, one by measurement and one by finding the surface that can
 //! reach it.
 //!
-//! # The real broker cannot mint a token, and no fixture changes that
+//! # The test broker cannot mint a token
 //!
 //! `KafkaApis.allowTokenRequests`
 //! (`kafka/core/src/main/scala/kafka/server/KafkaApis.scala:2345-2354`) returns
@@ -36,9 +36,9 @@
 //! fixture with `KAFKA_DELEGATION_TOKEN_SECRET_KEY` set and against the default
 //! fixture without it. Both produced byte-identical answers: error code 64 with
 //! Java's message "Delegation Token requests are not allowed on PLAINTEXT/1-way
-//! SSL channels and on delegation token authenticated channels." Configuring the
-//! secret key changes nothing, because the gate is the *client's* security
-//! protocol.
+//! SSL channels and on delegation token authenticated channels." Over PLAINTEXT,
+//! configuring the secret key changes nothing, because the gate is the
+//! *client's* security protocol.
 //!
 //! The admin client authenticates over TLS/SASL: `AdminClientConfig` parses
 //! `security.protocol` / `sasl.*` / `ssl.*`, and `KafkaAdminClient::new` selects
@@ -51,6 +51,13 @@
 //! and return code 64, whereas SASL_SSL passes the gate and returns
 //! `DelegationTokenAuthDisabled`; pinning keeps the code-64 assertion identical
 //! across all three runs.
+//!
+//! Minting a real token therefore needs a SASL_SSL connection to a broker with
+//! `delegation.token.secret.key` set, which the test fixtures do not configure.
+//! The gap is tracked in `design/current/status.md` (Tier 3 Phase 4,
+//! "Integration deferred"). That entry attributes it to missing SASL support in
+//! the admin client, which has since been added; the remaining requirement is
+//! the broker's secret key.
 //!
 //! [`delegation_token_rpcs_are_rejected_on_a_plaintext_connection`] pins that
 //! error path on all four backends. It is not vacuous: it drives the *request*
@@ -118,9 +125,9 @@ fn assert_not_allowed(backend: &str, what: &str, error: &confluent_kafka::common
 /// All four RPCs are refused on a PLAINTEXT connection, with Java's error and
 /// message.
 ///
-/// See the module docs for why this is the reachable state and why no broker
-/// fixture can move it. The value is in driving the four *request* encoders to a
-/// real broker: a mangled principal, lifetime sentinel or HMAC would produce a
+/// See the module docs for why this is the only reachable state over PLAINTEXT,
+/// regardless of broker configuration. The value is in driving the four
+/// *request* encoders to a real broker: a mangled principal, lifetime sentinel or HMAC would produce a
 /// different failure than 64.
 async fn delegation_token_rpcs_are_rejected_on_a_plaintext_connection<F: AdminBackendFactory>(
     ctx: &mut TestContext,

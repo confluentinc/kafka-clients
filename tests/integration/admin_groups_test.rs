@@ -154,25 +154,23 @@ impl Deserializer<Vec<u8>> for ByteArrayDeserializer {
 type BytesConsumer = Box<dyn Consumer<Vec<u8>, Vec<u8>>>;
 
 /// Build a KIP-848 (`group.protocol=consumer`) `ConsumerConfig`.
-fn consumer_config(ctx: &TestContext, bootstrap: &str, group_id: &str) -> ConsumerConfig {
+fn consumer_config(ctx: &TestContext, group_id: &str) -> ConsumerConfig {
     let mut props = HashMap::from([
-        ("bootstrap.servers".to_string(), bootstrap.to_string()),
         ("group.protocol".to_string(), "consumer".to_string()),
         ("auto.offset.reset".to_string(), "earliest".to_string()),
         ("client.id".to_string(), "integration-test-consumer".to_string()),
         ("enable.auto.commit".to_string(), "false".to_string()),
         ("group.id".to_string(), group_id.to_string()),
     ]);
-    ctx.apply_security(&mut props);
+    ctx.configure(&mut props);
     ConsumerConfig::new(&props).expect("invalid consumer test config")
 }
 
 /// Build a KIP-848 `ConsumerConfig` for a static member (with a
 /// `group.instance.id`), so it can be targeted by
 /// `remove_members_from_consumer_group`.
-fn static_consumer_config(ctx: &TestContext, bootstrap: &str, group_id: &str, instance_id: &str) -> ConsumerConfig {
+fn static_consumer_config(ctx: &TestContext, group_id: &str, instance_id: &str) -> ConsumerConfig {
     let mut props = HashMap::from([
-        ("bootstrap.servers".to_string(), bootstrap.to_string()),
         ("group.protocol".to_string(), "consumer".to_string()),
         ("auto.offset.reset".to_string(), "earliest".to_string()),
         ("client.id".to_string(), format!("integration-test-consumer-{instance_id}")),
@@ -180,22 +178,22 @@ fn static_consumer_config(ctx: &TestContext, bootstrap: &str, group_id: &str, in
         ("group.id".to_string(), group_id.to_string()),
         ("group.instance.id".to_string(), instance_id.to_string()),
     ]);
-    ctx.apply_security(&mut props);
+    ctx.configure(&mut props);
     ConsumerConfig::new(&props).expect("invalid consumer test config")
 }
 
-fn new_bytes_consumer(ctx: &TestContext, bootstrap: &str, group_id: &str) -> BytesConsumer {
+fn new_bytes_consumer(ctx: &TestContext, group_id: &str) -> BytesConsumer {
     KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
-        consumer_config(ctx, bootstrap, group_id),
+        consumer_config(ctx, group_id),
         Box::new(ByteArrayDeserializer),
         Box::new(ByteArrayDeserializer),
     )
     .expect("KafkaConsumer::new should succeed")
 }
 
-fn new_static_bytes_consumer(ctx: &TestContext, bootstrap: &str, group_id: &str, instance_id: &str) -> BytesConsumer {
+fn new_static_bytes_consumer(ctx: &TestContext, group_id: &str, instance_id: &str) -> BytesConsumer {
     KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
-        static_consumer_config(ctx, bootstrap, group_id, instance_id),
+        static_consumer_config(ctx, group_id, instance_id),
         Box::new(ByteArrayDeserializer),
         Box::new(ByteArrayDeserializer),
     )
@@ -281,14 +279,13 @@ async fn list_groups_and_list_consumer_groups_show_live_group<F: AdminBackendFac
 ) {
     let admin = admin_for(factory, ctx).await;
     let backend = admin.name();
-    let bootstrap = ctx.protocol_bootstrap_servers().to_string();
     let topic = ctx.topic("admin_groups_list");
     let group_id = ctx.group_id("g_list");
 
     // Create the topic explicitly so the assignment is deterministic.
     create_topic(&admin, &topic, NUM_PARTITIONS, 1).await;
 
-    let mut consumer = new_bytes_consumer(ctx, &bootstrap, &group_id);
+    let mut consumer = new_bytes_consumer(ctx, &group_id);
     subscribe_and_join(&mut consumer, &topic).await;
 
     // (a) list_groups: the created group appears with type Consumer, state Stable.
@@ -364,12 +361,11 @@ async fn list_groups_and_list_consumer_groups_show_live_group<F: AdminBackendFac
 async fn list_groups_filters_restrict_the_listing<F: AdminBackendFactory>(ctx: &mut TestContext, factory: &F) {
     let admin = admin_for(factory, ctx).await;
     let backend = admin.name();
-    let bootstrap = ctx.protocol_bootstrap_servers().to_string();
     let topic = ctx.topic("admin_groups_filters");
     let group_id = ctx.group_id("g_filters");
 
     create_topic(&admin, &topic, NUM_PARTITIONS, 1).await;
-    let mut consumer = new_bytes_consumer(ctx, &bootstrap, &group_id);
+    let mut consumer = new_bytes_consumer(ctx, &group_id);
     subscribe_and_join(&mut consumer, &topic).await;
 
     // Wait for Stable, then read the group's own protocol type off the listing.
@@ -490,13 +486,12 @@ async fn list_groups_filters_restrict_the_listing<F: AdminBackendFactory>(ctx: &
 async fn describe_consumer_groups_live_group<F: AdminBackendFactory>(ctx: &mut TestContext, factory: &F) {
     let admin = admin_for(factory, ctx).await;
     let backend = admin.name();
-    let bootstrap = ctx.protocol_bootstrap_servers().to_string();
     let topic = ctx.topic("admin_groups_describe");
     let group_id = ctx.group_id("g_describe");
 
     create_topic(&admin, &topic, NUM_PARTITIONS, 1).await;
 
-    let mut consumer = new_bytes_consumer(ctx, &bootstrap, &group_id);
+    let mut consumer = new_bytes_consumer(ctx, &group_id);
     let assigned = subscribe_and_join(&mut consumer, &topic).await;
     assert_eq!(
         assigned, NUM_PARTITIONS as usize,
@@ -586,10 +581,11 @@ async fn describe_consumer_groups_live_group<F: AdminBackendFactory>(ctx: &mut T
 ///
 ///   - `DescribeConsumerGroupsOptions.includeAuthorizedOperations(true)` — the
 ///     option is plumbed through all four backends and otherwise never set, and
-///     the *absent* case is what every other scenario sees. A `User:ANONYMOUS`
-///     caller on an authorizer-less KRaft broker is a super user, so the set
-///     comes back populated rather than empty (the same reachability surprise G2
-///     recorded for `describeCluster`).
+///     the *absent* case is what every other scenario sees. This fixture has no
+///     authorizer, and a broker without one reports every supported operation
+///     for any caller (`AuthHelper.authorizedOperations`), so the set comes back
+///     populated rather than empty in every protocol run (the same reachability
+///     surprise G2 recorded for `describeCluster`).
 ///   - `groupEpoch` / `targetAssignmentEpoch` / `memberEpoch`, Java `Optional`s
 ///     that are empty for a classic group and present for a KIP-848 one. An
 ///     encoder that decoded an absent epoch as 0 passes elsewhere; here a present
@@ -600,12 +596,11 @@ async fn describe_consumer_groups_reports_operations_and_epochs<F: AdminBackendF
 ) {
     let admin = admin_for(factory, ctx).await;
     let backend = admin.name();
-    let bootstrap = ctx.protocol_bootstrap_servers().to_string();
     let topic = ctx.topic("admin_groups_ops");
     let group_id = ctx.group_id("g_ops");
 
     create_topic(&admin, &topic, NUM_PARTITIONS, 1).await;
-    let mut consumer = new_bytes_consumer(ctx, &bootstrap, &group_id);
+    let mut consumer = new_bytes_consumer(ctx, &group_id);
     subscribe_and_join(&mut consumer, &topic).await;
 
     let mut described = None;
@@ -631,9 +626,10 @@ async fn describe_consumer_groups_reports_operations_and_epochs<F: AdminBackendF
     }
     let desc = described.unwrap_or_else(|| panic!("{backend} backend: {group_id} never became Stable with a member"));
 
-    // A KRaft broker with no authorizer still computes the operations, because
-    // User:ANONYMOUS is a super user. So the *populated* case is the reachable
-    // one here and the null case is what the no-option scenario above covers.
+    // A broker with no authorizer still reports the operations: every supported
+    // operation, whatever the caller's principal. So the *populated* case is the
+    // reachable one here and the null case is what the no-option scenario above
+    // covers.
     let operations = desc.authorized_operations().unwrap_or_else(|| {
         panic!(
             "{backend} backend: with includeAuthorizedOperations the broker reports a set; absent here means the \
@@ -642,7 +638,7 @@ async fn describe_consumer_groups_reports_operations_and_epochs<F: AdminBackendF
     });
     assert!(
         !operations.is_empty(),
-        "{backend} backend: a super user's authorized operations on a group are not empty"
+        "{backend} backend: authorized operations on a group are not empty without an authorizer"
     );
 
     // KIP-848 epochs. Present, and a reconciled group has bumped them past 0 —
@@ -695,7 +691,6 @@ async fn describe_consumer_groups_reports_operations_and_epochs<F: AdminBackendF
 async fn describe_consumer_groups_batches_several_groups<F: AdminBackendFactory>(ctx: &mut TestContext, factory: &F) {
     let admin = admin_for(factory, ctx).await;
     let backend = admin.name();
-    let bootstrap = ctx.protocol_bootstrap_servers().to_string();
     let topic = ctx.topic("admin_groups_batch");
 
     create_topic(&admin, &topic, NUM_PARTITIONS, 1).await;
@@ -703,7 +698,7 @@ async fn describe_consumer_groups_batches_several_groups<F: AdminBackendFactory>
     let group_ids: Vec<String> = (0..3).map(|i| ctx.group_id(&format!("g_batch_{i}"))).collect();
     let mut consumers = Vec::new();
     for group_id in &group_ids {
-        let mut consumer = new_bytes_consumer(ctx, &bootstrap, group_id);
+        let mut consumer = new_bytes_consumer(ctx, group_id);
         subscribe_and_join(&mut consumer, &topic).await;
         consumers.push(consumer);
     }
@@ -818,12 +813,11 @@ async fn describe_consumer_groups_nonexistent_group<F: AdminBackendFactory>(ctx:
 async fn describe_classic_groups_rejects_a_kip848_group<F: AdminBackendFactory>(ctx: &mut TestContext, factory: &F) {
     let admin = admin_for(factory, ctx).await;
     let backend = admin.name();
-    let bootstrap = ctx.protocol_bootstrap_servers().to_string();
     let topic = ctx.topic("admin_classic_describe");
     let group_id = ctx.group_id("g_classic");
 
     create_topic(&admin, &topic, NUM_PARTITIONS, 1).await;
-    let mut consumer = new_bytes_consumer(ctx, &bootstrap, &group_id);
+    let mut consumer = new_bytes_consumer(ctx, &group_id);
     subscribe_and_join(&mut consumer, &topic).await;
     let _ = consumer.poll(Duration::from_millis(200)).await;
 
@@ -1076,7 +1070,6 @@ async fn describe_a_simple_classic_group<F: AdminBackendFactory>(ctx: &mut TestC
 async fn delete_consumer_groups_empty_and_non_empty<F: AdminBackendFactory>(ctx: &mut TestContext, factory: &F) {
     let admin = admin_for(factory, ctx).await;
     let backend = admin.name();
-    let bootstrap = ctx.protocol_bootstrap_servers().to_string();
     let topic = ctx.topic("admin_delete_groups");
     let empty_group = ctx.group_id("g_delete_empty");
     let live_group = ctx.group_id("g_delete_live");
@@ -1086,7 +1079,7 @@ async fn delete_consumer_groups_empty_and_non_empty<F: AdminBackendFactory>(ctx:
     // Bring a group up, commit an offset so it is retained, then close the
     // consumer so the group becomes empty (member-less) but still exists.
     {
-        let mut consumer = new_bytes_consumer(ctx, &bootstrap, &empty_group);
+        let mut consumer = new_bytes_consumer(ctx, &empty_group);
         subscribe_and_join(&mut consumer, &topic).await;
         let _ = consumer.poll(Duration::from_millis(500)).await;
         consumer.commit_sync().await.expect("commit offsets");
@@ -1094,7 +1087,7 @@ async fn delete_consumer_groups_empty_and_non_empty<F: AdminBackendFactory>(ctx:
     }
 
     // (b) A group with an active member cannot be deleted (NON_EMPTY_GROUP).
-    let mut live_consumer = new_bytes_consumer(ctx, &bootstrap, &live_group);
+    let mut live_consumer = new_bytes_consumer(ctx, &live_group);
     subscribe_and_join(&mut live_consumer, &topic).await;
     let _ = live_consumer.poll(Duration::from_millis(200)).await;
 
@@ -1167,15 +1160,14 @@ async fn delete_consumer_groups_empty_and_non_empty<F: AdminBackendFactory>(ctx:
 async fn remove_one_member_from_consumer_group<F: AdminBackendFactory>(ctx: &mut TestContext, factory: &F) {
     let admin = admin_for(factory, ctx).await;
     let backend = admin.name();
-    let bootstrap = ctx.protocol_bootstrap_servers().to_string();
     let topic = ctx.topic("admin_remove_member");
     let group_id = ctx.group_id("g_remove_one");
 
     create_topic(&admin, &topic, NUM_PARTITIONS, 1).await;
 
     // Two static members share the topic's partitions.
-    let mut member_one = new_static_bytes_consumer(ctx, &bootstrap, &group_id, "instance-1");
-    let mut member_two = new_static_bytes_consumer(ctx, &bootstrap, &group_id, "instance-2");
+    let mut member_one = new_static_bytes_consumer(ctx, &group_id, "instance-1");
+    let mut member_two = new_static_bytes_consumer(ctx, &group_id, "instance-2");
     member_one
         .subscribe_with_topics(vec![topic.clone()])
         .await
@@ -1193,6 +1185,12 @@ async fn remove_one_member_from_consumer_group<F: AdminBackendFactory>(ctx: &mut
         }
     }
 
+    // Close instance-1 before removing it. A live consumer would rejoin as soon
+    // as the removal fences it, racing the reassignment asserted below. Closing a
+    // static member does not leave the group: the coordinator keeps its entry, and
+    // its partitions, as a placeholder until the session timeout expires so the
+    // same instance can rejoin. That placeholder is what removal by
+    // group.instance.id targets.
     member_one.close().await.expect("close m1");
 
     // Remove instance-1 by its group.instance.id.
@@ -1248,14 +1246,20 @@ async fn remove_one_member_from_consumer_group<F: AdminBackendFactory>(ctx: &mut
 async fn remove_all_members_from_consumer_group<F: AdminBackendFactory>(ctx: &mut TestContext, factory: &F) {
     let admin = admin_for(factory, ctx).await;
     let backend = admin.name();
-    let bootstrap = ctx.protocol_bootstrap_servers().to_string();
     let topic = ctx.topic("admin_remove_all");
     let group_id = ctx.group_id("g_remove_all");
 
     create_topic(&admin, &topic, NUM_PARTITIONS, 1).await;
 
-    let mut consumer = new_static_bytes_consumer(ctx, &bootstrap, &group_id, "instance-1");
+    let mut consumer = new_static_bytes_consumer(ctx, &group_id, "instance-1");
     subscribe_and_join(&mut consumer, &topic).await;
+
+    // Close the member before removing it, as in
+    // [`remove_one_member_from_consumer_group`]: a live consumer would rejoin
+    // after the removal fences it, so the group would not stay empty. The closed
+    // static member remains in the group as a placeholder until the session
+    // timeout, and that placeholder is what removeAll removes.
+    consumer.close().await.expect("close consumer");
 
     // removeAll: no specific members provided.
     let options = RemoveMembersFromConsumerGroupOptions::default();
@@ -1301,7 +1305,6 @@ async fn remove_all_members_from_consumer_group<F: AdminBackendFactory>(ctx: &mu
         "{backend} backend: removeAll should leave the group with no active members"
     );
 
-    drop(consumer);
     admin.close(Some(Duration::from_secs(5))).await.expect("close");
     ctx.cleanup().await;
 }

@@ -118,6 +118,7 @@ use confluent_kafka::producer::ProducerRecord;
 
 use crate::common::cluster_config::{ClusterConfig, kip848_3_broker};
 use crate::common::test_context::TestContext;
+use crate::common::test_utils::with_timeout;
 
 // Type alias matching the bytes-typed `Consumer` trait object returned by
 // `KafkaConsumer::new::<Vec<u8>, Vec<u8>>` (mirrors Java's `Consumer<byte[], byte[]>`).
@@ -722,6 +723,13 @@ async fn test_async_consumer_seek() {
     consumer.close().await.expect("consumer close");
 }
 
+/// Upper bound on the body of
+/// [`test_async_consumer_seek_throws_illegal_state_if_partitions_not_assigned`].
+const SEEK_TEST_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// Upper bound on a consumer `close()` in a bounded test.
+const CONSUMER_CLOSE_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// Translates Java's
 /// `testAsyncConsumerSeekThrowsIllegalStateIfPartitionsNotAssigned` (line 1199).
 /// `seek_to_end` on an unassigned partition raises IllegalState with the
@@ -733,21 +741,28 @@ async fn test_async_consumer_seek_throws_illegal_state_if_partitions_not_assigne
     let tp = TopicPartition::new(topic.clone(), 0);
     let group_id = ctx.group_id("g_seek_illegal_state");
 
-    let mut consumer = make_consumer(&ctx, &group_id, &[]);
-    create_topic(consumer.as_mut(), &topic, 2).await;
-    let err = consumer
-        .seek_to_end(std::slice::from_ref(&tp))
-        .await
-        .expect_err("seek_to_end unassigned should fail");
-    match err {
-        Error::LocalIllegalState(msg) => {
-            // Java: `"No current assignment for partition " + TP`.
-            assert_eq!(msg.message(), format!("No current assignment for partition {tp}"));
-        },
-        other => panic!("expected IllegalState, got {other:?}"),
-    }
+    // Bounded so that a hang fails this test promptly; it has previously stalled
+    // a CI job until the job's time limit.
+    with_timeout("seek_to_end on an unassigned partition", SEEK_TEST_TIMEOUT, async {
+        let mut consumer = make_consumer(&ctx, &group_id, &[]);
+        create_topic(consumer.as_mut(), &topic, 2).await;
+        let err = consumer
+            .seek_to_end(std::slice::from_ref(&tp))
+            .await
+            .expect_err("seek_to_end unassigned should fail");
+        match err {
+            Error::LocalIllegalState(msg) => {
+                // Java: `"No current assignment for partition " + TP`.
+                assert_eq!(msg.message(), format!("No current assignment for partition {tp}"));
+            },
+            other => panic!("expected IllegalState, got {other:?}"),
+        }
 
-    consumer.close().await.expect("consumer close");
+        with_timeout("consumer close", CONSUMER_CLOSE_TIMEOUT, consumer.close())
+            .await
+            .expect("consumer close");
+    })
+    .await;
 }
 
 /// Translates Java's `testAsyncConsumerConsumeMessagesWithLogAppendTime`

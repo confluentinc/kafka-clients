@@ -1462,12 +1462,6 @@ async fn test_async_consumer_recovery_on_poll_after_delayed_rebalance() {
 
 // ── Topic provisioning helpers ────────────────────────────────────────
 
-/// Equivalent of Java's `cluster.createTopic(name, 2, BROKER_COUNT)`.
-///
-/// The Rust integration harness has no admin client. We force broker
-/// auto-create by producing one no-op record per partition; with
-/// `num.partitions=2` on the broker, the first produce auto-creates
-/// the topic with two partitions. Subsequent calls are idempotent
 /// Builds an admin client for topic provisioning. Mirrors the per-file
 /// `admin_for` helper the `admin_*` integration tests use.
 fn admin_for(ctx: &TestContext) -> Box<dyn Admin> {
@@ -1482,7 +1476,12 @@ fn admin_for(ctx: &TestContext) -> Box<dyn Admin> {
     Box::new(KafkaAdminClient::new(config).expect("admin client"))
 }
 
-/// (a no-op record is just appended).
+/// Equivalent of Java's `cluster.createTopic(name, 2, BROKER_COUNT)`.
+///
+/// Forces broker auto-create by producing one no-op record per partition;
+/// with `num.partitions=2` on the broker, the first produce auto-creates the
+/// topic with two partitions. Subsequent calls are idempotent (a no-op record
+/// is just appended).
 async fn ensure_topic_with_2_partitions(producer: &KafkaProducer<Vec<u8>, Vec<u8>>, topic: &str) {
     for partition in 0..2 {
         let record = ProducerRecord::with_partition_key(

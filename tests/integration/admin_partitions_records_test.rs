@@ -47,21 +47,20 @@ use crate::common::backend_factory::AdminBackendFactory;
 use crate::common::test_context::TestContext;
 
 /// Build a byte-array producer with `acks=all`.
-fn build_producer(ctx: &TestContext, bootstrap: &str) -> KafkaProducer<Vec<u8>, Vec<u8>> {
+fn build_producer(ctx: &TestContext) -> KafkaProducer<Vec<u8>, Vec<u8>> {
     let mut props = HashMap::from([
-        ("bootstrap.servers".to_string(), bootstrap.to_string()),
         ("client.id".to_string(), "integration-test-admin-producer".to_string()),
         ("acks".to_string(), "all".to_string()),
         ("max.block.ms".to_string(), "30000".to_string()),
     ]);
-    ctx.apply_security(&mut props);
+    ctx.configure(&mut props);
     let config = ProducerConfig::new(&props).expect("valid producer config");
     KafkaProducer::new(config, Box::new(ByteArraySerializer), Box::new(ByteArraySerializer)).expect("build producer")
 }
 
 /// Produce `num` records to `(topic, partition)`, waiting for the broker acks.
-async fn produce_records(ctx: &TestContext, bootstrap: &str, topic: &str, partition: i32, num: usize) {
-    let producer = build_producer(ctx, bootstrap);
+async fn produce_records(ctx: &TestContext, topic: &str, partition: i32, num: usize) {
+    let producer = build_producer(ctx);
     let mut last = None;
     for i in 0..num {
         let record = ProducerRecord::with_partition_key(
@@ -306,13 +305,12 @@ async fn create_partitions_with_an_empty_assignment_list_is_rejected<F: AdminBac
 async fn delete_records_advances_low_watermark<F: AdminBackendFactory>(ctx: &mut TestContext, factory: &F) {
     let admin = admin_for(factory, ctx).await;
     let backend = factory.name();
-    let bootstrap = ctx.protocol_bootstrap_servers().to_string();
 
     let topic = ctx.topic("admin_delete_records");
     create_topic(&admin, &topic, 1, 1).await;
 
     // Produce 10 records (offsets 0..9) to partition 0.
-    produce_records(ctx, &bootstrap, &topic, 0, 10).await;
+    produce_records(ctx, &topic, 0, 10).await;
 
     // Delete everything before offset 5; the low watermark advances to 5.
     let tp = TopicPartition::new(topic.clone(), 0);
@@ -340,11 +338,10 @@ async fn delete_records_advances_low_watermark<F: AdminBackendFactory>(ctx: &mut
 async fn delete_records_offset_out_of_range_fails<F: AdminBackendFactory>(ctx: &mut TestContext, factory: &F) {
     let admin = admin_for(factory, ctx).await;
     let backend = factory.name();
-    let bootstrap = ctx.protocol_bootstrap_servers().to_string();
 
     let topic = ctx.topic("admin_delete_records_oor");
     create_topic(&admin, &topic, 1, 1).await;
-    produce_records(ctx, &bootstrap, &topic, 0, 5).await;
+    produce_records(ctx, &topic, 0, 5).await;
 
     let tp = TopicPartition::new(topic.clone(), 0);
     let records = HashMap::from([(tp.clone(), RecordsToDelete::with_before_offset(1000))]);

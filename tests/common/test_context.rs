@@ -19,7 +19,7 @@
 //! test safety on a shared cluster.
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 use super::cluster_config::ClusterConfig;
 use super::cluster_pool;
@@ -27,15 +27,14 @@ use super::kafka_cluster::{KafkaCluster, SASL_PASSWORD, SASL_USERNAME};
 
 /// Security protocol the parameterized integration suite runs against.
 ///
-/// Determined by the `INTEGRATION_TEST_PROTOCOL` environment variable, read
-/// fresh on each query (unset / unknown -> [`TestProtocol::Plaintext`]). The
-/// variable is fixed for the life of a test-binary process, so every query
-/// yields the same protocol — one protocol per run. This
-/// is how CI runs the whole functional integration suite three times — once
-/// over PLAINTEXT, once over SSL, once over SASL_SSL — without any per-test
-/// change: each test builds its config through [`TestContext::configure`] /
-/// [`TestContext::apply_security`], which fill in the right listener port and
-/// security keys for whichever protocol this run selected.
+/// Determined by the `INTEGRATION_TEST_PROTOCOL` environment variable, read once
+/// per test-binary process (see [`TestProtocol::from_env`]), so every test in a
+/// run targets the same protocol. This is how CI runs the whole functional
+/// integration suite three times — once over PLAINTEXT, once over SSL, once over
+/// SASL_SSL — without any per-test change: each test builds its config through
+/// [`TestContext::configure`] / [`TestContext::apply_security`], which fill in
+/// the right listener port and security keys for whichever protocol this run
+/// selected.
 ///
 /// Every broker the harness starts exposes all four listeners simultaneously
 /// (see [`super::kafka_cluster`]), so switching protocol is purely a
@@ -50,22 +49,30 @@ pub enum TestProtocol {
     SaslSsl,
 }
 
+/// `INTEGRATION_TEST_PROTOCOL`, parsed once so every test in the process agrees.
+static TEST_PROTOCOL: LazyLock<TestProtocol> = LazyLock::new(|| {
+    let value = std::env::var("INTEGRATION_TEST_PROTOCOL").unwrap_or_default();
+    match value.trim().to_ascii_lowercase().as_str() {
+        "" | "plaintext" => TestProtocol::Plaintext,
+        "ssl" => TestProtocol::Ssl,
+        "sasl_ssl" | "sasl-ssl" => TestProtocol::SaslSsl,
+        _ => panic!("INTEGRATION_TEST_PROTOCOL must be `plaintext`, `ssl` or `sasl_ssl`, got `{value}`"),
+    }
+});
+
 impl TestProtocol {
-    /// Read the protocol selected for this test-binary run from
-    /// `INTEGRATION_TEST_PROTOCOL`. Accepts `plaintext` (default), `ssl`, and
-    /// `sasl_ssl` (case-insensitive; `sasl-ssl` also accepted). Any unset or
-    /// unrecognized value falls back to [`TestProtocol::Plaintext`], so a plain
-    /// `cargo test` run behaves exactly as before this parameterization.
+    /// The protocol selected for this test-binary run by
+    /// `INTEGRATION_TEST_PROTOCOL`: `plaintext`, `ssl` or `sasl_ssl`
+    /// (case-insensitive and trimmed; `sasl-ssl` is also accepted). Unset or
+    /// empty selects [`TestProtocol::Plaintext`], so a plain `cargo test` run
+    /// needs no configuration.
+    ///
+    /// # Panics
+    ///
+    /// On any other value, so a misspelt protocol fails the run instead of
+    /// silently testing PLAINTEXT.
     pub fn from_env() -> Self {
-        match std::env::var("INTEGRATION_TEST_PROTOCOL")
-            .ok()
-            .map(|v| v.trim().to_ascii_lowercase())
-            .as_deref()
-        {
-            Some("ssl") => TestProtocol::Ssl,
-            Some("sasl_ssl") | Some("sasl-ssl") => TestProtocol::SaslSsl,
-            _ => TestProtocol::Plaintext,
-        }
+        *TEST_PROTOCOL
     }
 }
 
@@ -227,9 +234,11 @@ impl TestContext {
     /// - PLAINTEXT: no-op (client defaults to `security.protocol=PLAINTEXT`).
     /// - SSL: `security.protocol=SSL`, PEM truststore from
     ///   [`ca_cert_pem`](Self::ca_cert_pem), and an empty
-    ///   `ssl.endpoint.identification.algorithm` (tests connect via
-    ///   `127.0.0.1`, so hostname verification is disabled — matching the
-    ///   dedicated `ssl_sasl_test` / `sasl_ssl_consumer_test`).
+    ///   `ssl.endpoint.identification.algorithm`, disabling hostname
+    ///   verification to match the dedicated `ssl_sasl_test` /
+    ///   `sasl_ssl_consumer_test` fixtures (the certificate itself does not
+    ///   require it: its SANs cover `127.0.0.1`, `localhost` and every broker
+    ///   container name, see [`super::test_certs`]).
     /// - SASL_SSL: the SSL keys plus SASL/PLAIN (`sasl.mechanism=PLAIN` and a
     ///   `sasl.jaas.config` for `admin` / `admin-secret`).
     ///

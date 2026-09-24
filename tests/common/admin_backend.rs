@@ -1906,7 +1906,7 @@ fn comparable_config(config: &Config) -> Config {
 // ---------------------------------------------------------------------------
 
 /// Admin config for the backend under test. `bootstrap` must be reachable from
-/// the backend (container listener for Python/C, host loopback for Rust).
+/// the backend: see [`bootstrap_for`].
 ///
 /// The timeouts match `admin_topics_test`'s original `admin_for`, which every
 /// converted scenario inherits.
@@ -1920,9 +1920,10 @@ pub fn admin_config(bootstrap: &str) -> HashMap<String, String> {
 }
 
 /// Pick the bootstrap address this factory's backend can actually reach, over
-/// the run's selected protocol: the gRPC backends run in containers and reach
-/// the broker via its CONTAINER-family listener (PLAINTEXT / SSL / SASL_SSL by
-/// container hostname), native Rust uses the host loopback. See
+/// the run's selected protocol: a backend that needs container addresses (the
+/// gRPC backends in container mode) reaches the broker via its CONTAINER-family
+/// listener (PLAINTEXT / SSL / SASL_SSL by container hostname); the in-process
+/// Rust backend and natively run gRPC servers use the host loopback. See
 /// [`plaintext_bootstrap_for`] for the variant that forces PLAINTEXT regardless
 /// of the run's protocol.
 pub fn bootstrap_for<F: AdminBackendFactory>(factory: &F, ctx: &TestContext) -> String {
@@ -1933,23 +1934,13 @@ pub fn bootstrap_for<F: AdminBackendFactory>(factory: &F, ctx: &TestContext) -> 
     }
 }
 
-/// Inject the selected protocol's security keys into `config` for every backend.
-/// The gRPC/container backends reach the broker over its CONTAINER-family
-/// SSL / SASL_SSL listener, and the keys (CA-cert PEM truststore, SASL/PLAIN)
-/// travel through the gRPC config map to the containerized client.
-pub fn apply_backend_security<F: AdminBackendFactory>(
-    _factory: &F,
-    ctx: &TestContext,
-    config: &mut HashMap<String, String>,
-) {
-    ctx.apply_security(config);
-}
-
 /// [`admin_config`] for the factory's reachable bootstrap, with the selected
-/// protocol's security keys injected for a native backend.
+/// protocol's security keys injected. The keys are injected for every backend:
+/// the gRPC backends forward them through the config map to the client they
+/// create.
 pub fn admin_config_for<F: AdminBackendFactory>(factory: &F, ctx: &TestContext) -> HashMap<String, String> {
     let mut config = admin_config(&bootstrap_for(factory, ctx));
-    apply_backend_security(factory, ctx, &mut config);
+    ctx.apply_security(&mut config);
     config
 }
 
@@ -1963,9 +1954,9 @@ pub async fn admin_for<F: AdminBackendFactory>(factory: &F, ctx: &TestContext) -
 }
 
 /// Bootstrap address pinned to the broker's PLAINTEXT listener, ignoring the
-/// run's `INTEGRATION_TEST_PROTOCOL`. Container backends already reach the broker
-/// over its PLAINTEXT container listener; native Rust uses the host PLAINTEXT
-/// loopback rather than [`TestContext::protocol_bootstrap_servers`].
+/// run's `INTEGRATION_TEST_PROTOCOL`: the PLAINTEXT container listener for a
+/// backend that needs container addresses, otherwise the host PLAINTEXT
+/// loopback.
 pub fn plaintext_bootstrap_for<F: AdminBackendFactory>(factory: &F, ctx: &TestContext) -> String {
     if factory.needs_container_bootstrap() {
         ctx.container_bootstrap_servers().to_string()

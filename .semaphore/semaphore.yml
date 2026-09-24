@@ -39,6 +39,10 @@ name: build-test-release
 #      (MULTILANG_BACKEND_MODE=native), which tests the macOS build of each
 #      binding. The broker runs in Docker via Colima.
 #
+# Each verify block sets execution_time_limit to about twice its typical job
+# duration, so a hung test fails the job early instead of running until the
+# pipeline's default limit.
+#
 # All blocks declare `dependencies: []`, so every job starts immediately
 # and runs in parallel. Each rebuilds the Rust library it needs. Sharing one
 # build between blocks via a workflow artifact was tried and reverted: the
@@ -118,6 +122,8 @@ blocks:
     # (INTEGRATION_TEST_PROTOCOL / TestProtocol) for how a cluster's four
     # listeners are selected per run.
     dependencies: []
+    execution_time_limit:
+      minutes: 45
     task:
       prologue:
         commands:
@@ -157,6 +163,8 @@ blocks:
     # Each job is a separate VM with its own broker, so the six jobs do not
     # contend for Docker resources.
     dependencies: []
+    execution_time_limit:
+      minutes: 30
     task:
       prologue:
         # Runs before EACH job in this block; every job is a separate VM with
@@ -185,6 +193,8 @@ blocks:
 
   - name: "Verify Rust (macOS arm64)"
     dependencies: []
+    execution_time_limit:
+      minutes: 45
     task:
       agent:
         machine:
@@ -212,9 +222,12 @@ blocks:
     # the Linux build of the binding. The broker runs in Docker via Colima.
     #
     # These jobs use PLAINTEXT only. The SSL and SASL_SSL variants of this arm
-    # run on Linux; the TLS and SASL code they exercise is in the
-    # platform-independent Rust client.
+    # run on Linux. The TLS and SASL code paths are in the Rust client and are
+    # covered on macOS by ssl_sasl_test.rs and sasl_ssl_consumer_test.rs in
+    # "Verify Rust (macOS arm64)".
     dependencies: []
+    execution_time_limit:
+      minutes: 30
     task:
       agent:
         machine:

@@ -653,10 +653,12 @@ async fn test_async_consumer_async_commit() {
 
     // Java pre-creates the GROUP_METADATA_TOPIC_NAME (offsets) topic up front to
     // prevent transient RetriableCommitFailed errors during the async commits
-    // below (`PlaintextConsumerCommitTest.java:192-198`). The Rust harness has no
-    // admin client; the equivalent is to discover the coordinator and materialize
-    // the offsets topic via a `committed()` query before committing, so the five
-    // async commits all succeed rather than racing coordinator load.
+    // below (`PlaintextConsumerCommitTest.java:192-198`). This test uses a
+    // `committed()` query instead: it discovers the coordinator and makes the
+    // broker create the offsets topic, so the five async commits all succeed
+    // rather than racing coordinator load. The topic is not created explicitly
+    // because the cluster is pooled and its group coordinator is shared with
+    // other tests.
     let _ = consumer
         .committed(std::slice::from_ref(&tp))
         .await

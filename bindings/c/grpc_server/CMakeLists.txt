@@ -6,13 +6,15 @@
 #
 #     http://www.apache.org/licenses/LICENSE-2.0
 
-# Standalone CMake project for the C++ gRPC server image. Kept separate
-# from the parent bindings/c/CMakeLists.txt so the existing C unit-test
-# build doesn't pull in gRPC / protobuf.
+# Standalone CMake project for the C++ gRPC server used by the multilanguage
+# integration tests. Kept separate from the parent bindings/c/CMakeLists.txt
+# so the existing C unit-test build doesn't pull in gRPC / protobuf.
 #
-# Builds inside Dockerfile.grpc — see bindings/c/Dockerfile.grpc for the
-# expected layout (libconfluent_kafka.a in /build/lib, header in
-# /build/include, proto in /build/proto).
+# Built in two places:
+#   - inside bindings/c/Dockerfile.grpc, which stages the default layout below
+#     (libconfluent_kafka.a in lib/, the header in include/, protos in proto/);
+#   - natively on the host by `make build-grpc-native-c`, which passes
+#     RUST_LIB_DIR, RUST_INCLUDE_DIR and PROTO_DIR to point at the repo tree.
 
 cmake_minimum_required(VERSION 3.16)
 project(kafka_grpc_server LANGUAGES CXX)
@@ -21,7 +23,7 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
-# Locations the Dockerfile stages.
+# Default to the locations the Dockerfile stages; the native build overrides them.
 set(RUST_LIB_DIR "${CMAKE_CURRENT_SOURCE_DIR}/lib" CACHE PATH "libconfluent_kafka location")
 set(RUST_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/include" CACHE PATH "C FFI header dir")
 # All three protos are generated; consumer_service.proto imports

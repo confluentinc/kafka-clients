@@ -351,10 +351,10 @@ async fn create_topics_reports_metadata_and_configs<F: AdminBackendFactory>(ctx:
         .as_ref()
         .unwrap_or_else(|e| panic!("{backend} backend: create topics should succeed: {e}"));
 
-    // A single PLAINTEXT node with no authorizer always returns the metadata
-    // (ReplicationControlManager only sets topicConfigErrorCode when the caller
-    // lacks DESCRIBE_CONFIGS, and User:ANONYMOUS is a super user), so the
-    // accessors must succeed on every backend.
+    // A broker with no authorizer always returns the metadata
+    // (ReplicationControlManager sets topicConfigErrorCode only when the caller
+    // lacks DESCRIBE_CONFIGS, which every caller has without an authorizer), so
+    // the accessors must succeed on every backend and protocol.
     assert_eq!(
         metadata
             .num_partitions()

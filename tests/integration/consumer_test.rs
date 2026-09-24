@@ -91,7 +91,7 @@ impl Deserializer<String> for StringDeserializer {
 }
 
 /// Build a `ConsumerConfig` aligned with the producer integration
-/// tests (PLAINTEXT listener), with KIP-848 group protocol.
+/// tests (the run's selected protocol listener), with KIP-848 group protocol.
 fn make_consumer_config(ctx: &TestContext, group_id: &str) -> ConsumerConfig {
     let mut props = HashMap::from([
         ("bootstrap.servers".to_string(), ctx.protocol_bootstrap_servers().to_string()),

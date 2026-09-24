@@ -39,6 +39,18 @@ use confluent_kafka::common::utils::LogContext;
 use super::kafka_cluster::{SASL_PASSWORD, SASL_USERNAME};
 use super::test_context::{TestContext, TestProtocol};
 
+/// Awaits `fut`, panicking with `"{what} did not complete within {limit:?}"` if
+/// it has not completed within `limit`.
+///
+/// For bounding steps that could otherwise hang a test indefinitely, such as a
+/// test body or a consumer `close()`.
+pub async fn with_timeout<T>(what: &str, limit: Duration, fut: impl Future<Output = T>) -> T {
+    match tokio::time::timeout(limit, fut).await {
+        Ok(output) => output,
+        Err(_) => panic!("{what} did not complete within {limit:?}"),
+    }
+}
+
 /// Poll timeout used by [`connect_until_ready`], in milliseconds.
 const SELECTOR_POLL_TIMEOUT_MS: i64 = 5000;
 
@@ -51,9 +63,10 @@ const SELECTOR_MAX_POLL_ITERATIONS: usize = 100;
 ///
 /// PLAINTEXT uses a plain channel. SSL and SASL_SSL mirror the dedicated
 /// `ssl_sasl_test` helpers: the broker certificate is trusted through the
-/// cluster CA, hostname verification is disabled because tests connect via
-/// `127.0.0.1`, and SASL_SSL authenticates with SASL/PLAIN as
-/// `admin` / `admin-secret`.
+/// cluster CA, hostname verification is disabled to match those helpers (the
+/// certificate itself does not require it: its SANs cover `127.0.0.1`,
+/// `localhost` and the broker container names), and SASL_SSL authenticates
+/// with SASL/PLAIN as `admin` / `admin-secret`.
 pub fn protocol_selector(ctx: &TestContext) -> Selector {
     let ssl_factory = || {
         let ssl_config = SslConfig {
