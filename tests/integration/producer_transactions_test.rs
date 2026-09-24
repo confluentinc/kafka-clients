@@ -3523,6 +3523,7 @@ async fn downgrade_transaction_version_to_1(ctx: &TestContext) {
 /// level. The harness image always formats at the 4.2.0 default (TV2), so the
 /// cluster must be [`ClusterConfig::dedicated`]: the downgrade is cluster-wide.
 async fn downgrade_transaction_version(ctx: &TestContext, level: i16) {
+    use confluent_kafka::admin::DescribeFeaturesOptions;
     use confluent_kafka::admin::FeatureUpdate;
     use confluent_kafka::admin::UpgradeType;
 
@@ -3544,17 +3545,15 @@ async fn downgrade_transaction_version(ctx: &TestContext, level: i16) {
         .unwrap_or_else(|e| panic!("downgrading transaction.version to {level} should succeed: {e:?}"));
     admin.close().await;
 
+    // Each check is pinned to its broker with `DescribeFeaturesOptions.nodeId`
+    // (ConstantNodeId routing): with default options the request goes to the
+    // least-loaded node, which could check one broker repeatedly.
+    let admin = txn_test_admin(ctx);
     for broker_id in ctx.cluster().broker_ids() {
-        let props = HashMap::from([(
-            "bootstrap.servers".to_string(),
-            ctx.cluster().broker_bootstrap_servers(broker_id),
-        )]);
-        let broker_admin =
-            KafkaAdminClient::new(AdminClientConfig::new(&props).expect("valid admin config")).expect("admin client");
         test_utils::wait_until_true_with_timeout(
             || async {
-                broker_admin
-                    .describe_features()
+                admin
+                    .describe_features_with_options(DescribeFeaturesOptions::new().set_node_id(broker_id))
                     .feature_metadata()
                     .get()
                     .await
@@ -3574,8 +3573,8 @@ async fn downgrade_transaction_version(ctx: &TestContext, level: i16) {
             test_utils::DEFAULT_PAUSE_MS,
         )
         .await;
-        broker_admin.close().await;
     }
+    admin.close().await;
 }
 
 /// `testFailureToFenceEpoch`, row `consumer, false` (`TransactionsTest.scala:972`).
