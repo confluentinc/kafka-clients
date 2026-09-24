@@ -233,6 +233,7 @@ than silently diverging.
 - 2026-09-24: plan written; Actor 78 spawned.
 - 2026-09-24: Actor 78, §2.1 landed (commit 1). Discrepancies in §6.
 - 2026-09-24: Actor 78, §2.2 landed (commit 2). Choices in §6, items 9-13.
+- 2026-09-24: Actor 78, §2.3 landed (commit 3). Note in §6, item 14.
 
 ## 6. Implementation notes (Actor 78)
 
@@ -317,3 +318,11 @@ followed and the difference is recorded here.
 13. Observation, not changed: zstd's decoder sizes its window from the frame
     header up to libzstd's default `windowLogMax` (27, 128 MiB), as Java's
     zstd-jni does; lz4 frames cap blocks at 4 MiB; gzip's window is fixed.
+14. **No `Selector` getter was added** (§2.3 left it optional). What the
+    producer and admin constructors pass is not observable from a test without
+    new hooks — the producer's `NetworkClient` moves into its spawned `Sender`
+    — so the tests cover the consumer's derivation (`max_receive_size`: the
+    default, the saturation edge, `i32::MAX`) and the rejection of
+    `DEFAULT_MAX_RECEIVE_SIZE + 1` on both `NetworkReceive` read paths, with
+    Java's message and no payload buffer allocated. The three call sites are
+    direct `with_log_context(cap, ...)` calls.

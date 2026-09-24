@@ -47,6 +47,7 @@ use crate::common::metrics::time::{SystemTime, Time};
 use crate::common::metrics::{KafkaMetric, MetricConfig, Metrics, RecordingLevel};
 use crate::common::network::Selector;
 use crate::common::network::channel_builders;
+use crate::common::network::network_receive::DEFAULT_MAX_RECEIVE_SIZE;
 use crate::common::record::internal::CompressionType;
 use crate::common::record::internal::RecordBatch;
 use crate::common::record::internal::abstract_records;
@@ -502,7 +503,10 @@ impl<K, V> KafkaProducer<K, V> {
         // class is `ConfigException`, inside the `KafkaException` hierarchy;
         // `illegal_argument` put it outside, where `is_kafka_error()` is `false`.
         .map_err(|e| Error::config(format!("Failed to create channel builder: {}", e)))?;
-        let selector = Selector::with_defaults_and_log_context(
+        // APPSEC-7665 D5: a real receive cap, where Java's `Selector` has none
+        // (`Selector.java:229`).
+        let selector = Selector::with_log_context(
+            DEFAULT_MAX_RECEIVE_SIZE,
             config.connections_max_idle_ms,
             channel_builder,
             log_context.clone(),

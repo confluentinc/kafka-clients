@@ -64,6 +64,7 @@ use tokio::task::JoinHandle;
 use regex::Regex;
 
 use crate::common::metrics::{KafkaMetric, MetricConfig, Metrics, RecordingLevel};
+use crate::common::network::network_receive::DEFAULT_MAX_RECEIVE_SIZE;
 use crate::common::utils::LogContext;
 use crate::common::{Error, IsolationLevel, MetricName, TopicPartition};
 use crate::consumer::ConsumerGroupMetadata;
@@ -1389,6 +1390,20 @@ fn format_partitions_for_display(partitions: &[TopicPartition]) -> String {
     out
 }
 
+/// The consumer's cap on one network receive (APPSEC-7665 D5):
+/// `fetch.max.bytes` plus [`DEFAULT_MAX_RECEIVE_SIZE`], saturating at
+/// `i32::MAX`.
+///
+/// `fetch.max.bytes` is a soft limit — the broker returns the first batch of the
+/// first non-empty partition even when that batch is larger — so it cannot be
+/// the cap on its own. That batch is bounded by what the broker accepted in the
+/// first place, its `socket.request.max.bytes`, whose default is
+/// `DEFAULT_MAX_RECEIVE_SIZE`. Java's consumer receives with no limit
+/// (`Selector.java:229`).
+fn max_receive_size(fetch_max_bytes: i32) -> i32 {
+    fetch_max_bytes.saturating_add(DEFAULT_MAX_RECEIVE_SIZE)
+}
+
 /// `MemberStateListener` implementation that bridges the membership
 /// manager's state-change notifications back to the consumer's app-side
 /// caches: `group_metadata` and `group_assignment_snapshot`.
@@ -1866,7 +1881,11 @@ where
             log_context.clone(),
         )
         .map_err(|e| Error::local_illegal_argument(format!("Failed to create channel builder: {}", e)))?;
-        let selector = Selector::with_defaults_and_log_context(
+        // APPSEC-7665 D5: a real receive cap, where Java's `Selector` has none
+        // (`Selector.java:229`) — `fetch.max.bytes` plus headroom, see
+        // `max_receive_size`.
+        let selector = Selector::with_log_context(
+            max_receive_size(config.fetch_max_bytes),
             config.connections_max_idle_ms,
             channel_builder,
             log_context.clone(),
@@ -6085,6 +6104,18 @@ mod tests {
     use crate::consumer::internals::events::completable_event_reaper::CompletableEventReaper;
 
     use super::*;
+
+    /// APPSEC-7665 D5: the consumer's receive cap is `fetch.max.bytes` plus a
+    /// broker's default `socket.request.max.bytes`, saturating at `i32::MAX`.
+    #[test]
+    fn test_max_receive_size_adds_headroom_to_fetch_max_bytes() {
+        let default_fetch_max_bytes = ConsumerConfig::default().fetch_max_bytes;
+        assert_eq!(50 * 1024 * 1024, default_fetch_max_bytes);
+        assert_eq!(150 * 1024 * 1024, max_receive_size(default_fetch_max_bytes));
+        assert_eq!(i32::MAX, max_receive_size(i32::MAX - DEFAULT_MAX_RECEIVE_SIZE));
+        assert_eq!(i32::MAX, max_receive_size(i32::MAX - DEFAULT_MAX_RECEIVE_SIZE + 1));
+        assert_eq!(i32::MAX, max_receive_size(i32::MAX));
+    }
 
     /// Minimal `Vec<u8>` deserializer for tests — equivalent to Java's
     /// `ByteArrayDeserializer`. Returns the input bytes unchanged.

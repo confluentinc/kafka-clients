@@ -68,6 +68,7 @@ use crate::common::errors::{ApiError, UnsupportedEndpointTypeError};
 use crate::common::kafka_future::KafkaFutureImpl;
 use crate::common::network::Selector;
 use crate::common::network::channel_builders;
+use crate::common::network::network_receive::DEFAULT_MAX_RECEIVE_SIZE;
 use crate::common::protocol::Errors;
 use crate::common::quota::{ClientQuotaAlteration, ClientQuotaEntity, ClientQuotaFilter};
 use crate::common::requests::metadata_response::NO_CONTROLLER_ID;
@@ -315,7 +316,10 @@ impl KafkaAdminClient {
         // `KafkaException` hierarchy; `illegal_argument` put it outside, where
         // `is_kafka_error()` answers `false`. Same fix as `KafkaProducer::from_config`.
         .map_err(|e| Error::config(format!("Failed to create channel builder: {e}")))?;
-        let selector = Selector::with_defaults_and_log_context(
+        // APPSEC-7665 D5: a real receive cap, where Java's `Selector` has none
+        // (`Selector.java:229`).
+        let selector = Selector::with_log_context(
+            DEFAULT_MAX_RECEIVE_SIZE,
             config.connections_max_idle_ms(),
             channel_builder,
             log_context.clone(),
