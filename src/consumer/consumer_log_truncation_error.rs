@@ -40,9 +40,9 @@ use crate::consumer::OffsetAndMetadata;
 pub struct ConsumerLogTruncationError {
     message: String,
     /// The out-of-range offset per partition, inherited from the parent class.
-    pub offset_out_of_range_partitions: HashMap<TopicPartition, i64>,
+    pub(crate) offset_out_of_range_partitions: HashMap<TopicPartition, i64>,
     /// The divergent offset per partition.
-    pub divergent_offsets: HashMap<TopicPartition, OffsetAndMetadata>,
+    pub(crate) divergent_offsets: HashMap<TopicPartition, OffsetAndMetadata>,
 }
 
 impl ConsumerLogTruncationError {

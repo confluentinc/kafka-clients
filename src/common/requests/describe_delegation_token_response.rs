@@ -56,13 +56,13 @@ pub struct DescribeDelegationTokenResponse {
 #[non_exhaustive]
 pub struct DescribeDelegationTokenResponseOptions<'a> {
     /// Java's `version`.
-    pub version: i16,
+    pub(crate) version: i16,
     /// Java's `throttleTimeMs`.
-    pub throttle_time_ms: i32,
+    pub(crate) throttle_time_ms: i32,
     /// Java's `error`.
-    pub error: Errors,
+    pub(crate) error: Errors,
     /// Java's `tokens`. Starts empty, as in `:69`.
-    pub tokens: &'a [DelegationToken],
+    pub(crate) tokens: &'a [DelegationToken],
 }
 
 /// Fluent builder for [`DescribeDelegationTokenResponseOptions`].

@@ -52,13 +52,13 @@ pub struct ElectLeadersResponse {
 #[non_exhaustive]
 pub struct ElectLeadersResponseOptions {
     /// Java's `throttleTimeMs`.
-    pub throttle_time_ms: i32,
+    pub(crate) throttle_time_ms: i32,
     /// Java's `errorCode`.
-    pub error_code: i16,
+    pub(crate) error_code: i16,
     /// Java's `electionResults`.
-    pub election_results: Vec<ReplicaElectionResult>,
+    pub(crate) election_results: Vec<ReplicaElectionResult>,
     /// Java's `version`.
-    pub version: i16,
+    pub(crate) version: i16,
 }
 
 /// Fluent builder for [`ElectLeadersResponseOptions`].

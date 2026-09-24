@@ -40,7 +40,7 @@ use crate::common::error::{ErrorCode, ErrorHierarchy, ErrorMessage, ErrorSource}
 pub struct ConsumerNoOffsetForPartitionError {
     message: String,
     /// The partitions with no defined offset.
-    pub partitions: HashSet<TopicPartition>,
+    pub(crate) partitions: HashSet<TopicPartition>,
 }
 
 impl ConsumerNoOffsetForPartitionError {

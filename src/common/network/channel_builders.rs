@@ -23,7 +23,7 @@
 //! structs in their constructors, so there is no separate `configure()` step.
 //!
 //! Excluded Java code:
-//! - `JaasContext` loading -- simplified to direct `SaslConfig` struct
+//! - `JaasContext` loading -- simplified to direct `SaslConfigs` struct
 //! - `channelBuilderConfigs()` -- Java's config extraction from `AbstractConfig` is not applicable
 //! - `serverChannelBuilder()` -- server-side, out of scope
 //! - `createPrincipalBuilder()` -- server-side, out of scope
@@ -31,7 +31,7 @@
 
 use std::io;
 
-use crate::common::config::{SaslConfig, SslConfig};
+use crate::common::config::{SaslConfigs, SslConfigs};
 use crate::common::network::ChannelBuilder;
 use crate::common::network::ListenerName;
 use crate::common::network::PlaintextChannelBuilder;
@@ -66,8 +66,8 @@ impl ChannelBuilders {
     /// Returns an error if required configs are missing for the given protocol.
     pub fn client_channel_builder(
         security_protocol: SecurityProtocol,
-        ssl_config: Option<&SslConfig>,
-        sasl_config: Option<&SaslConfig>,
+        ssl_config: Option<&SslConfigs>,
+        sasl_config: Option<&SaslConfigs>,
         listener_name: Option<ListenerName>,
         client_id: &str,
         log_context: LogContext,
@@ -133,7 +133,7 @@ mod tests {
 
     #[test]
     fn test_ssl_builder() {
-        let ssl_config = SslConfig::default();
+        let ssl_config = SslConfigs::default();
         let result = ChannelBuilders::client_channel_builder(
             SecurityProtocol::Ssl,
             Some(&ssl_config),
@@ -165,11 +165,11 @@ mod tests {
 
     #[test]
     fn test_sasl_plaintext_builder() {
-        let sasl_config = SaslConfig {
+        let sasl_config = SaslConfigs {
             mechanism: "PLAIN".to_string(),
             username: Some("alice".to_string()),
             password: Some("secret".to_string()),
-            ..SaslConfig::default()
+            ..SaslConfigs::default()
         };
         let result = ChannelBuilders::client_channel_builder(
             SecurityProtocol::SaslPlaintext,
@@ -184,12 +184,12 @@ mod tests {
 
     #[test]
     fn test_sasl_ssl_builder() {
-        let ssl_config = SslConfig::default();
-        let sasl_config = SaslConfig {
+        let ssl_config = SslConfigs::default();
+        let sasl_config = SaslConfigs {
             mechanism: "PLAIN".to_string(),
             username: Some("alice".to_string()),
             password: Some("secret".to_string()),
-            ..SaslConfig::default()
+            ..SaslConfigs::default()
         };
         let result = ChannelBuilders::client_channel_builder(
             SecurityProtocol::SaslSsl,
@@ -204,11 +204,11 @@ mod tests {
 
     #[test]
     fn test_sasl_ssl_missing_ssl_config() {
-        let sasl_config = SaslConfig {
+        let sasl_config = SaslConfigs {
             mechanism: "PLAIN".to_string(),
             username: Some("alice".to_string()),
             password: Some("secret".to_string()),
-            ..SaslConfig::default()
+            ..SaslConfigs::default()
         };
         let result = ChannelBuilders::client_channel_builder(
             SecurityProtocol::SaslSsl,

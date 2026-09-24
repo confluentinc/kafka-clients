@@ -439,19 +439,19 @@ impl Completion {
 pub struct MockProducerOptions<K, V> {
     /// The cluster holding metadata for this producer. Java's `cluster`; starts
     /// as [`Cluster::empty`], the value `:137` passes on the caller's behalf.
-    pub cluster: Cluster,
+    pub(crate) cluster: Cluster,
     /// If `true`, automatically complete all requests successfully and execute
     /// the callback. Java's `autoComplete`.
-    pub auto_complete: bool,
+    pub(crate) auto_complete: bool,
     /// The partition strategy, or `None`. Java's `partitioner`, which `:149`
     /// passes as `null`.
-    pub partitioner: Option<Box<dyn Partitioner<K, V>>>,
+    pub(crate) partitioner: Option<Box<dyn Partitioner<K, V>>>,
     /// The key serializer, or `None`. Java's `keySerializer`, which `:149`
     /// passes as `null`.
-    pub key_serializer: Option<Box<dyn Serializer<K> + Send + Sync>>,
+    pub(crate) key_serializer: Option<Box<dyn Serializer<K> + Send + Sync>>,
     /// The value serializer, or `None`. Java's `valueSerializer`, which `:149`
     /// passes as `null`.
-    pub value_serializer: Option<Box<dyn Serializer<V> + Send + Sync>>,
+    pub(crate) value_serializer: Option<Box<dyn Serializer<V> + Send + Sync>>,
 }
 
 /// Fluent builder for [`MockProducerOptions`].

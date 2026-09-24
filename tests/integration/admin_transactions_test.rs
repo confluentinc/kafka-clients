@@ -326,7 +326,7 @@ async fn list_transactions_reports_a_fenced_transaction<F: AdminBackendFactory>(
     // partitions yet.
     assert_eq!(
         listing.producer_id(),
-        producer.producer_id,
+        producer.producer_id(),
         "{backend} backend: the listing should report the producer id fenceProducers allocated"
     );
     assert_eq!(
@@ -364,7 +364,7 @@ async fn list_transactions_filters<F: AdminBackendFactory>(ctx: &mut TestContext
         .get(&transactional_id)
         .and_then(|outcome| outcome.as_ref().ok())
         .unwrap_or_else(|| panic!("{backend} backend: fence {transactional_id} should succeed"))
-        .producer_id;
+        .producer_id();
 
     let listed = |options: ListTransactionsOptions| {
         let admin = &admin;
@@ -704,12 +704,12 @@ async fn describe_transactions_reports_a_fenced_transaction<F: AdminBackendFacto
     );
     assert_eq!(
         description.producer_id(),
-        producer.producer_id,
+        producer.producer_id(),
         "{backend} backend: the description should report the producer id fenceProducers allocated"
     );
     assert_eq!(
         description.producer_epoch() as i16,
-        producer.epoch,
+        producer.epoch(),
         "{backend} backend: the description should report the epoch fenceProducers allocated"
     );
     assert_eq!(
@@ -756,15 +756,16 @@ async fn fence_producers_allocates_producer_id_for_fresh_id<F: AdminBackendFacto
     let producer = outcomes[&transactional_id].as_ref().expect("checked above");
 
     assert!(
-        producer.producer_id >= 0,
+        producer.producer_id() >= 0,
         "{backend} backend: the coordinator should allocate a valid producer id, got {}",
-        producer.producer_id
+        producer.producer_id()
     );
     // A never-before-seen transactional id starts at epoch 0; the id is unique per
     // scenario *and* backend precisely so this stays exact rather than `>= 0`
     // (fencing an existing id bumps the epoch).
     assert_eq!(
-        producer.epoch, 0,
+        producer.epoch(),
+        0,
         "{backend} backend: a fresh producer id should be fenced at epoch 0"
     );
     // Deliberately *not* `producer.is_valid()`: that predicate is
@@ -787,12 +788,12 @@ async fn fence_producers_allocates_producer_id_for_fresh_id<F: AdminBackendFacto
         .unwrap_or_else(|e| panic!("{backend} backend: fenceProducers should have registered {transactional_id}: {e}"));
     assert_eq!(
         description.producer_id(),
-        producer.producer_id,
+        producer.producer_id(),
         "{backend} backend: the coordinator should report the producer id fenceProducers allocated"
     );
     assert_eq!(
         description.producer_epoch() as i16,
-        producer.epoch,
+        producer.epoch(),
         "{backend} backend: the coordinator should report the epoch fenceProducers allocated"
     );
 

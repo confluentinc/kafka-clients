@@ -27,7 +27,7 @@ use log::{info, warn};
 
 use crate::CommonClientConfigs;
 use crate::common::Error;
-use crate::common::config::{SaslConfig, SaslConfigs, SslConfig};
+use crate::common::config::{SaslConfigs, SslConfigs};
 use crate::common::record::internal::CompressionType;
 use crate::common::security::SecurityProtocol;
 use crate::producer::internals::KeyHasher;
@@ -66,10 +66,10 @@ pub struct ProducerConfig {
     pub(crate) security_protocol: SecurityProtocol,
 
     /// SASL configuration (mechanism, JAAS config, credentials).
-    pub(crate) sasl_config: SaslConfig,
+    pub(crate) sasl_config: SaslConfigs,
 
     /// SSL/TLS configuration.
-    pub(crate) ssl_config: SslConfig,
+    pub(crate) ssl_config: SslConfigs,
 
     // --- Batching ---
     /// `batch.size` - The producer will attempt to batch records together into fewer
@@ -272,8 +272,8 @@ impl Default for ProducerConfig {
             bootstrap_servers: Vec::new(),
             client_id: String::new(),
             security_protocol: SecurityProtocol::Plaintext,
-            sasl_config: SaslConfig::default(),
-            ssl_config: SslConfig::default(),
+            sasl_config: SaslConfigs::default(),
+            ssl_config: SslConfigs::default(),
             batch_size: 16384,
             linger_ms: 5,
             buffer_memory: 32 * 1024 * 1024,
@@ -607,7 +607,7 @@ impl ProducerConfig {
                     };
                 },
                 key if key.starts_with("ssl.") => {
-                    SslConfig::apply_ssl_config_key(&mut config.ssl_config, key, value);
+                    SslConfigs::apply_ssl_config_key(&mut config.ssl_config, key, value);
                 },
                 _ => {
                     warn!("Unknown producer configuration key: {}", key);

@@ -36,7 +36,7 @@ use crate::common::error::{ErrorCode, ErrorHierarchy, ErrorMessage, ErrorSource}
 pub struct ThrottlingQuotaExceededError {
     message: String,
     /// The amount of time to wait before retrying, in milliseconds.
-    pub throttle_time_ms: i32,
+    pub(crate) throttle_time_ms: i32,
 }
 
 impl ThrottlingQuotaExceededError {

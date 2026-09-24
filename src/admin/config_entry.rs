@@ -210,28 +210,28 @@ pub struct ConfigEntry {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConfigEntryOptions {
     /// The non-null config name. Java's `name`.
-    pub name: String,
+    pub(crate) name: String,
     /// The config value or `None`. Java's `value`.
-    pub value: Option<String>,
+    pub(crate) value: Option<String>,
     /// The source of this config entry. Java's `source`; starts as
     /// [`ConfigSource::Unknown`], as in `:44`.
-    pub source: ConfigSource,
+    pub(crate) source: ConfigSource,
     /// Whether the config value is sensitive; the broker never returns the
     /// value if it is sensitive. Java's `isSensitive`; starts as `false`, as in
     /// `:44`.
-    pub is_sensitive: bool,
+    pub(crate) is_sensitive: bool,
     /// Whether the config is read-only and cannot be updated. Java's
     /// `isReadOnly`; starts as `false`, as in `:44`.
-    pub is_read_only: bool,
+    pub(crate) is_read_only: bool,
     /// Synonym configs in order of precedence. Java's `synonyms`; starts empty,
     /// as in `:44` (`Collections.emptyList()`).
-    pub synonyms: Vec<ConfigSynonym>,
+    pub(crate) synonyms: Vec<ConfigSynonym>,
     /// The config data type. Java's `type`; starts as [`ConfigType::Unknown`],
     /// as in `:44`.
-    pub config_type: ConfigType,
+    pub(crate) config_type: ConfigType,
     /// The config documentation. Java's `documentation`; starts as `None`, as in
     /// `:44`.
-    pub documentation: Option<String>,
+    pub(crate) documentation: Option<String>,
 }
 
 /// Fluent builder for [`ConfigEntryOptions`].

@@ -60,13 +60,13 @@ pub struct RequestHeader {
 #[non_exhaustive]
 pub struct RequestHeaderOptions<'a> {
     /// Java's `apiKey`.
-    pub request_api_key: &'a ApiKeys,
+    pub(crate) request_api_key: &'a ApiKeys,
     /// Java's `requestVersion`.
-    pub request_version: i16,
+    pub(crate) request_version: i16,
     /// Java's `clientId`.
-    pub client_id: &'a str,
+    pub(crate) client_id: &'a str,
     /// Java's `correlationId`.
-    pub correlation_id: i32,
+    pub(crate) correlation_id: i32,
 }
 
 /// Fluent builder for [`RequestHeaderOptions`].

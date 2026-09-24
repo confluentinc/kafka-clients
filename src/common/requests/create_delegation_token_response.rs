@@ -59,25 +59,25 @@ pub struct CreateDelegationTokenResponse {
 #[non_exhaustive]
 pub struct CreateDelegationTokenResponseOptions<'a> {
     /// Java's `version`.
-    pub version: i16,
+    pub(crate) version: i16,
     /// Java's `throttleTimeMs`.
-    pub throttle_time_ms: i32,
+    pub(crate) throttle_time_ms: i32,
     /// Java's `error`.
-    pub error: Errors,
+    pub(crate) error: Errors,
     /// Java's `owner`.
-    pub owner: &'a KafkaPrincipal,
+    pub(crate) owner: &'a KafkaPrincipal,
     /// Java's `tokenRequester`.
-    pub token_requester: &'a KafkaPrincipal,
+    pub(crate) token_requester: &'a KafkaPrincipal,
     /// Java's `issueTimestamp`. Starts as `-1`, as in `:69`.
-    pub issue_timestamp: i64,
+    pub(crate) issue_timestamp: i64,
     /// Java's `expiryTimestamp`. Starts as `-1`, as in `:69`.
-    pub expiry_timestamp: i64,
+    pub(crate) expiry_timestamp: i64,
     /// Java's `maxTimestamp`. Starts as `-1`, as in `:69`.
-    pub max_timestamp: i64,
+    pub(crate) max_timestamp: i64,
     /// Java's `tokenId`. Starts empty, as in `:69`.
-    pub token_id: &'a str,
+    pub(crate) token_id: &'a str,
     /// Java's `hmac`. Starts empty, as in `:69`.
-    pub hmac: Vec<u8>,
+    pub(crate) hmac: Vec<u8>,
 }
 
 /// Fluent builder for [`CreateDelegationTokenResponseOptions`].

@@ -13,8 +13,8 @@
 // limitations under the License.
 
 mod check_bindings;
+mod lint_custom;
 
-use quote::ToTokens;
 use std::env;
 use std::fs;
 use std::path::PathBuf;
@@ -28,7 +28,7 @@ fn main() -> anyhow::Result<()> {
         Some("check-generated") => check_generated()?,
         Some("generate-error-codes") => generate_error_codes()?,
         Some("check-bindings") => check_bindings_task()?,
-        Some("check-no-data-carrying-enum-variants") => check_no_data_carrying_enum_variants()?,
+        Some("lint-custom") => lint_custom::lint_custom()?,
         Some("lint") => lint()?,
         Some("doc-hygiene") => doc_hygiene()?,
         Some("lint-fix") => lint_fix()?,
@@ -347,123 +347,12 @@ fn check_error_codes_up_to_date() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Checks that no variant of a public enum holds data inline.
-///
-/// Clippy's `exhaustive_enums` (denied in `Cargo.toml`) covers the *enum*, so a
-/// downstream `match` can never be exhaustive. It says nothing about a *variant*
-/// that carries fields inline: another crate can construct it and destructure it
-/// field-for-field, so adding the field a new Kafka version introduces is a
-/// breaking change.
-///
-/// The fix is structural rather than an attribute. A variant may carry data only
-/// as a single wrapped type, which then carries its own forward compatibility —
-/// `#[non_exhaustive]` on the wrapped struct, or private fields. This also
-/// matches the Java source: every data-carrying enum here translates a Java
-/// class hierarchy (a Java enum cannot give its constants per-constant shapes),
-/// so one named type per variant is the faithful shape.
-///
-/// Marking the *variant* `#[non_exhaustive]` is deliberately not the rule: on a
-/// tuple variant that attribute makes the variant wholly private to other crates
-/// (E0603) — not merely unconstructable but *unmatchable*, so
-/// `match err { Error::Api(e) => .. }` stops compiling downstream.
-fn check_no_data_carrying_enum_variants() -> anyhow::Result<()> {
-    println!("🔍 Checking public enum variants do not hold data inline...");
-
-    let mut failures = Vec::new();
-    let mut checked = 0usize;
-
-    for path in rust_sources("src")? {
-        let source = fs::read_to_string(&path)?;
-        let file = match syn::parse_file(&source) {
-            Ok(f) => f,
-            // A file we cannot parse is reported rather than silently skipped:
-            // a silent skip is how a rule like this rots.
-            Err(e) => {
-                failures.push(format!("{}: failed to parse: {e}", path.display()));
-                continue;
-            },
-        };
-        check_items(&file.items, &path, true, &mut checked, &mut failures);
-    }
-
-    if !failures.is_empty() {
-        eprintln!();
-        for f in &failures {
-            eprintln!("  {f}");
-        }
-        eprintln!("\n❌ {} public enum variant(s) hold data inline.", failures.len());
-        eprintln!("   Move the fields into their own struct and wrap it, e.g.:");
-        eprintln!("       pub struct GzipCompression {{ level: i32 }}");
-        eprintln!("       Gzip(GzipCompression),   // instead of Gzip {{ level: i32 }}");
-        eprintln!("   The struct then carries forward compatibility (private fields, or");
-        eprintln!("   #[non_exhaustive]); do NOT mark the variant itself.");
-        exit(1);
-    }
-
-    println!("✅ All {checked} public enum variant(s) wrap at most one named type");
-    Ok(())
-}
-
-/// Walks items, descending into inline modules. `public_path` tracks whether
-/// every enclosing inline module is itself `pub` — an enum under a private
-/// module is not reachable from another crate, so it is not checked.
-fn check_items(
-    items: &[syn::Item],
-    path: &PathBuf,
-    public_path: bool,
-    checked: &mut usize,
-    failures: &mut Vec<String>,
-) {
-    for item in items {
-        match item {
-            syn::Item::Mod(m) => {
-                // `#[cfg(test)]` modules never ship to downstream crates.
-                let is_test = m
-                    .attrs
-                    .iter()
-                    .any(|a| a.path().is_ident("cfg") && a.meta.to_token_stream().to_string().contains("test"));
-                if is_test {
-                    continue;
-                }
-                if let Some((_, inner)) = &m.content {
-                    let child_public = public_path && matches!(m.vis, syn::Visibility::Public(_));
-                    check_items(inner, path, child_public, checked, failures);
-                }
-            },
-            syn::Item::Enum(e) => {
-                if !public_path || !matches!(e.vis, syn::Visibility::Public(_)) {
-                    continue;
-                }
-                for v in &e.variants {
-                    *checked += 1;
-                    let shape = match &v.fields {
-                        // Carries nothing.
-                        syn::Fields::Unit => continue,
-                        // A newtype delegates forward compatibility to the type
-                        // it wraps; two or more fields have nothing to delegate
-                        // to and can be destructured positionally downstream.
-                        syn::Fields::Unnamed(f) if f.unnamed.len() == 1 => continue,
-                        syn::Fields::Unnamed(f) => format!("{} unnamed fields", f.unnamed.len()),
-                        syn::Fields::Named(_) => "inline named fields".to_string(),
-                    };
-                    failures.push(format!(
-                        "{}: `{}::{}` holds data inline ({shape})",
-                        path.display(),
-                        e.ident,
-                        v.ident
-                    ));
-                }
-            },
-            _ => {},
-        }
-    }
-}
-
 fn lint() -> anyhow::Result<()> {
     // Runs first: it is a fast source-only scan, so a violation is reported
-    // before paying for three full clippy passes. Clippy's `exhaustive_enums`
-    // covers the enum; this covers the shape of its variants.
-    check_no_data_carrying_enum_variants()?;
+    // before paying for three full clippy passes. It covers what clippy cannot:
+    // e.g. clippy's `exhaustive_enums` covers the enum, `lint-custom` the shape
+    // of its variants and the visibility of public structs' fields.
+    lint_custom::lint_custom()?;
 
     // Structural doc defects clippy cannot see: an item's attributes or doc
     // comment migrated onto a neighbour. Run first, because it is instant and its
@@ -969,9 +858,10 @@ fn print_help() {
   check-generated Check generated code formatting and error-code staleness (no changes)
   generate-error-codes  Regenerate the error-code constants for Python and the test harness
   check-bindings  Check Py_BuildValue / PyArg_Parse* format arity in the Python C extension
-  check-no-data-carrying-enum-variants
-                  Check public enum variants do not hold data inline
-                  (also runs as the first step of `lint`)
+  lint-custom     Run the source-level rules clippy cannot express
+                  (also runs as the first step of `lint`):
+                    check-no-data-carrying-enum-variants  public enum variants hold no data inline
+                    check-no-public-field                 public structs have no `pub` field
   lint            Run doc-hygiene plus clippy lints (warnings are errors)
   doc-hygiene     Check for migrated attributes and stacked doc blocks
   lint-fix        Run clippy and automatically fix what it can
@@ -987,7 +877,7 @@ Usage:
   cargo xtask check-generated
   cargo xtask generate-error-codes
   cargo xtask check-bindings [path/to/file.c]
-  cargo xtask check-no-data-carrying-enum-variants
+  cargo xtask lint-custom
   cargo xtask lint
   cargo xtask doc-hygiene
   cargo xtask lint-fix

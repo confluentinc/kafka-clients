@@ -84,38 +84,38 @@ pub struct ConsumerRecord<K, V> {
 #[non_exhaustive]
 pub struct ConsumerRecordOptions<K, V> {
     /// The topic this record is received from. Java's `topic`.
-    pub topic: Arc<str>,
+    pub(crate) topic: Arc<str>,
     /// The partition of the topic this record is received from. Java's
     /// `partition`.
-    pub partition: i32,
+    pub(crate) partition: i32,
     /// The offset of this record in the corresponding Kafka partition.
     /// Java's `offset`.
-    pub offset: i64,
+    pub(crate) offset: i64,
     /// The timestamp of the record. Java's `timestamp`; starts as
     /// [`ConsumerRecord::NO_TIMESTAMP`], as in `:83`.
-    pub timestamp: i64,
+    pub(crate) timestamp: i64,
     /// The timestamp type of the record. Java's `timestampType`; starts as
     /// [`TimestampType::NoTimestampType`], as in `:83`.
-    pub timestamp_type: TimestampType,
+    pub(crate) timestamp_type: TimestampType,
     /// The length of the serialized key. Java's `serializedKeySize`; starts
     /// as [`ConsumerRecord::NULL_SIZE`], as in `:83`.
-    pub serialized_key_size: i32,
+    pub(crate) serialized_key_size: i32,
     /// The length of the serialized value. Java's `serializedValueSize`;
     /// starts as [`ConsumerRecord::NULL_SIZE`], as in `:83`.
-    pub serialized_value_size: i32,
+    pub(crate) serialized_value_size: i32,
     /// The key of the record, if one exists. Java's `key`.
-    pub key: Option<K>,
+    pub(crate) key: Option<K>,
     /// The record contents. Java's `value`.
-    pub value: Option<V>,
+    pub(crate) value: Option<V>,
     /// The headers of the record. Java's `headers`; starts empty, as in
     /// `:83` (`new RecordHeaders()`).
-    pub headers: RecordHeaders,
+    pub(crate) headers: RecordHeaders,
     /// The leader epoch, if available. Java's `leaderEpoch`; starts as
     /// `None`, as in `:83` (`Optional.empty()`).
-    pub leader_epoch: Option<i32>,
+    pub(crate) leader_epoch: Option<i32>,
     /// The delivery count, if available. Java's `deliveryCount`; starts as
     /// `None`, as in `:107`/`:83` (`Optional.empty()`).
-    pub delivery_count: Option<i16>,
+    pub(crate) delivery_count: Option<i16>,
 }
 
 /// Fluent builder for [`ConsumerRecordOptions`].

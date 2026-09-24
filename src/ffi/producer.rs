@@ -283,19 +283,19 @@ pub struct kafka_producer_ProducerProperties_t {
 #[repr(C)]
 pub struct kafka_producer_ProducerRecord_t {
     /// Null-terminated UTF-8 topic name.
-    pub topic: *const c_char,
+    pub(crate) topic: *const c_char,
     /// Partition number, or -1 for unset.
-    pub partition: i32,
+    pub(crate) partition: i32,
     /// Timestamp in milliseconds since epoch, or -1 for unset.
-    pub timestamp: i64,
+    pub(crate) timestamp: i64,
     /// Pointer to key bytes, or null if no key.
-    pub key: *const u8,
+    pub(crate) key: *const u8,
     /// Key length in bytes, or -1 for no key.
-    pub key_len: i32,
+    pub(crate) key_len: i32,
     /// Pointer to value bytes, or null if no value.
-    pub value: *const u8,
+    pub(crate) value: *const u8,
     /// Value length in bytes, or -1 for no value.
-    pub value_len: i32,
+    pub(crate) value_len: i32,
 }
 
 // ---------------------------------------------------------------------------

@@ -73,22 +73,22 @@ pub struct ProducerRecord<K, V> {
 #[derive(Debug, Clone)]
 pub struct ProducerRecordOptions<K, V> {
     /// The topic the record will be appended to. Java's `topic`.
-    pub topic: String,
+    pub(crate) topic: String,
     /// The partition to which the record should be sent. Java's `partition`.
     /// Starts as `None`, as in `:142`.
-    pub partition: Option<i32>,
+    pub(crate) partition: Option<i32>,
     /// The timestamp of the record, in milliseconds since epoch. If `None`,
     /// the producer will assign the timestamp using the system clock. Java's
     /// `timestamp`; starts as `None`, as in `:142`.
-    pub timestamp: Option<i64>,
+    pub(crate) timestamp: Option<i64>,
     /// The key that will be included in the record. Java's `key`. Starts as
     /// `None`, as in `:142`.
-    pub key: Option<K>,
+    pub(crate) key: Option<K>,
     /// The record contents. Java's `value`.
-    pub value: Option<V>,
+    pub(crate) value: Option<V>,
     /// The headers that will be included in the record. Java's `headers`.
     /// Starts as `None`, as in `:142`.
-    pub headers: Option<RecordHeaders>,
+    pub(crate) headers: Option<RecordHeaders>,
 }
 
 /// Fluent builder for [`ProducerRecordOptions`].

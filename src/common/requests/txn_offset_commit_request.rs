@@ -57,17 +57,38 @@ use super::TxnOffsetCommitResponse;
 #[non_exhaustive]
 pub struct CommittedOffset {
     /// The offset to commit.
-    pub offset: i64,
+    pub(crate) offset: i64,
     /// Optional metadata to store alongside the offset.
-    pub metadata: Option<String>,
+    pub(crate) metadata: Option<String>,
     /// The leader epoch of the partition when the offset was read, if known.
-    pub leader_epoch: Option<i32>,
+    pub(crate) leader_epoch: Option<i32>,
 }
 
 impl CommittedOffset {
     /// Creates a committed offset.
     pub fn new(offset: i64, metadata: Option<String>, leader_epoch: Option<i32>) -> Self {
         Self { offset, metadata, leader_epoch }
+    }
+
+    /// The offset to commit.
+    ///
+    /// Java's public `CommittedOffset.offset`.
+    pub fn offset(&self) -> i64 {
+        self.offset
+    }
+
+    /// Optional metadata to store alongside the offset.
+    ///
+    /// Java's public `CommittedOffset.metadata`.
+    pub fn metadata(&self) -> Option<&str> {
+        self.metadata.as_deref()
+    }
+
+    /// The leader epoch of the partition when the offset was read, if known.
+    ///
+    /// Java's public `CommittedOffset.leaderEpoch`.
+    pub fn leader_epoch(&self) -> Option<i32> {
+        self.leader_epoch
     }
 }
 
@@ -311,24 +332,24 @@ pub struct TxnOffsetCommitRequestBuilder {
 #[non_exhaustive]
 pub struct TxnOffsetCommitRequestBuilderOptions<'a> {
     /// Java's `transactionalId`.
-    pub transactional_id: String,
+    pub(crate) transactional_id: String,
     /// Java's `consumerGroupId`.
-    pub consumer_group_id: String,
+    pub(crate) consumer_group_id: String,
     /// Java's `producerId`.
-    pub producer_id: i64,
+    pub(crate) producer_id: i64,
     /// Java's `producerEpoch`.
-    pub producer_epoch: i16,
+    pub(crate) producer_epoch: i16,
     /// Java's `pendingTxnOffsetCommits`.
-    pub pending_txn_offset_commits: &'a HashMap<TopicPartition, CommittedOffset>,
+    pub(crate) pending_txn_offset_commits: &'a HashMap<TopicPartition, CommittedOffset>,
     /// Java's `memberId`. Starts as [`TxnOffsetCommitRequest::UNKNOWN_MEMBER_ID`], as in `:50`.
-    pub member_id: String,
+    pub(crate) member_id: String,
     /// Java's `generationId`. Starts as [`TxnOffsetCommitRequest::UNKNOWN_GENERATION_ID`], as in `:50`.
-    pub generation_id: i32,
+    pub(crate) generation_id: i32,
     /// Java's `groupInstanceId`. Starts as `None`, as in `:50`'s
     /// `Optional.empty()`.
-    pub group_instance_id: Option<String>,
+    pub(crate) group_instance_id: Option<String>,
     /// Java's `isTransactionV2Enabled`.
-    pub is_transaction_v2_enabled: bool,
+    pub(crate) is_transaction_v2_enabled: bool,
 }
 
 /// Fluent builder for [`TxnOffsetCommitRequestBuilderOptions`].

@@ -32,15 +32,29 @@ use super::NodeApiVersions;
 #[non_exhaustive]
 pub struct FinalizedFeaturesInfo {
     /// The epoch of the finalized features.
-    pub finalized_features_epoch: i64,
+    pub(crate) finalized_features_epoch: i64,
     /// Map of finalized feature name to its version.
-    pub finalized_features: Option<HashMap<String, i16>>,
+    pub(crate) finalized_features: Option<HashMap<String, i16>>,
 }
 
 impl FinalizedFeaturesInfo {
     /// Creates a new `FinalizedFeaturesInfo`.
     fn new(finalized_features_epoch: i64, finalized_features: Option<HashMap<String, i16>>) -> Self {
         Self { finalized_features_epoch, finalized_features }
+    }
+
+    /// The epoch of the finalized features.
+    ///
+    /// Java's public `FinalizedFeaturesInfo.finalizedFeaturesEpoch`.
+    pub fn finalized_features_epoch(&self) -> i64 {
+        self.finalized_features_epoch
+    }
+
+    /// Map of finalized feature name to its version.
+    ///
+    /// Java's public `FinalizedFeaturesInfo.finalizedFeatures`.
+    pub fn finalized_features(&self) -> Option<&HashMap<String, i16>> {
+        self.finalized_features.as_ref()
     }
 }
 

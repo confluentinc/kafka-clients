@@ -441,17 +441,17 @@ impl Holder {
 #[non_exhaustive]
 pub struct TopicMetadata {
     /// The topic-level error.
-    pub error: Errors,
+    pub(crate) error: Errors,
     /// The topic name.
-    pub topic: String,
+    pub(crate) topic: String,
     /// The topic ID.
-    pub topic_id: Uuid,
+    pub(crate) topic_id: Uuid,
     /// Whether this is an internal topic.
-    pub is_internal: bool,
+    pub(crate) is_internal: bool,
     /// Partition metadata for this topic.
-    pub partition_metadata: Vec<PartitionMetadata>,
+    pub(crate) partition_metadata: Vec<PartitionMetadata>,
     /// Authorized operations bitfield.
-    pub authorized_operations: i32,
+    pub(crate) authorized_operations: i32,
 }
 
 impl TopicMetadata {
@@ -535,19 +535,19 @@ impl std::hash::Hash for TopicMetadata {
 #[non_exhaustive]
 pub struct PartitionMetadata {
     /// The partition-level error.
-    pub error: Errors,
+    pub(crate) error: Errors,
     /// The topic-partition.
-    pub topic_partition: TopicPartition,
+    pub(crate) topic_partition: TopicPartition,
     /// The leader node ID, or `None` if there is no leader.
-    pub leader_id: Option<i32>,
+    pub(crate) leader_id: Option<i32>,
     /// The leader epoch, or `None` if not known.
-    pub leader_epoch: Option<i32>,
+    pub(crate) leader_epoch: Option<i32>,
     /// Replica node IDs.
-    pub replica_ids: Vec<i32>,
+    pub(crate) replica_ids: Vec<i32>,
     /// In-sync replica node IDs.
-    pub in_sync_replica_ids: Vec<i32>,
+    pub(crate) in_sync_replica_ids: Vec<i32>,
     /// Offline replica node IDs.
-    pub offline_replica_ids: Vec<i32>,
+    pub(crate) offline_replica_ids: Vec<i32>,
 }
 
 impl PartitionMetadata {
@@ -572,6 +572,55 @@ impl PartitionMetadata {
             in_sync_replica_ids: self.in_sync_replica_ids.clone(),
             offline_replica_ids: self.offline_replica_ids.clone(),
         }
+    }
+
+    /// The partition-level error.
+    ///
+    /// Java's public `PartitionMetadata.error`.
+    pub fn error(&self) -> Errors {
+        self.error
+    }
+
+    /// The topic-partition.
+    ///
+    /// Java's public `PartitionMetadata.topicPartition`.
+    pub fn topic_partition(&self) -> &TopicPartition {
+        &self.topic_partition
+    }
+
+    /// The leader node ID, or `None` if there is no leader.
+    ///
+    /// Java's public `PartitionMetadata.leaderId`.
+    pub fn leader_id(&self) -> Option<i32> {
+        self.leader_id
+    }
+
+    /// The leader epoch, or `None` if not known.
+    ///
+    /// Java's public `PartitionMetadata.leaderEpoch`.
+    pub fn leader_epoch(&self) -> Option<i32> {
+        self.leader_epoch
+    }
+
+    /// Replica node IDs.
+    ///
+    /// Java's public `PartitionMetadata.replicaIds`.
+    pub fn replica_ids(&self) -> &[i32] {
+        &self.replica_ids
+    }
+
+    /// In-sync replica node IDs.
+    ///
+    /// Java's public `PartitionMetadata.inSyncReplicaIds`.
+    pub fn in_sync_replica_ids(&self) -> &[i32] {
+        &self.in_sync_replica_ids
+    }
+
+    /// Offline replica node IDs.
+    ///
+    /// Java's public `PartitionMetadata.offlineReplicaIds`.
+    pub fn offline_replica_ids(&self) -> &[i32] {
+        &self.offline_replica_ids
     }
 }
 

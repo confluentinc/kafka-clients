@@ -20,7 +20,7 @@ use std::collections::HashMap;
 
 use crate::CommonClientConfigs;
 use crate::common::Error;
-use crate::common::config::{SaslConfig, SaslConfigs, SslConfig};
+use crate::common::config::{SaslConfigs, SslConfigs};
 use crate::common::security::SecurityProtocol;
 
 /// Configuration for the admin client.
@@ -48,10 +48,10 @@ pub struct AdminClientConfig {
     security_protocol: SecurityProtocol,
 
     /// SASL configuration (mechanism, JAAS config, credentials).
-    sasl_config: SaslConfig,
+    sasl_config: SaslConfigs,
 
     /// SSL/TLS configuration.
-    ssl_config: SslConfig,
+    ssl_config: SslConfigs,
 }
 
 impl AdminClientConfig {
@@ -135,7 +135,7 @@ impl AdminClientConfig {
                     };
                 },
                 key if key.starts_with("ssl.") => {
-                    SslConfig::apply_ssl_config_key(&mut config.ssl_config, key, value);
+                    SslConfigs::apply_ssl_config_key(&mut config.ssl_config, key, value);
                 },
                 // Unknown keys are accepted silently, as in Java.
                 _ => {},
@@ -217,12 +217,12 @@ impl AdminClientConfig {
     }
 
     /// SASL configuration (mechanism, JAAS config, credentials).
-    pub fn sasl_config(&self) -> &SaslConfig {
+    pub fn sasl_config(&self) -> &SaslConfigs {
         &self.sasl_config
     }
 
     /// SSL/TLS configuration.
-    pub fn ssl_config(&self) -> &SslConfig {
+    pub fn ssl_config(&self) -> &SslConfigs {
         &self.ssl_config
     }
 }
@@ -244,8 +244,8 @@ impl Default for AdminClientConfig {
             metadata_max_age_ms: 300_000,
             socket_connection_setup_timeout_ms: 10_000,
             security_protocol: SecurityProtocol::Plaintext,
-            sasl_config: SaslConfig::default(),
-            ssl_config: SslConfig::default(),
+            sasl_config: SaslConfigs::default(),
+            ssl_config: SslConfigs::default(),
         }
     }
 }
