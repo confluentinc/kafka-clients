@@ -17,7 +17,10 @@ section** — do not load the other phases.
   An Admin client **exists** (`src/admin`, `test_utils::create_topic`) — use it
   instead of auto-create / provisioner workarounds in new code. Brokers are
   pooled per `ClusterConfig`; use a distinct config when broker props differ.
-  Broker image is `apache/kafka:4.2.0`; there is **no** broker stop/restart.
+  Broker image is `apache/kafka:4.2.0`. Broker stop/restart exists since Phase 15
+  (`ClusterConfig::kraft_dedicated(brokers, controllers)` + `ctx.cluster()`
+  `shutdown_broker` / `start_broker` / `alive_broker_ids` / `wait_for_ready_brokers`,
+  Java `ClusterInstance` equivalents; only on dedicated `Type::Kraft` clusters).
 - Mirror the Java test: same record counts, same timeouts, **exact error
   messages and typed error variants** (DoD §3). Any deviation gets an inline
   comment with the reason. If a test cannot pass for a real blocker (e.g. needs
@@ -255,3 +258,4 @@ null value as `b""` (Phase 2 / Critic 66).
 - Phase 12 / Actor 76: 869659ce (flush / close-zero Java shape; partitions_for un-gated), 3e4a2fb9 (no coordinator warm-up; pre-create __consumer_offsets). Critic 76: clean. Phase 12 DONE.
 - Phase 13 / Actor 77: 7ba4b551, b5b45912, f7305af9, d9dcda08, cc704bc0 (exact messages + typed variants; added testPartitionsForTimeoutErrorWhenTopicDoesNotExist). Critic 77: 1 low finding (invalid-topic loop must retry like retryOnExceptionWithTimeout) → fixed 9c27aa11. Phase 13 DONE.
 - Phase 14 / Actor 78: 56c2d387 (SASL_PLAINTEXT + SSL testSimpleConsumption, shared base_consumer_test.rs), 5adf6d8c (SSL send-offset/close/flush native; Java-shaped testClose). Critic 78: clean. Phase 14 DONE.
+- Phase 15 / Actor 79: cd653ef1 (Kraft isolated controllers, dedicated clusters, lifecycle API), 1e630fe0 (smoke tests). Full suite 265 passed / 3 ignored x2. Critic 79 reviewing.
