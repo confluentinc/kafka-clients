@@ -528,12 +528,13 @@ impl Rule for NoPublicField {
 ///     sources, and the item is a type named as the class — `Exception` →
 ///     `Error` with the package prefix outside `common`, acronyms in Rust
 ///     casing (`SSLFactory` → `SslFactory`), a nested class under its bare
-///     name. Under `ffi`, the type is `kafka_<package>_<Name>_t` instead.
+///     name.
 ///   - **method** (`..Class#method`): the class declares the method, and the
 ///     function's name derives from it — snake_case, `Exception` → `Error`,
 ///     `throw` → `return`, an optional dropped `get`, `_with_<params>` for an
-///     overload, `new` / `with_<params>` for a constructor. Under `ffi`, the
-///     function is `kafka_<package>_<Name>_<that name>`.
+///     overload, `new` / `with_<params>` for a constructor.
+///
+/// The C FFI (`src/ffi`) is excluded for now.
 ///
 /// And for every file named after a Java class of its package
 /// (`producer/producer_record.rs` ↔ `clients.producer.ProducerRecord`,
@@ -681,7 +682,7 @@ fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
 
 impl JavaName {
     /// Checks one marker on `item`, pushing a finding if its name does not follow.
-    fn check_marker(&self, file: &str, is_ffi: bool, item: &Marked, marker: &str, findings: &mut Vec<String>) {
+    fn check_marker(&self, file: &str, item: &Marked, marker: &str, findings: &mut Vec<String>) {
         let Some(class) = self.index.resolve(marker) else {
             findings.push(format!(
                 "{file}: `{}` is marked `{marker}`, which is not a Java class",
@@ -692,7 +693,7 @@ impl JavaName {
         let origin = format!("`{}`", marker.trim_start_matches(java::MARKER_PREFIX));
         match (JavaIndex::marker_method(marker), item.kind) {
             (None, ItemKind::Type) => {
-                let expected = if is_ffi { class.ffi_name() } else { class.rust_name() };
+                let expected = class.rust_name();
                 if !same_name(&item.name, &expected) {
                     findings.push(format!(
                         "{file}: `{}` translates {origin} and must be named `{expected}`",
@@ -709,22 +710,7 @@ impl JavaName {
                     ));
                     return;
                 }
-                let rust = if is_ffi {
-                    let prefix = format!("{}_", class.ffi_prefix());
-                    match item.name.strip_prefix(&prefix) {
-                        Some(rest) => rest,
-                        None => {
-                            findings.push(format!(
-                                "{file}: `{}` translates {origin} and must be named `{prefix}<method>`",
-                                item.name
-                            ));
-                            return;
-                        },
-                    }
-                } else {
-                    item.name.as_str()
-                };
-                if !class.is_rust_name_of(method, rust) {
+                if !class.is_rust_name_of(method, &item.name) {
                     let expected = if method == class.name() {
                         "`new` or `with_<params>`".to_string()
                     } else {
@@ -760,7 +746,7 @@ impl JavaName {
         let Some(stem) = package.pop().map(|f| f.trim_end_matches(".rs").to_string()) else {
             return 0;
         };
-        if matches!(stem.as_str(), "mod" | "lib" | "main") || package.first().is_some_and(|p| p == "ffi") {
+        if matches!(stem.as_str(), "mod" | "lib" | "main") {
             return 0;
         }
         let mut checked = 0;
@@ -828,7 +814,9 @@ impl Rule for JavaName {
         rust_files(Path::new("src"), &mut files);
         rust_files(Path::new("tests"), &mut files);
         let mut checked = 0usize;
-        for path in files.iter().filter(|p| !p.starts_with("src/bin")) {
+        // The C FFI (`src/ffi`) is excluded for now: it carries no markers and
+        // its CLAUDE.md §4 naming is not checked.
+        for path in files.iter().filter(|p| !p.starts_with("src/bin") && !p.starts_with("src/ffi")) {
             let file = path.display().to_string();
             let parsed = match fs::read_to_string(path).map(|s| syn::parse_file(&s)) {
                 Ok(Ok(parsed)) => parsed,
@@ -841,13 +829,12 @@ impl Rule for JavaName {
                     continue;
                 },
             };
-            let is_ffi = path.starts_with("src/ffi");
             let mut items = Vec::new();
             marked_items(&parsed.items, &mut items);
             for item in &items {
                 for marker in java_markers(&item.attrs) {
                     checked += 1;
-                    self.check_marker(&file, is_ffi, item, &marker, findings);
+                    self.check_marker(&file, item, &marker, findings);
                 }
             }
             checked += self.check_file(path, &items, findings);
@@ -859,8 +846,7 @@ impl Rule for JavaName {
         "   Name the item as Java does, adapted only by the translation rules
    (CLAUDE.md §2: Exception -> Error with the package prefix outside `common`,
    camelCase -> snake_case, `_with_<params>` for overloads, `new`/`with_..` for
-   constructors, a nested class under its bare name; §4:
-   `kafka_<java package without clients>_<Name>_t`). Fix the marker instead if
+   constructors, a nested class under its bare name). Fix the marker instead if
    it names the wrong Java class or method; a Rust-only helper carries none."
     }
 }

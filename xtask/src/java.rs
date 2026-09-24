@@ -90,23 +90,6 @@ impl JavaClass {
         format!("{prefix}{base}Error")
     }
 
-    /// The C FFI type name (CLAUDE.md §4): `kafka_<package>_<Name>_t`, the Java
-    /// package without `clients`. `common.errors` maps to `kafka_common_`, per
-    /// CLAUDE.md's `kafka_common_ResourceNotFoundError_t`.
-    pub fn ffi_name(&self) -> String {
-        format!("{}_t", self.ffi_prefix())
-    }
-
-    /// `kafka_<package>_<Name>`, the prefix of the C type and its functions.
-    pub fn ffi_prefix(&self) -> String {
-        let module = if self.module == ["common", "errors"] {
-            &self.module[..1]
-        } else {
-            &self.module[..]
-        };
-        format!("kafka_{}_{}", module.join("_"), self.rust_name())
-    }
-
     /// Whether `rust` is a Rust name the translation rules give Java method
     /// `method` of this class (CLAUDE.md §2):
     ///   - camelCase → snake_case, with `Exception` → `Error` and `throw` →
@@ -507,11 +490,10 @@ mod tests {
         };
         let oor = class(&["consumer"], "clients.consumer", "OffsetOutOfRangeException");
         assert_eq!(oor.rust_name(), "ConsumerOffsetOutOfRangeError");
-        assert_eq!(oor.ffi_name(), "kafka_consumer_ConsumerOffsetOutOfRangeError_t");
         let rnf = class(&["common", "errors"], "common.errors", "ResourceNotFoundException");
-        assert_eq!(rnf.ffi_name(), "kafka_common_ResourceNotFoundError_t");
+        assert_eq!(rnf.rust_name(), "ResourceNotFoundError");
         let acl = class(&["common", "acl"], "common.acl", "AclBinding");
-        assert_eq!(acl.ffi_name(), "kafka_common_acl_AclBinding_t");
+        assert_eq!(acl.rust_name(), "AclBinding");
         assert!(same_name("SslFactory", "SSLFactory"));
     }
 }
