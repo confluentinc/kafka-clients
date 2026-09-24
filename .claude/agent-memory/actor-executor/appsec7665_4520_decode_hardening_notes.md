@@ -51,6 +51,6 @@ discrepancy). Reusable, non-obvious findings:
 
 8. **Formatting without touching untracked workspace files:**
    `rustfmt --edition 2024 <changed files>` matches `cargo xtask format-check`
-   (style edition from Cargo's 2024) — see [[format_fix_without_cargo_fmt]].
+   (style edition from Cargo's 2024) — see [[format-fix-without-cargo-fmt]].
    Clippy's `type_complexity` fires on `[(&str, Box<dyn Fn(..)>); N]` test
    tables; use non-capturing closures coerced to a `fn(..)` type alias.

@@ -120,6 +120,6 @@ so the "reap between runs" advice above does not apply to an agent: list what
 is stray (`docker ps -a`, `docker network ls`, with creation dates, since old
 `kafka-net-*` networks may not be yours) and hand the user the command.
 
-See [[integration_metadata_propagation_races]] for the other half of this
+See [[integration-metadata-propagation-races]] for the other half of this
 branch's flakiness — the describe-after-create window and the
 `retry_on_exception_with_timeout` idiom that closes it.
