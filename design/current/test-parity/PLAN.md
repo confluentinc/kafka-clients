@@ -236,6 +236,8 @@ stop/restart harness + fault-injection tests; stale doc/comment cleanup.
 Binding gaps found: gRPC servers (python `grpc_translate.py`, C `server.cc`) return
 `serialized_key_size`/`serialized_value_size` = -1, and the Python server sends a
 null value as `b""` (Phase 2 / Critic 66).
+Harness: a failed cluster start attempt can leave broker containers in Docker `Created`
+state (seen once in Phase 17; removed manually) — reap them on the failure path.
 
 ## Production divergences found (not fixed — need a decision)
 
@@ -271,3 +273,4 @@ null value as `b""` (Phase 2 / Critic 66).
 - Phase 15: Critic 79 1 finding (wait_for_ready_brokers not pinned per broker) → fixed 1ba63a5c (raw Metadata v12 per broker); re-review clean. Phase 15 DONE.
 - Phase 16 / Actor 80: 5be6ef9c (un-ignored commit-async-during-close w/ real shutdown), 4be18e85 (testLeaderEpoch), 220e220b (harness BrokerProxy: stopped broker refuses/closes conns like in-JVM broker; fixes Docker Desktop forwarder hangs), 4f50cf28 (coordinator failover, close on broker shutdown). Full suite 269 passed / 2 ignored. Critic 80: clean (proxy not masking a client bug: Java close() default 30s timer). Phase 16 DONE.
 - Phase 17 / Actor 81: 0289681f, 738b9ba9, 7e16d75a (4 ConsumerBounceTest arms, 5/5 each). Critic 81: 1 finding (coordinator lookup relied on Rust-only background auto-commit) → fixing in test; production divergence logged above.
+- Phase 17: fixup f2bdd189 (coordinator via __consumer_offsets p0 leader). Phase 17 DONE.
