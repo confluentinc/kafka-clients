@@ -49,6 +49,16 @@ use confluent_kafka::common::Uuid;
 #[derive(Debug, Clone)]
 #[allow(dead_code)] // Acked / DeliveryCount land with the share consumer.
 pub enum WorkloadEvent {
+    /// Producer `producer` is about to hand `index` to the client. Opens the
+    /// record's in-flight window; the matching `Delivered` or `SendFailed`
+    /// closes it. The verifier derives from these that no producer ever has
+    /// more than one record in flight — the workload's contract (send, await
+    /// the ack, send the next), checked rather than assumed.
+    Sent {
+        index: u64,
+        topic: String,
+        producer: String,
+    },
     /// Producer received a broker ack for `index` at this physical address.
     Delivered {
         index: u64,
@@ -212,7 +222,24 @@ struct ConservationState {
     /// drain-progress signal read by `consumed_progress_for_topic`, used to
     /// detect that a just-recreated topic's consumer has resumed.
     consumed_events_by_topic: HashMap<String, u64>,
+    /// (topic, index) currently in flight — `Sent`, but not yet `Delivered` or
+    /// `SendFailed` — mapped to the producer that sent it. The settling event
+    /// carries no producer identity; it is attributed through this map, which
+    /// relies on the logical key being unique across producers — the same
+    /// invariant the conservation maps already rest on (see [`LogicalKey`]).
+    in_flight: HashMap<LogicalKey, String>,
+    /// producer -> records currently in flight.
+    in_flight_by_producer: HashMap<String, u32>,
+    /// producer -> the most records it ever had in flight at once. The producer
+    /// workload's contract is ONE (send, await the ack or failure, then send the
+    /// next); anything above that means the workload is not the one described.
+    max_in_flight_by_producer: HashMap<String, u32>,
 }
+
+/// The producer workload keeps exactly one record in flight: it awaits each
+/// send's outcome before issuing the next (`workload.rs`, `ProducerWorkload`).
+/// The verdict fails any producer whose observed peak exceeds this.
+const MAX_IN_FLIGHT_PER_PRODUCER: u32 = 1;
 
 impl ConservationVerifier {
     pub fn new() -> Self {
@@ -221,6 +248,17 @@ impl ConservationVerifier {
 }
 
 impl ConservationState {
+    /// Close `key`'s in-flight window (its `Delivered` / `SendFailed` arrived).
+    /// A key that was never `Sent` is ignored: event streams without `Sent`
+    /// (older workloads, the verifier's own unit tests) remain valid.
+    fn settle(&mut self, key: &LogicalKey) {
+        if let Some(producer) = self.in_flight.remove(key)
+            && let Some(n) = self.in_flight_by_producer.get_mut(&producer)
+        {
+            *n = n.saturating_sub(1);
+        }
+    }
+
     fn blackout_resume(&self) -> HashMap<&str, u64> {
         self.recreate_blackout
             .iter()
@@ -261,10 +299,23 @@ impl Verifier for ConservationVerifier {
     fn record(&self, event: WorkloadEvent) {
         let mut s = self.inner.lock().expect("verifier poisoned");
         match event {
-            WorkloadEvent::Delivered { index, topic, topic_id, partition, offset } => {
-                s.delivered.insert((topic, index), (topic_id, partition, offset));
+            WorkloadEvent::Sent { index, topic, producer } => {
+                s.in_flight.insert((topic, index), producer.clone());
+                let now = {
+                    let n = s.in_flight_by_producer.entry(producer.clone()).or_insert(0);
+                    *n += 1;
+                    *n
+                };
+                let peak = s.max_in_flight_by_producer.entry(producer).or_insert(0);
+                *peak = (*peak).max(now);
             },
-            WorkloadEvent::SendFailed { .. } => {
+            WorkloadEvent::Delivered { index, topic, topic_id, partition, offset } => {
+                let key = (topic, index);
+                s.settle(&key);
+                s.delivered.insert(key, (topic_id, partition, offset));
+            },
+            WorkloadEvent::SendFailed { index, topic, .. } => {
+                s.settle(&(topic, index));
                 s.failed_sends += 1;
             },
             WorkloadEvent::Consumed { index, topic, topic_id, partition, offset } => {
@@ -372,6 +423,41 @@ impl Verifier for ConservationVerifier {
             ));
         }
 
+        // In-flight bound: derived from the event stream (`Sent` opens a
+        // record's window, `Delivered` / `SendFailed` closes it), not
+        // self-reported by the workload. Per producer, not global — N producers
+        // legitimately have N records in flight between them.
+        let mut over: Vec<(&String, &u32)> = s
+            .max_in_flight_by_producer
+            .iter()
+            .filter(|(_, peak)| **peak > MAX_IN_FLIGHT_PER_PRODUCER)
+            .collect();
+        over.sort();
+        if !over.is_empty() {
+            let detail: Vec<String> = over.iter().map(|(producer, peak)| format!("{producer}={peak}")).collect();
+            reasons.push(format!(
+                "in-flight bound: {} producer(s) had more than {MAX_IN_FLIGHT_PER_PRODUCER} record in flight \
+                 at once (peak per producer: {})",
+                over.len(),
+                detail.join(", ")
+            ));
+        }
+        let max_in_flight = s.max_in_flight_by_producer.values().copied().max().unwrap_or(0);
+
+        // Every `Sent` must settle: the producer loop awaits each send's outcome
+        // before it can exit, so a window still open at verdict means an outcome
+        // was never recorded (or the run was cut off by the watchdog mid-send).
+        let unsettled_sends = s.in_flight.len();
+        if unsettled_sends > 0 {
+            let mut sample: Vec<&LogicalKey> = s.in_flight.keys().collect();
+            sample.sort_unstable();
+            sample.truncate(20);
+            let sample_str: Vec<String> = sample.iter().map(|(t, idx)| format!("{t}#{idx}")).collect();
+            reasons.push(format!(
+                "unsettled sends: {unsettled_sends} record(s) sent but never acked or failed (sample: {sample_str:?})"
+            ));
+        }
+
         // Report expected-lost as every delivered record that was legitimately
         // excused, via ANY path (recreate snapshot, blackout skip, or destroyed
         // generation): a delivered record is either observed, scored as loss, or
@@ -388,6 +474,8 @@ impl Verifier for ConservationVerifier {
             logical_duplicates,
             physical_duplicates,
             partitions_covered: s.partitions_seen.len(),
+            max_in_flight,
+            unsettled_sends,
             lost,
             reasons,
         }
@@ -405,6 +493,13 @@ pub struct ChaosVerdict {
     /// Same physical `(topic_id, partition, offset)` seen more than once.
     pub physical_duplicates: u64,
     pub partitions_covered: usize,
+    /// The most records any single producer had in flight at once. The
+    /// workload's contract is 1; above that fails the run. 0 when the event
+    /// stream carried no `Sent` events.
+    pub max_in_flight: u32,
+    /// Records `Sent` but neither `Delivered` nor `SendFailed` by verdict time.
+    /// Non-zero fails the run.
+    pub unsettled_sends: usize,
     /// Delivered `(topic, index)` records the consumer never observed (data
     /// loss).
     pub lost: Vec<LogicalKey>,
@@ -426,6 +521,10 @@ impl std::fmt::Display for ChaosVerdict {
         writeln!(f, "  duplicates (by index)     : {}", self.logical_duplicates)?;
         writeln!(f, "  duplicates (by offset)    : {}", self.physical_duplicates)?;
         writeln!(f, "  partitions covered        : {}", self.partitions_covered)?;
+        writeln!(f, "  in-flight peak (producer) : {}", self.max_in_flight)?;
+        if self.unsettled_sends > 0 {
+            writeln!(f, "  unsettled sends           : {}", self.unsettled_sends)?;
+        }
         if self.expected_lost > 0 {
             writeln!(f, "  expected-lost (recreate)  : {}", self.expected_lost)?;
         }
@@ -724,6 +823,144 @@ mod tests {
             "t1's unconsumed record is still real loss"
         );
         assert!(!verdict.is_pass(), "loss on t1 must fail the run");
+    }
+
+    fn sent(index: u64, producer: &str) -> WorkloadEvent {
+        WorkloadEvent::Sent { index, topic: "t".into(), producer: producer.into() }
+    }
+
+    fn delivered(index: u64) -> WorkloadEvent {
+        WorkloadEvent::Delivered { index, topic: "t".into(), topic_id: zero(), partition: 0, offset: index as i64 }
+    }
+
+    fn consumed(index: u64) -> WorkloadEvent {
+        WorkloadEvent::Consumed { index, topic: "t".into(), topic_id: zero(), partition: 0, offset: index as i64 }
+    }
+
+    /// The contract the producer workload claims: one record in flight, each
+    /// send settled before the next is issued. Peak 1, nothing left open.
+    #[test]
+    fn one_record_in_flight_per_producer_passes() {
+        let v = ConservationVerifier::new();
+        for i in 0..50u64 {
+            v.record(sent(i, "producer-rust-1"));
+            v.record(delivered(i));
+            v.record(consumed(i));
+        }
+        let verdict = v.verdict(1);
+        assert!(verdict.is_pass(), "sequential sends must pass: {verdict}");
+        assert_eq!(verdict.max_in_flight, 1);
+        assert_eq!(verdict.unsettled_sends, 0);
+    }
+
+    /// A second send issued before the first settled breaks the one-in-flight
+    /// contract and FAILS the run, naming the producer and its peak — even
+    /// though every record was delivered and consumed (conservation is intact).
+    #[test]
+    fn two_records_in_flight_fails() {
+        let v = ConservationVerifier::new();
+        v.record(sent(0, "producer-rust-1"));
+        v.record(sent(1, "producer-rust-1"));
+        v.record(delivered(0));
+        v.record(delivered(1));
+        v.record(consumed(0));
+        v.record(consumed(1));
+        let verdict = v.verdict(1);
+        assert!(!verdict.is_pass(), "pipelined sends must fail: {verdict}");
+        assert_eq!(verdict.max_in_flight, 2);
+        assert_eq!(verdict.unsettled_sends, 0, "both sends did settle");
+        assert_eq!(verdict.lost.len(), 0, "the failure is the in-flight bound, not loss");
+        let reason = verdict
+            .reasons
+            .iter()
+            .find(|r| r.starts_with("in-flight bound"))
+            .unwrap_or_else(|| panic!("expected an in-flight reason, got {:?}", verdict.reasons));
+        assert!(
+            reason.contains("producer-rust-1=2"),
+            "reason must name the producer and its peak: {reason}"
+        );
+    }
+
+    /// A failed send closes the window exactly like an ack does: sending again
+    /// after a `SendFailed` is still one in flight.
+    #[test]
+    fn failed_send_closes_the_in_flight_window() {
+        let v = ConservationVerifier::new();
+        v.record(sent(0, "producer-rust-1"));
+        v.record(WorkloadEvent::SendFailed { index: 0, topic: "t".into(), error: "timed out".into() });
+        v.record(sent(1, "producer-rust-1"));
+        v.record(delivered(1));
+        v.record(consumed(1));
+        let verdict = v.verdict(1);
+        assert!(verdict.is_pass(), "{verdict}");
+        assert_eq!(verdict.max_in_flight, 1);
+        assert_eq!(verdict.failed_sends, 1);
+    }
+
+    /// The bound is per producer, not global: two producers with one record
+    /// in flight each are within contract (a global count would read 2).
+    #[test]
+    fn in_flight_bound_is_per_producer_not_global() {
+        let v = ConservationVerifier::new();
+        v.record(WorkloadEvent::Sent { index: 0, topic: "t0".into(), producer: "producer-rust-100".into() });
+        v.record(WorkloadEvent::Sent { index: 0, topic: "t1".into(), producer: "producer-rust-101".into() });
+        for topic in ["t0", "t1"] {
+            v.record(WorkloadEvent::Delivered {
+                index: 0,
+                topic: topic.into(),
+                topic_id: zero(),
+                partition: 0,
+                offset: 0,
+            });
+            v.record(WorkloadEvent::Consumed {
+                index: 0,
+                topic: topic.into(),
+                topic_id: zero(),
+                partition: 0,
+                offset: 0,
+            });
+        }
+        let verdict = v.verdict(1);
+        assert!(verdict.is_pass(), "one in flight per producer must pass: {verdict}");
+        assert_eq!(verdict.max_in_flight, 1);
+    }
+
+    /// A `Sent` with no `Delivered` / `SendFailed` by verdict time is an outcome
+    /// the harness never recorded — fail, and say which record.
+    #[test]
+    fn unsettled_send_at_verdict_fails() {
+        let v = ConservationVerifier::new();
+        v.record(sent(0, "producer-rust-1"));
+        v.record(delivered(0));
+        v.record(consumed(0));
+        v.record(sent(1, "producer-rust-1"));
+        // index 1 never settles.
+        let verdict = v.verdict(1);
+        assert!(!verdict.is_pass(), "{verdict}");
+        assert_eq!(verdict.unsettled_sends, 1);
+        assert_eq!(verdict.max_in_flight, 1, "an open window is not a second in flight");
+        assert!(
+            verdict
+                .reasons
+                .iter()
+                .any(|r| r.starts_with("unsettled sends: 1") && r.contains("t#1")),
+            "expected an unsettled-sends reason naming t#1, got {:?}",
+            verdict.reasons
+        );
+    }
+
+    /// Event streams without `Sent` (the verifier's other tests, older workloads)
+    /// are unaffected: a `Delivered` that was never `Sent` neither fails nor
+    /// counts as in flight.
+    #[test]
+    fn delivered_without_sent_is_tolerated() {
+        let v = ConservationVerifier::new();
+        v.record(delivered(0));
+        v.record(consumed(0));
+        let verdict = v.verdict(1);
+        assert!(verdict.is_pass(), "{verdict}");
+        assert_eq!(verdict.max_in_flight, 0);
+        assert_eq!(verdict.unsettled_sends, 0);
     }
 
     /// A delayed recreate mints a new topic id; records acked to the OLD id are on
