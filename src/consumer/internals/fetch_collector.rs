@@ -55,9 +55,9 @@ use indexmap::IndexMap;
 use log::{debug, info, trace, warn};
 
 use crate::common::Error;
-use crate::common::Errors;
 use crate::common::TopicPartition;
-use crate::common::record::MemoryRecords;
+use crate::common::protocol::Errors;
+use crate::common::record::internal::MemoryRecords;
 use crate::common::requests::FetchResponse;
 use crate::consumer::ConsumerOffsetOutOfRangeError;
 use crate::consumer::ConsumerRecord;
@@ -1002,7 +1002,7 @@ mod tests {
     use crate::common::record::TimestampType;
     use crate::common::record::internal::{AbstractRecords, MemoryRecords, RecordBatch, SimpleRecord};
     use crate::common::serialization::Deserializer;
-    use crate::consumer::AutoOffsetResetStrategy;
+    use crate::consumer::internals::AutoOffsetResetStrategy;
     use crate::fetch_response_data::PartitionData;
     use crate::metadata::LeaderAndEpoch;
     use std::collections::HashSet;
@@ -2644,7 +2644,7 @@ mod tests {
     #[test]
     fn test_discarded_fetch_records_zero_so_the_response_metrics_publish() {
         use crate::common::Metric;
-        use crate::common::metrics::MetricValue;
+        use crate::common::MetricValue;
 
         let h = build_harness(DEFAULT_MAX_POLL_RECORDS, IsolationLevel::ReadUncommitted);
         let manager = FetchMetricsManager::for_test();

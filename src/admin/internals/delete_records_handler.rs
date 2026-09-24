@@ -23,8 +23,8 @@ use std::sync::Arc;
 use crate::DeleteRecordsRequestData;
 use crate::admin::DeletedRecords;
 use crate::admin::RecordsToDelete;
-use crate::common::Errors;
 use crate::common::errors::ApiError;
+use crate::common::protocol::Errors;
 use crate::common::requests::{ConcreteResponse, RequestBuilder, delete_records_request};
 use crate::common::utils::LogContext;
 use crate::common::{Error, Node, TopicPartition};
@@ -223,7 +223,7 @@ mod tests {
     use super::*;
     use crate::DeleteRecordsResponseData;
     use crate::MetadataResponseData;
-    use crate::common::ApiKeys;
+    use crate::common::protocol::ApiKeys;
     use crate::common::requests::{DeleteRecordsResponse, MetadataResponse};
     use crate::delete_records_response_data::{DeleteRecordsPartitionResult, DeleteRecordsTopicResult};
     use crate::metadata_response_data::{MetadataResponsePartition, MetadataResponseTopic};

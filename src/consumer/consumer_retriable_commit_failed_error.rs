@@ -30,7 +30,7 @@ use crate::common::error::{ErrorCode, ErrorHierarchy, ErrorMessage, ErrorSource}
 ///   `ApiException` -> `KafkaException`
 ///
 /// Being its own class is what makes it retriable. The previous mapping routed
-/// it through [`Errors::RequestTimedOut`](crate::common::Errors::RequestTimedOut)
+/// it through [`Errors::RequestTimedOut`](crate::common::protocol::Errors::RequestTimedOut)
 /// solely to borrow that code's retriability, which also made it
 /// indistinguishable from a real `TimeoutException`.
 ///

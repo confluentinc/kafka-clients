@@ -458,8 +458,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::Errors;
     use crate::common::internals::KafkaFutureImpl;
+    use crate::common::protocol::Errors;
     use std::sync::Mutex;
 
     #[tokio::test]

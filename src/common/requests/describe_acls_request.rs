@@ -232,7 +232,7 @@ mod tests {
         };
         let mut request = AbstractRequest::DescribeAcls(r);
         let bytes = request.serialize().unwrap();
-        let mut readable = crate::common::ByteBufferAccessor::new(bytes.into_buffer());
+        let mut readable = crate::common::protocol::ByteBufferAccessor::new(bytes.into_buffer());
         let parsed = DescribeAclsRequest::parse(&mut readable, version).unwrap();
         assert_eq!(parsed.filter(), sample_filter());
     }

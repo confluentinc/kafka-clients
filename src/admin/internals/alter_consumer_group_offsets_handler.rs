@@ -20,7 +20,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::OffsetCommitRequestData;
-use crate::common::Errors;
+use crate::common::protocol::Errors;
 use crate::common::requests::{ConcreteResponse, CoordinatorType, RequestBuilder, offset_commit_request};
 use crate::common::utils::LogContext;
 use crate::common::{Error, Node, TopicPartition};

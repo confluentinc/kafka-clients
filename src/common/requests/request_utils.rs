@@ -16,8 +16,8 @@
 //!
 //! Corresponds to `org.apache.kafka.common.requests.RequestUtils`.
 
-use crate::common::ByteBufferAccessor;
 use crate::common::Error;
+use crate::common::protocol::ByteBufferAccessor;
 use crate::common::protocol::Message;
 use crate::common::protocol::ObjectSerializationCache;
 

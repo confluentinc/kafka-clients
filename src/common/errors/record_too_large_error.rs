@@ -17,8 +17,8 @@
 use std::collections::HashMap;
 use std::fmt;
 
-use crate::common::Errors;
 use crate::common::error::{ErrorCode, ErrorHierarchy, ErrorMessage, ErrorName, ErrorSource};
+use crate::common::protocol::Errors;
 use crate::common::{Error, TopicPartition};
 
 /// The request included a message larger than the max message size the
@@ -66,7 +66,7 @@ impl RecordTooLargeError {
     }
 
     /// Create the error with the code's default message — used by
-    /// [`Errors::error`](crate::common::Errors::error).
+    /// [`Errors::error`](crate::common::protocol::Errors::error).
     #[doc(alias = "org.apache.kafka.common.errors.RecordTooLargeException#RecordTooLargeException")]
     pub fn with_default_message() -> Self {
         Self::new(Errors::MessageTooLarge.message())

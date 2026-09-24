@@ -66,7 +66,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use confluent_kafka::admin::{DescribeFeaturesOptions, FeatureUpdate, UpdateFeaturesOptions, UpgradeType};
-use confluent_kafka::common::Errors;
+use confluent_kafka::common::protocol::Errors;
 
 use crate::common::admin_backend::{AdminBackend, admin_for};
 use crate::common::backend_factory::AdminBackendFactory;

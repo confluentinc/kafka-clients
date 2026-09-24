@@ -37,9 +37,9 @@
 use std::sync::Arc;
 
 use crate::common::Error;
-use crate::common::Errors;
 use crate::common::error::ErrorMessage;
 use crate::common::errors::GroupAuthorizationError;
+use crate::common::protocol::Errors;
 use crate::consumer::ConsumerConfig;
 use crate::consumer::internals::events::BackgroundEvent;
 use crate::consumer::internals::events::BackgroundEventHandler;

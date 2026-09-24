@@ -286,7 +286,7 @@ mod tests {
         let mut builder = Builder::new(&alterations, false);
         let mut request = builder.build().unwrap();
         let bytes = request.serialize().unwrap();
-        let mut readable = crate::common::ByteBufferAccessor::new(bytes.into_buffer());
+        let mut readable = crate::common::protocol::ByteBufferAccessor::new(bytes.into_buffer());
         let parsed = AlterClientQuotasRequest::parse(&mut readable, version).unwrap();
         assert_eq!(parsed.entries(), alterations);
     }
@@ -389,7 +389,7 @@ mod tests {
         let mut builder = Builder::new(&alterations, false);
         let mut request = builder.build().unwrap();
         let bytes = request.serialize().unwrap();
-        let mut readable = crate::common::ByteBufferAccessor::new(bytes.into_buffer());
+        let mut readable = crate::common::protocol::ByteBufferAccessor::new(bytes.into_buffer());
         let parsed = AlterClientQuotasRequest::parse(&mut readable, version).unwrap();
         let decoded = parsed.entries();
         assert_eq!(decoded.len(), 2);

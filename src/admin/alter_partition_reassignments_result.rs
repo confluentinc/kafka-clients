@@ -61,8 +61,8 @@ impl AlterPartitionReassignmentsResult {
 mod tests {
     use super::*;
     use crate::common::Error;
-    use crate::common::Errors;
     use crate::common::internals::KafkaFutureImpl;
+    use crate::common::protocol::Errors;
 
     #[tokio::test]
     async fn all_succeeds_when_each_completes() {

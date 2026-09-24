@@ -137,7 +137,7 @@ impl ApiVersions {
     pub fn latest_usable_version_in_range(
         &self,
         node_id: &str,
-        api_key: &crate::common::ApiKeys,
+        api_key: &crate::common::protocol::ApiKeys,
         oldest_allowed_version: i16,
         latest_allowed_version: i16,
     ) -> Option<Result<i16, crate::common::Error>> {

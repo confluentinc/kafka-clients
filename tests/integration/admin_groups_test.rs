@@ -107,7 +107,7 @@ use confluent_kafka::admin::{
     DeleteConsumerGroupsOptions, DescribeClassicGroupsOptions, DescribeClusterOptions, DescribeConsumerGroupsOptions,
     ListGroupsOptions, MemberToRemove, RemoveMembersFromConsumerGroupOptions,
 };
-use confluent_kafka::common::Errors;
+use confluent_kafka::common::protocol::Errors;
 use confluent_kafka::common::serialization::Deserializer;
 use confluent_kafka::common::{ClassicGroupState, Error, GroupState, GroupType, Node, TopicPartition};
 use confluent_kafka::consumer::{Consumer, ConsumerConfig, KafkaConsumer, OffsetAndMetadata};

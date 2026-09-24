@@ -22,8 +22,8 @@ use std::sync::Arc;
 
 use crate::admin::ListOffsetsOptions;
 use crate::admin::ListOffsetsResultInfo;
-use crate::common::Errors;
 use crate::common::errors::ApiError;
+use crate::common::protocol::Errors;
 use crate::common::requests::{
     ConcreteResponse, ListOffsetsRequest, ListOffsetsRequestBuilderOptionsBuilder, ListOffsetsResponse, RequestBuilder,
     list_offsets_request,

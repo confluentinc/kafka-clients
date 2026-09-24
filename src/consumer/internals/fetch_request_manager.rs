@@ -33,8 +33,8 @@ use std::sync::{Arc, Mutex};
 use log::trace;
 use tokio::sync::{Notify, mpsc, oneshot};
 
-use crate::common::Errors;
 use crate::common::memory::BufferSupplier;
+use crate::common::protocol::Errors;
 use crate::common::requests::ConcreteResponse;
 use crate::common::requests::FetchResponse;
 use crate::common::{Error, Node};
@@ -557,7 +557,7 @@ mod tests {
     use crate::common::IsolationLevel;
     use crate::common::TopicPartition;
     use crate::common::internals::ClusterResourceListeners;
-    use crate::consumer::AutoOffsetResetStrategy;
+    use crate::consumer::internals::AutoOffsetResetStrategy;
     use std::collections::HashSet;
     use std::time::{Duration, Instant};
 
@@ -796,7 +796,7 @@ mod tests {
     /// `build_list_offsets_client_response` helper in
     /// `offsets_request_manager.rs`.
     fn build_fetch_client_response(response: Option<FetchResponse>) -> crate::ClientResponse {
-        use crate::common::ApiKeys;
+        use crate::common::protocol::ApiKeys;
         use crate::common::requests::{RequestHeader, RequestHeaderOptionsBuilder};
         let header = RequestHeader::with_options(
             RequestHeaderOptionsBuilder::new()
@@ -853,7 +853,9 @@ mod tests {
         let unsent = result.unsent_requests.into_iter().next().unwrap();
 
         // Fire a transport-level retriable failure through the handler.
-        unsent.handler().on_failure(0, Error::new(crate::common::Errors::NetworkError));
+        unsent
+            .handler()
+            .on_failure(0, Error::new(crate::common::protocol::Errors::NetworkError));
 
         // Wait deterministically for the drain on the next `poll(now)`
         // to observe the failure and remove node 0 from the pending set.
@@ -984,7 +986,7 @@ mod round_trip {
     use crate::common::requests::FetchResponse;
     use crate::common::serialization::Deserializer;
     use crate::common::{Error, IsolationLevel, Node, TopicPartition, Uuid};
-    use crate::consumer::AutoOffsetResetStrategy;
+    use crate::consumer::internals::AutoOffsetResetStrategy;
     use crate::consumer::internals::ConsumerMetadata;
     use crate::consumer::internals::Deserializers;
     use crate::consumer::internals::FetchBuffer;

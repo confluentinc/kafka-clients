@@ -391,12 +391,12 @@ impl ApiKeys {
     }
 
     /// Returns the response schema for this API at the given version.
-    pub fn response_schema(&self, api_version: i16) -> crate::common::protocol::Schema {
+    pub fn response_schema(&self, api_version: i16) -> crate::common::protocol::types::Schema {
         self.message_type.response_schema(api_version)
     }
 
     /// Returns the request schema for this API at the given version.
-    pub fn request_schema(&self, api_version: i16) -> crate::common::protocol::Schema {
+    pub fn request_schema(&self, api_version: i16) -> crate::common::protocol::types::Schema {
         self.message_type.request_schema(api_version)
     }
 

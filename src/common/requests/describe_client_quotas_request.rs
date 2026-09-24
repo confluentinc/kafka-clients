@@ -258,7 +258,7 @@ mod tests {
         let mut builder = Builder::new(&filter);
         let mut request = builder.build().unwrap();
         let bytes = request.serialize().unwrap();
-        let mut readable = crate::common::ByteBufferAccessor::new(bytes.into_buffer());
+        let mut readable = crate::common::protocol::ByteBufferAccessor::new(bytes.into_buffer());
         let parsed = DescribeClientQuotasRequest::parse(&mut readable, version).unwrap();
         assert_eq!(parsed.filter().unwrap(), filter);
     }

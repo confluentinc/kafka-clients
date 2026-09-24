@@ -461,8 +461,8 @@ impl InFlightRequests {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::ApiKeys;
     use crate::common::network::{ByteBufferSend, NetworkSend};
+    use crate::common::protocol::ApiKeys;
     use crate::common::requests::RequestHeaderOptionsBuilder;
 
     fn add_request(

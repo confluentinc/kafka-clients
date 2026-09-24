@@ -35,8 +35,9 @@ use ambassador::Delegate;
 use super::error::{ErrorCode, ErrorHierarchy, ErrorMessage, ErrorName, ErrorSource};
 // Ambassador exports its generated helper macros beside the trait; a
 // `#[delegate]` outside the trait's own module has to import them.
+use super::Error;
 use super::error::ambassador_impl_ErrorMessage;
-use super::{Error, Errors};
+use super::protocol::Errors;
 
 /// Base Kafka error with common fields shared by all error types.
 ///
@@ -57,7 +58,7 @@ use super::{Error, Errors};
 ///
 /// ```
 /// use confluent_kafka::common::KafkaError;
-/// use confluent_kafka::common::Errors;
+/// use confluent_kafka::common::protocol::Errors;
 ///
 /// let err = KafkaError::new(Errors::RequestTimedOut);
 /// assert_eq!(err.code(), 7);
@@ -69,7 +70,7 @@ use super::{Error, Errors};
 ///
 /// ```
 /// use confluent_kafka::common::Error;
-/// use confluent_kafka::common::Errors;
+/// use confluent_kafka::common::protocol::Errors;
 ///
 /// assert!(Error::new(Errors::RequestTimedOut).is_retriable_error());
 /// ```

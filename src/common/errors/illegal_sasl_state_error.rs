@@ -14,8 +14,8 @@
 
 //! Translated from `org.apache.kafka.common.errors.IllegalSaslStateException`.
 
-use crate::common::Errors;
 use crate::common::error::kafka_error_class;
+use crate::common::protocol::Errors;
 
 kafka_error_class! {
     /// Request is not valid given the current SASL state.

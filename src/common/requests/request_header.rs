@@ -380,7 +380,7 @@ impl fmt::Display for RequestHeader {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::Writable;
+    use crate::common::protocol::Writable;
 
     /// Helper: serializes a RequestHeader into a ByteBufferAccessor for parsing tests.
     /// Equivalent to Java's `RequestTestUtils.serializeRequestHeader`.

@@ -32,7 +32,7 @@ use super::ListenerName;
 use super::PlaintextAuthenticator;
 use super::SslTransportLayer;
 
-use crate::common::security::SslFactory;
+use crate::common::security::ssl::SslFactory;
 
 use std::io;
 use std::sync::Arc;

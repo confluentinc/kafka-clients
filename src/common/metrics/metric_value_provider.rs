@@ -15,7 +15,8 @@
 //! Super-interface for `Measurable` or `Gauge` that provides metric values
 //! (`org.apache.kafka.common.metrics.MetricValueProvider`).
 
-use crate::common::metrics::{Gauge, Measurable, MetricConfig, MetricValue};
+use crate::common::MetricValue;
+use crate::common::metrics::{Gauge, Measurable, MetricConfig};
 
 /// Super-interface for [`Measurable`] or [`Gauge`] that provides metric values.
 ///

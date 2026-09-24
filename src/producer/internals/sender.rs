@@ -55,7 +55,6 @@ use crate::ClientResponse;
 use crate::KafkaClient;
 use crate::NetworkClient;
 use crate::common::Error;
-use crate::common::Errors;
 use crate::common::Node;
 use crate::common::TopicPartition;
 use crate::common::Uuid;
@@ -63,6 +62,7 @@ use crate::common::errors::AuthenticationError;
 use crate::common::metrics::stats::{Avg, Max, Meter};
 use crate::common::metrics::{ClosureMeasurable, Sensor};
 use crate::common::network;
+use crate::common::protocol::Errors;
 use crate::common::record::internal::RecordBatch;
 use crate::common::requests::ConcreteResponse;
 use crate::common::requests::CoordinatorType;
@@ -3014,7 +3014,7 @@ mod tests {
         let api_versions = Arc::new(crate::ApiVersions::new());
         let mut init_producer_id = ApiVersion::new();
         init_producer_id
-            .set_api_key(crate::common::ApiKeys::INIT_PRODUCER_ID.id())
+            .set_api_key(crate::common::protocol::ApiKeys::INIT_PRODUCER_ID.id())
             .set_min_version(0)
             .set_max_version(6);
         api_versions.update(
@@ -5270,7 +5270,7 @@ mod tests {
         error: Option<Errors>,
     ) -> ClientResponse {
         use crate::InitProducerIdResponseData;
-        use crate::common::ApiKeys;
+        use crate::common::protocol::ApiKeys;
         use crate::common::requests::{InitProducerIdResponse, RequestHeader, RequestHeaderOptionsBuilder};
 
         let header = RequestHeader::with_options(
@@ -6107,7 +6107,7 @@ mod tests {
         );
         assert_eq!(
             *ctx.sender.client().requests().front().expect("in flight").api_key(),
-            crate::common::ApiKeys::INIT_PRODUCER_ID
+            crate::common::protocol::ApiKeys::INIT_PRODUCER_ID
         );
         assert!(ctx.sender.has_in_flight_request());
         assert_eq!(
@@ -6147,7 +6147,7 @@ mod tests {
         ctx.sender.run_once().await.expect("run_once");
         assert_eq!(
             *ctx.sender.client().requests().front().expect("in flight").api_key(),
-            crate::common::ApiKeys::PRODUCE
+            crate::common::protocol::ApiKeys::PRODUCE
         );
         let in_flight = ctx.sender.in_flight_batches(&tp0);
         assert_eq!(in_flight.len(), 1);
@@ -9182,7 +9182,7 @@ mod tests {
         sequence: i32,
         is_transactional: bool,
     ) -> crate::RequestMatcher {
-        use crate::common::record::MemoryRecords;
+        use crate::common::record::internal::MemoryRecords;
         use crate::common::requests::AbstractRequest;
 
         let tp = tp.clone();
@@ -10632,7 +10632,7 @@ mod tests {
     /// re-publish features mid-run pass their own epoch.
     fn txn_mgr_test_manager(transaction_v2_enabled: bool) -> Arc<Mutex<TransactionManager>> {
         use crate::api_versions_response_data::{ApiVersion, FinalizedFeatureKey, SupportedFeatureKey};
-        use crate::common::ApiKeys;
+        use crate::common::protocol::ApiKeys;
 
         fn api_version(api_key: &ApiKeys, max_version: i16) -> ApiVersion {
             let mut version = ApiVersion::new();
@@ -11404,7 +11404,10 @@ mod tests {
     /// the mid-test `apiVersions.update("0", new NodeApiVersions(..))` several entries in
     /// this group perform to cap `InitProducerId` / `Produce` / `EndTxn` below the
     /// versions the fixture installed.
-    fn update_node0_api_versions(ctx: &SenderTestContext, versions: &[(&'static crate::common::ApiKeys, i16)]) {
+    fn update_node0_api_versions(
+        ctx: &SenderTestContext,
+        versions: &[(&'static crate::common::protocol::ApiKeys, i16)],
+    ) {
         use crate::api_versions_response_data::ApiVersion;
 
         let entries: Vec<ApiVersion> = versions
@@ -12473,7 +12476,7 @@ mod tests {
     /// (Java 2155-2186).
     #[tokio::test]
     async fn test_invalid_producer_epoch_from_produce() {
-        use crate::common::ApiKeys;
+        use crate::common::protocol::ApiKeys;
         use crate::producer::internals::ProducerTestUtils;
 
         let mut ctx = txn_mgr_test_context(false);
@@ -13560,7 +13563,7 @@ mod tests {
     /// `ApiVersions`, and nothing in the assertions depends on it.
     #[tokio::test]
     async fn test_transition_to_fatal_error_when_retried_batch_is_expired() {
-        use crate::common::ApiKeys;
+        use crate::common::protocol::ApiKeys;
         use crate::producer::internals::ProducerTestUtils;
 
         let mut ctx = txn_mgr_test_context(false);
@@ -13723,7 +13726,7 @@ mod tests {
     /// explains.
     #[tokio::test]
     async fn test_abort_transaction_and_reuse_sequence_number_on_error() {
-        use crate::common::ApiKeys;
+        use crate::common::protocol::ApiKeys;
         use crate::producer::internals::ProducerTestUtils;
 
         let mut ctx = txn_mgr_test_context(false);
@@ -13809,7 +13812,7 @@ mod tests {
     /// Java's three `apiVersions` caps are load-bearing.
     #[tokio::test]
     async fn test_abort_transaction_and_reset_sequence_number_on_unknown_producer_id() {
-        use crate::common::ApiKeys;
+        use crate::common::protocol::ApiKeys;
         use crate::producer::internals::ProducerTestUtils;
 
         let mut ctx = txn_mgr_test_context(false);
@@ -14395,7 +14398,7 @@ mod tests {
         init_producer_id_max_version: i16,
     ) -> SenderTestContext {
         use crate::api_versions_response_data::ApiVersion;
-        use crate::common::ApiKeys;
+        use crate::common::protocol::ApiKeys;
 
         let mut init_producer_id = ApiVersion::new();
         init_producer_id

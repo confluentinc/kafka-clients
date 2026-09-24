@@ -121,7 +121,7 @@ impl FetchMetricsAggregator {
 mod tests {
     use super::*;
     use crate::common::Metric;
-    use crate::common::metrics::MetricValue;
+    use crate::common::MetricValue;
 
     /// The aggregator records the fetch-level bytes/records exactly once, after
     /// every partition of the response has reported via `record`.

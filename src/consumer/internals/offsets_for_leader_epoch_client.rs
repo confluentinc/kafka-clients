@@ -29,9 +29,9 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::common::Errors;
 use crate::common::TopicPartition;
 use crate::common::errors::TopicAuthorizationError;
+use crate::common::protocol::Errors;
 use crate::common::record::internal::RecordBatch;
 use crate::common::requests::OffsetsForLeaderEpochResponse;
 use crate::common::requests::offsets_for_leader_epoch_request;
@@ -241,7 +241,7 @@ mod tests {
         assert_eq!(topic_b.partitions.len(), 1);
         assert_eq!(topic_b.partitions[0].leader_epoch, 2);
         assert_eq!(topic_b.partitions[0].current_leader_epoch, 7);
-        assert_eq!(builder.api_key(), &crate::common::ApiKeys::OFFSET_FOR_LEADER_EPOCH);
+        assert_eq!(builder.api_key(), &crate::common::protocol::ApiKeys::OFFSET_FOR_LEADER_EPOCH);
     }
 
     /// Verifies `handle_response` returns end offsets for successful entries

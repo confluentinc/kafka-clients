@@ -292,14 +292,14 @@ impl ConsumerHandle {
     /// [`AsyncKafkaConsumer::seek_to_beginning`].
     pub async fn seek_to_beginning(&self, partitions: &[TopicPartition]) -> Result<(), Error> {
         self.async_state()?
-            .seek_with_reset_strategy(partitions, crate::consumer::AutoOffsetResetStrategy::EARLIEST)
+            .seek_with_reset_strategy(partitions, crate::consumer::internals::AutoOffsetResetStrategy::EARLIEST)
             .await
     }
 
     /// [`AsyncKafkaConsumer::seek_to_end`].
     pub async fn seek_to_end(&self, partitions: &[TopicPartition]) -> Result<(), Error> {
         self.async_state()?
-            .seek_with_reset_strategy(partitions, crate::consumer::AutoOffsetResetStrategy::LATEST)
+            .seek_with_reset_strategy(partitions, crate::consumer::internals::AutoOffsetResetStrategy::LATEST)
             .await
     }
 
@@ -525,7 +525,7 @@ impl AsyncConsumerHandleState {
     async fn seek_with_reset_strategy(
         &self,
         partitions: &[TopicPartition],
-        strategy: crate::consumer::AutoOffsetResetStrategy,
+        strategy: crate::consumer::internals::AutoOffsetResetStrategy,
     ) -> Result<(), Error> {
         let set: HashSet<TopicPartition> = partitions.iter().cloned().collect();
         let deadline_ms = self.default_api_timeout_deadline_ms();
@@ -1726,7 +1726,7 @@ where
             // here. "Failed to construct kafka consumer" is the string users
             // match on.
             Error::KafkaError(crate::common::KafkaError::with_message_source(
-                crate::common::Errors::UnknownServerError,
+                crate::common::protocol::Errors::UnknownServerError,
                 "Failed to construct kafka consumer",
                 err,
             ))
@@ -1749,7 +1749,7 @@ where
         use crate::common::internals::ClusterResourceListeners;
         use crate::common::network::ChannelBuilders;
         use crate::common::network::Selector;
-        use crate::consumer::AutoOffsetResetStrategy;
+        use crate::consumer::internals::AutoOffsetResetStrategy;
         use crate::consumer::internals::CommitRequestManager;
         use crate::consumer::internals::ConsumerHeartbeatRequestManager;
         use crate::consumer::internals::ConsumerMembershipManager;
@@ -3506,7 +3506,7 @@ where
                     // to the user), and the message text is byte-identical to
                     // Java's only literal for this skip.
                     let _ = ack.send(Err(Error::with_message(
-                        crate::common::Errors::UnknownServerError,
+                        crate::common::protocol::Errors::UnknownServerError,
                         "Assignment event skipped because consumer is unsubscribing",
                     )));
                     log::debug!("Skipped processing PartitionsAssigned during unsubscribe/close");
@@ -4861,13 +4861,13 @@ where
 
     /// Java: `void seekToBeginning(Collection<TopicPartition>)`.
     pub async fn seek_to_beginning(&mut self, partitions: &[TopicPartition]) -> Result<(), Error> {
-        self.seek_with_reset_strategy(partitions, crate::consumer::AutoOffsetResetStrategy::EARLIEST)
+        self.seek_with_reset_strategy(partitions, crate::consumer::internals::AutoOffsetResetStrategy::EARLIEST)
             .await
     }
 
     /// Java: `void seekToEnd(Collection<TopicPartition>)`.
     pub async fn seek_to_end(&mut self, partitions: &[TopicPartition]) -> Result<(), Error> {
-        self.seek_with_reset_strategy(partitions, crate::consumer::AutoOffsetResetStrategy::LATEST)
+        self.seek_with_reset_strategy(partitions, crate::consumer::internals::AutoOffsetResetStrategy::LATEST)
             .await
     }
 
@@ -4876,7 +4876,7 @@ where
     async fn seek_with_reset_strategy(
         &mut self,
         partitions: &[TopicPartition],
-        strategy: crate::consumer::AutoOffsetResetStrategy,
+        strategy: crate::consumer::internals::AutoOffsetResetStrategy,
     ) -> Result<(), Error> {
         self.ensure_open()?;
         let set: std::collections::HashSet<TopicPartition> = partitions.iter().cloned().collect();
@@ -6167,7 +6167,7 @@ mod tests {
 
     use crate::common::internals::ClusterResourceListeners;
     use crate::common::serialization::Deserializer;
-    use crate::consumer::AutoOffsetResetStrategy;
+    use crate::consumer::internals::AutoOffsetResetStrategy;
     use crate::consumer::internals::events::ApplicationEventEnvelope;
     use crate::consumer::internals::events::CompletableEventReaper;
 
@@ -7370,7 +7370,7 @@ mod tests {
     /// the read-only `group_metadata()` accessor.
     #[tokio::test]
     async fn group_metadata_groupless_commit_sync_emits_exact_java_message() {
-        use crate::common::Errors;
+        use crate::common::protocol::Errors;
         let (mut consumer, _handles) = make_test_consumer_with_channels();
         consumer.group_id = None;
         let err = consumer.commit_sync().await.expect_err("must err");
@@ -7523,7 +7523,7 @@ mod tests {
     /// `KafkaError` variant carrying `Errors::InvalidGroupId` (Issue 16).
     #[tokio::test]
     async fn subscribe_subscription_pattern_without_group_id_errors() {
-        use crate::common::Errors;
+        use crate::common::protocol::Errors;
         let (mut consumer, _handles) = make_test_consumer_with_channels();
         consumer.group_id = None;
         let err = consumer
@@ -8058,7 +8058,7 @@ mod tests {
     /// `canSkipUpdateFetchPositions` could not be translated.
     #[tokio::test]
     async fn collect_fetch_propagates_a_pending_validate_positions_error() {
-        use crate::common::Errors;
+        use crate::common::protocol::Errors;
         let (consumer, handles) = make_test_consumer_with_channels();
         consumer
             .positions_validator
@@ -9140,7 +9140,7 @@ mod tests {
     /// `testCommitSyncWithoutGroupId`.
     #[tokio::test]
     async fn commit_sync_without_group_id_errors() {
-        use crate::common::Errors;
+        use crate::common::protocol::Errors;
         let (mut consumer, _handles) = make_test_consumer_with_channels();
         consumer.group_id = None;
         let err = consumer.commit_sync().await.expect_err("must err");
@@ -9256,7 +9256,7 @@ mod tests {
     /// `Error::invalid_group_id(...)` (Issue 16).
     #[tokio::test]
     async fn committed_without_group_id_errors() {
-        use crate::common::Errors;
+        use crate::common::protocol::Errors;
         let (mut consumer, _handles) = make_test_consumer_with_channels();
         consumer.group_id = None;
         let tp = TopicPartition::new("t".to_string(), 0);
@@ -11331,7 +11331,7 @@ mod tests {
         // Wrapped as Java wraps every constructor failure.
         assert_eq!("Failed to construct kafka consumer", err.message());
         let cause = err.source().expect("the InvalidGroupId is the cause");
-        assert_eq!(cause.error(), crate::common::Errors::InvalidGroupId);
+        assert_eq!(cause.error(), crate::common::protocol::Errors::InvalidGroupId);
         assert_eq!(
             "The configured group.id should not be an empty string or whitespace.",
             cause.message()

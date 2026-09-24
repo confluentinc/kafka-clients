@@ -331,7 +331,7 @@ mod tests {
     use crate::common::IsolationLevel;
     use crate::common::internals::ClusterResourceListeners;
     use crate::common::memory::BufferSupplier;
-    use crate::consumer::AutoOffsetResetStrategy;
+    use crate::consumer::internals::AutoOffsetResetStrategy;
     use crate::consumer::internals::ConsumerMetadata;
     use crate::consumer::internals::FetchBuffer;
     use crate::consumer::internals::FetchConfig;

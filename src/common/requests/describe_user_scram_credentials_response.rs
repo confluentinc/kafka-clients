@@ -167,7 +167,7 @@ mod tests {
             0x00, // result tagged fields
             0x00, // response tagged fields
         ];
-        let mut readable = crate::common::ByteBufferAccessor::new(bytes);
+        let mut readable = crate::common::protocol::ByteBufferAccessor::new(bytes);
         let parsed = DescribeUserScramCredentialsResponse::parse(&mut readable, 0).unwrap();
         assert_eq!(parsed.data().throttle_time_ms, 0);
         assert_eq!(parsed.data().results.len(), 1);

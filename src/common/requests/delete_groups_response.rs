@@ -177,7 +177,7 @@ mod tests {
             0x00, 0x01, 0x67, // group_id "g"
             0x00, 0x44, // error_code 68
         ];
-        let mut readable = crate::common::ByteBufferAccessor::new(bytes);
+        let mut readable = crate::common::protocol::ByteBufferAccessor::new(bytes);
         let response = DeleteGroupsResponse::parse(&mut readable, 0).unwrap();
         assert_eq!(response.data().throttle_time_ms, 0);
         assert_eq!(response.data().results.len(), 1);

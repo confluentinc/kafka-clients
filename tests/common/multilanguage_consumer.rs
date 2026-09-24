@@ -47,13 +47,13 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use confluent_kafka::common::header::{RecordHeader, RecordHeaders};
-use confluent_kafka::common::metrics::{ClosureGauge, MetricConfig, MetricValueProvider, SystemTime};
+use confluent_kafka::common::metrics::{ClosureGauge, KafkaMetric, MetricConfig, MetricValueProvider, SystemTime};
 use confluent_kafka::common::record::TimestampType;
 use confluent_kafka::common::{Error, MetricName, MetricValue, PartitionInfo, TopicPartition};
 use confluent_kafka::consumer::{
     CloseOptions, Consumer, ConsumerGroupMetadata, ConsumerHandle, ConsumerRebalanceListener, ConsumerRecord,
-    ConsumerRecordOptionsBuilder, ConsumerRecords, KafkaMetric, OffsetAndMetadata, OffsetAndTimestamp,
-    OffsetCommitCallback, SubscriptionPattern,
+    ConsumerRecordOptionsBuilder, ConsumerRecords, OffsetAndMetadata, OffsetAndTimestamp, OffsetCommitCallback,
+    SubscriptionPattern,
 };
 use indexmap::IndexMap;
 use multilanguage_test_server::proto::consumer_service_client::ConsumerServiceClient;

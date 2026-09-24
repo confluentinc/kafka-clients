@@ -20,9 +20,9 @@ use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 
 use crate::api_versions_response_data::{ApiVersion, FinalizedFeatureKey, SupportedFeatureKey};
-use crate::common::ApiKeys;
 use crate::common::Error;
 use crate::common::feature::SupportedVersionRange;
+use crate::common::protocol::ApiKeys;
 use crate::common::requests::ApiVersionsResponse;
 
 /// An internal class which represents the API versions supported by a particular node.

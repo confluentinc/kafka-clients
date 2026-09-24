@@ -542,10 +542,10 @@ impl Stat for CompoundStatBox {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::Errors;
     use crate::common::metrics::MockTime;
     use crate::common::metrics::stats::{CumulativeCount, Value};
     use crate::common::metrics::{Quota, SystemTime};
+    use crate::common::protocol::Errors;
     use std::collections::BTreeMap;
 
     fn level_id(level: RecordingLevel) -> i16 {

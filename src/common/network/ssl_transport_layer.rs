@@ -872,7 +872,7 @@ mod tests {
     use super::*;
     use crate::common::config::SslConfigs;
     use crate::common::network::is_authentication_error;
-    use crate::common::security::SslFactory;
+    use crate::common::security::ssl::SslFactory;
     use std::sync::Arc;
 
     fn create_test_factory() -> SslFactory {

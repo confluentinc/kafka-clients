@@ -228,7 +228,7 @@ mod tests {
         let version = ApiKeys::CREATE_ACLS.latest_version();
         let mut request = AbstractRequest::CreateAcls(CreateAclsRequest::new(data, version));
         let bytes = request.serialize().unwrap();
-        let mut readable = crate::common::ByteBufferAccessor::new(bytes.into_buffer());
+        let mut readable = crate::common::protocol::ByteBufferAccessor::new(bytes.into_buffer());
         let parsed = CreateAclsRequest::parse(&mut readable, version).unwrap();
         assert_eq!(parsed.acl_creations().len(), 1);
         assert_eq!(CreateAclsRequest::acl_binding(&parsed.acl_creations()[0]).unwrap(), binding());

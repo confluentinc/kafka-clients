@@ -79,7 +79,7 @@ use confluent_kafka::admin::{
     CreateDelegationTokenOptions, DescribeDelegationTokenOptions, ExpireDelegationTokenOptions,
     RenewDelegationTokenOptions,
 };
-use confluent_kafka::common::Errors;
+use confluent_kafka::common::protocol::Errors;
 use confluent_kafka::common::security::auth::KafkaPrincipal;
 
 use crate::common::admin_backend::{AdminBackend, admin_for};

@@ -15,7 +15,7 @@
 //! Integration tests for generated message serialization and deserialization.
 //! Tests verify that read() and write() methods work correctly for all generated messages.
 
-use confluent_kafka::common::ByteBufferAccessor;
+use confluent_kafka::common::protocol::ByteBufferAccessor;
 use confluent_kafka::*; // Import all generated message modules
 use std::io;
 

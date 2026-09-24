@@ -19,7 +19,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::common::Errors;
+use crate::common::protocol::Errors;
 use crate::common::requests::{ConcreteResponse, CoordinatorType, RequestBuilder, leave_group_request};
 use crate::common::utils::LogContext;
 use crate::common::{Error, Node};

@@ -14,8 +14,8 @@
 
 //! Translated from `org.apache.kafka.common.errors.FencedLeaderEpochException`.
 
-use crate::common::Errors;
 use crate::common::error::kafka_error_class;
+use crate::common::protocol::Errors;
 
 kafka_error_class! {
     /// The leader epoch in the request is older than the epoch on the broker.

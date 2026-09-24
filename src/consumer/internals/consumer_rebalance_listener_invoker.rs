@@ -282,7 +282,7 @@ mod tests {
     use async_trait::async_trait;
 
     use crate::common::TopicPartition;
-    use crate::consumer::AutoOffsetResetStrategy;
+    use crate::consumer::internals::AutoOffsetResetStrategy;
 
     use super::*;
 

@@ -274,7 +274,8 @@ mod tests {
     use crate::common::protocol::{ApiKeys, Errors};
     use crate::common::requests::MetadataResponse;
     use crate::common::{Node, TopicPartition, Uuid};
-    use crate::consumer::{AutoOffsetResetStrategy, SubscriptionPattern};
+    use crate::consumer::SubscriptionPattern;
+    use crate::consumer::internals::AutoOffsetResetStrategy;
     use crate::metadata_response_data::{MetadataResponseBroker, MetadataResponseTopic};
 
     fn topics_set(metadata: &ConsumerMetadata) -> HashSet<String> {

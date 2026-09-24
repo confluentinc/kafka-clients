@@ -28,7 +28,6 @@ mod message_util;
 mod object_serialization_cache;
 mod readable;
 pub mod types;
-mod varint;
 mod writable;
 
 pub use api_keys::ApiKeys;
@@ -41,6 +40,4 @@ pub use message_size_accumulator::MessageSizeAccumulator;
 pub use message_util::MessageUtil;
 pub use object_serialization_cache::ObjectSerializationCache;
 pub use readable::Readable;
-pub use types::{BoundField, Field, RawTaggedField, Schema, SchemaType};
-pub use varint::ByteUtils;
 pub use writable::Writable;

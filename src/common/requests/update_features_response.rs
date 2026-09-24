@@ -199,7 +199,7 @@ mod tests {
         let response = UpdateFeaturesResponse::create_with_errors(Errors::None, None, &updates, 5);
         let mut concrete = super::super::ConcreteResponse::UpdateFeatures(response);
         let bytes = concrete.serialize(1).unwrap();
-        let mut readable = crate::common::ByteBufferAccessor::new(bytes.into_buffer());
+        let mut readable = crate::common::protocol::ByteBufferAccessor::new(bytes.into_buffer());
         let parsed = UpdateFeaturesResponse::parse(&mut readable, 1).unwrap();
         assert_eq!(parsed.data().throttle_time_ms, 5);
         assert_eq!(parsed.data().error_code, Errors::None.code());

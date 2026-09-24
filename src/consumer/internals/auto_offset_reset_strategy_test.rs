@@ -29,7 +29,7 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use confluent_kafka::consumer::AutoOffsetResetStrategy;
+use crate::consumer::internals::AutoOffsetResetStrategy;
 
 // `ListOffsetsRequest.EARLIEST_TIMESTAMP` and `LATEST_TIMESTAMP` are
 // `pub(crate)` inside the `internals` module; we duplicate the protocol

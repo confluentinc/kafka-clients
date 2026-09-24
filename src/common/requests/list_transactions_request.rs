@@ -154,7 +154,7 @@ mod tests {
         let mut builder = Builder::new(data);
         let mut request = builder.build_version(1).unwrap();
         let bytes = request.serialize().unwrap();
-        let mut readable = crate::common::ByteBufferAccessor::new(bytes.into_buffer());
+        let mut readable = crate::common::protocol::ByteBufferAccessor::new(bytes.into_buffer());
         let parsed = ListTransactionsRequest::parse(&mut readable, 1).unwrap();
         assert_eq!(parsed.data().state_filters, vec!["Ongoing".to_string()]);
         assert_eq!(parsed.data().producer_id_filters, vec![1, 2]);

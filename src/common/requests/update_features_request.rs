@@ -302,7 +302,7 @@ mod tests {
         let mut builder = Builder::new(data);
         let mut request = builder.build_version(1).unwrap();
         let bytes = request.serialize().unwrap();
-        let mut readable = crate::common::ByteBufferAccessor::new(bytes.into_buffer());
+        let mut readable = crate::common::protocol::ByteBufferAccessor::new(bytes.into_buffer());
         let parsed = UpdateFeaturesRequest::parse(&mut readable, 1).unwrap();
         assert_eq!(parsed.data().timeout_ms, 100);
         assert!(parsed.data().validate_only);

@@ -193,7 +193,7 @@ mod tests {
         let mut request =
             AbstractRequest::ExpireDelegationToken(ExpireDelegationTokenRequest::new(request_data(), version));
         let bytes = request.serialize().unwrap();
-        let mut readable = crate::common::ByteBufferAccessor::new(bytes.into_buffer());
+        let mut readable = crate::common::protocol::ByteBufferAccessor::new(bytes.into_buffer());
         let parsed = ExpireDelegationTokenRequest::parse(&mut readable, version).unwrap();
         assert_eq!(parsed.data().hmac, b"the-hmac");
         assert_eq!(parsed.data().expiry_time_period_ms, -1);

@@ -336,7 +336,7 @@ impl OffsetsManagerShared {
             tokio::spawn(async move {
                 let result = match response_rx.await {
                     Ok(r) => r,
-                    Err(_) => Err(Error::new(crate::common::Errors::NetworkError)),
+                    Err(_) => Err(Error::new(crate::common::protocol::Errors::NetworkError)),
                 };
                 let _ = tx.send(PendingCompletion::ListOffsetsForFetchOffsets {
                     state: state_for_task,
@@ -916,7 +916,7 @@ impl OffsetsRequestManager {
             tokio::spawn(async move {
                 let result = match response_rx.await {
                     Ok(r) => r,
-                    Err(_) => Err(Error::new(crate::common::Errors::NetworkError)),
+                    Err(_) => Err(Error::new(crate::common::protocol::Errors::NetworkError)),
                 };
                 let _ = tx.send(PendingCompletion::ListOffsetsForReset {
                     reset_timestamps: timestamps,
@@ -989,7 +989,7 @@ impl OffsetsRequestManager {
             tokio::spawn(async move {
                 let result = match response_rx.await {
                     Ok(r) => r,
-                    Err(_) => Err(Error::new(crate::common::Errors::NetworkError)),
+                    Err(_) => Err(Error::new(crate::common::protocol::Errors::NetworkError)),
                 };
                 let _ = tx.send(PendingCompletion::OffsetsForLeaderEpoch { fetch_positions: positions, result });
             });
@@ -1819,7 +1819,7 @@ mod tests {
         ]))
         .expect("config");
         let subscription_state = Arc::new(Mutex::new(SubscriptionState::new(
-            crate::consumer::AutoOffsetResetStrategy::EARLIEST,
+            crate::consumer::internals::AutoOffsetResetStrategy::EARLIEST,
         )));
         let metadata = Arc::new(ConsumerMetadata::with_config(
             &config,
@@ -1892,7 +1892,7 @@ mod tests {
         ]))
         .expect("config");
         let subscription_state = Arc::new(Mutex::new(SubscriptionState::new(
-            crate::consumer::AutoOffsetResetStrategy::EARLIEST,
+            crate::consumer::internals::AutoOffsetResetStrategy::EARLIEST,
         )));
         let metadata = Arc::new(ConsumerMetadata::with_config(
             &config,
@@ -2002,7 +2002,7 @@ mod tests {
         ]))
         .expect("config");
         let subscription_state = Arc::new(Mutex::new(SubscriptionState::new(
-            crate::consumer::AutoOffsetResetStrategy::EARLIEST,
+            crate::consumer::internals::AutoOffsetResetStrategy::EARLIEST,
         )));
         let metadata = Arc::new(ConsumerMetadata::with_config(
             &config,
@@ -2609,7 +2609,7 @@ mod tests {
         // Pre-seed a validate error (Java's path:
         // `OffsetsForLeaderEpoch` response set it via
         // `cachedValidatePositionsException.set(error)`).
-        let seeded_err = Error::new(crate::common::Errors::UnknownServerError);
+        let seeded_err = Error::new(crate::common::protocol::Errors::UnknownServerError);
         mgr.shared.offset_fetcher_utils.maybe_set_validate_error(seeded_err.clone());
 
         // current_time_ms == deadline_ms triggers the would-be cache
@@ -2652,7 +2652,7 @@ mod tests {
         // Seed a cached error directly (this is what
         // `cacheExceptionIfEventExpired` does in Java when an expired event
         // surfaces an error).
-        let cached_err = Error::new(crate::common::Errors::TopicAuthorizationFailed);
+        let cached_err = Error::new(crate::common::protocol::Errors::TopicAuthorizationFailed);
         {
             let mut guard = mgr.cached_update_positions_error.lock().unwrap();
             *guard = Some(cached_err.clone());
@@ -2687,8 +2687,8 @@ mod tests {
 
     use crate::ClientResponse;
     use crate::ListOffsetsResponseData;
-    use crate::common::ApiKeys;
-    use crate::common::Errors;
+    use crate::common::protocol::ApiKeys;
+    use crate::common::protocol::Errors;
     use crate::common::requests::ListOffsetsRequest;
     use crate::common::requests::ListOffsetsResponse;
     use crate::common::requests::RequestTestUtils;
@@ -4157,7 +4157,7 @@ mod tests {
         ]))
         .expect("config");
         let subscription_state = Arc::new(Mutex::new(SubscriptionState::new(
-            crate::consumer::AutoOffsetResetStrategy::EARLIEST,
+            crate::consumer::internals::AutoOffsetResetStrategy::EARLIEST,
         )));
         let metadata = Arc::new(ConsumerMetadata::with_config(
             &config,
@@ -4388,7 +4388,7 @@ mod tests {
         // maps to `NetworkException` in `FutureCompletionHandler::on_complete`.
         assert_eq!(
             err.error(),
-            crate::common::Errors::NetworkError,
+            crate::common::protocol::Errors::NetworkError,
             "per-node disconnect must surface as a network error"
         );
         // The description, not the enum constant `Display` renders.
@@ -4421,7 +4421,7 @@ mod tests {
         ]))
         .expect("config");
         let subscription_state = Arc::new(Mutex::new(SubscriptionState::new(
-            crate::consumer::AutoOffsetResetStrategy::EARLIEST,
+            crate::consumer::internals::AutoOffsetResetStrategy::EARLIEST,
         )));
         let metadata = Arc::new(ConsumerMetadata::with_config(
             &config,
@@ -4477,7 +4477,7 @@ mod tests {
     // =================================================================
 
     use crate::OffsetForLeaderEpochResponseData;
-    use crate::consumer::AutoOffsetResetStrategy;
+    use crate::consumer::internals::AutoOffsetResetStrategy;
     use crate::offset_for_leader_epoch_response_data::{EpochEndOffset, OffsetForLeaderTopicResult};
 
     /// Bootstrap `metadata` with a single topic / one-partition-per-index

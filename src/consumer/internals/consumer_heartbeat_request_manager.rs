@@ -31,8 +31,8 @@ use tokio::sync::mpsc;
 
 use crate::ConsumerGroupHeartbeatRequestData;
 use crate::common::Error;
-use crate::common::Errors;
 use crate::common::Uuid;
+use crate::common::protocol::Errors;
 use crate::common::requests::ConcreteResponse;
 use crate::common::requests::ConsumerGroupHeartbeatResponse;
 use crate::common::requests::consumer_group_heartbeat_request;
@@ -684,7 +684,7 @@ impl ConsumerHeartbeatRequestManager {
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerHeartbeatRequestManager#handleSpecificFailure")]
     pub(crate) fn handle_specific_failure(&mut self, error: &crate::common::Error, current_time_ms: i64) -> bool {
         use crate::common::Error;
-        use crate::common::Errors;
+        use crate::common::protocol::Errors;
         if error.error() == Errors::UnsupportedVersion {
             let msg = error.to_string();
             let message = if msg.contains(ConsumerGroupHeartbeatRequest::REGEX_RESOLUTION_NOT_SUPPORTED_MSG) {
@@ -718,12 +718,12 @@ impl ConsumerHeartbeatRequestManager {
     )]
     pub(crate) fn handle_specific_error_in_response(
         &mut self,
-        error: crate::common::Errors,
+        error: crate::common::protocol::Errors,
         error_message: Option<&str>,
         _current_time_ms: i64,
     ) -> Option<HeartbeatErrorAction> {
         use crate::common::Error;
-        use crate::common::Errors;
+        use crate::common::protocol::Errors;
         match error {
             Errors::UnsupportedVersion => {
                 log::error!(
@@ -1118,8 +1118,8 @@ mod tests {
     use super::*;
     use crate::common::Node;
     use crate::common::internals::ClusterResourceListeners;
-    use crate::consumer::AutoOffsetResetStrategy;
     use crate::consumer::ConsumerConfig;
+    use crate::consumer::internals::AutoOffsetResetStrategy;
     use crate::consumer::internals::ConsumerMetadata;
     use tokio::sync::mpsc;
 
@@ -1325,7 +1325,7 @@ mod tests {
     fn handle_specific_unsupported_version_is_fatal() {
         let mut mgr = make();
         let action = mgr.handle_specific_error_in_response(
-            crate::common::Errors::UnsupportedVersion,
+            crate::common::protocol::Errors::UnsupportedVersion,
             Some("broker doesn't support"),
             0,
         );
@@ -1342,7 +1342,8 @@ mod tests {
     #[test]
     fn handle_specific_fenced_instance_id_is_fatal() {
         let mut mgr = make();
-        let action = mgr.handle_specific_error_in_response(crate::common::Errors::FencedInstanceId, Some("msg"), 0);
+        let action =
+            mgr.handle_specific_error_in_response(crate::common::protocol::Errors::FencedInstanceId, Some("msg"), 0);
         assert!(matches!(action, Some(HeartbeatErrorAction::Fatal(_))));
     }
 
@@ -1351,7 +1352,7 @@ mod tests {
     #[test]
     fn handle_specific_returns_none_for_other_errors() {
         let mut mgr = make();
-        let action = mgr.handle_specific_error_in_response(crate::common::Errors::None, Some(""), 0);
+        let action = mgr.handle_specific_error_in_response(crate::common::protocol::Errors::None, Some(""), 0);
         assert!(action.is_none());
     }
 
@@ -1407,8 +1408,11 @@ mod tests {
     fn group_id_not_found_while_unsubscribed_is_skipped() {
         let (mut mgr, _coord, mm) = make_with_coord(None);
         assert_eq!(mm.state(), MemberState::Unsubscribed);
-        let action =
-            mgr.handle_specific_error_in_response(crate::common::Errors::GroupIdNotFound, Some("group not found"), 0);
+        let action = mgr.handle_specific_error_in_response(
+            crate::common::protocol::Errors::GroupIdNotFound,
+            Some("group not found"),
+            0,
+        );
         assert!(
             matches!(action, Some(HeartbeatErrorAction::Handled)),
             "GROUP_ID_NOT_FOUND while UNSUBSCRIBED must be skipped (Handled), not fatal/fenced",
@@ -1518,7 +1522,7 @@ mod tests {
     fn handle_specific_unreleased_instance_id_is_fatal() {
         let mut mgr = make();
         let action = mgr.handle_specific_error_in_response(
-            crate::common::Errors::UnreleasedInstanceId,
+            crate::common::protocol::Errors::UnreleasedInstanceId,
             Some("instance id still in use"),
             0,
         );
@@ -1583,7 +1587,7 @@ mod tests {
     async fn test_response_routing_through_spawned_forwarder() {
         use crate::ClientResponse;
         use crate::ConsumerGroupHeartbeatResponseData;
-        use crate::common::ApiKeys;
+        use crate::common::protocol::ApiKeys;
         use crate::common::requests::{RequestHeader, RequestHeaderOptionsBuilder};
         use crate::consumer_group_heartbeat_response_data::Assignment;
 
@@ -1691,7 +1695,7 @@ mod tests {
     async fn issue3_error_response_resets_sent_fields() {
         use crate::ClientResponse;
         use crate::ConsumerGroupHeartbeatResponseData;
-        use crate::common::ApiKeys;
+        use crate::common::protocol::ApiKeys;
         use crate::common::requests::{RequestHeader, RequestHeaderOptionsBuilder};
         use std::collections::HashSet;
 
@@ -1892,7 +1896,7 @@ mod tests {
     ) {
         use crate::ClientResponse;
         use crate::ConsumerGroupHeartbeatResponseData;
-        use crate::common::ApiKeys;
+        use crate::common::protocol::ApiKeys;
         use crate::common::requests::{RequestHeader, RequestHeaderOptionsBuilder};
 
         set_coordinator(coord);
@@ -2883,7 +2887,7 @@ mod tests {
     async fn error_response_surfaces_the_broker_error_message() {
         use crate::ClientResponse;
         use crate::ConsumerGroupHeartbeatResponseData;
-        use crate::common::ApiKeys;
+        use crate::common::protocol::ApiKeys;
         use crate::common::requests::{RequestHeader, RequestHeaderOptionsBuilder};
         use crate::consumer::internals::events::BackgroundEvent;
 

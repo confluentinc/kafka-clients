@@ -19,10 +19,10 @@ use std::sync::{Arc, Mutex};
 
 use crate::common::metrics::internals::MetricsUtils;
 use crate::common::metrics::{
-    ClosureGauge, Gauge, KafkaMetric, Measurable, MetricConfig, MetricValue, MetricValueProvider, MetricsReporter,
-    RecordingLevel, Sensor, SystemTime, Time,
+    ClosureGauge, Gauge, KafkaMetric, Measurable, MetricConfig, MetricValueProvider, MetricsReporter, RecordingLevel,
+    Sensor, SystemTime, Time,
 };
-use crate::common::{Error, Metric, MetricName, MetricNameTemplate};
+use crate::common::{Error, Metric, MetricName, MetricNameTemplate, MetricValue};
 
 /// The shared registry state (metrics map + reporters) that is referenced both
 /// by [`Metrics`] and by [`Sensor`] (so a sensor can register its metrics).

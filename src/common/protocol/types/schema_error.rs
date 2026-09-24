@@ -47,7 +47,7 @@ kafka_error_class! {
 mod tests {
     use super::*;
     use crate::common::Error;
-    use crate::common::Errors;
+    use crate::common::protocol::Errors;
 
     /// `SchemaException extends KafkaException` and stops there — it bypasses
     /// `ApiException`, so a `catch (ApiException)` does not see it while a

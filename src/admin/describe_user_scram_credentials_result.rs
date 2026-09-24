@@ -20,7 +20,7 @@
 use std::collections::HashMap;
 
 use crate::DescribeUserScramCredentialsResponseData;
-use crate::common::Errors;
+use crate::common::protocol::Errors;
 use crate::common::{Error, KafkaFuture};
 use crate::describe_user_scram_credentials_response_data::DescribeUserScramCredentialsResult as WireUserResult;
 

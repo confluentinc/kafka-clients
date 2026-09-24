@@ -36,7 +36,7 @@
 use std::collections::HashMap;
 
 use confluent_kafka::common::Error;
-use confluent_kafka::common::Errors;
+use confluent_kafka::common::protocol::Errors;
 use confluent_kafka::common::serialization::Deserializer;
 use confluent_kafka::consumer::ConsumerConfig;
 use confluent_kafka::consumer::KafkaConsumer;

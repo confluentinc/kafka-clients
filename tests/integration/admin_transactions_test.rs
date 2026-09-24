@@ -86,8 +86,8 @@ use confluent_kafka::admin::{
     FenceProducersOptions, ListOffsetsOptions, ListTransactionsOptions, OffsetSpec, TerminateTransactionOptions,
     TransactionListing, TransactionState,
 };
-use confluent_kafka::common::Errors;
 use confluent_kafka::common::TopicPartition;
+use confluent_kafka::common::protocol::Errors;
 
 use crate::common::admin_backend::{AdminBackend, Outcomes, admin_for, all_of_exactly, create_topic};
 use crate::common::backend_factory::AdminBackendFactory;

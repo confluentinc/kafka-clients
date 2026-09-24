@@ -82,7 +82,6 @@ use crate::admin::ConfigEntryOptionsBuilder;
 use crate::admin::config_entry::{ConfigSource, ConfigSynonym, ConfigType};
 use crate::alter_replica_log_dirs_request_data::{AlterReplicaLogDir, AlterReplicaLogDirTopic};
 use crate::alter_user_scram_credentials_request_data::{ScramCredentialDeletion, ScramCredentialUpsertion};
-use crate::common::Errors;
 use crate::common::acl::{AclBinding, AclBindingFilter, AclOperation};
 use crate::common::config::{ConfigResource, config_resource};
 use crate::common::errors::{ApiError, UnsupportedEndpointTypeError};
@@ -90,6 +89,7 @@ use crate::common::internals::KafkaFutureImpl;
 use crate::common::network::ChannelBuilders;
 use crate::common::network::Selector;
 use crate::common::network::selectable::USE_DEFAULT_BUFFER_SIZE;
+use crate::common::protocol::Errors;
 use crate::common::quota::{ClientQuotaAlteration, ClientQuotaEntity, ClientQuotaFilter};
 use crate::common::requests::{
     ConcreteResponse, CreateAclsRequest, DeleteAclsRequest, DeleteAclsResponse, DescribeAclsResponse,
@@ -5240,8 +5240,8 @@ mod tests {
     use crate::MockClient;
     use crate::admin::MemberToRemove;
     use crate::admin::internals::AdminClientRunnable;
-    use crate::common::Errors;
     use crate::common::Node;
+    use crate::common::protocol::Errors;
     use crate::common::requests::RequestTestUtils;
     use crate::common::requests::metadata_response::{PartitionMetadata, TopicMetadata};
     use crate::common::requests::{CreatePartitionsResponse, DeleteRecordsResponse};
@@ -5528,8 +5528,8 @@ mod tests {
     use crate::CreateAclsResponseData;
     use crate::DeleteAclsResponseData;
     use crate::DescribeAclsResponseData;
-    use crate::common::ApiKeys;
     use crate::common::acl::{AccessControlEntry, AccessControlEntryFilter, AclPermissionType};
+    use crate::common::protocol::ApiKeys;
     use crate::common::requests::{CreateAclsResponse, DeleteAclsResponse, DescribeAclsResponse};
     use crate::common::resource::{PatternType, ResourcePattern, ResourcePatternFilter, ResourceType};
     use crate::create_acls_response_data::AclCreationResult;
@@ -11605,7 +11605,7 @@ mod tests {
         data.set_groups(vec![g]);
         ConcreteResponse::OffsetFetch(crate::common::requests::OffsetFetchResponse::new(
             data,
-            crate::common::ApiKeys::OFFSET_FETCH.latest_version(),
+            crate::common::protocol::ApiKeys::OFFSET_FETCH.latest_version(),
         ))
     }
 
@@ -11631,7 +11631,7 @@ mod tests {
         data.set_groups(vec![g]);
         ConcreteResponse::OffsetFetch(crate::common::requests::OffsetFetchResponse::new(
             data,
-            crate::common::ApiKeys::OFFSET_FETCH.latest_version(),
+            crate::common::protocol::ApiKeys::OFFSET_FETCH.latest_version(),
         ))
     }
 
@@ -11815,7 +11815,7 @@ mod tests {
         data.set_groups(wire_groups);
         ConcreteResponse::OffsetFetch(crate::common::requests::OffsetFetchResponse::new(
             data,
-            crate::common::ApiKeys::OFFSET_FETCH.latest_version(),
+            crate::common::protocol::ApiKeys::OFFSET_FETCH.latest_version(),
         ))
     }
 
@@ -12678,7 +12678,7 @@ mod tests {
     /// code that ties the describe deadline to `options.timeout_ms()`.
     #[tokio::test]
     async fn test_remove_all_describe_uses_default_api_timeout() {
-        use crate::common::ApiKeys;
+        use crate::common::protocol::ApiKeys;
         // request.timeout.ms (30000) > default.api.timeout.ms (20000) so the
         // describe budget is observable uncapped; options.timeout (5000) is
         // smaller still, so the buggy and fixed budgets are distinguishable.
@@ -12725,7 +12725,7 @@ mod tests {
     /// have the LeaveGroup window already expired and issue no request at all.
     #[tokio::test]
     async fn test_remove_all_leave_group_deadline_computed_after_describe() {
-        use crate::common::ApiKeys;
+        use crate::common::protocol::ApiKeys;
         // default.api.timeout.ms is large so the describe step survives the clock
         // advance (the describe-timeout fix is a prerequisite); options.timeout
         // (5000) is smaller than request.timeout.ms so the LeaveGroup budget is

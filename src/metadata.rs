@@ -36,11 +36,11 @@ use crate::{kafka_debug, kafka_error, kafka_info, kafka_trace};
 use crate::common::Cluster;
 use crate::common::ClusterResource;
 use crate::common::Error;
-use crate::common::Errors;
 use crate::common::Node;
 use crate::common::TopicPartition;
 use crate::common::Uuid;
 use crate::common::internals::ClusterResourceListeners;
+use crate::common::protocol::Errors;
 use crate::common::requests::RECORD_BATCH_NO_PARTITION_LEADER_EPOCH;
 use crate::common::requests::metadata_request;
 use crate::common::requests::{MetadataResponse, PartitionMetadata};
@@ -1721,9 +1721,9 @@ mod tests {
     }
 
     use super::*;
-    use crate::common::ApiKeys;
     use crate::common::ClusterResourceListener;
     use crate::common::internals::ClusterResourceListeners;
+    use crate::common::protocol::ApiKeys;
     use crate::common::requests::RequestTestUtils;
     use std::collections::HashMap;
     use std::sync::Arc;
@@ -2731,8 +2731,8 @@ mod tests {
     #[doc(alias = "org.apache.kafka.clients.MetadataTest#testIgnoreLeaderEpochInOlderMetadataResponse")]
     fn test_ignore_leader_epoch_in_older_metadata_response() {
         use crate::MetadataResponseData;
-        use crate::common::Readable;
         use crate::common::protocol::MessageUtil;
+        use crate::common::protocol::Readable;
         use crate::metadata_response_data::{MetadataResponsePartition, MetadataResponseTopic};
 
         let metadata = new_metadata();

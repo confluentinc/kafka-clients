@@ -65,7 +65,7 @@ mod tests {
     use crate::DeleteGroupsResponseData;
     use crate::admin::internals::CoordinatorKey;
     use crate::admin::internals::{AdminApiHandler, ApiResult};
-    use crate::common::Errors;
+    use crate::common::protocol::Errors;
     use crate::common::requests::{ConcreteResponse, DeleteGroupsResponse, RequestBuilder};
     use crate::common::{Error, Node};
     use crate::delete_groups_response_data::DeletableGroupResult;

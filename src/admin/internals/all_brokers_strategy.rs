@@ -276,7 +276,7 @@ impl<V: Clone + Send + Sync + 'static> AdminApiFuture<BrokerKey, V> for AllBroke
 mod tests {
     use super::*;
     use crate::MetadataResponseData;
-    use crate::common::ApiKeys;
+    use crate::common::protocol::ApiKeys;
     use crate::common::requests::MetadataResponse;
     use crate::metadata_response_data::MetadataResponseBroker;
 

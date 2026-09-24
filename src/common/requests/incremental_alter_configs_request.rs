@@ -216,7 +216,7 @@ mod tests {
         data.set_validate_only(true);
         let mut request = AbstractRequest::IncrementalAlterConfigs(IncrementalAlterConfigsRequest::new(data, 1));
         let bytes = request.serialize().unwrap();
-        let mut readable = crate::common::ByteBufferAccessor::new(bytes.into_buffer());
+        let mut readable = crate::common::protocol::ByteBufferAccessor::new(bytes.into_buffer());
         let parsed = IncrementalAlterConfigsRequest::parse(&mut readable, 1).unwrap();
         assert_eq!(parsed.data().resources.len(), 1);
         assert_eq!(parsed.data().resources[0].resource_name, "t");

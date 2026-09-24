@@ -100,11 +100,11 @@ use std::time::Duration;
 use std::time::Instant;
 
 use confluent_kafka::common::Error;
-use confluent_kafka::common::Errors;
 use confluent_kafka::common::TopicPartition;
 use confluent_kafka::common::header::Header;
 use confluent_kafka::common::header::Headers;
 use confluent_kafka::common::header::RecordHeaders;
+use confluent_kafka::common::protocol::Errors;
 use confluent_kafka::common::record::TimestampType;
 use confluent_kafka::common::serialization::ByteArraySerializer;
 use confluent_kafka::common::serialization::Deserializer;

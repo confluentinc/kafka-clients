@@ -28,7 +28,7 @@ use std::collections::{HashMap, HashSet};
 use std::fmt::Display;
 use std::hash::Hash;
 
-use crate::common::Errors;
+use crate::common::protocol::Errors;
 use crate::common::requests::{ConcreteResponse, RequestBuilder};
 use crate::common::utils::{ExponentialBackoff, LogContext};
 use crate::common::{Error, Node};
@@ -584,7 +584,7 @@ pub(crate) mod test_support {
     use crate::admin::internals::ApiRequestScope;
     use crate::admin::internals::{AdminApiHandler, ApiResult, RequestAndKeys};
     use crate::admin::internals::{AdminApiLookupStrategy, LookupResult};
-    use crate::common::ApiKeys;
+    use crate::common::protocol::ApiKeys;
     use crate::common::requests::{ConcreteResponse, MetadataResponse, RequestBuilder, metadata_request};
     use crate::common::utils::{ExponentialBackoff, LogContext};
     use crate::common::{Error, Node};

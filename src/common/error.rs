@@ -44,7 +44,7 @@ use std::fmt::Display;
 
 use ambassador::{Delegate, delegatable_trait, delegatable_trait_remote};
 
-use super::Errors;
+use super::protocol::Errors;
 use crate::common::InvalidRecordError;
 use crate::common::KafkaError;
 use crate::common::LocalConcurrentModificationError;
@@ -367,7 +367,7 @@ macro_rules! kafka_error_class {
         kafka_error_class! {
             $(#[$meta])*
             $name,
-            code: $crate::common::Errors::UnknownServerError,
+            code: $crate::common::protocol::Errors::UnknownServerError,
             extends: [$($predicate),*],
         }
     };
@@ -464,7 +464,7 @@ macro_rules! kafka_error_class {
         }
 
         impl $crate::common::error::ErrorCode for $name {
-            fn error(&self) -> $crate::common::Errors {
+            fn error(&self) -> $crate::common::protocol::Errors {
                 $code
             }
         }

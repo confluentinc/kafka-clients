@@ -443,7 +443,8 @@ mod tests {
                 Builder.build does not"]
     fn test_build_is_repeatable() {
         use crate::common::compress::Compression;
-        use crate::common::record::{MemoryRecords, TimestampType};
+        use crate::common::record::TimestampType;
+        use crate::common::record::internal::MemoryRecords;
         use crate::produce_request_data::{PartitionProduceData, TopicProduceData};
 
         // `validate_records` requires a real magic-v2 batch (`:185-193`), so build one

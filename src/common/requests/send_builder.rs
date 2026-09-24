@@ -24,12 +24,12 @@
 use std::io;
 
 use crate::common::Uuid;
-use crate::common::Writable;
 use crate::common::network::ByteBufferSend;
-use crate::common::protocol::ByteUtils;
 use crate::common::protocol::Message;
 use crate::common::protocol::MessageSizeAccumulator;
 use crate::common::protocol::ObjectSerializationCache;
+use crate::common::protocol::Writable;
+use crate::common::utils::ByteUtils;
 
 use super::RequestHeader;
 use super::ResponseHeader;
@@ -190,8 +190,8 @@ impl Writable for SendBuilderWritable {
 mod tests {
     use super::*;
     use crate::MetadataRequestData;
-    use crate::common::ApiKeys;
     use crate::common::network::Send as _;
+    use crate::common::protocol::ApiKeys;
     use crate::common::requests::RequestHeaderOptionsBuilder;
 
     #[test]

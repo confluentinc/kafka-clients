@@ -17,8 +17,8 @@
 use std::fmt;
 
 use crate::common::Error;
-use crate::common::Errors;
 use crate::common::error::{ErrorCode, ErrorHierarchy, ErrorMessage, ErrorSource};
+use crate::common::protocol::Errors;
 
 /// The request was throttled due to a quota violation.
 ///

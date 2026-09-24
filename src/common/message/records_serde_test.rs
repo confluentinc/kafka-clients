@@ -20,11 +20,11 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 
 use bytes::Bytes;
 
-use crate::common::simple_records_message_data::SimpleRecordsMessageData;
-use confluent_kafka::common::compress::Compression;
-use confluent_kafka::common::protocol::MessageUtil;
-use confluent_kafka::common::protocol::{ByteBufferAccessor, Message, ObjectSerializationCache};
-use confluent_kafka::common::record::{MemoryRecords, SimpleRecord};
+use crate::common::compress::Compression;
+use crate::common::protocol::MessageUtil;
+use crate::common::protocol::{ByteBufferAccessor, Message, ObjectSerializationCache};
+use crate::common::record::internal::{MemoryRecords, SimpleRecord};
+use crate::test_generated::SimpleRecordsMessageData;
 
 fn hash_of<T: Hash>(val: &T) -> u64 {
     let mut hasher = DefaultHasher::new();
@@ -162,7 +162,7 @@ fn test_null_and_empty_records_are_distinct_on_the_wire() {
 /// [`test_null_and_empty_records_are_distinct_on_the_wire`].
 #[test]
 fn test_non_nullable_records_write_does_not_mutate_the_message() {
-    use confluent_kafka::fetch_snapshot_response_data::{FetchSnapshotResponseData, PartitionSnapshot, TopicSnapshot};
+    use crate::fetch_snapshot_response_data::{FetchSnapshotResponseData, PartitionSnapshot, TopicSnapshot};
 
     let records = records_of(&["foo", "bar"]);
 

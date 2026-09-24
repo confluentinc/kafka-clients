@@ -42,7 +42,8 @@ use crate::common::IsolationLevel;
 use crate::common::internals::PartitionStates;
 use crate::common::{Error, TopicPartition, Uuid};
 use crate::consumer::ConsumerNoOffsetForPartitionError;
-use crate::consumer::{AutoOffsetResetStrategy, ConsumerRebalanceListener, OffsetAndMetadata, SubscriptionPattern};
+use crate::consumer::internals::AutoOffsetResetStrategy;
+use crate::consumer::{ConsumerRebalanceListener, OffsetAndMetadata, SubscriptionPattern};
 use crate::metadata::LeaderAndEpoch;
 
 const SUBSCRIPTION_ERROR_MESSAGE: &str = "Subscription to topics, partitions and pattern are mutually exclusive";
@@ -3167,7 +3168,7 @@ mod tests {
 
     use crate::ApiVersions as ApiVersionsType;
     use crate::NodeApiVersions;
-    use crate::common::ApiKeys;
+    use crate::common::protocol::ApiKeys;
     use crate::offset_for_leader_epoch_response_data::EpochEndOffset;
 
     fn epoch_end_offset(leader_epoch: i32, end_offset: i64) -> EpochEndOffset {

@@ -999,9 +999,9 @@ impl AbstractMembershipManager {
 mod tests {
     use super::*;
     use crate::common::internals::ClusterResourceListeners;
-    use crate::consumer::AutoOffsetResetStrategy;
     use crate::consumer::ConsumerConfig;
     use crate::consumer::ConsumerRebalanceListener;
+    use crate::consumer::internals::AutoOffsetResetStrategy;
     use async_trait::async_trait;
     use std::collections::HashSet;
     use tokio::sync::mpsc;

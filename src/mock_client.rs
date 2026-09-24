@@ -930,7 +930,7 @@ impl KafkaClient for MockClient {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::Errors;
+    use crate::common::protocol::Errors;
     use crate::common::requests::FindCoordinatorResponse;
     use std::sync::atomic::AtomicI64;
 

@@ -477,7 +477,7 @@ impl BufferPool {
         #[cfg(test)]
         if self.fail_record_wait_time.load(Ordering::Relaxed) {
             return Err(Error::with_message(
-                crate::common::Errors::UnknownServerError,
+                crate::common::protocol::Errors::UnknownServerError,
                 "Injected recordWaitTime failure",
             ));
         }

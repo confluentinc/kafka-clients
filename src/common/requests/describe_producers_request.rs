@@ -179,7 +179,7 @@ mod tests {
         let mut builder = Builder::new(data);
         let mut request = builder.build_version(0).unwrap();
         let bytes = request.serialize().unwrap();
-        let mut readable = crate::common::ByteBufferAccessor::new(bytes.into_buffer());
+        let mut readable = crate::common::protocol::ByteBufferAccessor::new(bytes.into_buffer());
         let parsed = DescribeProducersRequest::parse(&mut readable, 0).unwrap();
         assert_eq!(parsed.data().topics.len(), 1);
         assert_eq!(parsed.data().topics[0].name, "foo");

@@ -218,7 +218,7 @@ mod tests {
         let mut builder = Builder::new(data);
         let mut request = builder.build().unwrap();
         let bytes = request.serialize().unwrap();
-        let mut readable = crate::common::ByteBufferAccessor::new(bytes.into_buffer());
+        let mut readable = crate::common::protocol::ByteBufferAccessor::new(bytes.into_buffer());
         let parsed = AlterUserScramCredentialsRequest::parse(&mut readable, version).unwrap();
         assert_eq!(parsed.data().deletions.len(), 1);
         assert_eq!(parsed.data().deletions[0].name, "d0");

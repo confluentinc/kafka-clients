@@ -45,10 +45,10 @@ use std::io::{self, Read, Write};
 use crate::common::InvalidRecordError;
 use crate::common::header::Header;
 use crate::common::header::RecordHeader;
-use crate::common::protocol::ByteUtils;
 use crate::common::record::TimestampType;
 use crate::common::record::internal::DefaultRecordBatch;
 use crate::common::record::internal::RecordBatch;
+use crate::common::utils::ByteUtils;
 
 /// The default (v2) record format for Kafka.
 ///

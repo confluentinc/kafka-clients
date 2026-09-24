@@ -16,7 +16,7 @@
 //!
 //! Corresponds to org.apache.kafka.common.protocol.Readable
 
-use super::RawTaggedField;
+use super::types::RawTaggedField;
 use crate::common::Uuid;
 use std::io;
 

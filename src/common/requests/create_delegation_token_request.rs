@@ -180,7 +180,7 @@ mod tests {
         let mut request =
             AbstractRequest::CreateDelegationToken(CreateDelegationTokenRequest::new(request_data(), version));
         let bytes = request.serialize().unwrap();
-        let mut readable = crate::common::ByteBufferAccessor::new(bytes.into_buffer());
+        let mut readable = crate::common::protocol::ByteBufferAccessor::new(bytes.into_buffer());
         let parsed = CreateDelegationTokenRequest::parse(&mut readable, version).unwrap();
         assert_eq!(parsed.data().max_lifetime_ms, 86_400_000);
         assert_eq!(parsed.data().renewers.len(), 1);

@@ -37,8 +37,8 @@ use crate::common::network::ListenerName;
 use crate::common::network::PlaintextChannelBuilder;
 use crate::common::network::SaslChannelBuilder;
 use crate::common::network::SslChannelBuilder;
-use crate::common::security::SecurityProtocol;
-use crate::common::security::SslFactory;
+use crate::common::security::auth::SecurityProtocol;
+use crate::common::security::ssl::SslFactory;
 use crate::common::utils::LogContext;
 
 /// Translates the Java static-utility class `org.apache.kafka.common.network.ChannelBuilders`,

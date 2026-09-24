@@ -23,9 +23,9 @@ use std::io;
 
 use super::MessageSizeAccumulator;
 use super::ObjectSerializationCache;
-use super::RawTaggedField;
 use super::Readable;
 use super::Writable;
+use super::types::RawTaggedField;
 
 /// Trait for Kafka protocol messages that can serialize and deserialize themselves.
 ///
@@ -247,7 +247,7 @@ mod tests {
 
     #[test]
     fn test_message_write_and_read() {
-        use crate::common::ByteBufferAccessor;
+        use crate::common::protocol::ByteBufferAccessor;
 
         let mut msg = TestMessage::new(42);
         let mut cache = ObjectSerializationCache::new();

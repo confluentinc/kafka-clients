@@ -60,8 +60,8 @@ use tokio::sync::oneshot;
 
 use crate::OffsetCommitRequestData;
 use crate::OffsetFetchRequestData;
-use crate::common::Errors;
 use crate::common::metrics::Time;
+use crate::common::protocol::Errors;
 use crate::common::requests::{
     OffsetCommitResponse, RECORD_BATCH_NO_PARTITION_LEADER_EPOCH, offset_commit_request, offset_fetch_request,
 };
@@ -2792,7 +2792,7 @@ mod tests {
     fn make_manager_with_time(now_ms: i64, enable_auto_commit: bool, time: Arc<dyn Time>) -> CommitRequestManager {
         let cfg = test_config(enable_auto_commit);
         let subs = Arc::new(Mutex::new(SubscriptionState::new(
-            crate::consumer::AutoOffsetResetStrategy::LATEST,
+            crate::consumer::internals::AutoOffsetResetStrategy::LATEST,
         )));
         let metadata = Arc::new(ConsumerMetadata::with_config(
             &cfg,
@@ -2839,7 +2839,7 @@ mod tests {
     ) -> (CommitRequestManager, Arc<Mutex<SubscriptionState>>, Arc<dyn Time>) {
         let cfg = test_config(enable_auto_commit);
         let subs = Arc::new(Mutex::new(SubscriptionState::new(
-            crate::consumer::AutoOffsetResetStrategy::LATEST,
+            crate::consumer::internals::AutoOffsetResetStrategy::LATEST,
         )));
         let metadata = Arc::new(ConsumerMetadata::with_config(
             &cfg,
@@ -2858,8 +2858,8 @@ mod tests {
     }
 
     use crate::ClientResponse;
-    use crate::common::ApiKeys;
     use crate::common::Node;
+    use crate::common::protocol::ApiKeys;
     use crate::common::requests::{ConcreteResponse, OffsetFetchResponse, RequestHeader, RequestHeaderOptionsBuilder};
     use crate::consumer::internals::CoordinatorRequestManager;
 
@@ -3280,7 +3280,7 @@ mod tests {
         );
         let header = crate::common::requests::RequestHeader::with_options(
             RequestHeaderOptionsBuilder::new()
-                .set_request_api_key(&crate::common::ApiKeys::OFFSET_COMMIT)
+                .set_request_api_key(&crate::common::protocol::ApiKeys::OFFSET_COMMIT)
                 .set_request_version(0)
                 .set_client_id("test-client")
                 .set_correlation_id(0)
@@ -3611,7 +3611,7 @@ mod tests {
         );
         let header = crate::common::requests::RequestHeader::with_options(
             RequestHeaderOptionsBuilder::new()
-                .set_request_api_key(&crate::common::ApiKeys::OFFSET_COMMIT)
+                .set_request_api_key(&crate::common::protocol::ApiKeys::OFFSET_COMMIT)
                 .set_request_version(0)
                 .set_client_id("test-client")
                 .set_correlation_id(0)
@@ -5194,7 +5194,7 @@ mod tests {
         cfg.retry_backoff_ms = 0;
         cfg.retry_backoff_max_ms = 0;
         let subs = Arc::new(Mutex::new(SubscriptionState::new(
-            crate::consumer::AutoOffsetResetStrategy::LATEST,
+            crate::consumer::internals::AutoOffsetResetStrategy::LATEST,
         )));
         let metadata = Arc::new(ConsumerMetadata::with_config(
             &cfg,
@@ -6055,7 +6055,7 @@ mod tests {
         let mut cfg = test_config(enable_auto_commit);
         cfg.auto_commit_interval_ms = interval_ms.clamp(0, i64::from(i32::MAX)) as i32;
         let subs = Arc::new(Mutex::new(SubscriptionState::new(
-            crate::consumer::AutoOffsetResetStrategy::LATEST,
+            crate::consumer::internals::AutoOffsetResetStrategy::LATEST,
         )));
         let metadata = Arc::new(ConsumerMetadata::with_config(
             &cfg,

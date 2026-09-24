@@ -61,10 +61,10 @@ use indexmap::IndexMap;
 use log::{debug, trace};
 use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 
-use crate::common::ApiKeys;
 use crate::common::Node;
 use crate::common::TopicPartition;
 use crate::common::memory::BufferSupplier;
+use crate::common::protocol::ApiKeys;
 use crate::common::requests::FetchResponse;
 use crate::common::requests::fetch_request::{self, FetchRequest, PartitionData};
 use crate::consumer::internals::CompletedFetch;
@@ -504,10 +504,11 @@ impl AbstractFetch {
             // KIP-951: when a partition reports a leadership-change error AND
             // carries new leader info, record it for the post-loop metadata
             // update. Translates `AbstractFetch.java:207-214`.
-            let partition_error = crate::common::Errors::for_code(partition_data.error_code);
+            let partition_error = crate::common::protocol::Errors::for_code(partition_data.error_code);
             if matches!(
                 partition_error,
-                crate::common::Errors::NotLeaderOrFollower | crate::common::Errors::FencedLeaderEpoch
+                crate::common::protocol::Errors::NotLeaderOrFollower
+                    | crate::common::protocol::Errors::FencedLeaderEpoch
             ) {
                 let leader_id = partition_data.current_leader.leader_id;
                 let leader_epoch = partition_data.current_leader.leader_epoch;
@@ -1012,7 +1013,7 @@ mod tests {
     use super::*;
     use crate::common::IsolationLevel;
     use crate::common::internals::ClusterResourceListeners;
-    use crate::consumer::AutoOffsetResetStrategy;
+    use crate::consumer::internals::AutoOffsetResetStrategy;
 
     fn make_fetch_config() -> FetchConfig {
         FetchConfig::new(

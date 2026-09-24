@@ -23,8 +23,8 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::common::Error;
-use crate::common::Errors;
 use crate::common::compress::Compression;
+use crate::common::protocol::Errors;
 use crate::common::record::TimestampType;
 use crate::common::record::internal::AbstractRecords;
 use crate::common::record::internal::DefaultRecord;

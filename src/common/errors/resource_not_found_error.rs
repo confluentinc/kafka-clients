@@ -17,8 +17,8 @@
 use std::fmt;
 
 use crate::common::Error;
-use crate::common::Errors;
 use crate::common::error::{ErrorCode, ErrorHierarchy, ErrorMessage, ErrorSource};
+use crate::common::protocol::Errors;
 
 /// A request referred to a resource that does not exist.
 ///
@@ -51,7 +51,7 @@ impl ResourceNotFoundError {
     }
 
     /// Create the error with the code's default message — used by
-    /// [`Errors::error`](crate::common::Errors::error).
+    /// [`Errors::error`](crate::common::protocol::Errors::error).
     #[doc(alias = "org.apache.kafka.common.errors.ResourceNotFoundException#ResourceNotFoundException")]
     pub fn with_default_message() -> Self {
         Self::new(Errors::ResourceNotFound.message())

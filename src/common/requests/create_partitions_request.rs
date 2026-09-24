@@ -187,7 +187,7 @@ mod tests {
         data.set_validate_only(true);
         let mut request = AbstractRequest::CreatePartitions(CreatePartitionsRequest::new(data, 3));
         let bytes = request.serialize().unwrap();
-        let mut readable = crate::common::ByteBufferAccessor::new(bytes.into_buffer());
+        let mut readable = crate::common::protocol::ByteBufferAccessor::new(bytes.into_buffer());
         let parsed = CreatePartitionsRequest::parse(&mut readable, 3).unwrap();
         assert_eq!(parsed.data().topics.len(), 1);
         assert_eq!(parsed.data().topics[0].name, "round-trip-topic");

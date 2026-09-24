@@ -14,8 +14,8 @@
 
 //! Translated from `org.apache.kafka.common.errors.StaleMemberEpochException`.
 
-use crate::common::Errors;
 use crate::common::error::kafka_error_class;
+use crate::common::protocol::Errors;
 
 kafka_error_class! {
     /// The member epoch is stale. The member must retry after receiving its

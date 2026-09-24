@@ -38,7 +38,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use confluent_kafka::common::Error;
-use confluent_kafka::common::Errors;
 use confluent_kafka::common::KafkaFuture;
 use confluent_kafka::common::MetricName;
 use confluent_kafka::common::MetricValue;
@@ -56,6 +55,7 @@ use confluent_kafka::common::errors::SslAuthenticationError;
 use confluent_kafka::common::header::Header;
 use confluent_kafka::common::metrics::{ClosureGauge, KafkaMetric, MetricConfig, MetricValueProvider, SystemTime};
 use confluent_kafka::common::network::InvalidReceiveError;
+use confluent_kafka::common::protocol::Errors;
 use confluent_kafka::consumer::ConsumerCommitFailedError;
 use confluent_kafka::consumer::ConsumerGroupMetadata;
 use confluent_kafka::consumer::ConsumerRetriableCommitFailedError;
