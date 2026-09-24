@@ -28,8 +28,8 @@ use confluent_kafka::common::network::selectable::USE_DEFAULT_BUFFER_SIZE;
 use confluent_kafka::common::protocol::{ApiKeys, ByteBufferAccessor, Errors};
 use confluent_kafka::common::requests::ConcreteResponse;
 use confluent_kafka::common::requests::{
-    ApiVersionsRequestBuilder, MetadataRequestBuilder, MetadataResponse, RequestBuilder, RequestHeader,
-    RequestHeaderOptionsBuilder,
+    MetadataResponse, RequestBuilder, RequestHeader, RequestHeaderOptionsBuilder, api_versions_request,
+    metadata_request,
 };
 
 use crate::common::cluster_config::ClusterConfig;
@@ -125,7 +125,7 @@ async fn send_and_receive(
 /// Helper: perform the initial ApiVersions handshake and return the max
 /// supported Metadata version from the broker.
 async fn handshake_and_get_metadata_version(selector: &mut Selector) -> i16 {
-    let mut builder = ApiVersionsRequestBuilder::new();
+    let mut builder = api_versions_request::Builder::new();
     let (payload, header) = send_and_receive(selector, &mut builder, "metadata-test", 1).await;
 
     let mut buffer = ByteBufferAccessor::new(payload);
@@ -149,7 +149,7 @@ async fn send_metadata_request(
     correlation_id: i32,
 ) -> MetadataResponse {
     let mut builder =
-        MetadataRequestBuilder::with_topics_allow_auto_topic_creation_version(topics, true, metadata_version);
+        metadata_request::Builder::with_topics_allow_auto_topic_creation_version(topics, true, metadata_version);
 
     let (payload, header) = send_and_receive(selector, &mut builder, "metadata-test", correlation_id).await;
 

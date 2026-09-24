@@ -295,11 +295,11 @@ impl OffsetFetchResponse {
 /// Builder for [`OffsetFetchResponse`] when constructing from a list of
 /// per-group response payloads. Mirrors Java's `OffsetFetchResponse.Builder`.
 #[doc(alias = "org.apache.kafka.common.requests.OffsetFetchResponse$Builder")]
-pub struct OffsetFetchResponseBuilder {
+pub struct Builder {
     groups: Vec<OffsetFetchResponseGroup>,
 }
 
-impl OffsetFetchResponseBuilder {
+impl Builder {
     /// Construct a builder over a single group's response.
     ///
     /// Mirrors Java's `Builder(OffsetFetchResponseGroup)`.
@@ -481,7 +481,7 @@ mod tests {
             g.set_group_id("b".to_string());
             g
         };
-        let builder = OffsetFetchResponseBuilder::with_groups(vec![g1, g2]);
+        let builder = Builder::with_groups(vec![g1, g2]);
         let err = builder.build(7).unwrap_err();
         assert!(err.to_string().contains("only supports one group"));
     }
@@ -502,7 +502,7 @@ mod tests {
         topic.set_partitions(vec![partition]);
         group.set_topics(vec![topic]);
 
-        let response = OffsetFetchResponseBuilder::with_group(group).build(5).expect("build ok");
+        let response = Builder::with_group(group).build(5).expect("build ok");
         assert_eq!(response.data().topics.len(), 1);
         assert_eq!(response.data().topics[0].partitions[0].committed_offset, 123);
     }

@@ -20,10 +20,10 @@ use std::io;
 
 use crate::ListConfigResourcesRequestData;
 use crate::ListConfigResourcesResponseData;
-use crate::common::config::ConfigResourceType;
+use crate::common::config::config_resource;
 use crate::common::protocol::{ApiKeys, Errors, Readable};
 
-use super::{ConcreteRequest, ConcreteResponse, ListConfigResourcesResponse, RequestBuilder};
+use super::{AbstractRequest, ConcreteResponse, ListConfigResourcesResponse, RequestBuilder};
 
 /// A ListConfigResources request.
 ///
@@ -98,13 +98,13 @@ impl std::fmt::Display for ListConfigResourcesRequest {
 /// Corresponds to `ListConfigResourcesRequest.Builder` in Java.
 #[derive(Debug, Clone)]
 #[doc(alias = "org.apache.kafka.common.requests.ListConfigResourcesRequest$Builder")]
-pub struct ListConfigResourcesRequestBuilder {
+pub struct Builder {
     data: ListConfigResourcesRequestData,
     oldest_allowed_version: i16,
     latest_allowed_version: i16,
 }
 
-impl ListConfigResourcesRequestBuilder {
+impl Builder {
     /// Creates a builder from existing data.
     #[doc(alias = "org.apache.kafka.common.requests.ListConfigResourcesRequest$Builder#Builder")]
     pub fn new(data: ListConfigResourcesRequestData) -> Self {
@@ -116,7 +116,7 @@ impl ListConfigResourcesRequestBuilder {
     }
 }
 
-impl RequestBuilder for ListConfigResourcesRequestBuilder {
+impl RequestBuilder for Builder {
     fn api_key(&self) -> &'static ApiKeys {
         &ApiKeys::LIST_CONFIG_RESOURCES
     }
@@ -129,24 +129,24 @@ impl RequestBuilder for ListConfigResourcesRequestBuilder {
         self.latest_allowed_version
     }
 
-    fn build_version(&mut self, version: i16) -> io::Result<ConcreteRequest> {
+    fn build_version(&mut self, version: i16) -> io::Result<AbstractRequest> {
         // Mirrors `ListConfigResourcesRequest.Builder.build`: v0 only supports
         // the CLIENT_METRICS resource type and carries no resource-types field.
         if version == 0 {
             let types = &self.data.resource_types;
-            let only_client_metrics = types.len() == 1 && types[0] == ConfigResourceType::ClientMetrics.id();
+            let only_client_metrics = types.len() == 1 && types[0] == config_resource::Type::ClientMetrics.id();
             if !only_client_metrics {
                 return Err(io::Error::new(
                     io::ErrorKind::Unsupported,
                     "The v0 ListConfigResources only supports CLIENT_METRICS",
                 ));
             }
-            return Ok(ConcreteRequest::ListConfigResources(ListConfigResourcesRequest::new(
+            return Ok(AbstractRequest::ListConfigResources(ListConfigResourcesRequest::new(
                 ListConfigResourcesRequestData::new(),
                 version,
             )));
         }
-        Ok(ConcreteRequest::ListConfigResources(ListConfigResourcesRequest::new(
+        Ok(AbstractRequest::ListConfigResources(ListConfigResourcesRequest::new(
             self.data.clone(),
             version,
         )))
@@ -172,24 +172,24 @@ mod tests {
     #[test]
     fn build_v0_rejects_non_client_metrics() {
         let mut data = ListConfigResourcesRequestData::new();
-        data.set_resource_types(vec![ConfigResourceType::Topic.id()]);
-        let mut builder = ListConfigResourcesRequestBuilder::new(data);
+        data.set_resource_types(vec![config_resource::Type::Topic.id()]);
+        let mut builder = Builder::new(data);
         assert!(builder.build_version(0).is_err());
     }
 
     #[test]
     fn build_v0_allows_client_metrics() {
         let mut data = ListConfigResourcesRequestData::new();
-        data.set_resource_types(vec![ConfigResourceType::ClientMetrics.id()]);
-        let mut builder = ListConfigResourcesRequestBuilder::new(data);
+        data.set_resource_types(vec![config_resource::Type::ClientMetrics.id()]);
+        let mut builder = Builder::new(data);
         assert!(builder.build_version(0).is_ok());
     }
 
     #[test]
     fn serialize_parse_round_trip() {
         let mut data = ListConfigResourcesRequestData::new();
-        data.set_resource_types(vec![ConfigResourceType::Topic.id(), ConfigResourceType::Broker.id()]);
-        let mut request = ConcreteRequest::ListConfigResources(ListConfigResourcesRequest::new(data, 1));
+        data.set_resource_types(vec![config_resource::Type::Topic.id(), config_resource::Type::Broker.id()]);
+        let mut request = AbstractRequest::ListConfigResources(ListConfigResourcesRequest::new(data, 1));
         let bytes = request.serialize().unwrap();
         let mut readable = crate::common::ByteBufferAccessor::new(bytes.into_buffer());
         let parsed = ListConfigResourcesRequest::parse(&mut readable, 1).unwrap();
@@ -203,8 +203,8 @@ mod tests {
     #[test]
     fn serialize_known_byte_vector_v1() {
         let mut data = ListConfigResourcesRequestData::new();
-        data.set_resource_types(vec![ConfigResourceType::Topic.id()]);
-        let mut request = ConcreteRequest::ListConfigResources(ListConfigResourcesRequest::new(data, 1));
+        data.set_resource_types(vec![config_resource::Type::Topic.id()]);
+        let mut request = AbstractRequest::ListConfigResources(ListConfigResourcesRequest::new(data, 1));
         let bytes = request.serialize().unwrap();
         let expected: &[u8] = &[
             0x02, // resource_types array length + 1

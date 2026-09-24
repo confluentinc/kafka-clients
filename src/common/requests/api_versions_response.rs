@@ -271,7 +271,7 @@ impl ApiVersionsResponse {
         enable_unstable_last_version: bool,
         client_telemetry_enabled: bool,
     ) -> Self {
-        ApiVersionsResponseBuilder::new()
+        Builder::new()
             .set_api_versions(Self::filter_apis(
                 listener_type,
                 enable_unstable_last_version,
@@ -295,7 +295,7 @@ impl std::fmt::Display for ApiVersionsResponse {
 /// Corresponds to `ApiVersionsResponse.Builder` in Java.
 #[derive(Debug)]
 #[doc(alias = "org.apache.kafka.common.requests.ApiVersionsResponse$Builder")]
-pub struct ApiVersionsResponseBuilder {
+pub struct Builder {
     error: Errors,
     throttle_time_ms: i32,
     api_versions: Option<Vec<ApiVersion>>,
@@ -306,7 +306,7 @@ pub struct ApiVersionsResponseBuilder {
     alter_feature_level0: bool,
 }
 
-impl ApiVersionsResponseBuilder {
+impl Builder {
     /// Creates a new builder with default values.
     pub fn new() -> Self {
         Self {
@@ -404,7 +404,7 @@ impl ApiVersionsResponseBuilder {
     }
 }
 
-impl Default for ApiVersionsResponseBuilder {
+impl Default for Builder {
     fn default() -> Self {
         Self::new()
     }
@@ -589,7 +589,7 @@ mod tests {
     /// Translated from `ApiVersionsResponseTest.shouldReturnAllKeysWhenThrottleMsIsDefaultThrottle`.
     #[test]
     fn test_should_return_all_keys_when_throttle_ms_is_default_throttle() {
-        let response = ApiVersionsResponseBuilder::new()
+        let response = Builder::new()
             .set_throttle_time_ms(super::super::AbstractResponse::DEFAULT_THROTTLE_TIME)
             .set_api_versions(ApiVersionsResponse::filter_apis(ListenerType::Broker, true, true))
             .set_supported_features(Vec::new())
@@ -615,7 +615,7 @@ mod tests {
     /// Translated from `ApiVersionsResponseTest.shouldCreateApiResponseWithTelemetryWhenEnabled`.
     #[test]
     fn test_should_create_api_response_with_telemetry_when_enabled() {
-        let response = ApiVersionsResponseBuilder::new()
+        let response = Builder::new()
             .set_throttle_time_ms(10)
             .set_api_versions(ApiVersionsResponse::filter_apis(ListenerType::Broker, true, true))
             .set_supported_features(Vec::new())
@@ -628,7 +628,7 @@ mod tests {
     /// Translated from `ApiVersionsResponseTest.shouldNotCreateApiResponseWithTelemetryWhenDisabled`.
     #[test]
     fn test_should_not_create_api_response_with_telemetry_when_disabled() {
-        let response = ApiVersionsResponseBuilder::new()
+        let response = Builder::new()
             .set_throttle_time_ms(10)
             .set_api_versions(ApiVersionsResponse::filter_apis(ListenerType::Broker, true, false))
             .set_supported_features(Vec::new())
@@ -642,7 +642,7 @@ mod tests {
     #[test]
     #[doc(alias = "org.apache.kafka.common.requests.ApiVersionsResponseTest#testBrokerApisAreEnabled")]
     fn test_broker_apis_are_enabled() {
-        let response = ApiVersionsResponseBuilder::new()
+        let response = Builder::new()
             .set_throttle_time_ms(super::super::AbstractResponse::DEFAULT_THROTTLE_TIME)
             .set_api_versions(ApiVersionsResponse::filter_apis(ListenerType::Broker, true, true))
             .set_supported_features(Vec::new())
@@ -735,7 +735,7 @@ mod tests {
         feature.set_min_version(0);
         feature.set_max_version(1);
 
-        let response = ApiVersionsResponseBuilder::new()
+        let response = Builder::new()
             .set_api_versions(ApiVersionsResponse::filter_apis(ListenerType::Broker, true, true))
             .set_supported_features(vec![feature])
             .set_finalized_features(HashMap::new())

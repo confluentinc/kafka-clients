@@ -31,7 +31,7 @@ use crate::KafkaClient;
 use crate::admin::KafkaAdminClient;
 use crate::common::Errors;
 use crate::common::errors::{DisconnectError, TimeoutError};
-use crate::common::requests::{ConcreteResponse, MetadataRequestBuilder, RequestBuilder};
+use crate::common::requests::{ConcreteResponse, RequestBuilder, metadata_request};
 use crate::common::utils::{ExponentialBackoff, LogContext};
 use crate::common::{Error, Node};
 use crate::{kafka_debug, kafka_error, kafka_info, kafka_trace};
@@ -769,10 +769,10 @@ impl<C: KafkaClient> AdminClientRunnable<C> {
             NodeProvider::MetadataUpdate,
             Box::new(|_timeout_ms| {
                 // Empty topic list: request brokers + controller only, matching Java.
-                Ok(
-                    Box::new(MetadataRequestBuilder::with_topics_allow_auto_topic_creation(Some(&[]), true))
-                        as Box<dyn RequestBuilder>,
-                )
+                Ok(Box::new(metadata_request::Builder::with_topics_allow_auto_topic_creation(
+                    Some(&[]),
+                    true,
+                )) as Box<dyn RequestBuilder>)
             }),
             Box::new(move |response, now, _cur_node| {
                 // Java does `(MetadataResponse) abstractResponse` unguarded

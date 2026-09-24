@@ -30,7 +30,7 @@ use crate::SaslHandshakeRequestData;
 use crate::SaslHandshakeResponseData;
 use crate::common::protocol::{ApiKeys, Errors, Readable};
 
-use super::ConcreteRequest;
+use super::AbstractRequest;
 use super::ConcreteResponse;
 use super::RequestBuilder;
 use super::SaslHandshakeResponse;
@@ -107,13 +107,13 @@ impl std::fmt::Display for SaslHandshakeRequest {
 /// Corresponds to `SaslHandshakeRequest.Builder` in Java.
 #[derive(Debug, Clone)]
 #[doc(alias = "org.apache.kafka.common.requests.SaslHandshakeRequest$Builder")]
-pub struct SaslHandshakeRequestBuilder {
+pub struct Builder {
     data: SaslHandshakeRequestData,
     oldest_allowed_version: i16,
     latest_allowed_version: i16,
 }
 
-impl SaslHandshakeRequestBuilder {
+impl Builder {
     /// Creates a new builder from the given data.
     #[doc(alias = "org.apache.kafka.common.requests.SaslHandshakeRequest$Builder#Builder")]
     pub fn new(data: SaslHandshakeRequestData) -> Self {
@@ -125,7 +125,7 @@ impl SaslHandshakeRequestBuilder {
     }
 }
 
-impl RequestBuilder for SaslHandshakeRequestBuilder {
+impl RequestBuilder for Builder {
     fn api_key(&self) -> &'static ApiKeys {
         &ApiKeys::SASL_HANDSHAKE
     }
@@ -138,15 +138,15 @@ impl RequestBuilder for SaslHandshakeRequestBuilder {
         self.latest_allowed_version
     }
 
-    fn build_version(&mut self, version: i16) -> io::Result<ConcreteRequest> {
-        Ok(ConcreteRequest::SaslHandshake(SaslHandshakeRequest::new(
+    fn build_version(&mut self, version: i16) -> io::Result<AbstractRequest> {
+        Ok(AbstractRequest::SaslHandshake(SaslHandshakeRequest::new(
             self.data.clone(),
             version,
         )))
     }
 }
 
-impl std::fmt::Display for SaslHandshakeRequestBuilder {
+impl std::fmt::Display for Builder {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.data)
     }
@@ -159,7 +159,7 @@ mod tests {
     #[test]
     fn test_builder_version_range() {
         let data = SaslHandshakeRequestData::new();
-        let builder = SaslHandshakeRequestBuilder::new(data);
+        let builder = Builder::new(data);
         assert_eq!(*builder.api_key(), ApiKeys::SASL_HANDSHAKE);
         assert_eq!(builder.oldest_allowed_version(), ApiKeys::SASL_HANDSHAKE.oldest_version());
         assert_eq!(builder.latest_allowed_version(), ApiKeys::SASL_HANDSHAKE.latest_version());
@@ -169,10 +169,10 @@ mod tests {
     fn test_builder_build() {
         let mut data = SaslHandshakeRequestData::new();
         data.set_mechanism("PLAIN".to_string());
-        let mut builder = SaslHandshakeRequestBuilder::new(data);
+        let mut builder = Builder::new(data);
         let request = builder.build().unwrap();
         assert_eq!(*request.api_key(), ApiKeys::SASL_HANDSHAKE);
-        if let ConcreteRequest::SaslHandshake(r) = &request {
+        if let AbstractRequest::SaslHandshake(r) = &request {
             assert_eq!(r.data().mechanism, "PLAIN");
         } else {
             panic!("Expected SaslHandshake request");
@@ -199,7 +199,7 @@ mod tests {
             data.set_mechanism("PLAIN".to_string());
             let original = SaslHandshakeRequest::new(data, version);
 
-            let serialized = ConcreteRequest::SaslHandshake(original.clone()).serialize().unwrap();
+            let serialized = AbstractRequest::SaslHandshake(original.clone()).serialize().unwrap();
             let mut buf = serialized;
             let parsed = SaslHandshakeRequest::parse(&mut buf, version).unwrap();
             assert_eq!(original.data().mechanism, parsed.data().mechanism);
@@ -224,11 +224,11 @@ mod tests {
     #[test]
     fn test_invalid_sasl_handshake_request() {
         use crate::common::ByteBufferAccessor;
-        use crate::common::requests::ConcreteRequest;
+        use crate::common::requests::AbstractRequest;
 
         let mut data = SaslHandshakeRequestData::new();
         data.set_mechanism("PLAIN".to_string());
-        let mut builder = SaslHandshakeRequestBuilder::new(data);
+        let mut builder = Builder::new(data);
         let mut request = builder.build().unwrap();
 
         let serialized = request.serialize().unwrap();
@@ -239,7 +239,7 @@ mod tests {
         corrupted[1] = corrupted_len[1];
 
         let mut buf = ByteBufferAccessor::new(corrupted);
-        let err = ConcreteRequest::parse_request(request.api_key(), request.version(), &mut buf).unwrap_err();
+        let err = AbstractRequest::parse_request(request.api_key(), request.version(), &mut buf).unwrap_err();
         assert_eq!(
             err.to_string(),
             "Error reading byte array of 32767 byte(s): only 5 byte(s) available"

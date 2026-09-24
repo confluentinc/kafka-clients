@@ -27,13 +27,13 @@
 use super::Authenticator;
 use super::ChannelMetadataRegistry;
 use super::ChannelState;
-use super::KafkaSend;
 use super::NetworkReceive;
 use super::NetworkSend;
 use super::Receive;
 use super::authentication_error_message;
 use super::channel_state::State;
 use super::{InterestOps, TransportLayer};
+use crate::common::network::Send as _;
 
 use crate::common::Error;
 use crate::common::errors::AuthenticationError;

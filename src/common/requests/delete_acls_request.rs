@@ -26,7 +26,7 @@ use crate::common::resource::{PatternType, ResourcePatternFilter, ResourceType};
 use crate::delete_acls_request_data::DeleteAclsFilter;
 use crate::delete_acls_response_data::DeleteAclsFilterResult;
 
-use super::{ConcreteRequest, ConcreteResponse, DeleteAclsResponse, RequestBuilder};
+use super::{AbstractRequest, ConcreteResponse, DeleteAclsResponse, RequestBuilder};
 
 /// A DeleteAcls request.
 ///
@@ -148,13 +148,13 @@ impl std::fmt::Display for DeleteAclsRequest {
 /// Corresponds to `DeleteAclsRequest.Builder` in Java.
 #[derive(Debug, Clone)]
 #[doc(alias = "org.apache.kafka.common.requests.DeleteAclsRequest$Builder")]
-pub struct DeleteAclsRequestBuilder {
+pub struct Builder {
     data: DeleteAclsRequestData,
     oldest_allowed_version: i16,
     latest_allowed_version: i16,
 }
 
-impl DeleteAclsRequestBuilder {
+impl Builder {
     /// Creates a builder from existing data.
     #[doc(alias = "org.apache.kafka.common.requests.DeleteAclsRequest$Builder#Builder")]
     pub fn new(data: DeleteAclsRequestData) -> Self {
@@ -166,7 +166,7 @@ impl DeleteAclsRequestBuilder {
     }
 }
 
-impl RequestBuilder for DeleteAclsRequestBuilder {
+impl RequestBuilder for Builder {
     fn api_key(&self) -> &'static ApiKeys {
         &ApiKeys::DELETE_ACLS
     }
@@ -179,7 +179,7 @@ impl RequestBuilder for DeleteAclsRequestBuilder {
         self.latest_allowed_version
     }
 
-    fn build_version(&mut self, version: i16) -> io::Result<ConcreteRequest> {
+    fn build_version(&mut self, version: i16) -> io::Result<AbstractRequest> {
         // Mirrors DeleteAclsRequest.normalizeAndValidate. Version 0 was removed
         // in Kafka 4.0 (valid versions 1-3), so the v0 pattern-type
         // normalization is unreachable; the UNKNOWN-elements guard remains.
@@ -195,7 +195,7 @@ impl RequestBuilder for DeleteAclsRequestBuilder {
                 format!("Filters contain UNKNOWN elements, filters: {:?}", self.data.filters),
             ));
         }
-        Ok(ConcreteRequest::DeleteAcls(DeleteAclsRequest::new(self.data.clone(), version)))
+        Ok(AbstractRequest::DeleteAcls(DeleteAclsRequest::new(self.data.clone(), version)))
     }
 }
 
@@ -226,7 +226,7 @@ mod tests {
         let mut data = DeleteAclsRequestData::new();
         data.set_filters(vec![DeleteAclsRequest::delete_acls_filter(&sample_filter())]);
         let version = ApiKeys::DELETE_ACLS.latest_version();
-        let mut request = ConcreteRequest::DeleteAcls(DeleteAclsRequest::new(data, version));
+        let mut request = AbstractRequest::DeleteAcls(DeleteAclsRequest::new(data, version));
         let bytes = request.serialize().unwrap();
         let mut readable = crate::common::ByteBufferAccessor::new(bytes.into_buffer());
         let parsed = DeleteAclsRequest::parse(&mut readable, version).unwrap();
@@ -260,7 +260,7 @@ mod tests {
         );
         let mut data = DeleteAclsRequestData::new();
         data.set_filters(vec![DeleteAclsRequest::delete_acls_filter(&filter)]);
-        let mut request = ConcreteRequest::DeleteAcls(DeleteAclsRequest::new(data, 3));
+        let mut request = AbstractRequest::DeleteAcls(DeleteAclsRequest::new(data, 3));
         let bytes = request.serialize().unwrap().into_buffer();
         let expected: Vec<u8> = vec![
             0x02, // Filters: compact array len+1 = 2 (one element)

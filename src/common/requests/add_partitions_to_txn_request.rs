@@ -23,7 +23,7 @@
 //! `v3_and_below_*` fields. From v4 it is a *broker* request, carrying a
 //! collection of transactions so a broker can batch-verify several at once
 //! (KIP-890). A producer only ever sends the v3-and-below shape — see
-//! [`AddPartitionsToTxnRequestBuilder::for_client`].
+//! [`Builder::for_client`].
 //!
 //! # Scope: broker-side request inspection is not translated
 //!
@@ -54,8 +54,8 @@ use crate::add_partitions_to_txn_response_data::{AddPartitionsToTxnPartitionResu
 use crate::common::TopicPartition;
 use crate::common::protocol::{ApiKeys, Errors, Readable};
 
+use super::AbstractRequest;
 use super::AddPartitionsToTxnResponse;
-use super::ConcreteRequest;
 use super::ConcreteResponse;
 use super::RequestBuilder;
 
@@ -198,13 +198,13 @@ impl std::fmt::Display for AddPartitionsToTxnRequest {
 /// named constructors; only the client one is translated (see the module docs).
 #[derive(Debug, Clone)]
 #[doc(alias = "org.apache.kafka.common.requests.AddPartitionsToTxnRequest$Builder")]
-pub struct AddPartitionsToTxnRequestBuilder {
+pub struct Builder {
     data: AddPartitionsToTxnRequestData,
     oldest_allowed_version: i16,
     latest_allowed_version: i16,
 }
 
-impl AddPartitionsToTxnRequestBuilder {
+impl Builder {
     /// Creates a builder for a producer's own transaction, capped at
     /// [`AddPartitionsToTxnRequest::LAST_CLIENT_VERSION`].
     ///
@@ -267,7 +267,7 @@ impl AddPartitionsToTxnRequestBuilder {
     }
 }
 
-impl RequestBuilder for AddPartitionsToTxnRequestBuilder {
+impl RequestBuilder for Builder {
     fn api_key(&self) -> &'static ApiKeys {
         &ApiKeys::ADD_PARTITIONS_TO_TXN
     }
@@ -280,9 +280,9 @@ impl RequestBuilder for AddPartitionsToTxnRequestBuilder {
         self.latest_allowed_version
     }
 
-    fn build_version(&mut self, version: i16) -> io::Result<ConcreteRequest> {
+    fn build_version(&mut self, version: i16) -> io::Result<AbstractRequest> {
         // Java's `Builder.build(short)` performs no validation for this request.
-        Ok(ConcreteRequest::AddPartitionsToTxn(AddPartitionsToTxnRequest::new(
+        Ok(AbstractRequest::AddPartitionsToTxn(AddPartitionsToTxnRequest::new(
             self.data.clone(),
             version,
         )))
@@ -300,7 +300,7 @@ mod tests {
 
     #[test]
     fn test_for_client_sets_v3_and_below_fields() {
-        let builder = AddPartitionsToTxnRequestBuilder::for_client("txn-1", 42, 7, &[tp("topic-a", 0)]);
+        let builder = Builder::for_client("txn-1", 42, 7, &[tp("topic-a", 0)]);
         let data = builder.data();
 
         assert_eq!(data.v3_and_below_transactional_id, "txn-1");
@@ -314,7 +314,7 @@ mod tests {
     /// even though the API itself supports higher ones.
     #[test]
     fn test_for_client_caps_the_version_at_last_client_version() {
-        let builder = AddPartitionsToTxnRequestBuilder::for_client("txn-1", 1, 0, &[tp("t", 0)]);
+        let builder = Builder::for_client("txn-1", 1, 0, &[tp("t", 0)]);
         assert_eq!(builder.latest_allowed_version(), AddPartitionsToTxnRequest::LAST_CLIENT_VERSION);
         assert_eq!(
             builder.oldest_allowed_version(),
@@ -328,7 +328,7 @@ mod tests {
 
     #[test]
     fn test_build_txn_topic_collection_groups_by_topic() {
-        let builder = AddPartitionsToTxnRequestBuilder::for_client(
+        let builder = Builder::for_client(
             "txn-1",
             1,
             0,
@@ -347,7 +347,7 @@ mod tests {
     #[test]
     fn test_get_partitions_round_trips_the_collection() {
         let partitions = vec![tp("topic-a", 0), tp("topic-a", 2), tp("topic-b", 1)];
-        let builder = AddPartitionsToTxnRequestBuilder::for_client("txn-1", 1, 0, &partitions);
+        let builder = Builder::for_client("txn-1", 1, 0, &partitions);
 
         let flattened = AddPartitionsToTxnRequest::get_partitions(&builder.data().v3_and_below_topics);
         assert_eq!(flattened, partitions);
@@ -361,17 +361,12 @@ mod tests {
     /// Below v4 the error is reported per partition, not top-level.
     #[test]
     fn test_get_error_response_v3_and_below_is_per_partition() {
-        let mut builder = AddPartitionsToTxnRequestBuilder::for_client(
-            "txn-1",
-            1,
-            0,
-            &[tp("topic-a", 0), tp("topic-a", 5), tp("topic-b", 1)],
-        );
+        let mut builder = Builder::for_client("txn-1", 1, 0, &[tp("topic-a", 0), tp("topic-a", 5), tp("topic-b", 1)]);
         let request = match builder
             .build_version(AddPartitionsToTxnRequest::LAST_CLIENT_VERSION)
             .expect("build")
         {
-            ConcreteRequest::AddPartitionsToTxn(request) => request,
+            AbstractRequest::AddPartitionsToTxn(request) => request,
             other => panic!("expected AddPartitionsToTxn, got {other:?}"),
         };
 
@@ -423,8 +418,7 @@ mod tests {
     fn test_serialization_round_trip_all_client_versions() {
         for version in ApiKeys::ADD_PARTITIONS_TO_TXN.oldest_version()..=AddPartitionsToTxnRequest::LAST_CLIENT_VERSION
         {
-            let mut builder =
-                AddPartitionsToTxnRequestBuilder::for_client("txn-1", 42, 7, &[tp("topic-a", 0), tp("topic-b", 1)]);
+            let mut builder = Builder::for_client("txn-1", 42, 7, &[tp("topic-a", 0), tp("topic-b", 1)]);
             let mut built = builder.build_version(version).expect("build");
             let mut buffer = built.serialize().expect("serialize");
             buffer.flip();
@@ -444,7 +438,7 @@ mod tests {
 
     #[test]
     fn test_api_key_and_version() {
-        let builder = AddPartitionsToTxnRequestBuilder::for_client("txn-1", 1, 0, &[]);
+        let builder = Builder::for_client("txn-1", 1, 0, &[]);
         assert_eq!(builder.api_key(), &ApiKeys::ADD_PARTITIONS_TO_TXN);
         let request = AddPartitionsToTxnRequest::new(AddPartitionsToTxnRequestData::new(), 2);
         assert_eq!(request.api_key(), &ApiKeys::ADD_PARTITIONS_TO_TXN);
@@ -470,10 +464,9 @@ mod tests {
         for version in ApiKeys::ADD_PARTITIONS_TO_TXN.oldest_version()..=AddPartitionsToTxnRequest::LAST_CLIENT_VERSION
         {
             let partitions = vec![tp("topic", 0), tp("topic", 1)];
-            let mut builder =
-                AddPartitionsToTxnRequestBuilder::for_client("transaction1", PRODUCER_ID, PRODUCER_EPOCH, &partitions);
+            let mut builder = Builder::for_client("transaction1", PRODUCER_ID, PRODUCER_EPOCH, &partitions);
             let request = match builder.build_version(version).expect("build") {
-                ConcreteRequest::AddPartitionsToTxn(request) => request,
+                AbstractRequest::AddPartitionsToTxn(request) => request,
                 other => panic!("expected AddPartitionsToTxn, got {other:?}"),
             };
 
@@ -528,7 +521,7 @@ mod tests {
         // 0/1/2 exercises the same non-flexible layout. v2 is the last
         // non-flexible version.
         let version: i16 = 2;
-        let mut builder = AddPartitionsToTxnRequestBuilder::for_client("txn-1", 42, 7, &[tp("topic-a", 0)]);
+        let mut builder = Builder::for_client("txn-1", 42, 7, &[tp("topic-a", 0)]);
         let mut built = builder.build_version(version).expect("build");
         let actual = built.serialize().expect("serialize");
 
@@ -589,7 +582,7 @@ mod tests {
     #[test]
     fn test_serialize_wire_bytes_v3_flexible() {
         let version: i16 = 3;
-        let mut builder = AddPartitionsToTxnRequestBuilder::for_client("txn-1", 42, 7, &[tp("topic-a", 0)]);
+        let mut builder = Builder::for_client("txn-1", 42, 7, &[tp("topic-a", 0)]);
         let mut built = builder.build_version(version).expect("build");
         let actual = built.serialize().expect("serialize");
 

@@ -24,7 +24,7 @@ use crate::admin::ListTransactionsOptions;
 use crate::admin::TransactionListing;
 use crate::admin::TransactionState;
 use crate::common::Errors;
-use crate::common::requests::{ConcreteResponse, ListTransactionsRequestBuilder, RequestBuilder};
+use crate::common::requests::{ConcreteResponse, RequestBuilder, list_transactions_request};
 use crate::common::utils::LogContext;
 use crate::common::{Error, Node};
 use crate::{kafka_debug, kafka_error};
@@ -101,7 +101,7 @@ impl AdminApiHandler<BrokerKey, Vec<TransactionListing>> for ListTransactionsHan
     fn build_request(&self, _broker_id: i32, keys: &HashSet<BrokerKey>) -> Vec<RequestAndKeys<BrokerKey>> {
         let data = self.build_batched_request();
         vec![RequestAndKeys {
-            request: Box::new(ListTransactionsRequestBuilder::new(data)) as Box<dyn RequestBuilder>,
+            request: Box::new(list_transactions_request::Builder::new(data)) as Box<dyn RequestBuilder>,
             keys: keys.clone(),
         }]
     }

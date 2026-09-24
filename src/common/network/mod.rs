@@ -71,7 +71,7 @@ pub use receive::Receive;
 pub use sasl_channel_builder::SaslChannelBuilder;
 pub use selectable::Selectable;
 pub use selector::Selector;
-pub use send::KafkaSend;
+pub use send::Send;
 pub use ssl_channel_builder::SslChannelBuilder;
 pub use ssl_transport_layer::SslTransportLayer;
 pub use transport_layer::{InterestOps, TransportLayer};

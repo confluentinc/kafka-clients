@@ -132,10 +132,10 @@ mod tests {
     /// Translated from `testBuildRequest`.
     #[test]
     fn test_build_request() {
-        use crate::common::requests::ConcreteRequest;
+        use crate::common::requests::AbstractRequest;
         let mut builder = handler().build_batched_request(1, &keys());
         match builder.build().unwrap() {
-            ConcreteRequest::DeleteGroups(r) => {
+            AbstractRequest::DeleteGroups(r) => {
                 assert_eq!(r.data().groups_names.len(), 1);
                 assert_eq!(r.data().groups_names[0], GROUP_ID1);
             },

@@ -233,7 +233,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 
 use crate::common::acl::{AclBinding, AclBindingFilter};
-use crate::common::config::{ConfigResource, ConfigResourceType};
+use crate::common::config::{ConfigResource, config_resource};
 use crate::common::quota::{ClientQuotaAlteration, ClientQuotaFilter};
 use crate::common::{ElectionType, Error, TopicCollection, TopicPartition, TopicPartitionReplica};
 use crate::consumer::OffsetAndMetadata;
@@ -554,7 +554,7 @@ pub trait Admin: Send + Sync {
     #[doc(alias = "org.apache.kafka.clients.admin.Admin#listConfigResources")]
     fn list_config_resources_with_options(
         &self,
-        config_resource_types: &HashSet<ConfigResourceType>,
+        config_resource_types: &HashSet<config_resource::Type>,
         options: ListConfigResourcesOptions,
     ) -> ListConfigResourcesResult;
 
@@ -1379,7 +1379,7 @@ mod tests {
         assert!(
             convenience
                 .iter()
-                .any(|resource| resource.resource_type() == ConfigResourceType::Topic),
+                .any(|resource| resource.resource_type() == config_resource::Type::Topic),
             "an empty type set must not mean an empty result: {convenience:?}"
         );
     }

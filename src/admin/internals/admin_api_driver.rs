@@ -585,7 +585,7 @@ pub(crate) mod test_support {
     use crate::admin::internals::{AdminApiHandler, ApiResult, RequestAndKeys};
     use crate::admin::internals::{AdminApiLookupStrategy, LookupResult};
     use crate::common::ApiKeys;
-    use crate::common::requests::{ConcreteResponse, MetadataRequestBuilder, MetadataResponse, RequestBuilder};
+    use crate::common::requests::{ConcreteResponse, MetadataResponse, RequestBuilder, metadata_request};
     use crate::common::utils::{ExponentialBackoff, LogContext};
     use crate::common::{Error, Node};
 
@@ -709,7 +709,7 @@ pub(crate) mod test_support {
                 self.expected.lock().unwrap().contains_key(&set),
                 "Unexpected lookup request for keys {set:?}"
             );
-            Box::new(MetadataRequestBuilder::with_topics_allow_auto_topic_creation(None, false))
+            Box::new(metadata_request::Builder::with_topics_allow_auto_topic_creation(None, false))
         }
 
         fn handle_response(&self, keys: &HashSet<String>, _response: &ConcreteResponse) -> LookupResult<String> {
@@ -748,7 +748,7 @@ pub(crate) mod test_support {
                 "Unexpected fulfillment request for keys {set:?}"
             );
             vec![RequestAndKeys {
-                request: Box::new(MetadataRequestBuilder::with_topics_allow_auto_topic_creation(None, false)),
+                request: Box::new(metadata_request::Builder::with_topics_allow_auto_topic_creation(None, false)),
                 keys: keys.clone(),
             }]
         }

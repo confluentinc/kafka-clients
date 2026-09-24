@@ -17,7 +17,7 @@
 //! Corresponds to `org.apache.kafka.common.requests.ListOffsetsRequest`.
 //!
 //! Wraps the auto-generated [`ListOffsetsRequestData`] and exposes a
-//! [`ListOffsetsRequestBuilder`] that picks the right version based on the
+//! [`Builder`] that picks the right version based on the
 //! consumer's options (require timestamp, isolation level, etc.).
 
 use crate::common::Error;
@@ -34,7 +34,7 @@ use crate::list_offsets_response_data::{ListOffsetsPartitionResponse, ListOffset
 
 use super::ConcreteResponse;
 use super::ListOffsetsResponse;
-use super::abstract_request::{ConcreteRequest, RequestBuilder};
+use super::abstract_request::{AbstractRequest, RequestBuilder};
 
 /// A `ListOffsets` request.
 ///
@@ -219,7 +219,7 @@ impl std::fmt::Display for ListOffsetsRequest {
 /// Corresponds to `ListOffsetsRequest.Builder` in Java.
 #[derive(Debug, Clone)]
 #[doc(alias = "org.apache.kafka.common.requests.ListOffsetsRequest$Builder")]
-pub struct ListOffsetsRequestBuilder {
+pub struct Builder {
     data: ListOffsetsRequestData,
     oldest_allowed_version: i16,
     latest_allowed_version: i16,
@@ -364,7 +364,7 @@ impl ListOffsetsRequestBuilderOptionsBuilder {
     }
 }
 
-impl ListOffsetsRequestBuilder {
+impl Builder {
     /// Constructs a consumer-side builder.
     ///
     /// Corresponds to Java's
@@ -467,7 +467,7 @@ impl ListOffsetsRequestBuilder {
     }
 }
 
-impl RequestBuilder for ListOffsetsRequestBuilder {
+impl RequestBuilder for Builder {
     fn api_key(&self) -> &'static ApiKeys {
         &ApiKeys::LIST_OFFSETS
     }
@@ -480,7 +480,7 @@ impl RequestBuilder for ListOffsetsRequestBuilder {
         self.latest_allowed_version
     }
 
-    fn build_version(&mut self, version: i16) -> io::Result<ConcreteRequest> {
+    fn build_version(&mut self, version: i16) -> io::Result<AbstractRequest> {
         if version < self.oldest_allowed_version || version > self.latest_allowed_version {
             return Err(io::Error::new(
                 io::ErrorKind::Unsupported,
@@ -490,7 +490,7 @@ impl RequestBuilder for ListOffsetsRequestBuilder {
                 ),
             ));
         }
-        Ok(ConcreteRequest::ListOffsets(ListOffsetsRequest::new(
+        Ok(AbstractRequest::ListOffsets(ListOffsetsRequest::new(
             self.data.clone(),
             version,
         )))
@@ -506,7 +506,7 @@ mod tests {
     /// request (translated from `Builder.forConsumer(false, READ_UNCOMMITTED)`).
     #[test]
     fn for_consumer_default_uses_oldest_version() {
-        let builder = ListOffsetsRequestBuilder::for_consumer(false, IsolationLevel::ReadUncommitted);
+        let builder = Builder::for_consumer(false, IsolationLevel::ReadUncommitted);
         assert_eq!(builder.oldest_allowed_version(), ApiKeys::LIST_OFFSETS.oldest_version());
         assert_eq!(builder.latest_allowed_version(), ApiKeys::LIST_OFFSETS.latest_version());
     }
@@ -514,21 +514,21 @@ mod tests {
     /// Verifies that `READ_COMMITTED` forces minimum v2.
     #[test]
     fn for_consumer_read_committed_forces_v2() {
-        let builder = ListOffsetsRequestBuilder::for_consumer(false, IsolationLevel::ReadCommitted);
+        let builder = Builder::for_consumer(false, IsolationLevel::ReadCommitted);
         assert_eq!(builder.oldest_allowed_version(), 2);
     }
 
     /// Verifies that `requireTimestamp` forces minimum v1.
     #[test]
     fn for_consumer_require_timestamp_forces_v1() {
-        let builder = ListOffsetsRequestBuilder::for_consumer(true, IsolationLevel::ReadUncommitted);
+        let builder = Builder::for_consumer(true, IsolationLevel::ReadUncommitted);
         assert_eq!(builder.oldest_allowed_version(), 1);
     }
 
     /// Verifies that `requireMaxTimestamp` forces minimum v7.
     #[test]
     fn for_consumer_require_max_timestamp_forces_v7() {
-        let builder = ListOffsetsRequestBuilder::for_consumer_options(
+        let builder = Builder::for_consumer_options(
             ListOffsetsRequestBuilderOptionsBuilder::new()
                 .set_require_timestamp(true)
                 .set_isolation_level(IsolationLevel::ReadCommitted)
@@ -542,7 +542,7 @@ mod tests {
     /// Verifies that `requireEarliestPendingUploadTimestamp` forces minimum v11.
     #[test]
     fn for_consumer_require_earliest_pending_upload_forces_v11() {
-        let builder = ListOffsetsRequestBuilder::for_consumer_options(
+        let builder = Builder::for_consumer_options(
             ListOffsetsRequestBuilderOptionsBuilder::new()
                 .set_require_timestamp(true)
                 .set_isolation_level(IsolationLevel::ReadCommitted)

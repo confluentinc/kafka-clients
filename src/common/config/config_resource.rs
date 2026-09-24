@@ -22,7 +22,7 @@
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 #[doc(alias = "org.apache.kafka.common.config.ConfigResource$Type")]
-pub enum ConfigResourceType {
+pub enum Type {
     /// A consumer group.
     Group,
     /// A client-metrics subscription.
@@ -37,35 +37,35 @@ pub enum ConfigResourceType {
     Unknown,
 }
 
-impl ConfigResourceType {
+impl Type {
     /// Returns the wire id for this resource type.
     ///
     /// Corresponds to `ConfigResource.Type.id()`.
     #[doc(alias = "org.apache.kafka.common.config.ConfigResource$Type#id")]
     pub fn id(&self) -> i8 {
         match self {
-            ConfigResourceType::Group => 32,
-            ConfigResourceType::ClientMetrics => 16,
-            ConfigResourceType::BrokerLogger => 8,
-            ConfigResourceType::Broker => 4,
-            ConfigResourceType::Topic => 2,
-            ConfigResourceType::Unknown => 0,
+            Type::Group => 32,
+            Type::ClientMetrics => 16,
+            Type::BrokerLogger => 8,
+            Type::Broker => 4,
+            Type::Topic => 2,
+            Type::Unknown => 0,
         }
     }
 
     /// Returns the resource type for the given wire id, or
-    /// [`ConfigResourceType::Unknown`] if the id is unrecognized.
+    /// [`Type::Unknown`] if the id is unrecognized.
     ///
     /// Corresponds to `ConfigResource.Type.forId(byte)`.
     #[doc(alias = "org.apache.kafka.common.config.ConfigResource$Type#forId")]
-    pub fn for_id(id: i8) -> ConfigResourceType {
+    pub fn for_id(id: i8) -> Type {
         match id {
-            32 => ConfigResourceType::Group,
-            16 => ConfigResourceType::ClientMetrics,
-            8 => ConfigResourceType::BrokerLogger,
-            4 => ConfigResourceType::Broker,
-            2 => ConfigResourceType::Topic,
-            _ => ConfigResourceType::Unknown,
+            32 => Type::Group,
+            16 => Type::ClientMetrics,
+            8 => Type::BrokerLogger,
+            4 => Type::Broker,
+            2 => Type::Topic,
+            _ => Type::Unknown,
         }
     }
 }
@@ -76,7 +76,7 @@ impl ConfigResourceType {
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 #[doc(alias = "org.apache.kafka.common.config.ConfigResource")]
 pub struct ConfigResource {
-    resource_type: ConfigResourceType,
+    resource_type: Type,
     name: String,
 }
 
@@ -86,12 +86,12 @@ impl ConfigResource {
     /// * `resource_type` - a resource type
     /// * `name` - a resource name
     #[doc(alias = "org.apache.kafka.common.config.ConfigResource#ConfigResource")]
-    pub fn new(resource_type: ConfigResourceType, name: String) -> Self {
+    pub fn new(resource_type: Type, name: String) -> Self {
         Self { resource_type, name }
     }
 
     /// Return the resource type.
-    pub fn resource_type(&self) -> ConfigResourceType {
+    pub fn resource_type(&self) -> Type {
         self.resource_type
     }
 
@@ -122,43 +122,43 @@ mod tests {
     #[test]
     fn type_id_round_trip() {
         for t in [
-            ConfigResourceType::Group,
-            ConfigResourceType::ClientMetrics,
-            ConfigResourceType::BrokerLogger,
-            ConfigResourceType::Broker,
-            ConfigResourceType::Topic,
-            ConfigResourceType::Unknown,
+            Type::Group,
+            Type::ClientMetrics,
+            Type::BrokerLogger,
+            Type::Broker,
+            Type::Topic,
+            Type::Unknown,
         ] {
-            assert_eq!(ConfigResourceType::for_id(t.id()), t);
+            assert_eq!(Type::for_id(t.id()), t);
         }
     }
 
     #[test]
     fn type_ids_match_java() {
-        assert_eq!(ConfigResourceType::Group.id(), 32);
-        assert_eq!(ConfigResourceType::ClientMetrics.id(), 16);
-        assert_eq!(ConfigResourceType::BrokerLogger.id(), 8);
-        assert_eq!(ConfigResourceType::Broker.id(), 4);
-        assert_eq!(ConfigResourceType::Topic.id(), 2);
-        assert_eq!(ConfigResourceType::Unknown.id(), 0);
+        assert_eq!(Type::Group.id(), 32);
+        assert_eq!(Type::ClientMetrics.id(), 16);
+        assert_eq!(Type::BrokerLogger.id(), 8);
+        assert_eq!(Type::Broker.id(), 4);
+        assert_eq!(Type::Topic.id(), 2);
+        assert_eq!(Type::Unknown.id(), 0);
     }
 
     #[test]
     fn for_id_unknown_falls_back() {
-        assert_eq!(ConfigResourceType::for_id(99), ConfigResourceType::Unknown);
+        assert_eq!(Type::for_id(99), Type::Unknown);
     }
 
     #[test]
     fn is_default_when_name_empty() {
-        assert!(ConfigResource::new(ConfigResourceType::Broker, String::new()).is_default());
-        assert!(!ConfigResource::new(ConfigResourceType::Broker, "0".to_string()).is_default());
+        assert!(ConfigResource::new(Type::Broker, String::new()).is_default());
+        assert!(!ConfigResource::new(Type::Broker, "0".to_string()).is_default());
     }
 
     #[test]
     fn equality_uses_type_and_name() {
-        let a = ConfigResource::new(ConfigResourceType::Topic, "t".to_string());
-        let b = ConfigResource::new(ConfigResourceType::Topic, "t".to_string());
-        let c = ConfigResource::new(ConfigResourceType::Broker, "t".to_string());
+        let a = ConfigResource::new(Type::Topic, "t".to_string());
+        let b = ConfigResource::new(Type::Topic, "t".to_string());
+        let c = ConfigResource::new(Type::Broker, "t".to_string());
         assert_eq!(a, b);
         assert_ne!(a, c);
     }

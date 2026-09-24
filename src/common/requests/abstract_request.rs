@@ -18,7 +18,7 @@
 //!
 //! Java uses an abstract class with per-type subclasses and an inner `Builder`
 //! abstract class. In Rust we use:
-//! - `ConcreteRequest` enum with a variant for each supported request type
+//! - `AbstractRequest` enum with a variant for each supported request type
 //! - `RequestBuilder` trait for constructing requests at a specific version
 
 use std::io;
@@ -157,7 +157,7 @@ pub trait RequestBuilder: Send {
     /// # Errors
     ///
     /// Returns an error if the version is unsupported or preconditions are violated.
-    fn build(&mut self) -> io::Result<ConcreteRequest> {
+    fn build(&mut self) -> io::Result<AbstractRequest> {
         self.build_version(self.latest_allowed_version())
     }
 
@@ -166,18 +166,20 @@ pub trait RequestBuilder: Send {
     /// # Errors
     ///
     /// Returns an error if the version is unsupported or preconditions are violated.
-    fn build_version(&mut self, version: i16) -> io::Result<ConcreteRequest>;
+    fn build_version(&mut self, version: i16) -> io::Result<AbstractRequest>;
 }
 
 /// Enum dispatch for all supported Kafka request types.
 ///
-/// Each variant wraps a concrete request struct. Common methods are dispatched
-/// via `match` on the variant.
+/// Translates Java's abstract class `AbstractRequest`: each variant wraps one
+/// of its concrete subclasses, and the methods Java dispatches virtually are
+/// dispatched via `match` on the variant.
 ///
 /// Variants will be added as request types are translated.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
-pub enum ConcreteRequest {
+#[doc(alias = "org.apache.kafka.common.requests.AbstractRequest")]
+pub enum AbstractRequest {
     /// An ApiVersions request.
     ApiVersions(ApiVersionsRequest),
     /// A Metadata request.
@@ -285,7 +287,7 @@ pub enum ConcreteRequest {
     ListTransactions(ListTransactionsRequest),
 }
 
-impl ConcreteRequest {
+impl AbstractRequest {
     /// Returns the API version of this request.
     pub fn version(&self) -> i16 {
         match self {
@@ -1064,7 +1066,7 @@ impl ConcreteRequest {
     }
 }
 
-impl std::fmt::Display for ConcreteRequest {
+impl std::fmt::Display for AbstractRequest {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::ApiVersions(r) => write!(f, "{r}"),
@@ -1135,7 +1137,7 @@ mod tests {
     /// carried by the public `name` field.
     #[test]
     fn test_serialize_with_header_api_key_mismatch_message() {
-        let mut request = ConcreteRequest::Metadata(MetadataRequest::new(MetadataRequestData::new(), 12));
+        let mut request = AbstractRequest::Metadata(MetadataRequest::new(MetadataRequestData::new(), 12));
         let header = RequestHeader::with_options(
             RequestHeaderOptionsBuilder::new()
                 .set_request_api_key(&ApiKeys::PRODUCE)
@@ -1163,7 +1165,7 @@ mod tests {
     /// pinned here so the pair of messages stays covered together.
     #[test]
     fn test_serialize_with_header_version_mismatch_message() {
-        let mut request = ConcreteRequest::Metadata(MetadataRequest::new(MetadataRequestData::new(), 12));
+        let mut request = AbstractRequest::Metadata(MetadataRequest::new(MetadataRequestData::new(), 12));
         let header = RequestHeader::with_options(
             RequestHeaderOptionsBuilder::new()
                 .set_request_api_key(&ApiKeys::METADATA)
@@ -1189,7 +1191,7 @@ mod tests {
     #[test]
     fn test_parse_request_unhandled_api_key_message() {
         let mut readable = ByteBufferAccessor::new(Vec::new());
-        let error = ConcreteRequest::parse_request(&ApiKeys::VOTE, 0, &mut readable)
+        let error = AbstractRequest::parse_request(&ApiKeys::VOTE, 0, &mut readable)
             .expect_err("VOTE is a broker-only api with no client-side parser");
         assert_eq!(error.kind(), io::ErrorKind::Unsupported);
         assert_eq!(

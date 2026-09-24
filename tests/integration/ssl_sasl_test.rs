@@ -35,7 +35,7 @@ use confluent_kafka::common::network::selectable::USE_DEFAULT_BUFFER_SIZE;
 use confluent_kafka::common::protocol::{ApiKeys, ByteBufferAccessor, Errors};
 use confluent_kafka::common::requests::ConcreteResponse;
 use confluent_kafka::common::requests::{
-    ApiVersionsRequestBuilder, RequestBuilder, RequestHeader, RequestHeaderOptionsBuilder,
+    RequestBuilder, RequestHeader, RequestHeaderOptionsBuilder, api_versions_request,
 };
 use confluent_kafka::common::security::SecurityProtocol;
 use confluent_kafka::common::security::SslFactory;
@@ -229,7 +229,7 @@ async fn test_ssl_connection() {
     poll_until_ready(&mut selector, NODE_ID).await;
 
     // Send ApiVersions to verify data flows over TLS
-    let mut builder = ApiVersionsRequestBuilder::new();
+    let mut builder = api_versions_request::Builder::new();
     let (send, header) = build_request_send(&mut builder, "ssl-test", 1, NODE_ID);
     selector.send(send).expect("Failed to queue send");
     poll_until_receive(&mut selector).await;
@@ -261,7 +261,7 @@ async fn test_sasl_plaintext_connection() {
     poll_until_ready(&mut selector, NODE_ID).await;
 
     // Verify with an ApiVersionsRequest
-    let mut builder = ApiVersionsRequestBuilder::new();
+    let mut builder = api_versions_request::Builder::new();
     let (send, header) = build_request_send(&mut builder, "sasl-test", 1, NODE_ID);
     selector.send(send).expect("Failed to queue send");
     poll_until_receive(&mut selector).await;
@@ -293,7 +293,7 @@ async fn test_sasl_ssl_connection() {
     poll_until_ready(&mut selector, NODE_ID).await;
 
     // Verify with an ApiVersionsRequest
-    let mut builder = ApiVersionsRequestBuilder::new();
+    let mut builder = api_versions_request::Builder::new();
     let (send, header) = build_request_send(&mut builder, "sasl-ssl-test", 1, NODE_ID);
     selector.send(send).expect("Failed to queue send");
     poll_until_receive(&mut selector).await;

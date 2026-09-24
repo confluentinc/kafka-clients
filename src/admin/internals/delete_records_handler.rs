@@ -25,7 +25,7 @@ use crate::admin::DeletedRecords;
 use crate::admin::RecordsToDelete;
 use crate::common::Errors;
 use crate::common::errors::ApiError;
-use crate::common::requests::{ConcreteResponse, DeleteRecordsRequestBuilder, RequestBuilder};
+use crate::common::requests::{ConcreteResponse, RequestBuilder, delete_records_request};
 use crate::common::utils::LogContext;
 use crate::common::{Error, Node, TopicPartition};
 use crate::delete_records_request_data::{DeleteRecordsPartition, DeleteRecordsTopic};
@@ -152,7 +152,7 @@ impl AdminApiHandler<TopicPartition, DeletedRecords> for DeleteRecordsHandler {
     fn build_request(&self, broker_id: i32, keys: &HashSet<TopicPartition>) -> Vec<RequestAndKeys<TopicPartition>> {
         let data = self.build_batched_request(broker_id, keys);
         vec![RequestAndKeys {
-            request: Box::new(DeleteRecordsRequestBuilder::new(data)) as Box<dyn RequestBuilder>,
+            request: Box::new(delete_records_request::Builder::new(data)) as Box<dyn RequestBuilder>,
             keys: keys.clone(),
         }]
     }

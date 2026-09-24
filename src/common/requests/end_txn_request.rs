@@ -25,7 +25,7 @@ use crate::EndTxnRequestData;
 use crate::EndTxnResponseData;
 use crate::common::protocol::{ApiKeys, Errors, Readable};
 
-use super::ConcreteRequest;
+use super::AbstractRequest;
 use super::ConcreteResponse;
 use super::EndTxnResponse;
 use super::RequestBuilder;
@@ -45,7 +45,7 @@ impl EndTxnRequest {
     /// Highest version predating KIP-890 Transaction V2.
     ///
     /// A client that has not negotiated Transaction V2 must not send above this, so
-    /// [`EndTxnRequestBuilder::build_version`] clamps to it. Corresponds to
+    /// [`Builder::build_version`] clamps to it. Corresponds to
     /// `EndTxnRequest.LAST_STABLE_VERSION_BEFORE_TRANSACTION_V2`.
     pub const LAST_STABLE_VERSION_BEFORE_TRANSACTION_V2: i16 = 4;
 
@@ -125,14 +125,14 @@ impl std::fmt::Display for EndTxnRequest {
 /// Corresponds to `EndTxnRequest.Builder` in Java.
 #[derive(Debug, Clone)]
 #[doc(alias = "org.apache.kafka.common.requests.EndTxnRequest$Builder")]
-pub struct EndTxnRequestBuilder {
+pub struct Builder {
     data: EndTxnRequestData,
     is_transaction_v2_enabled: bool,
     oldest_allowed_version: i16,
     latest_allowed_version: i16,
 }
 
-impl EndTxnRequestBuilder {
+impl Builder {
     /// Creates a builder.
     ///
     /// `is_transaction_v2_enabled` reflects whether the broker's finalized
@@ -171,7 +171,7 @@ impl EndTxnRequestBuilder {
     }
 }
 
-impl RequestBuilder for EndTxnRequestBuilder {
+impl RequestBuilder for Builder {
     fn api_key(&self) -> &'static ApiKeys {
         &ApiKeys::END_TXN
     }
@@ -193,13 +193,13 @@ impl RequestBuilder for EndTxnRequestBuilder {
     /// it silently downgrades rather than erroring: a client that has not
     /// negotiated TV2 must speak the older dialect even if the broker offers a
     /// higher version.
-    fn build_version(&mut self, version: i16) -> io::Result<ConcreteRequest> {
+    fn build_version(&mut self, version: i16) -> io::Result<AbstractRequest> {
         let version = if self.is_transaction_v2_enabled {
             version
         } else {
             version.min(EndTxnRequest::LAST_STABLE_VERSION_BEFORE_TRANSACTION_V2)
         };
-        Ok(ConcreteRequest::EndTxn(EndTxnRequest::new(self.data.clone(), version)))
+        Ok(AbstractRequest::EndTxn(EndTxnRequest::new(self.data.clone(), version)))
     }
 }
 
@@ -217,9 +217,9 @@ mod tests {
     }
 
     fn build_at(version: i16, transaction_v2: bool) -> EndTxnRequest {
-        let mut builder = EndTxnRequestBuilder::new(data(true), transaction_v2);
+        let mut builder = Builder::new(data(true), transaction_v2);
         match builder.build_version(version).expect("build") {
-            ConcreteRequest::EndTxn(request) => request,
+            AbstractRequest::EndTxn(request) => request,
             other => panic!("expected EndTxn, got {other:?}"),
         }
     }
@@ -236,17 +236,17 @@ mod tests {
     /// `committed` selects commit vs abort.
     #[test]
     fn test_result_maps_committed_flag() {
-        let mut builder = EndTxnRequestBuilder::new(data(true), false);
+        let mut builder = Builder::new(data(true), false);
         match builder.build_version(0).expect("build") {
-            ConcreteRequest::EndTxn(request) => {
+            AbstractRequest::EndTxn(request) => {
                 assert_eq!(request.result(), TransactionResult::Commit)
             },
             other => panic!("unexpected {other:?}"),
         }
 
-        let mut builder = EndTxnRequestBuilder::new(data(false), false);
+        let mut builder = Builder::new(data(false), false);
         match builder.build_version(0).expect("build") {
-            ConcreteRequest::EndTxn(request) => {
+            AbstractRequest::EndTxn(request) => {
                 assert_eq!(request.result(), TransactionResult::Abort)
             },
             other => panic!("unexpected {other:?}"),
@@ -302,7 +302,7 @@ mod tests {
         for version in ApiKeys::END_TXN.oldest_version()..=ApiKeys::END_TXN.latest_version() {
             // Enable TV2 so the requested version is not clamped, letting the
             // round trip cover every version the API supports.
-            let mut builder = EndTxnRequestBuilder::new(data(true), true);
+            let mut builder = Builder::new(data(true), true);
             let mut built = builder.build_version(version).expect("build");
             let mut buffer = built.serialize().expect("serialize");
             buffer.flip();
@@ -326,9 +326,9 @@ mod tests {
         const THROTTLE_TIME_MS: i32 = 10;
 
         for version in ApiKeys::END_TXN.oldest_version()..=ApiKeys::END_TXN.latest_version() {
-            let mut builder = EndTxnRequestBuilder::new(data(true), true);
+            let mut builder = Builder::new(data(true), true);
             let request = match builder.build_version(version).expect("build") {
-                ConcreteRequest::EndTxn(request) => request,
+                AbstractRequest::EndTxn(request) => request,
                 other => panic!("expected EndTxn, got {other:?}"),
             };
 
@@ -352,7 +352,7 @@ mod tests {
     /// Java's `@ValueSource(booleans = {true, false})` becomes a loop. Java uses
     /// the three-argument builder here; the extra `enableUnstableLastVersion`
     /// argument has no counterpart in this codebase (see
-    /// [`EndTxnRequestBuilder::new`]) and Java passes `false`, which is the
+    /// [`Builder::new`]) and Java passes `false`, which is the
     /// default the two-argument form gives.
     #[test]
     #[doc(
@@ -362,9 +362,9 @@ mod tests {
         let latest_version = ApiKeys::END_TXN.latest_version();
 
         for is_transaction_v2_enabled in [true, false] {
-            let mut builder = EndTxnRequestBuilder::new(data(true), is_transaction_v2_enabled);
+            let mut builder = Builder::new(data(true), is_transaction_v2_enabled);
             let request = match builder.build_version(latest_version).expect("build") {
-                ConcreteRequest::EndTxn(request) => request,
+                AbstractRequest::EndTxn(request) => request,
                 other => panic!("expected EndTxn, got {other:?}"),
             };
 
@@ -387,10 +387,10 @@ mod tests {
 
     #[test]
     fn test_api_key_and_accessors() {
-        let builder = EndTxnRequestBuilder::new(data(true), false);
+        let builder = Builder::new(data(true), false);
         assert_eq!(builder.api_key(), &ApiKeys::END_TXN);
         assert!(!builder.is_transaction_v2_enabled());
-        assert!(EndTxnRequestBuilder::new(data(true), true).is_transaction_v2_enabled());
+        assert!(Builder::new(data(true), true).is_transaction_v2_enabled());
 
         let request = EndTxnRequest::new(data(true), 3);
         assert_eq!(request.api_key(), &ApiKeys::END_TXN);
@@ -406,7 +406,7 @@ mod tests {
     /// correct if the flag ever flips upstream.
     #[test]
     fn test_builder_offers_only_released_versions() {
-        let builder = EndTxnRequestBuilder::new(data(true), true);
+        let builder = Builder::new(data(true), true);
         let released = ApiKeys::END_TXN.latest_version_enable_unstable_last_version(false);
 
         assert_eq!(builder.latest_allowed_version(), released);

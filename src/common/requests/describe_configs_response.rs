@@ -20,7 +20,7 @@ use std::collections::HashMap;
 use std::io;
 
 use crate::DescribeConfigsResponseData;
-use crate::common::config::{ConfigResource, ConfigResourceType};
+use crate::common::config::{ConfigResource, config_resource};
 use crate::common::protocol::{ApiKeys, Errors, Readable};
 use crate::describe_configs_response_data::DescribeConfigsResult;
 
@@ -80,7 +80,10 @@ impl DescribeConfigsResponse {
             .iter()
             .map(|result| {
                 (
-                    ConfigResource::new(ConfigResourceType::for_id(result.resource_type), result.resource_name.clone()),
+                    ConfigResource::new(
+                        config_resource::Type::for_id(result.resource_type),
+                        result.resource_name.clone(),
+                    ),
                     result,
                 )
             })
@@ -131,17 +134,17 @@ mod tests {
         let mut data = DescribeConfigsResponseData::new();
         let mut topic_result = DescribeConfigsResult::new();
         topic_result.set_resource_name("t".to_string());
-        topic_result.set_resource_type(ConfigResourceType::Topic.id());
+        topic_result.set_resource_type(config_resource::Type::Topic.id());
         topic_result.set_error_code(Errors::None.code());
         let mut broker_result = DescribeConfigsResult::new();
         broker_result.set_resource_name("0".to_string());
-        broker_result.set_resource_type(ConfigResourceType::Broker.id());
+        broker_result.set_resource_type(config_resource::Type::Broker.id());
         broker_result.set_error_code(Errors::None.code());
         data.set_results(vec![topic_result, broker_result]);
         let response = DescribeConfigsResponse::new(data);
         let map = response.result_map();
-        assert!(map.contains_key(&ConfigResource::new(ConfigResourceType::Topic, "t".to_string())));
-        assert!(map.contains_key(&ConfigResource::new(ConfigResourceType::Broker, "0".to_string())));
+        assert!(map.contains_key(&ConfigResource::new(config_resource::Type::Topic, "t".to_string())));
+        assert!(map.contains_key(&ConfigResource::new(config_resource::Type::Broker, "0".to_string())));
     }
 
     #[test]

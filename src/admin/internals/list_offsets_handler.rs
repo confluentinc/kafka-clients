@@ -25,8 +25,8 @@ use crate::admin::ListOffsetsResultInfo;
 use crate::common::Errors;
 use crate::common::errors::ApiError;
 use crate::common::requests::{
-    ConcreteResponse, ListOffsetsRequest, ListOffsetsRequestBuilder, ListOffsetsRequestBuilderOptionsBuilder,
-    ListOffsetsResponse, RequestBuilder,
+    ConcreteResponse, ListOffsetsRequest, ListOffsetsRequestBuilderOptionsBuilder, ListOffsetsResponse, RequestBuilder,
+    list_offsets_request,
 };
 use crate::common::utils::LogContext;
 use crate::common::{Error, Node, TopicPartition};
@@ -93,7 +93,7 @@ impl ListOffsetsHandler {
         &self,
         _broker_id: i32,
         keys: &HashSet<TopicPartition>,
-    ) -> ListOffsetsRequestBuilder {
+    ) -> list_offsets_request::Builder {
         let mut topics_by_name: HashMap<String, ListOffsetsTopic> = HashMap::new();
         for topic_partition in keys {
             let offset_timestamp = self.offset_timestamps_by_partition.get(topic_partition).copied().unwrap_or(0);
@@ -122,7 +122,7 @@ impl ListOffsetsHandler {
         });
 
         let timeout_ms = self.options.timeout_ms().unwrap_or(self.default_api_timeout_ms);
-        let mut builder = ListOffsetsRequestBuilder::for_consumer_options(
+        let mut builder = list_offsets_request::Builder::for_consumer_options(
             ListOffsetsRequestBuilderOptionsBuilder::new()
                 .set_require_timestamp(true)
                 .set_isolation_level(self.options.isolation_level())

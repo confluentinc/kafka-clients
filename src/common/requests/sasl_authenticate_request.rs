@@ -30,7 +30,7 @@ use crate::SaslAuthenticateRequestData;
 use crate::SaslAuthenticateResponseData;
 use crate::common::protocol::{ApiKeys, Errors, Readable};
 
-use super::ConcreteRequest;
+use super::AbstractRequest;
 use super::ConcreteResponse;
 use super::RequestBuilder;
 use super::SaslAuthenticateResponse;
@@ -113,13 +113,13 @@ impl std::fmt::Display for SaslAuthenticateRequest {
 /// Corresponds to `SaslAuthenticateRequest.Builder` in Java.
 #[derive(Debug, Clone)]
 #[doc(alias = "org.apache.kafka.common.requests.SaslAuthenticateRequest$Builder")]
-pub struct SaslAuthenticateRequestBuilder {
+pub struct Builder {
     data: SaslAuthenticateRequestData,
     oldest_allowed_version: i16,
     latest_allowed_version: i16,
 }
 
-impl SaslAuthenticateRequestBuilder {
+impl Builder {
     /// Creates a new builder from the given data.
     #[doc(alias = "org.apache.kafka.common.requests.SaslAuthenticateRequest$Builder#Builder")]
     pub fn new(data: SaslAuthenticateRequestData) -> Self {
@@ -131,7 +131,7 @@ impl SaslAuthenticateRequestBuilder {
     }
 }
 
-impl RequestBuilder for SaslAuthenticateRequestBuilder {
+impl RequestBuilder for Builder {
     fn api_key(&self) -> &'static ApiKeys {
         &ApiKeys::SASL_AUTHENTICATE
     }
@@ -144,15 +144,15 @@ impl RequestBuilder for SaslAuthenticateRequestBuilder {
         self.latest_allowed_version
     }
 
-    fn build_version(&mut self, version: i16) -> io::Result<ConcreteRequest> {
-        Ok(ConcreteRequest::SaslAuthenticate(SaslAuthenticateRequest::new(
+    fn build_version(&mut self, version: i16) -> io::Result<AbstractRequest> {
+        Ok(AbstractRequest::SaslAuthenticate(SaslAuthenticateRequest::new(
             self.data.clone(),
             version,
         )))
     }
 }
 
-impl std::fmt::Display for SaslAuthenticateRequestBuilder {
+impl std::fmt::Display for Builder {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "(type=SaslAuthenticateRequest)")
     }
@@ -165,7 +165,7 @@ mod tests {
     #[test]
     fn test_builder_version_range() {
         let data = SaslAuthenticateRequestData::new();
-        let builder = SaslAuthenticateRequestBuilder::new(data);
+        let builder = Builder::new(data);
         assert_eq!(*builder.api_key(), ApiKeys::SASL_AUTHENTICATE);
         assert_eq!(builder.oldest_allowed_version(), ApiKeys::SASL_AUTHENTICATE.oldest_version());
         assert_eq!(builder.latest_allowed_version(), ApiKeys::SASL_AUTHENTICATE.latest_version());
@@ -175,10 +175,10 @@ mod tests {
     fn test_builder_build() {
         let mut data = SaslAuthenticateRequestData::new();
         data.set_auth_bytes(vec![1, 2, 3]);
-        let mut builder = SaslAuthenticateRequestBuilder::new(data);
+        let mut builder = Builder::new(data);
         let request = builder.build().unwrap();
         assert_eq!(*request.api_key(), ApiKeys::SASL_AUTHENTICATE);
-        if let ConcreteRequest::SaslAuthenticate(r) = &request {
+        if let AbstractRequest::SaslAuthenticate(r) = &request {
             assert_eq!(r.data().auth_bytes, vec![1, 2, 3]);
         } else {
             panic!("Expected SaslAuthenticate request");
@@ -223,7 +223,7 @@ mod tests {
     #[test]
     fn test_builder_display() {
         let data = SaslAuthenticateRequestData::new();
-        let builder = SaslAuthenticateRequestBuilder::new(data);
+        let builder = Builder::new(data);
         assert_eq!(format!("{}", builder), "(type=SaslAuthenticateRequest)");
     }
 
@@ -236,7 +236,7 @@ mod tests {
             data.set_auth_bytes(vec![10, 20, 30]);
             let original = SaslAuthenticateRequest::new(data, version);
 
-            let serialized = ConcreteRequest::SaslAuthenticate(original.clone()).serialize().unwrap();
+            let serialized = AbstractRequest::SaslAuthenticate(original.clone()).serialize().unwrap();
             let mut buf = serialized;
             let parsed = SaslAuthenticateRequest::parse(&mut buf, version).unwrap();
             assert_eq!(original.data().auth_bytes, parsed.data().auth_bytes);
@@ -262,7 +262,7 @@ mod tests {
         data.set_auth_bytes(b);
         let request = SaslAuthenticateRequest::new(data, version);
 
-        let serialized = ConcreteRequest::SaslAuthenticate(request.clone()).serialize().unwrap();
+        let serialized = AbstractRequest::SaslAuthenticate(request.clone()).serialize().unwrap();
 
         // Corrupt the length of the bytes array (i32 at offset 0)
         let mut corrupted = serialized.buffer().to_vec();
@@ -273,7 +273,7 @@ mod tests {
         corrupted[3] = corrupted_len[3];
 
         let mut buf = ByteBufferAccessor::new(corrupted);
-        let err = ConcreteRequest::parse_request(request.api_key(), request.version(), &mut buf).unwrap_err();
+        let err = AbstractRequest::parse_request(request.api_key(), request.version(), &mut buf).unwrap_err();
         assert_eq!(
             err.to_string(),
             "Error reading byte array of 2147483647 byte(s): only 20 byte(s) available"
@@ -309,9 +309,9 @@ mod tests {
 
         let latest_version = SaslAuthenticateRequestData::HIGHEST_SUPPORTED_VERSION;
         let result =
-            ConcreteRequest::parse_request(&ApiKeys::SASL_AUTHENTICATE, latest_version, &mut accessor).unwrap();
+            AbstractRequest::parse_request(&ApiKeys::SASL_AUTHENTICATE, latest_version, &mut accessor).unwrap();
 
-        let ConcreteRequest::SaslAuthenticate(sasl_request) = &result.request else {
+        let AbstractRequest::SaslAuthenticate(sasl_request) = &result.request else {
             panic!("Expected SaslAuthenticate request");
         };
         assert_eq!(sasl_request.data().auth_bytes, auth_bytes);
@@ -347,7 +347,7 @@ mod tests {
 
         let latest_version = SaslAuthenticateRequestData::HIGHEST_SUPPORTED_VERSION;
         let err =
-            ConcreteRequest::parse_request(&ApiKeys::SASL_AUTHENTICATE, latest_version, &mut accessor).unwrap_err();
+            AbstractRequest::parse_request(&ApiKeys::SASL_AUTHENTICATE, latest_version, &mut accessor).unwrap_err();
         assert_eq!(
             err.to_string(),
             "Error reading byte array of 32767 byte(s): only 3 byte(s) available"

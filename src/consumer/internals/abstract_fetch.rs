@@ -66,7 +66,7 @@ use crate::common::Node;
 use crate::common::TopicPartition;
 use crate::common::memory::BufferSupplier;
 use crate::common::requests::FetchResponse;
-use crate::common::requests::fetch_request::{FetchRequest, FetchRequestBuilder, PartitionData};
+use crate::common::requests::fetch_request::{self, FetchRequest, PartitionData};
 use crate::consumer::internals::CompletedFetch;
 use crate::consumer::internals::ConsumerMetadata;
 use crate::consumer::internals::FetchBuffer;
@@ -303,7 +303,7 @@ impl AbstractFetch {
         &mut self,
         fetch_target: &Node,
         request_data: &FetchSessionRequestData,
-    ) -> FetchRequestBuilder {
+    ) -> fetch_request::Builder {
         let max_version = if request_data.can_use_topic_ids {
             ApiKeys::FETCH.latest_version()
         } else {
@@ -315,7 +315,7 @@ impl AbstractFetch {
         let to_fetch: IndexMap<TopicPartition, PartitionData> =
             request_data.to_send.iter().map(|(tp, pd)| (tp.clone(), pd.clone())).collect();
 
-        let builder = FetchRequestBuilder::for_consumer(
+        let builder = fetch_request::Builder::for_consumer(
             max_version,
             self.fetch_config.max_wait_ms,
             self.fetch_config.min_bytes,

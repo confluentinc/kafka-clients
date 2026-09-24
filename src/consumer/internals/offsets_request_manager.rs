@@ -60,7 +60,7 @@ use crate::ClientResponse;
 use crate::common::ClusterResource;
 use crate::common::ClusterResourceListener;
 use crate::common::requests::{
-    ConcreteResponse, ListOffsetsRequest, ListOffsetsRequestBuilder, OffsetsForLeaderEpochResponse,
+    ConcreteResponse, ListOffsetsRequest, OffsetsForLeaderEpochResponse, list_offsets_request,
 };
 use crate::common::{Error, IsolationLevel, Node, TopicPartition};
 use crate::consumer::ConsumerLogTruncationError;
@@ -321,7 +321,7 @@ impl OffsetsManagerShared {
         }
 
         for (node, target_times) in by_node {
-            let mut builder = ListOffsetsRequestBuilder::for_consumer(require_timestamps, self_arc.isolation_level);
+            let mut builder = list_offsets_request::Builder::for_consumer(require_timestamps, self_arc.isolation_level);
             let topics = crate::common::requests::ListOffsetsRequest::to_list_offsets_topics(&target_times);
             builder.set_target_times(topics);
             builder.set_timeout_ms(self_arc.request_timeout_ms as i32);
@@ -898,7 +898,7 @@ impl OffsetsRequestManager {
                 subs.set_next_allowed_retry(&partitions, now_ms + self.shared.request_timeout_ms);
             }
 
-            let mut builder = ListOffsetsRequestBuilder::for_consumer(false, self.shared.isolation_level);
+            let mut builder = list_offsets_request::Builder::for_consumer(false, self.shared.isolation_level);
             let topics = crate::common::requests::ListOffsetsRequest::to_list_offsets_topics(&reset_timestamps);
             builder.set_target_times(topics);
             builder.set_timeout_ms(self.shared.request_timeout_ms as i32);
@@ -2888,7 +2888,7 @@ mod tests {
             let built = {
                 let mut unsent = unsent;
                 let request = unsent.request_builder_mut().expect("builder present").build().expect("build");
-                let crate::common::requests::ConcreteRequest::ListOffsets(r) = request else {
+                let crate::common::requests::AbstractRequest::ListOffsets(r) = request else {
                     panic!("expected ListOffsetsRequest");
                 };
                 // Re-take the handler from the original unsent: rebuild is
@@ -4006,7 +4006,7 @@ mod tests {
         let poll_result = RequestManager::poll(&mut mgr, 0);
         let mut unsent = poll_result.unsent_requests.into_iter().next().expect("one request");
         let built = unsent.request_builder_mut().expect("builder").build().expect("build");
-        let crate::common::requests::ConcreteRequest::ListOffsets(req) = built else {
+        let crate::common::requests::AbstractRequest::ListOffsets(req) = built else {
             panic!("expected ListOffsetsRequest");
         };
         for topic in req.topics() {
@@ -4075,7 +4075,7 @@ mod tests {
         let poll_result = RequestManager::poll(&mut mgr, 0);
         let mut unsent = poll_result.unsent_requests.into_iter().next().expect("one request");
         let built = unsent.request_builder_mut().expect("builder").build().expect("build");
-        let crate::common::requests::ConcreteRequest::ListOffsets(req) = built else {
+        let crate::common::requests::AbstractRequest::ListOffsets(req) = built else {
             panic!("expected ListOffsetsRequest");
         };
         for topic in req.topics() {
@@ -4138,7 +4138,7 @@ mod tests {
         let res = RequestManager::poll(&mut mgr, 0);
         let mut unsent = res.unsent_requests.into_iter().next().expect("one unsent");
         let built = unsent.request_builder_mut().expect("builder").build().expect("build");
-        let crate::common::requests::ConcreteRequest::ListOffsets(req) = built else {
+        let crate::common::requests::AbstractRequest::ListOffsets(req) = built else {
             panic!("expected ListOffsetsRequest");
         };
         assert_eq!(
@@ -4185,7 +4185,7 @@ mod tests {
         let res = RequestManager::poll(&mut mgr, 0);
         let mut unsent = res.unsent_requests.into_iter().next().expect("one unsent");
         let built = unsent.request_builder_mut().expect("builder").build().expect("build");
-        let crate::common::requests::ConcreteRequest::ListOffsets(req) = built else {
+        let crate::common::requests::AbstractRequest::ListOffsets(req) = built else {
             panic!("expected ListOffsetsRequest");
         };
         assert_eq!(
@@ -4456,10 +4456,10 @@ mod tests {
         );
         // Java's `unsentRequest.requestBuilder().build()` returns an
         // `AbstractRequest` that is downcast to `ListOffsetsRequest`. The
-        // Rust equivalent is `builder.build()` → `ConcreteRequest::ListOffsets`.
+        // Rust equivalent is `builder.build()` → `AbstractRequest::ListOffsets`.
         let built = unsent.request_builder_mut().expect("builder present").build().expect("build");
         let request = match built {
-            crate::common::requests::ConcreteRequest::ListOffsets(r) => r,
+            crate::common::requests::AbstractRequest::ListOffsets(r) => r,
             other => panic!("expected ListOffsetsRequest, got {other:?}"),
         };
         assert_eq!(request.timeout_ms(), TEST_REQUEST_TIMEOUT_MS as i32);
@@ -5094,7 +5094,7 @@ mod tests {
         let mut unsent = res.unsent_requests.into_iter().next().expect("one unsent");
         let built = unsent.request_builder_mut().expect("builder").build().expect("build");
         let request = match built {
-            crate::common::requests::ConcreteRequest::ListOffsets(r) => r,
+            crate::common::requests::AbstractRequest::ListOffsets(r) => r,
             other => panic!("expected ListOffsetsRequest, got {other:?}"),
         };
         // Java: assertEquals(requestTimeoutMs, request.timeoutMs()).
@@ -5133,7 +5133,7 @@ mod tests {
         let mut unsent = res.unsent_requests.into_iter().next().expect("one unsent");
         let built = unsent.request_builder_mut().expect("builder").build().expect("build");
         let request = match built {
-            crate::common::requests::ConcreteRequest::ListOffsets(r) => r,
+            crate::common::requests::AbstractRequest::ListOffsets(r) => r,
             other => panic!("expected ListOffsetsRequest, got {other:?}"),
         };
         let epoch = request.topics()[0].partitions[0].current_leader_epoch;

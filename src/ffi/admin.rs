@@ -168,7 +168,7 @@ use crate::admin::{
 use crate::common::acl::{
     AccessControlEntry, AccessControlEntryFilter, AclBinding, AclBindingFilter, AclOperation, AclPermissionType,
 };
-use crate::common::config::{ConfigResource, ConfigResourceType};
+use crate::common::config::{ConfigResource, config_resource};
 use crate::common::quota::{
     ClientQuotaAlteration, ClientQuotaEntity, ClientQuotaFilter, ClientQuotaFilterComponent, Op as ClientQuotaOp,
 };
@@ -954,7 +954,7 @@ fn option_timeout(timeout_ms: i32) -> Option<i32> {
 /// `UNKNOWN` member codes it `0`**, so one constant serves them all; the list
 /// below is the current set of sites rather than the reason the value is `0`:
 /// `ResourceType`, `PatternType`, `AclOperation`, `AclPermissionType`,
-/// `ConfigResourceType` and `ScramMechanism`.
+/// `config_resource::Type` and `ScramMechanism`.
 const UNKNOWN_ENUM_CODE: i8 = 0;
 
 /// Narrows a C `int32_t` enum code to the `int8_t` Kafka defines its enums
@@ -971,7 +971,7 @@ const UNKNOWN_ENUM_CODE: i8 = 0;
 ///   - **The enum has an `UNKNOWN` member.** Fall through to it with
 ///     [`enum_code_or_unknown`]. That extends the enum's own total function
 ///     (Java's `CODE_TO_VALUE.getOrDefault(code, UNKNOWN)`, mirrored by
-///     `AclOperation::from_code` and `ConfigResourceType::for_id`) to the wider
+///     `AclOperation::from_code` and `config_resource::Type::for_id`) to the wider
 ///     C input type.
 ///   - **The enum has none** — the quota filter's `MATCH_TYPE_*` are bare wire
 ///     constants, and `AlterConfigOp::OpType::for_id` returns an `Option` —
@@ -4167,7 +4167,7 @@ unsafe fn read_config_resources(
             continue;
         }
         let name = unsafe { CStr::from_ptr(name_ptr) }.to_string_lossy().to_string();
-        let resource_type = ConfigResourceType::for_id(enum_code_or_unknown(unsafe { *type_codes.add(i) }));
+        let resource_type = config_resource::Type::for_id(enum_code_or_unknown(unsafe { *type_codes.add(i) }));
         out.push(ConfigResource::new(resource_type, name));
     }
     out
@@ -4249,7 +4249,7 @@ unsafe fn read_alter_config_ops(
         let op_type = narrow_enum_code(op_code).and_then(OpType::for_id).ok_or_else(|| {
             Error::local_illegal_argument(format!("unknown AlterConfigOp op type id {op_code} at index {i}"))
         })?;
-        let resource_type = ConfigResourceType::for_id(enum_code_or_unknown(unsafe { *resource_type_codes.add(i) }));
+        let resource_type = config_resource::Type::for_id(enum_code_or_unknown(unsafe { *resource_type_codes.add(i) }));
         let resource_name = unsafe { CStr::from_ptr(resource_name_ptr) }.to_string_lossy().to_string();
         let config_name = unsafe { CStr::from_ptr(config_name_ptr) }.to_string_lossy().to_string();
         let value = if config_values.is_null() {
@@ -5752,10 +5752,10 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_list_config_resources_async(
 /// # Safety
 ///
 /// `type_codes` must be null or have `count` readable entries.
-unsafe fn read_config_resource_types(type_codes: *const i32, count: i32) -> HashSet<ConfigResourceType> {
+unsafe fn read_config_resource_types(type_codes: *const i32, count: i32) -> HashSet<config_resource::Type> {
     unsafe { read_i32s(type_codes, count) }
         .into_iter()
-        .map(|code| ConfigResourceType::for_id(enum_code_or_unknown(code)))
+        .map(|code| config_resource::Type::for_id(enum_code_or_unknown(code)))
         .collect()
 }
 

@@ -43,7 +43,7 @@ use confluent_kafka::admin::{
     NewPartitionReassignment, OffsetSpec, OpType,
 };
 use confluent_kafka::common::Errors;
-use confluent_kafka::common::config::{ConfigResource, ConfigResourceType};
+use confluent_kafka::common::config::{ConfigResource, config_resource};
 use confluent_kafka::common::serialization::ByteArraySerializer;
 use confluent_kafka::common::{ElectionType, IsolationLevel, TopicPartition, TopicPartitionInfo};
 use confluent_kafka::producer::{KafkaProducer, Producer, ProducerConfig, ProducerRecord};
@@ -401,7 +401,7 @@ async fn list_offsets_covers_every_offset_spec_variant<F: AdminBackendFactory>(c
     // `ListOffsetsRequest.json`'s `"validVersions": "1-11"` /
     // `"latestVersionUnstable": false` mark v11 as a stable, released part of
     // 4.2 — not gated behind an unstable-versions flag). Our client already
-    // negotiates v11 for this spec (`ListOffsetsRequestBuilder::
+    // negotiates v11 for this spec (`list_offsets_request::Builder::
     // for_consumer_options` sets `min_version = 11` for
     // `require_earliest_pending_upload_timestamp`, covered by
     // `for_consumer_require_earliest_pending_upload_forces_v11`), so the
@@ -621,7 +621,7 @@ async fn elect_preferred_leaders<F: AdminBackendFactory>(ctx: &mut TestContext, 
 /// distinction is *preserved* is the code path rather than this scenario — every
 /// layer keeps it as an explicit discriminant (`optional TopicPartitionList` on
 /// the wire, the C entry points' `all_partitions` flag, `admin.py`'s
-/// `partitions is None` column, `ElectLeadersRequestBuilder`'s
+/// `partitions is None` column, `elect_leaders_request::Builder`'s
 /// `set_topic_partitions(None)`), never as an emptiness test.
 ///
 /// Both election types are exercised. On a healthy partition they agree — Java
@@ -863,11 +863,11 @@ async fn list_partition_reassignments_reports_an_ongoing_move<F: AdminBackendFac
     // Throttle replication before there is anything to replicate. Both halves are
     // required: the rate is a dynamic *broker* config and the replica list is a
     // *topic* config, and a rate with no throttled replicas throttles nothing.
-    let topic_resource = ConfigResource::new(ConfigResourceType::Topic, topic.clone());
+    let topic_resource = ConfigResource::new(config_resource::Type::Topic, topic.clone());
     set_config(&admin, &topic_resource, "leader.replication.throttled.replicas", "*").await;
     set_config(&admin, &topic_resource, "follower.replication.throttled.replicas", "*").await;
     for id in &ids {
-        let broker_resource = ConfigResource::new(ConfigResourceType::Broker, id.to_string());
+        let broker_resource = ConfigResource::new(config_resource::Type::Broker, id.to_string());
         set_config(&admin, &broker_resource, "leader.replication.throttled.rate", "1024").await;
         set_config(&admin, &broker_resource, "follower.replication.throttled.rate", "1024").await;
     }

@@ -32,10 +32,10 @@ use crate::common::protocol::{ApiKeys, Errors};
 use crate::common::record::internal::RecordBatch;
 use crate::common::requests::CoordinatorType;
 use crate::common::requests::{
-    AddOffsetsToTxnRequestBuilder, AddPartitionsToTxnRequestBuilder, AddPartitionsToTxnResponse, CommittedOffset,
-    ConcreteResponse, EndTxnRequestBuilder, FindCoordinatorRequestBuilder, InitProducerIdRequestBuilder,
-    PartitionResponse, RequestBuilder, TransactionResult, TxnOffsetCommitRequestBuilder,
-    TxnOffsetCommitRequestBuilderOptionsBuilder,
+    AddPartitionsToTxnResponse, CommittedOffset, ConcreteResponse, PartitionResponse, RequestBuilder,
+    TransactionResult, TxnOffsetCommitRequestBuilderOptionsBuilder, add_offsets_to_txn_request,
+    add_partitions_to_txn_request, end_txn_request, find_coordinator_request, init_producer_id_request,
+    txn_offset_commit_request,
 };
 use crate::common::utils::{LogContext, ProducerIdAndEpoch};
 use crate::common::{Error, KafkaError, LocalIllegalStateError, Node, TopicPartition};
@@ -544,7 +544,7 @@ impl std::fmt::Display for TransactionOperation {
 /// [`TransactionManager`].
 ///
 /// This mirrors how the crate already translates Java's `AbstractRequest` /
-/// `AbstractResponse` hierarchies — as the `ConcreteRequest` / `ConcreteResponse`
+/// `AbstractResponse` hierarchies — as the `AbstractRequest` / `ConcreteResponse`
 /// enums — so it introduces no pattern the codebase does not already use.
 ///
 /// All six Java handlers are translated: `InitProducerIdHandler` and
@@ -554,7 +554,7 @@ pub(crate) enum TxnRequestHandlerKind {
     /// `InitProducerIdHandler` (Java 1461-1539).
     InitProducerId {
         /// The request being sent.
-        builder: InitProducerIdRequestBuilder,
+        builder: init_producer_id_request::Builder,
         /// Whether this request bumps an existing epoch rather than acquiring a
         /// producer id for the first time.
         is_epoch_bump: bool,
@@ -562,17 +562,17 @@ pub(crate) enum TxnRequestHandlerKind {
     /// `FindCoordinatorHandler` (Java 1651-1721).
     FindCoordinator {
         /// The request being sent.
-        builder: FindCoordinatorRequestBuilder,
+        builder: find_coordinator_request::Builder,
     },
     /// `EndTxnHandler` (Java 1723-1794).
     EndTxn {
         /// The request being sent.
-        builder: EndTxnRequestBuilder,
+        builder: end_txn_request::Builder,
     },
     /// `AddOffsetsToTxnHandler` (Java 1796-1854).
     AddOffsetsToTxn {
         /// The request being sent.
-        builder: AddOffsetsToTxnRequestBuilder,
+        builder: add_offsets_to_txn_request::Builder,
         /// The offsets the follow-on `TxnOffsetCommit` will carry (Java 1798).
         offsets: HashMap<TopicPartition, OffsetAndMetadata>,
         /// The consumer group the offsets belong to (Java 1799).
@@ -581,12 +581,12 @@ pub(crate) enum TxnRequestHandlerKind {
     /// `TxnOffsetCommitHandler` (Java 1856-1951).
     TxnOffsetCommit {
         /// The request being sent.
-        builder: TxnOffsetCommitRequestBuilder,
+        builder: txn_offset_commit_request::Builder,
     },
     /// `AddPartitionsToTxnHandler` (Java 1541-1649).
     AddPartitionsToTxn {
         /// The request being sent.
-        builder: AddPartitionsToTxnRequestBuilder,
+        builder: add_partitions_to_txn_request::Builder,
         /// This handler's own backoff, lowered to
         /// [`ADD_PARTITIONS_RETRY_BACKOFF_MS`] by
         /// [`TransactionManager::maybe_override_retry_backoff_ms`] on the first
@@ -1444,7 +1444,7 @@ impl TransactionManager {
                     "InitProducerId",
                     manager.retry_backoff_ms,
                     TxnRequestHandlerKind::InitProducerId {
-                        builder: InitProducerIdRequestBuilder::new(request_data),
+                        builder: init_producer_id_request::Builder::new(request_data),
                         is_epoch_bump,
                     },
                 );
@@ -1715,7 +1715,7 @@ impl TransactionManager {
                 "AddOffsetsToTxn",
                 self.retry_backoff_ms,
                 TxnRequestHandlerKind::AddOffsetsToTxn {
-                    builder: AddOffsetsToTxnRequestBuilder::new(request_data),
+                    builder: add_offsets_to_txn_request::Builder::new(request_data),
                     offsets,
                     group_metadata,
                 },
@@ -1757,7 +1757,7 @@ impl TransactionManager {
                 .insert(topic_partition.clone(), committed_offset);
         }
 
-        let builder = TxnOffsetCommitRequestBuilder::with_options(
+        let builder = txn_offset_commit_request::Builder::with_options(
             // `ensureTransactional()` has already run, so the id is present.
             TxnOffsetCommitRequestBuilderOptionsBuilder::new()
                 .set_transactional_id(self.transactional_id.clone().unwrap_or_default())
@@ -1818,7 +1818,7 @@ impl TransactionManager {
             .set_producer_id(self.producer_id_and_epoch.producer_id)
             .set_producer_epoch(self.producer_id_and_epoch.epoch)
             .set_committed(transaction_result.id());
-        let builder = EndTxnRequestBuilder::new(request_data, self.is_transaction_v2_enabled);
+        let builder = end_txn_request::Builder::new(request_data, self.is_transaction_v2_enabled);
 
         // Maybe update the transaction version here before we enqueue the EndTxn request so there are no races with
         // completion of the EndTxn request. Since this method may update clientSideEpochBumpRequired, we want to update
@@ -2079,7 +2079,7 @@ impl TransactionManager {
             "InitProducerId",
             self.retry_backoff_ms,
             TxnRequestHandlerKind::InitProducerId {
-                builder: InitProducerIdRequestBuilder::new(request_data),
+                builder: init_producer_id_request::Builder::new(request_data),
                 is_epoch_bump: false,
             },
         );
@@ -3072,7 +3072,7 @@ impl TransactionManager {
                     "InitProducerId",
                     self.retry_backoff_ms,
                     TxnRequestHandlerKind::InitProducerId {
-                        builder: InitProducerIdRequestBuilder::new(request_data),
+                        builder: init_producer_id_request::Builder::new(request_data),
                         is_epoch_bump: false,
                     },
                 );
@@ -3668,7 +3668,7 @@ impl TransactionManager {
         let handler = TxnRequestHandler::new(
             "FindCoordinator",
             self.retry_backoff_ms,
-            TxnRequestHandlerKind::FindCoordinator { builder: FindCoordinatorRequestBuilder::new(data) },
+            TxnRequestHandlerKind::FindCoordinator { builder: find_coordinator_request::Builder::new(data) },
         );
         self.enqueue_request(pending_requests, handler);
         Ok(())
@@ -3695,7 +3695,7 @@ impl TransactionManager {
         // either — so the key is spelled out, as `cluster.rs:349` does.
         partitions.sort_by_key(|partition| (partition.topic_arc().clone(), partition.partition()));
 
-        let builder = AddPartitionsToTxnRequestBuilder::for_client(
+        let builder = add_partitions_to_txn_request::Builder::for_client(
             // `ensureTransactional()` has already run at every call site, so the id
             // is present; Java would interpolate a null as the text "null".
             self.transactional_id.as_deref().unwrap_or_default(),
@@ -4502,7 +4502,7 @@ impl TransactionManager {
     /// Both builders snapshot the topic collection at construction — Java's
     /// `TxnOffsetCommitRequest.Builder` calls `setTopics(getTopics(pendingTxnOffsetCommits))`,
     /// and
-    /// [`TxnOffsetCommitRequestBuilder::with_options`]
+    /// [`txn_offset_commit_request::Builder::with_options`]
     /// takes the map by reference and
     /// copies it the same way (it cannot borrow `self.pending_txn_offset_commits`,
     /// since the handler outlives the call). `reenqueue()` (Java 1394) and
@@ -6366,7 +6366,7 @@ mod tests {
             operation,
             DEFAULT_RETRY_BACKOFF_MS,
             TxnRequestHandlerKind::InitProducerId {
-                builder: InitProducerIdRequestBuilder::new(request_data),
+                builder: init_producer_id_request::Builder::new(request_data),
                 is_epoch_bump,
             },
         )

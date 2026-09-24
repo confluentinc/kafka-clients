@@ -544,7 +544,7 @@ async fn two_phase_commit_case(bootstrap: &str, suffix: &str) -> Result<bool, St
     // request at all: `initialize_transactions_internal` in
     // `transaction_manager.rs` is the only production construction site and it
     // sets four fields, none of them this one. It is also moot on the wire, since
-    // `InitProducerIdRequestBuilder` caps at v5. This is faithful to Java, which
+    // `init_producer_id_request::Builder` caps at v5. This is faithful to Java, which
     // likewise never calls `setEnable2Pc`.
     //
     // So a silent success here means the config is **accepted and inert**, which

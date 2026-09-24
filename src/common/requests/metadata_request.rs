@@ -27,7 +27,7 @@ use crate::common::protocol::{ApiKeys, Errors, Readable};
 use crate::metadata_request_data::MetadataRequestTopic;
 use crate::metadata_response_data::MetadataResponseTopic;
 
-use super::ConcreteRequest;
+use super::AbstractRequest;
 use super::ConcreteResponse;
 use super::MetadataResponse;
 use super::RequestBuilder;
@@ -191,7 +191,7 @@ impl std::fmt::Display for MetadataRequest {
 /// Corresponds to `MetadataRequest.Builder` in Java.
 #[derive(Debug, Clone)]
 #[doc(alias = "org.apache.kafka.common.requests.MetadataRequest$Builder")]
-pub struct MetadataRequestBuilder {
+pub struct Builder {
     data: MetadataRequestData,
     oldest_allowed_version: i16,
     latest_allowed_version: i16,
@@ -317,7 +317,7 @@ impl<'a> MetadataRequestBuilderOptionsBuilder<'a> {
     }
 }
 
-impl MetadataRequestBuilder {
+impl Builder {
     /// Creates a builder from existing data.
     ///
     /// Corresponds to Java's `MetadataRequest.Builder(MetadataRequestData)`
@@ -484,7 +484,7 @@ impl MetadataRequestBuilder {
     }
 }
 
-impl RequestBuilder for MetadataRequestBuilder {
+impl RequestBuilder for Builder {
     fn api_key(&self) -> &'static ApiKeys {
         &ApiKeys::METADATA
     }
@@ -497,7 +497,7 @@ impl RequestBuilder for MetadataRequestBuilder {
         self.latest_allowed_version
     }
 
-    fn build_version(&mut self, version: i16) -> io::Result<ConcreteRequest> {
+    fn build_version(&mut self, version: i16) -> io::Result<AbstractRequest> {
         if version < 1 {
             return Err(io::Error::new(
                 io::ErrorKind::Unsupported,
@@ -526,7 +526,7 @@ impl RequestBuilder for MetadataRequestBuilder {
                 }
             }
         }
-        Ok(ConcreteRequest::Metadata(MetadataRequest::new(self.data.clone(), version)))
+        Ok(AbstractRequest::Metadata(MetadataRequest::new(self.data.clone(), version)))
     }
 }
 
@@ -565,19 +565,18 @@ mod tests {
     #[test]
     #[doc(alias = "org.apache.kafka.common.requests.MetadataRequestTest#testMetadataRequestVersion")]
     fn test_metadata_request_version() {
-        let builder = MetadataRequestBuilder::with_topics_allow_auto_topic_creation(Some(&["topic"]), false);
+        let builder = Builder::with_topics_allow_auto_topic_creation(Some(&["topic"]), false);
         assert_eq!(ApiKeys::METADATA.oldest_version(), builder.oldest_allowed_version());
         assert_eq!(ApiKeys::METADATA.latest_version(), builder.latest_allowed_version());
 
         let version: i16 = 5;
-        let builder2 =
-            MetadataRequestBuilder::with_topics_allow_auto_topic_creation_version(Some(&["topic"]), false, version);
+        let builder2 = Builder::with_topics_allow_auto_topic_creation_version(Some(&["topic"]), false, version);
         assert_eq!(version, builder2.oldest_allowed_version());
         assert_eq!(version, builder2.latest_allowed_version());
 
         let min_version: i16 = 1;
         let max_version: i16 = 6;
-        let builder3 = MetadataRequestBuilder::with_options(
+        let builder3 = Builder::with_options(
             MetadataRequestBuilderOptionsBuilder::new()
                 .set_topics(Some(&["topic"]))
                 .set_allow_auto_topic_creation(false)
@@ -630,7 +629,7 @@ mod tests {
             for topic in &topics {
                 let mut data = MetadataRequestData::new();
                 data.set_topics(Some(vec![topic.clone()]));
-                let mut builder = MetadataRequestBuilder::with_data(data);
+                let mut builder = Builder::with_data(data);
                 let result = builder.build_version(*version);
                 assert!(result.is_err(), "Expected error for version {version} with topic {:?}", topic);
             }
@@ -651,7 +650,7 @@ mod tests {
         ids.insert(id_a);
         ids.insert(id_c);
 
-        let builder = MetadataRequestBuilder::for_topic_ids(&ids);
+        let builder = Builder::for_topic_ids(&ids);
         let topic_ids = builder.topic_ids();
 
         // BTreeSet sorted order — should match the sorted Uuid order.
@@ -689,7 +688,7 @@ mod tests {
             for topic in &topics {
                 let mut data = MetadataRequestData::new();
                 data.set_topics(Some(vec![topic.clone()]));
-                let mut builder = MetadataRequestBuilder::with_data(data);
+                let mut builder = Builder::with_data(data);
                 // Should succeed since topic_id is zero UUID
                 let result = builder.build_version(*version);
                 assert!(result.is_ok(), "Should not fail for version {version} with topic {:?}", topic);

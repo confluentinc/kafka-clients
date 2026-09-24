@@ -25,8 +25,8 @@ use crate::ApiVersionsRequestData;
 use crate::ApiVersionsResponseData;
 use crate::common::protocol::{ApiKeys, Errors, Readable};
 
+use super::AbstractRequest;
 use super::ApiVersionsResponse;
-use super::ConcreteRequest;
 use super::ConcreteResponse;
 use super::RequestBuilder;
 
@@ -160,13 +160,13 @@ impl std::fmt::Display for ApiVersionsRequest {
 /// Corresponds to `ApiVersionsRequest.Builder` in Java.
 #[derive(Debug, Clone)]
 #[doc(alias = "org.apache.kafka.common.requests.ApiVersionsRequest$Builder")]
-pub struct ApiVersionsRequestBuilder {
+pub struct Builder {
     data: ApiVersionsRequestData,
     oldest_allowed_version: i16,
     latest_allowed_version: i16,
 }
 
-impl ApiVersionsRequestBuilder {
+impl Builder {
     /// Creates a default builder with the default client software name and the crate version.
     #[doc(alias = "org.apache.kafka.common.requests.ApiVersionsRequest$Builder#Builder")]
     pub fn new() -> Self {
@@ -200,13 +200,13 @@ impl ApiVersionsRequestBuilder {
     }
 }
 
-impl Default for ApiVersionsRequestBuilder {
+impl Default for Builder {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl RequestBuilder for ApiVersionsRequestBuilder {
+impl RequestBuilder for Builder {
     fn api_key(&self) -> &'static ApiKeys {
         &ApiKeys::API_VERSIONS
     }
@@ -219,8 +219,8 @@ impl RequestBuilder for ApiVersionsRequestBuilder {
         self.latest_allowed_version
     }
 
-    fn build_version(&mut self, version: i16) -> io::Result<ConcreteRequest> {
-        Ok(ConcreteRequest::ApiVersions(ApiVersionsRequest::new(
+    fn build_version(&mut self, version: i16) -> io::Result<AbstractRequest> {
+        Ok(AbstractRequest::ApiVersions(ApiVersionsRequest::new(
             self.data.clone(),
             version,
         )))
@@ -267,7 +267,7 @@ mod tests {
 
     #[test]
     fn test_builder_default() {
-        let builder = ApiVersionsRequestBuilder::new();
+        let builder = Builder::new();
         assert_eq!(*builder.api_key(), ApiKeys::API_VERSIONS);
         assert_eq!(builder.oldest_allowed_version(), ApiKeys::API_VERSIONS.oldest_version());
         assert_eq!(builder.latest_allowed_version(), ApiKeys::API_VERSIONS.latest_version());
@@ -275,7 +275,7 @@ mod tests {
 
     #[test]
     fn test_builder_new_version() {
-        let builder = ApiVersionsRequestBuilder::with_version(2);
+        let builder = Builder::with_version(2);
         assert_eq!(builder.oldest_allowed_version(), 2);
         assert_eq!(builder.latest_allowed_version(), 2);
     }

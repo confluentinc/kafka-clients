@@ -25,7 +25,7 @@ use crate::write_txn_markers_response_data::{
     WritableTxnMarkerPartitionResult, WritableTxnMarkerResult, WritableTxnMarkerTopicResult,
 };
 
-use super::{ConcreteRequest, ConcreteResponse, RequestBuilder, WriteTxnMarkersResponse};
+use super::{AbstractRequest, ConcreteResponse, RequestBuilder, WriteTxnMarkersResponse};
 
 /// A WriteTxnMarkers request.
 ///
@@ -121,11 +121,11 @@ impl std::fmt::Display for WriteTxnMarkersRequest {
 /// Corresponds to `WriteTxnMarkersRequest.Builder`.
 #[derive(Debug, Clone)]
 #[doc(alias = "org.apache.kafka.common.requests.WriteTxnMarkersRequest$Builder")]
-pub struct WriteTxnMarkersRequestBuilder {
+pub struct Builder {
     data: WriteTxnMarkersRequestData,
 }
 
-impl WriteTxnMarkersRequestBuilder {
+impl Builder {
     /// Creates a builder from the given request data.
     #[doc(alias = "org.apache.kafka.common.requests.WriteTxnMarkersRequest$Builder#Builder")]
     pub fn new(data: WriteTxnMarkersRequestData) -> Self {
@@ -133,7 +133,7 @@ impl WriteTxnMarkersRequestBuilder {
     }
 }
 
-impl RequestBuilder for WriteTxnMarkersRequestBuilder {
+impl RequestBuilder for Builder {
     fn api_key(&self) -> &'static ApiKeys {
         &ApiKeys::WRITE_TXN_MARKERS
     }
@@ -146,8 +146,8 @@ impl RequestBuilder for WriteTxnMarkersRequestBuilder {
         ApiKeys::WRITE_TXN_MARKERS.latest_version()
     }
 
-    fn build_version(&mut self, version: i16) -> io::Result<ConcreteRequest> {
-        Ok(ConcreteRequest::WriteTxnMarkers(WriteTxnMarkersRequest::new(
+    fn build_version(&mut self, version: i16) -> io::Result<AbstractRequest> {
+        Ok(AbstractRequest::WriteTxnMarkers(WriteTxnMarkersRequest::new(
             self.data.clone(),
             version,
         )))
@@ -193,7 +193,7 @@ mod tests {
     fn serialize_parse_round_trip() {
         let mut data = WriteTxnMarkersRequestData::new();
         data.set_markers(vec![marker(42, "foo", 5)]);
-        let mut builder = WriteTxnMarkersRequestBuilder::new(data);
+        let mut builder = Builder::new(data);
         let mut request = builder.build_version(1).unwrap();
         let bytes = request.serialize().unwrap();
         let mut readable = crate::common::ByteBufferAccessor::new(bytes.into_buffer());
@@ -222,7 +222,7 @@ mod tests {
     fn serialize_known_byte_vector_v1() {
         let mut data = WriteTxnMarkersRequestData::new();
         data.set_markers(vec![marker(42, "foo", 5)]);
-        let mut builder = WriteTxnMarkersRequestBuilder::new(data);
+        let mut builder = Builder::new(data);
         let mut request = builder.build_version(1).unwrap();
         let bytes = request.serialize().unwrap();
         let expected: &[u8] = &[

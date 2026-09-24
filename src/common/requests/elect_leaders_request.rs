@@ -26,7 +26,7 @@ use crate::elect_leaders_request_data::TopicPartitions;
 use crate::elect_leaders_response_data::{PartitionResult, ReplicaElectionResult};
 
 use super::{
-    ConcreteRequest, ConcreteResponse, ElectLeadersResponse, ElectLeadersResponseOptionsBuilder, RequestBuilder,
+    AbstractRequest, ConcreteResponse, ElectLeadersResponse, ElectLeadersResponseOptionsBuilder, RequestBuilder,
 };
 
 /// An ElectLeaders request.
@@ -137,7 +137,7 @@ impl std::fmt::Display for ElectLeadersRequest {
 /// Corresponds to `ElectLeadersRequest.Builder` in Java.
 #[derive(Debug, Clone)]
 #[doc(alias = "org.apache.kafka.common.requests.ElectLeadersRequest$Builder")]
-pub struct ElectLeadersRequestBuilder {
+pub struct Builder {
     election_type: ElectionType,
     topic_partitions: Option<Vec<TopicPartition>>,
     timeout_ms: i32,
@@ -145,7 +145,7 @@ pub struct ElectLeadersRequestBuilder {
     latest_allowed_version: i16,
 }
 
-impl ElectLeadersRequestBuilder {
+impl Builder {
     /// Creates a builder for the given election type, partitions and timeout.
     ///
     /// A `None` `topic_partitions` requests election for all partitions.
@@ -207,7 +207,7 @@ impl ElectLeadersRequestBuilder {
     }
 }
 
-impl RequestBuilder for ElectLeadersRequestBuilder {
+impl RequestBuilder for Builder {
     fn api_key(&self) -> &'static ApiKeys {
         &ApiKeys::ELECT_LEADERS
     }
@@ -220,11 +220,11 @@ impl RequestBuilder for ElectLeadersRequestBuilder {
         self.latest_allowed_version
     }
 
-    fn build_version(&mut self, version: i16) -> io::Result<ConcreteRequest> {
+    fn build_version(&mut self, version: i16) -> io::Result<AbstractRequest> {
         let data = self
             .to_request_data(version)
             .map_err(|e| io::Error::new(io::ErrorKind::Unsupported, e.message().to_string()))?;
-        Ok(ConcreteRequest::ElectLeaders(ElectLeadersRequest::new(data, version)))
+        Ok(AbstractRequest::ElectLeaders(ElectLeadersRequest::new(data, version)))
     }
 }
 
@@ -256,8 +256,7 @@ mod tests {
 
     #[test]
     fn builder_v0_rejects_non_preferred() {
-        let mut builder =
-            ElectLeadersRequestBuilder::new(ElectionType::Unclean, Some(vec![TopicPartition::new("t", 0)]), 100);
+        let mut builder = Builder::new(ElectionType::Unclean, Some(vec![TopicPartition::new("t", 0)]), 100);
         let err = builder.build_version(0).unwrap_err();
         assert!(err.to_string().contains("API Version 0 only supports PREFERRED election type"));
     }
@@ -281,12 +280,11 @@ mod tests {
         }
     }
 
-    /// Round-trips a request through the shared `ConcreteRequest` serialize /
+    /// Round-trips a request through the shared `AbstractRequest` serialize /
     /// parse path, exercising the enum wiring end-to-end.
     #[test]
     fn serialize_parse_round_trip() {
-        let mut builder =
-            ElectLeadersRequestBuilder::new(ElectionType::Preferred, Some(vec![TopicPartition::new("t", 3)]), 30000);
+        let mut builder = Builder::new(ElectionType::Preferred, Some(vec![TopicPartition::new("t", 3)]), 30000);
         let mut request = builder.build_version(2).unwrap();
         let bytes = request.serialize().unwrap();
         let mut readable = crate::common::ByteBufferAccessor::new(bytes.into_buffer());
@@ -310,8 +308,7 @@ mod tests {
     ///   _tagged_fields: 0x00
     #[test]
     fn serialize_known_byte_vector_v2() {
-        let mut builder =
-            ElectLeadersRequestBuilder::new(ElectionType::Preferred, Some(vec![TopicPartition::new("t", 0)]), 100);
+        let mut builder = Builder::new(ElectionType::Preferred, Some(vec![TopicPartition::new("t", 0)]), 100);
         let mut request = builder.build_version(2).unwrap();
         let bytes = request.serialize().unwrap();
         let expected: &[u8] = &[

@@ -17,7 +17,7 @@
 //! Corresponds to `org.apache.kafka.common.requests.FindCoordinatorRequest`.
 //!
 //! Wraps the auto-generated [`FindCoordinatorRequestData`] and exposes a
-//! [`FindCoordinatorRequestBuilder`] that picks the right version based on
+//! [`Builder`] that picks the right version based on
 //! the broker's `ApiVersions` and handles the batched-vs-single key
 //! representation introduced in v4.
 
@@ -29,7 +29,7 @@ use crate::common::Node;
 use crate::common::protocol::{ApiKeys, Errors, Readable};
 use crate::find_coordinator_response_data::Coordinator;
 
-use super::ConcreteRequest;
+use super::AbstractRequest;
 use super::ConcreteResponse;
 use super::FindCoordinatorResponse;
 use super::RequestBuilder;
@@ -202,13 +202,13 @@ impl std::fmt::Display for FindCoordinatorRequest {
 /// Corresponds to `FindCoordinatorRequest.Builder` in Java.
 #[derive(Debug, Clone)]
 #[doc(alias = "org.apache.kafka.common.requests.FindCoordinatorRequest$Builder")]
-pub struct FindCoordinatorRequestBuilder {
+pub struct Builder {
     data: FindCoordinatorRequestData,
     oldest_allowed_version: i16,
     latest_allowed_version: i16,
 }
 
-impl FindCoordinatorRequestBuilder {
+impl Builder {
     /// Creates a builder wrapping the given data with the full supported
     /// version range.
     #[doc(alias = "org.apache.kafka.common.requests.FindCoordinatorRequest$Builder#Builder")]
@@ -227,7 +227,7 @@ impl FindCoordinatorRequestBuilder {
     }
 }
 
-impl RequestBuilder for FindCoordinatorRequestBuilder {
+impl RequestBuilder for Builder {
     fn api_key(&self) -> &'static ApiKeys {
         &ApiKeys::FIND_COORDINATOR
     }
@@ -240,7 +240,7 @@ impl RequestBuilder for FindCoordinatorRequestBuilder {
         self.latest_allowed_version
     }
 
-    fn build_version(&mut self, version: i16) -> io::Result<ConcreteRequest> {
+    fn build_version(&mut self, version: i16) -> io::Result<AbstractRequest> {
         // Mirrors `FindCoordinatorRequest.Builder.build(short version)`.
         if version < 1 && self.data.key_type == CoordinatorType::Transaction.id() {
             return Err(io::Error::new(
@@ -274,7 +274,7 @@ impl RequestBuilder for FindCoordinatorRequestBuilder {
             data.set_coordinator_keys(vec![data.key.clone()]);
             data.set_key(String::new()); // default value
         }
-        Ok(ConcreteRequest::FindCoordinator(FindCoordinatorRequest::new(data, version)))
+        Ok(AbstractRequest::FindCoordinator(FindCoordinatorRequest::new(data, version)))
     }
 }
 
@@ -303,7 +303,7 @@ mod tests {
         let mut data = FindCoordinatorRequestData::new();
         data.set_key_type(CoordinatorType::Transaction.id());
         data.set_key("txn-id".to_string());
-        let mut builder = FindCoordinatorRequestBuilder::new(data);
+        let mut builder = Builder::new(data);
         let err = builder.build_version(0).expect_err("v0 transaction key must be rejected");
         let msg = err.to_string();
         assert!(msg.contains("Cannot create a v0 FindCoordinator request"), "got: {msg}");
@@ -316,7 +316,7 @@ mod tests {
         let mut data = FindCoordinatorRequestData::new();
         data.set_key_type(CoordinatorType::Group.id());
         data.set_coordinator_keys(vec!["g1".to_string(), "g2".to_string()]);
-        let mut builder = FindCoordinatorRequestBuilder::new(data);
+        let mut builder = Builder::new(data);
         let err = builder.build_version(3).expect_err("pre-v4 batched keys must be rejected");
         let msg = err.to_string();
         assert!(msg.contains("4 or later"), "got: {msg}");
@@ -329,10 +329,10 @@ mod tests {
         let mut data = FindCoordinatorRequestData::new();
         data.set_key_type(CoordinatorType::Group.id());
         data.set_coordinator_keys(vec!["only".to_string()]);
-        let mut builder = FindCoordinatorRequestBuilder::new(data);
+        let mut builder = Builder::new(data);
         let built = builder.build_version(3).expect("pre-v4 build with one key");
         match built {
-            ConcreteRequest::FindCoordinator(req) => {
+            AbstractRequest::FindCoordinator(req) => {
                 assert_eq!(req.data().key, "only");
                 assert!(req.data().coordinator_keys.is_empty());
                 assert_eq!(req.version(), 3);
@@ -348,10 +348,10 @@ mod tests {
         let mut data = FindCoordinatorRequestData::new();
         data.set_key_type(CoordinatorType::Group.id());
         data.set_key("g1".to_string());
-        let mut builder = FindCoordinatorRequestBuilder::new(data);
+        let mut builder = Builder::new(data);
         let built = builder.build_version(4).expect("v4 build");
         match built {
-            ConcreteRequest::FindCoordinator(req) => {
+            AbstractRequest::FindCoordinator(req) => {
                 assert_eq!(req.data().key, "");
                 assert_eq!(req.data().coordinator_keys, vec!["g1".to_string()]);
             },
@@ -362,7 +362,7 @@ mod tests {
     /// Verifies the API key accessor.
     #[test]
     fn test_api_key() {
-        let builder = FindCoordinatorRequestBuilder::new(FindCoordinatorRequestData::new());
+        let builder = Builder::new(FindCoordinatorRequestData::new());
         assert_eq!(builder.api_key(), &ApiKeys::FIND_COORDINATOR);
     }
 }

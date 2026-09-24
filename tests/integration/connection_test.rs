@@ -32,7 +32,7 @@ use confluent_kafka::common::network::selectable::USE_DEFAULT_BUFFER_SIZE;
 use confluent_kafka::common::protocol::{ApiKeys, ByteBufferAccessor, Errors};
 use confluent_kafka::common::requests::ConcreteResponse;
 use confluent_kafka::common::requests::{
-    ApiVersionsRequestBuilder, MetadataRequestBuilder, RequestBuilder, RequestHeader, RequestHeaderOptionsBuilder,
+    RequestBuilder, RequestHeader, RequestHeaderOptionsBuilder, api_versions_request, metadata_request,
 };
 
 use crate::common::cluster_config::ClusterConfig;
@@ -163,7 +163,7 @@ async fn test_api_versions_request_response() {
     poll_until_connected(&mut selector).await;
 
     // Build and send ApiVersionsRequest
-    let mut builder = ApiVersionsRequestBuilder::new();
+    let mut builder = api_versions_request::Builder::new();
     let (send, req_header) = build_request_send(&mut builder, "integration-test", 1, NODE_ID);
 
     selector.send(send).expect("Failed to queue send");
@@ -220,7 +220,7 @@ async fn test_full_connection_flow() {
     poll_until_connected(&mut selector).await;
 
     // Step 2: Send ApiVersionsRequest
-    let mut api_versions_builder = ApiVersionsRequestBuilder::new();
+    let mut api_versions_builder = api_versions_request::Builder::new();
     let (send, api_versions_header) = build_request_send(&mut api_versions_builder, "integration-test", 1, NODE_ID);
 
     selector.send(send).expect("Failed to queue ApiVersions send");
@@ -243,7 +243,7 @@ async fn test_full_connection_flow() {
 
     // Step 4: Send MetadataRequest (for all topics)
     let mut metadata_builder =
-        MetadataRequestBuilder::with_topics_allow_auto_topic_creation_version(None, true, metadata_version);
+        metadata_request::Builder::with_topics_allow_auto_topic_creation_version(None, true, metadata_version);
     let (send, metadata_header) = build_request_send(&mut metadata_builder, "integration-test", 2, NODE_ID);
 
     selector.send(send).expect("Failed to queue Metadata send");

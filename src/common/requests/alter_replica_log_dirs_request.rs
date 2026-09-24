@@ -25,7 +25,7 @@ use crate::alter_replica_log_dirs_response_data::{AlterReplicaLogDirPartitionRes
 use crate::common::TopicPartition;
 use crate::common::protocol::{ApiKeys, Errors, Readable};
 
-use super::{AlterReplicaLogDirsResponse, ConcreteRequest, ConcreteResponse, RequestBuilder};
+use super::{AbstractRequest, AlterReplicaLogDirsResponse, ConcreteResponse, RequestBuilder};
 
 /// An AlterReplicaLogDirs request.
 ///
@@ -136,13 +136,13 @@ impl std::fmt::Display for AlterReplicaLogDirsRequest {
 /// Corresponds to `AlterReplicaLogDirsRequest.Builder` in Java.
 #[derive(Debug, Clone)]
 #[doc(alias = "org.apache.kafka.common.requests.AlterReplicaLogDirsRequest$Builder")]
-pub struct AlterReplicaLogDirsRequestBuilder {
+pub struct Builder {
     data: AlterReplicaLogDirsRequestData,
     oldest_allowed_version: i16,
     latest_allowed_version: i16,
 }
 
-impl AlterReplicaLogDirsRequestBuilder {
+impl Builder {
     /// Creates a builder from existing data.
     #[doc(alias = "org.apache.kafka.common.requests.AlterReplicaLogDirsRequest$Builder#Builder")]
     pub fn new(data: AlterReplicaLogDirsRequestData) -> Self {
@@ -154,7 +154,7 @@ impl AlterReplicaLogDirsRequestBuilder {
     }
 }
 
-impl RequestBuilder for AlterReplicaLogDirsRequestBuilder {
+impl RequestBuilder for Builder {
     fn api_key(&self) -> &'static ApiKeys {
         &ApiKeys::ALTER_REPLICA_LOG_DIRS
     }
@@ -167,8 +167,8 @@ impl RequestBuilder for AlterReplicaLogDirsRequestBuilder {
         self.latest_allowed_version
     }
 
-    fn build_version(&mut self, version: i16) -> io::Result<ConcreteRequest> {
-        Ok(ConcreteRequest::AlterReplicaLogDirs(AlterReplicaLogDirsRequest::new(
+    fn build_version(&mut self, version: i16) -> io::Result<AbstractRequest> {
+        Ok(AbstractRequest::AlterReplicaLogDirs(AlterReplicaLogDirsRequest::new(
             self.data.clone(),
             version,
         )))
@@ -235,13 +235,13 @@ mod tests {
         assert_eq!(request.partition_dirs(), expect);
     }
 
-    /// Round-trips a request through the shared `ConcreteRequest` serialize /
+    /// Round-trips a request through the shared `AbstractRequest` serialize /
     /// parse path.
     #[test]
     fn serialize_parse_round_trip() {
         let mut data = AlterReplicaLogDirsRequestData::new();
         data.set_dirs(vec![dir("/data0", vec![topic("round-trip-topic", vec![3, 4])])]);
-        let mut request = ConcreteRequest::AlterReplicaLogDirs(AlterReplicaLogDirsRequest::new(data, 2));
+        let mut request = AbstractRequest::AlterReplicaLogDirs(AlterReplicaLogDirsRequest::new(data, 2));
         let bytes = request.serialize().unwrap();
         let mut readable = crate::common::ByteBufferAccessor::new(bytes.into_buffer());
         let parsed = AlterReplicaLogDirsRequest::parse(&mut readable, 2).unwrap();
@@ -265,7 +265,7 @@ mod tests {
     fn serialize_known_byte_vector_v2() {
         let mut data = AlterReplicaLogDirsRequestData::new();
         data.set_dirs(vec![dir("/d", vec![topic("t", vec![5])])]);
-        let mut request = ConcreteRequest::AlterReplicaLogDirs(AlterReplicaLogDirsRequest::new(data, 2));
+        let mut request = AbstractRequest::AlterReplicaLogDirs(AlterReplicaLogDirsRequest::new(data, 2));
         let bytes = request.serialize().unwrap();
         let expected: &[u8] = &[
             0x02, // dirs array length + 1

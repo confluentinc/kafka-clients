@@ -30,8 +30,7 @@ use crate::admin::internals::AdminUtils;
 use crate::admin::{ConsumerGroupDescription, MemberAssignment, MemberDescription};
 use crate::common::Errors;
 use crate::common::requests::{
-    ConcreteResponse, ConsumerGroupDescribeRequestBuilder, CoordinatorType, DescribeGroupsRequestBuilder,
-    RequestBuilder,
+    ConcreteResponse, CoordinatorType, RequestBuilder, consumer_group_describe_request, describe_groups_request,
 };
 use crate::common::utils::LogContext;
 use crate::common::{Error, GroupState, GroupType, Node, TopicPartition};
@@ -387,7 +386,7 @@ impl AdminApiHandler<CoordinatorKey, ConsumerGroupDescription> for DescribeConsu
             data.set_group_ids(new_ids);
             data.set_include_authorized_operations(self.include_authorized_operations);
             requests.push(RequestAndKeys {
-                request: Box::new(ConsumerGroupDescribeRequestBuilder::new(data)) as Box<dyn RequestBuilder>,
+                request: Box::new(consumer_group_describe_request::Builder::new(data)) as Box<dyn RequestBuilder>,
                 keys: new_keys,
             });
         }
@@ -396,7 +395,7 @@ impl AdminApiHandler<CoordinatorKey, ConsumerGroupDescription> for DescribeConsu
             data.set_groups(old_ids);
             data.set_include_authorized_operations(self.include_authorized_operations);
             requests.push(RequestAndKeys {
-                request: Box::new(DescribeGroupsRequestBuilder::new(data)) as Box<dyn RequestBuilder>,
+                request: Box::new(describe_groups_request::Builder::new(data)) as Box<dyn RequestBuilder>,
                 keys: old_keys,
             });
         }
@@ -506,10 +505,10 @@ mod tests {
     /// request, whichever concrete variant it is.
     fn request_ids(mut request: Box<dyn RequestBuilder>) -> (Vec<String>, bool, &'static str) {
         match request.build().unwrap() {
-            crate::common::requests::ConcreteRequest::ConsumerGroupDescribe(r) => {
+            crate::common::requests::AbstractRequest::ConsumerGroupDescribe(r) => {
                 (r.data().group_ids.clone(), r.data().include_authorized_operations, "consumer")
             },
-            crate::common::requests::ConcreteRequest::DescribeGroups(r) => {
+            crate::common::requests::AbstractRequest::DescribeGroups(r) => {
                 (r.data().groups.clone(), r.data().include_authorized_operations, "classic")
             },
             other => panic!("unexpected request {other:?}"),

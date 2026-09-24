@@ -25,7 +25,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicI32, Ordering};
 
 use crate::common::network::NetworkSend;
-use crate::common::requests::{ConcreteRequest, ConcreteResponse, RequestHeader};
+use crate::common::requests::{AbstractRequest, ConcreteResponse, RequestHeader};
 
 use super::ClientResponse;
 use super::RequestCompletionHandler;
@@ -50,7 +50,7 @@ pub struct InFlightRequest {
     /// Whether this request is initiated internally by the `NetworkClient`.
     pub(crate) is_internal_request: bool,
     /// The built request.
-    pub(crate) request: Option<ConcreteRequest>,
+    pub(crate) request: Option<AbstractRequest>,
     /// The network send associated with this request.
     // Java only ever assigns `InFlightRequest.send` (`NetworkClient.java:1557`).
     #[allow(dead_code)]
@@ -76,7 +76,7 @@ impl InFlightRequest {
         client_request: &mut super::ClientRequest,
         header: RequestHeader,
         is_internal_request: bool,
-        request: Option<ConcreteRequest>,
+        request: Option<AbstractRequest>,
         send: NetworkSend,
         send_time_ms: i64,
     ) -> Self {
@@ -108,7 +108,7 @@ impl InFlightRequest {
         callback: Option<RequestCompletionHandler>,
         expect_response: bool,
         is_internal_request: bool,
-        request: Option<ConcreteRequest>,
+        request: Option<AbstractRequest>,
         send: NetworkSend,
         send_time_ms: i64,
     ) -> Self {

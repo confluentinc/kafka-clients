@@ -23,7 +23,7 @@ use crate::DescribeGroupsResponseData;
 use crate::common::protocol::{ApiKeys, Errors, Readable};
 use crate::describe_groups_response_data::DescribedGroup;
 
-use super::ConcreteRequest;
+use super::AbstractRequest;
 use super::ConcreteResponse;
 use super::DescribeGroupsResponse;
 use super::RequestBuilder;
@@ -108,13 +108,13 @@ impl std::fmt::Display for DescribeGroupsRequest {
 /// Corresponds to `DescribeGroupsRequest.Builder` in Java.
 #[derive(Debug, Clone)]
 #[doc(alias = "org.apache.kafka.common.requests.DescribeGroupsRequest$Builder")]
-pub struct DescribeGroupsRequestBuilder {
+pub struct Builder {
     data: DescribeGroupsRequestData,
     oldest_allowed_version: i16,
     latest_allowed_version: i16,
 }
 
-impl DescribeGroupsRequestBuilder {
+impl Builder {
     /// Creates a builder wrapping the given data with the full supported
     /// version range.
     #[doc(alias = "org.apache.kafka.common.requests.DescribeGroupsRequest$Builder#Builder")]
@@ -132,7 +132,7 @@ impl DescribeGroupsRequestBuilder {
     }
 }
 
-impl RequestBuilder for DescribeGroupsRequestBuilder {
+impl RequestBuilder for Builder {
     fn api_key(&self) -> &'static ApiKeys {
         &ApiKeys::DESCRIBE_GROUPS
     }
@@ -145,8 +145,8 @@ impl RequestBuilder for DescribeGroupsRequestBuilder {
         self.latest_allowed_version
     }
 
-    fn build_version(&mut self, version: i16) -> io::Result<ConcreteRequest> {
-        Ok(ConcreteRequest::DescribeGroups(DescribeGroupsRequest::new(
+    fn build_version(&mut self, version: i16) -> io::Result<AbstractRequest> {
+        Ok(AbstractRequest::DescribeGroups(DescribeGroupsRequest::new(
             self.data.clone(),
             version,
         )))
@@ -166,7 +166,7 @@ mod tests {
     fn test_serialize_known_byte_vector_v0() {
         let mut data = DescribeGroupsRequestData::new();
         data.set_groups(vec!["g1".to_string()]);
-        let mut builder = DescribeGroupsRequestBuilder::new(data);
+        let mut builder = Builder::new(data);
         let mut req = builder.build_version(0).unwrap();
         let expected: &[u8] = &[0x00, 0x00, 0x00, 0x01, 0x00, 0x02, 0x67, 0x31];
         assert_eq!(req.serialize().unwrap().into_buffer().as_slice(), expected);
@@ -174,7 +174,7 @@ mod tests {
 
     #[test]
     fn test_api_key() {
-        let builder = DescribeGroupsRequestBuilder::new(DescribeGroupsRequestData::new());
+        let builder = Builder::new(DescribeGroupsRequestData::new());
         assert_eq!(builder.api_key(), &ApiKeys::DESCRIBE_GROUPS);
     }
 

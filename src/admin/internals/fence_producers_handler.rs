@@ -23,7 +23,7 @@ use std::collections::{HashMap, HashSet};
 use crate::InitProducerIdRequestData;
 use crate::admin::FenceProducersOptions;
 use crate::common::Errors;
-use crate::common::requests::{ConcreteResponse, CoordinatorType, InitProducerIdRequestBuilder, RequestBuilder};
+use crate::common::requests::{ConcreteResponse, CoordinatorType, RequestBuilder, init_producer_id_request};
 use crate::common::utils::{LogContext, ProducerIdAndEpoch};
 use crate::common::{Error, Node};
 use crate::kafka_debug;
@@ -202,7 +202,7 @@ impl AdminApiHandler<CoordinatorKey, ProducerIdAndEpoch> for FenceProducersHandl
             .map(|key| {
                 let data = self.build_single_request(key);
                 RequestAndKeys {
-                    request: Box::new(InitProducerIdRequestBuilder::new(data)) as Box<dyn RequestBuilder>,
+                    request: Box::new(init_producer_id_request::Builder::new(data)) as Box<dyn RequestBuilder>,
                     keys: HashSet::from([key.clone()]),
                 }
             })

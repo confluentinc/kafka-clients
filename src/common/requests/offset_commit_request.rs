@@ -17,7 +17,7 @@
 //! Corresponds to `org.apache.kafka.common.requests.OffsetCommitRequest`.
 //!
 //! Wraps the auto-generated [`OffsetCommitRequestData`] and exposes an
-//! [`OffsetCommitRequestBuilder`] for the consumer's commit path.
+//! [`Builder`] for the consumer's commit path.
 //!
 //! # Version selection
 //!
@@ -38,7 +38,7 @@ use crate::offset_commit_response_data::{OffsetCommitResponsePartition, OffsetCo
 
 use super::ConcreteResponse;
 use super::OffsetCommitResponse;
-use super::abstract_request::{ConcreteRequest, RequestBuilder};
+use super::abstract_request::{AbstractRequest, RequestBuilder};
 
 /// An `OffsetCommit` request.
 ///
@@ -175,13 +175,13 @@ impl std::fmt::Display for OffsetCommitRequest {
 ///   guaranteed to use topic names.
 #[derive(Debug, Clone)]
 #[doc(alias = "org.apache.kafka.common.requests.OffsetCommitRequest$Builder")]
-pub struct OffsetCommitRequestBuilder {
+pub struct Builder {
     data: OffsetCommitRequestData,
     oldest_allowed_version: i16,
     latest_allowed_version: i16,
 }
 
-impl OffsetCommitRequestBuilder {
+impl Builder {
     /// Build a request that can use either topic ids or topic names.
     ///
     /// Mirrors Java's `Builder.forTopicIdsOrNames(OffsetCommitRequestData)`.
@@ -212,7 +212,7 @@ impl OffsetCommitRequestBuilder {
     }
 }
 
-impl RequestBuilder for OffsetCommitRequestBuilder {
+impl RequestBuilder for Builder {
     fn api_key(&self) -> &'static ApiKeys {
         &ApiKeys::OFFSET_COMMIT
     }
@@ -225,7 +225,7 @@ impl RequestBuilder for OffsetCommitRequestBuilder {
         self.latest_allowed_version
     }
 
-    fn build_version(&mut self, version: i16) -> io::Result<ConcreteRequest> {
+    fn build_version(&mut self, version: i16) -> io::Result<AbstractRequest> {
         if version < self.oldest_allowed_version || version > self.latest_allowed_version {
             return Err(io::Error::new(
                 io::ErrorKind::Unsupported,
@@ -263,7 +263,7 @@ impl RequestBuilder for OffsetCommitRequestBuilder {
                 }
             }
         }
-        Ok(ConcreteRequest::OffsetCommit(OffsetCommitRequest::new(
+        Ok(AbstractRequest::OffsetCommit(OffsetCommitRequest::new(
             self.data.clone(),
             version,
         )))
@@ -291,7 +291,7 @@ mod tests {
     fn for_topic_ids_or_names_uses_full_range() {
         let mut data = OffsetCommitRequestData::new();
         data.set_group_id("g".to_string());
-        let builder = OffsetCommitRequestBuilder::for_topic_ids_or_names(data);
+        let builder = Builder::for_topic_ids_or_names(data);
         assert_eq!(builder.oldest_allowed_version(), ApiKeys::OFFSET_COMMIT.oldest_version());
         assert_eq!(builder.latest_allowed_version(), ApiKeys::OFFSET_COMMIT.latest_version());
     }
@@ -301,7 +301,7 @@ mod tests {
     fn for_topic_names_caps_at_v9() {
         let mut data = OffsetCommitRequestData::new();
         data.set_group_id("g".to_string());
-        let builder = OffsetCommitRequestBuilder::for_topic_names(data);
+        let builder = Builder::for_topic_names(data);
         assert_eq!(builder.latest_allowed_version(), 9);
     }
 
@@ -323,7 +323,7 @@ mod tests {
     fn build_version_out_of_range_returns_err() {
         let mut data = OffsetCommitRequestData::new();
         data.set_group_id("g".to_string());
-        let mut builder = OffsetCommitRequestBuilder::for_topic_names(data);
+        let mut builder = Builder::for_topic_names(data);
         let result = builder.build_version(10);
         assert!(result.is_err());
     }
@@ -336,7 +336,7 @@ mod tests {
         let mut topic = OffsetCommitRequestTopic::new();
         topic.set_name("t".to_string()); // no topic_id set
         data.set_topics(vec![topic]);
-        let mut builder = OffsetCommitRequestBuilder::for_topic_ids_or_names(data);
+        let mut builder = Builder::for_topic_ids_or_names(data);
         let err = builder.build_version(10).unwrap_err();
         assert!(err.to_string().contains("topic ids"));
     }
@@ -350,7 +350,7 @@ mod tests {
         topic.set_topic_id(Uuid::new(1, 2));
         // name left empty
         data.set_topics(vec![topic]);
-        let mut builder = OffsetCommitRequestBuilder::for_topic_names(data);
+        let mut builder = Builder::for_topic_names(data);
         let err = builder.build_version(9).unwrap_err();
         assert!(err.to_string().contains("topic names"));
     }
@@ -361,7 +361,7 @@ mod tests {
         let mut data = OffsetCommitRequestData::new();
         data.set_group_id("g".to_string());
         data.set_group_instance_id(Some("instance-a".to_string()));
-        let mut builder = OffsetCommitRequestBuilder::for_topic_ids_or_names(data);
+        let mut builder = Builder::for_topic_ids_or_names(data);
         let err = builder.build_version(6).unwrap_err();
         assert!(err.to_string().contains("group.instance.id"));
     }

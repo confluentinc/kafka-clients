@@ -191,7 +191,7 @@ mod tests {
     use super::*;
     use crate::MetadataRequestData;
     use crate::common::ApiKeys;
-    use crate::common::network::KafkaSend;
+    use crate::common::network::Send as _;
     use crate::common::requests::RequestHeaderOptionsBuilder;
 
     #[test]

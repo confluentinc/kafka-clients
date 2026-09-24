@@ -20,7 +20,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::common::Errors;
-use crate::common::requests::{ConcreteResponse, CoordinatorType, LeaveGroupRequestBuilder, RequestBuilder};
+use crate::common::requests::{ConcreteResponse, CoordinatorType, RequestBuilder, leave_group_request};
 use crate::common::utils::LogContext;
 use crate::common::{Error, Node};
 use crate::kafka_debug;
@@ -86,9 +86,9 @@ impl RemoveMembersFromConsumerGroupHandler {
         &self,
         _coordinator_id: i32,
         group_ids: &HashSet<CoordinatorKey>,
-    ) -> LeaveGroupRequestBuilder {
+    ) -> leave_group_request::Builder {
         self.validate_keys(group_ids);
-        LeaveGroupRequestBuilder::new(self.group_id.id_value.clone(), self.members.clone())
+        leave_group_request::Builder::new(self.group_id.id_value.clone(), self.members.clone())
     }
 
     #[doc(alias = "org.apache.kafka.clients.admin.internals.RemoveMembersFromConsumerGroupHandler#handleGroupError")]
@@ -307,10 +307,10 @@ mod tests {
         alias = "org.apache.kafka.clients.admin.internals.RemoveMembersFromConsumerGroupHandlerTest#testBuildRequest"
     )]
     fn test_build_request() {
-        use crate::common::requests::ConcreteRequest;
+        use crate::common::requests::AbstractRequest;
         let mut builder = handler().build_batched_request(1, &keys());
         match builder.build().unwrap() {
-            ConcreteRequest::LeaveGroup(r) => {
+            AbstractRequest::LeaveGroup(r) => {
                 assert_eq!(r.data().group_id, GROUP_ID);
                 assert_eq!(r.data().members.len(), 2);
             },

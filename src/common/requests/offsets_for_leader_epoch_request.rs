@@ -17,7 +17,7 @@
 //! Corresponds to `org.apache.kafka.common.requests.OffsetsForLeaderEpochRequest`.
 //!
 //! Wraps the auto-generated [`OffsetForLeaderEpochRequestData`] and exposes
-//! a [`OffsetsForLeaderEpochRequestBuilder`] that emits v3+ for consumer
+//! a [`Builder`] that emits v3+ for consumer
 //! callers (the version range required for topic-level permission instead
 //! of cluster permission).
 
@@ -31,7 +31,7 @@ use crate::offset_for_leader_epoch_response_data::{EpochEndOffset, OffsetForLead
 
 use super::ConcreteResponse;
 use super::OffsetsForLeaderEpochResponse;
-use super::abstract_request::{ConcreteRequest, RequestBuilder};
+use super::abstract_request::{AbstractRequest, RequestBuilder};
 
 /// An `OffsetsForLeaderEpoch` request.
 ///
@@ -146,13 +146,13 @@ impl std::fmt::Display for OffsetsForLeaderEpochRequest {
 /// Corresponds to `OffsetsForLeaderEpochRequest.Builder` in Java.
 #[derive(Debug, Clone)]
 #[doc(alias = "org.apache.kafka.common.requests.OffsetsForLeaderEpochRequest$Builder")]
-pub struct OffsetsForLeaderEpochRequestBuilder {
+pub struct Builder {
     data: OffsetForLeaderEpochRequestData,
     oldest_allowed_version: i16,
     latest_allowed_version: i16,
 }
 
-impl OffsetsForLeaderEpochRequestBuilder {
+impl Builder {
     /// Constructs a consumer-side builder targeting v3+ (the version that
     /// allows topic-level permission).
     ///
@@ -192,7 +192,7 @@ impl OffsetsForLeaderEpochRequestBuilder {
     }
 }
 
-impl RequestBuilder for OffsetsForLeaderEpochRequestBuilder {
+impl RequestBuilder for Builder {
     fn api_key(&self) -> &'static ApiKeys {
         &ApiKeys::OFFSET_FOR_LEADER_EPOCH
     }
@@ -205,7 +205,7 @@ impl RequestBuilder for OffsetsForLeaderEpochRequestBuilder {
         self.latest_allowed_version
     }
 
-    fn build_version(&mut self, version: i16) -> io::Result<ConcreteRequest> {
+    fn build_version(&mut self, version: i16) -> io::Result<AbstractRequest> {
         if version < self.oldest_allowed_version || version > self.latest_allowed_version {
             return Err(io::Error::new(
                 io::ErrorKind::Unsupported,
@@ -215,7 +215,7 @@ impl RequestBuilder for OffsetsForLeaderEpochRequestBuilder {
                 ),
             ));
         }
-        Ok(ConcreteRequest::OffsetsForLeaderEpoch(OffsetsForLeaderEpochRequest::new(
+        Ok(AbstractRequest::OffsetsForLeaderEpoch(OffsetsForLeaderEpochRequest::new(
             self.data.clone(),
             version,
         )))
@@ -230,7 +230,7 @@ mod tests {
     /// requirement.
     #[test]
     fn for_consumer_targets_v3_plus() {
-        let builder = OffsetsForLeaderEpochRequestBuilder::for_consumer(Vec::new());
+        let builder = Builder::for_consumer(Vec::new());
         assert_eq!(
             builder.oldest_allowed_version(),
             OffsetsForLeaderEpochRequest::MIN_CONSUMER_VERSION
@@ -246,7 +246,7 @@ mod tests {
     /// supplied replica id.
     #[test]
     fn for_follower_pins_to_v4() {
-        let builder = OffsetsForLeaderEpochRequestBuilder::for_follower(Vec::new(), 7);
+        let builder = Builder::for_follower(Vec::new(), 7);
         assert_eq!(builder.oldest_allowed_version(), 4);
         assert_eq!(builder.latest_allowed_version(), 4);
         assert_eq!(builder.data().replica_id, 7);

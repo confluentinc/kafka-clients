@@ -23,7 +23,7 @@ use crate::OffsetFetchRequestData;
 use crate::admin::{GroupOffsets, ListConsumerGroupOffsetsSpec};
 use crate::common::Errors;
 use crate::common::requests::RequestUtils;
-use crate::common::requests::{ConcreteResponse, CoordinatorType, OffsetFetchRequestBuilder, RequestBuilder};
+use crate::common::requests::{ConcreteResponse, CoordinatorType, RequestBuilder, offset_fetch_request};
 use crate::common::utils::LogContext;
 use crate::common::{Error, Node, TopicPartition};
 use crate::consumer::OffsetAndMetadata;
@@ -96,7 +96,7 @@ impl ListConsumerGroupOffsetsHandler {
     /// Builds a single (possibly batched) `OffsetFetch` request for the given
     /// group ids. Mirrors `buildBatchedRequest`.
     #[doc(alias = "org.apache.kafka.clients.admin.internals.ListConsumerGroupOffsetsHandler#buildBatchedRequest")]
-    pub(crate) fn build_batched_request(&self, group_ids: &HashSet<CoordinatorKey>) -> OffsetFetchRequestBuilder {
+    pub(crate) fn build_batched_request(&self, group_ids: &HashSet<CoordinatorKey>) -> offset_fetch_request::Builder {
         let mut data = OffsetFetchRequestData::new();
         data.set_require_stable(self.require_stable);
         let groups = group_ids
@@ -128,7 +128,7 @@ impl ListConsumerGroupOffsetsHandler {
             })
             .collect();
         data.set_groups(groups);
-        OffsetFetchRequestBuilder::for_topic_names(data, false)
+        offset_fetch_request::Builder::for_topic_names(data, false)
     }
 
     #[doc(alias = "org.apache.kafka.clients.admin.internals.ListConsumerGroupOffsetsHandler#handleGroupError")]
@@ -369,7 +369,7 @@ mod tests {
 
     fn build_offset_fetch(mut request: Box<dyn RequestBuilder>) -> OffsetFetchRequestData {
         match request.build().unwrap() {
-            crate::common::requests::ConcreteRequest::OffsetFetch(r) => r.data().clone(),
+            crate::common::requests::AbstractRequest::OffsetFetch(r) => r.data().clone(),
             other => panic!("expected OffsetFetch request, got {}", other.api_key().name()),
         }
     }

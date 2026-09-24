@@ -22,7 +22,7 @@ use crate::ConsumerGroupHeartbeatRequestData;
 use crate::ConsumerGroupHeartbeatResponseData;
 use crate::common::protocol::{ApiKeys, Errors, Readable};
 
-use super::ConcreteRequest;
+use super::AbstractRequest;
 use super::ConcreteResponse;
 use super::ConsumerGroupHeartbeatResponse;
 use super::RequestBuilder;
@@ -128,13 +128,13 @@ impl std::fmt::Display for ConsumerGroupHeartbeatRequest {
 /// Corresponds to `ConsumerGroupHeartbeatRequest.Builder` in Java.
 #[derive(Debug, Clone)]
 #[doc(alias = "org.apache.kafka.common.requests.ConsumerGroupHeartbeatRequest$Builder")]
-pub struct ConsumerGroupHeartbeatRequestBuilder {
+pub struct Builder {
     data: ConsumerGroupHeartbeatRequestData,
     oldest_allowed_version: i16,
     latest_allowed_version: i16,
 }
 
-impl ConsumerGroupHeartbeatRequestBuilder {
+impl Builder {
     /// Creates a builder wrapping the given data with the full supported
     /// version range.
     #[doc(alias = "org.apache.kafka.common.requests.ConsumerGroupHeartbeatRequest$Builder#Builder")]
@@ -152,7 +152,7 @@ impl ConsumerGroupHeartbeatRequestBuilder {
     }
 }
 
-impl RequestBuilder for ConsumerGroupHeartbeatRequestBuilder {
+impl RequestBuilder for Builder {
     fn api_key(&self) -> &'static ApiKeys {
         &ApiKeys::CONSUMER_GROUP_HEARTBEAT
     }
@@ -165,7 +165,7 @@ impl RequestBuilder for ConsumerGroupHeartbeatRequestBuilder {
         self.latest_allowed_version
     }
 
-    fn build_version(&mut self, version: i16) -> io::Result<ConcreteRequest> {
+    fn build_version(&mut self, version: i16) -> io::Result<AbstractRequest> {
         // Mirrors `ConsumerGroupHeartbeatRequest.Builder.build(short version)`.
         if version == 0 && self.data.subscribed_topic_regex.is_some() {
             return Err(io::Error::new(
@@ -173,7 +173,7 @@ impl RequestBuilder for ConsumerGroupHeartbeatRequestBuilder {
                 ConsumerGroupHeartbeatRequest::REGEX_RESOLUTION_NOT_SUPPORTED_MSG,
             ));
         }
-        Ok(ConcreteRequest::ConsumerGroupHeartbeat(ConsumerGroupHeartbeatRequest::new(
+        Ok(AbstractRequest::ConsumerGroupHeartbeat(ConsumerGroupHeartbeatRequest::new(
             self.data.clone(),
             version,
         )))
@@ -187,7 +187,7 @@ mod tests {
     /// Verifies the API key accessor.
     #[test]
     fn test_api_key() {
-        let builder = ConsumerGroupHeartbeatRequestBuilder::new(ConsumerGroupHeartbeatRequestData::new());
+        let builder = Builder::new(ConsumerGroupHeartbeatRequestData::new());
         assert_eq!(builder.api_key(), &ApiKeys::CONSUMER_GROUP_HEARTBEAT);
     }
 
@@ -197,7 +197,7 @@ mod tests {
     fn test_v0_regex_rejected() {
         let mut data = ConsumerGroupHeartbeatRequestData::new();
         data.set_subscribed_topic_regex(Some("topic-.*".to_string()));
-        let mut builder = ConsumerGroupHeartbeatRequestBuilder::new(data);
+        let mut builder = Builder::new(data);
         let err = builder.build_version(0).expect_err("v0 with regex must be rejected");
         assert!(err.to_string().contains("regular expressions"), "got: {err}");
     }
@@ -207,10 +207,10 @@ mod tests {
     fn test_v1_regex_accepted() {
         let mut data = ConsumerGroupHeartbeatRequestData::new();
         data.set_subscribed_topic_regex(Some("topic-.*".to_string()));
-        let mut builder = ConsumerGroupHeartbeatRequestBuilder::new(data);
+        let mut builder = Builder::new(data);
         let built = builder.build_version(1).expect("v1 build with regex");
         match built {
-            ConcreteRequest::ConsumerGroupHeartbeat(req) => {
+            AbstractRequest::ConsumerGroupHeartbeat(req) => {
                 assert_eq!(req.version(), 1);
                 assert_eq!(req.data().subscribed_topic_regex.as_deref(), Some("topic-.*"));
             },

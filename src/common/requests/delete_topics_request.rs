@@ -25,7 +25,7 @@ use crate::common::protocol::{ApiKeys, Errors, Readable};
 use crate::delete_topics_request_data::DeleteTopicState;
 use crate::delete_topics_response_data::DeletableTopicResult;
 
-use super::{ConcreteRequest, ConcreteResponse, DeleteTopicsResponse, RequestBuilder};
+use super::{AbstractRequest, ConcreteResponse, DeleteTopicsResponse, RequestBuilder};
 
 /// A DeleteTopics request.
 ///
@@ -132,13 +132,13 @@ impl std::fmt::Display for DeleteTopicsRequest {
 /// Corresponds to `DeleteTopicsRequest.Builder` in Java.
 #[derive(Debug, Clone)]
 #[doc(alias = "org.apache.kafka.common.requests.DeleteTopicsRequest$Builder")]
-pub struct DeleteTopicsRequestBuilder {
+pub struct Builder {
     data: DeleteTopicsRequestData,
     oldest_allowed_version: i16,
     latest_allowed_version: i16,
 }
 
-impl DeleteTopicsRequestBuilder {
+impl Builder {
     /// Creates a builder from existing data.
     #[doc(alias = "org.apache.kafka.common.requests.DeleteTopicsRequest$Builder#Builder")]
     pub fn new(data: DeleteTopicsRequestData) -> Self {
@@ -150,7 +150,7 @@ impl DeleteTopicsRequestBuilder {
     }
 }
 
-impl RequestBuilder for DeleteTopicsRequestBuilder {
+impl RequestBuilder for Builder {
     fn api_key(&self) -> &'static ApiKeys {
         &ApiKeys::DELETE_TOPICS
     }
@@ -163,7 +163,7 @@ impl RequestBuilder for DeleteTopicsRequestBuilder {
         self.latest_allowed_version
     }
 
-    fn build_version(&mut self, version: i16) -> io::Result<ConcreteRequest> {
+    fn build_version(&mut self, version: i16) -> io::Result<AbstractRequest> {
         // v6+ carries topics as DeleteTopicState (with topic ids); older
         // versions use the topic_names list. Mirror Builder.build's grouping.
         if version >= 6 && !self.data.topic_names.is_empty() {
@@ -189,7 +189,7 @@ impl RequestBuilder for DeleteTopicsRequestBuilder {
                 }
             }
         }
-        Ok(ConcreteRequest::DeleteTopics(DeleteTopicsRequest::new(
+        Ok(AbstractRequest::DeleteTopics(DeleteTopicsRequest::new(
             self.data.clone(),
             version,
         )))
@@ -231,7 +231,7 @@ mod tests {
         let mut data = DeleteTopicsRequestData::new();
         data.set_topic_names(vec!["to-delete".to_string()]);
         data.set_timeout_ms(15000);
-        let mut request = ConcreteRequest::DeleteTopics(DeleteTopicsRequest::new(data, 5));
+        let mut request = AbstractRequest::DeleteTopics(DeleteTopicsRequest::new(data, 5));
         let bytes = request.serialize().unwrap();
         let mut readable = crate::common::ByteBufferAccessor::new(bytes.into_buffer());
         let parsed = DeleteTopicsRequest::parse(&mut readable, 5).unwrap();

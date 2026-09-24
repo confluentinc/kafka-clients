@@ -20,7 +20,7 @@ use std::collections::HashMap;
 use std::io;
 
 use crate::ListConfigResourcesResponseData;
-use crate::common::config::{ConfigResource, ConfigResourceType};
+use crate::common::config::{ConfigResource, config_resource};
 use crate::common::protocol::{ApiKeys, Errors, Readable};
 
 use super::AbstractResponse;
@@ -86,7 +86,7 @@ impl ListConfigResourcesResponse {
             .config_resources
             .iter()
             .map(|entry| {
-                ConfigResource::new(ConfigResourceType::for_id(entry.resource_type), entry.resource_name.clone())
+                ConfigResource::new(config_resource::Type::for_id(entry.resource_type), entry.resource_name.clone())
             })
             .collect()
     }
@@ -132,16 +132,16 @@ mod tests {
         data.set_error_code(Errors::None.code());
         let mut a = WireConfigResource::new();
         a.set_resource_name("topic".to_string());
-        a.set_resource_type(ConfigResourceType::Topic.id());
+        a.set_resource_type(config_resource::Type::Topic.id());
         let mut b = WireConfigResource::new();
         b.set_resource_name("1".to_string());
-        b.set_resource_type(ConfigResourceType::Broker.id());
+        b.set_resource_type(config_resource::Type::Broker.id());
         data.set_config_resources(vec![a, b]);
         let response = ListConfigResourcesResponse::new(data);
         let resources = response.config_resources();
         assert_eq!(resources.len(), 2);
-        assert!(resources.contains(&ConfigResource::new(ConfigResourceType::Topic, "topic".to_string())));
-        assert!(resources.contains(&ConfigResource::new(ConfigResourceType::Broker, "1".to_string())));
+        assert!(resources.contains(&ConfigResource::new(config_resource::Type::Topic, "topic".to_string())));
+        assert!(resources.contains(&ConfigResource::new(config_resource::Type::Broker, "1".to_string())));
     }
 
     #[test]

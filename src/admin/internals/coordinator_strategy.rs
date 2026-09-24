@@ -25,7 +25,7 @@ use crate::FindCoordinatorRequestData;
 use crate::common::Error;
 use crate::common::Errors;
 use crate::common::requests::{
-    ConcreteResponse, CoordinatorType, FindCoordinatorRequestBuilder, FindCoordinatorResponse, RequestBuilder,
+    ConcreteResponse, CoordinatorType, FindCoordinatorResponse, RequestBuilder, find_coordinator_request,
 };
 use crate::common::utils::LogContext;
 use crate::{kafka_debug, kafka_error};
@@ -85,19 +85,19 @@ impl CoordinatorStrategy {
     pub(crate) fn build_lookup_request(
         &self,
         keys: &HashSet<CoordinatorKey>,
-    ) -> Result<FindCoordinatorRequestBuilder, Error> {
+    ) -> Result<find_coordinator_request::Builder, Error> {
         if self.batch() {
             self.ensure_same_type(keys)?;
             let mut data = FindCoordinatorRequestData::new();
             data.set_key_type(self.coordinator_type.id());
             data.set_coordinator_keys(keys.iter().map(|k| k.id_value.clone()).collect());
-            Ok(FindCoordinatorRequestBuilder::new(data))
+            Ok(find_coordinator_request::Builder::new(data))
         } else {
             let key = self.require_singleton_and_type(keys)?;
             let mut data = FindCoordinatorRequestData::new();
             data.set_key(key.id_value.clone());
             data.set_key_type(key.coordinator_type.id());
-            Ok(FindCoordinatorRequestBuilder::new(data))
+            Ok(find_coordinator_request::Builder::new(data))
         }
     }
 

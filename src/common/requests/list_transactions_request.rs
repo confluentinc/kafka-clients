@@ -22,7 +22,7 @@ use crate::ListTransactionsRequestData;
 use crate::ListTransactionsResponseData;
 use crate::common::protocol::{ApiKeys, Errors, Readable};
 
-use super::{ConcreteRequest, ConcreteResponse, ListTransactionsResponse, RequestBuilder};
+use super::{AbstractRequest, ConcreteResponse, ListTransactionsResponse, RequestBuilder};
 
 /// A ListTransactions request.
 ///
@@ -97,11 +97,11 @@ impl std::fmt::Display for ListTransactionsRequest {
 /// Corresponds to `ListTransactionsRequest.Builder`.
 #[derive(Debug, Clone)]
 #[doc(alias = "org.apache.kafka.common.requests.ListTransactionsRequest$Builder")]
-pub struct ListTransactionsRequestBuilder {
+pub struct Builder {
     data: ListTransactionsRequestData,
 }
 
-impl ListTransactionsRequestBuilder {
+impl Builder {
     /// Creates a builder from the given request data.
     #[doc(alias = "org.apache.kafka.common.requests.ListTransactionsRequest$Builder#Builder")]
     pub fn new(data: ListTransactionsRequestData) -> Self {
@@ -109,7 +109,7 @@ impl ListTransactionsRequestBuilder {
     }
 }
 
-impl RequestBuilder for ListTransactionsRequestBuilder {
+impl RequestBuilder for Builder {
     fn api_key(&self) -> &'static ApiKeys {
         &ApiKeys::LIST_TRANSACTIONS
     }
@@ -122,8 +122,8 @@ impl RequestBuilder for ListTransactionsRequestBuilder {
         ApiKeys::LIST_TRANSACTIONS.latest_version()
     }
 
-    fn build_version(&mut self, version: i16) -> io::Result<ConcreteRequest> {
-        Ok(ConcreteRequest::ListTransactions(ListTransactionsRequest::new(
+    fn build_version(&mut self, version: i16) -> io::Result<AbstractRequest> {
+        Ok(AbstractRequest::ListTransactions(ListTransactionsRequest::new(
             self.data.clone(),
             version,
         )))
@@ -151,7 +151,7 @@ mod tests {
         data.set_state_filters(vec!["Ongoing".to_string()]);
         data.set_producer_id_filters(vec![1, 2]);
         data.set_duration_filter(-1);
-        let mut builder = ListTransactionsRequestBuilder::new(data);
+        let mut builder = Builder::new(data);
         let mut request = builder.build_version(1).unwrap();
         let bytes = request.serialize().unwrap();
         let mut readable = crate::common::ByteBufferAccessor::new(bytes.into_buffer());
@@ -171,7 +171,7 @@ mod tests {
         let mut data = ListTransactionsRequestData::new();
         data.set_state_filters(vec!["Ongoing".to_string()]);
         data.set_duration_filter(-1);
-        let mut builder = ListTransactionsRequestBuilder::new(data);
+        let mut builder = Builder::new(data);
         let mut request = builder.build_version(1).unwrap();
         let bytes = request.serialize().unwrap();
         let expected: &[u8] = &[

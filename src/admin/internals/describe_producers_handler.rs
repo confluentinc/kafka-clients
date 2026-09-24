@@ -27,7 +27,7 @@ use crate::admin::KafkaAdminClient;
 use crate::admin::PartitionProducerState;
 use crate::admin::ProducerState;
 use crate::common::Errors;
-use crate::common::requests::{ConcreteResponse, DescribeProducersRequestBuilder, RequestBuilder};
+use crate::common::requests::{ConcreteResponse, RequestBuilder, describe_producers_request};
 use crate::common::utils::LogContext;
 use crate::common::{Error, Node, TopicPartition};
 use crate::describe_producers_request_data::TopicRequest;
@@ -206,7 +206,7 @@ impl AdminApiHandler<TopicPartition, PartitionProducerState> for DescribeProduce
     fn build_request(&self, _broker_id: i32, keys: &HashSet<TopicPartition>) -> Vec<RequestAndKeys<TopicPartition>> {
         let data = self.build_batched_request(keys);
         vec![RequestAndKeys {
-            request: Box::new(DescribeProducersRequestBuilder::new(data)) as Box<dyn RequestBuilder>,
+            request: Box::new(describe_producers_request::Builder::new(data)) as Box<dyn RequestBuilder>,
             keys: keys.clone(),
         }]
     }

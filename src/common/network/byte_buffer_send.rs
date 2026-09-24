@@ -16,8 +16,8 @@
 //!
 //! Translated from `org.apache.kafka.common.network.ByteBufferSend`.
 
-use super::KafkaSend;
 use super::TransportLayer;
+use crate::common::network;
 
 use bytes::Bytes;
 use std::fmt;
@@ -85,7 +85,7 @@ impl ByteBufferSend {
     }
 }
 
-impl KafkaSend for ByteBufferSend {
+impl network::Send for ByteBufferSend {
     fn completed(&self) -> bool {
         self.remaining == 0 && !self.pending
     }

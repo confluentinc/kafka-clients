@@ -34,8 +34,8 @@ use crate::common::Error;
 use crate::common::Errors;
 use crate::common::Uuid;
 use crate::common::requests::ConcreteResponse;
-use crate::common::requests::ConsumerGroupHeartbeatRequestBuilder;
 use crate::common::requests::ConsumerGroupHeartbeatResponse;
+use crate::common::requests::consumer_group_heartbeat_request;
 use crate::consumer::ConsumerConfig;
 use crate::consumer::internals::events::BackgroundEvent;
 use crate::consumer::internals::events::BackgroundEventHandler;
@@ -391,7 +391,7 @@ impl ConsumerHeartbeatRequestManager {
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerHeartbeatRequestManager#buildHeartbeatRequest")]
     fn build_heartbeat_request(&mut self, ignore_response: bool) -> UnsentRequest {
         let data = self.heartbeat_state.build_request_data();
-        let builder = Box::new(ConsumerGroupHeartbeatRequestBuilder::new(data));
+        let builder = Box::new(consumer_group_heartbeat_request::Builder::new(data));
         let node = self.inner.coordinator_request_manager.coordinator();
         let mut unsent = UnsentRequest::new(builder, node);
 

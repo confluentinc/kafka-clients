@@ -22,7 +22,7 @@ use crate::DescribeLogDirsRequestData;
 use crate::DescribeLogDirsResponseData;
 use crate::common::protocol::{ApiKeys, Errors, Readable};
 
-use super::{ConcreteRequest, ConcreteResponse, DescribeLogDirsResponse, RequestBuilder};
+use super::{AbstractRequest, ConcreteResponse, DescribeLogDirsResponse, RequestBuilder};
 
 /// A DescribeLogDirs request.
 ///
@@ -107,13 +107,13 @@ impl std::fmt::Display for DescribeLogDirsRequest {
 /// Corresponds to `DescribeLogDirsRequest.Builder` in Java.
 #[derive(Debug, Clone)]
 #[doc(alias = "org.apache.kafka.common.requests.DescribeLogDirsRequest$Builder")]
-pub struct DescribeLogDirsRequestBuilder {
+pub struct Builder {
     data: DescribeLogDirsRequestData,
     oldest_allowed_version: i16,
     latest_allowed_version: i16,
 }
 
-impl DescribeLogDirsRequestBuilder {
+impl Builder {
     /// Creates a builder from existing data.
     #[doc(alias = "org.apache.kafka.common.requests.DescribeLogDirsRequest$Builder#Builder")]
     pub fn new(data: DescribeLogDirsRequestData) -> Self {
@@ -125,7 +125,7 @@ impl DescribeLogDirsRequestBuilder {
     }
 }
 
-impl RequestBuilder for DescribeLogDirsRequestBuilder {
+impl RequestBuilder for Builder {
     fn api_key(&self) -> &'static ApiKeys {
         &ApiKeys::DESCRIBE_LOG_DIRS
     }
@@ -138,8 +138,8 @@ impl RequestBuilder for DescribeLogDirsRequestBuilder {
         self.latest_allowed_version
     }
 
-    fn build_version(&mut self, version: i16) -> io::Result<ConcreteRequest> {
-        Ok(ConcreteRequest::DescribeLogDirs(DescribeLogDirsRequest::new(
+    fn build_version(&mut self, version: i16) -> io::Result<AbstractRequest> {
+        Ok(AbstractRequest::DescribeLogDirs(DescribeLogDirsRequest::new(
             self.data.clone(),
             version,
         )))
@@ -195,13 +195,13 @@ mod tests {
         }
     }
 
-    /// Round-trips a request through the shared `ConcreteRequest` serialize /
+    /// Round-trips a request through the shared `AbstractRequest` serialize /
     /// parse path, exercising the enum wiring end-to-end.
     #[test]
     fn serialize_parse_round_trip() {
         let mut data = DescribeLogDirsRequestData::new();
         data.set_topics(Some(vec![topic("round-trip-topic", vec![1, 2, 3])]));
-        let mut request = ConcreteRequest::DescribeLogDirs(DescribeLogDirsRequest::new(data, 2));
+        let mut request = AbstractRequest::DescribeLogDirs(DescribeLogDirsRequest::new(data, 2));
         let bytes = request.serialize().unwrap();
         let mut readable = crate::common::ByteBufferAccessor::new(bytes.into_buffer());
         let parsed = DescribeLogDirsRequest::parse(&mut readable, 2).unwrap();
@@ -222,7 +222,7 @@ mod tests {
     fn serialize_known_byte_vector_v2() {
         let mut data = DescribeLogDirsRequestData::new();
         data.set_topics(Some(vec![topic("t", vec![0])]));
-        let mut request = ConcreteRequest::DescribeLogDirs(DescribeLogDirsRequest::new(data, 2));
+        let mut request = AbstractRequest::DescribeLogDirs(DescribeLogDirsRequest::new(data, 2));
         let bytes = request.serialize().unwrap();
         let expected: &[u8] = &[
             0x02, // topics array length + 1
@@ -241,7 +241,7 @@ mod tests {
     fn serialize_known_byte_vector_all_partitions_v2() {
         let mut data = DescribeLogDirsRequestData::new();
         data.set_topics(None);
-        let mut request = ConcreteRequest::DescribeLogDirs(DescribeLogDirsRequest::new(data, 2));
+        let mut request = AbstractRequest::DescribeLogDirs(DescribeLogDirsRequest::new(data, 2));
         let bytes = request.serialize().unwrap();
         let expected: &[u8] = &[
             0x00, // topics = null
