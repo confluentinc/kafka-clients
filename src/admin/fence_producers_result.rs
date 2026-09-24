@@ -39,6 +39,19 @@ impl FenceProducersResult {
         Self { futures }
     }
 
+    /// Returns the underlying per-transactional-id futures.
+    ///
+    /// Crate-internal, for the C FFI's per-key (unjoined) delivery. Java exposes
+    /// only the `producerId(id)` / `epochId(id)` / `fencedProducers()`
+    /// projections publicly, each a `thenApply` view over this same map; the FFI
+    /// needs the whole `ProducerIdAndEpoch` value per key — exactly the field
+    /// those projections are built from — so it reads the map directly rather
+    /// than joining two scalar projections back together.
+    #[cfg_attr(not(feature = "ffi"), allow(dead_code))]
+    pub(crate) fn futures(&self) -> &HashMap<String, KafkaFuture<ProducerIdAndEpoch>> {
+        &self.futures
+    }
+
     /// Return a map from transactional id to futures which can be used to check
     /// the status of individual fencings.
     ///
