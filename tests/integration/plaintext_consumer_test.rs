@@ -603,7 +603,7 @@ async fn test_async_consumer_partitions_for_auto_create() {
     consumer.close().await.expect("consumer close");
 }
 
-/// Translates Java's `testAsyncConsumerPartitionsForInvalidTopic` (line 440).
+/// Translates Java's `testAsyncConsumerPartitionsForInvalidTopic` (PlaintextConsumerTest.java:513).
 #[tokio::test(flavor = "multi_thread")]
 async fn test_async_consumer_partitions_for_invalid_topic() {
     let ctx = TestContext::new(cluster_config_kip848()).await;
@@ -614,11 +614,15 @@ async fn test_async_consumer_partitions_for_invalid_topic() {
         .partitions_for(";3# ads,{234")
         .await
         .expect_err("partitions_for on an invalid topic should fail");
-    let msg = err.to_string();
+    // Java: `assertThrows(InvalidTopicException.class, ...)`, raised by
+    // TopicMetadataRequestManager.java:260 as
+    // `new InvalidTopicException("Topic '" + topic + "' is invalid")`.
     assert!(
-        msg.contains("Invalid topic") || msg.contains("invalid topic") || err.error() == Errors::InvalidTopicError,
-        "expected InvalidTopic error, got: {msg}"
+        matches!(err, Error::InvalidTopic(_)),
+        "expected Error::InvalidTopic, got: {err:?}"
     );
+    assert_eq!(err.error(), Errors::InvalidTopicError);
+    assert_eq!(err.message(), "Topic ';3# ads,{234' is invalid");
 
     consumer.close().await.expect("consumer close");
 }
