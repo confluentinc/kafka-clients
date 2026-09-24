@@ -23,10 +23,15 @@
 //! `volatile` / `synchronizedSet` fields become atomics and `std::sync::Mutex`es
 //! shared with the test; no guard is ever held across an `.await`.
 //!
-//! Only the subscribe-mode constructor
-//! (`ConsumerAssignmentPoller(Consumer, List<String>)`) is translated: the
-//! assign-mode constructor, the user-listener chaining and `subscribe(List)`
-//! have no caller among the translated tests yet.
+//! The subscribe-mode (`ConsumerAssignmentPoller(Consumer, List<String>)`) and
+//! assign-mode (`ConsumerAssignmentPoller(Consumer, Set<TopicPartition>)`)
+//! constructors are translated; the user-listener chaining and
+//! `subscribe(List)` have no caller among the translated tests yet.
+//!
+//! Java's poller only borrows its consumer: the test keeps using it after
+//! `shutdown()` (e.g. to close it, or to start a second poller on it) and
+//! closes it in `tearDown`. The task owns the consumer here, so
+//! [`ConsumerAssignmentPoller::shutdown`] hands it back instead.
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -82,14 +87,13 @@ pub struct ConsumerAssignmentPoller {
     received_messages: Arc<AtomicUsize>,
     thrown_error: Arc<Mutex<Option<Error>>>,
     shutdown_requested: Arc<AtomicBool>,
-    handle: Option<JoinHandle<()>>,
+    handle: Option<JoinHandle<BytesConsumer>>,
 }
 
 impl ConsumerAssignmentPoller {
     /// Java's `ConsumerAssignmentPoller(consumer, topicsToSubscribe)` followed
     /// by `start()`: subscribes with the tracking listener, then spawns the
-    /// polling task, which owns the consumer and closes it on exit (Java closes
-    /// it in the test's `tearDown`).
+    /// polling task, which owns the consumer until [`Self::shutdown`].
     pub async fn start(mut consumer: BytesConsumer, topics_to_subscribe: Vec<String>) -> Self {
         let partition_assignment = Arc::new(Mutex::new(HashSet::new()));
         let listener = Arc::new(AssignmentTrackingListener { partition_assignment: Arc::clone(&partition_assignment) });
@@ -97,7 +101,22 @@ impl ConsumerAssignmentPoller {
             .subscribe_with_topics_listener(topics_to_subscribe, listener)
             .await
             .expect("subscribe should succeed");
+        Self::spawn(consumer, partition_assignment)
+    }
 
+    /// Java's `ConsumerAssignmentPoller(consumer, partitionsToAssign)` followed
+    /// by `start()`: `assign`s the partitions (no listener fires for a manual
+    /// assignment), then spawns the polling task.
+    pub async fn start_with_partitions_to_assign(
+        mut consumer: BytesConsumer,
+        partitions_to_assign: Vec<TopicPartition>,
+    ) -> Self {
+        consumer.assign(partitions_to_assign).await.expect("assign should succeed");
+        Self::spawn(consumer, Arc::new(Mutex::new(HashSet::new())))
+    }
+
+    /// Java's `start()`: the polling loop of `doWork()`.
+    fn spawn(mut consumer: BytesConsumer, partition_assignment: Arc<Mutex<HashSet<TopicPartition>>>) -> Self {
         let received_messages = Arc::new(AtomicUsize::new(0));
         let thrown_error = Arc::new(Mutex::new(None));
         let shutdown_requested = Arc::new(AtomicBool::new(false));
@@ -123,7 +142,7 @@ impl ConsumerAssignmentPoller {
                         },
                     }
                 }
-                let _ = consumer.close().await;
+                consumer
             })
         };
 
@@ -151,18 +170,20 @@ impl ConsumerAssignmentPoller {
         self.received_messages.load(Ordering::SeqCst)
     }
 
-    /// Java's `shutdown()` (`initiateShutdown()` + `awaitShutdown()`).
+    /// Java's `shutdown()` (`initiateShutdown()` + `awaitShutdown()`),
+    /// returning the consumer the task owned; `None` if already shut down.
     ///
     /// Java's `initiateShutdown` also calls `consumer.wakeup()` to interrupt a
     /// blocked `poll`; the task owns the consumer here, and each `poll` is
     /// bounded at 50 ms, so the flag alone ends the loop within one poll.
-    pub async fn shutdown(&mut self) {
+    pub async fn shutdown(&mut self) -> Option<BytesConsumer> {
         self.shutdown_requested.store(true, Ordering::SeqCst);
-        if let Some(handle) = self.handle.take() {
+        let handle = self.handle.take()?;
+        Some(
             tokio::time::timeout(SHUTDOWN_JOIN_TIMEOUT, handle)
                 .await
                 .expect("consumer assignment poller did not shut down in time")
-                .expect("consumer assignment poller task panicked");
-        }
+                .expect("consumer assignment poller task panicked"),
+        )
     }
 }
