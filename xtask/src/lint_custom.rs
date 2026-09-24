@@ -541,15 +541,53 @@ impl Rule for NoPublicField {
 /// CLAUDE.md §2: one class per file), the file holds that class's marked type,
 /// or — when a rule keeps the outer class out of scope — its marked nested ones.
 ///
-/// Scope: `src/` (without `src/bin`) and `tests/`, test modules included.
-/// Runs only when the `kafka` submodule is checked out.
+/// Packages (CLAUDE.md §3: two Java classes of one name must never collide in
+/// one Rust package). A Java package maps to one Rust module, and three checks
+/// together guarantee a class only ever shares a module with its own package:
+///   - **location**: a marked item under `src/` lives in its class's package
+///     module. A file's module is its directory, less the folders that are no
+///     Java package — grouping folders such as `admin/options/`.
+///   - **mapping**: no two Java packages map to one module, and no two classes
+///     of a package map to one Rust name.
+///   - **re-exports**: a module's `pub use` lifts only from its own class files
+///     and grouping folders — never from another package (`crate::`, `super::`,
+///     a sub-package), whose class could collide with one of this package's.
+///
+/// Scope: `src/` (without `src/bin`) and `tests/`, test modules included; the
+/// package checks cover `src/` only. Runs only when the `kafka` submodule is
+/// checked out.
 struct JavaName {
     index: JavaIndex,
+    /// Every Rust module a Java package maps to, and each of its ancestors.
+    package_modules: BTreeSet<Vec<String>>,
 }
 
 impl JavaName {
     fn new() -> Self {
-        JavaName { index: JavaIndex::load() }
+        let index = JavaIndex::load();
+        let mut package_modules = BTreeSet::new();
+        for class in &index.classes {
+            for len in 0..=class.module.len() {
+                package_modules.insert(class.module[..len].to_vec());
+            }
+        }
+        JavaName { index, package_modules }
+    }
+
+    /// The Rust module of `src/` file `path`: its directory, less the grouping
+    /// folders that are no Java package. `None` outside `src/`.
+    fn file_module(&self, path: &Path) -> Option<Vec<String>> {
+        let rel = path.strip_prefix("src").ok()?;
+        let mut dirs: Vec<String> = rel.iter().map(|s| s.to_string_lossy().into_owned()).collect();
+        dirs.pop();
+        let mut module = Vec::new();
+        for dir in dirs {
+            module.push(dir);
+            if !self.package_modules.contains(&module) {
+                module.pop();
+            }
+        }
+        Some(module)
     }
 }
 
@@ -665,6 +703,28 @@ fn java_markers(attrs: &[syn::Attribute]) -> Vec<String> {
     out
 }
 
+/// `module` as a Rust path, `crate` for the root.
+fn module_path(module: &[String]) -> String {
+    if module.is_empty() {
+        "crate".to_string()
+    } else {
+        format!("crate::{}", module.join("::"))
+    }
+}
+
+/// The first segment of each path a `use` tree imports, skipping a leading
+/// `self`: `use a::{b, c}` → `a`; `use {a::b, c}` → `a`, `c`.
+fn use_roots(tree: &syn::UseTree, out: &mut Vec<syn::Ident>) {
+    match tree {
+        syn::UseTree::Path(p) if p.ident == "self" => use_roots(&p.tree, out),
+        syn::UseTree::Path(p) => out.push(p.ident.clone()),
+        syn::UseTree::Name(n) => out.push(n.ident.clone()),
+        syn::UseTree::Rename(r) => out.push(r.ident.clone()),
+        syn::UseTree::Glob(_) => {},
+        syn::UseTree::Group(g) => g.items.iter().for_each(|t| use_roots(t, out)),
+    }
+}
+
 /// Every `.rs` file under `dir`, sorted.
 fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
     let Ok(entries) = fs::read_dir(dir) else { return };
@@ -681,8 +741,17 @@ fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
 }
 
 impl JavaName {
-    /// Checks one marker on `item`, pushing a finding if its name does not follow.
-    fn check_marker(&self, file: &str, item: &Marked, marker: &str, findings: &mut Vec<String>) {
+    /// Checks one marker on `item`, pushing a finding if its name does not follow,
+    /// or if the item is not in its class's package module (`module`, the item's
+    /// module; `None` outside `src/`).
+    fn check_marker(
+        &self,
+        file: &str,
+        module: Option<&[String]>,
+        item: &Marked,
+        marker: &str,
+        findings: &mut Vec<String>,
+    ) {
         let Some(class) = self.index.resolve(marker) else {
             findings.push(format!(
                 "{file}: `{}` is marked `{marker}`, which is not a Java class",
@@ -691,6 +760,14 @@ impl JavaName {
             return;
         };
         let origin = format!("`{}`", marker.trim_start_matches(java::MARKER_PREFIX));
+        if let Some(module) = module.filter(|m| **m != class.module) {
+            findings.push(format!(
+                "{file}: `{}` translates {origin}, so it belongs in module `{}`, not `{}`",
+                item.name,
+                module_path(&class.module),
+                module_path(module)
+            ));
+        }
         match (JavaIndex::marker_method(marker), item.kind) {
             (None, ItemKind::Type) => {
                 let expected = class.rust_name();
@@ -793,6 +870,90 @@ impl JavaName {
         }
         checked
     }
+
+    /// The mapping check: distinct Java packages map to distinct modules, and
+    /// distinct classes of a package to distinct Rust names.
+    fn check_mapping(&self, findings: &mut Vec<String>) -> usize {
+        let mut packages: BTreeMap<&[String], BTreeSet<&str>> = BTreeMap::new();
+        let mut names: BTreeMap<(&[String], String), BTreeSet<String>> = BTreeMap::new();
+        for class in &self.index.classes {
+            packages.entry(&class.module).or_default().insert(&class.package);
+            if !class.is_test && class.path.len() == 1 {
+                names
+                    .entry((&class.module, squash(&class.rust_name())))
+                    .or_default()
+                    .insert(format!("{}.{}", class.package, class.name()));
+            }
+        }
+        for (module, pkgs) in packages.iter().filter(|(_, p)| p.len() > 1) {
+            findings.push(format!(
+                "Java packages {} all map to module `{}`",
+                pkgs.iter().map(|p| format!("`{p}`")).collect::<Vec<_>>().join(", "),
+                module_path(module)
+            ));
+        }
+        for ((module, _), classes) in names.iter().filter(|(_, c)| c.len() > 1) {
+            findings.push(format!(
+                "Java classes {} share one Rust name in module `{}`",
+                classes.iter().map(|c| format!("`{c}`")).collect::<Vec<_>>().join(", "),
+                module_path(module)
+            ));
+        }
+        packages.len() + names.len()
+    }
+
+    /// The re-export check: each `pub use` of `items`, in module `module`, lifts
+    /// from a class file or grouping folder of that same module — never from
+    /// another package. Macros the file defines may be re-exported too.
+    fn check_reexports(&self, file: &str, module: &[String], items: &[syn::Item], findings: &mut Vec<String>) -> usize {
+        let mut children = BTreeSet::new();
+        let mut macros = BTreeSet::new();
+        for item in items {
+            match item {
+                syn::Item::Mod(m) => {
+                    children.insert(m.ident.to_string());
+                },
+                syn::Item::Macro(m) => {
+                    if let Some(ident) = &m.ident {
+                        macros.insert(ident.to_string());
+                    }
+                },
+                _ => {},
+            }
+        }
+        let mut checked = 0;
+        for item in items {
+            let syn::Item::Use(u) = item else { continue };
+            if matches!(u.vis, syn::Visibility::Inherited) {
+                continue;
+            }
+            let mut roots = Vec::new();
+            use_roots(&u.tree, &mut roots);
+            for root in roots {
+                checked += 1;
+                let name = root.to_string();
+                let mut child = module.to_vec();
+                child.push(name.clone());
+                let foreign = if macros.contains(&name) {
+                    None
+                } else if !children.contains(&name) {
+                    Some(format!("`{name}`, outside this module"))
+                } else if self.package_modules.contains(&child) {
+                    Some(format!("package `{}`", module_path(&child)))
+                } else {
+                    None
+                };
+                if let Some(from) = foreign {
+                    findings.push(format!(
+                        "{file}: `{}` re-exports from {from} into `{}`; import it from its own package instead",
+                        u.to_token_stream().to_string().replace(" :: ", "::"),
+                        module_path(module)
+                    ));
+                }
+            }
+        }
+        checked
+    }
 }
 
 impl Rule for JavaName {
@@ -829,17 +990,21 @@ impl Rule for JavaName {
                     continue;
                 },
             };
+            let module = self.file_module(path);
             let mut items = Vec::new();
             marked_items(&parsed.items, &mut items);
             for item in &items {
                 for marker in java_markers(&item.attrs) {
                     checked += 1;
-                    self.check_marker(&file, item, &marker, findings);
+                    self.check_marker(&file, module.as_deref(), item, &marker, findings);
                 }
             }
             checked += self.check_file(path, &items, findings);
+            if let Some(module) = &module {
+                checked += self.check_reexports(&file, module, &parsed.items, findings);
+            }
         }
-        checked
+        checked + self.check_mapping(findings)
     }
 
     fn hint(&self) -> &'static str {
