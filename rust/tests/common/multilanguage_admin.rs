@@ -47,7 +47,7 @@ use confluent_kafka::admin::{
     RemoveMembersFromConsumerGroupOptions, RenewDelegationTokenOptions, ReplicaInfo, ScramCredentialInfo,
     ScramMechanism, SupportedVersionRange, TerminateTransactionOptions, TopicDescription, TopicListing,
     TopicMetadataAndConfig, TransactionDescription, TransactionListing, TransactionState, UpdateFeaturesOptions,
-    UserScramCredentialAlteration, UserScramCredentialsDescription,
+    UserScramCredentialAlteration,
 };
 use confluent_kafka::common::acl::{
     AccessControlEntry, AccessControlEntryFilter, AclBinding, AclBindingFilter, AclOperation, AclPermissionType,
@@ -69,8 +69,9 @@ use multilanguage_test_server::proto::{self};
 use tonic::transport::Channel;
 
 use crate::common::admin_backend::{
-    AdminBackend, ClusterDescription, ConfigEntryView, ConfigSynonymView, ConfigView, FeatureMetadataView,
-    FencedProducer, FilterResultView, FilterResultsView, Listings, Outcomes, ReplicaLogDirInfoView,
+    AdminBackend, ClusterDescription, ConfigEntryView, ConfigSynonymView, ConfigView, DescribeUserScramCredentialsView,
+    FeatureMetadataView, FencedProducer, FilterResultView, FilterResultsView, Listings, Outcomes,
+    ReplicaLogDirInfoView, ScramUserRow,
 };
 use crate::common::multilanguage_producer::{kafka_error_from_proto, status_to_kafka_error};
 
@@ -396,18 +397,6 @@ impl MultilanguageAdmin {
             )));
         }
         Ok(rebuilt)
-    }
-
-    /// Rebuilds a [`UserScramCredentialsDescription`].
-    fn scram_description(
-        &self,
-        description: proto::UserScramCredentialsDescription,
-    ) -> Result<UserScramCredentialsDescription, Error> {
-        let mut infos = Vec::with_capacity(description.credential_infos.len());
-        for info in description.credential_infos {
-            infos.push(ScramCredentialInfo::new(self.scram_mechanism(info.mechanism)?, info.iterations));
-        }
-        Ok(UserScramCredentialsDescription::new(description.name, infos))
     }
 
     /// Rebuilds a [`FeatureMetadataView`].
@@ -2150,7 +2139,7 @@ impl AdminBackend for MultilanguageAdmin {
         &self,
         users: &[String],
         options: DescribeUserScramCredentialsOptions,
-    ) -> Result<Outcomes<String, UserScramCredentialsDescription>, Error> {
+    ) -> Result<DescribeUserScramCredentialsView, Error> {
         let request = proto::DescribeUserScramCredentialsRequest {
             admin_id: self.admin_id,
             users: users.to_vec(),
@@ -2159,15 +2148,35 @@ impl AdminBackend for MultilanguageAdmin {
         let response = self
             .call(|mut c| async move { c.describe_user_scram_credentials(request).await })
             .await?;
-        keyed(response.error, response.entries, |entry| {
-            let key = self.name_key(entry.key, "describeUserScramCredentials")?;
-            let outcome = match entry.outcome {
-                Some(proto::describe_user_scram_credentials_entry::Outcome::Error(e)) => Err(kafka_error_from_proto(e)),
-                Some(proto::describe_user_scram_credentials_entry::Outcome::Value(v)) => Ok(self.scram_description(v)?),
-                None => return Err(self.protocol_error("DescribeUserScramCredentialsEntry with no outcome")),
-            };
-            Ok((key, outcome))
-        })
+        // A whole-response (data-future) failure faults every view — mirrors
+        // Java's top-level `whenComplete` throwable.
+        if let Some(error) = response.error {
+            return Err(kafka_error_from_proto(error));
+        }
+        // Rebuild the raw per-user rows and hand them to the harness's
+        // `DescribeUserScramCredentialsView`, whose `Rows` arm answers
+        // all()/users()/description() with the production result's rules (the
+        // production result's constructor and response-data type are
+        // crate-private, so it cannot be rebuilt here). A row's wire error code is the FFI code
+        // `kafka_error_from_proto` decodes (the two agree on every broker code);
+        // an absent message decodes as empty rather than the code's default text.
+        let mut rows = Vec::with_capacity(response.entries.len());
+        for entry in response.entries {
+            let mut credential_infos = Vec::with_capacity(entry.credential_infos.len());
+            for info in entry.credential_infos {
+                // Reuse the mechanism-indicator validation the other SCRAM paths use.
+                credential_infos.push(ScramCredentialInfo::new(self.scram_mechanism(info.mechanism)?, info.iterations));
+            }
+            let error = (entry.error_code != 0).then(|| {
+                kafka_error_from_proto(proto::KafkaError {
+                    code: entry.error_code,
+                    message: entry.error_message.unwrap_or_default(),
+                    ..Default::default()
+                })
+            });
+            rows.push(ScramUserRow { user: entry.user, error, credential_infos });
+        }
+        Ok(DescribeUserScramCredentialsView::Rows(rows))
     }
 
     async fn alter_user_scram_credentials(
