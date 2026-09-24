@@ -453,11 +453,21 @@ async fn test_async_consumer_fetch_invalid_offset() {
         .poll(Duration::from_millis(15_000))
         .await
         .expect_err("poll should fail with NoOffsetForPartition");
-    let err_msg = err.to_string();
-    assert!(
-        err_msg.contains("Undefined offset with no reset policy"),
-        "expected NoOffsetForPartition error, got: {err_msg}"
-    );
+    // Java: `assertThrows(NoOffsetForPartitionException.class, ...)`. The
+    // exception is raised by `SubscriptionState.resetInitializingPositions`
+    // (SubscriptionState.java:882) via the `Collection` constructor, whose
+    // message is "Undefined offset with no reset policy for partitions: " +
+    // the set's `toString()`.
+    match &err {
+        Error::ConsumerNoOffsetForPartition(e) => {
+            assert_eq!(
+                e.message(),
+                format!("Undefined offset with no reset policy for partitions: [{tp}]")
+            );
+            assert_eq!(e.partitions(), &HashSet::from([tp.clone()]));
+        },
+        other => panic!("expected Error::ConsumerNoOffsetForPartition, got: {other:?}"),
+    }
 
     // seek to out of range position
     let out_of_range_pos: i64 = total_records as i64 + 1;
@@ -469,21 +479,27 @@ async fn test_async_consumer_fetch_invalid_offset() {
         .poll(Duration::from_millis(20_000))
         .await
         .expect_err("poll should fail with OffsetOutOfRange");
-    let err_msg = err.to_string();
-    // Java asserts `OffsetOutOfRangeException` and inspects
-    // `offsetOutOfRangePartitions()`. The Rust error is now
-    // `Error::ConsumerOffsetOutOfRange`, which carries that map, but this test
-    // asserts on the message so it keeps working against a remote broker
-    // regardless of which partition reports first. The message format is:
-    // `Fetch position FetchPosition{offset=N, ...} is out of range for partition {tp}`.
-    assert!(
-        err_msg.contains("out of range for partition") && err_msg.contains(tp.topic()),
-        "expected OffsetOutOfRange error for {tp}, got: {err_msg}"
-    );
-    assert!(
-        err_msg.contains(&format!("offset={out_of_range_pos}")),
-        "error message should reference offset={out_of_range_pos}, got: {err_msg}"
-    );
+    // Java lines 114-118: `OffsetOutOfRangeException` whose
+    // `offsetOutOfRangePartitions()` is exactly `{tp: outOfRangePos}`.
+    match &err {
+        Error::ConsumerOffsetOutOfRange(e) => {
+            assert_eq!(
+                e.offset_out_of_range_partitions(),
+                &HashMap::from([(tp.clone(), out_of_range_pos)])
+            );
+            // Message built at FetchCollector.java:346:
+            // "Fetch position " + position + " is out of range for partition " + tp.
+            // The middle of `FetchPosition.toString()` carries the broker's
+            // leader id and epoch, which the test cannot know, so only the
+            // deterministic prefix and suffix are pinned.
+            let msg = e.message();
+            let prefix = format!("Fetch position FetchPosition{{offset={out_of_range_pos}, ");
+            let suffix = format!("}} is out of range for partition {tp}");
+            assert!(msg.starts_with(&prefix), "message should start with {prefix:?}, got: {msg}");
+            assert!(msg.ends_with(&suffix), "message should end with {suffix:?}, got: {msg}");
+        },
+        other => panic!("expected Error::ConsumerOffsetOutOfRange, got: {other:?}"),
+    }
 
     consumer.close().await.expect("consumer close should succeed");
 }
