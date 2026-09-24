@@ -36,6 +36,7 @@ mod admin_scram_test;
 mod admin_topics_test;
 mod admin_transactions_test;
 mod api_versions_test;
+mod base_consumer_test;
 mod connection_test;
 mod consumer_bounce_test;
 mod consumer_test;
@@ -65,5 +66,7 @@ mod producer_send_while_deletion_test;
 #[cfg(feature = "integration-tests")]
 mod producer_test;
 mod producer_transactions_test;
+mod sasl_plain_plaintext_consumer_test;
 mod sasl_ssl_consumer_test;
+mod ssl_consumer_test;
 mod ssl_sasl_test;
