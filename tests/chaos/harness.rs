@@ -32,7 +32,7 @@ use super::common::broker_control::BrokerControl;
 use super::common::cluster_config::kip848_3_broker;
 use super::common::kafka_cluster::KafkaCluster;
 use super::verifier::{ConservationVerifier, ExpectedLossHint, Verifier};
-use super::workload::{CommitMode, Role, Workload, WorkloadContext, WorkloadSpec, build_workload};
+use super::workload::{CommitMode, Role, TopicIds, Workload, WorkloadContext, WorkloadSpec, build_workload};
 
 /// Drain-settle signal shared between [`ChaosHarness::recreate_topic`] and the
 /// drain loop (`drain_wait`).
@@ -97,8 +97,9 @@ pub struct ChaosHarness {
     replication: i16,
     /// Per-topic current topic id, for the physical verification key.
     /// Re-resolved after a topic recreate (the id changes). Missing / absent =
-    /// unresolved (treated as `Uuid::zero()`).
-    topic_ids: std::sync::Mutex<HashMap<String, Uuid>>,
+    /// unresolved (treated as `Uuid::zero()`). Shared with every workload (via
+    /// [`WorkloadContext::topic_ids`]) so they stamp records with the live id.
+    topic_ids: TopicIds,
     /// Drain-settle signal: per-topic resume baselines captured at each recreate.
     /// `recreate_topic` records one; the drain reads them (via
     /// [`Self::recreate_settle`]) to suppress idle-quiescence until every
@@ -182,7 +183,7 @@ impl ChaosHarness {
             topics: topics.to_vec(),
             partitions,
             replication,
-            topic_ids: std::sync::Mutex::new(HashMap::new()),
+            topic_ids: Arc::new(std::sync::Mutex::new(HashMap::new())),
             recreate_settle: Arc::new(RecreateSettle::default()),
             rps: std::sync::atomic::AtomicU32::new(0),
             msg_size: std::sync::atomic::AtomicU32::new(100),
@@ -269,11 +270,6 @@ impl ChaosHarness {
             .unwrap_or_else(Uuid::zero)
     }
 
-    /// Snapshot of every topic's current id (for the consumer's per-topic key).
-    fn topic_ids_snapshot(&self) -> HashMap<String, Uuid> {
-        self.topic_ids.lock().expect("topic_ids poisoned").clone()
-    }
-
     /// Delete and recreate ONE chaos topic, optionally dwelling `dwell` between
     /// delete and recreate (librdkafka's `--topic-chaos recreate-immediate` /
     /// `recreate-delayed`). librdkafka's `_topic_chaos_thread` picks a single
@@ -333,8 +329,9 @@ impl ChaosHarness {
 
         // Re-resolve the topic id so post-recreate records are keyed under the
         // new generation. (librdkafka restarts the topic's producer here; our
-        // in-process producer keeps running against the same topic name — the
-        // re-resolved id is what it and the consumer key new records against.)
+        // in-process producer keeps running against the same topic name.) The
+        // workloads share this map, so from here on the producer stamps new sends
+        // and the consumer keys new reads with the new id.
         self.resolve_topic_id(topic).await;
         let new_id = self.current_topic_id(topic);
 
@@ -348,8 +345,7 @@ impl ChaosHarness {
         // recreate that reuses the id relies on the `RecreateBlackout` heuristic
         // below, since old and new records then share a topic_id.
         if old_id != new_id && old_id != Uuid::zero() {
-            self.verifier
-                .note_expected_loss(ExpectedLossHint::DestroyedGeneration(old_id));
+            self.verifier.note_expected_loss(ExpectedLossHint::DestroyedGeneration(old_id));
         }
 
         // Mark the topic as a recreate BLACKOUT. An immediate recreate (dwell 0)
@@ -502,8 +498,7 @@ impl ChaosHarness {
             container_bootstrap: self.cluster.container_bootstrap_servers().to_string(),
             topic: topic.to_string(),
             topics: self.topics.clone(),
-            topic_id: self.current_topic_id(topic),
-            topic_ids: self.topic_ids_snapshot(),
+            topic_ids: self.topic_ids.clone(),
             group: format!("chaos-group-{}", self.primary_topic()),
             target_rps: self.rps.load(Ordering::Relaxed),
             msg_size: self.msg_size.load(Ordering::Relaxed) as usize,
