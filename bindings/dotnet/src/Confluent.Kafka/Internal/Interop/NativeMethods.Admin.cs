@@ -3617,36 +3617,78 @@ internal static partial class NativeMethods
         AdminCallbacks.DescribeUserScramCredentialsCallback callback,
         IntPtr userData);
 
-    [DllImport(DllName, EntryPoint = "kafka_admin_DescribeUserScramCredentialsResult_count", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern int DescribeUserScramCredentialsResultCount(IntPtr result);
-
-    [DllImport(DllName, EntryPoint = "kafka_admin_DescribeUserScramCredentialsResult_get_user", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern IntPtr DescribeUserScramCredentialsResultGetUser(IntPtr result, int index);
+    /// <summary>
+    /// <c>all()</c>'s fault, or null when <c>all()</c> succeeds. ⚠ <b>OWNED</b> — read with
+    /// <see cref="KafkaException.FromHandle"/>, never <c>FromBorrowedHandle</c> (which would
+    /// leak one error per faulting <c>All()</c>).
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_DescribeUserScramCredentialsResult_all_error", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr DescribeUserScramCredentialsResultAllError(IntPtr result);
 
     /// <summary>
-    /// That user's error, or null on success. ⚠ <b>BORROWED</b> — read with
-    /// <see cref="KafkaException.FromBorrowedHandle"/>, never <c>FromHandle</c>.
+    /// Number of <c>all()</c> rows, or 0 when <c>all()</c> faults. Users are sorted by name.
     /// </summary>
-    [DllImport(DllName, EntryPoint = "kafka_admin_DescribeUserScramCredentialsResult_get_error", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern IntPtr DescribeUserScramCredentialsResultGetError(IntPtr result, int index);
+    [DllImport(DllName, EntryPoint = "kafka_admin_DescribeUserScramCredentialsResult_all_count", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int DescribeUserScramCredentialsResultAllCount(IntPtr result);
+
+    [DllImport(DllName, EntryPoint = "kafka_admin_DescribeUserScramCredentialsResult_all_get_user", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr DescribeUserScramCredentialsResultAllGetUser(IntPtr result, int index);
 
     /// <summary>
-    /// The number of credential infos for user <paramref name="index"/> — <b>the bound of the
-    /// inner walk</b>, which is never the outer <c>count</c>. Zero for a failed user.
+    /// The <c>all()</c> row's description. ⚠ <b>BORROWED</b> from the result — never pass it to
+    /// <see cref="UserScramCredentialsDescriptionDestroy"/> (that is a double free); it dies with
+    /// the result handle.
     /// </summary>
-    [DllImport(DllName, EntryPoint = "kafka_admin_DescribeUserScramCredentialsResult_get_credential_count", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern int DescribeUserScramCredentialsResultGetCredentialCount(IntPtr result, int index);
+    [DllImport(DllName, EntryPoint = "kafka_admin_DescribeUserScramCredentialsResult_all_get_description", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr DescribeUserScramCredentialsResultAllGetDescription(IntPtr result, int index);
 
-    [DllImport(DllName, EntryPoint = "kafka_admin_DescribeUserScramCredentialsResult_get_credential_mechanism", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern int DescribeUserScramCredentialsResultGetCredentialMechanism(
-        IntPtr result, int index, int credentialIndex);
+    /// <summary>
+    /// Number of <c>users()</c> rows — RESOURCE_NOT_FOUND users excluded, unlike <c>all()</c>.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_DescribeUserScramCredentialsResult_users_count", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int DescribeUserScramCredentialsResultUsersCount(IntPtr result);
 
-    [DllImport(DllName, EntryPoint = "kafka_admin_DescribeUserScramCredentialsResult_get_credential_iterations", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern int DescribeUserScramCredentialsResultGetCredentialIterations(
-        IntPtr result, int index, int credentialIndex);
+    [DllImport(DllName, EntryPoint = "kafka_admin_DescribeUserScramCredentialsResult_users_get", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr DescribeUserScramCredentialsResultUsersGet(IntPtr result, int index);
+
+    /// <summary>
+    /// <c>description(user)</c>: returns null and writes an <b>OWNED</b> description to
+    /// <paramref name="outDescription"/> on success; on fault returns an <b>OWNED</b> error and
+    /// leaves <paramref name="outDescription"/> untouched. ⚠ The written description must be
+    /// released with <see cref="UserScramCredentialsDescriptionDestroy"/> — the opposite ownership
+    /// to <see cref="DescribeUserScramCredentialsResultAllGetDescription"/>.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_DescribeUserScramCredentialsResult_description", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr DescribeUserScramCredentialsResultDescription(
+        IntPtr result, IntPtr user, out IntPtr outDescription);
 
     [DllImport(DllName, EntryPoint = "kafka_admin_DescribeUserScramCredentialsResult_destroy", CallingConvention = CallingConvention.Cdecl)]
     internal static extern void DescribeUserScramCredentialsResultDestroy(IntPtr result);
+
+    [DllImport(DllName, EntryPoint = "kafka_admin_UserScramCredentialsDescription_name", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr UserScramCredentialsDescriptionName(IntPtr description);
+
+    /// <summary>
+    /// The number of credential infos on this description — <b>the bound of the inner walk</b>,
+    /// which is never an outer count. May be 0.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_UserScramCredentialsDescription_credential_count", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int UserScramCredentialsDescriptionCredentialCount(IntPtr description);
+
+    [DllImport(DllName, EntryPoint = "kafka_admin_UserScramCredentialsDescription_credential_mechanism", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int UserScramCredentialsDescriptionCredentialMechanism(
+        IntPtr description, int credentialIndex);
+
+    [DllImport(DllName, EntryPoint = "kafka_admin_UserScramCredentialsDescription_credential_iterations", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int UserScramCredentialsDescriptionCredentialIterations(
+        IntPtr description, int credentialIndex);
+
+    /// <summary>
+    /// Destroys an <b>owned</b> description (from
+    /// <see cref="DescribeUserScramCredentialsResultDescription"/> only). Null-safe.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_admin_UserScramCredentialsDescription_destroy", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void UserScramCredentialsDescriptionDestroy(IntPtr description);
 
     // ---- M15/P7: alterUserScramCredentials (result shape 2; ten parallel input arrays) ----
 
