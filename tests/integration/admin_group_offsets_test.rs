@@ -75,8 +75,8 @@ impl Deserializer<Vec<u8>> for ByteArrayDeserializer {
 
 type BytesConsumer = Box<dyn Consumer<Vec<u8>, Vec<u8>>>;
 
-fn consumer_config(bootstrap: &str, group_id: &str) -> ConsumerConfig {
-    let props = HashMap::from([
+fn consumer_config(ctx: &TestContext, bootstrap: &str, group_id: &str) -> ConsumerConfig {
+    let mut props = HashMap::from([
         ("bootstrap.servers".to_string(), bootstrap.to_string()),
         ("group.protocol".to_string(), "consumer".to_string()),
         ("auto.offset.reset".to_string(), "earliest".to_string()),
@@ -84,12 +84,13 @@ fn consumer_config(bootstrap: &str, group_id: &str) -> ConsumerConfig {
         ("enable.auto.commit".to_string(), "false".to_string()),
         ("group.id".to_string(), group_id.to_string()),
     ]);
+    ctx.apply_security(&mut props);
     ConsumerConfig::new(&props).expect("invalid consumer test config")
 }
 
-fn new_bytes_consumer(bootstrap: &str, group_id: &str) -> BytesConsumer {
+fn new_bytes_consumer(ctx: &TestContext, bootstrap: &str, group_id: &str) -> BytesConsumer {
     KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
-        consumer_config(bootstrap, group_id),
+        consumer_config(ctx, bootstrap, group_id),
         Box::new(ByteArrayDeserializer),
         Box::new(ByteArrayDeserializer),
     )
@@ -112,13 +113,14 @@ async fn subscribe_and_join(consumer: &mut BytesConsumer, topic: &str) {
     panic!("consumer never received a partition assignment for topic {topic}");
 }
 
-async fn produce_records(bootstrap: &str, tp: &TopicPartition, num: usize) {
-    let props = HashMap::from([
+async fn produce_records(ctx: &TestContext, bootstrap: &str, tp: &TopicPartition, num: usize) {
+    let mut props = HashMap::from([
         ("bootstrap.servers".to_string(), bootstrap.to_string()),
         ("client.id".to_string(), "integration-test-producer".to_string()),
         ("acks".to_string(), "all".to_string()),
         ("linger.ms".to_string(), "5".to_string()),
     ]);
+    ctx.apply_security(&mut props);
     let producer: KafkaProducer<Vec<u8>, Vec<u8>> = KafkaProducer::new(
         ProducerConfig::new(&props).expect("producer config"),
         Box::new(ByteArraySerializer),
@@ -192,12 +194,12 @@ fn committed(offsets: &GroupOffsets, tp: &TopicPartition) -> Option<i64> {
 async fn list_consumer_group_offsets_matches_committed<F: AdminBackendFactory>(ctx: &mut TestContext, factory: &F) {
     let admin = admin_for(factory, ctx).await;
     let backend = admin.name();
-    let bootstrap = ctx.bootstrap_servers().to_string();
+    let bootstrap = ctx.protocol_bootstrap_servers().to_string();
     let topic = ctx.topic("admin_offsets_list");
     let group_id = ctx.group_id("g_offsets_list");
     create_topic(&admin, &topic, NUM_PARTITIONS, 1).await;
 
-    let mut consumer = new_bytes_consumer(&bootstrap, &group_id);
+    let mut consumer = new_bytes_consumer(ctx, &bootstrap, &group_id);
     subscribe_and_join(&mut consumer, &topic).await;
 
     let tp0 = TopicPartition::new(topic.clone(), 0);
@@ -272,12 +274,12 @@ async fn list_consumer_group_offsets_honours_the_partition_selection<F: AdminBac
 ) {
     let admin = admin_for(factory, ctx).await;
     let backend = admin.name();
-    let bootstrap = ctx.bootstrap_servers().to_string();
+    let bootstrap = ctx.protocol_bootstrap_servers().to_string();
     let topic = ctx.topic("admin_offsets_selection");
     let group_id = ctx.group_id("g_offsets_selection");
     create_topic(&admin, &topic, NUM_PARTITIONS, 1).await;
 
-    let mut consumer = new_bytes_consumer(&bootstrap, &group_id);
+    let mut consumer = new_bytes_consumer(ctx, &bootstrap, &group_id);
     subscribe_and_join(&mut consumer, &topic).await;
     let tp0 = TopicPartition::new(topic.clone(), 0);
     let tp1 = TopicPartition::new(topic.clone(), 1);
@@ -400,16 +402,16 @@ async fn list_consumer_group_offsets_honours_the_partition_selection<F: AdminBac
 async fn alter_consumer_group_offsets_and_resume<F: AdminBackendFactory>(ctx: &mut TestContext, factory: &F) {
     let admin = admin_for(factory, ctx).await;
     let backend = admin.name();
-    let bootstrap = ctx.bootstrap_servers().to_string();
+    let bootstrap = ctx.protocol_bootstrap_servers().to_string();
     let topic = ctx.topic("admin_offsets_alter");
     let group_id = ctx.group_id("g_offsets_alter");
     create_topic(&admin, &topic, NUM_PARTITIONS, 1).await;
     let tp0 = TopicPartition::new(topic.clone(), 0);
 
-    produce_records(&bootstrap, &tp0, 10).await;
+    produce_records(ctx, &bootstrap, &tp0, 10).await;
 
     // Consumer A joins and commits offset 10 (the log end), then leaves.
-    let mut consumer_a = new_bytes_consumer(&bootstrap, &group_id);
+    let mut consumer_a = new_bytes_consumer(ctx, &bootstrap, &group_id);
     subscribe_and_join(&mut consumer_a, &topic).await;
     consumer_a
         .commit_sync_with_offsets(HashMap::from([(tp0.clone(), OffsetAndMetadata::new(10).unwrap())]))
@@ -454,7 +456,7 @@ async fn alter_consumer_group_offsets_and_resume<F: AdminBackendFactory>(ctx: &m
     // Consumer B resumes from the altered offset (5) and reads records 5..10.
     // Subscribe and poll in one loop so the very first partition-0 record is
     // captured (the join itself drives fetching).
-    let mut consumer_b = new_bytes_consumer(&bootstrap, &group_id);
+    let mut consumer_b = new_bytes_consumer(ctx, &bootstrap, &group_id);
     consumer_b
         .subscribe_with_topics(vec![topic.clone()])
         .await
@@ -491,14 +493,14 @@ async fn alter_consumer_group_offsets_and_resume<F: AdminBackendFactory>(ctx: &m
 async fn delete_consumer_group_offsets_on_inactive_group<F: AdminBackendFactory>(ctx: &mut TestContext, factory: &F) {
     let admin = admin_for(factory, ctx).await;
     let backend = admin.name();
-    let bootstrap = ctx.bootstrap_servers().to_string();
+    let bootstrap = ctx.protocol_bootstrap_servers().to_string();
     let topic = ctx.topic("admin_offsets_delete");
     let group_id = ctx.group_id("g_offsets_delete");
     create_topic(&admin, &topic, NUM_PARTITIONS, 1).await;
     let tp0 = TopicPartition::new(topic.clone(), 0);
     let tp1 = TopicPartition::new(topic.clone(), 1);
 
-    let mut consumer = new_bytes_consumer(&bootstrap, &group_id);
+    let mut consumer = new_bytes_consumer(ctx, &bootstrap, &group_id);
     subscribe_and_join(&mut consumer, &topic).await;
     // Both partitions are committed, so the deletion can be shown to be scoped to
     // the one that was asked for.
@@ -559,13 +561,13 @@ async fn delete_consumer_group_offsets_on_active_group_errors<F: AdminBackendFac
 ) {
     let admin = admin_for(factory, ctx).await;
     let backend = admin.name();
-    let bootstrap = ctx.bootstrap_servers().to_string();
+    let bootstrap = ctx.protocol_bootstrap_servers().to_string();
     let topic = ctx.topic("admin_offsets_active");
     let group_id = ctx.group_id("g_offsets_active");
     create_topic(&admin, &topic, NUM_PARTITIONS, 1).await;
     let tp0 = TopicPartition::new(topic.clone(), 0);
 
-    let mut consumer = new_bytes_consumer(&bootstrap, &group_id);
+    let mut consumer = new_bytes_consumer(ctx, &bootstrap, &group_id);
     subscribe_and_join(&mut consumer, &topic).await;
     // Keep the member alive across the delete attempt.
     let _ = consumer.poll(Duration::from_millis(200)).await;

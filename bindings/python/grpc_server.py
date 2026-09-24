@@ -1489,15 +1489,19 @@ def main():
         stream=sys.stderr,
     )
     port = int(os.environ.get("GRPC_PORT", "50051"))
+    # Defaults to 0.0.0.0 for the Docker image. The test harness's native
+    # (non-container) mode sets GRPC_HOST=127.0.0.1 to restrict the server to
+    # local connections.
+    host = os.environ.get("GRPC_HOST", "0.0.0.0")
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=32))
     pb_grpc.add_ProducerServiceServicer_to_server(ProducerService(), server)
     cpb_grpc.add_ConsumerServiceServicer_to_server(ConsumerService(), server)
     apb_grpc.add_AdminServiceServicer_to_server(AdminService(), server)
-    server.add_insecure_port(f"0.0.0.0:{port}")
+    server.add_insecure_port(f"{host}:{port}")
     server.start()
     # The Rust BackendPool waits for "listening" on stderr before
     # connecting — keep this string stable.
-    print(f"listening on 0.0.0.0:{port}", file=sys.stderr, flush=True)
+    print(f"listening on {host}:{port}", file=sys.stderr, flush=True)
     server.wait_for_termination()
 
 
