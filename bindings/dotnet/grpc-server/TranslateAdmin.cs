@@ -40,6 +40,18 @@ internal static class TranslateAdmin
         BuildTransactionStateTable();
 
     /// <summary>
+    /// Java's <c>GroupState.NAME_TO_ENUM</c>. Case-<b>insensitive</b>, unlike
+    /// <see cref="s_transactionStatesByName"/>: <c>GroupState.parse</c> lower-cases its input,
+    /// <c>TransactionState.parse</c> does not.
+    /// </summary>
+    private static readonly Dictionary<string, GroupState> s_groupStatesByName =
+        BuildNameTable<GroupState>();
+
+    /// <summary>Java's <c>GroupType.NAME_TO_ENUM</c>, also case-insensitive.</summary>
+    private static readonly Dictionary<string, GroupType> s_groupTypesByName =
+        BuildNameTable<GroupType>();
+
+    /// <summary>
     /// The normative mock-selection rule of <c>admin_service.proto</c>'s
     /// <c>CreateAdminRequest</c>: an empty config, or one whose every value is empty, selects
     /// <see cref="MockAdminClient"/>. Port of <c>_admin_selects_mock</c>.
@@ -568,13 +580,7 @@ internal static class TranslateAdmin
         // as reporting that none are authorized.
         if (description.AuthorizedOperations is not null)
         {
-            Proto.AclOperationList operations = new Proto.AclOperationList();
-            foreach (AclOperation operation in description.AuthorizedOperations)
-            {
-                operations.Operations.Add((int)operation);
-            }
-
-            proto.AuthorizedOperations = operations;
+            proto.AuthorizedOperations = AclOperationsToProto(description.AuthorizedOperations);
         }
 
         return proto;
@@ -871,6 +877,334 @@ internal static class TranslateAdmin
             request.CoordinatorEpoch);
     }
 
+    // -- Groups (slice G4) ----------------------------------------------------------------
+
+    /// <summary>
+    /// A nullable <c>authorizedOperations</c> -&gt; proto <c>AclOperationList</c>. The enum's
+    /// values <em>are</em> Java's <c>AclOperation.code()</c>, which is what the wire carries.
+    /// </summary>
+    internal static Proto.AclOperationList AclOperationsToProto(IEnumerable<AclOperation> operations)
+    {
+        Proto.AclOperationList list = new Proto.AclOperationList();
+        foreach (AclOperation operation in operations)
+        {
+            list.Operations.Add((int)operation);
+        }
+
+        return list;
+    }
+
+    /// <summary>
+    /// <c>repeated string group_states</c> -&gt; the filter the list options take. Matching is
+    /// <b>case-insensitive</b> and an unrecognised name decodes to
+    /// <see cref="GroupState.Unknown"/>, exactly as Java's <c>GroupState.parse</c>. An empty
+    /// list is Java's empty set — the filter left unset — and needs no null form.
+    /// </summary>
+    internal static List<GroupState> GroupStates(IEnumerable<string> names) =>
+        ParseNames(names, s_groupStatesByName, GroupState.Unknown);
+
+    /// <summary>
+    /// <c>repeated string types</c> -&gt; the group-type filter, on the same terms as
+    /// <see cref="GroupStates"/> (Java's <c>GroupType.parse</c>).
+    /// </summary>
+    internal static List<GroupType> GroupTypes(IEnumerable<string> names) =>
+        ParseNames(names, s_groupTypesByName, GroupType.Unknown);
+
+    /// <summary>
+    /// Binding <see cref="GroupListing"/> -&gt; proto. <c>group_type</c> / <c>group_state</c>
+    /// are Java <c>Optional</c>s and stay absent when null — "the broker did not report a
+    /// state" is not the empty string. <c>protocol</c> is the lower-case wire protocol-type
+    /// string, unrelated to the type.
+    /// </summary>
+    internal static Proto.GroupListing GroupListingToProto(GroupListing listing)
+    {
+        Proto.GroupListing proto = new Proto.GroupListing
+        {
+            GroupId = listing.GroupId,
+            Protocol = listing.Protocol,
+            IsSimpleConsumerGroup = listing.IsSimpleConsumerGroup,
+        };
+        if (listing.Type.HasValue)
+        {
+            proto.GroupType = listing.Type.Value.ToString();
+        }
+
+        if (listing.GroupState.HasValue)
+        {
+            proto.GroupState = listing.GroupState.Value.ToString();
+        }
+
+        return proto;
+    }
+
+    // Java deprecates the listing type and its state enum; mirrored, not avoided.
+#pragma warning disable CS0618
+    /// <summary>
+    /// Binding <see cref="ConsumerGroupListing"/> -&gt; proto. Both <c>group_state</c> and the
+    /// deprecated <c>state</c> cross although Java derives the second from the first: both
+    /// bindings expose both, so a dropped one is a finding.
+    /// </summary>
+    internal static Proto.ConsumerGroupListing ConsumerGroupListingToProto(ConsumerGroupListing listing)
+    {
+        Proto.ConsumerGroupListing proto = new Proto.ConsumerGroupListing
+        {
+            GroupId = listing.GroupId,
+            IsSimpleConsumerGroup = listing.IsSimpleConsumerGroup,
+        };
+        if (listing.GroupState.HasValue)
+        {
+            proto.GroupState = listing.GroupState.Value.ToString();
+        }
+
+        if (listing.State.HasValue)
+        {
+            proto.State = listing.State.Value.ToString();
+        }
+
+        if (listing.Type.HasValue)
+        {
+            proto.GroupType = listing.Type.Value.ToString();
+        }
+
+        return proto;
+    }
+#pragma warning restore CS0618
+
+    /// <summary>Binding <see cref="MemberAssignment"/> -&gt; proto.</summary>
+    internal static Proto.MemberAssignment MemberAssignmentToProto(MemberAssignment assignment)
+    {
+        Proto.MemberAssignment proto = new Proto.MemberAssignment();
+        foreach (TopicPartition partition in assignment.TopicPartitions)
+        {
+            proto.TopicPartitions.Add(Translate.TpToProto(partition));
+        }
+
+        return proto;
+    }
+
+    /// <summary>
+    /// Binding <see cref="MemberDescription"/> -&gt; proto. <c>group_instance_id</c> /
+    /// <c>rack_id</c> / <c>target_assignment</c> / <c>member_epoch</c> / <c>upgraded</c> are
+    /// Java <c>Optional</c>s and stay absent when null: a static member with an empty instance
+    /// id is not a dynamic member, and an absent epoch is not epoch 0.
+    /// </summary>
+    /// <remarks>
+    /// <c>assignment</c> is never absent here. Java's constructor coalesces a null assignment
+    /// to an empty one (<c>MemberDescription.java:55</c>) and this binding mirrors that, so
+    /// there is no null to leave absent — unlike Python, whose holder can carry one.
+    /// </remarks>
+    internal static Proto.MemberDescription MemberDescriptionToProto(MemberDescription member)
+    {
+        Proto.MemberDescription proto = new Proto.MemberDescription
+        {
+            ConsumerId = member.ConsumerId,
+            ClientId = member.ClientId,
+            Host = member.Host,
+            Assignment = MemberAssignmentToProto(member.Assignment),
+        };
+        if (member.GroupInstanceId is not null)
+        {
+            proto.GroupInstanceId = member.GroupInstanceId;
+        }
+
+        if (member.RackId is not null)
+        {
+            proto.RackId = member.RackId;
+        }
+
+        if (member.TargetAssignment is not null)
+        {
+            proto.TargetAssignment = MemberAssignmentToProto(member.TargetAssignment);
+        }
+
+        if (member.MemberEpoch.HasValue)
+        {
+            proto.MemberEpoch = member.MemberEpoch.Value;
+        }
+
+        if (member.Upgraded.HasValue)
+        {
+            proto.Upgraded = member.Upgraded.Value;
+        }
+
+        return proto;
+    }
+
+    // Java deprecates state(); mirrored, not avoided.
+#pragma warning disable CS0618
+    /// <summary>
+    /// Binding <see cref="ConsumerGroupDescription"/> -&gt; proto. The coordinator must carry
+    /// the broker's real host and port, not a placeholder — the field this milestone exists
+    /// for; a null coordinator stays absent.
+    /// </summary>
+    internal static Proto.ConsumerGroupDescription ConsumerGroupDescriptionToProto(
+        ConsumerGroupDescription description)
+    {
+        Proto.ConsumerGroupDescription proto = new Proto.ConsumerGroupDescription
+        {
+            GroupId = description.GroupId,
+            IsSimpleConsumerGroup = description.IsSimpleConsumerGroup,
+            PartitionAssignor = description.PartitionAssignor,
+            GroupType = description.Type.ToString(),
+            State = description.State.ToString(),
+            GroupState = description.GroupState.ToString(),
+        };
+        foreach (MemberDescription member in description.Members)
+        {
+            proto.Members.Add(MemberDescriptionToProto(member));
+        }
+
+        if (description.Coordinator is not null)
+        {
+            proto.Coordinator = Translate.NodeToProto(description.Coordinator);
+        }
+
+        // Absent means the broker did not report the operations at all, which is not the same
+        // as reporting that none are authorized.
+        if (description.AuthorizedOperations is not null)
+        {
+            proto.AuthorizedOperations = AclOperationsToProto(description.AuthorizedOperations);
+        }
+
+        if (description.GroupEpoch.HasValue)
+        {
+            proto.GroupEpoch = description.GroupEpoch.Value;
+        }
+
+        if (description.TargetAssignmentEpoch.HasValue)
+        {
+            proto.TargetAssignmentEpoch = description.TargetAssignmentEpoch.Value;
+        }
+
+        return proto;
+    }
+#pragma warning restore CS0618
+
+    /// <summary>
+    /// Binding <see cref="ClassicGroupDescription"/> -&gt; proto. <c>protocol</c> (the
+    /// protocol type) and <c>protocol_data</c> (the selected assignment strategy) are two
+    /// different response fields; both cross so a transposition is detectable.
+    /// </summary>
+    /// <remarks>
+    /// Java's <c>protocol()</c> is nullable and <c>isSimpleConsumerGroup()</c> dereferences it
+    /// without a guard, so a null faults into the handler's whole-call <c>catch</c> rather
+    /// than being invented as <c>""</c> — which is what the Python server does for the same
+    /// input.
+    /// </remarks>
+    internal static Proto.ClassicGroupDescription ClassicGroupDescriptionToProto(
+        ClassicGroupDescription description)
+    {
+        Proto.ClassicGroupDescription proto = new Proto.ClassicGroupDescription
+        {
+            GroupId = description.GroupId,
+            Protocol = description.Protocol!,
+            ProtocolData = description.ProtocolData,
+            IsSimpleConsumerGroup = description.IsSimpleConsumerGroup,
+            State = description.State.ToString(),
+        };
+        foreach (MemberDescription member in description.Members)
+        {
+            proto.Members.Add(MemberDescriptionToProto(member));
+        }
+
+        if (description.Coordinator is not null)
+        {
+            proto.Coordinator = Translate.NodeToProto(description.Coordinator);
+        }
+
+        if (description.AuthorizedOperations is not null)
+        {
+            proto.AuthorizedOperations = AclOperationsToProto(description.AuthorizedOperations);
+        }
+
+        return proto;
+    }
+
+    /// <summary>
+    /// Proto <c>ListConsumerGroupOffsetsSpec</c>s -&gt; the map
+    /// <see cref="IAdmin.ListConsumerGroupOffsets(IReadOnlyDictionary{string, ListConsumerGroupOffsetsSpec}, ListConsumerGroupOffsetsOptions)"/>
+    /// takes (port of <c>_admin_group_offset_specs</c>). An absent <c>topic_partitions</c> is
+    /// Java's <b>unset</b> collection — every partition the group has committed offsets for —
+    /// and present-but-empty selects nothing; emptiness is never the discriminant.
+    /// </summary>
+    /// <returns>
+    /// The map, or <see langword="null"/> with <paramref name="invalid"/> set. A repeated
+    /// <c>group_id</c> is <b>rejected</b>, not silently de-duplicated: keying a dictionary by
+    /// the wire field would let a second entry replace the first, which is exactly what the C
+    /// entry point refuses.
+    /// </returns>
+    internal static Dictionary<string, ListConsumerGroupOffsetsSpec>? GroupOffsetSpecs(
+        IEnumerable<Proto.ListConsumerGroupOffsetsSpec> protos, out string? invalid)
+    {
+        Dictionary<string, ListConsumerGroupOffsetsSpec> map =
+            new Dictionary<string, ListConsumerGroupOffsetsSpec>(StringComparer.Ordinal);
+        foreach (Proto.ListConsumerGroupOffsetsSpec proto in protos)
+        {
+            if (map.ContainsKey(proto.GroupId))
+            {
+                invalid = $"group id `{proto.GroupId}` appears more than once in listConsumerGroupOffsets";
+                return null;
+            }
+
+            map[proto.GroupId] = new ListConsumerGroupOffsetsSpec
+            {
+                TopicPartitions = OptionalPartitions(proto.TopicPartitions),
+            };
+        }
+
+        invalid = null;
+        return map;
+    }
+
+    /// <summary>
+    /// Proto <c>GroupOffsetCommit</c>s -&gt; the map
+    /// <see cref="IAdmin.AlterConsumerGroupOffsets"/> takes (port of
+    /// <c>_admin_group_offset_commits</c>). An absent <c>leader_epoch</c> is Java's empty
+    /// <c>Optional</c> and must not become 0.
+    /// </summary>
+    internal static Dictionary<TopicPartition, OffsetAndMetadata> GroupOffsetCommits(
+        IEnumerable<Proto.GroupOffsetCommit> protos)
+    {
+        Dictionary<TopicPartition, OffsetAndMetadata> map = new Dictionary<TopicPartition, OffsetAndMetadata>();
+        foreach (Proto.GroupOffsetCommit proto in protos)
+        {
+            int? leaderEpoch = proto.Offset.HasLeaderEpoch ? proto.Offset.LeaderEpoch : (int?)null;
+            map[Translate.Tp(proto.Partition)] =
+                new OffsetAndMetadata(proto.Offset.Offset, proto.Offset.Metadata, leaderEpoch);
+        }
+
+        return map;
+    }
+
+    /// <summary>
+    /// <c>optional MemberToRemoveList members</c> -&gt; the selection
+    /// <see cref="RemoveMembersFromConsumerGroupOptions"/> takes (port of
+    /// <c>_admin_members_to_remove</c>).
+    /// </summary>
+    /// <returns>
+    /// <see langword="null"/> for an absent list — Java's no-argument constructor, i.e.
+    /// removeAll — and otherwise the (de-duplicated) selection, <b>including an empty one</b>,
+    /// which is the collection constructor Java rejects. Presence is the discriminant, never
+    /// emptiness.
+    /// </returns>
+    internal static List<MemberToRemove>? MembersToRemove(Proto.MemberToRemoveList? members)
+    {
+        if (members is null)
+        {
+            return null;
+        }
+
+        List<MemberToRemove> selection = new List<MemberToRemove>(members.Members.Count);
+        foreach (Proto.MemberToRemove member in members.Members)
+        {
+            selection.Add(new MemberToRemove(member.GroupInstanceId));
+        }
+
+        // Java's options constructor collapses duplicates into a Set, and `memberResult` is a
+        // keyed lookup, so a repeated instance id must not emit two identical entries.
+        return DistinctKeys(selection);
+    }
+
     /// <summary>
     /// The de-duplicated request keys, in request order: the per-key result accessors
     /// (<c>PartitionResult</c> / <c>Description</c>) are keyed lookups, so a duplicated request
@@ -907,6 +1241,39 @@ internal static class TranslateAdmin
         }
 
         return table;
+    }
+
+    /// <summary>
+    /// The <c>toString()</c>-spelling lookup for an enum whose members are spelled to match
+    /// Java's display names, keyed case-insensitively (Java's <c>parse</c> lower-cases).
+    /// </summary>
+    private static Dictionary<string, TEnum> BuildNameTable<TEnum>()
+        where TEnum : struct, Enum
+    {
+        Dictionary<string, TEnum> table = new Dictionary<string, TEnum>(StringComparer.OrdinalIgnoreCase);
+        foreach (TEnum value in (TEnum[])Enum.GetValues(typeof(TEnum)))
+        {
+            table[value.ToString()!] = value;
+        }
+
+        return table;
+    }
+
+    /// <summary>
+    /// Java's <c>parse</c> over a list of names: an unrecognised name becomes
+    /// <paramref name="fallback"/> (the enum's <c>UNKNOWN</c>) rather than failing the call.
+    /// </summary>
+    private static List<TEnum> ParseNames<TEnum>(
+        IEnumerable<string> names, Dictionary<string, TEnum> table, TEnum fallback)
+        where TEnum : struct, Enum
+    {
+        List<TEnum> values = new List<TEnum>();
+        foreach (string name in names)
+        {
+            values.Add(table.TryGetValue(name, out TEnum value) ? value : fallback);
+        }
+
+        return values;
     }
 
     private static Proto.NodeList NodeListToProto(IEnumerable<Node> nodes)

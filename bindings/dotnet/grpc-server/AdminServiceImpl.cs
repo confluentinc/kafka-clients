@@ -30,9 +30,9 @@ namespace Confluent.Kafka.GrpcServer;
 /// Maps the <c>AdminService</c> RPCs onto the binding's <see cref="KafkaAdminClient"/> /
 /// <see cref="MockAdminClient"/> — the .NET port of <c>grpc_server.py</c>'s
 /// <c>AdminService</c> (M15/P12). Slices G1 (topics &amp; partitions), G2 (cluster, configs,
-/// log dirs), G3 (elections, reassignments, offsets) and G6 (producers &amp; transactions) are
-/// implemented here; G4 (groups) and G5 (acls, quotas, scram, tokens, features) are added
-/// additively by later checkpoints and answer from the generated base until then.
+/// log dirs), G3 (elections, reassignments, offsets), G6 (producers &amp; transactions) and G4
+/// (groups) are implemented here; G5 (acls, quotas, scram, tokens, features) is added
+/// additively by a later checkpoint and answers from the generated base until then.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -1225,6 +1225,432 @@ internal sealed class AdminServiceImpl : Proto.AdminService.AdminServiceBase, ID
         catch (Exception ex)
         {
             return new Proto.FenceProducersResponse { Error = Translate.ToProto(ex) };
+        }
+    }
+
+    // -- Groups (slice G4) ---------------------------------------------------------------
+
+    /// <inheritdoc/>
+    public override async Task<Proto.ListGroupsResponse> ListGroups(Proto.ListGroupsRequest request, ServerCallContext context)
+    {
+        IAdmin? admin = Get(request.AdminId);
+        if (admin is null)
+        {
+            return new Proto.ListGroupsResponse { Error = Translate.UnknownAdmin(request.AdminId) };
+        }
+
+        try
+        {
+            // Empty filter lists are Java's empty sets, i.e. the filter left unset.
+            ListGroupsResult result = admin.ListGroups(new ListGroupsOptions
+            {
+                TimeoutMs = TranslateAdmin.Timeout(request.HasTimeoutMs, request.TimeoutMs),
+                GroupStates = TranslateAdmin.GroupStates(request.GroupStates),
+                ProtocolTypes = new List<string>(request.ProtocolTypes),
+                Types = TranslateAdmin.GroupTypes(request.Types_),
+            });
+
+            // Whole-value response whose value is Java's valid()/errors() split: the two lists
+            // are independent and of unrelated length, so nothing may be zipped across them.
+            // A failure of the single underlying future faults both awaits and becomes the
+            // top-level error via the catch below.
+            IReadOnlyCollection<GroupListing> valid = await result.Valid().ConfigureAwait(false);
+            IReadOnlyCollection<KafkaException> errors = await result.Errors().ConfigureAwait(false);
+
+            Proto.ListGroupsResponse response = new Proto.ListGroupsResponse();
+            foreach (GroupListing listing in valid)
+            {
+                response.Valid.Add(TranslateAdmin.GroupListingToProto(listing));
+            }
+
+            foreach (KafkaException error in errors)
+            {
+                response.ListingErrors.Add(Translate.ToProto(error));
+            }
+
+            return response;
+        }
+        catch (Exception ex)
+        {
+            return new Proto.ListGroupsResponse { Error = Translate.ToProto(ex) };
+        }
+    }
+
+    // Java deprecates this RPC and its three types; mirrored, not avoided.
+#pragma warning disable CS0618
+    /// <inheritdoc/>
+    public override async Task<Proto.ListConsumerGroupsResponse> ListConsumerGroups(Proto.ListConsumerGroupsRequest request, ServerCallContext context)
+    {
+        IAdmin? admin = Get(request.AdminId);
+        if (admin is null)
+        {
+            return new Proto.ListConsumerGroupsResponse { Error = Translate.UnknownAdmin(request.AdminId) };
+        }
+
+        try
+        {
+            // Only GroupStates is set: this options type's deprecated `States` is the SAME
+            // filter on the older enum (assigning one replaces the other), and the wire has
+            // one field for both, so setting both would just overwrite.
+            ListConsumerGroupsResult result = admin.ListConsumerGroups(new ListConsumerGroupsOptions
+            {
+                TimeoutMs = TranslateAdmin.Timeout(request.HasTimeoutMs, request.TimeoutMs),
+                GroupStates = TranslateAdmin.GroupStates(request.GroupStates),
+                Types = TranslateAdmin.GroupTypes(request.Types_),
+            });
+
+            IReadOnlyCollection<ConsumerGroupListing> valid = await result.Valid().ConfigureAwait(false);
+            IReadOnlyCollection<KafkaException> errors = await result.Errors().ConfigureAwait(false);
+
+            Proto.ListConsumerGroupsResponse response = new Proto.ListConsumerGroupsResponse();
+            foreach (ConsumerGroupListing listing in valid)
+            {
+                response.Valid.Add(TranslateAdmin.ConsumerGroupListingToProto(listing));
+            }
+
+            foreach (KafkaException error in errors)
+            {
+                response.ListingErrors.Add(Translate.ToProto(error));
+            }
+
+            return response;
+        }
+        catch (Exception ex)
+        {
+            return new Proto.ListConsumerGroupsResponse { Error = Translate.ToProto(ex) };
+        }
+    }
+#pragma warning restore CS0618
+
+    /// <inheritdoc/>
+    public override async Task<Proto.DescribeConsumerGroupsResponse> DescribeConsumerGroups(Proto.DescribeConsumerGroupsRequest request, ServerCallContext context)
+    {
+        IAdmin? admin = Get(request.AdminId);
+        if (admin is null)
+        {
+            return new Proto.DescribeConsumerGroupsResponse { Error = Translate.UnknownAdmin(request.AdminId) };
+        }
+
+        try
+        {
+            DescribeConsumerGroupsResult result = admin.DescribeConsumerGroups(
+                TranslateAdmin.DistinctKeys(request.GroupIds),
+                new DescribeConsumerGroupsOptions
+                {
+                    TimeoutMs = TranslateAdmin.Timeout(request.HasTimeoutMs, request.TimeoutMs),
+                    IncludeAuthorizedOperations = request.IncludeAuthorizedOperations,
+                });
+
+            Proto.DescribeConsumerGroupsResponse response = new Proto.DescribeConsumerGroupsResponse();
+            foreach (KeyValuePair<string, Task<ConsumerGroupDescription>> pair in result.DescribedGroups)
+            {
+                (ConsumerGroupDescription description, Proto.KafkaError? error) =
+                    await TranslateAdmin.Resolve(pair.Value).ConfigureAwait(false);
+                Proto.DescribeConsumerGroupsEntry entry = new Proto.DescribeConsumerGroupsEntry
+                {
+                    Key = TranslateAdmin.NameKey(pair.Key),
+                };
+                if (error is not null)
+                {
+                    entry.Error = error;
+                }
+                else
+                {
+                    entry.Value = TranslateAdmin.ConsumerGroupDescriptionToProto(description);
+                }
+
+                response.Entries.Add(entry);
+            }
+
+            return response;
+        }
+        catch (Exception ex)
+        {
+            return new Proto.DescribeConsumerGroupsResponse { Error = Translate.ToProto(ex) };
+        }
+    }
+
+    /// <inheritdoc/>
+    public override async Task<Proto.DescribeClassicGroupsResponse> DescribeClassicGroups(Proto.DescribeClassicGroupsRequest request, ServerCallContext context)
+    {
+        IAdmin? admin = Get(request.AdminId);
+        if (admin is null)
+        {
+            return new Proto.DescribeClassicGroupsResponse { Error = Translate.UnknownAdmin(request.AdminId) };
+        }
+
+        try
+        {
+            DescribeClassicGroupsResult result = admin.DescribeClassicGroups(
+                TranslateAdmin.DistinctKeys(request.GroupIds),
+                new DescribeClassicGroupsOptions
+                {
+                    TimeoutMs = TranslateAdmin.Timeout(request.HasTimeoutMs, request.TimeoutMs),
+                    IncludeAuthorizedOperations = request.IncludeAuthorizedOperations,
+                });
+
+            Proto.DescribeClassicGroupsResponse response = new Proto.DescribeClassicGroupsResponse();
+            foreach (KeyValuePair<string, Task<ClassicGroupDescription>> pair in result.DescribedGroups)
+            {
+                (ClassicGroupDescription description, Proto.KafkaError? error) =
+                    await TranslateAdmin.Resolve(pair.Value).ConfigureAwait(false);
+                Proto.DescribeClassicGroupsEntry entry = new Proto.DescribeClassicGroupsEntry
+                {
+                    Key = TranslateAdmin.NameKey(pair.Key),
+                };
+                if (error is not null)
+                {
+                    entry.Error = error;
+                }
+                else
+                {
+                    entry.Value = TranslateAdmin.ClassicGroupDescriptionToProto(description);
+                }
+
+                response.Entries.Add(entry);
+            }
+
+            return response;
+        }
+        catch (Exception ex)
+        {
+            return new Proto.DescribeClassicGroupsResponse { Error = Translate.ToProto(ex) };
+        }
+    }
+
+    /// <inheritdoc/>
+    public override async Task<Proto.ListConsumerGroupOffsetsResponse> ListConsumerGroupOffsets(Proto.ListConsumerGroupOffsetsRequest request, ServerCallContext context)
+    {
+        IAdmin? admin = Get(request.AdminId);
+        if (admin is null)
+        {
+            return new Proto.ListConsumerGroupOffsetsResponse { Error = Translate.UnknownAdmin(request.AdminId) };
+        }
+
+        try
+        {
+            // Inside the try, for the same reason as ListOffsets above.
+            Dictionary<string, ListConsumerGroupOffsetsSpec>? specs =
+                TranslateAdmin.GroupOffsetSpecs(request.GroupSpecs, out string? invalid);
+            if (specs is null)
+            {
+                return new Proto.ListConsumerGroupOffsetsResponse { Error = TranslateAdmin.RequestError(invalid!) };
+            }
+
+            ListConsumerGroupOffsetsResult result = admin.ListConsumerGroupOffsets(
+                specs,
+                new ListConsumerGroupOffsetsOptions
+                {
+                    TimeoutMs = TranslateAdmin.Timeout(request.HasTimeoutMs, request.TimeoutMs),
+                    RequireStable = request.RequireStable,
+                });
+
+            // Two levels, like describeLogDirs: the per-group future carries a whole map, and
+            // an inner null is Java's null map value ("no committed offset for that
+            // partition"), which stays absent on the wire rather than becoming offset 0.
+            Proto.ListConsumerGroupOffsetsResponse response = new Proto.ListConsumerGroupOffsetsResponse();
+            foreach (string groupId in specs.Keys)
+            {
+                (IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?> offsets, Proto.KafkaError? error) =
+                    await TranslateAdmin.Resolve(result.PartitionsToOffsetAndMetadata(groupId))
+                        .ConfigureAwait(false);
+                Proto.ListConsumerGroupOffsetsEntry entry = new Proto.ListConsumerGroupOffsetsEntry
+                {
+                    Key = TranslateAdmin.NameKey(groupId),
+                };
+                if (error is not null)
+                {
+                    entry.Error = error;
+                }
+                else
+                {
+                    Proto.GroupOffsets value = new Proto.GroupOffsets();
+                    foreach (KeyValuePair<TopicPartition, OffsetAndMetadata?> pair in offsets)
+                    {
+                        Proto.GroupOffset offset = new Proto.GroupOffset
+                        {
+                            Partition = Translate.TpToProto(pair.Key),
+                        };
+                        if (pair.Value is not null)
+                        {
+                            offset.Offset = Translate.OamToProto(pair.Value);
+                        }
+
+                        value.Offsets.Add(offset);
+                    }
+
+                    entry.Value = value;
+                }
+
+                response.Entries.Add(entry);
+            }
+
+            return response;
+        }
+        catch (Exception ex)
+        {
+            return new Proto.ListConsumerGroupOffsetsResponse { Error = Translate.ToProto(ex) };
+        }
+    }
+
+    /// <inheritdoc/>
+    public override async Task<Proto.VoidKeyedResponse> AlterConsumerGroupOffsets(Proto.AlterConsumerGroupOffsetsRequest request, ServerCallContext context)
+    {
+        IAdmin? admin = Get(request.AdminId);
+        if (admin is null)
+        {
+            return new Proto.VoidKeyedResponse { Error = Translate.UnknownAdmin(request.AdminId) };
+        }
+
+        try
+        {
+            Dictionary<TopicPartition, OffsetAndMetadata> offsets =
+                TranslateAdmin.GroupOffsetCommits(request.Offsets);
+            AlterConsumerGroupOffsetsResult result = admin.AlterConsumerGroupOffsets(
+                request.GroupId,
+                offsets,
+                new AlterConsumerGroupOffsetsOptions
+                {
+                    TimeoutMs = TranslateAdmin.Timeout(request.HasTimeoutMs, request.TimeoutMs),
+                });
+
+            // The result exposes no keyed future map (Java holds one future over the whole
+            // per-partition map), so the requested keys drive the walk — Java's own
+            // partitionResult(tp) pattern. With an EMPTY request there is no per-partition
+            // slot at all and the response is simply empty, which is all Java's all() could
+            // report in that case; the RPC is still submitted.
+            Dictionary<TopicPartition, Task> futures = new Dictionary<TopicPartition, Task>();
+            foreach (TopicPartition partition in offsets.Keys)
+            {
+                futures[partition] = result.PartitionResult(partition);
+            }
+
+            return await TranslateAdmin.VoidResponse(futures, TranslateAdmin.PartitionKey)
+                .ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            return new Proto.VoidKeyedResponse { Error = Translate.ToProto(ex) };
+        }
+    }
+
+    /// <inheritdoc/>
+    public override async Task<Proto.VoidKeyedResponse> DeleteConsumerGroupOffsets(Proto.DeleteConsumerGroupOffsetsRequest request, ServerCallContext context)
+    {
+        IAdmin? admin = Get(request.AdminId);
+        if (admin is null)
+        {
+            return new Proto.VoidKeyedResponse { Error = Translate.UnknownAdmin(request.AdminId) };
+        }
+
+        try
+        {
+            List<TopicPartition> partitions = TranslateAdmin.DistinctKeys(PartitionsOf(request.Partitions));
+            DeleteConsumerGroupOffsetsResult result = admin.DeleteConsumerGroupOffsets(
+                request.GroupId,
+                partitions,
+                new DeleteConsumerGroupOffsetsOptions
+                {
+                    TimeoutMs = TranslateAdmin.Timeout(request.HasTimeoutMs, request.TimeoutMs),
+                });
+
+            // Same single-future shape as AlterConsumerGroupOffsets above, empty case included.
+            Dictionary<TopicPartition, Task> futures = new Dictionary<TopicPartition, Task>();
+            foreach (TopicPartition partition in partitions)
+            {
+                futures[partition] = result.PartitionResult(partition);
+            }
+
+            return await TranslateAdmin.VoidResponse(futures, TranslateAdmin.PartitionKey)
+                .ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            return new Proto.VoidKeyedResponse { Error = Translate.ToProto(ex) };
+        }
+    }
+
+    /// <inheritdoc/>
+    public override async Task<Proto.VoidKeyedResponse> DeleteConsumerGroups(Proto.DeleteConsumerGroupsRequest request, ServerCallContext context)
+    {
+        IAdmin? admin = Get(request.AdminId);
+        if (admin is null)
+        {
+            return new Proto.VoidKeyedResponse { Error = Translate.UnknownAdmin(request.AdminId) };
+        }
+
+        try
+        {
+            DeleteConsumerGroupsResult result = admin.DeleteConsumerGroups(
+                TranslateAdmin.DistinctKeys(request.GroupIds),
+                new DeleteConsumerGroupsOptions
+                {
+                    TimeoutMs = TranslateAdmin.Timeout(request.HasTimeoutMs, request.TimeoutMs),
+                });
+
+            // Genuinely per-key futures here (Map<String, KafkaFuture<Void>>), so the
+            // top-level error keeps its ordinary narrow meaning.
+            return await TranslateAdmin.VoidResponse(result.DeletedGroups, TranslateAdmin.NameKey)
+                .ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            return new Proto.VoidKeyedResponse { Error = Translate.ToProto(ex) };
+        }
+    }
+
+    /// <inheritdoc/>
+    public override async Task<Proto.VoidKeyedResponse> RemoveMembersFromConsumerGroup(Proto.RemoveMembersFromConsumerGroupRequest request, ServerCallContext context)
+    {
+        IAdmin? admin = Get(request.AdminId);
+        if (admin is null)
+        {
+            return new Proto.VoidKeyedResponse { Error = Translate.UnknownAdmin(request.AdminId) };
+        }
+
+        try
+        {
+            // Absent members selects Java's no-argument constructor (removeAll); a present
+            // list — including an empty one, which the collection constructor rejects with
+            // Java's exact message — selects the other. Presence is the discriminant.
+            List<MemberToRemove>? members = TranslateAdmin.MembersToRemove(request.Members);
+            RemoveMembersFromConsumerGroupOptions options = members is null
+                ? new RemoveMembersFromConsumerGroupOptions()
+                : new RemoveMembersFromConsumerGroupOptions(members);
+            options.TimeoutMs = TranslateAdmin.Timeout(request.HasTimeoutMs, request.TimeoutMs);
+            if (request.HasReason)
+            {
+                options.Reason = request.Reason;
+            }
+
+            RemoveMembersFromConsumerGroupResult result =
+                admin.RemoveMembersFromConsumerGroup(request.GroupId, options);
+
+            if (result.RemoveAll)
+            {
+                // In removeAll mode Java's memberResult refuses, so all() is the only
+                // observable: its failure is the top-level error and its success reports no
+                // per-member entry at all. Awaiting it here runs the removal to completion
+                // before responding.
+                Proto.KafkaError? error = await TranslateAdmin.ResolveVoid(result.All()).ConfigureAwait(false);
+                return error is null
+                    ? new Proto.VoidKeyedResponse()
+                    : new Proto.VoidKeyedResponse { Error = error };
+            }
+
+            Dictionary<MemberToRemove, Task> futures = new Dictionary<MemberToRemove, Task>();
+            foreach (MemberToRemove member in members!)
+            {
+                futures[member] = result.MemberResult(member);
+            }
+
+            return await TranslateAdmin
+                .VoidResponse(futures, member => TranslateAdmin.NameKey(member.GroupInstanceId))
+                .ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            return new Proto.VoidKeyedResponse { Error = Translate.ToProto(ex) };
         }
     }
 
