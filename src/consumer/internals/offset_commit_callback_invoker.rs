@@ -41,13 +41,9 @@ use crate::consumer::OffsetCommitCallback;
 
 use super::ConsumerInterceptors;
 
-/// One queued task in the invoker. Java: nested
-/// `OffsetCommitCallbackInvoker.OffsetCommitCallbackTask`.
-///
-/// `kind` is `Interceptor` when the task is to invoke the interceptor
-/// chain's `on_commit` (the chain itself is owned by the invoker), and
-/// `User { callback }` when it is a user-supplied commit callback.
-#[doc(alias = "org.apache.kafka.clients.consumer.internals.OffsetCommitCallbackInvoker$OffsetCommitCallbackTask")]
+/// Which callback an [`OffsetCommitCallbackTask`] invokes: `Interceptor` to
+/// invoke the interceptor chain's `on_commit` (the chain itself is owned by
+/// the invoker), and `User { callback }` for a user-supplied commit callback.
 enum CallbackKind {
     /// Invoke the interceptor chain's `on_commit(offsets)`. The chain is
     /// owned by the invoker (see [`OffsetCommitCallbackInvoker`]).
@@ -56,7 +52,10 @@ enum CallbackKind {
     User { callback: Arc<dyn OffsetCommitCallback> },
 }
 
-struct PendingCallback {
+/// One queued task in the invoker. Java: nested
+/// `OffsetCommitCallbackInvoker.OffsetCommitCallbackTask`.
+#[doc(alias = "org.apache.kafka.clients.consumer.internals.OffsetCommitCallbackInvoker$OffsetCommitCallbackTask")]
+struct OffsetCommitCallbackTask {
     kind: CallbackKind,
     offsets: HashMap<TopicPartition, OffsetAndMetadata>,
     /// Optional error captured at enqueue time. `None` for the interceptor
@@ -94,7 +93,7 @@ pub(crate) struct OffsetCommitCallbackInvoker<K: 'static, V: 'static> {
     /// sufficient because the queue is never `take()`ed in a blocking
     /// fashion. The mutex is held only across `push_back` / `pop_front`,
     /// never across an `.await`.
-    pending: Mutex<VecDeque<PendingCallback>>,
+    pending: Mutex<VecDeque<OffsetCommitCallbackTask>>,
     /// Tracks whether the chain is empty without locking on the enqueue
     /// path. Mirrors Java's `interceptors.isEmpty()` check that happens
     /// without any extra synchronisation. Set at construction time and not
@@ -178,7 +177,7 @@ where
         if self.interceptors_empty {
             return;
         }
-        let task = PendingCallback { kind: CallbackKind::Interceptor, offsets, error: None };
+        let task = OffsetCommitCallbackTask { kind: CallbackKind::Interceptor, offsets, error: None };
         let mut guard = match self.pending.lock() {
             Ok(g) => g,
             Err(poisoned) => poisoned.into_inner(),
@@ -199,7 +198,7 @@ where
         offsets: HashMap<TopicPartition, OffsetAndMetadata>,
         error: Option<Error>,
     ) {
-        let task = PendingCallback { kind: CallbackKind::User { callback }, offsets, error };
+        let task = OffsetCommitCallbackTask { kind: CallbackKind::User { callback }, offsets, error };
         let mut guard = match self.pending.lock() {
             Ok(g) => g,
             Err(poisoned) => poisoned.into_inner(),

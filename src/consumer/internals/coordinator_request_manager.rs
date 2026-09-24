@@ -26,7 +26,7 @@ use std::sync::{Arc, Mutex};
 use crate::FindCoordinatorRequestData;
 use crate::common::Errors;
 use crate::common::requests::{
-    ConcreteResponse, CoordinatorType, FindCoordinatorRequestBuilder, FindCoordinatorResponse, RequestBuilder,
+    ConcreteResponse, CoordinatorType, FindCoordinatorResponse, RequestBuilder, find_coordinator_request,
 };
 use crate::common::{Error, Node};
 
@@ -357,7 +357,7 @@ impl CoordinatorRequestManager {
         let mut data = FindCoordinatorRequestData::new();
         data.set_key_type(CoordinatorType::Group.id());
         data.set_key(inner.group_id.clone());
-        let builder: Box<dyn RequestBuilder> = Box::new(FindCoordinatorRequestBuilder::new(data));
+        let builder: Box<dyn RequestBuilder> = Box::new(find_coordinator_request::Builder::new(data));
         let mut unsent = UnsentRequest::new(builder, None);
         let response_rx = unsent.take_response_receiver().expect("receiver fresh");
         let inner_for_handler = Arc::clone(inner);
@@ -491,7 +491,7 @@ mod tests {
     use super::*;
     use crate::ClientResponse;
     use crate::common::ApiKeys;
-    use crate::common::requests::{ConcreteRequest, ConcreteResponse, RequestHeader, RequestHeaderOptionsBuilder};
+    use crate::common::requests::{AbstractRequest, ConcreteResponse, RequestHeader, RequestHeaderOptionsBuilder};
 
     const RETRY_BACKOFF_MS: i64 = 500;
     const GROUP_ID: &str = "group-1";
@@ -514,7 +514,7 @@ mod tests {
             .latest_allowed_version();
         // Drive the builder forward to produce a concrete request so we
         // can grab the version for the header.
-        let _abstract_request: ConcreteRequest = unsent
+        let _abstract_request: AbstractRequest = unsent
             .request_builder_mut()
             .expect("builder still present")
             .build_version(api_version)

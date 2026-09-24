@@ -27,7 +27,7 @@ use crate::common::resource::{PatternType, ResourcePattern, ResourceType};
 use crate::create_acls_request_data::AclCreation;
 use crate::create_acls_response_data::AclCreationResult;
 
-use super::{ConcreteRequest, ConcreteResponse, CreateAclsResponse, RequestBuilder};
+use super::{AbstractRequest, ConcreteResponse, CreateAclsResponse, RequestBuilder};
 
 /// A CreateAcls request.
 ///
@@ -153,13 +153,13 @@ impl std::fmt::Display for CreateAclsRequest {
 /// Corresponds to `CreateAclsRequest.Builder` in Java.
 #[derive(Debug, Clone)]
 #[doc(alias = "org.apache.kafka.common.requests.CreateAclsRequest$Builder")]
-pub struct CreateAclsRequestBuilder {
+pub struct Builder {
     data: CreateAclsRequestData,
     oldest_allowed_version: i16,
     latest_allowed_version: i16,
 }
 
-impl CreateAclsRequestBuilder {
+impl Builder {
     /// Creates a builder from existing data.
     #[doc(alias = "org.apache.kafka.common.requests.CreateAclsRequest$Builder#Builder")]
     pub fn new(data: CreateAclsRequestData) -> Self {
@@ -171,7 +171,7 @@ impl CreateAclsRequestBuilder {
     }
 }
 
-impl RequestBuilder for CreateAclsRequestBuilder {
+impl RequestBuilder for Builder {
     fn api_key(&self) -> &'static ApiKeys {
         &ApiKeys::CREATE_ACLS
     }
@@ -184,7 +184,7 @@ impl RequestBuilder for CreateAclsRequestBuilder {
         self.latest_allowed_version
     }
 
-    fn build_version(&mut self, version: i16) -> io::Result<ConcreteRequest> {
+    fn build_version(&mut self, version: i16) -> io::Result<AbstractRequest> {
         // Mirrors CreateAclsRequest.validate. Version 0 was removed in Kafka 4.0
         // (valid versions 1-3), so the v0 pattern-type guard is unreachable; the
         // UNKNOWN-elements guard remains.
@@ -200,7 +200,7 @@ impl RequestBuilder for CreateAclsRequestBuilder {
                 format!("CreatableAcls contain unknown elements: {:?}", self.data.creations),
             ));
         }
-        Ok(ConcreteRequest::CreateAcls(CreateAclsRequest::new(self.data.clone(), version)))
+        Ok(AbstractRequest::CreateAcls(CreateAclsRequest::new(self.data.clone(), version)))
     }
 }
 
@@ -226,7 +226,7 @@ mod tests {
         let mut data = CreateAclsRequestData::new();
         data.set_creations(vec![CreateAclsRequest::acl_creation(&binding())]);
         let version = ApiKeys::CREATE_ACLS.latest_version();
-        let mut request = ConcreteRequest::CreateAcls(CreateAclsRequest::new(data, version));
+        let mut request = AbstractRequest::CreateAcls(CreateAclsRequest::new(data, version));
         let bytes = request.serialize().unwrap();
         let mut readable = crate::common::ByteBufferAccessor::new(bytes.into_buffer());
         let parsed = CreateAclsRequest::parse(&mut readable, version).unwrap();
@@ -261,7 +261,7 @@ mod tests {
         );
         let mut data = CreateAclsRequestData::new();
         data.set_creations(vec![CreateAclsRequest::acl_creation(&acl)]);
-        let mut request = ConcreteRequest::CreateAcls(CreateAclsRequest::new(data, 3));
+        let mut request = AbstractRequest::CreateAcls(CreateAclsRequest::new(data, 3));
         let bytes = request.serialize().unwrap().into_buffer();
         let expected: Vec<u8> = vec![
             0x02, // Creations: compact array len+1 = 2 (one element)

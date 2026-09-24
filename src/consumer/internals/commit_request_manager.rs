@@ -63,7 +63,7 @@ use crate::OffsetFetchRequestData;
 use crate::common::Errors;
 use crate::common::metrics::Time;
 use crate::common::requests::{
-    OffsetCommitRequestBuilder, OffsetCommitResponse, OffsetFetchRequestBuilder, RECORD_BATCH_NO_PARTITION_LEADER_EPOCH,
+    OffsetCommitResponse, RECORD_BATCH_NO_PARTITION_LEADER_EPOCH, offset_commit_request, offset_fetch_request,
 };
 use crate::common::{Error, TopicPartition, Uuid};
 use crate::consumer::ConsumerConfig;
@@ -1725,9 +1725,9 @@ fn build_offset_commit_unsent_request(
     // `poll_with_coordinator`.
 
     let builder = if can_use_topic_ids {
-        OffsetCommitRequestBuilder::for_topic_ids_or_names(data)
+        offset_commit_request::Builder::for_topic_ids_or_names(data)
     } else {
-        OffsetCommitRequestBuilder::for_topic_names(data)
+        offset_commit_request::Builder::for_topic_names(data)
     };
 
     // Build the unsent request, register a completion handler that
@@ -1807,9 +1807,9 @@ fn build_offset_fetch_unsent_request(
     data.set_groups(vec![group]);
 
     let builder = if can_use_topic_ids {
-        OffsetFetchRequestBuilder::for_topic_ids_or_names(data, inner.throw_on_fetch_stable_offset_unsupported)
+        offset_fetch_request::Builder::for_topic_ids_or_names(data, inner.throw_on_fetch_stable_offset_unsupported)
     } else {
-        OffsetFetchRequestBuilder::for_topic_names(data, inner.throw_on_fetch_stable_offset_unsupported)
+        offset_fetch_request::Builder::for_topic_names(data, inner.throw_on_fetch_stable_offset_unsupported)
     };
 
     let coordinator_node = inner.coordinator_node();
@@ -5530,7 +5530,7 @@ mod tests {
         let mut retried = yield_until_unsent(&manager, &coordinator, poll_step).await;
         // The retried request carries the new member id + epoch.
         let req = retried.request_builder_mut().expect("builder present").build().expect("build");
-        if let crate::common::requests::ConcreteRequest::OffsetFetch(fetch) = req {
+        if let crate::common::requests::AbstractRequest::OffsetFetch(fetch) = req {
             let groups = &fetch.data().groups;
             assert_eq!(groups.len(), 1);
             assert_eq!(groups[0].member_epoch, new_epoch);

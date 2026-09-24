@@ -25,7 +25,7 @@ use crate::AlterUserScramCredentialsResponseData;
 use crate::alter_user_scram_credentials_response_data::AlterUserScramCredentialsResult;
 use crate::common::protocol::{ApiKeys, Errors, Readable};
 
-use super::{AlterUserScramCredentialsResponse, ConcreteRequest, ConcreteResponse, RequestBuilder};
+use super::{AbstractRequest, AlterUserScramCredentialsResponse, ConcreteResponse, RequestBuilder};
 
 /// An AlterUserScramCredentials request.
 ///
@@ -127,13 +127,13 @@ impl std::fmt::Display for AlterUserScramCredentialsRequest {
 /// Corresponds to `AlterUserScramCredentialsRequest.Builder`.
 #[derive(Debug, Clone)]
 #[doc(alias = "org.apache.kafka.common.requests.AlterUserScramCredentialsRequest$Builder")]
-pub struct AlterUserScramCredentialsRequestBuilder {
+pub struct Builder {
     data: AlterUserScramCredentialsRequestData,
     oldest_allowed_version: i16,
     latest_allowed_version: i16,
 }
 
-impl AlterUserScramCredentialsRequestBuilder {
+impl Builder {
     /// Creates a builder wrapping the given request data.
     #[doc(alias = "org.apache.kafka.common.requests.AlterUserScramCredentialsRequest$Builder#Builder")]
     pub fn new(data: AlterUserScramCredentialsRequestData) -> Self {
@@ -145,7 +145,7 @@ impl AlterUserScramCredentialsRequestBuilder {
     }
 }
 
-impl RequestBuilder for AlterUserScramCredentialsRequestBuilder {
+impl RequestBuilder for Builder {
     fn api_key(&self) -> &'static ApiKeys {
         &ApiKeys::ALTER_USER_SCRAM_CREDENTIALS
     }
@@ -158,8 +158,8 @@ impl RequestBuilder for AlterUserScramCredentialsRequestBuilder {
         self.latest_allowed_version
     }
 
-    fn build_version(&mut self, version: i16) -> io::Result<ConcreteRequest> {
-        Ok(ConcreteRequest::AlterUserScramCredentials(
+    fn build_version(&mut self, version: i16) -> io::Result<AbstractRequest> {
+        Ok(AbstractRequest::AlterUserScramCredentials(
             AlterUserScramCredentialsRequest::new(self.data.clone(), version),
         ))
     }
@@ -215,7 +215,7 @@ mod tests {
         let mut data = AlterUserScramCredentialsRequestData::new();
         data.set_deletions(vec![deletion("d0", 2)]);
         data.set_upsertions(vec![upsertion("u0")]);
-        let mut builder = AlterUserScramCredentialsRequestBuilder::new(data);
+        let mut builder = Builder::new(data);
         let mut request = builder.build().unwrap();
         let bytes = request.serialize().unwrap();
         let mut readable = crate::common::ByteBufferAccessor::new(bytes.into_buffer());
@@ -235,7 +235,7 @@ mod tests {
         let mut data = AlterUserScramCredentialsRequestData::new();
         data.set_deletions(vec![deletion("d0", 2)]);
         data.set_upsertions(vec![upsertion("u0")]);
-        let mut builder = AlterUserScramCredentialsRequestBuilder::new(data);
+        let mut builder = Builder::new(data);
         let mut request = builder.build_version(0).unwrap();
         let bytes = request.serialize().unwrap().into_buffer();
         let expected: Vec<u8> = vec![

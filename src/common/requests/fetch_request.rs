@@ -399,7 +399,7 @@ impl std::fmt::Display for FetchRequest {
 /// `consumer-threading.md` §20.
 #[derive(Debug, Clone)]
 #[doc(alias = "org.apache.kafka.common.requests.FetchRequest$Builder")]
-pub struct FetchRequestBuilder {
+pub struct Builder {
     oldest_allowed_version: i16,
     latest_allowed_version: i16,
     replica_id: i32,
@@ -418,7 +418,7 @@ pub struct FetchRequestBuilder {
     replaced: Vec<TopicIdPartition>,
 }
 
-impl FetchRequestBuilder {
+impl Builder {
     /// Creates a builder configured for a consumer fetch.
     ///
     /// Translates `FetchRequest.Builder.forConsumer(maxVersion, maxWait, minBytes, fetchData)`.
@@ -610,7 +610,7 @@ impl FetchRequestBuilder {
     }
 }
 
-impl crate::common::requests::RequestBuilder for FetchRequestBuilder {
+impl crate::common::requests::RequestBuilder for Builder {
     fn api_key(&self) -> &'static ApiKeys {
         &ApiKeys::FETCH
     }
@@ -623,10 +623,10 @@ impl crate::common::requests::RequestBuilder for FetchRequestBuilder {
         self.latest_allowed_version
     }
 
-    fn build_version(&mut self, version: i16) -> std::io::Result<crate::common::requests::ConcreteRequest> {
-        Ok(crate::common::requests::ConcreteRequest::Fetch(
-            FetchRequestBuilder::build_version(self, version),
-        ))
+    fn build_version(&mut self, version: i16) -> std::io::Result<crate::common::requests::AbstractRequest> {
+        Ok(crate::common::requests::AbstractRequest::Fetch(Builder::build_version(
+            self, version,
+        )))
     }
 }
 
@@ -644,7 +644,7 @@ mod tests {
 
     #[test]
     fn test_for_consumer_defaults() {
-        let builder = FetchRequestBuilder::for_consumer(15, 500, 1, IndexMap::new());
+        let builder = Builder::for_consumer(15, 500, 1, IndexMap::new());
         assert_eq!(builder.replica_id, FetchRequest::CONSUMER_REPLICA_ID);
         assert_eq!(builder.max_wait, 500);
         assert_eq!(builder.min_bytes, 1);
@@ -660,7 +660,7 @@ mod tests {
         let topic_id = Uuid::random_uuid();
         let mut data = IndexMap::new();
         data.insert(tp("t", 0), pd(topic_id, 100));
-        let builder = FetchRequestBuilder::for_consumer(15, 500, 1, data);
+        let builder = Builder::for_consumer(15, 500, 1, data);
         let req = builder.build_version(15);
         // v15 stores replica id in replica_state.
         assert_eq!(FetchRequest::CONSUMER_REPLICA_ID, req.replica_id());
@@ -675,7 +675,7 @@ mod tests {
         let topic_id = Uuid::random_uuid();
         let mut data = IndexMap::new();
         data.insert(tp("t", 0), pd(topic_id, 100));
-        let builder = FetchRequestBuilder::for_consumer(12, 500, 1, data);
+        let builder = Builder::for_consumer(12, 500, 1, data);
         let req = builder.build_version(12);
         assert_eq!(FetchRequest::CONSUMER_REPLICA_ID, req.replica_id());
         assert_eq!(12, req.version());
@@ -690,7 +690,7 @@ mod tests {
         data.insert(tp("a", 1), pd(id_a, 0));
         data.insert(tp("b", 0), pd(id_b, 0));
         data.insert(tp("a", 2), pd(id_a, 0));
-        let builder = FetchRequestBuilder::for_consumer(15, 500, 1, data);
+        let builder = Builder::for_consumer(15, 500, 1, data);
         let req = builder.build();
         // Three groups: a[0,1], b[0], a[2].
         assert_eq!(3, req.data().topics.len());
@@ -707,9 +707,7 @@ mod tests {
         let id = Uuid::random_uuid();
         let mut data = IndexMap::new();
         data.insert(tp("t", 0), pd(id, 0));
-        let req = FetchRequestBuilder::for_consumer(12, 500, 1, data)
-            .set_max_bytes(123_456)
-            .build_version(2);
+        let req = Builder::for_consumer(12, 500, 1, data).set_max_bytes(123_456).build_version(2);
         assert_eq!(FetchRequest::DEFAULT_RESPONSE_MAX_BYTES, req.max_bytes());
     }
 
@@ -718,9 +716,7 @@ mod tests {
         let id = Uuid::random_uuid();
         let mut data = IndexMap::new();
         data.insert(tp("t", 0), pd(id, 0));
-        let req = FetchRequestBuilder::for_consumer(15, 500, 1, data)
-            .set_max_bytes(123_456)
-            .build_version(3);
+        let req = Builder::for_consumer(15, 500, 1, data).set_max_bytes(123_456).build_version(3);
         assert_eq!(123_456, req.max_bytes());
     }
 
@@ -729,7 +725,7 @@ mod tests {
         let id = Uuid::random_uuid();
         let removed = vec![TopicIdPartition::with_partition_topic(id, 5, "x")];
         let replaced = vec![TopicIdPartition::with_partition_topic(id, 6, "y")];
-        let builder = FetchRequestBuilder::for_consumer(15, 500, 1, IndexMap::new())
+        let builder = Builder::for_consumer(15, 500, 1, IndexMap::new())
             .set_removed(removed)
             .set_replaced(replaced);
         let req = builder.build_version(12);
@@ -744,7 +740,7 @@ mod tests {
         let id = Uuid::random_uuid();
         let removed = vec![TopicIdPartition::with_partition_topic(id, 5, "x")];
         let replaced = vec![TopicIdPartition::with_partition_topic(id, 6, "y")];
-        let builder = FetchRequestBuilder::for_consumer(15, 500, 1, IndexMap::new())
+        let builder = Builder::for_consumer(15, 500, 1, IndexMap::new())
             .set_removed(removed)
             .set_replaced(replaced);
         let req = builder.build_version(13);
@@ -755,7 +751,7 @@ mod tests {
     #[test]
     fn test_removed_and_replaced_round_trip() {
         let id = Uuid::random_uuid();
-        let builder = FetchRequestBuilder::for_consumer(15, 500, 1, IndexMap::new());
+        let builder = Builder::for_consumer(15, 500, 1, IndexMap::new());
         // Java's Builder defaults both to `Collections.emptyList()`.
         assert!(builder.removed().is_empty());
         assert!(builder.replaced().is_empty());
@@ -769,16 +765,15 @@ mod tests {
 
     #[test]
     fn test_isolation_level_round_trip() {
-        let builder = FetchRequestBuilder::for_consumer(15, 500, 1, IndexMap::new())
-            .set_isolation_level(IsolationLevel::ReadCommitted);
+        let builder =
+            Builder::for_consumer(15, 500, 1, IndexMap::new()).set_isolation_level(IsolationLevel::ReadCommitted);
         let req = builder.build_version(15);
         assert_eq!(IsolationLevel::ReadCommitted, req.isolation_level().unwrap());
     }
 
     #[test]
     fn test_metadata_round_trip() {
-        let builder =
-            FetchRequestBuilder::for_consumer(15, 500, 1, IndexMap::new()).set_metadata(FetchMetadata::new(42, 7));
+        let builder = Builder::for_consumer(15, 500, 1, IndexMap::new()).set_metadata(FetchMetadata::new(42, 7));
         let req = builder.build_version(15);
         assert_eq!(FetchMetadata::new(42, 7), req.metadata());
     }
@@ -806,7 +801,7 @@ mod tests {
         let id = Uuid::random_uuid();
         let mut data = IndexMap::new();
         data.insert(tp("orig", 0), pd(id, 100));
-        let req = FetchRequestBuilder::for_consumer(15, 500, 1, data).build_version(15);
+        let req = Builder::for_consumer(15, 500, 1, data).build_version(15);
 
         let mut topic_names = HashMap::new();
         topic_names.insert(id, "resolved".to_string());
@@ -824,7 +819,7 @@ mod tests {
         let id = Uuid::random_uuid();
         let mut data = IndexMap::new();
         data.insert(tp("name-in-data", 0), pd(id, 100));
-        let req = FetchRequestBuilder::for_consumer(15, 500, 1, data).build_version(12);
+        let req = Builder::for_consumer(15, 500, 1, data).build_version(12);
 
         let resolved = FetchRequest::fetch_data_from(&req, &HashMap::new());
         let (tip, _) = resolved.iter().next().unwrap();

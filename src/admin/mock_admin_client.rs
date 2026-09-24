@@ -72,7 +72,7 @@ use crate::common::ElectionType;
 use crate::common::Errors;
 use crate::common::KafkaFuture;
 use crate::common::acl::{AclBinding, AclBindingFilter, AclOperation};
-use crate::common::config::{ConfigResource, ConfigResourceType};
+use crate::common::config::{ConfigResource, config_resource};
 use crate::common::internals::KafkaFutureImpl;
 use crate::common::quota::{ClientQuotaAlteration, ClientQuotaEntity, ClientQuotaFilter};
 use crate::common::security::auth::KafkaPrincipal;
@@ -548,7 +548,7 @@ fn apply_alter_ops(map: &mut BTreeMap<String, String>, ops: &[AlterConfigOp]) ->
 /// Corresponds to `MockAdminClient.getResourceDescription`.
 fn get_resource_description(state: &mut State, resource: &ConfigResource) -> Result<Config, Error> {
     match resource.resource_type() {
-        ConfigResourceType::Broker => {
+        config_resource::Type::Broker => {
             let broker_id: usize = resource.name().parse().map_err(|_| {
                 Error::with_message(Errors::InvalidRequest, format!("Broker {} not found.", resource.name()))
             })?;
@@ -560,7 +560,7 @@ fn get_resource_description(state: &mut State, resource: &ConfigResource) -> Res
                 )),
             }
         },
-        ConfigResourceType::Topic => {
+        config_resource::Type::Topic => {
             if let Some(metadata) = state.all_topics.get_mut(resource.name())
                 && !metadata.marked_for_deletion
             {
@@ -576,7 +576,7 @@ fn get_resource_description(state: &mut State, resource: &ConfigResource) -> Res
                 format!("Resource {resource} not found."),
             ))
         },
-        ConfigResourceType::ClientMetrics => {
+        config_resource::Type::ClientMetrics => {
             let resource_name = resource.name();
             if resource_name.is_empty() {
                 return Err(Error::with_message(Errors::InvalidRequest, "Empty resource name"));
@@ -584,7 +584,7 @@ fn get_resource_description(state: &mut State, resource: &ConfigResource) -> Res
             let config = state.client_metrics_configs.get(resource_name).cloned().unwrap_or_default();
             Ok(to_config_object(&config))
         },
-        ConfigResourceType::Group => {
+        config_resource::Type::Group => {
             let resource_name = resource.name();
             if resource_name.is_empty() {
                 return Err(Error::with_message(Errors::InvalidRequest, "Empty resource name"));
@@ -609,7 +609,7 @@ fn handle_incremental_resource_alteration(
     ops: &[AlterConfigOp],
 ) -> Result<(), Error> {
     match resource.resource_type() {
-        ConfigResourceType::Broker => {
+        config_resource::Type::Broker => {
             let broker_id: usize = resource.name().parse().map_err(|_| {
                 Error::with_message(Errors::InvalidRequest, format!("no such broker as {}", resource.name()))
             })?;
@@ -624,7 +624,7 @@ fn handle_incremental_resource_alteration(
             state.broker_configs[broker_id] = new_map;
             Ok(())
         },
-        ConfigResourceType::Topic => {
+        config_resource::Type::Topic => {
             let metadata = state.all_topics.get_mut(resource.name()).ok_or_else(|| {
                 Error::with_message(Errors::UnknownTopicOrPartition, format!("No such topic as {}", resource.name()))
             })?;
@@ -633,7 +633,7 @@ fn handle_incremental_resource_alteration(
             metadata.configs = Some(new_map);
             Ok(())
         },
-        ConfigResourceType::ClientMetrics => {
+        config_resource::Type::ClientMetrics => {
             let resource_name = resource.name();
             if resource_name.is_empty() {
                 return Err(Error::with_message(Errors::InvalidRequest, "Empty resource name"));
@@ -643,7 +643,7 @@ fn handle_incremental_resource_alteration(
             state.client_metrics_configs.insert(resource_name.to_string(), new_map);
             Ok(())
         },
-        ConfigResourceType::Group => {
+        config_resource::Type::Group => {
             let resource_name = resource.name();
             if resource_name.is_empty() {
                 return Err(Error::with_message(Errors::InvalidRequest, "Empty resource name"));
@@ -1167,7 +1167,7 @@ impl Admin for MockAdminClient {
 
     fn list_config_resources_with_options(
         &self,
-        config_resource_types: &HashSet<ConfigResourceType>,
+        config_resource_types: &HashSet<config_resource::Type>,
         _options: ListConfigResourcesOptions,
     ) -> ListConfigResourcesResult {
         let state = self.state.lock().unwrap();
@@ -1176,29 +1176,29 @@ impl Admin for MockAdminClient {
         let mut config_resources: HashSet<ConfigResource> = HashSet::new();
         let all = config_resource_types.is_empty();
 
-        if all || config_resource_types.contains(&ConfigResourceType::Topic) {
+        if all || config_resource_types.contains(&config_resource::Type::Topic) {
             for name in state.all_topics.keys() {
-                config_resources.insert(ConfigResource::new(ConfigResourceType::Topic, name.clone()));
+                config_resources.insert(ConfigResource::new(config_resource::Type::Topic, name.clone()));
             }
         }
-        if all || config_resource_types.contains(&ConfigResourceType::Broker) {
+        if all || config_resource_types.contains(&config_resource::Type::Broker) {
             for i in 0..state.brokers.len() {
-                config_resources.insert(ConfigResource::new(ConfigResourceType::Broker, i.to_string()));
+                config_resources.insert(ConfigResource::new(config_resource::Type::Broker, i.to_string()));
             }
         }
-        if all || config_resource_types.contains(&ConfigResourceType::BrokerLogger) {
+        if all || config_resource_types.contains(&config_resource::Type::BrokerLogger) {
             for i in 0..state.brokers.len() {
-                config_resources.insert(ConfigResource::new(ConfigResourceType::BrokerLogger, i.to_string()));
+                config_resources.insert(ConfigResource::new(config_resource::Type::BrokerLogger, i.to_string()));
             }
         }
-        if all || config_resource_types.contains(&ConfigResourceType::ClientMetrics) {
+        if all || config_resource_types.contains(&config_resource::Type::ClientMetrics) {
             for name in state.client_metrics_configs.keys() {
-                config_resources.insert(ConfigResource::new(ConfigResourceType::ClientMetrics, name.clone()));
+                config_resources.insert(ConfigResource::new(config_resource::Type::ClientMetrics, name.clone()));
             }
         }
-        if all || config_resource_types.contains(&ConfigResourceType::Group) {
+        if all || config_resource_types.contains(&config_resource::Type::Group) {
             for name in state.group_configs.keys() {
-                config_resources.insert(ConfigResource::new(ConfigResourceType::Group, name.clone()));
+                config_resources.insert(ConfigResource::new(config_resource::Type::Group, name.clone()));
             }
         }
         handle.complete(config_resources.into_iter().collect());
@@ -2443,7 +2443,7 @@ mod tests {
             .await
             .unwrap();
 
-        let resource = ConfigResource::new(ConfigResourceType::Topic, "t".to_string());
+        let resource = ConfigResource::new(config_resource::Type::Topic, "t".to_string());
         let result =
             client.describe_configs_with_options(std::slice::from_ref(&resource), DescribeConfigsOptions::new());
         let config = result.values()[&resource].get().await.unwrap();
@@ -2453,7 +2453,7 @@ mod tests {
     #[tokio::test]
     async fn describe_configs_broker_returns_default_replication_factor() {
         let client = admin();
-        let resource = ConfigResource::new(ConfigResourceType::Broker, "0".to_string());
+        let resource = ConfigResource::new(config_resource::Type::Broker, "0".to_string());
         let result =
             client.describe_configs_with_options(std::slice::from_ref(&resource), DescribeConfigsOptions::new());
         let config = result.values()[&resource].get().await.unwrap();
@@ -2463,7 +2463,7 @@ mod tests {
     #[tokio::test]
     async fn describe_configs_unknown_topic_is_unknown_topic_error() {
         let client = admin();
-        let resource = ConfigResource::new(ConfigResourceType::Topic, "missing".to_string());
+        let resource = ConfigResource::new(config_resource::Type::Topic, "missing".to_string());
         let result =
             client.describe_configs_with_options(std::slice::from_ref(&resource), DescribeConfigsOptions::new());
         let err = result.values()[&resource].get().await.unwrap_err();
@@ -2474,7 +2474,7 @@ mod tests {
     #[tokio::test]
     async fn describe_configs_unknown_broker_is_invalid_request() {
         let client = admin();
-        let resource = ConfigResource::new(ConfigResourceType::Broker, "99".to_string());
+        let resource = ConfigResource::new(config_resource::Type::Broker, "99".to_string());
         let result =
             client.describe_configs_with_options(std::slice::from_ref(&resource), DescribeConfigsOptions::new());
         let err = result.values()[&resource].get().await.unwrap_err();
@@ -2486,7 +2486,7 @@ mod tests {
     async fn describe_configs_timeout_recovers_on_next_call() {
         let client = admin();
         client.timeout_next_request(1);
-        let resource = ConfigResource::new(ConfigResourceType::Broker, "0".to_string());
+        let resource = ConfigResource::new(config_resource::Type::Broker, "0".to_string());
         let timed_out =
             client.describe_configs_with_options(std::slice::from_ref(&resource), DescribeConfigsOptions::new());
         assert!(matches!(timed_out.values()[&resource].get().await, Err(Error::Timeout(_))));
@@ -2507,7 +2507,7 @@ mod tests {
             .get()
             .await
             .unwrap();
-        let resource = ConfigResource::new(ConfigResourceType::Topic, "t".to_string());
+        let resource = ConfigResource::new(config_resource::Type::Topic, "t".to_string());
 
         // SET.
         let set_op = AlterConfigOp::new(
@@ -2554,7 +2554,7 @@ mod tests {
     #[tokio::test]
     async fn incremental_alter_configs_unknown_topic_is_unknown_topic_error() {
         let client = admin();
-        let resource = ConfigResource::new(ConfigResourceType::Topic, "missing".to_string());
+        let resource = ConfigResource::new(config_resource::Type::Topic, "missing".to_string());
         let op = AlterConfigOp::new(ConfigEntry::new("k".to_string(), Some("v".to_string())), OpType::Set);
         let mut configs = HashMap::new();
         configs.insert(resource.clone(), vec![op]);
@@ -2567,7 +2567,7 @@ mod tests {
     #[tokio::test]
     async fn incremental_alter_configs_client_metrics_creates_resource() {
         let client = admin();
-        let resource = ConfigResource::new(ConfigResourceType::ClientMetrics, "cm".to_string());
+        let resource = ConfigResource::new(config_resource::Type::ClientMetrics, "cm".to_string());
         let op = AlterConfigOp::new(
             ConfigEntry::new("interval.ms".to_string(), Some("5000".to_string())),
             OpType::Set,
@@ -2584,7 +2584,7 @@ mod tests {
         // The new client-metrics resource now shows up in list_config_resources.
         let listed = client
             .list_config_resources_with_options(
-                &HashSet::from([ConfigResourceType::ClientMetrics]),
+                &HashSet::from([config_resource::Type::ClientMetrics]),
                 ListConfigResourcesOptions::new(),
             )
             .all()
@@ -2612,7 +2612,7 @@ mod tests {
 
         // Seed two client-metrics resources via incrementalAlterConfigs.
         for name in ["one", "two"] {
-            let resource = ConfigResource::new(ConfigResourceType::ClientMetrics, name.to_string());
+            let resource = ConfigResource::new(config_resource::Type::ClientMetrics, name.to_string());
             let op = AlterConfigOp::new(
                 ConfigEntry::new("interval.ms".to_string(), Some("5000".to_string())),
                 OpType::Set,
@@ -2645,7 +2645,7 @@ mod tests {
     #[tokio::test]
     async fn incremental_alter_configs_empty_client_metrics_name_is_invalid_request() {
         let client = admin();
-        let resource = ConfigResource::new(ConfigResourceType::ClientMetrics, String::new());
+        let resource = ConfigResource::new(config_resource::Type::ClientMetrics, String::new());
         let op = AlterConfigOp::new(ConfigEntry::new("k".to_string(), Some("v".to_string())), OpType::Set);
         let mut configs = HashMap::new();
         configs.insert(resource.clone(), vec![op]);
@@ -2674,11 +2674,11 @@ mod tests {
             .await
             .unwrap();
         let set: HashSet<ConfigResource> = listed.into_iter().collect();
-        assert!(set.contains(&ConfigResource::new(ConfigResourceType::Topic, "t".to_string())));
+        assert!(set.contains(&ConfigResource::new(config_resource::Type::Topic, "t".to_string())));
         // 3 brokers -> broker 0..2 and broker-logger 0..2.
         for i in 0..3 {
-            assert!(set.contains(&ConfigResource::new(ConfigResourceType::Broker, i.to_string())));
-            assert!(set.contains(&ConfigResource::new(ConfigResourceType::BrokerLogger, i.to_string())));
+            assert!(set.contains(&ConfigResource::new(config_resource::Type::Broker, i.to_string())));
+            assert!(set.contains(&ConfigResource::new(config_resource::Type::BrokerLogger, i.to_string())));
         }
     }
 
@@ -2696,14 +2696,14 @@ mod tests {
             .unwrap();
         let listed = client
             .list_config_resources_with_options(
-                &HashSet::from([ConfigResourceType::Topic]),
+                &HashSet::from([config_resource::Type::Topic]),
                 ListConfigResourcesOptions::new(),
             )
             .all()
             .get()
             .await
             .unwrap();
-        assert_eq!(listed, vec![ConfigResource::new(ConfigResourceType::Topic, "t".to_string())]);
+        assert_eq!(listed, vec![ConfigResource::new(config_resource::Type::Topic, "t".to_string())]);
     }
 
     // --- Delegation tokens ---

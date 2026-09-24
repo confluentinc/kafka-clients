@@ -24,7 +24,7 @@ use crate::common::protocol::{ApiKeys, Errors, Readable};
 use crate::common::security::auth::KafkaPrincipal;
 use crate::describe_delegation_token_request_data::DescribeDelegationTokenOwner;
 
-use super::{ConcreteRequest, ConcreteResponse, DescribeDelegationTokenResponse, RequestBuilder};
+use super::{AbstractRequest, ConcreteResponse, DescribeDelegationTokenResponse, RequestBuilder};
 
 /// A DescribeDelegationToken request.
 ///
@@ -112,13 +112,13 @@ impl std::fmt::Display for DescribeDelegationTokenRequest {
 /// Corresponds to `DescribeDelegationTokenRequest.Builder` in Java.
 #[derive(Debug, Clone)]
 #[doc(alias = "org.apache.kafka.common.requests.DescribeDelegationTokenRequest$Builder")]
-pub struct DescribeDelegationTokenRequestBuilder {
+pub struct Builder {
     data: DescribeDelegationTokenRequestData,
     oldest_allowed_version: i16,
     latest_allowed_version: i16,
 }
 
-impl DescribeDelegationTokenRequestBuilder {
+impl Builder {
     /// Creates a builder from an optional owners filter.
     ///
     /// Mirrors `DescribeDelegationTokenRequest.Builder(List<KafkaPrincipal>)`:
@@ -147,7 +147,7 @@ impl DescribeDelegationTokenRequestBuilder {
     }
 }
 
-impl RequestBuilder for DescribeDelegationTokenRequestBuilder {
+impl RequestBuilder for Builder {
     fn api_key(&self) -> &'static ApiKeys {
         &ApiKeys::DESCRIBE_DELEGATION_TOKEN
     }
@@ -160,8 +160,8 @@ impl RequestBuilder for DescribeDelegationTokenRequestBuilder {
         self.latest_allowed_version
     }
 
-    fn build_version(&mut self, version: i16) -> io::Result<ConcreteRequest> {
-        Ok(ConcreteRequest::DescribeDelegationToken(DescribeDelegationTokenRequest::new(
+    fn build_version(&mut self, version: i16) -> io::Result<AbstractRequest> {
+        Ok(AbstractRequest::DescribeDelegationToken(DescribeDelegationTokenRequest::new(
             self.data.clone(),
             version,
         )))
@@ -174,14 +174,14 @@ mod tests {
 
     #[test]
     fn new_none_leaves_null_owners() {
-        let builder = DescribeDelegationTokenRequestBuilder::new(None);
+        let builder = Builder::new(None);
         assert!(builder.data.owners.is_none());
     }
 
     #[test]
     fn new_maps_principals() {
         let owners = vec![KafkaPrincipal::new(KafkaPrincipal::USER_TYPE, "alice")];
-        let builder = DescribeDelegationTokenRequestBuilder::new(Some(&owners));
+        let builder = Builder::new(Some(&owners));
         let owners = builder.data.owners.as_ref().unwrap();
         assert_eq!(owners.len(), 1);
         assert_eq!(owners[0].principal_name, "alice");
@@ -205,7 +205,7 @@ mod tests {
     fn serialize_parse_round_trip() {
         let version = ApiKeys::DESCRIBE_DELEGATION_TOKEN.latest_version();
         let owners = vec![KafkaPrincipal::new(KafkaPrincipal::USER_TYPE, "alice")];
-        let mut builder = DescribeDelegationTokenRequestBuilder::new(Some(&owners));
+        let mut builder = Builder::new(Some(&owners));
         let mut request = builder.build_version(version).unwrap();
         let bytes = request.serialize().unwrap();
         let mut readable = crate::common::ByteBufferAccessor::new(bytes.into_buffer());
@@ -219,7 +219,7 @@ mod tests {
     #[test]
     fn known_wire_vector_v3() {
         let owners = vec![KafkaPrincipal::new(KafkaPrincipal::USER_TYPE, "alice")];
-        let mut builder = DescribeDelegationTokenRequestBuilder::new(Some(&owners));
+        let mut builder = Builder::new(Some(&owners));
         let mut request = builder.build_version(3).unwrap();
         let bytes = request.serialize().unwrap().into_buffer();
         let expected: Vec<u8> = vec![
@@ -236,7 +236,7 @@ mod tests {
     /// which must encode as the compact-null array marker (0x00).
     #[test]
     fn known_wire_vector_v3_null_owners() {
-        let mut builder = DescribeDelegationTokenRequestBuilder::new(None);
+        let mut builder = Builder::new(None);
         let mut request = builder.build_version(3).unwrap();
         let bytes = request.serialize().unwrap().into_buffer();
         let expected: Vec<u8> = vec![

@@ -22,7 +22,7 @@ use std::io;
 use crate::ExpireDelegationTokenRequestData;
 use crate::common::protocol::{ApiKeys, Errors, Readable};
 
-use super::{ConcreteRequest, ConcreteResponse, ExpireDelegationTokenResponse, RequestBuilder};
+use super::{AbstractRequest, ConcreteResponse, ExpireDelegationTokenResponse, RequestBuilder};
 
 /// An ExpireDelegationToken request.
 ///
@@ -116,13 +116,13 @@ impl std::fmt::Display for ExpireDelegationTokenRequest {
 /// Corresponds to `ExpireDelegationTokenRequest.Builder` in Java.
 #[derive(Debug, Clone)]
 #[doc(alias = "org.apache.kafka.common.requests.ExpireDelegationTokenRequest$Builder")]
-pub struct ExpireDelegationTokenRequestBuilder {
+pub struct Builder {
     data: ExpireDelegationTokenRequestData,
     oldest_allowed_version: i16,
     latest_allowed_version: i16,
 }
 
-impl ExpireDelegationTokenRequestBuilder {
+impl Builder {
     /// Creates a builder from existing data.
     #[doc(alias = "org.apache.kafka.common.requests.ExpireDelegationTokenRequest$Builder#Builder")]
     pub fn new(data: ExpireDelegationTokenRequestData) -> Self {
@@ -134,7 +134,7 @@ impl ExpireDelegationTokenRequestBuilder {
     }
 }
 
-impl RequestBuilder for ExpireDelegationTokenRequestBuilder {
+impl RequestBuilder for Builder {
     fn api_key(&self) -> &'static ApiKeys {
         &ApiKeys::EXPIRE_DELEGATION_TOKEN
     }
@@ -147,8 +147,8 @@ impl RequestBuilder for ExpireDelegationTokenRequestBuilder {
         self.latest_allowed_version
     }
 
-    fn build_version(&mut self, version: i16) -> io::Result<ConcreteRequest> {
-        Ok(ConcreteRequest::ExpireDelegationToken(ExpireDelegationTokenRequest::new(
+    fn build_version(&mut self, version: i16) -> io::Result<AbstractRequest> {
+        Ok(AbstractRequest::ExpireDelegationToken(ExpireDelegationTokenRequest::new(
             self.data.clone(),
             version,
         )))
@@ -191,7 +191,7 @@ mod tests {
     fn serialize_parse_round_trip() {
         let version = ApiKeys::EXPIRE_DELEGATION_TOKEN.latest_version();
         let mut request =
-            ConcreteRequest::ExpireDelegationToken(ExpireDelegationTokenRequest::new(request_data(), version));
+            AbstractRequest::ExpireDelegationToken(ExpireDelegationTokenRequest::new(request_data(), version));
         let bytes = request.serialize().unwrap();
         let mut readable = crate::common::ByteBufferAccessor::new(bytes.into_buffer());
         let parsed = ExpireDelegationTokenRequest::parse(&mut readable, version).unwrap();
@@ -206,7 +206,7 @@ mod tests {
         let mut data = ExpireDelegationTokenRequestData::new();
         data.hmac = vec![0xDE, 0xAD];
         data.expiry_time_period_ms = -1;
-        let mut request = ConcreteRequest::ExpireDelegationToken(ExpireDelegationTokenRequest::new(data, 2));
+        let mut request = AbstractRequest::ExpireDelegationToken(ExpireDelegationTokenRequest::new(data, 2));
         let bytes = request.serialize().unwrap().into_buffer();
         let expected: Vec<u8> = vec![
             0x03, 0xDE, 0xAD, // hmac: compact bytes len (2 + 1) then raw bytes

@@ -35,7 +35,7 @@ use std::sync::Mutex;
 use crate::common::Error;
 use crate::common::KafkaFuture;
 use crate::common::internals::KafkaFutureImpl;
-use crate::common::requests::{ConcreteResponse, MetadataRequestBuilder, RequestBuilder};
+use crate::common::requests::{ConcreteResponse, RequestBuilder, metadata_request};
 use crate::common::utils::LogContext;
 use crate::kafka_debug;
 
@@ -121,7 +121,10 @@ impl AdminApiLookupStrategy<BrokerKey> for AllBrokersStrategy {
         Self::validate_lookup_keys(keys);
         // Send an empty `Metadata` request; we are only interested in the
         // brokers from the response.
-        Box::new(MetadataRequestBuilder::with_topics_allow_auto_topic_creation(Some(&[]), false))
+        Box::new(metadata_request::Builder::with_topics_allow_auto_topic_creation(
+            Some(&[]),
+            false,
+        ))
     }
 
     fn handle_response(&self, keys: &HashSet<BrokerKey>, response: &ConcreteResponse) -> LookupResult<BrokerKey> {
@@ -302,7 +305,7 @@ mod tests {
     fn build_request() {
         let strategy = AllBrokersStrategy::new(log_context());
         let request = strategy.build_request(&AllBrokersStrategy::lookup_keys()).build().unwrap();
-        let crate::common::requests::ConcreteRequest::Metadata(m) = request else {
+        let crate::common::requests::AbstractRequest::Metadata(m) = request else {
             panic!("expected metadata request");
         };
         assert_eq!(m.topics(), Some(Vec::new()));
@@ -409,7 +412,10 @@ mod integration_tests {
 
         fn build_request(&self, _broker_id: i32, keys: &HashSet<BrokerKey>) -> Vec<RequestAndKeys<BrokerKey>> {
             vec![RequestAndKeys {
-                request: Box::new(MetadataRequestBuilder::with_topics_allow_auto_topic_creation(Some(&[]), false)),
+                request: Box::new(metadata_request::Builder::with_topics_allow_auto_topic_creation(
+                    Some(&[]),
+                    false,
+                )),
                 keys: keys.clone(),
             }]
         }

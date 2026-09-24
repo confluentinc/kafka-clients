@@ -28,7 +28,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::DeleteGroupsRequestData;
 use crate::common::Errors;
-use crate::common::requests::{ConcreteResponse, CoordinatorType, DeleteGroupsRequestBuilder, RequestBuilder};
+use crate::common::requests::{ConcreteResponse, CoordinatorType, RequestBuilder, delete_groups_request};
 use crate::common::utils::LogContext;
 use crate::common::{Error, Node};
 use crate::{kafka_debug, kafka_error};
@@ -90,11 +90,11 @@ impl DeleteGroupsHandler {
         &self,
         _coordinator_id: i32,
         keys: &HashSet<CoordinatorKey>,
-    ) -> DeleteGroupsRequestBuilder {
+    ) -> delete_groups_request::Builder {
         let group_ids: Vec<String> = keys.iter().map(|key| key.id_value.clone()).collect();
         let mut data = DeleteGroupsRequestData::new();
         data.set_groups_names(group_ids);
-        DeleteGroupsRequestBuilder::new(data)
+        delete_groups_request::Builder::new(data)
     }
 
     #[doc(alias = "org.apache.kafka.clients.admin.internals.DeleteGroupsHandler#handleError")]

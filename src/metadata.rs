@@ -41,8 +41,8 @@ use crate::common::Node;
 use crate::common::TopicPartition;
 use crate::common::Uuid;
 use crate::common::internals::ClusterResourceListeners;
-use crate::common::requests::MetadataRequestBuilder;
 use crate::common::requests::RECORD_BATCH_NO_PARTITION_LEADER_EPOCH;
+use crate::common::requests::metadata_request;
 use crate::common::requests::{MetadataResponse, PartitionMetadata};
 use crate::common::utils::ExponentialBackoff;
 use crate::common::utils::LogContext;
@@ -76,8 +76,8 @@ type RetainTopicWithIdCb<'a> = dyn Fn(&str, Option<Uuid>, bool, i64) -> bool + '
 /// Type alias for a function that builds metadata request builders.
 ///
 /// Used by subclasses (e.g., `ProducerMetadata`) to override metadata request
-/// construction. Returns a `MetadataRequestBuilder`.
-type MetadataRequestBuilderFn = dyn Fn() -> MetadataRequestBuilder + Send + Sync;
+/// construction. Returns a `metadata_request::Builder`.
+type MetadataRequestBuilderFn = dyn Fn() -> metadata_request::Builder + Send + Sync;
 
 /// Type alias for a post-update callback invoked at the end of `Metadata::update()`.
 ///
@@ -214,7 +214,7 @@ struct MetadataInner {
 #[doc(alias = "org.apache.kafka.clients.Metadata$MetadataRequestAndVersion")]
 pub struct MetadataRequestAndVersion {
     /// The request builder.
-    pub(crate) request_builder: MetadataRequestBuilder,
+    pub(crate) request_builder: metadata_request::Builder,
     /// The request version at the time of creation.
     pub(crate) request_version: i32,
     /// Whether this is a partial update.
@@ -225,7 +225,7 @@ impl MetadataRequestAndVersion {
     /// The request builder.
     ///
     /// Java's public `MetadataRequestAndVersion.requestBuilder`.
-    pub fn request_builder(&self) -> &MetadataRequestBuilder {
+    pub fn request_builder(&self) -> &metadata_request::Builder {
         &self.request_builder
     }
 
@@ -1567,11 +1567,11 @@ impl Metadata {
     /// or `ConsumerMetadata`), that function is called instead of the
     /// default `all_topics()`.
     #[doc(alias = "org.apache.kafka.clients.Metadata#newMetadataRequestBuilder")]
-    pub(crate) fn new_metadata_request_builder(&self) -> MetadataRequestBuilder {
+    pub(crate) fn new_metadata_request_builder(&self) -> metadata_request::Builder {
         if let Some(f) = &self.request_builder_fn {
             f()
         } else {
-            MetadataRequestBuilder::all_topics()
+            metadata_request::Builder::all_topics()
         }
     }
 
@@ -1583,7 +1583,7 @@ impl Metadata {
     /// `ConsumerMetadata`), the default metadata request builder is returned.
     /// Otherwise returns `None`.
     #[doc(alias = "org.apache.kafka.clients.Metadata#newMetadataRequestBuilderForNewTopics")]
-    fn new_metadata_request_builder_for_new_topics(&self) -> Option<MetadataRequestBuilder> {
+    fn new_metadata_request_builder_for_new_topics(&self) -> Option<metadata_request::Builder> {
         if let Some(f) = &self.new_topics_request_builder_fn {
             Some(f())
         } else if self.enable_partial_updates {

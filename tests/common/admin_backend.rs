@@ -49,7 +49,7 @@ use confluent_kafka::admin::{
 };
 use confluent_kafka::common::Errors;
 use confluent_kafka::common::acl::{AclBinding, AclBindingFilter, AclOperation};
-use confluent_kafka::common::config::{ConfigResource, ConfigResourceType};
+use confluent_kafka::common::config::{ConfigResource, config_resource};
 use confluent_kafka::common::quota::{ClientQuotaAlteration, ClientQuotaEntity, ClientQuotaFilter};
 use confluent_kafka::common::security::token::delegation::DelegationToken;
 use confluent_kafka::common::utils::ProducerIdAndEpoch;
@@ -244,7 +244,7 @@ pub trait AdminBackend {
     /// `KafkaFuture<Collection<ConfigResource>>`.
     async fn list_config_resources(
         &self,
-        config_resource_types: &HashSet<ConfigResourceType>,
+        config_resource_types: &HashSet<config_resource::Type>,
         options: ListConfigResourcesOptions,
     ) -> Result<Vec<ConfigResource>, Error>;
 
@@ -1245,7 +1245,7 @@ impl AdminBackend for RustNativeAdmin {
 
     async fn list_config_resources(
         &self,
-        config_resource_types: &HashSet<ConfigResourceType>,
+        config_resource_types: &HashSet<config_resource::Type>,
         options: ListConfigResourcesOptions,
     ) -> Result<Vec<ConfigResource>, Error> {
         self.admin

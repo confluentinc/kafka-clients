@@ -16,7 +16,7 @@
 //!
 //! Corresponds to `org.apache.kafka.common.requests.RequestAndSize`.
 
-use super::ConcreteRequest;
+use super::AbstractRequest;
 
 /// A parsed request together with the number of bytes it consumed from the buffer.
 ///
@@ -26,7 +26,7 @@ use super::ConcreteRequest;
 #[doc(alias = "org.apache.kafka.common.requests.RequestAndSize")]
 pub struct RequestAndSize {
     /// The parsed request.
-    pub(crate) request: ConcreteRequest,
+    pub(crate) request: AbstractRequest,
     /// The number of bytes consumed during parsing.
     pub(crate) size: usize,
 }
@@ -34,12 +34,12 @@ pub struct RequestAndSize {
 impl RequestAndSize {
     /// Creates a new `RequestAndSize`.
     #[doc(alias = "org.apache.kafka.common.requests.RequestAndSize#RequestAndSize")]
-    pub fn new(request: ConcreteRequest, size: usize) -> Self {
+    pub fn new(request: AbstractRequest, size: usize) -> Self {
         Self { request, size }
     }
 
     /// The parsed request. Java's public `RequestAndSize.request`.
-    pub fn request(&self) -> &ConcreteRequest {
+    pub fn request(&self) -> &AbstractRequest {
         &self.request
     }
 

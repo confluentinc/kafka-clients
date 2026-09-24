@@ -66,7 +66,7 @@ use crate::common::network;
 use crate::common::record::internal::RecordBatch;
 use crate::common::requests::ConcreteResponse;
 use crate::common::requests::CoordinatorType;
-use crate::common::requests::ProduceRequestBuilder;
+use crate::common::requests::ProduceRequest;
 use crate::common::requests::{PartitionResponse, PartitionResponseOptionsBuilder, RecordError};
 
 /// Names one concrete instantiation of [`Sender`] so its client-independent
@@ -2804,8 +2804,7 @@ impl<C: KafkaClient> Sender<C> {
         // the version at the last Transaction V1 one when the flag is set, so a
         // broker that has not finalized `transaction.version` 2 is not sent a v12+
         // produce request.
-        let request_builder =
-            ProduceRequestBuilder::builder_use_transaction_v1_version(data, use_transaction_v1_version);
+        let request_builder = ProduceRequest::builder_with_use_transaction_v1_version(data, use_transaction_v1_version);
 
         // Capture debug representation before request_builder is moved into Box.
         let request_debug = if log::log_enabled!(log::Level::Trace) {
@@ -3305,7 +3304,7 @@ mod tests {
         /// The wire version the enqueued `EndTxn` will be sent at.
         ///
         /// Java reads `endTxnRequest.version()` from inside a `RequestMatcher`, i.e. at
-        /// send time. `EndTxnRequestBuilder::new(.., is_transaction_v2_enabled)` fixes the
+        /// send time. `end_txn_request::Builder::new(.., is_transaction_v2_enabled)` fixes the
         /// bound when `beginCompletingTransaction` enqueues the handler
         /// (`TransactionManager.java:1737`), so reading it off the queued handler gives
         /// the same answer earlier — and reads the builder rather than restating the
@@ -3492,7 +3491,7 @@ mod tests {
     /// so the broker received B's records addressed as A.
     #[tokio::test]
     async fn test_send_produce_request_does_not_merge_topics_with_unresolved_ids() {
-        use crate::common::requests::ConcreteRequest;
+        use crate::common::requests::AbstractRequest;
 
         let mut ctx = SenderTestContext::new();
         let now = ctx.time.milliseconds();
@@ -3524,7 +3523,7 @@ mod tests {
             .request_builder_mut()
             .build()
             .expect("produce request builds");
-        let ConcreteRequest::Produce(produce_request) = built else {
+        let AbstractRequest::Produce(produce_request) = built else {
             panic!("expected a Produce request");
         };
         let topic_data = &produce_request.data().topic_data;
@@ -5698,7 +5697,7 @@ mod tests {
         data.set_timeout_ms(REQUEST_TIMEOUT);
         let occupying_request = ctx.sender.client_mut().new_client_request(
             node.id_string(),
-            Box::new(ProduceRequestBuilder::builder(data)),
+            Box::new(ProduceRequest::builder(data)),
             now,
             true,
         );
@@ -6902,7 +6901,7 @@ mod tests {
         log_start_offset: i64,
     ) {
         use crate::common::record::internal::MemoryRecords;
-        use crate::common::requests::ConcreteRequest;
+        use crate::common::requests::AbstractRequest;
 
         {
             let request = ctx
@@ -6912,7 +6911,7 @@ mod tests {
                 .front_mut()
                 .expect("a produce request must be in flight");
             let built = request.request_builder_mut().build().expect("the request builds");
-            let ConcreteRequest::Produce(produce_request) = built else {
+            let AbstractRequest::Produce(produce_request) = built else {
                 panic!("expected a produce request, got {built}");
             };
             let partition_data = produce_request
@@ -8247,7 +8246,7 @@ mod tests {
         data.set_timeout_ms(REQUEST_TIMEOUT);
         let occupying_request = ctx.sender.client_mut().new_client_request(
             node.id_string(),
-            Box::new(ProduceRequestBuilder::builder(data)),
+            Box::new(ProduceRequest::builder(data)),
             now,
             true,
         );
@@ -9184,11 +9183,11 @@ mod tests {
         is_transactional: bool,
     ) -> crate::RequestMatcher {
         use crate::common::record::MemoryRecords;
-        use crate::common::requests::ConcreteRequest;
+        use crate::common::requests::AbstractRequest;
 
         let tp = tp.clone();
         Box::new(move |request| {
-            let ConcreteRequest::Produce(produce_request) = request else {
+            let AbstractRequest::Produce(produce_request) = request else {
                 return false;
             };
             let Some(records) = produce_request
@@ -10737,11 +10736,11 @@ mod tests {
     /// `produceRequestMatcher(producerId, epoch, tp)` (Java 4109-4133).
     fn produce_request_matcher(producer_id: i64, epoch: i16, tp: &TopicPartition) -> crate::RequestMatcher {
         use crate::common::record::internal::MemoryRecords;
-        use crate::common::requests::ConcreteRequest;
+        use crate::common::requests::AbstractRequest;
 
         let tp = tp.clone();
         Box::new(move |request| {
-            let ConcreteRequest::Produce(produce_request) = request else {
+            let AbstractRequest::Produce(produce_request) = request else {
                 panic!("expected a produce request, got {request}");
             };
             let records = produce_request
@@ -10798,12 +10797,12 @@ mod tests {
         expected_base_sequence: i32,
     ) {
         use crate::common::record::internal::MemoryRecords;
-        use crate::common::requests::ConcreteRequest;
+        use crate::common::requests::AbstractRequest;
 
         let response = txn_produce_response(ctx, tp, 0, error);
         let tp = tp.clone();
         let matcher: crate::RequestMatcher = Box::new(move |request| {
-            let ConcreteRequest::Produce(produce_request) = request else {
+            let AbstractRequest::Produce(produce_request) = request else {
                 panic!("expected a produce request, got {request}");
             };
             let records = produce_request
@@ -10863,11 +10862,11 @@ mod tests {
     /// `prepareAddPartitionsToTxn(Map<TopicPartition, Errors>)` (Java 4028-4036): the
     /// matcher asserts the request's partition *set* equals the response's key set.
     fn prepare_add_partitions_to_txn(ctx: &mut SenderTestContext, errors: &[(TopicPartition, Errors)]) {
-        use crate::common::requests::ConcreteRequest;
+        use crate::common::requests::AbstractRequest;
 
         let expected: HashSet<TopicPartition> = errors.iter().map(|(tp, _)| tp.clone()).collect();
         let matcher: crate::RequestMatcher = Box::new(move |request| {
-            let ConcreteRequest::AddPartitionsToTxn(request) = request else {
+            let AbstractRequest::AddPartitionsToTxn(request) = request else {
                 panic!("expected an AddPartitionsToTxn request, got {request}");
             };
             let actual: HashSet<TopicPartition> = partitions_from_v3_request(request.data()).into_iter().collect();
@@ -10884,11 +10883,11 @@ mod tests {
     /// asserts the producer id / epoch / transactional id too, and compares the
     /// partitions as an ordered `List`.
     fn add_partitions_request_matcher(tp: &TopicPartition, epoch: i16, producer_id: i64) -> crate::RequestMatcher {
-        use crate::common::requests::ConcreteRequest;
+        use crate::common::requests::AbstractRequest;
 
         let tp = tp.clone();
         Box::new(move |request| {
-            let ConcreteRequest::AddPartitionsToTxn(request) = request else {
+            let AbstractRequest::AddPartitionsToTxn(request) = request else {
                 panic!("expected an AddPartitionsToTxn request, got {request}");
             };
             assert_eq!(request.data().v3_and_below_producer_id, producer_id);
@@ -10931,10 +10930,10 @@ mod tests {
 
     /// `endTxnMatcher(result, producerId, epoch)` (Java 4262-4271).
     fn end_txn_matcher(result: TransactionResult, producer_id: i64, epoch: i16) -> crate::RequestMatcher {
-        use crate::common::requests::ConcreteRequest;
+        use crate::common::requests::AbstractRequest;
 
         Box::new(move |request| {
-            let ConcreteRequest::EndTxn(request) = request else {
+            let AbstractRequest::EndTxn(request) = request else {
                 panic!("expected an EndTxn request, got {request}");
             };
             assert_eq!(request.data().transactional_id, TRANSACTIONAL_ID);
@@ -10955,12 +10954,12 @@ mod tests {
         request_producer_id: i64,
         request_producer_epoch: i16,
     ) {
-        use crate::common::requests::ConcreteRequest;
+        use crate::common::requests::AbstractRequest;
 
         let inner = end_txn_matcher(result, request_producer_id, request_producer_epoch);
         let matcher: crate::RequestMatcher = Box::new(move |request| {
             assert!(inner(request));
-            let ConcreteRequest::EndTxn(end_txn) = request else {
+            let AbstractRequest::EndTxn(end_txn) = request else {
                 unreachable!()
             };
             assert!(
@@ -11033,11 +11032,11 @@ mod tests {
         producer_epoch: i16,
     ) {
         use crate::AddOffsetsToTxnResponseData;
-        use crate::common::requests::{AddOffsetsToTxnResponse, ConcreteRequest};
+        use crate::common::requests::{AbstractRequest, AddOffsetsToTxnResponse};
 
         let consumer_group_id = consumer_group_id.to_string();
         let matcher: crate::RequestMatcher = Box::new(move |request| {
-            let ConcreteRequest::AddOffsetsToTxn(request) = request else {
+            let AbstractRequest::AddOffsetsToTxn(request) = request else {
                 panic!("expected an AddOffsetsToTxn request, got {request}");
             };
             assert_eq!(request.data().group_id, consumer_group_id);
@@ -11105,11 +11104,11 @@ mod tests {
         group_metadata: Option<(String, String, i32)>,
         responses: &[(TopicPartition, Errors)],
     ) {
-        use crate::common::requests::{ConcreteRequest, TxnOffsetCommitResponse};
+        use crate::common::requests::{AbstractRequest, TxnOffsetCommitResponse};
 
         let consumer_group_id = consumer_group_id.to_string();
         let matcher: crate::RequestMatcher = Box::new(move |request| {
-            let ConcreteRequest::TxnOffsetCommit(request) = request else {
+            let AbstractRequest::TxnOffsetCommit(request) = request else {
                 panic!("expected a TxnOffsetCommit request, got {request}");
             };
             assert_eq!(request.data().group_id, consumer_group_id);
@@ -11139,13 +11138,13 @@ mod tests {
         coordinator_type: CoordinatorType,
         coordinator_key: &str,
     ) {
-        use crate::common::requests::ConcreteRequest;
+        use crate::common::requests::AbstractRequest;
 
         let node = ctx.metadata.fetch().node_by_id(0).expect("node 0").clone();
         let key = coordinator_key.to_string();
         let expected_key = key.clone();
         let matcher: crate::RequestMatcher = Box::new(move |request| {
-            let ConcreteRequest::FindCoordinator(request) = request else {
+            let AbstractRequest::FindCoordinator(request) = request else {
                 panic!("expected a FindCoordinator request, got {request}");
             };
             assert_eq!(
@@ -11178,10 +11177,10 @@ mod tests {
         producer_epoch: i16,
     ) {
         use crate::InitProducerIdResponseData;
-        use crate::common::requests::{ConcreteRequest, InitProducerIdResponse};
+        use crate::common::requests::{AbstractRequest, InitProducerIdResponse};
 
         let matcher: crate::RequestMatcher = Box::new(move |request| {
-            let ConcreteRequest::InitProducerId(request) = request else {
+            let AbstractRequest::InitProducerId(request) = request else {
                 panic!("expected an InitProducerId request, got {request}");
             };
             assert_eq!(request.data().transactional_id.as_deref(), Some(TRANSACTIONAL_ID));
@@ -11794,7 +11793,7 @@ mod tests {
     /// (Java 1553-1599).
     #[tokio::test]
     async fn test_commit_with_topic_authorization_failure_in_add_partitions_in_flight() {
-        use crate::common::requests::ConcreteRequest;
+        use crate::common::requests::AbstractRequest;
 
         let foo0 = TopicPartition::new("foo".to_string(), 0);
         let bar0 = TopicPartition::new("bar".to_string(), 0);
@@ -11826,7 +11825,7 @@ mod tests {
         ];
         let expected: HashSet<TopicPartition> = errors.iter().map(|(tp, _)| tp.clone()).collect();
         let matcher: crate::RequestMatcher = Box::new(move |request| {
-            let ConcreteRequest::AddPartitionsToTxn(request) = request else {
+            let AbstractRequest::AddPartitionsToTxn(request) = request else {
                 panic!("expected an AddPartitionsToTxn request, got {request}");
             };
             let actual: HashSet<TopicPartition> = partitions_from_v3_request(request.data()).into_iter().collect();
@@ -13557,7 +13556,7 @@ mod tests {
     /// at v7. Only the first is load-bearing here — it is what makes
     /// `coordinatorSupportsBumpingEpoch` false, so the expired retried batch becomes a
     /// *fatal* error instead of an epoch bump. The `PRODUCE` cap has no analogue to
-    /// reproduce: the produce version is chosen by `ProduceRequestBuilder`, not from
+    /// reproduce: the produce version is chosen by `produce_request::Builder`, not from
     /// `ApiVersions`, and nothing in the assertions depends on it.
     #[tokio::test]
     async fn test_transition_to_fatal_error_when_retried_batch_is_expired() {
@@ -13718,7 +13717,7 @@ mod tests {
     /// Java's `apiVersions.update("0", ..)` caps `INIT_PRODUCER_ID` at v1, `END_TXN` at
     /// v4 and `PRODUCE` at v7. The first is load-bearing (no epoch-bump support, so the
     /// sequence is *reused* rather than reset). The `END_TXN` cap already holds here — a
-    /// Transaction-V1 manager builds its `EndTxnRequestBuilder` with
+    /// Transaction-V1 manager builds its `end_txn_request::Builder` with
     /// `is_transaction_v2_enabled = false`, which bounds it at v4 — and the `PRODUCE` cap
     /// has no analogue, as `test_transition_to_fatal_error_when_retried_batch_is_expired`
     /// explains.
@@ -14358,18 +14357,18 @@ mod tests {
 
     /// `SenderTest.respondToProduce(tp, error, offset)` (Java 2880-2886).
     fn respond_to_produce(ctx: &mut SenderTestContext, tp: &TopicPartition, error: Errors, offset: i64) {
-        use crate::common::requests::ConcreteRequest;
+        use crate::common::requests::AbstractRequest;
 
         let response = ctx.produce_response(tp, offset, error, 0);
-        let matcher: crate::RequestMatcher = Box::new(|request| matches!(request, ConcreteRequest::Produce(_)));
+        let matcher: crate::RequestMatcher = Box::new(|request| matches!(request, AbstractRequest::Produce(_)));
         ctx.sender.client_mut().respond_matcher(matcher, response);
     }
 
     /// `SenderTest.respondToEndTxn(error)` (Java 2888-2895).
     fn respond_to_end_txn(ctx: &mut SenderTestContext, error: Errors) {
-        use crate::common::requests::ConcreteRequest;
+        use crate::common::requests::AbstractRequest;
 
-        let matcher: crate::RequestMatcher = Box::new(|request| matches!(request, ConcreteRequest::EndTxn(_)));
+        let matcher: crate::RequestMatcher = Box::new(|request| matches!(request, AbstractRequest::EndTxn(_)));
         ctx.sender.client_mut().respond_matcher(matcher, end_txn_response(error));
     }
 

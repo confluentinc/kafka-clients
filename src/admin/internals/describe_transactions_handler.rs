@@ -23,7 +23,7 @@ use crate::DescribeTransactionsRequestData;
 use crate::admin::TransactionDescription;
 use crate::admin::TransactionState;
 use crate::common::Errors;
-use crate::common::requests::{ConcreteResponse, CoordinatorType, DescribeTransactionsRequestBuilder, RequestBuilder};
+use crate::common::requests::{ConcreteResponse, CoordinatorType, RequestBuilder, describe_transactions_request};
 use crate::common::utils::LogContext;
 use crate::common::{Error, Node, TopicPartition};
 use crate::{kafka_debug, kafka_warn};
@@ -169,7 +169,7 @@ impl AdminApiHandler<CoordinatorKey, TransactionDescription> for DescribeTransac
     fn build_request(&self, _broker_id: i32, keys: &HashSet<CoordinatorKey>) -> Vec<RequestAndKeys<CoordinatorKey>> {
         let data = self.build_batched_request(keys);
         vec![RequestAndKeys {
-            request: Box::new(DescribeTransactionsRequestBuilder::new(data)) as Box<dyn RequestBuilder>,
+            request: Box::new(describe_transactions_request::Builder::new(data)) as Box<dyn RequestBuilder>,
             keys: keys.clone(),
         }]
     }

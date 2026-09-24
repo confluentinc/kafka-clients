@@ -22,7 +22,7 @@ use crate::UpdateFeaturesRequestData;
 use crate::admin::UpgradeType;
 use crate::common::protocol::{ApiKeys, Errors, Readable};
 
-use super::{ConcreteRequest, ConcreteResponse, RequestBuilder, UpdateFeaturesResponse};
+use super::{AbstractRequest, ConcreteResponse, RequestBuilder, UpdateFeaturesResponse};
 
 /// A single feature update decoded from an [`UpdateFeaturesRequest`].
 ///
@@ -186,13 +186,13 @@ impl std::fmt::Display for UpdateFeaturesRequest {
 /// Corresponds to `UpdateFeaturesRequest.Builder` in Java.
 #[derive(Debug, Clone)]
 #[doc(alias = "org.apache.kafka.common.requests.UpdateFeaturesRequest$Builder")]
-pub struct UpdateFeaturesRequestBuilder {
+pub struct Builder {
     data: UpdateFeaturesRequestData,
     oldest_allowed_version: i16,
     latest_allowed_version: i16,
 }
 
-impl UpdateFeaturesRequestBuilder {
+impl Builder {
     /// Creates a builder from the given request data.
     ///
     /// Mirrors `UpdateFeaturesRequest.Builder(UpdateFeaturesRequestData)`.
@@ -206,7 +206,7 @@ impl UpdateFeaturesRequestBuilder {
     }
 }
 
-impl RequestBuilder for UpdateFeaturesRequestBuilder {
+impl RequestBuilder for Builder {
     fn api_key(&self) -> &'static ApiKeys {
         &ApiKeys::UPDATE_FEATURES
     }
@@ -219,8 +219,8 @@ impl RequestBuilder for UpdateFeaturesRequestBuilder {
         self.latest_allowed_version
     }
 
-    fn build_version(&mut self, version: i16) -> io::Result<ConcreteRequest> {
-        Ok(ConcreteRequest::UpdateFeatures(UpdateFeaturesRequest::new(
+    fn build_version(&mut self, version: i16) -> io::Result<AbstractRequest> {
+        Ok(AbstractRequest::UpdateFeatures(UpdateFeaturesRequest::new(
             self.data.clone(),
             version,
         )))
@@ -291,7 +291,7 @@ mod tests {
         assert!(r.data().results.is_empty());
     }
 
-    /// Round-trips a request through the shared `ConcreteRequest` serialize /
+    /// Round-trips a request through the shared `AbstractRequest` serialize /
     /// parse path, exercising the enum wiring end-to-end.
     #[test]
     fn serialize_parse_round_trip() {
@@ -299,7 +299,7 @@ mod tests {
         data.set_timeout_ms(100);
         data.set_feature_updates(vec![key("f", 2, UpgradeType::Upgrade.code())]);
         data.set_validate_only(true);
-        let mut builder = UpdateFeaturesRequestBuilder::new(data);
+        let mut builder = Builder::new(data);
         let mut request = builder.build_version(1).unwrap();
         let bytes = request.serialize().unwrap();
         let mut readable = crate::common::ByteBufferAccessor::new(bytes.into_buffer());
@@ -328,7 +328,7 @@ mod tests {
         data.set_timeout_ms(100);
         data.set_feature_updates(vec![key("f", 2, UpgradeType::Upgrade.code())]);
         data.set_validate_only(false);
-        let mut builder = UpdateFeaturesRequestBuilder::new(data);
+        let mut builder = Builder::new(data);
         let mut request = builder.build_version(1).unwrap();
         let bytes = request.serialize().unwrap();
         let expected: &[u8] = &[

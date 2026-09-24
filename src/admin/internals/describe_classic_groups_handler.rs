@@ -26,7 +26,7 @@ use crate::DescribeGroupsRequestData;
 use crate::admin::internals::AdminUtils;
 use crate::admin::{ClassicGroupDescription, MemberAssignment, MemberDescription};
 use crate::common::Errors;
-use crate::common::requests::{ConcreteResponse, CoordinatorType, DescribeGroupsRequestBuilder, RequestBuilder};
+use crate::common::requests::{ConcreteResponse, CoordinatorType, RequestBuilder, describe_groups_request};
 use crate::common::utils::LogContext;
 use crate::common::{ClassicGroupState, Error, Node, TopicPartition};
 use crate::consumer::internals::ConsumerProtocol;
@@ -76,7 +76,7 @@ impl DescribeClassicGroupsHandler {
     ///
     /// Mirrors `DescribeClassicGroupsHandler.buildBatchedRequest`.
     #[doc(alias = "org.apache.kafka.clients.admin.internals.DescribeClassicGroupsHandler#buildBatchedRequest")]
-    fn build_batched_request(&self, keys: &HashSet<CoordinatorKey>) -> DescribeGroupsRequestBuilder {
+    fn build_batched_request(&self, keys: &HashSet<CoordinatorKey>) -> describe_groups_request::Builder {
         let group_ids: Vec<String> = keys
             .iter()
             .map(|key| {
@@ -90,7 +90,7 @@ impl DescribeClassicGroupsHandler {
         let mut data = DescribeGroupsRequestData::new();
         data.set_groups(group_ids);
         data.set_include_authorized_operations(self.include_authorized_operations);
-        DescribeGroupsRequestBuilder::new(data)
+        describe_groups_request::Builder::new(data)
     }
 
     #[doc(alias = "org.apache.kafka.clients.admin.internals.DescribeClassicGroupsHandler#handleError")]

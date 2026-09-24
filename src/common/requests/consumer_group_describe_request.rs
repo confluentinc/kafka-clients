@@ -23,7 +23,7 @@ use crate::ConsumerGroupDescribeResponseData;
 use crate::common::protocol::{ApiKeys, Errors, Readable};
 use crate::consumer_group_describe_response_data::DescribedGroup;
 
-use super::ConcreteRequest;
+use super::AbstractRequest;
 use super::ConcreteResponse;
 use super::ConsumerGroupDescribeResponse;
 use super::RequestBuilder;
@@ -110,13 +110,13 @@ impl std::fmt::Display for ConsumerGroupDescribeRequest {
 /// Corresponds to `ConsumerGroupDescribeRequest.Builder` in Java.
 #[derive(Debug, Clone)]
 #[doc(alias = "org.apache.kafka.common.requests.ConsumerGroupDescribeRequest$Builder")]
-pub struct ConsumerGroupDescribeRequestBuilder {
+pub struct Builder {
     data: ConsumerGroupDescribeRequestData,
     oldest_allowed_version: i16,
     latest_allowed_version: i16,
 }
 
-impl ConsumerGroupDescribeRequestBuilder {
+impl Builder {
     /// Creates a builder wrapping the given data with the full supported
     /// version range.
     #[doc(alias = "org.apache.kafka.common.requests.ConsumerGroupDescribeRequest$Builder#Builder")]
@@ -134,7 +134,7 @@ impl ConsumerGroupDescribeRequestBuilder {
     }
 }
 
-impl RequestBuilder for ConsumerGroupDescribeRequestBuilder {
+impl RequestBuilder for Builder {
     fn api_key(&self) -> &'static ApiKeys {
         &ApiKeys::CONSUMER_GROUP_DESCRIBE
     }
@@ -147,8 +147,8 @@ impl RequestBuilder for ConsumerGroupDescribeRequestBuilder {
         self.latest_allowed_version
     }
 
-    fn build_version(&mut self, version: i16) -> io::Result<ConcreteRequest> {
-        Ok(ConcreteRequest::ConsumerGroupDescribe(ConsumerGroupDescribeRequest::new(
+    fn build_version(&mut self, version: i16) -> io::Result<AbstractRequest> {
+        Ok(AbstractRequest::ConsumerGroupDescribe(ConsumerGroupDescribeRequest::new(
             self.data.clone(),
             version,
         )))
@@ -169,7 +169,7 @@ mod tests {
     fn test_serialize_known_byte_vector_v0() {
         let mut data = ConsumerGroupDescribeRequestData::new();
         data.set_group_ids(vec!["g1".to_string()]);
-        let mut builder = ConsumerGroupDescribeRequestBuilder::new(data);
+        let mut builder = Builder::new(data);
         let mut req = builder.build_version(0).unwrap();
         let expected: &[u8] = &[0x02, 0x03, 0x67, 0x31, 0x00, 0x00];
         assert_eq!(req.serialize().unwrap().into_buffer().as_slice(), expected);
@@ -177,7 +177,7 @@ mod tests {
 
     #[test]
     fn test_api_key() {
-        let builder = ConsumerGroupDescribeRequestBuilder::new(ConsumerGroupDescribeRequestData::new());
+        let builder = Builder::new(ConsumerGroupDescribeRequestData::new());
         assert_eq!(builder.api_key(), &ApiKeys::CONSUMER_GROUP_DESCRIBE);
     }
 

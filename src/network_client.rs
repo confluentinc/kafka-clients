@@ -39,13 +39,13 @@ use crate::common::network::NetworkSend;
 use crate::common::network::Selectable;
 use crate::common::network::{ChannelState, channel_state};
 use crate::common::protocol::{ApiKeys, Errors};
-use crate::common::requests::ApiVersionsRequestBuilder;
 use crate::common::requests::ApiVersionsResponse;
 use crate::common::requests::ConcreteResponse;
 use crate::common::requests::CorrelationIdMismatchError;
-use crate::common::requests::MetadataRequestBuilder;
 use crate::common::requests::MetadataResponse;
-use crate::common::requests::{ConcreteRequest, RequestBuilder, RequestHeader};
+use crate::common::requests::api_versions_request;
+use crate::common::requests::metadata_request;
+use crate::common::requests::{AbstractRequest, RequestBuilder, RequestHeader};
 
 use super::ClientRequest;
 use super::ClientResponse;
@@ -122,7 +122,7 @@ pub struct NetworkClient<S: Selectable, H: HostResolver> {
     api_versions: Arc<ApiVersions>,
     /// Nodes that need an ApiVersions fetch. `FxHashMap` (Phase 27):
     /// touched every poll on the bg hot loop; internal only.
-    nodes_needing_api_versions_fetch: rustc_hash::FxHashMap<String, ApiVersionsRequestBuilder>,
+    nodes_needing_api_versions_fetch: rustc_hash::FxHashMap<String, api_versions_request::Builder>,
     /// Aborted sends due to unsupported versions or disconnects.
     aborted_sends: Vec<ClientResponse>,
     /// The client state (ACTIVE, CLOSING, CLOSED).
@@ -544,7 +544,7 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
     #[doc(alias = "org.apache.kafka.clients.NetworkClient#sendInternalMetadataRequest")]
     pub fn send_internal_metadata_request(
         &mut self,
-        builder: MetadataRequestBuilder,
+        builder: metadata_request::Builder,
         node_connection_id: &str,
         now: i64,
     ) {
@@ -717,7 +717,7 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
         client_request: &mut ClientRequest,
         is_internal_request: bool,
         now: i64,
-        mut request: ConcreteRequest,
+        mut request: AbstractRequest,
     ) -> std::io::Result<()> {
         let destination = client_request.destination().to_string();
         let header = client_request
@@ -912,7 +912,7 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
                     max_api_version = api_version.max_version;
                 }
                 self.nodes_needing_api_versions_fetch
-                    .insert(node, ApiVersionsRequestBuilder::with_version(max_api_version));
+                    .insert(node, api_versions_request::Builder::with_version(max_api_version));
             }
             return;
         }
@@ -961,7 +961,7 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
         for node in connected {
             if self.discover_broker_versions {
                 self.nodes_needing_api_versions_fetch
-                    .insert(node.clone(), ApiVersionsRequestBuilder::new());
+                    .insert(node.clone(), api_versions_request::Builder::new());
                 kafka_debug!(
                     self.log_context,
                     "Completed connection to node {}. Fetching API versions.",
@@ -977,7 +977,7 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
     /// Initiate ApiVersion requests for nodes that need them.
     #[doc(alias = "org.apache.kafka.clients.NetworkClient#handleInitiateApiVersionRequests")]
     fn handle_initiate_api_version_requests(&mut self, now: i64) {
-        let ready_nodes: Vec<(String, ApiVersionsRequestBuilder)> = self
+        let ready_nodes: Vec<(String, api_versions_request::Builder)> = self
             .nodes_needing_api_versions_fetch
             .iter()
             .filter(|(node, _)| self.selector.is_channel_ready(node) && self.in_flight_requests.can_send_more(node))
@@ -1788,9 +1788,9 @@ mod tests {
     use crate::common::protocol::ObjectSerializationCache;
     use crate::common::protocol::{ApiKeys, ByteBufferAccessor, Errors};
     use crate::common::requests::ApiVersionsResponse;
-    use crate::common::requests::ProduceRequestBuilder;
+    use crate::common::requests::ProduceRequest;
     use crate::common::requests::ResponseHeader;
-    use crate::common::requests::{MetadataRequestBuilder, MetadataRequestBuilderOptionsBuilder};
+    use crate::common::requests::{MetadataRequestBuilderOptionsBuilder, metadata_request};
 
     // ---------------------------------------------------------------------------
     // TestHostResolver — a host resolver that returns 127.0.0.1 without DNS.
@@ -2167,7 +2167,7 @@ mod tests {
         assert!(client.is_ready(&node, now), "The client should be ready");
 
         // Send a metadata request
-        let builder = MetadataRequestBuilder::with_topics_allow_auto_topic_creation(Some(&["test"]), true);
+        let builder = metadata_request::Builder::with_topics_allow_auto_topic_creation(Some(&["test"]), true);
         let request = client.new_client_request(node.id_string(), Box::new(builder), now, true);
         let correlation_id = request.correlation_id();
         client.send(request, now);
@@ -2320,7 +2320,7 @@ mod tests {
     async fn test_send_to_unready_node() {
         let mut client = create_network_client(RECONNECT_BACKOFF_MAX_MS_TEST);
         let now = 0_i64;
-        let builder = MetadataRequestBuilder::with_topics_allow_auto_topic_creation(Some(&["test"]), true);
+        let builder = metadata_request::Builder::with_topics_allow_auto_topic_creation(Some(&["test"]), true);
         let request = client.new_client_request("5", Box::new(builder), now, false);
         client.send(request, now);
     }
@@ -2340,7 +2340,7 @@ mod tests {
         assert!(!client.has_in_flight_requests_for_node(node.id_string()));
 
         // Send a request
-        let builder = MetadataRequestBuilder::with_topics_allow_auto_topic_creation(Some(&["test"]), true);
+        let builder = metadata_request::Builder::with_topics_allow_auto_topic_creation(Some(&["test"]), true);
         let request = client.new_client_request(node.id_string(), Box::new(builder), now, true);
         client.send(request, now);
 
@@ -2491,7 +2491,7 @@ mod tests {
 
     /// Common logic for testSimpleRequestResponse variants.
     ///
-    /// Since our ConcreteRequest only supports METADATA and API_VERSIONS (not PRODUCE),
+    /// Since our AbstractRequest only supports METADATA and API_VERSIONS (not PRODUCE),
     /// we send a MetadataRequest instead of a ProduceRequest.
     async fn check_simple_metadata_request_response(
         client: &mut NetworkClient<MockSelector, TestHostResolver>,
@@ -2501,7 +2501,7 @@ mod tests {
         // Must call before creating any request, as it may send ApiVersionsRequest
         await_ready(client, node).await;
 
-        let builder = MetadataRequestBuilder::with_topics_allow_auto_topic_creation(Some(&["test_topic"]), true);
+        let builder = metadata_request::Builder::with_topics_allow_auto_topic_creation(Some(&["test_topic"]), true);
         let callback_executed = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let callback_flag = callback_executed.clone();
         let callback: super::super::RequestCompletionHandler =
@@ -2554,10 +2554,10 @@ mod tests {
         let now = 0_i64;
 
         // Disabling auto topic creation for versions less than 4 is not supported.
-        // Build a MetadataRequestBuilder that targets version 3 only, with
+        // Build a metadata_request::Builder that targets version 3 only, with
         // allow_auto_topic_creation=false, which should fail.
         let builder =
-            MetadataRequestBuilder::with_topics_allow_auto_topic_creation_version(Some(&["topic_1"]), false, 3);
+            metadata_request::Builder::with_topics_allow_auto_topic_creation_version(Some(&["topic_1"]), false, 3);
         client.send_internal_metadata_request(builder, node.id_string(), now);
 
         // The MetadataUpdater should have recorded a failure.
@@ -2600,7 +2600,7 @@ mod tests {
         data.set_topics(Some(Vec::new()));
         data.set_allow_auto_topic_creation(true);
         data.set_include_topic_authorized_operations(true);
-        let builder = MetadataRequestBuilder::with_data(data);
+        let builder = metadata_request::Builder::with_data(data);
         let request = client.new_client_request(node.id_string(), Box::new(builder), now, true);
         client.send(request, now);
 
@@ -2637,7 +2637,7 @@ mod tests {
         let mut data = MetadataRequestData::new();
         data.set_topics(Some(Vec::new()));
         data.set_allow_auto_topic_creation(true);
-        let builder = MetadataRequestBuilder::with_data(data);
+        let builder = metadata_request::Builder::with_data(data);
         let request = client.new_client_request(node.id_string(), Box::new(builder), now, true);
         client.send(request, now);
 
@@ -2664,7 +2664,7 @@ mod tests {
         assert!(least_loaded.has_node_available_or_connection_ready());
 
         // Send a metadata request to saturate the connection
-        let builder = MetadataRequestBuilder::with_topics_allow_auto_topic_creation(Some(&[]), true);
+        let builder = metadata_request::Builder::with_topics_allow_auto_topic_creation(Some(&[]), true);
         let request = client.new_client_request(node.id_string(), Box::new(builder), now, true);
         client.send(request, now);
         client.poll(DEFAULT_REQUEST_TIMEOUT_MS as i64, now).await;
@@ -2688,7 +2688,7 @@ mod tests {
         assert!(client.is_ready(&node, now), "The client should be ready");
 
         // Send a metadata request
-        let builder = MetadataRequestBuilder::with_topics_allow_auto_topic_creation(Some(&["test"]), true);
+        let builder = metadata_request::Builder::with_topics_allow_auto_topic_creation(Some(&["test"]), true);
         let request = client.new_client_request(node.id_string(), Box::new(builder), now, true);
         let correlation_id = request.correlation_id();
         client.send(request, now);
@@ -2728,7 +2728,7 @@ mod tests {
 
         await_ready(&mut client, &node).await;
 
-        let builder = MetadataRequestBuilder::with_topics_allow_auto_topic_creation(Some(&[]), true);
+        let builder = metadata_request::Builder::with_topics_allow_auto_topic_creation(Some(&[]), true);
         let request = client.new_client_request(node.id_string(), Box::new(builder), now, true);
         client.send(request, now);
         client.poll(DEFAULT_REQUEST_TIMEOUT_MS as i64, now).await;
@@ -2762,7 +2762,7 @@ mod tests {
         let callback_responses: Arc<std::sync::Mutex<Vec<i32>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
 
         // Send first request
-        let builder1 = MetadataRequestBuilder::with_topics_allow_auto_topic_creation(Some(&[]), true);
+        let builder1 = metadata_request::Builder::with_topics_allow_auto_topic_creation(Some(&[]), true);
         let cb_responses1 = callback_responses.clone();
         let callback1: super::super::RequestCompletionHandler =
             Box::new(move |resp: &mut super::super::ClientResponse| {
@@ -2781,7 +2781,7 @@ mod tests {
         client.poll(0, now).await;
 
         // Send second request
-        let builder2 = MetadataRequestBuilder::with_topics_allow_auto_topic_creation(Some(&[]), true);
+        let builder2 = metadata_request::Builder::with_topics_allow_auto_topic_creation(Some(&[]), true);
         let cb_responses2 = callback_responses.clone();
         let callback2: super::super::RequestCompletionHandler =
             Box::new(move |resp: &mut super::super::ClientResponse| {
@@ -3123,7 +3123,7 @@ mod tests {
     /// past the timeout; otherwise provides a response.
     ///
     /// The Java test uses ProduceRequest but we use MetadataRequest since that's
-    /// the only request type fully supported in our ConcreteRequest.
+    /// the only request type fully supported in our AbstractRequest.
     async fn send_metadata_request(
         client: &mut NetworkClient<MockSelector, TestHostResolver>,
         node: &Node,
@@ -3133,7 +3133,7 @@ mod tests {
     ) -> ClientResponse {
         await_ready(client, node).await;
 
-        let builder = MetadataRequestBuilder::with_topics_allow_auto_topic_creation(Some(&["test"]), true);
+        let builder = metadata_request::Builder::with_topics_allow_auto_topic_creation(Some(&["test"]), true);
         let request = client.new_client_request_with_timeout(
             node.id_string(),
             Box::new(builder),
@@ -3273,7 +3273,7 @@ mod tests {
 
         // Send first request
         let timeout_ms = 1000;
-        let builder = MetadataRequestBuilder::with_topics_allow_auto_topic_creation(Some(&["test"]), true);
+        let builder = metadata_request::Builder::with_topics_allow_auto_topic_creation(Some(&["test"]), true);
         let request = client.new_client_request_with_timeout(
             node.id_string(),
             Box::new(builder),
@@ -3301,7 +3301,7 @@ mod tests {
             .delayed_receive(DelayedReceive::new(node.id_string(), receive));
 
         // Send second request
-        let builder2 = MetadataRequestBuilder::with_topics_allow_auto_topic_creation(Some(&["test"]), true);
+        let builder2 = metadata_request::Builder::with_topics_allow_auto_topic_creation(Some(&["test"]), true);
         let request2 = client.new_client_request_with_timeout(
             node.id_string(),
             Box::new(builder2),
@@ -3336,7 +3336,7 @@ mod tests {
         await_ready(&mut client, &node).await;
 
         // Send a request
-        let builder = MetadataRequestBuilder::with_topics_allow_auto_topic_creation(Some(&["test"]), true);
+        let builder = metadata_request::Builder::with_topics_allow_auto_topic_creation(Some(&["test"]), true);
         let request = client.new_client_request_with_timeout(
             node.id_string(),
             Box::new(builder),
@@ -3480,7 +3480,7 @@ mod tests {
     /// Translated from `NetworkClientTest.testInflightRequestsDuringRebootstrap`.
     ///
     /// Tests that in-flight requests are aborted when rebootstrap is triggered.
-    /// Since our ConcreteRequest doesn't support PRODUCE, we use METADATA requests.
+    /// Since our AbstractRequest doesn't support PRODUCE, we use METADATA requests.
     #[tokio::test]
     #[doc(alias = "org.apache.kafka.clients.NetworkClientTest#testInflightRequestsDuringRebootstrap")]
     async fn test_inflight_requests_during_rebootstrap() {
@@ -3533,7 +3533,7 @@ mod tests {
         }
 
         // Queue a user request to nodes[0]
-        let builder = MetadataRequestBuilder::with_topics_allow_auto_topic_creation(Some(&["test"]), true);
+        let builder = metadata_request::Builder::with_topics_allow_auto_topic_creation(Some(&["test"]), true);
         let request = client.new_client_request_with_timeout(
             nodes[0].id_string(),
             Box::new(builder),
@@ -3756,7 +3756,7 @@ mod tests {
             .expect("METADATA must be advertised");
 
         let unreachable = supported.max_version + 1;
-        let builder = MetadataRequestBuilder::with_options(
+        let builder = metadata_request::Builder::with_options(
             MetadataRequestBuilderOptionsBuilder::new()
                 .set_topics(Some(&["topic_1"]))
                 .set_allow_auto_topic_creation(true)
@@ -3809,7 +3809,7 @@ mod tests {
         // v3 is a usable version, but disabling auto topic creation below v4 is
         // not representable, so `build_version` fails.
         let builder =
-            MetadataRequestBuilder::with_topics_allow_auto_topic_creation_version(Some(&["topic_1"]), false, 3);
+            metadata_request::Builder::with_topics_allow_auto_topic_creation_version(Some(&["topic_1"]), false, 3);
         let request = client.new_client_request(node.id_string(), Box::new(builder), now, true);
         client.send(request, now);
         let responses = client.poll(0, now).await;
@@ -4705,7 +4705,7 @@ mod tests {
             data.set_acks(1);
             data.set_timeout_ms(1000);
             data.set_topic_data(Vec::new());
-            let builder = ProduceRequestBuilder::builder(data);
+            let builder = ProduceRequest::builder(data);
 
             let request =
                 client.new_client_request(node.id_string(), Box::new(builder), mock_time.milliseconds(), true);

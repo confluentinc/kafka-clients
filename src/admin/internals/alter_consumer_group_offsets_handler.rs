@@ -21,7 +21,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::OffsetCommitRequestData;
 use crate::common::Errors;
-use crate::common::requests::{ConcreteResponse, CoordinatorType, OffsetCommitRequestBuilder, RequestBuilder};
+use crate::common::requests::{ConcreteResponse, CoordinatorType, RequestBuilder, offset_commit_request};
 use crate::common::utils::LogContext;
 use crate::common::{Error, Node, TopicPartition};
 use crate::consumer::OffsetAndMetadata;
@@ -91,7 +91,7 @@ impl AlterConsumerGroupOffsetsHandler {
         &self,
         _coordinator_id: i32,
         group_ids: &HashSet<CoordinatorKey>,
-    ) -> OffsetCommitRequestBuilder {
+    ) -> offset_commit_request::Builder {
         self.validate_keys(group_ids);
 
         let mut offset_data: HashMap<String, OffsetCommitRequestTopic> = HashMap::new();
@@ -113,7 +113,7 @@ impl AlterConsumerGroupOffsetsHandler {
         let mut data = OffsetCommitRequestData::new();
         data.set_group_id(self.group_id.id_value.clone());
         data.set_topics(offset_data.into_values().collect());
-        OffsetCommitRequestBuilder::for_topic_names(data)
+        offset_commit_request::Builder::for_topic_names(data)
     }
 
     #[allow(clippy::too_many_arguments)]

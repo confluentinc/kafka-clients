@@ -17,7 +17,7 @@
 //! Corresponds to `org.apache.kafka.common.requests.InitProducerIdRequest`.
 //!
 //! Wraps the auto-generated [`InitProducerIdRequestData`] and exposes an
-//! [`InitProducerIdRequestBuilder`] that validates the transaction timeout and
+//! [`Builder`] that validates the transaction timeout and
 //! transactional id before building.
 
 use std::io;
@@ -27,7 +27,7 @@ use crate::InitProducerIdResponseData;
 use crate::common::protocol::{ApiKeys, Errors, Readable};
 use crate::common::record::internal::RecordBatch;
 
-use super::ConcreteRequest;
+use super::AbstractRequest;
 use super::ConcreteResponse;
 use super::InitProducerIdResponse;
 use super::RequestBuilder;
@@ -126,13 +126,13 @@ impl std::fmt::Display for InitProducerIdRequest {
 /// Corresponds to `InitProducerIdRequest.Builder` in Java.
 #[derive(Debug, Clone)]
 #[doc(alias = "org.apache.kafka.common.requests.InitProducerIdRequest$Builder")]
-pub struct InitProducerIdRequestBuilder {
+pub struct Builder {
     data: InitProducerIdRequestData,
     oldest_allowed_version: i16,
     latest_allowed_version: i16,
 }
 
-impl InitProducerIdRequestBuilder {
+impl Builder {
     /// Creates a builder wrapping the given data with the full supported
     /// version range.
     #[doc(alias = "org.apache.kafka.common.requests.InitProducerIdRequest$Builder#Builder")]
@@ -170,7 +170,7 @@ impl InitProducerIdRequestBuilder {
     }
 }
 
-impl RequestBuilder for InitProducerIdRequestBuilder {
+impl RequestBuilder for Builder {
     fn api_key(&self) -> &'static ApiKeys {
         &ApiKeys::INIT_PRODUCER_ID
     }
@@ -183,7 +183,7 @@ impl RequestBuilder for InitProducerIdRequestBuilder {
         self.latest_allowed_version
     }
 
-    fn build_version(&mut self, version: i16) -> io::Result<ConcreteRequest> {
+    fn build_version(&mut self, version: i16) -> io::Result<AbstractRequest> {
         // Mirrors `InitProducerIdRequest.Builder.build(short version)`. Java
         // throws IllegalArgumentException for both checks; per CLAUDE.md §10.2
         // these become errors rather than panics.
@@ -207,7 +207,7 @@ impl RequestBuilder for InitProducerIdRequestBuilder {
             ));
         }
 
-        Ok(ConcreteRequest::InitProducerId(InitProducerIdRequest::new(
+        Ok(AbstractRequest::InitProducerId(InitProducerIdRequest::new(
             self.data.clone(),
             version,
         )))
@@ -227,12 +227,12 @@ mod tests {
 
     #[test]
     fn test_build_accepts_valid_data() {
-        let mut builder = InitProducerIdRequestBuilder::new(valid_data());
+        let mut builder = Builder::new(valid_data());
         let built = builder
             .build_version(ApiKeys::INIT_PRODUCER_ID.latest_version())
             .expect("valid");
         match built {
-            ConcreteRequest::InitProducerId(req) => {
+            AbstractRequest::InitProducerId(req) => {
                 assert_eq!(req.data().transactional_id.as_deref(), Some("txn-id"));
                 assert_eq!(req.data().transaction_timeout_ms, 60_000);
             },
@@ -246,7 +246,7 @@ mod tests {
         for timeout in [0, -1] {
             let mut data = valid_data();
             data.set_transaction_timeout_ms(timeout);
-            let mut builder = InitProducerIdRequestBuilder::new(data);
+            let mut builder = Builder::new(data);
             let err = builder.build_version(0).expect_err("non-positive timeout must be rejected");
             assert_eq!(err.to_string(), format!("transaction timeout value is not positive: {timeout}"));
         }
@@ -257,7 +257,7 @@ mod tests {
     fn test_build_rejects_empty_transactional_id() {
         let mut data = valid_data();
         data.set_transactional_id(Some(String::new()));
-        let mut builder = InitProducerIdRequestBuilder::new(data);
+        let mut builder = Builder::new(data);
         let err = builder.build_version(0).expect_err("empty transactional id must be rejected");
         assert_eq!(err.to_string(), "Must set either a null or a non-empty transactional id.");
     }
@@ -268,7 +268,7 @@ mod tests {
     fn test_build_accepts_absent_transactional_id() {
         let mut data = InitProducerIdRequestData::new();
         data.set_transactional_id(None).set_transaction_timeout_ms(60_000);
-        let mut builder = InitProducerIdRequestBuilder::new(data);
+        let mut builder = Builder::new(data);
         builder.build_version(0).expect("absent transactional id must be accepted");
     }
 
@@ -303,7 +303,7 @@ mod tests {
 
     #[test]
     fn test_api_key_and_version() {
-        let builder = InitProducerIdRequestBuilder::new(valid_data());
+        let builder = Builder::new(valid_data());
         assert_eq!(builder.api_key(), &ApiKeys::INIT_PRODUCER_ID);
         let request = InitProducerIdRequest::new(valid_data(), 3);
         assert_eq!(request.api_key(), &ApiKeys::INIT_PRODUCER_ID);
@@ -324,7 +324,7 @@ mod tests {
         data.set_transaction_timeout_ms(1000)
             .set_transactional_id(Some("abracadabra".to_string()))
             .set_producer_id(123);
-        let mut builder = InitProducerIdRequestBuilder::new(data);
+        let mut builder = Builder::new(data);
 
         let mut v2 = builder.build_version(2).expect("v2 must build; the failure is at serialize");
         // `expect_err` is unavailable: the Ok type `ByteBufferAccessor` is not `Debug`.
@@ -350,7 +350,7 @@ mod tests {
         for version in ApiKeys::INIT_PRODUCER_ID.oldest_version()..=ApiKeys::INIT_PRODUCER_ID.latest_version() {
             let mut data = InitProducerIdRequestData::new();
             data.set_transactional_id(None).set_transaction_timeout_ms(100);
-            let mut builder = InitProducerIdRequestBuilder::new(data);
+            let mut builder = Builder::new(data);
             let mut built = builder.build_version(version).expect("build");
 
             let mut buffer = built.serialize().expect("serialize");
@@ -371,7 +371,7 @@ mod tests {
     /// version Java never sends. Regression test for Critic 42 finding 1.
     #[test]
     fn test_builder_offers_only_released_versions() {
-        let builder = InitProducerIdRequestBuilder::new(valid_data());
+        let builder = Builder::new(valid_data());
         let released = ApiKeys::INIT_PRODUCER_ID.latest_version_enable_unstable_last_version(false);
         let with_unstable = ApiKeys::INIT_PRODUCER_ID.latest_version();
 

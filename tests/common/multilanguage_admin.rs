@@ -57,7 +57,7 @@ use confluent_kafka::admin::{
 use confluent_kafka::common::acl::{
     AccessControlEntry, AccessControlEntryFilter, AclBinding, AclBindingFilter, AclOperation, AclPermissionType,
 };
-use confluent_kafka::common::config::{ConfigResource, ConfigResourceType};
+use confluent_kafka::common::config::{ConfigResource, config_resource};
 use confluent_kafka::common::quota::{
     ClientQuotaAlteration, ClientQuotaEntity, ClientQuotaFilter, ClientQuotaFilterComponent, ClientQuotaMatch,
 };
@@ -474,7 +474,7 @@ impl MultilanguageAdmin {
 
     /// Rebuilds a [`ConfigResource`] from the wire's `Type.id()` code.
     ///
-    /// `ConfigResourceType::for_id` maps an unrecognized id to `Unknown` rather
+    /// `config_resource::Type::for_id` maps an unrecognized id to `Unknown` rather
     /// than failing, so an id that does not even fit Java's `byte` is rejected
     /// here instead of silently truncating into a valid-looking type.
     fn config_resource(&self, resource: proto::ConfigResource) -> Result<ConfigResource, Error> {
@@ -484,7 +484,7 @@ impl MultilanguageAdmin {
                 resource.resource_type
             ))
         })?;
-        Ok(ConfigResource::new(ConfigResourceType::for_id(id), resource.name))
+        Ok(ConfigResource::new(config_resource::Type::for_id(id), resource.name))
     }
 
     /// Rebuilds a [`LogDirDescription`], preserving the log dir's own error and
@@ -1152,7 +1152,7 @@ fn full_config_entry_from_proto(entry: proto::ConfigEntry) -> ConfigEntryView {
 /// an explicit discriminant rather than an emptiness test — the C entry points
 /// take an `all_partitions` flag (`read_optional_partition_set` returns without
 /// reading the arrays when it is set), `admin.py` computes `partitions is None`
-/// into its own column, and `ElectLeadersRequestBuilder::build` calls
+/// into its own column, and `elect_leaders_request::Builder::build` calls
 /// `set_topic_partitions(None)` versus `Some(vec)`. `NewPartitions.new_assignments`
 /// and `UserScramCredentialUpsertion`'s salt now follow the same rule
 /// (`has_assignments` / `has_salts`); both previously collapsed absent into empty
@@ -1621,7 +1621,7 @@ impl AdminBackend for MultilanguageAdmin {
 
     async fn list_config_resources(
         &self,
-        config_resource_types: &HashSet<ConfigResourceType>,
+        config_resource_types: &HashSet<config_resource::Type>,
         options: ListConfigResourcesOptions,
     ) -> Result<Vec<ConfigResource>, Error> {
         let request = proto::ListConfigResourcesRequest {

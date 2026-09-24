@@ -12,11 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! The `KafkaSend` trait models the in-progress sending of data.
+//! The `Send` trait models the in-progress sending of data.
 //!
 //! Translated from `org.apache.kafka.common.network.Send`.
 //!
-//! Renamed from `Send` to `KafkaSend` to avoid conflict with `std::marker::Send`.
+//! It shares its name with `std::marker::Send`, so callers name it through its
+//! module (`network::Send`) and this file spells the marker trait out in full.
 
 use super::TransportLayer;
 
@@ -27,10 +28,11 @@ use std::pin::Pin;
 /// Models the in-progress sending of data.
 ///
 /// This trait represents a send operation that may require multiple calls to
-/// [`write_to`](KafkaSend::write_to) before all data is fully written.
+/// [`write_to`](Send::write_to) before all data is fully written.
 ///
 /// All I/O is async per CLAUDE.md rule 8.
-pub trait KafkaSend: Send + Sync {
+#[doc(alias = "org.apache.kafka.common.network.Send")]
+pub trait Send: std::marker::Send + Sync {
     /// Returns `true` if this send is complete.
     fn completed(&self) -> bool;
 
@@ -52,7 +54,7 @@ pub trait KafkaSend: Send + Sync {
     fn write_to<'a>(
         &'a mut self,
         channel: &'a mut dyn TransportLayer,
-    ) -> Pin<Box<dyn Future<Output = io::Result<usize>> + Send + 'a>>;
+    ) -> Pin<Box<dyn Future<Output = io::Result<usize>> + std::marker::Send + 'a>>;
 
     /// Attempts a non-blocking write without creating a Future.
     ///

@@ -23,7 +23,7 @@ use crate::DescribeTransactionsResponseData;
 use crate::common::protocol::{ApiKeys, Errors, Readable};
 use crate::describe_transactions_response_data::TransactionState;
 
-use super::{ConcreteRequest, ConcreteResponse, DescribeTransactionsResponse, RequestBuilder};
+use super::{AbstractRequest, ConcreteResponse, DescribeTransactionsResponse, RequestBuilder};
 
 /// A DescribeTransactions request.
 ///
@@ -105,11 +105,11 @@ impl std::fmt::Display for DescribeTransactionsRequest {
 /// Corresponds to `DescribeTransactionsRequest.Builder`.
 #[derive(Debug, Clone)]
 #[doc(alias = "org.apache.kafka.common.requests.DescribeTransactionsRequest$Builder")]
-pub struct DescribeTransactionsRequestBuilder {
+pub struct Builder {
     data: DescribeTransactionsRequestData,
 }
 
-impl DescribeTransactionsRequestBuilder {
+impl Builder {
     /// Creates a builder from the given request data.
     #[doc(alias = "org.apache.kafka.common.requests.DescribeTransactionsRequest$Builder#Builder")]
     pub fn new(data: DescribeTransactionsRequestData) -> Self {
@@ -117,7 +117,7 @@ impl DescribeTransactionsRequestBuilder {
     }
 }
 
-impl RequestBuilder for DescribeTransactionsRequestBuilder {
+impl RequestBuilder for Builder {
     fn api_key(&self) -> &'static ApiKeys {
         &ApiKeys::DESCRIBE_TRANSACTIONS
     }
@@ -130,8 +130,8 @@ impl RequestBuilder for DescribeTransactionsRequestBuilder {
         ApiKeys::DESCRIBE_TRANSACTIONS.latest_version()
     }
 
-    fn build_version(&mut self, version: i16) -> io::Result<ConcreteRequest> {
-        Ok(ConcreteRequest::DescribeTransactions(DescribeTransactionsRequest::new(
+    fn build_version(&mut self, version: i16) -> io::Result<AbstractRequest> {
+        Ok(AbstractRequest::DescribeTransactions(DescribeTransactionsRequest::new(
             self.data.clone(),
             version,
         )))
@@ -162,7 +162,7 @@ mod tests {
     fn serialize_parse_round_trip() {
         let mut data = DescribeTransactionsRequestData::new();
         data.set_transactional_ids(vec!["t1".to_string()]);
-        let mut builder = DescribeTransactionsRequestBuilder::new(data);
+        let mut builder = Builder::new(data);
         let mut request = builder.build_version(0).unwrap();
         let bytes = request.serialize().unwrap();
         let mut readable = crate::common::ByteBufferAccessor::new(bytes.into_buffer());
@@ -178,7 +178,7 @@ mod tests {
     fn serialize_known_byte_vector_v0() {
         let mut data = DescribeTransactionsRequestData::new();
         data.set_transactional_ids(vec!["t1".to_string()]);
-        let mut builder = DescribeTransactionsRequestBuilder::new(data);
+        let mut builder = Builder::new(data);
         let mut request = builder.build_version(0).unwrap();
         let bytes = request.serialize().unwrap();
         let expected: &[u8] = &[

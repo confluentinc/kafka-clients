@@ -24,7 +24,7 @@ use crate::DescribeUserScramCredentialsResponseData;
 use crate::common::protocol::{ApiKeys, Errors, Readable};
 use crate::describe_user_scram_credentials_response_data::DescribeUserScramCredentialsResult;
 
-use super::{ConcreteRequest, ConcreteResponse, DescribeUserScramCredentialsResponse, RequestBuilder};
+use super::{AbstractRequest, ConcreteResponse, DescribeUserScramCredentialsResponse, RequestBuilder};
 
 /// A DescribeUserScramCredentials request.
 ///
@@ -122,13 +122,13 @@ impl std::fmt::Display for DescribeUserScramCredentialsRequest {
 /// Corresponds to `DescribeUserScramCredentialsRequest.Builder`.
 #[derive(Debug, Clone)]
 #[doc(alias = "org.apache.kafka.common.requests.DescribeUserScramCredentialsRequest$Builder")]
-pub struct DescribeUserScramCredentialsRequestBuilder {
+pub struct Builder {
     data: DescribeUserScramCredentialsRequestData,
     oldest_allowed_version: i16,
     latest_allowed_version: i16,
 }
 
-impl DescribeUserScramCredentialsRequestBuilder {
+impl Builder {
     /// Creates a builder wrapping the given request data.
     #[doc(alias = "org.apache.kafka.common.requests.DescribeUserScramCredentialsRequest$Builder#Builder")]
     pub fn new(data: DescribeUserScramCredentialsRequestData) -> Self {
@@ -140,7 +140,7 @@ impl DescribeUserScramCredentialsRequestBuilder {
     }
 }
 
-impl RequestBuilder for DescribeUserScramCredentialsRequestBuilder {
+impl RequestBuilder for Builder {
     fn api_key(&self) -> &'static ApiKeys {
         &ApiKeys::DESCRIBE_USER_SCRAM_CREDENTIALS
     }
@@ -153,8 +153,8 @@ impl RequestBuilder for DescribeUserScramCredentialsRequestBuilder {
         self.latest_allowed_version
     }
 
-    fn build_version(&mut self, version: i16) -> io::Result<ConcreteRequest> {
-        Ok(ConcreteRequest::DescribeUserScramCredentials(
+    fn build_version(&mut self, version: i16) -> io::Result<AbstractRequest> {
+        Ok(AbstractRequest::DescribeUserScramCredentials(
             DescribeUserScramCredentialsRequest::new(self.data.clone(), version),
         ))
     }
@@ -213,7 +213,7 @@ mod tests {
     #[test]
     fn serialize_parse_round_trip() {
         let version = ApiKeys::DESCRIBE_USER_SCRAM_CREDENTIALS.latest_version();
-        let mut builder = DescribeUserScramCredentialsRequestBuilder::new({
+        let mut builder = Builder::new({
             let mut data = DescribeUserScramCredentialsRequestData::new();
             data.set_users(Some(vec![{
                 let mut n = UserName::new();
@@ -240,7 +240,7 @@ mod tests {
             n.set_name("u0".to_string());
             n
         }]));
-        let mut builder = DescribeUserScramCredentialsRequestBuilder::new(data);
+        let mut builder = Builder::new(data);
         let mut request = builder.build_version(0).unwrap();
         let bytes = request.serialize().unwrap().into_buffer();
         let expected: Vec<u8> = vec![

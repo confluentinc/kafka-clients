@@ -32,7 +32,7 @@ use std::ops::Deref;
 use std::sync::{Arc, Mutex};
 
 use crate::common::internals::ClusterResourceListeners;
-use crate::common::requests::MetadataRequestBuilder;
+use crate::common::requests::metadata_request;
 use crate::common::utils::LogContext;
 use crate::consumer::ConsumerConfig;
 use crate::consumer::internals::SubscriptionState;
@@ -138,21 +138,21 @@ impl ConsumerMetadata {
         // 3. Otherwise -> request by metadata-topics + transient topic names.
         let builder_subscription = Arc::clone(&subscription);
         let builder_inner = Arc::clone(&inner);
-        let request_builder_fn: Box<dyn Fn() -> MetadataRequestBuilder + Send + Sync> = Box::new(move || {
+        let request_builder_fn: Box<dyn Fn() -> metadata_request::Builder + Send + Sync> = Box::new(move || {
             let sub_guard = builder_subscription.lock().unwrap();
             if sub_guard.has_pattern_subscription() {
-                return MetadataRequestBuilder::all_topics();
+                return metadata_request::Builder::all_topics();
             }
             let inner_guard = builder_inner.lock().unwrap();
             if sub_guard.has_re2j_pattern_subscription() && inner_guard.transient_topics.is_empty() {
                 // Use BTreeSet to preserve Java's `TreeSet<Uuid>` ordering on the wire.
-                return MetadataRequestBuilder::for_topic_ids(sub_guard.assigned_topic_ids());
+                return metadata_request::Builder::for_topic_ids(sub_guard.assigned_topic_ids());
             }
             // Explicit topic names + transient topics.
             let mut topics: HashSet<String> = sub_guard.metadata_topics();
             topics.extend(inner_guard.transient_topics.iter().cloned());
             let topic_refs: Vec<&str> = topics.iter().map(|s| s.as_str()).collect();
-            MetadataRequestBuilder::for_topic_names(&topic_refs, allow_auto_topic_creation)
+            metadata_request::Builder::for_topic_names(&topic_refs, allow_auto_topic_creation)
         });
 
         let metadata = Arc::new(Metadata::with_overrides(

@@ -38,7 +38,7 @@ use confluent_kafka::admin::{
     DescribeConfigsOptions, ListConfigResourcesOptions, OpType,
 };
 use confluent_kafka::common::acl::AclOperation;
-use confluent_kafka::common::config::{ConfigResource, ConfigResourceType};
+use confluent_kafka::common::config::{ConfigResource, config_resource};
 
 use crate::common::admin_backend::{AdminBackend, ConfigEntryView, ConfigView, admin_for, all_of, create_topic};
 use crate::common::backend_factory::AdminBackendFactory;
@@ -304,7 +304,7 @@ async fn describe_configs_topic_returns_defaults<F: AdminBackendFactory>(ctx: &m
     // `TestUtils.createTopicWithAdmin`.
     create_topic(&admin, &topic, 1, 1).await;
 
-    let resource = ConfigResource::new(ConfigResourceType::Topic, topic.clone());
+    let resource = ConfigResource::new(config_resource::Type::Topic, topic.clone());
     let config = config_of(&admin, &resource).await;
 
     // A topic should report standard default configs.
@@ -339,7 +339,7 @@ async fn incremental_alter_configs_set_and_delete_topic_config<F: AdminBackendFa
     // `TestUtils.createTopicWithAdmin`.
     create_topic(&admin, &topic, 1, 1).await;
 
-    let resource = ConfigResource::new(ConfigResourceType::Topic, topic.clone());
+    let resource = ConfigResource::new(config_resource::Type::Topic, topic.clone());
 
     // SET retention.ms to a custom value.
     alter(
@@ -431,7 +431,7 @@ async fn describe_configs_broker_returns_broker_configs<F: AdminBackendFactory>(
     // Discover a broker id from describeCluster.
     let broker_id = first_broker_id(&admin).await;
 
-    let resource = ConfigResource::new(ConfigResourceType::Broker, broker_id.to_string());
+    let resource = ConfigResource::new(config_resource::Type::Broker, broker_id.to_string());
     let config = config_of(&admin, &resource).await;
 
     // A broker reports many configs; a couple of universal ones must exist.
@@ -473,7 +473,7 @@ async fn describe_configs_reports_synonyms_and_documentation<F: AdminBackendFact
     let backend = factory.name();
 
     let broker_id = first_broker_id(&admin).await;
-    let resource = ConfigResource::new(ConfigResourceType::Broker, broker_id.to_string());
+    let resource = ConfigResource::new(config_resource::Type::Broker, broker_id.to_string());
     let described = admin
         .describe_configs(
             std::slice::from_ref(&resource),
@@ -548,13 +548,13 @@ async fn list_config_resources_lists_resources<F: AdminBackendFactory>(ctx: &mut
         .unwrap_or_else(|e| panic!("{backend} backend: list config resources: {e}"));
 
     assert!(
-        resources.iter().any(|r| r.resource_type() == ConfigResourceType::Broker),
+        resources.iter().any(|r| r.resource_type() == config_resource::Type::Broker),
         "{backend} backend: expected at least one BROKER config resource"
     );
     assert!(
         resources
             .iter()
-            .any(|r| r.resource_type() == ConfigResourceType::Topic && r.name() == topic),
+            .any(|r| r.resource_type() == config_resource::Type::Topic && r.name() == topic),
         "{backend} backend: expected the created topic among the TOPIC config resources"
     );
 
@@ -562,7 +562,10 @@ async fn list_config_resources_lists_resources<F: AdminBackendFactory>(ctx: &mut
     // effect of the `resource_types` argument, and a wire field that is
     // otherwise never exercised with a non-empty value.
     let topics_only = admin
-        .list_config_resources(&HashSet::from([ConfigResourceType::Topic]), ListConfigResourcesOptions::new())
+        .list_config_resources(
+            &HashSet::from([config_resource::Type::Topic]),
+            ListConfigResourcesOptions::new(),
+        )
         .await
         .unwrap_or_else(|e| panic!("{backend} backend: list TOPIC config resources: {e}"));
     assert!(
@@ -570,7 +573,7 @@ async fn list_config_resources_lists_resources<F: AdminBackendFactory>(ctx: &mut
         "{backend} backend: the created topic should be in the TOPIC-only listing"
     );
     assert!(
-        topics_only.iter().all(|r| r.resource_type() == ConfigResourceType::Topic),
+        topics_only.iter().all(|r| r.resource_type() == config_resource::Type::Topic),
         "{backend} backend: a TOPIC-only listing must contain only TOPIC resources, got {:?}",
         topics_only.iter().map(|r| r.resource_type()).collect::<HashSet<_>>()
     );
@@ -595,7 +598,7 @@ async fn list_client_metrics_resources_lists_subscription<F: AdminBackendFactory
     // one by setting its subscription configs (KIP-714). `interval.ms` is the
     // push interval; `metrics` scopes which client metrics are collected.
     let subscription = ctx.topic("admin_client_metrics_sub");
-    let resource = ConfigResource::new(ConfigResourceType::ClientMetrics, subscription.clone());
+    let resource = ConfigResource::new(config_resource::Type::ClientMetrics, subscription.clone());
     alter(
         &admin,
         &resource,
@@ -632,7 +635,7 @@ async fn list_client_metrics_resources_lists_subscription<F: AdminBackendFactory
     // agree, on every backend.
     let via_config_resources = admin
         .list_config_resources(
-            &HashSet::from([ConfigResourceType::ClientMetrics]),
+            &HashSet::from([config_resource::Type::ClientMetrics]),
             ListConfigResourcesOptions::new(),
         )
         .await

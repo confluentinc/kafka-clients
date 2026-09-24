@@ -27,7 +27,7 @@ use crate::common::protocol::{ApiKeys, Errors, Readable};
 use crate::common::quota::Op;
 use crate::common::quota::{ClientQuotaAlteration, ClientQuotaEntity};
 
-use super::{AlterClientQuotasResponse, ConcreteRequest, ConcreteResponse, RequestBuilder};
+use super::{AbstractRequest, AlterClientQuotasResponse, ConcreteResponse, RequestBuilder};
 
 /// An AlterClientQuotas request.
 ///
@@ -151,13 +151,13 @@ impl std::fmt::Display for AlterClientQuotasRequest {
 /// Corresponds to `AlterClientQuotasRequest.Builder` in Java.
 #[derive(Debug, Clone)]
 #[doc(alias = "org.apache.kafka.common.requests.AlterClientQuotasRequest$Builder")]
-pub struct AlterClientQuotasRequestBuilder {
+pub struct Builder {
     data: AlterClientQuotasRequestData,
     oldest_allowed_version: i16,
     latest_allowed_version: i16,
 }
 
-impl AlterClientQuotasRequestBuilder {
+impl Builder {
     /// Creates a builder from a collection of alterations, mirroring
     /// `AlterClientQuotasRequest.Builder(Collection, boolean)`.
     ///
@@ -199,7 +199,7 @@ impl AlterClientQuotasRequestBuilder {
     }
 }
 
-impl RequestBuilder for AlterClientQuotasRequestBuilder {
+impl RequestBuilder for Builder {
     fn api_key(&self) -> &'static ApiKeys {
         &ApiKeys::ALTER_CLIENT_QUOTAS
     }
@@ -212,8 +212,8 @@ impl RequestBuilder for AlterClientQuotasRequestBuilder {
         self.latest_allowed_version
     }
 
-    fn build_version(&mut self, version: i16) -> io::Result<ConcreteRequest> {
-        Ok(ConcreteRequest::AlterClientQuotas(AlterClientQuotasRequest::new(
+    fn build_version(&mut self, version: i16) -> io::Result<AbstractRequest> {
+        Ok(AbstractRequest::AlterClientQuotas(AlterClientQuotasRequest::new(
             self.data.clone(),
             version,
         )))
@@ -242,8 +242,8 @@ mod tests {
                 Op::new("producer_byte_rate", None),
             ],
         )];
-        let mut builder = AlterClientQuotasRequestBuilder::new(&alterations, false);
-        let ConcreteRequest::AlterClientQuotas(r) = builder.build().unwrap() else {
+        let mut builder = Builder::new(&alterations, false);
+        let AbstractRequest::AlterClientQuotas(r) = builder.build().unwrap() else {
             panic!("expected AlterClientQuotas request");
         };
         let ops = &r.data().entries[0].ops;
@@ -264,8 +264,8 @@ mod tests {
                 Op::new("producer_byte_rate", None),
             ],
         )];
-        let mut builder = AlterClientQuotasRequestBuilder::new(&alterations, true);
-        let ConcreteRequest::AlterClientQuotas(r) = builder.build().unwrap() else {
+        let mut builder = Builder::new(&alterations, true);
+        let AbstractRequest::AlterClientQuotas(r) = builder.build().unwrap() else {
             panic!("expected AlterClientQuotas request");
         };
         assert!(r.validate_only());
@@ -283,7 +283,7 @@ mod tests {
             vec![Op::new("consumer_byte_rate", Some(10000.0))],
         )];
         let version = ApiKeys::ALTER_CLIENT_QUOTAS.latest_version();
-        let mut builder = AlterClientQuotasRequestBuilder::new(&alterations, false);
+        let mut builder = Builder::new(&alterations, false);
         let mut request = builder.build().unwrap();
         let bytes = request.serialize().unwrap();
         let mut readable = crate::common::ByteBufferAccessor::new(bytes.into_buffer());
@@ -300,7 +300,7 @@ mod tests {
             entity("u1"),
             vec![Op::new("producer_byte_rate", None)],
         )];
-        let mut builder = AlterClientQuotasRequestBuilder::new(&alterations, false);
+        let mut builder = Builder::new(&alterations, false);
         let mut request = builder.build_version(1).unwrap();
         let bytes = request.serialize().unwrap().into_buffer();
         let expected: Vec<u8> = vec![
@@ -336,7 +336,7 @@ mod tests {
             default_entity(),
             vec![Op::new("producer_byte_rate", None)],
         )];
-        let mut builder = AlterClientQuotasRequestBuilder::new(&alterations, false);
+        let mut builder = Builder::new(&alterations, false);
         let mut request = builder.build_version(1).unwrap();
         let bytes = request.serialize().unwrap().into_buffer();
         let expected: Vec<u8> = vec![
@@ -364,7 +364,7 @@ mod tests {
             entity(""),
             vec![Op::new("producer_byte_rate", None)],
         )];
-        let mut builder = AlterClientQuotasRequestBuilder::new(&empty_named, false);
+        let mut builder = Builder::new(&empty_named, false);
         let mut request = builder.build_version(1).unwrap();
         let empty_bytes = request.serialize().unwrap().into_buffer();
         assert_eq!(bytes.as_slice()[7], 0x00, "default entity name must be wire-null");
@@ -386,7 +386,7 @@ mod tests {
             ClientQuotaAlteration::new(entity(""), vec![Op::new("consumer_byte_rate", Some(2.0))]),
         ];
         let version = ApiKeys::ALTER_CLIENT_QUOTAS.latest_version();
-        let mut builder = AlterClientQuotasRequestBuilder::new(&alterations, false);
+        let mut builder = Builder::new(&alterations, false);
         let mut request = builder.build().unwrap();
         let bytes = request.serialize().unwrap();
         let mut readable = crate::common::ByteBufferAccessor::new(bytes.into_buffer());

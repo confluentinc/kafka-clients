@@ -27,7 +27,7 @@ use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 
 use tokio::sync::Notify;
 
-use crate::common::requests::ConcreteRequest;
+use crate::common::requests::AbstractRequest;
 use crate::common::requests::ConcreteResponse;
 use crate::common::requests::RequestBuilder;
 use crate::common::{Error, Node};
@@ -138,7 +138,7 @@ impl MockConnectionState {
 /// `send` and `respond`. Every `TransactionManagerTest` `prepare*`/`send*` helper
 /// supplies one, and the assertions live *inside* it — so a port without matchers
 /// silently drops them.
-pub type RequestMatcher = Box<dyn Fn(&ConcreteRequest) -> bool + Send>;
+pub type RequestMatcher = Box<dyn Fn(&AbstractRequest) -> bool + Send>;
 
 /// A queued future response to be delivered when a matching request is sent.
 struct FutureResponse {
@@ -737,7 +737,7 @@ impl KafkaClient for MockClient {
             //     test pay for a build it never reads. Nothing downstream of a matched
             //     future response reads the request body, so the narrower build is
             //     equivalent.
-            //   - Safety: `ProduceRequestBuilder::build_version` *drains* its builder —
+            //   - Safety: `produce_request::Builder::build_version` *drains* its builder —
             //     `std::mem::replace(&mut self.data, ProduceRequestData::new())`
             //     (`common/requests/produce_request.rs:307`) — so a second build of the
             //     same request yields empty `topic_data`. Java's

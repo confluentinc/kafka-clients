@@ -24,7 +24,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::OffsetDeleteRequestData;
 use crate::common::Errors;
-use crate::common::requests::{ConcreteResponse, CoordinatorType, OffsetDeleteRequestBuilder, RequestBuilder};
+use crate::common::requests::{ConcreteResponse, CoordinatorType, RequestBuilder, offset_delete_request};
 use crate::common::utils::LogContext;
 use crate::common::{Error, Node, TopicPartition};
 use crate::kafka_warn;
@@ -89,7 +89,7 @@ impl DeleteConsumerGroupOffsetsHandler {
         &self,
         _coordinator_id: i32,
         group_ids: &HashSet<CoordinatorKey>,
-    ) -> OffsetDeleteRequestBuilder {
+    ) -> offset_delete_request::Builder {
         self.validate_keys(group_ids);
 
         let mut by_topic: HashMap<String, Vec<i32>> = HashMap::new();
@@ -118,7 +118,7 @@ impl DeleteConsumerGroupOffsetsHandler {
         let mut data = OffsetDeleteRequestData::new();
         data.set_group_id(self.group_id.id_value.clone());
         data.set_topics(topics);
-        OffsetDeleteRequestBuilder::new(data)
+        offset_delete_request::Builder::new(data)
     }
 
     #[doc(alias = "org.apache.kafka.clients.admin.internals.DeleteConsumerGroupOffsetsHandler#handleGroupError")]

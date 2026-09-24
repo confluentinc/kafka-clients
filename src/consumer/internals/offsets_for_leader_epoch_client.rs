@@ -33,8 +33,8 @@ use crate::common::Errors;
 use crate::common::TopicPartition;
 use crate::common::errors::TopicAuthorizationError;
 use crate::common::record::internal::RecordBatch;
-use crate::common::requests::OffsetsForLeaderEpochRequestBuilder;
 use crate::common::requests::OffsetsForLeaderEpochResponse;
+use crate::common::requests::offsets_for_leader_epoch_request;
 use crate::offset_for_leader_epoch_request_data::{OffsetForLeaderPartition, OffsetForLeaderTopic};
 use crate::offset_for_leader_epoch_response_data::EpochEndOffset;
 
@@ -88,7 +88,7 @@ impl OffsetsForLeaderEpochClient {
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.OffsetsForLeaderEpochClient#prepareRequest")]
     pub(crate) fn prepare_request(
         request_data: &HashMap<TopicPartition, FetchPosition>,
-    ) -> OffsetsForLeaderEpochRequestBuilder {
+    ) -> offsets_for_leader_epoch_request::Builder {
         let mut topics: HashMap<String, OffsetForLeaderTopic> = HashMap::new();
         for (topic_partition, fetch_position) in request_data {
             let Some(fetch_epoch) = fetch_position.offset_epoch else {
@@ -110,7 +110,7 @@ impl OffsetsForLeaderEpochClient {
             );
             topic_entry.partitions.push(partition);
         }
-        OffsetsForLeaderEpochRequestBuilder::for_consumer(topics.into_values().collect())
+        offsets_for_leader_epoch_request::Builder::for_consumer(topics.into_values().collect())
     }
 
     /// Processes an `OffsetsForLeaderEpoch` response.

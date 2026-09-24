@@ -23,7 +23,7 @@ use crate::DeleteRecordsResponseData;
 use crate::common::protocol::{ApiKeys, Errors, Readable};
 use crate::delete_records_response_data::{DeleteRecordsPartitionResult, DeleteRecordsTopicResult};
 
-use super::{ConcreteRequest, ConcreteResponse, DeleteRecordsResponse, RequestBuilder};
+use super::{AbstractRequest, ConcreteResponse, DeleteRecordsResponse, RequestBuilder};
 
 /// A DeleteRecords request.
 ///
@@ -116,13 +116,13 @@ impl std::fmt::Display for DeleteRecordsRequest {
 /// Corresponds to `DeleteRecordsRequest.Builder` in Java.
 #[derive(Debug, Clone)]
 #[doc(alias = "org.apache.kafka.common.requests.DeleteRecordsRequest$Builder")]
-pub struct DeleteRecordsRequestBuilder {
+pub struct Builder {
     data: DeleteRecordsRequestData,
     oldest_allowed_version: i16,
     latest_allowed_version: i16,
 }
 
-impl DeleteRecordsRequestBuilder {
+impl Builder {
     /// Creates a builder from existing data.
     #[doc(alias = "org.apache.kafka.common.requests.DeleteRecordsRequest$Builder#Builder")]
     pub fn new(data: DeleteRecordsRequestData) -> Self {
@@ -134,7 +134,7 @@ impl DeleteRecordsRequestBuilder {
     }
 }
 
-impl RequestBuilder for DeleteRecordsRequestBuilder {
+impl RequestBuilder for Builder {
     fn api_key(&self) -> &'static ApiKeys {
         &ApiKeys::DELETE_RECORDS
     }
@@ -147,8 +147,8 @@ impl RequestBuilder for DeleteRecordsRequestBuilder {
         self.latest_allowed_version
     }
 
-    fn build_version(&mut self, version: i16) -> io::Result<ConcreteRequest> {
-        Ok(ConcreteRequest::DeleteRecords(DeleteRecordsRequest::new(
+    fn build_version(&mut self, version: i16) -> io::Result<AbstractRequest> {
+        Ok(AbstractRequest::DeleteRecords(DeleteRecordsRequest::new(
             self.data.clone(),
             version,
         )))
@@ -196,14 +196,14 @@ mod tests {
         }
     }
 
-    /// Round-trips a request through the shared `ConcreteRequest` serialize /
+    /// Round-trips a request through the shared `AbstractRequest` serialize /
     /// parse path, exercising the enum wiring end-to-end.
     #[test]
     fn serialize_parse_round_trip() {
         let mut data = DeleteRecordsRequestData::new();
         data.set_topics(vec![topic("round-trip-topic", &[(0, 42), (3, 100)])]);
         data.set_timeout_ms(30000);
-        let mut request = ConcreteRequest::DeleteRecords(DeleteRecordsRequest::new(data, 2));
+        let mut request = AbstractRequest::DeleteRecords(DeleteRecordsRequest::new(data, 2));
         let bytes = request.serialize().unwrap();
         let mut readable = crate::common::ByteBufferAccessor::new(bytes.into_buffer());
         let parsed = DeleteRecordsRequest::parse(&mut readable, 2).unwrap();
@@ -233,7 +233,7 @@ mod tests {
         let mut data = DeleteRecordsRequestData::new();
         data.set_topics(vec![topic("t", &[(0, 5)])]);
         data.set_timeout_ms(100);
-        let mut request = ConcreteRequest::DeleteRecords(DeleteRecordsRequest::new(data, 2));
+        let mut request = AbstractRequest::DeleteRecords(DeleteRecordsRequest::new(data, 2));
         let bytes = request.serialize().unwrap();
         let expected: &[u8] = &[
             0x02, // topics array length + 1

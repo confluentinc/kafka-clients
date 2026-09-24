@@ -17,7 +17,7 @@
 //! Corresponds to `org.apache.kafka.common.requests.OffsetFetchRequest`.
 //!
 //! Wraps the auto-generated [`OffsetFetchRequestData`] and exposes the
-//! `OffsetFetchRequestBuilder` used by the consumer's fetch-committed-offsets
+//! `Builder` used by the consumer's fetch-committed-offsets
 //! path.
 //!
 //! # Version selection
@@ -45,7 +45,7 @@ use crate::offset_fetch_response_data::{
 use super::ConcreteResponse;
 use super::OffsetFetchResponse;
 use super::RECORD_BATCH_NO_PARTITION_LEADER_EPOCH;
-use super::abstract_request::{ConcreteRequest, RequestBuilder};
+use super::abstract_request::{AbstractRequest, RequestBuilder};
 
 /// An `OffsetFetch` request.
 ///
@@ -293,14 +293,14 @@ impl std::fmt::Display for OffsetFetchRequest {
 /// Corresponds to `OffsetFetchRequest.Builder` in Java.
 #[derive(Debug, Clone)]
 #[doc(alias = "org.apache.kafka.common.requests.OffsetFetchRequest$Builder")]
-pub struct OffsetFetchRequestBuilder {
+pub struct Builder {
     data: OffsetFetchRequestData,
     throw_on_fetch_stable_offsets_unsupported: bool,
     oldest_allowed_version: i16,
     latest_allowed_version: i16,
 }
 
-impl OffsetFetchRequestBuilder {
+impl Builder {
     /// Build a request that can use either topic ids or topic names.
     ///
     /// Mirrors Java's `Builder.forTopicIdsOrNames(OffsetFetchRequestData, boolean)`.
@@ -364,7 +364,7 @@ impl OffsetFetchRequestBuilder {
     }
 }
 
-impl RequestBuilder for OffsetFetchRequestBuilder {
+impl RequestBuilder for Builder {
     fn api_key(&self) -> &'static ApiKeys {
         &ApiKeys::OFFSET_FETCH
     }
@@ -377,7 +377,7 @@ impl RequestBuilder for OffsetFetchRequestBuilder {
         self.latest_allowed_version
     }
 
-    fn build_version(&mut self, version: i16) -> io::Result<ConcreteRequest> {
+    fn build_version(&mut self, version: i16) -> io::Result<AbstractRequest> {
         if version < self.oldest_allowed_version || version > self.latest_allowed_version {
             return Err(io::Error::new(
                 io::ErrorKind::Unsupported,
@@ -461,7 +461,7 @@ impl RequestBuilder for OffsetFetchRequestBuilder {
         {
             data.set_require_stable(false);
         }
-        Ok(ConcreteRequest::OffsetFetch(OffsetFetchRequest::new(data, version)))
+        Ok(AbstractRequest::OffsetFetch(OffsetFetchRequest::new(data, version)))
     }
 }
 
@@ -499,7 +499,7 @@ mod tests {
     /// `for_topic_ids_or_names` opens the full version range.
     #[test]
     fn for_topic_ids_or_names_uses_full_range() {
-        let builder = OffsetFetchRequestBuilder::for_topic_ids_or_names(OffsetFetchRequestData::new(), false);
+        let builder = Builder::for_topic_ids_or_names(OffsetFetchRequestData::new(), false);
         assert_eq!(builder.oldest_allowed_version(), ApiKeys::OFFSET_FETCH.oldest_version());
         assert_eq!(builder.latest_allowed_version(), ApiKeys::OFFSET_FETCH.latest_version());
     }
@@ -507,7 +507,7 @@ mod tests {
     /// `for_topic_names` caps the latest allowed version at v9.
     #[test]
     fn for_topic_names_caps_at_v9() {
-        let builder = OffsetFetchRequestBuilder::for_topic_names(OffsetFetchRequestData::new(), false);
+        let builder = Builder::for_topic_names(OffsetFetchRequestData::new(), false);
         assert_eq!(builder.latest_allowed_version(), OffsetFetchRequest::TOPIC_ID_MIN_VERSION - 1);
     }
 
@@ -520,7 +520,7 @@ mod tests {
         let mut g2 = OffsetFetchRequestGroup::new();
         g2.set_group_id("g2".to_string());
         data.set_groups(vec![g1, g2]);
-        let mut builder = OffsetFetchRequestBuilder::for_topic_ids_or_names(data, false);
+        let mut builder = Builder::for_topic_ids_or_names(data, false);
         let err = builder.build_version(7).unwrap_err();
         assert!(err.to_string().contains("batching groups"));
     }
@@ -531,7 +531,7 @@ mod tests {
         let mut data = OffsetFetchRequestData::new();
         data.set_groups(vec![group_with_topics()]);
         data.set_require_stable(true);
-        let mut builder = OffsetFetchRequestBuilder::for_topic_ids_or_names(data, true);
+        let mut builder = Builder::for_topic_ids_or_names(data, true);
         let err = builder.build_version(6).unwrap_err();
         assert!(err.to_string().contains("requireStable"));
     }
@@ -543,10 +543,10 @@ mod tests {
         let mut data = OffsetFetchRequestData::new();
         data.set_groups(vec![group_with_topics()]);
         data.set_require_stable(true);
-        let mut builder = OffsetFetchRequestBuilder::for_topic_ids_or_names(data, false);
+        let mut builder = Builder::for_topic_ids_or_names(data, false);
         let req = builder.build_version(6).expect("falls back silently");
         match req {
-            ConcreteRequest::OffsetFetch(r) => assert!(!r.require_stable()),
+            AbstractRequest::OffsetFetch(r) => assert!(!r.require_stable()),
             other => panic!("expected OffsetFetch, got {}", other.api_key().name()),
         }
     }
@@ -562,7 +562,7 @@ mod tests {
         // name left empty
         g.set_topics(Some(vec![t]));
         data.set_groups(vec![g]);
-        let mut builder = OffsetFetchRequestBuilder::for_topic_names(data, false);
+        let mut builder = Builder::for_topic_names(data, false);
         let err = builder.build_version(8).unwrap_err();
         assert!(err.to_string().contains("topic names"));
     }
@@ -577,7 +577,7 @@ mod tests {
         t.set_name("t".to_string()); // no topic_id
         g.set_topics(Some(vec![t]));
         data.set_groups(vec![g]);
-        let mut builder = OffsetFetchRequestBuilder::for_topic_ids_or_names(data, false);
+        let mut builder = Builder::for_topic_ids_or_names(data, false);
         let err = builder.build_version(10).unwrap_err();
         assert!(err.to_string().contains("topic ids"));
     }

@@ -22,7 +22,7 @@ use crate::DescribeClusterRequestData;
 use crate::DescribeClusterResponseData;
 use crate::common::protocol::{ApiKeys, Errors, Readable};
 
-use super::{ConcreteRequest, ConcreteResponse, DescribeClusterResponse, RequestBuilder};
+use super::{AbstractRequest, ConcreteResponse, DescribeClusterResponse, RequestBuilder};
 
 /// A DescribeCluster request.
 ///
@@ -104,13 +104,13 @@ impl std::fmt::Display for DescribeClusterRequest {
 /// Corresponds to `DescribeClusterRequest.Builder` in Java.
 #[derive(Debug, Clone)]
 #[doc(alias = "org.apache.kafka.common.requests.DescribeClusterRequest$Builder")]
-pub struct DescribeClusterRequestBuilder {
+pub struct Builder {
     data: DescribeClusterRequestData,
     oldest_allowed_version: i16,
     latest_allowed_version: i16,
 }
 
-impl DescribeClusterRequestBuilder {
+impl Builder {
     /// Creates a builder from existing data.
     #[doc(alias = "org.apache.kafka.common.requests.DescribeClusterRequest$Builder#Builder")]
     pub fn new(data: DescribeClusterRequestData) -> Self {
@@ -122,7 +122,7 @@ impl DescribeClusterRequestBuilder {
     }
 }
 
-impl RequestBuilder for DescribeClusterRequestBuilder {
+impl RequestBuilder for Builder {
     fn api_key(&self) -> &'static ApiKeys {
         &ApiKeys::DESCRIBE_CLUSTER
     }
@@ -135,8 +135,8 @@ impl RequestBuilder for DescribeClusterRequestBuilder {
         self.latest_allowed_version
     }
 
-    fn build_version(&mut self, version: i16) -> io::Result<ConcreteRequest> {
-        Ok(ConcreteRequest::DescribeCluster(DescribeClusterRequest::new(
+    fn build_version(&mut self, version: i16) -> io::Result<AbstractRequest> {
+        Ok(AbstractRequest::DescribeCluster(DescribeClusterRequest::new(
             self.data.clone(),
             version,
         )))
@@ -164,7 +164,7 @@ mod tests {
         let mut data = DescribeClusterRequestData::new();
         data.set_include_cluster_authorized_operations(true);
         data.set_endpoint_type(DescribeClusterRequest::ENDPOINT_TYPE_BROKER);
-        let mut request = ConcreteRequest::DescribeCluster(DescribeClusterRequest::new(data, 1));
+        let mut request = AbstractRequest::DescribeCluster(DescribeClusterRequest::new(data, 1));
         let bytes = request.serialize().unwrap();
         let mut readable = crate::common::ByteBufferAccessor::new(bytes.into_buffer());
         let parsed = DescribeClusterRequest::parse(&mut readable, 1).unwrap();
@@ -182,7 +182,7 @@ mod tests {
         let mut data = DescribeClusterRequestData::new();
         data.set_include_cluster_authorized_operations(true);
         data.set_endpoint_type(DescribeClusterRequest::ENDPOINT_TYPE_BROKER);
-        let mut request = ConcreteRequest::DescribeCluster(DescribeClusterRequest::new(data, 1));
+        let mut request = AbstractRequest::DescribeCluster(DescribeClusterRequest::new(data, 1));
         let bytes = request.serialize().unwrap();
         let expected: &[u8] = &[
             0x01, // include_cluster_authorized_operations = true

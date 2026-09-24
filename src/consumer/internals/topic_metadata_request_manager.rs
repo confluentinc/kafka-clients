@@ -34,7 +34,7 @@ use tokio::sync::oneshot;
 use crate::common::Error;
 use crate::common::Errors;
 use crate::common::PartitionInfo;
-use crate::common::requests::{ConcreteResponse, MetadataRequestBuilder, MetadataResponse, RequestBuilder};
+use crate::common::requests::{ConcreteResponse, MetadataResponse, RequestBuilder, metadata_request};
 use crate::consumer::ConsumerConfig;
 
 use super::RequestManager;
@@ -442,11 +442,11 @@ impl TopicMetadataRequestManager {
             state.timed_state.on_send_attempt(current_time_ms);
 
             let builder: Box<dyn RequestBuilder> = match state.topic.as_deref() {
-                Some(topic) => Box::new(MetadataRequestBuilder::with_topics_allow_auto_topic_creation(
+                Some(topic) => Box::new(metadata_request::Builder::with_topics_allow_auto_topic_creation(
                     Some(&[topic]),
                     self.inner.allow_auto_topic_creation,
                 )),
-                None => Box::new(MetadataRequestBuilder::all_topics()),
+                None => Box::new(metadata_request::Builder::all_topics()),
             };
             let mut req = UnsentRequest::new(builder, None);
             let response_rx = req.take_response_receiver().expect("receiver fresh");
@@ -903,7 +903,7 @@ mod tests {
             unsent.request_builder().expect("builder still present").api_key()
         );
         // Java cross-checks `assertInstanceOf(MetadataRequest.class, ...)`;
-        // the Rust equivalent is matching on the `ConcreteRequest`
+        // the Rust equivalent is matching on the `AbstractRequest`
         // variant the builder produces.
         let concrete = unsent
             .request_builder_mut()
@@ -911,7 +911,7 @@ mod tests {
             .build()
             .expect("builder.build() ok");
         let metadata = match &concrete {
-            crate::common::requests::ConcreteRequest::Metadata(m) => m,
+            crate::common::requests::AbstractRequest::Metadata(m) => m,
             other => panic!("expected Metadata, got {other:?}"),
         };
         let topic_names = metadata.topics().expect("not all-topics");
@@ -937,7 +937,7 @@ mod tests {
             .build()
             .expect("builder.build() ok");
         let metadata = match &concrete {
-            crate::common::requests::ConcreteRequest::Metadata(m) => m,
+            crate::common::requests::AbstractRequest::Metadata(m) => m,
             other => panic!("expected Metadata, got {other:?}"),
         };
         assert!(metadata.is_all_topics(), "all-topics request has no topic list");

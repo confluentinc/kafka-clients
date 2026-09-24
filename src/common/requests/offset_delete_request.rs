@@ -17,7 +17,7 @@
 //! Corresponds to `org.apache.kafka.common.requests.OffsetDeleteRequest`.
 //!
 //! Wraps the auto-generated [`OffsetDeleteRequestData`] and exposes an
-//! [`OffsetDeleteRequestBuilder`] used by the admin client's
+//! [`Builder`] used by the admin client's
 //! `deleteConsumerGroupOffsets` path. `OffsetDelete` is a dedicated RPC
 //! (`ApiKeys.OFFSET_DELETE`) — deletion is NOT expressed as an `OffsetCommit`
 //! with a sentinel offset.
@@ -30,7 +30,7 @@ use crate::common::protocol::{ApiKeys, Errors, Readable};
 
 use super::ConcreteResponse;
 use super::OffsetDeleteResponse;
-use super::abstract_request::{ConcreteRequest, RequestBuilder};
+use super::abstract_request::{AbstractRequest, RequestBuilder};
 
 /// An `OffsetDelete` request.
 ///
@@ -107,11 +107,11 @@ impl std::fmt::Display for OffsetDeleteRequest {
 /// Corresponds to `OffsetDeleteRequest.Builder` in Java.
 #[derive(Debug, Clone)]
 #[doc(alias = "org.apache.kafka.common.requests.OffsetDeleteRequest$Builder")]
-pub struct OffsetDeleteRequestBuilder {
+pub struct Builder {
     data: OffsetDeleteRequestData,
 }
 
-impl OffsetDeleteRequestBuilder {
+impl Builder {
     /// Creates a builder over the given request data.
     ///
     /// Mirrors Java's `OffsetDeleteRequest.Builder(OffsetDeleteRequestData)`.
@@ -126,7 +126,7 @@ impl OffsetDeleteRequestBuilder {
     }
 }
 
-impl RequestBuilder for OffsetDeleteRequestBuilder {
+impl RequestBuilder for Builder {
     fn api_key(&self) -> &'static ApiKeys {
         &ApiKeys::OFFSET_DELETE
     }
@@ -139,7 +139,7 @@ impl RequestBuilder for OffsetDeleteRequestBuilder {
         ApiKeys::OFFSET_DELETE.latest_version()
     }
 
-    fn build_version(&mut self, version: i16) -> io::Result<ConcreteRequest> {
+    fn build_version(&mut self, version: i16) -> io::Result<AbstractRequest> {
         if version < self.oldest_allowed_version() || version > self.latest_allowed_version() {
             return Err(io::Error::new(
                 io::ErrorKind::Unsupported,
@@ -150,7 +150,7 @@ impl RequestBuilder for OffsetDeleteRequestBuilder {
                 ),
             ));
         }
-        Ok(ConcreteRequest::OffsetDelete(OffsetDeleteRequest::new(
+        Ok(AbstractRequest::OffsetDelete(OffsetDeleteRequest::new(
             self.data.clone(),
             version,
         )))
@@ -178,10 +178,10 @@ mod tests {
         let mut data = OffsetDeleteRequestData::new();
         data.set_group_id("g".to_string());
         data.set_topics(vec![topic("t", 0)]);
-        let mut builder = OffsetDeleteRequestBuilder::new(data);
+        let mut builder = Builder::new(data);
         let version = ApiKeys::OFFSET_DELETE.latest_version();
         match builder.build_version(version).unwrap() {
-            ConcreteRequest::OffsetDelete(r) => {
+            AbstractRequest::OffsetDelete(r) => {
                 assert_eq!(r.version(), version);
                 assert_eq!(r.data().group_id, "g");
                 assert_eq!(r.data().topics.len(), 1);
@@ -195,7 +195,7 @@ mod tests {
     fn build_version_out_of_range_returns_err() {
         let mut data = OffsetDeleteRequestData::new();
         data.set_group_id("g".to_string());
-        let mut builder = OffsetDeleteRequestBuilder::new(data);
+        let mut builder = Builder::new(data);
         let too_new = ApiKeys::OFFSET_DELETE.latest_version() + 1;
         assert!(builder.build_version(too_new).is_err());
     }
@@ -212,7 +212,7 @@ mod tests {
         let mut data = OffsetDeleteRequestData::new();
         data.set_group_id("g".to_string());
         data.set_topics(vec![topic("t", 3)]);
-        let mut builder = OffsetDeleteRequestBuilder::new(data);
+        let mut builder = Builder::new(data);
         let mut req = builder.build_version(0).unwrap();
         let expected: &[u8] = &[
             0x00, 0x01, 0x67, // group_id "g"

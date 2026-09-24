@@ -20,7 +20,7 @@ use std::collections::HashMap;
 use std::io;
 
 use crate::IncrementalAlterConfigsResponseData;
-use crate::common::config::{ConfigResource, ConfigResourceType};
+use crate::common::config::{ConfigResource, config_resource};
 use crate::common::protocol::{ApiKeys, Errors, Readable};
 
 use super::AbstractResponse;
@@ -83,7 +83,7 @@ impl IncrementalAlterConfigsResponse {
             .map(|response| {
                 (
                     ConfigResource::new(
-                        ConfigResourceType::for_id(response.resource_type),
+                        config_resource::Type::for_id(response.resource_type),
                         response.resource_name.clone(),
                     ),
                     (response.error_code, response.error_message.clone()),
@@ -144,18 +144,18 @@ mod tests {
     fn errors_by_resource_maps_type_and_name() {
         let mut data = IncrementalAlterConfigsResponseData::new();
         data.set_responses(vec![
-            response("t", ConfigResourceType::Topic.id(), Errors::InvalidRequest),
-            response("0", ConfigResourceType::Broker.id(), Errors::None),
+            response("t", config_resource::Type::Topic.id(), Errors::InvalidRequest),
+            response("0", config_resource::Type::Broker.id(), Errors::None),
         ]);
         let resp = IncrementalAlterConfigsResponse::new(data);
         let map = resp.errors_by_resource();
         assert_eq!(
-            map.get(&ConfigResource::new(ConfigResourceType::Topic, "t".to_string()))
+            map.get(&ConfigResource::new(config_resource::Type::Topic, "t".to_string()))
                 .map(|(c, _)| *c),
             Some(Errors::InvalidRequest.code())
         );
         assert_eq!(
-            map.get(&ConfigResource::new(ConfigResourceType::Broker, "0".to_string()))
+            map.get(&ConfigResource::new(config_resource::Type::Broker, "0".to_string()))
                 .map(|(c, _)| *c),
             Some(Errors::None.code())
         );
@@ -165,8 +165,8 @@ mod tests {
     fn error_counts_aggregates_responses() {
         let mut data = IncrementalAlterConfigsResponseData::new();
         data.set_responses(vec![
-            response("", ConfigResourceType::Broker.id(), Errors::NotController),
-            response("t", ConfigResourceType::Topic.id(), Errors::None),
+            response("", config_resource::Type::Broker.id(), Errors::NotController),
+            response("t", config_resource::Type::Topic.id(), Errors::None),
         ]);
         let resp = IncrementalAlterConfigsResponse::new(data);
         let counts = resp.error_counts();

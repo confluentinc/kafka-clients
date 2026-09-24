@@ -21,7 +21,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::common::Errors;
-use crate::common::requests::{ConcreteResponse, MetadataRequestBuilder, RequestBuilder};
+use crate::common::requests::{ConcreteResponse, RequestBuilder, metadata_request};
 use crate::common::utils::LogContext;
 use crate::common::{Error, TopicPartition};
 use crate::{kafka_debug, kafka_error};
@@ -216,7 +216,7 @@ impl AdminApiLookupStrategy<TopicPartition> for PartitionLeaderStrategy {
                 topics.push(tp.topic());
             }
         }
-        Box::new(MetadataRequestBuilder::with_topics_allow_auto_topic_creation(
+        Box::new(metadata_request::Builder::with_topics_allow_auto_topic_creation(
             Some(&topics),
             false,
         ))
@@ -442,8 +442,8 @@ mod tests {
         Other,
     }
 
-    fn request_topics(request: &crate::common::requests::ConcreteRequest) -> ConcreteRequestMatch<'_> {
-        if let crate::common::requests::ConcreteRequest::Metadata(m) = request {
+    fn request_topics(request: &crate::common::requests::AbstractRequest) -> ConcreteRequestMatch<'_> {
+        if let crate::common::requests::AbstractRequest::Metadata(m) = request {
             ConcreteRequestMatch::Metadata(m.topics().unwrap_or_default(), m.allow_auto_topic_creation())
         } else {
             ConcreteRequestMatch::Other

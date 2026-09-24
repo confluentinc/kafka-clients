@@ -27,8 +27,8 @@ use std::sync::{Arc, Mutex};
 use crate::Metadata;
 use crate::common::Errors;
 use crate::common::internals::ClusterResourceListeners;
-use crate::common::requests::MetadataRequestBuilder;
 use crate::common::requests::MetadataResponse;
+use crate::common::requests::metadata_request;
 use crate::common::utils::LogContext;
 use crate::kafka_debug;
 
@@ -152,19 +152,19 @@ impl ProducerMetadata {
 
         // Closure for request_builder_fn: returns a builder with just the known topics
         let builder_inner = Arc::clone(&inner);
-        let request_builder_fn: Box<dyn Fn() -> MetadataRequestBuilder + Send + Sync> = Box::new(move || {
+        let request_builder_fn: Box<dyn Fn() -> metadata_request::Builder + Send + Sync> = Box::new(move || {
             let state = builder_inner.lock().unwrap();
             let topics: Vec<&str> = state.topics.keys().map(|s| s.as_str()).collect();
-            MetadataRequestBuilder::with_topics_allow_auto_topic_creation(Some(&topics), true)
+            metadata_request::Builder::with_topics_allow_auto_topic_creation(Some(&topics), true)
         });
 
         // Closure for new_topics_request_builder_fn: returns a builder with just the new topics
         let new_topics_inner = Arc::clone(&inner);
-        let new_topics_request_builder_fn: Box<dyn Fn() -> MetadataRequestBuilder + Send + Sync> =
+        let new_topics_request_builder_fn: Box<dyn Fn() -> metadata_request::Builder + Send + Sync> =
             Box::new(move || {
                 let state = new_topics_inner.lock().unwrap();
                 let topics: Vec<&str> = state.new_topics.iter().map(|s| s.as_str()).collect();
-                MetadataRequestBuilder::with_topics_allow_auto_topic_creation(Some(&topics), true)
+                metadata_request::Builder::with_topics_allow_auto_topic_creation(Some(&topics), true)
             });
 
         // Closure for post_update_fn: tracks per-topic errors and removes confirmed

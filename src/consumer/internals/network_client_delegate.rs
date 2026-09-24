@@ -931,8 +931,7 @@ mod tests {
     use crate::MockClient;
     use crate::common::internals::ClusterResourceListeners;
     use crate::common::requests::{
-        ConcreteResponse, FindCoordinatorRequestBuilder, FindCoordinatorResponse, MetadataRequestBuilder,
-        RequestBuilder,
+        ConcreteResponse, FindCoordinatorResponse, RequestBuilder, find_coordinator_request, metadata_request,
     };
 
     const GROUP_ID: &str = "group";
@@ -955,7 +954,7 @@ mod tests {
         let mut data = FindCoordinatorRequestData::new();
         data.set_key(GROUP_ID.to_string());
         data.set_key_type(crate::common::requests::CoordinatorType::Group.id());
-        let builder: Box<dyn RequestBuilder> = Box::new(FindCoordinatorRequestBuilder::new(data));
+        let builder: Box<dyn RequestBuilder> = Box::new(find_coordinator_request::Builder::new(data));
         UnsentRequest::new(builder, None)
     }
 
@@ -1000,7 +999,7 @@ mod tests {
 
     #[test]
     fn unsent_request_defaults() {
-        let builder: Box<dyn RequestBuilder> = Box::new(MetadataRequestBuilder::all_topics());
+        let builder: Box<dyn RequestBuilder> = Box::new(metadata_request::Builder::all_topics());
         let req = UnsentRequest::new(builder, None);
         assert_eq!(req.deadline_ms(), -1);
         assert_eq!(req.enqueue_time_ms(), -1);

@@ -24,7 +24,7 @@ use std::sync::Arc;
 use crate::WriteTxnMarkersRequestData;
 use crate::admin::AbortTransactionSpec;
 use crate::common::Errors;
-use crate::common::requests::{ConcreteResponse, RequestBuilder, WriteTxnMarkersRequestBuilder};
+use crate::common::requests::{ConcreteResponse, RequestBuilder, write_txn_markers_request};
 use crate::common::utils::LogContext;
 use crate::common::{Error, Node, TopicPartition};
 use crate::kafka_error;
@@ -226,7 +226,7 @@ impl AdminApiHandler<TopicPartition, ()> for AbortTransactionHandler {
     fn build_request(&self, _broker_id: i32, keys: &HashSet<TopicPartition>) -> Vec<RequestAndKeys<TopicPartition>> {
         let data = self.build_batched_request(keys);
         vec![RequestAndKeys {
-            request: Box::new(WriteTxnMarkersRequestBuilder::new(data)) as Box<dyn RequestBuilder>,
+            request: Box::new(write_txn_markers_request::Builder::new(data)) as Box<dyn RequestBuilder>,
             keys: keys.clone(),
         }]
     }

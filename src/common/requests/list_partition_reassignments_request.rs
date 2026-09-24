@@ -24,7 +24,7 @@ use crate::ListPartitionReassignmentsResponseData;
 use crate::common::protocol::{ApiKeys, Errors, Readable};
 use crate::list_partition_reassignments_response_data::{OngoingPartitionReassignment, OngoingTopicReassignment};
 
-use super::{ConcreteRequest, ConcreteResponse, ListPartitionReassignmentsResponse, RequestBuilder};
+use super::{AbstractRequest, ConcreteResponse, ListPartitionReassignmentsResponse, RequestBuilder};
 
 /// A ListPartitionReassignments request.
 ///
@@ -127,13 +127,13 @@ impl std::fmt::Display for ListPartitionReassignmentsRequest {
 /// Corresponds to `ListPartitionReassignmentsRequest.Builder` in Java.
 #[derive(Debug, Clone)]
 #[doc(alias = "org.apache.kafka.common.requests.ListPartitionReassignmentsRequest$Builder")]
-pub struct ListPartitionReassignmentsRequestBuilder {
+pub struct Builder {
     data: ListPartitionReassignmentsRequestData,
     oldest_allowed_version: i16,
     latest_allowed_version: i16,
 }
 
-impl ListPartitionReassignmentsRequestBuilder {
+impl Builder {
     /// Creates a builder from existing data.
     #[doc(alias = "org.apache.kafka.common.requests.ListPartitionReassignmentsRequest$Builder#Builder")]
     pub fn new(data: ListPartitionReassignmentsRequestData) -> Self {
@@ -145,7 +145,7 @@ impl ListPartitionReassignmentsRequestBuilder {
     }
 }
 
-impl RequestBuilder for ListPartitionReassignmentsRequestBuilder {
+impl RequestBuilder for Builder {
     fn api_key(&self) -> &'static ApiKeys {
         &ApiKeys::LIST_PARTITION_REASSIGNMENTS
     }
@@ -158,8 +158,8 @@ impl RequestBuilder for ListPartitionReassignmentsRequestBuilder {
         self.latest_allowed_version
     }
 
-    fn build_version(&mut self, version: i16) -> io::Result<ConcreteRequest> {
-        Ok(ConcreteRequest::ListPartitionReassignments(
+    fn build_version(&mut self, version: i16) -> io::Result<AbstractRequest> {
+        Ok(AbstractRequest::ListPartitionReassignments(
             ListPartitionReassignmentsRequest::new(self.data.clone(), version),
         ))
     }
@@ -193,14 +193,14 @@ mod tests {
         }
     }
 
-    /// Round-trips a request through the shared `ConcreteRequest` serialize /
+    /// Round-trips a request through the shared `AbstractRequest` serialize /
     /// parse path.
     #[test]
     fn serialize_parse_round_trip() {
         let mut data = ListPartitionReassignmentsRequestData::new();
         data.set_timeout_ms(30000);
         data.set_topics(Some(vec![topic("A", vec![0, 2])]));
-        let mut request = ConcreteRequest::ListPartitionReassignments(ListPartitionReassignmentsRequest::new(data, 0));
+        let mut request = AbstractRequest::ListPartitionReassignments(ListPartitionReassignmentsRequest::new(data, 0));
         let bytes = request.serialize().unwrap();
         let mut readable = crate::common::ByteBufferAccessor::new(bytes.into_buffer());
         let parsed = ListPartitionReassignmentsRequest::parse(&mut readable, 0).unwrap();
@@ -224,7 +224,7 @@ mod tests {
         let mut data = ListPartitionReassignmentsRequestData::new();
         data.set_timeout_ms(100);
         data.set_topics(Some(vec![topic("A", vec![0])]));
-        let mut request = ConcreteRequest::ListPartitionReassignments(ListPartitionReassignmentsRequest::new(data, 0));
+        let mut request = AbstractRequest::ListPartitionReassignments(ListPartitionReassignmentsRequest::new(data, 0));
         let bytes = request.serialize().unwrap();
         let expected: &[u8] = &[
             0x00, 0x00, 0x00, 0x64, // timeout_ms = 100

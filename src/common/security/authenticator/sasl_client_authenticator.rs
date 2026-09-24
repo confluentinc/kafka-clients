@@ -39,22 +39,22 @@
 use crate::SaslAuthenticateRequestData;
 use crate::SaslHandshakeRequestData;
 use crate::common::Error;
+use crate::common::network;
 use crate::common::network::Authenticator;
 use crate::common::network::ByteBufferSend;
-use crate::common::network::KafkaSend;
 use crate::common::network::NetworkReceive;
 use crate::common::network::Receive;
 use crate::common::network::{InterestOps, TransportLayer};
 use crate::common::network::{auth_io_error, auth_io_error_with_source};
 use crate::common::protocol::{ApiKeys, ByteBufferAccessor, Errors};
-use crate::common::requests::ApiVersionsRequestBuilder;
+use crate::common::requests::AbstractRequest;
 use crate::common::requests::ApiVersionsResponse;
-use crate::common::requests::ConcreteRequest;
 use crate::common::requests::ConcreteResponse;
 use crate::common::requests::RequestBuilder;
 use crate::common::requests::SaslAuthenticateRequest;
 use crate::common::requests::SaslHandshakeRequest;
 use crate::common::requests::SaslHandshakeResponse;
+use crate::common::requests::api_versions_request;
 use crate::common::requests::{RequestHeader, RequestHeaderOptionsBuilder};
 
 use crate::common::utils::LogContext;
@@ -133,7 +133,7 @@ pub struct SaslClientAuthenticator {
     /// Request header for which a response from the server is pending.
     current_request_header: Option<RequestHeader>,
     /// Pending outbound data.
-    net_out_buffer: Option<Box<dyn KafkaSend>>,
+    net_out_buffer: Option<Box<dyn network::Send>>,
     /// Pending inbound data.
     net_in_buffer: Option<NetworkReceive>,
     /// Next SASL state to be set when outgoing writes complete.
@@ -274,7 +274,7 @@ impl SaslClientAuthenticator {
     /// to `Failed` state.
     async fn send_request(
         &mut self,
-        send: Box<dyn KafkaSend>,
+        send: Box<dyn network::Send>,
         transport: &mut (dyn TransportLayer + Send),
     ) -> io::Result<()> {
         self.net_out_buffer = Some(send);
@@ -305,7 +305,7 @@ impl SaslClientAuthenticator {
     #[doc(alias = "org.apache.kafka.common.security.authenticator.SaslClientAuthenticator#sendSaslClientToken")]
     async fn send_sasl_client_token(&mut self, transport: &mut (dyn TransportLayer + Send)) -> io::Result<()> {
         let sasl_token = self.create_sasl_token();
-        let send: Box<dyn KafkaSend> =
+        let send: Box<dyn network::Send> =
             if self.sasl_authenticate_version == SaslClientAuthenticator::DISABLE_KAFKA_SASL_AUTHENTICATE_HEADER {
                 Box::new(ByteBufferSend::size_prefixed(bytes::Bytes::from(sasl_token)))
             } else {
@@ -313,7 +313,7 @@ impl SaslClientAuthenticator {
                 data.set_auth_bytes(sasl_token);
                 let request = SaslAuthenticateRequest::new(data, self.sasl_authenticate_version);
                 let header = self.next_request_header(&ApiKeys::SASL_AUTHENTICATE, self.sasl_authenticate_version)?;
-                let mut concrete = ConcreteRequest::SaslAuthenticate(request);
+                let mut concrete = AbstractRequest::SaslAuthenticate(request);
                 let byte_buffer_send = concrete.to_send(&header)?;
                 Box::new(byte_buffer_send)
             };
@@ -558,7 +558,7 @@ impl SaslClientAuthenticator {
             SaslState::SendApiVersionsRequest => {
                 // Always use version 0 request since brokers treat requests with
                 // schema exceptions as GSSAPI tokens
-                let mut builder = ApiVersionsRequestBuilder::with_version(0);
+                let mut builder = api_versions_request::Builder::with_version(0);
                 let mut request = builder.build()?;
                 let header = self.next_request_header(&ApiKeys::API_VERSIONS, request.version())?;
                 let send = Box::new(request.to_send(&header)?);
@@ -643,7 +643,7 @@ impl SaslClientAuthenticator {
         data.set_mechanism(self.mechanism.clone());
         let request = SaslHandshakeRequest::new(data, self.sasl_handshake_version);
         let header = self.next_request_header(&ApiKeys::SASL_HANDSHAKE, request.version())?;
-        let mut concrete = ConcreteRequest::SaslHandshake(request);
+        let mut concrete = AbstractRequest::SaslHandshake(request);
         let send = Box::new(concrete.to_send(&header)?);
         self.send_request(send, transport).await
     }

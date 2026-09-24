@@ -84,7 +84,7 @@ use crate::alter_replica_log_dirs_request_data::{AlterReplicaLogDir, AlterReplic
 use crate::alter_user_scram_credentials_request_data::{ScramCredentialDeletion, ScramCredentialUpsertion};
 use crate::common::Errors;
 use crate::common::acl::{AclBinding, AclBindingFilter, AclOperation};
-use crate::common::config::{ConfigResource, ConfigResourceType};
+use crate::common::config::{ConfigResource, config_resource};
 use crate::common::errors::{ApiError, UnsupportedEndpointTypeError};
 use crate::common::internals::KafkaFutureImpl;
 use crate::common::network::ChannelBuilders;
@@ -92,15 +92,14 @@ use crate::common::network::Selector;
 use crate::common::network::selectable::USE_DEFAULT_BUFFER_SIZE;
 use crate::common::quota::{ClientQuotaAlteration, ClientQuotaEntity, ClientQuotaFilter};
 use crate::common::requests::{
-    AlterClientQuotasRequestBuilder, AlterReplicaLogDirsRequestBuilder, AlterUserScramCredentialsRequestBuilder,
-    ConcreteResponse, CreateAclsRequest, CreateAclsRequestBuilder, CreateDelegationTokenRequestBuilder,
-    CreatePartitionsRequestBuilder, CreateTopicsRequestBuilder, DeleteAclsRequest, DeleteAclsRequestBuilder,
-    DeleteAclsResponse, DeleteTopicsRequestBuilder, DescribeAclsRequestBuilder, DescribeAclsResponse,
-    DescribeClientQuotasRequestBuilder, DescribeClusterRequestBuilder, DescribeConfigsRequestBuilder,
-    DescribeDelegationTokenRequestBuilder, DescribeLogDirsRequestBuilder, DescribeLogDirsResponse,
-    DescribeUserScramCredentialsRequestBuilder, ExpireDelegationTokenRequestBuilder,
-    IncrementalAlterConfigsRequestBuilder, ListConfigResourcesRequestBuilder, ListGroupsRequestBuilder,
-    MetadataRequestBuilder, RenewDelegationTokenRequestBuilder, RequestBuilder,
+    ConcreteResponse, CreateAclsRequest, DeleteAclsRequest, DeleteAclsResponse, DescribeAclsResponse,
+    DescribeLogDirsResponse, RequestBuilder, alter_client_quotas_request, alter_replica_log_dirs_request,
+    alter_user_scram_credentials_request, create_acls_request, create_delegation_token_request,
+    create_partitions_request, create_topics_request, delete_acls_request, delete_topics_request,
+    describe_acls_request, describe_client_quotas_request, describe_cluster_request, describe_configs_request,
+    describe_delegation_token_request, describe_log_dirs_request, describe_user_scram_credentials_request,
+    expire_delegation_token_request, incremental_alter_configs_request, list_config_resources_request,
+    list_groups_request, metadata_request, renew_delegation_token_request,
 };
 use crate::common::security::auth::KafkaPrincipal;
 use crate::common::security::scram::internals::{ScramFormatter, ScramMechanism as InternalScramMechanism};
@@ -196,8 +195,8 @@ use crate::UpdateFeaturesRequestData;
 use crate::alter_partition_reassignments_request_data::{ReassignablePartition, ReassignableTopic};
 use crate::common::TopicPartitionReplica;
 use crate::common::requests::{
-    AlterPartitionReassignmentsRequestBuilder, ApiVersionsRequestBuilder, ElectLeadersRequestBuilder,
-    ElectLeadersResponse, JoinGroupRequest, ListPartitionReassignmentsRequestBuilder, UpdateFeaturesRequestBuilder,
+    ElectLeadersResponse, JoinGroupRequest, alter_partition_reassignments_request, api_versions_request,
+    elect_leaders_request, list_partition_reassignments_request, update_features_request,
 };
 use crate::common::{ElectionType, Node};
 use crate::create_delegation_token_request_data::CreatableRenewers;
@@ -557,10 +556,10 @@ impl KafkaAdminClient {
         let create_request = Box::new(move |_timeout_ms: i32| {
             // Empty topic list (just the broker list), matching Java's
             // MetadataRequest with setTopics(emptyList).setAllowAutoTopicCreation(true).
-            Ok(
-                Box::new(MetadataRequestBuilder::with_topics_allow_auto_topic_creation(Some(&[]), true))
-                    as Box<dyn RequestBuilder>,
-            )
+            Ok(Box::new(metadata_request::Builder::with_topics_allow_auto_topic_creation(
+                Some(&[]),
+                true,
+            )) as Box<dyn RequestBuilder>)
         });
 
         let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64, _cur_node: Option<&Node>| {
@@ -592,7 +591,7 @@ impl KafkaAdminClient {
                     data.set_states_filter(states.clone());
                     data.set_types_filter(types.clone());
                     let _ = &node_create;
-                    Ok(Box::new(ListGroupsRequestBuilder::new(data)) as Box<dyn RequestBuilder>)
+                    Ok(Box::new(list_groups_request::Builder::new(data)) as Box<dyn RequestBuilder>)
                 });
 
                 let resp_results = Arc::clone(&results);
@@ -712,8 +711,10 @@ impl KafkaAdminClient {
         request_data.set_resources(wire_resources);
 
         let create_request = Box::new(move |_timeout_ms: i32| {
-            Ok(Box::new(IncrementalAlterConfigsRequestBuilder::with_data(request_data.clone()))
-                as Box<dyn RequestBuilder>)
+            Ok(
+                Box::new(incremental_alter_configs_request::Builder::with_data(request_data.clone()))
+                    as Box<dyn RequestBuilder>,
+            )
         });
 
         let handles = Arc::new(handles);
@@ -1144,7 +1145,7 @@ fn get_create_acls_call(
     let create_request = Box::new(move |_timeout_ms: i32| {
         let mut data = CreateAclsRequestData::new();
         data.set_creations(acl_creations.clone());
-        Ok(Box::new(CreateAclsRequestBuilder::new(data)) as Box<dyn RequestBuilder>)
+        Ok(Box::new(create_acls_request::Builder::new(data)) as Box<dyn RequestBuilder>)
     });
 
     let resp_mm = mm.clone();
@@ -1202,7 +1203,7 @@ fn get_create_acls_call(
 /// `KafkaAdminClient.describeAcls`.
 fn get_describe_acls_call(filter: AclBindingFilter, handle: KafkaFutureImpl<Vec<AclBinding>>, deadline: i64) -> Call {
     let create_request = Box::new(move |_timeout_ms: i32| {
-        Ok(Box::new(DescribeAclsRequestBuilder::new(&filter)) as Box<dyn RequestBuilder>)
+        Ok(Box::new(describe_acls_request::Builder::new(&filter)) as Box<dyn RequestBuilder>)
     });
 
     let resp_handle = handle.clone();
@@ -1252,7 +1253,7 @@ fn get_describe_client_quotas_call(
     deadline: i64,
 ) -> Call {
     let create_request = Box::new(move |_timeout_ms: i32| {
-        Ok(Box::new(DescribeClientQuotasRequestBuilder::new(&filter)) as Box<dyn RequestBuilder>)
+        Ok(Box::new(describe_client_quotas_request::Builder::new(&filter)) as Box<dyn RequestBuilder>)
     });
 
     let resp_handle = handle.clone();
@@ -1299,7 +1300,10 @@ fn get_alter_client_quotas_call(
 ) -> Call {
     let request_entries = entries;
     let create_request = Box::new(move |_timeout_ms: i32| {
-        Ok(Box::new(AlterClientQuotasRequestBuilder::new(&request_entries, validate_only)) as Box<dyn RequestBuilder>)
+        Ok(
+            Box::new(alter_client_quotas_request::Builder::new(&request_entries, validate_only))
+                as Box<dyn RequestBuilder>,
+        )
     });
 
     let resp_futures = Arc::clone(&futures);
@@ -1370,7 +1374,7 @@ fn get_describe_user_scram_credentials_call(
                 data.set_users(Some(user_names));
             }
         }
-        Ok(Box::new(DescribeUserScramCredentialsRequestBuilder::new(data)) as Box<dyn RequestBuilder>)
+        Ok(Box::new(describe_user_scram_credentials_request::Builder::new(data)) as Box<dyn RequestBuilder>)
     });
 
     let resp_handle = handle.clone();
@@ -1419,7 +1423,7 @@ fn get_alter_user_scram_credentials_call(
     let create_request = Box::new(move |_timeout_ms: i32| {
         let mut data = AlterUserScramCredentialsRequestData::new();
         data.set_upsertions(upsertions.clone()).set_deletions(deletions.clone());
-        Ok(Box::new(AlterUserScramCredentialsRequestBuilder::new(data)) as Box<dyn RequestBuilder>)
+        Ok(Box::new(alter_user_scram_credentials_request::Builder::new(data)) as Box<dyn RequestBuilder>)
     });
 
     let resp_mm = metadata_manager;
@@ -1568,7 +1572,7 @@ fn get_create_delegation_token_call(
             data.owner_principal_name = Some(owner.name().to_string());
             data.owner_principal_type = Some(owner.principal_type().to_string());
         }
-        Ok(Box::new(CreateDelegationTokenRequestBuilder::new(data)) as Box<dyn RequestBuilder>)
+        Ok(Box::new(create_delegation_token_request::Builder::new(data)) as Box<dyn RequestBuilder>)
     });
 
     let resp_handle = handle.clone();
@@ -1630,7 +1634,7 @@ fn get_renew_delegation_token_call(
         let mut data = RenewDelegationTokenRequestData::new();
         data.hmac = hmac.clone();
         data.renew_period_ms = renew_time_period_ms;
-        Ok(Box::new(RenewDelegationTokenRequestBuilder::new(data)) as Box<dyn RequestBuilder>)
+        Ok(Box::new(renew_delegation_token_request::Builder::new(data)) as Box<dyn RequestBuilder>)
     });
 
     let resp_handle = handle.clone();
@@ -1674,7 +1678,7 @@ fn get_expire_delegation_token_call(
         let mut data = ExpireDelegationTokenRequestData::new();
         data.hmac = hmac.clone();
         data.expiry_time_period_ms = expiry_time_period_ms;
-        Ok(Box::new(ExpireDelegationTokenRequestBuilder::new(data)) as Box<dyn RequestBuilder>)
+        Ok(Box::new(expire_delegation_token_request::Builder::new(data)) as Box<dyn RequestBuilder>)
     });
 
     let resp_handle = handle.clone();
@@ -1714,7 +1718,7 @@ fn get_describe_delegation_token_call(
     deadline: i64,
 ) -> Call {
     let create_request = Box::new(move |_timeout_ms: i32| {
-        Ok(Box::new(DescribeDelegationTokenRequestBuilder::new(owners.as_deref())) as Box<dyn RequestBuilder>)
+        Ok(Box::new(describe_delegation_token_request::Builder::new(owners.as_deref())) as Box<dyn RequestBuilder>)
     });
 
     let resp_handle = handle.clone();
@@ -1758,7 +1762,7 @@ fn get_delete_acls_call(
     let create_request = Box::new(move |_timeout_ms: i32| {
         let mut data = DeleteAclsRequestData::new();
         data.set_filters(delete_acls_filters.clone());
-        Ok(Box::new(DeleteAclsRequestBuilder::new(data)) as Box<dyn RequestBuilder>)
+        Ok(Box::new(delete_acls_request::Builder::new(data)) as Box<dyn RequestBuilder>)
     });
 
     let resp_mm = mm.clone();
@@ -1899,7 +1903,7 @@ fn get_alter_partition_reassignments_call(
         data.set_topics(topics);
         data.set_timeout_ms(timeout_ms);
         data.set_allow_replication_factor_change(allow_replication_factor_change);
-        Ok(Box::new(AlterPartitionReassignmentsRequestBuilder::new(data)) as Box<dyn RequestBuilder>)
+        Ok(Box::new(alter_partition_reassignments_request::Builder::new(data)) as Box<dyn RequestBuilder>)
     });
 
     let resp_mm = mm.clone();
@@ -2024,7 +2028,7 @@ fn get_list_partition_reassignments_call(
             }
             list_data.set_topics(Some(topics_by_name.into_values().collect()));
         }
-        Ok(Box::new(ListPartitionReassignmentsRequestBuilder::new(list_data)) as Box<dyn RequestBuilder>)
+        Ok(Box::new(list_partition_reassignments_request::Builder::new(list_data)) as Box<dyn RequestBuilder>)
     });
 
     let resp_mm = mm.clone();
@@ -2086,8 +2090,8 @@ fn get_list_partition_reassignments_call(
 /// Mirrors `KafkaAdminClient.nodeFor`.
 #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClient#nodeFor")]
 fn node_for(resource: &ConfigResource) -> Option<i32> {
-    if (resource.resource_type() == ConfigResourceType::Broker && !resource.is_default())
-        || resource.resource_type() == ConfigResourceType::BrokerLogger
+    if (resource.resource_type() == config_resource::Type::Broker && !resource.is_default())
+        || resource.resource_type() == config_resource::Type::BrokerLogger
     {
         // Java parses `Integer.valueOf(resource.name())`; a non-numeric name
         // would throw. Here a parse failure degrades to "any broker" rather
@@ -2156,7 +2160,7 @@ fn get_describe_configs_call(
         data.set_resources(resources);
         data.set_include_synonyms(include_synonyms);
         data.set_include_documentation(include_documentation);
-        Ok(Box::new(DescribeConfigsRequestBuilder::new(data)) as Box<dyn RequestBuilder>)
+        Ok(Box::new(describe_configs_request::Builder::new(data)) as Box<dyn RequestBuilder>)
     });
 
     let resp_unified = Arc::clone(&unified);
@@ -2282,7 +2286,7 @@ fn get_describe_log_dirs_call(
         // Query selected partitions in all log directories (topics == null).
         let mut data = DescribeLogDirsRequestData::new();
         data.set_topics(None);
-        Ok(Box::new(DescribeLogDirsRequestBuilder::new(data)) as Box<dyn RequestBuilder>)
+        Ok(Box::new(describe_log_dirs_request::Builder::new(data)) as Box<dyn RequestBuilder>)
     });
 
     let resp_handle = handle.clone();
@@ -2333,7 +2337,7 @@ fn get_alter_replica_log_dirs_call(
     deadline: i64,
 ) -> Call {
     let create_request = Box::new(move |_timeout_ms: i32| {
-        Ok(Box::new(AlterReplicaLogDirsRequestBuilder::new(assignment.clone())) as Box<dyn RequestBuilder>)
+        Ok(Box::new(alter_replica_log_dirs_request::Builder::new(assignment.clone())) as Box<dyn RequestBuilder>)
     });
 
     let resp_futures = Arc::clone(&futures);
@@ -2411,7 +2415,7 @@ fn get_describe_replica_log_dirs_call(
 ) -> Call {
     let create_request = Box::new(move |_timeout_ms: i32| {
         // Query selected partitions in all log directories.
-        Ok(Box::new(DescribeLogDirsRequestBuilder::new(request_data.clone())) as Box<dyn RequestBuilder>)
+        Ok(Box::new(describe_log_dirs_request::Builder::new(request_data.clone())) as Box<dyn RequestBuilder>)
     });
 
     let resp_futures = Arc::clone(&futures);
@@ -2549,7 +2553,7 @@ fn get_create_topics_call(
         data.set_topics(topics);
         data.set_timeout_ms(timeout_ms);
         data.set_validate_only(validate_only);
-        Ok(Box::new(CreateTopicsRequestBuilder::new(data)) as Box<dyn RequestBuilder>)
+        Ok(Box::new(create_topics_request::Builder::new(data)) as Box<dyn RequestBuilder>)
     });
 
     let resp_mm = mm.clone();
@@ -2703,7 +2707,7 @@ fn get_create_partitions_call(
         data.set_topics(topics);
         data.set_timeout_ms(timeout_ms);
         data.set_validate_only(validate_only);
-        Ok(Box::new(CreatePartitionsRequestBuilder::new(data)) as Box<dyn RequestBuilder>)
+        Ok(Box::new(create_partitions_request::Builder::new(data)) as Box<dyn RequestBuilder>)
     });
 
     let resp_mm = mm.clone();
@@ -2817,7 +2821,7 @@ fn get_delete_topics_call(
         let mut data = DeleteTopicsRequestData::new();
         data.set_topic_names(req_names.clone());
         data.set_timeout_ms(timeout_ms);
-        Ok(Box::new(DeleteTopicsRequestBuilder::new(data)) as Box<dyn RequestBuilder>)
+        Ok(Box::new(delete_topics_request::Builder::new(data)) as Box<dyn RequestBuilder>)
     });
 
     let resp_mm = mm.clone();
@@ -2935,7 +2939,7 @@ fn get_delete_topics_with_ids_call(
             .collect();
         data.set_topics(states);
         data.set_timeout_ms(timeout_ms);
-        Ok(Box::new(DeleteTopicsRequestBuilder::new(data)) as Box<dyn RequestBuilder>)
+        Ok(Box::new(delete_topics_request::Builder::new(data)) as Box<dyn RequestBuilder>)
     });
 
     let resp_mm = mm.clone();
@@ -3156,7 +3160,7 @@ impl Admin for KafkaAdminClient {
         let list_internal = options.should_list_internal();
 
         let create_request = Box::new(move |_timeout_ms: i32| {
-            Ok(Box::new(MetadataRequestBuilder::all_topics()) as Box<dyn RequestBuilder>)
+            Ok(Box::new(metadata_request::Builder::all_topics()) as Box<dyn RequestBuilder>)
         });
 
         let resp_handle = handle.clone();
@@ -3509,7 +3513,7 @@ impl Admin for KafkaAdminClient {
                 data.set_topics(Some(Vec::new()));
                 data.set_allow_auto_topic_creation(true);
                 data.set_include_cluster_authorized_operations(include_authorized_operations);
-                Ok(Box::new(MetadataRequestBuilder::with_data(data)) as Box<dyn RequestBuilder>)
+                Ok(Box::new(metadata_request::Builder::with_data(data)) as Box<dyn RequestBuilder>)
             } else {
                 if req_mm.using_bootstrap_controllers() && include_fenced_brokers {
                     return Err(Error::local_illegal_argument(
@@ -3525,7 +3529,7 @@ impl Admin for KafkaAdminClient {
                 data.set_include_cluster_authorized_operations(include_authorized_operations);
                 data.set_endpoint_type(endpoint_type);
                 data.set_include_fenced_brokers(include_fenced_brokers);
-                Ok(Box::new(DescribeClusterRequestBuilder::new(data)) as Box<dyn RequestBuilder>)
+                Ok(Box::new(describe_cluster_request::Builder::new(data)) as Box<dyn RequestBuilder>)
             }
         });
 
@@ -3673,7 +3677,7 @@ impl Admin for KafkaAdminClient {
         for resource in configs.keys() {
             let mut node = node_for(resource);
             if self.shared.metadata_manager.using_bootstrap_controllers()
-                && resource.resource_type() != ConfigResourceType::BrokerLogger
+                && resource.resource_type() != config_resource::Type::BrokerLogger
             {
                 node = None;
             }
@@ -3704,7 +3708,7 @@ impl Admin for KafkaAdminClient {
 
     fn list_config_resources_with_options(
         &self,
-        config_resource_types: &HashSet<ConfigResourceType>,
+        config_resource_types: &HashSet<config_resource::Type>,
         options: ListConfigResourcesOptions,
     ) -> ListConfigResourcesResult {
         let now = self.now();
@@ -3712,11 +3716,11 @@ impl Admin for KafkaAdminClient {
         let handle: KafkaFutureImpl<Vec<ConfigResource>> = KafkaFutureImpl::new();
         let public = handle.future();
 
-        let resource_type_ids: Vec<i8> = config_resource_types.iter().map(ConfigResourceType::id).collect();
+        let resource_type_ids: Vec<i8> = config_resource_types.iter().map(config_resource::Type::id).collect();
         let create_request = Box::new(move |_timeout_ms: i32| {
             let mut data = ListConfigResourcesRequestData::new();
             data.set_resource_types(resource_type_ids.clone());
-            Ok(Box::new(ListConfigResourcesRequestBuilder::new(data)) as Box<dyn RequestBuilder>)
+            Ok(Box::new(list_config_resources_request::Builder::new(data)) as Box<dyn RequestBuilder>)
         });
 
         let resp_handle = handle.clone();
@@ -3767,8 +3771,8 @@ impl Admin for KafkaAdminClient {
         // `List.of(ConfigResource.Type.CLIENT_METRICS.id())`).
         let create_request = Box::new(move |_timeout_ms: i32| {
             let mut data = ListConfigResourcesRequestData::new();
-            data.set_resource_types(vec![ConfigResourceType::ClientMetrics.id()]);
-            Ok(Box::new(ListConfigResourcesRequestBuilder::new(data)) as Box<dyn RequestBuilder>)
+            data.set_resource_types(vec![config_resource::Type::ClientMetrics.id()]);
+            Ok(Box::new(list_config_resources_request::Builder::new(data)) as Box<dyn RequestBuilder>)
         });
 
         let resp_handle = handle.clone();
@@ -3783,7 +3787,7 @@ impl Admin for KafkaAdminClient {
                 let listings: Vec<ClientMetricsResourceListing> = list_response
                     .config_resources()
                     .into_iter()
-                    .filter(|resource| resource.resource_type() == ConfigResourceType::ClientMetrics)
+                    .filter(|resource| resource.resource_type() == config_resource::Type::ClientMetrics)
                     .map(|resource| ClientMetricsResourceListing::new(resource.name()))
                     .collect();
                 resp_handle.complete(listings);
@@ -3951,7 +3955,7 @@ impl Admin for KafkaAdminClient {
 
         let req_partitions = request_partitions.clone();
         let create_request = Box::new(move |timeout_ms: i32| {
-            Ok(Box::new(ElectLeadersRequestBuilder::new(
+            Ok(Box::new(elect_leaders_request::Builder::new(
                 election_type,
                 req_partitions.clone(),
                 timeout_ms,
@@ -4771,8 +4775,9 @@ impl Admin for KafkaAdminClient {
             None => NodeProvider::LeastLoadedBrokerOrActiveKController,
         };
 
-        let create_request =
-            Box::new(move |_timeout_ms: i32| Ok(Box::new(ApiVersionsRequestBuilder::new()) as Box<dyn RequestBuilder>));
+        let create_request = Box::new(move |_timeout_ms: i32| {
+            Ok(Box::new(api_versions_request::Builder::new()) as Box<dyn RequestBuilder>)
+        });
 
         let resp_handle = handle.clone();
         let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64, _cur_node: Option<&Node>| {
@@ -4853,7 +4858,7 @@ impl Admin for KafkaAdminClient {
             data.set_timeout_ms(timeout_ms);
             data.set_validate_only(validate_only);
             data.set_feature_updates(collection);
-            Ok(Box::new(UpdateFeaturesRequestBuilder::new(data)) as Box<dyn RequestBuilder>)
+            Ok(Box::new(update_features_request::Builder::new(data)) as Box<dyn RequestBuilder>)
         });
 
         let resp_mm = self.shared.metadata_manager.clone();
@@ -5062,9 +5067,9 @@ fn get_describe_topics_by_names_call(
             ));
             data.set_allow_auto_topic_creation(false);
             data.set_include_topic_authorized_operations(include_authorized_operations);
-            Ok(Box::new(MetadataRequestBuilder::with_data(data)) as Box<dyn RequestBuilder>)
+            Ok(Box::new(metadata_request::Builder::with_data(data)) as Box<dyn RequestBuilder>)
         } else {
-            Ok(Box::new(MetadataRequestBuilder::all_topics()) as Box<dyn RequestBuilder>)
+            Ok(Box::new(metadata_request::Builder::all_topics()) as Box<dyn RequestBuilder>)
         }
     });
 
@@ -5140,7 +5145,7 @@ fn get_describe_topics_by_ids_call(
         ));
         data.set_allow_auto_topic_creation(false);
         data.set_include_topic_authorized_operations(include_authorized_operations);
-        Ok(Box::new(MetadataRequestBuilder::with_data(data)) as Box<dyn RequestBuilder>)
+        Ok(Box::new(metadata_request::Builder::with_data(data)) as Box<dyn RequestBuilder>)
     });
 
     let resp_futures = Arc::clone(&futures);
@@ -8197,7 +8202,7 @@ mod tests {
         OpType,
     };
     use crate::common::acl::AclOperation;
-    use crate::common::config::{ConfigResource, ConfigResourceType};
+    use crate::common::config::{ConfigResource, config_resource};
     use crate::common::requests::{
         DescribeClusterResponse, DescribeConfigsResponse, IncrementalAlterConfigsResponse, ListConfigResourcesResponse,
     };
@@ -8350,12 +8355,12 @@ mod tests {
     #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testDescribeBrokerConfigs")]
     async fn test_describe_broker_configs() {
         let (admin, mut runnable, _time, nodes) = env();
-        let broker0 = ConfigResource::new(ConfigResourceType::Broker, "0".to_string());
-        let broker1 = ConfigResource::new(ConfigResourceType::Broker, "1".to_string());
+        let broker0 = ConfigResource::new(config_resource::Type::Broker, "0".to_string());
+        let broker1 = ConfigResource::new(config_resource::Type::Broker, "1".to_string());
         runnable.client_mut().prepare_response_from(
             describe_configs_response(vec![describe_configs_result(
                 "0",
-                ConfigResourceType::Broker.id(),
+                config_resource::Type::Broker.id(),
                 Errors::None,
             )]),
             &nodes[0],
@@ -8363,7 +8368,7 @@ mod tests {
         runnable.client_mut().prepare_response_from(
             describe_configs_response(vec![describe_configs_result(
                 "1",
-                ConfigResourceType::Broker.id(),
+                config_resource::Type::Broker.id(),
                 Errors::None,
             )]),
             &nodes[1],
@@ -8381,14 +8386,14 @@ mod tests {
     #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testDescribeBrokerAndLogConfigs")]
     async fn test_describe_broker_and_log_configs() {
         let (admin, mut runnable, _time, nodes) = env();
-        let broker = ConfigResource::new(ConfigResourceType::Broker, "0".to_string());
-        let broker_logger = ConfigResource::new(ConfigResourceType::BrokerLogger, "0".to_string());
+        let broker = ConfigResource::new(config_resource::Type::Broker, "0".to_string());
+        let broker_logger = ConfigResource::new(config_resource::Type::BrokerLogger, "0".to_string());
         // Both broker and broker-logger resources for node 0 go to node 0 in one
         // request.
         runnable.client_mut().prepare_response_from(
             describe_configs_response(vec![
-                describe_configs_result("0", ConfigResourceType::Broker.id(), Errors::None),
-                describe_configs_result("0", ConfigResourceType::BrokerLogger.id(), Errors::None),
+                describe_configs_result("0", config_resource::Type::Broker.id(), Errors::None),
+                describe_configs_result("0", config_resource::Type::BrokerLogger.id(), Errors::None),
             ]),
             &nodes[0],
         );
@@ -8405,14 +8410,14 @@ mod tests {
     #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testDescribeConfigsPartialResponse")]
     async fn test_describe_configs_partial_response() {
         let (admin, mut runnable, _time, _nodes) = env();
-        let topic = ConfigResource::new(ConfigResourceType::Topic, "topic".to_string());
-        let topic2 = ConfigResource::new(ConfigResourceType::Topic, "topic2".to_string());
+        let topic = ConfigResource::new(config_resource::Type::Topic, "topic".to_string());
+        let topic2 = ConfigResource::new(config_resource::Type::Topic, "topic2".to_string());
         // The (single, least-loaded) response only contains `topic`.
         runnable
             .client_mut()
             .prepare_response(describe_configs_response(vec![describe_configs_result(
                 "topic",
-                ConfigResourceType::Topic.id(),
+                config_resource::Type::Topic.id(),
                 Errors::None,
             )]));
         let result =
@@ -8428,11 +8433,11 @@ mod tests {
     #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testDescribeConfigsUnrequested")]
     async fn test_describe_configs_unrequested() {
         let (admin, mut runnable, _time, _nodes) = env();
-        let topic = ConfigResource::new(ConfigResourceType::Topic, "topic".to_string());
+        let topic = ConfigResource::new(config_resource::Type::Topic, "topic".to_string());
         // Response contains an extra, unrequested resource; it is ignored.
         runnable.client_mut().prepare_response(describe_configs_response(vec![
-            describe_configs_result("topic", ConfigResourceType::Topic.id(), Errors::None),
-            describe_configs_result("unrequested", ConfigResourceType::Topic.id(), Errors::None),
+            describe_configs_result("topic", config_resource::Type::Topic.id(), Errors::None),
+            describe_configs_result("unrequested", config_resource::Type::Topic.id(), Errors::None),
         ]));
         let result = admin.describe_configs_with_options(std::slice::from_ref(&topic), DescribeConfigsOptions::new());
         pump(&mut runnable, 8).await;
@@ -8445,11 +8450,11 @@ mod tests {
     #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testDescribeClientMetricsConfigs")]
     async fn test_describe_client_metrics_configs() {
         let (admin, mut runnable, _time, _nodes) = env();
-        let sub1 = ConfigResource::new(ConfigResourceType::ClientMetrics, "sub1".to_string());
-        let sub2 = ConfigResource::new(ConfigResourceType::ClientMetrics, "sub2".to_string());
+        let sub1 = ConfigResource::new(config_resource::Type::ClientMetrics, "sub1".to_string());
+        let sub2 = ConfigResource::new(config_resource::Type::ClientMetrics, "sub2".to_string());
         runnable.client_mut().prepare_response(describe_configs_response(vec![
-            describe_configs_result("sub1", ConfigResourceType::ClientMetrics.id(), Errors::None),
-            describe_configs_result("sub2", ConfigResourceType::ClientMetrics.id(), Errors::None),
+            describe_configs_result("sub1", config_resource::Type::ClientMetrics.id(), Errors::None),
+            describe_configs_result("sub2", config_resource::Type::ClientMetrics.id(), Errors::None),
         ]));
         let result = admin.describe_configs_with_options(&[sub1.clone(), sub2.clone()], DescribeConfigsOptions::new());
         pump(&mut runnable, 8).await;
@@ -8486,10 +8491,10 @@ mod tests {
     async fn test_incremental_alter_configs() {
         let (admin, mut runnable, _time, _nodes) = env();
 
-        let broker_resource = ConfigResource::new(ConfigResourceType::Broker, String::new());
-        let topic_resource = ConfigResource::new(ConfigResourceType::Topic, "topic1".to_string());
-        let metric_resource = ConfigResource::new(ConfigResourceType::ClientMetrics, "metric1".to_string());
-        let group_resource = ConfigResource::new(ConfigResourceType::Group, "group1".to_string());
+        let broker_resource = ConfigResource::new(config_resource::Type::Broker, String::new());
+        let topic_resource = ConfigResource::new(config_resource::Type::Topic, "topic1".to_string());
+        let metric_resource = ConfigResource::new(config_resource::Type::ClientMetrics, "metric1".to_string());
+        let group_resource = ConfigResource::new(config_resource::Type::Group, "group1".to_string());
 
         // Error scenario: all four resources are least-loaded-routed (default
         // broker, topic, client-metrics, group all have node_for == None), so a
@@ -8497,25 +8502,25 @@ mod tests {
         runnable.client_mut().prepare_response(incremental_alter_configs_response(vec![
             alter_configs_resource_response(
                 "",
-                ConfigResourceType::Broker.id(),
+                config_resource::Type::Broker.id(),
                 Errors::ClusterAuthorizationFailed,
                 "authorization error",
             ),
             alter_configs_resource_response(
                 "metric1",
-                ConfigResourceType::ClientMetrics.id(),
+                config_resource::Type::ClientMetrics.id(),
                 Errors::InvalidRequest,
                 "Subscription is not allowed",
             ),
             alter_configs_resource_response(
                 "topic1",
-                ConfigResourceType::Topic.id(),
+                config_resource::Type::Topic.id(),
                 Errors::InvalidRequest,
                 "Config value append is not allowed for config",
             ),
             alter_configs_resource_response(
                 "group1",
-                ConfigResourceType::Group.id(),
+                config_resource::Type::Group.id(),
                 Errors::InvalidConfig,
                 "Unknown group config name: group.initial.rebalance.delay.ms",
             ),
@@ -8565,9 +8570,9 @@ mod tests {
 
         // Success scenario.
         runnable.client_mut().prepare_response(incremental_alter_configs_response(vec![
-            alter_configs_resource_response("", ConfigResourceType::Broker.id(), Errors::None, ""),
-            alter_configs_resource_response("metric1", ConfigResourceType::ClientMetrics.id(), Errors::None, ""),
-            alter_configs_resource_response("group1", ConfigResourceType::Group.id(), Errors::None, ""),
+            alter_configs_resource_response("", config_resource::Type::Broker.id(), Errors::None, ""),
+            alter_configs_resource_response("metric1", config_resource::Type::ClientMetrics.id(), Errors::None, ""),
+            alter_configs_resource_response("group1", config_resource::Type::Group.id(), Errors::None, ""),
         ]));
         let mut success = HashMap::new();
         success.insert(broker_resource, vec![op1]);
@@ -8601,11 +8606,11 @@ mod tests {
     async fn test_list_config_resources() {
         let (admin, mut runnable, _time, _nodes) = env();
         let expected = [
-            ("client-metrics", ConfigResourceType::ClientMetrics.id()),
-            ("1", ConfigResourceType::Broker.id()),
-            ("1", ConfigResourceType::BrokerLogger.id()),
-            ("topic", ConfigResourceType::Topic.id()),
-            ("group", ConfigResourceType::Group.id()),
+            ("client-metrics", config_resource::Type::ClientMetrics.id()),
+            ("1", config_resource::Type::Broker.id()),
+            ("1", config_resource::Type::BrokerLogger.id()),
+            ("topic", config_resource::Type::Topic.id()),
+            ("group", config_resource::Type::Group.id()),
         ];
         runnable
             .client_mut()
@@ -8616,7 +8621,7 @@ mod tests {
         assert_eq!(listed.len(), expected.len());
         let expected_set: HashSet<ConfigResource> = expected
             .iter()
-            .map(|(name, type_id)| ConfigResource::new(ConfigResourceType::for_id(*type_id), (*name).to_string()))
+            .map(|(name, type_id)| ConfigResource::new(config_resource::Type::for_id(*type_id), (*name).to_string()))
             .collect();
         assert_eq!(listed.into_iter().collect::<HashSet<_>>(), expected_set);
     }
@@ -8641,7 +8646,7 @@ mod tests {
             .client_mut()
             .prepare_response(list_config_resources_response(Errors::UnsupportedVersion, &[]));
         let mut types = HashSet::new();
-        types.insert(ConfigResourceType::Unknown);
+        types.insert(config_resource::Type::Unknown);
         let result = admin.list_config_resources_with_options(&types, ListConfigResourcesOptions::new());
         pump(&mut runnable, 5).await;
         let err = result.all().get().await.unwrap_err();
@@ -8657,7 +8662,7 @@ mod tests {
     async fn test_list_client_metrics_resources() {
         use crate::admin::{ClientMetricsResourceListing, ListClientMetricsResourcesOptions};
         let (admin, mut runnable, _time, _nodes) = env();
-        let client_metrics_id = ConfigResourceType::ClientMetrics.id();
+        let client_metrics_id = config_resource::Type::ClientMetrics.id();
         let expected: HashSet<ClientMetricsResourceListing> = [
             ClientMetricsResourceListing::new("one"),
             ClientMetricsResourceListing::new("two"),
@@ -9652,7 +9657,7 @@ mod tests {
     use crate::admin::UpgradeType;
     use crate::api_message_type::ListenerType;
     use crate::api_versions_response_data::SupportedFeatureKey;
-    use crate::common::requests::{ApiVersionsResponse, ApiVersionsResponseBuilder, UpdateFeaturesResponse};
+    use crate::common::requests::{ApiVersionsResponse, UpdateFeaturesResponse, api_versions_response};
 
     /// Mirrors `KafkaAdminClientTest.defaultFeatureMetadata`.
     fn default_feature_metadata() -> FeatureMetadata {
@@ -9672,7 +9677,7 @@ mod tests {
             supported.set_max_version(5);
             let mut finalized = HashMap::new();
             finalized.insert("test_feature_1".to_string(), 2i16);
-            let response = ApiVersionsResponseBuilder::new()
+            let response = api_versions_response::Builder::new()
                 .set_api_versions(ApiVersionsResponse::filter_apis(ListenerType::Broker, false, false))
                 .set_supported_features(vec![supported])
                 .set_finalized_features(finalized)
@@ -10887,7 +10892,7 @@ mod tests {
     #[tokio::test]
     #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testListGroupsWithTypes")]
     async fn test_list_groups_with_types() {
-        use crate::common::requests::ConcreteRequest;
+        use crate::common::requests::AbstractRequest;
 
         let (admin, mut runnable, _time, nodes) = env_nodes_with_props(1, &[]);
         runnable.client_mut().prepare_response(metadata_resp(&nodes, Vec::new()));
@@ -10901,7 +10906,7 @@ mod tests {
             let reqs = runnable.client_mut().requests_mut();
             assert_eq!(reqs.len(), 1);
             match reqs[0].request_builder_mut().build().unwrap() {
-                ConcreteRequest::ListGroups(req) => {
+                AbstractRequest::ListGroups(req) => {
                     assert!(req.data().states_filter.is_empty());
                     assert_eq!(req.data().types_filter, vec![GroupType::Consumer.to_string()]);
                 },
@@ -10945,7 +10950,7 @@ mod tests {
     #[tokio::test]
     #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testListGroupsWithTypesOlderBrokerVersion")]
     async fn test_list_groups_with_types_older_broker_version() {
-        use crate::common::requests::ConcreteRequest;
+        use crate::common::requests::AbstractRequest;
 
         let (admin, mut runnable, _time, nodes) = env_nodes_with_props(1, &[]);
 
@@ -10967,7 +10972,7 @@ mod tests {
             assert_eq!(reqs.len(), 1);
             // At v5 the request still carries the classic types filter ...
             match reqs[0].request_builder_mut().build().unwrap() {
-                ConcreteRequest::ListGroups(req) => {
+                AbstractRequest::ListGroups(req) => {
                     assert_eq!(req.data().types_filter, vec![GroupType::Classic.to_string()]);
                 },
                 other => panic!("expected a ListGroups request, got {other:?}"),
@@ -10975,7 +10980,7 @@ mod tests {
             // ... but building at the older broker's v4 omits it (the request
             // succeeds against the older broker with an empty filter).
             match reqs[0].request_builder_mut().build_version(4).unwrap() {
-                ConcreteRequest::ListGroups(req) => assert!(req.data().types_filter.is_empty()),
+                AbstractRequest::ListGroups(req) => assert!(req.data().types_filter.is_empty()),
                 other => panic!("expected a ListGroups request, got {other:?}"),
             }
         }
@@ -11005,7 +11010,7 @@ mod tests {
     #[tokio::test]
     #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testListConsumerGroupsWithStates")]
     async fn test_list_consumer_groups_with_states() {
-        use crate::common::requests::ConcreteRequest;
+        use crate::common::requests::AbstractRequest;
 
         let (admin, mut runnable, _time, nodes) = env_nodes_with_props(1, &[]);
         runnable.client_mut().prepare_response(metadata_resp(&nodes, Vec::new()));
@@ -11015,7 +11020,7 @@ mod tests {
         {
             let reqs = runnable.client_mut().requests_mut();
             match reqs[0].request_builder_mut().build().unwrap() {
-                ConcreteRequest::ListGroups(req) => {
+                AbstractRequest::ListGroups(req) => {
                     let mut types = req.data().types_filter.clone();
                     types.sort();
                     assert_eq!(types, vec![GroupType::Classic.to_string(), GroupType::Consumer.to_string()]);
@@ -11055,7 +11060,7 @@ mod tests {
         alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testListConsumerGroupsWithTypesOlderBrokerVersion"
     )]
     async fn test_list_consumer_groups_with_types_older_broker_version() {
-        use crate::common::requests::ConcreteRequest;
+        use crate::common::requests::AbstractRequest;
 
         let (admin, mut runnable, _time, nodes) = env_nodes_with_props(1, &[]);
 
@@ -11067,7 +11072,7 @@ mod tests {
         {
             let reqs = runnable.client_mut().requests_mut();
             match reqs[0].request_builder_mut().build_version(4).unwrap() {
-                ConcreteRequest::ListGroups(req) => {
+                AbstractRequest::ListGroups(req) => {
                     assert_eq!(req.data().states_filter, vec![GroupState::Stable.to_string()]);
                     assert!(req.data().types_filter.is_empty());
                 },
@@ -11098,7 +11103,7 @@ mod tests {
     #[allow(deprecated)]
     #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testListConsumerGroupsDeprecated")]
     async fn test_list_consumer_groups_deprecated_with_states_and_types() {
-        use crate::common::requests::ConcreteRequest;
+        use crate::common::requests::AbstractRequest;
 
         let (admin, mut runnable, _time, nodes) = env_nodes_with_props(1, &[]);
         runnable.client_mut().prepare_response(metadata_resp(&nodes, Vec::new()));
@@ -11111,7 +11116,7 @@ mod tests {
         {
             let reqs = runnable.client_mut().requests_mut();
             match reqs[0].request_builder_mut().build().unwrap() {
-                ConcreteRequest::ListGroups(req) => {
+                AbstractRequest::ListGroups(req) => {
                     assert_eq!(req.data().states_filter, vec![GroupState::Stable.to_string()]);
                     assert_eq!(req.data().types_filter, vec![GroupType::Consumer.to_string()]);
                 },
@@ -11498,7 +11503,7 @@ mod tests {
     /// resource).
     async fn seed_mock_group(mock: &crate::admin::MockAdminClient, group_id: &str) {
         use crate::admin::{AlterConfigOp, ConfigEntry, OpType};
-        let resource = ConfigResource::new(ConfigResourceType::Group, group_id.to_string());
+        let resource = ConfigResource::new(config_resource::Type::Group, group_id.to_string());
         let ops = vec![AlterConfigOp::new(
             ConfigEntry::new("consumer.session.timeout.ms".to_string(), Some("45000".to_string())),
             OpType::Set,
@@ -11924,7 +11929,7 @@ mod tests {
         alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testListConsumerGroupOffsetsOptionsWithBatchedApi"
     )]
     async fn test_list_consumer_group_offsets_options_with_batched_api() {
-        use crate::common::requests::ConcreteRequest;
+        use crate::common::requests::AbstractRequest;
 
         // Java uses mockCluster(3, 0) with RETRIES_CONFIG = "0".
         let (admin, mut runnable, _time, nodes) = env_with_props(&[("retries", "0")]);
@@ -11953,7 +11958,7 @@ mod tests {
         // sent request's timeout (Java asserts clientRequest.requestTimeoutMs()).
         assert_eq!(client_request.request_timeout_ms(), 300);
         match client_request.request_builder_mut().build().unwrap() {
-            ConcreteRequest::OffsetFetch(req) => {
+            AbstractRequest::OffsetFetch(req) => {
                 let data = req.data();
                 // The core contract this test pins: requireStable(true) reaches
                 // the wire.
@@ -12784,7 +12789,7 @@ mod tests {
     /// no such matcher, so we inspect the emitted (queued, unanswered) request
     /// directly, which is the established request-inspection pattern.
     async fn assert_remove_members_reason(reason: Option<&str>, expected_reason: &str) {
-        use crate::common::requests::ConcreteRequest;
+        use crate::common::requests::AbstractRequest;
         let (admin, mut runnable, _time, nodes) = offsets_env(3);
         // Answer only FindCoordinator so the LeaveGroup request is sent but stays
         // queued (no prepared response), ready for inspection.
@@ -12802,7 +12807,7 @@ mod tests {
             r.client_mut()
                 .requests_mut()
                 .iter_mut()
-                .any(|req| matches!(req.request_builder_mut().build(), Ok(ConcreteRequest::LeaveGroup(_))))
+                .any(|req| matches!(req.request_builder_mut().build(), Ok(AbstractRequest::LeaveGroup(_))))
         })
         .await;
 
@@ -12811,7 +12816,7 @@ mod tests {
             .requests_mut()
             .iter_mut()
             .find_map(|req| match req.request_builder_mut().build() {
-                Ok(ConcreteRequest::LeaveGroup(r)) => Some(r),
+                Ok(AbstractRequest::LeaveGroup(r)) => Some(r),
                 _ => None,
             })
             .expect("a LeaveGroup request should be queued");
