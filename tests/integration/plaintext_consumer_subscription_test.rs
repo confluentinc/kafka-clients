@@ -93,6 +93,7 @@ use std::time::Duration;
 use std::time::Instant;
 
 use confluent_kafka::common::Error;
+use confluent_kafka::common::Errors;
 use confluent_kafka::common::TopicPartition;
 use confluent_kafka::common::record::TimestampType;
 use confluent_kafka::common::serialization::ByteArraySerializer;
@@ -782,28 +783,28 @@ async fn test_re2j_pattern_subscription_invalid_regex() {
 
     // Drive `poll()` until it surfaces an `InvalidRegularExpression`
     // error or the deadline elapses. Java's `waitForPollThrowException`
-    // uses a 30s deadline (TestUtils.DEFAULT_MAX_WAIT_MS); we match.
-    let deadline = Instant::now() + Duration::from_secs(30);
-    let mut saw_invalid_regex = false;
+    // (ClientsTestUtils.java:348-360) polls inside `TestUtils.waitForCondition`
+    // with its 15s default (`TestUtils.DEFAULT_MAX_WAIT_MS`), and returns
+    // `false` — i.e. keeps polling — on any exception that is not an
+    // `InvalidRegularExpression`; we match both. Java asserts only the
+    // exception class (the message is the broker's regex-parser text), so
+    // the typed variant is what is pinned here.
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let mut invalid_regex_err = None;
+    let mut last_other_err = None;
     while Instant::now() < deadline {
         match consumer.poll(Duration::from_millis(500)).await {
             Ok(_) => continue,
-            Err(err) => {
-                let msg = err.to_string();
-                if msg.contains("InvalidRegularExpression") || msg.contains("regular expression is not valid") {
-                    saw_invalid_regex = true;
-                    break;
-                }
-                // Re-surface anything else — Java fails the test in
-                // that branch.
-                panic!("expected InvalidRegularExpression, got: {msg}");
+            Err(err @ Error::InvalidRegularExpression(_)) => {
+                invalid_regex_err = Some(err);
+                break;
             },
+            Err(other) => last_other_err = Some(other),
         }
     }
-    assert!(
-        saw_invalid_regex,
-        "expected poll to surface InvalidRegularExpression within deadline"
-    );
+    let err = invalid_regex_err
+        .unwrap_or_else(|| panic!("Continuous poll not fail (last non-matching error: {last_other_err:?})"));
+    assert_eq!(err.error(), Errors::InvalidRegularExpression);
 
     // Java asserts `assertDoesNotThrow(consumer::unsubscribe)`.
     consumer
@@ -1032,28 +1033,23 @@ async fn setup_subscribe_invalid_topic(consumer: &mut BytesConsumer) {
         .expect("subscribe should accept the topic at API level (broker-side validation)");
 
     let deadline = Instant::now() + Duration::from_secs(5);
-    let mut saw_invalid_topic = false;
+    let mut invalid_topic_err = None;
     while Instant::now() < deadline {
         match consumer.poll(Duration::from_millis(500)).await {
             Ok(_) => continue,
-            Err(err) => {
-                let msg = err.to_string();
-                // Java asserts exact equality with
-                // `"Invalid topics: [topic abc]"`. The Rust translation
-                // surfaces `Error::InvalidTopic` whose `Display`
-                // includes the message + the topic set; we check both
-                // the canonical message and the topic name appear in
-                // the error string.
-                if (msg.contains("Invalid topics") || msg.contains("invalid topic")) && msg.contains(invalid_topic_name)
-                {
-                    saw_invalid_topic = true;
-                    break;
-                }
-                panic!("expected an invalid-topic error, got: {msg}");
+            Err(Error::InvalidTopic(e)) => {
+                invalid_topic_err = Some(e);
+                break;
             },
+            // Java: `fail("An InvalidTopicException should be thrown. But " +
+            // e.getClass() + " is thrown")`.
+            Err(other) => panic!("An InvalidTopicException should be thrown. But {other:?} is thrown"),
         }
     }
-    assert!(saw_invalid_topic, "expected poll to surface InvalidTopic within 5s deadline");
+    let e = invalid_topic_err.expect("An InvalidTopicException should be thrown.");
+    // Java line 691: `assertEquals("Invalid topics: [" + invalidTopicName + "]", ...)`.
+    assert_eq!(e.kafka_error().message(), format!("Invalid topics: [{invalid_topic_name}]"));
+    assert_eq!(e.invalid_topics(), &HashSet::from([invalid_topic_name.to_string()]));
 }
 
 // ── Local utilities ────────────────────────────────────────────────────
