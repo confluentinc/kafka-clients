@@ -124,3 +124,21 @@ no payload buffer, not an authentication error) and exactly `524288` (read in
 full through `receive_response_or_token`); it fails with the unlimited receive
 put back. Recorded as a Rust-only deviation in plan §4 (Java's client is
 `UNLIMITED`, `SaslClientAuthenticator.java:475`, `:570`) and as §6 item 15.
+
+## Pass 2 (Critic 78 over `53298153`, `e6b7dd28`, `38945ca0`): zero findings
+
+Gates re-run at `d2995f75`: lib `4013 passed; 0 failed; 2 ignored`, ffi `206
+passed`, build / ffi build / format-check / lint clean. Every "fails with the old
+code put back" claim from round 2 was re-verified by mutation in a scratch copy;
+each mutation broke exactly the tests named and no others. The autosquash onto
+`d7f38f14` was re-run in a scratch clone (conflict-free, identical tree) and each
+squashed commit built and passed `cargo test --lib`, so the squashed history
+bisects.
+
+One note, not a finding: the 512 KiB SASL receive cap is safe only while
+client-side re-authentication (KIP-368) stays unimplemented, because Java reads
+parked responses to earlier requests (`Fetch` included) through the same receive
+during re-authentication (`SaslClientAuthenticator.java:345`, `:586-593`).
+Resolution (Manager, direct — a one-paragraph doc change): the constant's rustdoc
+now states the assumption and what a future re-authentication implementation
+must do (`fixup! fix(security): cap the SASL client receive`).

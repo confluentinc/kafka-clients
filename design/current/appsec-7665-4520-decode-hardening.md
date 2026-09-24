@@ -245,6 +245,10 @@ than silently diverging.
 - 2026-09-24: Actor 78 round 2: fixups of commit 1 (§6 items 3 and 5) and
   commit 2 (§1 D4, §6 item 11), and the SASL client receive capped (§4, §6
   item 15).
+- 2026-09-24: Critic 78 pass 2 over the round-2 commits: zero findings; one
+  note (the 512 KiB SASL cap assumes no KIP-368 re-authentication), taken as a
+  doc sentence on the constant by the Manager. Loop 78 closed. Still owed: one
+  clean run of the consumer integration filter once Docker is back.
 
 ## 6. Implementation notes (Actor 78)
 

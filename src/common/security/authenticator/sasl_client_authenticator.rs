@@ -98,6 +98,16 @@ pub const SASL_CLIENT_AUTHENTICATOR_MIN_RESERVED_CORRELATION_ID: i32 =
 /// Rust-only constant rather than a configuration key. An oversized receive fails
 /// with an `InvalidReceiveError`, which closes the connection like any other
 /// oversized receive.
+///
+/// The value is sized for the authentication phase only. Java's client-side
+/// re-authentication (KIP-368) parks responses to *earlier* requests that arrive
+/// mid-re-authentication — a `Fetch` response among them — in
+/// `pendingAuthenticatedReceives` after reading them through this same receive
+/// (`SaslClientAuthenticator.java:345`, `:570`, `:586-593`). This client does not
+/// implement re-authentication, so only SASL-phase responses reach here; if it
+/// ever does, those parked responses must be read under the channel's own
+/// receive limit, or a fetch response larger than this constant would
+/// disconnect the consumer in the middle of re-authenticating.
 pub(crate) const SASL_CLIENT_AUTHENTICATOR_MAX_RECEIVE_SIZE: i32 = 524_288;
 
 /// Returns `true` if the correlation ID is reserved for SASL requests.
