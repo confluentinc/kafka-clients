@@ -259,3 +259,4 @@ null value as `b""` (Phase 2 / Critic 66).
 - Phase 13 / Actor 77: 7ba4b551, b5b45912, f7305af9, d9dcda08, cc704bc0 (exact messages + typed variants; added testPartitionsForTimeoutErrorWhenTopicDoesNotExist). Critic 77: 1 low finding (invalid-topic loop must retry like retryOnExceptionWithTimeout) → fixed 9c27aa11. Phase 13 DONE.
 - Phase 14 / Actor 78: 56c2d387 (SASL_PLAINTEXT + SSL testSimpleConsumption, shared base_consumer_test.rs), 5adf6d8c (SSL send-offset/close/flush native; Java-shaped testClose). Critic 78: clean. Phase 14 DONE.
 - Phase 15 / Actor 79: cd653ef1 (Kraft isolated controllers, dedicated clusters, lifecycle API), 1e630fe0 (smoke tests). Full suite 265 passed / 3 ignored x2. Critic 79 reviewing.
+- Phase 15: Critic 79 1 finding (wait_for_ready_brokers not pinned per broker) → fixed 1ba63a5c (raw Metadata v12 per broker); re-review clean. Phase 15 DONE.
