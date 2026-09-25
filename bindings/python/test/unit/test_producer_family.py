@@ -896,8 +896,8 @@ def test_drain_waits_until_the_accumulation_is_handed_over() -> None:
         p.close(timeout=0)
 
 
-@pytest.mark.parametrize("operation", ["begin_transaction", "commit_transaction",
-                                       "abort_transaction", "init_transactions", "flush"])
+@pytest.mark.parametrize("operation", ["commit_transaction", "abort_transaction",
+                                       "init_transactions", "flush"])
 def test_control_operations_run_after_the_sends_that_returned(operation: str) -> None:
     # producer-transactions.md §13: a send that returned belongs to the
     # control call after it, so the call waits until the record is with the
@@ -927,6 +927,40 @@ def test_control_operations_run_after_the_sends_that_returned(operation: str) ->
         else:
             assert isinstance(result["error"], IllegalStateError)
             assert str(result["error"]) == NOT_TRANSACTIONAL
+    finally:
+        p.close(timeout=0)
+
+
+@pytest.mark.parametrize("transactional", [False, True])
+def test_begin_transaction_does_not_wait_for_earlier_sends(transactional: bool) -> None:
+    # Critic 75 N1: Java's beginTransaction does not wait. No send that
+    # returned can still be on its way (a transactional producer's send with no
+    # transaction started returns once its record is with the Rust producer),
+    # so begin_transaction() does not drain: with the handover held, it returns
+    # at once, while a transactional send is still waiting for its handover.
+    configs = {**UNREACHABLE, "transactional.id": "txn"} if transactional else UNREACHABLE
+    p = KafkaProducer(configs=configs)
+    try:
+        _lib.Producer_test_set_paused(p._c_producer, True)  # noqa: SLF001
+        sent = threading.Event()
+
+        def send() -> None:
+            p.send(record=RECORD)
+            sent.set()
+
+        t = threading.Thread(target=send)
+        t.start()
+        assert sent.wait(0.3) is not transactional
+        start = time.monotonic()
+        with pytest.raises(IllegalStateError) as err:
+            p.begin_transaction()
+        assert time.monotonic() - start < 0.3
+        assert str(err.value) == (
+            "TransactionalId txn: Invalid transition attempted from state UNINITIALIZED to "
+            "state IN_TRANSACTION" if transactional else NOT_TRANSACTIONAL)
+        _lib.Producer_test_set_paused(p._c_producer, False)  # noqa: SLF001
+        t.join(30)
+        assert sent.is_set()
     finally:
         p.close(timeout=0)
 
@@ -1016,11 +1050,15 @@ async def test_async_send_callback_runs_on_the_loop_before_the_future() -> None:
     assert str(err.value) == CLOSED
 
 
-async def test_async_begin_transaction_is_plain_and_drains() -> None:
-    async with AsyncKafkaProducer(configs=UNREACHABLE) as p:
+async def test_async_begin_transaction_is_plain_and_does_not_block_the_loop() -> None:
+    # Critic 75 N1: a record still waiting for its topic's metadata (up to
+    # max.block.ms) does not hold begin_transaction() on the loop thread.
+    async with AsyncKafkaProducer(configs={**UNREACHABLE, "max.block.ms": 3000}) as p:
         f = await p.send(record=RECORD)
+        start = time.monotonic()
         with pytest.raises(IllegalStateError) as err:
             p.begin_transaction()
+        assert time.monotonic() - start < 1
         assert str(err.value) == NOT_TRANSACTIONAL
         with pytest.raises(IllegalStateError):
             await p.commit_transaction()

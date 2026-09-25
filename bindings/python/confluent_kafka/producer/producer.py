@@ -124,7 +124,14 @@ class Producer(Generic[K, V], _ProducerState):
         encountered a previous fatal error.
         """
         self._check_not_closed()
-        self._drain_sync()
+        # No drain of the batching engine first, as Java's beginTransaction
+        # does not wait, and producer-transactions.md §13 holds without one: a
+        # transactional producer's send() with no transaction open returns only
+        # once its record is with the Rust producer (see send), so nothing that
+        # returned is still accumulated when a begin that can succeed runs; the
+        # records of an open transaction stay in it whatever this call does, and
+        # the commit / abort ending it drains them; and a producer without a
+        # transactional.id fails here whatever it has accumulated.
         raise_if_error(self._call(_lib.Producer_begin_transaction))
         self._in_transaction = True
 

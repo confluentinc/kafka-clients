@@ -103,9 +103,10 @@ class AsyncProducer(Generic[K, V], _ProducerState):
 
     def begin_transaction(self) -> None:
         """See :meth:`Producer.begin_transaction`. Java does not wait in it, so
-        it is a plain ``def``."""
+        it is a plain ``def``; it does not wait for earlier sends either, so it
+        never blocks the loop (see :meth:`Producer.begin_transaction` for why it
+        needs no drain)."""
         self._check_not_closed()
-        self._drain_sync()
         raise_if_error(self._call(_lib.Producer_begin_transaction))
         self._in_transaction = True
 
