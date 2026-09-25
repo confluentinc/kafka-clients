@@ -32,8 +32,10 @@ use confluent_kafka::common::{TopicCollection, Uuid};
 use super::common::broker_control::BrokerControl;
 use super::common::cluster_config::kip848_3_broker;
 use super::common::kafka_cluster::KafkaCluster;
+use super::config::SecurityProtocol;
 use super::verifier::{ConservationVerifier, ExpectedLossHint, Verifier};
 use super::workload::{CommitMode, Role, TopicIds, Workload, WorkloadContext, WorkloadSpec, build_workload};
+use super::workload_config::security_props;
 
 /// Drain-settle signal shared between [`ChaosHarness::recreate_topic`] and the
 /// drain loop (`drain_wait`).
@@ -88,6 +90,9 @@ impl RecreateSettle {
 /// eviction; see the design doc §2). Tear it down with [`Self::shutdown`].
 pub struct ChaosHarness {
     cluster: KafkaCluster,
+    /// Broker listener / client `security.protocol` every client in the run
+    /// (admin + workloads) connects through (`--security-protocol`).
+    security_protocol: SecurityProtocol,
     admin: Box<dyn Admin>,
     /// All topics in the run (`--num-topics`). A single-topic run has one
     /// entry; `topics[0]` is the primary/prefix topic.
@@ -130,18 +135,29 @@ impl ChaosHarness {
     /// Like [`Self::start`] but with a caller-supplied verifier — the seam a
     /// future share consumer uses to plug in a `ShareAckVerifier`.
     pub async fn start_with_verifier(topic: &str, brokers: u16, partitions: i32, verifier: Arc<dyn Verifier>) -> Self {
-        Self::start_with_topics(&[topic.to_string()], brokers, partitions, None, verifier).await
+        Self::start_with_topics(
+            &[topic.to_string()],
+            brokers,
+            partitions,
+            None,
+            SecurityProtocol::Plaintext,
+            verifier,
+        )
+        .await
     }
 
     /// The multi-topic entry point used by the flag-driven runner. Creates every
     /// topic in `topics` with `partitions` partitions at `replication` (or
     /// `min(brokers, 3)` when `None`). Panics (librdkafka's FATAL) if an explicit
-    /// replication exceeds the broker count.
+    /// replication exceeds the broker count. Every client of the run — the
+    /// harness's admin and the workloads — connects through the broker listener
+    /// selected by `security_protocol` (`--security-protocol`).
     pub async fn start_with_topics(
         topics: &[String],
         brokers: u16,
         partitions: i32,
         replication: Option<i16>,
+        security_protocol: SecurityProtocol,
         verifier: Arc<dyn Verifier>,
     ) -> Self {
         assert!(brokers >= 1, "chaos cluster needs >= 1 broker");
@@ -169,6 +185,18 @@ impl ChaosHarness {
             .insert("KAFKA_AUTO_CREATE_TOPICS_ENABLE".to_string(), "false".to_string());
         let cluster = KafkaCluster::start_with_config(&config).await;
 
+        // The harness's own admin (create/delete topic, elect leaders,
+        // reassign) stays on the PLAINTEXT listener regardless of
+        // `security_protocol`: on this branch `KafkaAdminClient` hardcodes a
+        // plaintext channel (`kafka_admin_client.rs` passes
+        // `SecurityProtocol::Plaintext` to `client_channel_builder`) and
+        // `AdminClientConfig` has no security keys, so an admin pointed at a
+        // TLS / SASL listener never connects ("Timed out waiting for a node
+        // assignment"). Newer branches wire `config.security_protocol()` /
+        // `ssl_config()` / `sasl_config()` through; once this branch has that,
+        // switch these props to `protocol_bootstrap` + `security_props` so the
+        // control plane is exercised over the secured listener too. The
+        // workloads — the clients under test — already use it.
         let admin = {
             let props = HashMap::from([
                 ("bootstrap.servers".to_string(), cluster.bootstrap_servers().to_string()),
@@ -177,9 +205,17 @@ impl ChaosHarness {
             new_admin_client(AdminClientConfig::from_properties(&props).expect("valid admin config"))
                 .expect("admin client")
         };
+        if security_protocol != SecurityProtocol::Plaintext {
+            eprintln!(
+                "chaos: workloads connect over {} ({}); the harness admin stays on PLAINTEXT",
+                security_protocol.config_value(),
+                Self::listener_bootstrap(&cluster, security_protocol)
+            );
+        }
 
         let harness = Self {
             cluster,
+            security_protocol,
             admin,
             topics: topics.to_vec(),
             partitions,
@@ -201,6 +237,31 @@ impl ChaosHarness {
     /// leader-sampling target, and the `WorkloadContext::topic` fallback.
     fn primary_topic(&self) -> &str {
         &self.topics[0]
+    }
+
+    /// Host-loopback bootstrap for `cluster`'s listener of `protocol`. Every
+    /// broker exposes all four listeners; this picks the one the run's clients
+    /// use.
+    fn listener_bootstrap(cluster: &KafkaCluster, protocol: SecurityProtocol) -> &str {
+        match protocol {
+            SecurityProtocol::Plaintext => cluster.bootstrap_servers(),
+            SecurityProtocol::Ssl => cluster.ssl_bootstrap_servers(),
+            SecurityProtocol::SaslPlaintext => cluster.sasl_plaintext_bootstrap_servers(),
+            SecurityProtocol::SaslSsl => cluster.sasl_ssl_bootstrap_servers(),
+        }
+    }
+
+    /// Host-loopback bootstrap for the run's `--security-protocol` listener —
+    /// what in-process (Rust) clients connect to.
+    pub fn protocol_bootstrap(&self) -> &str {
+        Self::listener_bootstrap(&self.cluster, self.security_protocol)
+    }
+
+    /// Client-side security keys matching [`Self::protocol_bootstrap`]
+    /// (`security.protocol`, the cluster CA truststore, SASL/PLAIN
+    /// credentials); empty for PLAINTEXT.
+    pub fn security_props(&self) -> HashMap<String, String> {
+        security_props(self.security_protocol, self.cluster.ca_cert_pem())
     }
 
     /// Create `topic` and cache its id (see [`Self::cache_created_topic_id`]).
@@ -515,8 +576,9 @@ impl ChaosHarness {
     /// the primary topic so every consumer joins the same group.
     fn workload_ctx(&self, topic: &str) -> WorkloadContext {
         WorkloadContext {
-            bootstrap: self.cluster.bootstrap_servers().to_string(),
+            bootstrap: self.protocol_bootstrap().to_string(),
             container_bootstrap: self.cluster.container_bootstrap_servers().to_string(),
+            security: self.security_props(),
             topic: topic.to_string(),
             topics: self.topics.clone(),
             topic_ids: self.topic_ids.clone(),

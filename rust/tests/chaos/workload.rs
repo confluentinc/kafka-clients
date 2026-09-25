@@ -27,6 +27,7 @@
 //! (`tests/common/backend_factory.rs`), which already covers rust / python /
 //! c, so no new per-binding driver code is needed here.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -78,7 +79,7 @@ impl Backend {
 
     /// Whether this backend runs through the gRPC bridge (needs a server
     /// container + the `multilanguage-tests` feature).
-    fn is_grpc(self) -> bool {
+    pub fn is_grpc(self) -> bool {
         !matches!(self, Backend::Rust)
     }
 }
@@ -135,12 +136,18 @@ pub type TopicIds = Arc<std::sync::Mutex<std::collections::HashMap<String, Uuid>
 /// Immutable per-run context handed to every workload.
 #[derive(Clone)]
 pub struct WorkloadContext {
-    /// Client-facing bootstrap (host-mapped ports) for the Rust backend.
+    /// Client-facing bootstrap (host-mapped ports) for the Rust backend — the
+    /// listener matching the run's `--security-protocol`.
     pub bootstrap: String,
     /// Container-network bootstrap for the gRPC (python/c) backends, whose
     /// client runs inside a sibling container and must reach the broker by
-    /// container hostname.
+    /// container hostname. Always the PLAINTEXT container listener (a secured
+    /// run is rejected up front for gRPC backends, see `ChaosConfig::from_env`).
     pub container_bootstrap: String,
+    /// Client-side security keys for the run's `--security-protocol`
+    /// (`workload_config::security_props`); empty for PLAINTEXT. Merged into
+    /// every producer / consumer config.
+    pub security: HashMap<String, String>,
     /// The topic THIS workload's producer sends to (one producer per topic).
     /// For consumers this is the first topic and is not used for subscription —
     /// consumers subscribe to every topic in [`Self::topics`].
@@ -402,7 +409,7 @@ where
         let bootstrap = self.ctx.bootstrap_for(self.spec.backend).to_string();
         let producer = self
             .factory
-            .create(producer_props(&bootstrap, &self.spec.label()))
+            .create(producer_props(&bootstrap, &self.spec.label(), &self.ctx.security))
             .await
             .expect("failed to build chaos producer");
 
@@ -524,7 +531,7 @@ where
         let label = self.spec.label();
         let mut consumer = self
             .factory
-            .create(consumer_props(&bootstrap, &self.ctx.group, &label))
+            .create(consumer_props(&bootstrap, &self.ctx.group, &label, &self.ctx.security))
             .await
             .expect("failed to build chaos consumer");
 
@@ -603,8 +610,6 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
-
     use confluent_kafka::common::{KafkaError, TopicPartition};
     use confluent_kafka::producer::{MockProducer, RecordMetadata};
 
@@ -616,6 +621,7 @@ mod tests {
         WorkloadContext {
             bootstrap: String::new(),
             container_bootstrap: String::new(),
+            security: HashMap::new(),
             topic: "t".into(),
             topics: vec!["t".into()],
             topic_ids,
