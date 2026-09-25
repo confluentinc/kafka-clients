@@ -5523,17 +5523,6 @@ where
         .await
     }
 
-    /// Java: `@Deprecated void close(Duration timeout)`, whose body is
-    /// `close(CloseOptions.timeout(timeout))`
-    /// (`AsyncKafkaConsumer.java:1543-1545`).
-    #[deprecated(
-        note = "mirroring Java's @Deprecated close(Duration); use close_with_options with CloseOptions::timeout"
-    )]
-    pub async fn close_with_timeout(&mut self, timeout: Duration) -> Result<(), Error> {
-        self.close_with_options(crate::consumer::CloseOptions::new_timeout(timeout))
-            .await
-    }
-
     /// Java: `void close(CloseOptions options)`.
     pub async fn close_with_options(&mut self, options: crate::consumer::CloseOptions) -> Result<(), Error> {
         let timeout = options
@@ -6131,11 +6120,6 @@ where
 
     async fn close(&mut self) -> Result<(), Error> {
         AsyncKafkaConsumer::close(self).await
-    }
-
-    #[allow(deprecated)]
-    async fn close_with_timeout(&mut self, timeout: Duration) -> Result<(), Error> {
-        AsyncKafkaConsumer::close_with_timeout(self, timeout).await
     }
 
     async fn close_with_options(&mut self, options: crate::consumer::CloseOptions) -> Result<(), Error> {
@@ -9884,19 +9868,17 @@ mod tests {
         drop(drainer);
     }
 
-    /// CLAUDE.md §2 splits Java's three `close` overloads
-    /// (`Consumer.java:277,283,288`) into `close` / `close_with_timeout` /
-    /// `close_with_options`. The deprecated `close_with_timeout` must agree with the
-    /// form it forwards to: Java's `close(Duration timeout)` body is exactly
+    /// `close_with_options(CloseOptions::new_timeout(..))` is the replacement
+    /// for Java's deprecated `close(Duration timeout)`, whose body is exactly
     /// `close(CloseOptions.timeout(timeout))`
-    /// (`AsyncKafkaConsumer.java:1543-1545`).
+    /// (`AsyncKafkaConsumer.java:1543-1545`) and which is not translated
+    /// (CLAUDE.md §3). The user timeout must reach the close path.
     ///
-    /// Asserting `is_closed()` alone would not catch a forward that dropped
-    /// the timeout, so this compares the *deadline* carried on the
-    /// `LeaveGroupOnClose` event — the only place the timeout is observable —
-    /// between the two forms.
+    /// Asserting `is_closed()` alone would not catch a dropped timeout, so
+    /// this checks the *deadline* carried on the `LeaveGroupOnClose` event —
+    /// the only place the timeout is observable.
     #[tokio::test]
-    async fn close_timeout_agrees_with_close_options_timeout() {
+    async fn close_with_options_carries_user_timeout() {
         use crate::consumer::CloseOptions;
 
         // Well under the 30s `request.timeout.ms` cap, so the deadline
@@ -9938,20 +9920,9 @@ mod tests {
 
         let via_options =
             deadline_delta_for(async |c| c.close_with_options(CloseOptions::new_timeout(user_timeout)).await).await;
-        let via_timeout = deadline_delta_for(async |c| {
-            #[allow(deprecated)]
-            c.close_with_timeout(user_timeout).await
-        })
-        .await;
-
         assert!(
             (via_options - 7_000).abs() <= 100,
             "close_with_options must carry the user timeout (delta={via_options})"
-        );
-        assert!(
-            (via_timeout - via_options).abs() <= 100,
-            "close_with_timeout must forward to close_with_options(CloseOptions::new_timeout(..)) \
-             (via_timeout={via_timeout}, via_options={via_options})"
         );
     }
 
