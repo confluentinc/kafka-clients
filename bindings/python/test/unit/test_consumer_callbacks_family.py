@@ -81,12 +81,14 @@ def test_mock_callback_receives_the_explicit_offsets() -> None:
     close(consumer)
 
 
-def test_kafka_consumer_callback_receives_offsets_and_no_error() -> None:
+def test_kafka_consumer_callback_of_an_empty_commit_gets_null_offsets() -> None:
+    # Java's commitAsync(emptyMap, cb): commit() returns completedFuture(null),
+    # so whenComplete hands the callback (null, null).
     consumer = kafka_consumer()
     seen: list[Any] = []
     consumer.commit_nowait(offsets={}, callback=lambda o, e: seen.append((o, e)))
     consumer.commit(offsets={})
-    assert seen == [({}, None)]
+    assert seen == [(None, None)]
     close(consumer)
 
 

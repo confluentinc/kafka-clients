@@ -18,9 +18,11 @@
 A single-method callback interface, so a ``Callable`` alias of the interface's
 name (CLAUDE.md, Python Binding Conventions, Idiom translations), called
 positionally as ``callback(offsets, exception)`` — Java's ``onComplete(offsets,
-exception)``. ``offsets`` is ``None`` when the commit failed before the offsets
-it applies to were known (Java passes ``null`` then), and ``exception`` is
-``None`` when the commit completed successfully.
+exception)``. ``offsets`` is ``None`` where Java passes ``null``: when the commit
+failed, and for an explicit empty ``offsets`` (whose commit completes at once
+with ``null``, ``AsyncKafkaConsumer.commit``); ``MockConsumer`` passes the offsets
+given, as Java's mock does. ``exception`` is ``None`` when the commit completed
+successfully.
 
 The callback runs on the caller's thread, inside the call that delivers it
 (``poll()``, ``commit()``, ``commit_nowait()``, ``close()``, …), as Java runs it

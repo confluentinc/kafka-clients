@@ -236,6 +236,11 @@ class Consumer(Generic[K, V], _ConsumerState):
         be sent in the same order as the invocations. The ``callback`` runs on
         the caller's thread, inside a later call on this consumer (``poll()``,
         ``commit()``, ``commit_nowait()``, ``close()``, …).
+
+        Unlike Java's ``commitAsync``, the call may deliver a queued
+        ``ConsumerRebalanceListener`` callback, on this thread, while it waits
+        for the offsets to commit (``consumer-threading.md`` §31); a listener
+        error it raised is then raised here.
         """
         self._c_commit_nowait(offsets, callback)
 

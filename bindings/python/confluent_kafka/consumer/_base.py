@@ -30,6 +30,14 @@ waiting thread, inside the call that delivers them (Threads and callbacks,
   synchronous call (``commit_nowait()`` running earlier commits' callbacks) runs
   inside that call, on this thread.
 
+``commit_nowait()`` has no ``_async`` entry point, and the core's commit
+processes the background events while it waits for the offsets; with a listener
+registered, its synchronous FFI call runs on a helper thread while the calling
+thread waits and drains the queue, and a commit callback the core runs on the
+helper is handed to the calling thread. The pending-callback notify is
+registered once per consumer and wakes every waiting call, so a call the guard
+rejects cannot take it from the call in flight.
+
 A consumer operation the callback issues goes through the core's guard-free
 ``ConsumerHandle`` (``kafka_consumer_Consumer_handle``), since the outer call
 holds the consumer's single-owner guard.
@@ -44,6 +52,8 @@ never touches a freed handle.
 from __future__ import annotations
 
 import asyncio
+import collections
+import concurrent.futures
 import contextvars
 import inspect
 import logging
@@ -58,6 +68,7 @@ import _confluentkafka as _lib  # type: ignore[import-not-found]
 from confluent_kafka._config import duration_to_ms, log_unused, prepare
 from confluent_kafka._errors import from_ffi_error, to_ffi_id
 from confluent_kafka.common.errors.invalid_group_id_error import InvalidGroupIdError
+from confluent_kafka.common.kafka_error import KafkaError
 from confluent_kafka.common.serialization import bytes_deserializer
 from confluent_kafka.common.serialization._supply import close_if_defined, resolve_serde
 from confluent_kafka.common.topic_partition import TopicPartition
@@ -129,6 +140,13 @@ _OPEN = "open"
 _CLOSING = "closing"
 _CLOSED = "closed"
 
+# Java's AsyncKafkaConsumer.invokeRebalanceCallbacks wrapping message.
+_LISTENER_ERROR_MESSAGE = "User rebalance callback throws an error"
+
+# The errors this call's listeners raised: (the message the core got, the
+# object to raise).
+_ListenerErrors = list[tuple[str, BaseException]]
+
 
 def raise_if_error(error: int) -> None:
     """Raise the typed error of a plain FFI entry point's result handle."""
@@ -142,6 +160,18 @@ def _error_handle_for(exc: BaseException) -> int:
     class is chosen by its FFI id (``kafka_common_Error_new``)."""
     handle: int = _lib.KafkaError_new(to_ffi_id(exc), str(exc))
     return handle
+
+
+def _listener_error_for(failure: BaseException, errors: _ListenerErrors) -> BaseException | None:
+    """The listener's error object a call's ``failure`` reports, if any: the
+    core fails the delivering call with the first listener error, carrying its
+    class and message (an empty message may come back as the class's
+    default)."""
+    message = str(failure)
+    for reported, error in errors:
+        if reported == message or not reported:
+            return error
+    return None
 
 
 def poll_timeout_ms(timeout: Duration) -> int:
@@ -194,28 +224,38 @@ def close_args(timeout: Duration | None, option: CloseOptions | None) -> tuple[i
 
 class _Use:
     """One use of the native consumer handle: while it runs, ``close()`` does not
-    free the handle (see ``_ConsumerState``)."""
+    free the handle (see ``_ConsumerState``). It counts per thread, so a
+    ``close()`` from another thread knows the consumer is in use."""
 
-    __slots__ = ("_state",)
+    __slots__ = ("_state", "_thread")
 
     def __init__(self, state: _ConsumerState) -> None:
         self._state = state
+        self._thread = 0
 
     def __enter__(self) -> int:
         state = self._state
+        thread = threading.get_ident()
         with state._lifecycle:
             if state._state == _CLOSED or state._h == 0:
                 raise IllegalStateError(message=CLOSED_MESSAGE)
-            if state._state == _CLOSING and state._closing_thread != threading.get_ident():
+            if state._state == _CLOSING and state._closing_thread != thread:
                 # Java's close() holds the consumer's lock (acquire()).
                 raise ConcurrentModificationError(message=CONCURRENT_MESSAGE)
             state._uses += 1
+            state._use_threads[thread] = state._use_threads.get(thread, 0) + 1
+            self._thread = thread
         return state._h
 
     def __exit__(self, *exc: object) -> None:
         state = self._state
         with state._lifecycle:
             state._uses -= 1
+            remaining = state._use_threads[self._thread] - 1
+            if remaining:
+                state._use_threads[self._thread] = remaining
+            else:
+                del state._use_threads[self._thread]
             if state._uses == 0:
                 state._lifecycle.notify_all()
 
@@ -229,10 +269,13 @@ class _ConsumerState:
     consumer is closed (``IllegalStateError``) or, on another thread, while it is
     closing (``ConcurrentModificationError``, as Java's ``close()`` holds the
     consumer). ``close()`` sets the closing state under the same lock, so exactly
-    one close runs; when its FFI close fails because another thread is inside the
-    consumer, the consumer stays open, as in Java. Once closed, it waits for the
-    uses still counted before it frees the handle. A waiting call is one use,
-    covering its submission, its wait and its callbacks.
+    one close runs, and only when no other thread is inside the consumer: Java's
+    ``close()`` calls ``acquire()`` before it changes any state, so a ``close()``
+    from another thread raises ``ConcurrentModificationError`` and leaves the
+    consumer as it was (and when its FFI close still fails because another thread
+    is inside the consumer, the consumer stays open, as in Java). Once closed, it
+    waits for the uses still counted before it frees the handle. A waiting call is
+    one use, covering its submission, its wait and its callbacks.
     """
 
     def __init__(self) -> None:
@@ -241,6 +284,9 @@ class _ConsumerState:
         self._closing_thread: int | None = None
         self._lifecycle = threading.Condition()
         self._uses = 0
+        # The threads holding a use, with their counts (close() refuses while
+        # another thread holds one, as Java's acquire()).
+        self._use_threads: dict[int, int] = {}
         self._listener: ConsumerRebalanceListener | None = None
         self._key_deserializer: Deserializer[Any] = bytes_deserializer()
         self._value_deserializer: Deserializer[Any] = bytes_deserializer()
@@ -250,6 +296,22 @@ class _ConsumerState:
         # an operation's completion, so the waiting call wakes and drains.
         self._pending_event = threading.Event()
         self._pending_notify_ref: Callable[[], None] | None = None
+        # The awaiting calls' (loop, event) pairs the notify wakes. The notify
+        # is registered once per consumer, so a call the guard rejects cannot
+        # take it from the call in flight.
+        self._async_waiters: set[tuple[asyncio.AbstractEventLoop, asyncio.Event]] = set()
+        # commit_nowait(): the thread waiting while its synchronous FFI call
+        # runs on the helper thread, and the commit callbacks the helper hands
+        # to it (with the event the helper waits on until each has run).
+        self._forward_to: int | None = None
+        self._forwarded: collections.deque[tuple[Callable[[], None], threading.Event]] = (
+            collections.deque())
+        self._commit_helper: concurrent.futures.ThreadPoolExecutor | None = None
+        # AsyncConsumer.commit_nowait(): the task finishing a commit whose
+        # coroutine listener is awaited on the loop, and its failure, raised by
+        # the next awaited call.
+        self._commit_continuation: asyncio.Task[None] | None = None
+        self._deferred_error: BaseException | None = None
 
     # ---- construction ---------------------------------------------------
     def _start(self, configs: dict[str, Any], key_deserializer: Deserializer[Any] | None,
@@ -289,7 +351,7 @@ class _ConsumerState:
         self._group_id_defined = configs.get(_GROUP_ID) is not None
         # Registered once, before any operation: it also moves commit callbacks
         # onto the caller's thread (kafka_consumer_Consumer_set_pending_callback_notify).
-        self._pending_notify_ref = self._pending_event.set
+        self._pending_notify_ref = self._on_pending_notify
         _lib.Consumer_set_pending_callback_notify(self._h, self._pending_notify_ref)
         log_unused(originals, client="consumer")
 
@@ -306,16 +368,21 @@ class _ConsumerState:
     def _begin_close(self) -> bool:
         """Enter the closing state; whether this call did (and so must close).
         A second ``close()`` — after it, or from inside the closing call's own
-        callbacks — does nothing, as Java's ``if (!closed)``."""
+        callbacks — does nothing, as Java's ``if (!closed)``. While another
+        thread is inside the consumer it raises ``ConcurrentModificationError``
+        and changes nothing: Java's ``close()`` calls ``acquire()`` first."""
+        thread = threading.get_ident()
         with self._lifecycle:
             if self._state == _CLOSED or self._h == 0:
                 return False
             if self._state == _CLOSING:
-                if self._closing_thread == threading.get_ident():
+                if self._closing_thread == thread:
                     return False
                 raise ConcurrentModificationError(message=CONCURRENT_MESSAGE)
+            if any(user != thread for user in self._use_threads):
+                raise ConcurrentModificationError(message=CONCURRENT_MESSAGE)
             self._state = _CLOSING
-            self._closing_thread = threading.get_ident()
+            self._closing_thread = thread
             return True
 
     def _abort_close(self) -> None:
@@ -335,6 +402,9 @@ class _ConsumerState:
                 self._lifecycle.wait()
             handle, self._h = self._h, 0
             reentrant, self._reentrant_handle = self._reentrant_handle, 0
+            helper, self._commit_helper = self._commit_helper, None
+        if helper is not None:
+            helper.shutdown(wait=False)
         if reentrant:
             _lib.ConsumerHandle_destroy(reentrant)
         if handle:
@@ -357,6 +427,12 @@ class _ConsumerState:
     def _exit_callback(token: contextvars.Token[frozenset[int]]) -> None:
         _IN_CALLBACK.reset(token)
 
+    def _inside_own_call(self) -> bool:
+        """Whether a call on this consumer holds its FFI guard for this context:
+        a callback it is delivering, or a ``commit_nowait()`` still finishing on
+        the loop; a read then goes through the ConsumerHandle."""
+        return self._in_callback() or self._commit_in_flight()
+
     def _handle(self) -> int:
         """The core's guard-free ``ConsumerHandle`` (created lazily)."""
         with self._lifecycle:
@@ -364,18 +440,61 @@ class _ConsumerState:
                 self._reentrant_handle = _lib.Consumer_handle(self._h)
             return self._reentrant_handle
 
-    def _wrap_commit_callback(self, callback: OffsetCommitCallback | None
+    def _on_pending_notify(self) -> None:
+        """The pending-callback notify, registered once per consumer; it runs on
+        the dispatcher thread. It wakes every call waiting on this consumer: a
+        synchronous one through ``_pending_event``, an awaiting one on its own
+        loop."""
+        self._pending_event.set()
+        for loop, event in list(self._async_waiters):
+            try:
+                loop.call_soon_threadsafe(event.set)
+            except RuntimeError:  # its loop is closed
+                pass
+
+    def _on_caller_thread(self, run: Callable[[], None]) -> None:
+        """Run a commit callback on the thread of the call delivering it. The
+        core runs the callbacks of earlier commits inside ``commit_nowait()``'s
+        synchronous FFI call, which runs on the helper thread when a listener is
+        registered: the helper hands the callback to the waiting thread and waits
+        until it has run, so the core continues after it, as after Java's
+        ``offsetCommitCallbackInvoker.executeCallbacks()``."""
+        target = self._forward_to
+        if target is None or target == threading.get_ident():
+            run()
+            return
+        ran = threading.Event()
+        self._forwarded.append((run, ran))
+        self._on_pending_notify()
+        ran.wait()
+
+    def _run_forwarded(self) -> None:
+        """Run the commit callbacks the helper thread handed to this thread."""
+        while self._forwarded:
+            run, ran = self._forwarded.popleft()
+            try:
+                run()
+            finally:
+                ran.set()
+
+    def _wrap_commit_callback(self, callback: OffsetCommitCallback | None, *,
+                              empty_offsets: bool = False
                               ) -> Callable[[int, int], None] | None:
         """Adapt ``callback(offsets, exception)`` to the C commit trampoline.
 
+        ``offsets`` is ``None`` where Java passes ``null``: when the commit
+        failed (``whenComplete`` on an exceptionally completed future), and for
+        an explicit empty ``offsets`` (``empty_offsets``), whose Java
+        ``commit()`` returns ``completedFuture(null)``
+        (``AsyncKafkaConsumer.commitAsync``).
+
         It runs on the caller's thread, inside the call that delivers it (the
-        waiting call that acks its queued entry, or a synchronous
-        ``commit_nowait()`` running the callbacks of earlier commits), with the
-        callback window open, so a consumer operation it issues goes through the
-        ConsumerHandle. Java lets an exception from ``onComplete`` propagate out
-        of the delivering call; across the FFI it cannot, so it is logged. A
-        commit callback is a plain function: an awaitable it returns is closed
-        and reported."""
+        waiting call that acks its queued entry, or ``commit_nowait()`` running
+        the callbacks of earlier commits), with the callback window open, so a
+        consumer operation it issues goes through the ConsumerHandle. Java lets
+        an exception from ``onComplete`` propagate out of the delivering call;
+        across the FFI it cannot, so it is logged. A commit callback is a plain
+        function: an awaitable it returns is closed and reported."""
         if callback is None:
             return None
         if not callable(callback):
@@ -384,22 +503,28 @@ class _ConsumerState:
         def adapter(offsets_handle: int, error_handle: int) -> None:
             offsets: dict[TopicPartition, OffsetAndMetadata] | None = None
             if offsets_handle:
-                offsets = {tp: oam for tp, oam in to_offset_map(
+                drained = {tp: oam for tp, oam in to_offset_map(
                     _lib.OffsetMap_drain(offsets_handle)).items() if oam is not None}
+                if not error_handle and not empty_offsets:
+                    offsets = drained
             exception = from_ffi_error(error_handle) if error_handle else None
-            token = self._enter_callback()
-            try:
-                result = callback(offsets, cast(Exception, exception))
-                if inspect.isawaitable(result):
-                    close = getattr(result, "close", None)
-                    if callable(close):
-                        close()
-                    _LOG.error("An OffsetCommitCallback returned an awaitable; commit "
-                               "callbacks are plain functions and it was not awaited")
-            except Exception:  # noqa: BLE001 - it cannot cross the FFI
-                _LOG.exception("Error in OffsetCommitCallback")
-            finally:
-                self._exit_callback(token)
+
+            def run() -> None:
+                token = self._enter_callback()
+                try:
+                    result = callback(offsets, cast(Exception, exception))
+                    if inspect.isawaitable(result):
+                        close = getattr(result, "close", None)
+                        if callable(close):
+                            close()
+                        _LOG.error("An OffsetCommitCallback returned an awaitable; commit "
+                                   "callbacks are plain functions and it was not awaited")
+                except Exception:  # noqa: BLE001 - it cannot cross the FFI
+                    _LOG.exception("Error in OffsetCommitCallback")
+                finally:
+                    self._exit_callback(token)
+
+            self._on_caller_thread(run)
 
         return adapter
 
@@ -424,14 +549,53 @@ class _ConsumerState:
                       for (t, p) in _lib.PendingCallback_partitions(pending)}
         return pending, method, partitions
 
-    def _drain_pending(self, h: int) -> None:
+    @staticmethod
+    def _listener_failure(exc: BaseException, errors: _ListenerErrors) -> int:
+        """The error handle reporting a listener's exception to the core, which
+        fails the delivering call with it.
+
+        Java's ``invokeRebalanceCallbacks`` keeps a ``KafkaException`` as it is
+        and wraps any other exception as ``KafkaException("User rebalance
+        callback throws an error", e)`` (``maybeWrapAsKafkaException``). The
+        core only carries the class and the message, so the error object is kept
+        in ``errors`` for the delivering call to raise (``_resolve_reporting``).
+        ``KeyboardInterrupt`` / ``CancelledError`` are re-raised by the drain."""
+        if not isinstance(exc, Exception):
+            return _error_handle_for(exc)
+        error: BaseException = exc
+        if not isinstance(exc, KafkaError):
+            error = KafkaError(message=_LISTENER_ERROR_MESSAGE, cause=exc)
+        errors.append((str(error), error))
+        return _error_handle_for(error)
+
+    @staticmethod
+    def _resolve_reporting(resolve: Callable[[tuple[Any, ...]], _T], payload: tuple[Any, ...],
+                           errors: _ListenerErrors) -> _T:
+        """``resolve(payload)``; when the call failed with the error a listener
+        of this call raised, raise that very object (with its class, payload and
+        cause) rather than the one rebuilt from its FFI id."""
+        try:
+            return resolve(payload)
+        except KafkaError as exc:
+            original = _listener_error_for(exc, errors)
+            if original is None:
+                raise
+        raise original
+
+    def _drain_pending(self, h: int, errors: _ListenerErrors, *,
+                       handoff: bool = False) -> tuple[int, Awaitable[object]] | None:
         """Run the queued callbacks on this thread and ack each (unparking the
-        core). A coroutine listener needs an async consumer: it is closed and
-        the rebalance fails with a ``TypeError``."""
+        core), after the commit callbacks the helper thread handed over.
+
+        A coroutine listener needs an event loop: with ``handoff`` the drain
+        stops and returns the entry with its awaitable, unacked (the caller
+        awaits it on the loop); otherwise it is closed and the rebalance fails
+        with a ``TypeError``."""
         while True:
+            self._run_forwarded()
             entry = self._next_pending(h)
             if entry is None:
-                return
+                return None
             pending, method, partitions = entry
             if method == _PENDING_COMMIT:
                 # The ack runs the commit callback (the adapter) on this thread.
@@ -443,12 +607,14 @@ class _ConsumerState:
             try:
                 result = self._invoke_listener(method, partitions)
                 if inspect.isawaitable(result):
+                    if handoff:
+                        return pending, cast("Awaitable[object]", result)
                     close = getattr(result, "close", None)
                     if callable(close):
                         close()
                     raise TypeError("a coroutine rebalance listener requires an AsyncConsumer")
             except BaseException as exc:  # noqa: BLE001 - reported to the core
-                error_handle = _error_handle_for(exc)
+                error_handle = self._listener_failure(exc, errors)
                 if isinstance(exc, KeyboardInterrupt):
                     interrupted = exc
             finally:
@@ -457,33 +623,33 @@ class _ConsumerState:
             if interrupted is not None:
                 raise interrupted
 
-    async def _drain_pending_async(self, h: int) -> None:
+    async def _await_listener(self, pending: int, awaitable: Awaitable[object],
+                              errors: _ListenerErrors) -> None:
+        """Await a coroutine listener's result on this loop, inside the callback
+        window, and ack its entry."""
+        error_handle = 0
+        cancelled: BaseException | None = None
+        token = self._enter_callback()
+        try:
+            await awaitable
+        except BaseException as exc:  # noqa: BLE001 - reported to the core
+            error_handle = self._listener_failure(exc, errors)
+            if isinstance(exc, (asyncio.CancelledError, KeyboardInterrupt)):
+                cancelled = exc
+        finally:
+            self._exit_callback(token)
+        _lib.Consumer_ack_pending_callback(pending, error_handle)
+        if cancelled is not None:
+            raise cancelled
+
+    async def _drain_pending_async(self, h: int, errors: _ListenerErrors) -> None:
         """Async peer of ``_drain_pending``: a coroutine listener is awaited on
         this event loop, so ``await consumer.commit()`` inside it works."""
         while True:
-            entry = self._next_pending(h)
-            if entry is None:
+            handoff = self._drain_pending(h, errors, handoff=True)
+            if handoff is None:
                 return
-            pending, method, partitions = entry
-            if method == _PENDING_COMMIT:
-                _lib.Consumer_ack_pending_callback(pending, 0)
-                continue
-            error_handle = 0
-            cancelled: BaseException | None = None
-            token = self._enter_callback()
-            try:
-                result = self._invoke_listener(method, partitions)
-                if inspect.isawaitable(result):
-                    await cast("Awaitable[object]", result)
-            except BaseException as exc:  # noqa: BLE001 - reported to the core
-                error_handle = _error_handle_for(exc)
-                if isinstance(exc, (asyncio.CancelledError, KeyboardInterrupt)):
-                    cancelled = exc
-            finally:
-                self._exit_callback(token)
-            _lib.Consumer_ack_pending_callback(pending, error_handle)
-            if cancelled is not None:
-                raise cancelled
+            await self._await_listener(*handoff, errors)
 
     # ---- waiting calls ----------------------------------------------------
     def _run_sync(self, submit: Callable[[int, Callable[..., None]], None],
@@ -495,6 +661,7 @@ class _ConsumerState:
         result and re-raises ``KeyboardInterrupt``."""
         box: dict[str, tuple[Any, ...]] = {}
         done = threading.Event()
+        errors: _ListenerErrors = []
 
         def cb(*payload: Any) -> None:
             box["payload"] = payload
@@ -510,28 +677,38 @@ class _ConsumerState:
                     # Short slices keep KeyboardInterrupt deliverable.
                     self._pending_event.wait(0.1)
                     self._pending_event.clear()
-                    self._drain_pending(h)
+                    self._drain_pending(h, errors)
                 except KeyboardInterrupt as exc:
                     if interrupted is None:
                         interrupted = exc
                         _lib.Consumer_wakeup(h)
-            self._drain_pending(h)
+            self._drain_pending(h, errors)
         payload = box["payload"]
         if interrupted is not None:
             free(payload)
             raise interrupted
-        return resolve(payload)
+        return self._resolve_reporting(resolve, payload, errors)
 
     async def _run_async(self, submit: Callable[[int, Callable[..., None]], None],
                          resolve: Callable[[tuple[Any, ...]], _T],
-                         free: Callable[[tuple[Any, ...]], None]) -> _T:
+                         free: Callable[[tuple[Any, ...]], None], *,
+                         after_commit_nowait: bool = True) -> _T:
         """Async peer of ``_run_sync``: awaits the completion on the event loop,
         draining the caller-thread callbacks on the loop. Cancelling the
         awaiting task wakes the consumer, lets the call end, frees its result
-        and re-raises ``CancelledError``."""
+        and re-raises ``CancelledError``.
+
+        It first lets a ``commit_nowait()`` still awaiting a coroutine listener
+        finish (``after_commit_nowait``), and raises that commit's failure."""
+        if after_commit_nowait and not self._in_callback():
+            await self._await_commit_continuation()
         loop = asyncio.get_running_loop()
         fut: asyncio.Future[tuple[Any, ...]] = loop.create_future()
         pending = asyncio.Event()
+        # Drain once first: an entry may be queued already.
+        pending.set()
+        waiter = (loop, pending)
+        errors: _ListenerErrors = []
 
         def deliver(payload: tuple[Any, ...]) -> None:
             if not fut.done():
@@ -544,32 +721,101 @@ class _ConsumerState:
                 return
             loop.call_soon_threadsafe(deliver, payload)
 
-        def on_pending() -> None:
-            # On the dispatcher thread; hop onto the loop.
-            if not loop.is_closed():
-                loop.call_soon_threadsafe(pending.set)
-
         cancelled: asyncio.CancelledError | None = None
         with self._use() as h:
-            # Re-registered per operation so the notify reaches this loop.
-            self._pending_notify_ref = on_pending
-            _lib.Consumer_set_pending_callback_notify(h, on_pending)
-            submit(h, cb)
-            while not fut.done():
-                try:
-                    await pending.wait()
-                    pending.clear()
-                    await self._drain_pending_async(h)
-                except asyncio.CancelledError as exc:
-                    if cancelled is None:
-                        cancelled = exc
-                        _lib.Consumer_wakeup(h)
-            await self._drain_pending_async(h)
+            self._async_waiters.add(waiter)
+            try:
+                submit(h, cb)
+                while not fut.done():
+                    try:
+                        await pending.wait()
+                        pending.clear()
+                        await self._drain_pending_async(h, errors)
+                    except asyncio.CancelledError as exc:
+                        if cancelled is None:
+                            cancelled = exc
+                            _lib.Consumer_wakeup(h)
+                await self._drain_pending_async(h, errors)
+            finally:
+                self._async_waiters.discard(waiter)
         payload = fut.result()
         if cancelled is not None:
             free(payload)
             raise cancelled
-        return resolve(payload)
+        return self._resolve_reporting(resolve, payload, errors)
+
+    async def _await_commit_continuation(self) -> None:
+        """Wait for the ``commit_nowait()`` still awaiting a coroutine listener
+        (``AsyncConsumer``), then raise its failure, as Java raises a
+        listener's error from the next call that runs it."""
+        task = self._commit_continuation
+        if task is None:
+            return
+        if not task.done():
+            await asyncio.wait({task})
+        if self._commit_continuation is task:
+            self._commit_continuation = None
+        error, self._deferred_error = self._deferred_error, None
+        if error is not None:
+            raise error
+
+    def _commit_in_flight(self) -> bool:
+        """Whether a ``commit_nowait()`` is still finishing on the loop, holding
+        the consumer (``AsyncConsumer``)."""
+        task = self._commit_continuation
+        return task is not None and not task.done()
+
+    # ---- commit_nowait (Java's commitAsync) -----------------------------------
+    @staticmethod
+    def _commit_async_ffi(h: int, spec: Any, adapter: Any) -> int:
+        """The synchronous ``kafka_consumer_Consumer_commit_async*`` call of
+        ``commit_nowait()``'s form; its error handle (0 on success)."""
+        if spec is None:
+            error: int = (_lib.Consumer_commit_async(h) if adapter is None
+                          else _lib.Consumer_commit_async(h, adapter))
+            return error
+        error = _lib.Consumer_commit_async_offsets(h, spec, adapter)
+        return error
+
+    def _helper(self) -> concurrent.futures.ThreadPoolExecutor:
+        """The thread running ``commit_nowait()``'s synchronous FFI call while a
+        listener is registered (created lazily, shut down by ``close()``)."""
+        with self._lifecycle:
+            if self._commit_helper is None:
+                self._commit_helper = concurrent.futures.ThreadPoolExecutor(
+                    max_workers=1, thread_name_prefix="confluent-kafka-commit-nowait")
+            return self._commit_helper
+
+    def _commit_on_helper_spec(self, spec: Any, adapter: Any) -> tuple[Any, Any, Any]:
+        """``commit_nowait()`` as a waiting operation: its synchronous FFI call
+        runs on the helper thread, and the calling thread waits for it, draining
+        the queue. There is no ``_async`` form of
+        ``kafka_consumer_Consumer_commit_async*``, and the core's commit
+        processes the background events while it waits for the offsets
+        (``consumer-threading.md`` §31): a listener callback queued then can
+        only run on the calling thread, which must not be blocked in the call."""
+        def submit(h: int, cb: Callable[..., None]) -> None:
+            def run() -> None:
+                try:
+                    error = self._commit_async_ffi(h, spec, adapter)
+                except BaseException as exc:  # noqa: BLE001 - raised by the waiting call
+                    cb(0, exc)
+                    return
+                cb(error, None)
+
+            self._helper().submit(run)
+
+        def resolve(payload: tuple[Any, ...]) -> None:
+            error, exc = payload
+            if exc is not None:
+                raise exc
+            raise_if_error(error)
+
+        def free(payload: tuple[Any, ...]) -> None:
+            if payload[0]:
+                _lib.KafkaError_destroy(payload[0])
+
+        return submit, resolve, free
 
     # ---- payload handlers ---------------------------------------------------
     @staticmethod
@@ -719,7 +965,7 @@ class _ConsumerState:
     # ---- calls that do not wait (both families) ---------------------------
     def _c_assignment(self) -> set[TopicPartition]:
         with self._use() as h:
-            raw = (_lib.ConsumerHandle_assignment(self._handle()) if self._in_callback()
+            raw = (_lib.ConsumerHandle_assignment(self._handle()) if self._inside_own_call()
                    else _lib.Consumer_assignment(h))
         if raw is None:
             raise ConcurrentModificationError(message=CONCURRENT_MESSAGE)
@@ -727,7 +973,7 @@ class _ConsumerState:
 
     def _c_subscription(self) -> set[str]:
         with self._use() as h:
-            raw = (_lib.ConsumerHandle_subscription(self._handle()) if self._in_callback()
+            raw = (_lib.ConsumerHandle_subscription(self._handle()) if self._inside_own_call()
                    else _lib.Consumer_subscription(h))
         if raw is None:
             raise ConcurrentModificationError(message=CONCURRENT_MESSAGE)
@@ -735,7 +981,7 @@ class _ConsumerState:
 
     def _c_paused(self) -> set[TopicPartition]:
         with self._use() as h:
-            raw = (_lib.ConsumerHandle_paused(self._handle()) if self._in_callback()
+            raw = (_lib.ConsumerHandle_paused(self._handle()) if self._inside_own_call()
                    else _lib.Consumer_paused(h))
         if raw is None:
             raise ConcurrentModificationError(message=CONCURRENT_MESSAGE)
@@ -779,21 +1025,38 @@ class _ConsumerState:
     def _c_commit_nowait(self, offsets: Any, callback: OffsetCommitCallback | None) -> None:
         """Java's ``commitAsync()`` / ``commitAsync(callback)`` /
         ``commitAsync(offsets, callback)``: returns once the commit is sent; the
-        callback runs inside a later call on this consumer, on its thread."""
+        callback runs inside a later call on this consumer, on its thread.
+
+        The core's commit waits for the offsets to commit and processes the
+        background events meanwhile (``consumer-threading.md`` §31; Java's
+        ``commitAsync`` does not), so with a listener registered a listener
+        callback can be queued during it for this thread to run: the
+        synchronous FFI call then runs on the helper thread while this thread
+        waits and drains the queue (``_commit_on_helper``)."""
         with self._use() as h:
+            spec = None if offsets is None else offsets_to_spec(offsets)
             if self._in_callback() and callback is None:
                 handle = self._handle()
-                error = (_lib.ConsumerHandle_commit_async(handle) if offsets is None
-                         else _lib.ConsumerHandle_commit_async_offsets(
-                             handle, offsets_to_spec(offsets)))
-            else:
-                adapter = self._wrap_commit_callback(callback)
-                if offsets is None:
-                    error = (_lib.Consumer_commit_async(h) if adapter is None
-                             else _lib.Consumer_commit_async(h, adapter))
-                else:
-                    error = _lib.Consumer_commit_async_offsets(h, offsets_to_spec(offsets), adapter)
-        raise_if_error(error)
+                raise_if_error(_lib.ConsumerHandle_commit_async(handle) if spec is None
+                               else _lib.ConsumerHandle_commit_async_offsets(handle, spec))
+                return
+            adapter = self._wrap_commit_callback(
+                callback, empty_offsets=offsets is not None and not offsets)
+            if self._in_callback() or self._listener is None:
+                # Nothing can be queued for this thread: no caller-thread listener
+                # (or, inside a callback, the FFI guard rejects the call).
+                raise_if_error(self._commit_async_ffi(h, spec, adapter))
+                return
+        self._commit_on_helper(spec, adapter)
+
+    def _commit_on_helper(self, spec: Any, adapter: Any) -> None:
+        """``commit_nowait()``'s FFI call on the helper thread, this thread
+        waiting and draining (``_commit_on_helper_spec``)."""
+        self._forward_to = threading.get_ident()
+        try:
+            self._run_sync(*self._commit_on_helper_spec(spec, adapter))
+        finally:
+            self._forward_to = None
 
     def _c_wakeup(self) -> None:
         """Java's ``wakeup()``: callable from any thread; a no-op once closed."""
