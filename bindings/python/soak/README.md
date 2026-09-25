@@ -142,10 +142,9 @@ End-to-end latency comes from the `send_time_ms` field in the payload.
 The final `SUMMARY` line reports `verdict=FAIL (message loss)` if and only if
 `missed > 0`. Duplicates are expected, for two independent reasons:
 
-1. **No rebalance listener.** The binding bridges no
-   `ConsumerRebalanceListener` callbacks (`consumer.py`'s module docstring
-   states this is out of scope — the FFI bridges no callbacks into the
-   embedding language), so offsets cannot be committed on partitions-revoked.
+1. **No rebalance listener.** The soak registers no
+   `ConsumerRebalanceListener`, so offsets are not committed on
+   partitions-revoked.
 2. **`enable.idempotence` is inert.** The key is accepted by
    `ProducerConfig`, but there is no producer-ID/sequence machinery behind it
    in `src/producer/internals/sender.rs`, and transactions are not exposed
@@ -492,14 +491,9 @@ b"{msgid}|{send_time_ms}|{txcnt}|" + padding
 ```
 
 The Python soak stamps `msgid` / `time` / `txcnt` as **record headers** and
-reads the `time` header back for its end-to-end latency. This binding cannot:
-`ProducerRecord` accepts only `{topic, value, key, partition, timestamp}`, and
-`kafka_producer_ProducerRecord_t` has no headers field at all — all four FFI
-send paths pass NULL headers. The Rust core *does* support headers
-(`producer_record.rs::with_headers`), so this is purely an FFI/binding gap,
-tracked separately; closing it is a change to the client, not to the soak.
-
-So the soak carries the same three fields inside the value. `SoakRecord`
+reads the `time` header back for its end-to-end latency. This soak was written
+when the binding could not send headers, so it carries the same three fields
+inside the value, and keeps doing so so that runs stay comparable. `SoakRecord`
 `serialize()` / `deserialize()` own the format and are the single source of
 truth; padding brings each record up to `--payload-size`. Semantics are
 identical to the Python soak's and no dashboard cares where the timestamp
