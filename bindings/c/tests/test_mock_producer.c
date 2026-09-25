@@ -1039,21 +1039,35 @@ void test_close_with_timeout_async(void) {
     kafka_producer_Producer_destroy(producer);
 }
 
-/* close_with_timeout (sync) closes the producer; a negative timeout is
- * rejected with Java's message and leaves it open. */
+/* close_with_timeout (sync) closes the mock producer. A negative timeout
+ * closes it too: Java's MockProducer.close(Duration) never reads the timeout
+ * (MockProducer.java:436-442); only a KafkaProducer rejects it
+ * (test_kafka_producer.c). */
 void test_close_with_timeout(void) {
     kafka_producer_Producer_t *producer = kafka_producer_MockProducer_new(true);
 
     kafka_common_Error_t *err = NULL;
-    kafka_producer_Producer_close_with_timeout(producer, -1, &err);
-    TEST_ASSERT_NOT_NULL(err);
-    TEST_ASSERT_EQUAL_STRING("The timeout cannot be negative.", kafka_common_Error_message(err));
-    kafka_common_Error_destroy(err);
-
-    err = NULL;
     kafka_producer_Producer_close_with_timeout(producer, 1000, &err);
     TEST_ASSERT_NULL(err);
+    kafka_producer_Producer_destroy(producer);
 
+    producer = kafka_producer_MockProducer_new(true);
+    err = NULL;
+    kafka_producer_Producer_close_with_timeout(producer, -1, &err);
+    TEST_ASSERT_NULL(err);
+    err = NULL;
+    kafka_producer_FutureRecordMetadata_t *future = kafka_producer_Producer_send(
+        producer, "t", -1, -1, NULL, -1, NULL, -1, &err);
+    TEST_ASSERT_NULL(future);  /* closed: the send is rejected */
+    TEST_ASSERT_NOT_NULL(err);
+    kafka_common_Error_destroy(err);
+    kafka_producer_Producer_destroy(producer);
+
+    producer = kafka_producer_MockProducer_new(true);
+    async_op_result_t result = {0};
+    kafka_producer_Producer_close_with_timeout_async(producer, -1, on_operation, &result);
+    TEST_ASSERT_TRUE(wait_for(&result.fired, 1));
+    TEST_ASSERT_FALSE(result.had_error);
     kafka_producer_Producer_destroy(producer);
 }
 
