@@ -459,8 +459,8 @@ mod tests {
     use super::*;
     use crate::common::Metric;
     use crate::common::metrics::MetricConfig;
-    use crate::common::metrics::MockTime;
     use crate::common::metrics::stats::{Avg, Max};
+    use crate::common::utils::MockTime;
     use crate::common::{MetricName, MetricNameTemplate};
     use crate::consumer::internals::AutoOffsetResetStrategy;
     use std::collections::HashSet;

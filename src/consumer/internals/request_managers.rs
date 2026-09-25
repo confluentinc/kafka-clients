@@ -367,7 +367,7 @@ mod tests {
             subs,
             "g",
             None,
-            Arc::new(crate::common::metrics::SystemTime),
+            Arc::new(crate::common::utils::SystemTime),
             0,
         ))
     }
@@ -391,6 +391,7 @@ mod tests {
             subs,
             metadata,
             IsolationLevel::ReadUncommitted,
+            Arc::new(crate::common::utils::SystemTime),
             100,
             30_000,
             60_000,

@@ -12,14 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! A `Time` implementation backed by the system clock.
-//!
-//! Mirrors `org.apache.kafka.common.utils.SystemTime`.
-//!
-//! Java keeps `SystemTime` in `org.apache.kafka.common.utils`, alongside
-//! `Time`; this crate hosts both under `common::metrics` because `Metrics` /
-//! `Sensor` / `KafkaMetric` are their only consumers. The package drift is
-//! pre-existing and shared with `ByteUtils` (`common::utils::ByteUtils`).
+//! A `Time` implementation backed by the system clock, translated from
+//! `org.apache.kafka.common.utils.SystemTime`.
 
 use super::Time;
 
@@ -30,13 +24,17 @@ use super::Time;
 /// turn it into an `i64`. Captured once on first use.
 static NANO_ORIGIN: std::sync::LazyLock<std::time::Instant> = std::sync::LazyLock::new(std::time::Instant::now);
 
-/// A `Time` implementation that uses the system clock and sleep call. Mirrors
-/// `org.apache.kafka.common.utils.SystemTime`.
+/// A time implementation that uses the system clock.
+///
+/// Java's `Time.SYSTEM` singleton has no counterpart: `SystemTime` is a
+/// stateless unit struct, so every instance is interchangeable.
+#[doc(alias = "org.apache.kafka.common.utils.SystemTime")]
 #[derive(Debug, Clone, Copy, Default)]
-#[non_exhaustive]
-pub struct SystemTime;
+pub(crate) struct SystemTime;
 
 impl Time for SystemTime {
+    /// Wall-clock time, as Java's `System.currentTimeMillis()`.
+    #[doc(alias = "org.apache.kafka.common.utils.SystemTime#milliseconds")]
     fn milliseconds(&self) -> i64 {
         use std::time::{SystemTime as StdSystemTime, UNIX_EPOCH};
         StdSystemTime::now()
@@ -50,7 +48,8 @@ impl Time for SystemTime {
     /// This used to read `SystemTime::now().duration_since(UNIX_EPOCH)`, which is
     /// wall-clock: an NTP step backwards makes a later reading smaller than an
     /// earlier one, so any `nanoseconds() - start` elapsed measurement goes
-    /// negative. `Instant` cannot regress.
+    /// negative. `Instant` cannot regress. Java's is `System.nanoTime()`.
+    #[doc(alias = "org.apache.kafka.common.utils.SystemTime#nanoseconds")]
     fn nanoseconds(&self) -> i64 {
         NANO_ORIGIN.elapsed().as_nanos() as i64
     }

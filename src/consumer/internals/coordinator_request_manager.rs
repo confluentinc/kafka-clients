@@ -361,11 +361,8 @@ impl CoordinatorRequestManager {
         let mut unsent = UnsentRequest::new(builder, None);
         let response_rx = unsent.take_response_receiver().expect("receiver fresh");
         let inner_for_handler = Arc::clone(inner);
+        let handler = unsent.handler();
         tokio::spawn(async move {
-            let now_ms = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_millis() as i64)
-                .unwrap_or(0);
             // Java: `CoordinatorRequestManager.java:124` —
             // `getAndClearFatalError()` runs UNCONDITIONALLY at the top
             // of the `whenComplete` lambda, before branching on success
@@ -379,23 +376,34 @@ impl CoordinatorRequestManager {
             // on the next heartbeat poll).
             inner_for_handler.fatal_error.lock().expect("fatal_error poisoned").take();
             match response_rx.await {
-                Ok(Ok(mut client_response)) => match client_response.take_response_body() {
-                    Some(ConcreteResponse::FindCoordinator(resp)) => {
-                        Self::on_response_inner(&inner_for_handler, now_ms, &resp);
-                    },
-                    _ => {
-                        Self::on_failed_response_inner(
-                            &inner_for_handler,
-                            now_ms,
-                            Error::new(Errors::UnknownServerError),
-                        );
-                    },
+                // Java: `onResponse(clientResponse.receivedTimeMs(), response)`
+                // on success, `onFailedResponse(unsentRequest.handler().completionTimeMs(), throwable)`
+                // on failure — the time the response arrived, not the time
+                // the request was sent.
+                Ok(Ok(mut client_response)) => {
+                    let received_time_ms = client_response.received_time_ms();
+                    match client_response.take_response_body() {
+                        Some(ConcreteResponse::FindCoordinator(resp)) => {
+                            Self::on_response_inner(&inner_for_handler, received_time_ms, &resp);
+                        },
+                        _ => {
+                            Self::on_failed_response_inner(
+                                &inner_for_handler,
+                                received_time_ms,
+                                Error::new(Errors::UnknownServerError),
+                            );
+                        },
+                    }
                 },
                 Ok(Err(err)) => {
-                    Self::on_failed_response_inner(&inner_for_handler, now_ms, err);
+                    Self::on_failed_response_inner(&inner_for_handler, handler.completion_time_ms(), err);
                 },
                 Err(_recv) => {
-                    Self::on_failed_response_inner(&inner_for_handler, now_ms, Error::new(Errors::NetworkError));
+                    Self::on_failed_response_inner(
+                        &inner_for_handler,
+                        handler.completion_time_ms(),
+                        Error::new(Errors::NetworkError),
+                    );
                 },
             }
         });

@@ -985,14 +985,15 @@ mod round_trip {
     use crate::common::requests::FetchRequest;
     use crate::common::requests::FetchResponse;
     use crate::common::serialization::Deserializer;
+    use crate::common::utils::SystemTime;
     use crate::common::{Error, IsolationLevel, Node, TopicPartition, Uuid};
     use crate::consumer::internals::AutoOffsetResetStrategy;
     use crate::consumer::internals::ConsumerMetadata;
     use crate::consumer::internals::Deserializers;
     use crate::consumer::internals::FetchBuffer;
+    use crate::consumer::internals::FetchCollector;
     use crate::consumer::internals::FetchConfig;
     use crate::consumer::internals::FetchMetricsManager;
-    use crate::consumer::internals::{FetchCollector, SystemFetchCollectorTime};
     use crate::consumer::internals::{FetchPosition, SubscriptionState};
     use crate::fetch_response_data::{
         AbortedTransaction, FetchableTopicResponse, NodeEndpoint, PartitionData as RespPartitionData,
@@ -1666,7 +1667,7 @@ mod round_trip {
                 cfg,
                 deserializers,
                 FetchMetricsManager::for_test(),
-                Arc::new(SystemFetchCollectorTime),
+                Arc::new(SystemTime),
             );
             collector.collect_fetch(&self.fetch_buffer).expect("collect_fetch")
         }
@@ -1683,7 +1684,7 @@ mod round_trip {
                 self.fetch_config.clone(),
                 deserializers,
                 FetchMetricsManager::for_test(),
-                Arc::new(SystemFetchCollectorTime),
+                Arc::new(SystemTime),
             );
             collector
                 .collect_fetch(&self.fetch_buffer)
@@ -1701,7 +1702,7 @@ mod round_trip {
                 self.fetch_config.clone(),
                 deserializers,
                 FetchMetricsManager::for_test(),
-                Arc::new(SystemFetchCollectorTime),
+                Arc::new(SystemTime),
             );
             collector.collect_fetch(&self.fetch_buffer)
         }
@@ -1722,7 +1723,7 @@ mod round_trip {
                 self.fetch_config.clone(),
                 deserializers,
                 FetchMetricsManager::for_test(),
-                Arc::new(SystemFetchCollectorTime),
+                Arc::new(SystemTime),
             );
             collector.collect_fetch(&self.fetch_buffer)
         }

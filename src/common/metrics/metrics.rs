@@ -20,8 +20,9 @@ use std::sync::{Arc, Mutex};
 use crate::common::metrics::internals::MetricsUtils;
 use crate::common::metrics::{
     ClosureGauge, Gauge, KafkaMetric, Measurable, MetricConfig, MetricValueProvider, MetricsReporter, RecordingLevel,
-    Sensor, SystemTime, Time,
+    Sensor,
 };
+use crate::common::utils::{SystemTime, Time};
 use crate::common::{Error, Metric, MetricName, MetricNameTemplate, MetricValue};
 
 /// The shared registry state (metrics map + reporters) that is referenced both
@@ -250,7 +251,6 @@ impl Metrics {
     /// no reporters. Mirrors Java's `Metrics(MetricConfig defaultConfig, Time time)`
     /// (`:101`).
     #[doc(alias = "org.apache.kafka.common.metrics.Metrics#Metrics")]
-    #[cfg_attr(not(test), expect(dead_code))] // translated overload; only tests pass a clock
     pub(crate) fn with_default_config_time(default_config: Arc<MetricConfig>, time: Arc<dyn Time>) -> Self {
         Self::with_default_config_reporters_time(default_config, Vec::new(), time)
     }
@@ -780,8 +780,8 @@ impl Default for Metrics {
 mod tests {
     use super::*;
     use crate::common::MetricValue;
-    use crate::common::metrics::MockTime;
     use crate::common::metrics::stats::{CumulativeCount, CumulativeSum, Value};
+    use crate::common::utils::MockTime;
 
     // Matches MetricsTest.EPS.
     const EPS: f64 = 0.000001;

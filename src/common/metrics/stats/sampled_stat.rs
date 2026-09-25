@@ -375,10 +375,11 @@ impl Sample {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::metrics::MockTime;
     use crate::common::metrics::TimeUnit;
     use crate::common::metrics::stats::{Avg, Max, Min, WindowedCount, WindowedSum};
-    use crate::common::metrics::{Measurable, Stat, Time};
+    use crate::common::metrics::{Measurable, Stat};
+    use crate::common::utils::MockTime;
+    use crate::common::utils::Time;
     use std::sync::Arc;
 
     // A SampledStat whose measure() returns the number of samples (sum of

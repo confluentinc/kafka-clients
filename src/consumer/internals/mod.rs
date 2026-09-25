@@ -83,14 +83,14 @@ pub(crate) use consumer_heartbeat_request_manager::ConsumerHeartbeatRequestManag
 pub(crate) use consumer_interceptors::ConsumerInterceptors;
 pub(crate) use consumer_membership_manager::ConsumerMembershipManager;
 pub(crate) use consumer_metadata::ConsumerMetadata;
-pub(crate) use consumer_network_thread::{ConsumerNetworkThread, SystemThreadTime, ThreadTime};
+pub(crate) use consumer_network_thread::ConsumerNetworkThread;
 pub(crate) use consumer_rebalance_listener_invoker::ConsumerRebalanceListenerInvoker;
 pub(crate) use consumer_rebalance_metrics_manager::ConsumerRebalanceMetricsManager;
 pub(crate) use consumer_utils::ConsumerUtils;
 pub(crate) use coordinator_request_manager::CoordinatorRequestManager;
 pub(crate) use deserializers::Deserializers;
 pub(crate) use fetch_buffer::FetchBuffer;
-pub(crate) use fetch_collector::{FetchCollector, FetchCollectorTime, SystemFetchCollectorTime};
+pub(crate) use fetch_collector::FetchCollector;
 pub(crate) use fetch_config::FetchConfig;
 pub(crate) use fetch_metrics_aggregator::FetchMetricsAggregator;
 pub(crate) use fetch_metrics_manager::FetchMetricsManager;

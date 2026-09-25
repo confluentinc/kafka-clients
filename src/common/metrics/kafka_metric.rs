@@ -18,7 +18,8 @@
 use std::sync::{Arc, Mutex};
 
 use crate::common::MetricValue;
-use crate::common::metrics::{Measurable, MetricConfig, MetricValueProvider, Time};
+use crate::common::metrics::{Measurable, MetricConfig, MetricValueProvider};
+use crate::common::utils::Time;
 use crate::common::{Error, Metric, MetricName};
 
 /// A metric tracked by the registry. Holds a [`MetricName`], a (mutable)
@@ -131,9 +132,10 @@ impl Metric for KafkaMetric {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::metrics::MockTime;
     use crate::common::metrics::stats::Value;
-    use crate::common::metrics::{ClosureGauge, Stat, SystemTime};
+    use crate::common::metrics::{ClosureGauge, Stat};
+    use crate::common::utils::MockTime;
+    use crate::common::utils::SystemTime;
     use std::collections::BTreeMap;
 
     fn name() -> MetricName {

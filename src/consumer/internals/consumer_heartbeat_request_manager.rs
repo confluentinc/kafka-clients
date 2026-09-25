@@ -406,12 +406,14 @@ impl ConsumerHeartbeatRequestManager {
         } else {
             None
         };
+        let handler = unsent.handler();
         tokio::spawn(async move {
-            let now_ms = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_millis() as i64)
-                .unwrap_or(0);
-            let completion = match response_rx.await {
+            let result = response_rx.await;
+            // Java: `long completionTimeMs = request.handler().completionTimeMs()`
+            // — read once the request has completed, so it is the time the
+            // response (or failure) arrived, not the time the request was sent.
+            let now_ms = handler.completion_time_ms();
+            let completion = match result {
                 Ok(Ok(mut client_response)) => {
                     // Java: `response.requestLatencyMs()` — captured before
                     // `take_response_body()`. Recorded in the drain (normal
@@ -1181,7 +1183,7 @@ mod tests {
             beh.clone(),
             true,
             None,
-            Arc::new(crate::common::metrics::SystemTime),
+            Arc::new(crate::common::utils::SystemTime),
         ));
         let mut hb = ConsumerHeartbeatRequestManager::new(0, &config, coord.clone(), subs, mm.clone(), beh);
         if let Some(interval) = initial_interval_ms {
@@ -1250,7 +1252,7 @@ mod tests {
             beh.clone(),
             true,
             None,
-            Arc::new(crate::common::metrics::SystemTime),
+            Arc::new(crate::common::utils::SystemTime),
         ));
         let mut hb = ConsumerHeartbeatRequestManager::new(0, &config, coord.clone(), subs.clone(), mm.clone(), beh);
         if let Some(interval) = initial_interval_ms {
@@ -1758,11 +1760,13 @@ mod tests {
         );
         unsent.handler().on_complete(client_response);
 
-        // Drive poll() until the spawned forwarder has enqueued the
-        // completion and the drain has run.
+        // Drain until the spawned forwarder has enqueued the completion.
+        // Drain directly rather than through poll(0): the error completes
+        // at time 0, so a poll at 0 would immediately send the retry,
+        // repopulating the sent fields this test inspects.
         let deadline = std::time::Instant::now() + std::time::Duration::from_millis(200);
         loop {
-            let _ = mgr.poll(0);
+            mgr.drain_pending_completions(0);
             if !mgr.sent_fields_topics_populated() {
                 break;
             }

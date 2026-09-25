@@ -452,33 +452,37 @@ impl TopicMetadataRequestManager {
             let response_rx = req.take_response_receiver().expect("receiver fresh");
             let inner_for_handler = Arc::clone(&self.inner);
             let request_id = state.id;
+            let handler = req.handler();
             tokio::spawn(async move {
-                let now_ms = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_millis() as i64)
-                    .unwrap_or(0);
+                // Java: `handleError(exception, unsent.handler().completionTimeMs())`
+                // on failure, `handleError(e, response.receivedTimeMs())` when the
+                // response cannot be handled — the time the response arrived, not
+                // the time the request was sent.
                 match response_rx.await {
-                    Ok(Ok(mut client_response)) => match client_response.take_response_body() {
-                        Some(ConcreteResponse::Metadata(resp)) => {
-                            Self::on_response_inner(&inner_for_handler, request_id, now_ms, &resp);
-                        },
-                        _ => {
-                            Self::on_failure_inner(
-                                &inner_for_handler,
-                                request_id,
-                                now_ms,
-                                Error::new(Errors::UnknownServerError),
-                            );
-                        },
+                    Ok(Ok(mut client_response)) => {
+                        let received_time_ms = client_response.received_time_ms();
+                        match client_response.take_response_body() {
+                            Some(ConcreteResponse::Metadata(resp)) => {
+                                Self::on_response_inner(&inner_for_handler, request_id, received_time_ms, &resp);
+                            },
+                            _ => {
+                                Self::on_failure_inner(
+                                    &inner_for_handler,
+                                    request_id,
+                                    received_time_ms,
+                                    Error::new(Errors::UnknownServerError),
+                                );
+                            },
+                        }
                     },
                     Ok(Err(err)) => {
-                        Self::on_failure_inner(&inner_for_handler, request_id, now_ms, err);
+                        Self::on_failure_inner(&inner_for_handler, request_id, handler.completion_time_ms(), err);
                     },
                     Err(_recv) => {
                         Self::on_failure_inner(
                             &inner_for_handler,
                             request_id,
-                            now_ms,
+                            handler.completion_time_ms(),
                             Error::new(Errors::NetworkError),
                         );
                     },

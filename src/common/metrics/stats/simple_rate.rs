@@ -76,8 +76,8 @@ impl Measurable for SimpleRate {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::metrics::MockTime;
-    use crate::common::metrics::Time;
+    use crate::common::utils::MockTime;
+    use crate::common::utils::Time;
 
     fn record(rate: &SimpleRate, config: &MetricConfig, time: &MockTime, value: f64) {
         rate.record(config, value, time.milliseconds());

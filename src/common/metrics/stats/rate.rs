@@ -151,9 +151,9 @@ impl Measurable for Rate {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::metrics::MockTime;
-    use crate::common::metrics::Time;
     use crate::common::metrics::internals::MetricsUtils;
+    use crate::common::utils::MockTime;
+    use crate::common::utils::Time;
 
     const EPS: f64 = 0.000001;
 

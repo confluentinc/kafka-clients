@@ -6138,7 +6138,8 @@ mod tests {
         tags: &[(&str, &str)],
         provider: crate::common::metrics::MetricValueProvider,
     ) -> (MetricName, Arc<KafkaMetric>) {
-        use crate::common::metrics::{MetricConfig, SystemTime};
+        use crate::common::metrics::MetricConfig;
+        use crate::common::utils::SystemTime;
         use std::collections::BTreeMap;
         let tag_map: BTreeMap<String, String> = tags.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
         let mn = MetricName::new(name, "grp", "desc", tag_map);

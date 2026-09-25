@@ -64,6 +64,7 @@ use tokio::task::JoinHandle;
 
 use crate::common::metrics::{KafkaMetric, MetricConfig, Metrics, RecordingLevel};
 use crate::common::utils::LogContext;
+use crate::common::utils::Time;
 use crate::common::{Error, IsolationLevel, MetricName, TopicPartition};
 use crate::consumer::ConsumerConfig;
 use crate::consumer::ConsumerRebalanceListener;
@@ -88,7 +89,6 @@ use crate::consumer::internals::OffsetCommitCallbackInvoker;
 use crate::consumer::internals::PositionsValidator;
 use crate::consumer::internals::RequestManagers;
 use crate::consumer::internals::SubscriptionState;
-use crate::consumer::internals::ThreadTime;
 use crate::consumer::internals::WakeupTrigger;
 use crate::consumer::internals::events::ApplicationEventHandler;
 use crate::consumer::internals::events::BackgroundEventHandler;
@@ -206,7 +206,7 @@ pub(crate) struct AsyncConsumerHandleState {
     /// partitions (Java `fetchBuffer.retainAll`).
     fetch_buffer: Arc<FetchBuffer>,
     /// Time source for deadline computation.
-    time: Arc<dyn ThreadTime>,
+    time: Arc<dyn Time>,
     /// Cached `default.api.timeout.ms`.
     default_api_timeout_ms: i64,
 }
@@ -1317,7 +1317,7 @@ where
     /// inside `close`).
     config: ConsumerConfig,
     /// Time source used for `current_time_ms` arguments to events.
-    time: Arc<dyn ThreadTime>,
+    time: Arc<dyn Time>,
     /// Java: `private CompletableFuture<...> lastPendingAsyncCommit`.
     ///
     /// Tracks the most-recently-submitted async commit so that
@@ -1586,7 +1586,7 @@ pub(crate) struct AsyncKafkaConsumerComponents<K: Send + Sync + 'static, V: Send
     pub deserializers: Arc<Deserializers<K, V>>,
     pub interceptors: Arc<Mutex<ConsumerInterceptors<K, V>>>,
     pub isolation_level: IsolationLevel,
-    pub time: Arc<dyn ThreadTime>,
+    pub time: Arc<dyn Time>,
     /// Shared `Arc<Mutex<Option<Arc<ConsumerGroupMetadataImpl>>>>` slot. Java has a
     /// **single** `AtomicReference<Optional<ConsumerGroupMetadata>>` field
     /// (`AsyncKafkaConsumer.java:289`); the same slot is referenced by
@@ -1762,6 +1762,10 @@ where
 
         log::debug!("Initializing the Kafka consumer");
 
+        // Java's `KafkaConsumer` passes `Time.SYSTEM`, and the constructor
+        // hands that one instance to every component it builds.
+        let time: Arc<dyn Time> = Arc::new(crate::common::utils::SystemTime);
+
         // Java line 390 — `clientId = config.getString(CLIENT_ID_CONFIG)`.
         let client_id: Arc<str> = Arc::from(config.client_id());
         // Java line 391 — `autoCommitEnabled = config.getBoolean(...)`.
@@ -1837,7 +1841,7 @@ where
         // the fetch path (FetchRequestManager / FetchCollector). The full
         // Metrics-wiring (`consumer.metrics()`, reporter list) is finalized in
         // M7 over THIS same registry — no re-plumb.
-        let (metrics, fetch_metrics_manager) = Self::create_fetch_metrics_manager(&config);
+        let (metrics, fetch_metrics_manager) = Self::create_fetch_metrics_manager(&config, Arc::clone(&time));
 
         // M4: the consumer-level + heartbeat + offset-commit metrics managers
         // all register against the SAME `Arc<Metrics>` registry. Java
@@ -2042,10 +2046,7 @@ where
         // `ApplicationEventProcessor` event arms, `membership` via
         // `reconcile()`); see `consumer_network_thread.rs`.
 
-        let current_time_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as i64)
-            .unwrap_or(0);
+        let current_time_ms = time.milliseconds();
 
         let coordinator: Option<Arc<CoordinatorRequestManager>> = group_id.as_ref().map(|gid| {
             Arc::new(CoordinatorRequestManager::new(
@@ -2062,7 +2063,7 @@ where
                 Arc::clone(&subscriptions),
                 gid.clone(),
                 config.group_instance_id().map(|s| s.to_string()),
-                Arc::new(crate::common::metrics::SystemTime),
+                Arc::clone(&time),
                 current_time_ms,
             ))
         });
@@ -2137,7 +2138,7 @@ where
                     &metrics,
                     Arc::clone(&subscriptions),
                 ))),
-                Arc::new(crate::common::metrics::SystemTime),
+                Arc::clone(&time),
             ))),
             _ => None,
         };
@@ -2179,6 +2180,7 @@ where
             Arc::clone(&subscriptions),
             Arc::clone(&metadata),
             fetch_config.isolation_level,
+            Arc::clone(&time),
             config.retry_backoff_ms(),
             config.request_timeout_ms() as i64,
             config.default_api_timeout_ms as i64,
@@ -2358,10 +2360,8 @@ where
         // `ConsumerRebalanceListenerInvoker` + `ConsumerNetworkThread`
         // build + spawn. Each Java step maps line-for-line to the Rust
         // block below.
+        use crate::consumer::internals::ConsumerNetworkThread;
         use crate::consumer::internals::events::ApplicationEventProcessor;
-        use crate::consumer::internals::{ConsumerNetworkThread, SystemThreadTime, ThreadTime};
-
-        let time: Arc<dyn ThreadTime> = Arc::new(SystemThreadTime);
 
         // Java lines 466-470 — `applicationEventProcessor`.
         let application_event_reaper: Arc<std::sync::Mutex<CompletableEventReaper>> =
@@ -2371,6 +2371,7 @@ where
             Arc::clone(&metadata),
             Arc::clone(&subscriptions),
             Arc::clone(&application_event_reaper),
+            Arc::clone(&time),
         );
 
         // Java lines 471-481 — `applicationEventHandler`. M6: wire the
@@ -2386,12 +2387,11 @@ where
         // `RebalanceCallbackMetricsManager` + `Time` into the constructor; we
         // wire them post-construction so the no-arg `new` stays usable in
         // tests. The metrics manager registers against the consumer's shared
-        // `Arc<Metrics>` (M3 field); the clock is `SystemTime` (the same clock
-        // the metrics registry uses), so the recorded latency durations match.
+        // `Arc<Metrics>` (M3 field); the clock is the consumer's `time`.
         let mut rebalance_listener_invoker = ConsumerRebalanceListenerInvoker::new(Arc::clone(&subscriptions));
         rebalance_listener_invoker.set_metrics(
             crate::consumer::internals::RebalanceCallbackMetricsManager::new(&metrics),
-            Arc::new(crate::common::metrics::SystemTime),
+            Arc::clone(&time),
         );
 
         // Java line 491 — `backgroundEventReaper`. We reuse the same
@@ -2404,15 +2404,13 @@ where
         let wakeup_trigger = WakeupTrigger::new();
 
         // Java lines 494-500 — `fetchCollector`.
-        let fetch_collector_time: Arc<dyn crate::consumer::internals::FetchCollectorTime> =
-            Arc::new(crate::consumer::internals::SystemFetchCollectorTime);
         let fetch_collector = Arc::new(FetchCollector::new(
             Arc::clone(&metadata),
             Arc::clone(&subscriptions),
             fetch_config,
             Arc::clone(&_deserializers),
             Arc::clone(&fetch_metrics_manager),
-            fetch_collector_time,
+            Arc::clone(&time),
         ));
 
         // Java line 506 — `config.logUnused()` → `log::debug!(...)`.
@@ -2573,7 +2571,10 @@ where
     /// reporter-less but fully functional. Returns the owned `Arc<Metrics>`
     /// (kept on the consumer for M7's public accessor) and the
     /// `Arc<FetchMetricsManager>` shared into the fetch path.
-    fn create_fetch_metrics_manager(config: &ConsumerConfig) -> (Arc<Metrics>, Arc<FetchMetricsManager>) {
+    fn create_fetch_metrics_manager(
+        config: &ConsumerConfig,
+        time: Arc<dyn Time>,
+    ) -> (Arc<Metrics>, Arc<FetchMetricsManager>) {
         const CONSUMER_METRIC_GROUP_PREFIX: &str = "consumer";
         const CONSUMER_CLIENT_ID_METRIC_TAG: &str = "client-id";
 
@@ -2587,7 +2588,7 @@ where
             .set_record_level(recording_level)
             .set_tags(tags);
 
-        let metrics = Arc::new(Metrics::with_default_config(Arc::new(metric_config)));
+        let metrics = Arc::new(Metrics::with_default_config_time(Arc::new(metric_config), time));
 
         // `client-id` is a default config tag, so it is added automatically to
         // every metric name; the registry's template tag set therefore lists
@@ -6268,8 +6269,9 @@ mod tests {
             "",
             IsolationLevel::ReadUncommitted,
         );
+        let time: Arc<dyn Time> = Arc::new(crate::common::utils::SystemTime);
         let (metrics, fetch_metrics_manager) =
-            AsyncKafkaConsumer::<Vec<u8>, Vec<u8>>::create_fetch_metrics_manager(&config);
+            AsyncKafkaConsumer::<Vec<u8>, Vec<u8>>::create_fetch_metrics_manager(&config, Arc::clone(&time));
         let kafka_consumer_metrics = Arc::new(KafkaConsumerMetrics::new(Arc::clone(&metrics)));
         let async_consumer_metrics = Arc::new(AsyncConsumerMetrics::new(
             Arc::clone(&metrics),
@@ -6282,7 +6284,7 @@ mod tests {
             fetch_config,
             Arc::clone(&deserializers),
             Arc::clone(&fetch_metrics_manager),
-            Arc::new(crate::consumer::internals::SystemFetchCollectorTime),
+            Arc::new(crate::common::utils::SystemTime),
         ));
 
         // Build the state-notifier + shared slots once (Phase-12
@@ -6328,7 +6330,7 @@ mod tests {
             deserializers,
             interceptors,
             isolation_level: IsolationLevel::ReadUncommitted,
-            time: Arc::new(crate::consumer::internals::SystemThreadTime),
+            time,
             group_metadata: group_metadata_slot,
             group_assignment_snapshot: group_assignment_snapshot_slot,
             state_notifier,
@@ -7269,7 +7271,7 @@ mod tests {
     //   - testRecordBackgroundEventQueueSizeAndBackgroundEventQueueTime —
     //     TRANSLATED (Phase M7) as
     //     `test_record_background_event_queue_size_and_time` (inline below).
-    //     Drains a bg event under a mock `ThreadTime` advanced by 10 ms, then
+    //     Drains a bg event under a `MockTime` advanced by 10 ms, then
     //     reads the values via the public `metrics()` accessor (M7).
     //   - testEmptyStreamRebalanceData, testStreamRebalanceData,
     //     testCloseInvokesStreamsRebalanceListenerOnTasksRevokedWhenMemberEpochPositive,
@@ -8239,32 +8241,20 @@ mod tests {
     #[tokio::test]
     async fn test_record_background_event_queue_size_and_time() {
         use crate::common::Metric;
+        use crate::common::utils::MockTime;
         use crate::consumer::ConsumerRebalanceListenerMethodName;
-        use crate::consumer::internals::ThreadTime;
         use tokio::sync::oneshot;
 
         // Mock clock so the recorded queue-time (now - enqueuedMs) is exactly
         // 10 ms, deterministically. `self.time` drives both the enqueue stamp
         // and the drain-time read in `process_background_events`.
-        struct MockThreadTime {
-            millis: std::sync::Mutex<i64>,
-        }
-        impl MockThreadTime {
-            fn sleep(&self, dur_ms: i64) {
-                *self.millis.lock().unwrap() += dur_ms;
-            }
-        }
-        impl ThreadTime for MockThreadTime {
-            fn milliseconds(&self) -> i64 {
-                *self.millis.lock().unwrap()
-            }
-        }
-
         let (mut consumer, handles) = make_test_consumer_with_channels();
 
         // Swap in the mock clock (start at an arbitrary non-zero epoch).
-        let mock_time = Arc::new(MockThreadTime { millis: std::sync::Mutex::new(1_000) });
-        consumer.time = Arc::clone(&mock_time) as Arc<dyn ThreadTime>;
+        let mock_time = Arc::new(MockTime::with_auto_tick_ms_current_time_ms_current_high_res_time_ns(
+            0, 1_000, 0,
+        ));
+        consumer.time = Arc::clone(&mock_time) as Arc<dyn Time>;
 
         // Java: `event.setEnqueuedMs(time.milliseconds()); backgroundEventQueue.add(event);`
         // A no-listener callback-needed event acks Ok(()) — the time recording
