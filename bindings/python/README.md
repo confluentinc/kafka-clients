@@ -14,7 +14,7 @@ exports only `Duration` and the Java built-in exception classes:
 ```python
 from confluent_kafka.producer import (
     KafkaProducer, MockProducer, AsyncKafkaProducer, AsyncMockProducer,
-    ProducerRecord, RecordMetadata,
+    ProducerRecord, RecordMetadata, Callback,
 )
 from confluent_kafka.consumer import (
     KafkaConsumer, MockConsumer, AsyncKafkaConsumer, AsyncMockConsumer,
@@ -49,6 +49,22 @@ Each async client lives in the same module as its sync peer, `Async`-prefixed
 async class iff it blocks in Java or awaits the background task; in-memory reads
 (`assignment()`, `subscription()`, `metrics()`, `group_metadata()`) stay plain
 `def` on both.
+
+## Producer
+
+- `send(record=…, callback=cb)` returns a future for the record's
+  `RecordMetadata`; like Java's, it cannot be cancelled. `cb(metadata,
+  exception)` is Java's `Callback`: it runs on the producer's background
+  completion thread (`KafkaProducer`) or on the event loop
+  (`AsyncKafkaProducer`), one at a time in completion order, before the future
+  completes; a raising callback is logged. `metadata` is never `None`: on
+  failure every field but the topic and partition is -1.
+- `close()` waits for the records sent before it; `close(timeout=…)` waits at
+  most `timeout`, then fails what is left. Neither cancels a future.
+- A `send()` that returned belongs to the `flush()` or transaction call after it
+  (`commit_transaction()` includes it, `abort_transaction()` discards it).
+- `MockProducer` is Java's `MockProducer`: sends complete, and callbacks run, on
+  the calling thread.
 
 ## Errors
 

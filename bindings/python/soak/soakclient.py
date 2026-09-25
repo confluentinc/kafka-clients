@@ -1486,11 +1486,11 @@ class SoakClient(object):
                     self.outstanding -= 1
             self._record_delivery(metadata, (time.time() - sent_at) * 1000.0)
         except Exception as ex:
-            # A failed send raises KafkaError through the future; a cancelled
-            # one raises CancelledError. Both are counted the same way, and the
-            # error's code/message are read by duck typing (error_code /
-            # error_message) rather than by isinstance, so this file needs no
-            # module-scope KafkaError.
+            # A failed send raises its error through the future (the future
+            # cannot be cancelled, and close() does not cancel it: it waits for
+            # the in-flight sends, as Java's does). The error's code/message are
+            # read by duck typing (error_code / error_message) rather than by
+            # isinstance, so this file needs no module-scope KafkaError.
             with self._lock:
                 self.dr_err_cnt += 1
             code = error_code(ex)

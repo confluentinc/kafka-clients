@@ -38,7 +38,8 @@ import datetime as _dt
 import threading  # noqa: E402  (CallbackLog's lock)
 
 # The gRPC integration servers speak the new ``confluent_kafka`` package
-# (spec §4), not the retired top-level ``producer.py`` / ``consumer.py``.
+# (CLAUDE.md, Python Binding Conventions, Modules), not the retired top-level
+# ``producer.py`` / ``consumer.py``.
 from confluent_kafka import IllegalArgumentError, IllegalStateError  # noqa: E402
 from confluent_kafka.common import TopicPartition  # noqa: E402
 from confluent_kafka._errors import to_ffi_id
@@ -345,7 +346,7 @@ def _metric_to_proto(metric):
     """One entry of a producer/consumer ``metrics()`` snapshot -> ``pb.Metric``.
 
     ``metric`` is a :class:`confluent_kafka.common.Metric` (the snapshot is now
-    ``dict[MetricName, Metric]``, spec §; the handlers iterate ``.values()``).
+    ``dict[MetricName, Metric]``, Java's ``Map``; the handlers iterate ``.values()``).
     Its ``MetricName`` carries name/group/description/tags; ``metric_value()`` is
     the value. The proto ``value`` oneof is picked from the Python type of the
     value — ``str`` -> string, ``bool``/``int`` -> long, ``float`` -> double.
@@ -539,21 +540,17 @@ def make_logging_commit_callback(log, client_id):
 
 
 def make_logging_delivery_callback(log, client_id):
-    """A real delivery ``callback`` recording the delivered record's metadata.
+    """A real delivery ``Callback`` recording the delivered record's metadata.
 
-    Both arguments can be set at once: a producer that rejects a record before
-    it reaches the accumulator delivers placeholder metadata (offset/partition
-    -1) *alongside* the error, mirroring Java's
-    ``callback.onCompletion(nullMetadata, e)``. Record whichever is present.
+    The metadata is never ``None``: on failure it is Java's placeholder
+    ``RecordMetadata(tp, -1, -1, NO_TIMESTAMP, -1, -1)`` beside the error
+    (``KafkaProducer.AppendCallbacks.onCompletion``), recorded as it is.
     """
 
     def delivery_callback(metadata, exception):
-        partitions = ()
-        offsets = None
-        if metadata is not None:
-            topic, partition = metadata.topic(), metadata.partition()
-            partitions = ((topic, partition),)
-            offsets = {_offset_key(topic, partition): metadata.offset()}
+        topic, partition = metadata.topic(), metadata.partition()
+        partitions = ((topic, partition),)
+        offsets = {_offset_key(topic, partition): metadata.offset()}
         log.append(
             client_id,
             KIND_DELIVERY,
