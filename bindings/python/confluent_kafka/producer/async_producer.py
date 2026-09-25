@@ -43,7 +43,7 @@ from ._base import (
     _to_partition_info,
 )
 from ._send import _completion_to_python, _invoke_delivery_callback
-from .producer import _timeout_seconds, _timeout_to_ms, _validate_timeout
+from .producer import _close_submit, _timeout_seconds, _validate_timeout
 from .record_metadata import RecordMetadata
 
 if TYPE_CHECKING:
@@ -229,10 +229,7 @@ class AsyncProducer(Generic[K, V], _ProducerState):
         self._cancel()
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(None, _lib.Producer_shutdown, self._c_producer)
-        timeout_ms = _timeout_to_ms(timeout)
-        await self._run_async(
-            lambda cb: _lib.Producer_close_async(
-                self._c_producer, cb, timeout_ms))
+        await self._run_async(_close_submit(self._c_producer, timeout))
         await loop.run_in_executor(None, _lib.Producer_destroy, self._c_producer)
 
     def _cancel(self) -> None:
