@@ -24,7 +24,7 @@ from __future__ import annotations
 from typing import ClassVar
 
 from confluent_kafka import _throwable
-from confluent_kafka._args import UNSET, Form, java_forms
+from confluent_kafka._args import UNSET, is_given
 from confluent_kafka.common.errors.retriable_error import RetriableError
 
 __all__ = ["ThrottlingQuotaExceededError"]
@@ -41,23 +41,18 @@ class ThrottlingQuotaExceededError(RetriableError):
 
     _ffi_id: ClassVar[int] = 89  # kafka_common_ErrorCode_THROTTLING_QUOTA_EXCEEDED
 
-    @java_forms(
-        Form("message"),
-        Form("throttle_time_ms", "message"),
-    )
     def __init__(
         self,
         *,
         throttle_time_ms: int = UNSET,
         message: str,
-        _java_form: int = -1,
     ) -> None:
-        if _java_form == 0:
-            _throwable.init(self, message, None)
-            self._throttle_time_ms = 0
-        else:
+        if is_given(throttle_time_ms, UNSET):
             _throwable.init(self, message, None)
             self._throttle_time_ms = throttle_time_ms
+        else:
+            _throwable.init(self, message, None)
+            self._throttle_time_ms = 0
         self._java_kwargs = _throwable.kwargs(throttle_time_ms=throttle_time_ms, message=message)
 
     def throttle_time_ms(self) -> int:

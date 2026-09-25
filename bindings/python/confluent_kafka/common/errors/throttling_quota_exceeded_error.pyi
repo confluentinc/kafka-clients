@@ -14,7 +14,7 @@
 
 # GENERATED, DO NOT EDIT (stub for confluent_kafka.common.errors.ThrottlingQuotaExceededError).
 
-from typing import ClassVar, overload
+from typing import ClassVar
 
 from confluent_kafka.common.errors.retriable_error import RetriableError
 
@@ -22,8 +22,5 @@ __all__ = ["ThrottlingQuotaExceededError"]
 
 class ThrottlingQuotaExceededError(RetriableError):
     _ffi_id: ClassVar[int]
-    @overload
-    def __init__(self, *, message: str) -> None: ...
-    @overload
-    def __init__(self, *, throttle_time_ms: int, message: str) -> None: ...
+    def __init__(self, *, throttle_time_ms: int = 0, message: str) -> None: ...
     def throttle_time_ms(self) -> int: ...

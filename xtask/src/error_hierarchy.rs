@@ -1403,7 +1403,6 @@ struct PyForm {
 
 struct Selection {
     form: usize,
-    fills: Vec<(String, String)>,
 }
 
 struct PyModel {
@@ -1716,7 +1715,7 @@ fn build_model(g: &Graph, info: &ClassInfo) -> anyhow::Result<PyModel> {
     }
 
     // The java_forms table, replicated: which form each set of given names
-    // selects, and with which fills.
+    // selects.
     let bit: BTreeMap<&str, u64> = order.iter().enumerate().map(|(i, p)| (p.as_str(), 1u64 << i)).collect();
     let mask_of = |names: &[String]| names.iter().fold(0u64, |m, p| m | bit[p.as_str()]);
     let mut table: BTreeMap<u64, Selection> = BTreeMap::new();
@@ -1735,13 +1734,7 @@ fn build_model(g: &Graph, info: &ClassInfo) -> anyhow::Result<PyModel> {
                     continue;
                 }
             }
-            table.insert(
-                given,
-                Selection {
-                    form: fi,
-                    fills: left_out.iter().map(|p| ((*p).clone(), form.defaults[*p].clone())).collect(),
-                },
-            );
+            table.insert(given, Selection { form: fi });
         }
     }
     // A parameter in every overload is required: it always counts as given
@@ -1763,21 +1756,17 @@ fn build_model(g: &Graph, info: &ClassInfo) -> anyhow::Result<PyModel> {
                 given |= b;
             }
         }
+        // The decorator exists iff a combination the union accepts matches no
+        // Java overload (CLAUDE.md, Signatures: "A method whose every
+        // combination matches an overload has no decorator"); otherwise the
+        // body tells the forms apart by what is given, filling a form's
+        // Java-given defaults itself.
         match table.get(&given) {
             None => decorated = true,
             Some(sel) => {
                 reachable_set.insert(sel.form);
-                for (p, v) in &sel.fills {
-                    let d = &params.iter().find(|x| &x.name == p).unwrap().default;
-                    if &d.python() != v {
-                        decorated = true;
-                    }
-                }
             },
         }
-    }
-    if params.iter().any(|p| p.default == Dflt::Unset) {
-        decorated = true;
     }
     if decorated {
         // With the decorator every form a table entry selects is reachable.
@@ -2031,7 +2020,7 @@ fn given_expr(p: &PyParam) -> String {
     match &p.default {
         Dflt::Required => "True".into(),
         Dflt::NoneDefault => format!("{} is not None", p.name),
-        Dflt::Unset => format!("{} is not UNSET", p.name),
+        Dflt::Unset => format!("is_given({}, UNSET)", p.name),
         Dflt::Const(c) => format!("is_given({}, {})", p.name, c),
     }
 }
@@ -2040,7 +2029,7 @@ fn not_given_expr(p: &PyParam) -> String {
     match &p.default {
         Dflt::Required => "False".into(),
         Dflt::NoneDefault => format!("{} is None", p.name),
-        Dflt::Unset => format!("{} is UNSET", p.name),
+        Dflt::Unset => format!("not is_given({}, UNSET)", p.name),
         Dflt::Const(c) => format!("not is_given({}, {})", p.name, c),
     }
 }
@@ -2119,7 +2108,10 @@ fn stub_param(
         }
         return Ok(format!("{}: {ty}", p.name));
     }
-    let java_value = model.forms.iter().find_map(|f| f.defaults.get(&p.name).cloned());
+    let java_value = model
+        .forms
+        .iter()
+        .find_map(|f| f.defaults.get(&p.name).or_else(|| f.field_defaults.get(&p.name)).cloned());
     Ok(match (&p.default, java_value) {
         (Dflt::NoneDefault, _) => format!("{}: {ty} | None = None", p.name),
         (_, Some(v)) if v == "None" => format!("{}: {ty} | None = None", p.name),
@@ -2346,7 +2338,20 @@ fn render_class(g: &Graph, info: &ClassInfo) -> anyhow::Result<Rendered> {
                 })
                 .collect()
         };
-        branches.push((conds, branch_code(g, info, form, "            ")));
+        let mut code = Vec::new();
+        if !model.decorated {
+            // Without the decorator nothing fills the form's Java-given
+            // defaults: a left-out parameter gets its value here.
+            for (name, value) in &form.defaults {
+                let p = model.params.iter().find(|p| &p.name == name).unwrap();
+                if p.default.python() != *value {
+                    code.push(format!("            if {}:", not_given_expr(p)));
+                    code.push(format!("                {name} = {value}"));
+                }
+            }
+        }
+        code.extend(branch_code(g, info, form, "            "));
+        branches.push((conds, code));
     }
     if !model.decorated {
         // A branch that differs from a longer one only by a None-default
@@ -2622,7 +2627,17 @@ fn render_class(g: &Graph, info: &ClassInfo) -> anyhow::Result<Rendered> {
         for p in &model.params {
             let decl = param_decl(p, info, &mut stub_used)?;
             ps.push(if p.default == Dflt::Unset {
-                decl.replace("= UNSET", "= ...")
+                // The stub shows the Java value (CLAUDE.md, Signatures: "the
+                // stubs show the Java value") when the forms agree on one.
+                let values: BTreeSet<&String> = model
+                    .forms
+                    .iter()
+                    .filter_map(|f| f.defaults.get(&p.name).or_else(|| f.field_defaults.get(&p.name)))
+                    .collect();
+                match values.iter().next() {
+                    Some(v) if values.len() == 1 => decl.replace("= UNSET", &format!("= {v}")),
+                    _ => decl.replace("= UNSET", "= ..."),
+                }
             } else {
                 decl
             });
@@ -3222,7 +3237,9 @@ mod tests {
         // two forms are matched strictly and throttle_time_ms is UNSET.
         let m = model_of(&classes, "org.apache.kafka.common.errors.ThrottlingQuotaExceededException");
         assert_eq!(param(&m, "throttle_time_ms").default, Dflt::Unset);
-        assert!(m.decorated);
+        // Both given sets are Java constructors: no decorator, no stubs.
+        assert!(!m.decorated);
+        assert!(m.stubs.is_empty());
         let m = model_of(&classes, "org.apache.kafka.common.errors.RecordDeserializationException");
         let full = &m.forms[1];
         // The deprecated constructor assigns the fields itself; it passes
@@ -3279,6 +3296,44 @@ mod tests {
         .unwrap();
         assert!(unlisted_packages(&root, &outputs).unwrap().is_empty());
         fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn decorated_iff_the_union_accepts_a_set_no_java_constructor_takes() {
+        let classes = build_graph(&repo_root()).unwrap();
+        let g = Graph { classes: &classes };
+        for info in classes.values() {
+            let m = build_model(&g, info).unwrap();
+            let names: Vec<&String> = m.params.iter().map(|p| &p.name).collect();
+            let always: BTreeSet<&String> = m
+                .params
+                .iter()
+                .filter(|p| m.forms.iter().all(|f| f.params.contains(&p.name)) && p.name != "cause")
+                .map(|p| &p.name)
+                .collect();
+            let mut rejects = false;
+            for combo in 0..(1u64 << names.len()) {
+                let given: BTreeSet<&String> = names
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, _)| combo & (1 << i) != 0)
+                    .map(|(_, n)| *n)
+                    .collect();
+                if !always.is_subset(&given) {
+                    continue; // a required parameter left out is Python's TypeError
+                }
+                let cause_everywhere = m.forms.iter().all(|f| f.params.iter().any(|p| p == "cause"));
+                if cause_everywhere && !given.iter().any(|n| *n == "cause") {
+                    continue; // cause in every form is always given
+                }
+                let matches = m.forms.iter().any(|f| {
+                    given.iter().all(|n| f.params.contains(n))
+                        && f.params.iter().all(|p| given.contains(p) || f.defaults.contains_key(p))
+                });
+                rejects |= !matches;
+            }
+            assert_eq!(m.decorated, rejects, "{}", info.java_fqn);
+        }
     }
 
     #[test]
