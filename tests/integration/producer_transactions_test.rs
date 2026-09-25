@@ -75,7 +75,7 @@ use confluent_kafka::producer::Producer;
 use confluent_kafka::producer::ProducerConfig;
 use confluent_kafka::producer::{ProducerRecord, ProducerRecordOptionsBuilder};
 
-use crate::common::backend_factory::ProducerBackendFactory;
+use crate::common::backend_factory::{ConsumerBackendFactory, ProducerBackendFactory};
 use crate::common::cluster_config::{ClusterConfig, kip848_3_broker};
 use crate::common::test_context::TestContext;
 
@@ -166,12 +166,11 @@ fn plain_producer(bootstrap: &str, client_id: &str) -> KafkaProducer<Vec<u8>, Ve
     .expect("failed to build a plain producer")
 }
 
-/// A consumer for `group_id` at the given isolation level.
-///
-/// Callers either `assign` a partition (every verification consumer, so no rebalance
-/// is involved) or `subscribe` — see the module docstring for which and why.
-fn assigned_consumer(bootstrap: &str, group_id: &str, isolation_level: &str) -> Box<dyn Consumer<Vec<u8>, Vec<u8>>> {
-    let props = HashMap::from([
+/// The config of a consumer for `group_id` at the given isolation level, as a
+/// flat property map: [`assigned_consumer`] parses it natively, and scenario 4
+/// hands it to a [`ConsumerBackendFactory`].
+fn consumer_config(bootstrap: &str, group_id: &str, isolation_level: &str) -> HashMap<String, String> {
+    HashMap::from([
         ("bootstrap.servers".to_string(), bootstrap.to_string()),
         ("group.protocol".to_string(), "consumer".to_string()),
         ("group.id".to_string(), group_id.to_string()),
@@ -179,7 +178,15 @@ fn assigned_consumer(bootstrap: &str, group_id: &str, isolation_level: &str) -> 
         ("enable.auto.commit".to_string(), "false".to_string()),
         ("isolation.level".to_string(), isolation_level.to_string()),
         ("client.id".to_string(), format!("txn-consumer-{group_id}")),
-    ]);
+    ])
+}
+
+/// A consumer for `group_id` at the given isolation level.
+///
+/// Callers either `assign` a partition (every verification consumer, so no rebalance
+/// is involved) or `subscribe` — see the module docstring for which and why.
+fn assigned_consumer(bootstrap: &str, group_id: &str, isolation_level: &str) -> Box<dyn Consumer<Vec<u8>, Vec<u8>>> {
+    let props = consumer_config(bootstrap, group_id, isolation_level);
     KafkaConsumer::new::<Vec<u8>, Vec<u8>>(
         ConsumerConfig::new(&props).expect("invalid consumer config"),
         Box::new(ByteArrayDeserializer),
@@ -563,7 +570,15 @@ async fn aborted_transaction_records_are_discarded_inner<F: ProducerBackendFacto
 /// what was consumed. The second is the half that only
 /// `send_offsets_to_transaction` can deliver — a plain `commit_sync` would also
 /// move it, but not atomically with the output records.
-async fn consume_transform_produce_with_offsets_inner<F: ProducerBackendFactory>(ctx: &mut TestContext, factory: &F) {
+///
+/// The input consumer comes from the same backend as the producer: its
+/// `group_metadata()` is what `send_offsets_to_transaction` takes, and a gRPC
+/// backend's producer only accepts the metadata handle its own consumer handed
+/// out (the bindings have no `ConsumerGroupMetadata` constructor).
+async fn consume_transform_produce_with_offsets_inner<F: ProducerBackendFactory + ConsumerBackendFactory>(
+    ctx: &mut TestContext,
+    factory: &F,
+) {
     let input_topic = ctx.topic("txn-ctp-input");
     let output_topic = ctx.topic("txn-ctp-output");
     let bootstrap = ctx.bootstrap_servers().to_string();
@@ -576,9 +591,13 @@ async fn consume_transform_produce_with_offsets_inner<F: ProducerBackendFactory>
 
     // The transform consumer subscribes rather than assigns: it must have real
     // group metadata (generation + member id) for the coordinator to accept the
-    // TxnOffsetCommit the producer sends on its behalf.
+    // TxnOffsetCommit the producer sends on its behalf. It lives on the
+    // producer's backend, so it reaches the broker at the producer's address.
     let input_group = ctx.group_id("txn-ctp-group");
-    let mut input_consumer = assigned_consumer(&bootstrap, &input_group, "read_committed");
+    let mut input_consumer =
+        ConsumerBackendFactory::create(factory, consumer_config(&producer_bootstrap, &input_group, "read_committed"))
+            .await
+            .expect("create the input consumer");
     input_consumer
         .subscribe_with_topics(vec![input_topic.clone()])
         .await
@@ -594,13 +613,15 @@ async fn consume_transform_produce_with_offsets_inner<F: ProducerBackendFactory>
     assert_eq!(next_offset, 3, "three records consumed, so the next offset is 3");
 
     // Transform and produce inside a transaction, committing the input offsets
-    // with it. Only the transactional producer crosses the gRPC boundary; the
-    // input transform-consumer (whose group_metadata() feeds
-    // send_offsets_to_transaction) and every verification consumer stay native.
-    let producer = factory
-        .create(make_txn_config(&producer_bootstrap, &format!("{output_topic}-txn-id")))
-        .await
-        .expect("create transactional producer");
+    // with it. The transactional producer and the input transform-consumer
+    // (whose group_metadata() feeds send_offsets_to_transaction) cross the gRPC
+    // boundary; every verification consumer stays native.
+    let producer = ProducerBackendFactory::create(
+        factory,
+        make_txn_config(&producer_bootstrap, &format!("{output_topic}-txn-id")),
+    )
+    .await
+    .expect("create transactional producer");
     producer.init_transactions().await.expect("initTransactions");
     producer.begin_transaction().expect("beginTransaction");
     let transformed: Vec<String> = consumed.iter().map(|value| value.to_uppercase()).collect();
@@ -613,7 +634,7 @@ async fn consume_transform_produce_with_offsets_inner<F: ProducerBackendFactory>
         OffsetAndMetadata::new(next_offset).expect("a non-negative offset"),
     );
     producer
-        .send_offsets_to_transaction(offsets, input_consumer.group_metadata())
+        .send_offsets_to_transaction(offsets, &*input_consumer.group_metadata())
         .await
         .expect("sendOffsetsToTransaction");
     producer.commit_transaction().await.expect("commitTransaction");
@@ -665,11 +686,11 @@ async fn consume_transform_produce_with_offsets_inner<F: ProducerBackendFactory>
 // rust / python / c via the macro. Otherwise `rust_only_fallback` runs each
 // against `RustNativeFactory` — the single native home for these scenarios,
 // whose hand-written `#[tokio::test]` versions were folded into the `_inner`
-// bodies above to avoid duplication. Either way only the *producer* crosses the
-// gRPC boundary; the seed producer, scenario 4's input transform-consumer
-// (whose `group_metadata()` feeds `send_offsets_to_transaction`), and every
-// verification consumer stay native, reading the same broker at its host
-// listener.
+// bodies above to avoid duplication. Either way the *producer* crosses the gRPC
+// boundary, and so does scenario 4's input transform-consumer, whose
+// `group_metadata()` handle feeds `send_offsets_to_transaction` on the same
+// server. The seed producer and every verification consumer stay native,
+// reading the same broker at its host listener.
 //
 // Python is deferred: the Python gRPC servers have no transaction handlers yet
 // (tracked to follow-up PR #175), so the `__grpc_python` / `__grpc_python_async`

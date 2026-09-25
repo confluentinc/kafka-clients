@@ -95,7 +95,7 @@ pub trait Producer<K, V>: Send + Sync {
     fn send_offsets_to_transaction(
         &self,
         offsets: HashMap<TopicPartition, OffsetAndMetadata>,
-        group_metadata: ConsumerGroupMetadata,
+        group_metadata: &dyn ConsumerGroupMetadata,
     ) -> impl Future<Output = Result<(), Error>> + Send;
 
     /// Commits the ongoing transaction.

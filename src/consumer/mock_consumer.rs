@@ -40,8 +40,9 @@ use crate::consumer::internals::AutoOffsetResetStrategy;
 use crate::consumer::internals::StrategyType;
 use crate::consumer::internals::{FetchPosition, SubscriptionState};
 use crate::consumer::{
-    CloseOptions, Consumer, ConsumerGroupMetadata, ConsumerHandle, ConsumerRebalanceListener, ConsumerRecord,
-    ConsumerRecords, OffsetAndMetadata, OffsetAndTimestamp, OffsetCommitCallback, SubscriptionPattern,
+    CloseOptions, Consumer, ConsumerGroupMetadata, ConsumerGroupMetadataImpl, ConsumerHandle,
+    ConsumerRebalanceListener, ConsumerRecord, ConsumerRecords, OffsetAndMetadata, OffsetAndTimestamp,
+    OffsetCommitCallback, SubscriptionPattern,
 };
 use crate::consumer::{ConsumerNoOffsetForPartitionError, ConsumerOffsetOutOfRangeError};
 use crate::metadata::LeaderAndEpoch;
@@ -481,11 +482,14 @@ where
         self.paused.clone()
     }
 
-    fn group_metadata(&self) -> ConsumerGroupMetadata {
+    fn group_metadata(&self) -> Arc<dyn ConsumerGroupMetadata> {
         // Java line 692-693: hard-coded sentinel values.
-        #[allow(deprecated)]
-        // ConsumerGroupMetadata::with_generation_id_member_id_group_instance_id is the only way to set the fields.
-        ConsumerGroupMetadata::with_generation_id_member_id_group_instance_id("dummy.group.id", 1, "1", None)
+        Arc::new(ConsumerGroupMetadataImpl::with_generation_id_member_id_group_instance_id(
+            "dummy.group.id",
+            1,
+            "1",
+            None,
+        ))
     }
 
     fn client_id(&self) -> &str {

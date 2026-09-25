@@ -95,6 +95,17 @@ service ConsumerService {
   // Metrics snapshot.
   rpc Metrics(ConsumerIdRequest) returns (MetricsResponse);
 
+  // Java groupMetadata(). The server keeps the binding's group-metadata handle
+  // in an id -> handle store shared with ProducerService, and returns its id
+  // together with the fields read through the handle's accessors. The id is
+  // what SendOffsetsToTransactionRequest carries. The handle stays in the
+  // store, even after the consumer closes, until ReleaseGroupMetadata.
+  rpc GroupMetadata(ConsumerIdRequest) returns (GroupMetadataResponse);
+
+  // Destroy a handle GroupMetadata stored. The Rust client issues it when the
+  // last reference to its metadata object is dropped. Unknown ids are ignored.
+  rpc ReleaseGroupMetadata(ReleaseGroupMetadataRequest) returns (StatusResponse);
+
   // Signalling / lifecycle.
   rpc Wakeup(ConsumerIdRequest) returns (StatusResponse);
   rpc Close(ConsumerCloseRequest) returns (StatusResponse);
@@ -112,6 +123,19 @@ service ConsumerService {
 
 message ConsumerIdRequest {
   uint64 consumer_id = 1;
+}
+
+message GroupMetadataResponse {
+  // Server-local group-metadata handle id; 0 on failure.
+  uint64 group_metadata_id = 1;
+  // The handle's fields, so the client can answer the accessors locally.
+  ConsumerGroupMetadata group_metadata = 2;
+  // Set on failure (e.g. unknown consumer_id).
+  optional KafkaError error = 3;
+}
+
+message ReleaseGroupMetadataRequest {
+  uint64 group_metadata_id = 1;
 }
 
 message TopicPartition {

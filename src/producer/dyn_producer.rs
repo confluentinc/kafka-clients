@@ -100,7 +100,7 @@ pub trait DynProducer<K, V>: private::Sealed<K, V> + Send + Sync {
     fn send_offsets_to_transaction<'a>(
         &'a self,
         offsets: HashMap<TopicPartition, OffsetAndMetadata>,
-        group_metadata: ConsumerGroupMetadata,
+        group_metadata: &'a dyn ConsumerGroupMetadata,
     ) -> BoxFuture<'a, Result<(), Error>>
     where
         K: 'a,
@@ -210,7 +210,7 @@ impl<K, V, P: Producer<K, V>> DynProducer<K, V> for P {
     fn send_offsets_to_transaction<'a>(
         &'a self,
         offsets: HashMap<TopicPartition, OffsetAndMetadata>,
-        group_metadata: ConsumerGroupMetadata,
+        group_metadata: &'a dyn ConsumerGroupMetadata,
     ) -> BoxFuture<'a, Result<(), Error>>
     where
         K: 'a,
@@ -304,12 +304,15 @@ impl<K, V> Producer<K, V> for dyn DynProducer<K, V> + '_ {
         DynProducer::begin_transaction(self)
     }
 
-    fn send_offsets_to_transaction(
+    // An `async fn` rather than returning the boxed future: the box is bounded by a
+    // single lifetime, the intersection of `self`'s and `group_metadata`'s, which
+    // the trait's opaque return type cannot name.
+    async fn send_offsets_to_transaction(
         &self,
         offsets: HashMap<TopicPartition, OffsetAndMetadata>,
-        group_metadata: ConsumerGroupMetadata,
-    ) -> impl Future<Output = Result<(), Error>> + Send {
-        DynProducer::send_offsets_to_transaction(self, offsets, group_metadata)
+        group_metadata: &dyn ConsumerGroupMetadata,
+    ) -> Result<(), Error> {
+        DynProducer::send_offsets_to_transaction(self, offsets, group_metadata).await
     }
 
     fn commit_transaction(&self) -> impl Future<Output = Result<(), Error>> + Send {

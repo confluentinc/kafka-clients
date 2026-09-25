@@ -242,22 +242,54 @@ def _proto_offset_entries_to_dict(entries):
     }
 
 
-def _proto_to_group_metadata(proto_gm):
-    """Build the C-backed :class:`consumer.ConsumerGroupMetadata` from the
-    producer proto's ``ConsumerGroupMetadata`` message.
+class GroupMetadataStore:
+    """Server-side group-metadata objects, by id, shared by the producer and
+    consumer services of one server.
 
-    ``group_id`` / ``generation_id`` / ``member_id`` are always present;
-    ``group_instance_id`` is proto3 ``optional`` (present only for a static
-    member), so an absent one becomes ``None`` — which the constructor passes to
-    the FFI as ``NULL`` (Java's ``Optional.empty()``). The returned object owns a
-    fresh Rust handle that ``Producer.send_offsets_to_transaction`` feeds back
-    into the FFI.
+    ``ConsumerService.GroupMetadata`` adds what ``Consumer.group_metadata()``
+    returned, and ``ProducerService.SendOffsetsToTransaction`` passes it back to
+    ``Producer.send_offsets_to_transaction``: :class:`consumer.ConsumerGroupMetadata`
+    has no constructor (Java deprecated its constructors in 4.2), so an object a
+    consumer handed out is the only one a producer can take.
+    ``ConsumerService.ReleaseGroupMetadata`` drops it when the Rust client drops
+    its last reference, and its Rust handle is freed on GC. The object holds its
+    own reference to the metadata, so it stays valid after its consumer closes.
+
+    Locked because the sync server serves each RPC on its own worker thread.
     """
-    return kc.ConsumerGroupMetadata(
-        proto_gm.group_id,
-        proto_gm.generation_id,
-        proto_gm.member_id,
-        proto_gm.group_instance_id if proto_gm.HasField("group_instance_id") else None,
+
+    def __init__(self):
+        self._entries = {}
+        self._next_id = 1
+        self._lock = threading.Lock()
+
+    def add(self, group_metadata):
+        with self._lock:
+            group_metadata_id = self._next_id
+            self._next_id += 1
+            self._entries[group_metadata_id] = group_metadata
+        return group_metadata_id
+
+    def get(self, group_metadata_id):
+        """The stored object, or ``None`` for an unknown (or released) id."""
+        with self._lock:
+            return self._entries.get(group_metadata_id)
+
+    def release(self, group_metadata_id):
+        """Drop the object; unknown ids are ignored."""
+        with self._lock:
+            self._entries.pop(group_metadata_id, None)
+
+
+def _group_metadata_to_proto(group_metadata):
+    """The four fields of a :class:`consumer.ConsumerGroupMetadata` as the
+    producer proto's ``ConsumerGroupMetadata`` message. ``group_instance_id`` is
+    ``None`` for a dynamic member, which leaves the proto3 ``optional`` unset."""
+    return pb.ConsumerGroupMetadata(
+        group_id=group_metadata.group_id,
+        generation_id=group_metadata.generation_id,
+        member_id=group_metadata.member_id,
+        group_instance_id=group_metadata.group_instance_id,
     )
 
 
