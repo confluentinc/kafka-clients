@@ -195,3 +195,63 @@ def test_async_begin_transaction_does_not_wait_and_an_open_transaction_keeps_its
             await producer.close(timeout=0)
 
     asyncio.run(main())
+
+
+# Written as the Headers input: an empty value and a null value kept apart.
+HEADERS = [("trace", b"abc"), ("empty", b""), ("null", None)]
+
+
+def _consumed_headers(broker: Any, topic: str) -> list[tuple[str, bytes | None]]:
+    """The headers of the record at offset 0 of ``topic``-0, read back with the
+    binding's consumer."""
+    from confluent_kafka.common import TopicPartition
+    from confluent_kafka.consumer import KafkaConsumer
+
+    consumer = KafkaConsumer(configs={"bootstrap.servers": broker.external_bootstrap,
+                                      "group.protocol": "consumer",
+                                      "group.id": f"py-headers-{uuid.uuid4().hex[:12]}",
+                                      "enable.auto.commit": False})
+    try:
+        tp = TopicPartition(topic=topic, partition=0)
+        consumer.assign(partitions=[tp])
+        consumer.seek(partition=tp, offset=0)
+        deadline = time.monotonic() + 60
+        while time.monotonic() < deadline:
+            for record in consumer.poll(timeout=0.5):
+                return [(key, None if value is None else bytes(value))
+                        for key, value in record.headers()]
+        raise AssertionError("the record was not consumed")
+    finally:
+        consumer.close()
+
+
+def test_send_delivers_the_record_headers(kafka_broker: Any) -> None:
+    # Critic 75 R2-B2: the core's borrowed send, which send_batch calls for
+    # every record of the C engine, appended no headers; Java's doSend appends
+    # record.headers().toArray() (KafkaProducer.java:1020, 1029-1030).
+    topic = _topic(kafka_broker)
+    producer = KafkaProducer(configs={"bootstrap.servers": kafka_broker.external_bootstrap})
+    try:
+        future = producer.send(record=ProducerRecord(topic=topic, partition=0, key=b"k",
+                                                     value=b"v", headers=HEADERS))
+        assert future.result(timeout=30).offset() == 0
+    finally:
+        producer.close()
+    assert _consumed_headers(kafka_broker, topic) == HEADERS
+
+
+def test_async_send_delivers_the_record_headers(kafka_broker: Any) -> None:
+    topic = _topic(kafka_broker)
+
+    async def main() -> None:
+        producer = AsyncKafkaProducer(
+            configs={"bootstrap.servers": kafka_broker.external_bootstrap})
+        try:
+            future = await producer.send(record=ProducerRecord(
+                topic=topic, partition=0, key=b"k", value=b"v", headers=HEADERS))
+            assert (await asyncio.wait_for(future, 30)).offset() == 0
+        finally:
+            await producer.close()
+
+    asyncio.run(main())
+    assert _consumed_headers(kafka_broker, topic) == HEADERS
