@@ -436,24 +436,30 @@ class _ProducerState:
         self._futures.add(future)
         future.add_done_callback(self._futures.discard)
 
-    def _drain_sync(self, timeout_s: float | None = None) -> bool:
+    def _drain_sync(self, timeout_s: float | None = None, *, closing: bool = False) -> bool:
         """Wait until every record sent so far is with the Rust producer, so a
         send that returned belongs to the flush, transaction-control operation
         or close that follows (producer-transactions.md §13); at most
         ``timeout_s`` seconds when given. Returns whether they are.
 
         Only the registration is a use of the handle: the wait is not, so a
-        ``close()`` meanwhile proceeds (its last send round fires the waiter)."""
+        ``close()`` meanwhile proceeds (its last send round fires the waiter).
+        ``closing`` is passed by ``close()`` alone (see ``_drain_registered``)."""
         done = threading.Event()
-        if self._drain_registered(done.set):
+        if self._drain_registered(done.set, closing=closing):
             return True
         return done.wait(timeout_s)
 
-    def _drain_registered(self, ready: Callable[[], None]) -> bool:
+    def _drain_registered(self, ready: Callable[[], None], *, closing: bool = False) -> bool:
         """``Producer_drain``: True if drained, else ``ready`` is registered.
-        Called by ``close()`` after ``_closed`` is set, it uses the handle
-        directly (close is its owner)."""
-        if self._closed:
+
+        Only ``close()`` passes ``closing``: it owns the handle, which it frees
+        only after this returns, so it uses the handle directly although
+        ``_closed`` is set. Every other caller registers as a counted use,
+        which raises Java's closed ``IllegalStateError`` once a ``close()`` has
+        begun, even when the caller passed its own closed check before that
+        (``_closed`` alone cannot tell such a caller from ``close()``)."""
+        if closing:
             return bool(_lib.Producer_drain(self._c_producer, ready))
         with self._use() as c_producer:
             return bool(_lib.Producer_drain(c_producer, ready))

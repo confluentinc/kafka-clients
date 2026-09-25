@@ -300,11 +300,11 @@ class AsyncProducer(Generic[K, V], _ProducerState):
         closed = False
         try:
             if timeout_ms is None:
-                await self._drain_async()
+                await self._drain_async(closing=True)
                 (error,) = await self._await_payload(
                     lambda cb: _lib.Producer_close_async(c_producer, cb), False)
             else:
-                await self._drain_async(timeout_ms / 1000.0)
+                await self._drain_async(timeout_ms / 1000.0, closing=True)
                 remaining_ms = max(0, timeout_ms - int((loop.time() - start) * 1000))
                 (error,) = await self._await_payload(
                     lambda cb: _lib.Producer_close_with_timeout_async(
@@ -340,10 +340,12 @@ class AsyncProducer(Generic[K, V], _ProducerState):
 
     # ---- completion primitives ----------------------------------------------
 
-    async def _drain_async(self, timeout_s: float | None = None) -> None:
+    async def _drain_async(self, timeout_s: float | None = None, *,
+                           closing: bool = False) -> None:
         """Await until every record sent so far is with the Rust producer (see
         ``_ProducerState._drain_sync``), at most ``timeout_s`` seconds when
-        given, without blocking the loop."""
+        given, without blocking the loop; ``closing`` is passed by ``close()``
+        alone (see ``_ProducerState._drain_registered``)."""
         loop = asyncio.get_running_loop()
         drained: asyncio.Future[None] = loop.create_future()
 
@@ -351,7 +353,7 @@ class AsyncProducer(Generic[K, V], _ProducerState):
             if not loop.is_closed():
                 loop.call_soon_threadsafe(_set_result, drained)
 
-        if self._drain_registered(ready):
+        if self._drain_registered(ready, closing=closing):
             return
         if timeout_s is None:
             await drained

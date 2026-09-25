@@ -434,10 +434,10 @@ class Producer(Generic[K, V], _ProducerState):
         closed = False
         try:
             if timeout_ms is None:
-                self._drain_sync()
+                self._drain_sync(closing=True)
                 (error,) = await_payload(lambda cb: _lib.Producer_close_async(c_producer, cb))
             else:
-                self._drain_sync(timeout_ms / 1000.0)
+                self._drain_sync(timeout_ms / 1000.0, closing=True)
                 remaining_ms = max(0, timeout_ms - int((time.monotonic() - start) * 1000))
                 (error,) = await_payload(lambda cb: _lib.Producer_close_with_timeout_async(
                     c_producer, remaining_ms, cb))
