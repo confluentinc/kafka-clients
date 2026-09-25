@@ -20,6 +20,8 @@
 ///
 /// Corresponds to `org.apache.kafka.common.resource.ResourceType`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[non_exhaustive]
+#[doc(alias = "org.apache.kafka.common.resource.ResourceType")]
 pub enum ResourceType {
     /// Represents any `ResourceType` which this client cannot understand,
     /// perhaps because this client is too old.
@@ -55,6 +57,7 @@ impl ResourceType {
     ];
 
     /// Return the code of this resource.
+    #[doc(alias = "org.apache.kafka.common.resource.ResourceType#code")]
     pub fn code(&self) -> i8 {
         match self {
             ResourceType::Unknown => 0,
@@ -70,6 +73,7 @@ impl ResourceType {
 
     /// Return the `ResourceType` with the provided code or
     /// [`ResourceType::Unknown`] if one cannot be found.
+    #[doc(alias = "org.apache.kafka.common.resource.ResourceType#fromCode")]
     pub fn from_code(code: i8) -> ResourceType {
         match code {
             0 => ResourceType::Unknown,
@@ -88,6 +92,7 @@ impl ResourceType {
     ///
     /// Returns the `ResourceType`, or [`ResourceType::Unknown`] if the string
     /// could not be matched (case-insensitive).
+    #[doc(alias = "org.apache.kafka.common.resource.ResourceType#fromString")]
     pub fn from_string(str: &str) -> ResourceType {
         match str.to_uppercase().as_str() {
             "UNKNOWN" => ResourceType::Unknown,
@@ -103,6 +108,7 @@ impl ResourceType {
     }
 
     /// Return whether this resource type is [`ResourceType::Unknown`].
+    #[doc(alias = "org.apache.kafka.common.resource.ResourceType#isUnknown")]
     pub fn is_unknown(&self) -> bool {
         *self == ResourceType::Unknown
     }
@@ -157,6 +163,7 @@ mod tests {
     ];
 
     #[test]
+    #[doc(alias = "org.apache.kafka.common.resource.ResourceTypeTest#testIsUnknown")]
     fn test_is_unknown() {
         for info in &INFOS {
             assert_eq!(info.unknown, info.resource_type.is_unknown());
@@ -164,6 +171,7 @@ mod tests {
     }
 
     #[test]
+    #[doc(alias = "org.apache.kafka.common.resource.ResourceTypeTest#testCode")]
     fn test_code() {
         assert_eq!(ResourceType::VALUES.len(), INFOS.len());
         for info in &INFOS {
@@ -174,6 +182,7 @@ mod tests {
     }
 
     #[test]
+    #[doc(alias = "org.apache.kafka.common.resource.ResourceTypeTest#testName")]
     fn test_name() {
         for info in &INFOS {
             assert_eq!(info.resource_type, ResourceType::from_string(info.name));
@@ -182,6 +191,7 @@ mod tests {
     }
 
     #[test]
+    #[doc(alias = "org.apache.kafka.common.resource.ResourceTypeTest#testExhaustive")]
     fn test_exhaustive() {
         assert_eq!(INFOS.len(), ResourceType::VALUES.len());
         for (i, info) in INFOS.iter().enumerate() {

@@ -24,12 +24,14 @@ use crate::common::KafkaFuture;
 ///
 /// Corresponds to `org.apache.kafka.clients.admin.DescribeFeaturesResult`.
 #[derive(Clone, Debug)]
+#[doc(alias = "org.apache.kafka.clients.admin.DescribeFeaturesResult")]
 pub struct DescribeFeaturesResult {
     future: KafkaFuture<FeatureMetadata>,
 }
 
 impl DescribeFeaturesResult {
     /// Creates a result wrapping the given future.
+    #[doc(alias = "org.apache.kafka.clients.admin.DescribeFeaturesResult#DescribeFeaturesResult")]
     pub(crate) fn new(future: KafkaFuture<FeatureMetadata>) -> Self {
         Self { future }
     }
@@ -37,6 +39,7 @@ impl DescribeFeaturesResult {
     /// The future which completes with the cluster's feature metadata.
     ///
     /// Mirrors `featureMetadata()`.
+    #[doc(alias = "org.apache.kafka.clients.admin.DescribeFeaturesResult#featureMetadata")]
     pub fn feature_metadata(&self) -> KafkaFuture<FeatureMetadata> {
         self.future.clone()
     }

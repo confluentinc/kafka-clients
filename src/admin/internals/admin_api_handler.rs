@@ -29,6 +29,7 @@ use super::AdminApiLookupStrategy;
 /// failed fatally, and which must be sent back to the lookup stage.
 ///
 /// Corresponds to `AdminApiHandler.ApiResult`.
+#[doc(alias = "org.apache.kafka.clients.admin.internals.AdminApiHandler$ApiResult")]
 pub(crate) struct ApiResult<K, V> {
     /// Keys that have been completed with their values.
     pub(crate) completed_keys: HashMap<K, V>,
@@ -40,6 +41,7 @@ pub(crate) struct ApiResult<K, V> {
 
 impl<K, V> ApiResult<K, V> {
     /// Creates a result from its three components.
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.AdminApiHandler$ApiResult#ApiResult")]
     pub(crate) fn new(completed_keys: HashMap<K, V>, failed_keys: HashMap<K, Error>, unmapped_keys: Vec<K>) -> Self {
         Self { completed_keys, failed_keys, unmapped_keys }
     }
@@ -75,6 +77,7 @@ impl<K: Clone + Eq + Hash, V> ApiResult<K, V> {
 /// A built request together with the keys it covers.
 ///
 /// Corresponds to `AdminApiHandler.RequestAndKeys`.
+#[doc(alias = "org.apache.kafka.clients.admin.internals.AdminApiHandler$RequestAndKeys")]
 pub(crate) struct RequestAndKeys<K> {
     /// The request builder for the covered keys.
     pub(crate) request: Box<dyn RequestBuilder>,
@@ -92,20 +95,24 @@ pub(crate) struct RequestAndKeys<K> {
 /// request per broker for all its keys), so [`build_request`](Self::build_request)
 /// is implemented directly to return one [`RequestAndKeys`]; the `Batched` /
 /// `Unbatched` abstraction is not modelled until a second handler needs it.
+#[doc(alias = "org.apache.kafka.clients.admin.internals.AdminApiHandler")]
 pub(crate) trait AdminApiHandler<K, V>: Send {
     /// A user-friendly name for the API this handler implements.
     ///
     /// Mirrors `apiName`.
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.AdminApiHandler#apiName")]
     fn api_name(&self) -> &str;
 
     /// Builds the requests necessary for the given keys targeting `broker_id`.
     ///
     /// Mirrors `buildRequest`.
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.AdminApiHandler#buildRequest")]
     fn build_request(&self, broker_id: i32, keys: &HashSet<K>) -> Vec<RequestAndKeys<K>>;
 
     /// Handles a successful fulfillment response.
     ///
     /// Mirrors `handleResponse`.
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.AdminApiHandler#handleResponse")]
     fn handle_response(&self, broker: &Node, keys: &HashSet<K>, response: &ConcreteResponse) -> ApiResult<K, V>;
 
     /// Handles an `UnsupportedVersionException` on a fulfillment request. The
@@ -113,6 +120,7 @@ pub(crate) trait AdminApiHandler<K, V>: Send {
     /// retried).
     ///
     /// Mirrors `handleUnsupportedVersionException`.
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.AdminApiHandler#handleUnsupportedVersionException")]
     fn handle_unsupported_version_error(&self, _broker_id: i32, error: &Error, keys: &HashSet<K>) -> HashMap<K, Error>
     where
         K: Clone + Eq + Hash,
@@ -123,5 +131,6 @@ pub(crate) trait AdminApiHandler<K, V>: Send {
     /// The lookup strategy responsible for finding the broker id for each key.
     ///
     /// Mirrors `lookupStrategy`.
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.AdminApiHandler#lookupStrategy")]
     fn lookup_strategy(&self) -> &dyn AdminApiLookupStrategy<K>;
 }

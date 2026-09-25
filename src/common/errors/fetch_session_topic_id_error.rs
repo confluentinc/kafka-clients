@@ -14,8 +14,8 @@
 
 //! Translated from `org.apache.kafka.common.errors.FetchSessionTopicIdException`.
 
-use crate::common::Errors;
 use crate::common::error::kafka_error_class;
+use crate::common::protocol::Errors;
 
 kafka_error_class! {
     /// The fetch session encountered inconsistent topic ID usage.
@@ -25,6 +25,7 @@ kafka_error_class! {
     /// Java `extends` chain:
     ///    `FetchSessionTopicIdException` -> `RetriableException` ->
     ///   `ApiException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.FetchSessionTopicIdException")]
     FetchSessionTopicIdError,
     code: Errors::FetchSessionTopicIdError,
     extends: [

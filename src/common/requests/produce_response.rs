@@ -46,6 +46,7 @@ use crate::produce_response_data::LeaderIdAndEpoch;
 ///
 /// Corresponds to `org.apache.kafka.common.requests.ProduceResponse`.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.ProduceResponse")]
 pub struct ProduceResponse {
     data: ProduceResponseData,
 }
@@ -55,11 +56,13 @@ impl ProduceResponse {
     pub const INVALID_OFFSET: i64 = -1;
 
     /// Creates a new `ProduceResponse` from data.
+    #[doc(alias = "org.apache.kafka.common.requests.ProduceResponse#ProduceResponse(ProduceResponseData)")]
     pub fn new(data: ProduceResponseData) -> Self {
         Self { data }
     }
 
     /// Returns a reference to the underlying data.
+    #[doc(alias = "org.apache.kafka.common.requests.ProduceResponse#data")]
     pub fn data(&self) -> &ProduceResponseData {
         &self.data
     }
@@ -77,6 +80,7 @@ impl ProduceResponse {
     /// Returns the error counts for this response.
     ///
     /// Iterates over all partition responses and counts each error code.
+    #[doc(alias = "org.apache.kafka.common.requests.ProduceResponse#errorCounts")]
     pub fn error_counts(&self) -> HashMap<Errors, i32> {
         let mut counts = HashMap::new();
         for topic in &self.data.responses {
@@ -89,11 +93,13 @@ impl ProduceResponse {
     }
 
     /// Returns the throttle time in milliseconds.
+    #[doc(alias = "org.apache.kafka.common.requests.ProduceResponse#throttleTimeMs")]
     pub fn throttle_time_ms(&self) -> i32 {
         self.data.throttle_time_ms
     }
 
     /// Sets the throttle time in the response.
+    #[doc(alias = "org.apache.kafka.common.requests.ProduceResponse#maybeSetThrottleTimeMs")]
     pub fn maybe_set_throttle_time_ms(&mut self, throttle_time_ms: i32) {
         self.data.set_throttle_time_ms(throttle_time_ms);
     }
@@ -101,6 +107,7 @@ impl ProduceResponse {
     /// Returns whether the client should throttle upon receiving this response.
     ///
     /// Client-side throttling is enabled starting from version 6.
+    #[doc(alias = "org.apache.kafka.common.requests.ProduceResponse#shouldClientThrottle")]
     pub fn should_client_throttle(&self, version: i16) -> bool {
         version >= 6
     }
@@ -110,6 +117,7 @@ impl ProduceResponse {
     /// # Errors
     ///
     /// Returns an error if parsing fails.
+    #[doc(alias = "org.apache.kafka.common.requests.ProduceResponse#parse")]
     pub fn parse(readable: &mut dyn Readable, version: i16) -> io::Result<Self> {
         let data = ProduceResponseData::read(readable, version)?;
         Ok(Self::new(data))
@@ -126,22 +134,24 @@ impl std::fmt::Display for ProduceResponse {
 ///
 /// Corresponds to `ProduceResponse.PartitionResponse` in Java.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+#[doc(alias = "org.apache.kafka.common.requests.ProduceResponse$PartitionResponse")]
 pub struct PartitionResponse {
     /// The error for this partition.
-    pub error: Errors,
+    pub(crate) error: Errors,
     /// The base offset assigned to the records.
-    pub base_offset: i64,
+    pub(crate) base_offset: i64,
     /// The log append time (-1 if CreateTime is used).
-    pub log_append_time: i64,
+    pub(crate) log_append_time: i64,
     /// The log start offset.
-    pub log_start_offset: i64,
+    pub(crate) log_start_offset: i64,
     /// Per-record errors (batch index and optional error message).
-    pub record_errors: Vec<RecordError>,
+    pub(crate) record_errors: Vec<RecordError>,
     /// Optional error message.
-    pub error_message: Option<String>,
+    pub(crate) error_message: Option<String>,
     /// The current leader for this partition, used by the producer to discover
     /// the leader when a `NOT_LEADER_OR_FOLLOWER` error is returned.
-    pub current_leader: LeaderIdAndEpoch,
+    pub(crate) current_leader: LeaderIdAndEpoch,
 }
 
 /// The parameters of Java's widest `ProduceResponse.PartitionResponse`
@@ -170,21 +180,21 @@ pub struct PartitionResponse {
 #[non_exhaustive]
 pub struct PartitionResponseOptions {
     /// Java's `error`.
-    pub error: Errors,
+    pub(crate) error: Errors,
     /// Java's `baseOffset`. Starts as `INVALID_OFFSET`, as in `:168`.
-    pub base_offset: i64,
+    pub(crate) base_offset: i64,
     /// Java's `logAppendTime`. Starts as `RecordBatch.NO_TIMESTAMP`, as in
     /// `:168`.
-    pub log_append_time: i64,
+    pub(crate) log_append_time: i64,
     /// Java's `logStartOffset`. Starts as `INVALID_OFFSET`, as in `:168`.
-    pub log_start_offset: i64,
+    pub(crate) log_start_offset: i64,
     /// Java's `recordErrors`. Starts empty, as in `:176`
     /// (`Collections.emptyList()`).
-    pub record_errors: Vec<RecordError>,
+    pub(crate) record_errors: Vec<RecordError>,
     /// Java's `errorMessage`. Starts as `None`, as in `:176`/`:180`.
-    pub error_message: Option<String>,
+    pub(crate) error_message: Option<String>,
     /// Java's `currentLeader`. Starts as `new LeaderIdAndEpoch()`, as in `:184`.
-    pub current_leader: LeaderIdAndEpoch,
+    pub(crate) current_leader: LeaderIdAndEpoch,
 }
 
 /// Fluent builder for [`PartitionResponseOptions`].
@@ -301,6 +311,7 @@ impl PartitionResponse {
     /// Corresponds to Java's `PartitionResponse(Errors)`
     /// (`ProduceResponse.java:168`), the overload whose parameters equal the
     /// group's intersection.
+    #[doc(alias = "org.apache.kafka.common.requests.ProduceResponse$PartitionResponse#PartitionResponse")]
     pub fn new(error: Errors) -> Self {
         Self {
             error,
@@ -317,6 +328,7 @@ impl PartitionResponse {
     ///
     /// Corresponds to Java's `PartitionResponse(Errors, String)`
     /// (`ProduceResponse.java:172`).
+    #[doc(alias = "org.apache.kafka.common.requests.ProduceResponse$PartitionResponse#PartitionResponse")]
     pub fn with_error_message(error: Errors, error_message: Option<String>) -> Self {
         Self {
             error,
@@ -339,6 +351,7 @@ impl PartitionResponse {
     /// [`PartitionResponseOptions`]. Leaving that struct's `current_leader` at
     /// its initial value — `:184`'s own `new LeaderIdAndEpoch()` — gives `:184`'s
     /// behaviour.
+    #[doc(alias = "org.apache.kafka.common.requests.ProduceResponse$PartitionResponse#PartitionResponse")]
     pub fn with_options(options: PartitionResponseOptions) -> Self {
         let PartitionResponseOptions {
             error,
@@ -358,6 +371,55 @@ impl PartitionResponse {
             error_message,
             current_leader,
         }
+    }
+
+    /// The error for this partition.
+    ///
+    /// Java's public `PartitionResponse.error`.
+    pub fn error(&self) -> Errors {
+        self.error
+    }
+
+    /// The base offset assigned to the records.
+    ///
+    /// Java's public `PartitionResponse.baseOffset`.
+    pub fn base_offset(&self) -> i64 {
+        self.base_offset
+    }
+
+    /// The log append time (-1 if CreateTime is used).
+    ///
+    /// Java's public `PartitionResponse.logAppendTime`.
+    pub fn log_append_time(&self) -> i64 {
+        self.log_append_time
+    }
+
+    /// The log start offset.
+    ///
+    /// Java's public `PartitionResponse.logStartOffset`.
+    pub fn log_start_offset(&self) -> i64 {
+        self.log_start_offset
+    }
+
+    /// Per-record errors (batch index and optional error message).
+    ///
+    /// Java's public `PartitionResponse.recordErrors`.
+    pub fn record_errors(&self) -> &[RecordError] {
+        &self.record_errors
+    }
+
+    /// Optional error message.
+    ///
+    /// Java's public `PartitionResponse.errorMessage`.
+    pub fn error_message(&self) -> Option<&str> {
+        self.error_message.as_deref()
+    }
+
+    /// The current leader for this partition, used by the producer to discover the leader when a `NOT_LEADER_OR_FOLLOWER` error is returned.
+    ///
+    /// Java's public `PartitionResponse.currentLeader`.
+    pub fn current_leader(&self) -> &LeaderIdAndEpoch {
+        &self.current_leader
     }
 }
 
@@ -381,22 +443,40 @@ impl std::fmt::Display for PartitionResponse {
 ///
 /// Corresponds to `ProduceResponse.RecordError` in Java.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+#[doc(alias = "org.apache.kafka.common.requests.ProduceResponse$RecordError")]
 pub struct RecordError {
     /// The batch index of the record that caused the error.
-    pub batch_index: i32,
+    pub(crate) batch_index: i32,
     /// Optional error message.
-    pub message: Option<String>,
+    pub(crate) message: Option<String>,
 }
 
 impl RecordError {
     /// Creates a `RecordError` with batch index and optional message.
+    #[doc(alias = "org.apache.kafka.common.requests.ProduceResponse$RecordError#RecordError")]
     pub fn with_message(batch_index: i32, message: Option<String>) -> Self {
         Self { batch_index, message }
     }
 
     /// Creates a `RecordError` with just a batch index (no message).
+    #[doc(alias = "org.apache.kafka.common.requests.ProduceResponse$RecordError#RecordError")]
     pub fn new(batch_index: i32) -> Self {
         Self { batch_index, message: None }
+    }
+
+    /// The batch index of the record that caused the error.
+    ///
+    /// Java's public `RecordError.batchIndex`.
+    pub fn batch_index(&self) -> i32 {
+        self.batch_index
+    }
+
+    /// Optional error message.
+    ///
+    /// Java's public `RecordError.message`.
+    pub fn message(&self) -> Option<&str> {
+        self.message.as_deref()
     }
 }
 

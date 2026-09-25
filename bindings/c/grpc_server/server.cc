@@ -86,6 +86,7 @@ using confluent::kafka::test::ConsumerRecordList;
 using confluent::kafka::test::ConsumerService;
 using confluent::kafka::test::CreateConsumerRequest;
 using confluent::kafka::test::CreateConsumerResponse;
+using confluent::kafka::test::GroupMetadataResponse;
 using confluent::kafka::test::ListTopicsResponse;
 using confluent::kafka::test::LongOffsetMap;
 using confluent::kafka::test::LongOffsetsResponse;
@@ -97,6 +98,7 @@ using confluent::kafka::test::PollRequest;
 using confluent::kafka::test::PollResponse;
 using confluent::kafka::test::PositionRequest;
 using confluent::kafka::test::PositionResponse;
+using confluent::kafka::test::ReleaseGroupMetadataRequest;
 using confluent::kafka::test::SeekRequest;
 using confluent::kafka::test::SubscribeRequest;
 using confluent::kafka::test::Metric;
@@ -118,7 +120,6 @@ using confluent::kafka::test::AdminService;
 using confluent::kafka::test::AdminTopicListing;
 using confluent::kafka::test::AlterPartitionReassignmentsRequest;
 using confluent::kafka::test::AlterReplicaLogDirsRequest;
-using confluent::kafka::test::ClientMetricsResourceListing;
 using confluent::kafka::test::ClusterDescription;
 using confluent::kafka::test::ConfigEntry;
 using confluent::kafka::test::ConfigResource;
@@ -136,8 +137,6 @@ using confluent::kafka::test::DescribeReplicaLogDirsEntry;
 using confluent::kafka::test::DescribeReplicaLogDirsRequest;
 using confluent::kafka::test::DescribeReplicaLogDirsResponse;
 using confluent::kafka::test::IncrementalAlterConfigsRequest;
-using confluent::kafka::test::ListClientMetricsResourcesRequest;
-using confluent::kafka::test::ListClientMetricsResourcesResponse;
 using confluent::kafka::test::ListConfigResourcesRequest;
 using confluent::kafka::test::ListConfigResourcesResponse;
 using confluent::kafka::test::ListOffsetsEntry;
@@ -178,7 +177,6 @@ using confluent::kafka::test::TopicMetadata;
 using confluent::kafka::test::AlterConsumerGroupOffsetsRequest;
 using confluent::kafka::test::ClassicGroupDescription;
 using confluent::kafka::test::ConsumerGroupDescription;
-using confluent::kafka::test::ConsumerGroupListing;
 using confluent::kafka::test::DeleteConsumerGroupOffsetsRequest;
 using confluent::kafka::test::DeleteConsumerGroupsRequest;
 using confluent::kafka::test::DescribeClassicGroupsEntry;
@@ -193,8 +191,6 @@ using confluent::kafka::test::GroupOffsets;
 using confluent::kafka::test::ListConsumerGroupOffsetsEntry;
 using confluent::kafka::test::ListConsumerGroupOffsetsRequest;
 using confluent::kafka::test::ListConsumerGroupOffsetsResponse;
-using confluent::kafka::test::ListConsumerGroupsRequest;
-using confluent::kafka::test::ListConsumerGroupsResponse;
 using confluent::kafka::test::ListGroupsRequest;
 using confluent::kafka::test::ListGroupsResponse;
 using confluent::kafka::test::MemberAssignment;
@@ -370,7 +366,7 @@ extern "C" void metadata_copy_cb(int64_t offset, int32_t partition,
 
 // Defined in the consumer section below; reused by the producer PartitionsFor.
 void node_to_proto(const kafka_common_Node_t* node, Node* dst);
-void partition_info_to_proto(const kafka_consumer_PartitionInfo_t* info, PartitionInfo* dst);
+void partition_info_to_proto(const kafka_common_PartitionInfo_t* info, PartitionInfo* dst);
 
 // ---------------------------------------------------------------------------
 // Callback log
@@ -478,34 +474,34 @@ struct LogState {
 // TopicPartitionList and must destroy it; returning NULL means the listener
 // succeeded (a non-null error would fail the rebalance, like a throwing Java
 // listener).
-kafka_common_Error_t* log_rebalance(kafka_consumer_TopicPartitionList_t* partitions,
+kafka_common_Error_t* log_rebalance(kafka_common_TopicPartitionList_t* partitions,
                                         void* user_data, const char* kind) {
   auto* state = static_cast<LogState*>(user_data);
   CallbackLogEntry entry;
   entry.set_kind(kind);
   if (partitions != nullptr) {
-    int32_t n = kafka_consumer_TopicPartitionList_count(partitions);
+    int32_t n = kafka_common_TopicPartitionList_count(partitions);
     for (int32_t i = 0; i < n; i++) {
-      const kafka_consumer_TopicPartition_t* tp =
-          kafka_consumer_TopicPartitionList_get(partitions, i);
+      const kafka_common_TopicPartition_t* tp =
+          kafka_common_TopicPartitionList_get(partitions, i);
       CallbackLogPartition* p = entry.add_partitions();
-      const char* topic = kafka_consumer_TopicPartition_topic(tp);
+      const char* topic = kafka_common_TopicPartition_topic(tp);
       p->set_topic(topic ? topic : "");
-      p->set_partition(kafka_consumer_TopicPartition_partition(tp));
+      p->set_partition(kafka_common_TopicPartition_partition(tp));
     }
-    kafka_consumer_TopicPartitionList_destroy(partitions);
+    kafka_common_TopicPartitionList_destroy(partitions);
   }
   state->log->append(state->client_id, std::move(entry));
   return nullptr;
 }
 
 extern "C" kafka_common_Error_t* log_partitions_assigned(
-    kafka_consumer_TopicPartitionList_t* partitions, void* user_data) {
+    kafka_common_TopicPartitionList_t* partitions, void* user_data) {
   return log_rebalance(partitions, user_data, KIND_ASSIGNED);
 }
 
 extern "C" kafka_common_Error_t* log_partitions_revoked(
-    kafka_consumer_TopicPartitionList_t* partitions, void* user_data) {
+    kafka_common_TopicPartitionList_t* partitions, void* user_data) {
   return log_rebalance(partitions, user_data, KIND_REVOKED);
 }
 
@@ -513,7 +509,7 @@ extern "C" kafka_common_Error_t* log_partitions_revoked(
 // reproduce Java's "onPartitionsLost delegates to onPartitionsRevoked" default),
 // so a lost callback is distinguishable from a revoke in the log.
 extern "C" kafka_common_Error_t* log_partitions_lost(
-    kafka_consumer_TopicPartitionList_t* partitions, void* user_data) {
+    kafka_common_TopicPartitionList_t* partitions, void* user_data) {
   return log_rebalance(partitions, user_data, KIND_LOST);
 }
 
@@ -531,10 +527,10 @@ void take_offsets_into(CallbackLogEntry* entry, kafka_consumer_OffsetMap_t* offs
   if (offsets == nullptr) return;
   int32_t n = kafka_consumer_OffsetMap_count(offsets);
   for (int32_t i = 0; i < n; i++) {
-    const kafka_consumer_TopicPartition_t* tp = kafka_consumer_OffsetMap_get_key(offsets, i);
-    const char* raw_topic = kafka_consumer_TopicPartition_topic(tp);
+    const kafka_common_TopicPartition_t* tp = kafka_consumer_OffsetMap_get_key(offsets, i);
+    const char* raw_topic = kafka_common_TopicPartition_topic(tp);
     const std::string topic = raw_topic ? raw_topic : "";
-    const int32_t partition = kafka_consumer_TopicPartition_partition(tp);
+    const int32_t partition = kafka_common_TopicPartition_partition(tp);
     CallbackLogPartition* p = entry->add_partitions();
     p->set_topic(topic);
     p->set_partition(partition);
@@ -588,8 +584,60 @@ extern "C" void log_delivery(kafka_producer_RecordMetadata_t* metadata,
   state->log->append(state->client_id, std::move(entry));
 }
 
+// Server-side group-metadata handles, by id. ConsumerService.GroupMetadata
+// adds the handle kafka_consumer_Consumer_group_metadata returns, and
+// ProducerService.SendOffsetsToTransaction passes it back to the FFI: the C API
+// has no ConsumerGroupMetadata constructor, so a handle the consumer handed out
+// is the only one the producer can take. ConsumerService.ReleaseGroupMetadata
+// removes it, when the Rust client drops its last reference.
+//
+// Handles sit in shared_ptrs whose deleter is
+// kafka_consumer_ConsumerGroupMetadata_destroy, so a release that races a
+// send_offsets_to_transaction destroys the handle only after the FFI call
+// returns. The handle holds its own reference to the metadata, so it stays
+// valid after its consumer closes.
+class GroupMetadataStore {
+ public:
+  uint64_t add(kafka_consumer_ConsumerGroupMetadata_t* handle) {
+    const uint64_t id = next_id_.fetch_add(1);
+    std::lock_guard<std::mutex> lock(mu_);
+    handles_[id] = std::shared_ptr<kafka_consumer_ConsumerGroupMetadata_t>(
+        handle, kafka_consumer_ConsumerGroupMetadata_destroy);
+    return id;
+  }
+
+  // nullptr for an unknown (or already released) id.
+  std::shared_ptr<kafka_consumer_ConsumerGroupMetadata_t> get(uint64_t id) {
+    std::lock_guard<std::mutex> lock(mu_);
+    auto it = handles_.find(id);
+    return it == handles_.end() ? nullptr : it->second;
+  }
+
+  void release(uint64_t id) {
+    std::shared_ptr<kafka_consumer_ConsumerGroupMetadata_t> handle;
+    {
+      std::lock_guard<std::mutex> lock(mu_);
+      auto it = handles_.find(id);
+      if (it == handles_.end()) return;
+      handle = std::move(it->second);
+      handles_.erase(it);
+    }
+    // `handle` goes out of scope here, outside the lock.
+  }
+
+ private:
+  std::mutex mu_;
+  std::unordered_map<uint64_t,
+                     std::shared_ptr<kafka_consumer_ConsumerGroupMetadata_t>>
+      handles_;
+  std::atomic<uint64_t> next_id_{1};
+};
+
 class ProducerServiceImpl final : public ProducerService::Service {
  public:
+  explicit ProducerServiceImpl(GroupMetadataStore* group_metadata)
+      : group_metadata_(group_metadata) {}
+
   grpc::Status CreateProducer(grpc::ServerContext*,
                               const CreateProducerRequest* req,
                               CreateProducerResponse* resp) override {
@@ -659,7 +707,7 @@ class ProducerServiceImpl final : public ProducerService::Service {
     // callback saw. The blocking future path below is unchanged: the FFI gives us
     // both, exactly like Java's send(record, callback).
     kafka_common_Error_t* send_err = nullptr;
-    kafka_producer_FutureRecordMetadata_t* future = nullptr;
+    kafka_common_KafkaFuture_RecordMetadata_t* future = nullptr;
     if (req->with_callback()) {
       LogState* state = log_state_for(req->producer_id());
       future = kafka_producer_Producer_send_with_callback(
@@ -682,8 +730,8 @@ class ProducerServiceImpl final : public ProducerService::Service {
     // owns, so it's safe to call from arbitrary threads.
     kafka_common_Error_t* get_err = nullptr;
     kafka_producer_RecordMetadata_t* metadata =
-        kafka_producer_FutureRecordMetadata_get(future, &get_err);
-    kafka_producer_FutureRecordMetadata_destroy(future);
+        kafka_common_KafkaFuture_RecordMetadata_get(future, &get_err);
+    kafka_common_KafkaFuture_RecordMetadata_destroy(future);
     if (metadata == nullptr) {
       fill_proto_error(resp->mutable_error(), get_err);
       return grpc::Status::OK;
@@ -780,8 +828,8 @@ class ProducerServiceImpl final : public ProducerService::Service {
 
   // Java sendOffsetsToTransaction(offsets, groupMetadata): the producer half of
   // consume-transform-produce. Flattens the repeated OffsetEntry into the
-  // parallel arrays the sync FFI expects and rebuilds a ConsumerGroupMetadata
-  // handle from the wire fields.
+  // parallel arrays the sync FFI expects, and passes the group-metadata handle
+  // stored under the request's id by ConsumerService.GroupMetadata.
   grpc::Status SendOffsetsToTransaction(
       grpc::ServerContext*, const SendOffsetsToTransactionRequest* req,
       StatusResponse* resp) override {
@@ -814,21 +862,21 @@ class ProducerServiceImpl final : public ProducerService::Service {
       leader_epochs.push_back(e.has_leader_epoch() ? e.leader_epoch() : -1);
       metadata.push_back(e.has_metadata() ? e.metadata().c_str() : nullptr);
     }
-    // Rebuild the group-metadata handle from its wire fields. The const char*
-    // borrow into `req` and only need to survive the _new call, which copies
-    // them; group_instance_id is absent for a dynamic (non-static) member.
-    const ConsumerGroupMetadata& gm = req->group_metadata();
-    kafka_consumer_ConsumerGroupMetadata_t* group_meta =
-        kafka_consumer_ConsumerGroupMetadata_new(
-            gm.group_id().c_str(), gm.generation_id(), gm.member_id().c_str(),
-            gm.has_group_instance_id() ? gm.group_instance_id().c_str()
-                                       : nullptr);
+    // Holding the shared_ptr keeps the handle alive through the FFI call even
+    // if a ReleaseGroupMetadata for it arrives meanwhile.
+    std::shared_ptr<kafka_consumer_ConsumerGroupMetadata_t> group_meta =
+        group_metadata_->get(req->group_metadata_id());
+    if (group_meta == nullptr) {
+      *resp->mutable_error() = make_synthetic_error(
+          "unknown group_metadata_id " +
+          std::to_string(req->group_metadata_id()));
+      return grpc::Status::OK;
+    }
     kafka_common_Error_t* err =
         kafka_producer_Producer_send_offsets_to_transaction(
             producer, topics.data(), partitions.data(), offsets.data(),
             leader_epochs.data(), metadata.data(),
-            static_cast<int32_t>(topics.size()), group_meta);
-    kafka_consumer_ConsumerGroupMetadata_destroy(group_meta);
+            static_cast<int32_t>(topics.size()), group_meta.get());
     if (err != nullptr) {
       fill_proto_error(resp->mutable_error(), err);
     }
@@ -860,18 +908,18 @@ class ProducerServiceImpl final : public ProducerService::Service {
           "unknown producer_id " + std::to_string(req->producer_id()));
       return grpc::Status::OK;
     }
-    kafka_consumer_PartitionInfoList_t* list = nullptr;
+    kafka_common_PartitionInfoList_t* list = nullptr;
     kafka_common_Error_t* err =
         kafka_producer_Producer_partitions_for(producer, req->topic().c_str(), &list);
     if (err != nullptr) {
       fill_proto_error(resp->mutable_error(), err);
       return grpc::Status::OK;
     }
-    int32_t n = kafka_consumer_PartitionInfoList_count(list);
+    int32_t n = kafka_common_PartitionInfoList_count(list);
     for (int32_t i = 0; i < n; i++) {
-      partition_info_to_proto(kafka_consumer_PartitionInfoList_get(list, i), resp->add_partitions());
+      partition_info_to_proto(kafka_common_PartitionInfoList_get(list, i), resp->add_partitions());
     }
-    kafka_consumer_PartitionInfoList_destroy(list);
+    kafka_common_PartitionInfoList_destroy(list);
     return grpc::Status::OK;
   }
 
@@ -993,6 +1041,8 @@ class ProducerServiceImpl final : public ProducerService::Service {
   }
 
 
+  // Shared with ConsumerServiceImpl; owned by main().
+  GroupMetadataStore* group_metadata_;
   std::mutex mu_;
   std::unordered_map<uint64_t, kafka_producer_Producer_t*> producers_;
   // user_data for the delivery callbacks; owned here, one per producer, for the
@@ -1087,37 +1137,40 @@ void node_to_proto(const kafka_common_Node_t* node, Node* dst) {
   if (rack != nullptr) dst->set_rack(std::string(rack, rack_len));
 }
 
-void partition_info_to_proto(const kafka_consumer_PartitionInfo_t* info,
+void partition_info_to_proto(const kafka_common_PartitionInfo_t* info,
                              PartitionInfo* dst) {
-  const char* topic = kafka_consumer_PartitionInfo_topic(info);  // NUL-terminated
+  const char* topic = kafka_common_PartitionInfo_topic(info);  // NUL-terminated
   dst->set_topic(topic ? topic : "");
-  dst->set_partition(kafka_consumer_PartitionInfo_partition(info));
-  const kafka_common_Node_t* leader = kafka_consumer_PartitionInfo_leader(info);
+  dst->set_partition(kafka_common_PartitionInfo_partition(info));
+  const kafka_common_Node_t* leader = kafka_common_PartitionInfo_leader(info);
   if (leader != nullptr) node_to_proto(leader, dst->mutable_leader());
-  int32_t n = kafka_consumer_PartitionInfo_replica_count(info);
+  int32_t n = kafka_common_PartitionInfo_replica_count(info);
   for (int32_t i = 0; i < n; i++) {
-    node_to_proto(kafka_consumer_PartitionInfo_replica(info, i), dst->add_replicas());
+    node_to_proto(kafka_common_PartitionInfo_replica(info, i), dst->add_replicas());
   }
-  n = kafka_consumer_PartitionInfo_in_sync_replica_count(info);
+  n = kafka_common_PartitionInfo_in_sync_replica_count(info);
   for (int32_t i = 0; i < n; i++) {
-    node_to_proto(kafka_consumer_PartitionInfo_in_sync_replica(info, i),
+    node_to_proto(kafka_common_PartitionInfo_in_sync_replica(info, i),
                   dst->add_in_sync_replicas());
   }
-  n = kafka_consumer_PartitionInfo_offline_replica_count(info);
+  n = kafka_common_PartitionInfo_offline_replica_count(info);
   for (int32_t i = 0; i < n; i++) {
-    node_to_proto(kafka_consumer_PartitionInfo_offline_replica(info, i),
+    node_to_proto(kafka_common_PartitionInfo_offline_replica(info, i),
                   dst->add_offline_replicas());
   }
 }
 
-void tp_to_proto(const kafka_consumer_TopicPartition_t* tp, TopicPartition* dst) {
-  const char* topic = kafka_consumer_TopicPartition_topic(tp);
+void tp_to_proto(const kafka_common_TopicPartition_t* tp, TopicPartition* dst) {
+  const char* topic = kafka_common_TopicPartition_topic(tp);
   dst->set_topic(topic ? topic : "");
-  dst->set_partition(kafka_consumer_TopicPartition_partition(tp));
+  dst->set_partition(kafka_common_TopicPartition_partition(tp));
 }
 
 class ConsumerServiceImpl final : public ConsumerService::Service {
  public:
+  explicit ConsumerServiceImpl(GroupMetadataStore* group_metadata)
+      : group_metadata_(group_metadata) {}
+
   grpc::Status CreateConsumer(grpc::ServerContext*,
                               const CreateConsumerRequest* req,
                               CreateConsumerResponse* resp) override {
@@ -1413,18 +1466,18 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
           "unknown consumer_id " + std::to_string(req->consumer_id()));
       return grpc::Status::OK;
     }
-    kafka_consumer_PartitionInfoList_t* infos = nullptr;
+    kafka_common_PartitionInfoList_t* infos = nullptr;
     kafka_common_Error_t* err =
         kafka_consumer_Consumer_partitions_for(c, req->topic().c_str(), &infos);
     if (err != nullptr) {
       fill_proto_error(resp->mutable_error(), err);
       return grpc::Status::OK;
     }
-    int32_t n = kafka_consumer_PartitionInfoList_count(infos);
+    int32_t n = kafka_common_PartitionInfoList_count(infos);
     for (int32_t i = 0; i < n; i++) {
-      partition_info_to_proto(kafka_consumer_PartitionInfoList_get(infos, i), resp->add_partitions());
+      partition_info_to_proto(kafka_common_PartitionInfoList_get(infos, i), resp->add_partitions());
     }
-    kafka_consumer_PartitionInfoList_destroy(infos);
+    kafka_common_PartitionInfoList_destroy(infos);
     return grpc::Status::OK;
   }
 
@@ -1436,26 +1489,26 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
           "unknown consumer_id " + std::to_string(req->consumer_id()));
       return grpc::Status::OK;
     }
-    kafka_consumer_TopicPartitionInfoMap_t* map = nullptr;
+    kafka_common_TopicPartitionInfoMap_t* map = nullptr;
     kafka_common_Error_t* err = kafka_consumer_Consumer_list_topics(c, &map);
     if (err != nullptr) {
       fill_proto_error(resp->mutable_error(), err);
       return grpc::Status::OK;
     }
     TopicListing* listing = resp->mutable_topics();
-    int32_t n = kafka_consumer_TopicPartitionInfoMap_count(map);
+    int32_t n = kafka_common_TopicPartitionInfoMap_count(map);
     for (int32_t i = 0; i < n; i++) {
       TopicPartitionInfoEntry* entry = listing->add_topics();
-      const char* topic = kafka_consumer_TopicPartitionInfoMap_get_topic(map, i);
+      const char* topic = kafka_common_TopicPartitionInfoMap_get_topic(map, i);
       entry->set_topic(topic ? topic : "");
-      const kafka_consumer_PartitionInfoList_t* infos =
-          kafka_consumer_TopicPartitionInfoMap_get_partitions(map, i);
-      int32_t pn = kafka_consumer_PartitionInfoList_count(infos);
+      const kafka_common_PartitionInfoList_t* infos =
+          kafka_common_TopicPartitionInfoMap_get_partitions(map, i);
+      int32_t pn = kafka_common_PartitionInfoList_count(infos);
       for (int32_t j = 0; j < pn; j++) {
-        partition_info_to_proto(kafka_consumer_PartitionInfoList_get(infos, j), entry->add_partitions());
+        partition_info_to_proto(kafka_common_PartitionInfoList_get(infos, j), entry->add_partitions());
       }
     }
-    kafka_consumer_TopicPartitionInfoMap_destroy(map);
+    kafka_common_TopicPartitionInfoMap_destroy(map);
     return grpc::Status::OK;
   }
 
@@ -1467,7 +1520,7 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
           "unknown consumer_id " + std::to_string(req->consumer_id()));
       return grpc::Status::OK;
     }
-    kafka_consumer_TopicPartitionList_t* list = kafka_consumer_Consumer_assignment(c);
+    kafka_common_TopicPartitionList_t* list = kafka_consumer_Consumer_assignment(c);
     fill_tp_list(list, resp);
     return grpc::Status::OK;
   }
@@ -1480,7 +1533,7 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
           "unknown consumer_id " + std::to_string(req->consumer_id()));
       return grpc::Status::OK;
     }
-    kafka_consumer_TopicPartitionList_t* list = kafka_consumer_Consumer_paused(c);
+    kafka_common_TopicPartitionList_t* list = kafka_consumer_Consumer_paused(c);
     fill_tp_list(list, resp);
     return grpc::Status::OK;
   }
@@ -1557,6 +1610,39 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
       }
       kafka_consumer_StringList_destroy(list);
     }
+    return grpc::Status::OK;
+  }
+
+  // Java groupMetadata(): store the handle and return its id together with the
+  // fields read through the accessors (group_instance_id is null for a dynamic
+  // member).
+  grpc::Status GroupMetadata(grpc::ServerContext*, const ConsumerIdRequest* req,
+                             GroupMetadataResponse* resp) override {
+    kafka_consumer_Consumer_t* c = consumer_for(req->consumer_id());
+    if (c == nullptr) {
+      *resp->mutable_error() = make_synthetic_error(
+          "unknown consumer_id " + std::to_string(req->consumer_id()));
+      return grpc::Status::OK;
+    }
+    kafka_consumer_ConsumerGroupMetadata_t* handle =
+        kafka_consumer_Consumer_group_metadata(c);
+    ConsumerGroupMetadata* fields = resp->mutable_group_metadata();
+    fields->set_group_id(kafka_consumer_ConsumerGroupMetadata_group_id(handle));
+    fields->set_generation_id(
+        kafka_consumer_ConsumerGroupMetadata_generation_id(handle));
+    fields->set_member_id(kafka_consumer_ConsumerGroupMetadata_member_id(handle));
+    if (const char* instance =
+            kafka_consumer_ConsumerGroupMetadata_group_instance_id(handle)) {
+      fields->set_group_instance_id(instance);
+    }
+    resp->set_group_metadata_id(group_metadata_->add(handle));
+    return grpc::Status::OK;
+  }
+
+  grpc::Status ReleaseGroupMetadata(grpc::ServerContext*,
+                                    const ReleaseGroupMetadataRequest* req,
+                                    StatusResponse*) override {
+    group_metadata_->release(req->group_metadata_id());
     return grpc::Status::OK;
   }
 
@@ -1663,14 +1749,14 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
     return grpc::Status::OK;
   }
 
-  void fill_tp_list(kafka_consumer_TopicPartitionList_t* list, TopicPartitionListResponse* resp) {
+  void fill_tp_list(kafka_common_TopicPartitionList_t* list, TopicPartitionListResponse* resp) {
     TopicPartitionList* out = resp->mutable_partitions();
     if (list != nullptr) {
-      int32_t n = kafka_consumer_TopicPartitionList_count(list);
+      int32_t n = kafka_common_TopicPartitionList_count(list);
       for (int32_t i = 0; i < n; i++) {
-        tp_to_proto(kafka_consumer_TopicPartitionList_get(list, i), out->add_partitions());
+        tp_to_proto(kafka_common_TopicPartitionList_get(list, i), out->add_partitions());
       }
-      kafka_consumer_TopicPartitionList_destroy(list);
+      kafka_common_TopicPartitionList_destroy(list);
     }
   }
 
@@ -1702,6 +1788,8 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
     }
   }
 
+  // Shared with ProducerServiceImpl; owned by main().
+  GroupMetadataStore* group_metadata_;
   std::mutex mu_;
   std::unordered_map<uint64_t, kafka_consumer_Consumer_t*> consumers_;
   // user_data for the rebalance-listener and commit callbacks; owned here, one
@@ -2084,9 +2172,8 @@ class AdminServiceImpl final : public AdminService::Service {
 
   // -- Cluster, configs & log dirs (slice G2) -------------------------------
   //
-  // Same three steps as G1. The three whole-value RPCs (describeCluster,
-  // listConfigResources, listClientMetricsResources) have no per-key errors at
-  // all, so for them the sync entry point's return value carries *every*
+  // Same three steps as G1. The two whole-value RPCs (describeCluster,
+  // listConfigResources) have no per-key errors at all, so for them the sync entry point's return value carries *every*
   // failure; the per-key RPCs keep the two-level split.
 
   grpc::Status DescribeCluster(grpc::ServerContext*, const DescribeClusterRequest* req,
@@ -2268,30 +2355,6 @@ class AdminServiceImpl final : public AdminService::Service {
       dst->set_name(cstr(kafka_admin_ListConfigResourcesResult_get_name(result, i)));
     }
     kafka_admin_ListConfigResourcesResult_destroy(result);
-    return grpc::Status::OK;
-  }
-
-  grpc::Status ListClientMetricsResources(grpc::ServerContext*,
-                                          const ListClientMetricsResourcesRequest* req,
-                                          ListClientMetricsResourcesResponse* resp) override {
-    kafka_admin_AdminClient_t* admin = admin_for(req->admin_id());
-    if (admin == nullptr) {
-      *resp->mutable_error() = unknown_admin(req->admin_id());
-      return grpc::Status::OK;
-    }
-    kafka_admin_ListClientMetricsResourcesResult_t* result = nullptr;
-    kafka_common_Error_t* err = kafka_admin_AdminClient_list_client_metrics_resources(
-        admin, timeout_ms(*req), &result);
-    if (err != nullptr) {
-      fill_proto_error(resp->mutable_error(), err);
-      return grpc::Status::OK;
-    }
-    const int32_t count = kafka_admin_ListClientMetricsResourcesResult_count(result);
-    for (int32_t i = 0; i < count; i++) {
-      ClientMetricsResourceListing* dst = resp->add_resources();
-      dst->set_name(cstr(kafka_admin_ListClientMetricsResourcesResult_get_name(result, i)));
-    }
-    kafka_admin_ListClientMetricsResourcesResult_destroy(result);
     return grpc::Status::OK;
   }
 
@@ -2755,8 +2818,7 @@ class AdminServiceImpl final : public AdminService::Service {
 
   // -- Groups & offsets (slice G4) -------------------------------------------
   //
-  // listGroups / listConsumerGroups are the only RPCs so far whose result handle
-  // has no keys at all: Java splits one future into valid() and an *unkeyed*
+  // listGroups is the only RPC so far whose result handle has no keys at all: Java splits one future into valid() and an *unkeyed*
   // errors() collection, which the C handle exposes as `_valid_count` /
   // `_get_valid` next to `_error_count` / `_get_error`. The two lists are
   // independent and generally of different length, so nothing is zipped.
@@ -2821,59 +2883,6 @@ class AdminServiceImpl final : public AdminService::Service {
       if (listing_err != nullptr) copy_proto_error(resp->add_listing_errors(), listing_err);
     }
     kafka_admin_ListGroupsResult_destroy(result);
-    return grpc::Status::OK;
-  }
-
-  grpc::Status ListConsumerGroups(grpc::ServerContext*, const ListConsumerGroupsRequest* req,
-                                  ListConsumerGroupsResponse* resp) override {
-    kafka_admin_AdminClient_t* admin = admin_for(req->admin_id());
-    if (admin == nullptr) {
-      *resp->mutable_error() = unknown_admin(req->admin_id());
-      return grpc::Status::OK;
-    }
-    StringArray states(req->group_states());
-    StringArray types(req->types());
-
-    kafka_admin_ListConsumerGroupsResult_t* result = nullptr;
-    kafka_common_Error_t* err = kafka_admin_AdminClient_list_consumer_groups(
-        admin, states.data(), states.count(), types.data(), types.count(),
-        timeout_ms(*req), &result);
-    if (err != nullptr) {
-      fill_proto_error(resp->mutable_error(), err);
-      return grpc::Status::OK;
-    }
-
-    const int32_t valid = kafka_admin_ListConsumerGroupsResult_valid_count(result);
-    for (int32_t i = 0; i < valid; i++) {
-      const kafka_admin_ConsumerGroupListing_t* listing =
-          kafka_admin_ListConsumerGroupsResult_get_valid(result, i);
-      if (listing == nullptr) {
-        resp->clear_valid();
-        resp->clear_listing_errors();
-        *resp->mutable_error() = make_synthetic_error("listConsumerGroups valid entry is null");
-        kafka_admin_ListConsumerGroupsResult_destroy(result);
-        return grpc::Status::OK;
-      }
-      ConsumerGroupListing* dst = resp->add_valid();
-      dst->set_group_id(cstr(kafka_admin_ConsumerGroupListing_group_id(listing)));
-      dst->set_is_simple_consumer_group(
-          kafka_admin_ConsumerGroupListing_is_simple_consumer_group(listing));
-      const char* group_state = kafka_admin_ConsumerGroupListing_group_state(listing);
-      if (group_state != nullptr) dst->set_group_state(std::string(group_state));
-      // Java's deprecated state(), derived from group_state. Carried so that a
-      // backend which dropped it is a finding rather than invisible.
-      const char* state = kafka_admin_ConsumerGroupListing_state(listing);
-      if (state != nullptr) dst->set_state(std::string(state));
-      const char* group_type = kafka_admin_ConsumerGroupListing_group_type(listing);
-      if (group_type != nullptr) dst->set_group_type(std::string(group_type));
-    }
-    const int32_t errors = kafka_admin_ListConsumerGroupsResult_error_count(result);
-    for (int32_t i = 0; i < errors; i++) {
-      const kafka_common_Error_t* listing_err =
-          kafka_admin_ListConsumerGroupsResult_get_error(result, i);
-      if (listing_err != nullptr) copy_proto_error(resp->add_listing_errors(), listing_err);
-    }
-    kafka_admin_ListConsumerGroupsResult_destroy(result);
     return grpc::Status::OK;
   }
 
@@ -3298,7 +3307,7 @@ class AdminServiceImpl final : public AdminService::Service {
     const int32_t count = kafka_admin_CreateAclsResult_count(result);
     for (int32_t i = 0; i < count; i++) {
       VoidResultEntry* entry = resp->add_entries();
-      const kafka_common_AclBinding_t* binding =
+      const kafka_common_acl_AclBinding_t* binding =
           kafka_admin_CreateAclsResult_get_binding(result, i);
       if (binding == nullptr) {
         // Unreachable for i < count, but a keyless entry would be silently
@@ -3344,7 +3353,7 @@ class AdminServiceImpl final : public AdminService::Service {
 
     const int32_t count = kafka_admin_DescribeAclsResult_count(result);
     for (int32_t i = 0; i < count; i++) {
-      const kafka_common_AclBinding_t* binding =
+      const kafka_common_acl_AclBinding_t* binding =
           kafka_admin_DescribeAclsResult_get_binding(result, i);
       if (binding == nullptr) {
         resp->clear_acls();
@@ -3381,7 +3390,7 @@ class AdminServiceImpl final : public AdminService::Service {
     const int32_t count = kafka_admin_DeleteAclsResult_count(result);
     for (int32_t i = 0; i < count; i++) {
       DeleteAclsEntry* entry = resp->add_entries();
-      const kafka_common_AclBindingFilter_t* filter =
+      const kafka_common_acl_AclBindingFilter_t* filter =
           kafka_admin_DeleteAclsResult_get_filter(result, i);
       if (filter == nullptr) {
         resp->clear_entries();
@@ -3405,7 +3414,7 @@ class AdminServiceImpl final : public AdminService::Service {
       const int32_t inner = kafka_admin_DeleteAclsResult_get_result_count(result, i);
       for (int32_t j = 0; j < inner; j++) {
         DeletedAcl* deleted = value->add_values();
-        const kafka_common_AclBinding_t* deleted_binding =
+        const kafka_common_acl_AclBinding_t* deleted_binding =
             kafka_admin_DeleteAclsResult_get_binding(result, i, j);
         if (deleted_binding != nullptr) {
           acl_binding_to_proto(deleted_binding, deleted->mutable_binding());
@@ -3493,7 +3502,7 @@ class AdminServiceImpl final : public AdminService::Service {
 
     const int32_t count = kafka_admin_DescribeClientQuotasResult_count(result);
     for (int32_t i = 0; i < count; i++) {
-      const kafka_common_ClientQuotaEntity_t* entity =
+      const kafka_common_quota_ClientQuotaEntity_t* entity =
           kafka_admin_DescribeClientQuotasResult_get_entity(result, i);
       if (entity == nullptr) {
         resp->clear_entities();
@@ -3602,7 +3611,7 @@ class AdminServiceImpl final : public AdminService::Service {
 
     const int32_t count = kafka_admin_AlterClientQuotasResult_count(result);
     for (int32_t i = 0; i < count; i++) {
-      const kafka_common_ClientQuotaEntity_t* entity =
+      const kafka_common_quota_ClientQuotaEntity_t* entity =
           kafka_admin_AlterClientQuotasResult_get_entity(result, i);
       if (entity == nullptr) {
         resp->clear_entries();
@@ -3769,7 +3778,7 @@ class AdminServiceImpl final : public AdminService::Service {
       return grpc::Status::OK;
     }
 
-    const kafka_common_DelegationToken_t* token =
+    const kafka_common_security_token_delegation_DelegationToken_t* token =
         kafka_admin_CreateDelegationTokenResult_get_token(result);
     if (token == nullptr) {
       *resp->mutable_error() = make_synthetic_error("createDelegationToken returned neither a token nor an error");
@@ -3852,7 +3861,7 @@ class AdminServiceImpl final : public AdminService::Service {
 
     const int32_t count = kafka_admin_DescribeDelegationTokenResult_count(result);
     for (int32_t i = 0; i < count; i++) {
-      const kafka_common_DelegationToken_t* token =
+      const kafka_common_security_token_delegation_DelegationToken_t* token =
           kafka_admin_DescribeDelegationTokenResult_get_token(result, i);
       if (token == nullptr || !delegation_token_to_proto(token, resp->add_tokens())) {
         resp->clear_tokens();
@@ -4415,50 +4424,50 @@ class AdminServiceImpl final : public AdminService::Service {
     const char* const* names;
   };
 
-  static void acl_binding_to_proto(const kafka_common_AclBinding_t* binding, AclBinding* dst) {
-    dst->set_resource_type(kafka_common_AclBinding_resource_type(binding));
-    dst->set_resource_name(cstr(kafka_common_AclBinding_resource_name(binding)));
-    dst->set_pattern_type(kafka_common_AclBinding_pattern_type(binding));
-    dst->set_principal(cstr(kafka_common_AclBinding_principal(binding)));
-    dst->set_host(cstr(kafka_common_AclBinding_host(binding)));
-    dst->set_operation(kafka_common_AclBinding_operation(binding));
-    dst->set_permission_type(kafka_common_AclBinding_permission_type(binding));
+  static void acl_binding_to_proto(const kafka_common_acl_AclBinding_t* binding, AclBinding* dst) {
+    dst->set_resource_type(kafka_common_acl_AclBinding_resource_type(binding));
+    dst->set_resource_name(cstr(kafka_common_acl_AclBinding_resource_name(binding)));
+    dst->set_pattern_type(kafka_common_acl_AclBinding_pattern_type(binding));
+    dst->set_principal(cstr(kafka_common_acl_AclBinding_principal(binding)));
+    dst->set_host(cstr(kafka_common_acl_AclBinding_host(binding)));
+    dst->set_operation(kafka_common_acl_AclBinding_operation(binding));
+    dst->set_permission_type(kafka_common_acl_AclBinding_permission_type(binding));
   }
 
   // The three nullable strings stay absent when the C accessor returns NULL:
   // that is Java's match-any, and `cstr` would turn it into "".
-  static void acl_filter_to_proto(const kafka_common_AclBindingFilter_t* filter,
+  static void acl_filter_to_proto(const kafka_common_acl_AclBindingFilter_t* filter,
                                   AclBindingFilter* dst) {
-    dst->set_resource_type(kafka_common_AclBindingFilter_resource_type(filter));
-    dst->set_pattern_type(kafka_common_AclBindingFilter_pattern_type(filter));
-    dst->set_operation(kafka_common_AclBindingFilter_operation(filter));
-    dst->set_permission_type(kafka_common_AclBindingFilter_permission_type(filter));
-    const char* name = kafka_common_AclBindingFilter_resource_name(filter);
+    dst->set_resource_type(kafka_common_acl_AclBindingFilter_resource_type(filter));
+    dst->set_pattern_type(kafka_common_acl_AclBindingFilter_pattern_type(filter));
+    dst->set_operation(kafka_common_acl_AclBindingFilter_operation(filter));
+    dst->set_permission_type(kafka_common_acl_AclBindingFilter_permission_type(filter));
+    const char* name = kafka_common_acl_AclBindingFilter_resource_name(filter);
     if (name != nullptr) dst->set_resource_name(std::string(name));
-    const char* principal = kafka_common_AclBindingFilter_principal(filter);
+    const char* principal = kafka_common_acl_AclBindingFilter_principal(filter);
     if (principal != nullptr) dst->set_principal(std::string(principal));
-    const char* host = kafka_common_AclBindingFilter_host(filter);
+    const char* host = kafka_common_acl_AclBindingFilter_host(filter);
     if (host != nullptr) dst->set_host(std::string(host));
   }
 
   // An absent entity name stays absent: that is Java's built-in *default*
   // entity for the type, not the entity named "".
-  static void quota_entity_to_proto(const kafka_common_ClientQuotaEntity_t* entity,
+  static void quota_entity_to_proto(const kafka_common_quota_ClientQuotaEntity_t* entity,
                                     ClientQuotaEntity* dst) {
-    const int32_t n = kafka_common_ClientQuotaEntity_entry_count(entity);
+    const int32_t n = kafka_common_quota_ClientQuotaEntity_entry_count(entity);
     for (int32_t i = 0; i < n; i++) {
       auto* pair = dst->add_entries();
-      pair->set_entity_type(cstr(kafka_common_ClientQuotaEntity_get_entry_type(entity, i)));
-      const char* name = kafka_common_ClientQuotaEntity_get_entry_name(entity, i);
+      pair->set_entity_type(cstr(kafka_common_quota_ClientQuotaEntity_get_entry_type(entity, i)));
+      const char* name = kafka_common_quota_ClientQuotaEntity_get_entry_name(entity, i);
       if (name != nullptr) pair->set_entity_name(std::string(name));
     }
   }
 
-  static void principal_to_proto(const kafka_common_KafkaPrincipal_t* principal,
+  static void principal_to_proto(const kafka_common_security_auth_KafkaPrincipal_t* principal,
                                  KafkaPrincipal* dst) {
-    dst->set_principal_type(cstr(kafka_common_KafkaPrincipal_principal_type(principal)));
-    dst->set_name(cstr(kafka_common_KafkaPrincipal_name(principal)));
-    dst->set_token_authenticated(kafka_common_KafkaPrincipal_token_authenticated(principal));
+    dst->set_principal_type(cstr(kafka_common_security_auth_KafkaPrincipal_principal_type(principal)));
+    dst->set_name(cstr(kafka_common_security_auth_KafkaPrincipal_name(principal)));
+    dst->set_token_authenticated(kafka_common_security_auth_KafkaPrincipal_token_authenticated(principal));
   }
 
   // Returns false when the token has no `token_info`, which the caller turns
@@ -4469,34 +4478,34 @@ class AdminServiceImpl final : public AdminService::Service {
   // getting that pair wrong is a live defect class, which is why the Rust client
   // asserts each one by its own getter (Java's `TokenInformation.equals` ignores
   // the expiry, so an equality check could not see it).
-  static bool delegation_token_to_proto(const kafka_common_DelegationToken_t* token,
+  static bool delegation_token_to_proto(const kafka_common_security_token_delegation_DelegationToken_t* token,
                                         DelegationToken* dst) {
-    const kafka_common_TokenInformation_t* info =
-        kafka_common_DelegationToken_token_info(token);
+    const kafka_common_security_token_delegation_TokenInformation_t* info =
+        kafka_common_security_token_delegation_DelegationToken_token_info(token);
     if (info == nullptr) return false;
     TokenInformation* out = dst->mutable_token_information();
-    out->set_token_id(cstr(kafka_common_TokenInformation_token_id(info)));
-    const kafka_common_KafkaPrincipal_t* owner = kafka_common_TokenInformation_owner(info);
+    out->set_token_id(cstr(kafka_common_security_token_delegation_TokenInformation_token_id(info)));
+    const kafka_common_security_auth_KafkaPrincipal_t* owner = kafka_common_security_token_delegation_TokenInformation_owner(info);
     if (owner != nullptr) principal_to_proto(owner, out->mutable_owner());
-    const kafka_common_KafkaPrincipal_t* requester =
-        kafka_common_TokenInformation_token_requester(info);
+    const kafka_common_security_auth_KafkaPrincipal_t* requester =
+        kafka_common_security_token_delegation_TokenInformation_token_requester(info);
     if (requester != nullptr) principal_to_proto(requester, out->mutable_token_requester());
-    const int32_t renewers = kafka_common_TokenInformation_renewer_count(info);
+    const int32_t renewers = kafka_common_security_token_delegation_TokenInformation_renewer_count(info);
     for (int32_t i = 0; i < renewers; i++) {
-      const kafka_common_KafkaPrincipal_t* renewer =
-          kafka_common_TokenInformation_get_renewer(info, i);
+      const kafka_common_security_auth_KafkaPrincipal_t* renewer =
+          kafka_common_security_token_delegation_TokenInformation_get_renewer(info, i);
       if (renewer != nullptr) principal_to_proto(renewer, out->add_renewers());
     }
-    out->set_issue_timestamp(kafka_common_TokenInformation_issue_timestamp(info));
-    out->set_max_timestamp(kafka_common_TokenInformation_max_timestamp(info));
-    out->set_expiry_timestamp(kafka_common_TokenInformation_expiry_timestamp(info));
+    out->set_issue_timestamp(kafka_common_security_token_delegation_TokenInformation_issue_timestamp(info));
+    out->set_max_timestamp(kafka_common_security_token_delegation_TokenInformation_max_timestamp(info));
+    out->set_expiry_timestamp(kafka_common_security_token_delegation_TokenInformation_expiry_timestamp(info));
     int32_t hmac_len = 0;
-    const uint8_t* hmac = kafka_common_DelegationToken_hmac(token, &hmac_len);
+    const uint8_t* hmac = kafka_common_security_token_delegation_DelegationToken_hmac(token, &hmac_len);
     if (hmac != nullptr && hmac_len > 0) {
       dst->set_hmac(std::string(reinterpret_cast<const char*>(hmac),
                                 static_cast<size_t>(hmac_len)));
     }
-    dst->set_hmac_as_base64(cstr(kafka_common_DelegationToken_hmac_as_base64_string(token)));
+    dst->set_hmac_as_base64(cstr(kafka_common_security_token_delegation_DelegationToken_hmac_as_base64_string(token)));
     return true;
   }
 
@@ -4675,33 +4684,33 @@ class AdminServiceImpl final : public AdminService::Service {
   // Named for its Java type rather than reusing `partition_info_to_proto`,
   // which is the consumer service's free function for `PartitionInfo`; a member
   // of the same name would hide it inside this class.
-  static void topic_partition_info_to_proto(const kafka_admin_TopicPartitionInfo_t* info,
+  static void topic_partition_info_to_proto(const kafka_common_TopicPartitionInfo_t* info,
                                             TopicPartitionInfo* dst) {
-    dst->set_partition(kafka_admin_TopicPartitionInfo_partition(info));
-    const kafka_common_Node_t* leader = kafka_admin_TopicPartitionInfo_leader(info);
+    dst->set_partition(kafka_common_TopicPartitionInfo_partition(info));
+    const kafka_common_Node_t* leader = kafka_common_TopicPartitionInfo_leader(info);
     if (leader != nullptr) node_to_proto(leader, dst->mutable_leader());
-    const int32_t replicas = kafka_admin_TopicPartitionInfo_replica_count(info);
+    const int32_t replicas = kafka_common_TopicPartitionInfo_replica_count(info);
     for (int32_t i = 0; i < replicas; i++) {
-      node_to_proto(kafka_admin_TopicPartitionInfo_replica(info, i), dst->add_replicas());
+      node_to_proto(kafka_common_TopicPartitionInfo_replica(info, i), dst->add_replicas());
     }
-    const int32_t isr = kafka_admin_TopicPartitionInfo_isr_count(info);
+    const int32_t isr = kafka_common_TopicPartitionInfo_isr_count(info);
     for (int32_t i = 0; i < isr; i++) {
-      node_to_proto(kafka_admin_TopicPartitionInfo_isr(info, i), dst->add_isr());
+      node_to_proto(kafka_common_TopicPartitionInfo_isr(info, i), dst->add_isr());
     }
     // elr / last_known_elr are nullable in Java, and an absent list reports the
     // same count 0 as an empty one — hence the dedicated has_* predicates.
-    if (kafka_admin_TopicPartitionInfo_has_elr(info)) {
+    if (kafka_common_TopicPartitionInfo_has_elr(info)) {
       NodeList* elr = dst->mutable_elr();
-      const int32_t n = kafka_admin_TopicPartitionInfo_elr_count(info);
+      const int32_t n = kafka_common_TopicPartitionInfo_elr_count(info);
       for (int32_t i = 0; i < n; i++) {
-        node_to_proto(kafka_admin_TopicPartitionInfo_elr(info, i), elr->add_nodes());
+        node_to_proto(kafka_common_TopicPartitionInfo_elr(info, i), elr->add_nodes());
       }
     }
-    if (kafka_admin_TopicPartitionInfo_has_last_known_elr(info)) {
+    if (kafka_common_TopicPartitionInfo_has_last_known_elr(info)) {
       NodeList* last = dst->mutable_last_known_elr();
-      const int32_t n = kafka_admin_TopicPartitionInfo_last_known_elr_count(info);
+      const int32_t n = kafka_common_TopicPartitionInfo_last_known_elr_count(info);
       for (int32_t i = 0; i < n; i++) {
-        node_to_proto(kafka_admin_TopicPartitionInfo_last_known_elr(info, i), last->add_nodes());
+        node_to_proto(kafka_common_TopicPartitionInfo_last_known_elr(info, i), last->add_nodes());
       }
     }
   }
@@ -4782,9 +4791,6 @@ class AdminServiceImpl final : public AdminService::Service {
     dst->set_partition_assignor(
         cstr(kafka_admin_ConsumerGroupDescription_partition_assignor(description)));
     dst->set_group_type(cstr(kafka_admin_ConsumerGroupDescription_group_type(description)));
-    // Java's deprecated state() next to groupState(). Both cross so that a
-    // backend which dropped one is a finding rather than invisible.
-    dst->set_state(cstr(kafka_admin_ConsumerGroupDescription_state(description)));
     dst->set_group_state(cstr(kafka_admin_ConsumerGroupDescription_group_state(description)));
     const int32_t members = kafka_admin_ConsumerGroupDescription_member_count(description);
     for (int32_t i = 0; i < members; i++) {
@@ -4870,8 +4876,10 @@ int main(int /*argc*/, char** /*argv*/) {
 
   grpc::ServerBuilder builder;
   builder.AddListeningPort(address, grpc::InsecureServerCredentials());
-  ProducerServiceImpl producer_service;
-  ConsumerServiceImpl consumer_service;
+  // Outlives both services, which share it.
+  GroupMetadataStore group_metadata;
+  ProducerServiceImpl producer_service(&group_metadata);
+  ConsumerServiceImpl consumer_service(&group_metadata);
   AdminServiceImpl admin_service;
   builder.RegisterService(&producer_service);
   builder.RegisterService(&consumer_service);

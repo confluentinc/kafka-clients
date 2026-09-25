@@ -14,8 +14,8 @@
 
 //! Translated from `org.apache.kafka.common.errors.UnknownTopicIdException`.
 
-use crate::common::Errors;
 use crate::common::error::kafka_error_class;
+use crate::common::protocol::Errors;
 
 kafka_error_class! {
     /// This server does not host this topic ID.
@@ -26,6 +26,7 @@ kafka_error_class! {
     ///    `UnknownTopicIdException` -> `InvalidMetadataException` ->
     ///   `RefreshRetriableException` -> `RetriableException` -> `ApiException` ->
     ///   `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.UnknownTopicIdException")]
     UnknownTopicIdError,
     code: Errors::UnknownTopicId,
     extends: [

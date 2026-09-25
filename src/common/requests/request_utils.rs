@@ -16,8 +16,8 @@
 //!
 //! Corresponds to `org.apache.kafka.common.requests.RequestUtils`.
 
-use crate::common::ByteBufferAccessor;
 use crate::common::Error;
+use crate::common::protocol::ByteBufferAccessor;
 use crate::common::protocol::Message;
 use crate::common::protocol::ObjectSerializationCache;
 
@@ -28,6 +28,8 @@ use super::RECORD_BATCH_NO_PARTITION_LEADER_EPOCH;
 /// Translates the Java static-utility class `org.apache.kafka.common.requests.RequestUtils`,
 /// which has no instance state, so it becomes a unit struct hosting its
 /// statics as associated items.
+#[non_exhaustive]
+#[doc(alias = "org.apache.kafka.common.requests.RequestUtils")]
 pub struct RequestUtils;
 
 impl RequestUtils {
@@ -57,6 +59,7 @@ impl RequestUtils {
     ///     e instanceof UnsupportedEndpointTypeException ||
     ///     e instanceof UnsupportedForMessageFormatException;
     /// ```
+    #[doc(alias = "org.apache.kafka.common.requests.RequestUtils#isFatalException")]
     pub fn is_fatal_error(e: &Error) -> bool {
         e.is_authentication_error()
             || e.is_authorization_error()
@@ -74,6 +77,7 @@ impl RequestUtils {
     /// [`RECORD_BATCH_NO_PARTITION_LEADER_EPOCH`]), or `None` otherwise.
     ///
     /// Corresponds to `RequestUtils.getLeaderEpoch` in Java.
+    #[doc(alias = "org.apache.kafka.common.requests.RequestUtils#getLeaderEpoch")]
     pub fn get_leader_epoch(leader_epoch: i32) -> Option<i32> {
         if leader_epoch == RECORD_BATCH_NO_PARTITION_LEADER_EPOCH {
             None
@@ -92,6 +96,7 @@ impl RequestUtils {
     /// # Errors
     ///
     /// Returns an error if size calculation or serialization fails.
+    #[doc(alias = "org.apache.kafka.common.requests.RequestUtils#serialize")]
     pub fn serialize(
         header: &impl Message,
         header_version: i16,

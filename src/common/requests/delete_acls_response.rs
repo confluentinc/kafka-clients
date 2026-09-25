@@ -32,14 +32,16 @@ use super::AbstractResponse;
 ///
 /// Corresponds to `org.apache.kafka.common.requests.DeleteAclsResponse`.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.DeleteAclsResponse")]
 pub struct DeleteAclsResponse {
     data: DeleteAclsResponseData,
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     version: i16,
 }
 
 impl DeleteAclsResponse {
     /// Creates a new `DeleteAclsResponse` from the underlying data and version.
+    #[doc(alias = "org.apache.kafka.common.requests.DeleteAclsResponse#DeleteAclsResponse")]
     pub fn new(data: DeleteAclsResponseData, version: i16) -> Self {
         Self { data, version }
     }
@@ -50,6 +52,7 @@ impl DeleteAclsResponse {
     }
 
     /// Returns a reference to the underlying data.
+    #[doc(alias = "org.apache.kafka.common.requests.DeleteAclsResponse#data")]
     pub fn data(&self) -> &DeleteAclsResponseData {
         &self.data
     }
@@ -60,11 +63,13 @@ impl DeleteAclsResponse {
     }
 
     /// Returns the throttle time in milliseconds.
+    #[doc(alias = "org.apache.kafka.common.requests.DeleteAclsResponse#throttleTimeMs")]
     pub fn throttle_time_ms(&self) -> i32 {
         self.data.throttle_time_ms
     }
 
     /// Sets the throttle time in the response.
+    #[doc(alias = "org.apache.kafka.common.requests.DeleteAclsResponse#maybeSetThrottleTimeMs")]
     pub fn maybe_set_throttle_time_ms(&mut self, throttle_time_ms: i32) {
         self.data.set_throttle_time_ms(throttle_time_ms);
     }
@@ -72,11 +77,13 @@ impl DeleteAclsResponse {
     /// Returns the per-filter results.
     ///
     /// Mirrors `DeleteAclsResponse.filterResults()`.
+    #[doc(alias = "org.apache.kafka.common.requests.DeleteAclsResponse#filterResults")]
     pub fn filter_results(&self) -> &[DeleteAclsFilterResult] {
         &self.data.filter_results
     }
 
     /// Returns the error counts aggregated across all filter results.
+    #[doc(alias = "org.apache.kafka.common.requests.DeleteAclsResponse#errorCounts")]
     pub fn error_counts(&self) -> HashMap<Errors, i32> {
         let mut counts = HashMap::new();
         for result in &self.data.filter_results {
@@ -91,12 +98,14 @@ impl DeleteAclsResponse {
     /// # Errors
     ///
     /// Returns an error if parsing fails.
+    #[doc(alias = "org.apache.kafka.common.requests.DeleteAclsResponse#parse")]
     pub fn parse(readable: &mut dyn Readable, version: i16) -> io::Result<Self> {
         let data = DeleteAclsResponseData::read(readable, version)?;
         Ok(Self::new(data, version))
     }
 
     /// Whether the client should throttle on this response (v1+).
+    #[doc(alias = "org.apache.kafka.common.requests.DeleteAclsResponse#shouldClientThrottle")]
     pub fn should_client_throttle(&self, version: i16) -> bool {
         version >= 1
     }
@@ -104,6 +113,7 @@ impl DeleteAclsResponse {
     /// Builds a wire [`DeleteAclsMatchingAcl`] from a binding and error.
     ///
     /// Mirrors `DeleteAclsResponse.matchingAcl(AclBinding, ApiError)`.
+    #[doc(alias = "org.apache.kafka.common.requests.DeleteAclsResponse#matchingAcl")]
     pub fn matching_acl(acl: &AclBinding, error: Errors, error_message: Option<String>) -> DeleteAclsMatchingAcl {
         let mut wire = DeleteAclsMatchingAcl::new();
         wire.set_error_code(error.code())
@@ -126,6 +136,7 @@ impl DeleteAclsResponse {
     ///
     /// Returns an error if the matching ACL carries invalid pattern/permission
     /// components (mirrors Java's constructor exceptions).
+    #[doc(alias = "org.apache.kafka.common.requests.DeleteAclsResponse#aclBinding")]
     pub fn acl_binding(matching_acl: &DeleteAclsMatchingAcl) -> Result<AclBinding, Error> {
         let pattern = ResourcePattern::new(
             ResourceType::from_code(matching_acl.resource_type),

@@ -24,6 +24,7 @@ use crate::common::TopicPartition;
 ///
 /// Corresponds to `org.apache.kafka.clients.admin.MemberAssignment`.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[doc(alias = "org.apache.kafka.clients.admin.MemberAssignment")]
 pub struct MemberAssignment {
     topic_partitions: HashSet<TopicPartition>,
 }
@@ -32,6 +33,7 @@ impl MemberAssignment {
     /// Creates an instance with the specified topic partitions.
     ///
     /// Mirrors `new MemberAssignment(Set<TopicPartition>)`.
+    #[doc(alias = "org.apache.kafka.clients.admin.MemberAssignment#MemberAssignment")]
     pub fn new(topic_partitions: HashSet<TopicPartition>) -> Self {
         Self { topic_partitions }
     }
@@ -39,6 +41,7 @@ impl MemberAssignment {
     /// The topic partitions assigned to a group member.
     ///
     /// Mirrors `topicPartitions()`.
+    #[doc(alias = "org.apache.kafka.clients.admin.MemberAssignment#topicPartitions")]
     pub fn topic_partitions(&self) -> &HashSet<TopicPartition> {
         &self.topic_partitions
     }

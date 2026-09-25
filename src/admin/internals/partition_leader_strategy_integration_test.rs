@@ -34,7 +34,7 @@ use crate::admin::internals::{AdminApiHandler, ApiResult, RequestAndKeys};
 use crate::admin::internals::{PartitionLeaderFuture, PartitionLeaderStrategy};
 use crate::common::protocol::{ApiKeys, Errors};
 use crate::common::requests::{
-    ConcreteResponse, ListOffsetsResponse, MetadataRequestBuilder, MetadataResponse, RequestBuilder,
+    ConcreteResponse, ListOffsetsResponse, MetadataResponse, RequestBuilder, metadata_request,
 };
 use crate::common::utils::{ExponentialBackoff, LogContext};
 use crate::common::{Error, KafkaFuture, Node, TopicPartition};
@@ -78,7 +78,7 @@ impl AdminApiHandler<TopicPartition, ()> for MockApiHandler {
 
     fn build_request(&self, _broker_id: i32, keys: &HashSet<TopicPartition>) -> Vec<RequestAndKeys<TopicPartition>> {
         vec![RequestAndKeys {
-            request: Box::new(MetadataRequestBuilder::with_topics_allow_auto_topic_creation(None, false))
+            request: Box::new(metadata_request::Builder::with_topics_allow_auto_topic_creation(None, false))
                 as Box<dyn RequestBuilder>,
             keys: keys.clone(),
         }]

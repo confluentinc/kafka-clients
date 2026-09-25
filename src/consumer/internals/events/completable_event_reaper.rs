@@ -41,6 +41,7 @@ use super::CompletableEventErasedHandle;
 ///
 /// Owned by the consumer background task (Phase 10). Inserted into and
 /// queried in single-threaded fashion — no internal locking.
+#[doc(alias = "org.apache.kafka.clients.consumer.internals.events.CompletableEventReaper")]
 pub(crate) struct CompletableEventReaper {
     tracked: Vec<Arc<dyn CompletableEventErasedHandle>>,
 }
@@ -53,6 +54,7 @@ impl Default for CompletableEventReaper {
 
 impl CompletableEventReaper {
     /// Creates an empty reaper.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.events.CompletableEventReaper#CompletableEventReaper")]
     pub(crate) fn new() -> Self {
         Self { tracked: Vec::new() }
     }
@@ -61,6 +63,7 @@ impl CompletableEventReaper {
     /// supplied handle. Must be called when the corresponding event is
     /// posted to the bg task so the deadline is enforced even if the
     /// bg-task path does not get to it.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.events.CompletableEventReaper#add")]
     pub(crate) fn add(&mut self, handle: Arc<dyn CompletableEventErasedHandle>) {
         self.tracked.push(handle);
     }
@@ -76,6 +79,7 @@ impl CompletableEventReaper {
     /// Returns the number of events that were expired (not the total
     /// removed — events that completed normally are removed but not
     /// counted as expired, matching Java).
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.events.CompletableEventReaper#reap")]
     pub(crate) fn reap(&mut self, current_time_ms: i64) -> u64 {
         let mut expired_count: u64 = 0;
 
@@ -159,6 +163,7 @@ impl CompletableEventReaper {
     }
 
     /// Number of currently-tracked handles.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.events.CompletableEventReaper#size")]
     pub(crate) fn size(&self) -> usize {
         self.tracked.len()
     }
@@ -174,6 +179,7 @@ impl CompletableEventReaper {
     /// every `erased()` call (and across `Arc::clone` of the resulting
     /// trait object), so this `contains` works whether the caller saved
     /// the original `Arc` or re-called `handle.erased()` to query.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.events.CompletableEventReaper#contains")]
     pub(crate) fn contains(&self, handle: &Arc<dyn CompletableEventErasedHandle>) -> bool {
         let target = handle.inner_id();
         self.tracked.iter().any(|h| h.inner_id() == target)
@@ -181,6 +187,7 @@ impl CompletableEventReaper {
 
     /// Java: `uncompletedEvents()` — returns the subset of tracked
     /// handles whose senders have not yet been consumed.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.events.CompletableEventReaper#uncompletedEvents")]
     pub(crate) fn uncompleted_events(&self) -> Vec<Arc<dyn CompletableEventErasedHandle>> {
         self.tracked.iter().filter(|h| !h.is_done()).cloned().collect()
     }

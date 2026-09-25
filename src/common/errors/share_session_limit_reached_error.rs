@@ -14,8 +14,8 @@
 
 //! Translated from `org.apache.kafka.common.errors.ShareSessionLimitReachedException`.
 
-use crate::common::Errors;
 use crate::common::error::kafka_error_class;
+use crate::common::protocol::Errors;
 
 kafka_error_class! {
     /// The limit of share sessions has been reached.
@@ -25,6 +25,7 @@ kafka_error_class! {
     /// Java `extends` chain:
     ///    `ShareSessionLimitReachedException` -> `RetriableException` ->
     ///   `ApiException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.ShareSessionLimitReachedException")]
     ShareSessionLimitReachedError,
     code: Errors::ShareSessionLimitReached,
     extends: [

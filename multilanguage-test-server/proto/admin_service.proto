@@ -87,9 +87,8 @@ service AdminService {
   // -------------------------------------------------------------------------
   // Cluster, configs & log dirs (slice G2)
   //
-  // Three of the eight are *whole-value* responses (envelope addendum (a)):
-  // describeCluster, listConfigResources and listClientMetricsResources have no
-  // per-key futures at all, so a per-key error arm would be permanently dead.
+  // Two of the seven are *whole-value* responses (envelope addendum (a)):
+  // describeCluster and listConfigResources have no per-key futures at all, so a per-key error arm would be permanently dead.
   // describeLogDirs is the second of the three value-carries-its-own-error RPCs
   // (envelope exception 3). The remaining four are ordinary per-key results,
   // two of them keyed by [ResultKey.config_resource] and two by
@@ -100,8 +99,6 @@ service AdminService {
   rpc DescribeConfigs(DescribeConfigsRequest) returns (DescribeConfigsResponse);
   rpc IncrementalAlterConfigs(IncrementalAlterConfigsRequest) returns (VoidKeyedResponse);
   rpc ListConfigResources(ListConfigResourcesRequest) returns (ListConfigResourcesResponse);
-  rpc ListClientMetricsResources(ListClientMetricsResourcesRequest)
-      returns (ListClientMetricsResourcesResponse);
   rpc DescribeLogDirs(DescribeLogDirsRequest) returns (DescribeLogDirsResponse);
   rpc AlterReplicaLogDirs(AlterReplicaLogDirsRequest) returns (VoidKeyedResponse);
   rpc DescribeReplicaLogDirs(DescribeReplicaLogDirsRequest) returns (DescribeReplicaLogDirsResponse);
@@ -141,13 +138,13 @@ service AdminService {
   // -------------------------------------------------------------------------
   // Groups & offsets (slice G4)
   //
-  // Nine RPCs, and every one of them lands on an established envelope shape —
+  // Eight RPCs, and every one of them lands on an established envelope shape —
   // chosen by reading its `src/admin/*_result.rs` future shape, which the C
   // FFI's own comment (`src/ffi/admin.rs`, "Group result handles") independently
   // classifies the same three ways:
   //
-  //   - **Whole-value** (envelope addendum (a)) for `listGroups` and
-  //     `listConsumerGroups`. `ListGroupsResult` holds ONE
+  //   - **Whole-value** (envelope addendum (a)) for `listGroups`.
+  //     `ListGroupsResult` holds ONE
   //     `KafkaFuture<Collection<Object>>` that it splits into `valid()` listings
   //     and an **unkeyed** `errors()` collection. A per-key envelope cannot
   //     express that: the errors have no key to attach them to. So the response
@@ -167,15 +164,14 @@ service AdminService {
   // No fourth key variant and no fifth response shape were needed.
   //
   // Group states and types cross as the Java enums' `toString()` **names**, the
-  // [ConfigEntry.source] precedent: `GroupState`, `GroupType`,
-  // `ConsumerGroupState` and `ClassicGroupState` have no numeric id in Java, so
+  // [ConfigEntry.source] precedent: `GroupState`, `GroupType` and
+  // `ClassicGroupState` have no numeric id in Java, so
   // the name is the contract at the C boundary
   // (`kafka_admin_ConsumerGroupDescription_group_state` returns a string) and
   // admin.py exposes the same strings.
   // -------------------------------------------------------------------------
 
   rpc ListGroups(ListGroupsRequest) returns (ListGroupsResponse);
-  rpc ListConsumerGroups(ListConsumerGroupsRequest) returns (ListConsumerGroupsResponse);
   rpc DescribeConsumerGroups(DescribeConsumerGroupsRequest)
       returns (DescribeConsumerGroupsResponse);
   rpc DescribeClassicGroups(DescribeClassicGroupsRequest)
@@ -530,13 +526,11 @@ message VoidKeyedResponse {
 // error arm. [AdminListTopicsResponse] therefore places the values directly next
 // to the one top-level error.
 //
-// Slice G2 reused this shape for three more, each checked against its
+// Slice G2 reused this shape for two more, each checked against its
 // `src/admin/*_result.rs` before choosing:
 //   - [DescribeClusterResponse] — `DescribeClusterResult` holds four
 //     *independent* futures over attributes of one cluster, not a map;
-//   - [ListConfigResourcesResponse] — one `KafkaFuture<Collection<ConfigResource>>`;
-//   - [ListClientMetricsResourcesResponse] — one
-//     `KafkaFuture<Collection<ClientMetricsResourceListing>>`.
+//   - [ListConfigResourcesResponse] — one `KafkaFuture<Collection<ConfigResource>>`.
 // Slice G3 reused it for [ListPartitionReassignmentsResponse], whose
 // `ListPartitionReassignmentsResult` likewise holds one
 // `KafkaFuture<Map<TopicPartition, PartitionReassignment>>`. Later slices reuse
@@ -1052,27 +1046,6 @@ message ListConfigResourcesResponse {
 }
 
 // ---------------------------------------------------------------------------
-// listClientMetricsResources — whole-value response. Deprecated in Java since
-// 4.1 in favour of `listConfigResources(Set.of(CLIENT_METRICS))`, and carried
-// here because both bindings still expose it.
-// ---------------------------------------------------------------------------
-
-message ListClientMetricsResourcesRequest {
-  uint64 admin_id = 1;
-  optional int32 timeout_ms = 2;
-}
-
-// Java `ClientMetricsResourceListing`.
-message ClientMetricsResourceListing {
-  string name = 1;
-}
-
-message ListClientMetricsResourcesResponse {
-  repeated ClientMetricsResourceListing resources = 1;
-  optional KafkaError error = 2;
-}
-
-// ---------------------------------------------------------------------------
 // describeLogDirs — per-key by broker id, and the second of the three
 // value-carries-its-own-error RPCs (envelope exception 3).
 //
@@ -1457,26 +1430,6 @@ message GroupListing {
   bool is_simple_consumer_group = 5;
 }
 
-// Java `ConsumerGroupListing`, as the deprecated `listConsumerGroups` reports
-// it.
-//
-// Both `group_state` and the deprecated `state` are carried, even though Java
-// derives the second from the first (`ConsumerGroupState.parse(groupState)`):
-// both bindings expose both (`kafka_admin_ConsumerGroupListing_state` next to
-// `_group_state`, admin.py's two attributes), so a backend that dropped one is a
-// finding. See [ConsumerGroupDescription.state] for what that pair can and
-// cannot detect.
-message ConsumerGroupListing {
-  string group_id = 1;
-  bool is_simple_consumer_group = 2;
-  // `GroupState.toString()`.
-  optional string group_state = 3;
-  // `ConsumerGroupState.toString()` — Java's deprecated `state()`.
-  optional string state = 4;
-  // `GroupType.toString()`.
-  optional string group_type = 5;
-}
-
 // Java `MemberAssignment`: the partitions assigned to one member.
 //
 // Wrapped in a message of its own (rather than a bare `repeated TopicPartition`
@@ -1527,24 +1480,9 @@ message ConsumerGroupDescription {
   // `GroupType.toString()`. Not optional here: Java's `type()` returns a plain
   // `GroupType`, unlike `GroupListing`'s `Optional`.
   string group_type = 5;
-  // Java's **deprecated** `state()`, i.e. `ConsumerGroupState.toString()`.
-  //
-  // Carried alongside `group_state` because both bindings expose both. Note
-  // exactly what a scenario can prove with the pair: Java defines
-  // `state() == ConsumerGroupState.parse(groupState().toString())`, and the two
-  // enums' constant names coincide for all eight `ConsumerGroupState` values, so
-  // the only state that distinguishes them is `GroupState.NOT_READY`
-  // (`GroupState.java:60`), which has no `ConsumerGroupState` counterpart and
-  // therefore parses to `Unknown`. `NOT_READY` is reachable **only for a
-  // STREAMS group** (`GroupState.java`'s javadoc table and
-  // `groupStatesForType`, `GroupState.java:80-89`), and a streams group is not
-  // something `describeConsumerGroups` can return — the classic
-  // `describeGroups`/`consumerGroupDescribe` coordinator path answers
-  // `GROUP_ID_NOT_FOUND` for a group of another type. So a *transposition* of
-  // this pair is invisible by construction, not merely unreachable on a
-  // one-node fixture; a *dropped* field is not, and that is what the equality
-  // assertion in the scenarios pins.
-  string state = 6;
+  // Field 6 carried Java's deprecated `state()`, which is not translated.
+  reserved 6;
+  reserved "state";
   // `GroupState.toString()`.
   string group_state = 7;
   // Java's `coordinator()` is nullable. Absent stays absent rather than
@@ -1581,7 +1519,7 @@ message ClassicGroupDescription {
 }
 
 // ---------------------------------------------------------------------------
-// listGroups / listConsumerGroups — whole-value responses whose "value" is
+// listGroups — a whole-value response whose "value" is
 // Java's `valid()` / `errors()` split. See the service-level G4 comment.
 // ---------------------------------------------------------------------------
 
@@ -1614,23 +1552,6 @@ message ListGroupsResponse {
   // Whole-call failure (Java's `all()` future failing before either list
   // exists, an unknown admin_id, a transport error). When set, both lists are
   // empty.
-  optional KafkaError error = 3;
-}
-
-message ListConsumerGroupsRequest {
-  uint64 admin_id = 1;
-  // `inGroupStates(Set<GroupState>)` as `toString()` names. Java's deprecated
-  // `inStates(Set<ConsumerGroupState>)` is *defined* as `inGroupStates` over
-  // `GroupState.parse` of the same names, so one wire field serves both.
-  repeated string group_states = 2;
-  repeated string types = 3;
-  optional int32 timeout_ms = 4;
-}
-
-message ListConsumerGroupsResponse {
-  repeated ConsumerGroupListing valid = 1;
-  // See [ListGroupsResponse.listing_errors].
-  repeated KafkaError listing_errors = 2;
   optional KafkaError error = 3;
 }
 

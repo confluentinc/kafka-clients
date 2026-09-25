@@ -14,8 +14,8 @@
 
 //! Translated from `org.apache.kafka.common.errors.NotEnoughReplicasAfterAppendException`.
 
-use crate::common::Errors;
 use crate::common::error::kafka_error_class;
+use crate::common::protocol::Errors;
 
 kafka_error_class! {
     /// Messages are written to the log, but to fewer in-sync replicas than
@@ -26,6 +26,7 @@ kafka_error_class! {
     /// Java `extends` chain:
     ///    `NotEnoughReplicasAfterAppendException` -> `RetriableException` ->
     ///   `ApiException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.NotEnoughReplicasAfterAppendException")]
     NotEnoughReplicasAfterAppendError,
     code: Errors::NotEnoughReplicasAfterAppend,
     extends: [

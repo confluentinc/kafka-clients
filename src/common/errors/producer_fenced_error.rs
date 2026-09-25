@@ -14,8 +14,8 @@
 
 //! Translated from `org.apache.kafka.common.errors.ProducerFencedException`.
 
-use crate::common::Errors;
 use crate::common::error::kafka_error_class;
+use crate::common::protocol::Errors;
 
 kafka_error_class! {
     /// There is a newer producer with the same transactionalId which fences the
@@ -26,6 +26,7 @@ kafka_error_class! {
     /// Java `extends` chain:
     ///    `ProducerFencedException` -> `ApplicationRecoverableException` ->
     ///   `ApiException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.ProducerFencedException")]
     ProducerFencedError,
     code: Errors::ProducerFenced,
     extends: [

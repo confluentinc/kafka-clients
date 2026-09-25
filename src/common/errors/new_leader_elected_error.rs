@@ -14,8 +14,8 @@
 
 //! Translated from `org.apache.kafka.common.errors.NewLeaderElectedException`.
 
-use crate::common::Errors;
 use crate::common::error::kafka_error_class;
+use crate::common::protocol::Errors;
 
 kafka_error_class! {
     /// The AlterPartition request successfully updated the partition state but
@@ -25,6 +25,7 @@ kafka_error_class! {
     ///
     /// Java `extends` chain:
     ///    `NewLeaderElectedException` -> `ApiException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.NewLeaderElectedException")]
     NewLeaderElectedError,
     code: Errors::NewLeaderElected,
     extends: [

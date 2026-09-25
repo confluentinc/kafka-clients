@@ -28,6 +28,7 @@ use super::RequestCompletionHandler;
 ///
 /// Contains both the body of the response as well as the correlated request
 /// metadata that was originally sent.
+#[doc(alias = "org.apache.kafka.clients.ClientResponse")]
 pub struct ClientResponse {
     /// The header of the corresponding request.
     request_header: RequestHeader,
@@ -78,7 +79,8 @@ impl ClientResponse {
     /// * `version_mismatch` - Error message if there was a version mismatch
     /// * `authentication_error` - The authentication error, if there was one
     /// * `response_body` - The response contents (or `None`)
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
+    #[doc(alias = "org.apache.kafka.clients.ClientResponse#ClientResponse")]
     pub fn new(
         request_header: RequestHeader,
         callback: Option<RequestCompletionHandler>,
@@ -124,7 +126,8 @@ impl ClientResponse {
     /// * `version_mismatch` - Error message if there was a version mismatch
     /// * `authentication_error` - The authentication error, if there was one
     /// * `response_body` - The response contents (or `None`)
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
+    #[doc(alias = "org.apache.kafka.clients.ClientResponse#ClientResponse")]
     pub fn with_timed_out(
         request_header: RequestHeader,
         callback: Option<RequestCompletionHandler>,
@@ -157,42 +160,50 @@ impl ClientResponse {
     }
 
     /// Returns the unix timestamp when this response was received.
+    #[doc(alias = "org.apache.kafka.clients.ClientResponse#receivedTimeMs")]
     pub fn received_time_ms(&self) -> i64 {
         self.received_time_ms
     }
 
     /// Returns whether the client disconnected before fully reading a response.
+    #[doc(alias = "org.apache.kafka.clients.ClientResponse#wasDisconnected")]
     pub fn was_disconnected(&self) -> bool {
         self.disconnected
     }
 
     /// Returns whether the client was disconnected because of a timeout.
+    #[doc(alias = "org.apache.kafka.clients.ClientResponse#wasTimedOut")]
     pub fn was_timed_out(&self) -> bool {
         self.timed_out
     }
 
     /// Returns the version mismatch error message, if any.
+    #[doc(alias = "org.apache.kafka.clients.ClientResponse#versionMismatch")]
     pub fn version_mismatch(&self) -> Option<&str> {
         self.version_mismatch.as_deref()
     }
 
     /// Returns the authentication error, if any. Java's
     /// `authenticationException()` (`ClientResponse.java:128`).
+    #[doc(alias = "org.apache.kafka.clients.ClientResponse#authenticationException")]
     pub fn authentication_error(&self) -> Option<&Error> {
         self.authentication_error.as_ref()
     }
 
     /// Returns a reference to the request header.
+    #[doc(alias = "org.apache.kafka.clients.ClientResponse#requestHeader")]
     pub fn request_header(&self) -> &RequestHeader {
         &self.request_header
     }
 
     /// Returns the destination node id.
+    #[doc(alias = "org.apache.kafka.clients.ClientResponse#destination")]
     pub fn destination(&self) -> &str {
         &self.destination
     }
 
     /// Returns a reference to the response body, if present.
+    #[doc(alias = "org.apache.kafka.clients.ClientResponse#responseBody")]
     pub fn response_body(&self) -> Option<&ConcreteResponse> {
         self.response_body.as_ref()
     }
@@ -205,6 +216,7 @@ impl ClientResponse {
     }
 
     /// Returns whether this response has a body.
+    #[doc(alias = "org.apache.kafka.clients.ClientResponse#hasResponse")]
     pub fn has_response(&self) -> bool {
         self.response_body.is_some()
     }
@@ -213,6 +225,7 @@ impl ClientResponse {
     /// (`received_time_ms - created_time_ms`). Translates Java's
     /// `ClientResponse.requestLatencyMs()` (`ClientResponse.java:148`), which is
     /// the only latency accessor Java exposes.
+    #[doc(alias = "org.apache.kafka.clients.ClientResponse#requestLatencyMs")]
     pub fn request_latency_ms(&self) -> i64 {
         self.latency_ms
     }
@@ -221,6 +234,7 @@ impl ClientResponse {
     ///
     /// The callback is taken out (consumed) by this call. Subsequent calls will
     /// be no-ops.
+    #[doc(alias = "org.apache.kafka.clients.ClientResponse#onComplete")]
     pub fn on_complete(&mut self) {
         if let Some(callback) = self.callback.take() {
             callback(self);

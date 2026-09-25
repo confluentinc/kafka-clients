@@ -23,3 +23,7 @@ sysinfo = "0.32"
 # dropped. Control via RUST_LOG (see README "Debugging the client").
 env_logger = "0.11"
 log = "0.4"
+
+[lints.clippy]
+# See the root Cargo.toml: `#[expect]`, never `#[allow]`.
+allow_attributes = "deny"

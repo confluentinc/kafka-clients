@@ -14,8 +14,8 @@
 
 //! Translated from `org.apache.kafka.common.errors.StreamsInvalidTopologyEpochException`.
 
-use crate::common::Errors;
 use crate::common::error::kafka_error_class;
+use crate::common::protocol::Errors;
 
 kafka_error_class! {
     /// The supplied topology epoch is invalid.
@@ -25,6 +25,7 @@ kafka_error_class! {
     /// Java `extends` chain:
     ///    `StreamsInvalidTopologyEpochException` -> `ApiException` ->
     ///   `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.StreamsInvalidTopologyEpochException")]
     StreamsInvalidTopologyEpochError,
     code: Errors::StreamsInvalidTopologyEpoch,
     extends: [

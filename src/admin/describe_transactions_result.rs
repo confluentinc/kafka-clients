@@ -29,12 +29,14 @@ use crate::common::{Error, KafkaFuture};
 /// them by the transactional id string (the `idValue`), following the
 /// `DescribeConsumerGroupsResult` precedent.
 #[derive(Clone, Debug)]
+#[doc(alias = "org.apache.kafka.clients.admin.DescribeTransactionsResult")]
 pub struct DescribeTransactionsResult {
     futures: HashMap<String, KafkaFuture<TransactionDescription>>,
 }
 
 impl DescribeTransactionsResult {
     /// Creates a result from the per-transactional-id futures.
+    #[doc(alias = "org.apache.kafka.clients.admin.DescribeTransactionsResult#DescribeTransactionsResult")]
     pub(crate) fn new(futures: HashMap<String, KafkaFuture<TransactionDescription>>) -> Self {
         Self { futures }
     }
@@ -47,6 +49,7 @@ impl DescribeTransactionsResult {
     ///
     /// Returns [`Error::local_illegal_argument`] if `transactional_id` was not
     /// included in the request (mirroring Java's `IllegalArgumentException`).
+    #[doc(alias = "org.apache.kafka.clients.admin.DescribeTransactionsResult#description")]
     pub fn description(&self, transactional_id: &str) -> Result<KafkaFuture<TransactionDescription>, Error> {
         self.futures.get(transactional_id).cloned().ok_or_else(|| {
             Error::local_illegal_argument(format!(
@@ -59,6 +62,7 @@ impl DescribeTransactionsResult {
     /// description. Fails if any transactional id's request fails.
     ///
     /// Mirrors `DescribeTransactionsResult.all`.
+    #[doc(alias = "org.apache.kafka.clients.admin.DescribeTransactionsResult#all")]
     pub fn all(&self) -> KafkaFuture<HashMap<String, TransactionDescription>> {
         KafkaFuture::join_map(self.futures.iter().map(|(id, f)| (id.clone(), f.clone())).collect())
     }

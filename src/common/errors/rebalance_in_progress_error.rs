@@ -14,8 +14,8 @@
 
 //! Translated from `org.apache.kafka.common.errors.RebalanceInProgressException`.
 
-use crate::common::Errors;
 use crate::common::error::kafka_error_class;
+use crate::common::protocol::Errors;
 
 kafka_error_class! {
     /// The group is rebalancing, so a rejoin is needed.
@@ -24,6 +24,7 @@ kafka_error_class! {
     ///
     /// Java `extends` chain:
     ///    `RebalanceInProgressException` -> `ApiException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.RebalanceInProgressException")]
     RebalanceInProgressError,
     code: Errors::RebalanceInProgress,
     extends: [

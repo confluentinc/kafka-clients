@@ -380,14 +380,9 @@ async fn produce_too_large_record_acks_one_inner<F: ProducerBackendFactory>(ctx:
     let err = result.unwrap_err();
     // Java's Producer throws RecordTooLargeException for both client-side
     // (max.request.size) and broker-side (message.max.bytes) rejections.
-    // The Rust client uses the dedicated RecordTooLarge variant only for
-    // client-side rejections; broker-side rejections come back through
-    // the response path as Error(MessageTooLarge). Accept either.
-    let too_large = match &err {
-        confluent_kafka::common::Error::RecordTooLarge(_) => true,
-        confluent_kafka::common::Error::KafkaError(g) => g.error() == confluent_kafka::common::Errors::MessageTooLarge,
-        _ => false,
-    };
+    // Both a client-side rejection and a broker `MESSAGE_TOO_LARGE` response
+    // surface as the RecordTooLarge variant (Java's `RecordTooLargeException`).
+    let too_large = matches!(err, confluent_kafka::common::Error::RecordTooLarge(_));
     assert!(
         too_large,
         "Expected RecordTooLarge or Error(MessageTooLarge) from server, got: {err:?}"
@@ -678,6 +673,9 @@ async fn produce_and_check_metrics_inner<F: ProducerBackendFactory>(ctx: &mut Te
                 MetricValue::Long(l) => l as f64,
                 MetricValue::Int(i) => i as f64,
                 MetricValue::String(_) => f64::NAN,
+                // `MetricValue` is `#[non_exhaustive]`, so this external crate
+                // needs a wildcard arm; a non-numeric value is not comparable.
+                _ => f64::NAN,
             })
     };
 
@@ -823,8 +821,12 @@ async fn test_close_with_zero_timeout_aborts_pending() {
     props.insert("linger.ms".to_string(), "60000".to_string());
     props.insert("delivery.timeout.ms".to_string(), "120000".to_string());
     let producer_config = ProducerConfig::new(&props).expect("Invalid test config");
-    let producer = KafkaProducer::new(producer_config, Box::new(ByteArraySerializer), Box::new(ByteArraySerializer))
-        .expect("Failed to create producer");
+    let producer = KafkaProducer::new(
+        producer_config,
+        Box::new(ByteArraySerializer::default()),
+        Box::new(ByteArraySerializer::default()),
+    )
+    .expect("Failed to create producer");
 
     let mut futures = Vec::new();
     for i in 0..5 {
@@ -870,8 +872,12 @@ async fn test_wrong_serializer_errors_send() {
     let ctx = TestContext::new(ClusterConfig::default()).await;
     let props = make_config(ctx.bootstrap_servers());
     let producer_config = ProducerConfig::new(&props).expect("Invalid test config");
-    let producer = KafkaProducer::new(producer_config, Box::new(ByteArraySerializer), Box::new(FailingSerializer))
-        .expect("Failed to create producer");
+    let producer = KafkaProducer::new(
+        producer_config,
+        Box::new(ByteArraySerializer::default()),
+        Box::new(FailingSerializer),
+    )
+    .expect("Failed to create producer");
 
     let record = ProducerRecord::with_key("any-topic".to_string(), Some(b("key")), Some(b("value")));
     // UFCS to call the trait method past the inherent shadow.

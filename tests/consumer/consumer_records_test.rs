@@ -38,6 +38,7 @@ use indexmap::IndexMap;
 
 /// Translated from `ConsumerRecordsTest.testIterator`.
 #[test]
+#[doc(alias = "org.apache.kafka.clients.consumer.ConsumerRecordsTest#testIterator")]
 fn test_iterator() {
     let topic = "topic";
     let record_size = 10;
@@ -64,6 +65,7 @@ fn test_iterator() {
 
 /// Translated from `ConsumerRecordsTest.testRecordsByPartition`.
 #[test]
+#[doc(alias = "org.apache.kafka.clients.consumer.ConsumerRecordsTest#testRecordsByPartition")]
 fn test_records_by_partition() {
     let topics = ["topic1", "topic2"];
     let record_size: i32 = 3;
@@ -101,6 +103,7 @@ fn test_records_by_partition() {
 
 /// Translated from `ConsumerRecordsTest.testRecordsByTopic`.
 #[test]
+#[doc(alias = "org.apache.kafka.clients.consumer.ConsumerRecordsTest#testRecordsByTopic")]
 fn test_records_by_topic() {
     let topics = ["topic1", "topic2", "topic3", "topic4"];
     let record_size: i32 = 3;

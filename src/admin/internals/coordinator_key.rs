@@ -26,6 +26,7 @@ use crate::common::requests::CoordinatorType;
 ///
 /// Corresponds to `CoordinatorKey`.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[doc(alias = "org.apache.kafka.clients.admin.internals.CoordinatorKey")]
 pub(crate) struct CoordinatorKey {
     /// The id value (group id or transactional id).
     pub(crate) id_value: String,
@@ -37,6 +38,7 @@ impl CoordinatorKey {
     /// Creates a coordinator key for a consumer group id.
     ///
     /// Mirrors `CoordinatorKey.byGroupId`.
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.CoordinatorKey#byGroupId")]
     pub(crate) fn by_group_id(group_id: impl Into<String>) -> Self {
         Self { id_value: group_id.into(), coordinator_type: CoordinatorType::Group }
     }
@@ -44,6 +46,7 @@ impl CoordinatorKey {
     /// Creates a coordinator key for a transactional id.
     ///
     /// Mirrors `CoordinatorKey.byTransactionalId`.
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.CoordinatorKey#byTransactionalId")]
     pub(crate) fn by_transactional_id(transactional_id: impl Into<String>) -> Self {
         Self {
             id_value: transactional_id.into(),

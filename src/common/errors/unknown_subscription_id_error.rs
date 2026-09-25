@@ -14,8 +14,8 @@
 
 //! Translated from `org.apache.kafka.common.errors.UnknownSubscriptionIdException`.
 
-use crate::common::Errors;
 use crate::common::error::kafka_error_class;
+use crate::common::protocol::Errors;
 
 kafka_error_class! {
     /// Client sent a push telemetry request with an invalid or outdated
@@ -25,6 +25,7 @@ kafka_error_class! {
     ///
     /// Java `extends` chain:
     ///    `UnknownSubscriptionIdException` -> `ApiException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.UnknownSubscriptionIdException")]
     UnknownSubscriptionIdError,
     code: Errors::UnknownSubscriptionId,
     extends: [

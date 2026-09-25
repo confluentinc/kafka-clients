@@ -24,6 +24,7 @@ use super::{AccessControlEntry, AclBindingFilter};
 ///
 /// Corresponds to `org.apache.kafka.common.acl.AclBinding`.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[doc(alias = "org.apache.kafka.common.acl.AclBinding")]
 pub struct AclBinding {
     pattern: ResourcePattern,
     entry: AccessControlEntry,
@@ -35,26 +36,31 @@ impl AclBinding {
     /// # Arguments
     /// * `pattern` - resource pattern
     /// * `entry` - entry
+    #[doc(alias = "org.apache.kafka.common.acl.AclBinding#AclBinding")]
     pub fn new(pattern: ResourcePattern, entry: AccessControlEntry) -> AclBinding {
         AclBinding { pattern, entry }
     }
 
     /// Return true if this binding has any UNKNOWN components.
+    #[doc(alias = "org.apache.kafka.common.acl.AclBinding#isUnknown")]
     pub fn is_unknown(&self) -> bool {
         self.pattern.is_unknown() || self.entry.is_unknown()
     }
 
     /// Return the resource pattern for this binding.
+    #[doc(alias = "org.apache.kafka.common.acl.AclBinding#pattern")]
     pub fn pattern(&self) -> &ResourcePattern {
         &self.pattern
     }
 
     /// Return the access control entry for this binding.
+    #[doc(alias = "org.apache.kafka.common.acl.AclBinding#entry")]
     pub fn entry(&self) -> &AccessControlEntry {
         &self.entry
     }
 
     /// Create a filter which matches only this `AclBinding`.
+    #[doc(alias = "org.apache.kafka.common.acl.AclBinding#toFilter")]
     pub fn to_filter(&self) -> AclBindingFilter {
         AclBindingFilter::new(self.pattern.to_filter(), self.entry.to_filter())
     }
@@ -157,6 +163,7 @@ mod tests {
     }
 
     #[test]
+    #[doc(alias = "org.apache.kafka.common.acl.AclBindingTest#testMatching")]
     fn test_matching() {
         assert_eq!(acl1(), acl1());
         let acl1_copy = acl(
@@ -191,6 +198,7 @@ mod tests {
     }
 
     #[test]
+    #[doc(alias = "org.apache.kafka.common.acl.AclBindingTest#testUnknowns")]
     fn test_unknowns() {
         assert!(!acl1().is_unknown());
         assert!(!acl2().is_unknown());
@@ -202,6 +210,7 @@ mod tests {
     }
 
     #[test]
+    #[doc(alias = "org.apache.kafka.common.acl.AclBindingTest#testMatchesAtMostOne")]
     fn test_matches_at_most_one() {
         assert!(acl1().to_filter().find_indefinite_field().is_none());
         assert!(acl2().to_filter().find_indefinite_field().is_none());

@@ -31,12 +31,14 @@ use crate::common::{Error, KafkaFuture};
 /// — semantically identical (`all` fails with the first error; `valid`/`errors`
 /// never fail).
 #[derive(Clone, Debug)]
+#[doc(alias = "org.apache.kafka.clients.admin.ListGroupsResult")]
 pub struct ListGroupsResult {
     source: KafkaFuture<Vec<Result<GroupListing, Error>>>,
 }
 
 impl ListGroupsResult {
     /// Creates a result from the combined per-broker listings-or-errors future.
+    #[doc(alias = "org.apache.kafka.clients.admin.ListGroupsResult#ListGroupsResult")]
     pub(crate) fn new(source: KafkaFuture<Vec<Result<GroupListing, Error>>>) -> Self {
         Self { source }
     }
@@ -44,6 +46,7 @@ impl ListGroupsResult {
     /// A future yielding either the first error, or the full set of listings.
     ///
     /// Mirrors `all()`.
+    #[doc(alias = "org.apache.kafka.clients.admin.ListGroupsResult#all")]
     pub fn all(&self) -> KafkaFuture<Vec<GroupListing>> {
         self.source.then_apply_try(|results| {
             let mut valid = Vec::new();
@@ -58,12 +61,14 @@ impl ListGroupsResult {
     }
 
     /// A future yielding just the valid listings (never fails). Mirrors `valid()`.
+    #[doc(alias = "org.apache.kafka.clients.admin.ListGroupsResult#valid")]
     pub fn valid(&self) -> KafkaFuture<Vec<GroupListing>> {
         self.source
             .then_apply(|results| results.into_iter().filter_map(Result::ok).collect())
     }
 
     /// A future yielding just the errors (never fails). Mirrors `errors()`.
+    #[doc(alias = "org.apache.kafka.clients.admin.ListGroupsResult#errors")]
     pub fn errors(&self) -> KafkaFuture<Vec<Error>> {
         self.source
             .then_apply(|results| results.into_iter().filter_map(Result::err).collect())

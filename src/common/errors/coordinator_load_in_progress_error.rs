@@ -14,8 +14,8 @@
 
 //! Translated from `org.apache.kafka.common.errors.CoordinatorLoadInProgressException`.
 
-use crate::common::Errors;
 use crate::common::error::kafka_error_class;
+use crate::common::protocol::Errors;
 
 kafka_error_class! {
     /// The coordinator is loading and hence can't process requests.
@@ -25,6 +25,7 @@ kafka_error_class! {
     /// Java `extends` chain:
     ///    `CoordinatorLoadInProgressException` -> `RetriableException` ->
     ///   `ApiException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.CoordinatorLoadInProgressException")]
     CoordinatorLoadInProgressError,
     code: Errors::CoordinatorLoadInProgress,
     extends: [

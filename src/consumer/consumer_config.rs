@@ -34,9 +34,9 @@ use std::collections::HashMap;
 use log::warn;
 
 use crate::common::Error;
-use crate::common::config::{SaslConfig, SaslConfigs, SslConfig};
-use crate::common::security::SecurityProtocol;
-use crate::consumer::AutoOffsetResetStrategy;
+use crate::common::config::{SaslConfigs, SslConfigs};
+use crate::common::security::auth::SecurityProtocol;
+use crate::consumer::internals::AutoOffsetResetStrategy;
 
 /// Configuration for the Kafka Consumer.
 ///
@@ -45,6 +45,7 @@ use crate::consumer::AutoOffsetResetStrategy;
 ///
 /// Corresponds to `org.apache.kafka.clients.consumer.ConsumerConfig`.
 #[derive(Clone, Debug)]
+#[doc(alias = "org.apache.kafka.clients.consumer.ConsumerConfig")]
 pub struct ConsumerConfig {
     // --- Group ---
     /// `group.id` — the consumer group identifier. `None` means no group.
@@ -178,10 +179,10 @@ pub struct ConsumerConfig {
     pub(crate) security_protocol: SecurityProtocol,
 
     /// SASL configuration (mechanism, JAAS config, credentials).
-    pub(crate) sasl_config: SaslConfig,
+    pub(crate) sasl_config: SaslConfigs,
 
     /// SSL/TLS configuration.
-    pub(crate) ssl_config: SslConfig,
+    pub(crate) ssl_config: SslConfigs,
 
     // --- Config providers ---
     /// `config.providers`
@@ -256,8 +257,8 @@ impl Default for ConsumerConfig {
 
             security_providers: None,
             security_protocol: SecurityProtocol::Plaintext,
-            sasl_config: SaslConfig::default(),
-            ssl_config: SslConfig::default(),
+            sasl_config: SaslConfigs::default(),
+            ssl_config: SslConfigs::default(),
 
             config_providers: Vec::new(),
         }
@@ -548,6 +549,7 @@ impl ConsumerConfig {
     ///
     /// Returns [`Error::LocalIllegalArgument`] if a value cannot be parsed
     /// for its expected type, or fails its validator.
+    #[doc(alias = "org.apache.kafka.clients.consumer.ConsumerConfig#ConsumerConfig")]
     pub fn new(props: &HashMap<String, String>) -> Result<Self, Error> {
         // NOTE: 14 of Java's per-field `atLeast(..)` numeric validators
         // (ConsumerConfig.java lines 415-710) are intentionally deferred to
@@ -811,7 +813,7 @@ impl ConsumerConfig {
                     config.sasl_config.jaas_config = if value.is_empty() { None } else { Some(value.clone()) };
                 },
                 key if key.starts_with("ssl.") => {
-                    SslConfig::apply_ssl_config_key(&mut config.ssl_config, key, value);
+                    SslConfigs::apply_ssl_config_key(&mut config.ssl_config, key, value);
                 },
                 Self::CONFIG_PROVIDERS_CONFIG => {
                     config.config_providers = split_csv(value);
@@ -1007,6 +1009,7 @@ mod tests {
     /// Invalid `security.protocol` → `illegal_argument` with asserted message
     /// content (DoD §3): the config key, the bad value, and the valid names.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.consumer.ConsumerConfigTest#testInvalidSecurityProtocol")]
     fn test_invalid_security_protocol() {
         let mut props = HashMap::new();
         props.insert("security.protocol".to_string(), "abc".to_string());

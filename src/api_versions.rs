@@ -29,17 +29,34 @@ use super::NodeApiVersions;
 
 /// Information about finalized features and their epoch.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
+#[doc(alias = "org.apache.kafka.clients.ApiVersions$FinalizedFeaturesInfo")]
 pub struct FinalizedFeaturesInfo {
     /// The epoch of the finalized features.
-    pub finalized_features_epoch: i64,
+    pub(crate) finalized_features_epoch: i64,
     /// Map of finalized feature name to its version.
-    pub finalized_features: Option<HashMap<String, i16>>,
+    pub(crate) finalized_features: Option<HashMap<String, i16>>,
 }
 
 impl FinalizedFeaturesInfo {
     /// Creates a new `FinalizedFeaturesInfo`.
+    #[doc(alias = "org.apache.kafka.clients.ApiVersions$FinalizedFeaturesInfo#FinalizedFeaturesInfo")]
     fn new(finalized_features_epoch: i64, finalized_features: Option<HashMap<String, i16>>) -> Self {
         Self { finalized_features_epoch, finalized_features }
+    }
+
+    /// The epoch of the finalized features.
+    ///
+    /// Java's public `FinalizedFeaturesInfo.finalizedFeaturesEpoch`.
+    pub fn finalized_features_epoch(&self) -> i64 {
+        self.finalized_features_epoch
+    }
+
+    /// Map of finalized feature name to its version.
+    ///
+    /// Java's public `FinalizedFeaturesInfo.finalizedFeatures`.
+    pub fn finalized_features(&self) -> Option<&HashMap<String, i16>> {
+        self.finalized_features.as_ref()
     }
 }
 
@@ -49,6 +66,7 @@ impl FinalizedFeaturesInfo {
 ///
 /// Translated from `org.apache.kafka.clients.ApiVersions`.
 #[derive(Debug)]
+#[doc(alias = "org.apache.kafka.clients.ApiVersions")]
 pub struct ApiVersions {
     inner: RwLock<ApiVersionsInner>,
 }
@@ -80,6 +98,7 @@ impl ApiVersions {
     ///
     /// If the node's finalized features epoch is higher than the current maximum,
     /// the finalized features are updated.
+    #[doc(alias = "org.apache.kafka.clients.ApiVersions#update")]
     pub fn update(&self, node_id: &str, node_api_versions: NodeApiVersions) {
         let mut inner = self.inner.write().unwrap();
         if inner.max_finalized_features_epoch < node_api_versions.finalized_features_epoch() {
@@ -90,6 +109,7 @@ impl ApiVersions {
     }
 
     /// Removes the API versions for a given node.
+    #[doc(alias = "org.apache.kafka.clients.ApiVersions#remove")]
     pub fn remove(&self, node_id: &str) {
         let mut inner = self.inner.write().unwrap();
         inner.node_api_versions.remove(node_id);
@@ -98,6 +118,7 @@ impl ApiVersions {
     /// Gets the API versions for a given node.
     ///
     /// Returns `None` if the node is not known.
+    #[doc(alias = "org.apache.kafka.clients.ApiVersions#get")]
     pub fn get(&self, node_id: &str) -> Option<NodeApiVersions> {
         let inner = self.inner.read().unwrap();
         inner.node_api_versions.get(node_id).cloned()
@@ -116,7 +137,7 @@ impl ApiVersions {
     pub fn latest_usable_version_in_range(
         &self,
         node_id: &str,
-        api_key: &crate::common::ApiKeys,
+        api_key: &crate::common::protocol::ApiKeys,
         oldest_allowed_version: i16,
         latest_allowed_version: i16,
     ) -> Option<Result<i16, crate::common::Error>> {
@@ -128,12 +149,14 @@ impl ApiVersions {
     }
 
     /// Returns the maximum finalized features epoch.
+    #[doc(alias = "org.apache.kafka.clients.ApiVersions#getMaxFinalizedFeaturesEpoch")]
     pub fn max_finalized_features_epoch(&self) -> i64 {
         let inner = self.inner.read().unwrap();
         inner.max_finalized_features_epoch
     }
 
     /// Returns the finalized features info containing the epoch and features map.
+    #[doc(alias = "org.apache.kafka.clients.ApiVersions#getFinalizedFeaturesInfo")]
     pub fn finalized_features_info(&self) -> FinalizedFeaturesInfo {
         let inner = self.inner.read().unwrap();
         FinalizedFeaturesInfo::new(inner.max_finalized_features_epoch, inner.finalized_features.clone())
@@ -154,6 +177,7 @@ mod tests {
 
     /// Translated from `ApiVersionsTest.testFinalizedFeaturesUpdate`
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.ApiVersionsTest#testFinalizedFeaturesUpdate")]
     fn test_finalized_features_update() {
         let api_versions = ApiVersions::new();
         assert_eq!(-1, api_versions.max_finalized_features_epoch());

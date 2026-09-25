@@ -30,12 +30,14 @@ use super::AbstractResponse;
 /// Corresponds to
 /// `org.apache.kafka.common.requests.RenewDelegationTokenResponse`.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.RenewDelegationTokenResponse")]
 pub struct RenewDelegationTokenResponse {
     data: RenewDelegationTokenResponseData,
 }
 
 impl RenewDelegationTokenResponse {
     /// Creates a new `RenewDelegationTokenResponse` from the underlying data.
+    #[doc(alias = "org.apache.kafka.common.requests.RenewDelegationTokenResponse#RenewDelegationTokenResponse")]
     pub fn new(data: RenewDelegationTokenResponseData) -> Self {
         Self { data }
     }
@@ -57,6 +59,7 @@ impl RenewDelegationTokenResponse {
     }
 
     /// Returns a reference to the underlying data.
+    #[doc(alias = "org.apache.kafka.common.requests.RenewDelegationTokenResponse#data")]
     pub fn data(&self) -> &RenewDelegationTokenResponseData {
         &self.data
     }
@@ -69,6 +72,7 @@ impl RenewDelegationTokenResponse {
     /// Returns the top-level error.
     ///
     /// Mirrors `RenewDelegationTokenResponse.error`.
+    #[doc(alias = "org.apache.kafka.common.requests.RenewDelegationTokenResponse#error")]
     pub fn error(&self) -> Errors {
         Errors::for_code(self.data.error_code)
     }
@@ -76,6 +80,7 @@ impl RenewDelegationTokenResponse {
     /// Whether this response carries an error.
     ///
     /// Mirrors `RenewDelegationTokenResponse.hasError`.
+    #[doc(alias = "org.apache.kafka.common.requests.RenewDelegationTokenResponse#hasError")]
     pub fn has_error(&self) -> bool {
         self.error() != Errors::None
     }
@@ -83,21 +88,25 @@ impl RenewDelegationTokenResponse {
     /// Returns the expiry timestamp.
     ///
     /// Mirrors `RenewDelegationTokenResponse.expiryTimestamp`.
+    #[doc(alias = "org.apache.kafka.common.requests.RenewDelegationTokenResponse#expiryTimestamp")]
     pub fn expiry_timestamp(&self) -> i64 {
         self.data.expiry_timestamp_ms
     }
 
     /// Returns the throttle time in milliseconds.
+    #[doc(alias = "org.apache.kafka.common.requests.RenewDelegationTokenResponse#throttleTimeMs")]
     pub fn throttle_time_ms(&self) -> i32 {
         self.data.throttle_time_ms
     }
 
     /// Sets the throttle time in the response.
+    #[doc(alias = "org.apache.kafka.common.requests.RenewDelegationTokenResponse#maybeSetThrottleTimeMs")]
     pub fn maybe_set_throttle_time_ms(&mut self, throttle_time_ms: i32) {
         self.data.throttle_time_ms = throttle_time_ms;
     }
 
     /// Returns the error counts for this response.
+    #[doc(alias = "org.apache.kafka.common.requests.RenewDelegationTokenResponse#errorCounts")]
     pub fn error_counts(&self) -> HashMap<Errors, i32> {
         AbstractResponse::single_error_count(self.error())
     }
@@ -107,12 +116,14 @@ impl RenewDelegationTokenResponse {
     /// # Errors
     ///
     /// Returns an error if parsing fails.
+    #[doc(alias = "org.apache.kafka.common.requests.RenewDelegationTokenResponse#parse")]
     pub fn parse(readable: &mut dyn Readable, version: i16) -> io::Result<Self> {
         let data = RenewDelegationTokenResponseData::read(readable, version)?;
         Ok(Self::new(data))
     }
 
     /// Whether the client should throttle on this response (v1+).
+    #[doc(alias = "org.apache.kafka.common.requests.RenewDelegationTokenResponse#shouldClientThrottle")]
     pub fn should_client_throttle(&self, version: i16) -> bool {
         version >= 1
     }

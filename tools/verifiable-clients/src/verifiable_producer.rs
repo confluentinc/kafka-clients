@@ -69,13 +69,16 @@ fn print_json<T: Serialize>(data: &T) {
 /// The value for the JSON `exception` field.
 ///
 /// Java's `FailedSend.exception()` is `Exception.getClass().toString()` — a JVM
-/// class name that has no Rust equivalent. We emit the error's protocol
-/// classification (`Errors` variant) as the closest stable analog. The JSON
-/// *field name* `exception` is Java's wire contract and is preserved unchanged;
-/// only this value differs, unavoidably. The Rust identifier deliberately
-/// avoids the word "exception".
+/// class name that has no Rust equivalent. We emit the name of the [`Error`]
+/// variant, which is named after the Java class (`Timeout` for
+/// `TimeoutException`), as the closest stable analog. The JSON *field name*
+/// `exception` is Java's wire contract and is preserved unchanged; only this
+/// value differs, unavoidably. The Rust identifier deliberately avoids the word
+/// "exception".
 fn error_class_name(error: &Error) -> String {
-    format!("{:?}", error.error())
+    // `Error` derives `Debug`, which prints a variant as `Name(payload)`.
+    let debug = format!("{error:?}");
+    debug.split('(').next().unwrap_or_default().to_string()
 }
 
 // ----------------------------------------------------------------------------
@@ -653,8 +656,11 @@ pub async fn create_from_args(args: &[String]) -> Result<VerifiableProducer<Kafk
     }
 
     let config = ProducerConfig::new(&props)?;
-    let producer =
-        KafkaProducer::<String, String>::new(config, Box::new(StringSerializer), Box::new(StringSerializer))?;
+    let producer = KafkaProducer::<String, String>::new(
+        config,
+        Box::new(StringSerializer::new()),
+        Box::new(StringSerializer::new()),
+    )?;
 
     Ok(VerifiableProducer::new(
         producer,
@@ -670,7 +676,6 @@ pub async fn create_from_args(args: &[String]) -> Result<VerifiableProducer<Kafk
 #[cfg(test)]
 mod tests {
     use super::*;
-    use confluent_kafka::common::protocol::Errors;
     use confluent_kafka::producer::MockProducer;
 
     fn mock_producer() -> MockProducer<String, String> {
@@ -809,12 +814,12 @@ mod tests {
             key: Some("k".to_string()),
             value: "v".to_string(),
             topic: "t".to_string(),
-            error_class: "RequestTimedOut".to_string(),
+            error_class: "Timeout".to_string(),
             message: Some("boom".to_string()),
         };
         assert_eq!(
             serde_json::to_string(&event).unwrap(),
-            r#"{"timestamp":42,"name":"producer_send_error","key":"k","value":"v","topic":"t","exception":"RequestTimedOut","message":"boom"}"#
+            r#"{"timestamp":42,"name":"producer_send_error","key":"k","value":"v","topic":"t","exception":"Timeout","message":"boom"}"#
         );
     }
 
@@ -826,12 +831,12 @@ mod tests {
             key: None,
             value: "v".to_string(),
             topic: "t".to_string(),
-            error_class: "RequestTimedOut".to_string(),
+            error_class: "Timeout".to_string(),
             message: None,
         };
         assert_eq!(
             serde_json::to_string(&event).unwrap(),
-            r#"{"timestamp":42,"name":"producer_send_error","key":null,"value":"v","topic":"t","exception":"RequestTimedOut","message":null}"#
+            r#"{"timestamp":42,"name":"producer_send_error","key":null,"value":"v","topic":"t","exception":"Timeout","message":null}"#
         );
     }
 
@@ -842,14 +847,14 @@ mod tests {
     // wire string is exact.
     #[test]
     fn failed_send_from_error_present_message_json() {
-        let error = Error::with_message(Errors::RequestTimedOut, "boom");
+        let error = Error::timeout("boom");
         let mut event = FailedSend::from_error(Some("k".to_string()), "v".to_string(), "t".to_string(), &error);
         event.timestamp = 42;
         // `message` is the bare text, NOT `to_string()` (which would prefix the
         // class name and duplicate the `exception` field).
         assert_eq!(
             serde_json::to_string(&event).unwrap(),
-            r#"{"timestamp":42,"name":"producer_send_error","key":"k","value":"v","topic":"t","exception":"RequestTimedOut","message":"boom"}"#
+            r#"{"timestamp":42,"name":"producer_send_error","key":"k","value":"v","topic":"t","exception":"Timeout","message":"boom"}"#
         );
     }
 
@@ -858,12 +863,12 @@ mod tests {
         // An empty message is Rust's representation of "no message"; Java's
         // `getMessage()` would be null. Both render as JSON `null` (present, not
         // skipped).
-        let error = Error::with_message(Errors::RequestTimedOut, "");
+        let error = Error::timeout("");
         let mut event = FailedSend::from_error(None, "v".to_string(), "t".to_string(), &error);
         event.timestamp = 42;
         assert_eq!(
             serde_json::to_string(&event).unwrap(),
-            r#"{"timestamp":42,"name":"producer_send_error","key":null,"value":"v","topic":"t","exception":"RequestTimedOut","message":null}"#
+            r#"{"timestamp":42,"name":"producer_send_error","key":null,"value":"v","topic":"t","exception":"Timeout","message":null}"#
         );
     }
 

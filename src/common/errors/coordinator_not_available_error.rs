@@ -14,8 +14,8 @@
 
 //! Translated from `org.apache.kafka.common.errors.CoordinatorNotAvailableException`.
 
-use crate::common::Errors;
 use crate::common::error::kafka_error_class;
+use crate::common::protocol::Errors;
 
 kafka_error_class! {
     /// The coordinator is not available.
@@ -25,6 +25,7 @@ kafka_error_class! {
     /// Java `extends` chain:
     ///    `CoordinatorNotAvailableException` -> `RefreshRetriableException` ->
     ///   `RetriableException` -> `ApiException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.CoordinatorNotAvailableException")]
     CoordinatorNotAvailableError,
     code: Errors::CoordinatorNotAvailable,
     extends: [

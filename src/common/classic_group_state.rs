@@ -22,6 +22,8 @@ use std::fmt;
 ///
 /// Corresponds to `org.apache.kafka.common.ClassicGroupState`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+#[doc(alias = "org.apache.kafka.common.ClassicGroupState")]
 pub enum ClassicGroupState {
     /// An unrecognized classic group state (e.g. a state newer than this
     /// client).
@@ -58,6 +60,7 @@ impl ClassicGroupState {
     ///
     /// Returns [`ClassicGroupState::Unknown`] if the name is unrecognized,
     /// mirroring Java's `parse`.
+    #[doc(alias = "org.apache.kafka.common.ClassicGroupState#parse")]
     pub fn parse(name: &str) -> Self {
         match name.to_uppercase().as_str() {
             "UNKNOWN" => Self::Unknown,

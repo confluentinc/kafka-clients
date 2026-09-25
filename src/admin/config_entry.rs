@@ -22,6 +22,8 @@ use crate::common::Error;
 ///
 /// Corresponds to `ConfigEntry.ConfigType`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
+#[non_exhaustive]
+#[doc(alias = "org.apache.kafka.clients.admin.ConfigEntry$ConfigType")]
 pub enum ConfigType {
     /// Unknown data type.
     #[default]
@@ -75,6 +77,8 @@ impl ConfigType {
 ///
 /// Corresponds to `ConfigEntry.ConfigSource`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+#[doc(alias = "org.apache.kafka.clients.admin.ConfigEntry$ConfigSource")]
 pub enum ConfigSource {
     /// Dynamic topic config that is configured for a specific topic.
     DynamicTopicConfig,
@@ -128,6 +132,7 @@ impl ConfigSource {
 ///
 /// Corresponds to `ConfigEntry.ConfigSynonym`.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[doc(alias = "org.apache.kafka.clients.admin.ConfigEntry$ConfigSynonym")]
 pub struct ConfigSynonym {
     name: String,
     value: Option<String>,
@@ -137,26 +142,28 @@ pub struct ConfigSynonym {
 impl ConfigSynonym {
     /// Create a configuration synonym with the provided values.
     ///
-    /// Package-private in Java; the first caller is `describeConfigs` response
-    /// parsing (Tier 1 Phase 3), so it is not yet referenced in Phase 1.
-    #[allow(dead_code)]
+    /// Package-private in Java; the caller is `describeConfigs` response parsing.
+    #[doc(alias = "org.apache.kafka.clients.admin.ConfigEntry$ConfigSynonym#ConfigSynonym")]
     pub(crate) fn new(name: String, value: Option<String>, source: ConfigSource) -> Self {
         Self { name, value, source }
     }
 
     /// Returns the name of this configuration (this may be different from the
     /// name of the associated [`ConfigEntry`]).
+    #[doc(alias = "org.apache.kafka.clients.admin.ConfigEntry$ConfigSynonym#name")]
     pub fn name(&self) -> &str {
         &self.name
     }
 
     /// Returns the value of this configuration, which may be `None` if the
     /// configuration is sensitive.
+    #[doc(alias = "org.apache.kafka.clients.admin.ConfigEntry$ConfigSynonym#value")]
     pub fn value(&self) -> Option<&str> {
         self.value.as_deref()
     }
 
     /// Returns the source of this configuration.
+    #[doc(alias = "org.apache.kafka.clients.admin.ConfigEntry$ConfigSynonym#source")]
     pub fn source(&self) -> ConfigSource {
         self.source
     }
@@ -178,6 +185,7 @@ impl std::fmt::Display for ConfigSynonym {
 ///
 /// Corresponds to `org.apache.kafka.clients.admin.ConfigEntry`.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[doc(alias = "org.apache.kafka.clients.admin.ConfigEntry")]
 pub struct ConfigEntry {
     name: String,
     value: Option<String>,
@@ -208,28 +216,28 @@ pub struct ConfigEntry {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConfigEntryOptions {
     /// The non-null config name. Java's `name`.
-    pub name: String,
+    pub(crate) name: String,
     /// The config value or `None`. Java's `value`.
-    pub value: Option<String>,
+    pub(crate) value: Option<String>,
     /// The source of this config entry. Java's `source`; starts as
     /// [`ConfigSource::Unknown`], as in `:44`.
-    pub source: ConfigSource,
+    pub(crate) source: ConfigSource,
     /// Whether the config value is sensitive; the broker never returns the
     /// value if it is sensitive. Java's `isSensitive`; starts as `false`, as in
     /// `:44`.
-    pub is_sensitive: bool,
+    pub(crate) is_sensitive: bool,
     /// Whether the config is read-only and cannot be updated. Java's
     /// `isReadOnly`; starts as `false`, as in `:44`.
-    pub is_read_only: bool,
+    pub(crate) is_read_only: bool,
     /// Synonym configs in order of precedence. Java's `synonyms`; starts empty,
     /// as in `:44` (`Collections.emptyList()`).
-    pub synonyms: Vec<ConfigSynonym>,
+    pub(crate) synonyms: Vec<ConfigSynonym>,
     /// The config data type. Java's `type`; starts as [`ConfigType::Unknown`],
     /// as in `:44`.
-    pub config_type: ConfigType,
+    pub(crate) config_type: ConfigType,
     /// The config documentation. Java's `documentation`; starts as `None`, as in
     /// `:44`.
-    pub documentation: Option<String>,
+    pub(crate) documentation: Option<String>,
 }
 
 /// Fluent builder for [`ConfigEntryOptions`].
@@ -359,6 +367,7 @@ impl ConfigEntry {
     ///
     /// * `name` - the non-null config name
     /// * `value` - the config value or `None`
+    #[doc(alias = "org.apache.kafka.clients.admin.ConfigEntry#ConfigEntry")]
     pub fn new(name: String, value: Option<String>) -> Self {
         Self::with_options(
             ConfigEntryOptionsBuilder::new()
@@ -377,6 +386,7 @@ impl ConfigEntry {
     /// parameter and carries all of them.
     ///
     /// * `options` - every parameter of Java's widest constructor
+    #[doc(alias = "org.apache.kafka.clients.admin.ConfigEntry#ConfigEntry")]
     pub fn with_options(options: ConfigEntryOptions) -> Self {
         let ConfigEntryOptions {
             name,
@@ -401,34 +411,40 @@ impl ConfigEntry {
     }
 
     /// Return the config name.
+    #[doc(alias = "org.apache.kafka.clients.admin.ConfigEntry#name")]
     pub fn name(&self) -> &str {
         &self.name
     }
 
     /// Return the value or `None`. `None` is returned if the config is unset or
     /// if `is_sensitive` is true.
+    #[doc(alias = "org.apache.kafka.clients.admin.ConfigEntry#value")]
     pub fn value(&self) -> Option<&str> {
         self.value.as_deref()
     }
 
     /// Return the source of this configuration entry.
+    #[doc(alias = "org.apache.kafka.clients.admin.ConfigEntry#source")]
     pub fn source(&self) -> ConfigSource {
         self.source
     }
 
     /// Return whether the config value is the default or if it's been
     /// explicitly set.
+    #[doc(alias = "org.apache.kafka.clients.admin.ConfigEntry#isDefault")]
     pub fn is_default(&self) -> bool {
         self.source == ConfigSource::DefaultConfig
     }
 
     /// Return whether the config value is sensitive. The value is always set to
     /// `None` by the broker if the config value is sensitive.
+    #[doc(alias = "org.apache.kafka.clients.admin.ConfigEntry#isSensitive")]
     pub fn is_sensitive(&self) -> bool {
         self.is_sensitive
     }
 
     /// Return whether the config is read-only and cannot be updated.
+    #[doc(alias = "org.apache.kafka.clients.admin.ConfigEntry#isReadOnly")]
     pub fn is_read_only(&self) -> bool {
         self.is_read_only
     }
@@ -437,6 +453,7 @@ impl ConfigEntry {
     /// along with their source, in the order of precedence. The list starts
     /// with the value returned in this `ConfigEntry`. The list is empty if
     /// synonyms were not requested.
+    #[doc(alias = "org.apache.kafka.clients.admin.ConfigEntry#synonyms")]
     pub fn synonyms(&self) -> &[ConfigSynonym] {
         &self.synonyms
     }
@@ -447,6 +464,7 @@ impl ConfigEntry {
     }
 
     /// Return the config documentation.
+    #[doc(alias = "org.apache.kafka.clients.admin.ConfigEntry#documentation")]
     pub fn documentation(&self) -> Option<&str> {
         self.documentation.as_deref()
     }

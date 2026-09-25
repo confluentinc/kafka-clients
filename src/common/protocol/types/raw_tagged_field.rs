@@ -21,6 +21,7 @@
 ///
 /// Corresponds to org.apache.kafka.common.protocol.types.RawTaggedField
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[doc(alias = "org.apache.kafka.common.protocol.types.RawTaggedField")]
 pub struct RawTaggedField {
     tag: u32,
     data: Vec<u8>,
@@ -28,21 +29,25 @@ pub struct RawTaggedField {
 
 impl RawTaggedField {
     /// Create a new raw tagged field.
+    #[doc(alias = "org.apache.kafka.common.protocol.types.RawTaggedField#RawTaggedField")]
     pub fn new(tag: u32, data: Vec<u8>) -> Self {
         RawTaggedField { tag, data }
     }
 
     /// Get the tag number.
+    #[doc(alias = "org.apache.kafka.common.protocol.types.RawTaggedField#tag")]
     pub fn tag(&self) -> u32 {
         self.tag
     }
 
     /// Get the data bytes.
+    #[doc(alias = "org.apache.kafka.common.protocol.types.RawTaggedField#data")]
     pub fn data(&self) -> &[u8] {
         &self.data
     }
 
     /// Get the size of the data.
+    #[doc(alias = "org.apache.kafka.common.protocol.types.RawTaggedField#size")]
     pub fn size(&self) -> usize {
         self.data.len()
     }

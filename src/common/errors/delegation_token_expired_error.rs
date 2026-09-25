@@ -14,8 +14,8 @@
 
 //! Translated from `org.apache.kafka.common.errors.DelegationTokenExpiredException`.
 
-use crate::common::Errors;
 use crate::common::error::kafka_error_class;
+use crate::common::protocol::Errors;
 
 kafka_error_class! {
     /// Delegation Token is expired.
@@ -24,6 +24,7 @@ kafka_error_class! {
     ///
     /// Java `extends` chain:
     ///    `DelegationTokenExpiredException` -> `ApiException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.DelegationTokenExpiredException")]
     DelegationTokenExpiredError,
     code: Errors::DelegationTokenExpired,
     extends: [

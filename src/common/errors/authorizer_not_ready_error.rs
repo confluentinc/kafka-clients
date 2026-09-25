@@ -26,6 +26,7 @@ kafka_error_class! {
     /// Java `extends` chain:
     ///    `AuthorizerNotReadyException` -> `RetriableException` -> `ApiException` ->
     ///   `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.AuthorizerNotReadyException")]
     AuthorizerNotReadyError,
     extends: [
         is_kafka_error,

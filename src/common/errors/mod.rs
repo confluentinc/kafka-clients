@@ -23,7 +23,7 @@
 //! The error code for each class lives in its
 //! [`ErrorCode`](crate::common::error::ErrorCode) impl — Java keeps the
 //! same association in `Errors`' `CLASS_TO_ERROR` map — while the default
-//! message strings stay in [`Errors`](crate::common::Errors), exactly
+//! message strings stay in [`Errors`](crate::common::protocol::Errors), exactly
 //! as Java stores them on the enum constant and passes them to the class's
 //! constructor.
 
@@ -83,7 +83,7 @@ mod invalid_principal_type_error;
 mod invalid_producer_epoch_error;
 mod invalid_record_state_error;
 mod invalid_registration_error;
-mod invalid_regular_expression_error;
+mod invalid_regular_expression;
 mod invalid_replica_assignment_error;
 mod invalid_replication_factor_error;
 mod invalid_request_error;
@@ -110,7 +110,7 @@ mod not_coordinator_error;
 mod not_enough_replicas_after_append_error;
 mod not_enough_replicas_error;
 mod not_leader_or_follower_error;
-mod offset_metadata_too_large_error;
+mod offset_metadata_too_large;
 mod offset_moved_to_tiered_storage_error;
 mod offset_not_available_error;
 mod offset_out_of_range_error;
@@ -247,7 +247,7 @@ pub use invalid_principal_type_error::InvalidPrincipalTypeError;
 pub use invalid_producer_epoch_error::InvalidProducerEpochError;
 pub use invalid_record_state_error::InvalidRecordStateError;
 pub use invalid_registration_error::InvalidRegistrationError;
-pub use invalid_regular_expression_error::InvalidRegularExpressionError;
+pub use invalid_regular_expression::InvalidRegularExpression;
 pub use invalid_replica_assignment_error::InvalidReplicaAssignmentError;
 pub use invalid_replication_factor_error::InvalidReplicationFactorError;
 pub use invalid_request_error::InvalidRequestError;
@@ -274,7 +274,7 @@ pub use not_coordinator_error::NotCoordinatorError;
 pub use not_enough_replicas_after_append_error::NotEnoughReplicasAfterAppendError;
 pub use not_enough_replicas_error::NotEnoughReplicasError;
 pub use not_leader_or_follower_error::NotLeaderOrFollowerError;
-pub use offset_metadata_too_large_error::OffsetMetadataTooLargeError;
+pub use offset_metadata_too_large::OffsetMetadataTooLarge;
 pub use offset_moved_to_tiered_storage_error::OffsetMovedToTieredStorageError;
 pub use offset_not_available_error::OffsetNotAvailableError;
 pub use offset_out_of_range_error::OffsetOutOfRangeError;
@@ -340,8 +340,8 @@ pub use wakeup_error::WakeupError;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::Errors;
     use crate::common::error::{ErrorCode, ErrorHierarchy};
+    use crate::common::protocol::Errors;
     use crate::producer::ProducerBufferExhaustedError;
 
     /// `BufferExhaustedException extends TimeoutException` and has no entry of its
@@ -367,7 +367,6 @@ mod tests {
     // fatal classes are covered there instead.
     #[test]
     fn codeless_classes_state_their_own_ancestry() {
-        #[allow(clippy::type_complexity)]
         let cases: Vec<(&str, Box<dyn ErrorHierarchy>, &[&str])> = vec![
             ("ApiError", Box::new(ApiError::new("m")), &["kafka", "api"]),
             (

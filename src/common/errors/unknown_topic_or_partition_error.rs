@@ -14,8 +14,8 @@
 
 //! Translated from `org.apache.kafka.common.errors.UnknownTopicOrPartitionException`.
 
-use crate::common::Errors;
 use crate::common::error::kafka_error_class;
+use crate::common::protocol::Errors;
 
 kafka_error_class! {
     /// This server does not host this topic-partition.
@@ -26,6 +26,7 @@ kafka_error_class! {
     ///    `UnknownTopicOrPartitionException` -> `InvalidMetadataException` ->
     ///   `RefreshRetriableException` -> `RetriableException` -> `ApiException` ->
     ///   `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.UnknownTopicOrPartitionException")]
     UnknownTopicOrPartitionError,
     code: Errors::UnknownTopicOrPartition,
     extends: [

@@ -14,8 +14,8 @@
 
 //! Translated from `org.apache.kafka.common.errors.KafkaStorageException`.
 
-use crate::common::Errors;
 use crate::common::error::kafka_error_class;
+use crate::common::protocol::Errors;
 
 kafka_error_class! {
     /// Disk error when trying to access log file on the disk.
@@ -26,6 +26,7 @@ kafka_error_class! {
     ///    `KafkaStorageException` -> `InvalidMetadataException` ->
     ///   `RefreshRetriableException` -> `RetriableException` -> `ApiException` ->
     ///   `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.KafkaStorageException")]
     KafkaStorageError,
     code: Errors::KafkaStorageError,
     extends: [

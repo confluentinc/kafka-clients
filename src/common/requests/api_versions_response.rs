@@ -27,6 +27,7 @@ use crate::common::protocol::{ApiKeys, ByteBufferAccessor, Errors};
 /// - [`Errors::UnsupportedVersion`]
 /// - [`Errors::InvalidRequest`]
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.ApiVersionsResponse")]
 pub struct ApiVersionsResponse {
     data: ApiVersionsResponseData,
 }
@@ -36,11 +37,13 @@ impl ApiVersionsResponse {
     pub const API_VERSIONS_RESPONSE_UNKNOWN_FINALIZED_FEATURES_EPOCH: i64 = -1;
 
     /// Creates a new `ApiVersionsResponse` from data.
+    #[doc(alias = "org.apache.kafka.common.requests.ApiVersionsResponse#ApiVersionsResponse")]
     pub fn new(data: ApiVersionsResponseData) -> Self {
         Self { data }
     }
 
     /// Returns a reference to the underlying data.
+    #[doc(alias = "org.apache.kafka.common.requests.ApiVersionsResponse#data")]
     pub fn data(&self) -> &ApiVersionsResponseData {
         &self.data
     }
@@ -56,21 +59,25 @@ impl ApiVersionsResponse {
     }
 
     /// Find the API version entry for a given API key id.
+    #[doc(alias = "org.apache.kafka.common.requests.ApiVersionsResponse#apiVersion")]
     pub fn api_version(&self, api_key_id: i16) -> Option<&ApiVersion> {
         self.data.api_keys.iter().find(|v| v.api_key == api_key_id)
     }
 
     /// Returns the error counts for this response.
+    #[doc(alias = "org.apache.kafka.common.requests.ApiVersionsResponse#errorCounts")]
     pub fn error_counts(&self) -> HashMap<Errors, i32> {
         super::AbstractResponse::single_error_count(Errors::for_code(self.data.error_code))
     }
 
     /// Returns the throttle time in milliseconds.
+    #[doc(alias = "org.apache.kafka.common.requests.ApiVersionsResponse#throttleTimeMs")]
     pub fn throttle_time_ms(&self) -> i32 {
         self.data.throttle_time_ms
     }
 
     /// Sets the throttle time in the response.
+    #[doc(alias = "org.apache.kafka.common.requests.ApiVersionsResponse#maybeSetThrottleTimeMs")]
     pub fn maybe_set_throttle_time_ms(&mut self, throttle_time_ms: i32) {
         self.data.set_throttle_time_ms(throttle_time_ms);
     }
@@ -78,11 +85,13 @@ impl ApiVersionsResponse {
     /// Returns whether the client should throttle upon receiving this response.
     ///
     /// Client-side throttling is enabled starting from version 2.
+    #[doc(alias = "org.apache.kafka.common.requests.ApiVersionsResponse#shouldClientThrottle")]
     pub fn should_client_throttle(&self, version: i16) -> bool {
         version >= 2
     }
 
     /// Whether ZK migration is ready.
+    #[doc(alias = "org.apache.kafka.common.requests.ApiVersionsResponse#zkMigrationReady")]
     pub fn zk_migration_ready(&self) -> bool {
         self.data.zk_migration_ready
     }
@@ -96,6 +105,7 @@ impl ApiVersionsResponse {
     /// # Errors
     ///
     /// Returns an error if parsing fails at both the requested version and version 0.
+    #[doc(alias = "org.apache.kafka.common.requests.ApiVersionsResponse#parse")]
     pub fn parse(readable: &mut ByteBufferAccessor, version: i16) -> std::io::Result<Self> {
         // Fallback to version 0 for ApiVersions response. If a client sends an ApiVersionsRequest
         // using a version higher than that supported by the broker, a version 0 response is sent
@@ -120,6 +130,7 @@ impl ApiVersionsResponse {
     /// Filters APIs available for the given listener type.
     ///
     /// Corresponds to `ApiVersionsResponse.filterApis` in Java.
+    #[doc(alias = "org.apache.kafka.common.requests.ApiVersionsResponse#filterApis")]
     pub fn filter_apis(
         listener_type: ListenerType,
         enable_unstable_last_version: bool,
@@ -143,6 +154,7 @@ impl ApiVersionsResponse {
     /// Collects API versions for a specific set of API keys.
     ///
     /// Corresponds to `ApiVersionsResponse.collectApis` in Java.
+    #[doc(alias = "org.apache.kafka.common.requests.ApiVersionsResponse#collectApis")]
     pub fn collect_apis(
         listener_type: ListenerType,
         api_keys_set: &[&ApiKeys],
@@ -161,6 +173,7 @@ impl ApiVersionsResponse {
     /// known range and that of another set.
     ///
     /// Corresponds to `ApiVersionsResponse.intersectForwardableApis` in Java.
+    #[doc(alias = "org.apache.kafka.common.requests.ApiVersionsResponse#intersectForwardableApis")]
     pub fn intersect_forwardable_apis(
         listener_type: ListenerType,
         active_controller_api_versions: &HashMap<ApiKeys, ApiVersion>,
@@ -207,6 +220,7 @@ impl ApiVersionsResponse {
     /// # Panics
     ///
     /// Panics if both versions are `Some` but have different API keys.
+    #[doc(alias = "org.apache.kafka.common.requests.ApiVersionsResponse#intersect")]
     pub fn intersect(this_version: Option<&ApiVersion>, other: Option<&ApiVersion>) -> Option<ApiVersion> {
         let this = this_version?;
         let other = other?;
@@ -231,6 +245,7 @@ impl ApiVersionsResponse {
     /// Converts an API key to its API version entry with the full supported range.
     ///
     /// Corresponds to `ApiVersionsResponse.toApiVersion` in Java.
+    #[doc(alias = "org.apache.kafka.common.requests.ApiVersionsResponse#toApiVersion")]
     pub fn to_api_version(api_key: &ApiKeys) -> ApiVersion {
         let mut v = ApiVersion::new();
         v.set_api_key(api_key.id());
@@ -256,7 +271,7 @@ impl ApiVersionsResponse {
         enable_unstable_last_version: bool,
         client_telemetry_enabled: bool,
     ) -> Self {
-        ApiVersionsResponseBuilder::new()
+        Builder::new()
             .set_api_versions(Self::filter_apis(
                 listener_type,
                 enable_unstable_last_version,
@@ -279,7 +294,8 @@ impl std::fmt::Display for ApiVersionsResponse {
 ///
 /// Corresponds to `ApiVersionsResponse.Builder` in Java.
 #[derive(Debug)]
-pub struct ApiVersionsResponseBuilder {
+#[doc(alias = "org.apache.kafka.common.requests.ApiVersionsResponse$Builder")]
+pub struct Builder {
     error: Errors,
     throttle_time_ms: i32,
     api_versions: Option<Vec<ApiVersion>>,
@@ -290,7 +306,7 @@ pub struct ApiVersionsResponseBuilder {
     alter_feature_level0: bool,
 }
 
-impl ApiVersionsResponseBuilder {
+impl Builder {
     /// Creates a new builder with default values.
     pub fn new() -> Self {
         Self {
@@ -306,42 +322,49 @@ impl ApiVersionsResponseBuilder {
     }
 
     /// Sets the error code.
+    #[doc(alias = "org.apache.kafka.common.requests.ApiVersionsResponse$Builder#setError")]
     pub fn set_error(mut self, error: Errors) -> Self {
         self.error = error;
         self
     }
 
     /// Sets the throttle time in milliseconds.
+    #[doc(alias = "org.apache.kafka.common.requests.ApiVersionsResponse$Builder#setThrottleTimeMs")]
     pub fn set_throttle_time_ms(mut self, throttle_time_ms: i32) -> Self {
         self.throttle_time_ms = throttle_time_ms;
         self
     }
 
     /// Sets the API version collection.
+    #[doc(alias = "org.apache.kafka.common.requests.ApiVersionsResponse$Builder#setApiVersions")]
     pub fn set_api_versions(mut self, api_versions: Vec<ApiVersion>) -> Self {
         self.api_versions = Some(api_versions);
         self
     }
 
     /// Sets the supported features.
+    #[doc(alias = "org.apache.kafka.common.requests.ApiVersionsResponse$Builder#setSupportedFeatures")]
     pub fn set_supported_features(mut self, supported_features: Vec<SupportedFeatureKey>) -> Self {
         self.supported_features = Some(supported_features);
         self
     }
 
     /// Sets the finalized features map.
+    #[doc(alias = "org.apache.kafka.common.requests.ApiVersionsResponse$Builder#setFinalizedFeatures")]
     pub fn set_finalized_features(mut self, finalized_features: HashMap<String, i16>) -> Self {
         self.finalized_features = Some(finalized_features);
         self
     }
 
     /// Sets the finalized features epoch.
+    #[doc(alias = "org.apache.kafka.common.requests.ApiVersionsResponse$Builder#setFinalizedFeaturesEpoch")]
     pub fn set_finalized_features_epoch(mut self, epoch: i64) -> Self {
         self.finalized_features_epoch = epoch;
         self
     }
 
     /// Sets whether ZK migration is enabled.
+    #[doc(alias = "org.apache.kafka.common.requests.ApiVersionsResponse$Builder#setZkMigrationEnabled")]
     pub fn set_zk_migration_enabled(mut self, enabled: bool) -> Self {
         self.zk_migration_enabled = enabled;
         self
@@ -351,6 +374,7 @@ impl ApiVersionsResponseBuilder {
     ///
     /// When true, features with a minimum supported version of 0 are omitted
     /// to avoid deserialization problems with older clients (see KAFKA-17492).
+    #[doc(alias = "org.apache.kafka.common.requests.ApiVersionsResponse$Builder#setAlterFeatureLevel0")]
     pub fn set_alter_feature_level0(mut self, alter: bool) -> Self {
         self.alter_feature_level0 = alter;
         self
@@ -361,6 +385,7 @@ impl ApiVersionsResponseBuilder {
     /// # Panics
     ///
     /// Panics if `api_versions`, `supported_features`, or `finalized_features` was not set.
+    #[doc(alias = "org.apache.kafka.common.requests.ApiVersionsResponse$Builder#build")]
     pub fn build(self) -> ApiVersionsResponse {
         let mut data = ApiVersionsResponseData::new();
         data.set_error_code(self.error.code());
@@ -379,7 +404,7 @@ impl ApiVersionsResponseBuilder {
     }
 }
 
-impl Default for ApiVersionsResponseBuilder {
+impl Default for Builder {
     fn default() -> Self {
         Self::new()
     }
@@ -390,6 +415,7 @@ impl Default for ApiVersionsResponseBuilder {
 /// Some older clients will have deserialization problems if a feature's
 /// minimum supported level is 0. Therefore, when preparing ApiVersionResponse
 /// at versions less than 4, we must omit these features. See KAFKA-17492.
+#[doc(alias = "org.apache.kafka.common.requests.ApiVersionsResponse#maybeFilterSupportedFeatureKeys")]
 fn maybe_filter_supported_feature_keys(features: &[SupportedFeatureKey], alter_v0: bool) -> Vec<SupportedFeatureKey> {
     let mut converted = Vec::new();
     for feature in features {
@@ -403,6 +429,7 @@ fn maybe_filter_supported_feature_keys(features: &[SupportedFeatureKey], alter_v
 }
 
 /// Converts finalized features from a map to `FinalizedFeatureKey` collection.
+#[doc(alias = "org.apache.kafka.common.requests.ApiVersionsResponse#createFinalizedFeatureKeys")]
 fn create_finalized_feature_keys(finalized_features: &HashMap<String, i16>) -> Vec<FinalizedFeatureKey> {
     let mut converted = Vec::new();
     for (name, &version_level) in finalized_features {
@@ -562,7 +589,7 @@ mod tests {
     /// Translated from `ApiVersionsResponseTest.shouldReturnAllKeysWhenThrottleMsIsDefaultThrottle`.
     #[test]
     fn test_should_return_all_keys_when_throttle_ms_is_default_throttle() {
-        let response = ApiVersionsResponseBuilder::new()
+        let response = Builder::new()
             .set_throttle_time_ms(super::super::AbstractResponse::DEFAULT_THROTTLE_TIME)
             .set_api_versions(ApiVersionsResponse::filter_apis(ListenerType::Broker, true, true))
             .set_supported_features(Vec::new())
@@ -588,7 +615,7 @@ mod tests {
     /// Translated from `ApiVersionsResponseTest.shouldCreateApiResponseWithTelemetryWhenEnabled`.
     #[test]
     fn test_should_create_api_response_with_telemetry_when_enabled() {
-        let response = ApiVersionsResponseBuilder::new()
+        let response = Builder::new()
             .set_throttle_time_ms(10)
             .set_api_versions(ApiVersionsResponse::filter_apis(ListenerType::Broker, true, true))
             .set_supported_features(Vec::new())
@@ -601,7 +628,7 @@ mod tests {
     /// Translated from `ApiVersionsResponseTest.shouldNotCreateApiResponseWithTelemetryWhenDisabled`.
     #[test]
     fn test_should_not_create_api_response_with_telemetry_when_disabled() {
-        let response = ApiVersionsResponseBuilder::new()
+        let response = Builder::new()
             .set_throttle_time_ms(10)
             .set_api_versions(ApiVersionsResponse::filter_apis(ListenerType::Broker, true, false))
             .set_supported_features(Vec::new())
@@ -613,8 +640,9 @@ mod tests {
 
     /// Translated from `ApiVersionsResponseTest.testBrokerApisAreEnabled`.
     #[test]
+    #[doc(alias = "org.apache.kafka.common.requests.ApiVersionsResponseTest#testBrokerApisAreEnabled")]
     fn test_broker_apis_are_enabled() {
-        let response = ApiVersionsResponseBuilder::new()
+        let response = Builder::new()
             .set_throttle_time_ms(super::super::AbstractResponse::DEFAULT_THROTTLE_TIME)
             .set_api_versions(ApiVersionsResponse::filter_apis(ListenerType::Broker, true, true))
             .set_supported_features(Vec::new())
@@ -635,6 +663,7 @@ mod tests {
 
     /// Translated from `ApiVersionsResponseTest.testIntersect`.
     #[test]
+    #[doc(alias = "org.apache.kafka.common.requests.ApiVersionsResponseTest#testIntersect")]
     fn test_intersect() {
         assert!(ApiVersionsResponse::intersect(None, None).is_none());
 
@@ -706,7 +735,7 @@ mod tests {
         feature.set_min_version(0);
         feature.set_max_version(1);
 
-        let response = ApiVersionsResponseBuilder::new()
+        let response = Builder::new()
             .set_api_versions(ApiVersionsResponse::filter_apis(ListenerType::Broker, true, true))
             .set_supported_features(vec![feature])
             .set_finalized_features(HashMap::new())

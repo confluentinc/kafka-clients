@@ -20,6 +20,7 @@
 ///
 /// Corresponds to `org.apache.kafka.clients.admin.RecordsToDelete`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[doc(alias = "org.apache.kafka.clients.admin.RecordsToDelete")]
 pub struct RecordsToDelete {
     offset: i64,
 }
@@ -28,6 +29,7 @@ impl RecordsToDelete {
     /// Delete all the records before the given `offset`.
     ///
     /// Use `-1` to truncate to the high watermark.
+    #[doc(alias = "org.apache.kafka.clients.admin.RecordsToDelete#RecordsToDelete")]
     pub fn with_before_offset(offset: i64) -> Self {
         Self { offset }
     }
@@ -35,6 +37,7 @@ impl RecordsToDelete {
     /// The offset before which all records will be deleted.
     ///
     /// Use `-1` to truncate to the high watermark.
+    #[doc(alias = "org.apache.kafka.clients.admin.RecordsToDelete#beforeOffset")]
     pub fn before_offset(&self) -> i64 {
         self.offset
     }

@@ -14,8 +14,8 @@
 
 //! Translated from `org.apache.kafka.common.errors.IllegalGenerationException`.
 
-use crate::common::Errors;
 use crate::common::error::kafka_error_class;
+use crate::common::protocol::Errors;
 
 kafka_error_class! {
     /// Specified group generation id is not valid.
@@ -25,6 +25,7 @@ kafka_error_class! {
     /// Java `extends` chain:
     ///    `IllegalGenerationException` -> `ApplicationRecoverableException` ->
     ///   `ApiException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.IllegalGenerationException")]
     IllegalGenerationError,
     code: Errors::IllegalGeneration,
     extends: [

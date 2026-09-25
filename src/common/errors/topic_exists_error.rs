@@ -14,8 +14,8 @@
 
 //! Translated from `org.apache.kafka.common.errors.TopicExistsException`.
 
-use crate::common::Errors;
 use crate::common::error::kafka_error_class;
+use crate::common::protocol::Errors;
 
 kafka_error_class! {
     /// Topic with this name already exists.
@@ -24,6 +24,7 @@ kafka_error_class! {
     ///
     /// Java `extends` chain:
     ///    `TopicExistsException` -> `ApiException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.TopicExistsException")]
     TopicExistsError,
     code: Errors::TopicAlreadyExists,
     extends: [

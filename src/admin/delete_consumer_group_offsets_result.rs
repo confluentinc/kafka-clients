@@ -18,7 +18,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::common::Errors;
+use crate::common::protocol::Errors;
 use crate::common::{Error, KafkaFuture, TopicPartition};
 
 /// The per-partition delete errors carried by the underlying future.
@@ -28,6 +28,7 @@ type PartitionErrors = HashMap<TopicPartition, Errors>;
 ///
 /// Corresponds to `org.apache.kafka.clients.admin.DeleteConsumerGroupOffsetsResult`.
 #[derive(Clone, Debug)]
+#[doc(alias = "org.apache.kafka.clients.admin.DeleteConsumerGroupOffsetsResult")]
 pub struct DeleteConsumerGroupOffsetsResult {
     future: KafkaFuture<PartitionErrors>,
     partitions: HashSet<TopicPartition>,
@@ -36,6 +37,7 @@ pub struct DeleteConsumerGroupOffsetsResult {
 impl DeleteConsumerGroupOffsetsResult {
     /// Creates a result wrapping the single group's per-partition-error future
     /// and the set of partitions from the original request.
+    #[doc(alias = "org.apache.kafka.clients.admin.DeleteConsumerGroupOffsetsResult#DeleteConsumerGroupOffsetsResult")]
     pub(crate) fn new(future: KafkaFuture<PartitionErrors>, partitions: HashSet<TopicPartition>) -> Self {
         Self { future, partitions }
     }
@@ -51,6 +53,7 @@ impl DeleteConsumerGroupOffsetsResult {
     /// partition was not included in the original request. The returned future
     /// fails if the deletion for the partition failed (or the partition is
     /// missing from the response).
+    #[doc(alias = "org.apache.kafka.clients.admin.DeleteConsumerGroupOffsetsResult#partitionResult")]
     pub fn partition_result(&self, partition: &TopicPartition) -> Result<KafkaFuture<()>, Error> {
         if !self.partitions.contains(partition) {
             return Err(Error::local_illegal_argument(format!(
@@ -70,6 +73,7 @@ impl DeleteConsumerGroupOffsetsResult {
     /// If not, the first partition error is returned.
     ///
     /// Mirrors `all()`.
+    #[doc(alias = "org.apache.kafka.clients.admin.DeleteConsumerGroupOffsetsResult#all")]
     pub fn all(&self) -> KafkaFuture<()> {
         // Sort for a stable "first error" (Java relies on set iteration order,
         // which is unspecified anyway).

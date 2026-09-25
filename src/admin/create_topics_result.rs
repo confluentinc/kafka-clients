@@ -27,6 +27,7 @@ use crate::common::{Error, KafkaFuture, Uuid};
 /// the metadata or a stored error; the accessors surface the error (mirroring
 /// Java's `ensureSuccess`, which rethrows the stored `ApiException`).
 #[derive(Clone, Debug)]
+#[doc(alias = "org.apache.kafka.clients.admin.CreateTopicsResult$TopicMetadataAndConfig")]
 pub struct TopicMetadataAndConfig {
     error: Option<Error>,
     topic_id: Uuid,
@@ -37,12 +38,14 @@ pub struct TopicMetadataAndConfig {
 
 impl TopicMetadataAndConfig {
     /// Creates a successful metadata-and-config holder.
+    #[doc(alias = "org.apache.kafka.clients.admin.CreateTopicsResult$TopicMetadataAndConfig#TopicMetadataAndConfig")]
     pub fn new(topic_id: Uuid, num_partitions: i32, replication_factor: i32, config: Config) -> Self {
         Self { error: None, topic_id, num_partitions, replication_factor, config: Some(config) }
     }
 
     /// Creates a holder representing a failure; every accessor returns the
     /// error.
+    #[doc(alias = "org.apache.kafka.clients.admin.CreateTopicsResult$TopicMetadataAndConfig#TopicMetadataAndConfig")]
     pub fn with_error(error: Error) -> Self {
         Self {
             error: Some(error),
@@ -53,6 +56,7 @@ impl TopicMetadataAndConfig {
         }
     }
 
+    #[doc(alias = "org.apache.kafka.clients.admin.CreateTopicsResult$TopicMetadataAndConfig#ensureSuccess")]
     fn ensure_success(&self) -> Result<(), Error> {
         match &self.error {
             Some(e) => Err(e.clone()),
@@ -61,24 +65,28 @@ impl TopicMetadataAndConfig {
     }
 
     /// The topic id, or the stored error.
+    #[doc(alias = "org.apache.kafka.clients.admin.CreateTopicsResult$TopicMetadataAndConfig#topicId")]
     pub fn topic_id(&self) -> Result<Uuid, Error> {
         self.ensure_success()?;
         Ok(self.topic_id)
     }
 
     /// The number of partitions, or the stored error.
+    #[doc(alias = "org.apache.kafka.clients.admin.CreateTopicsResult$TopicMetadataAndConfig#numPartitions")]
     pub fn num_partitions(&self) -> Result<i32, Error> {
         self.ensure_success()?;
         Ok(self.num_partitions)
     }
 
     /// The replication factor, or the stored error.
+    #[doc(alias = "org.apache.kafka.clients.admin.CreateTopicsResult$TopicMetadataAndConfig#replicationFactor")]
     pub fn replication_factor(&self) -> Result<i32, Error> {
         self.ensure_success()?;
         Ok(self.replication_factor)
     }
 
     /// The topic config, or the stored error.
+    #[doc(alias = "org.apache.kafka.clients.admin.CreateTopicsResult$TopicMetadataAndConfig#config")]
     pub fn config(&self) -> Result<Config, Error> {
         self.ensure_success()?;
         // Only `None` when an exception is present, already handled above.
@@ -90,6 +98,7 @@ impl TopicMetadataAndConfig {
 ///
 /// Corresponds to `org.apache.kafka.clients.admin.CreateTopicsResult`.
 #[derive(Clone, Debug)]
+#[doc(alias = "org.apache.kafka.clients.admin.CreateTopicsResult")]
 pub struct CreateTopicsResult {
     futures: HashMap<String, KafkaFuture<TopicMetadataAndConfig>>,
 }
@@ -99,12 +108,14 @@ impl CreateTopicsResult {
     pub(crate) const UNKNOWN: i32 = -1;
 
     /// Creates a result from a map of topic name to per-topic future.
+    #[doc(alias = "org.apache.kafka.clients.admin.CreateTopicsResult#CreateTopicsResult")]
     pub(crate) fn new(futures: HashMap<String, KafkaFuture<TopicMetadataAndConfig>>) -> Self {
         Self { futures }
     }
 
     /// Return a map from topic names to futures, which can be used to check the
     /// status of individual topic creations.
+    #[doc(alias = "org.apache.kafka.clients.admin.CreateTopicsResult#values")]
     pub fn values(&self) -> HashMap<String, KafkaFuture<()>> {
         self.futures
             .iter()
@@ -113,6 +124,7 @@ impl CreateTopicsResult {
     }
 
     /// Return a future which succeeds if all the topic creations succeed.
+    #[doc(alias = "org.apache.kafka.clients.admin.CreateTopicsResult#all")]
     pub fn all(&self) -> KafkaFuture<()> {
         KafkaFuture::all_of(self.futures.values().cloned().collect())
     }
@@ -123,6 +135,7 @@ impl CreateTopicsResult {
     /// # Panics
     ///
     /// Panics if `topic` was not part of the original request.
+    #[doc(alias = "org.apache.kafka.clients.admin.CreateTopicsResult#config")]
     pub fn config(&self, topic: &str) -> KafkaFuture<Config> {
         self.future_for(topic).then_apply_try(|tmac| tmac.config())
     }
@@ -132,6 +145,7 @@ impl CreateTopicsResult {
     /// # Panics
     ///
     /// Panics if `topic` was not part of the original request.
+    #[doc(alias = "org.apache.kafka.clients.admin.CreateTopicsResult#topicId")]
     pub fn topic_id(&self, topic: &str) -> KafkaFuture<Uuid> {
         self.future_for(topic).then_apply_try(|tmac| tmac.topic_id())
     }
@@ -141,6 +155,7 @@ impl CreateTopicsResult {
     /// # Panics
     ///
     /// Panics if `topic` was not part of the original request.
+    #[doc(alias = "org.apache.kafka.clients.admin.CreateTopicsResult#numPartitions")]
     pub fn num_partitions(&self, topic: &str) -> KafkaFuture<i32> {
         self.future_for(topic).then_apply_try(|tmac| tmac.num_partitions())
     }
@@ -150,6 +165,7 @@ impl CreateTopicsResult {
     /// # Panics
     ///
     /// Panics if `topic` was not part of the original request.
+    #[doc(alias = "org.apache.kafka.clients.admin.CreateTopicsResult#replicationFactor")]
     pub fn replication_factor(&self, topic: &str) -> KafkaFuture<i32> {
         self.future_for(topic).then_apply_try(|tmac| tmac.replication_factor())
     }
@@ -166,7 +182,7 @@ impl CreateTopicsResult {
     /// the public surface still matches Java exactly.
     // Only the `ffi` feature consumes this outside tests; without it the method
     // is dead code and `#![deny(warnings)]` would fail the build.
-    #[cfg_attr(not(feature = "ffi"), allow(dead_code))]
+    #[cfg_attr(all(not(feature = "ffi"), not(test)), expect(dead_code))]
     pub(crate) fn futures(&self) -> &HashMap<String, KafkaFuture<TopicMetadataAndConfig>> {
         &self.futures
     }

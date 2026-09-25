@@ -35,6 +35,7 @@ use super::RequestCompletionHandler;
 /// requests/receiving responses.
 ///
 /// Translated from `org.apache.kafka.clients.KafkaClient`.
+#[doc(alias = "org.apache.kafka.clients.KafkaClient")]
 pub trait KafkaClient {
     /// Check if we are currently ready to send another request to the given node
     /// but don't attempt to connect if we aren't.
@@ -43,6 +44,7 @@ pub trait KafkaClient {
     ///
     /// * `node` - The node to check
     /// * `now` - The current timestamp in milliseconds
+    #[doc(alias = "org.apache.kafka.clients.KafkaClient#isReady")]
     fn is_ready(&self, node: &Node, now: i64) -> bool;
 
     /// Initiate a connection to the given node (if necessary), and return true if
@@ -55,6 +57,7 @@ pub trait KafkaClient {
     ///
     /// Returns `true` iff we are ready to immediately initiate the sending of another
     /// request to the given node.
+    #[doc(alias = "org.apache.kafka.clients.KafkaClient#ready")]
     fn ready(&mut self, node: &Node, now: i64) -> impl std::future::Future<Output = bool> + Send;
 
     /// Return the number of milliseconds to wait, based on the connection state,
@@ -67,6 +70,7 @@ pub trait KafkaClient {
     /// * `now` - The current timestamp in milliseconds
     ///
     /// Returns the number of milliseconds to wait.
+    #[doc(alias = "org.apache.kafka.clients.KafkaClient#connectionDelay")]
     fn connection_delay(&self, node: &Node, now: i64) -> i64;
 
     /// Return the number of milliseconds to wait, based on the connection state and
@@ -78,6 +82,7 @@ pub trait KafkaClient {
     ///
     /// * `node` - The connection to check
     /// * `now` - The current time in ms
+    #[doc(alias = "org.apache.kafka.clients.KafkaClient#pollDelayMs")]
     fn poll_delay_ms(&self, node: &Node, now: i64) -> i64;
 
     /// Check if the connection of the node has failed, based on the connection state.
@@ -90,6 +95,7 @@ pub trait KafkaClient {
     /// * `node` - The node to check
     ///
     /// Returns `true` iff the connection has failed and the node is disconnected.
+    #[doc(alias = "org.apache.kafka.clients.KafkaClient#connectionFailed")]
     fn connection_failed(&self, node: &Node) -> bool;
 
     /// Check if authentication to this node has failed, based on the connection state.
@@ -121,6 +127,7 @@ pub trait KafkaClient {
     /// §10.4). The value originates in
     /// [`ChannelState::error`](crate::common::network::ChannelState::error), which
     /// only carries one in the `AuthenticationFailed` state.
+    #[doc(alias = "org.apache.kafka.clients.KafkaClient#authenticationException")]
     fn authentication_error(&self, node: &Node) -> Option<Error>;
 
     /// Queue up the given request for sending. Requests can only be sent on ready connections.
@@ -129,6 +136,7 @@ pub trait KafkaClient {
     ///
     /// * `request` - The request
     /// * `now` - The current timestamp in milliseconds
+    #[doc(alias = "org.apache.kafka.clients.KafkaClient#send")]
     fn send(&mut self, request: ClientRequest, now: i64);
 
     /// Do actual reads and writes from sockets.
@@ -141,6 +149,7 @@ pub trait KafkaClient {
     /// * `now` - The current time in ms
     ///
     /// Returns the list of responses received.
+    #[doc(alias = "org.apache.kafka.clients.KafkaClient#poll")]
     fn poll(&mut self, timeout: i64, now: i64) -> impl std::future::Future<Output = Vec<ClientResponse>> + Send;
 
     /// Disconnects the connection to a particular node, if there is one.
@@ -149,6 +158,7 @@ pub trait KafkaClient {
     /// # Arguments
     ///
     /// * `node_id` - The id of the node
+    #[doc(alias = "org.apache.kafka.clients.KafkaClient#disconnect")]
     fn disconnect(&mut self, node_id: &str) -> impl std::future::Future<Output = ()> + Send;
 
     /// Closes the connection to a particular node (if there is one).
@@ -169,10 +179,12 @@ pub trait KafkaClient {
     /// * `now` - The current time in ms
     ///
     /// Returns the node with the fewest in-flight requests.
+    #[doc(alias = "org.apache.kafka.clients.KafkaClient#leastLoadedNode")]
     fn least_loaded_node(&self, now: i64) -> LeastLoadedNode;
 
     /// The number of currently in-flight requests for which we have not yet returned
     /// a response.
+    #[doc(alias = "org.apache.kafka.clients.KafkaClient#inFlightRequestCount")]
     fn in_flight_request_count(&self) -> i32;
 
     /// Returns a shared, read-only handle to the total in-flight-request count,
@@ -187,6 +199,7 @@ pub trait KafkaClient {
     }
 
     /// Return `true` if there is at least one in-flight request and `false` otherwise.
+    #[doc(alias = "org.apache.kafka.clients.KafkaClient#hasInFlightRequests")]
     fn has_in_flight_requests(&self) -> bool;
 
     /// Get the total in-flight requests for a particular node.
@@ -206,9 +219,11 @@ pub trait KafkaClient {
     /// # Arguments
     ///
     /// * `now` - The current time
+    #[doc(alias = "org.apache.kafka.clients.KafkaClient#hasReadyNodes")]
     fn has_ready_nodes(&self, now: i64) -> bool;
 
     /// Wake up the client if it is currently blocked waiting for I/O.
+    #[doc(alias = "org.apache.kafka.clients.KafkaClient#wakeup")]
     fn wakeup(&self);
 
     /// Returns a lock-free handle to the underlying selector's wakeup
@@ -232,6 +247,7 @@ pub trait KafkaClient {
     /// * `request_builder` - The request builder to use
     /// * `created_time_ms` - The time in milliseconds to use as the creation time of the request
     /// * `expect_response` - `true` iff we expect a response
+    #[doc(alias = "org.apache.kafka.clients.KafkaClient#newClientRequest")]
     fn new_client_request(
         &mut self,
         node_id: &str,
@@ -251,6 +267,7 @@ pub trait KafkaClient {
     /// * `request_timeout_ms` - Upper bound time in milliseconds to await a response before
     ///   disconnecting the socket and cancelling the request
     /// * `callback` - The callback to invoke when we get a response
+    #[doc(alias = "org.apache.kafka.clients.KafkaClient#newClientRequest")]
     fn new_client_request_with_timeout(
         &mut self,
         node_id: &str,
@@ -265,12 +282,15 @@ pub trait KafkaClient {
     /// thread while this client is being polled. No further requests may be sent
     /// using the client. The current poll() will be terminated using wakeup().
     /// The client should be explicitly shutdown using `close()` after poll returns.
+    #[doc(alias = "org.apache.kafka.clients.KafkaClient#initiateClose")]
     fn initiate_close(&self);
 
     /// Returns `true` if the client is still active. Returns `false` if
     /// `initiate_close()` or `close()` was invoked for this client.
+    #[doc(alias = "org.apache.kafka.clients.KafkaClient#active")]
     fn active(&self) -> bool;
 
     /// Close the network client.
+    #[doc(alias = "org.apache.kafka.clients.KafkaClient#close")]
     fn close(&mut self) -> impl std::future::Future<Output = ()> + Send;
 }

@@ -38,12 +38,14 @@ use super::AbstractResponse;
 ///
 /// Corresponds to `org.apache.kafka.common.requests.EndTxnResponse`.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.EndTxnResponse")]
 pub struct EndTxnResponse {
     data: EndTxnResponseData,
 }
 
 impl EndTxnResponse {
     /// Creates a new `EndTxnResponse` from the underlying data.
+    #[doc(alias = "org.apache.kafka.common.requests.EndTxnResponse#EndTxnResponse")]
     pub fn new(data: EndTxnResponseData) -> Self {
         Self { data }
     }
@@ -54,6 +56,7 @@ impl EndTxnResponse {
     }
 
     /// Returns a reference to the underlying data.
+    #[doc(alias = "org.apache.kafka.common.requests.EndTxnResponse#data")]
     pub fn data(&self) -> &EndTxnResponseData {
         &self.data
     }
@@ -64,11 +67,13 @@ impl EndTxnResponse {
     }
 
     /// Returns the throttle time in milliseconds.
+    #[doc(alias = "org.apache.kafka.common.requests.EndTxnResponse#throttleTimeMs")]
     pub fn throttle_time_ms(&self) -> i32 {
         self.data.throttle_time_ms
     }
 
     /// Sets the throttle time in the response.
+    #[doc(alias = "org.apache.kafka.common.requests.EndTxnResponse#maybeSetThrottleTimeMs")]
     pub fn maybe_set_throttle_time_ms(&mut self, throttle_time_ms: i32) {
         self.data.set_throttle_time_ms(throttle_time_ms);
     }
@@ -76,16 +81,19 @@ impl EndTxnResponse {
     /// Whether the client should throttle upon receiving this response.
     ///
     /// Returns `true` for v1+.
+    #[doc(alias = "org.apache.kafka.common.requests.EndTxnResponse#shouldClientThrottle")]
     pub fn should_client_throttle(&self, version: i16) -> bool {
         version >= 1
     }
 
     /// Returns the error code wrapped as an [`Errors`].
+    #[doc(alias = "org.apache.kafka.common.requests.EndTxnResponse#error")]
     pub fn error(&self) -> Errors {
         Errors::for_code(self.data.error_code)
     }
 
     /// Returns error counts by [`Errors`].
+    #[doc(alias = "org.apache.kafka.common.requests.EndTxnResponse#errorCounts")]
     pub fn error_counts(&self) -> HashMap<Errors, i32> {
         let mut counts = HashMap::new();
         AbstractResponse::update_error_counts(&mut counts, self.error());
@@ -97,6 +105,7 @@ impl EndTxnResponse {
     /// # Errors
     ///
     /// Returns an error if parsing fails.
+    #[doc(alias = "org.apache.kafka.common.requests.EndTxnResponse#parse")]
     pub fn parse(readable: &mut dyn Readable, version: i16) -> io::Result<Self> {
         let data = EndTxnResponseData::read(readable, version)?;
         Ok(Self::new(data))
@@ -171,6 +180,7 @@ mod tests {
     /// once on the constructed response, once after a serialize/parse round trip —
     /// so both the in-memory and on-the-wire forms are checked.
     #[test]
+    #[doc(alias = "org.apache.kafka.common.requests.EndTxnResponseTest#testConstructor")]
     fn test_constructor() {
         use super::super::ConcreteResponse;
 

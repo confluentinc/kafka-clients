@@ -25,6 +25,7 @@ use crate::common::TopicPartition;
 ///
 /// `topic_partitions == None` includes all topic partitions of the group.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[doc(alias = "org.apache.kafka.clients.admin.ListConsumerGroupOffsetsSpec")]
 pub struct ListConsumerGroupOffsetsSpec {
     topic_partitions: Option<Vec<TopicPartition>>,
 }
@@ -50,6 +51,7 @@ impl ListConsumerGroupOffsetsSpec {
     /// group are to be listed.
     ///
     /// Mirrors `topicPartitions()`.
+    #[doc(alias = "org.apache.kafka.clients.admin.ListConsumerGroupOffsetsSpec#topicPartitions")]
     pub fn topic_partitions(&self) -> Option<&[TopicPartition]> {
         self.topic_partitions.as_deref()
     }

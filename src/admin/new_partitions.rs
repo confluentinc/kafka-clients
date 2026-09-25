@@ -21,6 +21,7 @@
 ///
 /// Corresponds to `org.apache.kafka.clients.admin.NewPartitions`.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[doc(alias = "org.apache.kafka.clients.admin.NewPartitions")]
 pub struct NewPartitions {
     total_count: i32,
     new_assignments: Option<Vec<Vec<i32>>>,
@@ -32,6 +33,7 @@ impl NewPartitions {
     ///
     /// `total_count` is the total number of partitions after the operation
     /// succeeds.
+    #[doc(alias = "org.apache.kafka.clients.admin.NewPartitions#increaseTo")]
     pub fn increase_to(total_count: i32) -> Self {
         Self { total_count, new_assignments: None }
     }
@@ -53,12 +55,14 @@ impl NewPartitions {
     }
 
     /// The total number of partitions after the operation succeeds.
+    #[doc(alias = "org.apache.kafka.clients.admin.NewPartitions#totalCount")]
     pub fn total_count(&self) -> i32 {
         self.total_count
     }
 
     /// The replica assignments for the new partitions, or `None` if the
     /// assignment will be done by the controller.
+    #[doc(alias = "org.apache.kafka.clients.admin.NewPartitions#assignments")]
     pub fn assignments(&self) -> Option<&Vec<Vec<i32>>> {
         self.new_assignments.as_ref()
     }

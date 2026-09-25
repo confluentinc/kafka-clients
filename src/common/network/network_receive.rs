@@ -43,6 +43,7 @@ use std::pin::Pin;
 /// EOF detection: when the remote end closes the connection, `read()` returns
 /// `Ok(0)`. This is translated to an `UnexpectedEof` error to match Java's
 /// `EOFException` behavior in `NetworkReceive.readFrom()`.
+#[doc(alias = "org.apache.kafka.common.network.NetworkReceive")]
 pub struct NetworkReceive {
     /// The source identifier for this receive.
     source: String,
@@ -75,6 +76,7 @@ impl NetworkReceive {
     ///
     /// The size header is considered already read and the payload buffer is provided directly.
     /// This constructor is used when the buffer contents are already known (e.g., in tests).
+    #[doc(alias = "org.apache.kafka.common.network.NetworkReceive#NetworkReceive")]
     pub fn with_source_buffer(source: &str, buffer: Vec<u8>) -> Self {
         // When a buffer is provided, we treat the size header as fully read
         // and set the payload position to the buffer's capacity (matching Java behavior
@@ -92,11 +94,13 @@ impl NetworkReceive {
     }
 
     /// Creates a new `NetworkReceive` with the given source and no size limit.
+    #[doc(alias = "org.apache.kafka.common.network.NetworkReceive#NetworkReceive")]
     pub fn with_source(source: &str) -> Self {
         Self::with_max_size_source(NetworkReceive::UNLIMITED, source)
     }
 
     /// Creates a new `NetworkReceive` with the given maximum size and source.
+    #[doc(alias = "org.apache.kafka.common.network.NetworkReceive#NetworkReceive")]
     pub fn with_max_size_source(max_size: i32, source: &str) -> Self {
         Self {
             source: source.to_string(),
@@ -110,11 +114,13 @@ impl NetworkReceive {
     }
 
     /// Creates a new `NetworkReceive` with unknown source and no size limit.
+    #[doc(alias = "org.apache.kafka.common.network.NetworkReceive#NetworkReceive")]
     pub fn new() -> Self {
         Self::with_source(NetworkReceive::UNKNOWN_SOURCE)
     }
 
     /// Returns the payload buffer, or `None` if it has not been allocated yet.
+    #[doc(alias = "org.apache.kafka.common.network.NetworkReceive#payload")]
     pub fn payload(&self) -> Option<&[u8]> {
         self.buffer.as_deref()
     }
@@ -130,6 +136,7 @@ impl NetworkReceive {
     }
 
     /// Returns the number of bytes read so far (both size header and payload).
+    #[doc(alias = "org.apache.kafka.common.network.NetworkReceive#bytesRead")]
     pub fn bytes_read(&self) -> usize {
         if self.buffer.is_none() {
             self.size_bytes_read
@@ -144,6 +151,7 @@ impl NetworkReceive {
     /// # Panics
     ///
     /// Panics if the payload buffer has not been allocated yet.
+    #[doc(alias = "org.apache.kafka.common.network.NetworkReceive#size")]
     pub fn size(&self) -> usize {
         self.buffer.as_ref().expect("payload buffer not yet allocated").len() + NetworkReceive::SIZE_LENGTH
     }
@@ -719,6 +727,7 @@ mod tests {
     /// Translated from `NetworkReceiveTest.testBytesRead` in
     /// `org.apache.kafka.common.network.NetworkReceiveTest`.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.common.network.NetworkReceiveTest#testBytesRead")]
     async fn test_bytes_read() {
         let mut receive = NetworkReceive::with_max_size_source(128, "0");
         assert_eq!(0, receive.bytes_read());
@@ -754,6 +763,7 @@ mod tests {
     /// Translated from `NetworkReceiveTest.testRequiredMemoryAmountKnownWhenNotSet` in
     /// `org.apache.kafka.common.network.NetworkReceiveTest`.
     #[test]
+    #[doc(alias = "org.apache.kafka.common.network.NetworkReceiveTest#testRequiredMemoryAmountKnownWhenNotSet")]
     fn test_required_memory_amount_known_when_not_set() {
         let receive = NetworkReceive::with_source("0");
         assert!(
@@ -765,6 +775,7 @@ mod tests {
     /// Translated from `NetworkReceiveTest.testRequiredMemoryAmountKnownWhenSet` in
     /// `org.apache.kafka.common.network.NetworkReceiveTest`.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.common.network.NetworkReceiveTest#testRequiredMemoryAmountKnownWhenSet")]
     async fn test_required_memory_amount_known_when_set() {
         let mut receive = NetworkReceive::with_max_size_source(128, "0");
 
@@ -801,6 +812,7 @@ mod tests {
     /// Translated from `NetworkReceiveTest.testSizeAfterRead` in
     /// `org.apache.kafka.common.network.NetworkReceiveTest`.
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.common.network.NetworkReceiveTest#testSizeAfterRead")]
     async fn test_size_after_read() {
         let payload_size: i32 = 32;
         let expected_total_size = 4 + payload_size as usize; // 4 bytes for size buffer + payload size

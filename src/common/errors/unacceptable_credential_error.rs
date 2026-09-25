@@ -14,8 +14,8 @@
 
 //! Translated from `org.apache.kafka.common.errors.UnacceptableCredentialException`.
 
-use crate::common::Errors;
 use crate::common::error::kafka_error_class;
+use crate::common::protocol::Errors;
 
 kafka_error_class! {
     /// Requested credential would not meet criteria for acceptability.
@@ -24,6 +24,7 @@ kafka_error_class! {
     ///
     /// Java `extends` chain:
     ///    `UnacceptableCredentialException` -> `ApiException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.UnacceptableCredentialException")]
     UnacceptableCredentialError,
     code: Errors::UnacceptableCredential,
     extends: [

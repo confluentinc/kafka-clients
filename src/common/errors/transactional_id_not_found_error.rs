@@ -14,8 +14,8 @@
 
 //! Translated from `org.apache.kafka.common.errors.TransactionalIdNotFoundException`.
 
-use crate::common::Errors;
 use crate::common::error::kafka_error_class;
+use crate::common::protocol::Errors;
 
 kafka_error_class! {
     /// The transactionalId could not be found.
@@ -24,6 +24,7 @@ kafka_error_class! {
     ///
     /// Java `extends` chain:
     ///    `TransactionalIdNotFoundException` -> `ApiException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.TransactionalIdNotFoundException")]
     TransactionalIdNotFoundError,
     code: Errors::TransactionalIdNotFound,
     extends: [

@@ -14,8 +14,8 @@
 
 //! Translated from `org.apache.kafka.common.errors.TransactionAbortableException`.
 
-use crate::common::Errors;
 use crate::common::error::kafka_error_class;
+use crate::common::protocol::Errors;
 
 kafka_error_class! {
     /// The server encountered an error with the transaction. The client can abort
@@ -25,6 +25,7 @@ kafka_error_class! {
     ///
     /// Java `extends` chain:
     ///    `TransactionAbortableException` -> `ApiException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.TransactionAbortableException")]
     TransactionAbortableError,
     code: Errors::TransactionAbortable,
     extends: [

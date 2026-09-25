@@ -35,16 +35,19 @@ pub(crate) const UNKNOWN_BROKER_ID: i32 = -1;
 /// Corresponds to `AdminApiFuture<K, V>`. Kept a plain (non-`async`) trait per
 /// `.claude/rules/admin-client.md` §2 — the driver completes the futures on the
 /// background task.
+#[doc(alias = "org.apache.kafka.clients.admin.internals.AdminApiFuture")]
 pub(crate) trait AdminApiFuture<K, V>: Send {
     /// The initial set of lookup keys.
     ///
     /// Mirrors `lookupKeys`.
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.AdminApiFuture#lookupKeys")]
     fn lookup_keys(&self) -> HashSet<K>;
 
     /// The cached key-to-broker-id mapping. The default maps every key to
     /// [`UNKNOWN_BROKER_ID`].
     ///
     /// Mirrors `cachedKeyBrokerIdMapping`.
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.AdminApiFuture#cachedKeyBrokerIdMapping")]
     fn cached_key_broker_id_mapping(&self) -> HashMap<K, i32>
     where
         K: Clone + Eq + Hash,
@@ -55,17 +58,20 @@ pub(crate) trait AdminApiFuture<K, V>: Send {
     /// Completes the futures associated with the given keys.
     ///
     /// Mirrors `complete`.
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.AdminApiFuture#complete")]
     fn complete(&self, values: HashMap<K, V>);
 
     /// Invoked when lookup of a set of keys succeeds. The default is a no-op.
     ///
     /// Mirrors `completeLookup`.
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.AdminApiFuture#completeLookup")]
     fn complete_lookup(&self, _broker_id_mapping: HashMap<K, i32>) {}
 
     /// Invoked when lookup fails with a fatal error on a set of keys. The
     /// default delegates to [`complete_with_error`](Self::complete_with_error).
     ///
     /// Mirrors `completeLookupExceptionally`.
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.AdminApiFuture#completeLookup")]
     fn complete_lookup_with_error(&self, lookup_errors: HashMap<K, Error>) {
         self.complete_with_error(lookup_errors);
     }
@@ -74,6 +80,7 @@ pub(crate) trait AdminApiFuture<K, V>: Send {
     ///
     /// Mirrors `completeExceptionally`. The Rust name differs because
     /// CLAUDE.md §2 keeps the word "exception" out of Rust identifiers.
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.AdminApiFuture#complete")]
     fn complete_with_error(&self, errors: HashMap<K, Error>);
 }
 
@@ -83,6 +90,7 @@ pub(crate) trait AdminApiFuture<K, V>: Send {
 /// Corresponds to `AdminApiFuture.SimpleAdminApiFuture` (created via
 /// `AdminApiFuture.forKeys(keys)`). Used by the group-describe handlers, which
 /// key their futures by [`CoordinatorKey`](super::CoordinatorKey).
+#[doc(alias = "org.apache.kafka.clients.admin.internals.AdminApiFuture$SimpleAdminApiFuture")]
 pub(crate) struct SimpleAdminApiFuture<K, V>
 where
     K: Clone + Eq + Hash,
@@ -107,6 +115,7 @@ where
     /// Returns the per-key public futures.
     ///
     /// Mirrors `AdminApiFuture.all()`.
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.AdminApiFuture$SimpleAdminApiFuture#all")]
     pub(crate) fn all(&self) -> HashMap<K, KafkaFuture<V>> {
         self.futures.iter().map(|(k, v)| (k.clone(), v.future())).collect()
     }

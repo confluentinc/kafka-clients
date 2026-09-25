@@ -18,6 +18,7 @@ use crate::common::metrics::stats::sampled_stat::{Sample, SampledStat, SampledSt
 use crate::common::metrics::{Measurable, MetricConfig, Stat};
 
 /// A [`SampledStat`] that gives the max over its samples.
+#[doc(alias = "org.apache.kafka.common.metrics.stats.Max")]
 pub struct Max {
     inner: SampledStat,
 }
@@ -42,6 +43,7 @@ impl SampledStatKind for MaxKind {
 
 impl Max {
     /// Create a `Max`.
+    #[doc(alias = "org.apache.kafka.common.metrics.stats.Max#Max")]
     pub fn new() -> Self {
         Self { inner: SampledStat::new(f64::NEG_INFINITY, Box::new(MaxKind)) }
     }
@@ -68,9 +70,9 @@ impl Measurable for Max {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::metrics::MockTime;
-    use crate::common::metrics::Time;
-    use crate::common::metrics::internals::TimeUnit;
+    use crate::common::metrics::TimeUnit;
+    use crate::common::utils::MockTime;
+    use crate::common::utils::Time;
 
     #[test]
     fn max_of_records() {

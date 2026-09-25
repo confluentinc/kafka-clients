@@ -14,8 +14,8 @@
 
 //! Translated from `org.apache.kafka.common.errors.FencedMemberEpochException`.
 
-use crate::common::Errors;
 use crate::common::error::kafka_error_class;
+use crate::common::protocol::Errors;
 
 kafka_error_class! {
     /// The member epoch is fenced by the group coordinator. The member must
@@ -25,6 +25,7 @@ kafka_error_class! {
     ///
     /// Java `extends` chain:
     ///    `FencedMemberEpochException` -> `ApiException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.FencedMemberEpochException")]
     FencedMemberEpochError,
     code: Errors::FencedMemberEpoch,
     extends: [

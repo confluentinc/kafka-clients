@@ -14,8 +14,8 @@
 
 //! Translated from `org.apache.kafka.common.errors.PreferredLeaderNotAvailableException`.
 
-use crate::common::Errors;
 use crate::common::error::kafka_error_class;
+use crate::common::protocol::Errors;
 
 kafka_error_class! {
     /// The preferred leader was not available.
@@ -26,6 +26,7 @@ kafka_error_class! {
     ///    `PreferredLeaderNotAvailableException` -> `InvalidMetadataException` ->
     ///   `RefreshRetriableException` -> `RetriableException` -> `ApiException` ->
     ///   `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.PreferredLeaderNotAvailableException")]
     PreferredLeaderNotAvailableError,
     code: Errors::PreferredLeaderNotAvailable,
     extends: [

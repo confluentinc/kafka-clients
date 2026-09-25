@@ -16,22 +16,23 @@
 //!
 //! Translated from `org.apache.kafka.common.network.NetworkSend`.
 
-use super::KafkaSend;
 use super::TransportLayer;
+use crate::common::network;
 
 use std::future::Future;
 use std::io;
 use std::pin::Pin;
 
-/// A network send that wraps an inner [`KafkaSend`] with a destination identifier.
+/// A network send that wraps an inner [`network::Send`] with a destination identifier.
 ///
 /// `NetworkSend` delegates all send operations to the inner send and adds
 /// a `destination_id` to identify the target broker/node.
+#[doc(alias = "org.apache.kafka.common.network.NetworkSend")]
 pub struct NetworkSend {
     /// The destination identifier (typically a broker node ID).
     destination_id: String,
     /// The inner send that performs the actual data writing.
-    send: Box<dyn KafkaSend>,
+    send: Box<dyn network::Send>,
     /// Whether this send expects no response (producer `acks=0`).
     ///
     /// When `true`, the request is fire-and-forget: the broker never replies,
@@ -50,11 +51,13 @@ impl NetworkSend {
     /// The send defaults to expecting a response (`fire_and_forget = false`);
     /// callers that know the request is fire-and-forget (producer `acks=0`) mark
     /// it via [`set_fire_and_forget`](Self::set_fire_and_forget).
-    pub fn new(destination_id: &str, send: Box<dyn KafkaSend>) -> Self {
+    #[doc(alias = "org.apache.kafka.common.network.NetworkSend#NetworkSend")]
+    pub fn new(destination_id: &str, send: Box<dyn network::Send>) -> Self {
         Self { destination_id: destination_id.to_string(), send, fire_and_forget: false }
     }
 
     /// Returns the destination identifier.
+    #[doc(alias = "org.apache.kafka.common.network.NetworkSend#destinationId")]
     pub fn destination_id(&self) -> &str {
         &self.destination_id
     }
@@ -70,12 +73,13 @@ impl NetworkSend {
     }
 
     /// Returns a reference to the inner send.
-    pub fn send(&self) -> &dyn KafkaSend {
+    #[doc(alias = "org.apache.kafka.common.network.NetworkSend#send")]
+    pub fn send(&self) -> &dyn network::Send {
         self.send.as_ref()
     }
 }
 
-impl KafkaSend for NetworkSend {
+impl network::Send for NetworkSend {
     fn completed(&self) -> bool {
         self.send.completed()
     }

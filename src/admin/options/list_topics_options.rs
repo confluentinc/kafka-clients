@@ -20,6 +20,7 @@
 ///
 /// Corresponds to `org.apache.kafka.clients.admin.ListTopicsOptions`.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[doc(alias = "org.apache.kafka.clients.admin.ListTopicsOptions")]
 pub struct ListTopicsOptions {
     timeout_ms: Option<i32>,
     list_internal: bool,

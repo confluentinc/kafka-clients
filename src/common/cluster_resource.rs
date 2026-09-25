@@ -18,6 +18,7 @@ use std::fmt;
 
 /// The `ClusterResource` class encapsulates metadata for a Kafka cluster.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[doc(alias = "org.apache.kafka.common.ClusterResource")]
 pub struct ClusterResource {
     cluster_id: Option<String>,
 }
@@ -25,12 +26,14 @@ pub struct ClusterResource {
 impl ClusterResource {
     /// Create a `ClusterResource` with a cluster id. Note that cluster id may be `None` if the
     /// metadata request was sent to a broker without support for cluster ids.
+    #[doc(alias = "org.apache.kafka.common.ClusterResource#ClusterResource")]
     pub fn new(cluster_id: Option<String>) -> Self {
         Self { cluster_id }
     }
 
     /// Return the cluster id. Note that it may be `None` if the metadata request was sent to a
     /// broker without support for cluster ids.
+    #[doc(alias = "org.apache.kafka.common.ClusterResource#clusterId")]
     pub fn cluster_id(&self) -> Option<&str> {
         self.cluster_id.as_deref()
     }

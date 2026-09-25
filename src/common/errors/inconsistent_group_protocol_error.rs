@@ -14,8 +14,8 @@
 
 //! Translated from `org.apache.kafka.common.errors.InconsistentGroupProtocolException`.
 
-use crate::common::Errors;
 use crate::common::error::kafka_error_class;
+use crate::common::protocol::Errors;
 
 kafka_error_class! {
     /// The group member's supported protocols are incompatible with those of
@@ -26,6 +26,7 @@ kafka_error_class! {
     ///
     /// Java `extends` chain:
     ///    `InconsistentGroupProtocolException` -> `ApiException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.InconsistentGroupProtocolException")]
     InconsistentGroupProtocolError,
     code: Errors::InconsistentGroupProtocol,
     extends: [

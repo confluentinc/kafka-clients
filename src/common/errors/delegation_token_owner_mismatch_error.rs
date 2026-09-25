@@ -14,8 +14,8 @@
 
 //! Translated from `org.apache.kafka.common.errors.DelegationTokenOwnerMismatchException`.
 
-use crate::common::Errors;
 use crate::common::error::kafka_error_class;
+use crate::common::protocol::Errors;
 
 kafka_error_class! {
     /// Specified Principal is not valid Owner/Renewer.
@@ -25,6 +25,7 @@ kafka_error_class! {
     /// Java `extends` chain:
     ///    `DelegationTokenOwnerMismatchException` -> `ApiException` ->
     ///   `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.DelegationTokenOwnerMismatchException")]
     DelegationTokenOwnerMismatchError,
     code: Errors::DelegationTokenOwnerMismatch,
     extends: [

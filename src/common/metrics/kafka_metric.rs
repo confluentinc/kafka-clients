@@ -17,7 +17,9 @@
 
 use std::sync::{Arc, Mutex};
 
-use crate::common::metrics::{Measurable, MetricConfig, MetricValue, MetricValueProvider, Time};
+use crate::common::MetricValue;
+use crate::common::metrics::{Measurable, MetricConfig, MetricValueProvider};
+use crate::common::utils::Time;
 use crate::common::{Error, Metric, MetricName};
 
 /// A metric tracked by the registry. Holds a [`MetricName`], a (mutable)
@@ -29,6 +31,7 @@ use crate::common::{Error, Metric, MetricName};
 /// value read needs no extra lock; we still guard `config` with a `Mutex` so the
 /// `config(new)` setter is observed atomically, matching Java's `synchronized`
 /// setter + `volatile` read.
+#[doc(alias = "org.apache.kafka.common.metrics.KafkaMetric")]
 pub struct KafkaMetric {
     metric_name: MetricName,
     config: Mutex<Arc<MetricConfig>>,
@@ -43,7 +46,11 @@ impl KafkaMetric {
     /// * `value_provider` - The metric value provider associated with this metric
     /// * `config` - The configuration of the metric
     /// * `time` - The time instance to use with the metric
-    pub fn new(
+    ///
+    /// Crate-private: it takes the non-public `Time`. Java keeps it public only
+    /// "for testing"; users obtain metrics from `Metrics`.
+    #[doc(alias = "org.apache.kafka.common.metrics.KafkaMetric#KafkaMetric")]
+    pub(crate) fn new(
         metric_name: MetricName,
         value_provider: MetricValueProvider,
         config: Arc<MetricConfig>,
@@ -58,6 +65,7 @@ impl KafkaMetric {
     }
 
     /// Get the configuration of this metric.
+    #[doc(alias = "org.apache.kafka.common.metrics.KafkaMetric#config")]
     pub fn config(&self) -> Arc<MetricConfig> {
         Arc::clone(&self.config.lock().expect("metric config mutex poisoned"))
     }
@@ -68,6 +76,7 @@ impl KafkaMetric {
     }
 
     /// Determine if the metric value provider is of type `Measurable`.
+    #[doc(alias = "org.apache.kafka.common.metrics.KafkaMetric#isMeasurable")]
     pub fn is_measurable(&self) -> bool {
         matches!(self.metric_value_provider, MetricValueProvider::Measurable(_))
     }
@@ -85,6 +94,7 @@ impl KafkaMetric {
     /// trait object, which is the closest equivalent — trait objects have no
     /// meaningful value equality, so callers assert on `is_ok()` / the measured
     /// value instead.
+    #[doc(alias = "org.apache.kafka.common.metrics.KafkaMetric#measurable")]
     pub fn measurable(&self) -> Result<&dyn Measurable, Error> {
         match &self.metric_value_provider {
             MetricValueProvider::Measurable(m) => Ok(m.as_ref()),
@@ -97,6 +107,7 @@ impl KafkaMetric {
     /// Take the metric and return the value, where the underlying metric provider
     /// should be a measurable. Returns the measured value if measurable,
     /// otherwise `0`.
+    #[doc(alias = "org.apache.kafka.common.metrics.KafkaMetric#measurableValue")]
     pub fn measurable_value(&self, time_ms: i64) -> f64 {
         let config = self.config();
         match &self.metric_value_provider {
@@ -121,9 +132,10 @@ impl Metric for KafkaMetric {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::metrics::MockTime;
     use crate::common::metrics::stats::Value;
-    use crate::common::metrics::{ClosureGauge, Stat, SystemTime};
+    use crate::common::metrics::{ClosureGauge, Stat};
+    use crate::common::utils::MockTime;
+    use crate::common::utils::SystemTime;
     use std::collections::BTreeMap;
 
     fn name() -> MetricName {
@@ -184,6 +196,7 @@ mod tests {
     // borrow measures the same value the provider was seeded with, which is the
     // behavioral content of the identity check.
     #[test]
+    #[doc(alias = "org.apache.kafka.common.metrics.KafkaMetricTest#testIsMeasurable")]
     fn test_is_measurable() {
         let value = Value::new();
         value.record(&MetricConfig::new(), 7.0, 0);
@@ -206,6 +219,7 @@ mod tests {
     // (CLAUDE.md §10.2). The message is asserted because error text is part of
     // the behavioral contract (definition-of-done.md #3).
     #[test]
+    #[doc(alias = "org.apache.kafka.common.metrics.KafkaMetricTest#testIsMeasurableWithGaugeProvider")]
     fn test_is_measurable_with_gauge_provider() {
         let gauge = ClosureGauge::new(|_, _| MetricValue::Double(0.0));
         let metric = KafkaMetric::new(
@@ -225,6 +239,7 @@ mod tests {
 
     // KafkaMetricTest.testMeasurableValueReturnsZeroWhenNotMeasurable
     #[test]
+    #[doc(alias = "org.apache.kafka.common.metrics.KafkaMetricTest#testMeasurableValueReturnsZeroWhenNotMeasurable")]
     fn test_measurable_value_returns_zero_when_not_measurable() {
         let time = Arc::new(MockTime::new());
         // Java's gauge is `Gauge<Integer> gauge = (c, now) -> 7` — a non-zero
@@ -250,6 +265,9 @@ mod tests {
     // value and `metric_value()` returns it verbatim", which a
     // `MetricValue::String` gauge expresses exactly.
     #[test]
+    #[doc(
+        alias = "org.apache.kafka.common.metrics.KafkaMetricTest#testKafkaMetricAcceptsNonMeasurableNonGaugeProvider"
+    )]
     fn test_kafka_metric_accepts_non_measurable_non_gauge_provider() {
         let gauge = ClosureGauge::new(|_, _| MetricValue::String("metric value provider".to_string()));
         let metric = KafkaMetric::new(

@@ -16,8 +16,8 @@
 //!
 //! Translated from `org.apache.kafka.common.network.ByteBufferSend`.
 
-use super::KafkaSend;
 use super::TransportLayer;
+use crate::common::network;
 
 use bytes::Bytes;
 use std::fmt;
@@ -29,6 +29,7 @@ use std::pin::Pin;
 ///
 /// Each buffer is written in sequence to the destination channel.
 /// Uses vectored writes (`IoSlice`) for efficient scatter-gather I/O.
+#[doc(alias = "org.apache.kafka.common.network.ByteBufferSend")]
 pub struct ByteBufferSend {
     /// The byte buffers to send. Each buffer tracks its own position
     /// as a `(data, offset)` pair where offset marks the next byte to write.
@@ -37,7 +38,7 @@ pub struct ByteBufferSend {
     /// here from the [`MemoryRecords`] buffer is sent via vectored I/O without
     /// any copy (`IoSlice` borrows `&data[..]` through `Bytes`'s `Deref`).
     ///
-    /// [`MemoryRecords`]: crate::common::record::MemoryRecords
+    /// [`MemoryRecords`]: crate::common::record::internal::MemoryRecords
     buffers: Vec<(Bytes, usize)>,
     /// The total size of this send (sum of all buffer lengths).
     size: usize,
@@ -51,6 +52,7 @@ impl ByteBufferSend {
     /// Creates a new `ByteBufferSend` from the given byte buffers.
     ///
     /// The size is computed as the sum of all buffer lengths.
+    #[doc(alias = "org.apache.kafka.common.network.ByteBufferSend#ByteBufferSend")]
     pub fn new(buffers: Vec<Bytes>) -> Self {
         let remaining: usize = buffers.iter().map(|b| b.len()).sum();
         let size = remaining;
@@ -62,6 +64,7 @@ impl ByteBufferSend {
     ///
     /// This constructor allows specifying the size explicitly, which may differ from the
     /// sum of buffer lengths if buffers have already been partially consumed.
+    #[doc(alias = "org.apache.kafka.common.network.ByteBufferSend#ByteBufferSend")]
     pub fn with_size(buffers: Vec<Bytes>, size: usize) -> Self {
         let buffers = buffers.into_iter().map(|b| (b, 0)).collect();
         Self { buffers, size, remaining: size, pending: false }
@@ -69,18 +72,20 @@ impl ByteBufferSend {
 
     /// Creates a size-prefixed send: prepends a 4-byte big-endian size header
     /// followed by the given buffer's content.
+    #[doc(alias = "org.apache.kafka.common.network.ByteBufferSend#sizePrefixed")]
     pub fn size_prefixed(buffer: Bytes) -> Self {
         let size_buffer = Bytes::copy_from_slice(&(buffer.len() as i32).to_be_bytes());
         Self::new(vec![size_buffer, buffer])
     }
 
     /// Returns the number of bytes remaining to be written.
+    #[doc(alias = "org.apache.kafka.common.network.ByteBufferSend#remaining")]
     pub fn remaining(&self) -> usize {
         self.remaining
     }
 }
 
-impl KafkaSend for ByteBufferSend {
+impl network::Send for ByteBufferSend {
     fn completed(&self) -> bool {
         self.remaining == 0 && !self.pending
     }

@@ -14,8 +14,8 @@
 
 //! Translated from `org.apache.kafka.common.errors.RecordBatchTooLargeException`.
 
-use crate::common::Errors;
 use crate::common::error::kafka_error_class;
+use crate::common::protocol::Errors;
 
 kafka_error_class! {
     /// The request included message batch larger than the configured segment size
@@ -26,6 +26,7 @@ kafka_error_class! {
     /// Java `extends` chain:
     ///    `RecordBatchTooLargeException` -> `InvalidConfigurationException` ->
     ///   `ApiException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.RecordBatchTooLargeException")]
     RecordBatchTooLargeError,
     code: Errors::RecordListTooLarge,
     extends: [

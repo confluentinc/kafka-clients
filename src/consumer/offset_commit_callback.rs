@@ -44,6 +44,7 @@ use crate::consumer::OffsetAndMetadata;
 /// invoke later on app side" pipeline used by `process_background_events`.
 /// `Box<dyn>` would forbid the clone and the design collapses.
 #[async_trait]
+#[doc(alias = "org.apache.kafka.clients.consumer.OffsetCommitCallback")]
 pub trait OffsetCommitCallback: Send + Sync + 'static {
     /// A callback method the user can implement to provide asynchronous
     /// handling of commit request completion. This method will be called
@@ -64,5 +65,6 @@ pub trait OffsetCommitCallback: Send + Sync + 'static {
     ///   applies to
     /// * `error` - `Some(&error)` if the commit failed, `None` if it
     ///   completed successfully
+    #[doc(alias = "org.apache.kafka.clients.consumer.OffsetCommitCallback#onComplete")]
     async fn on_complete(&self, offsets: &HashMap<TopicPartition, OffsetAndMetadata>, error: Option<&Error>);
 }

@@ -14,8 +14,8 @@
 
 //! Translated from `org.apache.kafka.common.errors.TimeoutException`.
 
-use crate::common::Errors;
 use crate::common::error::kafka_error_class;
+use crate::common::protocol::Errors;
 
 kafka_error_class! {
     /// The request timed out.
@@ -25,6 +25,7 @@ kafka_error_class! {
     /// Java `extends` chain:
     ///    `TimeoutException` -> `RetriableException` -> `ApiException` ->
     ///   `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.TimeoutException")]
     TimeoutError,
     code: Errors::RequestTimedOut,
     extends: [

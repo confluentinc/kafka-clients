@@ -22,6 +22,8 @@ use std::fmt;
 ///
 /// Corresponds to `org.apache.kafka.common.GroupType`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+#[doc(alias = "org.apache.kafka.common.GroupType")]
 pub enum GroupType {
     /// An unrecognized group type (e.g. a type newer than this client).
     Unknown,
@@ -54,6 +56,7 @@ impl GroupType {
     ///
     /// Returns [`GroupType::Unknown`] if the name is unrecognized (mirrors
     /// Java's `parse`, including the `null` handling that maps to `Unknown`).
+    #[doc(alias = "org.apache.kafka.common.GroupType#parse")]
     pub fn parse(name: &str) -> Self {
         match name.to_lowercase().as_str() {
             "unknown" => Self::Unknown,
