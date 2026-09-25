@@ -696,9 +696,10 @@ def test_error_is_retriable(ex, expected):
     ("This is not the correct coordinator.", False),
 ])
 def test_is_wakeup_classification(message, expected):
-    # KafkaError::Wakeup reports UnknownServerError (-1) like every other
-    # client-side error, so the message is the only signal; the commit path at
-    # shutdown relies on this to retry rather than report a failure.
+    # A duck-typed error carries no type to test, only its message, so the
+    # message decides; the commit path at shutdown relies on this to retry
+    # rather than report a failure. (A confluent_kafka wakeup is also caught by
+    # type: WakeupError, whose FFI id is -18.)
     assert SoakClient._is_wakeup(RuntimeError(message)) is expected
     # Same verdict when the message arrives via the property, as it does from
     # the real KafkaError.
