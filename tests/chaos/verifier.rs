@@ -149,13 +149,16 @@ pub enum ExpectedLossHint {
     /// — the operator deleted the data the client was correctly acked into.
     ///
     /// Unlike the point-in-time snapshots (`AllDeliveredForTopic`), this is
-    /// evaluated against the `topic_id` recorded WITH each delivered record, so it
-    /// is immune to the async-ack race: a produce acked to the old generation by a
-    /// broker that had not yet deleted its log emits its `Delivered` event
-    /// whenever the ack lands — possibly long after the topic vanished from
-    /// metadata — and is still attributed to the destroyed generation. Only
-    /// emitted when the recreate minted a genuinely new id (delayed recreate);
-    /// an immediate recreate that reuses the id relies on `RecreateBlackout`.
+    /// evaluated against the `topic_id` recorded WITH each delivered record. The
+    /// producer stamps that id when the ack arrives, from a map the harness
+    /// switches to the new generation's id (taken from the create-topics
+    /// response) before the producer can be acked by the new generation. So
+    /// with thousands of records in flight across the recreate, a record
+    /// buffered during the delete or retried into the new generation carries
+    /// the new id and stays in the loss check, while only records the old
+    /// leader actually acked carry `old_id` and are excused. Only emitted when
+    /// the recreate minted a genuinely new id (delayed recreate); an immediate
+    /// recreate that reuses the id relies on `RecreateBlackout`.
     DestroyedGeneration(Uuid),
 }
 
@@ -603,9 +606,12 @@ impl Verifier for ConservationVerifier {
         // the client's pipeline reached.
         let max_in_flight = s.max_in_flight_by_producer.values().copied().max().unwrap_or(0);
 
-        // Every `Sent` must settle: the producer loop awaits each send's outcome
-        // before it can exit, so a window still open at verdict means an outcome
-        // was never recorded (or the run was cut off by the watchdog mid-send).
+        // Every `Sent` must settle: the producer loop sends without awaiting
+        // each outcome, but its `close()` waits for every buffered record's
+        // callback before returning, and the drain starts only after every
+        // producer has closed. A window still open at verdict therefore means
+        // the client never fired a callback for that record (or the run was cut
+        // off by the watchdog mid-send).
         let unsettled_sends = s.in_flight.len();
         if unsettled_sends > 0 {
             let mut sample: Vec<&LogicalKey> = s.in_flight.keys().collect();
