@@ -192,15 +192,21 @@ pub enum ExpectedLossHint {
     /// on the other topics is still real loss.
     AllDeliveredForTopic(String),
     /// `topic` underwent a recreate — mark it as a **recreate blackout** topic.
-    /// At verdict time, any delivered-but-unobserved record on this topic whose
-    /// index is BELOW the highest index the consumer eventually observed on it is
-    /// excused (the consumer provably skipped over it). This is the per-topic
-    /// analog of librdkafka's pre-delete-HWM → post-recreate expected-loss
-    /// window, and — unlike a point-in-time snapshot — it robustly covers the
-    /// whole blackout the producer's non-resetting index keeps delivering into,
-    /// regardless of whether the recreate reused the topic id (immediate),
-    /// minted a new one (delayed), or the id could not be resolved under churn.
-    /// Records ABOVE the resume point that are unobserved remain real loss.
+    /// Noted right after the recreate completed. Records delivered up to that
+    /// point are the old generation; records delivered after it went into the
+    /// new one, whose partitions restart at offset 0 while the group's
+    /// committed offsets still point where the old generation ended, so the
+    /// consumer skips the new generation's low offsets until they climb past
+    /// the stale commit. The verifier excuses exactly that skipped range: a
+    /// new-generation record on a partition is expected-lost only if it sits
+    /// BELOW the offset at which the consumer first resumed on that partition.
+    /// The resume point is frozen at the first post-recreate record observed,
+    /// so later loss on the topic (a broker roll two cycles on) stays real
+    /// loss, and a partition the consumer never resumes on excuses nothing.
+    /// This is the per-topic analog of librdkafka's pre-delete-HWM →
+    /// post-recreate expected-loss window, and it holds whether the recreate
+    /// reused the topic id (immediate), minted a new one (delayed), or the id
+    /// could not be resolved under churn.
     RecreateBlackout(String),
     /// A topic recreate replaced generation `old_id` with a new one, destroying
     /// every record acked to `old_id`. At verdict, any delivered-but-unobserved
@@ -296,16 +302,29 @@ struct ConservationState {
     /// Physical addresses the consumer has seen — a second sighting of the same
     /// (topic_id, partition, offset) is a physical duplicate.
     phys_seen: HashMap<PhysKey, u32>,
-    /// Partitions that carried at least one observed record (coverage).
-    partitions_seen: BTreeSet<i32>,
+    /// (topic, partition) pairs that carried at least one observed record
+    /// (coverage). Scored per topic — see [`ConservationState::partitions_covered`].
+    partitions_seen: BTreeSet<(String, i32)>,
     /// (topic, index) pairs legitimately destroyed by a topic recreate (not
     /// loss).
     expected_lost: BTreeSet<LogicalKey>,
-    /// Topics that underwent a recreate blackout. At verdict, an unobserved
-    /// delivered record on one of these whose index is below the max observed
-    /// index on that topic is excused (the consumer skipped it during the
-    /// blackout). See [`ExpectedLossHint::RecreateBlackout`].
-    recreate_blackout: BTreeSet<String>,
+    /// topic -> the highest index delivered on it when its recreate completed
+    /// (the `RecreateBlackout` hint; `None` if nothing had been delivered yet).
+    /// Records at or below the floor predate the recreate: they are covered by
+    /// the pre-delete snapshots / destroyed generation, and one that surfaces
+    /// from the consumer's fetch buffer *after* the recreate is an
+    /// old-generation record, not progress on the new one. Records above the
+    /// floor were produced into the new generation.
+    /// See [`ExpectedLossHint::RecreateBlackout`].
+    blackout_floor: HashMap<String, Option<u64>>,
+    /// (topic, partition) -> offset of the FIRST new-generation record (index
+    /// above the floor) the consumer observed on that partition after the
+    /// recreate: where it resumed. Frozen at first observation, so it cannot
+    /// drift upward as the run continues. New-generation records delivered to
+    /// that partition at a lower offset were skipped in the blackout and are
+    /// excused; anything at or above it, and every record on a partition the
+    /// consumer never resumed on, is real loss.
+    blackout_resume: HashMap<(String, i32), i64>,
     /// Topic-ids of destroyed generations (a delayed recreate minted a new id).
     /// At verdict, an unobserved delivered record whose physical `topic_id` is in
     /// this set is expected-lost. See [`ExpectedLossHint::DestroyedGeneration`].
@@ -380,6 +399,20 @@ struct ConservationState {
     /// Committed-offset violations (ahead of or behind the consumer's own
     /// consumption), in the order detected. Any fails the run.
     commit_violations: Vec<String>,
+    /// `(producer, (topic, partition)) -> (index, offset)` of the highest-index
+    /// record that producer has had acknowledged on the partition. One
+    /// idempotent producer appends to one partition in send order, so a later
+    /// index must land at a higher offset and vice versa. See
+    /// [`ConservationState::record_ordering`].
+    producer_last_ack: HashMap<(String, (String, i32)), (u64, i64)>,
+    /// Ordering violations that fail the run: a consumer read an older offset
+    /// after a newer one within a single assignment of a partition, or a
+    /// producer's acknowledged offsets on a partition disagree with its send
+    /// order. Only on topics that were never recreated.
+    order_violations: Vec<String>,
+    /// The same anomalies observed on a recreated topic, where an offset reset
+    /// can legitimately look like a regression. Reported, not scored.
+    unscored_order_anomalies: usize,
 }
 
 impl ConservationVerifier {
@@ -418,10 +451,18 @@ impl ConservationState {
                             tp_label(&partition)
                         ));
                     }
+                    // Ownership is keyed by topic NAME (that is all a rebalance
+                    // callback carries), but the coordinator keys by topic id. A
+                    // recreated topic's new-id partitions have no owner, so they
+                    // are assigned at once while the old owner's clean revoke of
+                    // the old-id partitions of the same name can land later. That
+                    // is not a fence, so the overlap check is suspended for
+                    // recreated topics.
+                    let recreated = self.blackout_floor.contains_key(&partition.0);
                     let previous_owners: Vec<String> = self
                         .owned
                         .iter()
-                        .filter(|(other, set)| **other != consumer && set.contains(&partition))
+                        .filter(|(other, set)| !recreated && **other != consumer && set.contains(&partition))
                         .map(|(other, _)| other.clone())
                         .collect();
                     for previous in previous_owners {
@@ -516,20 +557,77 @@ impl ConservationState {
         }
     }
 
-    fn blackout_resume(&self) -> HashMap<&str, u64> {
-        self.recreate_blackout
-            .iter()
-            .map(|topic| {
-                let max_observed = self
-                    .observed
-                    .keys()
-                    .filter(|(t, _)| t == topic)
-                    .map(|(_, idx)| *idx)
-                    .max()
-                    .unwrap_or(0);
-                (topic.as_str(), max_observed)
-            })
-            .collect()
+    /// File an ordering anomaly: scored on a topic that was never recreated,
+    /// only counted on one that was (its partitions' offsets restarted, so a
+    /// regression there can be the reset rather than a client defect).
+    fn record_ordering(&mut self, topic: &str, description: String) {
+        if self.blackout_floor.contains_key(topic) {
+            self.unscored_order_anomalies += 1;
+        } else {
+            self.order_violations.push(description);
+        }
+    }
+
+    /// Producer-side ordering: `producer`'s ack for `index` landed at `offset`
+    /// on `(topic, partition)`. Against the highest-index record it already had
+    /// acknowledged there, a higher index must have a higher offset and a lower
+    /// index a lower one — an idempotent producer appends to a partition in
+    /// send order, and `max.in.flight` with idempotence keeps it that way
+    /// across retries. Equal offsets for two indexes would be a double write,
+    /// caught separately.
+    fn record_producer_ack_order(&mut self, producer: String, topic: &str, partition: i32, index: u64, offset: i64) {
+        let key = (producer, (topic.to_string(), partition));
+        match self.producer_last_ack.get(&key) {
+            Some(&(last_index, last_offset)) => {
+                let index_forward = index > last_index;
+                let offset_forward = offset > last_offset;
+                if index_forward != offset_forward {
+                    self.record_ordering(
+                        topic,
+                        format!(
+                            "{}: ack for index {index} on {topic}-{partition} at offset {offset}, but index {last_index} \
+                             was acknowledged at offset {last_offset} (send order and log order disagree)",
+                            key.0
+                        ),
+                    );
+                }
+                if index_forward {
+                    self.producer_last_ack.insert(key, (index, offset));
+                }
+            },
+            None => {
+                self.producer_last_ack.insert(key, (index, offset));
+            },
+        }
+    }
+
+    /// Partition coverage, scored per topic: the number of distinct partitions
+    /// the consumer read from on the LEAST-covered topic (0 when nothing was
+    /// consumed). Counting `(topic, partition)` pairs across topics would let a
+    /// fully-read topic mask another that was never read.
+    fn partitions_covered(&self) -> usize {
+        let mut per_topic: HashMap<&str, usize> = HashMap::new();
+        for (topic, _) in &self.partitions_seen {
+            *per_topic.entry(topic.as_str()).or_insert(0) += 1;
+        }
+        per_topic.values().copied().min().unwrap_or(0)
+    }
+
+    /// Whether `(topic, index)` is a record of a recreated topic's NEW
+    /// generation (`Some(true)`), of its old one (`Some(false)`), or the topic
+    /// was never recreated (`None`). See `blackout_floor`.
+    fn recreate_generation(&self, topic: &str, index: u64) -> Option<bool> {
+        self.blackout_floor.get(topic).map(|floor| floor.is_none_or(|f| index > f))
+    }
+
+    /// Is this unobserved new-generation record excused by the recreate
+    /// blackout? Only when the consumer resumed on its partition at a HIGHER
+    /// offset: the record sits in the range the stale committed offset made the
+    /// consumer skip. A partition the consumer never resumed on excuses nothing.
+    fn skipped_in_blackout(&self, topic: &str, partition: i32, offset: i64) -> bool {
+        self.blackout_resume
+            .get(&(topic.to_string(), partition))
+            .is_some_and(|&resume| offset < resume)
     }
 
     /// Classify logical records that the consumer observed at more than one
@@ -578,16 +676,18 @@ impl ConservationState {
     /// and above any blackout resume point). Shared by `verdict` and `outstanding`
     /// so the drain waits for exactly what the verdict checks.
     fn lost_keys(&self) -> Vec<LogicalKey> {
-        let blackout_resume = self.blackout_resume();
         self.delivered
             .iter()
             .filter(|(key, _)| !self.observed.contains_key(*key) && !self.expected_lost.contains(*key))
             // A delivered record whose physical topic_id is a destroyed
             // generation is expected-lost regardless of when its ack landed.
             .filter(|(_, (topic_id, _, _))| !self.destroyed_generations.contains(topic_id))
-            .filter(|((topic, idx), _)| match blackout_resume.get(topic.as_str()) {
-                Some(&resume) => *idx > resume,
-                None => true,
+            // A new-generation record on a recreated topic that the consumer
+            // provably skipped (it resumed on that partition past it) is
+            // expected-lost; see `blackout_resume`.
+            .filter(|((topic, idx), (_, partition, offset))| {
+                !(self.recreate_generation(topic, *idx) == Some(true)
+                    && self.skipped_in_blackout(topic, *partition, *offset))
             })
             .map(|(key, _)| key.clone())
             .collect()
@@ -611,6 +711,12 @@ impl Verifier for ConservationVerifier {
             WorkloadEvent::Delivered { index, topic, topic_id, partition, offset } => {
                 s.last_delivered_offset.insert((topic.clone(), partition), offset);
                 let key = (topic, index);
+                // The producer is known from the `Sent` that opened this
+                // record's in-flight window (absent for event streams without
+                // `Sent`, which skip the producer-order check).
+                if let Some(producer) = s.in_flight.get(&key).cloned() {
+                    s.record_producer_ack_order(producer, &key.0, partition, index, offset);
+                }
                 s.settle(&key);
                 s.delivered.insert(key, (topic_id, partition, offset));
             },
@@ -620,15 +726,61 @@ impl Verifier for ConservationVerifier {
                 s.failed_sends.push((key, error));
             },
             WorkloadEvent::Consumed { consumer, index, topic, topic_id, partition, offset } => {
-                s.consumed_since_assign.insert((consumer, (topic.clone(), partition)), offset);
+                match s.recreate_generation(&topic, index) {
+                    // An old-generation record surfacing after the recreate
+                    // (still in the consumer's fetch buffer when the topic was
+                    // replaced): not progress on the recreated partition, and
+                    // not where the consumer resumed.
+                    Some(false) => {},
+                    generation => {
+                        // Consumer-side ordering: within one assignment of a
+                        // partition (the entry is cleared by
+                        // `on_partitions_assigned` and by a recreate) offsets
+                        // must strictly increase. Only for consumers with a
+                        // listener: without `Assigned` events a re-read after
+                        // a reassignment is indistinguishable from a defect.
+                        let key = (consumer, (topic.clone(), partition));
+                        if let Some(&previous) = s.consumed_since_assign.get(&key)
+                            && offset <= previous
+                            && s.listener_consumers.contains(&key.0)
+                        {
+                            s.record_ordering(
+                                &topic,
+                                format!(
+                                    "{}: read {topic}-{partition} offset {offset} after offset {previous} within one \
+                                     assignment (fetch returned older data)",
+                                    key.0
+                                ),
+                            );
+                        }
+                        s.consumed_since_assign.insert(key, offset);
+                        if generation == Some(true) {
+                            s.blackout_resume.entry((topic.clone(), partition)).or_insert(offset);
+                        }
+                    },
+                }
                 *s.observed.entry((topic.clone(), index)).or_insert(0) += 1;
+                // The consumer stamps `topic_id` from the live id map at consume
+                // time, so a record fetched from the old generation but polled
+                // after the recreate switched the map carries the new id. The
+                // producer stamps its ack with the generation that acked it, so
+                // when the consumer saw the record at the very address the ack
+                // named, the ack's id is the truth about that address.
+                let topic_id = match s.delivered.get(&(topic.clone(), index)) {
+                    Some(&(acked_id, acked_partition, acked_offset))
+                        if acked_partition == partition && acked_offset == offset =>
+                    {
+                        acked_id
+                    },
+                    _ => topic_id,
+                };
                 let addr = (topic_id, partition, offset);
                 let addrs = s.observed_at.entry((topic.clone(), index)).or_default();
                 if !addrs.contains(&addr) {
                     addrs.push(addr);
                 }
                 *s.phys_seen.entry(addr).or_insert(0) += 1;
-                s.partitions_seen.insert(partition);
+                s.partitions_seen.insert((topic.clone(), partition));
                 s.consumed_events += 1;
                 s.last_consumed_offset.insert((topic.clone(), partition), offset);
                 *s.consumed_events_by_topic.entry(topic).or_insert(0) += 1;
@@ -683,7 +835,16 @@ impl Verifier for ConservationVerifier {
                 s.expected_lost.extend(scoped);
             },
             ExpectedLossHint::RecreateBlackout(topic) => {
-                s.recreate_blackout.insert(topic);
+                // Everything delivered so far predates the recreate; the
+                // consumer's resume points and its per-partition progress on
+                // this topic start over with the new generation (the recreate
+                // reset the partitions' offsets, so progress measured against
+                // the old generation would make the next committed offset look
+                // wrong). A second recreate of the same topic re-arms both.
+                let floor = s.delivered.keys().filter(|(t, _)| *t == topic).map(|(_, i)| *i).max();
+                s.blackout_floor.insert(topic.clone(), floor);
+                s.blackout_resume.retain(|(t, _), _| *t != topic);
+                s.consumed_since_assign.retain(|(_, (t, _)), _| *t != topic);
             },
             ExpectedLossHint::DestroyedGeneration(old_id) => {
                 s.destroyed_generations.insert(old_id);
@@ -773,10 +934,11 @@ impl Verifier for ConservationVerifier {
                 lost.len()
             ));
         }
-        if s.partitions_seen.len() < min_partitions {
+        let partitions_covered = s.partitions_covered();
+        if partitions_covered < min_partitions {
             reasons.push(format!(
-                "partition coverage: only {} partition(s) produced records, expected >= {min_partitions}",
-                s.partitions_seen.len()
+                "partition coverage: the least-covered topic had records consumed from only {partitions_covered} \
+                 partition(s), expected >= {min_partitions}"
             ));
         }
 
@@ -887,6 +1049,17 @@ impl Verifier for ConservationVerifier {
                 commit_violations.len()
             ));
         }
+
+        // Ordering: consumer offset regressions within an assignment and
+        // producer send-order vs log-order disagreements (see `record_ordering`).
+        let order_violations = s.order_violations.clone();
+        if !order_violations.is_empty() {
+            let sample: Vec<&String> = order_violations.iter().take(20).collect();
+            reasons.push(format!(
+                "ordering: {} violation(s) (sample: {sample:?})",
+                order_violations.len()
+            ));
+        }
         let mut grouped: HashMap<String, usize> = HashMap::new();
         for (_, err) in &s.failed_sends {
             *grouped.entry(format!("producer send: {err}")).or_insert(0) += 1;
@@ -911,12 +1084,14 @@ impl Verifier for ConservationVerifier {
             rebalance_violations,
             commit_checks: s.commit_checks,
             commit_violations,
+            order_violations,
+            unscored_order_anomalies: s.unscored_order_anomalies,
             error_breakdown,
             logical_duplicates,
             physical_duplicates,
             producer_duplicates,
             cross_generation_duplicates,
-            partitions_covered: s.partitions_seen.len(),
+            partitions_covered,
             max_in_flight,
             unsettled_sends,
             lost,
@@ -982,6 +1157,14 @@ pub struct ChaosVerdict {
     /// Committed offsets that were ahead of or behind the consumer's own
     /// consumption. Non-empty fails the run.
     pub commit_violations: Vec<String>,
+    /// Ordering violations on never-recreated topics: a consumer read an older
+    /// offset after a newer one within one assignment, or a producer's
+    /// acknowledged offsets disagree with its send order. Non-empty fails the
+    /// run.
+    pub order_violations: Vec<String>,
+    /// The same anomalies on recreated topics, where an offset reset can look
+    /// like a regression. Reported, not scored.
+    pub unscored_order_anomalies: usize,
     /// Every client-reported error (failed sends, poll and commit errors)
     /// grouped by operation and error text, with its count, most frequent
     /// first. Rendered under the verdict as `<n>x <operation>: <error>`.
@@ -1067,6 +1250,12 @@ impl std::fmt::Display for ChaosVerdict {
             "  committed offsets checked : {} ({} violation(s))",
             self.commit_checks,
             self.commit_violations.len()
+        )?;
+        writeln!(
+            f,
+            "  ordering violations       : {} ({} unscored on recreated topics)",
+            self.order_violations.len(),
+            self.unscored_order_anomalies
         )?;
         writeln!(f, "  consumer poll errors      : {}", self.poll_errors)?;
         writeln!(f, "  consumer commit errors    : {}", self.commit_errors)?;
@@ -1328,6 +1517,163 @@ mod tests {
         assert!(!verdict.is_pass());
     }
 
+    /// The resume point is where the consumer FIRST resumed, not the highest
+    /// index it ever saw: a gap opened later on the recreated topic (a broker
+    /// roll two cycles after the recreate) is real loss even though the
+    /// consumer went on to read past it.
+    #[test]
+    fn recreate_blackout_gap_after_resume_is_loss() {
+        let v = ConservationVerifier::new();
+        v.note_expected_loss(ExpectedLossHint::RecreateBlackout("t".to_string()));
+        // Skipped in the blackout: offsets 0..5, never observed.
+        for i in 0..5u64 {
+            v.record(WorkloadEvent::Delivered {
+                index: i,
+                topic: "t".into(),
+                topic_id: zero(),
+                partition: 0,
+                offset: i as i64,
+            });
+        }
+        // Consumer resumes at offset 10.
+        v.record(WorkloadEvent::Delivered { index: 10, topic: "t".into(), topic_id: zero(), partition: 0, offset: 10 });
+        v.record(consumed(10));
+        // 11..=20 delivered after the resume and never observed; the consumer
+        // then reads 30. Under a "max observed" rule these would be excused.
+        for i in 11..=20u64 {
+            v.record(WorkloadEvent::Delivered {
+                index: i,
+                topic: "t".into(),
+                topic_id: zero(),
+                partition: 0,
+                offset: i as i64,
+            });
+        }
+        v.record(WorkloadEvent::Delivered { index: 30, topic: "t".into(), topic_id: zero(), partition: 0, offset: 30 });
+        v.record(consumed(30));
+        let verdict = v.verdict(1);
+        assert_eq!(verdict.lost.len(), 10, "gap after the resume point is real loss: {verdict}");
+        assert_eq!(
+            verdict.expected_lost, 5,
+            "only the skipped blackout range is excused: {verdict}"
+        );
+        assert!(!verdict.is_pass());
+    }
+
+    /// The resume point is per partition: resuming on p0 says nothing about p1,
+    /// where the consumer never resumed, so p1's post-recreate records are loss.
+    #[test]
+    fn recreate_blackout_resume_is_per_partition() {
+        let v = ConservationVerifier::new();
+        v.note_expected_loss(ExpectedLossHint::RecreateBlackout("t".to_string()));
+        v.record(WorkloadEvent::Delivered { index: 0, topic: "t".into(), topic_id: zero(), partition: 0, offset: 0 });
+        v.record(WorkloadEvent::Delivered { index: 1, topic: "t".into(), topic_id: zero(), partition: 1, offset: 0 });
+        v.record(WorkloadEvent::Delivered { index: 2, topic: "t".into(), topic_id: zero(), partition: 0, offset: 5 });
+        v.record(WorkloadEvent::Consumed {
+            consumer: "c".into(),
+            index: 2,
+            topic: "t".into(),
+            topic_id: zero(),
+            partition: 0,
+            offset: 5,
+        });
+        let verdict = v.verdict(1);
+        assert_eq!(verdict.lost, vec![("t".to_string(), 1)], "{verdict}");
+    }
+
+    /// A recreate resets the partitions' offsets, so the committing consumer's
+    /// progress on the topic starts over: a commit read back before it consumed
+    /// anything from the new generation is not compared, and an old-generation
+    /// record surfacing from its fetch buffer after the recreate does not count
+    /// as new-generation progress either.
+    #[test]
+    fn recreate_resets_committed_offset_progress_for_the_topic() {
+        let v = ConservationVerifier::new();
+        v.record(delivered(5000));
+        v.record(consumed(5000));
+        v.note_expected_loss(ExpectedLossHint::AllDeliveredSoFar);
+        v.note_expected_loss(ExpectedLossHint::RecreateBlackout("t".to_string()));
+        // Stale buffered record from the old generation (index below the floor).
+        v.record(consumed(4999));
+        // auto.offset.reset put the position at 0 and the loop committed it.
+        v.record(committed("c", 0, 0));
+        let verdict = v.verdict(0);
+        assert!(verdict.commit_violations.is_empty(), "{verdict}");
+        assert_eq!(verdict.commit_checks, 0);
+        // New-generation progress is compared again.
+        v.record(WorkloadEvent::Delivered {
+            index: 5001,
+            topic: "t".into(),
+            topic_id: zero(),
+            partition: 0,
+            offset: 0,
+        });
+        v.record(WorkloadEvent::Consumed {
+            consumer: "c".into(),
+            index: 5001,
+            topic: "t".into(),
+            topic_id: zero(),
+            partition: 0,
+            offset: 0,
+        });
+        v.record(committed("c", 0, 1));
+        v.record(committed("c", 0, 7));
+        let verdict = v.verdict(0);
+        assert_eq!(verdict.commit_checks, 2);
+        assert_eq!(verdict.commit_violations.len(), 1, "{verdict}");
+    }
+
+    /// On a recreated topic the coordinator hands the new generation's
+    /// partitions out before the old owner's clean revoke of the same-named
+    /// old-generation partitions lands. Not a fence: no violation.
+    #[test]
+    fn recreated_topic_suspends_the_overlap_check() {
+        let v = ConservationVerifier::new();
+        v.record(rebalance("c1", RebalanceCallback::Assigned, &[0, 1, 2]));
+        v.record(rebalance("c2", RebalanceCallback::Assigned, &[3, 4, 5]));
+        v.note_expected_loss(ExpectedLossHint::RecreateBlackout("t".to_string()));
+        v.record(rebalance("c2", RebalanceCallback::Assigned, &[1]));
+        v.record(rebalance("c1", RebalanceCallback::Revoked, &[0, 1, 2]));
+        v.record(rebalance("c1", RebalanceCallback::Assigned, &[0, 2]));
+        let verdict = v.verdict(0);
+        assert!(verdict.rebalance_violations.is_empty(), "{verdict}");
+    }
+
+    /// The consumer stamps a record's topic id from the live map, so an
+    /// old-generation record polled after the recreate carries the new id. When
+    /// the consumer saw the record at exactly the address the producer's ack
+    /// named, the ack's generation wins: the legitimate retry into the new
+    /// generation is then a cross-generation repeat, not a double write.
+    #[test]
+    fn consumed_topic_id_is_corrected_from_the_ack_at_the_same_address() {
+        let old = Uuid::from_bytes([1u8; 16]);
+        let new = Uuid::from_bytes([2u8; 16]);
+        let v = ConservationVerifier::new();
+        v.record(WorkloadEvent::Delivered { index: 7, topic: "t".into(), topic_id: old, partition: 0, offset: 100 });
+        // Old-generation copy, polled after the id map switched to `new`.
+        v.record(WorkloadEvent::Consumed {
+            consumer: "c".into(),
+            index: 7,
+            topic: "t".into(),
+            topic_id: new,
+            partition: 0,
+            offset: 100,
+        });
+        // The producer's retry into the new generation.
+        v.record(WorkloadEvent::Consumed {
+            consumer: "c".into(),
+            index: 7,
+            topic: "t".into(),
+            topic_id: new,
+            partition: 0,
+            offset: 3,
+        });
+        let verdict = v.verdict(0);
+        assert!(verdict.producer_duplicates.is_empty(), "not a double write: {verdict}");
+        assert_eq!(verdict.cross_generation_duplicates, 1);
+        assert!(verdict.is_pass(), "{verdict}");
+    }
+
     /// The per-topic consume-progress signal advances only for the named topic,
     /// so the drain can detect a resumed consumer on a just-recreated topic even
     /// while the other topics' consumption keeps the GLOBAL counter climbing.
@@ -1554,6 +1900,108 @@ mod tests {
 
     fn committed(consumer: &str, partition: i32, offset: i64) -> WorkloadEvent {
         WorkloadEvent::Committed { consumer: consumer.into(), topic: "t".into(), partition, offset }
+    }
+
+    fn delivered_at(index: u64, partition: i32, offset: i64) -> WorkloadEvent {
+        WorkloadEvent::Delivered { index, topic: "t".into(), topic_id: zero(), partition, offset }
+    }
+
+    /// A listener consumer that reads offset 5 after offset 9 on the same
+    /// partition without a new assignment in between returned older data.
+    #[test]
+    fn consumer_offset_regression_within_an_assignment_fails() {
+        let v = ConservationVerifier::new();
+        v.record(rebalance("c1", RebalanceCallback::Assigned, &[0]));
+        v.record(consumed_by("c1", 0, 9));
+        v.record(consumed_by("c1", 0, 5));
+        let verdict = v.verdict(0);
+        assert_eq!(
+            verdict.order_violations,
+            vec!["c1: read t-0 offset 5 after offset 9 within one assignment (fetch returned older data)".to_string()]
+        );
+        assert!(
+            verdict.reasons.iter().any(|r| r.starts_with("ordering: 1 violation(s)")),
+            "{verdict}"
+        );
+    }
+
+    /// A re-read after the partition was assigned again is a legitimate
+    /// resume from the committed offset, and a consumer without a listener is
+    /// never checked (its reassignments are invisible).
+    #[test]
+    fn consumer_offset_regression_after_reassignment_or_without_listener_is_fine() {
+        let v = ConservationVerifier::new();
+        v.record(rebalance("c1", RebalanceCallback::Assigned, &[0]));
+        v.record(consumed_by("c1", 0, 9));
+        v.record(rebalance("c1", RebalanceCallback::Revoked, &[0]));
+        v.record(rebalance("c1", RebalanceCallback::Assigned, &[0]));
+        v.record(consumed_by("c1", 0, 5));
+        // gRPC-style consumer: no callbacks at all.
+        v.record(consumed_by("grpc", 1, 9));
+        v.record(consumed_by("grpc", 1, 5));
+        let verdict = v.verdict(0);
+        assert!(verdict.order_violations.is_empty(), "{verdict}");
+        assert_eq!(verdict.unscored_order_anomalies, 0);
+    }
+
+    /// One producer's acks on one partition must keep send order and log order
+    /// in step: a later index at a lower offset (or an earlier index at a
+    /// higher one) means records were appended out of send order.
+    #[test]
+    fn producer_send_order_disagreeing_with_log_order_fails() {
+        let v = ConservationVerifier::new();
+        v.record(sent(1, "p1"));
+        v.record(sent(2, "p1"));
+        v.record(sent(3, "p1"));
+        v.record(delivered_at(1, 0, 10));
+        v.record(delivered_at(2, 0, 11));
+        v.record(delivered_at(3, 0, 8));
+        let verdict = v.verdict(0);
+        assert_eq!(
+            verdict.order_violations,
+            vec![
+                "p1: ack for index 3 on t-0 at offset 8, but index 2 was acknowledged at offset 11 (send order and \
+                 log order disagree)"
+                    .to_string()
+            ]
+        );
+    }
+
+    /// Acks arriving out of callback order but consistent with the log (an
+    /// earlier index at a lower offset) are not a violation; two producers
+    /// interleaving on one partition are tracked separately.
+    #[test]
+    fn producer_order_check_tolerates_late_acks_and_separates_producers() {
+        let v = ConservationVerifier::new();
+        for (i, p) in [(1, "p1"), (2, "p1"), (3, "p2"), (4, "p2")] {
+            v.record(sent(i, p));
+        }
+        v.record(delivered_at(2, 0, 11));
+        v.record(delivered_at(1, 0, 10)); // late ack, consistent
+        v.record(delivered_at(4, 0, 12)); // p2 interleaves at a lower offset than p1's... fine, other producer
+        v.record(delivered_at(3, 0, 9));
+        let verdict = v.verdict(0);
+        assert!(verdict.order_violations.is_empty(), "{verdict}");
+    }
+
+    /// On a recreated topic an offset reset can look like a regression, so the
+    /// anomaly is reported but does not fail the run.
+    #[test]
+    fn ordering_anomalies_on_a_recreated_topic_are_reported_not_scored() {
+        let v = ConservationVerifier::new();
+        v.record(sent(1, "p1"));
+        v.record(sent(2, "p1"));
+        v.record(delivered_at(1, 0, 10));
+        v.note_expected_loss(ExpectedLossHint::RecreateBlackout("t".to_string()));
+        v.record(delivered_at(2, 0, 0));
+        let verdict = v.verdict(0);
+        assert!(verdict.order_violations.is_empty(), "{verdict}");
+        assert_eq!(verdict.unscored_order_anomalies, 1);
+        assert!(
+            verdict
+                .to_string()
+                .contains("ordering violations       : 0 (1 unscored on recreated topics)")
+        );
     }
 
     /// After a sync commit the committed offset is last consumed + 1: counted

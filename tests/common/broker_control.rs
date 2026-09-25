@@ -84,25 +84,34 @@ impl<'a> BrokerControl<'a> {
     /// `docker stop` waits out its grace period then SIGKILLs; for
     /// [`StopKind::Unclean`] we pass `docker kill` so there is no grace
     /// period at all.
-    pub fn stop(&self, node_id: u16, kind: StopKind) {
-        let id = self.container_id(node_id);
-        let status = match kind {
-            StopKind::Clean => Command::new("docker").args(["stop", id]).status(),
-            StopKind::Unclean => Command::new("docker").args(["kill", id]).status(),
-        };
-        let status = status.expect("failed to spawn docker to stop broker");
-        assert!(status.success(), "docker stop/kill failed for node {node_id} (container {id})");
+    ///
+    /// The docker command runs on a blocking thread: a clean stop waits out the
+    /// broker's controlled shutdown (seconds), and the chaos scenario is driven
+    /// on the same task as every producer and consumer future, so blocking here
+    /// would freeze all of them for exactly the leader-handoff window the fault
+    /// exists to exercise.
+    pub async fn stop(&self, node_id: u16, kind: StopKind) {
+        let id = self.container_id(node_id).to_string();
+        let status = tokio::task::spawn_blocking(move || match kind {
+            StopKind::Clean => Command::new("docker").args(["stop", &id]).status(),
+            StopKind::Unclean => Command::new("docker").args(["kill", &id]).status(),
+        })
+        .await
+        .expect("docker stop task panicked")
+        .expect("failed to spawn docker to stop broker");
+        assert!(status.success(), "docker stop/kill failed for node {node_id}");
     }
 
     /// Start a previously-stopped broker. It rejoins the KRaft quorum with
-    /// the same node id and catches up on metadata.
-    pub fn start(&self, node_id: u16) {
-        let id = self.container_id(node_id);
-        let status = Command::new("docker")
-            .args(["start", id])
-            .status()
+    /// the same node id and catches up on metadata. Runs off-task like
+    /// [`BrokerControl::stop`].
+    pub async fn start(&self, node_id: u16) {
+        let id = self.container_id(node_id).to_string();
+        let status = tokio::task::spawn_blocking(move || Command::new("docker").args(["start", &id]).status())
+            .await
+            .expect("docker start task panicked")
             .expect("failed to spawn docker to start broker");
-        assert!(status.success(), "docker start failed for node {node_id} (container {id})");
+        assert!(status.success(), "docker start failed for node {node_id}");
     }
 
     /// Whether the broker's container is currently running (the `pid()`
