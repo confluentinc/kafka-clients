@@ -1866,9 +1866,16 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_set_pending_callback_notify(
     *slot = Some(PendingCallbackNotify { notify, target: CallbackTarget { user_data, destroy: user_data_destroy } });
 }
 
-/// Subscribes to `topics` with a caller-thread rebalance listener (async): the
-/// listener callbacks are delivered to the embedder's thread via the pending
-/// queue, not run on the dispatcher thread. See the module section above.
+/// Subscribes to `topics` with a caller-thread rebalance listener (async).
+///
+/// The completion `callback` runs on the consumer's callback dispatcher thread.
+/// The rebalance-listener callbacks do not: each one is queued on the consumer,
+/// the notify registered with [`kafka_consumer_Consumer_set_pending_callback_notify`]
+/// fires (on the dispatcher thread), and the embedder runs the listener on its
+/// own thread by draining the queue with
+/// [`kafka_consumer_Consumer_next_pending_callback`] and acking each entry with
+/// [`kafka_consumer_Consumer_ack_pending_callback`]. The rebalance does not
+/// advance until the ack.
 ///
 /// # Safety
 ///
@@ -1893,8 +1900,16 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_subscribe_caller_thread_listene
 }
 
 /// Subscribes to a broker-side RE2/J `pattern` with a caller-thread rebalance
-/// listener (async). See
-/// [`kafka_consumer_Consumer_subscribe_caller_thread_listener_async`].
+/// listener (async).
+///
+/// The completion `callback` runs on the consumer's callback dispatcher thread.
+/// The rebalance-listener callbacks do not: each one is queued on the consumer,
+/// the notify registered with [`kafka_consumer_Consumer_set_pending_callback_notify`]
+/// fires (on the dispatcher thread), and the embedder runs the listener on its
+/// own thread by draining the queue with
+/// [`kafka_consumer_Consumer_next_pending_callback`] and acking each entry with
+/// [`kafka_consumer_Consumer_ack_pending_callback`]. The rebalance does not
+/// advance until the ack.
 ///
 /// # Safety
 ///
