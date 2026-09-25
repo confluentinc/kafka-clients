@@ -306,6 +306,7 @@ async fn chaos_run() {
         config.brokers,
         config.partitions,
         config.replication_factor,
+        config.security_protocol,
         Arc::new(super::verifier::ConservationVerifier::new()),
     )
     .await;
