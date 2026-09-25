@@ -15,9 +15,13 @@ header = """
  * kafka_common_Error_code, or an error handle for a function that returns one.
  * A function with an out_error parameter also stores an error describing the
  * panic there. A function that reports ordinary failures through a completion
- * callback reports the panic through that callback instead, exactly once. The
- * error's code is kafka_common_ErrorCode_LOCAL_ILLEGAL_STATE and its message
- * begins "Rust panic caught at the FFI boundary in <function>".
+ * callback reports the panic through that callback instead, exactly once,
+ * unless its documentation says that a synchronous failure does not invoke the
+ * callback. Such a function reports the panic as a synchronous failure,
+ * through its return value and out_error where it has one, and does not
+ * invoke the callback. The error's code is
+ * kafka_common_ErrorCode_LOCAL_ILLEGAL_STATE and its message begins
+ * "Rust panic caught at the FFI boundary in <function>".
  *
  * A panic is a bug in this library and may leave the handle it happened on in
  * an inconsistent state: destroy that handle and create a new one. Later calls

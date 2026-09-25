@@ -4127,6 +4127,9 @@ fn make_commit_callback(
 /// Like [`kafka_consumer_Consumer_commit_async`] this call is synchronous and
 /// returns as soon as the commit has been initiated (null on success, a non-null
 /// error handle on failure).
+/// A caught panic returns a `kafka_common_ErrorCode_LOCAL_ILLEGAL_STATE` error
+/// handle and does not invoke `callback`; `user_data_destroy` still fires, as
+/// for any other error.
 ///
 /// # Callback contract
 ///
@@ -4190,6 +4193,9 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_commit_async_with_callback(
 /// offsets fail to marshal (e.g. a negative offset) this returns the error
 /// **without registering the callback** — the callback never fires, but
 /// `user_data_destroy` still does.
+/// A caught panic is handled the same way: it returns a
+/// `kafka_common_ErrorCode_LOCAL_ILLEGAL_STATE` error handle, `callback` does
+/// not fire, and `user_data_destroy` still does.
 ///
 /// # Safety
 ///
@@ -5009,6 +5015,8 @@ mod tests {
     use crate::common::MetricName;
     use crate::common::MetricValue;
     use crate::common::metrics::{ClosureGauge, ClosureMeasurable, MetricConfig, MetricValueProvider, SystemTime};
+    use crate::ffi::common::kafka_common_ErrorCode_t::kafka_common_ErrorCode_LOCAL_ILLEGAL_STATE;
+    use crate::ffi::common::{kafka_common_Error_code, kafka_common_Error_destroy, kafka_common_Error_message};
     use std::collections::BTreeMap;
 
     fn metric(name: &str, tags: &[(&str, &str)], provider: MetricValueProvider) -> (MetricName, Arc<KafkaMetric>) {
@@ -5357,5 +5365,138 @@ mod tests {
         // Null is a no-op.
         unsafe { kafka_consumer_ConsumerRebalanceListener_destroy(std::ptr::null_mut()) };
         assert_eq!(1, DESTROY_CALLS.load(Ordering::SeqCst));
+    }
+
+    /// Counts a commit callback's invocations and its `user_data_destroy` firings;
+    /// the commit panic tests pass it as `user_data`.
+    #[derive(Default)]
+    struct CommitCallbackCounts {
+        callbacks: AtomicI32,
+        destroys: AtomicI32,
+    }
+
+    /// A commit callback that counts itself in the [`CommitCallbackCounts`] passed
+    /// as `user_data`, freeing whichever handles it is given, as a C caller must.
+    unsafe extern "C" fn count_commit_callback(
+        offsets: *mut kafka_consumer_OffsetMap_t,
+        error: *mut kafka_common_Error_t,
+        user_data: *mut c_void,
+    ) {
+        let counts = unsafe { &*(user_data as *const CommitCallbackCounts) };
+        counts.callbacks.fetch_add(1, Ordering::SeqCst);
+        if !offsets.is_null() {
+            unsafe { kafka_consumer_OffsetMap_destroy(offsets) };
+        }
+        if !error.is_null() {
+            unsafe { kafka_common_Error_destroy(error) };
+        }
+    }
+
+    /// A `user_data_destroy` hook that counts itself in the
+    /// [`CommitCallbackCounts`] passed as `user_data`.
+    unsafe extern "C" fn count_commit_destroy(user_data: *mut c_void) {
+        let counts = unsafe { &*(user_data as *const CommitCallbackCounts) };
+        counts.destroys.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// Asserts that `commit`, a call to one of the two commit-with-callback entry
+    /// points, reports a caught panic as a synchronous failure. These keep the
+    /// plain guard (§6 note 8), so the panic must come back as a
+    /// `LOCAL_ILLEGAL_STATE` error handle naming `function`, with no callback and
+    /// exactly one `user_data_destroy` (COMMENTS.79.md issue 1).
+    ///
+    /// The panic comes from making the call inside another tokio runtime, which
+    /// the synchronous consumer API does not support: `sync_void_op`'s `block_on`
+    /// panics ("Cannot start a runtime from within a runtime") before it polls the
+    /// commit, and the unwind drops the callback adapter with the unpolled future.
+    /// It is the one synchronous panic these entry points can be driven into
+    /// without a test hook in production code.
+    fn assert_commit_panic_is_a_synchronous_failure(
+        function: &str,
+        commit: impl FnOnce(*const kafka_consumer_Consumer_t, *mut c_void) -> *mut kafka_common_Error_t,
+    ) {
+        let consumer = unsafe { kafka_consumer_MockConsumer_new(std::ptr::null()) };
+        let counts = CommitCallbackCounts::default();
+        let user_data = &counts as *const CommitCallbackCounts as *mut c_void;
+        let outer = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        let error = outer.block_on(async { commit(consumer, user_data) });
+        drop(outer);
+
+        assert!(!error.is_null(), "a caught panic must return an error handle");
+        assert_eq!(
+            unsafe { kafka_common_Error_code(error) },
+            kafka_common_ErrorCode_LOCAL_ILLEGAL_STATE
+        );
+        let msg = unsafe { CStr::from_ptr(kafka_common_Error_message(error)) }
+            .to_string_lossy()
+            .into_owned();
+        unsafe { kafka_common_Error_destroy(error) };
+        assert!(
+            msg.starts_with(&format!("Rust panic caught at the FFI boundary in {function}:")),
+            "unexpected error message: {msg}"
+        );
+        assert!(
+            msg.contains("Cannot start a runtime from within a runtime"),
+            "unexpected error message: {msg}"
+        );
+
+        // Outside any runtime: dropping the consumer's own runtime inside one
+        // would panic.
+        unsafe { kafka_consumer_Consumer_destroy(consumer) };
+        // Give a stray completion ample time to reach the detached dispatcher.
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        assert_eq!(
+            counts.callbacks.load(Ordering::SeqCst),
+            0,
+            "a panic returned as an error handle must not also invoke the callback"
+        );
+        assert_eq!(
+            counts.destroys.load(Ordering::SeqCst),
+            1,
+            "user_data_destroy must fire exactly once"
+        );
+    }
+
+    #[test]
+    fn test_commit_async_with_callback_panic_is_a_synchronous_failure() {
+        assert_commit_panic_is_a_synchronous_failure(
+            "kafka_consumer_Consumer_commit_async_with_callback",
+            |consumer, user_data| unsafe {
+                kafka_consumer_Consumer_commit_async_with_callback(
+                    consumer,
+                    count_commit_callback,
+                    user_data,
+                    Some(count_commit_destroy),
+                )
+            },
+        );
+    }
+
+    /// The offsets marshal successfully, so the panic comes after the only
+    /// synchronous failure the documentation names.
+    #[test]
+    fn test_commit_async_offsets_with_callback_panic_is_a_synchronous_failure() {
+        let topic = std::ffi::CString::new("topic").unwrap();
+        let topics = [topic.as_ptr()];
+        let partitions = [0_i32];
+        let offsets = [5_i64];
+        let leader_epochs = [-1_i32];
+        assert_commit_panic_is_a_synchronous_failure(
+            "kafka_consumer_Consumer_commit_async_offsets_with_callback",
+            |consumer, user_data| unsafe {
+                kafka_consumer_Consumer_commit_async_offsets_with_callback(
+                    consumer,
+                    topics.as_ptr(),
+                    partitions.as_ptr(),
+                    offsets.as_ptr(),
+                    leader_epochs.as_ptr(),
+                    std::ptr::null(),
+                    1,
+                    count_commit_callback,
+                    user_data,
+                    Some(count_commit_destroy),
+                )
+            },
+        );
     }
 }

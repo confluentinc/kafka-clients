@@ -472,3 +472,80 @@ code and record the difference here.
     `bindings/python/test/unit/conftest.py` that skips on a 32-bit Python and
     on `MemoryError`. Each assertion matches a message only the new check
     produces, and each of the three tests failed against the unfixed extension.
+22. **Critic 79 issue 1 (round 2) — the preamble promised a panic callback
+    that five functions never fire.** It said a function that reports
+    ordinary failures through a completion callback "reports the panic
+    through that callback instead, exactly once". That holds for the 80 D4
+    sites and not for five of note 8's six plain-guard sites
+    (`kafka_producer_Producer_send_async`, `..._send_with_callback`,
+    `..._send_batch_async`,
+    `kafka_consumer_Consumer_commit_async_with_callback`,
+    `..._commit_async_offsets_with_callback`); the sixth,
+    `kafka_producer_RecordMetadata_copy`, reports no failure through its
+    callback, so the sentence never covered it. The behaviour stays; the text
+    changed.
+    - **Wording.** Both copies (`cbindgen.toml` and the `src/ffi/mod.rs`
+      module docs) now add: "…exactly once, unless its documentation says that
+      a synchronous failure does not invoke the callback. Such a function
+      reports the panic as a synchronous failure, through its return value and
+      out_error where it has one, and does not invoke the callback." The rest
+      of the preamble is unchanged.
+    - **Per-function docs.** Each of the five gained one sentence saying what a
+      caught panic produces there: `send_with_callback` returns null with the
+      error in `*out_error`; `send_async` writes `*out_error` only, so with a
+      null `out_error` the panic is only logged; `send_batch_async` returns
+      `-1` and stores nothing for the panic in `out_errors`; the two commits
+      return the error handle, and `user_data_destroy` still fires. None fires
+      the callback. "Does not invoke the callback" is what the guard does. A
+      panic raised after the callback was handed on can still see it delivered:
+      note 16's mid-loop `send_batch_async` case (hence "not invoked *for it*"
+      in that sentence), and the Critic's not-filed panic after registration in
+      `commit_async_with_callback`. Only a bug reaches either, and the
+      preamble's "destroy that handle" covers them.
+    - **Header diff against `a0b5065b`:** 21 lines added and 3 removed, in six
+      hunks (15744 → 15762 lines). The preamble's last three lines become seven
+      (header lines 11–17), and the five sentences add 14 lines: 3 each for
+      `commit_async_with_callback`, `commit_async_offsets_with_callback`,
+      `send_with_callback` and `send_async`, and 2 for `send_batch_async`. No
+      other line changed. This amends note 14's "byte-identical apart from the
+      preamble" by exactly those five sentences; the `# Panics` docs stay
+      verbatim.
+    - **Tests (four of the five).**
+      `test_send_with_callback_panic_is_a_synchronous_failure` poisons the
+      `kind` lock and asserts null, a LOCAL_ILLEGAL_STATE error in `out_error`
+      whose message starts with the function name and contains `PoisonError`,
+      and a callback counter (in `user_data`) still at 0 after `destroy` plus
+      200 ms. `test_send_batch_async_panic_is_a_synchronous_failure` uses the
+      negative-`count` precondition and asserts `-1`, an `out_errors` slot
+      still holding its sentinel, and the counter at 0. The two consumer tests
+      share `assert_commit_panic_is_a_synchronous_failure`. It makes the call
+      inside another tokio runtime, which the synchronous consumer API does not
+      support: `sync_void_op`'s `block_on` panics ("Cannot start a runtime from
+      within a runtime") before it polls the commit. It then asserts a
+      LOCAL_ILLEGAL_STATE error handle naming the function, no callback, and
+      exactly one `user_data_destroy` (the unwind drops the adapter with the
+      unpolled future). The offsets test marshals valid offsets, so the panic
+      comes after the one synchronous failure its docs name. Poisoning was not
+      an option there: neither entry point takes a lock before the commit
+      starts, and the access guard is an atomic CAS that fails with an
+      ordinary error.
+    - **`send_async` is not pinned.** It has no synchronous panic that the
+      existing fixtures can trigger. It takes no lock, so poisoning does not
+      reach it. It has no `block_on`, so the nested runtime does not either.
+      It builds its record through `Result`-returning code. What is left ends
+      the process instead of unwinding: tokio's `UnboundedSender::send` aborts
+      on counter overflow, the `slice::from_raw_parts` precondition checks
+      cannot unwind, and allocation failure aborts. The brief ruled out a test
+      hook in production code. Its plain `#[ffi_guard]` generates the same
+      `out_error` store as `send_with_callback`'s, which is pinned; it only
+      has no value to return.
+    - **Teeth.** With each test's callback assertion inverted (`0` → `1`), all
+      four fail on it. With the plain guard swapped for a D4-style `on_panic`
+      that fires the callback (the producer ones still writing `out_error`, so
+      only the callback assertion can differ), all four fail on the callback
+      assertion (`left: 1, right: 0`) after their other assertions pass. With
+      `#[ffi_guard]` removed from the four functions, each test's process
+      aborts (exit 134, "panic in a function that cannot unwind"), which is
+      how these functions behaved before `7294d8d0`.
+    - `COMMENTS.DONE.79.md` and `COMMENTS.79.md` match `.gitignore`'s
+      `/COMMENTS*\.md`, so the move of issue 1 exists in the working tree only.

@@ -1411,6 +1411,9 @@ pub unsafe extern "C" fn kafka_producer_Producer_send(
 /// `out_error` reports synchronous validation errors (null topic / bad
 /// key/value length) and synchronous send failures (closed producer), in which
 /// case `callback` is **not** invoked.
+/// A caught panic is reported the same way: the function returns null,
+/// `*out_error` receives a `kafka_common_ErrorCode_LOCAL_ILLEGAL_STATE` error,
+/// and `callback` is not invoked.
 ///
 /// # Zero-copy / lifetime contract
 ///
@@ -1712,6 +1715,9 @@ pub unsafe extern "C" fn kafka_producer_Producer_send_batch(
 ///
 /// `out_error` reports only synchronous validation errors (null topic / bad
 /// key/value length), in which case `callback` is **not** invoked.
+/// A caught panic is reported the same way: `*out_error` receives a
+/// `kafka_common_ErrorCode_LOCAL_ILLEGAL_STATE` error and `callback` is not
+/// invoked, so with a null `out_error` the panic is only logged.
 ///
 /// # Zero-copy / lifetime contract
 ///
@@ -1828,6 +1834,8 @@ pub unsafe extern "C" fn kafka_producer_Producer_send_async(
 /// `out_errors[i]` receives a non-null handle for records that fail synchronous
 /// validation (those do not produce a callback); null otherwise. Returns the
 /// number of records accepted for delivery.
+/// A caught panic returns `-1`; it is not stored in `out_errors`, and `callback`
+/// is not invoked for it.
 ///
 /// The same zero-copy / lifetime contract as
 /// [`kafka_producer_Producer_send_async`] applies to every record's
@@ -5386,6 +5394,117 @@ mod tests {
         assert!(
             finished.load(std::sync::atomic::Ordering::Acquire),
             "destroy must join every registered task before it frees the producer"
+        );
+    }
+
+    /// A send callback that counts its invocations in the `AtomicUsize` passed as
+    /// `user_data`, freeing whichever handles it is given, as a C caller must.
+    unsafe extern "C" fn count_send_callback(
+        metadata: *mut kafka_producer_RecordMetadata_t,
+        error: *mut kafka_common_Error_t,
+        user_data: *mut std::ffi::c_void,
+    ) {
+        let invocations = unsafe { &*(user_data as *const std::sync::atomic::AtomicUsize) };
+        invocations.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        if !metadata.is_null() {
+            unsafe { kafka_producer_RecordMetadata_destroy(metadata) };
+        }
+        if !error.is_null() {
+            unsafe { kafka_common_Error_destroy(error) };
+        }
+    }
+
+    /// `send_with_callback` keeps the plain guard (§6 note 8), because its docs say
+    /// a synchronous failure does not invoke the callback. A caught panic — here
+    /// from the `kind` lock an earlier panic poisoned — is such a failure: null,
+    /// the panic error in `out_error`, and no callback, not even after teardown
+    /// (COMMENTS.79.md issue 1).
+    #[test]
+    fn test_send_with_callback_panic_is_a_synchronous_failure() {
+        let producer = kafka_producer_MockProducer_new(true);
+        poison(&unsafe { producer_handle(producer) }.kind);
+        let topic = CString::new("topic").unwrap();
+        let value = b"value";
+        let invocations = std::sync::atomic::AtomicUsize::new(0);
+        let mut out_error: *mut kafka_common_Error_t = std::ptr::null_mut();
+        let future = unsafe {
+            kafka_producer_Producer_send_with_callback(
+                producer,
+                topic.as_ptr(),
+                -1,
+                -1,
+                std::ptr::null(),
+                -1,
+                value.as_ptr(),
+                value.len() as i32,
+                count_send_callback,
+                &invocations as *const std::sync::atomic::AtomicUsize as *mut std::ffi::c_void,
+                &mut out_error,
+            )
+        };
+        assert!(future.is_null(), "a caught panic must return null");
+        assert!(!out_error.is_null(), "a caught panic must be stored in out_error");
+        assert_eq!(
+            unsafe { kafka_common_Error_code(out_error) },
+            kafka_common_ErrorCode_LOCAL_ILLEGAL_STATE
+        );
+        let msg = unsafe { take_error_message(out_error) };
+        assert!(
+            msg.starts_with("Rust panic caught at the FFI boundary in kafka_producer_Producer_send_with_callback:"),
+            "unexpected error message: {msg}"
+        );
+        assert!(msg.contains("PoisonError"), "unexpected error message: {msg}");
+        unsafe { kafka_producer_Producer_destroy(producer) };
+        // Give a stray completion ample time to reach the detached dispatcher.
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        assert_eq!(
+            invocations.load(std::sync::atomic::Ordering::Acquire),
+            0,
+            "a panic reported through out_error must not also invoke the callback"
+        );
+    }
+
+    /// `send_batch_async` keeps the plain guard (§6 note 8), because its docs say a
+    /// record that fails synchronously produces no callback. A caught panic — here
+    /// from the negative-`count` precondition — is such a failure: `-1`, nothing
+    /// stored in `out_errors`, and no callback, not even after teardown
+    /// (COMMENTS.79.md issue 1).
+    #[test]
+    fn test_send_batch_async_panic_is_a_synchronous_failure() {
+        let producer = kafka_producer_MockProducer_new(true);
+        let topic = CString::new("topic").unwrap();
+        let records = [kafka_producer_ProducerRecord_t {
+            topic: topic.as_ptr(),
+            partition: -1,
+            timestamp: -1,
+            key: std::ptr::null(),
+            key_len: -1,
+            value: std::ptr::null(),
+            value_len: -1,
+        }];
+        // Neither a success (null) nor an error handle, so any store shows.
+        let sentinel = std::ptr::dangling_mut::<kafka_common_Error_t>();
+        let mut errors: [*mut kafka_common_Error_t; 1] = [sentinel];
+        let invocations = std::sync::atomic::AtomicUsize::new(0);
+        let accepted = unsafe {
+            kafka_producer_Producer_send_batch_async(
+                producer,
+                records.as_ptr(),
+                -1,
+                count_send_callback,
+                &invocations as *const std::sync::atomic::AtomicUsize as *mut std::ffi::c_void,
+                errors.as_mut_ptr(),
+            )
+        };
+        assert_eq!(accepted, -1, "a caught panic must return -1");
+        assert_eq!(errors[0], sentinel, "a caught panic must not be stored in out_errors");
+        unsafe { kafka_producer_Producer_destroy(producer) };
+        // Give a stray completion ample time to reach the detached dispatcher.
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        assert_eq!(
+            invocations.load(std::sync::atomic::Ordering::Acquire),
+            0,
+            "a panic reported through the return value must not also invoke the callback"
         );
     }
 
