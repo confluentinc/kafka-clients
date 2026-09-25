@@ -168,8 +168,8 @@ struct FfiConsumerHandle {
     /// which is the whole point of the handle: every method takes `&self`, so
     /// it bypasses the single-owner guard by design.
     consumer_handle: ConsumerHandle,
-    /// Whether this handle wraps a [`MockConsumer`].
-    #[allow(dead_code)]
+    /// Whether this handle wraps a [`MockConsumer`] (whose Java `close(Duration)`
+    /// does not validate its timeout).
     is_mock: bool,
     /// Caller-thread rebalance-callback delivery (Python binding, §31).
     ///
@@ -186,8 +186,9 @@ struct FfiConsumerHandle {
     /// enqueued above, so the embedder's blocking-API wait loop wakes and drains.
     /// Set via [`kafka_consumer_Consumer_set_pending_callback_notify`]; shared
     /// with every [`CallerThreadRebalanceListener`] so the listener reads the
-    /// **current** notify at callback time (the embedder re-registers it per
-    /// blocking op, e.g. the async client hops onto the running op's loop).
+    /// **current** notify at callback time. The embedder registers it once and
+    /// wakes whichever of its calls wait: re-registering it per operation would
+    /// let a call the access guard then rejects take it from the call in flight.
     pending_callback_notify: Arc<Mutex<Option<PendingCallbackNotify>>>,
 }
 
@@ -1362,27 +1363,31 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer_update_partitions(
     }
 }
 
-/// Builds an [`Error`] from a protocol error `code` + `message`, reusing the
-/// shared [`common::kafka_common_Error_new`] conversion (wire-code round-trip).
-/// Used by the mock error setters so a Python-injected `KafkaError` re-raises
-/// with a matching type/message.
+/// Builds an [`Error`] from an error `code` + `message` with the shared
+/// [`common::kafka_common_Error_new`] mapping, so an injected error reports the
+/// class of its code (a protocol code or a client-side negative one).
 ///
 /// # Safety
 ///
 /// `message` must be null or a valid C string.
 unsafe fn error_from_code_and_message(code: i32, message: *const c_char) -> Error {
-    let handle = unsafe { common::kafka_common_Error_new(code, message) };
-    // `kafka_common_Error_new` always returns a non-null handle; `take_error`
-    // consumes it back into an `Error`.
-    unsafe { common::take_error(handle) }.unwrap_or_else(|| Error::local_illegal_state(String::new()))
+    let message = if message.is_null() {
+        String::new()
+    } else {
+        unsafe { CStr::from_ptr(message) }.to_string_lossy().into_owned()
+    };
+    common::error_for_code(code, message)
 }
 
-/// Injects an error to be returned by the next `poll` on a mock consumer (mock
-/// only). Mirrors Java's `setPollException(KafkaException)`.
+/// Injects an error to be returned by the next `poll` on a mock consumer, or
+/// clears a pending one (mock only). Mirrors Java's
+/// `setPollException(KafkaException)`, whose `null` argument clears the field
+/// (`MockConsumer.java:344-346`).
 ///
-/// The error is built from `code` + `message` exactly as
-/// [`common::kafka_common_Error_new`] builds it: `code` is a Kafka protocol error
-/// code, and an unknown code maps to `UNKNOWN_SERVER_ERROR`. `message` may be
+/// With `clear` set, `code` and `message` are ignored and a pending error is
+/// cleared. Otherwise the error is built from `code` + `message` exactly as
+/// [`common::kafka_common_Error_new`] builds it (a Kafka protocol code, or a
+/// client-side negative one such as `LOCAL_ILLEGAL_STATE`); `message` may be
 /// null for an empty message. The error is consumed by the first `poll` that
 /// returns it.
 ///
@@ -1395,6 +1400,7 @@ unsafe fn error_from_code_and_message(code: i32, message: *const c_char) -> Erro
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_MockConsumer_set_poll_error(
     consumer: *const kafka_consumer_Consumer_t,
+    clear: bool,
     code: i32,
     message: *const c_char,
 ) -> *mut kafka_common_Error_t {
@@ -1403,20 +1409,25 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer_set_poll_error(
         return box_error(e);
     }
     let _g = ReleaseGuard(h);
-    let error = unsafe { error_from_code_and_message(code, message) };
     let mock = match unsafe { mock_mut(h) } {
         Ok(m) => m,
         Err(e) => return box_error(e),
+    };
+    let error = if clear {
+        None
+    } else {
+        Some(unsafe { error_from_code_and_message(code, message) })
     };
     mock.set_poll_error(error);
     std::ptr::null_mut()
 }
 
 /// Injects an error to be returned by the next `beginning_offsets` /
-/// `end_offsets` on a mock consumer (mock only). Mirrors Java's
-/// `setOffsetsException(KafkaException)`.
+/// `end_offsets` on a mock consumer, or clears a pending one (mock only).
+/// Mirrors Java's `setOffsetsException(KafkaException)`, whose `null` argument
+/// clears the field (`MockConsumer.java:348-350`).
 ///
-/// `code` + `message` build the error as in
+/// `clear`, `code` and `message` work as in
 /// [`kafka_consumer_MockConsumer_set_poll_error`].
 ///
 /// Returns null on success, or a non-null error handle (incl. `illegal_state`
@@ -1428,6 +1439,7 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer_set_poll_error(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_MockConsumer_set_offsets_error(
     consumer: *const kafka_consumer_Consumer_t,
+    clear: bool,
     code: i32,
     message: *const c_char,
 ) -> *mut kafka_common_Error_t {
@@ -1436,10 +1448,14 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer_set_offsets_error(
         return box_error(e);
     }
     let _g = ReleaseGuard(h);
-    let error = unsafe { error_from_code_and_message(code, message) };
     let mock = match unsafe { mock_mut(h) } {
         Ok(m) => m,
         Err(e) => return box_error(e),
+    };
+    let error = if clear {
+        None
+    } else {
+        Some(unsafe { error_from_code_and_message(code, message) })
     };
     mock.set_offsets_error(error);
     std::ptr::null_mut()
@@ -1729,17 +1745,60 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer_rebalance_async(
 // on a runtime worker — the consumer's background task keeps spinning, so a
 // reentrant `ConsumerHandle` op the listener submits completes (§41).
 
-/// The rebalance-listener method a pending callback carries. Matches the C-side
-/// discriminant: `0` = revoked, `1` = assigned, `2` = lost.
+/// The callback a pending entry carries. Matches the C-side discriminant: `0` =
+/// `onPartitionsRevoked`, `1` = `onPartitionsAssigned`, `2` =
+/// `onPartitionsLost`, `3` = an `OffsetCommitCallback.onComplete` (see
+/// [`FfiOffsetCommitCallback`]).
 const PENDING_METHOD_REVOKED: i32 = 0;
 const PENDING_METHOD_ASSIGNED: i32 = 1;
 const PENDING_METHOD_LOST: i32 = 2;
+const PENDING_METHOD_COMMIT: i32 = 3;
 
-/// One rebalance callback awaiting delivery on the embedder's thread.
+/// A commit callback's C invocation, run by the thread that acks its entry.
+type PendingJob = Box<dyn FnOnce() + Send>;
+
+/// One callback awaiting delivery on the embedder's thread.
 struct PendingRebalanceCallback {
     method: i32,
     partitions: Vec<TopicPartition>,
     ack: tokio::sync::oneshot::Sender<Result<(), Error>>,
+    /// For [`PENDING_METHOD_COMMIT`]: the C commit callback, which
+    /// [`kafka_consumer_Consumer_ack_pending_callback`] runs on the acking
+    /// thread before it completes the entry. `None` for a listener method,
+    /// which the embedder runs itself.
+    job: Option<PendingJob>,
+}
+
+/// Queues `entry` for delivery on the embedder's thread and fires the notify
+/// registered with [`kafka_consumer_Consumer_set_pending_callback_notify`] (on
+/// the dispatcher thread, so it may take the embedder's lock, e.g. the GIL).
+/// Reads the CURRENT notify from the shared slot, since the embedder may
+/// re-register it per blocking op.
+fn enqueue_pending(
+    queue: &Mutex<std::collections::VecDeque<PendingRebalanceCallback>>,
+    completion_tx: &std::sync::mpsc::Sender<CompletionJob>,
+    notify: &Mutex<Option<PendingCallbackNotify>>,
+    entry: PendingRebalanceCallback,
+) {
+    queue.lock().unwrap().push_back(entry);
+    let snapshot = notify
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map(|n| NotifySnapshot { notify: n.notify, user_data: n.target.user_data });
+    if let Some(snapshot) = snapshot {
+        enqueue_or_run_inline(
+            completion_tx,
+            Box::new(move || {
+                // Move the whole `Send` snapshot in (not its raw-pointer field,
+                // which Rust 2021 disjoint capture would grab instead).
+                let snapshot = snapshot;
+                // SAFETY: `notify` + `user_data` were supplied together by the
+                // embedder and remain valid until the consumer is destroyed.
+                unsafe { (snapshot.notify)(snapshot.user_data) };
+            }),
+        );
+    }
 }
 
 /// The registered C notification fired when a callback is enqueued. Owns
@@ -1781,32 +1840,14 @@ struct CallerThreadRebalanceListener {
 impl CallerThreadRebalanceListener {
     async fn enqueue_and_wait(&self, method: i32, partitions: &[TopicPartition]) -> Result<(), Error> {
         let (ack_tx, ack_rx) = tokio::sync::oneshot::channel::<Result<(), Error>>();
-        {
-            let mut queue = self.queue.lock().unwrap();
-            queue.push_back(PendingRebalanceCallback { method, partitions: partitions.to_vec(), ack: ack_tx });
-        }
         // Wake the embedder's blocking-API wait loop from the dispatcher thread
-        // (GIL-safe for the Python binding), so it drains the queue. Read the
-        // CURRENT notify from the shared slot (not a subscribe-time snapshot).
-        let snapshot = self
-            .notify
-            .lock()
-            .unwrap()
-            .as_ref()
-            .map(|n| NotifySnapshot { notify: n.notify, user_data: n.target.user_data });
-        if let Some(snapshot) = snapshot {
-            enqueue_or_run_inline(
-                &self.completion_tx,
-                Box::new(move || {
-                    // Move the whole `Send` snapshot in (not its raw-pointer field,
-                    // which Rust 2021 disjoint capture would grab instead).
-                    let snapshot = snapshot;
-                    // SAFETY: `notify` + `user_data` were supplied together by the
-                    // embedder and remain valid until the consumer is destroyed.
-                    unsafe { (snapshot.notify)(snapshot.user_data) };
-                }),
-            );
-        }
+        // (GIL-safe for the Python binding), so it drains the queue.
+        enqueue_pending(
+            &self.queue,
+            &self.completion_tx,
+            &self.notify,
+            PendingRebalanceCallback { method, partitions: partitions.to_vec(), ack: ack_tx, job: None },
+        );
         // Park on the ack. Dropping the sender (embedder never acked, e.g. the
         // consumer is being torn down) resolves to an Err via `recv` error →
         // treat as "no error" so teardown is not blocked.
@@ -1845,8 +1886,19 @@ pub struct kafka_consumer_PendingCallback_t {
     _private: [u8; 0],
 }
 
-/// Registers the notification fired when a caller-thread rebalance callback is
-/// enqueued. Call once, before subscribing with a caller-thread listener.
+/// Registers the notification fired when a callback is enqueued for delivery on
+/// the embedder's thread. Call once, before subscribing with a caller-thread
+/// listener or registering a commit callback: the slot holds one notify, so an
+/// embedder with several waiting calls (e.g. tasks of an event loop) registers
+/// one that wakes all of them, rather than one per call.
+///
+/// Registering a notify also moves commit callbacks
+/// ([`kafka_consumer_Consumer_commit_async_with_callback`]) onto the caller's
+/// thread: one that completes inside a synchronous call runs on that call's
+/// thread, and one that completes inside an `_async` operation is queued too
+/// (method `3`) and runs on the thread that acks it — so the embedder must drain
+/// the queue while it waits for any `_async` operation, not only after
+/// subscribing with a listener.
 ///
 /// # Safety
 ///
@@ -1967,8 +2019,12 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_next_pending_callback(
     }
 }
 
-/// The rebalance-listener method a pending callback carries (`0` = revoked,
-/// `1` = assigned, `2` = lost).
+/// The callback a pending entry carries: `0` = `onPartitionsRevoked`, `1` =
+/// `onPartitionsAssigned`, `2` = `onPartitionsLost` (run the listener, then ack
+/// with its result), `3` = an `OffsetCommitCallback.onComplete` registered with
+/// [`kafka_consumer_Consumer_commit_async_with_callback`] /
+/// [`kafka_consumer_Consumer_commit_async_offsets_with_callback`] (just ack:
+/// the ack runs the commit callback on the acking thread).
 ///
 /// # Safety
 ///
@@ -1996,10 +2052,16 @@ pub unsafe extern "C" fn kafka_consumer_PendingCallback_partitions(
     box_topic_partition_list(pending.partitions.clone())
 }
 
-/// Completes a pending callback with the result of running the user listener
-/// (`error` null = success), freeing the handle and un-parking the op that
-/// triggered it. A non-null `error` fails the rebalance, exactly as a Java
-/// listener that throws.
+/// Completes a pending callback, freeing the handle and un-parking the op that
+/// triggered it.
+///
+/// For a listener method (`0`–`2`), `error` is the result of running the user
+/// listener (null = success); a non-null `error` fails the rebalance, exactly as
+/// a Java listener that throws. For a commit callback (`3`), this call first
+/// runs the registered commit callback **on the calling thread** (Java runs
+/// `OffsetCommitCallback.onComplete` on the thread calling `poll()` /
+/// `commitSync()` / …), then completes the entry; `error` should be null and is
+/// freed if not.
 ///
 /// # Safety
 ///
@@ -2011,10 +2073,17 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_ack_pending_callback(
     pending: *mut kafka_consumer_PendingCallback_t,
     error: *mut kafka_common_Error_t,
 ) {
-    let pending = unsafe { Box::from_raw(pending as *mut PendingRebalanceCallback) };
-    let result = match unsafe { common::take_error(error) } {
-        Some(e) => Err(e),
-        None => Ok(()),
+    let mut pending = unsafe { Box::from_raw(pending as *mut PendingRebalanceCallback) };
+    let error = unsafe { common::take_error(error) };
+    let result = match pending.job.take() {
+        Some(job) => {
+            job();
+            Ok(())
+        },
+        None => match error {
+            Some(e) => Err(e),
+            None => Ok(()),
+        },
     };
     // The receiver is only dropped if the op was cancelled; ignore send failure.
     let _ = pending.ack.send(result);
@@ -4192,15 +4261,16 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_seek_async(
 }
 
 /// Seeks a single partition to `offset` with commit metadata / leader epoch
-/// (sync). Pass `metadata == NULL` for no metadata and `leader_epoch < 0` for
-/// no leader epoch.
+/// (sync). Java's `seek(TopicPartition, OffsetAndMetadata)`. Pass
+/// `metadata == NULL` for no metadata and `leader_epoch < 0` for no leader
+/// epoch.
 ///
 /// # Safety
 ///
 /// `consumer` must be a valid handle; `topic` a valid C string; `metadata` null
 /// or a valid C string.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_consumer_Consumer_seek_with_metadata(
+pub unsafe extern "C" fn kafka_consumer_Consumer_seek_with_offset_and_metadata(
     consumer: *const kafka_consumer_Consumer_t,
     topic: *const c_char,
     partition: i32,
@@ -4223,9 +4293,39 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_seek_with_metadata(
     unsafe { sync_void_op(consumer, move |c| Box::pin(c.seek_with_offset_and_metadata(tp, oam))) }
 }
 
+/// **Deprecated:** the earlier name of
+/// [`kafka_consumer_Consumer_seek_with_offset_and_metadata`], which it calls;
+/// kept so existing callers still link. Use the new name, which is the one
+/// CLAUDE.md §2/§3 derive for Java's `seek(TopicPartition, OffsetAndMetadata)`.
+///
+/// # Safety
+///
+/// As for [`kafka_consumer_Consumer_seek_with_offset_and_metadata`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_consumer_Consumer_seek_with_metadata(
+    consumer: *const kafka_consumer_Consumer_t,
+    topic: *const c_char,
+    partition: i32,
+    offset: i64,
+    leader_epoch: i32,
+    metadata: *const c_char,
+) -> *mut kafka_common_Error_t {
+    unsafe {
+        kafka_consumer_Consumer_seek_with_offset_and_metadata(
+            consumer,
+            topic,
+            partition,
+            offset,
+            leader_epoch,
+            metadata,
+        )
+    }
+}
+
 /// Seeks a single partition to `offset` with commit metadata / leader epoch
-/// (async). Pass `metadata == NULL` for no metadata and `leader_epoch < 0` for
-/// no leader epoch.
+/// (async). Java's `seek(TopicPartition, OffsetAndMetadata)`. Pass
+/// `metadata == NULL` for no metadata and `leader_epoch < 0` for no leader
+/// epoch.
 ///
 /// The completion `callback` runs on the consumer's callback dispatcher thread.
 ///
@@ -4234,7 +4334,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_seek_with_metadata(
 /// `consumer` must be a valid handle; `topic` a valid C string; `metadata` null
 /// or a valid C string.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_consumer_Consumer_seek_with_metadata_async(
+pub unsafe extern "C" fn kafka_consumer_Consumer_seek_with_offset_and_metadata_async(
     consumer: *const kafka_consumer_Consumer_t,
     topic: *const c_char,
     partition: i32,
@@ -4261,6 +4361,40 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_seek_with_metadata_async(
         },
     };
     unsafe { async_void_op(consumer, callback, user_data, move |c| c.seek_with_offset_and_metadata(tp, oam)) };
+}
+
+/// **Deprecated:** the earlier name of
+/// [`kafka_consumer_Consumer_seek_with_offset_and_metadata_async`], which it
+/// calls; kept so existing callers still link. Use the new name.
+///
+/// The completion `callback` runs on the consumer's callback dispatcher thread.
+///
+/// # Safety
+///
+/// As for [`kafka_consumer_Consumer_seek_with_offset_and_metadata_async`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_consumer_Consumer_seek_with_metadata_async(
+    consumer: *const kafka_consumer_Consumer_t,
+    topic: *const c_char,
+    partition: i32,
+    offset: i64,
+    leader_epoch: i32,
+    metadata: *const c_char,
+    callback: kafka_consumer_Consumer_op_callback_t,
+    user_data: *mut c_void,
+) {
+    unsafe {
+        kafka_consumer_Consumer_seek_with_offset_and_metadata_async(
+            consumer,
+            topic,
+            partition,
+            offset,
+            leader_epoch,
+            metadata,
+            callback,
+            user_data,
+        )
+    }
 }
 
 /// Seeks the given partitions to their beginning offsets (sync).
@@ -4453,7 +4587,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_commit_sync_async(
 ///
 /// Shared with the producer FFI, so
 /// `kafka_producer_Producer_send_offsets_to_transaction` marshals its offsets
-/// exactly like `kafka_consumer_Consumer_commit_sync_offsets`.
+/// exactly like `kafka_consumer_Consumer_commit_sync_with_offsets`.
 ///
 /// # Safety
 ///
@@ -4495,7 +4629,8 @@ pub(crate) unsafe fn read_offset_map(
     Ok(map)
 }
 
-/// Commits specific offsets synchronously (sync). Parallel arrays of
+/// Commits specific offsets synchronously (sync). Java's
+/// `commitSync(Map<TopicPartition, OffsetAndMetadata>)`. Parallel arrays of
 /// `(topic, partition, offset, leader_epoch, metadata)`; `metadata` may be null
 /// and `leader_epoch < 0` means no epoch.
 ///
@@ -4503,7 +4638,7 @@ pub(crate) unsafe fn read_offset_map(
 ///
 /// `consumer` a valid handle; arrays `count` valid entries.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_consumer_Consumer_commit_sync_offsets(
+pub unsafe extern "C" fn kafka_consumer_Consumer_commit_sync_with_offsets(
     consumer: *const kafka_consumer_Consumer_t,
     topics: *const *const c_char,
     partitions: *const i32,
@@ -4519,9 +4654,76 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_commit_sync_offsets(
     unsafe { sync_void_op(consumer, move |c| Box::pin(c.commit_sync_with_offsets(map))) }
 }
 
+/// **Deprecated:** the earlier name of
+/// [`kafka_consumer_Consumer_commit_sync_with_offsets`], which it calls; kept
+/// so existing callers still link. Use the new name, which is the one CLAUDE.md
+/// §2/§3 derive for Java's `commitSync(Map<TopicPartition, OffsetAndMetadata>)`.
+///
+/// # Safety
+///
+/// As for [`kafka_consumer_Consumer_commit_sync_with_offsets`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_consumer_Consumer_commit_sync_offsets(
+    consumer: *const kafka_consumer_Consumer_t,
+    topics: *const *const c_char,
+    partitions: *const i32,
+    offsets: *const i64,
+    leader_epochs: *const i32,
+    metadata: *const *const c_char,
+    count: i32,
+) -> *mut kafka_common_Error_t {
+    unsafe {
+        kafka_consumer_Consumer_commit_sync_with_offsets(
+            consumer,
+            topics,
+            partitions,
+            offsets,
+            leader_epochs,
+            metadata,
+            count,
+        )
+    }
+}
+
+/// **Deprecated:** the earlier name of
+/// [`kafka_consumer_Consumer_commit_sync_with_offsets_async`], which it calls;
+/// kept so existing callers still link. Use the new name.
+///
+/// The completion `callback` runs on the consumer's callback dispatcher thread.
+///
+/// # Safety
+///
+/// As for [`kafka_consumer_Consumer_commit_sync_with_offsets_async`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_consumer_Consumer_commit_sync_offsets_async(
+    consumer: *const kafka_consumer_Consumer_t,
+    topics: *const *const c_char,
+    partitions: *const i32,
+    offsets: *const i64,
+    leader_epochs: *const i32,
+    metadata: *const *const c_char,
+    count: i32,
+    callback: kafka_consumer_Consumer_op_callback_t,
+    user_data: *mut c_void,
+) {
+    unsafe {
+        kafka_consumer_Consumer_commit_sync_with_offsets_async(
+            consumer,
+            topics,
+            partitions,
+            offsets,
+            leader_epochs,
+            metadata,
+            count,
+            callback,
+            user_data,
+        )
+    }
+}
+
 /// Commits specific offsets asynchronously (async dispatch of
-/// [`kafka_consumer_Consumer_commit_sync_offsets`]; the callback fires when the
-/// commit has completed). One-operation-in-flight; reuses
+/// [`kafka_consumer_Consumer_commit_sync_with_offsets`]; the callback fires when
+/// the commit has completed). One-operation-in-flight; reuses
 /// [`kafka_consumer_Consumer_op_callback_t`].
 ///
 /// The completion `callback` runs on the consumer's callback dispatcher thread.
@@ -4530,7 +4732,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_commit_sync_offsets(
 ///
 /// `consumer` a valid handle; arrays `count` valid entries.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_consumer_Consumer_commit_sync_offsets_async(
+pub unsafe extern "C" fn kafka_consumer_Consumer_commit_sync_with_offsets_async(
     consumer: *const kafka_consumer_Consumer_t,
     topics: *const *const c_char,
     partitions: *const i32,
@@ -4557,7 +4759,14 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_commit_sync_offsets_async(
 /// [`kafka_consumer_Consumer_commit_async_with_callback`] and
 /// [`kafka_consumer_Consumer_commit_async_offsets_with_callback`].
 ///
-/// The completion `callback` runs on the consumer's callback dispatcher thread.
+/// While a caller-thread listener is registered
+/// ([`kafka_consumer_Consumer_subscribe_caller_thread_listener_async`]), this
+/// call can wait for a queued listener callback: the core's commit waits for
+/// the offsets it commits and delivers the background events meanwhile
+/// (`consumer-threading.md` §31; Java's `commitAsync` does not). Make the call
+/// from a thread other than the one that drains the queue
+/// ([`kafka_consumer_Consumer_next_pending_callback`]), while that thread
+/// drains, or it can block forever.
 ///
 /// # Safety
 ///
@@ -4582,9 +4791,10 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_commit_async(
 /// [`kafka_common_Error_destroy`] (matching the "callbacks own the handles
 /// delivered to them" convention of the async consumer callbacks).
 ///
-/// Invoked on the consumer's callback dispatcher thread, exactly once per
-/// registration, when the commit completes. See
-/// [`kafka_consumer_Consumer_commit_async_with_callback`] for the full contract.
+/// Invoked exactly once per registration, when the commit completes, on the
+/// thread described by [`kafka_consumer_Consumer_commit_async_with_callback`]
+/// (the consumer's callback dispatcher thread, or the embedder's calling thread
+/// when a pending-callback notify is registered), which has the full contract.
 ///
 /// Named after the **Java** method it carries the callback for
 /// (`commitAsync(OffsetCommitCallback)`) rather than after either C entry point,
@@ -4621,40 +4831,97 @@ pub type kafka_consumer_Consumer_commit_async_user_data_destroy_t = unsafe exter
 /// Holds the `user_data` inside a [`CallbackTarget`], so the optional
 /// `user_data_destroy` hook fires exactly once when the core drops the
 /// registration (the trait object is stored as `Arc<dyn OffsetCommitCallback>`).
+///
+/// Java runs `OffsetCommitCallback.onComplete` on the thread calling `poll()` /
+/// `commitSync()` / `commitAsync()` / … (`AsyncKafkaConsumer`'s
+/// `OffsetCommitCallbackInvoker.executeCallbacks()`), which the core mirrors by
+/// invoking [`OffsetCommitCallback::on_complete`] from inside those calls. An
+/// embedder that registered a pending-callback notify
+/// ([`kafka_consumer_Consumer_set_pending_callback_notify`]) gets the C callback
+/// on its calling thread too:
+///
+/// 1. invoked on the thread that holds the access guard — inside a synchronous
+///    FFI call (`block_on` on the caller's thread, e.g. a later `commit_async`
+///    running the callbacks of earlier commits, or a `MockConsumer`'s inline
+///    invocation): the callback runs right there;
+/// 2. invoked on a runtime worker (an `_async` operation): the callback is
+///    queued as a [`PENDING_METHOD_COMMIT`] entry and runs on the thread that
+///    acks it with [`kafka_consumer_Consumer_ack_pending_callback`] — the
+///    embedder's thread draining the queue inside its waiting call.
+///
+/// Without a registered notify the callback runs on the consumer's callback
+/// dispatcher thread. In each case `on_complete` returns only after the C
+/// callback has returned, so the call that delivers it does not complete first.
 struct FfiOffsetCommitCallback {
     callback: kafka_consumer_Consumer_commit_async_callback_t,
     /// Owns `user_data` (and fires the destroy hook on drop).
     target: CallbackTarget,
-    /// Sender for the consumer's completion-dispatch queue.
-    completion_tx: std::sync::mpsc::Sender<CompletionJob>,
+    /// The consumer handle: its access-guard owner, pending queue, notify slot
+    /// and completion-dispatch queue.
+    ///
+    /// It does **not** outlive every registration:
+    /// [`kafka_consumer_Consumer_destroy`] frees the handle's allocation when it
+    /// moves the fields out of the box, and drops the consumer holding the
+    /// registrations only afterwards. The reference is sound because it is only
+    /// read inside `on_complete`, which runs only from the application-side
+    /// futures of calls on this consumer; by the time `destroy` runs, those have
+    /// finished or are cancelled by the runtime shutdown that comes before the
+    /// consumer's drop, and dropping a registration only releases `user_data`
+    /// (the same argument as the `&'static` handle of the poll completion).
+    handle: &'static FfiConsumerHandle,
 }
 
 #[async_trait]
 impl OffsetCommitCallback for FfiOffsetCommitCallback {
     async fn on_complete(&self, offsets: &HashMap<TopicPartition, OffsetAndMetadata>, error: Option<&Error>) {
         // Clone the borrowed inputs into owned, `Send` values *before* the job:
-        // the C handles themselves are built inside the job, on the dispatcher
+        // the C handles themselves are built inside the job, on the delivering
         // thread, so no raw pointer is ever held across an `.await` (the same
         // reason `async_value_op` builds its handles in `complete`).
+        let partitions: Vec<TopicPartition> = offsets.keys().cloned().collect();
         let offsets = offsets.clone();
         let error = error.cloned();
         let callback = self.callback;
         // Capture the whole `Send` wrapper rather than the raw pointer field
         // (Rust 2021 disjoint closure capture would otherwise grab the latter).
         let user_data = SendUserData(self.target.user_data);
-        // Wait for the C callback to return before returning from `on_complete`:
-        // Java runs `onComplete` on the thread calling `poll()`/`commitSync()`,
-        // so the FFI call must not return first — and firing-and-forgetting
-        // would let the C caller release `user_data` while the job is queued.
-        dispatch_and_wait(&self.completion_tx, move || {
+        let fire = move || {
             let user_data = user_data;
             let map = box_offset_map(offsets);
             let error = error.map(box_error).unwrap_or(std::ptr::null_mut());
             // SAFETY: `callback` was supplied by the C caller along with
             // `user_data`; both handles are freshly allocated and handed over.
             unsafe { callback(map, error, user_data.into_ptr()) };
-        })
-        .await;
+        };
+        let h = self.handle;
+        let caller_thread_delivery = h.pending_callback_notify.lock().unwrap().is_some();
+        // 1. Inside a synchronous FFI call on the caller's thread.
+        if caller_thread_delivery && h.owner.load(Ordering::Acquire) == current_thread_id() {
+            fire();
+            return;
+        }
+        // 2. The embedder drains the caller-thread queue.
+        if caller_thread_delivery {
+            let (ack_tx, ack_rx) = tokio::sync::oneshot::channel::<Result<(), Error>>();
+            enqueue_pending(
+                &h.pending_rebalance_callbacks,
+                &h.completion_tx,
+                &h.pending_callback_notify,
+                PendingRebalanceCallback {
+                    method: PENDING_METHOD_COMMIT,
+                    partitions,
+                    ack: ack_tx,
+                    job: Some(Box::new(fire)),
+                },
+            );
+            // A dropped entry (the consumer is being torn down) resolves too.
+            let _ = ack_rx.await;
+            return;
+        }
+        // 3. The dispatcher thread. Wait for the C callback to return before
+        // returning from `on_complete`: firing-and-forgetting would let the C
+        // caller release `user_data` while the job is queued.
+        dispatch_and_wait(&h.completion_tx, fire).await;
     }
 }
 
@@ -4671,12 +4938,12 @@ fn make_commit_callback(
     // Same type the entry points spell out inline; named here so the C-facing
     // alias is tied to the Rust code that consumes it.
     user_data_destroy: Option<kafka_consumer_Consumer_commit_async_user_data_destroy_t>,
-    completion_tx: std::sync::mpsc::Sender<CompletionJob>,
+    handle: &'static FfiConsumerHandle,
 ) -> Arc<dyn OffsetCommitCallback> {
     Arc::new(FfiOffsetCommitCallback {
         callback,
         target: CallbackTarget { user_data, destroy: user_data_destroy },
-        completion_tx,
+        handle,
     })
 }
 
@@ -4687,10 +4954,27 @@ fn make_commit_callback(
 /// returns as soon as the commit has been initiated (null on success, a non-null
 /// error handle on failure).
 ///
+/// While a caller-thread listener is registered
+/// ([`kafka_consumer_Consumer_subscribe_caller_thread_listener_async`]), this
+/// call can wait for a queued listener callback: the core's commit waits for
+/// the offsets it commits and delivers the background events meanwhile
+/// (`consumer-threading.md` §31; Java's `commitAsync` does not). Make the call
+/// from a thread other than the one that drains the queue
+/// ([`kafka_consumer_Consumer_next_pending_callback`]), while that thread
+/// drains, or it can block forever.
+///
 /// # Callback contract
 ///
-/// - Fires **exactly once** per successful call, on the consumer's callback
-///   dispatcher thread, when the commit completes.
+/// - Fires **exactly once** per successful call, when the commit completes,
+///   inside a later call on this consumer (as Java runs `onComplete` inside
+///   `poll()` / `commitSync()` / `commitAsync()` / …; on a `MockConsumer`,
+///   inside this very call). It runs on the consumer's callback dispatcher
+///   thread, unless a pending-callback notify is registered
+///   ([`kafka_consumer_Consumer_set_pending_callback_notify`]); then it runs on
+///   the caller's thread: inside a synchronous call on the thread making that
+///   call, and inside an `_async` operation on the thread that acks the entry
+///   it is queued as ([`kafka_consumer_Consumer_ack_pending_callback`], method
+///   `3`) — the embedder's thread draining the queue inside its waiting call.
 /// - `offsets` and a non-null `error` are owned by the callee (see
 ///   [`kafka_consumer_Consumer_commit_async_callback_t`]).
 /// - The callback must **not** call the plain `kafka_consumer_Consumer_*` API of
@@ -4701,10 +4985,10 @@ fn make_commit_callback(
 ///   purpose and is the sanctioned reentrancy path, matching Java, where
 ///   `acquire()` is reentrant for the polling thread and `onComplete` therefore
 ///   may call `seek(...)` / `commitSync()` on the consumer.
-/// - Independently of that: a callback that block-waits on *consumer progress*
-///   (e.g. spins until another thread's `poll` returns) deadlocks the dispatcher
-///   queue, because the callback runs on the single dispatcher thread that must
-///   also deliver every other callback of this consumer.
+/// - Independently of that: a callback on the dispatcher thread that
+///   block-waits on *consumer progress* (e.g. spins until another thread's
+///   `poll` returns) deadlocks the dispatcher queue, because that single thread
+///   must also deliver every other callback of this consumer.
 /// - On a `MockConsumer` the core invokes the callback inline during the commit
 ///   (with `error` always null), so the callback has already run by the time this
 ///   function returns. Against a real broker the commit completes later, on a
@@ -4731,7 +5015,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_commit_async_with_callback(
     user_data_destroy: Option<unsafe extern "C" fn(*mut c_void)>,
 ) -> *mut kafka_common_Error_t {
     let h = unsafe { handle_ref(consumer) };
-    let cb = make_commit_callback(callback, user_data, user_data_destroy, h.completion_tx.clone());
+    let cb = make_commit_callback(callback, user_data, user_data_destroy, h);
     unsafe { sync_void_op(consumer, move |c| Box::pin(c.commit_async_with_callback(cb))) }
 }
 
@@ -4740,7 +5024,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_commit_async_with_callback(
 /// `commitAsync(Map<TopicPartition, OffsetAndMetadata>, OffsetCommitCallback)`.
 ///
 /// Offsets are passed as the same parallel arrays as
-/// [`kafka_consumer_Consumer_commit_sync_offsets`]: `metadata` may be null (whole
+/// [`kafka_consumer_Consumer_commit_sync_with_offsets`]: `metadata` may be null (whole
 /// array or individual entries) and a `leader_epoch` entry `< 0` means no epoch.
 ///
 /// The callback and `user_data` contracts are identical to
@@ -4748,6 +5032,15 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_commit_async_with_callback(
 /// offsets fail to marshal (e.g. a negative offset) this returns the error
 /// **without registering the callback** — the callback never fires, but
 /// `user_data_destroy` still does.
+///
+/// While a caller-thread listener is registered
+/// ([`kafka_consumer_Consumer_subscribe_caller_thread_listener_async`]), this
+/// call can wait for a queued listener callback: the core's commit waits for
+/// the offsets it commits and delivers the background events meanwhile
+/// (`consumer-threading.md` §31; Java's `commitAsync` does not). Make the call
+/// from a thread other than the one that drains the queue
+/// ([`kafka_consumer_Consumer_next_pending_callback`]), while that thread
+/// drains, or it can block forever.
 ///
 /// # Safety
 ///
@@ -4770,7 +5063,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_commit_async_offsets_with_callb
     let h = unsafe { handle_ref(consumer) };
     // Build the adapter (which takes ownership of `user_data`) BEFORE anything
     // that can fail, so every early return drops it and fires the destroy hook.
-    let cb = make_commit_callback(callback, user_data, user_data_destroy, h.completion_tx.clone());
+    let cb = make_commit_callback(callback, user_data, user_data_destroy, h);
     let map = match unsafe { read_offset_map(topics, partitions, offsets, leader_epochs, metadata, count) } {
         Ok(m) => m,
         Err(e) => return box_error(e),
@@ -4824,7 +5117,14 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_close(
     unsafe { sync_void_op(consumer, |c| Box::pin(c.close())) }
 }
 
-/// Closes the consumer with a timeout in milliseconds (sync).
+/// Closes the consumer with a timeout in milliseconds (sync). Java's deprecated
+/// `close(Duration)`, which is `close(CloseOptions.timeout(timeout))`.
+///
+/// A negative `timeout_ms` on a `KafkaConsumer` returns a
+/// `LOCAL_ILLEGAL_ARGUMENT` error with Java's message, "The timeout cannot be
+/// negative." (`AsyncKafkaConsumer.close(CloseOptions)`), and leaves the
+/// consumer open. Java's `MockConsumer.close(Duration)` does not read its
+/// timeout, so a mock handle closes whatever the value.
 ///
 /// # Safety
 ///
@@ -4834,6 +5134,10 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_close_with_timeout(
     consumer: *const kafka_consumer_Consumer_t,
     timeout_ms: i64,
 ) -> *mut kafka_common_Error_t {
+    let h = unsafe { handle_ref(consumer) };
+    if timeout_ms < 0 && !h.is_mock {
+        return box_error(Error::local_illegal_argument("The timeout cannot be negative."));
+    }
     let timeout = Duration::from_millis(timeout_ms.max(0) as u64);
     let options = CloseOptions::new_timeout(timeout);
     unsafe { sync_void_op(consumer, move |c| Box::pin(c.close_with_options(options))) }
@@ -5967,5 +6271,311 @@ mod tests {
         // Null is a no-op.
         unsafe { kafka_consumer_ConsumerRebalanceListener_destroy(std::ptr::null_mut()) };
         assert_eq!(1, DESTROY_CALLS.load(Ordering::SeqCst));
+    }
+
+    // ── P5: the one-time renames, the mock-error clear flag, the negative close
+    //    timeout and the caller-thread commit callback ──
+
+    /// An `earliest` mock consumer assigned to `t-0` with beginning offset 0.
+    fn assigned_mock() -> *mut kafka_consumer_Consumer_t {
+        let earliest = std::ffi::CString::new("earliest").unwrap();
+        let c = unsafe { kafka_consumer_MockConsumer_new(earliest.as_ptr()) };
+        let topic = std::ffi::CString::new("t").unwrap();
+        let topics = [topic.as_ptr()];
+        let partitions = [0i32];
+        assert!(unsafe { kafka_consumer_Consumer_assign(c, topics.as_ptr(), partitions.as_ptr(), 1) }.is_null());
+        assert!(unsafe { kafka_consumer_MockConsumer_update_beginning_offsets(c, topic.as_ptr(), 0, 0) }.is_null());
+        c
+    }
+
+    fn error_code_and_message(error: *mut kafka_common_Error_t) -> (common::kafka_common_ErrorCode_t, String) {
+        assert!(!error.is_null(), "expected an error");
+        let code = unsafe { common::kafka_common_Error_code(error) };
+        let message = unsafe { CStr::from_ptr(common::kafka_common_Error_message(error)) }
+            .to_str()
+            .unwrap()
+            .to_owned();
+        unsafe { common::kafka_common_Error_destroy(error) };
+        (code, message)
+    }
+
+    fn position(c: *mut kafka_consumer_Consumer_t) -> i64 {
+        let topic = std::ffi::CString::new("t").unwrap();
+        let mut out = -1i64;
+        assert!(unsafe { kafka_consumer_Consumer_position(c, topic.as_ptr(), 0, &mut out) }.is_null());
+        out
+    }
+
+    /// `seek_with_offset_and_metadata` (Java's `seek(TopicPartition,
+    /// OffsetAndMetadata)`) moves the position, and so does its deprecated alias.
+    #[test]
+    fn seek_with_offset_and_metadata_and_its_deprecated_alias_move_the_position() {
+        let c = assigned_mock();
+        let topic = std::ffi::CString::new("t").unwrap();
+        let meta = std::ffi::CString::new("m").unwrap();
+        assert!(
+            unsafe {
+                kafka_consumer_Consumer_seek_with_offset_and_metadata(c, topic.as_ptr(), 0, 7, -1, meta.as_ptr())
+            }
+            .is_null()
+        );
+        assert_eq!(position(c), 7);
+        assert!(
+            unsafe { kafka_consumer_Consumer_seek_with_metadata(c, topic.as_ptr(), 0, 9, 3, std::ptr::null()) }
+                .is_null()
+        );
+        assert_eq!(position(c), 9);
+        unsafe { kafka_consumer_Consumer_destroy(c) };
+    }
+
+    /// `commit_sync_with_offsets` (Java's `commitSync(Map)`) commits, and so does
+    /// its deprecated alias.
+    #[test]
+    fn commit_sync_with_offsets_and_its_deprecated_alias_commit() {
+        let c = assigned_mock();
+        let topic = std::ffi::CString::new("t").unwrap();
+        let topics = [topic.as_ptr()];
+        let partitions = [0i32];
+        let committed = |c: *mut kafka_consumer_Consumer_t| -> i64 {
+            let mut map: *mut kafka_consumer_OffsetMap_t = std::ptr::null_mut();
+            assert!(
+                unsafe { kafka_consumer_Consumer_committed(c, topics.as_ptr(), partitions.as_ptr(), 1, &mut map) }
+                    .is_null()
+            );
+            assert_eq!(unsafe { kafka_consumer_OffsetMap_count(map) }, 1);
+            let oam = unsafe { kafka_consumer_OffsetMap_get_value(map, 0) };
+            let offset = unsafe { kafka_consumer_OffsetAndMetadata_offset(oam) };
+            unsafe { kafka_consumer_OffsetMap_destroy(map) };
+            offset
+        };
+        let offsets = [4i64];
+        let epochs = [-1i32];
+        assert!(
+            unsafe {
+                kafka_consumer_Consumer_commit_sync_with_offsets(
+                    c,
+                    topics.as_ptr(),
+                    partitions.as_ptr(),
+                    offsets.as_ptr(),
+                    epochs.as_ptr(),
+                    std::ptr::null(),
+                    1,
+                )
+            }
+            .is_null()
+        );
+        assert_eq!(committed(c), 4);
+        let offsets = [6i64];
+        assert!(
+            unsafe {
+                kafka_consumer_Consumer_commit_sync_offsets(
+                    c,
+                    topics.as_ptr(),
+                    partitions.as_ptr(),
+                    offsets.as_ptr(),
+                    epochs.as_ptr(),
+                    std::ptr::null(),
+                    1,
+                )
+            }
+            .is_null()
+        );
+        assert_eq!(committed(c), 6);
+        unsafe { kafka_consumer_Consumer_destroy(c) };
+    }
+
+    /// Java's `setPollException(null)` clears a pending error: with `clear` set
+    /// the next poll succeeds; an injected client-side code (`LOCAL_ILLEGAL_STATE`)
+    /// comes back as itself.
+    #[test]
+    fn set_poll_error_clear_flag_clears_the_pending_error() {
+        let c = assigned_mock();
+        let boom = std::ffi::CString::new("boom").unwrap();
+        let illegal_state = common::kafka_common_ErrorCode_t::kafka_common_ErrorCode_LOCAL_ILLEGAL_STATE as i32;
+        assert!(
+            unsafe { kafka_consumer_MockConsumer_set_poll_error(c, false, illegal_state, boom.as_ptr()) }.is_null()
+        );
+        assert!(unsafe { kafka_consumer_MockConsumer_set_poll_error(c, true, 0, std::ptr::null()) }.is_null());
+        let mut error: *mut kafka_common_Error_t = std::ptr::null_mut();
+        let records = unsafe { kafka_consumer_Consumer_poll(c, 0, &mut error) };
+        assert!(error.is_null(), "the cleared error must not fire");
+        unsafe { kafka_consumer_ConsumerRecords_destroy(records) };
+
+        assert!(
+            unsafe { kafka_consumer_MockConsumer_set_poll_error(c, false, illegal_state, boom.as_ptr()) }.is_null()
+        );
+        let records = unsafe { kafka_consumer_Consumer_poll(c, 0, &mut error) };
+        assert!(records.is_null());
+        let (code, message) = error_code_and_message(error);
+        assert_eq!(
+            code,
+            common::kafka_common_ErrorCode_t::kafka_common_ErrorCode_LOCAL_ILLEGAL_STATE
+        );
+        assert_eq!(message, "boom");
+        unsafe { kafka_consumer_Consumer_destroy(c) };
+    }
+
+    /// Java's `setOffsetsException(null)` clears a pending error.
+    #[test]
+    fn set_offsets_error_clear_flag_clears_the_pending_error() {
+        let c = assigned_mock();
+        let topic = std::ffi::CString::new("t").unwrap();
+        let topics = [topic.as_ptr()];
+        let partitions = [0i32];
+        let boom = std::ffi::CString::new("boom").unwrap();
+        assert!(unsafe { kafka_consumer_MockConsumer_set_offsets_error(c, false, -1, boom.as_ptr()) }.is_null());
+        assert!(unsafe { kafka_consumer_MockConsumer_set_offsets_error(c, true, 0, std::ptr::null()) }.is_null());
+        let mut map: *mut kafka_consumer_LongOffsetMap_t = std::ptr::null_mut();
+        let error =
+            unsafe { kafka_consumer_Consumer_beginning_offsets(c, topics.as_ptr(), partitions.as_ptr(), 1, &mut map) };
+        assert!(error.is_null(), "the cleared error must not fire");
+        unsafe { kafka_consumer_LongOffsetMap_destroy(map) };
+        unsafe { kafka_consumer_Consumer_destroy(c) };
+    }
+
+    /// Java's `KafkaConsumer.close(Duration)` rejects a negative timeout and the
+    /// consumer stays open; `MockConsumer.close(Duration)` never reads it.
+    #[test]
+    fn close_with_timeout_rejects_a_negative_timeout_on_a_kafka_consumer_only() {
+        let props = kafka_consumer_ConsumerProperties_new();
+        for (k, v) in [("bootstrap.servers", "localhost:1"), ("group.protocol", "consumer")] {
+            let k = std::ffi::CString::new(k).unwrap();
+            let v = std::ffi::CString::new(v).unwrap();
+            unsafe { kafka_consumer_ConsumerProperties_put(props, k.as_ptr(), v.as_ptr()) };
+        }
+        let mut error: *mut kafka_common_Error_t = std::ptr::null_mut();
+        let c = unsafe { kafka_consumer_KafkaConsumer_new(props, &mut error) };
+        unsafe { kafka_consumer_ConsumerProperties_destroy(props) };
+        assert!(error.is_null() && !c.is_null());
+        let (code, message) = error_code_and_message(unsafe { kafka_consumer_Consumer_close_with_timeout(c, -1) });
+        assert_eq!(
+            code,
+            common::kafka_common_ErrorCode_t::kafka_common_ErrorCode_LOCAL_ILLEGAL_ARGUMENT
+        );
+        assert_eq!(message, "The timeout cannot be negative.");
+        // Still open: a valid close succeeds.
+        assert!(unsafe { kafka_consumer_Consumer_close_with_timeout(c, 0) }.is_null());
+        unsafe { kafka_consumer_Consumer_destroy(c) };
+
+        let mock = unsafe { kafka_consumer_MockConsumer_new(std::ptr::null()) };
+        assert!(unsafe { kafka_consumer_Consumer_close_with_timeout(mock, -1) }.is_null());
+        assert!(unsafe { kafka_consumer_MockConsumer_closed(mock) });
+        unsafe { kafka_consumer_Consumer_destroy(mock) };
+    }
+
+    /// Records the thread a commit callback ran on and frees its handles.
+    struct CommitCallbackProbe {
+        thread: Mutex<Option<std::thread::ThreadId>>,
+        calls: AtomicI32,
+    }
+
+    unsafe extern "C" fn probe_commit_callback(
+        offsets: *mut kafka_consumer_OffsetMap_t,
+        error: *mut kafka_common_Error_t,
+        user_data: *mut c_void,
+    ) {
+        let probe = unsafe { &*(user_data as *const CommitCallbackProbe) };
+        *probe.thread.lock().unwrap() = Some(std::thread::current().id());
+        probe.calls.fetch_add(1, Ordering::SeqCst);
+        unsafe { kafka_consumer_OffsetMap_destroy(offsets) };
+        if !error.is_null() {
+            unsafe { common::kafka_common_Error_destroy(error) };
+        }
+    }
+
+    unsafe extern "C" fn count_notify(user_data: *mut c_void) {
+        let count = unsafe { &*(user_data as *const AtomicI32) };
+        count.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// Java runs `OffsetCommitCallback.onComplete` on the thread making the call
+    /// (`MockConsumer.commitAsync` calls it inline): invoked inside a synchronous
+    /// FFI call, the callback runs on that call's thread, even with a
+    /// pending-callback notify registered (which would otherwise deadlock).
+    #[test]
+    fn commit_callback_inside_a_sync_call_runs_on_the_calling_thread() {
+        let c = assigned_mock();
+        let notified = AtomicI32::new(0);
+        unsafe {
+            kafka_consumer_Consumer_set_pending_callback_notify(
+                c,
+                count_notify,
+                &notified as *const AtomicI32 as *mut c_void,
+                None,
+            )
+        };
+        let probe = CommitCallbackProbe { thread: Mutex::new(None), calls: AtomicI32::new(0) };
+        let error = unsafe {
+            kafka_consumer_Consumer_commit_async_with_callback(
+                c,
+                probe_commit_callback,
+                &probe as *const CommitCallbackProbe as *mut c_void,
+                None,
+            )
+        };
+        assert!(error.is_null());
+        assert_eq!(probe.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(*probe.thread.lock().unwrap(), Some(std::thread::current().id()));
+        assert!(
+            unsafe { kafka_consumer_Consumer_next_pending_callback(c) }.is_null(),
+            "nothing is queued"
+        );
+        unsafe { kafka_consumer_Consumer_destroy(c) };
+    }
+
+    /// Invoked on a runtime worker (an `_async` operation) with a
+    /// pending-callback notify registered, the commit callback is queued as
+    /// method `3` and runs on the thread that acks it; `on_complete` does not
+    /// return before it has run.
+    #[test]
+    fn commit_callback_inside_an_async_operation_runs_on_the_acking_thread() {
+        let c = assigned_mock();
+        let notified = AtomicI32::new(0);
+        unsafe {
+            kafka_consumer_Consumer_set_pending_callback_notify(
+                c,
+                count_notify,
+                &notified as *const AtomicI32 as *mut c_void,
+                None,
+            )
+        };
+        let probe = CommitCallbackProbe { thread: Mutex::new(None), calls: AtomicI32::new(0) };
+        let h = unsafe { handle_ref(c) };
+        let callback = make_commit_callback(
+            probe_commit_callback,
+            &probe as *const CommitCallbackProbe as *mut c_void,
+            None,
+            h,
+        );
+        let offsets = HashMap::from([(TopicPartition::new("t", 0), OffsetAndMetadata::new(3).unwrap())]);
+        let task = h
+            .runtime_handle
+            .spawn(async move { callback.on_complete(&offsets, None).await });
+
+        let pending = loop {
+            let pending = unsafe { kafka_consumer_Consumer_next_pending_callback(c) };
+            if !pending.is_null() {
+                break pending;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        assert_eq!(unsafe { kafka_consumer_PendingCallback_method(pending) }, PENDING_METHOD_COMMIT);
+        let list = unsafe { kafka_consumer_PendingCallback_partitions(pending) };
+        assert_eq!(unsafe { kafka_consumer_TopicPartitionList_count(list) }, 1);
+        unsafe { kafka_consumer_TopicPartitionList_destroy(list) };
+        assert_eq!(probe.calls.load(Ordering::SeqCst), 0, "queued, not run yet");
+        assert!(!task.is_finished(), "on_complete waits for the callback");
+
+        unsafe { kafka_consumer_Consumer_ack_pending_callback(pending, std::ptr::null_mut()) };
+        assert_eq!(probe.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(*probe.thread.lock().unwrap(), Some(std::thread::current().id()));
+        h.runtime.block_on(task).expect("on_complete returns once acked");
+        // The notify fired on the dispatcher thread.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while notified.load(Ordering::SeqCst) == 0 && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(notified.load(Ordering::SeqCst), 1);
+        unsafe { kafka_consumer_Consumer_destroy(c) };
     }
 }

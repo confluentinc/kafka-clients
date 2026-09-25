@@ -12,47 +12,77 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""``KafkaConsumer`` — the real synchronous consumer.
+"""``KafkaConsumer``: Java's ``org.apache.kafka.clients.consumer.KafkaConsumer``.
 
-Translated from ``org.apache.kafka.clients.consumer.KafkaConsumer`` (Apache
-Kafka 4.3.1). Constructor only; every method is inherited from ``Consumer``.
+Only Java's public constructors, every method being :class:`Consumer`'s
+(CLAUDE.md, Python Binding Conventions, Class family). Java's four
+constructors, ``(Map configs)``, ``(Properties properties)``, ``(Properties
+properties, Deserializer, Deserializer)`` and ``(Map configs, Deserializer,
+Deserializer)``, are one keyword-only ``__init__``: ``Map`` and ``Properties``
+are both ``dict``, so the parameter is ``configs``; the shorter constructors
+pass ``null`` deserializers, so every combination is a Java overload and the
+stubs only bind the type parameters (Signatures). A deserializer defaults to
+the config key, else ``bytes_deserializer()`` *(deviation: Java requires one)*.
+The constructor maps to ``kafka_consumer_KafkaConsumer_new``; the deserializers
+run in Python on the caller's thread.
 """
 
 from __future__ import annotations
 
-from typing import Any, Generic, TypeVar
+from typing import TYPE_CHECKING, Any, TypeVar, overload
 
-from confluent_kafka.common.serialization import Deserializer, bytes_deserializer
-
-from ._config_resolve import resolve_consumer_construction
 from .consumer import Consumer
+
+if TYPE_CHECKING:
+    from confluent_kafka.common.serialization import Deserializer
+
+__all__ = ["KafkaConsumer"]
 
 K = TypeVar("K")
 V = TypeVar("V")
 
 
-class KafkaConsumer(Consumer[K, V], Generic[K, V]):
-    """The real consumer connected to a Kafka cluster.
+class KafkaConsumer(Consumer[K, V]):
+    """A client that consumes records from a Kafka cluster.
 
-    Java: ``KafkaConsumer<K, V>``. ``configs`` is a ``dict`` of Java's dotted
-    property names (``bootstrap.servers``, ``group.id``,
-    ``group.protocol=consumer`` for KIP-848, …). ``group.id`` is optional
-    (group APIs raise ``InvalidGroupIdError`` without it, spec §5.7). ``K`` / ``V``
-    are inferred from the typed deserializers (spec §3 principle 7)."""
+    This client transparently handles the failure of Kafka brokers, and
+    transparently adapts as topic partitions it fetches migrate within the
+    cluster. It also interacts with the broker to allow groups of consumers to
+    load balance consumption using consumer groups (``group.protocol=consumer``,
+    KIP-848). The consumer is not thread-safe: a call while another thread is
+    inside it raises ``ConcurrentModificationError``, ``wakeup()`` excepted.
+    Failure to close the consumer after use will leak its resources.
 
-    __slots__ = ()
+    Java: ``org.apache.kafka.clients.consumer.KafkaConsumer<K, V>``.
+    """
+
+    @overload
+    def __init__(self: KafkaConsumer[bytes, bytes], *, configs: dict[str, Any]) -> None: ...
+    @overload
+    def __init__(self: KafkaConsumer[K, bytes], *, configs: dict[str, Any],
+                 key_deserializer: Deserializer[K]) -> None: ...
+    @overload
+    def __init__(self: KafkaConsumer[bytes, V], *, configs: dict[str, Any],
+                 value_deserializer: Deserializer[V]) -> None: ...
+    @overload
+    def __init__(self, *, configs: dict[str, Any], key_deserializer: Deserializer[K],
+                 value_deserializer: Deserializer[V]) -> None: ...
 
     def __init__(self, *, configs: dict[str, Any],
-                 key_deserializer: Deserializer[K] = bytes_deserializer(),  # type: ignore[assignment]
-                 value_deserializer: Deserializer[V] = bytes_deserializer(),  # type: ignore[assignment]
-                 ) -> None:
-        handle, key_deser, value_deser = resolve_consumer_construction(
-            config=configs,
-            key_deserializer=key_deserializer,
-            value_deserializer=value_deserializer,
-        )
-        self._engine_init(
-            handle=handle,
-            key_deserializer=key_deser,
-            value_deserializer=value_deser,
-        )
+                 key_deserializer: Deserializer[Any] | None = None,
+                 value_deserializer: Deserializer[Any] | None = None) -> None:
+        """A consumer is instantiated by providing a set of key-value pairs as
+        configuration, and a key and a value deserializer. Valid configuration
+        strings are documented at
+        http://kafka.apache.org/documentation.html#consumerconfigs. Values can
+        be either strings or objects of the appropriate type (for example a
+        numeric configuration would accept either the string "42" or the
+        integer 42). The ``configure()`` method won't be called in the consumer
+        when the deserializer is passed in directly. ``group.id`` is optional;
+        the group APIs raise ``InvalidGroupIdError`` without it.
+
+        Note: after creating a ``KafkaConsumer`` you must always ``close()`` it
+        to avoid resource leaks.
+        """
+        Consumer.__init__(self)
+        self._start(configs, key_deserializer, value_deserializer)

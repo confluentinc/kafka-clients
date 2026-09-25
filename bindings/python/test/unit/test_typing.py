@@ -183,67 +183,105 @@ def test_error_reexport_derives_from_kafka_error() -> None:
     assert issubclass(TopicAuthorizationError, KafkaError)
     assert isinstance(TopicAuthorizationError(message="x"), KafkaError)
 def _consumer_family_types(c: object = None) -> None:
-    """P5: the consumer clients' method return types and overloads.
+    """P5: the consumer clients' constructor binding stubs, method return types
+    and overload stubs.
 
     Type-check-only: the body is statically analysed by mypy --strict but never
-    executed at runtime (an early return guards the actual FFI calls), so no real
-    consumer is constructed."""
+    executed at runtime (an early return guards the FFI calls)."""
     if c is None:
         return
-    from confluent_kafka.consumer import (
-        Consumer, ConsumerRecords, KafkaConsumer, MockConsumer,
-        OffsetAndMetadata, OffsetAndTimestamp, SubscriptionPattern,
-    )
-    from confluent_kafka.common import PartitionInfo, TopicPartition
-    from confluent_kafka.common.serialization import (
-        bytes_deserializer, string_deserializer,
-    )
+    from typing import Any
 
-    # K/V are inferred from the typed deserializers.
-    c = MockConsumer(
-        offset_reset_strategy="earliest",
-        key_deserializer=bytes_deserializer(),
-        value_deserializer=string_deserializer(),
+    from confluent_kafka.common import MetricName, PartitionInfo, TopicPartition
+    from confluent_kafka.common.metric import Metric
+    from confluent_kafka.common.serialization import (
+        bytes_deserializer, int_deserializer, json_deserializer, string_deserializer,
     )
-    assert_type(c.poll(timeout=1.0), ConsumerRecords[bytes, str])
-    assert_type(
-        c.committed(partitions=[TopicPartition(topic="t", partition=0)]),
-        "dict[TopicPartition, OffsetAndMetadata | None]",
+    from confluent_kafka.consumer import (
+        AsyncConsumer, AsyncKafkaConsumer, AsyncMockConsumer, CloseOptions, Consumer,
+        ConsumerGroupMetadata, ConsumerRecord, ConsumerRecords, KafkaConsumer, MockConsumer,
+        OffsetAndMetadata, OffsetAndTimestamp, OffsetCommitCallback, SubscriptionPattern,
     )
-    assert_type(c.position(partition=TopicPartition(topic="t", partition=0)),
-                int)
-    assert_type(c.assignment(), "set[TopicPartition]")
-    assert_type(c.subscription(), "set[str]")
-    assert_type(c.current_lag(topic_partition=TopicPartition(topic="t", partition=0)),
-                "int | None")
-    assert_type(c.list_topics(), "dict[str, list[PartitionInfo]]")
-    assert_type(c.partitions_for(topic="t"), "list[PartitionInfo]")
-    assert_type(
-        c.offsets_for_times(timestamps_to_search={}),
-        "dict[TopicPartition, OffsetAndTimestamp | None]",
-    )
-    # The subscribe/seek @overload stubs must accept each disjoint form.
-    c.subscribe(topics=["t"])
-    c.subscribe(pattern=SubscriptionPattern(pattern="t.*"))
-    c.seek(partition=TopicPartition(topic="t", partition=0), offset=5)
-    c.seek(partition=TopicPartition(topic="t", partition=0),
-           offset_and_metadata=OffsetAndMetadata(offset=5))
-    # The close @overload stubs must accept the timeout form and the option form.
-    from confluent_kafka.consumer import CloseOptions
     from confluent_kafka.consumer.offset_reset_strategy import OffsetResetStrategy
-    c.close()
-    c.close(timeout=1.0)
-    c.close(option=CloseOptions.timeout(1.0))
+
+    configs: dict[str, Any] = {"bootstrap.servers": "localhost:9092"}
+    tp = TopicPartition(topic="t", partition=0)
+    # An omitted deserializer binds bytes; a given one binds its type.
+    assert_type(KafkaConsumer(configs=configs), "KafkaConsumer[bytes, bytes]")
+    assert_type(KafkaConsumer(configs=configs, key_deserializer=string_deserializer()),
+                "KafkaConsumer[str, bytes]")
+    assert_type(KafkaConsumer(configs=configs, value_deserializer=int_deserializer()),
+                "KafkaConsumer[bytes, int]")
+    assert_type(KafkaConsumer(configs=configs, key_deserializer=string_deserializer(),
+                              value_deserializer=json_deserializer()),
+                "KafkaConsumer[str, Any]")
+    assert_type(AsyncKafkaConsumer(configs=configs), "AsyncKafkaConsumer[bytes, bytes]")
+    assert_type(AsyncKafkaConsumer(configs=configs, key_deserializer=bytes_deserializer(),
+                                   value_deserializer=string_deserializer()),
+                "AsyncKafkaConsumer[bytes, str]")
+
+    kc = KafkaConsumer(configs=configs, value_deserializer=string_deserializer())
+    assert_type(kc.poll(timeout=1.0), "ConsumerRecords[bytes, str]")
+    assert_type(kc.committed(partitions=[tp]), "dict[TopicPartition, OffsetAndMetadata | None]")
+    assert_type(kc.position(partition=tp), int)
+    assert_type(kc.assignment(), "set[TopicPartition]")
+    assert_type(kc.subscription(), "set[str]")
+    assert_type(kc.paused(), "set[TopicPartition]")
+    assert_type(kc.current_lag(topic_partition=tp), "int | None")
+    assert_type(kc.list_topics(), "dict[str, list[PartitionInfo]]")
+    assert_type(kc.partitions_for(topic="t"), "list[PartitionInfo]")
+    assert_type(kc.beginning_offsets(partitions=[tp]), "dict[TopicPartition, int]")
+    assert_type(kc.end_offsets(partitions=[tp]), "dict[TopicPartition, int]")
+    assert_type(kc.offsets_for_times(timestamps_to_search={tp: 0}),
+                "dict[TopicPartition, OffsetAndTimestamp | None]")
+    assert_type(kc.metrics(), "dict[MetricName, Metric]")
+    assert_type(kc.group_metadata(), ConsumerGroupMetadata)
+    # The overload stubs accept each Java form.
+    kc.subscribe(topics=["t"])
+    kc.subscribe(pattern=SubscriptionPattern(pattern="t.*"))
+    kc.seek(partition=tp, offset=5)
+    kc.seek(partition=tp, offset_and_metadata=OffsetAndMetadata(offset=5))
+    callback: OffsetCommitCallback = lambda offsets, exception: None  # noqa: E731
+    kc.commit_nowait()
+    kc.commit_nowait(callback=callback)
+    kc.commit_nowait(offsets={tp: OffsetAndMetadata(offset=5)}, callback=callback)
+    kc.commit()
+    kc.commit(offsets={tp: OffsetAndMetadata(offset=5)})
+    kc.close()
+    kc.close(timeout=1.0)
+    kc.close(option=CloseOptions.timeout(1.0))
     assert_type(CloseOptions.timeout(1.0).timeout(), "float | None")
-    # MockConsumer's constructor @overload stubs accept str OR OffsetResetStrategy
-    # (the enum form is Java's deprecated-but-kept variant).
-    _cs: MockConsumer[bytes, bytes] = MockConsumer(offset_reset_strategy="earliest")
-    _ce: MockConsumer[bytes, bytes] = MockConsumer(
-        offset_reset_strategy=OffsetResetStrategy.EARLIEST)
-    del _cs, _ce
-    _kc: type[KafkaConsumer[bytes, bytes]] = KafkaConsumer
-    _base: type[Consumer[bytes, bytes]] = MockConsumer
-    del _kc, _base
+    base: Consumer[bytes, str] = kc
+    assert_type(base.poll(timeout=0), "ConsumerRecords[bytes, str]")
+
+    # Nothing binds MockConsumer's type parameters: the caller writes them, as
+    # Java does (`new MockConsumer<String, String>("earliest")`).
+    mc: MockConsumer[str, str] = MockConsumer(offset_reset_strategy="earliest")
+    _me: MockConsumer[str, str] = MockConsumer(offset_reset_strategy=OffsetResetStrategy.EARLIEST)
+    mc.add_record(record=ConsumerRecord(topic="t", partition=0, offset=0, key="k", value="v"))
+    assert_type(mc.poll(timeout=0), "ConsumerRecords[str, str]")
+    assert_type(mc.last_poll_timeout(), "float | None")
+    assert_type(mc.closed(), bool)
+    mc.rebalance(new_assignment=[tp])
+    mc.schedule_poll_task(task=lambda: None)
+    del _me
+
+    async def _async() -> None:
+        ac = AsyncKafkaConsumer(configs=configs, key_deserializer=string_deserializer())
+        assert_type(await ac.poll(timeout=1.0), "ConsumerRecords[str, bytes]")
+        assert_type(await ac.position(partition=tp), int)
+        assert_type(ac.assignment(), "set[TopicPartition]")
+        ac.commit_nowait(callback=callback)
+        await ac.commit()
+        await ac.seek(partition=tp, offset=5)
+        await ac.close(option=CloseOptions.timeout(1.0))
+        abase: AsyncConsumer[str, bytes] = ac
+        assert_type(await abase.poll(timeout=0), "ConsumerRecords[str, bytes]")
+        am: AsyncMockConsumer[int, int] = AsyncMockConsumer(offset_reset_strategy="latest")
+        await am.rebalance(new_assignment=[tp])
+        assert_type(await am.poll(timeout=0), "ConsumerRecords[int, int]")
+
+    del _async
 
 
 def _producer_family_types(p: object = None) -> None:

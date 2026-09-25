@@ -52,6 +52,7 @@ from confluent_kafka.producer import AsyncKafkaProducer, AsyncMockProducer  # no
 from confluent_kafka.consumer import (  # noqa: E402
     AsyncKafkaConsumer,
     AsyncMockConsumer,
+    CloseOptions,
     OffsetAndMetadata,
 )
 from confluent_kafka.common import KafkaError  # noqa: E402
@@ -146,6 +147,7 @@ from grpc_translate import (  # noqa: E402
     _record_to_proto,
     _tp,
     _tp_to_proto,
+    ignore_commit_completion,
     make_logging_commit_callback,
     make_logging_delivery_callback,
 )
@@ -376,18 +378,17 @@ class ProducerService(pb_grpc.ProducerServiceServicer):
 class ConsumerService(cpb_grpc.ConsumerServiceServicer):
     """Async twin of grpc_server.ConsumerService, driving AsyncKafkaConsumer.
 
-    Ops that block in the Rust consumer are coroutines and are awaited (seek
-    included: it awaits the background task, which may run a rebalance listener);
-    the non-blocking state reads (assignment/subscription/paused/wakeup) live on
-    the shared _ConsumerBase and are sync — called directly, never awaited."""
+    Methods Java waits in are coroutines and are awaited (seek included: it
+    waits on the background thread, which may run a rebalance listener); the
+    others (assignment/subscription/paused/commit_nowait/wakeup) are plain
+    methods, called directly."""
 
     def __init__(self):
         self._consumers = {}
         self._next_id = 1
-        # This one genuinely needs CallbackLog's lock: rebalance-listener and
-        # commit callbacks fire on the Rust dispatcher thread (the listener
-        # methods are plain, so they run there directly, never on the loop),
-        # while GetCallbackLog is served on the loop.
+        # Rebalance-listener and commit callbacks run on the event loop, inside
+        # the consumer call that delivers them; CallbackLog's lock is shared with
+        # the sync server.
         self._callback_log = CallbackLog()
 
     def _get(self, consumer_id):
@@ -434,10 +435,8 @@ class ConsumerService(cpb_grpc.ConsumerServiceServicer):
 
     async def Subscribe(self, request, context):
         # with_listener => a real ConsumerRebalanceListener whose invocations
-        # land in the callback log. LoggingRebalanceListener's methods are plain
-        # functions on purpose: a *coroutine* listener method must not await
-        # AsyncConsumer FFI ops (the dispatcher thread is parked in
-        # run_coroutine_threadsafe(...).result() waiting for it — deadlock).
+        # land in the callback log (plain methods; an async def one would be
+        # awaited on the loop).
         listener = None
         if request.with_listener:
             listener = LoggingRebalanceListener(self._callback_log, request.consumer_id)
@@ -476,9 +475,11 @@ class ConsumerService(cpb_grpc.ConsumerServiceServicer):
         return await self._run_status(request.consumer_id, do)
 
     async def CommitAsync(self, request, context):
-        # commit_async is a sync local op on the shared _ConsumerBase in both
-        # clients (it only *initiates* the commit), so it is called directly
-        # rather than awaited. The callback fires on a later poll/commit/close.
+        # commit_nowait (Java's commitAsync) does not wait, so it is a plain def,
+        # called directly. The callback runs inside a later poll/commit/close; a
+        # listener callback the core delivers while the commit waits for its
+        # offsets runs on this loop (an async def one in a task the next awaited
+        # call waits for).
         consumer = self._get(request.consumer_id)
         if consumer is None:
             return pb.StatusResponse(error=self._unknown_consumer(request.consumer_id))
@@ -486,7 +487,12 @@ class ConsumerService(cpb_grpc.ConsumerServiceServicer):
         if request.with_callback:
             callback = make_logging_commit_callback(self._callback_log, request.consumer_id)
         try:
-            consumer.commit_nowait(offsets=_proto_offsets_to_dict(request.offsets) or None, callback=callback)
+            offsets = _proto_offsets_to_dict(request.offsets)
+            if offsets:
+                consumer.commit_nowait(offsets=offsets,
+                                       callback=callback or ignore_commit_completion)
+            else:
+                consumer.commit_nowait(callback=callback)
             return pb.StatusResponse()
         except KafkaError as e:
             return self._status_err(e)
@@ -671,10 +677,12 @@ class ConsumerService(cpb_grpc.ConsumerServiceServicer):
         if consumer is None:
             return pb.StatusResponse()
         try:
-            # AsyncKafkaConsumer.close(*, timeout=...) has a timed FFI form (D7);
-            # an absent timeout_ms is Java's no-argument close().
+            # A timeout_ms is Java's close(CloseOptions.timeout(timeout)) (the
+            # deprecated close(Duration) delegates to it); an absent one is the
+            # no-argument close().
             if request.HasField("timeout_ms"):
-                await consumer.close(timeout=_dt.timedelta(milliseconds=request.timeout_ms))
+                await consumer.close(option=CloseOptions.timeout(
+                    _dt.timedelta(milliseconds=request.timeout_ms)))
             else:
                 await consumer.close()
         except KafkaError as e:

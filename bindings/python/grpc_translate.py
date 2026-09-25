@@ -438,10 +438,9 @@ class CallbackLog:
 
     One instance per service (producer or consumer), keyed by the server-local
     client id. The lock is mandatory rather than defensive: consumer callbacks
-    are invoked from the Rust dispatcher thread and producer delivery callbacks
-    from the completion thread, while GetCallbackLog is served on a gRPC worker
-    thread — and in the async server the event loop is a *fourth* context. None
-    of those are the same thread, in either server.
+    run on the thread (or event loop) of the consumer call that delivers them,
+    and producer delivery callbacks on the completion thread, while
+    GetCallbackLog is served on another gRPC worker thread.
     """
 
     def __init__(self):
@@ -494,11 +493,12 @@ def _callback_log_partition(p):
 class LoggingRebalanceListener(ConsumerRebalanceListener):
     """A real rebalance listener that records each invocation in a CallbackLog.
 
-    Subclasses the new ``ConsumerRebalanceListener`` (a multi-method interface
-    kept as a class, rule 3.9). The listener runs on the caller's task inside
-    ``poll()`` / ``close()`` (consumer-threading §31), so the sync server's plain
-    ``def`` methods run on the gRPC worker thread that called ``poll()``. They
-    only touch the log, never the consumer, so no reentrancy is involved.
+    Subclasses ``ConsumerRebalanceListener`` (a multi-method interface the user
+    implements, a class). The listener runs on the caller's thread inside
+    ``poll()`` / ``close()`` (consumer-threading §31), so these plain ``def``
+    methods run on the gRPC worker thread (or the event loop) that called
+    ``poll()``. They only touch the log, never the consumer, so no reentrancy
+    is involved.
 
     ``on_partitions_lost`` is implemented explicitly rather than left to the
     binding's Java-faithful "delegate to on_partitions_revoked" default, so a
@@ -520,13 +520,16 @@ class LoggingRebalanceListener(ConsumerRebalanceListener):
 
 
 def make_logging_commit_callback(log, client_id):
-    """A real commit callback (``callback=``) recording the committed offsets.
+    """A real ``OffsetCommitCallback`` (``callback=``) recording the committed
+    offsets.
 
-    The callback receives ``offsets: dict[TopicPartition, OffsetAndMetadata]``
-    (new keyword-only value types, method accessors) and an optional exception.
+    The callback receives ``offsets: dict[TopicPartition, OffsetAndMetadata] |
+    None`` (``None`` when the commit failed before its offsets were known, as
+    Java passes ``null``) and an optional exception.
     """
 
     def on_complete(offsets, exception):
+        offsets = offsets or {}
         log.append(
             client_id,
             KIND_COMMIT,
@@ -537,6 +540,13 @@ def make_logging_commit_callback(log, client_id):
         )
 
     return on_complete
+
+
+def ignore_commit_completion(offsets, exception):
+    """The callback of a ``commit_nowait(offsets=…)`` the harness sends without
+    one: Java has no ``commitAsync(Map)`` overload, only ``commitAsync(Map,
+    OffsetCommitCallback)`` (``commit_nowait(offsets=…)`` alone is rejected), and
+    a ``null`` callback reports nothing."""
 
 
 def make_logging_delivery_callback(log, client_id):

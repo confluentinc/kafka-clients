@@ -16,7 +16,8 @@
 value types (P2).
 
 The ``_confluentkafka`` natives return offsets, partition metadata, nodes and
-metrics as plain tuples/lists/dicts (a marshaling layer only, spec §4). These
+metrics as plain tuples/lists/dicts (a marshaling layer only, CLAUDE.md, Python
+Binding Conventions, Implementation over the FFI). These
 helpers turn them into the ``confluent_kafka.common`` / ``confluent_kafka.
 consumer`` value types the public API returns, and the reverse for arguments
 passed to the FFI. Kept out of the client modules so the FFI tuple shapes are
@@ -105,7 +106,7 @@ def to_offset_map(
     None]``.
 
     Java's ``committed()`` maps a partition with no committed offset to a
-    ``null`` value (D25 ruling C); the FFI signals that with ``offset == -1``,
+    ``null`` value; the FFI signals that with ``offset == -1``,
     which becomes ``None`` here.
     """
     out: dict[TopicPartition, OffsetAndMetadata | None] = {}
