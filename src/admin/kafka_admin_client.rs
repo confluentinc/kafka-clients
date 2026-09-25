@@ -103,7 +103,7 @@ use crate::common::requests::{
 use crate::common::security::auth::KafkaPrincipal;
 use crate::common::security::scram::internals::{ScramFormatter, ScramMechanism as InternalScramMechanism};
 use crate::common::security::token::delegation::{DelegationToken, TokenInformation};
-use crate::common::utils::{ExponentialBackoff, LogContext};
+use crate::common::utils::{ExponentialBackoff, LogContext, SystemTime, Time};
 use crate::common::{
     Cluster, Error, GroupState, GroupType, KafkaFuture, TopicCollection, TopicPartition, TopicPartitionInfo, Uuid,
 };
@@ -226,7 +226,7 @@ struct Shared {
     wakeup: Arc<Notify>,
     shutdown: Arc<ShutdownSignal>,
     metadata_manager: AdminMetadataManager,
-    time_provider: Arc<dyn Fn() -> i64 + Send + Sync>,
+    time: Arc<dyn Time>,
     bg_handle: Mutex<Option<JoinHandle<()>>>,
     /// Retry-backoff parameters for the `AdminApiDriver` (mirrors the fields
     /// passed to the driver in `invokeDriver`).
@@ -304,12 +304,8 @@ impl KafkaAdminClient {
         let bootstrap: Vec<String> = config.bootstrap_servers().to_vec();
         let addresses = ClientUtils::parse_and_validate_addresses(&bootstrap)?;
 
-        let time_provider: Arc<dyn Fn() -> i64 + Send + Sync> = Arc::new(|| {
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_millis() as i64
-        });
+        // Java's `Time.SYSTEM`.
+        let time: Arc<dyn Time> = Arc::new(SystemTime);
 
         let metadata_manager = AdminMetadataManager::new(
             config.retry_backoff_ms(),
@@ -319,7 +315,7 @@ impl KafkaAdminClient {
         );
         // Seed with the bootstrap cluster so the first metadata refresh has
         // nodes to talk to (mirrors Java's constructor `metadataManager.update`).
-        let now = (time_provider)();
+        let now = time.milliseconds();
         metadata_manager.update(Cluster::bootstrap(&addresses), now);
 
         // Selects the channel builder from `security.protocol` + `ssl.*` /
@@ -338,14 +334,15 @@ impl KafkaAdminClient {
         // `KafkaException` hierarchy; `illegal_argument` put it outside, where
         // `is_kafka_error()` answers `false`. Same fix as `KafkaProducer::new`.
         .map_err(|e| Error::config_message(format!("Failed to create channel builder: {e}")))?;
-        let selector = Selector::with_defaults_and_log_context(
+        let mut selector = Selector::with_defaults_and_log_context(
             config.connections_max_idle_ms(),
             channel_builder,
             log_context.clone(),
         );
+        selector.set_time(Arc::clone(&time));
         let api_versions = Arc::new(ApiVersions::new());
 
-        let client = NetworkClient::with_metadata_updater(
+        let mut client = NetworkClient::with_metadata_updater(
             selector,
             metadata_manager.updater(),
             config.client_id(),
@@ -363,8 +360,9 @@ impl KafkaAdminClient {
             MetadataRecoveryStrategy::None,
             log_context.clone(),
         );
+        client.set_time(Arc::clone(&time));
 
-        let (admin, runnable) = Self::build(client, metadata_manager, &config, time_provider, log_context)?;
+        let (admin, runnable) = Self::build(client, metadata_manager, &config, time, log_context)?;
         admin.spawn(runnable);
         Ok(admin)
     }
@@ -374,7 +372,7 @@ impl KafkaAdminClient {
         client: C,
         metadata_manager: AdminMetadataManager,
         config: &AdminClientConfig,
-        time_provider: Arc<dyn Fn() -> i64 + Send + Sync>,
+        time: Arc<dyn Time>,
         log_context: LogContext,
     ) -> Result<(Self, AdminClientRunnable<C>), Error> {
         let (admin_tx, admin_rx) = mpsc::unbounded_channel();
@@ -402,7 +400,7 @@ impl KafkaAdminClient {
             config.retry_backoff_ms(),
             config.retries(),
             config.request_timeout_ms(),
-            Arc::clone(&time_provider),
+            Arc::clone(&time),
             Arc::clone(&shutdown),
             log_context.clone(),
         );
@@ -415,7 +413,7 @@ impl KafkaAdminClient {
             wakeup,
             shutdown,
             metadata_manager,
-            time_provider,
+            time,
             bg_handle: Mutex::new(None),
             retry_backoff_ms: config.retry_backoff_ms(),
             retry_backoff_max_ms: config.retry_backoff_max_ms(),
@@ -483,7 +481,7 @@ impl KafkaAdminClient {
     }
 
     fn now(&self) -> i64 {
-        (self.shared.time_provider)()
+        self.shared.time.milliseconds()
     }
 
     /// Builds the context used to submit `AdminApiDriver`-generated calls
@@ -492,7 +490,7 @@ impl KafkaAdminClient {
         DriverContext {
             tx: self.shared.admin_tx.clone(),
             wakeup: Arc::clone(&self.shared.wakeup),
-            time_provider: Arc::clone(&self.shared.time_provider),
+            time: Arc::clone(&self.shared.time),
             log_context: LogContext::new(format!("[AdminClient clientId={}] ", self.shared.client_id)),
         }
     }
@@ -763,7 +761,7 @@ impl KafkaAdminClient {
 struct DriverContext {
     tx: mpsc::UnboundedSender<Call>,
     wakeup: Arc<Notify>,
-    time_provider: Arc<dyn Fn() -> i64 + Send + Sync>,
+    time: Arc<dyn Time>,
     log_context: LogContext,
 }
 
@@ -858,9 +856,9 @@ where
     let hf_ctx = ctx.clone();
     let hf_scope = scope.clone();
     let hf_keys = keys.clone();
-    let hf_time = Arc::clone(&ctx.time_provider);
+    let hf_time = Arc::clone(&ctx.time);
     let handle_failure = Box::new(move |error: &Error| {
-        let now = (hf_time)();
+        let now = hf_time.milliseconds();
         // Poison-tolerant on purpose. This closure is the recovery path: it runs
         // from `AdminClientRunnable::fail_all_remaining` after `run()` catches a
         // panic, and that panic may have poisoned this very mutex inside
@@ -2535,7 +2533,7 @@ fn get_create_topics_call(
     retry_on_quota: bool,
     now: i64,
     deadline: i64,
-    time_provider: Arc<dyn Fn() -> i64 + Send + Sync>,
+    time: Arc<dyn Time>,
 ) -> Call {
     let req_names = names.clone();
     let req_topics = Arc::clone(&topics_by_name);
@@ -2551,7 +2549,7 @@ fn get_create_topics_call(
     let resp_mm = mm.clone();
     let resp_futures = Arc::clone(&futures);
     let resp_topics = Arc::clone(&topics_by_name);
-    let resp_time = Arc::clone(&time_provider);
+    let resp_time = Arc::clone(&time);
     let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64, _cur_node: Option<&Node>| {
         let ConcreteResponse::CreateTopics(create_response) = response else {
             return HandleResult::Retry(Error::local_illegal_state("Expected a CreateTopics response"));
@@ -2623,7 +2621,7 @@ fn get_create_topics_call(
             });
             HandleResult::Done
         } else {
-            let retry_now = (resp_time)();
+            let retry_now = resp_time.milliseconds();
             let call = get_create_topics_call(
                 resp_mm.clone(),
                 Arc::clone(&resp_futures),
@@ -2641,12 +2639,12 @@ fn get_create_topics_call(
     });
 
     let fail_futures = Arc::clone(&futures);
-    let fail_time = Arc::clone(&time_provider);
+    let fail_time = Arc::clone(&time);
     let handle_failure = Box::new(move |error: &Error| {
         // If there were any topics retried due to a quota exceeded exception,
         // propagate the initial error back to the caller if the request timed
         // out (mirrors maybeCompleteQuotaExceededException).
-        let throttle_time_delta = ((fail_time)() - now).clamp(0, i32::MAX as i64) as i32;
+        let throttle_time_delta = (fail_time.milliseconds() - now).clamp(0, i32::MAX as i64) as i32;
         maybe_complete_quota_exceeded(
             retry_on_quota,
             error,
@@ -2689,7 +2687,7 @@ fn get_create_partitions_call(
     retry_on_quota: bool,
     now: i64,
     deadline: i64,
-    time_provider: Arc<dyn Fn() -> i64 + Send + Sync>,
+    time: Arc<dyn Time>,
 ) -> Call {
     let req_names = names.clone();
     let req_topics = Arc::clone(&topics_by_name);
@@ -2705,7 +2703,7 @@ fn get_create_partitions_call(
     let resp_mm = mm.clone();
     let resp_futures = Arc::clone(&futures);
     let resp_topics = Arc::clone(&topics_by_name);
-    let resp_time = Arc::clone(&time_provider);
+    let resp_time = Arc::clone(&time);
     let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64, _cur_node: Option<&Node>| {
         let ConcreteResponse::CreatePartitions(create_response) = response else {
             return HandleResult::Retry(Error::local_illegal_state("Expected a CreatePartitions response"));
@@ -2746,7 +2744,7 @@ fn get_create_partitions_call(
             });
             HandleResult::Done
         } else {
-            let retry_now = (resp_time)();
+            let retry_now = resp_time.milliseconds();
             let call = get_create_partitions_call(
                 resp_mm.clone(),
                 Arc::clone(&resp_futures),
@@ -2764,9 +2762,9 @@ fn get_create_partitions_call(
     });
 
     let fail_futures = Arc::clone(&futures);
-    let fail_time = Arc::clone(&time_provider);
+    let fail_time = Arc::clone(&time);
     let handle_failure = Box::new(move |error: &Error| {
-        let throttle_time_delta = ((fail_time)() - now).clamp(0, i32::MAX as i64) as i32;
+        let throttle_time_delta = (fail_time.milliseconds() - now).clamp(0, i32::MAX as i64) as i32;
         maybe_complete_quota_exceeded(
             retry_on_quota,
             error,
@@ -2806,7 +2804,7 @@ fn get_delete_topics_call(
     retry_on_quota: bool,
     now: i64,
     deadline: i64,
-    time_provider: Arc<dyn Fn() -> i64 + Send + Sync>,
+    time: Arc<dyn Time>,
 ) -> Call {
     let req_names = names.clone();
     let create_request = Box::new(move |timeout_ms: i32| {
@@ -2818,7 +2816,7 @@ fn get_delete_topics_call(
 
     let resp_mm = mm.clone();
     let resp_futures = Arc::clone(&futures);
-    let resp_time = Arc::clone(&time_provider);
+    let resp_time = Arc::clone(&time);
     let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64, _cur_node: Option<&Node>| {
         let ConcreteResponse::DeleteTopics(delete_response) = response else {
             return HandleResult::Retry(Error::local_illegal_state("Expected a DeleteTopics response"));
@@ -2862,7 +2860,7 @@ fn get_delete_topics_call(
             });
             HandleResult::Done
         } else {
-            let retry_now = (resp_time)();
+            let retry_now = resp_time.milliseconds();
             let call = get_delete_topics_call(
                 resp_mm.clone(),
                 Arc::clone(&resp_futures),
@@ -2878,9 +2876,9 @@ fn get_delete_topics_call(
     });
 
     let fail_futures = Arc::clone(&futures);
-    let fail_time = Arc::clone(&time_provider);
+    let fail_time = Arc::clone(&time);
     let handle_failure = Box::new(move |error: &Error| {
-        let throttle_time_delta = ((fail_time)() - now).clamp(0, i32::MAX as i64) as i32;
+        let throttle_time_delta = (fail_time.milliseconds() - now).clamp(0, i32::MAX as i64) as i32;
         maybe_complete_quota_exceeded(
             retry_on_quota,
             error,
@@ -2916,7 +2914,7 @@ fn get_delete_topics_with_ids_call(
     retry_on_quota: bool,
     now: i64,
     deadline: i64,
-    time_provider: Arc<dyn Fn() -> i64 + Send + Sync>,
+    time: Arc<dyn Time>,
 ) -> Call {
     let req_ids = ids.clone();
     let create_request = Box::new(move |timeout_ms: i32| {
@@ -2936,7 +2934,7 @@ fn get_delete_topics_with_ids_call(
 
     let resp_mm = mm.clone();
     let resp_futures = Arc::clone(&futures);
-    let resp_time = Arc::clone(&time_provider);
+    let resp_time = Arc::clone(&time);
     let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64, _cur_node: Option<&Node>| {
         let ConcreteResponse::DeleteTopics(delete_response) = response else {
             return HandleResult::Retry(Error::local_illegal_state("Expected a DeleteTopics response"));
@@ -2986,7 +2984,7 @@ fn get_delete_topics_with_ids_call(
             }
             HandleResult::Done
         } else {
-            let retry_now = (resp_time)();
+            let retry_now = resp_time.milliseconds();
             let call = get_delete_topics_with_ids_call(
                 resp_mm.clone(),
                 Arc::clone(&resp_futures),
@@ -3002,9 +3000,9 @@ fn get_delete_topics_with_ids_call(
     });
 
     let fail_futures = Arc::clone(&futures);
-    let fail_time = Arc::clone(&time_provider);
+    let fail_time = Arc::clone(&time);
     let handle_failure = Box::new(move |error: &Error| {
-        let throttle_time_delta = ((fail_time)() - now).clamp(0, i32::MAX as i64) as i32;
+        let throttle_time_delta = (fail_time.milliseconds() - now).clamp(0, i32::MAX as i64) as i32;
         maybe_complete_quota_exceeded(
             retry_on_quota,
             error,
@@ -3065,7 +3063,7 @@ impl Admin for KafkaAdminClient {
                 options.should_retry_on_quota_violation(),
                 now,
                 deadline,
-                Arc::clone(&self.shared.time_provider),
+                Arc::clone(&self.shared.time),
             );
             self.submit(call);
         }
@@ -3103,7 +3101,7 @@ impl Admin for KafkaAdminClient {
                         options.should_retry_on_quota_violation(),
                         now,
                         deadline,
-                        Arc::clone(&self.shared.time_provider),
+                        Arc::clone(&self.shared.time),
                     );
                     self.submit(call);
                 }
@@ -3135,7 +3133,7 @@ impl Admin for KafkaAdminClient {
                         options.should_retry_on_quota_violation(),
                         now,
                         deadline,
-                        Arc::clone(&self.shared.time_provider),
+                        Arc::clone(&self.shared.time),
                     );
                     self.submit(call);
                 }
@@ -3308,7 +3306,7 @@ impl Admin for KafkaAdminClient {
                 options.should_retry_on_quota_violation(),
                 now,
                 deadline,
-                Arc::clone(&self.shared.time_provider),
+                Arc::clone(&self.shared.time),
             );
             self.submit(call);
         }
@@ -4317,10 +4315,10 @@ impl Admin for KafkaAdminClient {
                     // now that the describe future has resolved. This mirrors Java's
                     // `memFuture.whenComplete(...)` (`KafkaAdminClient.java:4224-4230`)
                     // calling `invokeDriver(handler, adminFuture, options.timeoutMs())`,
-                    // whose `calcDeadlineMs(time.now.load(Ordering::Acquire), timeoutMs)` runs at
+                    // whose `calcDeadlineMs(time.milliseconds(), timeoutMs)` runs at
                     // this later moment — giving `LeaveGroup` a fresh full timeout
                     // window rather than the (already partially consumed) describe one.
-                    let leave_now = (ctx.time_provider)();
+                    let leave_now = ctx.time.milliseconds();
                     let leave_deadline = calc_deadline_ms(leave_now, options_timeout, default_api_timeout_ms);
                     let driver = AdminApiDriver::new(
                         Box::new(handler),
@@ -5110,7 +5108,7 @@ impl KafkaAdminClient {
         client: C,
         cluster: Cluster,
         config: &AdminClientConfig,
-        time_provider: Arc<dyn Fn() -> i64 + Send + Sync>,
+        time: Arc<dyn Time>,
     ) -> (Self, AdminClientRunnable<C>) {
         let log_context = LogContext::new(format!("[AdminClient clientId={}] ", config.client_id()));
         let metadata_manager = AdminMetadataManager::new(
@@ -5119,10 +5117,10 @@ impl KafkaAdminClient {
             false,
             log_context.clone(),
         );
-        metadata_manager.update(cluster, (time_provider)());
+        metadata_manager.update(cluster, time.milliseconds());
         // Test-only: a bad `RETRY_BACKOFF_JITTER` constant is a build error in the
         // fixture, so panicking here is the right test behaviour.
-        Self::build(client, metadata_manager, config, time_provider, log_context)
+        Self::build(client, metadata_manager, config, time, log_context)
             .expect("the admin retry backoff constants are valid")
     }
 }
@@ -5130,6 +5128,7 @@ impl KafkaAdminClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::common::utils::MockTime;
     use std::collections::{HashMap, HashSet};
     use std::sync::atomic::{AtomicI64, Ordering};
 
@@ -5205,22 +5204,11 @@ mod tests {
         assert_eq!(present.message(), "boom");
     }
 
-    /// A mutable mock clock so retry/backoff tests can advance time.
-    struct MockTime {
-        now: AtomicI64,
-    }
-
-    impl MockTime {
-        fn new(initial: i64) -> Arc<Self> {
-            Arc::new(Self { now: AtomicI64::new(initial) })
-        }
-        fn provider(self: &Arc<Self>) -> Arc<dyn Fn() -> i64 + Send + Sync> {
-            let t = Arc::clone(self);
-            Arc::new(move || t.now.load(Ordering::Acquire))
-        }
-        fn sleep(&self, ms: i64) {
-            self.now.fetch_add(ms, Ordering::AcqRel);
-        }
+    /// Java's `new MockTime()` started at `initial_ms`, with a frozen monotonic clock.
+    fn mock_time(initial_ms: i64) -> Arc<MockTime> {
+        Arc::new(MockTime::with_auto_tick_ms_current_time_ms_current_high_res_time_ns(
+            0, initial_ms, 0,
+        ))
     }
 
     fn test_config() -> AdminClientConfig {
@@ -5255,11 +5243,12 @@ mod tests {
         // false when `throttled_until_ms` is also 0, so a node never becomes
         // ready at t=0 (matching the producer's `SenderTest` which starts at
         // 1000 for the same reason).
-        let time = MockTime::new(1000);
+        let time = mock_time(1000);
         let (cluster, nodes) = mock_cluster(3, 0);
-        let client = MockClient::with_static_nodes(nodes.clone(), time.provider());
+        let client = MockClient::with_static_nodes(nodes.clone(), Arc::clone(&time) as Arc<dyn Time>);
         let config = test_config();
-        let (admin, runnable) = KafkaAdminClient::create_for_test(client, cluster, &config, time.provider());
+        let (admin, runnable) =
+            KafkaAdminClient::create_for_test(client, cluster, &config, Arc::clone(&time) as Arc<dyn Time>);
         (admin, runnable, time, nodes)
     }
 
@@ -5268,16 +5257,17 @@ mod tests {
     fn env_with_props(
         extra: &[(&str, &str)],
     ) -> (KafkaAdminClient, AdminClientRunnable<MockClient>, Arc<MockTime>, Vec<Node>) {
-        let time = MockTime::new(1000);
+        let time = mock_time(1000);
         let (cluster, nodes) = mock_cluster(3, 0);
-        let client = MockClient::with_static_nodes(nodes.clone(), time.provider());
+        let client = MockClient::with_static_nodes(nodes.clone(), Arc::clone(&time) as Arc<dyn Time>);
         let mut props = HashMap::new();
         props.insert("bootstrap.servers".to_string(), "localhost:9092".to_string());
         for (k, v) in extra {
             props.insert((*k).to_string(), (*v).to_string());
         }
         let config = AdminClientConfig::new(&props).unwrap();
-        let (admin, runnable) = KafkaAdminClient::create_for_test(client, cluster, &config, time.provider());
+        let (admin, runnable) =
+            KafkaAdminClient::create_for_test(client, cluster, &config, Arc::clone(&time) as Arc<dyn Time>);
         (admin, runnable, time, nodes)
     }
 
@@ -5288,16 +5278,17 @@ mod tests {
         num_nodes: i32,
         extra: &[(&str, &str)],
     ) -> (KafkaAdminClient, AdminClientRunnable<MockClient>, Arc<MockTime>, Vec<Node>) {
-        let time = MockTime::new(1000);
+        let time = mock_time(1000);
         let (cluster, nodes) = mock_cluster(num_nodes, 0);
-        let client = MockClient::with_static_nodes(nodes.clone(), time.provider());
+        let client = MockClient::with_static_nodes(nodes.clone(), Arc::clone(&time) as Arc<dyn Time>);
         let mut props = HashMap::new();
         props.insert("bootstrap.servers".to_string(), "localhost:9092".to_string());
         for (k, v) in extra {
             props.insert((*k).to_string(), (*v).to_string());
         }
         let config = AdminClientConfig::new(&props).unwrap();
-        let (admin, runnable) = KafkaAdminClient::create_for_test(client, cluster, &config, time.provider());
+        let (admin, runnable) =
+            KafkaAdminClient::create_for_test(client, cluster, &config, Arc::clone(&time) as Arc<dyn Time>);
         (admin, runnable, time, nodes)
     }
 
@@ -6859,7 +6850,7 @@ mod tests {
         // the queue can be observed instead of panicking again.
         let failures = Arc::new(AtomicI64::new(0));
         let counter = Arc::clone(&failures);
-        let now = time.now.load(Ordering::Acquire);
+        let now = time.milliseconds();
         admin.submit(Call::new(
             "panicOnPurpose",
             now - 1,
@@ -6908,7 +6899,7 @@ mod tests {
 
         let failure: Arc<Mutex<Option<Error>>> = Arc::new(Mutex::new(None));
         let sink = Arc::clone(&failure);
-        let now = time.now.load(Ordering::Acquire);
+        let now = time.milliseconds();
         admin.submit(Call::new(
             "createRequestBoom",
             now + 60_000,
@@ -6982,9 +6973,7 @@ mod tests {
         );
 
         assert_ne!(
-            runnable
-                .metadata_manager()
-                .metadata_fetch_delay_ms(time.now.load(Ordering::Acquire)),
+            runnable.metadata_manager().metadata_fetch_delay_ms(time.milliseconds()),
             i64::MAX,
             "the manager must leave UPDATE_PENDING and retry under backoff, as Java's \
              updateFailed(e) makes it"
@@ -7613,8 +7602,8 @@ mod tests {
             .prepare_response(metadata_resp(&nodes, vec![topic_meta_leaders("foo", &[(0, 0)])]));
 
         let expected = vec![
-            ProducerState::new(12345, 15, 30, time.provider()(), Some(99), None),
-            ProducerState::new(12345, 15, 30, time.provider()(), None, Some(23423)),
+            ProducerState::new(12345, 15, 30, time.milliseconds(), Some(99), None),
+            ProducerState::new(12345, 15, 30, time.milliseconds(), None, Some(23423)),
         ];
         runnable
             .client_mut()
@@ -7677,8 +7666,8 @@ mod tests {
             .prepare_response(metadata_resp(&nodes, vec![topic_meta_leaders("foo", &[(0, 0)])]));
 
         let expected = vec![
-            ProducerState::new(12345, 15, 30, time.provider()(), Some(99), None),
-            ProducerState::new(12345, 15, 30, time.provider()(), None, Some(23423)),
+            ProducerState::new(12345, 15, 30, time.milliseconds(), Some(99), None),
+            ProducerState::new(12345, 15, 30, time.milliseconds(), None, Some(23423)),
         ];
         runnable
             .client_mut()
@@ -8594,7 +8583,7 @@ mod tests {
         let drv_ctx = DriverContext {
             tx,
             wakeup: Arc::new(Notify::new()),
-            time_provider: Arc::new(move || now),
+            time: mock_time(now),
             log_context: LogContext::new("[test] "),
         };
         let mut call = new_driver_call(Arc::clone(&driver), spec, drv_ctx);
@@ -8633,7 +8622,7 @@ mod tests {
         let drv_ctx = DriverContext {
             tx,
             wakeup: Arc::new(Notify::new()),
-            time_provider: Arc::new(move || now),
+            time: mock_time(now),
             log_context: LogContext::new("[test] "),
         };
         let mut call = new_driver_call(Arc::clone(&driver), spec, drv_ctx);
@@ -10411,7 +10400,7 @@ mod tests {
             Some(node0.clone()),
             HashMap::new(),
         );
-        admin.shared.metadata_manager.update(shrunk, (admin.shared.time_provider)());
+        admin.shared.metadata_manager.update(shrunk, admin.shared.time.milliseconds());
 
         // Second call: the cache sends foo-0 straight to fulfillment on node1,
         // which is gone. The admin client must re-resolve the leader (now node0)
@@ -12536,7 +12525,7 @@ mod tests {
     /// Java computes the `LeaveGroup` driver's deadline INSIDE
     /// `memFuture.whenComplete(...)`, after the describe future resolves
     /// (`KafkaAdminClient.java:4224-4230` → `invokeDriver(..., options.timeoutMs())`
-    /// → `calcDeadlineMs(time.now.load(Ordering::Acquire), ...)`), so `LeaveGroup` gets a
+    /// → `calcDeadlineMs(time.milliseconds(), ...)`), so `LeaveGroup` gets a
     /// fresh full timeout window starting when describe completes. Here the mock
     /// clock is advanced past the ORIGINAL (call-time) `options.timeout` window
     /// before describe completes: the fix recomputes the LeaveGroup deadline from
@@ -12832,9 +12821,9 @@ mod tests {
     /// `message()`.
     #[tokio::test]
     async fn an_admin_authentication_failure_is_not_reported_as_sasl() {
-        let time = MockTime::new(1000);
+        let time = mock_time(1000);
         let (cluster, nodes) = mock_cluster(3, 0);
-        let inner = MockClient::with_static_nodes(nodes.clone(), time.provider());
+        let inner = MockClient::with_static_nodes(nodes.clone(), Arc::clone(&time) as Arc<dyn Time>);
         let client = AuthFailingClient::new(
             inner,
             Error::SslAuthentication(crate::common::errors::SslAuthenticationError::new(
@@ -12845,7 +12834,8 @@ mod tests {
         props.insert("bootstrap.servers".to_string(), "localhost:9092".to_string());
         props.insert("retries".to_string(), "0".to_string());
         let config = AdminClientConfig::new(&props).unwrap();
-        let (admin, mut runnable) = KafkaAdminClient::create_for_test(client, cluster, &config, time.provider());
+        let (admin, mut runnable) =
+            KafkaAdminClient::create_for_test(client, cluster, &config, Arc::clone(&time) as Arc<dyn Time>);
 
         runnable
             .client_mut()
@@ -13145,7 +13135,7 @@ mod tests {
             .store(i64::MAX, Ordering::Release);
 
         assert!(
-            runnable.should_exit_for_test(time.now.load(Ordering::Acquire)),
+            runnable.should_exit_for_test(time.milliseconds()),
             "close() must not wait on an internal call: the I/O task has to exit at once"
         );
     }
@@ -13163,7 +13153,7 @@ mod tests {
             "the submitted listTopics call should be an active external call"
         );
 
-        let now = time.now.load(Ordering::Acquire);
+        let now = time.milliseconds();
         admin.shared.shutdown.closing.store(true, Ordering::Release);
         admin
             .shared
@@ -13256,7 +13246,7 @@ mod tests {
             }
             let now = if self.advance_clock.load(Ordering::Acquire) {
                 self.time.sleep(timeout);
-                self.time.now.load(Ordering::Acquire)
+                self.time.milliseconds()
             } else {
                 now
             };
@@ -13354,14 +13344,17 @@ mod tests {
     /// callers would see the same overrun.
     #[tokio::test]
     async fn close_bounds_the_poll_timeout_by_the_hard_shutdown_deadline() {
-        let time = MockTime::new(1000);
+        let time = mock_time(1000);
         let (cluster, nodes) = mock_cluster(3, 0);
-        let client =
-            WaitingClient::new(MockClient::with_static_nodes(nodes.clone(), time.provider()), Arc::clone(&time));
+        let client = WaitingClient::new(
+            MockClient::with_static_nodes(nodes.clone(), Arc::clone(&time) as Arc<dyn Time>),
+            Arc::clone(&time),
+        );
         let poll_timeouts = client.poll_timeouts();
         let advance_clock = client.advance_clock();
         let config = test_config();
-        let (admin, mut runnable) = KafkaAdminClient::create_for_test(client, cluster, &config, time.provider());
+        let (admin, mut runnable) =
+            KafkaAdminClient::create_for_test(client, cluster, &config, Arc::clone(&time) as Arc<dyn Time>);
 
         // Put an external RPC in flight. The mock has no prepared response, so
         // the call sits in `correlation_id_to_calls`: `pending_calls` is empty,
@@ -13385,7 +13378,7 @@ mod tests {
         );
 
         // `close(Duration::from_millis(100))`.
-        let now = time.now.load(Ordering::Acquire);
+        let now = time.milliseconds();
         let hard_deadline = now + 100;
         admin.shared.shutdown.closing.store(true, Ordering::Release);
         admin
@@ -13413,7 +13406,7 @@ mod tests {
                  (100 ms), got {timeouts:?}"
             );
         }
-        let waited = time.now.load(Ordering::Acquire) - now;
+        let waited = time.milliseconds() - now;
         assert!(
             waited <= 100,
             "close(100ms) must not overrun its deadline: the I/O task waited {waited}ms"
@@ -13439,13 +13432,16 @@ mod tests {
     /// connect timeout.
     #[tokio::test]
     async fn close_returns_within_its_timeout_even_when_the_io_task_cannot_exit() {
-        let time = MockTime::new(1000);
+        let time = mock_time(1000);
         let (cluster, nodes) = mock_cluster(3, 0);
-        let client =
-            WaitingClient::new(MockClient::with_static_nodes(nodes.clone(), time.provider()), Arc::clone(&time));
+        let client = WaitingClient::new(
+            MockClient::with_static_nodes(nodes.clone(), Arc::clone(&time) as Arc<dyn Time>),
+            Arc::clone(&time),
+        );
         let stuck = client.stuck();
         let config = test_config();
-        let (admin, runnable) = KafkaAdminClient::create_for_test(client, cluster, &config, time.provider());
+        let (admin, runnable) =
+            KafkaAdminClient::create_for_test(client, cluster, &config, Arc::clone(&time) as Arc<dyn Time>);
 
         // From its first poll on, the I/O task is parked forever: it can neither
         // finish work nor re-evaluate `should_exit`, so nothing but the timed
@@ -13480,7 +13476,7 @@ mod tests {
     #[tokio::test]
     async fn close_never_widens_an_existing_hard_shutdown_deadline() {
         let (admin, _runnable, time, _nodes) = env();
-        let now = time.now.load(Ordering::Acquire);
+        let now = time.milliseconds();
         let deadline = || admin.shared.shutdown.hard_shutdown_deadline_ms.load(Ordering::Acquire);
 
         // No task was spawned, so each `close()` here only publishes the deadline.
@@ -13504,7 +13500,7 @@ mod tests {
     #[tokio::test]
     async fn close_clamps_the_wait_to_a_year() {
         let (admin, _runnable, time, _nodes) = env();
-        let now = time.now.load(Ordering::Acquire);
+        let now = time.milliseconds();
         admin.close_with_timeout(Duration::from_millis(i64::MAX as u64)).await;
         assert_eq!(
             admin.shared.shutdown.hard_shutdown_deadline_ms.load(Ordering::Acquire),

@@ -85,6 +85,7 @@ use crate::metadata::LeaderIdAndEpoch;
 use crate::produce_request_data::{PartitionProduceData, TopicProduceData};
 
 use crate::common::utils::LogContext;
+use crate::common::utils::Time;
 
 use super::Caller;
 use super::InFlightBatchPool;
@@ -162,9 +163,8 @@ struct SenderMetrics {
     max_record_size_sensor: Arc<Sensor>,
     batch_split_sensor: Arc<Sensor>,
     metrics: SenderMetricsRegistry,
-    /// Provider of current wall-clock time in milliseconds. Java's
-    /// `SenderMetrics` holds a `Time time` and calls `time.milliseconds()`.
-    time_provider: Arc<dyn Fn() -> i64 + Send + Sync>,
+    /// Java: `SenderMetrics`' `private final Time time`.
+    time: Arc<dyn Time>,
     /// Contextual log message prefix (for the unreachable registration-error path).
     log_context: LogContext,
 }
@@ -183,7 +183,7 @@ impl SenderMetrics {
         metrics: SenderMetricsRegistry,
         metadata: Arc<ProducerMetadata>,
         in_flight_count: Arc<AtomicI32>,
-        time_provider: Arc<dyn Fn() -> i64 + Send + Sync>,
+        time: Arc<dyn Time>,
         log_context: LogContext,
     ) -> Result<Self, Error> {
         let batch_size_sensor = metrics.sensor("batch-size")?;
@@ -258,7 +258,7 @@ impl SenderMetrics {
             max_record_size_sensor,
             batch_split_sensor,
             metrics,
-            time_provider,
+            time,
             log_context,
         })
     }
@@ -313,7 +313,7 @@ impl SenderMetrics {
     /// `SenderMetrics.updateProduceRequestMetrics(Map<Integer, List<ProducerBatch>>)`.
     #[doc(alias = "org.apache.kafka.clients.producer.internals.Sender$SenderMetrics#updateProduceRequestMetrics")]
     fn update_produce_request_metrics(&self, batches: &HashMap<i32, Vec<ProducerBatch>>) {
-        let now = (self.time_provider)();
+        let now = self.time.milliseconds();
         for node_batch in batches.values() {
             let mut records: i32 = 0;
             for batch in node_batch {
@@ -363,7 +363,7 @@ impl SenderMetrics {
     /// `SenderMetrics.recordRetries`.
     #[doc(alias = "org.apache.kafka.clients.producer.internals.Sender$SenderMetrics#recordRetries")]
     fn record_retries(&self, topic: &str, count: i32) {
-        let now = (self.time_provider)();
+        let now = self.time.milliseconds();
         self.retry_sensor.record_value_time_ms(count as f64, now);
         let topic_retry_name = format!("topic.{topic}.record-retries");
         if let Some(topic_retry_sensor) = self.metrics.get_sensor(&topic_retry_name) {
@@ -375,7 +375,7 @@ impl SenderMetrics {
     /// `SenderMetrics.recordErrors`.
     #[doc(alias = "org.apache.kafka.clients.producer.internals.Sender$SenderMetrics#recordErrors")]
     fn record_errors(&self, topic: &str, count: i32) {
-        let now = (self.time_provider)();
+        let now = self.time.milliseconds();
         self.error_sensor.record_value_time_ms(count as f64, now);
         let topic_error_name = format!("topic.{topic}.record-errors");
         if let Some(topic_error_sensor) = self.metrics.get_sensor(&topic_error_name) {
@@ -388,7 +388,7 @@ impl SenderMetrics {
     /// `SenderMetrics.recordLatency`.
     #[doc(alias = "org.apache.kafka.clients.producer.internals.Sender$SenderMetrics#recordLatency")]
     fn record_latency(&self, node: &str, latency: i64) {
-        let now = (self.time_provider)();
+        let now = self.time.milliseconds();
         self.request_time_sensor.record_value_time_ms(latency as f64, now);
         if !node.is_empty() {
             let node_time_name = format!("node-{node}.latency");
@@ -586,8 +586,8 @@ pub struct Sender<C: KafkaClient> {
     batches_awaiting_response: Vec<ProducerBatch>,
     /// Pending produce requests awaiting responses, keyed by correlation ID.
     pending_produce_responses: HashMap<i32, PendingProduceRequest>,
-    /// Provider of current wall-clock time in milliseconds (epoch).
-    time_provider: Arc<dyn Fn() -> i64 + Send + Sync>,
+    /// Java: `private final Time time`.
+    time: Arc<dyn Time>,
     /// Contextual log message prefix.
     ///
     /// Translated from Java's `LogContext logContext` field in `Sender`.
@@ -632,7 +632,7 @@ impl<C: KafkaClient> Sender<C> {
     /// passes through instantly. Tokio's timer is real unless the test opts into
     /// `#[tokio::test(start_paused = true)]`, which auto-advances when the runtime is
     /// idle. That is a difference in test *duration* only — the Sender's own clock is
-    /// the injected `time_provider` either way.
+    /// the injected `time` either way.
     async fn sleep_ms(duration_ms: i64) {
         if duration_ms > 0 {
             tokio::time::sleep(std::time::Duration::from_millis(duration_ms as u64)).await;
@@ -700,7 +700,7 @@ impl<C: KafkaClient> Sender<C> {
         metrics: SenderMetricsRegistry,
         running: Arc<AtomicBool>,
         force_close: Arc<AtomicBool>,
-        time_provider: Arc<dyn Fn() -> i64 + Send + Sync>,
+        time: Arc<dyn Time>,
         transaction_manager: Option<Arc<Mutex<TransactionManager>>>,
         pending_requests: Arc<Mutex<PendingRequests>>,
         log_context: LogContext,
@@ -713,7 +713,7 @@ impl<C: KafkaClient> Sender<C> {
             metrics,
             Arc::clone(&metadata),
             in_flight_count,
-            Arc::clone(&time_provider),
+            Arc::clone(&time),
             log_context.clone(),
         )
         .expect("registering sender sensors");
@@ -738,7 +738,7 @@ impl<C: KafkaClient> Sender<C> {
             in_flight_batches: HashMap::new(),
             batches_awaiting_response: Vec::new(),
             pending_produce_responses: HashMap::new(),
-            time_provider,
+            time,
             log_context,
             sensors,
         }
@@ -1147,7 +1147,7 @@ impl<C: KafkaClient> Sender<C> {
             }
         }
 
-        let current_time_ms = (self.time_provider)();
+        let current_time_ms = self.time.milliseconds();
         let poll_timeout = self.send_producer_data(current_time_ms).await?;
         self.poll_and_dispatch(poll_timeout, current_time_ms).await;
         Ok(())
@@ -1183,7 +1183,7 @@ impl<C: KafkaClient> Sender<C> {
     /// cancel-safe).
     async fn poll_and_dispatch(&mut self, timeout: i64, now: i64) {
         let responses = self.client.poll(timeout, now).await;
-        let dispatch_time_ms = (self.time_provider)();
+        let dispatch_time_ms = self.time.milliseconds();
         self.handle_client_responses(&responses, dispatch_time_ms);
     }
 
@@ -1371,7 +1371,7 @@ impl<C: KafkaClient> Sender<C> {
                 // with no manager lock held — rules §3's order is unaffected.
                 self.maybe_abort_batches(error);
             }
-            let now = (self.time_provider)();
+            let now = self.time.milliseconds();
             self.poll_and_dispatch(self.retry_backoff_ms, now).await;
             return Ok(true);
         }
@@ -1524,7 +1524,7 @@ impl<C: KafkaClient> Sender<C> {
         // Java 460-464: as long as there are outstanding transactional requests, we
         // simply wait for them to return.
         if self.has_in_flight_request() {
-            let now = (self.time_provider)();
+            let now = self.time.milliseconds();
             self.poll_and_dispatch(self.retry_backoff_ms, now).await;
             return Ok(true);
         }
@@ -1571,7 +1571,7 @@ impl<C: KafkaClient> Sender<C> {
         let target_node = match coordinator_type {
             Some(coordinator_type) => self.coordinators.coordinator(coordinator_type)?.cloned(),
             None => {
-                let now = (self.time_provider)();
+                let now = self.time.milliseconds();
                 self.client.least_loaded_node(now).node().cloned()
             },
         };
@@ -1601,7 +1601,7 @@ impl<C: KafkaClient> Sender<C> {
                     .unwrap()
                     .retry(&mut pending_requests, next_request_handler);
             }
-            let now = (self.time_provider)();
+            let now = self.time.milliseconds();
             self.poll_and_dispatch(self.retry_backoff_ms, now).await;
             return Ok(true);
         };
@@ -1656,7 +1656,7 @@ impl<C: KafkaClient> Sender<C> {
         }
 
         // Java 503-510.
-        let current_time_ms = (self.time_provider)();
+        let current_time_ms = self.time.milliseconds();
         // Java hands the builder itself to `newClientRequest`, keeping the handler's
         // own reference alive for a possible retry. This crate only exposes builders
         // as `Box<dyn RequestBuilder>` at that boundary, so the builder is cloned
@@ -1691,7 +1691,7 @@ impl<C: KafkaClient> Sender<C> {
         self.pending_transactional_response = Some((correlation_id, next_request_handler));
         self.client.send(client_request, current_time_ms);
         self.set_in_flight_correlation_id(correlation_id);
-        let now = (self.time_provider)();
+        let now = self.time.milliseconds();
         self.poll_and_dispatch(self.retry_backoff_ms, now).await;
         Ok(true)
     }
@@ -1751,8 +1751,7 @@ impl<C: KafkaClient> Sender<C> {
     ) -> std::io::Result<bool> {
         let request_timeout_ms = self.request_timeout_ms as i64;
         let (responses, result) =
-            crate::NetworkClientUtils::await_ready(&mut self.client, node, &*self.time_provider, request_timeout_ms)
-                .await;
+            crate::NetworkClientUtils::await_ready(&mut self.client, node, &*self.time, request_timeout_ms).await;
         // Route the responses collected while awaiting readiness through the same
         // path `poll_and_dispatch` uses, **before** propagating any error. This
         // crate's `NetworkClient::poll` does not self-dispatch (PLAN §9.28) —
@@ -1767,7 +1766,7 @@ impl<C: KafkaClient> Sender<C> {
         // so it loses nothing on the error paths either. No manager guard is held
         // across the await above or this dispatch (rules §4).
         if !responses.is_empty() {
-            let now = (self.time_provider)();
+            let now = self.time.milliseconds();
             self.handle_client_responses(&responses, now);
         }
         let ready = result?;
@@ -2899,6 +2898,7 @@ mod tests {
     use crate::common::requests::ConcreteResponse;
     use crate::common::requests::TransactionResult;
     use crate::common::requests::{PartitionResponse, ProduceResponse};
+    use crate::common::utils::MockTime;
     use crate::common::utils::ProducerIdAndEpoch;
     use crate::consumer::{ConsumerGroupMetadata, ConsumerGroupMetadataImpl, OffsetAndMetadata};
     use crate::produce_response_data::{PartitionProduceResponse, TopicProduceResponse};
@@ -2906,7 +2906,6 @@ mod tests {
     use crate::producer::internals::FutureRecordMetadata;
     use crate::producer::internals::PartitionerConfig;
     use crate::producer::internals::{Caller, InFlightBatchPool, TransactionalRequestResult};
-    use std::sync::atomic::AtomicI64;
     use std::time::Duration;
 
     // Constants matching Java's SenderTest
@@ -2933,51 +2932,14 @@ mod tests {
         m
     }
 
-    /// Shared mock time: atomically advancing clock.
-    struct MockTime {
-        now_ms: AtomicI64,
-        /// Milliseconds to advance on every [`Self::milliseconds`] call.
-        ///
-        /// Java's `MockTime(autoTickMs)` does the same, and `milliseconds()` sleeps
-        /// *before* reading, so the returned value already includes the tick. Zero
-        /// (the default) leaves the clock under the test's explicit control, which is
-        /// what every test but `test_node_not_ready` wants.
-        ///
-        /// Some code cannot make progress without it. `NetworkClientUtils.awaitReady`
-        /// loops on `attempt_start_time - start_time < timeout_ms` and advances that
-        /// difference only by re-reading the clock, so with a frozen clock and an
-        /// unready node it never terminates — the Sender is driven synchronously by
-        /// the test, so no other task can advance time for it.
-        auto_tick_ms: AtomicI64,
-    }
-
-    impl MockTime {
-        fn new(initial: i64) -> Arc<Self> {
-            Arc::new(Self { now_ms: AtomicI64::new(initial), auto_tick_ms: AtomicI64::new(0) })
-        }
-
-        /// Advances the clock by `ms` on every read, mirroring Java's
-        /// `new MockTime(autoTickMs)`.
-        fn set_auto_tick(&self, ms: i64) {
-            self.auto_tick_ms.store(ms, Ordering::Release);
-        }
-
-        fn milliseconds(&self) -> i64 {
-            let tick = self.auto_tick_ms.load(Ordering::Acquire);
-            if tick == 0 {
-                return self.now_ms.load(Ordering::Acquire);
-            }
-            self.now_ms.fetch_add(tick, Ordering::AcqRel) + tick
-        }
-
-        fn sleep(&self, ms: i64) {
-            self.now_ms.fetch_add(ms, Ordering::AcqRel);
-        }
-
-        fn as_provider(self: &Arc<Self>) -> Arc<dyn Fn() -> i64 + Send + Sync> {
-            let time = Arc::clone(self);
-            Arc::new(move || time.milliseconds())
-        }
+    /// Java's `new MockTime()` started at `initial_ms`, with a frozen monotonic clock.
+    ///
+    /// Start at a non-zero time: Java's MockTime uses `System.currentTimeMillis()`,
+    /// which is always > 0.
+    fn mock_time(initial_ms: i64) -> Arc<MockTime> {
+        Arc::new(MockTime::with_auto_tick_ms_current_time_ms_current_high_res_time_ns(
+            0, initial_ms, 0,
+        ))
     }
 
     /// Builds an idempotent (non-transactional) [`TransactionManager`], mirroring
@@ -3159,8 +3121,8 @@ mod tests {
             // Start at a non-zero time. Java's MockTime uses System.currentTimeMillis()
             // which is always > 0. Starting at 0 breaks MockClient because
             // not_throttled(0) returns false when throttled_until_ms is also 0.
-            let time = MockTime::new(1000);
-            let time_provider = time.as_provider();
+            let time = mock_time(1000);
+            let clock: Arc<dyn Time> = Arc::clone(&time) as Arc<dyn Time>;
 
             let batch_size = 16 * 1024;
             let total_size = 1024 * 1024;
@@ -3187,7 +3149,7 @@ mod tests {
             ));
 
             let nodes = vec![Node::new(0, "localhost".to_string(), 1969)];
-            let client = MockClient::with_static_nodes(nodes, Arc::clone(&time_provider));
+            let client = MockClient::with_static_nodes(nodes, Arc::clone(&clock));
 
             let running = Arc::new(AtomicBool::new(true));
             let force_close = Arc::new(AtomicBool::new(false));
@@ -3214,7 +3176,7 @@ mod tests {
                 sender_metrics_registry,
                 running,
                 force_close,
-                time_provider,
+                clock,
                 transaction_manager.clone(),
                 Arc::new(Mutex::new(PendingRequests::new())),
                 LogContext::empty(),
@@ -4901,8 +4863,8 @@ mod tests {
     async fn test_node_latency_stats() {
         // Create a new record accumulator with non-0 partitionAvailabilityTimeoutMs
         // otherwise it wouldn't update the stats.
-        let time = MockTime::new(1000);
-        let time_provider = time.as_provider();
+        let time = mock_time(1000);
+        let clock: Arc<dyn Time> = Arc::clone(&time) as Arc<dyn Time>;
 
         let batch_size = 16 * 1024;
         let total_size = 1024 * 1024;
@@ -4928,7 +4890,7 @@ mod tests {
         ));
 
         let nodes = vec![Node::new(0, "localhost".to_string(), 1969)];
-        let client = MockClient::with_static_nodes(nodes, Arc::clone(&time_provider));
+        let client = MockClient::with_static_nodes(nodes, Arc::clone(&clock));
 
         let running = Arc::new(AtomicBool::new(true));
         let force_close = Arc::new(AtomicBool::new(false));
@@ -4949,7 +4911,7 @@ mod tests {
             sender_metrics_registry,
             running,
             force_close,
-            time_provider,
+            clock,
             None,
             Arc::new(Mutex::new(PendingRequests::new())),
             LogContext::empty(),
@@ -5158,7 +5120,7 @@ mod tests {
             registry,
             metadata,
             Arc::new(std::sync::atomic::AtomicI32::new(0)),
-            Arc::new(|| 0),
+            mock_time(0),
             LogContext::empty(),
         )
         .expect("sender metrics");
@@ -5209,7 +5171,7 @@ mod tests {
             registry,
             metadata,
             Arc::new(std::sync::atomic::AtomicI32::new(0)),
-            Arc::new(|| 0),
+            mock_time(0),
             LogContext::empty(),
         )
         .expect("sender metrics");
@@ -5852,7 +5814,7 @@ mod tests {
     ///   1. **Making `awaitReady` time out at all.** `NetworkClientUtils.awaitReady`
     ///      advances its own deadline only by re-reading the clock, so with a frozen
     ///      clock and an unready node it spins forever. So the auto-tick is kept, via
-    ///      [`MockTime::set_auto_tick`].
+    ///      [`MockTime::set_auto_tick_ms`].
     ///   2. **Letting the delay expire afterwards.** Java's delay is
     ///      `REQUEST_TIMEOUT + 20`, i.e. two ticks longer than the await window, so
     ///      whether the node is still unready when the window closes depends on how
@@ -5874,7 +5836,7 @@ mod tests {
         let mut ctx = SenderTestContext::transactional();
         let node = ctx.metadata.fetch().node_by_id(0).expect("node 0").clone();
         // Java: `time = new MockTime(10)`.
-        ctx.time.set_auto_tick(10);
+        ctx.time.set_auto_tick_ms(10);
 
         let result = ctx
             .initialize_transactions()
@@ -8868,8 +8830,8 @@ mod tests {
     ///     `Sender` mid-test would *lose* it and the driver's first `run_once` would
     ///     re-issue FindCoordinator — a divergence the swap is supposed to avoid.
     fn split_batch_and_send_context(transaction_manager: Arc<Mutex<TransactionManager>>) -> SenderTestContext {
-        let time = MockTime::new(1000);
-        let time_provider = time.as_provider();
+        let time = mock_time(1000);
+        let clock: Arc<dyn Time> = Arc::clone(&time) as Arc<dyn Time>;
 
         let batch_size = 16 * 1024;
         let total_size = 1024 * 1024;
@@ -8905,7 +8867,7 @@ mod tests {
             Node::new(0, "localhost".to_string(), 1969),
             Node::new(1, "localhost".to_string(), 1970),
         ];
-        let client = MockClient::with_static_nodes(nodes, Arc::clone(&time_provider));
+        let client = MockClient::with_static_nodes(nodes, Arc::clone(&clock));
 
         // Build metrics with a `client-id` tag, matching Java's
         // `SenderTest.testSenderMetricsTemplates` (`clientA`) and the default rig.
@@ -8931,7 +8893,7 @@ mod tests {
             sender_metrics_registry,
             Arc::new(AtomicBool::new(true)),
             Arc::new(AtomicBool::new(false)),
-            time_provider,
+            clock,
             Some(Arc::clone(&transaction_manager)),
             Arc::new(Mutex::new(PendingRequests::new())),
             LogContext::empty(),
@@ -10257,7 +10219,7 @@ mod tests {
     // below is unaffected:
     //   `testSenderShouldRetryWithBackoffOnRetriableError` (3104) — asserts
     //     `time.milliseconds()` advances by exactly `RETRY_BACKOFF_MS` between retries.
-    //     Missing surface: the `Sender`'s clock is an injected `Arc<dyn Fn() -> i64>` with no
+    //     Missing surface: the `Sender`'s clock is an injected `Arc<dyn Time>`, which has no
     //     `sleep`, so `sleep_ms` uses `tokio::time::sleep` and does not move the test's
     //     `MockTime` — the assertion is unrepresentable. Needs Java's `Time` interface (a
     //     `sleep` that advances the injected clock) threaded through `Sender`, which is a

@@ -51,6 +51,7 @@ use tokio::net::TcpSocket;
 use tokio::sync::Notify;
 
 use crate::common::utils::LogContext;
+use crate::common::utils::{SystemTime, Time};
 use crate::{kafka_debug, kafka_error, kafka_trace};
 
 use std::collections::{HashMap, LinkedList};
@@ -58,7 +59,6 @@ use std::io;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex as StdMutex};
 use std::task::{Context, Poll, Wake, Waker};
-use std::time::Instant;
 
 /// Shared between the [`Selector`] and every per-channel [`ChannelWaker`].
 ///
@@ -233,6 +233,10 @@ pub struct Selector {
     idle_expiry_manager: Option<IdleExpiryManager>,
     /// Notify for wakeup support.
     notify: Arc<Notify>,
+    /// Java: `private final Time time`. The monotonic
+    /// [`nanoseconds`](Time::nanoseconds) reading drives idle-connection
+    /// expiry.
+    time: Arc<dyn Time>,
     /// Whether progress was made reading in the last poll.
     made_read_progress_last_poll: bool,
     /// Reusable scratch buffer for the per-iteration snapshot of channel ids in
@@ -320,6 +324,7 @@ impl Selector {
         channel_builder: Box<dyn ChannelBuilder>,
         log_context: LogContext,
     ) -> Self {
+        let time: Arc<dyn Time> = Arc::new(SystemTime);
         Self {
             channels: FxHashMap::default(),
             explicitly_muted_channels: FxHashSet::default(),
@@ -334,10 +339,11 @@ impl Selector {
             channel_builder,
             max_receive_size,
             idle_expiry_manager: if connection_max_idle_ms >= 0 {
-                Some(IdleExpiryManager::new(connection_max_idle_ms))
+                Some(IdleExpiryManager::new(&*time, connection_max_idle_ms))
             } else {
                 None
             },
+            time,
             notify: Arc::new(Notify::new()),
             made_read_progress_last_poll: true,
             poll_id_scratch: Vec::new(),
@@ -366,6 +372,20 @@ impl Selector {
         log_context: LogContext,
     ) -> Self {
         Self::with_log_context(NetworkReceive::UNLIMITED, connection_max_idle_ms, channel_builder, log_context)
+    }
+
+    /// Replaces the clock, which defaults to the system clock.
+    ///
+    /// Java passes the client's `Time` to the constructor; the Rust
+    /// constructors keep their shorter signatures, so a client that owns a
+    /// clock sets it here, before opening any connection. The idle-expiry
+    /// schedule, computed from the clock at construction, is re-anchored to
+    /// the new one.
+    pub(crate) fn set_time(&mut self, time: Arc<dyn Time>) {
+        if let Some(ref mut mgr) = self.idle_expiry_manager {
+            mgr.next_idle_close_check_time = time.nanoseconds().saturating_add(mgr.connections_max_idle_nanos);
+        }
+        self.time = time;
     }
 
     /// Returns the interned `Arc<str>` key for `id` from the active channels
@@ -582,7 +602,7 @@ impl Selector {
     ///
     /// Handles everything except writes, which are done concurrently
     /// in `poll_channels_write_concurrent`.
-    async fn poll_channel_reads(&mut self, channel_id: &str, is_immediately_connected: bool, current_time_nanos: u64) {
+    async fn poll_channel_reads(&mut self, channel_id: &str, is_immediately_connected: bool, current_time_nanos: i64) {
         let mut had_bytes_transferred = false;
         let pre_connected = self.connected.len();
 
@@ -683,7 +703,7 @@ impl Selector {
     /// Channels are temporarily removed from the HashMap so each can be
     /// borrowed independently by `join_all`. While one channel's TLS write
     /// awaits TCP readiness, other channels' writes can proceed.
-    async fn poll_channels_write_concurrent(&mut self, channel_ids: &[Arc<str>], current_time_nanos: u64) {
+    async fn poll_channels_write_concurrent(&mut self, channel_ids: &[Arc<str>], current_time_nanos: i64) {
         let mut extracted: Vec<(Arc<str>, KafkaChannel)> = Vec::new();
         for id in channel_ids {
             if let Some(channel) = self.channels.get(id)
@@ -876,7 +896,7 @@ impl Selector {
     }
 
     #[doc(alias = "org.apache.kafka.common.network.Selector#maybeCloseOldestConnection")]
-    async fn maybe_close_oldest_connection(&mut self, current_time_nanos: u64) {
+    async fn maybe_close_oldest_connection(&mut self, current_time_nanos: i64) {
         if self.idle_expiry_manager.is_none() {
             return;
         }
@@ -1187,8 +1207,9 @@ impl Selectable for Selector {
         self.register_arming(&key);
         self.channels.insert(key, channel);
 
+        let now_nanos = self.time.nanoseconds();
         if let Some(ref mut mgr) = self.idle_expiry_manager {
-            mgr.update(id, nanos_now());
+            mgr.update(id, now_nanos);
         }
 
         Ok(())
@@ -1294,7 +1315,7 @@ impl Selectable for Selector {
                 timeout_ms
             };
 
-        let start_select = nanos_now();
+        let start_select = self.time.nanoseconds();
         let deadline = if effective_timeout > 0 {
             Some(tokio::time::Instant::now() + std::time::Duration::from_millis(effective_timeout as u64))
         } else {
@@ -1610,7 +1631,7 @@ impl Selectable for Selector {
             self.made_read_progress_last_poll = true; // no work is also "progress"
         }
 
-        let end_time = nanos_now();
+        let end_time = self.time.nanoseconds();
 
         // Close oldest connection if idle.
         self.maybe_close_oldest_connection(end_time).await;
@@ -1723,7 +1744,7 @@ struct ChannelWriteResult {
 }
 
 /// Standalone write I/O on a single extracted channel — no Selector state access.
-async fn do_channel_write(channel: &mut KafkaChannel, current_time_nanos: u64) -> ChannelWriteResult {
+async fn do_channel_write(channel: &mut KafkaChannel, current_time_nanos: i64) -> ChannelWriteResult {
     if !channel.has_send() || !channel.ready() {
         return ChannelWriteResult { bytes_written: 0, completed_send: None, error: None };
     }
@@ -1747,15 +1768,6 @@ async fn do_channel_write(channel: &mut KafkaChannel, current_time_nanos: u64) -
     }
 }
 
-/// Helper to get current time in nanoseconds.
-fn nanos_now() -> u64 {
-    // Use std::time::Instant for monotonic time, converting to u64 nanos
-    // relative to an arbitrary epoch. This matches Java's System.nanoTime().
-    static START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
-    let start = START.get_or_init(Instant::now);
-    start.elapsed().as_nanos() as u64
-}
-
 /// Helper class for tracking least recently used connections to enable idle
 /// connection closing.
 ///
@@ -1766,33 +1778,33 @@ fn nanos_now() -> u64 {
 struct IdleExpiryManager {
     /// LRU connections: maps connection ID to last active time (nanoseconds).
     /// IndexMap maintains insertion order; we manually move entries to back on update.
-    lru_connections: IndexMap<String, u64>,
+    lru_connections: IndexMap<String, i64>,
     /// Maximum idle duration in nanoseconds.
-    connections_max_idle_nanos: u64,
+    connections_max_idle_nanos: i64,
     /// Next time to check for idle connections.
-    next_idle_close_check_time: u64,
+    next_idle_close_check_time: i64,
 }
 
 impl IdleExpiryManager {
     #[doc(alias = "org.apache.kafka.common.network.Selector$IdleExpiryManager#IdleExpiryManager")]
-    fn new(connections_max_idle_ms: i64) -> Self {
-        let connections_max_idle_nanos = (connections_max_idle_ms as u64) * 1_000_000;
+    fn new(time: &dyn Time, connections_max_idle_ms: i64) -> Self {
+        let connections_max_idle_nanos = connections_max_idle_ms.saturating_mul(1_000_000);
         Self {
             lru_connections: IndexMap::new(),
             connections_max_idle_nanos,
-            next_idle_close_check_time: nanos_now() + connections_max_idle_nanos,
+            next_idle_close_check_time: time.nanoseconds().saturating_add(connections_max_idle_nanos),
         }
     }
 
     #[doc(alias = "org.apache.kafka.common.network.Selector$IdleExpiryManager#update")]
-    fn update(&mut self, connection_id: &str, current_time_nanos: u64) {
+    fn update(&mut self, connection_id: &str, current_time_nanos: i64) {
         // Remove and re-insert to move to the back (most recently used)
         self.lru_connections.shift_remove(connection_id);
         self.lru_connections.insert(connection_id.to_string(), current_time_nanos);
     }
 
     #[doc(alias = "org.apache.kafka.common.network.Selector$IdleExpiryManager#pollExpiredConnection")]
-    fn poll_expired_connection(&mut self, current_time_nanos: u64) -> Option<(String, u64)> {
+    fn poll_expired_connection(&mut self, current_time_nanos: i64) -> Option<(String, i64)> {
         if current_time_nanos <= self.next_idle_close_check_time {
             return None;
         }
@@ -1832,6 +1844,7 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
+    use crate::common::utils::MockTime;
     use std::sync::atomic::{AtomicBool, Ordering};
 
     const BUFFER_SIZE: i32 = 4 * 1024;
@@ -2216,6 +2229,8 @@ mod tests {
         let server = EchoServer::new().await.unwrap();
         let channel_builder = Box::new(PlaintextChannelBuilder::new(None));
         let mut selector = Selector::new(super::NetworkReceive::UNLIMITED, CONNECTION_MAX_IDLE_MS, channel_builder);
+        let time = Arc::new(MockTime::new());
+        selector.set_time(Arc::clone(&time) as Arc<dyn Time>);
 
         let addr: SocketAddr = format!("127.0.0.1:{}", server.port()).parse().unwrap();
         selector
@@ -2223,19 +2238,13 @@ mod tests {
             .await
             .unwrap();
         wait_for_channel_ready(&mut selector, "0").await;
-
-        // Simulate time passing by manipulating the idle expiry manager.
-        // Set the connection's last active time far enough in the past that
-        // it exceeds connections_max_idle_nanos, and force the next check
-        // to happen immediately.
-        if let Some(ref mut mgr) = selector.idle_expiry_manager {
-            mgr.lru_connections.insert("0".to_string(), 0);
-            mgr.next_idle_close_check_time = 0;
-            // Also set connections_max_idle_nanos to 0 so that
-            // last_active_time + max_idle = 0, which is < current_time
-            mgr.connections_max_idle_nanos = 0;
-        }
-
+        // `Selector::connect` awaits the TCP handshake, so the channel is ready
+        // before any poll and its immediately-connected bookkeeping (which
+        // refreshes its idle-expiry entry) runs on the next poll. In Java the
+        // non-blocking connect completes inside `waitForChannelConnected`'s poll;
+        // poll once here so that happens before the clock advances.
+        selector.poll(0).await.unwrap();
+        time.sleep(CONNECTION_MAX_IDLE_MS + 1_000);
         selector.poll(0).await.unwrap();
 
         assert!(
@@ -2564,7 +2573,7 @@ mod tests {
             mgr.lru_connections.insert("2".to_string(), 0);
             // Insert others with increasing timestamps
             for &i in &[4, 3, 1, 0] {
-                mgr.lru_connections.insert(i.to_string(), (5 - i as u64) * 10_000_000);
+                mgr.lru_connections.insert(i.to_string(), (5 - i as i64) * 10_000_000);
             }
         }
         assert_eq!("2", selector.lowest_priority_channel().unwrap().id());
@@ -2654,19 +2663,14 @@ mod tests {
     async fn test_expire_connection_with_pending_receives() {
         let server = EchoServer::new().await.unwrap();
         let mut selector = create_selector().await;
+        let time = Arc::new(MockTime::new());
+        selector.set_time(Arc::clone(&time) as Arc<dyn Time>);
 
         let id = create_connection_with_pending_receives(&mut selector, &server, 5).await;
 
         // Mute to allow channel to be expired even if more data is available
         selector.mute(&id);
-
-        // Simulate time passing past the idle timeout
-        if let Some(ref mut mgr) = selector.idle_expiry_manager {
-            mgr.lru_connections.insert(id.clone(), 0);
-            mgr.next_idle_close_check_time = 0;
-            mgr.connections_max_idle_nanos = 0;
-        }
-
+        time.sleep(CONNECTION_MAX_IDLE_MS + 1_000);
         selector.poll(0).await.unwrap();
 
         assert!(selector.channel(&id).is_none(), "Channel not expired");
@@ -2689,25 +2693,17 @@ mod tests {
     async fn test_close_oldest_connection_with_multiple_pending_receives() {
         let server = EchoServer::new().await.unwrap();
         let mut selector = create_selector().await;
+        let time = Arc::new(MockTime::new());
+        selector.set_time(Arc::clone(&time) as Arc<dyn Time>);
 
         let expected_receives = 5;
         let id = create_connection_with_pending_receives(&mut selector, &server, expected_receives).await;
         let mut completed_receives = selector.completed_receives().len() as i32;
 
         while selector.disconnected().is_empty() {
-            // Simulate time passing past the idle timeout, matching Java's
-            // `time.sleep(CONNECTION_MAX_IDLE_MS + 1_000)`.
-            // We set the LRU entry to a timestamp far enough in the past that
-            // idle expiry will fire. However, if poll_channel reads data, it
-            // refreshes the LRU to the current time, preventing expiry —
-            // matching Java's behavior where pollSelectionKeys updates the LRU
-            // for channels with ready selection keys.
-            if let Some(ref mut mgr) = selector.idle_expiry_manager {
-                let expired_time = nanos_now().saturating_sub(mgr.connections_max_idle_nanos + 1_000_000_000);
-                mgr.lru_connections.insert(id.clone(), expired_time);
-                mgr.next_idle_close_check_time = 0;
-            }
-
+            // A poll that reads data refreshes the channel's LRU entry, so the
+            // connection only expires once every pending receive is processed.
+            time.sleep(CONNECTION_MAX_IDLE_MS + 1_000);
             let timeout = if completed_receives == expected_receives {
                 0
             } else {

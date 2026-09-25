@@ -42,7 +42,7 @@ use std::io;
 use std::net::SocketAddr;
 
 /// Minimum interval between re-authentication attempts: 1 second in nanoseconds.
-const MIN_REAUTH_INTERVAL_ONE_SECOND_NANOS: u64 = 1_000_000_000;
+const MIN_REAUTH_INTERVAL_ONE_SECOND_NANOS: i64 = 1_000_000_000;
 
 /// Mute states for KafkaChannel.
 ///
@@ -130,9 +130,9 @@ pub struct KafkaChannel {
     /// Whether a write is mid-progress.
     mid_write: bool,
     /// Accumulated network thread time in nanoseconds.
-    network_thread_time_nanos: u64,
+    network_thread_time_nanos: i64,
     /// Time of last re-authentication start in nanoseconds.
-    last_reauthentication_start_nanos: u64,
+    last_reauthentication_start_nanos: i64,
 }
 
 impl KafkaChannel {
@@ -668,14 +668,14 @@ impl KafkaChannel {
 
     /// Accumulates network thread time for this channel.
     #[doc(alias = "org.apache.kafka.common.network.KafkaChannel#addNetworkThreadTimeNanos")]
-    pub fn add_network_thread_time_nanos(&mut self, nanos: u64) {
+    pub fn add_network_thread_time_nanos(&mut self, nanos: i64) {
         self.network_thread_time_nanos += nanos;
     }
 
     /// Returns accumulated network thread time for this channel and resets
     /// the value to zero.
     #[doc(alias = "org.apache.kafka.common.network.KafkaChannel#getAndResetNetworkThreadTimeNanos")]
-    pub fn get_and_reset_network_thread_time_nanos(&mut self) -> u64 {
+    pub fn get_and_reset_network_thread_time_nanos(&mut self) -> i64 {
         let current = self.network_thread_time_nanos;
         self.network_thread_time_nanos = 0;
         current
@@ -703,7 +703,7 @@ impl KafkaChannel {
     /// Returns `true` if this is a server-side channel and the given time is past
     /// the session expiration time.
     #[doc(alias = "org.apache.kafka.common.network.KafkaChannel#serverAuthenticationSessionExpired")]
-    pub fn server_authentication_session_expired(&self, now_nanos: u64) -> bool {
+    pub fn server_authentication_session_expired(&self, now_nanos: i64) -> bool {
         if let Some(expiration) = self.authenticator.server_session_expiration_time_nanos() {
             now_nanos > expiration
         } else {
@@ -760,7 +760,7 @@ impl KafkaChannel {
     pub fn maybe_begin_server_reauthentication(
         &mut self,
         _sasl_handshake_network_receive: &NetworkReceive,
-        now_nanos_supplier: impl FnOnce() -> u64,
+        now_nanos_supplier: impl FnOnce() -> i64,
     ) -> io::Result<bool> {
         if !self.ready() {
             return Err(io::Error::new(
@@ -791,7 +791,7 @@ impl KafkaChannel {
     #[doc(alias = "org.apache.kafka.common.network.KafkaChannel#maybeBeginClientReauthentication")]
     pub fn maybe_begin_client_reauthentication(
         &mut self,
-        now_nanos_supplier: impl FnOnce() -> u64,
+        now_nanos_supplier: impl FnOnce() -> i64,
     ) -> io::Result<bool> {
         if !self.ready() {
             return Err(io::Error::new(

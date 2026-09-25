@@ -85,12 +85,12 @@ pub trait Authenticator: Send + Sync {
 
     /// Return the session expiration time, if any.
     ///
-    /// The value is in nanoseconds as per `Instant`. This value may be non-null
+    /// The value is in nanoseconds as per `Time::nanoseconds`. This value may be non-null
     /// only on the server-side.
     ///
     /// Default implementation returns `None`.
     #[doc(alias = "org.apache.kafka.common.network.Authenticator#serverSessionExpirationTimeNanos")]
-    fn server_session_expiration_time_nanos(&self) -> Option<u64> {
+    fn server_session_expiration_time_nanos(&self) -> Option<i64> {
         None
     }
 
@@ -102,7 +102,7 @@ pub trait Authenticator: Send + Sync {
     ///
     /// Default implementation returns `None`.
     #[doc(alias = "org.apache.kafka.common.network.Authenticator#clientSessionReauthenticationTimeNanos")]
-    fn client_session_reauthentication_time_nanos(&self) -> Option<u64> {
+    fn client_session_reauthentication_time_nanos(&self) -> Option<i64> {
         None
     }
 
