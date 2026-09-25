@@ -12,45 +12,48 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""``AsyncKafkaConsumer`` — the real asyncio consumer.
-
-Same constructor as ``KafkaConsumer``; every method inherited from
-``AsyncConsumer`` (spec §6.2).
-"""
+"""``AsyncKafkaConsumer``: the asyncio peer of :class:`KafkaConsumer`, with the
+same constructor (CLAUDE.md, Python Binding Conventions, Class family); every
+method is :class:`AsyncConsumer`'s."""
 
 from __future__ import annotations
 
-from typing import Any, Generic, TypeVar
+from typing import TYPE_CHECKING, Any, TypeVar, overload
 
-from confluent_kafka.common.serialization import Deserializer, bytes_deserializer
-
-from ._config_resolve import resolve_consumer_construction
 from .async_consumer import AsyncConsumer
+
+if TYPE_CHECKING:
+    from confluent_kafka.common.serialization import Deserializer
+
+__all__ = ["AsyncKafkaConsumer"]
 
 K = TypeVar("K")
 V = TypeVar("V")
 
 
-class AsyncKafkaConsumer(AsyncConsumer[K, V], Generic[K, V]):
-    """The real asyncio consumer connected to a Kafka cluster.
+class AsyncKafkaConsumer(AsyncConsumer[K, V]):
+    """The asyncio peer of ``KafkaConsumer``: a client that consumes records
+    from a Kafka cluster. See ``KafkaConsumer`` for the ``configs`` and the
+    deserializers.
 
-    Java: ``KafkaConsumer<K, V>`` (the async peer). See ``KafkaConsumer`` for the
-    ``configs`` contract.
+    Java: ``org.apache.kafka.clients.consumer.KafkaConsumer<K, V>``.
     """
 
-    __slots__ = ()
+    @overload
+    def __init__(self: AsyncKafkaConsumer[bytes, bytes], *, configs: dict[str, Any]) -> None: ...
+    @overload
+    def __init__(self: AsyncKafkaConsumer[K, bytes], *, configs: dict[str, Any],
+                 key_deserializer: Deserializer[K]) -> None: ...
+    @overload
+    def __init__(self: AsyncKafkaConsumer[bytes, V], *, configs: dict[str, Any],
+                 value_deserializer: Deserializer[V]) -> None: ...
+    @overload
+    def __init__(self, *, configs: dict[str, Any], key_deserializer: Deserializer[K],
+                 value_deserializer: Deserializer[V]) -> None: ...
 
     def __init__(self, *, configs: dict[str, Any],
-                 key_deserializer: Deserializer[K] = bytes_deserializer(),  # type: ignore[assignment]
-                 value_deserializer: Deserializer[V] = bytes_deserializer(),  # type: ignore[assignment]
-                 ) -> None:
-        handle, key_deser, value_deser = resolve_consumer_construction(
-            config=configs,
-            key_deserializer=key_deserializer,
-            value_deserializer=value_deserializer,
-        )
-        self._engine_init(
-            handle=handle,
-            key_deserializer=key_deser,
-            value_deserializer=value_deser,
-        )
+                 key_deserializer: Deserializer[Any] | None = None,
+                 value_deserializer: Deserializer[Any] | None = None) -> None:
+        """See :meth:`KafkaConsumer.__init__`."""
+        AsyncConsumer.__init__(self)
+        self._start(configs, key_deserializer, value_deserializer)

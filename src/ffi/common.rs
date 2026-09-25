@@ -95,7 +95,7 @@ pub(crate) unsafe fn error_ref(error: *const kafka_common_Error_t) -> &'static E
     unsafe { &*(error as *const ErrorInner) }
 }
 
-/// Creates a new error handle from a protocol error code and a message.
+/// Creates a new error handle from an error code and a message.
 ///
 /// This is the inverse of the [`kafka_common_Error_code`] /
 /// [`kafka_common_Error_message`] accessors: it lets a C (or Python)
@@ -105,13 +105,25 @@ pub(crate) unsafe fn error_ref(error: *const kafka_common_Error_t) -> &'static E
 /// `kafka_common_Error_t*` in C, and a Python listener that raised an
 /// exception has to convert it into one.
 ///
-/// `code` is looked up as a Kafka protocol error code; unknown codes (including
-/// any value outside the `i16` protocol range) map to
-/// `Errors::UnknownServerError`, mirroring Java's `Errors.forCode`.
+/// `code` is a [`kafka_common_ErrorCode_t`] value, so the handle reports it back
+/// from [`kafka_common_Error_code`]:
+///
+/// - A Kafka protocol error code (`-1` and up) is looked up as Java's
+///   `Errors.forCode` does; an unknown one maps to `UNKNOWN_SERVER_ERROR`.
+/// - A client-side (negative) code builds that class with `message`, so an
+///   `IllegalStateException` (`LOCAL_ILLEGAL_STATE`, `-4`) or a
+///   `WakeupException` (`WAKEUP`, `-18`) comes back as itself. The classes whose
+///   Java constructors all take a payload the code cannot carry —
+///   `NO_OFFSET_FOR_PARTITION` (`-21`), `CORRELATION_ID_MISMATCH` (`-24`),
+///   `QUOTA_VIOLATION` (`-26`) and `RECORD_DESERIALIZATION` (`-27`) — map to
+///   `UNKNOWN_SERVER_ERROR` with `message`, as does any value that is no
+///   [`kafka_common_ErrorCode_t`]. `LOG_TRUNCATION` (`-20`) and
+///   `CONSUMER_OFFSET_OUT_OF_RANGE` (`-22`) are built with empty partition maps,
+///   as Java's `(String, Map…)` constructors allow.
 ///
 /// # Parameters
 ///
-/// - `code`: Kafka protocol error code (see `kafka_common_Error_code`).
+/// - `code`: Error code (see [`kafka_common_Error_code`]).
 /// - `message`: Null-terminated error message, or null for an empty message.
 ///
 /// # Returns
@@ -125,16 +137,69 @@ pub(crate) unsafe fn error_ref(error: *const kafka_common_Error_t) -> &'static E
 /// `message` must be null or a valid, null-terminated C string.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_new(code: i32, message: *const c_char) -> *mut kafka_common_Error_t {
-    let error = match i16::try_from(code) {
-        Ok(code) => Errors::for_code(code),
-        Err(_) => Errors::UnknownServerError,
-    };
     let message = if message.is_null() {
         String::new()
     } else {
         unsafe { CStr::from_ptr(message) }.to_string_lossy().into_owned()
     };
-    box_error(Error::with_message(error, message))
+    box_error(error_for_code(code, message))
+}
+
+/// The [`Error`] [`kafka_common_Error_new`] builds for `code` and `message` (see
+/// its documentation for the mapping).
+pub(crate) fn error_for_code(code: i32, message: String) -> Error {
+    use crate::common::errors::{
+        ApiError, AuthenticationError, AuthorizationError, AuthorizerNotReadyError, DisconnectError, InterruptError,
+        InvalidOffsetError, SslAuthenticationError,
+    };
+    use crate::common::network::InvalidReceiveError;
+    use crate::consumer::{
+        ConsumerCommitFailedError, ConsumerLogTruncationError, ConsumerOffsetOutOfRangeError,
+        ConsumerRetriableCommitFailedError,
+    };
+    use std::collections::HashMap;
+
+    if code >= -1 {
+        let error = match i16::try_from(code) {
+            Ok(code) => Errors::for_code(code),
+            Err(_) => Errors::UnknownServerError,
+        };
+        return Error::with_message(error, message);
+    }
+    // One arm per client-side enumerator of `kafka_common_ErrorCode_t`, the
+    // inverse of `error_code_of`.
+    match code {
+        -2 => Error::local_concurrent_modification(message),
+        -3 => Error::local_illegal_argument(message),
+        -4 => Error::local_illegal_state(message),
+        -5 => Error::local_timeout(message),
+        -6 => Error::Api(ApiError::new(message)),
+        -7 => Error::Authentication(AuthenticationError::new(message)),
+        -8 => Error::AuthorizerNotReady(AuthorizerNotReadyError::new(message)),
+        -9 => Error::Authorization(AuthorizationError::new(message)),
+        -10 => Error::config_message(message),
+        -11 => Error::Disconnect(DisconnectError::new(message)),
+        -12 => Error::Interrupt(InterruptError::new(message)),
+        -13 => Error::InvalidOffset(InvalidOffsetError::new(message)),
+        -14 => Error::schema(message),
+        -15 => Error::serialization(message),
+        -16 => Error::SslAuthentication(SslAuthenticationError::new(message)),
+        -17 => Error::transaction_aborted_message(message),
+        -18 => Error::wakeup(message),
+        -19 => Error::ConsumerCommitFailed(ConsumerCommitFailedError::new(message)),
+        -20 => Error::ConsumerLogTruncation(Box::new(ConsumerLogTruncationError::with_message(
+            message,
+            HashMap::new(),
+            HashMap::new(),
+        ))),
+        -22 => Error::ConsumerOffsetOutOfRange(ConsumerOffsetOutOfRangeError::with_message(message, HashMap::new())),
+        -23 => Error::ConsumerRetriableCommitFailed(ConsumerRetriableCommitFailedError::new(message)),
+        -25 => Error::InvalidReceive(InvalidReceiveError::new(message)),
+        -28 => Error::buffer_exhausted(message),
+        // -21, -24, -26, -27: every Java constructor takes a payload the code
+        // cannot carry; any other value is no enumerator.
+        _ => Error::with_message(Errors::UnknownServerError, message),
+    }
 }
 
 /// Takes ownership of an error handle **returned by a C callback** and converts
@@ -2636,6 +2701,48 @@ mod tests {
                 "{} maps to the wrong code",
                 ErrorName::name(&error)
             );
+        }
+    }
+
+    /// `kafka_common_Error_new` builds the class of a client-side (negative)
+    /// code, so the handle reports that code back with the message; the four
+    /// classes whose every Java constructor takes a payload fall back to
+    /// `UNKNOWN_SERVER_ERROR`.
+    #[test]
+    fn error_new_builds_client_side_classes_from_their_code() {
+        let payload_only = [
+            kafka_common_ErrorCode_CONSUMER_NO_OFFSET_FOR_PARTITION,
+            kafka_common_ErrorCode_CORRELATION_ID_MISMATCH,
+            kafka_common_ErrorCode_QUOTA_VIOLATION,
+            kafka_common_ErrorCode_RECORD_DESERIALIZATION,
+        ];
+        let message = CString::new("boom").unwrap();
+        for (_, expected, value) in client_side_classes() {
+            let handle = unsafe { kafka_common_Error_new(value, message.as_ptr()) };
+            let code = unsafe { kafka_common_Error_code(handle) };
+            let text = unsafe { CStr::from_ptr(kafka_common_Error_message(handle)) }
+                .to_str()
+                .unwrap()
+                .to_owned();
+            unsafe { kafka_common_Error_destroy(handle) };
+            if payload_only.contains(&expected) {
+                assert_eq!(code, kafka_common_ErrorCode_UNKNOWN_SERVER_ERROR, "{expected:?}");
+            } else {
+                assert_eq!(code, expected, "code {value} does not come back as itself");
+            }
+            assert_eq!(text, "boom", "{expected:?} lost its message");
+        }
+        // A protocol code and a value that is no enumerator.
+        for (value, expected) in [
+            (-1, kafka_common_ErrorCode_UNKNOWN_SERVER_ERROR),
+            (7, kafka_common_ErrorCode_REQUEST_TIMED_OUT),
+            (-29, kafka_common_ErrorCode_UNKNOWN_SERVER_ERROR),
+            (i32::MIN, kafka_common_ErrorCode_UNKNOWN_SERVER_ERROR),
+            (40_000, kafka_common_ErrorCode_UNKNOWN_SERVER_ERROR),
+        ] {
+            let handle = unsafe { kafka_common_Error_new(value, message.as_ptr()) };
+            assert_eq!(unsafe { kafka_common_Error_code(handle) }, expected, "code {value}");
+            unsafe { kafka_common_Error_destroy(handle) };
         }
     }
 
