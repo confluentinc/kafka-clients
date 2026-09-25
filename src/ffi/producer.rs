@@ -808,6 +808,23 @@ unsafe fn producer_static_ref(ptr: usize) -> ProducerStaticRef {
     }
 }
 
+/// The producer's [`ProducerKind`], taken under the `kind` lock held only for
+/// that, never across the blocking send it serves (as [`producer_static_ref`]
+/// does for the async paths). A send may wait up to `max.block.ms` for the
+/// topic's metadata, and a concurrent close must be able to take the lock,
+/// close the producer and so wake that wait (`Metadata::await_update` returns on
+/// close); holding the lock across the send made a close wait out every
+/// pending metadata wait.
+///
+/// # Safety
+/// The handle, and the kind it owns, must outlive the returned reference (the
+/// caller's use of the handle), and nothing takes the kind mutably while the
+/// handle is alive.
+unsafe fn producer_kind_ref(handle: &ProducerHandle) -> &ProducerKind {
+    let guard = handle.kind.lock().unwrap();
+    unsafe { &*(&*guard as *const ProducerKind) }
+}
+
 /// Decrements [`ProducerHandle::queued_sends`] once the submission task is done
 /// with a request, whether it was produced, discarded, or panicked on. Keeping it
 /// in a `Drop` means the counter cannot drift, and a drifted counter would make
@@ -1379,9 +1396,10 @@ pub unsafe extern "C" fn kafka_producer_Producer_send(
 
     let handle = unsafe { producer_handle(producer) };
     let completion_tx = handle.completion_tx.clone();
-    let guard = handle.kind.lock().unwrap();
-    let runtime_handle = guard.runtime().handle().clone();
-    match producer_send(&guard, record) {
+    // Not the lock across the send: see `producer_kind_ref`.
+    let kind = unsafe { producer_kind_ref(handle) };
+    let runtime_handle = kind.runtime().handle().clone();
+    match producer_send(kind, record) {
         Ok(future) => {
             if !out_error.is_null() {
                 unsafe { *out_error = std::ptr::null_mut() };
@@ -1533,9 +1551,10 @@ pub unsafe extern "C" fn kafka_producer_Producer_send_with_callback(
     // with, unlike the async submission path.
     let fired = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let cb = make_record_callback(RecordCallbackTarget { callback, user_data }, completion_tx.clone(), fired);
-    let guard = handle.kind.lock().unwrap();
-    let runtime_handle = guard.runtime().handle().clone();
-    match producer_send_with_callback(&guard, record, cb) {
+    // Not the lock across the send: see `producer_kind_ref`.
+    let kind = unsafe { producer_kind_ref(handle) };
+    let runtime_handle = kind.runtime().handle().clone();
+    match producer_send_with_callback(kind, record, cb) {
         Ok(future) => {
             if !out_error.is_null() {
                 unsafe { *out_error = std::ptr::null_mut() };
@@ -1581,19 +1600,11 @@ unsafe fn send_batch_inner(
 
     let handle = unsafe { producer_handle(producer) };
     let completion_tx = handle.completion_tx.clone();
-    // Hold the `kind` lock only to take the reference, never across the sends,
-    // as `producer_static_ref` does for the async paths: each send may wait up to
-    // `max.block.ms` for the topic's metadata, and a concurrent close must be
-    // able to take the lock, close the producer and so wake that wait
-    // (`Metadata::await_update` returns on close); the records after it then
+    // Not the lock across the sends (see `producer_kind_ref`): a close during
+    // the batch wakes the record waiting for metadata, and the records after it
     // fail at once as sent after close. Holding the lock for the whole batch
-    // made a close wait for every record's metadata wait in turn. The handle,
-    // and the kind it owns, outlive this call, and nothing takes the kind
-    // mutably while the handle is alive.
-    let kind: &ProducerKind = {
-        let guard = handle.kind.lock().unwrap();
-        unsafe { &*(&*guard as *const ProducerKind) }
-    };
+    // made a close wait for every record's metadata wait in turn.
+    let kind = unsafe { producer_kind_ref(handle) };
     let runtime_handle = kind.runtime().handle().clone();
     let mut success_count: i32 = 0;
 
@@ -5514,13 +5525,9 @@ mod tests {
         }
     }
 
-    /// `send_batch` does not hold the producer lock across its sends: a close
-    /// started while a record waits for the topic's metadata (up to
-    /// `max.block.ms`, 30 s here) proceeds, wakes that wait, and the records
-    /// after it fail at once. Holding the lock made the close wait for every
-    /// record's metadata wait in turn.
-    #[test]
-    fn test_close_proceeds_while_send_batch_waits_for_metadata() {
+    /// A producer whose sends wait up to `max.block.ms` (30 s) for the metadata
+    /// of an unreachable broker.
+    fn producer_waiting_for_metadata() -> *mut kafka_producer_Producer_t {
         let configs = [
             CString::new("bootstrap.servers").unwrap(),
             CString::new("127.0.0.1:59999").unwrap(),
@@ -5534,17 +5541,60 @@ mod tests {
             configs[3].as_ptr(),
             std::ptr::null(),
         ];
-        let producer = unsafe {
+        unsafe {
             let props = kafka_producer_ProducerProperties_from_configs(pointers.as_ptr());
             let mut err: *mut kafka_common_Error_t = std::ptr::null_mut();
             let producer = kafka_producer_KafkaProducer_new(props, &mut err);
             kafka_producer_ProducerProperties_destroy(props);
             assert_success(err);
             producer
-        };
+        }
+    }
+
+    /// Runs `send(producer)` on another thread, `close_with_timeout(0)`s the
+    /// producer once the send has reached its metadata wait, and returns what
+    /// `send` returned and how long the two took. Destroys the producer.
+    fn close_while_sending<T: Send + 'static>(
+        send: impl FnOnce(usize) -> T + Send + 'static,
+    ) -> (T, std::time::Duration) {
+        let producer = producer_waiting_for_metadata();
         let address = producer as usize;
         let start = std::time::Instant::now();
-        let sender = std::thread::spawn(move || {
+        let sender = std::thread::spawn(move || send(address));
+        // Let the send reach the metadata wait.
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        unsafe {
+            let mut err: *mut kafka_common_Error_t = std::ptr::null_mut();
+            kafka_producer_Producer_close_with_timeout(producer, 0, &mut err);
+            assert_success(err);
+        }
+        let sent = sender.join().unwrap();
+        let elapsed = start.elapsed();
+        unsafe { kafka_producer_Producer_destroy(producer) };
+        (sent, elapsed)
+    }
+
+    /// The message of a failed single-record send (its future must be null);
+    /// frees the error.
+    fn failed_send_message(future: usize, err: usize) -> String {
+        assert_eq!(future, 0, "the send must fail");
+        assert_ne!(err, 0, "a failed send reports its error");
+        let err = err as *mut kafka_common_Error_t;
+        let message = unsafe { CStr::from_ptr(kafka_common_Error_message(err)) }
+            .to_string_lossy()
+            .into_owned();
+        unsafe { kafka_common_Error_destroy(err) };
+        message
+    }
+
+    /// `send_batch` does not hold the producer lock across its sends: a close
+    /// started while a record waits for the topic's metadata (up to
+    /// `max.block.ms`, 30 s here) proceeds, wakes that wait, and the records
+    /// after it fail at once. Holding the lock made the close wait for every
+    /// record's metadata wait in turn.
+    #[test]
+    fn test_close_proceeds_while_send_batch_waits_for_metadata() {
+        let ((sent, failed), elapsed) = close_while_sending(|address| {
             let topic = CString::new("t").unwrap();
             let record = || kafka_producer_ProducerRecord_t {
                 topic: topic.as_ptr(),
@@ -5582,21 +5632,95 @@ mod tests {
             }
             (sent, failed)
         });
-        // Let the batch reach the first record's metadata wait.
-        std::thread::sleep(std::time::Duration::from_millis(500));
-        unsafe {
-            let mut err: *mut kafka_common_Error_t = std::ptr::null_mut();
-            kafka_producer_Producer_close_with_timeout(producer, 0, &mut err);
-            assert_success(err);
-        }
-        let (sent, failed) = sender.join().unwrap();
-        let elapsed = start.elapsed();
         assert!(
             elapsed < std::time::Duration::from_secs(20),
             "close and send_batch took {elapsed:?}"
         );
         assert_eq!((sent, failed), (0, 3), "every record fails: closed during, or after, its wait");
-        unsafe { kafka_producer_Producer_destroy(producer) };
+    }
+
+    /// Critic 75 F3: the single-record `send` does not hold the producer lock
+    /// across its metadata wait either, so a close started meanwhile proceeds
+    /// and fails the send at once, as Java's `doSend` does ("Producer closed
+    /// while send in progress", `KafkaProducer.java:988-990`).
+    #[test]
+    fn test_close_proceeds_while_send_waits_for_metadata() {
+        let ((future, err), elapsed) = close_while_sending(|address| {
+            let topic = CString::new("t").unwrap();
+            let mut err: *mut kafka_common_Error_t = std::ptr::null_mut();
+            let future = unsafe {
+                kafka_producer_Producer_send(
+                    address as *mut kafka_producer_Producer_t,
+                    topic.as_ptr(),
+                    -1,
+                    -1,
+                    std::ptr::null(),
+                    -1,
+                    std::ptr::null(),
+                    -1,
+                    &mut err,
+                )
+            };
+            (future as usize, err as usize)
+        });
+        assert!(elapsed < std::time::Duration::from_secs(20), "close and send took {elapsed:?}");
+        assert_eq!(failed_send_message(future, err), "Producer closed while send in progress");
+    }
+
+    /// Firings of [`counting_record_callback`] (only
+    /// `test_close_proceeds_while_send_with_callback_waits_for_metadata` uses it).
+    static RECORD_CALLBACK_FIRINGS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+    unsafe extern "C" fn counting_record_callback(
+        metadata: *mut kafka_producer_RecordMetadata_t,
+        error: *mut kafka_common_Error_t,
+        _user_data: *mut std::ffi::c_void,
+    ) {
+        RECORD_CALLBACK_FIRINGS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        unsafe {
+            if !metadata.is_null() {
+                kafka_producer_RecordMetadata_destroy(metadata);
+            }
+            if !error.is_null() {
+                kafka_common_Error_destroy(error);
+            }
+        }
+    }
+
+    /// As [`test_close_proceeds_while_send_waits_for_metadata`], for
+    /// `send_with_callback`, whose callback does not fire for the failed send.
+    #[test]
+    fn test_close_proceeds_while_send_with_callback_waits_for_metadata() {
+        let ((future, err), elapsed) = close_while_sending(|address| {
+            let topic = CString::new("t").unwrap();
+            let mut err: *mut kafka_common_Error_t = std::ptr::null_mut();
+            let future = unsafe {
+                kafka_producer_Producer_send_with_callback(
+                    address as *mut kafka_producer_Producer_t,
+                    topic.as_ptr(),
+                    -1,
+                    -1,
+                    std::ptr::null(),
+                    -1,
+                    std::ptr::null(),
+                    -1,
+                    counting_record_callback,
+                    std::ptr::null_mut(),
+                    &mut err,
+                )
+            };
+            (future as usize, err as usize)
+        });
+        assert!(
+            elapsed < std::time::Duration::from_secs(20),
+            "close and send_with_callback took {elapsed:?}"
+        );
+        assert_eq!(failed_send_message(future, err), "Producer closed while send in progress");
+        assert_eq!(
+            RECORD_CALLBACK_FIRINGS.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "a send that fails synchronously does not fire its callback"
+        );
     }
 
     #[test]
