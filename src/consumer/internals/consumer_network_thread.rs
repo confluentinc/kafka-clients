@@ -225,9 +225,12 @@ pub(crate) struct ConsumerNetworkThread<K: KafkaClient + Send + 'static> {
     /// [`Self::maximum_time_to_wait`]. Updated by `run_once` after each
     /// pass through the request managers.
     cached_max_time_to_wait_ms: Arc<AtomicI64>,
-    /// Close timeout (millis). Set by [`Self::set_close_timeout_ms`]
-    /// before `close()`.
-    close_timeout_ms: AtomicI64,
+    /// Close timeout (millis) — Java's `volatile Duration closeTimeout`
+    /// (`ConsumerNetworkThread.java:84`). Written by the app side's close
+    /// path through the shared [`Self::close_timeout_handle`] (Java's
+    /// `closeInternal(timeout)` assigns `closeTimeout = timeout`, line 380)
+    /// and read by [`Self::cleanup`].
+    close_timeout_ms: Arc<AtomicI64>,
     /// Wall-clock timestamp of the last `run_once` call. Feeds Java's
     /// `recordTimeBetweenNetworkThreadPoll(currentTimeMs - lastPollTimeMs)`
     /// metric (wired in `run_once` when `async_consumer_metrics` is set).
@@ -310,7 +313,7 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
             wakeup,
             running: Arc::new(AtomicBool::new(true)),
             cached_max_time_to_wait_ms,
-            close_timeout_ms: AtomicI64::new(Self::DEFAULT_CLOSE_TIMEOUT_MS),
+            close_timeout_ms: Arc::new(AtomicI64::new(Self::DEFAULT_CLOSE_TIMEOUT_MS)),
             last_poll_time_ms: 0,
             time,
             membership,
@@ -382,6 +385,13 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
     pub(crate) fn signal_close(&self) {
         self.running.store(false, Ordering::Release);
         self.wakeup.wakeup();
+    }
+
+    /// Shared handle to the close timeout read by [`Self::cleanup`], captured
+    /// by the production close closure before `self` moves onto the bg task
+    /// (same pattern as [`Self::running_handle`]).
+    pub(crate) fn close_timeout_handle(&self) -> Arc<AtomicI64> {
+        Arc::clone(&self.close_timeout_ms)
     }
 
     /// Sets the close timeout used by [`Self::cleanup`].
@@ -950,23 +960,36 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
         }
 
         // ──── 2. Drain unsent requests until timer expires ────
-        loop {
-            let now = self.time.milliseconds();
-            let remaining = close_deadline_ms.saturating_sub(now);
-            let has_pending = {
-                let delegate_guard = self
-                    .network_client_delegate
-                    .try_lock()
-                    .expect("delegate not contended on bg task");
-                delegate_guard.has_any_pending_requests()
-            };
-            if !has_pending || remaining <= 0 {
-                break;
+        //
+        // Java's `sendUnsentRequests` (`ConsumerNetworkThread.java:393-407`)
+        // returns early only when nothing is pending; otherwise it is a
+        // do-while that ALWAYS polls once — a non-blocking `poll(0)` when the
+        // close timer is already spent — before checking
+        // `timer.notExpired() && hasAnyPendingRequests()`. That first pass is
+        // what sends the leave-group heartbeat `pollOnClose` builds for a
+        // close with zero timeout (`AbstractHeartbeatRequestManager.java:217-237`),
+        // so the timer check must not precede it.
+        let has_pending = |thread: &Self| {
+            thread
+                .network_client_delegate
+                .try_lock()
+                .expect("delegate not contended on bg task")
+                .has_any_pending_requests()
+        };
+        if has_pending(self) {
+            loop {
+                let now = self.time.milliseconds();
+                let remaining = close_deadline_ms.saturating_sub(now).max(0);
+                {
+                    let mut delegate_guard = self.network_client_delegate.lock().await;
+                    delegate_guard.poll_on_close(remaining, now).await;
+                }
+                // `while (timer.notExpired() && hasAnyPendingRequests())` —
+                // short-circuits, so pending is not read once expired.
+                if close_deadline_ms.saturating_sub(self.time.milliseconds()) <= 0 || !has_pending(self) {
+                    break;
+                }
             }
-            let mut delegate_guard = self.network_client_delegate.lock().await;
-            delegate_guard.poll_on_close(remaining, now).await;
-            // re-loop; `notExpired() && hasAnyPendingRequests` is the
-            // Java guard.
         }
         {
             let delegate_guard = self
@@ -1905,6 +1928,36 @@ mod tests {
             poll_call_count.load(Ordering::SeqCst),
             2,
             "delegate.poll(..., onClose=true) must be invoked twice during cleanup"
+        );
+    }
+
+    /// Java's `sendUnsentRequests` is a do-while
+    /// (`ConsumerNetworkThread.java:393-407`): with a request pending it polls
+    /// once even when the close timeout is zero, which is how the leave-group
+    /// heartbeat `pollOnClose` builds for a zero-timeout close gets sent
+    /// (`AbstractHeartbeatRequestManager.java:217-237`). A zero close timeout
+    /// must therefore still perform exactly one non-blocking `poll(0)`.
+    #[tokio::test]
+    async fn test_send_unsent_requests_polls_once_with_zero_close_timeout() {
+        let (mut fixture, poll_call_count, poll_timeouts, has_in_flight_script) =
+            make_thread_with_dyn_managers(Vec::new());
+        // Initial `hasAnyPendingRequests()` = true -> one poll; the expired
+        // timer short-circuits the loop guard; the trailing `false` serves
+        // the post-drain warning check.
+        has_in_flight_script.lock().unwrap().extend([true, false]);
+
+        fixture.thread.set_close_timeout_ms(0);
+        fixture.thread.cleanup().await;
+
+        assert_eq!(
+            poll_call_count.load(Ordering::SeqCst),
+            1,
+            "a zero close timeout must still poll once to send pending requests"
+        );
+        assert_eq!(
+            poll_timeouts.lock().unwrap().as_slice(),
+            &[0],
+            "the single close poll must be non-blocking (timer.remainingMs() == 0)"
         );
     }
 
