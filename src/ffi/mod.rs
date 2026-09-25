@@ -30,6 +30,27 @@
 //! the count reports 0 and a separate `*_has_<field>` predicate carries the
 //! presence bit — see the "Counts are never negative" section of [`admin`].
 //!
+//! # Panics never cross the C boundary
+//!
+//! Every exported function catches a Rust panic before it can unwind into its
+//! caller, which would abort the process. After a caught panic the function
+//! returns its failure value instead: NULL, `false`, -1 (0 for a `*_count`
+//! accessor), NaN for a `double`, `kafka_common_ErrorCode_UNKNOWN_SERVER_ERROR`
+//! for `kafka_common_Error_code`, or an error handle for a function that returns
+//! one. A function with an `out_error` parameter also stores an error describing
+//! the panic there. A function that reports ordinary failures through a
+//! completion callback reports the panic through that callback instead, exactly
+//! once. The error's code is `kafka_common_ErrorCode_LOCAL_ILLEGAL_STATE` and its
+//! message begins "Rust panic caught at the FFI boundary in <function>".
+//!
+//! A panic is a bug in this library and may leave the handle it happened on in
+//! an inconsistent state: destroy that handle and create a new one. Later calls
+//! on it can keep failing, because a poisoned lock is never cleared.
+//!
+//! The same paragraphs open the generated C header (`header` in
+//! `cbindgen.toml`). The mechanism is the [`ffi_guard`] attribute, whose runtime
+//! half is `common::ffi_guard_or`.
+//!
 //! # Feature Gate
 //!
 //! This module is only compiled when the `ffi` feature is enabled.
@@ -39,3 +60,10 @@ pub(crate) mod common;
 pub(crate) mod consumer;
 pub(crate) mod consumer_handle;
 pub(crate) mod producer;
+
+/// Guards an exported function against a Rust panic unwinding into its C
+/// caller; see the module docs and the `ffi-macros` crate.
+// Transitional: plan §2.2 applies the attribute to every entry point and
+// removes this allow.
+#[allow(unused_imports)]
+pub(crate) use ffi_macros::ffi_guard;

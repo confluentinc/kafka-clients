@@ -486,6 +486,7 @@ dependencies = [
  "crc32fast",
  "dashmap",
  "env_logger",
+ "ffi-macros",
  "flate2",
  "futures-util",
  "generator",
@@ -757,6 +758,15 @@ dependencies = [
  "portable-atomic",
  "rand 0.10.1",
  "web-time",
+]
+
+[[package]]
+name = "ffi-macros"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
 ]
 
 [[package]]

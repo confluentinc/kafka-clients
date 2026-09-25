@@ -268,3 +268,56 @@ proved wrong or incomplete). The Manager keeps §5.
 
 Where the code proves a premise of this plan incomplete or wrong, follow the
 code and record the difference here.
+
+1. **§2.1 — `#![deny(warnings)]` forces two transitional allows.** The crate
+   root denies warnings, so until §2.2 applies the attribute the non-test build
+   rejects the unused `pub(crate) use ffi_macros::ffi_guard;` and the uncalled
+   `ffi_guard_or` / `panic_error`. §2.1 puts `#[allow(unused_imports)]` /
+   `#[allow(dead_code)]` on exactly those three items, each with a comment
+   naming §2.2, which removes them.
+2. **§2.1 — D2's counts.** Of the 811 `#[unsafe(no_mangle)]` signatures, 108
+   return `*mut kafka_common_Error_t` (plan: 125) and 35 return
+   `*const kafka_common_Error_t` (plan: 37). Nothing depends on the numbers —
+   the fallback is derived from the type — and D2 covers every return type in
+   the five files (195 `*const T`, 169 `()`, 156 `i32`, 61 `bool`, 44 `*mut T`,
+   33 `i64`, 5 `i16`, 4 `f64`, 1 `kafka_common_ErrorCode_t`, plus the 108 and
+   35), so no entry point needs a `fallback` override.
+3. **§2.1 — inner attributes.** syn files a body's inner attributes
+   (`#![...]`) under `ItemFn::attrs`, so emitting `#(#attrs)*` before the
+   signature, as the step-2 template reads, would hoist them out of the body,
+   where they do not parse. The macro splits them off and re-emits them first
+   inside the new body (macro unit test; no FFI function has one today).
+4. **§2.1 — the `compile_fail` doctest was cheap, so it exists** (unsupported
+   return type), next to a passing doctest of the expansion; both carry
+   scaffold `crate::common` / `crate::ffi::common` modules because the macro
+   emits crate paths. Also checked by hand in a scratch crate: an
+   `extern "C" fn answer() -> u8` without an override fails with
+   "`#[ffi_guard]` cannot derive a panic fallback for `answer`, which returns
+   `u8`: add `#[ffi_guard(fallback = <expr>)]` or
+   `#[ffi_guard(on_panic = |err| <expr>)]`", spanned on the return type.
+5. **§2.1 — argument checking beyond the plan.** An unknown argument, a
+   duplicate, or `fallback` together with `on_panic` is a compile error with a
+   message, and so is a parameter named `out_error` whose type is not
+   `*mut *mut kafka_common_Error_t` (D3 keys on name *and* type; ignoring a
+   mistyped one would silently drop the error report). `fallback` replaces
+   only the value, so D3's `out_error` store still happens with it; `on_panic`
+   gets nothing generated around it — the literal reading of D2's overrides.
+6. **§2.1 — a panic payload whose destructor panics.** Dropping the payload
+   after reading its message can panic in turn (a `panic_any` value with a
+   panicking `Drop`), and that second panic would unwind out of
+   `ffi_guard_or` into C. The payload is dropped inside a second
+   `catch_unwind`, and a nested payload is forgotten instead of dropped. Test:
+   `ffi_guard_survives_a_payload_whose_destructor_panics`.
+7. **§3 gates — the working tree holds an uncompilable untracked example.**
+   `examples/eos_app.rs` (untracked, on the do-not-touch list) uses APIs this
+   tree does not have (`consumer::new_consumer`,
+   `ConsumerConfig::from_properties`, …), so `cargo test --workspace` and the
+   `--all-targets` clippy passes of `cargo xtask lint` fail on it before they
+   reach anything in this change. The gates were therefore run with every
+   other target named: `cargo test --workspace --lib --bins --tests`,
+   `cargo test --workspace --doc`, `cargo build` of the 15 tracked examples,
+   and both clippy passes of `cargo xtask lint` (default and
+   `--all-features`, `-D warnings`) with `--lib --bins --tests --benches` plus
+   the 15 examples, and the xtask clippy pass; `cargo xtask lint` itself was
+   still run for its doc-hygiene and module-path-hygiene steps, which pass
+   before its clippy step reaches the file.

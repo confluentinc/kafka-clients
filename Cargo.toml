@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "generator", "xtask", "consumer-perf", "multilanguage-test-server"]
+members = [".", "generator", "xtask", "consumer-perf", "multilanguage-test-server", "ffi-macros"]
 
 [package]
 name = "confluent-kafka-rust"
@@ -12,7 +12,7 @@ integration-tests = []
 # (native Rust, Python via gRPC, C via gRPC). See
 # design/history/MILESTONE-6/DESIGN-multilanguage-tests.md for details.
 multilanguage-tests = ["integration-tests"]
-ffi = ["dep:cbindgen", "dep:env_logger"]
+ffi = ["dep:cbindgen", "dep:env_logger", "dep:ffi-macros"]
 
 [lib]
 name = "confluent_kafka"
@@ -41,6 +41,9 @@ indexmap = "2"
 rustc-hash = "2"
 log = "0.4"
 env_logger = { version = "0.11", optional = true }
+# `#[ffi_guard]`, the attribute that keeps a Rust panic from unwinding into a C
+# caller of `src/ffi/` (APPSEC-7665 / NONJAVACLI-4521). Used only by that module.
+ffi-macros = { path = "ffi-macros", optional = true }
 flate2 = "1"
 snap = "1"
 lz4_flex = "0.11"
