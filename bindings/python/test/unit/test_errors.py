@@ -600,15 +600,26 @@ def test_generated_errors_reject_what_java_has_no_constructor_for(
 
 
 def test_every_java_forms_error_class_has_a_rejection_case() -> None:
+    # A class gets java_forms only when its union accepts a combination that
+    # matches no Java constructor (CLAUDE.md, Signatures), and each such class
+    # has its rejections tested above.
     decorated = {cls for cls in error_classes()
                  if getattr(cls.__init__, "__wrapped__", None) is not None}
     covered = {cls for cls, _, _ in _REJECTED} | {RecordDeserializationError}
-    # ThrottlingQuotaExceededError's forms both take message: every given set
-    # is a Java constructor, java_forms only picks the one (throttle_time_ms is
-    # UNSET), so there is nothing to reject.
-    assert decorated - covered == {ThrottlingQuotaExceededError}
+    assert decorated == covered
+
+
+def test_throttling_quota_exceeded_tells_its_forms_apart_without_java_forms() -> None:
+    # Every combination is a Java constructor, (String) and (int, String), so
+    # the class has no decorator and one signature; the body tells the forms
+    # apart by whether throttle_time_ms is given.
+    assert getattr(ThrottlingQuotaExceededError.__init__, "__wrapped__", None) is None
     assert ThrottlingQuotaExceededError(message="m").throttle_time_ms() == 0
     assert ThrottlingQuotaExceededError(throttle_time_ms=0, message="m").throttle_time_ms() == 0
+    assert ThrottlingQuotaExceededError(throttle_time_ms=7, message="m").throttle_time_ms() == 7
+    assert str(ThrottlingQuotaExceededError(throttle_time_ms=7, message="m")) == "m"
+    clone = pickle.loads(pickle.dumps(ThrottlingQuotaExceededError(throttle_time_ms=7, message="m")))
+    assert clone.throttle_time_ms() == 7
 
 
 def test_group_authorization_for_group_id() -> None:
