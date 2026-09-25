@@ -62,6 +62,22 @@ FLUSH_IN_CALLBACK_MESSAGE = ("KafkaProducer.flush() invocation inside a callback
 # the core cannot receive a null, so the binding checks it.
 NULL_GROUP_METADATA_MESSAGE = "Consumer group metadata could not be null"
 
+# Java's KafkaProducer.throwIfNoTransactionManager() message.
+NO_TRANSACTION_MANAGER_MESSAGE = ("Cannot use transactional methods without enabling "
+                                  "transactions by setting the transactional.id configuration "
+                                  "property")
+
+# JoinGroupRequest.UNKNOWN_MEMBER_ID.
+_UNKNOWN_MEMBER_ID = ""
+
+# The ProducerConfig keys (and their Java defaults) that decide whether the
+# producer has a transaction manager (has_transaction_manager).
+_ENABLE_IDEMPOTENCE = "enable.idempotence"
+_RETRIES = "retries"
+_RETRIES_DEFAULT = str((1 << 31) - 1)  # Integer.MAX_VALUE
+_ACKS = "acks"
+_ACKS_DEFAULT = "all"
+
 # Java's ProducerConfig keys of a serializer given through the config route.
 _KEY_SERIALIZER = "key.serializer"
 _VALUE_SERIALIZER = "value.serializer"
@@ -136,6 +152,25 @@ def group_metadata_fields(group_metadata: ConsumerGroupMetadata) -> tuple[str, i
     """The four fields the FFI builds its ``ConsumerGroupMetadata`` from."""
     return (group_metadata.group_id(), group_metadata.generation_id(),
             group_metadata.member_id(), group_metadata.group_instance_id())
+
+
+def has_transaction_manager(native: Mapping[str, str]) -> bool:
+    """Whether a producer the core built from ``native`` (the configs it
+    parsed) has Java's ``TransactionManager``.
+
+    ``KafkaProducer.configureTransactionState`` creates one iff
+    ``enable.idempotence`` holds (KafkaProducer.java:604-608) once
+    ``ProducerConfig.postProcessAndValidateIdempotenceConfigs`` has run
+    (ProducerConfig.java:591-636): idempotence, on by default, is turned off
+    when the user did not set it and ``retries`` is 0 or ``acks`` is not
+    ``all`` / ``-1``. The construction succeeded, so none of that method's
+    errors applied. The binding reads it here because Java checks it before
+    the closed state, and the core's own answer goes with the native handle
+    ``close()`` frees."""
+    if _ENABLE_IDEMPOTENCE in native:
+        return native[_ENABLE_IDEMPOTENCE] == "true"
+    return (int(native.get(_RETRIES, _RETRIES_DEFAULT)) != 0
+            and native.get(_ACKS, _ACKS_DEFAULT) in ("all", "-1"))
 
 
 def close_timeout_ms(timeout: Duration | None) -> int | None:
@@ -295,6 +330,9 @@ class _ProducerState:
         # through the batching engine without that wait.
         self._transactional = False
         self._in_transaction = False
+        # Whether the core producer has Java's transaction manager (see
+        # has_transaction_manager): transactional or idempotent.
+        self._transaction_manager = False
         # Futures of the records sent and not yet completed: flush() waits for
         # the ones sent before it (their callbacks have run by then, as in Java).
         self._futures: set[Any] = set()
@@ -362,7 +400,16 @@ class _ProducerState:
         self._value_serializer = value
         self._c_producer = handle
         self._transactional = bool(configs.get(_TRANSACTIONAL_ID))
+        self._transaction_manager = has_transaction_manager(native)
         log_unused(originals, client="producer")
+
+    def _check_transaction_manager(self) -> None:
+        """Java's ``throwIfNoTransactionManager()``, which the transactional
+        methods call before ``throwIfProducerClosed()``
+        (KafkaProducer.java:661-662, 687-688, 746-747, 791-792, 825-826), so a
+        closed producer without one reports this, not the closed state."""
+        if not self._transaction_manager:
+            raise IllegalStateError(message=NO_TRANSACTION_MANAGER_MESSAGE)
 
     def _check_not_closed(self) -> None:
         """Java's ``throwIfProducerClosed()``."""
@@ -418,8 +465,14 @@ class _ProducerState:
         close_if_defined(self._value_serializer)
 
 
-def check_group_metadata(group_metadata: object) -> None:
-    """Java's ``throwIfInvalidGroupMetadata`` null arm; the core checks the
-    generation / member id arm."""
+def check_group_metadata(group_metadata: ConsumerGroupMetadata | None) -> None:
+    """Java's ``throwIfInvalidGroupMetadata`` (KafkaProducer.java:1491-1498),
+    which ``sendOffsetsToTransaction`` calls first: the null arm, which the core
+    cannot receive, and the generation / member id arm, which the core checks
+    too but only on an open producer that has a transaction manager."""
     if group_metadata is None:
         raise IllegalArgumentError(message=NULL_GROUP_METADATA_MESSAGE)
+    if group_metadata.generation_id() > 0 and group_metadata.member_id() == _UNKNOWN_MEMBER_ID:
+        raise IllegalArgumentError(
+            message=f"Passed in group metadata {group_metadata} has generationId > 0 but the "
+                    "member.id is unknown")
