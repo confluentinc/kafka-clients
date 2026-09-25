@@ -23,7 +23,7 @@ use crate::common::protocol::Errors;
 /// The request was throttled due to a quota violation.
 ///
 /// Corresponds to Java's `ThrottlingQuotaExceededException`, error code
-/// [`Errors::ThrottlingQuotaExceeded`].
+/// `Errors::ThrottlingQuotaExceeded`.
 ///
 /// Java `extends` chain:
 ///    `ThrottlingQuotaExceededException` -> `RetriableException` ->

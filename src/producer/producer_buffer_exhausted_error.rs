@@ -29,7 +29,7 @@ kafka_error_class! {
     ///   `RetriableException` -> `ApiException` -> `KafkaException`
     ///
     /// It is therefore **retriable**, and reports error code
-    /// [`Errors::RequestTimedOut`]: it has no entry in `Errors` itself, and
+    /// `Errors::RequestTimedOut`: it has no entry in `Errors` itself, and
     /// Java's `Errors.forException` walks up the superclass chain, finding
     /// `TimeoutException`'s.
     #[doc(alias = "org.apache.kafka.clients.producer.BufferExhaustedException")]

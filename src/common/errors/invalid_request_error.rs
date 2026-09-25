@@ -22,7 +22,7 @@ kafka_error_class! {
     /// library or the message was sent to an incompatible broker. See the broker
     /// logs for more details.
     ///
-    /// Corresponds to Java's `InvalidRequestException`, error code [`Errors::InvalidRequest`].
+    /// Corresponds to Java's `InvalidRequestException`, error code `Errors::InvalidRequest`.
     ///
     /// Java `extends` chain:
     ///    `InvalidRequestException` -> `ApiException` -> `KafkaException`

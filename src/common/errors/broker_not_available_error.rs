@@ -20,7 +20,7 @@ use crate::common::protocol::Errors;
 kafka_error_class! {
     /// The broker is not available.
     ///
-    /// Corresponds to Java's `BrokerNotAvailableException`, error code [`Errors::BrokerNotAvailable`].
+    /// Corresponds to Java's `BrokerNotAvailableException`, error code `Errors::BrokerNotAvailable`.
     ///
     /// Java `extends` chain:
     ///    `BrokerNotAvailableException` -> `ApiException` -> `KafkaException`

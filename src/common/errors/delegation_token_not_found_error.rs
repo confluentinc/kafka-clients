@@ -20,7 +20,7 @@ use crate::common::protocol::Errors;
 kafka_error_class! {
     /// Delegation Token is not found on server.
     ///
-    /// Corresponds to Java's `DelegationTokenNotFoundException`, error code [`Errors::DelegationTokenNotFound`].
+    /// Corresponds to Java's `DelegationTokenNotFoundException`, error code `Errors::DelegationTokenNotFound`.
     ///
     /// Java `extends` chain:
     ///    `DelegationTokenNotFoundException` -> `ApiException` -> `KafkaException`

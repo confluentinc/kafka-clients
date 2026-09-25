@@ -21,7 +21,7 @@ kafka_error_class! {
     /// The server encountered an error with the transaction. The client can abort
     /// the transaction to continue using this transactional ID.
     ///
-    /// Corresponds to Java's `TransactionAbortableException`, error code [`Errors::TransactionAbortable`].
+    /// Corresponds to Java's `TransactionAbortableException`, error code `Errors::TransactionAbortable`.
     ///
     /// Java `extends` chain:
     ///    `TransactionAbortableException` -> `ApiException` -> `KafkaException`

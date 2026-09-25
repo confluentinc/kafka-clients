@@ -20,7 +20,7 @@ use crate::common::protocol::Errors;
 kafka_error_class! {
     /// The share session was not found.
     ///
-    /// Corresponds to Java's `ShareSessionNotFoundException`, error code [`Errors::ShareSessionNotFound`].
+    /// Corresponds to Java's `ShareSessionNotFoundException`, error code `Errors::ShareSessionNotFound`.
     ///
     /// Java `extends` chain:
     ///    `ShareSessionNotFoundException` -> `RetriableException` ->

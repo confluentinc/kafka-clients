@@ -21,7 +21,7 @@ kafka_error_class! {
     /// Client sent a push telemetry request larger than the maximum size the
     /// broker will accept.
     ///
-    /// Corresponds to Java's `TelemetryTooLargeException`, error code [`Errors::TelemetryTooLarge`].
+    /// Corresponds to Java's `TelemetryTooLargeException`, error code `Errors::TelemetryTooLarge`.
     ///
     /// Java `extends` chain:
     ///    `TelemetryTooLargeException` -> `ApiException` -> `KafkaException`

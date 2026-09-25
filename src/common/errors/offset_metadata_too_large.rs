@@ -20,7 +20,7 @@ use crate::common::protocol::Errors;
 kafka_error_class! {
     /// The metadata field of the offset request was too large.
     ///
-    /// Corresponds to Java's `OffsetMetadataTooLarge`, error code [`Errors::OffsetMetadataTooLarge`].
+    /// Corresponds to Java's `OffsetMetadataTooLarge`, error code `Errors::OffsetMetadataTooLarge`.
     ///
     /// Java `extends` chain:
     ///    `OffsetMetadataTooLarge` -> `ApiException` -> `KafkaException`

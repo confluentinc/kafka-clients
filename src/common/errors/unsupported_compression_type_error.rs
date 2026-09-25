@@ -21,7 +21,7 @@ kafka_error_class! {
     /// The requesting client does not support the compression type of given
     /// partition.
     ///
-    /// Corresponds to Java's `UnsupportedCompressionTypeException`, error code [`Errors::UnsupportedCompressionType`].
+    /// Corresponds to Java's `UnsupportedCompressionTypeException`, error code `Errors::UnsupportedCompressionType`.
     ///
     /// Java `extends` chain:
     ///    `UnsupportedCompressionTypeException` -> `ApiException` ->

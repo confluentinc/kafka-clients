@@ -20,7 +20,7 @@ use crate::common::protocol::Errors;
 kafka_error_class! {
     /// The voter is already part of the set of voters.
     ///
-    /// Corresponds to Java's `DuplicateVoterException`, error code [`Errors::DuplicateVoter`].
+    /// Corresponds to Java's `DuplicateVoterException`, error code `Errors::DuplicateVoter`.
     ///
     /// Java `extends` chain:
     ///    `DuplicateVoterException` -> `ApiException` -> `KafkaException`

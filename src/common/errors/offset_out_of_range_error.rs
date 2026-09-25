@@ -22,7 +22,7 @@ kafka_error_class! {
     /// the server.
     ///
     /// Corresponds to Java's `OffsetOutOfRangeException`, error code
-    /// [`Errors::OffsetOutOfRange`].
+    /// `Errors::OffsetOutOfRange`.
     ///
     /// Java `extends` chain:
     ///    `OffsetOutOfRangeException` -> `InvalidOffsetException` ->

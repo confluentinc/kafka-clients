@@ -20,7 +20,7 @@ use crate::common::protocol::Errors;
 kafka_error_class! {
     /// The limit of share sessions has been reached.
     ///
-    /// Corresponds to Java's `ShareSessionLimitReachedException`, error code [`Errors::ShareSessionLimitReached`].
+    /// Corresponds to Java's `ShareSessionLimitReachedException`, error code `Errors::ShareSessionLimitReached`.
     ///
     /// Java `extends` chain:
     ///    `ShareSessionLimitReachedException` -> `RetriableException` ->

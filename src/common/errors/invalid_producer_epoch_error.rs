@@ -20,7 +20,7 @@ use crate::common::protocol::Errors;
 kafka_error_class! {
     /// Producer attempted to produce with an old epoch.
     ///
-    /// Corresponds to Java's `InvalidProducerEpochException`, error code [`Errors::InvalidProducerEpoch`].
+    /// Corresponds to Java's `InvalidProducerEpochException`, error code `Errors::InvalidProducerEpoch`.
     ///
     /// Java `extends` chain:
     ///    `InvalidProducerEpochException` -> `ApplicationRecoverableException` ->

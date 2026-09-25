@@ -172,10 +172,10 @@ where
     ///
     /// Returns a snapshot of all metrics maintained by the consumer, keyed by
     /// [`MetricName`]. The value type is `Arc<KafkaMetric>` — [`KafkaMetric`]
-    /// implements the [`Metric`] read interface, mirroring Java's
+    /// implements the [`Metric`](crate::common::Metric) read interface, mirroring Java's
     /// `? extends Metric` wildcard. Read each metric's name via
-    /// [`Metric::metric_name`] and its current value via
-    /// [`Metric::metric_value`].
+    /// [`Metric::metric_name`](crate::common::Metric::metric_name) and its current value via
+    /// [`Metric::metric_value`](crate::common::Metric::metric_value).
     ///
     /// Sync — Java's `metrics()` does not block. The returned map is a
     /// point-in-time snapshot taken under the registry lock (a cold,

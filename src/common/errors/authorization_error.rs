@@ -21,7 +21,7 @@ kafka_error_class! {
     /// The client is not authorized to perform the operation.
     ///
     /// Corresponds to Java's `AuthorizationException`, which reports error code
-    /// [`Errors::InvalidConfig`] by inheritance.
+    /// `Errors::InvalidConfig` by inheritance.
     ///
     /// Java `extends` chain:
     ///    `AuthorizationException` -> `InvalidConfigurationException` ->

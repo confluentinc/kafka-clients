@@ -20,7 +20,7 @@ use crate::common::protocol::Errors;
 kafka_error_class! {
     /// The preferred leader was not available.
     ///
-    /// Corresponds to Java's `PreferredLeaderNotAvailableException`, error code [`Errors::PreferredLeaderNotAvailable`].
+    /// Corresponds to Java's `PreferredLeaderNotAvailableException`, error code `Errors::PreferredLeaderNotAvailable`.
     ///
     /// Java `extends` chain:
     ///    `PreferredLeaderNotAvailableException` -> `InvalidMetadataException` ->

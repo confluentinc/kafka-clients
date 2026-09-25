@@ -21,7 +21,7 @@ kafka_error_class! {
     /// The broker rejected this static consumer since another consumer with the
     /// same group.instance.id has registered with a different member.id.
     ///
-    /// Corresponds to Java's `FencedInstanceIdException`, error code [`Errors::FencedInstanceId`].
+    /// Corresponds to Java's `FencedInstanceIdException`, error code `Errors::FencedInstanceId`.
     ///
     /// Java `extends` chain:
     ///    `FencedInstanceIdException` -> `ApplicationRecoverableException` ->

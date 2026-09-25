@@ -20,7 +20,7 @@ use crate::common::protocol::Errors;
 kafka_error_class! {
     /// The transactionalId could not be found.
     ///
-    /// Corresponds to Java's `TransactionalIdNotFoundException`, error code [`Errors::TransactionalIdNotFound`].
+    /// Corresponds to Java's `TransactionalIdNotFoundException`, error code `Errors::TransactionalIdNotFound`.
     ///
     /// Java `extends` chain:
     ///    `TransactionalIdNotFoundException` -> `ApiException` -> `KafkaException`

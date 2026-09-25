@@ -20,7 +20,7 @@ use crate::common::protocol::Errors;
 kafka_error_class! {
     /// The request was sent to an endpoint of the wrong type.
     ///
-    /// Corresponds to Java's `MismatchedEndpointTypeException`, error code [`Errors::MismatchedEndpointType`].
+    /// Corresponds to Java's `MismatchedEndpointTypeException`, error code `Errors::MismatchedEndpointType`.
     ///
     /// Java `extends` chain:
     ///    `MismatchedEndpointTypeException` -> `ApiException` -> `KafkaException`

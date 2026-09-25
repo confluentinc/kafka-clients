@@ -21,7 +21,7 @@ kafka_error_class! {
     /// The member epoch is stale. The member must retry after receiving its
     /// updated member epoch via the ConsumerGroupHeartbeat API.
     ///
-    /// Corresponds to Java's `StaleMemberEpochException`, error code [`Errors::StaleMemberEpoch`].
+    /// Corresponds to Java's `StaleMemberEpochException`, error code `Errors::StaleMemberEpoch`.
     ///
     /// Java `extends` chain:
     ///    `StaleMemberEpochException` -> `ApiException` -> `KafkaException`

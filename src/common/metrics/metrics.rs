@@ -168,28 +168,28 @@ impl<'a> SensorOptionsBuilder<'a> {
         }
     }
 
-    /// Sets [`SensorOptions::name`], a mandatory parameter: [`Self::build`]
+    /// Sets `SensorOptions::name`, a mandatory parameter: [`Self::build`]
     /// panics if it was not set.
     pub fn set_name(mut self, name: &'a str) -> Self {
         self.name = Some(name);
         self
     }
-    /// Sets [`SensorOptions::config`].
+    /// Sets `SensorOptions::config`.
     pub fn set_config(mut self, config: Option<Arc<MetricConfig>>) -> Self {
         self.config = config;
         self
     }
-    /// Sets [`SensorOptions::inactive_sensor_expiration_time_seconds`].
+    /// Sets `SensorOptions::inactive_sensor_expiration_time_seconds`.
     pub fn set_inactive_sensor_expiration_time_seconds(mut self, inactive_sensor_expiration_time_seconds: i64) -> Self {
         self.inactive_sensor_expiration_time_seconds = inactive_sensor_expiration_time_seconds;
         self
     }
-    /// Sets [`SensorOptions::recording_level`].
+    /// Sets `SensorOptions::recording_level`.
     pub fn set_recording_level(mut self, recording_level: RecordingLevel) -> Self {
         self.recording_level = recording_level;
         self
     }
-    /// Sets [`SensorOptions::parents`].
+    /// Sets `SensorOptions::parents`.
     pub fn set_parents(mut self, parents: &'a [Arc<Sensor>]) -> Self {
         self.parents = parents;
         self

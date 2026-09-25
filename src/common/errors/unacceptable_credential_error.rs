@@ -20,7 +20,7 @@ use crate::common::protocol::Errors;
 kafka_error_class! {
     /// Requested credential would not meet criteria for acceptability.
     ///
-    /// Corresponds to Java's `UnacceptableCredentialException`, error code [`Errors::UnacceptableCredential`].
+    /// Corresponds to Java's `UnacceptableCredentialException`, error code `Errors::UnacceptableCredential`.
     ///
     /// Java `extends` chain:
     ///    `UnacceptableCredentialException` -> `ApiException` -> `KafkaException`

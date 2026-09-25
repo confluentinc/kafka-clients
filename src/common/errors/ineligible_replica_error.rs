@@ -20,7 +20,7 @@ use crate::common::protocol::Errors;
 kafka_error_class! {
     /// The new ISR contains at least one ineligible replica.
     ///
-    /// Corresponds to Java's `IneligibleReplicaException`, error code [`Errors::IneligibleReplica`].
+    /// Corresponds to Java's `IneligibleReplicaException`, error code `Errors::IneligibleReplica`.
     ///
     /// Java `extends` chain:
     ///    `IneligibleReplicaException` -> `ApiException` -> `KafkaException`

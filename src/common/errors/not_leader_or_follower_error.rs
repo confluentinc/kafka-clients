@@ -23,7 +23,7 @@ kafka_error_class! {
     /// this error indicates that the broker is not a replica of the topic
     /// partition.
     ///
-    /// Corresponds to Java's `NotLeaderOrFollowerException`, error code [`Errors::NotLeaderOrFollower`].
+    /// Corresponds to Java's `NotLeaderOrFollowerException`, error code `Errors::NotLeaderOrFollower`.
     ///
     /// Java `extends` chain:
     ///    `NotLeaderOrFollowerException` -> `InvalidMetadataException` ->

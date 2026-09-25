@@ -786,14 +786,14 @@ impl<K, V> KafkaProducer<K, V> {
     /// the plain name stays here; `with_partitioner` remains suffixed
     /// by the one parameter that distinguishes it. The consumer side takes the
     /// identical decision — see
-    /// [`AsyncKafkaConsumer::new`](crate::consumer::AsyncKafkaConsumer::new).
+    /// `AsyncKafkaConsumer::new`.
     ///
     /// It internally wires up all infrastructure components:
     ///
     /// 1. Parses and resolves bootstrap server addresses from the config
-    /// 2. Creates [`ProducerMetadata`] and bootstraps it with the resolved addresses
-    /// 3. Creates a [`PlaintextChannelBuilder`], [`Selector`], and [`NetworkClient`]
-    /// 4. Creates a [`BufferPool`] and [`RecordAccumulator`]
+    /// 2. Creates `ProducerMetadata` and bootstraps it with the resolved addresses
+    /// 3. Creates a `PlaintextChannelBuilder`, `Selector`, and `NetworkClient`
+    /// 4. Creates a `BufferPool` and `RecordAccumulator`
     /// 5. Spawns the background sender task via the crate-internal `with_client_options`
     ///
     /// # Arguments

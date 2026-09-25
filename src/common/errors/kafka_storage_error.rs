@@ -20,7 +20,7 @@ use crate::common::protocol::Errors;
 kafka_error_class! {
     /// Disk error when trying to access log file on the disk.
     ///
-    /// Corresponds to Java's `KafkaStorageException`, error code [`Errors::KafkaStorageError`].
+    /// Corresponds to Java's `KafkaStorageException`, error code `Errors::KafkaStorageError`.
     ///
     /// Java `extends` chain:
     ///    `KafkaStorageException` -> `InvalidMetadataException` ->

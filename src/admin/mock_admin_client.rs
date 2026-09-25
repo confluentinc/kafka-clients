@@ -188,7 +188,7 @@ impl MockAdminClient {
     /// caller-supplied count that the caller can trivially correct, which is
     /// CLAUDE.md §10.2 ("return a `Result` when Java code throws … even if
     /// unchecked but recoverable") and not §10.1's unrecoverable case. It also
-    /// keeps [`crate::ffi::admin`] free of a panic that could unwind out of
+    /// keeps `crate::ffi::admin` free of a panic that could unwind out of
     /// `kafka_admin_MockAdminClient_new` and abort the process.
     pub fn create(num_brokers: i32) -> Result<Self, Error> {
         let brokers: Vec<Node> = (0..num_brokers)

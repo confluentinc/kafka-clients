@@ -20,7 +20,7 @@ use crate::common::protocol::Errors;
 kafka_error_class! {
     /// The supplied topology epoch is outdated.
     ///
-    /// Corresponds to Java's `StreamsTopologyFencedException`, error code [`Errors::StreamsTopologyFenced`].
+    /// Corresponds to Java's `StreamsTopologyFencedException`, error code `Errors::StreamsTopologyFenced`.
     ///
     /// Java `extends` chain:
     ///    `StreamsTopologyFencedException` -> `ApiException` -> `KafkaException`

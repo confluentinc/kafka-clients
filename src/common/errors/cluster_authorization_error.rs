@@ -20,7 +20,7 @@ use crate::common::protocol::Errors;
 kafka_error_class! {
     /// Cluster authorization failed.
     ///
-    /// Corresponds to Java's `ClusterAuthorizationException`, error code [`Errors::ClusterAuthorizationFailed`].
+    /// Corresponds to Java's `ClusterAuthorizationException`, error code `Errors::ClusterAuthorizationFailed`.
     ///
     /// Java `extends` chain:
     ///    `ClusterAuthorizationException` -> `AuthorizationException` ->

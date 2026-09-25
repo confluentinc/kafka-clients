@@ -20,7 +20,7 @@ use crate::common::protocol::Errors;
 kafka_error_class! {
     /// The record state is invalid.
     ///
-    /// Corresponds to Java's `InvalidRecordStateException`, error code [`Errors::InvalidRecordState`].
+    /// Corresponds to Java's `InvalidRecordStateException`, error code `Errors::InvalidRecordState`.
     ///
     /// Java `extends` chain:
     ///    `InvalidRecordStateException` -> `ApiException` -> `KafkaException`

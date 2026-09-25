@@ -22,7 +22,7 @@ kafka_error_class! {
     /// existing members or first group member tried to join with empty protocol
     /// type or empty protocol list.
     ///
-    /// Corresponds to Java's `InconsistentGroupProtocolException`, error code [`Errors::InconsistentGroupProtocol`].
+    /// Corresponds to Java's `InconsistentGroupProtocolException`, error code `Errors::InconsistentGroupProtocol`.
     ///
     /// Java `extends` chain:
     ///    `InconsistentGroupProtocolException` -> `ApiException` -> `KafkaException`

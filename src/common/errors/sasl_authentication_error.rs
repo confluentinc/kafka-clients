@@ -20,7 +20,7 @@ use crate::common::protocol::Errors;
 kafka_error_class! {
     /// SASL Authentication failed.
     ///
-    /// Corresponds to Java's `SaslAuthenticationException`, error code [`Errors::SaslAuthenticationFailed`].
+    /// Corresponds to Java's `SaslAuthenticationException`, error code `Errors::SaslAuthenticationFailed`.
     ///
     /// Java `extends` chain:
     ///    `SaslAuthenticationException` -> `AuthenticationException` ->

@@ -20,7 +20,7 @@ use crate::common::protocol::Errors;
 kafka_error_class! {
     /// Eligible topic partition leaders are not available.
     ///
-    /// Corresponds to Java's `EligibleLeadersNotAvailableException`, error code [`Errors::EligibleLeadersNotAvailable`].
+    /// Corresponds to Java's `EligibleLeadersNotAvailableException`, error code `Errors::EligibleLeadersNotAvailable`.
     ///
     /// Java `extends` chain:
     ///    `EligibleLeadersNotAvailableException` -> `InvalidMetadataException` ->

@@ -20,7 +20,7 @@ use crate::common::protocol::Errors;
 kafka_error_class! {
     /// The version of API is not supported.
     ///
-    /// Corresponds to Java's `UnsupportedVersionException`, error code [`Errors::UnsupportedVersion`].
+    /// Corresponds to Java's `UnsupportedVersionException`, error code `Errors::UnsupportedVersion`.
     ///
     /// Java `extends` chain:
     ///    `UnsupportedVersionException` -> `InvalidConfigurationException` ->

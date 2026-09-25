@@ -23,7 +23,7 @@ use crate::leave_group_request_data::MemberIdentity;
 ///
 /// Corresponds to `org.apache.kafka.clients.admin.MemberToRemove`. Members are
 /// identified by their `group.instance.id` (static membership); the member id
-/// is left as [`JoinGroupRequest::UNKNOWN_MEMBER_ID`] so the broker resolves it by instance id.
+/// is left as `JoinGroupRequest::UNKNOWN_MEMBER_ID` so the broker resolves it by instance id.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 #[doc(alias = "org.apache.kafka.clients.admin.MemberToRemove")]
 pub struct MemberToRemove {

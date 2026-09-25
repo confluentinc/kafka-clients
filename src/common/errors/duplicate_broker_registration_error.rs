@@ -20,7 +20,7 @@ use crate::common::protocol::Errors;
 kafka_error_class! {
     /// This broker ID is already in use.
     ///
-    /// Corresponds to Java's `DuplicateBrokerRegistrationException`, error code [`Errors::DuplicateBrokerRegistration`].
+    /// Corresponds to Java's `DuplicateBrokerRegistrationException`, error code `Errors::DuplicateBrokerRegistration`.
     ///
     /// Java `extends` chain:
     ///    `DuplicateBrokerRegistrationException` -> `ApiException` ->

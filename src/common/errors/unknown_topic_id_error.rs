@@ -20,7 +20,7 @@ use crate::common::protocol::Errors;
 kafka_error_class! {
     /// This server does not host this topic ID.
     ///
-    /// Corresponds to Java's `UnknownTopicIdException`, error code [`Errors::UnknownTopicId`].
+    /// Corresponds to Java's `UnknownTopicIdException`, error code `Errors::UnknownTopicId`.
     ///
     /// Java `extends` chain:
     ///    `UnknownTopicIdException` -> `InvalidMetadataException` ->

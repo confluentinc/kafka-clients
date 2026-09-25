@@ -20,7 +20,7 @@ use crate::common::protocol::Errors;
 kafka_error_class! {
     /// The coordinator is not available.
     ///
-    /// Corresponds to Java's `CoordinatorNotAvailableException`, error code [`Errors::CoordinatorNotAvailable`].
+    /// Corresponds to Java's `CoordinatorNotAvailableException`, error code `Errors::CoordinatorNotAvailable`.
     ///
     /// Java `extends` chain:
     ///    `CoordinatorNotAvailableException` -> `RefreshRetriableException` ->

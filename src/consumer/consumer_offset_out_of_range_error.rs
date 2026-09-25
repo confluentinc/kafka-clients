@@ -84,7 +84,7 @@ impl ConsumerOffsetOutOfRangeError {
     /// single abstract member `InvalidOffsetException` declares
     /// (`InvalidOffsetException.java:36`), so it is available uniformly across
     /// the family that
-    /// [`is_consumer_invalid_offset_error`](crate::common::error::ErrorHierarchy::is_consumer_invalid_offset_error)
+    /// `is_consumer_invalid_offset_error`
     /// recognises.
     ///
     /// Returns an iterator rather than a `HashSet`: Java's `keySet()` is a

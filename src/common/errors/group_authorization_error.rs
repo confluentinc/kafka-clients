@@ -28,7 +28,7 @@ use crate::common::protocol::Errors;
 /// Group authorization failure with the group ID.
 ///
 /// Corresponds to Java's `GroupAuthorizationException`, error code
-/// [`Errors::GroupAuthorizationFailed`].
+/// `Errors::GroupAuthorizationFailed`.
 ///
 /// Java `extends` chain:
 ///    `GroupAuthorizationException` -> `AuthorizationException` ->

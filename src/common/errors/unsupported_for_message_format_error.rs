@@ -20,7 +20,7 @@ use crate::common::protocol::Errors;
 kafka_error_class! {
     /// The message format version on the broker does not support the request.
     ///
-    /// Corresponds to Java's `UnsupportedForMessageFormatException`, error code [`Errors::UnsupportedForMessageFormat`].
+    /// Corresponds to Java's `UnsupportedForMessageFormatException`, error code `Errors::UnsupportedForMessageFormat`.
     ///
     /// Java `extends` chain:
     ///    `UnsupportedForMessageFormatException` ->

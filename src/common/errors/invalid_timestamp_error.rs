@@ -20,7 +20,7 @@ use crate::common::protocol::Errors;
 kafka_error_class! {
     /// The timestamp of the message is out of acceptable range.
     ///
-    /// Corresponds to Java's `InvalidTimestampException`, error code [`Errors::InvalidTimestamp`].
+    /// Corresponds to Java's `InvalidTimestampException`, error code `Errors::InvalidTimestamp`.
     ///
     /// Java `extends` chain:
     ///    `InvalidTimestampException` -> `ApiException` -> `KafkaException`

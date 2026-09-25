@@ -21,7 +21,7 @@ kafka_error_class! {
     /// The TLS handshake failed.
     ///
     /// Raised client-side, so it never arrives from a broker — but Java still
-    /// reports a code for it, by inheritance: [`Errors::InvalidConfig`].
+    /// reports a code for it, by inheritance: `Errors::InvalidConfig`.
     ///
     /// Corresponds to Java's `SslAuthenticationException`.
     ///

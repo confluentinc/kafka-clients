@@ -24,7 +24,7 @@ kafka_error_class! {
     /// This record has failed the validation on broker and hence will be
     /// rejected.
     ///
-    /// Corresponds to Java's `InvalidRecordException`, error code [`Errors::InvalidRecord`].
+    /// Corresponds to Java's `InvalidRecordException`, error code `Errors::InvalidRecord`.
     ///
     /// Java `extends` chain:
     ///    `InvalidRecordException`

@@ -22,7 +22,7 @@ use crate::common::protocol::Errors;
 
 /// A request referred to a resource that does not exist.
 ///
-/// Corresponds to Java's `ResourceNotFoundException`, error code [`Errors::ResourceNotFound`].
+/// Corresponds to Java's `ResourceNotFoundException`, error code `Errors::ResourceNotFound`.
 ///
 /// Java `extends` chain:
 ///    `ResourceNotFoundException` -> `ApiException` -> `KafkaException`
@@ -51,7 +51,7 @@ impl ResourceNotFoundError {
     }
 
     /// Create the error with the code's default message — used by
-    /// [`Errors::error`](crate::common::protocol::Errors::error).
+    /// `Errors::error`.
     #[doc(alias = "org.apache.kafka.common.errors.ResourceNotFoundException#ResourceNotFoundException")]
     pub fn with_default_message() -> Self {
         Self::new(Errors::ResourceNotFound.message())

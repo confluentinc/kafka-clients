@@ -21,7 +21,7 @@ kafka_error_class! {
     /// The request included message batch larger than the configured segment size
     /// on the server.
     ///
-    /// Corresponds to Java's `RecordBatchTooLargeException`, error code [`Errors::RecordListTooLarge`].
+    /// Corresponds to Java's `RecordBatchTooLargeException`, error code `Errors::RecordListTooLarge`.
     ///
     /// Java `extends` chain:
     ///    `RecordBatchTooLargeException` -> `InvalidConfigurationException` ->

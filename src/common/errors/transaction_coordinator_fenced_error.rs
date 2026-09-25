@@ -21,7 +21,7 @@ kafka_error_class! {
     /// Indicates that the transaction coordinator sending a WriteTxnMarker is no
     /// longer the current coordinator for a given producer.
     ///
-    /// Corresponds to Java's `TransactionCoordinatorFencedException`, error code [`Errors::TransactionCoordinatorFenced`].
+    /// Corresponds to Java's `TransactionCoordinatorFencedException`, error code `Errors::TransactionCoordinatorFenced`.
     ///
     /// Java `extends` chain:
     ///    `TransactionCoordinatorFencedException` -> `ApiException` ->

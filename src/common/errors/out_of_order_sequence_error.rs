@@ -20,7 +20,7 @@ use crate::common::protocol::Errors;
 kafka_error_class! {
     /// The broker received an out of order sequence number.
     ///
-    /// Corresponds to Java's `OutOfOrderSequenceException`, error code [`Errors::OutOfOrderSequenceNumber`].
+    /// Corresponds to Java's `OutOfOrderSequenceException`, error code `Errors::OutOfOrderSequenceNumber`.
     ///
     /// Java `extends` chain:
     ///    `OutOfOrderSequenceException` -> `ApiException` -> `KafkaException`

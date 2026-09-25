@@ -20,7 +20,7 @@ use crate::common::protocol::Errors;
 kafka_error_class! {
     /// Topic deletion is disabled.
     ///
-    /// Corresponds to Java's `TopicDeletionDisabledException`, error code [`Errors::TopicDeletionDisabled`].
+    /// Corresponds to Java's `TopicDeletionDisabledException`, error code `Errors::TopicDeletionDisabled`.
     ///
     /// Java `extends` chain:
     ///    `TopicDeletionDisabledException`

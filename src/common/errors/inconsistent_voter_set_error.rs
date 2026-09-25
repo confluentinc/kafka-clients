@@ -21,7 +21,7 @@ kafka_error_class! {
     /// Indicates that the either the sender or recipient of a voter-only request
     /// is not one of the expected voters.
     ///
-    /// Corresponds to Java's `InconsistentVoterSetException`, error code [`Errors::InconsistentVoterSet`].
+    /// Corresponds to Java's `InconsistentVoterSetException`, error code `Errors::InconsistentVoterSet`.
     ///
     /// Java `extends` chain:
     ///    `InconsistentVoterSetException` -> `ApiException` -> `KafkaException`

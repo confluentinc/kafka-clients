@@ -21,7 +21,7 @@ kafka_error_class! {
     /// Messages are written to the log, but to fewer in-sync replicas than
     /// required.
     ///
-    /// Corresponds to Java's `NotEnoughReplicasAfterAppendException`, error code [`Errors::NotEnoughReplicasAfterAppend`].
+    /// Corresponds to Java's `NotEnoughReplicasAfterAppendException`, error code `Errors::NotEnoughReplicasAfterAppend`.
     ///
     /// Java `extends` chain:
     ///    `NotEnoughReplicasAfterAppendException` -> `RetriableException` ->

@@ -20,7 +20,7 @@ use crate::common::protocol::Errors;
 kafka_error_class! {
     /// The fetch session encountered inconsistent topic ID usage.
     ///
-    /// Corresponds to Java's `FetchSessionTopicIdException`, error code [`Errors::FetchSessionTopicIdError`].
+    /// Corresponds to Java's `FetchSessionTopicIdException`, error code `Errors::FetchSessionTopicIdError`.
     ///
     /// Java `extends` chain:
     ///    `FetchSessionTopicIdException` -> `RetriableException` ->

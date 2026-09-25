@@ -20,7 +20,7 @@ use crate::common::protocol::Errors;
 kafka_error_class! {
     /// This server does not host this topic-partition.
     ///
-    /// Corresponds to Java's `UnknownTopicOrPartitionException`, error code [`Errors::UnknownTopicOrPartition`].
+    /// Corresponds to Java's `UnknownTopicOrPartitionException`, error code `Errors::UnknownTopicOrPartition`.
     ///
     /// Java `extends` chain:
     ///    `UnknownTopicOrPartitionException` -> `InvalidMetadataException` ->

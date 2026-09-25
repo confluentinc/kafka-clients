@@ -20,7 +20,7 @@ use crate::common::protocol::Errors;
 kafka_error_class! {
     /// Produce request specified an invalid value for required acks.
     ///
-    /// Corresponds to Java's `InvalidRequiredAcksException`, error code [`Errors::InvalidRequiredAcks`].
+    /// Corresponds to Java's `InvalidRequiredAcksException`, error code `Errors::InvalidRequiredAcks`.
     ///
     /// Java `extends` chain:
     ///    `InvalidRequiredAcksException` -> `InvalidConfigurationException` ->

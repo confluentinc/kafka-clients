@@ -20,7 +20,7 @@ use crate::common::protocol::Errors;
 kafka_error_class! {
     /// The leader epoch in the request is older than the epoch on the broker.
     ///
-    /// Corresponds to Java's `FencedLeaderEpochException`, error code [`Errors::FencedLeaderEpoch`].
+    /// Corresponds to Java's `FencedLeaderEpochException`, error code `Errors::FencedLeaderEpoch`.
     ///
     /// Java `extends` chain:
     ///    `FencedLeaderEpochException` -> `InvalidMetadataException` ->

@@ -20,7 +20,7 @@ use crate::common::protocol::Errors;
 kafka_error_class! {
     /// No partition reassignment is in progress.
     ///
-    /// Corresponds to Java's `NoReassignmentInProgressException`, error code [`Errors::NoReassignmentInProgress`].
+    /// Corresponds to Java's `NoReassignmentInProgressException`, error code `Errors::NoReassignmentInProgress`.
     ///
     /// Java `extends` chain:
     ///    `NoReassignmentInProgressException` -> `ApiException` -> `KafkaException`
