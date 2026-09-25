@@ -126,3 +126,80 @@ def test_record_metadata_surface() -> None:
     assert str(metadata) == "foo-2@7"
     with pytest.raises(TypeError):
         RecordMetadata(tp, 0, 0, 0, 0, 0)  # type: ignore[call-arg]
+
+
+# --------------------------------------------------------------------------- #
+# Header values: the record's own views, and the native record's buffer
+# exports (the send path borrows the bytes, never reads a released buffer)
+# --------------------------------------------------------------------------- #
+
+
+def test_header_value_survives_the_caller_releasing_its_view() -> None:
+    with memoryview(bytearray(b"hdr")) as mv:
+        record = ProducerRecord(topic="t", value=b"v", headers=[("h", mv)])
+    ((_, value),) = record.headers()
+    assert value is not None and value.tobytes() == b"hdr"
+    # A caller releasing a handed-out view leaves the record's own intact.
+    with record.headers()[0][1] as handed_out:  # type: ignore[union-attr]
+        assert handed_out.tobytes() == b"hdr"
+    assert record.headers()[0][1].tobytes() == b"hdr"  # type: ignore[union-attr]
+
+
+def test_released_or_non_contiguous_header_value_is_rejected() -> None:
+    released = memoryview(b"x")
+    released.release()
+    with pytest.raises(ValueError) as exc:
+        ProducerRecord(topic="t", value=b"v", headers=[("h", released)])
+    assert str(exc.value) == "operation forbidden on released memoryview object"
+    with pytest.raises(TypeError) as type_exc:
+        ProducerRecord(topic="t", value=b"v", headers=[("h", memoryview(b"abcdef")[::2])])
+    assert str(type_exc.value) == "header[0] value must be a C-contiguous buffer"
+    # A non-byte format is carried as its bytes.
+    import array
+
+    record = ProducerRecord(topic="t", value=b"v", headers=[("h", memoryview(array.array("H", [1])))])
+    assert record.headers()[0][1].tobytes() == array.array("H", [1]).tobytes()  # type: ignore[union-attr]
+
+
+def test_native_record_holds_an_export_of_each_header_value() -> None:
+    import _confluentkafka as lib  # type: ignore[import-not-found]
+
+    released = memoryview(bytes(bytearray(b"Z" * 4096)))
+    released.release()
+    with pytest.raises(ValueError) as exc:
+        lib.ProducerRecord("t", b"v", None, -1, -1, (("k", released),))
+    assert str(exc.value) == "operation forbidden on released memoryview object"
+
+    buffer = bytearray(b"hdr")
+    view = memoryview(buffer)
+    native = lib.ProducerRecord("t", b"v", None, -1, -1,
+                                (("k", view), ("n", None), ("b", b"xy")))
+    assert native.headers == [("k", b"hdr"), ("n", None), ("b", b"xy")]
+    # The export pins the bytes: the view cannot be released, nor the
+    # bytearray resized, while the native record lives.
+    with pytest.raises(BufferError):
+        view.release()
+    with pytest.raises(BufferError):
+        buffer.extend(b"!")
+    del native
+    view.release()
+
+    with pytest.raises(BufferError) as buffer_exc:
+        lib.ProducerRecord("t", b"v", None, -1, -1, (("k", memoryview(b"abcdef")[::2]),))
+    assert str(buffer_exc.value) == "memoryview: underlying buffer is not C-contiguous"
+    with pytest.raises(TypeError) as type_exc:
+        lib.ProducerRecord("t", b"v", None, -1, -1, (("k", 5),))
+    assert str(type_exc.value) == "header value must be bytes, a contiguous memoryview or None"
+
+
+def test_send_path_record_from_a_released_caller_view() -> None:
+    # The native record the send path builds from a record whose caller has
+    # released its header view carries the header bytes, not freed memory.
+    import _confluentkafka as lib  # type: ignore[import-not-found]
+
+    with memoryview(bytearray(b"A" * 4096)) as mv:
+        record = ProducerRecord(topic="t", value=b"v", headers=[("h", mv)])
+    junk = [bytes(bytearray(b"Q" * 4096)) for _ in range(50)]
+    native = lib.ProducerRecord("t", b"v", None, -1, -1, tuple(record.headers()))
+    assert native.headers == [("h", b"A" * 4096)]
+    del junk

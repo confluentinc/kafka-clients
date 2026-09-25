@@ -24,6 +24,7 @@ from __future__ import annotations
 from typing import ClassVar
 
 from confluent_kafka import _throwable
+from confluent_kafka._java import java_str
 from confluent_kafka.common.errors.authorization_error import AuthorizationError
 
 __all__ = ["GroupAuthorizationError"]
@@ -49,3 +50,8 @@ class GroupAuthorizationError(AuthorizationError):
     def group_id(self) -> str | None:
         """Java's ``groupId()``."""
         return self._group_id
+
+    @staticmethod
+    def for_group_id(*, group_id: str) -> GroupAuthorizationError:
+        """Java's static ``forGroupId(groupId)``."""
+        return GroupAuthorizationError(message="Not authorized to access group: " + java_str(group_id), group_id=group_id)

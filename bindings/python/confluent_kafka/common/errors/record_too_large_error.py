@@ -49,14 +49,14 @@ class RecordTooLargeError(ApiError):
         Form("message", "cause"),
         Form("message"),
         Form("cause"),
-        Form("message", "record_too_large_partitions", defaults={"record_too_large_partitions": None}),
+        Form("message", "record_too_large_partitions"),
     )
     def __init__(
         self,
         *,
         message: str = UNSET,
         cause: BaseException | None = None,
-        record_too_large_partitions: Mapping[TopicPartition, int] | None = None,
+        record_too_large_partitions: Mapping[TopicPartition, int] | None = UNSET,
         _java_form: int = -1,
     ) -> None:
         if _java_form == 0:
@@ -64,6 +64,9 @@ class RecordTooLargeError(ApiError):
             self._record_too_large_partitions = None
         elif _java_form == 1:
             _throwable.init(self, message, cause)
+            self._record_too_large_partitions = None
+        elif _java_form == 2:
+            _throwable.init(self, message, None)
             self._record_too_large_partitions = None
         elif _java_form == 3:
             _throwable.init(self, _throwable.cause_message(cause), cause)

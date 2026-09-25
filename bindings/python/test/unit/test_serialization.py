@@ -441,6 +441,11 @@ def test_lifecycle_protocols() -> None:
     assert not isinstance(bare, Closeable)
     import confluent_kafka.common.serialization as serialization
 
+    # One file per public class (CLAUDE.md, Modules).
+    assert [c.__module__ for c in (Serializer, Deserializer, Configurable, Closeable, SerdeBase)] == [
+        "confluent_kafka.common.serialization." + m
+        for m in ("serializer", "deserializer", "configurable", "closeable", "serde_base")]
+
     assert serialization.__all__ == [
         "Serializer", "Deserializer", "Configurable", "Closeable", "SerdeBase",
         "bytes_serializer", "bytes_deserializer", "memoryview_deserializer",

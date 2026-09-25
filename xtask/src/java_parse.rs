@@ -112,6 +112,17 @@ pub struct NestedEnum {
     pub constants: Vec<String>,
 }
 
+/// A `public static <Class> name(params) { return new <Class>(args); }` factory.
+#[derive(Clone, Debug)]
+pub struct Factory {
+    pub name: String,
+    pub params: Vec<Param>,
+    pub args: Vec<Expr>,
+    /// Its place among the class's getters: the number of getters declared
+    /// before it (members keep Java's declaration order).
+    pub after_getters: usize,
+}
+
 /// A `public static final <Class> NAME = new <Class>(args);` singleton.
 #[derive(Clone, Debug)]
 pub struct Singleton {
@@ -135,6 +146,8 @@ pub struct JavaClass {
     pub getters: Vec<Getter>,
     pub enums: Vec<NestedEnum>,
     pub singletons: Vec<Singleton>,
+    /// Public static factories, which become `@staticmethod`s.
+    pub factories: Vec<Factory>,
 }
 
 type Res<T> = anyhow::Result<T>;
@@ -759,6 +772,7 @@ pub fn parse_class(raw: &str) -> Res<JavaClass> {
     let mut getters = Vec::new();
     let mut enums = Vec::new();
     let mut singletons = Vec::new();
+    let mut factories = Vec::new();
 
     // Walk the members at depth 1: each ends with `;` or a `{...}` block.
     let b = body.as_bytes();
@@ -873,9 +887,24 @@ pub fn parse_class(raw: &str) -> Res<JavaClass> {
                 ctors.push(Ctor { visibility: visibility_of(before), params, call, assigns, deprecated });
                 continue;
             }
-            // A method: only public no-argument getters matter.
-            if visibility_of(before) != Visibility::Public || !params_src.trim().is_empty() {
+            // A method: public no-argument getters and public static factories
+            // matter; any other public method stops generation.
+            if visibility_of(before) != Visibility::Public {
                 continue;
+            }
+            if !params_src.trim().is_empty() {
+                let words: Vec<&str> = before.split(' ').filter(|w| !w.starts_with('@')).collect();
+                let is_factory = words.contains(&"static") && words.len() >= 2 && words[words.len() - 2] == simple;
+                let stmt = block.trim().trim_end_matches(';').trim();
+                let created = stmt.strip_prefix("return ").map(str::trim).map(parse_expr).transpose()?;
+                match created {
+                    Some(Expr::New(cls, args)) if is_factory && cls == simple => {
+                        let params = parse_params(params_src)?;
+                        factories.push(Factory { name, params, args, after_getters: getters.len() });
+                        continue;
+                    },
+                    _ => anyhow::bail!("{simple}.{name}(...): unsupported public method `{header}`"),
+                }
             }
             if matches!(name.as_str(), "toString" | "fillInStackTrace" | "hashCode") {
                 continue;
@@ -915,6 +944,7 @@ pub fn parse_class(raw: &str) -> Res<JavaClass> {
         getters,
         enums,
         singletons,
+        factories,
     })
 }
 
@@ -947,6 +977,22 @@ mod tests {
                 vec![Expr::Name(vec!["partition".into()])]
             )
         );
+    }
+
+    #[test]
+    fn parses_public_static_factories_and_rejects_other_public_methods() {
+        let src = "package p;\npublic class XException extends KafkaException {\n\
+                   public XException(String message, String id) { super(message); this.id = id; }\n\
+                   private final String id;\n\
+                   public String id() { return id; }\n\
+                   public static XException forId(String id) { return new XException(\"x: \" + id, id); }\n}\n";
+        let c = parse_class(src).unwrap();
+        assert_eq!(c.factories.len(), 1);
+        assert_eq!(c.factories[0].name, "forId");
+        assert_eq!(c.factories[0].after_getters, 1);
+        assert_eq!(c.factories[0].params[0].name, "id");
+        let bad = src.replace("public static XException forId", "public void setId");
+        assert!(parse_class(&bad).is_err());
     }
 
     #[test]
