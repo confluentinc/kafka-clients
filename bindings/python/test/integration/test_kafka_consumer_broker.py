@@ -39,12 +39,14 @@ from typing import Any
 import pytest
 
 from confluent_kafka import ConcurrentModificationError
-from confluent_kafka.common import TopicPartition
-from confluent_kafka.common.errors import RecordDeserializationError, WakeupError
+from confluent_kafka.common import KafkaError, TopicPartition
+from confluent_kafka.common.errors import (
+    RecordDeserializationError, TopicAuthorizationError, WakeupError,
+)
 from confluent_kafka.common.serialization import string_deserializer, string_serializer
 from confluent_kafka.consumer import (
-    AsyncKafkaConsumer, CloseOptions, ConsumerRebalanceListener, KafkaConsumer,
-    OffsetAndMetadata,
+    AsyncKafkaConsumer, CloseOptions, CommitFailedError, ConsumerRebalanceListener, KafkaConsumer,
+    OffsetAndMetadata, RetriableCommitFailedError,
 )
 from confluent_kafka.producer import KafkaProducer, ProducerRecord
 
@@ -342,5 +344,369 @@ def test_a_failing_deserializer_leaves_the_position_at_the_record(kafka_broker: 
                 assert consumer.poll(timeout=0.5).is_empty()
         consumer.seek(partition=error.topic_partition(), offset=error.offset() + 1)
         assert _poll_until(consumer, lambda v: len(v) >= 1) == ["c"]
+    finally:
+        consumer.close(option=CloseOptions.timeout(0))
+
+
+# ---------------------------------------------------------------------------
+# commit_nowait() while a rebalance is delivered: the core's commit processes
+# the background events while it waits for its offsets (consumer-threading.md
+# §31), so a listener callback queued then runs on the calling thread (or loop)
+# inside commit_nowait() — it must never block (Critic 76 B1)
+# ---------------------------------------------------------------------------
+class _Producing:
+    """Produce to every partition of ``topic`` until stopped."""
+
+    def __init__(self, broker: Any, topic: str, partitions: int) -> None:
+        self._stop = threading.Event()
+        self._producer: KafkaProducer[bytes, bytes] = KafkaProducer(
+            configs={"bootstrap.servers": broker.external_bootstrap, "linger.ms": 5})
+        self._thread = threading.Thread(target=self._run, args=(topic, partitions), daemon=True)
+        self._thread.start()
+
+    def _run(self, topic: str, partitions: int) -> None:
+        sent = 0
+        while not self._stop.is_set():
+            self._producer.send(record=ProducerRecord(topic=topic, partition=sent % partitions,
+                                                      value=b"x" * 10))
+            sent += 1
+            if sent % 50 == 0:
+                self._producer.flush()
+                time.sleep(0.01)
+
+    def stop(self) -> None:
+        self._stop.set()
+        self._thread.join(DEADLINE)
+        self._producer.close()
+
+
+class _Member:
+    """A second group member, joining when started and polling until stopped."""
+
+    def __init__(self, configs: dict[str, Any], topic: str) -> None:
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, args=(configs, topic), daemon=True)
+        self._thread.start()
+
+    def _run(self, configs: dict[str, Any], topic: str) -> None:
+        member: KafkaConsumer[bytes, bytes] = KafkaConsumer(configs=configs)
+        member.subscribe(topics=[topic])
+        while not self._stop.is_set():
+            member.poll(timeout=0.2)
+        member.close(option=CloseOptions.timeout(0))
+
+    def stop(self) -> None:
+        self._stop.set()
+        self._thread.join(DEADLINE)
+
+
+def _rebalance_topic(broker: Any) -> str:
+    topic = f"py-consumer-rebalance-{uuid.uuid4().hex[:12]}"
+    create_topic(broker, topic, partitions=4)
+    return topic
+
+
+@pytest.mark.parametrize("with_callback", [False, True])
+def test_commit_nowait_during_a_rebalance_runs_the_listener_on_this_thread(
+        kafka_broker: Any, with_callback: bool) -> None:
+    topic = _rebalance_topic(kafka_broker)
+    configs = _configs(kafka_broker, **{"max.poll.records": "5"})
+    events: list[tuple[str, int, int]] = []
+    state: dict[str, Any] = {"after_revoke": 0, "callbacks": []}
+
+    class Recording(ConsumerRebalanceListener):
+        def on_partitions_revoked(self, partitions: set[TopicPartition]) -> None:
+            events.append(("revoked", len(partitions), threading.get_ident()))
+
+        def on_partitions_assigned(self, partitions: set[TopicPartition]) -> None:
+            events.append(("assigned", len(partitions), threading.get_ident()))
+
+    consumer: KafkaConsumer[bytes, bytes] = KafkaConsumer(configs=configs)
+    stop = threading.Event()
+
+    def loop() -> None:
+        try:
+            consumer.subscribe(topics=[topic], callback=Recording())
+            while not stop.is_set():
+                if not consumer.poll(timeout=0.5).is_empty():
+                    time.sleep(0.05)  # processing the records
+                    if with_callback:
+                        consumer.commit_nowait(
+                            callback=lambda o, e: state["callbacks"].append(threading.get_ident()))
+                    else:
+                        consumer.commit_nowait()
+                if any(event[0] == "revoked" for event in events):
+                    state["after_revoke"] += 1
+        except BaseException as exc:  # noqa: BLE001 - asserted below
+            state["error"] = exc
+
+    producing = _Producing(kafka_broker, topic, 4)
+    worker = threading.Thread(target=loop, daemon=True)
+    worker.start()
+    member: _Member | None = None
+    try:
+        deadline = time.monotonic() + DEADLINE
+        while ("assigned", 4, worker.ident) not in events:
+            assert time.monotonic() < deadline, f"no assignment: {events}"
+            time.sleep(0.1)
+        member = _Member(configs, topic)
+        deadline = time.monotonic() + DEADLINE
+        while state["after_revoke"] < 20 and "error" not in state:
+            assert time.monotonic() < deadline, (
+                f"the poll/commit_nowait loop stopped: {events}, {state}")
+            time.sleep(0.1)
+        stop.set()
+        worker.join(DEADLINE)
+        assert not worker.is_alive()
+        assert "error" not in state, state
+        assert [thread for name, _, thread in events if name == "revoked"][:1] == [worker.ident]
+        if with_callback:
+            assert state["callbacks"] and set(state["callbacks"]) == {worker.ident}
+    finally:
+        stop.set()
+        if member is not None:
+            member.stop()
+        producing.stop()
+        if not worker.is_alive():
+            # The default close timeout: pending async commits are awaited.
+            consumer.close()
+
+
+@pytest.mark.parametrize("coroutine_listener", [True, False])
+def test_async_commit_nowait_during_a_rebalance_runs_the_listener_on_the_loop(
+        kafka_broker: Any, coroutine_listener: bool) -> None:
+    topic = _rebalance_topic(kafka_broker)
+    configs = _configs(kafka_broker, **{"max.poll.records": "5"})
+    events: list[tuple[str, int, int]] = []
+    state: dict[str, Any] = {"after_revoke": 0}
+
+    async def main() -> None:
+        consumer: AsyncKafkaConsumer[bytes, bytes] = AsyncKafkaConsumer(configs=configs)
+
+        def record(name: str, partitions: set[TopicPartition]) -> None:
+            events.append((name, len(partitions), threading.get_ident()))
+
+        class Plain(ConsumerRebalanceListener):
+            def on_partitions_revoked(self, partitions: set[TopicPartition]) -> None:
+                record("revoked", partitions)
+
+            def on_partitions_assigned(self, partitions: set[TopicPartition]) -> None:
+                record("assigned", partitions)
+
+        class Coroutine(ConsumerRebalanceListener):
+            async def on_partitions_revoked(  # type: ignore[override]
+                    self, partitions: set[TopicPartition]) -> None:
+                await asyncio.sleep(0.01)
+                # A reentrant call from the listener still works.
+                consumer.assignment()
+                record("revoked", partitions)
+
+            async def on_partitions_assigned(  # type: ignore[override]
+                    self, partitions: set[TopicPartition]) -> None:
+                await asyncio.sleep(0.01)
+                record("assigned", partitions)
+
+        member: _Member | None = None
+        try:
+            await consumer.subscribe(topics=[topic],
+                                     callback=Coroutine() if coroutine_listener else Plain())
+            deadline = time.monotonic() + 2 * DEADLINE
+            while state["after_revoke"] < 20:
+                assert time.monotonic() < deadline, f"no progress: {events}"
+                if not (await consumer.poll(timeout=0.5)).is_empty():
+                    await asyncio.sleep(0.05)
+                    consumer.commit_nowait()
+                if member is None and any(e[:2] == ("assigned", 4) for e in events):
+                    member = _Member(configs, topic)
+                if any(event[0] == "revoked" for event in events):
+                    state["after_revoke"] += 1
+            state["loop_thread"] = threading.get_ident()
+        finally:
+            if member is not None:
+                member.stop()
+            # The default close timeout: pending async commits are awaited.
+            await consumer.close()
+
+    def run() -> None:
+        try:
+            asyncio.run(main())
+        except BaseException as exc:  # noqa: BLE001 - asserted below
+            state["error"] = exc
+
+    producing = _Producing(kafka_broker, topic, 4)
+    worker = threading.Thread(target=run, daemon=True)
+    worker.start()
+    try:
+        worker.join(3 * DEADLINE)
+        assert not worker.is_alive(), f"the event loop is blocked: {events}, {state}"
+        assert "error" not in state, state
+        revoked = [thread for name, _, thread in events if name == "revoked"]
+        assert revoked and set(revoked) == {state["loop_thread"]}
+    finally:
+        producing.stop()
+
+
+# ---------------------------------------------------------------------------
+# AsyncKafkaConsumer: a call the guard rejects does not take the pending-callback
+# notify from the call in flight (Critic 76 F1)
+# ---------------------------------------------------------------------------
+def test_async_rejected_call_does_not_stall_the_polling_task(kafka_broker: Any) -> None:
+    topic = f"py-consumer-notify-{uuid.uuid4().hex[:12]}"
+    create_topic(kafka_broker, topic, partitions=2)
+    configs = _configs(kafka_broker)
+
+    async def main() -> None:
+        consumer: AsyncKafkaConsumer[bytes, bytes] = AsyncKafkaConsumer(configs=configs)
+        loop = asyncio.get_running_loop()
+        revoked = asyncio.Event()
+
+        class Recording(ConsumerRebalanceListener):
+            def on_partitions_revoked(self, partitions: set[TopicPartition]) -> None:
+                if partitions:
+                    revoked.set()
+
+        member: _Member | None = None
+        stop = asyncio.Event()
+        try:
+            await consumer.subscribe(topics=[topic], callback=Recording())
+            deadline = loop.time() + DEADLINE
+            while len(consumer.assignment()) < 2:
+                assert loop.time() < deadline, "no assignment"
+                await consumer.poll(timeout=0.2)
+
+            async def poller() -> None:
+                while not stop.is_set():
+                    await consumer.poll(timeout=30)
+
+            polling = asyncio.ensure_future(poller())
+            await asyncio.sleep(0.2)
+            with pytest.raises(ConcurrentModificationError):
+                await consumer.position(partition=TopicPartition(topic=topic, partition=0))
+            member = _Member(configs, topic)
+            # Delivered by the in-flight poll(timeout=30), well before it times out.
+            await asyncio.wait_for(revoked.wait(), 20)
+            stop.set()
+            await asyncio.wait_for(polling, DEADLINE)
+        finally:
+            if member is not None:
+                member.stop()
+            await consumer.close(option=CloseOptions.timeout(0))
+
+    asyncio.run(main())
+
+
+# ---------------------------------------------------------------------------
+# A listener's exception comes back as Java raises it (Critic 76 F3):
+# AsyncKafkaConsumer.invokeRebalanceCallbacks → maybeWrapAsKafkaException(e,
+# "User rebalance callback throws an error")
+# ---------------------------------------------------------------------------
+class _MyCommitFailed(CommitFailedError):
+    pass
+
+
+def _raising_listener(raised: BaseException) -> ConsumerRebalanceListener:
+    class Raising(ConsumerRebalanceListener):
+        def on_partitions_assigned(self, partitions: set[TopicPartition]) -> None:
+            if partitions:
+                raise raised
+
+    return Raising()
+
+
+def _poll_for_error(consumer: KafkaConsumer[Any, Any]) -> BaseException:
+    deadline = time.monotonic() + DEADLINE
+    while True:
+        assert time.monotonic() < deadline, "poll() never raised the listener's error"
+        try:
+            consumer.poll(timeout=0.5)
+        except Exception as exc:  # noqa: BLE001 - returned for the assertions
+            return exc
+
+
+def test_listener_value_error_is_wrapped_as_java_does(kafka_broker: Any) -> None:
+    topic = _topic(kafka_broker, [])
+    raised = ValueError("listener boom")
+    consumer: KafkaConsumer[bytes, bytes] = KafkaConsumer(configs=_configs(kafka_broker))
+    try:
+        consumer.subscribe(topics=[topic], callback=_raising_listener(raised))
+        error = _poll_for_error(consumer)
+        assert type(error) is KafkaError
+        assert str(error) == "User rebalance callback throws an error"
+        assert error.__cause__ is raised
+    finally:
+        consumer.close(option=CloseOptions.timeout(0))
+
+
+@pytest.mark.parametrize("raised", [
+    _MyCommitFailed(message="sub boom"),
+    TopicAuthorizationError(unauthorized_topics={"t1"}),
+], ids=["kafka-error-subclass", "payload-error"])
+def test_listener_kafka_error_is_raised_as_the_same_instance(kafka_broker: Any,
+                                                             raised: KafkaError) -> None:
+    topic = _topic(kafka_broker, [])
+    consumer: KafkaConsumer[bytes, bytes] = KafkaConsumer(configs=_configs(kafka_broker))
+    try:
+        consumer.subscribe(topics=[topic], callback=_raising_listener(raised))
+        error = _poll_for_error(consumer)
+        assert error is raised
+        if isinstance(raised, TopicAuthorizationError):
+            assert error.unauthorized_topics() == {"t1"}  # type: ignore[attr-defined]
+    finally:
+        consumer.close(option=CloseOptions.timeout(0))
+
+
+def test_async_listener_error_is_wrapped_as_java_does(kafka_broker: Any) -> None:
+    topic = _topic(kafka_broker, [])
+    raised = ValueError("listener boom")
+
+    class Raising(ConsumerRebalanceListener):
+        async def on_partitions_assigned(  # type: ignore[override]
+                self, partitions: set[TopicPartition]) -> None:
+            if partitions:
+                raise raised
+
+    async def main() -> None:
+        consumer: AsyncKafkaConsumer[bytes, bytes] = AsyncKafkaConsumer(
+            configs=_configs(kafka_broker))
+        try:
+            await consumer.subscribe(topics=[topic], callback=Raising())
+            deadline = time.monotonic() + DEADLINE
+            while True:
+                assert time.monotonic() < deadline, "poll() never raised the listener's error"
+                try:
+                    await consumer.poll(timeout=0.5)
+                except KafkaError as error:
+                    assert type(error) is KafkaError
+                    assert str(error) == "User rebalance callback throws an error"
+                    assert error.__cause__ is raised
+                    return
+        finally:
+            await consumer.close(option=CloseOptions.timeout(0))
+
+    asyncio.run(main())
+
+
+# ---------------------------------------------------------------------------
+# The commit callback of a failed commit gets offsets=None, as Java's
+# whenComplete on an exceptionally completed future (Critic 76 F4)
+# ---------------------------------------------------------------------------
+def test_commit_callback_of_a_failed_commit_gets_null_offsets(kafka_broker: Any) -> None:
+    consumer: KafkaConsumer[bytes, bytes] = KafkaConsumer(configs=_configs(kafka_broker))
+    missing = TopicPartition(topic=f"py-missing-{uuid.uuid4().hex[:12]}", partition=0)
+    seen: list[tuple[Any, Any]] = []
+    try:
+        consumer.commit_nowait(offsets={missing: OffsetAndMetadata(offset=5)},
+                               callback=lambda o, e: seen.append((o, e)))
+        deadline = time.monotonic() + DEADLINE
+        while not seen:
+            assert time.monotonic() < deadline, "the commit callback did not run"
+            try:
+                consumer.commit(offsets={})
+            except KafkaError:
+                pass
+            time.sleep(0.2)
+        offsets, error = seen[0]
+        assert offsets is None
+        assert isinstance(error, RetriableCommitFailedError)
     finally:
         consumer.close(option=CloseOptions.timeout(0))

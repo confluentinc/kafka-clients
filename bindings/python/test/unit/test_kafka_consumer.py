@@ -419,6 +419,92 @@ def test_close_from_another_thread_while_polling_fails_and_stays_open() -> None:
     consumer.close(option=CloseOptions.timeout(0))
 
 
+def _spy_close(monkeypatch: pytest.MonkeyPatch) -> list[Any]:
+    import _confluentkafka as lib  # type: ignore[import-not-found]
+
+    calls: list[Any] = []
+    original = lib.Consumer_close_with_option_async
+
+    def spy(*args: Any) -> Any:
+        calls.append(args)
+        return original(*args)
+
+    monkeypatch.setattr(lib, "Consumer_close_with_option_async", spy)
+    return calls
+
+
+def test_close_from_another_thread_fails_before_changing_anything(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    # Java's close(CloseOptions) calls acquire() before it changes any state: a
+    # close() from another thread while one is inside the consumer throws
+    # ConcurrentModificationException to the closer only, and the owning
+    # thread's calls go on (its own later calls, not a window of refusals).
+    calls = _spy_close(monkeypatch)
+    consumer = new_consumer()
+    consumer.assign(partitions=[TP0])
+    inside, outcome = threading.Event(), {}
+
+    def owner() -> None:
+        inside.set()
+        try:
+            consumer.poll(timeout=1.0)
+            outcome["calls"] = (consumer.assignment(), consumer.poll(timeout=0).is_empty())
+        except BaseException as exc:  # noqa: BLE001
+            outcome["error"] = exc
+
+    worker = threading.Thread(target=owner)
+    worker.start()
+    try:
+        assert inside.wait(WAIT)
+        deadline = time.monotonic() + WAIT
+        while not consumer._use_threads:
+            assert time.monotonic() < deadline
+            time.sleep(0.01)
+        for _ in range(20):
+            with pytest.raises(ConcurrentModificationError) as e:
+                consumer.close(option=CloseOptions.timeout(0))
+            assert str(e.value) == CONCURRENT
+        # The FFI close was never reached: nothing changed.
+        assert calls == []
+    finally:
+        worker.join(WAIT)
+    assert outcome == {"calls": ({TP0}, True)}
+    consumer.close(option=CloseOptions.timeout(0))
+    assert len(calls) == 1
+
+
+def test_async_close_from_another_thread_fails_before_changing_anything(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = _spy_close(monkeypatch)
+    polling, release = threading.Event(), threading.Event()
+    outcome: dict[str, Any] = {}
+
+    async def main(consumer: AsyncKafkaConsumer[bytes, bytes]) -> None:
+        await consumer.assign(partitions=[TP0])
+        task = asyncio.ensure_future(consumer.poll(timeout=1.0))
+        await asyncio.sleep(0.1)
+        polling.set()
+        await task
+        outcome["assignment"] = consumer.assignment()
+        await asyncio.get_running_loop().run_in_executor(None, release.wait, WAIT)
+        await consumer.close(option=CloseOptions.timeout(0))
+
+    consumer: AsyncKafkaConsumer[bytes, bytes] = AsyncKafkaConsumer(configs=configs())
+    worker = threading.Thread(target=asyncio.run, args=(main(consumer),))
+    worker.start()
+    try:
+        assert polling.wait(WAIT)
+        with pytest.raises(ConcurrentModificationError) as e:
+            asyncio.run(consumer.close(option=CloseOptions.timeout(0)))
+        assert str(e.value) == CONCURRENT
+        assert calls == []
+    finally:
+        release.set()
+        worker.join(WAIT)
+    assert outcome == {"assignment": {TP0}}
+    assert len(calls) == 1
+
+
 def test_close_races_calls_from_other_threads_without_touching_a_freed_handle() -> None:
     # Every native call is a counted use; close() frees the handle only once
     # none is left. Four threads hammer the consumer while it closes: each call
@@ -512,16 +598,17 @@ def test_a_listenerless_subscribe_releases_the_listener() -> None:
 # The commit callback runs on the caller's thread (C47)
 # ---------------------------------------------------------------------------
 def test_commit_callback_runs_on_the_thread_of_a_later_waiting_call() -> None:
-    # An empty commit completes at once (Java's completedFuture); its callback
-    # runs in the next call that executes the callbacks — here commit(), whose
-    # _async operation queues it, and this thread runs it while waiting.
+    # An empty commit completes at once (Java's completedFuture(null), so the
+    # callback's offsets are None); its callback runs in the next call that
+    # executes the callbacks — here commit(), whose _async operation queues it,
+    # and this thread runs it while waiting.
     with new_consumer() as consumer:
         consumer.assign(partitions=[TP0])
         seen: list[tuple[Any, Any, int]] = []
         consumer.commit_nowait(offsets={}, callback=lambda o, e: seen.append(
             (o, e, threading.get_ident())))
         consumer.commit(offsets={})
-        assert seen == [({}, None, threading.get_ident())]
+        assert seen == [(None, None, threading.get_ident())]
 
 
 def test_commit_callback_runs_inside_a_later_commit_nowait() -> None:

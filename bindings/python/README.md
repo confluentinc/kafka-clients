@@ -75,13 +75,19 @@ rebalance listener it runs); the others (`assignment()`, `subscription()`,
   `seek(partition=e.topic_partition(), offset=e.offset() + 1)` skips it.
 - `commit()` is Java's `commitSync` and waits; `commit_nowait(callback=cb)` is
   Java's `commitAsync`. `cb(offsets, exception)` is Java's
-  `OffsetCommitCallback`.
+  `OffsetCommitCallback`; `offsets` is `None` when the commit failed and for
+  an explicit empty `offsets`, as Java passes `null`.
 - The `ConsumerRebalanceListener` methods and the `commit_nowait()` callback run
   on the caller's thread, inside the call that delivers them (`poll()`,
-  `commit()`, `unsubscribe()`, `close()`, …), and the rebalance does not advance
-  until the listener returns. A listener may call back into its consumer
-  (`commit()`, `seek()`, `position()`, …). On `AsyncKafkaConsumer` a listener
-  method may be `async def`; it is awaited on the event loop.
+  `commit()`, `commit_nowait()`, `unsubscribe()`, `close()`, …), and the
+  rebalance does not advance until the listener returns. A listener may call
+  back into its consumer (`commit()`, `seek()`, `position()`, …); on
+  `AsyncKafkaConsumer` those calls block the event loop for their duration.
+  On `AsyncKafkaConsumer` a listener method may be `async def`; it is awaited
+  on the event loop. A listener's `KafkaError` is raised as it is from the
+  call that delivered it; any other exception is wrapped as
+  `KafkaError("User rebalance callback throws an error")` with it as the
+  cause.
 - `KafkaConsumer` is not thread-safe: a call while another thread is inside it
   raises `ConcurrentModificationError`. `wakeup()` is the exception: from any
   thread, it makes the waiting call raise `WakeupError`.

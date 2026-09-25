@@ -2800,9 +2800,12 @@ static PyObject* py_Consumer_enforce_rebalance(PyObject* self, PyObject* args) {
 //
 // The GIL must be released around the call: these are synchronous FFI entry
 // points (they block in block_on), and the callbacks of earlier commits run
-// inside this very call, on this thread (the package registers a
+// inside this very call, on the calling thread (the package registers a
 // pending-callback notify, which moves commit callbacks onto the caller's
-// thread): their trampoline re-takes the GIL.
+// thread): their trampoline re-takes the GIL. While a caller-thread listener is
+// registered, the package makes this call from commit_nowait()'s helper thread
+// (the core's commit may wait for a queued listener callback, which only the
+// waiting thread can run) and hands those commit callbacks to that thread.
 static PyObject* py_Consumer_commit_async(PyObject* self, PyObject* args) {
     unsigned long long h; PyObject* cb = Py_None;
     if (!PyArg_ParseTuple(args, "K|O", &h, &cb)) return NULL;

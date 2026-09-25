@@ -493,8 +493,11 @@ class ConsumerService(cpb_grpc.ConsumerServiceServicer):
             callback = make_logging_commit_callback(self._callback_log, request.consumer_id)
 
         def do(c):
-            # commit_nowait (Java's commitAsync) does not wait; the callback runs
-            # inside a later poll/commit/close, on that call's thread, as in Java.
+            # commit_nowait (Java's commitAsync) does not wait for the commit; the
+            # callback runs inside a later poll/commit/close, on that call's thread,
+            # as in Java. A listener callback the core delivers while the commit
+            # waits for its offsets runs here, on this thread (the binding keeps
+            # this thread draining the queue meanwhile).
             offsets = _proto_offsets_to_dict(request.offsets)
             if offsets:
                 c.commit_nowait(offsets=offsets,

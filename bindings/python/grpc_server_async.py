@@ -476,7 +476,10 @@ class ConsumerService(cpb_grpc.ConsumerServiceServicer):
 
     async def CommitAsync(self, request, context):
         # commit_nowait (Java's commitAsync) does not wait, so it is a plain def,
-        # called directly. The callback runs inside a later poll/commit/close.
+        # called directly. The callback runs inside a later poll/commit/close; a
+        # listener callback the core delivers while the commit waits for its
+        # offsets runs on this loop (an async def one in a task the next awaited
+        # call waits for).
         consumer = self._get(request.consumer_id)
         if consumer is None:
             return pb.StatusResponse(error=self._unknown_consumer(request.consumer_id))
