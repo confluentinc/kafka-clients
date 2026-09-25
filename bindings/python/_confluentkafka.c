@@ -3861,7 +3861,7 @@ static PyObject* py_MockConsumer_set_poll_error(PyObject* self, PyObject* args) 
     unsigned long long h; int code; const char* message;
     if (!PyArg_ParseTuple(args, "Kis", &h, &code, &message)) return NULL;
     kafka_common_Error_t* e = kafka_consumer_MockConsumer_set_poll_error(
-        (kafka_consumer_Consumer_t*)(uintptr_t)h, code, message);
+        (kafka_consumer_Consumer_t*)(uintptr_t)h, false, code, message);
     return PyLong_FromUnsignedLongLong((unsigned long long)(uintptr_t)e);
 }
 
@@ -3870,7 +3870,7 @@ static PyObject* py_MockConsumer_set_offsets_error(PyObject* self, PyObject* arg
     unsigned long long h; int code; const char* message;
     if (!PyArg_ParseTuple(args, "Kis", &h, &code, &message)) return NULL;
     kafka_common_Error_t* e = kafka_consumer_MockConsumer_set_offsets_error(
-        (kafka_consumer_Consumer_t*)(uintptr_t)h, code, message);
+        (kafka_consumer_Consumer_t*)(uintptr_t)h, false, code, message);
     return PyLong_FromUnsignedLongLong((unsigned long long)(uintptr_t)e);
 }
 
