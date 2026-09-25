@@ -57,6 +57,7 @@ from confluent_kafka.producer import (
     ProducerRecord,
     RecordMetadata,
 )
+from confluent_kafka.producer._base import raise_if_error
 
 TOPIC = "topic"
 RECORD = ProducerRecord(topic=TOPIC, key=b"k", value=b"v")
@@ -980,6 +981,126 @@ def test_send_offsets_to_transaction_checks_group_metadata_first() -> None:
         assert str(err2.value) == NO_TXN
     with KafkaProducer(configs=UNREACHABLE) as idempotent:
         idempotent.send_offsets_to_transaction(offsets={}, group_metadata=_group_metadata())
+
+
+# Configs on top of UNREACHABLE, and whether Java's producer built from them has
+# a transaction manager: KafkaProducer.configureTransactionState creates one iff
+# idempotence is on after ProducerConfig.postProcessAndValidateIdempotenceConfigs,
+# which turns the default off for retries=0 or acks other than all / -1.
+TRANSACTION_MANAGER_CASES: list[tuple[dict[str, Any], bool]] = [
+    ({}, True),
+    ({"enable.idempotence": True}, True),
+    ({"enable.idempotence": "false"}, False),
+    ({"enable.idempotence": None}, True),  # left out of the core's configs: the default
+    ({"acks": "all"}, True),
+    ({"acks": "-1"}, True),
+    ({"acks": "1"}, False),
+    ({"acks": "0"}, False),
+    ({"retries": 0}, False),
+    ({"retries": 3}, True),
+    ({"enable.idempotence": False, "acks": "all"}, False),
+    ({"enable.idempotence": False, "max.in.flight.requests.per.connection": 6}, False),
+    ({"transactional.id": "txn"}, True),
+]
+
+TRANSACTIONAL_OPERATIONS = ["init_transactions", "begin_transaction",
+                            "send_offsets_to_transaction", "commit_transaction",
+                            "abort_transaction"]
+
+
+def _transactional_arguments(operation: str) -> dict[str, Any]:
+    if operation == "send_offsets_to_transaction":
+        return {"offsets": {}, "group_metadata": _group_metadata()}
+    return {}
+
+
+def _unknown_member_group_metadata() -> ConsumerGroupMetadata:
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        return ConsumerGroupMetadata(group_id="group", generation_id=2, member_id="",
+                                     group_instance_id=None)
+
+
+UNKNOWN_MEMBER = ("Passed in group metadata GroupMetadata(groupId = group, generationId = 2, "
+                  "memberId = , groupInstanceId = ) has generationId > 0 but the member.id is "
+                  "unknown")
+
+
+@pytest.mark.parametrize(("extra", "manager"), TRANSACTION_MANAGER_CASES)
+def test_the_transaction_manager_follows_java_idempotence_post_processing(
+        extra: dict[str, Any], manager: bool) -> None:
+    # The binding reads it from the configs (for a closed producer, below); the
+    # core, asked directly, agrees, and the open producer reports the core's error.
+    p = KafkaProducer(configs={**UNREACHABLE, **extra})
+    try:
+        with pytest.raises(IllegalStateError) as core:
+            raise_if_error(_lib.Producer_begin_transaction(p._c_producer))  # noqa: SLF001
+        assert (str(core.value) != NO_TXN) is manager
+        with pytest.raises(IllegalStateError) as err:
+            p.begin_transaction()
+        assert str(err.value) == str(core.value)
+    finally:
+        p.close(timeout=0)
+
+
+@pytest.mark.parametrize("operation", TRANSACTIONAL_OPERATIONS)
+@pytest.mark.parametrize(("extra", "manager"), TRANSACTION_MANAGER_CASES)
+def test_a_closed_producer_checks_the_transaction_manager_first(
+        operation: str, extra: dict[str, Any], manager: bool) -> None:
+    # Critic 75 N3: KafkaProducer's transactional methods call
+    # throwIfNoTransactionManager() before throwIfProducerClosed()
+    # (KafkaProducer.java:661-662, 687-688, 746-747, 791-792, 825-826).
+    p = KafkaProducer(configs={**UNREACHABLE, **extra})
+    p.close(timeout=0)
+    with pytest.raises(IllegalStateError) as err:
+        getattr(p, operation)(**_transactional_arguments(operation))
+    assert str(err.value) == (CLOSED if manager else NO_TXN)
+
+
+@pytest.mark.parametrize("operation", TRANSACTIONAL_OPERATIONS)
+@pytest.mark.parametrize(("extra", "manager"), TRANSACTION_MANAGER_CASES)
+async def test_a_closed_async_producer_checks_the_transaction_manager_first(
+        operation: str, extra: dict[str, Any], manager: bool) -> None:
+    p = AsyncKafkaProducer(configs={**UNREACHABLE, **extra})
+    await p.close(timeout=0)
+    with pytest.raises(IllegalStateError) as err:
+        result = getattr(p, operation)(**_transactional_arguments(operation))
+        if inspect.isawaitable(result):
+            await result
+    assert str(err.value) == (CLOSED if manager else NO_TXN)
+
+
+@pytest.mark.parametrize("closed", [False, True])
+@pytest.mark.parametrize(("extra", "manager"), TRANSACTION_MANAGER_CASES)
+def test_send_offsets_to_transaction_checks_the_member_id_first(
+        closed: bool, extra: dict[str, Any], manager: bool) -> None:
+    # Java's throwIfInvalidGroupMetadata comes before the transaction manager
+    # and closed checks (KafkaProducer.java:745-747), on a closed producer too.
+    p = KafkaProducer(configs={**UNREACHABLE, **extra})
+    try:
+        if closed:
+            p.close(timeout=0)
+        with pytest.raises(IllegalArgumentError) as err:
+            p.send_offsets_to_transaction(offsets={},
+                                          group_metadata=_unknown_member_group_metadata())
+        assert str(err.value) == UNKNOWN_MEMBER
+    finally:
+        p.close(timeout=0)
+
+
+@pytest.mark.parametrize("closed", [False, True])
+async def test_async_send_offsets_to_transaction_checks_the_member_id_first(
+        closed: bool) -> None:
+    p = AsyncKafkaProducer(configs={**UNREACHABLE, "enable.idempotence": False})
+    try:
+        if closed:
+            await p.close(timeout=0)
+        with pytest.raises(IllegalArgumentError) as err:
+            await p.send_offsets_to_transaction(
+                offsets={}, group_metadata=_unknown_member_group_metadata())
+        assert str(err.value) == UNKNOWN_MEMBER
+    finally:
+        await p.close(timeout=0)
 
 
 # ===========================================================================
