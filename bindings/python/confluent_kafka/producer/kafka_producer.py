@@ -45,10 +45,16 @@ _KEY_SERIALIZER_KEY = "key.serializer"
 _VALUE_SERIALIZER_KEY = "value.serializer"
 
 
-def _prepare_config(configs: dict[str, Any]) -> tuple[RecordingConfigs, dict[str, str]]:
+def _prepare_config(configs: dict[str, Any], key_serializer: object,
+                    value_serializer: object) -> tuple[RecordingConfigs, dict[str, str]]:
     """Java's ``ProducerConfig`` parsing of ``configs``: the user's configs
-    (for the serde config route) and the string map the core parses."""
-    return prepare(configs, client="producer")
+    (for the serde config route) and the string map the core parses. A given
+    serializer argument replaces its config key, which is then not parsed
+    (``ProducerConfig.appendSerializerToConfig``)."""
+    given = [key for key, argument in ((_KEY_SERIALIZER_KEY, key_serializer),
+                                       (_VALUE_SERIALIZER_KEY, value_serializer))
+             if argument is not None]
+    return prepare(configs, client="producer", given_serdes=given)
 
 
 def _resolve_serializers(
@@ -81,7 +87,7 @@ class KafkaProducer(Producer[K, V]):
                  value_serializer: Serializer[Any] = bytes_serializer(),
                  partitioner: object | None = None) -> None:
         Producer.__init__(self)
-        originals, native = _prepare_config(configs)
+        originals, native = _prepare_config(configs, key_serializer, value_serializer)
         self._key_serializer, self._value_serializer = _resolve_serializers(
             originals, key_serializer, value_serializer)
         _reject_partitioner(partitioner)
@@ -102,7 +108,7 @@ class AsyncKafkaProducer(AsyncProducer[K, V]):
                  value_serializer: Serializer[Any] = bytes_serializer(),
                  partitioner: object | None = None) -> None:
         AsyncProducer.__init__(self)
-        originals, native = _prepare_config(configs)
+        originals, native = _prepare_config(configs, key_serializer, value_serializer)
         self._key_serializer, self._value_serializer = _resolve_serializers(
             originals, key_serializer, value_serializer)
         _reject_partitioner(partitioner)

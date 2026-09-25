@@ -49,8 +49,13 @@ def resolve_consumer_construction(
     empty ``group.id``) rather than a bare ``RuntimeError``.
     """
     # Java's ConsumerConfig parsing: coerced values, the serde keys left to
-    # the binding, the unused keys logged once the serdes are configured.
-    originals, native_config = prepare(config, client="consumer")
+    # the binding, the unused keys logged once the serdes are configured. A
+    # given deserializer argument replaces its config key, which is then not
+    # parsed (ConsumerConfig.appendDeserializerToConfig).
+    given = [key for key, argument in ((_KEY_DESERIALIZER_KEY, key_deserializer),
+                                       (_VALUE_DESERIALIZER_KEY, value_deserializer))
+             if argument is not None]
+    originals, native_config = prepare(config, client="consumer", given_serdes=given)
     key_deser = resolve_serde(
         key_deserializer, originals, _KEY_DESERIALIZER_KEY,
         is_key=True, default=bytes_deserializer(),
