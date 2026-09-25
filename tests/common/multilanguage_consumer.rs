@@ -790,7 +790,7 @@ fn consumer_record_from_proto(r: proto::ConsumerRecord) -> ConsumerRecord<Vec<u8
     ConsumerRecord::with_options(options)
 }
 
-/// Records bucketed by topic-partition, in the shape `ConsumerRecords::new` takes.
+/// Records bucketed by topic-partition, in the shape `ConsumerRecords::with_next_offsets` takes.
 type RecordsByPartition = IndexMap<TopicPartition, Vec<ConsumerRecord<Vec<u8>, Vec<u8>>>>;
 
 fn consumer_records_from_proto(list: proto::ConsumerRecordList) -> ConsumerRecords<Vec<u8>, Vec<u8>> {
