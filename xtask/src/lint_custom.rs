@@ -56,6 +56,7 @@ fn rules() -> Vec<Box<dyn Rule>> {
         Box::new(NoPublicField),
         Box::new(JavaName::new()),
         Box::new(NoDeprecatedTranslation::new()),
+        Box::new(PublicAudience::new()),
         // Disabled until every public struct is confirmed to need being public:
         // making traits dyn-compatible is wasted on types that should become
         // `pub(crate)`. The trait changes it requires are parked on branch
@@ -234,6 +235,14 @@ impl Crate {
     /// `pub use` chain from one, e.g.
     /// `mod producer_record; pub use producer_record::ProducerRecord;`.
     fn public_types(&self) -> BTreeSet<(ModPath, String)> {
+        self.public_names(|item| pub_type_ident(item).map(ToString::to_string))
+    }
+
+    /// The names another crate can reach, as (defining module, name), where
+    /// `def` gives the name an item defines `pub` (`None` for an item that
+    /// defines none): defined in a reachable module, or re-exported by a
+    /// `pub use` chain from one.
+    fn public_names(&self, def: impl Fn(&syn::Item) -> Option<String>) -> BTreeSet<(ModPath, String)> {
         // The names each module exposes (`pub` items and `pub use`s), each
         // resolved to the (module, name) that may define it.
         let mut public: BTreeSet<(ModPath, String)> = BTreeSet::new();
@@ -244,8 +253,8 @@ impl Crate {
             if !self.is_reachable(path) {
                 continue;
             }
-            for ident in module.items.iter().filter_map(pub_type_ident) {
-                work.push((path.clone(), ident.to_string()));
+            for name in module.items.iter().filter_map(&def) {
+                work.push((path.clone(), name));
             }
             for (target, name) in self.pub_uses(path) {
                 match name {
@@ -262,8 +271,8 @@ impl Crate {
                     continue;
                 }
                 if let Some(m) = self.modules.get(&module) {
-                    for ident in m.items.iter().filter_map(pub_type_ident) {
-                        work.push((module.clone(), ident.to_string()));
+                    for name in m.items.iter().filter_map(&def) {
+                        work.push((module.clone(), name));
                     }
                 }
                 for (target, name) in self.pub_uses(&module) {
@@ -292,7 +301,7 @@ impl Crate {
             .filter(|(module, name)| {
                 self.modules
                     .get(module)
-                    .is_some_and(|m| m.items.iter().filter_map(pub_type_ident).any(|ident| ident == name))
+                    .is_some_and(|m| m.items.iter().filter_map(&def).any(|n| n == *name))
             })
             .collect()
     }
@@ -561,6 +570,10 @@ struct JavaName {
     index: JavaIndex,
     /// Every Rust module a Java package maps to, and each of its ancestors.
     package_modules: BTreeSet<Vec<String>>,
+    /// [`PUBLIC_AUDIENCE_ALLOWLIST`]: a re-export of an allow-listed item from
+    /// another package is allowed (`common::header` lifts
+    /// `internals::{RecordHeader, RecordHeaders}`).
+    allow: AllowList,
 }
 
 impl JavaName {
@@ -572,7 +585,8 @@ impl JavaName {
                 package_modules.insert(class.module[..len].to_vec());
             }
         }
-        JavaName { index, package_modules }
+        let (allow, _) = AllowList::load(Path::new(PUBLIC_AUDIENCE_ALLOWLIST));
+        JavaName { index, package_modules, allow }
     }
 
     /// The Rust module of `src/` file `path`: its directory, less the grouping
@@ -712,20 +726,6 @@ fn module_path(module: &[String]) -> String {
         format!("crate::{}", module.join("::"))
     }
 }
-
-/// Re-exports the re-export check allows, as `(module, lifted path)`.
-///
-/// `common.header.internals.{RecordHeader, RecordHeaders}` are the concrete
-/// types behind Java's public `Header` / `Headers` interfaces, and the Rust
-/// record APIs (`ProducerRecord`, `ConsumerRecord`,
-/// `RecordDeserializationError`) name them in their signatures to keep
-/// headers zero-copy and statically dispatched. `internals` stays
-/// `pub(crate)`, so `common::header` lifts exactly these two to make them
-/// reachable.
-const ALLOWED_REEXPORTS: &[(&str, &str)] = &[
-    ("crate::common::header", "internals::RecordHeader"),
-    ("crate::common::header", "internals::RecordHeaders"),
-];
 
 /// Each path a `use` tree imports, skipping a leading `self`:
 /// `use a::{b, c as d}` → `a::b`, `a::c`. Globs are skipped.
@@ -934,7 +934,8 @@ impl JavaName {
 
     /// The re-export check: each `pub use` of `items`, in module `module`, lifts
     /// from a class file or grouping folder of that same module — never from
-    /// another package. Macros the file defines may be re-exported too.
+    /// another package. Macros the file defines may be re-exported too, and so
+    /// may an item of [`PUBLIC_AUDIENCE_ALLOWLIST`] (by its lifted Rust path).
     fn check_reexports(&self, file: &str, module: &[String], items: &[syn::Item], findings: &mut Vec<String>) -> usize {
         let mut children = BTreeSet::new();
         let mut macros = BTreeSet::new();
@@ -966,8 +967,7 @@ impl JavaName {
                 let lifted = path.join("::");
                 let mut child = module.to_vec();
                 child.push(name.clone());
-                let foreign = if macros.contains(name) || ALLOWED_REEXPORTS.contains(&(into.as_str(), lifted.as_str()))
-                {
+                let foreign = if macros.contains(name) || self.allow.allows_quietly(&[&format!("{into}::{lifted}")]) {
                     None
                 } else if !children.contains(name) {
                     Some(format!("`{name}`, outside this module"))
@@ -1248,6 +1248,537 @@ impl Rule for NoDeprecatedTranslation {
 }
 
 // ---------------------------------------------------------------------------
+// Rule: check-public-audience
+// ---------------------------------------------------------------------------
+
+/// The types annotated `@InterfaceAudience.Public` at [`java::AUDIENCE_REF`],
+/// one fully-qualified top-level name per line.
+const PUBLIC_AUDIENCE_LIST: &str = "design/current/interface-audience-public-4.4.txt";
+
+/// The public items [`PublicAudience`] lets through although no Public Java
+/// class backs them, one per line: `<key>  # <reason>`.
+const PUBLIC_AUDIENCE_ALLOWLIST: &str = "xtask/public-audience-allowlist.txt";
+
+/// Where the C header's `[export] include` list lives.
+const CBINDGEN_TOML: &str = "cbindgen.toml";
+
+/// One line of [`PUBLIC_AUDIENCE_ALLOWLIST`].
+struct AllowEntry {
+    /// A Java class (`org.apache.kafka.clients.admin.MockAdminClient`), a Rust
+    /// path (`crate::common::Error`) or a C symbol prefix
+    /// (`kafka_consumer_ConsumerHandle`); `*` matches any run of characters.
+    key: String,
+    line: usize,
+    /// Whether the entry let through an item that would otherwise be a finding.
+    used: std::cell::Cell<bool>,
+}
+
+/// The entries of [`PUBLIC_AUDIENCE_ALLOWLIST`].
+#[derive(Default)]
+struct AllowList {
+    entries: Vec<AllowEntry>,
+}
+
+impl AllowList {
+    /// Reads the list at `path` (empty if there is none), with a finding for
+    /// each malformed line.
+    fn load(path: &Path) -> (Self, Vec<String>) {
+        Self::parse(&path.display().to_string(), &fs::read_to_string(path).unwrap_or_default())
+    }
+
+    /// Parses `text`: a line is `<key>  # <reason>`, and the reason is
+    /// required; blank lines and lines starting with `#` are comments.
+    fn parse(file: &str, text: &str) -> (Self, Vec<String>) {
+        let mut list = AllowList::default();
+        let mut errors = Vec::new();
+        for (i, raw) in text.lines().enumerate() {
+            let line = raw.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let (key, reason) = line.split_once('#').map_or((line, ""), |(k, r)| (k.trim(), r.trim()));
+            if key.is_empty() || key.contains(char::is_whitespace) || reason.is_empty() {
+                errors.push(format!("{file}:{}: expected `<key>  # <reason>`, found `{line}`", i + 1));
+                continue;
+            }
+            list.entries
+                .push(AllowEntry { key: key.to_string(), line: i + 1, used: Default::default() });
+        }
+        (list, errors)
+    }
+
+    /// Whether an entry matches one of `keys`; the entry is then recorded as used.
+    fn allows(&self, keys: &[&str]) -> bool {
+        let hit = self.entries.iter().find(|e| keys.iter().any(|k| glob_match(&e.key, k)));
+        hit.inspect(|e| e.used.set(true)).is_some()
+    }
+
+    /// [`AllowList::allows`], without recording the entry as used.
+    fn allows_quietly(&self, keys: &[&str]) -> bool {
+        self.entries.iter().any(|e| keys.iter().any(|k| glob_match(&e.key, k)))
+    }
+}
+
+/// Whether `text` matches `pattern`, in which `*` matches any run of
+/// characters (`::` included) and every other character matches itself.
+fn glob_match(pattern: &str, text: &str) -> bool {
+    let Some((head, rest)) = pattern.split_once('*') else {
+        return pattern == text;
+    };
+    let Some(mut text) = text.strip_prefix(head) else {
+        return false;
+    };
+    let parts: Vec<&str> = rest.split('*').collect();
+    let (last, middle) = parts.split_last().expect("split yields at least one part");
+    for part in middle {
+        match text.find(part) {
+            Some(at) => text = &text[at + part.len()..],
+            None => return false,
+        }
+    }
+    text.len() >= last.len() && text.ends_with(last)
+}
+
+/// Checks that the crate makes public — in Rust and in C — only what Java's
+/// public API holds (CLAUDE.md §2, §4). A public item translating a Java class
+/// must pass all three rules, which are conjunctive:
+///   1. its package contains no `internal` segment;
+///   2. its package's `package-info.java` does not say "This package is not a
+///      supported Kafka API" at [`java::AUDIENCE_REF`];
+///   3. its class is annotated `@InterfaceAudience.Public` at
+///      [`java::AUDIENCE_REF`] ([`PUBLIC_AUDIENCE_LIST`]); a nested class
+///      takes the audience of the top-level class declaring it.
+///
+/// A public item without a Java class (a Rust-only helper, a JDK type) must be
+/// listed in [`PUBLIC_AUDIENCE_ALLOWLIST`] with the reason it is public, as
+/// must a Java class that is public on purpose despite the rules (a test-jar
+/// helper). An entry that no longer lets anything through is reported, so the
+/// list cannot rot.
+///
+/// **Rust:** every `pub` struct, enum, union, trait, type alias, fn, const and
+/// static another crate can name — defined in a reachable module or
+/// re-exported by a `pub use` chain from one — and the error types of the
+/// error macros, found by their Java marker (see [`crate::java`]). The C FFI
+/// module is left to the C half. The module wrapping the generated protocol
+/// code (a single `include!`, which the parser cannot see into) must not be
+/// `pub` nor re-exported by `pub use`: the protocol messages are not public
+/// API.
+///
+/// **C:** every `#[no_mangle]` function and every `kafka_*_t` type of the FFI
+/// module, and every `[export] include` of `cbindgen.toml`. A name
+/// `kafka_<pkg>_<Class>_…` names Java class `<Class>` of package
+/// `clients.<pkg>`, else `<pkg>` (`Error` → `Exception` for an error, with or
+/// without the package prefix of CLAUDE.md §2); a class not public by the rules
+/// cannot have C bindings, and a name that resolves to no class is an error.
+///
+/// Leaks through signatures (a public fn taking a `pub(crate)` type) are not
+/// checked here: rustc's `private_interfaces` / `private_bounds` lints catch
+/// them under `cargo xtask lint`.
+struct PublicAudience {
+    index: JavaIndex,
+    /// [`PUBLIC_AUDIENCE_LIST`].
+    public: BTreeSet<String>,
+    /// The dotted packages (below `org.apache.kafka`) carrying the
+    /// unsupported-API disclaimer.
+    unsupported: BTreeSet<String>,
+    allow: AllowList,
+    /// The malformed lines of the allow-list.
+    allow_errors: Vec<String>,
+    /// Where the `[export] include` list is read from.
+    cbindgen: PathBuf,
+    /// Where the disclaimers were read from, for the skip reason.
+    unsupported_source: String,
+}
+
+impl PublicAudience {
+    fn new() -> Self {
+        let index = JavaIndex::load();
+        let public = parse_public_list(&fs::read_to_string(PUBLIC_AUDIENCE_LIST).unwrap_or_default());
+        let (unsupported, unsupported_source) = match java::unsupported_packages_at_ref(java::AUDIENCE_REF) {
+            Some(packages) => (packages, format!("`kafka` at {}", java::AUDIENCE_REF)),
+            // Without the ref (a shallow clone), the working tree's disclaimers.
+            None => (java::unsupported_packages_in_tree(), format!("`{}`", java::JAVA_MAIN_ROOT)),
+        };
+        let (allow, allow_errors) = AllowList::load(Path::new(PUBLIC_AUDIENCE_ALLOWLIST));
+        PublicAudience {
+            index,
+            public,
+            unsupported,
+            allow,
+            allow_errors,
+            cbindgen: PathBuf::from(CBINDGEN_TOML),
+            unsupported_source,
+        }
+    }
+
+    /// Why top-level Java class `fqn` (`org.apache.kafka.<package>.<Class>`)
+    /// may not be public, one reason per rule it fails; empty when it may.
+    fn audience_failures(&self, fqn: &str) -> Vec<String> {
+        let path = fqn.strip_prefix(java::MARKER_PREFIX).unwrap_or(fqn);
+        let (package, _) = path.rsplit_once('.').unwrap_or(("", path));
+        let mut reasons = Vec::new();
+        if package.split('.').any(|seg| seg.contains("internal")) {
+            reasons.push(format!("its package `{package}` is internal"));
+        }
+        if self.unsupported.contains(package) {
+            reasons.push(format!("its package `{package}` is not a supported Kafka API"));
+        }
+        if !self.public.contains(fqn) {
+            reasons.push(format!("it is not `@InterfaceAudience.Public` in Kafka {}", java::AUDIENCE_REF));
+        }
+        reasons
+    }
+
+    /// The Rust half: public items and the generated module.
+    fn check_rust(&self, krate: &Crate, findings: &mut Vec<String>) -> usize {
+        let mut checked = 0;
+        for (module, name) in krate.public_names(|item| pub_def(item).map(|(name, _)| name)) {
+            if module.first().is_some_and(|m| m == "ffi") {
+                continue;
+            }
+            let m = &krate.modules[&module];
+            let file = m.file.display();
+            // Every item of the name (a type and a fn may share it through a macro).
+            for (_, attrs) in m.items.iter().filter_map(pub_def).filter(|(n, _)| *n == name) {
+                checked += 1;
+                let full = format!("{}::{name}", module_path(&module));
+                // The path §2 imports it by: its file module dropped.
+                let canonical = match module.split_last() {
+                    Some((file_mod, parent)) if *file_mod == java::snake_case(&name) => {
+                        format!("{}::{name}", module_path(parent))
+                    },
+                    _ => full.clone(),
+                };
+                let classes: BTreeSet<String> = java_markers(&attrs)
+                    .iter()
+                    .filter_map(|marker| marker.split('#').next())
+                    .map(str::to_string)
+                    .collect();
+                let tops: Vec<String> = classes.iter().map(|c| top_level_class(c).to_string()).collect();
+                let mut keys: Vec<&str> = vec![&full, &canonical];
+                keys.extend(classes.iter().map(String::as_str));
+                keys.extend(tops.iter().map(String::as_str));
+                if classes.is_empty() {
+                    if !self.allow.allows(&keys) {
+                        findings.push(format!(
+                            "{file}: `{canonical}` is public but carries no Java marker; mark the class it translates, or \
+                             add it to {PUBLIC_AUDIENCE_ALLOWLIST} with the reason it is public"
+                        ));
+                    }
+                    continue;
+                }
+                let failures: Vec<String> = tops
+                    .iter()
+                    .filter_map(|top| {
+                        let reasons = self.audience_failures(top);
+                        (!reasons.is_empty()).then(|| format!("`{top}`: {}", reasons.join(", ")))
+                    })
+                    .collect();
+                if !failures.is_empty() && !self.allow.allows(&keys) {
+                    findings.push(format!(
+                        "{file}: `{canonical}` is public but translates {}",
+                        failures.join("; ")
+                    ));
+                }
+            }
+        }
+        checked + check_generated_module(krate, findings)
+    }
+
+    /// The Java class C symbol prefix `kafka_<pkg>_<Class>` names, as its
+    /// (possibly nested) marker and its top-level marker; `None` if it names
+    /// none.
+    fn resolve_ffi_class(&self, pkg: &[&str], class: &str) -> Option<(String, String)> {
+        let dotted = pkg.join(".");
+        let packages = [format!("clients.{dotted}"), dotted];
+        let mut names = vec![class.to_string()];
+        if let Some(base) = class.strip_suffix("Error") {
+            names.push(format!("{base}Exception"));
+        }
+        let top = |c: &java::JavaClass| format!("{}{}.{}", java::MARKER_PREFIX, c.package, c.path[0]);
+        for package in &packages {
+            for name in &names {
+                if let Some(c) = self.index.classes.iter().find(|c| c.package == *package && c.name() == name) {
+                    return Some((c.marker(), top(c)));
+                }
+                let fqn = format!("{}{package}.{name}", java::MARKER_PREFIX);
+                if self.public.contains(&fqn) {
+                    return Some((fqn.clone(), fqn));
+                }
+            }
+        }
+        // An error payload hangs off the `kafka_common_Error_t` handle
+        // (`kafka_common_ResourceNotFoundError_t`, CLAUDE.md §4) under its Rust
+        // name, whatever the exception's package: `common.errors`, or another
+        // package whose prefix the name carries (`ConsumerOffsetOutOfRangeError`,
+        // §2). Those names are unique by construction.
+        if class.ends_with("Error") {
+            let error = self
+                .index
+                .classes
+                .iter()
+                .find(|c| !c.is_test && c.name().ends_with("Exception") && c.rust_name() == class);
+            if let Some(c) = error {
+                return Some((c.marker(), top(c)));
+            }
+        }
+        None
+    }
+
+    /// Where Java declares a class named as C `class` when the C package does
+    /// not match, to say so in the finding (`; Java declares it as …`).
+    fn misplaced_ffi_class(&self, class: &str) -> String {
+        let exception = class.strip_suffix("Error").map(|b| format!("{b}Exception"));
+        let found: BTreeSet<String> = self
+            .index
+            .classes
+            .iter()
+            .filter(|c| c.name() == class || Some(c.name()) == exception.as_deref() || c.rust_name() == class)
+            .map(|c| format!("`{}`", c.marker()))
+            .collect();
+        if found.is_empty() {
+            String::new()
+        } else {
+            let names: Vec<String> = found.into_iter().collect();
+            format!("; Java declares it as {}", names.join(", "))
+        }
+    }
+
+    /// The C half: the FFI symbols and the header's include list, reported once
+    /// per `kafka_<pkg>_<Class>` prefix.
+    fn check_c(&self, krate: &Crate, findings: &mut Vec<String>) -> usize {
+        // symbol -> file it is declared in.
+        let mut symbols: BTreeMap<String, String> = BTreeMap::new();
+        for (path, module) in &krate.modules {
+            if path.first().is_none_or(|m| m != "ffi") {
+                continue;
+            }
+            for item in &module.items {
+                let name = match item {
+                    syn::Item::Fn(f) if is_no_mangle(&f.attrs) => f.sig.ident.to_string(),
+                    syn::Item::Struct(s) => s.ident.to_string(),
+                    syn::Item::Enum(e) => e.ident.to_string(),
+                    syn::Item::Type(t) => t.ident.to_string(),
+                    syn::Item::Union(u) => u.ident.to_string(),
+                    _ => continue,
+                };
+                if matches!(item, syn::Item::Fn(_)) || (name.starts_with("kafka_") && name.ends_with("_t")) {
+                    symbols.entry(name).or_insert_with(|| module.file.display().to_string());
+                }
+            }
+        }
+        let cbindgen = self.cbindgen.display().to_string();
+        for name in cbindgen_includes(&fs::read_to_string(&self.cbindgen).unwrap_or_default()) {
+            symbols.entry(name).or_insert_with(|| cbindgen.clone());
+        }
+
+        // prefix -> (file, symbol count, finding reason)
+        let mut by_prefix: BTreeMap<String, (String, usize, Option<String>)> = BTreeMap::new();
+        for (symbol, file) in &symbols {
+            let parsed = ffi_class(symbol);
+            let prefix = parsed
+                .as_ref()
+                .map_or_else(|| symbol.clone(), |(pkg, class)| format!("kafka_{}_{class}", pkg.join("_")));
+            if let Some(entry) = by_prefix.get_mut(&prefix) {
+                entry.1 += 1;
+                continue;
+            }
+            let reason = match parsed.as_ref().and_then(|(pkg, class)| self.resolve_ffi_class(pkg, class)) {
+                None if self.allow.allows(&[symbol, &prefix]) => None,
+                None => Some(format!(
+                    "names no Java class (`kafka_<pkg>_<Class>_…`, with `<pkg>` the Java package without \
+                     `clients`){}",
+                    parsed
+                        .as_ref()
+                        .map_or_else(String::new, |(_, class)| self.misplaced_ffi_class(class))
+                )),
+                Some((class, top)) => {
+                    let failures = self.audience_failures(&top);
+                    if failures.is_empty() || self.allow.allows(&[symbol, &prefix, &class, &top]) {
+                        None
+                    } else {
+                        Some(format!("binds `{class}`, which may not be public: {}", failures.join(", ")))
+                    }
+                },
+            };
+            by_prefix.insert(prefix, (file.clone(), 1, reason));
+        }
+        for (prefix, (file, count, reason)) in &by_prefix {
+            if let Some(reason) = reason {
+                findings.push(format!("{file}: C `{prefix}` ({count} symbol(s)) {reason}"));
+            }
+        }
+        symbols.len()
+    }
+}
+
+/// The name a public item defines, and its attributes: a `pub` struct, enum,
+/// union, trait, type alias, fn, const or static, or an error macro's type
+/// (always `pub`).
+fn pub_def(item: &syn::Item) -> Option<(String, Vec<syn::Attribute>)> {
+    let is_pub = |vis: &syn::Visibility| matches!(vis, syn::Visibility::Public(_));
+    let (ident, attrs) = match item {
+        syn::Item::Struct(s) if is_pub(&s.vis) => (&s.ident, &s.attrs),
+        syn::Item::Enum(e) if is_pub(&e.vis) => (&e.ident, &e.attrs),
+        syn::Item::Union(u) if is_pub(&u.vis) => (&u.ident, &u.attrs),
+        syn::Item::Trait(t) if is_pub(&t.vis) => (&t.ident, &t.attrs),
+        syn::Item::Type(t) if is_pub(&t.vis) => (&t.ident, &t.attrs),
+        syn::Item::Fn(f) if is_pub(&f.vis) => (&f.sig.ident, &f.attrs),
+        syn::Item::Const(c) if is_pub(&c.vis) => (&c.ident, &c.attrs),
+        syn::Item::Static(s) if is_pub(&s.vis) => (&s.ident, &s.attrs),
+        syn::Item::Macro(m) => return error_macro_type_def(m).map(|def| (def.name, def.attrs)),
+        _ => return None,
+    };
+    Some((ident.to_string(), attrs.clone()))
+}
+
+/// The top-level class of a class marker: `…Outer$Nested` → `…Outer`.
+fn top_level_class(marker: &str) -> &str {
+    marker.split('$').next().unwrap_or(marker)
+}
+
+/// The generated-code check: a crate-root module wrapping an `include!` must
+/// not be `pub`, nor be re-exported by a `pub use`.
+fn check_generated_module(krate: &Crate, findings: &mut Vec<String>) -> usize {
+    let Some(root) = krate.modules.get(&Vec::new()) else {
+        return 0;
+    };
+    let file = root.file.display();
+    let mut generated = BTreeSet::new();
+    for item in &root.items {
+        let syn::Item::Mod(m) = item else { continue };
+        let Some((_, inner)) = &m.content else { continue };
+        let includes = inner
+            .iter()
+            .any(|i| matches!(i, syn::Item::Macro(mac) if mac.mac.path.is_ident("include")));
+        if !includes {
+            continue;
+        }
+        generated.insert(m.ident.to_string());
+        if matches!(m.vis, syn::Visibility::Public(_)) {
+            findings.push(format!(
+                "{file}: `pub mod {}` makes the generated protocol code public; make it `pub(crate)`",
+                m.ident
+            ));
+        }
+    }
+    for item in &root.items {
+        let syn::Item::Use(u) = item else { continue };
+        if !matches!(u.vis, syn::Visibility::Public(_)) {
+            continue;
+        }
+        let mut leaves = Vec::new();
+        flatten_use(&u.tree, &mut Vec::new(), &mut leaves);
+        for (segments, _) in leaves {
+            let first = segments.iter().find(|s| *s != "self" && *s != "crate");
+            if let Some(module) = first.filter(|s| generated.contains(*s)) {
+                findings.push(format!(
+                    "{file}: a `pub use` re-exports the generated module `{module}`; make it `pub(crate) use`"
+                ));
+            }
+        }
+    }
+    generated.len()
+}
+
+fn is_no_mangle(attrs: &[syn::Attribute]) -> bool {
+    attrs.iter().any(|a| a.meta.to_token_stream().to_string().contains("no_mangle"))
+}
+
+/// A C symbol `kafka_<pkg>_<Class>_…` as (package segments, class); `None`
+/// when it has no lower-case package segment followed by a PascalCase class.
+fn ffi_class(symbol: &str) -> Option<(Vec<&str>, &str)> {
+    let rest = symbol.strip_prefix("kafka_")?;
+    let mut pkg = Vec::new();
+    for seg in rest.split('_') {
+        if seg.starts_with(|c: char| c.is_ascii_uppercase()) {
+            return (!pkg.is_empty()).then_some((pkg, seg));
+        }
+        if seg.is_empty() || !seg.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()) {
+            return None;
+        }
+        pkg.push(seg);
+    }
+    None
+}
+
+/// The quoted names of `cbindgen.toml`'s `[export] include = [..]`.
+fn cbindgen_includes(toml: &str) -> Vec<String> {
+    let mut in_export = false;
+    let mut collecting = false;
+    let mut list = String::new();
+    for line in toml.lines() {
+        let trimmed = line.trim();
+        if !collecting && trimmed.starts_with('[') {
+            in_export = trimmed == "[export]";
+            continue;
+        }
+        if in_export && !collecting && trimmed.starts_with("include") {
+            collecting = true;
+        }
+        if collecting {
+            list.push_str(trimmed.split_once('#').map_or(trimmed, |(code, _)| code));
+            if trimmed.contains(']') {
+                break;
+            }
+        }
+    }
+    list.split('"').skip(1).step_by(2).map(str::to_string).collect()
+}
+
+/// The fully-qualified names of the Public list.
+fn parse_public_list(text: &str) -> BTreeSet<String> {
+    text.lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .map(str::to_string)
+        .collect()
+}
+
+impl Rule for PublicAudience {
+    fn name(&self) -> &'static str {
+        "check-public-audience"
+    }
+
+    fn skip_reason(&self) -> Option<String> {
+        if self.index.is_empty() {
+            return Some(format!(
+                "no Java sources at `{}` (run `git submodule update --init kafka`)",
+                java::JAVA_MAIN_ROOT
+            ));
+        }
+        if self.public.is_empty() {
+            return Some(format!("no Public list at `{PUBLIC_AUDIENCE_LIST}`"));
+        }
+        self.unsupported
+            .is_empty()
+            .then(|| format!("no unsupported-API disclaimers found in {}", self.unsupported_source))
+    }
+
+    fn check(&self, krate: &Crate, findings: &mut Vec<String>) -> usize {
+        findings.extend(self.allow_errors.iter().cloned());
+        let checked = self.check_rust(krate, findings) + self.check_c(krate, findings);
+        for entry in self.allow.entries.iter().filter(|e| !e.used.get()) {
+            findings.push(format!(
+                "{PUBLIC_AUDIENCE_ALLOWLIST}:{}: `{}` lets nothing through any more; remove it",
+                entry.line, entry.key
+            ));
+        }
+        checked
+    }
+
+    fn hint(&self) -> &'static str {
+        "   Make the item `pub(crate)` and drop its C binding: only a class Java
+   publishes may be public — outside `internal*` packages, outside packages whose
+   package-info.java says \"not a supported Kafka API\", and annotated
+   `@InterfaceAudience.Public` in Kafka 4.4. A Rust-only item, or a deliberate
+   exception, goes in xtask/public-audience-allowlist.txt with its reason.
+   A public signature naming a `pub(crate)` type is caught by rustc's
+   `private_interfaces` / `private_bounds` under `cargo xtask lint`."
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Rule: check-dyn-compatible
 // ---------------------------------------------------------------------------
 
@@ -1415,5 +1946,327 @@ impl Rule for DynCompatible {
    `#[async_trait]` for async methods off the hot path), or — for a
    performance-oriented trait — add a public dyn-compatible `Dyn<Name>` trait
    blanket-implemented for it, as `DynProducer` is for `Producer`."
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const PUBLIC_CONSUMER: &str = "org.apache.kafka.clients.consumer.KafkaConsumer";
+
+    /// A crate whose every public item exercises one outcome of
+    /// `check-public-audience`.
+    const FIXTURE_LIB: &str = r#"
+        pub mod consumer {
+            pub mod internals {
+                #[doc(alias = "org.apache.kafka.clients.consumer.internals.Fetcher")]
+                pub struct Fetcher;
+            }
+            #[doc(alias = "org.apache.kafka.clients.consumer.KafkaConsumer")]
+            pub struct KafkaConsumer;
+            #[doc(alias = "org.apache.kafka.clients.consumer.MockConsumer")]
+            pub struct MockConsumer;
+            pub struct Unmarked;
+            pub struct Allowed;
+            pub(crate) struct Hidden;
+        }
+        pub mod common {
+            pub mod network {
+                #[doc(alias = "org.apache.kafka.common.network.Selector")]
+                pub struct Selector;
+            }
+            #[doc(alias = "org.apache.kafka.common.Cluster")]
+            pub struct Cluster;
+        }
+        pub mod ffi {
+            pub struct kafka_consumer_KafkaConsumer_t;
+            #[unsafe(no_mangle)]
+            pub extern "C" fn kafka_consumer_KafkaConsumer_new() {}
+            #[unsafe(no_mangle)]
+            pub extern "C" fn kafka_common_Cluster_new() {}
+            #[unsafe(no_mangle)]
+            pub extern "C" fn kafka_consumer_Nothing_new() {}
+            #[unsafe(no_mangle)]
+            pub extern "C" fn kafka_consumer_StringList_new() {}
+            #[unsafe(no_mangle)]
+            pub extern "C" fn kafka_common_TopicAuthorizationError_topics() {}
+        }
+        pub mod generated {
+            include!("generated.rs");
+        }
+        pub use generated::Foo;
+    "#;
+
+    const FIXTURE_CBINDGEN: &str = r#"
+        [parse]
+        include = ["ignored"]
+
+        [export]
+        include = [
+            "kafka_consumer_KafkaConsumer_t",  # a comment
+            "kafka_common_Error_t",
+        ]
+    "#;
+
+    const ALLOW: &str = "\
+        # the fixture allow-list\n\
+        crate::consumer::Allowed  # Rust-only\n\
+        org.apache.kafka.clients.consumer.MockConsumer  # a test helper\n\
+        kafka_consumer_StringList  # a Java `Collection<String>`\n\
+        kafka_common_Error  # the error handle\n";
+
+    fn class(package: &str, path: &[&str]) -> java::JavaClass {
+        java::JavaClass {
+            module: package.split('.').filter(|s| *s != "clients").map(str::to_string).collect(),
+            package: package.to_string(),
+            path: path.iter().map(|s| s.to_string()).collect(),
+            methods: BTreeSet::new(),
+            overloads: Vec::new(),
+            fields: BTreeMap::new(),
+            deprecated: false,
+            is_test: false,
+        }
+    }
+
+    fn fixture_dir(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("xtask-public-audience-{name}-{}", std::process::id()))
+    }
+
+    /// The fixture crate written to its own temp dir, and the rule over a
+    /// synthetic Java index with allow-list `allow`.
+    fn fixture(name: &str, allow: &str) -> (Crate, PublicAudience) {
+        let dir = fixture_dir(name);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("lib.rs"), FIXTURE_LIB).unwrap();
+        fs::write(dir.join("cbindgen.toml"), FIXTURE_CBINDGEN).unwrap();
+        let krate = Crate::load(&dir.join("lib.rs")).unwrap();
+        let (allow, allow_errors) = AllowList::parse("allow.txt", allow);
+        let rule = PublicAudience {
+            index: JavaIndex {
+                classes: vec![
+                    class("clients.consumer", &["KafkaConsumer"]),
+                    class("clients.consumer", &["MockConsumer"]),
+                    class("clients.consumer.internals", &["Fetcher"]),
+                    class("common.network", &["Selector"]),
+                    class("common", &["Cluster"]),
+                    class("common.errors", &["TopicAuthorizationException"]),
+                ],
+            },
+            public: [
+                PUBLIC_CONSUMER,
+                "org.apache.kafka.common.errors.TopicAuthorizationException",
+            ]
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
+            unsupported: ["common.network".to_string()].into(),
+            allow,
+            allow_errors,
+            cbindgen: dir.join("cbindgen.toml"),
+            unsupported_source: "fixture".to_string(),
+        };
+        (krate, rule)
+    }
+
+    fn run(name: &str, allow: &str) -> Vec<String> {
+        let (krate, rule) = fixture(name, allow);
+        let mut findings = Vec::new();
+        rule.check(&krate, &mut findings);
+        fs::remove_dir_all(fixture_dir(name)).unwrap();
+        findings
+    }
+
+    fn with<'a>(findings: &'a [String], needle: &str) -> Vec<&'a str> {
+        findings.iter().filter(|f| f.contains(needle)).map(String::as_str).collect()
+    }
+
+    #[test]
+    fn test_public_internal_item_fails_the_internal_and_public_rules() {
+        let findings = run("internal", ALLOW);
+        let expected = format!(
+            "{}: `crate::consumer::internals::Fetcher` is public but translates \
+             `org.apache.kafka.clients.consumer.internals.Fetcher`: its package `clients.consumer.internals` is \
+             internal, it is not `@InterfaceAudience.Public` in Kafka {}",
+            fixture_dir("internal").join("lib.rs").display(),
+            java::AUDIENCE_REF
+        );
+        assert_eq!(with(&findings, "Fetcher"), [expected]);
+    }
+
+    #[test]
+    fn test_public_disclaimer_item_fails_the_disclaimer_and_public_rules() {
+        let findings = run("disclaimer", ALLOW);
+        let expected = format!(
+            "{}: `crate::common::network::Selector` is public but translates \
+             `org.apache.kafka.common.network.Selector`: its package `common.network` is not a supported Kafka \
+             API, it is not `@InterfaceAudience.Public` in Kafka {}",
+            fixture_dir("disclaimer").join("lib.rs").display(),
+            java::AUDIENCE_REF
+        );
+        assert_eq!(with(&findings, "Selector"), [expected]);
+    }
+
+    #[test]
+    fn test_public_item_outside_the_public_list_fails_only_that_rule() {
+        let findings = run("not-public", ALLOW);
+        let expected = format!(
+            "{}: `crate::common::Cluster` is public but translates `org.apache.kafka.common.Cluster`: it is not \
+             `@InterfaceAudience.Public` in Kafka {}",
+            fixture_dir("not-public").join("lib.rs").display(),
+            java::AUDIENCE_REF
+        );
+        assert_eq!(with(&findings, "`crate::common::Cluster`"), [expected]);
+    }
+
+    #[test]
+    fn test_public_and_allow_listed_items_pass() {
+        let findings = run("pass", ALLOW);
+        // Public in Java, in Rust and in C.
+        assert!(with(&findings, "KafkaConsumer").is_empty(), "{findings:#?}");
+        // Allow-listed by Rust path, by Java class and by C prefix.
+        assert!(with(&findings, "Allowed").is_empty(), "{findings:#?}");
+        assert!(with(&findings, "MockConsumer").is_empty(), "{findings:#?}");
+        assert!(with(&findings, "StringList").is_empty(), "{findings:#?}");
+        assert!(with(&findings, "kafka_common_Error").is_empty(), "{findings:#?}");
+        // A C error handle resolves to its exception in `common.errors`.
+        assert!(with(&findings, "TopicAuthorizationError").is_empty(), "{findings:#?}");
+        // Not public at all.
+        assert!(with(&findings, "Hidden").is_empty(), "{findings:#?}");
+    }
+
+    #[test]
+    fn test_unmarked_public_item_needs_an_allow_list_entry() {
+        let findings = run("unmarked", ALLOW);
+        let expected = format!(
+            "{}: `crate::consumer::Unmarked` is public but carries no Java marker; mark the class it translates, or \
+             add it to {PUBLIC_AUDIENCE_ALLOWLIST} with the reason it is public",
+            fixture_dir("unmarked").join("lib.rs").display()
+        );
+        assert_eq!(with(&findings, "Unmarked"), [expected]);
+        // Without the allow-list, the Rust-only item is a finding too.
+        let bare = run("unmarked-bare", "");
+        assert_eq!(
+            with(&bare, "`crate::consumer::Allowed` is public but carries no Java marker").len(),
+            1
+        );
+    }
+
+    #[test]
+    fn test_pub_generated_module_and_its_pub_use_are_findings() {
+        let findings = run("generated", ALLOW);
+        let file = fixture_dir("generated").join("lib.rs").display().to_string();
+        assert_eq!(
+            with(&findings, "generated module").len() + with(&findings, "generated protocol").len(),
+            2,
+            "{findings:#?}"
+        );
+        assert!(findings.contains(&format!(
+            "{file}: `pub mod generated` makes the generated protocol code public; make it `pub(crate)`"
+        )));
+        assert!(findings.contains(&format!(
+            "{file}: a `pub use` re-exports the generated module `generated`; make it `pub(crate) use`"
+        )));
+    }
+
+    #[test]
+    fn test_ffi_names_for_a_non_public_or_unknown_class_are_findings() {
+        let findings = run("ffi", ALLOW);
+        let file = fixture_dir("ffi").join("lib.rs").display().to_string();
+        assert_eq!(
+            with(&findings, "C `kafka_common_Cluster`"),
+            [format!(
+                "{file}: C `kafka_common_Cluster` (1 symbol(s)) binds `org.apache.kafka.common.Cluster`, which may \
+                 not be public: it is not `@InterfaceAudience.Public` in Kafka {}",
+                java::AUDIENCE_REF
+            )]
+        );
+        assert_eq!(
+            with(&findings, "C `kafka_consumer_Nothing`"),
+            [format!(
+                "{file}: C `kafka_consumer_Nothing` (1 symbol(s)) names no Java class (`kafka_<pkg>_<Class>_…`, with \
+                 `<pkg>` the Java package without `clients`)"
+            )]
+        );
+        // The C `KafkaConsumer` prefix groups the fn with the `_t` type of both
+        // the module and the include list.
+        assert!(with(&findings, "C `kafka_consumer_KafkaConsumer`").is_empty(), "{findings:#?}");
+    }
+
+    #[test]
+    fn test_ffi_name_in_the_wrong_package_says_where_java_declares_it() {
+        let (_, mut rule) = fixture("misplaced", ALLOW);
+        fs::remove_dir_all(fixture_dir("misplaced")).unwrap();
+        rule.index.classes.push(class("common", &["TopicPartition"]));
+        assert_eq!(rule.resolve_ffi_class(&["consumer"], "TopicPartition"), None);
+        assert_eq!(
+            rule.misplaced_ffi_class("TopicPartition"),
+            "; Java declares it as `org.apache.kafka.common.TopicPartition`"
+        );
+        assert_eq!(rule.misplaced_ffi_class("Nothing"), "");
+    }
+
+    #[test]
+    fn test_stale_and_malformed_allow_list_entries_are_findings() {
+        let allow = format!("{ALLOW}crate::consumer::Gone  # removed\nno_reason\n");
+        let findings = run("stale", &allow);
+        assert_eq!(
+            with(&findings, "allow.txt:"),
+            ["allow.txt:7: expected `<key>  # <reason>`, found `no_reason`"]
+        );
+        assert_eq!(
+            with(&findings, "lets nothing through"),
+            [format!(
+                "{PUBLIC_AUDIENCE_ALLOWLIST}:6: `crate::consumer::Gone` lets nothing through any more; remove it"
+            )]
+        );
+    }
+
+    #[test]
+    fn test_glob_match() {
+        assert!(glob_match("crate::common::Error", "crate::common::Error"));
+        assert!(!glob_match("crate::common::Error", "crate::common::Errors"));
+        assert!(glob_match("crate::common::Local*Error", "crate::common::LocalTimeoutError"));
+        assert!(!glob_match("crate::common::Local*Error", "crate::common::LocalTimeout"));
+        assert!(glob_match(
+            "crate::consumer::*ConsumerHandle",
+            "crate::consumer::async_kafka_consumer::ConsumerHandle"
+        ));
+        assert!(glob_match("a*b*c", "a-b-b-c"));
+        assert!(!glob_match("a*bc*bc", "abc"));
+        assert!(glob_match("x*", "x"));
+    }
+
+    #[test]
+    fn test_ffi_class_parses_package_and_class() {
+        assert_eq!(
+            ffi_class("kafka_consumer_KafkaConsumer_poll"),
+            Some((vec!["consumer"], "KafkaConsumer"))
+        );
+        assert_eq!(
+            ffi_class("kafka_common_acl_AclBinding_t"),
+            Some((vec!["common", "acl"], "AclBinding"))
+        );
+        assert_eq!(ffi_class("kafka_consumer_string_destroy"), None);
+        assert_eq!(ffi_class("kafka_Error_t"), None);
+        assert_eq!(ffi_class("other_Thing"), None);
+    }
+
+    #[test]
+    fn test_cbindgen_includes_reads_only_the_export_list() {
+        assert_eq!(
+            cbindgen_includes(FIXTURE_CBINDGEN),
+            ["kafka_consumer_KafkaConsumer_t", "kafka_common_Error_t"]
+        );
+        assert!(cbindgen_includes("[export]\nexclude = [\"a\"]\n").is_empty());
+    }
+
+    #[test]
+    fn test_parse_public_list_skips_comments_and_blanks() {
+        let list = parse_public_list("# header\n\norg.apache.kafka.A\n  org.apache.kafka.B  \n");
+        assert_eq!(
+            list,
+            ["org.apache.kafka.A".to_string(), "org.apache.kafka.B".to_string()].into()
+        );
     }
 }
