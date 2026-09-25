@@ -151,6 +151,30 @@ Run via `cargo xtask chaos …`. Defaults mirror `chaos.py` where they overlap.
   `--msg-size < 8`).
 - `--commit sync|async` (`sync`)
 
+### Security protocol
+- `--security-protocol plaintext|ssl|sasl_plaintext|sasl_ssl` (`plaintext`) —
+  the broker listener every producer / consumer workload connects through.
+  Every broker the harness starts exposes all four listeners at once (the same
+  `KafkaCluster` the integration suite uses), so this only selects which one
+  the clients under test use; the faults are unchanged. The harness's own admin
+  client (create/delete topic, elect leaders, reassign) stays on PLAINTEXT on
+  this branch, because its `KafkaAdminClient` does not yet take security config
+  (see the comment in `harness.rs`).
+  - `ssl` — one-way TLS. The client trusts the cluster's generated CA
+    (`ssl.truststore.certificates` as PEM); hostname verification is off, as in
+    the integration suite (`INTEGRATION_TEST_PROTOCOL=ssl`).
+  - `sasl_plaintext` — SASL/PLAIN over plain TCP as `admin` / `admin-secret`.
+  - `sasl_ssl` — SASL/PLAIN over TLS (both of the above).
+  - **Rust workloads only.** The gRPC (python / c) backends run in a sibling
+    container and reach the broker through its container-network listener,
+    which on this branch exists for PLAINTEXT only; a secured run with a gRPC
+    workload is rejected up front with a clear error.
+  ```
+  cargo xtask chaos --security-protocol sasl_ssl --cycles 3 --reports
+  ```
+  The run header prints `security=SASL_SSL` and the listener addresses the
+  workloads use.
+
 ### Chaos
 - **Broker rolling is the default fault** — no flag needed. Layer additional
   faults on with the flags below; each takes an **optional cadence `N`** (every
