@@ -310,6 +310,44 @@ proved wrong or incomplete). The Manager keeps §5.
   the state down rather than using it. §6 note 18 retires the "known
   environmental ctest failure" in §3: that case bootstraps from `127.0.0.1:1`
   since #191 (`5fc83544`). Critic 79 spawned over `be795fa3..d5fcdeb2`.
+- 2026-09-25: review loop. Critic 79 pass 1 (`be795fa3..d5fcdeb2`): 0
+  blockers, 1 should-fix — the preamble promised a panic callback for every
+  callback-style function, false for the plain-guard sites of §6 note 8.
+  Actor 79 round 2 `de90b540`: exception clause in both preamble copies, five
+  per-function doc sentences, four pinning tests. Pass 2: issue 1 fixed;
+  issue 2 (should-fix) — `send_async` CAN be made to panic in a test through a
+  panicking receiver waker (tokio 1.52.0 `chan.send` enqueues, then wakes), so
+  note 22's reason was wrong; Note A — pre-existing `send_with_callback` doc
+  claim, contradicted by the post-`append` `maybe_add_partition` error path,
+  same text on master, tracked in `OPEN-BUGS.md`, not fixed here. Round 3
+  `1d105ed0`: `test_send_async_panic_after_queueing_is_reported_in_out_error`,
+  precise `send_async` paragraph, notes 22/23. Pass 3: issue 2 fixed; issue 3
+  (docs) — notes 16/22 said only a bug can panic after the hand-off, but
+  tokio's `unpark` `expect("failed to wake I/O driver")` can on an OS failure,
+  reaching `send_batch_async`, both commit functions and `send_with_callback`;
+  Note B — pre-existing "producer is closed" doc gap (§4 item 7,
+  `OPEN-BUGS.md`); Note C — at the D4 `on_panic` sites that same failure inside
+  `tokio::spawn` fires the callback twice (§4 item 6, `OPEN-BUGS.md`, user
+  decision pending). Round 4 `1acbc2ee` (documentation only): preamble and the
+  four per-function paragraphs now say the guard itself never invokes the
+  callback, it can still fire after the hand-off, and `user_data` must not be
+  released on a panic return; notes 16/22 corrected; header +47/−12 in five
+  hunks. Gates on `1acbc2ee` (Actor 79, logs in the session scratchpad):
+  `cargo test --features ffi --lib` 4278 / 0 / 2 ignored (247 `ffi::` tests,
+  presence test included); `ffi-macros` 12 tests + 2 doctests; format-check
+  clean; clippy `--features ffi --lib --tests -D warnings` clean, and
+  `--workspace --all-features` clean on every target except the untracked
+  `examples/eos_app.rs` (§6 note 7). The C and Python suites were last run on
+  `d5fcdeb2`; the four later commits change only Rust unit tests and comments,
+  nothing under `bindings/`. Critic 79 pass 4 (shortened to text-vs-code
+  checks) was started and stopped at the user's request before it wrote
+  anything, so round 4's doc paragraphs and §6 note 24 are Actor-verified
+  (line references in note 24) but not independently reviewed; note 23's claim
+  that `destroy` delivers any callback still in flight is flagged unverified in
+  note 24 and remains so. **Loop 79 closed 2026-09-25.** Open for the user:
+  the Note C fix (a D4 amendment — `ffi-macros` plus the 80 sites — recommended
+  as a follow-up loop), Jira remediation bullets 3–4 (§4 item 4), and the
+  Critic's CLAUDE.md §3 rule suggestion in `COMMENTS.79.md`.
 
 ## 6. Implementation notes (Actor 79)
 
