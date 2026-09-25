@@ -661,8 +661,11 @@ fn producer_perf_test() -> anyhow::Result<()> {
 ///                          whether/which fault fires (broker-roll, recreate,
 ///                          reassign, change-leader — all candidates) AND its
 ///                          parameters (broker, clean/unclean, down, dwell) and
-///                          the timing. Ignores the fixed cadences.
-///   --action-prob P        --random: per-cycle probability a fault fires (0.7)
+///                          the timing. Rejects the per-fault flags (--unclean,
+///                          --stop-s, --dwell-s, --no-broker-roll, the fault
+///                          cadences, --rebalance-mid-roll): it draws those itself
+///   --action-prob P        --random only: per-cycle probability a fault fires
+///                          (0.7, within 0..=1)
 ///   --seed N               reproducibility seed (0 = auto-pick & print). Drives
 ///                          the broker-roll order and, with --random, the ENTIRE
 ///                          run; rerun with the printed seed to reproduce it

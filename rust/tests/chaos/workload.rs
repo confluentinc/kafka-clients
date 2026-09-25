@@ -407,6 +407,19 @@ where
 
     async fn run(self: Box<Self>, stop: Arc<AtomicBool>) {
         eprintln!("chaos: starting workload {}", self.label());
+        if self.spec.backend.is_grpc() {
+            // The bridge's `send` returns only once the remote binding has the
+            // broker's acknowledgement (`multilanguage_producer.rs`), so the
+            // loop below cannot pipeline: one record per bridge round trip, and
+            // `--rps` is an upper bound it will not reach.
+            eprintln!(
+                "chaos: NOTE {} sends through the gRPC bridge, which acknowledges each record before the next \
+                 is sent: throughput is bounded by one record per round trip, so --rps {} is a ceiling, not a \
+                 target, and the in-flight peak will read 1",
+                self.label(),
+                self.ctx.target_rps
+            );
+        }
         let bootstrap = self.ctx.bootstrap_for(self.spec.backend).to_string();
         let producer = self
             .factory
@@ -558,20 +571,15 @@ impl ChaosRebalanceListener {
         self.verifier
             .record(WorkloadEvent::Rebalance { consumer: self.consumer.clone(), callback, partitions });
     }
-}
 
-#[async_trait]
-impl ConsumerRebalanceListener for ChaosRebalanceListener {
-    async fn on_partitions_revoked(&self, partitions: &[TopicPartition]) -> Result<(), KafkaError> {
-        self.record(RebalanceCallback::Revoked, partitions);
-        // Flush offsets before the partitions move — the canonical listener
-        // pattern. The workload already commits after every poll, so this is
-        // normally a small or empty commit; its outcome is recorded either way.
-        match self.handle.commit_sync().await {
-            // Read back what the broker now holds for the partitions being
-            // handed over: the next owner resumes from there, so it must be
-            // exactly this consumer's progress + 1 (the verifier checks). Not
-            // during close — see `closing`.
+    /// What `on_partitions_revoked` does with the outcome of its commit. A
+    /// successful commit is followed by a read-back of what the broker now holds
+    /// for the partitions being handed over: the next owner resumes from there,
+    /// so it must be exactly this consumer's progress + 1 (the verifier checks).
+    /// Not during close — see `closing`. A failed commit is recorded under its
+    /// own operation so the verdict tells it apart from the poll-loop commits.
+    async fn after_revoke_commit(&self, partitions: &[TopicPartition], commit: Result<(), KafkaError>) {
+        match commit {
             Ok(()) if !self.closing.load(Ordering::Relaxed) => {
                 record_committed(self.verifier.as_ref(), &self.consumer, self.handle.committed(partitions).await);
             },
@@ -585,6 +593,18 @@ impl ConsumerRebalanceListener for ChaosRebalanceListener {
                 });
             },
         }
+    }
+}
+
+#[async_trait]
+impl ConsumerRebalanceListener for ChaosRebalanceListener {
+    async fn on_partitions_revoked(&self, partitions: &[TopicPartition]) -> Result<(), KafkaError> {
+        self.record(RebalanceCallback::Revoked, partitions);
+        // Flush offsets before the partitions move — the canonical listener
+        // pattern. The workload already commits after every poll, so this is
+        // normally a small or empty commit; its outcome is recorded either way.
+        let commit = self.handle.commit_sync().await;
+        self.after_revoke_commit(partitions, commit).await;
         Ok(())
     }
 
@@ -598,6 +618,9 @@ impl ConsumerRebalanceListener for ChaosRebalanceListener {
         Ok(())
     }
 }
+
+/// Pause after a failed `poll()` before polling again (see the consumer loop).
+const POLL_ERROR_BACKOFF: Duration = Duration::from_millis(100);
 
 /// How often a sync-committing consumer reads its committed offsets back from
 /// the broker (one OffsetFetch) so the verifier can compare them with its own
@@ -649,6 +672,15 @@ where
     async fn run(self: Box<Self>, stop: Arc<AtomicBool>) {
         let bootstrap = self.ctx.bootstrap_for(self.spec.backend).to_string();
         let label = self.spec.label();
+        if self.spec.backend.is_grpc() && matches!(self.ctx.commit_mode, CommitMode::Async) {
+            // `multilanguage_consumer.rs` maps `commit_async` to a synchronous
+            // commit on the server side; the offsets are committed, but the
+            // async-commit timing `--commit async` is meant to exercise is not.
+            eprintln!(
+                "chaos: NOTE {label} commits through the gRPC bridge, which performs --commit async as a \
+                 synchronous commit; this consumer exercises sync-commit timing"
+            );
+        }
         let mut consumer = self
             .factory
             .create(consumer_props(&bootstrap, &self.ctx.group, &label, &self.ctx.security))
@@ -694,6 +726,11 @@ where
                         op: ConsumerOp::Poll,
                         error: err.to_string(),
                     });
+                    // A persistent error (e.g. the background task died) makes
+                    // `poll()` fail immediately; back off so this does not spin
+                    // at full CPU flooding the verifier and the log until the run
+                    // ends.
+                    tokio::time::sleep(POLL_ERROR_BACKOFF).await;
                     continue;
                 },
             };
@@ -842,6 +879,62 @@ mod tests {
                 .error_breakdown
                 .iter()
                 .any(|(text, n)| *n == 1 && text.starts_with("consumer commit inside on_partitions_revoked: ")),
+            "{verdict}"
+        );
+    }
+
+    /// After a revoke-time commit succeeds, the listener reads the committed
+    /// offsets back — except while the consumer is closing, when the read-back
+    /// would wait out the API timeout inside `close()`. `MockConsumer`'s handle
+    /// rejects `committed()`, so the read-back attempt shows up as exactly one
+    /// read-back error; the closing gate shows up as none.
+    #[tokio::test]
+    async fn revoke_commit_success_reads_committed_offsets_back_unless_closing() {
+        let mock: MockConsumer<Vec<u8>, Vec<u8>> = MockConsumer::new(AutoOffsetResetStrategy::EARLIEST);
+        let tp = TopicPartition::new("t".to_string(), 0);
+        let read_back_errors = |verifier: &ConservationVerifier| {
+            verifier
+                .verdict(0)
+                .error_breakdown
+                .iter()
+                .filter(|(text, _)| text.starts_with("consumer committed() read-back: "))
+                .map(|(_, n)| *n)
+                .sum::<usize>()
+        };
+
+        let verifier = Arc::new(ConservationVerifier::new());
+        let closing = Arc::new(AtomicBool::new(false));
+        let listener = ChaosRebalanceListener {
+            consumer: "consumer-rust-1".into(),
+            handle: mock.handle(),
+            verifier: verifier.clone(),
+            closing: closing.clone(),
+        };
+        listener.after_revoke_commit(std::slice::from_ref(&tp), Ok(())).await;
+        let verdict = verifier.verdict(0);
+        assert_eq!(read_back_errors(&verifier), 1, "one read-back attempted: {verdict}");
+        assert_eq!(verdict.revoke_commit_errors, 0, "the commit itself succeeded: {verdict}");
+
+        closing.store(true, Ordering::Relaxed);
+        listener.after_revoke_commit(std::slice::from_ref(&tp), Ok(())).await;
+        let verdict = verifier.verdict(0);
+        assert_eq!(read_back_errors(&verifier), 1, "no read-back while closing: {verdict}");
+        assert_eq!(verdict.commit_checks, 0, "{verdict}");
+
+        // A failed commit is never followed by a read-back, closing or not.
+        closing.store(false, Ordering::Relaxed);
+        listener
+            .after_revoke_commit(std::slice::from_ref(&tp), Err(KafkaError::timeout("commit timed out")))
+            .await;
+        let verdict = verifier.verdict(0);
+        assert_eq!(read_back_errors(&verifier), 1, "{verdict}");
+        assert_eq!(verdict.revoke_commit_errors, 1, "{verdict}");
+        assert!(
+            verdict.error_breakdown.iter().any(|(text, n)| {
+                *n == 1
+                    && text.starts_with("consumer commit inside on_partitions_revoked: ")
+                    && text.ends_with("commit timed out")
+            }),
             "{verdict}"
         );
     }

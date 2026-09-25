@@ -134,6 +134,11 @@ pub struct ChaosConfig {
     pub drain_s: u64,
     /// Idle-based early-drain threshold (`--idle-threshold-s`): end the drain
     /// once consumption has been quiet this long (0 = wait the full `drain_s`).
+    /// Only consulted for a verifier that does not report
+    /// `Verifier::outstanding`; the default `ConservationVerifier` does, and
+    /// its drain ends as soon as every acknowledged record has been observed
+    /// (bounded by `drain_s`), so this flag has no effect on a default run
+    /// (`drain_wait` in `harness.rs`).
     pub idle_threshold_s: u64,
     /// Producer target records/sec (0 = max).
     pub rps: u32,
@@ -147,11 +152,13 @@ pub struct ChaosConfig {
     pub seed: u64,
     /// Chaos-monkey mode (`--random`): ignore the per-fault cadences and, each
     /// cycle, let the seeded RNG choose whether an action fires, WHICH fault
-    /// (broker-roll / topic-recreate / reassign / change-leader — all are
-    /// candidates for a single-topic run; topic-recreate is EXCLUDED from the
-    /// candidate set under `--num-topics > 1`, a known limitation), and that
-    /// fault's parameters (broker index, clean/unclean, down duration, dwell).
-    /// Fully reproducible for a given `seed`.
+    /// (broker-roll / topic-recreate / reassign / change-leader — all four are
+    /// candidates for a single-topic run; topic-recreate is EXCLUDED under
+    /// `--num-topics > 1`, the same known consumer-side limitation that makes
+    /// `from_env` reject the fixed-cadence combination) and that fault's
+    /// parameters (broker index, clean/unclean, down duration, dwell). The
+    /// per-fault flags are rejected in this mode (`from_env`). Fully
+    /// reproducible for a given `seed`.
     pub random: bool,
     /// In `--random` mode, the per-cycle probability that some action fires
     /// (`--action-prob`, default 0.7). Cycles below the draw are quiet.
@@ -234,6 +241,16 @@ impl ChaosConfig {
                 if hi < lo {
                     return Err("--consumer-churn-max must be >= --consumer-churn-min".to_string());
                 }
+                // `max - min` is the headroom churn works in; with none there is
+                // never anything to add or remove, so the flags configure no
+                // churn at all. Say so rather than run a quiet fixed-consumer run.
+                if hi == lo {
+                    return Err(format!(
+                        "--consumer-churn-min {lo} == --consumer-churn-max {hi} leaves no headroom: churn adds and \
+                         removes consumers within (min, max], so nothing would ever churn; use --consumers {lo} \
+                         for a fixed set"
+                    ));
+                }
             },
             (None, None) => {},
         }
@@ -306,12 +323,22 @@ impl ChaosConfig {
         if env_str("CHAOS_NO_BROKER_ROLL", "0") != "1" {
             actions.push(ActionSpec { kind: ActionKind::BrokerRoll, every: 1 });
         }
-        for (env_key, kind) in [
-            ("CHAOS_CHANGE_LEADER", ActionKind::ChangeLeader),
-            ("CHAOS_REASSIGN_PARTITIONS", ActionKind::ReassignPartitions),
-            ("CHAOS_TOPIC_RECREATE", ActionKind::TopicRecreate),
+        for (env_key, flag, kind) in [
+            ("CHAOS_CHANGE_LEADER", "--change-leader", ActionKind::ChangeLeader),
+            (
+                "CHAOS_REASSIGN_PARTITIONS",
+                "--reassign-partitions",
+                ActionKind::ReassignPartitions,
+            ),
+            ("CHAOS_TOPIC_RECREATE", "--topic-recreate", ActionKind::TopicRecreate),
         ] {
             if let Some(every) = env_opt_u32(env_key)? {
+                // `cycle % 0` never matches: a cadence of 0 would configure a
+                // fault that never fires, and the run would PASS having injected
+                // nothing.
+                if every == 0 {
+                    return Err(format!("{flag} cadence must be >= 1 (0 would never fire the fault)"));
+                }
                 actions.push(ActionSpec { kind, every });
             }
         }
@@ -323,13 +350,57 @@ impl ChaosConfig {
             );
         }
 
-        // Multi-topic + topic-recreate is supported: the consumer does read each
-        // recreated topic's post-recreate tail, given enough drain for it to
-        // re-discover the new generation under churn. It was previously rejected
-        // as a "known limitation" written before the wait-until-observed drain
-        // (`Verifier::outstanding`) existed; validated across many `--num-topics 2`
-        // recreate runs with `--drain-s 180`. Use a generous `--drain-s` (≥180)
-        // for recreate scenarios so the post-recreate tail is not cut off.
+        // `--random` draws the fault, the broker, clean/unclean, the down
+        // duration and the dwell itself, every cycle. The fixed-cadence and
+        // per-fault flags have no effect in that mode, so a run that passes them
+        // would silently not do what its command line says (a `--random
+        // --unclean` run rolls cleanly half the time). Reject them instead.
+        if random {
+            let ignored: Vec<&str> = [
+                ("CHAOS_UNCLEAN", "--unclean"),
+                ("CHAOS_STOP_S", "--stop-s"),
+                ("CHAOS_DWELL_S", "--dwell-s"),
+                ("CHAOS_NO_BROKER_ROLL", "--no-broker-roll"),
+                ("CHAOS_TOPIC_RECREATE", "--topic-recreate"),
+                ("CHAOS_REASSIGN_PARTITIONS", "--reassign-partitions"),
+                ("CHAOS_CHANGE_LEADER", "--change-leader"),
+                ("CHAOS_REBALANCE_MID_ROLL", "--rebalance-mid-roll"),
+            ]
+            .into_iter()
+            .filter(|(key, _)| std::env::var(key).is_ok_and(|v| !v.is_empty()))
+            .map(|(_, flag)| flag)
+            .collect();
+            if !ignored.is_empty() {
+                return Err(format!(
+                    "--random draws the fault and its parameters (broker, clean/unclean, down duration, \
+                     dwell) itself every cycle, so {} would have no effect; drop {} or drop --random",
+                    ignored.join(", "),
+                    if ignored.len() == 1 { "it" } else { "them" }
+                ));
+            }
+        }
+
+        // Multi-topic + topic-recreate is a KNOWN LIMITATION, rejected up front.
+        // When one of several subscribed topics is recreated under a new topic id,
+        // the KIP-848 consumer keeps the old generation's fetch positions (and
+        // leader epochs) for some of that topic's partitions after the
+        // revoke/assign cycle: it never resets onto the new generation, so those
+        // partitions' post-recreate records are never consumed, and it keeps
+        // committing the stale positions under the old topic id (a revoke-time
+        // `commit_sync` then runs into its 60 s timeout). Reproduced on
+        // 2026-09-25 with `--num-topics 2 --topic-recreate --cycles 2 --drain-s 180
+        // --seed 5`: 461 records lost on 3 of 6 partitions of the recreated topic
+        // after the second recreate. Single-topic recreate does recover (the whole
+        // assignment is rebuilt). This is a consumer-side defect the harness
+        // surfaces, not a harness artifact; the guard stays until it is fixed.
+        if num_topics > 1 && actions.iter().any(|a| a.kind == ActionKind::TopicRecreate) {
+            return Err(format!(
+                "--topic-recreate with --num-topics {num_topics} is not supported yet: after a recreate of one of \
+                 several subscribed topics the KIP-848 consumer keeps stale positions on some partitions of the \
+                 recreated topic and never reads its new generation (a known consumer-side gap, see \
+                 tests/chaos/README.md). Use --num-topics 1 with --topic-recreate, or drop --topic-recreate"
+            ));
+        }
 
         let commit_mode = match env_str("CHAOS_COMMIT", "sync").as_str() {
             "sync" => CommitMode::Sync,
@@ -337,18 +408,84 @@ impl ChaosConfig {
             other => return Err(format!("CHAOS_COMMIT must be sync or async, got '{other}'")),
         };
 
-        let leave_broker_down = match std::env::var("CHAOS_LEAVE_BROKER_DOWN") {
+        if brokers == 0 {
+            return Err("--brokers must be >= 1".to_string());
+        }
+        let leave_broker_down: Option<u16> = match std::env::var("CHAOS_LEAVE_BROKER_DOWN") {
             Ok(v) if !v.is_empty() => Some(
                 v.parse()
                     .map_err(|_| "CHAOS_LEAVE_BROKER_DOWN must be a broker index".to_string())?,
             ),
             _ => None,
         };
+        // Brokers are addressed by 1-based node id; an index outside the
+        // cluster would panic inside `BrokerControl::container_id` mid-run, and
+        // leaving the only broker down leaves nothing to roll.
+        if let Some(node) = leave_broker_down {
+            if node < 1 || node > brokers {
+                return Err(format!(
+                    "--leave-broker-down {node} is out of range: brokers are numbered 1..={brokers}"
+                ));
+            }
+            if brokers == 1 {
+                return Err("--leave-broker-down with --brokers 1 leaves no broker to roll".to_string());
+            }
+        }
+
+        let cycles: u32 = env_parse("CHAOS_CYCLES", 3)?;
+        if cycles == 0 {
+            return Err("--cycles must be >= 1".to_string());
+        }
+        // Rebalance add/remove are 1-based cycle numbers; a cycle past the end
+        // never fires, and a remove needs something to remove (a consumer added
+        // earlier in the run, or churn-added consumers).
+        let rebalance_add_cycle = env_opt_u32("CHAOS_REBALANCE_ADD_CYCLE")?;
+        let rebalance_remove_cycle = env_opt_u32("CHAOS_REBALANCE_REMOVE_CYCLE")?;
+        for (flag, value) in [
+            ("--rebalance-add-cycle", rebalance_add_cycle),
+            ("--rebalance-remove-cycle", rebalance_remove_cycle),
+        ] {
+            if let Some(cycle) = value
+                && (cycle < 1 || cycle > cycles)
+            {
+                return Err(format!("{flag} {cycle} would never fire: cycles are numbered 1..={cycles}"));
+            }
+        }
+        match (rebalance_add_cycle, rebalance_remove_cycle) {
+            (Some(add), Some(remove)) if remove <= add => {
+                return Err(format!(
+                    "--rebalance-remove-cycle {remove} must come after --rebalance-add-cycle {add}: the consumer \
+                     it removes is added at the top of cycle {add}"
+                ));
+            },
+            (None, Some(remove)) if consumer_churn_min.is_none() => {
+                return Err(format!(
+                    "--rebalance-remove-cycle {remove} has nothing to remove: no --rebalance-add-cycle and no \
+                     consumer churn adds a consumer"
+                ));
+            },
+            _ => {},
+        }
+
+        let action_prob: f64 = env_parse("CHAOS_ACTION_PROB", 0.7_f64)?;
+        if !(0.0..=1.0).contains(&action_prob) {
+            return Err(format!("--action-prob must be within 0..=1, got {action_prob}"));
+        }
+        if !random && std::env::var("CHAOS_ACTION_PROB").is_ok_and(|v| !v.is_empty()) {
+            return Err("--action-prob only applies with --random".to_string());
+        }
+
+        // A zero budget would rotate the client log on every line (each line
+        // creates a fresh file), producing nothing usable.
+        let log_budget_mb: u64 = env_parse("CHAOS_LOG_BUDGET_MB", 64)?;
+        if log_budget_mb == 0 {
+            return Err("--log-budget-mb must be >= 1".to_string());
+        }
 
         Ok(Self {
             brokers,
             partitions: env_parse("CHAOS_PARTITIONS", 6)?,
-            cycles: env_parse("CHAOS_CYCLES", 3)?,
+            cycles,
             actions,
             unclean: env_str("CHAOS_UNCLEAN", "0") == "1",
             stop_s: env_parse("CHAOS_STOP_S", 5)?,
@@ -361,15 +498,15 @@ impl ChaosConfig {
             leave_broker_down,
             seed: env_parse("CHAOS_SEED", 0)?,
             random,
-            action_prob: env_parse("CHAOS_ACTION_PROB", 0.7_f64)?,
+            action_prob,
             dwell_s: env_parse("CHAOS_DWELL_S", 0)?,
             reports: env_str("CHAOS_REPORTS", "0") == "1",
-            rebalance_add_cycle: env_opt_u32("CHAOS_REBALANCE_ADD_CYCLE")?,
-            rebalance_remove_cycle: env_opt_u32("CHAOS_REBALANCE_REMOVE_CYCLE")?,
+            rebalance_add_cycle,
+            rebalance_remove_cycle,
             rebalance_mid_roll: env_str("CHAOS_REBALANCE_MID_ROLL", "0") == "1",
             consumer_churn_min,
             consumer_churn_max,
-            log_budget_mb: env_parse("CHAOS_LOG_BUDGET_MB", 64)?,
+            log_budget_mb,
             workloads,
             commit_mode,
             topic: env_str("CHAOS_TOPIC", "chaos-run"),
@@ -420,8 +557,14 @@ impl ChaosConfig {
     /// Pretty one-line summary for the run header.
     pub fn summary(&self) -> String {
         let wl: Vec<String> = self.workloads.iter().map(WorkloadSpec::label).collect();
-        // In random mode the fixed cadence is not used; describe the mode
-        // instead so the header reflects what actually drives the run.
+        // In random mode the fixed cadence is not used, and clean/unclean is
+        // drawn per roll; describe the mode instead so the header reflects what
+        // actually drives the run.
+        let unclean_desc = if self.random {
+            "random".to_string()
+        } else {
+            self.unclean.to_string()
+        };
         let actions_desc = if self.random {
             format!("RANDOM(prob={}, all-faults)", self.action_prob)
         } else {
@@ -450,7 +593,7 @@ impl ChaosConfig {
             self.msg_size,
             self.cycles,
             actions_desc,
-            self.unclean,
+            unclean_desc,
             self.rps,
             self.seed,
             self.security_protocol.config_value(),
@@ -496,7 +639,7 @@ fn parse_workloads(s: &str) -> Result<Vec<WorkloadSpec>, String> {
             _ => return Err(format!("workload role must be producer or consumer, got '{role}'")),
         };
         let backend = Backend::parse(backend)
-            .ok_or_else(|| format!("workload backend must be rust, python or c, got '{backend}'"))?;
+            .ok_or_else(|| format!("workload backend must be rust, python, python-async or c, got '{backend}'"))?;
         let n = counters.entry((role, backend)).or_insert(0);
         *n += 1;
         specs.push(WorkloadSpec { role, backend, instance: *n });
