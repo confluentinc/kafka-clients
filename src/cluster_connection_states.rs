@@ -611,26 +611,15 @@ mod tests {
     /// They do not depend on `H`, but a generic type cannot infer it (E0282).
     type ConnStates = ClusterConnectionStates<SingleIpHostResolver>;
 
+    use crate::common::utils::{MockTime, Time};
     use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 
     // --- Mock time ---
 
-    struct MockTime {
-        current_time_ms: i64,
-    }
-
-    impl MockTime {
-        fn new() -> Self {
-            Self { current_time_ms: 0 }
-        }
-
-        fn milliseconds(&self) -> i64 {
-            self.current_time_ms
-        }
-
-        fn sleep(&mut self, ms: i64) {
-            self.current_time_ms += ms;
-        }
+    /// Java's `new MockTime()`, started at 0 rather than the system clock so
+    /// the timestamps the tests compute stay small.
+    fn mock_time() -> MockTime {
+        MockTime::with_auto_tick_ms_current_time_ms_current_high_res_time_ns(0, 0, 0)
     }
 
     // --- Test HostResolver implementations ---
@@ -735,7 +724,7 @@ mod tests {
     #[doc(alias = "org.apache.kafka.clients.ClusterConnectionStatesTest#testClusterConnectionStateChanges")]
     fn test_cluster_connection_state_changes() {
         let mut connection_states = create_single_ip_states();
-        let mut time = MockTime::new();
+        let time = mock_time();
 
         assert!(connection_states.can_connect(NODE_ID1, time.milliseconds()));
         assert_eq!(0, connection_states.connection_delay(NODE_ID1, time.milliseconds()));
@@ -801,7 +790,7 @@ mod tests {
     #[doc(alias = "org.apache.kafka.clients.ClusterConnectionStatesTest#testMultipleNodeConnectionStates")]
     fn test_multiple_node_connection_states() {
         let mut connection_states = create_single_ip_states();
-        let mut time = MockTime::new();
+        let time = mock_time();
 
         // Check initial state, allowed to connect to all nodes, but no nodes shown as ready
         assert!(connection_states.can_connect(NODE_ID1, time.milliseconds()));
@@ -844,7 +833,7 @@ mod tests {
     #[doc(alias = "org.apache.kafka.clients.ClusterConnectionStatesTest#testAuthorizationFailed")]
     fn test_authorization_failed() {
         let mut connection_states = create_single_ip_states();
-        let mut time = MockTime::new();
+        let time = mock_time();
 
         // Try connecting
         connection_states.connecting(NODE_ID1, time.milliseconds(), "localhost");
@@ -890,7 +879,7 @@ mod tests {
     #[doc(alias = "org.apache.kafka.clients.ClusterConnectionStatesTest#testRemoveNode")]
     fn test_remove_node() {
         let mut connection_states = create_single_ip_states();
-        let mut time = MockTime::new();
+        let time = mock_time();
 
         connection_states.connecting(NODE_ID1, time.milliseconds(), "localhost");
         time.sleep(1000);
@@ -910,7 +899,7 @@ mod tests {
     #[doc(alias = "org.apache.kafka.clients.ClusterConnectionStatesTest#testMaxReconnectBackoff")]
     fn test_max_reconnect_backoff() {
         let mut connection_states = create_single_ip_states();
-        let mut time = MockTime::new();
+        let time = mock_time();
 
         let effective_max_reconnect_backoff =
             (RECONNECT_BACKOFF_MAX as f64 * (1.0 + ConnStates::RECONNECT_BACKOFF_JITTER)).round() as i64;
@@ -950,7 +939,7 @@ mod tests {
     #[doc(alias = "org.apache.kafka.clients.ClusterConnectionStatesTest#testThrottled")]
     fn test_throttled() {
         let mut connection_states = create_single_ip_states();
-        let mut time = MockTime::new();
+        let time = mock_time();
 
         connection_states.connecting(NODE_ID1, time.milliseconds(), "localhost");
         time.sleep(1000);
@@ -995,7 +984,7 @@ mod tests {
             LogContext::empty(),
             host_resolver,
         );
-        let time = MockTime::new();
+        let time = mock_time();
 
         connection_states.connecting(NODE_ID1, time.milliseconds(), "localhost");
         let addr1 = connection_states.current_address(NODE_ID1).await.unwrap();
@@ -1010,7 +999,7 @@ mod tests {
     #[tokio::test]
     async fn test_multiple_ips() {
         let mut connection_states = create_multi_ip_states();
-        let time = MockTime::new();
+        let time = mock_time();
 
         let resolved = ClientUtils::resolve(HOST_TWO_IPS, &connection_states.host_resolver)
             .await
@@ -1032,7 +1021,7 @@ mod tests {
     #[doc(alias = "org.apache.kafka.clients.ClusterConnectionStatesTest#testHostResolveChange")]
     async fn test_host_resolve_change() {
         let mut connection_states = create_multi_ip_states();
-        let time = MockTime::new();
+        let time = mock_time();
 
         let resolved = ClientUtils::resolve(HOST_TWO_IPS, &connection_states.host_resolver)
             .await
@@ -1054,7 +1043,7 @@ mod tests {
     #[doc(alias = "org.apache.kafka.clients.ClusterConnectionStatesTest#testNodeWithNewHostname")]
     async fn test_node_with_new_hostname() {
         let mut connection_states = create_multi_ip_states();
-        let time = MockTime::new();
+        let time = mock_time();
 
         connection_states.connecting(NODE_ID1, time.milliseconds(), "localhost");
         let addr1 = connection_states.current_address(NODE_ID1).await.unwrap();
@@ -1071,7 +1060,7 @@ mod tests {
     #[doc(alias = "org.apache.kafka.clients.ClusterConnectionStatesTest#testIsPreparingConnection")]
     fn test_is_preparing_connection() {
         let mut connection_states = create_single_ip_states();
-        let time = MockTime::new();
+        let time = mock_time();
 
         assert!(!connection_states.is_preparing_connection(NODE_ID1));
         connection_states.connecting(NODE_ID1, time.milliseconds(), "localhost");
@@ -1087,7 +1076,7 @@ mod tests {
     #[doc(alias = "org.apache.kafka.clients.ClusterConnectionStatesTest#testExponentialConnectionSetupTimeout")]
     fn test_exponential_connection_setup_timeout() {
         let mut connection_states = create_single_ip_states();
-        let time = MockTime::new();
+        let time = mock_time();
 
         assert!(connection_states.can_connect(NODE_ID1, time.milliseconds()));
 
@@ -1158,7 +1147,7 @@ mod tests {
     #[doc(alias = "org.apache.kafka.clients.ClusterConnectionStatesTest#testTimedOutConnections")]
     fn test_timed_out_connections() {
         let mut connection_states = create_single_ip_states();
-        let mut time = MockTime::new();
+        let time = mock_time();
 
         // Initiate two connections
         connection_states.connecting(NODE_ID1, time.milliseconds(), "localhost");
@@ -1220,7 +1209,7 @@ mod tests {
     #[doc(alias = "org.apache.kafka.clients.ClusterConnectionStatesTest#testSkipLastAttemptedIp")]
     async fn test_skip_last_attempted_ip() {
         let mut connection_states = create_multi_ip_states();
-        let time = MockTime::new();
+        let time = mock_time();
 
         let resolved = ClientUtils::resolve(HOST_TWO_IPS, &connection_states.host_resolver)
             .await
@@ -1242,7 +1231,7 @@ mod tests {
 
     fn verify_reconnect_exponential_backoff(enter_checking_api_version_state: bool) {
         let mut connection_states = create_single_ip_states();
-        let mut time = MockTime::new();
+        let time = mock_time();
 
         let reconnect_backoff_max_exp = (RECONNECT_BACKOFF_MAX as f64 / (RECONNECT_BACKOFF_MS.max(1) as f64)).ln()
             / (ConnStates::RECONNECT_BACKOFF_EXP_BASE as f64).ln();

@@ -1276,8 +1276,7 @@ mod tests {
     }
 
     fn make_delegate(config: &ConsumerConfig, metadata: Arc<ConsumerMetadata>) -> NetworkClientDelegate<MockClient> {
-        let time_provider: Arc<dyn Fn() -> i64 + Send + Sync> = Arc::new(|| 0);
-        let client = MockClient::with_static_nodes(Vec::<Node>::new(), time_provider);
+        let client = MockClient::with_static_nodes(Vec::<Node>::new(), Arc::new(mock_time(0)));
         let (tx, _rx) = mpsc::unbounded_channel();
         let beh = Arc::new(BackgroundEventHandler::new(tx));
         let raw_metadata = metadata.metadata_arc();
@@ -1288,8 +1287,7 @@ mod tests {
         config: &ConsumerConfig,
         metadata: Arc<ConsumerMetadata>,
     ) -> NetworkClientDelegate<CountingClient> {
-        let time_provider: Arc<dyn Fn() -> i64 + Send + Sync> = Arc::new(|| 0);
-        let client = CountingClient::new(MockClient::with_static_nodes(Vec::<Node>::new(), time_provider));
+        let client = CountingClient::new(MockClient::with_static_nodes(Vec::<Node>::new(), Arc::new(mock_time(0))));
         let (tx, _rx) = mpsc::unbounded_channel();
         let beh = Arc::new(BackgroundEventHandler::new(tx));
         let raw_metadata = metadata.metadata_arc();

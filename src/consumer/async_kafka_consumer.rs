@@ -1905,13 +1905,14 @@ where
             log_context.clone(),
         )
         .map_err(|e| Error::local_illegal_argument(format!("Failed to create channel builder: {}", e)))?;
-        let selector = Selector::with_defaults_and_log_context(
+        let mut selector = Selector::with_defaults_and_log_context(
             config.connections_max_idle_ms,
             channel_builder,
             log_context.clone(),
         );
+        selector.set_time(Arc::clone(&time));
         let shared_metadata = metadata.metadata_arc();
-        let network_client = NetworkClient::with_metadata_rebootstrap_trigger_ms(
+        let mut network_client = NetworkClient::with_metadata_rebootstrap_trigger_ms(
             selector,
             shared_metadata,
             config.client_id(),
@@ -1930,6 +1931,7 @@ where
             MetadataRecoveryStrategy::None,
             log_context,
         );
+        network_client.set_time(Arc::clone(&time));
         let mut network_client_delegate_inner = NetworkClientDelegate::new(
             &config,
             network_client,

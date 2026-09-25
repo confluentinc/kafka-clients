@@ -32,7 +32,7 @@ use crate::admin::KafkaAdminClient;
 use crate::common::errors::{DisconnectError, TimeoutError};
 use crate::common::protocol::Errors;
 use crate::common::requests::{ConcreteResponse, RequestBuilder, metadata_request};
-use crate::common::utils::{ExponentialBackoff, LogContext};
+use crate::common::utils::{ExponentialBackoff, LogContext, Time};
 use crate::common::{Error, Node};
 use crate::{kafka_debug, kafka_error, kafka_info, kafka_trace};
 
@@ -101,7 +101,8 @@ pub(crate) struct AdminClientRunnable<C: KafkaClient> {
     retry_backoff_ms: i64,
     max_retries: i32,
     request_timeout_ms: i32,
-    time_provider: Arc<dyn Fn() -> i64 + Send + Sync>,
+    /// Java: `KafkaAdminClient`'s `private final Time time`.
+    time: Arc<dyn Time>,
     shutdown: Arc<ShutdownSignal>,
     log_context: LogContext,
 }
@@ -123,7 +124,7 @@ impl<C: KafkaClient> AdminClientRunnable<C> {
         retry_backoff_ms: i64,
         max_retries: i32,
         request_timeout_ms: i32,
-        time_provider: Arc<dyn Fn() -> i64 + Send + Sync>,
+        time: Arc<dyn Time>,
         shutdown: Arc<ShutdownSignal>,
         log_context: LogContext,
     ) -> Self {
@@ -140,7 +141,7 @@ impl<C: KafkaClient> AdminClientRunnable<C> {
             retry_backoff_ms,
             max_retries,
             request_timeout_ms,
-            time_provider,
+            time,
             shutdown,
             log_context,
         }
@@ -207,7 +208,7 @@ impl<C: KafkaClient> AdminClientRunnable<C> {
         }
 
         // finally: time out any remaining calls, then close the client.
-        let now = (self.time_provider)();
+        let now = self.time.milliseconds();
         self.fail_all_remaining(now);
         self.client.close().await;
         kafka_debug!(self.log_context, "Shutdown of the Kafka admin client I/O task has completed.");
@@ -219,7 +220,7 @@ impl<C: KafkaClient> AdminClientRunnable<C> {
     async fn process_requests(&mut self) {
         loop {
             self.run_once().await;
-            let now = (self.time_provider)();
+            let now = self.time.milliseconds();
             if self.should_exit(now) {
                 break;
             }
@@ -277,7 +278,7 @@ impl<C: KafkaClient> AdminClientRunnable<C> {
         // 1. Drain freshly submitted calls into pending.
         self.drain_new_calls();
 
-        let now = (self.time_provider)();
+        let now = self.time.milliseconds();
 
         // 2. Time out expired calls; base poll timeout.
         let mut poll_timeout = Self::MAX_POLL_TIMEOUT_MS.min(self.handle_timeouts(now).await);
@@ -333,7 +334,7 @@ impl<C: KafkaClient> AdminClientRunnable<C> {
         }
 
         // 8. Handle responses.
-        let now = (self.time_provider)();
+        let now = self.time.milliseconds();
         self.handle_responses(now, responses).await;
     }
 

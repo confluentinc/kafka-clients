@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![expect(dead_code)]
+#![cfg_attr(not(test), expect(dead_code))]
 //! A network client for asynchronous request/response network I/O.
 //!
 //! This is an internal class used to implement the user-facing producer and
@@ -25,8 +25,9 @@
 use crate::common::security::authenticator::SaslClientAuthenticator;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicI64, AtomicU8, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+#[cfg(test)]
+use std::sync::atomic::AtomicI64;
+use std::sync::atomic::{AtomicU8, Ordering};
 
 use tokio::sync::Notify;
 
@@ -61,15 +62,7 @@ use super::{InFlightRequest, InFlightRequests};
 use crate::common::Error;
 use crate::common::errors::AuthenticationError;
 use crate::common::utils::LogContext;
-
-/// Returns current wall-clock time in milliseconds since the Unix epoch.
-/// This is the default time provider, equivalent to Java's `SystemTime`.
-fn system_time_ms() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system clock before Unix epoch")
-        .as_millis() as i64
-}
+use crate::common::utils::{SystemTime, Time};
 
 /// Internal state enum for the client lifecycle.
 const STATE_ACTIVE: u8 = 0;
@@ -133,13 +126,12 @@ pub struct NetworkClient<S: Selectable, H: HostResolver> {
     /// parameter. In Java, the `Time` instance provides this; here we store it
     /// explicitly.
     last_poll_time_ms: i64,
-    /// Provider of current wall-clock time in milliseconds (epoch).
-    /// Mirrors Java's `Time time` field — defaults to system clock,
-    /// tests supply a mock via `set_time_provider`.
-    time_provider: Arc<dyn Fn() -> i64 + Send + Sync>,
-    /// Shared storage for mock time support. When `set_mock_time()` is used,
-    /// `time_provider` reads from this; `poll()` writes `now` into it at entry.
-    /// For the default (system clock) provider this is unused.
+    /// Java: `private final Time time`. Defaults to [`SystemTime`]; the client
+    /// constructors inject their own clock via [`Self::set_time`].
+    time: Arc<dyn Time>,
+    /// Shared storage for the test-only clock installed by `set_mock_time()`:
+    /// `ready()` and `poll()` write their `now` into it at entry.
+    #[cfg(test)]
     poll_time_store: Arc<AtomicI64>,
 
     /// Contextual log message prefix.
@@ -324,7 +316,8 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
             state: Arc::new(AtomicU8::new(STATE_ACTIVE)),
             rand_offset: std::sync::Mutex::new(StdRng::from_os_rng()),
             last_poll_time_ms: 0,
-            time_provider: Arc::new(system_time_ms),
+            time: Arc::new(SystemTime),
+            #[cfg(test)]
             poll_time_store: Arc::new(AtomicI64::new(0)),
             log_context,
             metadata: Some(metadata),
@@ -401,7 +394,8 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
             state: Arc::new(AtomicU8::new(STATE_ACTIVE)),
             rand_offset: std::sync::Mutex::new(StdRng::from_os_rng()),
             last_poll_time_ms: 0,
-            time_provider: Arc::new(system_time_ms),
+            time: Arc::new(SystemTime),
+            #[cfg(test)]
             poll_time_store: Arc::new(AtomicI64::new(0)),
             log_context,
             metadata: None,
@@ -412,11 +406,11 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
         }
     }
 
-    /// Sets a custom time provider, replacing the default system clock.
-    /// This mirrors Java's ability to inject a `Time` instance (e.g. `MockTime`
-    /// in tests).
-    pub fn set_time_provider(&mut self, provider: Arc<dyn Fn() -> i64 + Send + Sync>) {
-        self.time_provider = provider;
+    /// Replaces the clock, which defaults to [`SystemTime`]. Java passes the
+    /// `Time` to the `NetworkClient` constructor; it is set after construction
+    /// here, like the throttle-time sensor below.
+    pub fn set_time(&mut self, time: Arc<dyn Time>) {
+        self.time = time;
     }
 
     /// Wires in the sensor that records every response's throttle time. Java
@@ -426,16 +420,15 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
         self.throttle_time_sensor = Some(sensor);
     }
 
-    /// Replaces the time provider with a mock that returns the `now` value
-    /// passed to each `poll()` call. Equivalent to Java's `MockTime` in tests.
+    /// Replaces the clock with one that returns the `now` value passed to the
+    /// latest `ready()` / `poll()` call.
     ///
     /// This is needed because `poll()` computes a fresh timestamp after
-    /// `selector.poll()` using `(self.time_provider)()`. For tests with mock
+    /// `selector.poll()` using `self.time.milliseconds()`. For tests with mock
     /// selectors (instant poll), the fresh timestamp should equal `now`.
     #[cfg(test)]
     fn set_mock_time(&mut self) {
-        let store = Arc::clone(&self.poll_time_store);
-        self.time_provider = Arc::new(move || store.load(Ordering::Relaxed));
+        self.time = Arc::new(PollTime(Arc::clone(&self.poll_time_store)));
     }
 
     /// Returns whether broker version discovery is enabled.
@@ -1473,6 +1466,7 @@ impl<S: Selectable, H: HostResolver> KafkaClient for NetworkClient<S, H> {
         }
 
         self.last_poll_time_ms = now;
+        #[cfg(test)]
         self.poll_time_store.store(now, Ordering::Relaxed);
 
         if self.is_ready(node, now) {
@@ -1512,6 +1506,7 @@ impl<S: Selectable, H: HostResolver> KafkaClient for NetworkClient<S, H> {
     async fn poll(&mut self, timeout: i64, now: i64) -> Vec<ClientResponse> {
         self.ensure_active();
         self.last_poll_time_ms = now;
+        #[cfg(test)]
         self.poll_time_store.store(now, Ordering::Relaxed);
 
         if !self.aborted_sends.is_empty() {
@@ -1528,7 +1523,7 @@ impl<S: Selectable, H: HostResolver> KafkaClient for NetworkClient<S, H> {
 
         // Compute a fresh timestamp after the (potentially blocking) poll,
         // matching Java's `long updatedNow = this.time.milliseconds()`.
-        let updated_now = (self.time_provider)();
+        let updated_now = self.time.milliseconds();
         self.last_poll_time_ms = updated_now;
 
         // Process completed actions
@@ -1763,6 +1758,22 @@ impl<S: Selectable, H: HostResolver> KafkaClient for NetworkClient<S, H> {
                 "Attempting to close NetworkClient that has already been closed."
             );
         }
+    }
+}
+
+/// Test clock for `NetworkClient::set_mock_time`: reads the `now` last passed to
+/// `ready()` / `poll()`.
+#[cfg(test)]
+struct PollTime(Arc<AtomicI64>);
+
+#[cfg(test)]
+impl Time for PollTime {
+    fn milliseconds(&self) -> i64 {
+        self.0.load(Ordering::Relaxed)
+    }
+
+    fn nanoseconds(&self) -> i64 {
+        self.milliseconds().saturating_mul(1_000_000)
     }
 }
 

@@ -26,7 +26,9 @@ use std::sync::atomic::{AtomicI64, Ordering};
 #[doc(alias = "org.apache.kafka.common.utils.MockTime")]
 #[derive(Debug)]
 pub(crate) struct MockTime {
-    auto_tick_ms: i64,
+    /// Java's `final long autoTickMs`. Atomic only so that
+    /// [`set_auto_tick_ms`](Self::set_auto_tick_ms) can change it.
+    auto_tick_ms: AtomicI64,
 
     // Values from `nanoTime` and `currentTimeMillis` are not comparable, so we
     // store them separately to allow tests using this class to detect bugs
@@ -60,10 +62,20 @@ impl MockTime {
         current_high_res_time_ns: i64,
     ) -> Self {
         Self {
-            auto_tick_ms,
+            auto_tick_ms: AtomicI64::new(auto_tick_ms),
             time_ms: AtomicI64::new(current_time_ms),
             high_res_time_ns: AtomicI64::new(current_high_res_time_ns),
         }
+    }
+
+    /// Changes the auto-tick applied on every clock read.
+    ///
+    /// Rust-only: Java's `autoTickMs` is `final`. A Java test chooses its tick when
+    /// it builds the `MockTime`, before the fixture; the Rust producer and
+    /// `Sender` fixtures build the clock inside a shared helper, so a test picks
+    /// its tick afterwards with this setter instead.
+    pub(crate) fn set_auto_tick_ms(&self, auto_tick_ms: i64) {
+        self.auto_tick_ms.store(auto_tick_ms, Ordering::SeqCst);
     }
 
     fn maybe_sleep(&self, ms: i64) {
@@ -112,13 +124,13 @@ impl Default for MockTime {
 impl Time for MockTime {
     #[doc(alias = "org.apache.kafka.common.utils.MockTime#milliseconds")]
     fn milliseconds(&self) -> i64 {
-        self.maybe_sleep(self.auto_tick_ms);
+        self.maybe_sleep(self.auto_tick_ms.load(Ordering::SeqCst));
         self.time_ms.load(Ordering::SeqCst)
     }
 
     #[doc(alias = "org.apache.kafka.common.utils.MockTime#nanoseconds")]
     fn nanoseconds(&self) -> i64 {
-        self.maybe_sleep(self.auto_tick_ms);
+        self.maybe_sleep(self.auto_tick_ms.load(Ordering::SeqCst));
         self.high_res_time_ns.load(Ordering::SeqCst)
     }
 }

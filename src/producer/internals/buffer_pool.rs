@@ -48,11 +48,7 @@ use crate::common::Error;
 use crate::common::metrics::TimeUnit;
 use crate::common::metrics::stats::Meter;
 use crate::common::metrics::{Metrics, Sensor};
-
-/// A provider of the current POSIX time in milliseconds. The Rust analog of
-/// Java's `Time.milliseconds()`, used as the timestamp when recording the
-/// wait-time sensor (`SenderMetrics` holds the same shape).
-type TimeProvider = Arc<dyn Fn() -> i64 + Send + Sync>;
+use crate::common::utils::Time;
 
 /// Mutable state protected by the lock.
 struct PoolInner {
@@ -104,8 +100,8 @@ pub struct BufferPool {
     poolable_size: usize,
     /// Whether the pool has been closed.
     closed: AtomicBool,
-    /// Provider of the current POSIX time in milliseconds (Java's `Time time`).
-    time_provider: TimeProvider,
+    /// Java: `private final Time time`.
+    time: Arc<dyn Time>,
     /// Sensor tracking the time an appender waits for space allocation
     /// (Java's `Sensor waitTime`, `WAIT_TIME_SENSOR_NAME`).
     wait_time_sensor: Arc<Sensor>,
@@ -131,14 +127,14 @@ impl BufferPool {
     /// * `memory` - The maximum amount of memory that this buffer pool can allocate
     /// * `poolable_size` - The buffer size to cache in the free list rather than deallocating
     /// * `metrics` - Instance of `Metrics`
-    /// * `time_provider` - Provider of the current POSIX time in milliseconds
+    /// * `time` - Time instance
     /// * `metric_grp_name` - Logical group name for metrics
     #[doc(alias = "org.apache.kafka.clients.producer.internals.BufferPool#BufferPool")]
     pub fn new(
         memory: i64,
         poolable_size: usize,
         metrics: Arc<Metrics>,
-        time_provider: TimeProvider,
+        time: Arc<dyn Time>,
         metric_grp_name: &str,
     ) -> Self {
         assert!(memory > 0, "Buffer pool memory must be positive");
@@ -201,7 +197,7 @@ impl BufferPool {
             total_memory: memory,
             poolable_size,
             closed: AtomicBool::new(false),
-            time_provider,
+            time,
             wait_time_sensor,
             buffer_exhausted_sensor,
             #[cfg(test)]
@@ -210,22 +206,16 @@ impl BufferPool {
     }
 
     /// Test-only convenience constructor that supplies a fresh reporter-less
-    /// [`Metrics`] registry and a system-clock time provider, mirroring Java's
+    /// [`Metrics`] registry and the system clock, mirroring Java's
     /// `BufferPoolTest` passing `new Metrics()`. Java has no metrics-less
     /// production constructor.
     #[cfg(test)]
     pub(crate) fn new_for_test(memory: i64, poolable_size: usize) -> Self {
-        let time_provider: TimeProvider = Arc::new(|| {
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_millis() as i64
-        });
         Self::new(
             memory,
             poolable_size,
             Arc::new(Metrics::new()),
-            time_provider,
+            Arc::new(crate::common::utils::SystemTime),
             "producer-metrics",
         )
     }
@@ -370,12 +360,13 @@ impl BufferPool {
 
             // Wait for notification (no lock held here). This is the await the
             // caller may be cancelled at, which is what `WaitGuard` exists for.
-            // The wait duration is measured in nanoseconds with a monotonic
-            // clock, the analog of Java's `time.nanoseconds()` bracketing
-            // `moreMemory.await(...)`.
-            let start_wait = std::time::Instant::now();
+            // The wait duration is measured with `time.nanoseconds()`
+            // bracketing `moreMemory.await(...)`, as in Java. The deadline
+            // itself stays on the tokio clock, which drives the timeout.
+            let start_wait_ns = self.time.nanoseconds();
             let timed_out = tokio::time::timeout(remaining, more_memory.notified()).await.is_err();
-            let time_ns = start_wait.elapsed().as_nanos() as i64;
+            let end_wait_ns = self.time.nanoseconds();
+            let time_ns = (end_wait_ns - start_wait_ns).max(0);
 
             // Java records the wait time in a `finally` — even when the wait
             // ends in timeout/close/error (`BufferPool.java:150-154`). If
@@ -446,7 +437,7 @@ impl BufferPool {
                     // elapsed, before throwing `BufferExhaustedException`
                     // (`BufferPool.java:160`). Recorded outside the pool lock
                     // (value/timestamp are independent of pool state).
-                    self.buffer_exhausted_sensor.record_value_time_ms(1.0, (self.time_provider)());
+                    self.buffer_exhausted_sensor.record_value_time_ms(1.0, self.time.milliseconds());
                     return Err(Error::buffer_exhausted(format!(
                         "Failed to allocate {} bytes within the configured max blocking time \
                          {} ms. Total memory: {} bytes. Available memory: {} bytes. \
@@ -482,7 +473,7 @@ impl BufferPool {
             ));
         }
         self.wait_time_sensor
-            .record_value_time_ms(time_ns as f64, (self.time_provider)());
+            .record_value_time_ms(time_ns as f64, self.time.milliseconds());
         Ok(())
     }
 
@@ -914,8 +905,13 @@ mod tests {
     #[tokio::test]
     async fn test_wait_and_exhausted_metrics_recorded() {
         let metrics = Arc::new(Metrics::new());
-        let time_provider: TimeProvider = Arc::new(|| 0);
-        let pool = BufferPool::new(2, 1, Arc::clone(&metrics), time_provider, "producer-metrics");
+        let pool = BufferPool::new(
+            2,
+            1,
+            Arc::clone(&metrics),
+            Arc::new(crate::common::utils::SystemTime),
+            "producer-metrics",
+        );
 
         // The four metric names are registered in the group.
         for name in [

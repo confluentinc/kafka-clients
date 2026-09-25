@@ -22,6 +22,7 @@ use std::io;
 
 use crate::common::Node;
 use crate::common::network::auth_io_error;
+use crate::common::utils::Time;
 
 use super::ClientRequest;
 use super::ClientResponse;
@@ -88,16 +89,13 @@ impl NetworkClientUtils {
     ///
     /// * `client` - The Kafka client to use
     /// * `node` - The node to await readiness for
-    /// * `now_ms_fn` - A function that returns the current time in milliseconds. `Sync`
-    ///   because this future is awaited inside the producer's spawned `Sender` task, so
-    ///   the `&dyn Fn()` reference must be `Send` — and a shared reference `&T` is `Send`
-    ///   exactly when `T: Sync`. `+ Send` on the trait object itself would be redundant.
+    /// * `time` - The time instance used to read the current time
     /// * `timeout_ms` - The maximum time to wait in milliseconds
     #[doc(alias = "org.apache.kafka.clients.NetworkClientUtils#awaitReady")]
     pub async fn await_ready<C: KafkaClient>(
         client: &mut C,
         node: &Node,
-        now_ms_fn: &(dyn Fn() -> i64 + Sync),
+        time: &dyn Time,
         timeout_ms: i64,
     ) -> (Vec<ClientResponse>, io::Result<bool>) {
         if timeout_ms < 0 {
@@ -110,7 +108,7 @@ impl NetworkClientUtils {
             );
         }
 
-        let start_time = now_ms_fn();
+        let start_time = time.milliseconds();
 
         // Accumulate the responses from every internal poll so the caller can route
         // them, rather than discarding them as a bare `client.poll(..)` would. The Vec
@@ -122,7 +120,7 @@ impl NetworkClientUtils {
             return (responses, Ok(true));
         }
 
-        let mut attempt_start_time = now_ms_fn();
+        let mut attempt_start_time = time.milliseconds();
         while !client.is_ready(node, attempt_start_time) && attempt_start_time - start_time < timeout_ms {
             if client.connection_failed(node) {
                 return (
@@ -159,7 +157,7 @@ impl NetworkClientUtils {
                 // the typed error does not double-prefix the class name (finding 231).
                 return (responses, Err(auth_io_error(auth_error.message())));
             }
-            attempt_start_time = now_ms_fn();
+            attempt_start_time = time.milliseconds();
         }
 
         (responses, Ok(client.is_ready(node, attempt_start_time)))
@@ -179,18 +177,18 @@ impl NetworkClientUtils {
     ///
     /// * `client` - The Kafka client to use
     /// * `request` - The request to send
-    /// * `now_ms_fn` - A function that returns the current time in milliseconds
+    /// * `time` - The time instance used to read the current time
     #[doc(alias = "org.apache.kafka.clients.NetworkClientUtils#sendAndReceive")]
     pub async fn send_and_receive<C: KafkaClient>(
         client: &mut C,
         request: ClientRequest,
-        now_ms_fn: &dyn Fn() -> i64,
+        time: &dyn Time,
     ) -> io::Result<ClientResponse> {
         let correlation_id = request.correlation_id();
-        client.send(request, now_ms_fn());
+        client.send(request, time.milliseconds());
 
         while client.active() {
-            let responses = client.poll(i64::MAX, now_ms_fn()).await;
+            let responses = client.poll(i64::MAX, time.milliseconds()).await;
             for response in responses {
                 if response.request_header().correlation_id() == correlation_id {
                     if response.was_disconnected() {

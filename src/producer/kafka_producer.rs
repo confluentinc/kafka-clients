@@ -189,8 +189,8 @@ pub struct KafkaProducer<K, V> {
     /// Wrapped in `Mutex<Option<_>>` so `close_with_timeout` can take ownership
     /// and `.await` it even though we only have `&self` (not `&mut self`).
     sender_handle: Mutex<Option<JoinHandle<()>>>,
-    /// Provider of current wall-clock time in milliseconds.
-    time_provider: Arc<dyn Fn() -> i64 + Send + Sync>,
+    /// Java: `private final Time time`.
+    time: Arc<dyn Time>,
     /// The metrics registry owned by this producer.
     ///
     /// Translated from Java's `Metrics metrics` field. Shared into
@@ -253,8 +253,8 @@ pub(crate) struct KafkaProducerOptions<'a, K, V> {
     /// Rust's counterpart of Java's `ioThread`, which the `:482` constructor also
     /// accepts as a pre-built value.
     pub sender_handle: Option<JoinHandle<()>>,
-    /// Provider of current wall-clock time. Java's `time`.
-    pub time_provider: Arc<dyn Fn() -> i64 + Send + Sync>,
+    /// The clock. Java's `time`.
+    pub time: Arc<dyn Time>,
     /// The shared transaction state, or `None` when idempotence is disabled.
     /// Java's `transactionManager`, which `:482` also accepts as `null`.
     pub transaction_manager: Option<Arc<Mutex<TransactionManager>>>,
@@ -284,7 +284,7 @@ pub(crate) struct KafkaProducerOptionsBuilder<'a, K, V> {
     force_close: Option<Arc<AtomicBool>>,
     wakeup: Option<Arc<Notify>>,
     sender_handle: Option<JoinHandle<()>>,
-    time_provider: Option<Arc<dyn Fn() -> i64 + Send + Sync>>,
+    time: Option<Arc<dyn Time>>,
     transaction_manager: Option<Arc<Mutex<TransactionManager>>>,
     pending_requests: Option<Arc<Mutex<PendingRequests>>>,
     partitioner: Option<Box<dyn Partitioner<K, V>>>,
@@ -310,7 +310,7 @@ impl<'a, K, V> KafkaProducerOptionsBuilder<'a, K, V> {
             force_close: None,
             wakeup: None,
             sender_handle: None,
-            time_provider: None,
+            time: None,
             transaction_manager: None,
             pending_requests: None,
             partitioner: None,
@@ -362,9 +362,9 @@ impl<'a, K, V> KafkaProducerOptionsBuilder<'a, K, V> {
         self.sender_handle = sender_handle;
         self
     }
-    /// Sets [`KafkaProducerOptions::time_provider`], a mandatory parameter.
-    pub(crate) fn set_time_provider(mut self, time_provider: Arc<dyn Fn() -> i64 + Send + Sync>) -> Self {
-        self.time_provider = Some(time_provider);
+    /// Sets [`KafkaProducerOptions::time`], a mandatory parameter.
+    pub(crate) fn set_time(mut self, time: Arc<dyn Time>) -> Self {
+        self.time = Some(time);
         self
     }
     /// Sets [`KafkaProducerOptions::transaction_manager`]; defaults to `None`.
@@ -393,7 +393,7 @@ impl<'a, K, V> KafkaProducerOptionsBuilder<'a, K, V> {
     /// them optional changes the set this accepts instead of adding a second
     /// constructor. Today there is one mandatory set: `config`,
     /// `key_serializer`, `value_serializer`, `metadata`, `accumulator`,
-    /// `time_provider` and `pending_requests`.
+    /// `time` and `pending_requests`.
     ///
     /// The other six are not in it for two distinct reasons. `sender_handle`,
     /// `transaction_manager` and `partitioner` are the parameters Java's `:482`
@@ -427,7 +427,7 @@ impl<'a, K, V> KafkaProducerOptionsBuilder<'a, K, V> {
             force_close: self.force_close.unwrap_or_else(|| Arc::new(AtomicBool::new(false))),
             wakeup: self.wakeup.unwrap_or_else(|| Arc::new(Notify::new())),
             sender_handle: self.sender_handle,
-            time_provider: self.time_provider.ok_or_else(|| Self::missing("time_provider"))?,
+            time: self.time.ok_or_else(|| Self::missing("time"))?,
             transaction_manager: self.transaction_manager,
             pending_requests: self.pending_requests.ok_or_else(|| Self::missing("pending_requests"))?,
             partitioner: self.partitioner,
@@ -472,8 +472,8 @@ pub(crate) struct KafkaProducerClientOptions<'a, K, V, C> {
     pub accumulator: Arc<RecordAccumulator>,
     /// The network client the sender task drives. Java's `kafkaClient`.
     pub client: C,
-    /// Provider of current wall-clock time. Java's `time`.
-    pub time_provider: Arc<dyn Fn() -> i64 + Send + Sync>,
+    /// The clock. Java's `time`.
+    pub time: Arc<dyn Time>,
     /// The producer's metrics registry.
     pub metrics: Arc<Metrics>,
     /// The producer-level metrics wrapper.
@@ -504,7 +504,7 @@ pub(crate) struct KafkaProducerClientOptionsBuilder<'a, K, V, C> {
     metadata: Option<Arc<ProducerMetadata>>,
     accumulator: Option<Arc<RecordAccumulator>>,
     client: Option<C>,
-    time_provider: Option<Arc<dyn Fn() -> i64 + Send + Sync>>,
+    time: Option<Arc<dyn Time>>,
     metrics: Option<Arc<Metrics>>,
     producer_metrics: Option<KafkaProducerMetrics>,
     sender_metrics_registry: Option<SenderMetricsRegistry>,
@@ -530,7 +530,7 @@ impl<'a, K, V, C> KafkaProducerClientOptionsBuilder<'a, K, V, C> {
             metadata: None,
             accumulator: None,
             client: None,
-            time_provider: None,
+            time: None,
             metrics: None,
             producer_metrics: None,
             sender_metrics_registry: None,
@@ -570,9 +570,9 @@ impl<'a, K, V, C> KafkaProducerClientOptionsBuilder<'a, K, V, C> {
         self.client = Some(client);
         self
     }
-    /// Sets [`KafkaProducerClientOptions::time_provider`], a mandatory parameter.
-    pub(crate) fn set_time_provider(mut self, time_provider: Arc<dyn Fn() -> i64 + Send + Sync>) -> Self {
-        self.time_provider = Some(time_provider);
+    /// Sets [`KafkaProducerClientOptions::time`], a mandatory parameter.
+    pub(crate) fn set_time(mut self, time: Arc<dyn Time>) -> Self {
+        self.time = Some(time);
         self
     }
     /// Sets [`KafkaProducerClientOptions::metrics`], a mandatory parameter.
@@ -630,7 +630,7 @@ impl<'a, K, V, C> KafkaProducerClientOptionsBuilder<'a, K, V, C> {
             metadata: self.metadata.ok_or_else(|| Self::missing("metadata"))?,
             accumulator: self.accumulator.ok_or_else(|| Self::missing("accumulator"))?,
             client: self.client.ok_or_else(|| Self::missing("client"))?,
-            time_provider: self.time_provider.ok_or_else(|| Self::missing("time_provider"))?,
+            time: self.time.ok_or_else(|| Self::missing("time"))?,
             metrics: self.metrics.ok_or_else(|| Self::missing("metrics"))?,
             producer_metrics: self.producer_metrics.ok_or_else(|| Self::missing("producer_metrics"))?,
             sender_metrics_registry: self
@@ -711,7 +711,7 @@ impl<K, V> KafkaProducer<K, V> {
             force_close,
             wakeup,
             sender_handle,
-            time_provider,
+            time,
             transaction_manager,
             pending_requests,
             partitioner,
@@ -737,7 +737,7 @@ impl<K, V> KafkaProducer<K, V> {
             force_close,
             wakeup,
             sender_handle: Mutex::new(sender_handle),
-            time_provider,
+            time,
             metrics,
             producer_metrics,
             log_context,
@@ -945,13 +945,8 @@ impl<K, V> KafkaProducer<K, V> {
         // at its default level.
         let compression = Compression::of(config.compression_type).build();
 
-        // 4. Create a system clock time provider
-        let time_provider: Arc<dyn Fn() -> i64 + Send + Sync> = Arc::new(|| {
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_millis() as i64
-        });
+        // 4. The system clock, Java's `Time.SYSTEM`
+        let time: Arc<dyn Time> = Arc::new(SystemTime);
 
         // 5. Create ProducerMetadata and bootstrap it with the resolved addresses
         let metadata = Arc::new(ProducerMetadata::with_log_context(
@@ -985,11 +980,12 @@ impl<K, V> KafkaProducer<K, V> {
         // class is `ConfigException`, inside the `KafkaException` hierarchy;
         // `illegal_argument` put it outside, where `is_kafka_error()` is `false`.
         .map_err(|e| Error::config_message(format!("Failed to create channel builder: {}", e)))?;
-        let selector = Selector::with_defaults_and_log_context(
+        let mut selector = Selector::with_defaults_and_log_context(
             config.connections_max_idle_ms,
             channel_builder,
             log_context.clone(),
         );
+        selector.set_time(Arc::clone(&time));
         let api_versions = Arc::new(ApiVersions::new());
 
         let mut client = NetworkClient::with_metadata_rebootstrap_trigger_ms(
@@ -1052,7 +1048,7 @@ impl<K, V> KafkaProducer<K, V> {
         }
 
         // 10. Create BufferPool and RecordAccumulator, threading the shared
-        //    `Arc<Metrics>` and time provider into both (KafkaProducer.java:438
+        //    `Arc<Metrics>` and `time` into both (KafkaProducer.java:438
         //    passes `metrics`/`time` to the `BufferPool` and `RecordAccumulator`).
         //    As per Kafka configuration documentation, batch.size may be set to 0
         //    to explicitly disable batching, which in practice uses a batch size of 1.
@@ -1061,7 +1057,7 @@ impl<K, V> KafkaProducer<K, V> {
             config.buffer_memory,
             batch_size as usize,
             Arc::clone(&metrics),
-            Arc::clone(&time_provider),
+            Arc::clone(&time),
             Self::PRODUCER_METRIC_GROUP_NAME,
         ));
         let accumulator = Arc::new(RecordAccumulator::with_log_context(
@@ -1098,6 +1094,7 @@ impl<K, V> KafkaProducer<K, V> {
         let throttle_sensor = SenderStatics::throttle_time_sensor(&sender_metrics_registry)
             .expect("registering produce-throttle-time sensor");
         client.set_throttle_time_sensor(throttle_sensor);
+        client.set_time(Arc::clone(&time));
 
         // 12. Wire up the Sender and spawn the I/O background task
         Ok(Self::with_client_options(
@@ -1108,7 +1105,7 @@ impl<K, V> KafkaProducer<K, V> {
                 .set_metadata(metadata)
                 .set_accumulator(accumulator)
                 .set_client(client)
-                .set_time_provider(time_provider)
+                .set_time(time)
                 .set_metrics(metrics)
                 .set_producer_metrics(producer_metrics)
                 .set_sender_metrics_registry(sender_metrics_registry)
@@ -1207,7 +1204,7 @@ impl<K, V> KafkaProducer<K, V> {
             metadata,
             accumulator,
             client,
-            time_provider,
+            time,
             metrics,
             producer_metrics,
             sender_metrics_registry,
@@ -1237,7 +1234,7 @@ impl<K, V> KafkaProducer<K, V> {
             sender_metrics_registry,
             Arc::clone(&running),
             Arc::clone(&force_close),
-            Arc::clone(&time_provider),
+            Arc::clone(&time),
             transaction_manager.clone(),
             Arc::clone(&pending_requests),
             log_context.clone(),
@@ -1271,7 +1268,7 @@ impl<K, V> KafkaProducer<K, V> {
             force_close,
             wakeup,
             sender_handle: Mutex::new(Some(sender_handle)),
-            time_provider,
+            time,
             metrics,
             producer_metrics,
             log_context,
@@ -1302,14 +1299,6 @@ impl<K, V> KafkaProducer<K, V> {
         let metrics = Arc::new(Metrics::with_default_config(Arc::new(metric_config)));
         let producer_metrics = KafkaProducerMetrics::new(Arc::clone(&metrics));
         (metrics, producer_metrics)
-    }
-
-    /// A monotonic nanosecond reading, the analog of Java's
-    /// `time.nanoseconds()` (`System.nanoTime()`), used for the per-call
-    /// latency metrics. Matches the source the consumer uses for
-    /// `commit-sync-time-ns-total`.
-    fn now_nanos() -> i64 {
-        SystemTime.nanoseconds()
     }
 
     /// Validate and optionally adjust `delivery.timeout.ms` against
@@ -1369,9 +1358,9 @@ impl<K, V> KafkaProducer<K, V> {
         &self.client_id
     }
 
-    /// Returns the current time in milliseconds from the time provider.
+    /// Returns the current time in milliseconds from `time`.
     fn now_ms(&self) -> i64 {
-        (self.time_provider)()
+        self.time.milliseconds()
     }
 
     /// `max.block.ms` as a [`Duration`], for the four transactional methods that
@@ -2168,7 +2157,7 @@ impl<K, V> KafkaProducer<K, V> {
         // `producerMetrics.recordMetadataWait(time.nanoseconds() - nowNanos)`
         // once the loop succeeds. A timeout inside the loop throws before the
         // record, so only successful waits are recorded — preserved here.
-        let now_nanos = Self::now_nanos();
+        let now_nanos = self.time.nanoseconds();
 
         // Issue metadata requests until we have metadata for the topic and the
         // requested partition, or until max_wait_ms is exceeded.
@@ -2236,7 +2225,7 @@ impl<K, V> KafkaProducer<K, V> {
                 Some(count) => partition.is_none() || partition.unwrap() < count as i32,
             };
             if done {
-                self.producer_metrics.record_metadata_wait(Self::now_nanos() - now_nanos);
+                self.producer_metrics.record_metadata_wait(self.time.nanoseconds() - now_nanos);
                 return Ok(ClusterAndWaitTime { cluster, waited_on_metadata_ms: elapsed });
             }
         }
@@ -2564,11 +2553,11 @@ where
         // (`KafkaProducer.java:1231/1239`). `await_flush_completion` returns
         // `()` (no error channel), so the finally reduces to recording after
         // the await.
-        let start = Self::now_nanos();
+        let start = self.time.nanoseconds();
         self.accumulator.begin_flush();
         self.wakeup.notify_one();
         self.accumulator.await_flush_completion().await;
-        self.producer_metrics.record_flush(Self::now_nanos() - start);
+        self.producer_metrics.record_flush(self.time.nanoseconds() - start);
         Ok(())
     }
 
@@ -2671,8 +2660,8 @@ impl<K, V> Drop for KafkaProducer<K, V> {
 
 #[cfg(test)]
 mod tests {
+    use crate::common::utils::MockTime;
     use std::collections::HashMap;
-    use std::sync::atomic::AtomicI64;
 
     use super::*;
     use crate::MockClient;
@@ -2701,13 +2690,8 @@ mod tests {
     const PRODUCER_ID: i64 = 1;
     const EPOCH: i16 = 5;
 
-    fn default_time_provider() -> Arc<dyn Fn() -> i64 + Send + Sync> {
-        Arc::new(|| {
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_millis() as i64
-        })
+    fn default_time() -> Arc<dyn Time> {
+        Arc::new(SystemTime)
     }
 
     fn create_metadata_with_topic(topic: &str, num_partitions: i32) -> Arc<ProducerMetadata> {
@@ -2802,7 +2786,7 @@ mod tests {
                 .set_running(running)
                 .set_force_close(force_close)
                 .set_wakeup(wakeup)
-                .set_time_provider(default_time_provider())
+                .set_time(default_time())
                 .set_pending_requests(Arc::new(Mutex::new(PendingRequests::new())))
                 .build()
                 .expect("KafkaProducerOptionsBuilder::build: every mandatory parameter is set above"),
@@ -2831,7 +2815,7 @@ mod tests {
                 .set_value_serializer(Box::new(StringSerializer))
                 .set_metadata(metadata)
                 .set_accumulator(accumulator)
-                .set_time_provider(default_time_provider())
+                .set_time(default_time())
                 .set_pending_requests(Arc::new(Mutex::new(PendingRequests::new())))
                 .build()
                 .expect("KafkaProducerOptionsBuilder::build: every mandatory parameter is set above"),
@@ -3719,7 +3703,7 @@ mod tests {
                 .set_running(running)
                 .set_force_close(force_close)
                 .set_wakeup(wakeup)
-                .set_time_provider(default_time_provider())
+                .set_time(default_time())
                 .set_pending_requests(Arc::new(Mutex::new(PendingRequests::new())))
                 .set_partitioner(Some(partitioner))
                 .build()
@@ -4798,7 +4782,7 @@ mod tests {
                     .set_value_serializer(Box::new(StringSerializer))
                     .set_metadata(Arc::clone(&metadata))
                     .set_accumulator(accumulator)
-                    .set_time_provider(default_time_provider())
+                    .set_time(default_time())
                     .set_transaction_manager(transaction_manager)
                     .set_pending_requests(Arc::new(Mutex::new(PendingRequests::new())))
                     .build()
@@ -4880,7 +4864,7 @@ mod tests {
                     .set_value_serializer(Box::new(StringSerializer))
                     .set_metadata(Arc::clone(&metadata))
                     .set_accumulator(accumulator)
-                    .set_time_provider(default_time_provider())
+                    .set_time(default_time())
                     .set_pending_requests(Arc::new(Mutex::new(PendingRequests::new())))
                     .set_partitioner(partitioner)
                     .build()
@@ -4975,35 +4959,11 @@ mod tests {
         );
     }
 
-    /// Shared mock clock, the same shape `SenderTest`'s uses.
-    struct MockTime {
-        now_ms: AtomicI64,
-        auto_tick_ms: AtomicI64,
-    }
-
-    impl MockTime {
-        fn new(initial: i64) -> Arc<Self> {
-            Arc::new(Self { now_ms: AtomicI64::new(initial), auto_tick_ms: AtomicI64::new(0) })
-        }
-
-        /// Advances the clock by `ms` on every read, mirroring Java's
-        /// `new MockTime(autoTickMs)`.
-        fn set_auto_tick(&self, ms: i64) {
-            self.auto_tick_ms.store(ms, Ordering::Release);
-        }
-
-        fn milliseconds(&self) -> i64 {
-            let tick = self.auto_tick_ms.load(Ordering::Acquire);
-            if tick == 0 {
-                return self.now_ms.load(Ordering::Acquire);
-            }
-            self.now_ms.fetch_add(tick, Ordering::AcqRel) + tick
-        }
-
-        fn as_provider(self: &Arc<Self>) -> Arc<dyn Fn() -> i64 + Send + Sync> {
-            let time = Arc::clone(self);
-            Arc::new(move || time.milliseconds())
-        }
+    /// Java's `new MockTime()` started at `initial_ms`, with a frozen monotonic clock.
+    fn mock_time(initial_ms: i64) -> Arc<MockTime> {
+        Arc::new(MockTime::with_auto_tick_ms_current_time_ms_current_high_res_time_ns(
+            0, initial_ms, 0,
+        ))
     }
 
     /// A `KafkaProducer` and the `Sender` that serves it, sharing every piece of
@@ -5045,7 +5005,7 @@ mod tests {
             }
             let config = ProducerConfig::new(&props).expect("valid config");
             let log_context = LogContext::new(format!("[Producer clientId={}] ", config.client_id));
-            let time = MockTime::new(1_000);
+            let time = mock_time(1_000);
             let api_versions = Arc::new(ApiVersions::new());
             if transaction_v2 {
                 seed_transaction_version(&api_versions, 2);
@@ -5084,7 +5044,7 @@ mod tests {
                 config.buffer_memory,
                 batch_size as usize,
                 Arc::clone(&metrics),
-                time.as_provider(),
+                Arc::clone(&time) as Arc<dyn Time>,
                 KafkaProducer::<String, String>::PRODUCER_METRIC_GROUP_NAME,
             ));
             let accumulator = Arc::new(RecordAccumulator::with_log_context(
@@ -5105,7 +5065,7 @@ mod tests {
                 log_context.clone(),
             ));
 
-            let client = MockClient::with_static_nodes(vec![coordinator_node()], time.as_provider());
+            let client = MockClient::with_static_nodes(vec![coordinator_node()], Arc::clone(&time) as Arc<dyn Time>);
             let wakeup = client.wakeup_notify();
             let running = Arc::new(AtomicBool::new(true));
             let force_close = Arc::new(AtomicBool::new(false));
@@ -5123,7 +5083,7 @@ mod tests {
                 SenderMetricsRegistry::new(Arc::clone(&metrics)),
                 Arc::clone(&running),
                 Arc::clone(&force_close),
-                time.as_provider(),
+                Arc::clone(&time) as Arc<dyn Time>,
                 Some(Arc::clone(&transaction_manager)),
                 Arc::clone(&pending_requests),
                 log_context.clone(),
@@ -5139,7 +5099,7 @@ mod tests {
                     .set_running(running)
                     .set_force_close(force_close)
                     .set_wakeup(wakeup)
-                    .set_time_provider(time.as_provider())
+                    .set_time(Arc::clone(&time) as Arc<dyn Time>)
                     .set_transaction_manager(Some(Arc::clone(&transaction_manager)))
                     .set_pending_requests(pending_requests)
                     .build()
@@ -5202,7 +5162,7 @@ mod tests {
     /// `MockClient::poll` returns immediately, so the yield is what lets the runtime
     /// run `op` and fire its `max.block.ms` timer, and it is also what keeps the
     /// injected `MockTime` advancing (each `run_once` reads the clock several times, so
-    /// with `set_auto_tick` the loop is the only thing that moves time — a Java
+    /// with `set_auto_tick_ms` the loop is the only thing that moves time — a Java
     /// `MockTime(1)` plus a hot Sender thread behaves the same way).
     ///
     /// A free function rather than a method on [`TxnProducerContext`] so callers can
@@ -5213,7 +5173,7 @@ mod tests {
         // test that legitimately waits a timeout out busy-spins this loop —
         // `run_once` + `yield_now`, neither of which sleeps — for the whole real-time
         // window. That is an unbounded, machine-speed-dependent number of iterations,
-        // especially when MockTime is frozen (no `set_auto_tick`, as in
+        // especially when MockTime is frozen (no `set_auto_tick_ms`, as in
         // `test_init_transactions_response_after_timeout`). An iteration cap could not be
         // sized to let those tests pass *and* fail a genuine hang fast; a wall-clock
         // budget can. It comfortably exceeds the longest `max.block.ms` any drive-based
@@ -5299,7 +5259,7 @@ mod tests {
         let mut ctx = TxnProducerContext::new(&[("transactional.id", "bad-transaction"), ("max.block.ms", "500")], 1);
         // Coarser tick reaches the simulated 500ms deadline in fewer real
         // `drive()` iterations, reducing flakiness under CPU contention.
-        ctx.time.set_auto_tick(20);
+        ctx.time.set_auto_tick_ms(20);
         let node = coordinator_node();
         ctx.sender
             .client_mut()
@@ -5386,7 +5346,7 @@ mod tests {
         // Java's `new MockTime(1)`: without a ticking clock `awaitNodeReady`'s
         // `now - startTime < timeout` never advances, because this test drives the
         // Sender itself and nothing else moves the clock.
-        ctx.time.set_auto_tick(1);
+        ctx.time.set_auto_tick_ms(1);
         let node = coordinator_node();
         ctx.sender.client_mut().throttle(&node, 5000);
         ctx.prepare_init_transactions(Errors::None, PRODUCER_ID, EPOCH);
@@ -5416,7 +5376,7 @@ mod tests {
             ],
             1,
         );
-        ctx.time.set_auto_tick(1);
+        ctx.time.set_auto_tick_ms(1);
         let node = coordinator_node();
         ctx.sender
             .client_mut()
@@ -6023,7 +5983,7 @@ mod tests {
     async fn test_commit_transaction_with_record_too_large_error() {
         let mut ctx =
             TxnProducerContext::new(&[("transactional.id", TRANSACTIONAL_ID), ("max.request.size", "1000")], 1);
-        ctx.time.set_auto_tick(1);
+        ctx.time.set_auto_tick_ms(1);
         init_transactions(&mut ctx).await;
         ctx.producer.begin_transaction().expect("beginTransaction");
 
@@ -6227,7 +6187,7 @@ mod tests {
     #[doc(alias = "org.apache.kafka.clients.producer.KafkaProducerTest#testSendTxnOffsetsWithGroupId")]
     async fn test_send_txn_offsets_with_group_id() {
         let mut ctx = TxnProducerContext::new(&[("transactional.id", TRANSACTIONAL_ID), ("max.block.ms", "10000")], 1);
-        ctx.time.set_auto_tick(1);
+        ctx.time.set_auto_tick_ms(1);
         let node = coordinator_node();
         ctx.sender.client_mut().throttle(&node, 5000);
         init_transactions(&mut ctx).await;
@@ -6266,7 +6226,7 @@ mod tests {
     #[doc(alias = "org.apache.kafka.clients.producer.KafkaProducerTest#testSendTxnOffsetsWithGroupMetadata")]
     async fn test_send_txn_offsets_with_group_metadata() {
         let mut ctx = TxnProducerContext::new(&[("transactional.id", TRANSACTIONAL_ID), ("max.block.ms", "10000")], 1);
-        ctx.time.set_auto_tick(1);
+        ctx.time.set_auto_tick_ms(1);
         let node = coordinator_node();
         ctx.sender.client_mut().throttle(&node, 5000);
         init_transactions(&mut ctx).await;
@@ -6310,7 +6270,7 @@ mod tests {
     )]
     async fn test_invalid_generation_id_and_member_id_combined_in_send_offsets() {
         let mut ctx = TxnProducerContext::new(&[("transactional.id", TRANSACTIONAL_ID), ("max.block.ms", "10000")], 1);
-        ctx.time.set_auto_tick(1);
+        ctx.time.set_auto_tick_ms(1);
         let node = coordinator_node();
         ctx.sender.client_mut().throttle(&node, 5000);
         init_transactions(&mut ctx).await;
@@ -6391,7 +6351,7 @@ mod tests {
     #[doc(alias = "org.apache.kafka.clients.producer.KafkaProducerTest#testTransactionV2Produce")]
     async fn test_transaction_v2_produce() {
         let mut ctx = TxnProducerContext::transactional_v2(&[("transactional.id", "some-txn")], 1);
-        ctx.time.set_auto_tick(1);
+        ctx.time.set_auto_tick_ms(1);
         let node = coordinator_node();
         ctx.sender
             .client_mut()
@@ -6443,7 +6403,7 @@ mod tests {
     )]
     async fn test_transaction_v2_produce_with_concurrent_transaction_error() {
         let mut ctx = TxnProducerContext::transactional_v2(&[("transactional.id", "some-txn")], 1);
-        ctx.time.set_auto_tick(1);
+        ctx.time.set_auto_tick_ms(1);
         let node = coordinator_node();
         ctx.sender
             .client_mut()
@@ -6496,7 +6456,7 @@ mod tests {
             &[("transactional.id", TRANSACTIONAL_ID), ("max.block.ms", "10000")],
             1,
         );
-        ctx.time.set_auto_tick(1);
+        ctx.time.set_auto_tick_ms(1);
         let node = coordinator_node();
         ctx.sender.client_mut().throttle(&node, 5000);
         ctx.prepare_init_transactions(Errors::None, PRODUCER_ID, EPOCH);
@@ -6549,7 +6509,7 @@ mod tests {
     #[doc(alias = "org.apache.kafka.clients.producer.KafkaProducerTest#testMeasureAbortTransactionDuration")]
     async fn test_measure_abort_transaction_duration() {
         let mut ctx = TxnProducerContext::transactional();
-        ctx.time.set_auto_tick(1);
+        ctx.time.set_auto_tick_ms(1);
         init_transactions(&mut ctx).await;
 
         for attempt in 0..2 {
@@ -6581,7 +6541,7 @@ mod tests {
         let mut ctx = TxnProducerContext::new(&[("transactional.id", TRANSACTIONAL_ID), ("max.block.ms", "10000")], 1);
         // Java's `new MockTime(Duration.ofSeconds(1).toMillis())` — a one-second tick,
         // which is what made the duration assertions meaningful.
-        ctx.time.set_auto_tick(1000);
+        ctx.time.set_auto_tick_ms(1000);
         init_transactions(&mut ctx).await;
 
         const GROUP_ID: &str = "group";
@@ -6655,7 +6615,7 @@ mod tests {
         }
         let config = ProducerConfig::new(&props).expect("valid config");
         let log_context = LogContext::new(format!("[Producer clientId={}] ", config.client_id));
-        let time = MockTime::new(1_000);
+        let time = mock_time(1_000);
         let api_versions = Arc::new(ApiVersions::new());
 
         let transaction_manager =
@@ -6683,7 +6643,7 @@ mod tests {
             config.buffer_memory,
             batch_size as usize,
             Arc::clone(&metrics),
-            time.as_provider(),
+            Arc::clone(&time) as Arc<dyn Time>,
             KafkaProducer::<String, String>::PRODUCER_METRIC_GROUP_NAME,
         ));
         let accumulator = Arc::new(RecordAccumulator::with_log_context(
@@ -6704,7 +6664,7 @@ mod tests {
             log_context,
         ));
 
-        let mut client = MockClient::with_static_nodes(vec![coordinator_node()], time.as_provider());
+        let mut client = MockClient::with_static_nodes(vec![coordinator_node()], Arc::clone(&time) as Arc<dyn Time>);
         prepare(&mut client);
         let wakeup = client.wakeup_notify();
         let running = Arc::new(AtomicBool::new(true));
@@ -6724,7 +6684,7 @@ mod tests {
             SenderMetricsRegistry::new(Arc::clone(&metrics)),
             Arc::clone(&running),
             Arc::clone(&force_close),
-            time.as_provider(),
+            Arc::clone(&time) as Arc<dyn Time>,
             Some(Arc::clone(&transaction_manager)),
             Arc::clone(&pending_requests),
             LogContext::empty(),
@@ -6768,7 +6728,7 @@ mod tests {
                 .set_force_close(force_close)
                 .set_wakeup(wakeup)
                 .set_sender_handle(Some(sender_handle))
-                .set_time_provider(time.as_provider())
+                .set_time(Arc::clone(&time) as Arc<dyn Time>)
                 .set_transaction_manager(Some(transaction_manager))
                 .set_pending_requests(pending_requests)
                 .build()
