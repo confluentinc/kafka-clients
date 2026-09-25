@@ -177,3 +177,4 @@
 - [Skips recorded in prose](skips_recorded_in_prose.md) — untranslated tests park in comments, not just #[ignore]; grep the Rust tree for the blocker's words
 - [Nullable array default](generator_nullable_array_default.md) — a new guard's first failures are wrong defaults; Java's array default is empty, not null
 - [Docker wedged → --no-verify](workflow_docker_wedged_no_verify.md) — pre-commit runs make verify-sandbox (needs Docker); run the non-Docker gate and say the rest is owed
+- [M14 verifiable-clients](m14_verifiable_clients_notes.md) — tools crate; EventReporter Arc split for listener/callback; Box<dyn Consumer> (dyn-compatible) not generic; StringDeserializer in main crate; JSON stdout is the wire
