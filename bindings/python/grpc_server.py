@@ -49,7 +49,8 @@ import grpc
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 # The gRPC integration servers speak the new ``confluent_kafka`` package
-# (spec §4), not the retired top-level ``producer.py`` / ``consumer.py``.
+# (CLAUDE.md, Python Binding Conventions, Modules), not the retired top-level
+# ``producer.py`` / ``consumer.py``.
 from confluent_kafka.producer import KafkaProducer, MockProducer  # noqa: E402
 from confluent_kafka.consumer import (  # noqa: E402
     KafkaConsumer,
@@ -179,7 +180,10 @@ class ProducerService(pb_grpc.ProducerServiceServicer):
             # Empty config selects MockProducer for client-side smoke
             # testing — useful when developing without a real broker.
             if not config or all(not v for v in config.values()):
-                producer = MockProducer(auto_complete=True)
+                # Java's MockProducer(autoComplete, partitioner, keySerializer,
+                # valueSerializer); a None serializer is bytes_serializer().
+                producer = MockProducer(auto_complete=True, partitioner=None,
+                                 key_serializer=None, value_serializer=None)
             else:
                 producer = KafkaProducer(configs=config)
         except Exception as e:  # noqa: BLE001
@@ -366,8 +370,8 @@ class ProducerService(pb_grpc.ProducerServiceServicer):
         return self._close(request.producer_id, None)
 
     def CloseTimeout(self, request, context):
-        # The new KafkaProducer.close(*, timeout=...) has a timed FFI form, so
-        # the timeout is wired (D7). timeout_ms is milliseconds; Duration is
+        # KafkaProducer.close(*, timeout=...) is Java's close(Duration), the
+        # FFI's close_with_timeout. timeout_ms is milliseconds; Duration is
         # seconds / timedelta.
         timeout = _dt.timedelta(milliseconds=request.timeout_ms)
         return self._close(request.producer_id, timeout)
