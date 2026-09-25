@@ -710,3 +710,52 @@ def test_commit_callback_of_a_failed_commit_gets_null_offsets(kafka_broker: Any)
         assert isinstance(error, RetriableCommitFailedError)
     finally:
         consumer.close(option=CloseOptions.timeout(0))
+
+
+# ---------------------------------------------------------------------------
+# ConsumerRecords.next_offsets() past a transaction marker (Critic 76 F5):
+# Java's FetchCollector reports the fetch's next offset, the position after the
+# poll. The FFI's ConsumerRecords has no next-offsets accessor, so the binding
+# recomputes last offset + 1 (ffi-overload-gaps.md).
+# ---------------------------------------------------------------------------
+def _transactional_topic(broker: Any, values: list[str]) -> str:
+    topic = f"py-consumer-txn-{uuid.uuid4().hex[:12]}"
+    create_topic(broker, topic)
+    producer: KafkaProducer[str, str] = KafkaProducer(
+        configs={"bootstrap.servers": broker.external_bootstrap,
+                 "transactional.id": f"py-txn-{uuid.uuid4().hex[:12]}"},
+        key_serializer=string_serializer(), value_serializer=string_serializer())
+    try:
+        producer.init_transactions()
+        producer.begin_transaction()
+        for value in values:
+            producer.send(record=ProducerRecord(topic=topic, partition=0, value=value))
+        producer.commit_transaction()
+    finally:
+        producer.close()
+    return topic
+
+
+@pytest.mark.skip(reason=(
+    "The FFI's ConsumerRecords has no next-offsets accessor (ffi-overload-gaps.md): "
+    "next_offsets() is the last offset + 1 (3), Java's is past the commit marker (4)"))
+def test_next_offsets_skip_the_transaction_marker(kafka_broker: Any) -> None:
+    # Offsets 0-2 are the records, 3 the commit marker.
+    topic = _transactional_topic(kafka_broker, ["a", "b", "c"])
+    tp = TopicPartition(topic=topic, partition=0)
+    consumer: KafkaConsumer[str, str] = KafkaConsumer(
+        configs=_configs(kafka_broker, **{"isolation.level": "read_committed"}),
+        value_deserializer=string_deserializer())
+    try:
+        consumer.assign(partitions=[tp])
+        deadline = time.monotonic() + DEADLINE
+        while True:
+            assert time.monotonic() < deadline, "no records"
+            records = consumer.poll(timeout=0.5)
+            if not records.is_empty():
+                break
+        assert [r.value() for r in records] == ["a", "b", "c"]
+        assert consumer.position(partition=tp) == 4
+        assert records.next_offsets()[tp].offset() == 4
+    finally:
+        consumer.close(option=CloseOptions.timeout(0))

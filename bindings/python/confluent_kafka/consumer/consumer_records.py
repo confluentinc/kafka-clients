@@ -106,7 +106,16 @@ class ConsumerRecords(Generic[K, V]):
     def next_offsets(self) -> dict[TopicPartition, OffsetAndMetadata]:
         """Get the next offsets and metadata corresponding to all topic
         partitions for which the position have been advanced in this poll
-        call."""
+        call.
+
+        On the records a ``KafkaConsumer`` / ``AsyncKafkaConsumer`` ``poll()``
+        returns, a partition's next offset is its last returned record's offset
+        + 1 (with that record's leader epoch), and a partition that returned no
+        record is absent. Java's is the fetch's next offset, the position after
+        the poll: past trailing control records (transaction markers) and a
+        compacted tail, and present for a partition whose poll only advanced
+        past them. The FFI does not expose the core's next offsets yet
+        (``ffi-overload-gaps.md``)."""
         global _tainted_next_offsets_last_log_s
         if self._tainted:
             now = time.monotonic()
