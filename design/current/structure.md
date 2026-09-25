@@ -158,7 +158,7 @@ src/consumer/               # 19 files + 48 internals + 9 events
 │   consumer_group_metadata.rs, consumer_rebalance_listener.rs,
 │   consumer_rebalance_listener_method_name.rs, offset_commit_callback.rs,
 │   offset_and_metadata.rs, offset_and_timestamp.rs,
-│   offset_reset_strategy.rs, group_protocol.rs, close_options.rs,
+│   group_protocol.rs, close_options.rs,
 │   subscription_pattern.rs, interceptor.rs, errors.rs,
 │   consumer_partition_assignor.rs   # Assignment/Subscription holders only
 └── internals/

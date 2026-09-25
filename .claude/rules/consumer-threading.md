@@ -375,7 +375,7 @@ compatibility but is NOT in scope now.
     `ConsumerConfig`, `ConsumerRecord`, `ConsumerRecords`,
     `ConsumerGroupMetadata`, `ConsumerRebalanceListener`,
     `OffsetCommitCallback`, `OffsetAndMetadata`, `OffsetAndTimestamp`,
-    `OffsetResetStrategy`, `GroupProtocol`, `CloseOptions`,
+    `GroupProtocol`, `CloseOptions`,
     `SubscriptionPattern`, the consumer exception hierarchy.
 
 **Out of scope (do NOT translate):**
