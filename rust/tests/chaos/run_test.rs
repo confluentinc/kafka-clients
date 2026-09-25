@@ -213,6 +213,18 @@ async fn run_action(
             let topic = pick_topic(rng, harness);
             harness.recreate_topic(&topic, Duration::from_secs(cfg.dwell_s)).await;
         },
+        ActionKind::AllBrokersDown => {
+            // Every broker that is up; one kept down by --leave-broker-down
+            // stays down.
+            let nodes = (1..=cfg.brokers).filter(|b| cfg.leave_broker_down != Some(*b)).collect();
+            ChaosAction::AllBrokersDown {
+                nodes,
+                outage: Duration::from_secs(cfg.outage_s),
+                wait_up: cfg.up_wait_dur(),
+            }
+            .execute(brokers, admin, reports)
+            .await;
+        },
     }
 }
 
@@ -292,6 +304,13 @@ async fn chaos_run() {
         Ok(c) => c,
         Err(err) => panic!("invalid chaos configuration: {err}"),
     };
+    // `cargo xtask chaos-matrix` validates every run's configuration this way
+    // before starting the first cluster, so a bad matrix line fails in seconds
+    // rather than hours into the matrix.
+    if std::env::var("CHAOS_CHECK_CONFIG").is_ok_and(|v| v == "1") {
+        eprintln!("chaos: configuration OK");
+        return;
+    }
 
     // Resolve the reproducibility seed. `0` means "unset": pick a fresh one and
     // print it so a run that finds a bug can be replayed with `--seed <printed>`.
@@ -319,6 +338,7 @@ async fn chaos_run() {
         config.partitions,
         config.replication_factor,
         config.security_protocol,
+        config.msg_size,
         Arc::new(super::verifier::ConservationVerifier::new()),
     )
     .await;
@@ -548,6 +568,14 @@ async fn chaos_run() {
         }
         + if has(|k| matches!(k, ActionKind::ChangeLeader)) {
             30
+        } else {
+            0
+        }
+        + if config.actions.iter().any(|a| a.kind == ActionKind::AllBrokersDown) {
+            // The outage, then the brokers restart together and are waited
+            // for one after another (each bounded by `up_wait_s`, but they
+            // recover in parallel, so one wait dominates).
+            config.outage_s + config.up_wait_s + 60
         } else {
             0
         }

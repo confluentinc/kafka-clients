@@ -60,6 +60,18 @@ pub enum ChaosAction {
     /// Trigger a leader migration on every listed topic without bouncing
     /// brokers (librdkafka's change-leader / reassign act across all topics).
     Migrate { topics: Vec<String>, mode: ReassignMode },
+    /// Kill every listed broker at once (SIGKILL, a whole-cluster crash), keep
+    /// the cluster down for `outage`, then start them all and wait until each
+    /// has re-registered (bounded by `wait_up`). Every partition, the group
+    /// coordinator and the controller quorum are unavailable for the whole
+    /// outage, so the clients must buffer, retry and rediscover everything.
+    /// Automates the manual `docker kill` / `docker start` of the whole
+    /// cluster the Sep 2026 matrix did by hand.
+    AllBrokersDown {
+        nodes: Vec<u16>,
+        outage: Duration,
+        wait_up: Duration,
+    },
 }
 
 impl ChaosAction {
@@ -143,6 +155,26 @@ impl ChaosAction {
                         },
                     }
                 }
+            },
+            ChaosAction::AllBrokersDown { nodes, outage, wait_up } => {
+                eprintln!("chaos: killing every running broker {nodes:?} at once (SIGKILL), down for {outage:?}");
+                if let Some(r) = reports {
+                    r.record_leader_change(&format!("all-brokers-down nodes={nodes:?} outage={outage:?}"));
+                }
+                // All at once, not one after another: a staggered kill would
+                // let leadership hop to the survivors, which is a roll, not a
+                // cluster crash.
+                futures_util::future::join_all(nodes.iter().map(|n| brokers.stop(*n, StopKind::Unclean))).await;
+                tokio::time::sleep(*outage).await;
+                futures_util::future::join_all(nodes.iter().map(|n| brokers.start(*n))).await;
+                for node_id in nodes {
+                    let up = brokers.wait_operational(admin, *node_id, *wait_up).await;
+                    assert!(
+                        up,
+                        "broker {node_id} did not become operational within {wait_up:?} after the outage"
+                    );
+                }
+                eprintln!("chaos: all brokers back up after the outage");
             },
         }
     }
