@@ -46,6 +46,7 @@ pub use async_kafka_consumer::{AsyncKafkaConsumer, ConsumerHandle};
 pub use close_options::{CloseOptions, GroupMembershipOperation};
 pub use consumer_config::ConsumerConfig;
 pub use consumer_group_metadata::ConsumerGroupMetadata;
+pub(crate) use consumer_group_metadata::ConsumerGroupMetadataImpl;
 pub use consumer_rebalance_listener::ConsumerRebalanceListener;
 pub use consumer_rebalance_listener_method_name::ConsumerRebalanceListenerMethodName;
 pub use consumer_record::{ConsumerRecord, ConsumerRecordOptions, ConsumerRecordOptionsBuilder};
@@ -150,8 +151,12 @@ where
     fn paused(&self) -> HashSet<TopicPartition>;
 
     /// Translates Java's `ConsumerGroupMetadata groupMetadata()`.
+    ///
+    /// `ConsumerGroupMetadata` is a trait (see its docs), so the consumer
+    /// returns its own implementation behind an `Arc`, which is cheap to clone
+    /// and to hand to `Producer::send_offsets_to_transaction`.
     #[doc(alias = "org.apache.kafka.clients.consumer.Consumer#groupMetadata")]
-    fn group_metadata(&self) -> ConsumerGroupMetadata;
+    fn group_metadata(&self) -> Arc<dyn ConsumerGroupMetadata>;
 
     /// Returns the consumer's `client.id`. Borrowed per CLAUDE.md §12.
     fn client_id(&self) -> &str;

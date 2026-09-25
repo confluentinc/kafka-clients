@@ -1667,21 +1667,26 @@ pub unsafe extern "C" fn kafka_consumer_OffsetAndTimestamp_destroy(oat: *mut kaf
 }
 
 /// Opaque handle to a [`ConsumerGroupMetadata`].
+///
+/// Obtained only from [`kafka_consumer_Consumer_group_metadata`]: Java has
+/// deprecated the public `ConsumerGroupMetadata` constructors since 4.2, and
+/// the class becomes an interface in Kafka 5.0, so the C API does not expose
+/// a constructor either.
 #[repr(C)]
 pub struct kafka_consumer_ConsumerGroupMetadata_t {
     _private: [u8; 0],
 }
 
-/// Cached group-metadata handle: owns the value plus NUL-terminated string
-/// getters.
+/// Cached group-metadata handle: shares the consumer's metadata and owns
+/// NUL-terminated copies of its strings for the getters.
 struct ConsumerGroupMetadataInner {
-    meta: ConsumerGroupMetadata,
+    meta: Arc<dyn ConsumerGroupMetadata>,
     group_id_c: std::ffi::CString,
     member_id_c: std::ffi::CString,
     group_instance_id_c: Option<std::ffi::CString>,
 }
 
-fn box_group_metadata(meta: ConsumerGroupMetadata) -> *mut kafka_consumer_ConsumerGroupMetadata_t {
+fn box_group_metadata(meta: Arc<dyn ConsumerGroupMetadata>) -> *mut kafka_consumer_ConsumerGroupMetadata_t {
     let group_id_c = std::ffi::CString::new(meta.group_id().as_bytes()).unwrap_or_default();
     let member_id_c = std::ffi::CString::new(meta.member_id().as_bytes()).unwrap_or_default();
     let group_instance_id_c = meta
@@ -1693,50 +1698,6 @@ fn box_group_metadata(meta: ConsumerGroupMetadata) -> *mut kafka_consumer_Consum
         member_id_c,
         group_instance_id_c,
     })) as *mut kafka_consumer_ConsumerGroupMetadata_t
-}
-
-/// Builds a [`kafka_consumer_ConsumerGroupMetadata_t`] from its four fields,
-/// returning an owned handle the caller frees with
-/// [`kafka_consumer_ConsumerGroupMetadata_destroy`].
-///
-/// This is the public constructor a caller that is not a consumer — for example
-/// a gRPC server driving `kafka_producer_Producer_send_offsets_to_transaction`
-/// from group-metadata fields received over the wire — uses to synthesise the
-/// handle. A consumer normally obtains one from
-/// [`kafka_consumer_Consumer_group_metadata`] instead.
-///
-/// `generation_id` is the group generation (`-1` when unknown). `group_instance_id`
-/// is the static-membership id; pass null when the member is not static (it
-/// becomes `None`, matching Java's `Optional.empty()`). `group_id` and
-/// `member_id` are always read (an unknown member id is the empty string, never
-/// null), mirroring the non-null preconditions of the sibling constructors.
-///
-/// # Safety
-///
-/// - `group_id` and `member_id` must be valid NUL-terminated C strings.
-/// - `group_instance_id` must be null or a valid NUL-terminated C string.
-#[unsafe(no_mangle)]
-#[allow(deprecated)] // ConsumerGroupMetadata::with_generation_id_member_id_group_instance_id is deprecated in the public API but is the constructor the FFI must expose.
-pub unsafe extern "C" fn kafka_consumer_ConsumerGroupMetadata_new(
-    group_id: *const c_char,
-    generation_id: i32,
-    member_id: *const c_char,
-    group_instance_id: *const c_char,
-) -> *mut kafka_consumer_ConsumerGroupMetadata_t {
-    let group_id = unsafe { CStr::from_ptr(group_id) }.to_string_lossy().to_string();
-    let member_id = unsafe { CStr::from_ptr(member_id) }.to_string_lossy().to_string();
-    let group_instance_id = if group_instance_id.is_null() {
-        None
-    } else {
-        Some(unsafe { CStr::from_ptr(group_instance_id) }.to_string_lossy().to_string())
-    };
-    let meta = ConsumerGroupMetadata::with_generation_id_member_id_group_instance_id(
-        group_id,
-        generation_id,
-        member_id,
-        group_instance_id,
-    );
-    box_group_metadata(meta)
 }
 
 /// Returns the group id as a NUL-terminated C string (owned by the handle).
@@ -1803,7 +1764,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerGroupMetadata_group_instance_id(
 /// `meta` must be a valid group-metadata handle.
 pub(crate) unsafe fn group_metadata_ref(
     meta: *const kafka_consumer_ConsumerGroupMetadata_t,
-) -> &'static ConsumerGroupMetadata {
+) -> &'static Arc<dyn ConsumerGroupMetadata> {
     &unsafe { &*(meta as *const ConsumerGroupMetadataInner) }.meta
 }
 
@@ -4835,6 +4796,7 @@ mod tests {
     use crate::common::MetricName;
     use crate::common::MetricValue;
     use crate::common::metrics::{ClosureGauge, ClosureMeasurable, MetricConfig, MetricValueProvider, SystemTime};
+    use crate::consumer::ConsumerGroupMetadataImpl;
     use std::collections::BTreeMap;
 
     fn metric(name: &str, tags: &[(&str, &str)], provider: MetricValueProvider) -> (MetricName, Arc<KafkaMetric>) {
@@ -4844,16 +4806,20 @@ mod tests {
         (mn, Arc::new(km))
     }
 
-    /// The public group-metadata constructor builds a handle whose four
-    /// accessors read back exactly the values passed in, and `destroy` frees it.
+    /// A group-metadata handle's four accessors read back exactly the
+    /// consumer's values, and `destroy` frees it. The handle is built with the
+    /// same `box_group_metadata` that `kafka_consumer_Consumer_group_metadata`
+    /// uses, because the C API has no constructor.
     #[test]
-    fn group_metadata_new_round_trips_all_fields() {
-        let group_id = std::ffi::CString::new("my-group").unwrap();
-        let member_id = std::ffi::CString::new("member-7").unwrap();
-        let instance_id = std::ffi::CString::new("static-3").unwrap();
-        let meta = unsafe {
-            kafka_consumer_ConsumerGroupMetadata_new(group_id.as_ptr(), 42, member_id.as_ptr(), instance_id.as_ptr())
-        };
+    fn group_metadata_handle_round_trips_all_fields() {
+        let meta = box_group_metadata(Arc::new(
+            ConsumerGroupMetadataImpl::with_generation_id_member_id_group_instance_id(
+                "my-group",
+                42,
+                "member-7",
+                Some("static-3".to_string()),
+            ),
+        ));
         assert!(!meta.is_null());
         let read_group = unsafe { CStr::from_ptr(kafka_consumer_ConsumerGroupMetadata_group_id(meta)) };
         assert_eq!(read_group.to_str().unwrap(), "my-group");
@@ -4866,22 +4832,29 @@ mod tests {
         unsafe { kafka_consumer_ConsumerGroupMetadata_destroy(meta) };
     }
 
-    /// A null `group_instance_id` becomes `None` (a dynamic member has no
-    /// static-membership id), surfacing as a null accessor return; an unknown
-    /// member id is the empty string, never null.
+    /// An absent `group_instance_id` (a dynamic member has no static-membership
+    /// id) surfaces as a null accessor return; an unknown member id is the
+    /// empty string, never null.
     #[test]
-    fn group_metadata_new_null_instance_id_is_absent() {
-        let group_id = std::ffi::CString::new("g").unwrap();
-        let member_id = std::ffi::CString::new("").unwrap();
-        let meta = unsafe {
-            kafka_consumer_ConsumerGroupMetadata_new(group_id.as_ptr(), -1, member_id.as_ptr(), std::ptr::null())
-        };
+    fn group_metadata_handle_absent_instance_id_is_null() {
+        let meta = box_group_metadata(Arc::new(ConsumerGroupMetadataImpl::new("g")));
         assert!(!meta.is_null());
         let read_member = unsafe { CStr::from_ptr(kafka_consumer_ConsumerGroupMetadata_member_id(meta)) };
         assert_eq!(read_member.to_str().unwrap(), "");
         assert_eq!(unsafe { kafka_consumer_ConsumerGroupMetadata_generation_id(meta) }, -1);
         assert!(unsafe { kafka_consumer_ConsumerGroupMetadata_group_instance_id(meta) }.is_null());
         unsafe { kafka_consumer_ConsumerGroupMetadata_destroy(meta) };
+    }
+
+    /// The handle shares the consumer's metadata rather than copying it:
+    /// `group_metadata_ref` hands back the very `Arc` it was built from.
+    #[test]
+    fn group_metadata_handle_shares_the_consumer_arc() {
+        let shared: Arc<dyn ConsumerGroupMetadata> = Arc::new(ConsumerGroupMetadataImpl::new("g"));
+        let meta = box_group_metadata(Arc::clone(&shared));
+        assert!(Arc::ptr_eq(unsafe { group_metadata_ref(meta) }, &shared));
+        unsafe { kafka_consumer_ConsumerGroupMetadata_destroy(meta) };
+        assert_eq!(Arc::strong_count(&shared), 1);
     }
 
     /// Every `MetricValue` variant round-trips through `box_metric_map` to the

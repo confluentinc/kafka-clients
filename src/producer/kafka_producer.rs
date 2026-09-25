@@ -56,8 +56,8 @@ use crate::common::record::internal::CompressionType;
 use crate::common::record::internal::RecordBatch;
 use crate::common::serialization::Serializer;
 use crate::common::utils::LogContext;
-use crate::consumer::ConsumerGroupMetadata;
 use crate::consumer::OffsetAndMetadata;
+use crate::consumer::{ConsumerGroupMetadata, ConsumerGroupMetadataImpl};
 use crate::producer::Callback;
 use crate::producer::Partitioner;
 use crate::producer::Producer;
@@ -1489,7 +1489,7 @@ impl<K, V> KafkaProducer<K, V> {
     /// batched together, typically in a consume-transform-produce pattern. Thus
     /// `group_metadata` should be obtained from the consumer's `group_metadata()`
     /// to leverage consumer group metadata, which provides stronger fencing than
-    /// `ConsumerGroupMetadata::new(group_id)`.
+    /// a metadata carrying only the group id.
     ///
     /// Java blocks until the request has been received and acknowledged by the
     /// consumer group coordinator; the offsets are not considered committed until
@@ -1499,10 +1499,11 @@ impl<K, V> KafkaProducer<K, V> {
     /// Note that the consumer should have `enable.auto.commit=false` and should
     /// also not commit offsets manually.
     ///
-    /// `offsets` and `group_metadata` are taken by value because the transaction
-    /// manager moves both into the `AddOffsetsToTxn` handler that carries them to
-    /// the coordinator — the same convention
-    /// `AsyncKafkaConsumer::commit_sync_with_offsets` already uses for an offsets map.
+    /// `offsets` is taken by value because the transaction manager moves it into
+    /// the `AddOffsetsToTxn` handler that carries it to the coordinator — the same
+    /// convention `AsyncKafkaConsumer::commit_sync_with_offsets` already uses for an
+    /// offsets map. `group_metadata` is borrowed: [`ConsumerGroupMetadata`] is a
+    /// trait, and the handler keeps a copy of its four fields.
     ///
     /// # Errors
     ///
@@ -1526,9 +1527,9 @@ impl<K, V> KafkaProducer<K, V> {
     pub async fn send_offsets_to_transaction(
         &self,
         offsets: HashMap<TopicPartition, OffsetAndMetadata>,
-        group_metadata: ConsumerGroupMetadata,
+        group_metadata: &dyn ConsumerGroupMetadata,
     ) -> Result<(), Error> {
-        Self::throw_if_invalid_group_metadata(&group_metadata)?;
+        Self::throw_if_invalid_group_metadata(group_metadata)?;
         let transaction_manager = self.transaction_manager_or_error()?;
         self.ensure_not_closed()?;
 
@@ -1543,7 +1544,7 @@ impl<K, V> KafkaProducer<K, V> {
             let mut pending_requests = self.pending_requests.lock().unwrap();
             transaction_manager.lock().unwrap().send_offsets_to_transaction(
                 offsets,
-                group_metadata,
+                ConsumerGroupMetadataImpl::copy_of(group_metadata),
                 &mut pending_requests,
             )?
         };
@@ -1682,7 +1683,7 @@ impl<K, V> KafkaProducer<K, V> {
     ///
     /// [`Error::LocalIllegalArgument`] when the generation id is greater than zero
     /// but the member id is unknown.
-    fn throw_if_invalid_group_metadata(group_metadata: &ConsumerGroupMetadata) -> Result<(), Error> {
+    fn throw_if_invalid_group_metadata(group_metadata: &dyn ConsumerGroupMetadata) -> Result<(), Error> {
         if group_metadata.generation_id() > 0 && group_metadata.member_id() == TxnOffsetCommitRequest::UNKNOWN_MEMBER_ID
         {
             return Err(Error::local_illegal_argument(format!(
@@ -2519,7 +2520,7 @@ where
     async fn send_offsets_to_transaction(
         &self,
         offsets: HashMap<TopicPartition, OffsetAndMetadata>,
-        group_metadata: ConsumerGroupMetadata,
+        group_metadata: &dyn ConsumerGroupMetadata,
     ) -> Result<(), Error> {
         KafkaProducer::send_offsets_to_transaction(self, offsets, group_metadata).await
     }
@@ -6232,12 +6233,11 @@ mod tests {
         init_transactions(&mut ctx).await;
         ctx.producer.begin_transaction().expect("beginTransaction");
 
-        #[allow(deprecated)]
-        let group_metadata = ConsumerGroupMetadata::new("group");
+        let group_metadata = ConsumerGroupMetadataImpl::new("group");
         let sent_before = ctx.sender.client().request_count();
         drive(
             &mut ctx.sender,
-            ctx.producer.send_offsets_to_transaction(HashMap::new(), group_metadata),
+            ctx.producer.send_offsets_to_transaction(HashMap::new(), &group_metadata),
         )
         .await
         .expect("an empty offsets map is a no-op");
@@ -6272,8 +6272,7 @@ mod tests {
         init_transactions(&mut ctx).await;
         ctx.producer.begin_transaction().expect("beginTransaction");
 
-        #[allow(deprecated)]
-        let group_metadata = ConsumerGroupMetadata::with_generation_id_member_id_group_instance_id(
+        let group_metadata = ConsumerGroupMetadataImpl::with_generation_id_member_id_group_instance_id(
             "group",
             5,
             "member",
@@ -6281,7 +6280,7 @@ mod tests {
         );
         drive(
             &mut ctx.sender,
-            ctx.producer.send_offsets_to_transaction(HashMap::new(), group_metadata),
+            ctx.producer.send_offsets_to_transaction(HashMap::new(), &group_metadata),
         )
         .await
         .expect("a populated group metadata is valid and an empty offsets map is a no-op");
@@ -6317,8 +6316,7 @@ mod tests {
         init_transactions(&mut ctx).await;
         ctx.producer.begin_transaction().expect("beginTransaction");
 
-        #[allow(deprecated)]
-        let group_metadata = ConsumerGroupMetadata::with_generation_id_member_id_group_instance_id(
+        let group_metadata = ConsumerGroupMetadataImpl::with_generation_id_member_id_group_instance_id(
             "group",
             2,
             crate::common::requests::TxnOffsetCommitRequest::UNKNOWN_MEMBER_ID,
@@ -6326,7 +6324,7 @@ mod tests {
         );
         let error = ctx
             .producer
-            .send_offsets_to_transaction(HashMap::new(), group_metadata.clone())
+            .send_offsets_to_transaction(HashMap::new(), &group_metadata)
             .await
             .expect_err("generationId > 0 with an unknown member id is rejected");
         assert_eq!(
@@ -6518,12 +6516,11 @@ mod tests {
             .prepare_response(txn_offsets_commit_response(&[(partition.clone(), Errors::None)]));
         ctx.sender.client_mut().prepare_response(end_txn_response(Errors::None));
 
-        #[allow(deprecated)]
-        let group_metadata = ConsumerGroupMetadata::new(GROUP_ID);
+        let group_metadata = ConsumerGroupMetadataImpl::new(GROUP_ID);
         let offsets = HashMap::from([(partition, OffsetAndMetadata::new(5).expect("a non-negative offset"))]);
         drive(
             &mut ctx.sender,
-            ctx.producer.send_offsets_to_transaction(offsets, group_metadata),
+            ctx.producer.send_offsets_to_transaction(offsets, &group_metadata),
         )
         .await
         .expect("sendOffsetsToTransaction");
@@ -6609,15 +6606,14 @@ mod tests {
                 .begin_transaction()
                 .unwrap_or_else(|error| panic!("beginTransaction {}: {}", attempt, error));
 
-            #[allow(deprecated)]
-            let group_metadata = ConsumerGroupMetadata::new(GROUP_ID);
+            let group_metadata = ConsumerGroupMetadataImpl::new(GROUP_ID);
             let offsets = HashMap::from([(
                 partition.clone(),
                 OffsetAndMetadata::new(offset).expect("a non-negative offset"),
             )]);
             drive(
                 &mut ctx.sender,
-                ctx.producer.send_offsets_to_transaction(offsets, group_metadata),
+                ctx.producer.send_offsets_to_transaction(offsets, &group_metadata),
             )
             .await
             .unwrap_or_else(|error| panic!("sendOffsetsToTransaction {}: {}", attempt, error));
@@ -7336,10 +7332,7 @@ mod tests {
             "commit_transaction",
         );
         expect_no_manager(producer.abort_transaction().await.expect_err("no manager"), "abort_transaction");
-        // Java's own tests carry `@SuppressWarnings("removal")` for the deprecated
-        // `ConsumerGroupMetadata(String)` constructor; this is that suppression.
-        #[allow(deprecated)]
-        let group_metadata = ConsumerGroupMetadata::new("group");
+        let group_metadata = ConsumerGroupMetadataImpl::new("group");
         expect_no_manager(
             producer
                 .send_offsets_to_transaction(
@@ -7347,7 +7340,7 @@ mod tests {
                         TopicPartition::new(TOPIC.to_string(), 0),
                         OffsetAndMetadata::new(1).expect("a non-negative offset"),
                     )]),
-                    group_metadata,
+                    &group_metadata,
                 )
                 .await
                 .expect_err("no manager"),
