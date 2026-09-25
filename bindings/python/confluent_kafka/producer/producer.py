@@ -231,10 +231,7 @@ class Producer(Generic[K, V], _ProducerState):
         self._closed = True
         self._cancel()
         _lib.Producer_shutdown(self._c_producer)
-        timeout_ms = _timeout_to_ms(timeout)
-        self._run_sync(
-            lambda cb: _lib.Producer_close_async(
-                self._c_producer, cb, timeout_ms))
+        self._run_sync(_close_submit(self._c_producer, timeout))
         _lib.Producer_destroy(self._c_producer)
 
     def _cancel(self) -> None:
@@ -308,8 +305,13 @@ def _validate_timeout(timeout: Duration | None) -> None:
         raise IllegalArgumentError("The timeout cannot be negative.")
 
 
-def _timeout_to_ms(timeout: Duration | None) -> int:
-    """Milliseconds for the FFI close, or ``-1`` for the default (no timeout)."""
+def _close_submit(c_producer: int | None, timeout: Duration | None
+                  ) -> Callable[[Callable[..., None]], None]:
+    """The FFI close to drive: Java's ``close()`` (``Producer_close_async``) when
+    ``timeout`` is ``None``, else ``close(Duration)``
+    (``Producer_close_with_timeout_async``, in milliseconds)."""
     if timeout is None:
-        return -1
-    return int(_timeout_seconds(timeout) * 1000)
+        return lambda cb: _lib.Producer_close_async(c_producer, cb)
+    timeout_ms = int(_timeout_seconds(timeout) * 1000)
+    return lambda cb: _lib.Producer_close_with_timeout_async(
+        c_producer, timeout_ms, cb)
