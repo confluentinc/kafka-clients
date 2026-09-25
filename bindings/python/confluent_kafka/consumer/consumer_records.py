@@ -36,7 +36,7 @@ from collections.abc import Iterator, Mapping, Sequence
 from typing import Any, Generic, TypeVar, overload
 
 from confluent_kafka import IllegalArgumentError
-from confluent_kafka._args import exactly_one
+from confluent_kafka._args import Form, java_forms
 from confluent_kafka.common.topic_partition import TopicPartition
 
 from .consumer_record import ConsumerRecord
@@ -106,6 +106,7 @@ class ConsumerRecords(Generic[K, V]):
     @overload
     def records(self, *, topic: str) -> list[ConsumerRecord[K, V]]: ...
 
+    @java_forms(Form("partition"), Form("topic"))
     def records(self, *, partition: TopicPartition | None = None,
                 topic: str | None = None) -> list[ConsumerRecord[K, V]]:
         """Records for one partition, or all records for one topic.
@@ -114,11 +115,7 @@ class ConsumerRecords(Generic[K, V]):
         give exactly one of ``partition`` / ``topic``. ``records(topic=None)``
         would be Java's null-topic call, which raises ``IllegalArgumentError``.
         """
-        chosen = exactly_one(
-            "records", partition=partition, topic=topic,
-        )
-        if chosen == "partition":
-            assert partition is not None
+        if partition is not None:
             return list(self._records.get(partition, ()))
         # topic form.
         assert topic is not None

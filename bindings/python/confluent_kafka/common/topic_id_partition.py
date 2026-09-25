@@ -30,7 +30,7 @@ from __future__ import annotations
 
 from typing import overload
 
-from confluent_kafka._args import exactly_one
+from confluent_kafka._args import Form, java_forms
 
 from .topic_partition import TopicPartition
 from .uuid import Uuid
@@ -51,17 +51,12 @@ class TopicIdPartition:
     def __init__(self, *, topic_id: Uuid,
                  topic_partition: TopicPartition) -> None: ...
 
+    @java_forms(Form("topic_id", "topic_partition"),
+                Form("topic_id", "partition", "topic"))
     def __init__(self, *, topic_id: Uuid, partition: int | None = None,
                  topic: str | None = None,
                  topic_partition: TopicPartition | None = None) -> None:
-        # Distinguish the two Java constructors by which key was supplied. A
-        # null topic is legal in the (topic_id, partition, topic) form, so the
-        # discriminator is partition vs topic_partition (not topic).
-        chosen = exactly_one(
-            "TopicIdPartition",
-            partition=partition,
-            topic_partition=topic_partition,
-        )
+        chosen = "topic_partition" if topic_partition is not None else "partition"
         # Java: Objects.requireNonNull(topicId, "topicId can not be null").
         if topic_id is None:
             raise TypeError("topicId can not be null")

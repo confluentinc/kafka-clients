@@ -181,7 +181,12 @@ _PART1 = 1
 _TP0 = TopicPartition(topic=_NAME0, partition=_PART1)
 _TIDP0 = TopicIdPartition(topic_id=_TID0, topic_partition=_TP0)
 _TIDP1 = TopicIdPartition(topic_id=_TID0, partition=_PART1, topic=_NAME0)
-_TIDP_NULL0 = TopicIdPartition(topic_id=_TID0, partition=_PART1, topic=None)
+# Java's `new TopicIdPartition(topicId0, 1, null)`: `topic=None` is "not given"
+# under java_forms (post-phase review item 5), so the null topic is spelled
+# through the TopicPartition form, which Java's constructor builds anyway.
+_TIDP_NULL0 = TopicIdPartition(
+    topic_id=_TID0, topic_partition=TopicPartition(topic=None, partition=_PART1),  # type: ignore[arg-type]
+)
 _TIDP_NULL1 = TopicIdPartition(
     topic_id=_TID0, topic_partition=TopicPartition(topic=None, partition=_PART1),  # type: ignore[arg-type]
 )
@@ -229,7 +234,9 @@ def test_topic_id_partition_accessors() -> None:
 def test_topic_id_partition_requires_exactly_one_form() -> None:
     with pytest.raises(IllegalArgumentError) as exc:
         TopicIdPartition(topic_id=_TID0)  # neither form
-    assert "takes exactly one of partition, topic_partition" in str(exc.value)
+    assert str(exc.value) == (
+        "TopicIdPartition() takes one of (topic_id, topic_partition), "
+        "(topic_id, partition, topic); got (topic_id)")
 
     with pytest.raises(IllegalArgumentError):
         # both forms
