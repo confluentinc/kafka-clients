@@ -419,6 +419,21 @@ impl ProducerBatch {
         // `on_completion` call.
         self.produce_future.set(base_offset, log_append_time, record_errors.clone());
 
+        // Java's `ProducerBatch` thunk callback is the `AppendCallbacks` wrapper
+        // installed by `KafkaProducer.doSend` (`KafkaProducer.java:1793-1800`),
+        // which substitutes a sentinel `RecordMetadata` (real topic-partition
+        // kept, offset/batch-index/timestamp/sizes all `-1`) whenever it is
+        // invoked with `null` metadata, before ever reaching the user's own
+        // `Callback`. Rust's `Thunk.callback` is the raw user `Callback` (no
+        // such wrapper — see `RecordAccumulator::append`'s doc comment on why),
+        // so this method must perform that substitution itself to keep the
+        // documented `Callback` contract ("metadata is `Some` even on error,
+        // with a sentinel `-1` offset") true for every failure path, not just
+        // `KafkaProducer`'s pre-append `handle_api_error`.
+        let sentinel_metadata = record_errors
+            .as_ref()
+            .map(|_| RecordMetadata::new(self.topic_partition.clone(), -1, -1, RecordBatch::NO_TIMESTAMP, -1, -1));
+
         // Execute callbacks — matches Java's loop in completeFutureAndFireCallbacks.
         // Take ownership of the thunks so we can consume FnOnce callbacks.
         let mut thunks = self.thunks.lock().unwrap();
@@ -440,7 +455,7 @@ impl ProducerBatch {
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     if let Some(ref errors_fn) = record_errors {
                         let error = errors_fn(i as i32);
-                        callback(None, error.as_ref());
+                        callback(sentinel_metadata.as_ref(), error.as_ref());
                     } else {
                         let metadata = thunk.future.value();
                         callback(Some(&metadata), None);
@@ -1481,16 +1496,16 @@ mod tests {
 
         let invocations = Arc::new(AtomicI32::new(0));
         let got_error = Arc::new(Mutex::new(false));
-        let got_metadata = Arc::new(Mutex::new(false));
+        let got_sentinel_metadata = Arc::new(Mutex::new(false));
 
         let inv = Arc::clone(&invocations);
         let err_flag = Arc::clone(&got_error);
-        let meta_flag = Arc::clone(&got_metadata);
+        let meta_flag = Arc::clone(&got_sentinel_metadata);
 
         let callback: Callback = Box::new(move |metadata, error| {
             inv.fetch_add(1, Ordering::SeqCst);
             *err_flag.lock().unwrap() = error.is_some();
-            *meta_flag.lock().unwrap() = metadata.is_some();
+            *meta_flag.lock().unwrap() = matches!(metadata, Some(m) if m.offset() == -1);
         });
 
         let mut batch = ProducerBatch::new(make_tp(), make_builder(), NOW);
@@ -1503,7 +1518,15 @@ mod tests {
         assert!(future.is_done());
         assert_eq!(1, invocations.load(Ordering::SeqCst));
         assert!(*got_error.lock().unwrap(), "Callback should receive error");
-        assert!(!*got_metadata.lock().unwrap(), "Callback should not receive metadata on abort");
+        // Per the `Callback` contract mirrored from Java (`Callback.java`'s
+        // javadoc): on failure the callback still receives `Some` metadata, with
+        // a sentinel `-1` offset — never `None`. The partition itself is kept
+        // (the batch's own topic-partition, already resolved by the time a
+        // batch exists), matching Java's `AppendCallbacks.topicPartition()`.
+        assert!(
+            *got_sentinel_metadata.lock().unwrap(),
+            "Callback should receive sentinel -1 offset metadata on abort, not None"
+        );
 
         // subsequent completion should be ignored
         assert!(!batch.complete(500, 2342342341));
