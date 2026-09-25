@@ -12,28 +12,30 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""JDK behaviour the package reproduces: ``String.valueOf`` and
-``UUID.fromString``.
+"""JDK behaviour the package reproduces: ``String.valueOf``, the number
+parsers and ``UUID.fromString``.
 
 The Java ``toString()`` methods the package translates to ``__str__`` and the
 messages its errors build concatenate values with ``+``, which calls
 ``String.valueOf``. Python's ``str`` renders the same values differently
 (``None`` / ``null``, ``True`` / ``true``, ``{'a': 1}`` / ``{a=1}``,
 ``1e+20`` / ``1.0E20``), so every such concatenation goes through
-:func:`java_str`. :func:`uuid_from_string` is ``java.util.UUID.fromString``,
-which the UUID deserializer calls and which accepts more than Python's
-``uuid.UUID`` parser (and rejects some of what it accepts).
+:func:`java_str`. The config coercion parses numbers as Java's
+``Long.parseLong`` / ``Integer.parseInt`` / ``Double.parseDouble`` do, and the
+UUID deserializer as ``java.util.UUID.fromString`` does; each accepts and
+rejects different text than Python's ``int`` / ``float`` / ``uuid.UUID``.
 """
 
 from __future__ import annotations
 
 import math
+import re
 import unicodedata
 import uuid
 from collections.abc import Mapping
 from decimal import Decimal
 
-__all__ = ["java_str", "uuid_from_string"]
+__all__ = ["java_str", "java_trim", "parse_double", "parse_int", "parse_long", "uuid_from_string"]
 
 
 def _double_to_string(d: float) -> str:
@@ -92,37 +94,43 @@ _LONG_MAX = (1 << 63) - 1
 _MASK64 = (1 << 64) - 1
 
 
-def _digit16(ch: str) -> int:
-    """Java's ``Character.digit(char, 16)``."""
+def _digit(ch: str, radix: int) -> int:
+    """Java's ``Character.digit(char, radix)`` for radix 10 or 16."""
     code = ord(ch)
+    value = -1
     if code > 0xFFFF:
         return -1  # Java sees a surrogate half, which is no digit
     if "0" <= ch <= "9":
-        return code - 0x30
-    if "a" <= ch <= "f":
-        return code - 0x61 + 10
-    if "A" <= ch <= "F":
-        return code - 0x41 + 10
-    if 0xFF21 <= code <= 0xFF26:  # fullwidth A-F
-        return code - 0xFF21 + 10
-    if 0xFF41 <= code <= 0xFF46:  # fullwidth a-f
-        return code - 0xFF41 + 10
-    if ch.isdecimal():
-        return unicodedata.decimal(ch)
-    return -1
+        value = code - 0x30
+    elif "a" <= ch <= "z":
+        value = code - 0x61 + 10
+    elif "A" <= ch <= "Z":
+        value = code - 0x41 + 10
+    elif 0xFF21 <= code <= 0xFF3A:  # fullwidth A-Z
+        value = code - 0xFF21 + 10
+    elif 0xFF41 <= code <= 0xFF5A:  # fullwidth a-z
+        value = code - 0xFF41 + 10
+    elif ch.isdecimal():
+        value = unicodedata.decimal(ch)
+    return value if value < radix else -1
 
 
-def _parse_long16(s: str, begin: int, end: int) -> int:
-    """Java's ``Long.parseLong(s, begin, end, 16)``, raising
-    ``IllegalArgumentError`` with ``NumberFormatException``'s message."""
+def parse_long(s: str, begin: int = 0, end: int | None = None, radix: int = 10) -> int:
+    """Java's ``Long.parseLong(s, begin, end, radix)``, raising
+    ``IllegalArgumentError`` (Java's ``NumberFormatException``, an
+    ``IllegalArgumentException``) with its message."""
     from .illegal_argument_error import IllegalArgumentError
+
+    if end is None:
+        end = len(s)
 
     def error_at(index: int) -> IllegalArgumentError:
         return IllegalArgumentError(
             message=f'Error at index {index - begin} in: "{s[begin:end]}"')
 
     if begin == end:
-        raise IllegalArgumentError(message='For input string: "" under radix 16')
+        suffix = "" if radix == 10 else f" under radix {radix}"
+        raise IllegalArgumentError(message=f'For input string: ""{suffix}')
     negative = False
     i = begin
     limit = -_LONG_MAX
@@ -136,18 +144,69 @@ def _parse_long16(s: str, begin: int, end: int) -> int:
         i += 1
         if i == end:
             raise error_at(i)
-    multmin = -(-limit // 16)  # Java's limit / radix, truncated toward zero
+    multmin = -(-limit // radix)  # Java's limit / radix, truncated toward zero
     result = 0
     while i < end:
-        digit = _digit16(s[i])
+        digit = _digit(s[i], radix)
         if digit < 0 or result < multmin:
             raise error_at(i)
-        result *= 16
+        result *= radix
         if result < limit + digit:
             raise error_at(i)
         i += 1
         result -= digit
     return result if negative else -result
+
+
+def parse_int(s: str, bits: int = 32) -> int:
+    """Java's ``Integer.parseInt(s)`` (``bits=32``) or ``Short.parseShort(s)``
+    (``bits=16``): ``Long.parseLong`` limited to the width."""
+    from .illegal_argument_error import IllegalArgumentError
+
+    value = parse_long(s)
+    if not -(1 << (bits - 1)) <= value < (1 << (bits - 1)):
+        raise IllegalArgumentError(message=f'Value out of range. Value:"{s}" Radix:10')
+    return value
+
+
+_DOUBLE = re.compile(
+    r"[+-]?(?:NaN|Infinity|(?:(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?|"
+    r"0[xX](?:[0-9a-fA-F]+\.?|[0-9a-fA-F]*\.[0-9a-fA-F]+)[pP][+-]?\d+)[fFdD]?)",
+    re.ASCII)
+
+
+def java_trim(s: str) -> str:
+    """Java's ``String.trim()``: strips the characters up to U+0020."""
+    start, end = 0, len(s)
+    while start < end and s[start] <= " ":
+        start += 1
+    while end > start and s[end - 1] <= " ":
+        end -= 1
+    return s[start:end]
+
+
+def parse_double(s: str) -> float:
+    """Java's ``Double.parseDouble(s)``: decimal or hexadecimal, an optional
+    ``f`` / ``d`` suffix, ``NaN`` and ``Infinity`` (not Python's ``nan`` /
+    ``inf``); raises ``IllegalArgumentError`` (Java's
+    ``NumberFormatException``)."""
+    from .illegal_argument_error import IllegalArgumentError
+
+    text = java_trim(s)
+    if not _DOUBLE.fullmatch(text):
+        raise IllegalArgumentError(
+            message="empty String" if not text else f'For input string: "{text}"')
+    sign = -1.0 if text[0] == "-" else 1.0
+    body = text.lstrip("+-")
+    if body == "NaN":
+        return math.nan
+    if body == "Infinity":
+        return sign * math.inf
+    if body[-1] in "fFdD":
+        body = body[:-1]
+    if body[:2] in ("0x", "0X"):
+        return sign * float.fromhex(body)
+    return sign * float(body)
 
 
 def uuid_from_string(name: str) -> uuid.UUID:
@@ -166,9 +225,9 @@ def uuid_from_string(name: str) -> uuid.UUID:
     dash5 = name.find("-", dash4 + 1)
     if dash4 < 0 or dash5 >= 0:
         raise IllegalArgumentError(message="Invalid UUID string: " + name)
-    most = _parse_long16(name, 0, dash1) & 0xFFFFFFFF
-    most = (most << 16) | (_parse_long16(name, dash1 + 1, dash2) & 0xFFFF)
-    most = (most << 16) | (_parse_long16(name, dash2 + 1, dash3) & 0xFFFF)
-    least = _parse_long16(name, dash3 + 1, dash4) & 0xFFFF
-    least = (least << 48) | (_parse_long16(name, dash4 + 1, len(name)) & 0xFFFFFFFFFFFF)
+    most = parse_long(name, 0, dash1, 16) & 0xFFFFFFFF
+    most = (most << 16) | (parse_long(name, dash1 + 1, dash2, 16) & 0xFFFF)
+    most = (most << 16) | (parse_long(name, dash2 + 1, dash3, 16) & 0xFFFF)
+    least = parse_long(name, dash3 + 1, dash4, 16) & 0xFFFF
+    least = (least << 48) | (parse_long(name, dash4 + 1, len(name), 16) & 0xFFFFFFFFFFFF)
     return uuid.UUID(int=((most & _MASK64) << 64) | (least & _MASK64))

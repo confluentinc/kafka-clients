@@ -644,7 +644,7 @@ class TestKafkaProducerConstruction:
         p.close()
 
     def test_config_must_be_dict(self):
-        with pytest.raises(IllegalArgumentError):
+        with pytest.raises(TypeError):
             KafkaProducer(configs="not-a-dict")  # type: ignore[arg-type]
 
     def test_close_should_be_idempotent(self):
@@ -675,13 +675,29 @@ class TestKafkaProducerConstruction:
         with pytest.raises(IllegalStateError):
             p.init_transactions()
 
-    def test_callback_config_key_rejected(self):
-        # The old-client callback keys are rejected with a ConfigError (§11.1).
-        from confluent_kafka.common.config import ConfigError
+    def test_unknown_config_key_accepted_and_logged_unused(self, caplog):
+        # Java's AbstractConfig.logUnused(): an unknown key (an old-client
+        # callback key among them) is accepted and logged once as unused.
+        import logging
         cfg = dict(BOOTSTRAP)
         cfg["on_delivery"] = lambda *a: None
-        with pytest.raises(ConfigError):
-            KafkaProducer(configs=cfg)
+        with caplog.at_level(logging.INFO, logger="confluent_kafka.common.config"):
+            p = KafkaProducer(configs=cfg)
+        p.close()
+        assert [r.getMessage() for r in caplog.records
+                if r.name == "confluent_kafka.common.config"] == [
+            "These configurations '[on_delivery]' were supplied but are not used yet."]
+
+    def test_config_values_coerced_and_checked(self):
+        # ConfigDef.parseType: "true" equals True, a bad value raises
+        # ConfigException's message.
+        from confluent_kafka.common.config import ConfigError
+        p = KafkaProducer(configs={**BOOTSTRAP, "linger.ms": 5, "enable.idempotence": True})
+        p.close()
+        with pytest.raises(ConfigError) as exc:
+            KafkaProducer(configs={**BOOTSTRAP, "linger.ms": "soon"})
+        assert str(exc.value) == (
+            "Invalid value soon for configuration linger.ms: Not a number of type LONG")
 
     def test_client_instance_id_invalid_timeout(self):
         # testClientInstanceIdInvalidTimeout: exact Java message.

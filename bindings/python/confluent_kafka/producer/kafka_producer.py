@@ -25,7 +25,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, TypeVar, cast
 
 from confluent_kafka import IllegalArgumentError
-from confluent_kafka._config import reject_callback_config_keys
+from confluent_kafka._config import RecordingConfigs, log_unused, prepare
 from confluent_kafka.common.serialization import bytes_serializer
 from confluent_kafka.common.serialization._supply import resolve_serde
 
@@ -45,13 +45,10 @@ _KEY_SERIALIZER_KEY = "key.serializer"
 _VALUE_SERIALIZER_KEY = "value.serializer"
 
 
-def _prepare_config(config: dict[str, Any]) -> dict[str, Any]:
-    if not isinstance(config, dict):
-        raise IllegalArgumentError(message="config must be a dict")
-    # Reject the old-client callback config keys (§11.1); each names its
-    # replacement. group.id is intentionally not rejected.
-    reject_callback_config_keys(config)
-    return config
+def _prepare_config(configs: dict[str, Any]) -> tuple[RecordingConfigs, dict[str, str]]:
+    """Java's ``ProducerConfig`` parsing of ``configs``: the user's configs
+    (for the serde config route) and the string map the core parses."""
+    return prepare(configs, client="producer")
 
 
 def _resolve_serializers(
@@ -84,11 +81,12 @@ class KafkaProducer(Producer[K, V]):
                  value_serializer: Serializer[Any] = bytes_serializer(),
                  partitioner: object | None = None) -> None:
         Producer.__init__(self)
-        config = _prepare_config(configs)
+        originals, native = _prepare_config(configs)
         self._key_serializer, self._value_serializer = _resolve_serializers(
-            config, key_serializer, value_serializer)
+            originals, key_serializer, value_serializer)
         _reject_partitioner(partitioner)
-        self._init_kafka(config)
+        self._init_kafka(native)
+        log_unused(originals, client="producer")
 
     def close(self, *, timeout: Duration | None = None) -> None:
         super().close(timeout=timeout)
@@ -104,11 +102,12 @@ class AsyncKafkaProducer(AsyncProducer[K, V]):
                  value_serializer: Serializer[Any] = bytes_serializer(),
                  partitioner: object | None = None) -> None:
         AsyncProducer.__init__(self)
-        config = _prepare_config(configs)
+        originals, native = _prepare_config(configs)
         self._key_serializer, self._value_serializer = _resolve_serializers(
-            config, key_serializer, value_serializer)
+            originals, key_serializer, value_serializer)
         _reject_partitioner(partitioner)
-        self._init_kafka(config)
+        self._init_kafka(native)
+        log_unused(originals, client="producer")
 
     async def close(self, *, timeout: Duration | None = None) -> None:
         await super().close(timeout=timeout)
