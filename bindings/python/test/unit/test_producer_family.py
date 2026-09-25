@@ -724,6 +724,99 @@ def test_calls_racing_close_never_touch_a_freed_handle() -> None:
     assert outcomes == {"metrics", "closed"}
 
 
+def _guard_freed_handles(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Wrap every ``_lib.Producer_*`` entry point: a call with a handle that
+    ``Producer_destroy`` has freed is recorded (by name) and not run, so a
+    use-after-free fails the test instead of reading freed memory."""
+    freed: set[int] = set()
+    violations: list[str] = []
+    for name in dir(_lib):
+        if not name.startswith("Producer_"):
+            continue
+        real = getattr(_lib, name)
+
+        def guarded(*args: Any, _name: str = name, _real: Any = real) -> Any:
+            if args and isinstance(args[0], int) and args[0] in freed:
+                violations.append(_name)
+                raise RuntimeError(f"{_name} called with a freed producer handle")
+            result = _real(*args)
+            if _name == "Producer_destroy":
+                freed.add(args[0])
+            return result
+
+        monkeypatch.setattr(_lib, name, guarded)
+    return violations
+
+
+# Every method that checks for a closed producer, then calls into the native
+# one (the drain of flush and the four waiting transaction ops included).
+CALLS_AFTER_THE_CLOSED_CHECK: dict[str, dict[str, Any]] = {
+    "flush": {},
+    "init_transactions": {},
+    "begin_transaction": {},
+    "send_offsets_to_transaction": {"offsets": {}, "group_metadata": None},
+    "commit_transaction": {},
+    "abort_transaction": {},
+    "partitions_for": {"topic": TOPIC},
+    "metrics": {},
+}
+
+
+def _arguments(operation: str) -> dict[str, Any]:
+    arguments = dict(CALLS_AFTER_THE_CLOSED_CHECK[operation])
+    if "group_metadata" in arguments:
+        arguments["group_metadata"] = _group_metadata()
+    return arguments
+
+
+@pytest.mark.parametrize("operation", CALLS_AFTER_THE_CLOSED_CHECK)
+def test_a_call_that_passed_its_closed_check_before_close_never_touches_the_freed_handle(
+        operation: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Critic 75 R2-B1: a call that passed its closed check just before a
+    # concurrent close() must still not use the handle close() frees (the
+    # drain took close()'s owner path whenever _closed was set). The whole
+    # close runs right after the call's closed check passes.
+    violations = _guard_freed_handles(monkeypatch)
+    p = KafkaProducer(configs=UNREACHABLE)
+    passed = p._check_not_closed  # noqa: SLF001
+
+    def check_then_close() -> None:
+        passed()
+        p._check_not_closed = passed  # type: ignore[method-assign]  # noqa: SLF001
+        p.close(timeout=0)
+
+    p._check_not_closed = check_then_close  # type: ignore[method-assign]  # noqa: SLF001
+    with pytest.raises(IllegalStateError) as err:
+        getattr(p, operation)(**_arguments(operation))
+    assert str(err.value) == CLOSED
+    assert violations == []
+
+
+@pytest.mark.parametrize("operation", CALLS_AFTER_THE_CLOSED_CHECK)
+async def test_an_async_call_that_passed_its_closed_check_before_close_never_touches_the_freed_handle(  # noqa: E501
+        operation: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    violations = _guard_freed_handles(monkeypatch)
+    p = AsyncKafkaProducer(configs=UNREACHABLE)
+    passed = p._check_not_closed  # noqa: SLF001
+
+    def check_then_close() -> None:
+        # The close runs to its end, on its own loop, before the call goes on.
+        passed()
+        p._check_not_closed = passed  # type: ignore[method-assign]  # noqa: SLF001
+        closer = threading.Thread(target=lambda: asyncio.run(p.close(timeout=0)))
+        closer.start()
+        closer.join(30)
+        assert not closer.is_alive()
+
+    p._check_not_closed = check_then_close  # type: ignore[method-assign]  # noqa: SLF001
+    with pytest.raises(IllegalStateError) as err:
+        result = getattr(p, operation)(**_arguments(operation))
+        if inspect.isawaitable(result):
+            await result
+    assert str(err.value) == CLOSED
+    assert violations == []
+
+
 def _count_teardowns(monkeypatch: pytest.MonkeyPatch) -> dict[str, list[int]]:
     """Count Producer_shutdown / Producer_destroy per handle; a second destroy
     of one handle is counted, not run (it would free the struct twice)."""
