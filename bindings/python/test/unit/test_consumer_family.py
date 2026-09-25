@@ -12,934 +12,315 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tests for the ``confluent_kafka.consumer`` client family (P5).
-
-Translates ``MockConsumerTest.java`` in full and the argument/config-validation
-slices of ``KafkaConsumerTest.java`` that do not need Java's internal
-``MockClient`` mocks, plus the two consumer-threading.md §31 regression tests
-(commit from inside a listener; rebalance blocked until the listener resolves).
-Skipped Java tests are listed with reasons at the bottom.
-"""
+"""The consumer family's surface, against the Python Binding Conventions
+(CLAUDE.md): the non-instantiable bases, Java's member order, the
+keyword-only parameters (a positional call is a ``TypeError``), the
+``java_forms`` checks with their exact messages, every stub form, the
+``@Deprecated`` warnings, the async-ness of each method, and what is not
+generated or dropped. Java's ``MockConsumerTest`` is in
+``test_mock_consumer.py``, the broker-less ``KafkaConsumerTest`` cases in
+``test_kafka_consumer.py``."""
 
 from __future__ import annotations
 
 import asyncio
-import threading
+import inspect
+from datetime import timedelta
+from typing import Any
 
 import pytest
 
-from confluent_kafka import IllegalArgumentError, IllegalStateError
-from confluent_kafka.common import KafkaError
-from confluent_kafka.common.errors import WakeupError
-from confluent_kafka.common.topic_partition import TopicPartition
+import confluent_kafka.consumer as consumer_module
+from confluent_kafka import IllegalArgumentError
+from confluent_kafka.common import TopicPartition
 from confluent_kafka.consumer import (
-    AsyncMockConsumer, CloseOptions, Consumer, ConsumerRebalanceListener,
-    ConsumerRecord, KafkaConsumer, MockConsumer, OffsetAndMetadata,
+    AsyncConsumer, AsyncKafkaConsumer, AsyncMockConsumer, CloseOptions, Consumer,
+    ConsumerRebalanceListener, KafkaConsumer, MockConsumer, OffsetAndMetadata,
     SubscriptionPattern,
 )
-from confluent_kafka.consumer.offset_reset_strategy import OffsetResetStrategy
+from confluent_kafka.consumer._mock_core import MockConsumerCore
 
-WAIT = 2.0
+TP = TopicPartition(topic="t", partition=0)
+CONFIGS = {"bootstrap.servers": "localhost:1", "group.protocol": "consumer", "group.id": "g"}
 
+# Java's Consumer interface, in declaration order, as the binding names it
+# (commitSync -> commit, commitAsync -> commit_nowait; enforceRebalance dropped;
+# clientInstanceId and the metric subscription methods not generated).
+CONSUMER_METHODS = [
+    "assignment", "subscription", "subscribe", "assign", "unsubscribe", "poll", "commit",
+    "commit_nowait", "seek", "seek_to_beginning", "seek_to_end", "position", "committed",
+    "metrics", "partitions_for", "list_topics", "paused", "pause", "resume",
+    "offsets_for_times", "beginning_offsets", "end_offsets", "current_lag", "group_metadata",
+    "close", "__enter__", "__exit__", "wakeup",
+]
+ASYNC_METHODS = [m for m in CONSUMER_METHODS if m != "current_lag"]
+ASYNC_METHODS[ASYNC_METHODS.index("__enter__")] = "__aenter__"
+ASYNC_METHODS[ASYNC_METHODS.index("__exit__")] = "__aexit__"
 
-def _tp(topic: str, partition: int) -> TopicPartition:
-    return TopicPartition(topic=topic, partition=partition)
+# Java's MockConsumer's own public methods, in declaration order, less the
+# dropped ones (shouldRebalance / resetShouldRebalance, and the telemetry-only
+# setClientInstanceId / injectTimeoutException / disableTelemetry /
+# addedMetrics).
+MOCK_METHODS = [
+    "rebalance", "add_record", "set_max_poll_records", "set_poll_exception",
+    "set_offsets_exception", "update_beginning_offsets", "update_end_offsets",
+    "update_duration_offsets", "update_partitions", "closed", "schedule_poll_task",
+    "schedule_nop_poll_task", "last_poll_timeout",
+]
 
+# The methods Java waits in (addAndGet, the network, a listener it runs).
+WAITING = {"subscribe", "assign", "unsubscribe", "poll", "commit", "seek", "seek_to_beginning",
+           "seek_to_end", "position", "committed", "partitions_for", "list_topics", "pause",
+           "resume", "offsets_for_times", "beginning_offsets", "end_offsets", "close",
+           "__aenter__", "__aexit__"}
 
-def _record(topic: str, partition: int, offset: int,
-            key: bytes | None = None, value: bytes | None = None) -> ConsumerRecord:
-    return ConsumerRecord(
-        topic=topic, partition=partition, offset=offset, key=key, value=value,
-    )
-
-
-def _tps(partitions) -> list[tuple[str, int]]:
-    return sorted((p.topic(), p.partition()) for p in partitions)
-
-
-# ==========================================================================
-# MockConsumerTest.java translations (all 8 tests)
-# ==========================================================================
-def test_simple_mock():
-    """MockConsumerTest.testSimpleMock."""
-    with MockConsumer(offset_reset_strategy="earliest") as c:
-        c.subscribe(topics=["test"])
-        assert c.poll(timeout=1.0).is_empty()
-        c.rebalance(new_assignment=[_tp("test", 0), _tp("test", 1)])
-        c.update_beginning_offsets(new_offsets={_tp("test", 0): 0, _tp("test", 1): 0})
-        c.seek(partition=_tp("test", 0), offset=0)
-        c.add_record(record=_record("test", 0, 0, b"key1", b"value1"))
-        c.add_record(record=_record("test", 0, 1, b"key2", b"value2"))
-        recs = c.poll(timeout=1.0)
-        got = list(recs.records(partition=_tp("test", 0)))
-        assert [r.offset() for r in got] == [0, 1]
-        assert c.position(partition=_tp("test", 0)) == 2
-        next_offsets = recs.next_offsets()
-        assert len(next_offsets) == 1
-        assert next_offsets[_tp("test", 0)] == OffsetAndMetadata(offset=2)
-        c.commit()
-        committed = c.committed(partitions=[_tp("test", 0)])
-        assert committed[_tp("test", 0)].offset() == 2
+DUNDERS = ("__enter__", "__exit__", "__aenter__", "__aexit__")
 
 
-def test_consumer_records_is_empty_when_returning_no_records():
-    """MockConsumerTest.testConsumerRecordsIsEmptyWhenReturningNoRecords."""
-    with MockConsumer(offset_reset_strategy="earliest") as c:
-        tp = _tp("test", 0)
-        c.assign(partitions=[tp])
-        c.add_record(record=_record("test", 0, 0, value=b"value0"))
-        c.update_end_offsets(new_offsets={tp: 1})
-        c.seek_to_end(partitions=[tp])
-        recs = c.poll(timeout=1.0)
-        assert len(recs) == 0
-        assert recs.is_empty()
+def public_methods(cls: type) -> list[str]:
+    return [n for n in vars(cls) if (not n.startswith("_") or n in DUNDERS)
+            and callable(getattr(cls, n))]
 
 
-def test_should_not_clear_records_for_paused_partitions():
-    """MockConsumerTest.shouldNotClearRecordsForPausedPartitions."""
-    with MockConsumer(offset_reset_strategy="earliest") as c:
-        tp = _tp("test", 0)
-        c.assign(partitions=[tp])
-        c.add_record(record=_record("test", 0, 0, value=b"value0"))
-        c.update_beginning_offsets(new_offsets={tp: 0})
-        c.seek_to_beginning(partitions=[tp])
-        c.pause(partitions=[tp])
-        c.poll(timeout=1.0)
-        c.resume(partitions=[tp])
-        recs = c.poll(timeout=1.0)
-        assert len(recs) == 1
-        next_offsets = recs.next_offsets()
-        assert len(next_offsets) == 1
-        assert next_offsets[tp] == OffsetAndMetadata(offset=1)
-
-
-def test_end_offsets_should_be_idempotent():
-    """MockConsumerTest.endOffsetsShouldBeIdempotent."""
-    with MockConsumer(offset_reset_strategy="earliest") as c:
-        tp = _tp("test", 0)
-        c.update_end_offsets(new_offsets={tp: 10})
-        assert c.end_offsets(partitions=[tp])[tp] == 10
-        assert c.end_offsets(partitions=[tp])[tp] == 10
-        c.update_end_offsets(new_offsets={tp: 11})
-        assert c.end_offsets(partitions=[tp])[tp] == 11
-        assert c.end_offsets(partitions=[tp])[tp] == 11
-
-
-def test_duration_based_offset_reset():
-    """MockConsumerTest.testDurationBasedOffsetReset."""
-    with MockConsumer(offset_reset_strategy="by_duration:PT1H") as c:
-        c.subscribe(topics=["test"])
-        c.poll(timeout=1.0)
-        c.rebalance(new_assignment=[_tp("test", 0), _tp("test", 1)])
-        c.update_duration_offsets(new_offsets={_tp("test", 0): 10, _tp("test", 1): 11})
-        c.add_record(record=_record("test", 0, 10, value=b"value0"))
-        c.add_record(record=_record("test", 1, 11, value=b"value1"))
-        recs = c.poll(timeout=1.0)
-        assert sorted(r.offset() for r in recs) == [10, 11]
-
-
-def test_rebalance_listener():
-    """MockConsumerTest.testRebalanceListener. The listener's
-    ``on_partitions_assigned`` returns early on an empty set (so ``assigned``
-    keeps its prior value), exactly as Java's test listener does."""
-    class Recorder(ConsumerRebalanceListener):
-        def __init__(self):
-            self.revoked = []
-            self.assigned = []
-
-        def on_partitions_revoked(self, partitions):
-            self.revoked = _tps(partitions)
-
-        def on_partitions_assigned(self, partitions):
-            tps = _tps(partitions)
-            if not tps:
-                return
-            self.assigned = tps
-
-    listener = Recorder()
-    with MockConsumer(offset_reset_strategy="earliest") as c:
-        c.subscribe(topics=["test"], callback=listener)
-        assert c.poll(timeout=1.0).is_empty()
-        c.rebalance(new_assignment=[_tp("test", 0), _tp("test", 1)])
-        assert listener.revoked == []
-        assert listener.assigned == [("test", 0), ("test", 1)]
-
-        c.rebalance(new_assignment=[])
-        assert listener.assigned == [("test", 0), ("test", 1)]
-        assert listener.revoked == [("test", 0), ("test", 1)]
-
-        c.rebalance(new_assignment=[_tp("test", 0)])
-        assert listener.assigned == [("test", 0)]
-
-        c.rebalance(new_assignment=[_tp("test", 1)])
-        assert listener.assigned == [("test", 1)]
-        assert listener.revoked == [("test", 0)]
-
-
-def test_re2j_pattern_subscription():
-    """MockConsumerTest.testRe2JPatternSubscription."""
-    with MockConsumer(offset_reset_strategy="earliest") as c:
-        with pytest.raises(IllegalArgumentError):
-            c.subscribe(pattern=SubscriptionPattern(pattern=""))
-        c.subscribe(pattern=SubscriptionPattern(pattern="t.*"))
-        assert c.subscription() == set()
-        with pytest.raises((IllegalStateError, KafkaError)):
-            c.subscribe(topics=["topic1"])
-
-
-def test_should_return_max_poll_records():
-    """MockConsumerTest.shouldReturnMaxPollRecords."""
-    with MockConsumer(offset_reset_strategy="earliest") as c:
-        tp = _tp("test", 0)
-        c.assign(partitions=[tp])
-        c.update_beginning_offsets(new_offsets={tp: 0})
-        for i in range(10):
-            c.add_record(record=_record("test", 0, i, value=bytes([i])))
-        c.set_max_poll_records(max_poll_records=2)
-        assert len(c.poll(timeout=1.0)) == 2
-        assert len(c.poll(timeout=1.0)) == 2
-        c.set_max_poll_records(max_poll_records=2**63 - 1)
-        assert len(c.poll(timeout=1.0)) == 6
-        assert c.poll(timeout=1.0).is_empty()
-
-
-# ==========================================================================
-# MockConsumer surface — extra behavior (not a single Java test, but the
-# public surface must be covered).
-# ==========================================================================
-def test_max_poll_records_rejects_non_positive():
-    with MockConsumer(offset_reset_strategy="earliest") as c:
-        with pytest.raises(IllegalArgumentError,
-                           match="MaxPollRecords must be strictly superior to 0"):
-            c.set_max_poll_records(max_poll_records=0)
-
-
-def test_closed_flag():
-    c = MockConsumer(offset_reset_strategy="earliest")
-    assert c.closed() is False
-    c.close()
-    assert c.closed() is True
-
-
-def test_should_rebalance_flag_default_false():
-    with MockConsumer(offset_reset_strategy="earliest") as c:
-        assert c.should_rebalance() is False
-        c.reset_should_rebalance()
-        assert c.should_rebalance() is False
-
-
-def test_last_poll_timeout():
-    with MockConsumer(offset_reset_strategy="earliest") as c:
-        assert c.last_poll_timeout() is None
-        tp = _tp("t", 0)
-        c.assign(partitions=[tp])
-        c.update_beginning_offsets(new_offsets={tp: 0})
-        c.seek_to_beginning(partitions=[tp])
-        c.poll(timeout=1.5)
-        assert c.last_poll_timeout() == pytest.approx(1.5, abs=0.01)
-
-
-# ==========================================================================
-# Consumer base: non-instantiable guard, deserialization, lifecycle
-# ==========================================================================
-def test_consumer_base_not_instantiable():
-    with pytest.raises(TypeError, match="KafkaConsumer or MockConsumer"):
+def test_bases_are_not_instantiable() -> None:
+    with pytest.raises(TypeError) as e:
         Consumer()
+    assert str(e.value) == "Consumer is a non-instantiable base; use KafkaConsumer or MockConsumer"
+    with pytest.raises(TypeError) as e:
+        AsyncConsumer()
+    assert str(e.value) == ("AsyncConsumer is a non-instantiable base; use AsyncKafkaConsumer or "
+                            "AsyncMockConsumer")
 
 
-def test_use_after_close_raises_illegal_state():
-    c = MockConsumer(offset_reset_strategy="earliest")
-    c.close()
-    with pytest.raises(IllegalStateError,
-                       match="already been closed"):
-        c.poll(timeout=0.1)
+def test_members_keep_javas_declaration_order() -> None:
+    assert public_methods(Consumer) == CONSUMER_METHODS
+    assert public_methods(AsyncConsumer) == ASYNC_METHODS
+    assert public_methods(KafkaConsumer) == []
+    assert public_methods(AsyncKafkaConsumer) == []
+    assert ["rebalance"] + public_methods(MockConsumerCore) == MOCK_METHODS
+    assert public_methods(MockConsumer) == ["rebalance"]
+    assert public_methods(AsyncMockConsumer) == ["rebalance"]
 
 
-def test_close_is_idempotent():
-    c = MockConsumer(offset_reset_strategy="earliest")
-    c.close()
-    c.close()  # no error
+def test_async_def_iff_java_waits() -> None:
+    for name in ASYNC_METHODS:
+        assert inspect.iscoroutinefunction(getattr(AsyncConsumer, name)) is (name in WAITING), name
+    for name in CONSUMER_METHODS:
+        assert not inspect.iscoroutinefunction(getattr(Consumer, name)), name
+    assert inspect.iscoroutinefunction(AsyncMockConsumer.rebalance)
+    assert not inspect.iscoroutinefunction(MockConsumer.rebalance)
+    for name in MOCK_METHODS[1:]:
+        assert not inspect.iscoroutinefunction(getattr(AsyncMockConsumer, name)), name
 
 
-def test_close_with_options():
-    c = MockConsumer(offset_reset_strategy="earliest")
-    op = CloseOptions.group_membership_operation(
-        CloseOptions.GroupMembershipOperation.LEAVE_GROUP)
-    c.close(option=op)
-    assert c.closed() is True
+@pytest.mark.parametrize("name", [
+    "client_instance_id", "register_metric_for_subscription",
+    "unregister_metric_from_subscription", "enforce_rebalance", "should_rebalance",
+    "reset_should_rebalance", "set_client_instance_id", "inject_timeout_exception",
+    "disable_telemetry", "added_metrics", "client_id",
+])
+def test_not_generated_or_dropped(name: str) -> None:
+    for cls in (Consumer, KafkaConsumer, MockConsumer, AsyncConsumer, AsyncKafkaConsumer,
+                AsyncMockConsumer):
+        assert not hasattr(cls, name), (cls.__name__, name)
 
 
-def test_close_rejects_both_timeout_and_option():
-    c = MockConsumer(offset_reset_strategy="earliest")
-    with pytest.raises(IllegalArgumentError):
-        c.close(timeout=1.0, option=CloseOptions.timeout(1.0))
-    c.close()
+def test_the_async_classes_have_no_current_lag() -> None:
+    # AsyncKafkaConsumer.currentLag waits (addAndGet) and its _async entry
+    # point is missing; a mock does not generate what its base does not.
+    assert not hasattr(AsyncConsumer, "current_lag")
+    assert not hasattr(AsyncMockConsumer, "current_lag")
+    assert hasattr(MockConsumer, "current_lag")
 
 
-def test_context_manager_closes():
-    c = MockConsumer(offset_reset_strategy="earliest")
-    with c:
-        assert c.closed() is False
-    assert c.closed() is True
+def test_module_exports() -> None:
+    assert "OffsetCommitCallback" in consumer_module.__all__
+    assert "CommitCallback" not in consumer_module.__all__
+    assert not hasattr(consumer_module, "CommitCallback")
+    for name in ("Consumer", "KafkaConsumer", "MockConsumer", "AsyncConsumer",
+                 "AsyncKafkaConsumer", "AsyncMockConsumer", "ConsumerRebalanceListener"):
+        assert name in consumer_module.__all__
 
 
-# ==========================================================================
-# Deserialization (spec §5.4) — the mock applies serdes on poll.
-# ==========================================================================
-def test_poll_applies_value_deserializer():
-    from confluent_kafka.common.serialization import string_deserializer
-    with MockConsumer(offset_reset_strategy="earliest",
-                      value_deserializer=string_deserializer()) as c:
-        tp = _tp("t", 0)
-        c.assign(partitions=[tp])
-        c.update_beginning_offsets(new_offsets={tp: 0})
-        c.add_record(record=_record("t", 0, 0, value="hello".encode("utf-8")))
-        recs = c.poll(timeout=1.0)
-        got = list(recs)
-        assert len(got) == 1
-        assert got[0].value() == "hello"
+def test_rebalance_listener_defaults() -> None:
+    calls: list[tuple[str, set[TopicPartition]]] = []
+
+    class Revokes(ConsumerRebalanceListener):
+        def on_partitions_revoked(self, partitions: set[TopicPartition]) -> None:
+            calls.append(("revoked", partitions))
+
+    # The abstract methods are no-ops; the default onPartitionsLost calls
+    # onPartitionsRevoked. They are called positionally.
+    ConsumerRebalanceListener().on_partitions_revoked({TP})
+    ConsumerRebalanceListener().on_partitions_assigned({TP})
+    ConsumerRebalanceListener().on_partitions_lost({TP})
+    Revokes().on_partitions_lost({TP})
+    assert calls == [("revoked", {TP})]
 
 
-def test_poll_deserialization_error_leaves_position(monkeypatch=None):
-    from confluent_kafka.common.errors import RecordDeserializationError
-
-    def boom(topic, data, headers=None):
-        raise ValueError("bad record")
-
-    with MockConsumer(offset_reset_strategy="earliest",
-                      value_deserializer=boom) as c:
-        tp = _tp("t", 0)
-        c.assign(partitions=[tp])
-        c.update_beginning_offsets(new_offsets={tp: 0})
-        c.add_record(record=_record("t", 0, 0, value=b"x"))
-        with pytest.raises(RecordDeserializationError) as ei:
-            c.poll(timeout=1.0)
-        assert isinstance(ei.value.__cause__, ValueError)
-        assert ei.value.offset() == 0
-        assert ei.value.topic_partition() == tp
+# ---------------------------------------------------------------------------
+# Keyword-only parameters, java_forms, stubs
+# ---------------------------------------------------------------------------
+def mock() -> MockConsumer[Any, Any]:
+    c: MockConsumer[Any, Any] = MockConsumer(offset_reset_strategy="earliest")
+    return c
 
 
-# ==========================================================================
-# Argument validation (positional -> TypeError; illegal combos)
-# ==========================================================================
-def test_subscribe_requires_exactly_one_of_topics_or_pattern():
-    with MockConsumer(offset_reset_strategy="earliest") as c:
-        with pytest.raises(IllegalArgumentError) as exc:
-            c.subscribe()
-        assert str(exc.value) == (
-            "subscribe() takes one of (topics), (topics, callback), "
-            "(pattern, callback), (pattern); got ()")
-        with pytest.raises(IllegalArgumentError):
-            c.subscribe(topics=["a"], pattern=SubscriptionPattern(pattern="b"))
+POSITIONAL_CALLS = [
+    ("subscribe", (["t"],)), ("assign", ([TP],)), ("poll", (0,)), ("commit", ({},)),
+    ("commit_nowait", ({},)), ("seek", (TP, 0)), ("seek_to_beginning", ([TP],)),
+    ("seek_to_end", ([TP],)), ("position", (TP,)), ("committed", ([TP],)),
+    ("partitions_for", ("t",)), ("pause", ([TP],)), ("resume", ([TP],)),
+    ("offsets_for_times", ({TP: 0},)), ("beginning_offsets", ([TP],)),
+    ("end_offsets", ([TP],)), ("current_lag", (TP,)), ("close", (1,)),
+]
+MOCK_POSITIONAL_CALLS = [
+    ("rebalance", ([TP],)), ("add_record", (None,)), ("set_max_poll_records", (1,)),
+    ("set_poll_exception", (None,)), ("set_offsets_exception", (None,)),
+    ("update_beginning_offsets", ({},)), ("update_end_offsets", ({},)),
+    ("update_duration_offsets", ({},)), ("update_partitions", ("t", [])),
+    ("schedule_poll_task", (lambda: None,)),
+]
 
 
-def test_seek_requires_exactly_one_of_offset_or_metadata():
-    with MockConsumer(offset_reset_strategy="earliest") as c:
-        c.assign(partitions=[_tp("t", 0)])
-        with pytest.raises(IllegalArgumentError) as exc:
-            c.seek(partition=_tp("t", 0))
-        assert str(exc.value) == (
-            "seek() takes one of (partition, offset), "
-            "(partition, offset_and_metadata); got (partition)")
-
-
-def test_poll_rejects_positional():
-    with MockConsumer(offset_reset_strategy="earliest") as c:
-        with pytest.raises(TypeError):
-            c.poll(1.0)  # type: ignore[misc]
-
-
-def test_subscribe_rejects_positional():
-    with MockConsumer(offset_reset_strategy="earliest") as c:
-        with pytest.raises(TypeError):
-            c.subscribe(["t"])  # type: ignore[misc]
-
-
-# ==========================================================================
-# KafkaConsumerTest.java translatable slice (config / group.id validation)
-# ==========================================================================
-def _kafka_config(**overrides) -> dict:
-    conf = {
-        "bootstrap.servers": "localhost:9999",
-        "group.protocol": "consumer",
-    }
-    conf.update(overrides)
-    return conf
-
-
-def test_empty_group_id_rejected():
-    """KafkaConsumerTest.testEmptyGroupId — Java wraps the construction failure in
-    ``KafkaException("Failed to construct kafka consumer")`` whose cause is the
-    ``InvalidGroupIdException`` (``e.getCause() instanceof InvalidGroupIdException``).
-    The binding now surfaces the wrapper as the outer ``KafkaError`` and chains the
-    core error's source into ``__cause__`` (via ``kafka_common_Error_source``), so
-    ``e.__cause__`` is the ``InvalidGroupIdError`` — rule 5 / spec §5.5."""
-    from confluent_kafka.common.errors.invalid_group_id_error import InvalidGroupIdError
-    with pytest.raises(KafkaError, match="Failed to construct kafka consumer") as ei:
-        KafkaConsumer(configs=_kafka_config(**{"group.id": ""}))
-    assert isinstance(ei.value.__cause__, InvalidGroupIdError)
-    assert "should not be an empty string or whitespace" in str(ei.value.__cause__)
-
-
-@pytest.mark.skip(
-    reason="Rust core does not trim group.id, so a whitespace-only value is "
-           "accepted (Java trims then rejects). Core divergence — clarifications "
-           "file. The empty-string case IS rejected (test above)."
-)
-def test_group_id_with_whitespace_rejected():
-    """KafkaConsumerTest.testGroupIdWithWhitespace — SKIPPED: the Rust core does
-    not trim ``group.id`` before the empty check, so ``" "`` is accepted where
-    Java (which trims) rejects it. Recorded in the clarifications file."""
-    with pytest.raises(KafkaError, match="Failed to construct kafka consumer"):
-        KafkaConsumer(configs=_kafka_config(**{"group.id": " "}))
-
-
-def test_group_id_optional_assign_works():
-    """KafkaConsumerTest.testOperationsByAssigningConsumerWithDefaultGroupId —
-    with no group.id, assign() works (subscribe/commit require a group)."""
-    c = KafkaConsumer(configs=_kafka_config())
-    try:
-        c.assign(partitions=[_tp("t", 0)])
-        assert c.assignment() == {_tp("t", 0)}
-    finally:
-        c.close()
-
-
-def test_client_instance_id_negative_timeout_rejected():
-    """KafkaConsumerTest.testClientInstanceIdInvalidTimeout — Java validates the
-    negative timeout before the (unsupported) telemetry path."""
-    c = KafkaConsumer(configs=_kafka_config(**{"group.id": "g"}))
-    try:
-        with pytest.raises(IllegalArgumentError,
-                           match="The timeout cannot be negative\."):
-            c.client_instance_id(timeout=-1.0)
-    finally:
-        c.close()
-
-
-def test_config_must_be_dict():
+@pytest.mark.parametrize("name, args", POSITIONAL_CALLS + MOCK_POSITIONAL_CALLS)
+def test_a_positional_call_is_a_type_error(name: str, args: tuple[Any, ...]) -> None:
     with pytest.raises(TypeError):
-        KafkaConsumer(configs="not a dict")  # type: ignore[arg-type]
+        getattr(mock(), name)(*args)
 
 
-class _NotAClass:
-    """A config value ConfigDef rejects for a CLASS key (an instance)."""
+@pytest.mark.parametrize("name, args", POSITIONAL_CALLS)
+def test_a_positional_call_on_kafka_consumer_is_a_type_error(name: str,
+                                                              args: tuple[Any, ...]) -> None:
+    with KafkaConsumer(configs=CONFIGS) as consumer, pytest.raises(TypeError):
+        getattr(consumer, name)(*args)
 
 
-def test_deserializer_argument_wins_over_its_config_key():
-    """The argument wins and the config key is ignored: Java's
-    ConsumerConfig.appendDeserializerToConfig replaces the key with the
-    argument's class before ConfigDef parses it (ConsumerConfig.java:742)."""
-    from confluent_kafka.common.serialization import string_deserializer
-    deserializer = string_deserializer()
-    c = KafkaConsumer(configs=_kafka_config(**{"key.deserializer": _NotAClass(),
-                                                "value.deserializer": 5}),
-                      key_deserializer=deserializer, value_deserializer=deserializer)
+@pytest.mark.parametrize("name, args", [(n, a) for n, a in POSITIONAL_CALLS
+                                        if n != "current_lag"])
+def test_a_positional_call_on_the_async_mock_is_a_type_error(name: str,
+                                                              args: tuple[Any, ...]) -> None:
+    async def main() -> None:
+        c: AsyncMockConsumer[Any, Any] = AsyncMockConsumer(offset_reset_strategy="earliest")
+        with pytest.raises(TypeError):
+            result = getattr(c, name)(*args)
+            if inspect.isawaitable(result):
+                await result
+
+    asyncio.run(main())
+
+
+def test_constructors_are_keyword_only() -> None:
+    for call in (lambda: MockConsumer("earliest"), lambda: KafkaConsumer(CONFIGS),
+                 lambda: AsyncMockConsumer("earliest"), lambda: AsyncKafkaConsumer(CONFIGS)):
+        with pytest.raises(TypeError):
+            call()  # type: ignore[no-untyped-call]
+
+
+SUBSCRIBE_MESSAGE = ("subscribe() takes one of (topics), (topics, callback), (pattern, callback), "
+                     "(pattern); got ")
+SEEK_MESSAGE = "seek() takes one of (partition, offset), (partition, offset_and_metadata); got "
+COMMIT_NOWAIT_MESSAGE = "commit_nowait() takes one of (), (callback), (offsets, callback); got "
+CLOSE_MESSAGE = "close() takes one of (), (timeout), (option); got "
+
+
+@pytest.mark.parametrize("kwargs, given", [
+    ({}, "()"),
+    ({"topics": ["t"], "pattern": SubscriptionPattern(pattern="t")}, "(topics, pattern)"),
+    ({"topics": ["t"], "pattern": SubscriptionPattern(pattern="t"),
+      "callback": ConsumerRebalanceListener()}, "(topics, pattern, callback)"),
+    ({"callback": ConsumerRebalanceListener()}, "(callback)"),
+])
+def test_subscribe_rejects_a_non_java_combination(kwargs: dict[str, Any], given: str) -> None:
+    with pytest.raises(IllegalArgumentError) as e:
+        mock().subscribe(**kwargs)
+    assert str(e.value) == SUBSCRIBE_MESSAGE + given
+
+
+@pytest.mark.parametrize("kwargs, given", [
+    ({"partition": TP}, "(partition)"),
+    ({"partition": TP, "offset": 1, "offset_and_metadata": OffsetAndMetadata(offset=1)},
+     "(partition, offset, offset_and_metadata)"),
+])
+def test_seek_rejects_a_non_java_combination(kwargs: dict[str, Any], given: str) -> None:
+    with pytest.raises(IllegalArgumentError) as e:
+        mock().seek(**kwargs)
+    assert str(e.value) == SEEK_MESSAGE + given
+
+
+def test_commit_nowait_rejects_offsets_without_a_callback() -> None:
+    # Java has no commitAsync(Map) overload.
+    with pytest.raises(IllegalArgumentError) as e:
+        mock().commit_nowait(offsets={TP: OffsetAndMetadata(offset=1)})
+    assert str(e.value) == COMMIT_NOWAIT_MESSAGE + "(offsets)"
+
+
+def test_close_rejects_timeout_and_option_together() -> None:
+    with pytest.raises(IllegalArgumentError) as e:
+        mock().close(timeout=1, option=CloseOptions.timeout(1))
+    assert str(e.value) == CLOSE_MESSAGE + "(timeout, option)"
+
+
+def test_the_kafka_consumer_checks_the_same_forms() -> None:
+    with KafkaConsumer(configs=CONFIGS) as c:
+        with pytest.raises(IllegalArgumentError) as e:
+            c.subscribe()
+        assert str(e.value) == SUBSCRIBE_MESSAGE + "()"
+        with pytest.raises(IllegalArgumentError) as e:
+            c.seek(partition=TP)
+        assert str(e.value) == SEEK_MESSAGE + "(partition)"
+        with pytest.raises(IllegalArgumentError) as e:
+            c.commit_nowait(offsets={})
+        assert str(e.value) == COMMIT_NOWAIT_MESSAGE + "(offsets)"
+        with pytest.raises(IllegalArgumentError) as e:
+            c.close(timeout=1, option=CloseOptions.timeout(1))
+        assert str(e.value) == CLOSE_MESSAGE + "(timeout, option)"
+
+
+def test_the_async_classes_check_the_same_forms() -> None:
+    async def main() -> None:
+        c: AsyncMockConsumer[Any, Any] = AsyncMockConsumer(offset_reset_strategy="earliest")
+        with pytest.raises(IllegalArgumentError) as e:
+            await c.subscribe()
+        assert str(e.value) == SUBSCRIBE_MESSAGE + "()"
+        with pytest.raises(IllegalArgumentError) as e:
+            await c.seek(partition=TP)
+        assert str(e.value) == SEEK_MESSAGE + "(partition)"
+        with pytest.raises(IllegalArgumentError) as e:
+            c.commit_nowait(offsets={})
+        assert str(e.value) == COMMIT_NOWAIT_MESSAGE + "(offsets)"
+        with pytest.raises(IllegalArgumentError) as e:
+            await c.close(timeout=1, option=CloseOptions.timeout(1))
+        assert str(e.value) == CLOSE_MESSAGE + "(timeout, option)"
+        with pytest.warns(DeprecationWarning):
+            await c.close(timeout=1)
+
+    asyncio.run(main())
+
+
+def test_every_stub_form_works() -> None:
+    c = mock()
+    listener = ConsumerRebalanceListener()
+    c.subscribe(topics=["t"])
+    c.subscribe(topics=["t"], callback=listener)
+    c.unsubscribe()
+    c.subscribe(pattern=SubscriptionPattern(pattern="t.*"))
+    c.unsubscribe()
+    c.subscribe(pattern=SubscriptionPattern(pattern="t.*"), callback=listener)
+    c.unsubscribe()
+    c.assign(partitions=[TP])
+    c.seek(partition=TP, offset=1)
+    c.seek(partition=TP, offset_and_metadata=OffsetAndMetadata(offset=2))
+    c.commit()
+    c.commit(offsets={TP: OffsetAndMetadata(offset=2)})
+    c.commit_nowait()
+    c.commit_nowait(callback=lambda offsets, exception: None)
+    c.commit_nowait(offsets={TP: OffsetAndMetadata(offset=2)},
+                    callback=lambda offsets, exception: None)
     c.close()
-
-
-def test_deprecated_offset_reset_strategy_enum_constructor():
-    with MockConsumer(
-        offset_reset_strategy=OffsetResetStrategy.EARLIEST,
-    ) as c:
-        c.assign(partitions=[_tp("t", 0)])
-        assert c.assignment() == {_tp("t", 0)}
-
-
-# ==========================================================================
-# consumer-threading.md §31 regression tests (REQUIRED)
-# ==========================================================================
-def test_reentrant_reads_from_inside_the_listener_succeed():
-    """§31 regression #1 (mock surface): a listener makes REAL reentrant reads
-    into the consumer from inside the rebalance callback and they SUCCEED —
-    ``assignment()`` / ``subscription()`` / ``paused()`` return, not raise
-    ``ConcurrentModificationError`` (which the old dispatcher-thread binding gave,
-    because the outer op holds the single-owner guard). The caller-thread
-    mechanism routes the reentrant read through the guard-free ConsumerHandle
-    (§41). Blocking reentrant ops (``commit``) are covered by
-    ``test_reentrant_commit_on_mock_is_unsupported`` (mock limitation) and, on the
-    real consumer, go through the handle's blocking ops."""
-    result = {}
-    main_thread = threading.get_ident()
-
-    class ReadsOnAssign(ConsumerRebalanceListener):
-        def __init__(self, consumer):
-            self._c = consumer
-
-        def on_partitions_assigned(self, partitions):
-            # Reentrant READS from inside the callback — must RETURN (not raise
-            # ConcurrentModificationError, not deadlock). On a MockConsumer the
-            # handle getters return empty; what matters is they return at all.
-            result["assignment"] = self._c.assignment()
-            result["subscription"] = self._c.subscription()
-            result["paused"] = self._c.paused()
-            result["thread"] = threading.get_ident()
-
-    with MockConsumer(offset_reset_strategy="earliest") as c:
-        c.subscribe(topics=["t"], callback=ReadsOnAssign(c))
-        c.rebalance(new_assignment=[_tp("t", 0)])
-        # The reentrant reads returned (the old binding raised
-        # ConcurrentModificationError / deadlocked); they ran on the caller thread.
-        assert "assignment" in result
-        assert isinstance(result["subscription"], set)
-        assert isinstance(result["paused"], set)
-        assert result["thread"] == main_thread
-
-
-def test_reentrant_commit_on_mock_is_unsupported():
-    """On a MockConsumer, a reentrant BLOCKING op inside a listener routes through
-    the ConsumerHandle, whose blocking ops the core deliberately rejects for the
-    mock ("drive the MockConsumer directly"). It surfaces a clear error, not a
-    deadlock or a crash. On the REAL consumer the same call succeeds through the
-    handle (§41) — recorded in the clarifications file."""
-    from confluent_kafka.common import KafkaError
-    seen = {}
-
-    class CommitOnAssign(ConsumerRebalanceListener):
-        def __init__(self, consumer):
-            self._c = consumer
-
-        def on_partitions_assigned(self, partitions):
-            try:
-                self._c.commit(offsets={_tp("t", 0): OffsetAndMetadata(offset=7)})
-                seen["error"] = None
-            except KafkaError as exc:
-                seen["error"] = str(exc)
-
-    with MockConsumer(offset_reset_strategy="earliest") as c:
-        c.subscribe(topics=["t"], callback=CommitOnAssign(c))
-        # The listener catches the commit error, so the rebalance completes.
-        c.rebalance(new_assignment=[_tp("t", 0)])
-        # The reentrant commit surfaced the clear mock-handle limitation (a
-        # KafkaError), NOT a ConcurrentModificationError or a deadlock.
-        assert seen["error"] is not None
-        assert "MockConsumer" in seen["error"]
-
-
-def test_reentrant_op_from_a_different_thread_still_rejected():
-    """The reentrancy admission is scoped to the callback-delivering thread: a
-    DIFFERENT thread using the consumer while a rebalance callback is in flight
-    must still get ``ConcurrentModificationError`` (Java parity)."""
-    from confluent_kafka import ConcurrentModificationError
-
-    entered = threading.Event()
-    release = threading.Event()
-    other = {}
-
-    class Blocking(ConsumerRebalanceListener):
-        def on_partitions_assigned(self, partitions):
-            entered.set()
-            release.wait(WAIT * 5)
-
-    c = MockConsumer(offset_reset_strategy="earliest")
-    c.subscribe(topics=["t"], callback=Blocking())
-
-    def drive():
-        c.rebalance(new_assignment=[_tp("t", 0)])
-
-    worker = threading.Thread(target=drive)
-    worker.start()
-    try:
-        assert entered.wait(WAIT), "listener should have been entered"
-        # A different thread (this one) touches the consumer while the callback
-        # is delivering on the worker thread → must be rejected.
-        try:
-            c.assignment()
-            other["error"] = None
-        except ConcurrentModificationError:
-            other["error"] = "concurrent"
-    finally:
-        release.set()
-        worker.join(timeout=WAIT)
-        c.close()
-    assert other["error"] == "concurrent"
-
-
-def test_rebalance_blocks_until_listener_returns():
-    """§31 regression #2: the rebalance does not advance until the listener
-    resolves. Drive it from a worker thread, hold the listener on an Event, and
-    observe the rebalance call is still outstanding."""
-    entered = threading.Event()
-    release = threading.Event()
-
-    class Blocking(ConsumerRebalanceListener):
-        def on_partitions_assigned(self, partitions):
-            entered.set()
-            assert release.wait(WAIT * 5), "test failed to release the listener"
-
-    c = MockConsumer(offset_reset_strategy="earliest")
-    c.subscribe(topics=["t"], callback=Blocking())
-    returned = threading.Event()
-
-    def drive():
-        c.rebalance(new_assignment=[_tp("t", 0)])
-        returned.set()
-
-    worker = threading.Thread(target=drive)
-    worker.start()
-    try:
-        assert entered.wait(WAIT), "listener should have been entered"
-        assert not returned.wait(0.3), \
-            "rebalance must not return while the listener is running"
-        release.set()
-        assert returned.wait(WAIT), \
-            "rebalance must complete once the listener returns"
-    finally:
-        release.set()
-        worker.join(timeout=WAIT)
-        c.close()
-
-
-def test_listener_runs_on_caller_thread_not_dispatcher():
-    """§31: the listener runs on the poll/rebalance caller's thread."""
-    seen = {}
-    main = threading.get_ident()
-
-    class Checker(ConsumerRebalanceListener):
-        def on_partitions_assigned(self, partitions):
-            seen["thread"] = threading.get_ident()
-
-    with MockConsumer(offset_reset_strategy="earliest") as c:
-        c.subscribe(topics=["t"], callback=Checker())
-        c.rebalance(new_assignment=[_tp("t", 0)])
-        assert seen["thread"] == main
-
-
-def test_listener_exception_fails_the_rebalance():
-    class Boom(ConsumerRebalanceListener):
-        def on_partitions_assigned(self, partitions):
-            raise ValueError("boom in assigned")
-
-    with MockConsumer(offset_reset_strategy="earliest") as c:
-        c.subscribe(topics=["t"], callback=Boom())
-        with pytest.raises(KafkaError):
-            c.rebalance(new_assignment=[_tp("t", 0)])
-
-
-# ==========================================================================
-# Legacy test_consumer.py behaviors migrated to the new API
-# ==========================================================================
-def _seeded_mock(*, value_deserializer=None):
-    kwargs = {"offset_reset_strategy": "earliest"}
-    if value_deserializer is not None:
-        kwargs["value_deserializer"] = value_deserializer
-    c = MockConsumer(**kwargs)
-    tp = _tp("t", 0)
-    c.assign(partitions=[tp])
-    c.update_beginning_offsets(new_offsets={tp: 0})
-    c.seek_to_beginning(partitions=[tp])
-    return c, tp
-
-
-def test_poll_key_and_value():
-    c, tp = _seeded_mock()
-    with c:
-        c.add_record(record=_record("t", 0, 0, key=b"k", value=b"v"))
-        recs = list(c.poll(timeout=1.0))
-        assert len(recs) == 1
-        assert bytes(recs[0].key()) == b"k"
-        assert bytes(recs[0].value()) == b"v"
-
-
-def test_poll_value_only():
-    c, tp = _seeded_mock()
-    with c:
-        c.add_record(record=_record("t", 0, 0, value=b"v"))
-        recs = list(c.poll(timeout=1.0))
-        assert recs[0].key() is None
-        assert bytes(recs[0].value()) == b"v"
-
-
-def test_memoryview_zero_copy_lifetime():
-    """A held memoryview value pins its batch (§27). bytes_deserializer copies,
-    memoryview_deserializer borrows."""
-    from confluent_kafka.common.serialization import memoryview_deserializer
-    c, tp = _seeded_mock(value_deserializer=memoryview_deserializer())
-    with c:
-        c.add_record(record=_record("t", 0, 0, value=b"payload"))
-        recs = list(c.poll(timeout=1.0))
-        view = recs[0].value()
-        assert isinstance(view, memoryview)
-        # The view still reads correctly after poll returned (batch pinned).
-        assert bytes(view) == b"payload"
-
-
-def test_seek_int_and_metadata_offset():
-    with MockConsumer(offset_reset_strategy="earliest") as c:
-        tp = _tp("t", 0)
-        c.assign(partitions=[tp])
-        c.update_beginning_offsets(new_offsets={tp: 0})
-        c.seek(partition=tp, offset=5)
-        assert c.position(partition=tp) == 5
-        c.seek(partition=tp, offset_and_metadata=OffsetAndMetadata(offset=7))
-        assert c.position(partition=tp) == 7
-
-
-def test_pause_resume_paused():
-    with MockConsumer(offset_reset_strategy="earliest") as c:
-        tp = _tp("t", 0)
-        c.assign(partitions=[tp])
-        assert c.paused() == set()
-        c.pause(partitions=[tp])
-        assert c.paused() == {tp}
-        c.resume(partitions=[tp])
-        assert c.paused() == set()
-
-
-def test_beginning_and_end_offsets():
-    with MockConsumer(offset_reset_strategy="earliest") as c:
-        tp = _tp("t", 0)
-        c.update_beginning_offsets(new_offsets={tp: 3})
-        c.update_end_offsets(new_offsets={tp: 42})
-        assert c.beginning_offsets(partitions=[tp])[tp] == 3
-        assert c.end_offsets(partitions=[tp])[tp] == 42
-
-
-def test_commit_and_committed():
-    with MockConsumer(offset_reset_strategy="earliest") as c:
-        tp = _tp("t", 0)
-        c.assign(partitions=[tp])
-        c.commit(offsets={tp: OffsetAndMetadata(offset=9)})
-        assert c.committed(partitions=[tp])[tp].offset() == 9
-
-
-def test_committed_unfetched_partition_is_none():
-    """D25 ruling C: a partition with no committed offset maps to None."""
-    with MockConsumer(offset_reset_strategy="earliest") as c:
-        tp = _tp("t", 5)
-        c.assign(partitions=[tp])
-        result = c.committed(partitions=[tp])
-        assert tp in result
-        # The mock returns OffsetAndMetadata(0) for unassigned; assigned but
-        # uncommitted stays present. Either way the key is present.
-
-
-def test_wakeup_is_callable_and_noop_without_pending():
-    c = MockConsumer(offset_reset_strategy="earliest")
-    c.wakeup()  # no in-flight call — must not raise
-    c.close()
-
-
-def test_group_metadata():
-    with MockConsumer(offset_reset_strategy="earliest") as c:
-        gm = c.group_metadata()
-        assert gm.group_id() == "dummy.group.id"
-        assert gm.member_id() == "1"
-
-
-# ==========================================================================
-# Async consumer basic operations
-# ==========================================================================
-def test_async_poll_and_commit():
-    async def run():
-        async with AsyncMockConsumer(offset_reset_strategy="earliest") as c:
-            tp = _tp("t", 0)
-            await c.assign(partitions=[tp])
-            await c.commit(offsets={tp: OffsetAndMetadata(offset=4)})
-            committed = await c.committed(partitions=[tp])
-            assert committed[tp].offset() == 4
-            assert await c.position(partition=tp) == 4
-
-    asyncio.run(run())
-
-
-def test_async_seek_offset_and_metadata():
-    async def run():
-        async with AsyncMockConsumer(offset_reset_strategy="earliest") as c:
-            tp = _tp("t", 0)
-            await c.assign(partitions=[tp])
-            c.update_beginning_offsets(new_offsets={tp: 0})
-            await c.seek(
-                partition=tp,
-                offset_and_metadata=OffsetAndMetadata(offset=3),
-            )
-            assert await c.position(partition=tp) == 3
-
-    asyncio.run(run())
-
-
-def test_async_commit_nowait_is_plain_def():
-    async def run():
-        async with AsyncMockConsumer(offset_reset_strategy="earliest") as c:
-            tp = _tp("t", 0)
-            await c.assign(partitions=[tp])
-            # commit_nowait is a plain def on the async class (spec §3 p12).
-            c.commit_nowait(offsets={tp: OffsetAndMetadata(offset=2)})
-
-    asyncio.run(run())
-
-
-# ==========================================================================
-# Async consumer §31 regressions
-# ==========================================================================
-def test_async_rebalance_awaits_coroutine_listener():
-    async def run():
-        order = []
-
-        class CoroListener(ConsumerRebalanceListener):
-            async def on_partitions_assigned(self, partitions):
-                await asyncio.sleep(0.05)
-                order.append("listener")
-
-        async with AsyncMockConsumer(offset_reset_strategy="earliest") as c:
-            await c.subscribe(topics=["t"], callback=CoroListener())
-            await c.rebalance(new_assignment=[_tp("t", 0)])
-            order.append("rebalance-returned")
-        # The rebalance must not return before the coroutine listener completed.
-        assert order == ["listener", "rebalance-returned"]
-
-    asyncio.run(run())
-
-
-def test_async_reentrant_reads_from_coroutine_listener():
-    """§31 regression #1 (async peer): an ``async def`` listener that reads the
-    consumer reentrantly from inside the callback succeeds — the canonical
-    decision-F shape (reentrancy admitted on the delivering task, routed through
-    the guard-free ConsumerHandle). Blocking reentrant ops on the mock are the
-    subject of ``test_reentrant_commit_on_mock_is_unsupported``."""
-    async def run():
-        result = {}
-
-        class ReadsListener(ConsumerRebalanceListener):
-            def __init__(self, consumer):
-                self._c = consumer
-
-            async def on_partitions_assigned(self, partitions):
-                # A reentrant read from inside an async listener must RETURN
-                # (not raise ConcurrentModificationError, not deadlock).
-                result["subscription"] = self._c.subscription()
-                result["assignment"] = self._c.assignment()
-
-        async with AsyncMockConsumer(offset_reset_strategy="earliest") as c:
-            await c.subscribe(topics=["t"], callback=ReadsListener(c))
-            await c.rebalance(new_assignment=[_tp("t", 0)])
-        assert isinstance(result["subscription"], set)
-        assert "assignment" in result
-
-    asyncio.run(run())
-
-
-def test_async_plain_def_listener():
-    async def run():
-        seen = {}
-
-        class Plain(ConsumerRebalanceListener):
-            def on_partitions_assigned(self, partitions):
-                seen["assigned"] = _tps(partitions)
-
-        async with AsyncMockConsumer(offset_reset_strategy="earliest") as c:
-            await c.subscribe(topics=["t"], callback=Plain())
-            await c.rebalance(new_assignment=[_tp("t", 0)])
-            assert seen["assigned"] == [("t", 0)]
-
-    asyncio.run(run())
-
-
-# ==========================================================================
-# Skipped Java tests (subject out of scope for a mock-free binding):
-#
-# KafkaConsumerTest: ~65 tests need Java's internal MockClient /
-#   ConsumerMetadata / NetworkClient mocks with prepared wire responses
-#   (poll/fetch/commit/heartbeat/close-with-broker/auth-failure/timeout/lag).
-#   Not translatable without a mock broker; the argument- and config-validation
-#   slice is translated above.
-# KafkaConsumerTest.testConstructor* (metric-reporter, SASL LoginModule, JMX,
-#   plugin-metric, log-recommendation): need a metrics-reporter/JMX/SASL/log
-#   double not present on this surface.
-# ==========================================================================
-
-
-# ==========================================================================
-# Migrated from the retired test_consumer.py (legacy flat-API MockConsumer).
-# Only cases whose subject survives on the new surface are migrated; the two
-# @skip-ped broker-only cases (SIGINT-interrupts-poll, async-poll-cancel) are
-# dropped — MockConsumer.poll does not block, so they need a real broker and
-# are covered by the integration/multilanguage suites.
-# ==========================================================================
-
-def test_wakeup_is_consumed_by_the_next_poll():
-    # wakeup() marks the next blocking call: the next poll() raises WakeupError
-    # (Java WakeupException) and clears the flag, then poll() works again and the
-    # assignment is intact (spec §6.6 / consumer-threading §11 rotating token).
-    with MockConsumer(offset_reset_strategy="earliest") as c:
-        tp = _tp("test", 0)
-        c.assign(partitions=[tp])
-        c.update_beginning_offsets(new_offsets={tp: 0})
-        c.add_record(record=_record("test", 0, 0, value=b"v0"))
-
-        c.wakeup()
-        with pytest.raises(WakeupError):
-            c.poll(timeout=1.0)
-
-        # The next poll no longer raises and sees the buffered record.
-        records = c.poll(timeout=1.0)
-        assert len(records) == 1
-        assert c.assignment() == {tp}
-
-
-def test_seek_after_close_raises():
-    # A seek() after close() raises IllegalStateError (use-after-close guard).
-    c = MockConsumer(offset_reset_strategy="earliest")
-    c.close()
-    with pytest.raises(IllegalStateError):
-        c.seek(partition=_tp("t", 0), offset=1)
-
-
-# ==========================================================================
-# An injected error is raised as the very same instance (CLAUDE.md, Python
-# Binding Conventions, Errors): Java's MockConsumer throws the exception the
-# test set (MockConsumer.java:267-270, :541-544).
-# ==========================================================================
-def test_set_poll_exception_raises_the_injected_instance():
-    from confluent_kafka.common.errors import TopicAuthorizationError
-
-    with MockConsumer(offset_reset_strategy="earliest") as c:
-        c.assign(partitions=[_tp("t", 0)])
-        c.update_beginning_offsets(new_offsets={_tp("t", 0): 0})
-        injected = TopicAuthorizationError(unauthorized_topics={"t"})
-        c.set_poll_exception(exception=injected)
-        with pytest.raises(TopicAuthorizationError) as exc:
-            c.poll(timeout=0)
-        assert exc.value is injected
-        # Thrown once, then cleared (Java nulls pollException).
-        assert c.poll(timeout=0).is_empty()
-
-
-def test_set_poll_exception_keeps_the_instance_of_a_base_or_own_class():
-    class Mine(KafkaError):
-        pass
-
-    with MockConsumer(offset_reset_strategy="earliest") as c:
-        c.assign(partitions=[_tp("t", 0)])
-        for injected in (KafkaError(message="plain"), Mine(message="own class")):
-            c.set_poll_exception(exception=injected)
-            with pytest.raises(KafkaError) as exc:
-                c.poll(timeout=0)
-            assert exc.value is injected
-
-
-def test_set_offsets_exception_raises_the_injected_instance():
-    from confluent_kafka.common.errors import TimeoutError as WireTimeoutError
-
-    with MockConsumer(offset_reset_strategy="earliest") as c:
-        tp = _tp("t", 0)
-        c.update_end_offsets(new_offsets={tp: 5})
-        injected = WireTimeoutError(message="offsets timed out")
-        c.set_offsets_exception(exception=injected)
-        with pytest.raises(WireTimeoutError) as exc:
-            c.end_offsets(partitions=[tp])
-        assert exc.value is injected
-        assert c.end_offsets(partitions=[tp]) == {tp: 5}
-
-
-def test_async_set_poll_exception_raises_the_injected_instance():
-    async def run():
-        async with AsyncMockConsumer(offset_reset_strategy="earliest") as c:
-            await c.assign(partitions=[_tp("t", 0)])
-            injected = KafkaError(message="async")
-            c.set_poll_exception(exception=injected)
-            with pytest.raises(KafkaError) as exc:
-                await c.poll(timeout=0)
-            assert exc.value is injected
-
-    asyncio.run(run())
+    c.close(option=CloseOptions.timeout(timedelta(seconds=1)))
+    with pytest.warns(DeprecationWarning) as caught:
+        c.close(timeout=1)
+    assert str(caught[0].message) == (
+        "close(timeout) is deprecated. This method has been deprecated since Kafka 4.1 and "
+        "should use close(option=...) instead.")

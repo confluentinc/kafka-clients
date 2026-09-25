@@ -12,117 +12,91 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""``MockConsumer`` — the in-memory synchronous test consumer.
+"""``MockConsumer``: Java's ``org.apache.kafka.clients.consumer.MockConsumer``.
 
-Translated from ``org.apache.kafka.clients.consumer.MockConsumer`` (Apache Kafka
-4.3.1). Constructor plus Java's full public mock surface (the driver methods come
-from ``_MockDriverMixin``; ``rebalance`` is here because it fires the listener
-and so is synchronous on the sync mock).
+Java's two public constructors, ``(@Deprecated OffsetResetStrategy
+offsetResetStrategy)`` and ``(String offsetResetStrategy)``, share one name
+with two types, so one parameter typed as their union with one stub per type,
+the deprecated form last (Signatures); the deprecated one warns. The Java
+mock's own methods follow (Class family) in Java's order; ``shouldRebalance()``
+/ ``resetShouldRebalance()`` read and clear state only the dropped
+``enforceRebalance()`` sets, and ``setClientInstanceId`` /
+``injectTimeoutException`` / ``disableTelemetry`` / ``addedMetrics`` serve only
+the methods not generated, so they are dropped too *(deviation)*.
 
-The mock applies the configured deserializers on ``poll()`` (spec §6.2), so a
-record added with ``add_record`` carries its **serialized** (``bytes``) key /
-value — the one deviation from Java's ``MockConsumer<K,V>`` (whose ``addRecord``
-takes the typed value), recorded in the clarifications file.
+The mock has no deserializers: ``add_record`` takes the ``ConsumerRecord[K,
+V]`` the test builds, and ``poll()`` returns those very records, as Java's mock
+does. Nothing binds ``K`` / ``V``, so the caller annotates the mock as Java
+writes its type arguments: ``c: MockConsumer[str, str] =
+MockConsumer(offset_reset_strategy="earliest")``.
+
+A direct Python translation of Java's mock (``_mock_core``), not FFI-backed
+*(deviation, see there)*.
 """
 
 from __future__ import annotations
 
+import warnings
 from collections.abc import Iterable
-from typing import Generic, TypeVar, overload
+from typing import TYPE_CHECKING, Generic, TypeVar, overload
 
-import _confluentkafka as _lib  # type: ignore[import-not-found]
-
-from confluent_kafka.common.serialization import Deserializer, bytes_deserializer
-from confluent_kafka import Duration
-from confluent_kafka.common.topic_partition import TopicPartition
-
-from ._conversions import tp_to_spec
-from ._mock_driver import _MockDriverMixin
-from .consumer_records import ConsumerRecords
+from ._auto_offset_reset_strategy import AutoOffsetResetStrategy
+from ._mock_core import MockConsumerCore
 from .consumer import Consumer
 from .offset_reset_strategy import OffsetResetStrategy
+
+if TYPE_CHECKING:
+    from confluent_kafka.common.topic_partition import TopicPartition
+
+__all__ = ["MockConsumer"]
 
 K = TypeVar("K")
 V = TypeVar("V")
 
+DEPRECATED_CONSTRUCTOR = ("MockConsumer(offset_reset_strategy: OffsetResetStrategy) is "
+                          "deprecated. Since 4.0. Use MockConsumer(offset_reset_strategy: str) "
+                          "instead.")
 
-class MockConsumer(_MockDriverMixin, Consumer[K, V], Generic[K, V]):
-    """The in-memory test consumer (Java ``MockConsumer<K, V>``)."""
 
-    __slots__ = ()
+def reset_strategy_of(offset_reset_strategy: str | OffsetResetStrategy) -> AutoOffsetResetStrategy:
+    """Java's two constructors: the enum form (deprecated, warns) is
+    ``AutoOffsetResetStrategy.fromString(offsetResetStrategy.toString())``."""
+    if isinstance(offset_reset_strategy, OffsetResetStrategy):
+        warnings.warn(DEPRECATED_CONSTRUCTOR, DeprecationWarning, stacklevel=3)
+        return AutoOffsetResetStrategy.from_string(str(offset_reset_strategy))
+    return AutoOffsetResetStrategy.from_string(offset_reset_strategy)
+
+
+class MockConsumer(MockConsumerCore[K, V], Consumer[K, V], Generic[K, V]):
+    """A mock of the ``Consumer`` interface you can use for testing code that
+    uses Kafka. This class is not thread-safe. However, you can use
+    ``schedule_poll_task()`` to write multithreaded tests where a driver thread
+    waits for ``poll()`` to be called by a background thread and then can
+    safely perform operations during a callback.
+
+    Java: ``org.apache.kafka.clients.consumer.MockConsumer<K, V>``.
+    """
 
     @overload
-    def __init__(self, *, offset_reset_strategy: str,
-                 key_deserializer: Deserializer[K] = ...,
-                 value_deserializer: Deserializer[V] = ...,
-                 ) -> None: ...
+    def __init__(self, *, offset_reset_strategy: str) -> None: ...
     @overload
-    def __init__(self, *, offset_reset_strategy: OffsetResetStrategy,
-                 key_deserializer: Deserializer[K] = ...,
-                 value_deserializer: Deserializer[V] = ...,
-                 ) -> None: ...
+    def __init__(self, *, offset_reset_strategy: OffsetResetStrategy) -> None: ...
 
-    def __init__(self, *, offset_reset_strategy: str | OffsetResetStrategy,
-                 key_deserializer: Deserializer[K] = bytes_deserializer(),  # type: ignore[assignment]
-                 value_deserializer: Deserializer[V] = bytes_deserializer(),  # type: ignore[assignment]
-                 ) -> None:
-        """Java: ``MockConsumer(String offsetResetStrategy)`` /
-        ``@Deprecated MockConsumer(OffsetResetStrategy)`` (the value is the
-        ``auto.offset.reset`` setting; the enum form is the deprecated
-        overload, kept)."""
-        reset = (str(offset_reset_strategy)
-                 if isinstance(offset_reset_strategy, OffsetResetStrategy)
-                 else offset_reset_strategy)
-        handle = _lib.Consumer_MockConsumer_new(reset)
-        self._engine_init(
-            handle=handle,
-            key_deserializer=key_deserializer,
-            value_deserializer=value_deserializer,
-        )
+    def __init__(self, *, offset_reset_strategy: str | OffsetResetStrategy) -> None:
+        """A mock consumer is instantiated by providing the ``auto.offset.reset``
+        value (``"earliest"``, ``"latest"``, ``"none"`` or
+        ``"by_duration:<ISO-8601 duration>"``) as the input.
+
+        Deprecated: the ``OffsetResetStrategy`` form. Since 4.0. Use the ``str``
+        form instead.
+        """
+        strategy = reset_strategy_of(offset_reset_strategy)
+        Consumer.__init__(self)
+        self._init_mock(strategy)
 
     def rebalance(self, *, new_assignment: Iterable[TopicPartition]) -> None:
-        """Java ``rebalance(Collection)`` — simulate a rebalance, firing the
-        listener callbacks on the caller's thread (§31)."""
-        self._check_closed()
-        spec = tp_to_spec(new_assignment)
-        self._run_sync(
-            lambda cb: _lib.MockConsumer_rebalance_async(self._h, spec, cb),
-            self._resolve_void, self._free_void,
-        )
-
-    def poll(self, *, timeout: Duration) -> ConsumerRecords[K, V]:
-        """Java ``poll(Duration)``; raises an error injected with
-        ``set_poll_exception`` as the very instance injected."""
-        try:
-            return super().poll(timeout=timeout)
-        except Exception as error:
-            instead = self._injected_instead("poll", error)
-            if instead is error:
-                raise
-        raise instead
-
-    def beginning_offsets(self, *, partitions: Iterable[TopicPartition],
-                          timeout: Duration | None = None
-                          ) -> dict[TopicPartition, int]:
-        """Java ``beginningOffsets(Collection)``; raises an error injected with
-        ``set_offsets_exception`` as the very instance injected."""
-        try:
-            return super().beginning_offsets(partitions=partitions, timeout=timeout)
-        except Exception as error:
-            instead = self._injected_instead("offsets", error)
-            if instead is error:
-                raise
-        raise instead
-
-    def end_offsets(self, *, partitions: Iterable[TopicPartition],
-                    timeout: Duration | None = None
-                    ) -> dict[TopicPartition, int]:
-        """Java ``endOffsets(Collection)``; raises an error injected with
-        ``set_offsets_exception`` as the very instance injected."""
-        try:
-            return super().end_offsets(partitions=partitions, timeout=timeout)
-        except Exception as error:
-            instead = self._injected_instead("offsets", error)
-            if instead is error:
-                raise
-        raise instead
+        """Simulate a rebalance event: the listener's ``on_partitions_revoked``
+        runs with the partitions removed (if any), the assignment becomes
+        ``new_assignment``, then ``on_partitions_assigned`` runs with the
+        partitions added, on this thread; the buffered records are cleared."""
+        self._c_rebalance(new_assignment)

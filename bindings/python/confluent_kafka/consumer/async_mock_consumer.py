@@ -12,107 +12,55 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""``AsyncMockConsumer`` — the in-memory asyncio test consumer.
-
-The async peer of ``MockConsumer``: the driver methods come from
-``_MockDriverMixin``; ``rebalance`` is a coroutine here (it fires the listener,
-which may be ``async def`` on the async client, spec §3 principle 5 / §6.2).
-"""
+"""``AsyncMockConsumer``: the asyncio peer of :class:`MockConsumer`, with the
+same constructor and the same mock methods (CLAUDE.md, Python Binding
+Conventions, Class family). ``rebalance`` is ``async def``: Java's waits on the
+listener it runs, which may be ``async def`` here and is awaited. As
+:class:`AsyncConsumer`, it has no ``current_lag()``: a mock does not generate
+what its base class does not (Implementation over the FFI)."""
 
 from __future__ import annotations
 
 from collections.abc import Iterable
-from typing import Generic, TypeVar, overload
+from typing import TYPE_CHECKING, Generic, TypeVar, overload
 
-import _confluentkafka as _lib  # type: ignore[import-not-found]
-
-from confluent_kafka.common.serialization import Deserializer, bytes_deserializer
-from confluent_kafka import Duration
-from confluent_kafka.common.topic_partition import TopicPartition
-
-from ._conversions import tp_to_spec
-from ._mock_driver import _MockDriverMixin
-from .consumer_records import ConsumerRecords
+from ._mock_core import MockConsumerCore
 from .async_consumer import AsyncConsumer
+from .mock_consumer import reset_strategy_of
 from .offset_reset_strategy import OffsetResetStrategy
+
+if TYPE_CHECKING:
+    from confluent_kafka.common.topic_partition import TopicPartition
+
+__all__ = ["AsyncMockConsumer"]
 
 K = TypeVar("K")
 V = TypeVar("V")
 
 
-class AsyncMockConsumer(_MockDriverMixin, AsyncConsumer[K, V], Generic[K, V]):
-    """The in-memory asyncio test consumer (async peer of ``MockConsumer``)."""
+class AsyncMockConsumer(MockConsumerCore[K, V], AsyncConsumer[K, V], Generic[K, V]):
+    """The asyncio peer of ``MockConsumer``, a mock of the ``Consumer``
+    interface you can use for testing code that uses Kafka.
 
-    __slots__ = ()
+    Java: ``org.apache.kafka.clients.consumer.MockConsumer<K, V>``.
+    """
 
     @overload
-    def __init__(self, *, offset_reset_strategy: str,
-                 key_deserializer: Deserializer[K] = ...,
-                 value_deserializer: Deserializer[V] = ...,
-                 ) -> None: ...
+    def __init__(self, *, offset_reset_strategy: str) -> None: ...
     @overload
-    def __init__(self, *, offset_reset_strategy: OffsetResetStrategy,
-                 key_deserializer: Deserializer[K] = ...,
-                 value_deserializer: Deserializer[V] = ...,
-                 ) -> None: ...
+    def __init__(self, *, offset_reset_strategy: OffsetResetStrategy) -> None: ...
 
-    def __init__(self, *, offset_reset_strategy: str | OffsetResetStrategy,
-                 key_deserializer: Deserializer[K] = bytes_deserializer(),  # type: ignore[assignment]
-                 value_deserializer: Deserializer[V] = bytes_deserializer(),  # type: ignore[assignment]
-                 ) -> None:
-        reset = (str(offset_reset_strategy)
-                 if isinstance(offset_reset_strategy, OffsetResetStrategy)
-                 else offset_reset_strategy)
-        handle = _lib.Consumer_MockConsumer_new(reset)
-        self._engine_init(
-            handle=handle,
-            key_deserializer=key_deserializer,
-            value_deserializer=value_deserializer,
-        )
+    def __init__(self, *, offset_reset_strategy: str | OffsetResetStrategy) -> None:
+        """See :meth:`MockConsumer.__init__`.
+
+        Deprecated: the ``OffsetResetStrategy`` form. Since 4.0. Use the ``str``
+        form instead.
+        """
+        strategy = reset_strategy_of(offset_reset_strategy)
+        AsyncConsumer.__init__(self)
+        self._init_mock(strategy)
 
     async def rebalance(self, *, new_assignment: Iterable[TopicPartition]) -> None:
-        """Java ``rebalance(Collection)`` — simulate a rebalance, awaiting the
-        (possibly ``async def``) listener on the event loop (§31 / §41)."""
-        self._check_closed()
-        spec = tp_to_spec(new_assignment)
-        await self._run_async(
-            lambda cb: _lib.MockConsumer_rebalance_async(self._h, spec, cb),
-            self._resolve_void, self._free_void,
-        )
-
-    async def poll(self, *, timeout: Duration) -> ConsumerRecords[K, V]:
-        """Java ``poll(Duration)``; raises an error injected with
-        ``set_poll_exception`` as the very instance injected."""
-        try:
-            return await super().poll(timeout=timeout)
-        except Exception as error:
-            instead = self._injected_instead("poll", error)
-            if instead is error:
-                raise
-        raise instead
-
-    async def beginning_offsets(self, *, partitions: Iterable[TopicPartition],
-                          timeout: Duration | None = None
-                          ) -> dict[TopicPartition, int]:
-        """Java ``beginningOffsets(Collection)``; raises an error injected with
-        ``set_offsets_exception`` as the very instance injected."""
-        try:
-            return await super().beginning_offsets(partitions=partitions, timeout=timeout)
-        except Exception as error:
-            instead = self._injected_instead("offsets", error)
-            if instead is error:
-                raise
-        raise instead
-
-    async def end_offsets(self, *, partitions: Iterable[TopicPartition],
-                    timeout: Duration | None = None
-                    ) -> dict[TopicPartition, int]:
-        """Java ``endOffsets(Collection)``; raises an error injected with
-        ``set_offsets_exception`` as the very instance injected."""
-        try:
-            return await super().end_offsets(partitions=partitions, timeout=timeout)
-        except Exception as error:
-            instead = self._injected_instead("offsets", error)
-            if instead is error:
-                raise
-        raise instead
+        """See :meth:`MockConsumer.rebalance`; a coroutine listener method is
+        awaited."""
+        await self._a_rebalance(new_assignment)
