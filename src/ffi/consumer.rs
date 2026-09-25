@@ -186,8 +186,9 @@ struct FfiConsumerHandle {
     /// enqueued above, so the embedder's blocking-API wait loop wakes and drains.
     /// Set via [`kafka_consumer_Consumer_set_pending_callback_notify`]; shared
     /// with every [`CallerThreadRebalanceListener`] so the listener reads the
-    /// **current** notify at callback time (the embedder re-registers it per
-    /// blocking op, e.g. the async client hops onto the running op's loop).
+    /// **current** notify at callback time. The embedder registers it once and
+    /// wakes whichever of its calls wait: re-registering it per operation would
+    /// let a call the access guard then rejects take it from the call in flight.
     pending_callback_notify: Arc<Mutex<Option<PendingCallbackNotify>>>,
 }
 
@@ -1887,7 +1888,9 @@ pub struct kafka_consumer_PendingCallback_t {
 
 /// Registers the notification fired when a callback is enqueued for delivery on
 /// the embedder's thread. Call once, before subscribing with a caller-thread
-/// listener or registering a commit callback.
+/// listener or registering a commit callback: the slot holds one notify, so an
+/// embedder with several waiting calls (e.g. tasks of an event loop) registers
+/// one that wakes all of them, rather than one per call.
 ///
 /// Registering a notify also moves commit callbacks
 /// ([`kafka_consumer_Consumer_commit_async_with_callback`]) onto the caller's
@@ -4756,7 +4759,14 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_commit_sync_with_offsets_async(
 /// [`kafka_consumer_Consumer_commit_async_with_callback`] and
 /// [`kafka_consumer_Consumer_commit_async_offsets_with_callback`].
 ///
-/// The completion `callback` runs on the consumer's callback dispatcher thread.
+/// While a caller-thread listener is registered
+/// ([`kafka_consumer_Consumer_subscribe_caller_thread_listener_async`]), this
+/// call can wait for a queued listener callback: the core's commit waits for
+/// the offsets it commits and delivers the background events meanwhile
+/// (`consumer-threading.md` §31; Java's `commitAsync` does not). Make the call
+/// from a thread other than the one that drains the queue
+/// ([`kafka_consumer_Consumer_next_pending_callback`]), while that thread
+/// drains, or it can block forever.
 ///
 /// # Safety
 ///
@@ -4847,9 +4857,17 @@ struct FfiOffsetCommitCallback {
     /// Owns `user_data` (and fires the destroy hook on drop).
     target: CallbackTarget,
     /// The consumer handle: its access-guard owner, pending queue, notify slot
-    /// and completion-dispatch queue. The handle outlives every registration
-    /// (the consumer that holds them is dropped first by
-    /// [`kafka_consumer_Consumer_destroy`]).
+    /// and completion-dispatch queue.
+    ///
+    /// It does **not** outlive every registration:
+    /// [`kafka_consumer_Consumer_destroy`] frees the handle's allocation when it
+    /// moves the fields out of the box, and drops the consumer holding the
+    /// registrations only afterwards. The reference is sound because it is only
+    /// read inside `on_complete`, which runs only from the application-side
+    /// futures of calls on this consumer; by the time `destroy` runs, those have
+    /// finished or are cancelled by the runtime shutdown that comes before the
+    /// consumer's drop, and dropping a registration only releases `user_data`
+    /// (the same argument as the `&'static` handle of the poll completion).
     handle: &'static FfiConsumerHandle,
 }
 
@@ -4936,6 +4954,15 @@ fn make_commit_callback(
 /// returns as soon as the commit has been initiated (null on success, a non-null
 /// error handle on failure).
 ///
+/// While a caller-thread listener is registered
+/// ([`kafka_consumer_Consumer_subscribe_caller_thread_listener_async`]), this
+/// call can wait for a queued listener callback: the core's commit waits for
+/// the offsets it commits and delivers the background events meanwhile
+/// (`consumer-threading.md` §31; Java's `commitAsync` does not). Make the call
+/// from a thread other than the one that drains the queue
+/// ([`kafka_consumer_Consumer_next_pending_callback`]), while that thread
+/// drains, or it can block forever.
+///
 /// # Callback contract
 ///
 /// - Fires **exactly once** per successful call, when the commit completes,
@@ -5005,6 +5032,15 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_commit_async_with_callback(
 /// offsets fail to marshal (e.g. a negative offset) this returns the error
 /// **without registering the callback** — the callback never fires, but
 /// `user_data_destroy` still does.
+///
+/// While a caller-thread listener is registered
+/// ([`kafka_consumer_Consumer_subscribe_caller_thread_listener_async`]), this
+/// call can wait for a queued listener callback: the core's commit waits for
+/// the offsets it commits and delivers the background events meanwhile
+/// (`consumer-threading.md` §31; Java's `commitAsync` does not). Make the call
+/// from a thread other than the one that drains the queue
+/// ([`kafka_consumer_Consumer_next_pending_callback`]), while that thread
+/// drains, or it can block forever.
 ///
 /// # Safety
 ///
