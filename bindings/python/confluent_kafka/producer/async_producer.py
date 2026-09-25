@@ -44,6 +44,8 @@ from ._base import (
     _ProducerState,
     check_group_metadata,
     close_timeout_ms,
+    force_close,
+    free_payload,
     group_metadata_fields,
     offsets_to_spec,
     raise_if_error,
@@ -245,22 +247,36 @@ class AsyncProducer(Generic[K, V], _ProducerState):
         # timer covers the whole close).
         start = loop.time()
         _lib.Producer_shutdown(c_producer)
+        # Whether the Rust close ran to its end; if the task was cancelled
+        # first, the close is forced before the handle is freed (see
+        # force_close).
+        closed = False
         try:
             if timeout_ms is None:
                 await self._drain_async()
-                await self._run_async(lambda cb: _lib.Producer_close_async(c_producer, cb))
+                (error,) = await self._await_payload(
+                    lambda cb: _lib.Producer_close_async(c_producer, cb), False)
             else:
                 await self._drain_async(timeout_ms / 1000.0)
                 remaining_ms = max(0, timeout_ms - int((loop.time() - start) * 1000))
-                await self._run_async(lambda cb: _lib.Producer_close_with_timeout_async(
-                    c_producer, remaining_ms, cb))
+                (error,) = await self._await_payload(
+                    lambda cb: _lib.Producer_close_with_timeout_async(
+                        c_producer, remaining_ms, cb), False)
+            closed = True
+            raise_if_error(error)
         finally:
-            # Waits for the calls still in flight, then joins the send and poll
-            # threads: off the loop.
-            await loop.run_in_executor(None, self._destroy, c_producer)
-            self._close_serializers()
+            # Forces an unfinished close, waits for the calls still in flight,
+            # then joins the send and poll threads: off the loop, and to its end
+            # even if this task is cancelled again meanwhile.
+            teardown = loop.run_in_executor(None, self._teardown, c_producer, not closed)
+            try:
+                await asyncio.shield(teardown)
+            finally:
+                self._close_serializers()
 
-    def _destroy(self, c_producer: int) -> None:
+    def _teardown(self, c_producer: int, force: bool) -> None:
+        if force:
+            force_close(c_producer)
         self._wait_for_uses()
         _lib.Producer_destroy(c_producer)
 
@@ -309,13 +325,13 @@ class AsyncProducer(Generic[K, V], _ProducerState):
 
         def deliver(payload: tuple[Any, ...]) -> None:
             if fut.done():
-                _free_payload(payload, partitions)
+                free_payload(payload, partitions)
                 return
             fut.set_result(payload)
 
         def cb(*payload: Any) -> None:
             if loop.is_closed():
-                _free_payload(payload, partitions)
+                free_payload(payload, partitions)
                 return
             loop.call_soon_threadsafe(deliver, payload)
 
@@ -326,14 +342,3 @@ class AsyncProducer(Generic[K, V], _ProducerState):
         """A void ``_async`` FFI operation, awaited; raises its typed error."""
         (error,) = await self._await_payload(submit, False)
         raise_if_error(error)
-
-
-def _free_payload(payload: tuple[Any, ...], partitions: bool) -> None:
-    if partitions:
-        list_handle, error = payload
-        if list_handle:
-            _lib.PartitionInfoList_drain(list_handle)
-    else:
-        (error,) = payload
-    if error:
-        _lib.KafkaError_destroy(error)

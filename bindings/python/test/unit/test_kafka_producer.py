@@ -42,8 +42,6 @@ so. Not translated, with the reason:
   ``testPartitionerClose``, ``configurableObjectsShouldSeeGeneratedClientId``):
   the client runs none, and ``interceptor.classes`` / ``partitioner.class``
   raise ``ConfigError``;
-- ``shouldCloseProperlyAndThrowIfInterrupted``: Python threads have no
-  interruption;
 - ``testHeadersFailure``: Python headers are immutable, so there is no
   read-only state to check;
 - ``testUnusedConfigs``: the binding logs only keys the ``ConfigDef`` does not
@@ -52,8 +50,12 @@ so. Not translated, with the reason:
 
 from __future__ import annotations
 
+import os
+import signal
 import threading
+import time
 import warnings
+from types import FrameType
 from typing import Any
 
 import pytest
@@ -138,6 +140,54 @@ def test_serializer_close() -> None:
 
     assert MockSerializer.INIT_COUNT == old_init_count + 2
     assert MockSerializer.CLOSE_COUNT == old_close_count + 2
+
+
+def test_should_close_properly_and_throw_if_interrupted() -> None:
+    # Java interrupts the thread blocked in close() and expects an
+    # InterruptException after the close force-closed the sender
+    # (KafkaProducer.close(Duration, boolean), :1419-1437). The Python analog of
+    # the interrupt is Ctrl+C: SIGINT, which only the main thread receives, so
+    # close() runs here and a timer sends the signal. Java's MockClient holds
+    # the send in flight; here an unreachable broker keeps the record waiting
+    # for metadata (max.block.ms 60 s), so close() cannot end on its own sooner.
+    configs = {"bootstrap.servers": "localhost:9999", "batch.size": "1",
+               "max.block.ms": 60000}
+    producer = KafkaProducer(configs=configs, key_serializer=string_serializer(),
+                             value_serializer=string_serializer())
+    future = producer.send(record=ProducerRecord(topic="topic", key="key", value="value"))
+
+    armed = True
+
+    def on_sigint(signum: int, frame: FrameType | None) -> None:
+        if armed:
+            raise KeyboardInterrupt
+
+    previous = signal.signal(signal.SIGINT, on_sigint)
+    timer = threading.Timer(0.1, os.kill, (os.getpid(), signal.SIGINT))
+    start = time.monotonic()
+    try:
+        timer.start()
+        with pytest.raises(KeyboardInterrupt):
+            producer.close()
+            pytest.fail("Close should block and throw.")
+        elapsed = time.monotonic() - start
+    finally:
+        timer.cancel()
+        timer.join()
+        armed = False
+        time.sleep(0.05)  # a signal still pending runs the disarmed handler
+        signal.signal(signal.SIGINT, previous)
+
+    # Close did not complete without waiting for the send, and the interrupt
+    # surfaced once the close was forced, not after max.block.ms.
+    assert 0.1 <= elapsed < 10, elapsed
+    # Closed properly: the pending record failed, and the producer is closed.
+    assert future.done()
+    assert isinstance(future.exception(), KafkaError)
+    with pytest.raises(IllegalStateError) as err:
+        producer.send(record=ProducerRecord(topic="topic", key="key", value="value"))
+    assert str(err.value) == "Cannot perform operation after producer has been closed"
+    producer.close()  # closing again is harmless
 
 
 def test_os_default_socket_buffer_sizes() -> None:

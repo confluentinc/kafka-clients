@@ -156,20 +156,50 @@ def serialize(serializer: Serializer[Any], topic: str, data: object,
     raise TypeError(f"a serializer must return bytes or None, not {type(out).__name__}")
 
 
-def await_payload(submit: Callable[[Callable[..., None]], None]) -> tuple[Any, ...]:
+def await_payload(submit: Callable[[Callable[..., None]], None],
+                  partitions: bool = False) -> tuple[Any, ...]:
     """Submit an ``_async`` FFI operation and wait for its completion payload
     on a ``threading.Event``, which releases the GIL (so the dispatcher thread
-    can run the completion) and stays interruptible by Ctrl+C."""
+    can run the completion) and stays interruptible by Ctrl+C. A payload that
+    arrives after the wait was interrupted has its handles freed (see
+    ``free_payload`` for ``partitions``)."""
     box: dict[str, tuple[Any, ...]] = {}
     done = threading.Event()
+    lock = threading.Lock()
+    abandoned = False
 
     def cb(*payload: Any) -> None:
-        box["payload"] = payload
+        with lock:
+            if abandoned:
+                free_payload(payload, partitions)
+                return
+            box["payload"] = payload
         done.set()
 
     submit(cb)
-    done.wait()
+    try:
+        done.wait()
+    except BaseException:
+        with lock:
+            abandoned = True
+            unclaimed = box.pop("payload", None)
+        if unclaimed is not None:
+            free_payload(unclaimed, partitions)
+        raise
     return box["payload"]
+
+
+def free_payload(payload: tuple[Any, ...], partitions: bool) -> None:
+    """Free the handles of a completion payload nobody takes any more: a
+    ``(error,)`` one, or a ``partitions_for`` ``(list, error)`` one."""
+    if partitions:
+        list_handle, error = payload
+        if list_handle:
+            _lib.PartitionInfoList_drain(list_handle)
+    else:
+        (error,) = payload
+    if error:
+        _lib.KafkaError_destroy(error)
 
 
 def run_sync(submit: Callable[[Callable[..., None]], None]) -> None:
@@ -177,6 +207,30 @@ def run_sync(submit: Callable[[Callable[..., None]], None]) -> None:
     (error,) = await_payload(submit)
     if error:
         raise from_ffi_error(error)
+
+
+def force_close(c_producer: int) -> None:
+    """Java's ``sender.forceClose()`` and the ``ioThread.join()`` after it,
+    for a ``close()`` an interrupt stopped (``KafkaProducer.close(Duration,
+    boolean)``, KafkaProducer.java:1419-1437: the interrupt is kept and the
+    close proceeds to force-close and join). A close with a zero timeout fails
+    the records still pending, which also ends the send thread's metadata
+    waits; a second Ctrl+C meanwhile is dropped, as Java keeps only the first
+    interrupt."""
+    done = threading.Event()
+
+    def cb(error: int) -> None:
+        if error:
+            _lib.KafkaError_destroy(error)
+        done.set()
+
+    _lib.Producer_close_with_timeout_async(c_producer, 0, cb)
+    while True:
+        try:
+            done.wait()
+            return
+        except KeyboardInterrupt:
+            continue
 
 
 def raise_if_error(error: int) -> None:
