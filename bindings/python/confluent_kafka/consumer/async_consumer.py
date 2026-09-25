@@ -24,7 +24,10 @@ listener it runs: ``subscribe``, ``assign``, ``unsubscribe``, ``poll``,
 every other method is a plain ``def`` (``assignment()``, ``subscription()``,
 ``commit_nowait()``, ``metrics()``, ``paused()``, ``group_metadata()``,
 ``wakeup()``). A waiting method awaits the entry point's ``_async`` form; the
-listener runs on the event loop and may be ``async def``.
+listener runs on the event loop and may be ``async def``. A coroutine listener
+method that ``commit_nowait()`` delivers is awaited in a task that holds the
+consumer until it ends: meanwhile ``metrics()`` / ``group_metadata()`` raise
+``ConcurrentModificationError`` (see ``commit_nowait``).
 
 Not generated, besides :class:`Consumer`'s omissions: ``current_lag()``, which
 waits in Java (``AsyncKafkaConsumer.currentLag`` uses ``addAndGet``) but whose
@@ -46,7 +49,7 @@ from confluent_kafka._args import java_forms
 from confluent_kafka.concurrent_modification_error import ConcurrentModificationError
 
 from ._base import (
-    _ConsumerState, _ListenerErrors, blank_null_topics, close_args, poll_timeout_ms,
+    _ConsumerState, _Forward, _ListenerErrors, blank_null_topics, close_args, poll_timeout_ms,
 )
 from ._conversions import offsets_to_spec, tp_to_spec
 from .close_options import CloseOptions
@@ -157,7 +160,11 @@ class AsyncConsumer(Generic[K, V], _ConsumerState):
         inside this call; an ``async def`` one cannot be awaited inside a plain
         ``def``, so the rest of the commit then continues in a task on this
         loop, the listener awaited there, and the next awaited call on the
-        consumer waits for it (and raises its failure)."""
+        consumer waits for it (and raises its failure). Until that task ends,
+        ``assignment()`` / ``subscription()`` / ``paused()`` read through the
+        core's ``ConsumerHandle``, a further ``commit_nowait()`` follows it, and
+        ``metrics()`` / ``group_metadata()``, which the handle lacks, raise
+        ``ConcurrentModificationError``."""
         self._c_commit_nowait(offsets, callback)
 
     @overload
@@ -191,7 +198,12 @@ class AsyncConsumer(Generic[K, V], _ConsumerState):
         return await self._a_committed(partitions)
 
     def metrics(self) -> dict[MetricName, Metric]:
-        """See :meth:`Consumer.metrics`."""
+        """See :meth:`Consumer.metrics`.
+
+        While a ``commit_nowait()`` still finishes in a task (a coroutine listener
+        it delivered is being awaited), this raises ``ConcurrentModificationError``:
+        that commit holds the consumer, and the core's ``ConsumerHandle`` has no
+        ``metrics`` (``ffi-overload-gaps.md``)."""
         return self._c_metrics()
 
     async def partitions_for(self, *, topic: str) -> list[PartitionInfo]:
@@ -230,7 +242,12 @@ class AsyncConsumer(Generic[K, V], _ConsumerState):
         return await self._a_end_offsets(partitions)
 
     def group_metadata(self) -> ConsumerGroupMetadata:
-        """See :meth:`Consumer.group_metadata`."""
+        """See :meth:`Consumer.group_metadata`.
+
+        While a ``commit_nowait()`` still finishes in a task (a coroutine listener
+        it delivered is being awaited), this raises ``ConcurrentModificationError``:
+        that commit holds the consumer, and the core's ``ConsumerHandle`` has no
+        ``groupMetadata`` (``ffi-overload-gaps.md``)."""
         return self._c_group_metadata()
 
     @overload
@@ -431,7 +448,8 @@ class AsyncConsumer(Generic[K, V], _ConsumerState):
             loop: asyncio.AbstractEventLoop | None = asyncio.get_running_loop()
         except RuntimeError:
             loop = None
-        submit, resolve, free = self._commit_on_helper_spec(spec, adapter)
+        forward = _Forward(self._on_pending_notify)
+        submit, resolve, free = self._commit_on_helper_spec(spec, adapter, forward)
         box: dict[str, tuple[Any, ...]] = {}
         done = threading.Event()
         errors: _ListenerErrors = []
@@ -445,18 +463,18 @@ class AsyncConsumer(Generic[K, V], _ConsumerState):
         h = use.__enter__()
         handed_off = False
         interrupted: KeyboardInterrupt | None = None
-        self._forward_to = threading.get_ident()
         try:
             self._pending_event.clear()
             submit(h, cb)
             while True:
                 finished = done.is_set()
                 try:
-                    handoff = self._drain_pending(h, errors, handoff=loop is not None)
+                    handoff = self._drain_pending(h, errors, handoff=loop is not None,
+                                                  forward=forward)
                     if handoff is not None and loop is not None:
                         self._commit_continuation = loop.create_task(
                             self._continue_commit_nowait(use, h, handoff, done, box, resolve,
-                                                         errors))
+                                                         errors, forward))
                         handed_off = True
                         return
                     if finished:
@@ -470,7 +488,6 @@ class AsyncConsumer(Generic[K, V], _ConsumerState):
                         _lib.Consumer_wakeup(h)
         finally:
             if not handed_off:
-                self._forward_to = None
                 use.__exit__(None, None, None)
         payload = box["payload"]
         if interrupted is not None:
@@ -480,7 +497,8 @@ class AsyncConsumer(Generic[K, V], _ConsumerState):
 
     async def _continue_commit_nowait(self, use: Any, h: int, handoff: tuple[int, Any],
                                       done: threading.Event, box: dict[str, tuple[Any, ...]],
-                                      resolve: Any, errors: _ListenerErrors) -> None:
+                                      resolve: Any, errors: _ListenerErrors,
+                                      forward: _Forward) -> None:
         """The rest of a ``commit_nowait()`` whose coroutine listener is awaited
         on this loop: await it, ack it, wait for the helper's FFI call (draining
         on the loop), and keep the commit's failure for the next awaited call.
@@ -496,12 +514,12 @@ class AsyncConsumer(Generic[K, V], _ConsumerState):
                 while not done.is_set():
                     await pending.wait()
                     pending.clear()
-                    await self._drain_pending_async(h, errors)
-                await self._drain_pending_async(h, errors)
+                    await self._drain_pending_async(h, errors, forward)
+                await self._drain_pending_async(h, errors, forward)
             except asyncio.CancelledError:
                 while True:
                     finished = done.is_set()
-                    self._drain_pending(h, errors)
+                    self._drain_pending(h, errors, forward=forward)
                     if finished:
                         break
                     done.wait(0.1)
@@ -512,7 +530,6 @@ class AsyncConsumer(Generic[K, V], _ConsumerState):
                 self._deferred_error = exc
         finally:
             self._async_waiters.discard(waiter)
-            self._forward_to = None
             use.__exit__(None, None, None)
 
     def _follow_commit_nowait(self, spec: Any, adapter: Any) -> None:
@@ -530,15 +547,13 @@ class AsyncConsumer(Generic[K, V], _ConsumerState):
         async def follow() -> None:
             if previous is not None:
                 await asyncio.wait({previous})
-            self._forward_to = threading.get_ident()
+            forward = _Forward(self._on_pending_notify)
             try:
-                await self._run_async(*self._commit_on_helper_spec(spec, adapter),
-                                      after_commit_nowait=False)
+                await self._run_async(*self._commit_on_helper_spec(spec, adapter, forward),
+                                      after_commit_nowait=False, forward=forward)
             except Exception as exc:  # noqa: BLE001 - raised by the next awaited call
                 if self._deferred_error is None:
                     self._deferred_error = exc
-            finally:
-                self._forward_to = None
 
         self._commit_continuation = loop.create_task(follow())
 

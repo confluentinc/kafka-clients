@@ -34,7 +34,7 @@ waiting thread, inside the call that delivers them (Threads and callbacks,
 processes the background events while it waits for the offsets; with a listener
 registered, its synchronous FFI call runs on a helper thread while the calling
 thread waits and drains the queue, and a commit callback the core runs on the
-helper is handed to the calling thread. The pending-callback notify is
+helper is handed back to that call's own caller. The pending-callback notify is
 registered once per consumer and wakes every waiting call, so a call the guard
 rejects cannot take it from the call in flight.
 
@@ -42,9 +42,11 @@ A consumer operation the callback issues goes through the core's guard-free
 ``ConsumerHandle`` (``kafka_consumer_Consumer_handle``), since the outer call
 holds the consumer's single-owner guard.
 
-``KafkaConsumer`` is not thread-safe: the FFI's single-owner guard rejects a call
-while another thread is inside the consumer with ``ConcurrentModificationError``,
-``wakeup()`` excepted. Every native call runs inside a counted use of the handle,
+``KafkaConsumer`` is not thread-safe: a call while another thread is inside the
+consumer raises ``ConcurrentModificationError``, ``wakeup()`` excepted — refused by
+the per-thread use count, as Java's ``acquire()``, before it reaches the FFI's
+single-owner guard (which still rejects a call from another task of the same
+thread). Every native call runs inside a counted use of the handle,
 and ``close()`` frees it only once no use is left, so a call racing ``close()``
 never touches a freed handle.
 """
@@ -222,10 +224,46 @@ def close_args(timeout: Duration | None, option: CloseOptions | None) -> tuple[i
     return duration_to_ms(timeout, default_ms=-1), _GROUP_OP_CODE[operation]
 
 
+class _Forward:
+    """The commit callbacks a helper-hosted ``commit_nowait()`` hands back to its
+    own caller's thread; the helper waits on each until it has run."""
+
+    __slots__ = ("_queue", "_wake", "thread")
+
+    def __init__(self, wake: Callable[[], None]) -> None:
+        self.thread = threading.get_ident()
+        self._wake = wake
+        self._queue: collections.deque[tuple[Callable[[], None], threading.Event]] = (
+            collections.deque())
+
+    def hand(self, run: Callable[[], None]) -> None:
+        """On the helper thread: queue ``run`` for the caller and wait for it."""
+        ran = threading.Event()
+        self._queue.append((run, ran))
+        self._wake()
+        ran.wait()
+
+    def run_pending(self) -> None:
+        """On the caller's thread: run what the helper handed over."""
+        while self._queue:
+            run, ran = self._queue.popleft()
+            try:
+                run()
+            finally:
+                ran.set()
+
+
+# The _Forward of the commit_nowait() call the helper thread is running.
+_HELPER = threading.local()
+
+
 class _Use:
     """One use of the native consumer handle: while it runs, ``close()`` does not
-    free the handle (see ``_ConsumerState``). It counts per thread, so a
-    ``close()`` from another thread knows the consumer is in use."""
+    free the handle (see ``_ConsumerState``). It counts per thread, as Java's
+    ``acquire()``: a use while another thread holds one raises
+    ``ConcurrentModificationError`` (the same thread may nest), so a call is
+    refused before it reaches the FFI — or the helper thread of
+    ``commit_nowait()``, where it would otherwise queue behind the other call."""
 
     __slots__ = ("_state", "_thread")
 
@@ -241,6 +279,9 @@ class _Use:
                 raise IllegalStateError(message=CLOSED_MESSAGE)
             if state._state == _CLOSING and state._closing_thread != thread:
                 # Java's close() holds the consumer's lock (acquire()).
+                raise ConcurrentModificationError(message=CONCURRENT_MESSAGE)
+            if any(user != thread for user in state._use_threads):
+                # Java's acquire(): another thread is inside the consumer.
                 raise ConcurrentModificationError(message=CONCURRENT_MESSAGE)
             state._uses += 1
             state._use_threads[thread] = state._use_threads.get(thread, 0) + 1
@@ -265,10 +306,10 @@ class _ConsumerState:
     lifecycle.
 
     The handle lives until ``close()`` frees it. Every native call runs inside
-    ``_use()``, which counts it under ``_lifecycle`` and refuses to start once the
-    consumer is closed (``IllegalStateError``) or, on another thread, while it is
-    closing (``ConcurrentModificationError``, as Java's ``close()`` holds the
-    consumer). ``close()`` sets the closing state under the same lock, so exactly
+    ``_use()``, which counts it per thread under ``_lifecycle`` and refuses to
+    start once the consumer is closed (``IllegalStateError``), while another
+    thread holds a use, or, on another thread, while it is closing
+    (``ConcurrentModificationError``, as Java's ``acquire()``). ``close()`` sets the closing state under the same lock, so exactly
     one close runs, and only when no other thread is inside the consumer: Java's
     ``close()`` calls ``acquire()`` before it changes any state, so a ``close()``
     from another thread raises ``ConcurrentModificationError`` and leaves the
@@ -300,12 +341,9 @@ class _ConsumerState:
         # is registered once per consumer, so a call the guard rejects cannot
         # take it from the call in flight.
         self._async_waiters: set[tuple[asyncio.AbstractEventLoop, asyncio.Event]] = set()
-        # commit_nowait(): the thread waiting while its synchronous FFI call
-        # runs on the helper thread, and the commit callbacks the helper hands
-        # to it (with the event the helper waits on until each has run).
-        self._forward_to: int | None = None
-        self._forwarded: collections.deque[tuple[Callable[[], None], threading.Event]] = (
-            collections.deque())
+        # The thread running commit_nowait()'s synchronous FFI call while a
+        # listener is registered (each call hands its commit callbacks back to
+        # its own caller through a _Forward).
         self._commit_helper: concurrent.futures.ThreadPoolExecutor | None = None
         # AsyncConsumer.commit_nowait(): the task finishing a commit whose
         # coroutine listener is awaited on the loop, and its failure, raised by
@@ -452,30 +490,19 @@ class _ConsumerState:
             except RuntimeError:  # its loop is closed
                 pass
 
-    def _on_caller_thread(self, run: Callable[[], None]) -> None:
+    @staticmethod
+    def _on_caller_thread(run: Callable[[], None]) -> None:
         """Run a commit callback on the thread of the call delivering it. The
         core runs the callbacks of earlier commits inside ``commit_nowait()``'s
         synchronous FFI call, which runs on the helper thread when a listener is
-        registered: the helper hands the callback to the waiting thread and waits
-        until it has run, so the core continues after it, as after Java's
-        ``offsetCommitCallbackInvoker.executeCallbacks()``."""
-        target = self._forward_to
-        if target is None or target == threading.get_ident():
+        registered: the helper hands the callback to that call's own caller
+        (its ``_Forward``) and waits until it has run, so the core continues
+        after it, as after Java's ``offsetCommitCallbackInvoker.executeCallbacks()``."""
+        forward: _Forward | None = getattr(_HELPER, "forward", None)
+        if forward is None or forward.thread == threading.get_ident():
             run()
             return
-        ran = threading.Event()
-        self._forwarded.append((run, ran))
-        self._on_pending_notify()
-        ran.wait()
-
-    def _run_forwarded(self) -> None:
-        """Run the commit callbacks the helper thread handed to this thread."""
-        while self._forwarded:
-            run, ran = self._forwarded.popleft()
-            try:
-                run()
-            finally:
-                ran.set()
+        forward.hand(run)
 
     def _wrap_commit_callback(self, callback: OffsetCommitCallback | None, *,
                               empty_offsets: bool = False
@@ -582,17 +609,20 @@ class _ConsumerState:
                 raise
         raise original
 
-    def _drain_pending(self, h: int, errors: _ListenerErrors, *,
-                       handoff: bool = False) -> tuple[int, Awaitable[object]] | None:
+    def _drain_pending(self, h: int, errors: _ListenerErrors, *, handoff: bool = False,
+                       forward: _Forward | None = None
+                       ) -> tuple[int, Awaitable[object]] | None:
         """Run the queued callbacks on this thread and ack each (unparking the
-        core), after the commit callbacks the helper thread handed over.
+        core), after the commit callbacks the helper thread handed to this call
+        (``forward``).
 
         A coroutine listener needs an event loop: with ``handoff`` the drain
         stops and returns the entry with its awaitable, unacked (the caller
         awaits it on the loop); otherwise it is closed and the rebalance fails
         with a ``TypeError``."""
         while True:
-            self._run_forwarded()
+            if forward is not None:
+                forward.run_pending()
             entry = self._next_pending(h)
             if entry is None:
                 return None
@@ -642,11 +672,12 @@ class _ConsumerState:
         if cancelled is not None:
             raise cancelled
 
-    async def _drain_pending_async(self, h: int, errors: _ListenerErrors) -> None:
+    async def _drain_pending_async(self, h: int, errors: _ListenerErrors,
+                                   forward: _Forward | None = None) -> None:
         """Async peer of ``_drain_pending``: a coroutine listener is awaited on
         this event loop, so ``await consumer.commit()`` inside it works."""
         while True:
-            handoff = self._drain_pending(h, errors, handoff=True)
+            handoff = self._drain_pending(h, errors, handoff=True, forward=forward)
             if handoff is None:
                 return
             await self._await_listener(*handoff, errors)
@@ -654,7 +685,8 @@ class _ConsumerState:
     # ---- waiting calls ----------------------------------------------------
     def _run_sync(self, submit: Callable[[int, Callable[..., None]], None],
                   resolve: Callable[[tuple[Any, ...]], _T],
-                  free: Callable[[tuple[Any, ...]], None]) -> _T:
+                  free: Callable[[tuple[Any, ...]], None], *,
+                  forward: _Forward | None = None) -> _T:
         """Submit an ``_async`` FFI operation (``submit(handle, cb)``) and wait
         for its completion on this thread, draining the caller-thread callbacks
         meanwhile. Ctrl+C wakes the consumer, lets the call end, frees its
@@ -677,12 +709,12 @@ class _ConsumerState:
                     # Short slices keep KeyboardInterrupt deliverable.
                     self._pending_event.wait(0.1)
                     self._pending_event.clear()
-                    self._drain_pending(h, errors)
+                    self._drain_pending(h, errors, forward=forward)
                 except KeyboardInterrupt as exc:
                     if interrupted is None:
                         interrupted = exc
                         _lib.Consumer_wakeup(h)
-            self._drain_pending(h, errors)
+            self._drain_pending(h, errors, forward=forward)
         payload = box["payload"]
         if interrupted is not None:
             free(payload)
@@ -692,7 +724,8 @@ class _ConsumerState:
     async def _run_async(self, submit: Callable[[int, Callable[..., None]], None],
                          resolve: Callable[[tuple[Any, ...]], _T],
                          free: Callable[[tuple[Any, ...]], None], *,
-                         after_commit_nowait: bool = True) -> _T:
+                         after_commit_nowait: bool = True,
+                         forward: _Forward | None = None) -> _T:
         """Async peer of ``_run_sync``: awaits the completion on the event loop,
         draining the caller-thread callbacks on the loop. Cancelling the
         awaiting task wakes the consumer, lets the call end, frees its result
@@ -730,12 +763,12 @@ class _ConsumerState:
                     try:
                         await pending.wait()
                         pending.clear()
-                        await self._drain_pending_async(h, errors)
+                        await self._drain_pending_async(h, errors, forward)
                     except asyncio.CancelledError as exc:
                         if cancelled is None:
                             cancelled = exc
                             _lib.Consumer_wakeup(h)
-                await self._drain_pending_async(h, errors)
+                await self._drain_pending_async(h, errors, forward)
             finally:
                 self._async_waiters.discard(waiter)
         payload = fut.result()
@@ -786,7 +819,8 @@ class _ConsumerState:
                     max_workers=1, thread_name_prefix="confluent-kafka-commit-nowait")
             return self._commit_helper
 
-    def _commit_on_helper_spec(self, spec: Any, adapter: Any) -> tuple[Any, Any, Any]:
+    def _commit_on_helper_spec(self, spec: Any, adapter: Any,
+                               forward: _Forward) -> tuple[Any, Any, Any]:
         """``commit_nowait()`` as a waiting operation: its synchronous FFI call
         runs on the helper thread, and the calling thread waits for it, draining
         the queue. There is no ``_async`` form of
@@ -796,11 +830,16 @@ class _ConsumerState:
         only run on the calling thread, which must not be blocked in the call."""
         def submit(h: int, cb: Callable[..., None]) -> None:
             def run() -> None:
+                # The commit callbacks the core runs inside this call go back to
+                # this call's caller.
+                _HELPER.forward = forward
                 try:
                     error = self._commit_async_ffi(h, spec, adapter)
                 except BaseException as exc:  # noqa: BLE001 - raised by the waiting call
                     cb(0, exc)
                     return
+                finally:
+                    _HELPER.forward = None
                 cb(error, None)
 
             self._helper().submit(run)
@@ -1052,11 +1091,8 @@ class _ConsumerState:
     def _commit_on_helper(self, spec: Any, adapter: Any) -> None:
         """``commit_nowait()``'s FFI call on the helper thread, this thread
         waiting and draining (``_commit_on_helper_spec``)."""
-        self._forward_to = threading.get_ident()
-        try:
-            self._run_sync(*self._commit_on_helper_spec(spec, adapter))
-        finally:
-            self._forward_to = None
+        forward = _Forward(self._on_pending_notify)
+        self._run_sync(*self._commit_on_helper_spec(spec, adapter, forward), forward=forward)
 
     def _c_wakeup(self) -> None:
         """Java's ``wakeup()``: callable from any thread; a no-op once closed."""
