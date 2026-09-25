@@ -716,12 +716,15 @@ fn snake(name: &str) -> String {
     out
 }
 
-/// The Python class name for a Java simple class name: a trailing `Exception`
-/// becomes `Error`; a name without it just gets `Error`
-/// (`InvalidRegularExpression` -> `InvalidRegularExpressionError`).
+/// The Python class name for a Java simple class name: "a class name's
+/// `Exception` suffix becomes `Error`, nothing else changes" (CLAUDE.md,
+/// Python Binding Conventions, Idiom translations), so a name without the
+/// suffix is kept (`InvalidRegularExpression`, `OffsetMetadataTooLarge`).
 fn python_name(java_simple: &str) -> String {
-    let stem = java_simple.strip_suffix("Exception").unwrap_or(java_simple);
-    format!("{stem}Error")
+    match java_simple.strip_suffix("Exception") {
+        Some(stem) => format!("{stem}Error"),
+        None => java_simple.to_string(),
+    }
 }
 
 /// The Python module of a Java package: `clients` dropped, `java.*` at the root.
@@ -2761,8 +2764,83 @@ pub fn generate(repo_root: &Path) -> anyhow::Result<()> {
         }
         fs::write(path, content)?;
     }
-    println!("✅ Wrote {} generated error-hierarchy file(s)", outputs.len());
+    // A class Java renamed or dropped leaves its old output behind: remove it.
+    let orphans = orphaned_outputs(repo_root, &outputs)?;
+    for path in &orphans {
+        fs::remove_file(path)?;
+    }
+    println!(
+        "✅ Wrote {} generated error-hierarchy file(s), removed {} orphaned",
+        outputs.len(),
+        orphans.len()
+    );
+    let unlisted = unlisted_packages(repo_root, &outputs)?;
+    if !unlisted.is_empty() {
+        anyhow::bail!("generated packages missing from bindings/python/pyproject.toml: {unlisted:?}");
+    }
     Ok(())
+}
+
+/// The marker every generated error module and stub carries.
+const GENERATED_MARKER: &str = "GENERATED, DO NOT EDIT";
+
+/// Generated files under the package that the Java sources no longer produce
+/// (a renamed or dropped exception class): files carrying the generated
+/// marker that are not among `outputs`.
+fn orphaned_outputs(repo_root: &Path, outputs: &[(PathBuf, String)]) -> anyhow::Result<Vec<PathBuf>> {
+    let expected: BTreeSet<&PathBuf> = outputs.iter().map(|(p, _)| p).collect();
+    let mut orphans = Vec::new();
+    let mut stack = vec![repo_root.join(PY_ROOT).join("confluent_kafka")];
+    while let Some(dir) = stack.pop() {
+        for entry in fs::read_dir(&dir)? {
+            let path = entry?.path();
+            if path.is_dir() {
+                if path.file_name().is_some_and(|n| n != "__pycache__") {
+                    stack.push(path);
+                }
+                continue;
+            }
+            let is_source = path.extension().is_some_and(|e| e == "py" || e == "pyi");
+            if !is_source || expected.contains(&path) {
+                continue;
+            }
+            let text = fs::read_to_string(&path)?;
+            // Hand-written package inits carry only a spliced block, not the
+            // file marker.
+            if text.lines().take(25).any(|l| l.contains(GENERATED_MARKER)) {
+                orphans.push(path);
+            }
+        }
+    }
+    orphans.sort();
+    Ok(orphans)
+}
+
+/// The generated packages (directories with a generated `__init__.py`) that
+/// `pyproject.toml`'s hand-kept `packages` list lacks, so the wheel would
+/// leave them out.
+fn unlisted_packages(repo_root: &Path, outputs: &[(PathBuf, String)]) -> anyhow::Result<Vec<String>> {
+    let pyproject = fs::read_to_string(repo_root.join(PY_ROOT).join("pyproject.toml"))?;
+    let root = repo_root.join(PY_ROOT);
+    let mut missing = Vec::new();
+    for (path, _) in outputs {
+        if path.file_name().is_none_or(|n| n != "__init__.py") {
+            continue;
+        }
+        let Some(dir) = path.parent() else { continue };
+        let Ok(rel) = dir.strip_prefix(&root) else { continue };
+        let package = rel
+            .components()
+            .map(|c| c.as_os_str().to_string_lossy())
+            .collect::<Vec<_>>()
+            .join(".");
+        if !pyproject.contains(&format!("\"{package}\"")) {
+            missing.push(package);
+        }
+    }
+    missing.sort();
+    missing.dedup();
+    Ok(missing)
 }
 
 /// Fail when a generated file no longer matches what the Java sources + FFI enum
@@ -2776,6 +2854,14 @@ pub fn check_up_to_date(repo_root: &Path) -> anyhow::Result<Vec<PathBuf>> {
             _ => stale.push(path.clone()),
         }
     }
+    // Output left behind for a renamed or dropped Java class is stale too.
+    stale.extend(orphaned_outputs(repo_root, &outputs)?);
+    // So is a generated package the wheel would leave out.
+    stale.extend(
+        unlisted_packages(repo_root, &outputs)?
+            .into_iter()
+            .map(|p| PathBuf::from(format!("{PY_ROOT}/pyproject.toml (package {p} not listed)"))),
+    );
     Ok(stale)
 }
 
@@ -2962,7 +3048,8 @@ mod tests {
     #[test]
     fn names_and_modules() {
         assert_eq!(python_name("TopicAuthorizationException"), "TopicAuthorizationError");
-        assert_eq!(python_name("InvalidRegularExpression"), "InvalidRegularExpressionError");
+        assert_eq!(python_name("InvalidRegularExpression"), "InvalidRegularExpression");
+        assert_eq!(python_name("OffsetMetadataTooLarge"), "OffsetMetadataTooLarge");
         assert_eq!(snake("TopicAuthorizationError"), "topic_authorization_error");
         assert_eq!(snake("throttleTimeMs"), "throttle_time_ms");
         assert_eq!(snake("SslAuthenticationError"), "ssl_authentication_error");
@@ -3090,6 +3177,34 @@ mod tests {
         }
         assert!(param(&m, "key_buffer").field_nullable);
         assert!(m.forms[0].deprecated.as_deref().unwrap().starts_with("Since 3.9."));
+    }
+
+    #[test]
+    fn orphaned_outputs_and_unlisted_packages_are_found() {
+        let root = std::env::temp_dir().join(format!("xtask-orphans-{}", std::process::id()));
+        let errors = root.join(PY_ROOT).join("confluent_kafka/common/errors");
+        fs::create_dir_all(&errors).unwrap();
+        let kept = errors.join("kept_error.py");
+        let gone = errors.join("gone_error.pyi");
+        let hand = errors.join("_helper.py");
+        fs::write(&kept, format!("\"\"\"x\n\n{GENERATED_MARKER}.\n\"\"\"\n")).unwrap();
+        fs::write(&gone, format!("# {GENERATED_MARKER} (stub)\n")).unwrap();
+        fs::write(&hand, "\"\"\"Hand-written.\"\"\"\n").unwrap();
+        let init = errors.join("__init__.py");
+        let outputs = vec![(kept.clone(), String::new()), (init, String::new())];
+        assert_eq!(orphaned_outputs(&root, &outputs).unwrap(), vec![gone]);
+        fs::write(root.join(PY_ROOT).join("pyproject.toml"), "packages = [\"confluent_kafka\"]\n").unwrap();
+        assert_eq!(
+            unlisted_packages(&root, &outputs).unwrap(),
+            vec!["confluent_kafka.common.errors"]
+        );
+        fs::write(
+            root.join(PY_ROOT).join("pyproject.toml"),
+            "packages = [\"confluent_kafka\", \"confluent_kafka.common.errors\"]\n",
+        )
+        .unwrap();
+        assert!(unlisted_packages(&root, &outputs).unwrap().is_empty());
+        fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]

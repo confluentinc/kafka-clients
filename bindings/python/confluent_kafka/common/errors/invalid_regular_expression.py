@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""``OffsetMetadataTooLargeError``: Java's ``org.apache.kafka.common.errors.OffsetMetadataTooLarge``.
+"""``InvalidRegularExpression``: Java's ``org.apache.kafka.common.errors.InvalidRegularExpression``.
 
 GENERATED, DO NOT EDIT. Produced from the Java source by
 ``cargo xtask generate-error-codes`` (CLAUDE.md, Python Binding Conventions,
@@ -26,30 +26,23 @@ from typing import ClassVar
 from confluent_kafka import _throwable
 from confluent_kafka.common.errors.api_error import ApiError
 
-__all__ = ["OffsetMetadataTooLargeError"]
+__all__ = ["InvalidRegularExpression"]
 
 
-class OffsetMetadataTooLargeError(ApiError):
-    """The client has tried to save its offset with associated metadata larger
-    than the maximum size allowed by the server.
+class InvalidRegularExpression(ApiError):
+    """Thrown when a regular expression received in a request is not valid.
 
-    Java: ``org.apache.kafka.common.errors.OffsetMetadataTooLarge``.
+    Java: ``org.apache.kafka.common.errors.InvalidRegularExpression``.
     """
 
     __module__ = "confluent_kafka.common.errors"
 
-    _ffi_id: ClassVar[int] = 12  # kafka_common_ErrorCode_OFFSET_METADATA_TOO_LARGE
+    _ffi_id: ClassVar[int] = 128  # kafka_common_ErrorCode_INVALID_REGULAR_EXPRESSION
 
     def __init__(
         self,
         *,
-        message: str | None = None,
-        cause: BaseException | None = None,
+        message: str,
     ) -> None:
-        if message is not None:
-            _throwable.init(self, message, cause)
-        elif message is None and cause is not None:
-            _throwable.init(self, _throwable.cause_message(cause), cause)
-        else:
-            _throwable.init(self, None, None)
-        self._java_kwargs = _throwable.kwargs(message=message, cause=cause)
+        _throwable.init(self, message, None)
+        self._java_kwargs = _throwable.kwargs(message=message)
