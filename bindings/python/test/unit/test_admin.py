@@ -2886,7 +2886,7 @@ def test_authorized_operations_none_stays_distinct_from_empty():
     `_has_authorized_operations` bit, so the converters must map absent to None
     and reported-but-empty to []."""
     def consumer_group(operations):
-        raw = ("g", False, [], "range", "Consumer", "Stable", "Stable",
+        raw = ("g", False, [], "range", "Consumer", "Stable",
                (1, "h1", 9091, None), operations, 1, 1)
         return _to_describe_consumer_groups({"g": (None, raw)})["g"]
 
