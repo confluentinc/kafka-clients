@@ -263,6 +263,20 @@ proved wrong or incomplete). The Manager keeps §5.
 
 - 2026-09-25: branch cut from `origin/master` `dfade0be`; the user approved
   the proc-macro approach; plan written; Actor 79 spawned.
+- 2026-09-25: Actor 79 finished: `931b5259` (§2.1), `7294d8d0` (§2.2),
+  `4fb04f1f` (§2.3), `d5fcdeb2` (§2.4); 18 files, +3153/−149; 21 notes in §6.
+  Gates on `d5fcdeb2`: `cargo test --features ffi --lib` 4273 passed / 0
+  failed / 2 ignored; workspace tests by named target 4291 / 0 / 3 plus 7
+  doctests; format-check clean; clippy (default and `--all-features`,
+  `-D warnings`) clean when the untracked `examples/eos_app.rs` is left out —
+  `cargo xtask lint` itself exits 1 on that file (§6 note 7, environmental);
+  `check-bindings` clean; C ctest 7/7 and Unity 312 / 0; Python unit tests 371
+  passed, 2 pre-existing skips; header identical to master's apart from the
+  19-line preamble. Manager accepts §6 note 12 as an amendment to D6:
+  `kafka_producer_Producer_destroy` may recover poisoned locks because it tears
+  the state down rather than using it. §6 note 18 retires the "known
+  environmental ctest failure" in §3: that case bootstraps from `127.0.0.1:1`
+  since #191 (`5fc83544`). Critic 79 spawned over `be795fa3..d5fcdeb2`.
 
 ## 6. Implementation notes (Actor 79)
 
