@@ -393,7 +393,7 @@ static void test_mock_admin_create_topics_replicas_assignment(void) {
         kafka_admin_DescribeTopicsResult_get_value(described, 0);
     TEST_ASSERT_NOT_NULL(d);
     TEST_ASSERT_EQUAL_INT32(1, kafka_admin_TopicDescription_partition_count(d));
-    TEST_ASSERT_EQUAL_INT32(3, kafka_admin_TopicPartitionInfo_replica_count(
+    TEST_ASSERT_EQUAL_INT32(3, kafka_common_TopicPartitionInfo_replica_count(
         kafka_admin_TopicDescription_partition(d, 0)));
 
     kafka_admin_DescribeTopicsResult_destroy(described);
@@ -629,13 +629,13 @@ static void test_mock_admin_describe_topics_by_names(void) {
     TEST_ASSERT_TRUE(kafka_admin_TopicDescription_has_authorized_operations(d));
     TEST_ASSERT_EQUAL_INT32(-1, kafka_admin_TopicDescription_authorized_operation(d, 0));
 
-    const kafka_admin_TopicPartitionInfo_t *p0 =
+    const kafka_common_TopicPartitionInfo_t *p0 =
         kafka_admin_TopicDescription_partition(d, 0);
     TEST_ASSERT_NOT_NULL(p0);
-    TEST_ASSERT_EQUAL_INT32(0, kafka_admin_TopicPartitionInfo_partition(p0));
+    TEST_ASSERT_EQUAL_INT32(0, kafka_common_TopicPartitionInfo_partition(p0));
     /* The mock puts every partition's leader on broker 0 and its replicas on
      * the first `replicationFactor` brokers. */
-    const kafka_common_Node_t *leader = kafka_admin_TopicPartitionInfo_leader(p0);
+    const kafka_common_Node_t *leader = kafka_common_TopicPartitionInfo_leader(p0);
     TEST_ASSERT_NOT_NULL(leader);
     TEST_ASSERT_EQUAL_INT32(0, kafka_common_Node_id(leader));
     TEST_ASSERT_EQUAL_INT32(1000, kafka_common_Node_port(leader));
@@ -644,18 +644,18 @@ static void test_mock_admin_describe_topics_by_names(void) {
     TEST_ASSERT_EQUAL_INT32(9, host_len);
     TEST_ASSERT_EQUAL_INT(0, strncmp(host, "localhost", 9));
 
-    TEST_ASSERT_EQUAL_INT32(2, kafka_admin_TopicPartitionInfo_replica_count(p0));
+    TEST_ASSERT_EQUAL_INT32(2, kafka_common_TopicPartitionInfo_replica_count(p0));
     TEST_ASSERT_EQUAL_INT32(1, kafka_common_Node_id(
-        kafka_admin_TopicPartitionInfo_replica(p0, 1)));
-    TEST_ASSERT_NULL(kafka_admin_TopicPartitionInfo_replica(p0, 2));
-    TEST_ASSERT_EQUAL_INT32(0, kafka_admin_TopicPartitionInfo_isr_count(p0));
+        kafka_common_TopicPartitionInfo_replica(p0, 1)));
+    TEST_ASSERT_NULL(kafka_common_TopicPartitionInfo_replica(p0, 2));
+    TEST_ASSERT_EQUAL_INT32(0, kafka_common_TopicPartitionInfo_isr_count(p0));
     /* The mock reports an empty (not absent) ELR set: count 0 with the presence
      * bit set. An absent set would also count 0, with the bit clear. */
-    TEST_ASSERT_EQUAL_INT32(0, kafka_admin_TopicPartitionInfo_elr_count(p0));
-    TEST_ASSERT_TRUE(kafka_admin_TopicPartitionInfo_has_elr(p0));
-    TEST_ASSERT_EQUAL_INT32(0, kafka_admin_TopicPartitionInfo_last_known_elr_count(p0));
-    TEST_ASSERT_TRUE(kafka_admin_TopicPartitionInfo_has_last_known_elr(p0));
-    TEST_ASSERT_NULL(kafka_admin_TopicPartitionInfo_elr(p0, 0));
+    TEST_ASSERT_EQUAL_INT32(0, kafka_common_TopicPartitionInfo_elr_count(p0));
+    TEST_ASSERT_TRUE(kafka_common_TopicPartitionInfo_has_elr(p0));
+    TEST_ASSERT_EQUAL_INT32(0, kafka_common_TopicPartitionInfo_last_known_elr_count(p0));
+    TEST_ASSERT_TRUE(kafka_common_TopicPartitionInfo_has_last_known_elr(p0));
+    TEST_ASSERT_NULL(kafka_common_TopicPartitionInfo_elr(p0, 0));
 
     TEST_ASSERT_NULL(kafka_admin_TopicDescription_partition(d, 2));
     TEST_ASSERT_NULL(kafka_admin_TopicDescription_partition(d, -1));

@@ -326,7 +326,7 @@ typedef struct BatchNode {
     ProducerRecordObject* producer_records[PRODUCER_RECORD_SLOT_CAPACITY];
     kafka_producer_ProducerRecord_t* producer_structs[PRODUCER_RECORD_SLOT_CAPACITY];
     PyObject* complete_cbs[PRODUCER_RECORD_SLOT_CAPACITY];
-    kafka_producer_FutureRecordMetadata_t* futures[PRODUCER_RECORD_SLOT_CAPACITY];
+    kafka_common_KafkaFuture_RecordMetadata_t* futures[PRODUCER_RECORD_SLOT_CAPACITY];
     kafka_common_Error_t* batch_errors[PRODUCER_RECORD_SLOT_CAPACITY];
     struct BatchNode* next_batch;
 } BatchNode;
@@ -385,15 +385,15 @@ static void Producer_complete_callback(PyObject* cb,
 static void Producer_complete_callbacks(
     PyObject **complete_cbs,
     ProducerRecordObject **result_objs,
-    kafka_producer_FutureRecordMetadata_t **futures,
+    kafka_common_KafkaFuture_RecordMetadata_t **futures,
     int count) {
     // Phase 1: Block on all futures at once WITHOUT the GIL.
     // Uses a single tokio runtime for the entire batch.
     kafka_producer_RecordMetadata_t *metadata_ptrs[PRODUCER_RECORD_SLOT_CAPACITY];
     kafka_common_Error_t *error_ptrs[PRODUCER_RECORD_SLOT_CAPACITY];
-    kafka_producer_FutureRecordMetadata_get_all(
+    kafka_common_KafkaFuture_RecordMetadata_get_all(
         futures, count, metadata_ptrs, error_ptrs);
-    kafka_producer_FutureRecordMetadata_destroy_all(futures, count);
+    kafka_common_KafkaFuture_RecordMetadata_destroy_all(futures, count);
 
     // Phase 2: Acquire GIL and dispatch Python callbacks.
     // Ownership of metadata/error handles transfers to the callback.
@@ -567,7 +567,7 @@ static int Producer_send_thread(void* arg) {
                 for (int i = 0; i < batch_node->count; i++) {
                     if (batch_node->batch_errors[i] != NULL) {
                         if (batch_node->futures[i] != NULL) {
-                            kafka_producer_FutureRecordMetadata_destroy(batch_node->futures[i]);
+                            kafka_common_KafkaFuture_RecordMetadata_destroy(batch_node->futures[i]);
                             batch_node->futures[i] = NULL;
                         }
                         // Pass error pointer to callback; ownership transfers
@@ -606,7 +606,7 @@ static int Producer_send_thread(void* arg) {
     mtx_unlock(&producer->pending_batches_mutex);
     // Flush so every in-flight record resolves before we join the poll-futures
     // task. Without this the poll task can block forever in
-    // FutureRecordMetadata_get_all on a record that never completes on its own
+    // KafkaFuture_RecordMetadata_get_all on a record that never completes on its own
     // (e.g. a MockProducer with auto_complete disabled), deadlocking the join
     // below. Java's flush() likewise completes outstanding records. We hold no
     // GIL here (background C task), so the blocking flush does not stall the
@@ -877,9 +877,9 @@ static void producer_op_trampoline(kafka_common_Error_t* error, void* user_data)
 }
 
 // cb(list_int, error_int): producer partitions_for async. The list handle is a
-// kafka_consumer_PartitionInfoList_t (shared with the consumer FFI) that Python
+// kafka_common_PartitionInfoList_t (shared with the consumer FFI) that Python
 // drains via PartitionInfoList_drain.
-static void producer_partitions_for_trampoline(kafka_consumer_PartitionInfoList_t* list,
+static void producer_partitions_for_trampoline(kafka_common_PartitionInfoList_t* list,
                                                kafka_common_Error_t* error, void* user_data) {
     PyObject* cb = (PyObject*)user_data;
     PyGILState_STATE g = PyGILState_Ensure();
@@ -1101,14 +1101,14 @@ static PyObject* py_Producer_flush(PyObject* self, PyObject* args) {
 }
 
 // Producer partitions_for: returns (list_handle_int, error_int). The list
-// handle is a kafka_consumer_PartitionInfoList_t (shared with the consumer FFI)
+// handle is a kafka_common_PartitionInfoList_t (shared with the consumer FFI)
 // that Python drains via PartitionInfoList_drain.
 static PyObject* py_Producer_partitions_for(PyObject* self, PyObject* args) {
     unsigned long long producer_ptr;
     const char* topic;
     if (!PyArg_ParseTuple(args, "Ks", &producer_ptr, &topic)) return NULL;
     Producer* producer = (Producer*)producer_ptr;
-    kafka_consumer_PartitionInfoList_t* list = NULL;
+    kafka_common_PartitionInfoList_t* list = NULL;
     kafka_common_Error_t* err;
     // Blocking FFI call (metadata round trip): release the GIL, so a delivery
     // callback firing meanwhile can take it.
@@ -2014,13 +2014,13 @@ static void consumer_oft_trampoline(kafka_consumer_OffsetAndTimestampMap_t* m,
                                     kafka_common_Error_t* e, void* ud) { fire_handle_cb(m, e, ud); }
 static void consumer_long_offsets_trampoline(kafka_consumer_LongOffsetMap_t* m,
                                              kafka_common_Error_t* e, void* ud) { fire_handle_cb(m, e, ud); }
-static void consumer_partitions_for_trampoline(kafka_consumer_PartitionInfoList_t* l,
+static void consumer_partitions_for_trampoline(kafka_common_PartitionInfoList_t* l,
                                                kafka_common_Error_t* e, void* ud) { fire_handle_cb(l, e, ud); }
-static void consumer_list_topics_trampoline(kafka_consumer_TopicPartitionInfoMap_t* m,
+static void consumer_list_topics_trampoline(kafka_common_TopicPartitionInfoMap_t* m,
                                             kafka_common_Error_t* e, void* ud) { fire_handle_cb(m, e, ud); }
 
 // Converts + destroys an owned TopicPartitionList (defined with the state reads).
-static PyObject* topic_partition_list_to_py(kafka_consumer_TopicPartitionList_t* list);
+static PyObject* topic_partition_list_to_py(kafka_common_TopicPartitionList_t* list);
 
 // ---- rebalance-listener trampolines (multi-shot) ---------------------------
 //
@@ -2030,7 +2030,7 @@ static PyObject* topic_partition_list_to_py(kafka_consumer_TopicPartitionList_t*
 // reference taken at subscribe time is released by
 // listener_user_data_destroy_trampoline when the Rust adapter is dropped.
 //
-// The delivered kafka_consumer_TopicPartitionList_t is owned by the callee, and
+// The delivered kafka_common_TopicPartitionList_t is owned by the callee, and
 // is converted here rather than handed to Python as a handle int:
 // topic_partition_list_to_py destroys it on every path (success and failure
 // alike), so no ownership hand-off — and therefore no possible leak — crosses
@@ -2064,7 +2064,7 @@ static kafka_common_Error_t* error_from_py_exception(const char* fallback) {
 }
 
 static kafka_common_Error_t* listener_invoke(const char* method,
-                                                  kafka_consumer_TopicPartitionList_t* list,
+                                                  kafka_common_TopicPartitionList_t* list,
                                                   void* user_data) {
     PyObject* adapter = (PyObject*)user_data;
     kafka_common_Error_t* err = NULL;
@@ -2086,17 +2086,17 @@ static kafka_common_Error_t* listener_invoke(const char* method,
 }
 
 static kafka_common_Error_t* listener_on_revoked_trampoline(
-        kafka_consumer_TopicPartitionList_t* list, void* ud) {
+        kafka_common_TopicPartitionList_t* list, void* ud) {
     return listener_invoke("_on_revoked", list, ud);
 }
 
 static kafka_common_Error_t* listener_on_assigned_trampoline(
-        kafka_consumer_TopicPartitionList_t* list, void* ud) {
+        kafka_common_TopicPartitionList_t* list, void* ud) {
     return listener_invoke("_on_assigned", list, ud);
 }
 
 static kafka_common_Error_t* listener_on_lost_trampoline(
-        kafka_consumer_TopicPartitionList_t* list, void* ud) {
+        kafka_common_TopicPartitionList_t* list, void* ud) {
     return listener_invoke("_on_lost", list, ud);
 }
 
@@ -2551,20 +2551,20 @@ static PyObject* py_Consumer_commit_async_offsets(PyObject* self, PyObject* args
 }
 
 // ---- sync state reads (return Python objects directly) ---------------------
-static PyObject* topic_partition_list_to_py(kafka_consumer_TopicPartitionList_t* list) {
+static PyObject* topic_partition_list_to_py(kafka_common_TopicPartitionList_t* list) {
     if (list == NULL) Py_RETURN_NONE;  // guard rejected (concurrent access)
-    int32_t n = kafka_consumer_TopicPartitionList_count(list);
+    int32_t n = kafka_common_TopicPartitionList_count(list);
     PyObject* out = PyList_New(n < 0 ? 0 : n);
-    if (out == NULL) { kafka_consumer_TopicPartitionList_destroy(list); return NULL; }
+    if (out == NULL) { kafka_common_TopicPartitionList_destroy(list); return NULL; }
     for (int32_t i = 0; i < n; i++) {
-        const kafka_consumer_TopicPartition_t* tp = kafka_consumer_TopicPartitionList_get(list, i);
-        const char* topic = kafka_consumer_TopicPartition_topic(tp);
-        int32_t part = kafka_consumer_TopicPartition_partition(tp);
+        const kafka_common_TopicPartition_t* tp = kafka_common_TopicPartitionList_get(list, i);
+        const char* topic = kafka_common_TopicPartition_topic(tp);
+        int32_t part = kafka_common_TopicPartition_partition(tp);
         PyObject* t = Py_BuildValue("(si)", topic, part);
-        if (t == NULL) { Py_DECREF(out); kafka_consumer_TopicPartitionList_destroy(list); return NULL; }
+        if (t == NULL) { Py_DECREF(out); kafka_common_TopicPartitionList_destroy(list); return NULL; }
         PyList_SET_ITEM(out, i, t);
     }
-    kafka_consumer_TopicPartitionList_destroy(list);
+    kafka_common_TopicPartitionList_destroy(list);
     return out;
 }
 
@@ -2737,31 +2737,31 @@ static PyObject* node_to_py(const kafka_common_Node_t* node) {
     return out;
 }
 
-static PyObject* partition_info_to_py(const kafka_consumer_PartitionInfo_t* info) {
+static PyObject* partition_info_to_py(const kafka_common_PartitionInfo_t* info) {
     int32_t r = 0;
-    const char* topic = kafka_consumer_PartitionInfo_topic(info);  // NUL-terminated
-    int32_t partition = kafka_consumer_PartitionInfo_partition(info);
-    PyObject* leader = node_to_py(kafka_consumer_PartitionInfo_leader(info));
+    const char* topic = kafka_common_PartitionInfo_topic(info);  // NUL-terminated
+    int32_t partition = kafka_common_PartitionInfo_partition(info);
+    PyObject* leader = node_to_py(kafka_common_PartitionInfo_leader(info));
     if (leader == NULL) return NULL;
-    int32_t nrep = kafka_consumer_PartitionInfo_replica_count(info);
-    int32_t nisr = kafka_consumer_PartitionInfo_in_sync_replica_count(info);
-    int32_t noff = kafka_consumer_PartitionInfo_offline_replica_count(info);
+    int32_t nrep = kafka_common_PartitionInfo_replica_count(info);
+    int32_t nisr = kafka_common_PartitionInfo_in_sync_replica_count(info);
+    int32_t noff = kafka_common_PartitionInfo_offline_replica_count(info);
     PyObject* replicas = PyList_New(nrep < 0 ? 0 : nrep);
     PyObject* isr = PyList_New(nisr < 0 ? 0 : nisr);
     PyObject* offline = PyList_New(noff < 0 ? 0 : noff);
     if (!replicas || !isr || !offline) { Py_XDECREF(replicas); Py_XDECREF(isr); Py_XDECREF(offline); Py_DECREF(leader); return NULL; }
     for (r = 0; r < nrep; r++) {
-        PyObject* n = node_to_py(kafka_consumer_PartitionInfo_replica(info, r));
+        PyObject* n = node_to_py(kafka_common_PartitionInfo_replica(info, r));
         if (!n) goto fail;
         PyList_SET_ITEM(replicas, r, n);
     }
     for (r = 0; r < nisr; r++) {
-        PyObject* n = node_to_py(kafka_consumer_PartitionInfo_in_sync_replica(info, r));
+        PyObject* n = node_to_py(kafka_common_PartitionInfo_in_sync_replica(info, r));
         if (!n) goto fail;
         PyList_SET_ITEM(isr, r, n);
     }
     for (r = 0; r < noff; r++) {
-        PyObject* n = node_to_py(kafka_consumer_PartitionInfo_offline_replica(info, r));
+        PyObject* n = node_to_py(kafka_common_PartitionInfo_offline_replica(info, r));
         if (!n) goto fail;
         PyList_SET_ITEM(offline, r, n);
     }
@@ -2782,12 +2782,12 @@ static PyObject* py_OffsetMap_drain(PyObject* self, PyObject* args) {
     PyObject* d = PyDict_New();
     if (d == NULL) { kafka_consumer_OffsetMap_destroy(m); return NULL; }
     for (int32_t i = 0; i < n; i++) {
-        const kafka_consumer_TopicPartition_t* k = kafka_consumer_OffsetMap_get_key(m, i);
+        const kafka_common_TopicPartition_t* k = kafka_consumer_OffsetMap_get_key(m, i);
         const kafka_consumer_OffsetAndMetadata_t* v = kafka_consumer_OffsetMap_get_value(m, i);
         int32_t epoch = 0;
         int has_epoch = kafka_consumer_OffsetAndMetadata_leader_epoch(v, &epoch);
-        PyObject* key = Py_BuildValue("(si)", kafka_consumer_TopicPartition_topic(k),
-                                      kafka_consumer_TopicPartition_partition(k));
+        PyObject* key = Py_BuildValue("(si)", kafka_common_TopicPartition_topic(k),
+                                      kafka_common_TopicPartition_partition(k));
         PyObject* val = Py_BuildValue("(LsO)", kafka_consumer_OffsetAndMetadata_offset(v),
                                       kafka_consumer_OffsetAndMetadata_metadata(v),
                                       has_epoch ? PyLong_FromLong(epoch) : (Py_INCREF(Py_None), Py_None));
@@ -2809,12 +2809,12 @@ static PyObject* py_OffsetAndTimestampMap_drain(PyObject* self, PyObject* args) 
     PyObject* d = PyDict_New();
     if (d == NULL) { kafka_consumer_OffsetAndTimestampMap_destroy(m); return NULL; }
     for (int32_t i = 0; i < n; i++) {
-        const kafka_consumer_TopicPartition_t* k = kafka_consumer_OffsetAndTimestampMap_get_key(m, i);
+        const kafka_common_TopicPartition_t* k = kafka_consumer_OffsetAndTimestampMap_get_key(m, i);
         const kafka_consumer_OffsetAndTimestamp_t* v = kafka_consumer_OffsetAndTimestampMap_get_value(m, i);
         int32_t epoch = 0;
         int has_epoch = kafka_consumer_OffsetAndTimestamp_leader_epoch(v, &epoch);
-        PyObject* key = Py_BuildValue("(si)", kafka_consumer_TopicPartition_topic(k),
-                                      kafka_consumer_TopicPartition_partition(k));
+        PyObject* key = Py_BuildValue("(si)", kafka_common_TopicPartition_topic(k),
+                                      kafka_common_TopicPartition_partition(k));
         PyObject* val = Py_BuildValue("(LLO)", kafka_consumer_OffsetAndTimestamp_offset(v),
                                       kafka_consumer_OffsetAndTimestamp_timestamp(v),
                                       has_epoch ? PyLong_FromLong(epoch) : (Py_INCREF(Py_None), Py_None));
@@ -2836,9 +2836,9 @@ static PyObject* py_LongOffsetMap_drain(PyObject* self, PyObject* args) {
     PyObject* d = PyDict_New();
     if (d == NULL) { kafka_consumer_LongOffsetMap_destroy(m); return NULL; }
     for (int32_t i = 0; i < n; i++) {
-        const kafka_consumer_TopicPartition_t* k = kafka_consumer_LongOffsetMap_get_key(m, i);
-        PyObject* key = Py_BuildValue("(si)", kafka_consumer_TopicPartition_topic(k),
-                                      kafka_consumer_TopicPartition_partition(k));
+        const kafka_common_TopicPartition_t* k = kafka_consumer_LongOffsetMap_get_key(m, i);
+        PyObject* key = Py_BuildValue("(si)", kafka_common_TopicPartition_topic(k),
+                                      kafka_common_TopicPartition_partition(k));
         PyObject* val = PyLong_FromLongLong(kafka_consumer_LongOffsetMap_get_value(m, i));
         if (!key || !val || PyDict_SetItem(d, key, val) < 0) {
             Py_XDECREF(key); Py_XDECREF(val); Py_DECREF(d);
@@ -2853,46 +2853,46 @@ static PyObject* py_LongOffsetMap_drain(PyObject* self, PyObject* args) {
 static PyObject* py_PartitionInfoList_drain(PyObject* self, PyObject* args) {
     unsigned long long ptr;
     if (!PyArg_ParseTuple(args, "K", &ptr)) return NULL;
-    kafka_consumer_PartitionInfoList_t* list = (kafka_consumer_PartitionInfoList_t*)(uintptr_t)ptr;
-    int32_t n = kafka_consumer_PartitionInfoList_count(list);
+    kafka_common_PartitionInfoList_t* list = (kafka_common_PartitionInfoList_t*)(uintptr_t)ptr;
+    int32_t n = kafka_common_PartitionInfoList_count(list);
     PyObject* out = PyList_New(n < 0 ? 0 : n);
-    if (out == NULL) { kafka_consumer_PartitionInfoList_destroy(list); return NULL; }
+    if (out == NULL) { kafka_common_PartitionInfoList_destroy(list); return NULL; }
     for (int32_t i = 0; i < n; i++) {
-        PyObject* pi = partition_info_to_py(kafka_consumer_PartitionInfoList_get(list, i));
-        if (pi == NULL) { Py_DECREF(out); kafka_consumer_PartitionInfoList_destroy(list); return NULL; }
+        PyObject* pi = partition_info_to_py(kafka_common_PartitionInfoList_get(list, i));
+        if (pi == NULL) { Py_DECREF(out); kafka_common_PartitionInfoList_destroy(list); return NULL; }
         PyList_SET_ITEM(out, i, pi);
     }
-    kafka_consumer_PartitionInfoList_destroy(list);
+    kafka_common_PartitionInfoList_destroy(list);
     return out;
 }
 
 static PyObject* py_TopicPartitionInfoMap_drain(PyObject* self, PyObject* args) {
     unsigned long long ptr;
     if (!PyArg_ParseTuple(args, "K", &ptr)) return NULL;
-    kafka_consumer_TopicPartitionInfoMap_t* m = (kafka_consumer_TopicPartitionInfoMap_t*)(uintptr_t)ptr;
-    int32_t n = kafka_consumer_TopicPartitionInfoMap_count(m);
+    kafka_common_TopicPartitionInfoMap_t* m = (kafka_common_TopicPartitionInfoMap_t*)(uintptr_t)ptr;
+    int32_t n = kafka_common_TopicPartitionInfoMap_count(m);
     PyObject* d = PyDict_New();
-    if (d == NULL) { kafka_consumer_TopicPartitionInfoMap_destroy(m); return NULL; }
+    if (d == NULL) { kafka_common_TopicPartitionInfoMap_destroy(m); return NULL; }
     for (int32_t i = 0; i < n; i++) {
-        const char* topic = kafka_consumer_TopicPartitionInfoMap_get_topic(m, i);
-        const kafka_consumer_PartitionInfoList_t* infos =
-            kafka_consumer_TopicPartitionInfoMap_get_partitions(m, i);
-        int32_t pn = kafka_consumer_PartitionInfoList_count(infos);
+        const char* topic = kafka_common_TopicPartitionInfoMap_get_topic(m, i);
+        const kafka_common_PartitionInfoList_t* infos =
+            kafka_common_TopicPartitionInfoMap_get_partitions(m, i);
+        int32_t pn = kafka_common_PartitionInfoList_count(infos);
         PyObject* plist = PyList_New(pn < 0 ? 0 : pn);
-        if (plist == NULL) { Py_DECREF(d); kafka_consumer_TopicPartitionInfoMap_destroy(m); return NULL; }
+        if (plist == NULL) { Py_DECREF(d); kafka_common_TopicPartitionInfoMap_destroy(m); return NULL; }
         for (int32_t j = 0; j < pn; j++) {
-            PyObject* pi = partition_info_to_py(kafka_consumer_PartitionInfoList_get(infos, j));
-            if (pi == NULL) { Py_DECREF(plist); Py_DECREF(d); kafka_consumer_TopicPartitionInfoMap_destroy(m); return NULL; }
+            PyObject* pi = partition_info_to_py(kafka_common_PartitionInfoList_get(infos, j));
+            if (pi == NULL) { Py_DECREF(plist); Py_DECREF(d); kafka_common_TopicPartitionInfoMap_destroy(m); return NULL; }
             PyList_SET_ITEM(plist, j, pi);
         }
         PyObject* key = PyUnicode_FromString(topic ? topic : "");
         if (!key || PyDict_SetItem(d, key, plist) < 0) {
             Py_XDECREF(key); Py_DECREF(plist); Py_DECREF(d);
-            kafka_consumer_TopicPartitionInfoMap_destroy(m); return NULL;
+            kafka_common_TopicPartitionInfoMap_destroy(m); return NULL;
         }
         Py_DECREF(key); Py_DECREF(plist);
     }
-    kafka_consumer_TopicPartitionInfoMap_destroy(m);
+    kafka_common_TopicPartitionInfoMap_destroy(m);
     return d;
 }
 
@@ -3870,8 +3870,8 @@ static PyObject* acl_codes_to_py(bool present, int32_t count, int32_t (*get)(con
 }
 
 // Builds a list of `count` node tuples via `get(index)`.
-static PyObject* admin_node_list_to_py(const kafka_admin_TopicPartitionInfo_t* info, int32_t count,
-                                       const kafka_common_Node_t* (*get)(const kafka_admin_TopicPartitionInfo_t*,
+static PyObject* admin_node_list_to_py(const kafka_common_TopicPartitionInfo_t* info, int32_t count,
+                                       const kafka_common_Node_t* (*get)(const kafka_common_TopicPartitionInfo_t*,
                                                                         int32_t)) {
     PyObject* out = PyList_New(count);
     if (out == NULL) return NULL;
@@ -3884,28 +3884,28 @@ static PyObject* admin_node_list_to_py(const kafka_admin_TopicPartitionInfo_t* i
 }
 
 // (partition, leader, replicas, isr, elr, last_known_elr)
-static PyObject* topic_partition_info_to_py(const kafka_admin_TopicPartitionInfo_t* info) {
-    PyObject* leader = node_to_py(kafka_admin_TopicPartitionInfo_leader(info));
+static PyObject* topic_partition_info_to_py(const kafka_common_TopicPartitionInfo_t* info) {
+    PyObject* leader = node_to_py(kafka_common_TopicPartitionInfo_leader(info));
     PyObject* replicas = admin_node_list_to_py(info,
-        kafka_admin_TopicPartitionInfo_replica_count(info), kafka_admin_TopicPartitionInfo_replica);
+        kafka_common_TopicPartitionInfo_replica_count(info), kafka_common_TopicPartitionInfo_replica);
     PyObject* isr = admin_node_list_to_py(info,
-        kafka_admin_TopicPartitionInfo_isr_count(info), kafka_admin_TopicPartitionInfo_isr);
+        kafka_common_TopicPartitionInfo_isr_count(info), kafka_common_TopicPartitionInfo_isr);
     // Java's elr()/lastKnownElr() are null when the broker did not report the
     // set, which stays distinct from a reported-but-empty one.
-    PyObject* elr = kafka_admin_TopicPartitionInfo_has_elr(info)
-        ? admin_node_list_to_py(info, kafka_admin_TopicPartitionInfo_elr_count(info),
-                                kafka_admin_TopicPartitionInfo_elr)
+    PyObject* elr = kafka_common_TopicPartitionInfo_has_elr(info)
+        ? admin_node_list_to_py(info, kafka_common_TopicPartitionInfo_elr_count(info),
+                                kafka_common_TopicPartitionInfo_elr)
         : (Py_INCREF(Py_None), Py_None);
-    PyObject* last_elr = kafka_admin_TopicPartitionInfo_has_last_known_elr(info)
-        ? admin_node_list_to_py(info, kafka_admin_TopicPartitionInfo_last_known_elr_count(info),
-                                kafka_admin_TopicPartitionInfo_last_known_elr)
+    PyObject* last_elr = kafka_common_TopicPartitionInfo_has_last_known_elr(info)
+        ? admin_node_list_to_py(info, kafka_common_TopicPartitionInfo_last_known_elr_count(info),
+                                kafka_common_TopicPartitionInfo_last_known_elr)
         : (Py_INCREF(Py_None), Py_None);
     if (!leader || !replicas || !isr || !elr || !last_elr) {
         Py_XDECREF(leader); Py_XDECREF(replicas); Py_XDECREF(isr);
         Py_XDECREF(elr); Py_XDECREF(last_elr);
         return NULL;
     }
-    return Py_BuildValue("(iNNNNN)", kafka_admin_TopicPartitionInfo_partition(info),
+    return Py_BuildValue("(iNNNNN)", kafka_common_TopicPartitionInfo_partition(info),
                          leader, replicas, isr, elr, last_elr);
 }
 
