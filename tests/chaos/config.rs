@@ -37,6 +37,62 @@ pub enum ActionKind {
     TopicRecreate,
 }
 
+/// The broker listener (and matching client `security.protocol`) every client
+/// in the run connects through, chosen by `--security-protocol`.
+///
+/// Every broker the harness starts exposes all four listeners at once (see
+/// `tests/common/kafka_cluster.rs`), so this only selects which one the admin
+/// client and the workloads use; the fault injection itself is unchanged. The
+/// integration suite's `INTEGRATION_TEST_PROTOCOL` is the same idea.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SecurityProtocol {
+    /// The broker's PLAINTEXT listener (default).
+    #[default]
+    Plaintext,
+    /// One-way TLS: the client trusts the cluster CA; no client certificate.
+    Ssl,
+    /// SASL/PLAIN over a plain TCP connection (`admin` / `admin-secret`).
+    SaslPlaintext,
+    /// SASL/PLAIN over TLS.
+    SaslSsl,
+}
+
+impl SecurityProtocol {
+    /// Parse the `--security-protocol` value. Case-insensitive; `-` and `_`
+    /// are interchangeable (`sasl_ssl` / `sasl-ssl` / `SASL_SSL`).
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().replace('-', "_").as_str() {
+            "plaintext" => Some(Self::Plaintext),
+            "ssl" => Some(Self::Ssl),
+            "sasl_plaintext" => Some(Self::SaslPlaintext),
+            "sasl_ssl" => Some(Self::SaslSsl),
+            _ => None,
+        }
+    }
+
+    /// The value the client accepts for `security.protocol` (Java's
+    /// `SecurityProtocol.name`).
+    pub fn config_value(self) -> &'static str {
+        match self {
+            Self::Plaintext => "PLAINTEXT",
+            Self::Ssl => "SSL",
+            Self::SaslPlaintext => "SASL_PLAINTEXT",
+            Self::SaslSsl => "SASL_SSL",
+        }
+    }
+
+    /// Whether the connection is TLS-wrapped (the client needs the cluster CA).
+    pub fn uses_tls(self) -> bool {
+        matches!(self, Self::Ssl | Self::SaslSsl)
+    }
+
+    /// Whether the connection authenticates with SASL (the client needs the
+    /// PLAIN credentials).
+    pub fn uses_sasl(self) -> bool {
+        matches!(self, Self::SaslPlaintext | Self::SaslSsl)
+    }
+}
+
 /// One scheduled fault: a kind and a cadence in cycles. Built from the
 /// per-fault CLI flags (broker rolling default-on; others layered via
 /// `--topic-recreate [N]` etc.). `every = 1` = every cycle.
@@ -148,6 +204,9 @@ pub struct ChaosConfig {
     /// Explicit replication factor override (`--replication-factor`). `None` =
     /// librdkafka's default of `min(brokers, 3)`.
     pub replication_factor: Option<i16>,
+    /// Broker listener / client `security.protocol` for every client in the run
+    /// (`--security-protocol`, default `plaintext`).
+    pub security_protocol: SecurityProtocol,
 }
 
 impl ChaosConfig {
@@ -214,6 +273,28 @@ impl ChaosConfig {
         if workloads.is_empty() {
             return Err("CHAOS_WORKLOADS resolved to no workloads".to_string());
         }
+
+        // `--security-protocol`: which broker listener every client uses. The
+        // gRPC (python / c) backends run in a sibling container and reach the
+        // broker through its container-network listener, which on this branch
+        // exists only for PLAINTEXT — so a secured run is Rust-workload only.
+        let security_protocol = {
+            let raw = env_str("CHAOS_SECURITY_PROTOCOL", "plaintext");
+            let protocol = SecurityProtocol::parse(&raw).ok_or_else(|| {
+                format!("CHAOS_SECURITY_PROTOCOL must be plaintext, ssl, sasl_plaintext or sasl_ssl, got '{raw}'")
+            })?;
+            if protocol != SecurityProtocol::Plaintext
+                && let Some(spec) = workloads.iter().find(|w| w.backend.is_grpc())
+            {
+                return Err(format!(
+                    "--security-protocol {} is only supported for rust workloads: '{}' runs through the \
+                     gRPC bridge, whose container-network listener is PLAINTEXT only",
+                    raw.to_ascii_lowercase(),
+                    spec.label()
+                ));
+            }
+            protocol
+        };
 
         // Faults, librdkafka-style: broker rolling is implicit (default-on)
         // unless `--no-broker-roll`. Other faults are layered on via valued
@@ -301,6 +382,7 @@ impl ChaosConfig {
                 ),
                 _ => None,
             },
+            security_protocol,
         })
     }
 
@@ -358,7 +440,7 @@ impl ChaosConfig {
         };
         format!(
             "brokers={} topics={} partitions={} replication={} msg_size={} cycles={} actions={} \
-             unclean={} rps={} seed={} workloads=[{}]",
+             unclean={} rps={} seed={} security={} workloads=[{}]",
             self.brokers,
             self.num_topics,
             self.partitions,
@@ -371,6 +453,7 @@ impl ChaosConfig {
             self.unclean,
             self.rps,
             self.seed,
+            self.security_protocol.config_value(),
             wl.join(", ")
         )
     }
@@ -419,4 +502,54 @@ fn parse_workloads(s: &str) -> Result<Vec<WorkloadSpec>, String> {
         specs.push(WorkloadSpec { role, backend, instance: *n });
     }
     Ok(specs)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn security_protocol_parses_every_listener_case_insensitively() {
+        for (input, expected) in [
+            ("plaintext", SecurityProtocol::Plaintext),
+            ("PLAINTEXT", SecurityProtocol::Plaintext),
+            ("ssl", SecurityProtocol::Ssl),
+            ("SSL", SecurityProtocol::Ssl),
+            ("sasl_plaintext", SecurityProtocol::SaslPlaintext),
+            ("sasl-plaintext", SecurityProtocol::SaslPlaintext),
+            ("SASL_PLAINTEXT", SecurityProtocol::SaslPlaintext),
+            ("sasl_ssl", SecurityProtocol::SaslSsl),
+            ("sasl-ssl", SecurityProtocol::SaslSsl),
+            (" SASL_SSL ", SecurityProtocol::SaslSsl),
+        ] {
+            assert_eq!(SecurityProtocol::parse(input), Some(expected), "for input {input:?}");
+        }
+        assert_eq!(SecurityProtocol::parse("tls"), None);
+        assert_eq!(SecurityProtocol::parse(""), None);
+    }
+
+    #[test]
+    fn security_protocol_config_value_is_the_java_name() {
+        assert_eq!(SecurityProtocol::Plaintext.config_value(), "PLAINTEXT");
+        assert_eq!(SecurityProtocol::Ssl.config_value(), "SSL");
+        assert_eq!(SecurityProtocol::SaslPlaintext.config_value(), "SASL_PLAINTEXT");
+        assert_eq!(SecurityProtocol::SaslSsl.config_value(), "SASL_SSL");
+        // Round-trips through the parser, so a printed header can be replayed.
+        for p in [
+            SecurityProtocol::Plaintext,
+            SecurityProtocol::Ssl,
+            SecurityProtocol::SaslPlaintext,
+            SecurityProtocol::SaslSsl,
+        ] {
+            assert_eq!(SecurityProtocol::parse(p.config_value()), Some(p));
+        }
+    }
+
+    #[test]
+    fn security_protocol_tls_and_sasl_flags() {
+        assert!(!SecurityProtocol::Plaintext.uses_tls() && !SecurityProtocol::Plaintext.uses_sasl());
+        assert!(SecurityProtocol::Ssl.uses_tls() && !SecurityProtocol::Ssl.uses_sasl());
+        assert!(!SecurityProtocol::SaslPlaintext.uses_tls() && SecurityProtocol::SaslPlaintext.uses_sasl());
+        assert!(SecurityProtocol::SaslSsl.uses_tls() && SecurityProtocol::SaslSsl.uses_sasl());
+    }
 }
