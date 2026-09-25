@@ -646,6 +646,12 @@ fn producer_perf_test() -> anyhow::Result<()> {
 ///                               a random batch (librdkafka chaos churn). Both
 ///                               required together; owns the consumer set (not
 ///                               usable with --consumers/--workload)
+///   --security-protocol P  broker listener the producer/consumer workloads
+///                          connect through: plaintext (default) | ssl |
+///                          sasl_plaintext | sasl_ssl. SSL trusts the cluster CA;
+///                          SASL is PLAIN as admin/admin-secret. Rust workloads
+///                          only (the gRPC bridge reaches PLAINTEXT only); the
+///                          harness's own admin stays on PLAINTEXT
 ///   --rps N                producer target records/sec, 0 = max (1000)
 ///   --stop-s N             seconds a broker stays down per roll (5)
 ///   --drain-s N            drain window at the end (15)
@@ -854,6 +860,7 @@ fn parse_chaos_flags(raw: &[String]) -> anyhow::Result<Vec<(String, String)>> {
         ("--consumers", "CHAOS_CONSUMERS"),
         ("--consumer-churn-min", "CHAOS_CONSUMER_CHURN_MIN"),
         ("--consumer-churn-max", "CHAOS_CONSUMER_CHURN_MAX"),
+        ("--security-protocol", "CHAOS_SECURITY_PROTOCOL"),
     ];
 
     while i < raw.len() {
