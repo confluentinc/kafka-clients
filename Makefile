@@ -13,7 +13,7 @@ endif
 
 .PHONY: build build-all \
 	build-rust build-rust-integration-tests build-rust-all-features \
-	submodules build-c init-venv build-python \
+	submodules build-c init-venv init-venv-librdkafka build-python \
 	devel-build devel-build-rust devel-build-rust-integration-tests devel-build-rust-all-features \
 	devel-build-c devel-build-python \
 	build-grpc-images build-grpc-images-python build-grpc-images-c init init-hooks \
@@ -47,6 +47,18 @@ build-c: submodules build-rust-all-features
 
 init-venv:
 	[ -d venv ] || python3 -m venv venv
+
+# The librdkafka venv of the Python perf benchmarks: the PyPI confluent-kafka
+# client for the CLIENT_VERSION=2 baseline and for the librdkafka-backed helpers
+# (topic recreation, end-of-run verification; see
+# bindings/python/test/performance/librdkafka_helpers.py). It is separate from
+# `venv` because both packages install the top-level package `confluent_kafka`.
+LIBRDKAFKA_VENV ?= venv-librdkafka
+LIBRDKAFKA_PYTHON := $(abspath $(LIBRDKAFKA_VENV))/bin/python
+
+init-venv-librdkafka:
+	[ -d $(LIBRDKAFKA_VENV) ] || python3 -m venv $(LIBRDKAFKA_VENV)
+	$(LIBRDKAFKA_PYTHON) -m pip install -q -r bindings/python/test/performance/requirements-librdkafka.txt
 
 build-python: init-venv build-rust-all-features
 	@(. venv/bin/activate && \
@@ -276,15 +288,23 @@ producer-perf-test-c: build-c
 # with CLIENT_VERSION (3 = Rust binding, default; 2 = librdkafka baseline). Set
 # ASYNC=True to drive the asyncio-native consumer of the selected backend
 # (AsyncKafkaConsumer / confluent_kafka.aio.AIOConsumer) instead of the sync one.
-consumer-perf-test-python: build-python
-	@(. venv/bin/activate && \
-	  python $(RUST_PROJECT_ROOT)/bindings/python/test/performance/consumer_performance_test.py)
+# CLIENT_VERSION=2 runs in the librdkafka venv (init-venv-librdkafka); the Rust
+# run uses it only for CREATE_TOPIC.
+consumer-perf-test-python: build-python init-venv-librdkafka
+	@(if [ "$${CLIENT_VERSION:-3}" = "2" ]; then py=$(LIBRDKAFKA_PYTHON); \
+	  else . venv/bin/activate && py=python; fi; \
+	  LIBRDKAFKA_PYTHON=$(LIBRDKAFKA_PYTHON) \
+	  $$py $(RUST_PROJECT_ROOT)/bindings/python/test/performance/consumer_performance_test.py)
 
 # Env-driven Python producer performance benchmark (standalone). Same env-var
-# contract as `producer-perf-test`.
-producer-perf-test-python: build-python
-	@(. venv/bin/activate && \
-	  python $(RUST_PROJECT_ROOT)/bindings/python/test/performance/producer_performance_test.py)
+# contract as `producer-perf-test`; CLIENT_VERSION selects the backend as for
+# consumer-perf-test-python. CLIENT_VERSION=2 runs in the librdkafka venv; the
+# Rust run uses it only for CREATE_TOPIC / VERIFY_CONSUMED.
+producer-perf-test-python: build-python init-venv-librdkafka
+	@(if [ "$${CLIENT_VERSION:-3}" = "2" ]; then py=$(LIBRDKAFKA_PYTHON); \
+	  else . venv/bin/activate && py=python; fi; \
+	  LIBRDKAFKA_PYTHON=$(LIBRDKAFKA_PYTHON) \
+	  $$py $(RUST_PROJECT_ROOT)/bindings/python/test/performance/producer_performance_test.py)
 
 # Delegates to bindings/c's own `test` (ctest + the C-backend multilanguage arm)
 # instead of reimplementing the ctest invocation here, mirroring how
