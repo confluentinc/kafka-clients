@@ -219,6 +219,20 @@ def test_every_python_error_class_is_a_java_class() -> None:
     assert len(_BY_JAVA) == 169
 
 
+def test_only_an_exception_suffix_becomes_error() -> None:
+    # CLAUDE.md, Idiom translations: "a class name's Exception suffix becomes
+    # Error, nothing else changes", so the two suffixless Java exceptions keep
+    # their names.
+    for _module, name, java in ERRORS:
+        simple = java.rsplit(".", 1)[1]
+        expected = simple[: -len("Exception")] + "Error" if simple.endswith("Exception") else simple
+        assert name == expected, java
+    from confluent_kafka.common.errors import InvalidRegularExpression, OffsetMetadataTooLarge
+
+    assert InvalidRegularExpression.__name__ == "InvalidRegularExpression"
+    assert OffsetMetadataTooLarge.__module__ == "confluent_kafka.common.errors"
+
+
 def test_each_error_lives_in_the_module_of_its_java_package() -> None:
     for module, name, java in ERRORS:
         cls = _BY_JAVA[java]
