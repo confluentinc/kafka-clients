@@ -34,10 +34,10 @@ use std::time::Duration;
 use async_trait::async_trait;
 
 use confluent_kafka::common::Uuid;
-use confluent_kafka::producer::{Producer, ProducerRecord};
+use confluent_kafka::producer::{Callback, Producer, ProducerRecord};
 
 use super::common::backend_factory::{ConsumerBackendFactory, ProducerBackendFactory, RustNativeFactory};
-use super::verifier::{Verifier, WorkloadEvent};
+use super::verifier::{ConsumerOp, Verifier, WorkloadEvent};
 use super::workload_config::{consumer_props, producer_props};
 
 /// Which binding drives a workload.
@@ -175,13 +175,73 @@ impl WorkloadContext {
     /// The current id of `topic`, or `Uuid::zero()` if the harness has not
     /// resolved it.
     fn topic_id_for(&self, topic: &str) -> Uuid {
-        self.topic_ids
-            .lock()
-            .expect("topic_ids poisoned")
-            .get(topic)
-            .copied()
-            .unwrap_or_else(Uuid::zero)
+        topic_id_in(&self.topic_ids, topic)
     }
+}
+
+/// The current id of `topic` in the harness's live map, or `Uuid::zero()` if
+/// the harness has not resolved it.
+fn topic_id_in(ids: &TopicIds, topic: &str) -> Uuid {
+    ids.lock()
+        .expect("topic_ids poisoned")
+        .get(topic)
+        .copied()
+        .unwrap_or_else(Uuid::zero)
+}
+
+/// Builds the completion callback for record `index` of `topic`. The callback
+/// closes the record's in-flight window with `Delivered` or `SendFailed`, and
+/// stamps a delivered record with the topic id current at **acknowledgement**
+/// time, read from the harness's live map.
+///
+/// Why ack time and not send time: a recreate switches the map to the new
+/// generation's id from the create-topics response, before the producer's own
+/// metadata can learn the new generation's leaders. So every record written to
+/// the new generation is acknowledged after the switch and carries the new id.
+/// That includes a record sent while the topic was deleted, which sits in the
+/// accumulator until the new generation appears, and a record already in flight
+/// when the delete landed, which the client retries into the new generation.
+/// Stamping at send time got both wrong: they carried the old id, the
+/// destroyed-generation excusal forgave them, and real loss on the new
+/// generation went unscored.
+///
+/// The race this leaves is an acknowledgement from the OLD generation arriving
+/// after the switch. It cannot: the old leader answers or fails every request
+/// before it drops the partition, so those callbacks fire within milliseconds
+/// of the delete, while the switch happens only after the delete has been
+/// confirmed absent and the create has returned, hundreds of milliseconds later.
+fn delivery_callback(
+    index: u64,
+    topic: String,
+    topic_ids: TopicIds,
+    producer_label: String,
+    verifier: Arc<dyn Verifier>,
+) -> Callback {
+    Box::new(move |metadata, error| {
+        // The client passes both metadata and an error on the pre-enqueue
+        // failure path, so the error decides.
+        let event = match (error, metadata) {
+            (Some(err), _) => WorkloadEvent::SendFailed { index, topic: topic.clone(), error: err.to_string() },
+            (None, Some(meta)) => WorkloadEvent::Delivered {
+                index,
+                topic: topic.clone(),
+                topic_id: topic_id_in(&topic_ids, &topic),
+                partition: meta.partition(),
+                offset: meta.offset(),
+            },
+            (None, None) => WorkloadEvent::SendFailed {
+                index,
+                topic: topic.clone(),
+                error: "completion callback fired with neither metadata nor error".to_string(),
+            },
+        };
+        if let WorkloadEvent::SendFailed { error, .. } = &event {
+            // Surface the failure as it happens so it can be correlated with
+            // the fault in progress; the verdict fails the run on any of these.
+            eprintln!("chaos: {producer_label} send of {topic}#{index} failed: {error}");
+        }
+        verifier.record(event);
+    })
 }
 
 /// A pluggable chaos workload. The orchestrator only starts it and, via the
@@ -346,15 +406,30 @@ where
             .await
             .expect("failed to build chaos producer");
 
+        // Pacing runs on an absolute schedule: each record has a due time
+        // `interval` after the previous one, and the loop sleeps only until that
+        // time. Sleeping `interval` per iteration would add the timer's tick
+        // granularity (about 1 ms) and the loop's own cost to every record, so
+        // the achieved rate would fall well short of the target; on the absolute
+        // schedule an overshoot is caught up by the next records, and the
+        // average rate stays at the target.
         let interval = if self.ctx.target_rps == 0 {
             Duration::ZERO
         } else {
             Duration::from_secs_f64(1.0 / f64::from(self.ctx.target_rps))
         };
+        let mut next_due = tokio::time::Instant::now();
 
         let topic = self.ctx.topic.clone();
         let msg_size = self.ctx.msg_size;
         let producer_label = self.label();
+        // The loop does not await each record's outcome; the client reports it
+        // through the send callback, which runs on the client's sender task.
+        // This is what lets the client batch records and pipeline requests; a
+        // loop that awaited each send would put one record per batch on the
+        // wire and be bounded by one round trip per record. Backpressure is the
+        // client's own: `send` blocks on `buffer.memory` / `max.block.ms` when
+        // the accumulator is full, as it would for any application.
         let mut index: u64 = 0;
         while !stop.load(Ordering::Relaxed) {
             // Key = the 8-byte big-endian logical index (the record's logical
@@ -365,47 +440,61 @@ where
             let key = index.to_be_bytes().to_vec();
             let value = build_value(index, msg_size);
             let record = ProducerRecord::with_key(topic.clone(), Some(key), Some(value));
-            // Stamp the generation current at SEND time, not at ack time: an ack
-            // from the old generation can land after the harness has re-resolved
-            // the new id (the async-ack race), and stamping it with the new id
-            // would score a legitimately destroyed record as loss. The cost: a
-            // record sent before the re-resolve but written to the new generation
-            // (the one in flight across the delete, plus any sent between the
-            // create and the re-resolve) keeps the old id and is excused if
-            // unconsumed — a handful per recreate, not the rest of the run.
-            let topic_id = self.ctx.topic_id_for(&topic);
             // Open the record's in-flight window before handing it to the
-            // client; the `Delivered` / `SendFailed` below closes it. The
-            // verifier uses these events to verify that this loop never has
-            // more than one record in flight, which is its contract (send,
-            // await the outcome, send the next).
+            // client; the callback's `Delivered` / `SendFailed` closes it. The
+            // verifier uses these events to report the per-producer peak and
+            // to check that every window is closed by verdict time.
             self.verifier
                 .record(WorkloadEvent::Sent { index, topic: topic.clone(), producer: producer_label.clone() });
-            let event = match producer.send_with_callback(record, None).await {
-                Ok(future) => match future.get_timeout(Duration::from_secs(120)).await {
-                    Ok(meta) => WorkloadEvent::Delivered {
-                        index,
-                        topic: topic.clone(),
-                        topic_id,
-                        partition: meta.partition(),
-                        offset: meta.offset(),
-                    },
-                    Err(err) => WorkloadEvent::SendFailed { index, topic: topic.clone(), error: err.to_string() },
-                },
-                Err(err) => WorkloadEvent::SendFailed { index, topic: topic.clone(), error: err.to_string() },
-            };
-            if let WorkloadEvent::SendFailed { error, .. } = &event {
-                // Surface the failure as it happens so it can be correlated with
-                // the fault in progress; the verdict fails the run on any of these.
-                eprintln!("chaos: {producer_label} send of {topic}#{index} failed: {error}");
+            // The topic id is stamped when the ack arrives, not here; see
+            // `delivery_callback` for why.
+            let callback = delivery_callback(
+                index,
+                topic.clone(),
+                self.ctx.topic_ids.clone(),
+                producer_label.clone(),
+                self.verifier.clone(),
+            );
+            if let Err(err) = producer.send_with_callback(record, Some(callback)).await {
+                // The client invokes the callback itself for API errors and
+                // returns a failed future. Other errors come back here without
+                // the callback having run, so the outcome is recorded directly.
+                eprintln!("chaos: {producer_label} send of {topic}#{index} failed: {err}");
+                self.verifier
+                    .record(WorkloadEvent::SendFailed { index, topic: topic.clone(), error: err.to_string() });
             }
-            self.verifier.record(event);
             index += 1;
-            if !interval.is_zero() {
-                tokio::time::sleep(interval).await;
+            if interval.is_zero() {
+                // Unlimited rate (`--rps 0`): `send` returns ready without ever
+                // touching a tokio resource while the accumulator has room, so
+                // the loop would never return `Pending`. The drive loop polls
+                // this workload, the consumers and the scenario timer from one
+                // task, so without an explicit yield they run only when the
+                // producer blocks on a full buffer: the warmup timer fired
+                // minutes late and the consumer starved. One yield per record
+                // costs well under a microsecond.
+                tokio::task::yield_now().await;
+            } else {
+                next_due += interval;
+                let now = tokio::time::Instant::now();
+                if next_due > now {
+                    tokio::time::sleep_until(next_due).await;
+                } else if now - next_due > Duration::from_secs(1) {
+                    // More than a second behind (a long `send` block while the
+                    // client waits out a fault): do not replay the backlog as a
+                    // burst, resume at the target rate from now.
+                    next_due = now;
+                    tokio::task::yield_now().await;
+                } else {
+                    // Behind schedule but catching up; still yield so the stop
+                    // flag and other tasks on this runtime get a turn.
+                    tokio::task::yield_now().await;
+                }
             }
         }
 
+        // Close waits for every buffered record's outcome, so all callbacks
+        // have fired, and every in-flight window is closed, when it returns.
         producer.close().await.expect("chaos producer close failed");
     }
 }
@@ -452,6 +541,11 @@ where
                 Ok(records) => records,
                 Err(err) => {
                     eprintln!("chaos {label}: poll error: {err}");
+                    self.verifier.record(WorkloadEvent::ConsumerError {
+                        consumer: label.clone(),
+                        op: ConsumerOp::Poll,
+                        error: err.to_string(),
+                    });
                     continue;
                 },
             };
@@ -484,11 +578,25 @@ where
                 };
                 if let Err(err) = commit {
                     eprintln!("chaos {label}: commit error: {err}");
+                    self.verifier.record(WorkloadEvent::ConsumerError {
+                        consumer: label.clone(),
+                        op: ConsumerOp::Commit,
+                        error: err.to_string(),
+                    });
                 }
             }
         }
 
-        let _ = consumer.commit_sync().await;
+        // Final commit before leaving; an error here is recorded like any other
+        // commit error so the summary accounts for it.
+        if let Err(err) = consumer.commit_sync().await {
+            eprintln!("chaos {label}: final commit error: {err}");
+            self.verifier.record(WorkloadEvent::ConsumerError {
+                consumer: label.clone(),
+                op: ConsumerOp::Commit,
+                error: err.to_string(),
+            });
+        }
         consumer.close().await.expect("chaos consumer close failed");
     }
 }
@@ -497,8 +605,8 @@ where
 mod tests {
     use std::collections::HashMap;
 
-    use confluent_kafka::common::KafkaError;
-    use confluent_kafka::producer::MockProducer;
+    use confluent_kafka::common::{KafkaError, TopicPartition};
+    use confluent_kafka::producer::{MockProducer, RecordMetadata};
 
     use super::*;
     use crate::common::callback_log::ProducerCallbackLog;
@@ -544,12 +652,13 @@ mod tests {
 
     /// Drives the production `ProducerWorkload::run` loop against the verifier
     /// and checks what the verdict derives from its events: every record was
-    /// `Sent` before it was `Delivered`, the peak in flight was exactly 1, and
-    /// no window was left open at close. This guards the emission order in the
-    /// loop: a `Sent` emitted after the send, or omitted, would appear here as a
-    /// peak of 0 or as unsettled sends.
+    /// `Sent` before its outcome, and no window was left open at close. This
+    /// guards the emission order in the loop: a `Sent` emitted after the send,
+    /// or omitted, would appear here as a peak of 0 or as unsettled sends. The
+    /// mock acknowledges inside `send`, so the callback fires before the next
+    /// iteration and the peak is 1.
     #[tokio::test]
-    async fn producer_loop_keeps_one_record_in_flight_and_settles_every_send() {
+    async fn producer_loop_emits_sent_before_each_outcome_and_settles_every_send() {
         let ids: TopicIds = Arc::new(std::sync::Mutex::new(HashMap::new()));
         let mut ctx = ctx_with(ids);
         // A non-zero rate makes the loop yield to the runtime (its `sleep`),
@@ -572,16 +681,75 @@ mod tests {
         let verdict = verifier.verdict(0);
         assert!(verdict.delivered > 0, "the loop must have produced: {verdict}");
         assert_eq!(verdict.failed_sends, 0, "{verdict}");
-        assert_eq!(verdict.max_in_flight, 1, "one record in flight at a time: {verdict}");
+        assert_eq!(verdict.max_in_flight, 1, "the mock acknowledges inside send: {verdict}");
         assert_eq!(verdict.unsettled_sends, 0, "every Sent must have settled by close: {verdict}");
         assert!(
-            !verdict
-                .reasons
-                .iter()
-                .any(|r| r.starts_with("in-flight bound") || r.starts_with("unsettled sends")),
-            "no in-flight failure expected, got {:?}",
+            !verdict.reasons.iter().any(|r| r.starts_with("unsettled sends")),
+            "no unsettled sends expected, got {:?}",
             verdict.reasons
         );
+    }
+
+    /// The completion callback stamps the topic id current when the ACK
+    /// arrives, not when the record was sent. Here the record is sent under the
+    /// old generation, the harness switches the map to the new generation and
+    /// marks the old one destroyed, and only then does the ack land: the record
+    /// must carry the new id, so it is scored as loss when unconsumed rather
+    /// than excused as destroyed. With send-time stamping this record would
+    /// have been silently excused.
+    #[test]
+    fn delivery_callback_stamps_the_generation_current_at_ack_time() {
+        let old_id = Uuid::from_bytes([7u8; 16]);
+        let new_id = Uuid::from_bytes([8u8; 16]);
+        let ids: TopicIds = Arc::new(std::sync::Mutex::new(HashMap::from([("t".to_string(), old_id)])));
+        let verifier = Arc::new(ConservationVerifier::new());
+
+        // Sent while the map still held the old generation.
+        verifier.record(WorkloadEvent::Sent { index: 0, topic: "t".into(), producer: "p".into() });
+        let callback = delivery_callback(0, "t".into(), ids.clone(), "p".into(), verifier.clone());
+
+        // The recreate lands before the ack does.
+        ids.lock().unwrap().insert("t".to_string(), new_id);
+        verifier.note_expected_loss(ExpectedLossHint::DestroyedGeneration(old_id));
+
+        let meta = RecordMetadata::new(TopicPartition::new("t".to_string(), 3), 5, 0, 0, 8, 8);
+        callback(Some(&meta), None);
+
+        let verdict = verifier.verdict(1);
+        assert_eq!(verdict.unsettled_sends, 0, "the callback must settle the send: {verdict}");
+        assert_eq!(
+            verdict.lost,
+            vec![("t".to_string(), 0)],
+            "an ack landing after the switch belongs to the new generation and is real loss: {verdict}"
+        );
+        assert_eq!(verdict.expected_lost, 0, "nothing may be excused as destroyed: {verdict}");
+        let tail = &verdict.lost_by_partition;
+        assert_eq!(tail.len(), 1, "{verdict}");
+        assert_eq!((tail[0].partition, tail[0].last_lost_offset), (3, 5), "{verdict}");
+    }
+
+    /// A failing ack settles the send without stamping anything: no id lookup,
+    /// one `SendFailed` carrying the client's error text.
+    #[test]
+    fn delivery_callback_records_a_failed_send_with_its_error_text() {
+        let ids: TopicIds = Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let verifier = Arc::new(ConservationVerifier::new());
+        verifier.record(WorkloadEvent::Sent { index: 4, topic: "t".into(), producer: "p".into() });
+        let callback = delivery_callback(4, "t".into(), ids, "p".into(), verifier.clone());
+
+        let err = KafkaError::timeout("Expiring 1 record(s) for t-0: 120000 ms has passed");
+        callback(None, Some(&err));
+
+        let verdict = verifier.verdict(0);
+        assert_eq!(verdict.unsettled_sends, 0, "{verdict}");
+        assert_eq!(verdict.failed_sends, 1, "{verdict}");
+        assert!(verdict.delivered == 0, "a failed send is not a delivery: {verdict}");
+        let reason = verdict
+            .reasons
+            .iter()
+            .find(|r| r.starts_with("failed sends"))
+            .unwrap_or_else(|| panic!("expected a failed-sends reason: {verdict}"));
+        assert!(reason.contains("t#4: ") && reason.contains("Expiring 1 record(s)"), "{reason}");
     }
 
     /// A workload context built BEFORE a recreate must see the id the harness

@@ -24,7 +24,8 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use confluent_kafka::admin::{
-    Admin, AdminClientConfig, CreateTopicsOptions, DescribeTopicsOptions, NewTopic, new_admin_client,
+    Admin, AdminClientConfig, CreateTopicsOptions, CreateTopicsResult, DescribeTopicsOptions, NewTopic,
+    new_admin_client,
 };
 use confluent_kafka::common::{TopicCollection, Uuid};
 
@@ -193,7 +194,6 @@ impl ChaosHarness {
         for t in &harness.topics {
             harness.create_topic(t).await;
         }
-        harness.resolve_topic_id_all().await;
         harness
     }
 
@@ -203,20 +203,43 @@ impl ChaosHarness {
         &self.topics[0]
     }
 
+    /// Create `topic` and cache its id (see [`Self::cache_created_topic_id`]).
     async fn create_topic(&self, topic: &str) {
         let new_topic = NewTopic::new(topic.to_string(), self.partitions, self.replication);
-        self.admin
-            .create_topics(&[new_topic], CreateTopicsOptions::new())
-            .all()
-            .get()
-            .await
-            .expect("chaos topic creation failed");
+        let result = self.admin.create_topics(&[new_topic], CreateTopicsOptions::new());
+        result.all().get().await.expect("chaos topic creation failed");
+        self.cache_created_topic_id(topic, &result).await;
     }
 
-    /// Resolve the current topic id (physical verification key) for every topic.
-    async fn resolve_topic_id_all(&self) {
-        for t in self.topics.clone() {
-            self.resolve_topic_id(&t).await;
+    /// Cache the id the controller assigned to `topic`, taken from the
+    /// create-topics response itself rather than a follow-up describe.
+    ///
+    /// The timing matters. The producer workload stamps each delivered record
+    /// with the id in this map at acknowledgement time (`delivery_callback` in
+    /// `workload.rs`). The create response returns as soon as the controller
+    /// has registered the new topic; the producer cannot learn the new leaders,
+    /// let alone be acknowledged by one, until its own metadata refresh sees the
+    /// topic afterwards. Switching the map here therefore guarantees that no
+    /// record of the new generation is stamped with the old id. A describe
+    /// round-trip after the create (the previous approach) left a window in
+    /// which records written to the new generation carried the destroyed
+    /// generation's id and were silently excused.
+    ///
+    /// Falls back to `describe_topics` when the response carries no id (a
+    /// broker too old to return one, or a create that raced a still-pending
+    /// delete of the same name and reported the existing topic).
+    async fn cache_created_topic_id(&self, topic: &str, result: &CreateTopicsResult) {
+        match result.topic_id(topic).get().await {
+            Ok(id) if id != Uuid::zero() => {
+                self.topic_ids.lock().expect("topic_ids poisoned").insert(topic.to_string(), id);
+            },
+            other => {
+                eprintln!(
+                    "chaos: create-topics response carried no usable id for {topic} ({other:?}); \
+                     resolving it through describe"
+                );
+                self.resolve_topic_id(topic).await;
+            },
         }
     }
 
@@ -226,8 +249,8 @@ impl ChaosHarness {
     /// `describe_topics` can transiently return a zero/absent id (metadata
     /// churn), and keying post-recreate records under `Uuid::zero()` corrupts the
     /// physical accounting. Logs loudly if it genuinely cannot resolve within the
-    /// bound (leaving the previous cached value untouched). Called after create
-    /// and after each recreate (the id changes).
+    /// bound (leaving the previous cached value untouched). The fallback for a
+    /// create-topics response without an id; see [`Self::cache_created_topic_id`].
     async fn resolve_topic_id(&self, topic: &str) {
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
         loop {
@@ -324,15 +347,13 @@ impl ChaosHarness {
         }
 
         // Recreate with the same shape, retrying while the broker still reports
-        // the old topic as not-yet-collected.
+        // the old topic as not-yet-collected. This also switches the shared id
+        // map to the new generation, from the create response, before the
+        // producer can be acknowledged by it (see `cache_created_topic_id`).
+        // (librdkafka restarts the topic's producer here; our in-process
+        // producer keeps running against the same topic name.) From here on the
+        // producer stamps acks and the consumer keys reads with the new id.
         self.create_topic_retrying(topic, Duration::from_secs(30)).await;
-
-        // Re-resolve the topic id so post-recreate records are keyed under the
-        // new generation. (librdkafka restarts the topic's producer here; our
-        // in-process producer keeps running against the same topic name.) The
-        // workloads share this map, so from here on the producer stamps new sends
-        // and the consumer keys new reads with the new id.
-        self.resolve_topic_id(topic).await;
         let new_id = self.current_topic_id(topic);
 
         eprintln!("chaos: topic {topic} recreated: id {old_id} -> {new_id}");
@@ -377,7 +398,7 @@ impl ChaosHarness {
         // legitimately reuse the same id (in-place topic_id mutation — librdkafka
         // documents this as a valid mode), especially when the cluster metadata
         // is still churning from a concurrent broker roll, so we do not assert
-        // there. Either way the id is now re-resolved for keying.
+        // there. Either way the map now holds the create response's id for keying.
         if !dwell.is_zero() && old_id != Uuid::zero() && new_id != Uuid::zero() {
             assert_ne!(
                 old_id, new_id,
@@ -428,19 +449,19 @@ impl ChaosHarness {
     }
 
     /// Create `topic`, retrying while the broker still reports the previous
-    /// generation as pending deletion (`TopicAlreadyExists`).
+    /// generation as pending deletion (`TopicAlreadyExists`), and cache the new
+    /// generation's id from the create response (see
+    /// [`Self::cache_created_topic_id`]).
     async fn create_topic_retrying(&self, topic: &str, timeout: Duration) {
         let deadline = std::time::Instant::now() + timeout;
         loop {
             let new_topic = NewTopic::new(topic.to_string(), self.partitions, self.replication);
-            match self
-                .admin
-                .create_topics(&[new_topic], CreateTopicsOptions::new())
-                .all()
-                .get()
-                .await
-            {
-                Ok(()) => return,
+            let result = self.admin.create_topics(&[new_topic], CreateTopicsOptions::new());
+            match result.all().get().await {
+                Ok(()) => {
+                    self.cache_created_topic_id(topic, &result).await;
+                    return;
+                },
                 Err(err) => {
                     assert!(
                         std::time::Instant::now() < deadline,
