@@ -366,7 +366,7 @@ extern "C" void metadata_copy_cb(int64_t offset, int32_t partition,
 
 // Defined in the consumer section below; reused by the producer PartitionsFor.
 void node_to_proto(const kafka_common_Node_t* node, Node* dst);
-void partition_info_to_proto(const kafka_consumer_PartitionInfo_t* info, PartitionInfo* dst);
+void partition_info_to_proto(const kafka_common_PartitionInfo_t* info, PartitionInfo* dst);
 
 // ---------------------------------------------------------------------------
 // Callback log
@@ -474,34 +474,34 @@ struct LogState {
 // TopicPartitionList and must destroy it; returning NULL means the listener
 // succeeded (a non-null error would fail the rebalance, like a throwing Java
 // listener).
-kafka_common_Error_t* log_rebalance(kafka_consumer_TopicPartitionList_t* partitions,
+kafka_common_Error_t* log_rebalance(kafka_common_TopicPartitionList_t* partitions,
                                         void* user_data, const char* kind) {
   auto* state = static_cast<LogState*>(user_data);
   CallbackLogEntry entry;
   entry.set_kind(kind);
   if (partitions != nullptr) {
-    int32_t n = kafka_consumer_TopicPartitionList_count(partitions);
+    int32_t n = kafka_common_TopicPartitionList_count(partitions);
     for (int32_t i = 0; i < n; i++) {
-      const kafka_consumer_TopicPartition_t* tp =
-          kafka_consumer_TopicPartitionList_get(partitions, i);
+      const kafka_common_TopicPartition_t* tp =
+          kafka_common_TopicPartitionList_get(partitions, i);
       CallbackLogPartition* p = entry.add_partitions();
-      const char* topic = kafka_consumer_TopicPartition_topic(tp);
+      const char* topic = kafka_common_TopicPartition_topic(tp);
       p->set_topic(topic ? topic : "");
-      p->set_partition(kafka_consumer_TopicPartition_partition(tp));
+      p->set_partition(kafka_common_TopicPartition_partition(tp));
     }
-    kafka_consumer_TopicPartitionList_destroy(partitions);
+    kafka_common_TopicPartitionList_destroy(partitions);
   }
   state->log->append(state->client_id, std::move(entry));
   return nullptr;
 }
 
 extern "C" kafka_common_Error_t* log_partitions_assigned(
-    kafka_consumer_TopicPartitionList_t* partitions, void* user_data) {
+    kafka_common_TopicPartitionList_t* partitions, void* user_data) {
   return log_rebalance(partitions, user_data, KIND_ASSIGNED);
 }
 
 extern "C" kafka_common_Error_t* log_partitions_revoked(
-    kafka_consumer_TopicPartitionList_t* partitions, void* user_data) {
+    kafka_common_TopicPartitionList_t* partitions, void* user_data) {
   return log_rebalance(partitions, user_data, KIND_REVOKED);
 }
 
@@ -509,7 +509,7 @@ extern "C" kafka_common_Error_t* log_partitions_revoked(
 // reproduce Java's "onPartitionsLost delegates to onPartitionsRevoked" default),
 // so a lost callback is distinguishable from a revoke in the log.
 extern "C" kafka_common_Error_t* log_partitions_lost(
-    kafka_consumer_TopicPartitionList_t* partitions, void* user_data) {
+    kafka_common_TopicPartitionList_t* partitions, void* user_data) {
   return log_rebalance(partitions, user_data, KIND_LOST);
 }
 
@@ -527,10 +527,10 @@ void take_offsets_into(CallbackLogEntry* entry, kafka_consumer_OffsetMap_t* offs
   if (offsets == nullptr) return;
   int32_t n = kafka_consumer_OffsetMap_count(offsets);
   for (int32_t i = 0; i < n; i++) {
-    const kafka_consumer_TopicPartition_t* tp = kafka_consumer_OffsetMap_get_key(offsets, i);
-    const char* raw_topic = kafka_consumer_TopicPartition_topic(tp);
+    const kafka_common_TopicPartition_t* tp = kafka_consumer_OffsetMap_get_key(offsets, i);
+    const char* raw_topic = kafka_common_TopicPartition_topic(tp);
     const std::string topic = raw_topic ? raw_topic : "";
-    const int32_t partition = kafka_consumer_TopicPartition_partition(tp);
+    const int32_t partition = kafka_common_TopicPartition_partition(tp);
     CallbackLogPartition* p = entry->add_partitions();
     p->set_topic(topic);
     p->set_partition(partition);
@@ -707,7 +707,7 @@ class ProducerServiceImpl final : public ProducerService::Service {
     // callback saw. The blocking future path below is unchanged: the FFI gives us
     // both, exactly like Java's send(record, callback).
     kafka_common_Error_t* send_err = nullptr;
-    kafka_producer_FutureRecordMetadata_t* future = nullptr;
+    kafka_common_KafkaFuture_RecordMetadata_t* future = nullptr;
     if (req->with_callback()) {
       LogState* state = log_state_for(req->producer_id());
       future = kafka_producer_Producer_send_with_callback(
@@ -730,8 +730,8 @@ class ProducerServiceImpl final : public ProducerService::Service {
     // owns, so it's safe to call from arbitrary threads.
     kafka_common_Error_t* get_err = nullptr;
     kafka_producer_RecordMetadata_t* metadata =
-        kafka_producer_FutureRecordMetadata_get(future, &get_err);
-    kafka_producer_FutureRecordMetadata_destroy(future);
+        kafka_common_KafkaFuture_RecordMetadata_get(future, &get_err);
+    kafka_common_KafkaFuture_RecordMetadata_destroy(future);
     if (metadata == nullptr) {
       fill_proto_error(resp->mutable_error(), get_err);
       return grpc::Status::OK;
@@ -908,18 +908,18 @@ class ProducerServiceImpl final : public ProducerService::Service {
           "unknown producer_id " + std::to_string(req->producer_id()));
       return grpc::Status::OK;
     }
-    kafka_consumer_PartitionInfoList_t* list = nullptr;
+    kafka_common_PartitionInfoList_t* list = nullptr;
     kafka_common_Error_t* err =
         kafka_producer_Producer_partitions_for(producer, req->topic().c_str(), &list);
     if (err != nullptr) {
       fill_proto_error(resp->mutable_error(), err);
       return grpc::Status::OK;
     }
-    int32_t n = kafka_consumer_PartitionInfoList_count(list);
+    int32_t n = kafka_common_PartitionInfoList_count(list);
     for (int32_t i = 0; i < n; i++) {
-      partition_info_to_proto(kafka_consumer_PartitionInfoList_get(list, i), resp->add_partitions());
+      partition_info_to_proto(kafka_common_PartitionInfoList_get(list, i), resp->add_partitions());
     }
-    kafka_consumer_PartitionInfoList_destroy(list);
+    kafka_common_PartitionInfoList_destroy(list);
     return grpc::Status::OK;
   }
 
@@ -1137,33 +1137,33 @@ void node_to_proto(const kafka_common_Node_t* node, Node* dst) {
   if (rack != nullptr) dst->set_rack(std::string(rack, rack_len));
 }
 
-void partition_info_to_proto(const kafka_consumer_PartitionInfo_t* info,
+void partition_info_to_proto(const kafka_common_PartitionInfo_t* info,
                              PartitionInfo* dst) {
-  const char* topic = kafka_consumer_PartitionInfo_topic(info);  // NUL-terminated
+  const char* topic = kafka_common_PartitionInfo_topic(info);  // NUL-terminated
   dst->set_topic(topic ? topic : "");
-  dst->set_partition(kafka_consumer_PartitionInfo_partition(info));
-  const kafka_common_Node_t* leader = kafka_consumer_PartitionInfo_leader(info);
+  dst->set_partition(kafka_common_PartitionInfo_partition(info));
+  const kafka_common_Node_t* leader = kafka_common_PartitionInfo_leader(info);
   if (leader != nullptr) node_to_proto(leader, dst->mutable_leader());
-  int32_t n = kafka_consumer_PartitionInfo_replica_count(info);
+  int32_t n = kafka_common_PartitionInfo_replica_count(info);
   for (int32_t i = 0; i < n; i++) {
-    node_to_proto(kafka_consumer_PartitionInfo_replica(info, i), dst->add_replicas());
+    node_to_proto(kafka_common_PartitionInfo_replica(info, i), dst->add_replicas());
   }
-  n = kafka_consumer_PartitionInfo_in_sync_replica_count(info);
+  n = kafka_common_PartitionInfo_in_sync_replica_count(info);
   for (int32_t i = 0; i < n; i++) {
-    node_to_proto(kafka_consumer_PartitionInfo_in_sync_replica(info, i),
+    node_to_proto(kafka_common_PartitionInfo_in_sync_replica(info, i),
                   dst->add_in_sync_replicas());
   }
-  n = kafka_consumer_PartitionInfo_offline_replica_count(info);
+  n = kafka_common_PartitionInfo_offline_replica_count(info);
   for (int32_t i = 0; i < n; i++) {
-    node_to_proto(kafka_consumer_PartitionInfo_offline_replica(info, i),
+    node_to_proto(kafka_common_PartitionInfo_offline_replica(info, i),
                   dst->add_offline_replicas());
   }
 }
 
-void tp_to_proto(const kafka_consumer_TopicPartition_t* tp, TopicPartition* dst) {
-  const char* topic = kafka_consumer_TopicPartition_topic(tp);
+void tp_to_proto(const kafka_common_TopicPartition_t* tp, TopicPartition* dst) {
+  const char* topic = kafka_common_TopicPartition_topic(tp);
   dst->set_topic(topic ? topic : "");
-  dst->set_partition(kafka_consumer_TopicPartition_partition(tp));
+  dst->set_partition(kafka_common_TopicPartition_partition(tp));
 }
 
 class ConsumerServiceImpl final : public ConsumerService::Service {
@@ -1466,18 +1466,18 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
           "unknown consumer_id " + std::to_string(req->consumer_id()));
       return grpc::Status::OK;
     }
-    kafka_consumer_PartitionInfoList_t* infos = nullptr;
+    kafka_common_PartitionInfoList_t* infos = nullptr;
     kafka_common_Error_t* err =
         kafka_consumer_Consumer_partitions_for(c, req->topic().c_str(), &infos);
     if (err != nullptr) {
       fill_proto_error(resp->mutable_error(), err);
       return grpc::Status::OK;
     }
-    int32_t n = kafka_consumer_PartitionInfoList_count(infos);
+    int32_t n = kafka_common_PartitionInfoList_count(infos);
     for (int32_t i = 0; i < n; i++) {
-      partition_info_to_proto(kafka_consumer_PartitionInfoList_get(infos, i), resp->add_partitions());
+      partition_info_to_proto(kafka_common_PartitionInfoList_get(infos, i), resp->add_partitions());
     }
-    kafka_consumer_PartitionInfoList_destroy(infos);
+    kafka_common_PartitionInfoList_destroy(infos);
     return grpc::Status::OK;
   }
 
@@ -1489,26 +1489,26 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
           "unknown consumer_id " + std::to_string(req->consumer_id()));
       return grpc::Status::OK;
     }
-    kafka_consumer_TopicPartitionInfoMap_t* map = nullptr;
+    kafka_common_TopicPartitionInfoMap_t* map = nullptr;
     kafka_common_Error_t* err = kafka_consumer_Consumer_list_topics(c, &map);
     if (err != nullptr) {
       fill_proto_error(resp->mutable_error(), err);
       return grpc::Status::OK;
     }
     TopicListing* listing = resp->mutable_topics();
-    int32_t n = kafka_consumer_TopicPartitionInfoMap_count(map);
+    int32_t n = kafka_common_TopicPartitionInfoMap_count(map);
     for (int32_t i = 0; i < n; i++) {
       TopicPartitionInfoEntry* entry = listing->add_topics();
-      const char* topic = kafka_consumer_TopicPartitionInfoMap_get_topic(map, i);
+      const char* topic = kafka_common_TopicPartitionInfoMap_get_topic(map, i);
       entry->set_topic(topic ? topic : "");
-      const kafka_consumer_PartitionInfoList_t* infos =
-          kafka_consumer_TopicPartitionInfoMap_get_partitions(map, i);
-      int32_t pn = kafka_consumer_PartitionInfoList_count(infos);
+      const kafka_common_PartitionInfoList_t* infos =
+          kafka_common_TopicPartitionInfoMap_get_partitions(map, i);
+      int32_t pn = kafka_common_PartitionInfoList_count(infos);
       for (int32_t j = 0; j < pn; j++) {
-        partition_info_to_proto(kafka_consumer_PartitionInfoList_get(infos, j), entry->add_partitions());
+        partition_info_to_proto(kafka_common_PartitionInfoList_get(infos, j), entry->add_partitions());
       }
     }
-    kafka_consumer_TopicPartitionInfoMap_destroy(map);
+    kafka_common_TopicPartitionInfoMap_destroy(map);
     return grpc::Status::OK;
   }
 
@@ -1520,7 +1520,7 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
           "unknown consumer_id " + std::to_string(req->consumer_id()));
       return grpc::Status::OK;
     }
-    kafka_consumer_TopicPartitionList_t* list = kafka_consumer_Consumer_assignment(c);
+    kafka_common_TopicPartitionList_t* list = kafka_consumer_Consumer_assignment(c);
     fill_tp_list(list, resp);
     return grpc::Status::OK;
   }
@@ -1533,7 +1533,7 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
           "unknown consumer_id " + std::to_string(req->consumer_id()));
       return grpc::Status::OK;
     }
-    kafka_consumer_TopicPartitionList_t* list = kafka_consumer_Consumer_paused(c);
+    kafka_common_TopicPartitionList_t* list = kafka_consumer_Consumer_paused(c);
     fill_tp_list(list, resp);
     return grpc::Status::OK;
   }
@@ -1749,14 +1749,14 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
     return grpc::Status::OK;
   }
 
-  void fill_tp_list(kafka_consumer_TopicPartitionList_t* list, TopicPartitionListResponse* resp) {
+  void fill_tp_list(kafka_common_TopicPartitionList_t* list, TopicPartitionListResponse* resp) {
     TopicPartitionList* out = resp->mutable_partitions();
     if (list != nullptr) {
-      int32_t n = kafka_consumer_TopicPartitionList_count(list);
+      int32_t n = kafka_common_TopicPartitionList_count(list);
       for (int32_t i = 0; i < n; i++) {
-        tp_to_proto(kafka_consumer_TopicPartitionList_get(list, i), out->add_partitions());
+        tp_to_proto(kafka_common_TopicPartitionList_get(list, i), out->add_partitions());
       }
-      kafka_consumer_TopicPartitionList_destroy(list);
+      kafka_common_TopicPartitionList_destroy(list);
     }
   }
 
@@ -4684,33 +4684,33 @@ class AdminServiceImpl final : public AdminService::Service {
   // Named for its Java type rather than reusing `partition_info_to_proto`,
   // which is the consumer service's free function for `PartitionInfo`; a member
   // of the same name would hide it inside this class.
-  static void topic_partition_info_to_proto(const kafka_admin_TopicPartitionInfo_t* info,
+  static void topic_partition_info_to_proto(const kafka_common_TopicPartitionInfo_t* info,
                                             TopicPartitionInfo* dst) {
-    dst->set_partition(kafka_admin_TopicPartitionInfo_partition(info));
-    const kafka_common_Node_t* leader = kafka_admin_TopicPartitionInfo_leader(info);
+    dst->set_partition(kafka_common_TopicPartitionInfo_partition(info));
+    const kafka_common_Node_t* leader = kafka_common_TopicPartitionInfo_leader(info);
     if (leader != nullptr) node_to_proto(leader, dst->mutable_leader());
-    const int32_t replicas = kafka_admin_TopicPartitionInfo_replica_count(info);
+    const int32_t replicas = kafka_common_TopicPartitionInfo_replica_count(info);
     for (int32_t i = 0; i < replicas; i++) {
-      node_to_proto(kafka_admin_TopicPartitionInfo_replica(info, i), dst->add_replicas());
+      node_to_proto(kafka_common_TopicPartitionInfo_replica(info, i), dst->add_replicas());
     }
-    const int32_t isr = kafka_admin_TopicPartitionInfo_isr_count(info);
+    const int32_t isr = kafka_common_TopicPartitionInfo_isr_count(info);
     for (int32_t i = 0; i < isr; i++) {
-      node_to_proto(kafka_admin_TopicPartitionInfo_isr(info, i), dst->add_isr());
+      node_to_proto(kafka_common_TopicPartitionInfo_isr(info, i), dst->add_isr());
     }
     // elr / last_known_elr are nullable in Java, and an absent list reports the
     // same count 0 as an empty one — hence the dedicated has_* predicates.
-    if (kafka_admin_TopicPartitionInfo_has_elr(info)) {
+    if (kafka_common_TopicPartitionInfo_has_elr(info)) {
       NodeList* elr = dst->mutable_elr();
-      const int32_t n = kafka_admin_TopicPartitionInfo_elr_count(info);
+      const int32_t n = kafka_common_TopicPartitionInfo_elr_count(info);
       for (int32_t i = 0; i < n; i++) {
-        node_to_proto(kafka_admin_TopicPartitionInfo_elr(info, i), elr->add_nodes());
+        node_to_proto(kafka_common_TopicPartitionInfo_elr(info, i), elr->add_nodes());
       }
     }
-    if (kafka_admin_TopicPartitionInfo_has_last_known_elr(info)) {
+    if (kafka_common_TopicPartitionInfo_has_last_known_elr(info)) {
       NodeList* last = dst->mutable_last_known_elr();
-      const int32_t n = kafka_admin_TopicPartitionInfo_last_known_elr_count(info);
+      const int32_t n = kafka_common_TopicPartitionInfo_last_known_elr_count(info);
       for (int32_t i = 0; i < n; i++) {
-        node_to_proto(kafka_admin_TopicPartitionInfo_last_known_elr(info, i), last->add_nodes());
+        node_to_proto(kafka_common_TopicPartitionInfo_last_known_elr(info, i), last->add_nodes());
       }
     }
   }

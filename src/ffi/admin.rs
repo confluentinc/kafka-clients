@@ -103,8 +103,8 @@
 //! - `kafka_admin_ConsumerGroupDescription_has_authorized_operations`
 //! - `kafka_admin_ClassicGroupDescription_has_authorized_operations`
 //! - `kafka_admin_DescribeClusterResult_has_authorized_operations`
-//! - `kafka_admin_TopicPartitionInfo_has_elr`
-//! - `kafka_admin_TopicPartitionInfo_has_last_known_elr`
+//! - `kafka_common_TopicPartitionInfo_has_elr`
+//! - `kafka_common_TopicPartitionInfo_has_last_known_elr`
 //!
 //! An in-band `-1` sentinel was rejected because a count flows straight into
 //! `malloc(count * sizeof *p)` and into `for (size_t i = 0; i < count; i++)`,
@@ -1987,11 +1987,11 @@ fn config_entry_at(inner: &TopicMetadataAndConfigInner, index: i32) -> Option<&C
 
 /// Opaque handle to a `TopicPartitionInfo`.
 #[repr(C)]
-pub struct kafka_admin_TopicPartitionInfo_t {
+pub struct kafka_common_TopicPartitionInfo_t {
     _private: [u8; 0],
 }
 
-/// Backing state for [`kafka_admin_TopicPartitionInfo_t`].
+/// Backing state for [`kafka_common_TopicPartitionInfo_t`].
 ///
 /// Node lists are owned here so [`kafka_common_Node_t`] pointers handed out by
 /// the getters stay valid for the lifetime of the owning result handle.
@@ -2019,12 +2019,12 @@ impl TopicPartitionInfoInner {
     }
 }
 
-/// Casts a `*const kafka_admin_TopicPartitionInfo_t` to a reference.
+/// Casts a `*const kafka_common_TopicPartitionInfo_t` to a reference.
 ///
 /// # Safety
 ///
 /// `info` must be a non-null borrowed pointer from a `TopicDescription` getter.
-unsafe fn partition_info_ref(info: *const kafka_admin_TopicPartitionInfo_t) -> &'static TopicPartitionInfoInner {
+unsafe fn partition_info_ref(info: *const kafka_common_TopicPartitionInfo_t) -> &'static TopicPartitionInfoInner {
     unsafe { &*(info as *const TopicPartitionInfoInner) }
 }
 
@@ -2046,8 +2046,8 @@ fn node_at(nodes: &[Node], index: i32) -> *const kafka_common_Node_t {
 ///
 /// `info` must be a valid borrowed pointer from a `TopicDescription` getter.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_admin_TopicPartitionInfo_partition(
-    info: *const kafka_admin_TopicPartitionInfo_t,
+pub unsafe extern "C" fn kafka_common_TopicPartitionInfo_partition(
+    info: *const kafka_common_TopicPartitionInfo_t,
 ) -> i32 {
     unsafe { partition_info_ref(info) }.partition
 }
@@ -2058,8 +2058,8 @@ pub unsafe extern "C" fn kafka_admin_TopicPartitionInfo_partition(
 ///
 /// `info` must be a valid borrowed pointer from a `TopicDescription` getter.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_admin_TopicPartitionInfo_leader(
-    info: *const kafka_admin_TopicPartitionInfo_t,
+pub unsafe extern "C" fn kafka_common_TopicPartitionInfo_leader(
+    info: *const kafka_common_TopicPartitionInfo_t,
 ) -> *const kafka_common_Node_t {
     match unsafe { partition_info_ref(info) }.leader.as_ref() {
         Some(node) => node as *const Node as *const kafka_common_Node_t,
@@ -2073,8 +2073,8 @@ pub unsafe extern "C" fn kafka_admin_TopicPartitionInfo_leader(
 ///
 /// `info` must be a valid borrowed pointer from a `TopicDescription` getter.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_admin_TopicPartitionInfo_replica_count(
-    info: *const kafka_admin_TopicPartitionInfo_t,
+pub unsafe extern "C" fn kafka_common_TopicPartitionInfo_replica_count(
+    info: *const kafka_common_TopicPartitionInfo_t,
 ) -> i32 {
     unsafe { partition_info_ref(info) }.replicas.len() as i32
 }
@@ -2085,8 +2085,8 @@ pub unsafe extern "C" fn kafka_admin_TopicPartitionInfo_replica_count(
 ///
 /// `info` must be a valid borrowed pointer from a `TopicDescription` getter.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_admin_TopicPartitionInfo_replica(
-    info: *const kafka_admin_TopicPartitionInfo_t,
+pub unsafe extern "C" fn kafka_common_TopicPartitionInfo_replica(
+    info: *const kafka_common_TopicPartitionInfo_t,
     index: i32,
 ) -> *const kafka_common_Node_t {
     node_at(&unsafe { partition_info_ref(info) }.replicas, index)
@@ -2098,8 +2098,8 @@ pub unsafe extern "C" fn kafka_admin_TopicPartitionInfo_replica(
 ///
 /// `info` must be a valid borrowed pointer from a `TopicDescription` getter.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_admin_TopicPartitionInfo_isr_count(
-    info: *const kafka_admin_TopicPartitionInfo_t,
+pub unsafe extern "C" fn kafka_common_TopicPartitionInfo_isr_count(
+    info: *const kafka_common_TopicPartitionInfo_t,
 ) -> i32 {
     unsafe { partition_info_ref(info) }.isr.len() as i32
 }
@@ -2110,8 +2110,8 @@ pub unsafe extern "C" fn kafka_admin_TopicPartitionInfo_isr_count(
 ///
 /// `info` must be a valid borrowed pointer from a `TopicDescription` getter.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_admin_TopicPartitionInfo_isr(
-    info: *const kafka_admin_TopicPartitionInfo_t,
+pub unsafe extern "C" fn kafka_common_TopicPartitionInfo_isr(
+    info: *const kafka_common_TopicPartitionInfo_t,
     index: i32,
 ) -> *const kafka_common_Node_t {
     node_at(&unsafe { partition_info_ref(info) }.isr, index)
@@ -2119,14 +2119,14 @@ pub unsafe extern "C" fn kafka_admin_TopicPartitionInfo_isr(
 
 /// Returns the number of eligible leader replicas, always non-negative. An
 /// absent ELR set (Java's `elr()` returns null) and a reported-but-empty one both
-/// count 0; use [`kafka_admin_TopicPartitionInfo_has_elr`] to tell them apart.
+/// count 0; use [`kafka_common_TopicPartitionInfo_has_elr`] to tell them apart.
 ///
 /// # Safety
 ///
 /// `info` must be a valid borrowed pointer from a `TopicDescription` getter.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_admin_TopicPartitionInfo_elr_count(
-    info: *const kafka_admin_TopicPartitionInfo_t,
+pub unsafe extern "C" fn kafka_common_TopicPartitionInfo_elr_count(
+    info: *const kafka_common_TopicPartitionInfo_t,
 ) -> i32 {
     unsafe { partition_info_ref(info) }
         .elr
@@ -2141,7 +2141,9 @@ pub unsafe extern "C" fn kafka_admin_TopicPartitionInfo_elr_count(
 ///
 /// `info` must be a valid borrowed pointer from a `TopicDescription` getter.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_admin_TopicPartitionInfo_has_elr(info: *const kafka_admin_TopicPartitionInfo_t) -> bool {
+pub unsafe extern "C" fn kafka_common_TopicPartitionInfo_has_elr(
+    info: *const kafka_common_TopicPartitionInfo_t,
+) -> bool {
     unsafe { partition_info_ref(info) }.elr.is_some()
 }
 
@@ -2152,8 +2154,8 @@ pub unsafe extern "C" fn kafka_admin_TopicPartitionInfo_has_elr(info: *const kaf
 ///
 /// `info` must be a valid borrowed pointer from a `TopicDescription` getter.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_admin_TopicPartitionInfo_elr(
-    info: *const kafka_admin_TopicPartitionInfo_t,
+pub unsafe extern "C" fn kafka_common_TopicPartitionInfo_elr(
+    info: *const kafka_common_TopicPartitionInfo_t,
     index: i32,
 ) -> *const kafka_common_Node_t {
     match unsafe { partition_info_ref(info) }.elr.as_ref() {
@@ -2165,14 +2167,14 @@ pub unsafe extern "C" fn kafka_admin_TopicPartitionInfo_elr(
 /// Returns the number of last-known eligible leader replicas, always
 /// non-negative. An absent set (Java's `lastKnownElr()` returns null) and a
 /// reported-but-empty one both count 0; use
-/// [`kafka_admin_TopicPartitionInfo_has_last_known_elr`] to tell them apart.
+/// [`kafka_common_TopicPartitionInfo_has_last_known_elr`] to tell them apart.
 ///
 /// # Safety
 ///
 /// `info` must be a valid borrowed pointer from a `TopicDescription` getter.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_admin_TopicPartitionInfo_last_known_elr_count(
-    info: *const kafka_admin_TopicPartitionInfo_t,
+pub unsafe extern "C" fn kafka_common_TopicPartitionInfo_last_known_elr_count(
+    info: *const kafka_common_TopicPartitionInfo_t,
 ) -> i32 {
     unsafe { partition_info_ref(info) }
         .last_known_elr
@@ -2187,8 +2189,8 @@ pub unsafe extern "C" fn kafka_admin_TopicPartitionInfo_last_known_elr_count(
 ///
 /// `info` must be a valid borrowed pointer from a `TopicDescription` getter.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_admin_TopicPartitionInfo_has_last_known_elr(
-    info: *const kafka_admin_TopicPartitionInfo_t,
+pub unsafe extern "C" fn kafka_common_TopicPartitionInfo_has_last_known_elr(
+    info: *const kafka_common_TopicPartitionInfo_t,
 ) -> bool {
     unsafe { partition_info_ref(info) }.last_known_elr.is_some()
 }
@@ -2200,8 +2202,8 @@ pub unsafe extern "C" fn kafka_admin_TopicPartitionInfo_has_last_known_elr(
 ///
 /// `info` must be a valid borrowed pointer from a `TopicDescription` getter.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_admin_TopicPartitionInfo_last_known_elr(
-    info: *const kafka_admin_TopicPartitionInfo_t,
+pub unsafe extern "C" fn kafka_common_TopicPartitionInfo_last_known_elr(
+    info: *const kafka_common_TopicPartitionInfo_t,
     index: i32,
 ) -> *const kafka_common_Node_t {
     match unsafe { partition_info_ref(info) }.last_known_elr.as_ref() {
@@ -2307,12 +2309,12 @@ pub unsafe extern "C" fn kafka_admin_TopicDescription_partition_count(
 pub unsafe extern "C" fn kafka_admin_TopicDescription_partition(
     description: *const kafka_admin_TopicDescription_t,
     index: i32,
-) -> *const kafka_admin_TopicPartitionInfo_t {
+) -> *const kafka_common_TopicPartitionInfo_t {
     if index < 0 {
         return std::ptr::null();
     }
     match unsafe { description_ref(description) }.partitions.get(index as usize) {
-        Some(info) => info as *const TopicPartitionInfoInner as *const kafka_admin_TopicPartitionInfo_t,
+        Some(info) => info as *const TopicPartitionInfoInner as *const kafka_common_TopicPartitionInfo_t,
         None => std::ptr::null(),
     }
 }
@@ -11814,7 +11816,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_remove_members_from_consumer_gr
 // `.resource`, `.quota`), never in `clients.admin`, so per CLAUDE.md §3 the C
 // spelling is `kafka_common_*`. `kafka_common_Node_t` and
 // `kafka_common_Error_t` are the existing precedent. Naming these
-// `kafka_admin_*` would repeat the `kafka_consumer_TopicPartition_t` mistake
+// `kafka_admin_*` would repeat the `kafka_common_TopicPartition_t` mistake
 // in a second public surface.
 //
 // The three handles below are **output-only and borrowed**: they are interior
@@ -20801,25 +20803,25 @@ mod tests {
             ],
         ));
         let p = |inner: &TopicPartitionInfoInner| {
-            inner as *const TopicPartitionInfoInner as *const kafka_admin_TopicPartitionInfo_t
+            inner as *const TopicPartitionInfoInner as *const kafka_common_TopicPartitionInfo_t
         };
         unsafe {
-            assert_eq!(kafka_admin_TopicPartitionInfo_elr_count(p(&absent)), 0);
-            assert!(!kafka_admin_TopicPartitionInfo_has_elr(p(&absent)));
-            assert!(kafka_admin_TopicPartitionInfo_elr(p(&absent), 0).is_null());
-            assert_eq!(kafka_admin_TopicPartitionInfo_last_known_elr_count(p(&absent)), 0);
-            assert!(!kafka_admin_TopicPartitionInfo_has_last_known_elr(p(&absent)));
+            assert_eq!(kafka_common_TopicPartitionInfo_elr_count(p(&absent)), 0);
+            assert!(!kafka_common_TopicPartitionInfo_has_elr(p(&absent)));
+            assert!(kafka_common_TopicPartitionInfo_elr(p(&absent), 0).is_null());
+            assert_eq!(kafka_common_TopicPartitionInfo_last_known_elr_count(p(&absent)), 0);
+            assert!(!kafka_common_TopicPartitionInfo_has_last_known_elr(p(&absent)));
 
-            assert_eq!(kafka_admin_TopicPartitionInfo_elr_count(p(&reported_empty)), 0);
-            assert!(kafka_admin_TopicPartitionInfo_has_elr(p(&reported_empty)));
-            assert_eq!(kafka_admin_TopicPartitionInfo_last_known_elr_count(p(&reported_empty)), 0);
-            assert!(kafka_admin_TopicPartitionInfo_has_last_known_elr(p(&reported_empty)));
+            assert_eq!(kafka_common_TopicPartitionInfo_elr_count(p(&reported_empty)), 0);
+            assert!(kafka_common_TopicPartitionInfo_has_elr(p(&reported_empty)));
+            assert_eq!(kafka_common_TopicPartitionInfo_last_known_elr_count(p(&reported_empty)), 0);
+            assert!(kafka_common_TopicPartitionInfo_has_last_known_elr(p(&reported_empty)));
 
             // Distinct lengths, so swapping the two accessors fails.
-            assert_eq!(kafka_admin_TopicPartitionInfo_elr_count(p(&reported)), 1);
-            assert_eq!(kafka_admin_TopicPartitionInfo_last_known_elr_count(p(&reported)), 2);
-            assert!(kafka_admin_TopicPartitionInfo_has_elr(p(&reported)));
-            assert!(kafka_admin_TopicPartitionInfo_has_last_known_elr(p(&reported)));
+            assert_eq!(kafka_common_TopicPartitionInfo_elr_count(p(&reported)), 1);
+            assert_eq!(kafka_common_TopicPartitionInfo_last_known_elr_count(p(&reported)), 2);
+            assert!(kafka_common_TopicPartitionInfo_has_elr(p(&reported)));
+            assert!(kafka_common_TopicPartitionInfo_has_last_known_elr(p(&reported)));
         }
     }
 
