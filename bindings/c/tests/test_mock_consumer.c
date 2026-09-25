@@ -401,17 +401,24 @@ static void test_mock_consumer_seek_position(void) {
     TEST_ASSERT_NULL(err);
     TEST_ASSERT_EQUAL_INT64(42, pos);
 
-    // seek_with_metadata also sets position.
-    TEST_ASSERT_NULL(kafka_consumer_Consumer_seek_with_metadata(c, "test", 0, 100, -1, "meta"));
+    // seek_with_offset_and_metadata (Java's seek(TopicPartition,
+    // OffsetAndMetadata)) also sets position.
+    TEST_ASSERT_NULL(kafka_consumer_Consumer_seek_with_offset_and_metadata(c, "test", 0, 100, -1, "meta"));
     err = kafka_consumer_Consumer_position(c, "test", 0, &pos);
     TEST_ASSERT_NULL(err);
     TEST_ASSERT_EQUAL_INT64(100, pos);
+
+    // The deprecated earlier name still links and behaves the same.
+    TEST_ASSERT_NULL(kafka_consumer_Consumer_seek_with_metadata(c, "test", 0, 120, -1, NULL));
+    err = kafka_consumer_Consumer_position(c, "test", 0, &pos);
+    TEST_ASSERT_NULL(err);
+    TEST_ASSERT_EQUAL_INT64(120, pos);
 
     kafka_consumer_Consumer_destroy(c);
 }
 
 // ---------------------------------------------------------------------------
-// commit_sync_offsets + committed round-trip
+// commit_sync_with_offsets + committed round-trip
 // ---------------------------------------------------------------------------
 
 static void test_mock_consumer_commit_committed(void) {
@@ -421,7 +428,7 @@ static void test_mock_consumer_commit_committed(void) {
     int32_t partitions[1] = {0};
     int64_t offsets[1] = {7};
     const char *metas[1] = {"checkpoint"};
-    kafka_common_Error_t *err = kafka_consumer_Consumer_commit_sync_offsets(
+    kafka_common_Error_t *err = kafka_consumer_Consumer_commit_sync_with_offsets(
         c, topics, partitions, offsets, NULL, metas, 1);
     TEST_ASSERT_NULL(err);
 
@@ -625,7 +632,7 @@ static void test_mock_consumer_record_metadata_getters(void) {
 static void test_mock_consumer_poll_error(void) {
     kafka_consumer_Consumer_t *c = make_assigned_mock("test", 0);
     TEST_ASSERT_NULL(kafka_consumer_MockConsumer_set_poll_error(
-        c, kafka_common_ErrorCode_UNKNOWN_SERVER_ERROR, "boom"));
+        c, false, kafka_common_ErrorCode_UNKNOWN_SERVER_ERROR, "boom"));
 
     kafka_common_Error_t *poll_err = NULL;
     kafka_consumer_ConsumerRecords_t *records =
@@ -636,6 +643,25 @@ static void test_mock_consumer_poll_error(void) {
 
     // The error is consumed; a subsequent poll succeeds.
     records = kafka_consumer_Consumer_poll(c, 10, &poll_err);
+    TEST_ASSERT_NOT_NULL(records);
+    kafka_consumer_ConsumerRecords_destroy(records);
+
+    // A client-side code comes back as itself (Java's setPollException takes
+    // any KafkaException, e.g. an IllegalStateException).
+    TEST_ASSERT_NULL(kafka_consumer_MockConsumer_set_poll_error(
+        c, false, kafka_common_ErrorCode_LOCAL_ILLEGAL_STATE, "illegal"));
+    records = kafka_consumer_Consumer_poll(c, 10, &poll_err);
+    TEST_ASSERT_NULL(records);
+    TEST_ASSERT_EQUAL_INT(kafka_common_ErrorCode_LOCAL_ILLEGAL_STATE, kafka_common_Error_code(poll_err));
+    TEST_ASSERT_EQUAL_STRING("illegal", kafka_common_Error_message(poll_err));
+    kafka_common_Error_destroy(poll_err);
+
+    // Java's setPollException(null) clears a pending error: `clear` set.
+    TEST_ASSERT_NULL(kafka_consumer_MockConsumer_set_poll_error(
+        c, false, kafka_common_ErrorCode_UNKNOWN_SERVER_ERROR, "boom"));
+    TEST_ASSERT_NULL(kafka_consumer_MockConsumer_set_poll_error(c, true, 0, NULL));
+    records = kafka_consumer_Consumer_poll(c, 10, &poll_err);
+    TEST_ASSERT_NULL(poll_err);
     TEST_ASSERT_NOT_NULL(records);
     kafka_consumer_ConsumerRecords_destroy(records);
     kafka_consumer_Consumer_destroy(c);
@@ -730,7 +756,7 @@ static void test_mock_consumer_p5_mock_helpers(void) {
     TEST_ASSERT_NULL(kafka_consumer_MockConsumer_schedule_nop_poll_task(c));
 
     // Typed poll/offsets error setters build the error from (code, message).
-    TEST_ASSERT_NULL(kafka_consumer_MockConsumer_set_poll_error(c, -1, "boom poll"));
+    TEST_ASSERT_NULL(kafka_consumer_MockConsumer_set_poll_error(c, false, -1, "boom poll"));
     kafka_common_Error_t *poll_err = NULL;
     kafka_consumer_ConsumerRecords_t *records =
         kafka_consumer_Consumer_poll(c, 10, &poll_err);
@@ -738,7 +764,9 @@ static void test_mock_consumer_p5_mock_helpers(void) {
     TEST_ASSERT_NOT_NULL(poll_err);
     kafka_common_Error_destroy(poll_err);
 
-    TEST_ASSERT_NULL(kafka_consumer_MockConsumer_set_offsets_error(c, -1, "boom offsets"));
+    TEST_ASSERT_NULL(kafka_consumer_MockConsumer_set_offsets_error(c, false, -1, "boom offsets"));
+    // Java's setOffsetsException(null) clears it again.
+    TEST_ASSERT_NULL(kafka_consumer_MockConsumer_set_offsets_error(c, true, 0, NULL));
 
     // last_poll_timeout now reflects the 10ms poll above.
     TEST_ASSERT_EQUAL_INT64(10, kafka_consumer_MockConsumer_last_poll_timeout(c));
@@ -750,6 +778,15 @@ static void test_mock_consumer_close_with_option(void) {
     kafka_consumer_Consumer_t *c = kafka_consumer_MockConsumer_new("earliest");
     // close(CloseOptions): default timeout (-1), leave-group operation (1).
     TEST_ASSERT_NULL(kafka_consumer_Consumer_close_with_option(c, -1, 1));
+    kafka_consumer_Consumer_destroy(c);
+}
+
+// Java's MockConsumer.close(Duration) never reads its timeout, so a negative one
+// closes the mock (a KafkaConsumer rejects it: test_kafka_consumer.c).
+static void test_mock_consumer_close_with_negative_timeout(void) {
+    kafka_consumer_Consumer_t *c = kafka_consumer_MockConsumer_new("earliest");
+    TEST_ASSERT_NULL(kafka_consumer_Consumer_close_with_timeout(c, -1));
+    TEST_ASSERT_TRUE(kafka_consumer_MockConsumer_closed(c));
     kafka_consumer_Consumer_destroy(c);
 }
 
@@ -903,6 +940,7 @@ int main(void) {
     RUN_TEST(test_mock_consumer_close);
     RUN_TEST(test_mock_consumer_p5_mock_helpers);
     RUN_TEST(test_mock_consumer_close_with_option);
+    RUN_TEST(test_mock_consumer_close_with_negative_timeout);
     RUN_TEST(test_mock_consumer_caller_thread_rebalance);
     RUN_TEST(test_error_source_accessor);
     return UNITY_END();
