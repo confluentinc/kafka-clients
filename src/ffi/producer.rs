@@ -47,17 +47,16 @@
 //! **no access guard at all**: no send is ever *rejected* for concurrency, from
 //! any thread, at any time, including while a transaction is open.
 //!
-//! "Not rejected" is not the same as "not serialized", and the two blocking send
-//! functions are in fact serialized: [`kafka_producer_Producer_send`] holds the
-//! `kind` mutex across its enqueue and
-//! [`kafka_producer_Producer_send_batch`] holds it across the whole batch, so N
-//! threads calling either take turns, and one metadata fetch blocks all of them
-//! for up to `max.block.ms`. Only [`kafka_producer_Producer_send_async`] and
-//! [`kafka_producer_Producer_send_batch_async`] are genuinely concurrent — they
-//! touch no shared mutex, just an unbounded channel drained by the submission
-//! task. Callers that need real send parallelism should prefer the async pair.
-//! (Removing that serialization is a change to the blocking send path, out of
-//! scope here.)
+//! Nor are the sends serialized. The blocking send functions
+//! ([`kafka_producer_Producer_send`], [`kafka_producer_Producer_send_with_callback`]
+//! and [`kafka_producer_Producer_send_batch`]) take the `kind` mutex only to
+//! obtain the producer reference, never across the send, so N threads sending at
+//! once each wait only for their own topic's metadata (up to `max.block.ms`), and
+//! a close started while a send waits for metadata proceeds, wakes that wait and
+//! fails the send as closed while in progress, as Java's `doSend` does.
+//! [`kafka_producer_Producer_send_async`] and
+//! [`kafka_producer_Producer_send_batch_async`] touch no shared mutex at all,
+//! just an unbounded channel drained by the submission task.
 //!
 //! Java's *transaction-control* methods are the exception: `initTransactions`,
 //! `beginTransaction`, `sendOffsetsToTransaction`, `commitTransaction` and
