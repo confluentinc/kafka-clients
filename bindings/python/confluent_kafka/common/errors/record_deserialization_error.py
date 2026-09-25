@@ -22,12 +22,11 @@ Errors) and validated for staleness by ``cargo xtask check-generated``.
 from __future__ import annotations
 
 import enum
-import warnings
 from collections.abc import Iterable
 from typing import ClassVar, TYPE_CHECKING
 
 from confluent_kafka import _throwable
-from confluent_kafka._args import is_given
+from confluent_kafka._args import UNSET, Form, java_forms
 from confluent_kafka.common.errors.serialization_error import SerializationError
 from confluent_kafka.common.timestamp_type import TimestampType
 
@@ -62,31 +61,45 @@ class RecordDeserializationError(SerializationError):
         KEY = "KEY"
         VALUE = "VALUE"
 
+    @java_forms(
+        Form("partition", "offset", "message", "cause", deprecated="Since 3.9. Use ``RecordDeserializationException(DeserializationExceptionOrigin, TopicPartition, long, long, TimestampType, ByteBuffer, ByteBuffer, Headers, String, Throwable)`` instead."),
+        Form("origin", "partition", "offset", "timestamp", "timestamp_type", "key_buffer", "value_buffer", "headers", "message", "cause"),
+    )
     def __init__(
         self,
         *,
-        origin: RecordDeserializationError.DeserializationExceptionOrigin | None = None,
+        origin: RecordDeserializationError.DeserializationExceptionOrigin | None = UNSET,
         partition: TopicPartition,
         offset: int,
-        timestamp: int = -1,
-        timestamp_type: TimestampType = TimestampType.NO_TIMESTAMP_TYPE,
-        key_buffer: bytes | None = None,
-        value_buffer: bytes | None = None,
-        headers: Iterable[tuple[str, bytes | bytearray | memoryview | None]] = (),
+        timestamp: int = UNSET,
+        timestamp_type: TimestampType = UNSET,
+        key_buffer: bytes | None = UNSET,
+        value_buffer: bytes | None = UNSET,
+        headers: Iterable[tuple[str, bytes | bytearray | memoryview | None]] = UNSET,
         message: str,
         cause: BaseException | None = None,
+        _java_form: int = -1,
     ) -> None:
-        if origin is None and not is_given(timestamp, -1) and not is_given(timestamp_type, TimestampType.NO_TIMESTAMP_TYPE) and key_buffer is None and value_buffer is None and not is_given(headers, ()):
-            warnings.warn("RecordDeserializationError(partition, offset, message, cause) is deprecated. Since 3.9. Use ``RecordDeserializationException(DeserializationExceptionOrigin, TopicPartition, long, long, TimestampType, ByteBuffer, ByteBuffer, Headers, String, Throwable)`` instead.", DeprecationWarning, stacklevel=2)
-        _throwable.init(self, message, cause)
-        self._origin = origin
-        self._partition = partition
-        self._offset = offset
-        self._timestamp_type = timestamp_type
-        self._timestamp = timestamp
-        self._key_buffer = _throwable.view(key_buffer)
-        self._value_buffer = _throwable.view(value_buffer)
-        self._headers = _throwable.headers(headers)
+        if _java_form == 0:
+            _throwable.init(self, message, cause)
+            self._origin = None
+            self._partition = partition
+            self._offset = offset
+            self._timestamp_type = TimestampType.NO_TIMESTAMP_TYPE
+            self._timestamp = -1
+            self._key_buffer = None
+            self._value_buffer = None
+            self._headers = None
+        else:
+            _throwable.init(self, message, cause)
+            self._origin = origin
+            self._partition = partition
+            self._offset = offset
+            self._timestamp_type = timestamp_type
+            self._timestamp = timestamp
+            self._key_buffer = _throwable.view(key_buffer)
+            self._value_buffer = _throwable.view(value_buffer)
+            self._headers = _throwable.headers(headers)
         self._java_kwargs = _throwable.kwargs(origin=origin, partition=partition, offset=offset, timestamp=timestamp, timestamp_type=timestamp_type, key_buffer=key_buffer, value_buffer=value_buffer, headers=headers, message=message, cause=cause)
 
     def origin(self) -> RecordDeserializationError.DeserializationExceptionOrigin | None:
@@ -117,6 +130,6 @@ class RecordDeserializationError(SerializationError):
         """Java's ``valueBuffer()``."""
         return self._value_buffer
 
-    def headers(self) -> Headers:
+    def headers(self) -> Headers | None:
         """Java's ``headers()``."""
         return self._headers
