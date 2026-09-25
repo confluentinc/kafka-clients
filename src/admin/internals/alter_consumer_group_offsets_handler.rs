@@ -116,7 +116,6 @@ impl AlterConsumerGroupOffsetsHandler {
         offset_commit_request::Builder::for_topic_names(data)
     }
 
-    #[allow(clippy::too_many_arguments)]
     #[doc(alias = "org.apache.kafka.clients.admin.internals.AlterConsumerGroupOffsetsHandler#handleError")]
     fn handle_error(
         &self,

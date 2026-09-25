@@ -49,7 +49,7 @@
 //! `MutexGuard`s on `MembershipInner` are scoped tightly so they are
 //! ALWAYS dropped before any `.await`.
 
-#![allow(dead_code)]
+#![expect(dead_code)]
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;

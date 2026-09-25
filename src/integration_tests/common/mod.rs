@@ -18,19 +18,16 @@
 
 // `dead_code`: the harness serves every integration suite; this binary uses
 // only part of it.
-#[allow(dead_code)]
+#[expect(dead_code)]
 #[path = "../../../tests/common/cluster_config.rs"]
 pub(crate) mod cluster_config;
-#[allow(dead_code)]
 #[path = "../../../tests/common/cluster_pool.rs"]
 pub(crate) mod cluster_pool;
-#[allow(dead_code)]
 #[path = "../../../tests/common/kafka_cluster.rs"]
 pub(crate) mod kafka_cluster;
-#[allow(dead_code)]
 #[path = "../../../tests/common/test_certs.rs"]
 pub(crate) mod test_certs;
-#[allow(dead_code)]
+#[expect(dead_code)]
 #[path = "../../../tests/common/test_context.rs"]
 pub(crate) mod test_context;
 

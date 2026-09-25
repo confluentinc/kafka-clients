@@ -17,8 +17,6 @@
 //! Translated from
 //! `org.apache.kafka.clients.consumer.internals.FetchUtils`.
 
-#![allow(dead_code)]
-
 use std::sync::{Arc, Mutex};
 
 use crate::common::TopicPartition;

@@ -446,7 +446,7 @@ impl CountConsumerCommitCallbackHandles {
         self.success_count.load(Ordering::SeqCst)
     }
 
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     fn fail_count(&self) -> usize {
         self.fail_count.load(Ordering::SeqCst)
     }

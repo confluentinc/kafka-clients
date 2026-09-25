@@ -574,7 +574,7 @@ where
 /// these tests — is identical either way; only the initial lookup fan-out
 /// coalesces. This is called out per-test where it changes a request count.
 #[cfg(test)]
-#[allow(dead_code)]
+#[expect(dead_code)]
 pub(crate) mod test_support {
     use std::collections::{BTreeSet, HashMap, HashSet};
     use std::sync::{Arc, Mutex};

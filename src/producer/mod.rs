@@ -25,7 +25,7 @@ mod partitioner;
 // The `Producer` interface lives in its own `producer.rs` file per CLAUDE.md's
 // "one Java class per file" rule, nested under the `producer` module that
 // mirrors the `org.apache.kafka.clients.producer` package.
-#[allow(clippy::module_inception)]
+#[expect(clippy::module_inception)]
 mod producer;
 mod producer_buffer_exhausted_error;
 mod producer_config;

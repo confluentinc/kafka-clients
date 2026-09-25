@@ -50,7 +50,7 @@
 
 // Phase 9 lands the manager; Phase 10 wires it into the bg task and
 // Phase 11 wires the public API. Suppress dead-code warnings until then.
-#![allow(dead_code)]
+#![expect(dead_code)]
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -2312,7 +2312,6 @@ async fn commit_sync_with_retries(
 ///
 /// Always clears the auto-commit inflight flag when the driver exits, so a
 /// later interval-based auto-commit can fire.
-#[allow(clippy::too_many_arguments)]
 #[doc(
     alias = "org.apache.kafka.clients.consumer.internals.CommitRequestManager#autoCommitSyncBeforeRebalanceWithRetries"
 )]
@@ -2498,7 +2497,6 @@ async fn auto_commit_sync_before_rebalance_with_retries(
 ///
 /// Deadline expiry (Java's `maybeWrapAsTimeoutException`) surfaces as
 /// [`Error::timeout`] wrapping the original error message.
-#[allow(clippy::too_many_arguments)]
 #[doc(alias = "org.apache.kafka.clients.consumer.internals.CommitRequestManager#fetchOffsetsWithRetries")]
 async fn fetch_offsets_with_retries(
     inner: Arc<CommitRequestManagerInner>,

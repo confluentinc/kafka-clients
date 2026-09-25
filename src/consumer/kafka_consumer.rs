@@ -68,7 +68,7 @@ impl KafkaConsumer {
     // (`KafkaConsumer.java:615`), and Rust returns it as `Box<dyn Consumer<K, V>>`
     // rather than re-wrapping it in a type whose only content is 55 forwarding
     // methods. See the type-level comment above.
-    #[allow(clippy::new_ret_no_self)]
+    #[expect(clippy::new_ret_no_self)]
     #[doc(alias = "org.apache.kafka.clients.consumer.KafkaConsumer#KafkaConsumer")]
     pub fn new<K, V>(
         config: ConsumerConfig,

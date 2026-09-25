@@ -19,7 +19,7 @@
 //! Translated from
 //! `org.apache.kafka.clients.consumer.internals.CoordinatorRequestManager`.
 
-#![allow(dead_code)]
+#![cfg_attr(not(test), expect(dead_code))]
 
 use std::sync::{Arc, Mutex};
 

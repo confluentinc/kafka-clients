@@ -32,7 +32,7 @@
 
 // FFI function names follow the kafka_<TypeName>_<method> convention with PascalCase
 // type names, which intentionally differs from Rust's snake_case convention.
-#![allow(non_snake_case, non_camel_case_types)]
+#![expect(non_camel_case_types)]
 
 use std::ffi::{CStr, CString, c_char};
 

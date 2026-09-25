@@ -119,7 +119,7 @@ pub struct SaslClientAuthenticator {
     /// The broker hostname.
     /// Used by GSSAPI/Kerberos for service principal construction; retained for
     /// future mechanism support.
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     host: String,
     /// The Kafka client ID for request headers.
     client_id: String,

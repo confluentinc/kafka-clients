@@ -40,7 +40,7 @@
 //! `build_request` consumes the builder and either replaces the session
 //! (full fetch) or diffs against it (incremental fetch).
 
-#![allow(dead_code)]
+#![expect(dead_code)]
 
 use std::collections::{HashMap, HashSet};
 

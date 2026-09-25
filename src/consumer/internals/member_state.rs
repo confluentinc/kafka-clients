@@ -17,8 +17,6 @@
 //! Translated from
 //! `org.apache.kafka.clients.consumer.internals.MemberState`.
 
-#![allow(dead_code)]
-
 use std::fmt;
 
 /// Membership state for a single KIP-848 consumer group member.

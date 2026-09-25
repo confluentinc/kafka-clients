@@ -119,7 +119,7 @@
 
 // FFI function names follow the kafka_<TypeName>_<method> convention with PascalCase
 // type names, which intentionally differs from Rust's snake_case convention.
-#![allow(non_snake_case, non_camel_case_types)]
+#![expect(non_camel_case_types)]
 
 use std::collections::HashMap;
 use std::ffi::{CStr, CString, c_char};
@@ -3404,7 +3404,7 @@ pub unsafe extern "C" fn kafka_producer_Producer_send_offsets_to_transaction(
 /// # Safety
 ///
 /// Same requirements as [`kafka_producer_Producer_send_offsets_to_transaction`].
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 unsafe fn send_offsets_to_transaction_inner(
     producer: *mut kafka_producer_Producer_t,
     topics: *const *const c_char,
@@ -3813,7 +3813,6 @@ pub unsafe extern "C" fn kafka_producer_Producer_begin_transaction_async(
 ///   and `metadata` may be null; `count == 0` reads none of the arrays.
 /// - `group_metadata` must be a valid group-metadata handle, or null (null is
 ///   reported through `callback`).
-#[allow(clippy::too_many_arguments)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_Producer_send_offsets_to_transaction_async(
     producer: *mut kafka_producer_Producer_t,
@@ -3858,7 +3857,7 @@ pub unsafe extern "C" fn kafka_producer_Producer_send_offsets_to_transaction_asy
 /// # Safety
 ///
 /// Same requirements as [`kafka_producer_Producer_send_offsets_to_transaction_async`].
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 unsafe fn send_offsets_to_transaction_async_inner(
     producer: *mut kafka_producer_Producer_t,
     topics: *const *const c_char,

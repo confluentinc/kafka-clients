@@ -52,7 +52,7 @@ pub(crate) use sender_metrics_registry::SenderMetricsRegistry;
 // than the file module path. Unused until then.
 #[cfg(test)]
 pub(crate) use producer_test_utils::ProducerTestUtils;
-#[allow(unused_imports)]
+#[expect(unused_imports)]
 pub(crate) use transaction_manager::{
     Caller, CoordinatorNodes, InFlightBatchPool, PendingRequests, Priority, State, TransactionManager,
     TxnRequestHandler, TxnRequestHandlerKind,

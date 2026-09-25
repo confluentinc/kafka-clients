@@ -123,7 +123,7 @@
 // FFI function names follow the kafka_<TypeName>_<method> convention with
 // PascalCase type names, which intentionally differs from Rust's snake_case
 // convention.
-#![allow(non_snake_case, non_camel_case_types)]
+#![expect(non_camel_case_types)]
 
 use crate::common::requests::DescribeClientQuotasRequest;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -12386,7 +12386,7 @@ unsafe fn optional_string_at(strings: *const *const c_char, index: usize) -> Opt
 /// # Safety
 ///
 /// Every array must be non-null with at least `index + 1` entries.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 unsafe fn read_acl_binding_at(
     resource_types: *const i32,
     resource_names: *const *const c_char,
@@ -12420,7 +12420,7 @@ unsafe fn read_acl_binding_at(
 ///
 /// Each array must be null, or have `count` entries; string entries must be
 /// NULL or valid C strings.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 unsafe fn read_acl_bindings(
     resource_types: *const i32,
     resource_names: *const *const c_char,
@@ -12506,7 +12506,7 @@ unsafe fn build_acl_binding_filter(
 ///
 /// Each array must be null, or have `count` entries; string entries must be
 /// NULL or valid C strings.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 unsafe fn read_acl_binding_filters(
     resource_types: *const i32,
     resource_names: *const *const c_char,
@@ -12697,7 +12697,7 @@ unsafe fn read_client_quota_entity(
 ///
 /// Each array must be null, or have `count` entries, each of which is null or
 /// has the matching per-row count of entries.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 unsafe fn read_client_quota_alterations(
     entity_types: *const *const *const c_char,
     entity_names: *const *const *const c_char,
@@ -13596,7 +13596,6 @@ pub type kafka_admin_AdminClient_create_acls_callback_t =
 /// entries, with string entries NULL or valid C strings; `out_result` must be
 /// null or writable.
 #[unsafe(no_mangle)]
-#[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_create_acls(
     admin: *const kafka_admin_AdminClient_t,
     resource_types: *const i32,
@@ -13650,7 +13649,6 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_create_acls(
 /// `admin` must be a valid handle; every non-null array must have `count`
 /// entries, with string entries NULL or valid C strings.
 #[unsafe(no_mangle)]
-#[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_create_acls_async(
     admin: *const kafka_admin_AdminClient_t,
     resource_types: *const i32,
@@ -13745,7 +13743,6 @@ pub type kafka_admin_AdminClient_describe_acls_callback_t =
 /// `admin` must be a valid handle; the three string parameters must be NULL or
 /// valid C strings; `out_result` must be null or writable.
 #[unsafe(no_mangle)]
-#[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_describe_acls(
     admin: *const kafka_admin_AdminClient_t,
     resource_type: i32,
@@ -13795,7 +13792,6 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_acls(
 /// `admin` must be a valid handle; the three string parameters must be NULL or
 /// valid C strings.
 #[unsafe(no_mangle)]
-#[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_describe_acls_async(
     admin: *const kafka_admin_AdminClient_t,
     resource_type: i32,
@@ -13877,7 +13873,6 @@ pub type kafka_admin_AdminClient_delete_acls_callback_t =
 /// entries, with string entries NULL or valid C strings; `out_result` must be
 /// null or writable.
 #[unsafe(no_mangle)]
-#[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_delete_acls(
     admin: *const kafka_admin_AdminClient_t,
     resource_types: *const i32,
@@ -13929,7 +13924,6 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_delete_acls(
 /// `admin` must be a valid handle; every non-null array must have `count`
 /// entries, with string entries NULL or valid C strings.
 #[unsafe(no_mangle)]
-#[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_delete_acls_async(
     admin: *const kafka_admin_AdminClient_t,
     resource_types: *const i32,
@@ -14026,7 +14020,6 @@ pub type kafka_admin_AdminClient_describe_client_quotas_callback_t =
 /// entries, with string entries NULL or valid C strings; `out_result` must be
 /// null or writable.
 #[unsafe(no_mangle)]
-#[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_describe_client_quotas(
     admin: *const kafka_admin_AdminClient_t,
     entity_types: *const *const c_char,
@@ -14066,7 +14059,6 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_client_quotas(
 /// `admin` must be a valid handle; every non-null array must have `count`
 /// entries, with string entries NULL or valid C strings.
 #[unsafe(no_mangle)]
-#[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_describe_client_quotas_async(
     admin: *const kafka_admin_AdminClient_t,
     entity_types: *const *const c_char,
@@ -14168,7 +14160,6 @@ pub type kafka_admin_AdminClient_alter_client_quotas_callback_t =
 /// entries; string entries must be NULL or valid C strings; `out_result` must
 /// be null or writable.
 #[unsafe(no_mangle)]
-#[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_alter_client_quotas(
     admin: *const kafka_admin_AdminClient_t,
     entity_types: *const *const *const c_char,
@@ -14223,7 +14214,6 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_alter_client_quotas(
 /// entries, and each non-null inner array the matching per-row count of
 /// entries; string entries must be NULL or valid C strings.
 #[unsafe(no_mangle)]
-#[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_alter_client_quotas_async(
     admin: *const kafka_admin_AdminClient_t,
     entity_types: *const *const *const c_char,
@@ -15058,7 +15048,7 @@ unsafe fn read_kafka_principals(
 ///
 /// Every array must be null, or have `count` entries; byte pointers must be
 /// null or readable for their matching length.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 unsafe fn read_scram_alterations(
     users: *const *const c_char,
     is_deletions: *const bool,
@@ -15502,7 +15492,6 @@ pub type kafka_admin_AdminClient_alter_user_scram_credentials_callback_t =
 /// pointer readable for its matching length; `out_result` must be null or
 /// writable.
 #[unsafe(no_mangle)]
-#[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_alter_user_scram_credentials(
     admin: *const kafka_admin_AdminClient_t,
     users: *const *const c_char,
@@ -15564,7 +15553,6 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_alter_user_scram_credentials(
 /// entries, with string entries NULL or valid C strings and each non-null byte
 /// pointer readable for its matching length.
 #[unsafe(no_mangle)]
-#[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_alter_user_scram_credentials_async(
     admin: *const kafka_admin_AdminClient_t,
     users: *const *const c_char,
@@ -15699,7 +15687,6 @@ pub type kafka_admin_AdminClient_create_delegation_token_callback_t =
 /// `renewer_count` entries, each NULL or a valid C string; the owner pointers
 /// must be null or valid C strings; `out_result` must be null or writable.
 #[unsafe(no_mangle)]
-#[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_create_delegation_token(
     admin: *const kafka_admin_AdminClient_t,
     renewer_principal_types: *const *const c_char,
@@ -15745,7 +15732,6 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_create_delegation_token(
 /// `renewer_count` entries, each NULL or a valid C string; the owner pointers
 /// must be null or valid C strings.
 #[unsafe(no_mangle)]
-#[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_create_delegation_token_async(
     admin: *const kafka_admin_AdminClient_t,
     renewer_principal_types: *const *const c_char,
@@ -16056,7 +16042,6 @@ pub type kafka_admin_AdminClient_describe_delegation_token_callback_t =
 /// `owner_count` entries, each NULL or a valid C string; `out_result` must be
 /// null or writable.
 #[unsafe(no_mangle)]
-#[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_describe_delegation_token(
     admin: *const kafka_admin_AdminClient_t,
     has_owners_filter: bool,
@@ -16098,7 +16083,6 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_delegation_token(
 /// `admin` must be a valid handle; the owner arrays must be null or have
 /// `owner_count` entries, each NULL or a valid C string.
 #[unsafe(no_mangle)]
-#[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_describe_delegation_token_async(
     admin: *const kafka_admin_AdminClient_t,
     has_owners_filter: bool,
@@ -16297,7 +16281,6 @@ pub type kafka_admin_AdminClient_update_features_callback_t =
 /// entries, with name entries NULL or valid C strings; `out_result` must be
 /// null or writable.
 #[unsafe(no_mangle)]
-#[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_update_features(
     admin: *const kafka_admin_AdminClient_t,
     features: *const *const c_char,
@@ -16338,7 +16321,6 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_update_features(
 /// `admin` must be a valid handle; every non-null array must have `count`
 /// entries, with name entries NULL or valid C strings.
 #[unsafe(no_mangle)]
-#[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_update_features_async(
     admin: *const kafka_admin_AdminClient_t,
     features: *const *const c_char,
@@ -18626,7 +18608,6 @@ pub type kafka_admin_AdminClient_describe_producers_callback_t =
 /// have `count` entries each, with topic entries NULL or valid C strings;
 /// `out_result` must be null or writable.
 #[unsafe(no_mangle)]
-#[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_describe_producers(
     admin: *const kafka_admin_AdminClient_t,
     topics: *const *const c_char,
@@ -18664,7 +18645,6 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_producers(
 /// `admin` must be a valid handle; `topics` and `partitions` must be null or
 /// have `count` entries each, with topic entries NULL or valid C strings.
 #[unsafe(no_mangle)]
-#[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_describe_producers_async(
     admin: *const kafka_admin_AdminClient_t,
     topics: *const *const c_char,
@@ -18872,7 +18852,6 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_abort_transaction(
 ///
 /// `admin` must be a valid handle; `topic` must be null or a valid C string.
 #[unsafe(no_mangle)]
-#[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_abort_transaction_async(
     admin: *const kafka_admin_AdminClient_t,
     topic: *const c_char,
@@ -19149,7 +19128,6 @@ pub type kafka_admin_AdminClient_list_transactions_callback_t =
 /// `producer_id_count` readable entries; `transactional_id_pattern` must be null
 /// or a valid C string; `out_result` must be null or writable.
 #[unsafe(no_mangle)]
-#[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_list_transactions(
     admin: *const kafka_admin_AdminClient_t,
     states: *const *const c_char,
@@ -19197,7 +19175,6 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_list_transactions(
 /// `producer_id_count` readable entries; `transactional_id_pattern` must be null
 /// or a valid C string.
 #[unsafe(no_mangle)]
-#[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_list_transactions_async(
     admin: *const kafka_admin_AdminClient_t,
     states: *const *const c_char,

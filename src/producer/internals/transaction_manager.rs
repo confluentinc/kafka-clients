@@ -153,7 +153,7 @@ impl PendingRequests {
     /// The number of queued requests.
     // Retained for Java parity (DoD #2) as the companion to `is_empty`; no caller
     // in this crate yet.
-    #[allow(dead_code)]
+    #[cfg_attr(not(test), expect(dead_code))]
     pub(crate) fn len(&self) -> usize {
         self.queue.len()
     }
@@ -660,7 +660,7 @@ impl TxnRequestHandler {
 
     /// The request-specific state.
     // Retained for Java parity (DoD #2); no caller in this crate yet.
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     pub(crate) fn kind(&self) -> &TxnRequestHandlerKind {
         &self.kind
     }
@@ -705,7 +705,7 @@ impl TxnRequestHandler {
     /// (Java 1501) and its tests cast the request; an accessor is the Rust
     /// equivalent of both.
     // Retained for Java parity (DoD #2); no caller in this crate yet.
-    #[allow(dead_code)]
+    #[cfg_attr(not(test), expect(dead_code))]
     pub(crate) fn init_producer_id_request_data(&self) -> Option<&InitProducerIdRequestData> {
         match &self.kind {
             TxnRequestHandlerKind::InitProducerId { builder, .. } => Some(builder.data()),
@@ -715,7 +715,7 @@ impl TxnRequestHandler {
 
     /// The `FindCoordinator` request data, or `None` for another request kind.
     // Retained for Java parity (DoD #2); exercised only by this crate's tests.
-    #[allow(dead_code)]
+    #[cfg_attr(not(test), expect(dead_code))]
     pub(crate) fn find_coordinator_request_data(&self) -> Option<&FindCoordinatorRequestData> {
         match &self.kind {
             TxnRequestHandlerKind::FindCoordinator { builder } => Some(builder.data()),
@@ -725,7 +725,7 @@ impl TxnRequestHandler {
 
     /// The `AddPartitionsToTxn` request data, or `None` for another request kind.
     // Retained for Java parity (DoD #2); exercised only by this crate's tests.
-    #[allow(dead_code)]
+    #[cfg_attr(not(test), expect(dead_code))]
     pub(crate) fn add_partitions_to_txn_request_data(&self) -> Option<&AddPartitionsToTxnRequestData> {
         match &self.kind {
             TxnRequestHandlerKind::AddPartitionsToTxn { builder, .. } => Some(builder.data()),
@@ -735,7 +735,7 @@ impl TxnRequestHandler {
 
     /// The `EndTxn` request data, or `None` for another request kind.
     // Retained for Java parity (DoD #2); exercised only by this crate's tests.
-    #[allow(dead_code)]
+    #[cfg_attr(not(test), expect(dead_code))]
     pub(crate) fn end_txn_request_data(&self) -> Option<&EndTxnRequestData> {
         match &self.kind {
             TxnRequestHandlerKind::EndTxn { builder } => Some(builder.data()),
@@ -745,7 +745,7 @@ impl TxnRequestHandler {
 
     /// The `AddOffsetsToTxn` request data, or `None` for another request kind.
     // Retained for Java parity (DoD #2); exercised only by this crate's tests.
-    #[allow(dead_code)]
+    #[cfg_attr(not(test), expect(dead_code))]
     pub(crate) fn add_offsets_to_txn_request_data(&self) -> Option<&AddOffsetsToTxnRequestData> {
         match &self.kind {
             TxnRequestHandlerKind::AddOffsetsToTxn { builder, .. } => Some(builder.data()),
@@ -755,7 +755,7 @@ impl TxnRequestHandler {
 
     /// The `TxnOffsetCommit` request data, or `None` for another request kind.
     // Retained for Java parity (DoD #2); exercised only by this crate's tests.
-    #[allow(dead_code)]
+    #[cfg_attr(not(test), expect(dead_code))]
     pub(crate) fn txn_offset_commit_request_data(&self) -> Option<&TxnOffsetCommitRequestData> {
         match &self.kind {
             TxnRequestHandlerKind::TxnOffsetCommit { builder } => Some(builder.data()),
@@ -851,7 +851,7 @@ impl TxnRequestHandler {
 
     /// The operation name this handler's result was created for.
     // Retained for Java parity (DoD #2); no caller in this crate yet.
-    #[allow(dead_code)]
+    #[cfg_attr(not(test), expect(dead_code))]
     pub(crate) fn operation(&self) -> &str {
         self.result.operation()
     }
@@ -1203,7 +1203,6 @@ pub(crate) struct TransactionManager {
     is_transaction_v2_enabled: bool,
     // KIP-939 `enable2Pc` (Java 148). Written by the constructor but not yet read:
     // the 2PC recovery path that consumes it is not wired. Retained for parity (DoD #2).
-    #[allow(dead_code)]
     enable_2pc: bool,
     /// Whether the transaction coordinator's `InitProducerId` version supports a
     /// client-triggered epoch bump (Java 139).
@@ -1506,7 +1505,7 @@ impl TransactionManager {
     /// `IN_TRANSACTION` and `INITIALIZING` (Java 172).
     // Java `prepareTransaction` (KIP-939, Java 342). Retained for parity (DoD #2);
     // exercised only by this crate's tests.
-    #[allow(dead_code)]
+    #[cfg_attr(not(test), expect(dead_code))]
     #[doc(alias = "org.apache.kafka.clients.producer.internals.TransactionManager#prepareTransaction")]
     pub(crate) fn prepare_transaction(&mut self) -> Result<(), Error> {
         self.ensure_transactional()?;
@@ -1933,7 +1932,7 @@ impl TransactionManager {
     ///
     /// Corresponds to `is2PCEnabled()` (Java 510).
     // Java `is2PCEnabled` (KIP-939). Retained for parity (DoD #2); no caller in this crate yet.
-    #[allow(dead_code)]
+    #[cfg_attr(not(test), expect(dead_code))]
     pub(crate) fn is_2pc_enabled(&self) -> bool {
         self.enable_2pc
     }
@@ -1944,7 +1943,7 @@ impl TransactionManager {
     /// there is no accessor. Kept because it is the only reader outside the
     /// module, and `SenderTest`'s harness asserts on it.
     // Java `transactionTimeoutMs` accessor. Retained for parity (DoD #2); no caller in this crate yet.
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     pub(crate) fn transaction_timeout_ms(&self) -> i32 {
         self.transaction_timeout_ms
     }
@@ -1957,7 +1956,7 @@ impl TransactionManager {
     /// (`testNeedToTriggerEpochBumpFromClientDuringCoordinatorDisconnect`,
     /// Java 3719).
     // Java `apiVersions` accessor. Retained for parity (DoD #2); no caller in this crate yet.
-    #[allow(dead_code)]
+    #[cfg_attr(not(test), expect(dead_code))]
     pub(crate) fn api_versions(&self) -> &Arc<ApiVersions> {
         &self.api_versions
     }
@@ -2747,7 +2746,7 @@ impl TransactionManager {
     /// Corresponds to `hasPendingOffsetCommits()` (Java 1001), which Java marks
     /// "visible for testing".
     // Java `hasPendingOffsetCommits`. Retained for parity (DoD #2); exercised only by this crate's tests.
-    #[allow(dead_code)]
+    #[cfg_attr(not(test), expect(dead_code))]
     #[doc(alias = "org.apache.kafka.clients.producer.internals.TransactionManager#hasPendingOffsetCommits")]
     pub(crate) fn has_pending_offset_commits(&self) -> bool {
         !self.pending_txn_offset_commits.is_empty()
@@ -2757,7 +2756,7 @@ impl TransactionManager {
     ///
     /// Corresponds to `hasPartitionsToAdd()` (Java 514).
     // Java `hasPartitionsToAdd`. Retained for parity (DoD #2); exercised only by this crate's tests.
-    #[allow(dead_code)]
+    #[cfg_attr(not(test), expect(dead_code))]
     #[doc(alias = "org.apache.kafka.clients.producer.internals.TransactionManager#hasPartitionsToAdd")]
     pub(crate) fn has_partitions_to_add(&self) -> bool {
         !self.new_partitions_in_transaction.is_empty() || !self.pending_partitions_in_transaction.is_empty()
@@ -2789,7 +2788,7 @@ impl TransactionManager {
     /// the client or its tests; translated because it is part of the class
     /// (`definition-of-done.md` §2).
     // Java `isReady`. Retained for parity (DoD #2); no caller in this crate yet.
-    #[allow(dead_code)]
+    #[cfg_attr(not(test), expect(dead_code))]
     #[doc(alias = "org.apache.kafka.clients.producer.internals.TransactionManager#isReady")]
     pub(crate) fn is_ready(&self) -> bool {
         self.is_transactional() && self.current_state == State::Ready
@@ -2801,7 +2800,7 @@ impl TransactionManager {
     /// either the client or its tests; translated because it is part of the class
     /// (`definition-of-done.md` §2).
     // Java `isInitializing`. Retained for parity (DoD #2); exercised only by this crate's tests.
-    #[allow(dead_code)]
+    #[cfg_attr(not(test), expect(dead_code))]
     #[doc(alias = "org.apache.kafka.clients.producer.internals.TransactionManager#isInitializing")]
     pub(crate) fn is_initializing(&self) -> bool {
         self.is_transactional() && self.current_state == State::Initializing
@@ -2815,7 +2814,7 @@ impl TransactionManager {
     // Retained for parity (DoD #2); exercised only by this crate's tests — the
     // production 2PC caller was reverted in AK 4.3.1 (milestone 12), the same
     // reason its sibling `prepared_transaction_state` carries this allow.
-    #[allow(dead_code)]
+    #[cfg_attr(not(test), expect(dead_code))]
     #[doc(alias = "org.apache.kafka.clients.producer.internals.TransactionManager#isPrepared")]
     pub(crate) fn is_prepared(&self) -> bool {
         self.current_state == State::PreparedTransaction
@@ -2830,7 +2829,7 @@ impl TransactionManager {
     /// transaction on the producer's behalf (KIP-939).
     // Java `preparedTransactionState` (KIP-939). Retained for parity (DoD #2);
     // exercised only by this crate's tests.
-    #[allow(dead_code)]
+    #[cfg_attr(not(test), expect(dead_code))]
     #[doc(alias = "org.apache.kafka.clients.producer.internals.TransactionManager#preparedTransactionState")]
     pub(crate) fn prepared_transaction_state(&self) -> ProducerIdAndEpoch {
         self.prepared_txn_state
@@ -3124,7 +3123,7 @@ impl TransactionManager {
     /// (Java 689). Renamed because Rust has no overloading and
     /// [`Self::producer_id_and_epoch`] already takes the no-argument form.
     // Retained for Java parity (DoD #2); exercised only by this crate's tests.
-    #[allow(dead_code)]
+    #[cfg_attr(not(test), expect(dead_code))]
     pub(crate) fn producer_id_and_epoch_for_partition(
         &mut self,
         topic_partition: &TopicPartition,
@@ -3370,7 +3369,7 @@ impl TransactionManager {
     ///
     /// Corresponds to `hasUnresolvedSequences()` (Java 832).
     // Java `hasUnresolvedSequences`. Retained for parity (DoD #2); exercised only by this crate's tests.
-    #[allow(dead_code)]
+    #[cfg_attr(not(test), expect(dead_code))]
     #[doc(alias = "org.apache.kafka.clients.producer.internals.TransactionManager#hasUnresolvedSequences")]
     pub(crate) fn has_unresolved_sequences(&self) -> bool {
         !self.partitions_with_unresolved_sequences.is_empty()
@@ -5149,7 +5148,6 @@ mod tests {
 
     /// As [`complete_init_producer_id`], but with a caller-supplied coordinator
     /// record, for the arms that rediscover the coordinator (Java 1520).
-    #[allow(clippy::too_many_arguments)]
     fn complete_init_producer_id_with_coordinators(
         manager: &mut TransactionManager,
         coordinators: &mut CoordinatorNodes,

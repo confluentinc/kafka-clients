@@ -367,7 +367,6 @@ mod tests {
     // fatal classes are covered there instead.
     #[test]
     fn codeless_classes_state_their_own_ancestry() {
-        #[allow(clippy::type_complexity)]
         let cases: Vec<(&str, Box<dyn ErrorHierarchy>, &[&str])> = vec![
             ("ApiError", Box::new(ApiError::new("m")), &["kafka", "api"]),
             (

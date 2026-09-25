@@ -125,7 +125,6 @@ impl Cluster {
     ///
     /// * `nodes` - The nodes in the cluster
     /// * `partitions` - Information about a subset of the topic-partitions this cluster hosts
-    #[allow(clippy::too_many_arguments)]
     #[doc(alias = "org.apache.kafka.common.Cluster#Cluster")]
     pub fn with_invalid_topics_controller(
         cluster_id: Option<String>,
@@ -157,7 +156,7 @@ impl Cluster {
     ///
     /// * `nodes` - The nodes in the cluster
     /// * `partitions` - Information about a subset of the topic-partitions this cluster hosts
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     #[doc(alias = "org.apache.kafka.common.Cluster#Cluster")]
     pub fn with_invalid_topics_controller_topic_ids(
         cluster_id: Option<String>,
@@ -182,7 +181,7 @@ impl Cluster {
         )
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     fn new_internal(
         cluster_id: Option<String>,
         is_bootstrap_configured: bool,

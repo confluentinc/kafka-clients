@@ -25,7 +25,7 @@
 //! `OffsetsRequestManager` calls them directly without an
 //! `AsyncClient`-style dispatch layer.
 
-#![allow(dead_code)]
+#![cfg_attr(not(test), expect(dead_code))]
 
 use std::collections::{HashMap, HashSet};
 

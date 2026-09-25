@@ -19,7 +19,7 @@
 //! Translated from
 //! `org.apache.kafka.clients.consumer.internals.RequestManager`.
 
-#![allow(dead_code)]
+#![cfg_attr(not(test), expect(dead_code))]
 
 use super::PollResult;
 

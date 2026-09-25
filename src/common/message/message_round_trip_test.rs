@@ -22,7 +22,7 @@ use crate::*;
 use std::io;
 
 /// Test helper to perform round-trip serialization for any message at a specific version
-#[allow(dead_code)]
+#[expect(dead_code)]
 fn test_message_round_trip<T, F>(_version: i16, create_message: F) -> io::Result<()>
 where
     T: Clone + PartialEq + std::fmt::Debug,

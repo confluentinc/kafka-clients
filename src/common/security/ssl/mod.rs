@@ -22,7 +22,7 @@
 //! crate can reach it, so the module allows dead code rather than dropping
 //! Java methods.
 
-#![allow(dead_code, unused_imports)]
+#![cfg_attr(not(test), expect(dead_code))]
 
 mod ssl_factory;
 

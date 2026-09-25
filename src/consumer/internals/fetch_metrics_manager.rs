@@ -243,7 +243,7 @@ impl FetchMetricsManager {
     /// network client at construction); that delegate-side recording is a
     /// documented carry-over for the network-client metrics pass. Exercised by
     /// the manager test, which records through this sensor directly.
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg_attr(not(test), expect(dead_code))]
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.FetchMetricsManager#throttleTimeSensor")]
     pub(crate) fn throttle_time_sensor(&self) -> Arc<Sensor> {
         Arc::clone(&self.throttle_time)

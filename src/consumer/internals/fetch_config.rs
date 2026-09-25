@@ -19,7 +19,7 @@
 //! Java class: public final fields (`pub` in Rust) read directly by the
 //! consumer fetch path, no getters.
 
-#![allow(dead_code)]
+#![cfg_attr(not(test), expect(dead_code))]
 
 use std::fmt;
 
@@ -55,7 +55,7 @@ impl FetchConfig {
     /// Constructs a `FetchConfig` with explicit values.
     ///
     /// Translates the 8-arg Java constructor.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.FetchConfig#FetchConfig")]
     pub(crate) fn new(
         min_bytes: i32,

@@ -30,7 +30,7 @@ use std::fmt;
 // All three variants share the `OnPartitions` prefix because all three Java
 // listener methods do (`onPartitionsRevoked` / `onPartitionsAssigned` /
 // `onPartitionsLost`); the names are the translation contract.
-#[allow(clippy::enum_variant_names)]
+#[expect(clippy::enum_variant_names)]
 pub enum ConsumerRebalanceListenerMethodName {
     /// Corresponds to `ConsumerRebalanceListener::on_partitions_revoked`.
     OnPartitionsRevoked,

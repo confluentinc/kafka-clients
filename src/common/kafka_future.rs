@@ -313,7 +313,6 @@ where
     R: Clone + Send + Sync + 'static,
 {
     source: KafkaFuture<T>,
-    #[allow(clippy::type_complexity)]
     function: Arc<dyn Fn(T) -> Result<R, Error> + Send + Sync>,
 }
 

@@ -20,7 +20,7 @@
 // later phases (`CommitRequestManager`, `*HeartbeatRequestManager`,
 // `OffsetsRequestManager`, ...). Suppress dead-code warnings for items
 // that are not yet referenced inside the workspace.
-#![allow(dead_code)]
+#![cfg_attr(not(test), expect(dead_code))]
 
 use std::fmt;
 

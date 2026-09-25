@@ -22,7 +22,7 @@
 //! `SimpleBuilder`, and follower-only methods are intentionally not
 //! translated.
 
-#![allow(dead_code)]
+#![expect(dead_code)]
 
 use std::collections::HashMap;
 

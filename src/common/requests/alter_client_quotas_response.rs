@@ -34,7 +34,7 @@ use super::AbstractResponse;
 #[doc(alias = "org.apache.kafka.common.requests.AlterClientQuotasResponse")]
 pub struct AlterClientQuotasResponse {
     data: AlterClientQuotasResponseData,
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     version: i16,
 }
 

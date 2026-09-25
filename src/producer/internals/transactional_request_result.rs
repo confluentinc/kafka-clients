@@ -173,7 +173,7 @@ impl TransactionalRequestResult {
     ///
     /// Corresponds to Java's `isSuccessful()`.
     // Retained for Java parity (DoD #2); exercised only by this crate's tests.
-    #[allow(dead_code)]
+    #[cfg_attr(not(test), expect(dead_code))]
     #[doc(alias = "org.apache.kafka.clients.producer.internals.TransactionalRequestResult#isSuccessful")]
     pub(crate) fn is_successful(&self) -> bool {
         self.is_completed() && self.error().is_none()
@@ -197,8 +197,7 @@ impl TransactionalRequestResult {
     }
 
     /// The operation name this result was created for.
-    // Java `operation()` accessor. Retained for parity (DoD #2); no caller in this crate yet.
-    #[allow(dead_code)]
+    // Java `operation()` accessor.
     pub(crate) fn operation(&self) -> &str {
         &self.operation
     }

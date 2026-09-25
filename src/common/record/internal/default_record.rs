@@ -194,7 +194,7 @@ impl DefaultRecord {
     const NULL_VARINT_SIZE_BYTES: i32 = ByteUtils::size_of_varint(-1);
 
     /// Create a new `DefaultRecord` with all fields.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     #[doc(alias = "org.apache.kafka.common.record.internal.DefaultRecord#DefaultRecord")]
     pub(crate) fn new(
         size_in_bytes: i32,

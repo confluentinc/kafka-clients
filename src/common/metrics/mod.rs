@@ -28,7 +28,7 @@ mod measurable;
 mod measurable_stat;
 mod metric_config;
 mod metric_value_provider;
-#[allow(clippy::module_inception)]
+#[expect(clippy::module_inception)]
 mod metrics;
 mod metrics_reporter;
 mod quota;

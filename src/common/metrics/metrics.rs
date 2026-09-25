@@ -250,7 +250,7 @@ impl Metrics {
     /// no reporters. Mirrors Java's `Metrics(MetricConfig defaultConfig, Time time)`
     /// (`:101`).
     #[doc(alias = "org.apache.kafka.common.metrics.Metrics#Metrics")]
-    #[cfg_attr(not(test), allow(dead_code))] // translated overload; only tests pass a clock
+    #[cfg_attr(not(test), expect(dead_code))] // translated overload; only tests pass a clock
     pub(crate) fn with_default_config_time(default_config: Arc<MetricConfig>, time: Arc<dyn Time>) -> Self {
         Self::with_default_config_reporters_time(default_config, Vec::new(), time)
     }
@@ -272,7 +272,7 @@ impl Metrics {
     /// Create a metrics repository with the supplied clock.
     /// Mirrors Java's `Metrics(Time time)` (`:93`).
     #[doc(alias = "org.apache.kafka.common.metrics.Metrics#Metrics")]
-    #[cfg_attr(not(test), allow(dead_code))] // translated overload; only tests pass a clock
+    #[cfg_attr(not(test), expect(dead_code))] // translated overload; only tests pass a clock
     pub(crate) fn with_time(time: Arc<dyn Time>) -> Self {
         Self::with_default_config_reporters_time(Arc::new(MetricConfig::new()), Vec::new(), time)
     }

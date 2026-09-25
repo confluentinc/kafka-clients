@@ -217,7 +217,6 @@ const MAX_CLOSE_WAIT_TIME_MS: i64 = 365 * 24 * 60 * 60 * 1000;
 /// State shared between the `KafkaAdminClient` handle and (indirectly) the
 /// background task.
 struct Shared {
-    #[allow(dead_code)]
     client_id: String,
     default_api_timeout_ms: i32,
     /// The `request.timeout.ms` config, used as the default transaction timeout
@@ -1866,7 +1865,6 @@ fn get_offset_from_spec(offset_spec: OffsetSpec) -> i64 {
 /// Builds the `alterPartitionReassignments` controller call.
 ///
 /// Mirrors the anonymous `Call` in `KafkaAdminClient.alterPartitionReassignments`.
-#[allow(clippy::type_complexity)]
 fn get_alter_partition_reassignments_call(
     mm: AdminMetadataManager,
     futures: Arc<HashMap<TopicPartition, KafkaFutureImpl<()>>>,
@@ -2525,7 +2523,7 @@ fn topic_description_from_cluster(
 /// Builds a `createTopics` [`Call`]. Free function so the quota-retry path can
 /// rebuild a fresh call with the same futures. Translated from
 /// `KafkaAdminClient.getCreateTopicsCall`.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClient#getCreateTopicsCall")]
 fn get_create_topics_call(
     mm: AdminMetadataManager,
@@ -2679,7 +2677,7 @@ fn get_create_topics_call(
 /// Builds a `createPartitions` [`Call`]. Free function so the quota-retry path
 /// can rebuild a fresh call with the same futures. Translated from
 /// `KafkaAdminClient.getCreatePartitionsCall`.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClient#getCreatePartitionsCall")]
 fn get_create_partitions_call(
     mm: AdminMetadataManager,
@@ -2798,7 +2796,7 @@ fn get_create_partitions_call(
 
 /// Builds a `deleteTopics` (by name) [`Call`]. Translated from
 /// `KafkaAdminClient.getDeleteTopicsCall`.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClient#getDeleteTopicsCall")]
 fn get_delete_topics_call(
     mm: AdminMetadataManager,
@@ -2908,7 +2906,7 @@ fn get_delete_topics_call(
 
 /// Builds a `deleteTopics` (by id) [`Call`]. Translated from
 /// `KafkaAdminClient.getDeleteTopicsWithIdsCall`.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClient#getDeleteTopicsWithIdsCall")]
 fn get_delete_topics_with_ids_call(
     mm: AdminMetadataManager,
@@ -8731,7 +8729,7 @@ mod tests {
         describe_log_dirs_response(vec![r])
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     fn describe_log_dirs_single_cordoned(
         error: Errors,
         log_dir: &str,
@@ -8844,7 +8842,6 @@ mod tests {
         assert_eq!(err2.error(), Errors::UnknownServerError);
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn assert_description_contains(
         map: &HashMap<String, LogDirDescription>,
         log_dir: &str,

@@ -79,7 +79,7 @@ impl ClientResponse {
     /// * `version_mismatch` - Error message if there was a version mismatch
     /// * `authentication_error` - The authentication error, if there was one
     /// * `response_body` - The response contents (or `None`)
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     #[doc(alias = "org.apache.kafka.clients.ClientResponse#ClientResponse")]
     pub fn new(
         request_header: RequestHeader,
@@ -126,7 +126,7 @@ impl ClientResponse {
     /// * `version_mismatch` - Error message if there was a version mismatch
     /// * `authentication_error` - The authentication error, if there was one
     /// * `response_body` - The response contents (or `None`)
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     #[doc(alias = "org.apache.kafka.clients.ClientResponse#ClientResponse")]
     pub fn with_timed_out(
         request_header: RequestHeader,

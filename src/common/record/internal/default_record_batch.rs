@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![allow(dead_code)]
+#![expect(dead_code)]
 //! Record batch implementation for magic 2 and above.
 //!
 //! The schema is:
@@ -593,7 +593,7 @@ impl DefaultRecordBatch {
     /// Write an empty batch header (no records) to the given buffer.
     ///
     /// Corresponds to Java's `DefaultRecordBatch.writeEmptyHeader`.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     #[doc(alias = "org.apache.kafka.common.record.internal.DefaultRecordBatch#writeEmptyHeader")]
     pub fn write_empty_header(
         buffer: &mut Vec<u8>,
@@ -637,7 +637,7 @@ impl DefaultRecordBatch {
     /// and this method writes/overwrites the header portion at `position`.
     ///
     /// Corresponds to Java's `DefaultRecordBatch.writeHeader`.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     #[doc(alias = "org.apache.kafka.common.record.internal.DefaultRecordBatch#writeHeader")]
     pub fn write_header(
         buffer: &mut Vec<u8>,
@@ -705,7 +705,7 @@ impl DefaultRecordBatch {
     /// Used by `MemoryRecordsBuilder` to write the header after records have been appended.
     ///
     /// The buffer should already be sized to hold the full batch.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     pub fn write_header_at(
         buffer: &mut [u8],
         position: usize,

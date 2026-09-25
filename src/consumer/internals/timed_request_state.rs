@@ -20,7 +20,7 @@
 // Items here are consumed by Phase 7-9 managers (`CommitRequestManager`,
 // `OffsetsRequestManager`, etc.). Suppress dead-code warnings for items
 // that aren't yet referenced inside the workspace.
-#![allow(dead_code)]
+#![expect(dead_code)]
 
 use std::fmt;
 use std::ops::{Deref, DerefMut};

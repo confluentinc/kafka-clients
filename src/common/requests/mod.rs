@@ -26,7 +26,7 @@
 //! crate can reach it, so the module allows dead code rather than dropping
 //! Java methods.
 
-#![allow(dead_code, unused_imports)]
+#![expect(dead_code, unused_imports)]
 
 mod abstract_request;
 mod abstract_response;

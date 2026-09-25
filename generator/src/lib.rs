@@ -17,7 +17,7 @@
 //! Message generator library - can be used from both build.rs and CLI binary
 
 #![deny(warnings)]
-#![allow(dead_code)]
+#![expect(dead_code)]
 
 mod message;
 
@@ -205,8 +205,6 @@ pub fn generate_api_message_type(input_dir: &Path, output_dir: &Path) -> Result<
     )?;
     writeln!(file, "//! for each Kafka API key.")?;
     writeln!(file)?;
-    writeln!(file, "#![allow(unused_imports)]")?;
-    writeln!(file)?;
     writeln!(file, "use crate::common::protocol::types::Schema;")?;
     writeln!(file)?;
 
@@ -223,7 +221,7 @@ pub fn generate_api_message_type(input_dir: &Path, output_dir: &Path) -> Result<
     // --- ApiMessageType enum ---
     writeln!(file, "/// Identifiers and metadata for every Kafka API.")?;
     writeln!(file, "#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]")?;
-    writeln!(file, "#[allow(non_camel_case_types)]")?;
+    writeln!(file, "#[expect(non_camel_case_types)]")?;
     writeln!(file, "#[non_exhaustive]")?;
     writeln!(file, "pub enum ApiMessageType {{")?;
 
@@ -434,7 +432,6 @@ pub fn generate_api_message_type(input_dir: &Path, output_dir: &Path) -> Result<
             }
         }
     }
-    writeln!(file, "            #[allow(unreachable_patterns)]")?;
     writeln!(file, "            _ => 1,")?;
     writeln!(file, "        }}")?;
     writeln!(file, "    }}")?;
@@ -477,7 +474,6 @@ pub fn generate_api_message_type(input_dir: &Path, output_dir: &Path) -> Result<
             }
         }
     }
-    writeln!(file, "            #[allow(unreachable_patterns)]")?;
     writeln!(file, "            _ => 0,")?;
     writeln!(file, "        }}")?;
     writeln!(file, "    }}")?;
@@ -603,8 +599,8 @@ fn process_spec_file(spec_file: &Path, output_dir: &Path) -> Result<(String, Str
     // Write generated code
     writeln!(file, "//! Generated from {}.json", file_name)?;
     writeln!(file)?;
-    writeln!(file, "#![allow(unused_imports)]")?;
-    writeln!(file, "#![allow(dead_code)]")?;
+    writeln!(file, "#![expect(unused_imports)]")?;
+    writeln!(file, "#![expect(dead_code)]")?;
     writeln!(file)?;
     writeln!(
         file,
@@ -5074,7 +5070,7 @@ fn generate_stub_file(file_name: &str, output_dir: &Path) -> Result<(), Box<dyn 
 
     writeln!(file, "//! Generated from {}.json (stub due to parse error)", file_name)?;
     writeln!(file)?;
-    writeln!(file, "#![allow(dead_code)]")?;
+    writeln!(file, "#![expect(dead_code)]")?;
     writeln!(file)?;
     writeln!(file, "#[derive(Debug, Clone)]")?;
     writeln!(file, "#[non_exhaustive]")?;

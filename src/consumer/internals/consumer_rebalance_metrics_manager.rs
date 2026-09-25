@@ -287,7 +287,7 @@ impl ConsumerRebalanceMetricsManager {
     /// as in Java, not called from the membership state machine — only the
     /// `ConsumerRebalanceMetricsManagerTest` cases exercise it. Kept (not
     /// `#[cfg(test)]`) to preserve the Java API.
-    #[allow(dead_code)]
+    #[cfg_attr(not(test), expect(dead_code))]
     pub(crate) fn rebalance_started(&self) -> bool {
         self.last_rebalance_start_ms.load(Ordering::SeqCst) > self.last_rebalance_end_ms.load(Ordering::SeqCst)
     }

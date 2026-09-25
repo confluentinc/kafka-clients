@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![allow(dead_code)]
+#![cfg_attr(not(test), expect(dead_code))]
 //! Variable-length integer encoding/decoding using Protocol Buffers encoding.
 //!
 //! This module implements:

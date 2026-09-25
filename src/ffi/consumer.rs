@@ -43,7 +43,7 @@
 // FFI function names follow the kafka_<TypeName>_<method> convention with
 // PascalCase type names, which intentionally differs from Rust's snake_case
 // convention.
-#![allow(non_snake_case, non_camel_case_types)]
+#![expect(non_camel_case_types)]
 
 use std::cell::UnsafeCell;
 use std::collections::HashMap;
@@ -169,7 +169,7 @@ struct FfiConsumerHandle {
     /// it bypasses the single-owner guard by design.
     consumer_handle: ConsumerHandle,
     /// Whether this handle wraps a [`MockConsumer`].
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     is_mock: bool,
 }
 
@@ -717,7 +717,7 @@ unsafe impl Send for PollCallbackTarget {}
 /// still held).
 // The `&mut` from `&` is the whole point of the `UnsafeCell` + access-guard
 // design: the guard enforces the exclusivity the borrow checker cannot.
-#[allow(clippy::mut_from_ref)]
+#[expect(clippy::mut_from_ref)]
 unsafe fn consumer_mut(h: &FfiConsumerHandle) -> &mut dyn Consumer<Bytes, Bytes> {
     match unsafe { &mut *h.consumer.get() } {
         ConsumerKind::Async(c) => c.as_mut(),
@@ -1133,7 +1133,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecord_header_value(
 /// The caller must hold the access guard.
 // The `&mut` from `&` is the whole point of the `UnsafeCell` + access-guard
 // design: the guard enforces the exclusivity the borrow checker cannot.
-#[allow(clippy::mut_from_ref)]
+#[expect(clippy::mut_from_ref)]
 unsafe fn mock_mut(h: &FfiConsumerHandle) -> Result<&mut MockConsumer<Bytes, Bytes>, Error> {
     match unsafe { &mut *h.consumer.get() } {
         ConsumerKind::Mock(c) => Ok(c.as_mut()),

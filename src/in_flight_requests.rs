@@ -53,7 +53,7 @@ pub struct InFlightRequest {
     pub(crate) request: Option<AbstractRequest>,
     /// The network send associated with this request.
     // Java only ever assigns `InFlightRequest.send` (`NetworkClient.java:1557`).
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     pub(crate) send: NetworkSend,
     /// Whether the network send has been completed (confirmed by the selector).
     ///
@@ -99,7 +99,7 @@ impl InFlightRequest {
     /// Creates a new `InFlightRequest` with all fields specified directly.
     ///
     /// This corresponds to the Java constructor with explicit parameters.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     pub fn new(
         header: RequestHeader,
         request_timeout_ms: i64,

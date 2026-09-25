@@ -145,9 +145,7 @@ impl AdminMetadataManager {
 
     /// The node with the given id, if known.
     ///
-    /// Used by `ConstantNodeIdProvider`, which the Phase-1 topic RPCs do not
-    /// exercise (it arrives with later tiers, per admin-client.md §2).
-    #[allow(dead_code)]
+    /// Used by `ConstantNodeIdProvider` (admin-client.md §2).
     #[doc(alias = "org.apache.kafka.clients.admin.internals.AdminMetadataManager#nodeById")]
     pub(crate) fn node_by_id(&self, id: i32) -> Option<Node> {
         self.inner.lock().unwrap().cluster.node_by_id(id).cloned()

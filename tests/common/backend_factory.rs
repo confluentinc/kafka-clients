@@ -53,7 +53,6 @@ use crate::common::multilanguage_producer::MultilanguageProducer;
 /// `Box<dyn AdminBackend>` to hand back. Test bodies are written generically
 /// over `<F: AdminBackendFactory>` and quadruplicated by
 /// [`crate::multilanguage_admin_test`].
-#[allow(async_fn_in_trait)]
 pub trait AdminBackendFactory {
     /// The concrete admin backend this factory constructs.
     type Admin: AdminBackend;
@@ -85,7 +84,6 @@ pub trait AdminBackendFactory {
 /// backend simply yields a boxed consumer. Test bodies are written generically
 /// over `<F: ConsumerBackendFactory>` and triplicated by
 /// [`crate::multilanguage_consumer_test`].
-#[allow(async_fn_in_trait)]
 pub trait ConsumerBackendFactory {
     /// Construct a consumer from the given config properties.
     async fn create(&self, config: HashMap<String, String>) -> Result<Box<dyn Consumer<Vec<u8>, Vec<u8>>>, Error>;
@@ -122,7 +120,6 @@ pub trait ConsumerBackendFactory {
 ///
 /// The map is taken by value because the gRPC factories forward it into
 /// a proto `CreateProducerRequest`, which consumes the map.
-#[allow(async_fn_in_trait)]
 pub trait ProducerBackendFactory {
     /// The concrete producer type this backend constructs.
     type Producer: Producer<Vec<u8>, Vec<u8>> + Send;
@@ -508,5 +505,4 @@ mod grpc_backends {
 }
 
 #[cfg(feature = "multilanguage-tests")]
-#[allow(unused_imports)] // Used only by the `integration` test binary
 pub use grpc_backends::{CGrpcFactory, PythonAsyncGrpcFactory, PythonGrpcFactory};

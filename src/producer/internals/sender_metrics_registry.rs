@@ -43,7 +43,6 @@ pub(crate) struct SenderMetricsRegistry {
     metrics: Arc<Metrics>,
     /// Every registered template, for `all_templates()`. Only read by the
     /// metric-template parity tests (Java's `SenderTest.testSenderMetricsTemplates`).
-    #[cfg_attr(not(test), allow(dead_code))]
     all_templates: Vec<MetricNameTemplate>,
 
     /* Client level. */
@@ -289,7 +288,7 @@ impl SenderMetricsRegistry {
     }
 
     /// Returns every registered template, mirroring Java's `allTemplates()`.
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg_attr(not(test), expect(dead_code))]
     #[doc(alias = "org.apache.kafka.clients.producer.internals.SenderMetricsRegistry#allTemplates")]
     pub(crate) fn all_templates(&self) -> &[MetricNameTemplate] {
         &self.all_templates

@@ -21,8 +21,6 @@
 //! `AsyncKafkaConsumer` (Phase 11); `dead_code` is allowed at the module
 //! level to keep the public-API surface frozen ahead of consumer wiring.
 
-#![allow(dead_code)]
-
 use crate::common::serialization::Deserializer;
 
 /// A container that holds the key + value [`Deserializer`] instances as

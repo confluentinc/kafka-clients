@@ -39,7 +39,7 @@ use crate::common::error::{ErrorCode, ErrorHierarchy, ErrorMessage, ErrorSource}
 /// Crate-private although `Error::InvalidReceive` is public: Java's class sits in
 /// `common.network`, which is "not a supported API". Callers match the variant and
 /// use `Display` / `source()`; the payload itself is not reachable by name.
-#[allow(unnameable_types)]
+#[expect(unnameable_types)]
 #[derive(Clone, Debug)]
 #[doc(alias = "org.apache.kafka.common.network.InvalidReceiveException")]
 pub struct InvalidReceiveError {

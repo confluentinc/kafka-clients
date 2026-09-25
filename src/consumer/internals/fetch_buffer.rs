@@ -35,7 +35,7 @@
 //! [`FetchBuffer::has_completed_fetches`] (Java's predicate-based check)
 //! for the few call sites that want a peek-shaped operation.
 
-#![allow(dead_code)]
+#![cfg_attr(not(test), expect(dead_code))]
 
 use std::collections::{HashSet, VecDeque};
 use std::sync::Mutex;

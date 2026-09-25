@@ -117,3 +117,7 @@ codegen-units = 1
 [lints.clippy]
 exhaustive_structs = "deny"
 exhaustive_enums = "deny"
+# Suppress a lint with `#[expect]`, never `#[allow]`: an expectation the lint no
+# longer meets is itself reported (`unfulfilled_lint_expectations`), so a stale
+# suppression cannot outlive the code that needed it.
+allow_attributes = "deny"

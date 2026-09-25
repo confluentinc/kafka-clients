@@ -42,7 +42,7 @@
 // attributes to it nor lets it move into a submodule, so the allowance is
 // file-wide. It covers only items defined in this file: a crate-private type
 // leaking from elsewhere is still reported at its own definition.
-#![allow(unnameable_types)]
+#![expect(unnameable_types)]
 
 use std::collections::HashSet;
 // Imported unqualified so that `#[delegate(Display)]` on `Error` resolves to

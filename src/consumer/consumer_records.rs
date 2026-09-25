@@ -221,7 +221,7 @@ impl<'a, K, V> IntoIterator for &'a ConsumerRecords<K, V> {
         // the `IntoIter` associated type alias above; using `&[T]` here would
         // produce a slice iterator whose lifetime cannot be unified with the
         // map values iterator.
-        #[allow(clippy::ptr_arg)]
+        #[expect(clippy::ptr_arg)]
         fn iter_vec<T>(v: &Vec<T>) -> std::slice::Iter<'_, T> {
             v.iter()
         }

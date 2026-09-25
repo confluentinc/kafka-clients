@@ -81,10 +81,7 @@ impl<T: Clone + Send + Sync + 'static> Completable<T> {
     /// Register a callback to run when this future completes. If the future is
     /// already complete, the callback runs immediately on the calling task.
     ///
-    /// Only reached via [`KafkaFutureImpl::when_complete`], whose sole consumer
-    /// (the `AdminApiDriver` `describeCluster().nodes()` chaining) arrives with
-    /// a later admin tier.
-    #[allow(dead_code)]
+    /// Only reached via [`KafkaFutureImpl::when_complete`].
     fn on_complete(&self, callback: CompletionCallback<T>) {
         let mut guard = self.inner.lock().unwrap();
         if let Some(result) = guard.result.clone() {
@@ -192,9 +189,7 @@ impl<T: Clone + Send + Sync + 'static> KafkaFutureImpl<T> {
     ///
     /// Translated from the eager side of `KafkaFuture.whenComplete` — used by
     /// the admin client to chain a follow-up `Call` when a prerequisite future
-    /// (e.g. `describeCluster().nodes()`) resolves. That chaining arrives with a
-    /// later admin tier (Phase-1 topic RPCs do not chain calls).
-    #[allow(dead_code)]
+    /// (e.g. `describeCluster().nodes()`) resolves.
     #[doc(alias = "org.apache.kafka.common.internals.KafkaFutureImpl#whenComplete")]
     pub(crate) fn when_complete<F>(&self, action: F)
     where

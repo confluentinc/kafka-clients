@@ -2003,7 +2003,7 @@ mod tests {
             .into_iter()
             .collect();
 
-        #[allow(clippy::type_complexity)]
+        #[expect(clippy::type_complexity)]
         let families: &[(&str, &HashSet<Errors>, fn(&Errors) -> bool)] = &[
             ("is_invalid_configuration_error", &invalid_configuration, |e| {
                 e.error().is_some_and(|x| x.is_invalid_configuration_error())

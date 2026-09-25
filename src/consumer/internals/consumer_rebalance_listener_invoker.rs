@@ -68,8 +68,6 @@
 //!     state machine inspects the returned error to decide whether to
 //!     advance.
 
-#![allow(dead_code)] // Phase 11 commit (1/N): invoker lands before its caller in commit (3).
-
 use std::sync::{Arc, Mutex};
 
 use log::{error, info};

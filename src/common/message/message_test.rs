@@ -145,7 +145,6 @@ fn test_all_message_round_trips_from_version<
     }
 }
 
-#[allow(dead_code)]
 fn test_all_message_round_trips_until_version<
     T: Message + PartialEq + Hash + std::fmt::Debug + std::fmt::Display + Clone,
 >(
@@ -157,7 +156,6 @@ fn test_all_message_round_trips_until_version<
     }
 }
 
-#[allow(dead_code)]
 fn test_all_message_round_trips_before_version<
     T: Message + PartialEq + Hash + std::fmt::Debug + std::fmt::Display + Clone,
 >(
@@ -171,7 +169,6 @@ fn test_all_message_round_trips_before_version<
     }
 }
 
-#[allow(dead_code)]
 fn test_all_message_round_trips_between_versions<
     T: Message + PartialEq + Hash + std::fmt::Debug + std::fmt::Display + Clone,
 >(

@@ -29,7 +29,7 @@
 //! `Err(Error::local_illegal_state(...))` / `Err(Error::local_illegal_argument(...))`
 //! per CLAUDE.md §10.
 
-#![allow(dead_code)] // Phase 4: types land before their callers (Phases 5-11).
+#![expect(dead_code)] // Phase 4: types land before their callers (Phases 5-11).
 
 use crate::common::requests::OffsetsForLeaderEpochResponse;
 use std::collections::{BTreeSet, HashMap, HashSet};

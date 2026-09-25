@@ -40,10 +40,6 @@ use crate::common::TopicPartition;
 /// `Arc<Mutex<…>>` by the caller (per `consumer-threading.md` §16). Java's
 /// thread-safe `size()` field is dropped — there is no Rust call-site that
 /// reads `size` without the outer lock.
-// Per-commit dead-code allow: Phase 4 commit 1 lands `PartitionStates` ahead
-// of its only caller (`SubscriptionState`, commit 3+). The lint goes away
-// once `SubscriptionState` references this type.
-#[allow(dead_code)]
 #[doc(alias = "org.apache.kafka.common.internals.PartitionStates")]
 pub(crate) struct PartitionStates<S> {
     // FxHash (non-cryptographic) keyed by `TopicPartition`, which is internal
@@ -53,7 +49,7 @@ pub(crate) struct PartitionStates<S> {
     map: IndexMap<TopicPartition, S, FxBuildHasher>,
 }
 
-#[allow(dead_code)]
+#[cfg_attr(not(test), expect(dead_code))]
 impl<S> PartitionStates<S> {
     /// Create an empty container.
     #[doc(alias = "org.apache.kafka.common.internals.PartitionStates#PartitionStates")]

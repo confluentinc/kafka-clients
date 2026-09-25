@@ -48,7 +48,7 @@ impl MemberDescription {
     /// MemberAssignment, Optional, Optional, Optional)` constructor. `null`
     /// member id / client id / host are normalized to empty strings, matching
     /// Java.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     #[doc(
         alias = "org.apache.kafka.clients.admin.MemberDescription#MemberDescription(String,Optional,Optional,String,String,MemberAssignment,Optional,Optional,Optional)"
     )]

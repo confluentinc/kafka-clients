@@ -54,7 +54,7 @@ pub struct MetadataSnapshot {
 
 impl MetadataSnapshot {
     /// Creates a new `MetadataSnapshot`.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     #[doc(alias = "org.apache.kafka.clients.MetadataSnapshot#MetadataSnapshot")]
     pub fn new(
         cluster_id: Option<String>,
@@ -82,7 +82,7 @@ impl MetadataSnapshot {
     /// Creates a new `MetadataSnapshot` with an optional pre-built cluster instance.
     ///
     /// Visible for testing.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     #[doc(alias = "org.apache.kafka.clients.MetadataSnapshot#MetadataSnapshot")]
     pub fn with_cluster(
         cluster_id: Option<String>,
@@ -184,7 +184,7 @@ impl MetadataSnapshot {
     /// metadata will be overridden. The `retain_topic` predicate determines whether
     /// a pre-existing topic's metadata should be retained. It receives the topic name
     /// and whether the topic is internal.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     #[doc(alias = "org.apache.kafka.clients.MetadataSnapshot#mergeWith")]
     pub fn merge_with<F>(
         &self,
@@ -304,7 +304,7 @@ impl MetadataSnapshot {
         result
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     #[doc(alias = "org.apache.kafka.clients.MetadataSnapshot#computeClusterView")]
     fn compute_cluster_view(
         cluster_id: &Option<String>,

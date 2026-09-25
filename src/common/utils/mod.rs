@@ -22,7 +22,7 @@
 //! crate can reach it, so the module allows dead code rather than dropping
 //! Java methods.
 
-#![allow(dead_code, unused_imports)]
+#![expect(dead_code)]
 
 mod byte_utils;
 mod exponential_backoff;
@@ -33,7 +33,7 @@ mod producer_id_and_epoch;
 // `utils.rs` inside `utils/` mirrors Java's `org.apache.kafka.common.utils.Utils`
 // sitting inside the `utils` package; the struct is reached through the
 // re-export below, never through this module path (CLAUDE.md §2).
-#[allow(clippy::module_inception)]
+#[expect(clippy::module_inception)]
 mod utils;
 
 pub(crate) use byte_utils::ByteUtils;

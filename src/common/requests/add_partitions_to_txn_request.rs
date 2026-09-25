@@ -42,7 +42,7 @@
 //! `EndTransactionMarker` are out of scope for this client-only port (see
 //! `design/history/Milestone-11/PLAN.md` §1.1). Translating them would add
 //! permanently unreachable code that `#![deny(warnings)]` would force us to
-//! mask with `#[allow(dead_code)]`.
+//! mask with `#[expect(dead_code)]`.
 
 use std::collections::HashMap;
 use std::io;

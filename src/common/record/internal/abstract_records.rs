@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![allow(dead_code)]
+#![expect(dead_code)]
 //! Utility functions for record batch operations.
 //!
 //! Corresponds to Java's `org.apache.kafka.common.record.AbstractRecords`.

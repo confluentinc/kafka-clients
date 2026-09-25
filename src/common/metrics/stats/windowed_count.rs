@@ -69,7 +69,6 @@ impl WindowedCount {
     /// with the FetchMetricsManager wiring in Phase M3; exercised here by the
     /// Meter tests. Kept `pub(crate)` API now to mirror Java's
     /// `new Meter(unit, new WindowedCount(), ...)`.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn into_sampled_stat(self) -> SampledStat {
         self.inner
     }

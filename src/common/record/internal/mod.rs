@@ -32,7 +32,7 @@
 //! tests. Nothing outside the crate can reach it, so the module allows dead
 //! code rather than dropping Java methods.
 
-#![allow(dead_code)]
+#![expect(dead_code)]
 
 mod abstract_records;
 mod compression_ratio_estimator;
@@ -62,7 +62,7 @@ pub(crate) use memory_records::BatchIterator;
 // named outside `memory_records.rs`, where they are already in scope.
 pub(crate) use memory_records::MemoryRecords;
 #[cfg(test)]
-#[allow(unused_imports)]
+#[expect(unused_imports)]
 pub(crate) use memory_records::{
     MemoryRecordsBuilderOptions, MemoryRecordsBuilderOptionsBuilder, MemoryRecordsOptions, MemoryRecordsOptionsBuilder,
 };
@@ -78,5 +78,5 @@ pub(crate) use simple_record::SimpleRecord;
 // form today, hence `#[cfg(test)]`, and `SimpleRecordOptions` itself is never
 // named outside `simple_record.rs`, where the type is already in scope.
 #[cfg(test)]
-#[allow(unused_imports)]
+#[expect(unused_imports)]
 pub(crate) use simple_record::{SimpleRecordOptions, SimpleRecordOptionsBuilder};

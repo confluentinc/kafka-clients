@@ -21,8 +21,6 @@
 //! `AsyncKafkaConsumer` (Phase 11); `dead_code` is allowed at the module
 //! level to keep the public-API surface frozen ahead of consumer wiring.
 
-#![allow(dead_code)]
-
 use std::collections::HashMap;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 

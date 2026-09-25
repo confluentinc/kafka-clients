@@ -29,7 +29,8 @@
 //! crate can reach it, so the module allows dead code rather than dropping
 //! Java methods.
 
-#![allow(dead_code, unused_imports)]
+#![expect(unused_imports)]
+#![cfg_attr(not(test), expect(dead_code))]
 
 mod compression;
 pub mod gzip_compression;
