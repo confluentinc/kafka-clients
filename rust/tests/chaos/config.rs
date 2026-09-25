@@ -35,6 +35,9 @@ pub enum ActionKind {
     ReassignPartitions,
     /// Delete then recreate the topic each cycle.
     TopicRecreate,
+    /// Kill every broker at once, keep the cluster down for `--outage-s`,
+    /// then bring it all back (`--all-brokers-down`).
+    AllBrokersDown,
 }
 
 /// The broker listener (and matching client `security.protocol`) every client
@@ -166,6 +169,9 @@ pub struct ChaosConfig {
     /// Dwell between delete and recreate for topic-recreate (`--dwell-s`); 0 =
     /// recreate-immediate.
     pub dwell_s: u64,
+    /// How long the whole cluster stays down for `--all-brokers-down`
+    /// (`--outage-s`, default 30).
+    pub outage_s: u64,
     /// Write on-disk report files under target/chaos-runs/<id>/ and capture the
     /// Rust client log (`--reports`).
     pub reports: bool,
@@ -331,6 +337,7 @@ impl ChaosConfig {
                 ActionKind::ReassignPartitions,
             ),
             ("CHAOS_TOPIC_RECREATE", "--topic-recreate", ActionKind::TopicRecreate),
+            ("CHAOS_ALL_BROKERS_DOWN", "--all-brokers-down", ActionKind::AllBrokersDown),
         ] {
             if let Some(every) = env_opt_u32(env_key)? {
                 // `cycle % 0` never matches: a cadence of 0 would configure a
@@ -345,7 +352,8 @@ impl ChaosConfig {
         if actions.is_empty() {
             return Err(
                 "no faults configured: broker rolling is disabled (--no-broker-roll) and no other \
-                 fault flag (--topic-recreate / --reassign-partitions / --change-leader) was given"
+                 fault flag (--topic-recreate / --reassign-partitions / --change-leader / \
+                 --all-brokers-down) was given"
                     .to_string(),
             );
         }
@@ -364,6 +372,8 @@ impl ChaosConfig {
                 ("CHAOS_TOPIC_RECREATE", "--topic-recreate"),
                 ("CHAOS_REASSIGN_PARTITIONS", "--reassign-partitions"),
                 ("CHAOS_CHANGE_LEADER", "--change-leader"),
+                ("CHAOS_ALL_BROKERS_DOWN", "--all-brokers-down"),
+                ("CHAOS_OUTAGE_S", "--outage-s"),
                 ("CHAOS_REBALANCE_MID_ROLL", "--rebalance-mid-roll"),
             ]
             .into_iter()
@@ -467,6 +477,16 @@ impl ChaosConfig {
             _ => {},
         }
 
+        let outage_s: u64 = env_parse("CHAOS_OUTAGE_S", 30)?;
+        if std::env::var("CHAOS_OUTAGE_S").is_ok_and(|v| !v.is_empty())
+            && !actions.iter().any(|a| a.kind == ActionKind::AllBrokersDown)
+        {
+            return Err("--outage-s only applies with --all-brokers-down".to_string());
+        }
+        if outage_s == 0 && actions.iter().any(|a| a.kind == ActionKind::AllBrokersDown) {
+            return Err("--outage-s must be >= 1".to_string());
+        }
+
         let action_prob: f64 = env_parse("CHAOS_ACTION_PROB", 0.7_f64)?;
         if !(0.0..=1.0).contains(&action_prob) {
             return Err(format!("--action-prob must be within 0..=1, got {action_prob}"));
@@ -499,6 +519,7 @@ impl ChaosConfig {
             seed: env_parse("CHAOS_SEED", 0)?,
             random,
             action_prob,
+            outage_s,
             dwell_s: env_parse("CHAOS_DWELL_S", 0)?,
             reports: env_str("CHAOS_REPORTS", "0") == "1",
             rebalance_add_cycle,
