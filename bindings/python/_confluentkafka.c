@@ -596,11 +596,16 @@ static PyObject* py_KafkaProducer_new(PyObject* self, PyObject* args) {
 // the outbox to its bound (the Python side then waits on
 // Producer_on_space_available before sending more), False otherwise.
 //
-// Runs entirely under the GIL: send_async is a channel push plus record
-// validation, not I/O, so releasing the GIL would cost more than it saves. The
+// The Rust call runs with the GIL released, like the other producer entry
+// points. The push itself is cheap, but an application thread flooding send()
+// would otherwise never yield the interpreter, so the callback thread (which
+// needs the GIL to resolve the futures) and every other Python thread would
+// only run on CPython's forced switch, several 5 ms rounds each -- measured as
+// a tail-latency penalty of 60-120 ms at p99 in the performance harness. The
 // record object is pinned (via the (record, callback, producer) tuple passed as
 // user_data) until its completion is reported, because send_async borrows the
-// record's key/value buffers until the callback fires.
+// record's key/value buffers until the callback fires; that pin is what makes
+// the buffers safe to read while the GIL is released.
 static PyObject* py_Producer_send(PyObject* self, PyObject* args) {
     unsigned long long producer_ptr;
     PyObject *record_obj, *complete_cb;
@@ -635,11 +640,14 @@ static PyObject* py_Producer_send(PyObject* self, PyObject* args) {
     ProducerRecordObject* record = (ProducerRecordObject*)record_obj;
     kafka_producer_ProducerRecord_t* rs = &record->record_struct;
     kafka_common_Error_t* err = NULL;
-    bool full = kafka_producer_Producer_send_async(
+    bool full;
+    Py_BEGIN_ALLOW_THREADS
+    full = kafka_producer_Producer_send_async(
         producer->producer,
         rs->topic, rs->partition, rs->timestamp,
         rs->key, rs->key_len, rs->value, rs->value_len,
         send_direct_trampoline, ud, &err);
+    Py_END_ALLOW_THREADS
 
     if (err != NULL) {                 // sync failure: cb will NOT fire
         Py_DECREF(ud);
