@@ -492,7 +492,8 @@ first. Both share the one background task.*
 
 ## Tier 2 Phase 1 — Group listing & describe ✓ (2026-07-29)
 
-Translated `list_groups`, `list_consumer_groups` (deprecated),
+Translated `list_groups`, `list_consumer_groups` (deprecated, since removed —
+see Tier 3 Phase 7),
 `describe_consumer_groups` (dual-protocol), and `describe_classic_groups`,
 Rust core + unit tests + real-broker integration tests, all green. **First
 real use of `CoordinatorStrategy` and the shared broker-enumeration `Call`
