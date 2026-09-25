@@ -1471,7 +1471,7 @@ unsafe fn read_topics(topics: *const *const c_char, count: i32) -> Vec<String> {
 
 /// Opaque handle to a [`TopicPartition`].
 #[repr(C)]
-pub struct kafka_consumer_TopicPartition_t {
+pub struct kafka_common_TopicPartition_t {
     _private: [u8; 0],
 }
 
@@ -1489,9 +1489,7 @@ struct TopicPartitionInner {
 ///
 /// `tp` must be a valid topic-partition handle.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_consumer_TopicPartition_topic(
-    tp: *const kafka_consumer_TopicPartition_t,
-) -> *const c_char {
+pub unsafe extern "C" fn kafka_common_TopicPartition_topic(tp: *const kafka_common_TopicPartition_t) -> *const c_char {
     let inner = unsafe { &*(tp as *const TopicPartitionInner) };
     inner.topic_c.as_ptr()
 }
@@ -1502,7 +1500,7 @@ pub unsafe extern "C" fn kafka_consumer_TopicPartition_topic(
 ///
 /// `tp` must be a valid topic-partition handle.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_consumer_TopicPartition_partition(tp: *const kafka_consumer_TopicPartition_t) -> i32 {
+pub unsafe extern "C" fn kafka_common_TopicPartition_partition(tp: *const kafka_common_TopicPartition_t) -> i32 {
     let inner = unsafe { &*(tp as *const TopicPartitionInner) };
     inner.tp.partition()
 }
@@ -1513,7 +1511,7 @@ pub unsafe extern "C" fn kafka_consumer_TopicPartition_partition(tp: *const kafk
 ///
 /// `tp` must be null or a valid topic-partition handle.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_consumer_TopicPartition_destroy(tp: *mut kafka_consumer_TopicPartition_t) {
+pub unsafe extern "C" fn kafka_common_TopicPartition_destroy(tp: *mut kafka_common_TopicPartition_t) {
     if !tp.is_null() {
         unsafe { drop(Box::from_raw(tp as *mut TopicPartitionInner)) };
     }
@@ -1524,9 +1522,9 @@ pub unsafe extern "C" fn kafka_consumer_TopicPartition_destroy(tp: *mut kafka_co
 /// `kafka_common_RecordDeserializationError_partition`
 /// (`src/ffi/common.rs`) since `RecordDeserializationError` carries a single
 /// non-optional `TopicPartition` rather than a collection.
-pub(crate) fn box_topic_partition(tp: TopicPartition) -> *mut kafka_consumer_TopicPartition_t {
+pub(crate) fn box_topic_partition(tp: TopicPartition) -> *mut kafka_common_TopicPartition_t {
     let topic_c = std::ffi::CString::new(tp.topic().as_bytes()).unwrap_or_default();
-    Box::into_raw(Box::new(TopicPartitionInner { tp, topic_c })) as *mut kafka_consumer_TopicPartition_t
+    Box::into_raw(Box::new(TopicPartitionInner { tp, topic_c })) as *mut kafka_common_TopicPartition_t
 }
 
 /// Opaque handle to an [`OffsetAndMetadata`].
@@ -1848,7 +1846,7 @@ pub unsafe extern "C" fn kafka_common_Node_rack(node: *const kafka_common_Node_t
 
 /// Opaque handle to a [`PartitionInfo`].
 #[repr(C)]
-pub struct kafka_consumer_PartitionInfo_t {
+pub struct kafka_common_PartitionInfo_t {
     _private: [u8; 0],
 }
 
@@ -1865,9 +1863,7 @@ struct PartitionInfoInner {
 ///
 /// `info` must be a valid partition-info handle.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_consumer_PartitionInfo_topic(
-    info: *const kafka_consumer_PartitionInfo_t,
-) -> *const c_char {
+pub unsafe extern "C" fn kafka_common_PartitionInfo_topic(info: *const kafka_common_PartitionInfo_t) -> *const c_char {
     unsafe { &*(info as *const PartitionInfoInner) }.topic_c.as_ptr()
 }
 
@@ -1877,7 +1873,7 @@ pub unsafe extern "C" fn kafka_consumer_PartitionInfo_topic(
 ///
 /// `info` must be a valid partition-info handle.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_consumer_PartitionInfo_partition(info: *const kafka_consumer_PartitionInfo_t) -> i32 {
+pub unsafe extern "C" fn kafka_common_PartitionInfo_partition(info: *const kafka_common_PartitionInfo_t) -> i32 {
     unsafe { &*(info as *const PartitionInfoInner) }.info.partition()
 }
 
@@ -1888,8 +1884,8 @@ pub unsafe extern "C" fn kafka_consumer_PartitionInfo_partition(info: *const kaf
 ///
 /// `info` must be a valid partition-info handle.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_consumer_PartitionInfo_leader(
-    info: *const kafka_consumer_PartitionInfo_t,
+pub unsafe extern "C" fn kafka_common_PartitionInfo_leader(
+    info: *const kafka_common_PartitionInfo_t,
 ) -> *const kafka_common_Node_t {
     match unsafe { &*(info as *const PartitionInfoInner) }.info.leader() {
         Some(node) => node as *const Node as *const kafka_common_Node_t,
@@ -1903,9 +1899,7 @@ pub unsafe extern "C" fn kafka_consumer_PartitionInfo_leader(
 ///
 /// `info` must be a valid partition-info handle.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_consumer_PartitionInfo_replica_count(
-    info: *const kafka_consumer_PartitionInfo_t,
-) -> i32 {
+pub unsafe extern "C" fn kafka_common_PartitionInfo_replica_count(info: *const kafka_common_PartitionInfo_t) -> i32 {
     unsafe { &*(info as *const PartitionInfoInner) }.info.replicas().len() as i32
 }
 
@@ -1915,8 +1909,8 @@ pub unsafe extern "C" fn kafka_consumer_PartitionInfo_replica_count(
 ///
 /// `info` must be a valid partition-info handle.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_consumer_PartitionInfo_replica(
-    info: *const kafka_consumer_PartitionInfo_t,
+pub unsafe extern "C" fn kafka_common_PartitionInfo_replica(
+    info: *const kafka_common_PartitionInfo_t,
     index: i32,
 ) -> *const kafka_common_Node_t {
     node_at(unsafe { &*(info as *const PartitionInfoInner) }.info.replicas(), index)
@@ -1928,8 +1922,8 @@ pub unsafe extern "C" fn kafka_consumer_PartitionInfo_replica(
 ///
 /// `info` must be a valid partition-info handle.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_consumer_PartitionInfo_in_sync_replica_count(
-    info: *const kafka_consumer_PartitionInfo_t,
+pub unsafe extern "C" fn kafka_common_PartitionInfo_in_sync_replica_count(
+    info: *const kafka_common_PartitionInfo_t,
 ) -> i32 {
     unsafe { &*(info as *const PartitionInfoInner) }.info.in_sync_replicas().len() as i32
 }
@@ -1941,8 +1935,8 @@ pub unsafe extern "C" fn kafka_consumer_PartitionInfo_in_sync_replica_count(
 ///
 /// `info` must be a valid partition-info handle.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_consumer_PartitionInfo_in_sync_replica(
-    info: *const kafka_consumer_PartitionInfo_t,
+pub unsafe extern "C" fn kafka_common_PartitionInfo_in_sync_replica(
+    info: *const kafka_common_PartitionInfo_t,
     index: i32,
 ) -> *const kafka_common_Node_t {
     node_at(unsafe { &*(info as *const PartitionInfoInner) }.info.in_sync_replicas(), index)
@@ -1954,8 +1948,8 @@ pub unsafe extern "C" fn kafka_consumer_PartitionInfo_in_sync_replica(
 ///
 /// `info` must be a valid partition-info handle.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_consumer_PartitionInfo_offline_replica_count(
-    info: *const kafka_consumer_PartitionInfo_t,
+pub unsafe extern "C" fn kafka_common_PartitionInfo_offline_replica_count(
+    info: *const kafka_common_PartitionInfo_t,
 ) -> i32 {
     unsafe { &*(info as *const PartitionInfoInner) }.info.offline_replicas().len() as i32
 }
@@ -1967,8 +1961,8 @@ pub unsafe extern "C" fn kafka_consumer_PartitionInfo_offline_replica_count(
 ///
 /// `info` must be a valid partition-info handle.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_consumer_PartitionInfo_offline_replica(
-    info: *const kafka_consumer_PartitionInfo_t,
+pub unsafe extern "C" fn kafka_common_PartitionInfo_offline_replica(
+    info: *const kafka_common_PartitionInfo_t,
     index: i32,
 ) -> *const kafka_common_Node_t {
     node_at(unsafe { &*(info as *const PartitionInfoInner) }.info.offline_replicas(), index)
@@ -1992,7 +1986,7 @@ fn node_at(nodes: &[Node], index: i32) -> *const kafka_common_Node_t {
 ///
 /// `info` must be null or a valid partition-info handle.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_consumer_PartitionInfo_destroy(info: *mut kafka_consumer_PartitionInfo_t) {
+pub unsafe extern "C" fn kafka_common_PartitionInfo_destroy(info: *mut kafka_common_PartitionInfo_t) {
     if !info.is_null() {
         unsafe { drop(Box::from_raw(info as *mut PartitionInfoInner)) };
     }
@@ -2052,12 +2046,12 @@ pub unsafe extern "C" fn kafka_consumer_OffsetMap_count(map: *const kafka_consum
 pub unsafe extern "C" fn kafka_consumer_OffsetMap_get_key(
     map: *const kafka_consumer_OffsetMap_t,
     index: i32,
-) -> *const kafka_consumer_TopicPartition_t {
+) -> *const kafka_common_TopicPartition_t {
     if index < 0 {
         return std::ptr::null();
     }
     match unsafe { &*(map as *const OffsetMapInner) }.keys.get(index as usize) {
-        Some(k) => k as *const TopicPartitionInner as *const kafka_consumer_TopicPartition_t,
+        Some(k) => k as *const TopicPartitionInner as *const kafka_common_TopicPartition_t,
         None => std::ptr::null(),
     }
 }
@@ -2141,12 +2135,12 @@ pub unsafe extern "C" fn kafka_consumer_OffsetAndTimestampMap_count(
 pub unsafe extern "C" fn kafka_consumer_OffsetAndTimestampMap_get_key(
     map: *const kafka_consumer_OffsetAndTimestampMap_t,
     index: i32,
-) -> *const kafka_consumer_TopicPartition_t {
+) -> *const kafka_common_TopicPartition_t {
     if index < 0 {
         return std::ptr::null();
     }
     match unsafe { &*(map as *const OffsetAndTimestampMapInner) }.keys.get(index as usize) {
-        Some(k) => k as *const TopicPartitionInner as *const kafka_consumer_TopicPartition_t,
+        Some(k) => k as *const TopicPartitionInner as *const kafka_common_TopicPartition_t,
         None => std::ptr::null(),
     }
 }
@@ -2231,12 +2225,12 @@ pub unsafe extern "C" fn kafka_consumer_LongOffsetMap_count(map: *const kafka_co
 pub unsafe extern "C" fn kafka_consumer_LongOffsetMap_get_key(
     map: *const kafka_consumer_LongOffsetMap_t,
     index: i32,
-) -> *const kafka_consumer_TopicPartition_t {
+) -> *const kafka_common_TopicPartition_t {
     if index < 0 {
         return std::ptr::null();
     }
     match unsafe { &*(map as *const LongOffsetMapInner) }.keys.get(index as usize) {
-        Some(k) => k as *const TopicPartitionInner as *const kafka_consumer_TopicPartition_t,
+        Some(k) => k as *const TopicPartitionInner as *const kafka_common_TopicPartition_t,
         None => std::ptr::null(),
     }
 }
@@ -2274,7 +2268,7 @@ pub unsafe extern "C" fn kafka_consumer_LongOffsetMap_destroy(map: *mut kafka_co
 
 /// Opaque handle to a `List<PartitionInfo>` result (`partitions_for`).
 #[repr(C)]
-pub struct kafka_consumer_PartitionInfoList_t {
+pub struct kafka_common_PartitionInfoList_t {
     _private: [u8; 0],
 }
 
@@ -2282,7 +2276,7 @@ struct PartitionInfoListInner {
     items: Vec<PartitionInfoInner>,
 }
 
-pub(crate) fn box_partition_info_list(infos: Vec<PartitionInfo>) -> *mut kafka_consumer_PartitionInfoList_t {
+pub(crate) fn box_partition_info_list(infos: Vec<PartitionInfo>) -> *mut kafka_common_PartitionInfoList_t {
     let items = infos
         .into_iter()
         .map(|info| {
@@ -2290,7 +2284,7 @@ pub(crate) fn box_partition_info_list(infos: Vec<PartitionInfo>) -> *mut kafka_c
             PartitionInfoInner { info, topic_c }
         })
         .collect();
-    Box::into_raw(Box::new(PartitionInfoListInner { items })) as *mut kafka_consumer_PartitionInfoList_t
+    Box::into_raw(Box::new(PartitionInfoListInner { items })) as *mut kafka_common_PartitionInfoList_t
 }
 
 /// Returns the number of partition-info entries.
@@ -2299,9 +2293,7 @@ pub(crate) fn box_partition_info_list(infos: Vec<PartitionInfo>) -> *mut kafka_c
 ///
 /// `list` must be a valid partition-info-list handle.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_consumer_PartitionInfoList_count(
-    list: *const kafka_consumer_PartitionInfoList_t,
-) -> i32 {
+pub unsafe extern "C" fn kafka_common_PartitionInfoList_count(list: *const kafka_common_PartitionInfoList_t) -> i32 {
     unsafe { &*(list as *const PartitionInfoListInner) }.items.len() as i32
 }
 
@@ -2311,15 +2303,15 @@ pub unsafe extern "C" fn kafka_consumer_PartitionInfoList_count(
 ///
 /// `list` must be a valid partition-info-list handle.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_consumer_PartitionInfoList_get(
-    list: *const kafka_consumer_PartitionInfoList_t,
+pub unsafe extern "C" fn kafka_common_PartitionInfoList_get(
+    list: *const kafka_common_PartitionInfoList_t,
     index: i32,
-) -> *const kafka_consumer_PartitionInfo_t {
+) -> *const kafka_common_PartitionInfo_t {
     if index < 0 {
         return std::ptr::null();
     }
     match unsafe { &*(list as *const PartitionInfoListInner) }.items.get(index as usize) {
-        Some(i) => i as *const PartitionInfoInner as *const kafka_consumer_PartitionInfo_t,
+        Some(i) => i as *const PartitionInfoInner as *const kafka_common_PartitionInfo_t,
         None => std::ptr::null(),
     }
 }
@@ -2330,7 +2322,7 @@ pub unsafe extern "C" fn kafka_consumer_PartitionInfoList_get(
 ///
 /// `list` must be null or a valid partition-info-list handle.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_consumer_PartitionInfoList_destroy(list: *mut kafka_consumer_PartitionInfoList_t) {
+pub unsafe extern "C" fn kafka_common_PartitionInfoList_destroy(list: *mut kafka_common_PartitionInfoList_t) {
     if !list.is_null() {
         unsafe { drop(Box::from_raw(list as *mut PartitionInfoListInner)) };
     }
@@ -2546,7 +2538,7 @@ pub unsafe extern "C" fn kafka_consumer_MetricMap_destroy(map: *mut kafka_consum
 /// Opaque handle to a `Map<String, List<PartitionInfo>>` result
 /// (`list_topics`).
 #[repr(C)]
-pub struct kafka_consumer_TopicPartitionInfoMap_t {
+pub struct kafka_common_TopicPartitionInfoMap_t {
     _private: [u8; 0],
 }
 
@@ -2555,9 +2547,7 @@ struct TopicPartitionInfoMapInner {
     lists: Vec<PartitionInfoListInner>,
 }
 
-fn box_topic_partition_info_map(
-    map: HashMap<String, Vec<PartitionInfo>>,
-) -> *mut kafka_consumer_TopicPartitionInfoMap_t {
+fn box_topic_partition_info_map(map: HashMap<String, Vec<PartitionInfo>>) -> *mut kafka_common_TopicPartitionInfoMap_t {
     let mut topics = Vec::with_capacity(map.len());
     let mut lists = Vec::with_capacity(map.len());
     for (topic, infos) in map {
@@ -2571,7 +2561,7 @@ fn box_topic_partition_info_map(
             .collect();
         lists.push(PartitionInfoListInner { items });
     }
-    Box::into_raw(Box::new(TopicPartitionInfoMapInner { topics, lists })) as *mut kafka_consumer_TopicPartitionInfoMap_t
+    Box::into_raw(Box::new(TopicPartitionInfoMapInner { topics, lists })) as *mut kafka_common_TopicPartitionInfoMap_t
 }
 
 /// Returns the number of topics.
@@ -2580,8 +2570,8 @@ fn box_topic_partition_info_map(
 ///
 /// `map` must be a valid topic-partition-info-map handle.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_consumer_TopicPartitionInfoMap_count(
-    map: *const kafka_consumer_TopicPartitionInfoMap_t,
+pub unsafe extern "C" fn kafka_common_TopicPartitionInfoMap_count(
+    map: *const kafka_common_TopicPartitionInfoMap_t,
 ) -> i32 {
     unsafe { &*(map as *const TopicPartitionInfoMapInner) }.topics.len() as i32
 }
@@ -2593,8 +2583,8 @@ pub unsafe extern "C" fn kafka_consumer_TopicPartitionInfoMap_count(
 ///
 /// `map` must be a valid topic-partition-info-map handle.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_consumer_TopicPartitionInfoMap_get_topic(
-    map: *const kafka_consumer_TopicPartitionInfoMap_t,
+pub unsafe extern "C" fn kafka_common_TopicPartitionInfoMap_get_topic(
+    map: *const kafka_common_TopicPartitionInfoMap_t,
     index: i32,
 ) -> *const c_char {
     if index < 0 {
@@ -2616,10 +2606,10 @@ pub unsafe extern "C" fn kafka_consumer_TopicPartitionInfoMap_get_topic(
 ///
 /// `map` must be a valid topic-partition-info-map handle.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_consumer_TopicPartitionInfoMap_get_partitions(
-    map: *const kafka_consumer_TopicPartitionInfoMap_t,
+pub unsafe extern "C" fn kafka_common_TopicPartitionInfoMap_get_partitions(
+    map: *const kafka_common_TopicPartitionInfoMap_t,
     index: i32,
-) -> *const kafka_consumer_PartitionInfoList_t {
+) -> *const kafka_common_PartitionInfoList_t {
     if index < 0 {
         return std::ptr::null();
     }
@@ -2627,7 +2617,7 @@ pub unsafe extern "C" fn kafka_consumer_TopicPartitionInfoMap_get_partitions(
         .lists
         .get(index as usize)
     {
-        Some(l) => l as *const PartitionInfoListInner as *const kafka_consumer_PartitionInfoList_t,
+        Some(l) => l as *const PartitionInfoListInner as *const kafka_common_PartitionInfoList_t,
         None => std::ptr::null(),
     }
 }
@@ -2638,9 +2628,7 @@ pub unsafe extern "C" fn kafka_consumer_TopicPartitionInfoMap_get_partitions(
 ///
 /// `map` must be null or a valid topic-partition-info-map handle.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_consumer_TopicPartitionInfoMap_destroy(
-    map: *mut kafka_consumer_TopicPartitionInfoMap_t,
-) {
+pub unsafe extern "C" fn kafka_common_TopicPartitionInfoMap_destroy(map: *mut kafka_common_TopicPartitionInfoMap_t) {
     if !map.is_null() {
         unsafe { drop(Box::from_raw(map as *mut TopicPartitionInfoMapInner)) };
     }
@@ -2648,7 +2636,7 @@ pub unsafe extern "C" fn kafka_consumer_TopicPartitionInfoMap_destroy(
 
 /// Opaque handle to a `Set<TopicPartition>` result (`assignment` / `paused`).
 #[repr(C)]
-pub struct kafka_consumer_TopicPartitionList_t {
+pub struct kafka_common_TopicPartitionList_t {
     _private: [u8; 0],
 }
 
@@ -2658,7 +2646,7 @@ struct TopicPartitionListInner {
 
 pub(crate) fn box_topic_partition_list(
     tps: impl IntoIterator<Item = TopicPartition>,
-) -> *mut kafka_consumer_TopicPartitionList_t {
+) -> *mut kafka_common_TopicPartitionList_t {
     let items = tps
         .into_iter()
         .map(|tp| {
@@ -2666,7 +2654,7 @@ pub(crate) fn box_topic_partition_list(
             TopicPartitionInner { tp, topic_c }
         })
         .collect();
-    Box::into_raw(Box::new(TopicPartitionListInner { items })) as *mut kafka_consumer_TopicPartitionList_t
+    Box::into_raw(Box::new(TopicPartitionListInner { items })) as *mut kafka_common_TopicPartitionList_t
 }
 
 /// Returns the number of topic-partitions.
@@ -2675,9 +2663,7 @@ pub(crate) fn box_topic_partition_list(
 ///
 /// `list` must be a valid topic-partition-list handle.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_consumer_TopicPartitionList_count(
-    list: *const kafka_consumer_TopicPartitionList_t,
-) -> i32 {
+pub unsafe extern "C" fn kafka_common_TopicPartitionList_count(list: *const kafka_common_TopicPartitionList_t) -> i32 {
     unsafe { &*(list as *const TopicPartitionListInner) }.items.len() as i32
 }
 
@@ -2687,15 +2673,15 @@ pub unsafe extern "C" fn kafka_consumer_TopicPartitionList_count(
 ///
 /// `list` must be a valid topic-partition-list handle.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_consumer_TopicPartitionList_get(
-    list: *const kafka_consumer_TopicPartitionList_t,
+pub unsafe extern "C" fn kafka_common_TopicPartitionList_get(
+    list: *const kafka_common_TopicPartitionList_t,
     index: i32,
-) -> *const kafka_consumer_TopicPartition_t {
+) -> *const kafka_common_TopicPartition_t {
     if index < 0 {
         return std::ptr::null();
     }
     match unsafe { &*(list as *const TopicPartitionListInner) }.items.get(index as usize) {
-        Some(i) => i as *const TopicPartitionInner as *const kafka_consumer_TopicPartition_t,
+        Some(i) => i as *const TopicPartitionInner as *const kafka_common_TopicPartition_t,
         None => std::ptr::null(),
     }
 }
@@ -2706,7 +2692,7 @@ pub unsafe extern "C" fn kafka_consumer_TopicPartitionList_get(
 ///
 /// `list` must be null or a valid topic-partition-list handle.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_consumer_TopicPartitionList_destroy(list: *mut kafka_consumer_TopicPartitionList_t) {
+pub unsafe extern "C" fn kafka_common_TopicPartitionList_destroy(list: *mut kafka_common_TopicPartitionList_t) {
     if !list.is_null() {
         unsafe { drop(Box::from_raw(list as *mut TopicPartitionListInner)) };
     }
@@ -2983,7 +2969,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_subscribe_async(
 ///
 /// `partitions` is the (always non-null) list of partitions being taken away.
 /// **The callee owns it** and must free it with
-/// [`kafka_consumer_TopicPartitionList_destroy`], matching the "callbacks own the
+/// [`kafka_common_TopicPartitionList_destroy`], matching the "callbacks own the
 /// handles delivered to them" convention of the other consumer callbacks.
 ///
 /// # Return value
@@ -3009,7 +2995,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_subscribe_async(
 /// reentrancy path Java gets for free by running the callback on the polling
 /// thread.
 pub type kafka_consumer_ConsumerRebalanceListener_on_partitions_revoked_callback_t =
-    unsafe extern "C" fn(*mut kafka_consumer_TopicPartitionList_t, *mut c_void) -> *mut kafka_common_Error_t;
+    unsafe extern "C" fn(*mut kafka_common_TopicPartitionList_t, *mut c_void) -> *mut kafka_common_Error_t;
 
 /// `on_partitions_assigned` callback of a
 /// [`kafka_consumer_ConsumerRebalanceListener_t`] — Java's
@@ -3020,7 +3006,7 @@ pub type kafka_consumer_ConsumerRebalanceListener_on_partitions_revoked_callback
 /// fires. Ownership and return-value rules are identical to
 /// [`kafka_consumer_ConsumerRebalanceListener_on_partitions_revoked_callback_t`].
 pub type kafka_consumer_ConsumerRebalanceListener_on_partitions_assigned_callback_t =
-    unsafe extern "C" fn(*mut kafka_consumer_TopicPartitionList_t, *mut c_void) -> *mut kafka_common_Error_t;
+    unsafe extern "C" fn(*mut kafka_common_TopicPartitionList_t, *mut c_void) -> *mut kafka_common_Error_t;
 
 /// `on_partitions_lost` callback of a
 /// [`kafka_consumer_ConsumerRebalanceListener_t`] — Java's
@@ -3032,7 +3018,7 @@ pub type kafka_consumer_ConsumerRebalanceListener_on_partitions_assigned_callbac
 /// return-value rules are identical to
 /// [`kafka_consumer_ConsumerRebalanceListener_on_partitions_revoked_callback_t`].
 pub type kafka_consumer_ConsumerRebalanceListener_on_partitions_lost_callback_t =
-    unsafe extern "C" fn(*mut kafka_consumer_TopicPartitionList_t, *mut c_void) -> *mut kafka_common_Error_t;
+    unsafe extern "C" fn(*mut kafka_common_TopicPartitionList_t, *mut c_void) -> *mut kafka_common_Error_t;
 
 /// Release hook for the `user_data` handed to
 /// [`kafka_consumer_ConsumerRebalanceListener_new`].
@@ -3102,7 +3088,7 @@ pub struct kafka_consumer_ConsumerRebalanceListener_t {
 /// Shared shape of the three listener callbacks. All three public typedefs above
 /// alias exactly this signature, so one invocation helper serves them all.
 type RebalanceCallbackFn =
-    unsafe extern "C" fn(*mut kafka_consumer_TopicPartitionList_t, *mut c_void) -> *mut kafka_common_Error_t;
+    unsafe extern "C" fn(*mut kafka_common_TopicPartitionList_t, *mut c_void) -> *mut kafka_common_Error_t;
 
 /// Contents of a [`kafka_consumer_ConsumerRebalanceListener_t`] before it is
 /// handed to a consumer: the C callbacks plus the owned `user_data`.
@@ -3251,7 +3237,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRebalanceListener_new(
     // alias) so cbindgen emits a nullable C function pointer — see that
     // typedef's docs.
     on_partitions_lost: Option<
-        unsafe extern "C" fn(*mut kafka_consumer_TopicPartitionList_t, *mut c_void) -> *mut kafka_common_Error_t,
+        unsafe extern "C" fn(*mut kafka_common_TopicPartitionList_t, *mut c_void) -> *mut kafka_common_Error_t,
     >,
     user_data: *mut c_void,
     user_data_destroy: Option<unsafe extern "C" fn(*mut c_void)>,
@@ -4501,7 +4487,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_end_offsets_async(
 }
 
 /// Returns the partition metadata for a topic (sync). On success writes a
-/// [`kafka_consumer_PartitionInfoList_t`] to `*out_list`.
+/// [`kafka_common_PartitionInfoList_t`] to `*out_list`.
 ///
 /// # Safety
 ///
@@ -4510,7 +4496,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_end_offsets_async(
 pub unsafe extern "C" fn kafka_consumer_Consumer_partitions_for(
     consumer: *const kafka_consumer_Consumer_t,
     topic: *const c_char,
-    out_list: *mut *mut kafka_consumer_PartitionInfoList_t,
+    out_list: *mut *mut kafka_common_PartitionInfoList_t,
 ) -> *mut kafka_common_Error_t {
     let h = unsafe { handle_ref(consumer) };
     if let Err(e) = acquire(h) {
@@ -4530,11 +4516,11 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_partitions_for(
 }
 
 /// Completion callback for [`kafka_consumer_Consumer_partitions_for_async`]. On
-/// success `list` is a non-null [`kafka_consumer_PartitionInfoList_t`] (free with
-/// [`kafka_consumer_PartitionInfoList_destroy`]) and `error` is null; on failure
+/// success `list` is a non-null [`kafka_common_PartitionInfoList_t`] (free with
+/// [`kafka_common_PartitionInfoList_destroy`]) and `error` is null; on failure
 /// `list` is null and `error` is non-null. The callback owns whichever is non-null.
 pub type kafka_consumer_Consumer_partitions_for_callback_t =
-    unsafe extern "C" fn(*mut kafka_consumer_PartitionInfoList_t, *mut kafka_common_Error_t, *mut c_void);
+    unsafe extern "C" fn(*mut kafka_common_PartitionInfoList_t, *mut kafka_common_Error_t, *mut c_void);
 
 /// Returns the partition metadata for a topic asynchronously
 /// (one-operation-in-flight). See [`kafka_consumer_Consumer_partitions_for`].
@@ -4567,7 +4553,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_partitions_for_async(
 }
 
 /// Returns metadata for all topics the consumer is authorized to view (sync).
-/// On success writes a [`kafka_consumer_TopicPartitionInfoMap_t`] to `*out_map`.
+/// On success writes a [`kafka_common_TopicPartitionInfoMap_t`] to `*out_map`.
 ///
 /// # Safety
 ///
@@ -4575,7 +4561,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_partitions_for_async(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_list_topics(
     consumer: *const kafka_consumer_Consumer_t,
-    out_map: *mut *mut kafka_consumer_TopicPartitionInfoMap_t,
+    out_map: *mut *mut kafka_common_TopicPartitionInfoMap_t,
 ) -> *mut kafka_common_Error_t {
     let h = unsafe { handle_ref(consumer) };
     if let Err(e) = acquire(h) {
@@ -4594,12 +4580,12 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_list_topics(
 }
 
 /// Completion callback for [`kafka_consumer_Consumer_list_topics_async`]. On
-/// success `map` is a non-null [`kafka_consumer_TopicPartitionInfoMap_t`] (free
-/// with [`kafka_consumer_TopicPartitionInfoMap_destroy`]) and `error` is null;
+/// success `map` is a non-null [`kafka_common_TopicPartitionInfoMap_t`] (free
+/// with [`kafka_common_TopicPartitionInfoMap_destroy`]) and `error` is null;
 /// on failure `map` is null and `error` is non-null. The callback owns whichever
 /// is non-null.
 pub type kafka_consumer_Consumer_list_topics_callback_t =
-    unsafe extern "C" fn(*mut kafka_consumer_TopicPartitionInfoMap_t, *mut kafka_common_Error_t, *mut c_void);
+    unsafe extern "C" fn(*mut kafka_common_TopicPartitionInfoMap_t, *mut kafka_common_Error_t, *mut c_void);
 
 /// Returns metadata for all topics the consumer is authorized to view
 /// asynchronously (one-operation-in-flight). See [`kafka_consumer_Consumer_list_topics`].
@@ -4633,8 +4619,8 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_list_topics_async(
 // Phase D — sync state reads (under the access guard)
 // ---------------------------------------------------------------------------
 
-/// Returns the current assignment as a [`kafka_consumer_TopicPartitionList_t`]
-/// (free with [`kafka_consumer_TopicPartitionList_destroy`]), or null on a
+/// Returns the current assignment as a [`kafka_common_TopicPartitionList_t`]
+/// (free with [`kafka_common_TopicPartitionList_destroy`]), or null on a
 /// concurrent-access rejection (the guard could not be acquired).
 ///
 /// # Safety
@@ -4643,7 +4629,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_list_topics_async(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_assignment(
     consumer: *const kafka_consumer_Consumer_t,
-) -> *mut kafka_consumer_TopicPartitionList_t {
+) -> *mut kafka_common_TopicPartitionList_t {
     let h = unsafe { handle_ref(consumer) };
     if acquire(h).is_err() {
         return std::ptr::null_mut();
@@ -4697,7 +4683,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_subscription(
 }
 
 /// Returns the currently paused partitions as a
-/// [`kafka_consumer_TopicPartitionList_t`], or null on a concurrent-access
+/// [`kafka_common_TopicPartitionList_t`], or null on a concurrent-access
 /// rejection.
 ///
 /// # Safety
@@ -4706,7 +4692,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_subscription(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_paused(
     consumer: *const kafka_consumer_Consumer_t,
-) -> *mut kafka_consumer_TopicPartitionList_t {
+) -> *mut kafka_common_TopicPartitionList_t {
     let h = unsafe { handle_ref(consumer) };
     if acquire(h).is_err() {
         return std::ptr::null_mut();
@@ -4992,46 +4978,46 @@ mod tests {
     /// Records the invocation, destroys the delivered list (the callee owns it),
     /// and reports success.
     unsafe extern "C" fn stub_revoked(
-        partitions: *mut kafka_consumer_TopicPartitionList_t,
+        partitions: *mut kafka_common_TopicPartitionList_t,
         user_data: *mut c_void,
     ) -> *mut kafka_common_Error_t {
         let counters = unsafe { &*(user_data as *const StubCounters) };
         counters.revoked_calls.fetch_add(1, Ordering::SeqCst);
         counters
             .last_partition_count
-            .store(unsafe { kafka_consumer_TopicPartitionList_count(partitions) }, Ordering::SeqCst);
-        unsafe { kafka_consumer_TopicPartitionList_destroy(partitions) };
+            .store(unsafe { kafka_common_TopicPartitionList_count(partitions) }, Ordering::SeqCst);
+        unsafe { kafka_common_TopicPartitionList_destroy(partitions) };
         std::ptr::null_mut()
     }
 
     unsafe extern "C" fn stub_assigned(
-        partitions: *mut kafka_consumer_TopicPartitionList_t,
+        partitions: *mut kafka_common_TopicPartitionList_t,
         user_data: *mut c_void,
     ) -> *mut kafka_common_Error_t {
         let counters = unsafe { &*(user_data as *const StubCounters) };
         counters.assigned_calls.fetch_add(1, Ordering::SeqCst);
-        unsafe { kafka_consumer_TopicPartitionList_destroy(partitions) };
+        unsafe { kafka_common_TopicPartitionList_destroy(partitions) };
         std::ptr::null_mut()
     }
 
     unsafe extern "C" fn stub_lost(
-        partitions: *mut kafka_consumer_TopicPartitionList_t,
+        partitions: *mut kafka_common_TopicPartitionList_t,
         user_data: *mut c_void,
     ) -> *mut kafka_common_Error_t {
         let counters = unsafe { &*(user_data as *const StubCounters) };
         counters.lost_calls.fetch_add(1, Ordering::SeqCst);
-        unsafe { kafka_consumer_TopicPartitionList_destroy(partitions) };
+        unsafe { kafka_common_TopicPartitionList_destroy(partitions) };
         std::ptr::null_mut()
     }
 
     /// Returns an error handle, mirroring a C listener that "throws".
     unsafe extern "C" fn stub_revoked_failing(
-        partitions: *mut kafka_consumer_TopicPartitionList_t,
+        partitions: *mut kafka_common_TopicPartitionList_t,
         user_data: *mut c_void,
     ) -> *mut kafka_common_Error_t {
         let counters = unsafe { &*(user_data as *const StubCounters) };
         counters.revoked_calls.fetch_add(1, Ordering::SeqCst);
-        unsafe { kafka_consumer_TopicPartitionList_destroy(partitions) };
+        unsafe { kafka_common_TopicPartitionList_destroy(partitions) };
         box_error(Error::local_illegal_state("listener refused the revocation"))
     }
 

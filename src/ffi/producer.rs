@@ -20,7 +20,7 @@
 //!
 //! # Design
 //!
-//! - **Opaque handles**: [`kafka_producer_Producer_t`], [`kafka_producer_FutureRecordMetadata_t`], and
+//! - **Opaque handles**: [`kafka_producer_Producer_t`], [`kafka_common_KafkaFuture_RecordMetadata_t`], and
 //!   [`kafka_producer_RecordMetadata_t`] are opaque types. Callers receive and pass raw
 //!   pointers to these types; the internal layout is hidden.
 //!
@@ -154,8 +154,8 @@ use crate::ffi::common::{
 // consumer FFI produces and marshals offsets exactly like
 // kafka_consumer_Consumer_commit_sync_offsets.
 use crate::ffi::consumer::{
-    box_partition_info_list, group_metadata_ref, kafka_consumer_ConsumerGroupMetadata_t,
-    kafka_consumer_PartitionInfoList_t, read_offset_map,
+    box_partition_info_list, group_metadata_ref, kafka_common_PartitionInfoList_t,
+    kafka_consumer_ConsumerGroupMetadata_t, read_offset_map,
 };
 use crate::producer::Callback;
 use crate::producer::KafkaProducer;
@@ -206,14 +206,14 @@ impl ProducerKind {
 /// Internal wrapper that pairs a [`KafkaFuture<RecordMetadata>`] with the
 /// [`tokio::runtime::Handle`] of the producer that created it.
 ///
-/// This allows [`kafka_producer_FutureRecordMetadata_get`] and
-/// [`kafka_producer_FutureRecordMetadata_get_all`] to call `handle.block_on()`
+/// This allows [`kafka_common_KafkaFuture_RecordMetadata_get`] and
+/// [`kafka_common_KafkaFuture_RecordMetadata_get_all`] to call `handle.block_on()`
 /// instead of creating throwaway runtimes.
 struct FfiFuture {
     future: KafkaFuture<RecordMetadata>,
     runtime_handle: tokio::runtime::Handle,
     /// Sender for the producer's completion-dispatch queue, so
-    /// [`kafka_producer_FutureRecordMetadata_get_async`] can deliver its
+    /// [`kafka_common_KafkaFuture_RecordMetadata_get_async`] can deliver its
     /// callback on the same dispatcher thread as every other completion.
     completion_tx: std::sync::mpsc::Sender<CompletionJob>,
 }
@@ -244,7 +244,7 @@ pub struct kafka_producer_Producer_t {
 ///
 /// Internally wraps a `Box<KafkaFuture<RecordMetadata>>`.
 #[repr(C)]
-pub struct kafka_producer_FutureRecordMetadata_t {
+pub struct kafka_common_KafkaFuture_RecordMetadata_t {
     _private: [u8; 0],
 }
 
@@ -323,13 +323,13 @@ unsafe fn producer_handle(producer: *mut kafka_producer_Producer_t) -> &'static 
     unsafe { &*(producer as *const ProducerHandle) }
 }
 
-/// Casts a `*mut kafka_producer_FutureRecordMetadata_t` to a reference to
+/// Casts a `*mut kafka_common_KafkaFuture_RecordMetadata_t` to a reference to
 /// [`FfiFuture`].
 ///
 /// # Safety
 ///
 /// The pointer must be non-null and must have been created by a send function.
-unsafe fn future_ref(future: *mut kafka_producer_FutureRecordMetadata_t) -> &'static FfiFuture {
+unsafe fn future_ref(future: *mut kafka_common_KafkaFuture_RecordMetadata_t) -> &'static FfiFuture {
     unsafe { &*(future as *const FfiFuture) }
 }
 
@@ -338,7 +338,7 @@ unsafe fn future_ref(future: *mut kafka_producer_FutureRecordMetadata_t) -> &'st
 /// # Safety
 ///
 /// The pointer must be non-null and must have been created by
-/// [`kafka_producer_FutureRecordMetadata_get`].
+/// [`kafka_common_KafkaFuture_RecordMetadata_get`].
 unsafe fn metadata_ref(metadata: *const kafka_producer_RecordMetadata_t) -> &'static RecordMetadataInner {
     unsafe { &*(metadata as *const RecordMetadataInner) }
 }
@@ -434,9 +434,9 @@ fn box_future(
     future: KafkaFuture<RecordMetadata>,
     runtime_handle: tokio::runtime::Handle,
     completion_tx: std::sync::mpsc::Sender<CompletionJob>,
-) -> *mut kafka_producer_FutureRecordMetadata_t {
+) -> *mut kafka_common_KafkaFuture_RecordMetadata_t {
     let ffi_future = FfiFuture { future, runtime_handle, completion_tx };
-    Box::into_raw(Box::new(ffi_future)) as *mut kafka_producer_FutureRecordMetadata_t
+    Box::into_raw(Box::new(ffi_future)) as *mut kafka_common_KafkaFuture_RecordMetadata_t
 }
 
 /// Wraps a [`RecordMetadata`] into a heap-allocated opaque pointer, including
@@ -511,11 +511,11 @@ pub type kafka_producer_Producer_send_callback_t =
 /// Per-record completion callback for [`kafka_producer_Producer_send_batch_async`].
 pub type kafka_producer_Producer_send_batch_callback_t =
     unsafe extern "C" fn(*mut kafka_producer_RecordMetadata_t, *mut kafka_common_Error_t, *mut std::ffi::c_void);
-/// Completion callback for [`kafka_producer_FutureRecordMetadata_get_async`].
-pub type kafka_producer_FutureRecordMetadata_get_callback_t =
+/// Completion callback for [`kafka_common_KafkaFuture_RecordMetadata_get_async`].
+pub type kafka_common_KafkaFuture_RecordMetadata_get_callback_t =
     unsafe extern "C" fn(*mut kafka_producer_RecordMetadata_t, *mut kafka_common_Error_t, *mut std::ffi::c_void);
-/// Aggregate completion callback for [`kafka_producer_FutureRecordMetadata_get_all_async`].
-pub type kafka_producer_FutureRecordMetadata_get_all_callback_t = unsafe extern "C" fn(
+/// Aggregate completion callback for [`kafka_common_KafkaFuture_RecordMetadata_get_all_async`].
+pub type kafka_common_KafkaFuture_RecordMetadata_get_all_callback_t = unsafe extern "C" fn(
     *mut *mut kafka_producer_RecordMetadata_t,
     *mut *mut kafka_common_Error_t,
     i32,
@@ -554,14 +554,14 @@ pub type kafka_producer_Producer_commit_transaction_callback_t =
 pub type kafka_producer_Producer_abort_transaction_callback_t =
     unsafe extern "C" fn(*mut kafka_common_Error_t, *mut std::ffi::c_void);
 /// Completion callback for [`kafka_producer_Producer_partitions_for_async`]. On
-/// success `list` is a non-null [`kafka_consumer_PartitionInfoList_t`] (free with
-/// [`kafka_consumer_PartitionInfoList_destroy`]) and `error` is null; on failure
+/// success `list` is a non-null [`kafka_common_PartitionInfoList_t`] (free with
+/// [`kafka_common_PartitionInfoList_destroy`]) and `error` is null; on failure
 /// `list` is null and `error` is non-null. The caller owns whichever is non-null.
 /// (Named after the consumer sibling `..._partitions_for_callback_t` rather than
 /// the `..._partitions_for_async_callback_t` that CLAUDE.md §3 would suggest, for
 /// consistency with `kafka_consumer_Consumer_partitions_for_callback_t`.)
 pub type kafka_producer_Producer_partitions_for_callback_t =
-    unsafe extern "C" fn(*mut kafka_consumer_PartitionInfoList_t, *mut kafka_common_Error_t, *mut std::ffi::c_void);
+    unsafe extern "C" fn(*mut kafka_common_PartitionInfoList_t, *mut kafka_common_Error_t, *mut std::ffi::c_void);
 
 /// Owned per-record completion payload, fired by the dispatcher thread.
 struct RecordCompletion {
@@ -1263,7 +1263,7 @@ pub unsafe extern "C" fn kafka_producer_Producer_send(
     value: *const u8,
     value_len: i32,
     out_error: *mut *mut kafka_common_Error_t,
-) -> *mut kafka_producer_FutureRecordMetadata_t {
+) -> *mut kafka_common_KafkaFuture_RecordMetadata_t {
     if producer.is_null() || topic.is_null() {
         if !out_error.is_null() {
             unsafe { *out_error = box_error(Error::new(Errors::InvalidRequest)) };
@@ -1373,7 +1373,7 @@ pub unsafe extern "C" fn kafka_producer_Producer_send(
 /// # Returns
 ///
 /// A non-null future handle on success, or null on failure. The caller owns the
-/// future and must free it with [`kafka_producer_FutureRecordMetadata_destroy`].
+/// future and must free it with [`kafka_common_KafkaFuture_RecordMetadata_destroy`].
 /// If `out_error` is non-null, `*out_error` is set to null on success or to a
 /// valid [`kafka_common_Error_t`] handle on failure.
 ///
@@ -1409,7 +1409,7 @@ pub unsafe extern "C" fn kafka_producer_Producer_send_with_callback(
     callback: kafka_producer_Producer_send_callback_t,
     user_data: *mut std::ffi::c_void,
     out_error: *mut *mut kafka_common_Error_t,
-) -> *mut kafka_producer_FutureRecordMetadata_t {
+) -> *mut kafka_common_KafkaFuture_RecordMetadata_t {
     if producer.is_null() || topic.is_null() {
         if !out_error.is_null() {
             unsafe { *out_error = box_error(Error::new(Errors::InvalidRequest)) };
@@ -1510,7 +1510,7 @@ unsafe fn send_batch_inner(
     producer: *mut kafka_producer_Producer_t,
     records: *const kafka_producer_ProducerRecord_t,
     count: i32,
-    out_futures: *mut *mut kafka_producer_FutureRecordMetadata_t,
+    out_futures: *mut *mut kafka_common_KafkaFuture_RecordMetadata_t,
     out_errors: *mut *mut kafka_common_Error_t,
 ) -> i32 {
     assert!(!producer.is_null(), "producer must not be null");
@@ -1611,7 +1611,7 @@ unsafe fn send_batch_inner(
 /// For each record, `out_futures[i]` receives the future handle on success
 /// (non-null) or null on failure, and `out_errors[i]` receives null on
 /// success or a non-null error handle on failure. The caller must free
-/// every non-null future with [`kafka_producer_FutureRecordMetadata_destroy`]
+/// every non-null future with [`kafka_common_KafkaFuture_RecordMetadata_destroy`]
 /// and every non-null error with [`kafka_common_Error_destroy`].
 ///
 /// # Parameters
@@ -1619,7 +1619,7 @@ unsafe fn send_batch_inner(
 /// - `producer`: Non-null producer handle.
 /// - `records`: Non-null pointer to an array of [`kafka_producer_ProducerRecord_t`].
 /// - `count`: Number of records in the array (must be `>= 0`).
-/// - `out_futures`: Non-null pointer to an array of `*mut kafka_producer_FutureRecordMetadata_t`
+/// - `out_futures`: Non-null pointer to an array of `*mut kafka_common_KafkaFuture_RecordMetadata_t`
 ///   with at least `count` entries. Caller must allocate this array.
 /// - `out_errors`: Non-null pointer to an array of `*mut kafka_common_Error_t`
 ///   with at least `count` entries. Caller must allocate this array.
@@ -1645,7 +1645,7 @@ pub unsafe extern "C" fn kafka_producer_Producer_send_batch(
     producer: *mut kafka_producer_Producer_t,
     records: *const kafka_producer_ProducerRecord_t,
     count: i32,
-    out_futures: *mut *mut kafka_producer_FutureRecordMetadata_t,
+    out_futures: *mut *mut kafka_common_KafkaFuture_RecordMetadata_t,
     out_errors: *mut *mut kafka_common_Error_t,
 ) -> i32 {
     unsafe { send_batch_inner(producer, records, count, out_futures, out_errors) }
@@ -1912,8 +1912,8 @@ pub unsafe extern "C" fn kafka_producer_Producer_send_batch_async(
 ///
 /// `future` must be a valid handle from a send function, or null.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_producer_FutureRecordMetadata_is_done(
-    future: *mut kafka_producer_FutureRecordMetadata_t,
+pub unsafe extern "C" fn kafka_common_KafkaFuture_RecordMetadata_is_done(
+    future: *mut kafka_common_KafkaFuture_RecordMetadata_t,
 ) -> bool {
     if future.is_null() {
         return false;
@@ -1941,8 +1941,8 @@ pub unsafe extern "C" fn kafka_producer_FutureRecordMetadata_is_done(
 ///
 /// - `future` must be a valid handle, or null.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_producer_FutureRecordMetadata_get(
-    future: *mut kafka_producer_FutureRecordMetadata_t,
+pub unsafe extern "C" fn kafka_common_KafkaFuture_RecordMetadata_get(
+    future: *mut kafka_common_KafkaFuture_RecordMetadata_t,
     out_error: *mut *mut kafka_common_Error_t,
 ) -> *mut kafka_producer_RecordMetadata_t {
     if future.is_null() {
@@ -2004,8 +2004,8 @@ pub unsafe extern "C" fn kafka_producer_FutureRecordMetadata_get(
 /// - Each non-null entry in `futures` must be a valid handle from a send
 ///   function.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_producer_FutureRecordMetadata_get_all(
-    futures: *mut *mut kafka_producer_FutureRecordMetadata_t,
+pub unsafe extern "C" fn kafka_common_KafkaFuture_RecordMetadata_get_all(
+    futures: *mut *mut kafka_common_KafkaFuture_RecordMetadata_t,
     count: i32,
     out_metadata: *mut *mut kafka_producer_RecordMetadata_t,
     out_errors: *mut *mut kafka_common_Error_t,
@@ -2043,7 +2043,7 @@ pub unsafe extern "C" fn kafka_producer_FutureRecordMetadata_get_all(
 
 /// Asynchronously awaits a future, invoking `callback` on completion instead
 /// of blocking (the async counterpart of
-/// [`kafka_producer_FutureRecordMetadata_get`]).
+/// [`kafka_common_KafkaFuture_RecordMetadata_get`]).
 ///
 /// `callback` fires on the producer's dispatcher thread with a non-null
 /// metadata handle on success or a non-null error handle on failure; the caller
@@ -2055,9 +2055,9 @@ pub unsafe extern "C" fn kafka_producer_FutureRecordMetadata_get_all(
 /// - `future` must be a valid handle from a send function, or null (null is
 ///   reported as an error through `callback`).
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_producer_FutureRecordMetadata_get_async(
-    future: *mut kafka_producer_FutureRecordMetadata_t,
-    callback: kafka_producer_FutureRecordMetadata_get_callback_t,
+pub unsafe extern "C" fn kafka_common_KafkaFuture_RecordMetadata_get_async(
+    future: *mut kafka_common_KafkaFuture_RecordMetadata_t,
+    callback: kafka_common_KafkaFuture_RecordMetadata_get_callback_t,
     user_data: *mut std::ffi::c_void,
 ) {
     if future.is_null() {
@@ -2088,7 +2088,7 @@ pub unsafe extern "C" fn kafka_producer_FutureRecordMetadata_get_async(
 
 /// Asynchronously awaits all futures, invoking `callback` once with parallel
 /// result arrays (the async counterpart of
-/// [`kafka_producer_FutureRecordMetadata_get_all`]).
+/// [`kafka_common_KafkaFuture_RecordMetadata_get_all`]).
 ///
 /// `callback` fires on the dispatcher thread with `metadata[0..count]` /
 /// `errors[0..count]`: per index, exactly one is non-null (a null `futures[i]`
@@ -2106,10 +2106,10 @@ pub unsafe extern "C" fn kafka_producer_FutureRecordMetadata_get_async(
 /// - `futures` must point to at least `count` future handles (null entries
 ///   allowed).
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_producer_FutureRecordMetadata_get_all_async(
-    futures: *mut *mut kafka_producer_FutureRecordMetadata_t,
+pub unsafe extern "C" fn kafka_common_KafkaFuture_RecordMetadata_get_all_async(
+    futures: *mut *mut kafka_common_KafkaFuture_RecordMetadata_t,
     count: i32,
-    callback: kafka_producer_FutureRecordMetadata_get_all_callback_t,
+    callback: kafka_common_KafkaFuture_RecordMetadata_get_all_callback_t,
     user_data: *mut std::ffi::c_void,
 ) {
     assert!(!futures.is_null(), "futures must not be null");
@@ -2194,8 +2194,8 @@ pub unsafe extern "C" fn kafka_producer_FutureRecordMetadata_get_all_async(
 /// - `future` must be null or a valid handle from a send function.
 /// - After this call, the pointer is invalid and must not be used.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_producer_FutureRecordMetadata_destroy(
-    future: *mut kafka_producer_FutureRecordMetadata_t,
+pub unsafe extern "C" fn kafka_common_KafkaFuture_RecordMetadata_destroy(
+    future: *mut kafka_common_KafkaFuture_RecordMetadata_t,
 ) {
     if !future.is_null() {
         unsafe {
@@ -2221,8 +2221,8 @@ pub unsafe extern "C" fn kafka_producer_FutureRecordMetadata_destroy(
 /// - After this call, all pointers in the array are invalid and must not be
 ///   used.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_producer_FutureRecordMetadata_destroy_all(
-    futures: *mut *mut kafka_producer_FutureRecordMetadata_t,
+pub unsafe extern "C" fn kafka_common_KafkaFuture_RecordMetadata_destroy_all(
+    futures: *mut *mut kafka_common_KafkaFuture_RecordMetadata_t,
     count: i32,
 ) {
     assert!(!futures.is_null(), "futures must not be null");
@@ -2254,7 +2254,7 @@ pub unsafe extern "C" fn kafka_producer_FutureRecordMetadata_destroy_all(
 ///
 /// # Safety
 ///
-/// `metadata` must be a valid handle from [`kafka_producer_FutureRecordMetadata_get`], or null.
+/// `metadata` must be a valid handle from [`kafka_common_KafkaFuture_RecordMetadata_get`], or null.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_RecordMetadata_offset(metadata: *const kafka_producer_RecordMetadata_t) -> i64 {
     if metadata.is_null() {
@@ -2279,7 +2279,7 @@ pub unsafe extern "C" fn kafka_producer_RecordMetadata_offset(metadata: *const k
 ///
 /// # Safety
 ///
-/// `metadata` must be a valid handle from [`kafka_producer_FutureRecordMetadata_get`], or null.
+/// `metadata` must be a valid handle from [`kafka_common_KafkaFuture_RecordMetadata_get`], or null.
 /// The returned pointer must not be used after the metadata is destroyed.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_RecordMetadata_topic(
@@ -2303,7 +2303,7 @@ pub unsafe extern "C" fn kafka_producer_RecordMetadata_topic(
 ///
 /// # Safety
 ///
-/// `metadata` must be a valid handle from [`kafka_producer_FutureRecordMetadata_get`], or null.
+/// `metadata` must be a valid handle from [`kafka_common_KafkaFuture_RecordMetadata_get`], or null.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_RecordMetadata_partition(
     metadata: *const kafka_producer_RecordMetadata_t,
@@ -2327,7 +2327,7 @@ pub unsafe extern "C" fn kafka_producer_RecordMetadata_partition(
 ///
 /// # Safety
 ///
-/// `metadata` must be a valid handle from [`kafka_producer_FutureRecordMetadata_get`], or null.
+/// `metadata` must be a valid handle from [`kafka_common_KafkaFuture_RecordMetadata_get`], or null.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_RecordMetadata_timestamp(
     metadata: *const kafka_producer_RecordMetadata_t,
@@ -2361,7 +2361,7 @@ pub unsafe extern "C" fn kafka_producer_RecordMetadata_timestamp(
 /// # Safety
 ///
 /// - `metadata` must be a valid, non-null handle from
-///   [`kafka_producer_FutureRecordMetadata_get`].
+///   [`kafka_common_KafkaFuture_RecordMetadata_get`].
 /// - `callback` must be a valid function pointer.
 /// - The `topic` pointer passed to the callback is only valid for the duration
 ///   of the callback invocation.
@@ -2398,7 +2398,7 @@ pub unsafe extern "C" fn kafka_producer_RecordMetadata_copy(
 ///
 /// # Safety
 ///
-/// - `metadata` must be null or a valid handle from [`kafka_producer_FutureRecordMetadata_get`].
+/// - `metadata` must be null or a valid handle from [`kafka_common_KafkaFuture_RecordMetadata_get`].
 /// - After this call, the pointer is invalid and must not be used.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_RecordMetadata_destroy(metadata: *mut kafka_producer_RecordMetadata_t) {
@@ -2702,8 +2702,8 @@ pub unsafe extern "C" fn kafka_producer_MetricMap_destroy(map: *mut kafka_produc
 }
 
 /// Returns the partition metadata for a topic. On success writes a
-/// [`kafka_consumer_PartitionInfoList_t`] to `*out_list` (free it with
-/// [`kafka_consumer_PartitionInfoList_destroy`]) and returns null; on failure
+/// [`kafka_common_PartitionInfoList_t`] to `*out_list` (free it with
+/// [`kafka_common_PartitionInfoList_destroy`]) and returns null; on failure
 /// returns a non-null error and leaves `*out_list` untouched. The
 /// `PartitionInfoList` handle/accessors are shared with the consumer FFI.
 ///
@@ -2714,7 +2714,7 @@ pub unsafe extern "C" fn kafka_producer_MetricMap_destroy(map: *mut kafka_produc
 pub unsafe extern "C" fn kafka_producer_Producer_partitions_for(
     producer: *mut kafka_producer_Producer_t,
     topic: *const c_char,
-    out_list: *mut *mut kafka_consumer_PartitionInfoList_t,
+    out_list: *mut *mut kafka_common_PartitionInfoList_t,
 ) -> *mut kafka_common_Error_t {
     if producer.is_null() || topic.is_null() {
         return box_error(Error::new(Errors::InvalidRequest));
@@ -2907,7 +2907,7 @@ pub unsafe extern "C" fn kafka_producer_Producer_close_async(
 struct PartitionInfoListCompletion {
     callback: kafka_producer_Producer_partitions_for_callback_t,
     user_data: *mut std::ffi::c_void,
-    list: *mut kafka_consumer_PartitionInfoList_t,
+    list: *mut kafka_common_PartitionInfoList_t,
     error: *mut kafka_common_Error_t,
 }
 // SAFETY: the raw pointers are owned handles moved to the dispatcher thread; the
@@ -2938,7 +2938,7 @@ unsafe impl Send for PartitionInfoListCallbackTarget {}
 /// [`kafka_producer_Producer_partitions_for`]).
 ///
 /// Returns immediately; `callback` fires on the producer's dispatcher thread
-/// with a non-null [`kafka_consumer_PartitionInfoList_t`] and null error on
+/// with a non-null [`kafka_common_PartitionInfoList_t`] and null error on
 /// success, or a null list and non-null [`kafka_common_Error_t`] on
 /// failure. The caller owns whichever handle is non-null.
 ///
@@ -4396,9 +4396,9 @@ mod tests {
             );
             assert_success(err);
             assert!(!future.is_null());
-            assert!(kafka_producer_FutureRecordMetadata_is_done(future));
+            assert!(kafka_common_KafkaFuture_RecordMetadata_is_done(future));
 
-            kafka_producer_FutureRecordMetadata_destroy(future);
+            kafka_common_KafkaFuture_RecordMetadata_destroy(future);
             kafka_producer_Producer_destroy(producer);
         }
     }
@@ -4423,13 +4423,13 @@ mod tests {
             );
             assert_success(err);
             assert!(!future.is_null());
-            assert!(!kafka_producer_FutureRecordMetadata_is_done(future));
+            assert!(!kafka_common_KafkaFuture_RecordMetadata_is_done(future));
 
             // Complete it
             assert!(kafka_producer_MockProducer_complete_next(producer));
-            assert!(kafka_producer_FutureRecordMetadata_is_done(future));
+            assert!(kafka_common_KafkaFuture_RecordMetadata_is_done(future));
 
-            kafka_producer_FutureRecordMetadata_destroy(future);
+            kafka_common_KafkaFuture_RecordMetadata_destroy(future);
             kafka_producer_Producer_destroy(producer);
         }
     }
@@ -4501,13 +4501,13 @@ mod tests {
 
             // Get metadata and verify partition
             let mut err: *mut kafka_common_Error_t = std::ptr::null_mut();
-            let metadata = kafka_producer_FutureRecordMetadata_get(future, &mut err);
+            let metadata = kafka_common_KafkaFuture_RecordMetadata_get(future, &mut err);
             assert_success(err);
             assert!(!metadata.is_null());
             assert_eq!(kafka_producer_RecordMetadata_partition(metadata), 3);
 
             kafka_producer_RecordMetadata_destroy(metadata);
-            kafka_producer_FutureRecordMetadata_destroy(future);
+            kafka_common_KafkaFuture_RecordMetadata_destroy(future);
             kafka_producer_Producer_destroy(producer);
         }
     }
@@ -4543,7 +4543,8 @@ mod tests {
             },
         ];
 
-        let mut futures: [*mut kafka_producer_FutureRecordMetadata_t; 2] = [std::ptr::null_mut(), std::ptr::null_mut()];
+        let mut futures: [*mut kafka_common_KafkaFuture_RecordMetadata_t; 2] =
+            [std::ptr::null_mut(), std::ptr::null_mut()];
         let mut errors: [*mut kafka_common_Error_t; 2] = [std::ptr::null_mut(), std::ptr::null_mut()];
 
         unsafe {
@@ -4559,14 +4560,14 @@ mod tests {
             for i in 0..2 {
                 assert!(errors[i].is_null(), "errors[{i}] should be null on success");
                 assert!(!futures[i].is_null());
-                assert!(kafka_producer_FutureRecordMetadata_is_done(futures[i]));
+                assert!(kafka_common_KafkaFuture_RecordMetadata_is_done(futures[i]));
             }
 
             // Check history count
             assert_eq!(kafka_producer_MockProducer_history_count(producer as *const _), 2);
 
             for f in &futures {
-                kafka_producer_FutureRecordMetadata_destroy(*f);
+                kafka_common_KafkaFuture_RecordMetadata_destroy(*f);
             }
             kafka_producer_Producer_destroy(producer);
         }
@@ -5005,7 +5006,7 @@ mod tests {
         producer: *mut kafka_producer_Producer_t,
         records: *const kafka_producer_ProducerRecord_t,
         count: i32,
-        out_futures: *mut *mut kafka_producer_FutureRecordMetadata_t,
+        out_futures: *mut *mut kafka_common_KafkaFuture_RecordMetadata_t,
         out_errors: *mut *mut kafka_common_Error_t,
         expected_msg: &str,
     ) {
@@ -5040,7 +5041,7 @@ mod tests {
             value: std::ptr::null(),
             value_len: -1,
         }];
-        let mut futures: [*mut kafka_producer_FutureRecordMetadata_t; 1] = [std::ptr::null_mut()];
+        let mut futures: [*mut kafka_common_KafkaFuture_RecordMetadata_t; 1] = [std::ptr::null_mut()];
         let mut errors: [*mut kafka_common_Error_t; 1] = [std::ptr::null_mut()];
 
         unsafe {
@@ -5058,7 +5059,7 @@ mod tests {
     #[test]
     fn test_send_batch_null_records_panics() {
         let producer = kafka_producer_MockProducer_new(true);
-        let mut futures: [*mut kafka_producer_FutureRecordMetadata_t; 1] = [std::ptr::null_mut()];
+        let mut futures: [*mut kafka_common_KafkaFuture_RecordMetadata_t; 1] = [std::ptr::null_mut()];
         let mut errors: [*mut kafka_common_Error_t; 1] = [std::ptr::null_mut()];
 
         unsafe {
@@ -5115,7 +5116,7 @@ mod tests {
             value: std::ptr::null(),
             value_len: -1,
         }];
-        let mut futures: [*mut kafka_producer_FutureRecordMetadata_t; 1] = [std::ptr::null_mut()];
+        let mut futures: [*mut kafka_common_KafkaFuture_RecordMetadata_t; 1] = [std::ptr::null_mut()];
 
         unsafe {
             assert_send_batch_panics(
@@ -5143,7 +5144,7 @@ mod tests {
             value: std::ptr::null(),
             value_len: -1,
         }];
-        let mut futures: [*mut kafka_producer_FutureRecordMetadata_t; 1] = [std::ptr::null_mut()];
+        let mut futures: [*mut kafka_common_KafkaFuture_RecordMetadata_t; 1] = [std::ptr::null_mut()];
         let mut errors: [*mut kafka_common_Error_t; 1] = [std::ptr::null_mut()];
 
         unsafe {
@@ -5162,7 +5163,7 @@ mod tests {
     #[test]
     fn test_send_batch_zero_count() {
         let producer = kafka_producer_MockProducer_new(true);
-        let mut futures: *mut kafka_producer_FutureRecordMetadata_t = std::ptr::null_mut();
+        let mut futures: *mut kafka_common_KafkaFuture_RecordMetadata_t = std::ptr::null_mut();
         let mut errors: *mut kafka_common_Error_t = std::ptr::null_mut();
 
         unsafe {
@@ -5222,7 +5223,7 @@ mod tests {
             },
         ];
 
-        let mut futures: [*mut kafka_producer_FutureRecordMetadata_t; 3] =
+        let mut futures: [*mut kafka_common_KafkaFuture_RecordMetadata_t; 3] =
             [std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut()];
         let mut errors: [*mut kafka_common_Error_t; 3] =
             [std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut()];
@@ -5250,9 +5251,9 @@ mod tests {
             assert!(errors[2].is_null(), "Third error should be null");
 
             // Clean up
-            kafka_producer_FutureRecordMetadata_destroy(futures[0]);
+            kafka_common_KafkaFuture_RecordMetadata_destroy(futures[0]);
             kafka_common_Error_destroy(errors[1]);
-            kafka_producer_FutureRecordMetadata_destroy(futures[2]);
+            kafka_common_KafkaFuture_RecordMetadata_destroy(futures[2]);
             kafka_producer_Producer_destroy(producer);
         }
     }
@@ -5283,7 +5284,8 @@ mod tests {
             },
         ];
 
-        let mut futures: [*mut kafka_producer_FutureRecordMetadata_t; 2] = [std::ptr::null_mut(), std::ptr::null_mut()];
+        let mut futures: [*mut kafka_common_KafkaFuture_RecordMetadata_t; 2] =
+            [std::ptr::null_mut(), std::ptr::null_mut()];
         let mut errors: [*mut kafka_common_Error_t; 2] = [std::ptr::null_mut(), std::ptr::null_mut()];
 
         unsafe {
@@ -5329,7 +5331,7 @@ mod tests {
             assert_success(err);
 
             let mut err: *mut kafka_common_Error_t = std::ptr::null_mut();
-            let metadata = kafka_producer_FutureRecordMetadata_get(future, &mut err);
+            let metadata = kafka_common_KafkaFuture_RecordMetadata_get(future, &mut err);
             assert_success(err);
             assert!(!metadata.is_null());
 
@@ -5343,7 +5345,7 @@ mod tests {
             assert_eq!(topic_str, "my-topic");
 
             kafka_producer_RecordMetadata_destroy(metadata);
-            kafka_producer_FutureRecordMetadata_destroy(future);
+            kafka_common_KafkaFuture_RecordMetadata_destroy(future);
             kafka_producer_Producer_destroy(producer);
         }
     }
@@ -5376,7 +5378,7 @@ mod tests {
             );
 
             let mut err: *mut kafka_common_Error_t = std::ptr::null_mut();
-            let metadata = kafka_producer_FutureRecordMetadata_get(future, &mut err);
+            let metadata = kafka_common_KafkaFuture_RecordMetadata_get(future, &mut err);
             assert!(!err.is_null(), "Expected an error from future get");
             assert_eq!(kafka_common_Error_code(err), kafka_common_ErrorCode_CORRUPT_MESSAGE);
 
@@ -5387,7 +5389,7 @@ mod tests {
             assert!(metadata.is_null());
 
             kafka_common_Error_destroy(err);
-            kafka_producer_FutureRecordMetadata_destroy(future);
+            kafka_common_KafkaFuture_RecordMetadata_destroy(future);
             kafka_producer_Producer_destroy(producer);
         }
     }
@@ -5395,7 +5397,7 @@ mod tests {
     #[test]
     fn test_future_is_done_null() {
         unsafe {
-            assert!(!kafka_producer_FutureRecordMetadata_is_done(std::ptr::null_mut()));
+            assert!(!kafka_common_KafkaFuture_RecordMetadata_is_done(std::ptr::null_mut()));
         }
     }
 
@@ -5403,7 +5405,7 @@ mod tests {
     fn test_future_get_null_params() {
         unsafe {
             let mut err: *mut kafka_common_Error_t = std::ptr::null_mut();
-            let metadata = kafka_producer_FutureRecordMetadata_get(std::ptr::null_mut(), &mut err);
+            let metadata = kafka_common_KafkaFuture_RecordMetadata_get(std::ptr::null_mut(), &mut err);
             assert_error(err);
             assert!(metadata.is_null());
         }
@@ -5412,7 +5414,7 @@ mod tests {
     #[test]
     fn test_future_destroy_null() {
         unsafe {
-            kafka_producer_FutureRecordMetadata_destroy(std::ptr::null_mut());
+            kafka_common_KafkaFuture_RecordMetadata_destroy(std::ptr::null_mut());
         }
     }
 
@@ -5456,15 +5458,15 @@ mod tests {
             );
             assert_success(err);
 
-            assert!(!kafka_producer_FutureRecordMetadata_is_done(future));
+            assert!(!kafka_common_KafkaFuture_RecordMetadata_is_done(future));
 
             let mut err: *mut kafka_common_Error_t = std::ptr::null_mut();
             kafka_producer_Producer_flush(producer, &mut err);
             assert_success(err);
 
-            assert!(kafka_producer_FutureRecordMetadata_is_done(future));
+            assert!(kafka_common_KafkaFuture_RecordMetadata_is_done(future));
 
-            kafka_producer_FutureRecordMetadata_destroy(future);
+            kafka_common_KafkaFuture_RecordMetadata_destroy(future);
             kafka_producer_Producer_destroy(producer);
         }
     }
@@ -5572,11 +5574,11 @@ mod tests {
             ));
 
             let mut err: *mut kafka_common_Error_t = std::ptr::null_mut();
-            let metadata = kafka_producer_FutureRecordMetadata_get(future, &mut err);
+            let metadata = kafka_common_KafkaFuture_RecordMetadata_get(future, &mut err);
             assert_error(err);
             assert!(metadata.is_null());
 
-            kafka_producer_FutureRecordMetadata_destroy(future);
+            kafka_common_KafkaFuture_RecordMetadata_destroy(future);
             kafka_producer_Producer_destroy(producer);
         }
     }
@@ -5625,8 +5627,8 @@ mod tests {
             );
             assert_eq!(kafka_producer_MockProducer_history_count(producer as *const _), 2);
 
-            kafka_producer_FutureRecordMetadata_destroy(f1);
-            kafka_producer_FutureRecordMetadata_destroy(f2);
+            kafka_common_KafkaFuture_RecordMetadata_destroy(f1);
+            kafka_common_KafkaFuture_RecordMetadata_destroy(f2);
             kafka_producer_Producer_destroy(producer);
         }
     }
@@ -5661,7 +5663,7 @@ mod tests {
             kafka_producer_MockProducer_clear(producer);
             assert_eq!(kafka_producer_MockProducer_history_count(producer as *const _), 0);
 
-            kafka_producer_FutureRecordMetadata_destroy(f);
+            kafka_common_KafkaFuture_RecordMetadata_destroy(f);
             kafka_producer_Producer_destroy(producer);
         }
     }
@@ -5782,7 +5784,7 @@ mod tests {
 
             // Get metadata
             let mut err: *mut kafka_common_Error_t = std::ptr::null_mut();
-            let metadata = kafka_producer_FutureRecordMetadata_get(future, &mut err);
+            let metadata = kafka_common_KafkaFuture_RecordMetadata_get(future, &mut err);
             assert_success(err);
 
             // Verify metadata
@@ -5797,7 +5799,7 @@ mod tests {
 
             // Clean up
             kafka_producer_RecordMetadata_destroy(metadata);
-            kafka_producer_FutureRecordMetadata_destroy(future);
+            kafka_common_KafkaFuture_RecordMetadata_destroy(future);
             kafka_producer_Producer_destroy(producer);
         }
     }
@@ -5824,12 +5826,12 @@ mod tests {
                 assert_success(err);
 
                 let mut err: *mut kafka_common_Error_t = std::ptr::null_mut();
-                let metadata = kafka_producer_FutureRecordMetadata_get(future, &mut err);
+                let metadata = kafka_common_KafkaFuture_RecordMetadata_get(future, &mut err);
                 assert_success(err);
                 assert_eq!(kafka_producer_RecordMetadata_offset(metadata), expected_offset);
 
                 kafka_producer_RecordMetadata_destroy(metadata);
-                kafka_producer_FutureRecordMetadata_destroy(future);
+                kafka_common_KafkaFuture_RecordMetadata_destroy(future);
             }
 
             kafka_producer_Producer_destroy(producer);
@@ -5902,9 +5904,9 @@ mod tests {
                 &mut err,
             );
             assert_success(err);
-            assert!(kafka_producer_FutureRecordMetadata_is_done(future));
+            assert!(kafka_common_KafkaFuture_RecordMetadata_is_done(future));
 
-            kafka_producer_FutureRecordMetadata_destroy(future);
+            kafka_common_KafkaFuture_RecordMetadata_destroy(future);
             kafka_producer_Producer_destroy(producer);
         }
     }
@@ -6123,9 +6125,9 @@ mod tests {
                 &mut err,
             );
             assert_success(err);
-            assert!(kafka_producer_FutureRecordMetadata_is_done(future));
+            assert!(kafka_common_KafkaFuture_RecordMetadata_is_done(future));
 
-            kafka_producer_FutureRecordMetadata_destroy(future);
+            kafka_common_KafkaFuture_RecordMetadata_destroy(future);
             kafka_producer_Producer_destroy(producer);
         }
     }
