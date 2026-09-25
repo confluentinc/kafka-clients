@@ -42,7 +42,7 @@ from collections.abc import Callable
 from typing import cast
 
 from confluent_kafka import IllegalArgumentError
-from confluent_kafka.common.config._generated_errors import ConfigError
+from confluent_kafka.common.config.config_error import ConfigError
 
 _LOG = logging.getLogger("confluent_kafka")
 
@@ -83,15 +83,15 @@ def _resolve_class(dotted_path: str) -> type:
     """
     module_name, _, attr = dotted_path.rpartition(".")
     if not module_name:
-        raise ConfigError(f"Class {dotted_path} could not be found.")
+        raise ConfigError(message=f"Class {dotted_path} could not be found.")
     try:
         module = importlib.import_module(module_name)
         obj = getattr(module, attr)
     except (ImportError, AttributeError) as exc:
-        raise ConfigError(f"Class {dotted_path} could not be found.") from exc
+        raise ConfigError(message=f"Class {dotted_path} could not be found.") from exc
     if not isinstance(obj, type):
         raise ConfigError(
-            f"Class {dotted_path} could not be found."
+            message=f"Class {dotted_path} could not be found."
         )
     return obj
 
@@ -103,12 +103,12 @@ def _construct_from_class(cls: type, configs: dict[str, object], is_key: bool) -
     except TypeError as exc:
         # Java: "Could not find a public no-argument constructor for <cls>".
         raise ConfigError(
-            f"Could not find a public no-argument constructor for "
+            message=f"Could not find a public no-argument constructor for "
             f"{cls.__module__}.{cls.__qualname__}"
         ) from exc
     if not callable(instance):
         raise ConfigError(
-            f"{cls.__module__}.{cls.__qualname__} is not a serializer/deserializer"
+            message=f"{cls.__module__}.{cls.__qualname__} is not a serializer/deserializer"
         )
     configure_if_defined(instance, configs, is_key)
     return cast("Callable[..., object]", instance)
@@ -133,11 +133,11 @@ def resolve_serde(
     if kwarg is not None:
         if inspect.isclass(kwarg):
             raise IllegalArgumentError(
-                f"{key}: pass an instance, not the class — did you forget '()'?"
+                message=f"{key}: pass an instance, not the class — did you forget '()'?"
             )
         if not callable(kwarg):
             raise IllegalArgumentError(
-                f"{key} must be a callable serializer/deserializer, "
+                message=f"{key} must be a callable serializer/deserializer, "
                 f"got {type(kwarg).__name__}"
             )
         return cast("Callable[..., object]", kwarg)
@@ -153,6 +153,6 @@ def resolve_serde(
     # An instance (or any non-str, non-class value) in config is rejected —
     # Java's config dict stays pure data (Type.CLASS accepts a name or a Class).
     raise ConfigError(
-        f"Invalid value {config_value!r} for configuration {key}: "
+        message=f"Invalid value {config_value!r} for configuration {key}: "
         f"Expected a Class instance or class name."
     )

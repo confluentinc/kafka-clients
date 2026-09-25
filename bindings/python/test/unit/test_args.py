@@ -44,7 +44,8 @@ class _Acknowledge:
     ``acknowledge(topic, partition, offset, type)``: ``type`` is required by
     the last form and defaulted by the first, so its default is ``UNSET``."""
 
-    @java_forms(Form("record", "type", defaults={"type": "ACCEPT"}),
+    @java_forms(Form("record"),
+                Form("record", "type", defaults={"type": "ACCEPT"}),
                 Form("topic", "partition", "offset", "type"))
     def acknowledge(self, *, record: object | None = None,
                     topic: str | None = None, partition: int | None = None,
@@ -105,7 +106,7 @@ def test_strict_matching_rejects_a_default_another_overload_receives() -> None:
     with pytest.raises(IllegalArgumentError) as exc:
         _Acknowledge().acknowledge(topic="t", partition=0, offset=1)
     assert str(exc.value) == (
-        "acknowledge() takes one of (record, type), "
+        "acknowledge() takes one of (record), (record, type), "
         "(topic, partition, offset, type); got (topic, partition, offset)")
 
 

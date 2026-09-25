@@ -26,7 +26,7 @@ than ``java.util.UUID`` — see clarification C15.
 
 from __future__ import annotations
 
-from confluent_kafka.common.errors._generated import SerializationError
+from confluent_kafka.common.errors.serialization_error import SerializationError
 from confluent_kafka.common.headers import Headers
 from confluent_kafka.common.uuid import Uuid
 
@@ -61,11 +61,11 @@ class UUIDDeserializer:
             text = bytes(data).decode(self._encoding)
         except LookupError as exc:
             raise SerializationError(
-                "Error when deserializing byte[] to UUID due to unsupported "
+                message="Error when deserializing byte[] to UUID due to unsupported "
                 f"encoding {self._encoding}"
             ) from exc
         try:
             return Uuid.from_string(str=text)
         except IllegalArgumentError as exc:
             # Java wraps UUID.fromString's IllegalArgumentException.
-            raise SerializationError("Error parsing data into UUID") from exc
+            raise SerializationError(message="Error parsing data into UUID") from exc

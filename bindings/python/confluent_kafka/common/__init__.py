@@ -12,31 +12,41 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""``confluent_kafka.common`` — mirror of ``org.apache.kafka.common``.
+"""``confluent_kafka.common``: Java's ``org.apache.kafka.common``.
 
-Common value types (``TopicPartition``, ``TopicIdPartition``, ``Node``,
-``PartitionInfo``, ``Uuid``, ``MetricName``, ``Metric``, ``KafkaMetric``,
-``TimestampType``, ``Headers``) live here (P2). The sub-packages
-``common.errors``, ``common.config`` and ``common.serialization`` hold the
-error hierarchy and the serialization surface.
+The common value types, plus the types of ``common.*`` subpackages that are not
+a module of their own (CLAUDE.md, Python Binding Conventions, Modules):
+``TimestampType`` (``common.record``), ``Headers`` (``common.header``),
+``KafkaMetric``, ``MetricConfig`` and ``Measurable`` (``common.metrics``). The
+errors of ``org.apache.kafka.common`` (``KafkaError``, ``InvalidRecordError``)
+live here too; the other error packages are the modules ``common.errors``,
+``common.requests``, ``common.network``, ``common.metrics`` and
+``common.protocol.types``.
 """
 
 from __future__ import annotations
 
-from .headers import Headers
-from .metric import KafkaMetric, Metric
-from .metric_name import MetricName
-from .node import Node
-from .partition_info import PartitionInfo
-from .timestamp_type import TimestampType
-from .topic_id_partition import TopicIdPartition
-from .topic_partition import TopicPartition
-from .uuid import Uuid
+from .cluster import Cluster as Cluster
+from .headers import Headers as Headers
+from .kafka_metric import KafkaMetric as KafkaMetric
+from .measurable import Measurable as Measurable
+from .metric import Metric as Metric
+from .metric_config import MetricConfig as MetricConfig
+from .metric_name import MetricName as MetricName
+from .node import Node as Node
+from .partition_info import PartitionInfo as PartitionInfo
+from .timestamp_type import TimestampType as TimestampType
+from .topic_id_partition import TopicIdPartition as TopicIdPartition
+from .topic_partition import TopicPartition as TopicPartition
+from .uuid import Uuid as Uuid
 
 __all__ = [
+    "Cluster",
     "Headers",
     "KafkaMetric",
+    "Measurable",
     "Metric",
+    "MetricConfig",
     "MetricName",
     "Node",
     "PartitionInfo",
@@ -45,3 +55,12 @@ __all__ = [
     "TopicPartition",
     "Uuid",
 ]
+
+# BEGIN GENERATED ERRORS (cargo xtask generate-error-codes; do not edit)
+from .invalid_record_error import InvalidRecordError as InvalidRecordError
+from .kafka_error import KafkaError as KafkaError
+__all__ += [
+    "InvalidRecordError",
+    "KafkaError",
+]
+# END GENERATED ERRORS

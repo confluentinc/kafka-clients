@@ -37,7 +37,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-from confluent_kafka.common.errors._base import KafkaError
+from confluent_kafka.common.kafka_error import KafkaError
 from confluent_kafka.common.topic_partition import TopicPartition
 
 from .offset_and_metadata import OffsetAndMetadata

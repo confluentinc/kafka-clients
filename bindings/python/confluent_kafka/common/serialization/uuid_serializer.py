@@ -28,7 +28,7 @@ see clarification C15.
 
 from __future__ import annotations
 
-from confluent_kafka.common.errors._generated import SerializationError
+from confluent_kafka.common.errors.serialization_error import SerializationError
 from confluent_kafka.common.headers import Headers
 from confluent_kafka.common.uuid import Uuid
 
@@ -64,6 +64,6 @@ class UUIDSerializer:
             return str(value).encode(self._encoding)
         except LookupError as exc:
             raise SerializationError(
-                "Error when serializing UUID to byte[] due to unsupported "
+                message="Error when serializing UUID to byte[] due to unsupported "
                 f"encoding {self._encoding}"
             ) from exc

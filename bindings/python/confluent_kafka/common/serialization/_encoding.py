@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import codecs
 
-from confluent_kafka.common.errors._generated import SerializationError
+from confluent_kafka.common.errors.serialization_error import SerializationError
 
 
 def normalize_encoding(name: str) -> str:
@@ -40,5 +40,5 @@ def normalize_encoding(name: str) -> str:
     try:
         codecs.lookup(name)
     except LookupError as exc:
-        raise SerializationError(f"Unsupported encoding {name}") from exc
+        raise SerializationError(message=f"Unsupported encoding {name}") from exc
     return name

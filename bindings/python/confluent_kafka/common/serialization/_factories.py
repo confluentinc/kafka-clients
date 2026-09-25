@@ -78,7 +78,7 @@ def int_serializer(*, size: int = 4) -> Serializer[int]:
     """Signed big-endian integer serializer; ``size`` is 4 or 8 bytes."""
     if size not in _INT_SIZES:
         raise IllegalArgumentError(
-            f"int_serializer size must be one of {_INT_SIZES}; got {size}"
+            message=f"int_serializer size must be one of {_INT_SIZES}; got {size}"
         )
     return IntSerializer(size)
 
@@ -87,7 +87,7 @@ def int_deserializer(*, size: int = 4) -> Deserializer[int]:
     """Signed big-endian integer deserializer; ``size`` is 4 or 8 bytes."""
     if size not in _INT_SIZES:
         raise IllegalArgumentError(
-            f"int_deserializer size must be one of {_INT_SIZES}; got {size}"
+            message=f"int_deserializer size must be one of {_INT_SIZES}; got {size}"
         )
     return IntDeserializer(size)
 
@@ -96,7 +96,7 @@ def float_serializer(*, size: int = 8) -> Serializer[float]:
     """Big-endian IEEE-754 serializer; ``size`` is 8 or 4 bytes."""
     if size not in _FLOAT_SIZES:
         raise IllegalArgumentError(
-            f"float_serializer size must be one of {_FLOAT_SIZES}; got {size}"
+            message=f"float_serializer size must be one of {_FLOAT_SIZES}; got {size}"
         )
     return FloatSerializer(size)
 
@@ -105,7 +105,7 @@ def float_deserializer(*, size: int = 8) -> Deserializer[float]:
     """Big-endian IEEE-754 deserializer; ``size`` is 8 or 4 bytes."""
     if size not in _FLOAT_SIZES:
         raise IllegalArgumentError(
-            f"float_deserializer size must be one of {_FLOAT_SIZES}; got {size}"
+            message=f"float_deserializer size must be one of {_FLOAT_SIZES}; got {size}"
         )
     return FloatDeserializer(size)
 

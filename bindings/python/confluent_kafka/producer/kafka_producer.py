@@ -46,7 +46,7 @@ _VALUE_SERIALIZER_KEY = "value.serializer"
 
 def _prepare_config(config: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(config, dict):
-        raise IllegalArgumentError("config must be a dict")
+        raise IllegalArgumentError(message="config must be a dict")
     # Reject the old-client callback config keys (§11.1); each names its
     # replacement. group.id is intentionally not rejected.
     reject_callback_config_keys(config)
@@ -122,7 +122,7 @@ def _reject_partitioner(partitioner: object | None) -> None:
     gap."""
     if partitioner is not None:
         raise IllegalArgumentError(
-            "custom partitioner is not yet supported; the pluggable partitioner "
+            message="custom partitioner is not yet supported; the pluggable partitioner "
             "surface is finalized in the plugin design pass (spec §6.1)")
 
 

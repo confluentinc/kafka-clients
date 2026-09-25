@@ -14,6 +14,7 @@
 
 mod check_bindings;
 mod error_hierarchy;
+mod java_parse;
 
 use std::env;
 use std::fs;

@@ -20,7 +20,7 @@ raises ``SerializationException``. ``None`` maps to ``None``.
 
 from __future__ import annotations
 
-from confluent_kafka.common.errors._generated import SerializationError
+from confluent_kafka.common.errors.serialization_error import SerializationError
 from confluent_kafka.common.headers import Headers
 
 _TRUE = 0x01
@@ -40,7 +40,7 @@ class BooleanDeserializer:
             return None
         if len(data) != 1:
             raise SerializationError(
-                "Size of data received by BooleanDeserializer is not 1"
+                message="Size of data received by BooleanDeserializer is not 1"
             )
         b = data[0]
         if b == _TRUE:
@@ -51,5 +51,5 @@ class BooleanDeserializer:
         # 0xFF). Convert so the text matches Java exactly.
         signed = b - 256 if b > 127 else b
         raise SerializationError(
-            f"Unexpected byte received by BooleanDeserializer: {signed}"
+            message=f"Unexpected byte received by BooleanDeserializer: {signed}"
         )

@@ -25,7 +25,7 @@ from typing import Any, Callable
 
 import _confluentkafka as _lib  # type: ignore[import-not-found]
 
-from confluent_kafka.common.errors import from_ffi_error
+from confluent_kafka._errors import from_ffi_error
 from confluent_kafka.common.serialization import (
     bytes_deserializer, resolve_serde,
 )

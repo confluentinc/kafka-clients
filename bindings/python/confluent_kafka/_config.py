@@ -45,7 +45,7 @@ import logging
 from datetime import timedelta
 
 from confluent_kafka import Duration, IllegalArgumentError
-from confluent_kafka.common.config._generated_errors import ConfigError
+from confluent_kafka.common.config.config_error import ConfigError
 
 _LOG = logging.getLogger("confluent_kafka")
 
@@ -86,7 +86,7 @@ _INT64_MIN, _INT64_MAX = -(2**63), 2**63 - 1
 
 def _config_exception(name: str, value: object, message: str) -> ConfigError:
     """Java's ``ConfigException(name, value, message)`` text as a ``ConfigError``."""
-    return ConfigError(f"Invalid value {value} for configuration {name}: {message}")
+    return ConfigError(message=f"Invalid value {value} for configuration {name}: {message}")
 
 
 def coerce_config_value(name: str, value: object, config_type: ConfigType) -> object:
@@ -180,7 +180,7 @@ def coerce_config_value(name: str, value: object, config_type: ConfigType) -> ob
             return value
         raise _config_exception(name, value, "Expected a Class instance or class name.")
 
-    raise ConfigError(f"Unknown config type for {name}")  # unreachable
+    raise ConfigError(message=f"Unknown config type for {name}")  # unreachable
 
 
 def _coerce_int(
@@ -254,7 +254,7 @@ def duration_to_ms(timeout: Duration | None, *, default_ms: int) -> int:
     if millis < 0:
         # Java's exact text for every client's negative-timeout guard
         # (KafkaProducer.java:1393, AsyncKafkaConsumer.java:1552, ...).
-        raise IllegalArgumentError("The timeout cannot be negative.")
+        raise IllegalArgumentError(message="The timeout cannot be negative.")
     return int(millis)
 
 
@@ -301,5 +301,5 @@ def reject_callback_config_keys(config: dict[str, object]) -> None:
         replacement = REJECTED_CALLBACK_KEYS.get(key)
         if replacement is not None:
             raise ConfigError(
-                f"'{key}' is not a configuration key in this client: {replacement}"
+                message=f"'{key}' is not a configuration key in this client: {replacement}"
             )

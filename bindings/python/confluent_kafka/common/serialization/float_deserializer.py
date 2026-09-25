@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import struct
 
-from confluent_kafka.common.errors._generated import SerializationError
+from confluent_kafka.common.errors.serialization_error import SerializationError
 from confluent_kafka.common.headers import Headers
 
 _FORMAT_BY_SIZE = {4: ">f", 8: ">d"}
@@ -49,7 +49,7 @@ class FloatDeserializer:
         if len(data) != self._size:
             # Both Java array-path deserializers use the literal "Deserializer".
             raise SerializationError(
-                f"Size of data received by Deserializer is not {self._size}"
+                message=f"Size of data received by Deserializer is not {self._size}"
             )
         value: float = struct.unpack(self._format, bytes(data))[0]
         return value

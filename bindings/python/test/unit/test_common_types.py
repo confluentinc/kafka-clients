@@ -47,7 +47,8 @@ from confluent_kafka.common import (
     Uuid,
 )
 # Binding-internal helper (not part of the public common surface, F3).
-from confluent_kafka.common.headers import _validate_written_headers
+from confluent_kafka.common.headers import _read_headers
+from confluent_kafka import NullPointerError
 
 # --------------------------------------------------------------------------- #
 # Uuid — translated from UuidTest
@@ -402,27 +403,25 @@ def test_metric_name_hash_is_tag_insertion_order_independent() -> None:
 # --------------------------------------------------------------------------- #
 
 
-def test_validate_written_headers_normalizes() -> None:
-    out = _validate_written_headers(
-        [("k1", b"v1"), ("k2", bytearray(b"v2")), ("k3", None)]
-    )
-    assert out == (("k1", b"v1"), ("k2", b"v2"), ("k3", None))
+def test_read_headers_views_the_values_without_copying() -> None:
+    raw = bytearray(b"v2")
+    out = _read_headers([("k1", b"v1"), ("k2", raw), ("k3", None)])
+    assert [(k, None if v is None else v.tobytes()) for k, v in out] == [
+        ("k1", b"v1"), ("k2", b"v2"), ("k3", None)]
+    assert all(v is None or isinstance(v, memoryview) for _, v in out)
+    raw[0] = ord("V")  # a view, not a copy (CLAUDE.md §12)
+    assert out[1][1] is not None and out[1][1].tobytes() == b"V2"
+    assert _read_headers(None) == ()
 
 
-def test_validate_written_headers_rejects_bad_value() -> None:
-    with pytest.raises(IllegalArgumentError):
-        _validate_written_headers([("k", "not-bytes")])  # type: ignore[list-item]
+def test_read_headers_rejects_a_bad_value_or_shape() -> None:
+    with pytest.raises(TypeError):
+        _read_headers([("k", "not-bytes")])  # type: ignore[list-item]
+    with pytest.raises(TypeError):
+        _read_headers([("k",)])  # type: ignore[list-item]
 
 
-def test_validate_written_headers_rejects_bad_shape() -> None:
-    with pytest.raises(IllegalArgumentError):
-        _validate_written_headers([("k",)])  # type: ignore[list-item]
-
-
-def test_validate_written_headers_is_not_public() -> None:
-    # F3: the write-path header validator is binding-internal (no Java analog),
-    # so it must NOT be on the public confluent_kafka.common surface.
-    import confluent_kafka.common as common
-
-    assert "validate_written_headers" not in common.__all__
-    assert not hasattr(common, "validate_written_headers")
+def test_read_headers_rejects_a_null_key_with_javas_message() -> None:
+    with pytest.raises(NullPointerError) as exc:
+        _read_headers([(None, b"v")])  # type: ignore[list-item]
+    assert str(exc.value) == "Null header keys are not permitted"

@@ -12,18 +12,25 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tests for the generated error hierarchy (spec §5.5, Design Decisions D1).
+"""Tests for the generated error hierarchy (CLAUDE.md, Python Binding
+Conventions, Errors).
 
-The parent chains, abstract set and ``_ffi_id`` round-trip are checked **against
-the Java sources directly** (both directions) — the same cross-check the
-generator performs — so a drift in the generated output is caught here as well
-as at build time.
+The parent chains are checked against the Java sources directly, in both
+directions, and each ``_ffi_id`` against the FFI enum, independently of the
+generator. The constructors are checked against Java's: the message each
+overload gives ``getMessage()``, the payload defaults, and the ``java_forms``
+rejection of a combination Java has no constructor for.
 """
 
 from __future__ import annotations
 
+import builtins
+import copy
+import importlib
+import pickle
 import re
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -32,779 +39,654 @@ from confluent_kafka import (
     ConcurrentModificationError,
     IllegalArgumentError,
     IllegalStateError,
-    TimeoutError as RootTimeoutError,
+    NoSuchElementError,
+    NullPointerError,
+)
+from confluent_kafka import TimeoutError as RootTimeoutError
+from confluent_kafka import _errors as errmod
+from confluent_kafka._error_registry import ERRORS
+from confluent_kafka._errors import class_for_ffi_id, error_classes, from_ffi_error, to_ffi_id
+from confluent_kafka.common import (
+    InvalidRecordError,
+    KafkaError,
+    KafkaMetric,
+    MetricName,
+    TimestampType,
+    TopicPartition,
 )
 from confluent_kafka.common.config import ConfigError
 from confluent_kafka.common.errors import (
-    KafkaError,
+    CoordinatorNotAvailableError,
+    CorruptRecordError,
+    DisconnectError,
+    DuplicateResourceError,
+    GroupAuthorizationError,
+    InterruptError,
+    InvalidMetadataError,
+    InvalidTopicError,
+    NotLeaderOrFollowerError,
+    RecordDeserializationError,
+    RecordTooLargeError,
+    ResourceNotFoundError,
     RetriableError,
-    to_ffi_id,
+    ThrottlingQuotaExceededError,
+    TopicAuthorizationError,
+    TransactionAbortedError,
+    UnknownServerError,
+    WakeupError,
 )
-from confluent_kafka.common.errors import _BY_FFI_ID, _generated
-from confluent_kafka.common.errors._base import KafkaError as BaseKafkaError
-
-# ----------------------------------------------------------------------------
-# Java-source parsing (independent of the generator, for a real cross-check)
-# ----------------------------------------------------------------------------
+from confluent_kafka.common.metrics import QuotaViolationError
+from confluent_kafka.common.network import InvalidReceiveError
+from confluent_kafka.common.protocol.types import SchemaError
+from confluent_kafka.common.requests import CorrelationIdMismatchError
+from confluent_kafka.consumer import (
+    CommitFailedError,
+    InvalidOffsetError,
+    LogTruncationError,
+    NoOffsetForPartitionError,
+    OffsetAndMetadata,
+    OffsetOutOfRangeError,
+    RetriableCommitFailedError,
+)
+from confluent_kafka.producer import BufferExhaustedError
 
 _REPO_ROOT = Path(__file__).resolve().parents[4]
 _JAVA_ROOT = _REPO_ROOT / "kafka/clients/src/main/java"
-
-# The generator's BRIDGE, read here so the test is a genuine independent check of
-# the generated output rather than a re-run of the generator.
-# (id_constant -> java_fqn). Kept in sync with xtask/src/error_hierarchy.rs.
-_BRIDGE_PATH = _REPO_ROOT / "xtask/src/error_hierarchy.rs"
+_TP = TopicPartition(topic="t", partition=0)
 
 
-def _load_bridge() -> dict[str, str]:
-    """Parse the BRIDGE table out of the generator source (its `(ID, "fqn")` rows)."""
-    text = _BRIDGE_PATH.read_text()
-    start = text.index("const BRIDGE:")
-    end = text.index("];", start)
-    body = text[start:end]
-    # ``cargo fmt`` may split a row across lines, so allow whitespace/newlines
-    # between the id and the fqn.
-    rows = re.findall(r'\(\s*"([A-Z0-9_]+)"\s*,\s*"([\w.]+)"\s*,?\s*\)', body)
-    bridge = dict(rows)
-    assert len(bridge) == len(rows), "duplicate id in BRIDGE"
-    assert len(bridge) == 161, f"expected 161 bridge rows, parsed {len(bridge)}"
-    return bridge
+# ----------------------------------------------------------------------------
+# The Java side, read independently of the generator
+# ----------------------------------------------------------------------------
 
 
-def _java_path(fqn: str) -> Path:
-    return _JAVA_ROOT / (fqn.replace(".", "/") + ".java")
+def _java_source(fqn: str) -> str:
+    return (_JAVA_ROOT / (fqn.replace(".", "/") + ".java")).read_text()
 
 
-def _parse_java(fqn: str) -> tuple[bool, str]:
-    """Return ``(is_abstract, parent_fqn)`` for a Java exception class."""
-    text = _java_path(fqn).read_text()
-    package = re.search(r"package\s+([\w.]+);", text).group(1)
-    m = re.search(r"public\s+(abstract\s+)?class\s+\w+\s+extends\s+(\w+)", text)
-    assert m, f"no class declaration in {fqn}"
-    is_abstract = bool(m.group(1))
-    parent_simple = m.group(2)
-    imp = re.search(rf"import\s+([\w.]+\.{parent_simple});", text)
-    if imp:
-        parent_fqn = imp.group(1)
-    elif parent_simple in (
-        "RuntimeException",
-        "Exception",
-        "Throwable",
-        "IllegalStateException",
-        "IllegalArgumentException",
-    ):
-        parent_fqn = f"java.lang.{parent_simple}"
-    else:
-        parent_fqn = f"{package}.{parent_simple}"
-    return is_abstract, parent_fqn
+def _java_parent(fqn: str) -> str:
+    """The FQN of a Java exception class's parent, from its source."""
+    text = _java_source(fqn)
+    package_match = re.search(r"package\s+([\w.]+);", text)
+    assert package_match is not None, fqn
+    m = re.search(r"public\s+(?:abstract\s+|final\s+)?class\s+\w+\s+extends\s+(\w+)", text)
+    assert m is not None, fqn
+    parent = m.group(1)
+    imported = re.search(rf"import\s+([\w.]+\.{parent});", text)
+    if imported:
+        return imported.group(1)
+    if parent in ("RuntimeException", "Exception", "IllegalStateException"):
+        return f"java.lang.{parent}"
+    return f"{package_match.group(1)}.{parent}"
 
 
-def _python_name(java_simple: str) -> str:
-    stem = java_simple[: -len("Exception")] if java_simple.endswith("Exception") else java_simple
-    return stem + "Error"
+def _java_is_abstract(fqn: str) -> bool:
+    return re.search(r"public\s+abstract\s+class\s", _java_source(fqn)) is not None
 
 
-_BRIDGE = _load_bridge()
-
-
-def _module_object(java_package: str):
-    """The generated Python module for a Java package (mirrors the generator's
-    placement rule)."""
-    from confluent_kafka import _generated_errors as root_errors
-    from confluent_kafka.common import errors as common_errors
-    from confluent_kafka.common.config import _generated_errors as config_errors
-    from confluent_kafka.consumer import _generated_errors as consumer_errors
-
-    if java_package == "org.apache.kafka.common.config":
-        return config_errors
-    if java_package == "org.apache.kafka.clients.consumer":
-        return consumer_errors
+def _python_module(java_package: str) -> str:
     if java_package.startswith("java."):
-        return root_errors
-    return common_errors
+        return "confluent_kafka"
+    rest = java_package.removeprefix("org.apache.kafka.").removeprefix("clients.")
+    return f"confluent_kafka.{rest}"
 
 
-def _class_for_java(fqn: str) -> type:
-    """The exact Python class for a Java FQN, resolved in the right module (so the
-    two ``InvalidOffsetError`` classes — common.errors concrete vs consumer
-    abstract — do not collide)."""
-    package = fqn.rsplit(".", 1)[0]
-    py_name = _python_name(fqn.rsplit(".", 1)[1])
-    return getattr(_module_object(package), py_name)
+# The Java built-ins and their Python base (CLAUDE.md, Types).
+_JDK: dict[str, type[BaseException]] = {
+    "java.lang.IllegalStateException": RuntimeError,
+    "java.lang.IllegalArgumentException": RuntimeError,
+    "java.util.ConcurrentModificationException": RuntimeError,
+    "java.util.concurrent.TimeoutException": builtins.TimeoutError,
+    "java.util.NoSuchElementException": RuntimeError,
+    "java.lang.NullPointerException": RuntimeError,
+}
 
-
-# Every generated class, keyed by (module_name, py_name) so name collisions
-# across modules are preserved.
-def _all_generated_classes() -> dict[tuple[str, str], type]:
-    from confluent_kafka import _generated_errors as root_errors
-    from confluent_kafka.common.config import _generated_errors as config_errors
-    from confluent_kafka.consumer import _generated_errors as consumer_errors
-
-    classes: dict[tuple[str, str], type] = {}
-    for module in (_generated, root_errors, config_errors, consumer_errors):
-        for name in module.__all__:
-            classes[(module.__name__, name)] = getattr(module, name)
-    return classes
-
-
-_CLASSES = _all_generated_classes()
-
-_ABSTRACT_JAVA = {
-    "org.apache.kafka.common.errors.RetriableException",
-    "org.apache.kafka.common.errors.RefreshRetriableException",
-    "org.apache.kafka.common.errors.InvalidMetadataException",
-    "org.apache.kafka.common.errors.ApplicationRecoverableException",
-    "org.apache.kafka.clients.consumer.InvalidOffsetException",
+_BY_JAVA: dict[str, type[BaseException]] = {
+    java: getattr(importlib.import_module(module), name) for module, name, java in ERRORS
 }
 
 
-# ----------------------------------------------------------------------------
-# Parent chains: every generated class equals its Java `extends` (both directions)
-# ----------------------------------------------------------------------------
+def _bridge() -> dict[str, str]:
+    """The generator's reviewed id -> Java class table, parsed from its source."""
+    text = (_REPO_ROOT / "xtask/src/error_hierarchy.rs").read_text()
+    body = text[text.index("const BRIDGE:"):]
+    body = body[:body.index("];")]
+    rows = re.findall(r'\(\s*"([A-Z0-9_]+)"\s*,\s*"([\w.]+)"\s*,?\s*\)', body)
+    assert len(rows) == 161
+    return dict(rows)
 
 
-def test_every_bridge_class_exists_in_python_with_correct_parent() -> None:
-    """Java -> Python: each concrete Java class has a Python class whose immediate
-    base equals the Python class for its Java parent (or ``KafkaError`` for
-    ``KafkaException``, or a builtin for a JDK root)."""
-    for _id, fqn in _BRIDGE.items():
-        java_simple = fqn.rsplit(".", 1)[1]
-        py_name = _python_name(java_simple)
-        cls = _class_for_java(fqn)  # raises if missing
-        assert cls.__name__ == py_name
-        if fqn.startswith("java."):
-            # JDK analogs: parent is a builtin, checked separately.
-            continue
-        _is_abstract, parent_fqn = _parse_java(fqn)
-        immediate_base = cls.__mro__[1]
-        expected_base = _expected_base_name(parent_fqn)
-        assert immediate_base.__name__ == expected_base, (
-            f"{py_name} extends {immediate_base.__name__}, Java says {expected_base}"
-        )
-
-
-def _expected_base_name(parent_fqn: str) -> str:
-    if parent_fqn == "org.apache.kafka.common.KafkaException":
-        return "KafkaError"
-    return _python_name(parent_fqn.rsplit(".", 1)[1])
-
-
-def test_python_to_java_no_extra_concrete_classes() -> None:
-    """Python -> Java: every concrete generated class corresponds to a bridge
-    class (no invented classes)."""
-    bridge_py_names = {
-        _python_name(fqn.rsplit(".", 1)[1]) for fqn in _BRIDGE.values()
-    }
-    for (_module, name), cls in _CLASSES.items():
-        if "_ffi_id" in cls.__dict__:
-            assert name in bridge_py_names, f"{name} is concrete but not in the bridge"
-
-
-# ----------------------------------------------------------------------------
-# _ffi_id: unique, and equal to the same-named _error_code.py constant
-# ----------------------------------------------------------------------------
-
-
-def test_ffi_ids_are_unique() -> None:
-    seen: dict[int, str] = {}
-    for (_module, name), cls in _CLASSES.items():
-        if "_ffi_id" not in cls.__dict__:
-            continue
-        ffi_id = cls._ffi_id
-        assert ffi_id not in seen, f"{name} and {seen[ffi_id]} share id {ffi_id}"
-        seen[ffi_id] = name
-    # 161 concrete classes (one per FFI id except NONE).
-    assert len(seen) == 161
-
-
-def _error_code_constants() -> dict[str, int]:
-    """The FFI error-code constants, from the generated Rust mirror
-    ``tests/common/error_code.rs`` (``pub const NAME: i32 = VALUE;``).
-
-    The flat ``_error_code.py`` copy was retired in P6; this Rust mirror is the
-    surviving generated copy of the same ``kafka_common_ErrorCode_t`` enum, so it
-    is the ground truth for the cross-check below.
-    """
+def _ffi_enum() -> dict[str, int]:
+    """``kafka_common_ErrorCode_t``, from its generated Rust mirror."""
     text = (_REPO_ROOT / "tests/common/error_code.rs").read_text()
-    return {name: int(value)
-            for name, value in re.findall(
-                r"pub const (\w+): i32 = (-?\d+);", text)}
+    return {n: int(v) for n, v in re.findall(r"pub const (\w+): i32 = (-?\d+);", text)}
 
 
-def test_ffi_id_equals_error_code_constant() -> None:
-    """Each ``_ffi_id`` equals the FFI error-code constant of the same name
-    named in the trailing comment of the generated class."""
-    constants = _error_code_constants()
-
-    for _id, fqn in _BRIDGE.items():
-        cls = _class_for_java(fqn)
-        expected = constants[_id]
-        assert cls._ffi_id == expected, f"{cls.__name__}._ffi_id {cls._ffi_id} != {_id} {expected}"
+def _snake(name: str) -> str:
+    return re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", name).lower()
 
 
 # ----------------------------------------------------------------------------
-# Abstract classes: exactly the five Java abstract ones; construction raises
+# Parent chains, both directions
 # ----------------------------------------------------------------------------
 
 
-def test_abstract_classes_are_exactly_the_five_java_abstract_ones() -> None:
-    expected = {_class_for_java(fqn) for fqn in _ABSTRACT_JAVA}
-    abstract_py = set()
-    for (_module, _name), cls in _CLASSES.items():
-        try:
-            cls("x")
-        except TypeError:
-            abstract_py.add(cls)
-        except Exception:  # noqa: BLE001 - only TypeError marks an abstract class
-            pass
-    assert abstract_py == expected
+def test_every_java_class_has_its_python_class_with_the_java_parent() -> None:
+    """Java -> Python: each class's immediate base is the Python class of its
+    Java parent (a Python builtin for a JDK class and for KafkaException)."""
+    for java, cls in _BY_JAVA.items():
+        if java in _JDK:
+            assert cls.__bases__ == (_JDK[java],), java
+            continue
+        parent = _java_parent(java)
+        if parent == "java.lang.RuntimeException":
+            assert java == "org.apache.kafka.common.KafkaException"
+            assert cls.__bases__ == (RuntimeError,)
+            continue
+        assert cls.__bases__ == (_BY_JAVA[parent],), f"{java} extends {parent}"
 
 
-def test_abstract_construction_raises_type_error() -> None:
-    for fqn in _ABSTRACT_JAVA:
-        cls = _class_for_java(fqn)
-        with pytest.raises(TypeError):
-            cls("nope")
+def test_every_python_error_class_is_a_java_class() -> None:
+    """Python -> Java: every error class the package defines is a generated one
+    (no invented class), and the generated set is exactly the FFI enum's
+    classes, Java's abstract bases, KafkaException and the Java built-ins."""
+    def walk(cls: type[BaseException]) -> set[type[BaseException]]:
+        out = {cls}
+        for sub in cls.__subclasses__():
+            if sub.__module__.startswith("confluent_kafka"):
+                out |= walk(sub)
+        return out
+
+    defined = walk(KafkaError)
+    for root in (IllegalStateError, IllegalArgumentError, ConcurrentModificationError,
+                 RootTimeoutError, NoSuchElementError, NullPointerError):
+        defined |= walk(root)
+    assert defined == set(error_classes())
+    expected = set(_bridge().values()) | {
+        "org.apache.kafka.common.KafkaException",
+        "java.util.NoSuchElementException",
+        "java.lang.NullPointerException",
+        "org.apache.kafka.common.errors.RetriableException",
+        "org.apache.kafka.common.errors.RefreshRetriableException",
+        "org.apache.kafka.common.errors.InvalidMetadataException",
+        "org.apache.kafka.common.errors.ApplicationRecoverableException",
+        "org.apache.kafka.clients.consumer.InvalidOffsetException",
+    }
+    assert set(_BY_JAVA) == expected
+    assert len(_BY_JAVA) == 169
 
 
-def test_abstract_classes_have_no_own_ffi_id() -> None:
-    for fqn in _ABSTRACT_JAVA:
-        cls = _class_for_java(fqn)
-        assert "_ffi_id" not in cls.__dict__
+def test_each_error_lives_in_the_module_of_its_java_package() -> None:
+    for module, name, java in ERRORS:
+        cls = _BY_JAVA[java]
+        public = _python_module(java.rsplit(".", 1)[0])
+        assert cls.__module__ == public
+        package = importlib.import_module(public)
+        assert getattr(package, name) is cls
+        assert name in package.__all__
+        assert module == f"{public}.{_snake(name)}"
+    assert BufferExhaustedError.__module__ == "confluent_kafka.producer"
+    assert InvalidRecordError.__module__ == "confluent_kafka.common"
+    assert CorrelationIdMismatchError.__module__ == "confluent_kafka.common.requests"
+    assert InvalidReceiveError.__module__ == "confluent_kafka.common.network"
+    assert QuotaViolationError.__module__ == "confluent_kafka.common.metrics"
+    assert SchemaError.__module__ == "confluent_kafka.common.protocol.types"
 
 
-# ----------------------------------------------------------------------------
-# JDK analogs subclass the right Python builtin
-# ----------------------------------------------------------------------------
-
-
-def test_jdk_analogs_subclass_runtime_error() -> None:
-    assert issubclass(IllegalStateError, RuntimeError)
-    assert issubclass(IllegalArgumentError, RuntimeError)
-    assert issubclass(ConcurrentModificationError, RuntimeError)
-    # Not under KafkaError.
-    assert not issubclass(IllegalStateError, KafkaError)
-
-
-def test_root_timeout_error_subclasses_builtin_timeout() -> None:
-    import builtins
-
+def test_the_root_exports_duration_and_the_java_built_ins_only() -> None:
+    assert sorted(confluent_kafka.__all__) == sorted([
+        "Duration", "ConcurrentModificationError", "IllegalArgumentError",
+        "IllegalStateError", "NoSuchElementError", "NullPointerError", "TimeoutError"])
     assert issubclass(RootTimeoutError, builtins.TimeoutError)
-    assert not issubclass(RootTimeoutError, KafkaError)
+    for cls in (IllegalStateError, IllegalArgumentError, ConcurrentModificationError,
+                NoSuchElementError, NullPointerError):
+        assert issubclass(cls, RuntimeError)
+        assert not issubclass(cls, KafkaError)
 
 
-def test_config_error_is_under_kafka_error() -> None:
-    # ConfigException extends KafkaException in Java.
+def test_kafka_error_subclasses_runtime_error() -> None:
+    assert KafkaError.__bases__ == (RuntimeError,)
     assert issubclass(ConfigError, KafkaError)
+    assert issubclass(CorrelationIdMismatchError, IllegalStateError)
 
 
 # ----------------------------------------------------------------------------
-# Catching by an intermediate base
+# FFI ids
 # ----------------------------------------------------------------------------
 
 
-def test_except_retriable_error_catches_not_leader_or_follower() -> None:
-    from confluent_kafka.common.errors import NotLeaderOrFollowerError
-
-    assert issubclass(NotLeaderOrFollowerError, RetriableError)
-    with pytest.raises(RetriableError):
-        raise NotLeaderOrFollowerError("no leader")
-
-
-def test_except_kafka_error_catches_any_kafka_subtype() -> None:
-    from confluent_kafka.common.errors import TopicAuthorizationError
-
-    with pytest.raises(KafkaError):
-        raise TopicAuthorizationError("nope")
-
-
-# ----------------------------------------------------------------------------
-# from_ffi_error / to_ffi_id (the FFI conversion), without the native extension
-# ----------------------------------------------------------------------------
-
-
-def test_from_ffi_error_unknown_id_maps_to_base_kafka_error(monkeypatch) -> None:
-    """An id with no class raises the base KafkaError, never a KeyError."""
-    from confluent_kafka.common import errors as errmod
-
-    class _FakeLib:
-        @staticmethod
-        def KafkaError_code(handle: int) -> int:
-            return 999_999  # no class owns this id
-
-        @staticmethod
-        def KafkaError_message(handle: int) -> str:
-            return "some message"
-
-        @staticmethod
-        def KafkaError_destroy(handle: int) -> None:
-            pass
-
-    monkeypatch.setattr(errmod, "_lib", _FakeLib)
-    err = errmod.from_ffi_error(0)
-    assert type(err) is KafkaError
-    assert str(err) == "some message"
-
-
-def test_from_ffi_error_known_id_maps_to_its_class(monkeypatch) -> None:
-    from confluent_kafka.common import errors as errmod
-    from confluent_kafka.common.errors import TopicAuthorizationError
-
-    class _FakeLib:
-        @staticmethod
-        def KafkaError_code(handle: int) -> int:
-            return TopicAuthorizationError._ffi_id
-
-        @staticmethod
-        def KafkaError_message(handle: int) -> str:
-            return "not authorized"
-
-        @staticmethod
-        def KafkaError_destroy(handle: int) -> None:
-            pass
-
-    monkeypatch.setattr(errmod, "_lib", _FakeLib)
-    err = errmod.from_ffi_error(0)
-    assert type(err) is TopicAuthorizationError
-
-
-def test_from_ffi_error_chains_cause(monkeypatch) -> None:
-    from confluent_kafka.common import errors as errmod
-
-    class _FakeLib:
-        @staticmethod
-        def KafkaError_code(handle: int) -> int:
-            return 999_999  # unknown id -> base KafkaError fallback
-
-        @staticmethod
-        def KafkaError_message(handle: int) -> str:
-            return "wrapped"
-
-        @staticmethod
-        def KafkaError_destroy(handle: int) -> None:
-            pass
-
-    monkeypatch.setattr(errmod, "_lib", _FakeLib)
-    cause = ValueError("root cause")
-    err = errmod.from_ffi_error(0, cause=cause)
-    assert type(err) is KafkaError
-    assert err.__cause__ is cause
-
-
-def test_raise_from_preserves_cause() -> None:
-    from confluent_kafka.common.errors import TopicAuthorizationError
-
-    cause = ValueError("original")
-    try:
+def _instance(cls: type[BaseException]) -> BaseException:
+    """An instance of a concrete class through one of its Java constructors."""
+    tries: list[dict[str, Any]] = [
+        {"message": "m"}, {}, {"partitions": [_TP]},
+        {"offset_out_of_range_partitions": {_TP: 1}},
+        {"fetch_offsets": {_TP: 1}, "divergent_offsets": {}},
+        {"metric": KafkaMetric._snapshot(name="n", group="g", value=1.0), "value": 1.0,
+         "bound": 0.5},
+        {"origin": None, "partition": _TP, "offset": 1, "timestamp": 5, "message": "m",
+         "cause": ValueError("v")},
+        {"message": "m", "request_correlation_id": 1, "response_correlation_id": 2},
+    ]
+    for kwargs in tries:
         try:
-            raise cause
-        except ValueError as e:
-            raise TopicAuthorizationError("wrapped") from e
-    except TopicAuthorizationError as caught:
-        assert caught.__cause__ is cause
+            return cls(**kwargs)
+        except (TypeError, IllegalArgumentError):
+            continue
+    raise AssertionError(f"no constructor of {cls.__name__} matched")
 
 
-def test_to_ffi_id_round_trips() -> None:
-    from confluent_kafka.common.errors import TopicAuthorizationError
-
-    err = TopicAuthorizationError("x")
-    assert to_ffi_id(err) == TopicAuthorizationError._ffi_id
-    # The mapping id -> class -> id is stable.
-    assert _BY_FFI_ID[to_ffi_id(err)] is TopicAuthorizationError
-
-
-def test_to_ffi_id_rejects_a_non_kafka_error() -> None:
-    with pytest.raises(TypeError):
-        to_ffi_id(RuntimeError("not ours"))
-
-
-def test_to_ffi_id_rejects_the_bare_base_kafka_error() -> None:
-    # The base is the no-mapping fallback, never injected: it carries no _ffi_id,
-    # so to_ffi_id raises rather than silently coercing to a code (Critic 64 F2).
-    assert "_ffi_id" not in KafkaError.__dict__
-    with pytest.raises(TypeError):
-        to_ffi_id(KafkaError("x"))
+def test_every_ffi_id_is_the_enum_value_of_its_bridge_row() -> None:
+    enum = _ffi_enum()
+    ids = set()
+    for constant, java in _bridge().items():
+        cls = _BY_JAVA[java]
+        assert cls.__dict__["_ffi_id"] == enum[constant], java
+        ids.add(enum[constant])
+        # id -> class -> id round-trips.
+        assert class_for_ffi_id(enum[constant]) is cls
+        assert to_ffi_id(_instance(cls)) == enum[constant]
+    assert len(ids) == 161
 
 
-def test_unknown_server_error_owns_wire_code_minus_one(monkeypatch) -> None:
-    # The catch-all wire code -1 (UNKNOWN_SERVER_ERROR) maps to the concrete
-    # UnknownServerError, NOT the base KafkaError — that is the class a mock
-    # injects for it, and the class from_ffi_error builds for id -1.
-    from confluent_kafka.common import errors as errmod
-    from confluent_kafka.common.errors import UnknownServerError
+def test_the_base_carries_unknown_server_error_which_unknown_server_error_owns() -> None:
+    assert KafkaError._ffi_id == -1 == _ffi_enum()["UNKNOWN_SERVER_ERROR"]
+    assert class_for_ffi_id(-1) is UnknownServerError
+    assert to_ffi_id(KafkaError(message="x")) == -1
 
-    assert UnknownServerError._ffi_id == _error_code_constants()["UNKNOWN_SERVER_ERROR"] == -1
-    assert _BY_FFI_ID[-1] is UnknownServerError
-    assert to_ffi_id(UnknownServerError("x")) == -1
 
-    class _FakeLib:
-        @staticmethod
-        def KafkaError_code(handle: int) -> int:
-            return -1
+def test_built_ins_the_core_does_not_model_have_no_id() -> None:
+    for cls in (NoSuchElementError, NullPointerError):
+        assert not hasattr(cls, "_ffi_id")
+        assert to_ffi_id(cls(message="x")) == -1
+    assert to_ffi_id(ValueError("not ours")) == -1
 
-        @staticmethod
-        def KafkaError_message(handle: int) -> str:
-            return "boom"
 
-        @staticmethod
-        def KafkaError_destroy(handle: int) -> None:
-            pass
+def test_abstract_bases_are_java_abstract_have_no_id_and_cannot_be_built() -> None:
+    abstract = {java for java in _BY_JAVA if java not in _JDK and _java_is_abstract(java)}
+    assert {_BY_JAVA[j] for j in abstract} == {
+        RetriableError, InvalidMetadataError, InvalidOffsetError,
+        _BY_JAVA["org.apache.kafka.common.errors.RefreshRetriableException"],
+        _BY_JAVA["org.apache.kafka.common.errors.ApplicationRecoverableException"],
+    }
+    for java in abstract:
+        cls = _BY_JAVA[java]
+        assert "_ffi_id" not in cls.__dict__
+        with pytest.raises(TypeError) as exc:
+            cls(message="x")  # type: ignore[call-arg]
+        assert str(exc.value) == (
+            f"{cls.__name__} is an abstract catch-only base; it is never raised directly")
 
-    monkeypatch.setattr(errmod, "_lib", _FakeLib)
-    assert type(errmod.from_ffi_error(0)) is UnknownServerError
+    class Mine(RetriableError):
+        pass
+
+    assert str(Mine(message="a subclass of an abstract base")) == (
+        "a subclass of an abstract base")
+
+
+def test_a_positional_call_is_a_type_error_for_every_class() -> None:
+    for cls in error_classes():
+        with pytest.raises(TypeError):
+            cls("positional")
 
 
 # ----------------------------------------------------------------------------
-# Base identity
+# Constructors: Java's forms and messages
 # ----------------------------------------------------------------------------
 
 
-def test_base_kafka_error_is_the_same_object_everywhere() -> None:
-    assert KafkaError is BaseKafkaError
-
-
-def test_kafka_error_str_is_the_message() -> None:
-    assert str(KafkaError("hi")) == "hi"
+def test_kafka_error_has_javas_four_constructors() -> None:
+    assert str(KafkaError(message="m")) == "m"
     assert str(KafkaError()) == ""
+    cause = ValueError("v")
+    e = KafkaError(message="m", cause=cause)
+    assert str(e) == "m" and e.__cause__ is cause
+    # Throwable(Throwable cause): the message is cause.toString().
+    e = KafkaError(cause=cause)
+    assert str(e) == "builtins.ValueError: v" and e.__cause__ is cause
+    assert e.args == ("builtins.ValueError: v",)
+    assert str(KafkaError(cause=KafkaError())) == "confluent_kafka.common.KafkaError"
+    assert str(KafkaError(cause=TopicAuthorizationError(message="no"))) == (
+        "confluent_kafka.common.errors.TopicAuthorizationError: no")
+    assert KafkaError().args == ()
 
 
-def test_duration_alias_exists() -> None:
-    # Duration = float | timedelta (rule 3.7).
-    assert confluent_kafka.Duration is not None
+def test_message_is_the_keyword_message() -> None:
+    with pytest.raises(TypeError):
+        KafkaError("positional")  # type: ignore[call-arg]
+    assert str(IllegalStateError(message="s")) == "s"
+    assert str(NullPointerError()) == ""
+    assert str(RootTimeoutError(message="t")) == "t"
+
+
+def test_topic_authorization_constructors() -> None:
+    e = TopicAuthorizationError(unauthorized_topics={"t"})
+    assert str(e) == "Not authorized to access topics: [t]"
+    assert e.unauthorized_topics() == {"t"}
+    # (String message) passes Collections.emptySet(): the Java-given default.
+    assert TopicAuthorizationError(message="x").unauthorized_topics() == set()
+    # UNSET: an explicit empty set is given, so (unauthorizedTopics) is used.
+    assert str(TopicAuthorizationError(unauthorized_topics=())) == (
+        "Not authorized to access topics: []")
+    with pytest.raises(IllegalArgumentError) as exc:
+        TopicAuthorizationError()  # type: ignore[call-overload]
+    assert str(exc.value) == (
+        "TopicAuthorizationError() takes one of (message, unauthorized_topics), "
+        "(unauthorized_topics), (message); got ()")
+
+
+def test_config_error_constructors() -> None:
+    assert str(ConfigError(message="plain")) == "plain"
+    assert str(ConfigError(name="a.b", value=5)) == "Invalid value 5 for configuration a.b"
+    assert str(ConfigError(name="a.b", value=True, message="m")) == (
+        "Invalid value true for configuration a.b: m")
+    assert str(ConfigError(name="a.b", value=[1, 2], message="m")) == (
+        "Invalid value [1, 2] for configuration a.b: m")
+    with pytest.raises(IllegalArgumentError) as exc:
+        ConfigError()  # type: ignore[call-overload]
+    assert str(exc.value) == (
+        "ConfigError() takes one of (message), (name, value), "
+        "(name, value, message); got ()")
+
+
+def test_constructors_with_a_literal_message() -> None:
+    assert str(CommitFailedError()).startswith(
+        "Commit cannot be completed since the group has already rebalanced")
+    assert str(CommitFailedError(message="x")) == "x"
+    assert str(TransactionAbortedError()) == "Failing batch since transaction was aborted"
+    assert str(CorruptRecordError()) == (
+        "This message has failed its CRC checksum, exceeds the valid size, has a null key "
+        "for a compacted topic, or is otherwise corrupt.")
+    cause = ValueError("v")
+    assert str(CorruptRecordError(cause=cause)) == "builtins.ValueError: v"
+    e = RetriableCommitFailedError(cause=cause)
+    assert str(e) == (
+        "Offset commit failed with a retriable exception. You should retry committing "
+        "the latest consumed offsets.")
+    assert e.__cause__ is cause
+    with pytest.raises(IllegalArgumentError) as exc:
+        RetriableCommitFailedError()
+    assert str(exc.value) == (
+        "RetriableCommitFailedError() takes one of (cause), (message), "
+        "(message, cause); got ()")
+
+
+def test_invalid_topic_constructors() -> None:
+    assert str(InvalidTopicError(invalid_topics=["a"])) == "Invalid topics: [a]"
+    assert InvalidTopicError(message="m").invalid_topics() == set()
+    assert InvalidTopicError().invalid_topics() == set()
+    # `message` is UNSET: an explicit None is Java's (String) null.
+    assert str(InvalidTopicError(message=None)) == ""  # type: ignore[call-overload]
+
+
+def test_no_offset_for_partition_constructors() -> None:
+    tp1 = TopicPartition(topic="t", partition=1)
+    e = NoOffsetForPartitionError(partition=_TP)
+    assert str(e) == "Undefined offset with no reset policy for partition: t-0"
+    assert e.partitions() == {_TP}
+    e = NoOffsetForPartitionError(partitions=[_TP, tp1])
+    assert str(e) == "Undefined offset with no reset policy for partitions: [t-0, t-1]"
+    assert e.partitions() == {_TP, tp1}
+
+
+def test_offset_out_of_range_and_log_truncation_constructors() -> None:
+    e = OffsetOutOfRangeError(offset_out_of_range_partitions={_TP: 5})
+    assert str(e) == (
+        "Offsets out of range with no configured reset policy for partitions: {t-0=5}")
+    assert e.offset_out_of_range_partitions() == {_TP: 5}
+    assert e.partitions() == {_TP}
+    oam = OffsetAndMetadata(offset=3)
+    e2 = LogTruncationError(fetch_offsets={_TP: 5}, divergent_offsets={_TP: oam})
+    assert isinstance(e2, OffsetOutOfRangeError)
+    assert e2.offset_out_of_range_partitions() == {_TP: 5}
+    assert e2.partitions() == {_TP}
+    assert e2.divergent_offsets() == {_TP: oam}
+    assert str(LogTruncationError(message="m", fetch_offsets={}, divergent_offsets={})) == "m"
+
+
+def test_payload_getters_return_javas_defaults() -> None:
+    assert ThrottlingQuotaExceededError(message="x").throttle_time_ms() == 0
+    assert ThrottlingQuotaExceededError(throttle_time_ms=5, message="x").throttle_time_ms() == 5
+    assert GroupAuthorizationError(message="x").group_id() is None
+    assert GroupAuthorizationError(message="x", group_id="g").group_id() == "g"
+    assert DuplicateResourceError(message="m").resource() is None
+    cause = ValueError("v")
+    e = ResourceNotFoundError(resource="r", message="m", cause=cause)
+    assert (e.resource(), str(e), e.__cause__) == ("r", "m", cause)
+    assert RecordTooLargeError(message="m").record_too_large_partitions() is None
+    assert RecordTooLargeError(
+        message="m", record_too_large_partitions={_TP: 9}).record_too_large_partitions() == {_TP: 9}
+    c = CorrelationIdMismatchError(message="m", request_correlation_id=1,
+                                   response_correlation_id=2)
+    assert (c.request_correlation_id(), c.response_correlation_id()) == (1, 2)
+
+
+def test_quota_violation_has_no_message() -> None:
+    metric = KafkaMetric._snapshot(name="rate", group="producer", value=9.5)
+    e = QuotaViolationError(metric=metric, value=9.5, bound=5.0)
+    assert e.metric() is metric
+    assert (e.value(), e.bound()) == (9.5, 5.0)
+    assert str(e) == ""
+    assert metric.metric_name() == MetricName(name="rate", group="producer", description="",
+                                              tags={})
+
+
+def test_interrupt_error_has_no_interrupted_exception_cause() -> None:
+    # Java's (String message) passes `new InterruptedException()`; Python has no
+    # such class, so the cause is left empty.
+    e = InterruptError(message="m")
+    assert str(e) == "m" and e.__cause__ is None
+
+
+def test_record_deserialization_constructors() -> None:
+    origin = RecordDeserializationError.DeserializationExceptionOrigin
+    assert [m.value for m in origin] == ["KEY", "VALUE"]
+    cause = ValueError("bad")
+    e = RecordDeserializationError(
+        origin=origin.VALUE, partition=_TP, offset=7, timestamp=10,
+        timestamp_type=TimestampType.CREATE_TIME,
+        key_buffer=b"k", value_buffer=b"v", headers=[("h", b"1")], message="m", cause=cause)
+    assert e.origin() is origin.VALUE
+    assert e.topic_partition() == _TP and e.offset() == 7 and e.timestamp() == 10
+    assert bytes(e.key_buffer() or b"") == b"k"
+    assert bytes(e.value_buffer() or b"") == b"v"
+    assert [(k, bytes(v or b"")) for k, v in e.headers()] == [("h", b"1")]
+    assert e.__cause__ is cause
+    # The deprecated (partition, offset, message, cause) constructor warns and
+    # takes Java's defaults.
+    with pytest.warns(DeprecationWarning, match="is deprecated. Since 3.9."):
+        d = RecordDeserializationError(partition=_TP, offset=1, message="m", cause=cause)
+    assert d.origin() is None
+    assert d.timestamp() == -1
+    assert d.timestamp_type() is TimestampType.NO_TIMESTAMP_TYPE
+    assert d.key_buffer() is None and d.value_buffer() is None
+    assert d.headers() == ()
+
+
+def test_singletons() -> None:
+    assert isinstance(DisconnectError.INSTANCE, DisconnectError)
+    assert str(DisconnectError.INSTANCE) == ""
+    assert isinstance(CoordinatorNotAvailableError.INSTANCE, CoordinatorNotAvailableError)
+    # Java's CoordinatorNotAvailableException() is private: only INSTANCE uses it.
+    with pytest.raises(TypeError):
+        CoordinatorNotAvailableError()  # type: ignore[call-arg]
+    assert WakeupError().args == ()
+    with pytest.raises(TypeError):
+        WakeupError(message="Java's WakeupException has only ()")  # type: ignore[call-arg]
 
 
 # ----------------------------------------------------------------------------
-# Typed payload accessors (rule 5 — mirror Java's exception getters). The C
-# extension's ``KafkaError_payload`` returns the raw payload keyed by accessor
-# name (raw tuples for ``TopicPartition`` / ``OffsetAndMetadata``); the
-# ``build_payload`` layer wraps them into public types and the generated
-# accessor methods return them. These tests drive that path through a fake
-# ``_lib`` (no core error carrying such a payload can be constructed from
-# Python), one per accessor.
+# copy / pickle rebuild through the keyword-only constructors
 # ----------------------------------------------------------------------------
 
 
-def _fake_lib_with_payload(ffi_id: int, message: str, payload: object):
+@pytest.mark.parametrize("error", [
+    KafkaError(message="m"),
+    KafkaError(),
+    TopicAuthorizationError(unauthorized_topics={"t"}),
+    ConfigError(name="a", value=1, message="bad"),
+    IllegalStateError(message="root"),
+    NoOffsetForPartitionError(partition=_TP),
+    RecordDeserializationError(
+        origin=RecordDeserializationError.DeserializationExceptionOrigin.KEY, partition=_TP,
+        offset=1, timestamp=2, timestamp_type=TimestampType.CREATE_TIME, key_buffer=b"k",
+        value_buffer=None, headers=(), message="m", cause=ValueError("c")),
+])
+def test_copy_and_pickle_rebuild_from_the_constructor_arguments(error: BaseException) -> None:
+    for clone in (copy.copy(error), copy.deepcopy(error), pickle.loads(pickle.dumps(error))):
+        assert type(clone) is type(error)
+        assert str(clone) == str(error)
+        assert clone.args == error.args
+
+
+def test_pickle_keeps_the_constructor_cause() -> None:
+    clone = pickle.loads(pickle.dumps(KafkaError(message="m", cause=ValueError("c"))))
+    assert type(clone.__cause__) is ValueError and str(clone.__cause__) == "c"
+
+
+def test_singletons_copy_and_pickle_as_themselves() -> None:
+    for s in (DisconnectError.INSTANCE, CoordinatorNotAvailableError.INSTANCE):
+        assert copy.copy(s) is s
+        assert pickle.loads(pickle.dumps(s)) is s
+
+
+# ----------------------------------------------------------------------------
+# Core -> Python, through a fake C extension
+# ----------------------------------------------------------------------------
+
+
+def _fake_lib(ffi_id: int, message: str, payload: object = None,
+              source: dict[int, tuple[int, str]] | None = None) -> type:
+    sources = source or {}
+
     class _FakeLib:
         @staticmethod
         def KafkaError_code(handle: int) -> int:
-            return ffi_id
+            return sources[handle][0] if handle in sources else ffi_id
 
         @staticmethod
         def KafkaError_message(handle: int) -> str:
-            return message
+            return sources[handle][1] if handle in sources else message
+
+        @staticmethod
+        def KafkaError_source(handle: int) -> int:
+            return handle + 1 if handle + 1 in sources else 0
+
+        @staticmethod
+        def KafkaError_payload(handle: int) -> object:
+            return None if handle in sources else payload
 
         @staticmethod
         def KafkaError_destroy(handle: int) -> None:
             pass
-
-        @staticmethod
-        def KafkaError_payload(handle: int):
-            return payload
 
     return _FakeLib
 
 
-def test_topic_authorization_unauthorized_topics(monkeypatch) -> None:
-    from confluent_kafka.common import errors as errmod
-    from confluent_kafka.common.errors import TopicAuthorizationError
-
-    monkeypatch.setattr(
-        errmod,
-        "_lib",
-        _fake_lib_with_payload(
-            TopicAuthorizationError._ffi_id,
-            "no",
-            {"unauthorized_topics": ["a", "b"]},
-        ),
-    )
-    err = errmod.from_ffi_error(0)
-    assert isinstance(err, TopicAuthorizationError)
-    assert err.unauthorized_topics() == {"a", "b"}
+def test_from_ffi_error_unknown_id_is_the_base(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(errmod, "_lib", _fake_lib(999_999, "some message"))
+    err = from_ffi_error(0)
+    assert type(err) is KafkaError and str(err) == "some message"
 
 
-def test_group_authorization_group_id(monkeypatch) -> None:
-    from confluent_kafka.common import errors as errmod
-    from confluent_kafka.common.errors import GroupAuthorizationError
-
-    monkeypatch.setattr(
-        errmod,
-        "_lib",
-        _fake_lib_with_payload(
-            GroupAuthorizationError._ffi_id, "no", {"group_id": "g1"}
-        ),
-    )
-    err = errmod.from_ffi_error(0)
-    assert isinstance(err, GroupAuthorizationError)
-    assert err.group_id() == "g1"
+def test_from_ffi_error_minus_one_is_unknown_server_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(errmod, "_lib", _fake_lib(-1, "boom"))
+    assert type(from_ffi_error(0)) is UnknownServerError
 
 
-def test_group_authorization_group_id_none(monkeypatch) -> None:
-    from confluent_kafka.common import errors as errmod
-    from confluent_kafka.common.errors import GroupAuthorizationError
-
-    monkeypatch.setattr(
-        errmod,
-        "_lib",
-        _fake_lib_with_payload(
-            GroupAuthorizationError._ffi_id, "no", {"group_id": None}
-        ),
-    )
-    err = errmod.from_ffi_error(0)
-    assert isinstance(err, GroupAuthorizationError)
-    assert err.group_id() is None
+def test_from_ffi_error_chains_the_core_cause(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(errmod, "_lib", _fake_lib(
+        -1, "outer", source={1: (TopicAuthorizationError._ffi_id, "inner")}))
+    err = from_ffi_error(0)
+    assert isinstance(err.__cause__, TopicAuthorizationError)
+    assert str(err.__cause__) == "inner"
+    explicit = ValueError("wins")
+    assert from_ffi_error(0, cause=explicit).__cause__ is explicit
 
 
-def test_invalid_topic_invalid_topics(monkeypatch) -> None:
-    from confluent_kafka.common import errors as errmod
-    from confluent_kafka.common.errors import InvalidTopicError
-
-    monkeypatch.setattr(
-        errmod,
-        "_lib",
-        _fake_lib_with_payload(
-            InvalidTopicError._ffi_id, "bad", {"invalid_topics": ["x"]}
-        ),
-    )
-    err = errmod.from_ffi_error(0)
-    assert isinstance(err, InvalidTopicError)
-    assert err.invalid_topics() == {"x"}
-
-
-def test_throttling_quota_throttle_time_ms(monkeypatch) -> None:
-    from confluent_kafka.common import errors as errmod
-    from confluent_kafka.common.errors import ThrottlingQuotaExceededError
-
-    monkeypatch.setattr(
-        errmod,
-        "_lib",
-        _fake_lib_with_payload(
-            ThrottlingQuotaExceededError._ffi_id,
-            "slow",
-            {"throttle_time_ms": 250},
-        ),
-    )
-    err = errmod.from_ffi_error(0)
-    assert isinstance(err, ThrottlingQuotaExceededError)
-    assert err.throttle_time_ms() == 250
+_PAYLOADS: list[tuple[type[BaseException], dict[str, Any], str, Any]] = [
+    (TopicAuthorizationError, {"unauthorized_topics": ["a", "b"]},
+     "unauthorized_topics", {"a", "b"}),
+    (GroupAuthorizationError, {"group_id": "g1"}, "group_id", "g1"),
+    (GroupAuthorizationError, {"group_id": None}, "group_id", None),
+    (InvalidTopicError, {"invalid_topics": ["x"]}, "invalid_topics", {"x"}),
+    (ThrottlingQuotaExceededError, {"throttle_time_ms": 250}, "throttle_time_ms", 250),
+    (DuplicateResourceError, {"resource": "r1"}, "resource", "r1"),
+    (ResourceNotFoundError, {"resource": None}, "resource", None),
+    (CorrelationIdMismatchError, {"request_correlation_id": 7, "response_correlation_id": 8},
+     "response_correlation_id", 8),
+    (RecordTooLargeError, {"record_too_large_partitions": {("t", 0): 99}},
+     "record_too_large_partitions", {_TP: 99}),
+    (RecordTooLargeError, {"record_too_large_partitions": None},
+     "record_too_large_partitions", None),
+    (OffsetOutOfRangeError, {"offset_out_of_range_partitions": {("t", 0): 42}},
+     "partitions", {_TP}),
+    (LogTruncationError, {"offset_out_of_range_partitions": {("t", 0): 10},
+                          "divergent_offsets": {("t", 0): (7, "", None)}},
+     "divergent_offsets", {_TP: OffsetAndMetadata(offset=7)}),
+    (NoOffsetForPartitionError, {"partitions": [("t", 0)]}, "partitions", {_TP}),
+]
 
 
-def test_quota_violation_accessors(monkeypatch) -> None:
-    from confluent_kafka.common import errors as errmod
-    from confluent_kafka.common.errors import QuotaViolationError
+@pytest.mark.parametrize("cls,payload,getter,expected", _PAYLOADS)
+def test_from_ffi_error_builds_the_payload_through_the_java_constructor(
+        monkeypatch: pytest.MonkeyPatch, cls: type[BaseException], payload: dict[str, Any],
+        getter: str, expected: Any) -> None:
+    ffi_id: int = cls._ffi_id  # type: ignore[attr-defined]
+    monkeypatch.setattr(errmod, "_lib", _fake_lib(ffi_id, "core message", payload))
+    err = from_ffi_error(0)
+    assert type(err) is cls
+    assert getattr(err, getter)() == expected
 
-    monkeypatch.setattr(
-        errmod,
-        "_lib",
-        _fake_lib_with_payload(
-            QuotaViolationError._ffi_id,
-            "over",
-            {
-                "metric_name": "rate",
-                "metric_group": "producer",
-                "value": 9.5,
-                "bound": 5.0,
-            },
-        ),
-    )
-    err = errmod.from_ffi_error(0)
+
+def test_from_ffi_error_quota_violation(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(errmod, "_lib", _fake_lib(QuotaViolationError._ffi_id, "over", {
+        "metric_name": "rate", "metric_group": "producer", "value": 9.5, "bound": 5.0}))
+    err = from_ffi_error(0)
     assert isinstance(err, QuotaViolationError)
-    assert err.metric_name() == "rate"
-    assert err.metric_group() == "producer"
-    assert err.value() == 9.5
-    assert err.bound() == 5.0
+    assert err.metric().metric_name().name() == "rate"
+    assert err.metric().metric_name().group() == "producer"
+    assert err.metric().metric_value() == 9.5
+    assert (err.value(), err.bound()) == (9.5, 5.0)
 
 
-def test_duplicate_resource_resource(monkeypatch) -> None:
-    from confluent_kafka.common import errors as errmod
-    from confluent_kafka.common.errors import DuplicateResourceError
-
-    monkeypatch.setattr(
-        errmod,
-        "_lib",
-        _fake_lib_with_payload(
-            DuplicateResourceError._ffi_id, "dup", {"resource": "r1"}
-        ),
-    )
-    err = errmod.from_ffi_error(0)
-    assert isinstance(err, DuplicateResourceError)
-    assert err.resource() == "r1"
-
-
-def test_resource_not_found_resource(monkeypatch) -> None:
-    from confluent_kafka.common import errors as errmod
-    from confluent_kafka.common.errors import ResourceNotFoundError
-
-    monkeypatch.setattr(
-        errmod,
-        "_lib",
-        _fake_lib_with_payload(
-            ResourceNotFoundError._ffi_id, "missing", {"resource": None}
-        ),
-    )
-    err = errmod.from_ffi_error(0)
-    assert isinstance(err, ResourceNotFoundError)
-    assert err.resource() is None
-
-
-def test_correlation_id_mismatch_accessors(monkeypatch) -> None:
-    from confluent_kafka.common import errors as errmod
-    from confluent_kafka.common.errors import CorrelationIdMismatchError
-
-    monkeypatch.setattr(
-        errmod,
-        "_lib",
-        _fake_lib_with_payload(
-            CorrelationIdMismatchError._ffi_id,
-            "mismatch",
-            {
-                "request_correlation_id": 7,
-                "response_correlation_id": 8,
-            },
-        ),
-    )
-    err = errmod.from_ffi_error(0)
-    assert isinstance(err, CorrelationIdMismatchError)
-    assert err.request_correlation_id() == 7
-    assert err.response_correlation_id() == 8
-
-
-def test_no_offset_for_partition_partitions(monkeypatch) -> None:
-    from confluent_kafka.common import errors as errmod
-    from confluent_kafka.common.topic_partition import TopicPartition
-    from confluent_kafka.consumer._generated_errors import (
-        NoOffsetForPartitionError,
-    )
-
-    monkeypatch.setattr(
-        errmod,
-        "_lib",
-        _fake_lib_with_payload(
-            NoOffsetForPartitionError._ffi_id,
-            "no offset",
-            {"partitions": [("t", 0), ("t", 1)]},
-        ),
-    )
-    err = errmod.from_ffi_error(0)
-    assert isinstance(err, NoOffsetForPartitionError)
-    assert err.partitions() == {
-        TopicPartition(topic="t", partition=0),
-        TopicPartition(topic="t", partition=1),
-    }
-
-
-def test_offset_out_of_range_accessors(monkeypatch) -> None:
-    from confluent_kafka.common import errors as errmod
-    from confluent_kafka.common.topic_partition import TopicPartition
-    from confluent_kafka.consumer._generated_errors import OffsetOutOfRangeError
-
-    monkeypatch.setattr(
-        errmod,
-        "_lib",
-        _fake_lib_with_payload(
-            OffsetOutOfRangeError._ffi_id,
-            "oor",
-            {"offset_out_of_range_partitions": {("t", 0): 42}},
-        ),
-    )
-    err = errmod.from_ffi_error(0)
-    assert isinstance(err, OffsetOutOfRangeError)
-    tp = TopicPartition(topic="t", partition=0)
-    assert err.offset_out_of_range_partitions() == {tp: 42}
-    # partitions() is the key set (Java Map.keySet()).
-    assert err.partitions() == {tp}
-
-
-def test_log_truncation_accessors(monkeypatch) -> None:
-    from confluent_kafka.common import errors as errmod
-    from confluent_kafka.common.topic_partition import TopicPartition
-    from confluent_kafka.consumer._generated_errors import LogTruncationError
-    from confluent_kafka.consumer.offset_and_metadata import OffsetAndMetadata
-
-    monkeypatch.setattr(
-        errmod,
-        "_lib",
-        _fake_lib_with_payload(
-            LogTruncationError._ffi_id,
-            "truncated",
-            {
-                "offset_out_of_range_partitions": {("t", 0): 10},
-                "divergent_offsets": {("t", 0): (7, "", None)},
-            },
-        ),
-    )
-    err = errmod.from_ffi_error(0)
-    assert isinstance(err, LogTruncationError)
-    tp = TopicPartition(topic="t", partition=0)
-    # Inherited from OffsetOutOfRangeError.
-    assert err.offset_out_of_range_partitions() == {tp: 10}
-    assert err.partitions() == {tp}
-    # Declared on LogTruncationError.
-    assert err.divergent_offsets() == {tp: OffsetAndMetadata(offset=7)}
-
-
-def test_record_too_large_partitions(monkeypatch) -> None:
-    from confluent_kafka.common import errors as errmod
-    from confluent_kafka.common.errors import RecordTooLargeError
-    from confluent_kafka.common.topic_partition import TopicPartition
-
-    monkeypatch.setattr(
-        errmod,
-        "_lib",
-        _fake_lib_with_payload(
-            RecordTooLargeError._ffi_id,
-            "too big",
-            {"record_too_large_partitions": {("t", 3): 99}},
-        ),
-    )
-    err = errmod.from_ffi_error(0)
-    assert isinstance(err, RecordTooLargeError)
-    assert err.record_too_large_partitions() == {
-        TopicPartition(topic="t", partition=3): 99
-    }
-
-
-def test_record_too_large_partitions_none(monkeypatch) -> None:
-    from confluent_kafka.common import errors as errmod
-    from confluent_kafka.common.errors import RecordTooLargeError
-
-    monkeypatch.setattr(
-        errmod,
-        "_lib",
-        _fake_lib_with_payload(
-            RecordTooLargeError._ffi_id,
-            "too big",
-            {"record_too_large_partitions": None},
-        ),
-    )
-    err = errmod.from_ffi_error(0)
-    assert isinstance(err, RecordTooLargeError)
-    assert err.record_too_large_partitions() is None
-
-
-def test_error_without_payload_has_no_attribute(monkeypatch) -> None:
-    """An error variant that carries no typed payload gets no ``_error_payload``
-    (the C extension returns None)."""
-    from confluent_kafka.common import errors as errmod
-    from confluent_kafka.common.errors import TopicAuthorizationError
-
-    monkeypatch.setattr(
-        errmod,
-        "_lib",
-        _fake_lib_with_payload(TopicAuthorizationError._ffi_id, "x", None),
-    )
-    err = errmod.from_ffi_error(0)
-    assert not hasattr(err, "_error_payload")
+def test_from_ffi_error_keeps_the_message_when_java_needs_more(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    # A RecordDeserializationError the core reports without its record: no Java
+    # constructor takes a message alone, so only the message is kept.
+    monkeypatch.setattr(errmod, "_lib", _fake_lib(RecordDeserializationError._ffi_id,
+                                                  "bad record"))
+    err = from_ffi_error(0)
+    assert type(err) is RecordDeserializationError and str(err) == "bad record"
+    clone = pickle.loads(pickle.dumps(err))
+    assert type(clone) is RecordDeserializationError and str(clone) == "bad record"
 
 
 def test_real_native_plain_error_has_no_payload() -> None:
-    """A round-trip through the real C extension: an error built with no typed
-    payload reports None from ``KafkaError_payload``."""
-    _lib = pytest.importorskip("_confluentkafka")
-
-    # UNKNOWN_SERVER_ERROR (-1) carries no typed payload.
-    handle = _lib.KafkaError_new(-1, "boom")
+    lib = pytest.importorskip("_confluentkafka")
+    handle = lib.KafkaError_new(-1, "boom")
     try:
-        assert _lib.KafkaError_payload(handle) is None
+        assert lib.KafkaError_payload(handle) is None
     finally:
-        _lib.KafkaError_destroy(handle)
+        lib.KafkaError_destroy(handle)
+
+
+def test_real_native_round_trip() -> None:
+    lib = pytest.importorskip("_confluentkafka")
+    err = from_ffi_error(lib.KafkaError_new(TopicAuthorizationError._ffi_id, "no access"))
+    assert type(err) is TopicAuthorizationError
+    assert str(err) == "no access"
+
+
+# ----------------------------------------------------------------------------
+# The type is the predicate
+# ----------------------------------------------------------------------------
+
+
+def test_the_type_is_the_predicate() -> None:
+    assert issubclass(NotLeaderOrFollowerError, RetriableError)
+    with pytest.raises(RetriableError):
+        raise NotLeaderOrFollowerError(message="no leader")
+    with pytest.raises(KafkaError):
+        raise TopicAuthorizationError(message="nope")
+    for name in ("code", "is_retriable", "is_fatal"):
+        assert not hasattr(KafkaError(message="x"), name)

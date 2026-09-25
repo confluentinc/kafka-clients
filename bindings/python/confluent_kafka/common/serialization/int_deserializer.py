@@ -24,7 +24,7 @@ exactly.
 
 from __future__ import annotations
 
-from confluent_kafka.common.errors._generated import SerializationError
+from confluent_kafka.common.errors.serialization_error import SerializationError
 from confluent_kafka.common.headers import Headers
 
 # Java's per-class exception text, keyed by width so the collapsed class matches
@@ -49,6 +49,6 @@ class IntDeserializer:
         if len(data) != self._size:
             cls = _CLASS_NAME_BY_SIZE.get(self._size, "IntegerDeserializer")
             raise SerializationError(
-                f"Size of data received by {cls} is not {self._size}"
+                message=f"Size of data received by {cls} is not {self._size}"
             )
         return int.from_bytes(bytes(data), "big", signed=True)

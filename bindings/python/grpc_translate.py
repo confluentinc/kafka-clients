@@ -41,7 +41,8 @@ import threading  # noqa: E402  (CallbackLog's lock)
 # (spec §4), not the retired top-level ``producer.py`` / ``consumer.py``.
 from confluent_kafka import IllegalArgumentError, IllegalStateError  # noqa: E402
 from confluent_kafka.common import TopicPartition  # noqa: E402
-from confluent_kafka.common.errors import KafkaError, to_ffi_id  # noqa: E402
+from confluent_kafka._errors import to_ffi_id
+from confluent_kafka.common import KafkaError  # noqa: E402
 # The broker wire ``TimeoutException`` (code 7), distinct from the JDK-analog
 # ``confluent_kafka.TimeoutError`` (code -5). Aliased to avoid the name clash.
 from confluent_kafka.common.errors import TimeoutError as _WireTimeout  # noqa: E402

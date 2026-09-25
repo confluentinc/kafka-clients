@@ -30,7 +30,8 @@ from typing import TYPE_CHECKING, Callable, cast
 
 import _confluentkafka as _lib  # type: ignore[import-not-found]
 
-from confluent_kafka.common.errors import KafkaError, from_ffi_error
+from confluent_kafka._errors import from_ffi_error
+from confluent_kafka.common.kafka_error import KafkaError
 
 from .record_metadata import RecordMetadata
 

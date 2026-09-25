@@ -53,7 +53,7 @@ from confluent_kafka.consumer import (  # noqa: E402
     AsyncMockConsumer,
     OffsetAndMetadata,
 )
-from confluent_kafka.common.errors import KafkaError  # noqa: E402
+from confluent_kafka.common import KafkaError  # noqa: E402
 import admin as ka  # noqa: E402  (AsyncAdminClient / AsyncMockAdminClient / ...)
 import producer_service_pb2 as pb  # noqa: E402  (generated)
 import producer_service_pb2_grpc as pb_grpc  # noqa: E402  (generated)

@@ -27,10 +27,12 @@ from typing import Generic, TypeVar, overload
 import _confluentkafka as _lib  # type: ignore[import-not-found]
 
 from confluent_kafka.common.serialization import Deserializer, bytes_deserializer
+from confluent_kafka import Duration
 from confluent_kafka.common.topic_partition import TopicPartition
 
 from ._conversions import tp_to_spec
 from ._mock_driver import _MockDriverMixin
+from .consumer_records import ConsumerRecords
 from .async_consumer import AsyncConsumer
 from .offset_reset_strategy import OffsetResetStrategy
 
@@ -77,3 +79,40 @@ class AsyncMockConsumer(_MockDriverMixin, AsyncConsumer[K, V], Generic[K, V]):
             lambda cb: _lib.MockConsumer_rebalance_async(self._h, spec, cb),
             self._resolve_void, self._free_void,
         )
+
+    async def poll(self, *, timeout: Duration) -> ConsumerRecords[K, V]:
+        """Java ``poll(Duration)``; raises an error injected with
+        ``set_poll_exception`` as the very instance injected."""
+        try:
+            return await super().poll(timeout=timeout)
+        except Exception as error:
+            instead = self._injected_instead("poll", error)
+            if instead is error:
+                raise
+        raise instead
+
+    async def beginning_offsets(self, *, partitions: Iterable[TopicPartition],
+                          timeout: Duration | None = None
+                          ) -> dict[TopicPartition, int]:
+        """Java ``beginningOffsets(Collection)``; raises an error injected with
+        ``set_offsets_exception`` as the very instance injected."""
+        try:
+            return await super().beginning_offsets(partitions=partitions, timeout=timeout)
+        except Exception as error:
+            instead = self._injected_instead("offsets", error)
+            if instead is error:
+                raise
+        raise instead
+
+    async def end_offsets(self, *, partitions: Iterable[TopicPartition],
+                    timeout: Duration | None = None
+                    ) -> dict[TopicPartition, int]:
+        """Java ``endOffsets(Collection)``; raises an error injected with
+        ``set_offsets_exception`` as the very instance injected."""
+        try:
+            return await super().end_offsets(partitions=partitions, timeout=timeout)
+        except Exception as error:
+            instead = self._injected_instead("offsets", error)
+            if instead is error:
+                raise
+        raise instead

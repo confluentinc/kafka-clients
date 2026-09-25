@@ -25,8 +25,6 @@ which Java places in this package (``CommitFailedException``,
 
 from __future__ import annotations
 
-from ._generated_errors import *  # noqa: F401,F403 -- re-export the consumer errors
-from ._generated_errors import __all__ as _errors_all
 from .async_consumer import AsyncConsumer
 from .async_kafka_consumer import AsyncKafkaConsumer
 from .async_mock_consumer import AsyncMockConsumer
@@ -44,7 +42,6 @@ from .offset_reset_strategy import OffsetResetStrategy
 from .subscription_pattern import SubscriptionPattern
 
 __all__ = [
-    *_errors_all,
     "AsyncConsumer",
     "AsyncKafkaConsumer",
     "AsyncMockConsumer",
@@ -62,3 +59,20 @@ __all__ = [
     "OffsetResetStrategy",
     "SubscriptionPattern",
 ]
+
+# BEGIN GENERATED ERRORS (cargo xtask generate-error-codes; do not edit)
+from .commit_failed_error import CommitFailedError as CommitFailedError
+from .invalid_offset_error import InvalidOffsetError as InvalidOffsetError
+from .log_truncation_error import LogTruncationError as LogTruncationError
+from .no_offset_for_partition_error import NoOffsetForPartitionError as NoOffsetForPartitionError
+from .offset_out_of_range_error import OffsetOutOfRangeError as OffsetOutOfRangeError
+from .retriable_commit_failed_error import RetriableCommitFailedError as RetriableCommitFailedError
+__all__ += [
+    "CommitFailedError",
+    "InvalidOffsetError",
+    "LogTruncationError",
+    "NoOffsetForPartitionError",
+    "OffsetOutOfRangeError",
+    "RetriableCommitFailedError",
+]
+# END GENERATED ERRORS

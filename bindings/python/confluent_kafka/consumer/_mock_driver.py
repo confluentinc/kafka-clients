@@ -25,9 +25,9 @@ from typing import Any
 
 import _confluentkafka as _lib  # type: ignore[import-not-found]
 
-from confluent_kafka.common.errors import from_ffi_error, to_ffi_id
-from confluent_kafka.common.errors._base import KafkaError
-from confluent_kafka.common.metric import KafkaMetric
+from confluent_kafka._errors import from_ffi_error, reported_ffi_id, to_ffi_id
+from confluent_kafka.common.kafka_error import KafkaError
+from confluent_kafka.common.kafka_metric import KafkaMetric
 from confluent_kafka.common.partition_info import PartitionInfo
 from confluent_kafka.common.topic_partition import TopicPartition
 from confluent_kafka.common.uuid import Uuid
@@ -113,21 +113,37 @@ class _MockDriverMixin:
             self._h, topic, len(partitions), leader_id, leader_host, leader_port))  # type: ignore[attr-defined]
 
     def set_poll_exception(self, *, exception: KafkaError | None) -> None:
-        """Java ``setPollException(KafkaException)`` — the next ``poll`` raises
-        this once. ``None`` is a no-op (the FFI has no clear)."""
+        """Java ``setPollException(KafkaException)``: the next ``poll`` raises
+        this very instance once. ``None`` clears the pending instance; the core
+        cannot clear an error it holds yet (ffi-overload-gaps.md, core gap 4)."""
         self._check_closed()  # type: ignore[attr-defined]
-        if exception is None:
-            return
-        _raise_if_error(_lib.MockConsumer_set_poll_error(
-            self._h, to_ffi_id(exception), str(exception)))  # type: ignore[attr-defined]
+        self._inject("poll", exception, _lib.MockConsumer_set_poll_error)
 
     def set_offsets_exception(self, *, exception: KafkaError | None) -> None:
-        """Java ``setOffsetsException(KafkaException)``."""
+        """Java ``setOffsetsException(KafkaException)``: the next
+        ``beginning_offsets`` / ``end_offsets`` raises this very instance once."""
         self._check_closed()  # type: ignore[attr-defined]
+        self._inject("offsets", exception, _lib.MockConsumer_set_offsets_error)
+
+    def _inject(self, slot: str, exception: BaseException | None,
+                native: Callable[..., int]) -> None:
+        injected: dict[str, BaseException] = self._injected  # type: ignore[attr-defined]
         if exception is None:
+            injected.pop(slot, None)
             return
-        _raise_if_error(_lib.MockConsumer_set_offsets_error(
+        injected[slot] = exception
+        _raise_if_error(native(
             self._h, to_ffi_id(exception), str(exception)))  # type: ignore[attr-defined]
+
+    def _injected_instead(self, slot: str, error: BaseException) -> BaseException:
+        """The injected instance when ``error`` is the core reporting it (its
+        FFI id is the one the injection reported), else ``error``."""
+        injected: dict[str, BaseException] = self._injected  # type: ignore[attr-defined]
+        pending = injected.get(slot)
+        if pending is not None and getattr(type(error), "_ffi_id", None) == reported_ffi_id(pending):
+            del injected[slot]
+            return pending
+        return error
 
     def set_max_poll_records(self, *, max_poll_records: int) -> None:
         """Java ``setMaxPollRecords(long)`` — ``IllegalArgumentError`` when
