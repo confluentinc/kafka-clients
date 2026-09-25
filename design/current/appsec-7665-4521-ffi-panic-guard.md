@@ -498,10 +498,24 @@ code and record the difference here.
       return the error handle, and `user_data_destroy` still fires. None fires
       the callback. "Does not invoke the callback" is what the guard does. A
       panic raised after the callback was handed on can still see it delivered:
-      note 16's mid-loop `send_batch_async` case (hence "not invoked *for it*"
-      in that sentence), and the Critic's not-filed panic after registration in
-      `commit_async_with_callback`. Only a bug reaches either, and the
-      preamble's "destroy that handle" covers them.
+      - note 16's mid-loop `send_batch_async` case (hence "not invoked *for
+        it*" in that sentence);
+      - the Critic's not-filed panic after registration in
+        `commit_async_with_callback`;
+      - in `send_with_callback`, the `transaction_manager.lock().unwrap()` at
+        `src/producer/kafka_producer.rs:1936`, which runs after `append`
+        (`:1897`) has moved the callback into a batch: on a poisoned
+        transaction-manager lock the function returns null with the panic in
+        `*out_error`, and the batch still fires the callback when it
+        completes;
+      - in `send_async`, the wake of the submission receiver after the request
+        is queued (the `send_async` bullet below): the submission task still
+        sends the record and fires its callback once.
+
+      Only a bug reaches the first three, and only a failure in tokio or the
+      OS reaches the fourth. The preamble's "destroy that handle" covers all
+      four. `send_async`, whose only unwinding panic is the fourth, now also
+      says in its own docs that the callback still fires (note 23).
     - **Header diff against `a0b5065b`:** 21 lines added and 3 removed, in six
       hunks (15744 → 15762 lines). The preamble's last three lines become seven
       (header lines 11–17), and the five sentences add 14 lines: 3 each for
@@ -529,16 +543,39 @@ code and record the difference here.
       an option there: neither entry point takes a lock before the commit
       starts, and the access guard is an atomic CAS that fails with an
       ordinary error.
-    - **`send_async` is not pinned.** It has no synchronous panic that the
-      existing fixtures can trigger. It takes no lock, so poisoning does not
-      reach it. It has no `block_on`, so the nested runtime does not either.
-      It builds its record through `Result`-returning code. What is left ends
-      the process instead of unwinding: tokio's `UnboundedSender::send` aborts
-      on counter overflow, the `slice::from_raw_parts` precondition checks
-      cannot unwind, and allocation failure aborts. The brief ruled out a test
-      hook in production code. Its plain `#[ffi_guard]` generates the same
-      `out_error` store as `send_with_callback`'s, which is pinned; it only
-      has no value to return.
+    - **`send_async`: its one unwinding panic comes after the hand-off.**
+      (Round 2 wrote here that `send_async` could not be pinned, because
+      tokio's `UnboundedSender::send` could only abort. Critic 79 issue 2
+      showed that was wrong; note 23 records the fix.) It takes no lock, so
+      poisoning does not reach it, and it has no `block_on`, so the nested
+      runtime does not either. It builds its record through
+      `Result`-returning code, and allocation failure, the
+      `slice::from_raw_parts` precondition checks and the message-counter
+      overflow in `UnboundedSender::send` (`sync/mpsc/unbounded.rs:570`)
+      abort rather than unwind. But `send` can unwind after it has queued the
+      request. In tokio 1.52.0 (the version in `Cargo.lock`) it calls
+      `Chan::send`, which pushes the request and then wakes the receiver
+      (`sync/mpsc/chan.rs:528-534`), and `AtomicWaker::wake` lets a panicking
+      waker unwind: "If wake panics, we've consumed the waker which is a
+      legitimate outcome" (`sync/task/atomic_waker.rs:303-308`). A test that
+      owns the receiver can register such a waker, so the panic can be
+      pinned without a hook in production code. In production the waker is
+      the submission task's tokio waker. Short of a bug in tokio (the
+      `panic!("inconsistent state in unpark")` at
+      `runtime/scheduler/multi_thread/park.rs:288`), its one panic is
+      `expect("failed to wake I/O driver")` (`runtime/io/driver.rs:260`): the
+      OS failing to signal the I/O driver, raised after `push_remote_task`
+      has already put the task on the scheduler's inject queue
+      (`runtime/scheduler/multi_thread/worker.rs:1333-1334`). The task still
+      runs once a worker next takes it from that queue, so the record is sent
+      and its callback fires exactly once. That firing is not ordered against
+      the panic report in `*out_error`: as on the success path, the callback
+      can run on the dispatcher thread before `send_async` returns. The same
+      firing is why the plain guard is the only correct guard here: the
+      submission task makes its own at-most-once `fired` flag for each
+      request (`src/ffi/producer.rs:797`), which a firing from the guard would
+      not share, so a D4-style `on_panic` would fire the callback twice and
+      free `user_data` twice.
     - **Teeth.** With each test's callback assertion inverted (`0` → `1`), all
       four fail on it. With the plain guard swapped for a D4-style `on_panic`
       that fires the callback (the producer ones still writing `out_error`, so
@@ -549,3 +586,102 @@ code and record the difference here.
       how these functions behaved before `7294d8d0`.
     - `COMMENTS.DONE.79.md` and `COMMENTS.79.md` match `.gitignore`'s
       `/COMMENTS*\.md`, so the move of issue 1 exists in the working tree only.
+23. **Critic 79 issue 2 (round 3) — `send_async`'s post-queue panic is
+    pinned, and its docs say the callback still fires.** Round 2 left
+    `send_async` unpinned on a false premise; note 22's `send_async` bullet
+    now gives the correct account. The guard is unchanged: `send_async`
+    keeps the plain `#[ffi_guard]` (note 8).
+    - **Test.** `test_send_async_panic_after_queueing_is_reported_in_out_error`
+      (`src/ffi/producer.rs`, after the round-2
+      `test_send_batch_async_panic_is_a_synchronous_failure`) builds its
+      handle as `dead_submission_handle` does, but keeps both receivers, so
+      no submission task or dispatcher thread exists. Polling the empty
+      submission channel registers a waker whose `wake` panics; the test
+      then calls `send_async` with a valid record and `count_send_callback`.
+      It asserts:
+      - a non-null `out_error`, whose code is
+        `kafka_common_ErrorCode_LOCAL_ILLEGAL_STATE` and whose message starts
+        "Rust panic caught at the FFI boundary in
+        kafka_producer_Producer_send_async:" and contains the waker's panic
+        text;
+      - `queued_sends` at 1;
+      - exactly one request on the channel, a `SubmitRequest::Send`
+        carrying this call's `user_data`;
+      - the callback counter at 0, once the request and the receiver are
+        dropped, the handle is reclaimed and the completion queue has been
+        run.
+
+      Three of these checks go beyond the brief. `queued_sends` and
+      `user_data` show the request is in the state a successful call leaves
+      it in. Running the completion queue, as the dispatcher would, makes a
+      callback fired through the dispatcher count too.
+    - **What the counter at 0 shows.** Only that the guard did not invoke the
+      callback. The test holds the receiver, so nothing delivers the queued
+      record. In production the submission task delivers it and fires its
+      callback exactly once, so the test's doc comment names "one callback,
+      from the delivery" as the contract, not "no callback".
+    - **Docs.** Only `send_async`'s panic sentence changed
+      (`src/ffi/producer.rs:1718-1722`). It now reads: "A caught panic is
+      reported the same way: `*out_error` receives a
+      `kafka_common_ErrorCode_LOCAL_ILLEGAL_STATE` error (with a null
+      `out_error` it is only logged), and it is never reported through
+      `callback`. The only panic reachable in this function happens after the
+      record was queued, so that record is still sent and `callback` still
+      fires for it, exactly once." Both preamble copies are unchanged.
+      - *"The only panic reachable".* Checked against the body before
+        writing it.
+        - Cannot panic: the null checks, the `CStr` conversion, the
+          `queued_sends` updates, `producer_handle` (a pointer cast),
+          `box_error` (whose one `unwrap` is on `CString::new("")`) and the
+          record builder (`build()` and `with_options` return `Result`).
+        - Abort instead of unwinding: allocation failure, the
+          `slice::from_raw_parts` precondition checks (`panic_nounwind`,
+          which the null checks and `i32` lengths also make unreachable) and
+          tokio's message-counter overflow.
+
+        That leaves the wake after the push. The claim sets aside tokio's own
+        invariant checks, which fire only on a bug in tokio:
+        - the `debug_assert!`s that `find_block` reaches before the write
+          (`sync/mpsc/block.rs:130, 139, 301`, compiled out of a release
+          build);
+        - the `park.rs:288` panic above, which comes after the push anyway.
+      - *"Still fires".* This holds even if the caller destroys the handle
+        straight after the call:
+        - `destroy` drops `submit_tx` first;
+        - the submission task, which is in `pending_tasks`
+          (`src/ffi/producer.rs:928-930`), still receives the requests
+          already queued before `recv()` returns `None`;
+        - `destroy` joins it, then drops the producer (whose close fires any
+          callback still in flight), and only then detaches the dispatcher.
+
+        The callback then reports the close's error if the record had not
+        completed, as it would for any send queued just before `destroy`.
+      - *Telling this error apart.* `send_async` reports one other
+        `LOCAL_ILLEGAL_STATE` error, "producer is closed", and that one does
+        not fire the callback. A C caller tells the two apart only by the
+        message prefix the preamble documents. The sentence before the new
+        one, "`out_error` reports only synchronous validation errors (null
+        topic / bad key/value length), in which case `callback` is **not**
+        invoked", does not mention the closed-producer case either. That
+        sentence is already on `master` (`dfade0be`). It stays as it is,
+        because the brief allowed no other doc change; it is left for the
+        Manager.
+    - **Header diff against `de90b540`:** one hunk,
+      `14539,14540c14539,14542`: 2 lines removed and 4 added
+      (15762 → 15764 lines), all in the sentence above. No other line
+      changed.
+    - **Teeth.** Each mutation ran the new test on its own.
+      - With the final assertion inverted (`0` → `1`), the test fails on that
+        assertion (`left: 0, right: 1`).
+      - With the plain guard swapped for a D4-style `on_panic` that writes
+        `*out_error` and fires the callback, it fails on the callback
+        assertion (`left: 1, right: 0`) after every other assertion passes.
+      - With `#[ffi_guard]` removed, the process aborts ("panic in a
+        function that cannot unwind", SIGABRT).
+
+      After each mutation `src/ffi/producer.rs` was restored from a saved
+      copy and confirmed byte-identical (sha256).
+    - `COMMENTS.DONE.79.md` now holds issue 2, plus the corrected
+      `send_async` clause of issue 1's round-2 resolution. `COMMENTS.79.md`
+      keeps a pointer where issue 2 was, and Note A, which is the Manager's
+      to settle. Both files are gitignored (note 22).

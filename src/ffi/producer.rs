@@ -1716,8 +1716,10 @@ pub unsafe extern "C" fn kafka_producer_Producer_send_batch(
 /// `out_error` reports only synchronous validation errors (null topic / bad
 /// key/value length), in which case `callback` is **not** invoked.
 /// A caught panic is reported the same way: `*out_error` receives a
-/// `kafka_common_ErrorCode_LOCAL_ILLEGAL_STATE` error and `callback` is not
-/// invoked, so with a null `out_error` the panic is only logged.
+/// `kafka_common_ErrorCode_LOCAL_ILLEGAL_STATE` error (with a null `out_error`
+/// it is only logged), and it is never reported through `callback`. The only
+/// panic reachable in this function happens after the record was queued, so that
+/// record is still sent and `callback` still fires for it, exactly once.
 ///
 /// # Zero-copy / lifetime contract
 ///
@@ -5505,6 +5507,119 @@ mod tests {
             invocations.load(std::sync::atomic::Ordering::Acquire),
             0,
             "a panic reported through the return value must not also invoke the callback"
+        );
+    }
+
+    /// `send_async` keeps the plain guard (§6 note 8), and its one unwinding panic
+    /// comes after the hand-off: tokio's `UnboundedSender::send` queues the request
+    /// and then wakes the receiver, and a waker that panics unwinds out of that wake
+    /// (tokio 1.52.0, `sync/mpsc/chan.rs:528-534`, `sync/task/atomic_waker.rs:303-308`).
+    /// The test registers such a waker on a submission channel it owns and checks that
+    /// the panic lands in `out_error` while the request stays queued, counted and
+    /// carrying this call's callback target (COMMENTS.79.md issue 2).
+    ///
+    /// The callback counter staying at 0 means only that the guard did not invoke the
+    /// callback. The test holds the receiver, so nothing delivers the queued record
+    /// here. In production the submission task does deliver it and fires the callback
+    /// exactly once, under an at-most-once flag of its own, so an `on_panic` that fired
+    /// the callback would fire it a second time and free `user_data` twice. The
+    /// contract for this path is one callback, from the delivery, not none.
+    #[test]
+    fn test_send_async_panic_after_queueing_is_reported_in_out_error() {
+        struct PanickingWake;
+        impl std::task::Wake for PanickingWake {
+            fn wake(self: std::sync::Arc<Self>) {
+                panic!("the submission receiver's waker panics");
+            }
+        }
+        // Built like `dead_submission_handle`, except that the test keeps both
+        // receivers: the submission one to register the waker and see what was
+        // queued, the completion one to run whatever reaches the dispatcher queue.
+        // No submission task or dispatcher thread exists.
+        let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
+        let kind = ProducerKind::Mock(Box::new(MockProducer::with_auto_complete(true)), runtime);
+        let (completion_tx, completion_rx) = std::sync::mpsc::channel::<CompletionJob>();
+        let (submit_tx, mut submit_rx) = tokio::sync::mpsc::unbounded_channel::<SubmitRequest>();
+        let handle = Box::new(ProducerHandle {
+            kind: Mutex::new(kind),
+            completion_tx,
+            submit_tx,
+            dispatcher: Mutex::new(None),
+            pending_tasks: Mutex::new(Vec::new()),
+            txn_control_busy: std::sync::atomic::AtomicBool::new(false),
+            queued_sends: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let producer = Box::into_raw(handle) as *mut kafka_producer_Producer_t;
+        let waker = std::task::Waker::from(std::sync::Arc::new(PanickingWake));
+        let mut cx = std::task::Context::from_waker(&waker);
+        assert!(
+            submit_rx.poll_recv(&mut cx).is_pending(),
+            "polling the empty channel registers the panicking waker"
+        );
+
+        let topic = CString::new("topic").unwrap();
+        let value = b"value";
+        let invocations = std::sync::atomic::AtomicUsize::new(0);
+        let user_data = &invocations as *const std::sync::atomic::AtomicUsize as *mut std::ffi::c_void;
+        let mut out_error: *mut kafka_common_Error_t = std::ptr::null_mut();
+        unsafe {
+            kafka_producer_Producer_send_async(
+                producer,
+                topic.as_ptr(),
+                -1,
+                -1,
+                std::ptr::null(),
+                -1,
+                value.as_ptr(),
+                value.len() as i32,
+                count_send_callback,
+                user_data,
+                &mut out_error,
+            )
+        };
+        assert!(!out_error.is_null(), "a caught panic must be stored in out_error");
+        assert_eq!(
+            unsafe { kafka_common_Error_code(out_error) },
+            kafka_common_ErrorCode_LOCAL_ILLEGAL_STATE
+        );
+        let msg = unsafe { take_error_message(out_error) };
+        assert!(
+            msg.starts_with("Rust panic caught at the FFI boundary in kafka_producer_Producer_send_async:"),
+            "unexpected error message: {msg}"
+        );
+        assert!(
+            msg.contains("the submission receiver's waker panics"),
+            "unexpected error message: {msg}"
+        );
+
+        // The panic came after the hand-off: the request is counted and on the channel,
+        // carrying this call's callback target, exactly as after a successful call.
+        let queued_sends = unsafe { producer_handle(producer) }
+            .queued_sends
+            .load(std::sync::atomic::Ordering::Acquire);
+        assert_eq!(queued_sends, 1, "the queued request must still be counted");
+        let Ok(SubmitRequest::Send(request)) = submit_rx.try_recv() else {
+            panic!("the request must reach the channel before the waker panics");
+        };
+        assert_eq!(
+            request.target.user_data, user_data,
+            "the queued request must carry this call's callback target"
+        );
+        drop(request);
+        assert!(submit_rx.try_recv().is_err(), "send_async must queue exactly one request");
+        drop(submit_rx);
+        // Sound: `send_async` spawns nothing and keeps no reference to the handle, and
+        // the one request that borrowed this call's buffers has been dropped.
+        unsafe { reclaim_producer_handle(producer) };
+        // Run whatever reached the completion queue, as the dispatcher would, so that a
+        // callback fired through it is counted too.
+        while let Ok(job) = completion_rx.try_recv() {
+            job();
+        }
+        assert_eq!(
+            invocations.load(std::sync::atomic::Ordering::Acquire),
+            0,
+            "the guard must not invoke the callback: the queued record still owns its one firing"
         );
     }
 
