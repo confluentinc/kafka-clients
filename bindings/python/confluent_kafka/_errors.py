@@ -211,8 +211,16 @@ def from_ffi_error(handle: int, *, cause: BaseException | None = None) -> BaseEx
     error_payload = getattr(_lib, "KafkaError_payload", None)
     if error_payload is not None:
         payload = error_payload(handle)
+    cls = class_for_ffi_id(ffi_id)
+    is_api_error = getattr(_lib, "KafkaError_is_api_error", None)
+    if ffi_id == UNKNOWN_SERVER_ERROR and is_api_error is not None and not is_api_error(handle):
+        # A bare KafkaException shares UnknownServerException's id; only the
+        # latter is an ApiException.
+        from .common.kafka_error import KafkaError
+
+        cls = KafkaError
     _lib.KafkaError_destroy(handle)
-    error = construct(class_for_ffi_id(ffi_id), message, payload)
+    error = construct(cls, message, payload)
     if cause is not None:
         error.__cause__ = cause
     elif source_cause is not None:

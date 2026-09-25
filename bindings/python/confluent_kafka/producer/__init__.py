@@ -16,37 +16,31 @@
 
 The records (``ProducerRecord``, ``RecordMetadata``), the client family
 (``Producer``, ``KafkaProducer``, ``MockProducer`` and their ``Async`` peers),
-the delivery callback alias and the errors Java declares in this package
-(CLAUDE.md, Python Binding Conventions, Modules).
+the ``Callback`` alias, the ``Partitioner`` placeholder and the errors Java
+declares in this package (CLAUDE.md, Python Binding Conventions, Modules).
 """
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Callable
-
+from .async_kafka_producer import AsyncKafkaProducer as AsyncKafkaProducer
+from .async_mock_producer import AsyncMockProducer as AsyncMockProducer
 from .async_producer import AsyncProducer as AsyncProducer
-from .kafka_producer import AsyncKafkaProducer as AsyncKafkaProducer
+from .callback import Callback as Callback
 from .kafka_producer import KafkaProducer as KafkaProducer
-from .mock_producer import AsyncMockProducer as AsyncMockProducer
 from .mock_producer import MockProducer as MockProducer
+from .partitioner import Partitioner as Partitioner
 from .producer import Producer as Producer
 from .producer_record import ProducerRecord as ProducerRecord
 from .record_metadata import RecordMetadata as RecordMetadata
-
-if TYPE_CHECKING:
-    from confluent_kafka.common.kafka_error import KafkaError
-
-# Java: org.apache.kafka.clients.producer.Callback. Defined here beside its use
-# (the ``callback`` parameter of ``send``).
-DeliveryCallback = Callable[["RecordMetadata | None", "KafkaError | None"], None]
 
 __all__ = [
     "AsyncKafkaProducer",
     "AsyncMockProducer",
     "AsyncProducer",
-    "DeliveryCallback",
+    "Callback",
     "KafkaProducer",
     "MockProducer",
+    "Partitioner",
     "Producer",
     "ProducerRecord",
     "RecordMetadata",

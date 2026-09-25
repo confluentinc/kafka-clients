@@ -12,123 +12,77 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""``KafkaProducer`` / ``AsyncKafkaProducer`` — the real producer clients.
+"""``KafkaProducer``: Java's ``org.apache.kafka.clients.producer.KafkaProducer``.
 
-Translated from ``org.apache.kafka.clients.producer.KafkaProducer`` (Apache
-Kafka 4.3.1). Java's ``KafkaProducer(Properties, Serializer, Serializer)``
-collapses to one keyword-only constructor (spec §6.1); all methods are inherited
-from :class:`Producer` / :class:`AsyncProducer`.
+Only Java's public constructors, every method being :class:`Producer`'s
+(CLAUDE.md, Python Binding Conventions, Class family). Java's four
+constructors, ``(Map configs)``, ``(Map configs, Serializer, Serializer)``,
+``(Properties properties)`` and ``(Properties properties, Serializer,
+Serializer)``, are one keyword-only ``__init__``: ``Map`` and ``Properties``
+are both ``dict``, so the parameter is ``configs``; the shorter constructors
+pass ``null`` serializers, so every combination is a Java overload and the
+stubs only bind the type parameters (Signatures). A serializer defaults to the
+config key, else ``bytes_serializer()`` *(deviation: Java requires one)*. The
+constructor maps to ``kafka_producer_KafkaProducer_new``; the serializers run
+in Python on the caller's thread.
 """
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, TypeVar, cast
+from typing import TYPE_CHECKING, Any, ClassVar, TypeVar, overload
 
-from confluent_kafka import IllegalArgumentError
-from confluent_kafka._config import RecordingConfigs, log_unused, prepare
-from confluent_kafka.common.serialization import bytes_serializer
-from confluent_kafka.common.serialization._supply import resolve_serde
-
-from .async_producer import AsyncProducer
 from .producer import Producer
 
 if TYPE_CHECKING:
-    from confluent_kafka import Duration
     from confluent_kafka.common.serialization import Serializer
+
+__all__ = ["KafkaProducer"]
 
 K = TypeVar("K")
 V = TypeVar("V")
 
-# Java's ProducerConfig keys for a serializer supplied through config
-# (a dotted class path / class object). The kwarg wins over these (spec §5.4).
-_KEY_SERIALIZER_KEY = "key.serializer"
-_VALUE_SERIALIZER_KEY = "value.serializer"
-
-
-def _prepare_config(configs: dict[str, Any]) -> tuple[RecordingConfigs, dict[str, str]]:
-    """Java's ``ProducerConfig`` parsing of ``configs``: the user's configs
-    (for the serde config route) and the string map the core parses."""
-    return prepare(configs, client="producer")
-
-
-def _resolve_serializers(
-        config: dict[str, Any],
-        key_serializer: Serializer[Any],
-        value_serializer: Serializer[Any],
-) -> tuple[Serializer[Any], Serializer[Any]]:
-    """Resolve the key/value serializers (kwarg wins over the config route),
-    honouring ``configure(conf, is_key)`` on the config route (spec §5.4)."""
-    key = resolve_serde(
-        key_serializer, config, _KEY_SERIALIZER_KEY,
-        is_key=True, default=bytes_serializer())
-    value = resolve_serde(
-        value_serializer, config, _VALUE_SERIALIZER_KEY,
-        is_key=False, default=bytes_serializer())
-    # ``resolve_serde`` returns the generic ``Callable`` supply type; both routes
-    # yield a callable of the ``Serializer`` shape (kwarg is checked, config
-    # constructs one), so the narrower stored type is exact.
-    return cast("Serializer[Any]", key), cast("Serializer[Any]", value)
-
 
 class KafkaProducer(Producer[K, V]):
-    """A Kafka producer connected to a real cluster.
+    """A Kafka client that publishes records to the Kafka cluster.
 
-    Java: ``KafkaProducer<K, V>`` — constructor only; every method is inherited
-    from :class:`Producer`."""
+    The producer is thread safe and sharing a single producer instance across
+    threads will generally be faster than having multiple instances. It
+    consists of a pool of buffer space that holds records that haven't yet been
+    transmitted to the server, and a background task responsible for turning
+    these records into requests and transmitting them to the cluster. Failure
+    to close the producer after use will leak these resources.
 
-    def __init__(self, *, configs: dict[str, Any],
-                 key_serializer: Serializer[Any] = bytes_serializer(),
-                 value_serializer: Serializer[Any] = bytes_serializer(),
-                 partitioner: object | None = None) -> None:
+    Java: ``org.apache.kafka.clients.producer.KafkaProducer<K, V>``.
+    """
+
+    NETWORK_THREAD_PREFIX: ClassVar[str] = "kafka-producer-network-thread"
+    PRODUCER_METRIC_GROUP_NAME: ClassVar[str] = "producer-metrics"
+
+    @overload
+    def __init__(self: KafkaProducer[bytes, bytes], *, configs: dict[str, Any]) -> None: ...
+    @overload
+    def __init__(self: KafkaProducer[K, bytes], *, configs: dict[str, Any],
+                 key_serializer: Serializer[K]) -> None: ...
+    @overload
+    def __init__(self: KafkaProducer[bytes, V], *, configs: dict[str, Any],
+                 value_serializer: Serializer[V]) -> None: ...
+    @overload
+    def __init__(self, *, configs: dict[str, Any], key_serializer: Serializer[K],
+                 value_serializer: Serializer[V]) -> None: ...
+
+    def __init__(self, *, configs: dict[str, Any], key_serializer: Serializer[Any] | None = None,
+                 value_serializer: Serializer[Any] | None = None) -> None:
+        """A producer is instantiated by providing a set of key-value pairs as
+        configuration, and a key and a value serializer. Valid configuration
+        strings are documented at
+        http://kafka.apache.org/documentation.html#producerconfigs. Values can
+        be either strings or objects of the appropriate type (for example a
+        numeric configuration would accept either the string "42" or the
+        integer 42). The ``configure()`` method won't be called in the producer
+        when the serializer is passed in directly.
+
+        Note: after creating a ``KafkaProducer`` you must always ``close()`` it
+        to avoid resource leaks.
+        """
         Producer.__init__(self)
-        originals, native = _prepare_config(configs)
-        self._key_serializer, self._value_serializer = _resolve_serializers(
-            originals, key_serializer, value_serializer)
-        _reject_partitioner(partitioner)
-        self._init_kafka(native)
-        log_unused(originals, client="producer")
-
-    def close(self, *, timeout: Duration | None = None) -> None:
-        super().close(timeout=timeout)
-        _close_serializers(self)
-
-
-class AsyncKafkaProducer(AsyncProducer[K, V]):
-    """The asyncio-native real client — same constructor as ``KafkaProducer``;
-    methods inherited from :class:`AsyncProducer`."""
-
-    def __init__(self, *, configs: dict[str, Any],
-                 key_serializer: Serializer[Any] = bytes_serializer(),
-                 value_serializer: Serializer[Any] = bytes_serializer(),
-                 partitioner: object | None = None) -> None:
-        AsyncProducer.__init__(self)
-        originals, native = _prepare_config(configs)
-        self._key_serializer, self._value_serializer = _resolve_serializers(
-            originals, key_serializer, value_serializer)
-        _reject_partitioner(partitioner)
-        self._init_kafka(native)
-        log_unused(originals, client="producer")
-
-    async def close(self, *, timeout: Duration | None = None) -> None:
-        await super().close(timeout=timeout)
-        _close_serializers(self)
-
-
-def _reject_partitioner(partitioner: object | None) -> None:
-    """The ``partitioner=`` argument declares the pluggable surface (spec §6.1);
-    the custom-partitioner plumbing is finalized in the plugin design pass. Until
-    the FFI has a hook, a non-None value is rejected rather than silently ignored
-    (the default Java partitioning always applies). A clarification records the
-    gap."""
-    if partitioner is not None:
-        raise IllegalArgumentError(
-            message="custom partitioner is not yet supported; the pluggable partitioner "
-            "surface is finalized in the plugin design pass (spec §6.1)")
-
-
-def _close_serializers(producer: object) -> None:
-    """Java `Serializer.close()` on both serializers at producer close
-    (spec §5.4). Idempotent; a failing close is logged, not raised."""
-    from confluent_kafka.common.serialization._supply import close_if_defined
-    close_if_defined(producer._key_serializer)   # type: ignore[attr-defined]
-    close_if_defined(producer._value_serializer)  # type: ignore[attr-defined]
+        self._start(configs, key_serializer, value_serializer)
