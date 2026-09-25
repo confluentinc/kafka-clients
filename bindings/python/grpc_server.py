@@ -13,16 +13,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""gRPC server exposing bindings/python/{producer,consumer,admin}.py over
-the ProducerService / ConsumerService / AdminService defined in
-multilanguage-test-server/proto/.
+"""gRPC server exposing the sync clients of the ``confluent_kafka`` package
+(``confluent_kafka.producer``, ``confluent_kafka.consumer``) and
+bindings/python/admin.py over the ProducerService / ConsumerService /
+AdminService defined in multilanguage-test-server/proto/.
 
 Used by the Rust integration tests under the multilanguage-tests
 feature: the Rust MultilanguageProducer / MultilanguageConsumer /
 MultilanguageAdmin clients tunnel every call to this server, which
-translates each call into a producer.py KafkaProducer/MockProducer,
-consumer.py KafkaConsumer/MockConsumer or admin.py
-AdminClient/MockAdminClient call, returning the result over gRPC. See
+translates each call into a ``confluent_kafka.producer``
+KafkaProducer/MockProducer, ``confluent_kafka.consumer``
+KafkaConsumer/MockConsumer or admin.py AdminClient/MockAdminClient call,
+returning the result over gRPC. See
 design/history/MILESTONE-6/DESIGN-multilanguage-tests.md and
 design/history/Milestone-11/PLAN-multilanguage-admin.md.
 
@@ -30,10 +32,10 @@ The server listens on 0.0.0.0:50051 (the fixed internal port the
 Docker image exposes; the test pool maps it to a random host port via
 testcontainers).
 
-Sync grpc.server + thread pool is used because producer.py's underlying
-ctypes library is thread-based — futures are completed by background
-threads from the Rust send task, and concurrent.futures.Future.result()
-blocks the calling thread until the future fires.
+Sync grpc.server + thread pool is used because the sync clients are
+thread-based: their C extension (``_confluentkafka``) completes each
+concurrent.futures.Future on a background completion thread, and
+Future.result() blocks the calling thread until the future fires.
 """
 
 import datetime as _dt
@@ -225,8 +227,9 @@ class ProducerService(pb_grpc.ProducerServiceServicer):
             return pb.SendResponse(error=_kafka_error_to_proto(e))
 
         # Block this gRPC worker thread until the producer future fires.
-        # producer.py futures are concurrent.futures.Future instances
-        # completed by Rust background tasks, so .result() is safe here.
+        # KafkaProducer's futures are concurrent.futures.Future instances
+        # completed on the C extension's completion thread, so .result() is
+        # safe here.
         try:
             metadata = future.result(timeout=120)
         except KafkaError as e:

@@ -17,10 +17,10 @@
 by the sync and async gRPC test servers (grpc_server.py / grpc_server_async.py).
 
 These are client-agnostic: they convert between the generated protobuf messages
-and the bindings/python producer.py / consumer.py / admin.py value types, and do
-not depend on whether the driving Kafka client is the sync or the asyncio-native
-one (`ProducerRecord`, `KafkaError` and admin.py's value types are the same
-C-backed types in both). Kept in one module so the two servers don't duplicate
+and the value types of the ``confluent_kafka`` package and bindings/python/admin.py,
+and do not depend on whether the driving Kafka client is the sync or the
+asyncio-native one (`ProducerRecord`, `KafkaError` and admin.py's value types are
+the same types in both). Kept in one module so the two servers don't duplicate
 their conversion code.
 
 The `CallbackLog` / `LoggingRebalanceListener` / `make_logging_*_callback`
@@ -137,7 +137,7 @@ class _AdminEncodeError(RuntimeError):
 
 
 def _kafka_error_to_proto(err):
-    """Translate a producer.py KafkaError (or generic Exception) into a
+    """Translate a ``confluent_kafka`` KafkaError (or generic Exception) into a
     proto KafkaError.
 
     `code` is the only discriminator the proto carries, and that is enough:
