@@ -25,8 +25,11 @@ build:
 typecheck:
 	cd $(RUST_PROJECT_ROOT)/bindings/python && python -m mypy --strict confluent_kafka test/unit/test_typing.py
 
-test: build typecheck
+# `typecheck` runs after the dev extras are installed: mypy is one of them, and
+# a fresh venv (CI) has it only from that step.
+test: build
 	pip install .[dev] || pip install --no-dependencies .[dev]
+	$(MAKE) typecheck
 	cd $(RUST_PROJECT_ROOT)/bindings/python && python -m pytest test/unit -v
 	$(MAKE) test-soak
 	$(MAKE) -C $(RUST_PROJECT_ROOT) test-integration-python
