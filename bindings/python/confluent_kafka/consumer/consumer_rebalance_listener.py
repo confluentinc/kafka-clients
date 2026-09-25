@@ -89,6 +89,8 @@ class ConsumerRebalanceListener:
         group).
 
         By default it will just trigger ``on_partitions_revoked``; override it
-        to distinguish the handling of revoked from lost partitions.
+        to distinguish the handling of revoked from lost partitions. (Its
+        result is returned, so an ``async def`` ``on_partitions_revoked`` is
+        awaited by the async consumers.)
         """
-        self.on_partitions_revoked(partitions)
+        return self.on_partitions_revoked(partitions)
