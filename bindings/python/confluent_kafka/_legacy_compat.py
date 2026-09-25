@@ -14,15 +14,15 @@
 
 """Private compatibility shims for the **paused** admin binding (``admin.py``).
 
-The Python interface spec (``design/current/python-client-interface-spec.md``)
-replaces the flat ``KafkaError`` (``code()`` / ``is_retriable()``) and the
+The Python Binding Conventions (``CLAUDE.md``, ``## Python Binding Conventions``)
+replace the flat ``KafkaError`` (``code()`` / ``is_retriable()``) and the
 positional ``Node`` / ``OffsetAndMetadata`` value types with the typed error
 hierarchy (``confluent_kafka.common.errors``) and the keyword-only value types
 (``confluent_kafka.common.Node`` / ``confluent_kafka.consumer.OffsetAndMetadata``).
 
 The admin client is **paused** — its public surface (including the flat
 ``KafkaError`` values it returns per-key and its positional value types) must not
-change (PLAN §"Out of scope"; the admin interface spec is paused). Rather than
+change (the conventions do not cover the Admin client). Rather than
 keep the retired top-level ``producer.py`` / ``consumer.py`` modules alive only
 for ``admin.py`` to import, the two things admin needs from them are moved here,
 private to the package:
@@ -34,8 +34,8 @@ private to the package:
 Nothing in the *new* ``confluent_kafka`` public surface imports this module. It
 exists only so ``admin.py`` (and the gRPC admin translation that speaks admin's
 frozen contract) keeps working after ``producer.py`` / ``consumer.py`` are
-deleted. When the admin binding is un-paused and ported to the spec, this module
-is deleted with it.
+deleted. When the admin binding is un-paused and ported to the conventions, this
+module is deleted with it.
 """
 
 from __future__ import annotations

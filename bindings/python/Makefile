@@ -11,8 +11,9 @@ build:
 	CFLAGS="$(CFLAGS_EXTRA)" \
 	pip install -e .
 
-# Static type check of the new `confluent_kafka` package (spec §11 / rule 11):
-# `mypy --strict` catches stub/implementation drift so it fails `make verify`.
+# Static type check of the new `confluent_kafka` package (CLAUDE.md, Python
+# Binding Conventions, Tests and typing: `mypy --strict` over the package runs in
+# `make verify`). It catches stub/implementation drift.
 # `test/unit/test_typing.py` carries `typing.assert_type` assertions that
 # machine-verify the `@overload` stubs and the generics inference, so it is type
 # checked here too — a broken stub fails `make verify`.

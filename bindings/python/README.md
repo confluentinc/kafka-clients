@@ -1,14 +1,15 @@
 # confluent_kafka (Rust-core Python client)
 
 The Python client built on the Rust core's C FFI. Its surface is the Java Kafka
-client (Apache Kafka 4.3.1) mapped to idiomatic Python, ruled by
-`design/current/python-client-interface-spec.md`.
+client (Apache Kafka 4.3.1) mapped to idiomatic Python, ruled by the
+`## Python Binding Conventions` section of the repository's `CLAUDE.md`.
 
 ## Import paths
 
 The package mirrors Java's package tree with the `clients` segment dropped
-(spec §4). Import each name from its own module — the package root does **not**
-re-export the everyday client names (that is undecided; spec §4):
+(`CLAUDE.md`, Python Binding Conventions, Modules). Import each name from its own
+module — the package root does **not** re-export the everyday client names; it
+exports only `Duration` and the Java built-in exception classes:
 
 ```python
 from confluent_kafka.producer import (
@@ -58,8 +59,8 @@ retriability is `except RetriableError`, and each Java exception class has a
 
 ## Migrating from `confluent-kafka-python`
 
-This is a different API, not a drop-in bump — see **spec §11** for the full
-migration surface. The two rules that explain most call-site changes:
+This is a different API, not a drop-in bump. The two rules that explain most
+call-site changes:
 
 - **Every argument is keyword-only.** `poll(1.0)` → `poll(timeout=1.0)`,
   `subscribe(topics)` → `subscribe(topics=topics)`, `close(5)` →
@@ -67,7 +68,7 @@ migration surface. The two rules that explain most call-site changes:
 - **Collections come back as Java's types** — `set` where Java returns `Set`,
   `dict` where Java returns `Map` — not the old client's lists.
 
-Highlights (spec §11 is authoritative):
+Highlights:
 
 | Old client | New client |
 |---|---|
