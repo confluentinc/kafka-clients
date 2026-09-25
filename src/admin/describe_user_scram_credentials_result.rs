@@ -47,7 +47,7 @@ impl DescribeUserScramCredentialsResult {
     #[doc(
         alias = "org.apache.kafka.clients.admin.DescribeUserScramCredentialsResult#DescribeUserScramCredentialsResult"
     )]
-    pub fn new(data_future: KafkaFuture<DescribeUserScramCredentialsResponseData>) -> Self {
+    pub(crate) fn new(data_future: KafkaFuture<DescribeUserScramCredentialsResponseData>) -> Self {
         Self { data_future }
     }
 

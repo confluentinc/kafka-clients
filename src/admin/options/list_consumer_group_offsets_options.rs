@@ -20,6 +20,7 @@
 ///
 /// Corresponds to `org.apache.kafka.clients.admin.ListConsumerGroupOffsetsOptions`.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[doc(alias = "org.apache.kafka.clients.admin.ListConsumerGroupOffsetsOptions")]
 pub struct ListConsumerGroupOffsetsOptions {
     timeout_ms: Option<i32>,
     require_stable: bool,

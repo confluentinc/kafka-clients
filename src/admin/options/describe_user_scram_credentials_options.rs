@@ -22,6 +22,7 @@
 /// Corresponds to
 /// `org.apache.kafka.clients.admin.DescribeUserScramCredentialsOptions`.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[doc(alias = "org.apache.kafka.clients.admin.DescribeUserScramCredentialsOptions")]
 pub struct DescribeUserScramCredentialsOptions {
     timeout_ms: Option<i32>,
 }

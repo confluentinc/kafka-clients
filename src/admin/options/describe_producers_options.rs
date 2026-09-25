@@ -23,6 +23,7 @@
 /// that broker (via `StaticBrokerStrategy`) rather than looking up each
 /// partition's leader.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[doc(alias = "org.apache.kafka.clients.admin.DescribeProducersOptions")]
 pub struct DescribeProducersOptions {
     timeout_ms: Option<i32>,
     broker_id: Option<i32>,

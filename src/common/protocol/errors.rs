@@ -696,9 +696,9 @@ impl Errors {
             Self::InvalidRegistration => {
                 Some(Error::InvalidRegistration(InvalidRegistrationError::with_default_message()))
             },
-            Self::InvalidRegularExpression => Some(Error::InvalidRegularExpression(
-                InvalidRegularExpressionError::with_default_message(),
-            )),
+            Self::InvalidRegularExpression => {
+                Some(Error::InvalidRegularExpression(InvalidRegularExpression::with_default_message()))
+            },
             Self::InvalidReplicationFactor => Some(Error::InvalidReplicationFactor(
                 InvalidReplicationFactorError::with_default_message(),
             )),
@@ -751,9 +751,9 @@ impl Errors {
             Self::NoReassignmentInProgress => Some(Error::NoReassignmentInProgress(
                 NoReassignmentInProgressError::with_default_message(),
             )),
-            Self::OffsetMetadataTooLarge => Some(Error::OffsetMetadataTooLarge(
-                OffsetMetadataTooLargeError::with_default_message(),
-            )),
+            Self::OffsetMetadataTooLarge => {
+                Some(Error::OffsetMetadataTooLarge(OffsetMetadataTooLarge::with_default_message()))
+            },
             Self::OffsetMovedToTieredStorage => Some(Error::OffsetMovedToTieredStorage(
                 OffsetMovedToTieredStorageError::with_default_message(),
             )),
@@ -1016,7 +1016,7 @@ impl Errors {
             Self::InvalidRecordState => Some(Error::InvalidRecordState(InvalidRecordStateError::new(message))),
             Self::InvalidRegistration => Some(Error::InvalidRegistration(InvalidRegistrationError::new(message))),
             Self::InvalidRegularExpression => {
-                Some(Error::InvalidRegularExpression(InvalidRegularExpressionError::new(message)))
+                Some(Error::InvalidRegularExpression(InvalidRegularExpression::new(message)))
             },
             Self::InvalidReplicationFactor => {
                 Some(Error::InvalidReplicationFactor(InvalidReplicationFactorError::new(message)))
@@ -1060,9 +1060,7 @@ impl Errors {
             Self::NoReassignmentInProgress => {
                 Some(Error::NoReassignmentInProgress(NoReassignmentInProgressError::new(message)))
             },
-            Self::OffsetMetadataTooLarge => {
-                Some(Error::OffsetMetadataTooLarge(OffsetMetadataTooLargeError::new(message)))
-            },
+            Self::OffsetMetadataTooLarge => Some(Error::OffsetMetadataTooLarge(OffsetMetadataTooLarge::new(message))),
             Self::OffsetMovedToTieredStorage => {
                 Some(Error::OffsetMovedToTieredStorage(OffsetMovedToTieredStorageError::new(message)))
             },

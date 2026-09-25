@@ -2025,7 +2025,7 @@ pub async fn alter_consumer_group_offsets_awaiting_propagation<B: AdminBackend>(
             .await
             .unwrap_or_else(|e| panic!("{backend} backend: {what}: {e}"));
         if let Some(tp) = outcomes.iter().find_map(|(tp, outcome)| match outcome {
-            Err(e) if matches!(e, Error::UnknownTopicOrPartition(_)) => Some(tp),
+            Err(Error::UnknownTopicOrPartition(_)) => Some(tp),
             _ => None,
         }) {
             return Err(format!(

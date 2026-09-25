@@ -36,6 +36,14 @@
 //! "the variant for Kafka errors"; [`Error::Timeout`](Error::Timeout) and the
 //! rest are Kafka errors too. See [`Error::is_kafka_error`] for that test.
 
+// `#[delegatable_trait_remote]` (below) expands to a helper trait,
+// `MatchDisplay`, that the `Delegate` derive on `Error` makes reachable without
+// being nameable. It is macro plumbing, not API, and ambassador neither forwards
+// attributes to it nor lets it move into a submodule, so the allowance is
+// file-wide. It covers only items defined in this file: a crate-private type
+// leaking from elsewhere is still reported at its own definition.
+#![allow(unnameable_types)]
+
 use std::collections::HashSet;
 // Imported unqualified so that `#[delegate(Display)]` on `Error` resolves to
 // the std trait; the `#[delegatable_trait_remote]` stub below only registers
@@ -67,13 +75,13 @@ use crate::common::errors::{
     InterruptError, InvalidCommitOffsetSizeError, InvalidConfigurationError, InvalidFetchSessionEpochError,
     InvalidFetchSizeError, InvalidGroupIdError, InvalidOffsetError, InvalidPartitionsError, InvalidPidMappingError,
     InvalidPrincipalTypeError, InvalidProducerEpochError, InvalidRecordStateError, InvalidRegistrationError,
-    InvalidRegularExpressionError, InvalidReplicaAssignmentError, InvalidReplicationFactorError, InvalidRequestError,
+    InvalidRegularExpression, InvalidReplicaAssignmentError, InvalidReplicationFactorError, InvalidRequestError,
     InvalidRequiredAcksError, InvalidSessionTimeoutError, InvalidShareSessionEpochError, InvalidTimestampError,
     InvalidTopicError, InvalidTxnStateError, InvalidTxnTimeoutError, InvalidUpdateVersionError, InvalidVoterKeyError,
     KafkaStorageError, LeaderNotAvailableError, ListenerNotFoundError, LogDirNotFoundError, MemberIdRequiredError,
     MismatchedEndpointTypeError, NetworkError, NewLeaderElectedError, NoReassignmentInProgressError,
     NotControllerError, NotCoordinatorError, NotEnoughReplicasAfterAppendError, NotEnoughReplicasError,
-    NotLeaderOrFollowerError, OffsetMetadataTooLargeError, OffsetMovedToTieredStorageError, OffsetNotAvailableError,
+    NotLeaderOrFollowerError, OffsetMetadataTooLarge, OffsetMovedToTieredStorageError, OffsetNotAvailableError,
     OffsetOutOfRangeError, OperationNotAttemptedError, OutOfOrderSequenceError, PolicyViolationError,
     PositionOutOfRangeError, PreferredLeaderNotAvailableError, PrincipalDeserializationError, ProducerFencedError,
     ReassignmentInProgressError, RebalanceInProgressError, RebootstrapRequiredError, RecordBatchTooLargeError,
@@ -826,8 +834,17 @@ impl ErrorHierarchy for LocalTimeoutError {}
 /// Java families into one enum is what makes
 /// [`is_kafka_error`](Self::is_kafka_error) necessary.
 ///
-/// `error()`, `code()`, `message()` and `is_retriable_error()` are delegated to
-/// the inner [`KafkaError`] base. `request_utils::RequestUtils::is_fatal_error` and
+/// **Classify by variant, not by code.** Java callers write
+/// `e instanceof TopicAuthorizationException`; Rust callers write
+/// `matches!(e, Error::TopicAuthorization(_))`, and the `is_*_error()`
+/// predicates stand in for the intermediate classes. There is no public numeric
+/// error code: the wire-level `Errors` enum lives in `common.protocol`, a
+/// package Java marks "not a supported API", so the crate keeps it
+/// `pub(crate)`. The C bindings expose the class as the
+/// `kafka_common_ErrorCode_t` enum instead.
+///
+/// `message()` and `is_retriable_error()` are delegated to the inner
+/// [`KafkaError`] base. `request_utils::RequestUtils::is_fatal_error` and
 /// `is_transaction_abortable_error()`
 /// live only here: `KafkaError` mirrors Java's `KafkaException`, which has
 /// neither — they are librdkafka-style predicates required by CLAUDE.md
@@ -1002,8 +1019,8 @@ pub enum Error {
     InvalidRecordState(InvalidRecordStateError),
     /// See [`InvalidRegistrationError`](crate::common::errors::InvalidRegistrationError).
     InvalidRegistration(InvalidRegistrationError),
-    /// See [`InvalidRegularExpressionError`](crate::common::errors::InvalidRegularExpressionError).
-    InvalidRegularExpression(InvalidRegularExpressionError),
+    /// See [`InvalidRegularExpression`](crate::common::errors::InvalidRegularExpression).
+    InvalidRegularExpression(InvalidRegularExpression),
     /// See [`InvalidReplicaAssignmentError`](crate::common::errors::InvalidReplicaAssignmentError).
     InvalidReplicaAssignment(InvalidReplicaAssignmentError),
     /// See [`InvalidReplicationFactorError`](crate::common::errors::InvalidReplicationFactorError).
@@ -1056,8 +1073,8 @@ pub enum Error {
     NotEnoughReplicasAfterAppend(NotEnoughReplicasAfterAppendError),
     /// See [`NotLeaderOrFollowerError`](crate::common::errors::NotLeaderOrFollowerError).
     NotLeaderOrFollower(NotLeaderOrFollowerError),
-    /// See [`OffsetMetadataTooLargeError`](crate::common::errors::OffsetMetadataTooLargeError).
-    OffsetMetadataTooLarge(OffsetMetadataTooLargeError),
+    /// See [`OffsetMetadataTooLarge`](crate::common::errors::OffsetMetadataTooLarge).
+    OffsetMetadataTooLarge(OffsetMetadataTooLarge),
     /// See [`OffsetMovedToTieredStorageError`](crate::common::errors::OffsetMovedToTieredStorageError).
     OffsetMovedToTieredStorage(OffsetMovedToTieredStorageError),
     /// See [`OffsetNotAvailableError`](crate::common::errors::OffsetNotAvailableError).
@@ -1220,7 +1237,7 @@ impl Error {
     // -- Convenience constructors ------------------------------------------
 
     /// Create a bare Kafka error from an error code.
-    pub fn new(error: Errors) -> Self {
+    pub(crate) fn new(error: Errors) -> Self {
         // Java's `Errors.exception()`: the code names a class, and that class —
         // not this enum — knows its ancestry. The fallback covers `Errors::None`,
         // which Java maps to a null exception.
@@ -1228,7 +1245,7 @@ impl Error {
     }
 
     /// Create a bare Kafka error with a custom message.
-    pub fn with_message(error: Errors, message: impl Into<String>) -> Self {
+    pub(crate) fn with_message(error: Errors, message: impl Into<String>) -> Self {
         // Java's `Errors.exception(String)`.
         let message = message.into();
         error
@@ -1349,7 +1366,7 @@ impl Error {
     /// by group-management / offset-commit APIs when the consumer was
     /// constructed without a valid `group.id`.
     pub fn invalid_group_id(message: impl Into<String>) -> Self {
-        Self::KafkaError(KafkaError::with_message(Errors::InvalidGroupId, message))
+        Self::InvalidGroupId(InvalidGroupIdError::new(message))
     }
 
     /// Create a throttling quota exceeded error.
@@ -1491,8 +1508,10 @@ impl Error {
     }
 
     /// Create an unsupported version error.
+    ///
+    /// Corresponds to Java's `UnsupportedVersionException`.
     pub fn unsupported_version(message: impl Into<String>) -> Self {
-        Self::KafkaError(KafkaError::with_message(Errors::UnsupportedVersion, message))
+        Self::UnsupportedVersion(UnsupportedVersionError::new(message))
     }
 
     /// Create a wakeup error.
@@ -1546,7 +1565,7 @@ impl Error {
     ///
     /// Corresponds to Java's `RecordBatchTooLargeException`.
     pub fn record_batch_too_large(message: impl Into<String>) -> Self {
-        Self::KafkaError(KafkaError::with_message(Errors::MessageTooLarge, message))
+        Self::RecordBatchTooLarge(RecordBatchTooLargeError::new(message))
     }
 
     // -- Base access -------------------------------------------------------
@@ -1580,15 +1599,10 @@ impl Error {
     ///
     /// Returns [`Errors::UnknownServerError`] for variants without a
     /// [`KafkaError`].
-    pub fn error(&self) -> Errors {
+    pub(crate) fn error(&self) -> Errors {
         // Delegated to the payload: Java associates a code with an exception
         // *class* (`Errors.forException`), not with an instance.
         ErrorCode::error(self)
-    }
-
-    /// The numeric error code (i16).
-    pub fn code(&self) -> i16 {
-        self.error().code()
     }
 
     /// The error message, translating Java's `Throwable.getMessage()`.
@@ -2092,7 +2106,7 @@ mod tests {
         let ise = Error::local_illegal_state("bad state");
 
         assert_eq!(cme.message(), "KafkaConsumer is not safe for multi-threaded access.");
-        assert_eq!(cme.code(), ise.code());
+        assert_eq!(cme.error().code(), ise.error().code());
         assert_eq!(cme.error(), ise.error());
         assert_eq!(cme.is_retriable_error(), ise.is_retriable_error());
         assert!(!cme.is_retriable_error());
@@ -2501,7 +2515,7 @@ mod tests {
         let timeout = Error::timeout("late");
         assert_eq!(timeout.error(), Errors::RequestTimedOut);
         // Java: `TimeoutException` carries `Errors.REQUEST_TIMED_OUT`.
-        assert_eq!(timeout.code(), 7, "a timeout error is Errors.REQUEST_TIMED_OUT");
+        assert_eq!(timeout.error().code(), 7, "a timeout error is Errors.REQUEST_TIMED_OUT");
         assert_eq!(timeout.message(), "late");
         assert!(timeout.is_retriable_error());
 
@@ -2563,7 +2577,7 @@ mod tests {
     fn transaction_abortable_is_a_leaf_variant_test() {
         let abortable = Error::new(Errors::TransactionAbortable);
         assert!(abortable.is_transaction_abortable_error());
-        assert_eq!(abortable.code(), 120);
+        assert_eq!(abortable.error().code(), 120);
 
         // Different class, despite the near-identical name.
         let aborted = Error::TransactionAborted(TransactionAbortedError::new("aborted"));

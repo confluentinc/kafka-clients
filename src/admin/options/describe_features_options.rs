@@ -20,6 +20,7 @@
 ///
 /// Corresponds to `org.apache.kafka.clients.admin.DescribeFeaturesOptions`.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[doc(alias = "org.apache.kafka.clients.admin.DescribeFeaturesOptions")]
 pub struct DescribeFeaturesOptions {
     timeout_ms: Option<i32>,
     node_id: Option<i32>,

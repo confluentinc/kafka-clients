@@ -45,8 +45,11 @@ impl KafkaMetric {
     /// * `value_provider` - The metric value provider associated with this metric
     /// * `config` - The configuration of the metric
     /// * `time` - The time instance to use with the metric
+    ///
+    /// Crate-private: it takes the non-public `Time`. Java keeps it public only
+    /// "for testing"; users obtain metrics from `Metrics`.
     #[doc(alias = "org.apache.kafka.common.metrics.KafkaMetric#KafkaMetric")]
-    pub fn new(
+    pub(crate) fn new(
         metric_name: MetricName,
         value_provider: MetricValueProvider,
         config: Arc<MetricConfig>,

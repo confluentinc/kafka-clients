@@ -105,28 +105,28 @@ impl KafkaError {
     /// Create a `KafkaError` from an error code with the default message.
     /// Mirrors Java's no-arg `KafkaException()`.
     #[doc(alias = "org.apache.kafka.common.KafkaException#KafkaException")]
-    pub fn new(error: Errors) -> Self {
+    pub(crate) fn new(error: Errors) -> Self {
         Self { error, custom_message: None, source: None }
     }
 
     /// Create a `KafkaError` from an error code with a custom message.
     /// Mirrors Java's `KafkaException(String message)`.
     #[doc(alias = "org.apache.kafka.common.KafkaException#KafkaException")]
-    pub fn with_message(error: Errors, message: impl Into<String>) -> Self {
+    pub(crate) fn with_message(error: Errors, message: impl Into<String>) -> Self {
         Self { error, custom_message: Some(message.into()), source: None }
     }
 
     /// Create a `KafkaError` from an error code, a custom message, and the error
     /// that caused it. Mirrors Java's `KafkaException(String message, Throwable cause)`.
     #[doc(alias = "org.apache.kafka.common.KafkaException#KafkaException")]
-    pub fn with_message_source(error: Errors, message: impl Into<String>, source: Error) -> Self {
+    pub(crate) fn with_message_source(error: Errors, message: impl Into<String>, source: Error) -> Self {
         Self { error, custom_message: Some(message.into()), source: Some(Box::new(source)) }
     }
 
     /// Create a `KafkaError` from an error code and the error that caused it,
     /// keeping the code's default message. Mirrors `KafkaException(Throwable cause)`.
     #[doc(alias = "org.apache.kafka.common.KafkaException#KafkaException")]
-    pub fn with_source(error: Errors, source: Error) -> Self {
+    pub(crate) fn with_source(error: Errors, source: Error) -> Self {
         Self { error, custom_message: None, source: Some(Box::new(source)) }
     }
 
@@ -135,14 +135,10 @@ impl KafkaError {
         self.source.as_deref()
     }
 
-    /// The protocol error code.
-    pub fn error(&self) -> Errors {
+    /// The protocol error code. Only the C bindings read it back.
+    #[cfg_attr(not(feature = "ffi"), allow(dead_code))]
+    pub(crate) fn error(&self) -> Errors {
         self.error
-    }
-
-    /// The numeric error code (i16).
-    pub fn code(&self) -> i16 {
-        self.error.code()
     }
 
     /// The error message. Returns the custom message if set, otherwise the

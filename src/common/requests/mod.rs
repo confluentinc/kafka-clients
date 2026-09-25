@@ -17,6 +17,16 @@
 //! This module provides the request and response header types, the abstract
 //! request/response framework, and concrete implementations for ApiVersions
 //! and Metadata RPCs.
+//!
+//! # Dead-code lint
+//!
+//! Java marks this package "not a supported API", so it is crate-private. It
+//! is translated in full (DoD #2), but the client uses only part of it; the
+//! rest has no caller yet, or only the translated tests. Nothing outside the
+//! crate can reach it, so the module allows dead code rather than dropping
+//! Java methods.
+
+#![allow(dead_code, unused_imports)]
 
 mod abstract_request;
 mod abstract_response;

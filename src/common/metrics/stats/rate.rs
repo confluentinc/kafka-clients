@@ -17,7 +17,8 @@
 
 use std::sync::Arc;
 
-use crate::common::metrics::internals::{MetricsUtils, TimeUnit};
+use crate::common::metrics::TimeUnit;
+use crate::common::metrics::internals::MetricsUtils;
 use crate::common::metrics::stats::SampledStat;
 use crate::common::metrics::stats::WindowedSum;
 use crate::common::metrics::{Measurable, MetricConfig, Stat};

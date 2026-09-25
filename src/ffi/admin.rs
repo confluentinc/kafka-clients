@@ -11831,7 +11831,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_remove_members_from_consumer_gr
 // `AccessControlEntry`) are flattened onto the binding rather than getting
 // handles of their own, following B2's treatment of
 // `LogDirDescription.ReplicaInfo`. The accessor names keep Java's field names,
-// so `kafka_common_AclBinding_resource_name` is `pattern().name()` and
+// so `kafka_common_acl_AclBinding_resource_name` is `pattern().name()` and
 // `..._principal` is `entry().principal()`.
 //
 // All four ACL enums have a numeric `code()` in Java
@@ -11847,11 +11847,11 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_remove_members_from_consumer_gr
 /// Borrowed from the owning `create_acls` / `describe_acls` / `delete_acls`
 /// result handle; valid until that handle is destroyed. Do not free it.
 #[repr(C)]
-pub struct kafka_common_AclBinding_t {
+pub struct kafka_common_acl_AclBinding_t {
     _private: [u8; 0],
 }
 
-/// Backing state for [`kafka_common_AclBinding_t`].
+/// Backing state for [`kafka_common_acl_AclBinding_t`].
 ///
 /// `AclBinding`'s two components are flattened: `pattern()`'s three fields and
 /// `entry()`'s four. Every string is non-nullable on a *binding* (only a
@@ -11897,17 +11897,17 @@ impl AclBindingInner {
         )
     }
 
-    fn as_ptr(&self) -> *const kafka_common_AclBinding_t {
-        self as *const AclBindingInner as *const kafka_common_AclBinding_t
+    fn as_ptr(&self) -> *const kafka_common_acl_AclBinding_t {
+        self as *const AclBindingInner as *const kafka_common_acl_AclBinding_t
     }
 }
 
-/// Casts a `*const kafka_common_AclBinding_t` to a reference.
+/// Casts a `*const kafka_common_acl_AclBinding_t` to a reference.
 ///
 /// # Safety
 ///
 /// `binding` must be a non-null borrowed pointer from an ACL result getter.
-unsafe fn acl_binding_ref(binding: *const kafka_common_AclBinding_t) -> &'static AclBindingInner {
+unsafe fn acl_binding_ref(binding: *const kafka_common_acl_AclBinding_t) -> &'static AclBindingInner {
     unsafe { &*(binding as *const AclBindingInner) }
 }
 
@@ -11921,7 +11921,9 @@ unsafe fn acl_binding_ref(binding: *const kafka_common_AclBinding_t) -> &'static
 ///
 /// `binding` must be a valid borrowed ACL-binding pointer.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_AclBinding_resource_type(binding: *const kafka_common_AclBinding_t) -> i32 {
+pub unsafe extern "C" fn kafka_common_acl_AclBinding_resource_type(
+    binding: *const kafka_common_acl_AclBinding_t,
+) -> i32 {
     unsafe { acl_binding_ref(binding) }.resource_type
 }
 
@@ -11931,8 +11933,8 @@ pub unsafe extern "C" fn kafka_common_AclBinding_resource_type(binding: *const k
 ///
 /// `binding` must be a valid borrowed ACL-binding pointer.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_AclBinding_resource_name(
-    binding: *const kafka_common_AclBinding_t,
+pub unsafe extern "C" fn kafka_common_acl_AclBinding_resource_name(
+    binding: *const kafka_common_acl_AclBinding_t,
 ) -> *const c_char {
     unsafe { acl_binding_ref(binding) }.resource_name_c.as_ptr()
 }
@@ -11947,7 +11949,9 @@ pub unsafe extern "C" fn kafka_common_AclBinding_resource_name(
 ///
 /// `binding` must be a valid borrowed ACL-binding pointer.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_AclBinding_pattern_type(binding: *const kafka_common_AclBinding_t) -> i32 {
+pub unsafe extern "C" fn kafka_common_acl_AclBinding_pattern_type(
+    binding: *const kafka_common_acl_AclBinding_t,
+) -> i32 {
     unsafe { acl_binding_ref(binding) }.pattern_type
 }
 
@@ -11958,7 +11962,9 @@ pub unsafe extern "C" fn kafka_common_AclBinding_pattern_type(binding: *const ka
 ///
 /// `binding` must be a valid borrowed ACL-binding pointer.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_AclBinding_principal(binding: *const kafka_common_AclBinding_t) -> *const c_char {
+pub unsafe extern "C" fn kafka_common_acl_AclBinding_principal(
+    binding: *const kafka_common_acl_AclBinding_t,
+) -> *const c_char {
     unsafe { acl_binding_ref(binding) }.principal_c.as_ptr()
 }
 
@@ -11968,7 +11974,9 @@ pub unsafe extern "C" fn kafka_common_AclBinding_principal(binding: *const kafka
 ///
 /// `binding` must be a valid borrowed ACL-binding pointer.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_AclBinding_host(binding: *const kafka_common_AclBinding_t) -> *const c_char {
+pub unsafe extern "C" fn kafka_common_acl_AclBinding_host(
+    binding: *const kafka_common_acl_AclBinding_t,
+) -> *const c_char {
     unsafe { acl_binding_ref(binding) }.host_c.as_ptr()
 }
 
@@ -11983,7 +11991,7 @@ pub unsafe extern "C" fn kafka_common_AclBinding_host(binding: *const kafka_comm
 ///
 /// `binding` must be a valid borrowed ACL-binding pointer.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_AclBinding_operation(binding: *const kafka_common_AclBinding_t) -> i32 {
+pub unsafe extern "C" fn kafka_common_acl_AclBinding_operation(binding: *const kafka_common_acl_AclBinding_t) -> i32 {
     unsafe { acl_binding_ref(binding) }.operation
 }
 
@@ -11996,7 +12004,9 @@ pub unsafe extern "C" fn kafka_common_AclBinding_operation(binding: *const kafka
 ///
 /// `binding` must be a valid borrowed ACL-binding pointer.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_AclBinding_permission_type(binding: *const kafka_common_AclBinding_t) -> i32 {
+pub unsafe extern "C" fn kafka_common_acl_AclBinding_permission_type(
+    binding: *const kafka_common_acl_AclBinding_t,
+) -> i32 {
     unsafe { acl_binding_ref(binding) }.permission_type
 }
 
@@ -12006,11 +12016,11 @@ pub unsafe extern "C" fn kafka_common_AclBinding_permission_type(binding: *const
 /// Borrowed from the owning `delete_acls` result handle; valid until that
 /// handle is destroyed. Do not free it.
 #[repr(C)]
-pub struct kafka_common_AclBindingFilter_t {
+pub struct kafka_common_acl_AclBindingFilter_t {
     _private: [u8; 0],
 }
 
-/// Backing state for [`kafka_common_AclBindingFilter_t`].
+/// Backing state for [`kafka_common_acl_AclBindingFilter_t`].
 ///
 /// A *filter* differs from a binding in exactly two ways, both of which the C
 /// surface has to preserve: its three string fields are genuinely nullable
@@ -12066,26 +12076,26 @@ impl AclBindingFilterInner {
     }
 }
 
-/// Casts a `*const kafka_common_AclBindingFilter_t` to a reference.
+/// Casts a `*const kafka_common_acl_AclBindingFilter_t` to a reference.
 ///
 /// # Safety
 ///
 /// `filter` must be a non-null borrowed pointer from a `delete_acls` result
 /// getter.
-unsafe fn acl_binding_filter_ref(filter: *const kafka_common_AclBindingFilter_t) -> &'static AclBindingFilterInner {
+unsafe fn acl_binding_filter_ref(filter: *const kafka_common_acl_AclBindingFilter_t) -> &'static AclBindingFilterInner {
     unsafe { &*(filter as *const AclBindingFilterInner) }
 }
 
 /// Returns `patternFilter().resourceType().code()`. See
-/// [`kafka_common_AclBinding_resource_type`] for the codes; a filter may also
+/// [`kafka_common_acl_AclBinding_resource_type`] for the codes; a filter may also
 /// carry ANY=1, which matches every resource type.
 ///
 /// # Safety
 ///
 /// `filter` must be a valid borrowed ACL-filter pointer.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_AclBindingFilter_resource_type(
-    filter: *const kafka_common_AclBindingFilter_t,
+pub unsafe extern "C" fn kafka_common_acl_AclBindingFilter_resource_type(
+    filter: *const kafka_common_acl_AclBindingFilter_t,
 ) -> i32 {
     unsafe { acl_binding_filter_ref(filter) }.resource_type
 }
@@ -12098,14 +12108,14 @@ pub unsafe extern "C" fn kafka_common_AclBindingFilter_resource_type(
 ///
 /// `filter` must be a valid borrowed ACL-filter pointer.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_AclBindingFilter_resource_name(
-    filter: *const kafka_common_AclBindingFilter_t,
+pub unsafe extern "C" fn kafka_common_acl_AclBindingFilter_resource_name(
+    filter: *const kafka_common_acl_AclBindingFilter_t,
 ) -> *const c_char {
     optional_cstring_ptr(&unsafe { acl_binding_filter_ref(filter) }.resource_name_c)
 }
 
 /// Returns `patternFilter().patternType().code()`. See
-/// [`kafka_common_AclBinding_pattern_type`] for the codes; a filter may also
+/// [`kafka_common_acl_AclBinding_pattern_type`] for the codes; a filter may also
 /// carry ANY=1 (any pattern type) and MATCH=2 (literal, prefixed and wildcard
 /// patterns that would match the name).
 ///
@@ -12113,8 +12123,8 @@ pub unsafe extern "C" fn kafka_common_AclBindingFilter_resource_name(
 ///
 /// `filter` must be a valid borrowed ACL-filter pointer.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_AclBindingFilter_pattern_type(
-    filter: *const kafka_common_AclBindingFilter_t,
+pub unsafe extern "C" fn kafka_common_acl_AclBindingFilter_pattern_type(
+    filter: *const kafka_common_acl_AclBindingFilter_t,
 ) -> i32 {
     unsafe { acl_binding_filter_ref(filter) }.pattern_type
 }
@@ -12126,8 +12136,8 @@ pub unsafe extern "C" fn kafka_common_AclBindingFilter_pattern_type(
 ///
 /// `filter` must be a valid borrowed ACL-filter pointer.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_AclBindingFilter_principal(
-    filter: *const kafka_common_AclBindingFilter_t,
+pub unsafe extern "C" fn kafka_common_acl_AclBindingFilter_principal(
+    filter: *const kafka_common_acl_AclBindingFilter_t,
 ) -> *const c_char {
     optional_cstring_ptr(&unsafe { acl_binding_filter_ref(filter) }.principal_c)
 }
@@ -12139,36 +12149,36 @@ pub unsafe extern "C" fn kafka_common_AclBindingFilter_principal(
 ///
 /// `filter` must be a valid borrowed ACL-filter pointer.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_AclBindingFilter_host(
-    filter: *const kafka_common_AclBindingFilter_t,
+pub unsafe extern "C" fn kafka_common_acl_AclBindingFilter_host(
+    filter: *const kafka_common_acl_AclBindingFilter_t,
 ) -> *const c_char {
     optional_cstring_ptr(&unsafe { acl_binding_filter_ref(filter) }.host_c)
 }
 
 /// Returns `entryFilter().operation().code()`. See
-/// [`kafka_common_AclBinding_operation`] for the codes; a filter may also carry
+/// [`kafka_common_acl_AclBinding_operation`] for the codes; a filter may also carry
 /// ANY=1.
 ///
 /// # Safety
 ///
 /// `filter` must be a valid borrowed ACL-filter pointer.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_AclBindingFilter_operation(
-    filter: *const kafka_common_AclBindingFilter_t,
+pub unsafe extern "C" fn kafka_common_acl_AclBindingFilter_operation(
+    filter: *const kafka_common_acl_AclBindingFilter_t,
 ) -> i32 {
     unsafe { acl_binding_filter_ref(filter) }.operation
 }
 
 /// Returns `entryFilter().permissionType().code()`. See
-/// [`kafka_common_AclBinding_permission_type`] for the codes; a filter may also
+/// [`kafka_common_acl_AclBinding_permission_type`] for the codes; a filter may also
 /// carry ANY=1.
 ///
 /// # Safety
 ///
 /// `filter` must be a valid borrowed ACL-filter pointer.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_AclBindingFilter_permission_type(
-    filter: *const kafka_common_AclBindingFilter_t,
+pub unsafe extern "C" fn kafka_common_acl_AclBindingFilter_permission_type(
+    filter: *const kafka_common_acl_AclBindingFilter_t,
 ) -> i32 {
     unsafe { acl_binding_filter_ref(filter) }.permission_type
 }
@@ -12179,11 +12189,11 @@ pub unsafe extern "C" fn kafka_common_AclBindingFilter_permission_type(
 /// Borrowed from the owning `describe_client_quotas` / `alter_client_quotas`
 /// result handle; valid until that handle is destroyed. Do not free it.
 #[repr(C)]
-pub struct kafka_common_ClientQuotaEntity_t {
+pub struct kafka_common_quota_ClientQuotaEntity_t {
     _private: [u8; 0],
 }
 
-/// Backing state for [`kafka_common_ClientQuotaEntity_t`].
+/// Backing state for [`kafka_common_quota_ClientQuotaEntity_t`].
 ///
 /// Java's entity is a `Map<String, String>` from entity type (`"user"`,
 /// `"client-id"`, `"ip"`) to entity name, with a **null value meaning the
@@ -12229,18 +12239,20 @@ impl ClientQuotaEntityInner {
             .collect()
     }
 
-    fn as_ptr(&self) -> *const kafka_common_ClientQuotaEntity_t {
-        self as *const ClientQuotaEntityInner as *const kafka_common_ClientQuotaEntity_t
+    fn as_ptr(&self) -> *const kafka_common_quota_ClientQuotaEntity_t {
+        self as *const ClientQuotaEntityInner as *const kafka_common_quota_ClientQuotaEntity_t
     }
 }
 
-/// Casts a `*const kafka_common_ClientQuotaEntity_t` to a reference.
+/// Casts a `*const kafka_common_quota_ClientQuotaEntity_t` to a reference.
 ///
 /// # Safety
 ///
 /// `entity` must be a non-null borrowed pointer from a client-quota result
 /// getter.
-unsafe fn client_quota_entity_ref(entity: *const kafka_common_ClientQuotaEntity_t) -> &'static ClientQuotaEntityInner {
+unsafe fn client_quota_entity_ref(
+    entity: *const kafka_common_quota_ClientQuotaEntity_t,
+) -> &'static ClientQuotaEntityInner {
     unsafe { &*(entity as *const ClientQuotaEntityInner) }
 }
 
@@ -12251,8 +12263,8 @@ unsafe fn client_quota_entity_ref(entity: *const kafka_common_ClientQuotaEntity_
 ///
 /// `entity` must be a valid borrowed client-quota-entity pointer.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_ClientQuotaEntity_entry_count(
-    entity: *const kafka_common_ClientQuotaEntity_t,
+pub unsafe extern "C" fn kafka_common_quota_ClientQuotaEntity_entry_count(
+    entity: *const kafka_common_quota_ClientQuotaEntity_t,
 ) -> i32 {
     unsafe { client_quota_entity_ref(entity) }.entry_types_c.len() as i32
 }
@@ -12264,8 +12276,8 @@ pub unsafe extern "C" fn kafka_common_ClientQuotaEntity_entry_count(
 ///
 /// `entity` must be a valid borrowed client-quota-entity pointer.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_ClientQuotaEntity_get_entry_type(
-    entity: *const kafka_common_ClientQuotaEntity_t,
+pub unsafe extern "C" fn kafka_common_quota_ClientQuotaEntity_get_entry_type(
+    entity: *const kafka_common_quota_ClientQuotaEntity_t,
     index: i32,
 ) -> *const c_char {
     cstring_at(&unsafe { client_quota_entity_ref(entity) }.entry_types_c, index)
@@ -12274,7 +12286,7 @@ pub unsafe extern "C" fn kafka_common_ClientQuotaEntity_get_entry_type(
 /// Returns the entity name at `index` (borrowed), or null if out of range **or
 /// if the entry names the built-in default entity** for its type.
 ///
-/// The two nulls are told apart by [`kafka_common_ClientQuotaEntity_entry_count`]:
+/// The two nulls are told apart by [`kafka_common_quota_ClientQuotaEntity_entry_count`]:
 /// an `index` below the count always denotes a present entry, so a null there
 /// means "default entity", Java's null map value. A name of `""` is a real,
 /// distinct name and comes back as a pointer to an empty string.
@@ -12283,8 +12295,8 @@ pub unsafe extern "C" fn kafka_common_ClientQuotaEntity_get_entry_type(
 ///
 /// `entity` must be a valid borrowed client-quota-entity pointer.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_ClientQuotaEntity_get_entry_name(
-    entity: *const kafka_common_ClientQuotaEntity_t,
+pub unsafe extern "C" fn kafka_common_quota_ClientQuotaEntity_get_entry_name(
+    entity: *const kafka_common_quota_ClientQuotaEntity_t,
     index: i32,
 ) -> *const c_char {
     if index < 0 {
@@ -12904,7 +12916,7 @@ pub unsafe extern "C" fn kafka_admin_CreateAclsResult_count(result: *const kafka
 pub unsafe extern "C" fn kafka_admin_CreateAclsResult_get_binding(
     result: *const kafka_admin_CreateAclsResult_t,
     index: i32,
-) -> *const kafka_common_AclBinding_t {
+) -> *const kafka_common_acl_AclBinding_t {
     if index < 0 {
         return std::ptr::null();
     }
@@ -12994,7 +13006,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeAclsResult_count(result: *const kaf
 pub unsafe extern "C" fn kafka_admin_DescribeAclsResult_get_binding(
     result: *const kafka_admin_DescribeAclsResult_t,
     index: i32,
-) -> *const kafka_common_AclBinding_t {
+) -> *const kafka_common_acl_AclBinding_t {
     if index < 0 {
         return std::ptr::null();
     }
@@ -13106,12 +13118,12 @@ pub unsafe extern "C" fn kafka_admin_DeleteAclsResult_count(result: *const kafka
 pub unsafe extern "C" fn kafka_admin_DeleteAclsResult_get_filter(
     result: *const kafka_admin_DeleteAclsResult_t,
     index: i32,
-) -> *const kafka_common_AclBindingFilter_t {
+) -> *const kafka_common_acl_AclBindingFilter_t {
     if index < 0 {
         return std::ptr::null();
     }
     match unsafe { delete_acls_result_ref(result) }.filters.get(index as usize) {
-        Some(filter) => filter as *const AclBindingFilterInner as *const kafka_common_AclBindingFilter_t,
+        Some(filter) => filter as *const AclBindingFilterInner as *const kafka_common_acl_AclBindingFilter_t,
         None => std::ptr::null(),
     }
 }
@@ -13173,7 +13185,7 @@ pub unsafe extern "C" fn kafka_admin_DeleteAclsResult_get_binding(
     result: *const kafka_admin_DeleteAclsResult_t,
     index: i32,
     result_index: i32,
-) -> *const kafka_common_AclBinding_t {
+) -> *const kafka_common_acl_AclBinding_t {
     match unsafe { delete_acls_filter_result_at(result, index, result_index) } {
         Some(entry) => match &entry.binding {
             Some(binding) => binding.as_ptr(),
@@ -13316,7 +13328,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeClientQuotasResult_count(
 pub unsafe extern "C" fn kafka_admin_DescribeClientQuotasResult_get_entity(
     result: *const kafka_admin_DescribeClientQuotasResult_t,
     index: i32,
-) -> *const kafka_common_ClientQuotaEntity_t {
+) -> *const kafka_common_quota_ClientQuotaEntity_t {
     if index < 0 {
         return std::ptr::null();
     }
@@ -13487,7 +13499,7 @@ pub unsafe extern "C" fn kafka_admin_AlterClientQuotasResult_count(
 pub unsafe extern "C" fn kafka_admin_AlterClientQuotasResult_get_entity(
     result: *const kafka_admin_AlterClientQuotasResult_t,
     index: i32,
-) -> *const kafka_common_ClientQuotaEntity_t {
+) -> *const kafka_common_quota_ClientQuotaEntity_t {
     if index < 0 {
         return std::ptr::null();
     }
@@ -13562,7 +13574,7 @@ pub type kafka_admin_AdminClient_create_acls_callback_t =
 /// # Parameters
 ///
 /// - `resource_types`: `ResourceType` codes; see
-///   [`kafka_common_AclBinding_resource_type`]. ANY (1) is rejected, as Java's
+///   [`kafka_common_acl_AclBinding_resource_type`]. ANY (1) is rejected, as Java's
 ///   `ResourcePattern` constructor rejects it.
 /// - `resource_names`: resource names; a NULL entry is rejected.
 /// - `pattern_types`: `PatternType` codes; ANY (1) and MATCH (2) are rejected,
@@ -14601,11 +14613,11 @@ unsafe fn read_partition_offsets(
 /// Borrowed from the owning delegation-token result handle; valid until that
 /// handle is destroyed. Do not free it.
 #[repr(C)]
-pub struct kafka_common_KafkaPrincipal_t {
+pub struct kafka_common_security_auth_KafkaPrincipal_t {
     _private: [u8; 0],
 }
 
-/// Backing state for [`kafka_common_KafkaPrincipal_t`].
+/// Backing state for [`kafka_common_security_auth_KafkaPrincipal_t`].
 struct KafkaPrincipalInner {
     principal_type_c: CString,
     name_c: CString,
@@ -14621,17 +14633,19 @@ impl KafkaPrincipalInner {
         }
     }
 
-    fn as_ptr(&self) -> *const kafka_common_KafkaPrincipal_t {
-        self as *const KafkaPrincipalInner as *const kafka_common_KafkaPrincipal_t
+    fn as_ptr(&self) -> *const kafka_common_security_auth_KafkaPrincipal_t {
+        self as *const KafkaPrincipalInner as *const kafka_common_security_auth_KafkaPrincipal_t
     }
 }
 
-/// Casts a `*const kafka_common_KafkaPrincipal_t` to a reference.
+/// Casts a `*const kafka_common_security_auth_KafkaPrincipal_t` to a reference.
 ///
 /// # Safety
 ///
 /// `principal` must be a non-null borrowed pointer from a token getter.
-unsafe fn kafka_principal_ref(principal: *const kafka_common_KafkaPrincipal_t) -> &'static KafkaPrincipalInner {
+unsafe fn kafka_principal_ref(
+    principal: *const kafka_common_security_auth_KafkaPrincipal_t,
+) -> &'static KafkaPrincipalInner {
     unsafe { &*(principal as *const KafkaPrincipalInner) }
 }
 
@@ -14641,8 +14655,8 @@ unsafe fn kafka_principal_ref(principal: *const kafka_common_KafkaPrincipal_t) -
 ///
 /// `principal` must be a valid borrowed principal pointer.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_KafkaPrincipal_principal_type(
-    principal: *const kafka_common_KafkaPrincipal_t,
+pub unsafe extern "C" fn kafka_common_security_auth_KafkaPrincipal_principal_type(
+    principal: *const kafka_common_security_auth_KafkaPrincipal_t,
 ) -> *const c_char {
     unsafe { kafka_principal_ref(principal) }.principal_type_c.as_ptr()
 }
@@ -14653,8 +14667,8 @@ pub unsafe extern "C" fn kafka_common_KafkaPrincipal_principal_type(
 ///
 /// `principal` must be a valid borrowed principal pointer.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_KafkaPrincipal_name(
-    principal: *const kafka_common_KafkaPrincipal_t,
+pub unsafe extern "C" fn kafka_common_security_auth_KafkaPrincipal_name(
+    principal: *const kafka_common_security_auth_KafkaPrincipal_t,
 ) -> *const c_char {
     unsafe { kafka_principal_ref(principal) }.name_c.as_ptr()
 }
@@ -14666,8 +14680,8 @@ pub unsafe extern "C" fn kafka_common_KafkaPrincipal_name(
 ///
 /// `principal` must be a valid borrowed principal pointer.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_KafkaPrincipal_token_authenticated(
-    principal: *const kafka_common_KafkaPrincipal_t,
+pub unsafe extern "C" fn kafka_common_security_auth_KafkaPrincipal_token_authenticated(
+    principal: *const kafka_common_security_auth_KafkaPrincipal_t,
 ) -> bool {
     unsafe { kafka_principal_ref(principal) }.token_authenticated
 }
@@ -14675,14 +14689,14 @@ pub unsafe extern "C" fn kafka_common_KafkaPrincipal_token_authenticated(
 /// Opaque handle to a `TokenInformation` (Java's
 /// `org.apache.kafka.common.security.token.delegation.TokenInformation`).
 ///
-/// Borrowed from the owning [`kafka_common_DelegationToken_t`]; valid until the
+/// Borrowed from the owning [`kafka_common_security_token_delegation_DelegationToken_t`]; valid until the
 /// result handle that owns the token is destroyed. Do not free it.
 #[repr(C)]
-pub struct kafka_common_TokenInformation_t {
+pub struct kafka_common_security_token_delegation_TokenInformation_t {
     _private: [u8; 0],
 }
 
-/// Backing state for [`kafka_common_TokenInformation_t`].
+/// Backing state for [`kafka_common_security_token_delegation_TokenInformation_t`].
 struct TokenInformationInner {
     token_id_c: CString,
     owner: KafkaPrincipalInner,
@@ -14706,18 +14720,20 @@ impl TokenInformationInner {
         }
     }
 
-    fn as_ptr(&self) -> *const kafka_common_TokenInformation_t {
-        self as *const TokenInformationInner as *const kafka_common_TokenInformation_t
+    fn as_ptr(&self) -> *const kafka_common_security_token_delegation_TokenInformation_t {
+        self as *const TokenInformationInner as *const kafka_common_security_token_delegation_TokenInformation_t
     }
 }
 
-/// Casts a `*const kafka_common_TokenInformation_t` to a reference.
+/// Casts a `*const kafka_common_security_token_delegation_TokenInformation_t` to a reference.
 ///
 /// # Safety
 ///
 /// `info` must be a non-null borrowed pointer from
-/// [`kafka_common_DelegationToken_token_info`].
-unsafe fn token_information_ref(info: *const kafka_common_TokenInformation_t) -> &'static TokenInformationInner {
+/// [`kafka_common_security_token_delegation_DelegationToken_token_info`].
+unsafe fn token_information_ref(
+    info: *const kafka_common_security_token_delegation_TokenInformation_t,
+) -> &'static TokenInformationInner {
     unsafe { &*(info as *const TokenInformationInner) }
 }
 
@@ -14727,8 +14743,8 @@ unsafe fn token_information_ref(info: *const kafka_common_TokenInformation_t) ->
 ///
 /// `info` must be a valid borrowed token-information pointer.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_TokenInformation_token_id(
-    info: *const kafka_common_TokenInformation_t,
+pub unsafe extern "C" fn kafka_common_security_token_delegation_TokenInformation_token_id(
+    info: *const kafka_common_security_token_delegation_TokenInformation_t,
 ) -> *const c_char {
     unsafe { token_information_ref(info) }.token_id_c.as_ptr()
 }
@@ -14740,9 +14756,9 @@ pub unsafe extern "C" fn kafka_common_TokenInformation_token_id(
 ///
 /// `info` must be a valid borrowed token-information pointer.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_TokenInformation_owner(
-    info: *const kafka_common_TokenInformation_t,
-) -> *const kafka_common_KafkaPrincipal_t {
+pub unsafe extern "C" fn kafka_common_security_token_delegation_TokenInformation_owner(
+    info: *const kafka_common_security_token_delegation_TokenInformation_t,
+) -> *const kafka_common_security_auth_KafkaPrincipal_t {
     unsafe { token_information_ref(info) }.owner.as_ptr()
 }
 
@@ -14754,9 +14770,9 @@ pub unsafe extern "C" fn kafka_common_TokenInformation_owner(
 ///
 /// `info` must be a valid borrowed token-information pointer.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_TokenInformation_token_requester(
-    info: *const kafka_common_TokenInformation_t,
-) -> *const kafka_common_KafkaPrincipal_t {
+pub unsafe extern "C" fn kafka_common_security_token_delegation_TokenInformation_token_requester(
+    info: *const kafka_common_security_token_delegation_TokenInformation_t,
+) -> *const kafka_common_security_auth_KafkaPrincipal_t {
     unsafe { token_information_ref(info) }.token_requester.as_ptr()
 }
 
@@ -14766,8 +14782,8 @@ pub unsafe extern "C" fn kafka_common_TokenInformation_token_requester(
 ///
 /// `info` must be a valid borrowed token-information pointer.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_TokenInformation_renewer_count(
-    info: *const kafka_common_TokenInformation_t,
+pub unsafe extern "C" fn kafka_common_security_token_delegation_TokenInformation_renewer_count(
+    info: *const kafka_common_security_token_delegation_TokenInformation_t,
 ) -> i32 {
     unsafe { token_information_ref(info) }.renewers.len() as i32
 }
@@ -14779,10 +14795,10 @@ pub unsafe extern "C" fn kafka_common_TokenInformation_renewer_count(
 ///
 /// `info` must be a valid borrowed token-information pointer.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_TokenInformation_get_renewer(
-    info: *const kafka_common_TokenInformation_t,
+pub unsafe extern "C" fn kafka_common_security_token_delegation_TokenInformation_get_renewer(
+    info: *const kafka_common_security_token_delegation_TokenInformation_t,
     index: i32,
-) -> *const kafka_common_KafkaPrincipal_t {
+) -> *const kafka_common_security_auth_KafkaPrincipal_t {
     if index < 0 {
         return std::ptr::null();
     }
@@ -14798,8 +14814,8 @@ pub unsafe extern "C" fn kafka_common_TokenInformation_get_renewer(
 ///
 /// `info` must be a valid borrowed token-information pointer.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_TokenInformation_issue_timestamp(
-    info: *const kafka_common_TokenInformation_t,
+pub unsafe extern "C" fn kafka_common_security_token_delegation_TokenInformation_issue_timestamp(
+    info: *const kafka_common_security_token_delegation_TokenInformation_t,
 ) -> i64 {
     unsafe { token_information_ref(info) }.issue_timestamp
 }
@@ -14810,8 +14826,8 @@ pub unsafe extern "C" fn kafka_common_TokenInformation_issue_timestamp(
 ///
 /// `info` must be a valid borrowed token-information pointer.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_TokenInformation_expiry_timestamp(
-    info: *const kafka_common_TokenInformation_t,
+pub unsafe extern "C" fn kafka_common_security_token_delegation_TokenInformation_expiry_timestamp(
+    info: *const kafka_common_security_token_delegation_TokenInformation_t,
 ) -> i64 {
     unsafe { token_information_ref(info) }.expiry_timestamp
 }
@@ -14823,8 +14839,8 @@ pub unsafe extern "C" fn kafka_common_TokenInformation_expiry_timestamp(
 ///
 /// `info` must be a valid borrowed token-information pointer.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_TokenInformation_max_timestamp(
-    info: *const kafka_common_TokenInformation_t,
+pub unsafe extern "C" fn kafka_common_security_token_delegation_TokenInformation_max_timestamp(
+    info: *const kafka_common_security_token_delegation_TokenInformation_t,
 ) -> i64 {
     unsafe { token_information_ref(info) }.max_timestamp
 }
@@ -14836,11 +14852,11 @@ pub unsafe extern "C" fn kafka_common_TokenInformation_max_timestamp(
 /// `describe_delegation_token` result handle; valid until that handle is
 /// destroyed. Do not free it.
 #[repr(C)]
-pub struct kafka_common_DelegationToken_t {
+pub struct kafka_common_security_token_delegation_DelegationToken_t {
     _private: [u8; 0],
 }
 
-/// Backing state for [`kafka_common_DelegationToken_t`].
+/// Backing state for [`kafka_common_security_token_delegation_DelegationToken_t`].
 ///
 /// The HMAC is raw bytes, not a string: it is a SHA-512 MAC and can contain
 /// NULs, so it crosses as a pointer plus a length rather than as a `CString`.
@@ -14861,18 +14877,20 @@ impl DelegationTokenInner {
         }
     }
 
-    fn as_ptr(&self) -> *const kafka_common_DelegationToken_t {
-        self as *const DelegationTokenInner as *const kafka_common_DelegationToken_t
+    fn as_ptr(&self) -> *const kafka_common_security_token_delegation_DelegationToken_t {
+        self as *const DelegationTokenInner as *const kafka_common_security_token_delegation_DelegationToken_t
     }
 }
 
-/// Casts a `*const kafka_common_DelegationToken_t` to a reference.
+/// Casts a `*const kafka_common_security_token_delegation_DelegationToken_t` to a reference.
 ///
 /// # Safety
 ///
 /// `token` must be a non-null borrowed pointer from a delegation-token result
 /// getter.
-unsafe fn delegation_token_ref(token: *const kafka_common_DelegationToken_t) -> &'static DelegationTokenInner {
+unsafe fn delegation_token_ref(
+    token: *const kafka_common_security_token_delegation_DelegationToken_t,
+) -> &'static DelegationTokenInner {
     unsafe { &*(token as *const DelegationTokenInner) }
 }
 
@@ -14883,9 +14901,9 @@ unsafe fn delegation_token_ref(token: *const kafka_common_DelegationToken_t) -> 
 ///
 /// `token` must be a valid borrowed delegation-token pointer.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_DelegationToken_token_info(
-    token: *const kafka_common_DelegationToken_t,
-) -> *const kafka_common_TokenInformation_t {
+pub unsafe extern "C" fn kafka_common_security_token_delegation_DelegationToken_token_info(
+    token: *const kafka_common_security_token_delegation_DelegationToken_t,
+) -> *const kafka_common_security_token_delegation_TokenInformation_t {
     unsafe { delegation_token_ref(token) }.token_info.as_ptr()
 }
 
@@ -14902,8 +14920,8 @@ pub unsafe extern "C" fn kafka_common_DelegationToken_token_info(
 /// `token` must be a valid borrowed delegation-token pointer; `out_len` must be
 /// null or writable.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_DelegationToken_hmac(
-    token: *const kafka_common_DelegationToken_t,
+pub unsafe extern "C" fn kafka_common_security_token_delegation_DelegationToken_hmac(
+    token: *const kafka_common_security_token_delegation_DelegationToken_t,
     out_len: *mut i32,
 ) -> *const u8 {
     let inner = unsafe { delegation_token_ref(token) };
@@ -14919,8 +14937,8 @@ pub unsafe extern "C" fn kafka_common_DelegationToken_hmac(
 ///
 /// `token` must be a valid borrowed delegation-token pointer.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_DelegationToken_hmac_as_base64_string(
-    token: *const kafka_common_DelegationToken_t,
+pub unsafe extern "C" fn kafka_common_security_token_delegation_DelegationToken_hmac_as_base64_string(
+    token: *const kafka_common_security_token_delegation_DelegationToken_t,
 ) -> *const c_char {
     unsafe { delegation_token_ref(token) }.hmac_base64_c.as_ptr()
 }
@@ -15796,7 +15814,7 @@ pub type kafka_admin_AdminClient_renew_delegation_token_callback_t =
 /// # Parameters
 ///
 /// - `hmac` / `hmac_len`: the token's raw HMAC, as returned by
-///   [`kafka_common_DelegationToken_hmac`]. Not NUL-terminated; the length is
+///   [`kafka_common_security_token_delegation_DelegationToken_hmac`]. Not NUL-terminated; the length is
 ///   required.
 /// - `renew_time_period_ms`: how much longer the token should live; negative
 ///   keeps Java's `-1`, meaning the broker's
@@ -15905,7 +15923,7 @@ pub type kafka_admin_AdminClient_expire_delegation_token_callback_t =
 /// # Parameters
 ///
 /// - `hmac` / `hmac_len`: the token's raw HMAC, as returned by
-///   [`kafka_common_DelegationToken_hmac`]. Not NUL-terminated; the length is
+///   [`kafka_common_security_token_delegation_DelegationToken_hmac`]. Not NUL-terminated; the length is
 ///   required.
 /// - `expiry_time_period_ms`: `>= 0` moves the expiry to
 ///   `min(now + expiry_time_period_ms, maxTimestamp)`; **negative expires the
@@ -16701,7 +16719,7 @@ unsafe fn create_delegation_token_result_ref(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_CreateDelegationTokenResult_get_token(
     result: *const kafka_admin_CreateDelegationTokenResult_t,
-) -> *const kafka_common_DelegationToken_t {
+) -> *const kafka_common_security_token_delegation_DelegationToken_t {
     unsafe { create_delegation_token_result_ref(result) }.token.as_ptr()
 }
 
@@ -16864,7 +16882,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeDelegationTokenResult_count(
 pub unsafe extern "C" fn kafka_admin_DescribeDelegationTokenResult_get_token(
     result: *const kafka_admin_DescribeDelegationTokenResult_t,
     index: i32,
-) -> *const kafka_common_DelegationToken_t {
+) -> *const kafka_common_security_token_delegation_DelegationToken_t {
     if index < 0 {
         return std::ptr::null();
     }
@@ -19570,7 +19588,7 @@ mod tests {
         let flat = LogDirDescriptionInner::new(&description);
 
         let error = flat.error.as_ref().expect("log dir reported an error");
-        assert_eq!(error.error.code(), Errors::KafkaStorageError.code());
+        assert_eq!(error.error.error().code(), Errors::KafkaStorageError.code());
         assert_eq!(flat.total_bytes, 2_000);
         assert_eq!(flat.usable_bytes, 1_000);
         assert_eq!(flat.replicas.len(), 1);
@@ -21117,14 +21135,26 @@ mod tests {
         let inner = AclBindingInner::new(&acl_binding("orders-", "User:alice"));
         let b = inner.as_ptr();
         unsafe {
-            assert_eq!(kafka_common_AclBinding_resource_type(b), i32::from(ResourceType::Topic.code()));
-            assert_eq!(CStr::from_ptr(kafka_common_AclBinding_resource_name(b)).to_str(), Ok("orders-"));
-            assert_eq!(kafka_common_AclBinding_pattern_type(b), i32::from(PatternType::Prefixed.code()));
-            assert_eq!(CStr::from_ptr(kafka_common_AclBinding_principal(b)).to_str(), Ok("User:alice"));
-            assert_eq!(CStr::from_ptr(kafka_common_AclBinding_host(b)).to_str(), Ok("10.0.0.1"));
-            assert_eq!(kafka_common_AclBinding_operation(b), i32::from(AclOperation::Write.code()));
             assert_eq!(
-                kafka_common_AclBinding_permission_type(b),
+                kafka_common_acl_AclBinding_resource_type(b),
+                i32::from(ResourceType::Topic.code())
+            );
+            assert_eq!(
+                CStr::from_ptr(kafka_common_acl_AclBinding_resource_name(b)).to_str(),
+                Ok("orders-")
+            );
+            assert_eq!(
+                kafka_common_acl_AclBinding_pattern_type(b),
+                i32::from(PatternType::Prefixed.code())
+            );
+            assert_eq!(
+                CStr::from_ptr(kafka_common_acl_AclBinding_principal(b)).to_str(),
+                Ok("User:alice")
+            );
+            assert_eq!(CStr::from_ptr(kafka_common_acl_AclBinding_host(b)).to_str(), Ok("10.0.0.1"));
+            assert_eq!(kafka_common_acl_AclBinding_operation(b), i32::from(AclOperation::Write.code()));
+            assert_eq!(
+                kafka_common_acl_AclBinding_permission_type(b),
                 i32::from(AclPermissionType::Deny.code())
             );
         }
@@ -21197,30 +21227,36 @@ mod tests {
             ),
         ));
         unsafe {
-            let a = &any as *const AclBindingFilterInner as *const kafka_common_AclBindingFilter_t;
-            assert!(kafka_common_AclBindingFilter_resource_name(a).is_null());
-            assert!(kafka_common_AclBindingFilter_principal(a).is_null());
-            assert!(kafka_common_AclBindingFilter_host(a).is_null());
+            let a = &any as *const AclBindingFilterInner as *const kafka_common_acl_AclBindingFilter_t;
+            assert!(kafka_common_acl_AclBindingFilter_resource_name(a).is_null());
+            assert!(kafka_common_acl_AclBindingFilter_principal(a).is_null());
+            assert!(kafka_common_acl_AclBindingFilter_host(a).is_null());
             // `AclBindingFilter::any()` is ANY on all four enums.
             assert_eq!(
-                kafka_common_AclBindingFilter_resource_type(a),
+                kafka_common_acl_AclBindingFilter_resource_type(a),
                 i32::from(ResourceType::Any.code())
             );
             assert_eq!(
-                kafka_common_AclBindingFilter_pattern_type(a),
+                kafka_common_acl_AclBindingFilter_pattern_type(a),
                 i32::from(PatternType::Any.code())
             );
-            assert_eq!(kafka_common_AclBindingFilter_operation(a), i32::from(AclOperation::Any.code()));
             assert_eq!(
-                kafka_common_AclBindingFilter_permission_type(a),
+                kafka_common_acl_AclBindingFilter_operation(a),
+                i32::from(AclOperation::Any.code())
+            );
+            assert_eq!(
+                kafka_common_acl_AclBindingFilter_permission_type(a),
                 i32::from(AclPermissionType::Any.code())
             );
 
-            let e = &empty as *const AclBindingFilterInner as *const kafka_common_AclBindingFilter_t;
-            assert!(!kafka_common_AclBindingFilter_resource_name(e).is_null());
-            assert_eq!(CStr::from_ptr(kafka_common_AclBindingFilter_resource_name(e)).to_str(), Ok(""));
-            assert_eq!(CStr::from_ptr(kafka_common_AclBindingFilter_principal(e)).to_str(), Ok(""));
-            assert_eq!(CStr::from_ptr(kafka_common_AclBindingFilter_host(e)).to_str(), Ok(""));
+            let e = &empty as *const AclBindingFilterInner as *const kafka_common_acl_AclBindingFilter_t;
+            assert!(!kafka_common_acl_AclBindingFilter_resource_name(e).is_null());
+            assert_eq!(
+                CStr::from_ptr(kafka_common_acl_AclBindingFilter_resource_name(e)).to_str(),
+                Ok("")
+            );
+            assert_eq!(CStr::from_ptr(kafka_common_acl_AclBindingFilter_principal(e)).to_str(), Ok(""));
+            assert_eq!(CStr::from_ptr(kafka_common_acl_AclBindingFilter_host(e)).to_str(), Ok(""));
         }
     }
 
@@ -21445,14 +21481,14 @@ mod tests {
             // Sorted by resource name, so "a-topic" comes first.
             let first = kafka_admin_CreateAclsResult_get_binding(result, 0);
             assert_eq!(
-                CStr::from_ptr(kafka_common_AclBinding_resource_name(first)).to_str(),
+                CStr::from_ptr(kafka_common_acl_AclBinding_resource_name(first)).to_str(),
                 Ok("a-topic")
             );
             assert!(kafka_admin_CreateAclsResult_get_error(result, 0).is_null());
 
             let second = kafka_admin_CreateAclsResult_get_binding(result, 1);
             assert_eq!(
-                CStr::from_ptr(kafka_common_AclBinding_principal(second)).to_str(),
+                CStr::from_ptr(kafka_common_acl_AclBinding_principal(second)).to_str(),
                 Ok("User:zoe")
             );
             assert_eq!(
@@ -21476,14 +21512,14 @@ mod tests {
         unsafe {
             assert_eq!(kafka_admin_DescribeAclsResult_count(result), 2);
             assert_eq!(
-                CStr::from_ptr(kafka_common_AclBinding_resource_name(
+                CStr::from_ptr(kafka_common_acl_AclBinding_resource_name(
                     kafka_admin_DescribeAclsResult_get_binding(result, 0)
                 ))
                 .to_str(),
                 Ok("z-topic")
             );
             assert_eq!(
-                CStr::from_ptr(kafka_common_AclBinding_resource_name(
+                CStr::from_ptr(kafka_common_acl_AclBinding_resource_name(
                     kafka_admin_DescribeAclsResult_get_binding(result, 1)
                 ))
                 .to_str(),
@@ -21530,16 +21566,16 @@ mod tests {
             // Sorted by the filter's fields, so "a-filter" is index 0.
             let f0 = kafka_admin_DeleteAclsResult_get_filter(result, 0);
             assert_eq!(
-                CStr::from_ptr(kafka_common_AclBindingFilter_resource_name(f0)).to_str(),
+                CStr::from_ptr(kafka_common_acl_AclBindingFilter_resource_name(f0)).to_str(),
                 Ok("a-filter")
             );
             assert!(kafka_admin_DeleteAclsResult_get_error(result, 0).is_null());
             assert_eq!(kafka_admin_DeleteAclsResult_get_result_count(result, 0), 2);
             // Entry 0: a binding, no exception.
             assert_eq!(
-                CStr::from_ptr(kafka_common_AclBinding_resource_name(kafka_admin_DeleteAclsResult_get_binding(
-                    result, 0, 0
-                )))
+                CStr::from_ptr(kafka_common_acl_AclBinding_resource_name(
+                    kafka_admin_DeleteAclsResult_get_binding(result, 0, 0)
+                ))
                 .to_str(),
                 Ok("deleted-topic")
             );
@@ -21555,7 +21591,7 @@ mod tests {
             // which is a different thing from a filter that matched nothing.
             let f2 = kafka_admin_DeleteAclsResult_get_filter(result, 2);
             assert_eq!(
-                CStr::from_ptr(kafka_common_AclBindingFilter_resource_name(f2)).to_str(),
+                CStr::from_ptr(kafka_common_acl_AclBindingFilter_resource_name(f2)).to_str(),
                 Ok("z-filter")
             );
             assert_eq!(
@@ -21774,36 +21810,36 @@ mod tests {
         ]));
         let e = inner.as_ptr();
         unsafe {
-            assert_eq!(kafka_common_ClientQuotaEntity_entry_count(e), 3);
+            assert_eq!(kafka_common_quota_ClientQuotaEntity_entry_count(e), 3);
             // Sorted by entity type: client-id, ip, user.
             assert_eq!(
-                CStr::from_ptr(kafka_common_ClientQuotaEntity_get_entry_type(e, 0)).to_str(),
+                CStr::from_ptr(kafka_common_quota_ClientQuotaEntity_get_entry_type(e, 0)).to_str(),
                 Ok("client-id")
             );
             // Present but empty: a pointer to "", not null.
-            let empty = kafka_common_ClientQuotaEntity_get_entry_name(e, 0);
+            let empty = kafka_common_quota_ClientQuotaEntity_get_entry_name(e, 0);
             assert!(!empty.is_null());
             assert_eq!(CStr::from_ptr(empty).to_str(), Ok(""));
 
             assert_eq!(
-                CStr::from_ptr(kafka_common_ClientQuotaEntity_get_entry_type(e, 1)).to_str(),
+                CStr::from_ptr(kafka_common_quota_ClientQuotaEntity_get_entry_type(e, 1)).to_str(),
                 Ok("ip")
             );
             assert_eq!(
-                CStr::from_ptr(kafka_common_ClientQuotaEntity_get_entry_name(e, 1)).to_str(),
+                CStr::from_ptr(kafka_common_quota_ClientQuotaEntity_get_entry_name(e, 1)).to_str(),
                 Ok("10.0.0.1")
             );
 
             assert_eq!(
-                CStr::from_ptr(kafka_common_ClientQuotaEntity_get_entry_type(e, 2)).to_str(),
+                CStr::from_ptr(kafka_common_quota_ClientQuotaEntity_get_entry_type(e, 2)).to_str(),
                 Ok("user")
             );
             // The default entity: a null name at an in-range index.
-            assert!(kafka_common_ClientQuotaEntity_get_entry_name(e, 2).is_null());
+            assert!(kafka_common_quota_ClientQuotaEntity_get_entry_name(e, 2).is_null());
 
-            assert!(kafka_common_ClientQuotaEntity_get_entry_type(e, 3).is_null());
-            assert!(kafka_common_ClientQuotaEntity_get_entry_name(e, 3).is_null());
-            assert!(kafka_common_ClientQuotaEntity_get_entry_type(e, -1).is_null());
+            assert!(kafka_common_quota_ClientQuotaEntity_get_entry_type(e, 3).is_null());
+            assert!(kafka_common_quota_ClientQuotaEntity_get_entry_name(e, 3).is_null());
+            assert!(kafka_common_quota_ClientQuotaEntity_get_entry_type(e, -1).is_null());
         }
     }
 
@@ -21826,7 +21862,7 @@ mod tests {
             // Entities sorted by their (type, name) pairs: alice before bob.
             let alice = kafka_admin_DescribeClientQuotasResult_get_entity(result, 0);
             assert_eq!(
-                CStr::from_ptr(kafka_common_ClientQuotaEntity_get_entry_name(alice, 0)).to_str(),
+                CStr::from_ptr(kafka_common_quota_ClientQuotaEntity_get_entry_name(alice, 0)).to_str(),
                 Ok("alice")
             );
             assert_eq!(kafka_admin_DescribeClientQuotasResult_get_quota_count(result, 0), 2);
@@ -21879,7 +21915,7 @@ mod tests {
             assert_eq!(kafka_admin_AlterClientQuotasResult_count(result), 2);
             let alice = kafka_admin_AlterClientQuotasResult_get_entity(result, 0);
             assert_eq!(
-                CStr::from_ptr(kafka_common_ClientQuotaEntity_get_entry_name(alice, 0)).to_str(),
+                CStr::from_ptr(kafka_common_quota_ClientQuotaEntity_get_entry_name(alice, 0)).to_str(),
                 Ok("alice")
             );
             assert!(kafka_admin_AlterClientQuotasResult_get_error(result, 0).is_null());
@@ -22588,38 +22624,49 @@ mod tests {
             // The HMAC contains an interior NUL, so only the length says how
             // long it is -- a CString would have truncated it to one byte.
             let mut len = 0i32;
-            let hmac = kafka_common_DelegationToken_hmac(handle, &mut len);
+            let hmac = kafka_common_security_token_delegation_DelegationToken_hmac(handle, &mut len);
             assert_eq!(len, 3);
             assert_eq!(std::slice::from_raw_parts(hmac, len as usize), &[0x01, 0x00, 0x02]);
-            let encoded = CStr::from_ptr(kafka_common_DelegationToken_hmac_as_base64_string(handle));
+            let encoded = CStr::from_ptr(kafka_common_security_token_delegation_DelegationToken_hmac_as_base64_string(
+                handle,
+            ));
             assert_eq!(encoded.to_str().expect("utf8"), base64);
 
-            let info = kafka_common_DelegationToken_token_info(handle);
-            let id = CStr::from_ptr(kafka_common_TokenInformation_token_id(info));
+            let info = kafka_common_security_token_delegation_DelegationToken_token_info(handle);
+            let id = CStr::from_ptr(kafka_common_security_token_delegation_TokenInformation_token_id(info));
             assert_eq!(id.to_str().expect("utf8"), "token-id-1");
-            assert_eq!(kafka_common_TokenInformation_issue_timestamp(info), 1_000);
-            assert_eq!(kafka_common_TokenInformation_max_timestamp(info), 9_000);
-            assert_eq!(kafka_common_TokenInformation_expiry_timestamp(info), 5_000);
+            assert_eq!(
+                kafka_common_security_token_delegation_TokenInformation_issue_timestamp(info),
+                1_000
+            );
+            assert_eq!(
+                kafka_common_security_token_delegation_TokenInformation_max_timestamp(info),
+                9_000
+            );
+            assert_eq!(
+                kafka_common_security_token_delegation_TokenInformation_expiry_timestamp(info),
+                5_000
+            );
 
-            let owner = kafka_common_TokenInformation_owner(info);
-            let owner_name = CStr::from_ptr(kafka_common_KafkaPrincipal_name(owner));
+            let owner = kafka_common_security_token_delegation_TokenInformation_owner(info);
+            let owner_name = CStr::from_ptr(kafka_common_security_auth_KafkaPrincipal_name(owner));
             assert_eq!(owner_name.to_str().expect("utf8"), "owner");
-            let requester = kafka_common_TokenInformation_token_requester(info);
-            let requester_name = CStr::from_ptr(kafka_common_KafkaPrincipal_name(requester));
+            let requester = kafka_common_security_token_delegation_TokenInformation_token_requester(info);
+            let requester_name = CStr::from_ptr(kafka_common_security_auth_KafkaPrincipal_name(requester));
             assert_eq!(requester_name.to_str().expect("utf8"), "requester");
 
-            assert_eq!(kafka_common_TokenInformation_renewer_count(info), 2);
-            let renewer0 = kafka_common_TokenInformation_get_renewer(info, 0);
-            let renewer0_type = CStr::from_ptr(kafka_common_KafkaPrincipal_principal_type(renewer0));
-            let renewer0_name = CStr::from_ptr(kafka_common_KafkaPrincipal_name(renewer0));
+            assert_eq!(kafka_common_security_token_delegation_TokenInformation_renewer_count(info), 2);
+            let renewer0 = kafka_common_security_token_delegation_TokenInformation_get_renewer(info, 0);
+            let renewer0_type = CStr::from_ptr(kafka_common_security_auth_KafkaPrincipal_principal_type(renewer0));
+            let renewer0_name = CStr::from_ptr(kafka_common_security_auth_KafkaPrincipal_name(renewer0));
             assert_eq!(renewer0_type.to_str().expect("utf8"), "User");
             assert_eq!(renewer0_name.to_str().expect("utf8"), "renewer-1");
-            let renewer1 = kafka_common_TokenInformation_get_renewer(info, 1);
-            let renewer1_type = CStr::from_ptr(kafka_common_KafkaPrincipal_principal_type(renewer1));
+            let renewer1 = kafka_common_security_token_delegation_TokenInformation_get_renewer(info, 1);
+            let renewer1_type = CStr::from_ptr(kafka_common_security_auth_KafkaPrincipal_principal_type(renewer1));
             assert_eq!(renewer1_type.to_str().expect("utf8"), "Group");
-            assert!(kafka_common_TokenInformation_get_renewer(info, 2).is_null());
-            assert!(kafka_common_TokenInformation_get_renewer(info, -1).is_null());
-            assert!(!kafka_common_KafkaPrincipal_token_authenticated(owner));
+            assert!(kafka_common_security_token_delegation_TokenInformation_get_renewer(info, 2).is_null());
+            assert!(kafka_common_security_token_delegation_TokenInformation_get_renewer(info, -1).is_null());
+            assert!(!kafka_common_security_auth_KafkaPrincipal_token_authenticated(owner));
 
             kafka_admin_DescribeDelegationTokenResult_destroy(result);
         }
@@ -22684,13 +22731,15 @@ mod tests {
         let result = box_create_delegation_token_result(DelegationToken::new(info, vec![0xff]));
         unsafe {
             let handle = kafka_admin_CreateDelegationTokenResult_get_token(result);
-            let id = CStr::from_ptr(kafka_common_TokenInformation_token_id(kafka_common_DelegationToken_token_info(
-                handle,
-            )));
+            let id = CStr::from_ptr(kafka_common_security_token_delegation_TokenInformation_token_id(
+                kafka_common_security_token_delegation_DelegationToken_token_info(handle),
+            ));
             assert_eq!(id.to_str().expect("utf8"), "token-id-2");
             // No renewers is a legal token: only the owner may renew it.
             assert_eq!(
-                kafka_common_TokenInformation_renewer_count(kafka_common_DelegationToken_token_info(handle)),
+                kafka_common_security_token_delegation_TokenInformation_renewer_count(
+                    kafka_common_security_token_delegation_DelegationToken_token_info(handle)
+                ),
                 0
             );
             kafka_admin_CreateDelegationTokenResult_destroy(result);

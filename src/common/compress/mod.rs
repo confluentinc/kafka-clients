@@ -20,6 +20,16 @@
 //! Corresponds to Java's `org.apache.kafka.common.compress.Compression` and its
 //! subclasses (`NoCompression`, `GzipCompression`, `SnappyCompression`,
 //! `Lz4Compression`, `ZstdCompression`).
+//!
+//! # Dead-code lint
+//!
+//! Java marks this package "not a supported API", so it is crate-private. It
+//! is translated in full (DoD #2), but the client uses only part of it; the
+//! rest has no caller yet, or only the translated tests. Nothing outside the
+//! crate can reach it, so the module allows dead code rather than dropping
+//! Java methods.
+
+#![allow(dead_code, unused_imports)]
 
 mod compression;
 pub mod gzip_compression;

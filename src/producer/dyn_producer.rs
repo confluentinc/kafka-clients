@@ -45,6 +45,8 @@ use crate::producer::RecordMetadata;
 type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 mod private {
+    // Deliberately unnameable: it seals `DynProducer` to `Producer` implementors.
+    #[allow(unnameable_types)]
     pub trait Sealed<K, V> {}
 }
 

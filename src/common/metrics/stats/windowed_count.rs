@@ -98,7 +98,7 @@ mod tests {
     use super::*;
     use crate::common::metrics::MockTime;
     use crate::common::metrics::Time;
-    use crate::common::metrics::internals::TimeUnit;
+    use crate::common::metrics::TimeUnit;
 
     #[test]
     fn counts_invocations() {

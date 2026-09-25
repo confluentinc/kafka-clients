@@ -37,7 +37,7 @@ use std::sync::atomic::{AtomicI64, Ordering};
 
 #[cfg(test)]
 use crate::common::MetricName;
-use crate::common::metrics::internals::TimeUnit;
+use crate::common::metrics::TimeUnit;
 use crate::common::metrics::stats::{Avg, CumulativeCount, CumulativeSum, Max, Rate, WindowedCount};
 use crate::common::metrics::{ClosureMeasurable, Metrics, Sensor};
 use crate::consumer::internals::ConsumerUtils;

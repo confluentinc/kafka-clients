@@ -24,6 +24,7 @@ use crate::common::security::auth::KafkaPrincipal;
 /// Corresponds to
 /// `org.apache.kafka.clients.admin.CreateDelegationTokenOptions`.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[doc(alias = "org.apache.kafka.clients.admin.CreateDelegationTokenOptions")]
 pub struct CreateDelegationTokenOptions {
     max_lifetime_ms: i64,
     renewers: Vec<KafkaPrincipal>,

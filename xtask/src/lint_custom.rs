@@ -1372,8 +1372,10 @@ fn glob_match(pattern: &str, text: &str) -> bool {
 /// cannot have C bindings, and a name that resolves to no class is an error.
 ///
 /// Leaks through signatures (a public fn taking a `pub(crate)` type) are not
-/// checked here: rustc's `private_interfaces` / `private_bounds` lints catch
-/// them under `cargo xtask lint`.
+/// checked here: rustc's `unnameable_types` lint, enabled in `src/lib.rs`,
+/// catches them under `cargo xtask lint`. `private_interfaces` /
+/// `private_bounds` do not, because they ignore a `pub` item declared inside a
+/// `pub(crate)` module — the shape every privatised package here has.
 struct PublicAudience {
     index: JavaIndex,
     /// [`PUBLIC_AUDIENCE_LIST`].
@@ -1773,8 +1775,8 @@ impl Rule for PublicAudience {
    package-info.java says \"not a supported Kafka API\", and annotated
    `@InterfaceAudience.Public` in Kafka 4.4. A Rust-only item, or a deliberate
    exception, goes in xtask/public-audience-allowlist.txt with its reason.
-   A public signature naming a `pub(crate)` type is caught by rustc's
-   `private_interfaces` / `private_bounds` under `cargo xtask lint`."
+   A public signature naming a crate-private type is caught by rustc's
+   `unnameable_types` (enabled in src/lib.rs) under `cargo xtask lint`."
     }
 }
 

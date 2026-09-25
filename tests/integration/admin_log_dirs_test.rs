@@ -274,8 +274,7 @@ async fn alter_replica_log_dirs_nonexistent_dir_errors<F: AdminBackendFactory>(c
             err,
             Error::LogDirNotFound(_) | Error::KafkaStorage(_) | Error::ReplicaNotAvailable(_)
         ),
-        "{backend} backend: unexpected error for unknown log dir: {:?}",
-        err.error()
+        "{backend} backend: unexpected error for unknown log dir: {err:?}"
     );
 
     admin

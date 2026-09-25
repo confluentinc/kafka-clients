@@ -14,7 +14,8 @@
 
 //! A simple incremental rate (`org.apache.kafka.common.metrics.stats.SimpleRate`).
 
-use crate::common::metrics::internals::{MetricsUtils, TimeUnit};
+use crate::common::metrics::TimeUnit;
+use crate::common::metrics::internals::MetricsUtils;
 use crate::common::metrics::stats::Rate;
 use crate::common::metrics::{Measurable, MetricConfig, Stat};
 

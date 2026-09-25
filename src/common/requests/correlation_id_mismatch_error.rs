@@ -42,6 +42,11 @@ use crate::common::error::{ErrorCode, ErrorHierarchy, ErrorMessage, ErrorSource}
 /// carries Java's two `int` fields and their accessors — `responseCorrelationId()`
 /// is read by `NetworkClient.parseResponse` to decide whether the response is
 /// unrelated to a SASL request.
+///
+/// Crate-private although `Error::CorrelationIdMismatch` is public: Java's class sits in
+/// `common.requests`, which is "not a supported API". Callers match the variant and
+/// use `Display` / `source()`; the payload itself is not reachable by name.
+#[allow(unnameable_types)]
 #[derive(Clone, Debug)]
 #[doc(alias = "org.apache.kafka.common.requests.CorrelationIdMismatchException")]
 pub struct CorrelationIdMismatchError {

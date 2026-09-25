@@ -38,6 +38,7 @@ mod stat;
 pub mod stats;
 mod system_time;
 mod time;
+mod time_unit;
 
 pub use compound_stat::{CompoundStat, NamedMeasurable};
 pub use gauge::{ClosureGauge, Gauge};
@@ -53,7 +54,11 @@ pub use quota::Quota;
 pub use quota_violation_error::QuotaViolationError;
 pub use sensor::{RecordingLevel, Sensor};
 pub use stat::Stat;
-pub use system_time::SystemTime;
-pub use time::Time;
+// `org.apache.kafka.common.utils.Time` is not `@InterfaceAudience.Public`, so
+// the clock abstraction, and every constructor taking one, is crate-private.
+// Users get the system clock through the plain constructors.
+pub(crate) use system_time::SystemTime;
+pub(crate) use time::Time;
 #[cfg(test)]
 pub(crate) use time::mock::MockTime;
+pub use time_unit::TimeUnit;

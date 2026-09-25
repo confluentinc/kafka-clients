@@ -376,7 +376,7 @@ impl Sample {
 mod tests {
     use super::*;
     use crate::common::metrics::MockTime;
-    use crate::common::metrics::internals::TimeUnit;
+    use crate::common::metrics::TimeUnit;
     use crate::common::metrics::stats::{Avg, Max, Min, WindowedCount, WindowedSum};
     use crate::common::metrics::{Measurable, Stat, Time};
     use std::sync::Arc;

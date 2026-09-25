@@ -1244,7 +1244,7 @@ async fn remove_all_members_from_consumer_group<F: AdminBackendFactory>(ctx: &mu
                 emptied = true;
                 break;
             },
-            Some(Err(err)) if matches!(err, Error::GroupIdNotFound(_)) => {
+            Some(Err(Error::GroupIdNotFound(_))) => {
                 emptied = true;
                 break;
             },

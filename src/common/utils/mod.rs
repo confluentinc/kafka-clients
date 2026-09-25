@@ -13,6 +13,16 @@
 // limitations under the License.
 
 //! Common utility classes (org.apache.kafka.common.utils)
+//!
+//! # Dead-code lint
+//!
+//! None of the translated classes is `@InterfaceAudience.Public` in Java, so
+//! they are crate-private. They are translated in full (DoD #2), but the client uses only part of it; the
+//! rest has no caller yet, or only the translated tests. Nothing outside the
+//! crate can reach it, so the module allows dead code rather than dropping
+//! Java methods.
+
+#![allow(dead_code, unused_imports)]
 
 mod byte_utils;
 mod exponential_backoff;
@@ -26,8 +36,8 @@ mod producer_id_and_epoch;
 #[allow(clippy::module_inception)]
 mod utils;
 
-pub use byte_utils::ByteUtils;
-pub use exponential_backoff::ExponentialBackoff;
-pub use log_context::LogContext;
-pub use producer_id_and_epoch::ProducerIdAndEpoch;
-pub use utils::Utils;
+pub(crate) use byte_utils::ByteUtils;
+pub(crate) use exponential_backoff::ExponentialBackoff;
+pub(crate) use log_context::LogContext;
+pub(crate) use producer_id_and_epoch::ProducerIdAndEpoch;
+pub(crate) use utils::Utils;

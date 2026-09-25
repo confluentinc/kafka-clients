@@ -3657,7 +3657,7 @@ mod tests {
         // `InvalidConfigurationException` at `INVALID_CONFIG(40)`
         // (`Errors.java:264`), so 40 is Java's answer here.
         assert_eq!(err.error(), Errors::InvalidConfig);
-        assert_eq!(err.code(), 40);
+        assert_eq!(err.error().code(), 40);
     }
 
     /// `KafkaClient.authenticationException(Node)` returns the exception

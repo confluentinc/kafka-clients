@@ -15,7 +15,7 @@
 //! Security types and utilities (org.apache.kafka.common.security).
 
 pub mod auth;
-pub mod authenticator;
+pub(crate) mod authenticator;
 pub mod scram;
-pub mod ssl;
+pub(crate) mod ssl;
 pub mod token;

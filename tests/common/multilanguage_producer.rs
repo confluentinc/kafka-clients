@@ -53,7 +53,7 @@ use confluent_kafka::common::errors::InterruptError;
 use confluent_kafka::common::errors::InvalidOffsetError;
 use confluent_kafka::common::errors::SslAuthenticationError;
 use confluent_kafka::common::header::Header;
-use confluent_kafka::common::metrics::{ClosureGauge, KafkaMetric, MetricConfig, MetricValueProvider, SystemTime};
+use confluent_kafka::common::metrics::{ClosureGauge, KafkaMetric, MetricValueProvider, Metrics};
 use confluent_kafka::consumer::ConsumerCommitFailedError;
 use confluent_kafka::consumer::ConsumerGroupMetadata;
 use confluent_kafka::consumer::ConsumerRetriableCommitFailedError;
@@ -384,13 +384,10 @@ fn metric_from_proto(m: proto::Metric) -> (MetricName, Arc<KafkaMetric>) {
         None => MetricValue::Double(0.0),
     };
     let gauge = ClosureGauge::new(move |_config, _now| value.clone());
-    let metric = KafkaMetric::new(
-        name.clone(),
-        MetricValueProvider::Gauge(Box::new(gauge)),
-        Arc::new(MetricConfig::new()),
-        Arc::new(SystemTime::default()),
-    );
-    (name, Arc::new(metric))
+    // A standalone registry mints the `KafkaMetric`, as Java code obtains one
+    // (its constructor is public only "for testing"); the metric outlives it.
+    let metric = Metrics::new().add_metric_if_absent(name.clone(), None, MetricValueProvider::Gauge(Box::new(gauge)));
+    (name, metric)
 }
 
 fn record_metadata_from_proto(m: proto::RecordMetadata) -> RecordMetadata {
