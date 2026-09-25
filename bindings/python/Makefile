@@ -27,11 +27,15 @@ typecheck:
 	cd $(RUST_PROJECT_ROOT)/bindings/python && python -m mypy --strict confluent_kafka test/unit/test_typing.py
 
 # `typecheck` runs after the dev extras are installed: mypy is one of them, and
-# a fresh venv (CI) has it only from that step.
+# a fresh venv (CI) has it only from that step. `test/integration` holds the
+# broker-backed binding tests (a testcontainers KRaft broker; they skip without
+# Docker): what the Java tests drive through a MockClient the binding cannot
+# inject.
 test: build
 	pip install .[dev] || pip install --no-dependencies .[dev]
 	$(MAKE) typecheck
 	cd $(RUST_PROJECT_ROOT)/bindings/python && python -m pytest test/unit -v
+	cd $(RUST_PROJECT_ROOT)/bindings/python && python -m pytest test/integration -v
 	$(MAKE) test-soak
 	$(MAKE) -C $(RUST_PROJECT_ROOT) test-integration-python
 

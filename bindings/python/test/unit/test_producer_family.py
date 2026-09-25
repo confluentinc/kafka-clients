@@ -513,6 +513,48 @@ def test_send_failure_metadata_callback_and_future() -> None:
     assert not md.has_offset() and not md.has_timestamp()
 
 
+@pytest.mark.parametrize("cls", [KafkaProducer, AsyncKafkaProducer])
+def test_a_transactional_send_waits_for_its_handover_and_keeps_api_errors_in_the_future(
+        cls: type[KafkaProducer[Any, Any]] | type[AsyncKafkaProducer[Any, Any]]) -> None:
+    # Critic 75 F2: with a transactional.id, send() returns once the record is
+    # with the Rust producer, so it can raise what Java's doSend rethrows (the
+    # broker tests in test/integration). The metadata wait's TimeoutError is an
+    # ApiException: Java gives it to the callback and returns a failed future
+    # (KafkaProducer.java:1056-1068), after send() waited max.block.ms.
+    configs = {**UNREACHABLE, "max.block.ms": 300, "transactional.id": "txn"}
+    seen: list[Exception | None] = []
+
+    def callback(md: RecordMetadata, e: Exception | None) -> None:
+        seen.append(e)
+
+    async def send_async() -> tuple[float, BaseException | None]:
+        p = AsyncKafkaProducer(configs=configs)
+        try:
+            start = time.monotonic()
+            f = await p.send(record=RECORD, callback=callback)
+            elapsed = time.monotonic() - start
+            await asyncio.wait([f], timeout=30)
+            return elapsed, f.exception()
+        finally:
+            await p.close(timeout=0)
+
+    if cls is AsyncKafkaProducer:
+        elapsed, error = asyncio.run(send_async())
+    else:
+        p = KafkaProducer(configs=configs)
+        try:
+            start = time.monotonic()
+            f = p.send(record=RECORD, callback=callback)
+            elapsed = time.monotonic() - start
+            error = f.exception(timeout=30)
+        finally:
+            p.close(timeout=0)
+    assert elapsed >= 0.3, elapsed
+    assert type(error) is KafkaTimeoutError
+    assert str(error) == "Topic topic not present in metadata after 300 ms."
+    assert seen == [error]
+
+
 def test_callbacks_run_in_completion_order_and_a_raising_one_is_logged(
         caplog: pytest.LogCaptureFixture) -> None:
     order: list[int] = []

@@ -72,6 +72,8 @@ LONG_MAX_VALUE = (1 << 63) - 1
 # Java's RecordAccumulator.append() message for a send that races close.
 CLOSED_WHILE_SENDING_MESSAGE = "Producer closed while send in progress"
 
+_TRANSACTIONAL_ID = "transactional.id"
+
 
 class _SnapshotMetric:
     """A point-in-time metric value returned from ``metrics()``: the
@@ -284,6 +286,15 @@ class _ProducerState:
         self._closed = False
         self._lifecycle = threading.Condition()
         self._uses = 0
+        # Whether transactional.id is set, and whether a transaction this
+        # producer began is open (begin_transaction() returned; commit / abort
+        # not called since). While a transactional producer has none open,
+        # send() waits for its record to reach the Rust producer and raises
+        # what Java's doSend rethrows (every such send fails there: the
+        # transaction manager is not IN_TRANSACTION). Inside one, records go
+        # through the batching engine without that wait.
+        self._transactional = False
+        self._in_transaction = False
         # Futures of the records sent and not yet completed: flush() waits for
         # the ones sent before it (their callbacks have run by then, as in Java).
         self._futures: set[Any] = set()
@@ -350,6 +361,7 @@ class _ProducerState:
         self._key_serializer = key
         self._value_serializer = value
         self._c_producer = handle
+        self._transactional = bool(configs.get(_TRANSACTIONAL_ID))
         log_unused(originals, client="producer")
 
     def _check_not_closed(self) -> None:
