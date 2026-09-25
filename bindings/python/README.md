@@ -24,16 +24,18 @@ from confluent_kafka.consumer import (
 from confluent_kafka.common import (
     TopicPartition, TopicIdPartition, Node, PartitionInfo, Uuid,
     MetricName, Metric, KafkaMetric, TimestampType, Headers,
+    KafkaError,  # Java's org.apache.kafka.common.KafkaException
 )
-from confluent_kafka.common.errors import KafkaError, RetriableError  # typed hierarchy
+from confluent_kafka.common.errors import RetriableError  # typed hierarchy
 from confluent_kafka.common.serialization import (
     bytes_serializer, string_serializer, int_serializer, json_serializer,  # etc.
 )
 
-# JDK-type analogs and the Duration alias live at the package root:
+# The Java built-in exception classes and the Duration alias live at the
+# package root:
 from confluent_kafka import (
     IllegalArgumentError, IllegalStateError, ConcurrentModificationError,
-    TimeoutError, Duration,
+    TimeoutError, NoSuchElementError, NullPointerError, Duration,
 )
 ```
 
@@ -53,9 +55,10 @@ async class iff it blocks in Java or awaits the background task; in-memory reads
 Errors are a typed hierarchy caught by class, not a flat error with a `code()`.
 There is no `code()` / `is_retriable()` / `is_fatal()` on the surface —
 retriability is `except RetriableError`, and each Java exception class has a
-`…Error` Python analog (generated from the Java sources). The JDK analogs
-(`IllegalStateError`, `IllegalArgumentError`, `ConcurrentModificationError`,
-`TimeoutError`) live at the package root.
+`…Error` Python analog in the module of its Java package (generated from the
+Java sources). The Java built-in exception classes (`IllegalStateError`,
+`IllegalArgumentError`, `ConcurrentModificationError`, `TimeoutError`,
+`NoSuchElementError`, `NullPointerError`) live at the package root.
 
 ## Migrating from `confluent-kafka-python`
 
@@ -81,6 +84,7 @@ Highlights:
 | `commit()` (fire-and-forget by default) | `commit()` blocks (Java `commitSync`); `commit_nowait(callback=cb)` is Java `commitAsync` |
 | flat `err.code` / `err.is_retriable()` | typed `except SpecificError` / `except RetriableError` |
 | `AIOProducer` / `AIOConsumer` (thread-pool async) | `AsyncKafkaProducer` / `AsyncKafkaConsumer` (native async, no worker knobs) |
+| `error_cb`, `logger`, `on_delivery`, … in the config dict | not config entries: an unknown key is accepted and logged once as unused (Java's `logUnused()`); errors raise or fail their future, logs go to the `confluent_kafka.*` Python loggers |
 
 ## Development
 
