@@ -1,5 +1,16 @@
 # Current Status: Milestones 1–13 complete — client tracks Apache Kafka 4.3.1
 
+> **Public surface restricted (2026-09-25):** the Rust crate and the C API now
+> export only what Java's audience allows (`@InterfaceAudience.Public` at 4.4,
+> outside `internal*` and "not a supported API" packages), enforced by
+> `cargo xtask lint-custom` → `check-public-audience`, with the exceptions in
+> `xtask/public-audience-allowlist.txt`. Crate-private internals are now tested
+> in-crate. C symbols were renamed to follow their Java package
+> (`kafka_common_TopicPartition*`, `kafka_common_acl_AclBinding*`,
+> `kafka_common_KafkaFuture_RecordMetadata*`, ...) and the
+> `CorrelationIdMismatchError` binding was removed. See
+> `structure.md` → "Public surface".
+
 > **Current state (2026-08-26):** the Rust client is up to **Apache Kafka
 > 4.3.1**. Milestone 13 bumped the `kafka/` submodule reference from 4.2.0
 > (`a18251b`) to 4.3.1 (`26b251a451`), synced the wire-spec corpus

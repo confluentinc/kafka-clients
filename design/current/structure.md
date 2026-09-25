@@ -67,6 +67,35 @@ design/{current,history}/
 > and a top-level `message-specs/` directory (both live in the `generator/`
 > crate now: `generator/src/message/` and `generator/messages/`).
 
+## Public surface (2026-09-25)
+
+What the crate exports follows Java's audience, not the module tree. An item
+may be public only if its Java class is annotated `@InterfaceAudience.Public`
+at Apache Kafka 4.4, is outside every `internal*` package, and is outside the
+packages whose `package-info.java` says "not a supported API". C bindings exist
+only for public items. `cargo xtask lint-custom`'s `check-public-audience` rule
+enforces this, and rustc's `unnameable_types` (enabled in `src/lib.rs`) catches
+a crate-private type escaping through a public signature.
+
+In practice:
+
+- The flat client-layer files above (`NetworkClient`, `Metadata`,
+  `ApiVersions`, `KafkaClient`, ...) and `CommonClientConfigs` are
+  `pub(crate)`.
+- `common::{compress, feature, memory, network, protocol, requests, utils}`,
+  `common::security::{authenticator, ssl}` and the generated wire modules are
+  `pub(crate)`. Tests that need them live inside the crate: the message and
+  protocol tests sit under `src/common/`, and the raw-socket integration suites
+  under `src/integration_tests/`.
+- `consumer::AsyncKafkaConsumer` is `pub(crate)`; `KafkaConsumer` /
+  `new_consumer` construct it.
+- `Errors` (the wire enum) is `pub(crate)`, so `Error` has no public
+  `error()` / `code()`. Callers classify by variant and `is_*_error()`, and C
+  callers use `kafka_common_ErrorCode_t`.
+- Exceptions (Rust-only types, test helpers such as `MockAdminClient`, JDK
+  translations such as `TimeUnit`, C helper handles) are listed, each with its
+  reason, in `xtask/public-audience-allowlist.txt`.
+
 ![Layered network stack](img/network-stack.svg)
 
 *The layer boundaries still match Java's; only the client layer (flattened
