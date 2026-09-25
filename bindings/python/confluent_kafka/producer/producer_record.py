@@ -31,7 +31,13 @@ from collections.abc import Iterable
 from typing import TYPE_CHECKING, Any, Generic, TypeVar, overload
 
 from confluent_kafka._java import java_str
-from confluent_kafka.common.headers import Headers, _headers_hash, _headers_to_string, _read_headers
+from confluent_kafka.common.headers import (
+    Headers,
+    _hand_out,
+    _headers_hash,
+    _headers_to_string,
+    _read_headers,
+)
 from confluent_kafka.illegal_argument_error import IllegalArgumentError
 
 if TYPE_CHECKING:
@@ -113,7 +119,7 @@ class ProducerRecord(Generic[K_co, V_co]):
         self._key: K_co | None = key
         self._value: V_co | None = value
         self._timestamp = timestamp
-        self._headers: Headers = _read_headers(headers)
+        self._headers = _read_headers(headers)
 
     def topic(self) -> str:
         """The topic this record is being sent to."""
@@ -121,7 +127,7 @@ class ProducerRecord(Generic[K_co, V_co]):
 
     def headers(self) -> Headers:
         """The headers."""
-        return self._headers
+        return _hand_out(self._headers)
 
     def key(self) -> K_co | None:
         """The key (or ``None`` if no key is specified)."""

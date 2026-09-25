@@ -33,12 +33,15 @@ typedef struct {
     PyObject* value;        // PyBytesObject or Py_None (null value = tombstone)
     kafka_producer_ProducerRecord_t record_struct;
     char* topic_owned;      // owned copy of topic string
-    // Headers: `header_seq` is the INCREF'd Python sequence of (str, bytes|None)
-    // pairs that keeps the header value bytes alive; `header_keys` are the owned
-    // NUL-terminated key strings; `header_entries` is the FFI array the send path
-    // reads (points into header_keys / the value bytes). All parallel, length
-    // record_struct.header_count.
+    // Headers: `header_seq` is the INCREF'd Python sequence of (str, buffer|None)
+    // pairs; `header_views` holds one buffer export (PyObject_GetBuffer) per
+    // non-None value, so the value bytes stay valid, and a memoryview value
+    // cannot be released, while the record lives; `header_keys` are the owned
+    // NUL-terminated key strings; `header_entries` is the FFI array the send
+    // path reads (points into header_keys / the exported value bytes). All
+    // parallel, length record_struct.header_count.
     PyObject* header_seq;
+    Py_buffer* header_views;
     char** header_keys;
     kafka_producer_ProducerRecordHeader_t* header_entries;
 } ProducerRecordObject;
@@ -53,9 +56,18 @@ static int ProducerRecord_traverse(ProducerRecordObject* self, visitproc visit, 
 static int ProducerRecord_clear(ProducerRecordObject* self) {
     Py_CLEAR(self->key);
     Py_CLEAR(self->value);
-    Py_CLEAR(self->header_seq);
     PyMem_Free(self->topic_owned);
     self->topic_owned = NULL;
+    if (self->header_views != NULL) {
+        // A zeroed Py_buffer (a None value, or one never exported) has no
+        // obj, and PyBuffer_Release ignores it.
+        for (int32_t i = 0; i < self->record_struct.header_count; i++) {
+            PyBuffer_Release(&self->header_views[i]);
+        }
+        PyMem_Free(self->header_views);
+        self->header_views = NULL;
+    }
+    Py_CLEAR(self->header_seq);
     if (self->header_keys != NULL) {
         for (int32_t i = 0; i < self->record_struct.header_count; i++) {
             PyMem_Free(self->header_keys[i]);
@@ -87,6 +99,7 @@ static PyObject* ProducerRecord_new(PyTypeObject* type, PyObject* args, PyObject
         self->value = NULL;
         self->topic_owned = NULL;
         self->header_seq = NULL;
+        self->header_views = NULL;
         self->header_keys = NULL;
         self->header_entries = NULL;
         memset(&self->record_struct, 0, sizeof(self->record_struct));
@@ -94,10 +107,14 @@ static PyObject* ProducerRecord_new(PyTypeObject* type, PyObject* args, PyObject
     return (PyObject*)self;
 }
 
-// Build the FFI header array from a Python sequence of (str, bytes|None) pairs.
-// The value bytes are borrowed from the pairs (kept alive by self->header_seq);
-// only the header KEY strings are copied once (they must be NUL-terminated).
-// Returns 0 on success, -1 with a Python exception set on failure.
+// Build the FFI header array from a Python sequence of (str, buffer|None) pairs.
+// Each non-None value is exported with PyObject_GetBuffer (C-contiguous), and the
+// export is held until clear(): the bytes are borrowed, never copied (CLAUDE.md
+// §12), and a released memoryview is rejected (ValueError) instead of read after
+// its buffer is freed. Only the header KEY strings are copied (they must be
+// NUL-terminated). Returns 0 on success, -1 with a Python exception set on
+// failure; everything allocated or exported so far is owned by the record, so
+// clear() releases it.
 static int producer_record_build_headers(ProducerRecordObject* self, PyObject* headers) {
     if (headers == NULL || headers == Py_None) {
         return 0;
@@ -108,71 +125,63 @@ static int producer_record_build_headers(ProducerRecordObject* self, PyObject* h
     if (n == 0) { Py_DECREF(seq); return 0; }
 
     char** keys = PyMem_Calloc((size_t)n, sizeof(char*));
+    Py_buffer* views = PyMem_Calloc((size_t)n, sizeof(Py_buffer));
     kafka_producer_ProducerRecordHeader_t* entries =
         PyMem_Calloc((size_t)n, sizeof(kafka_producer_ProducerRecordHeader_t));
-    if (keys == NULL || entries == NULL) {
-        PyMem_Free(keys); PyMem_Free(entries); Py_DECREF(seq);
+    if (keys == NULL || views == NULL || entries == NULL) {
+        PyMem_Free(keys); PyMem_Free(views); PyMem_Free(entries); Py_DECREF(seq);
         PyErr_NoMemory();
         return -1;
     }
+    // Owned by the record from here on: clear() frees the keys and releases the
+    // views of the first header_count entries (the arrays are zeroed).
+    Py_INCREF(headers);
+    self->header_seq = headers;
+    self->header_views = views;
+    self->header_keys = keys;
+    self->header_entries = entries;
+    self->record_struct.header_count = (int32_t)n;
 
+    int rc = 0;
     for (Py_ssize_t i = 0; i < n; i++) {
         PyObject* pair = PySequence_Fast_GET_ITEM(seq, i);  // borrowed
         const char* k = NULL;
         PyObject* v = NULL;
-        // (key: str, value: bytes|None)
+        // (key: str, value: buffer|None)
         if (!PyArg_ParseTuple(pair, "sO", &k, &v)) {
-            goto fail;
+            rc = -1;
+            break;
         }
         size_t klen = strlen(k);
         keys[i] = PyMem_Malloc(klen + 1);
-        if (keys[i] == NULL) { PyErr_NoMemory(); goto fail; }
+        if (keys[i] == NULL) { PyErr_NoMemory(); rc = -1; break; }
         memcpy(keys[i], k, klen + 1);
         entries[i].key = keys[i];
         if (v == Py_None) {
             entries[i].value = NULL;
             entries[i].value_len = -1;  // null header value (Java allows it)
-        } else if (PyBytes_Check(v)) {
-            entries[i].value = (const uint8_t*)PyBytes_AsString(v);
-            entries[i].value_len = (int32_t)PyBytes_Size(v);
-        } else if (PyMemoryView_Check(v)
-                   && PyBuffer_IsContiguous(PyMemoryView_GET_BUFFER(v), 'C')) {
-            // The record's read-form header value: a view of the caller's
-            // bytes, not a copy (CLAUDE.md §12). header_seq keeps the view, and
-            // so its buffer, alive for the record's lifetime.
-            Py_buffer* view = PyMemoryView_GET_BUFFER(v);
-            entries[i].value = (const uint8_t*)view->buf;
-            entries[i].value_len = (int32_t)view->len;
-        } else {
+            continue;
+        }
+        if (!PyObject_CheckBuffer(v)) {
             PyErr_SetString(PyExc_TypeError,
                             "header value must be bytes, a contiguous memoryview or None");
-            // keys[i] is set; make header_count cover it so clear() frees it.
-            self->record_struct.header_count = (int32_t)(i + 1);
-            self->header_keys = keys;
-            self->header_entries = entries;
-            Py_DECREF(seq);
-            return -1;
+            rc = -1;
+            break;
         }
+        // Raises ValueError for a released memoryview and BufferError for a
+        // non-contiguous one.
+        if (PyObject_GetBuffer(v, &views[i], PyBUF_C_CONTIGUOUS) != 0) {
+            rc = -1;
+            break;
+        }
+        entries[i].value = (const uint8_t*)views[i].buf;
+        entries[i].value_len = (int32_t)views[i].len;
     }
-
-    Py_INCREF(headers);
-    self->header_seq = headers;   // keeps the value bytes alive
-    self->header_keys = keys;
-    self->header_entries = entries;
-    self->record_struct.headers = entries;
-    self->record_struct.header_count = (int32_t)n;
     Py_DECREF(seq);
-    return 0;
-
-fail:
-    // Free the keys allocated so far, then the arrays.
-    for (Py_ssize_t j = 0; j < n; j++) {
-        PyMem_Free(keys[j]);  // Calloc-zeroed; PyMem_Free(NULL) is a no-op
+    if (rc == 0) {
+        self->record_struct.headers = entries;
     }
-    PyMem_Free(keys);
-    PyMem_Free(entries);
-    Py_DECREF(seq);
-    return -1;
+    return rc;
 }
 
 static int ProducerRecord_init(ProducerRecordObject* self, PyObject* args, PyObject* kwds) {
@@ -321,7 +330,8 @@ static PyObject* ProducerRecord_get_value(ProducerRecordObject* self, void* clos
 // the send path reads is populated, not just the Python side). Returns a list of
 // (str, bytes|None) pairs, in insertion order.
 static PyObject* ProducerRecord_get_headers(ProducerRecordObject* self, void* closure) {
-    int32_t n = self->record_struct.header_count;
+    // No header array (none given, or building it failed): no headers.
+    int32_t n = self->record_struct.headers == NULL ? 0 : self->record_struct.header_count;
     PyObject* out = PyList_New(n < 0 ? 0 : n);
     if (out == NULL) return NULL;
     for (int32_t i = 0; i < n; i++) {
