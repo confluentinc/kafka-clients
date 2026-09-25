@@ -12,38 +12,112 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""``KafkaConsumer`` without a broker: the ``KafkaConsumerTest`` cases that run
-against an unreachable bootstrap server, with Java's messages, and the
-binding's own contracts that need no broker — the commit callback on the
-caller's thread (C47), the lifetime of the native handle across a racing
-``close()``, the deserializers' configuration route and their close, the
-negative timeouts. The broker-backed cases are in
-``test/integration/test_kafka_consumer_broker.py``.
+"""``KafkaConsumerTest.java`` (Apache Kafka 4.3.1) for ``KafkaConsumer`` without a
+broker, in Java order, with Java's messages; and the binding's own contracts that
+need no broker — the commit callback on the caller's thread (C47), the lifetime of
+the native handle across a racing ``close()``, the deserializers' configuration
+route and their close, the negative timeouts. Where Java drives a ``MockClient``
+only to make an operation time out, an unreachable bootstrap address and a short
+``default.api.timeout.ms`` stand for it. ``test/integration/test_kafka_consumer_broker.py``
+runs, against a broker, the cases Java scripts through a ``MockClient``.
 
-Not translated (the subject is not generated, or needs Java's ``MockClient`` /
-``MockTime`` / ``MockMetricsReporter`` to script the network, which the binding
-cannot inject; the §31 and wakeup cases run against a broker instead):
-the ``*Metrics*`` / ``*MetricReporter*`` / ``testConsumerJmxPrefix`` /
-``testMetricConfigRecordingLevelInfo`` / ``testPollTimeMetrics`` /
-``testPollIdleRatio`` / ``testMeasure*`` cases (metric registration is not
-generated and the core's metrics are not reporter-backed);
-``testInterceptorConstructor*`` (``interceptor.classes`` raises ``ConfigError``);
-``testClientInstanceId*`` (not generated); ``testEnforceRebalance*`` (dropped);
-``testSubscriptionWithEmptyPartitionAssignment``, ``testEmptyGroupId``,
-``testGracefulClose``, ``testClassicProtocol*``, ``testSubscribeToRe2jPattern
-NotSupportedForClassicConsumer``, ``testAssignorNameConflict`` (the classic
-protocol, which the core does not implement); the pattern-subscription
-``testSubscriptionOnNullPattern`` / ``OnEmptyPattern`` / ``testRegexSubscription``
-/ ``testChangingRegexSubscription`` for ``java.util.regex.Pattern`` (dropped;
-the ``SubscriptionPattern`` counterparts are below); ``testUnusedConfigs``
-(``ssl.protocol`` is a key ``ConsumerConfig`` defines, and the binding can only
-log keys the ``ConfigDef`` does not define); ``testInvalidSocketSendBufferSize``
-/ ``ReceiveBufferSize`` (the core does not validate ``send.buffer.bytes`` /
-``receive.buffer.bytes`` ranges, ``ffi-overload-gaps.md``);
+Of Java's 126 tests, 31 are translated here and 14 in the broker module; the
+other 81, each named, are not, with the reason:
+
+- the classic protocol: Java runs these with ``group.protocol=classic`` only, and
+  the core implements KIP-848 only (``consumer-threading.md`` §20):
+  ``testPollReturnsRecords``,
+  ``testSecondPollWithDeserializationErrorThrowsRecordDeserializationException``,
+  ``testSubscriptionWithEmptyPartitionAssignment``, ``verifyHeartbeatSent``,
+  ``verifyHeartbeatSentWhenFetchedDataReady``,
+  ``verifyNoCoordinatorLookupForManualAssignmentWithOffsetCommit``,
+  ``testAutoCommitSentBeforePositionUpdate``, ``testRegexSubscription``,
+  ``testChangingRegexSubscription``, ``testWakeupWithFetchDataAvailable``,
+  ``testPollThrowsInterruptExceptionIfInterrupted``,
+  ``testSubscriptionChangesWithAutoCommitEnabled``,
+  ``testSubscriptionChangesWithAutoCommitDisabled``,
+  ``testUnsubscribeShouldTriggerPartitionsRevokedWithValidGeneration``,
+  ``testUnsubscribeShouldTriggerPartitionsLostWithNoGeneration``,
+  ``testGracefulClose``, ``testCloseTimeoutDueToNoResponseForCloseFetchRequest``,
+  ``testCloseTimeout``, ``testLeaveGroupTimeout``, ``testCloseNoWait``,
+  ``testCloseInterrupt``, ``testShouldAttemptToRejoinGroupAfterSyncGroupFailed``,
+  ``testPartitionsForNonExistingTopic``, ``testPartitionsForAuthenticationFailure``,
+  ``testBeginningOffsetsAuthenticationFailure``,
+  ``testEndOffsetsAuthenticationFailure``,
+  ``testOffsetsForTimesAuthenticationFailure``,
+  ``testCommitSyncAuthenticationFailure``, ``testCommittedAuthenticationFailure``,
+  ``testRebalanceException``, ``testReturnRecordsDuringRebalance``,
+  ``testGetGroupMetadata``, ``testCurrentLagPreventsMultipleInFlightRequests``,
+  ``testCurrentLagClearsFlagOnFatalPartitionError``,
+  ``testCurrentLagClearsFlagOnRetriablePartitionError``,
+  ``testEnforceRebalanceWithManualAssignment``,
+  ``testEnforceRebalanceTriggersRebalanceOnNextPoll``,
+  ``testEnforceRebalanceReason``, ``testAssignorNameConflict`` and
+  ``testSubscribeToRe2jPatternNotSupportedForClassicConsumer``. The broker module
+  covers what three of them check for the consumer protocol (a ``wakeup()``
+  breaking a waiting ``poll()``, a failing deserializer leaving the position at
+  the record, a listener's exception);
+- ``ClassicKafkaConsumer``'s KIP-848 recommendation log, which only the classic
+  consumer writes: ``testClassicProtocolLogsRecommendationToTryConsumerProtocol``,
+  ``testDefaultProtocolLogsRecommendationToTryConsumerProtocol``,
+  ``testNoGroupIdDoesNotLogGroupProtocolMessage`` and
+  ``testConsumerProtocolDoesNotLogRecommendation``;
+- a ``MockClient`` answer a broker does not give, or a mocked collaborator:
+  ``testFetchProgressWithMissingPartitionPosition`` (a
+  ``NOT_LEADER_OR_FOLLOWER`` list-offsets answer for one partition),
+  ``fetchResponseWithUnexpectedPartitionIsIgnored`` (a fetch response naming an
+  unassigned partition), ``testFetchStableOffsetThrowInCommitted``,
+  ``testFetchStableOffsetThrowInPoll`` and
+  ``testFetchStableOffsetThrowInPosition`` (an ``OffsetFetch`` version without
+  ``requireStable``: an old broker), ``testPollAuthenticationFailure`` (a SASL
+  authentication failure; the test broker has no SASL listener) and
+  ``testConstructorFailsOnNetworkClientConstructorFailure`` (a mocked
+  ``NetworkClient`` constructor);
+- metrics: the KIP-1076 metric subscription is not generated
+  (``testSubscribingCustomMetricsDoesntAffectConsumerMetrics``,
+  ``testSubscribingCustomMetricsWithSameNameDoesntAffectConsumerMetrics``,
+  ``testUnsubscribingCustomMetricsWithSameNameDoesntAffectConsumerMetrics``,
+  ``testUnSubscribingNonExisingMetricsDoesntCauseError``); the core loads no
+  metric reporter, JMX or telemetry reporter
+  (``testShouldOnlyCallMetricReporterMetricChangeOnceWithExistingConsumerMetric``,
+  ``testShouldNotCallMetricReporterMetricRemovalWithExistingConsumerMetric``,
+  ``testMetricsReporterAutoGeneratedClientId``,
+  ``testDisableJmxAndClientTelemetryReporter``,
+  ``testExplicitlyOnlyEnableJmxReporter``,
+  ``testExplicitlyOnlyEnableClientTelemetryReporter``,
+  ``testConstructorInvalidMetricReporters`` — ``metric.reporters`` is not loaded,
+  so an invalid class is not detected — and ``testConsumerJmxPrefix``);
+  ``testMetricConfigRecordingLevelInfo`` reads the private
+  ``metricsRegistry().config()``; ``testPollTimeMetrics``, ``testPollIdleRatio``,
+  ``testMeasureCommitSyncDurationOnFailure``, ``testMeasureCommitSyncDuration``,
+  ``testMeasureCommittedDurationOnFailure`` and ``testMeasureCommittedDuration``
+  assert values a ``MockTime`` makes exact, and the core's clock cannot be
+  injected;
+- not generated or dropped: ``testClientInstanceId``,
+  ``testClientInstanceIdInvalidTimeout`` and
+  ``testClientInstanceIdNoTelemetryReporterRegistered`` (``clientInstanceId`` is
+  not generated, ``ffi-overload-gaps.md``); ``testCurrentLag``
+  (``current_lag()`` always returns ``None``, Rust-core gap 3); and
+  ``testSubscriptionOnNullPattern`` for the dropped ``java.util.regex.Pattern``
+  overloads (``testSubscriptionOnEmptyPattern`` runs as its ``SubscriptionPattern``
+  counterpart);
+- configuration: ``testInvalidSocketSendBufferSize`` /
+  ``testInvalidSocketReceiveBufferSize`` (the core does not validate the
+  ``send.buffer.bytes`` / ``receive.buffer.bytes`` ranges, Rust-core gap 11);
+  ``testUnusedConfigs`` (``ssl.protocol`` is a key ``ConsumerConfig`` defines,
+  and the binding can only log keys the ``ConfigDef`` does not define);
+  ``testInterceptorConstructorClose``,
+  ``testInterceptorConstructorConfigurationWithExceptionShouldCloseRemainingInstances``
+  and ``configurableObjectsShouldSeeGeneratedClientId`` (``interceptor.classes``
+  raises ``ConfigError``; the last also needs the generated ``client.id`` in a
+  config-route deserializer's ``configure``, which the binding does not have when
+  it builds the deserializers, before the core consumer, in Java's order).
+
 ``testOperationsBySubscribingConsumerWithDefaultGroupId``'s
-``enable.auto.commit=true`` half (the core does not reject it,
-``ffi-overload-gaps.md``); and every case that scripts fetch, heartbeat,
-coordinator, offset or rebalance responses through ``MockClient``.
+``enable.auto.commit=true`` half is not asserted (the core does not reject it,
+Rust-core gap 11); ``testAssignedPartitionsMetrics``' group-assignment half needs
+a broker, and ``testClosingConsumerUnregistersConsumerMetrics``' after-close half
+reads ``metrics()`` after ``close()``, which raises ``IllegalStateError`` here.
 """
 
 from __future__ import annotations
@@ -62,6 +136,7 @@ import pytest
 from confluent_kafka import ConcurrentModificationError, IllegalArgumentError, IllegalStateError
 from confluent_kafka.common import KafkaError, TopicPartition
 from confluent_kafka.common.errors import InvalidGroupIdError, UnsupportedVersionError, WakeupError
+from confluent_kafka.common.errors import TimeoutError as KafkaTimeoutError
 from confluent_kafka.common.serialization import string_deserializer
 from confluent_kafka.consumer import (
     AsyncKafkaConsumer, CloseOptions, ConsumerRebalanceListener, KafkaConsumer,
@@ -213,9 +288,10 @@ def test_pause() -> None:
         assert consumer.paused() == set()
 
 
-@pytest.mark.parametrize("setup", ["no-subscription", "empty-subscription", "empty-assignment"])
+@pytest.mark.parametrize("setup", ["no-subscription", "empty-subscription", "empty-assignment"],
+                         ids=["testPollWithNoSubscription", "testPollWithEmptySubscription",
+                              "testPollWithEmptyUserAssignment"])
 def test_poll_without_subscription(setup: str) -> None:
-    # testPollWithNoSubscription / WithEmptySubscription / WithEmptyUserAssignment.
     with new_consumer(None if setup == "no-subscription" else GROUP_ID) as consumer:
         if setup == "empty-subscription":
             consumer.subscribe(topics=[])
@@ -224,6 +300,93 @@ def test_poll_without_subscription(setup: str) -> None:
         with pytest.raises(IllegalStateError) as e:
             consumer.poll(timeout=0)
         assert str(e.value) == "Consumer is not subscribed to any topics or assigned any partitions"
+
+
+def test_verify_poll_times_out_during_metadata_update() -> None:
+    # Java asserts no FETCH is sent while the metadata is not updated; with an
+    # unreachable broker there is none, and poll(timeout=0) returns at once.
+    with new_consumer() as consumer:
+        consumer.subscribe(topics=[TOPIC])
+        started = time.monotonic()
+        assert consumer.poll(timeout=0).is_empty()
+        assert time.monotonic() - started < WAIT
+
+
+def test_committed_throws_timeout_error_for_no_response() -> None:
+    # testCommittedThrowsTimeoutExceptionForNoResponse: Java's
+    # committed(partitions, Duration.ofMillis(1000)); the Duration form is
+    # not generated (ffi-overload-gaps.md), so default.api.timeout.ms bounds it.
+    with new_consumer(**{"default.api.timeout.ms": 1000}) as consumer:
+        consumer.assign(partitions=[TP0])
+        with pytest.raises(KafkaTimeoutError) as e:
+            consumer.committed(partitions={TP0})
+        assert str(e.value) == ("Timeout of 1000ms expired before the last committed offset for "
+                                "partitions [test-0] could be determined. Try tuning "
+                                "default.api.timeout.ms larger to relax the threshold.")
+
+
+# Java's consumerForCheckingTimeoutException leaves default.api.timeout.ms at its
+# 60000 ms default; 500 ms keeps the test short, and Java's message carries it.
+OFFSETS_TIMEOUT = "Failed to get offsets by times in 500ms"
+
+
+def test_offsets_for_times_timeout() -> None:
+    consumer = new_consumer(**{"default.api.timeout.ms": 500})
+    with pytest.raises(KafkaTimeoutError) as e:
+        consumer.offsets_for_times(timestamps_to_search={TP0: 0})
+    assert str(e.value) == OFFSETS_TIMEOUT
+    consumer.close(option=CloseOptions.timeout(0))
+
+
+def test_beginning_offsets_timeout() -> None:
+    consumer = new_consumer(**{"default.api.timeout.ms": 500})
+    with pytest.raises(KafkaTimeoutError) as e:
+        consumer.beginning_offsets(partitions=[TP0])
+    assert str(e.value) == OFFSETS_TIMEOUT
+    consumer.close(option=CloseOptions.timeout(0))
+
+
+def test_end_offsets_timeout() -> None:
+    consumer = new_consumer(**{"default.api.timeout.ms": 500})
+    with pytest.raises(KafkaTimeoutError) as e:
+        consumer.end_offsets(partitions=[TP0])
+    assert str(e.value) == OFFSETS_TIMEOUT
+    consumer.close(option=CloseOptions.timeout(0))
+
+
+def _metric_value(consumer: KafkaConsumer[Any, Any], name: str) -> Any:
+    for metric_name, metric in consumer.metrics().items():
+        if metric_name.name() == name:
+            return metric.metric_value()
+    return None
+
+
+def test_assigned_partitions_metrics() -> None:
+    # Java also moves the assignment through subscribe + assignFromSubscribed on
+    # the SubscriptionState it injects; a group assignment needs a broker here.
+    with new_consumer() as consumer:
+        deadline = time.monotonic() + WAIT
+        while _metric_value(consumer, "assigned-partitions") is None:
+            assert time.monotonic() < deadline, "no assigned-partitions metric"
+            time.sleep(0.01)
+        assert _metric_value(consumer, "assigned-partitions") == 0.0
+        consumer.assign(partitions={TP0})
+        assert _metric_value(consumer, "assigned-partitions") == 1.0
+        consumer.assign(partitions={TP0, TopicPartition(topic=TOPIC, partition=1)})
+        assert _metric_value(consumer, "assigned-partitions") == 2.0
+
+
+def test_closing_consumer_unregisters_consumer_metrics() -> None:
+    # Java then checks the metrics are gone after close(); here metrics() after
+    # close() raises IllegalStateError (use after close raises), so only the
+    # registration is checked.
+    consumer = new_consumer()
+    consumer.subscribe(topics=[TOPIC])
+    names = {metric_name.name() for metric_name in consumer.metrics()}
+    assert {"last-poll-seconds-ago", "time-between-poll-avg", "time-between-poll-max"} <= names
+    consumer.close()
+    with pytest.raises(IllegalStateError):
+        consumer.metrics()
 
 
 def test_close_should_be_idempotent() -> None:
@@ -269,7 +432,8 @@ def test_group_metadata_needs_a_group_id() -> None:
                 metadata.group_instance_id()) == (GROUP_ID, -1, "", None)
 
 
-@pytest.mark.parametrize("group_id", ["", " "])
+@pytest.mark.parametrize("group_id", ["", " "],
+                         ids=["testEmptyGroupId", "testGroupIdWithWhitespace"])
 def test_group_id_with_whitespace(group_id: str) -> None:
     with pytest.raises(KafkaError) as e:
         new_consumer(group_id)

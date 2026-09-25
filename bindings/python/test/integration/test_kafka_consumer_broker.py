@@ -23,7 +23,22 @@
   (C47);
 - ``wakeup()`` breaking a waiting ``poll()`` (``testWakeupWithFetchDataAvailable``);
 - a failing deserializer leaving the position at the record
-  (``testSecondPollWithDeserializationErrorThrowsRecordDeserializationException``).
+  (``testSecondPollWithDeserializationErrorThrowsRecordDeserializationException``);
+- ``commit_nowait()`` while a rebalance is delivered, the async notify, a
+  listener's exception as Java raises it (``testRebalanceException``'s
+  consumer-protocol counterpart), a failed commit's callback;
+- the ``KafkaConsumerTest`` cases Java scripts through a ``MockClient``, with the
+  broker's answers standing for the prepared responses:
+  ``testMissingOffsetNoResetPolicy``, ``testResetToCommittedOffset``,
+  ``testResetUsingAutoResetPolicy``, ``testResetUsingDurationBasedAutoResetPolicy``,
+  ``testOffsetIsValidAfterSeek``, ``testCommitsFetchedDuringAssign``,
+  ``testNoCommittedOffsets``, ``testManualAssignmentChangeWithAutoCommitEnabled``,
+  ``testManualAssignmentChangeWithAutoCommitDisabled``,
+  ``testOffsetOfPausedPartitions``, ``testListOffsetShouldUpdateSubscriptions``,
+  ``testSubscriptionOnInvalidTopic``,
+  ``verifyNoCoordinatorLookupForManualAssignmentWithSeek`` and
+  ``testPollSendsRequestToJoin`` (the rest are named in
+  ``test/unit/test_kafka_consumer.py``).
 
 Skips without Docker (``kafka_broker``).
 """
@@ -41,12 +56,12 @@ import pytest
 from confluent_kafka import ConcurrentModificationError
 from confluent_kafka.common import KafkaError, TopicPartition
 from confluent_kafka.common.errors import (
-    RecordDeserializationError, TopicAuthorizationError, WakeupError,
+    InvalidTopicError, RecordDeserializationError, TopicAuthorizationError, WakeupError,
 )
 from confluent_kafka.common.serialization import string_deserializer, string_serializer
 from confluent_kafka.consumer import (
     AsyncKafkaConsumer, CloseOptions, CommitFailedError, ConsumerRebalanceListener, KafkaConsumer,
-    OffsetAndMetadata, RetriableCommitFailedError,
+    NoOffsetForPartitionError, OffsetAndMetadata, RetriableCommitFailedError,
 )
 from confluent_kafka.producer import KafkaProducer, ProducerRecord
 
@@ -757,5 +772,295 @@ def test_next_offsets_skip_the_transaction_marker(kafka_broker: Any) -> None:
         assert [r.value() for r in records] == ["a", "b", "c"]
         assert consumer.position(partition=tp) == 4
         assert records.next_offsets()[tp].offset() == 4
+    finally:
+        consumer.close(option=CloseOptions.timeout(0))
+
+
+# ---------------------------------------------------------------------------
+# KafkaConsumerTest cases Java scripts through a MockClient, run against the
+# broker: the broker's answers stand for the prepared responses (the offsets
+# differ: Java's MockClient invents 50 / 539 / 10000, here they are the real
+# log's)
+# ---------------------------------------------------------------------------
+def _produce(broker: Any, topic: str, partition: int, values: list[str]) -> None:
+    producer: KafkaProducer[str, str] = KafkaProducer(
+        configs={"bootstrap.servers": broker.external_bootstrap},
+        key_serializer=string_serializer(), value_serializer=string_serializer())
+    try:
+        for value in values:
+            producer.send(record=ProducerRecord(topic=topic, partition=partition, value=value))
+        producer.flush()
+    finally:
+        producer.close()
+
+
+def _two_partition_topic(broker: Any, values: list[str]) -> str:
+    topic = f"py-consumer-2p-{uuid.uuid4().hex[:12]}"
+    create_topic(broker, topic, partitions=2)
+    for partition in (0, 1):
+        _produce(broker, topic, partition, values)
+    return topic
+
+
+def _commit(configs: dict[str, Any], offsets: dict[TopicPartition, OffsetAndMetadata]) -> None:
+    """Commit ``offsets`` for the group of ``configs`` (Java's prepared OffsetFetch)."""
+    committer: KafkaConsumer[bytes, bytes] = KafkaConsumer(configs=configs)
+    try:
+        committer.assign(partitions=list(offsets))
+        committer.commit(offsets=offsets)
+    finally:
+        committer.close(option=CloseOptions.timeout(0))
+
+
+def _poll_eventually_raises(consumer: KafkaConsumer[Any, Any]) -> BaseException:
+    """Java's assertPollEventuallyThrows: poll(ZERO) until it raises."""
+    deadline = time.monotonic() + DEADLINE
+    while True:
+        assert time.monotonic() < deadline, "poll() never raised"
+        try:
+            consumer.poll(timeout=0)
+        except Exception as exc:  # noqa: BLE001 - returned for the assertions
+            return exc
+        time.sleep(0.05)
+
+
+def test_missing_offset_no_reset_policy(kafka_broker: Any) -> None:
+    topic = _topic(kafka_broker, ["a"])
+    tp = TopicPartition(topic=topic, partition=0)
+    consumer: KafkaConsumer[bytes, bytes] = KafkaConsumer(
+        configs=_configs(kafka_broker, **{"auto.offset.reset": "none"}))
+    try:
+        consumer.assign(partitions=[tp])
+        error = _poll_eventually_raises(consumer)
+        assert isinstance(error, NoOffsetForPartitionError)
+        assert error.partitions() == {tp}  # type: ignore[attr-defined]
+    finally:
+        consumer.close(option=CloseOptions.timeout(0))
+
+
+def test_reset_to_committed_offset(kafka_broker: Any) -> None:
+    topic = _topic(kafka_broker, ["a", "b", "c"])
+    tp = TopicPartition(topic=topic, partition=0)
+    configs = _configs(kafka_broker, **{"auto.offset.reset": "none"})
+    _commit(configs, {tp: OffsetAndMetadata(offset=2)})
+    consumer: KafkaConsumer[bytes, bytes] = KafkaConsumer(configs=configs)
+    try:
+        consumer.assign(partitions=[tp])
+        consumer.poll(timeout=0)
+        assert consumer.position(partition=tp) == 2
+    finally:
+        consumer.close(option=CloseOptions.timeout(0))
+
+
+@pytest.mark.parametrize("strategy, expected", [("latest", 3), ("by_duration:PT1H", 0)],
+                         ids=["testResetUsingAutoResetPolicy",
+                              "testResetUsingDurationBasedAutoResetPolicy"])
+def test_reset_using_auto_reset_policy(kafka_broker: Any, strategy: str, expected: int) -> None:
+    # by_duration:PT1H: the three records were produced just now, so the first
+    # offset at or after one hour ago is the first record's.
+    topic = _topic(kafka_broker, ["a", "b", "c"])
+    tp = TopicPartition(topic=topic, partition=0)
+    consumer: KafkaConsumer[bytes, bytes] = KafkaConsumer(
+        configs=_configs(kafka_broker, **{"auto.offset.reset": strategy}))
+    try:
+        consumer.assign(partitions=[tp])
+        consumer.poll(timeout=0)
+        assert consumer.position(partition=tp) == expected
+    finally:
+        consumer.close(option=CloseOptions.timeout(0))
+
+
+def test_offset_is_valid_after_seek(kafka_broker: Any) -> None:
+    topic = _topic(kafka_broker, ["a", "b", "c"])
+    tp = TopicPartition(topic=topic, partition=0)
+    consumer: KafkaConsumer[bytes, bytes] = KafkaConsumer(
+        configs=_configs(kafka_broker, **{"auto.offset.reset": "latest"}))
+    try:
+        consumer.assign(partitions=[tp])
+        consumer.seek(partition=tp, offset=1)
+        consumer.poll(timeout=0)
+        assert consumer.position(partition=tp) == 1
+    finally:
+        consumer.close(option=CloseOptions.timeout(0))
+
+
+def test_commits_fetched_during_assign(kafka_broker: Any) -> None:
+    topic = _two_partition_topic(kafka_broker, ["a", "b", "c"])
+    tp0, tp1 = (TopicPartition(topic=topic, partition=p) for p in (0, 1))
+    configs = _configs(kafka_broker)
+    _commit(configs, {tp0: OffsetAndMetadata(offset=1), tp1: OffsetAndMetadata(offset=2)})
+    consumer: KafkaConsumer[bytes, bytes] = KafkaConsumer(configs=configs)
+    try:
+        consumer.assign(partitions=[tp0])
+        committed = consumer.committed(partitions={tp0})[tp0]
+        assert committed is not None and committed.offset() == 1
+        consumer.assign(partitions=[tp0, tp1])
+        committed = consumer.committed(partitions={tp0})[tp0]
+        assert committed is not None and committed.offset() == 1
+        committed = consumer.committed(partitions={tp1})[tp1]
+        assert committed is not None and committed.offset() == 2
+    finally:
+        consumer.close(option=CloseOptions.timeout(0))
+
+
+def test_no_committed_offsets(kafka_broker: Any) -> None:
+    topic = _two_partition_topic(kafka_broker, ["a"])
+    tp0, tp1 = (TopicPartition(topic=topic, partition=p) for p in (0, 1))
+    configs = _configs(kafka_broker)
+    _commit(configs, {tp0: OffsetAndMetadata(offset=1)})
+    consumer: KafkaConsumer[bytes, bytes] = KafkaConsumer(configs=configs)
+    try:
+        consumer.assign(partitions=[tp0, tp1])
+        committed = consumer.committed(partitions={tp0, tp1})
+        assert len(committed) == 2
+        tp0_committed = committed[tp0]
+        assert tp0_committed is not None and tp0_committed.offset() == 1
+        assert committed[tp1] is None
+    finally:
+        consumer.close(option=CloseOptions.timeout(0))
+
+
+@pytest.mark.parametrize("auto_commit", [True, False],
+                         ids=["testManualAssignmentChangeWithAutoCommitEnabled",
+                              "testManualAssignmentChangeWithAutoCommitDisabled"])
+def test_manual_assignment_change(kafka_broker: Any, auto_commit: bool) -> None:
+    topic, topic2 = _topic(kafka_broker, ["a"]), _topic(kafka_broker, ["x"])
+    tp0, t2p0 = TopicPartition(topic=topic, partition=0), TopicPartition(topic=topic2, partition=0)
+    # Java's assign() auto-commits the consumed positions once the auto-commit
+    # interval has elapsed (CommitRequestManager.updateTimerAndMaybeCommit), as
+    # Java's MockTime has it; a short interval and a wait stand for that here.
+    configs = _configs(kafka_broker, **{"enable.auto.commit": str(auto_commit).lower(),
+                                        "auto.commit.interval.ms": 500})
+    _commit(configs, {tp0: OffsetAndMetadata(offset=0)})
+    consumer: KafkaConsumer[str, str] = KafkaConsumer(
+        configs=configs, value_deserializer=string_deserializer())
+    try:
+        consumer.assign(partitions={tp0})
+        consumer.seek_to_beginning(partitions={tp0})
+        committed = consumer.committed(partitions={tp0})[tp0]
+        assert committed is not None and committed.offset() == 0
+        assert consumer.assignment() == {tp0}
+        deadline = time.monotonic() + DEADLINE
+        while True:
+            assert time.monotonic() < deadline, "no record"
+            records = consumer.poll(timeout=0.5)
+            if not records.is_empty():
+                break
+        assert len(records) == 1
+        assert consumer.position(partition=tp0) == 1
+        assert {tp: oam.offset() for tp, oam in records.next_offsets().items()} == {tp0: 1}
+        # Several auto-commit intervals, so an auto-commit (or the one assign()
+        # makes once the interval has elapsed) has the consumed position.
+        time.sleep(1.6)
+        consumer.assign(partitions={t2p0})
+        assert consumer.assignment() == {t2p0}
+        # With auto-commit, the revoked partition's position is committed; without
+        # it, no commit is sent.
+        expected = 1 if auto_commit else 0
+        deadline = time.monotonic() + (DEADLINE if auto_commit else 2.0)
+        while True:
+            committed = consumer.committed(partitions={tp0})[tp0]
+            assert committed is not None
+            if committed.offset() == expected and auto_commit:
+                break
+            if time.monotonic() >= deadline:
+                assert committed.offset() == expected
+                break
+            time.sleep(0.1)
+    finally:
+        consumer.close(option=CloseOptions.timeout(0))
+
+
+def test_offset_of_paused_partitions(kafka_broker: Any) -> None:
+    topic = _two_partition_topic(kafka_broker, ["a", "b", "c"])
+    tp0, tp1 = (TopicPartition(topic=topic, partition=p) for p in (0, 1))
+    configs = _configs(kafka_broker)
+    _commit(configs, {tp0: OffsetAndMetadata(offset=0), tp1: OffsetAndMetadata(offset=0)})
+    consumer: KafkaConsumer[bytes, bytes] = KafkaConsumer(configs=configs)
+    try:
+        partitions = {tp0, tp1}
+        consumer.assign(partitions=partitions)
+        assert consumer.assignment() == partitions
+        consumer.pause(partitions=partitions)
+        consumer.seek_to_end(partitions=partitions)
+        committed = consumer.committed(partitions={tp0})[tp0]
+        assert committed is not None and committed.offset() == 0
+        committed = consumer.committed(partitions={tp1})[tp1]
+        assert committed is not None and committed.offset() == 0
+        assert consumer.position(partition=tp0) == 3
+        assert consumer.position(partition=tp1) == 3
+        consumer.unsubscribe()
+    finally:
+        consumer.close(option=CloseOptions.timeout(0))
+
+
+def test_list_offset_should_update_subscriptions(kafka_broker: Any) -> None:
+    # Java also asserts currentLag(tp0) == 40; current_lag() always returns None
+    # (Rust-core gap 3), so that half is not asserted.
+    topic = _topic(kafka_broker, ["a", "b", "c"])
+    tp = TopicPartition(topic=topic, partition=0)
+    configs = _configs(kafka_broker)
+    del configs["group.id"]
+    consumer: KafkaConsumer[bytes, bytes] = KafkaConsumer(configs=configs)
+    try:
+        consumer.assign(partitions={tp})
+        consumer.seek(partition=tp, offset=1)
+        assert consumer.end_offsets(partitions={tp}) == {tp: 3}
+    finally:
+        consumer.close(option=CloseOptions.timeout(0))
+
+
+def test_subscription_on_invalid_topic(kafka_broker: Any) -> None:
+    invalid_topic_name = "topic abc"  # Invalid topic name due to space
+    consumer: KafkaConsumer[bytes, bytes] = KafkaConsumer(configs=_configs(kafka_broker))
+    try:
+        consumer.subscribe(topics={invalid_topic_name}, callback=ConsumerRebalanceListener())
+        error = _poll_eventually_raises(consumer)
+        assert isinstance(error, InvalidTopicError)
+    finally:
+        consumer.close(option=CloseOptions.timeout(0))
+
+
+def test_verify_no_coordinator_lookup_for_manual_assignment_with_seek(kafka_broker: Any) -> None:
+    # Without a group.id there is no coordinator to look up: the records come
+    # from the list-offsets and fetch alone.
+    topic = _topic(kafka_broker, ["a", "b", "c"])
+    tp = TopicPartition(topic=topic, partition=0)
+    configs = _configs(kafka_broker)
+    del configs["group.id"]
+    consumer: KafkaConsumer[str, str] = KafkaConsumer(
+        configs=configs, value_deserializer=string_deserializer())
+    try:
+        consumer.assign(partitions={tp})
+        consumer.seek_to_beginning(partitions={tp})
+        deadline = time.monotonic() + DEADLINE
+        while True:
+            assert time.monotonic() < deadline, "no records"
+            records = consumer.poll(timeout=0.5)
+            if not records.is_empty():
+                break
+        assert len(records) == 3
+        assert consumer.position(partition=tp) == 3
+        assert {p: oam.offset() for p, oam in records.next_offsets().items()} == {tp: 3}
+    finally:
+        consumer.close(option=CloseOptions.timeout(0))
+
+
+def test_poll_sends_request_to_join(kafka_broker: Any) -> None:
+    # Java checks subscribe() sends no heartbeat and poll() does; the requests
+    # are not observable here, so the join poll() starts is: the member gets
+    # its assignment only by polling.
+    topic = _topic(kafka_broker, ["a"])
+    tp = TopicPartition(topic=topic, partition=0)
+    consumer: KafkaConsumer[bytes, bytes] = KafkaConsumer(configs=_configs(kafka_broker))
+    try:
+        consumer.subscribe(topics=[topic])
+        time.sleep(1.0)
+        assert consumer.assignment() == set()
+        deadline = time.monotonic() + DEADLINE
+        while consumer.assignment() != {tp}:
+            assert time.monotonic() < deadline, "the member did not join"
+            consumer.poll(timeout=0)
+            time.sleep(0.05)
     finally:
         consumer.close(option=CloseOptions.timeout(0))
