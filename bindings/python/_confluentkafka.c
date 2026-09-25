@@ -601,9 +601,10 @@ typedef struct {
     // Drain barrier, guarded by record_batches_mutex: accepted_seq counts the
     // records Producer_send accepted, submitted_seq those the send task has
     // handed to kafka_producer_Producer_send_batch; drain_waiters are fired when
-    // submitted_seq reaches their target. flush and every transaction-control
-    // op wait on it first, so a send that returned belongs to them
-    // (producer-transactions.md §13).
+    // submitted_seq reaches their target. flush, close and every waiting
+    // transaction-control op wait on it first, so a send that returned belongs
+    // to them (producer-transactions.md §13); begin_transaction does not wait
+    // (see py_Producer_begin_transaction).
     int64_t accepted_seq;
     int64_t submitted_seq;
     DrainWaiter* drain_waiters;
@@ -1156,9 +1157,10 @@ static PyObject* py_Producer_send(PyObject* self, PyObject* args) {
 // kafka_producer_Producer_send_batch); otherwise `cb` is registered, the send
 // task is woken to take the accumulation now, and False is returned: `cb()`
 // then fires on the send task, with the GIL, once those records are handed
-// over (or the producer closes). flush and the transaction-control ops wait on
-// it before their FFI call, so a send that returned belongs to them
-// (producer-transactions.md §13). On the send task itself — a delivery callback
+// over (or the producer closes). flush, close and the waiting
+// transaction-control ops wait on it before their FFI call, so a send that
+// returned belongs to them (producer-transactions.md §13); begin_transaction
+// does not. On the send task itself — a delivery callback
 // of an immediate send failure — it returns True: the task cannot wait for
 // itself.
 static PyObject* py_Producer_drain(PyObject* self, PyObject* args) {
@@ -1521,9 +1523,11 @@ static PyObject* py_Producer_partitions_for_async(PyObject* self, PyObject* args
 // wait, so the Python method (a plain def on both producer classes) uses this
 // plain FFI form rather than an _async one. The FFI first drains its own
 // submission queue (producer-transactions.md §13), a single atomic load for the
-// Python client, which never queues there; Python drains the C accumulation
-// (Producer_drain) before calling. Returns the error handle directly (null =
-// success); Python owns and frees a non-null handle.
+// Python client, which never queues there. Python does not drain the C
+// accumulation first (Producer.begin_transaction says why no send that
+// returned needs it), so the call never waits for a record's metadata.
+// Returns the error handle directly (null = success); Python owns and frees a
+// non-null handle.
 static PyObject* py_Producer_begin_transaction(PyObject* self, PyObject* args) {
     unsigned long long producer_ptr;
     if (!PyArg_ParseTuple(args, "K", &producer_ptr)) return NULL;
