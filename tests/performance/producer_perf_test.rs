@@ -659,8 +659,8 @@ async fn producer_perf_test() {
 
     let producer = KafkaProducer::<Vec<u8>, Vec<u8>>::new(
         producer_config,
-        Box::new(ByteArraySerializer),
-        Box::new(ByteArraySerializer),
+        Box::new(ByteArraySerializer::new()),
+        Box::new(ByteArraySerializer::new()),
     )
     .expect("Failed to create producer");
 
