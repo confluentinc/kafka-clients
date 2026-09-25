@@ -57,6 +57,7 @@ class NoOffsetForPartitionError(InvalidOffsetError):
         partitions: Iterable[TopicPartition] | None = None,
         _java_form: int = -1,
     ) -> None:
+        partitions = _throwable.materialize(partitions)
         if _java_form == 0:
             _throwable.init(self, "Undefined offset with no reset policy for partition: " + java_str(partition), None)
             self._partitions = {partition}

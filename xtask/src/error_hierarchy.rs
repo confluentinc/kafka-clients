@@ -2277,6 +2277,14 @@ fn render_class(g: &Graph, info: &ClassInfo) -> anyhow::Result<Rendered> {
         ));
         body.push("            )".into());
     }
+    // An Iterable argument is read once, as Java's Set.copyOf reads its
+    // collection: the message, the payload and the pickled arguments then
+    // see the same elements, even for a generator.
+    for p in &model.params {
+        if py_type(&p.java_ty, true, info, &mut used)?.starts_with("Iterable[") {
+            body.push(format!("        {0} = _throwable.materialize({0})", p.name));
+        }
+    }
     if !model.decorated {
         // Undecorated: a deprecated form is recognized by its given names.
         for form in model.forms.iter().filter(|f| f.deprecated.is_some()) {

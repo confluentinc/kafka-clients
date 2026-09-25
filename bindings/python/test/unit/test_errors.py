@@ -621,6 +621,25 @@ def test_group_authorization_for_group_id() -> None:
         GroupAuthorizationError.for_group_id("g")  # type: ignore[misc]
 
 
+def test_iterable_arguments_are_read_once() -> None:
+    # An Iterable argument is materialized as Java's Set.copyOf does, so a
+    # generator gives the same message, payload and pickled arguments.
+    cases: list[tuple[BaseException, str, Any]] = [
+        (TopicAuthorizationError(unauthorized_topics=(t for t in ["a", "b"])),
+         "Not authorized to access topics: [a, b]", lambda e: e.unauthorized_topics()),
+        (InvalidTopicError(invalid_topics=(t for t in ["x"])), "Invalid topics: [x]",
+         lambda e: e.invalid_topics()),
+        (NoOffsetForPartitionError(partitions=(p for p in [_TP])),
+         "Undefined offset with no reset policy for partitions: [t-0]",
+         lambda e: e.partitions()),
+    ]
+    for error, message, payload in cases:
+        assert str(error) == message
+        clone = pickle.loads(pickle.dumps(error))
+        assert str(clone) == message
+        assert payload(clone) == payload(error) and payload(error)
+
+
 def test_singletons() -> None:
     assert isinstance(DisconnectError.INSTANCE, DisconnectError)
     assert str(DisconnectError.INSTANCE) == ""
