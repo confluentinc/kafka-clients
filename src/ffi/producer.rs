@@ -1581,8 +1581,20 @@ unsafe fn send_batch_inner(
 
     let handle = unsafe { producer_handle(producer) };
     let completion_tx = handle.completion_tx.clone();
-    let guard = handle.kind.lock().unwrap();
-    let runtime_handle = guard.runtime().handle().clone();
+    // Hold the `kind` lock only to take the reference, never across the sends,
+    // as `producer_static_ref` does for the async paths: each send may wait up to
+    // `max.block.ms` for the topic's metadata, and a concurrent close must be
+    // able to take the lock, close the producer and so wake that wait
+    // (`Metadata::await_update` returns on close); the records after it then
+    // fail at once as sent after close. Holding the lock for the whole batch
+    // made a close wait for every record's metadata wait in turn. The handle,
+    // and the kind it owns, outlive this call, and nothing takes the kind
+    // mutably while the handle is alive.
+    let kind: &ProducerKind = {
+        let guard = handle.kind.lock().unwrap();
+        unsafe { &*(&*guard as *const ProducerKind) }
+    };
+    let runtime_handle = kind.runtime().handle().clone();
     let mut success_count: i32 = 0;
 
     for i in 0..count {
@@ -1649,7 +1661,7 @@ unsafe fn send_batch_inner(
             },
         };
 
-        match producer_send(&guard, record) {
+        match producer_send(kind, record) {
             Ok(future) => unsafe {
                 *out_futures.add(i) = box_future(future, runtime_handle.clone(), completion_tx.clone());
                 *out_errors.add(i) = std::ptr::null_mut();
@@ -5500,6 +5512,91 @@ mod tests {
                 );
             },
         }
+    }
+
+    /// `send_batch` does not hold the producer lock across its sends: a close
+    /// started while a record waits for the topic's metadata (up to
+    /// `max.block.ms`, 30 s here) proceeds, wakes that wait, and the records
+    /// after it fail at once. Holding the lock made the close wait for every
+    /// record's metadata wait in turn.
+    #[test]
+    fn test_close_proceeds_while_send_batch_waits_for_metadata() {
+        let configs = [
+            CString::new("bootstrap.servers").unwrap(),
+            CString::new("127.0.0.1:59999").unwrap(),
+            CString::new("max.block.ms").unwrap(),
+            CString::new("30000").unwrap(),
+        ];
+        let pointers = [
+            configs[0].as_ptr(),
+            configs[1].as_ptr(),
+            configs[2].as_ptr(),
+            configs[3].as_ptr(),
+            std::ptr::null(),
+        ];
+        let producer = unsafe {
+            let props = kafka_producer_ProducerProperties_from_configs(pointers.as_ptr());
+            let mut err: *mut kafka_common_Error_t = std::ptr::null_mut();
+            let producer = kafka_producer_KafkaProducer_new(props, &mut err);
+            kafka_producer_ProducerProperties_destroy(props);
+            assert_success(err);
+            producer
+        };
+        let address = producer as usize;
+        let start = std::time::Instant::now();
+        let sender = std::thread::spawn(move || {
+            let topic = CString::new("t").unwrap();
+            let record = || kafka_producer_ProducerRecord_t {
+                topic: topic.as_ptr(),
+                partition: -1,
+                timestamp: -1,
+                key: std::ptr::null(),
+                key_len: -1,
+                value: std::ptr::null(),
+                value_len: -1,
+                headers: std::ptr::null(),
+                header_count: 0,
+            };
+            let records = [record(), record(), record()];
+            let mut futures = [std::ptr::null_mut(); 3];
+            let mut errors = [std::ptr::null_mut(); 3];
+            let sent = unsafe {
+                kafka_producer_Producer_send_batch(
+                    address as *mut kafka_producer_Producer_t,
+                    records.as_ptr(),
+                    3,
+                    futures.as_mut_ptr(),
+                    errors.as_mut_ptr(),
+                )
+            };
+            let failed = errors.iter().filter(|e| !e.is_null()).count();
+            for e in errors {
+                if !e.is_null() {
+                    unsafe { kafka_common_Error_destroy(e) };
+                }
+            }
+            for f in futures {
+                if !f.is_null() {
+                    unsafe { kafka_producer_FutureRecordMetadata_destroy(f) };
+                }
+            }
+            (sent, failed)
+        });
+        // Let the batch reach the first record's metadata wait.
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        unsafe {
+            let mut err: *mut kafka_common_Error_t = std::ptr::null_mut();
+            kafka_producer_Producer_close_with_timeout(producer, 0, &mut err);
+            assert_success(err);
+        }
+        let (sent, failed) = sender.join().unwrap();
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed < std::time::Duration::from_secs(20),
+            "close and send_batch took {elapsed:?}"
+        );
+        assert_eq!((sent, failed), (0, 3), "every record fails: closed during, or after, its wait");
+        unsafe { kafka_producer_Producer_destroy(producer) };
     }
 
     #[test]
