@@ -56,7 +56,7 @@ import _confluentkafka as _lib  # type: ignore[import-not-found]
 from confluent_kafka._args import Form, java_forms
 from confluent_kafka.concurrent_modification_error import ConcurrentModificationError
 
-from ._base import _ConsumerState, close_args, poll_timeout_ms
+from ._base import _ConsumerState, blank_null_topics, close_args, poll_timeout_ms
 from ._conversions import tp_to_spec
 from .close_options import CloseOptions
 
@@ -160,9 +160,9 @@ class Consumer(Generic[K, V], _ConsumerState):
         the same as ``unsubscribe()``. Manual topic assignment does not use the
         consumer's group management functionality.
 
-        Raises ``IllegalArgumentError`` if ``partitions`` contains a partition
-        with a null or empty topic, and ``IllegalStateError`` if ``assign()`` is
-        called after ``subscribe()``.
+        Raises ``IllegalArgumentError`` if ``partitions`` is ``None`` or contains
+        a ``None`` partition or a partition with a null or empty topic, and
+        ``IllegalStateError`` if ``assign()`` is called after ``subscribe()``.
         """
         self._c_assign(partitions)
 
@@ -420,7 +420,7 @@ class Consumer(Generic[K, V], _ConsumerState):
     # ---- the FFI implementations of the waiting calls ------------------------
     def _c_subscribe_topics(self, topics: Iterable[str],
                             callback: ConsumerRebalanceListener | None) -> None:
-        topic_list = list(topics)
+        topic_list = blank_null_topics(topics)
         previous, self._listener = self._listener, callback
         try:
             self._run_sync(*self._subscribe_topics_spec(topic_list, callback is not None))
@@ -446,7 +446,8 @@ class Consumer(Generic[K, V], _ConsumerState):
         self._run_sync(*self._void_spec(fn, tp_to_spec(partition_list)))
 
     def _c_assign(self, partitions: Iterable[TopicPartition]) -> None:
-        self._tp_op("assign", _lib.Consumer_assign_async, partitions)
+        self._tp_op("assign", _lib.Consumer_assign_async,
+                    self._assign_partitions(partitions))
 
     def _c_unsubscribe(self) -> None:
         self._run_sync(*self._void_spec(_lib.Consumer_unsubscribe_async))

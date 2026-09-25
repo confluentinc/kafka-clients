@@ -129,6 +129,19 @@ def test_subscription_on_empty_topic() -> None:
     assert str(e.value) == "Topic collection to subscribe to cannot contain null or empty topic"
 
 
+def test_subscription_on_null_topic() -> None:
+    with new_consumer() as consumer, pytest.raises(IllegalArgumentError) as e:
+        consumer.subscribe(topics=[None])  # type: ignore[list-item]
+    assert str(e.value) == "Topic collection to subscribe to cannot contain null or empty topic"
+
+
+def test_subscription_on_null_topic_without_a_group_id() -> None:
+    # Java's subscribe() checks the group.id before the topics.
+    with new_consumer(None) as consumer, pytest.raises(InvalidGroupIdError) as e:
+        consumer.subscribe(topics=[None])  # type: ignore[list-item]
+    assert str(e.value) == NO_GROUP_ID
+
+
 def test_subscription_on_empty_subscription_pattern() -> None:
     with new_consumer() as consumer, pytest.raises(IllegalArgumentError) as e:
         consumer.subscribe(pattern=SubscriptionPattern(pattern=""))
@@ -149,6 +162,33 @@ def test_assign_on_empty_topic_partition() -> None:
         consumer.assign(partitions=[])
         assert consumer.subscription() == set()
         assert consumer.assignment() == set()
+
+
+def test_assign_on_null_topic_partition() -> None:
+    with new_consumer(None) as consumer, pytest.raises(IllegalArgumentError) as e:
+        consumer.assign(partitions=None)  # type: ignore[arg-type]
+    assert str(e.value) == "Topic partitions collection to assign to cannot be null"
+
+
+def test_assign_on_null_topic_partition_after_close() -> None:
+    # Java's assign() checks that the consumer is open before its argument.
+    consumer = new_consumer(None)
+    consumer.close()
+    with pytest.raises(IllegalStateError) as e:
+        consumer.assign(partitions=None)  # type: ignore[arg-type]
+    assert str(e.value) == CLOSED
+
+
+def test_assign_on_null_topic_in_partition() -> None:
+    with new_consumer(None) as consumer:
+        with pytest.raises(IllegalArgumentError) as e:
+            null_topic = TopicPartition(topic=None, partition=0)  # type: ignore[arg-type]
+            consumer.assign(partitions={null_topic})
+        assert str(e.value) == "Topic partitions to assign to cannot have null or empty topic"
+        # Java: isBlank(tp != null ? tp.topic() : null).
+        with pytest.raises(IllegalArgumentError) as e:
+            consumer.assign(partitions=[None])  # type: ignore[list-item]
+        assert str(e.value) == "Topic partitions to assign to cannot have null or empty topic"
 
 
 def test_assign_on_empty_topic_in_partition() -> None:
@@ -673,6 +713,16 @@ def test_async_consumer_surface_without_a_broker() -> None:
         assert not hasattr(consumer, "current_lag")
         with pytest.raises(IllegalArgumentError):
             await consumer.poll(timeout=-1)
+        with pytest.raises(IllegalArgumentError) as e:
+            await consumer.subscribe(topics=[None])  # type: ignore[list-item]
+        assert str(e.value) == ("Topic collection to subscribe to cannot contain null or "
+                                "empty topic")
+        with pytest.raises(IllegalArgumentError) as e:
+            await consumer.assign(partitions=None)  # type: ignore[arg-type]
+        assert str(e.value) == "Topic partitions collection to assign to cannot be null"
+        with pytest.raises(IllegalArgumentError) as e:
+            await consumer.assign(partitions=[None])  # type: ignore[list-item]
+        assert str(e.value) == "Topic partitions to assign to cannot have null or empty topic"
         await consumer.close(option=CloseOptions.timeout(0))
         await consumer.close()
         with pytest.raises(IllegalStateError):

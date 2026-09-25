@@ -49,7 +49,7 @@ import inspect
 import logging
 import math
 import threading
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterable
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any, TypeVar, cast
 
@@ -153,6 +153,27 @@ def poll_timeout_ms(timeout: Duration) -> int:
     if millis < 0:
         raise IllegalArgumentError(message=f"Invalid negative timeout {millis}")
     return millis
+
+
+# A None topic crosses to the FFI as the blank "": Java's Utils.isBlank(null) is
+# true, so the core's own check raises Java's IllegalArgumentException for it,
+# in Java's order (after the open and group.id checks).
+_BLANK_TOPIC_PARTITION = TopicPartition(topic="", partition=0)
+
+
+def blank_null_topics(topics: Iterable[str]) -> list[str]:
+    """``subscribe(topics)``'s topics for the FFI, a ``None`` topic as ``""``
+    (Java: ``isBlank(topic)`` → "Topic collection to subscribe to cannot
+    contain null or empty topic")."""
+    return ["" if topic is None else topic for topic in topics]
+
+
+def blank_null_topic_partitions(partitions: Iterable[TopicPartition]) -> list[TopicPartition]:
+    """``assign(partitions)``'s partitions for the FFI, a ``None`` partition or
+    topic as a blank topic (Java: ``isBlank(tp != null ? tp.topic() : null)`` →
+    "Topic partitions to assign to cannot have null or empty topic")."""
+    return [_BLANK_TOPIC_PARTITION if tp is None or tp.topic() is None else tp
+            for tp in partitions]
 
 
 def close_args(timeout: Duration | None, option: CloseOptions | None) -> tuple[int, int]:
@@ -730,6 +751,16 @@ class _ConsumerState:
         lag: int | None = self._call(_lib.Consumer_current_lag, topic_partition.topic(),
                                      topic_partition.partition())
         return lag
+
+    def _assign_partitions(self, partitions: Iterable[TopicPartition]) -> list[TopicPartition]:
+        """Java's ``assign()`` argument checks: a null collection raises after
+        the open check (the FFI takes a list, so the binding checks it); a null
+        partition or topic is left to the core as a blank topic."""
+        if partitions is None:
+            with self._use():
+                raise IllegalArgumentError(
+                    message="Topic partitions collection to assign to cannot be null")
+        return blank_null_topic_partitions(partitions)
 
     def _c_group_metadata(self) -> ConsumerGroupMetadata:
         # Java's groupMetadata() calls throwIfGroupIdNotDefined(); the core's
