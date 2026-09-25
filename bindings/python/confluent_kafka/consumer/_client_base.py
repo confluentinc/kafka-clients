@@ -340,7 +340,7 @@ class _ConsumerClientBase(_ConsumerEngine):
         native = _lib.Consumer_group_metadata(self._h)
         if native is None:
             raise _concurrent_error()
-        return ConsumerGroupMetadata(
+        return ConsumerGroupMetadata._of(
             group_id=native.group_id,
             generation_id=native.generation_id,
             member_id=native.member_id,

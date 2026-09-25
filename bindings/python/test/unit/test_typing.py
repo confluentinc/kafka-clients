@@ -12,21 +12,22 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Static-typing assertions for the P2 value types.
+"""Static-typing assertions for the value types, records, serdes and clients.
 
 Run by ``mypy --strict`` (the module is in the ``confluent_kafka`` test tree and
 also imported at runtime as a smoke check). ``typing.assert_type`` fails the
 type check if the inferred type of an expression is not exactly the asserted
 one, which is how the ``@overload`` stubs on ``TopicIdPartition``,
-``ConsumerRecords.records`` and the generics inference on the record types are
-machine-verified.
+``ConsumerRecords.records`` and the generics inference on the record types
+(an omitted or ``None`` key or value binds ``Never``) are machine-verified.
 """
 
 from __future__ import annotations
 
-from typing import assert_type
+import sys
+from typing import TYPE_CHECKING, assert_type
 
-from confluent_kafka.common import TopicIdPartition, TopicPartition, Uuid
+from confluent_kafka.common import TimestampType, TopicIdPartition, TopicPartition, Uuid
 from confluent_kafka.common.serialization import (
     Deserializer,
     Serializer,
@@ -54,6 +55,12 @@ from confluent_kafka.consumer import (
     OffsetAndMetadata,
 )
 from confluent_kafka.producer import ProducerRecord, RecordMetadata
+
+if TYPE_CHECKING:
+    if sys.version_info >= (3, 11):
+        from typing import Never
+    else:
+        from typing_extensions import Never
 
 
 def _topic_id_partition_overloads() -> None:
@@ -84,6 +91,31 @@ def _record_generics_inference() -> None:
     pr = ProducerRecord(topic="t", key=b"k", value=b"v")
     assert_type(pr.key(), "bytes | None")
     assert_type(pr.value(), "bytes | None")
+
+
+def _record_never_binding() -> None:
+    # An omitted or None key or value binds its type variable to Never, so a
+    # record needs no written type parameters.
+    assert_type(ProducerRecord(topic="t", value=None), "ProducerRecord[Never, Never]")
+    assert_type(ProducerRecord(topic="t", key="k", value=None), "ProducerRecord[str, Never]")
+    assert_type(ProducerRecord(topic="t", value=1), "ProducerRecord[Never, int]")
+    assert_type(ProducerRecord(topic="t", key=None, value=1), "ProducerRecord[Never, int]")
+    assert_type(ProducerRecord(topic="t", partition=0, timestamp=5, key="k", value=1.0,
+                               headers=[("h", b"v")]), "ProducerRecord[str, float]")
+    assert_type(ConsumerRecord(topic="t", partition=0, offset=0, key=None, value=None),
+                "ConsumerRecord[Never, Never]")
+    assert_type(ConsumerRecord(topic="t", partition=0, offset=0, key=1, value=None),
+                "ConsumerRecord[int, Never]")
+    assert_type(ConsumerRecord(topic="t", partition=0, offset=0, key=None, value="v"),
+                "ConsumerRecord[Never, str]")
+    full = ConsumerRecord(topic="t", partition=0, offset=0, timestamp=0,
+                          timestamp_type=TimestampType.CREATE_TIME, serialized_key_size=0,
+                          serialized_value_size=1, key=None, value=b"v", headers=(),
+                          leader_epoch=None, delivery_count=1)
+    assert_type(full, "ConsumerRecord[Never, bytes]")
+    # Covariance: a record of Never keys is a record of any key type.
+    widened: ConsumerRecord[str, bytes] = full
+    assert_type(widened.key(), "str | None")
 
 
 def _sentinel_return_types() -> None:

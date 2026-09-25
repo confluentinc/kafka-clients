@@ -12,33 +12,43 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""``MetricName`` — the key of the ``metrics()`` map.
-
-Translated from ``org.apache.kafka.common.MetricName`` (Apache Kafka 4.3.1).
-Immutable, hashable; equality over ``(name, group, tags)`` — Java excludes
-``description`` from ``equals``/``hashCode``.
-"""
+"""``MetricName``: Java's ``org.apache.kafka.common.MetricName``, the key of the
+``metrics()`` map."""
 
 from __future__ import annotations
 
 from collections.abc import Mapping
 
+from confluent_kafka._java import java_str
+from confluent_kafka.null_pointer_error import NullPointerError
+
+__all__ = ["MetricName"]
+
 
 class MetricName:
-    """The key of the ``metrics()`` map.
+    """The ``MetricName`` class encapsulates a metric's name, logical group and
+    its related attributes.
 
-    Java: ``org.apache.kafka.common.MetricName``
-    (``MetricName(String name, String group, String description,
-    Map<String, String> tags)``).
+    - ``name``: the name of the metric;
+    - ``group``: logical group name of the metrics to which this metric belongs;
+    - ``description``: a human-readable description to include in the metric;
+    - ``tags``: additional key/value attributes of the metric.
+
+    ``group`` and ``tags`` can be used to create unique metric names while
+    reporting in JMX or any custom reporting. Equality and the hash are over
+    ``group``, ``name`` and ``tags``.
+
+    Java: ``org.apache.kafka.common.MetricName`` (``final``).
     """
 
     __slots__ = ("_name", "_group", "_description", "_tags")
 
     def __init__(self, *, name: str, group: str, description: str,
                  tags: Mapping[str, str]) -> None:
-        # Java: Objects.requireNonNull on every argument.
-        if name is None or group is None or description is None or tags is None:
-            raise TypeError("MetricName arguments must not be null")
+        # Java: Objects.requireNonNull on each argument, without a message.
+        for value in (name, group, description, tags):
+            if value is None:
+                raise NullPointerError()
         self._name = name
         self._group = group
         self._description = description
@@ -50,27 +60,25 @@ class MetricName:
     def group(self) -> str:
         return self._group
 
+    def tags(self) -> dict[str, str]:
+        return dict(self._tags)
+
     def description(self) -> str:
         return self._description
 
-    def tags(self) -> dict[str, str]:
-        return dict(self._tags)
+    def __hash__(self) -> int:
+        return hash((self._group, self._name, frozenset(self._tags.items())))
 
     def __eq__(self, other: object) -> bool:
         if self is other:
             return True
-        if not isinstance(other, MetricName):
+        if type(other) is not type(self):
             return NotImplemented
-        # Java: group, name and tags — description is not compared.
-        return (self._group == other._group
-                and self._name == other._name
+        assert isinstance(other, MetricName)
+        return (self._group == other._group and self._name == other._name
                 and self._tags == other._tags)
 
-    def __hash__(self) -> int:
-        # Java: over group, name, tags (description excluded).
-        return hash((self._group, self._name,
-                     tuple(sorted(self._tags.items()))))
-
-    def __repr__(self) -> str:
-        return (f"MetricName [name={self._name}, group={self._group}, "
-                f"description={self._description}, tags={self._tags}]")
+    def __str__(self) -> str:
+        return ("MetricName [name=" + self._name + ", group=" + self._group
+                + ", description=" + self._description + ", tags="
+                + java_str(self._tags) + "]")
