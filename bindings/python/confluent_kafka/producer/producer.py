@@ -48,6 +48,7 @@ from ._base import (
     await_payload,
     check_group_metadata,
     close_timeout_ms,
+    force_close,
     group_metadata_fields,
     offsets_to_spec,
     raise_if_error,
@@ -318,7 +319,7 @@ class Producer(Generic[K, V], _ProducerState):
             raise NullPointerError(message="topic cannot be null")
         self._check_not_closed()
         list_handle, error = await_payload(
-            lambda cb: self._call(_lib.Producer_partitions_for_async, topic, cb))
+            lambda cb: self._call(_lib.Producer_partitions_for_async, topic, cb), True)
         if error:
             if list_handle:
                 _lib.PartitionInfoList_drain(list_handle)
@@ -364,16 +365,23 @@ class Producer(Generic[K, V], _ProducerState):
         # timer covers the whole close).
         start = time.monotonic()
         _lib.Producer_shutdown(c_producer)
+        # Whether the Rust close ran to its end; if an interrupt (Ctrl+C)
+        # stopped a wait first, the close is forced before the handle is freed.
+        closed = False
         try:
             if timeout_ms is None:
                 self._drain_sync()
-                run_sync(lambda cb: _lib.Producer_close_async(c_producer, cb))
+                (error,) = await_payload(lambda cb: _lib.Producer_close_async(c_producer, cb))
             else:
                 self._drain_sync(timeout_ms / 1000.0)
                 remaining_ms = max(0, timeout_ms - int((time.monotonic() - start) * 1000))
-                run_sync(lambda cb: _lib.Producer_close_with_timeout_async(
+                (error,) = await_payload(lambda cb: _lib.Producer_close_with_timeout_async(
                     c_producer, remaining_ms, cb))
+            closed = True
+            raise_if_error(error)
         finally:
+            if not closed:
+                force_close(c_producer)
             # No call that could still touch the handle is in flight once this
             # returns; then it is freed.
             self._wait_for_uses()

@@ -790,6 +790,34 @@ def test_an_async_send_racing_close_is_refused_after_its_serializer() -> None:
     assert str(error) == "Producer closed while send in progress"
 
 
+def test_a_cancelled_async_close_is_forced_and_raises_promptly() -> None:
+    # Critic 75 F1, the async analog of KafkaProducerTest's
+    # shouldCloseProperlyAndThrowIfInterrupted (see test_kafka_producer.py):
+    # cancelling the task awaiting close() force-closes the producer
+    # (KafkaProducer.java:1419-1437) and re-raises CancelledError, instead of
+    # waiting for the pending record's max.block.ms.
+    async def main() -> None:
+        p = AsyncKafkaProducer(configs={**UNREACHABLE, "max.block.ms": 60000})
+        future = await p.send(record=RECORD)
+        task = asyncio.ensure_future(p.close())
+        await asyncio.sleep(0.1)
+        assert not task.done()
+        loop = asyncio.get_running_loop()
+        start = loop.time()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert loop.time() - start < 10
+        assert future.done()
+        assert isinstance(future.exception(), KafkaError)
+        with pytest.raises(IllegalStateError) as err:
+            await p.send(record=RECORD)
+        assert str(err.value) == CLOSED
+        await p.close()  # closing again is harmless
+
+    asyncio.run(main())
+
+
 def test_close_rejects_a_negative_timeout_and_stays_open() -> None:
     p = KafkaProducer(configs=UNREACHABLE)
     with pytest.raises(IllegalArgumentError) as err:
