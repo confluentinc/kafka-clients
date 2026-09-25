@@ -20,7 +20,7 @@ use crate::common::protocol::Errors;
 kafka_error_class! {
     /// The given broker ID was not registered.
     ///
-    /// Corresponds to Java's `BrokerIdNotRegisteredException`, error code [`Errors::BrokerIdNotRegistered`].
+    /// Corresponds to Java's `BrokerIdNotRegisteredException`, error code `Errors::BrokerIdNotRegistered`.
     ///
     /// Java `extends` chain:
     ///    `BrokerIdNotRegisteredException` -> `ApiException` -> `KafkaException`

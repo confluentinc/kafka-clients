@@ -20,7 +20,7 @@ use crate::common::protocol::Errors;
 kafka_error_class! {
     /// The leader epoch in the request is newer than the epoch on the broker.
     ///
-    /// Corresponds to Java's `UnknownLeaderEpochException`, error code [`Errors::UnknownLeaderEpoch`].
+    /// Corresponds to Java's `UnknownLeaderEpochException`, error code `Errors::UnknownLeaderEpoch`.
     ///
     /// Java `extends` chain:
     ///    `UnknownLeaderEpochException` -> `RetriableException` -> `ApiException` ->

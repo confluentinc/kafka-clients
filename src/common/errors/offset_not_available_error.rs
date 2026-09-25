@@ -21,7 +21,7 @@ kafka_error_class! {
     /// The leader high watermark has not caught up from a recent leader election
     /// so the offsets cannot be guaranteed to be monotonically increasing.
     ///
-    /// Corresponds to Java's `OffsetNotAvailableException`, error code [`Errors::OffsetNotAvailable`].
+    /// Corresponds to Java's `OffsetNotAvailableException`, error code `Errors::OffsetNotAvailable`.
     ///
     /// Java `extends` chain:
     ///    `OffsetNotAvailableException` -> `RetriableException` -> `ApiException` ->

@@ -20,7 +20,7 @@ use crate::common::protocol::Errors;
 kafka_error_class! {
     /// The group is not empty.
     ///
-    /// Corresponds to Java's `GroupNotEmptyException`, error code [`Errors::NonEmptyGroup`].
+    /// Corresponds to Java's `GroupNotEmptyException`, error code `Errors::NonEmptyGroup`.
     ///
     /// Java `extends` chain:
     ///    `GroupNotEmptyException` -> `ApiException` -> `KafkaException`

@@ -20,7 +20,7 @@ use crate::common::protocol::Errors;
 kafka_error_class! {
     /// The requested fetch size is invalid.
     ///
-    /// Corresponds to Java's `InvalidFetchSizeException`, error code [`Errors::InvalidFetchSize`].
+    /// Corresponds to Java's `InvalidFetchSizeException`, error code `Errors::InvalidFetchSize`.
     ///
     /// Java `extends` chain:
     ///    `InvalidFetchSizeException` -> `ApiException` -> `KafkaException`

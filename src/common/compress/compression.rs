@@ -29,7 +29,10 @@ use crate::common::record::internal::CompressionType;
 ///
 /// # Examples
 ///
-/// ```
+/// Not run as a doctest: the type is crate-private, so an external doctest
+/// crate cannot name it.
+///
+/// ```ignore
 /// use confluent_kafka::common::compress::Compression;
 ///
 /// let compression = Compression::none().build();

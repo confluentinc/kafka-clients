@@ -31,7 +31,7 @@ use super::format_java_set;
 /// Invalid topic error with the set of invalid topics.
 ///
 /// Corresponds to Java's `InvalidTopicException`, error code
-/// [`Errors::InvalidTopicError`].
+/// `Errors::InvalidTopicError`.
 ///
 /// Java `extends` chain:
 ///    `InvalidTopicException` -> `InvalidConfigurationException` ->

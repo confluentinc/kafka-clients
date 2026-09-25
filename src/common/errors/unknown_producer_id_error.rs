@@ -25,7 +25,7 @@ kafka_error_class! {
     /// producer's metadata is removed from the broker, and future appends by the
     /// producer will return this exception.
     ///
-    /// Corresponds to Java's `UnknownProducerIdException`, error code [`Errors::UnknownProducerId`].
+    /// Corresponds to Java's `UnknownProducerIdException`, error code `Errors::UnknownProducerId`.
     ///
     /// Java `extends` chain:
     ///    `UnknownProducerIdException` -> `OutOfOrderSequenceException` ->

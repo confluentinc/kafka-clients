@@ -20,7 +20,7 @@ use crate::common::protocol::Errors;
 kafka_error_class! {
     /// There are unstable offsets that need to be cleared.
     ///
-    /// Corresponds to Java's `UnstableOffsetCommitException`, error code [`Errors::UnstableOffsetCommit`].
+    /// Corresponds to Java's `UnstableOffsetCommitException`, error code `Errors::UnstableOffsetCommit`.
     ///
     /// Java `extends` chain:
     ///    `UnstableOffsetCommitException` -> `RetriableException` ->

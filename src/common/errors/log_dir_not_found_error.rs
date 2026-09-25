@@ -20,7 +20,7 @@ use crate::common::protocol::Errors;
 kafka_error_class! {
     /// The user-specified log directory is not found in the broker config.
     ///
-    /// Corresponds to Java's `LogDirNotFoundException`, error code [`Errors::LogDirNotFound`].
+    /// Corresponds to Java's `LogDirNotFoundException`, error code `Errors::LogDirNotFound`.
     ///
     /// Java `extends` chain:
     ///    `LogDirNotFoundException` -> `ApiException` -> `KafkaException`

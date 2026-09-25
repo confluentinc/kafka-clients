@@ -20,7 +20,7 @@ use crate::common::protocol::Errors;
 kafka_error_class! {
     /// The coordinator is loading and hence can't process requests.
     ///
-    /// Corresponds to Java's `CoordinatorLoadInProgressException`, error code [`Errors::CoordinatorLoadInProgress`].
+    /// Corresponds to Java's `CoordinatorLoadInProgressException`, error code `Errors::CoordinatorLoadInProgress`.
     ///
     /// Java `extends` chain:
     ///    `CoordinatorLoadInProgressException` -> `RetriableException` ->

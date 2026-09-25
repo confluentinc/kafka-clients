@@ -20,7 +20,7 @@ use crate::common::protocol::Errors;
 kafka_error_class! {
     /// Delegation Token is expired.
     ///
-    /// Corresponds to Java's `DelegationTokenExpiredException`, error code [`Errors::DelegationTokenExpired`].
+    /// Corresponds to Java's `DelegationTokenExpiredException`, error code `Errors::DelegationTokenExpired`.
     ///
     /// Java `extends` chain:
     ///    `DelegationTokenExpiredException` -> `ApiException` -> `KafkaException`

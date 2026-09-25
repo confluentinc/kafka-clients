@@ -17,13 +17,13 @@
 //! Translates `org.apache.kafka.common.errors`. Each Java exception class is one
 //! struct in its own file, named with the `Exception` -> `Error` substitution of
 //! CLAUDE.md §2, and declares its `extends` chain through its
-//! [`ErrorHierarchy`](crate::common::error::ErrorHierarchy) impl rather
+//! `ErrorHierarchy` impl rather
 //! than through a predicate that enumerates it from the outside.
 //!
 //! The error code for each class lives in its
-//! [`ErrorCode`](crate::common::error::ErrorCode) impl — Java keeps the
+//! `ErrorCode` impl — Java keeps the
 //! same association in `Errors`' `CLASS_TO_ERROR` map — while the default
-//! message strings stay in [`Errors`](crate::common::protocol::Errors), exactly
+//! message strings stay in `Errors`, exactly
 //! as Java stores them on the enum constant and passes them to the class's
 //! constructor.
 

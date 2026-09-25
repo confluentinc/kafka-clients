@@ -126,7 +126,7 @@ enum BgJoin {
 }
 
 /// A `Clone + Send + Sync` handle to a consumer that exposes
-/// [`Consumer::wakeup`] **and** the reentrant-safe consumer operations,
+/// [`Consumer::wakeup`](crate::consumer::Consumer::wakeup) **and** the reentrant-safe consumer operations,
 /// callable from a task or thread other than the one owning the consumer.
 ///
 /// **No Java class counterpart — it recovers a Java capability.** Java's
@@ -154,7 +154,7 @@ enum BgJoin {
 /// captures the handle into their listener struct — the Rust equivalent
 /// of Java capturing the `consumer` variable.
 ///
-/// Obtain one via [`Consumer::handle`]. Cheap to clone — clones share the
+/// Obtain one via [`Consumer::handle`](crate::consumer::Consumer::handle). Cheap to clone — clones share the
 /// same underlying state.
 ///
 /// # Operations
@@ -163,7 +163,7 @@ enum BgJoin {
 /// [`subscription`](Self::subscription), [`paused`](Self::paused).
 ///
 /// Async (reentrant-safe consumer ops): [`assign`](Self::assign),
-/// [`seek`](Self::seek), [`seek_to_beginning`](Self::seek_to_beginning),
+/// [`seek_with_offset`](Self::seek_with_offset), [`seek_to_beginning`](Self::seek_to_beginning),
 /// [`seek_to_end`](Self::seek_to_end), [`pause`](Self::pause),
 /// [`resume`](Self::resume), [`position`](Self::position),
 /// [`committed`](Self::committed),
@@ -226,7 +226,7 @@ enum ConsumerHandleInner {
 
 impl ConsumerHandle {
     /// Fires the consumer's `wakeup()` from this handle. Equivalent to
-    /// calling [`Consumer::wakeup`] on the owning consumer, but callable
+    /// calling [`Consumer::wakeup`](crate::consumer::Consumer::wakeup) on the owning consumer, but callable
     /// from any task / thread without holding a reference to the consumer.
     pub fn wakeup(&self) {
         match &self.inner {
@@ -242,7 +242,7 @@ impl ConsumerHandle {
 
     // ── Sync getters ───────────────────────────────────────────────────
 
-    /// [`Consumer::assignment`] via the shared `SubscriptionState`.
+    /// [`Consumer::assignment`](crate::consumer::Consumer::assignment) via the shared `SubscriptionState`.
     pub fn assignment(&self) -> HashSet<TopicPartition> {
         match &self.inner {
             ConsumerHandleInner::Async(state) => state.subscriptions.lock().unwrap().assigned_partitions(),
@@ -250,7 +250,7 @@ impl ConsumerHandle {
         }
     }
 
-    /// [`Consumer::subscription`] via the shared `SubscriptionState`.
+    /// [`Consumer::subscription`](crate::consumer::Consumer::subscription) via the shared `SubscriptionState`.
     pub fn subscription(&self) -> HashSet<String> {
         match &self.inner {
             ConsumerHandleInner::Async(state) => state.subscriptions.lock().unwrap().subscription(),
@@ -258,7 +258,7 @@ impl ConsumerHandle {
         }
     }
 
-    /// [`Consumer::paused`] via the shared `SubscriptionState`.
+    /// [`Consumer::paused`](crate::consumer::Consumer::paused) via the shared `SubscriptionState`.
     pub fn paused(&self) -> HashSet<TopicPartition> {
         match &self.inner {
             ConsumerHandleInner::Async(state) => state.subscriptions.lock().unwrap().paused_partitions(),
@@ -268,17 +268,17 @@ impl ConsumerHandle {
 
     // ── Async reentrant-safe consumer ops ───────────────────────────────
 
-    /// [`AsyncKafkaConsumer::assign`].
+    /// [`Consumer::assign`](crate::consumer::Consumer::assign).
     pub async fn assign(&self, partitions: Vec<TopicPartition>) -> Result<(), Error> {
         self.async_state()?.assign(partitions).await
     }
 
-    /// [`AsyncKafkaConsumer::seek`].
+    /// `AsyncKafkaConsumer::seek`.
     pub async fn seek_with_offset(&self, partition: TopicPartition, offset: i64) -> Result<(), Error> {
         self.async_state()?.seek(partition, offset, None).await
     }
 
-    /// [`AsyncKafkaConsumer::seek_with_offset_and_metadata`].
+    /// [`Consumer::seek_with_offset_and_metadata`](crate::consumer::Consumer::seek_with_offset_and_metadata).
     pub async fn seek_with_offset_and_metadata(
         &self,
         partition: TopicPartition,
@@ -289,43 +289,43 @@ impl ConsumerHandle {
         self.async_state()?.seek(partition, offset, epoch).await
     }
 
-    /// [`AsyncKafkaConsumer::seek_to_beginning`].
+    /// [`Consumer::seek_to_beginning`](crate::consumer::Consumer::seek_to_beginning).
     pub async fn seek_to_beginning(&self, partitions: &[TopicPartition]) -> Result<(), Error> {
         self.async_state()?
             .seek_with_reset_strategy(partitions, crate::consumer::internals::AutoOffsetResetStrategy::EARLIEST)
             .await
     }
 
-    /// [`AsyncKafkaConsumer::seek_to_end`].
+    /// [`Consumer::seek_to_end`](crate::consumer::Consumer::seek_to_end).
     pub async fn seek_to_end(&self, partitions: &[TopicPartition]) -> Result<(), Error> {
         self.async_state()?
             .seek_with_reset_strategy(partitions, crate::consumer::internals::AutoOffsetResetStrategy::LATEST)
             .await
     }
 
-    /// [`AsyncKafkaConsumer::pause`].
+    /// [`Consumer::pause`](crate::consumer::Consumer::pause).
     pub async fn pause(&self, partitions: &[TopicPartition]) -> Result<(), Error> {
         self.async_state()?.pause(partitions).await
     }
 
-    /// [`AsyncKafkaConsumer::resume`].
+    /// [`Consumer::resume`](crate::consumer::Consumer::resume).
     pub async fn resume(&self, partitions: &[TopicPartition]) -> Result<(), Error> {
         self.async_state()?.resume(partitions).await
     }
 
-    /// [`AsyncKafkaConsumer::position`].
+    /// [`Consumer::position`](crate::consumer::Consumer::position).
     pub async fn position(&self, partition: &TopicPartition) -> Result<i64, Error> {
         let state = self.async_state()?;
         let timeout = Duration::from_millis(state.default_api_timeout_ms as u64);
         state.position(partition, timeout).await
     }
 
-    /// [`AsyncKafkaConsumer::position_with_timeout`].
+    /// [`Consumer::position_with_timeout`](crate::consumer::Consumer::position_with_timeout).
     pub async fn position_with_timeout(&self, partition: &TopicPartition, timeout: Duration) -> Result<i64, Error> {
         self.async_state()?.position(partition, timeout).await
     }
 
-    /// [`AsyncKafkaConsumer::committed`].
+    /// [`Consumer::committed`](crate::consumer::Consumer::committed).
     pub async fn committed(
         &self,
         partitions: &[TopicPartition],
@@ -335,7 +335,7 @@ impl ConsumerHandle {
         state.committed(partitions, timeout).await
     }
 
-    /// [`AsyncKafkaConsumer::beginning_offsets`].
+    /// [`Consumer::beginning_offsets`](crate::consumer::Consumer::beginning_offsets).
     pub async fn beginning_offsets(
         &self,
         partitions: &[TopicPartition],
@@ -346,7 +346,7 @@ impl ConsumerHandle {
         state.beginning_or_end_offsets(partitions, -2, timeout).await
     }
 
-    /// [`AsyncKafkaConsumer::end_offsets`].
+    /// [`Consumer::end_offsets`](crate::consumer::Consumer::end_offsets).
     pub async fn end_offsets(&self, partitions: &[TopicPartition]) -> Result<HashMap<TopicPartition, i64>, Error> {
         let state = self.async_state()?;
         let timeout = Duration::from_millis(state.default_api_timeout_ms as u64);
@@ -354,7 +354,7 @@ impl ConsumerHandle {
         state.beginning_or_end_offsets(partitions, -1, timeout).await
     }
 
-    /// [`AsyncKafkaConsumer::offsets_for_times`].
+    /// [`Consumer::offsets_for_times`](crate::consumer::Consumer::offsets_for_times).
     pub async fn offsets_for_times(
         &self,
         timestamps_to_search: HashMap<TopicPartition, i64>,
@@ -364,7 +364,7 @@ impl ConsumerHandle {
         state.offsets_for_times(timestamps_to_search, timeout).await
     }
 
-    /// [`AsyncKafkaConsumer::commit_sync`]. Commits the offsets the bg
+    /// [`Consumer::commit_sync`](crate::consumer::Consumer::commit_sync). Commits the offsets the bg
     /// task has consumed (Java `commitSync()` with no offsets — commit
     /// `allConsumed`).
     pub async fn commit_sync(&self) -> Result<(), Error> {
@@ -373,7 +373,7 @@ impl ConsumerHandle {
         state.commit_sync(None, timeout).await
     }
 
-    /// [`AsyncKafkaConsumer::commit_sync_with_offsets`].
+    /// [`Consumer::commit_sync_with_offsets`](crate::consumer::Consumer::commit_sync_with_offsets).
     pub async fn commit_sync_with_offsets(
         &self,
         offsets: HashMap<TopicPartition, OffsetAndMetadata>,
@@ -383,13 +383,13 @@ impl ConsumerHandle {
         state.commit_sync(Some(offsets), timeout).await
     }
 
-    /// [`AsyncKafkaConsumer::commit_async`]. Fire-and-forget commit of the
+    /// [`Consumer::commit_async`](crate::consumer::Consumer::commit_async). Fire-and-forget commit of the
     /// offsets the bg task has consumed.
     pub async fn commit_async(&self) -> Result<(), Error> {
         self.async_state()?.commit_async(None).await
     }
 
-    /// [`AsyncKafkaConsumer::commit_async_offsets`].
+    /// `AsyncKafkaConsumer::commit_async_offsets`.
     pub async fn commit_async_offsets(&self, offsets: HashMap<TopicPartition, OffsetAndMetadata>) -> Result<(), Error> {
         self.async_state()?.commit_async(Some(offsets)).await
     }

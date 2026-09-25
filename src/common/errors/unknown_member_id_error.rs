@@ -20,7 +20,7 @@ use crate::common::protocol::Errors;
 kafka_error_class! {
     /// The coordinator is not aware of this member.
     ///
-    /// Corresponds to Java's `UnknownMemberIdException`, error code [`Errors::UnknownMemberId`].
+    /// Corresponds to Java's `UnknownMemberIdException`, error code `Errors::UnknownMemberId`.
     ///
     /// Java `extends` chain:
     ///    `UnknownMemberIdException` -> `ApplicationRecoverableException` ->

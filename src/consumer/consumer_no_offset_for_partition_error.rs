@@ -34,7 +34,7 @@ use crate::common::error::{ErrorCode, ErrorHierarchy, ErrorMessage, ErrorSource}
 /// class, which extends `KafkaException` — not the concrete
 /// [`InvalidOffsetError`](crate::common::errors::InvalidOffsetError) of
 /// `common.errors`, which extends `ApiException`. Hence
-/// [`is_consumer_invalid_offset_error`](ErrorHierarchy::is_consumer_invalid_offset_error)
+/// `is_consumer_invalid_offset_error`
 /// rather than `is_invalid_offset_error`.
 #[derive(Clone, Debug)]
 #[doc(alias = "org.apache.kafka.clients.consumer.NoOffsetForPartitionException")]

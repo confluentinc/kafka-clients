@@ -20,7 +20,7 @@ use crate::common::protocol::Errors;
 kafka_error_class! {
     /// The committing offset data size is not valid.
     ///
-    /// Corresponds to Java's `InvalidCommitOffsetSizeException`, error code [`Errors::InvalidCommitOffsetSize`].
+    /// Corresponds to Java's `InvalidCommitOffsetSizeException`, error code `Errors::InvalidCommitOffsetSize`.
     ///
     /// Java `extends` chain:
     ///    `InvalidCommitOffsetSizeException` -> `ApiException` -> `KafkaException`

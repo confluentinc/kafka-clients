@@ -20,7 +20,7 @@ use crate::common::protocol::Errors;
 kafka_error_class! {
     /// Request is not valid given the current SASL state.
     ///
-    /// Corresponds to Java's `IllegalSaslStateException`, error code [`Errors::IllegalSaslState`].
+    /// Corresponds to Java's `IllegalSaslStateException`, error code `Errors::IllegalSaslState`.
     ///
     /// Java `extends` chain:
     ///    `IllegalSaslStateException` -> `AuthenticationException` ->

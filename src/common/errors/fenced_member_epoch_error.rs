@@ -21,7 +21,7 @@ kafka_error_class! {
     /// The member epoch is fenced by the group coordinator. The member must
     /// abandon all its partitions and rejoin.
     ///
-    /// Corresponds to Java's `FencedMemberEpochException`, error code [`Errors::FencedMemberEpoch`].
+    /// Corresponds to Java's `FencedMemberEpochException`, error code `Errors::FencedMemberEpoch`.
     ///
     /// Java `extends` chain:
     ///    `FencedMemberEpochException` -> `ApiException` -> `KafkaException`

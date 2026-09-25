@@ -20,7 +20,7 @@ use crate::common::protocol::Errors;
 kafka_error_class! {
     /// Replica assignment is invalid.
     ///
-    /// Corresponds to Java's `InvalidReplicaAssignmentException`, error code [`Errors::InvalidReplicaAssignment`].
+    /// Corresponds to Java's `InvalidReplicaAssignmentException`, error code `Errors::InvalidReplicaAssignment`.
     ///
     /// Java `extends` chain:
     ///    `InvalidReplicaAssignmentException` -> `ApiException` -> `KafkaException`

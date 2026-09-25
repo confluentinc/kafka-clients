@@ -20,7 +20,7 @@ use crate::common::protocol::Errors;
 kafka_error_class! {
     /// The voter key doesn't match the receiving replica's key.
     ///
-    /// Corresponds to Java's `InvalidVoterKeyException`, error code [`Errors::InvalidVoterKey`].
+    /// Corresponds to Java's `InvalidVoterKeyException`, error code `Errors::InvalidVoterKey`.
     ///
     /// Java `extends` chain:
     ///    `InvalidVoterKeyException` -> `ApiException` -> `KafkaException`

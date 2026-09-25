@@ -20,7 +20,7 @@ use crate::common::protocol::Errors;
 kafka_error_class! {
     /// Request parameters do not satisfy the configured policy.
     ///
-    /// Corresponds to Java's `PolicyViolationException`, error code [`Errors::PolicyViolation`].
+    /// Corresponds to Java's `PolicyViolationException`, error code `Errors::PolicyViolation`.
     ///
     /// Java `extends` chain:
     ///    `PolicyViolationException` -> `ApiException` -> `KafkaException`

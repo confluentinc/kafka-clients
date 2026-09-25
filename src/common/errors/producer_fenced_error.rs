@@ -21,7 +21,7 @@ kafka_error_class! {
     /// There is a newer producer with the same transactionalId which fences the
     /// current one.
     ///
-    /// Corresponds to Java's `ProducerFencedException`, error code [`Errors::ProducerFenced`].
+    /// Corresponds to Java's `ProducerFencedException`, error code `Errors::ProducerFenced`.
     ///
     /// Java `extends` chain:
     ///    `ProducerFencedException` -> `ApplicationRecoverableException` ->

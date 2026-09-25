@@ -20,7 +20,7 @@ use crate::common::protocol::Errors;
 kafka_error_class! {
     /// The replica is not available for the requested topic-partition.
     ///
-    /// Corresponds to Java's `ReplicaNotAvailableException`, error code [`Errors::ReplicaNotAvailable`].
+    /// Corresponds to Java's `ReplicaNotAvailableException`, error code `Errors::ReplicaNotAvailable`.
     ///
     /// Java `extends` chain:
     ///    `ReplicaNotAvailableException` -> `InvalidMetadataException` ->

@@ -127,34 +127,34 @@ impl<K, V> ProducerRecordOptionsBuilder<K, V> {
         }
     }
 
-    /// Sets [`ProducerRecordOptions::topic`], a mandatory parameter: [`Self::build`]
+    /// Sets `ProducerRecordOptions::topic`, a mandatory parameter: [`Self::build`]
     /// panics if it was not set.
     pub fn set_topic(mut self, topic: String) -> Self {
         self.topic = Some(topic);
         self
     }
-    /// Sets [`ProducerRecordOptions::partition`].
+    /// Sets `ProducerRecordOptions::partition`.
     pub fn set_partition(mut self, partition: Option<i32>) -> Self {
         self.partition = partition;
         self
     }
-    /// Sets [`ProducerRecordOptions::timestamp`].
+    /// Sets `ProducerRecordOptions::timestamp`.
     pub fn set_timestamp(mut self, timestamp: Option<i64>) -> Self {
         self.timestamp = timestamp;
         self
     }
-    /// Sets [`ProducerRecordOptions::key`].
+    /// Sets `ProducerRecordOptions::key`.
     pub fn set_key(mut self, key: Option<K>) -> Self {
         self.key = key;
         self
     }
-    /// Sets [`ProducerRecordOptions::value`], a mandatory parameter: [`Self::build`]
+    /// Sets `ProducerRecordOptions::value`, a mandatory parameter: [`Self::build`]
     /// panics if it was not set.
     pub fn set_value(mut self, value: Option<V>) -> Self {
         self.value = Some(value);
         self
     }
-    /// Sets [`ProducerRecordOptions::headers`].
+    /// Sets `ProducerRecordOptions::headers`.
     pub fn set_headers(mut self, headers: Option<RecordHeaders>) -> Self {
         self.headers = headers;
         self

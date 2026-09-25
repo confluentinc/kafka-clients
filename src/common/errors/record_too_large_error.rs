@@ -25,7 +25,7 @@ use crate::common::{Error, TopicPartition};
 /// server will accept.
 ///
 /// Corresponds to Java's `RecordTooLargeException`, error code
-/// [`Errors::MessageTooLarge`].
+/// `Errors::MessageTooLarge`.
 ///
 /// Java `extends` chain:
 ///    `RecordTooLargeException` -> `ApiException` -> `KafkaException`
@@ -66,7 +66,7 @@ impl RecordTooLargeError {
     }
 
     /// Create the error with the code's default message — used by
-    /// [`Errors::error`](crate::common::protocol::Errors::error).
+    /// `Errors::error`.
     #[doc(alias = "org.apache.kafka.common.errors.RecordTooLargeException#RecordTooLargeException")]
     pub fn with_default_message() -> Self {
         Self::new(Errors::MessageTooLarge.message())

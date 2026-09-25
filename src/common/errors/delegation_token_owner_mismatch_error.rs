@@ -20,7 +20,7 @@ use crate::common::protocol::Errors;
 kafka_error_class! {
     /// Specified Principal is not valid Owner/Renewer.
     ///
-    /// Corresponds to Java's `DelegationTokenOwnerMismatchException`, error code [`Errors::DelegationTokenOwnerMismatch`].
+    /// Corresponds to Java's `DelegationTokenOwnerMismatchException`, error code `Errors::DelegationTokenOwnerMismatch`.
     ///
     /// Java `extends` chain:
     ///    `DelegationTokenOwnerMismatchException` -> `ApiException` ->

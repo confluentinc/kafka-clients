@@ -21,7 +21,7 @@ kafka_error_class! {
     /// The group member needs to have a valid member id before actually entering
     /// a consumer group.
     ///
-    /// Corresponds to Java's `MemberIdRequiredException`, error code [`Errors::MemberIdRequired`].
+    /// Corresponds to Java's `MemberIdRequiredException`, error code `Errors::MemberIdRequired`.
     ///
     /// Java `extends` chain:
     ///    `MemberIdRequiredException` -> `ApiException` -> `KafkaException`

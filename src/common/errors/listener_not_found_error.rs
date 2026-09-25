@@ -21,7 +21,7 @@ kafka_error_class! {
     /// There is no listener on the leader broker that matches the listener on
     /// which metadata request was processed.
     ///
-    /// Corresponds to Java's `ListenerNotFoundException`, error code [`Errors::ListenerNotFound`].
+    /// Corresponds to Java's `ListenerNotFoundException`, error code `Errors::ListenerNotFound`.
     ///
     /// Java `extends` chain:
     ///    `ListenerNotFoundException` -> `InvalidMetadataException` ->

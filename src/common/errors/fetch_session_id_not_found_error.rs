@@ -20,7 +20,7 @@ use crate::common::protocol::Errors;
 kafka_error_class! {
     /// The fetch session ID was not found.
     ///
-    /// Corresponds to Java's `FetchSessionIdNotFoundException`, error code [`Errors::FetchSessionIdNotFound`].
+    /// Corresponds to Java's `FetchSessionIdNotFoundException`, error code `Errors::FetchSessionIdNotFound`.
     ///
     /// Java `extends` chain:
     ///    `FetchSessionIdNotFoundException` -> `RetriableException` ->

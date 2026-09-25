@@ -20,7 +20,7 @@ use crate::common::protocol::Errors;
 kafka_error_class! {
     /// Security features are disabled.
     ///
-    /// Corresponds to Java's `SecurityDisabledException`, error code [`Errors::SecurityDisabled`].
+    /// Corresponds to Java's `SecurityDisabledException`, error code `Errors::SecurityDisabled`.
     ///
     /// Java `extends` chain:
     ///    `SecurityDisabledException` -> `ApiException` -> `KafkaException`

@@ -491,28 +491,28 @@ impl<K, V> MockProducerOptionsBuilder<K, V> {
         }
     }
 
-    /// Sets [`MockProducerOptions::cluster`].
+    /// Sets `MockProducerOptions::cluster`.
     pub fn set_cluster(mut self, cluster: Cluster) -> Self {
         self.cluster = Some(cluster);
         self
     }
-    /// Sets [`MockProducerOptions::auto_complete`], a mandatory parameter:
+    /// Sets `MockProducerOptions::auto_complete`, a mandatory parameter:
     /// [`Self::build`] returns an error if it was not set.
     pub fn set_auto_complete(mut self, auto_complete: bool) -> Self {
         self.auto_complete = Some(auto_complete);
         self
     }
-    /// Sets [`MockProducerOptions::partitioner`].
+    /// Sets `MockProducerOptions::partitioner`.
     pub fn set_partitioner(mut self, partitioner: Option<Box<dyn Partitioner<K, V>>>) -> Self {
         self.partitioner = partitioner;
         self
     }
-    /// Sets [`MockProducerOptions::key_serializer`].
+    /// Sets `MockProducerOptions::key_serializer`.
     pub fn set_key_serializer(mut self, key_serializer: Option<Box<dyn Serializer<K> + Send + Sync>>) -> Self {
         self.key_serializer = key_serializer;
         self
     }
-    /// Sets [`MockProducerOptions::value_serializer`].
+    /// Sets `MockProducerOptions::value_serializer`.
     pub fn set_value_serializer(mut self, value_serializer: Option<Box<dyn Serializer<V> + Send + Sync>>) -> Self {
         self.value_serializer = value_serializer;
         self
@@ -773,7 +773,7 @@ impl<K, V> MockProducer<K, V> {
     /// Mark this producer as fenced by another producer with the same
     /// `transactional.id`. Every subsequent transactional call and every
     /// [`send()`](Producer::send) then fails with
-    /// [`Errors::ProducerFenced`].
+    /// `Errors::ProducerFenced`.
     ///
     /// Corresponds to Java's `MockProducer.fenceProducer()`
     /// (`MockProducer.java:429`).
@@ -782,7 +782,7 @@ impl<K, V> MockProducer<K, V> {
     ///
     /// Returns `Err` if the producer is closed, is already fenced, or was never
     /// initialized for transactions ([`Error::local_illegal_state`] for the first
-    /// and last, [`Errors::ProducerFenced`] for the second).
+    /// and last, `Errors::ProducerFenced` for the second).
     #[doc(alias = "org.apache.kafka.clients.producer.MockProducer#fenceProducer")]
     pub fn fence_producer(&self) -> Result<(), Error> {
         let mut inner = self.inner.lock().unwrap();

@@ -20,7 +20,7 @@ use crate::common::protocol::Errors;
 kafka_error_class! {
     /// Configuration is invalid.
     ///
-    /// Corresponds to Java's `InvalidConfigurationException`, error code [`Errors::InvalidConfig`].
+    /// Corresponds to Java's `InvalidConfigurationException`, error code `Errors::InvalidConfig`.
     ///
     /// Java `extends` chain:
     ///    `InvalidConfigurationException` -> `ApiException` -> `KafkaException`

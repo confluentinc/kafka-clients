@@ -45,7 +45,10 @@ impl LogContext {
     ///
     /// # Examples
     ///
-    /// ```
+    /// Not run as a doctest: the type is crate-private, so an external doctest
+    /// crate cannot name it.
+    ///
+    /// ```ignore
     /// use confluent_kafka::common::utils::LogContext;
     ///
     /// let ctx = LogContext::new(format!("[Producer clientId={}] ", "my-producer"));

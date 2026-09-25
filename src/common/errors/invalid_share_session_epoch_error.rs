@@ -20,7 +20,7 @@ use crate::common::protocol::Errors;
 kafka_error_class! {
     /// The share session epoch is invalid.
     ///
-    /// Corresponds to Java's `InvalidShareSessionEpochException`, error code [`Errors::InvalidShareSessionEpoch`].
+    /// Corresponds to Java's `InvalidShareSessionEpochException`, error code `Errors::InvalidShareSessionEpoch`.
     ///
     /// Java `extends` chain:
     ///    `InvalidShareSessionEpochException` -> `RetriableException` ->

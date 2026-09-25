@@ -20,7 +20,7 @@ use crate::common::protocol::Errors;
 kafka_error_class! {
     /// The group id is invalid.
     ///
-    /// Corresponds to Java's `InvalidGroupIdException`, error code [`Errors::InvalidGroupId`].
+    /// Corresponds to Java's `InvalidGroupIdException`, error code `Errors::InvalidGroupId`.
     ///
     /// Java `extends` chain:
     ///    `InvalidGroupIdException` -> `ApiException` -> `KafkaException`

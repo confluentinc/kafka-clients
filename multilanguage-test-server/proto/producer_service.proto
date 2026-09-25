@@ -175,7 +175,7 @@ message TransactionRequest {
 // read_offset_map, where leader_epoch and metadata are the only nullable
 // inputs: an absent (or < 0) leader_epoch means "no epoch", and an absent
 // metadata means the empty string. Hence both are proto3 `optional`, matching
-// OffsetAndMetadata's actual fields (leader_epoch is Option<i32>; metadata is a
+// OffsetAndMetadata's actual fields (leader_epoch is `Option<i32>`; metadata is a
 // plain String, which is always present but may be empty).
 message OffsetEntry {
   string topic = 1;
@@ -292,6 +292,7 @@ message CallbackLogPartition {
 // strings and use the same field encoding so the Rust harness can compare
 // backends:
 //
+// ```text
 //   kind        | partitions                | offsets                        | error
 //   ------------+---------------------------+--------------------------------+------------------
 //   "assigned"  | the assigned partitions   | empty                          | listener failure
@@ -299,13 +300,14 @@ message CallbackLogPartition {
 //   "lost"      | the lost partitions       | empty                          | listener failure
 //   "commit"    | the committed partitions  | committed offset per partition | commit failure
 //   "delivery"  | the delivered-to partition| {"<topic>-<partition>": offset}| delivery failure
+// ```
 //
-// `offsets` keys are always "<topic>-<partition>" (e.g. "my-topic-0").
+// `offsets` keys are always `"<topic>-<partition>"` (e.g. `"my-topic-0"`).
 message CallbackLogEntry {
   // One of "assigned", "revoked", "lost", "commit", "delivery".
   string kind = 1;
   repeated CallbackLogPartition partitions = 2;
-  // "<topic>-<partition>" -> offset. Empty for the rebalance kinds.
+  // `"<topic>-<partition>"` -> offset. Empty for the rebalance kinds.
   map<string, int64> offsets = 3;
   // The callback's error message; empty string when the callback was
   // invoked with no error.

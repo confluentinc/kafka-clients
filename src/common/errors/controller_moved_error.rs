@@ -20,7 +20,7 @@ use crate::common::protocol::Errors;
 kafka_error_class! {
     /// The controller moved to another broker.
     ///
-    /// Corresponds to Java's `ControllerMovedException`, error code [`Errors::StaleControllerEpoch`].
+    /// Corresponds to Java's `ControllerMovedException`, error code `Errors::StaleControllerEpoch`.
     ///
     /// Java `extends` chain:
     ///    `ControllerMovedException` -> `ApiException` -> `KafkaException`

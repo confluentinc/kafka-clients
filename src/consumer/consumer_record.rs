@@ -166,67 +166,67 @@ impl<K, V> ConsumerRecordOptionsBuilder<K, V> {
         }
     }
 
-    /// Sets [`ConsumerRecordOptions::topic`], a mandatory parameter: [`Self::build`]
+    /// Sets `ConsumerRecordOptions::topic`, a mandatory parameter: [`Self::build`]
     /// panics if it was not set.
     pub fn set_topic(mut self, topic: impl Into<Arc<str>>) -> Self {
         self.topic = Some(topic.into());
         self
     }
-    /// Sets [`ConsumerRecordOptions::partition`], a mandatory parameter: [`Self::build`]
+    /// Sets `ConsumerRecordOptions::partition`, a mandatory parameter: [`Self::build`]
     /// panics if it was not set.
     pub fn set_partition(mut self, partition: i32) -> Self {
         self.partition = Some(partition);
         self
     }
-    /// Sets [`ConsumerRecordOptions::offset`], a mandatory parameter: [`Self::build`]
+    /// Sets `ConsumerRecordOptions::offset`, a mandatory parameter: [`Self::build`]
     /// panics if it was not set.
     pub fn set_offset(mut self, offset: i64) -> Self {
         self.offset = Some(offset);
         self
     }
-    /// Sets [`ConsumerRecordOptions::timestamp`].
+    /// Sets `ConsumerRecordOptions::timestamp`.
     pub fn set_timestamp(mut self, timestamp: i64) -> Self {
         self.timestamp = timestamp;
         self
     }
-    /// Sets [`ConsumerRecordOptions::timestamp_type`].
+    /// Sets `ConsumerRecordOptions::timestamp_type`.
     pub fn set_timestamp_type(mut self, timestamp_type: TimestampType) -> Self {
         self.timestamp_type = timestamp_type;
         self
     }
-    /// Sets [`ConsumerRecordOptions::serialized_key_size`].
+    /// Sets `ConsumerRecordOptions::serialized_key_size`.
     pub fn set_serialized_key_size(mut self, serialized_key_size: i32) -> Self {
         self.serialized_key_size = serialized_key_size;
         self
     }
-    /// Sets [`ConsumerRecordOptions::serialized_value_size`].
+    /// Sets `ConsumerRecordOptions::serialized_value_size`.
     pub fn set_serialized_value_size(mut self, serialized_value_size: i32) -> Self {
         self.serialized_value_size = serialized_value_size;
         self
     }
-    /// Sets [`ConsumerRecordOptions::key`], a mandatory parameter: [`Self::build`]
+    /// Sets `ConsumerRecordOptions::key`, a mandatory parameter: [`Self::build`]
     /// panics if it was not set.
     pub fn set_key(mut self, key: Option<K>) -> Self {
         self.key = Some(key);
         self
     }
-    /// Sets [`ConsumerRecordOptions::value`], a mandatory parameter: [`Self::build`]
+    /// Sets `ConsumerRecordOptions::value`, a mandatory parameter: [`Self::build`]
     /// panics if it was not set.
     pub fn set_value(mut self, value: Option<V>) -> Self {
         self.value = Some(value);
         self
     }
-    /// Sets [`ConsumerRecordOptions::headers`].
+    /// Sets `ConsumerRecordOptions::headers`.
     pub fn set_headers(mut self, headers: RecordHeaders) -> Self {
         self.headers = headers;
         self
     }
-    /// Sets [`ConsumerRecordOptions::leader_epoch`].
+    /// Sets `ConsumerRecordOptions::leader_epoch`.
     pub fn set_leader_epoch(mut self, leader_epoch: Option<i32>) -> Self {
         self.leader_epoch = leader_epoch;
         self
     }
-    /// Sets [`ConsumerRecordOptions::delivery_count`].
+    /// Sets `ConsumerRecordOptions::delivery_count`.
     pub fn set_delivery_count(mut self, delivery_count: Option<i16>) -> Self {
         self.delivery_count = delivery_count;
         self
@@ -323,7 +323,7 @@ impl<K, V> ConsumerRecord<K, V> {
     /// `deliveryCount = Optional.empty()`, and under CLAUDE.md §2 both derive
     /// the same name `with_options` once the surplus parameters move into
     /// [`ConsumerRecordOptions`]. Callers get the 11-arg form by leaving
-    /// [`ConsumerRecordOptions::delivery_count`] at `None`.
+    /// `ConsumerRecordOptions::delivery_count` at `None`.
     ///
     /// * `options` - every parameter of Java's widest constructor
     #[doc(alias = "org.apache.kafka.clients.consumer.ConsumerRecord#ConsumerRecord")]

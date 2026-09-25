@@ -20,7 +20,7 @@ use crate::common::protocol::Errors;
 kafka_error_class! {
     /// The server disconnected before a response was received.
     ///
-    /// Corresponds to Java's `NetworkException`, error code [`Errors::NetworkError`].
+    /// Corresponds to Java's `NetworkException`, error code `Errors::NetworkError`.
     ///
     /// Java `extends` chain:
     ///    `NetworkException` -> `InvalidMetadataException` ->

@@ -20,7 +20,7 @@ use crate::common::protocol::Errors;
 kafka_error_class! {
     /// The server experienced an unexpected error when processing the request.
     ///
-    /// Corresponds to Java's `UnknownServerException`, error code [`Errors::UnknownServerError`].
+    /// Corresponds to Java's `UnknownServerException`, error code `Errors::UnknownServerError`.
     ///
     /// Java `extends` chain:
     ///    `UnknownServerException` -> `ApiException` -> `KafkaException`

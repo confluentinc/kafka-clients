@@ -20,7 +20,7 @@ use crate::common::protocol::Errors;
 kafka_error_class! {
     /// The log's topic ID did not match the topic ID in the request.
     ///
-    /// Corresponds to Java's `InconsistentTopicIdException`, error code [`Errors::InconsistentTopicId`].
+    /// Corresponds to Java's `InconsistentTopicIdException`, error code `Errors::InconsistentTopicId`.
     ///
     /// Java `extends` chain:
     ///    `InconsistentTopicIdException` -> `InvalidMetadataException` ->

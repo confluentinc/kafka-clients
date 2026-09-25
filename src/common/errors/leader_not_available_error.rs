@@ -21,7 +21,7 @@ kafka_error_class! {
     /// There is no leader for this topic-partition as we are in the middle of a
     /// leadership election.
     ///
-    /// Corresponds to Java's `LeaderNotAvailableException`, error code [`Errors::LeaderNotAvailable`].
+    /// Corresponds to Java's `LeaderNotAvailableException`, error code `Errors::LeaderNotAvailable`.
     ///
     /// Java `extends` chain:
     ///    `LeaderNotAvailableException` -> `InvalidMetadataException` ->

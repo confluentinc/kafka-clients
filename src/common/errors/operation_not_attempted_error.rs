@@ -22,7 +22,7 @@ kafka_error_class! {
     /// batched RPCs where some operations in the batch failed, causing the broker
     /// to respond without trying the rest.
     ///
-    /// Corresponds to Java's `OperationNotAttemptedException`, error code [`Errors::OperationNotAttempted`].
+    /// Corresponds to Java's `OperationNotAttemptedException`, error code `Errors::OperationNotAttempted`.
     ///
     /// Java `extends` chain:
     ///    `OperationNotAttemptedException` -> `ApiException` -> `KafkaException`

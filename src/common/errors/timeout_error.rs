@@ -20,7 +20,7 @@ use crate::common::protocol::Errors;
 kafka_error_class! {
     /// The request timed out.
     ///
-    /// Corresponds to Java's `TimeoutException`, error code [`Errors::RequestTimedOut`].
+    /// Corresponds to Java's `TimeoutException`, error code `Errors::RequestTimedOut`.
     ///
     /// Java `extends` chain:
     ///    `TimeoutException` -> `RetriableException` -> `ApiException` ->

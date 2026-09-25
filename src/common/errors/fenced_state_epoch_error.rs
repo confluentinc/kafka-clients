@@ -21,7 +21,7 @@ kafka_error_class! {
     /// The share coordinator rejected the request because the share-group state
     /// epoch did not match.
     ///
-    /// Corresponds to Java's `FencedStateEpochException`, error code [`Errors::FencedStateEpoch`].
+    /// Corresponds to Java's `FencedStateEpochException`, error code `Errors::FencedStateEpoch`.
     ///
     /// Java `extends` chain:
     ///    `FencedStateEpochException` -> `ApiException` -> `KafkaException`

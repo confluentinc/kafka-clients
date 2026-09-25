@@ -20,7 +20,7 @@ use crate::common::protocol::Errors;
 kafka_error_class! {
     /// The broker does not support the requested SASL mechanism.
     ///
-    /// Corresponds to Java's `UnsupportedSaslMechanismException`, error code [`Errors::UnsupportedSaslMechanism`].
+    /// Corresponds to Java's `UnsupportedSaslMechanismException`, error code `Errors::UnsupportedSaslMechanism`.
     ///
     /// Java `extends` chain:
     ///    `UnsupportedSaslMechanismException` -> `AuthenticationException` ->

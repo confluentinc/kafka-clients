@@ -18,7 +18,7 @@
 //! `org.apache.kafka.clients.consumer.ConsumerPartitionAssignor`.
 //!
 //! Only the two data holders are in scope here: they are consumed by
-//! [`ConsumerProtocol`](crate::consumer::internals::ConsumerProtocol)
+//! `ConsumerProtocol`
 //! for (de)serializing member subscriptions/assignments, which the admin
 //! group-describe path relies on. The `ConsumerPartitionAssignor` trait itself
 //! and the client-side assignors (`RangeAssignor`, `StickyAssignor`, ...) are
@@ -104,28 +104,28 @@ impl SubscriptionOptionsBuilder {
         }
     }
 
-    /// Sets [`SubscriptionOptions::topics`], a mandatory parameter: [`Self::build`]
+    /// Sets `SubscriptionOptions::topics`, a mandatory parameter: [`Self::build`]
     /// panics if it was not set.
     pub fn set_topics(mut self, topics: Vec<String>) -> Self {
         self.topics = Some(topics);
         self
     }
-    /// Sets [`SubscriptionOptions::user_data`].
+    /// Sets `SubscriptionOptions::user_data`.
     pub fn set_user_data(mut self, user_data: Option<Vec<u8>>) -> Self {
         self.user_data = user_data;
         self
     }
-    /// Sets [`SubscriptionOptions::owned_partitions`].
+    /// Sets `SubscriptionOptions::owned_partitions`.
     pub fn set_owned_partitions(mut self, owned_partitions: Vec<TopicPartition>) -> Self {
         self.owned_partitions = owned_partitions;
         self
     }
-    /// Sets [`SubscriptionOptions::generation_id`].
+    /// Sets `SubscriptionOptions::generation_id`.
     pub fn set_generation_id(mut self, generation_id: i32) -> Self {
         self.generation_id = generation_id;
         self
     }
-    /// Sets [`SubscriptionOptions::rack_id`].
+    /// Sets `SubscriptionOptions::rack_id`.
     pub fn set_rack_id(mut self, rack_id: Option<String>) -> Self {
         self.rack_id = rack_id;
         self

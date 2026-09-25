@@ -279,44 +279,44 @@ impl ConfigEntryOptionsBuilder {
         }
     }
 
-    /// Sets [`ConfigEntryOptions::name`], a mandatory parameter: [`Self::build`]
+    /// Sets `ConfigEntryOptions::name`, a mandatory parameter: [`Self::build`]
     /// panics if it was not set.
     pub fn set_name(mut self, name: String) -> Self {
         self.name = Some(name);
         self
     }
-    /// Sets [`ConfigEntryOptions::value`], a mandatory parameter: [`Self::build`]
+    /// Sets `ConfigEntryOptions::value`, a mandatory parameter: [`Self::build`]
     /// panics if it was not set.
     pub fn set_value(mut self, value: Option<String>) -> Self {
         self.value = Some(value);
         self
     }
-    /// Sets [`ConfigEntryOptions::source`].
+    /// Sets `ConfigEntryOptions::source`.
     pub fn set_source(mut self, source: ConfigSource) -> Self {
         self.source = source;
         self
     }
-    /// Sets [`ConfigEntryOptions::is_sensitive`].
+    /// Sets `ConfigEntryOptions::is_sensitive`.
     pub fn set_is_sensitive(mut self, is_sensitive: bool) -> Self {
         self.is_sensitive = is_sensitive;
         self
     }
-    /// Sets [`ConfigEntryOptions::is_read_only`].
+    /// Sets `ConfigEntryOptions::is_read_only`.
     pub fn set_is_read_only(mut self, is_read_only: bool) -> Self {
         self.is_read_only = is_read_only;
         self
     }
-    /// Sets [`ConfigEntryOptions::synonyms`].
+    /// Sets `ConfigEntryOptions::synonyms`.
     pub fn set_synonyms(mut self, synonyms: Vec<ConfigSynonym>) -> Self {
         self.synonyms = synonyms;
         self
     }
-    /// Sets [`ConfigEntryOptions::config_type`].
+    /// Sets `ConfigEntryOptions::config_type`.
     pub fn set_config_type(mut self, config_type: ConfigType) -> Self {
         self.config_type = config_type;
         self
     }
-    /// Sets [`ConfigEntryOptions::documentation`].
+    /// Sets `ConfigEntryOptions::documentation`.
     pub fn set_documentation(mut self, documentation: Option<String>) -> Self {
         self.documentation = documentation;
         self

@@ -20,7 +20,7 @@ use crate::common::protocol::Errors;
 kafka_error_class! {
     /// The regular expression is not valid.
     ///
-    /// Corresponds to Java's `InvalidRegularExpression`, error code [`Errors::InvalidRegularExpression`].
+    /// Corresponds to Java's `InvalidRegularExpression`, error code `Errors::InvalidRegularExpression`.
     ///
     /// Java `extends` chain:
     ///    `InvalidRegularExpression` -> `ApiException` -> `KafkaException`

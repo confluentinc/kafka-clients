@@ -30,7 +30,7 @@ use crate::common::error::{ErrorCode, ErrorHierarchy, ErrorMessage, ErrorSource}
 ///   `ApiException` -> `KafkaException`
 ///
 /// Being its own class is what makes it retriable. The previous mapping routed
-/// it through [`Errors::RequestTimedOut`](crate::common::protocol::Errors::RequestTimedOut)
+/// it through `Errors::RequestTimedOut`
 /// solely to borrow that code's retriability, which also made it
 /// indistinguishable from a real `TimeoutException`.
 ///
@@ -71,8 +71,8 @@ impl ConsumerRetriableCommitFailedError {
 
     /// `RetriableCommitFailedException(Throwable t)` — uses the default message.
     ///
-    /// The cause is retained and readable through [`Self::cause`] /
-    /// [`Error::cause`], matching Java's `getCause()`.
+    /// The cause is retained and readable through [`Self::source`] /
+    /// [`Error::source`], matching Java's `getCause()`.
     #[doc(alias = "org.apache.kafka.clients.consumer.RetriableCommitFailedException#RetriableCommitFailedException")]
     pub fn with_source(source: Error) -> Self {
         Self {

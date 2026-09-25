@@ -920,7 +920,7 @@ pub enum Error {
     CoordinatorLoadInProgress(CoordinatorLoadInProgressError),
     /// See [`CoordinatorNotAvailableError`](crate::common::errors::CoordinatorNotAvailableError).
     CoordinatorNotAvailable(CoordinatorNotAvailableError),
-    /// See [`CorrelationIdMismatchError`](crate::common::requests::CorrelationIdMismatchError).
+    /// See `CorrelationIdMismatchError`.
     ///
     /// Lives in `common.requests`, not `common.errors`, and extends
     /// `IllegalStateException` rather than `KafkaException` — so like
@@ -1120,7 +1120,7 @@ pub enum Error {
     RecordDeserialization(Box<RecordDeserializationError>),
     /// See [`RecordTooLargeError`](crate::common::errors::RecordTooLargeError).
     RecordTooLarge(RecordTooLargeError),
-    /// See [`InvalidReceiveError`](crate::common::network::InvalidReceiveError).
+    /// See `InvalidReceiveError`.
     InvalidReceive(InvalidReceiveError),
     /// See [`ConfigError`](crate::common::config::ConfigError).
     Config(ConfigError),
@@ -1143,7 +1143,7 @@ pub enum Error {
     ResourceNotFound(ResourceNotFoundError),
     /// See [`SaslAuthenticationError`](crate::common::errors::SaslAuthenticationError).
     SaslAuthentication(SaslAuthenticationError),
-    /// See [`SchemaError`](crate::common::protocol::types::SchemaError).
+    /// See `SchemaError`.
     ///
     /// Lives in `common.protocol.types`, not `common.errors`.
     Schema(SchemaError),
@@ -1261,8 +1261,8 @@ impl Error {
     /// and the no-arg form matches it, so under CLAUDE.md §2 this one keeps the
     /// plain name and the others are suffixed with their parameters.
     ///
-    /// This is deliberately NOT [`new`](Self::new) with
-    /// [`Errors::UnknownServerError`]: that constructor resolves the code to the
+    /// This is deliberately NOT `new` with
+    /// `Errors::UnknownServerError`: that constructor resolves the code to the
     /// class Java associates with it and yields
     /// [`UnknownServer`](Self::UnknownServer), an `ApiException`. Java's bare
     /// `KafkaException` is a *sibling* of `ApiException`, not a subclass, so it
@@ -1272,7 +1272,7 @@ impl Error {
     /// exactly that (`catch (ApiException e)` returns a failed future,
     /// `catch (KafkaException e)` rethrows).
     ///
-    /// The wire code stays [`Errors::UnknownServerError`] because a
+    /// The wire code stays `Errors::UnknownServerError` because a
     /// client-constructed `KafkaException` has no protocol code of its own.
     ///
     /// Java's no-arg form leaves the message null; Rust reports the code's
@@ -1286,7 +1286,7 @@ impl Error {
     /// `new KafkaException(String message)` (`KafkaException.java:30`).
     ///
     /// See [`kafka`](Self::kafka) for why this does not go through
-    /// [`with_message`](Self::with_message).
+    /// `with_message`.
     pub fn kafka_message(message: impl Into<String>) -> Self {
         Self::KafkaError(KafkaError::with_message(Errors::UnknownServerError, message))
     }
@@ -1296,7 +1296,7 @@ impl Error {
     /// (`KafkaException.java:34`).
     ///
     /// See [`kafka`](Self::kafka) for why this does not go through
-    /// [`with_message`](Self::with_message).
+    /// `with_message`.
     pub fn kafka_source(source: Error) -> Self {
         Self::KafkaError(KafkaError::with_source(Errors::UnknownServerError, source))
     }
@@ -1306,7 +1306,7 @@ impl Error {
     /// (`KafkaException.java:26`).
     ///
     /// See [`kafka`](Self::kafka) for why this does not go through
-    /// [`with_message`](Self::with_message).
+    /// `with_message`.
     pub fn kafka_message_source(message: impl Into<String>, source: Error) -> Self {
         Self::KafkaError(KafkaError::with_message_source(Errors::UnknownServerError, message, source))
     }
@@ -1362,7 +1362,7 @@ impl Error {
     /// Create an invalid group ID error.
     ///
     /// Corresponds to Java's `InvalidGroupIdException` (an `ApiException`
-    /// subclass carrying error code [`Errors::InvalidGroupId`]). Thrown
+    /// subclass carrying error code `Errors::InvalidGroupId`). Thrown
     /// by group-management / offset-commit APIs when the consumer was
     /// constructed without a valid `group.id`.
     pub fn invalid_group_id(message: impl Into<String>) -> Self {
@@ -1640,7 +1640,7 @@ impl Error {
     /// Named for the Java class it tests, per CLAUDE.md §10.4's uniform
     /// `is_` + class + `_error` shape, even though `TransactionAbortableException`
     /// is a **leaf**: it has no subclasses, so §10.4 puts no predicate on
-    /// [`ErrorHierarchy`] for it and this stays an inherent test on the variant.
+    /// `ErrorHierarchy` for it and this stays an inherent test on the variant.
     ///
     /// That is what Java does too — `TransactionManager` compares the code
     /// (`error == Errors.TRANSACTION_ABORTABLE`, four sites) or tests the class
@@ -1724,8 +1724,8 @@ impl Error {
     ///
     /// `false` for the bare [`KafkaError`](Self::KafkaError) — `KafkaException`
     /// is `ApiException`'s *parent*, not an instance of it, and since
-    /// [`Error::new`] resolves every code to its own class that variant is now
-    /// reached only for [`Errors::None`] and for
+    /// `Error::new` resolves every code to its own class that variant is now
+    /// reached only for `Errors::None` and for
     /// [`Error::kafka`](Self::kafka). Also `false` for
     /// [`LocalIllegalArgument`](Self::LocalIllegalArgument) and
     /// [`LocalIllegalState`](Self::LocalIllegalState) (plain `RuntimeException`s),
@@ -1752,7 +1752,7 @@ impl Error {
     /// [`ProducerBufferExhausted`](Self::ProducerBufferExhausted) (through
     /// `BufferExhaustedException extends TimeoutException`).
     ///
-    /// Since [`Error::new`] resolves every code to its own class, the set of
+    /// Since `Error::new` resolves every code to its own class, the set of
     /// *codes* answering `true` is pinned in both directions — against the Java
     /// `extends` chain, over every code — by `errors.rs`'s
     /// `test_retriable_errors_match_java_hierarchy`.
@@ -1820,10 +1820,10 @@ impl Error {
     /// [`is_authentication_error`](Self::is_authentication_error) or
     /// [`is_authorization_error`](Self::is_authorization_error) answers `true`
     /// here too. The remaining members are the configuration errors proper —
-    /// [`Errors::InvalidConfig`], [`Errors::InvalidReplicationFactor`],
-    /// [`Errors::InvalidRequiredAcks`], [`Errors::InvalidTopicError`],
-    /// [`Errors::RecordListTooLarge`], [`Errors::UnsupportedForMessageFormat`]
-    /// and [`Errors::UnsupportedVersion`].
+    /// `Errors::InvalidConfig`, `Errors::InvalidReplicationFactor`,
+    /// `Errors::InvalidRequiredAcks`, `Errors::InvalidTopicError`,
+    /// `Errors::RecordListTooLarge`, `Errors::UnsupportedForMessageFormat`
+    /// and `Errors::UnsupportedVersion`.
     pub fn is_invalid_configuration_error(&self) -> bool {
         ErrorHierarchy::is_invalid_configuration_error(self)
     }
@@ -1834,9 +1834,9 @@ impl Error {
     /// session is gone.
     ///
     /// 6 codes, covering the transaction and group-membership fencing paths:
-    /// [`Errors::FencedInstanceId`], [`Errors::IllegalGeneration`],
-    /// [`Errors::InvalidProducerEpoch`], [`Errors::InvalidProducerIdMapping`],
-    /// [`Errors::ProducerFenced`] and [`Errors::UnknownMemberId`].
+    /// `Errors::FencedInstanceId`, `Errors::IllegalGeneration`,
+    /// `Errors::InvalidProducerEpoch`, `Errors::InvalidProducerIdMapping`,
+    /// `Errors::ProducerFenced` and `Errors::UnknownMemberId`.
     pub fn is_application_recoverable_error(&self) -> bool {
         ErrorHierarchy::is_application_recoverable_error(self)
     }
@@ -1844,7 +1844,7 @@ impl Error {
     /// Whether this error's Java class extends `InvalidOffsetException`
     /// (CLAUDE.md §10.4).
     ///
-    /// [`Errors::OffsetOutOfRange`] is the only member carrying a protocol code;
+    /// `Errors::OffsetOutOfRange` is the only member carrying a protocol code;
     /// the sibling `NoOffsetForPartitionException` is raised client-side.
     pub fn is_invalid_offset_error(&self) -> bool {
         ErrorHierarchy::is_invalid_offset_error(self)
@@ -1853,8 +1853,8 @@ impl Error {
     /// Whether this error's Java class extends `OutOfOrderSequenceException`
     /// (CLAUDE.md §10.4).
     ///
-    /// Two codes: [`Errors::OutOfOrderSequenceNumber`] itself and
-    /// [`Errors::UnknownProducerId`], its only subclass.
+    /// Two codes: `Errors::OutOfOrderSequenceNumber` itself and
+    /// `Errors::UnknownProducerId`, its only subclass.
     pub fn is_out_of_order_sequence_error(&self) -> bool {
         ErrorHierarchy::is_out_of_order_sequence_error(self)
     }
@@ -1915,7 +1915,7 @@ impl Error {
     /// Five payloads name it in their `extends:` list:
     /// [`Authentication`](Self::Authentication) — the concrete base class, which
     /// has no entry in `Errors` of its own but inherits
-    /// [`Errors::InvalidConfig`] from `InvalidConfigurationException` — plus
+    /// `Errors::InvalidConfig` from `InvalidConfigurationException` — plus
     /// [`SaslAuthentication`](Self::SaslAuthentication),
     /// [`SslAuthentication`](Self::SslAuthentication),
     /// [`IllegalSaslState`](Self::IllegalSaslState) and
@@ -1945,7 +1945,7 @@ impl Error {
     /// Six payloads name it in their `extends:` list:
     /// [`Authorization`](Self::Authorization) — the concrete base class, which
     /// has no entry in `Errors` of its own but inherits
-    /// [`Errors::InvalidConfig`] from `InvalidConfigurationException` — plus the five
+    /// `Errors::InvalidConfig` from `InvalidConfigurationException` — plus the five
     /// that do carry one,
     /// [`TopicAuthorization`](Self::TopicAuthorization),
     /// [`GroupAuthorization`](Self::GroupAuthorization),

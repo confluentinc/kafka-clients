@@ -20,7 +20,7 @@ use crate::common::protocol::Errors;
 kafka_error_class! {
     /// The controller has considered the broker registration to be invalid.
     ///
-    /// Corresponds to Java's `InvalidRegistrationException`, error code [`Errors::InvalidRegistration`].
+    /// Corresponds to Java's `InvalidRegistrationException`, error code `Errors::InvalidRegistration`.
     ///
     /// Java `extends` chain:
     ///    `InvalidRegistrationException` -> `ApiException` -> `KafkaException`

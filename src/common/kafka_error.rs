@@ -57,12 +57,12 @@ use super::protocol::Errors;
 /// # Examples
 ///
 /// ```
-/// use confluent_kafka::common::KafkaError;
-/// use confluent_kafka::common::protocol::Errors;
+/// use confluent_kafka::common::Error;
 ///
-/// let err = KafkaError::new(Errors::RequestTimedOut);
-/// assert_eq!(err.code(), 7);
-/// assert_eq!(err.message(), Errors::RequestTimedOut.message());
+/// let err = Error::kafka_message_source("send failed", Error::timeout("expired"));
+/// let base = err.kafka_error().expect("a bare Kafka error embeds a KafkaError");
+/// assert_eq!(base.message(), "send failed");
+/// assert_eq!(base.source().map(Error::message), Some("expired"));
 /// ```
 ///
 /// Classification lives on [`Error`], which wraps this type — Java's
@@ -70,9 +70,9 @@ use super::protocol::Errors;
 ///
 /// ```
 /// use confluent_kafka::common::Error;
-/// use confluent_kafka::common::protocol::Errors;
 ///
-/// assert!(Error::new(Errors::RequestTimedOut).is_retriable_error());
+/// assert!(Error::timeout("expired").is_retriable_error());
+/// assert!(!Error::kafka().is_retriable_error());
 /// ```
 #[derive(Clone, Debug, Delegate)]
 // `target = "self"`: the trait impl is generated from the inherent `message()`

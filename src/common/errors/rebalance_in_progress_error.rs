@@ -20,7 +20,7 @@ use crate::common::protocol::Errors;
 kafka_error_class! {
     /// The group is rebalancing, so a rejoin is needed.
     ///
-    /// Corresponds to Java's `RebalanceInProgressException`, error code [`Errors::RebalanceInProgress`].
+    /// Corresponds to Java's `RebalanceInProgressException`, error code `Errors::RebalanceInProgress`.
     ///
     /// Java `extends` chain:
     ///    `RebalanceInProgressException` -> `ApiException` -> `KafkaException`

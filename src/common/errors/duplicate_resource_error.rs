@@ -22,7 +22,7 @@ use crate::common::protocol::Errors;
 
 /// A request illegally referred to the same resource twice.
 ///
-/// Corresponds to Java's `DuplicateResourceException`, error code [`Errors::DuplicateResource`].
+/// Corresponds to Java's `DuplicateResourceException`, error code `Errors::DuplicateResource`.
 ///
 /// Java `extends` chain:
 ///    `DuplicateResourceException` -> `ApiException` -> `KafkaException`
@@ -51,7 +51,7 @@ impl DuplicateResourceError {
     }
 
     /// Create the error with the code's default message — used by
-    /// [`Errors::error`](crate::common::protocol::Errors::error).
+    /// `Errors::error`.
     #[doc(alias = "org.apache.kafka.common.errors.DuplicateResourceException#DuplicateResourceException")]
     pub fn with_default_message() -> Self {
         Self::new(Errors::DuplicateResource.message())

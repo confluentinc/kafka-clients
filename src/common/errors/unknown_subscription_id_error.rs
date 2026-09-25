@@ -21,7 +21,7 @@ kafka_error_class! {
     /// Client sent a push telemetry request with an invalid or outdated
     /// subscription ID.
     ///
-    /// Corresponds to Java's `UnknownSubscriptionIdException`, error code [`Errors::UnknownSubscriptionId`].
+    /// Corresponds to Java's `UnknownSubscriptionIdException`, error code `Errors::UnknownSubscriptionId`.
     ///
     /// Java `extends` chain:
     ///    `UnknownSubscriptionIdException` -> `ApiException` -> `KafkaException`

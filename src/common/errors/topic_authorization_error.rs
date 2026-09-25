@@ -31,7 +31,7 @@ use super::format_java_set;
 /// Topic authorization failure with the set of unauthorized topics.
 ///
 /// Corresponds to Java's `TopicAuthorizationException`, error code
-/// [`Errors::TopicAuthorizationFailed`].
+/// `Errors::TopicAuthorizationFailed`.
 ///
 /// Java `extends` chain:
 ///    `TopicAuthorizationException` -> `AuthorizationException` ->
