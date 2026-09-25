@@ -13,6 +13,7 @@
 // limitations under the License.
 
 mod check_bindings;
+mod config_types;
 mod error_hierarchy;
 mod java_parse;
 
@@ -280,6 +281,10 @@ fn generate_error_codes() -> anyhow::Result<()> {
     // cross-checked against the same FFI enum (spec §5.5 / Design Decisions D1).
     println!("🔧 Generating the Python error hierarchy from the Java sources...");
     error_hierarchy::generate(Path::new("."))?;
+
+    // And the ConfigDef type of every producer / consumer config key.
+    println!("🔧 Generating the Python config key types from the Java sources...");
+    config_types::generate(Path::new("."))?;
     Ok(())
 }
 
@@ -297,7 +302,9 @@ fn check_error_codes_up_to_date() -> anyhow::Result<()> {
     }
 
     // The Python exception hierarchy generated from the Java sources.
-    let hierarchy_stale = error_hierarchy::check_up_to_date(Path::new("."))?;
+    let mut hierarchy_stale = error_hierarchy::check_up_to_date(Path::new("."))?;
+    // The config key types generated from ProducerConfig / ConsumerConfig.
+    hierarchy_stale.extend(config_types::check_up_to_date(Path::new("."))?);
 
     if !stale.is_empty() || !hierarchy_stale.is_empty() {
         if !stale.is_empty() {

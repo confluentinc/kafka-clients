@@ -12,294 +12,227 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Configuration helpers shared by the clients (spec §5.7, rule 9).
+"""Client configuration: the parts of Java's ``AbstractConfig`` / ``ConfigDef``
+the clients run before the core sees ``configs``.
 
-The ``config`` argument to every client is a ``dict`` of Java's dotted property
-names. These helpers implement the parts of Java's ``ConfigDef`` / ``AbstractConfig``
-the binding needs, so the client families (P4/P5) share one implementation:
+``configs`` is a ``dict`` of Java's dotted keys (CLAUDE.md, Python Binding
+Conventions, Configuration):
 
-* ``coerce_config_value`` — Java's ``ConfigDef.parseType`` coercion (``"true"``/
-  ``True`` equivalent, ``"1000"``/``1000`` equivalent), with Java's ``ConfigException``
-  messages surfaced as ``ConfigError``.
-* ``log_unused`` — Java's ``AbstractConfig.logUnused()`` — unknown keys are
-  accepted, not rejected, with one INFO log.
-* ``duration_to_ms`` — a ``Duration`` (float seconds or ``timedelta``) to
-  milliseconds; a negative value raises ``IllegalArgumentError("Timeout must not
-  be negative")``.
-* ``reject_callback_config_keys`` — the librdkafka callback keys the old client
-  used as config (``error_cb``, ``logger``, ``on_delivery`` …) are not config
-  entries here (spec §5.7 / §11.1); each is rejected with a ``ConfigError``
-  naming its replacement.
+- a key that is not a ``str`` raises ``ConfigError`` (``Utils.castToStringObjectMap``);
+- a value of a key the client's ``ConfigDef`` defines is coerced to the key's
+  type as ``ConfigDef.parseType`` does (``"true"`` equals ``True``,
+  ``"1000"`` equals ``1000``), and a bad value raises ``ConfigError`` with
+  Java's message;
+- ``interceptor.classes`` naming an interceptor, and ``partitioner.class``
+  naming a class other than Java's built-in ``RoundRobinPartitioner``, raise
+  ``ConfigError``: the core runs no interceptors and no custom partitioner;
+- every other key is accepted, and the keys neither the ``ConfigDef`` defines
+  nor a serde's ``configure`` reads are logged once as unused
+  (``AbstractConfig.logUnused()``).
 
-``group.id`` is deliberately **not** rejected: it is optional at construction
-(Java's ``ConsumerConfig`` default ``null``); the group APIs raise
-``InvalidGroupIdError`` when it is missing. This module never rejects it.
-
-The clients are wired to these helpers in P4/P5; nothing here constructs a client.
+The keys and types are generated from Java's ``ProducerConfig`` /
+``ConsumerConfig`` into ``_config_types``.
 """
 
 from __future__ import annotations
 
-import enum
 import logging
+from collections.abc import Callable, Mapping
 from datetime import timedelta
+from typing import Any, Literal
 
-from confluent_kafka import Duration, IllegalArgumentError
+from confluent_kafka import _config_types
+from confluent_kafka._java import java_str, java_trim, parse_double, parse_int, parse_long
 from confluent_kafka.common.config.config_error import ConfigError
+from confluent_kafka.illegal_argument_error import IllegalArgumentError
 
-_LOG = logging.getLogger("confluent_kafka")
+__all__ = ["RecordingConfigs", "coerce", "convert_to_string", "duration_to_ms", "log_unused",
+           "prepare"]
 
-__all__ = [
-    "ConfigType",
-    "coerce_config_value",
-    "log_unused",
-    "duration_to_ms",
-    "reject_callback_config_keys",
-    "REJECTED_CALLBACK_KEYS",
-]
+_LOG = logging.getLogger("confluent_kafka.common.config")
 
+Client = Literal["producer", "consumer"]
 
-class ConfigType(enum.Enum):
-    """The value types the client config keys use — Java's ``ConfigDef.Type``.
+_TYPES: dict[str, dict[str, str]] = {
+    "producer": _config_types.PRODUCER,
+    "consumer": _config_types.CONSUMER,
+}
 
-    Only the value-carrying members are modelled (the documentation-importance
-    members ``HIGH``/``MEDIUM``/``LOW`` are not value types). ``PASSWORD`` coerces
-    like ``STRING`` for our purposes (we do not model Java's ``Password`` wrapper
-    on the surface).
-    """
-
-    BOOLEAN = "boolean"
-    STRING = "string"
-    INT = "int"
-    SHORT = "short"
-    LONG = "long"
-    DOUBLE = "double"
-    LIST = "list"
-    CLASS = "class"
-    PASSWORD = "password"
+# The serde keys: resolved by the binding (``_supply``), never passed to the core.
+_SERDE_KEYS = frozenset({"key.serializer", "value.serializer",
+                         "key.deserializer", "value.deserializer"})
+_INTERCEPTOR_CLASSES = "interceptor.classes"
+_PARTITIONER_CLASS = "partitioner.class"
+_ROUND_ROBIN_PARTITIONER = "org.apache.kafka.clients.producer.RoundRobinPartitioner"
+_INT_BITS = {"INT": 32, "SHORT": 16, "LONG": 64}
+_INT_LABELS = {"INT": "a 32-bit integer", "SHORT": "a 16-bit integer (short)",
+               "LONG": "a 64-bit integer (long)"}
 
 
-_INT32_MIN, _INT32_MAX = -(2**31), 2**31 - 1
-_INT16_MIN, _INT16_MAX = -(2**15), 2**15 - 1
-_INT64_MIN, _INT64_MAX = -(2**63), 2**63 - 1
+class RecordingConfigs(dict[str, Any]):
+    """The user's ``configs``, recording the keys a serde's ``configure``
+    reads, as Java's ``AbstractConfig.RecordingMap`` does, so they are not
+    logged as unused."""
+
+    def __init__(self, configs: Mapping[str, Any]) -> None:
+        super().__init__(configs)
+        self.used: set[str] = set()
+
+    def __getitem__(self, key: str) -> Any:
+        self.used.add(key)
+        return super().__getitem__(key)
+
+    def get(self, key: str, default: Any = None) -> Any:
+        self.used.add(key)
+        return super().get(key, default)
 
 
-def _config_exception(name: str, value: object, message: str) -> ConfigError:
-    """Java's ``ConfigException(name, value, message)`` text as a ``ConfigError``."""
-    return ConfigError(message=f"Invalid value {value} for configuration {name}: {message}")
+def _type_name(value: object) -> str:
+    """The class name Java's ``value.getClass().getName()`` gives, for a
+    Python value."""
+    cls = type(value)
+    return f"{cls.__module__}.{cls.__qualname__}"
 
 
-def coerce_config_value(name: str, value: object, config_type: ConfigType) -> object:
-    """Coerce ``value`` to ``config_type``, mirroring Java's ``ConfigDef.parseType``.
+def _parse_number(name: str, value: object, parse: Callable[[Any], Any], type_name: str) -> Any:
+    """``parse`` the value, a ``NumberFormatException`` reported as
+    ``ConfigDef.parseType`` reports it."""
+    try:
+        return parse(java_trim(value) if isinstance(value, str) else value)
+    except IllegalArgumentError as exc:
+        raise ConfigError(name=name, value=value,
+                          message=f"Not a number of type {type_name}") from exc
 
-    ``None`` passes through (Java returns ``null``). A non-coercible value raises
-    ``ConfigError`` with Java's ``ConfigException`` message. String forms are
-    trimmed first (Java trims before parsing).
-    """
+
+def _fits(bits: int) -> Callable[[int], int]:
+    def check(value: int) -> int:
+        if not -(1 << (bits - 1)) <= value < (1 << (bits - 1)):
+            raise IllegalArgumentError(message=f"{value} is out of range")
+        return value
+    return check
+
+
+def coerce(name: str, value: object, type_name: str) -> object:
+    """``ConfigDef.parseType(name, value, type)``: ``value`` as the key's
+    ``ConfigDef`` type, or ``ConfigError`` with Java's message. ``None`` is
+    Java's ``null``."""
     if value is None:
         return None
-
-    if config_type is ConfigType.BOOLEAN:
+    if type_name == "BOOLEAN":
         if isinstance(value, str):
-            lowered = value.strip().lower()
-            if lowered == "true":
-                return True
-            if lowered == "false":
-                return False
-            raise _config_exception(
-                name, value, "Expected value to be either true or false"
-            )
-        # In Python, ``bool`` is a subclass of ``int``; check it first.
-        if isinstance(value, bool):
+            trimmed = java_trim(value).lower()
+            if trimmed in ("true", "false"):
+                return trimmed == "true"
+        elif isinstance(value, bool):
             return value
-        raise _config_exception(
-            name, value, "Expected value to be either true or false"
-        )
-
-    if config_type in (ConfigType.STRING, ConfigType.PASSWORD):
+        raise ConfigError(name=name, value=value,
+                          message="Expected value to be either true or false")
+    if type_name in ("STRING", "PASSWORD"):
         if isinstance(value, str):
-            return value.strip()
-        raise _config_exception(
-            name,
-            value,
-            f"Expected value to be a string, but it was a {type(value).__name__}",
-        )
-
-    if config_type is ConfigType.INT:
-        return _coerce_int(
-            name, value, _INT32_MIN, _INT32_MAX, "a 32-bit integer", "INT"
-        )
-
-    if config_type is ConfigType.SHORT:
-        return _coerce_int(
-            name, value, _INT16_MIN, _INT16_MAX, "a 16-bit integer (short)", "SHORT"
-        )
-
-    if config_type is ConfigType.LONG:
-        return _coerce_int(
-            name, value, _INT64_MIN, _INT64_MAX, "a 64-bit integer (long)", "LONG"
-        )
-
-    if config_type is ConfigType.DOUBLE:
-        # Java: any Number -> doubleValue(); a String -> Double.parseDouble.
-        if isinstance(value, bool):
-            raise _config_exception(
-                name, value, "Expected value to be a double, but it was a bool"
-            )
-        if isinstance(value, (int, float)):
+            return java_trim(value)
+        raise ConfigError(name=name, value=value,
+                          message=f"Expected value to be a string, but it was a {_type_name(value)}")
+    if type_name in _INT_BITS:
+        bits = _INT_BITS[type_name]
+        if isinstance(value, int) and not isinstance(value, bool):
+            return _parse_number(name, value, _fits(bits), type_name)
+        if isinstance(value, str):
+            if bits == 64:
+                return _parse_number(name, value, parse_long, type_name)
+            return _parse_number(name, value, lambda s: parse_int(s, bits), type_name)
+        raise ConfigError(
+            name=name, value=value,
+            message=f"Expected value to be {_INT_LABELS[type_name]}, but it was a {_type_name(value)}")
+    if type_name == "DOUBLE":
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
             return float(value)
         if isinstance(value, str):
-            try:
-                return float(value.strip())
-            except ValueError as exc:
-                raise _config_exception(
-                    name, value, "Not a number of type DOUBLE"
-                ) from exc
-        raise _config_exception(
-            name,
-            value,
-            f"Expected value to be a double, but it was a {type(value).__name__}",
-        )
-
-    if config_type is ConfigType.LIST:
-        # Java: a List passes through; a String splits on comma-with-whitespace;
-        # an empty string is the empty list.
+            return _parse_number(name, value, parse_double, type_name)
+        raise ConfigError(name=name, value=value,
+                          message=f"Expected value to be a double, but it was a {_type_name(value)}")
+    if type_name == "LIST":
         if isinstance(value, (list, tuple)):
             return list(value)
         if isinstance(value, str):
-            trimmed = value.strip()
-            if trimmed == "":
-                return []
-            return [part.strip() for part in trimmed.split(",")]
-        raise _config_exception(name, value, "Expected a comma separated list.")
-
-    # CLASS: a class object or a dotted-path string passes through unchanged;
-    # actual resolution happens in the serde supply route (Type.CLASS).
-    if config_type is ConfigType.CLASS:
-        if isinstance(value, (type, str)):
+            trimmed = java_trim(value)
+            return [] if not trimmed else [java_trim(part) for part in trimmed.split(",")]
+        raise ConfigError(name=name, value=value, message="Expected a comma separated list.")
+    if type_name == "CLASS":
+        # A class is loaded where it is used (the serde keys, by ``_supply``);
+        # the core resolves the Java class names of the other class keys.
+        if isinstance(value, type):
             return value
-        raise _config_exception(name, value, "Expected a Class instance or class name.")
-
-    raise ConfigError(message=f"Unknown config type for {name}")  # unreachable
-
-
-def _coerce_int(
-    name: str,
-    value: object,
-    lo: int,
-    hi: int,
-    label: str,
-    type_name: str,
-) -> int:
-    # ``bool`` is an ``int`` subclass in Python but is not an integer config value.
-    if isinstance(value, bool):
-        raise _config_exception(
-            name, value, f"Expected value to be {label}, but it was a bool"
-        )
-    if isinstance(value, int):
-        parsed = value
-    elif isinstance(value, str):
-        try:
-            parsed = int(value.strip())
-        except ValueError as exc:
-            # Java throws NumberFormatException -> "Not a number of type <TYPE>".
-            raise _config_exception(
-                name, value, f"Not a number of type {type_name}"
-            ) from exc
-    else:
-        raise _config_exception(
-            name,
-            value,
-            f"Expected value to be {label}, but it was a {type(value).__name__}",
-        )
-    # Java's Integer/Short/Long.parseXxx enforce the fixed width; a String out of
-    # range throws NumberFormatException. Reproduce that for the String route
-    # (a same-typed Java Integer/Short/Long is already in range).
-    if not (lo <= parsed <= hi) and not isinstance(value, int):
-        raise _config_exception(
-            name, value, f"Not a number of type {type_name}"
-        )
-    return parsed
+        if isinstance(value, str):
+            return java_trim(value)
+        raise ConfigError(name=name, value=value,
+                          message="Expected a Class instance or class name.")
+    raise ConfigError(name=name, value=value, message=f"Unknown type {type_name}")
 
 
-def log_unused(unused_keys: set[str]) -> None:
-    """Log unknown/unused config keys once at INFO — Java's ``logUnused()``.
+def convert_to_string(value: object, type_name: str | None) -> str | None:
+    """``ConfigDef.convertToString(parsedValue, type)``: a parsed value as the
+    text the core parses (a password as its value, since the core needs it)."""
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return value
+    if type_name == "LIST" and isinstance(value, list):
+        return ",".join(java_str(v) for v in value)
+    if isinstance(value, type):
+        return f"{value.__module__}.{value.__qualname__}"
+    return java_str(value)
 
-    Java: ``log.info("These configurations '{}' were supplied but are not used
-    yet.", unusedKeys)``. Unknown keys are accepted (the serde config route
-    relies on pass-through keys riding in the dict), only logged.
-    """
-    if unused_keys:
-        _LOG.info(
-            "These configurations '%s' were supplied but are not used yet.",
-            unused_keys,
-        )
+
+def prepare(configs: Mapping[str, Any], *,
+            client: Client) -> tuple[RecordingConfigs, dict[str, str]]:
+    """Parse ``configs`` for a ``client``: the user's configs, recording what
+    the serdes read, and the string map the core parses (the serde keys and
+    ``None`` values left out)."""
+    if not isinstance(configs, Mapping):
+        raise TypeError(f"configs must be a dict, not {type(configs).__name__}")
+    for key, value in configs.items():
+        if not isinstance(key, str):
+            raise ConfigError(name=java_str(key), value=value, message="Key must be a string.")
+    types = _TYPES[client]
+    native: dict[str, str] = {}
+    for key, value in configs.items():
+        type_name = types.get(key)
+        parsed = coerce(key, value, type_name) if type_name is not None else value
+        if key == _INTERCEPTOR_CLASSES and parsed:
+            raise ConfigError(name=key, value=value, message="The client runs no interceptors.")
+        if key == _PARTITIONER_CLASS and parsed is not None and parsed != _ROUND_ROBIN_PARTITIONER:
+            raise ConfigError(
+                name=key, value=value,
+                message=f"The client runs no custom partitioner; {_ROUND_ROBIN_PARTITIONER} "
+                "is the only partitioner class it has.")
+        text = convert_to_string(parsed, type_name)
+        if key in _SERDE_KEYS or text is None:
+            continue
+        native[key] = text
+    return RecordingConfigs(configs), native
 
 
-def duration_to_ms(timeout: Duration | None, *, default_ms: int) -> int:
-    """Convert a ``Duration`` (float seconds or ``timedelta``) to milliseconds.
+def log_unused(originals: RecordingConfigs, *, client: Client) -> None:
+    """``AbstractConfig.logUnused()``: log once, at INFO, the supplied keys
+    that the client's ``ConfigDef`` does not define and no serde read."""
+    types = _TYPES[client]
+    unused = sorted(k for k in originals if k not in types and k not in originals.used)
+    if unused:
+        _LOG.info("These configurations '%s' were supplied but are not used yet.",
+                  java_str(unused))
 
-    ``None`` -> ``default_ms`` (Java's ``default.api.timeout.ms`` fallback for the
-    ``Duration``-less overloads). A negative value raises
-    ``IllegalArgumentError("The timeout cannot be negative.")`` (Java rejects a
-    negative ``Duration``). There is no infinite sentinel (spec §11.1).
-    """
+
+def duration_to_ms(timeout: float | timedelta | None, *, default_ms: int) -> int:
+    """A ``Duration`` (seconds, or a ``timedelta``) in milliseconds; ``None`` is
+    ``default_ms``. A negative value raises
+    ``IllegalArgumentError(message="The timeout cannot be negative.")``, Java's
+    text for every client's negative-timeout check."""
     if timeout is None:
         return default_ms
     if isinstance(timeout, timedelta):
         millis = timeout.total_seconds() * 1000.0
     else:
-        # float | int seconds
         millis = float(timeout) * 1000.0
     if millis < 0:
-        # Java's exact text for every client's negative-timeout guard
-        # (KafkaProducer.java:1393, AsyncKafkaConsumer.java:1552, ...).
         raise IllegalArgumentError(message="The timeout cannot be negative.")
     return int(millis)
-
-
-# The librdkafka callback config keys the old client used, mapped to their
-# replacement here (spec §5.7 / §11.1). None of these is a config entry in the
-# new client; each is rejected with a ConfigError naming the replacement.
-REJECTED_CALLBACK_KEYS: dict[str, str] = {
-    "error_cb": (
-        "no global error callback — operation errors raise or fail the future; "
-        "attach a logging.Handler to 'confluent_kafka' for connectivity events"
-    ),
-    "logger": (
-        "no logger parameter — configure logging.getLogger('confluent_kafka')"
-    ),
-    "on_delivery": (
-        "pass a delivery callback to send(record=..., callback=cb) "
-        "instead of config"
-    ),
-    "on_commit": (
-        "pass a commit callback to commit_nowait(callback=cb) instead of config"
-    ),
-    "stats_cb": "use metrics() — statistics are pull-based",
-    "throttle_cb": "not part of this surface",
-    "oauth_cb": "not part of this surface",
-    "dr_cb": (
-        "use the delivery future or send(record=..., callback=cb)"
-    ),
-    "dr_msg_cb": (
-        "use the delivery future or send(record=..., callback=cb)"
-    ),
-    "rebalance_cb": (
-        "pass a ConsumerRebalanceListener to subscribe(callback=...)"
-    ),
-}
-
-
-def reject_callback_config_keys(config: dict[str, object]) -> None:
-    """Raise ``ConfigError`` for any old-client callback key present in ``config``.
-
-    Callbacks are never config entries here (spec §5.7); the message names the
-    replacement for each key found.
-    """
-    for key in config:
-        replacement = REJECTED_CALLBACK_KEYS.get(key)
-        if replacement is not None:
-            raise ConfigError(
-                message=f"'{key}' is not a configuration key in this client: {replacement}"
-            )

@@ -132,7 +132,7 @@ class _ProducerState:
     def _init_mock(self, auto_complete: bool) -> None:
         self._c_producer = _lib.Producer_new(auto_complete, self)
 
-    def _init_kafka(self, config: dict[str, object]) -> None:
+    def _init_kafka(self, config: dict[str, str]) -> None:
         self._c_producer = _lib.KafkaProducer_new(config, self)
 
     def _check_not_closed(self) -> None:

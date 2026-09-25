@@ -12,8 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Consumer construction: config validation, serde resolution, and building the
-native handle (spec §5.7 / §5.4).
+"""Consumer construction: config parsing, serde resolution, and building the
+native handle (CLAUDE.md, Python Binding Conventions, Configuration and
+Serialization).
 
 Shared by ``KafkaConsumer`` and ``AsyncKafkaConsumer`` so the two constructors
 cannot diverge.
@@ -25,27 +26,14 @@ from typing import Any, Callable
 
 import _confluentkafka as _lib  # type: ignore[import-not-found]
 
+from confluent_kafka._config import log_unused, prepare
 from confluent_kafka._errors import from_ffi_error
 from confluent_kafka.common.serialization import bytes_deserializer
 from confluent_kafka.common.serialization._supply import resolve_serde
-from confluent_kafka._config import reject_callback_config_keys
 
 # Config keys that carry the serde class on the config route.
 _KEY_DESERIALIZER_KEY = "key.deserializer"
 _VALUE_DESERIALIZER_KEY = "value.deserializer"
-
-# The keys the binding consumes itself (serde class keys) — not passed to the
-# native client, which does its own deserialization only for the byte defaults.
-_BINDING_ONLY_KEYS = frozenset({_KEY_DESERIALIZER_KEY, _VALUE_DESERIALIZER_KEY})
-
-
-def _stringify(value: object) -> str:
-    """Coerce a config value to the string the native properties map wants
-    (Java's ``ConfigDef`` accepts ``"true"``/``True`` and ``"1000"``/``1000``
-    equivalently; the native side re-parses per the key's declared type)."""
-    if isinstance(value, bool):
-        return "true" if value else "false"
-    return str(value)
 
 
 def resolve_consumer_construction(
@@ -60,33 +48,21 @@ def resolve_consumer_construction(
     Raises the typed construction error (e.g. ``InvalidGroupIdError`` for an
     empty ``group.id``) rather than a bare ``RuntimeError``.
     """
-    if not isinstance(config, dict):
-        raise TypeError("config must be a dict")
-    # Reject the old-client callback config keys with a ConfigError naming the
-    # replacement (spec §5.7 / §11.1). group.id is deliberately not rejected.
-    reject_callback_config_keys(config)
-
+    # Java's ConsumerConfig parsing: coerced values, the serde keys left to
+    # the binding, the unused keys logged once the serdes are configured.
+    originals, native_config = prepare(config, client="consumer")
     key_deser = resolve_serde(
-        key_deserializer, config, _KEY_DESERIALIZER_KEY,
-        is_key=True, default=bytes_deserializer,
+        key_deserializer, originals, _KEY_DESERIALIZER_KEY,
+        is_key=True, default=bytes_deserializer(),
     )
     value_deser = resolve_serde(
-        value_deserializer, config, _VALUE_DESERIALIZER_KEY,
-        is_key=False, default=bytes_deserializer,
+        value_deserializer, originals, _VALUE_DESERIALIZER_KEY,
+        is_key=False, default=bytes_deserializer(),
     )
-    # Honour the optional configure(conf, is_key) lifecycle (config route only;
-    # a kwarg serde is used as-is). resolve_serde already called configure for
-    # the config route, so this is a no-op for the kwarg route.
-
-    # Build the native config: string-coerced, binding-only keys stripped.
-    native_config = {
-        k: _stringify(v)
-        for k, v in config.items()
-        if k not in _BINDING_ONLY_KEYS
-    }
 
     handle, error = _lib.Consumer_KafkaConsumer_new_typed(native_config)
     if error:
         # Java wraps the construction failure; surface the typed cause.
         raise from_ffi_error(error)
+    log_unused(originals, client="consumer")
     return handle, key_deser, value_deser
