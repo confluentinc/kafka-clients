@@ -27,7 +27,7 @@
 //! `ShareAckVerifier` interprets them, with no change to the producer path or
 //! the orchestrator.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Mutex;
 
 use confluent_kafka::common::Uuid;
@@ -51,15 +51,17 @@ use confluent_kafka::common::Uuid;
 pub enum WorkloadEvent {
     /// Producer `producer` is about to hand `index` to the client. This opens
     /// the record's in-flight window; the matching `Delivered` or `SendFailed`
-    /// closes it. The verifier uses these events to verify that no producer has
-    /// more than one record in flight at any time, which is the producer
-    /// workload's contract (send, await the outcome, send the next).
+    /// closes it. The verifier uses these events to report each producer's
+    /// in-flight peak and to verify that every window is closed by verdict
+    /// time.
     Sent {
         index: u64,
         topic: String,
         producer: String,
     },
     /// Producer received a broker ack for `index` at this physical address.
+    /// `topic_id` is the generation current when the ack arrived (see
+    /// `delivery_callback` in `workload.rs`).
     Delivered {
         index: u64,
         topic: String,
@@ -67,9 +69,19 @@ pub enum WorkloadEvent {
         partition: i32,
         offset: i64,
     },
-    /// Producer's send failed — the record was never committed, so it is not
-    /// data loss; recorded only for context.
+    /// Producer's send failed: rejected before enqueue or not acknowledged
+    /// within the delivery timeout. Any failed send fails the run (see
+    /// `ConservationState::failed_sends`).
     SendFailed { index: u64, topic: String, error: String },
+    /// A consumer operation returned an error. Recorded for the verdict's error
+    /// summary; consumer errors are reported with their text and count, not
+    /// scored, because the consumer loop retries them and the conservation
+    /// check is what decides whether they had an effect.
+    ConsumerError {
+        consumer: String,
+        op: ConsumerOp,
+        error: String,
+    },
     /// Consumer received `index` at this physical address. `topic_id` is
     /// best-effort: `Uuid::zero()` when the consumer could not resolve it
     /// (single-topic non-recreate runs do not need it).
@@ -90,6 +102,22 @@ pub enum WorkloadEvent {
     },
     /// Broker-reported redelivery count for `index` (KIP-932 `dc`). (Future.)
     DeliveryCount { index: u64, count: u32 },
+}
+
+/// The consumer operation that produced a [`WorkloadEvent::ConsumerError`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ConsumerOp {
+    Poll,
+    Commit,
+}
+
+impl std::fmt::Display for ConsumerOp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            ConsumerOp::Poll => "consumer poll",
+            ConsumerOp::Commit => "consumer commit",
+        })
+    }
 }
 
 /// Hint to a verifier that a chaos action legitimately destroyed data, so the
@@ -229,6 +257,9 @@ struct ConservationState {
     /// the delivery timeout is also ambiguous (the record may or may not have
     /// been written), which the verifier cannot resolve.
     failed_sends: Vec<(LogicalKey, String)>,
+    /// Consumer poll and commit errors as (consumer label, operation, error
+    /// text). Reported in the verdict's error summary, not scored.
+    consumer_errors: Vec<(String, ConsumerOp, String)>,
     /// Total consume events seen (incl. redeliveries) — the drain-progress
     /// signal read by `consumed_progress`.
     consumed_events: u64,
@@ -245,16 +276,19 @@ struct ConservationState {
     /// producer -> records currently in flight.
     in_flight_by_producer: HashMap<String, u32>,
     /// producer -> the maximum number of records it had in flight at any one
-    /// time. The producer workload's contract is one (send, await the
-    /// acknowledgement or failure, then send the next); a higher value indicates
-    /// that the workload did not behave as documented.
+    /// time. Reported in the verdict (not scored): the producer workload sends
+    /// without awaiting each outcome, so the peak shows how deep the client's
+    /// pipeline got during the run.
     max_in_flight_by_producer: HashMap<String, u32>,
+    /// (topic, partition) -> offset of the most recent acknowledgement on it,
+    /// in event order (not the maximum: a recreate resets offsets to 0, and the
+    /// latest ack is what the per-partition loss report needs).
+    last_delivered_offset: HashMap<(String, i32), i64>,
+    /// (topic, partition) -> offset of the most recent record the consumer
+    /// observed on it, in event order. Compared with `last_delivered_offset`
+    /// in the per-partition loss report to show where the consumer stopped.
+    last_consumed_offset: HashMap<(String, i32), i64>,
 }
-
-/// The producer workload keeps exactly one record in flight: it awaits each
-/// send's outcome before issuing the next (`workload.rs`, `ProducerWorkload`).
-/// The verdict fails any producer whose observed peak exceeds this.
-const MAX_IN_FLIGHT_PER_PRODUCER: u32 = 1;
 
 impl ConservationVerifier {
     pub fn new() -> Self {
@@ -367,6 +401,7 @@ impl Verifier for ConservationVerifier {
                 *peak = (*peak).max(now);
             },
             WorkloadEvent::Delivered { index, topic, topic_id, partition, offset } => {
+                s.last_delivered_offset.insert((topic.clone(), partition), offset);
                 let key = (topic, index);
                 s.settle(&key);
                 s.delivered.insert(key, (topic_id, partition, offset));
@@ -386,7 +421,11 @@ impl Verifier for ConservationVerifier {
                 *s.phys_seen.entry(addr).or_insert(0) += 1;
                 s.partitions_seen.insert(partition);
                 s.consumed_events += 1;
+                s.last_consumed_offset.insert((topic.clone(), partition), offset);
                 *s.consumed_events_by_topic.entry(topic).or_insert(0) += 1;
+            },
+            WorkloadEvent::ConsumerError { consumer, op, error } => {
+                s.consumer_errors.push((consumer, op, error));
             },
             // The conservation verifier does not interpret share-consumer
             // events; a ShareAckVerifier will.
@@ -472,12 +511,45 @@ impl Verifier for ConservationVerifier {
             ));
         }
         let producer_duplicates: Vec<LogicalKey> = double_writes.into_iter().map(|(key, _)| key).collect();
+        // Where the loss sits: per (topic, partition), how many records were
+        // lost, the offset range they occupy, and the last offset acknowledged
+        // against the last one consumed on that partition. A partition whose
+        // consumer stopped shows as "last consumed" far below "last acked" (or
+        // absent), which is a different picture from loss scattered across
+        // every partition.
+        let mut by_partition: BTreeMap<(String, i32), (usize, i64, i64)> = BTreeMap::new();
+        for key in &lost {
+            let (_, partition, offset) = s.delivered[key];
+            let entry = by_partition.entry((key.0.clone(), partition)).or_insert((0, offset, offset));
+            entry.0 += 1;
+            entry.1 = entry.1.min(offset);
+            entry.2 = entry.2.max(offset);
+        }
+        let lost_by_partition: Vec<LostPartition> = by_partition
+            .into_iter()
+            .map(|((topic, partition), (count, first, last))| LostPartition {
+                last_delivered_offset: s.last_delivered_offset[&(topic.clone(), partition)],
+                last_consumed_offset: s.last_consumed_offset.get(&(topic.clone(), partition)).copied(),
+                topic,
+                partition,
+                lost: count,
+                first_lost_offset: first,
+                last_lost_offset: last,
+            })
+            .collect();
         if !lost.is_empty() {
             let mut sample = lost.clone();
             sample.sort_unstable();
             sample.truncate(20);
-            // Render as `topic#index` so multi-topic loss is legible.
-            let sample_str: Vec<String> = sample.iter().map(|(t, idx)| format!("{t}#{idx}")).collect();
+            // Render as `topic#index@p<partition>/<offset>` so each lost record
+            // can be located in the broker logs and its partition read off.
+            let sample_str: Vec<String> = sample
+                .iter()
+                .map(|key| {
+                    let (_, p, o) = s.delivered[key];
+                    format!("{}#{}@p{p}/{o}", key.0, key.1)
+                })
+                .collect();
             reasons.push(format!(
                 "data loss: {} acknowledged record(s) never consumed (sample: {sample_str:?})",
                 lost.len()
@@ -524,25 +596,11 @@ impl Verifier for ConservationVerifier {
             ));
         }
 
-        // In-flight bound: derived from the event stream (`Sent` opens a
+        // In-flight peak: derived from the event stream (`Sent` opens a
         // record's window, `Delivered` / `SendFailed` closes it), not
-        // self-reported by the workload. Per producer, not global — N producers
-        // legitimately have N records in flight between them.
-        let mut over: Vec<(&String, &u32)> = s
-            .max_in_flight_by_producer
-            .iter()
-            .filter(|(_, peak)| **peak > MAX_IN_FLIGHT_PER_PRODUCER)
-            .collect();
-        over.sort();
-        if !over.is_empty() {
-            let detail: Vec<String> = over.iter().map(|(producer, peak)| format!("{producer}={peak}")).collect();
-            reasons.push(format!(
-                "in-flight bound: {} producer(s) had more than {MAX_IN_FLIGHT_PER_PRODUCER} record in flight \
-                 at once (peak per producer: {})",
-                over.len(),
-                detail.join(", ")
-            ));
-        }
+        // self-reported by the workload. Reported, not scored: the producer
+        // sends without awaiting each outcome, so the peak is whatever depth
+        // the client's pipeline reached.
         let max_in_flight = s.max_in_flight_by_producer.values().copied().max().unwrap_or(0);
 
         // Every `Sent` must settle: the producer loop awaits each send's outcome
@@ -569,10 +627,29 @@ impl Verifier for ConservationVerifier {
         let unobserved_delivered = s.delivered.keys().filter(|key| !s.observed.contains_key(*key)).count();
         let expected_lost = unobserved_delivered.saturating_sub(lost.len());
 
+        // Error summary: every client-reported error, grouped by operation and
+        // error text so the report shows what failed and how often, e.g.
+        // `7x consumer commit: IllegalStateError: OffsetCommit failed with
+        // stale member epoch ...`. Ordered by count, then text.
+        let poll_errors = s.consumer_errors.iter().filter(|(_, op, _)| *op == ConsumerOp::Poll).count();
+        let commit_errors = s.consumer_errors.iter().filter(|(_, op, _)| *op == ConsumerOp::Commit).count();
+        let mut grouped: HashMap<String, usize> = HashMap::new();
+        for (_, err) in &s.failed_sends {
+            *grouped.entry(format!("producer send: {err}")).or_insert(0) += 1;
+        }
+        for (_, op, err) in &s.consumer_errors {
+            *grouped.entry(format!("{op}: {err}")).or_insert(0) += 1;
+        }
+        let mut error_breakdown: Vec<(String, usize)> = grouped.into_iter().collect();
+        error_breakdown.sort_by(|(a_text, a_n), (b_text, b_n)| b_n.cmp(a_n).then_with(|| a_text.cmp(b_text)));
+
         ChaosVerdict {
             delivered: s.delivered.len(),
             expected_lost,
             failed_sends: s.failed_sends.len(),
+            poll_errors,
+            commit_errors,
+            error_breakdown,
             logical_duplicates,
             physical_duplicates,
             producer_duplicates,
@@ -581,9 +658,27 @@ impl Verifier for ConservationVerifier {
             max_in_flight,
             unsettled_sends,
             lost,
+            lost_by_partition,
             reasons,
         }
     }
+}
+
+/// Where a run's loss sits on one partition; see [`ChaosVerdict::lost_by_partition`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LostPartition {
+    pub topic: String,
+    pub partition: i32,
+    /// Lost records on this partition.
+    pub lost: usize,
+    /// Lowest and highest offset among the lost records.
+    pub first_lost_offset: i64,
+    pub last_lost_offset: i64,
+    /// Offset of the most recent acknowledgement on this partition.
+    pub last_delivered_offset: i64,
+    /// Offset of the most recent record the consumer observed on this
+    /// partition; `None` if it never observed one.
+    pub last_consumed_offset: Option<i64>,
 }
 
 /// Pass/fail verdict of a chaos run.
@@ -594,6 +689,14 @@ pub struct ChaosVerdict {
     /// Producer sends that were rejected or not acknowledged within the
     /// delivery timeout. Non-zero fails the run.
     pub failed_sends: usize,
+    /// Consumer `poll` calls that returned an error. Reported, not scored.
+    pub poll_errors: usize,
+    /// Consumer commit calls that returned an error. Reported, not scored.
+    pub commit_errors: usize,
+    /// Every client-reported error (failed sends, poll and commit errors)
+    /// grouped by operation and error text, with its count, most frequent
+    /// first. Rendered under the verdict as `<n>x <operation>: <error>`.
+    pub error_breakdown: Vec<(String, usize)>,
     /// Same logical `index` observed more than once (redelivery).
     pub logical_duplicates: u64,
     /// Same physical `(topic_id, partition, offset)` seen more than once.
@@ -608,8 +711,8 @@ pub struct ChaosVerdict {
     pub cross_generation_duplicates: usize,
     pub partitions_covered: usize,
     /// The maximum number of records any single producer had in flight at one
-    /// time. The workload's contract is 1; a higher value fails the run. 0 when
-    /// the event stream carried no `Sent` events.
+    /// time. Reported, not scored. 0 when the event stream carried no `Sent`
+    /// events.
     pub max_in_flight: u32,
     /// Records `Sent` but neither `Delivered` nor `SendFailed` by verdict time.
     /// Non-zero fails the run.
@@ -617,6 +720,10 @@ pub struct ChaosVerdict {
     /// Delivered `(topic, index)` records the consumer never observed (data
     /// loss).
     pub lost: Vec<LogicalKey>,
+    /// `lost` grouped by (topic, partition), ordered by topic then partition,
+    /// with the last acknowledged and last consumed offset on each. Empty when
+    /// nothing was lost.
+    pub lost_by_partition: Vec<LostPartition>,
     /// Failure reasons; empty ⇒ pass.
     pub reasons: Vec<String>,
 }
@@ -647,6 +754,38 @@ impl std::fmt::Display for ChaosVerdict {
             writeln!(f, "  expected-lost (recreate)  : {}", self.expected_lost)?;
         }
         writeln!(f, "  lost (delivered, unseen)  : {}", self.lost.len())?;
+        if !self.lost_by_partition.is_empty() {
+            writeln!(f, "  lost by partition:")?;
+            for p in &self.lost_by_partition {
+                let consumed = match p.last_consumed_offset {
+                    Some(o) => o.to_string(),
+                    None => "none".to_string(),
+                };
+                writeln!(
+                    f,
+                    "    {} p{}: {} lost at offsets {}..={}; last acked offset {}, last consumed offset {consumed}",
+                    p.topic, p.partition, p.lost, p.first_lost_offset, p.last_lost_offset, p.last_delivered_offset
+                )?;
+            }
+        }
+        writeln!(f, "  consumer poll errors      : {}", self.poll_errors)?;
+        writeln!(f, "  consumer commit errors    : {}", self.commit_errors)?;
+        if !self.error_breakdown.is_empty() {
+            writeln!(f, "  errors by kind:")?;
+            for (text, count) in &self.error_breakdown {
+                // One line per distinct error; long messages are cut so the
+                // block stays readable, the full text is in the run log.
+                const MAX: usize = 160;
+                let shown: String = if text.chars().count() > MAX {
+                    let mut t: String = text.chars().take(MAX).collect();
+                    t.push_str("...");
+                    t
+                } else {
+                    text.clone()
+                };
+                writeln!(f, "    {count}x {shown}")?;
+            }
+        }
         for reason in &self.reasons {
             writeln!(f, "  FAIL: {reason}")?;
         }
@@ -943,6 +1082,91 @@ mod tests {
         assert!(!verdict.is_pass(), "loss on t1 must fail the run");
     }
 
+    /// The loss sample and the per-partition report name where each lost record
+    /// sits. Partition 1 here is a stuck consumer: it acked offsets 0..=3 and
+    /// consumed only offset 0, so the report shows the gap between the last
+    /// acked and last consumed offsets. Partition 0 is healthy and absent from
+    /// the report.
+    #[test]
+    fn loss_is_reported_per_partition_with_offsets() {
+        let v = ConservationVerifier::new();
+        let deliver = |index: u64, partition: i32, offset: i64| {
+            v.record(WorkloadEvent::Delivered { index, topic: "t".into(), topic_id: zero(), partition, offset });
+        };
+        let consume = |index: u64, partition: i32, offset: i64| {
+            v.record(WorkloadEvent::Consumed { index, topic: "t".into(), topic_id: zero(), partition, offset });
+        };
+        // Partition 0: two records, both consumed.
+        deliver(0, 0, 0);
+        deliver(2, 0, 1);
+        consume(0, 0, 0);
+        consume(2, 0, 1);
+        // Partition 1: four records, only the first consumed.
+        deliver(1, 1, 0);
+        deliver(3, 1, 1);
+        deliver(5, 1, 2);
+        deliver(7, 1, 3);
+        consume(1, 1, 0);
+
+        let verdict = v.verdict(1);
+        assert_eq!(verdict.lost.len(), 3, "{verdict}");
+        assert_eq!(
+            verdict.lost_by_partition,
+            vec![LostPartition {
+                topic: "t".into(),
+                partition: 1,
+                lost: 3,
+                first_lost_offset: 1,
+                last_lost_offset: 3,
+                last_delivered_offset: 3,
+                last_consumed_offset: Some(0),
+            }],
+            "{verdict}"
+        );
+        let reason = verdict
+            .reasons
+            .iter()
+            .find(|r| r.starts_with("data loss"))
+            .unwrap_or_else(|| panic!("expected a data-loss reason: {verdict}"));
+        assert!(
+            reason.contains("\"t#3@p1/1\"") && reason.contains("\"t#5@p1/2\"") && reason.contains("\"t#7@p1/3\""),
+            "the sample must carry partition and offset: {reason}"
+        );
+        let rendered = verdict.to_string();
+        assert!(
+            rendered.contains("t p1: 3 lost at offsets 1..=3; last acked offset 3, last consumed offset 0"),
+            "{rendered}"
+        );
+        assert!(
+            !rendered.contains("t p0:"),
+            "a partition without loss is not listed: {rendered}"
+        );
+    }
+
+    /// A partition the consumer never read at all reports `none` for its last
+    /// consumed offset, and a passing run renders no per-partition block.
+    #[test]
+    fn partition_never_consumed_reports_none_and_passing_run_has_no_block() {
+        let v = ConservationVerifier::new();
+        v.record(WorkloadEvent::Delivered { index: 0, topic: "t".into(), topic_id: zero(), partition: 2, offset: 9 });
+        let verdict = v.verdict(0);
+        assert_eq!(verdict.lost_by_partition.len(), 1, "{verdict}");
+        assert_eq!(verdict.lost_by_partition[0].last_consumed_offset, None);
+        assert!(
+            verdict
+                .to_string()
+                .contains("t p2: 1 lost at offsets 9..=9; last acked offset 9, last consumed offset none")
+        );
+
+        let ok = ConservationVerifier::new();
+        ok.record(delivered(0));
+        ok.record(consumed(0));
+        let verdict = ok.verdict(1);
+        assert!(verdict.is_pass(), "{verdict}");
+        assert!(verdict.lost_by_partition.is_empty());
+        assert!(!verdict.to_string().contains("lost by partition"), "{verdict}");
+    }
+
     fn sent(index: u64, producer: &str) -> WorkloadEvent {
         WorkloadEvent::Sent { index, topic: "t".into(), producer: producer.into() }
     }
@@ -955,9 +1179,8 @@ mod tests {
         WorkloadEvent::Consumed { index, topic: "t".into(), topic_id: zero(), partition: 0, offset: index as i64 }
     }
 
-    /// The producer workload's contract: one record in flight, with each send
-    /// settled before the next is issued. The peak is 1 and no window is left
-    /// open.
+    /// Sequential sends, each settled before the next is issued: the peak is 1
+    /// and no window is left open.
     #[test]
     fn one_record_in_flight_per_producer_passes() {
         let v = ConservationVerifier::new();
@@ -972,12 +1195,10 @@ mod tests {
         assert_eq!(verdict.unsettled_sends, 0);
     }
 
-    /// A second send issued before the first has settled violates the
-    /// one-in-flight contract and fails the run, naming the producer and its
-    /// peak, even though every record was delivered and consumed (conservation
-    /// is intact).
+    /// Pipelined sends (a second send issued before the first has settled) are
+    /// the normal case: the run passes and the verdict reports the peak.
     #[test]
-    fn two_records_in_flight_fails() {
+    fn two_records_in_flight_passes_and_reports_the_peak() {
         let v = ConservationVerifier::new();
         v.record(sent(0, "producer-rust-1"));
         v.record(sent(1, "producer-rust-1"));
@@ -986,24 +1207,14 @@ mod tests {
         v.record(consumed(0));
         v.record(consumed(1));
         let verdict = v.verdict(1);
-        assert!(!verdict.is_pass(), "pipelined sends must fail: {verdict}");
+        assert!(verdict.is_pass(), "pipelined sends must pass: {verdict}");
         assert_eq!(verdict.max_in_flight, 2);
         assert_eq!(verdict.unsettled_sends, 0, "both sends settled");
-        assert_eq!(verdict.lost.len(), 0, "the failure is the in-flight bound, not loss");
-        let reason = verdict
-            .reasons
-            .iter()
-            .find(|r| r.starts_with("in-flight bound"))
-            .unwrap_or_else(|| panic!("expected an in-flight reason, got {:?}", verdict.reasons));
-        assert!(
-            reason.contains("producer-rust-1=2"),
-            "reason must name the producer and its peak: {reason}"
-        );
     }
 
     /// A failed send closes the window in the same way as an acknowledgement:
     /// sending again after a `SendFailed` is still one record in flight. The
-    /// run still fails, but for the failed send itself, not the in-flight bound.
+    /// run fails for the failed send itself, not for an unsettled window.
     #[test]
     fn failed_send_closes_the_in_flight_window() {
         let v = ConservationVerifier::new();
@@ -1015,13 +1226,7 @@ mod tests {
         let verdict = v.verdict(1);
         assert_eq!(verdict.max_in_flight, 1);
         assert_eq!(verdict.unsettled_sends, 0);
-        assert!(
-            !verdict
-                .reasons
-                .iter()
-                .any(|r| r.starts_with("in-flight bound") || r.starts_with("unsettled sends")),
-            "{verdict}"
-        );
+        assert!(!verdict.reasons.iter().any(|r| r.starts_with("unsettled sends")), "{verdict}");
         assert_eq!(verdict.failed_sends, 1);
         assert!(!verdict.is_pass(), "{verdict}");
     }
@@ -1057,6 +1262,72 @@ mod tests {
         );
     }
 
+    /// Consumer poll and commit errors are counted per operation and grouped by
+    /// error text in the breakdown, most frequent first, together with failed
+    /// sends. They do not by themselves fail the run.
+    #[test]
+    fn consumer_errors_are_summarized_but_not_scored() {
+        let v = ConservationVerifier::new();
+        for i in 0..3 {
+            v.record(delivered(i));
+            v.record(consumed(i));
+        }
+        let stale = "IllegalStateError: OffsetCommit failed with stale member epoch.";
+        for consumer in ["consumer-rust-1", "consumer-rust-1", "consumer-rust-2"] {
+            v.record(WorkloadEvent::ConsumerError {
+                consumer: consumer.into(),
+                op: ConsumerOp::Commit,
+                error: stale.into(),
+            });
+        }
+        v.record(WorkloadEvent::ConsumerError {
+            consumer: "consumer-rust-2".into(),
+            op: ConsumerOp::Commit,
+            error: "TimeoutError: Timeout of 60000ms expired before successfully committing offsets".into(),
+        });
+        v.record(WorkloadEvent::ConsumerError {
+            consumer: "consumer-rust-1".into(),
+            op: ConsumerOp::Poll,
+            error: "DisconnectError: broker 2 disconnected".into(),
+        });
+        let verdict = v.verdict(1);
+        assert!(verdict.is_pass(), "{verdict}");
+        assert_eq!(verdict.poll_errors, 1);
+        assert_eq!(verdict.commit_errors, 4);
+        assert_eq!(
+            verdict.error_breakdown,
+            vec![
+                (format!("consumer commit: {stale}"), 3),
+                (
+                    "consumer commit: TimeoutError: Timeout of 60000ms expired before successfully committing offsets"
+                        .into(),
+                    1
+                ),
+                ("consumer poll: DisconnectError: broker 2 disconnected".into(), 1),
+            ]
+        );
+        let rendered = verdict.to_string();
+        assert!(rendered.contains("consumer commit errors    : 4"), "{rendered}");
+        assert!(rendered.contains(&format!("    3x consumer commit: {stale}")), "{rendered}");
+    }
+
+    /// Failed sends appear in the same breakdown under `producer send`.
+    #[test]
+    fn failed_sends_appear_in_the_error_breakdown() {
+        let v = ConservationVerifier::new();
+        v.record(WorkloadEvent::SendFailed { index: 0, topic: "t".into(), error: "Timeout: expired".into() });
+        v.record(WorkloadEvent::SendFailed { index: 1, topic: "t".into(), error: "Timeout: expired".into() });
+        let verdict = v.verdict(1);
+        assert_eq!(
+            verdict.error_breakdown,
+            vec![("producer send: Timeout: expired".to_string(), 2)]
+        );
+        assert!(
+            verdict.to_string().contains("    2x producer send: Timeout: expired"),
+            "{verdict}"
+        );
+    }
+
     /// A run with no failed sends does not carry a failed-sends reason.
     #[test]
     fn zero_failed_sends_passes() {
@@ -1070,10 +1341,10 @@ mod tests {
         assert_eq!(verdict.failed_sends, 0);
     }
 
-    /// The bound is per producer, not global: two producers with one record in
-    /// flight each are within the contract (a global count would be 2).
+    /// The peak is per producer, not global: two producers with one record in
+    /// flight each report a peak of 1 (a global count would be 2).
     #[test]
-    fn in_flight_bound_is_per_producer_not_global() {
+    fn in_flight_peak_is_per_producer_not_global() {
         let v = ConservationVerifier::new();
         v.record(WorkloadEvent::Sent { index: 0, topic: "t0".into(), producer: "producer-rust-100".into() });
         v.record(WorkloadEvent::Sent { index: 0, topic: "t1".into(), producer: "producer-rust-101".into() });
@@ -1094,8 +1365,11 @@ mod tests {
             });
         }
         let verdict = v.verdict(1);
-        assert!(verdict.is_pass(), "one in flight per producer must pass: {verdict}");
-        assert_eq!(verdict.max_in_flight, 1);
+        assert!(verdict.is_pass(), "{verdict}");
+        assert_eq!(
+            verdict.max_in_flight, 1,
+            "the peak is the maximum over producers, not their sum"
+        );
     }
 
     /// A `Sent` with no `Delivered` or `SendFailed` by verdict time is an

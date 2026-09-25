@@ -555,7 +555,7 @@ fn producer_perf_test() -> anyhow::Result<()> {
 ///                               a random batch (librdkafka chaos churn). Both
 ///                               required together; owns the consumer set (not
 ///                               usable with --consumers/--workload)
-///   --rps N                producer target records/sec, 0 = max (200)
+///   --rps N                producer target records/sec, 0 = max (1000)
 ///   --stop-s N             seconds a broker stays down per roll (5)
 ///   --drain-s N            drain window at the end (15)
 ///   --dwell-s N            delete->recreate dwell for topic-recreate (0)

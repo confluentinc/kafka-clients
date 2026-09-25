@@ -144,7 +144,7 @@ Run via `cargo xtask chaos …`. Defaults mirror `chaos.py` where they overlap.
 
 ### Workload
 - `--workload role:backend` (`producer:rust`, `consumer:rust`) — repeatable
-- `--rps N` (200) — producer target records/sec (per topic), `0` = max rate
+- `--rps N` (1000) — producer target records/sec (per topic), `0` = max rate
 - `--msg-size N` (100) — producer value payload size in bytes. The 8-byte logical
   index is written into the first bytes of the value and padded to this size; the
   key stays the 8-byte index (logical identity is preserved even for
@@ -238,8 +238,13 @@ Every record carries **two identities**:
 - **`(topic_id, partition, offset)`** — the broker's physical address, which
   catches anomalies `index` cannot: a duplicate written at a *new* offset, and
   topic-recreate generation collisions (offset resets to 0 after a recreate,
-  so `topic_id` disambiguates old vs. new — `topic_id` is re-resolved after
-  each recreate).
+  so `topic_id` disambiguates old vs. new). The client does not expose the
+  topic id on an ack or a consumed record, so the harness keeps a live
+  name → id map: a recreate switches it to the new id **from the create-topics
+  response**, before the producer can even learn the new leaders, and the
+  producer stamps each record with the id current when its **ack arrives**.
+  So a record written to the new generation always carries the new id, and
+  the destroyed-generation excusal cannot hide loss on the new generation.
 
 The default `ConservationVerifier` renders a verdict:
 
@@ -251,10 +256,25 @@ The default `ConservationVerifier` renders a verdict:
   duplicates (by offset)    : 0      # same physical (topic_id, partition, offset) seen twice
   duplicates (double write) : 0      # same logical record at 2+ offsets of one generation → FAIL if > 0
   partitions covered        : 6
-  in-flight peak (producer) : 1      # most records one producer had in flight at once → FAIL if > 1
+  in-flight peak (producer) : 37     # most records one producer had in flight at once (reported)
   expected-lost (recreate)  : 0      # records legitimately destroyed by topic-recreate
   lost (delivered, unseen)  : 0      # acked-but-never-consumed  → FAIL if > 0
+  lost by partition:                 # only when lost > 0: where the loss sits
+    chaos-run p0: 143 lost at offsets 1..=143; last acked offset 143, last consumed offset none
+  consumer poll errors      : 0      # poll() calls that returned an error (reported)
+  consumer commit errors    : 7      # commit calls that returned an error (reported)
+  errors by kind:                    # every client-reported error, grouped, most frequent first
+    7x consumer commit: IllegalStateError: OffsetCommit failed with stale member epoch. ...
 ```
+
+The last block is the **error summary**: every error a workload received from
+the client (failed sends, consumer `poll` errors, consumer commit errors) is
+recorded with its text and rendered grouped by operation and message, with a
+count per distinct message. Failed sends fail the run (below); consumer errors
+are reported only, because the consumer loop retries them and the conservation
+check decides whether they had any effect. The block is omitted when no error
+occurred. Each error is also printed on stderr as it happens, prefixed with the
+workload label, so it can be placed against the fault in progress.
 
 The run **fails** if any acknowledged record is never consumed
 (`lost > 0`), or if partition coverage is below the expected minimum.
@@ -273,13 +293,16 @@ can be correlated with the fault in progress. A scenario that deliberately
 exceeds these timeouts (for example a topic-recreate `--dwell-s` longer than
 60 s) is expected to fail this check.
 
-It also **fails** if the producer workload violates its contract of **one
-record in flight**: the producer emits a `Sent` event before each send and a
-`Delivered` / `SendFailed` event after it, and the verifier derives the
-per-producer peak from that stream. A peak above 1 (a send issued before the
-previous one settled) or a `Sent` that has not settled by verdict time
-(`unsettled sends`) fails the run, so the property is verified rather than
-inferred from the structure of the loop.
+The producer does not await each send's outcome: it hands the record to the
+client with a completion callback and moves on, so the client batches records
+and pipelines requests as it would in an application, and the only
+backpressure is the client's own (`buffer.memory` / `max.block.ms`). The
+producer emits a `Sent` event before each send and the callback emits
+`Delivered` / `SendFailed`; the verifier derives the **in-flight peak** per
+producer from that stream and reports it, so the verdict shows how deep the
+client's pipeline got. A `Sent` that has not settled by verdict time
+(`unsettled sends`) **fails** the run: every record handed to the client must
+come back as an acknowledgement or a failure.
 
 **Consumer re-reads** (`by index` / `by offset`) are reported, not failed;
 redelivery is expected under churn. Like `chaos.py`, the verdict also enforces
