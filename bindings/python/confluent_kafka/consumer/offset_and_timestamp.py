@@ -12,29 +12,27 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""``OffsetAndTimestamp`` — an offset with the timestamp it was found at.
+"""``OffsetAndTimestamp``: Java's ``org.apache.kafka.clients.consumer.OffsetAndTimestamp``.
 
-Translated from ``org.apache.kafka.clients.consumer.OffsetAndTimestamp`` (Apache
-Kafka 4.3.1). Java's two constructors collapse to one keyword-only constructor
-(``leader_epoch=None``). Negative offset or timestamp raise
-``IllegalArgumentException`` in Java — the binding raises
-``IllegalArgumentError`` with the same messages.
+Java's two constructors are one keyword-only constructor: ``(offset,
+timestamp)`` passes ``Optional.empty()`` as the leader epoch.
 """
 
 from __future__ import annotations
 
-from confluent_kafka import IllegalArgumentError
+from confluent_kafka._java import java_str
+from confluent_kafka.illegal_argument_error import IllegalArgumentError
+
+__all__ = ["OffsetAndTimestamp"]
 
 
 class OffsetAndTimestamp:
-    """An offset with the timestamp it was found at.
+    """A container class for offset and timestamp.
 
-    Java: ``org.apache.kafka.clients.consumer.OffsetAndTimestamp``
-    (``OffsetAndTimestamp(long offset, long timestamp,
-    Optional<Integer> leaderEpoch)``).
+    Java: ``org.apache.kafka.clients.consumer.OffsetAndTimestamp`` (``final``).
     """
 
-    __slots__ = ("_offset", "_timestamp", "_leader_epoch")
+    __slots__ = ("_timestamp", "_offset", "_leader_epoch")
 
     def __init__(self, *, offset: int, timestamp: int,
                  leader_epoch: int | None = None) -> None:
@@ -46,29 +44,30 @@ class OffsetAndTimestamp:
         self._timestamp = timestamp
         self._leader_epoch = leader_epoch
 
-    def offset(self) -> int:
-        return self._offset
-
     def timestamp(self) -> int:
         return self._timestamp
 
+    def offset(self) -> int:
+        return self._offset
+
     def leader_epoch(self) -> int | None:
-        # Unlike OffsetAndMetadata, Java returns the stored Optional verbatim
-        # here (no null-or-negative filtering), and equals/hashCode use it as-is.
+        """Get the leader epoch corresponding to the offset that was found (if
+        one exists). This can be provided to ``seek()`` to ensure that the log
+        hasn't been truncated prior to fetching. ``None`` if it is not known."""
         return self._leader_epoch
+
+    def __str__(self) -> str:
+        return ("(timestamp=" + str(self._timestamp) + ", leaderEpoch="
+                + java_str(self._leader_epoch) + ", offset=" + str(self._offset) + ")")
 
     def __eq__(self, other: object) -> bool:
         if self is other:
             return True
-        if not isinstance(other, OffsetAndTimestamp):
+        if type(other) is not type(self):
             return NotImplemented
-        return (self._timestamp == other._timestamp
-                and self._offset == other._offset
+        assert isinstance(other, OffsetAndTimestamp)
+        return (self._timestamp == other._timestamp and self._offset == other._offset
                 and self._leader_epoch == other._leader_epoch)
 
     def __hash__(self) -> int:
         return hash((self._timestamp, self._offset, self._leader_epoch))
-
-    def __repr__(self) -> str:
-        return (f"(timestamp={self._timestamp}, "
-                f"leaderEpoch={self._leader_epoch}, offset={self._offset})")

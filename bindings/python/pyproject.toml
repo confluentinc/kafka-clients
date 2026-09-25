@@ -27,7 +27,8 @@ dev = [
 ]
 
 [tool.setuptools]
-# The new ``confluent_kafka`` package (spec §4 module layout). The legacy
+# The ``confluent_kafka`` package, one module per Java package (CLAUDE.md,
+# Python Binding Conventions, Modules). The legacy
 # top-level ``producer.py`` / ``consumer.py`` / ``_error_code.py`` modules were
 # retired in P6 once the package covered their surface; the remaining top-level
 # modules are the PAUSED admin binding (``admin``) and the gRPC integration-test
@@ -38,11 +39,21 @@ packages = [
     "confluent_kafka.common",
     "confluent_kafka.common.config",
     "confluent_kafka.common.errors",
+    "confluent_kafka.common.metrics",
+    "confluent_kafka.common.network",
+    "confluent_kafka.common.protocol",
+    "confluent_kafka.common.protocol.types",
+    "confluent_kafka.common.requests",
     "confluent_kafka.common.serialization",
     "confluent_kafka.consumer",
     "confluent_kafka.producer",
 ]
 py-modules = ["admin", "grpc_server", "grpc_server_async", "grpc_translate"]
+
+[tool.setuptools.package-data]
+# The generated error modules' .pyi stubs, and the PEP 561 marker: the package
+# ships its annotations (CLAUDE.md, Python Binding Conventions, Tests and typing).
+"*" = ["*.pyi", "py.typed"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

@@ -91,10 +91,14 @@ class KafkaMetric:
         return self._metric_name
 
     def metric_value(self) -> Any:
-        """The metric value, via the provider's ``value(config, now)``."""
+        """The metric value, via the provider's ``value(config, now)`` (for a
+        ``Measurable``, Java's default ``value`` is ``measure(config, now)``)."""
         now = self._time.milliseconds()  # type: ignore[attr-defined]
+        provider: Any = self._metric_value_provider
         with self._locked():
-            return self._metric_value_provider.value(self._config, now)  # type: ignore[attr-defined]
+            if not callable(getattr(provider, "value", None)) and self.is_measurable():
+                return provider.measure(self._config, now)
+            return provider.value(self._config, now)
 
     def is_measurable(self) -> bool:
         """Whether the value provider is a ``Measurable``."""

@@ -60,6 +60,8 @@ def _read_headers(
             raise TypeError(f"header[{index}] key must be a str; got {type(key).__name__}")
         if value is None:
             result.append((key, None))
+        elif isinstance(value, memoryview) and value.readonly:
+            result.append((key, value))
         elif isinstance(value, _BYTE_LIKE):
             result.append((key, memoryview(value).toreadonly()))
         else:

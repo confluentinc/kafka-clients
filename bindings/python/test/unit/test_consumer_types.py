@@ -12,29 +12,27 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Unit tests for ``confluent_kafka.consumer`` value types (P2).
+"""Tests of the ``confluent_kafka.consumer`` value types and records.
 
-Translates the Java tests where they exist:
-
-- ``OffsetAndMetadataTest`` — all cases except the three that exercise Java
-  ``Serializable`` round-trips / a checked-in serialized blob (not relevant to
-  Python; noted below). The equality-semantics cases are translated.
-- ``ConsumerGroupMetadataTest`` — all four cases (the null-argument cases become
-  ``TypeError``, Python's analog of Java's ``NullPointerException``).
-- ``CloseOptionsTest`` — all four cases.
-- ``ConsumerRecordTest`` — ``testShortConstructor`` / ``testLongConstructor``.
-- ``ConsumerRecordsTest`` — iterator / records-by-partition / records-by-topic /
-  null-topic / immutability / next-offsets tainted-vs-supplied behaviour.
-
-No Java test exists for ``OffsetAndTimestamp``, ``SubscriptionPattern`` or
-``OffsetResetStrategy``; behavioural tests are added for parity.
+Java's tests translated: ``OffsetAndMetadataTest``, ``ConsumerGroupMetadataTest``,
+``CloseOptionsTest``, ``ConsumerRecordTest`` and ``ConsumerRecordsTest`` (all).
+Skipped: ``OffsetAndMetadataTest``'s two deserialization-compatibility tests
+read checked-in Java-serialized files (no Python meaning); its round-trip test
+uses pickle for Java's serialization. No Java test exists for
+``OffsetAndTimestamp``, ``SubscriptionPattern`` or ``OffsetResetStrategy``.
 """
 
 from __future__ import annotations
 
+import pickle
+import warnings
+from datetime import timedelta
+from typing import Any
+
 import pytest
 
-from confluent_kafka import IllegalArgumentError
+import confluent_kafka.consumer.consumer_records as records_module
+from confluent_kafka import IllegalArgumentError, NullPointerError
 from confluent_kafka.common import TimestampType, TopicPartition
 from confluent_kafka.consumer import (
     CloseOptions,
@@ -47,478 +45,436 @@ from confluent_kafka.consumer import (
     SubscriptionPattern,
 )
 
-_GMO = CloseOptions.GroupMembershipOperation
+_DEFAULT = CloseOptions.GroupMembershipOperation.DEFAULT
+_LOGGER = "confluent_kafka.consumer.consumer_records"
 
 # --------------------------------------------------------------------------- #
-# OffsetAndMetadata — translated from OffsetAndMetadataTest
+# OffsetAndMetadata: OffsetAndMetadataTest
 # --------------------------------------------------------------------------- #
 
 
-def test_offset_and_metadata_invalid_negative_offset() -> None:
+def test_invalid_negative_offset() -> None:
     with pytest.raises(IllegalArgumentError) as exc:
         OffsetAndMetadata(offset=-239, leader_epoch=15, metadata="")
-    assert "Invalid negative offset" in str(exc.value)
+    assert str(exc.value) == "Invalid negative offset"
 
 
-def test_offset_and_metadata_accessors_and_defaults() -> None:
-    om = OffsetAndMetadata(offset=239)
-    assert om.offset() == 239
-    assert om.metadata() == ""
-    assert om.leader_epoch() is None
-
-    om2 = OffsetAndMetadata(offset=239, leader_epoch=15, metadata="blah")
-    assert om2.leader_epoch() == 15
-    assert om2.metadata() == "blah"
+def test_offset_and_metadata_serialization_roundtrip() -> None:
+    for oam in (OffsetAndMetadata(offset=239, leader_epoch=15, metadata="blah"),
+                OffsetAndMetadata(offset=239, metadata="blah"),
+                OffsetAndMetadata(offset=239)):
+        assert pickle.loads(pickle.dumps(oam)) == oam
 
 
-def test_offset_and_metadata_equals_null_and_negative_leader_epoch() -> None:
-    # Java testEqualsWithNullAndNegativeLeaderEpoch.
-    with_null = OffsetAndMetadata(offset=100, leader_epoch=None,
-                                  metadata="metadata")
-    with_negative = OffsetAndMetadata(offset=100, leader_epoch=-1,
-                                      metadata="metadata")
+def test_equals_with_null_and_negative_leader_epoch() -> None:
+    with_null = OffsetAndMetadata(offset=100, leader_epoch=None, metadata="metadata")
+    with_negative = OffsetAndMetadata(offset=100, leader_epoch=-1, metadata="metadata")
     assert with_null == with_negative
     assert hash(with_null) == hash(with_negative)
-    # And both read back as absent.
-    assert with_null.leader_epoch() is None
-    assert with_negative.leader_epoch() is None
 
 
-def test_offset_and_metadata_equals_null_and_empty_metadata() -> None:
-    # Java testEqualsWithNullAndEmptyMetadata: null metadata -> "".
-    with_null = OffsetAndMetadata(offset=100, leader_epoch=1,
-                                  metadata=None)  # type: ignore[arg-type]
+def test_equals_with_null_and_empty_metadata() -> None:
+    with_null = OffsetAndMetadata(offset=100, leader_epoch=1, metadata=None)  # type: ignore[arg-type]
     with_empty = OffsetAndMetadata(offset=100, leader_epoch=1, metadata="")
     assert with_null == with_empty
     assert hash(with_null) == hash(with_empty)
-    assert with_null.metadata() == ""
 
 
-def test_offset_and_metadata_keyword_only() -> None:
+def test_offset_and_metadata_forms() -> None:
+    assert (OffsetAndMetadata(offset=5).metadata(), OffsetAndMetadata(offset=5).leader_epoch()) == (
+        "", None)
+    assert OffsetAndMetadata(offset=5, metadata="m").leader_epoch() is None
+    # metadata is UNSET: an explicit "" is given, so (offset, leaderEpoch, metadata).
+    assert OffsetAndMetadata(offset=5, leader_epoch=3, metadata="").leader_epoch() == 3
+    with pytest.raises(IllegalArgumentError) as exc:
+        OffsetAndMetadata(offset=5, leader_epoch=3)
+    assert str(exc.value) == (
+        "OffsetAndMetadata() takes one of (offset, leader_epoch, metadata), "
+        "(offset, metadata), (offset); got (offset, leader_epoch)")
+    assert str(OffsetAndMetadata(offset=5, leader_epoch=3, metadata="m")) == (
+        "OffsetAndMetadata{offset=5, leaderEpoch=3, metadata='m'}")
+    assert str(OffsetAndMetadata(offset=5)) == (
+        "OffsetAndMetadata{offset=5, leaderEpoch=null, metadata=''}")
     with pytest.raises(TypeError):
-        OffsetAndMetadata(1)  # type: ignore[misc, call-arg]
-
-
-# Skipped: OffsetAndMetadataTest.testSerializationRoundtrip /
-# testDeserializationCompatibilityBeforeLeaderEpoch /
-# testDeserializationCompatibilityWithLeaderEpoch exercise Java ``Serializable``
-# round-trips and checked-in serialized blobs, which have no Python analog.
+        OffsetAndMetadata(5)  # type: ignore[call-arg]
 
 
 # --------------------------------------------------------------------------- #
-# OffsetAndTimestamp
+# OffsetAndTimestamp (no Java test)
 # --------------------------------------------------------------------------- #
 
 
-def test_offset_and_timestamp_accessors_and_validation() -> None:
-    ot = OffsetAndTimestamp(offset=5, timestamp=100)
-    assert ot.offset() == 5
-    assert ot.timestamp() == 100
-    assert ot.leader_epoch() is None
-
-    ot2 = OffsetAndTimestamp(offset=5, timestamp=100, leader_epoch=7)
-    assert ot2.leader_epoch() == 7
-
+def test_offset_and_timestamp() -> None:
+    o = OffsetAndTimestamp(offset=1, timestamp=2)
+    assert (o.offset(), o.timestamp(), o.leader_epoch()) == (1, 2, None)
+    assert OffsetAndTimestamp(offset=1, timestamp=2, leader_epoch=-1).leader_epoch() == -1
+    assert o == OffsetAndTimestamp(offset=1, timestamp=2)
+    assert hash(o) == hash(OffsetAndTimestamp(offset=1, timestamp=2))
+    assert o != OffsetAndTimestamp(offset=1, timestamp=2, leader_epoch=4)
+    assert str(o) == "(timestamp=2, leaderEpoch=null, offset=1)"
     with pytest.raises(IllegalArgumentError) as exc:
-        OffsetAndTimestamp(offset=-1, timestamp=1)
-    assert "Invalid negative offset" in str(exc.value)
+        OffsetAndTimestamp(offset=-1, timestamp=0)
+    assert str(exc.value) == "Invalid negative offset"
     with pytest.raises(IllegalArgumentError) as exc:
-        OffsetAndTimestamp(offset=1, timestamp=-1)
-    assert "Invalid negative timestamp" in str(exc.value)
-
-
-def test_offset_and_timestamp_equality_uses_raw_leader_epoch() -> None:
-    # Unlike OffsetAndMetadata, equality here uses the stored epoch verbatim.
-    a = OffsetAndTimestamp(offset=1, timestamp=2, leader_epoch=None)
-    b = OffsetAndTimestamp(offset=1, timestamp=2, leader_epoch=-1)
-    assert a != b
-    c = OffsetAndTimestamp(offset=1, timestamp=2, leader_epoch=-1)
-    assert b == c
-    assert hash(b) == hash(c)
+        OffsetAndTimestamp(offset=0, timestamp=-1)
+    assert str(exc.value) == "Invalid negative timestamp"
+    with pytest.raises(TypeError):
+        OffsetAndTimestamp(1, 2)  # type: ignore[call-arg]
 
 
 # --------------------------------------------------------------------------- #
-# ConsumerGroupMetadata — translated from ConsumerGroupMetadataTest
+# ConsumerGroupMetadata: ConsumerGroupMetadataTest (the constructors are
+# @Deprecated(forRemoval = true): each call warns)
 # --------------------------------------------------------------------------- #
 
 
-def test_group_metadata_assignment_constructor() -> None:
-    gm = ConsumerGroupMetadata(group_id="group", generation_id=2,
-                               member_id="member", group_instance_id="instance")
+def test_assignment_constructor() -> None:
+    with pytest.warns(DeprecationWarning, match="is deprecated. Since 4.2"):
+        gm = ConsumerGroupMetadata(group_id="group", generation_id=2, member_id="member",
+                                   group_instance_id="instance")
     assert gm.group_id() == "group"
     assert gm.generation_id() == 2
     assert gm.member_id() == "member"
     assert gm.group_instance_id() == "instance"
 
 
-def test_group_metadata_group_id_constructor_defaults() -> None:
-    gm = ConsumerGroupMetadata(group_id="group")
+def test_group_id_constructor() -> None:
+    with pytest.warns(DeprecationWarning):
+        gm = ConsumerGroupMetadata(group_id="group")
     assert gm.group_id() == "group"
     assert gm.generation_id() == -1  # JoinGroupRequest.UNKNOWN_GENERATION_ID
-    assert gm.member_id() == ""      # JoinGroupRequest.UNKNOWN_MEMBER_ID
+    assert gm.member_id() == ""  # JoinGroupRequest.UNKNOWN_MEMBER_ID
     assert gm.group_instance_id() is None
 
 
-def test_group_metadata_invalid_group_id() -> None:
-    with pytest.raises(TypeError):
-        ConsumerGroupMetadata(group_id=None, generation_id=2,  # type: ignore[arg-type]
-                              member_id="member")
+def test_invalid_group_id() -> None:
+    with pytest.warns(DeprecationWarning), pytest.raises(NullPointerError) as exc:
+        ConsumerGroupMetadata(group_id=None, generation_id=2, member_id="member")  # type: ignore[arg-type]
+    assert str(exc.value) == "group.id can't be null"
 
 
-def test_group_metadata_invalid_member_id() -> None:
-    with pytest.raises(TypeError):
-        ConsumerGroupMetadata(group_id="group", generation_id=2,
-                              member_id=None)  # type: ignore[arg-type]
+def test_invalid_member_id() -> None:
+    with pytest.warns(DeprecationWarning), pytest.raises(NullPointerError) as exc:
+        ConsumerGroupMetadata(group_id="group", generation_id=2, member_id=None)  # type: ignore[arg-type]
+    assert str(exc.value) == "member.id can't be null"
 
 
-def test_group_metadata_equality_and_repr() -> None:
-    a = ConsumerGroupMetadata(group_id="g", generation_id=1, member_id="m")
-    b = ConsumerGroupMetadata(group_id="g", generation_id=1, member_id="m")
-    assert a == b
-    assert hash(a) == hash(b)
-    assert repr(a) == (
-        "GroupMetadata(groupId = g, generationId = 1, memberId = m, "
-        "groupInstanceId = )"
-    )
+# ConsumerGroupMetadataTest.testInvalidInstanceId passes a null Optional; the
+# Python None is Optional.empty(), so there is no null Optional to pass.
+
+
+def test_group_metadata_value_semantics() -> None:
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        a = ConsumerGroupMetadata(group_id="g", generation_id=1, member_id="m")
+        b = ConsumerGroupMetadata(group_id="g", generation_id=1, member_id="m")
+    assert a == b and hash(a) == hash(b)
+    assert str(a) == "GroupMetadata(groupId = g, generationId = 1, memberId = m, groupInstanceId = )"
+    # The client's own instances do not warn.
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        ConsumerGroupMetadata._of(group_id="g", generation_id=1, member_id="m",
+                                  group_instance_id=None)
 
 
 # --------------------------------------------------------------------------- #
-# CloseOptions — translated from CloseOptionsTest
+# CloseOptions: CloseOptionsTest
 # --------------------------------------------------------------------------- #
 
 
-def test_close_options_operation_should_not_be_null() -> None:
-    with pytest.raises(TypeError):
+def test_operation_should_not_be_null() -> None:
+    with pytest.raises(NullPointerError) as exc:
         CloseOptions.group_membership_operation(None)  # type: ignore[arg-type]
-    with pytest.raises(TypeError):
-        CloseOptions.timeout(0.0).with_group_membership_operation(
-            None)  # type: ignore[arg-type]
+    assert str(exc.value) == "operation should not be null"
+    with pytest.raises(NullPointerError):
+        CloseOptions.timeout(0).with_group_membership_operation(None)  # type: ignore[arg-type]
 
 
-def test_close_options_operation_default_value() -> None:
-    assert (CloseOptions.timeout(0.0).group_membership_operation()
-            is _GMO.DEFAULT)
+def test_operation_should_have_default_value() -> None:
+    assert CloseOptions.timeout(0).group_membership_operation() is _DEFAULT
 
 
-def test_close_options_timeout_could_be_null() -> None:
-    opts = CloseOptions.timeout(None)
-    assert opts.timeout() is None
+def test_timeout_could_be_null() -> None:
+    options = CloseOptions.timeout(None)
+    assert options.timeout() is None
 
 
-def test_close_options_timeout_default_empty() -> None:
-    assert CloseOptions.group_membership_operation(_GMO.DEFAULT).timeout() is None
+def test_timeout_should_be_default_empty() -> None:
+    assert CloseOptions.group_membership_operation(_DEFAULT).timeout() is None
 
 
-def test_close_options_constructor_raises() -> None:
-    with pytest.raises(TypeError):
+def test_close_options_builder_shape() -> None:
+    with pytest.raises(TypeError) as exc:
         CloseOptions()
-
-
-def test_close_options_fluent_chain() -> None:
-    opts = (CloseOptions.timeout(1.5)
-            .with_group_membership_operation(_GMO.LEAVE_GROUP))
-    assert opts.timeout() == 1.5
-    assert opts.group_membership_operation() is _GMO.LEAVE_GROUP
+    assert str(exc.value) == (
+        "CloseOptions cannot be constructed directly; use CloseOptions.timeout(...) or "
+        "CloseOptions.group_membership_operation(...)")
+    leave = CloseOptions.GroupMembershipOperation.LEAVE_GROUP
+    options = CloseOptions.timeout(timedelta(seconds=3)).with_group_membership_operation(leave)
+    # A returned Duration is a float of seconds.
+    assert options.timeout() == 3.0
+    assert options.group_membership_operation() is leave
+    assert options.with_timeout(1.5) is options and options.timeout() == 1.5
+    assert [m.value for m in CloseOptions.GroupMembershipOperation] == [
+        "LEAVE_GROUP", "REMAIN_IN_GROUP", "DEFAULT"]
 
 
 # --------------------------------------------------------------------------- #
-# SubscriptionPattern
+# SubscriptionPattern, OffsetResetStrategy (no Java test)
 # --------------------------------------------------------------------------- #
 
 
 def test_subscription_pattern() -> None:
-    sp = SubscriptionPattern(pattern="topic-.*")
-    assert sp.pattern() == "topic-.*"
-    assert str(sp) == "topic-.*"
-    assert sp == SubscriptionPattern(pattern="topic-.*")
-    assert hash(sp) == hash(SubscriptionPattern(pattern="topic-.*"))
-    assert sp != SubscriptionPattern(pattern="other")
-
-
-def test_subscription_pattern_keyword_only() -> None:
+    p = SubscriptionPattern(pattern="t.*")
+    assert p.pattern() == "t.*" and str(p) == "t.*"
+    assert p == SubscriptionPattern(pattern="t.*") and hash(p) == hash(SubscriptionPattern(pattern="t.*"))
     with pytest.raises(TypeError):
-        SubscriptionPattern("x")  # type: ignore[misc, call-arg]
+        SubscriptionPattern("t.*")  # type: ignore[call-arg]
+
+
+def test_offset_reset_strategy() -> None:
+    assert [m.value for m in OffsetResetStrategy] == ["LATEST", "EARLIEST", "NONE"]
+    assert [str(m) for m in OffsetResetStrategy] == ["latest", "earliest", "none"]
 
 
 # --------------------------------------------------------------------------- #
-# OffsetResetStrategy
+# ConsumerRecord: ConsumerRecordTest
 # --------------------------------------------------------------------------- #
 
 
-def test_offset_reset_strategy_members_and_str() -> None:
-    assert list(OffsetResetStrategy) == [
-        OffsetResetStrategy.LATEST,
-        OffsetResetStrategy.EARLIEST,
-        OffsetResetStrategy.NONE,
-    ]
-    assert str(OffsetResetStrategy.EARLIEST) == "earliest"
-    assert str(OffsetResetStrategy.LATEST) == "latest"
-    assert str(OffsetResetStrategy.NONE) == "none"
+def test_short_constructor() -> None:
+    record = ConsumerRecord(topic="topic", partition=0, offset=23, key="key", value="value")
+    assert record.topic() == "topic"
+    assert record.partition() == 0
+    assert record.offset() == 23
+    assert record.key() == "key"
+    assert record.value() == "value"
+    assert record.timestamp_type() is TimestampType.NO_TIMESTAMP_TYPE
+    assert record.timestamp() == ConsumerRecord.NO_TIMESTAMP == -1
+    assert record.serialized_key_size() == ConsumerRecord.NULL_SIZE == -1
+    assert record.serialized_value_size() == ConsumerRecord.NULL_SIZE
+    assert record.leader_epoch() is None
+    assert record.delivery_count() is None
+    assert record.headers() == ()
 
 
-# --------------------------------------------------------------------------- #
-# ConsumerRecord — translated from ConsumerRecordTest
-# --------------------------------------------------------------------------- #
+def test_long_constructor() -> None:
+    headers = [("header key", "header value".encode("utf-8"))]
+    record = ConsumerRecord(topic="topic", partition=0, offset=23, timestamp=23434217432432,
+                            timestamp_type=TimestampType.CREATE_TIME, serialized_key_size=100,
+                            serialized_value_size=1142, key="key", value="value",
+                            headers=headers, leader_epoch=None)
+    assert (record.topic(), record.partition(), record.offset()) == ("topic", 0, 23)
+    assert (record.key(), record.value()) == ("key", "value")
+    assert record.timestamp_type() is TimestampType.CREATE_TIME
+    assert record.timestamp() == 23434217432432
+    assert (record.serialized_key_size(), record.serialized_value_size()) == (100, 1142)
+    assert record.leader_epoch() is None and record.delivery_count() is None
+    assert [(k, bytes(v or b"")) for k, v in record.headers()] == [
+        ("header key", b"header value")]
+    record = ConsumerRecord(topic="topic", partition=0, offset=23, timestamp=23434217432432,
+                            timestamp_type=TimestampType.CREATE_TIME, serialized_key_size=100,
+                            serialized_value_size=1142, key="key", value="value",
+                            headers=headers, leader_epoch=10, delivery_count=1)
+    assert record.leader_epoch() == 10
+    assert record.delivery_count() == 1
 
 
-def test_consumer_record_short_constructor() -> None:
-    r: ConsumerRecord[str, str] = ConsumerRecord(
-        topic="topic", partition=0, offset=23, key="key", value="value")
-    assert r.topic() == "topic"
-    assert r.partition() == 0
-    assert r.offset() == 23
-    assert r.key() == "key"
-    assert r.value() == "value"
-    assert r.timestamp_type() is TimestampType.NO_TIMESTAMP_TYPE
-    assert r.timestamp() == -1                # ConsumerRecord.NO_TIMESTAMP
-    assert r.serialized_key_size() == -1      # NULL_SIZE
-    assert r.serialized_value_size() == -1
-    assert r.leader_epoch() is None
-    assert r.delivery_count() is None
-    assert r.headers() == ()
-
-
-def test_consumer_record_long_constructor() -> None:
-    headers = [("header key", b"header value")]
-    r: ConsumerRecord[str, str] = ConsumerRecord(
-        topic="topic", partition=0, offset=23, timestamp=23434217432432,
-        timestamp_type=TimestampType.CREATE_TIME, serialized_key_size=100,
-        serialized_value_size=1142, key="key", value="value", headers=headers)
-    assert r.topic() == "topic"
-    assert r.offset() == 23
-    assert r.timestamp_type() is TimestampType.CREATE_TIME
-    assert r.timestamp() == 23434217432432
-    assert r.serialized_key_size() == 100
-    assert r.serialized_value_size() == 1142
-    assert r.leader_epoch() is None
-    assert r.delivery_count() is None
-    assert r.headers() == (("header key", b"header value"),)
-
-    r2: ConsumerRecord[str, str] = ConsumerRecord(
-        topic="topic", partition=0, offset=23, timestamp=23434217432432,
-        timestamp_type=TimestampType.CREATE_TIME, serialized_key_size=100,
-        serialized_value_size=1142, key="key", value="value", headers=headers,
-        leader_epoch=10, delivery_count=1)
-    assert r2.leader_epoch() == 10
-    assert r2.delivery_count() == 1
-
-
-def test_consumer_record_null_topic_and_headers() -> None:
+def test_consumer_record_null_checks_and_forms() -> None:
     with pytest.raises(IllegalArgumentError) as exc:
-        ConsumerRecord(topic=None, partition=0, offset=0,  # type: ignore[arg-type]
-                       key=None, value=None)
-    assert "Topic cannot be null" in str(exc.value)
+        ConsumerRecord(topic=None, partition=0, offset=0, key=None, value=None)  # type: ignore[call-overload]
+    assert str(exc.value) == "Topic cannot be null"
     with pytest.raises(IllegalArgumentError) as exc:
-        ConsumerRecord(topic="t", partition=0, offset=0, key=None, value=None,
-                       headers=None)  # type: ignore[arg-type]
-    assert "Headers cannot be null" in str(exc.value)
+        ConsumerRecord(topic="t", partition=0, offset=0, timestamp=0,  # type: ignore[call-overload]
+                       timestamp_type=TimestampType.CREATE_TIME, serialized_key_size=0,
+                       serialized_value_size=0, key=None, value=None, headers=None,
+                       leader_epoch=None)
+    assert str(exc.value) == "Headers cannot be null"
+    # A delivery count needs the full form (Java has no shorter one taking it).
+    with pytest.raises(IllegalArgumentError) as exc:
+        ConsumerRecord(topic="t", partition=0, offset=0, key=None, value=None,  # type: ignore[call-overload]
+                       delivery_count=2)
+    assert str(exc.value).endswith("got (topic, partition, offset, key, value, delivery_count)")
+    # UNSET: Java's default values given explicitly still select the full form.
+    full = ConsumerRecord(topic="t", partition=0, offset=0, timestamp=-1,
+                          timestamp_type=TimestampType.NO_TIMESTAMP_TYPE, serialized_key_size=-1,
+                          serialized_value_size=-1, key=None, value=None, headers=(),
+                          leader_epoch=None, delivery_count=2)
+    assert full.delivery_count() == 2
+    assert str(full) == (
+        "ConsumerRecord(topic = t, partition = 0, leaderEpoch = null, offset = 0, "
+        "NoTimestampType = -1, deliveryCount = 2, serialized key size = -1, "
+        "serialized value size = -1, headers = RecordHeaders(headers = [], isReadOnly = false), "
+        "key = null, value = null)")
+    with pytest.raises(TypeError):
+        ConsumerRecord("t", 0, 0, None, None)  # type: ignore[call-overload]
 
 
 # --------------------------------------------------------------------------- #
-# ConsumerRecords — translated from ConsumerRecordsTest
+# ConsumerRecords: ConsumerRecordsTest
 # --------------------------------------------------------------------------- #
 
 
-def _build_test_records(record_size: int, partition_size: int,
-                        empty_partition_index: int,
-                        topics: list[str]) -> ConsumerRecords[int, str]:
-    partition_to_records: dict[
-        TopicPartition, list[ConsumerRecord[int, str]]] = {}
+def _build_topic_test_records(record_size: int, partition_size: int, empty_partition_index: int,
+                              topics: list[str]) -> ConsumerRecords[int, str]:
+    partition_to_records: dict[TopicPartition, list[ConsumerRecord[int, str]]] = {}
     next_offsets: dict[TopicPartition, OffsetAndMetadata] = {}
     for topic in topics:
         for i in range(partition_size):
-            recs: list[ConsumerRecord[int, str]] = []
+            records: list[ConsumerRecord[int, str]] = []
             if i != empty_partition_index:
                 for j in range(record_size):
-                    recs.append(ConsumerRecord(
+                    records.append(ConsumerRecord(
                         topic=topic, partition=i, offset=j, timestamp=0,
-                        timestamp_type=TimestampType.CREATE_TIME,
-                        serialized_key_size=0, serialized_value_size=0,
-                        key=j, value=str(j)))
+                        timestamp_type=TimestampType.CREATE_TIME, serialized_key_size=0,
+                        serialized_value_size=0, key=j, value=str(j), headers=(),
+                        leader_epoch=None))
             tp = TopicPartition(topic=topic, partition=i)
-            partition_to_records[tp] = recs
-            next_offsets[tp] = OffsetAndMetadata(offset=record_size,
-                                                 metadata="")
-    return ConsumerRecords(records=partition_to_records,
-                           next_offsets=next_offsets)
+            partition_to_records[tp] = records
+            next_offsets[tp] = OffsetAndMetadata(offset=record_size, leader_epoch=None, metadata="")
+    return ConsumerRecords(records=partition_to_records, next_offsets=next_offsets)
 
 
-def test_consumer_records_iterator() -> None:
-    topic = "topic"
-    record_size, partition_size, empty_idx = 10, 15, 3
-    records = _build_test_records(record_size, partition_size, empty_idx,
-                                  [topic])
-    record_count = 0
-    partition_count = 0
+def _validate_record_payload(topic: str, record: ConsumerRecord[int, str], current_partition: int,
+                             record_count: int, record_size: int) -> None:
+    assert record.topic() == topic
+    assert record.partition() == current_partition
+    assert record.offset() == record_count % record_size
+    assert record.key() == record_count % record_size
+    assert record.value() == str(record_count % record_size)
+
+
+def test_iterator() -> None:
+    topic, record_size, partition_size, empty = "topic", 10, 15, 3
+    records = _build_topic_test_records(record_size, partition_size, empty, [topic])
+    record_count = partition_count = 0
     current_partition = -1
     for record in records:
-        assert record.partition() != empty_idx
+        assert record.partition() != empty, f"Partition {record.partition()} is not empty"
         if current_partition != record.partition():
             partition_count += 1
             current_partition = record.partition()
-        assert record.topic() == topic
-        assert record.offset() == record_count % record_size
-        assert record.key() == record_count % record_size
-        assert record.value() == str(record_count % record_size)
+        _validate_record_payload(topic, record, current_partition, record_count, record_size)
         record_count += 1
-    assert partition_size == partition_count + 1  # including empty partition
+    assert partition_count + 1 == partition_size
 
 
-def test_consumer_records_by_partition() -> None:
-    topics = ["topic1", "topic2"]
-    record_size, partition_size, empty_idx = 3, 5, 2
-    cr = _build_test_records(record_size, partition_size, empty_idx, topics)
-    assert len(cr.next_offsets()) == partition_size * len(topics)
+def test_records_by_partition() -> None:
+    topics, record_size, partition_size, empty = ["topic1", "topic2"], 3, 5, 2
+    consumer_records = _build_topic_test_records(record_size, partition_size, empty, topics)
+    assert len(consumer_records.next_offsets()) == partition_size * len(topics)
     for topic in topics:
         for partition in range(partition_size):
             tp = TopicPartition(topic=topic, partition=partition)
-            recs = cr.records(partition=tp)
-            if partition == empty_idx:
-                assert recs == []
+            records = consumer_records.records(partition=tp)
+            if partition == empty:
+                assert records == []
             else:
-                assert len(recs) == record_size
-                last = recs[record_size - 1]
-                assert cr.next_offsets()[tp] == OffsetAndMetadata(
-                    offset=last.offset() + 1, leader_epoch=last.leader_epoch(),
-                    metadata="")
+                assert len(records) == record_size
+                last = records[record_size - 1]
+                assert consumer_records.next_offsets()[tp] == OffsetAndMetadata(
+                    offset=last.offset() + 1, leader_epoch=last.leader_epoch(), metadata="")
+                for i, record in enumerate(records):
+                    _validate_record_payload(topic, record, partition, i, record_size)
 
 
-def test_consumer_records_by_null_topic_raises() -> None:
-    # Java records(null) raises IllegalArgumentException "Topic must be
-    # non-null.". In the collapsed Python API, records(topic=None) is
-    # indistinguishable from "no argument given", so the combination check
-    # (_args.java_forms) raises IllegalArgumentError naming both overloads.
-    cr: ConsumerRecords[int, str] = ConsumerRecords.empty()
+def test_records_by_null_topic() -> None:
+    # Java's records(null) throws "Topic must be non-null."; in Python a None
+    # topic is not given, so java_forms rejects the call naming both forms.
     with pytest.raises(IllegalArgumentError) as exc:
-        cr.records(topic=None)  # type: ignore[arg-type]
-    assert str(exc.value) == (
-        "records() takes one of (partition), (topic); got ()")
+        ConsumerRecords.empty().records(topic=None)  # type: ignore[call-overload]
+    assert str(exc.value) == "records() takes one of (partition), (topic); got ()"
 
 
-def test_consumer_records_by_topic() -> None:
-    topics = ["topic1", "topic2", "topic3", "topic4"]
-    record_size, partition_size, empty_idx = 3, 10, 6
-    cr = _build_test_records(record_size, partition_size, empty_idx, topics)
-    expected_total = record_size * (partition_size - 1)
-    assert len(cr.next_offsets()) == partition_size * len(topics)
+def test_records_by_topic() -> None:
+    topics, record_size, partition_size, empty = ["topic1", "topic2", "topic3", "topic4"], 3, 10, 6
+    consumer_records = _build_topic_test_records(record_size, partition_size, empty, topics)
+    assert len(consumer_records.next_offsets()) == partition_size * len(topics)
     for topic in topics:
-        recs = cr.records(topic=topic)
-        record_count = 0
-        partition_count = 0
+        record_count = partition_count = 0
         current_partition = -1
-        for record in recs:
-            assert record.partition() != empty_idx
+        for record in consumer_records.records(topic=topic):
+            assert record.partition() != empty
             if current_partition != record.partition():
                 partition_count += 1
                 current_partition = record.partition()
+            _validate_record_payload(topic, record, current_partition, record_count, record_size)
             record_count += 1
-        assert partition_size == partition_count + 1
-        assert record_count == expected_total
+        assert partition_count + 1 == partition_size
+        assert record_count == record_size * (partition_size - 1)
 
 
-def test_consumer_records_requires_exactly_one_query() -> None:
-    tp = TopicPartition(topic="t", partition=0)
-    cr: ConsumerRecords[int, str] = ConsumerRecords.empty()
-    with pytest.raises(IllegalArgumentError):
-        cr.records(partition=tp, topic="t")  # both
-    with pytest.raises(IllegalArgumentError):
-        cr.records()  # neither
-
-
-def test_consumer_records_are_immutable() -> None:
-    # The Java test asserts the returned collections are unmodifiable. In Python
-    # records() returns a fresh list and partitions() a fresh set, so mutating
-    # them cannot affect the ConsumerRecords; count is unchanged.
-    topic = "topic"
-    record_size, partition_size, empty_idx = 3, 6, 2
+def test_records_are_immutable() -> None:
+    topic, record_size, partition_size, empty = "topic", 3, 6, 2
     tp = TopicPartition(topic=topic, partition=0)
-    records = _build_test_records(record_size, partition_size, empty_idx,
-                                  [topic])
-    recs = records.records(partition=tp)
-    recs.append(ConsumerRecord(topic=topic, partition=0, offset=0, key=0,
-                               value="0"))
-    parts = records.partitions()
-    parts.add(TopicPartition(topic=topic, partition=99))
-    assert len(records) == record_size * (partition_size - 1)
-    assert TopicPartition(topic=topic, partition=99) not in records.partitions()
+    new_record: ConsumerRecord[int, str] = ConsumerRecord(
+        topic=topic, partition=0, offset=0, timestamp=0, timestamp_type=TimestampType.CREATE_TIME,
+        serialized_key_size=0, serialized_value_size=0, key=0, value="0", headers=(),
+        leader_epoch=None)
+    records = _build_topic_test_records(record_size, partition_size, empty, [topic])
+    empty_records: ConsumerRecords[int, str] = ConsumerRecords.empty()
+    assert len(records.next_offsets()) == partition_size
+    # Java's views throw UnsupportedOperationException; Python hands out
+    # copies, so a change to one leaves the records as they were.
+    for batch, expected in ((records, record_size * (partition_size - 1)), (empty_records, 0)):
+        batch.records(partition=tp).append(new_record)
+        batch.partitions().add(tp)
+        batch.records(topic=topic).clear()
+        batch.next_offsets().clear()
+        assert len(batch) == expected
+    assert len(records.next_offsets()) == partition_size
 
 
-def test_consumer_records_empty() -> None:
-    empty: ConsumerRecords[int, str] = ConsumerRecords.empty()
-    assert len(empty) == 0
-    assert empty.is_empty() is True
-    assert empty.partitions() == set()
-    assert empty.next_offsets() == {}
-
-
-_LOGGER_NAME = "confluent_kafka.consumer.consumer_records"
-
-
-def test_next_offsets_logs_error_periodically_when_tainted(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    # Java testNextOffsetsLogsErrorPeriodicallyWhenConstructedWithDeprecated
-    # Constructor: the tainted (records-only) instance returns an empty map and
-    # logs a rate-limited ERROR — exactly once per interval, not once per call.
-    import confluent_kafka.consumer.consumer_records as cr_mod
-
+def test_next_offsets_logs_error_periodically_with_the_deprecated_constructor(
+        caplog: pytest.LogCaptureFixture) -> None:
     tp = TopicPartition(topic="topic", partition=0)
-    rec = ConsumerRecord(topic="topic", partition=0, offset=0, key=0,
-                         value="value")
-    records = {tp: [rec]}
-
-    previous = cr_mod._tainted_next_offsets_last_log_s
+    records = {tp: [ConsumerRecord(topic="topic", partition=0, offset=0, key=0, value="value")]}
+    previous = records_module._tainted_next_offsets_last_log_s
     try:
-        # Force the rate-limit window to have elapsed so the next tainted call
-        # logs (Java sets the AtomicLong one interval into the past).
-        cr_mod._tainted_next_offsets_last_log_s = (
-            cr_mod._TAINT_LOG_INTERVAL_S * -2)
-
-        with caplog.at_level("ERROR", logger=_LOGGER_NAME):
-            cr: ConsumerRecords[int, str] = ConsumerRecords(records=records)
-            # Deprecated constructor supplies no next offsets -> empty map.
-            assert cr.next_offsets() == {}
-
-            errors = [r for r in caplog.records if r.levelname == "ERROR"]
+        records_module._tainted_next_offsets_last_log_s = -2 * records_module._TAINT_LOG_INTERVAL_S
+        with caplog.at_level("ERROR", logger=_LOGGER):
+            with pytest.warns(DeprecationWarning, match=r"ConsumerRecords\(records\) is deprecated"):
+                consumer_records: ConsumerRecords[int, str] = ConsumerRecords(records=records)
+            assert consumer_records.next_offsets() == {}
+            errors = [r.getMessage() for r in caplog.records if r.levelname == "ERROR"]
             assert len(errors) == 1
-            assert "deprecated records-only" in errors[0].getMessage()
-
-            # Within the window, neither repeated calls nor new tainted
-            # instances log again.
-            assert cr.next_offsets() == {}
-            assert ConsumerRecords(records=records).next_offsets() == {}
-            assert len([r for r in caplog.records
-                        if r.levelname == "ERROR"]) == 1
-
-            # Once the window has elapsed, the error is logged again.
-            cr_mod._tainted_next_offsets_last_log_s = (
-                cr_mod._TAINT_LOG_INTERVAL_S * -2)
-            assert cr.next_offsets() == {}
-            assert len([r for r in caplog.records
-                        if r.levelname == "ERROR"]) == 2
+            assert "deprecated ConsumerRecords(Map) constructor" in errors[0]
+            assert consumer_records.next_offsets() == {}
+            with pytest.warns(DeprecationWarning):
+                assert ConsumerRecords(records=records).next_offsets() == {}
+            assert len([r for r in caplog.records if r.levelname == "ERROR"]) == 1
+            records_module._tainted_next_offsets_last_log_s = (
+                -2 * records_module._TAINT_LOG_INTERVAL_S)
+            assert consumer_records.next_offsets() == {}
+            assert len([r for r in caplog.records if r.levelname == "ERROR"]) == 2
     finally:
-        cr_mod._tainted_next_offsets_last_log_s = previous
+        records_module._tainted_next_offsets_last_log_s = previous
 
 
-def test_next_offsets_does_not_log_when_supplied(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    # Java testNextOffsetsDoesNotLogErrorWhenConstructedWithNextOffsets.
+def test_next_offsets_does_not_log_error_when_constructed_with_next_offsets(
+        caplog: pytest.LogCaptureFixture) -> None:
     tp = TopicPartition(topic="topic", partition=0)
-    rec = ConsumerRecord(topic="topic", partition=0, offset=0, key=0,
-                         value="value")
+    records = {tp: [ConsumerRecord(topic="topic", partition=0, offset=0, key=0, value="value")]}
     next_offsets = {tp: OffsetAndMetadata(offset=1)}
-    with caplog.at_level("ERROR", logger=_LOGGER_NAME):
-        cr: ConsumerRecords[int, str] = ConsumerRecords(
-            records={tp: [rec]}, next_offsets=next_offsets)
-        assert cr.next_offsets() == next_offsets
+    with caplog.at_level("ERROR", logger=_LOGGER):
+        consumer_records = ConsumerRecords(records=records, next_offsets=next_offsets)
+        assert consumer_records.next_offsets() == next_offsets
         assert [r for r in caplog.records if r.levelname == "ERROR"] == []
 
 
-def test_next_offsets_does_not_log_for_empty_records(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    # Java testNextOffsetsDoesNotLogErrorForEmptyRecords.
-    with caplog.at_level("ERROR", logger=_LOGGER_NAME):
+def test_next_offsets_does_not_log_error_for_empty_records(caplog: pytest.LogCaptureFixture) -> None:
+    with caplog.at_level("ERROR", logger=_LOGGER):
         assert ConsumerRecords.empty().next_offsets() == {}
         assert [r for r in caplog.records if r.levelname == "ERROR"] == []
+
+
+def test_consumer_records_surface() -> None:
+    assert ConsumerRecords.EMPTY is ConsumerRecords.empty()
+    assert ConsumerRecords.EMPTY.is_empty() and len(ConsumerRecords.EMPTY) == 0
+    with pytest.raises(IllegalArgumentError) as exc:
+        ConsumerRecords.empty().records(partition=TopicPartition(topic="t", partition=0),  # type: ignore[call-overload]
+                                        topic="t")
+    assert str(exc.value) == "records() takes one of (partition), (topic); got (partition, topic)"
+    records: Any = {}
+    with pytest.raises(TypeError):
+        ConsumerRecords(records)  # type: ignore[call-arg]

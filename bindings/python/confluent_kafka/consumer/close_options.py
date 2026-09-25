@@ -12,66 +12,73 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""``CloseOptions`` — the option object accepted by ``Consumer.close()``.
+"""``CloseOptions``: Java's ``org.apache.kafka.clients.consumer.CloseOptions``.
 
-Translated from ``org.apache.kafka.clients.consumer.CloseOptions`` (Apache Kafka
-4.3.1). Java's builder shape is kept (rule 3.14): a private constructor (so
-``CloseOptions()`` raises ``TypeError``), static ``timeout`` /
-``group_membership_operation`` factories, fluent ``with_timeout`` /
-``with_group_membership_operation`` returning ``Self``, and the getters
-``group_membership_operation()`` / ``timeout()``. The builder methods take their
-one argument positionally (rule 3.2(b)).
-
-Java overloads the name ``timeout`` — a static factory ``timeout(Duration)`` and
-an instance getter ``timeout()``. Python cannot bind one name to both a
-staticmethod and an instance method, so a small descriptor (``_StaticOrInstance``)
-dispatches: ``CloseOptions.timeout(d)`` builds a new instance, while
-``opts.timeout()`` reads. This is the only faithful way to keep both Java forms
-under the single Java name.
+Java's constructor is private, so ``CloseOptions()`` raises ``TypeError`` naming
+the static factories (CLAUDE.md, Python Binding Conventions, Class family). In a
+class with fluent setters every one-argument method takes its argument
+positionally (Signatures). Java's static factory ``timeout(Duration)`` and
+instance getter ``timeout()`` share one name, and so do
+``groupMembershipOperation(...)`` and ``groupMembershipOperation()``: each is one
+attribute, the factory on the class and the getter on an instance. A returned
+``Duration`` is a ``float`` of seconds.
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable
+from datetime import timedelta
 from enum import Enum
-from typing import Any
+from typing import Any, Generic, TypeVar, overload
 
 from confluent_kafka import Duration
+from confluent_kafka.null_pointer_error import NullPointerError
+
+__all__ = ["CloseOptions"]
+
+_F = TypeVar("_F", bound=Callable[..., Any])
+_G = TypeVar("_G", bound=Callable[..., Any])
 
 
-class _StaticOrInstance:
-    """A descriptor dispatching ``Name.method(x)`` (static factory) vs
-    ``instance.method()`` (getter) for Java's overloaded ``timeout`` name."""
+class _FactoryOrGetter(Generic[_F, _G]):
+    """One name that is a static factory on the class and a getter on an
+    instance."""
 
-    def __init__(self, static_fn: Callable[..., Any],
-                 instance_fn: Callable[..., Any]) -> None:
-        self._static_fn = static_fn
-        self._instance_fn = instance_fn
+    def __init__(self, factory: _F, getter: Callable[[Any], Any]) -> None:
+        self._factory = factory
+        self._getter = getter
 
-    def __get__(self, obj: Any, objtype: Any = None) -> Callable[..., Any]:
+    @overload
+    def __get__(self, obj: None, owner: type) -> _F: ...
+    @overload
+    def __get__(self, obj: object, owner: type | None = None) -> _G: ...
+
+    def __get__(self, obj: object | None, owner: type | None = None) -> Any:
         if obj is None:
-            return self._static_fn
+            return self._factory
+        getter = self._getter
 
-        def _bound() -> Any:
-            return self._instance_fn(obj)
+        def bound() -> Any:
+            return getter(obj)
 
-        return _bound
+        return bound
 
 
 class CloseOptions:
-    """The option object accepted by ``Consumer.close()``.
+    """The options of ``Consumer.close()``: the group membership operation to
+    apply upon leaving the group, and the maximum amount of time to wait for
+    the close process to complete (the consumer's default when not set).
 
     Java: ``org.apache.kafka.clients.consumer.CloseOptions``.
     """
 
     class GroupMembershipOperation(Enum):
-        """The group membership operation to apply upon leaving the group.
+        """Enum to specify the group membership operation upon leaving group.
 
-        Java nested enum ``CloseOptions.GroupMembershipOperation``:
-
-        - ``LEAVE_GROUP``: the consumer leaves the group.
-        - ``REMAIN_IN_GROUP``: the consumer remains in the group.
-        - ``DEFAULT``: static members remain; dynamic members leave.
+        - ``LEAVE_GROUP``: means the consumer will leave the group.
+        - ``REMAIN_IN_GROUP``: means the consumer will remain in the group.
+        - ``DEFAULT``: applies the default behavior: static members remain in
+          the group, dynamic members leave it.
         """
 
         LEAVE_GROUP = "LEAVE_GROUP"
@@ -80,70 +87,76 @@ class CloseOptions:
 
     __slots__ = ("_operation", "_timeout")
 
-    # A private sentinel so only the internal ``_create`` factory may build an
-    # instance; the public ``__init__`` always raises (Java's ctor is private).
-    _TOKEN: Any = object()
-
     def __init__(self, *args: Any, **kwargs: Any) -> None:
-        if not (len(args) == 1 and args[0] is CloseOptions._TOKEN and not kwargs):
-            raise TypeError(
-                "CloseOptions cannot be constructed directly; use "
-                "CloseOptions.timeout(...) or "
-                "CloseOptions.group_membership_operation(...)"
-            )
-        self._operation = CloseOptions.GroupMembershipOperation.DEFAULT
-        self._timeout: Duration | None = None
+        raise TypeError(
+            "CloseOptions cannot be constructed directly; use "
+            "CloseOptions.timeout(...) or CloseOptions.group_membership_operation(...)")
 
     @classmethod
-    def _create(cls) -> CloseOptions:
-        return cls(cls._TOKEN)
+    def _new(cls) -> CloseOptions:
+        """Java's private ``CloseOptions()``: the DEFAULT operation and no
+        timeout."""
+        options = cls.__new__(cls)
+        options._operation = CloseOptions.GroupMembershipOperation.DEFAULT
+        options._timeout = None
+        return options
 
     @staticmethod
-    def _timeout_factory(timeout: Duration | None) -> CloseOptions:
-        """Java ``static CloseOptions timeout(Duration)`` — a new instance with
-        the given timeout (``None`` leaves the default empty timeout)."""
-        return CloseOptions._create().with_timeout(timeout)
+    def _timeout_factory(timeout: Duration | None, /) -> CloseOptions:
+        """A new ``CloseOptions`` with a custom timeout: the maximum time to
+        wait for the consumer to close."""
+        return CloseOptions._new().with_timeout(timeout)
 
     @staticmethod
-    def group_membership_operation(
-        operation: CloseOptions.GroupMembershipOperation,
-    ) -> CloseOptions:
-        """Java ``static CloseOptions groupMembershipOperation(...)``."""
-        return CloseOptions._create().with_group_membership_operation(operation)
+    def _group_membership_operation_factory(
+            operation: CloseOptions.GroupMembershipOperation, /) -> CloseOptions:
+        """A new ``CloseOptions`` with the specified group membership
+        operation: one of ``LEAVE_GROUP``, ``REMAIN_IN_GROUP`` or ``DEFAULT``."""
+        return CloseOptions._new().with_group_membership_operation(operation)
 
-    def with_timeout(self, timeout: Duration | None) -> CloseOptions:
-        """Java fluent ``withTimeout(Duration)`` — ``None`` uses the default."""
+    #: ``CloseOptions.timeout(timeout)`` (static factory) /
+    #: ``options.timeout()`` (the timeout in seconds, ``None`` when not set).
+    timeout: _FactoryOrGetter[Callable[[Duration | None], CloseOptions],
+                              Callable[[], float | None]]
+    #: ``CloseOptions.group_membership_operation(operation)`` (static factory) /
+    #: ``options.group_membership_operation()`` (the operation).
+    group_membership_operation: _FactoryOrGetter[
+        Callable[[CloseOptions.GroupMembershipOperation], CloseOptions],
+        Callable[[], CloseOptions.GroupMembershipOperation]]
+
+    def with_timeout(self, timeout: Duration | None, /) -> CloseOptions:
+        """Fluent method to set the timeout for the close process: the maximum
+        time to wait for the consumer to close. If ``None``, the default
+        timeout will be used."""
         self._timeout = timeout
         return self
 
     def with_group_membership_operation(
-        self, operation: CloseOptions.GroupMembershipOperation,
-    ) -> CloseOptions:
-        """Java fluent ``withGroupMembershipOperation(...)``."""
+            self, operation: CloseOptions.GroupMembershipOperation, /) -> CloseOptions:
+        """Fluent method to set the group membership operation upon shutdown."""
         if operation is None:
-            raise TypeError("operation should not be null")
+            raise NullPointerError(message="operation should not be null")
         self._operation = operation
         return self
 
-    def _group_membership_operation_getter(
-        self,
-    ) -> CloseOptions.GroupMembershipOperation:
+    def _group_membership_operation_getter(self) -> CloseOptions.GroupMembershipOperation:
         return self._operation
 
+    def _timeout_seconds(self) -> float | None:
+        timeout = self._timeout
+        if timeout is None:
+            return None
+        if isinstance(timeout, timedelta):
+            return timeout.total_seconds()
+        return float(timeout)
+
     def _timeout_getter(self) -> Duration | None:
+        """The timeout as given (a ``Duration``), for the consumer's close."""
         return self._timeout
 
-    # Java overloads the name ``groupMembershipOperation`` too: a static factory
-    # and an instance getter. Same dispatch as ``timeout``.
-    group_membership_operation = _StaticOrInstance(  # type: ignore[assignment]
-        group_membership_operation.__func__,  # type: ignore[attr-defined]
-        _group_membership_operation_getter,
-    )
-    timeout = _StaticOrInstance(
-        _timeout_factory,
-        _timeout_getter,
-    )
 
-    def __repr__(self) -> str:
-        return (f"CloseOptions(timeout={self._timeout!r}, "
-                f"operation={self._operation})")
+CloseOptions.timeout = _FactoryOrGetter(
+    CloseOptions._timeout_factory, CloseOptions._timeout_seconds)
+CloseOptions.group_membership_operation = _FactoryOrGetter(
+    CloseOptions._group_membership_operation_factory,
+    CloseOptions._group_membership_operation_getter)

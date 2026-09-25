@@ -46,9 +46,8 @@ import threading
 
 import pytest
 
-from confluent_kafka import IllegalArgumentError, IllegalStateError
-from confluent_kafka.common import TopicPartition
-from confluent_kafka.common import KafkaError
+from confluent_kafka import IllegalArgumentError, IllegalStateError, NullPointerError
+from confluent_kafka.common import KafkaError, TopicPartition
 from confluent_kafka.common.errors import (
     ProducerFencedError,
     RecordTooLargeError,
@@ -365,9 +364,8 @@ class TestMockProducer:
         p = build_mock(True)
         p.init_transactions()
         p.begin_transaction()
-        # Java: NullPointerException from ConsumerGroupMetadata(null). Our
-        # ConsumerGroupMetadata requires group_id; None is a TypeError-ish reject.
-        with pytest.raises((TypeError, ValueError, IllegalArgumentError)):
+        # Java: NullPointerException from ConsumerGroupMetadata(null).
+        with pytest.warns(DeprecationWarning), pytest.raises(NullPointerError):
             p.send_offsets_to_transaction(
                 offsets={},
                 group_metadata=ConsumerGroupMetadata(group_id=None))  # type: ignore[arg-type]

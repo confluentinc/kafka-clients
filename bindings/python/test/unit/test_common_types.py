@@ -12,32 +12,36 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Unit tests for ``confluent_kafka.common`` value types (P2).
+"""Tests of the ``confluent_kafka.common`` value types.
 
-Translates the Java tests for these classes where they exist:
-
-- ``UuidTest`` — all cases except the two Java-serialization round-trip helpers
-  (``testToArray`` / ``testToList`` cover ``Uuid.toArray``/``toList``, static
-  array<->list helpers that are not part of the Python surface — skipped, noted
-  below).
-- ``TopicPartitionTest`` — its two tests are Java-``Serializable`` round-trips
-  (``ObjectOutputStream`` / a checked-in serialized blob); not relevant to
-  Python, which has no equivalent wire format. Replaced with value-type tests.
-- ``TopicIdPartitionTest`` — ``testEquals`` / ``testHashCode`` / ``testToString``.
-- ``PartitionInfoTest`` — ``testToString``.
-
-No Java test exists for ``Node``, ``TimestampType``, ``MetricName`` or
-``Headers``; behavioural tests are added for parity with the Java contract.
+Java's tests translated: ``UuidTest`` (all), ``TopicPartitionTest``,
+``TopicIdPartitionTest`` (all), ``PartitionInfoTest`` (all), ``KafkaMetricTest``.
+Skipped, with the reason at the test's place: the Java-serialization
+compatibility tests (a checked-in ``ObjectOutputStream`` blob has no Python
+meaning), and ``KafkaMetricTest.testMeasurableValueReturnsZeroWhenNotMeasurable``
+(``measurableValue`` is package-private, so not generated). Per public method:
+a positional call is a ``TypeError`` and each ``java_forms`` rejection has the
+exact message (CLAUDE.md, Python Binding Conventions, Tests and typing).
 """
 
 from __future__ import annotations
 
 import base64
+import copy
+import pickle
+import threading
+from typing import Any
 
 import pytest
 
-from confluent_kafka import IllegalArgumentError
+from confluent_kafka import IllegalArgumentError, IllegalStateError, NoSuchElementError, NullPointerError
+from confluent_kafka._java import java_str
 from confluent_kafka.common import (
+    Cluster,
+    KafkaMetric,
+    Measurable,
+    Metric,
+    MetricConfig,
     MetricName,
     Node,
     PartitionInfo,
@@ -46,12 +50,10 @@ from confluent_kafka.common import (
     TopicPartition,
     Uuid,
 )
-# Binding-internal helper (not part of the public common surface, F3).
-from confluent_kafka.common.headers import _read_headers
-from confluent_kafka import NullPointerError
+from confluent_kafka.common.headers import _headers_to_string, _read_headers
 
 # --------------------------------------------------------------------------- #
-# Uuid — translated from UuidTest
+# Uuid: UuidTest
 # --------------------------------------------------------------------------- #
 
 
@@ -65,37 +67,28 @@ def test_uuid_equality() -> None:
     id1 = Uuid(most_sig_bits=12, least_sig_bits=13)
     id2 = Uuid(most_sig_bits=12, least_sig_bits=13)
     id3 = Uuid(most_sig_bits=24, least_sig_bits=38)
-
     assert Uuid.ZERO_UUID == Uuid.ZERO_UUID
     assert id1 == id2
     assert id1 != id3
-
     assert hash(Uuid.ZERO_UUID) == hash(Uuid.ZERO_UUID)
     assert hash(id1) == hash(id2)
     assert hash(id1) != hash(id3)
 
 
 def test_hash_code() -> None:
-    # Java testHashCode exact vectors.
-    id1 = Uuid(most_sig_bits=16, least_sig_bits=7)
-    id2 = Uuid(most_sig_bits=1043, least_sig_bits=20075)
-    id3 = Uuid(most_sig_bits=104312423523523,
-               least_sig_bits=200732425676585)
-    assert hash(id1) == 23
-    assert hash(id2) == 19064
-    assert hash(id3) == -2011255899
+    assert hash(Uuid(most_sig_bits=16, least_sig_bits=7)) == 23
+    assert hash(Uuid(most_sig_bits=1043, least_sig_bits=20075)) == 19064
+    assert hash(Uuid(most_sig_bits=104312423523523, least_sig_bits=200732425676585)) == -2011255899
 
 
 def test_string_conversion() -> None:
     uid = Uuid.random_uuid()
     assert Uuid.from_string(str=str(uid)) == uid
-
-    zero = str(Uuid.ZERO_UUID)
-    assert Uuid.ZERO_UUID == Uuid.from_string(str=zero)
+    assert Uuid.ZERO_UUID == Uuid.from_string(str=str(Uuid.ZERO_UUID))
 
 
-@pytest.mark.parametrize("_", range(100))  # Java @RepeatedTest(100)
-def test_random_uuid(_: int) -> None:
+@pytest.mark.parametrize("repetition", range(100))  # Java @RepeatedTest(100)
+def test_random_uuid(repetition: int) -> None:
     random_id = Uuid.random_uuid()
     assert Uuid.ZERO_UUID != random_id
     assert Uuid.METADATA_TOPIC_ID != random_id
@@ -106,105 +99,121 @@ def test_compare_uuids() -> None:
     id00 = Uuid(most_sig_bits=0, least_sig_bits=0)
     id01 = Uuid(most_sig_bits=0, least_sig_bits=1)
     id10 = Uuid(most_sig_bits=1, least_sig_bits=0)
-    assert not (id00 < id00) and not (id00 > id00)
-    assert id00 < id01
-    assert id00 < id10
-    assert id01 > id00
-    assert id10 > id00
-    assert id01 < id10
-    assert id10 > id01
+    assert not id00 < id00 and not id00 > id00 and id00 <= id00
+    assert id00 < id01 and id00 < id10
+    assert id01 > id00 and id10 > id00
+    assert id01 < id10 and id10 > id01
+    # Java's longs are signed: a set high bit sorts first.
+    assert Uuid(most_sig_bits=-1, least_sig_bits=0) < id00
 
 
 def test_from_string_with_invalid_input() -> None:
     oversize = base64.urlsafe_b64encode(bytes(32)).rstrip(b"=").decode()
-    with pytest.raises(IllegalArgumentError):
+    with pytest.raises(IllegalArgumentError) as exc:
         Uuid.from_string(str=oversize)
-
+    assert str(exc.value) == (
+        f"Input string with prefix `{oversize[:24]}` is too long to be decoded as a base64 UUID")
     undersize = base64.urlsafe_b64encode(bytes(4)).rstrip(b"=").decode()
-    with pytest.raises(IllegalArgumentError):
+    with pytest.raises(IllegalArgumentError) as exc:
         Uuid.from_string(str=undersize)
+    assert str(exc.value) == (
+        f"Input string `{undersize}` decoded as 4 bytes, which is not equal to the expected "
+        "16 bytes of a base64-encoded UUID")
 
 
-def test_uuid_reserved_and_metadata() -> None:
-    assert Uuid.METADATA_TOPIC_ID == Uuid.ONE_UUID
-    assert Uuid.ZERO_UUID in Uuid.RESERVED
-    assert Uuid.ONE_UUID in Uuid.RESERVED
+@pytest.mark.parametrize("text,message", [
+    ("AAAA!AAA", "Illegal base64 character 21"),
+    ("A", "Last unit does not have enough valid bits"),
+    ("AA=", "Input byte array has wrong 4-byte ending unit"),
+    ("AAA=x", "Input byte array has incorrect ending byte at 4"),
+])
+def test_from_string_decodes_with_javas_base64_rules(text: str, message: str) -> None:
+    with pytest.raises(IllegalArgumentError) as exc:
+        Uuid.from_string(str=text)
+    assert str(exc.value) == message
 
 
-# Skipped: UuidTest.testToArray / testToList exercise Uuid.toArray / toList,
-# static Java array<->List helpers with no Python surface (lists/tuples are
-# native), so there is nothing to translate.
+def test_to_array() -> None:
+    assert Uuid.to_array(list=None) is None
+    other = Uuid.from_string(str="UXyU9i5ARn6W00ON2taeWA")
+    assert Uuid.to_array(list=[Uuid.ZERO_UUID, other]) == (Uuid.ZERO_UUID, other)
 
 
-def test_uuid_constructor_is_keyword_only() -> None:
+def test_to_list() -> None:
+    assert Uuid.to_list(array=None) is None
+    other = Uuid.from_string(str="UXyU9i5ARn6W00ON2taeWA")
+    assert Uuid.to_list(array=(Uuid.ZERO_UUID, other)) == [Uuid.ZERO_UUID, other]
+
+
+def test_uuid_constants() -> None:
+    assert Uuid.ONE_UUID == Uuid(most_sig_bits=0, least_sig_bits=1)
+    assert Uuid.METADATA_TOPIC_ID is Uuid.ONE_UUID
+    assert Uuid.ZERO_UUID == Uuid(most_sig_bits=0, least_sig_bits=0)
+    assert Uuid.RESERVED == frozenset({Uuid.ZERO_UUID, Uuid.ONE_UUID})
+    assert isinstance(Uuid.RESERVED, frozenset)
+
+
+def test_uuid_keyword_only() -> None:
     with pytest.raises(TypeError):
-        Uuid(0, 0)  # type: ignore[misc, call-arg]
+        Uuid(0, 0)  # type: ignore[call-arg]
+    with pytest.raises(TypeError):
+        Uuid.from_string("AAAAAAAAAAAAAAAAAAAAAA")  # type: ignore[call-arg]
 
 
 # --------------------------------------------------------------------------- #
-# TopicPartition — value-type tests (Java serialization tests not relevant)
+# TopicPartition: TopicPartitionTest
 # --------------------------------------------------------------------------- #
 
 
-def test_topic_partition_accessors_and_repr() -> None:
-    tp = TopicPartition(topic="mytopic", partition=5)
-    assert tp.topic() == "mytopic"
-    assert tp.partition() == 5
-    assert repr(tp) == "mytopic-5"
+def test_serialization_roundtrip() -> None:
+    """TopicPartitionTest.testSerializationRoundtrip, with pickle for Java's
+    ObjectOutputStream. (testTopiPartitionSerializationCompatibility reads a
+    checked-in Java-serialized file: no Python meaning, not translated.)"""
+    orig = TopicPartition(topic="mytopic", partition=5)
+    clone = pickle.loads(pickle.dumps(orig))
+    assert isinstance(clone, TopicPartition)
+    assert clone.partition() == 5 and clone.topic() == "mytopic"
+    assert copy.copy(orig) == orig
 
 
-def test_topic_partition_equality_and_hash() -> None:
+def test_topic_partition_value_semantics() -> None:
     a = TopicPartition(topic="t", partition=1)
-    b = TopicPartition(topic="t", partition=1)
-    c = TopicPartition(topic="t", partition=2)
-    d = TopicPartition(topic="u", partition=1)
-    assert a == b
-    assert hash(a) == hash(b)
-    assert a != c
-    assert a != d
-    # Hashable / usable as a dict key.
-    assert {a: 1}[b] == 1
-
-
-def test_topic_partition_keyword_only() -> None:
+    assert a == TopicPartition(topic="t", partition=1)
+    assert hash(a) == hash(TopicPartition(topic="t", partition=1))
+    assert a != TopicPartition(topic="t", partition=2)
+    assert a != TopicPartition(topic="u", partition=1)
+    assert {a: 1}[TopicPartition(topic="t", partition=1)] == 1
+    assert str(a) == "t-1"
+    assert str(TopicPartition(topic=None, partition=0)) == "null-0"  # type: ignore[arg-type]
     with pytest.raises(TypeError):
-        TopicPartition("t", 0)  # type: ignore[misc, call-arg]
+        TopicPartition("t", 0)  # type: ignore[call-arg]
 
 
 # --------------------------------------------------------------------------- #
-# TopicIdPartition — translated from TopicIdPartitionTest
+# TopicIdPartition: TopicIdPartitionTest
 # --------------------------------------------------------------------------- #
 
-_TID0 = Uuid(most_sig_bits=-4883993789924556279,
-             least_sig_bits=-5960309683534398572)
-_NAME0 = "a_topic_name"
-_PART1 = 1
-_TP0 = TopicPartition(topic=_NAME0, partition=_PART1)
-_TIDP0 = TopicIdPartition(topic_id=_TID0, topic_partition=_TP0)
-_TIDP1 = TopicIdPartition(topic_id=_TID0, partition=_PART1, topic=_NAME0)
-# Java's `new TopicIdPartition(topicId0, 1, null)`: `topic=None` is "not given"
-# under java_forms (post-phase review item 5), so the null topic is spelled
-# through the TopicPartition form, which Java's constructor builds anyway.
-_TIDP_NULL0 = TopicIdPartition(
-    topic_id=_TID0, topic_partition=TopicPartition(topic=None, partition=_PART1),  # type: ignore[arg-type]
-)
-_TIDP_NULL1 = TopicIdPartition(
-    topic_id=_TID0, topic_partition=TopicPartition(topic=None, partition=_PART1),  # type: ignore[arg-type]
-)
-_TID1 = Uuid(most_sig_bits=7759286116672424028,
-             least_sig_bits=-5081215629859775948)
-_NAME1 = "another_topic_name"
-_TIDP2 = TopicIdPartition(topic_id=_TID1, partition=_PART1, topic=_NAME1)
-_TIDP_NULL2 = TopicIdPartition(
-    topic_id=_TID1, topic_partition=TopicPartition(topic=None, partition=_PART1),  # type: ignore[arg-type]
-)
+_TOPIC_ID0 = Uuid(most_sig_bits=-4883993789924556279, least_sig_bits=-5960309683534398572)
+_TOPIC_NAME0 = "a_topic_name"
+_PARTITION1 = 1
+_TOPIC_PARTITION0 = TopicPartition(topic=_TOPIC_NAME0, partition=_PARTITION1)
+_TIDP0 = TopicIdPartition(topic_id=_TOPIC_ID0, topic_partition=_TOPIC_PARTITION0)
+_TIDP1 = TopicIdPartition(topic_id=_TOPIC_ID0, partition=_PARTITION1, topic=_TOPIC_NAME0)
+# Java's `new TopicIdPartition(topicId0, partition1, null)`: `topic=None` reads as
+# not given (post-phase review item 5), so the null topic goes through the
+# TopicPartition form, which is what Java's constructor builds.
+_NULL_TOPIC = TopicPartition(topic=None, partition=_PARTITION1)  # type: ignore[arg-type]
+_TIDP_NULL0 = TopicIdPartition(topic_id=_TOPIC_ID0, topic_partition=_NULL_TOPIC)
+_TIDP_NULL1 = TopicIdPartition(topic_id=_TOPIC_ID0, topic_partition=_NULL_TOPIC)
+_TOPIC_ID1 = Uuid(most_sig_bits=7759286116672424028, least_sig_bits=-5081215629859775948)
+_TIDP2 = TopicIdPartition(topic_id=_TOPIC_ID1, partition=_PARTITION1, topic="another_topic_name")
+_TIDP_NULL2 = TopicIdPartition(topic_id=_TOPIC_ID1, topic_partition=_NULL_TOPIC)
 
 
 def test_topic_id_partition_equals() -> None:
     assert _TIDP0 == _TIDP1
     assert _TIDP1 == _TIDP0
     assert _TIDP_NULL0 == _TIDP_NULL1
-
     assert _TIDP0 != _TIDP2
     assert _TIDP2 != _TIDP0
     assert _TIDP0 != _TIDP_NULL0
@@ -212,7 +221,6 @@ def test_topic_id_partition_equals() -> None:
 
 
 def test_topic_id_partition_hash_code() -> None:
-    assert hash(_TIDP0) == hash((_TIDP0.topic_id(), _TIDP0.topic_partition()))
     assert hash(_TIDP0) == hash(_TIDP1)
     assert hash(_TIDP_NULL0) == hash(_TIDP_NULL1)
     assert hash(_TIDP0) != hash(_TIDP2)
@@ -221,83 +229,35 @@ def test_topic_id_partition_hash_code() -> None:
 
 
 def test_topic_id_partition_to_string() -> None:
-    assert repr(_TIDP0) == "vDiRhkpVQgmtSLnsAZx7lA:a_topic_name-1"
-    assert repr(_TIDP_NULL0) == "vDiRhkpVQgmtSLnsAZx7lA:None-1"
+    assert str(_TIDP0) == "vDiRhkpVQgmtSLnsAZx7lA:a_topic_name-1"
+    assert str(_TIDP_NULL0) == "vDiRhkpVQgmtSLnsAZx7lA:null-1"
 
 
-def test_topic_id_partition_accessors() -> None:
-    assert _TIDP1.topic_id() == _TID0
-    assert _TIDP1.partition() == _PART1
-    assert _TIDP1.topic() == _NAME0
-    assert _TIDP1.topic_partition() == _TP0
-
-
-def test_topic_id_partition_requires_exactly_one_form() -> None:
+def test_topic_id_partition_forms() -> None:
+    assert (_TIDP1.topic_id(), _TIDP1.topic(), _TIDP1.partition()) == (
+        _TOPIC_ID0, _TOPIC_NAME0, _PARTITION1)
+    assert _TIDP1.topic_partition() == _TOPIC_PARTITION0
+    assert _TIDP_NULL0.topic() is None
     with pytest.raises(IllegalArgumentError) as exc:
-        TopicIdPartition(topic_id=_TID0)  # neither form
+        TopicIdPartition(topic_id=_TOPIC_ID0)  # type: ignore[call-overload]
     assert str(exc.value) == (
         "TopicIdPartition() takes one of (topic_id, topic_partition), "
         "(topic_id, partition, topic); got (topic_id)")
-
+    with pytest.raises(IllegalArgumentError) as exc:
+        TopicIdPartition(topic_id=_TOPIC_ID0, partition=0)  # type: ignore[call-overload]
+    assert str(exc.value).endswith("got (topic_id, partition)")
     with pytest.raises(IllegalArgumentError):
-        # both forms
-        TopicIdPartition(topic_id=_TID0, partition=1, topic_partition=_TP0)
-
-
-def test_topic_id_partition_null_topic_id() -> None:
+        TopicIdPartition(topic_id=_TOPIC_ID0, topic_partition=_TOPIC_PARTITION0,  # type: ignore[call-overload]
+                         partition=1, topic="t")
+    with pytest.raises(NullPointerError) as npe:
+        TopicIdPartition(topic_id=None, topic_partition=_TOPIC_PARTITION0)  # type: ignore[call-overload]
+    assert str(npe.value) == "topicId can not be null"
     with pytest.raises(TypeError):
-        TopicIdPartition(topic_id=None, topic_partition=_TP0)  # type: ignore[arg-type]
+        TopicIdPartition(_TOPIC_ID0, _TOPIC_PARTITION0)  # type: ignore[call-overload]
 
 
 # --------------------------------------------------------------------------- #
-# Node
-# --------------------------------------------------------------------------- #
-
-
-def test_node_accessors_and_overloads() -> None:
-    n = Node(id=1, host="h", port=9092)
-    assert n.id() == 1
-    assert n.id_string() == "1"
-    assert n.host() == "h"
-    assert n.port() == 9092
-    assert n.has_rack() is False
-    assert n.rack() is None
-    assert n.is_fenced() is False
-    assert n.is_empty() is False
-
-    with_rack = Node(id=2, host="h2", port=9093, rack="r")
-    assert with_rack.has_rack() is True
-    assert with_rack.rack() == "r"
-
-    fenced = Node(id=3, host="h3", port=9094, rack="r", is_fenced=True)
-    assert fenced.is_fenced() is True
-
-
-def test_node_no_node_is_empty() -> None:
-    nn = Node.no_node()
-    assert nn.id() == -1
-    assert nn.host() == ""
-    assert nn.port() == -1
-    assert nn.is_empty() is True
-
-
-def test_node_equality_hash_repr() -> None:
-    a = Node(id=1, host="h", port=9092, rack="r")
-    b = Node(id=1, host="h", port=9092, rack="r")
-    c = Node(id=1, host="h", port=9092, rack="other")
-    assert a == b
-    assert hash(a) == hash(b)
-    assert a != c
-    assert repr(a) == "h:9092 (id: 1 rack: r isFenced: False)"
-
-
-def test_node_keyword_only() -> None:
-    with pytest.raises(TypeError):
-        Node(1, "h", 9092)  # type: ignore[misc, call-arg]
-
-
-# --------------------------------------------------------------------------- #
-# PartitionInfo — translated from PartitionInfoTest
+# PartitionInfo: PartitionInfoTest
 # --------------------------------------------------------------------------- #
 
 
@@ -305,32 +265,141 @@ def test_partition_info_to_string() -> None:
     leader = Node(id=0, host="localhost", port=9092)
     r1 = Node(id=1, host="localhost", port=9093)
     r2 = Node(id=2, host="localhost", port=9094)
-    info = PartitionInfo(
-        topic="sample", partition=0, leader=leader,
-        replicas=(leader, r1, r2), in_sync_replicas=(leader, r1),
-        offline_replicas=(r2,),
-    )
-    expected = ("Partition(topic = sample, partition = 0, leader = 0, "
-                "replicas = [0,1,2], isr = [0,1], offlineReplicas = [2])")
-    assert repr(info) == expected
+    info = PartitionInfo(topic="sample", partition=0, leader=leader, replicas=(leader, r1, r2),
+                         in_sync_replicas=(leader, r1), offline_replicas=(r2,))
+    assert str(info) == ("Partition(topic = sample, partition = 0, leader = 0, "
+                         "replicas = [0,1,2], isr = [0,1], offlineReplicas = [2])")
 
 
-def test_partition_info_offline_default_and_equality() -> None:
-    leader = Node(id=0, host="localhost", port=9092)
-    a = PartitionInfo(topic="t", partition=0, leader=leader,
-                      replicas=(leader,), in_sync_replicas=(leader,))
-    assert a.offline_replicas() == ()
-    b = PartitionInfo(topic="t", partition=0, leader=leader,
-                      replicas=(leader,), in_sync_replicas=(leader,))
-    assert a == b
-    assert hash(a) == hash(b)
-
-
-def test_partition_info_null_leader() -> None:
-    info = PartitionInfo(topic="t", partition=0, leader=None,
-                         replicas=(), in_sync_replicas=())
+def test_partition_info_short_form_and_equality() -> None:
+    leader = Node(id=0, host="h", port=1)
+    info = PartitionInfo(topic="t", partition=1, leader=None, replicas=(leader,),
+                         in_sync_replicas=())
+    # new Node[0]: the Java-given offline replicas.
+    assert info.offline_replicas() == ()
     assert info.leader() is None
-    assert "leader = none" in repr(info)
+    assert "leader = none" in str(info)
+    assert info == PartitionInfo(topic="t", partition=1, leader=None, replicas=(leader,),
+                                 in_sync_replicas=(), offline_replicas=())
+    assert hash(info) == hash(PartitionInfo(topic="t", partition=1, leader=None,
+                                            replicas=(leader,), in_sync_replicas=()))
+
+
+# --------------------------------------------------------------------------- #
+# Node (no Java test)
+# --------------------------------------------------------------------------- #
+
+
+def test_node_constructors_and_accessors() -> None:
+    n = Node(id=5, host="h", port=9092)
+    assert (n.id(), n.id_string(), n.host(), n.port()) == (5, "5", "h", 9092)
+    assert n.rack() is None and not n.has_rack() and not n.is_fenced()
+    r = Node(id=5, host="h", port=9092, rack="r1")
+    assert r.has_rack() and r.rack() == "r1"
+    # Every combination is a Java form: (id, host, port) passes (null, false).
+    assert Node(id=5, host="h", port=9092, is_fenced=True).is_fenced()
+    assert str(r) == "h:9092 (id: 5 rack: r1 isFenced: false)"
+    assert str(n) == "h:9092 (id: 5 rack: null isFenced: false)"
+    assert n == Node(id=5, host="h", port=9092) and n != r
+    assert hash(n) == hash(Node(id=5, host="h", port=9092))
+    assert Node.no_node().is_empty()
+    assert str(Node.no_node()) == ":-1 (id: -1 rack: null isFenced: false)"
+    with pytest.raises(TypeError):
+        Node(5, "h", 9092)  # type: ignore[call-arg]
+
+
+# --------------------------------------------------------------------------- #
+# MetricName, Metric, KafkaMetric: KafkaMetricTest
+# --------------------------------------------------------------------------- #
+
+_METRIC_NAME = MetricName(name="name", group="group", description="description", tags={})
+
+
+def test_metric_name() -> None:
+    m = MetricName(name="n", group="g", description="d", tags={"client-id": "c1"})
+    assert (m.name(), m.group(), m.description(), m.tags()) == ("n", "g", "d", {"client-id": "c1"})
+    # Equality and the hash exclude the description.
+    same = MetricName(name="n", group="g", description="other", tags={"client-id": "c1"})
+    assert m == same and hash(m) == hash(same)
+    assert m != MetricName(name="n", group="g", description="d", tags={})
+    assert str(m) == "MetricName [name=n, group=g, description=d, tags={client-id=c1}]"
+    for field in ("name", "group", "description", "tags"):
+        args: dict[str, Any] = {"name": "n", "group": "g", "description": "d", "tags": {}}
+        args[field] = None
+        with pytest.raises(NullPointerError):
+            MetricName(**args)
+    with pytest.raises(TypeError):
+        MetricName("n", "g", "d", {})  # type: ignore[call-arg]
+
+
+class _Measurable:
+    def measure(self, config: object, now: int) -> float:
+        return 0.0
+
+
+class _Gauge:
+    def __init__(self, value: object) -> None:
+        self._value = value
+
+    def value(self, config: object, now: int) -> object:
+        return self._value
+
+
+class _MockTime:
+    def milliseconds(self) -> int:
+        return 1000
+
+
+def test_is_measurable() -> None:
+    provider = _Measurable()
+    metric = KafkaMetric(lock=object(), metric_name=_METRIC_NAME, value_provider=provider,
+                         config=MetricConfig(), time=_MockTime())
+    assert metric.is_measurable()
+    assert metric.measurable() is provider
+    assert metric.metric_value() == 0.0
+
+
+def test_is_measurable_with_gauge_provider() -> None:
+    metric = KafkaMetric(lock=object(), metric_name=_METRIC_NAME, value_provider=_Gauge(0.0),
+                         config=MetricConfig(), time=_MockTime())
+    assert not metric.is_measurable()
+    with pytest.raises(IllegalStateError) as exc:
+        metric.measurable()
+    assert str(exc.value) == "Not a measurable: class test.unit.test_common_types._Gauge"
+
+
+# KafkaMetricTest.testMeasurableValueReturnsZeroWhenNotMeasurable: Java's
+# measurableValue(long) is package-private, so it is not generated.
+
+
+def test_kafka_metric_accepts_non_measurable_non_gauge_provider() -> None:
+    metric = KafkaMetric(lock=threading.Lock(), metric_name=_METRIC_NAME,
+                         value_provider=_Gauge("metric value provider"),
+                         config=MetricConfig(), time=_MockTime())
+    assert metric.metric_value() == "metric value provider"
+    assert metric.metric_name() is _METRIC_NAME
+    assert isinstance(metric, Metric)
+
+
+def test_constructor_with_null_provider() -> None:
+    with pytest.raises(NullPointerError) as exc:
+        KafkaMetric(lock=object(), metric_name=_METRIC_NAME, value_provider=None,
+                    config=MetricConfig(), time=_MockTime())
+    assert str(exc.value) == "valueProvider must not be null"
+
+
+def test_kafka_metric_config_getter_and_setter() -> None:
+    config = MetricConfig()
+    metric = KafkaMetric(lock=object(), metric_name=_METRIC_NAME, value_provider=_Gauge(1),
+                         config=config, time=_MockTime())
+    assert metric.config() is config
+    other = MetricConfig()
+    assert metric.config(config=other) is None
+    assert metric.config() is other
+
+
+def test_placeholders_are_object() -> None:
+    assert Cluster is object and MetricConfig is object and Measurable is object
 
 
 # --------------------------------------------------------------------------- #
@@ -338,68 +407,20 @@ def test_partition_info_null_leader() -> None:
 # --------------------------------------------------------------------------- #
 
 
-def test_timestamp_type_values_and_labels() -> None:
-    assert int(TimestampType.NO_TIMESTAMP_TYPE) == -1
-    assert int(TimestampType.CREATE_TIME) == 0
-    assert int(TimestampType.LOG_APPEND_TIME) == 1
-    assert TimestampType.NO_TIMESTAMP_TYPE.id() == -1
-    assert TimestampType.CREATE_TIME.label() == "CreateTime"
-    assert str(TimestampType.LOG_APPEND_TIME) == "LogAppendTime"
-
-
-def test_timestamp_type_for_name() -> None:
+def test_timestamp_type() -> None:
+    assert [t.value for t in TimestampType] == [-1, 0, 1]
+    assert [str(t) for t in TimestampType] == ["NoTimestampType", "CreateTime", "LogAppendTime"]
     assert TimestampType.for_name(name="CreateTime") is TimestampType.CREATE_TIME
-    with pytest.raises(KeyError):
+    with pytest.raises(NoSuchElementError) as exc:
         TimestampType.for_name(name="nope")
+    assert str(exc.value) == "Invalid timestamp type nope"
+    assert not hasattr(TimestampType.CREATE_TIME, "label")
+    with pytest.raises(TypeError):
+        TimestampType.for_name("CreateTime")  # type: ignore[call-arg]
 
 
 # --------------------------------------------------------------------------- #
-# MetricName
-# --------------------------------------------------------------------------- #
-
-
-def test_metric_name_accessors_and_equality() -> None:
-    a = MetricName(name="n", group="g", description="d1", tags={"k": "v"})
-    b = MetricName(name="n", group="g", description="d2", tags={"k": "v"})
-    assert a.name() == "n"
-    assert a.group() == "g"
-    assert a.description() == "d1"
-    assert a.tags() == {"k": "v"}
-    # description excluded from equality/hash (Java).
-    assert a == b
-    assert hash(a) == hash(b)
-    c = MetricName(name="n", group="g", description="d1", tags={"k": "other"})
-    assert a != c
-
-
-def test_metric_name_hashable_as_dict_key() -> None:
-    a = MetricName(name="n", group="g", description="d", tags={})
-    assert {a: 1}[MetricName(name="n", group="g", description="x", tags={})] == 1
-
-
-def test_metric_name_equality_excludes_description() -> None:
-    # F2 / Java MetricName.equals: two instances differing ONLY in description
-    # are equal (Java compares group, name, tags — not description).
-    a = MetricName(name="n", group="g", description="first", tags={"k": "v"})
-    b = MetricName(name="n", group="g", description="second", tags={"k": "v"})
-    assert a.description() != b.description()
-    assert a == b
-    assert hash(a) == hash(b)
-
-
-def test_metric_name_hash_is_tag_insertion_order_independent() -> None:
-    # F2 / Java MetricName.hashCode over tags: the tag map is compared by
-    # content, so tag insertion order must not change equality or the hash.
-    a = MetricName(name="n", group="g", description="d",
-                   tags={"a": "1", "b": "2"})
-    b = MetricName(name="n", group="g", description="d",
-                   tags={"b": "2", "a": "1"})
-    assert a == b
-    assert hash(a) == hash(b)
-
-
-# --------------------------------------------------------------------------- #
-# Headers write-side validator
+# Headers and Java's string conversion
 # --------------------------------------------------------------------------- #
 
 
@@ -425,3 +446,20 @@ def test_read_headers_rejects_a_null_key_with_javas_message() -> None:
     with pytest.raises(NullPointerError) as exc:
         _read_headers([(None, b"v")])  # type: ignore[list-item]
     assert str(exc.value) == "Null header keys are not permitted"
+
+
+def test_headers_to_string_is_record_headers_to_string() -> None:
+    assert _headers_to_string(_read_headers([("k", b"\x01\xff"), ("n", None)])) == (
+        "RecordHeaders(headers = [RecordHeader(key = k, value = [1, -1]), "
+        "RecordHeader(key = n, value = null)], isReadOnly = false)")
+
+
+@pytest.mark.parametrize("value,text", [
+    (None, "null"), (True, "true"), (False, "false"), (5, "5"), ("s", "s"),
+    (1.0, "1.0"), (0.001, "0.001"), (1e7, "1.0E7"), (1.5e-5, "1.5E-5"), (-2.5e20, "-2.5E20"),
+    (float("nan"), "NaN"), (float("inf"), "Infinity"), (-0.0, "-0.0"),
+    ([1, None], "[1, null]"), ({"a": 1}, "{a=1}"),
+    (TopicPartition(topic="t", partition=0), "t-0"),
+])
+def test_java_str_is_string_value_of(value: object, text: str) -> None:
+    assert java_str(value) == text

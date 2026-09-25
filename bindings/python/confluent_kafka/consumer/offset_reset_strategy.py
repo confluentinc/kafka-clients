@@ -12,35 +12,31 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""``OffsetResetStrategy`` — the value of ``auto.offset.reset``.
+"""``OffsetResetStrategy``: Java's ``org.apache.kafka.clients.consumer.OffsetResetStrategy``.
 
-Translated from ``org.apache.kafka.clients.consumer.OffsetResetStrategy``
-(Apache Kafka 4.3.1). Java's enum is ``@Deprecated`` since 4.0 (no replacement);
-kept per rule 3.13 because ``MockConsumer``'s deprecated constructor takes it.
-Members are declared in Java's order (``LATEST``, ``EARLIEST``, ``NONE``);
-``__str__`` returns the lowercase name (Java ``toString``).
+An ``enum.Enum`` valued by the constant's name, members in Java's order
+(CLAUDE.md, Python Binding Conventions, Class family). Java deprecates the enum
+itself; the deprecated ``MockConsumer`` constructor that takes it warns when
+called.
 """
 
 from __future__ import annotations
 
-from enum import Enum, auto
+from enum import Enum
+
+__all__ = ["OffsetResetStrategy"]
 
 
 class OffsetResetStrategy(Enum):
-    """The value of ``auto.offset.reset``.
+    """Deprecated: since 4.0; will be removed in a future release. Not required
+    by Kafka client users; no replacement is provided.
 
     Java: ``org.apache.kafka.clients.consumer.OffsetResetStrategy``.
-
-    .. deprecated::
-        ``@Deprecated`` since 4.0; will be removed in a future release. Not
-        required by Kafka client users; no replacement is provided. Kept per
-        rule 3.13.
     """
 
-    LATEST = auto()
-    EARLIEST = auto()
-    NONE = auto()
+    LATEST = "LATEST"
+    EARLIEST = "EARLIEST"
+    NONE = "NONE"
 
     def __str__(self) -> str:
-        # Java toString: super.toString().toLowerCase(Locale.ROOT)
         return self.name.lower()

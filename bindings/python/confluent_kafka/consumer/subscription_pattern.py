@@ -12,19 +12,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""``SubscriptionPattern`` — a broker-side RE2/J regex for ``subscribe()``.
-
-Translated from ``org.apache.kafka.clients.consumer.SubscriptionPattern``
-(Apache Kafka 4.3.1). It just wraps the pattern string; all RE2/J validation is
-delegated to the broker. Value equality and hashable over the pattern string.
-"""
+"""``SubscriptionPattern``: Java's ``org.apache.kafka.clients.consumer.SubscriptionPattern``."""
 
 from __future__ import annotations
 
+__all__ = ["SubscriptionPattern"]
+
 
 class SubscriptionPattern:
-    """A regular expression compatible with Google RE2/J, used to subscribe to
-    topics.
+    """Represents a regular expression compatible with Google RE2/J, used to
+    subscribe to topics. This just keeps the string representation of the
+    pattern, and all validations to ensure it is RE2/J compatible are delegated
+    to the broker.
 
     Java: ``org.apache.kafka.clients.consumer.SubscriptionPattern``.
     """
@@ -35,20 +34,16 @@ class SubscriptionPattern:
         self._pattern = pattern
 
     def pattern(self) -> str:
-        """The RE2/J-compatible pattern string."""
+        """Regular expression pattern compatible with RE2/J."""
         return self._pattern
 
     def __str__(self) -> str:
-        # Java toString returns the pattern.
         return self._pattern
+
+    def __hash__(self) -> int:
+        return hash(self._pattern)
 
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, SubscriptionPattern):
             return NotImplemented
         return self._pattern == other._pattern
-
-    def __hash__(self) -> int:
-        return hash(self._pattern)
-
-    def __repr__(self) -> str:
-        return self._pattern
