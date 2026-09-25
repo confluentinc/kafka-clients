@@ -36,11 +36,11 @@ from typing import TYPE_CHECKING, Any, Generic, TypeVar
 
 import _confluentkafka as _lib  # type: ignore[import-not-found]
 
-from confluent_kafka.illegal_state_error import IllegalStateError
+from confluent_kafka.common.kafka_error import KafkaError
 from confluent_kafka.null_pointer_error import NullPointerError
 
 from ._base import (
-    CLOSED_MESSAGE,
+    CLOSED_WHILE_SENDING_MESSAGE,
     _ProducerState,
     check_group_metadata,
     close_timeout_ms,
@@ -97,14 +97,14 @@ class AsyncProducer(Generic[K, V], _ProducerState):
         self._check_not_closed()
         await self._drain_async()
         await self._run_async(
-            lambda cb: _lib.Producer_init_transactions_async(self._c_producer, cb))
+            lambda cb: self._call(_lib.Producer_init_transactions_async, cb))
 
     def begin_transaction(self) -> None:
         """See :meth:`Producer.begin_transaction`. Java does not wait in it, so
         it is a plain ``def``."""
         self._check_not_closed()
         self._drain_sync()
-        raise_if_error(_lib.Producer_begin_transaction(self._c_producer))
+        raise_if_error(self._call(_lib.Producer_begin_transaction))
 
     async def send_offsets_to_transaction(
             self, *, offsets: Mapping[TopicPartition, OffsetAndMetadata],
@@ -115,8 +115,8 @@ class AsyncProducer(Generic[K, V], _ProducerState):
         await self._drain_async()
         spec = offsets_to_spec(offsets)
         fields = group_metadata_fields(group_metadata)
-        await self._run_async(lambda cb: _lib.Producer_send_offsets_to_transaction_fields_async(
-            self._c_producer, spec, fields, cb))
+        await self._run_async(lambda cb: self._call(
+            _lib.Producer_send_offsets_to_transaction_fields_async, spec, fields, cb))
 
     async def commit_transaction(self) -> None:
         """See :meth:`Producer.commit_transaction`: when it returns, the
@@ -125,7 +125,7 @@ class AsyncProducer(Generic[K, V], _ProducerState):
         sent = list(self._futures)
         await self._drain_async()
         await self._run_async(
-            lambda cb: _lib.Producer_commit_transaction_async(self._c_producer, cb))
+            lambda cb: self._call(_lib.Producer_commit_transaction_async, cb))
         if sent:
             await asyncio.wait(sent)
 
@@ -134,7 +134,7 @@ class AsyncProducer(Generic[K, V], _ProducerState):
         self._check_not_closed()
         await self._drain_async()
         await self._run_async(
-            lambda cb: _lib.Producer_abort_transaction_async(self._c_producer, cb))
+            lambda cb: self._call(_lib.Producer_abort_transaction_async, cb))
 
     async def send(self, *, record: ProducerRecord[K, V],
                    callback: Callback | None = None) -> asyncio.Future[RecordMetadata]:
@@ -166,20 +166,26 @@ class AsyncProducer(Generic[K, V], _ProducerState):
             if schedule:
                 loop.call_soon_threadsafe(self._complete_pending, loop)
 
-        full = _lib.Producer_send(self._c_producer, native, cb)
-        if full is None:
-            # A concurrent close() won the race with this send.
-            raise IllegalStateError(message=CLOSED_MESSAGE)
-        self._track(future)
-        if full:
-            space: asyncio.Future[None] = loop.create_future()
+        # A close() that began since the check above (the serializers ran in
+        # between) refuses the record as Java's RecordAccumulator.append does.
+        closed_while_sending = KafkaError(message=CLOSED_WHILE_SENDING_MESSAGE)
+        space: asyncio.Future[None] | None = None
+        with self._use(closed_while_sending) as c_producer:
+            full = _lib.Producer_send(c_producer, native, cb)
+            if full is None:
+                raise closed_while_sending
+            self._track(future)
+            if full:
+                waiter: asyncio.Future[None] = loop.create_future()
 
-            def space_cb() -> None:
-                if not loop.is_closed():
-                    loop.call_soon_threadsafe(_set_result, space)
+                def space_cb() -> None:
+                    if not loop.is_closed():
+                        loop.call_soon_threadsafe(_set_result, waiter)
 
-            if not _lib.Producer_on_space_available(self._c_producer, space_cb):
-                await space
+                if not _lib.Producer_on_space_available(c_producer, space_cb):
+                    space = waiter
+        if space is not None:
+            await space
         return future
 
     def _complete_pending(self, loop: asyncio.AbstractEventLoop) -> None:
@@ -203,7 +209,7 @@ class AsyncProducer(Generic[K, V], _ProducerState):
         self._check_not_closed()
         sent = list(self._futures)
         await self._drain_async()
-        await self._run_async(lambda cb: _lib.Producer_flush_async(self._c_producer, cb))
+        await self._run_async(lambda cb: self._call(_lib.Producer_flush_async, cb))
         if sent:
             await asyncio.wait(sent)
 
@@ -213,7 +219,7 @@ class AsyncProducer(Generic[K, V], _ProducerState):
             raise NullPointerError(message="topic cannot be null")
         self._check_not_closed()
         list_handle, error = await self._await_payload(
-            lambda cb: _lib.Producer_partitions_for_async(self._c_producer, topic, cb), True)
+            lambda cb: self._call(_lib.Producer_partitions_for_async, topic, cb), True)
         if error:
             if list_handle:
                 _lib.PartitionInfoList_drain(list_handle)
@@ -224,14 +230,14 @@ class AsyncProducer(Generic[K, V], _ProducerState):
         """See :meth:`Producer.metrics`. Java does not wait in it, so it is a
         plain ``def``."""
         self._check_not_closed()
-        return to_metrics_map(_lib.Producer_metrics(self._c_producer))
+        return to_metrics_map(self._call(_lib.Producer_metrics))
 
     async def close(self, *, timeout: Duration | None = None) -> None:
         """See :meth:`Producer.close`."""
         timeout_ms = close_timeout_ms(timeout)
-        if self._closed:
+        # Check and set at once: exactly one close() tears the producer down.
+        if not self._begin_close():
             return
-        self._closed = True
         c_producer = self._c_producer
         loop = asyncio.get_running_loop()
         # Refuse further records and hand the accumulated ones to the Rust
@@ -249,9 +255,14 @@ class AsyncProducer(Generic[K, V], _ProducerState):
                 await self._run_async(lambda cb: _lib.Producer_close_with_timeout_async(
                     c_producer, remaining_ms, cb))
         finally:
-            # Joins the send and poll threads: off the loop.
-            await loop.run_in_executor(None, _lib.Producer_destroy, c_producer)
+            # Waits for the calls still in flight, then joins the send and poll
+            # threads: off the loop.
+            await loop.run_in_executor(None, self._destroy, c_producer)
             self._close_serializers()
+
+    def _destroy(self, c_producer: int) -> None:
+        self._wait_for_uses()
+        _lib.Producer_destroy(c_producer)
 
     async def __aenter__(self) -> AsyncProducer[K, V]:
         return self
@@ -277,7 +288,7 @@ class AsyncProducer(Generic[K, V], _ProducerState):
             if not loop.is_closed():
                 loop.call_soon_threadsafe(_set_result, drained)
 
-        if _lib.Producer_drain(self._c_producer, ready):
+        if self._drain_registered(ready):
             return
         if timeout_s is None:
             await drained

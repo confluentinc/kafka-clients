@@ -69,6 +69,9 @@ _VALUE_SERIALIZER = "value.serializer"
 # Java's close() is close(Duration.ofMillis(Long.MAX_VALUE)).
 LONG_MAX_VALUE = (1 << 63) - 1
 
+# Java's RecordAccumulator.append() message for a send that races close.
+CLOSED_WHILE_SENDING_MESSAGE = "Producer closed while send in progress"
+
 
 class _SnapshotMetric:
     """A point-in-time metric value returned from ``metrics()``: the
@@ -182,17 +185,82 @@ def raise_if_error(error: int) -> None:
         raise from_ffi_error(error)
 
 
+class _Use:
+    """One call into the native producer: while it runs, ``close()`` does not
+    free the handle (see ``_ProducerState``)."""
+
+    __slots__ = ("_state", "_error")
+
+    def __init__(self, state: _ProducerState, error: BaseException | None) -> None:
+        self._state = state
+        self._error = error
+
+    def __enter__(self) -> int:
+        state = self._state
+        with state._lifecycle:
+            if state._closed:
+                raise self._error if self._error is not None else IllegalStateError(
+                    message=CLOSED_MESSAGE)
+            state._uses += 1
+        return state._c_producer
+
+    def __exit__(self, *exc: object) -> None:
+        state = self._state
+        with state._lifecycle:
+            state._uses -= 1
+            if state._uses == 0:
+                state._lifecycle.notify_all()
+
+
 class _ProducerState:
-    """The native producer handle, its serializers and the closed flag."""
+    """The native producer handle, its serializers and the closed flag.
+
+    The handle lives until ``close()`` frees it, and the producer is
+    thread-safe: every native call runs inside ``_use()``, which counts it under
+    ``_lifecycle`` and refuses to start once ``_closed`` is set. ``close()`` sets
+    ``_closed`` under the same lock (so exactly one ``close()`` tears the
+    producer down) and waits for the calls in flight to end before it frees the
+    handle. A use covers only the native call itself, never a wait for a
+    completion, so a ``close()`` from a delivery callback waits for nothing that
+    the callback's thread must first run.
+    """
 
     def __init__(self) -> None:
         self._c_producer: int = 0
         self._closed = False
+        self._lifecycle = threading.Condition()
+        self._uses = 0
         # Futures of the records sent and not yet completed: flush() waits for
         # the ones sent before it (their callbacks have run by then, as in Java).
         self._futures: set[Any] = set()
         self._key_serializer: Serializer[Any] = bytes_serializer()
         self._value_serializer: Serializer[Any] = bytes_serializer()
+
+    def _use(self, error: BaseException | None = None) -> _Use:
+        """A call into the native producer: ``with self._use() as c:`` gives
+        the handle, or raises ``error`` (by default Java's closed
+        ``IllegalStateError``) once ``close()`` has begun."""
+        return _Use(self, error)
+
+    def _call(self, fn: Callable[..., Any], *args: Any) -> Any:
+        """``fn(handle, *args)`` as one use of the handle."""
+        with self._use() as c_producer:
+            return fn(c_producer, *args)
+
+    def _begin_close(self) -> bool:
+        """Set ``_closed``; whether this call did (and so must tear down)."""
+        with self._lifecycle:
+            if self._closed:
+                return False
+            self._closed = True
+            return True
+
+    def _wait_for_uses(self) -> None:
+        """Wait until no call into the native producer is in flight (none can
+        start: ``_closed`` is set)."""
+        with self._lifecycle:
+            while self._uses:
+                self._lifecycle.wait()
 
     def _start(self, configs: dict[str, Any], key_serializer: Serializer[Any] | None,
                value_serializer: Serializer[Any] | None) -> None:
@@ -231,6 +299,7 @@ class _ProducerState:
         log_unused(originals, client="producer")
 
     def _check_not_closed(self) -> None:
+        """Java's ``throwIfProducerClosed()``."""
         if self._closed:
             raise IllegalStateError(message=CLOSED_MESSAGE)
 
@@ -258,11 +327,23 @@ class _ProducerState:
         """Wait until every record sent so far is with the Rust producer, so a
         send that returned belongs to the flush, transaction-control operation
         or close that follows (producer-transactions.md §13); at most
-        ``timeout_s`` seconds when given. Returns whether they are."""
+        ``timeout_s`` seconds when given. Returns whether they are.
+
+        Only the registration is a use of the handle: the wait is not, so a
+        ``close()`` meanwhile proceeds (its last send round fires the waiter)."""
         done = threading.Event()
-        if _lib.Producer_drain(self._c_producer, done.set):
+        if self._drain_registered(done.set):
             return True
         return done.wait(timeout_s)
+
+    def _drain_registered(self, ready: Callable[[], None]) -> bool:
+        """``Producer_drain``: True if drained, else ``ready`` is registered.
+        Called by ``close()`` after ``_closed`` is set, it uses the handle
+        directly (close is its owner)."""
+        if self._closed:
+            return bool(_lib.Producer_drain(self._c_producer, ready))
+        with self._use() as c_producer:
+            return bool(_lib.Producer_drain(c_producer, ready))
 
     def _close_serializers(self) -> None:
         """Java closes both serializers at producer close; a failing

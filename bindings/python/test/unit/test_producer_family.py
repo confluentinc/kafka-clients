@@ -620,6 +620,176 @@ def test_close_is_idempotent_then_every_call_raises() -> None:
         assert str(err.value) == CLOSED
 
 
+def test_a_send_racing_close_is_refused_after_its_serializer() -> None:
+    # Critic 75 B1: a send whose serializer is still running when close()
+    # frees the handle must not use it afterwards; the record is refused as
+    # Java's RecordAccumulator.append refuses one after close.
+    started = threading.Event()
+
+    def slow(topic: str, value: bytes | None, headers: Any = None) -> bytes | None:
+        started.set()
+        time.sleep(0.5)
+        return value
+
+    p = KafkaProducer(configs=UNREACHABLE, value_serializer=slow)
+    raised: list[BaseException] = []
+
+    def send() -> None:
+        try:
+            p.send(record=RECORD)
+        except BaseException as error:  # noqa: BLE001
+            raised.append(error)
+
+    t = threading.Thread(target=send)
+    t.start()
+    assert started.wait(10)
+    p.close(timeout=0)
+    t.join(10)
+    ((error,),) = (raised,)
+    assert type(error) is KafkaError
+    assert str(error) == "Producer closed while send in progress"
+
+
+def test_calls_racing_close_never_touch_a_freed_handle() -> None:
+    # Every native call is a use the close waits for; after it, the calls see
+    # the closed producer.
+    stop = threading.Event()
+    outcomes: set[str] = set()
+
+    for _ in range(5):
+        p = KafkaProducer(configs=UNREACHABLE)
+        stop.clear()
+
+        def hammer() -> None:
+            while not stop.is_set():
+                try:
+                    p.metrics()
+                    outcomes.add("metrics")
+                except IllegalStateError as error:
+                    assert str(error) == CLOSED
+                    outcomes.add("closed")
+                    return
+
+        threads = [threading.Thread(target=hammer) for _ in range(4)]
+        for t in threads:
+            t.start()
+        time.sleep(0.05)
+        p.close(timeout=0)
+        stop.set()
+        for t in threads:
+            t.join(10)
+    assert outcomes == {"metrics", "closed"}
+
+
+def _count_teardowns(monkeypatch: pytest.MonkeyPatch) -> dict[str, list[int]]:
+    """Count Producer_shutdown / Producer_destroy per handle; a second destroy
+    of one handle is counted, not run (it would free the struct twice)."""
+    calls: dict[str, list[int]] = {"shutdown": [], "destroy": []}
+    real_shutdown, real_destroy = _lib.Producer_shutdown, _lib.Producer_destroy
+
+    def shutdown(c_producer: int) -> None:
+        calls["shutdown"].append(c_producer)
+        real_shutdown(c_producer)
+
+    def destroy(c_producer: int) -> None:
+        calls["destroy"].append(c_producer)
+        if calls["destroy"].count(c_producer) == 1:
+            real_destroy(c_producer)
+
+    monkeypatch.setattr(_lib, "Producer_shutdown", shutdown)
+    monkeypatch.setattr(_lib, "Producer_destroy", destroy)
+    return calls
+
+
+def _close_from_two_threads(p: KafkaProducer[Any, Any]) -> None:
+    barrier = threading.Barrier(2)
+
+    def close() -> None:
+        barrier.wait()
+        p.close(timeout=0)
+
+    threads = [threading.Thread(target=close) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(10)
+
+
+def test_concurrent_closes_tear_down_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Critic 75 B1: close() checks and sets the closed flag at once, so two
+    # threads closing together tear the producer down once. Deterministic: the
+    # in_callback() check that followed the old check-then-set now sleeps, so
+    # both closes would reach the teardown if the flag were set after it.
+    import confluent_kafka.producer.producer as module
+
+    calls = _count_teardowns(monkeypatch)
+
+    def slow_in_callback(producer: object) -> bool:
+        time.sleep(0.2)
+        return False
+
+    monkeypatch.setattr(module, "in_callback", slow_in_callback)
+    p = KafkaProducer(configs=UNREACHABLE)
+    _close_from_two_threads(p)
+    assert calls == {"shutdown": [p._c_producer], "destroy": [p._c_producer]}  # noqa: SLF001
+
+
+def test_concurrent_closes_tear_down_once_at_a_short_switch_interval(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    import sys
+
+    calls = _count_teardowns(monkeypatch)
+    previous = sys.getswitchinterval()
+    sys.setswitchinterval(1e-6)
+    try:
+        for _ in range(30):
+            calls["shutdown"].clear()
+            calls["destroy"].clear()
+            p = KafkaProducer(configs=UNREACHABLE)
+            _close_from_two_threads(p)
+            assert len(calls["shutdown"]) == 1 and len(calls["destroy"]) == 1
+    finally:
+        sys.setswitchinterval(previous)
+
+
+def test_concurrent_async_closes_tear_down_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = _count_teardowns(monkeypatch)
+
+    async def main() -> int:
+        p = AsyncKafkaProducer(configs=UNREACHABLE)
+        await asyncio.gather(p.close(timeout=0), p.close(timeout=0))
+        c_producer: int = p._c_producer  # noqa: SLF001
+        return c_producer
+
+    c_producer = asyncio.run(main())
+    assert calls == {"shutdown": [c_producer], "destroy": [c_producer]}
+
+
+def test_an_async_send_racing_close_is_refused_after_its_serializer() -> None:
+    started = threading.Event()
+
+    def slow(topic: str, value: bytes | None, headers: Any = None) -> bytes | None:
+        started.set()
+        time.sleep(0.5)
+        return value
+
+    async def main() -> BaseException:
+        p = AsyncKafkaProducer(configs=UNREACHABLE, value_serializer=slow)
+        loop = asyncio.get_running_loop()
+        send = loop.run_in_executor(None, lambda: asyncio.run(p.send(record=RECORD)))
+        await loop.run_in_executor(None, started.wait, 10)
+        await p.close(timeout=0)
+        try:
+            await send
+        except BaseException as error:  # noqa: BLE001
+            return error
+        raise AssertionError("send() returned")
+
+    error = asyncio.run(main())
+    assert type(error) is KafkaError
+    assert str(error) == "Producer closed while send in progress"
+
+
 def test_close_rejects_a_negative_timeout_and_stays_open() -> None:
     p = KafkaProducer(configs=UNREACHABLE)
     with pytest.raises(IllegalArgumentError) as err:
