@@ -118,6 +118,46 @@ void test_create_close_destroy(void) {
     kafka_producer_Producer_destroy(producer);
 }
 
+/* Captures the error message an async close callback delivers. */
+typedef struct {
+    atomic_int fired;
+    char message[128];
+} close_result_t;
+
+static void on_close(kafka_common_Error_t *error, void *user_data) {
+    close_result_t *r = (close_result_t *)user_data;
+    if (error != NULL) {
+        const char *m = kafka_common_Error_message(error);
+        strncpy(r->message, m ? m : "", sizeof(r->message) - 1);
+        kafka_common_Error_destroy(error);
+    }
+    atomic_fetch_add(&r->fired, 1);
+}
+
+/* A KafkaProducer rejects a negative close timeout with Java's
+ * KafkaProducer.close(Duration) message (KafkaProducer.java:1393-1394), on both
+ * the sync and the async entry point, and stays open for a real close. */
+void test_close_with_negative_timeout_is_rejected(void) {
+    kafka_common_Error_t *err = NULL;
+    kafka_producer_Producer_t *producer = create_producer("localhost:9092", &err);
+    TEST_ASSERT_NULL(err);
+
+    kafka_producer_Producer_close_with_timeout(producer, -1, &err);
+    TEST_ASSERT_NOT_NULL(err);
+    TEST_ASSERT_EQUAL_STRING("The timeout cannot be negative.", kafka_common_Error_message(err));
+    kafka_common_Error_destroy(err);
+
+    close_result_t result = {0};
+    kafka_producer_Producer_close_with_timeout_async(producer, -1, on_close, &result);
+    TEST_ASSERT_TRUE(wait_for(&result.fired, 1));
+    TEST_ASSERT_EQUAL_STRING("The timeout cannot be negative.", result.message);
+
+    err = NULL;
+    kafka_producer_Producer_close_with_timeout(producer, 0, &err);
+    TEST_ASSERT_NULL(err);
+    kafka_producer_Producer_destroy(producer);
+}
+
 void test_create_destroy_without_close(void) {
     kafka_common_Error_t *err = NULL;
     kafka_producer_Producer_t *producer = create_producer("localhost:9092", &err);
@@ -586,6 +626,7 @@ int main(void) {
     /* Lifecycle */
     RUN_TEST(test_create_close_destroy);
     RUN_TEST(test_create_destroy_without_close);
+    RUN_TEST(test_close_with_negative_timeout_is_rejected);
     RUN_TEST(test_create_null_props);
     RUN_TEST(test_create_null_out_error);
     RUN_TEST(test_create_invalid_config_value);
