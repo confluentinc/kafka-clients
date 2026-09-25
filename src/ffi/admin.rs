@@ -189,6 +189,7 @@ use super::common::{
     enqueue_or_run_inline, init_default_logger, kafka_common_Error_t,
 };
 use super::consumer::kafka_common_Node_t;
+use super::ffi_guard;
 
 // ---------------------------------------------------------------------------
 // Handle
@@ -323,6 +324,7 @@ unsafe fn properties_mut(props: *mut kafka_admin_AdminClientProperties_t) -> &'s
 ///
 /// A non-null opaque properties handle. The caller must free it with
 /// [`kafka_admin_AdminClientProperties_destroy`].
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_AdminClientProperties_new() -> *mut kafka_admin_AdminClientProperties_t {
     let map: HashMap<String, String> = HashMap::new();
@@ -345,6 +347,7 @@ pub extern "C" fn kafka_admin_AdminClientProperties_new() -> *mut kafka_admin_Ad
 ///
 /// `configs` must be NULL or point to a NULL-terminated array of valid,
 /// null-terminated C strings.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClientProperties_from_configs(
     configs: *const *const c_char,
@@ -377,6 +380,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClientProperties_from_configs(
 /// # Safety
 ///
 /// `props` must be a valid handle; `key` and `value` valid C strings.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClientProperties_put(
     props: *mut kafka_admin_AdminClientProperties_t,
@@ -398,6 +402,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClientProperties_put(
 ///
 /// `props` must be null or a valid handle from an `AdminClientProperties`
 /// constructor. After this call the pointer is invalid.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClientProperties_destroy(props: *mut kafka_admin_AdminClientProperties_t) {
     if !props.is_null() {
@@ -430,6 +435,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClientProperties_destroy(props: *mut k
 /// # Safety
 ///
 /// `props` must be a valid, non-null properties handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_new(
     props: *const kafka_admin_AdminClientProperties_t,
@@ -516,6 +522,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_new(
 /// `Err` for `num_brokers < 1`; this entry point only maps that `Err` to null,
 /// so there is one source of truth for the bound rather than a check here that
 /// could drift from the core's.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_MockAdminClient_new(num_brokers: i32) -> *mut kafka_admin_AdminClient_t {
     init_default_logger();
@@ -544,6 +551,7 @@ pub extern "C" fn kafka_admin_MockAdminClient_new(num_brokers: i32) -> *mut kafk
 ///
 /// `admin` must be null or a valid handle from an admin-client constructor.
 /// After this call the pointer is invalid.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_destroy(admin: *mut kafka_admin_AdminClient_t) {
     if admin.is_null() {
@@ -588,6 +596,7 @@ fn close_with_timeout(timeout_ms: i64) -> Duration {
 /// # Safety
 ///
 /// `admin` must be a valid handle from an admin-client constructor.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_close(admin: *const kafka_admin_AdminClient_t, timeout_ms: i64) {
     if admin.is_null() {
@@ -627,6 +636,7 @@ pub type kafka_admin_AdminClient_close_callback_t =
 /// # Safety
 ///
 /// `admin` must be a valid handle from an admin-client constructor.
+#[ffi_guard(on_panic = |err| unsafe { callback(box_error(err), user_data) })]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_close_async(
     admin: *const kafka_admin_AdminClient_t,
@@ -1077,6 +1087,7 @@ unsafe fn new_topic_mut(topic: *mut kafka_admin_NewTopic_t) -> &'static mut NewT
 /// # Safety
 ///
 /// `name` must be NULL or a valid, null-terminated C string.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_NewTopic_new(
     name: *const c_char,
@@ -1106,6 +1117,7 @@ pub unsafe extern "C" fn kafka_admin_NewTopic_new(
 /// # Safety
 ///
 /// `topic` must be a valid handle; `key` and `value` valid C strings.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_NewTopic_put_config(
     topic: *mut kafka_admin_NewTopic_t,
@@ -1131,6 +1143,7 @@ pub unsafe extern "C" fn kafka_admin_NewTopic_put_config(
 /// # Safety
 ///
 /// `topic` must be a valid handle; `broker_ids` must have `count` valid entries.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_NewTopic_set_replicas_assignment(
     topic: *mut kafka_admin_NewTopic_t,
@@ -1156,6 +1169,7 @@ pub unsafe extern "C" fn kafka_admin_NewTopic_set_replicas_assignment(
 ///
 /// `topic` must be null or a valid handle from [`kafka_admin_NewTopic_new`].
 /// After this call the pointer is invalid.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_NewTopic_destroy(topic: *mut kafka_admin_NewTopic_t) {
     if !topic.is_null() {
@@ -1277,6 +1291,7 @@ unsafe fn new_partitions_mut(partitions: *mut kafka_admin_NewPartitions_t) -> &'
 /// # Returns
 ///
 /// A non-null handle. Free it with [`kafka_admin_NewPartitions_destroy`].
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_NewPartitions_new(
     total_count: i32,
@@ -1304,6 +1319,7 @@ pub extern "C" fn kafka_admin_NewPartitions_new(
 ///
 /// `partitions` must be a valid handle; `broker_ids` must have `count` valid
 /// entries.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_NewPartitions_add_assignment(
     partitions: *mut kafka_admin_NewPartitions_t,
@@ -1329,6 +1345,7 @@ pub unsafe extern "C" fn kafka_admin_NewPartitions_add_assignment(
 ///
 /// `partitions` must be null or a valid handle from
 /// [`kafka_admin_NewPartitions_new`]. After this call the pointer is invalid.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_NewPartitions_destroy(partitions: *mut kafka_admin_NewPartitions_t) {
     if !partitions.is_null() {
@@ -1566,6 +1583,7 @@ unsafe fn config_entry_ref(entry: *const kafka_admin_ConfigEntry_t) -> &'static 
 /// # Safety
 ///
 /// `config` must be a valid borrowed pointer from a result-handle getter.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Config_entry_count(config: *const kafka_admin_Config_t) -> i32 {
     unsafe { config_ref(config) }.entries.len() as i32
@@ -1577,6 +1595,7 @@ pub unsafe extern "C" fn kafka_admin_Config_entry_count(config: *const kafka_adm
 /// # Safety
 ///
 /// `config` must be a valid borrowed pointer from a result-handle getter.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Config_get_entry(
     config: *const kafka_admin_Config_t,
@@ -1598,6 +1617,7 @@ pub unsafe extern "C" fn kafka_admin_Config_get_entry(
 ///
 /// `config` must be a valid borrowed pointer from a result-handle getter; `name`
 /// must be null or a valid C string.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Config_find_entry(
     config: *const kafka_admin_Config_t,
@@ -1622,6 +1642,7 @@ pub unsafe extern "C" fn kafka_admin_Config_find_entry(
 /// # Safety
 ///
 /// `entry` must be a valid borrowed pointer from a `Config` getter.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ConfigEntry_name(entry: *const kafka_admin_ConfigEntry_t) -> *const c_char {
     unsafe { config_entry_ref(entry) }.name_c.as_ptr()
@@ -1633,6 +1654,7 @@ pub unsafe extern "C" fn kafka_admin_ConfigEntry_name(entry: *const kafka_admin_
 /// # Safety
 ///
 /// `entry` must be a valid borrowed pointer from a `Config` getter.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ConfigEntry_value(entry: *const kafka_admin_ConfigEntry_t) -> *const c_char {
     match &unsafe { config_entry_ref(entry) }.value_c {
@@ -1650,6 +1672,7 @@ pub unsafe extern "C" fn kafka_admin_ConfigEntry_value(entry: *const kafka_admin
 /// # Safety
 ///
 /// `entry` must be a valid borrowed pointer from a `Config` getter.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ConfigEntry_source(entry: *const kafka_admin_ConfigEntry_t) -> *const c_char {
     unsafe { config_entry_ref(entry) }.source_c.as_ptr()
@@ -1660,6 +1683,7 @@ pub unsafe extern "C" fn kafka_admin_ConfigEntry_source(entry: *const kafka_admi
 /// # Safety
 ///
 /// `entry` must be a valid borrowed pointer from a `Config` getter.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ConfigEntry_is_default(entry: *const kafka_admin_ConfigEntry_t) -> bool {
     unsafe { config_entry_ref(entry) }.is_default
@@ -1670,6 +1694,7 @@ pub unsafe extern "C" fn kafka_admin_ConfigEntry_is_default(entry: *const kafka_
 /// # Safety
 ///
 /// `entry` must be a valid borrowed pointer from a `Config` getter.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ConfigEntry_is_sensitive(entry: *const kafka_admin_ConfigEntry_t) -> bool {
     unsafe { config_entry_ref(entry) }.is_sensitive
@@ -1680,6 +1705,7 @@ pub unsafe extern "C" fn kafka_admin_ConfigEntry_is_sensitive(entry: *const kafk
 /// # Safety
 ///
 /// `entry` must be a valid borrowed pointer from a `Config` getter.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ConfigEntry_is_read_only(entry: *const kafka_admin_ConfigEntry_t) -> bool {
     unsafe { config_entry_ref(entry) }.is_read_only
@@ -1694,6 +1720,7 @@ pub unsafe extern "C" fn kafka_admin_ConfigEntry_is_read_only(entry: *const kafk
 /// # Safety
 ///
 /// `entry` must be a valid borrowed pointer from a `Config` getter.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ConfigEntry_type(entry: *const kafka_admin_ConfigEntry_t) -> *const c_char {
     unsafe { config_entry_ref(entry) }.config_type_c.as_ptr()
@@ -1705,6 +1732,7 @@ pub unsafe extern "C" fn kafka_admin_ConfigEntry_type(entry: *const kafka_admin_
 /// # Safety
 ///
 /// `entry` must be a valid borrowed pointer from a `Config` getter.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ConfigEntry_documentation(
     entry: *const kafka_admin_ConfigEntry_t,
@@ -1720,6 +1748,7 @@ pub unsafe extern "C" fn kafka_admin_ConfigEntry_documentation(
 /// # Safety
 ///
 /// `entry` must be a valid borrowed pointer from a `Config` getter.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ConfigEntry_synonym_count(entry: *const kafka_admin_ConfigEntry_t) -> i32 {
     unsafe { config_entry_ref(entry) }.synonyms.len() as i32
@@ -1731,6 +1760,7 @@ pub unsafe extern "C" fn kafka_admin_ConfigEntry_synonym_count(entry: *const kaf
 /// # Safety
 ///
 /// `entry` must be a valid borrowed pointer from a `Config` getter.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ConfigEntry_synonym_name(
     entry: *const kafka_admin_ConfigEntry_t,
@@ -1748,6 +1778,7 @@ pub unsafe extern "C" fn kafka_admin_ConfigEntry_synonym_name(
 /// # Safety
 ///
 /// `entry` must be a valid borrowed pointer from a `Config` getter.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ConfigEntry_synonym_value(
     entry: *const kafka_admin_ConfigEntry_t,
@@ -1768,6 +1799,7 @@ pub unsafe extern "C" fn kafka_admin_ConfigEntry_synonym_value(
 /// # Safety
 ///
 /// `entry` must be a valid borrowed pointer from a `Config` getter.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ConfigEntry_synonym_source(
     entry: *const kafka_admin_ConfigEntry_t,
@@ -1852,6 +1884,7 @@ unsafe fn metadata_ref(mc: *const kafka_admin_TopicMetadataAndConfig_t) -> &'sta
 /// # Safety
 ///
 /// `mc` must be a valid borrowed pointer from a result-handle getter.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_TopicMetadataAndConfig_error(
     mc: *const kafka_admin_TopicMetadataAndConfig_t,
@@ -1866,6 +1899,7 @@ pub unsafe extern "C" fn kafka_admin_TopicMetadataAndConfig_error(
 /// # Safety
 ///
 /// `mc` must be a valid borrowed pointer from a result-handle getter.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_TopicMetadataAndConfig_topic_id(
     mc: *const kafka_admin_TopicMetadataAndConfig_t,
@@ -1878,6 +1912,7 @@ pub unsafe extern "C" fn kafka_admin_TopicMetadataAndConfig_topic_id(
 /// # Safety
 ///
 /// `mc` must be a valid borrowed pointer from a result-handle getter.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_TopicMetadataAndConfig_num_partitions(
     mc: *const kafka_admin_TopicMetadataAndConfig_t,
@@ -1890,6 +1925,7 @@ pub unsafe extern "C" fn kafka_admin_TopicMetadataAndConfig_num_partitions(
 /// # Safety
 ///
 /// `mc` must be a valid borrowed pointer from a result-handle getter.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_TopicMetadataAndConfig_replication_factor(
     mc: *const kafka_admin_TopicMetadataAndConfig_t,
@@ -1903,6 +1939,7 @@ pub unsafe extern "C" fn kafka_admin_TopicMetadataAndConfig_replication_factor(
 /// # Safety
 ///
 /// `mc` must be a valid borrowed pointer from a result-handle getter.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_TopicMetadataAndConfig_config_count(
     mc: *const kafka_admin_TopicMetadataAndConfig_t,
@@ -1916,6 +1953,7 @@ pub unsafe extern "C" fn kafka_admin_TopicMetadataAndConfig_config_count(
 /// # Safety
 ///
 /// `mc` must be a valid borrowed pointer from a result-handle getter.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_TopicMetadataAndConfig_config_name(
     mc: *const kafka_admin_TopicMetadataAndConfig_t,
@@ -1934,6 +1972,7 @@ pub unsafe extern "C" fn kafka_admin_TopicMetadataAndConfig_config_name(
 /// # Safety
 ///
 /// `mc` must be a valid borrowed pointer from a result-handle getter.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_TopicMetadataAndConfig_config_value(
     mc: *const kafka_admin_TopicMetadataAndConfig_t,
@@ -1951,6 +1990,7 @@ pub unsafe extern "C" fn kafka_admin_TopicMetadataAndConfig_config_value(
 /// # Safety
 ///
 /// `mc` must be a valid borrowed pointer from a result-handle getter.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_TopicMetadataAndConfig_config_is_default(
     mc: *const kafka_admin_TopicMetadataAndConfig_t,
@@ -1965,6 +2005,7 @@ pub unsafe extern "C" fn kafka_admin_TopicMetadataAndConfig_config_is_default(
 /// # Safety
 ///
 /// `mc` must be a valid borrowed pointer from a result-handle getter.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_TopicMetadataAndConfig_config_is_sensitive(
     mc: *const kafka_admin_TopicMetadataAndConfig_t,
@@ -1979,6 +2020,7 @@ pub unsafe extern "C" fn kafka_admin_TopicMetadataAndConfig_config_is_sensitive(
 /// # Safety
 ///
 /// `mc` must be a valid borrowed pointer from a result-handle getter.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_TopicMetadataAndConfig_config_is_read_only(
     mc: *const kafka_admin_TopicMetadataAndConfig_t,
@@ -2055,6 +2097,7 @@ fn node_at(nodes: &[Node], index: i32) -> *const kafka_common_Node_t {
 /// # Safety
 ///
 /// `info` must be a valid borrowed pointer from a `TopicDescription` getter.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_TopicPartitionInfo_partition(
     info: *const kafka_admin_TopicPartitionInfo_t,
@@ -2067,6 +2110,7 @@ pub unsafe extern "C" fn kafka_admin_TopicPartitionInfo_partition(
 /// # Safety
 ///
 /// `info` must be a valid borrowed pointer from a `TopicDescription` getter.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_TopicPartitionInfo_leader(
     info: *const kafka_admin_TopicPartitionInfo_t,
@@ -2082,6 +2126,7 @@ pub unsafe extern "C" fn kafka_admin_TopicPartitionInfo_leader(
 /// # Safety
 ///
 /// `info` must be a valid borrowed pointer from a `TopicDescription` getter.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_TopicPartitionInfo_replica_count(
     info: *const kafka_admin_TopicPartitionInfo_t,
@@ -2094,6 +2139,7 @@ pub unsafe extern "C" fn kafka_admin_TopicPartitionInfo_replica_count(
 /// # Safety
 ///
 /// `info` must be a valid borrowed pointer from a `TopicDescription` getter.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_TopicPartitionInfo_replica(
     info: *const kafka_admin_TopicPartitionInfo_t,
@@ -2107,6 +2153,7 @@ pub unsafe extern "C" fn kafka_admin_TopicPartitionInfo_replica(
 /// # Safety
 ///
 /// `info` must be a valid borrowed pointer from a `TopicDescription` getter.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_TopicPartitionInfo_isr_count(
     info: *const kafka_admin_TopicPartitionInfo_t,
@@ -2119,6 +2166,7 @@ pub unsafe extern "C" fn kafka_admin_TopicPartitionInfo_isr_count(
 /// # Safety
 ///
 /// `info` must be a valid borrowed pointer from a `TopicDescription` getter.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_TopicPartitionInfo_isr(
     info: *const kafka_admin_TopicPartitionInfo_t,
@@ -2134,6 +2182,7 @@ pub unsafe extern "C" fn kafka_admin_TopicPartitionInfo_isr(
 /// # Safety
 ///
 /// `info` must be a valid borrowed pointer from a `TopicDescription` getter.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_TopicPartitionInfo_elr_count(
     info: *const kafka_admin_TopicPartitionInfo_t,
@@ -2150,6 +2199,7 @@ pub unsafe extern "C" fn kafka_admin_TopicPartitionInfo_elr_count(
 /// # Safety
 ///
 /// `info` must be a valid borrowed pointer from a `TopicDescription` getter.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_TopicPartitionInfo_has_elr(info: *const kafka_admin_TopicPartitionInfo_t) -> bool {
     unsafe { partition_info_ref(info) }.elr.is_some()
@@ -2161,6 +2211,7 @@ pub unsafe extern "C" fn kafka_admin_TopicPartitionInfo_has_elr(info: *const kaf
 /// # Safety
 ///
 /// `info` must be a valid borrowed pointer from a `TopicDescription` getter.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_TopicPartitionInfo_elr(
     info: *const kafka_admin_TopicPartitionInfo_t,
@@ -2180,6 +2231,7 @@ pub unsafe extern "C" fn kafka_admin_TopicPartitionInfo_elr(
 /// # Safety
 ///
 /// `info` must be a valid borrowed pointer from a `TopicDescription` getter.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_TopicPartitionInfo_last_known_elr_count(
     info: *const kafka_admin_TopicPartitionInfo_t,
@@ -2196,6 +2248,7 @@ pub unsafe extern "C" fn kafka_admin_TopicPartitionInfo_last_known_elr_count(
 /// # Safety
 ///
 /// `info` must be a valid borrowed pointer from a `TopicDescription` getter.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_TopicPartitionInfo_has_last_known_elr(
     info: *const kafka_admin_TopicPartitionInfo_t,
@@ -2209,6 +2262,7 @@ pub unsafe extern "C" fn kafka_admin_TopicPartitionInfo_has_last_known_elr(
 /// # Safety
 ///
 /// `info` must be a valid borrowed pointer from a `TopicDescription` getter.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_TopicPartitionInfo_last_known_elr(
     info: *const kafka_admin_TopicPartitionInfo_t,
@@ -2265,6 +2319,7 @@ unsafe fn description_ref(description: *const kafka_admin_TopicDescription_t) ->
 /// # Safety
 ///
 /// `description` must be a valid borrowed pointer from a result-handle getter.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_TopicDescription_name(
     description: *const kafka_admin_TopicDescription_t,
@@ -2277,6 +2332,7 @@ pub unsafe extern "C" fn kafka_admin_TopicDescription_name(
 /// # Safety
 ///
 /// `description` must be a valid borrowed pointer from a result-handle getter.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_TopicDescription_topic_id(
     description: *const kafka_admin_TopicDescription_t,
@@ -2289,6 +2345,7 @@ pub unsafe extern "C" fn kafka_admin_TopicDescription_topic_id(
 /// # Safety
 ///
 /// `description` must be a valid borrowed pointer from a result-handle getter.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_TopicDescription_is_internal(
     description: *const kafka_admin_TopicDescription_t,
@@ -2301,6 +2358,7 @@ pub unsafe extern "C" fn kafka_admin_TopicDescription_is_internal(
 /// # Safety
 ///
 /// `description` must be a valid borrowed pointer from a result-handle getter.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_TopicDescription_partition_count(
     description: *const kafka_admin_TopicDescription_t,
@@ -2313,6 +2371,7 @@ pub unsafe extern "C" fn kafka_admin_TopicDescription_partition_count(
 /// # Safety
 ///
 /// `description` must be a valid borrowed pointer from a result-handle getter.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_TopicDescription_partition(
     description: *const kafka_admin_TopicDescription_t,
@@ -2336,6 +2395,7 @@ pub unsafe extern "C" fn kafka_admin_TopicDescription_partition(
 /// # Safety
 ///
 /// `description` must be a valid borrowed pointer from a result-handle getter.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_TopicDescription_authorized_operation_count(
     description: *const kafka_admin_TopicDescription_t,
@@ -2350,6 +2410,7 @@ pub unsafe extern "C" fn kafka_admin_TopicDescription_authorized_operation_count
 /// # Safety
 ///
 /// `description` must be a valid borrowed pointer from a result-handle getter.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_TopicDescription_has_authorized_operations(
     description: *const kafka_admin_TopicDescription_t,
@@ -2367,6 +2428,7 @@ pub unsafe extern "C" fn kafka_admin_TopicDescription_has_authorized_operations(
 /// # Safety
 ///
 /// `description` must be a valid borrowed pointer from a result-handle getter.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_TopicDescription_authorized_operation(
     description: *const kafka_admin_TopicDescription_t,
@@ -2412,6 +2474,7 @@ unsafe fn listing_ref(listing: *const kafka_admin_TopicListing_t) -> &'static To
 /// # Safety
 ///
 /// `listing` must be a valid borrowed pointer from a result-handle getter.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_TopicListing_name(listing: *const kafka_admin_TopicListing_t) -> *const c_char {
     unsafe { listing_ref(listing) }.name_c.as_ptr()
@@ -2422,6 +2485,7 @@ pub unsafe extern "C" fn kafka_admin_TopicListing_name(listing: *const kafka_adm
 /// # Safety
 ///
 /// `listing` must be a valid borrowed pointer from a result-handle getter.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_TopicListing_topic_id(
     listing: *const kafka_admin_TopicListing_t,
@@ -2434,6 +2498,7 @@ pub unsafe extern "C" fn kafka_admin_TopicListing_topic_id(
 /// # Safety
 ///
 /// `listing` must be a valid borrowed pointer from a result-handle getter.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_TopicListing_is_internal(listing: *const kafka_admin_TopicListing_t) -> bool {
     unsafe { listing_ref(listing) }.internal
@@ -2501,6 +2566,7 @@ unsafe fn create_topics_result_ref(
 /// # Safety
 ///
 /// `result` must be a valid `create_topics` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_CreateTopicsResult_count(result: *const kafka_admin_CreateTopicsResult_t) -> i32 {
     unsafe { create_topics_result_ref(result) }.keys.len() as i32
@@ -2512,6 +2578,7 @@ pub unsafe extern "C" fn kafka_admin_CreateTopicsResult_count(result: *const kaf
 /// # Safety
 ///
 /// `result` must be a valid `create_topics` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_CreateTopicsResult_get_key(
     result: *const kafka_admin_CreateTopicsResult_t,
@@ -2527,6 +2594,7 @@ pub unsafe extern "C" fn kafka_admin_CreateTopicsResult_get_key(
 /// # Safety
 ///
 /// `result` must be a valid `create_topics` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_CreateTopicsResult_get_value(
     result: *const kafka_admin_CreateTopicsResult_t,
@@ -2552,6 +2620,7 @@ pub unsafe extern "C" fn kafka_admin_CreateTopicsResult_get_value(
 /// # Safety
 ///
 /// `result` must be a valid `create_topics` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_CreateTopicsResult_get_error(
     result: *const kafka_admin_CreateTopicsResult_t,
@@ -2572,6 +2641,7 @@ pub unsafe extern "C" fn kafka_admin_CreateTopicsResult_get_error(
 /// # Safety
 ///
 /// `result` must be null or a valid `create_topics` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_CreateTopicsResult_destroy(result: *mut kafka_admin_CreateTopicsResult_t) {
     if !result.is_null() {
@@ -2627,6 +2697,7 @@ unsafe fn delete_topics_result_ref(
 /// # Safety
 ///
 /// `result` must be a valid `delete_topics` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DeleteTopicsResult_count(result: *const kafka_admin_DeleteTopicsResult_t) -> i32 {
     unsafe { delete_topics_result_ref(result) }.keys.len() as i32
@@ -2639,6 +2710,7 @@ pub unsafe extern "C" fn kafka_admin_DeleteTopicsResult_count(result: *const kaf
 /// # Safety
 ///
 /// `result` must be a valid `delete_topics` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DeleteTopicsResult_get_key(
     result: *const kafka_admin_DeleteTopicsResult_t,
@@ -2656,6 +2728,7 @@ pub unsafe extern "C" fn kafka_admin_DeleteTopicsResult_get_key(
 /// # Safety
 ///
 /// `result` must be a valid `delete_topics` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DeleteTopicsResult_get_error(
     result: *const kafka_admin_DeleteTopicsResult_t,
@@ -2675,6 +2748,7 @@ pub unsafe extern "C" fn kafka_admin_DeleteTopicsResult_get_error(
 /// # Safety
 ///
 /// `result` must be null or a valid `delete_topics` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DeleteTopicsResult_destroy(result: *mut kafka_admin_DeleteTopicsResult_t) {
     if !result.is_null() {
@@ -2724,6 +2798,7 @@ unsafe fn list_topics_result_ref(result: *const kafka_admin_ListTopicsResult_t) 
 /// # Safety
 ///
 /// `result` must be a valid `list_topics` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListTopicsResult_count(result: *const kafka_admin_ListTopicsResult_t) -> i32 {
     unsafe { list_topics_result_ref(result) }.keys.len() as i32
@@ -2735,6 +2810,7 @@ pub unsafe extern "C" fn kafka_admin_ListTopicsResult_count(result: *const kafka
 /// # Safety
 ///
 /// `result` must be a valid `list_topics` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListTopicsResult_get_key(
     result: *const kafka_admin_ListTopicsResult_t,
@@ -2748,6 +2824,7 @@ pub unsafe extern "C" fn kafka_admin_ListTopicsResult_get_key(
 /// # Safety
 ///
 /// `result` must be a valid `list_topics` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListTopicsResult_get_value(
     result: *const kafka_admin_ListTopicsResult_t,
@@ -2767,6 +2844,7 @@ pub unsafe extern "C" fn kafka_admin_ListTopicsResult_get_value(
 /// # Safety
 ///
 /// `result` must be null or a valid `list_topics` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListTopicsResult_destroy(result: *mut kafka_admin_ListTopicsResult_t) {
     if !result.is_null() {
@@ -2830,6 +2908,7 @@ unsafe fn describe_topics_result_ref(
 /// # Safety
 ///
 /// `result` must be a valid `describe_topics_with_topics` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeTopicsResult_count(
     result: *const kafka_admin_DescribeTopicsResult_t,
@@ -2844,6 +2923,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeTopicsResult_count(
 /// # Safety
 ///
 /// `result` must be a valid `describe_topics_with_topics` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeTopicsResult_get_key(
     result: *const kafka_admin_DescribeTopicsResult_t,
@@ -2859,6 +2939,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeTopicsResult_get_key(
 /// # Safety
 ///
 /// `result` must be a valid `describe_topics_with_topics` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeTopicsResult_get_value(
     result: *const kafka_admin_DescribeTopicsResult_t,
@@ -2879,6 +2960,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeTopicsResult_get_value(
 /// # Safety
 ///
 /// `result` must be a valid `describe_topics_with_topics` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeTopicsResult_get_error(
     result: *const kafka_admin_DescribeTopicsResult_t,
@@ -2898,6 +2980,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeTopicsResult_get_error(
 /// # Safety
 ///
 /// `result` must be null or a valid `describe_topics_with_topics` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeTopicsResult_destroy(result: *mut kafka_admin_DescribeTopicsResult_t) {
     if !result.is_null() {
@@ -2950,6 +3033,7 @@ unsafe fn create_partitions_result_ref(
 /// # Safety
 ///
 /// `result` must be a valid `create_partitions` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_CreatePartitionsResult_count(
     result: *const kafka_admin_CreatePartitionsResult_t,
@@ -2963,6 +3047,7 @@ pub unsafe extern "C" fn kafka_admin_CreatePartitionsResult_count(
 /// # Safety
 ///
 /// `result` must be a valid `create_partitions` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_CreatePartitionsResult_get_key(
     result: *const kafka_admin_CreatePartitionsResult_t,
@@ -2981,6 +3066,7 @@ pub unsafe extern "C" fn kafka_admin_CreatePartitionsResult_get_key(
 /// # Safety
 ///
 /// `result` must be a valid `create_partitions` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_CreatePartitionsResult_get_error(
     result: *const kafka_admin_CreatePartitionsResult_t,
@@ -3000,6 +3086,7 @@ pub unsafe extern "C" fn kafka_admin_CreatePartitionsResult_get_error(
 /// # Safety
 ///
 /// `result` must be null or a valid `create_partitions` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_CreatePartitionsResult_destroy(result: *mut kafka_admin_CreatePartitionsResult_t) {
     if !result.is_null() {
@@ -3083,6 +3170,7 @@ unsafe fn delete_records_result_ref(
 /// # Safety
 ///
 /// `result` must be a valid `delete_records` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DeleteRecordsResult_count(
     result: *const kafka_admin_DeleteRecordsResult_t,
@@ -3096,6 +3184,7 @@ pub unsafe extern "C" fn kafka_admin_DeleteRecordsResult_count(
 /// # Safety
 ///
 /// `result` must be a valid `delete_records` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DeleteRecordsResult_get_topic(
     result: *const kafka_admin_DeleteRecordsResult_t,
@@ -3109,6 +3198,7 @@ pub unsafe extern "C" fn kafka_admin_DeleteRecordsResult_get_topic(
 /// # Safety
 ///
 /// `result` must be a valid `delete_records` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DeleteRecordsResult_get_partition(
     result: *const kafka_admin_DeleteRecordsResult_t,
@@ -3131,6 +3221,7 @@ pub unsafe extern "C" fn kafka_admin_DeleteRecordsResult_get_partition(
 /// # Safety
 ///
 /// `result` must be a valid `delete_records` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DeleteRecordsResult_get_low_watermark(
     result: *const kafka_admin_DeleteRecordsResult_t,
@@ -3152,6 +3243,7 @@ pub unsafe extern "C" fn kafka_admin_DeleteRecordsResult_get_low_watermark(
 /// # Safety
 ///
 /// `result` must be a valid `delete_records` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DeleteRecordsResult_get_error(
     result: *const kafka_admin_DeleteRecordsResult_t,
@@ -3171,6 +3263,7 @@ pub unsafe extern "C" fn kafka_admin_DeleteRecordsResult_get_error(
 /// # Safety
 ///
 /// `result` must be null or a valid `delete_records` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DeleteRecordsResult_destroy(result: *mut kafka_admin_DeleteRecordsResult_t) {
     if !result.is_null() {
@@ -3361,6 +3454,7 @@ fn create_topics_options(timeout_ms: i32, validate_only: bool, retry_on_quota_vi
 ///
 /// `admin` must be a valid handle; `topics` must have `count` valid entries;
 /// `out_result` must be null or writable.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_create_topics(
     admin: *const kafka_admin_AdminClient_t,
@@ -3405,6 +3499,7 @@ pub type kafka_admin_AdminClient_create_topics_callback_t =
 /// # Safety
 ///
 /// `admin` must be a valid handle; `topics` must have `count` valid entries.
+#[ffi_guard(on_panic = |err| unsafe { callback(std::ptr::null_mut(), box_error(err), user_data) })]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_create_topics_async(
     admin: *const kafka_admin_AdminClient_t,
@@ -3470,6 +3565,7 @@ pub type kafka_admin_AdminClient_delete_topics_callback_t =
 ///
 /// `admin` must be a valid handle; `names` must have `count` valid C strings;
 /// `out_result` must be null or writable.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_delete_topics(
     admin: *const kafka_admin_AdminClient_t,
@@ -3506,6 +3602,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_delete_topics(
 /// # Safety
 ///
 /// `admin` must be a valid handle; `names` must have `count` valid C strings.
+#[ffi_guard(on_panic = |err| unsafe { callback(std::ptr::null_mut(), box_error(err), user_data) })]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_delete_topics_async(
     admin: *const kafka_admin_AdminClient_t,
@@ -3546,6 +3643,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_delete_topics_async(
 ///
 /// `admin` must be a valid handle; `topic_ids` must have `count` valid C
 /// strings; `out_result` must be null or writable.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_delete_topics_by_ids(
     admin: *const kafka_admin_AdminClient_t,
@@ -3585,6 +3683,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_delete_topics_by_ids(
 /// # Safety
 ///
 /// `admin` must be a valid handle; `topic_ids` must have `count` valid C strings.
+#[ffi_guard(on_panic = |err| unsafe { callback(std::ptr::null_mut(), box_error(err), user_data) })]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_delete_topics_by_ids_async(
     admin: *const kafka_admin_AdminClient_t,
@@ -3639,6 +3738,7 @@ pub type kafka_admin_AdminClient_list_topics_callback_t =
 /// # Safety
 ///
 /// `admin` must be a valid handle; `out_result` must be null or writable.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_list_topics(
     admin: *const kafka_admin_AdminClient_t,
@@ -3674,6 +3774,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_list_topics(
 /// # Safety
 ///
 /// `admin` must be a valid handle.
+#[ffi_guard(on_panic = |err| unsafe { callback(std::ptr::null_mut(), box_error(err), user_data) })]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_list_topics_async(
     admin: *const kafka_admin_AdminClient_t,
@@ -3743,6 +3844,7 @@ pub type kafka_admin_AdminClient_describe_topics_callback_t =
 ///
 /// `admin` must be a valid handle; `names` must have `count` valid C strings;
 /// `out_result` must be null or writable.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_describe_topics(
     admin: *const kafka_admin_AdminClient_t,
@@ -3780,6 +3882,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_topics(
 /// # Safety
 ///
 /// `admin` must be a valid handle; `names` must have `count` valid C strings.
+#[ffi_guard(on_panic = |err| unsafe { callback(std::ptr::null_mut(), box_error(err), user_data) })]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_describe_topics_async(
     admin: *const kafka_admin_AdminClient_t,
@@ -3821,6 +3924,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_topics_async(
 ///
 /// `admin` must be a valid handle; `topic_ids` must have `count` valid C
 /// strings; `out_result` must be null or writable.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_describe_topics_by_ids(
     admin: *const kafka_admin_AdminClient_t,
@@ -3861,6 +3965,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_topics_by_ids(
 /// # Safety
 ///
 /// `admin` must be a valid handle; `topic_ids` must have `count` valid C strings.
+#[ffi_guard(on_panic = |err| unsafe { callback(std::ptr::null_mut(), box_error(err), user_data) })]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_describe_topics_by_ids_async(
     admin: *const kafka_admin_AdminClient_t,
@@ -3945,6 +4050,7 @@ pub type kafka_admin_AdminClient_create_partitions_callback_t =
 ///
 /// `admin` must be a valid handle; `topics` and `new_partitions` must have
 /// `count` valid entries each; `out_result` must be null or writable.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_create_partitions(
     admin: *const kafka_admin_AdminClient_t,
@@ -3983,6 +4089,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_create_partitions(
 ///
 /// `admin` must be a valid handle; `topics` and `new_partitions` must have
 /// `count` valid entries each.
+#[ffi_guard(on_panic = |err| unsafe { callback(std::ptr::null_mut(), box_error(err), user_data) })]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_create_partitions_async(
     admin: *const kafka_admin_AdminClient_t,
@@ -4053,6 +4160,7 @@ pub type kafka_admin_AdminClient_delete_records_callback_t =
 ///
 /// `admin` must be a valid handle; `topics`, `partitions` and `before_offsets`
 /// must have `count` valid entries each; `out_result` must be null or writable.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_delete_records(
     admin: *const kafka_admin_AdminClient_t,
@@ -4090,6 +4198,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_delete_records(
 ///
 /// `admin` must be a valid handle; `topics`, `partitions` and `before_offsets`
 /// must have `count` valid entries each.
+#[ffi_guard(on_panic = |err| unsafe { callback(std::ptr::null_mut(), box_error(err), user_data) })]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_delete_records_async(
     admin: *const kafka_admin_AdminClient_t,
@@ -4378,6 +4487,7 @@ unsafe fn log_dir_ref(description: *const kafka_admin_LogDirDescription_t) -> &'
 /// # Safety
 ///
 /// `description` must be a valid borrowed pointer from a log-dir map getter.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_LogDirDescription_error(
     description: *const kafka_admin_LogDirDescription_t,
@@ -4391,6 +4501,7 @@ pub unsafe extern "C" fn kafka_admin_LogDirDescription_error(
 /// # Safety
 ///
 /// `description` must be a valid borrowed pointer from a log-dir map getter.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_LogDirDescription_total_bytes(
     description: *const kafka_admin_LogDirDescription_t,
@@ -4404,6 +4515,7 @@ pub unsafe extern "C" fn kafka_admin_LogDirDescription_total_bytes(
 /// # Safety
 ///
 /// `description` must be a valid borrowed pointer from a log-dir map getter.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_LogDirDescription_usable_bytes(
     description: *const kafka_admin_LogDirDescription_t,
@@ -4416,6 +4528,7 @@ pub unsafe extern "C" fn kafka_admin_LogDirDescription_usable_bytes(
 /// # Safety
 ///
 /// `description` must be a valid borrowed pointer from a log-dir map getter.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_LogDirDescription_replica_count(
     description: *const kafka_admin_LogDirDescription_t,
@@ -4429,6 +4542,7 @@ pub unsafe extern "C" fn kafka_admin_LogDirDescription_replica_count(
 /// # Safety
 ///
 /// `description` must be a valid borrowed pointer from a log-dir map getter.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_LogDirDescription_replica_topic(
     description: *const kafka_admin_LogDirDescription_t,
@@ -4445,6 +4559,7 @@ pub unsafe extern "C" fn kafka_admin_LogDirDescription_replica_topic(
 /// # Safety
 ///
 /// `description` must be a valid borrowed pointer from a log-dir map getter.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_LogDirDescription_replica_partition(
     description: *const kafka_admin_LogDirDescription_t,
@@ -4462,6 +4577,7 @@ pub unsafe extern "C" fn kafka_admin_LogDirDescription_replica_partition(
 /// # Safety
 ///
 /// `description` must be a valid borrowed pointer from a log-dir map getter.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_LogDirDescription_replica_size(
     description: *const kafka_admin_LogDirDescription_t,
@@ -4478,6 +4594,7 @@ pub unsafe extern "C" fn kafka_admin_LogDirDescription_replica_size(
 /// # Safety
 ///
 /// `description` must be a valid borrowed pointer from a log-dir map getter.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_LogDirDescription_replica_offset_lag(
     description: *const kafka_admin_LogDirDescription_t,
@@ -4495,6 +4612,7 @@ pub unsafe extern "C" fn kafka_admin_LogDirDescription_replica_offset_lag(
 /// # Safety
 ///
 /// `description` must be a valid borrowed pointer from a log-dir map getter.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_LogDirDescription_replica_is_future(
     description: *const kafka_admin_LogDirDescription_t,
@@ -4556,6 +4674,7 @@ unsafe fn log_dir_map_ref(map: *const kafka_admin_LogDirDescriptionMap_t) -> &'s
 ///
 /// `map` must be a valid borrowed pointer from a `describe_log_dirs` result
 /// getter.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_LogDirDescriptionMap_count(map: *const kafka_admin_LogDirDescriptionMap_t) -> i32 {
     unsafe { log_dir_map_ref(map) }.log_dirs.len() as i32
@@ -4568,6 +4687,7 @@ pub unsafe extern "C" fn kafka_admin_LogDirDescriptionMap_count(map: *const kafk
 ///
 /// `map` must be a valid borrowed pointer from a `describe_log_dirs` result
 /// getter.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_LogDirDescriptionMap_get_key(
     map: *const kafka_admin_LogDirDescriptionMap_t,
@@ -4583,6 +4703,7 @@ pub unsafe extern "C" fn kafka_admin_LogDirDescriptionMap_get_key(
 ///
 /// `map` must be a valid borrowed pointer from a `describe_log_dirs` result
 /// getter.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_LogDirDescriptionMap_get_value(
     map: *const kafka_admin_LogDirDescriptionMap_t,
@@ -4640,6 +4761,7 @@ unsafe fn replica_log_dir_info_ref(info: *const kafka_admin_ReplicaLogDirInfo_t)
 /// # Safety
 ///
 /// `info` must be a valid borrowed pointer from a result-handle getter.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ReplicaLogDirInfo_current_replica_log_dir(
     info: *const kafka_admin_ReplicaLogDirInfo_t,
@@ -4656,6 +4778,7 @@ pub unsafe extern "C" fn kafka_admin_ReplicaLogDirInfo_current_replica_log_dir(
 /// # Safety
 ///
 /// `info` must be a valid borrowed pointer from a result-handle getter.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ReplicaLogDirInfo_current_replica_offset_lag(
     info: *const kafka_admin_ReplicaLogDirInfo_t,
@@ -4669,6 +4792,7 @@ pub unsafe extern "C" fn kafka_admin_ReplicaLogDirInfo_current_replica_offset_la
 /// # Safety
 ///
 /// `info` must be a valid borrowed pointer from a result-handle getter.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ReplicaLogDirInfo_future_replica_log_dir(
     info: *const kafka_admin_ReplicaLogDirInfo_t,
@@ -4684,6 +4808,7 @@ pub unsafe extern "C" fn kafka_admin_ReplicaLogDirInfo_future_replica_log_dir(
 /// # Safety
 ///
 /// `info` must be a valid borrowed pointer from a result-handle getter.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ReplicaLogDirInfo_future_replica_offset_lag(
     info: *const kafka_admin_ReplicaLogDirInfo_t,
@@ -4757,6 +4882,7 @@ unsafe fn describe_cluster_result_ref(
 /// # Safety
 ///
 /// `result` must be a valid `describe_cluster` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeClusterResult_cluster_id(
     result: *const kafka_admin_DescribeClusterResult_t,
@@ -4769,6 +4895,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeClusterResult_cluster_id(
 /// # Safety
 ///
 /// `result` must be a valid `describe_cluster` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeClusterResult_node_count(
     result: *const kafka_admin_DescribeClusterResult_t,
@@ -4782,6 +4909,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeClusterResult_node_count(
 /// # Safety
 ///
 /// `result` must be a valid `describe_cluster` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeClusterResult_get_node(
     result: *const kafka_admin_DescribeClusterResult_t,
@@ -4796,6 +4924,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeClusterResult_get_node(
 /// # Safety
 ///
 /// `result` must be a valid `describe_cluster` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeClusterResult_controller(
     result: *const kafka_admin_DescribeClusterResult_t,
@@ -4815,6 +4944,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeClusterResult_controller(
 /// # Safety
 ///
 /// `result` must be a valid `describe_cluster` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeClusterResult_authorized_operation_count(
     result: *const kafka_admin_DescribeClusterResult_t,
@@ -4829,6 +4959,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeClusterResult_authorized_operation_
 /// # Safety
 ///
 /// `result` must be a valid `describe_cluster` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeClusterResult_has_authorized_operations(
     result: *const kafka_admin_DescribeClusterResult_t,
@@ -4842,6 +4973,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeClusterResult_has_authorized_operat
 /// # Safety
 ///
 /// `result` must be a valid `describe_cluster` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeClusterResult_authorized_operation(
     result: *const kafka_admin_DescribeClusterResult_t,
@@ -4859,6 +4991,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeClusterResult_authorized_operation(
 /// # Safety
 ///
 /// `result` must be null or a valid `describe_cluster` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeClusterResult_destroy(result: *mut kafka_admin_DescribeClusterResult_t) {
     if !result.is_null() {
@@ -4934,6 +5067,7 @@ pub type kafka_admin_AdminClient_describe_cluster_callback_t =
 /// # Safety
 ///
 /// `admin` must be a valid handle; `out_result` must be null or writable.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_describe_cluster(
     admin: *const kafka_admin_AdminClient_t,
@@ -4967,6 +5101,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_cluster(
 /// # Safety
 ///
 /// `admin` must be a valid handle from an admin-client constructor.
+#[ffi_guard(on_panic = |err| unsafe { callback(std::ptr::null_mut(), box_error(err), user_data) })]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_describe_cluster_async(
     admin: *const kafka_admin_AdminClient_t,
@@ -5061,6 +5196,7 @@ unsafe fn describe_configs_result_ref(
 /// # Safety
 ///
 /// `result` must be a valid `describe_configs` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeConfigsResult_count(
     result: *const kafka_admin_DescribeConfigsResult_t,
@@ -5074,6 +5210,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeConfigsResult_count(
 /// # Safety
 ///
 /// `result` must be a valid `describe_configs` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeConfigsResult_get_key_type(
     result: *const kafka_admin_DescribeConfigsResult_t,
@@ -5095,6 +5232,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeConfigsResult_get_key_type(
 /// # Safety
 ///
 /// `result` must be a valid `describe_configs` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeConfigsResult_get_key_name(
     result: *const kafka_admin_DescribeConfigsResult_t,
@@ -5110,6 +5248,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeConfigsResult_get_key_name(
 /// # Safety
 ///
 /// `result` must be a valid `describe_configs` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeConfigsResult_get_value(
     result: *const kafka_admin_DescribeConfigsResult_t,
@@ -5130,6 +5269,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeConfigsResult_get_value(
 /// # Safety
 ///
 /// `result` must be a valid `describe_configs` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeConfigsResult_get_error(
     result: *const kafka_admin_DescribeConfigsResult_t,
@@ -5150,6 +5290,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeConfigsResult_get_error(
 /// # Safety
 ///
 /// `result` must be null or a valid `describe_configs` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeConfigsResult_destroy(result: *mut kafka_admin_DescribeConfigsResult_t) {
     if !result.is_null() {
@@ -5215,6 +5356,7 @@ pub type kafka_admin_AdminClient_describe_configs_callback_t =
 ///
 /// `admin` must be a valid handle; `resource_types` and `resource_names` must
 /// have `count` valid entries each; `out_result` must be null or writable.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_describe_configs(
     admin: *const kafka_admin_AdminClient_t,
@@ -5253,6 +5395,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_configs(
 ///
 /// `admin` must be a valid handle; `resource_types` and `resource_names` must
 /// have `count` valid entries each.
+#[ffi_guard(on_panic = |err| unsafe { callback(std::ptr::null_mut(), box_error(err), user_data) })]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_describe_configs_async(
     admin: *const kafka_admin_AdminClient_t,
@@ -5338,6 +5481,7 @@ unsafe fn alter_configs_result_ref(
 /// # Safety
 ///
 /// `result` must be a valid `incremental_alter_configs` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AlterConfigsResult_count(result: *const kafka_admin_AlterConfigsResult_t) -> i32 {
     unsafe { alter_configs_result_ref(result) }.key_names.len() as i32
@@ -5349,6 +5493,7 @@ pub unsafe extern "C" fn kafka_admin_AlterConfigsResult_count(result: *const kaf
 /// # Safety
 ///
 /// `result` must be a valid `incremental_alter_configs` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AlterConfigsResult_get_key_type(
     result: *const kafka_admin_AlterConfigsResult_t,
@@ -5370,6 +5515,7 @@ pub unsafe extern "C" fn kafka_admin_AlterConfigsResult_get_key_type(
 /// # Safety
 ///
 /// `result` must be a valid `incremental_alter_configs` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AlterConfigsResult_get_key_name(
     result: *const kafka_admin_AlterConfigsResult_t,
@@ -5387,6 +5533,7 @@ pub unsafe extern "C" fn kafka_admin_AlterConfigsResult_get_key_name(
 /// # Safety
 ///
 /// `result` must be a valid `incremental_alter_configs` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AlterConfigsResult_get_error(
     result: *const kafka_admin_AlterConfigsResult_t,
@@ -5407,6 +5554,7 @@ pub unsafe extern "C" fn kafka_admin_AlterConfigsResult_get_error(
 /// # Safety
 ///
 /// `result` must be null or a valid `incremental_alter_configs` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AlterConfigsResult_destroy(result: *mut kafka_admin_AlterConfigsResult_t) {
     if !result.is_null() {
@@ -5465,6 +5613,7 @@ pub type kafka_admin_AdminClient_incremental_alter_configs_callback_t =
 ///
 /// `admin` must be a valid handle; every input array must have `count` valid
 /// entries; `out_result` must be null or writable.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_incremental_alter_configs(
     admin: *const kafka_admin_AdminClient_t,
@@ -5514,6 +5663,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_incremental_alter_configs(
 ///
 /// `admin` must be a valid handle; every input array must have `count` valid
 /// entries.
+#[ffi_guard(on_panic = |err| unsafe { callback(std::ptr::null_mut(), box_error(err), user_data) })]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_incremental_alter_configs_async(
     admin: *const kafka_admin_AdminClient_t,
@@ -5605,6 +5755,7 @@ unsafe fn list_config_resources_result_ref(
 /// # Safety
 ///
 /// `result` must be a valid `list_config_resources` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListConfigResourcesResult_count(
     result: *const kafka_admin_ListConfigResourcesResult_t,
@@ -5618,6 +5769,7 @@ pub unsafe extern "C" fn kafka_admin_ListConfigResourcesResult_count(
 /// # Safety
 ///
 /// `result` must be a valid `list_config_resources` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListConfigResourcesResult_get_type(
     result: *const kafka_admin_ListConfigResourcesResult_t,
@@ -5639,6 +5791,7 @@ pub unsafe extern "C" fn kafka_admin_ListConfigResourcesResult_get_type(
 /// # Safety
 ///
 /// `result` must be a valid `list_config_resources` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListConfigResourcesResult_get_name(
     result: *const kafka_admin_ListConfigResourcesResult_t,
@@ -5652,6 +5805,7 @@ pub unsafe extern "C" fn kafka_admin_ListConfigResourcesResult_get_name(
 /// # Safety
 ///
 /// `result` must be null or a valid `list_config_resources` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListConfigResourcesResult_destroy(
     result: *mut kafka_admin_ListConfigResourcesResult_t,
@@ -5683,6 +5837,7 @@ pub type kafka_admin_AdminClient_list_config_resources_callback_t =
 ///
 /// `admin` must be a valid handle; `resource_types` must be null or have `count`
 /// readable entries; `out_result` must be null or writable.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_list_config_resources(
     admin: *const kafka_admin_AdminClient_t,
@@ -5719,6 +5874,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_list_config_resources(
 ///
 /// `admin` must be a valid handle; `resource_types` must be null or have `count`
 /// readable entries.
+#[ffi_guard(on_panic = |err| unsafe { callback(std::ptr::null_mut(), box_error(err), user_data) })]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_list_config_resources_async(
     admin: *const kafka_admin_AdminClient_t,
@@ -5808,6 +5964,7 @@ unsafe fn list_client_metrics_resources_result_ref(
 /// # Safety
 ///
 /// `result` must be a valid `list_client_metrics_resources` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListClientMetricsResourcesResult_count(
     result: *const kafka_admin_ListClientMetricsResourcesResult_t,
@@ -5821,6 +5978,7 @@ pub unsafe extern "C" fn kafka_admin_ListClientMetricsResourcesResult_count(
 /// # Safety
 ///
 /// `result` must be a valid `list_client_metrics_resources` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListClientMetricsResourcesResult_get_name(
     result: *const kafka_admin_ListClientMetricsResourcesResult_t,
@@ -5836,6 +5994,7 @@ pub unsafe extern "C" fn kafka_admin_ListClientMetricsResourcesResult_get_name(
 ///
 /// `result` must be null or a valid `list_client_metrics_resources` result
 /// handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListClientMetricsResourcesResult_destroy(
     result: *mut kafka_admin_ListClientMetricsResourcesResult_t,
@@ -5865,6 +6024,7 @@ pub type kafka_admin_AdminClient_list_client_metrics_resources_callback_t =
 /// # Safety
 ///
 /// `admin` must be a valid handle; `out_result` must be null or writable.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 #[allow(deprecated)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_list_client_metrics_resources(
@@ -5898,6 +6058,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_list_client_metrics_resources(
 /// # Safety
 ///
 /// `admin` must be a valid handle from an admin-client constructor.
+#[ffi_guard(on_panic = |err| unsafe { callback(std::ptr::null_mut(), box_error(err), user_data) })]
 #[unsafe(no_mangle)]
 #[allow(deprecated)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_list_client_metrics_resources_async(
@@ -5982,6 +6143,7 @@ unsafe fn describe_log_dirs_result_ref(
 /// # Safety
 ///
 /// `result` must be a valid `describe_log_dirs` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeLogDirsResult_count(
     result: *const kafka_admin_DescribeLogDirsResult_t,
@@ -5995,6 +6157,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeLogDirsResult_count(
 /// # Safety
 ///
 /// `result` must be a valid `describe_log_dirs` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeLogDirsResult_get_broker(
     result: *const kafka_admin_DescribeLogDirsResult_t,
@@ -6017,6 +6180,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeLogDirsResult_get_broker(
 /// # Safety
 ///
 /// `result` must be a valid `describe_log_dirs` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeLogDirsResult_get_value(
     result: *const kafka_admin_DescribeLogDirsResult_t,
@@ -6040,6 +6204,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeLogDirsResult_get_value(
 /// # Safety
 ///
 /// `result` must be a valid `describe_log_dirs` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeLogDirsResult_get_error(
     result: *const kafka_admin_DescribeLogDirsResult_t,
@@ -6060,6 +6225,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeLogDirsResult_get_error(
 /// # Safety
 ///
 /// `result` must be null or a valid `describe_log_dirs` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeLogDirsResult_destroy(result: *mut kafka_admin_DescribeLogDirsResult_t) {
     if !result.is_null() {
@@ -6108,6 +6274,7 @@ pub type kafka_admin_AdminClient_describe_log_dirs_callback_t =
 ///
 /// `admin` must be a valid handle; `brokers` must have `count` readable entries;
 /// `out_result` must be null or writable.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_describe_log_dirs(
     admin: *const kafka_admin_AdminClient_t,
@@ -6142,6 +6309,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_log_dirs(
 /// # Safety
 ///
 /// `admin` must be a valid handle; `brokers` must have `count` readable entries.
+#[ffi_guard(on_panic = |err| unsafe { callback(std::ptr::null_mut(), box_error(err), user_data) })]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_describe_log_dirs_async(
     admin: *const kafka_admin_AdminClient_t,
@@ -6233,6 +6401,7 @@ unsafe fn alter_replica_log_dirs_result_ref(
 /// # Safety
 ///
 /// `result` must be a valid `alter_replica_log_dirs` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AlterReplicaLogDirsResult_count(
     result: *const kafka_admin_AlterReplicaLogDirsResult_t,
@@ -6246,6 +6415,7 @@ pub unsafe extern "C" fn kafka_admin_AlterReplicaLogDirsResult_count(
 /// # Safety
 ///
 /// `result` must be a valid `alter_replica_log_dirs` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AlterReplicaLogDirsResult_get_topic(
     result: *const kafka_admin_AlterReplicaLogDirsResult_t,
@@ -6259,6 +6429,7 @@ pub unsafe extern "C" fn kafka_admin_AlterReplicaLogDirsResult_get_topic(
 /// # Safety
 ///
 /// `result` must be a valid `alter_replica_log_dirs` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AlterReplicaLogDirsResult_get_partition(
     result: *const kafka_admin_AlterReplicaLogDirsResult_t,
@@ -6279,6 +6450,7 @@ pub unsafe extern "C" fn kafka_admin_AlterReplicaLogDirsResult_get_partition(
 /// # Safety
 ///
 /// `result` must be a valid `alter_replica_log_dirs` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AlterReplicaLogDirsResult_get_broker_id(
     result: *const kafka_admin_AlterReplicaLogDirsResult_t,
@@ -6303,6 +6475,7 @@ pub unsafe extern "C" fn kafka_admin_AlterReplicaLogDirsResult_get_broker_id(
 /// # Safety
 ///
 /// `result` must be a valid `alter_replica_log_dirs` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AlterReplicaLogDirsResult_get_error(
     result: *const kafka_admin_AlterReplicaLogDirsResult_t,
@@ -6322,6 +6495,7 @@ pub unsafe extern "C" fn kafka_admin_AlterReplicaLogDirsResult_get_error(
 /// # Safety
 ///
 /// `result` must be null or a valid `alter_replica_log_dirs` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AlterReplicaLogDirsResult_destroy(
     result: *mut kafka_admin_AlterReplicaLogDirsResult_t,
@@ -6407,6 +6581,7 @@ pub type kafka_admin_AdminClient_alter_replica_log_dirs_callback_t =
 ///
 /// `admin` must be a valid handle; every input array must have `count` valid
 /// entries; `out_result` must be null or writable.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_alter_replica_log_dirs(
     admin: *const kafka_admin_AdminClient_t,
@@ -6446,6 +6621,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_alter_replica_log_dirs(
 ///
 /// `admin` must be a valid handle; every input array must have `count` valid
 /// entries.
+#[ffi_guard(on_panic = |err| unsafe { callback(std::ptr::null_mut(), box_error(err), user_data) })]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_alter_replica_log_dirs_async(
     admin: *const kafka_admin_AdminClient_t,
@@ -6562,6 +6738,7 @@ unsafe fn describe_replica_log_dirs_result_ref(
 /// # Safety
 ///
 /// `result` must be a valid `describe_replica_log_dirs` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeReplicaLogDirsResult_count(
     result: *const kafka_admin_DescribeReplicaLogDirsResult_t,
@@ -6575,6 +6752,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeReplicaLogDirsResult_count(
 /// # Safety
 ///
 /// `result` must be a valid `describe_replica_log_dirs` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeReplicaLogDirsResult_get_topic(
     result: *const kafka_admin_DescribeReplicaLogDirsResult_t,
@@ -6588,6 +6766,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeReplicaLogDirsResult_get_topic(
 /// # Safety
 ///
 /// `result` must be a valid `describe_replica_log_dirs` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeReplicaLogDirsResult_get_partition(
     result: *const kafka_admin_DescribeReplicaLogDirsResult_t,
@@ -6608,6 +6787,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeReplicaLogDirsResult_get_partition(
 /// # Safety
 ///
 /// `result` must be a valid `describe_replica_log_dirs` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeReplicaLogDirsResult_get_broker_id(
     result: *const kafka_admin_DescribeReplicaLogDirsResult_t,
@@ -6631,6 +6811,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeReplicaLogDirsResult_get_broker_id(
 /// # Safety
 ///
 /// `result` must be a valid `describe_replica_log_dirs` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeReplicaLogDirsResult_get_value(
     result: *const kafka_admin_DescribeReplicaLogDirsResult_t,
@@ -6654,6 +6835,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeReplicaLogDirsResult_get_value(
 /// # Safety
 ///
 /// `result` must be a valid `describe_replica_log_dirs` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeReplicaLogDirsResult_get_error(
     result: *const kafka_admin_DescribeReplicaLogDirsResult_t,
@@ -6677,6 +6859,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeReplicaLogDirsResult_get_error(
 /// # Safety
 ///
 /// `result` must be null or a valid `describe_replica_log_dirs` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeReplicaLogDirsResult_destroy(
     result: *mut kafka_admin_DescribeReplicaLogDirsResult_t,
@@ -6728,6 +6911,7 @@ pub type kafka_admin_AdminClient_describe_replica_log_dirs_callback_t =
 ///
 /// `admin` must be a valid handle; every input array must have `count` valid
 /// entries; `out_result` must be null or writable.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_describe_replica_log_dirs(
     admin: *const kafka_admin_AdminClient_t,
@@ -6766,6 +6950,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_replica_log_dirs(
 ///
 /// `admin` must be a valid handle; every input array must have `count` valid
 /// entries.
+#[ffi_guard(on_panic = |err| unsafe { callback(std::ptr::null_mut(), box_error(err), user_data) })]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_describe_replica_log_dirs_async(
     admin: *const kafka_admin_AdminClient_t,
@@ -6859,6 +7044,7 @@ unsafe fn partition_reassignment_ref(
 /// # Safety
 ///
 /// `reassignment` must be a valid borrowed partition-reassignment pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_PartitionReassignment_replica_count(
     reassignment: *const kafka_admin_PartitionReassignment_t,
@@ -6871,6 +7057,7 @@ pub unsafe extern "C" fn kafka_admin_PartitionReassignment_replica_count(
 /// # Safety
 ///
 /// `reassignment` must be a valid borrowed partition-reassignment pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_PartitionReassignment_replica(
     reassignment: *const kafka_admin_PartitionReassignment_t,
@@ -6884,6 +7071,7 @@ pub unsafe extern "C" fn kafka_admin_PartitionReassignment_replica(
 /// # Safety
 ///
 /// `reassignment` must be a valid borrowed partition-reassignment pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_PartitionReassignment_adding_replica_count(
     reassignment: *const kafka_admin_PartitionReassignment_t,
@@ -6896,6 +7084,7 @@ pub unsafe extern "C" fn kafka_admin_PartitionReassignment_adding_replica_count(
 /// # Safety
 ///
 /// `reassignment` must be a valid borrowed partition-reassignment pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_PartitionReassignment_adding_replica(
     reassignment: *const kafka_admin_PartitionReassignment_t,
@@ -6909,6 +7098,7 @@ pub unsafe extern "C" fn kafka_admin_PartitionReassignment_adding_replica(
 /// # Safety
 ///
 /// `reassignment` must be a valid borrowed partition-reassignment pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_PartitionReassignment_removing_replica_count(
     reassignment: *const kafka_admin_PartitionReassignment_t,
@@ -6922,6 +7112,7 @@ pub unsafe extern "C" fn kafka_admin_PartitionReassignment_removing_replica_coun
 /// # Safety
 ///
 /// `reassignment` must be a valid borrowed partition-reassignment pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_PartitionReassignment_removing_replica(
     reassignment: *const kafka_admin_PartitionReassignment_t,
@@ -6966,6 +7157,7 @@ unsafe fn list_offsets_info_ref(
 /// # Safety
 ///
 /// `info` must be a valid borrowed list-offsets info pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListOffsetsResultInfo_offset(
     info: *const kafka_admin_ListOffsetsResultInfo_t,
@@ -6980,6 +7172,7 @@ pub unsafe extern "C" fn kafka_admin_ListOffsetsResultInfo_offset(
 /// # Safety
 ///
 /// `info` must be a valid borrowed list-offsets info pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListOffsetsResultInfo_timestamp(
     info: *const kafka_admin_ListOffsetsResultInfo_t,
@@ -6994,6 +7187,7 @@ pub unsafe extern "C" fn kafka_admin_ListOffsetsResultInfo_timestamp(
 ///
 /// `info` must be a valid borrowed list-offsets info pointer; `out_epoch` must
 /// be null or writable.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListOffsetsResultInfo_leader_epoch(
     info: *const kafka_admin_ListOffsetsResultInfo_t,
@@ -7331,6 +7525,7 @@ unsafe fn elect_leaders_result_ref(
 /// # Safety
 ///
 /// `result` must be a valid `elect_leaders` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ElectLeadersResult_count(result: *const kafka_admin_ElectLeadersResult_t) -> i32 {
     unsafe { elect_leaders_result_ref(result) }.topics.len() as i32
@@ -7342,6 +7537,7 @@ pub unsafe extern "C" fn kafka_admin_ElectLeadersResult_count(result: *const kaf
 /// # Safety
 ///
 /// `result` must be a valid `elect_leaders` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ElectLeadersResult_get_topic(
     result: *const kafka_admin_ElectLeadersResult_t,
@@ -7355,6 +7551,7 @@ pub unsafe extern "C" fn kafka_admin_ElectLeadersResult_get_topic(
 /// # Safety
 ///
 /// `result` must be a valid `elect_leaders` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ElectLeadersResult_get_partition(
     result: *const kafka_admin_ElectLeadersResult_t,
@@ -7377,6 +7574,7 @@ pub unsafe extern "C" fn kafka_admin_ElectLeadersResult_get_partition(
 /// # Safety
 ///
 /// `result` must be a valid `elect_leaders` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ElectLeadersResult_get_error(
     result: *const kafka_admin_ElectLeadersResult_t,
@@ -7396,6 +7594,7 @@ pub unsafe extern "C" fn kafka_admin_ElectLeadersResult_get_error(
 /// # Safety
 ///
 /// `result` must be null or a valid `elect_leaders` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ElectLeadersResult_destroy(result: *mut kafka_admin_ElectLeadersResult_t) {
     if !result.is_null() {
@@ -7456,6 +7655,7 @@ unsafe fn alter_partition_reassignments_result_ref(
 /// # Safety
 ///
 /// `result` must be a valid `alter_partition_reassignments` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AlterPartitionReassignmentsResult_count(
     result: *const kafka_admin_AlterPartitionReassignmentsResult_t,
@@ -7469,6 +7669,7 @@ pub unsafe extern "C" fn kafka_admin_AlterPartitionReassignmentsResult_count(
 /// # Safety
 ///
 /// `result` must be a valid `alter_partition_reassignments` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AlterPartitionReassignmentsResult_get_topic(
     result: *const kafka_admin_AlterPartitionReassignmentsResult_t,
@@ -7482,6 +7683,7 @@ pub unsafe extern "C" fn kafka_admin_AlterPartitionReassignmentsResult_get_topic
 /// # Safety
 ///
 /// `result` must be a valid `alter_partition_reassignments` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AlterPartitionReassignmentsResult_get_partition(
     result: *const kafka_admin_AlterPartitionReassignmentsResult_t,
@@ -7503,6 +7705,7 @@ pub unsafe extern "C" fn kafka_admin_AlterPartitionReassignmentsResult_get_parti
 /// # Safety
 ///
 /// `result` must be a valid `alter_partition_reassignments` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AlterPartitionReassignmentsResult_get_error(
     result: *const kafka_admin_AlterPartitionReassignmentsResult_t,
@@ -7527,6 +7730,7 @@ pub unsafe extern "C" fn kafka_admin_AlterPartitionReassignmentsResult_get_error
 ///
 /// `result` must be null or a valid `alter_partition_reassignments` result
 /// handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AlterPartitionReassignmentsResult_destroy(
     result: *mut kafka_admin_AlterPartitionReassignmentsResult_t,
@@ -7590,6 +7794,7 @@ unsafe fn list_partition_reassignments_result_ref(
 /// # Safety
 ///
 /// `result` must be a valid `list_partition_reassignments` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListPartitionReassignmentsResult_count(
     result: *const kafka_admin_ListPartitionReassignmentsResult_t,
@@ -7603,6 +7808,7 @@ pub unsafe extern "C" fn kafka_admin_ListPartitionReassignmentsResult_count(
 /// # Safety
 ///
 /// `result` must be a valid `list_partition_reassignments` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListPartitionReassignmentsResult_get_topic(
     result: *const kafka_admin_ListPartitionReassignmentsResult_t,
@@ -7616,6 +7822,7 @@ pub unsafe extern "C" fn kafka_admin_ListPartitionReassignmentsResult_get_topic(
 /// # Safety
 ///
 /// `result` must be a valid `list_partition_reassignments` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListPartitionReassignmentsResult_get_partition(
     result: *const kafka_admin_ListPartitionReassignmentsResult_t,
@@ -7637,6 +7844,7 @@ pub unsafe extern "C" fn kafka_admin_ListPartitionReassignmentsResult_get_partit
 /// # Safety
 ///
 /// `result` must be a valid `list_partition_reassignments` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListPartitionReassignmentsResult_get_value(
     result: *const kafka_admin_ListPartitionReassignmentsResult_t,
@@ -7661,6 +7869,7 @@ pub unsafe extern "C" fn kafka_admin_ListPartitionReassignmentsResult_get_value(
 ///
 /// `result` must be null or a valid `list_partition_reassignments` result
 /// handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListPartitionReassignmentsResult_destroy(
     result: *mut kafka_admin_ListPartitionReassignmentsResult_t,
@@ -7729,6 +7938,7 @@ unsafe fn list_offsets_result_ref(result: *const kafka_admin_ListOffsetsResult_t
 /// # Safety
 ///
 /// `result` must be a valid `list_offsets` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListOffsetsResult_count(result: *const kafka_admin_ListOffsetsResult_t) -> i32 {
     unsafe { list_offsets_result_ref(result) }.topics.len() as i32
@@ -7740,6 +7950,7 @@ pub unsafe extern "C" fn kafka_admin_ListOffsetsResult_count(result: *const kafk
 /// # Safety
 ///
 /// `result` must be a valid `list_offsets` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListOffsetsResult_get_topic(
     result: *const kafka_admin_ListOffsetsResult_t,
@@ -7753,6 +7964,7 @@ pub unsafe extern "C" fn kafka_admin_ListOffsetsResult_get_topic(
 /// # Safety
 ///
 /// `result` must be a valid `list_offsets` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListOffsetsResult_get_partition(
     result: *const kafka_admin_ListOffsetsResult_t,
@@ -7775,6 +7987,7 @@ pub unsafe extern "C" fn kafka_admin_ListOffsetsResult_get_partition(
 /// # Safety
 ///
 /// `result` must be a valid `list_offsets` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListOffsetsResult_get_value(
     result: *const kafka_admin_ListOffsetsResult_t,
@@ -7795,6 +8008,7 @@ pub unsafe extern "C" fn kafka_admin_ListOffsetsResult_get_value(
 /// # Safety
 ///
 /// `result` must be a valid `list_offsets` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListOffsetsResult_get_error(
     result: *const kafka_admin_ListOffsetsResult_t,
@@ -7814,6 +8028,7 @@ pub unsafe extern "C" fn kafka_admin_ListOffsetsResult_get_error(
 /// # Safety
 ///
 /// `result` must be null or a valid `list_offsets` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListOffsetsResult_destroy(result: *mut kafka_admin_ListOffsetsResult_t) {
     if !result.is_null() {
@@ -7942,6 +8157,7 @@ pub type kafka_admin_AdminClient_elect_leaders_callback_t =
 /// `admin` must be a valid handle; unless `all_partitions` is true, `topics` and
 /// `partitions` must have `count` valid entries each; `out_result` must be null
 /// or writable.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_elect_leaders(
     admin: *const kafka_admin_AdminClient_t,
@@ -7984,6 +8200,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_elect_leaders(
 ///
 /// `admin` must be a valid handle; unless `all_partitions` is true, `topics` and
 /// `partitions` must have `count` valid entries each.
+#[ffi_guard(on_panic = |err| unsafe { callback(std::ptr::null_mut(), box_error(err), user_data) })]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_elect_leaders_async(
     admin: *const kafka_admin_AdminClient_t,
@@ -8090,6 +8307,7 @@ pub type kafka_admin_AdminClient_alter_partition_reassignments_callback_t =
 /// each; every non-cancelled `target_replicas[i]` must point at
 /// `target_replica_counts[i]` readable ids; `out_result` must be null or
 /// writable.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_alter_partition_reassignments(
     admin: *const kafka_admin_AdminClient_t,
@@ -8136,6 +8354,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_alter_partition_reassignments(
 /// `admin` must be a valid handle; `topics`, `partitions`, `cancel`,
 /// `target_replicas` and `target_replica_counts` must have `count` valid entries
 /// each.
+#[ffi_guard(on_panic = |err| unsafe { callback(std::ptr::null_mut(), box_error(err), user_data) })]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_alter_partition_reassignments_async(
     admin: *const kafka_admin_AdminClient_t,
@@ -8216,6 +8435,7 @@ pub type kafka_admin_AdminClient_list_partition_reassignments_callback_t =
 /// `admin` must be a valid handle; unless `all_partitions` is true, `topics` and
 /// `partitions` must have `count` valid entries each; `out_result` must be null
 /// or writable.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_list_partition_reassignments(
     admin: *const kafka_admin_AdminClient_t,
@@ -8254,6 +8474,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_list_partition_reassignments(
 ///
 /// `admin` must be a valid handle; unless `all_partitions` is true, `topics` and
 /// `partitions` must have `count` valid entries each.
+#[ffi_guard(on_panic = |err| unsafe { callback(std::ptr::null_mut(), box_error(err), user_data) })]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_list_partition_reassignments_async(
     admin: *const kafka_admin_AdminClient_t,
@@ -8334,6 +8555,7 @@ pub type kafka_admin_AdminClient_list_offsets_callback_t =
 /// `admin` must be a valid handle; `topics`, `partitions`, `is_timestamp` and
 /// `spec_timestamps` must have `count` valid entries each; `out_result` must be
 /// null or writable.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_list_offsets(
     admin: *const kafka_admin_AdminClient_t,
@@ -8376,6 +8598,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_list_offsets(
 ///
 /// `admin` must be a valid handle; `topics`, `partitions`, `is_timestamp` and
 /// `spec_timestamps` must have `count` valid entries each.
+#[ffi_guard(on_panic = |err| unsafe { callback(std::ptr::null_mut(), box_error(err), user_data) })]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_list_offsets_async(
     admin: *const kafka_admin_AdminClient_t,
@@ -8500,6 +8723,7 @@ unsafe fn group_listing_ref(listing: *const kafka_admin_GroupListing_t) -> &'sta
 /// # Safety
 ///
 /// `listing` must be a valid borrowed group-listing pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_GroupListing_group_id(
     listing: *const kafka_admin_GroupListing_t,
@@ -8517,6 +8741,7 @@ pub unsafe extern "C" fn kafka_admin_GroupListing_group_id(
 /// # Safety
 ///
 /// `listing` must be a valid borrowed group-listing pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_GroupListing_group_type(
     listing: *const kafka_admin_GroupListing_t,
@@ -8530,6 +8755,7 @@ pub unsafe extern "C" fn kafka_admin_GroupListing_group_type(
 /// # Safety
 ///
 /// `listing` must be a valid borrowed group-listing pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_GroupListing_protocol(
     listing: *const kafka_admin_GroupListing_t,
@@ -8546,6 +8772,7 @@ pub unsafe extern "C" fn kafka_admin_GroupListing_protocol(
 /// # Safety
 ///
 /// `listing` must be a valid borrowed group-listing pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_GroupListing_group_state(
     listing: *const kafka_admin_GroupListing_t,
@@ -8559,6 +8786,7 @@ pub unsafe extern "C" fn kafka_admin_GroupListing_group_state(
 /// # Safety
 ///
 /// `listing` must be a valid borrowed group-listing pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_GroupListing_is_simple_consumer_group(
     listing: *const kafka_admin_GroupListing_t,
@@ -8616,6 +8844,7 @@ unsafe fn consumer_group_listing_ref(
 /// # Safety
 ///
 /// `listing` must be a valid borrowed consumer-group-listing pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ConsumerGroupListing_group_id(
     listing: *const kafka_admin_ConsumerGroupListing_t,
@@ -8628,6 +8857,7 @@ pub unsafe extern "C" fn kafka_admin_ConsumerGroupListing_group_id(
 /// # Safety
 ///
 /// `listing` must be a valid borrowed consumer-group-listing pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ConsumerGroupListing_is_simple_consumer_group(
     listing: *const kafka_admin_ConsumerGroupListing_t,
@@ -8641,6 +8871,7 @@ pub unsafe extern "C" fn kafka_admin_ConsumerGroupListing_is_simple_consumer_gro
 /// # Safety
 ///
 /// `listing` must be a valid borrowed consumer-group-listing pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ConsumerGroupListing_group_state(
     listing: *const kafka_admin_ConsumerGroupListing_t,
@@ -8658,6 +8889,7 @@ pub unsafe extern "C" fn kafka_admin_ConsumerGroupListing_group_state(
 /// # Safety
 ///
 /// `listing` must be a valid borrowed consumer-group-listing pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ConsumerGroupListing_state(
     listing: *const kafka_admin_ConsumerGroupListing_t,
@@ -8671,6 +8903,7 @@ pub unsafe extern "C" fn kafka_admin_ConsumerGroupListing_state(
 /// # Safety
 ///
 /// `listing` must be a valid borrowed consumer-group-listing pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ConsumerGroupListing_group_type(
     listing: *const kafka_admin_ConsumerGroupListing_t,
@@ -8723,6 +8956,7 @@ unsafe fn member_assignment_ref(assignment: *const kafka_admin_MemberAssignment_
 /// # Safety
 ///
 /// `assignment` must be a valid borrowed member-assignment pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_MemberAssignment_count(assignment: *const kafka_admin_MemberAssignment_t) -> i32 {
     unsafe { member_assignment_ref(assignment) }.topics.len() as i32
@@ -8734,6 +8968,7 @@ pub unsafe extern "C" fn kafka_admin_MemberAssignment_count(assignment: *const k
 /// # Safety
 ///
 /// `assignment` must be a valid borrowed member-assignment pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_MemberAssignment_get_topic(
     assignment: *const kafka_admin_MemberAssignment_t,
@@ -8747,6 +8982,7 @@ pub unsafe extern "C" fn kafka_admin_MemberAssignment_get_topic(
 /// # Safety
 ///
 /// `assignment` must be a valid borrowed member-assignment pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_MemberAssignment_get_partition(
     assignment: *const kafka_admin_MemberAssignment_t,
@@ -8816,6 +9052,7 @@ unsafe fn member_description_ref(member: *const kafka_admin_MemberDescription_t)
 /// # Safety
 ///
 /// `member` must be a valid borrowed member-description pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_MemberDescription_consumer_id(
     member: *const kafka_admin_MemberDescription_t,
@@ -8830,6 +9067,7 @@ pub unsafe extern "C" fn kafka_admin_MemberDescription_consumer_id(
 /// # Safety
 ///
 /// `member` must be a valid borrowed member-description pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_MemberDescription_group_instance_id(
     member: *const kafka_admin_MemberDescription_t,
@@ -8843,6 +9081,7 @@ pub unsafe extern "C" fn kafka_admin_MemberDescription_group_instance_id(
 /// # Safety
 ///
 /// `member` must be a valid borrowed member-description pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_MemberDescription_rack_id(
     member: *const kafka_admin_MemberDescription_t,
@@ -8855,6 +9094,7 @@ pub unsafe extern "C" fn kafka_admin_MemberDescription_rack_id(
 /// # Safety
 ///
 /// `member` must be a valid borrowed member-description pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_MemberDescription_client_id(
     member: *const kafka_admin_MemberDescription_t,
@@ -8867,6 +9107,7 @@ pub unsafe extern "C" fn kafka_admin_MemberDescription_client_id(
 /// # Safety
 ///
 /// `member` must be a valid borrowed member-description pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_MemberDescription_host(
     member: *const kafka_admin_MemberDescription_t,
@@ -8881,6 +9122,7 @@ pub unsafe extern "C" fn kafka_admin_MemberDescription_host(
 /// # Safety
 ///
 /// `member` must be a valid borrowed member-description pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_MemberDescription_assignment(
     member: *const kafka_admin_MemberDescription_t,
@@ -8897,6 +9139,7 @@ pub unsafe extern "C" fn kafka_admin_MemberDescription_assignment(
 /// # Safety
 ///
 /// `member` must be a valid borrowed member-description pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_MemberDescription_target_assignment(
     member: *const kafka_admin_MemberDescription_t,
@@ -8914,6 +9157,7 @@ pub unsafe extern "C" fn kafka_admin_MemberDescription_target_assignment(
 ///
 /// `member` must be a valid borrowed member-description pointer; `out_epoch`
 /// must be null or writable.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_MemberDescription_member_epoch(
     member: *const kafka_admin_MemberDescription_t,
@@ -8930,6 +9174,7 @@ pub unsafe extern "C" fn kafka_admin_MemberDescription_member_epoch(
 ///
 /// `member` must be a valid borrowed member-description pointer;
 /// `out_upgraded` must be null or writable.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_MemberDescription_upgraded(
     member: *const kafka_admin_MemberDescription_t,
@@ -9038,6 +9283,7 @@ unsafe fn consumer_group_description_ref(
 /// # Safety
 ///
 /// `description` must be a valid borrowed consumer-group-description pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ConsumerGroupDescription_group_id(
     description: *const kafka_admin_ConsumerGroupDescription_t,
@@ -9050,6 +9296,7 @@ pub unsafe extern "C" fn kafka_admin_ConsumerGroupDescription_group_id(
 /// # Safety
 ///
 /// `description` must be a valid borrowed consumer-group-description pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ConsumerGroupDescription_is_simple_consumer_group(
     description: *const kafka_admin_ConsumerGroupDescription_t,
@@ -9062,6 +9309,7 @@ pub unsafe extern "C" fn kafka_admin_ConsumerGroupDescription_is_simple_consumer
 /// # Safety
 ///
 /// `description` must be a valid borrowed consumer-group-description pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ConsumerGroupDescription_member_count(
     description: *const kafka_admin_ConsumerGroupDescription_t,
@@ -9075,6 +9323,7 @@ pub unsafe extern "C" fn kafka_admin_ConsumerGroupDescription_member_count(
 /// # Safety
 ///
 /// `description` must be a valid borrowed consumer-group-description pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ConsumerGroupDescription_get_member(
     description: *const kafka_admin_ConsumerGroupDescription_t,
@@ -9090,6 +9339,7 @@ pub unsafe extern "C" fn kafka_admin_ConsumerGroupDescription_get_member(
 /// # Safety
 ///
 /// `description` must be a valid borrowed consumer-group-description pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ConsumerGroupDescription_partition_assignor(
     description: *const kafka_admin_ConsumerGroupDescription_t,
@@ -9106,6 +9356,7 @@ pub unsafe extern "C" fn kafka_admin_ConsumerGroupDescription_partition_assignor
 /// # Safety
 ///
 /// `description` must be a valid borrowed consumer-group-description pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ConsumerGroupDescription_group_type(
     description: *const kafka_admin_ConsumerGroupDescription_t,
@@ -9120,6 +9371,7 @@ pub unsafe extern "C" fn kafka_admin_ConsumerGroupDescription_group_type(
 /// # Safety
 ///
 /// `description` must be a valid borrowed consumer-group-description pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ConsumerGroupDescription_state(
     description: *const kafka_admin_ConsumerGroupDescription_t,
@@ -9133,6 +9385,7 @@ pub unsafe extern "C" fn kafka_admin_ConsumerGroupDescription_state(
 /// # Safety
 ///
 /// `description` must be a valid borrowed consumer-group-description pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ConsumerGroupDescription_group_state(
     description: *const kafka_admin_ConsumerGroupDescription_t,
@@ -9146,6 +9399,7 @@ pub unsafe extern "C" fn kafka_admin_ConsumerGroupDescription_group_state(
 /// # Safety
 ///
 /// `description` must be a valid borrowed consumer-group-description pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ConsumerGroupDescription_coordinator(
     description: *const kafka_admin_ConsumerGroupDescription_t,
@@ -9163,6 +9417,7 @@ pub unsafe extern "C" fn kafka_admin_ConsumerGroupDescription_coordinator(
 /// # Safety
 ///
 /// `description` must be a valid borrowed consumer-group-description pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ConsumerGroupDescription_authorized_operation_count(
     description: *const kafka_admin_ConsumerGroupDescription_t,
@@ -9181,6 +9436,7 @@ pub unsafe extern "C" fn kafka_admin_ConsumerGroupDescription_authorized_operati
 /// # Safety
 ///
 /// `description` must be a valid borrowed consumer-group-description pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ConsumerGroupDescription_has_authorized_operations(
     description: *const kafka_admin_ConsumerGroupDescription_t,
@@ -9196,6 +9452,7 @@ pub unsafe extern "C" fn kafka_admin_ConsumerGroupDescription_has_authorized_ope
 /// # Safety
 ///
 /// `description` must be a valid borrowed consumer-group-description pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ConsumerGroupDescription_authorized_operation(
     description: *const kafka_admin_ConsumerGroupDescription_t,
@@ -9216,6 +9473,7 @@ pub unsafe extern "C" fn kafka_admin_ConsumerGroupDescription_authorized_operati
 ///
 /// `description` must be a valid borrowed consumer-group-description pointer;
 /// `out_epoch` must be null or writable.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ConsumerGroupDescription_group_epoch(
     description: *const kafka_admin_ConsumerGroupDescription_t,
@@ -9231,6 +9489,7 @@ pub unsafe extern "C" fn kafka_admin_ConsumerGroupDescription_group_epoch(
 ///
 /// `description` must be a valid borrowed consumer-group-description pointer;
 /// `out_epoch` must be null or writable.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ConsumerGroupDescription_target_assignment_epoch(
     description: *const kafka_admin_ConsumerGroupDescription_t,
@@ -9297,6 +9556,7 @@ unsafe fn classic_group_description_ref(
 /// # Safety
 ///
 /// `description` must be a valid borrowed classic-group-description pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ClassicGroupDescription_group_id(
     description: *const kafka_admin_ClassicGroupDescription_t,
@@ -9309,6 +9569,7 @@ pub unsafe extern "C" fn kafka_admin_ClassicGroupDescription_group_id(
 /// # Safety
 ///
 /// `description` must be a valid borrowed classic-group-description pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ClassicGroupDescription_protocol(
     description: *const kafka_admin_ClassicGroupDescription_t,
@@ -9322,6 +9583,7 @@ pub unsafe extern "C" fn kafka_admin_ClassicGroupDescription_protocol(
 /// # Safety
 ///
 /// `description` must be a valid borrowed classic-group-description pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ClassicGroupDescription_protocol_data(
     description: *const kafka_admin_ClassicGroupDescription_t,
@@ -9334,6 +9596,7 @@ pub unsafe extern "C" fn kafka_admin_ClassicGroupDescription_protocol_data(
 /// # Safety
 ///
 /// `description` must be a valid borrowed classic-group-description pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ClassicGroupDescription_is_simple_consumer_group(
     description: *const kafka_admin_ClassicGroupDescription_t,
@@ -9346,6 +9609,7 @@ pub unsafe extern "C" fn kafka_admin_ClassicGroupDescription_is_simple_consumer_
 /// # Safety
 ///
 /// `description` must be a valid borrowed classic-group-description pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ClassicGroupDescription_member_count(
     description: *const kafka_admin_ClassicGroupDescription_t,
@@ -9358,6 +9622,7 @@ pub unsafe extern "C" fn kafka_admin_ClassicGroupDescription_member_count(
 /// # Safety
 ///
 /// `description` must be a valid borrowed classic-group-description pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ClassicGroupDescription_get_member(
     description: *const kafka_admin_ClassicGroupDescription_t,
@@ -9372,6 +9637,7 @@ pub unsafe extern "C" fn kafka_admin_ClassicGroupDescription_get_member(
 /// # Safety
 ///
 /// `description` must be a valid borrowed classic-group-description pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ClassicGroupDescription_state(
     description: *const kafka_admin_ClassicGroupDescription_t,
@@ -9385,6 +9651,7 @@ pub unsafe extern "C" fn kafka_admin_ClassicGroupDescription_state(
 /// # Safety
 ///
 /// `description` must be a valid borrowed classic-group-description pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ClassicGroupDescription_coordinator(
     description: *const kafka_admin_ClassicGroupDescription_t,
@@ -9401,6 +9668,7 @@ pub unsafe extern "C" fn kafka_admin_ClassicGroupDescription_coordinator(
 /// # Safety
 ///
 /// `description` must be a valid borrowed classic-group-description pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ClassicGroupDescription_authorized_operation_count(
     description: *const kafka_admin_ClassicGroupDescription_t,
@@ -9419,6 +9687,7 @@ pub unsafe extern "C" fn kafka_admin_ClassicGroupDescription_authorized_operatio
 /// # Safety
 ///
 /// `description` must be a valid borrowed classic-group-description pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ClassicGroupDescription_has_authorized_operations(
     description: *const kafka_admin_ClassicGroupDescription_t,
@@ -9434,6 +9703,7 @@ pub unsafe extern "C" fn kafka_admin_ClassicGroupDescription_has_authorized_oper
 /// # Safety
 ///
 /// `description` must be a valid borrowed classic-group-description pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ClassicGroupDescription_authorized_operation(
     description: *const kafka_admin_ClassicGroupDescription_t,
@@ -9523,6 +9793,7 @@ fn group_offset_at(map: &OffsetAndMetadataMapInner, index: i32) -> Option<&Group
 /// # Safety
 ///
 /// `map` must be a valid borrowed offset-map pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_OffsetAndMetadataMap_count(map: *const kafka_admin_OffsetAndMetadataMap_t) -> i32 {
     unsafe { offset_and_metadata_map_ref(map) }.entries.len() as i32
@@ -9534,6 +9805,7 @@ pub unsafe extern "C" fn kafka_admin_OffsetAndMetadataMap_count(map: *const kafk
 /// # Safety
 ///
 /// `map` must be a valid borrowed offset-map pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_OffsetAndMetadataMap_get_topic(
     map: *const kafka_admin_OffsetAndMetadataMap_t,
@@ -9550,6 +9822,7 @@ pub unsafe extern "C" fn kafka_admin_OffsetAndMetadataMap_get_topic(
 /// # Safety
 ///
 /// `map` must be a valid borrowed offset-map pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_OffsetAndMetadataMap_get_partition(
     map: *const kafka_admin_OffsetAndMetadataMap_t,
@@ -9574,6 +9847,7 @@ pub unsafe extern "C" fn kafka_admin_OffsetAndMetadataMap_get_partition(
 /// # Safety
 ///
 /// `map` must be a valid borrowed offset-map pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_OffsetAndMetadataMap_has_offset(
     map: *const kafka_admin_OffsetAndMetadataMap_t,
@@ -9594,6 +9868,7 @@ pub unsafe extern "C" fn kafka_admin_OffsetAndMetadataMap_has_offset(
 /// # Safety
 ///
 /// `map` must be a valid borrowed offset-map pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_OffsetAndMetadataMap_get_offset(
     map: *const kafka_admin_OffsetAndMetadataMap_t,
@@ -9613,6 +9888,7 @@ pub unsafe extern "C" fn kafka_admin_OffsetAndMetadataMap_get_offset(
 /// # Safety
 ///
 /// `map` must be a valid borrowed offset-map pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_OffsetAndMetadataMap_get_metadata(
     map: *const kafka_admin_OffsetAndMetadataMap_t,
@@ -9633,6 +9909,7 @@ pub unsafe extern "C" fn kafka_admin_OffsetAndMetadataMap_get_metadata(
 ///
 /// `map` must be a valid borrowed offset-map pointer; `out_epoch` must be null
 /// or writable.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_OffsetAndMetadataMap_get_leader_epoch(
     map: *const kafka_admin_OffsetAndMetadataMap_t,
@@ -10286,6 +10563,7 @@ unsafe fn list_groups_result_ref(result: *const kafka_admin_ListGroupsResult_t) 
 /// # Safety
 ///
 /// `result` must be a valid `list_groups` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListGroupsResult_valid_count(
     result: *const kafka_admin_ListGroupsResult_t,
@@ -10299,6 +10577,7 @@ pub unsafe extern "C" fn kafka_admin_ListGroupsResult_valid_count(
 /// # Safety
 ///
 /// `result` must be a valid `list_groups` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListGroupsResult_get_valid(
     result: *const kafka_admin_ListGroupsResult_t,
@@ -10318,6 +10597,7 @@ pub unsafe extern "C" fn kafka_admin_ListGroupsResult_get_valid(
 /// # Safety
 ///
 /// `result` must be a valid `list_groups` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListGroupsResult_error_count(
     result: *const kafka_admin_ListGroupsResult_t,
@@ -10340,6 +10620,7 @@ pub unsafe extern "C" fn kafka_admin_ListGroupsResult_error_count(
 /// # Safety
 ///
 /// `result` must be a valid `list_groups` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListGroupsResult_get_error(
     result: *const kafka_admin_ListGroupsResult_t,
@@ -10356,6 +10637,7 @@ pub unsafe extern "C" fn kafka_admin_ListGroupsResult_get_error(
 /// # Safety
 ///
 /// `result` must be null or a valid `list_groups` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListGroupsResult_destroy(result: *mut kafka_admin_ListGroupsResult_t) {
     if !result.is_null() {
@@ -10402,6 +10684,7 @@ unsafe fn list_consumer_groups_result_ref(
 /// # Safety
 ///
 /// `result` must be a valid `list_consumer_groups` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListConsumerGroupsResult_valid_count(
     result: *const kafka_admin_ListConsumerGroupsResult_t,
@@ -10414,6 +10697,7 @@ pub unsafe extern "C" fn kafka_admin_ListConsumerGroupsResult_valid_count(
 /// # Safety
 ///
 /// `result` must be a valid `list_consumer_groups` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListConsumerGroupsResult_get_valid(
     result: *const kafka_admin_ListConsumerGroupsResult_t,
@@ -10433,6 +10717,7 @@ pub unsafe extern "C" fn kafka_admin_ListConsumerGroupsResult_get_valid(
 /// # Safety
 ///
 /// `result` must be a valid `list_consumer_groups` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListConsumerGroupsResult_error_count(
     result: *const kafka_admin_ListConsumerGroupsResult_t,
@@ -10449,6 +10734,7 @@ pub unsafe extern "C" fn kafka_admin_ListConsumerGroupsResult_error_count(
 /// # Safety
 ///
 /// `result` must be a valid `list_consumer_groups` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListConsumerGroupsResult_get_error(
     result: *const kafka_admin_ListConsumerGroupsResult_t,
@@ -10465,6 +10751,7 @@ pub unsafe extern "C" fn kafka_admin_ListConsumerGroupsResult_get_error(
 /// # Safety
 ///
 /// `result` must be null or a valid `list_consumer_groups` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListConsumerGroupsResult_destroy(
     result: *mut kafka_admin_ListConsumerGroupsResult_t,
@@ -10533,6 +10820,7 @@ unsafe fn describe_consumer_groups_result_ref(
 /// # Safety
 ///
 /// `result` must be a valid `describe_consumer_groups` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeConsumerGroupsResult_count(
     result: *const kafka_admin_DescribeConsumerGroupsResult_t,
@@ -10546,6 +10834,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeConsumerGroupsResult_count(
 /// # Safety
 ///
 /// `result` must be a valid `describe_consumer_groups` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeConsumerGroupsResult_get_group_id(
     result: *const kafka_admin_DescribeConsumerGroupsResult_t,
@@ -10560,6 +10849,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeConsumerGroupsResult_get_group_id(
 /// # Safety
 ///
 /// `result` must be a valid `describe_consumer_groups` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeConsumerGroupsResult_get_value(
     result: *const kafka_admin_DescribeConsumerGroupsResult_t,
@@ -10585,6 +10875,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeConsumerGroupsResult_get_value(
 /// # Safety
 ///
 /// `result` must be a valid `describe_consumer_groups` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeConsumerGroupsResult_get_error(
     result: *const kafka_admin_DescribeConsumerGroupsResult_t,
@@ -10607,6 +10898,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeConsumerGroupsResult_get_error(
 /// # Safety
 ///
 /// `result` must be null or a valid `describe_consumer_groups` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeConsumerGroupsResult_destroy(
     result: *mut kafka_admin_DescribeConsumerGroupsResult_t,
@@ -10674,6 +10966,7 @@ unsafe fn describe_classic_groups_result_ref(
 /// # Safety
 ///
 /// `result` must be a valid `describe_classic_groups` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeClassicGroupsResult_count(
     result: *const kafka_admin_DescribeClassicGroupsResult_t,
@@ -10687,6 +10980,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeClassicGroupsResult_count(
 /// # Safety
 ///
 /// `result` must be a valid `describe_classic_groups` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeClassicGroupsResult_get_group_id(
     result: *const kafka_admin_DescribeClassicGroupsResult_t,
@@ -10701,6 +10995,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeClassicGroupsResult_get_group_id(
 /// # Safety
 ///
 /// `result` must be a valid `describe_classic_groups` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeClassicGroupsResult_get_value(
     result: *const kafka_admin_DescribeClassicGroupsResult_t,
@@ -10726,6 +11021,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeClassicGroupsResult_get_value(
 /// # Safety
 ///
 /// `result` must be a valid `describe_classic_groups` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeClassicGroupsResult_get_error(
     result: *const kafka_admin_DescribeClassicGroupsResult_t,
@@ -10745,6 +11041,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeClassicGroupsResult_get_error(
 /// # Safety
 ///
 /// `result` must be null or a valid `describe_classic_groups` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeClassicGroupsResult_destroy(
     result: *mut kafka_admin_DescribeClassicGroupsResult_t,
@@ -10815,6 +11112,7 @@ unsafe fn list_consumer_group_offsets_result_ref(
 /// # Safety
 ///
 /// `result` must be a valid `list_consumer_group_offsets_with_group_specs` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListConsumerGroupOffsetsResult_count(
     result: *const kafka_admin_ListConsumerGroupOffsetsResult_t,
@@ -10828,6 +11126,7 @@ pub unsafe extern "C" fn kafka_admin_ListConsumerGroupOffsetsResult_count(
 /// # Safety
 ///
 /// `result` must be a valid `list_consumer_group_offsets_with_group_specs` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListConsumerGroupOffsetsResult_get_group_id(
     result: *const kafka_admin_ListConsumerGroupOffsetsResult_t,
@@ -10842,6 +11141,7 @@ pub unsafe extern "C" fn kafka_admin_ListConsumerGroupOffsetsResult_get_group_id
 /// # Safety
 ///
 /// `result` must be a valid `list_consumer_group_offsets_with_group_specs` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListConsumerGroupOffsetsResult_get_value(
     result: *const kafka_admin_ListConsumerGroupOffsetsResult_t,
@@ -10866,6 +11166,7 @@ pub unsafe extern "C" fn kafka_admin_ListConsumerGroupOffsetsResult_get_value(
 /// # Safety
 ///
 /// `result` must be a valid `list_consumer_group_offsets_with_group_specs` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListConsumerGroupOffsetsResult_get_error(
     result: *const kafka_admin_ListConsumerGroupOffsetsResult_t,
@@ -10890,6 +11191,7 @@ pub unsafe extern "C" fn kafka_admin_ListConsumerGroupOffsetsResult_get_error(
 ///
 /// `result` must be null or a valid `list_consumer_group_offsets_with_group_specs` result
 /// handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListConsumerGroupOffsetsResult_destroy(
     result: *mut kafka_admin_ListConsumerGroupOffsetsResult_t,
@@ -10944,6 +11246,7 @@ unsafe fn alter_consumer_group_offsets_result_ref(
 /// # Safety
 ///
 /// `result` must be a valid `alter_consumer_group_offsets` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AlterConsumerGroupOffsetsResult_count(
     result: *const kafka_admin_AlterConsumerGroupOffsetsResult_t,
@@ -10957,6 +11260,7 @@ pub unsafe extern "C" fn kafka_admin_AlterConsumerGroupOffsetsResult_count(
 /// # Safety
 ///
 /// `result` must be a valid `alter_consumer_group_offsets` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AlterConsumerGroupOffsetsResult_get_topic(
     result: *const kafka_admin_AlterConsumerGroupOffsetsResult_t,
@@ -10970,6 +11274,7 @@ pub unsafe extern "C" fn kafka_admin_AlterConsumerGroupOffsetsResult_get_topic(
 /// # Safety
 ///
 /// `result` must be a valid `alter_consumer_group_offsets` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AlterConsumerGroupOffsetsResult_get_partition(
     result: *const kafka_admin_AlterConsumerGroupOffsetsResult_t,
@@ -10985,6 +11290,7 @@ pub unsafe extern "C" fn kafka_admin_AlterConsumerGroupOffsetsResult_get_partiti
 /// # Safety
 ///
 /// `result` must be a valid `alter_consumer_group_offsets` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AlterConsumerGroupOffsetsResult_get_error(
     result: *const kafka_admin_AlterConsumerGroupOffsetsResult_t,
@@ -11000,6 +11306,7 @@ pub unsafe extern "C" fn kafka_admin_AlterConsumerGroupOffsetsResult_get_error(
 ///
 /// `result` must be null or a valid `alter_consumer_group_offsets` result
 /// handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AlterConsumerGroupOffsetsResult_destroy(
     result: *mut kafka_admin_AlterConsumerGroupOffsetsResult_t,
@@ -11052,6 +11359,7 @@ unsafe fn delete_consumer_group_offsets_result_ref(
 /// # Safety
 ///
 /// `result` must be a valid `delete_consumer_group_offsets` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DeleteConsumerGroupOffsetsResult_count(
     result: *const kafka_admin_DeleteConsumerGroupOffsetsResult_t,
@@ -11065,6 +11373,7 @@ pub unsafe extern "C" fn kafka_admin_DeleteConsumerGroupOffsetsResult_count(
 /// # Safety
 ///
 /// `result` must be a valid `delete_consumer_group_offsets` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DeleteConsumerGroupOffsetsResult_get_topic(
     result: *const kafka_admin_DeleteConsumerGroupOffsetsResult_t,
@@ -11078,6 +11387,7 @@ pub unsafe extern "C" fn kafka_admin_DeleteConsumerGroupOffsetsResult_get_topic(
 /// # Safety
 ///
 /// `result` must be a valid `delete_consumer_group_offsets` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DeleteConsumerGroupOffsetsResult_get_partition(
     result: *const kafka_admin_DeleteConsumerGroupOffsetsResult_t,
@@ -11093,6 +11403,7 @@ pub unsafe extern "C" fn kafka_admin_DeleteConsumerGroupOffsetsResult_get_partit
 /// # Safety
 ///
 /// `result` must be a valid `delete_consumer_group_offsets` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DeleteConsumerGroupOffsetsResult_get_error(
     result: *const kafka_admin_DeleteConsumerGroupOffsetsResult_t,
@@ -11108,6 +11419,7 @@ pub unsafe extern "C" fn kafka_admin_DeleteConsumerGroupOffsetsResult_get_error(
 ///
 /// `result` must be null or a valid `delete_consumer_group_offsets` result
 /// handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DeleteConsumerGroupOffsetsResult_destroy(
     result: *mut kafka_admin_DeleteConsumerGroupOffsetsResult_t,
@@ -11155,6 +11467,7 @@ unsafe fn delete_consumer_groups_result_ref(
 /// # Safety
 ///
 /// `result` must be a valid `delete_consumer_groups` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DeleteConsumerGroupsResult_count(
     result: *const kafka_admin_DeleteConsumerGroupsResult_t,
@@ -11168,6 +11481,7 @@ pub unsafe extern "C" fn kafka_admin_DeleteConsumerGroupsResult_count(
 /// # Safety
 ///
 /// `result` must be a valid `delete_consumer_groups` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DeleteConsumerGroupsResult_get_group_id(
     result: *const kafka_admin_DeleteConsumerGroupsResult_t,
@@ -11182,6 +11496,7 @@ pub unsafe extern "C" fn kafka_admin_DeleteConsumerGroupsResult_get_group_id(
 /// # Safety
 ///
 /// `result` must be a valid `delete_consumer_groups` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DeleteConsumerGroupsResult_get_error(
     result: *const kafka_admin_DeleteConsumerGroupsResult_t,
@@ -11195,6 +11510,7 @@ pub unsafe extern "C" fn kafka_admin_DeleteConsumerGroupsResult_get_error(
 /// # Safety
 ///
 /// `result` must be null or a valid `delete_consumer_groups` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DeleteConsumerGroupsResult_destroy(
     result: *mut kafka_admin_DeleteConsumerGroupsResult_t,
@@ -11254,6 +11570,7 @@ unsafe fn remove_members_result_ref(
 /// # Safety
 ///
 /// `result` must be a valid `remove_members_from_consumer_group` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_RemoveMembersFromConsumerGroupResult_count(
     result: *const kafka_admin_RemoveMembersFromConsumerGroupResult_t,
@@ -11267,6 +11584,7 @@ pub unsafe extern "C" fn kafka_admin_RemoveMembersFromConsumerGroupResult_count(
 /// # Safety
 ///
 /// `result` must be a valid `remove_members_from_consumer_group` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_RemoveMembersFromConsumerGroupResult_get_group_instance_id(
     result: *const kafka_admin_RemoveMembersFromConsumerGroupResult_t,
@@ -11281,6 +11599,7 @@ pub unsafe extern "C" fn kafka_admin_RemoveMembersFromConsumerGroupResult_get_gr
 /// # Safety
 ///
 /// `result` must be a valid `remove_members_from_consumer_group` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_RemoveMembersFromConsumerGroupResult_get_error(
     result: *const kafka_admin_RemoveMembersFromConsumerGroupResult_t,
@@ -11296,6 +11615,7 @@ pub unsafe extern "C" fn kafka_admin_RemoveMembersFromConsumerGroupResult_get_er
 ///
 /// `result` must be null or a valid `remove_members_from_consumer_group` result
 /// handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_RemoveMembersFromConsumerGroupResult_destroy(
     result: *mut kafka_admin_RemoveMembersFromConsumerGroupResult_t,
@@ -11351,6 +11671,7 @@ pub type kafka_admin_AdminClient_list_groups_callback_t =
 ///
 /// `admin` must be a valid handle; each name array must be null or have its
 /// stated number of valid C strings; `out_result` must be null or writable.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_list_groups(
     admin: *const kafka_admin_AdminClient_t,
@@ -11397,6 +11718,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_list_groups(
 ///
 /// `admin` must be a valid handle; each name array must be null or have its
 /// stated number of valid C strings.
+#[ffi_guard(on_panic = |err| unsafe { callback(std::ptr::null_mut(), box_error(err), user_data) })]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_list_groups_async(
     admin: *const kafka_admin_AdminClient_t,
@@ -11480,6 +11802,7 @@ pub type kafka_admin_AdminClient_list_consumer_groups_callback_t =
 ///
 /// `admin` must be a valid handle; each name array must be null or have its
 /// stated number of valid C strings; `out_result` must be null or writable.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_list_consumer_groups(
     admin: *const kafka_admin_AdminClient_t,
@@ -11516,6 +11839,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_list_consumer_groups(
 ///
 /// `admin` must be a valid handle; each name array must be null or have its
 /// stated number of valid C strings.
+#[ffi_guard(on_panic = |err| unsafe { callback(std::ptr::null_mut(), box_error(err), user_data) })]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_list_consumer_groups_async(
     admin: *const kafka_admin_AdminClient_t,
@@ -11590,6 +11914,7 @@ pub type kafka_admin_AdminClient_describe_consumer_groups_callback_t =
 /// `admin` must be a valid handle; `group_ids` must be null or have `count`
 /// entries, each NULL or a valid C string; `out_result` must be null or
 /// writable.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_describe_consumer_groups(
     admin: *const kafka_admin_AdminClient_t,
@@ -11625,6 +11950,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_consumer_groups(
 ///
 /// `admin` must be a valid handle; `group_ids` must be null or have `count`
 /// entries, each NULL or a valid C string.
+#[ffi_guard(on_panic = |err| unsafe { callback(std::ptr::null_mut(), box_error(err), user_data) })]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_describe_consumer_groups_async(
     admin: *const kafka_admin_AdminClient_t,
@@ -11694,6 +12020,7 @@ pub type kafka_admin_AdminClient_describe_classic_groups_callback_t =
 /// `admin` must be a valid handle; `group_ids` must be null or have `count`
 /// entries, each NULL or a valid C string; `out_result` must be null or
 /// writable.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_describe_classic_groups(
     admin: *const kafka_admin_AdminClient_t,
@@ -11729,6 +12056,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_classic_groups(
 ///
 /// `admin` must be a valid handle; `group_ids` must be null or have `count`
 /// entries, each NULL or a valid C string.
+#[ffi_guard(on_panic = |err| unsafe { callback(std::ptr::null_mut(), box_error(err), user_data) })]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_describe_classic_groups_async(
     admin: *const kafka_admin_AdminClient_t,
@@ -11814,6 +12142,7 @@ pub type kafka_admin_AdminClient_list_consumer_group_offsets_callback_t =
 /// entries each; for a group whose `all_partitions` flag is false, `topics[i]`
 /// and `partitions[i]` must have `partition_counts[i]` valid entries;
 /// `out_result` must be null or writable.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_list_consumer_group_offsets(
     admin: *const kafka_admin_AdminClient_t,
@@ -11858,6 +12187,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_list_consumer_group_offsets(
 /// `admin` must be a valid handle; the group arrays must be null or have
 /// `group_count` entries each, and each group's partition arrays must have that
 /// group's `partition_counts` entries.
+#[ffi_guard(on_panic = |err| unsafe { callback(std::ptr::null_mut(), box_error(err), user_data) })]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_list_consumer_group_offsets_async(
     admin: *const kafka_admin_AdminClient_t,
@@ -11943,6 +12273,7 @@ pub type kafka_admin_AdminClient_alter_consumer_group_offsets_callback_t =
 /// `admin` must be a valid handle; `group_id` must be a valid C string; every
 /// non-null array must have `count` valid entries; `out_result` must be null or
 /// writable.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_alter_consumer_group_offsets(
     admin: *const kafka_admin_AdminClient_t,
@@ -11991,6 +12322,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_alter_consumer_group_offsets(
 ///
 /// `admin` must be a valid handle; `group_id` must be a valid C string; every
 /// non-null array must have `count` valid entries.
+#[ffi_guard(on_panic = |err| unsafe { callback(std::ptr::null_mut(), box_error(err), user_data) })]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_alter_consumer_group_offsets_async(
     admin: *const kafka_admin_AdminClient_t,
@@ -12069,6 +12401,7 @@ pub type kafka_admin_AdminClient_delete_consumer_group_offsets_callback_t =
 /// `admin` must be a valid handle; `group_id` must be a valid C string;
 /// `topics` and `partitions` must be null or have `count` valid entries each;
 /// `out_result` must be null or writable.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_delete_consumer_group_offsets(
     admin: *const kafka_admin_AdminClient_t,
@@ -12112,6 +12445,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_delete_consumer_group_offsets(
 ///
 /// `admin` must be a valid handle; `group_id` must be a valid C string;
 /// `topics` and `partitions` must be null or have `count` valid entries each.
+#[ffi_guard(on_panic = |err| unsafe { callback(std::ptr::null_mut(), box_error(err), user_data) })]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_delete_consumer_group_offsets_async(
     admin: *const kafka_admin_AdminClient_t,
@@ -12182,6 +12516,7 @@ pub type kafka_admin_AdminClient_delete_consumer_groups_callback_t =
 /// `admin` must be a valid handle; `group_ids` must be null or have `count`
 /// entries, each NULL or a valid C string; `out_result` must be null or
 /// writable.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_delete_consumer_groups(
     admin: *const kafka_admin_AdminClient_t,
@@ -12216,6 +12551,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_delete_consumer_groups(
 ///
 /// `admin` must be a valid handle; `group_ids` must be null or have `count`
 /// entries, each NULL or a valid C string.
+#[ffi_guard(on_panic = |err| unsafe { callback(std::ptr::null_mut(), box_error(err), user_data) })]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_delete_consumer_groups_async(
     admin: *const kafka_admin_AdminClient_t,
@@ -12302,6 +12638,7 @@ pub type kafka_admin_AdminClient_remove_members_from_consumer_group_callback_t =
 /// `remove_all` is true, `group_instance_ids` must be null or have
 /// `member_count` entries, each NULL or a valid C string; `reason` must be null
 /// or a valid C string; `out_result` must be null or writable.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_remove_members_from_consumer_group(
     admin: *const kafka_admin_AdminClient_t,
@@ -12343,6 +12680,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_remove_members_from_consumer_gr
 /// `remove_all` is true, `group_instance_ids` must be null or have
 /// `member_count` entries, each NULL or a valid C string; `reason` must be null
 /// or a valid C string.
+#[ffi_guard(on_panic = |err| unsafe { callback(std::ptr::null_mut(), box_error(err), user_data) })]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_remove_members_from_consumer_group_async(
     admin: *const kafka_admin_AdminClient_t,
@@ -12484,6 +12822,7 @@ unsafe fn acl_binding_ref(binding: *const kafka_common_AclBinding_t) -> &'static
 /// # Safety
 ///
 /// `binding` must be a valid borrowed ACL-binding pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_AclBinding_resource_type(binding: *const kafka_common_AclBinding_t) -> i32 {
     unsafe { acl_binding_ref(binding) }.resource_type
@@ -12494,6 +12833,7 @@ pub unsafe extern "C" fn kafka_common_AclBinding_resource_type(binding: *const k
 /// # Safety
 ///
 /// `binding` must be a valid borrowed ACL-binding pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_AclBinding_resource_name(
     binding: *const kafka_common_AclBinding_t,
@@ -12510,6 +12850,7 @@ pub unsafe extern "C" fn kafka_common_AclBinding_resource_name(
 /// # Safety
 ///
 /// `binding` must be a valid borrowed ACL-binding pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_AclBinding_pattern_type(binding: *const kafka_common_AclBinding_t) -> i32 {
     unsafe { acl_binding_ref(binding) }.pattern_type
@@ -12521,6 +12862,7 @@ pub unsafe extern "C" fn kafka_common_AclBinding_pattern_type(binding: *const ka
 /// # Safety
 ///
 /// `binding` must be a valid borrowed ACL-binding pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_AclBinding_principal(binding: *const kafka_common_AclBinding_t) -> *const c_char {
     unsafe { acl_binding_ref(binding) }.principal_c.as_ptr()
@@ -12531,6 +12873,7 @@ pub unsafe extern "C" fn kafka_common_AclBinding_principal(binding: *const kafka
 /// # Safety
 ///
 /// `binding` must be a valid borrowed ACL-binding pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_AclBinding_host(binding: *const kafka_common_AclBinding_t) -> *const c_char {
     unsafe { acl_binding_ref(binding) }.host_c.as_ptr()
@@ -12546,6 +12889,7 @@ pub unsafe extern "C" fn kafka_common_AclBinding_host(binding: *const kafka_comm
 /// # Safety
 ///
 /// `binding` must be a valid borrowed ACL-binding pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_AclBinding_operation(binding: *const kafka_common_AclBinding_t) -> i32 {
     unsafe { acl_binding_ref(binding) }.operation
@@ -12559,6 +12903,7 @@ pub unsafe extern "C" fn kafka_common_AclBinding_operation(binding: *const kafka
 /// # Safety
 ///
 /// `binding` must be a valid borrowed ACL-binding pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_AclBinding_permission_type(binding: *const kafka_common_AclBinding_t) -> i32 {
     unsafe { acl_binding_ref(binding) }.permission_type
@@ -12647,6 +12992,7 @@ unsafe fn acl_binding_filter_ref(filter: *const kafka_common_AclBindingFilter_t)
 /// # Safety
 ///
 /// `filter` must be a valid borrowed ACL-filter pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_AclBindingFilter_resource_type(
     filter: *const kafka_common_AclBindingFilter_t,
@@ -12661,6 +13007,7 @@ pub unsafe extern "C" fn kafka_common_AclBindingFilter_resource_type(
 /// # Safety
 ///
 /// `filter` must be a valid borrowed ACL-filter pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_AclBindingFilter_resource_name(
     filter: *const kafka_common_AclBindingFilter_t,
@@ -12676,6 +13023,7 @@ pub unsafe extern "C" fn kafka_common_AclBindingFilter_resource_name(
 /// # Safety
 ///
 /// `filter` must be a valid borrowed ACL-filter pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_AclBindingFilter_pattern_type(
     filter: *const kafka_common_AclBindingFilter_t,
@@ -12689,6 +13037,7 @@ pub unsafe extern "C" fn kafka_common_AclBindingFilter_pattern_type(
 /// # Safety
 ///
 /// `filter` must be a valid borrowed ACL-filter pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_AclBindingFilter_principal(
     filter: *const kafka_common_AclBindingFilter_t,
@@ -12702,6 +13051,7 @@ pub unsafe extern "C" fn kafka_common_AclBindingFilter_principal(
 /// # Safety
 ///
 /// `filter` must be a valid borrowed ACL-filter pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_AclBindingFilter_host(
     filter: *const kafka_common_AclBindingFilter_t,
@@ -12716,6 +13066,7 @@ pub unsafe extern "C" fn kafka_common_AclBindingFilter_host(
 /// # Safety
 ///
 /// `filter` must be a valid borrowed ACL-filter pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_AclBindingFilter_operation(
     filter: *const kafka_common_AclBindingFilter_t,
@@ -12730,6 +13081,7 @@ pub unsafe extern "C" fn kafka_common_AclBindingFilter_operation(
 /// # Safety
 ///
 /// `filter` must be a valid borrowed ACL-filter pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_AclBindingFilter_permission_type(
     filter: *const kafka_common_AclBindingFilter_t,
@@ -12814,6 +13166,7 @@ unsafe fn client_quota_entity_ref(entity: *const kafka_common_ClientQuotaEntity_
 /// # Safety
 ///
 /// `entity` must be a valid borrowed client-quota-entity pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_ClientQuotaEntity_entry_count(
     entity: *const kafka_common_ClientQuotaEntity_t,
@@ -12827,6 +13180,7 @@ pub unsafe extern "C" fn kafka_common_ClientQuotaEntity_entry_count(
 /// # Safety
 ///
 /// `entity` must be a valid borrowed client-quota-entity pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_ClientQuotaEntity_get_entry_type(
     entity: *const kafka_common_ClientQuotaEntity_t,
@@ -12846,6 +13200,7 @@ pub unsafe extern "C" fn kafka_common_ClientQuotaEntity_get_entry_type(
 /// # Safety
 ///
 /// `entity` must be a valid borrowed client-quota-entity pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_ClientQuotaEntity_get_entry_name(
     entity: *const kafka_common_ClientQuotaEntity_t,
@@ -13451,6 +13806,7 @@ unsafe fn create_acls_result_ref(result: *const kafka_admin_CreateAclsResult_t) 
 /// # Safety
 ///
 /// `result` must be a valid `create_acls` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_CreateAclsResult_count(result: *const kafka_admin_CreateAclsResult_t) -> i32 {
     unsafe { create_acls_result_ref(result) }.bindings.len() as i32
@@ -13464,6 +13820,7 @@ pub unsafe extern "C" fn kafka_admin_CreateAclsResult_count(result: *const kafka
 /// # Safety
 ///
 /// `result` must be a valid `create_acls` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_CreateAclsResult_get_binding(
     result: *const kafka_admin_CreateAclsResult_t,
@@ -13484,6 +13841,7 @@ pub unsafe extern "C" fn kafka_admin_CreateAclsResult_get_binding(
 /// # Safety
 ///
 /// `result` must be a valid `create_acls` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_CreateAclsResult_get_error(
     result: *const kafka_admin_CreateAclsResult_t,
@@ -13497,6 +13855,7 @@ pub unsafe extern "C" fn kafka_admin_CreateAclsResult_get_error(
 /// # Safety
 ///
 /// `result` must be null or a valid `create_acls` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_CreateAclsResult_destroy(result: *mut kafka_admin_CreateAclsResult_t) {
     if !result.is_null() {
@@ -13542,6 +13901,7 @@ unsafe fn describe_acls_result_ref(
 /// # Safety
 ///
 /// `result` must be a valid `describe_acls` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeAclsResult_count(result: *const kafka_admin_DescribeAclsResult_t) -> i32 {
     unsafe { describe_acls_result_ref(result) }.bindings.len() as i32
@@ -13554,6 +13914,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeAclsResult_count(result: *const kaf
 /// # Safety
 ///
 /// `result` must be a valid `describe_acls` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeAclsResult_get_binding(
     result: *const kafka_admin_DescribeAclsResult_t,
@@ -13573,6 +13934,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeAclsResult_get_binding(
 /// # Safety
 ///
 /// `result` must be null or a valid `describe_acls` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeAclsResult_destroy(result: *mut kafka_admin_DescribeAclsResult_t) {
     if !result.is_null() {
@@ -13655,6 +14017,7 @@ unsafe fn delete_acls_result_ref(result: *const kafka_admin_DeleteAclsResult_t) 
 /// # Safety
 ///
 /// `result` must be a valid `delete_acls` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DeleteAclsResult_count(result: *const kafka_admin_DeleteAclsResult_t) -> i32 {
     unsafe { delete_acls_result_ref(result) }.filters.len() as i32
@@ -13666,6 +14029,7 @@ pub unsafe extern "C" fn kafka_admin_DeleteAclsResult_count(result: *const kafka
 /// # Safety
 ///
 /// `result` must be a valid `delete_acls` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DeleteAclsResult_get_filter(
     result: *const kafka_admin_DeleteAclsResult_t,
@@ -13692,6 +14056,7 @@ pub unsafe extern "C" fn kafka_admin_DeleteAclsResult_get_filter(
 /// # Safety
 ///
 /// `result` must be a valid `delete_acls` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DeleteAclsResult_get_error(
     result: *const kafka_admin_DeleteAclsResult_t,
@@ -13707,6 +14072,7 @@ pub unsafe extern "C" fn kafka_admin_DeleteAclsResult_get_error(
 /// # Safety
 ///
 /// `result` must be a valid `delete_acls` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DeleteAclsResult_get_result_count(
     result: *const kafka_admin_DeleteAclsResult_t,
@@ -13732,6 +14098,7 @@ pub unsafe extern "C" fn kafka_admin_DeleteAclsResult_get_result_count(
 /// # Safety
 ///
 /// `result` must be a valid `delete_acls` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DeleteAclsResult_get_binding(
     result: *const kafka_admin_DeleteAclsResult_t,
@@ -13759,6 +14126,7 @@ pub unsafe extern "C" fn kafka_admin_DeleteAclsResult_get_binding(
 /// # Safety
 ///
 /// `result` must be a valid `delete_acls` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DeleteAclsResult_get_result_error(
     result: *const kafka_admin_DeleteAclsResult_t,
@@ -13796,6 +14164,7 @@ unsafe fn delete_acls_filter_result_at(
 /// # Safety
 ///
 /// `result` must be null or a valid `delete_acls` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DeleteAclsResult_destroy(result: *mut kafka_admin_DeleteAclsResult_t) {
     if !result.is_null() {
@@ -13863,6 +14232,7 @@ unsafe fn describe_client_quotas_result_ref(
 /// # Safety
 ///
 /// `result` must be a valid `describe_client_quotas` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeClientQuotasResult_count(
     result: *const kafka_admin_DescribeClientQuotasResult_t,
@@ -13876,6 +14246,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeClientQuotasResult_count(
 /// # Safety
 ///
 /// `result` must be a valid `describe_client_quotas` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeClientQuotasResult_get_entity(
     result: *const kafka_admin_DescribeClientQuotasResult_t,
@@ -13899,6 +14270,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeClientQuotasResult_get_entity(
 /// # Safety
 ///
 /// `result` must be a valid `describe_client_quotas` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeClientQuotasResult_get_quota_count(
     result: *const kafka_admin_DescribeClientQuotasResult_t,
@@ -13926,6 +14298,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeClientQuotasResult_get_quota_count(
 /// # Safety
 ///
 /// `result` must be a valid `describe_client_quotas` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeClientQuotasResult_get_quota_key(
     result: *const kafka_admin_DescribeClientQuotasResult_t,
@@ -13957,6 +14330,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeClientQuotasResult_get_quota_key(
 ///
 /// `result` must be a valid `describe_client_quotas` result handle; `out` must
 /// be null or writable.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeClientQuotasResult_get_quota_value(
     result: *const kafka_admin_DescribeClientQuotasResult_t,
@@ -13980,6 +14354,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeClientQuotasResult_get_quota_value(
 /// # Safety
 ///
 /// `result` must be null or a valid `describe_client_quotas` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeClientQuotasResult_destroy(
     result: *mut kafka_admin_DescribeClientQuotasResult_t,
@@ -14034,6 +14409,7 @@ unsafe fn alter_client_quotas_result_ref(
 /// # Safety
 ///
 /// `result` must be a valid `alter_client_quotas` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AlterClientQuotasResult_count(
     result: *const kafka_admin_AlterClientQuotasResult_t,
@@ -14047,6 +14423,7 @@ pub unsafe extern "C" fn kafka_admin_AlterClientQuotasResult_count(
 /// # Safety
 ///
 /// `result` must be a valid `alter_client_quotas` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AlterClientQuotasResult_get_entity(
     result: *const kafka_admin_AlterClientQuotasResult_t,
@@ -14068,6 +14445,7 @@ pub unsafe extern "C" fn kafka_admin_AlterClientQuotasResult_get_entity(
 /// # Safety
 ///
 /// `result` must be a valid `alter_client_quotas` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AlterClientQuotasResult_get_error(
     result: *const kafka_admin_AlterClientQuotasResult_t,
@@ -14081,6 +14459,7 @@ pub unsafe extern "C" fn kafka_admin_AlterClientQuotasResult_get_error(
 /// # Safety
 ///
 /// `result` must be null or a valid `alter_client_quotas` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AlterClientQuotasResult_destroy(
     result: *mut kafka_admin_AlterClientQuotasResult_t,
@@ -14147,6 +14526,7 @@ pub type kafka_admin_AdminClient_create_acls_callback_t =
 /// `admin` must be a valid handle; every non-null array must have `count`
 /// entries, with string entries NULL or valid C strings; `out_result` must be
 /// null or writable.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_create_acls(
@@ -14201,6 +14581,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_create_acls(
 ///
 /// `admin` must be a valid handle; every non-null array must have `count`
 /// entries, with string entries NULL or valid C strings.
+#[ffi_guard(on_panic = |err| unsafe { callback(std::ptr::null_mut(), box_error(err), user_data) })]
 #[unsafe(no_mangle)]
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_create_acls_async(
@@ -14296,6 +14677,7 @@ pub type kafka_admin_AdminClient_describe_acls_callback_t =
 ///
 /// `admin` must be a valid handle; the three string parameters must be NULL or
 /// valid C strings; `out_result` must be null or writable.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_describe_acls(
@@ -14346,6 +14728,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_acls(
 ///
 /// `admin` must be a valid handle; the three string parameters must be NULL or
 /// valid C strings.
+#[ffi_guard(on_panic = |err| unsafe { callback(std::ptr::null_mut(), box_error(err), user_data) })]
 #[unsafe(no_mangle)]
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_describe_acls_async(
@@ -14428,6 +14811,7 @@ pub type kafka_admin_AdminClient_delete_acls_callback_t =
 /// `admin` must be a valid handle; every non-null array must have `count`
 /// entries, with string entries NULL or valid C strings; `out_result` must be
 /// null or writable.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_delete_acls(
@@ -14480,6 +14864,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_delete_acls(
 ///
 /// `admin` must be a valid handle; every non-null array must have `count`
 /// entries, with string entries NULL or valid C strings.
+#[ffi_guard(on_panic = |err| unsafe { callback(std::ptr::null_mut(), box_error(err), user_data) })]
 #[unsafe(no_mangle)]
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_delete_acls_async(
@@ -14577,6 +14962,7 @@ pub type kafka_admin_AdminClient_describe_client_quotas_callback_t =
 /// `admin` must be a valid handle; every non-null array must have `count`
 /// entries, with string entries NULL or valid C strings; `out_result` must be
 /// null or writable.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_describe_client_quotas(
@@ -14617,6 +15003,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_client_quotas(
 ///
 /// `admin` must be a valid handle; every non-null array must have `count`
 /// entries, with string entries NULL or valid C strings.
+#[ffi_guard(on_panic = |err| unsafe { callback(std::ptr::null_mut(), box_error(err), user_data) })]
 #[unsafe(no_mangle)]
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_describe_client_quotas_async(
@@ -14719,6 +15106,7 @@ pub type kafka_admin_AdminClient_alter_client_quotas_callback_t =
 /// entries, and each non-null inner array the matching per-row count of
 /// entries; string entries must be NULL or valid C strings; `out_result` must
 /// be null or writable.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_alter_client_quotas(
@@ -14774,6 +15162,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_alter_client_quotas(
 /// `admin` must be a valid handle; every non-null outer array must have `count`
 /// entries, and each non-null inner array the matching per-row count of
 /// entries; string entries must be NULL or valid C strings.
+#[ffi_guard(on_panic = |err| unsafe { callback(std::ptr::null_mut(), box_error(err), user_data) })]
 #[unsafe(no_mangle)]
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_alter_client_quotas_async(
@@ -14867,6 +15256,7 @@ unsafe fn mock_ref(admin: *const kafka_admin_AdminClient_t) -> Result<&'static M
 /// # Safety
 ///
 /// `admin` must be null or a valid handle from an admin-client constructor.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_MockAdminClient_timeout_next_request(
     admin: *const kafka_admin_AdminClient_t,
@@ -14916,6 +15306,7 @@ pub unsafe extern "C" fn kafka_admin_MockAdminClient_timeout_next_request(
 /// `admin` must be null or a valid handle from an admin-client constructor;
 /// `features` must be null or have `count` entries, each NULL or a valid C
 /// string; each level array must be null or have `count` entries.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_MockAdminClient_set_feature_levels(
     admin: *const kafka_admin_AdminClient_t,
@@ -14995,6 +15386,7 @@ unsafe fn read_feature_levels(
 ///
 /// `admin` must be null or a valid handle from an admin-client constructor;
 /// `topics`, `partitions` and `offsets` must have `count` valid entries each.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_MockAdminClient_update_beginning_offsets(
     admin: *const kafka_admin_AdminClient_t,
@@ -15029,6 +15421,7 @@ pub unsafe extern "C" fn kafka_admin_MockAdminClient_update_beginning_offsets(
 ///
 /// `admin` must be null or a valid handle from an admin-client constructor;
 /// `topics`, `partitions` and `offsets` must have `count` valid entries each.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_MockAdminClient_update_end_offsets(
     admin: *const kafka_admin_AdminClient_t,
@@ -15069,6 +15462,7 @@ pub unsafe extern "C" fn kafka_admin_MockAdminClient_update_end_offsets(
 ///
 /// `admin` must be null or a valid handle from an admin-client constructor;
 /// `topics`, `partitions` and `offsets` must have `count` valid entries each.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_MockAdminClient_update_consumer_group_offsets(
     admin: *const kafka_admin_AdminClient_t,
@@ -15204,6 +15598,7 @@ unsafe fn kafka_principal_ref(principal: *const kafka_common_KafkaPrincipal_t) -
 /// # Safety
 ///
 /// `principal` must be a valid borrowed principal pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_KafkaPrincipal_principal_type(
     principal: *const kafka_common_KafkaPrincipal_t,
@@ -15216,6 +15611,7 @@ pub unsafe extern "C" fn kafka_common_KafkaPrincipal_principal_type(
 /// # Safety
 ///
 /// `principal` must be a valid borrowed principal pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_KafkaPrincipal_name(
     principal: *const kafka_common_KafkaPrincipal_t,
@@ -15229,6 +15625,7 @@ pub unsafe extern "C" fn kafka_common_KafkaPrincipal_name(
 /// # Safety
 ///
 /// `principal` must be a valid borrowed principal pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_KafkaPrincipal_token_authenticated(
     principal: *const kafka_common_KafkaPrincipal_t,
@@ -15290,6 +15687,7 @@ unsafe fn token_information_ref(info: *const kafka_common_TokenInformation_t) ->
 /// # Safety
 ///
 /// `info` must be a valid borrowed token-information pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_TokenInformation_token_id(
     info: *const kafka_common_TokenInformation_t,
@@ -15303,6 +15701,7 @@ pub unsafe extern "C" fn kafka_common_TokenInformation_token_id(
 /// # Safety
 ///
 /// `info` must be a valid borrowed token-information pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_TokenInformation_owner(
     info: *const kafka_common_TokenInformation_t,
@@ -15317,6 +15716,7 @@ pub unsafe extern "C" fn kafka_common_TokenInformation_owner(
 /// # Safety
 ///
 /// `info` must be a valid borrowed token-information pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_TokenInformation_token_requester(
     info: *const kafka_common_TokenInformation_t,
@@ -15329,6 +15729,7 @@ pub unsafe extern "C" fn kafka_common_TokenInformation_token_requester(
 /// # Safety
 ///
 /// `info` must be a valid borrowed token-information pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_TokenInformation_renewer_count(
     info: *const kafka_common_TokenInformation_t,
@@ -15342,6 +15743,7 @@ pub unsafe extern "C" fn kafka_common_TokenInformation_renewer_count(
 /// # Safety
 ///
 /// `info` must be a valid borrowed token-information pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_TokenInformation_get_renewer(
     info: *const kafka_common_TokenInformation_t,
@@ -15361,6 +15763,7 @@ pub unsafe extern "C" fn kafka_common_TokenInformation_get_renewer(
 /// # Safety
 ///
 /// `info` must be a valid borrowed token-information pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_TokenInformation_issue_timestamp(
     info: *const kafka_common_TokenInformation_t,
@@ -15373,6 +15776,7 @@ pub unsafe extern "C" fn kafka_common_TokenInformation_issue_timestamp(
 /// # Safety
 ///
 /// `info` must be a valid borrowed token-information pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_TokenInformation_expiry_timestamp(
     info: *const kafka_common_TokenInformation_t,
@@ -15386,6 +15790,7 @@ pub unsafe extern "C" fn kafka_common_TokenInformation_expiry_timestamp(
 /// # Safety
 ///
 /// `info` must be a valid borrowed token-information pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_TokenInformation_max_timestamp(
     info: *const kafka_common_TokenInformation_t,
@@ -15446,6 +15851,7 @@ unsafe fn delegation_token_ref(token: *const kafka_common_DelegationToken_t) -> 
 /// # Safety
 ///
 /// `token` must be a valid borrowed delegation-token pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_DelegationToken_token_info(
     token: *const kafka_common_DelegationToken_t,
@@ -15465,6 +15871,7 @@ pub unsafe extern "C" fn kafka_common_DelegationToken_token_info(
 ///
 /// `token` must be a valid borrowed delegation-token pointer; `out_len` must be
 /// null or writable.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_DelegationToken_hmac(
     token: *const kafka_common_DelegationToken_t,
@@ -15482,6 +15889,7 @@ pub unsafe extern "C" fn kafka_common_DelegationToken_hmac(
 /// # Safety
 ///
 /// `token` must be a valid borrowed delegation-token pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_DelegationToken_hmac_as_base64_string(
     token: *const kafka_common_DelegationToken_t,
@@ -15903,6 +16311,7 @@ pub type kafka_admin_AdminClient_describe_user_scram_credentials_callback_t =
 ///
 /// `admin` must be a valid handle; `users` must be null or have `count` entries,
 /// each NULL or a valid C string; `out_result` must be null or writable.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_describe_user_scram_credentials(
     admin: *const kafka_admin_AdminClient_t,
@@ -15938,6 +16347,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_user_scram_credentials
 ///
 /// `admin` must be a valid handle; `users` must be null or have `count` entries,
 /// each NULL or a valid C string.
+#[ffi_guard(on_panic = |err| unsafe { callback(std::ptr::null_mut(), box_error(err), user_data) })]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_describe_user_scram_credentials_async(
     admin: *const kafka_admin_AdminClient_t,
@@ -16047,6 +16457,7 @@ pub type kafka_admin_AdminClient_alter_user_scram_credentials_callback_t =
 /// entries, with string entries NULL or valid C strings and each non-null byte
 /// pointer readable for its matching length; `out_result` must be null or
 /// writable.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_alter_user_scram_credentials(
@@ -16109,6 +16520,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_alter_user_scram_credentials(
 /// `admin` must be a valid handle; every non-null array must have `count`
 /// entries, with string entries NULL or valid C strings and each non-null byte
 /// pointer readable for its matching length.
+#[ffi_guard(on_panic = |err| unsafe { callback(std::ptr::null_mut(), box_error(err), user_data) })]
 #[unsafe(no_mangle)]
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_alter_user_scram_credentials_async(
@@ -16244,6 +16656,7 @@ pub type kafka_admin_AdminClient_create_delegation_token_callback_t =
 /// `admin` must be a valid handle; the renewer arrays must be null or have
 /// `renewer_count` entries, each NULL or a valid C string; the owner pointers
 /// must be null or valid C strings; `out_result` must be null or writable.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_create_delegation_token(
@@ -16290,6 +16703,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_create_delegation_token(
 /// `admin` must be a valid handle; the renewer arrays must be null or have
 /// `renewer_count` entries, each NULL or a valid C string; the owner pointers
 /// must be null or valid C strings.
+#[ffi_guard(on_panic = |err| unsafe { callback(std::ptr::null_mut(), box_error(err), user_data) })]
 #[unsafe(no_mangle)]
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_create_delegation_token_async(
@@ -16371,6 +16785,7 @@ pub type kafka_admin_AdminClient_renew_delegation_token_callback_t =
 ///
 /// `admin` must be a valid handle; `hmac` must be null or readable for
 /// `hmac_len` bytes; `out_result` must be null or writable.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_renew_delegation_token(
     admin: *const kafka_admin_AdminClient_t,
@@ -16406,6 +16821,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_renew_delegation_token(
 ///
 /// `admin` must be a valid handle; `hmac` must be null or readable for
 /// `hmac_len` bytes.
+#[ffi_guard(on_panic = |err| unsafe { callback(std::ptr::null_mut(), box_error(err), user_data) })]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_renew_delegation_token_async(
     admin: *const kafka_admin_AdminClient_t,
@@ -16481,6 +16897,7 @@ pub type kafka_admin_AdminClient_expire_delegation_token_callback_t =
 ///
 /// `admin` must be a valid handle; `hmac` must be null or readable for
 /// `hmac_len` bytes; `out_result` must be null or writable.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_expire_delegation_token(
     admin: *const kafka_admin_AdminClient_t,
@@ -16516,6 +16933,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_expire_delegation_token(
 ///
 /// `admin` must be a valid handle; `hmac` must be null or readable for
 /// `hmac_len` bytes.
+#[ffi_guard(on_panic = |err| unsafe { callback(std::ptr::null_mut(), box_error(err), user_data) })]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_expire_delegation_token_async(
     admin: *const kafka_admin_AdminClient_t,
@@ -16601,6 +17019,7 @@ pub type kafka_admin_AdminClient_describe_delegation_token_callback_t =
 /// `admin` must be a valid handle; the owner arrays must be null or have
 /// `owner_count` entries, each NULL or a valid C string; `out_result` must be
 /// null or writable.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_describe_delegation_token(
@@ -16643,6 +17062,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_delegation_token(
 ///
 /// `admin` must be a valid handle; the owner arrays must be null or have
 /// `owner_count` entries, each NULL or a valid C string.
+#[ffi_guard(on_panic = |err| unsafe { callback(std::ptr::null_mut(), box_error(err), user_data) })]
 #[unsafe(no_mangle)]
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_describe_delegation_token_async(
@@ -16722,6 +17142,7 @@ pub type kafka_admin_AdminClient_describe_features_callback_t =
 /// # Safety
 ///
 /// `admin` must be a valid handle; `out_result` must be null or writable.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_describe_features(
     admin: *const kafka_admin_AdminClient_t,
@@ -16754,6 +17175,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_features(
 /// # Safety
 ///
 /// `admin` must be a valid handle.
+#[ffi_guard(on_panic = |err| unsafe { callback(std::ptr::null_mut(), box_error(err), user_data) })]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_describe_features_async(
     admin: *const kafka_admin_AdminClient_t,
@@ -16842,6 +17264,7 @@ pub type kafka_admin_AdminClient_update_features_callback_t =
 /// `admin` must be a valid handle; every non-null array must have `count`
 /// entries, with name entries NULL or valid C strings; `out_result` must be
 /// null or writable.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_update_features(
@@ -16883,6 +17306,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_update_features(
 ///
 /// `admin` must be a valid handle; every non-null array must have `count`
 /// entries, with name entries NULL or valid C strings.
+#[ffi_guard(on_panic = |err| unsafe { callback(std::ptr::null_mut(), box_error(err), user_data) })]
 #[unsafe(no_mangle)]
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_update_features_async(
@@ -17012,6 +17436,7 @@ fn scram_user_row_at(inner: &DescribeUserScramCredentialsResultInner, index: i32
 /// # Safety
 ///
 /// `result` must be a valid `describe_user_scram_credentials` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeUserScramCredentialsResult_count(
     result: *const kafka_admin_DescribeUserScramCredentialsResult_t,
@@ -17025,6 +17450,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeUserScramCredentialsResult_count(
 /// # Safety
 ///
 /// `result` must be a valid `describe_user_scram_credentials` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeUserScramCredentialsResult_get_user(
     result: *const kafka_admin_DescribeUserScramCredentialsResult_t,
@@ -17046,6 +17472,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeUserScramCredentialsResult_get_user
 /// # Safety
 ///
 /// `result` must be a valid `describe_user_scram_credentials` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeUserScramCredentialsResult_get_error(
     result: *const kafka_admin_DescribeUserScramCredentialsResult_t,
@@ -17063,6 +17490,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeUserScramCredentialsResult_get_erro
 /// # Safety
 ///
 /// `result` must be a valid `describe_user_scram_credentials` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeUserScramCredentialsResult_get_credential_count(
     result: *const kafka_admin_DescribeUserScramCredentialsResult_t,
@@ -17081,6 +17509,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeUserScramCredentialsResult_get_cred
 /// # Safety
 ///
 /// `result` must be a valid `describe_user_scram_credentials` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeUserScramCredentialsResult_get_credential_mechanism(
     result: *const kafka_admin_DescribeUserScramCredentialsResult_t,
@@ -17100,6 +17529,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeUserScramCredentialsResult_get_cred
 /// # Safety
 ///
 /// `result` must be a valid `describe_user_scram_credentials` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeUserScramCredentialsResult_get_credential_iterations(
     result: *const kafka_admin_DescribeUserScramCredentialsResult_t,
@@ -17120,6 +17550,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeUserScramCredentialsResult_get_cred
 ///
 /// `result` must be null or a valid `describe_user_scram_credentials` result
 /// handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeUserScramCredentialsResult_destroy(
     result: *mut kafka_admin_DescribeUserScramCredentialsResult_t,
@@ -17173,6 +17604,7 @@ unsafe fn alter_user_scram_credentials_result_ref(
 /// # Safety
 ///
 /// `result` must be a valid `alter_user_scram_credentials` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AlterUserScramCredentialsResult_count(
     result: *const kafka_admin_AlterUserScramCredentialsResult_t,
@@ -17186,6 +17618,7 @@ pub unsafe extern "C" fn kafka_admin_AlterUserScramCredentialsResult_count(
 /// # Safety
 ///
 /// `result` must be a valid `alter_user_scram_credentials` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AlterUserScramCredentialsResult_get_user(
     result: *const kafka_admin_AlterUserScramCredentialsResult_t,
@@ -17200,6 +17633,7 @@ pub unsafe extern "C" fn kafka_admin_AlterUserScramCredentialsResult_get_user(
 /// # Safety
 ///
 /// `result` must be a valid `alter_user_scram_credentials` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AlterUserScramCredentialsResult_get_error(
     result: *const kafka_admin_AlterUserScramCredentialsResult_t,
@@ -17215,6 +17649,7 @@ pub unsafe extern "C" fn kafka_admin_AlterUserScramCredentialsResult_get_error(
 ///
 /// `result` must be null or a valid `alter_user_scram_credentials` result
 /// handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AlterUserScramCredentialsResult_destroy(
     result: *mut kafka_admin_AlterUserScramCredentialsResult_t,
@@ -17262,6 +17697,7 @@ unsafe fn create_delegation_token_result_ref(
 /// # Safety
 ///
 /// `result` must be a valid `create_delegation_token` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_CreateDelegationTokenResult_get_token(
     result: *const kafka_admin_CreateDelegationTokenResult_t,
@@ -17274,6 +17710,7 @@ pub unsafe extern "C" fn kafka_admin_CreateDelegationTokenResult_get_token(
 /// # Safety
 ///
 /// `result` must be null or a valid `create_delegation_token` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_CreateDelegationTokenResult_destroy(
     result: *mut kafka_admin_CreateDelegationTokenResult_t,
@@ -17306,6 +17743,7 @@ fn box_renew_delegation_token_result(expiry_timestamp: i64) -> *mut kafka_admin_
 /// # Safety
 ///
 /// `result` must be a valid `renew_delegation_token` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_RenewDelegationTokenResult_expiry_timestamp(
     result: *const kafka_admin_RenewDelegationTokenResult_t,
@@ -17318,6 +17756,7 @@ pub unsafe extern "C" fn kafka_admin_RenewDelegationTokenResult_expiry_timestamp
 /// # Safety
 ///
 /// `result` must be null or a valid `renew_delegation_token` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_RenewDelegationTokenResult_destroy(
     result: *mut kafka_admin_RenewDelegationTokenResult_t,
@@ -17351,6 +17790,7 @@ fn box_expire_delegation_token_result(expiry_timestamp: i64) -> *mut kafka_admin
 /// # Safety
 ///
 /// `result` must be a valid `expire_delegation_token` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ExpireDelegationTokenResult_expiry_timestamp(
     result: *const kafka_admin_ExpireDelegationTokenResult_t,
@@ -17363,6 +17803,7 @@ pub unsafe extern "C" fn kafka_admin_ExpireDelegationTokenResult_expiry_timestam
 /// # Safety
 ///
 /// `result` must be null or a valid `expire_delegation_token` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ExpireDelegationTokenResult_destroy(
     result: *mut kafka_admin_ExpireDelegationTokenResult_t,
@@ -17411,6 +17852,7 @@ unsafe fn describe_delegation_token_result_ref(
 /// # Safety
 ///
 /// `result` must be a valid `describe_delegation_token` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeDelegationTokenResult_count(
     result: *const kafka_admin_DescribeDelegationTokenResult_t,
@@ -17424,6 +17866,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeDelegationTokenResult_count(
 /// # Safety
 ///
 /// `result` must be a valid `describe_delegation_token` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeDelegationTokenResult_get_token(
     result: *const kafka_admin_DescribeDelegationTokenResult_t,
@@ -17447,6 +17890,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeDelegationTokenResult_get_token(
 /// # Safety
 ///
 /// `result` must be null or a valid `describe_delegation_token` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeDelegationTokenResult_destroy(
     result: *mut kafka_admin_DescribeDelegationTokenResult_t,
@@ -17513,6 +17957,7 @@ unsafe fn describe_features_result_ref(
 /// # Safety
 ///
 /// `result` must be a valid `describe_features` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeFeaturesResult_finalized_count(
     result: *const kafka_admin_DescribeFeaturesResult_t,
@@ -17526,6 +17971,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeFeaturesResult_finalized_count(
 /// # Safety
 ///
 /// `result` must be a valid `describe_features` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeFeaturesResult_get_finalized_feature(
     result: *const kafka_admin_DescribeFeaturesResult_t,
@@ -17540,6 +17986,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeFeaturesResult_get_finalized_featur
 /// # Safety
 ///
 /// `result` must be a valid `describe_features` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeFeaturesResult_get_finalized_min_version_level(
     result: *const kafka_admin_DescribeFeaturesResult_t,
@@ -17557,6 +18004,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeFeaturesResult_get_finalized_min_ve
 /// # Safety
 ///
 /// `result` must be a valid `describe_features` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeFeaturesResult_get_finalized_max_version_level(
     result: *const kafka_admin_DescribeFeaturesResult_t,
@@ -17579,6 +18027,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeFeaturesResult_get_finalized_max_ve
 ///
 /// `result` must be a valid `describe_features` result handle; `out_epoch` must
 /// be null or writable.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeFeaturesResult_finalized_features_epoch(
     result: *const kafka_admin_DescribeFeaturesResult_t,
@@ -17594,6 +18043,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeFeaturesResult_finalized_features_e
 /// # Safety
 ///
 /// `result` must be a valid `describe_features` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeFeaturesResult_supported_count(
     result: *const kafka_admin_DescribeFeaturesResult_t,
@@ -17607,6 +18057,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeFeaturesResult_supported_count(
 /// # Safety
 ///
 /// `result` must be a valid `describe_features` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeFeaturesResult_get_supported_feature(
     result: *const kafka_admin_DescribeFeaturesResult_t,
@@ -17621,6 +18072,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeFeaturesResult_get_supported_featur
 /// # Safety
 ///
 /// `result` must be a valid `describe_features` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeFeaturesResult_get_supported_min_version(
     result: *const kafka_admin_DescribeFeaturesResult_t,
@@ -17635,6 +18087,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeFeaturesResult_get_supported_min_ve
 /// # Safety
 ///
 /// `result` must be a valid `describe_features` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeFeaturesResult_get_supported_max_version(
     result: *const kafka_admin_DescribeFeaturesResult_t,
@@ -17648,6 +18101,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeFeaturesResult_get_supported_max_ve
 /// # Safety
 ///
 /// `result` must be null or a valid `describe_features` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeFeaturesResult_destroy(result: *mut kafka_admin_DescribeFeaturesResult_t) {
     if !result.is_null() {
@@ -17693,6 +18147,7 @@ unsafe fn update_features_result_ref(
 /// # Safety
 ///
 /// `result` must be a valid `update_features` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_UpdateFeaturesResult_count(
     result: *const kafka_admin_UpdateFeaturesResult_t,
@@ -17706,6 +18161,7 @@ pub unsafe extern "C" fn kafka_admin_UpdateFeaturesResult_count(
 /// # Safety
 ///
 /// `result` must be a valid `update_features` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_UpdateFeaturesResult_get_feature(
     result: *const kafka_admin_UpdateFeaturesResult_t,
@@ -17720,6 +18176,7 @@ pub unsafe extern "C" fn kafka_admin_UpdateFeaturesResult_get_feature(
 /// # Safety
 ///
 /// `result` must be a valid `update_features` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_UpdateFeaturesResult_get_error(
     result: *const kafka_admin_UpdateFeaturesResult_t,
@@ -17733,6 +18190,7 @@ pub unsafe extern "C" fn kafka_admin_UpdateFeaturesResult_get_error(
 /// # Safety
 ///
 /// `result` must be null or a valid `update_features` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_UpdateFeaturesResult_destroy(result: *mut kafka_admin_UpdateFeaturesResult_t) {
     if !result.is_null() {
@@ -18222,6 +18680,7 @@ fn producer_rows_at(inner: &DescribeProducersResultInner, index: i32) -> Option<
 /// # Safety
 ///
 /// `result` must be a valid `describe_producers` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeProducersResult_count(
     result: *const kafka_admin_DescribeProducersResult_t,
@@ -18235,6 +18694,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeProducersResult_count(
 /// # Safety
 ///
 /// `result` must be a valid `describe_producers` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeProducersResult_get_topic(
     result: *const kafka_admin_DescribeProducersResult_t,
@@ -18248,6 +18708,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeProducersResult_get_topic(
 /// # Safety
 ///
 /// `result` must be a valid `describe_producers` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeProducersResult_get_partition(
     result: *const kafka_admin_DescribeProducersResult_t,
@@ -18262,6 +18723,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeProducersResult_get_partition(
 /// # Safety
 ///
 /// `result` must be a valid `describe_producers` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeProducersResult_get_error(
     result: *const kafka_admin_DescribeProducersResult_t,
@@ -18276,6 +18738,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeProducersResult_get_error(
 /// # Safety
 ///
 /// `result` must be a valid `describe_producers` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeProducersResult_get_producer_count(
     result: *const kafka_admin_DescribeProducersResult_t,
@@ -18294,6 +18757,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeProducersResult_get_producer_count(
 /// # Safety
 ///
 /// `result` must be a valid `describe_producers` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeProducersResult_get_producer_id(
     result: *const kafka_admin_DescribeProducersResult_t,
@@ -18313,6 +18777,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeProducersResult_get_producer_id(
 /// # Safety
 ///
 /// `result` must be a valid `describe_producers` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeProducersResult_get_producer_epoch(
     result: *const kafka_admin_DescribeProducersResult_t,
@@ -18332,6 +18797,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeProducersResult_get_producer_epoch(
 /// # Safety
 ///
 /// `result` must be a valid `describe_producers` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeProducersResult_get_last_sequence(
     result: *const kafka_admin_DescribeProducersResult_t,
@@ -18351,6 +18817,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeProducersResult_get_last_sequence(
 /// # Safety
 ///
 /// `result` must be a valid `describe_producers` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeProducersResult_get_last_timestamp(
     result: *const kafka_admin_DescribeProducersResult_t,
@@ -18375,6 +18842,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeProducersResult_get_last_timestamp(
 ///
 /// `result` must be a valid `describe_producers` result handle; `out` must be
 /// null or writable.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeProducersResult_get_current_transaction_start_offset(
     result: *const kafka_admin_DescribeProducersResult_t,
@@ -18399,6 +18867,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeProducersResult_get_current_transac
 ///
 /// `result` must be a valid `describe_producers` result handle; `out` must be
 /// null or writable.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeProducersResult_get_coordinator_epoch(
     result: *const kafka_admin_DescribeProducersResult_t,
@@ -18419,6 +18888,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeProducersResult_get_coordinator_epo
 /// # Safety
 ///
 /// `result` must be null or a valid `describe_producers` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeProducersResult_destroy(
     result: *mut kafka_admin_DescribeProducersResult_t,
@@ -18531,6 +19001,7 @@ fn transaction_row_at(inner: &DescribeTransactionsResultInner, index: i32) -> Op
 /// # Safety
 ///
 /// `result` must be a valid `describe_transactions` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeTransactionsResult_count(
     result: *const kafka_admin_DescribeTransactionsResult_t,
@@ -18544,6 +19015,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeTransactionsResult_count(
 /// # Safety
 ///
 /// `result` must be a valid `describe_transactions` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeTransactionsResult_get_transactional_id(
     result: *const kafka_admin_DescribeTransactionsResult_t,
@@ -18561,6 +19033,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeTransactionsResult_get_transactiona
 /// # Safety
 ///
 /// `result` must be a valid `describe_transactions` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeTransactionsResult_get_error(
     result: *const kafka_admin_DescribeTransactionsResult_t,
@@ -18578,6 +19051,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeTransactionsResult_get_error(
 /// # Safety
 ///
 /// `result` must be a valid `describe_transactions` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeTransactionsResult_get_coordinator_id(
     result: *const kafka_admin_DescribeTransactionsResult_t,
@@ -18600,6 +19074,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeTransactionsResult_get_coordinator_
 /// # Safety
 ///
 /// `result` must be a valid `describe_transactions` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeTransactionsResult_get_state(
     result: *const kafka_admin_DescribeTransactionsResult_t,
@@ -18618,6 +19093,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeTransactionsResult_get_state(
 /// # Safety
 ///
 /// `result` must be a valid `describe_transactions` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeTransactionsResult_get_producer_id(
     result: *const kafka_admin_DescribeTransactionsResult_t,
@@ -18636,6 +19112,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeTransactionsResult_get_producer_id(
 /// # Safety
 ///
 /// `result` must be a valid `describe_transactions` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeTransactionsResult_get_producer_epoch(
     result: *const kafka_admin_DescribeTransactionsResult_t,
@@ -18654,6 +19131,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeTransactionsResult_get_producer_epo
 /// # Safety
 ///
 /// `result` must be a valid `describe_transactions` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeTransactionsResult_get_transaction_timeout_ms(
     result: *const kafka_admin_DescribeTransactionsResult_t,
@@ -18674,6 +19152,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeTransactionsResult_get_transaction_
 ///
 /// `result` must be a valid `describe_transactions` result handle; `out` must be
 /// null or writable.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeTransactionsResult_get_transaction_start_time_ms(
     result: *const kafka_admin_DescribeTransactionsResult_t,
@@ -18691,6 +19170,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeTransactionsResult_get_transaction_
 /// # Safety
 ///
 /// `result` must be a valid `describe_transactions` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeTransactionsResult_get_topic_partition_count(
     result: *const kafka_admin_DescribeTransactionsResult_t,
@@ -18710,6 +19190,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeTransactionsResult_get_topic_partit
 /// # Safety
 ///
 /// `result` must be a valid `describe_transactions` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeTransactionsResult_get_topic_partition_topic(
     result: *const kafka_admin_DescribeTransactionsResult_t,
@@ -18728,6 +19209,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeTransactionsResult_get_topic_partit
 /// # Safety
 ///
 /// `result` must be a valid `describe_transactions` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeTransactionsResult_get_topic_partition_partition(
     result: *const kafka_admin_DescribeTransactionsResult_t,
@@ -18746,6 +19228,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeTransactionsResult_get_topic_partit
 /// # Safety
 ///
 /// `result` must be null or a valid `describe_transactions` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeTransactionsResult_destroy(
     result: *mut kafka_admin_DescribeTransactionsResult_t,
@@ -18827,6 +19310,7 @@ unsafe fn fence_producers_result_ref(
 /// # Safety
 ///
 /// `result` must be a valid `fence_producers` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_FenceProducersResult_count(
     result: *const kafka_admin_FenceProducersResult_t,
@@ -18840,6 +19324,7 @@ pub unsafe extern "C" fn kafka_admin_FenceProducersResult_count(
 /// # Safety
 ///
 /// `result` must be a valid `fence_producers` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_FenceProducersResult_get_transactional_id(
     result: *const kafka_admin_FenceProducersResult_t,
@@ -18854,6 +19339,7 @@ pub unsafe extern "C" fn kafka_admin_FenceProducersResult_get_transactional_id(
 /// # Safety
 ///
 /// `result` must be a valid `fence_producers` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_FenceProducersResult_get_error(
     result: *const kafka_admin_FenceProducersResult_t,
@@ -18870,6 +19356,7 @@ pub unsafe extern "C" fn kafka_admin_FenceProducersResult_get_error(
 /// # Safety
 ///
 /// `result` must be a valid `fence_producers` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_FenceProducersResult_get_producer_id(
     result: *const kafka_admin_FenceProducersResult_t,
@@ -18886,6 +19373,7 @@ pub unsafe extern "C" fn kafka_admin_FenceProducersResult_get_producer_id(
 /// # Safety
 ///
 /// `result` must be a valid `fence_producers` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_FenceProducersResult_get_epoch_id(
     result: *const kafka_admin_FenceProducersResult_t,
@@ -18899,6 +19387,7 @@ pub unsafe extern "C" fn kafka_admin_FenceProducersResult_get_epoch_id(
 /// # Safety
 ///
 /// `result` must be null or a valid `fence_producers` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_FenceProducersResult_destroy(result: *mut kafka_admin_FenceProducersResult_t) {
     if !result.is_null() {
@@ -18988,6 +19477,7 @@ fn broker_transaction_row_at(inner: &ListTransactionsResultInner, index: i32) ->
 /// # Safety
 ///
 /// `result` must be a valid `list_transactions` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListTransactionsResult_count(
     result: *const kafka_admin_ListTransactionsResult_t,
@@ -19001,6 +19491,7 @@ pub unsafe extern "C" fn kafka_admin_ListTransactionsResult_count(
 /// # Safety
 ///
 /// `result` must be a valid `list_transactions` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListTransactionsResult_get_broker_id(
     result: *const kafka_admin_ListTransactionsResult_t,
@@ -19022,6 +19513,7 @@ pub unsafe extern "C" fn kafka_admin_ListTransactionsResult_get_broker_id(
 /// # Safety
 ///
 /// `result` must be a valid `list_transactions` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListTransactionsResult_get_error(
     result: *const kafka_admin_ListTransactionsResult_t,
@@ -19039,6 +19531,7 @@ pub unsafe extern "C" fn kafka_admin_ListTransactionsResult_get_error(
 /// # Safety
 ///
 /// `result` must be a valid `list_transactions` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListTransactionsResult_get_listing_count(
     result: *const kafka_admin_ListTransactionsResult_t,
@@ -19058,6 +19551,7 @@ pub unsafe extern "C" fn kafka_admin_ListTransactionsResult_get_listing_count(
 /// # Safety
 ///
 /// `result` must be a valid `list_transactions` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListTransactionsResult_get_transactional_id(
     result: *const kafka_admin_ListTransactionsResult_t,
@@ -19077,6 +19571,7 @@ pub unsafe extern "C" fn kafka_admin_ListTransactionsResult_get_transactional_id
 /// # Safety
 ///
 /// `result` must be a valid `list_transactions` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListTransactionsResult_get_producer_id(
     result: *const kafka_admin_ListTransactionsResult_t,
@@ -19100,6 +19595,7 @@ pub unsafe extern "C" fn kafka_admin_ListTransactionsResult_get_producer_id(
 /// # Safety
 ///
 /// `result` must be a valid `list_transactions` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListTransactionsResult_get_state(
     result: *const kafka_admin_ListTransactionsResult_t,
@@ -19117,6 +19613,7 @@ pub unsafe extern "C" fn kafka_admin_ListTransactionsResult_get_state(
 /// # Safety
 ///
 /// `result` must be null or a valid `list_transactions` result handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListTransactionsResult_destroy(result: *mut kafka_admin_ListTransactionsResult_t) {
     if !result.is_null() {
@@ -19171,6 +19668,7 @@ pub type kafka_admin_AdminClient_describe_producers_callback_t =
 /// `admin` must be a valid handle; `topics` and `partitions` must be null or
 /// have `count` entries each, with topic entries NULL or valid C strings;
 /// `out_result` must be null or writable.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_describe_producers(
@@ -19209,6 +19707,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_producers(
 ///
 /// `admin` must be a valid handle; `topics` and `partitions` must be null or
 /// have `count` entries each, with topic entries NULL or valid C strings.
+#[ffi_guard(on_panic = |err| unsafe { callback(std::ptr::null_mut(), box_error(err), user_data) })]
 #[unsafe(no_mangle)]
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_describe_producers_async(
@@ -19280,6 +19779,7 @@ pub type kafka_admin_AdminClient_describe_transactions_callback_t =
 /// `admin` must be a valid handle; `transactional_ids` must be null or have
 /// `count` entries, each NULL or a valid C string; `out_result` must be null or
 /// writable.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_describe_transactions(
     admin: *const kafka_admin_AdminClient_t,
@@ -19314,6 +19814,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_transactions(
 ///
 /// `admin` must be a valid handle; `transactional_ids` must be null or have
 /// `count` entries, each NULL or a valid C string.
+#[ffi_guard(on_panic = |err| unsafe { callback(std::ptr::null_mut(), box_error(err), user_data) })]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_describe_transactions_async(
     admin: *const kafka_admin_AdminClient_t,
@@ -19378,6 +19879,7 @@ pub type kafka_admin_AdminClient_abort_transaction_callback_t =
 /// # Safety
 ///
 /// `admin` must be a valid handle; `topic` must be null or a valid C string.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_abort_transaction(
     admin: *const kafka_admin_AdminClient_t,
@@ -19417,6 +19919,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_abort_transaction(
 /// # Safety
 ///
 /// `admin` must be a valid handle; `topic` must be null or a valid C string.
+#[ffi_guard(on_panic = |err| unsafe { callback(box_error(err), user_data) })]
 #[unsafe(no_mangle)]
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_abort_transaction_async(
@@ -19484,6 +19987,7 @@ pub type kafka_admin_AdminClient_force_terminate_transaction_callback_t =
 ///
 /// `admin` must be a valid handle; `transactional_id` must be null or a valid C
 /// string.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_force_terminate_transaction(
     admin: *const kafka_admin_AdminClient_t,
@@ -19520,6 +20024,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_force_terminate_transaction(
 ///
 /// `admin` must be a valid handle; `transactional_id` must be null or a valid C
 /// string.
+#[ffi_guard(on_panic = |err| unsafe { callback(box_error(err), user_data) })]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_force_terminate_transaction_async(
     admin: *const kafka_admin_AdminClient_t,
@@ -19583,6 +20088,7 @@ pub type kafka_admin_AdminClient_fence_producers_callback_t =
 /// `admin` must be a valid handle; `transactional_ids` must be null or have
 /// `count` entries, each NULL or a valid C string; `out_result` must be null or
 /// writable.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_fence_producers(
     admin: *const kafka_admin_AdminClient_t,
@@ -19617,6 +20123,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_fence_producers(
 ///
 /// `admin` must be a valid handle; `transactional_ids` must be null or have
 /// `count` entries, each NULL or a valid C string.
+#[ffi_guard(on_panic = |err| unsafe { callback(std::ptr::null_mut(), box_error(err), user_data) })]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_fence_producers_async(
     admin: *const kafka_admin_AdminClient_t,
@@ -19694,6 +20201,7 @@ pub type kafka_admin_AdminClient_list_transactions_callback_t =
 /// entries, each NULL or a valid C string; `producer_ids` must be null or have
 /// `producer_id_count` readable entries; `transactional_id_pattern` must be null
 /// or a valid C string; `out_result` must be null or writable.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_list_transactions(
@@ -19742,6 +20250,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_list_transactions(
 /// entries, each NULL or a valid C string; `producer_ids` must be null or have
 /// `producer_id_count` readable entries; `transactional_id_pattern` must be null
 /// or a valid C string.
+#[ffi_guard(on_panic = |err| unsafe { callback(std::ptr::null_mut(), box_error(err), user_data) })]
 #[unsafe(no_mangle)]
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_list_transactions_async(

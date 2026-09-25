@@ -108,6 +108,7 @@ use super::consumer::{
     kafka_consumer_OffsetAndTimestampMap_t, kafka_consumer_OffsetMap_t, kafka_consumer_StringList_t,
     kafka_consumer_TopicPartitionList_t, read_offset_map, read_timestamps_to_search, read_topic_partitions,
 };
+use super::ffi_guard;
 
 // ---------------------------------------------------------------------------
 // Opaque type + wrapper
@@ -226,6 +227,7 @@ where
 /// # Safety
 ///
 /// `consumer` must be a valid handle from a consumer constructor.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_handle(
     consumer: *const kafka_consumer_Consumer_t,
@@ -243,6 +245,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_handle(
 ///
 /// `handle` must be null or a valid handle from
 /// [`kafka_consumer_Consumer_handle`]. After this call the pointer is invalid.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_destroy(handle: *mut kafka_consumer_ConsumerHandle_t) {
     if handle.is_null() {
@@ -260,6 +263,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_destroy(handle: *mut kafk
 ///
 /// `handle` must be null or a valid handle from
 /// [`kafka_consumer_Consumer_handle`].
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_wakeup(handle: *const kafka_consumer_ConsumerHandle_t) {
     if handle.is_null() {
@@ -284,6 +288,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_wakeup(handle: *const kaf
 /// # Safety
 ///
 /// `handle` must be a valid handle from [`kafka_consumer_Consumer_handle`].
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_assignment(
     handle: *const kafka_consumer_ConsumerHandle_t,
@@ -300,6 +305,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_assignment(
 /// # Safety
 ///
 /// `handle` must be a valid handle from [`kafka_consumer_Consumer_handle`].
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_subscription(
     handle: *const kafka_consumer_ConsumerHandle_t,
@@ -316,6 +322,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_subscription(
 /// # Safety
 ///
 /// `handle` must be a valid handle from [`kafka_consumer_Consumer_handle`].
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_paused(
     handle: *const kafka_consumer_ConsumerHandle_t,
@@ -338,6 +345,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_paused(
 ///
 /// `handle` must be a valid handle; `topics` `count` valid C strings and
 /// `partitions` `count` `i32` values.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_assign(
     handle: *const kafka_consumer_ConsumerHandle_t,
@@ -355,6 +363,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_assign(
 /// # Safety
 ///
 /// `handle` must be a valid handle; `topic` a valid C string.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_seek(
     handle: *const kafka_consumer_ConsumerHandle_t,
@@ -374,6 +383,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_seek(
 ///
 /// `handle` must be a valid handle; `topic` a valid C string; `metadata` null
 /// or a valid C string.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_seek_with_metadata(
     handle: *const kafka_consumer_ConsumerHandle_t,
@@ -405,6 +415,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_seek_with_metadata(
 /// # Safety
 ///
 /// `handle` must be a valid handle; `topics`/`partitions` `count` entries.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_seek_to_beginning(
     handle: *const kafka_consumer_ConsumerHandle_t,
@@ -422,6 +433,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_seek_to_beginning(
 /// # Safety
 ///
 /// `handle` must be a valid handle; `topics`/`partitions` `count` entries.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_seek_to_end(
     handle: *const kafka_consumer_ConsumerHandle_t,
@@ -439,6 +451,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_seek_to_end(
 /// # Safety
 ///
 /// `handle` must be a valid handle; `topics`/`partitions` `count` entries.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_pause(
     handle: *const kafka_consumer_ConsumerHandle_t,
@@ -456,6 +469,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_pause(
 /// # Safety
 ///
 /// `handle` must be a valid handle; `topics`/`partitions` `count` entries.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_resume(
     handle: *const kafka_consumer_ConsumerHandle_t,
@@ -479,6 +493,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_resume(
 /// # Safety
 ///
 /// `handle` a valid handle; `topic` a valid C string; `out_position` valid.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_position(
     handle: *const kafka_consumer_ConsumerHandle_t,
@@ -496,6 +511,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_position(
 /// # Safety
 ///
 /// `handle` a valid handle; `topic` a valid C string; `out_position` valid.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_position_timeout(
     handle: *const kafka_consumer_ConsumerHandle_t,
@@ -520,6 +536,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_position_timeout(
 ///
 /// `handle` a valid handle; `topics`/`partitions` `count` entries; `out_map`
 /// valid.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_committed(
     handle: *const kafka_consumer_ConsumerHandle_t,
@@ -545,6 +562,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_committed(
 ///
 /// `handle` a valid handle; `topics`/`partitions` `count` entries; `out_map`
 /// valid.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_beginning_offsets(
     handle: *const kafka_consumer_ConsumerHandle_t,
@@ -570,6 +588,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_beginning_offsets(
 ///
 /// `handle` a valid handle; `topics`/`partitions` `count` entries; `out_map`
 /// valid.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_end_offsets(
     handle: *const kafka_consumer_ConsumerHandle_t,
@@ -596,6 +615,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_end_offsets(
 /// # Safety
 ///
 /// `handle` a valid handle; arrays `count` valid entries; `out_map` valid.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_offsets_for_times(
     handle: *const kafka_consumer_ConsumerHandle_t,
@@ -628,6 +648,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_offsets_for_times(
 /// # Safety
 ///
 /// `handle` must be a valid handle from [`kafka_consumer_Consumer_handle`].
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_commit_sync(
     handle: *const kafka_consumer_ConsumerHandle_t,
@@ -643,6 +664,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_commit_sync(
 /// # Safety
 ///
 /// `handle` a valid handle; arrays `count` valid entries.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_commit_sync_offsets(
     handle: *const kafka_consumer_ConsumerHandle_t,
@@ -670,6 +692,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_commit_sync_offsets(
 /// # Safety
 ///
 /// `handle` must be a valid handle from [`kafka_consumer_Consumer_handle`].
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_commit_async(
     handle: *const kafka_consumer_ConsumerHandle_t,
@@ -683,6 +706,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_commit_async(
 /// # Safety
 ///
 /// `handle` a valid handle; arrays `count` valid entries.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_commit_async_offsets(
     handle: *const kafka_consumer_ConsumerHandle_t,

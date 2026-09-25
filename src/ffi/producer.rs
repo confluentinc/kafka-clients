@@ -157,6 +157,7 @@ use crate::ffi::consumer::{
     box_partition_info_list, group_metadata_ref, kafka_consumer_ConsumerGroupMetadata_t,
     kafka_consumer_PartitionInfoList_t, read_offset_map,
 };
+use crate::ffi::ffi_guard;
 use crate::producer::Callback;
 use crate::producer::KafkaProducer;
 use crate::producer::MockProducer;
@@ -725,7 +726,7 @@ enum SubmitRequest {
 /// A lifetime-extended reference to the inner producer, obtained from the
 /// leaked producer handle. Sound while the handle is alive: every task that
 /// calls [`producer_static_ref`] registers its `JoinHandle` via
-/// [`register_pending_task`], and `destroy` joins all of them before dropping
+/// [`reserve_pending_task`], and `destroy` joins all of them before dropping
 /// the producer.
 enum ProducerStaticRef {
     Kafka(&'static KafkaProducer<Vec<u8>, Vec<u8>>),
@@ -779,7 +780,7 @@ async fn submission_loop(ptr: usize, mut rx: tokio::sync::mpsc::UnboundedReceive
             },
         };
         // SAFETY: the handle outlives the submission task — `destroy` joins this
-        // task (registered via `register_pending_task`) before dropping the
+        // task (registered via `reserve_pending_task`) before dropping the
         // producer it borrows from. Reached on the send path only, exactly where
         // `producer_static_ref(ptr)` below already dereferences the same handle.
         let handle = unsafe { &*(ptr as *const ProducerHandle) };
@@ -855,9 +856,10 @@ struct ProducerHandle {
     /// Join handles for every task spawned on this producer's runtime that
     /// reaches into the producer via [`producer_static_ref`]: the long-lived
     /// submission task, plus one short-lived task per `flush_async` /
-    /// `close_async` / `partitions_for_async` call. `destroy` joins all of
-    /// these *before* dropping the producer, since each holds a raw
-    /// `&'static` reference into it that must not outlive its memory.
+    /// `close_async` / `partitions_for_async` / transaction-control `_async`
+    /// call. `destroy` joins all of these *before* dropping the producer, since
+    /// each holds a raw `&'static` reference into it that must not outlive its
+    /// memory.
     pending_tasks: Mutex<Vec<tokio::task::JoinHandle<()>>>,
     /// Transaction-control mutual-exclusion flag. `true` while one of the five
     /// transaction-control functions is executing. See the module-level
@@ -878,14 +880,26 @@ struct ProducerHandle {
     queued_sends: std::sync::atomic::AtomicUsize,
 }
 
-/// Registers `task` so `destroy` will join it before the producer is freed,
-/// pruning already-finished handles first so `pending_tasks` does not grow
-/// unbounded over a producer's lifetime under repeated `flush_async` /
-/// `close_async` / `partitions_for_async` calls.
-fn register_pending_task(handle: &ProducerHandle, task: tokio::task::JoinHandle<()>) {
+/// Locks `pending_tasks` and reserves room for one more task, so the caller can
+/// register a task for `destroy` to join before the producer is freed. Prunes
+/// already-finished handles first so `pending_tasks` does not grow unbounded over
+/// a producer's lifetime under repeated `flush_async` / `close_async` /
+/// `partitions_for_async` / transaction-control `_async` calls.
+///
+/// This is the first half of a two-phase registration: the caller keeps the
+/// returned guard across its `spawn` and then `push`es the new `JoinHandle`, which
+/// cannot fail because the room is already reserved. Everything that can panic —
+/// the lock (poisoned by an earlier caught panic) and the allocation — therefore
+/// happens *before* the task exists. That is what lets `#[ffi_guard]` fire a
+/// callback-style entry point's callback on a panic without a task already
+/// spawned delivering a second completion (D4 of
+/// `design/current/appsec-7665-4521-ffi-panic-guard.md`). The spawned tasks never
+/// take this lock, so holding it across the `spawn` cannot deadlock.
+fn reserve_pending_task(handle: &ProducerHandle) -> std::sync::MutexGuard<'_, Vec<tokio::task::JoinHandle<()>>> {
     let mut tasks = handle.pending_tasks.lock().unwrap();
     tasks.retain(|t| !t.is_finished());
-    tasks.push(task);
+    tasks.reserve(1);
+    tasks
 }
 
 /// Builds a [`ProducerHandle`] around a [`ProducerKind`], spawning the
@@ -911,8 +925,10 @@ fn build_producer_handle(kind: ProducerKind) -> *mut kafka_producer_Producer_t {
     // handle pointer (as `usize` to cross the task boundary). Stash the join
     // handle back on the handle itself so `destroy` can wait for the task to
     // actually finish before freeing the producer it borrows from.
+    let mut pending = reserve_pending_task(unsafe { &*ptr });
     let task = rt_handle.spawn(submission_loop(ptr as usize, submit_rx));
-    register_pending_task(unsafe { &*ptr }, task);
+    pending.push(task);
+    drop(pending);
 
     ptr as *mut kafka_producer_Producer_t
 }
@@ -937,6 +953,7 @@ fn build_producer_handle(kind: ProducerKind) -> *mut kafka_producer_Producer_t {
 /// # Safety
 ///
 /// The returned handle must eventually be freed with [`kafka_producer_Producer_destroy`].
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_producer_MockProducer_new(auto_complete: bool) -> *mut kafka_producer_Producer_t {
     // A multi-thread runtime so the async submission task and completion
@@ -961,6 +978,7 @@ pub extern "C" fn kafka_producer_MockProducer_new(auto_complete: bool) -> *mut k
 ///
 /// A non-null opaque properties handle. The caller must free it with
 /// [`kafka_producer_ProducerProperties_destroy`].
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_producer_ProducerProperties_new() -> *mut kafka_producer_ProducerProperties_t {
     let map: HashMap<String, String> = HashMap::new();
@@ -990,6 +1008,7 @@ pub extern "C" fn kafka_producer_ProducerProperties_new() -> *mut kafka_producer
 ///
 /// - `configs` must be NULL or point to a NULL-terminated array of valid,
 ///   null-terminated C strings.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_ProducerProperties_from_configs(
     configs: *const *const c_char,
@@ -1034,6 +1053,7 @@ pub unsafe extern "C" fn kafka_producer_ProducerProperties_from_configs(
 /// - `props` must be a valid handle from [`kafka_producer_ProducerProperties_new`]
 ///   or [`kafka_producer_ProducerProperties_from_configs`].
 /// - `key` and `value` must be valid, null-terminated C strings.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_ProducerProperties_put(
     props: *mut kafka_producer_ProducerProperties_t,
@@ -1059,6 +1079,7 @@ pub unsafe extern "C" fn kafka_producer_ProducerProperties_put(
 ///   [`kafka_producer_ProducerProperties_new`] or
 ///   [`kafka_producer_ProducerProperties_from_configs`].
 /// - After this call, the pointer is invalid and must not be used.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_ProducerProperties_destroy(props: *mut kafka_producer_ProducerProperties_t) {
     if !props.is_null() {
@@ -1099,6 +1120,7 @@ pub unsafe extern "C" fn kafka_producer_ProducerProperties_destroy(props: *mut k
 /// - `props` must be a valid, non-null properties handle.
 /// - The returned handle must eventually be freed with
 ///   [`kafka_producer_Producer_destroy`].
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_KafkaProducer_new(
     props: *const kafka_producer_ProducerProperties_t,
@@ -1167,6 +1189,7 @@ pub unsafe extern "C" fn kafka_producer_KafkaProducer_new(
 /// - `producer` must be null or a valid handle from a `kafka_producer_new_*`
 ///   function.
 /// - After this call, the pointer is invalid and must not be used.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_Producer_destroy(producer: *mut kafka_producer_Producer_t) {
     if producer.is_null() {
@@ -1194,9 +1217,16 @@ pub unsafe extern "C" fn kafka_producer_Producer_destroy(producer: *mut kafka_pr
     //    `flush_or_close_async`, `partitions_for_async`), holding a raw
     //    `&'static` reference into it. Dropping `kind` (next step) frees that
     //    memory, so we must join here first or risk a use-after-free race.
-    let tasks = pending_tasks.into_inner().unwrap_or_default();
+    //
+    //    Both locks are read poison-tolerantly. A lock is poisoned only by a panic
+    //    that `#[ffi_guard]` caught, after which the C header tells the caller to
+    //    destroy the handle, so this is the one call that must still work on a
+    //    poisoned handle. Reading poison as "no tasks", or panicking on `kind`,
+    //    would skip the join and free the producer under a task still using it.
+    let tasks = pending_tasks.into_inner().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let kind = kind.into_inner().unwrap_or_else(std::sync::PoisonError::into_inner);
     if !tasks.is_empty() {
-        kind.lock().unwrap().runtime().block_on(async {
+        kind.runtime().block_on(async {
             for task in tasks {
                 let _ = task.await;
             }
@@ -1252,6 +1282,7 @@ pub unsafe extern "C" fn kafka_producer_Producer_destroy(producer: *mut kafka_pr
 /// - `topic` must be a valid C string.
 /// - `key` must be valid for `key_len` bytes if `key_len >= 0`.
 /// - `value` must be valid for `value_len` bytes if `value_len >= 0`.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_Producer_send(
     producer: *mut kafka_producer_Producer_t,
@@ -1396,6 +1427,7 @@ pub unsafe extern "C" fn kafka_producer_Producer_send(
 /// - `topic` must be a valid C string.
 /// - `key` must be valid for `key_len` bytes if `key_len >= 0`.
 /// - `value` must be valid for `value_len` bytes if `value_len >= 0`.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_Producer_send_with_callback(
     producer: *mut kafka_producer_Producer_t,
@@ -1495,13 +1527,13 @@ pub unsafe extern "C" fn kafka_producer_Producer_send_with_callback(
 
 /// Inner implementation of [`kafka_producer_Producer_send_batch`].
 ///
-/// Separated from the `extern "C"` wrapper so that tests can call it
-/// directly and catch panics without hitting the FFI boundary abort.
+/// Separated from the `extern "C"` wrapper, whose `#[ffi_guard]` turns a panic
+/// here into a `-1` return, so tests can also observe the panic message itself.
 ///
 /// # Panics
 ///
 /// Panics if `producer`, `records`, `out_futures`, or `out_errors` is null,
-/// or if `count` is negative.
+/// or if `count` is negative: a negative count must fail rather than be clamped.
 ///
 /// # Safety
 ///
@@ -1517,6 +1549,8 @@ unsafe fn send_batch_inner(
     assert!(!records.is_null(), "records must not be null");
     assert!(!out_futures.is_null(), "out_futures must not be null");
     assert!(!out_errors.is_null(), "out_errors must not be null");
+    // A negative count must fail rather than be clamped; the entry point's
+    // `#[ffi_guard]` reports this panic as the call's failure.
     assert!(count >= 0, "count must not be negative");
 
     let count = count as usize;
@@ -1640,6 +1674,7 @@ unsafe fn send_batch_inner(
 /// - `out_futures` must point to at least `count` writable pointer slots.
 /// - `out_errors` must point to at least `count` writable pointer slots.
 /// - Each `kafka_producer_ProducerRecord_t.topic` must be a valid C string.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_Producer_send_batch(
     producer: *mut kafka_producer_Producer_t,
@@ -1689,6 +1724,7 @@ pub unsafe extern "C" fn kafka_producer_Producer_send_batch(
 /// - `topic` must be a valid C string.
 /// - `key`/`value` must be valid for `key_len`/`value_len` bytes when `>= 0`,
 ///   and remain valid until `callback` is invoked.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_Producer_send_async(
     producer: *mut kafka_producer_Producer_t,
@@ -1808,6 +1844,7 @@ pub unsafe extern "C" fn kafka_producer_Producer_send_async(
 /// - `records` must point to at least `count` valid records whose `key`/`value`
 ///   remain valid until their callbacks fire.
 /// - `out_errors` must point to at least `count` writable pointer slots.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_Producer_send_batch_async(
     producer: *mut kafka_producer_Producer_t,
@@ -1820,6 +1857,8 @@ pub unsafe extern "C" fn kafka_producer_Producer_send_batch_async(
     assert!(!producer.is_null(), "producer must not be null");
     assert!(!records.is_null(), "records must not be null");
     assert!(!out_errors.is_null(), "out_errors must not be null");
+    // A negative count must fail rather than be clamped; the entry point's
+    // `#[ffi_guard]` reports this panic as the call's failure.
     assert!(count >= 0, "count must not be negative");
 
     let handle = unsafe { producer_handle(producer) };
@@ -1911,6 +1950,7 @@ pub unsafe extern "C" fn kafka_producer_Producer_send_batch_async(
 /// # Safety
 ///
 /// `future` must be a valid handle from a send function, or null.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_FutureRecordMetadata_is_done(
     future: *mut kafka_producer_FutureRecordMetadata_t,
@@ -1940,6 +1980,7 @@ pub unsafe extern "C" fn kafka_producer_FutureRecordMetadata_is_done(
 /// # Safety
 ///
 /// - `future` must be a valid handle, or null.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_FutureRecordMetadata_get(
     future: *mut kafka_producer_FutureRecordMetadata_t,
@@ -2003,6 +2044,7 @@ pub unsafe extern "C" fn kafka_producer_FutureRecordMetadata_get(
 ///   arrays of at least `count` elements.
 /// - Each non-null entry in `futures` must be a valid handle from a send
 ///   function.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_FutureRecordMetadata_get_all(
     futures: *mut *mut kafka_producer_FutureRecordMetadata_t,
@@ -2013,6 +2055,8 @@ pub unsafe extern "C" fn kafka_producer_FutureRecordMetadata_get_all(
     assert!(!futures.is_null(), "futures must not be null");
     assert!(!out_metadata.is_null(), "out_metadata must not be null");
     assert!(!out_errors.is_null(), "out_errors must not be null");
+    // A negative count must fail rather than be clamped; the entry point's
+    // `#[ffi_guard]` reports this panic as the call's failure.
     assert!(count >= 0, "count must not be negative");
 
     let count = count as usize;
@@ -2054,6 +2098,7 @@ pub unsafe extern "C" fn kafka_producer_FutureRecordMetadata_get_all(
 ///
 /// - `future` must be a valid handle from a send function, or null (null is
 ///   reported as an error through `callback`).
+#[ffi_guard(on_panic = |err| unsafe { callback(std::ptr::null_mut(), box_error(err), user_data) })]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_FutureRecordMetadata_get_async(
     future: *mut kafka_producer_FutureRecordMetadata_t,
@@ -2086,6 +2131,32 @@ pub unsafe extern "C" fn kafka_producer_FutureRecordMetadata_get_async(
     });
 }
 
+/// The `#[ffi_guard]` on-panic path of
+/// [`kafka_producer_FutureRecordMetadata_get_all_async`]: fires `callback` once, in
+/// the shape it promises — `count` null metadata entries and `count` error handles,
+/// each a copy of `error` — so the panic reaches the caller exactly like any other
+/// per-future failure (D4 of `design/current/appsec-7665-4521-ffi-panic-guard.md`).
+///
+/// A negative `count` (the precondition whose panic may have brought us here)
+/// yields empty arrays: the callback still fires, and the panic itself is reported
+/// only by the guard's log line.
+///
+/// # Safety
+///
+/// Same requirements as the callback contract of
+/// [`kafka_producer_FutureRecordMetadata_get_all_async`].
+unsafe fn fire_get_all_callback_with_error(
+    callback: kafka_producer_FutureRecordMetadata_get_all_callback_t,
+    count: i32,
+    error: Error,
+    user_data: *mut std::ffi::c_void,
+) {
+    let len = count.max(0) as usize;
+    let mut metadata: Vec<*mut kafka_producer_RecordMetadata_t> = vec![std::ptr::null_mut(); len];
+    let mut errors: Vec<*mut kafka_common_Error_t> = (0..len).map(|_| box_error(error.clone())).collect();
+    unsafe { callback(metadata.as_mut_ptr(), errors.as_mut_ptr(), len as i32, user_data) };
+}
+
 /// Asynchronously awaits all futures, invoking `callback` once with parallel
 /// result arrays (the async counterpart of
 /// [`kafka_producer_FutureRecordMetadata_get_all`]).
@@ -2105,6 +2176,7 @@ pub unsafe extern "C" fn kafka_producer_FutureRecordMetadata_get_async(
 ///
 /// - `futures` must point to at least `count` future handles (null entries
 ///   allowed).
+#[ffi_guard(on_panic = |err| unsafe { fire_get_all_callback_with_error(callback, count, err, user_data) })]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_FutureRecordMetadata_get_all_async(
     futures: *mut *mut kafka_producer_FutureRecordMetadata_t,
@@ -2113,6 +2185,8 @@ pub unsafe extern "C" fn kafka_producer_FutureRecordMetadata_get_all_async(
     user_data: *mut std::ffi::c_void,
 ) {
     assert!(!futures.is_null(), "futures must not be null");
+    // A negative count must fail rather than be clamped; the entry point's
+    // `#[ffi_guard]` reports this panic as the call's failure.
     assert!(count >= 0, "count must not be negative");
     let count = count as usize;
 
@@ -2193,6 +2267,7 @@ pub unsafe extern "C" fn kafka_producer_FutureRecordMetadata_get_all_async(
 ///
 /// - `future` must be null or a valid handle from a send function.
 /// - After this call, the pointer is invalid and must not be used.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_FutureRecordMetadata_destroy(
     future: *mut kafka_producer_FutureRecordMetadata_t,
@@ -2220,12 +2295,15 @@ pub unsafe extern "C" fn kafka_producer_FutureRecordMetadata_destroy(
 /// - Each non-null entry must be a valid handle from a send function.
 /// - After this call, all pointers in the array are invalid and must not be
 ///   used.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_FutureRecordMetadata_destroy_all(
     futures: *mut *mut kafka_producer_FutureRecordMetadata_t,
     count: i32,
 ) {
     assert!(!futures.is_null(), "futures must not be null");
+    // A negative count must fail rather than be clamped; the entry point's
+    // `#[ffi_guard]` reports this panic as the call's failure.
     assert!(count >= 0, "count must not be negative");
 
     for i in 0..count as usize {
@@ -2255,6 +2333,7 @@ pub unsafe extern "C" fn kafka_producer_FutureRecordMetadata_destroy_all(
 /// # Safety
 ///
 /// `metadata` must be a valid handle from [`kafka_producer_FutureRecordMetadata_get`], or null.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_RecordMetadata_offset(metadata: *const kafka_producer_RecordMetadata_t) -> i64 {
     if metadata.is_null() {
@@ -2281,6 +2360,7 @@ pub unsafe extern "C" fn kafka_producer_RecordMetadata_offset(metadata: *const k
 ///
 /// `metadata` must be a valid handle from [`kafka_producer_FutureRecordMetadata_get`], or null.
 /// The returned pointer must not be used after the metadata is destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_RecordMetadata_topic(
     metadata: *const kafka_producer_RecordMetadata_t,
@@ -2304,6 +2384,7 @@ pub unsafe extern "C" fn kafka_producer_RecordMetadata_topic(
 /// # Safety
 ///
 /// `metadata` must be a valid handle from [`kafka_producer_FutureRecordMetadata_get`], or null.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_RecordMetadata_partition(
     metadata: *const kafka_producer_RecordMetadata_t,
@@ -2328,6 +2409,7 @@ pub unsafe extern "C" fn kafka_producer_RecordMetadata_partition(
 /// # Safety
 ///
 /// `metadata` must be a valid handle from [`kafka_producer_FutureRecordMetadata_get`], or null.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_RecordMetadata_timestamp(
     metadata: *const kafka_producer_RecordMetadata_t,
@@ -2366,6 +2448,7 @@ pub unsafe extern "C" fn kafka_producer_RecordMetadata_timestamp(
 /// - The `topic` pointer passed to the callback is only valid for the duration
 ///   of the callback invocation.
 /// - After this call the metadata handle is destroyed and must not be used.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_RecordMetadata_copy(
     metadata: *mut kafka_producer_RecordMetadata_t,
@@ -2400,6 +2483,7 @@ pub unsafe extern "C" fn kafka_producer_RecordMetadata_copy(
 ///
 /// - `metadata` must be null or a valid handle from [`kafka_producer_FutureRecordMetadata_get`].
 /// - After this call, the pointer is invalid and must not be used.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_RecordMetadata_destroy(metadata: *mut kafka_producer_RecordMetadata_t) {
     if !metadata.is_null() {
@@ -2424,6 +2508,7 @@ pub unsafe extern "C" fn kafka_producer_RecordMetadata_destroy(metadata: *mut ka
 /// # Safety
 ///
 /// `producer` must be a valid handle, or null.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_Producer_flush(
     producer: *mut kafka_producer_Producer_t,
@@ -2510,6 +2595,7 @@ pub struct kafka_producer_MetricMap_t {
 /// # Safety
 ///
 /// `producer` must be a valid handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_Producer_metrics(
     producer: *mut kafka_producer_Producer_t,
@@ -2531,6 +2617,7 @@ pub unsafe extern "C" fn kafka_producer_Producer_metrics(
 /// # Safety
 ///
 /// `map` must be a valid metric-map handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_MetricMap_count(map: *const kafka_producer_MetricMap_t) -> i32 {
     unsafe { common::metric_map_count(map as *const MetricMapInner) }
@@ -2542,6 +2629,7 @@ pub unsafe extern "C" fn kafka_producer_MetricMap_count(map: *const kafka_produc
 /// # Safety
 ///
 /// `map` must be a valid metric-map handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_MetricMap_get_name(
     map: *const kafka_producer_MetricMap_t,
@@ -2555,6 +2643,7 @@ pub unsafe extern "C" fn kafka_producer_MetricMap_get_name(
 /// # Safety
 ///
 /// `map` must be a valid metric-map handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_MetricMap_get_group(
     map: *const kafka_producer_MetricMap_t,
@@ -2569,6 +2658,7 @@ pub unsafe extern "C" fn kafka_producer_MetricMap_get_group(
 /// # Safety
 ///
 /// `map` must be a valid metric-map handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_MetricMap_get_description(
     map: *const kafka_producer_MetricMap_t,
@@ -2582,6 +2672,7 @@ pub unsafe extern "C" fn kafka_producer_MetricMap_get_description(
 /// # Safety
 ///
 /// `map` must be a valid metric-map handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_MetricMap_get_tag_count(
     map: *const kafka_producer_MetricMap_t,
@@ -2596,6 +2687,7 @@ pub unsafe extern "C" fn kafka_producer_MetricMap_get_tag_count(
 /// # Safety
 ///
 /// `map` must be a valid metric-map handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_MetricMap_get_tag_key(
     map: *const kafka_producer_MetricMap_t,
@@ -2611,6 +2703,7 @@ pub unsafe extern "C" fn kafka_producer_MetricMap_get_tag_key(
 /// # Safety
 ///
 /// `map` must be a valid metric-map handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_MetricMap_get_tag_value(
     map: *const kafka_producer_MetricMap_t,
@@ -2627,6 +2720,7 @@ pub unsafe extern "C" fn kafka_producer_MetricMap_get_tag_value(
 /// # Safety
 ///
 /// `map` must be a valid metric-map handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_MetricMap_get_value_kind(
     map: *const kafka_producer_MetricMap_t,
@@ -2641,6 +2735,7 @@ pub unsafe extern "C" fn kafka_producer_MetricMap_get_value_kind(
 /// # Safety
 ///
 /// `map` must be a valid metric-map handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_MetricMap_get_value_double(
     map: *const kafka_producer_MetricMap_t,
@@ -2655,6 +2750,7 @@ pub unsafe extern "C" fn kafka_producer_MetricMap_get_value_double(
 /// # Safety
 ///
 /// `map` must be a valid metric-map handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_MetricMap_get_value_string(
     map: *const kafka_producer_MetricMap_t,
@@ -2669,6 +2765,7 @@ pub unsafe extern "C" fn kafka_producer_MetricMap_get_value_string(
 /// # Safety
 ///
 /// `map` must be a valid metric-map handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_MetricMap_get_value_long(
     map: *const kafka_producer_MetricMap_t,
@@ -2683,6 +2780,7 @@ pub unsafe extern "C" fn kafka_producer_MetricMap_get_value_long(
 /// # Safety
 ///
 /// `map` must be a valid metric-map handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_MetricMap_get_value_int(
     map: *const kafka_producer_MetricMap_t,
@@ -2696,6 +2794,7 @@ pub unsafe extern "C" fn kafka_producer_MetricMap_get_value_int(
 /// # Safety
 ///
 /// `map` must be null or a valid metric-map handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_MetricMap_destroy(map: *mut kafka_producer_MetricMap_t) {
     unsafe { common::metric_map_destroy(map as *mut MetricMapInner) };
@@ -2710,6 +2809,7 @@ pub unsafe extern "C" fn kafka_producer_MetricMap_destroy(map: *mut kafka_produc
 /// # Safety
 ///
 /// `producer` must be a valid handle; `topic` a valid C string; `out_list` valid.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_Producer_partitions_for(
     producer: *mut kafka_producer_Producer_t,
@@ -2751,6 +2851,7 @@ pub unsafe extern "C" fn kafka_producer_Producer_partitions_for(
 /// # Safety
 ///
 /// `producer` must be a valid handle, or null.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_Producer_close(
     producer: *mut kafka_producer_Producer_t,
@@ -2820,10 +2921,13 @@ fn flush_or_close_async(
     let ptr = producer as usize;
     let target = OperationCallbackTarget { callback, user_data };
 
+    // Two-phase registration (see `reserve_pending_task`): nothing that can panic
+    // runs after the spawn, so a caught panic never races this task's completion.
+    let mut pending = reserve_pending_task(handle);
     let task = runtime.spawn(async move {
         let target = target;
         // SAFETY: the handle outlives this task — it is registered via
-        // `register_pending_task` and `destroy` joins it before dropping the
+        // `reserve_pending_task` and `destroy` joins it before dropping the
         // producer it borrows from.
         let h = unsafe { &*(ptr as *const ProducerHandle) };
         // Order this flush/close after records still queued by `send_async`, the
@@ -2862,7 +2966,7 @@ fn flush_or_close_async(
         let job: CompletionJob = Box::new(move || unsafe { op.fire() });
         enqueue_or_run_inline(&completion, job);
     });
-    register_pending_task(handle, task);
+    pending.push(task);
 }
 
 /// Asynchronously flushes all pending records, invoking `callback` on
@@ -2875,6 +2979,7 @@ fn flush_or_close_async(
 /// # Safety
 ///
 /// `producer` must be a valid handle, or null (null reported via `callback`).
+#[ffi_guard(on_panic = |err| unsafe { callback(box_error(err), user_data) })]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_Producer_flush_async(
     producer: *mut kafka_producer_Producer_t,
@@ -2894,6 +2999,7 @@ pub unsafe extern "C" fn kafka_producer_Producer_flush_async(
 /// # Safety
 ///
 /// `producer` must be a valid handle, or null (null is a no-op success).
+#[ffi_guard(on_panic = |err| unsafe { callback(box_error(err), user_data) })]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_Producer_close_async(
     producer: *mut kafka_producer_Producer_t,
@@ -2946,6 +3052,7 @@ unsafe impl Send for PartitionInfoListCallbackTarget {}
 ///
 /// `producer` must be a valid handle, or null (null reported via `callback`);
 /// `topic` a valid C string.
+#[ffi_guard(on_panic = |err| unsafe { callback(std::ptr::null_mut(), box_error(err), user_data) })]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_Producer_partitions_for_async(
     producer: *mut kafka_producer_Producer_t,
@@ -2965,6 +3072,9 @@ pub unsafe extern "C" fn kafka_producer_Producer_partitions_for_async(
     let ptr = producer as usize;
     let target = PartitionInfoListCallbackTarget { callback, user_data };
 
+    // Two-phase registration (see `reserve_pending_task`): nothing that can panic
+    // runs after the spawn, so a caught panic never races this task's completion.
+    let mut pending = reserve_pending_task(handle);
     let task = runtime.spawn(async move {
         let target = target;
         // Brief lock to extend a reference to the inner producer; the guard is
@@ -2982,7 +3092,7 @@ pub unsafe extern "C" fn kafka_producer_Producer_partitions_for_async(
         let job: CompletionJob = Box::new(move || unsafe { completion_payload.fire() });
         enqueue_or_run_inline(&completion, job);
     });
-    register_pending_task(handle, task);
+    pending.push(task);
 }
 
 // ---------------------------------------------------------------------------
@@ -3034,19 +3144,22 @@ impl Drop for TxnControlGuard<'_> {
 }
 
 /// Async-lifetime analog of [`TxnControlGuard`]: releases the transaction-control
-/// flag when dropped, whether the spawned task exits normally or unwinds on a
+/// flag when dropped — on the calling thread if the call fails or panics before its
+/// task is spawned, otherwise when the spawned task exits normally or unwinds on a
 /// panic. It holds the handle by raw pointer (as a `usize`) rather than a borrow so
 /// it can be moved into the spawned task; that reach into the handle is sound for
 /// the same reason [`producer_static_ref`] and [`flush_or_close_async`] are —
-/// `destroy` joins every task registered via [`register_pending_task`] before it
+/// `destroy` joins every task registered via [`reserve_pending_task`] before it
 /// drops the producer, so the handle outlives the guard.
 struct TxnControlAsyncGuard {
     handle_ptr: usize,
 }
 impl Drop for TxnControlAsyncGuard {
     fn drop(&mut self) {
-        // SAFETY: the handle outlives the task that owns this guard (registered via
-        // `register_pending_task`, joined by `destroy` before the producer is freed).
+        // SAFETY: the handle outlives this guard. On the calling thread the C caller
+        // keeps it alive for the duration of the call; inside the spawned task it is
+        // alive because that task is registered via `reserve_pending_task` and joined
+        // by `destroy` before the producer is freed.
         let handle = unsafe { &*(self.handle_ptr as *const ProducerHandle) };
         handle.txn_control_busy.store(false, std::sync::atomic::Ordering::Release);
     }
@@ -3256,6 +3369,7 @@ where
 /// # Safety
 ///
 /// `producer` must be a valid handle, or null.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_Producer_init_transactions(
     producer: *mut kafka_producer_Producer_t,
@@ -3290,6 +3404,7 @@ pub unsafe extern "C" fn kafka_producer_Producer_init_transactions(
 /// # Safety
 ///
 /// `producer` must be a valid handle, or null.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_Producer_begin_transaction(
     producer: *mut kafka_producer_Producer_t,
@@ -3365,6 +3480,7 @@ pub unsafe extern "C" fn kafka_producer_Producer_begin_transaction(
 ///   still required of whichever is non-null. `count == 0` reads none of them, so
 ///   all five may be null in that case.
 /// - `group_metadata` must be a valid group-metadata handle, or null.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_Producer_send_offsets_to_transaction(
     producer: *mut kafka_producer_Producer_t,
@@ -3392,14 +3508,12 @@ pub unsafe extern "C" fn kafka_producer_Producer_send_offsets_to_transaction(
 
 /// Inner implementation of [`kafka_producer_Producer_send_offsets_to_transaction`].
 ///
-/// Separated from the `extern "C"` wrapper for the same reason as
-/// [`send_batch_inner`]: a panic that would unwind out of an `extern "C"` function
-/// aborts the process, so the `count` precondition can only be tested by calling
-/// this directly.
+/// Separated from the `extern "C"` wrapper, whose `#[ffi_guard]` turns a panic
+/// here into a returned error handle.
 ///
 /// # Panics
 ///
-/// Panics if `count` is negative.
+/// Panics if `count` is negative: it must fail rather than be clamped.
 ///
 /// # Safety
 ///
@@ -3415,6 +3529,8 @@ unsafe fn send_offsets_to_transaction_inner(
     count: i32,
     group_metadata: *const kafka_consumer_ConsumerGroupMetadata_t,
 ) -> *mut kafka_common_Error_t {
+    // A negative count must fail rather than be clamped; the entry point's
+    // `#[ffi_guard]` reports this panic as the call's failure.
     assert!(count >= 0, "count must not be negative");
     // Pure argument preconditions are checked before the guard is taken, so a
     // malformed call costs nothing and cannot be reported as a concurrency
@@ -3476,6 +3592,7 @@ unsafe fn send_offsets_to_transaction_inner(
 /// # Safety
 ///
 /// `producer` must be a valid handle, or null.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_Producer_commit_transaction(
     producer: *mut kafka_producer_Producer_t,
@@ -3523,6 +3640,7 @@ pub unsafe extern "C" fn kafka_producer_Producer_commit_transaction(
 /// # Safety
 ///
 /// `producer` must be a valid handle, or null.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_Producer_abort_transaction(
     producer: *mut kafka_producer_Producer_t,
@@ -3631,14 +3749,22 @@ unsafe fn with_txn_control_async<Prepare, Run, Fut>(
         return;
     }
 
-    // Flag is now held; every path from here must release it. `prepare` runs on the
-    // calling thread (it marshals caller-owned C data that is only valid for this
-    // synchronous call) after the CAS, mirroring the sync path's order. A failure
-    // releases the flag and reports through the callback without spawning.
+    // Flag is now held; every path from here must release it, so the guard that
+    // releases it on drop is taken at once. Created here rather than inside the task,
+    // it also covers a panic on this thread before the spawn — in `prepare`, or on a
+    // poisoned `kind` lock — which unwinds through it and frees the flag before
+    // `#[ffi_guard]` reports the panic through the callback. Otherwise the flag would
+    // stay set and every later control call would be rejected as concurrent.
+    let guard = TxnControlAsyncGuard { handle_ptr: producer as usize };
+
+    // `prepare` runs on the calling thread (it marshals caller-owned C data that is
+    // only valid for this synchronous call) after the CAS, mirroring the sync path's
+    // order. A failure releases the flag and reports through the callback without
+    // spawning.
     let run = match prepare() {
         Ok(run) => run,
         Err(e) => {
-            handle.txn_control_busy.store(false, std::sync::atomic::Ordering::Release);
+            drop(guard);
             let error = box_error(e);
             unsafe { callback(error, user_data) };
             return;
@@ -3650,15 +3776,18 @@ unsafe fn with_txn_control_async<Prepare, Run, Fut>(
     let ptr = producer as usize;
     let target = OperationCallbackTarget { callback, user_data };
 
+    // Two-phase registration (see `reserve_pending_task`): nothing that can panic
+    // runs after the spawn, so a caught panic never races this task's completion.
+    let mut pending = reserve_pending_task(handle);
     let task = runtime.spawn(async move {
         let target = target;
         // Releases `txn_control_busy` on every exit of this task: the normal path
         // drops it explicitly before delivering completion (so the flag is free by
         // the time the caller observes the result, as it is on the sync path); a
         // panic in the drain or op unwinds through this binding and drops it too.
-        let guard = TxnControlAsyncGuard { handle_ptr: ptr };
+        let guard = guard;
         // SAFETY: the handle outlives this task — it is registered via
-        // `register_pending_task` below and `destroy` joins it before dropping the
+        // `reserve_pending_task` below and `destroy` joins it before dropping the
         // producer it borrows from.
         let h = unsafe { &*(ptr as *const ProducerHandle) };
         // Hand over records still queued by `send_async` before the op, exactly as
@@ -3682,7 +3811,7 @@ unsafe fn with_txn_control_async<Prepare, Run, Fut>(
         let job: CompletionJob = Box::new(move || unsafe { op_completion.fire() });
         enqueue_or_run_inline(&completion, job);
     });
-    register_pending_task(handle, task);
+    pending.push(task);
 }
 
 /// Asynchronously initializes the transactional state (the async counterpart of
@@ -3708,6 +3837,7 @@ unsafe fn with_txn_control_async<Prepare, Run, Fut>(
 /// # Safety
 ///
 /// `producer` must be a valid handle, or null.
+#[ffi_guard(on_panic = |err| unsafe { callback(box_error(err), user_data) })]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_Producer_init_transactions_async(
     producer: *mut kafka_producer_Producer_t,
@@ -3748,6 +3878,7 @@ pub unsafe extern "C" fn kafka_producer_Producer_init_transactions_async(
 /// # Safety
 ///
 /// `producer` must be a valid handle, or null.
+#[ffi_guard(on_panic = |err| unsafe { callback(box_error(err), user_data) })]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_Producer_begin_transaction_async(
     producer: *mut kafka_producer_Producer_t,
@@ -3815,6 +3946,7 @@ pub unsafe extern "C" fn kafka_producer_Producer_begin_transaction_async(
 /// - `group_metadata` must be a valid group-metadata handle, or null (null is
 ///   reported through `callback`).
 #[allow(clippy::too_many_arguments)]
+#[ffi_guard(on_panic = |err| unsafe { callback(box_error(err), user_data) })]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_Producer_send_offsets_to_transaction_async(
     producer: *mut kafka_producer_Producer_t,
@@ -3847,14 +3979,12 @@ pub unsafe extern "C" fn kafka_producer_Producer_send_offsets_to_transaction_asy
 /// Inner implementation of
 /// [`kafka_producer_Producer_send_offsets_to_transaction_async`].
 ///
-/// Separated from the `extern "C"` wrapper for the same reason as
-/// [`send_offsets_to_transaction_inner`]: a panic that would unwind out of an
-/// `extern "C"` function aborts the process, so the `count` precondition can only be
-/// tested by calling this directly.
+/// Separated from the `extern "C"` wrapper, whose `#[ffi_guard]` reports a panic
+/// here through `callback`.
 ///
 /// # Panics
 ///
-/// Panics if `count` is negative.
+/// Panics if `count` is negative: it must fail rather than be clamped.
 ///
 /// # Safety
 ///
@@ -3875,6 +4005,8 @@ unsafe fn send_offsets_to_transaction_async_inner(
     // Pure argument preconditions are checked on the calling thread before the guard
     // is taken, matching the sync path: a malformed call costs nothing and is never
     // reported as a concurrency rejection.
+    // A negative count must fail rather than be clamped; the entry point's
+    // `#[ffi_guard]` reports this panic as the call's failure.
     assert!(count >= 0, "count must not be negative");
     if group_metadata.is_null() {
         let error = box_error(Error::local_illegal_argument(
@@ -3936,6 +4068,7 @@ unsafe fn send_offsets_to_transaction_async_inner(
 /// # Safety
 ///
 /// `producer` must be a valid handle, or null.
+#[ffi_guard(on_panic = |err| unsafe { callback(box_error(err), user_data) })]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_Producer_commit_transaction_async(
     producer: *mut kafka_producer_Producer_t,
@@ -3983,6 +4116,7 @@ pub unsafe extern "C" fn kafka_producer_Producer_commit_transaction_async(
 /// # Safety
 ///
 /// `producer` must be a valid handle, or null.
+#[ffi_guard(on_panic = |err| unsafe { callback(box_error(err), user_data) })]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_Producer_abort_transaction_async(
     producer: *mut kafka_producer_Producer_t,
@@ -4013,6 +4147,7 @@ pub unsafe extern "C" fn kafka_producer_Producer_abort_transaction_async(
 /// # Safety
 ///
 /// `producer` must be a valid handle, or null.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_MockProducer_complete_next(producer: *mut kafka_producer_Producer_t) -> bool {
     if producer.is_null() {
@@ -4044,6 +4179,7 @@ pub unsafe extern "C" fn kafka_producer_MockProducer_complete_next(producer: *mu
 ///
 /// - `producer` must be a valid handle.
 /// - `error_message` must be a valid C string or null.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_MockProducer_error_next(
     producer: *mut kafka_producer_Producer_t,
@@ -4092,6 +4228,7 @@ unsafe fn mock_error(error: Errors, error_message: *const c_char) -> Error {
 /// # Safety
 ///
 /// `producer` must be a valid handle, or null.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_MockProducer_history_count(producer: *const kafka_producer_Producer_t) -> i32 {
     if producer.is_null() {
@@ -4156,6 +4293,7 @@ pub unsafe extern "C" fn kafka_producer_MockProducer_history_count(producer: *co
 ///   that commit observes the new value. (The mock's own lock keeps this a
 ///   logical race, not undefined behaviour.) Call it before the control calls it
 ///   is meant to affect.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_MockProducer_set_commit_transaction_error(
     producer: *mut kafka_producer_Producer_t,
@@ -4201,6 +4339,7 @@ pub unsafe extern "C" fn kafka_producer_MockProducer_set_commit_transaction_erro
 /// # Safety
 ///
 /// `producer` must be a valid handle, or null.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_MockProducer_sent_offsets(producer: *mut kafka_producer_Producer_t) -> bool {
     if producer.is_null() {
@@ -4249,6 +4388,7 @@ pub unsafe extern "C" fn kafka_producer_MockProducer_sent_offsets(producer: *mut
 /// - `group_id` and `topic` must each be a valid C string, or null.
 /// - `out_offset` / `out_leader_epoch` must be null or writable.
 /// - `out_metadata` must be null or writable for `metadata_cap` bytes.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_MockProducer_committed_offset(
     producer: *mut kafka_producer_Producer_t,
@@ -4313,6 +4453,7 @@ pub unsafe extern "C" fn kafka_producer_MockProducer_committed_offset(
 /// # Safety
 ///
 /// `producer` must be a valid handle, or null (no-op).
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_MockProducer_clear(producer: *mut kafka_producer_Producer_t) {
     if producer.is_null() {
@@ -4628,18 +4769,20 @@ mod tests {
         );
     }
 
-    /// A negative `count` must panic rather than be clamped. Clamping would give an
+    /// A negative `count` must fail rather than be clamped. Clamping would give an
     /// empty offsets map, which `KafkaProducer` reports as success without staging
     /// anything (it short-circuits before consulting transaction state), so the
     /// transaction would commit with no offsets staged and no error surfaced —
-    /// silently breaking exactly-once. Mirrors `send_batch`'s own count assert.
+    /// silently breaking exactly-once. Mirrors `send_batch`'s own count assert. The
+    /// assert panics and `#[ffi_guard]` turns that into the returned error, so the
+    /// real `extern "C"` entry point is called and the test process keeps running.
     #[test]
-    fn test_send_offsets_to_transaction_negative_count_panics() {
+    fn test_send_offsets_to_transaction_negative_count_returns_error() {
         let producer = kafka_producer_MockProducer_new(true);
         // `group_metadata` is null on purpose: the count assert must fire before
         // anything else is looked at, so no valid handle is needed to reach it.
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
-            send_offsets_to_transaction_inner(
+        let error = unsafe {
+            kafka_producer_Producer_send_offsets_to_transaction(
                 producer,
                 std::ptr::null(),
                 std::ptr::null(),
@@ -4649,33 +4792,36 @@ mod tests {
                 -1,
                 std::ptr::null(),
             )
-        }));
-        match result {
-            Ok(_) => panic!("Expected a panic for a negative count but the call succeeded"),
-            Err(payload) => {
-                let msg = payload
-                    .downcast_ref::<String>()
-                    .map(|s| s.as_str())
-                    .or_else(|| payload.downcast_ref::<&str>().copied())
-                    .unwrap_or("");
-                assert!(msg.contains("count must not be negative"), "unexpected panic message: {msg}");
-            },
-        }
+        };
+        assert!(!error.is_null(), "a negative count must return an error, not success");
+        assert_eq!(
+            unsafe { kafka_common_Error_code(error) },
+            kafka_common_ErrorCode_LOCAL_ILLEGAL_STATE
+        );
+        let msg = unsafe { take_error_message(error) };
+        assert!(
+            msg.starts_with(
+                "Rust panic caught at the FFI boundary in kafka_producer_Producer_send_offsets_to_transaction:"
+            ),
+            "unexpected error message: {msg}"
+        );
+        assert!(msg.contains("count must not be negative"), "unexpected error message: {msg}");
         unsafe { kafka_producer_Producer_destroy(producer) };
     }
 
     /// The async `send_offsets_to_transaction` mirror of the count assert: a negative
-    /// count is a violated precondition and panics, matching
-    /// `test_send_offsets_to_transaction_negative_count_panics`. Tested through the
-    /// inner (non-`extern "C"`) function, since a panic out of the `extern "C"`
-    /// wrapper would abort the process. The assert fires before anything else is
-    /// looked at, so the null callback `user_data` and group_metadata are never
-    /// reached.
+    /// count must fail rather than be clamped, matching
+    /// `test_send_offsets_to_transaction_negative_count_returns_error`. The real
+    /// `extern "C"` entry point is called; its `#[ffi_guard]` reports the assert's
+    /// panic through the callback, exactly once and before returning. The assert
+    /// fires before anything else is looked at, so the null arrays and
+    /// `group_metadata` are never reached.
     #[test]
-    fn test_send_offsets_to_transaction_async_negative_count_panics() {
+    fn test_send_offsets_to_transaction_async_negative_count_returns_error() {
         let producer = kafka_producer_MockProducer_new(true);
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
-            send_offsets_to_transaction_async_inner(
+        let captured = CapturedOpResult::new();
+        unsafe {
+            kafka_producer_Producer_send_offsets_to_transaction_async(
                 producer,
                 std::ptr::null(),
                 std::ptr::null(),
@@ -4685,20 +4831,22 @@ mod tests {
                 -1,
                 std::ptr::null(),
                 capture_op_result,
-                std::ptr::null_mut(),
-            )
-        }));
-        match result {
-            Ok(_) => panic!("Expected a panic for a negative count but the call succeeded"),
-            Err(payload) => {
-                let msg = payload
-                    .downcast_ref::<String>()
-                    .map(|s| s.as_str())
-                    .or_else(|| payload.downcast_ref::<&str>().copied())
-                    .unwrap_or("");
-                assert!(msg.contains("count must not be negative"), "unexpected panic message: {msg}");
-            },
+                &captured as *const CapturedOpResult as *mut std::ffi::c_void,
+            );
         }
+        assert_eq!(
+            captured.fired(),
+            1,
+            "the callback must fire exactly once, before the call returns"
+        );
+        let msg = captured.message().expect("the callback must deliver an error");
+        assert!(
+            msg.starts_with(
+                "Rust panic caught at the FFI boundary in kafka_producer_Producer_send_offsets_to_transaction_async:"
+            ),
+            "unexpected error message: {msg}"
+        );
+        assert!(msg.contains("count must not be negative"), "unexpected error message: {msg}");
         unsafe { kafka_producer_Producer_destroy(producer) };
     }
 
@@ -4999,9 +5147,256 @@ mod tests {
         unsafe { kafka_producer_Producer_destroy(producer) };
     }
 
-    /// Helper: asserts that calling `send_batch_inner` with the given arguments
-    /// panics with a message containing `expected_msg`.
-    unsafe fn assert_send_batch_panics(
+    /// Poisons `lock` the way a panic caught by `#[ffi_guard]` does: by panicking
+    /// while holding it.
+    fn poison<T>(lock: &Mutex<T>) {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = lock.lock().unwrap();
+            panic!("poisoning the lock for a test");
+        }));
+        assert!(result.is_err(), "the poisoning closure must panic");
+        assert!(lock.is_poisoned(), "the lock must be poisoned");
+    }
+
+    /// A `partitions_for_async` callback recording into a [`CapturedOpResult`]: the
+    /// error through [`capture_op_result`], and a delivered list — which no test using
+    /// it expects — as a message that fails their assertions.
+    unsafe extern "C" fn capture_partitions_result(
+        list: *mut kafka_consumer_PartitionInfoList_t,
+        error: *mut kafka_common_Error_t,
+        user_data: *mut std::ffi::c_void,
+    ) {
+        unsafe { capture_op_result(error, user_data) };
+        if !list.is_null() {
+            unsafe { crate::ffi::consumer::kafka_consumer_PartitionInfoList_destroy(list) };
+            let captured = unsafe { &*(user_data as *const CapturedOpResult) };
+            *captured.message.lock().unwrap() = Some("unexpected non-null partition list".to_owned());
+        }
+    }
+
+    /// Captures a `get_all_async` completion: how often it fired, the `count` it was
+    /// given, how many metadata entries were non-null, and the message of every error
+    /// entry. Every delivered handle is freed.
+    struct CapturedGetAll {
+        fired: std::sync::atomic::AtomicUsize,
+        count: std::sync::atomic::AtomicI32,
+        non_null_metadata: std::sync::atomic::AtomicUsize,
+        messages: Mutex<Vec<String>>,
+    }
+    impl CapturedGetAll {
+        fn new() -> Self {
+            Self {
+                fired: std::sync::atomic::AtomicUsize::new(0),
+                count: std::sync::atomic::AtomicI32::new(-1),
+                non_null_metadata: std::sync::atomic::AtomicUsize::new(0),
+                messages: Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    /// A [`kafka_producer_FutureRecordMetadata_get_all_callback_t`] that records into
+    /// the [`CapturedGetAll`] passed as `user_data`.
+    unsafe extern "C" fn capture_get_all(
+        metadata: *mut *mut kafka_producer_RecordMetadata_t,
+        errors: *mut *mut kafka_common_Error_t,
+        count: i32,
+        user_data: *mut std::ffi::c_void,
+    ) {
+        let captured = unsafe { &*(user_data as *const CapturedGetAll) };
+        for i in 0..count.max(0) as usize {
+            let entry = unsafe { *metadata.add(i) };
+            if !entry.is_null() {
+                captured.non_null_metadata.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+                unsafe { kafka_producer_RecordMetadata_destroy(entry) };
+            }
+            let error = unsafe { *errors.add(i) };
+            if !error.is_null() {
+                let msg = unsafe { CStr::from_ptr(kafka_common_Error_message(error)) }
+                    .to_string_lossy()
+                    .into_owned();
+                captured.messages.lock().unwrap().push(msg);
+                unsafe { kafka_common_Error_destroy(error) };
+            }
+        }
+        captured.count.store(count, std::sync::atomic::Ordering::Release);
+        captured.fired.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+    }
+
+    /// `get_all_async` reports a panic through its callback, exactly once and in the
+    /// callback's own shape: a null `futures` array trips a precondition assert, and
+    /// the caller still receives `count` error entries and no metadata, each naming
+    /// the entry point and the violated precondition (D4).
+    #[test]
+    fn test_get_all_async_null_futures_reports_panic_through_callback() {
+        let captured = CapturedGetAll::new();
+        unsafe {
+            kafka_producer_FutureRecordMetadata_get_all_async(
+                std::ptr::null_mut(),
+                2,
+                capture_get_all,
+                &captured as *const CapturedGetAll as *mut std::ffi::c_void,
+            );
+        }
+        // The panic path fires inline, before the call returns.
+        assert_eq!(captured.fired.load(std::sync::atomic::Ordering::Acquire), 1);
+        assert_eq!(captured.count.load(std::sync::atomic::Ordering::Acquire), 2);
+        assert_eq!(captured.non_null_metadata.load(std::sync::atomic::Ordering::Acquire), 0);
+        let messages = captured.messages.lock().unwrap().clone();
+        assert_eq!(messages.len(), 2, "one error per requested entry");
+        for msg in messages {
+            assert!(
+                msg.starts_with(
+                    "Rust panic caught at the FFI boundary in kafka_producer_FutureRecordMetadata_get_all_async:"
+                ),
+                "unexpected error message: {msg}"
+            );
+            assert!(msg.contains("futures must not be null"), "unexpected error message: {msg}");
+        }
+    }
+
+    /// A negative `count` must fail rather than be clamped, and `get_all_async` still
+    /// keeps its fire-once promise: the callback fires with empty arrays, since there
+    /// is no valid length to report the error at.
+    #[test]
+    fn test_get_all_async_negative_count_fires_callback_once() {
+        let captured = CapturedGetAll::new();
+        let mut futures: [*mut kafka_producer_FutureRecordMetadata_t; 1] = [std::ptr::null_mut()];
+        unsafe {
+            kafka_producer_FutureRecordMetadata_get_all_async(
+                futures.as_mut_ptr(),
+                -1,
+                capture_get_all,
+                &captured as *const CapturedGetAll as *mut std::ffi::c_void,
+            );
+        }
+        assert_eq!(captured.fired.load(std::sync::atomic::Ordering::Acquire), 1);
+        assert_eq!(captured.count.load(std::sync::atomic::Ordering::Acquire), 0);
+        assert!(captured.messages.lock().unwrap().is_empty());
+    }
+
+    /// After a caught panic has poisoned the handle's `kind` lock, a later
+    /// `partitions_for_async` fails through `#[ffi_guard]` (D6): the callback fires
+    /// exactly once, before the call returns, with a null list and the panic error
+    /// (D4). `destroy` must still tear the poisoned handle down.
+    #[test]
+    fn test_partitions_for_async_on_poisoned_handle_reports_panic_through_callback() {
+        let producer = kafka_producer_MockProducer_new(true);
+        poison(&unsafe { producer_handle(producer) }.kind);
+        let topic = CString::new("topic").unwrap();
+        let captured = CapturedOpResult::new();
+        unsafe {
+            kafka_producer_Producer_partitions_for_async(
+                producer,
+                topic.as_ptr(),
+                capture_partitions_result,
+                &captured as *const CapturedOpResult as *mut std::ffi::c_void,
+            );
+        }
+        assert_eq!(captured.fired(), 1, "the panic must be reported once, before the call returns");
+        let msg = captured.message().expect("the callback must deliver the panic error");
+        assert!(
+            msg.starts_with("Rust panic caught at the FFI boundary in kafka_producer_Producer_partitions_for_async:"),
+            "unexpected error message: {msg}"
+        );
+        assert!(msg.contains("PoisonError"), "unexpected error message: {msg}");
+        unsafe { kafka_producer_Producer_destroy(producer) };
+    }
+
+    /// Regression for the two-phase task registration: with `pending_tasks` poisoned,
+    /// `flush_async` must fail *before* it spawns its task. Registering after the
+    /// spawn let `#[ffi_guard]` report the panic through the callback while the
+    /// already-spawned task delivered a second completion.
+    #[test]
+    fn test_flush_async_with_poisoned_task_list_fires_callback_once() {
+        let producer = kafka_producer_MockProducer_new(true);
+        poison(&unsafe { producer_handle(producer) }.pending_tasks);
+        let captured = CapturedOpResult::new();
+        unsafe {
+            kafka_producer_Producer_flush_async(
+                producer,
+                capture_op_result,
+                &captured as *const CapturedOpResult as *mut std::ffi::c_void,
+            );
+        }
+        assert_eq!(captured.fired(), 1, "the panic must be reported before the call returns");
+        // Give a stray task ample time to deliver a second completion.
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        assert_eq!(captured.fired(), 1, "the callback must fire exactly once");
+        let msg = captured.message().expect("the callback must deliver the panic error");
+        assert!(
+            msg.starts_with("Rust panic caught at the FFI boundary in kafka_producer_Producer_flush_async:"),
+            "unexpected error message: {msg}"
+        );
+        unsafe { kafka_producer_Producer_destroy(producer) };
+    }
+
+    /// Regression for creating `TxnControlAsyncGuard` right after the CAS: a panic
+    /// between the CAS and the spawn — here the poisoned `kind` lock — must still
+    /// release the transaction-control flag, or every later control call on the
+    /// handle would be rejected as concurrent.
+    #[test]
+    fn test_commit_transaction_async_panic_before_spawn_releases_txn_flag() {
+        let producer = kafka_producer_MockProducer_new(true);
+        let handle = unsafe { producer_handle(producer) };
+        poison(&handle.kind);
+        let captured = CapturedOpResult::new();
+        unsafe {
+            kafka_producer_Producer_commit_transaction_async(
+                producer,
+                capture_op_result,
+                &captured as *const CapturedOpResult as *mut std::ffi::c_void,
+            );
+        }
+        assert_eq!(captured.fired(), 1, "the panic must be reported once, before the call returns");
+        let msg = captured.message().expect("the callback must deliver the panic error");
+        assert!(
+            msg.starts_with(
+                "Rust panic caught at the FFI boundary in kafka_producer_Producer_commit_transaction_async:"
+            ),
+            "unexpected error message: {msg}"
+        );
+        assert!(
+            !handle.txn_control_busy.load(std::sync::atomic::Ordering::Acquire),
+            "the transaction-control flag must be released on the panic path"
+        );
+        unsafe { kafka_producer_Producer_destroy(producer) };
+    }
+
+    /// `destroy` is the documented way out after a caught panic, so it must still
+    /// join the handle's tasks when both of its locks are poisoned: reading a
+    /// poisoned `pending_tasks` as empty, or panicking on `kind`, would free the
+    /// producer under a task that may still be using it.
+    #[test]
+    fn test_destroy_joins_pending_tasks_on_a_poisoned_handle() {
+        let producer = kafka_producer_MockProducer_new(true);
+        let handle = unsafe { producer_handle(producer) };
+        let finished = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let runtime = handle.kind.lock().unwrap().runtime().handle().clone();
+        {
+            let mut pending = reserve_pending_task(handle);
+            let finished = Arc::clone(&finished);
+            pending.push(runtime.spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                finished.store(true, std::sync::atomic::Ordering::Release);
+            }));
+        }
+        poison(&handle.kind);
+        poison(&handle.pending_tasks);
+        unsafe { kafka_producer_Producer_destroy(producer) };
+        assert!(
+            finished.load(std::sync::atomic::Ordering::Acquire),
+            "destroy must join every registered task before it frees the producer"
+        );
+    }
+
+    /// Helper: asserts that `kafka_producer_Producer_send_batch` with the given
+    /// arguments fails rather than aborting the process or clamping: the real
+    /// `extern "C"` entry point returns `-1`, the failure value `#[ffi_guard]`
+    /// produces for a caught panic. `send_batch` has no `out_error`, so the panic
+    /// message is checked by running `send_batch_inner` through `ffi_guard_or`, the
+    /// runtime helper the attribute expands to, with an `on_panic` that keeps the
+    /// error.
+    unsafe fn assert_send_batch_fails(
         producer: *mut kafka_producer_Producer_t,
         records: *const kafka_producer_ProducerRecord_t,
         count: i32,
@@ -5009,27 +5404,29 @@ mod tests {
         out_errors: *mut *mut kafka_common_Error_t,
         expected_msg: &str,
     ) {
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
-            send_batch_inner(producer, records, count, out_futures, out_errors);
-        }));
-        match result {
-            Ok(_) => panic!("Expected panic containing \"{expected_msg}\" but call succeeded"),
-            Err(payload) => {
-                let msg = payload
-                    .downcast_ref::<String>()
-                    .map(|s| s.as_str())
-                    .or_else(|| payload.downcast_ref::<&str>().copied())
-                    .unwrap_or("");
-                assert!(
-                    msg.contains(expected_msg),
-                    "Expected panic containing \"{expected_msg}\" but got: \"{msg}\""
-                );
+        let returned = unsafe { kafka_producer_Producer_send_batch(producer, records, count, out_futures, out_errors) };
+        assert_eq!(returned, -1, "a violated precondition must make send_batch return -1");
+
+        let mut caught: Option<Error> = None;
+        let returned = common::ffi_guard_or(
+            "kafka_producer_Producer_send_batch",
+            |error| {
+                caught = Some(error);
+                -1
             },
-        }
+            || unsafe { send_batch_inner(producer, records, count, out_futures, out_errors) },
+        );
+        assert_eq!(returned, -1);
+        let error = caught.expect("the violated precondition must panic");
+        assert!(
+            error.message().contains(expected_msg),
+            "Expected an error containing \"{expected_msg}\" but got: \"{}\"",
+            error.message()
+        );
     }
 
     #[test]
-    fn test_send_batch_null_producer_panics() {
+    fn test_send_batch_null_producer_returns_error() {
         let topic = CString::new("topic").unwrap();
         let records = [kafka_producer_ProducerRecord_t {
             topic: topic.as_ptr(),
@@ -5044,7 +5441,7 @@ mod tests {
         let mut errors: [*mut kafka_common_Error_t; 1] = [std::ptr::null_mut()];
 
         unsafe {
-            assert_send_batch_panics(
+            assert_send_batch_fails(
                 std::ptr::null_mut(),
                 records.as_ptr(),
                 1,
@@ -5056,13 +5453,13 @@ mod tests {
     }
 
     #[test]
-    fn test_send_batch_null_records_panics() {
+    fn test_send_batch_null_records_returns_error() {
         let producer = kafka_producer_MockProducer_new(true);
         let mut futures: [*mut kafka_producer_FutureRecordMetadata_t; 1] = [std::ptr::null_mut()];
         let mut errors: [*mut kafka_common_Error_t; 1] = [std::ptr::null_mut()];
 
         unsafe {
-            assert_send_batch_panics(
+            assert_send_batch_fails(
                 producer,
                 std::ptr::null(),
                 1,
@@ -5075,7 +5472,7 @@ mod tests {
     }
 
     #[test]
-    fn test_send_batch_null_out_futures_panics() {
+    fn test_send_batch_null_out_futures_returns_error() {
         let producer = kafka_producer_MockProducer_new(true);
         let topic = CString::new("topic").unwrap();
         let records = [kafka_producer_ProducerRecord_t {
@@ -5090,7 +5487,7 @@ mod tests {
         let mut errors: [*mut kafka_common_Error_t; 1] = [std::ptr::null_mut()];
 
         unsafe {
-            assert_send_batch_panics(
+            assert_send_batch_fails(
                 producer,
                 records.as_ptr(),
                 1,
@@ -5103,7 +5500,7 @@ mod tests {
     }
 
     #[test]
-    fn test_send_batch_null_out_errors_panics() {
+    fn test_send_batch_null_out_errors_returns_error() {
         let producer = kafka_producer_MockProducer_new(true);
         let topic = CString::new("topic").unwrap();
         let records = [kafka_producer_ProducerRecord_t {
@@ -5118,7 +5515,7 @@ mod tests {
         let mut futures: [*mut kafka_producer_FutureRecordMetadata_t; 1] = [std::ptr::null_mut()];
 
         unsafe {
-            assert_send_batch_panics(
+            assert_send_batch_fails(
                 producer,
                 records.as_ptr(),
                 1,
@@ -5130,8 +5527,10 @@ mod tests {
         }
     }
 
+    /// A negative `count` must fail rather than be clamped: clamping would send
+    /// nothing and report success.
     #[test]
-    fn test_send_batch_negative_count_panics() {
+    fn test_send_batch_negative_count_returns_error() {
         let producer = kafka_producer_MockProducer_new(true);
         let topic = CString::new("topic").unwrap();
         let records = [kafka_producer_ProducerRecord_t {
@@ -5147,7 +5546,7 @@ mod tests {
         let mut errors: [*mut kafka_common_Error_t; 1] = [std::ptr::null_mut()];
 
         unsafe {
-            assert_send_batch_panics(
+            assert_send_batch_fails(
                 producer,
                 records.as_ptr(),
                 -1,

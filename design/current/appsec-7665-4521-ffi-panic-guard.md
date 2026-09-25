@@ -321,3 +321,103 @@ code and record the difference here.
    the 15 examples, and the xtask clippy pass; `cargo xtask lint` itself was
    still run for its doc-hygiene and module-path-hygiene steps, which pass
    before its clippy step reaches the file.
+8. **§2.2 — D4 applies to 80 of the 86 callback sites; six keep the plain
+   guard.** Their synchronous failures are documented as *not* invoking the
+   callback, so firing it on a panic would break that contract:
+   `kafka_consumer_Consumer_commit_async_with_callback` and
+   `..._commit_async_offsets_with_callback` report through the returned error;
+   `kafka_producer_Producer_send_with_callback` and
+   `kafka_producer_Producer_send_async` through `out_error` ("`callback` is
+   **not** invoked"); `kafka_producer_Producer_send_batch_async` through
+   `out_errors[i]` and its return value; and
+   `kafka_producer_RecordMetadata_copy`'s callback is a field sink with no
+   error parameter. D2/D3 give them the error handle, `out_error` plus
+   null/unit, `-1`, and log-only respectively. Of the other 80, 55 fire
+   `(null, error, user_data)`, 23 `(error, user_data)`,
+   `kafka_consumer_Consumer_position_async` fires `(0, error, user_data)` (its
+   typedef leads with the `i64` position), and
+   `kafka_producer_FutureRecordMetadata_get_all_async` fires in its own shape
+   (note 9).
+9. **§2.2 — `get_all_async` reports a panic in its callback's shape.** The
+   typedef delivers parallel arrays, so the on-panic path
+   (`fire_get_all_callback_with_error`) passes `count` null metadata entries
+   and `count` copies of the panic error. A negative `count` — the precondition
+   whose assert panics — has no length to report at: the callback still fires
+   once, with empty arrays, and the panic is visible only in the guard's log
+   line. Tests: `test_get_all_async_null_futures_reports_panic_through_callback`,
+   `test_get_all_async_negative_count_fires_callback_once`.
+10. **§2.2 — D4's "spawn is the last fallible step" did not hold in the
+    producer.** `flush_or_close_async`, `kafka_producer_Producer_partitions_for_async`
+    and `with_txn_control_async` spawned their task and only then called
+    `register_pending_task`, whose `pending_tasks.lock().unwrap()` panics once
+    that lock is poisoned: the guard would fire the callback while the spawned
+    task delivered a second completion, and the unregistered task would escape
+    `destroy`'s join. Now a two-phase registration: `reserve_pending_task`
+    locks, prunes finished handles and reserves room *before* the spawn, and
+    the caller `push`es the `JoinHandle` afterwards, which cannot fail
+    (`build_producer_handle` uses it too, for uniformity). Test:
+    `test_flush_async_with_poisoned_task_list_fires_callback_once`. The
+    consumer and admin async paths needed no change: between their guard
+    `acquire` (or null check) and the spawn only clones and pointer casts run,
+    and admin's `submit` — which can panic — runs before it, with `complete`
+    never invoked on that path.
+11. **§2.2 — the transaction-control flag leaked on a panic before the
+    spawn.** `with_txn_control_async` took `txn_control_busy` by CAS but created
+    its `TxnControlAsyncGuard` inside the spawned task, so a panic in `prepare`
+    or on a poisoned `kind` lock left the flag set, and every later control call
+    on the handle was rejected as concurrent. The guard is now created right
+    after the CAS and moved into the task; on the calling thread it is released
+    by unwinding before `#[ffi_guard]` fires the callback. Test:
+    `test_commit_transaction_async_panic_before_spawn_releases_txn_flag`.
+12. **§2.2 — D6 is incomplete for `kafka_producer_Producer_destroy`.** The
+    header tells the caller to destroy a handle after a caught panic, but
+    destroy did `kind.lock().unwrap()` (a panic on a poisoned handle, unwinding
+    through the teardown and dropping the producer before its runtime while a
+    task could still be using it) and read a poisoned `pending_tasks` as empty
+    (skipping the join, the same use-after-free window). Destroy now takes both
+    with `into_inner().unwrap_or_else(PoisonError::into_inner)`: the one
+    recovery D6's "no `into_inner()`" rule has to allow, since it tears the
+    state down rather than using it. The consumer and admin destroys take no
+    lock. Test: `test_destroy_joins_pending_tasks_on_a_poisoned_handle`.
+13. **§2.2 — count audit: no exceptions.** 194 exported functions return an
+    integer; 91 end in `_count`. The other 103 are ids, partitions, offsets,
+    timestamps, epochs, sizes and enum codes, whose failure value is already
+    -1 where they have one (`kafka_admin_TopicMetadataAndConfig_num_partitions`
+    documents -1 when the metadata is unavailable;
+    `kafka_consumer_ConsumerRecord_serialized_key_size` is -1 for a null key),
+    plus `kafka_producer_Producer_send_batch` / `..._send_batch_async`, which
+    return how many of the caller's own `count` records were accepted, where -1
+    is a distinct failure. So no `fallback` override was needed anywhere.
+14. **§2.2 — `# Panics` docs on exported functions stay verbatim.** Five
+    producer entry points (`send_batch`, `send_batch_async`,
+    `FutureRecordMetadata_get_all_async`, `send_offsets_to_transaction`,
+    `..._async`) document "Panics if ...". Rewording them would change the
+    header, which D9 requires byte-identical apart from the preamble. Kept
+    verbatim they still name the violated precondition, and the preamble says
+    what the caller observes (a failure value, not an abort). The docs of the
+    three non-exported `_inner` helpers were updated.
+15. **§2.2 — D7 named two `send_batch` panic tests; there were five.**
+    `null_producer`, `null_records`, `null_out_futures`, `null_out_errors` and
+    `negative_count` all became `*_returns_error` through
+    `assert_send_batch_fails`, which calls the real entry point (asserting `-1`)
+    and, because `send_batch` has no `out_error`, checks the message by running
+    `send_batch_inner` through `ffi_guard_or` with an `on_panic` that keeps the
+    error.
+16. **§2.2 — `send_batch` / `send_batch_async` after a panic mid-loop.** The
+    `-1` carries no index, so entries already written to `out_futures` /
+    `out_errors` go unreported (a caller that does not zero the arrays and free
+    what is non-null leaks them), and records `send_batch_async` had already
+    accepted still deliver their callbacks. Reachable only through a bug — the
+    asserts run before the first write — and not documented in the header
+    (D9); the preamble's "destroy that handle" is the guidance.
+17. **§2.2 — §4.5 extends to the dispatcher thread.** It runs completion jobs
+    without catching, so a panicking job ends that thread; `enqueue_or_run_inline`
+    then runs later jobs inline on the task that produced them. Nothing crosses
+    into C, so this change leaves it alone.
+18. **§3 gates — the known environmental ctest failure no longer occurs.** The
+    B3 case of `bindings/c/tests/test_kafka_admin.c` (now
+    `test_kafka_admin_b3_empty_batches_need_no_broker`, line 488) connects to
+    `NO_BROKER_BOOTSTRAP` (`127.0.0.1:1`) rather than `localhost:9092` since
+    `5fc83544` (#191), as its comment at 477–487 explains. With
+    `kafka-perf-local` accepting connections on 9092, all 7 ctest executables
+    pass, so there is no environmental failure to report.

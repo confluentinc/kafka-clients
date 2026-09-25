@@ -40,6 +40,7 @@ use std::panic::AssertUnwindSafe;
 
 use crate::common::Error;
 use crate::common::protocol::Errors;
+use crate::ffi::ffi_guard;
 // The 162 enumerators are spelled out in full (see
 // [`kafka_common_ErrorCode_t`]), so this glob keeps the match arms in
 // `error_code_of` readable without repeating the type name on each one.
@@ -88,9 +89,6 @@ pub(crate) fn init_default_logger() {
 /// `on_panic` must not panic itself: nothing is left to catch it.
 ///
 /// No Java counterpart: Java has no C boundary.
-// Transitional: plan §2.2 routes every entry point through this and removes
-// this allow.
-#[allow(dead_code)]
 pub(crate) fn ffi_guard_or<R>(fn_name: &'static str, on_panic: impl FnOnce(Error) -> R, body: impl FnOnce() -> R) -> R {
     match std::panic::catch_unwind(AssertUnwindSafe(body)) {
         Ok(value) => value,
@@ -115,8 +113,6 @@ pub(crate) fn ffi_guard_or<R>(fn_name: &'static str, on_panic: impl FnOnce(Error
 /// panic message is the payload when it is a `&str` or a `String`, which is
 /// what `panic!`, `assert!`, `unwrap` and `expect` produce, and
 /// `non-string panic payload` otherwise (`std::panic::panic_any`).
-// Transitional: see `ffi_guard_or`.
-#[allow(dead_code)]
 pub(crate) fn panic_error(fn_name: &str, payload: &(dyn Any + Send)) -> Error {
     let message = if let Some(message) = payload.downcast_ref::<&'static str>() {
         message
@@ -197,6 +193,7 @@ pub(crate) unsafe fn error_ref(error: *const kafka_common_Error_t) -> &'static E
 /// # Safety
 ///
 /// `message` must be null or a valid, null-terminated C string.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_new(code: i32, message: *const c_char) -> *mut kafka_common_Error_t {
     let error = match i16::try_from(code) {
@@ -731,6 +728,7 @@ pub(crate) fn error_code_of(error: &Error) -> kafka_common_ErrorCode_t {
 /// # Safety
 ///
 /// `error` must be a valid handle from a function that returned an error, or null.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_code(error: *const kafka_common_Error_t) -> kafka_common_ErrorCode_t {
     if error.is_null() {
@@ -757,6 +755,7 @@ pub unsafe extern "C" fn kafka_common_Error_code(error: *const kafka_common_Erro
 ///
 /// `error` must be a valid handle from a function that returned an error, or null.
 /// The returned pointer must not be used after the error is destroyed.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_message(error: *const kafka_common_Error_t) -> *const c_char {
     if error.is_null() {
@@ -778,6 +777,7 @@ pub unsafe extern "C" fn kafka_common_Error_message(error: *const kafka_common_E
 /// # Safety
 ///
 /// `error` must be a valid handle from a function that returned an error, or null.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_is_retriable_error(error: *const kafka_common_Error_t) -> bool {
     if error.is_null() {
@@ -819,6 +819,7 @@ pub unsafe extern "C" fn kafka_common_Error_is_retriable_error(error: *const kaf
 /// # Safety
 ///
 /// `error` must be a valid handle from a function that returned an error, or null.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_is_kafka_error(error: *const kafka_common_Error_t) -> bool {
     if error.is_null() {
@@ -844,6 +845,7 @@ pub unsafe extern "C" fn kafka_common_Error_is_kafka_error(error: *const kafka_c
 /// # Safety
 ///
 /// `error` must be a valid handle from a function that returned an error, or null.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_is_api_error(error: *const kafka_common_Error_t) -> bool {
     if error.is_null() {
@@ -869,6 +871,7 @@ pub unsafe extern "C" fn kafka_common_Error_is_api_error(error: *const kafka_com
 /// # Safety
 ///
 /// `error` must be a valid handle from a function that returned an error, or null.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_is_refresh_retriable_error(error: *const kafka_common_Error_t) -> bool {
     if error.is_null() {
@@ -894,6 +897,7 @@ pub unsafe extern "C" fn kafka_common_Error_is_refresh_retriable_error(error: *c
 /// # Safety
 ///
 /// `error` must be a valid handle from a function that returned an error, or null.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_is_invalid_metadata_error(error: *const kafka_common_Error_t) -> bool {
     if error.is_null() {
@@ -919,6 +923,7 @@ pub unsafe extern "C" fn kafka_common_Error_is_invalid_metadata_error(error: *co
 /// # Safety
 ///
 /// `error` must be a valid handle from a function that returned an error, or null.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_is_authentication_error(error: *const kafka_common_Error_t) -> bool {
     if error.is_null() {
@@ -944,6 +949,7 @@ pub unsafe extern "C" fn kafka_common_Error_is_authentication_error(error: *cons
 /// # Safety
 ///
 /// `error` must be a valid handle from a function that returned an error, or null.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_is_authorization_error(error: *const kafka_common_Error_t) -> bool {
     if error.is_null() {
@@ -971,6 +977,7 @@ pub unsafe extern "C" fn kafka_common_Error_is_authorization_error(error: *const
 /// # Safety
 ///
 /// `error` must be a valid handle from a function that returned an error, or null.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_is_invalid_configuration_error(error: *const kafka_common_Error_t) -> bool {
     if error.is_null() {
@@ -997,6 +1004,7 @@ pub unsafe extern "C" fn kafka_common_Error_is_invalid_configuration_error(error
 /// # Safety
 ///
 /// `error` must be a valid handle from a function that returned an error, or null.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_is_application_recoverable_error(
     error: *const kafka_common_Error_t,
@@ -1024,6 +1032,7 @@ pub unsafe extern "C" fn kafka_common_Error_is_application_recoverable_error(
 /// # Safety
 ///
 /// `error` must be a valid handle from a function that returned an error, or null.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_is_invalid_offset_error(error: *const kafka_common_Error_t) -> bool {
     if error.is_null() {
@@ -1049,6 +1058,7 @@ pub unsafe extern "C" fn kafka_common_Error_is_invalid_offset_error(error: *cons
 /// # Safety
 ///
 /// `error` must be a valid handle from a function that returned an error, or null.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_is_out_of_order_sequence_error(error: *const kafka_common_Error_t) -> bool {
     if error.is_null() {
@@ -1074,6 +1084,7 @@ pub unsafe extern "C" fn kafka_common_Error_is_out_of_order_sequence_error(error
 /// # Safety
 ///
 /// `error` must be a valid handle from a function that returned an error, or null.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_is_serialization_error(error: *const kafka_common_Error_t) -> bool {
     if error.is_null() {
@@ -1099,6 +1110,7 @@ pub unsafe extern "C" fn kafka_common_Error_is_serialization_error(error: *const
 /// # Safety
 ///
 /// `error` must be a valid handle from a function that returned an error, or null.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_is_timeout_error(error: *const kafka_common_Error_t) -> bool {
     if error.is_null() {
@@ -1124,6 +1136,7 @@ pub unsafe extern "C" fn kafka_common_Error_is_timeout_error(error: *const kafka
 /// # Safety
 ///
 /// `error` must be a valid handle from a function that returned an error, or null.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_is_consumer_invalid_offset_error(
     error: *const kafka_common_Error_t,
@@ -1152,6 +1165,7 @@ pub unsafe extern "C" fn kafka_common_Error_is_consumer_invalid_offset_error(
 /// # Safety
 ///
 /// `error` must be a valid handle from a function that returned an error, or null.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_is_consumer_offset_out_of_range_error(
     error: *const kafka_common_Error_t,
@@ -1179,6 +1193,7 @@ pub unsafe extern "C" fn kafka_common_Error_is_consumer_offset_out_of_range_erro
 /// # Safety
 ///
 /// `error` must be a valid handle from a function that returned an error, or null.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_is_transaction_abortable_error(error: *const kafka_common_Error_t) -> bool {
     if error.is_null() {
@@ -1195,6 +1210,7 @@ pub unsafe extern "C" fn kafka_common_Error_is_transaction_abortable_error(error
 ///
 /// - `error` must be null or a valid handle from a function that returned an error.
 /// - After this call, the pointer is invalid and must not be used.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_destroy(error: *mut kafka_common_Error_t) {
     if !error.is_null() {
@@ -1246,6 +1262,7 @@ pub struct kafka_common_TopicAuthorizationError_t {
 /// # Safety
 ///
 /// `error` must be a valid handle from a function that returned an error, or null.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_topic_authorization(
     error: *const kafka_common_Error_t,
@@ -1265,6 +1282,7 @@ pub unsafe extern "C" fn kafka_common_Error_topic_authorization(
 /// # Safety
 ///
 /// `handle` must be a valid, non-null [`kafka_common_TopicAuthorizationError_t`].
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_TopicAuthorizationError_unauthorized_topics(
     handle: *const kafka_common_TopicAuthorizationError_t,
@@ -1285,6 +1303,7 @@ pub struct kafka_common_GroupAuthorizationError_t {
 /// # Safety
 ///
 /// `error` must be a valid handle from a function that returned an error, or null.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_group_authorization(
     error: *const kafka_common_Error_t,
@@ -1304,6 +1323,7 @@ pub unsafe extern "C" fn kafka_common_Error_group_authorization(
 /// # Safety
 ///
 /// `handle` must be a valid, non-null [`kafka_common_GroupAuthorizationError_t`].
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_GroupAuthorizationError_group_id(
     handle: *const kafka_common_GroupAuthorizationError_t,
@@ -1324,6 +1344,7 @@ pub struct kafka_common_InvalidTopicError_t {
 /// # Safety
 ///
 /// `error` must be a valid handle from a function that returned an error, or null.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_invalid_topic(
     error: *const kafka_common_Error_t,
@@ -1343,6 +1364,7 @@ pub unsafe extern "C" fn kafka_common_Error_invalid_topic(
 /// # Safety
 ///
 /// `handle` must be a valid, non-null [`kafka_common_InvalidTopicError_t`].
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_InvalidTopicError_invalid_topics(
     handle: *const kafka_common_InvalidTopicError_t,
@@ -1363,6 +1385,7 @@ pub struct kafka_common_DuplicateResourceError_t {
 /// # Safety
 ///
 /// `error` must be a valid handle from a function that returned an error, or null.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_duplicate_resource(
     error: *const kafka_common_Error_t,
@@ -1383,6 +1406,7 @@ pub unsafe extern "C" fn kafka_common_Error_duplicate_resource(
 /// # Safety
 ///
 /// `handle` must be a valid, non-null [`kafka_common_DuplicateResourceError_t`].
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_DuplicateResourceError_resource(
     handle: *const kafka_common_DuplicateResourceError_t,
@@ -1406,6 +1430,7 @@ pub struct kafka_common_ResourceNotFoundError_t {
 /// # Safety
 ///
 /// `error` must be a valid handle from a function that returned an error, or null.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_resource_not_found(
     error: *const kafka_common_Error_t,
@@ -1426,6 +1451,7 @@ pub unsafe extern "C" fn kafka_common_Error_resource_not_found(
 /// # Safety
 ///
 /// `handle` must be a valid, non-null [`kafka_common_ResourceNotFoundError_t`].
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_ResourceNotFoundError_resource(
     handle: *const kafka_common_ResourceNotFoundError_t,
@@ -1449,6 +1475,7 @@ pub struct kafka_common_ThrottlingQuotaExceededError_t {
 /// # Safety
 ///
 /// `error` must be a valid handle from a function that returned an error, or null.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_throttling_quota_exceeded(
     error: *const kafka_common_Error_t,
@@ -1467,6 +1494,7 @@ pub unsafe extern "C" fn kafka_common_Error_throttling_quota_exceeded(
 /// # Safety
 ///
 /// `handle` must be a valid, non-null [`kafka_common_ThrottlingQuotaExceededError_t`].
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_ThrottlingQuotaExceededError_throttle_time_ms(
     handle: *const kafka_common_ThrottlingQuotaExceededError_t,
@@ -1487,6 +1515,7 @@ pub struct kafka_common_CorrelationIdMismatchError_t {
 /// # Safety
 ///
 /// `error` must be a valid handle from a function that returned an error, or null.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_correlation_id_mismatch(
     error: *const kafka_common_Error_t,
@@ -1505,6 +1534,7 @@ pub unsafe extern "C" fn kafka_common_Error_correlation_id_mismatch(
 /// # Safety
 ///
 /// `handle` must be a valid, non-null [`kafka_common_CorrelationIdMismatchError_t`].
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_CorrelationIdMismatchError_request_correlation_id(
     handle: *const kafka_common_CorrelationIdMismatchError_t,
@@ -1518,6 +1548,7 @@ pub unsafe extern "C" fn kafka_common_CorrelationIdMismatchError_request_correla
 /// # Safety
 ///
 /// `handle` must be a valid, non-null [`kafka_common_CorrelationIdMismatchError_t`].
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_CorrelationIdMismatchError_response_correlation_id(
     handle: *const kafka_common_CorrelationIdMismatchError_t,
@@ -1538,6 +1569,7 @@ pub struct kafka_common_RecordDeserializationError_t {
 /// # Safety
 ///
 /// `error` must be a valid handle from a function that returned an error, or null.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_record_deserialization(
     error: *const kafka_common_Error_t,
@@ -1560,6 +1592,7 @@ pub unsafe extern "C" fn kafka_common_Error_record_deserialization(
 ///
 /// `handle` must be a valid, non-null [`kafka_common_RecordDeserializationError_t`];
 /// `out_origin` must be a valid pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_RecordDeserializationError_origin(
     handle: *const kafka_common_RecordDeserializationError_t,
@@ -1587,6 +1620,7 @@ pub unsafe extern "C" fn kafka_common_RecordDeserializationError_origin(
 /// # Safety
 ///
 /// `handle` must be a valid, non-null [`kafka_common_RecordDeserializationError_t`].
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_RecordDeserializationError_partition(
     handle: *const kafka_common_RecordDeserializationError_t,
@@ -1600,6 +1634,7 @@ pub unsafe extern "C" fn kafka_common_RecordDeserializationError_partition(
 /// # Safety
 ///
 /// `handle` must be a valid, non-null [`kafka_common_RecordDeserializationError_t`].
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_RecordDeserializationError_offset(
     handle: *const kafka_common_RecordDeserializationError_t,
@@ -1613,6 +1648,7 @@ pub unsafe extern "C" fn kafka_common_RecordDeserializationError_offset(
 /// # Safety
 ///
 /// `handle` must be a valid, non-null [`kafka_common_RecordDeserializationError_t`].
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_RecordDeserializationError_timestamp(
     handle: *const kafka_common_RecordDeserializationError_t,
@@ -1628,6 +1664,7 @@ pub unsafe extern "C" fn kafka_common_RecordDeserializationError_timestamp(
 /// # Safety
 ///
 /// `handle` must be a valid, non-null [`kafka_common_RecordDeserializationError_t`].
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_RecordDeserializationError_timestamp_type(
     handle: *const kafka_common_RecordDeserializationError_t,
@@ -1644,6 +1681,7 @@ pub unsafe extern "C" fn kafka_common_RecordDeserializationError_timestamp_type(
 ///
 /// `handle` must be a valid, non-null [`kafka_common_RecordDeserializationError_t`];
 /// `out_len` must be a valid pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_RecordDeserializationError_key_buffer(
     handle: *const kafka_common_RecordDeserializationError_t,
@@ -1674,6 +1712,7 @@ pub unsafe extern "C" fn kafka_common_RecordDeserializationError_key_buffer(
 ///
 /// `handle` must be a valid, non-null [`kafka_common_RecordDeserializationError_t`];
 /// `out_len` must be a valid pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_RecordDeserializationError_value_buffer(
     handle: *const kafka_common_RecordDeserializationError_t,
@@ -1702,6 +1741,7 @@ pub unsafe extern "C" fn kafka_common_RecordDeserializationError_value_buffer(
 /// # Safety
 ///
 /// `handle` must be a valid, non-null [`kafka_common_RecordDeserializationError_t`].
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_RecordDeserializationError_header_count(
     handle: *const kafka_common_RecordDeserializationError_t,
@@ -1717,6 +1757,7 @@ pub unsafe extern "C" fn kafka_common_RecordDeserializationError_header_count(
 ///
 /// `handle` must be a valid, non-null [`kafka_common_RecordDeserializationError_t`];
 /// `out_len` must be a valid pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_RecordDeserializationError_header_key(
     handle: *const kafka_common_RecordDeserializationError_t,
@@ -1753,6 +1794,7 @@ pub unsafe extern "C" fn kafka_common_RecordDeserializationError_header_key(
 ///
 /// `handle` must be a valid, non-null [`kafka_common_RecordDeserializationError_t`];
 /// `out_len` must be a valid pointer.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_RecordDeserializationError_header_value(
     handle: *const kafka_common_RecordDeserializationError_t,
@@ -1793,6 +1835,7 @@ pub struct kafka_common_QuotaViolationError_t {
 /// # Safety
 ///
 /// `error` must be a valid handle from a function that returned an error, or null.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_quota_violation(
     error: *const kafka_common_Error_t,
@@ -1815,6 +1858,7 @@ pub unsafe extern "C" fn kafka_common_Error_quota_violation(
 /// # Safety
 ///
 /// `handle` must be a valid, non-null [`kafka_common_QuotaViolationError_t`].
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_QuotaViolationError_metric_name(
     handle: *const kafka_common_QuotaViolationError_t,
@@ -1829,6 +1873,7 @@ pub unsafe extern "C" fn kafka_common_QuotaViolationError_metric_name(
 /// # Safety
 ///
 /// `handle` must be a valid, non-null [`kafka_common_QuotaViolationError_t`].
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_QuotaViolationError_metric_group(
     handle: *const kafka_common_QuotaViolationError_t,
@@ -1842,6 +1887,7 @@ pub unsafe extern "C" fn kafka_common_QuotaViolationError_metric_group(
 /// # Safety
 ///
 /// `handle` must be a valid, non-null [`kafka_common_QuotaViolationError_t`].
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_QuotaViolationError_value(
     handle: *const kafka_common_QuotaViolationError_t,
@@ -1855,6 +1901,7 @@ pub unsafe extern "C" fn kafka_common_QuotaViolationError_value(
 /// # Safety
 ///
 /// `handle` must be a valid, non-null [`kafka_common_QuotaViolationError_t`].
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_QuotaViolationError_bound(
     handle: *const kafka_common_QuotaViolationError_t,
@@ -1875,6 +1922,7 @@ pub struct kafka_common_ConsumerLogTruncationError_t {
 /// # Safety
 ///
 /// `error` must be a valid handle from a function that returned an error, or null.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_consumer_log_truncation(
     error: *const kafka_common_Error_t,
@@ -1894,6 +1942,7 @@ pub unsafe extern "C" fn kafka_common_Error_consumer_log_truncation(
 /// # Safety
 ///
 /// `handle` must be a valid, non-null [`kafka_common_ConsumerLogTruncationError_t`].
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_ConsumerLogTruncationError_offset_out_of_range_partitions(
     handle: *const kafka_common_ConsumerLogTruncationError_t,
@@ -1908,6 +1957,7 @@ pub unsafe extern "C" fn kafka_common_ConsumerLogTruncationError_offset_out_of_r
 /// # Safety
 ///
 /// `handle` must be a valid, non-null [`kafka_common_ConsumerLogTruncationError_t`].
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_ConsumerLogTruncationError_divergent_offsets(
     handle: *const kafka_common_ConsumerLogTruncationError_t,
@@ -1928,6 +1978,7 @@ pub struct kafka_common_ConsumerNoOffsetForPartitionError_t {
 /// # Safety
 ///
 /// `error` must be a valid handle from a function that returned an error, or null.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_consumer_no_offset_for_partition(
     error: *const kafka_common_Error_t,
@@ -1950,6 +2001,7 @@ pub unsafe extern "C" fn kafka_common_Error_consumer_no_offset_for_partition(
 /// # Safety
 ///
 /// `handle` must be a valid, non-null [`kafka_common_ConsumerNoOffsetForPartitionError_t`].
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_ConsumerNoOffsetForPartitionError_partitions(
     handle: *const kafka_common_ConsumerNoOffsetForPartitionError_t,
@@ -1970,6 +2022,7 @@ pub struct kafka_common_ConsumerOffsetOutOfRangeError_t {
 /// # Safety
 ///
 /// `error` must be a valid handle from a function that returned an error, or null.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_consumer_offset_out_of_range(
     error: *const kafka_common_Error_t,
@@ -1989,6 +2042,7 @@ pub unsafe extern "C" fn kafka_common_Error_consumer_offset_out_of_range(
 /// # Safety
 ///
 /// `handle` must be a valid, non-null [`kafka_common_ConsumerOffsetOutOfRangeError_t`].
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_ConsumerOffsetOutOfRangeError_offset_out_of_range_partitions(
     handle: *const kafka_common_ConsumerOffsetOutOfRangeError_t,
@@ -2009,6 +2063,7 @@ pub struct kafka_common_RecordTooLargeError_t {
 /// # Safety
 ///
 /// `error` must be a valid handle from a function that returned an error, or null.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_record_too_large(
     error: *const kafka_common_Error_t,
@@ -2031,6 +2086,7 @@ pub unsafe extern "C" fn kafka_common_Error_record_too_large(
 /// # Safety
 ///
 /// `handle` must be a valid, non-null [`kafka_common_RecordTooLargeError_t`].
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_RecordTooLargeError_record_too_large_partitions(
     handle: *const kafka_common_RecordTooLargeError_t,
@@ -2450,7 +2506,6 @@ mod tests {
         kafka_consumer_TopicPartitionList_destroy, kafka_consumer_TopicPartitionList_get,
         kafka_consumer_string_destroy,
     };
-    use crate::ffi::ffi_guard;
     use std::cell::RefCell;
     use std::collections::{BTreeMap, HashMap, HashSet};
     use std::ffi::CStr;

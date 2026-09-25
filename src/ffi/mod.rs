@@ -63,7 +63,93 @@ pub(crate) mod producer;
 
 /// Guards an exported function against a Rust panic unwinding into its C
 /// caller; see the module docs and the `ffi-macros` crate.
-// Transitional: plan §2.2 applies the attribute to every entry point and
-// removes this allow.
-#[allow(unused_imports)]
 pub(crate) use ffi_macros::ffi_guard;
+
+#[cfg(test)]
+mod tests {
+    /// Every file in this module that exports functions, with its source text.
+    const SOURCES: [(&str, &str); 5] = [
+        ("src/ffi/admin.rs", include_str!("admin.rs")),
+        ("src/ffi/common.rs", include_str!("common.rs")),
+        ("src/ffi/consumer.rs", include_str!("consumer.rs")),
+        ("src/ffi/consumer_handle.rs", include_str!("consumer_handle.rs")),
+        ("src/ffi/producer.rs", include_str!("producer.rs")),
+    ];
+
+    /// Whether the attribute that ends on the line just above `index` is an
+    /// `#[ffi_guard...]`. The attribute may span several lines, so this walks up
+    /// from its last line to the line that opens it.
+    fn preceded_by_ffi_guard(lines: &[&str], index: usize) -> bool {
+        let Some(mut line) = index.checked_sub(1) else {
+            return false;
+        };
+        if !lines[line].trim_end().ends_with(']') {
+            return false;
+        }
+        loop {
+            let text = lines[line].trim_start();
+            if text.starts_with("#[") {
+                return text.starts_with("#[ffi_guard");
+            }
+            if line == 0 || text.is_empty() || text.starts_with("//") {
+                return false;
+            }
+            line -= 1;
+        }
+    }
+
+    /// Every exported function is guarded against a panic unwinding into C (D8 of
+    /// `design/current/appsec-7665-4521-ffi-panic-guard.md`): each
+    /// `#[unsafe(no_mangle)]` must be immediately preceded by the last line of an
+    /// `#[ffi_guard...]` attribute. A new entry point without one fails here with
+    /// its file and line.
+    #[test]
+    fn test_every_exported_function_is_guarded() {
+        let mut offenders = Vec::new();
+        let mut total = 0;
+        for (file, text) in SOURCES {
+            let lines: Vec<&str> = text.lines().collect();
+            let mut exported = 0;
+            for (index, line) in lines.iter().enumerate() {
+                if line.trim() != "#[unsafe(no_mangle)]" {
+                    continue;
+                }
+                exported += 1;
+                if !preceded_by_ffi_guard(&lines, index) {
+                    offenders.push(format!("{file}:{}", index + 1));
+                }
+            }
+            assert!(exported > 0, "{file} exports no function; the list of sources is stale");
+            total += exported;
+        }
+        assert!(
+            offenders.is_empty(),
+            "exported functions without #[ffi_guard] directly above #[unsafe(no_mangle)]: {offenders:?}"
+        );
+        // Sanity check that the scan saw the whole surface rather than, say, a
+        // renamed attribute spelling: 811 when the guard was introduced.
+        assert!(total >= 811, "only {total} exported functions found");
+    }
+
+    /// The scanner itself: a guard directly above passes, including one whose
+    /// attribute spans lines; anything else between the guard and
+    /// `#[unsafe(no_mangle)]`, or no guard at all, fails.
+    #[test]
+    fn test_preceded_by_ffi_guard() {
+        let guarded = ["/// Docs.", "#[ffi_guard]", "#[unsafe(no_mangle)]"];
+        assert!(preceded_by_ffi_guard(&guarded, 2));
+        let multi_line = [
+            "#[ffi_guard(",
+            "    on_panic = |err| unsafe { callback(box_error(err), user_data) }",
+            ")]",
+            "#[unsafe(no_mangle)]",
+        ];
+        assert!(preceded_by_ffi_guard(&multi_line, 3));
+        let other_attribute_between = ["#[ffi_guard]", "#[allow(dead_code)]", "#[unsafe(no_mangle)]"];
+        assert!(!preceded_by_ffi_guard(&other_attribute_between, 2));
+        let unguarded = ["/// Docs.", "#[unsafe(no_mangle)]"];
+        assert!(!preceded_by_ffi_guard(&unguarded, 1));
+        let first_line = ["#[unsafe(no_mangle)]"];
+        assert!(!preceded_by_ffi_guard(&first_line, 0));
+    }
+}
