@@ -257,8 +257,10 @@ def _bare_soak_client():
 def _fetched_record(offset, msgid=1):
     soak_record = SoakRecord(msgid=msgid, send_time_ms=int(time.time() * 1000))
     value = soak_record.serialize()
-    return SimpleNamespace(topic="t", partition=0, offset=offset, value=value,
-                           serialized_value_size=len(value))
+    # Shaped like confluent_kafka's ConsumerRecord: accessors are methods.
+    return SimpleNamespace(topic=lambda: "t", partition=lambda: 0,
+                           offset=lambda: offset, value=lambda: value,
+                           serialized_value_size=lambda: len(value))
 
 
 def test_consume_record_reports_the_actual_duplicate_count():
@@ -574,7 +576,7 @@ def test_module_imports_without_bindings():
     import soakclient
 
     assert soakclient.__name__ == "soakclient"
-    for module in ("producer", "consumer", "_confluentkafka"):
+    for module in ("confluent_kafka", "admin", "_confluentkafka"):
         assert not hasattr(soakclient, module), \
             f"soakclient must not bind {module} at module scope"
 
@@ -589,8 +591,13 @@ def test_bindings_accessor_reports_a_missing_binding_clearly(monkeypatch):
     """
     import soakclient
 
-    monkeypatch.setitem(sys.modules, "producer", None)
-    monkeypatch.setitem(sys.modules, "consumer", None)
+    # `from pkg.sub import x` finds an already-imported `pkg.sub` in
+    # sys.modules without consulting `pkg`, so every module the accessor
+    # imports is blocked, not just the package root.
+    for module in ("admin", "confluent_kafka", "confluent_kafka.common",
+                   "confluent_kafka.common.serialization",
+                   "confluent_kafka.consumer", "confluent_kafka.producer"):
+        monkeypatch.setitem(sys.modules, module, None)
     monkeypatch.setattr(soakclient, "_BINDINGS", None)
 
     with pytest.raises(RuntimeError) as exc:
@@ -696,6 +703,40 @@ def test_is_wakeup_classification(message, expected):
     # Same verdict when the message arrives via the property, as it does from
     # the real KafkaError.
     assert SoakClient._is_wakeup(_FakeKafkaError(-1, message)) is expected
+
+
+# ---------------------------------------------------------------------------
+# The same helpers over the confluent_kafka error hierarchy, which carries no
+# code / is_retriable properties: the type is the predicate.
+# ---------------------------------------------------------------------------
+def _errors():
+    return pytest.importorskip("confluent_kafka.common.errors")
+
+
+def test_error_code_reads_the_ffi_id_of_a_package_error():
+    # The FFI id equals Java's wire code for an API error, which is what
+    # COORDINATOR_ERROR_CODES / DISCONNECT_ERROR_CODES are keyed by.
+    errors = _errors()
+    assert error_code(errors.NotCoordinatorError("x")) == 16
+    assert error_code(errors.NetworkError("x")) == 13
+
+
+def test_error_code_is_none_for_the_package_base_error():
+    # The base KafkaError carries no FFI id (Java's KafkaException has no code).
+    errors = _errors()
+    assert error_code(errors.KafkaError("x")) is None
+
+
+def test_error_is_retriable_follows_the_package_hierarchy():
+    errors = _errors()
+    assert error_is_retriable(errors.NotCoordinatorError("x")) is True
+    assert error_is_retriable(errors.UnknownServerError("x")) is False
+
+
+def test_is_wakeup_recognizes_the_package_wakeup_error():
+    errors = _errors()
+    assert SoakClient._is_wakeup(errors.WakeupError("")) is True
+    assert SoakClient._is_wakeup(errors.NotCoordinatorError("x")) is False
 
 
 # ---------------------------------------------------------------------------
