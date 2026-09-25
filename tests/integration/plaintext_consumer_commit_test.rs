@@ -14,7 +14,8 @@
 
 //! Integration tests translated from
 //! `kafka/clients/clients-integration-tests/src/test/java/org/apache/kafka/clients/consumer/PlaintextConsumerCommitTest.java`
-//! (Apache Kafka 4.2).
+//! (Apache Kafka 4.2; the two tests under "Added in Apache Kafka 4.3.1" follow
+//! the 4.3.1 source and cite its line numbers).
 //!
 //! These exercise the consumer **commit path**: auto-commit-on-close,
 //! commit metadata round-trip, async commit + callback success counts,
@@ -47,22 +48,21 @@
 //! - `testCommitAsyncCompletedBeforeCommitSyncReturns` (line 519)
 //!   → `test_commit_async_completed_before_commit_sync_returns`
 //!
-//! # `#[ignore]`-gated translation
+//! # Added in Apache Kafka 4.3.1
 //!
-//! - `testCommitAsyncFailsWhenCoordinatorUnavailableDuringClose` (line 461)
+//! - `testAsyncConsumerNoCommittedOffsets` (line 187)
+//!   → `test_async_consumer_no_committed_offsets`
+//! - `testAsyncConsumerCommittedDeletedTopic` (line 225, KAFKA-20165)
+//!   → `test_async_consumer_committed_deleted_topic`
+//!
+//! # Broker fault injection (Phase 16)
+//!
+//! - `testCommitAsyncFailsWhenCoordinatorUnavailableDuringClose`
+//!   (4.3.1 line 552)
 //!   → `test_commit_async_fails_when_coordinator_unavailable_during_close`
-//!   — `#[ignore]`d: requires `cluster.shutdownBroker()` on ALL brokers.
-//!   The Rust integration harness pools+shares clusters across tests
-//!   (`tests/common/cluster_pool.rs`) and exposes no broker-shutdown API;
-//!   killing brokers would break every co-resident pooled test. The exact
-//!   close-path contract — the message
-//!   `"Failed to commit offsets: Coordinator unknown and consumer is
-//!   closing"` (a `CommitFailedException`) and a sub-1s fast close — is
-//!   already unit-tested in
-//!   `src/consumer/internals/commit_request_manager.rs` (line 4217+,
-//!   `commit_async_fails_when_coordinator_unavailable_during_close`).
-//!   Kept here as an `#[ignore]`d body documenting the integration-level
-//!   gap, gated on harness broker-shutdown support.
+//!   — runs on its own dedicated `Type::Kraft` cluster (3 brokers + 1
+//!   isolated controller) because it stops every broker with
+//!   `KafkaCluster::shutdown_broker`, which a pooled cluster must never do.
 //!
 //! # SKIPped (CONSUMER-arm)
 //!
@@ -85,7 +85,10 @@
 //! - SKIP: `testClassicConsumerAutoCommitOnRebalance` — classic-protocol-only
 //! - SKIP: `testClassicConsumerSubscribeAndCommitSync` — classic-protocol-only
 //! - SKIP: `testClassicConsumerPositionAndCommit` — classic-protocol-only
+//! - SKIP: `testClassicConsumerNoCommittedOffsets` — classic-protocol-only
+//! - SKIP: `testClassicConsumerCommittedDeletedTopic` — classic-protocol-only
 
+use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -97,7 +100,11 @@ use std::time::Instant;
 
 use async_trait::async_trait;
 
+use confluent_kafka::admin::Admin;
+use confluent_kafka::admin::AdminClientConfig;
+use confluent_kafka::admin::KafkaAdminClient;
 use confluent_kafka::common::Error;
+use confluent_kafka::common::TopicCollection;
 use confluent_kafka::common::TopicPartition;
 use confluent_kafka::common::serialization::ByteArraySerializer;
 use confluent_kafka::common::serialization::Deserializer;
@@ -113,6 +120,7 @@ use confluent_kafka::producer::ProducerRecord;
 
 use crate::common::cluster_config::{ClusterConfig, kip848_3_broker};
 use crate::common::test_context::TestContext;
+use crate::common::test_utils;
 
 // Type alias matching the bytes-typed `Consumer` trait object returned
 // by `KafkaConsumer::new::<Vec<u8>, Vec<u8>>`. Used in helper signatures so
@@ -134,13 +142,11 @@ type BytesConsumer = dyn Consumer<Vec<u8>, Vec<u8>>;
 /// group.min.session.timeout.ms     = 100
 /// ```
 ///
-/// Additionally `num.partitions=2` so auto-created topics get 2
-/// partitions — matching Java's `@BeforeEach`
-/// `cluster.createTopic(topic, 2, BROKER_COUNT)`.
+/// The suite's `@BeforeEach` topic is created explicitly by
+/// [`create_test_topic`]; `num.partitions=2` only matters for auto-created
+/// topics.
 fn cluster_config_with_kip848_3brokers() -> ClusterConfig {
-    // Java parity: `@BeforeEach setup() { cluster.createTopic(topic, 2, BROKER_COUNT); }`,
-    // so auto-created topics get 2 partitions; the canonical helper supplies
-    // the shared KIP-848 broker tuning.
+    // The canonical helper supplies the shared KIP-848 broker tuning.
     kip848_3_broker(2)
 }
 
@@ -250,34 +256,24 @@ async fn send_records_bytes(bootstrap: &str, tp: &TopicPartition, num_records: u
     producer.close().await.expect("producer close should succeed");
 }
 
-/// Creates `topic` EMPTY by triggering broker metadata auto-creation and
-/// waiting until it materializes with the expected partition count. Mirrors
-/// Java's `cluster.createTopic(name, partitions, replicationFactor)` (no data
-/// records, so the first produced record lands at offset 0).
-///
-/// The Rust harness has no admin client, but `partitions_for` over the
-/// METADATA path triggers broker auto-create (`auto.create.topics.enable` is
-/// on by default) with `num.partitions=2` — exactly an empty topic, matching
-/// Java. This replaces the earlier provisioner-record approach, which placed
-/// a record at offset 0 and shifted every real record by one.
-async fn create_topic(consumer: &mut BytesConsumer, topic: &str, partitions: usize) {
-    let deadline = Instant::now() + Duration::from_secs(30);
-    loop {
-        let parts = consumer.partitions_for(topic).await.expect("partitions_for");
-        if parts.len() >= partitions {
-            return;
-        }
-        if Instant::now() >= deadline {
-            panic!("topic {topic} not auto-created with >= {partitions} partitions within 30s");
-        }
-        tokio::time::sleep(Duration::from_millis(200)).await;
-    }
-}
+/// Java `PlaintextConsumerCommitTest.BROKER_COUNT` (`PlaintextConsumerCommitTest.java:73`).
+const BROKER_COUNT: i16 = 3;
 
-/// Equivalent of Java's `cluster.createTopic(name, 2, BROKER_COUNT)` — creates
-/// an EMPTY 2-partition topic via metadata auto-create (no records).
-async fn ensure_topic_with_2_partitions(consumer: &mut BytesConsumer, topic: &str) {
-    create_topic(consumer, topic, 2).await;
+/// Translates `cluster.createTopic(topic, numPartitions, (short) BROKER_COUNT)`,
+/// as the suite's `@BeforeEach` does for `topic`
+/// (`PlaintextConsumerCommitTest.java:85-88`). Creates the topic EMPTY (the
+/// first produced record lands at offset 0).
+///
+/// Creates the topic through the admin client and then waits until every
+/// partition leader accepts leader-only requests, before the test produces.
+/// Auto-creating the topic (by producing or via metadata) instead races leader
+/// election on the 3-broker cluster: `NOT_LEADER_OR_FOLLOWER` retries reorder
+/// the non-idempotent sends.
+async fn create_test_topic(bootstrap_servers: &str, topic: &str, num_partitions: i32) {
+    let admin = admin_for(bootstrap_servers);
+    test_utils::create_topic(admin.as_ref(), topic, num_partitions, BROKER_COUNT).await;
+    test_utils::wait_for_partition_leaders(admin.as_ref(), topic, 0..num_partitions).await;
+    admin.close_with_timeout(Duration::from_secs(5)).await;
 }
 
 // ── Consumer test helpers ─────────────────────────────────────────────
@@ -492,8 +488,8 @@ async fn test_async_consumer_auto_commit_on_close() {
         let mut consumer =
             new_bytes_consumer(make_consumer_config_bytes(ctx.bootstrap_servers(), &group_id, true, &[]));
         // Empty topic (both partitions), so seeks define the committed
-        // positions deterministically; producing to tp also auto-creates it.
-        create_topic(consumer.as_mut(), &topic, 2).await;
+        // positions deterministically.
+        create_test_topic(ctx.bootstrap_servers(), &topic, 2).await;
         send_records_bytes(ctx.bootstrap_servers(), &tp, 1000, current_time_ms()).await;
 
         consumer
@@ -540,8 +536,8 @@ async fn test_async_consumer_auto_commit_on_close_after_wakeup() {
     {
         let mut consumer =
             new_bytes_consumer(make_consumer_config_bytes(ctx.bootstrap_servers(), &group_id, true, &[]));
-        // Empty topic (both partitions); producing to tp also auto-creates it.
-        create_topic(consumer.as_mut(), &topic, 2).await;
+        // Empty topic (both partitions), as Java's `@BeforeEach` creates it.
+        create_test_topic(ctx.bootstrap_servers(), &topic, 2).await;
         send_records_bytes(ctx.bootstrap_servers(), &tp, 1000, current_time_ms()).await;
 
         consumer
@@ -588,7 +584,7 @@ async fn test_async_consumer_commit_metadata() {
 
     let mut consumer = new_bytes_consumer(make_consumer_config_bytes(ctx.bootstrap_servers(), &group_id, true, &[]));
     // Ensure the topic exists so assign() resolves a real partition.
-    ensure_topic_with_2_partitions(consumer.as_mut(), &topic).await;
+    create_test_topic(ctx.bootstrap_servers(), &topic, 2).await;
     consumer.assign(vec![tp.clone()]).await.expect("assign should succeed");
 
     // Sync commit: offset 5, leaderEpoch 15, metadata "foo".
@@ -648,7 +644,7 @@ async fn test_async_consumer_async_commit() {
     let tp = TopicPartition::new(topic.clone(), 0);
 
     let mut consumer = new_bytes_consumer(make_consumer_config_bytes(ctx.bootstrap_servers(), &group_id, false, &[]));
-    ensure_topic_with_2_partitions(consumer.as_mut(), &topic).await;
+    create_test_topic(ctx.bootstrap_servers(), &topic, 2).await;
     consumer.assign(vec![tp.clone()]).await.expect("assign should succeed");
 
     let cb = CountConsumerCommitCallback::new();
@@ -695,7 +691,7 @@ async fn test_async_consumer_commit_specified_offsets() {
     let tp1 = TopicPartition::new(topic.clone(), 1);
 
     let mut consumer = new_bytes_consumer(make_consumer_config_bytes(ctx.bootstrap_servers(), &group_id, false, &[]));
-    ensure_topic_with_2_partitions(consumer.as_mut(), &topic).await;
+    create_test_topic(ctx.bootstrap_servers(), &topic, 2).await;
     let producer = build_producer_bytes(ctx.bootstrap_servers());
     let now = current_time_ms();
     send_records_with_producer(&producer, &tp, 5, now).await;
@@ -781,8 +777,8 @@ async fn test_async_consumer_auto_commit_on_rebalance() {
 
     let mut consumer = new_bytes_consumer(make_consumer_config_bytes(ctx.bootstrap_servers(), &group_id, true, &[]));
     // Empty topics so produced records start at offset 0 (Java parity).
-    ensure_topic_with_2_partitions(consumer.as_mut(), &topic).await;
-    ensure_topic_with_2_partitions(consumer.as_mut(), &topic2).await;
+    create_test_topic(ctx.bootstrap_servers(), &topic, 2).await;
+    create_test_topic(ctx.bootstrap_servers(), &topic2, 2).await;
 
     // Produce up to each seek target so the seeks below are in-range (log
     // end), so no fetch advances or resets the position — see the
@@ -845,7 +841,7 @@ async fn test_async_consumer_subscribe_and_commit_sync() {
     let tp1 = TopicPartition::new(topic.clone(), 1);
 
     let mut consumer = new_bytes_consumer(make_consumer_config_bytes(ctx.bootstrap_servers(), &group_id, false, &[]));
-    ensure_topic_with_2_partitions(consumer.as_mut(), &topic).await;
+    create_test_topic(ctx.bootstrap_servers(), &topic, 2).await;
     assert_eq!(consumer.assignment().len(), 0);
     consumer
         .subscribe_with_topics(vec![topic.clone()])
@@ -876,7 +872,7 @@ async fn test_async_consumer_position_and_commit() {
     let mut other = new_bytes_consumer(make_consumer_config_bytes(ctx.bootstrap_servers(), &group_id, false, &[]));
 
     // Empty topic so produced records start at offset 0 (Java parity).
-    ensure_topic_with_2_partitions(consumer.as_mut(), &topic).await;
+    create_test_topic(ctx.bootstrap_servers(), &topic, 2).await;
     let producer = build_producer_bytes(ctx.bootstrap_servers());
     let starting_timestamp = current_time_ms();
     send_records_with_producer(&producer, &tp, 5, starting_timestamp).await;
@@ -946,7 +942,7 @@ async fn test_async_consumer_position_and_commit() {
 }
 
 /// Translates Java's `testCommitAsyncCompletedBeforeConsumerCloses`
-/// (line 492).
+/// (`PlaintextConsumerCommitTest.java:583-606`).
 ///
 /// Contract: async offset commits complete before the consumer is closed,
 /// even when no commit-sync is performed as part of close (auto-commit
@@ -959,11 +955,33 @@ async fn test_commit_async_completed_before_consumer_closes() {
     let tp = TopicPartition::new(topic.clone(), 0);
     let tp1 = TopicPartition::new(topic.clone(), 1);
 
+    // Create offsets topic to ensure coordinator is available during close:
+    // `cluster.createTopic(Topic.GROUP_METADATA_TOPIC_NAME,
+    // OFFSETS_TOPIC_PARTITIONS = 1, OFFSETS_TOPIC_REPLICATION = 3)`
+    // (`PlaintextConsumerCommitTest.java:589-590`, `:74-75`). Java gets a fresh
+    // cluster per test; the pooled cluster may already hold the topic from an
+    // earlier test, in which case `TopicExists` means the precondition holds.
+    {
+        const GROUP_METADATA_TOPIC_NAME: &str = "__consumer_offsets";
+        let admin = admin_for(ctx.bootstrap_servers());
+        let new_topic = confluent_kafka::admin::NewTopic::with_num_partitions_replication_factor(
+            GROUP_METADATA_TOPIC_NAME.to_string(),
+            Some(1),
+            Some(3),
+        );
+        match admin.create_topics(&[new_topic]).all().get().await {
+            Ok(()) | Err(Error::TopicExists(_)) => {},
+            Err(e) => panic!("creating {GROUP_METADATA_TOPIC_NAME} failed: {e:?}"),
+        }
+        test_utils::wait_for_all_partitions_metadata(admin.as_ref(), GROUP_METADATA_TOPIC_NAME, 1).await;
+        admin.close_with_timeout(Duration::from_secs(5)).await;
+    }
+
     let cb = CountConsumerCommitCallback::new();
     {
         let mut consumer =
             new_bytes_consumer(make_consumer_config_bytes(ctx.bootstrap_servers(), &group_id, false, &[]));
-        ensure_topic_with_2_partitions(consumer.as_mut(), &topic).await;
+        create_test_topic(ctx.bootstrap_servers(), &topic, 2).await;
 
         let producer = build_producer_bytes(ctx.bootstrap_servers());
         let now = current_time_ms();
@@ -975,17 +993,6 @@ async fn test_commit_async_completed_before_consumer_closes() {
             .assign(vec![tp.clone(), tp1.clone()])
             .await
             .expect("assign should succeed");
-
-        // Java pre-creates the GROUP_METADATA_TOPIC_NAME (offsets) topic so
-        // the coordinator is available during close
-        // (`PlaintextConsumerCommitTest.java:484-485`). The Rust harness has
-        // no admin client; the equivalent is to discover the coordinator and
-        // materialize the offsets topic up front via a `committed()` query, so
-        // the two async commits below can complete during the (bounded) close.
-        let _ = consumer
-            .committed(std::slice::from_ref(&tp))
-            .await
-            .expect("committed (coordinator readiness) should succeed");
 
         let cb_arc: Arc<dyn OffsetCommitCallback> = Arc::new(cb.clone());
         // Try without looking up the coordinator first.
@@ -1022,7 +1029,7 @@ async fn test_commit_async_completed_before_commit_sync_returns() {
     let tp1 = TopicPartition::new(topic.clone(), 1);
 
     let mut consumer = new_bytes_consumer(make_consumer_config_bytes(ctx.bootstrap_servers(), &group_id, false, &[]));
-    ensure_topic_with_2_partitions(consumer.as_mut(), &topic).await;
+    create_test_topic(ctx.bootstrap_servers(), &topic, 2).await;
     let producer = build_producer_bytes(ctx.bootstrap_servers());
     let now = current_time_ms();
     send_records_with_producer(&producer, &tp, 3, now).await;
@@ -1090,54 +1097,68 @@ async fn test_commit_async_completed_before_commit_sync_returns() {
     consumer.close().await.expect("consumer close should succeed");
 }
 
+/// Cluster for [`test_commit_async_fails_when_coordinator_unavailable_during_close`]:
+/// the suite's `@ClusterTestDefaults` shape (`types = {Type.KRAFT}`,
+/// `brokers = BROKER_COUNT` = 3, offsets topic 1 partition / RF 3,
+/// `group.min.session.timeout.ms=100`) as a **dedicated** cluster with an
+/// isolated controller, since the test stops every broker.
+fn dedicated_kraft_3brokers() -> ClusterConfig {
+    let props = BTreeMap::from([
+        (
+            "KAFKA_GROUP_COORDINATOR_REBALANCE_PROTOCOLS".to_string(),
+            "classic,consumer".to_string(),
+        ),
+        ("KAFKA_OFFSETS_TOPIC_NUM_PARTITIONS".to_string(), "1".to_string()),
+        ("KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR".to_string(), "3".to_string()),
+        ("KAFKA_GROUP_MIN_SESSION_TIMEOUT_MS".to_string(), "100".to_string()),
+    ]);
+    ClusterConfig::kraft_dedicated(3, 1).set_server_properties(props)
+}
+
 /// Translates Java's `testCommitAsyncFailsWhenCoordinatorUnavailableDuringClose`
-/// (line 461).
+/// (`PlaintextConsumerCommitTest.java:552`, AK 4.3.1).
 ///
-/// `#[ignore]`d: the Java test calls `cluster.brokerIds().forEach(
-/// cluster::shutdownBroker)` to make the coordinator unavailable, then
-/// asserts the async-commit callback fails with a `CommitFailedException`
-/// whose message is exactly `"Failed to commit offsets: Coordinator
-/// unknown and consumer is closing"` and that close completes in under 1s.
-///
-/// The Rust integration harness pools and shares clusters across tests
-/// (`tests/common/cluster_pool.rs`, keyed by `ClusterConfig`) and exposes
-/// no broker-shutdown API on `KafkaCluster`. Killing brokers in a pooled
-/// cluster would break every co-resident test, and the capability does
-/// not exist. The exact close-path contract is already covered by the
-/// unit test
-/// `commit_request_manager::tests::commit_async_fails_when_coordinator_unavailable_during_close`
-/// (`src/consumer/internals/commit_request_manager.rs:4217+`), which
-/// asserts the same `CommitFailedException` message string.
-///
-/// This body is kept (and wired into CI as `#[ignore]`d) to document the
-/// integration-level gap and to be ready to run once the harness gains a
-/// per-test isolated cluster with broker-shutdown support.
+/// Every broker is stopped before the consumer ever looks up its coordinator
+/// (it only `assign`s), so the async commit issued afterwards can never find
+/// one; closing with a 500 ms timeout must fail that commit with a
+/// `CommitFailedException` carrying the exact message
+/// `"Failed to commit offsets: Coordinator unknown and consumer is closing"`,
+/// fire the callback exactly once, and return in under 1 s.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "Requires cluster.shutdownBroker() on all brokers; the pooled \
-            test harness has no broker-shutdown API. The exact close-path \
-            commit-failed message is unit-tested in \
-            commit_request_manager.rs:4217+."]
 async fn test_commit_async_fails_when_coordinator_unavailable_during_close() {
-    let mut ctx = TestContext::new(cluster_config_with_kip848_3brokers()).await;
+    let mut ctx = TestContext::new(dedicated_kraft_3brokers()).await;
     let topic = ctx.topic("topic");
     let group_id = ctx.group_id("g_coordinator_unavailable_during_close");
     let tp = TopicPartition::new(topic.clone(), 0);
 
+    // Java `@BeforeEach`: `cluster.createTopic(topic, 2, (short) BROKER_COUNT)`.
+    create_test_topic(ctx.bootstrap_servers(), &topic, 2).await;
+
     let mut consumer = new_bytes_consumer(make_consumer_config_bytes(ctx.bootstrap_servers(), &group_id, false, &[]));
-    ensure_topic_with_2_partitions(consumer.as_mut(), &topic).await;
     let producer = build_producer_bytes(ctx.bootstrap_servers());
     send_records_with_producer(&producer, &tp, 3, current_time_ms()).await;
     producer.close().await.expect("producer close should succeed");
 
     consumer.assign(vec![tp.clone()]).await.expect("assign should succeed");
 
-    // NOTE: the Java step `cluster.brokerIds().forEach(cluster::shutdownBroker)`
-    // has no Rust equivalent in the pooled harness — see the `#[ignore]`
-    // rationale above. The assertions below document the contract.
+    // Close the coordinator before committing because otherwise the commit
+    // will fail to find the coordinator.
+    // Java: `cluster.brokerIds().forEach(cluster::shutdownBroker)`.
+    for broker_id in ctx.cluster().broker_ids() {
+        ctx.cluster().shutdown_broker(broker_id).await;
+    }
+    // Java: `waitForCondition(() -> cluster.aliveBrokers().isEmpty(), ...)`.
+    // `shutdown_broker` returns once the container has stopped, so the alive
+    // set is already empty here.
+    assert!(ctx.cluster().alive_broker_ids().is_empty(), "All brokers should be shut down");
+
     let cb = CountConsumerCommitCallback::new();
     let cb_arc: Arc<dyn OffsetCommitCallback> = Arc::new(cb.clone());
 
-    let _ = consumer.poll(Duration::from_millis(500)).await;
+    consumer
+        .poll(Duration::from_millis(500))
+        .await
+        .expect("poll with every broker down should not fail");
     let mut offsets = HashMap::new();
     offsets.insert(tp.clone(), OffsetAndMetadata::new(1).expect("OffsetAndMetadata"));
     consumer
@@ -1169,4 +1190,150 @@ async fn test_commit_async_fails_when_coordinator_unavailable_during_close() {
         "Failed to commit offsets: Coordinator unknown and consumer is closing"
     );
     assert_eq!(cb.error_count(), 1);
+}
+
+// ── Tests added in Apache Kafka 4.3.1 ─────────────────────────────────
+
+/// Builds an admin client for topic provisioning / deletion. Mirrors the
+/// per-file `admin_for` helper the other integration tests use (Java's
+/// `cluster.admin()`).
+fn admin_for(bootstrap_servers: &str) -> Box<dyn Admin> {
+    let props = HashMap::from([
+        ("bootstrap.servers".to_string(), bootstrap_servers.to_string()),
+        ("client.id".to_string(), "commit-test-admin".to_string()),
+        ("request.timeout.ms".to_string(), "30000".to_string()),
+        ("default.api.timeout.ms".to_string(), "30000".to_string()),
+    ]);
+    let config = AdminClientConfig::new(&props).expect("valid admin config");
+    Box::new(KafkaAdminClient::new(config).expect("admin client"))
+}
+
+/// Translates Java's `testAsyncConsumerNoCommittedOffsets`
+/// (`PlaintextConsumerCommitTest.java:187`, body `testNoCommittedOffsets` :191).
+///
+/// Fetches committed offsets for three partitions: `tp` (committed), `tp1`
+/// (exists, never committed) and `tp2` (partition 2 of a 2-partition topic —
+/// does not exist).
+///
+/// **Deviation (representation only):** Java asserts `committed.size() == 3`
+/// with `null` values for `tp1`/`tp2`. The Rust `committed` API returns
+/// `HashMap<TopicPartition, OffsetAndMetadata>`, where "no committed offset"
+/// is represented by *absence* (the `null`s of Java's
+/// `toOffsetMapWithNulls()` are stripped in
+/// `ApplicationEventProcessor::process_fetch_committed_offsets`). So the
+/// Rust assertions are: exactly one entry (`tp`), and `tp1`/`tp2` absent —
+/// the same observable contract `committed.get(tpN) == null` checks in Java.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_async_consumer_no_committed_offsets() {
+    let mut ctx = TestContext::new(cluster_config_with_kip848_3brokers()).await;
+    let topic = ctx.topic("topic");
+    let group_id = ctx.group_id("g_no_committed_offsets");
+    let tp = TopicPartition::new(topic.clone(), 0);
+    let tp1 = TopicPartition::new(topic.clone(), 1);
+
+    // Java `@BeforeEach`: `cluster.createTopic(topic, 2, BROKER_COUNT)`.
+    create_test_topic(ctx.bootstrap_servers(), &topic, 2).await;
+
+    // Java: `createConsumer(groupProtocol, true)`.
+    let mut consumer = new_bytes_consumer(make_consumer_config_bytes(ctx.bootstrap_servers(), &group_id, true, &[]));
+    consumer.assign(vec![tp.clone()]).await.expect("assign should succeed");
+
+    // commit for one partition
+    let metadata = OffsetAndMetadata::with_leader_epoch_metadata(5, Some(15), "foo").expect("OffsetAndMetadata");
+    consumer
+        .commit_sync_with_offsets(HashMap::from([(tp.clone(), metadata.clone())]))
+        .await
+        .expect("commit_sync_with_offsets should succeed");
+
+    let tp2 = TopicPartition::new(topic.clone(), 2);
+    // fetch offset for three partitions:
+    // 1. tp: exists and has committed offset
+    // 2. tp1: exists but has NO committed offset
+    // 3. tp2: does not exist
+    let committed = consumer
+        .committed(&[tp.clone(), tp1.clone(), tp2.clone()])
+        .await
+        .expect("committed should succeed");
+    // Java: `assertEquals(3, committed.size())` — see the deviation note above.
+    assert_eq!(1, committed.len(), "unexpected committed map: {committed:?}");
+    assert_eq!(Some(&metadata), committed.get(&tp));
+    assert_eq!(None, committed.get(&tp1));
+    assert_eq!(None, committed.get(&tp2));
+
+    consumer.close().await.expect("consumer close should succeed");
+}
+
+/// Translates Java's `testAsyncConsumerCommittedDeletedTopic`
+/// (`PlaintextConsumerCommitTest.java:225`, body
+/// `testConsumerCommittedDeletedTopic` :242) — validates KAFKA-20165.
+///
+/// Calling `committed()` for a deleted topic eventually returns "no offset"
+/// (Java `null`, Rust absent entry) for the partition: the group coordinator
+/// answers `UNKNOWN_TOPIC_ID` for the deleted topic when the client uses topic
+/// ids, which the consumer handles as a retriable partition error and reports
+/// as no committed offset.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_async_consumer_committed_deleted_topic() {
+    let mut ctx = TestContext::new(cluster_config_with_kip848_3brokers()).await;
+    let topic_to_delete = ctx.topic("topic-to-delete");
+    let group_id = ctx.group_id("g_committed_deleted_topic");
+    // Java: `cluster.createTopic(topicToDelete, 1, (short) BROKER_COUNT)`.
+    let admin = admin_for(ctx.bootstrap_servers());
+    test_utils::create_topic(admin.as_ref(), &topic_to_delete, 1, 3).await;
+    let tp_to_delete = TopicPartition::new(topic_to_delete.clone(), 0);
+
+    // Java: `createConsumer(groupProtocol, false)`.
+    let mut consumer = new_bytes_consumer(make_consumer_config_bytes(ctx.bootstrap_servers(), &group_id, false, &[]));
+    consumer
+        .assign(vec![tp_to_delete.clone()])
+        .await
+        .expect("assign should succeed");
+
+    // Commit an offset to ensure the consumer has the topic ID cached and there's data to fetch
+    consumer
+        .commit_sync_with_offsets(HashMap::from([(
+            tp_to_delete.clone(),
+            OffsetAndMetadata::new(0).expect("OffsetAndMetadata"),
+        )]))
+        .await
+        .expect("commit_sync_with_offsets should succeed");
+
+    // Verify the commit was successful
+    let committed = consumer
+        .committed(std::slice::from_ref(&tp_to_delete))
+        .await
+        .expect("committed should succeed");
+    assert_eq!(0, committed.get(&tp_to_delete).expect("committed entry present").offset());
+
+    // Delete the topic
+    admin
+        .delete_topics(TopicCollection::of_topic_names(vec![topic_to_delete.clone()]))
+        .all()
+        .get()
+        .await
+        .expect("delete_topics should succeed");
+
+    // Eventually, the response should return null for the deleted topic partition.
+    // Java: `TestUtils.waitForCondition(..., 10000, ...)`, which retries on both
+    // a false condition and an exception thrown by `committed(...)`.
+    let expected_end = Instant::now() + Duration::from_millis(10_000);
+    loop {
+        let failure = match consumer
+            .committed_with_timeout(std::slice::from_ref(&tp_to_delete), Duration::from_millis(5000))
+            .await
+        {
+            Ok(committed) if !committed.contains_key(&tp_to_delete) => break,
+            Ok(committed) => format!(
+                "Condition not met within timeout 10000. Expected null for deleted topic partition (got {committed:?})"
+            ),
+            Err(err) => format!("committed() failed: {err}"),
+        };
+        if Instant::now() >= expected_end {
+            panic!("Assertion failed after 10000ms: {failure}");
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    consumer.close().await.expect("consumer close should succeed");
+    admin.close_with_timeout(Duration::from_secs(5)).await;
 }
