@@ -12,76 +12,83 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""``ConsumerRebalanceListener`` and the ``CommitCallback`` alias.
+"""``ConsumerRebalanceListener``: Java's
+``org.apache.kafka.clients.consumer.ConsumerRebalanceListener``.
 
-Translated from ``org.apache.kafka.clients.consumer.ConsumerRebalanceListener``
-and ``OffsetCommitCallback`` (Apache Kafka 4.3.1).
+A multi-method interface the user implements, so a class to subclass: the
+abstract ``onPartitionsRevoked`` / ``onPartitionsAssigned`` become no-ops and the
+``default`` ``onPartitionsLost`` keeps its body (CLAUDE.md, Python Binding
+Conventions, Idiom translations). The methods are called positionally with the
+partitions (a user-written callable, Signatures).
 
-``ConsumerRebalanceListener`` is a multi-method interface, so it stays a class
-(rule 3.9); subclass it and override what you need. The methods are invoked
-**positionally** — they are user-implemented callables (rule 3.2 exemption (a)),
-so they take only ``self`` plus the partitions, exactly as Java's interface
-does — and on the **caller's thread** during ``poll()`` / ``commit*`` /
-``unsubscribe()`` / ``close()`` (consumer-threading.md §31). The rebalance does
-not proceed until the callback returns.
-
-On ``AsyncKafkaConsumer`` an override may be an ``async def``; the consumer
-awaits it and the rebalance does not proceed until it completes (decision F,
-spec §6.2). A plain ``def`` is accepted on either class.
-
-``OffsetCommitCallback`` is a single-method callback interface, so it collapses
-to a callable with the ``CommitCallback`` alias (rule 3.9).
+The listener runs on the caller's thread, inside the call that delivers it
+(``poll()``, ``unsubscribe()``, ``close()``, ``MockConsumer.rebalance()``, …),
+and the rebalance does not advance until it returns; it may call back into its
+consumer (``commit()``, ``seek()``, ``position()``, …). On the async consumers a
+method may be ``async def``: it is awaited on the event loop (Threads and
+callbacks).
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable
-
-from confluent_kafka.common.kafka_error import KafkaError
 from confluent_kafka.common.topic_partition import TopicPartition
 
-from .offset_and_metadata import OffsetAndMetadata
-
-__all__ = ["ConsumerRebalanceListener", "CommitCallback"]
+__all__ = ["ConsumerRebalanceListener"]
 
 
 class ConsumerRebalanceListener:
-    """A callback interface the user implements to trigger custom actions when
-    the set of partitions assigned to the consumer changes.
+    """A callback interface that the user can implement to trigger custom
+    actions when the set of partitions assigned to the consumer changes.
+
+    This is applicable when the consumer is having Kafka auto-manage group
+    membership. If the consumer directly assigns partitions, those partitions
+    will never be reassigned and this callback is not applicable.
 
     Java: ``org.apache.kafka.clients.consumer.ConsumerRebalanceListener``.
-    Subclass and override ``on_partitions_revoked`` / ``on_partitions_assigned``
-    (and optionally ``on_partitions_lost``). The base implementations are no-ops,
-    matching Java's interface having no behaviour of its own beyond the
-    ``on_partitions_lost`` default.
     """
 
-    def on_partitions_revoked(
-        self, partitions: set[TopicPartition]
-    ) -> None:
-        """Called before partitions are revoked from the consumer (Java
-        ``onPartitionsRevoked``). Override to commit offsets or flush state
-        before the partitions are reassigned. The default is a no-op."""
+    def on_partitions_revoked(self, partitions: set[TopicPartition]) -> None:
+        """A callback method the user can implement to provide handling of
+        offset commits to a customized store. This method will be called during
+        a rebalance operation when the consumer has to give up some partitions:
+        if the consumer assignment changes, if the consumer is being closed, or
+        if it is unsubscribing. It is recommended that offsets should be
+        committed in this callback to either Kafka or a custom offset store to
+        prevent duplicate data.
 
-    def on_partitions_assigned(
-        self, partitions: set[TopicPartition]
-    ) -> None:
-        """Called after partitions are assigned to the consumer (Java
-        ``onPartitionsAssigned``). The default is a no-op."""
+        This callback is always called before re-assigning the partitions. Under
+        the consumer rebalance protocol it is called with the partitions to
+        revoke iff the set is non-empty.
 
-    def on_partitions_lost(
-        self, partitions: set[TopicPartition]
-    ) -> None:
-        """Called when partitions are lost without a clean revocation (Java
-        ``onPartitionsLost``). Java's interface default delegates to
-        ``onPartitionsRevoked``; this reproduces it."""
+        A ``WakeupError`` or ``InterruptError`` raised from a nested call to the
+        consumer propagates to the call in which this callback is being executed.
+        """
+
+    def on_partitions_assigned(self, partitions: set[TopicPartition]) -> None:
+        """A callback method the user can implement to provide handling of
+        customized offsets on completion of a successful partition
+        re-assignment. This method will be called after the partition
+        re-assignment completes (even if no new partitions were assigned to the
+        consumer), and before the consumer starts fetching data, and only as the
+        result of a ``poll()`` call.
+
+        ``partitions`` are the partitions that have been added to the assignment
+        as a result of the rebalance.
+
+        A ``WakeupError`` or ``InterruptError`` raised from a nested call to the
+        consumer propagates to the call in which this callback is being executed.
+        """
+
+    def on_partitions_lost(self, partitions: set[TopicPartition]) -> None:
+        """A callback method you can implement to provide handling of cleaning
+        up resources for partitions that have already been reassigned to other
+        consumers. This method will not be called during normal execution; it is
+        invoked when the consumer realized that it does not own these partitions
+        any longer without a normal rebalance (for example, when its session
+        timeout expired, or a fatal error indicated it is no longer part of the
+        group).
+
+        By default it will just trigger ``on_partitions_revoked``; override it
+        to distinguish the handling of revoked from lost partitions.
+        """
         self.on_partitions_revoked(partitions)
-
-
-# Java: OffsetCommitCallback.onComplete(Map<TopicPartition, OffsetAndMetadata>,
-# Exception). A single-method interface → a callable alias (rule 3.9). The
-# second argument is ``None`` on success. Invoked positionally on the caller's
-# thread inside commit_nowait()/poll()/... (consumer-threading.md §31).
-CommitCallback = Callable[
-    [dict[TopicPartition, OffsetAndMetadata] | None, KafkaError | None], None
-]
