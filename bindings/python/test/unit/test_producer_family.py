@@ -392,6 +392,68 @@ def test_headers_reach_the_ffi_struct() -> None:
     assert _native(ProducerRecord(topic=TOPIC, key=b"k", value=b"v")).headers == []
 
 
+def _utf8_address(text: str) -> int:
+    """The address of ``text``'s cached UTF-8 buffer (PyUnicode_AsUTF8AndSize)."""
+    import ctypes
+
+    as_utf8 = ctypes.pythonapi.PyUnicode_AsUTF8AndSize
+    as_utf8.restype = ctypes.c_void_p
+    as_utf8.argtypes = [ctypes.py_object, ctypes.c_void_p]
+    address = as_utf8(text, None)
+    assert address
+    return int(address)
+
+
+def _bytes_address(data: bytes) -> int:
+    import ctypes
+
+    address = ctypes.cast(ctypes.c_char_p(data), ctypes.c_void_p).value
+    assert address
+    return int(address)
+
+
+def test_the_send_path_copies_no_topic_key_value_or_header_bytes() -> None:
+    # DoD #10 / CLAUDE.md §11/§12: the FFI struct the send path hands to
+    # kafka_producer_Producer_send_batch points into the Python objects' own
+    # buffers: the topic and header keys into their str's cached UTF-8, the key,
+    # the value and the header values into the serialized bytes.
+    topic = "".join(["top", "ic-", "zero-copy"])  # a str not interned elsewhere
+    key, value = b"the-key", b"the-value"
+    header_values = [b"v1", b"v2"]
+    record = ProducerRecord(topic=topic, key=key, value=value,
+                            headers=[("h-one", header_values[0]), ("h-two", header_values[1]),
+                                     ("h-null", None)])
+    native = _native(record)
+    topic_address, key_address, value_address, headers = native.ffi_addresses
+    assert native.topic is record.topic()
+    assert topic_address == _utf8_address(record.topic())
+    assert (key_address, value_address) == (_bytes_address(key), _bytes_address(value))
+    expected = [(_utf8_address(k), 0 if v is None else _bytes_address(original))
+                for (k, v), original in zip(record.headers(), [*header_values, None])]
+    assert headers == expected
+
+
+def test_the_native_record_holds_what_it_points_into() -> None:
+    # The native record keeps the topic, the header tuple (so the key strs) and
+    # the header value exports alive; a header list the caller changes later
+    # does not reach it.
+    import gc
+
+    headers = [("".join(["k", str(i)]), bytes([65 + i]) * 3) for i in range(3)]
+    native = _lib.ProducerRecord("".join(["t", "o", "p"]), b"v", None, -1, -1, headers)
+    headers[0] = ("changed", b"zzz")
+    del headers
+    gc.collect()
+    assert native.topic == "top"
+    assert native.headers == [("k0", b"AAA"), ("k1", b"BBB"), ("k2", b"CCC")]
+    with pytest.raises(ValueError, match="embedded null character"):
+        _lib.ProducerRecord("to\0pic", b"v")
+    with pytest.raises(ValueError, match="embedded null character"):
+        _lib.ProducerRecord("t", b"v", None, -1, -1, (("k\0", b"v"),))
+    with pytest.raises(TypeError):
+        _lib.ProducerRecord("t", b"v", None, -1, -1, ((1, b"v"),))
+
+
 def test_null_value_is_a_tombstone_and_empty_bytes_is_not() -> None:
     native = _native(ProducerRecord(topic=TOPIC, key=b"k", value=None))
     assert native.value is None and native.value_len == -1
