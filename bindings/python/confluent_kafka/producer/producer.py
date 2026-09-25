@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import logging
+import threading
 import time
 from collections.abc import Mapping
 from concurrent.futures import Future
@@ -125,6 +126,7 @@ class Producer(Generic[K, V], _ProducerState):
         self._check_not_closed()
         self._drain_sync()
         raise_if_error(self._call(_lib.Producer_begin_transaction))
+        self._in_transaction = True
 
     def send_offsets_to_transaction(
             self, *, offsets: Mapping[TopicPartition, OffsetAndMetadata],
@@ -182,6 +184,8 @@ class Producer(Generic[K, V], _ProducerState):
         """
         self._check_not_closed()
         sent = list(self._futures)
+        # Sends from now on wait for their handover again (see _ProducerState).
+        self._in_transaction = False
         self._drain_sync()
         run_sync(lambda cb: self._call(_lib.Producer_commit_transaction_async, cb))
         if not in_callback(self):
@@ -203,6 +207,8 @@ class Producer(Generic[K, V], _ProducerState):
         ``KafkaError`` if the producer has encountered a previous fatal error.
         """
         self._check_not_closed()
+        # Sends from now on wait for their handover again (see _ProducerState).
+        self._in_transaction = False
         self._drain_sync()
         run_sync(lambda cb: self._call(_lib.Producer_abort_transaction_async, cb))
 
@@ -239,9 +245,22 @@ class Producer(Generic[K, V], _ProducerState):
         error, the final ``commit_transaction()`` call will fail and raise the
         error from the last failed send.
 
-        Raises ``IllegalStateError`` if a ``transactional.id`` has been
-        configured and no transaction has been started, or when send is invoked
-        after the producer has been closed.
+        Raises ``IllegalStateError`` when send is invoked after the producer has
+        been closed, and ``KafkaError("Producer closed while send in
+        progress")`` when the producer is closed while it runs. With a
+        ``transactional.id`` configured and no transaction started (no
+        ``begin_transaction()`` since ``init_transactions()`` or the last
+        ``commit_transaction()`` / ``abort_transaction()``), send returns once
+        the record is with the producer (after the metadata wait, as Java's) and
+        raises ``IllegalStateError`` as Java's does, e.g. "Cannot add partition
+        … to transaction while in state  READY". The other errors of a send
+        (``TimeoutError`` for the metadata wait, ``RecordTooLargeError``,
+        ``ProducerFencedError``, …) are given to the callback and the future, as
+        in Java. So are, unlike Java, the errors its ``send()`` raises once the
+        record reaches the producer inside a started transaction or without a
+        ``transactional.id``: the ``KafkaError`` of a producer in a previous
+        fatal or abortable error state, which ``commit_transaction()`` then
+        raises.
         """
         self._check_not_closed()
         native = self._native_record(record)
@@ -252,11 +271,29 @@ class Producer(Generic[K, V], _ProducerState):
         # cannot be cancelled.
         future.set_running_or_notify_cancel()
 
-        def cb(result: int, error: int) -> None:
+        # A transactional producer's send with no transaction started waits
+        # for the handover (below) and raises the error the Rust send() returns:
+        # Java's doSend rethrows those (KafkaProducer.java:1069-1081), where an
+        # ApiException reaches the callback and the future (:1056-1068). Inside
+        # a started transaction the record is not waited for (see
+        # _ProducerState._in_transaction). `waiting` is read and cleared under
+        # `lock`, so an error arriving after the wait ended (a Ctrl+C) goes to
+        # the callback instead.
+        waiting = self._transactional and not self._in_transaction
+        rethrown: Exception | None = None
+        lock = threading.Lock()
+
+        def cb(result: int, error: int, immediate: bool) -> None:
             # Runs on the C completion thread with the GIL held. As in Java's
             # ProducerBatch.completeFutureAndFireCallbacks, the callback runs
             # before the future completes.
+            nonlocal rethrown
             metadata, exception = completion_to_python(result, error, topic, partition)
+            if immediate and waiting:
+                with lock:
+                    if waiting:
+                        rethrown = exception
+                        return
             invoke_callback(self, callback, metadata, exception)
             if exception is not None:
                 future.set_exception(exception)
@@ -267,11 +304,16 @@ class Producer(Generic[K, V], _ProducerState):
         # between) refuses the record as Java's RecordAccumulator.append does.
         closed_while_sending = KafkaError(message=CLOSED_WHILE_SENDING_MESSAGE)
         space: Future[None] | None = None
+        handed_over: threading.Event | None = None
         with self._use(closed_while_sending) as c_producer:
             full = _lib.Producer_send(c_producer, native, cb)
             if full is None:
                 raise closed_while_sending
             self._track(future)
+            if waiting:
+                handed_over = threading.Event()
+                if _lib.Producer_drain(c_producer, handed_over.set):
+                    handed_over = None
             if full:
                 # The buffer is full: wait (below, not as a use) until the send
                 # task frees capacity, as Java's send() blocks on buffer.memory.
@@ -281,6 +323,16 @@ class Producer(Generic[K, V], _ProducerState):
                     space = waiter
         if space is not None:
             space.result()
+        if waiting:
+            try:
+                if handed_over is not None:
+                    handed_over.wait()
+            finally:
+                with lock:
+                    waiting = False
+            if rethrown is not None:
+                self._futures.discard(future)
+                raise rethrown
         return future
 
     def flush(self) -> None:

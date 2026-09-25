@@ -107,6 +107,7 @@ class AsyncProducer(Generic[K, V], _ProducerState):
         self._check_not_closed()
         self._drain_sync()
         raise_if_error(self._call(_lib.Producer_begin_transaction))
+        self._in_transaction = True
 
     async def send_offsets_to_transaction(
             self, *, offsets: Mapping[TopicPartition, OffsetAndMetadata],
@@ -125,6 +126,8 @@ class AsyncProducer(Generic[K, V], _ProducerState):
         callbacks of the transaction's records have run."""
         self._check_not_closed()
         sent = list(self._futures)
+        # Sends from now on wait for their handover again (see _ProducerState).
+        self._in_transaction = False
         await self._drain_async()
         await self._run_async(
             lambda cb: self._call(_lib.Producer_commit_transaction_async, cb))
@@ -134,6 +137,8 @@ class AsyncProducer(Generic[K, V], _ProducerState):
     async def abort_transaction(self) -> None:
         """See :meth:`Producer.abort_transaction`."""
         self._check_not_closed()
+        # Sends from now on wait for their handover again (see _ProducerState).
+        self._in_transaction = False
         await self._drain_async()
         await self._run_async(
             lambda cb: self._call(_lib.Producer_abort_transaction_async, cb))
@@ -141,8 +146,10 @@ class AsyncProducer(Generic[K, V], _ProducerState):
     async def send(self, *, record: ProducerRecord[K, V],
                    callback: Callback | None = None) -> asyncio.Future[RecordMetadata]:
         """See :meth:`Producer.send`. Awaiting it waits for buffer space (Java's
-        ``send()`` blocks on ``buffer.memory``) without blocking the loop; the
-        returned ``asyncio.Future`` resolves with the record's metadata. The
+        ``send()`` blocks on ``buffer.memory``) and, with a ``transactional.id``
+        and no transaction started, for the record to reach the producer,
+        without blocking the loop; it raises what :meth:`Producer.send` raises. The returned
+        ``asyncio.Future`` resolves with the record's metadata. The
         ``callback`` runs on the event loop, before the future completes, and
         must not block it."""
         self._check_not_closed()
@@ -152,9 +159,22 @@ class AsyncProducer(Generic[K, V], _ProducerState):
         loop = asyncio.get_running_loop()
         future: asyncio.Future[RecordMetadata] = loop.create_future()
 
-        def cb(result: int, error: int) -> None:
+        # See Producer.send: with no transaction started, a transactional
+        # producer's send awaits the handover and raises the error the Rust
+        # send() returns.
+        waiting = self._transactional and not self._in_transaction
+        rethrown: Exception | None = None
+        lock = threading.Lock()
+
+        def cb(result: int, error: int, immediate: bool) -> None:
             # Runs on the C completion thread. asyncio futures may only be
             # completed on their loop: buffer, and schedule one drain per batch.
+            nonlocal rethrown
+            if immediate and waiting:
+                with lock:
+                    if waiting:
+                        rethrown = completion_to_python(result, error, topic, partition)[1]
+                        return
             if loop.is_closed():
                 metadata, exception = completion_to_python(result, error, topic, partition)
                 invoke_callback(self, callback, metadata, exception)
@@ -172,11 +192,22 @@ class AsyncProducer(Generic[K, V], _ProducerState):
         # between) refuses the record as Java's RecordAccumulator.append does.
         closed_while_sending = KafkaError(message=CLOSED_WHILE_SENDING_MESSAGE)
         space: asyncio.Future[None] | None = None
+        handed_over: asyncio.Future[None] | None = None
         with self._use(closed_while_sending) as c_producer:
             full = _lib.Producer_send(c_producer, native, cb)
             if full is None:
                 raise closed_while_sending
             self._track(future)
+            if waiting:
+                handed_over = loop.create_future()
+                handover = handed_over
+
+                def ready() -> None:
+                    if not loop.is_closed():
+                        loop.call_soon_threadsafe(_set_result, handover)
+
+                if _lib.Producer_drain(c_producer, ready):
+                    handed_over = None
             if full:
                 waiter: asyncio.Future[None] = loop.create_future()
 
@@ -188,6 +219,16 @@ class AsyncProducer(Generic[K, V], _ProducerState):
                     space = waiter
         if space is not None:
             await space
+        if waiting:
+            try:
+                if handed_over is not None:
+                    await handed_over
+            finally:
+                with lock:
+                    waiting = False
+            if rethrown is not None:
+                self._futures.discard(future)
+                raise rethrown
         return future
 
     def _complete_pending(self, loop: asyncio.AbstractEventLoop) -> None:

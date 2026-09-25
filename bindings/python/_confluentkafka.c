@@ -623,16 +623,21 @@ typedef struct {
 static void Producer_free(Producer* producer);
 
 
+// Call a record's `cb(metadata_int, error_int, immediate)`. `immediate` is True
+// when the Rust producer's send() itself returned `error` (the errors Java's
+// KafkaProducer.doSend rethrows out of send(), which the core returns as Err),
+// False for the completion of the record's future.
 static void Producer_complete_callback(PyObject* cb,
     ProducerRecordObject *record_obj,
     kafka_producer_RecordMetadata_t *metadata,
-    kafka_common_Error_t *error) {
+    kafka_common_Error_t *error,
+    int immediate) {
     // Pass raw pointers as Python ints — the Python wrapper
     // calls accessor/destroy functions on them.
     PyObject *result_long = PyLong_FromUnsignedLongLong((unsigned long long)(uintptr_t)metadata);
     PyObject *error_long  = PyLong_FromUnsignedLongLong((unsigned long long)(uintptr_t)error);
     PyObject* result = PyObject_CallFunctionObjArgs(cb,
-        result_long, error_long, NULL);
+        result_long, error_long, immediate ? Py_True : Py_False, NULL);
     Py_DECREF(cb);
     Py_DECREF(result_long);
     Py_DECREF(error_long);
@@ -662,7 +667,7 @@ static void Producer_complete_callbacks(
     PyGILState_STATE gstate = PyGILState_Ensure();
     for (int i = 0; i < count; i++) {
         Producer_complete_callback(complete_cbs[i], result_objs[i],
-                                   metadata_ptrs[i], error_ptrs[i]);
+                                   metadata_ptrs[i], error_ptrs[i], 0);
     }
     PyGILState_Release(gstate);
 }
@@ -925,7 +930,7 @@ static int Producer_send_thread(void* arg) {
                         // Pass error pointer to callback; ownership transfers
                         Producer_complete_callback(batch_node->complete_cbs[i],
                             batch_node->producer_records[i],
-                            NULL, batch_node->batch_errors[i]);
+                            NULL, batch_node->batch_errors[i], 1);
                         batch_node->batch_errors[i] = NULL;
                         errors_found++;
                     } else if (errors_found > 0) {
@@ -1065,8 +1070,10 @@ static PyObject* py_KafkaProducer_new(PyObject* self, PyObject* args) {
 }
 
 // Producer_send(producer, record, cb) -> bool | None: accept `record` into the
-// accumulation for the send task; `cb(metadata_int, error_int)` fires once on
-// its completion. Returns whether the producer is now over the backpressure
+// accumulation for the send task; `cb(metadata_int, error_int, immediate)`
+// fires once on its completion (see Producer_complete_callback: `immediate`
+// marks an error the Rust send() returned, on the send task, before the drain
+// waiters registered after this record fire). Returns whether the producer is now over the backpressure
 // bound (the caller then waits in Producer_on_space_available), or None when
 // the producer is closing and the record was refused (cb never fires). The
 // closed test is made under the mutex the send task's last round takes, so an
