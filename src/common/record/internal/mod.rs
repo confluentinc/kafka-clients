@@ -30,6 +30,7 @@ mod compression_type;
 mod control_record_type;
 mod default_record;
 mod default_record_batch;
+mod end_transaction_marker;
 mod memory_records;
 pub(crate) mod memory_records_builder;
 mod record;
@@ -43,6 +44,7 @@ pub(crate) use compression_type::CompressionType;
 pub(crate) use control_record_type::ControlRecordType;
 pub(crate) use default_record::{DefaultRecord, DefaultRecordRef};
 pub(crate) use default_record_batch::{DefaultRecordBatch, DefaultRecordBatchRef};
+pub(crate) use end_transaction_marker::EndTransactionMarker;
 pub(crate) use memory_records::BatchIterator;
 // Rust-only options types for `MemoryRecords::with_records_with_options` and
 // `MemoryRecords::builder_with_options` (CLAUDE.md §2's cap on derived overload
