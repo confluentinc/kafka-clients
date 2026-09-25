@@ -26,7 +26,7 @@ from admin import (
     MockAdminClient, AsyncMockAdminClient, AdminClient, AsyncAdminClient,
     NewTopic, NewPartitions, RecordsToDelete, DeletedRecords,
     TopicDescription, TopicListing, TopicMetadataAndConfig,
-    AlterConfigOp, ClientMetricsResourceListing, ClusterDescription, Config,
+    AlterConfigOp, ClusterDescription, Config,
     ConfigEntry, ConfigResource, ConfigResourceType, OpType, ReplicaLogDirInfo,
     TopicPartitionReplica,
     ElectionType, IsolationLevel, ListOffsetsResultInfo, NewPartitionReassignment,
@@ -756,9 +756,9 @@ def test_list_config_resources():
         assert ConfigResourceType.CLIENT_METRICS not in by_type
 
 
-def test_list_client_metrics_resources():
+def test_list_config_resources_lists_client_metrics():
     with MockAdminClient(1) as admin:
-        assert admin.list_client_metrics_resources() == []
+        assert admin.list_config_resources([ConfigResourceType.CLIENT_METRICS]) == []
 
         # Altering a CLIENT_METRICS resource creates it, which is how Java's
         # mock seeds clientMetricsConfigs.
@@ -769,13 +769,9 @@ def test_list_client_metrics_resources():
                               OpType.SET),
             ]})[resource] is None
 
-        listed = admin.list_client_metrics_resources()
-        assert [r.name for r in listed] == ["cm-a", "cm-b"]  # sorted by name
-        assert all(isinstance(r, ClientMetricsResourceListing) for r in listed)
-
-        # The same resources through the API that supersedes this one.
-        via_config = admin.list_config_resources([ConfigResourceType.CLIENT_METRICS])
-        assert {r.name for r in via_config} == {"cm-a", "cm-b"}
+        listed = admin.list_config_resources([ConfigResourceType.CLIENT_METRICS])
+        assert {r.name for r in listed} == {"cm-a", "cm-b"}
+        assert all(r.resource_type == ConfigResourceType.CLIENT_METRICS for r in listed)
 
 
 # -- B2: log dirs ------------------------------------------------------------
@@ -913,7 +909,6 @@ async def test_async_log_dirs_and_listings():
 
         assert [r.name for r in await admin.list_config_resources(
             [ConfigResourceType.TOPIC])] == ["async-ld"]
-        assert await admin.list_client_metrics_resources() == []
     finally:
         await admin.close()
 
@@ -1439,22 +1434,6 @@ def test_list_groups_accepts_every_filter():
         assert (valid, errors) == ([], [])
 
 
-def test_list_consumer_groups_reports_empty_optionals_as_none():
-    """MockAdminClient.java:743 uses `new ConsumerGroupListing(g, false)`, whose
-    state and type are empty Optionals — None here, not "Unknown"."""
-    with MockAdminClient(1) as admin:
-        _seed_group(admin, "lcg-a")
-        valid, errors = admin.list_consumer_groups()
-        assert errors == []
-        assert len(valid) == 1
-        listing = valid[0]
-        assert listing.group_id == "lcg-a"
-        assert listing.is_simple_consumer_group is False
-        assert listing.group_state is None
-        assert listing.state is None
-        assert listing.group_type is None
-
-
 def test_describe_consumer_groups_reports_unsupported_per_group():
     """`describedGroups()` is one future per group, so the mock's
     UnsupportedOperationException (MockAdminClient.java:735-737) lands in every
@@ -1665,9 +1644,6 @@ async def test_async_group_rpcs():
         assert [g.group_id for g in valid] == ["async-group"]
         assert errors == []
 
-        valid, errors = await admin.list_consumer_groups()
-        assert [g.group_id for g in valid] == ["async-group"]
-
         described = await admin.describe_consumer_groups(["async-group"])
         assert str(described["async-group"]) == "Not implemented yet"
         described = await admin.describe_classic_groups(["async-group"])
@@ -1726,7 +1702,7 @@ def test_to_describe_consumer_groups_maps_every_field():
     transposed tuple field fails."""
     member = ("consumer-7", "instance-7", "rack-7", "client-7", "host-7",
               [("ta", 0), ("tb", 1)], [("tc", 2)], 17, True)
-    description = ("g-ok", False, [member], "range", "Consumer", "Stable", "Stable",
+    description = ("g-ok", False, [member], "range", "Consumer", "Stable",
                    (3, "h3", 9093, "rack-3"), [3, 4], 11, 12)
     converted = _to_describe_consumer_groups({
         "g-ok": (None, description),
@@ -1738,7 +1714,6 @@ def test_to_describe_consumer_groups_maps_every_field():
     assert group.is_simple_consumer_group is False
     assert group.partition_assignor == "range"
     assert group.group_type == "Consumer"
-    assert group.state == "Stable"
     assert group.group_state == "Stable"
     # The whole coordinator endpoint must survive, not just the id: the Rust
     # driver used to hand the handler a fabricated Node::new(id, "", -1), which
@@ -2911,7 +2886,7 @@ def test_authorized_operations_none_stays_distinct_from_empty():
     `_has_authorized_operations` bit, so the converters must map absent to None
     and reported-but-empty to []."""
     def consumer_group(operations):
-        raw = ("g", False, [], "range", "Consumer", "Stable", "Stable",
+        raw = ("g", False, [], "range", "Consumer", "Stable",
                (1, "h1", 9091, None), operations, 1, 1)
         return _to_describe_consumer_groups({"g": (None, raw)})["g"]
 

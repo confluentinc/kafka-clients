@@ -45,6 +45,7 @@ use super::AbstractResponse;
 ///
 /// Corresponds to `org.apache.kafka.common.requests.OffsetCommitResponse`.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.OffsetCommitResponse")]
 pub struct OffsetCommitResponse {
     data: OffsetCommitResponseData,
 }
@@ -53,6 +54,7 @@ impl OffsetCommitResponse {
     /// Creates a new `OffsetCommitResponse` from the underlying data.
     ///
     /// Mirrors Java's constructor `OffsetCommitResponse(OffsetCommitResponseData)`.
+    #[doc(alias = "org.apache.kafka.common.requests.OffsetCommitResponse#OffsetCommitResponse")]
     pub fn with_data(data: OffsetCommitResponseData) -> Self {
         Self { data }
     }
@@ -61,6 +63,7 @@ impl OffsetCommitResponse {
     /// caller-provided throttle time.
     ///
     /// Mirrors Java's `OffsetCommitResponse(int, Map<TopicPartition, Errors>)`.
+    #[doc(alias = "org.apache.kafka.common.requests.OffsetCommitResponse#OffsetCommitResponse")]
     pub fn with_throttle_time_ms_response_data(
         throttle_time_ms: i32,
         response_data: &HashMap<TopicPartition, Errors>,
@@ -90,6 +93,7 @@ impl OffsetCommitResponse {
     }
 
     /// Returns a reference to the underlying data.
+    #[doc(alias = "org.apache.kafka.common.requests.OffsetCommitResponse#data")]
     pub fn data(&self) -> &OffsetCommitResponseData {
         &self.data
     }
@@ -100,11 +104,13 @@ impl OffsetCommitResponse {
     }
 
     /// Returns the throttle time in milliseconds.
+    #[doc(alias = "org.apache.kafka.common.requests.OffsetCommitResponse#throttleTimeMs")]
     pub fn throttle_time_ms(&self) -> i32 {
         self.data.throttle_time_ms
     }
 
     /// Sets the throttle time in the response.
+    #[doc(alias = "org.apache.kafka.common.requests.OffsetCommitResponse#maybeSetThrottleTimeMs")]
     pub fn maybe_set_throttle_time_ms(&mut self, throttle_time_ms: i32) {
         self.data.set_throttle_time_ms(throttle_time_ms);
     }
@@ -115,6 +121,7 @@ impl OffsetCommitResponse {
     }
 
     /// Returns the error counts aggregated across all partition responses.
+    #[doc(alias = "org.apache.kafka.common.requests.OffsetCommitResponse#errorCounts")]
     pub fn error_counts(&self) -> HashMap<Errors, i32> {
         let mut counts = HashMap::new();
         for topic in &self.data.topics {
@@ -131,17 +138,20 @@ impl OffsetCommitResponse {
     /// # Errors
     ///
     /// Returns an error if parsing fails.
+    #[doc(alias = "org.apache.kafka.common.requests.OffsetCommitResponse#parse")]
     pub fn parse(readable: &mut dyn Readable, version: i16) -> io::Result<Self> {
         let data = OffsetCommitResponseData::read(readable, version)?;
         Ok(Self::with_data(data))
     }
 
     /// Whether the client should throttle on this response (v4+).
+    #[doc(alias = "org.apache.kafka.common.requests.OffsetCommitResponse#shouldClientThrottle")]
     pub fn should_client_throttle(&self, version: i16) -> bool {
         version >= 4
     }
 
     /// Whether the wire protocol uses topic ids at the given version (v10+).
+    #[doc(alias = "org.apache.kafka.common.requests.OffsetCommitResponse#useTopicIds")]
     pub fn use_topic_ids(version: i16) -> bool {
         version >= 10
     }

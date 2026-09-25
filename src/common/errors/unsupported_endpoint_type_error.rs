@@ -14,16 +14,17 @@
 
 //! Translated from `org.apache.kafka.common.errors.UnsupportedEndpointTypeException`.
 
-use crate::common::Errors;
 use crate::common::error::kafka_error_class;
+use crate::common::protocol::Errors;
 
 kafka_error_class! {
     /// This endpoint type is not supported yet.
     ///
-    /// Corresponds to Java's `UnsupportedEndpointTypeException`, error code [`Errors::UnsupportedEndpointType`].
+    /// Corresponds to Java's `UnsupportedEndpointTypeException`, error code `Errors::UnsupportedEndpointType`.
     ///
     /// Java `extends` chain:
     ///    `UnsupportedEndpointTypeException` -> `ApiException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.UnsupportedEndpointTypeException")]
     UnsupportedEndpointTypeError,
     code: Errors::UnsupportedEndpointType,
     extends: [

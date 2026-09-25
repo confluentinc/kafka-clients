@@ -22,6 +22,7 @@
 ///
 /// Corresponds to `org.apache.kafka.clients.admin.PartitionReassignment`.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[doc(alias = "org.apache.kafka.clients.admin.PartitionReassignment")]
 pub struct PartitionReassignment {
     replicas: Vec<i32>,
     adding_replicas: Vec<i32>,
@@ -30,6 +31,7 @@ pub struct PartitionReassignment {
 
 impl PartitionReassignment {
     /// Creates a partition reassignment from its replica sets.
+    #[doc(alias = "org.apache.kafka.clients.admin.PartitionReassignment#PartitionReassignment")]
     pub fn new(replicas: Vec<i32>, adding_replicas: Vec<i32>, removing_replicas: Vec<i32>) -> Self {
         Self { replicas, adding_replicas, removing_replicas }
     }
@@ -37,6 +39,7 @@ impl PartitionReassignment {
     /// The brokers which this partition currently resides on.
     ///
     /// Mirrors `replicas()`.
+    #[doc(alias = "org.apache.kafka.clients.admin.PartitionReassignment#replicas")]
     pub fn replicas(&self) -> &[i32] {
         &self.replicas
     }
@@ -45,6 +48,7 @@ impl PartitionReassignment {
     /// reassignment. A subset of replicas.
     ///
     /// Mirrors `addingReplicas()`.
+    #[doc(alias = "org.apache.kafka.clients.admin.PartitionReassignment#addingReplicas")]
     pub fn adding_replicas(&self) -> &[i32] {
         &self.adding_replicas
     }
@@ -53,6 +57,7 @@ impl PartitionReassignment {
     /// reassignment. A subset of replicas.
     ///
     /// Mirrors `removingReplicas()`.
+    #[doc(alias = "org.apache.kafka.clients.admin.PartitionReassignment#removingReplicas")]
     pub fn removing_replicas(&self) -> &[i32] {
         &self.removing_replicas
     }

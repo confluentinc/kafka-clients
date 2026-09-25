@@ -42,7 +42,13 @@ use crate::common::error::{ErrorCode, ErrorHierarchy, ErrorMessage, ErrorSource}
 /// carries Java's two `int` fields and their accessors — `responseCorrelationId()`
 /// is read by `NetworkClient.parseResponse` to decide whether the response is
 /// unrelated to a SASL request.
+///
+/// Crate-private although `Error::CorrelationIdMismatch` is public: Java's class sits in
+/// `common.requests`, which is "not a supported API". Callers match the variant and
+/// use `Display` / `source()`; the payload itself is not reachable by name.
+#[expect(unnameable_types)]
 #[derive(Clone, Debug)]
+#[doc(alias = "org.apache.kafka.common.requests.CorrelationIdMismatchException")]
 pub struct CorrelationIdMismatchError {
     message: String,
     request_correlation_id: i32,
@@ -85,6 +91,7 @@ impl CorrelationIdMismatchError {
 
     /// Create the error, mirroring Java's
     /// `CorrelationIdMismatchException(String message, int requestCorrelationId, int responseCorrelationId)`.
+    #[doc(alias = "org.apache.kafka.common.requests.CorrelationIdMismatchException#CorrelationIdMismatchException")]
     pub fn new(message: impl Into<String>, request_correlation_id: i32, response_correlation_id: i32) -> Self {
         Self {
             message: message.into(),
@@ -95,11 +102,13 @@ impl CorrelationIdMismatchError {
     }
 
     /// The correlation id the request carried. Java's `requestCorrelationId()`.
+    #[doc(alias = "org.apache.kafka.common.requests.CorrelationIdMismatchException#requestCorrelationId")]
     pub fn request_correlation_id(&self) -> i32 {
         self.request_correlation_id
     }
 
     /// The correlation id the response carried. Java's `responseCorrelationId()`.
+    #[doc(alias = "org.apache.kafka.common.requests.CorrelationIdMismatchException#responseCorrelationId")]
     pub fn response_correlation_id(&self) -> i32 {
         self.response_correlation_id
     }
@@ -204,6 +213,6 @@ mod tests {
         assert_eq!(error.to_string(), "CorrelationIdMismatchError: ids disagree");
         // No entry in `Errors.java` and no coded superclass, so Java's
         // `Errors.forException` walk falls through to UNKNOWN_SERVER_ERROR.
-        assert_eq!(error.error(), crate::common::Errors::UnknownServerError);
+        assert_eq!(error.error(), crate::common::protocol::Errors::UnknownServerError);
     }
 }

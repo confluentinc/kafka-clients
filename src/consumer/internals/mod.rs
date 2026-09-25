@@ -22,6 +22,8 @@ mod abstract_heartbeat_request_manager;
 pub(crate) mod abstract_membership_manager;
 mod async_consumer_metrics;
 pub(crate) mod auto_offset_reset_strategy;
+#[cfg(test)]
+mod auto_offset_reset_strategy_test;
 pub(crate) mod commit_request_manager;
 mod completed_fetch;
 mod consumer_heartbeat_request_manager;
@@ -68,31 +70,27 @@ mod timed_request_state;
 pub(crate) mod topic_metadata_request_manager;
 mod wakeup_trigger;
 
-// `pub use`, not `pub(crate) use`: `AutoOffsetResetStrategy` / `StrategyType` are
-// public API (`consumer::AutoOffsetResetStrategy`, consumer-threading.md §20) even
-// though they live in an `internals` package, so the re-export must carry that
-// visibility for `consumer/mod.rs` to forward it.
 pub(crate) use abstract_fetch::AbstractFetch;
 pub(crate) use abstract_heartbeat_request_manager::{
     AbstractHeartbeatRequestManager, HeartbeatErrorAction, HeartbeatFailureAction,
 };
 pub(crate) use abstract_membership_manager::{AbstractMembershipManager, LocalAssignment};
 pub(crate) use async_consumer_metrics::AsyncConsumerMetrics;
-pub use auto_offset_reset_strategy::{AutoOffsetResetStrategy, StrategyType};
+pub(crate) use auto_offset_reset_strategy::{AutoOffsetResetStrategy, StrategyType};
 pub(crate) use commit_request_manager::CommitRequestManager;
 pub(crate) use completed_fetch::CompletedFetch;
 pub(crate) use consumer_heartbeat_request_manager::ConsumerHeartbeatRequestManager;
 pub(crate) use consumer_interceptors::ConsumerInterceptors;
 pub(crate) use consumer_membership_manager::ConsumerMembershipManager;
 pub(crate) use consumer_metadata::ConsumerMetadata;
-pub(crate) use consumer_network_thread::{ConsumerNetworkThread, SystemThreadTime, ThreadTime};
+pub(crate) use consumer_network_thread::ConsumerNetworkThread;
 pub(crate) use consumer_rebalance_listener_invoker::ConsumerRebalanceListenerInvoker;
 pub(crate) use consumer_rebalance_metrics_manager::ConsumerRebalanceMetricsManager;
 pub(crate) use consumer_utils::ConsumerUtils;
 pub(crate) use coordinator_request_manager::CoordinatorRequestManager;
 pub(crate) use deserializers::Deserializers;
 pub(crate) use fetch_buffer::FetchBuffer;
-pub(crate) use fetch_collector::{FetchCollector, FetchCollectorTime, SystemFetchCollectorTime};
+pub(crate) use fetch_collector::FetchCollector;
 pub(crate) use fetch_config::FetchConfig;
 pub(crate) use fetch_metrics_aggregator::FetchMetricsAggregator;
 pub(crate) use fetch_metrics_manager::FetchMetricsManager;

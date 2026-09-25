@@ -54,7 +54,7 @@ pub struct StructRegistry {
 
 struct StructInfo {
     spec: StructSpec,
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     parent_versions: Versions,
 }
 

@@ -32,6 +32,7 @@ use crate::producer::internals::ProduceRequestResult;
 /// uses of `IncompleteBatches` are:
 /// - `request_results()` for `awaitFlushCompletion`
 /// - `is_empty()` for `hasIncomplete`
+#[doc(alias = "org.apache.kafka.clients.producer.internals.IncompleteBatches")]
 pub struct IncompleteBatches {
     /// The set of incomplete produce futures, keyed by Arc pointer identity.
     incomplete: Mutex<HashSet<ArcResultKey>>,
@@ -58,17 +59,20 @@ impl std::hash::Hash for ArcResultKey {
 
 impl IncompleteBatches {
     /// Create a new empty `IncompleteBatches`.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.IncompleteBatches#IncompleteBatches")]
     pub fn new() -> Self {
         Self { incomplete: Mutex::new(HashSet::new()) }
     }
 
     /// Add a batch's produce future to the incomplete set.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.IncompleteBatches#add")]
     pub fn add(&self, produce_future: Arc<ProduceRequestResult>) {
         let mut incomplete = self.incomplete.lock().unwrap();
         incomplete.insert(ArcResultKey(produce_future));
     }
 
     /// Remove a batch's produce future from the incomplete set.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.IncompleteBatches#remove")]
     pub fn remove(&self, produce_future: &Arc<ProduceRequestResult>) {
         let mut incomplete = self.incomplete.lock().unwrap();
         let removed = incomplete.remove(&ArcResultKey(Arc::clone(produce_future)));
@@ -76,17 +80,20 @@ impl IncompleteBatches {
     }
 
     /// Return a snapshot copy of all incomplete produce futures.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.IncompleteBatches#copyAll")]
     pub fn copy_all(&self) -> Vec<Arc<ProduceRequestResult>> {
         let incomplete = self.incomplete.lock().unwrap();
         incomplete.iter().map(|k| Arc::clone(&k.0)).collect()
     }
 
     /// Return the [`ProduceRequestResult`] for each incomplete batch.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.IncompleteBatches#requestResults")]
     pub fn request_results(&self) -> Vec<Arc<ProduceRequestResult>> {
         self.copy_all()
     }
 
     /// Check if there are no incomplete batches.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.IncompleteBatches#isEmpty")]
     pub fn is_empty(&self) -> bool {
         let incomplete = self.incomplete.lock().unwrap();
         incomplete.is_empty()

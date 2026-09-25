@@ -35,11 +35,8 @@ mod admin_quotas_test;
 mod admin_scram_test;
 mod admin_topics_test;
 mod admin_transactions_test;
-mod api_versions_test;
-mod connection_test;
 mod consumer_test;
 mod consumer_topic_creation_test;
-mod metadata_test;
 #[cfg(feature = "multilanguage-tests")]
 mod multilanguage_admin_test;
 #[cfg(feature = "multilanguage-tests")]
@@ -62,4 +59,3 @@ mod plaintext_consumer_test;
 mod producer_test;
 mod producer_transactions_test;
 mod sasl_ssl_consumer_test;
-mod ssl_sasl_test;

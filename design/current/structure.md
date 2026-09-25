@@ -67,6 +67,35 @@ design/{current,history}/
 > and a top-level `message-specs/` directory (both live in the `generator/`
 > crate now: `generator/src/message/` and `generator/messages/`).
 
+## Public surface (2026-09-25)
+
+What the crate exports follows Java's audience, not the module tree. An item
+may be public only if its Java class is annotated `@InterfaceAudience.Public`
+at Apache Kafka 4.4, is outside every `internal*` package, and is outside the
+packages whose `package-info.java` says "not a supported API". C bindings exist
+only for public items. `cargo xtask lint-custom`'s `check-public-audience` rule
+enforces this, and rustc's `unnameable_types` (enabled in `src/lib.rs`) catches
+a crate-private type escaping through a public signature.
+
+In practice:
+
+- The flat client-layer files above (`NetworkClient`, `Metadata`,
+  `ApiVersions`, `KafkaClient`, ...) and `CommonClientConfigs` are
+  `pub(crate)`.
+- `common::{compress, feature, memory, network, protocol, requests, utils}`,
+  `common::security::{authenticator, ssl}` and the generated wire modules are
+  `pub(crate)`. Tests that need them live inside the crate: the message and
+  protocol tests sit under `src/common/`, and the raw-socket integration suites
+  under `src/integration_tests/`.
+- `consumer::AsyncKafkaConsumer` is `pub(crate)`; `KafkaConsumer` /
+  `new_consumer` construct it.
+- `Errors` (the wire enum) is `pub(crate)`, so `Error` has no public
+  `error()` / `code()`. Callers classify by variant and `is_*_error()`, and C
+  callers use `kafka_common_ErrorCode_t`.
+- Exceptions (Rust-only types, test helpers such as `MockAdminClient`, JDK
+  translations such as `TimeUnit`, C helper handles) are listed, each with its
+  reason, in `xtask/public-audience-allowlist.txt`.
+
 ![Layered network stack](img/network-stack.svg)
 
 *The layer boundaries still match Java's; only the client layer (flattened
@@ -115,7 +144,7 @@ src/common/
     topic_collection.rs, uuid.rs, kafka_error.rs, kafka_future.rs,
     partition_info.rs, isolation_level.rs, election_type.rs,
     group_state.rs, group_type.rs, classic_group_state.rs,
-    consumer_group_state.rs, cluster_resource{,_listener}.rs,
+    cluster_resource{,_listener}.rs,
     metric{,_name,_name_template}.rs
 ```
 
@@ -158,7 +187,7 @@ src/consumer/               # 19 files + 48 internals + 9 events
 │   consumer_group_metadata.rs, consumer_rebalance_listener.rs,
 │   consumer_rebalance_listener_method_name.rs, offset_commit_callback.rs,
 │   offset_and_metadata.rs, offset_and_timestamp.rs,
-│   offset_reset_strategy.rs, group_protocol.rs, close_options.rs,
+│   group_protocol.rs, close_options.rs,
 │   subscription_pattern.rs, interceptor.rs, errors.rs,
 │   consumer_partition_assignor.rs   # Assignment/Subscription holders only
 └── internals/
@@ -313,10 +342,10 @@ The 46 RPCs, in `Admin` trait declaration order:
 `abort_transaction`, `describe_transactions`, `fence_producers`,
 `list_transactions`, `force_terminate_transaction`, `describe_cluster`,
 `describe_configs`, `incremental_alter_configs`, `list_config_resources`,
-`list_client_metrics_resources`, `describe_log_dirs`, `alter_replica_log_dirs`,
+`describe_log_dirs`, `alter_replica_log_dirs`,
 `describe_replica_log_dirs`, `elect_leaders`, `alter_partition_reassignments`,
 `list_partition_reassignments`, `list_offsets`, `list_groups`,
-`list_consumer_groups`, `describe_consumer_groups`, `describe_classic_groups`,
+`describe_consumer_groups`, `describe_classic_groups`,
 `list_consumer_group_offsets`, `alter_consumer_group_offsets`,
 `delete_consumer_group_offsets`, `delete_consumer_groups`,
 `remove_members_from_consumer_group`, `create_acls`, `describe_acls`,
@@ -427,11 +456,11 @@ tests/integration/admin_elections_reassignments_offsets_test.rs
 
 ```
 src/admin/
-├── group_listing.rs, consumer_group_listing.rs,
+├── group_listing.rs,
 │   consumer_group_description.rs, classic_group_description.rs,
 │   member_description.rs, member_assignment.rs, member_to_remove.rs,
 │   list_consumer_group_offsets_spec.rs
-├── {list_groups,list_consumer_groups,describe_consumer_groups,
+├── {list_groups,describe_consumer_groups,
 │    describe_classic_groups,list_consumer_group_offsets,
 │    alter_consumer_group_offsets,delete_consumer_group_offsets,
 │    delete_consumer_groups,remove_members_from_consumer_group}_result.rs
@@ -443,8 +472,7 @@ src/admin/
     └── delete_groups_handler.rs, delete_consumer_groups_handler.rs,
         remove_members_from_consumer_group_handler.rs
 
-src/common/{group_state.rs, group_type.rs, classic_group_state.rs,
-            consumer_group_state.rs}
+src/common/{group_state.rs, group_type.rs, classic_group_state.rs}
 src/consumer/internals/consumer_protocol.rs   # decodes a classic member's
 src/consumer/consumer_partition_assignor.rs   # assignment bytes (data holders
                                               # only; no assignor trait)
@@ -470,8 +498,6 @@ src/admin/
 │   transaction_listing.rs, abort_transaction_spec.rs,
 │   {describe_producers,describe_transactions,abort_transaction,
 │    fence_producers,list_transactions,terminate_transaction}_result.rs
-├── client_metrics_resource_listing.rs,
-│   list_client_metrics_resources_result.rs
 └── internals/{describe_producers,describe_transactions,abort_transaction,
               fence_producers,list_transactions}_handler.rs
 
@@ -487,8 +513,7 @@ src/common/security/{auth/kafka_principal.rs,
 tests/integration/admin_{acls,quotas,scram,features,transactions}_test.rs
 ```
 
-`list_client_metrics_resources` reuses the `ListConfigResources` wire type
-rather than adding one. The transaction RPCs are the users of
+The transaction RPCs are the users of
 `AllBrokersStrategy` and `StaticBrokerStrategy`. `force_terminate_transaction`
 is the one RPC whose files are named for the Java `terminateTransaction`
 spelling (`terminate_transaction_{result,options}.rs`).

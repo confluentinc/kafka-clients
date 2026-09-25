@@ -32,7 +32,7 @@ use super::ListenerName;
 use super::PlaintextAuthenticator;
 use super::SslTransportLayer;
 
-use crate::common::security::SslFactory;
+use crate::common::security::ssl::SslFactory;
 
 use std::io;
 use std::sync::Arc;
@@ -46,11 +46,12 @@ use tokio::net::TcpStream;
 /// otherwise (client mode).
 ///
 /// Translated from `org.apache.kafka.common.network.SslChannelBuilder`.
+#[doc(alias = "org.apache.kafka.common.network.SslChannelBuilder")]
 pub struct SslChannelBuilder {
     /// SSL factory for creating TLS connectors.
     ssl_factory: SslFactory,
     /// The listener name, if any (server-side only).
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     listener_name: Option<ListenerName>,
 }
 
@@ -58,6 +59,7 @@ impl SslChannelBuilder {
     /// Creates a new `SslChannelBuilder` with the given SSL factory.
     ///
     /// `listener_name` is `Some` when instantiated in the broker and `None` otherwise.
+    #[doc(alias = "org.apache.kafka.common.network.SslChannelBuilder#SslChannelBuilder")]
     pub fn new(ssl_factory: SslFactory, listener_name: Option<ListenerName>) -> Self {
         Self { ssl_factory, listener_name }
     }
@@ -99,7 +101,7 @@ impl ChannelBuilder for SslChannelBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::config::SslConfig;
+    use crate::common::config::SslConfigs;
     use crate::common::network::DefaultChannelMetadataRegistry;
 
     /// Test that SslChannelBuilder creates a channel that is not immediately ready
@@ -111,7 +113,7 @@ mod tests {
 
         let stream = TcpStream::connect(addr).await.unwrap();
 
-        let ssl_factory = SslFactory::new(&SslConfig::default()).unwrap();
+        let ssl_factory = SslFactory::new(&SslConfigs::default()).unwrap();
         let builder = SslChannelBuilder::new(ssl_factory, None);
         let metadata_registry = Box::new(DefaultChannelMetadataRegistry::new());
 
@@ -132,7 +134,7 @@ mod tests {
 
         let stream = TcpStream::connect(addr).await.unwrap();
 
-        let ssl_factory = SslFactory::new(&SslConfig::default()).unwrap();
+        let ssl_factory = SslFactory::new(&SslConfigs::default()).unwrap();
         let builder = SslChannelBuilder::new(ssl_factory, None);
         let metadata_registry = Box::new(DefaultChannelMetadataRegistry::new());
 

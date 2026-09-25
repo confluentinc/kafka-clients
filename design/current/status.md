@@ -1,5 +1,16 @@
 # Current Status: Milestones 1–13 complete — client tracks Apache Kafka 4.3.1
 
+> **Public surface restricted (2026-09-25):** the Rust crate and the C API now
+> export only what Java's audience allows (`@InterfaceAudience.Public` at 4.4,
+> outside `internal*` and "not a supported API" packages), enforced by
+> `cargo xtask lint-custom` → `check-public-audience`, with the exceptions in
+> `xtask/public-audience-allowlist.txt`. Crate-private internals are now tested
+> in-crate. C symbols were renamed to follow their Java package
+> (`kafka_common_TopicPartition*`, `kafka_common_acl_AclBinding*`,
+> `kafka_common_KafkaFuture_RecordMetadata*`, ...) and the
+> `CorrelationIdMismatchError` binding was removed. See
+> `structure.md` → "Public surface".
+
 > **Current state (2026-08-26):** the Rust client is up to **Apache Kafka
 > 4.3.1**. Milestone 13 bumped the `kafka/` submodule reference from 4.2.0
 > (`a18251b`) to 4.3.1 (`26b251a451`), synced the wire-spec corpus
@@ -233,7 +244,7 @@ per-phase `design/history/Milestone-N/**/PLAN.md` files. For performance, use
 
 ### Supporting Infrastructure ✓
 - **Uuid** (`common/uuid.rs`): 128-bit UUID with base64 URL encoding and signed comparison matching Java
-- **varint** (`common/protocol/varint.rs`): Protocol Buffers varint/varlong encoding (unsigned and zig-zag)
+- **ByteUtils** (`common/utils/byte_utils.rs`): Protocol Buffers varint/varlong encoding (unsigned and zig-zag)
 - **MessageSizeAccumulator** (`common/protocol/message_size_accumulator.rs`): Two-pass size tracking
 - **ObjectSerializationCache** (`common/protocol/object_serialization_cache.rs`): Two-pass serialization cache
 - **MessageUtil** (`common/protocol/message_util.rs`): Helpers (to_byte_buffer_accessor, compare_raw_tagged_fields)
@@ -398,7 +409,8 @@ tests, all green.
   **per-resource-type routing**: broker / broker-logger resources route to that
   specific broker node, topic/other to the controller / least-loaded node.
 - **`list_config_resources`** (`ListConfigResourcesRequest`) — this wire wrapper
-  is reused later by Tier 3's `listClientMetricsResources`.
+  was reused by Tier 3's `listClientMetricsResources` (since removed, see Tier 3
+  Phase 7).
 - **New types**: `common::config::ConfigResource` (+ its resource-type enum),
   `AlterConfigOp` (+ `OpType`), `Describe{Cluster,Configs}{Options,Result}`,
   `AlterConfigsOptions`/`AlterConfigsResult`, `ListConfigResources{Options,Result}`
@@ -491,7 +503,8 @@ first. Both share the one background task.*
 
 ## Tier 2 Phase 1 — Group listing & describe ✓ (2026-07-29)
 
-Translated `list_groups`, `list_consumer_groups` (deprecated),
+Translated `list_groups`, `list_consumer_groups` (deprecated, since removed —
+see Tier 3 Phase 7),
 `describe_consumer_groups` (dual-protocol), and `describe_classic_groups`,
 Rust core + unit tests + real-broker integration tests, all green. **First
 real use of `CoordinatorStrategy` and the shared broker-enumeration `Call`
@@ -513,8 +526,8 @@ idiom.**
   `ConsumerPartitionAssignor.{Assignment,Subscription}` data holders (assignor
   trait stays out of scope) — the documented `consumer-threading.md` §20
   carve-out for Admin (PLAN finding #3). `common::{GroupState, GroupType,
-  ClassicGroupState, ConsumerGroupState}`.
-- **New types**: `admin::{GroupListing, ConsumerGroupListing,
+  ClassicGroupState}` (and `ConsumerGroupState`, since removed).
+- **New types**: `admin::{GroupListing, ConsumerGroupListing (since removed),
   ConsumerGroupDescription, ClassicGroupDescription, MemberDescription,
   MemberAssignment}`, the four `*Options`/`*Result` pairs,
   `internals::{CoordinatorKey, CoordinatorStrategy,
@@ -851,6 +864,14 @@ translated `AllBrokersStrategyTest` + `AllBrokersStrategyIntegrationTest`.
 ## Tier 3 Phase 7 — Client metrics ✓ (2026-07-29)
 
 RPC: `listClientMetricsResources(ListClientMetricsResourcesOptions)`.
+
+> **Removed (2026-09-25).** `listClientMetricsResources` is deprecated in Java
+> (in favour of `listConfigResources(Set.of(CLIENT_METRICS))`), and CLAUDE.md §3
+> forbids translating deprecated API before 1.0, so this phase's types, the trait
+> methods, the FFI/Python bindings and their tests were removed together with
+> the deprecated `listConsumerGroups` family (`ConsumerGroupListing`,
+> `ListConsumerGroups{Options,Result}`), `common::ConsumerGroupState` and
+> `ConsumerGroupDescription::state()`. The notes below are kept as history.
 
 - New: `ClientMetricsResourceListing` (name-only POJO, `Display` = Java
   `toString`), `ListClientMetricsResourcesResult` (`all()` →

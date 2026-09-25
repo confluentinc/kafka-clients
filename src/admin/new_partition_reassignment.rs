@@ -23,6 +23,7 @@ use crate::common::Error;
 ///
 /// Corresponds to `org.apache.kafka.clients.admin.NewPartitionReassignment`.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[doc(alias = "org.apache.kafka.clients.admin.NewPartitionReassignment")]
 pub struct NewPartitionReassignment {
     target_replicas: Vec<i32>,
 }
@@ -36,6 +37,7 @@ impl NewPartitionReassignment {
     ///
     /// Returns an error (invalid argument) if no replicas are supplied,
     /// mirroring Java's `IllegalArgumentException`.
+    #[doc(alias = "org.apache.kafka.clients.admin.NewPartitionReassignment#NewPartitionReassignment")]
     pub fn new(target_replicas: Vec<i32>) -> Result<Self, Error> {
         if target_replicas.is_empty() {
             return Err(Error::local_illegal_argument(
@@ -48,6 +50,7 @@ impl NewPartitionReassignment {
     /// Returns the target replicas of this reassignment.
     ///
     /// Mirrors `targetReplicas()`.
+    #[doc(alias = "org.apache.kafka.clients.admin.NewPartitionReassignment#targetReplicas")]
     pub fn target_replicas(&self) -> &[i32] {
         &self.target_replicas
     }

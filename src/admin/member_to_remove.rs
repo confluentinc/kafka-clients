@@ -23,20 +23,23 @@ use crate::leave_group_request_data::MemberIdentity;
 ///
 /// Corresponds to `org.apache.kafka.clients.admin.MemberToRemove`. Members are
 /// identified by their `group.instance.id` (static membership); the member id
-/// is left as [`JoinGroupRequest::UNKNOWN_MEMBER_ID`] so the broker resolves it by instance id.
+/// is left as `JoinGroupRequest::UNKNOWN_MEMBER_ID` so the broker resolves it by instance id.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[doc(alias = "org.apache.kafka.clients.admin.MemberToRemove")]
 pub struct MemberToRemove {
     group_instance_id: String,
 }
 
 impl MemberToRemove {
     /// Creates a `MemberToRemove` for the given `group.instance.id`.
+    #[doc(alias = "org.apache.kafka.clients.admin.MemberToRemove#MemberToRemove")]
     pub fn new(group_instance_id: impl Into<String>) -> Self {
         Self { group_instance_id: group_instance_id.into() }
     }
 
     /// Converts this member to a wire [`MemberIdentity`] (with an unknown member
     /// id). Mirrors Java's `MemberToRemove.toMemberIdentity`.
+    #[doc(alias = "org.apache.kafka.clients.admin.MemberToRemove#toMemberIdentity")]
     pub(crate) fn to_member_identity(&self) -> MemberIdentity {
         let mut identity = MemberIdentity::new();
         identity
@@ -46,6 +49,7 @@ impl MemberToRemove {
     }
 
     /// The `group.instance.id` of the member to remove.
+    #[doc(alias = "org.apache.kafka.clients.admin.MemberToRemove#groupInstanceId")]
     pub fn group_instance_id(&self) -> &str {
         &self.group_instance_id
     }

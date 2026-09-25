@@ -40,17 +40,17 @@
 //! `build_request` consumes the builder and either replaces the session
 //! (full fetch) or diffs against it (incremental fetch).
 
-#![allow(dead_code)]
+#![expect(dead_code)]
 
 use std::collections::{HashMap, HashSet};
 
 use indexmap::IndexMap;
 use log::{debug, info, trace};
 
-use crate::common::Errors;
 use crate::common::TopicIdPartition;
 use crate::common::TopicPartition;
 use crate::common::Uuid;
+use crate::common::protocol::Errors;
 use crate::common::requests::FetchMetadata;
 use crate::common::requests::FetchResponse;
 use crate::common::requests::fetch_request::PartitionData;
@@ -84,6 +84,7 @@ pub(crate) struct FetchSessionRequestData {
 ///
 /// Corresponds to `org.apache.kafka.clients.FetchSessionHandler`.
 #[derive(Debug)]
+#[doc(alias = "org.apache.kafka.clients.FetchSessionHandler")]
 pub struct FetchSessionHandler {
     node: i32,
     /// Metadata for the next fetch request.
@@ -103,11 +104,13 @@ impl FetchSessionHandler {
     /// Mirrors Java's static `findMissing` (which uses `LinkedHashSet`); the
     /// Rust translation returns `HashSet` because the consumers (`verify*`
     /// methods) don't depend on iteration order.
+    #[doc(alias = "org.apache.kafka.clients.FetchSessionHandler#findMissing")]
     pub fn find_missing<T: Clone + Eq + std::hash::Hash>(to_find: &HashSet<T>, to_search: &HashSet<T>) -> HashSet<T> {
         to_find.iter().filter(|item| !to_search.contains(*item)).cloned().collect()
     }
 
     /// Constructs a fresh handler for the given broker node id.
+    #[doc(alias = "org.apache.kafka.clients.FetchSessionHandler#FetchSessionHandler")]
     pub fn new(node: i32) -> Self {
         Self {
             node,
@@ -123,21 +126,25 @@ impl FetchSessionHandler {
     }
 
     /// Returns the session id of the current (or pending) session.
+    #[doc(alias = "org.apache.kafka.clients.FetchSessionHandler#sessionId")]
     pub fn session_id(&self) -> i32 {
         self.next_metadata.session_id()
     }
 
     /// Returns a reference to the topic-id-to-name map.
+    #[doc(alias = "org.apache.kafka.clients.FetchSessionHandler#sessionTopicNames")]
     pub fn session_topic_names(&self) -> &HashMap<Uuid, String> {
         &self.session_topic_names
     }
 
     /// Returns the set of partitions currently in the session.
+    #[doc(alias = "org.apache.kafka.clients.FetchSessionHandler#sessionTopicPartitions")]
     pub fn session_topic_partitions(&self) -> HashSet<TopicPartition> {
         self.session_partitions.keys().cloned().collect()
     }
 
     /// Creates a new builder for the next fetch request.
+    #[doc(alias = "org.apache.kafka.clients.FetchSessionHandler#newBuilder")]
     pub fn new_builder(&self) -> Builder {
         Builder::default()
     }
@@ -169,6 +176,7 @@ impl FetchSessionHandler {
 
     /// Marks the session as pending close. The next built request will
     /// signal close via the `FINAL_EPOCH` epoch.
+    #[doc(alias = "org.apache.kafka.clients.FetchSessionHandler#notifyClose")]
     pub fn notify_close(&mut self) {
         debug!(
             "Set the metadata for next fetch request to close the existing session ID={}",
@@ -179,6 +187,7 @@ impl FetchSessionHandler {
 
     /// Records that a fetch request failed. The next built request will
     /// attempt to recreate the session.
+    #[doc(alias = "org.apache.kafka.clients.FetchSessionHandler#handleError")]
     pub fn handle_error(&mut self, _t: &crate::common::Error) {
         info!("Error sending fetch request {} to node {}", self.next_metadata, self.node);
         self.next_metadata = self.next_metadata.next_close_existing_attempt_new();
@@ -192,6 +201,7 @@ impl FetchSessionHandler {
     /// should close/recreate the session.
     ///
     /// Translates `FetchSessionHandler.handleResponse(FetchResponse, short)`.
+    #[doc(alias = "org.apache.kafka.clients.FetchSessionHandler#handleResponse")]
     pub fn handle_response(&mut self, response: &FetchResponse, version: i16) -> bool {
         if response.error() != Errors::None {
             info!(
@@ -421,6 +431,7 @@ impl FetchSessionHandler {
     /// Verifies that a full-fetch response contains exactly the session's
     /// partitions. Returns `None` if everything matches; otherwise returns
     /// a human-readable description.
+    #[doc(alias = "org.apache.kafka.clients.FetchSessionHandler#verifyFullFetchResponsePartitions")]
     pub fn verify_full_fetch_response_partitions(
         &self,
         topic_partitions: &HashSet<TopicPartition>,
@@ -455,6 +466,7 @@ impl FetchSessionHandler {
 
     /// Verifies that an incremental fetch response only contains partitions
     /// from the session. Returns `None` if everything matches.
+    #[doc(alias = "org.apache.kafka.clients.FetchSessionHandler#verifyIncrementalFetchResponsePartitions")]
     pub fn verify_incremental_fetch_response_partitions(
         &self,
         topic_partitions: &HashSet<TopicPartition>,
@@ -490,6 +502,7 @@ impl FetchSessionHandler {
 /// via [`Builder::add`], pass to [`FetchSessionHandler::build_request`] to
 /// produce a [`FetchSessionRequestData`].
 #[derive(Debug, Default)]
+#[doc(alias = "org.apache.kafka.clients.FetchSessionHandler$Builder")]
 pub struct Builder {
     /// Insertion-ordered partitions for the upcoming fetch. The wire
     /// protocol truncates from the end of this list when the response cap
@@ -504,6 +517,7 @@ pub struct Builder {
 
 impl Builder {
     /// Marks that we want data from this partition in the upcoming fetch.
+    #[doc(alias = "org.apache.kafka.clients.FetchSessionHandler$Builder#add")]
     pub fn add(&mut self, topic_partition: TopicPartition, data: PartitionData) {
         if data.topic_id == Uuid::zero() {
             self.partitions_without_topic_ids += 1;
@@ -529,7 +543,7 @@ fn join_ids(set: &HashSet<Uuid>) -> String {
 mod tests {
     use super::*;
     use crate::FetchResponseData;
-    use crate::common::ApiKeys;
+    use crate::common::protocol::ApiKeys;
     use crate::fetch_response_data::{FetchableTopicResponse, PartitionData as RespPartitionData};
 
     fn tp(name: &str, partition: i32) -> TopicPartition {
@@ -591,6 +605,7 @@ mod tests {
 
     /// Translated from `FetchSessionHandlerTest.testFindMissing`.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.FetchSessionHandlerTest#testFindMissing")]
     fn test_find_missing() {
         let foo0 = tp("foo", 0);
         let foo1 = tp("foo", 1);
@@ -631,6 +646,7 @@ mod tests {
     /// Translated from `FetchSessionHandlerTest.testSessionless`. Iterates
     /// over v12 (no topic IDs) and the latest fetch version (topic IDs).
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.FetchSessionHandlerTest#testSessionless")]
     fn test_sessionless() {
         for version in [12i16, ApiKeys::FETCH.latest_version()] {
             let mut topic_ids = HashMap::new();
@@ -669,6 +685,7 @@ mod tests {
 
     /// Translated from `FetchSessionHandlerTest.testIncrementals`.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.FetchSessionHandlerTest#testIncrementals")]
     fn test_incrementals() {
         for version in [12i16, ApiKeys::FETCH.latest_version()] {
             let mut topic_ids = HashMap::new();
@@ -732,6 +749,7 @@ mod tests {
 
     /// Translated from `FetchSessionHandlerTest.testIncrementalPartitionRemoval`.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.FetchSessionHandlerTest#testIncrementalPartitionRemoval")]
     fn test_incremental_partition_removal() {
         for version in [12i16, ApiKeys::FETCH.latest_version()] {
             let mut topic_ids = HashMap::new();
@@ -851,6 +869,7 @@ mod tests {
     /// outcome: `canUseTopicIds = false` because at least one partition
     /// in the session no longer carries a topic ID.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.FetchSessionHandlerTest#testIdUsageRevokedOnIdDowngrade")]
     fn test_id_usage_revoked_on_id_downgrade() {
         for partition in [0i32, 1i32] {
             let foo_id = Uuid::random_uuid();
@@ -880,6 +899,7 @@ mod tests {
     /// Loops over Java's `idUsageCombinations` —
     /// `(startsWithTopicIds, endsWithTopicIds)` ∈ {TT, TF, FT, FF}.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.FetchSessionHandlerTest#testTopicIdReplaced")]
     fn test_topic_id_replaced() {
         for (starts_with_topic_ids, ends_with_topic_ids) in [(true, true), (true, false), (false, true), (false, false)]
         {
@@ -1018,6 +1038,7 @@ mod tests {
     /// Java loops over `useTopicIds = {true, false}` — the test is
     /// the same except for the topic id value and the response version.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.FetchSessionHandlerTest#testIdUsageWithAllForgottenPartitions")]
     fn test_id_usage_with_all_forgotten_partitions() {
         for use_topic_ids in [true, false] {
             let topic_id = if use_topic_ids {
@@ -1055,6 +1076,7 @@ mod tests {
 
     /// Translated from `testOkToAddNewIdAfterTopicRemovedFromSession`.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.FetchSessionHandlerTest#testOkToAddNewIdAfterTopicRemovedFromSession")]
     fn test_ok_to_add_new_id_after_topic_removed_from_session() {
         let topic_id_1 = Uuid::random_uuid();
         let mut handler = FetchSessionHandler::new(1);
@@ -1088,6 +1110,7 @@ mod tests {
 
     /// Translated from `testVerifyFullFetchResponsePartitions`.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.FetchSessionHandlerTest#testVerifyFullFetchResponsePartitions")]
     fn test_verify_full_fetch_response_partitions() {
         for version in [12i16, ApiKeys::FETCH.latest_version()] {
             let mut topic_ids = HashMap::new();
@@ -1168,6 +1191,7 @@ mod tests {
     /// topic id (`extra2`) not in the session must produce an
     /// `extraPartitions=` + `extraIds=` issue string.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.FetchSessionHandlerTest#testVerifyFullFetchResponsePartitionsWithTopicIds")]
     fn test_verify_full_fetch_response_partitions_with_topic_ids() {
         let mut topic_ids = HashMap::new();
         let mut topic_names = HashMap::new();
@@ -1244,6 +1268,7 @@ mod tests {
 
     /// Translated from `testTopLevelErrorResetsMetadata`.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.FetchSessionHandlerTest#testTopLevelErrorResetsMetadata")]
     fn test_top_level_error_resets_metadata() {
         let mut topic_ids = HashMap::new();
         let mut topic_names = HashMap::new();

@@ -14,16 +14,17 @@
 
 //! Translated from `org.apache.kafka.common.errors.InvalidRecordStateException`.
 
-use crate::common::Errors;
 use crate::common::error::kafka_error_class;
+use crate::common::protocol::Errors;
 
 kafka_error_class! {
     /// The record state is invalid.
     ///
-    /// Corresponds to Java's `InvalidRecordStateException`, error code [`Errors::InvalidRecordState`].
+    /// Corresponds to Java's `InvalidRecordStateException`, error code `Errors::InvalidRecordState`.
     ///
     /// Java `extends` chain:
     ///    `InvalidRecordStateException` -> `ApiException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.InvalidRecordStateException")]
     InvalidRecordStateError,
     code: Errors::InvalidRecordState,
     extends: [

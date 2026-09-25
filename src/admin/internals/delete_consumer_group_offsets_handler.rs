@@ -23,8 +23,8 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::OffsetDeleteRequestData;
-use crate::common::Errors;
-use crate::common::requests::{ConcreteResponse, CoordinatorType, OffsetDeleteRequestBuilder, RequestBuilder};
+use crate::common::protocol::Errors;
+use crate::common::requests::{ConcreteResponse, CoordinatorType, RequestBuilder, offset_delete_request};
 use crate::common::utils::LogContext;
 use crate::common::{Error, Node, TopicPartition};
 use crate::kafka_warn;
@@ -42,6 +42,7 @@ type PartitionErrors = HashMap<TopicPartition, Errors>;
 /// The `deleteConsumerGroupOffsets` handler.
 ///
 /// Corresponds to `DeleteConsumerGroupOffsetsHandler`.
+#[doc(alias = "org.apache.kafka.clients.admin.internals.DeleteConsumerGroupOffsetsHandler")]
 pub(crate) struct DeleteConsumerGroupOffsetsHandler {
     group_id: CoordinatorKey,
     partitions: HashSet<TopicPartition>,
@@ -51,6 +52,9 @@ pub(crate) struct DeleteConsumerGroupOffsetsHandler {
 
 impl DeleteConsumerGroupOffsetsHandler {
     /// Creates a handler.
+    #[doc(
+        alias = "org.apache.kafka.clients.admin.internals.DeleteConsumerGroupOffsetsHandler#DeleteConsumerGroupOffsetsHandler"
+    )]
     pub(crate) fn new(group_id: &str, partitions: HashSet<TopicPartition>, log_context: LogContext) -> Self {
         Self {
             group_id: CoordinatorKey::by_group_id(group_id),
@@ -63,12 +67,14 @@ impl DeleteConsumerGroupOffsetsHandler {
     /// Creates the future bundle for the given group id.
     ///
     /// Mirrors `DeleteConsumerGroupOffsetsHandler.newFuture`.
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.DeleteConsumerGroupOffsetsHandler#newFuture")]
     pub(crate) fn new_future(group_id: &str) -> SimpleAdminApiFuture<CoordinatorKey, PartitionErrors> {
         SimpleAdminApiFuture::for_keys(HashSet::from([CoordinatorKey::by_group_id(group_id)]))
     }
 
     /// Mirrors `validateKeys`: the requested keys must be exactly the single
     /// group id owned by this handler.
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.DeleteConsumerGroupOffsetsHandler#validateKeys")]
     fn validate_keys(&self, group_ids: &HashSet<CoordinatorKey>) {
         let expected = HashSet::from([self.group_id.clone()]);
         assert!(
@@ -78,11 +84,12 @@ impl DeleteConsumerGroupOffsetsHandler {
     }
 
     /// Builds the single `OffsetDelete` request. Mirrors `buildBatchedRequest`.
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.DeleteConsumerGroupOffsetsHandler#buildBatchedRequest")]
     pub(crate) fn build_batched_request(
         &self,
         _coordinator_id: i32,
         group_ids: &HashSet<CoordinatorKey>,
-    ) -> OffsetDeleteRequestBuilder {
+    ) -> offset_delete_request::Builder {
         self.validate_keys(group_ids);
 
         let mut by_topic: HashMap<String, Vec<i32>> = HashMap::new();
@@ -111,9 +118,10 @@ impl DeleteConsumerGroupOffsetsHandler {
         let mut data = OffsetDeleteRequestData::new();
         data.set_group_id(self.group_id.id_value.clone());
         data.set_topics(topics);
-        OffsetDeleteRequestBuilder::new(data)
+        offset_delete_request::Builder::new(data)
     }
 
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.DeleteConsumerGroupOffsetsHandler#handleGroupError")]
     fn handle_group_error(
         &self,
         error: Errors,
@@ -301,6 +309,7 @@ mod tests {
 
     /// Translated from `testBuildRequest`.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.DeleteConsumerGroupOffsetsHandlerTest#testBuildRequest")]
     fn test_build_request() {
         let request = handler().build_batched_request(1, &keys());
         let data = request.data();
@@ -314,6 +323,9 @@ mod tests {
 
     /// Translated from `testSuccessfulHandleResponse`.
     #[test]
+    #[doc(
+        alias = "org.apache.kafka.clients.admin.internals.DeleteConsumerGroupOffsetsHandlerTest#testSuccessfulHandleResponse"
+    )]
     fn test_successful_handle_response() {
         let result = handle_with_group_error(Errors::None);
         assert!(result.failed_keys.is_empty());
@@ -326,6 +338,9 @@ mod tests {
 
     /// Translated from `testUnmappedHandleResponse`.
     #[test]
+    #[doc(
+        alias = "org.apache.kafka.clients.admin.internals.DeleteConsumerGroupOffsetsHandlerTest#testUnmappedHandleResponse"
+    )]
     fn test_unmapped_handle_response() {
         for error in [Errors::NotCoordinator, Errors::CoordinatorNotAvailable] {
             let result = handle_with_group_error(error);
@@ -337,6 +352,9 @@ mod tests {
 
     /// Translated from `testRetriableHandleResponse`.
     #[test]
+    #[doc(
+        alias = "org.apache.kafka.clients.admin.internals.DeleteConsumerGroupOffsetsHandlerTest#testRetriableHandleResponse"
+    )]
     fn test_retriable_handle_response() {
         let result = handle_with_group_error(Errors::CoordinatorLoadInProgress);
         assert!(result.completed_keys.is_empty());
@@ -346,6 +364,9 @@ mod tests {
 
     /// Translated from `testFailedHandleResponseWithGroupError`.
     #[test]
+    #[doc(
+        alias = "org.apache.kafka.clients.admin.internals.DeleteConsumerGroupOffsetsHandlerTest#testFailedHandleResponseWithGroupError"
+    )]
     fn test_failed_handle_response_with_group_error() {
         for error in [
             Errors::GroupAuthorizationFailed,
@@ -362,6 +383,9 @@ mod tests {
 
     /// Translated from `testFailedHandleResponseWithPartitionError`.
     #[test]
+    #[doc(
+        alias = "org.apache.kafka.clients.admin.internals.DeleteConsumerGroupOffsetsHandlerTest#testFailedHandleResponseWithPartitionError"
+    )]
     fn test_failed_handle_response_with_partition_error() {
         for error in [
             Errors::GroupSubscribedToTopic,

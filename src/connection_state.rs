@@ -25,6 +25,8 @@
 /// - `Ready`: connection is ready to send requests
 /// - `AuthenticationFailed`: connection failed due to an authentication error
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+#[doc(alias = "org.apache.kafka.clients.ConnectionState")]
 pub enum ConnectionState {
     Disconnected,
     Connecting,
@@ -36,12 +38,14 @@ pub enum ConnectionState {
 impl ConnectionState {
     /// Returns `true` if the connection is in a disconnected state
     /// (either explicitly disconnected or authentication failed).
+    #[doc(alias = "org.apache.kafka.clients.ConnectionState#isDisconnected")]
     pub fn is_disconnected(&self) -> bool {
         matches!(self, Self::AuthenticationFailed | Self::Disconnected)
     }
 
     /// Returns `true` if the connection is in a connected state
     /// (either checking API versions or ready).
+    #[doc(alias = "org.apache.kafka.clients.ConnectionState#isConnected")]
     pub fn is_connected(&self) -> bool {
         matches!(self, Self::CheckingApiVersions | Self::Ready)
     }

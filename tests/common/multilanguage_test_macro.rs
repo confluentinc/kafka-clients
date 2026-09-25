@@ -60,7 +60,7 @@ macro_rules! multilanguage_test {
         ::paste::paste! {
             // Double underscore is intentional so backend labels are
             // easy to grep in cargo test output, hence non_snake_case.
-            #[allow(non_snake_case)]
+            #[expect(non_snake_case)]
             #[tokio::test(flavor = "multi_thread")]
             async fn [<$name __ rust>]() {
                 let mut ctx = $crate::common::test_context::TestContext::new($cluster_config).await;
@@ -68,7 +68,7 @@ macro_rules! multilanguage_test {
                 $body(&mut ctx, &factory).await;
             }
 
-            #[allow(non_snake_case)]
+            #[expect(non_snake_case)]
             #[tokio::test(flavor = "multi_thread")]
             async fn [<$name __ grpc_python>]() {
                 // Create the TestContext first so the broker network
@@ -85,7 +85,7 @@ macro_rules! multilanguage_test {
                 $body(&mut ctx, &factory).await;
             }
 
-            #[allow(non_snake_case)]
+            #[expect(non_snake_case)]
             #[tokio::test(flavor = "multi_thread")]
             async fn [<$name __ grpc_python_async>]() {
                 let mut ctx = $crate::common::test_context::TestContext::new($cluster_config).await;
@@ -99,7 +99,7 @@ macro_rules! multilanguage_test {
                 $body(&mut ctx, &factory).await;
             }
 
-            #[allow(non_snake_case)]
+            #[expect(non_snake_case)]
             #[tokio::test(flavor = "multi_thread")]
             async fn [<$name __ grpc_c>]() {
                 let mut ctx = $crate::common::test_context::TestContext::new($cluster_config).await;

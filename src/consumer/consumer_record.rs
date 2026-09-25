@@ -50,6 +50,7 @@ use crate::common::record::TimestampType;
 /// (e.g. tests using `i32` keys); users with non-`PartialEq` `K`/`V`
 /// continue to work because the bounds are gated by the derive.
 #[derive(PartialEq, Eq)]
+#[doc(alias = "org.apache.kafka.clients.consumer.ConsumerRecord")]
 pub struct ConsumerRecord<K, V> {
     topic: Arc<str>,
     partition: i32,
@@ -84,38 +85,38 @@ pub struct ConsumerRecord<K, V> {
 #[non_exhaustive]
 pub struct ConsumerRecordOptions<K, V> {
     /// The topic this record is received from. Java's `topic`.
-    pub topic: Arc<str>,
+    pub(crate) topic: Arc<str>,
     /// The partition of the topic this record is received from. Java's
     /// `partition`.
-    pub partition: i32,
+    pub(crate) partition: i32,
     /// The offset of this record in the corresponding Kafka partition.
     /// Java's `offset`.
-    pub offset: i64,
+    pub(crate) offset: i64,
     /// The timestamp of the record. Java's `timestamp`; starts as
     /// [`ConsumerRecord::NO_TIMESTAMP`], as in `:83`.
-    pub timestamp: i64,
+    pub(crate) timestamp: i64,
     /// The timestamp type of the record. Java's `timestampType`; starts as
     /// [`TimestampType::NoTimestampType`], as in `:83`.
-    pub timestamp_type: TimestampType,
+    pub(crate) timestamp_type: TimestampType,
     /// The length of the serialized key. Java's `serializedKeySize`; starts
     /// as [`ConsumerRecord::NULL_SIZE`], as in `:83`.
-    pub serialized_key_size: i32,
+    pub(crate) serialized_key_size: i32,
     /// The length of the serialized value. Java's `serializedValueSize`;
     /// starts as [`ConsumerRecord::NULL_SIZE`], as in `:83`.
-    pub serialized_value_size: i32,
+    pub(crate) serialized_value_size: i32,
     /// The key of the record, if one exists. Java's `key`.
-    pub key: Option<K>,
+    pub(crate) key: Option<K>,
     /// The record contents. Java's `value`.
-    pub value: Option<V>,
+    pub(crate) value: Option<V>,
     /// The headers of the record. Java's `headers`; starts empty, as in
     /// `:83` (`new RecordHeaders()`).
-    pub headers: RecordHeaders,
+    pub(crate) headers: RecordHeaders,
     /// The leader epoch, if available. Java's `leaderEpoch`; starts as
     /// `None`, as in `:83` (`Optional.empty()`).
-    pub leader_epoch: Option<i32>,
+    pub(crate) leader_epoch: Option<i32>,
     /// The delivery count, if available. Java's `deliveryCount`; starts as
     /// `None`, as in `:107`/`:83` (`Optional.empty()`).
-    pub delivery_count: Option<i16>,
+    pub(crate) delivery_count: Option<i16>,
 }
 
 /// Fluent builder for [`ConsumerRecordOptions`].
@@ -165,67 +166,67 @@ impl<K, V> ConsumerRecordOptionsBuilder<K, V> {
         }
     }
 
-    /// Sets [`ConsumerRecordOptions::topic`], a mandatory parameter: [`Self::build`]
+    /// Sets `ConsumerRecordOptions::topic`, a mandatory parameter: [`Self::build`]
     /// panics if it was not set.
     pub fn set_topic(mut self, topic: impl Into<Arc<str>>) -> Self {
         self.topic = Some(topic.into());
         self
     }
-    /// Sets [`ConsumerRecordOptions::partition`], a mandatory parameter: [`Self::build`]
+    /// Sets `ConsumerRecordOptions::partition`, a mandatory parameter: [`Self::build`]
     /// panics if it was not set.
     pub fn set_partition(mut self, partition: i32) -> Self {
         self.partition = Some(partition);
         self
     }
-    /// Sets [`ConsumerRecordOptions::offset`], a mandatory parameter: [`Self::build`]
+    /// Sets `ConsumerRecordOptions::offset`, a mandatory parameter: [`Self::build`]
     /// panics if it was not set.
     pub fn set_offset(mut self, offset: i64) -> Self {
         self.offset = Some(offset);
         self
     }
-    /// Sets [`ConsumerRecordOptions::timestamp`].
+    /// Sets `ConsumerRecordOptions::timestamp`.
     pub fn set_timestamp(mut self, timestamp: i64) -> Self {
         self.timestamp = timestamp;
         self
     }
-    /// Sets [`ConsumerRecordOptions::timestamp_type`].
+    /// Sets `ConsumerRecordOptions::timestamp_type`.
     pub fn set_timestamp_type(mut self, timestamp_type: TimestampType) -> Self {
         self.timestamp_type = timestamp_type;
         self
     }
-    /// Sets [`ConsumerRecordOptions::serialized_key_size`].
+    /// Sets `ConsumerRecordOptions::serialized_key_size`.
     pub fn set_serialized_key_size(mut self, serialized_key_size: i32) -> Self {
         self.serialized_key_size = serialized_key_size;
         self
     }
-    /// Sets [`ConsumerRecordOptions::serialized_value_size`].
+    /// Sets `ConsumerRecordOptions::serialized_value_size`.
     pub fn set_serialized_value_size(mut self, serialized_value_size: i32) -> Self {
         self.serialized_value_size = serialized_value_size;
         self
     }
-    /// Sets [`ConsumerRecordOptions::key`], a mandatory parameter: [`Self::build`]
+    /// Sets `ConsumerRecordOptions::key`, a mandatory parameter: [`Self::build`]
     /// panics if it was not set.
     pub fn set_key(mut self, key: Option<K>) -> Self {
         self.key = Some(key);
         self
     }
-    /// Sets [`ConsumerRecordOptions::value`], a mandatory parameter: [`Self::build`]
+    /// Sets `ConsumerRecordOptions::value`, a mandatory parameter: [`Self::build`]
     /// panics if it was not set.
     pub fn set_value(mut self, value: Option<V>) -> Self {
         self.value = Some(value);
         self
     }
-    /// Sets [`ConsumerRecordOptions::headers`].
+    /// Sets `ConsumerRecordOptions::headers`.
     pub fn set_headers(mut self, headers: RecordHeaders) -> Self {
         self.headers = headers;
         self
     }
-    /// Sets [`ConsumerRecordOptions::leader_epoch`].
+    /// Sets `ConsumerRecordOptions::leader_epoch`.
     pub fn set_leader_epoch(mut self, leader_epoch: Option<i32>) -> Self {
         self.leader_epoch = leader_epoch;
         self
     }
-    /// Sets [`ConsumerRecordOptions::delivery_count`].
+    /// Sets `ConsumerRecordOptions::delivery_count`.
     pub fn set_delivery_count(mut self, delivery_count: Option<i16>) -> Self {
         self.delivery_count = delivery_count;
         self
@@ -294,6 +295,7 @@ impl<K, V> ConsumerRecord<K, V> {
     /// [`TimestampType::NoTimestampType`], the serialized sizes to
     /// [`ConsumerRecord::NULL_SIZE`], headers to an empty [`RecordHeaders`], and both
     /// `leader_epoch` and `delivery_count` to `None`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.ConsumerRecord#ConsumerRecord")]
     pub fn new(topic: impl Into<Arc<str>>, partition: i32, offset: i64, key: Option<K>, value: Option<V>) -> Self {
         Self::with_options(
             ConsumerRecordOptionsBuilder::new()
@@ -321,9 +323,10 @@ impl<K, V> ConsumerRecord<K, V> {
     /// `deliveryCount = Optional.empty()`, and under CLAUDE.md §2 both derive
     /// the same name `with_options` once the surplus parameters move into
     /// [`ConsumerRecordOptions`]. Callers get the 11-arg form by leaving
-    /// [`ConsumerRecordOptions::delivery_count`] at `None`.
+    /// `ConsumerRecordOptions::delivery_count` at `None`.
     ///
     /// * `options` - every parameter of Java's widest constructor
+    #[doc(alias = "org.apache.kafka.clients.consumer.ConsumerRecord#ConsumerRecord")]
     pub fn with_options(options: ConsumerRecordOptions<K, V>) -> Self {
         // Java validates `topic != null` and `headers != null`; both are
         // type-system invariants in Rust (Arc<str> and RecordHeaders).
@@ -358,59 +361,70 @@ impl<K, V> ConsumerRecord<K, V> {
     }
 
     /// The topic this record is received from (never null).
+    #[doc(alias = "org.apache.kafka.clients.consumer.ConsumerRecord#topic")]
     pub fn topic(&self) -> &str {
         &self.topic
     }
 
     /// The partition from which this record is received.
+    #[doc(alias = "org.apache.kafka.clients.consumer.ConsumerRecord#partition")]
     pub fn partition(&self) -> i32 {
         self.partition
     }
 
     /// The position of this record in the corresponding Kafka partition.
+    #[doc(alias = "org.apache.kafka.clients.consumer.ConsumerRecord#offset")]
     pub fn offset(&self) -> i64 {
         self.offset
     }
 
     /// The timestamp of this record, in milliseconds elapsed since unix
     /// epoch.
+    #[doc(alias = "org.apache.kafka.clients.consumer.ConsumerRecord#timestamp")]
     pub fn timestamp(&self) -> i64 {
         self.timestamp
     }
 
     /// The timestamp type of this record.
+    #[doc(alias = "org.apache.kafka.clients.consumer.ConsumerRecord#timestampType")]
     pub fn timestamp_type(&self) -> TimestampType {
         self.timestamp_type
     }
 
     /// The size of the serialized, uncompressed key in bytes. Returns
     /// [`ConsumerRecord::NULL_SIZE`] (`-1`) if the key is `None`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.ConsumerRecord#serializedKeySize")]
     pub fn serialized_key_size(&self) -> i32 {
         self.serialized_key_size
     }
 
     /// The size of the serialized, uncompressed value in bytes. Returns
     /// [`ConsumerRecord::NULL_SIZE`] (`-1`) if the value is `None`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.ConsumerRecord#serializedValueSize")]
     pub fn serialized_value_size(&self) -> i32 {
         self.serialized_value_size
     }
 
     /// The key (or `None` if no key was specified).
+    #[doc(alias = "org.apache.kafka.clients.consumer.ConsumerRecord#key")]
     pub fn key(&self) -> Option<&K> {
         self.key.as_ref()
     }
 
     /// The value (or `None` if no value was specified).
+    #[doc(alias = "org.apache.kafka.clients.consumer.ConsumerRecord#value")]
     pub fn value(&self) -> Option<&V> {
         self.value.as_ref()
     }
 
     /// The headers (never null).
+    #[doc(alias = "org.apache.kafka.clients.consumer.ConsumerRecord#headers")]
     pub fn headers(&self) -> &RecordHeaders {
         &self.headers
     }
 
     /// Get the leader epoch for the record if available.
+    #[doc(alias = "org.apache.kafka.clients.consumer.ConsumerRecord#leaderEpoch")]
     pub fn leader_epoch(&self) -> Option<i32> {
         self.leader_epoch
     }
@@ -418,6 +432,7 @@ impl<K, V> ConsumerRecord<K, V> {
     /// Get the delivery count for the record if available.
     ///
     /// Deliveries are counted for records delivered by share groups.
+    #[doc(alias = "org.apache.kafka.clients.consumer.ConsumerRecord#deliveryCount")]
     pub fn delivery_count(&self) -> Option<i16> {
         self.delivery_count
     }

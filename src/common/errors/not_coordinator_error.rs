@@ -14,17 +14,18 @@
 
 //! Translated from `org.apache.kafka.common.errors.NotCoordinatorException`.
 
-use crate::common::Errors;
 use crate::common::error::kafka_error_class;
+use crate::common::protocol::Errors;
 
 kafka_error_class! {
     /// This is not the correct coordinator.
     ///
-    /// Corresponds to Java's `NotCoordinatorException`, error code [`Errors::NotCoordinator`].
+    /// Corresponds to Java's `NotCoordinatorException`, error code `Errors::NotCoordinator`.
     ///
     /// Java `extends` chain:
     ///    `NotCoordinatorException` -> `RefreshRetriableException` ->
     ///   `RetriableException` -> `ApiException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.NotCoordinatorException")]
     NotCoordinatorError,
     code: Errors::NotCoordinator,
     extends: [

@@ -26,6 +26,7 @@ use crate::common::metrics::{Measurable, MetricConfig, Stat};
 ///
 /// See also [`crate::common::metrics::stats::CumulativeCount`] for a non-sampled
 /// version of this metric.
+#[doc(alias = "org.apache.kafka.common.metrics.stats.WindowedCount")]
 pub struct WindowedCount {
     inner: SampledStat,
 }
@@ -68,7 +69,6 @@ impl WindowedCount {
     /// with the FetchMetricsManager wiring in Phase M3; exercised here by the
     /// Meter tests. Kept `pub(crate)` API now to mirror Java's
     /// `new Meter(unit, new WindowedCount(), ...)`.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn into_sampled_stat(self) -> SampledStat {
         self.inner
     }
@@ -95,9 +95,9 @@ impl Measurable for WindowedCount {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::metrics::MockTime;
-    use crate::common::metrics::Time;
-    use crate::common::metrics::internals::TimeUnit;
+    use crate::common::metrics::TimeUnit;
+    use crate::common::utils::MockTime;
+    use crate::common::utils::Time;
 
     #[test]
     fn counts_invocations() {

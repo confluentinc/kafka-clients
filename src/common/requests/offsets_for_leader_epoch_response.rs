@@ -37,6 +37,7 @@ use super::RECORD_BATCH_NO_PARTITION_LEADER_EPOCH;
 ///
 /// Corresponds to `org.apache.kafka.common.requests.OffsetsForLeaderEpochResponse`.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.OffsetsForLeaderEpochResponse")]
 pub struct OffsetsForLeaderEpochResponse {
     data: OffsetForLeaderEpochResponseData,
 }
@@ -49,6 +50,7 @@ impl OffsetsForLeaderEpochResponse {
     pub const UNDEFINED_EPOCH: i32 = RECORD_BATCH_NO_PARTITION_LEADER_EPOCH;
 
     /// Creates a new `OffsetsForLeaderEpochResponse` from the underlying data.
+    #[doc(alias = "org.apache.kafka.common.requests.OffsetsForLeaderEpochResponse#OffsetsForLeaderEpochResponse")]
     pub fn new(data: OffsetForLeaderEpochResponseData) -> Self {
         Self { data }
     }
@@ -59,6 +61,7 @@ impl OffsetsForLeaderEpochResponse {
     }
 
     /// Returns a reference to the underlying data.
+    #[doc(alias = "org.apache.kafka.common.requests.OffsetsForLeaderEpochResponse#data")]
     pub fn data(&self) -> &OffsetForLeaderEpochResponseData {
         &self.data
     }
@@ -69,16 +72,19 @@ impl OffsetsForLeaderEpochResponse {
     }
 
     /// Returns the throttle time in milliseconds.
+    #[doc(alias = "org.apache.kafka.common.requests.OffsetsForLeaderEpochResponse#throttleTimeMs")]
     pub fn throttle_time_ms(&self) -> i32 {
         self.data.throttle_time_ms
     }
 
     /// Sets the throttle time in the response.
+    #[doc(alias = "org.apache.kafka.common.requests.OffsetsForLeaderEpochResponse#maybeSetThrottleTimeMs")]
     pub fn maybe_set_throttle_time_ms(&mut self, throttle_time_ms: i32) {
         self.data.set_throttle_time_ms(throttle_time_ms);
     }
 
     /// Returns the error counts aggregated across all partition responses.
+    #[doc(alias = "org.apache.kafka.common.requests.OffsetsForLeaderEpochResponse#errorCounts")]
     pub fn error_counts(&self) -> HashMap<Errors, i32> {
         let mut counts = HashMap::new();
         for topic in &self.data.topics {
@@ -101,6 +107,7 @@ impl OffsetsForLeaderEpochResponse {
     /// # Errors
     ///
     /// Returns an error if parsing fails.
+    #[doc(alias = "org.apache.kafka.common.requests.OffsetsForLeaderEpochResponse#parse")]
     pub fn parse(readable: &mut dyn Readable, version: i16) -> io::Result<Self> {
         let data = OffsetForLeaderEpochResponseData::read(readable, version)?;
         Ok(Self::new(data))

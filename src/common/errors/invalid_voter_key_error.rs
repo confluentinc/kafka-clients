@@ -14,16 +14,17 @@
 
 //! Translated from `org.apache.kafka.common.errors.InvalidVoterKeyException`.
 
-use crate::common::Errors;
 use crate::common::error::kafka_error_class;
+use crate::common::protocol::Errors;
 
 kafka_error_class! {
     /// The voter key doesn't match the receiving replica's key.
     ///
-    /// Corresponds to Java's `InvalidVoterKeyException`, error code [`Errors::InvalidVoterKey`].
+    /// Corresponds to Java's `InvalidVoterKeyException`, error code `Errors::InvalidVoterKey`.
     ///
     /// Java `extends` chain:
     ///    `InvalidVoterKeyException` -> `ApiException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.InvalidVoterKeyException")]
     InvalidVoterKeyError,
     code: Errors::InvalidVoterKey,
     extends: [

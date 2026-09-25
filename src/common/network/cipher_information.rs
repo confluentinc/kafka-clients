@@ -22,6 +22,7 @@ use std::fmt;
 ///
 /// Empty or missing values are replaced with "unknown".
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[doc(alias = "org.apache.kafka.common.network.CipherInformation")]
 pub struct CipherInformation {
     cipher: String,
     protocol: String,
@@ -31,6 +32,7 @@ impl CipherInformation {
     /// Creates a new `CipherInformation` with the given cipher and protocol.
     ///
     /// Empty strings are replaced with "unknown".
+    #[doc(alias = "org.apache.kafka.common.network.CipherInformation#CipherInformation")]
     pub fn new(cipher: &str, protocol: &str) -> Self {
         Self {
             cipher: if cipher.is_empty() {
@@ -47,11 +49,13 @@ impl CipherInformation {
     }
 
     /// Returns the cipher name.
+    #[doc(alias = "org.apache.kafka.common.network.CipherInformation#cipher")]
     pub fn cipher(&self) -> &str {
         &self.cipher
     }
 
     /// Returns the protocol name.
+    #[doc(alias = "org.apache.kafka.common.network.CipherInformation#protocol")]
     pub fn protocol(&self) -> &str {
         &self.protocol
     }

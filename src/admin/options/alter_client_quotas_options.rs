@@ -20,6 +20,7 @@
 ///
 /// Corresponds to `org.apache.kafka.clients.admin.AlterClientQuotasOptions`.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[doc(alias = "org.apache.kafka.clients.admin.AlterClientQuotasOptions")]
 pub struct AlterClientQuotasOptions {
     timeout_ms: Option<i32>,
     validate_only: bool,

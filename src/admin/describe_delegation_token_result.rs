@@ -25,12 +25,14 @@ use crate::common::security::token::delegation::DelegationToken;
 /// Corresponds to
 /// `org.apache.kafka.clients.admin.DescribeDelegationTokenResult`.
 #[derive(Clone, Debug)]
+#[doc(alias = "org.apache.kafka.clients.admin.DescribeDelegationTokenResult")]
 pub struct DescribeDelegationTokenResult {
     delegation_tokens: KafkaFuture<Vec<DelegationToken>>,
 }
 
 impl DescribeDelegationTokenResult {
     /// Creates a new result from the delegation-tokens future.
+    #[doc(alias = "org.apache.kafka.clients.admin.DescribeDelegationTokenResult#DescribeDelegationTokenResult")]
     pub fn new(delegation_tokens: KafkaFuture<Vec<DelegationToken>>) -> Self {
         Self { delegation_tokens }
     }
@@ -38,6 +40,7 @@ impl DescribeDelegationTokenResult {
     /// Returns a future which yields the list of delegation tokens.
     ///
     /// Mirrors `DescribeDelegationTokenResult.delegationTokens()`.
+    #[doc(alias = "org.apache.kafka.clients.admin.DescribeDelegationTokenResult#delegationTokens")]
     pub fn delegation_tokens(&self) -> &KafkaFuture<Vec<DelegationToken>> {
         &self.delegation_tokens
     }

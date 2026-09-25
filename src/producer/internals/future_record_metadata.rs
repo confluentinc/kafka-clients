@@ -41,6 +41,7 @@ use crate::producer::internals::ProduceRequestResult;
 ///
 /// When a batch is split into smaller batches, the [`chain`](Self::chain) method redirects
 /// this future to wait on the new split batch's result instead.
+#[doc(alias = "org.apache.kafka.clients.producer.internals.FutureRecordMetadata")]
 pub struct FutureRecordMetadata {
     /// The produce request result shared across all records in the batch.
     result: Arc<ProduceRequestResult>,
@@ -70,6 +71,7 @@ impl FutureRecordMetadata {
     /// * `create_timestamp` - The timestamp assigned to this record
     /// * `serialized_key_size` - Size of the serialized key (-1 if null)
     /// * `serialized_value_size` - Size of the serialized value (-1 if null)
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.FutureRecordMetadata#FutureRecordMetadata")]
     pub fn new(
         result: Arc<ProduceRequestResult>,
         batch_index: i32,
@@ -121,6 +123,7 @@ impl FutureRecordMetadata {
     /// # Errors
     ///
     /// Returns the error from the produce response if the record failed.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.FutureRecordMetadata#get")]
     pub fn get(
         &self,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<RecordMetadata, Error>> + Send + '_>> {
@@ -162,6 +165,7 @@ impl FutureRecordMetadata {
     ///
     /// Returns [`Error::Timeout`] if the timeout elapses before the result is available.
     /// Returns the error from the produce response if the record failed.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.FutureRecordMetadata#get")]
     pub fn get_with_timeout(
         &self,
         timeout: std::time::Duration,
@@ -210,6 +214,7 @@ impl FutureRecordMetadata {
     /// and the rest) rather than a stringified copy. This matches Java's
     /// `valueOrError()`, which wraps the `RuntimeException` in an
     /// `ExecutionException`.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.FutureRecordMetadata#valueOrError")]
     fn value_or_error(&self) -> Result<RecordMetadata, Error> {
         if let Some(error) = self.result.error(self.batch_index) {
             Err(error)
@@ -223,6 +228,7 @@ impl FutureRecordMetadata {
     /// This is the synchronous equivalent of Java's `FutureRecordMetadata.value()`.
     /// It returns the metadata based on the current state of the result.
     /// Should only be called after the result has been set (via `set()`).
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.FutureRecordMetadata#value")]
     pub fn value(&self) -> RecordMetadata {
         self.to_metadata()
     }
@@ -255,7 +261,8 @@ impl FutureRecordMetadata {
     // method and DoD #2 requires the translated class to carry all of them; the
     // `dead_code` lint only became visible once `KafkaProducer::with_options`
     // stopped leaking this type through a `pub` signature.
-    #[allow(dead_code)]
+    #[cfg_attr(not(test), expect(dead_code))]
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.FutureRecordMetadata#chain")]
     pub fn chain(&self, future_record_metadata: FutureRecordMetadata) {
         self.chain_arc(Arc::new(future_record_metadata));
     }
@@ -275,6 +282,7 @@ impl FutureRecordMetadata {
     /// This is the Rust equivalent of Java's `Future.isDone()`.
     /// If chained, checks whether the chained future's result is completed.
     /// Matches Java's pattern of reading `nextRecordMetadata` and delegating.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.FutureRecordMetadata#isDone")]
     pub fn is_done(&self) -> bool {
         let guard = self.next_record_metadata.lock().unwrap();
         if let Some(next) = guard.as_ref() {
@@ -413,7 +421,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_future_get_with_error() {
-        use crate::common::Errors;
+        use crate::common::protocol::Errors;
 
         let tp = TopicPartition::new("test-topic".to_string(), 0);
         let result = make_result(tp);

@@ -56,6 +56,7 @@ use crate::common::{Error, TopicPartition};
 /// Per CLAUDE.md §11, `#[async_trait]` is only forbidden on per-record hot
 /// paths.
 #[async_trait]
+#[doc(alias = "org.apache.kafka.clients.consumer.ConsumerRebalanceListener")]
 pub trait ConsumerRebalanceListener: Send + Sync + 'static {
     /// A callback method the user can implement to provide handling of offset
     /// commits to a customized store. This method will be called during a
@@ -74,6 +75,7 @@ pub trait ConsumerRebalanceListener: Send + Sync + 'static {
     /// `partitions` is `&[TopicPartition]` rather than
     /// `Vec<TopicPartition>` per CLAUDE.md §12 — accept the most general
     /// borrowed form. Implementors who need ownership can `to_vec()`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.ConsumerRebalanceListener#onPartitionsRevoked")]
     async fn on_partitions_revoked(&self, partitions: &[TopicPartition]) -> Result<(), Error>;
 
     /// A callback method the user can implement to provide handling of
@@ -84,6 +86,7 @@ pub trait ConsumerRebalanceListener: Send + Sync + 'static {
     ///
     /// Corresponds to Java's
     /// `void onPartitionsAssigned(Collection<TopicPartition> partitions)`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.ConsumerRebalanceListener#onPartitionsAssigned")]
     async fn on_partitions_assigned(&self, partitions: &[TopicPartition]) -> Result<(), Error>;
 
     /// A callback method you can implement to provide handling of cleaning
@@ -98,6 +101,7 @@ pub trait ConsumerRebalanceListener: Send + Sync + 'static {
     /// `default void onPartitionsLost(Collection<TopicPartition> partitions) {
     ///     onPartitionsRevoked(partitions);
     /// }`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.ConsumerRebalanceListener#onPartitionsLost")]
     async fn on_partitions_lost(&self, partitions: &[TopicPartition]) -> Result<(), Error> {
         self.on_partitions_revoked(partitions).await
     }

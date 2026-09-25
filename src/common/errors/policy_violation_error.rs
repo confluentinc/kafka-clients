@@ -14,16 +14,17 @@
 
 //! Translated from `org.apache.kafka.common.errors.PolicyViolationException`.
 
-use crate::common::Errors;
 use crate::common::error::kafka_error_class;
+use crate::common::protocol::Errors;
 
 kafka_error_class! {
     /// Request parameters do not satisfy the configured policy.
     ///
-    /// Corresponds to Java's `PolicyViolationException`, error code [`Errors::PolicyViolation`].
+    /// Corresponds to Java's `PolicyViolationException`, error code `Errors::PolicyViolation`.
     ///
     /// Java `extends` chain:
     ///    `PolicyViolationException` -> `ApiException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.PolicyViolationException")]
     PolicyViolationError,
     code: Errors::PolicyViolation,
     extends: [

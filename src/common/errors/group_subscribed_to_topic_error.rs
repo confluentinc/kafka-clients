@@ -14,17 +14,18 @@
 
 //! Translated from `org.apache.kafka.common.errors.GroupSubscribedToTopicException`.
 
-use crate::common::Errors;
 use crate::common::error::kafka_error_class;
+use crate::common::protocol::Errors;
 
 kafka_error_class! {
     /// Deleting offsets of a topic is forbidden while the consumer group is
     /// actively subscribed to it.
     ///
-    /// Corresponds to Java's `GroupSubscribedToTopicException`, error code [`Errors::GroupSubscribedToTopic`].
+    /// Corresponds to Java's `GroupSubscribedToTopicException`, error code `Errors::GroupSubscribedToTopic`.
     ///
     /// Java `extends` chain:
     ///    `GroupSubscribedToTopicException` -> `ApiException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.GroupSubscribedToTopicException")]
     GroupSubscribedToTopicError,
     code: Errors::GroupSubscribedToTopic,
     extends: [

@@ -14,16 +14,17 @@
 
 //! Translated from `org.apache.kafka.common.errors.DelegationTokenDisabledException`.
 
-use crate::common::Errors;
 use crate::common::error::kafka_error_class;
+use crate::common::protocol::Errors;
 
 kafka_error_class! {
     /// Delegation Token feature is not enabled.
     ///
-    /// Corresponds to Java's `DelegationTokenDisabledException`, error code [`Errors::DelegationTokenAuthDisabled`].
+    /// Corresponds to Java's `DelegationTokenDisabledException`, error code `Errors::DelegationTokenAuthDisabled`.
     ///
     /// Java `extends` chain:
     ///    `DelegationTokenDisabledException` -> `ApiException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.DelegationTokenDisabledException")]
     DelegationTokenDisabledError,
     code: Errors::DelegationTokenAuthDisabled,
     extends: [

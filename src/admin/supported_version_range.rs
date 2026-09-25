@@ -23,6 +23,7 @@ use crate::common::Error;
 ///
 /// Corresponds to `org.apache.kafka.clients.admin.SupportedVersionRange`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[doc(alias = "org.apache.kafka.clients.admin.SupportedVersionRange")]
 pub struct SupportedVersionRange {
     min_version: i16,
     max_version: i16,
@@ -35,6 +36,7 @@ impl SupportedVersionRange {
     ///
     /// Returns [`Error::local_illegal_argument`] (mirroring Java's
     /// `IllegalArgumentException`) unless `0 <= min_version <= max_version`.
+    #[doc(alias = "org.apache.kafka.clients.admin.SupportedVersionRange#SupportedVersionRange")]
     pub fn new(min_version: i16, max_version: i16) -> Result<Self, Error> {
         if min_version < 0 || max_version < 0 || max_version < min_version {
             return Err(Error::local_illegal_argument(format!(
@@ -46,11 +48,13 @@ impl SupportedVersionRange {
     }
 
     /// Returns the minimum version value.
+    #[doc(alias = "org.apache.kafka.clients.admin.SupportedVersionRange#minVersion")]
     pub fn min_version(&self) -> i16 {
         self.min_version
     }
 
     /// Returns the maximum version value.
+    #[doc(alias = "org.apache.kafka.clients.admin.SupportedVersionRange#maxVersion")]
     pub fn max_version(&self) -> i16 {
         self.max_version
     }

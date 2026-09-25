@@ -37,6 +37,7 @@ use crate::kafka_info;
 /// for all nodes. The type parameter `H` is the host resolver implementation.
 ///
 /// Translated from `org.apache.kafka.clients.ClusterConnectionStates`.
+#[doc(alias = "org.apache.kafka.clients.ClusterConnectionStates")]
 pub struct ClusterConnectionStates<H: HostResolver> {
     /// Keyed by node-id string; queried multiple times per network poll per
     /// node (`is_ready` / `can_connect` / `state`). `FxHashMap` (Phase 27):
@@ -73,6 +74,7 @@ impl<H: HostResolver> ClusterConnectionStates<H> {
     /// * `connection_setup_timeout_ms` - Initial connection setup timeout in milliseconds.
     /// * `connection_setup_timeout_max_ms` - Maximum connection setup timeout in milliseconds.
     /// * `host_resolver` - The host resolver to use for DNS resolution.
+    #[doc(alias = "org.apache.kafka.clients.ClusterConnectionStates#ClusterConnectionStates")]
     pub fn new(
         reconnect_backoff_ms: i64,
         reconnect_backoff_max_ms: i64,
@@ -106,6 +108,7 @@ impl<H: HostResolver> ClusterConnectionStates<H> {
     /// Return true if we can currently initiate a new connection. This will be the case if we are
     /// not connected and haven't been connected for at least the minimum reconnection backoff
     /// period.
+    #[doc(alias = "org.apache.kafka.clients.ClusterConnectionStates#canConnect")]
     pub fn can_connect(&self, id: &str, now: i64) -> bool {
         match self.node_state.get(id) {
             None => true,
@@ -117,6 +120,7 @@ impl<H: HostResolver> ClusterConnectionStates<H> {
 
     /// Return true if we are disconnected from the given node and can't re-establish a connection
     /// yet.
+    #[doc(alias = "org.apache.kafka.clients.ClusterConnectionStates#isBlackedOut")]
     pub fn is_blacked_out(&self, id: &str, now: i64) -> bool {
         match self.node_state.get(id) {
             None => false,
@@ -130,6 +134,7 @@ impl<H: HostResolver> ClusterConnectionStates<H> {
     /// attempting to send data. When disconnected, this respects the reconnect backoff time.
     /// When connecting, return a delay based on the connection timeout. When connected, wait
     /// indefinitely (i.e. until a wakeup).
+    #[doc(alias = "org.apache.kafka.clients.ClusterConnectionStates#connectionDelay")]
     pub fn connection_delay(&self, id: &str, now: i64) -> i64 {
         match self.node_state.get(id) {
             None => 0,
@@ -149,6 +154,7 @@ impl<H: HostResolver> ClusterConnectionStates<H> {
     }
 
     /// Return true if a specific connection establishment is currently underway.
+    #[doc(alias = "org.apache.kafka.clients.ClusterConnectionStates#isConnecting")]
     pub fn is_connecting(&self, id: &str) -> bool {
         self.node_state
             .get(id)
@@ -156,6 +162,7 @@ impl<H: HostResolver> ClusterConnectionStates<H> {
     }
 
     /// Check whether a connection is either being established or awaiting API version information.
+    #[doc(alias = "org.apache.kafka.clients.ClusterConnectionStates#isPreparingConnection")]
     pub fn is_preparing_connection(&self, id: &str) -> bool {
         self.node_state.get(id).is_some_and(|state| {
             state.state == ConnectionState::Connecting || state.state == ConnectionState::CheckingApiVersions
@@ -164,6 +171,7 @@ impl<H: HostResolver> ClusterConnectionStates<H> {
 
     /// Enter the connecting state for the given connection, moving to a new resolved address if
     /// necessary.
+    #[doc(alias = "org.apache.kafka.clients.ClusterConnectionStates#connecting")]
     pub fn connecting(&mut self, id: &str, now: i64, host: &str) {
         if let Some(connection_state) = self.node_state.get_mut(id) {
             if connection_state.host() == host {
@@ -203,6 +211,7 @@ impl<H: HostResolver> ClusterConnectionStates<H> {
     ///
     /// # Errors
     /// Returns an `io::Error` if the address cannot be resolved.
+    #[doc(alias = "org.apache.kafka.clients.ClusterConnectionStates#currentAddress")]
     pub async fn current_address(&mut self, id: &str) -> io::Result<IpAddr> {
         let state = self.node_state(id)?;
         if state.addresses.is_empty() {
@@ -216,6 +225,7 @@ impl<H: HostResolver> ClusterConnectionStates<H> {
     }
 
     /// Enter the disconnected state for the given node.
+    #[doc(alias = "org.apache.kafka.clients.ClusterConnectionStates#disconnected")]
     pub fn disconnected(&mut self, id: &str, now: i64) {
         let node_state = self
             .node_state
@@ -238,6 +248,7 @@ impl<H: HostResolver> ClusterConnectionStates<H> {
     }
 
     /// Indicate that the connection is throttled until the specified deadline.
+    #[doc(alias = "org.apache.kafka.clients.ClusterConnectionStates#throttle")]
     pub fn throttle(&mut self, id: &str, throttle_until_time_ms: i64) {
         if let Some(state) = self.node_state.get_mut(id) {
             // The throttle deadline should never regress.
@@ -249,6 +260,7 @@ impl<H: HostResolver> ClusterConnectionStates<H> {
 
     /// Return the remaining throttling delay in milliseconds if throttling is in progress.
     /// Return 0 otherwise.
+    #[doc(alias = "org.apache.kafka.clients.ClusterConnectionStates#throttleDelayMs")]
     pub fn throttle_delay_ms(&self, id: &str, now: i64) -> i64 {
         match self.node_state.get(id) {
             Some(state) if state.throttle_until_time_ms > now => state.throttle_until_time_ms - now,
@@ -259,6 +271,7 @@ impl<H: HostResolver> ClusterConnectionStates<H> {
     /// Return the number of milliseconds to wait, based on the connection state and the throttle
     /// time, before attempting to send data. If the connection has been established but being
     /// throttled, return throttle delay. Otherwise, return connection delay.
+    #[doc(alias = "org.apache.kafka.clients.ClusterConnectionStates#pollDelayMs")]
     pub fn poll_delay_ms(&self, id: &str, now: i64) -> i64 {
         let throttle_delay_ms = self.throttle_delay_ms(id, now);
         if self.is_connected(id) && throttle_delay_ms > 0 {
@@ -269,6 +282,7 @@ impl<H: HostResolver> ClusterConnectionStates<H> {
     }
 
     /// Enter the checking_api_versions state for the given node.
+    #[doc(alias = "org.apache.kafka.clients.ClusterConnectionStates#checkingApiVersions")]
     pub fn checking_api_versions(&mut self, id: &str) {
         let node_state = self
             .node_state
@@ -280,6 +294,7 @@ impl<H: HostResolver> ClusterConnectionStates<H> {
     }
 
     /// Enter the ready state for the given node.
+    #[doc(alias = "org.apache.kafka.clients.ClusterConnectionStates#ready")]
     pub fn ready(&mut self, id: &str) {
         let node_state = self
             .node_state
@@ -302,6 +317,7 @@ impl<H: HostResolver> ClusterConnectionStates<H> {
     /// a `String`, which flattened every failure to the base class one hop past
     /// [`ChannelState`](crate::common::network::ChannelState) and made an SSL
     /// certificate rejection indistinguishable from a rejected SASL credential.
+    #[doc(alias = "org.apache.kafka.clients.ClusterConnectionStates#authenticationFailed")]
     pub fn authentication_failed(&mut self, id: &str, now: i64, error: Error) {
         let node_state = self
             .node_state
@@ -314,6 +330,7 @@ impl<H: HostResolver> ClusterConnectionStates<H> {
     }
 
     /// Return true if the connection is in the READY state and currently not throttled.
+    #[doc(alias = "org.apache.kafka.clients.ClusterConnectionStates#isReady")]
     pub fn is_ready(&self, id: &str, now: i64) -> bool {
         Self::is_ready_state(self.node_state.get(id), now)
     }
@@ -324,16 +341,19 @@ impl<H: HostResolver> ClusterConnectionStates<H> {
 
     /// Return true if there is at least one node with connection in the READY state and not
     /// throttled.
+    #[doc(alias = "org.apache.kafka.clients.ClusterConnectionStates#hasReadyNodes")]
     pub fn has_ready_nodes(&self, now: i64) -> bool {
         self.node_state.values().any(|s| Self::is_ready_state(Some(s), now))
     }
 
     /// Return true if the connection has been established.
+    #[doc(alias = "org.apache.kafka.clients.ClusterConnectionStates#isConnected")]
     pub fn is_connected(&self, id: &str) -> bool {
         self.node_state.get(id).is_some_and(|s| s.state.is_connected())
     }
 
     /// Return true if the connection has been disconnected.
+    #[doc(alias = "org.apache.kafka.clients.ClusterConnectionStates#isDisconnected")]
     pub fn is_disconnected(&self, id: &str) -> bool {
         self.node_state.get(id).is_some_and(|s| s.state.is_disconnected())
     }
@@ -346,6 +366,7 @@ impl<H: HostResolver> ClusterConnectionStates<H> {
     /// message: every caller (`NetworkClient.authenticationException` and from
     /// there the admin, consumer and producer) needs the class, not just the
     /// text.
+    #[doc(alias = "org.apache.kafka.clients.ClusterConnectionStates#authenticationException")]
     pub fn authentication_error(&self, id: &str) -> Option<&Error> {
         self.node_state.get(id).and_then(|s| s.authentication_error.as_ref())
     }
@@ -354,6 +375,7 @@ impl<H: HostResolver> ClusterConnectionStates<H> {
     ///
     /// # Panics
     /// Panics if no entry exists for the given connection id.
+    #[doc(alias = "org.apache.kafka.clients.ClusterConnectionStates#connectionState")]
     pub fn connection_state(&self, id: &str) -> ConnectionState {
         self.node_state
             .get(id)
@@ -364,11 +386,13 @@ impl<H: HostResolver> ClusterConnectionStates<H> {
     /// Get the id set of nodes which are in CONNECTING state.
     ///
     /// Visible for testing.
+    #[doc(alias = "org.apache.kafka.clients.ClusterConnectionStates#connectingNodes")]
     pub fn connecting_nodes(&self) -> &HashSet<String> {
         &self.connecting_nodes
     }
 
     /// Get the timestamp of the latest connection attempt of a given node.
+    #[doc(alias = "org.apache.kafka.clients.ClusterConnectionStates#lastConnectAttemptMs")]
     pub fn last_connect_attempt_ms(&self, id: &str) -> i64 {
         self.node_state.get(id).map_or(0, |s| s.last_connect_attempt_ms)
     }
@@ -377,6 +401,7 @@ impl<H: HostResolver> ClusterConnectionStates<H> {
     ///
     /// # Panics
     /// Panics if no entry exists for the given connection id.
+    #[doc(alias = "org.apache.kafka.clients.ClusterConnectionStates#connectionSetupTimeoutMs")]
     pub fn connection_setup_timeout_ms(&self, id: &str) -> i64 {
         self.node_state
             .get(id)
@@ -389,6 +414,7 @@ impl<H: HostResolver> ClusterConnectionStates<H> {
     /// # Panics
     /// Panics if no entry exists for the given connection id, or if the node
     /// is not in the connecting state.
+    #[doc(alias = "org.apache.kafka.clients.ClusterConnectionStates#isConnectionSetupTimeout")]
     pub fn is_connection_setup_timeout(&self, id: &str, now: i64) -> bool {
         let node_state = self
             .node_state
@@ -403,6 +429,7 @@ impl<H: HostResolver> ClusterConnectionStates<H> {
     }
 
     /// Return the list of nodes whose connection setup has timed out.
+    #[doc(alias = "org.apache.kafka.clients.ClusterConnectionStates#nodesWithConnectionSetupTimeout")]
     pub fn nodes_with_connection_setup_timeout(&self, now: i64) -> Vec<String> {
         self.connecting_nodes
             .iter()
@@ -416,6 +443,7 @@ impl<H: HostResolver> ClusterConnectionStates<H> {
     /// The main difference between this and `disconnected` is the impact on `connection_delay`:
     /// it will be 0 after this call whereas `reconnect_backoff_ms` will be taken into account
     /// after `disconnected` is called.
+    #[doc(alias = "org.apache.kafka.clients.ClusterConnectionStates#remove")]
     pub fn remove(&mut self, id: &str) {
         self.node_state.remove(id);
         self.connecting_nodes.remove(id);
@@ -424,6 +452,7 @@ impl<H: HostResolver> ClusterConnectionStates<H> {
     // --- Private helpers ---
 
     /// Gets a mutable reference to the node state for the given id.
+    #[doc(alias = "org.apache.kafka.clients.ClusterConnectionStates#nodeState")]
     fn node_state(&mut self, id: &str) -> io::Result<&mut NodeConnectionState> {
         self.node_state
             .get_mut(id)
@@ -463,6 +492,7 @@ impl<H: HostResolver> ClusterConnectionStates<H> {
 }
 
 /// The state of our connection to a node.
+#[doc(alias = "org.apache.kafka.clients.ClusterConnectionStates$NodeConnectionState")]
 struct NodeConnectionState {
     host: String,
     state: ConnectionState,
@@ -480,6 +510,7 @@ struct NodeConnectionState {
 }
 
 impl NodeConnectionState {
+    #[doc(alias = "org.apache.kafka.clients.ClusterConnectionStates$NodeConnectionState#NodeConnectionState")]
     fn new(
         state: ConnectionState,
         last_connect_attempt_ms: i64,
@@ -503,6 +534,7 @@ impl NodeConnectionState {
         }
     }
 
+    #[doc(alias = "org.apache.kafka.clients.ClusterConnectionStates$NodeConnectionState#host")]
     fn host(&self) -> &str {
         &self.host
     }
@@ -510,6 +542,7 @@ impl NodeConnectionState {
     /// Returns the current selected IP address for this node.
     ///
     /// The caller must ensure that addresses have been resolved before calling this method.
+    #[doc(alias = "org.apache.kafka.clients.ClusterConnectionStates$NodeConnectionState#currentAddress")]
     fn current_address(&mut self) -> IpAddr {
         let current = self.addresses[self.address_index as usize];
         self.last_attempted_address = Some(current);
@@ -518,6 +551,7 @@ impl NodeConnectionState {
 
     /// Jumps to the next available resolved address for this node. If no other addresses are
     /// available, marks the list to be refreshed on the next `current_address()` call.
+    #[doc(alias = "org.apache.kafka.clients.ClusterConnectionStates$NodeConnectionState#moveToNextAddress")]
     fn move_to_next_address(&mut self) {
         if self.addresses.is_empty() {
             return; // Avoid div0. List will initialize on next current_address() call
@@ -547,6 +581,7 @@ impl NodeConnectionState {
 
     /// Clears the resolved addresses in order to trigger re-resolving on the next
     /// `current_address()` call.
+    #[doc(alias = "org.apache.kafka.clients.ClusterConnectionStates$NodeConnectionState#clearAddresses")]
     fn clear_addresses(&mut self) {
         self.addresses.clear();
     }
@@ -576,26 +611,15 @@ mod tests {
     /// They do not depend on `H`, but a generic type cannot infer it (E0282).
     type ConnStates = ClusterConnectionStates<SingleIpHostResolver>;
 
+    use crate::common::utils::{MockTime, Time};
     use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 
     // --- Mock time ---
 
-    struct MockTime {
-        current_time_ms: i64,
-    }
-
-    impl MockTime {
-        fn new() -> Self {
-            Self { current_time_ms: 0 }
-        }
-
-        fn milliseconds(&self) -> i64 {
-            self.current_time_ms
-        }
-
-        fn sleep(&mut self, ms: i64) {
-            self.current_time_ms += ms;
-        }
+    /// Java's `new MockTime()`, started at 0 rather than the system clock so
+    /// the timestamps the tests compute stay small.
+    fn mock_time() -> MockTime {
+        MockTime::with_auto_tick_ms_current_time_ms_current_high_res_time_ns(0, 0, 0)
     }
 
     // --- Test HostResolver implementations ---
@@ -697,9 +721,10 @@ mod tests {
 
     /// Translated from `ClusterConnectionStatesTest.testClusterConnectionStateChanges`
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.ClusterConnectionStatesTest#testClusterConnectionStateChanges")]
     fn test_cluster_connection_state_changes() {
         let mut connection_states = create_single_ip_states();
-        let mut time = MockTime::new();
+        let time = mock_time();
 
         assert!(connection_states.can_connect(NODE_ID1, time.milliseconds()));
         assert_eq!(0, connection_states.connection_delay(NODE_ID1, time.milliseconds()));
@@ -762,9 +787,10 @@ mod tests {
 
     /// Translated from `ClusterConnectionStatesTest.testMultipleNodeConnectionStates`
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.ClusterConnectionStatesTest#testMultipleNodeConnectionStates")]
     fn test_multiple_node_connection_states() {
         let mut connection_states = create_single_ip_states();
-        let mut time = MockTime::new();
+        let time = mock_time();
 
         // Check initial state, allowed to connect to all nodes, but no nodes shown as ready
         assert!(connection_states.can_connect(NODE_ID1, time.milliseconds()));
@@ -804,9 +830,10 @@ mod tests {
 
     /// Translated from `ClusterConnectionStatesTest.testAuthorizationFailed`
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.ClusterConnectionStatesTest#testAuthorizationFailed")]
     fn test_authorization_failed() {
         let mut connection_states = create_single_ip_states();
-        let mut time = MockTime::new();
+        let time = mock_time();
 
         // Try connecting
         connection_states.connecting(NODE_ID1, time.milliseconds(), "localhost");
@@ -849,9 +876,10 @@ mod tests {
 
     /// Translated from `ClusterConnectionStatesTest.testRemoveNode`
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.ClusterConnectionStatesTest#testRemoveNode")]
     fn test_remove_node() {
         let mut connection_states = create_single_ip_states();
-        let mut time = MockTime::new();
+        let time = mock_time();
 
         connection_states.connecting(NODE_ID1, time.milliseconds(), "localhost");
         time.sleep(1000);
@@ -868,9 +896,10 @@ mod tests {
 
     /// Translated from `ClusterConnectionStatesTest.testMaxReconnectBackoff`
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.ClusterConnectionStatesTest#testMaxReconnectBackoff")]
     fn test_max_reconnect_backoff() {
         let mut connection_states = create_single_ip_states();
-        let mut time = MockTime::new();
+        let time = mock_time();
 
         let effective_max_reconnect_backoff =
             (RECONNECT_BACKOFF_MAX as f64 * (1.0 + ConnStates::RECONNECT_BACKOFF_JITTER)).round() as i64;
@@ -899,6 +928,7 @@ mod tests {
 
     /// Translated from `ClusterConnectionStatesTest.testExponentialReconnectBackoff`
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.ClusterConnectionStatesTest#testExponentialReconnectBackoff")]
     fn test_exponential_reconnect_backoff() {
         verify_reconnect_exponential_backoff(false);
         verify_reconnect_exponential_backoff(true);
@@ -906,9 +936,10 @@ mod tests {
 
     /// Translated from `ClusterConnectionStatesTest.testThrottled`
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.ClusterConnectionStatesTest#testThrottled")]
     fn test_throttled() {
         let mut connection_states = create_single_ip_states();
-        let mut time = MockTime::new();
+        let time = mock_time();
 
         connection_states.connecting(NODE_ID1, time.milliseconds(), "localhost");
         time.sleep(1000);
@@ -940,6 +971,7 @@ mod tests {
 
     /// Translated from `ClusterConnectionStatesTest.testSingleIP`
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.ClusterConnectionStatesTest#testSingleIP")]
     async fn test_single_ip() {
         let expected_ip = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1));
         let host_resolver = SingleIpHostResolver;
@@ -952,7 +984,7 @@ mod tests {
             LogContext::empty(),
             host_resolver,
         );
-        let time = MockTime::new();
+        let time = mock_time();
 
         connection_states.connecting(NODE_ID1, time.milliseconds(), "localhost");
         let addr1 = connection_states.current_address(NODE_ID1).await.unwrap();
@@ -967,7 +999,7 @@ mod tests {
     #[tokio::test]
     async fn test_multiple_ips() {
         let mut connection_states = create_multi_ip_states();
-        let time = MockTime::new();
+        let time = mock_time();
 
         let resolved = ClientUtils::resolve(HOST_TWO_IPS, &connection_states.host_resolver)
             .await
@@ -986,9 +1018,10 @@ mod tests {
 
     /// Translated from `ClusterConnectionStatesTest.testHostResolveChange`
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.ClusterConnectionStatesTest#testHostResolveChange")]
     async fn test_host_resolve_change() {
         let mut connection_states = create_multi_ip_states();
-        let time = MockTime::new();
+        let time = mock_time();
 
         let resolved = ClientUtils::resolve(HOST_TWO_IPS, &connection_states.host_resolver)
             .await
@@ -1007,9 +1040,10 @@ mod tests {
 
     /// Translated from `ClusterConnectionStatesTest.testNodeWithNewHostname`
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.ClusterConnectionStatesTest#testNodeWithNewHostname")]
     async fn test_node_with_new_hostname() {
         let mut connection_states = create_multi_ip_states();
-        let time = MockTime::new();
+        let time = mock_time();
 
         connection_states.connecting(NODE_ID1, time.milliseconds(), "localhost");
         let addr1 = connection_states.current_address(NODE_ID1).await.unwrap();
@@ -1023,9 +1057,10 @@ mod tests {
 
     /// Translated from `ClusterConnectionStatesTest.testIsPreparingConnection`
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.ClusterConnectionStatesTest#testIsPreparingConnection")]
     fn test_is_preparing_connection() {
         let mut connection_states = create_single_ip_states();
-        let time = MockTime::new();
+        let time = mock_time();
 
         assert!(!connection_states.is_preparing_connection(NODE_ID1));
         connection_states.connecting(NODE_ID1, time.milliseconds(), "localhost");
@@ -1038,9 +1073,10 @@ mod tests {
 
     /// Translated from `ClusterConnectionStatesTest.testExponentialConnectionSetupTimeout`
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.ClusterConnectionStatesTest#testExponentialConnectionSetupTimeout")]
     fn test_exponential_connection_setup_timeout() {
         let mut connection_states = create_single_ip_states();
-        let time = MockTime::new();
+        let time = mock_time();
 
         assert!(connection_states.can_connect(NODE_ID1, time.milliseconds()));
 
@@ -1108,9 +1144,10 @@ mod tests {
 
     /// Translated from `ClusterConnectionStatesTest.testTimedOutConnections`
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.ClusterConnectionStatesTest#testTimedOutConnections")]
     fn test_timed_out_connections() {
         let mut connection_states = create_single_ip_states();
-        let mut time = MockTime::new();
+        let time = mock_time();
 
         // Initiate two connections
         connection_states.connecting(NODE_ID1, time.milliseconds(), "localhost");
@@ -1169,9 +1206,10 @@ mod tests {
 
     /// Translated from `ClusterConnectionStatesTest.testSkipLastAttemptedIp`
     #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.ClusterConnectionStatesTest#testSkipLastAttemptedIp")]
     async fn test_skip_last_attempted_ip() {
         let mut connection_states = create_multi_ip_states();
-        let time = MockTime::new();
+        let time = mock_time();
 
         let resolved = ClientUtils::resolve(HOST_TWO_IPS, &connection_states.host_resolver)
             .await
@@ -1193,7 +1231,7 @@ mod tests {
 
     fn verify_reconnect_exponential_backoff(enter_checking_api_version_state: bool) {
         let mut connection_states = create_single_ip_states();
-        let mut time = MockTime::new();
+        let time = mock_time();
 
         let reconnect_backoff_max_exp = (RECONNECT_BACKOFF_MAX as f64 / (RECONNECT_BACKOFF_MS.max(1) as f64)).ln()
             / (ConnStates::RECONNECT_BACKOFF_EXP_BASE as f64).ln();

@@ -14,8 +14,8 @@
 
 //! Translated from `org.apache.kafka.clients.producer.BufferExhaustedException`.
 
-use crate::common::Errors;
 use crate::common::error::kafka_error_class;
+use crate::common::protocol::Errors;
 
 kafka_error_class! {
     /// The producer cannot allocate memory for a record because the buffer pool
@@ -29,9 +29,10 @@ kafka_error_class! {
     ///   `RetriableException` -> `ApiException` -> `KafkaException`
     ///
     /// It is therefore **retriable**, and reports error code
-    /// [`Errors::RequestTimedOut`]: it has no entry in `Errors` itself, and
+    /// `Errors::RequestTimedOut`: it has no entry in `Errors` itself, and
     /// Java's `Errors.forException` walks up the superclass chain, finding
     /// `TimeoutException`'s.
+    #[doc(alias = "org.apache.kafka.clients.producer.BufferExhaustedException")]
     ProducerBufferExhaustedError,
     code: Errors::RequestTimedOut,
     extends: [

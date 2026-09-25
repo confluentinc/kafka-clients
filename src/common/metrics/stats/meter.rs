@@ -18,12 +18,13 @@
 use std::sync::Arc;
 
 use crate::common::MetricName;
-use crate::common::metrics::internals::TimeUnit;
+use crate::common::metrics::TimeUnit;
 use crate::common::metrics::stats::WindowedSum;
 use crate::common::metrics::stats::{CumulativeSum, Rate, SampledStat};
 use crate::common::metrics::{CompoundStat, Measurable, MetricConfig, NamedMeasurable, Stat};
 
 /// A compound stat that includes a rate metric and a cumulative total metric.
+#[doc(alias = "org.apache.kafka.common.metrics.stats.Meter")]
 pub struct Meter {
     rate_metric_name: MetricName,
     total_metric_name: MetricName,
@@ -36,6 +37,7 @@ pub struct Meter {
 
 impl Meter {
     /// Construct a `Meter` with seconds as time unit, backed by a `WindowedSum`.
+    #[doc(alias = "org.apache.kafka.common.metrics.stats.Meter#Meter")]
     pub fn new(rate_metric_name: MetricName, total_metric_name: MetricName) -> Self {
         Self::with_unit_rate_stat(
             TimeUnit::Seconds,
@@ -46,6 +48,7 @@ impl Meter {
     }
 
     /// Construct a `Meter` with the provided time unit, backed by a `WindowedSum`.
+    #[doc(alias = "org.apache.kafka.common.metrics.stats.Meter#Meter")]
     pub fn with_unit(unit: TimeUnit, rate_metric_name: MetricName, total_metric_name: MetricName) -> Self {
         Self::with_unit_rate_stat(
             unit,
@@ -56,6 +59,7 @@ impl Meter {
     }
 
     /// Construct a `Meter` with seconds as time unit and a provided rate stat.
+    #[doc(alias = "org.apache.kafka.common.metrics.stats.Meter#Meter")]
     pub fn with_rate_stat(
         rate_stat: Arc<SampledStat>,
         rate_metric_name: MetricName,
@@ -69,6 +73,7 @@ impl Meter {
     /// Panics if `rate_stat` is not a `WindowedSum`/`WindowedCount`, mirroring
     /// Java's `IllegalArgumentException` — this is a construction-time
     /// programming error (Meter is only meaningful with a windowed sum/count).
+    #[doc(alias = "org.apache.kafka.common.metrics.stats.Meter#Meter")]
     pub fn with_unit_rate_stat(
         unit: TimeUnit,
         rate_stat: Arc<SampledStat>,
@@ -122,6 +127,7 @@ mod tests {
 
     // MeterTest.testMeter
     #[test]
+    #[doc(alias = "org.apache.kafka.common.metrics.stats.MeterTest#testMeter")]
     fn test_meter() {
         let rate_metric_name = name("rate");
         let total_metric_name = name("total");

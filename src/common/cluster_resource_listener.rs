@@ -28,7 +28,9 @@ use super::ClusterResource;
 /// each metadata response.
 ///
 /// Corresponds to `org.apache.kafka.common.ClusterResourceListener`.
+#[doc(alias = "org.apache.kafka.common.ClusterResourceListener")]
 pub trait ClusterResourceListener: Send {
     /// Called when the cluster metadata is updated.
+    #[doc(alias = "org.apache.kafka.common.ClusterResourceListener#onUpdate")]
     fn on_update(&self, cluster_resource: &ClusterResource);
 }

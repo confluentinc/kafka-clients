@@ -14,16 +14,17 @@
 
 //! Translated from `org.apache.kafka.common.errors.SnapshotNotFoundException`.
 
-use crate::common::Errors;
 use crate::common::error::kafka_error_class;
+use crate::common::protocol::Errors;
 
 kafka_error_class! {
     /// Requested snapshot was not found.
     ///
-    /// Corresponds to Java's `SnapshotNotFoundException`, error code [`Errors::SnapshotNotFound`].
+    /// Corresponds to Java's `SnapshotNotFoundException`, error code `Errors::SnapshotNotFound`.
     ///
     /// Java `extends` chain:
     ///    `SnapshotNotFoundException` -> `ApiException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.SnapshotNotFoundException")]
     SnapshotNotFoundError,
     code: Errors::SnapshotNotFound,
     extends: [

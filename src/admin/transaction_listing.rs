@@ -23,6 +23,7 @@ use crate::admin::TransactionState;
 /// Corresponds to `org.apache.kafka.clients.admin.TransactionListing`.
 /// `producer_id` is `i64` (Java `long`).
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[doc(alias = "org.apache.kafka.clients.admin.TransactionListing")]
 pub struct TransactionListing {
     transactional_id: String,
     producer_id: i64,
@@ -31,21 +32,25 @@ pub struct TransactionListing {
 
 impl TransactionListing {
     /// Creates a new `TransactionListing`.
+    #[doc(alias = "org.apache.kafka.clients.admin.TransactionListing#TransactionListing")]
     pub fn new(transactional_id: impl Into<String>, producer_id: i64, transaction_state: TransactionState) -> Self {
         Self { transactional_id: transactional_id.into(), producer_id, transaction_state }
     }
 
     /// The transactional id of the transaction.
+    #[doc(alias = "org.apache.kafka.clients.admin.TransactionListing#transactionalId")]
     pub fn transactional_id(&self) -> &str {
         &self.transactional_id
     }
 
     /// The producer id of the transaction.
+    #[doc(alias = "org.apache.kafka.clients.admin.TransactionListing#producerId")]
     pub fn producer_id(&self) -> i64 {
         self.producer_id
     }
 
     /// The current state of the transaction.
+    #[doc(alias = "org.apache.kafka.clients.admin.TransactionListing#state")]
     pub fn state(&self) -> TransactionState {
         self.transaction_state
     }

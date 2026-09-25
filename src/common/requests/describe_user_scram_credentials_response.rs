@@ -30,14 +30,18 @@ use super::AbstractResponse;
 /// Corresponds to
 /// `org.apache.kafka.common.requests.DescribeUserScramCredentialsResponse`.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.DescribeUserScramCredentialsResponse")]
 pub struct DescribeUserScramCredentialsResponse {
     data: DescribeUserScramCredentialsResponseData,
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     version: i16,
 }
 
 impl DescribeUserScramCredentialsResponse {
     /// Creates a new response from data and version.
+    #[doc(
+        alias = "org.apache.kafka.common.requests.DescribeUserScramCredentialsResponse#DescribeUserScramCredentialsResponse"
+    )]
     pub fn new(data: DescribeUserScramCredentialsResponseData, version: i16) -> Self {
         Self { data, version }
     }
@@ -48,6 +52,7 @@ impl DescribeUserScramCredentialsResponse {
     }
 
     /// Returns a reference to the underlying data.
+    #[doc(alias = "org.apache.kafka.common.requests.DescribeUserScramCredentialsResponse#data")]
     pub fn data(&self) -> &DescribeUserScramCredentialsResponseData {
         &self.data
     }
@@ -58,11 +63,13 @@ impl DescribeUserScramCredentialsResponse {
     }
 
     /// Returns the throttle time in milliseconds.
+    #[doc(alias = "org.apache.kafka.common.requests.DescribeUserScramCredentialsResponse#throttleTimeMs")]
     pub fn throttle_time_ms(&self) -> i32 {
         self.data.throttle_time_ms
     }
 
     /// Sets the throttle time in the response.
+    #[doc(alias = "org.apache.kafka.common.requests.DescribeUserScramCredentialsResponse#maybeSetThrottleTimeMs")]
     pub fn maybe_set_throttle_time_ms(&mut self, throttle_time_ms: i32) {
         self.data.set_throttle_time_ms(throttle_time_ms);
     }
@@ -71,6 +78,7 @@ impl DescribeUserScramCredentialsResponse {
     ///
     /// Mirrors `DescribeUserScramCredentialsResponse.errorCounts`: one count per
     /// user-level result error code.
+    #[doc(alias = "org.apache.kafka.common.requests.DescribeUserScramCredentialsResponse#errorCounts")]
     pub fn error_counts(&self) -> HashMap<Errors, i32> {
         let mut counts = HashMap::new();
         for result in &self.data.results {
@@ -84,6 +92,7 @@ impl DescribeUserScramCredentialsResponse {
     /// # Errors
     ///
     /// Returns an error if parsing fails.
+    #[doc(alias = "org.apache.kafka.common.requests.DescribeUserScramCredentialsResponse#parse")]
     pub fn parse(readable: &mut dyn Readable, version: i16) -> io::Result<Self> {
         let data = DescribeUserScramCredentialsResponseData::read(readable, version)?;
         Ok(Self::new(data, version))
@@ -93,6 +102,7 @@ impl DescribeUserScramCredentialsResponse {
     ///
     /// Mirrors `DescribeUserScramCredentialsResponse.shouldClientThrottle`
     /// (throttled for versions `>= 0`).
+    #[doc(alias = "org.apache.kafka.common.requests.DescribeUserScramCredentialsResponse#shouldClientThrottle")]
     pub fn should_client_throttle(&self, _version: i16) -> bool {
         true
     }
@@ -157,7 +167,7 @@ mod tests {
             0x00, // result tagged fields
             0x00, // response tagged fields
         ];
-        let mut readable = crate::common::ByteBufferAccessor::new(bytes);
+        let mut readable = crate::common::protocol::ByteBufferAccessor::new(bytes);
         let parsed = DescribeUserScramCredentialsResponse::parse(&mut readable, 0).unwrap();
         assert_eq!(parsed.data().throttle_time_ms, 0);
         assert_eq!(parsed.data().results.len(), 1);

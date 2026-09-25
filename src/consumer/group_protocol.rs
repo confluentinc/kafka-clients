@@ -25,6 +25,8 @@ use crate::common::Error;
 ///
 /// Corresponds to Java's `org.apache.kafka.clients.consumer.GroupProtocol`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+#[doc(alias = "org.apache.kafka.clients.consumer.GroupProtocol")]
 pub enum GroupProtocol {
     /// Classic group protocol.
     Classic,
@@ -52,6 +54,7 @@ impl GroupProtocol {
     /// Returns [`Error::LocalIllegalArgument`] if `name` is not a recognized
     /// group protocol (matching Java's `IllegalArgumentException` from
     /// `Enum.valueOf`).
+    #[doc(alias = "org.apache.kafka.clients.consumer.GroupProtocol#of")]
     pub fn of(name: &str) -> Result<Self, Error> {
         match name.to_ascii_uppercase().as_str() {
             "CLASSIC" => Ok(Self::Classic),
