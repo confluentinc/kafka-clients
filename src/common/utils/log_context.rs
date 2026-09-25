@@ -31,6 +31,7 @@
 ///
 /// Translated from `org.apache.kafka.common.utils.LogContext`.
 #[derive(Clone, Debug)]
+#[doc(alias = "org.apache.kafka.common.utils.LogContext")]
 pub struct LogContext {
     prefix: String,
 }
@@ -44,12 +45,16 @@ impl LogContext {
     ///
     /// # Examples
     ///
-    /// ```
+    /// Not run as a doctest: the type is crate-private, so an external doctest
+    /// crate cannot name it.
+    ///
+    /// ```ignore
     /// use confluent_kafka::common::utils::LogContext;
     ///
     /// let ctx = LogContext::new(format!("[Producer clientId={}] ", "my-producer"));
     /// assert_eq!(ctx.prefix(), "[Producer clientId=my-producer] ");
     /// ```
+    #[doc(alias = "org.apache.kafka.common.utils.LogContext#LogContext")]
     pub fn new(prefix: impl Into<String>) -> Self {
         Self { prefix: prefix.into() }
     }

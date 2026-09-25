@@ -168,8 +168,9 @@ impl RebalanceCallbackMetricsManager {
 mod tests {
     use super::*;
     use crate::common::Metric;
-    use crate::common::metrics::MockTime;
-    use crate::common::metrics::{Metrics, Time};
+    use crate::common::metrics::Metrics;
+    use crate::common::utils::MockTime;
+    use crate::common::utils::Time;
 
     fn value(metrics: &Metrics, name: &MetricName) -> f64 {
         metrics.metric(name).unwrap().metric_value().as_double().unwrap()

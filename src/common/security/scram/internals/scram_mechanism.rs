@@ -29,6 +29,7 @@
 /// Only the two supported SCRAM mechanisms exist, mirroring the Java enum which
 /// has exactly two members.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[doc(alias = "org.apache.kafka.common.security.scram.internals.ScramMechanism")]
 pub(crate) enum ScramMechanism {
     /// SCRAM-SHA-256 (`SHA-256` / `HmacSHA256`).
     ScramSha256,
@@ -42,6 +43,7 @@ impl ScramMechanism {
     ///
     /// Mirrors `ScramMechanism.forMechanismName`, which returns `null` for an
     /// unknown name.
+    #[doc(alias = "org.apache.kafka.common.security.scram.internals.ScramMechanism#forMechanismName")]
     pub(crate) fn for_mechanism_name(mechanism_name: &str) -> Option<ScramMechanism> {
         match mechanism_name {
             "SCRAM-SHA-256" => Some(ScramMechanism::ScramSha256),

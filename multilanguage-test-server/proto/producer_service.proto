@@ -54,7 +54,7 @@ service ProducerService {
   // method and returns StatusResponse — empty on success, a populated
   // KafkaError on failure. The four control RPCs act on the whole producer and
   // share TransactionRequest; send_offsets_to_transaction additionally carries
-  // offsets + the consumer's ConsumerGroupMetadata, so it has its own request.
+  // offsets + a server-side group-metadata handle id, so it has its own request.
 
   // Java initTransactions(): register transactional.id with the coordinator
   // and fence any prior producer holding the same id.
@@ -163,7 +163,7 @@ message RecordMetadata {
 
 // Shared request for the four transaction control RPCs — each acts on the
 // whole producer, so only the handle is needed. send_offsets_to_transaction
-// carries offsets + ConsumerGroupMetadata as well, so it uses
+// carries offsets + a group-metadata handle id as well, so it uses
 // SendOffsetsToTransactionRequest below instead.
 message TransactionRequest {
   uint64 producer_id = 1;
@@ -175,7 +175,7 @@ message TransactionRequest {
 // read_offset_map, where leader_epoch and metadata are the only nullable
 // inputs: an absent (or < 0) leader_epoch means "no epoch", and an absent
 // metadata means the empty string. Hence both are proto3 `optional`, matching
-// OffsetAndMetadata's actual fields (leader_epoch is Option<i32>; metadata is a
+// OffsetAndMetadata's actual fields (leader_epoch is `Option<i32>`; metadata is a
 // plain String, which is always present but may be empty).
 message OffsetEntry {
   string topic = 1;
@@ -185,8 +185,9 @@ message OffsetEntry {
   optional string metadata = 5;
 }
 
-// The four fields Rust's ConsumerGroupMetadata exposes
-// (consumer_group_metadata.rs). group_instance_id is present only for a static
+// The four fields Rust's ConsumerGroupMetadata trait exposes
+// (consumer_group_metadata.rs), as read from a server-side handle by
+// ConsumerService.GroupMetadata. group_instance_id is present only for a static
 // member, so it is `optional`; the other three are always present (member_id /
 // group_id default to the empty string when unknown, generation_id to -1).
 message ConsumerGroupMetadata {
@@ -199,10 +200,17 @@ message ConsumerGroupMetadata {
 // send_offsets_to_transaction's request: the producer handle, the offsets to
 // stage, and the consuming group's metadata (generation + member id) the
 // coordinator needs to accept the TxnOffsetCommit sent on the group's behalf.
+//
+// The metadata travels as the id of a handle the server's own consumer handed
+// out (ConsumerService.GroupMetadata), not as its fields: the bindings have no
+// ConsumerGroupMetadata constructor, since Java deprecated its constructors in
+// 4.2 and turns the class into an interface in 5.0. Field 3 carried the fields
+// before that change.
 message SendOffsetsToTransactionRequest {
+  reserved 3;
   uint64 producer_id = 1;
   repeated OffsetEntry offsets = 2;
-  ConsumerGroupMetadata group_metadata = 3;
+  uint64 group_metadata_id = 4;
 }
 
 // ---------------------------------------------------------------------------
@@ -284,6 +292,7 @@ message CallbackLogPartition {
 // strings and use the same field encoding so the Rust harness can compare
 // backends:
 //
+// ```text
 //   kind        | partitions                | offsets                        | error
 //   ------------+---------------------------+--------------------------------+------------------
 //   "assigned"  | the assigned partitions   | empty                          | listener failure
@@ -291,13 +300,14 @@ message CallbackLogPartition {
 //   "lost"      | the lost partitions       | empty                          | listener failure
 //   "commit"    | the committed partitions  | committed offset per partition | commit failure
 //   "delivery"  | the delivered-to partition| {"<topic>-<partition>": offset}| delivery failure
+// ```
 //
-// `offsets` keys are always "<topic>-<partition>" (e.g. "my-topic-0").
+// `offsets` keys are always `"<topic>-<partition>"` (e.g. `"my-topic-0"`).
 message CallbackLogEntry {
   // One of "assigned", "revoked", "lost", "commit", "delivery".
   string kind = 1;
   repeated CallbackLogPartition partitions = 2;
-  // "<topic>-<partition>" -> offset. Empty for the rebalance kinds.
+  // `"<topic>-<partition>"` -> offset. Empty for the rebalance kinds.
   map<string, int64> offsets = 3;
   // The callback's error message; empty string when the callback was
   // invoked with no error.

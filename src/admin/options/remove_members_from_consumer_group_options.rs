@@ -28,6 +28,7 @@ use crate::common::Error;
 /// Corresponds to
 /// `org.apache.kafka.clients.admin.RemoveMembersFromConsumerGroupOptions`.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[doc(alias = "org.apache.kafka.clients.admin.RemoveMembersFromConsumerGroupOptions")]
 pub struct RemoveMembersFromConsumerGroupOptions {
     members: HashSet<MemberToRemove>,
     reason: Option<String>,

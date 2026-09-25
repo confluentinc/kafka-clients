@@ -28,12 +28,14 @@ use crate::common::TopicPartitionReplica;
 /// [`all`](Self::all).
 ///
 /// Corresponds to `org.apache.kafka.clients.admin.AlterReplicaLogDirsResult`.
+#[doc(alias = "org.apache.kafka.clients.admin.AlterReplicaLogDirsResult")]
 pub struct AlterReplicaLogDirsResult {
     futures: HashMap<TopicPartitionReplica, KafkaFuture<()>>,
 }
 
 impl AlterReplicaLogDirsResult {
     /// Creates a new result from the per-replica futures.
+    #[doc(alias = "org.apache.kafka.clients.admin.AlterReplicaLogDirsResult#AlterReplicaLogDirsResult")]
     pub(crate) fn new(futures: HashMap<TopicPartitionReplica, KafkaFuture<()>>) -> Self {
         Self { futures }
     }
@@ -45,6 +47,7 @@ impl AlterReplicaLogDirsResult {
     /// one of `ClusterAuthorizationFailed`, `InvalidTopicException`,
     /// `LogDirNotFound`, `ReplicaNotAvailable`, `KafkaStorageError`, or
     /// `UnknownServerError`.
+    #[doc(alias = "org.apache.kafka.clients.admin.AlterReplicaLogDirsResult#values")]
     pub fn values(&self) -> &HashMap<TopicPartitionReplica, KafkaFuture<()>> {
         &self.futures
     }
@@ -54,6 +57,7 @@ impl AlterReplicaLogDirsResult {
     /// [`values`](Self::values).
     ///
     /// Corresponds to `AlterReplicaLogDirsResult.all`.
+    #[doc(alias = "org.apache.kafka.clients.admin.AlterReplicaLogDirsResult#all")]
     pub fn all(&self) -> KafkaFuture<()> {
         KafkaFuture::all_of(self.futures.values().cloned().collect())
     }

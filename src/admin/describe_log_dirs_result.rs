@@ -25,12 +25,14 @@ use super::LogDirDescription;
 /// The result of the `Admin::describe_log_dirs` call.
 ///
 /// Corresponds to `org.apache.kafka.clients.admin.DescribeLogDirsResult`.
+#[doc(alias = "org.apache.kafka.clients.admin.DescribeLogDirsResult")]
 pub struct DescribeLogDirsResult {
     futures: HashMap<i32, KafkaFuture<HashMap<String, LogDirDescription>>>,
 }
 
 impl DescribeLogDirsResult {
     /// Creates a new result from the per-broker futures.
+    #[doc(alias = "org.apache.kafka.clients.admin.DescribeLogDirsResult#DescribeLogDirsResult")]
     pub(crate) fn new(futures: HashMap<i32, KafkaFuture<HashMap<String, LogDirDescription>>>) -> Self {
         Self { futures }
     }
@@ -39,6 +41,7 @@ impl DescribeLogDirsResult {
     /// information of partitions on each individual broker. The result of the
     /// future is a map from broker log directory path to a description of that
     /// log directory.
+    #[doc(alias = "org.apache.kafka.clients.admin.DescribeLogDirsResult#descriptions")]
     pub fn descriptions(&self) -> &HashMap<i32, KafkaFuture<HashMap<String, LogDirDescription>>> {
         &self.futures
     }
@@ -48,6 +51,7 @@ impl DescribeLogDirsResult {
     /// directory path to a description of that log directory.
     ///
     /// Corresponds to `DescribeLogDirsResult.allDescriptions`.
+    #[doc(alias = "org.apache.kafka.clients.admin.DescribeLogDirsResult#allDescriptions")]
     pub fn all_descriptions(&self) -> KafkaFuture<HashMap<i32, HashMap<String, LogDirDescription>>> {
         let entries: Vec<(i32, KafkaFuture<HashMap<String, LogDirDescription>>)> =
             self.futures.iter().map(|(k, v)| (*k, v.clone())).collect();

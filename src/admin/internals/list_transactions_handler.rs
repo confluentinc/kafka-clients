@@ -23,8 +23,8 @@ use crate::ListTransactionsRequestData;
 use crate::admin::ListTransactionsOptions;
 use crate::admin::TransactionListing;
 use crate::admin::TransactionState;
-use crate::common::Errors;
-use crate::common::requests::{ConcreteResponse, ListTransactionsRequestBuilder, RequestBuilder};
+use crate::common::protocol::Errors;
+use crate::common::requests::{ConcreteResponse, RequestBuilder, list_transactions_request};
 use crate::common::utils::LogContext;
 use crate::common::{Error, Node};
 use crate::{kafka_debug, kafka_error};
@@ -37,6 +37,7 @@ use super::{AllBrokersFuture, AllBrokersStrategy, BrokerKey};
 ///
 /// Corresponds to `ListTransactionsHandler` (a `Batched` handler over
 /// [`BrokerKey`] keys yielding a `Vec<TransactionListing>` value per broker).
+#[doc(alias = "org.apache.kafka.clients.admin.internals.ListTransactionsHandler")]
 pub(crate) struct ListTransactionsHandler {
     log_context: LogContext,
     options: ListTransactionsOptions,
@@ -45,6 +46,7 @@ pub(crate) struct ListTransactionsHandler {
 
 impl ListTransactionsHandler {
     /// Creates a handler backed by an [`AllBrokersStrategy`].
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.ListTransactionsHandler#ListTransactionsHandler")]
     pub(crate) fn new(options: ListTransactionsOptions, log_context: LogContext) -> Self {
         Self {
             lookup_strategy: AllBrokersStrategy::new(log_context.clone()),
@@ -56,6 +58,7 @@ impl ListTransactionsHandler {
     /// Creates the future bundle for the RPC.
     ///
     /// Mirrors `ListTransactionsHandler.newFuture`.
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.ListTransactionsHandler#newFuture")]
     pub(crate) fn new_future() -> AllBrokersFuture<Vec<TransactionListing>> {
         AllBrokersFuture::new()
     }
@@ -63,6 +66,7 @@ impl ListTransactionsHandler {
     /// Builds a batched `ListTransactions` request from the options.
     ///
     /// Mirrors `buildBatchedRequest`.
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.ListTransactionsHandler#buildBatchedRequest")]
     fn build_batched_request(&self) -> ListTransactionsRequestData {
         let mut data = ListTransactionsRequestData::new();
         data.set_producer_id_filters(self.options.filtered_producer_ids().iter().copied().collect());
@@ -80,6 +84,7 @@ impl ListTransactionsHandler {
     /// broker key for the responding broker. Panics (Java's
     /// `IllegalArgumentException`) otherwise — a programming error the driver
     /// never triggers in production.
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.ListTransactionsHandler#requireSingleton")]
     fn require_singleton(keys: &HashSet<BrokerKey>, broker_id: i32) -> BrokerKey {
         assert!(keys.len() == 1, "Unexpected key set: {keys:?}");
         let key = keys.iter().next().expect("checked len == 1").clone();
@@ -96,7 +101,7 @@ impl AdminApiHandler<BrokerKey, Vec<TransactionListing>> for ListTransactionsHan
     fn build_request(&self, _broker_id: i32, keys: &HashSet<BrokerKey>) -> Vec<RequestAndKeys<BrokerKey>> {
         let data = self.build_batched_request();
         vec![RequestAndKeys {
-            request: Box::new(ListTransactionsRequestBuilder::new(data)) as Box<dyn RequestBuilder>,
+            request: Box::new(list_transactions_request::Builder::new(data)) as Box<dyn RequestBuilder>,
             keys: keys.clone(),
         }]
     }

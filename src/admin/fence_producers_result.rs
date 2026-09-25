@@ -29,12 +29,14 @@ use crate::common::{Error, KafkaFuture};
 /// transactional id string, following the `DescribeConsumerGroupsResult`
 /// precedent.
 #[derive(Clone, Debug)]
+#[doc(alias = "org.apache.kafka.clients.admin.FenceProducersResult")]
 pub struct FenceProducersResult {
     futures: HashMap<String, KafkaFuture<ProducerIdAndEpoch>>,
 }
 
 impl FenceProducersResult {
     /// Creates a result from the per-transactional-id futures.
+    #[doc(alias = "org.apache.kafka.clients.admin.FenceProducersResult#FenceProducersResult")]
     pub(crate) fn new(futures: HashMap<String, KafkaFuture<ProducerIdAndEpoch>>) -> Self {
         Self { futures }
     }
@@ -43,6 +45,7 @@ impl FenceProducersResult {
     /// the status of individual fencings.
     ///
     /// Mirrors `FenceProducersResult.fencedProducers`.
+    #[doc(alias = "org.apache.kafka.clients.admin.FenceProducersResult#fencedProducers")]
     pub fn fenced_producers(&self) -> HashMap<String, KafkaFuture<()>> {
         self.futures.iter().map(|(id, f)| (id.clone(), f.then_apply(|_| ()))).collect()
     }
@@ -56,6 +59,7 @@ impl FenceProducersResult {
     ///
     /// Returns [`Error::local_illegal_argument`] if `transactional_id` was not
     /// included in the request.
+    #[doc(alias = "org.apache.kafka.clients.admin.FenceProducersResult#producerId")]
     pub fn producer_id(&self, transactional_id: &str) -> Result<KafkaFuture<i64>, Error> {
         self.find_and_apply(transactional_id, |p| p.producer_id)
     }
@@ -69,6 +73,7 @@ impl FenceProducersResult {
     ///
     /// Returns [`Error::local_illegal_argument`] if `transactional_id` was not
     /// included in the request.
+    #[doc(alias = "org.apache.kafka.clients.admin.FenceProducersResult#epochId")]
     pub fn epoch_id(&self, transactional_id: &str) -> Result<KafkaFuture<i16>, Error> {
         self.find_and_apply(transactional_id, |p| p.epoch)
     }
@@ -76,11 +81,13 @@ impl FenceProducersResult {
     /// Return a future which succeeds only if all the producer fencings succeed.
     ///
     /// Mirrors `FenceProducersResult.all`.
+    #[doc(alias = "org.apache.kafka.clients.admin.FenceProducersResult#all")]
     pub fn all(&self) -> KafkaFuture<()> {
         KafkaFuture::all_of(self.futures.values().cloned().collect())
     }
 
     /// Mirrors `FenceProducersResult.findAndApply`.
+    #[doc(alias = "org.apache.kafka.clients.admin.FenceProducersResult#findAndApply")]
     fn find_and_apply<T, F>(&self, transactional_id: &str, followup: F) -> Result<KafkaFuture<T>, Error>
     where
         T: Clone + Send + Sync + 'static,

@@ -23,6 +23,7 @@ use crate::common::metrics::MetricConfig;
 /// `record` takes `&self`: the simple cumulative stats use interior mutability
 /// (atomics) so that recording is lock-free, which is the minimal Rust
 /// equivalent of Java guarding the stat field with the sensor's `synchronized`.
+#[doc(alias = "org.apache.kafka.common.metrics.Stat")]
 pub trait Stat: Send + Sync {
     /// Record the given value.
     ///

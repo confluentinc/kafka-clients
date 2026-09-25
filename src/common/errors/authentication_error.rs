@@ -14,20 +14,20 @@
 
 //! Translated from `org.apache.kafka.common.errors.AuthenticationException`.
 
-use crate::common::Errors;
 use crate::common::error::kafka_error_class;
+use crate::common::protocol::Errors;
 
 kafka_error_class! {
     /// Authentication failed.
     ///
     /// This is also the payload
-    /// [`auth_io_error`](crate::common::network::auth_io_error) puts inside an
+    /// `auth_io_error` puts inside an
     /// `io::Error` to carry "this was a genuine authentication failure" across the
     /// handshake boundary, recovered by
-    /// [`is_authentication_error`](crate::common::network::is_authentication_error).
+    /// `is_authentication_error`.
     ///
     /// Corresponds to Java's `AuthenticationException`, which reports error code
-    /// [`Errors::InvalidConfig`] by inheritance.
+    /// `Errors::InvalidConfig` by inheritance.
     ///
     /// Java `extends` chain:
     ///    `AuthenticationException` -> `InvalidConfigurationException` ->
@@ -40,6 +40,7 @@ kafka_error_class! {
     /// class itself has no entry of its own. `InvalidConfigurationError` remains
     /// the code's owner: `Errors::error(InvalidConfig)` names that class, not this
     /// one.
+    #[doc(alias = "org.apache.kafka.common.errors.AuthenticationException")]
     AuthenticationError,
     code: Errors::InvalidConfig,
     extends: [

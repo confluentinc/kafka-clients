@@ -23,8 +23,10 @@ use crate::common::metrics::{Measurable, Stat};
 /// A compound stat is a stat where a single measurement and associated data
 /// structure feeds many metrics. This is the example for a histogram which has
 /// many associated percentiles.
+#[doc(alias = "org.apache.kafka.common.metrics.CompoundStat")]
 pub trait CompoundStat: Stat {
     /// The named measurable child metrics this compound stat exposes.
+    #[doc(alias = "org.apache.kafka.common.metrics.CompoundStat#stats")]
     fn stats(&self) -> Vec<NamedMeasurable>;
 }
 
@@ -34,6 +36,7 @@ pub trait CompoundStat: Stat {
 /// the compound stat records into the same object the child metric measures, so
 /// a record must be reflected in the measured value.
 #[derive(Clone)]
+#[doc(alias = "org.apache.kafka.common.metrics.CompoundStat$NamedMeasurable")]
 pub struct NamedMeasurable {
     name: MetricName,
     stat: Arc<dyn Measurable>,
@@ -41,16 +44,19 @@ pub struct NamedMeasurable {
 
 impl NamedMeasurable {
     /// Create a `NamedMeasurable`.
+    #[doc(alias = "org.apache.kafka.common.metrics.CompoundStat$NamedMeasurable#NamedMeasurable")]
     pub fn new(name: MetricName, stat: Arc<dyn Measurable>) -> Self {
         Self { name, stat }
     }
 
     /// The metric name of this child.
+    #[doc(alias = "org.apache.kafka.common.metrics.CompoundStat$NamedMeasurable#name")]
     pub fn name(&self) -> &MetricName {
         &self.name
     }
 
     /// The measurable backing this child.
+    #[doc(alias = "org.apache.kafka.common.metrics.CompoundStat$NamedMeasurable#stat")]
     pub fn stat(&self) -> Arc<dyn Measurable> {
         Arc::clone(&self.stat)
     }

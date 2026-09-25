@@ -24,6 +24,7 @@ use crate::common::security::auth::KafkaPrincipal;
 /// Corresponds to
 /// `org.apache.kafka.clients.admin.DescribeDelegationTokenOptions`.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[doc(alias = "org.apache.kafka.clients.admin.DescribeDelegationTokenOptions")]
 pub struct DescribeDelegationTokenOptions {
     owners: Option<Vec<KafkaPrincipal>>,
     timeout_ms: Option<i32>,

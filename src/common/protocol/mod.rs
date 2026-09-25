@@ -16,6 +16,16 @@
 //!
 //! This module provides traits and implementations for reading and writing
 //! Kafka protocol messages to/from byte streams.
+//!
+//! # Dead-code lint
+//!
+//! Java marks this package "not a supported API", so it is crate-private. It
+//! is translated in full (DoD #2), but the client uses only part of it; the
+//! rest has no caller yet, or only the translated tests. Nothing outside the
+//! crate can reach it, so the module allows dead code rather than dropping
+//! Java methods.
+
+#![expect(dead_code)]
 
 mod api_keys;
 mod api_message;
@@ -28,8 +38,14 @@ mod message_util;
 mod object_serialization_cache;
 mod readable;
 pub mod types;
-mod varint;
 mod writable;
+
+// Tests of `org.apache.kafka.common.protocol` (Java test package), moved in
+// from `tests/` because the protocol module is not public API.
+#[cfg(test)]
+mod flexible_version_test;
+#[cfg(test)]
+mod tagged_fields_test;
 
 pub use api_keys::ApiKeys;
 pub use api_message::ApiMessage;
@@ -41,6 +57,4 @@ pub use message_size_accumulator::MessageSizeAccumulator;
 pub use message_util::MessageUtil;
 pub use object_serialization_cache::ObjectSerializationCache;
 pub use readable::Readable;
-pub use types::{BoundField, Field, RawTaggedField, Schema, SchemaType, TaggedField};
-pub use varint::ByteUtils;
 pub use writable::Writable;

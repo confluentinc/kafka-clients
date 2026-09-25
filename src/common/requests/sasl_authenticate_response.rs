@@ -29,17 +29,20 @@ use super::AbstractResponse;
 /// Possible error codes:
 /// - [`Errors::SaslAuthenticationFailed`] (57): Authentication failed
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.SaslAuthenticateResponse")]
 pub struct SaslAuthenticateResponse {
     data: SaslAuthenticateResponseData,
 }
 
 impl SaslAuthenticateResponse {
     /// Creates a new `SaslAuthenticateResponse` from data.
+    #[doc(alias = "org.apache.kafka.common.requests.SaslAuthenticateResponse#SaslAuthenticateResponse")]
     pub fn new(data: SaslAuthenticateResponseData) -> Self {
         Self { data }
     }
 
     /// Returns a reference to the underlying data.
+    #[doc(alias = "org.apache.kafka.common.requests.SaslAuthenticateResponse#data")]
     pub fn data(&self) -> &SaslAuthenticateResponseData {
         &self.data
     }
@@ -55,26 +58,31 @@ impl SaslAuthenticateResponse {
     }
 
     /// Returns the error from this response.
+    #[doc(alias = "org.apache.kafka.common.requests.SaslAuthenticateResponse#error")]
     pub fn error(&self) -> Errors {
         Errors::for_code(self.data.error_code)
     }
 
     /// Returns the error counts for this response.
+    #[doc(alias = "org.apache.kafka.common.requests.SaslAuthenticateResponse#errorCounts")]
     pub fn error_counts(&self) -> HashMap<Errors, i32> {
         super::AbstractResponse::single_error_count(Errors::for_code(self.data.error_code))
     }
 
     /// Returns the error message, or `None` if there was no error.
+    #[doc(alias = "org.apache.kafka.common.requests.SaslAuthenticateResponse#errorMessage")]
     pub fn error_message(&self) -> Option<&str> {
         self.data.error_message.as_deref()
     }
 
     /// Returns the session lifetime in milliseconds.
+    #[doc(alias = "org.apache.kafka.common.requests.SaslAuthenticateResponse#sessionLifetimeMs")]
     pub fn session_lifetime_ms(&self) -> i64 {
         self.data.session_lifetime_ms
     }
 
     /// Returns the SASL authentication bytes from the server.
+    #[doc(alias = "org.apache.kafka.common.requests.SaslAuthenticateResponse#saslAuthBytes")]
     pub fn sasl_auth_bytes(&self) -> &[u8] {
         &self.data.auth_bytes
     }
@@ -83,11 +91,13 @@ impl SaslAuthenticateResponse {
     ///
     /// Always returns [`AbstractResponse::DEFAULT_THROTTLE_TIME`] (0) because the SaslAuthenticate schema
     /// does not support throttle time.
+    #[doc(alias = "org.apache.kafka.common.requests.SaslAuthenticateResponse#throttleTimeMs")]
     pub fn throttle_time_ms(&self) -> i32 {
         AbstractResponse::DEFAULT_THROTTLE_TIME
     }
 
     /// No-op: the SaslAuthenticate schema does not support throttle time.
+    #[doc(alias = "org.apache.kafka.common.requests.SaslAuthenticateResponse#maybeSetThrottleTimeMs")]
     pub fn maybe_set_throttle_time_ms(&mut self, _throttle_time_ms: i32) {
         // Not supported by the response schema
     }
@@ -104,6 +114,7 @@ impl SaslAuthenticateResponse {
     /// # Errors
     ///
     /// Returns an error if parsing fails.
+    #[doc(alias = "org.apache.kafka.common.requests.SaslAuthenticateResponse#parse")]
     pub fn parse(readable: &mut dyn Readable, version: i16) -> std::io::Result<Self> {
         let data = SaslAuthenticateResponseData::read(readable, version)?;
         Ok(Self::new(data))

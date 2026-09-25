@@ -14,16 +14,17 @@
 
 //! Translated from `org.apache.kafka.common.errors.SecurityDisabledException`.
 
-use crate::common::Errors;
 use crate::common::error::kafka_error_class;
+use crate::common::protocol::Errors;
 
 kafka_error_class! {
     /// Security features are disabled.
     ///
-    /// Corresponds to Java's `SecurityDisabledException`, error code [`Errors::SecurityDisabled`].
+    /// Corresponds to Java's `SecurityDisabledException`, error code `Errors::SecurityDisabled`.
     ///
     /// Java `extends` chain:
     ///    `SecurityDisabledException` -> `ApiException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.SecurityDisabledException")]
     SecurityDisabledError,
     code: Errors::SecurityDisabled,
     extends: [

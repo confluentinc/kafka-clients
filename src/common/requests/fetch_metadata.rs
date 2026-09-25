@@ -16,14 +16,13 @@
 //!
 //! Translated from `org.apache.kafka.common.requests.FetchMetadata`.
 
-#![allow(dead_code)]
-
 use std::fmt;
 
 /// The metadata for a single fetch request: session id + epoch.
 ///
 /// Corresponds to `org.apache.kafka.common.requests.FetchMetadata`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[doc(alias = "org.apache.kafka.common.requests.FetchMetadata")]
 pub struct FetchMetadata {
     session_id: i32,
     epoch: i32,
@@ -36,6 +35,7 @@ impl FetchMetadata {
     /// `FINAL_EPOCH` sticky.
     ///
     /// Translates `FetchMetadata.nextEpoch(int)`.
+    #[doc(alias = "org.apache.kafka.common.requests.FetchMetadata#nextEpoch")]
     pub fn next_epoch(prev_epoch: i32) -> i32 {
         if prev_epoch < 0 {
             // The next epoch after FINAL_EPOCH is always FINAL_EPOCH itself.
@@ -70,43 +70,51 @@ impl FetchMetadata {
         FetchMetadata { session_id: FetchMetadata::INVALID_SESSION_ID, epoch: FetchMetadata::FINAL_EPOCH };
 
     /// Constructs metadata from an explicit session id and epoch.
+    #[doc(alias = "org.apache.kafka.common.requests.FetchMetadata#FetchMetadata")]
     pub fn new(session_id: i32, epoch: i32) -> Self {
         Self { session_id, epoch }
     }
 
     /// Returns true if this metadata describes a full fetch request.
+    #[doc(alias = "org.apache.kafka.common.requests.FetchMetadata#isFull")]
     pub fn is_full(&self) -> bool {
         self.epoch == FetchMetadata::INITIAL_EPOCH || self.epoch == FetchMetadata::FINAL_EPOCH
     }
 
     /// Returns the session id.
+    #[doc(alias = "org.apache.kafka.common.requests.FetchMetadata#sessionId")]
     pub fn session_id(&self) -> i32 {
         self.session_id
     }
 
     /// Returns the epoch.
+    #[doc(alias = "org.apache.kafka.common.requests.FetchMetadata#epoch")]
     pub fn epoch(&self) -> i32 {
         self.epoch
     }
 
     /// Returns metadata indicating the client wants to close the existing
     /// session.
+    #[doc(alias = "org.apache.kafka.common.requests.FetchMetadata#nextCloseExisting")]
     pub fn next_close_existing(&self) -> Self {
         Self { session_id: self.session_id, epoch: FetchMetadata::FINAL_EPOCH }
     }
 
     /// Returns metadata indicating the client wants to close the existing
     /// session and create a new one if possible.
+    #[doc(alias = "org.apache.kafka.common.requests.FetchMetadata#nextCloseExistingAttemptNew")]
     pub fn next_close_existing_attempt_new(&self) -> Self {
         Self { session_id: self.session_id, epoch: FetchMetadata::INITIAL_EPOCH }
     }
 
     /// Returns metadata for the first incremental fetch in a new session.
+    #[doc(alias = "org.apache.kafka.common.requests.FetchMetadata#FetchMetadata")]
     pub fn with_incremental(session_id: i32) -> Self {
         Self { session_id, epoch: FetchMetadata::next_epoch(FetchMetadata::INITIAL_EPOCH) }
     }
 
     /// Returns metadata for the next incremental fetch.
+    #[doc(alias = "org.apache.kafka.common.requests.FetchMetadata#nextIncremental")]
     pub fn next_incremental(&self) -> Self {
         Self { session_id: self.session_id, epoch: FetchMetadata::next_epoch(self.epoch) }
     }

@@ -26,6 +26,11 @@ use std::fmt;
 /// `ConsumerRebalanceListenerCallbackNeededEvent` (bg → app) and
 /// `ConsumerRebalanceListenerCallbackCompletedEvent` (app → bg) handshake.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[non_exhaustive]
+// All three variants share the `OnPartitions` prefix because all three Java
+// listener methods do (`onPartitionsRevoked` / `onPartitionsAssigned` /
+// `onPartitionsLost`); the names are the translation contract.
+#[expect(clippy::enum_variant_names)]
 pub enum ConsumerRebalanceListenerMethodName {
     /// Corresponds to `ConsumerRebalanceListener::on_partitions_revoked`.
     OnPartitionsRevoked,

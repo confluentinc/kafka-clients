@@ -24,6 +24,8 @@
 ///
 /// Variant order matches Java's declaration order (`ABORT`, `COMMIT`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+#[doc(alias = "org.apache.kafka.common.requests.TransactionResult")]
 pub enum TransactionResult {
     /// Abort the transaction; `id` is `false` on the wire.
     Abort,
@@ -45,6 +47,7 @@ impl TransactionResult {
     /// The result for a wire value.
     ///
     /// Corresponds to Java's `forId(boolean)`.
+    #[doc(alias = "org.apache.kafka.common.requests.TransactionResult#forId")]
     pub fn for_id(id: bool) -> Self {
         if id { Self::Commit } else { Self::Abort }
     }

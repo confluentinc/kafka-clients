@@ -28,6 +28,7 @@ use super::{AclOperation, AclPermissionType};
 ///
 /// `principal` and `host` are `None` when they act as wildcards in a filter.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[doc(alias = "org.apache.kafka.common.acl.AccessControlEntryData")]
 pub(crate) struct AccessControlEntryData {
     principal: Option<String>,
     host: Option<String>,
@@ -36,6 +37,7 @@ pub(crate) struct AccessControlEntryData {
 }
 
 impl AccessControlEntryData {
+    #[doc(alias = "org.apache.kafka.common.acl.AccessControlEntryData#AccessControlEntryData")]
     pub(crate) fn new(
         principal: Option<String>,
         host: Option<String>,
@@ -45,24 +47,29 @@ impl AccessControlEntryData {
         AccessControlEntryData { principal, host, operation, permission_type }
     }
 
+    #[doc(alias = "org.apache.kafka.common.acl.AccessControlEntryData#principal")]
     pub(crate) fn principal(&self) -> Option<&str> {
         self.principal.as_deref()
     }
 
+    #[doc(alias = "org.apache.kafka.common.acl.AccessControlEntryData#host")]
     pub(crate) fn host(&self) -> Option<&str> {
         self.host.as_deref()
     }
 
+    #[doc(alias = "org.apache.kafka.common.acl.AccessControlEntryData#operation")]
     pub(crate) fn operation(&self) -> AclOperation {
         self.operation
     }
 
+    #[doc(alias = "org.apache.kafka.common.acl.AccessControlEntryData#permissionType")]
     pub(crate) fn permission_type(&self) -> AclPermissionType {
         self.permission_type
     }
 
     /// Returns a string describing an ANY or UNKNOWN field, or `None` if there
     /// is no such field.
+    #[doc(alias = "org.apache.kafka.common.acl.AccessControlEntryData#findIndefiniteField")]
     pub(crate) fn find_indefinite_field(&self) -> Option<String> {
         if self.principal.is_none() {
             return Some("Principal is NULL".to_string());
@@ -86,6 +93,7 @@ impl AccessControlEntryData {
     }
 
     /// Return true if there are any UNKNOWN components.
+    #[doc(alias = "org.apache.kafka.common.acl.AccessControlEntryData#isUnknown")]
     pub(crate) fn is_unknown(&self) -> bool {
         self.operation.is_unknown() || self.permission_type.is_unknown()
     }

@@ -56,12 +56,14 @@ use super::AbstractResponse;
 ///
 /// Corresponds to `org.apache.kafka.common.requests.TxnOffsetCommitResponse`.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.TxnOffsetCommitResponse")]
 pub struct TxnOffsetCommitResponse {
     data: TxnOffsetCommitResponseData,
 }
 
 impl TxnOffsetCommitResponse {
     /// Creates a new `TxnOffsetCommitResponse` from the underlying data.
+    #[doc(alias = "org.apache.kafka.common.requests.TxnOffsetCommitResponse#TxnOffsetCommitResponse")]
     pub fn with_data(data: TxnOffsetCommitResponseData) -> Self {
         Self { data }
     }
@@ -73,6 +75,7 @@ impl TxnOffsetCommitResponse {
     /// Java groups through a `HashMap` and so has unspecified order; this sorts by
     /// topic name and then partition index for a deterministic encoding — see
     /// `.claude/rules/producer-transactions.md` §10.
+    #[doc(alias = "org.apache.kafka.common.requests.TxnOffsetCommitResponse#TxnOffsetCommitResponse")]
     pub fn with_request_throttle_ms_response_data(
         request_throttle_ms: i32,
         response_data: &HashMap<TopicPartition, Errors>,
@@ -120,6 +123,7 @@ impl TxnOffsetCommitResponse {
     }
 
     /// Returns a reference to the underlying data.
+    #[doc(alias = "org.apache.kafka.common.requests.TxnOffsetCommitResponse#data")]
     pub fn data(&self) -> &TxnOffsetCommitResponseData {
         &self.data
     }
@@ -130,11 +134,13 @@ impl TxnOffsetCommitResponse {
     }
 
     /// Returns the throttle time in milliseconds.
+    #[doc(alias = "org.apache.kafka.common.requests.TxnOffsetCommitResponse#throttleTimeMs")]
     pub fn throttle_time_ms(&self) -> i32 {
         self.data.throttle_time_ms
     }
 
     /// Sets the throttle time in the response.
+    #[doc(alias = "org.apache.kafka.common.requests.TxnOffsetCommitResponse#maybeSetThrottleTimeMs")]
     pub fn maybe_set_throttle_time_ms(&mut self, throttle_time_ms: i32) {
         self.data.set_throttle_time_ms(throttle_time_ms);
     }
@@ -142,6 +148,7 @@ impl TxnOffsetCommitResponse {
     /// Whether the client should throttle upon receiving this response.
     ///
     /// Returns `true` for v1+.
+    #[doc(alias = "org.apache.kafka.common.requests.TxnOffsetCommitResponse#shouldClientThrottle")]
     pub fn should_client_throttle(&self, version: i16) -> bool {
         version >= 1
     }
@@ -149,6 +156,7 @@ impl TxnOffsetCommitResponse {
     /// Per-partition errors.
     ///
     /// Corresponds to Java's `errors()`.
+    #[doc(alias = "org.apache.kafka.common.requests.TxnOffsetCommitResponse#errors")]
     pub fn errors(&self) -> HashMap<TopicPartition, Errors> {
         let mut error_map = HashMap::new();
         for topic in &self.data.topics {
@@ -166,6 +174,7 @@ impl TxnOffsetCommitResponse {
     ///
     /// Counts every partition's error. Unlike most responses there is no
     /// top-level code to fold in.
+    #[doc(alias = "org.apache.kafka.common.requests.TxnOffsetCommitResponse#errorCounts")]
     pub fn error_counts(&self) -> HashMap<Errors, i32> {
         let mut counts = HashMap::new();
         for topic in &self.data.topics {
@@ -182,6 +191,7 @@ impl TxnOffsetCommitResponse {
     /// # Errors
     ///
     /// Returns an error if parsing fails.
+    #[doc(alias = "org.apache.kafka.common.requests.TxnOffsetCommitResponse#parse")]
     pub fn parse(readable: &mut dyn Readable, version: i16) -> io::Result<Self> {
         let data = TxnOffsetCommitResponseData::read(readable, version)?;
         Ok(Self::with_data(data))
@@ -286,6 +296,7 @@ mod tests {
     /// Translated from
     /// `TxnOffsetCommitResponseTest.testConstructorWithErrorResponse`.
     #[test]
+    #[doc(alias = "org.apache.kafka.common.requests.TxnOffsetCommitResponseTest#testConstructorWithErrorResponse")]
     fn test_constructor_with_error_response() {
         const THROTTLE_TIME_MS: i32 = 10;
         let errors_map = HashMap::from([
@@ -310,6 +321,7 @@ mod tests {
     /// asserts at every version. `@ApiKeyVersionsSource`-style loops become Rust
     /// loops per DoD §3.
     #[test]
+    #[doc(alias = "org.apache.kafka.common.requests.TxnOffsetCommitResponseTest#testParse")]
     fn test_parse() {
         use super::super::ConcreteResponse;
 

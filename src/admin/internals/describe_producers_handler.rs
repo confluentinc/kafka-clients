@@ -26,8 +26,8 @@ use crate::admin::DescribeProducersOptions;
 use crate::admin::KafkaAdminClient;
 use crate::admin::PartitionProducerState;
 use crate::admin::ProducerState;
-use crate::common::Errors;
-use crate::common::requests::{ConcreteResponse, DescribeProducersRequestBuilder, RequestBuilder};
+use crate::common::protocol::Errors;
+use crate::common::requests::{ConcreteResponse, RequestBuilder, describe_producers_request};
 use crate::common::utils::LogContext;
 use crate::common::{Error, Node, TopicPartition};
 use crate::describe_producers_request_data::TopicRequest;
@@ -43,6 +43,7 @@ use super::{PartitionLeaderFuture, PartitionLeaderStrategy};
 ///
 /// Corresponds to `DescribeProducersHandler` (a `Batched` handler over
 /// `TopicPartition` keys yielding [`PartitionProducerState`] values).
+#[doc(alias = "org.apache.kafka.clients.admin.internals.DescribeProducersHandler")]
 pub(crate) struct DescribeProducersHandler {
     log_context: LogContext,
     options: DescribeProducersOptions,
@@ -53,6 +54,7 @@ impl DescribeProducersHandler {
     /// Creates a handler. When `options.broker_id` is set, a
     /// [`StaticBrokerStrategy`] targets that broker directly; otherwise a
     /// [`PartitionLeaderStrategy`] looks up each partition's leader.
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.DescribeProducersHandler#DescribeProducersHandler")]
     pub(crate) fn new(options: DescribeProducersOptions, log_context: LogContext) -> Self {
         let lookup_strategy: Box<dyn AdminApiLookupStrategy<TopicPartition>> = match options.broker_id() {
             Some(broker_id) => Box::new(StaticBrokerStrategy::new(broker_id)),
@@ -65,6 +67,7 @@ impl DescribeProducersHandler {
     /// resolved.
     ///
     /// Mirrors `DescribeProducersHandler.newFuture`.
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.DescribeProducersHandler#newFuture")]
     pub(crate) fn new_future(
         topic_partitions: HashSet<TopicPartition>,
         partition_leader_cache: Arc<PartitionLeaderCache>,
@@ -75,6 +78,7 @@ impl DescribeProducersHandler {
     /// Builds a single batched `DescribeProducers` request for the given keys.
     ///
     /// Mirrors `buildBatchedRequest`.
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.DescribeProducersHandler#buildBatchedRequest")]
     fn build_batched_request(&self, topic_partitions: &HashSet<TopicPartition>) -> DescribeProducersRequestData {
         let mut topics: HashMap<String, TopicRequest> = HashMap::new();
         for tp in topic_partitions {
@@ -95,6 +99,7 @@ impl DescribeProducersHandler {
     /// result so the driver retries.
     ///
     /// Mirrors `handlePartitionError`.
+    #[doc(alias = "org.apache.kafka.clients.admin.internals.DescribeProducersHandler#handlePartitionError")]
     fn handle_partition_error(
         &self,
         topic_partition: &TopicPartition,
@@ -201,7 +206,7 @@ impl AdminApiHandler<TopicPartition, PartitionProducerState> for DescribeProduce
     fn build_request(&self, _broker_id: i32, keys: &HashSet<TopicPartition>) -> Vec<RequestAndKeys<TopicPartition>> {
         let data = self.build_batched_request(keys);
         vec![RequestAndKeys {
-            request: Box::new(DescribeProducersRequestBuilder::new(data)) as Box<dyn RequestBuilder>,
+            request: Box::new(describe_producers_request::Builder::new(data)) as Box<dyn RequestBuilder>,
             keys: keys.clone(),
         }]
     }

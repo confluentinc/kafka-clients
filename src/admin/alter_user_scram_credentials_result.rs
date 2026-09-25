@@ -26,6 +26,7 @@ use crate::common::KafkaFuture;
 /// Corresponds to
 /// `org.apache.kafka.clients.admin.AlterUserScramCredentialsResult`.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.clients.admin.AlterUserScramCredentialsResult")]
 pub struct AlterUserScramCredentialsResult {
     futures: HashMap<String, KafkaFuture<()>>,
 }
@@ -35,6 +36,7 @@ impl AlterUserScramCredentialsResult {
     ///
     /// * `futures` — the required map from user names to futures representing the
     ///   results of the alteration(s) for each user
+    #[doc(alias = "org.apache.kafka.clients.admin.AlterUserScramCredentialsResult#AlterUserScramCredentialsResult")]
     pub fn new(futures: HashMap<String, KafkaFuture<()>>) -> Self {
         Self { futures }
     }
@@ -43,6 +45,7 @@ impl AlterUserScramCredentialsResult {
     /// status of the alteration(s) for each user.
     ///
     /// Mirrors `AlterUserScramCredentialsResult.values()`.
+    #[doc(alias = "org.apache.kafka.clients.admin.AlterUserScramCredentialsResult#values")]
     pub fn values(&self) -> &HashMap<String, KafkaFuture<()>> {
         &self.futures
     }
@@ -51,6 +54,7 @@ impl AlterUserScramCredentialsResult {
     /// alterations succeed.
     ///
     /// Mirrors `AlterUserScramCredentialsResult.all()`.
+    #[doc(alias = "org.apache.kafka.clients.admin.AlterUserScramCredentialsResult#all")]
     pub fn all(&self) -> KafkaFuture<()> {
         KafkaFuture::all_of(self.futures.values().cloned().collect())
     }

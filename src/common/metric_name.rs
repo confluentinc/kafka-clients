@@ -33,6 +33,7 @@ use std::collections::BTreeMap;
 /// `description` is intentionally excluded from equality and hashing, matching
 /// the Java implementation.
 #[derive(Clone, Debug)]
+#[doc(alias = "org.apache.kafka.common.MetricName")]
 pub struct MetricName {
     name: String,
     group: String,
@@ -52,6 +53,7 @@ impl MetricName {
     /// * `group` - logical group name of the metrics to which this metric belongs
     /// * `description` - A human-readable description to include in the metric
     /// * `tags` - additional key/value attributes of the metric
+    #[doc(alias = "org.apache.kafka.common.MetricName#MetricName")]
     pub fn new(
         name: impl Into<String>,
         group: impl Into<String>,
@@ -62,21 +64,25 @@ impl MetricName {
     }
 
     /// The name of the metric.
+    #[doc(alias = "org.apache.kafka.common.MetricName#name")]
     pub fn name(&self) -> &str {
         &self.name
     }
 
     /// The logical group name of the metrics to which this metric belongs.
+    #[doc(alias = "org.apache.kafka.common.MetricName#group")]
     pub fn group(&self) -> &str {
         &self.group
     }
 
     /// The additional key/value attributes of the metric.
+    #[doc(alias = "org.apache.kafka.common.MetricName#tags")]
     pub fn tags(&self) -> &BTreeMap<String, String> {
         &self.tags
     }
 
     /// A human-readable description of the metric.
+    #[doc(alias = "org.apache.kafka.common.MetricName#description")]
     pub fn description(&self) -> &str {
         &self.description
     }

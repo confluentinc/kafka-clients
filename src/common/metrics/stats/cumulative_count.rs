@@ -27,6 +27,7 @@ use crate::common::metrics::{Measurable, MetricConfig, Stat};
 /// Java implements this by extending `CumulativeSum` and overriding `record` to
 /// pass `1`; Rust composes a `CumulativeSum` and forwards `1.0` on each record.
 #[derive(Debug)]
+#[doc(alias = "org.apache.kafka.common.metrics.stats.CumulativeCount")]
 pub struct CumulativeCount {
     inner: CumulativeSum,
 }

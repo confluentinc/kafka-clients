@@ -86,7 +86,7 @@ use confluent_kafka::admin::{
     FenceProducersOptions, ListOffsetsOptions, ListTransactionsOptions, OffsetSpec, TerminateTransactionOptions,
     TransactionListing, TransactionState,
 };
-use confluent_kafka::common::Errors;
+use confluent_kafka::common::Error;
 use confluent_kafka::common::TopicPartition;
 
 use crate::common::admin_backend::{AdminBackend, Outcomes, admin_for, all_of_exactly, create_topic};
@@ -326,7 +326,7 @@ async fn list_transactions_reports_a_fenced_transaction<F: AdminBackendFactory>(
     // partitions yet.
     assert_eq!(
         listing.producer_id(),
-        producer.producer_id,
+        producer.producer_id(),
         "{backend} backend: the listing should report the producer id fenceProducers allocated"
     );
     assert_eq!(
@@ -364,7 +364,7 @@ async fn list_transactions_filters<F: AdminBackendFactory>(ctx: &mut TestContext
         .get(&transactional_id)
         .and_then(|outcome| outcome.as_ref().ok())
         .unwrap_or_else(|| panic!("{backend} backend: fence {transactional_id} should succeed"))
-        .producer_id;
+        .producer_id();
 
     let listed = |options: ListTransactionsOptions| {
         let admin = &admin;
@@ -468,9 +468,8 @@ async fn list_transactions_rejects_a_malformed_id_pattern<F: AdminBackendFactory
         let error = outcomes[broker_id]
             .as_ref()
             .expect_err("a malformed regular expression should be rejected");
-        assert_eq!(
-            error.error(),
-            Errors::InvalidRegularExpression,
+        assert!(
+            matches!(error, Error::InvalidRegularExpression(_)),
             "{backend} backend: broker {broker_id} should reject the pattern with \
              INVALID_REGULAR_EXPRESSION, got {error:?}"
         );
@@ -634,9 +633,8 @@ async fn describe_transactions_unknown_id_not_found<F: AdminBackendFactory>(ctx:
         .unwrap_or_else(|| panic!("{backend} backend: no entry for {unknown}"))
         .as_ref()
         .expect_err("describing an unknown transactional id should fail");
-    assert_eq!(
-        error.error(),
-        Errors::TransactionalIdNotFound,
+    assert!(
+        matches!(error, Error::TransactionalIdNotFound(_)),
         "{backend} backend: expected TRANSACTIONAL_ID_NOT_FOUND, got {error:?}"
     );
 
@@ -704,12 +702,12 @@ async fn describe_transactions_reports_a_fenced_transaction<F: AdminBackendFacto
     );
     assert_eq!(
         description.producer_id(),
-        producer.producer_id,
+        producer.producer_id(),
         "{backend} backend: the description should report the producer id fenceProducers allocated"
     );
     assert_eq!(
         description.producer_epoch() as i16,
-        producer.epoch,
+        producer.epoch(),
         "{backend} backend: the description should report the epoch fenceProducers allocated"
     );
     assert_eq!(
@@ -756,15 +754,16 @@ async fn fence_producers_allocates_producer_id_for_fresh_id<F: AdminBackendFacto
     let producer = outcomes[&transactional_id].as_ref().expect("checked above");
 
     assert!(
-        producer.producer_id >= 0,
+        producer.producer_id() >= 0,
         "{backend} backend: the coordinator should allocate a valid producer id, got {}",
-        producer.producer_id
+        producer.producer_id()
     );
     // A never-before-seen transactional id starts at epoch 0; the id is unique per
     // scenario *and* backend precisely so this stays exact rather than `>= 0`
     // (fencing an existing id bumps the epoch).
     assert_eq!(
-        producer.epoch, 0,
+        producer.epoch(),
+        0,
         "{backend} backend: a fresh producer id should be fenced at epoch 0"
     );
     // Deliberately *not* `producer.is_valid()`: that predicate is
@@ -787,12 +786,12 @@ async fn fence_producers_allocates_producer_id_for_fresh_id<F: AdminBackendFacto
         .unwrap_or_else(|e| panic!("{backend} backend: fenceProducers should have registered {transactional_id}: {e}"));
     assert_eq!(
         description.producer_id(),
-        producer.producer_id,
+        producer.producer_id(),
         "{backend} backend: the coordinator should report the producer id fenceProducers allocated"
     );
     assert_eq!(
         description.producer_epoch() as i16,
-        producer.epoch,
+        producer.epoch(),
         "{backend} backend: the coordinator should report the epoch fenceProducers allocated"
     );
 

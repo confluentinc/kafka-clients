@@ -14,18 +14,19 @@
 
 //! Translated from `org.apache.kafka.common.errors.NotEnoughReplicasException`.
 
-use crate::common::Errors;
 use crate::common::error::kafka_error_class;
+use crate::common::protocol::Errors;
 
 kafka_error_class! {
     /// Messages are rejected since there are fewer in-sync replicas than
     /// required.
     ///
-    /// Corresponds to Java's `NotEnoughReplicasException`, error code [`Errors::NotEnoughReplicas`].
+    /// Corresponds to Java's `NotEnoughReplicasException`, error code `Errors::NotEnoughReplicas`.
     ///
     /// Java `extends` chain:
     ///    `NotEnoughReplicasException` -> `RetriableException` -> `ApiException` ->
     ///   `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.NotEnoughReplicasException")]
     NotEnoughReplicasError,
     code: Errors::NotEnoughReplicas,
     extends: [

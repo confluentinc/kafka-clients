@@ -37,12 +37,14 @@ use super::AbstractResponse;
 ///
 /// Corresponds to `org.apache.kafka.common.requests.FindCoordinatorResponse`.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.FindCoordinatorResponse")]
 pub struct FindCoordinatorResponse {
     data: FindCoordinatorResponseData,
 }
 
 impl FindCoordinatorResponse {
     /// Creates a new `FindCoordinatorResponse` from the underlying data.
+    #[doc(alias = "org.apache.kafka.common.requests.FindCoordinatorResponse#FindCoordinatorResponse")]
     pub fn new(data: FindCoordinatorResponseData) -> Self {
         Self { data }
     }
@@ -53,6 +55,7 @@ impl FindCoordinatorResponse {
     }
 
     /// Returns a reference to the underlying data.
+    #[doc(alias = "org.apache.kafka.common.requests.FindCoordinatorResponse#data")]
     pub fn data(&self) -> &FindCoordinatorResponseData {
         &self.data
     }
@@ -63,11 +66,13 @@ impl FindCoordinatorResponse {
     }
 
     /// Returns the throttle time in milliseconds.
+    #[doc(alias = "org.apache.kafka.common.requests.FindCoordinatorResponse#throttleTimeMs")]
     pub fn throttle_time_ms(&self) -> i32 {
         self.data.throttle_time_ms
     }
 
     /// Sets the throttle time in the response.
+    #[doc(alias = "org.apache.kafka.common.requests.FindCoordinatorResponse#maybeSetThrottleTimeMs")]
     pub fn maybe_set_throttle_time_ms(&mut self, throttle_time_ms: i32) {
         self.data.set_throttle_time_ms(throttle_time_ms);
     }
@@ -75,16 +80,19 @@ impl FindCoordinatorResponse {
     /// Whether the client should throttle upon receiving this response.
     ///
     /// Returns `true` for v2+.
+    #[doc(alias = "org.apache.kafka.common.requests.FindCoordinatorResponse#shouldClientThrottle")]
     pub fn should_client_throttle(&self, version: i16) -> bool {
         version >= 2
     }
 
     /// Returns the top-level (v <= 3) error code wrapped as an [`Errors`].
+    #[doc(alias = "org.apache.kafka.common.requests.FindCoordinatorResponse#error")]
     pub fn error(&self) -> Errors {
         Errors::for_code(self.data.error_code)
     }
 
     /// Returns `true` if the top-level (v <= 3) error code is non-zero.
+    #[doc(alias = "org.apache.kafka.common.requests.FindCoordinatorResponse#hasError")]
     pub fn has_error(&self) -> bool {
         self.error() != Errors::None
     }
@@ -96,6 +104,7 @@ impl FindCoordinatorResponse {
     /// those fields and tagged with the supplied key. For v >= 4 the
     /// coordinator with matching `key` is looked up in the `coordinators`
     /// list.
+    #[doc(alias = "org.apache.kafka.common.requests.FindCoordinatorResponse#coordinatorByKey")]
     pub fn coordinator_by_key(&self, key: &str) -> Option<Coordinator> {
         if self.data.coordinators.is_empty() {
             // version <= 3
@@ -114,12 +123,14 @@ impl FindCoordinatorResponse {
 
     /// Returns a [`Node`] for the single (v <= 3) coordinator embedded in the
     /// top-level fields.
+    #[doc(alias = "org.apache.kafka.common.requests.FindCoordinatorResponse#node")]
     pub fn node(&self) -> Node {
         Node::new(self.data.node_id, self.data.host.clone(), self.data.port)
     }
 
     /// Returns the coordinator list — for v <= 3 a singleton synthesized from
     /// the top-level fields, for v >= 4 the wire `coordinators` list.
+    #[doc(alias = "org.apache.kafka.common.requests.FindCoordinatorResponse#coordinators")]
     pub fn coordinators(&self) -> Vec<Coordinator> {
         if !self.data.coordinators.is_empty() {
             return self.data.coordinators.clone();
@@ -136,6 +147,7 @@ impl FindCoordinatorResponse {
     }
 
     /// Returns error counts by [`Errors`].
+    #[doc(alias = "org.apache.kafka.common.requests.FindCoordinatorResponse#errorCounts")]
     pub fn error_counts(&self) -> HashMap<Errors, i32> {
         let mut counts = HashMap::new();
         if !self.data.coordinators.is_empty() {
@@ -154,6 +166,7 @@ impl FindCoordinatorResponse {
     /// # Errors
     ///
     /// Returns an error if parsing fails.
+    #[doc(alias = "org.apache.kafka.common.requests.FindCoordinatorResponse#parse")]
     pub fn parse(readable: &mut dyn Readable, version: i16) -> io::Result<Self> {
         let data = FindCoordinatorResponseData::read(readable, version)?;
         Ok(Self::new(data))
@@ -162,6 +175,7 @@ impl FindCoordinatorResponse {
     /// Constructs a synthetic v <= 3 response for testing.
     ///
     /// Corresponds to `FindCoordinatorResponse.prepareOldResponse(Errors, Node)`.
+    #[doc(alias = "org.apache.kafka.common.requests.FindCoordinatorResponse#prepareOldResponse")]
     pub fn prepare_old_response(error: Errors, node: &Node) -> Self {
         let mut data = FindCoordinatorResponseData::new();
         data.set_error_code(error.code())
@@ -175,6 +189,7 @@ impl FindCoordinatorResponse {
     /// Constructs a synthetic v >= 4 response with a single coordinator entry.
     ///
     /// Corresponds to `FindCoordinatorResponse.prepareResponse(Errors, String, Node)`.
+    #[doc(alias = "org.apache.kafka.common.requests.FindCoordinatorResponse#prepareResponse")]
     pub fn prepare_response(error: Errors, key: impl Into<String>, node: &Node) -> Self {
         let mut data = FindCoordinatorResponseData::new();
         data.set_coordinators(vec![Self::prepare_coordinator_response(error, key, node)]);
@@ -182,6 +197,7 @@ impl FindCoordinatorResponse {
     }
 
     /// Builds a single `Coordinator` entry with the supplied error/key/node.
+    #[doc(alias = "org.apache.kafka.common.requests.FindCoordinatorResponse#prepareCoordinatorResponse")]
     pub fn prepare_coordinator_response(error: Errors, key: impl Into<String>, node: &Node) -> Coordinator {
         let mut c = Coordinator::new();
         c.set_error_code(error.code())
@@ -196,6 +212,7 @@ impl FindCoordinatorResponse {
     /// Constructs a synthetic v >= 4 error response with one entry per key.
     ///
     /// Corresponds to `FindCoordinatorResponse.prepareErrorResponse(Errors, List<String>)`.
+    #[doc(alias = "org.apache.kafka.common.requests.FindCoordinatorResponse#prepareErrorResponse")]
     pub fn prepare_error_response(error: Errors, keys: &[String]) -> Self {
         let mut data = FindCoordinatorResponseData::new();
         let no_node = Node::no_node();

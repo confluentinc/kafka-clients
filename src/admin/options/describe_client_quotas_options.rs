@@ -20,6 +20,7 @@
 ///
 /// Corresponds to `org.apache.kafka.clients.admin.DescribeClientQuotasOptions`.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[doc(alias = "org.apache.kafka.clients.admin.DescribeClientQuotasOptions")]
 pub struct DescribeClientQuotasOptions {
     timeout_ms: Option<i32>,
 }

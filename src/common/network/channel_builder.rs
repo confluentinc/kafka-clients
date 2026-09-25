@@ -36,6 +36,7 @@ use tokio::net::TcpStream;
 /// of Java's `SelectionKey`. The builder wraps the stream in the appropriate transport
 /// layer (e.g., `PlaintextTransportLayer` or `SslTransportLayer`) and pairs it with
 /// an `Authenticator` inside a `KafkaChannel`.
+#[doc(alias = "org.apache.kafka.common.network.ChannelBuilder")]
 pub trait ChannelBuilder: Send + Sync {
     /// Returns a `KafkaChannel` with `TransportLayer` and `Authenticator` configured.
     ///
@@ -50,6 +51,7 @@ pub trait ChannelBuilder: Send + Sync {
     /// # Errors
     ///
     /// Returns an error if the channel cannot be built.
+    #[doc(alias = "org.apache.kafka.common.network.ChannelBuilder#buildChannel")]
     fn build_channel(
         &self,
         id: &str,
@@ -60,5 +62,6 @@ pub trait ChannelBuilder: Send + Sync {
     ) -> io::Result<KafkaChannel>;
 
     /// Closes this channel builder.
+    #[doc(alias = "org.apache.kafka.common.network.ChannelBuilder#close")]
     fn close(&mut self);
 }

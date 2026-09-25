@@ -49,17 +49,17 @@
 //!   to `tokio::time::timeout(...).await` at the call site in Rust; the
 //!   wrapper does not add value.
 
-#![allow(dead_code)] // Phase 11 commit (1/N): helpers land before their callers (commits 2-7).
+#![expect(dead_code)] // Phase 11 commit (1/N): helpers land before their callers (commits 2-7).
 
 use std::sync::{Arc, Mutex};
 
 use log::info;
 
-use crate::common::Errors;
+use crate::common::protocol::Errors;
 use crate::common::{Error, IsolationLevel, KafkaError, TopicPartition};
-use crate::consumer::AutoOffsetResetStrategy;
 use crate::consumer::ConsumerConfig;
 use crate::consumer::OffsetAndMetadata;
+use crate::consumer::internals::AutoOffsetResetStrategy;
 use crate::consumer::internals::ConsumerMetadata;
 use crate::consumer::internals::{FetchPosition, SubscriptionState};
 
@@ -69,6 +69,7 @@ use crate::consumer::internals::{FetchPosition, SubscriptionState};
 /// `org.apache.kafka.clients.consumer.internals.ConsumerUtils`, which has no
 /// instance state, so it becomes a unit struct hosting its statics as
 /// associated items.
+#[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerUtils")]
 pub(crate) struct ConsumerUtils;
 
 impl ConsumerUtils {
@@ -125,6 +126,7 @@ impl ConsumerUtils {
     /// `group_id` and `group_instance_id` are taken directly because the
     /// `GroupRebalanceConfig` Java helper is folded into `ConsumerConfig`
     /// fields on this side of the translation.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerUtils#createLogContext")]
     pub(crate) fn create_log_context(
         client_id: &str,
         group_id: Option<&str>,
@@ -144,6 +146,7 @@ impl ConsumerUtils {
     /// Parses the `isolation.level` config string. Java throws
     /// `IllegalArgumentException` for unknown values via `Enum.valueOf`; Rust
     /// returns [`Error::local_illegal_argument`].
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerUtils#configuredIsolationLevel")]
     pub(crate) fn configured_isolation_level(config: &ConsumerConfig) -> Result<IsolationLevel, Error> {
         Self::isolation_level_from_str(&config.isolation_level)
     }
@@ -164,6 +167,7 @@ impl ConsumerUtils {
     ///
     /// Builds a [`SubscriptionState`] seeded with the parsed
     /// [`AutoOffsetResetStrategy`] from `auto.offset.reset`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerUtils#createSubscriptionState")]
     pub(crate) fn create_subscription_state(config: &ConsumerConfig) -> Result<SubscriptionState, Error> {
         let strategy = AutoOffsetResetStrategy::from_string(config.auto_offset_reset())?;
         Ok(SubscriptionState::new(strategy))
@@ -197,6 +201,7 @@ impl ConsumerUtils {
     /// the distinction, and several call sites branch on it. Returning the input
     /// unchanged would let a generic error reach a caller that Java guarantees
     /// receives a `KafkaException`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerUtils#maybeWrapAsKafkaException")]
     pub(crate) fn maybe_wrap_as_kafka_error(err: Error) -> Error {
         if err.is_kafka_error() {
             // `t instanceof KafkaException` → return unchanged.
@@ -238,6 +243,7 @@ impl ConsumerUtils {
     /// `getCause()`). This matches Java, where
     /// `new KafkaException(message, t).getMessage()` returns `message` verbatim
     /// while `getCause()` still yields `t`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerUtils#maybeWrapAsKafkaException")]
     pub(crate) fn maybe_wrap_as_kafka_error_with_msg(err: Error, message: &str) -> Error {
         if err.is_kafka_error() {
             // `t instanceof KafkaException` → return unchanged.
@@ -276,6 +282,7 @@ impl ConsumerUtils {
     /// `SubscriptionState` monitor. The Rust translation acquires the lock
     /// inside this helper for each mutation; never holds it across `.await`
     /// (the function is synchronous).
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerUtils#refreshCommittedOffsets")]
     pub(crate) fn refresh_committed_offsets(
         offsets_and_metadata: &std::collections::HashMap<TopicPartition, OffsetAndMetadata>,
         metadata: &ConsumerMetadata,

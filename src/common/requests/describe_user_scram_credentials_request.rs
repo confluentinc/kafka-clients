@@ -24,13 +24,14 @@ use crate::DescribeUserScramCredentialsResponseData;
 use crate::common::protocol::{ApiKeys, Errors, Readable};
 use crate::describe_user_scram_credentials_response_data::DescribeUserScramCredentialsResult;
 
-use super::{ConcreteRequest, ConcreteResponse, DescribeUserScramCredentialsResponse, RequestBuilder};
+use super::{AbstractRequest, ConcreteResponse, DescribeUserScramCredentialsResponse, RequestBuilder};
 
 /// A DescribeUserScramCredentials request.
 ///
 /// Corresponds to
 /// `org.apache.kafka.common.requests.DescribeUserScramCredentialsRequest`.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.DescribeUserScramCredentialsRequest")]
 pub struct DescribeUserScramCredentialsRequest {
     data: DescribeUserScramCredentialsRequestData,
     version: i16,
@@ -38,11 +39,15 @@ pub struct DescribeUserScramCredentialsRequest {
 
 impl DescribeUserScramCredentialsRequest {
     /// Creates a new request from data and version.
+    #[doc(
+        alias = "org.apache.kafka.common.requests.DescribeUserScramCredentialsRequest#DescribeUserScramCredentialsRequest"
+    )]
     pub fn new(data: DescribeUserScramCredentialsRequestData, version: i16) -> Self {
         Self { data, version }
     }
 
     /// Returns a reference to the underlying data.
+    #[doc(alias = "org.apache.kafka.common.requests.DescribeUserScramCredentialsRequest#data")]
     pub fn data(&self) -> &DescribeUserScramCredentialsRequestData {
         &self.data
     }
@@ -66,6 +71,7 @@ impl DescribeUserScramCredentialsRequest {
     ///
     /// Mirrors `DescribeUserScramCredentialsRequest.getErrorResponse`: a
     /// message-level error plus one errored result per requested user.
+    #[doc(alias = "org.apache.kafka.common.requests.DescribeUserScramCredentialsRequest#getErrorResponse")]
     pub fn get_error_response(&self, throttle_time_ms: i32, error: &Errors) -> ConcreteResponse {
         let mut response = DescribeUserScramCredentialsResponseData::new();
         response
@@ -94,6 +100,7 @@ impl DescribeUserScramCredentialsRequest {
     /// # Errors
     ///
     /// Returns an error if parsing fails.
+    #[doc(alias = "org.apache.kafka.common.requests.DescribeUserScramCredentialsRequest#parse")]
     pub fn parse(readable: &mut dyn Readable, version: i16) -> io::Result<Self> {
         let data = DescribeUserScramCredentialsRequestData::read(readable, version)?;
         Ok(Self::new(data, version))
@@ -114,14 +121,16 @@ impl std::fmt::Display for DescribeUserScramCredentialsRequest {
 ///
 /// Corresponds to `DescribeUserScramCredentialsRequest.Builder`.
 #[derive(Debug, Clone)]
-pub struct DescribeUserScramCredentialsRequestBuilder {
+#[doc(alias = "org.apache.kafka.common.requests.DescribeUserScramCredentialsRequest$Builder")]
+pub struct Builder {
     data: DescribeUserScramCredentialsRequestData,
     oldest_allowed_version: i16,
     latest_allowed_version: i16,
 }
 
-impl DescribeUserScramCredentialsRequestBuilder {
+impl Builder {
     /// Creates a builder wrapping the given request data.
+    #[doc(alias = "org.apache.kafka.common.requests.DescribeUserScramCredentialsRequest$Builder#Builder")]
     pub fn new(data: DescribeUserScramCredentialsRequestData) -> Self {
         Self {
             data,
@@ -131,7 +140,7 @@ impl DescribeUserScramCredentialsRequestBuilder {
     }
 }
 
-impl RequestBuilder for DescribeUserScramCredentialsRequestBuilder {
+impl RequestBuilder for Builder {
     fn api_key(&self) -> &'static ApiKeys {
         &ApiKeys::DESCRIBE_USER_SCRAM_CREDENTIALS
     }
@@ -144,8 +153,8 @@ impl RequestBuilder for DescribeUserScramCredentialsRequestBuilder {
         self.latest_allowed_version
     }
 
-    fn build_version(&mut self, version: i16) -> io::Result<ConcreteRequest> {
-        Ok(ConcreteRequest::DescribeUserScramCredentials(
+    fn build_version(&mut self, version: i16) -> io::Result<AbstractRequest> {
+        Ok(AbstractRequest::DescribeUserScramCredentials(
             DescribeUserScramCredentialsRequest::new(self.data.clone(), version),
         ))
     }
@@ -204,7 +213,7 @@ mod tests {
     #[test]
     fn serialize_parse_round_trip() {
         let version = ApiKeys::DESCRIBE_USER_SCRAM_CREDENTIALS.latest_version();
-        let mut builder = DescribeUserScramCredentialsRequestBuilder::new({
+        let mut builder = Builder::new({
             let mut data = DescribeUserScramCredentialsRequestData::new();
             data.set_users(Some(vec![{
                 let mut n = UserName::new();
@@ -215,7 +224,7 @@ mod tests {
         });
         let mut request = builder.build().unwrap();
         let bytes = request.serialize().unwrap();
-        let mut readable = crate::common::ByteBufferAccessor::new(bytes.into_buffer());
+        let mut readable = crate::common::protocol::ByteBufferAccessor::new(bytes.into_buffer());
         let parsed = DescribeUserScramCredentialsRequest::parse(&mut readable, version).unwrap();
         let users = parsed.data().users.as_ref().unwrap();
         assert_eq!(users.len(), 1);
@@ -231,7 +240,7 @@ mod tests {
             n.set_name("u0".to_string());
             n
         }]));
-        let mut builder = DescribeUserScramCredentialsRequestBuilder::new(data);
+        let mut builder = Builder::new(data);
         let mut request = builder.build_version(0).unwrap();
         let bytes = request.serialize().unwrap().into_buffer();
         let expected: Vec<u8> = vec![

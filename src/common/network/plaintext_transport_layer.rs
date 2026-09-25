@@ -40,6 +40,7 @@ use tokio::net::TcpStream;
 /// semantics where the channel is actually closed and `isOpen()` returns `false`.
 ///
 /// All I/O operations are async and driven by the Tokio runtime.
+#[doc(alias = "org.apache.kafka.common.network.PlaintextTransportLayer")]
 pub struct PlaintextTransportLayer {
     /// The underlying async TCP stream, or `None` if the transport has been closed.
     stream: Option<TcpStream>,
@@ -54,6 +55,7 @@ impl PlaintextTransportLayer {
     ///
     /// The initial interest ops are set to `OP_CONNECT` to indicate that the
     /// connection is being established.
+    #[doc(alias = "org.apache.kafka.common.network.PlaintextTransportLayer#PlaintextTransportLayer")]
     pub fn new(stream: TcpStream) -> Self {
         Self { stream: Some(stream), connected: false, interest_ops: InterestOps::OP_CONNECT }
     }

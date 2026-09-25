@@ -14,18 +14,19 @@
 
 //! Translated from `org.apache.kafka.common.errors.CorruptRecordException`.
 
-use crate::common::Errors;
 use crate::common::error::kafka_error_class;
+use crate::common::protocol::Errors;
 
 kafka_error_class! {
     /// This message has failed its CRC checksum, exceeds the valid size, has a
     /// null key for a compacted topic, or is otherwise corrupt.
     ///
-    /// Corresponds to Java's `CorruptRecordException`, error code [`Errors::CorruptMessage`].
+    /// Corresponds to Java's `CorruptRecordException`, error code `Errors::CorruptMessage`.
     ///
     /// Java `extends` chain:
     ///    `CorruptRecordException` -> `RetriableException` -> `ApiException` ->
     ///   `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.CorruptRecordException")]
     CorruptRecordError,
     code: Errors::CorruptMessage,
     extends: [

@@ -44,6 +44,8 @@ use crate::common::Error;
 
 /// The state enum for a Kafka channel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+#[doc(alias = "org.apache.kafka.common.network.ChannelState$State")]
 pub enum State {
     /// Connections are created in this state.
     NotConnected,
@@ -90,6 +92,7 @@ impl fmt::Display for State {
 /// wire code — and would bake the `Display` class prefix into what every
 /// downstream caller treats as the *message*.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.network.ChannelState")]
 pub struct ChannelState {
     state: State,
     /// The error, if any (used for authentication failures).
@@ -134,31 +137,37 @@ impl ChannelState {
     pub const LOCAL_CLOSE: ChannelState = ChannelState { state: State::LocalClose, error: None, remote_address: None };
 
     /// Creates a new `ChannelState` with the given state, no error, and no remote address.
+    #[doc(alias = "org.apache.kafka.common.network.ChannelState#ChannelState")]
     pub fn new(state: State) -> Self {
         Self { state, error: None, remote_address: None }
     }
 
     /// Creates a new `ChannelState` with the given state and remote address.
+    #[doc(alias = "org.apache.kafka.common.network.ChannelState#ChannelState")]
     pub fn with_remote_address(state: State, remote_address: &str) -> Self {
         Self { state, error: None, remote_address: Some(remote_address.to_string()) }
     }
 
     /// Creates a new `ChannelState` with the given state, error, and remote address.
+    #[doc(alias = "org.apache.kafka.common.network.ChannelState#ChannelState")]
     pub fn with_error_remote_address(state: State, error: Error, remote_address: Option<&str>) -> Self {
         Self { state, error: Some(error), remote_address: remote_address.map(|s| s.to_string()) }
     }
 
     /// Returns the state.
+    #[doc(alias = "org.apache.kafka.common.network.ChannelState#state")]
     pub fn state(&self) -> State {
         self.state
     }
 
     /// Returns the error, if any (Java's `ChannelState.exception()`).
+    #[doc(alias = "org.apache.kafka.common.network.ChannelState#exception")]
     pub fn error(&self) -> Option<&Error> {
         self.error.as_ref()
     }
 
     /// Returns the remote address, if known.
+    #[doc(alias = "org.apache.kafka.common.network.ChannelState#remoteAddress")]
     pub fn remote_address(&self) -> Option<&str> {
         self.remote_address.as_deref()
     }

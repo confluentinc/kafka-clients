@@ -28,6 +28,7 @@ kafka_error_class! {
     ///
     /// Java `extends` chain:
     ///    `ApiException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.ApiException")]
     ApiError,
     extends: [
         is_kafka_error,

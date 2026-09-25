@@ -34,6 +34,7 @@ kafka_error_class! {
     /// an invalid configuration is a Kafka error
     /// ([`is_kafka_error`](crate::common::Error::is_kafka_error) is `true`),
     /// unlike a `java.lang.IllegalArgumentException`.
+    #[doc(alias = "org.apache.kafka.common.config.ConfigException")]
     ConfigError,
     extends: [
         is_kafka_error,
@@ -60,6 +61,7 @@ impl ConfigError {
     /// Create a config error naming the offending value and configuration key,
     /// mirroring Java's `ConfigException(String name, Object value)` (`:32`):
     /// `"Invalid value {value} for configuration {name}"`.
+    #[doc(alias = "org.apache.kafka.common.config.ConfigException#ConfigException")]
     pub fn with_name_value(name: impl Display, value: impl Display) -> Self {
         Self::new(format!("Invalid value {value} for configuration {name}"))
     }
@@ -67,6 +69,7 @@ impl ConfigError {
     /// Create a config error naming the value, key, and a detail message,
     /// mirroring Java's `ConfigException(String name, Object value, String message)`
     /// (`:36`): `"Invalid value {value} for configuration {name}: {message}"`.
+    #[doc(alias = "org.apache.kafka.common.config.ConfigException#ConfigException")]
     pub fn with_name_value_message(name: impl Display, value: impl Display, message: impl Display) -> Self {
         Self::new(format!("Invalid value {value} for configuration {name}: {message}"))
     }

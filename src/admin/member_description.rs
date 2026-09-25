@@ -23,10 +23,11 @@ use crate::admin::MemberAssignment;
 /// Corresponds to `org.apache.kafka.clients.admin.MemberDescription`.
 ///
 /// Note: Java's four `@Deprecated(forRemoval = true)` convenience constructors
-/// (which only supply default values already expressible through [`new`]) are
-/// omitted; the full-field [`new`] constructor is the sole entry point and no
+/// (which only supply default values already expressible through [`new`](Self::new)) are
+/// omitted; the full-field [`new`](Self::new) constructor is the sole entry point and no
 /// in-scope caller or test uses the deprecated overloads.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[doc(alias = "org.apache.kafka.clients.admin.MemberDescription")]
 pub struct MemberDescription {
     member_id: String,
     group_instance_id: Option<String>,
@@ -47,7 +48,10 @@ impl MemberDescription {
     /// MemberAssignment, Optional, Optional, Optional)` constructor. `null`
     /// member id / client id / host are normalized to empty strings, matching
     /// Java.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
+    #[doc(
+        alias = "org.apache.kafka.clients.admin.MemberDescription#MemberDescription(String,Optional,Optional,String,String,MemberAssignment,Optional,Optional,Optional)"
+    )]
     pub fn new(
         member_id: impl Into<String>,
         group_instance_id: Option<String>,
@@ -73,48 +77,57 @@ impl MemberDescription {
     }
 
     /// The consumer id of the group member. Mirrors `consumerId()`.
+    #[doc(alias = "org.apache.kafka.clients.admin.MemberDescription#consumerId")]
     pub fn consumer_id(&self) -> &str {
         &self.member_id
     }
 
     /// The instance id of the group member. Mirrors `groupInstanceId()`.
+    #[doc(alias = "org.apache.kafka.clients.admin.MemberDescription#groupInstanceId")]
     pub fn group_instance_id(&self) -> Option<&str> {
         self.group_instance_id.as_deref()
     }
 
     /// The rack id of the group member. Mirrors `rackId()`.
+    #[doc(alias = "org.apache.kafka.clients.admin.MemberDescription#rackId")]
     pub fn rack_id(&self) -> Option<&str> {
         self.rack_id.as_deref()
     }
 
     /// The client id of the group member. Mirrors `clientId()`.
+    #[doc(alias = "org.apache.kafka.clients.admin.MemberDescription#clientId")]
     pub fn client_id(&self) -> &str {
         &self.client_id
     }
 
     /// The host where the group member is running. Mirrors `host()`.
+    #[doc(alias = "org.apache.kafka.clients.admin.MemberDescription#host")]
     pub fn host(&self) -> &str {
         &self.host
     }
 
     /// The assignment of the group member. Mirrors `assignment()`.
+    #[doc(alias = "org.apache.kafka.clients.admin.MemberDescription#assignment")]
     pub fn assignment(&self) -> &MemberAssignment {
         &self.assignment
     }
 
     /// The target assignment of the member (consumer groups only). Mirrors
     /// `targetAssignment()`.
+    #[doc(alias = "org.apache.kafka.clients.admin.MemberDescription#targetAssignment")]
     pub fn target_assignment(&self) -> Option<&MemberAssignment> {
         self.target_assignment.as_ref()
     }
 
     /// The epoch of the group member. Mirrors `memberEpoch()`.
+    #[doc(alias = "org.apache.kafka.clients.admin.MemberDescription#memberEpoch")]
     pub fn member_epoch(&self) -> Option<i32> {
         self.member_epoch
     }
 
     /// Whether a member within a consumer group uses the consumer protocol.
     /// Mirrors `upgraded()`.
+    #[doc(alias = "org.apache.kafka.clients.admin.MemberDescription#upgraded")]
     pub fn upgraded(&self) -> Option<bool> {
         self.upgraded
     }
@@ -168,6 +181,7 @@ mod tests {
 
     /// Translated from `testEqualsWithoutGroupInstanceId`.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.admin.MemberDescriptionTest#testEqualsWithoutGroupInstanceId")]
     fn test_equals_without_group_instance_id() {
         let dynamic =
             MemberDescription::new("member_id", None, None, "client_id", "host", assignment(), None, None, None);
@@ -179,6 +193,7 @@ mod tests {
 
     /// Translated from `testEqualsWithGroupInstanceId`.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.admin.MemberDescriptionTest#testEqualsWithGroupInstanceId")]
     fn test_equals_with_group_instance_id() {
         let identity = MemberDescription::new(
             "member_id",
@@ -196,6 +211,7 @@ mod tests {
 
     /// Translated from `testNonEqual`.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.admin.MemberDescriptionTest#testNonEqual")]
     fn test_non_equal() {
         let new_member = MemberDescription::new(
             "new_member",

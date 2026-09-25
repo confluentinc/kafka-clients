@@ -14,18 +14,19 @@
 
 //! Translated from `org.apache.kafka.common.errors.EligibleLeadersNotAvailableException`.
 
-use crate::common::Errors;
 use crate::common::error::kafka_error_class;
+use crate::common::protocol::Errors;
 
 kafka_error_class! {
     /// Eligible topic partition leaders are not available.
     ///
-    /// Corresponds to Java's `EligibleLeadersNotAvailableException`, error code [`Errors::EligibleLeadersNotAvailable`].
+    /// Corresponds to Java's `EligibleLeadersNotAvailableException`, error code `Errors::EligibleLeadersNotAvailable`.
     ///
     /// Java `extends` chain:
     ///    `EligibleLeadersNotAvailableException` -> `InvalidMetadataException` ->
     ///   `RefreshRetriableException` -> `RetriableException` -> `ApiException` ->
     ///   `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.EligibleLeadersNotAvailableException")]
     EligibleLeadersNotAvailableError,
     code: Errors::EligibleLeadersNotAvailable,
     extends: [

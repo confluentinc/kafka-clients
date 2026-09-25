@@ -30,14 +30,16 @@ use super::AbstractResponse;
 ///
 /// Corresponds to `org.apache.kafka.common.requests.DescribeClientQuotasResponse`.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.DescribeClientQuotasResponse")]
 pub struct DescribeClientQuotasResponse {
     data: DescribeClientQuotasResponseData,
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     version: i16,
 }
 
 impl DescribeClientQuotasResponse {
     /// Creates a new `DescribeClientQuotasResponse` from data and version.
+    #[doc(alias = "org.apache.kafka.common.requests.DescribeClientQuotasResponse#DescribeClientQuotasResponse")]
     pub fn new(data: DescribeClientQuotasResponseData, version: i16) -> Self {
         Self { data, version }
     }
@@ -48,6 +50,7 @@ impl DescribeClientQuotasResponse {
     }
 
     /// Returns a reference to the underlying data.
+    #[doc(alias = "org.apache.kafka.common.requests.DescribeClientQuotasResponse#data")]
     pub fn data(&self) -> &DescribeClientQuotasResponseData {
         &self.data
     }
@@ -58,11 +61,13 @@ impl DescribeClientQuotasResponse {
     }
 
     /// Returns the throttle time in milliseconds.
+    #[doc(alias = "org.apache.kafka.common.requests.DescribeClientQuotasResponse#throttleTimeMs")]
     pub fn throttle_time_ms(&self) -> i32 {
         self.data.throttle_time_ms
     }
 
     /// Sets the throttle time in the response.
+    #[doc(alias = "org.apache.kafka.common.requests.DescribeClientQuotasResponse#maybeSetThrottleTimeMs")]
     pub fn maybe_set_throttle_time_ms(&mut self, throttle_time_ms: i32) {
         self.data.set_throttle_time_ms(throttle_time_ms);
     }
@@ -104,6 +109,7 @@ impl DescribeClientQuotasResponse {
     }
 
     /// Returns the error counts aggregated for this response.
+    #[doc(alias = "org.apache.kafka.common.requests.DescribeClientQuotasResponse#errorCounts")]
     pub fn error_counts(&self) -> HashMap<Errors, i32> {
         let mut counts = HashMap::new();
         AbstractResponse::update_error_counts(&mut counts, Errors::for_code(self.data.error_code));
@@ -116,6 +122,7 @@ impl DescribeClientQuotasResponse {
     /// # Errors
     ///
     /// Returns an error if parsing fails.
+    #[doc(alias = "org.apache.kafka.common.requests.DescribeClientQuotasResponse#parse")]
     pub fn parse(readable: &mut dyn Readable, version: i16) -> io::Result<Self> {
         let data = DescribeClientQuotasResponseData::read(readable, version)?;
         Ok(Self::new(data, version))
@@ -132,6 +139,7 @@ impl DescribeClientQuotasResponse {
     /// Builds a success response from a map of entities to quota values.
     ///
     /// Mirrors `DescribeClientQuotasResponse.fromQuotaEntities`.
+    #[doc(alias = "org.apache.kafka.common.requests.DescribeClientQuotasResponse#fromQuotaEntities")]
     pub fn from_quota_entities(
         entities: &HashMap<ClientQuotaEntity, HashMap<String, f64>>,
         throttle_time_ms: i32,

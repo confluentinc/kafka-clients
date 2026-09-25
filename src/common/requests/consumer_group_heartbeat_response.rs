@@ -42,12 +42,14 @@ use crate::consumer_group_heartbeat_response_data::{Assignment, TopicPartitions}
 ///
 /// Corresponds to `org.apache.kafka.common.requests.ConsumerGroupHeartbeatResponse`.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.ConsumerGroupHeartbeatResponse")]
 pub struct ConsumerGroupHeartbeatResponse {
     data: ConsumerGroupHeartbeatResponseData,
 }
 
 impl ConsumerGroupHeartbeatResponse {
     /// Creates a new `ConsumerGroupHeartbeatResponse` from the underlying data.
+    #[doc(alias = "org.apache.kafka.common.requests.ConsumerGroupHeartbeatResponse#ConsumerGroupHeartbeatResponse")]
     pub fn new(data: ConsumerGroupHeartbeatResponseData) -> Self {
         Self { data }
     }
@@ -58,6 +60,7 @@ impl ConsumerGroupHeartbeatResponse {
     }
 
     /// Returns a reference to the underlying data.
+    #[doc(alias = "org.apache.kafka.common.requests.ConsumerGroupHeartbeatResponse#data")]
     pub fn data(&self) -> &ConsumerGroupHeartbeatResponseData {
         &self.data
     }
@@ -68,11 +71,13 @@ impl ConsumerGroupHeartbeatResponse {
     }
 
     /// Returns the throttle time in milliseconds.
+    #[doc(alias = "org.apache.kafka.common.requests.ConsumerGroupHeartbeatResponse#throttleTimeMs")]
     pub fn throttle_time_ms(&self) -> i32 {
         self.data.throttle_time_ms
     }
 
     /// Sets the throttle time in the response.
+    #[doc(alias = "org.apache.kafka.common.requests.ConsumerGroupHeartbeatResponse#maybeSetThrottleTimeMs")]
     pub fn maybe_set_throttle_time_ms(&mut self, throttle_time_ms: i32) {
         self.data.set_throttle_time_ms(throttle_time_ms);
     }
@@ -91,6 +96,7 @@ impl ConsumerGroupHeartbeatResponse {
     }
 
     /// Returns error counts by [`Errors`].
+    #[doc(alias = "org.apache.kafka.common.requests.ConsumerGroupHeartbeatResponse#errorCounts")]
     pub fn error_counts(&self) -> HashMap<Errors, i32> {
         let mut counts = HashMap::new();
         counts.insert(Errors::for_code(self.data.error_code), 1);
@@ -103,6 +109,7 @@ impl ConsumerGroupHeartbeatResponse {
     /// # Errors
     ///
     /// Returns an error if parsing fails.
+    #[doc(alias = "org.apache.kafka.common.requests.ConsumerGroupHeartbeatResponse#parse")]
     pub fn parse(readable: &mut dyn Readable, version: i16) -> io::Result<Self> {
         let data = ConsumerGroupHeartbeatResponseData::read(readable, version)?;
         Ok(Self::new(data))
@@ -116,6 +123,7 @@ impl ConsumerGroupHeartbeatResponse {
     /// `ConsumerGroupHeartbeatResponse.createAssignment(Map<Uuid, Map<Integer, Integer>>)`
     /// (the value type widened from `Set<Integer>` to `Map<Integer, Integer>`
     /// in AK 4.3.1 for KIP-1251; `createAssignment` uses `.keySet()`).
+    #[doc(alias = "org.apache.kafka.common.requests.ConsumerGroupHeartbeatResponse#createAssignment")]
     pub fn create_assignment(assignment: HashMap<Uuid, HashMap<i32, i32>>) -> Assignment {
         let topic_partitions: Vec<TopicPartitions> = assignment
             .into_iter()

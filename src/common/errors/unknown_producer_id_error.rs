@@ -14,8 +14,8 @@
 
 //! Translated from `org.apache.kafka.common.errors.UnknownProducerIdException`.
 
-use crate::common::Errors;
 use crate::common::error::kafka_error_class;
+use crate::common::protocol::Errors;
 
 kafka_error_class! {
     /// This exception is raised by the broker if it could not locate the producer
@@ -25,11 +25,12 @@ kafka_error_class! {
     /// producer's metadata is removed from the broker, and future appends by the
     /// producer will return this exception.
     ///
-    /// Corresponds to Java's `UnknownProducerIdException`, error code [`Errors::UnknownProducerId`].
+    /// Corresponds to Java's `UnknownProducerIdException`, error code `Errors::UnknownProducerId`.
     ///
     /// Java `extends` chain:
     ///    `UnknownProducerIdException` -> `OutOfOrderSequenceException` ->
     ///   `ApiException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.UnknownProducerIdException")]
     UnknownProducerIdError,
     code: Errors::UnknownProducerId,
     extends: [

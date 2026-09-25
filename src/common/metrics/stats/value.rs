@@ -25,6 +25,7 @@ use crate::common::metrics::{Measurable, MetricConfig, Stat};
 /// lock-free — the minimal Rust equivalent of Java guarding the field with the
 /// sensor's `synchronized`. The stored value is bit-for-bit identical to Java's.
 #[derive(Debug)]
+#[doc(alias = "org.apache.kafka.common.metrics.stats.Value")]
 pub struct Value {
     value: AtomicU64,
 }

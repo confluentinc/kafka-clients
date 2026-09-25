@@ -30,17 +30,20 @@ use super::AbstractResponse;
 /// - [`Errors::UnsupportedSaslMechanism`] (33): Client mechanism not enabled in server
 /// - [`Errors::IllegalSaslState`] (34): Invalid request during SASL handshake
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.SaslHandshakeResponse")]
 pub struct SaslHandshakeResponse {
     data: SaslHandshakeResponseData,
 }
 
 impl SaslHandshakeResponse {
     /// Creates a new `SaslHandshakeResponse` from data.
+    #[doc(alias = "org.apache.kafka.common.requests.SaslHandshakeResponse#SaslHandshakeResponse")]
     pub fn new(data: SaslHandshakeResponseData) -> Self {
         Self { data }
     }
 
     /// Returns a reference to the underlying data.
+    #[doc(alias = "org.apache.kafka.common.requests.SaslHandshakeResponse#data")]
     pub fn data(&self) -> &SaslHandshakeResponseData {
         &self.data
     }
@@ -56,11 +59,13 @@ impl SaslHandshakeResponse {
     }
 
     /// Returns the error from this response.
+    #[doc(alias = "org.apache.kafka.common.requests.SaslHandshakeResponse#error")]
     pub fn error(&self) -> Errors {
         Errors::for_code(self.data.error_code)
     }
 
     /// Returns the error counts for this response.
+    #[doc(alias = "org.apache.kafka.common.requests.SaslHandshakeResponse#errorCounts")]
     pub fn error_counts(&self) -> HashMap<Errors, i32> {
         super::AbstractResponse::single_error_count(Errors::for_code(self.data.error_code))
     }
@@ -69,11 +74,13 @@ impl SaslHandshakeResponse {
     ///
     /// Always returns [`AbstractResponse::DEFAULT_THROTTLE_TIME`] (0) because the SaslHandshake schema
     /// does not support throttle time.
+    #[doc(alias = "org.apache.kafka.common.requests.SaslHandshakeResponse#throttleTimeMs")]
     pub fn throttle_time_ms(&self) -> i32 {
         AbstractResponse::DEFAULT_THROTTLE_TIME
     }
 
     /// No-op: the SaslHandshake schema does not support throttle time.
+    #[doc(alias = "org.apache.kafka.common.requests.SaslHandshakeResponse#maybeSetThrottleTimeMs")]
     pub fn maybe_set_throttle_time_ms(&mut self, _throttle_time_ms: i32) {
         // Not supported by the response schema
     }
@@ -86,6 +93,7 @@ impl SaslHandshakeResponse {
     }
 
     /// Returns the list of mechanisms enabled in the server.
+    #[doc(alias = "org.apache.kafka.common.requests.SaslHandshakeResponse#enabledMechanisms")]
     pub fn enabled_mechanisms(&self) -> &[String] {
         &self.data.mechanisms
     }
@@ -95,6 +103,7 @@ impl SaslHandshakeResponse {
     /// # Errors
     ///
     /// Returns an error if parsing fails.
+    #[doc(alias = "org.apache.kafka.common.requests.SaslHandshakeResponse#parse")]
     pub fn parse(readable: &mut dyn Readable, version: i16) -> std::io::Result<Self> {
         let data = SaslHandshakeResponseData::read(readable, version)?;
         Ok(Self::new(data))

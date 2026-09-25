@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![allow(dead_code)]
+#![expect(dead_code)]
 //! Topic name utilities.
 //!
 //! Corresponds to `org.apache.kafka.common.internals.Topic`.
@@ -21,6 +21,7 @@
 ///
 /// This is a namespace for topic-related utility functions, matching the Java
 /// `org.apache.kafka.common.internals.Topic` class.
+#[doc(alias = "org.apache.kafka.common.internals.Topic")]
 pub struct Topic;
 
 impl Topic {
@@ -50,11 +51,13 @@ impl Topic {
     ];
 
     /// Returns `true` if the topic is an internal Kafka topic.
+    #[doc(alias = "org.apache.kafka.common.internals.Topic#isInternal")]
     pub fn is_internal(topic: &str) -> bool {
         Self::INTERNAL_TOPICS.contains(&topic)
     }
 
     /// Validates a topic name, returning an error message if invalid.
+    #[doc(alias = "org.apache.kafka.common.internals.Topic#detectInvalidTopic")]
     pub fn detect_invalid_topic(name: &str) -> Option<String> {
         if name.is_empty() {
             return Some("the empty string is not allowed".to_string());
@@ -82,26 +85,31 @@ impl Topic {
     }
 
     /// Returns `true` if the topic name is valid.
+    #[doc(alias = "org.apache.kafka.common.internals.Topic#isValid")]
     pub fn is_valid(name: &str) -> bool {
         Self::detect_invalid_topic(name).is_none()
     }
 
     /// Checks if a topic name contains collision characters ('.' or '_').
+    #[doc(alias = "org.apache.kafka.common.internals.Topic#hasCollisionChars")]
     pub fn has_collision_chars(topic: &str) -> bool {
         topic.contains('_') || topic.contains('.')
     }
 
     /// Unifies collision characters by replacing '.' with '_'.
+    #[doc(alias = "org.apache.kafka.common.internals.Topic#unifyCollisionChars")]
     pub fn unify_collision_chars(topic: &str) -> String {
         topic.replace('.', "_")
     }
 
     /// Returns `true` if the two topic names collide due to '.' and '_' equivalence.
+    #[doc(alias = "org.apache.kafka.common.internals.Topic#hasCollision")]
     pub fn has_collision(topic_a: &str, topic_b: &str) -> bool {
         Self::unify_collision_chars(topic_a) == Self::unify_collision_chars(topic_b)
     }
 
     /// Valid characters for Kafka topics are ASCII alphanumerics, '.', '_', and '-'.
+    #[doc(alias = "org.apache.kafka.common.internals.Topic#containsValidPattern")]
     fn contains_valid_pattern(topic: &str) -> bool {
         topic
             .bytes()

@@ -25,10 +25,10 @@ use std::ops::Deref;
 use std::sync::{Arc, Mutex};
 
 use crate::Metadata;
-use crate::common::Errors;
 use crate::common::internals::ClusterResourceListeners;
-use crate::common::requests::MetadataRequestBuilder;
+use crate::common::protocol::Errors;
 use crate::common::requests::MetadataResponse;
+use crate::common::requests::metadata_request;
 use crate::common::utils::LogContext;
 use crate::kafka_debug;
 
@@ -57,6 +57,7 @@ struct ProducerMetadataInner {
 /// separate mutex-protected inner struct. The `Metadata` hooks
 /// (`retain_topic_fn`, `request_builder_fn`, `new_topics_request_builder_fn`)
 /// are set at construction to delegate to the producer state.
+#[doc(alias = "org.apache.kafka.clients.producer.internals.ProducerMetadata")]
 pub struct ProducerMetadata {
     /// The underlying metadata instance, wrapped in `Arc` so it can be shared
     /// with the `NetworkClient` (which also needs `Arc<Metadata>`). This mirrors
@@ -80,7 +81,8 @@ impl ProducerMetadata {
     // method and DoD #2 requires the translated class to carry all of them; the
     // `dead_code` lint only became visible once `KafkaProducer::with_options`
     // stopped leaking this type through a `pub` signature.
-    #[allow(dead_code)]
+    #[cfg_attr(not(test), expect(dead_code))]
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.ProducerMetadata#ProducerMetadata")]
     pub fn new(
         refresh_backoff_ms: i64,
         refresh_backoff_max_ms: i64,
@@ -108,6 +110,7 @@ impl ProducerMetadata {
     /// * `metadata_idle_ms` - The idle time after which an unused topic is removed
     /// * `cluster_resource_listeners` - Listeners notified of cluster resource updates
     /// * `log_context` - Contextual log message prefix
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.ProducerMetadata#ProducerMetadata")]
     pub fn with_log_context(
         refresh_backoff_ms: i64,
         refresh_backoff_max_ms: i64,
@@ -149,19 +152,19 @@ impl ProducerMetadata {
 
         // Closure for request_builder_fn: returns a builder with just the known topics
         let builder_inner = Arc::clone(&inner);
-        let request_builder_fn: Box<dyn Fn() -> MetadataRequestBuilder + Send + Sync> = Box::new(move || {
+        let request_builder_fn: Box<dyn Fn() -> metadata_request::Builder + Send + Sync> = Box::new(move || {
             let state = builder_inner.lock().unwrap();
             let topics: Vec<&str> = state.topics.keys().map(|s| s.as_str()).collect();
-            MetadataRequestBuilder::with_topics_allow_auto_topic_creation(Some(&topics), true)
+            metadata_request::Builder::with_topics_allow_auto_topic_creation(Some(&topics), true)
         });
 
         // Closure for new_topics_request_builder_fn: returns a builder with just the new topics
         let new_topics_inner = Arc::clone(&inner);
-        let new_topics_request_builder_fn: Box<dyn Fn() -> MetadataRequestBuilder + Send + Sync> =
+        let new_topics_request_builder_fn: Box<dyn Fn() -> metadata_request::Builder + Send + Sync> =
             Box::new(move || {
                 let state = new_topics_inner.lock().unwrap();
                 let topics: Vec<&str> = state.new_topics.iter().map(|s| s.as_str()).collect();
-                MetadataRequestBuilder::with_topics_allow_auto_topic_creation(Some(&topics), true)
+                metadata_request::Builder::with_topics_allow_auto_topic_creation(Some(&topics), true)
             });
 
         // Closure for post_update_fn: tracks per-topic errors and removes confirmed
@@ -204,6 +207,7 @@ impl ProducerMetadata {
     /// Add a topic to the metadata cache with the given timestamp.
     ///
     /// If the topic is new, triggers a metadata update for new topics.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.ProducerMetadata#add")]
     pub fn add(&self, topic: &str, now_ms: i64) {
         let mut state = self.inner.lock().unwrap();
         let idle_ms = state.metadata_idle_ms;
@@ -220,6 +224,7 @@ impl ProducerMetadata {
     ///
     /// If the topic is a new topic, triggers a partial update. Otherwise triggers
     /// a full update.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.ProducerMetadata#requestUpdateForTopic")]
     pub fn request_update_for_topic(&self, topic: &str) -> i32 {
         let state = self.inner.lock().unwrap();
         let is_new = state.new_topics.contains(topic);
@@ -233,27 +238,31 @@ impl ProducerMetadata {
     }
 
     /// Returns the set of all tracked topic names (visible for testing).
-    #[allow(dead_code)]
+    #[cfg_attr(not(test), expect(dead_code))]
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.ProducerMetadata#topics")]
     pub fn topics(&self) -> HashSet<String> {
         let state = self.inner.lock().unwrap();
         state.topics.keys().cloned().collect()
     }
 
     /// Returns the set of new (unconfirmed) topic names (visible for testing).
-    #[allow(dead_code)]
+    #[cfg_attr(not(test), expect(dead_code))]
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.ProducerMetadata#newTopics")]
     pub fn new_topics(&self) -> HashSet<String> {
         let state = self.inner.lock().unwrap();
         state.new_topics.clone()
     }
 
     /// Returns whether the given topic is in the metadata cache.
-    #[allow(dead_code)]
+    #[cfg_attr(not(test), expect(dead_code))]
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.ProducerMetadata#containsTopic")]
     pub fn contains_topic(&self, topic: &str) -> bool {
         let state = self.inner.lock().unwrap();
         state.topics.contains_key(topic)
     }
 
     /// Get the error for a specific topic from the last metadata response.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.ProducerMetadata#getError")]
     pub fn get_error(&self, topic: &str) -> Option<Errors> {
         let state = self.inner.lock().unwrap();
         state.errors.as_ref().and_then(|e| e.get(topic).copied())
@@ -283,8 +292,8 @@ impl Deref for ProducerMetadata {
 mod tests {
     use super::*;
     use crate::MetadataResponseData;
-    use crate::common::ApiKeys;
     use crate::common::Node;
+    use crate::common::protocol::ApiKeys;
     use crate::metadata_response_data::{MetadataResponseBroker, MetadataResponseTopic};
 
     const REFRESH_BACKOFF_MS: i64 = 100;
@@ -337,6 +346,9 @@ mod tests {
 
     /// Translated from `ProducerMetadataTest.testTimeToNextUpdateOverwriteBackoff`.
     #[test]
+    #[doc(
+        alias = "org.apache.kafka.clients.producer.internals.ProducerMetadataTest#testTimeToNextUpdateOverwriteBackoff"
+    )]
     fn test_time_to_next_update_overwrite_backoff() {
         let now: i64 = 10_000;
         let metadata = new_producer_metadata();
@@ -359,6 +371,7 @@ mod tests {
 
     /// Translated from `ProducerMetadataTest.testTopicExpiry`.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.ProducerMetadataTest#testTopicExpiry")]
     fn test_topic_expiry() {
         let mut time: i64 = 0;
         let metadata = new_producer_metadata();
@@ -395,6 +408,7 @@ mod tests {
 
     /// Translated from `ProducerMetadataTest.testMetadataPartialUpdate`.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.ProducerMetadataTest#testMetadataPartialUpdate")]
     fn test_metadata_partial_update() {
         let mut now: i64 = 10_000;
         let metadata = new_producer_metadata();
@@ -454,6 +468,7 @@ mod tests {
 
     /// Translated from `ProducerMetadataTest.testRequestUpdateForTopic`.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.ProducerMetadataTest#testRequestUpdateForTopic")]
     fn test_request_update_for_topic() {
         let mut now: i64 = 10_000;
         let metadata = new_producer_metadata();

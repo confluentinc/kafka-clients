@@ -23,8 +23,8 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::common::Error;
-use crate::common::Errors;
 use crate::common::compress::Compression;
+use crate::common::protocol::Errors;
 use crate::common::record::TimestampType;
 use crate::common::record::internal::AbstractRecords;
 use crate::common::record::internal::DefaultRecord;
@@ -39,6 +39,7 @@ use crate::common::record::internal::SimpleRecord;
 ///
 /// Corresponds to Java's `org.apache.kafka.common.record.MemoryRecords`.
 #[derive(Clone, Debug)]
+#[doc(alias = "org.apache.kafka.common.record.internal.MemoryRecords")]
 pub struct MemoryRecords {
     /// The single owning buffer for all record bytes in this set, held as a
     /// refcounted [`bytes::Bytes`]. On the receive path this is a zero-copy
@@ -53,6 +54,7 @@ impl MemoryRecords {
     ///
     /// Accepts an owned [`bytes::Bytes`]; callers holding a `Vec<u8>` can pass
     /// `vec.into()` (which adopts the allocation without copying).
+    #[doc(alias = "org.apache.kafka.common.record.internal.MemoryRecords#MemoryRecords")]
     pub fn new(buffer: bytes::Bytes) -> Self {
         Self { buffer }
     }
@@ -63,16 +65,19 @@ impl MemoryRecords {
     }
 
     /// Create a `MemoryRecords` from a byte slice (copies the data).
+    #[doc(alias = "org.apache.kafka.common.record.internal.MemoryRecords#readableRecords")]
     pub fn readable_records(data: &[u8]) -> Self {
         Self { buffer: bytes::Bytes::copy_from_slice(data) }
     }
 
     /// Returns the total size of this records set in bytes.
+    #[doc(alias = "org.apache.kafka.common.record.internal.MemoryRecords#sizeInBytes")]
     pub fn size_in_bytes(&self) -> usize {
         self.buffer.len()
     }
 
     /// Returns a reference to the underlying buffer.
+    #[doc(alias = "org.apache.kafka.common.record.internal.MemoryRecords#buffer")]
     pub fn buffer(&self) -> &[u8] {
         &self.buffer
     }
@@ -98,6 +103,7 @@ impl MemoryRecords {
     ///
     /// Each batch is a `DefaultRecordBatch` containing the full batch header
     /// and record data.
+    #[doc(alias = "org.apache.kafka.common.record.internal.MemoryRecords#batches")]
     pub fn batches(&self) -> BatchIterator<'_> {
         BatchIterator { data: &self.buffer, pos: 0 }
     }
@@ -123,6 +129,7 @@ impl MemoryRecords {
     }
 
     /// The total number of valid bytes (excluding any partial, trailing data).
+    #[doc(alias = "org.apache.kafka.common.record.internal.MemoryRecords#validBytes")]
     pub fn valid_bytes(&self) -> usize {
         let mut bytes = 0;
         for batch in self.batches() {
@@ -139,6 +146,7 @@ impl MemoryRecords {
     ///
     /// Corresponds to Java's `MemoryRecords.firstBatchSize()` which delegates
     /// to `ByteBufferLogInputStream.nextBatchSize()`.
+    #[doc(alias = "org.apache.kafka.common.record.internal.MemoryRecords#firstBatchSize")]
     pub fn first_batch_size(&self) -> Result<Option<usize>, Error> {
         // Minimum overhead for LegacyRecord v0:
         //   CRC(4) + Magic(1) + Attributes(1) + KeySize(4) + ValueSize(4) = 14
@@ -233,6 +241,7 @@ impl MemoryRecords {
     /// to the end of the buffer, matching Java's
     /// `MemoryRecords.slice(int, int)` which uses
     /// `Math.min(size, buffer.limit() - position)`.
+    #[doc(alias = "org.apache.kafka.common.record.internal.MemoryRecords#slice")]
     pub fn slice(&self, position: usize, size: usize) -> MemoryRecords {
         assert!(
             position <= self.buffer.len(),
@@ -273,6 +282,7 @@ impl MemoryRecords {
     /// Corresponds to Java's `builder(ByteBuffer, Compression, TimestampType,
     /// long)` (`MemoryRecords.java:475`), with the buffer allocated here from
     /// `initial_capacity`.
+    #[doc(alias = "org.apache.kafka.common.record.internal.MemoryRecords#builder")]
     pub fn builder_with_initial_capacity(
         initial_capacity: usize,
         compression: Compression,
@@ -293,6 +303,7 @@ impl MemoryRecords {
     /// Corresponds to Java's `builder(ByteBuffer, byte, Compression,
     /// TimestampType, long)` (`MemoryRecords.java:507`), with the buffer
     /// allocated here from `initial_capacity`.
+    #[doc(alias = "org.apache.kafka.common.record.internal.MemoryRecords#builder")]
     pub fn builder_with_initial_capacity_magic(
         initial_capacity: usize,
         magic: i8,
@@ -320,6 +331,7 @@ impl MemoryRecords {
     /// `buffer` token in the name discriminates it from
     /// [`Self::builder_with_initial_capacity_magic`], which translates the same
     /// Java overload with an allocated buffer (CLAUDE.md §2).
+    #[doc(alias = "org.apache.kafka.common.record.internal.MemoryRecords#builder")]
     pub fn builder_with_buffer_magic(
         buffer: Vec<u8>,
         magic: i8,
@@ -351,6 +363,7 @@ impl MemoryRecords {
     /// Corresponds to Java's `builder(ByteBuffer, Compression, TimestampType,
     /// long, int)` (`MemoryRecords.java:482`), with the buffer allocated here
     /// from `initial_capacity`.
+    #[doc(alias = "org.apache.kafka.common.record.internal.MemoryRecords#builder")]
     pub fn builder_with_initial_capacity_max_size(
         initial_capacity: usize,
         compression: Compression,
@@ -375,6 +388,7 @@ impl MemoryRecords {
     /// Corresponds to Java's `builder(ByteBuffer, byte, Compression,
     /// TimestampType, long, long)` (`MemoryRecords.java:496`), with the buffer
     /// allocated here from `initial_capacity`.
+    #[doc(alias = "org.apache.kafka.common.record.internal.MemoryRecords#builder")]
     pub fn builder_with_initial_capacity_magic_log_append_time(
         initial_capacity: usize,
         magic: i8,
@@ -413,6 +427,7 @@ impl MemoryRecords {
     /// [`MemoryRecordsBuilder::with_default`]; Java has no `builder` overload
     /// carrying a delete horizon, only the `MemoryRecordsBuilder` constructor
     /// that takes one.
+    #[doc(alias = "org.apache.kafka.common.record.internal.MemoryRecords#builder")]
     pub(crate) fn builder_with_options(options: MemoryRecordsBuilderOptions) -> MemoryRecordsBuilder {
         let MemoryRecordsBuilderOptions {
             initial_capacity,
@@ -502,6 +517,7 @@ impl MemoryRecords {
     /// Corresponds to Java's `withRecords(Compression, SimpleRecord...)`
     /// (`MemoryRecords.java:588`) — the overload whose parameters are the
     /// group's intersection, which is why it keeps the plain name.
+    #[doc(alias = "org.apache.kafka.common.record.internal.MemoryRecords#withRecords")]
     pub fn with_records(compression: Compression, records: &[SimpleRecord]) -> MemoryRecords {
         Self::with_records_with_magic(RecordBatch::CURRENT_MAGIC_VALUE, compression, records)
     }
@@ -510,6 +526,7 @@ impl MemoryRecords {
     ///
     /// Corresponds to Java's `withRecords(byte, Compression, SimpleRecord...)`
     /// (`MemoryRecords.java:598`).
+    #[doc(alias = "org.apache.kafka.common.record.internal.MemoryRecords#withRecords")]
     pub fn with_records_with_magic(magic: i8, compression: Compression, records: &[SimpleRecord]) -> MemoryRecords {
         Self::with_records_with_magic_initial_offset_timestamp_type(
             magic,
@@ -524,6 +541,7 @@ impl MemoryRecords {
     ///
     /// Corresponds to Java's `withRecords(byte, long, Compression,
     /// TimestampType, SimpleRecord...)` (`MemoryRecords.java:656`).
+    #[doc(alias = "org.apache.kafka.common.record.internal.MemoryRecords#withRecords")]
     pub fn with_records_with_magic_initial_offset_timestamp_type(
         magic: i8,
         initial_offset: i64,
@@ -547,6 +565,7 @@ impl MemoryRecords {
     ///
     /// Corresponds to Java's `withRecords(long, Compression, int,
     /// SimpleRecord...)` (`MemoryRecords.java:611`).
+    #[doc(alias = "org.apache.kafka.common.record.internal.MemoryRecords#withRecords")]
     pub fn with_records_with_initial_offset_partition_leader_epoch(
         initial_offset: i64,
         compression: Compression,
@@ -571,6 +590,7 @@ impl MemoryRecords {
     /// parameters are that group's intersection, which is why it keeps the
     /// plain name. Java's other two (`:622`, `:629`) have no Rust caller and are
     /// not translated (DoD #2).
+    #[doc(alias = "org.apache.kafka.common.record.internal.MemoryRecords#withIdempotentRecords")]
     pub fn with_idempotent_records(
         compression: Compression,
         producer_id: i64,
@@ -597,6 +617,7 @@ impl MemoryRecords {
     /// whose parameters are that group's intersection, which is why it keeps the
     /// plain name. Java's other two (`:642`, `:649`) have no Rust caller and are
     /// not translated (DoD #2).
+    #[doc(alias = "org.apache.kafka.common.record.internal.MemoryRecords#withTransactionalRecords")]
     pub fn with_transactional_records(
         compression: Compression,
         producer_id: i64,
@@ -630,6 +651,7 @@ impl MemoryRecords {
     /// Corresponds to Java's `withRecords(byte, long, Compression,
     /// TimestampType, long, short, int, int, boolean, SimpleRecord...)`
     /// (`MemoryRecords.java:663`).
+    #[doc(alias = "org.apache.kafka.common.record.internal.MemoryRecords#withRecords")]
     pub(crate) fn with_records_with_options(options: MemoryRecordsOptions<'_>) -> MemoryRecords {
         let MemoryRecordsOptions {
             magic,
@@ -853,42 +875,42 @@ impl MemoryRecordsBuilderOptionsBuilder {
     // the builder can express Java's `:520`/`:531`/`:543`/`:556`/`:571`
     // overloads; the `dead_code` lint sees only the subset today's callers use.
     /// Sets [`MemoryRecordsBuilderOptions::producer_id`].
-    #[allow(dead_code)]
+    #[cfg_attr(not(test), expect(dead_code))]
     pub(crate) fn set_producer_id(mut self, producer_id: i64) -> Self {
         self.producer_id = Some(producer_id);
         self
     }
 
     /// Sets [`MemoryRecordsBuilderOptions::producer_epoch`].
-    #[allow(dead_code)]
+    #[cfg_attr(not(test), expect(dead_code))]
     pub(crate) fn set_producer_epoch(mut self, producer_epoch: i16) -> Self {
         self.producer_epoch = Some(producer_epoch);
         self
     }
 
     /// Sets [`MemoryRecordsBuilderOptions::base_sequence`].
-    #[allow(dead_code)]
+    #[cfg_attr(not(test), expect(dead_code))]
     pub(crate) fn set_base_sequence(mut self, base_sequence: i32) -> Self {
         self.base_sequence = Some(base_sequence);
         self
     }
 
     /// Sets [`MemoryRecordsBuilderOptions::is_transactional`].
-    #[allow(dead_code)]
+    #[cfg_attr(not(test), expect(dead_code))]
     pub(crate) fn set_is_transactional(mut self, is_transactional: bool) -> Self {
         self.is_transactional = Some(is_transactional);
         self
     }
 
     /// Sets [`MemoryRecordsBuilderOptions::is_control_batch`].
-    #[allow(dead_code)]
+    #[cfg_attr(not(test), expect(dead_code))]
     pub(crate) fn set_is_control_batch(mut self, is_control_batch: bool) -> Self {
         self.is_control_batch = Some(is_control_batch);
         self
     }
 
     /// Sets [`MemoryRecordsBuilderOptions::partition_leader_epoch`].
-    #[allow(dead_code)]
+    #[cfg_attr(not(test), expect(dead_code))]
     pub(crate) fn set_partition_leader_epoch(mut self, partition_leader_epoch: i32) -> Self {
         self.partition_leader_epoch = Some(partition_leader_epoch);
         self
@@ -901,7 +923,7 @@ impl MemoryRecordsBuilderOptionsBuilder {
     }
 
     /// Sets [`MemoryRecordsBuilderOptions::delete_horizon_ms`].
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     pub(crate) fn set_delete_horizon_ms(mut self, delete_horizon_ms: i64) -> Self {
         self.delete_horizon_ms = Some(delete_horizon_ms);
         self
@@ -1225,16 +1247,17 @@ mod tests {
     /// All compression types to test with.
     fn all_compressions() -> Vec<Compression> {
         vec![
-            Compression::none(),
-            Compression::gzip(),
-            Compression::snappy(),
-            Compression::lz4(),
-            Compression::zstd(),
+            Compression::none().build(),
+            Compression::gzip().build(),
+            Compression::snappy().build(),
+            Compression::lz4().build(),
+            Compression::zstd().build(),
         ]
     }
 
     /// Corresponds to Java's `MemoryRecordsTest.testIterator`.
     #[test]
+    #[doc(alias = "org.apache.kafka.common.record.internal.MemoryRecordsTest#testIterator")]
     fn test_iterator() {
         let log_append_time = current_time_millis();
 
@@ -1318,6 +1341,7 @@ mod tests {
 
     /// Corresponds to Java's `MemoryRecordsTest.testHasRoomForMethod`.
     #[test]
+    #[doc(alias = "org.apache.kafka.common.record.internal.MemoryRecordsTest#testHasRoomForMethod")]
     fn test_has_room_for_method() {
         for compression in all_compressions() {
             let mut builder = MemoryRecords::builder_with_initial_capacity_magic(
@@ -1336,6 +1360,7 @@ mod tests {
 
     /// Corresponds to Java's `MemoryRecordsTest.testHasRoomForMethodWithHeaders`.
     #[test]
+    #[doc(alias = "org.apache.kafka.common.record.internal.MemoryRecordsTest#testHasRoomForMethodWithHeaders")]
     fn test_has_room_for_method_with_headers() {
         let log_append_time = current_time_millis();
 
@@ -1366,8 +1391,8 @@ mod tests {
     fn test_checksum_v2() {
         // We get reasonable coverage with uncompressed and one compression type
         for (compression, expected_checksum) in &[
-            (Compression::none(), 3851219455_u32),
-            (Compression::lz4(), 2745969314_u32),
+            (Compression::none().build(), 3851219455_u32),
+            (Compression::lz4().build(), 2745969314_u32),
         ] {
             let records = vec![
                 SimpleRecord::with_timestamp_key_value(283843, Some(b"key1".to_vec()), Some(b"value1".to_vec())),
@@ -1387,6 +1412,7 @@ mod tests {
 
     /// Corresponds to Java's `MemoryRecordsTest.testWithRecords`.
     #[test]
+    #[doc(alias = "org.apache.kafka.common.record.internal.MemoryRecordsTest#testWithRecords")]
     fn test_with_records() {
         for compression in all_compressions() {
             let mem_records = MemoryRecords::with_records_with_magic(
@@ -1455,6 +1481,7 @@ mod tests {
 
     /// Corresponds to Java's `MemoryRecordsTest.testSlice` (v2 only).
     #[test]
+    #[doc(alias = "org.apache.kafka.common.record.internal.MemoryRecordsTest#testSlice")]
     fn test_slice() {
         for compression in all_compressions() {
             // Create records with multiple batches
@@ -1544,6 +1571,7 @@ mod tests {
 
     /// Corresponds to Java's `MemoryRecordsTest.testSliceEmptyRecords`.
     #[test]
+    #[doc(alias = "org.apache.kafka.common.record.internal.MemoryRecordsTest#testSliceEmptyRecords")]
     fn test_slice_empty_records() {
         let empty = MemoryRecords::empty();
         let sliced = empty.slice(0, 0);
@@ -1554,9 +1582,10 @@ mod tests {
     /// Corresponds to Java's `MemoryRecordsTest.testSliceInvalidPosition`.
     #[test]
     #[should_panic(expected = "Slice from position")]
+    #[doc(alias = "org.apache.kafka.common.record.internal.MemoryRecordsTest#testSliceInvalidPosition")]
     fn test_slice_invalid_position() {
         let records = MemoryRecords::with_records(
-            Compression::none(),
+            Compression::none().build(),
             &[SimpleRecord::with_timestamp_key_value(
                 1,
                 Some(b"k".to_vec()),
@@ -1568,6 +1597,7 @@ mod tests {
 
     /// Corresponds to Java's `MemoryRecordsTest.testSliceForAlreadySlicedMemoryRecords`.
     #[test]
+    #[doc(alias = "org.apache.kafka.common.record.internal.MemoryRecordsTest#testSliceForAlreadySlicedMemoryRecords")]
     fn test_slice_for_already_sliced_memory_records() {
         for compression in all_compressions() {
             // Create records with multiple batches
@@ -1641,7 +1671,7 @@ mod tests {
         MemoryRecords::with_records_with_magic_initial_offset_timestamp_type(
             2,
             0,
-            Compression::none(),
+            Compression::none().build(),
             TimestampType::CreateTime,
             &records,
         )
@@ -1752,7 +1782,7 @@ mod tests {
         let second = MemoryRecords::with_records_with_magic_initial_offset_timestamp_type(
             2,
             10,
-            Compression::none(),
+            Compression::none().build(),
             TimestampType::CreateTime,
             &good,
         )
