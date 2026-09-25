@@ -78,16 +78,6 @@ impl FetchMetricsManager {
         format!("{tp}.records-lag")
     }
 
-    #[doc(alias = "org.apache.kafka.clients.consumer.internals.FetchMetricsManager#deprecatedMetricName")]
-    fn deprecated_metric_name(name: &str) -> String {
-        format!("{name}.deprecated")
-    }
-
-    #[doc(alias = "org.apache.kafka.clients.consumer.internals.FetchMetricsManager#shouldReportDeprecatedMetric")]
-    fn should_report_deprecated_metric(topic: &str) -> bool {
-        topic.contains('.')
-    }
-
     /// Unwraps a lazily-built per-topic / per-partition sensor, logging and skipping
     /// the recording instead of panicking when registration fails.
     ///
@@ -95,22 +85,11 @@ impl FetchMetricsManager {
     /// a recoverable registration error into a panic that killed the consumer task
     /// (CLAUDE.md §10.1 — do not panic where recovery is possible).
     ///
-    /// The error is reachable, not theoretical. Two topics differing only by `.` vs
-    /// `_` — say `my.topic` and `my_topic` — produce *distinct* sensor names, so
-    /// `SensorBuilder::with_tags` does not find and reuse the first sensor; but the
-    /// deprecated variants replace periods in the tag value, so both resolve to the
-    /// same `MetricName` (`fetch-size-avg{client-id, topic=my_topic}`). The second
-    /// `Sensor::add` then returns `Err`.
-    ///
     /// Java throws `IllegalArgumentException` from `Metrics.registerMetric`
     /// (`Metrics.java:506`) and lets it propagate out of the fetch path. We
     /// deliberately do NOT propagate: these `record_*` methods are a side channel,
-    /// and failing a user's fetch because two topic names collide after period
-    /// replacement is worse than the metric being absent. The collision is reported
-    /// rather than hidden.
-    ///
-    /// Note the log fires per record while the collision persists. That is intended:
-    /// it is a genuine misconfiguration, and the volume is the signal.
+    /// and failing a user's fetch is worse than the metric being absent. The
+    /// failure is reported rather than hidden.
     fn resolve_sensor(built: Result<Arc<Sensor>, Error>, what: &str) -> Option<Arc<Sensor>> {
         match built {
             Ok(sensor) => Some(sensor),
@@ -127,27 +106,10 @@ impl FetchMetricsManager {
         tags
     }
 
-    /// `{topic, partition}` tags with the actual topic name (non-deprecated form).
+    /// `{topic, partition}` tags with the actual topic name.
     fn topic_partition_tags_raw(tp: &TopicPartition) -> BTreeMap<String, String> {
         let mut tags = BTreeMap::new();
         tags.insert("topic".to_string(), tp.topic().to_string());
-        tags.insert("partition".to_string(), tp.partition().to_string());
-        tags
-    }
-
-    /// Deprecated topic tag: periods replaced with underscores
-    /// (Java `topicTags`).
-    #[doc(alias = "org.apache.kafka.clients.consumer.internals.FetchMetricsManager#topicTags")]
-    pub(crate) fn topic_tags(topic: &str) -> BTreeMap<String, String> {
-        Self::single_tag("topic", &topic.replace('.', "_"))
-    }
-
-    /// Deprecated `{topic, partition}` tags: topic periods replaced with
-    /// underscores (Java `topicPartitionTags`).
-    #[doc(alias = "org.apache.kafka.clients.consumer.internals.FetchMetricsManager#topicPartitionTags")]
-    pub(crate) fn topic_partition_tags(tp: &TopicPartition) -> BTreeMap<String, String> {
-        let mut tags = BTreeMap::new();
-        tags.insert("topic".to_string(), tp.topic().replace('.', "_"));
         tags.insert("partition".to_string(), tp.partition().to_string());
         tags
     }
@@ -315,7 +277,6 @@ impl FetchMetricsManager {
     /// Records the number of bytes fetched for a single topic.
     pub(crate) fn record_bytes_fetched_topic(&self, topic: &str, bytes: i32) {
         let name = FetchMetricsManager::topic_bytes_fetched_metric_name(topic);
-        self.maybe_record_deprecated_bytes_fetched(&name, topic, bytes);
 
         let bytes_fetched = (|| -> Result<Arc<Sensor>, Error> {
             Ok(SensorBuilder::with_tags(&self.metrics, &name, RecordingLevel::Info, || {
@@ -339,7 +300,6 @@ impl FetchMetricsManager {
     /// Records the number of records fetched for a single topic.
     pub(crate) fn record_records_fetched_topic(&self, topic: &str, records: i32) {
         let name = FetchMetricsManager::topic_records_fetched_metric_name(topic);
-        self.maybe_record_deprecated_records_fetched(&name, topic, records);
 
         let records_fetched = (|| -> Result<Arc<Sensor>, Error> {
             Ok(SensorBuilder::with_tags(&self.metrics, &name, RecordingLevel::Info, || {
@@ -372,7 +332,6 @@ impl FetchMetricsManager {
         self.records_lag.record_value(lag as f64);
 
         let name = FetchMetricsManager::partition_records_lag_metric_name(tp);
-        self.maybe_record_deprecated_partition_lag(&name, tp, lag);
 
         let records_lag = (|| -> Result<Arc<Sensor>, Error> {
             Ok(SensorBuilder::with_tags(&self.metrics, &name, RecordingLevel::Info, || {
@@ -399,7 +358,6 @@ impl FetchMetricsManager {
         self.records_lead.record_value(lead as f64);
 
         let name = FetchMetricsManager::partition_records_lead_metric_name(tp);
-        self.maybe_record_deprecated_partition_lead(&name, tp, lead as f64);
 
         let records_lead = (|| -> Result<Arc<Sensor>, Error> {
             Ok(SensorBuilder::with_tags(&self.metrics, &name, RecordingLevel::Info, || {
@@ -457,23 +415,11 @@ impl FetchMetricsManager {
                 if let Some(metric_name) = self.partition_preferred_read_replica_metric_name(tp) {
                     self.metrics.remove_metric(&metric_name);
                 }
-                // Remove deprecated metrics.
-                self.metrics.remove_sensor(&FetchMetricsManager::deprecated_metric_name(
-                    &FetchMetricsManager::partition_records_lag_metric_name(tp),
-                ));
-                self.metrics.remove_sensor(&FetchMetricsManager::deprecated_metric_name(
-                    &FetchMetricsManager::partition_records_lead_metric_name(tp),
-                ));
-                if let Some(metric_name) = self.deprecated_partition_preferred_read_replica_metric_name(tp) {
-                    self.metrics.remove_metric(&metric_name);
-                }
             }
         }
 
         for tp in &new_assigned_partitions {
             if !assignment.assigned_partitions.contains(tp) {
-                self.maybe_record_deprecated_preferred_read_replica(tp, subscription);
-
                 if let Some(metric_name) = self.partition_preferred_read_replica_metric_name(tp) {
                     let subscription = Arc::clone(subscription);
                     let tp_owned = tp.clone();
@@ -497,164 +443,11 @@ impl FetchMetricsManager {
         assignment.assignment_id = new_assignment_id;
     }
 
-    // To be removed in Kafka 5.0 release.
-    #[doc(alias = "org.apache.kafka.clients.consumer.internals.FetchMetricsManager#maybeRecordDeprecatedBytesFetched")]
-    fn maybe_record_deprecated_bytes_fetched(&self, name: &str, topic: &str, bytes: i32) {
-        if !FetchMetricsManager::should_report_deprecated_metric(topic) {
-            return;
-        }
-        let deprecated = (|| -> Result<Arc<Sensor>, Error> {
-            Ok(SensorBuilder::with_tags(
-                &self.metrics,
-                &FetchMetricsManager::deprecated_metric_name(name),
-                RecordingLevel::Info,
-                || FetchMetricsManager::topic_tags(topic),
-            )?
-            .with_avg(&self.metrics_registry.topic_fetch_size_avg)?
-            .with_max(&self.metrics_registry.topic_fetch_size_max)?
-            .with_meter(
-                &self.metrics_registry.topic_bytes_consumed_rate,
-                &self.metrics_registry.topic_bytes_consumed_total,
-            )?
-            .build())
-        })();
-        let Some(deprecated) = FetchMetricsManager::resolve_sensor(deprecated, "deprecated topic bytes-fetched sensor")
-        else {
-            return;
-        };
-        deprecated.record_value(bytes as f64);
-    }
-
-    // To be removed in Kafka 5.0 release.
-    #[doc(
-        alias = "org.apache.kafka.clients.consumer.internals.FetchMetricsManager#maybeRecordDeprecatedRecordsFetched"
-    )]
-    fn maybe_record_deprecated_records_fetched(&self, name: &str, topic: &str, records: i32) {
-        if !FetchMetricsManager::should_report_deprecated_metric(topic) {
-            return;
-        }
-        let deprecated = (|| -> Result<Arc<Sensor>, Error> {
-            Ok(SensorBuilder::with_tags(
-                &self.metrics,
-                &FetchMetricsManager::deprecated_metric_name(name),
-                RecordingLevel::Info,
-                || FetchMetricsManager::topic_tags(topic),
-            )?
-            .with_avg(&self.metrics_registry.topic_records_per_request_avg)?
-            .with_meter(
-                &self.metrics_registry.topic_records_consumed_rate,
-                &self.metrics_registry.topic_records_consumed_total,
-            )?
-            .build())
-        })();
-        let Some(deprecated) =
-            FetchMetricsManager::resolve_sensor(deprecated, "deprecated topic records-fetched sensor")
-        else {
-            return;
-        };
-        deprecated.record_value(records as f64);
-    }
-
-    // To be removed in Kafka 5.0 release.
-    #[doc(alias = "org.apache.kafka.clients.consumer.internals.FetchMetricsManager#maybeRecordDeprecatedPartitionLag")]
-    fn maybe_record_deprecated_partition_lag(&self, name: &str, tp: &TopicPartition, lag: i64) {
-        if !FetchMetricsManager::should_report_deprecated_metric(tp.topic()) {
-            return;
-        }
-        let deprecated = (|| -> Result<Arc<Sensor>, Error> {
-            Ok(SensorBuilder::with_tags(
-                &self.metrics,
-                &FetchMetricsManager::deprecated_metric_name(name),
-                RecordingLevel::Info,
-                || FetchMetricsManager::topic_partition_tags(tp),
-            )?
-            .with_value(&self.metrics_registry.partition_records_lag)?
-            .with_max(&self.metrics_registry.partition_records_lag_max)?
-            .with_avg(&self.metrics_registry.partition_records_lag_avg)?
-            .build())
-        })();
-        let Some(deprecated) =
-            FetchMetricsManager::resolve_sensor(deprecated, "deprecated partition records-lag sensor")
-        else {
-            return;
-        };
-        deprecated.record_value(lag as f64);
-    }
-
-    // To be removed in Kafka 5.0 release.
-    #[doc(alias = "org.apache.kafka.clients.consumer.internals.FetchMetricsManager#maybeRecordDeprecatedPartitionLead")]
-    fn maybe_record_deprecated_partition_lead(&self, name: &str, tp: &TopicPartition, lead: f64) {
-        if !FetchMetricsManager::should_report_deprecated_metric(tp.topic()) {
-            return;
-        }
-        let deprecated = (|| -> Result<Arc<Sensor>, Error> {
-            Ok(SensorBuilder::with_tags(
-                &self.metrics,
-                &FetchMetricsManager::deprecated_metric_name(name),
-                RecordingLevel::Info,
-                || FetchMetricsManager::topic_partition_tags(tp),
-            )?
-            .with_value(&self.metrics_registry.partition_records_lead)?
-            .with_min(&self.metrics_registry.partition_records_lead_min)?
-            .with_avg(&self.metrics_registry.partition_records_lead_avg)?
-            .build())
-        })();
-        let Some(deprecated) =
-            FetchMetricsManager::resolve_sensor(deprecated, "deprecated partition records-lead sensor")
-        else {
-            return;
-        };
-        deprecated.record_value(lead);
-    }
-
-    // To be removed in Kafka 5.0 release.
-    #[doc(
-        alias = "org.apache.kafka.clients.consumer.internals.FetchMetricsManager#maybeRecordDeprecatedPreferredReadReplica"
-    )]
-    fn maybe_record_deprecated_preferred_read_replica(
-        &self,
-        tp: &TopicPartition,
-        subscription: &Arc<Mutex<SubscriptionState>>,
-    ) {
-        if !FetchMetricsManager::should_report_deprecated_metric(tp.topic()) {
-            return;
-        }
-        if let Some(metric_name) = self.deprecated_partition_preferred_read_replica_metric_name(tp) {
-            let subscription = Arc::clone(subscription);
-            let tp_owned = tp.clone();
-            self.metrics.add_metric_if_absent(
-                metric_name,
-                None,
-                MetricValueProvider::Gauge(Box::new(ClosureGauge::new(move |_config, _now| {
-                    let value = subscription
-                        .lock()
-                        .expect("SubscriptionState mutex poisoned")
-                        .preferred_read_replica(&tp_owned, 0)
-                        .unwrap_or(-1);
-                    MetricValue::Int(value)
-                }))),
-            );
-        }
-    }
-
     #[doc(
         alias = "org.apache.kafka.clients.consumer.internals.FetchMetricsManager#partitionPreferredReadReplicaMetricName"
     )]
     fn partition_preferred_read_replica_metric_name(&self, tp: &TopicPartition) -> Option<crate::common::MetricName> {
         let tags = FetchMetricsManager::topic_partition_tags_raw(tp);
-        self.metrics
-            .metric_instance_tags(&self.metrics_registry.partition_preferred_read_replica, tags)
-            .ok()
-    }
-
-    #[doc(
-        alias = "org.apache.kafka.clients.consumer.internals.FetchMetricsManager#deprecatedPartitionPreferredReadReplicaMetricName"
-    )]
-    fn deprecated_partition_preferred_read_replica_metric_name(
-        &self,
-        tp: &TopicPartition,
-    ) -> Option<crate::common::MetricName> {
-        let tags = FetchMetricsManager::topic_partition_tags(tp);
         self.metrics
             .metric_instance_tags(&self.metrics_registry.partition_preferred_read_replica, tags)
             .ok()
@@ -803,6 +596,12 @@ mod tests {
     }
 
     /// `FetchMetricsManagerTest.testBytesFetchedTopic`
+    ///
+    /// Deviation from the Java test: Java also asserts the deprecated
+    /// period-to-underscore duplicates of the per-topic metrics
+    /// (`FetchMetricsManager.maybeRecordDeprecated*`, `@Deprecated`, to be removed
+    /// in Kafka 5.0). They are not translated (CLAUDE.md §3), so their assertions
+    /// are dropped and the metric counts exclude them.
     #[test]
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.FetchMetricsManagerTest#testBytesFetchedTopic")]
     fn test_bytes_fetched_topic() {
@@ -811,24 +610,21 @@ mod tests {
         let topic_name2 = "another.topic";
         let tags1 = ["topic", topic_name1];
         let tags2 = ["topic", topic_name2];
-        let deprecated = FetchMetricsManager::topic_tags(topic_name2);
-        let deprecated_topic = deprecated.get("topic").unwrap().clone();
-        let deprecated_tags = ["topic", deprecated_topic.as_str()];
         let initial = f.metrics.metrics().len();
 
         f.manager.record_bytes_fetched_topic(topic_name1, 2);
         // 4 new metrics shall be registered.
         assert_eq!(4, f.metrics.metrics().len() - initial);
         f.manager.record_bytes_fetched_topic(topic_name2, 1);
-        // Another 8 metrics get registered as deprecated metrics should be reported for topicName2.
-        assert_eq!(12, f.metrics.metrics().len() - initial);
+        // Another 4 metrics get registered for topicName2.
+        assert_eq!(8, f.metrics.metrics().len() - initial);
 
         f.time.sleep(time_window_ms(&f) + 1);
         f.manager.record_bytes_fetched_topic(topic_name1, 10);
         f.manager.record_bytes_fetched_topic(topic_name2, 5);
 
         // Subsequent calls should not register new metrics.
-        assert_eq!(12, f.metrics.metrics().len() - initial);
+        assert_eq!(8, f.metrics.metrics().len() - initial);
         // Validate metrics for topicName1.
         assert!((metric_value_tags(&f, &f.registry.topic_fetch_size_avg, &tags1) - 6.0).abs() < EPSILON);
         assert!((metric_value_tags(&f, &f.registry.topic_fetch_size_max, &tags1) - 10.0).abs() < EPSILON);
@@ -839,13 +635,6 @@ mod tests {
         assert!((metric_value_tags(&f, &f.registry.topic_fetch_size_max, &tags2) - 5.0).abs() < EPSILON);
         assert!(metric_value_tags(&f, &f.registry.topic_bytes_consumed_rate, &tags2) > 0.0);
         assert!((metric_value_tags(&f, &f.registry.topic_bytes_consumed_total, &tags2) - 6.0).abs() < EPSILON);
-        // Validate metrics for deprecated topic.
-        assert!((metric_value_tags(&f, &f.registry.topic_fetch_size_avg, &deprecated_tags) - 3.0).abs() < EPSILON);
-        assert!((metric_value_tags(&f, &f.registry.topic_fetch_size_max, &deprecated_tags) - 5.0).abs() < EPSILON);
-        assert!(metric_value_tags(&f, &f.registry.topic_bytes_consumed_rate, &deprecated_tags) > 0.0);
-        assert!(
-            (metric_value_tags(&f, &f.registry.topic_bytes_consumed_total, &deprecated_tags) - 6.0).abs() < EPSILON
-        );
     }
 
     /// `FetchMetricsManagerTest.testRecordsFetched`
@@ -861,6 +650,12 @@ mod tests {
     }
 
     /// `FetchMetricsManagerTest.testRecordsFetchedTopic`
+    ///
+    /// Deviation from the Java test: Java also asserts the deprecated
+    /// period-to-underscore duplicates of the per-topic metrics
+    /// (`FetchMetricsManager.maybeRecordDeprecated*`, `@Deprecated`, to be removed
+    /// in Kafka 5.0). They are not translated (CLAUDE.md §3), so their assertions
+    /// are dropped and the metric counts exclude them.
     #[test]
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.FetchMetricsManagerTest#testRecordsFetchedTopic")]
     fn test_records_fetched_topic() {
@@ -869,24 +664,21 @@ mod tests {
         let topic_name2 = "another.topic";
         let tags1 = ["topic", topic_name1];
         let tags2 = ["topic", topic_name2];
-        let deprecated = FetchMetricsManager::topic_tags(topic_name2);
-        let deprecated_topic = deprecated.get("topic").unwrap().clone();
-        let deprecated_tags = ["topic", deprecated_topic.as_str()];
         let initial = f.metrics.metrics().len();
 
         f.manager.record_records_fetched_topic(topic_name1, 2);
         // 3 new metrics shall be registered.
         assert_eq!(3, f.metrics.metrics().len() - initial);
         f.manager.record_records_fetched_topic(topic_name2, 1);
-        // Another 6 metrics get registered as deprecated metrics should be reported for topicName2.
-        assert_eq!(9, f.metrics.metrics().len() - initial);
+        // Another 3 metrics get registered for topicName2.
+        assert_eq!(6, f.metrics.metrics().len() - initial);
 
         f.time.sleep(time_window_ms(&f) + 1);
         f.manager.record_records_fetched_topic(topic_name1, 10);
         f.manager.record_records_fetched_topic(topic_name2, 5);
 
         // Subsequent calls should not register new metrics.
-        assert_eq!(9, f.metrics.metrics().len() - initial);
+        assert_eq!(6, f.metrics.metrics().len() - initial);
         // Validate metrics for topicName1.
         assert!((metric_value_tags(&f, &f.registry.topic_records_per_request_avg, &tags1) - 6.0).abs() < EPSILON);
         assert!(metric_value_tags(&f, &f.registry.topic_records_consumed_rate, &tags1) > 0.0);
@@ -895,19 +687,17 @@ mod tests {
         assert!((metric_value_tags(&f, &f.registry.topic_records_per_request_avg, &tags2) - 3.0).abs() < EPSILON);
         assert!(metric_value_tags(&f, &f.registry.topic_records_consumed_rate, &tags2) > 0.0);
         assert!((metric_value_tags(&f, &f.registry.topic_records_consumed_total, &tags2) - 6.0).abs() < EPSILON);
-        // Validate metrics for deprecated topic.
-        assert!(
-            (metric_value_tags(&f, &f.registry.topic_records_per_request_avg, &deprecated_tags) - 3.0).abs() < EPSILON
-        );
-        assert!(metric_value_tags(&f, &f.registry.topic_records_consumed_rate, &deprecated_tags) > 0.0);
-        assert!(
-            (metric_value_tags(&f, &f.registry.topic_records_consumed_total, &deprecated_tags) - 6.0).abs() < EPSILON
-        );
     }
 
     /// `FetchMetricsManagerTest.testPartitionLag`. Runs at the default INFO
     /// level, exactly like the Java test: the per-partition lag sensors are INFO
     /// (full Java parity, no DEBUG gating — see `FetchMetricsManager` ctor doc).
+    ///
+    /// Deviation from the Java test: Java also asserts the deprecated
+    /// period-to-underscore duplicates of the per-partition lag metrics
+    /// (`FetchMetricsManager.maybeRecordDeprecated*`, `@Deprecated`, to be removed
+    /// in Kafka 5.0). They are not translated (CLAUDE.md §3), so their assertions
+    /// are dropped and the metric counts exclude them.
     #[test]
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.FetchMetricsManagerTest#testPartitionLag")]
     fn test_partition_lag() {
@@ -919,10 +709,6 @@ mod tests {
         let p2 = tp2.partition().to_string();
         let tags1 = ["topic", tp1.topic(), "partition", p1.as_str()];
         let tags2 = ["topic", tp2.topic(), "partition", p2.as_str()];
-        let deprecated = FetchMetricsManager::topic_partition_tags(&tp2);
-        let dep_topic = deprecated.get("topic").unwrap().clone();
-        let dep_part = deprecated.get("partition").unwrap().clone();
-        let deprecated_tags = ["topic", dep_topic.as_str(), "partition", dep_part.as_str()];
         let initial = f.metrics.metrics().len();
 
         f.manager.record_partition_lag(&tp1, 14);
@@ -941,24 +727,26 @@ mod tests {
         assert!((metric_value_tags(&f, &f.registry.partition_records_lag_avg, &tags1) - 9.0).abs() < EPSILON);
 
         f.manager.record_partition_lag(&tp2, 7);
-        // Another 6 metrics get registered as deprecated metrics should be reported for tp2.
-        assert_eq!(9, f.metrics.metrics().len() - initial);
+        // Another 3 metrics get registered for tp2.
+        assert_eq!(6, f.metrics.metrics().len() - initial);
         f.manager.record_partition_lag(&tp2, 3);
         f.time.sleep(time_window_ms(&f) + 1);
         f.manager.record_partition_lag(&tp2, 2);
 
-        assert_eq!(9, f.metrics.metrics().len() - initial);
+        assert_eq!(6, f.metrics.metrics().len() - initial);
         assert!((metric_value_template(&f, &f.registry.records_lag_max) - 7.0).abs() < EPSILON);
         assert!((metric_value_tags(&f, &f.registry.partition_records_lag, &tags2) - 2.0).abs() < EPSILON);
         assert!((metric_value_tags(&f, &f.registry.partition_records_lag_max, &tags2) - 7.0).abs() < EPSILON);
         assert!((metric_value_tags(&f, &f.registry.partition_records_lag_avg, &tags2) - 4.0).abs() < EPSILON);
-        // Validate metrics for deprecated topic.
-        assert!((metric_value_tags(&f, &f.registry.partition_records_lag, &deprecated_tags) - 2.0).abs() < EPSILON);
-        assert!((metric_value_tags(&f, &f.registry.partition_records_lag_max, &deprecated_tags) - 7.0).abs() < EPSILON);
-        assert!((metric_value_tags(&f, &f.registry.partition_records_lag_avg, &deprecated_tags) - 4.0).abs() < EPSILON);
     }
 
     /// `FetchMetricsManagerTest.testPartitionLead` (default INFO, see `test_partition_lag`).
+    ///
+    /// Deviation from the Java test: Java also asserts the deprecated
+    /// period-to-underscore duplicates of the per-partition lead metrics
+    /// (`FetchMetricsManager.maybeRecordDeprecated*`, `@Deprecated`, to be removed
+    /// in Kafka 5.0). They are not translated (CLAUDE.md §3), so their assertions
+    /// are dropped and the metric counts exclude them.
     #[test]
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.FetchMetricsManagerTest#testPartitionLead")]
     fn test_partition_lead() {
@@ -970,10 +758,6 @@ mod tests {
         let p2 = tp2.partition().to_string();
         let tags1 = ["topic", tp1.topic(), "partition", p1.as_str()];
         let tags2 = ["topic", tp2.topic(), "partition", p2.as_str()];
-        let deprecated = FetchMetricsManager::topic_partition_tags(&tp2);
-        let dep_topic = deprecated.get("topic").unwrap().clone();
-        let dep_part = deprecated.get("partition").unwrap().clone();
-        let deprecated_tags = ["topic", dep_topic.as_str(), "partition", dep_part.as_str()];
         let initial = f.metrics.metrics().len();
 
         f.manager.record_partition_lead(&tp1, 15);
@@ -991,29 +775,27 @@ mod tests {
         assert!((metric_value_tags(&f, &f.registry.partition_records_lead_avg, &tags1) - 13.0).abs() < EPSILON);
 
         f.manager.record_partition_lead(&tp2, 18);
-        // Another 6 metrics get registered as deprecated metrics should be reported for tp2.
-        assert_eq!(9, f.metrics.metrics().len() - initial);
+        // Another 3 metrics get registered for tp2.
+        assert_eq!(6, f.metrics.metrics().len() - initial);
 
         f.manager.record_partition_lead(&tp2, 12);
         f.time.sleep(time_window_ms(&f) + 1);
         f.manager.record_partition_lead(&tp2, 15);
 
-        assert_eq!(9, f.metrics.metrics().len() - initial);
+        assert_eq!(6, f.metrics.metrics().len() - initial);
         assert!((metric_value_template(&f, &f.registry.records_lead_min) - 12.0).abs() < EPSILON);
         assert!((metric_value_tags(&f, &f.registry.partition_records_lead, &tags2) - 15.0).abs() < EPSILON);
         assert!((metric_value_tags(&f, &f.registry.partition_records_lead_min, &tags2) - 12.0).abs() < EPSILON);
         assert!((metric_value_tags(&f, &f.registry.partition_records_lead_avg, &tags2) - 15.0).abs() < EPSILON);
-        // Validate metrics for deprecated topic.
-        assert!((metric_value_tags(&f, &f.registry.partition_records_lead, &deprecated_tags) - 15.0).abs() < EPSILON);
-        assert!(
-            (metric_value_tags(&f, &f.registry.partition_records_lead_min, &deprecated_tags) - 12.0).abs() < EPSILON
-        );
-        assert!(
-            (metric_value_tags(&f, &f.registry.partition_records_lead_avg, &deprecated_tags) - 15.0).abs() < EPSILON
-        );
     }
 
     /// `FetchMetricsManagerTest.testMaybeUpdateAssignment`
+    ///
+    /// Deviation from the Java test: Java also asserts the deprecated
+    /// period-to-underscore duplicates of the preferred-read-replica metrics
+    /// (`FetchMetricsManager.maybeRecordDeprecated*`, `@Deprecated`, to be removed
+    /// in Kafka 5.0). They are not translated (CLAUDE.md §3), so their assertions
+    /// are dropped and the metric counts exclude them.
     #[test]
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.FetchMetricsManagerTest#testMaybeUpdateAssignment")]
     fn test_maybe_update_assignment() {
@@ -1041,17 +823,13 @@ mod tests {
             .unwrap();
         subscription.lock().unwrap().update_preferred_read_replica(&tp2, 1, 0).unwrap();
         f.manager.maybe_update_assignment(&subscription);
-        // Another 2 metrics get registered as deprecated metrics should be reported for tp2.
-        assert_eq!(3, f.metrics.metrics().len() - initial);
+        // Another metric gets registered for tp2.
+        assert_eq!(2, f.metrics.metrics().len() - initial);
 
         let p1 = tp1.partition().to_string();
         let p2 = tp2.partition().to_string();
         let tags1 = ["topic", tp1.topic(), "partition", p1.as_str()];
         let tags2 = ["topic", tp2.topic(), "partition", p2.as_str()];
-        let deprecated = FetchMetricsManager::topic_partition_tags(&tp2);
-        let dep_topic = deprecated.get("topic").unwrap().clone();
-        let dep_part = deprecated.get("partition").unwrap().clone();
-        let deprecated_tags = ["topic", dep_topic.as_str(), "partition", dep_part.as_str()];
         // Validate preferred read replica metrics.
         assert_eq!(
             -1,
@@ -1060,10 +838,6 @@ mod tests {
         assert_eq!(
             1,
             read_replica_metric_value(&f, &f.registry.partition_preferred_read_replica, &tags2)
-        );
-        assert_eq!(
-            1,
-            read_replica_metric_value(&f, &f.registry.partition_preferred_read_replica, &deprecated_tags)
         );
 
         // Remove tp2 from subscription set.
@@ -1074,7 +848,7 @@ mod tests {
             .unwrap();
         f.manager.maybe_update_assignment(&subscription);
         // Metrics count shall remain same as tp2 should be removed and tp3 gets added.
-        assert_eq!(3, f.metrics.metrics().len() - initial);
+        assert_eq!(2, f.metrics.metrics().len() - initial);
 
         // Remove all partitions.
         subscription.lock().unwrap().assign_from_user(HashSet::new()).unwrap();
@@ -1089,6 +863,12 @@ mod tests {
     /// register at INFO, matching Java. (This previously said it "runs at DEBUG
     /// so the per-partition lag/lead sensors register", which was never true of
     /// this test or of the sensors.)
+    ///
+    /// Deviation from the Java test: Java also asserts the deprecated
+    /// period-to-underscore duplicates of the per-partition lag, lead and preferred-read-replica metrics
+    /// (`FetchMetricsManager.maybeRecordDeprecated*`, `@Deprecated`, to be removed
+    /// in Kafka 5.0). They are not translated (CLAUDE.md §3), so their assertions
+    /// are dropped and the metric counts exclude them.
     #[test]
     #[doc(
         alias = "org.apache.kafka.clients.consumer.internals.FetchMetricsManagerTest#testMaybeUpdateAssignmentWithAdditionalRegisteredMetrics"
@@ -1118,18 +898,18 @@ mod tests {
             .unwrap();
         f.manager.maybe_update_assignment(&subscription);
 
-        // 5 new metrics shall be registered.
-        assert_eq!(5, f.metrics.metrics().len() - additional);
+        // 3 new metrics shall be registered.
+        assert_eq!(3, f.metrics.metrics().len() - additional);
 
-        // Remove 1 partition which has deprecated metrics as well.
+        // Remove 1 partition.
         subscription
             .lock()
             .unwrap()
             .assign_from_user(HashSet::from([tp1.clone(), tp2.clone()]))
             .unwrap();
         f.manager.maybe_update_assignment(&subscription);
-        // For tp2, 14 metrics will be unregistered; we should have 9 removed from `additional`.
-        assert_eq!(9, additional - f.metrics.metrics().len());
+        // For tp3, 7 metrics will be unregistered; we should have 4 removed from `additional`.
+        assert_eq!(4, additional - f.metrics.metrics().len());
 
         // Remove all partitions.
         subscription.lock().unwrap().assign_from_user(HashSet::new()).unwrap();
@@ -1158,53 +938,13 @@ mod tests {
 
         // (b) the DETAILED per-partition sensors ALSO register at INFO (full
         // Java parity, no DEBUG gating): lag (value/max/avg) + lead
-        // (value/min/avg) = 6 new metrics for this non-deprecated topic.
+        // (value/min/avg) = 6 new metrics.
         assert_eq!(6, f.metrics.metrics().len() - initial);
 
         let p = tp.partition().to_string();
         let tags = ["topic", tp.topic(), "partition", p.as_str()];
         assert!((metric_value_tags(&f, &f.registry.partition_records_lag, &tags) - 14.0).abs() < EPSILON);
         assert!((metric_value_tags(&f, &f.registry.partition_records_lead, &tags) - 11.0).abs() < EPSILON);
-    }
-
-    /// Regression: two topic names that differ only by `.` vs `_` must not panic
-    /// the record path.
-    ///
-    /// `my.topic` and `my_topic` produce distinct sensor names, so the second
-    /// call does not reuse the first sensor — but the deprecated variants replace
-    /// periods in the tag value, so both resolve to the same `MetricName` and the
-    /// second `Sensor::add` returns `Err`. That used to hit a `.expect()` on the
-    /// per-fetch path and kill the consumer task; it now logs and skips
-    /// (see `resolve_sensor`).
-    ///
-    /// Note the order: the dotted topic must be recorded first, because only it
-    /// registers a deprecated sensor (`should_report_deprecated_metric` keys off
-    /// the period) and so claims the period-replaced `MetricName`.
-    #[test]
-    fn test_period_vs_underscore_topic_collision_does_not_panic() {
-        let f = setup();
-
-        f.manager.record_bytes_fetched_topic("my.topic", 100);
-        f.manager.record_records_fetched_topic("my.topic", 5);
-
-        // Reaching these at all is the assertion: before the fix the collision
-        // panicked here rather than returning.
-        f.manager.record_bytes_fetched_topic("my_topic", 200);
-        f.manager.record_records_fetched_topic("my_topic", 7);
-
-        // The collision is wider than just the deprecated pair: `my_topic`'s
-        // *non-deprecated* tags are `single_tag("topic", "my_topic")`, which is
-        // exactly what `topic_tags("my.topic")` produces after period
-        // replacement. So `my_topic` loses its metric entirely and the first
-        // registration — the dotted topic's deprecated sensor — keeps the name.
-        //
-        // Asserting the retained value documents that cost precisely: 100 from
-        // `my.topic`, not 200 from `my_topic`.
-        let tags = ["topic", "my_topic"];
-        assert!(
-            (metric_value_tags(&f, &f.registry.topic_fetch_size_avg, &tags) - 100.0).abs() < EPSILON,
-            "the first registration (my.topic's deprecated sensor) should own the collided MetricName"
-        );
     }
 
     /// Exercises the throttle-time sensor (registered + recordable). Java has no
