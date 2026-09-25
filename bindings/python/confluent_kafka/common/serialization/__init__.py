@@ -39,10 +39,10 @@ from ._factories import string_deserializer as string_deserializer
 from ._factories import string_serializer as string_serializer
 from ._factories import uuid_deserializer as uuid_deserializer
 from ._factories import uuid_serializer as uuid_serializer
-from ._lifecycle import Closeable as Closeable
-from ._lifecycle import Configurable as Configurable
-from ._lifecycle import SerdeBase as SerdeBase
+from .closeable import Closeable as Closeable
+from .configurable import Configurable as Configurable
 from .deserializer import Deserializer as Deserializer
+from .serde_base import SerdeBase as SerdeBase
 from .serializer import Serializer as Serializer
 
 __all__ = [
