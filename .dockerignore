@@ -21,6 +21,7 @@ kafka
 
 # Local build/venv trees, none of which are copied into any image.
 venv
+venv-librdkafka
 bindings/c/build
 bindings/python/build
 bindings/python/*.egg-info

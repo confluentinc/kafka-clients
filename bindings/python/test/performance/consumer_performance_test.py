@@ -28,8 +28,11 @@ Methodology (matches the C benchmark):
     producer perf test and the Rust harness).
   * Summary: min/avg + p50/p90/p95/p99/p999, throughput msg/s and MiB/s.
 
-Backends (``CLIENT_VERSION``): ``3`` = the Rust binding (``consumer.py``
-``KafkaConsumer``), ``2`` = ``confluent_kafka.Consumer`` (librdkafka baseline).
+Backends (``CLIENT_VERSION``): ``3`` = the Rust binding
+(``confluent_kafka.consumer.KafkaConsumer`` of this repo's package), ``2`` =
+the PyPI ``confluent_kafka.Consumer`` (librdkafka baseline). The two packages
+share the top-level name ``confluent_kafka``, so each runs in its own venv (see
+``librdkafka_helpers``); the Makefile targets pick the interpreter.
 
 Load generation (like ``consumer-perf/compare/librdkafka_e2e.py``): if
 ``KAFKA_BIN`` is set, spawn ``kafka-producer-perf-test.sh`` and kill it at the
@@ -57,10 +60,11 @@ import time
 import pytest
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-_BINDINGS = os.path.dirname(os.path.dirname(_HERE))  # bindings/python (consumer.py, _confluentkafka)
-for _p in (_HERE, _BINDINGS):
-    if _p not in sys.path:
-        sys.path.insert(0, _p)
+# Only this directory (performance_common, librdkafka_helpers). Not
+# bindings/python: its confluent_kafka/ source tree would shadow the PyPI
+# package of the same name in the CLIENT_VERSION=2 baseline venv.
+if _HERE not in sys.path:
+    sys.path.insert(0, _HERE)
 from performance_common import Metrics, MAX_LATENCY_MS, percentile_from_hist, recreate_topic  # noqa: E402
 
 
@@ -154,10 +158,12 @@ class Config:
 # Consumer backends — normalized to a poll() yielding (timestamp_ms, nbytes).
 # ---------------------------------------------------------------------------
 class _RustConsumer:
-    """bindings/python/consumer.py KafkaConsumer (CLIENT_VERSION=3)."""
+    """confluent_kafka.consumer.KafkaConsumer, this repo's package
+    (CLIENT_VERSION=3)."""
 
     def __init__(self, cfg):
-        from consumer import KafkaConsumer
+        from confluent_kafka.common.serialization import memoryview_deserializer
+        from confluent_kafka.consumer import KafkaConsumer
         custom_conf = {} if cfg.use_defaults else {
             "fetch.min.bytes": str(cfg.fetch_min_bytes),
             "max.partition.fetch.bytes": str(cfg.fetch_max_bytes),
@@ -174,11 +180,15 @@ class _RustConsumer:
             **custom_conf
         }
         conf.update(sasl_config_from_env(v2=False))
-        self._c = KafkaConsumer(conf)
+        # memoryview deserializers: key and value stay zero-copy views over the
+        # fetch batch, so no per-record copy is added to what is measured.
+        self._c = KafkaConsumer(configs=conf,
+                                key_deserializer=memoryview_deserializer(),
+                                value_deserializer=memoryview_deserializer())
         self._timeout = cfg.poll_timeout_ms / 1000.0
 
     def subscribe(self, topic):
-        self._c.subscribe([topic])
+        self._c.subscribe(topics=[topic])
 
     def assigned(self):
         try:
@@ -188,12 +198,12 @@ class _RustConsumer:
 
     def poll_batch(self):
         """Yield (timestamp_ms, nbytes) for each record in one poll."""
-        records = self._c.poll(self._timeout)
+        records = self._c.poll(timeout=self._timeout)
         for r in records:
-            value = r.value
-            key = r.key
+            value = r.value()
+            key = r.key()
             nbytes = (len(value) if value is not None else 0) + (len(key) if key is not None else 0)
-            yield r.timestamp, nbytes
+            yield r.timestamp(), nbytes
 
     def poll_single(self):
         """POLL_SINGLE: the Rust binding exposes no single-message API, so reuse
@@ -273,10 +283,12 @@ def build_consumer(cfg):
 # async; poll_batch is an async generator.
 # ---------------------------------------------------------------------------
 class _AsyncRustConsumer:
-    """bindings/python/consumer.py AsyncKafkaConsumer (CLIENT_VERSION=3)."""
+    """confluent_kafka.consumer.AsyncKafkaConsumer, this repo's package
+    (CLIENT_VERSION=3)."""
 
     def __init__(self, cfg):
-        from consumer import AsyncKafkaConsumer
+        from confluent_kafka.common.serialization import memoryview_deserializer
+        from confluent_kafka.consumer import AsyncKafkaConsumer
         custom_conf = {} if cfg.use_defaults else {
             "fetch.min.bytes": str(cfg.fetch_min_bytes),
             "max.partition.fetch.bytes": str(cfg.fetch_max_bytes),
@@ -293,11 +305,14 @@ class _AsyncRustConsumer:
             **custom_conf
         }
         conf.update(sasl_config_from_env(v2=False))
-        self._c = AsyncKafkaConsumer(conf)
+        # memoryview deserializers, as in _RustConsumer.
+        self._c = AsyncKafkaConsumer(configs=conf,
+                                     key_deserializer=memoryview_deserializer(),
+                                     value_deserializer=memoryview_deserializer())
         self._timeout = cfg.poll_timeout_ms / 1000.0
 
     async def subscribe(self, topic):
-        await self._c.subscribe([topic])
+        await self._c.subscribe(topics=[topic])
 
     async def assigned(self):
         # assignment() is a sync (non-blocking) getter on the Rust consumer.
@@ -307,12 +322,12 @@ class _AsyncRustConsumer:
             return False
 
     async def poll_batch(self):
-        records = await self._c.poll(self._timeout)
+        records = await self._c.poll(timeout=self._timeout)
         for r in records:
-            value = r.value
-            key = r.key
+            value = r.value()
+            key = r.key()
             nbytes = (len(value) if value is not None else 0) + (len(key) if key is not None else 0)
-            yield r.timestamp, nbytes
+            yield r.timestamp(), nbytes
 
     async def poll_single(self):
         """POLL_SINGLE: no single-message API on the Rust async binding; reuse
