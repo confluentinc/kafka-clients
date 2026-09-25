@@ -30,9 +30,8 @@ namespace Confluent.Kafka.GrpcServer;
 /// Maps the <c>AdminService</c> RPCs onto the binding's <see cref="KafkaAdminClient"/> /
 /// <see cref="MockAdminClient"/> — the .NET port of <c>grpc_server.py</c>'s
 /// <c>AdminService</c> (M15/P12). Slices G1 (topics &amp; partitions), G2 (cluster, configs,
-/// log dirs), G3 (elections, reassignments, offsets), G6 (producers &amp; transactions) and G4
-/// (groups) are implemented here; G5 (acls, quotas, scram, tokens, features) is added
-/// additively by a later checkpoint and answers from the generated base until then.
+/// log dirs), G3 (elections, reassignments, offsets), G6 (producers &amp; transactions), G4
+/// (groups) and G5 (acls, quotas, scram, tokens, features) are all implemented here.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -1652,6 +1651,540 @@ internal sealed class AdminServiceImpl : Proto.AdminService.AdminServiceBase, ID
         {
             return new Proto.VoidKeyedResponse { Error = Translate.ToProto(ex) };
         }
+    }
+
+    // -- ACLs, quotas, SCRAM, tokens & features (slice G5) -------------------------------
+
+    /// <inheritdoc/>
+    public override async Task<Proto.VoidKeyedResponse> CreateAcls(Proto.CreateAclsRequest request, ServerCallContext context)
+    {
+        IAdmin? admin = Get(request.AdminId);
+        if (admin is null)
+        {
+            return new Proto.VoidKeyedResponse { Error = Translate.UnknownAdmin(request.AdminId) };
+        }
+
+        try
+        {
+            CreateAclsResult result = admin.CreateAcls(
+                TranslateAdmin.AclBindings(request.Acls),
+                new CreateAclsOptions
+                {
+                    TimeoutMs = TranslateAdmin.Timeout(request.HasTimeoutMs, request.TimeoutMs),
+                });
+
+            return await TranslateAdmin.VoidResponse(result.Values, TranslateAdmin.AclBindingKey)
+                .ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            return new Proto.VoidKeyedResponse { Error = Translate.ToProto(ex) };
+        }
+    }
+
+    /// <inheritdoc/>
+    public override async Task<Proto.DescribeAclsResponse> DescribeAcls(Proto.DescribeAclsRequest request, ServerCallContext context)
+    {
+        IAdmin? admin = Get(request.AdminId);
+        if (admin is null)
+        {
+            return new Proto.DescribeAclsResponse { Error = Translate.UnknownAdmin(request.AdminId) };
+        }
+
+        try
+        {
+            if (request.Filter is null)
+            {
+                return new Proto.DescribeAclsResponse
+                {
+                    Error = TranslateAdmin.RequestError("describe_acls requires a filter"),
+                };
+            }
+
+            DescribeAclsResult result = admin.DescribeAcls(
+                TranslateAdmin.AclFilter(request.Filter),
+                new DescribeAclsOptions
+                {
+                    TimeoutMs = TranslateAdmin.Timeout(request.HasTimeoutMs, request.TimeoutMs),
+                });
+
+            // Whole-value: one future for the whole call, so an empty list is a successful
+            // "nothing matched" rather than a per-binding error arm.
+            Proto.DescribeAclsResponse response = new Proto.DescribeAclsResponse();
+            foreach (AclBinding binding in await result.Values().ConfigureAwait(false))
+            {
+                response.Acls.Add(TranslateAdmin.AclBindingToProto(binding));
+            }
+
+            return response;
+        }
+        catch (Exception ex)
+        {
+            return new Proto.DescribeAclsResponse { Error = Translate.ToProto(ex) };
+        }
+    }
+
+    /// <inheritdoc/>
+    public override async Task<Proto.DeleteAclsResponse> DeleteAcls(Proto.DeleteAclsRequest request, ServerCallContext context)
+    {
+        IAdmin? admin = Get(request.AdminId);
+        if (admin is null)
+        {
+            return new Proto.DeleteAclsResponse { Error = Translate.UnknownAdmin(request.AdminId) };
+        }
+
+        try
+        {
+            DeleteAclsResult result = admin.DeleteAcls(
+                TranslateAdmin.AclFilters(request.Filters),
+                new DeleteAclsOptions
+                {
+                    TimeoutMs = TranslateAdmin.Timeout(request.HasTimeoutMs, request.TimeoutMs),
+                });
+
+            Proto.DeleteAclsResponse response = new Proto.DeleteAclsResponse();
+            foreach (KeyValuePair<AclBindingFilter, Task<DeleteAclsResult.FilterResults>> pair in result.Values)
+            {
+                (DeleteAclsResult.FilterResults results, Proto.KafkaError? error) =
+                    await TranslateAdmin.Resolve(pair.Value).ConfigureAwait(false);
+                Proto.DeleteAclsEntry entry = new Proto.DeleteAclsEntry
+                {
+                    Key = TranslateAdmin.AclFilterKey(pair.Key),
+                };
+                if (error is not null)
+                {
+                    entry.Error = error;
+                }
+                else
+                {
+                    entry.Value = FilterResultsToProto(results);
+                }
+
+                response.Entries.Add(entry);
+            }
+
+            return response;
+        }
+        catch (Exception ex)
+        {
+            return new Proto.DeleteAclsResponse { Error = Translate.ToProto(ex) };
+        }
+    }
+
+    /// <inheritdoc/>
+    public override async Task<Proto.DescribeClientQuotasResponse> DescribeClientQuotas(Proto.DescribeClientQuotasRequest request, ServerCallContext context)
+    {
+        IAdmin? admin = Get(request.AdminId);
+        if (admin is null)
+        {
+            return new Proto.DescribeClientQuotasResponse { Error = Translate.UnknownAdmin(request.AdminId) };
+        }
+
+        try
+        {
+            ClientQuotaFilter? filter = TranslateAdmin.QuotaFilter(request, out string? invalid);
+            if (filter is null)
+            {
+                return new Proto.DescribeClientQuotasResponse
+                {
+                    Error = TranslateAdmin.RequestError(invalid!),
+                };
+            }
+
+            DescribeClientQuotasResult result = admin.DescribeClientQuotas(
+                filter,
+                new DescribeClientQuotasOptions
+                {
+                    TimeoutMs = TranslateAdmin.Timeout(request.HasTimeoutMs, request.TimeoutMs),
+                });
+
+            // A removed quota is absent from the inner map rather than reported as zero, which
+            // is the only observable separating a removal from a zero-valued set.
+            Proto.DescribeClientQuotasResponse response = new Proto.DescribeClientQuotasResponse();
+            IReadOnlyDictionary<ClientQuotaEntity, IReadOnlyDictionary<string, double>> entities =
+                await result.Entities().ConfigureAwait(false);
+            foreach (KeyValuePair<ClientQuotaEntity, IReadOnlyDictionary<string, double>> pair in entities)
+            {
+                Proto.EntityQuotas reported = new Proto.EntityQuotas
+                {
+                    Entity = TranslateAdmin.QuotaEntityToProto(pair.Key),
+                };
+                foreach (KeyValuePair<string, double> quota in pair.Value)
+                {
+                    reported.Values.Add(new Proto.QuotaValue { Key = quota.Key, Value = quota.Value });
+                }
+
+                response.Entities.Add(reported);
+            }
+
+            return response;
+        }
+        catch (Exception ex)
+        {
+            return new Proto.DescribeClientQuotasResponse { Error = Translate.ToProto(ex) };
+        }
+    }
+
+    /// <inheritdoc/>
+    public override async Task<Proto.VoidKeyedResponse> AlterClientQuotas(Proto.AlterClientQuotasRequest request, ServerCallContext context)
+    {
+        IAdmin? admin = Get(request.AdminId);
+        if (admin is null)
+        {
+            return new Proto.VoidKeyedResponse { Error = Translate.UnknownAdmin(request.AdminId) };
+        }
+
+        try
+        {
+            AlterClientQuotasResult result = admin.AlterClientQuotas(
+                TranslateAdmin.QuotaAlterations(request.Entries),
+                new AlterClientQuotasOptions
+                {
+                    TimeoutMs = TranslateAdmin.Timeout(request.HasTimeoutMs, request.TimeoutMs),
+                    ValidateOnly = request.ValidateOnly,
+                });
+
+            return await TranslateAdmin.VoidResponse(result.Values, TranslateAdmin.QuotaEntityKey)
+                .ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            return new Proto.VoidKeyedResponse { Error = Translate.ToProto(ex) };
+        }
+    }
+
+    /// <inheritdoc/>
+    public override async Task<Proto.DescribeUserScramCredentialsResponse> DescribeUserScramCredentials(Proto.DescribeUserScramCredentialsRequest request, ServerCallContext context)
+    {
+        IAdmin? admin = Get(request.AdminId);
+        if (admin is null)
+        {
+            return new Proto.DescribeUserScramCredentialsResponse
+            {
+                Error = Translate.UnknownAdmin(request.AdminId),
+            };
+        }
+
+        try
+        {
+            // An empty `users` is Java's no-argument overload: describe every user.
+            DescribeUserScramCredentialsResult result = admin.DescribeUserScramCredentials(
+                new List<string>(request.Users),
+                new DescribeUserScramCredentialsOptions
+                {
+                    TimeoutMs = TranslateAdmin.Timeout(request.HasTimeoutMs, request.TimeoutMs),
+                });
+
+            // RAW per-user rows, so the client can rebuild all three Java views. users()
+            // excludes RESOURCE_NOT_FOUND users, so all()'s keys supply those; all() itself
+            // faults on a hard per-user error, and then every non-RNF user is already listed.
+            List<string> candidates = new List<string>(await result.Users().ConfigureAwait(false));
+            try
+            {
+                foreach (string user in (await result.All().ConfigureAwait(false)).Keys)
+                {
+                    if (!candidates.Contains(user))
+                    {
+                        candidates.Add(user);
+                    }
+                }
+            }
+            catch (KafkaException)
+            {
+            }
+
+            Proto.DescribeUserScramCredentialsResponse response =
+                new Proto.DescribeUserScramCredentialsResponse();
+            foreach (string user in candidates)
+            {
+                response.Entries.Add(await ScramCredentialsEntry(result, user).ConfigureAwait(false));
+            }
+
+            return response;
+        }
+        catch (Exception ex)
+        {
+            return new Proto.DescribeUserScramCredentialsResponse { Error = Translate.ToProto(ex) };
+        }
+    }
+
+    /// <inheritdoc/>
+    public override async Task<Proto.VoidKeyedResponse> AlterUserScramCredentials(Proto.AlterUserScramCredentialsRequest request, ServerCallContext context)
+    {
+        IAdmin? admin = Get(request.AdminId);
+        if (admin is null)
+        {
+            return new Proto.VoidKeyedResponse { Error = Translate.UnknownAdmin(request.AdminId) };
+        }
+
+        try
+        {
+            AlterUserScramCredentialsResult result = admin.AlterUserScramCredentials(
+                TranslateAdmin.ScramAlterations(request.Alterations),
+                new AlterUserScramCredentialsOptions
+                {
+                    TimeoutMs = TranslateAdmin.Timeout(request.HasTimeoutMs, request.TimeoutMs),
+                });
+
+            return await TranslateAdmin.VoidResponse(result.Values, TranslateAdmin.NameKey)
+                .ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            return new Proto.VoidKeyedResponse { Error = Translate.ToProto(ex) };
+        }
+    }
+
+    /// <inheritdoc/>
+    public override async Task<Proto.CreateDelegationTokenResponse> CreateDelegationToken(Proto.CreateDelegationTokenRequest request, ServerCallContext context)
+    {
+        IAdmin? admin = Get(request.AdminId);
+        if (admin is null)
+        {
+            return new Proto.CreateDelegationTokenResponse { Error = Translate.UnknownAdmin(request.AdminId) };
+        }
+
+        try
+        {
+            // An absent owner leaves Java's field unset, making the requesting principal the
+            // owner; both halves of the principal are absent together.
+            CreateDelegationTokenOptions options = new CreateDelegationTokenOptions
+            {
+                TimeoutMs = TranslateAdmin.Timeout(request.HasTimeoutMs, request.TimeoutMs),
+                Renewers = TranslateAdmin.Principals(request.Renewers),
+                MaxLifetimeMs = request.MaxLifetimeMs,
+            };
+            if (request.Owner is not null)
+            {
+                options.Owner = TranslateAdmin.Principals(new[] { request.Owner })[0];
+            }
+
+            CreateDelegationTokenResult result = admin.CreateDelegationToken(options);
+            DelegationToken token = await result.DelegationToken().ConfigureAwait(false);
+            return new Proto.CreateDelegationTokenResponse
+            {
+                Token = TranslateAdmin.DelegationTokenToProto(token),
+            };
+        }
+        catch (Exception ex)
+        {
+            return new Proto.CreateDelegationTokenResponse { Error = Translate.ToProto(ex) };
+        }
+    }
+
+    /// <inheritdoc/>
+    public override async Task<Proto.DelegationTokenExpiryResponse> RenewDelegationToken(Proto.RenewDelegationTokenRequest request, ServerCallContext context)
+    {
+        IAdmin? admin = Get(request.AdminId);
+        if (admin is null)
+        {
+            return new Proto.DelegationTokenExpiryResponse { Error = Translate.UnknownAdmin(request.AdminId) };
+        }
+
+        try
+        {
+            RenewDelegationTokenResult result = admin.RenewDelegationToken(
+                request.Hmac.ToByteArray(),
+                new RenewDelegationTokenOptions
+                {
+                    TimeoutMs = TranslateAdmin.Timeout(request.HasTimeoutMs, request.TimeoutMs),
+                    RenewTimePeriodMs = request.RenewTimePeriodMs,
+                });
+
+            return new Proto.DelegationTokenExpiryResponse
+            {
+                ExpiryTimestampMs = await result.ExpiryTimestamp().ConfigureAwait(false),
+            };
+        }
+        catch (Exception ex)
+        {
+            return new Proto.DelegationTokenExpiryResponse { Error = Translate.ToProto(ex) };
+        }
+    }
+
+    /// <inheritdoc/>
+    public override async Task<Proto.DelegationTokenExpiryResponse> ExpireDelegationToken(Proto.ExpireDelegationTokenRequest request, ServerCallContext context)
+    {
+        IAdmin? admin = Get(request.AdminId);
+        if (admin is null)
+        {
+            return new Proto.DelegationTokenExpiryResponse { Error = Translate.UnknownAdmin(request.AdminId) };
+        }
+
+        try
+        {
+            ExpireDelegationTokenResult result = admin.ExpireDelegationToken(
+                request.Hmac.ToByteArray(),
+                new ExpireDelegationTokenOptions
+                {
+                    TimeoutMs = TranslateAdmin.Timeout(request.HasTimeoutMs, request.TimeoutMs),
+                    ExpiryTimePeriodMs = request.ExpiryTimePeriodMs,
+                });
+
+            return new Proto.DelegationTokenExpiryResponse
+            {
+                ExpiryTimestampMs = await result.ExpiryTimestamp().ConfigureAwait(false),
+            };
+        }
+        catch (Exception ex)
+        {
+            return new Proto.DelegationTokenExpiryResponse { Error = Translate.ToProto(ex) };
+        }
+    }
+
+    /// <inheritdoc/>
+    public override async Task<Proto.DescribeDelegationTokenResponse> DescribeDelegationToken(Proto.DescribeDelegationTokenRequest request, ServerCallContext context)
+    {
+        IAdmin? admin = Get(request.AdminId);
+        if (admin is null)
+        {
+            return new Proto.DescribeDelegationTokenResponse { Error = Translate.UnknownAdmin(request.AdminId) };
+        }
+
+        try
+        {
+            DescribeDelegationTokenResult result = admin.DescribeDelegationToken(
+                new DescribeDelegationTokenOptions
+                {
+                    TimeoutMs = TranslateAdmin.Timeout(request.HasTimeoutMs, request.TimeoutMs),
+                    Owners = TranslateAdmin.TokenOwners(request.Owners),
+                });
+
+            Proto.DescribeDelegationTokenResponse response = new Proto.DescribeDelegationTokenResponse();
+            foreach (DelegationToken token in await result.DelegationTokens().ConfigureAwait(false))
+            {
+                response.Tokens.Add(TranslateAdmin.DelegationTokenToProto(token));
+            }
+
+            return response;
+        }
+        catch (Exception ex)
+        {
+            return new Proto.DescribeDelegationTokenResponse { Error = Translate.ToProto(ex) };
+        }
+    }
+
+    /// <inheritdoc/>
+    public override async Task<Proto.DescribeFeaturesResponse> DescribeFeatures(Proto.DescribeFeaturesRequest request, ServerCallContext context)
+    {
+        IAdmin? admin = Get(request.AdminId);
+        if (admin is null)
+        {
+            return new Proto.DescribeFeaturesResponse { Error = Translate.UnknownAdmin(request.AdminId) };
+        }
+
+        try
+        {
+            // An absent node_id is Java's empty OptionalInt; node 0 is a legal broker, so
+            // presence is what carries the absence.
+            DescribeFeaturesResult result = admin.DescribeFeatures(
+                new DescribeFeaturesOptions
+                {
+                    TimeoutMs = TranslateAdmin.Timeout(request.HasTimeoutMs, request.TimeoutMs),
+                    NodeId = request.HasNodeId ? request.NodeId : (int?)null,
+                });
+
+            FeatureMetadata metadata = await result.FeatureMetadata().ConfigureAwait(false);
+            return new Proto.DescribeFeaturesResponse
+            {
+                Metadata = TranslateAdmin.FeatureMetadataToProto(metadata),
+            };
+        }
+        catch (Exception ex)
+        {
+            return new Proto.DescribeFeaturesResponse { Error = Translate.ToProto(ex) };
+        }
+    }
+
+    /// <inheritdoc/>
+    public override async Task<Proto.VoidKeyedResponse> UpdateFeatures(Proto.UpdateFeaturesRequest request, ServerCallContext context)
+    {
+        IAdmin? admin = Get(request.AdminId);
+        if (admin is null)
+        {
+            return new Proto.VoidKeyedResponse { Error = Translate.UnknownAdmin(request.AdminId) };
+        }
+
+        try
+        {
+            Dictionary<string, FeatureUpdate>? updates =
+                TranslateAdmin.FeatureUpdates(request.FeatureUpdates, out string? invalid);
+            if (updates is null)
+            {
+                return new Proto.VoidKeyedResponse { Error = TranslateAdmin.RequestError(invalid!) };
+            }
+
+            // An empty map is not a no-op: Java rejects it synchronously, and that throw is
+            // exactly what the top-level error is for.
+            UpdateFeaturesResult result = admin.UpdateFeatures(
+                updates,
+                new UpdateFeaturesOptions
+                {
+                    TimeoutMs = TranslateAdmin.Timeout(request.HasTimeoutMs, request.TimeoutMs),
+                    ValidateOnly = request.ValidateOnly,
+                });
+
+            return await TranslateAdmin.VoidResponse(result.Values, TranslateAdmin.NameKey)
+                .ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            return new Proto.VoidKeyedResponse { Error = Translate.ToProto(ex) };
+        }
+    }
+
+    /// <summary>
+    /// One <c>deleteAcls</c> filter's matched ACLs — envelope exception 3: the per-filter future
+    /// resolved, yet an individual matched ACL can still have failed to delete. Both halves are
+    /// written independently, so a backend that set neither or both stays visible.
+    /// </summary>
+    private static Proto.FilterResults FilterResultsToProto(DeleteAclsResult.FilterResults results)
+    {
+        Proto.FilterResults proto = new Proto.FilterResults();
+        foreach (DeleteAclsResult.FilterResult result in results.Values)
+        {
+            Proto.DeletedAcl deleted = new Proto.DeletedAcl();
+            if (result.Binding is not null)
+            {
+                deleted.Binding = TranslateAdmin.AclBindingToProto(result.Binding);
+            }
+
+            if (result.Error is not null)
+            {
+                deleted.Exception = Translate.ToProto(result.Error);
+            }
+
+            proto.Values.Add(deleted);
+        }
+
+        return proto;
+    }
+
+    /// <summary>
+    /// One RAW <c>describeUserScramCredentials</c> row: the user, plus either its credentials or
+    /// the wire error code that <c>description(user)</c> faulted with.
+    /// </summary>
+    private static async Task<Proto.DescribeUserScramCredentialsEntry> ScramCredentialsEntry(
+        DescribeUserScramCredentialsResult result, string user)
+    {
+        Proto.DescribeUserScramCredentialsEntry entry =
+            new Proto.DescribeUserScramCredentialsEntry { User = user };
+        try
+        {
+            UserScramCredentialsDescription description =
+                await result.Description(user).ConfigureAwait(false);
+            foreach (ScramCredentialInfo info in description.CredentialInfos)
+            {
+                entry.CredentialInfos.Add(TranslateAdmin.ScramInfoToProto(info));
+            }
+        }
+        catch (KafkaException ex)
+        {
+            entry.ErrorCode = ex.Code;
+            entry.ErrorMessage = ex.Message ?? string.Empty;
+        }
+
+        return entry;
     }
 
     /// <summary>Proto <c>TopicPartition</c>s -&gt; binding ones.</summary>

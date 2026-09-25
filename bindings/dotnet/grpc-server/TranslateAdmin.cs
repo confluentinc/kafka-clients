@@ -18,6 +18,8 @@ using System.Threading.Tasks;
 
 using Confluent.Kafka.Admin;
 
+using Google.Protobuf;
+
 using Proto = Confluent.Kafka.Test;
 
 namespace Confluent.Kafka.GrpcServer;
@@ -1223,6 +1225,386 @@ internal static class TranslateAdmin
         }
 
         return ordered;
+    }
+
+    // -- ACLs, quotas, SCRAM, tokens & features (slice G5) --------------------------------
+
+    /// <summary>An <c>acl_binding</c>-keyed <c>ResultKey</c>.</summary>
+    internal static Proto.ResultKey AclBindingKey(AclBinding binding) =>
+        new Proto.ResultKey { AclBinding = AclBindingToProto(binding) };
+
+    /// <summary>An <c>acl_binding_filter</c>-keyed <c>ResultKey</c>.</summary>
+    internal static Proto.ResultKey AclFilterKey(AclBindingFilter filter) =>
+        new Proto.ResultKey { AclBindingFilter = AclFilterToProto(filter) };
+
+    /// <summary>A <c>client_quota_entity</c>-keyed <c>ResultKey</c>.</summary>
+    internal static Proto.ResultKey QuotaEntityKey(ClientQuotaEntity entity) =>
+        new Proto.ResultKey { ClientQuotaEntity = QuotaEntityToProto(entity) };
+
+    /// <summary>
+    /// Proto <c>AclBinding</c>s -&gt; binding ones. Every field is required: an ACL to be
+    /// <em>created</em> has no match-any state and no nullable string.
+    /// </summary>
+    internal static List<AclBinding> AclBindings(IEnumerable<Proto.AclBinding> protos)
+    {
+        List<AclBinding> bindings = new List<AclBinding>();
+        foreach (Proto.AclBinding proto in protos)
+        {
+            bindings.Add(new AclBinding(
+                new ResourcePattern(
+                    (ResourceType)proto.ResourceType, proto.ResourceName, (PatternType)proto.PatternType),
+                new AccessControlEntry(
+                    proto.Principal,
+                    proto.Host,
+                    (AclOperation)proto.Operation,
+                    (AclPermissionType)proto.PermissionType)));
+        }
+
+        return bindings;
+    }
+
+    /// <summary>
+    /// Proto <c>AclBindingFilter</c> -&gt; binding one. The three nullable strings are read
+    /// through presence, never through an emptiness test: absent is Java's match-any and
+    /// <c>""</c> is a literal name.
+    /// </summary>
+    internal static AclBindingFilter AclFilter(Proto.AclBindingFilter proto) =>
+        new AclBindingFilter(
+            new ResourcePatternFilter(
+                (ResourceType)proto.ResourceType,
+                proto.HasResourceName ? proto.ResourceName : null,
+                (PatternType)proto.PatternType),
+            new AccessControlEntryFilter(
+                proto.HasPrincipal ? proto.Principal : null,
+                proto.HasHost ? proto.Host : null,
+                (AclOperation)proto.Operation,
+                (AclPermissionType)proto.PermissionType));
+
+    /// <summary>Proto <c>AclBindingFilter</c>s -&gt; binding ones.</summary>
+    internal static List<AclBindingFilter> AclFilters(IEnumerable<Proto.AclBindingFilter> protos)
+    {
+        List<AclBindingFilter> filters = new List<AclBindingFilter>();
+        foreach (Proto.AclBindingFilter proto in protos)
+        {
+            filters.Add(AclFilter(proto));
+        }
+
+        return filters;
+    }
+
+    /// <summary>Binding <see cref="AclBinding"/> -&gt; proto.</summary>
+    internal static Proto.AclBinding AclBindingToProto(AclBinding binding) => new Proto.AclBinding
+    {
+        ResourceType = (int)binding.Pattern.ResourceType,
+        ResourceName = binding.Pattern.Name,
+        PatternType = (int)binding.Pattern.PatternType,
+        Principal = binding.Entry.Principal,
+        Host = binding.Entry.Host,
+        Operation = (int)binding.Entry.Operation,
+        PermissionType = (int)binding.Entry.PermissionType,
+    };
+
+    /// <summary>
+    /// Binding <see cref="AclBindingFilter"/> -&gt; proto, keeping each of the three nullable
+    /// strings absent when it is <see langword="null"/>.
+    /// </summary>
+    internal static Proto.AclBindingFilter AclFilterToProto(AclBindingFilter filter)
+    {
+        Proto.AclBindingFilter proto = new Proto.AclBindingFilter
+        {
+            ResourceType = (int)filter.PatternFilter.ResourceType,
+            PatternType = (int)filter.PatternFilter.PatternType,
+            Operation = (int)filter.EntryFilter.Operation,
+            PermissionType = (int)filter.EntryFilter.PermissionType,
+        };
+        if (filter.PatternFilter.Name is not null)
+        {
+            proto.ResourceName = filter.PatternFilter.Name;
+        }
+
+        if (filter.EntryFilter.Principal is not null)
+        {
+            proto.Principal = filter.EntryFilter.Principal;
+        }
+
+        if (filter.EntryFilter.Host is not null)
+        {
+            proto.Host = filter.EntryFilter.Host;
+        }
+
+        return proto;
+    }
+
+    /// <summary>
+    /// Binding <see cref="ClientQuotaEntity"/> -&gt; proto, keeping a null entity name absent —
+    /// that is the built-in default entity of its type, not the entity named <c>""</c>.
+    /// </summary>
+    internal static Proto.ClientQuotaEntity QuotaEntityToProto(ClientQuotaEntity entity)
+    {
+        Proto.ClientQuotaEntity proto = new Proto.ClientQuotaEntity();
+        foreach (KeyValuePair<string, string?> pair in entity.Entries)
+        {
+            Proto.ClientQuotaEntityEntry entry = new Proto.ClientQuotaEntityEntry { EntityType = pair.Key };
+            if (pair.Value is not null)
+            {
+                entry.EntityName = pair.Value;
+            }
+
+            proto.Entries.Add(entry);
+        }
+
+        return proto;
+    }
+
+    /// <summary>
+    /// Proto <c>ClientQuotaEntity</c> -&gt; binding one. An unset submessage is the empty entity,
+    /// which is what Python reads from its default instance.
+    /// </summary>
+    internal static ClientQuotaEntity QuotaEntity(Proto.ClientQuotaEntity? proto)
+    {
+        Dictionary<string, string?> entries = new Dictionary<string, string?>(StringComparer.Ordinal);
+        if (proto is not null)
+        {
+            foreach (Proto.ClientQuotaEntityEntry entry in proto.Entries)
+            {
+                entries[entry.EntityType] = entry.HasEntityName ? entry.EntityName : null;
+            }
+        }
+
+        return new ClientQuotaEntity(entries);
+    }
+
+    /// <summary>
+    /// <c>DescribeClientQuotasRequest</c> -&gt; <see cref="ClientQuotaFilter"/>. The named kind is
+    /// resolved through the binding's own public factories rather than through a
+    /// <c>MATCH_TYPE_*</c> table written here, so a disagreement between backends is a finding.
+    /// </summary>
+    /// <returns>
+    /// The filter, or <see langword="null"/> with <paramref name="invalid"/> set.
+    /// <c>MATCH_KIND_UNSPECIFIED</c> is never sent and is rejected rather than defaulted: a
+    /// defaulted EXACT would turn a dropped field into a silently valid filter.
+    /// </returns>
+    internal static ClientQuotaFilter? QuotaFilter(
+        Proto.DescribeClientQuotasRequest request, out string? invalid)
+    {
+        List<ClientQuotaFilterComponent> components = new List<ClientQuotaFilterComponent>();
+        foreach (Proto.ClientQuotaFilterComponent component in request.Components)
+        {
+            switch (component.MatchKind)
+            {
+                case Proto.ClientQuotaMatchKind.MatchKindExact:
+                    if (!component.HasMatchName)
+                    {
+                        invalid = "ClientQuotaFilterComponent with MATCH_KIND_EXACT carries no match_name";
+                        return null;
+                    }
+
+                    components.Add(ClientQuotaFilterComponent.OfEntity(component.EntityType, component.MatchName));
+                    break;
+                case Proto.ClientQuotaMatchKind.MatchKindDefault:
+                    components.Add(ClientQuotaFilterComponent.OfDefaultEntity(component.EntityType));
+                    break;
+                case Proto.ClientQuotaMatchKind.MatchKindAny:
+                    components.Add(ClientQuotaFilterComponent.OfEntityType(component.EntityType));
+                    break;
+                default:
+                    invalid = $"ClientQuotaFilterComponent has no match_kind (got {(int)component.MatchKind})";
+                    return null;
+            }
+        }
+
+        invalid = null;
+        return request.Strict
+            ? ClientQuotaFilter.ContainsOnly(components)
+            : ClientQuotaFilter.Contains(components);
+    }
+
+    /// <summary>
+    /// Proto <c>ClientQuotaAlteration</c>s -&gt; binding ones. An op with no <c>value</c> is
+    /// Java's null <see langword="double"/>, which <b>removes</b> the quota; presence is the
+    /// discriminant, since every finite double including 0 is a legal quota.
+    /// </summary>
+    internal static List<ClientQuotaAlteration> QuotaAlterations(
+        IEnumerable<Proto.ClientQuotaAlteration> protos)
+    {
+        List<ClientQuotaAlteration> alterations = new List<ClientQuotaAlteration>();
+        foreach (Proto.ClientQuotaAlteration proto in protos)
+        {
+            List<ClientQuotaAlteration.Op> ops = new List<ClientQuotaAlteration.Op>();
+            foreach (Proto.ClientQuotaOp op in proto.Ops)
+            {
+                ops.Add(new ClientQuotaAlteration.Op(op.Key, op.HasValue ? op.Value : (double?)null));
+            }
+
+            alterations.Add(new ClientQuotaAlteration(QuotaEntity(proto.Entity), ops));
+        }
+
+        return alterations;
+    }
+
+    /// <summary>Binding <see cref="ScramCredentialInfo"/> -&gt; proto.</summary>
+    internal static Proto.ScramCredentialInfo ScramInfoToProto(ScramCredentialInfo info) =>
+        new Proto.ScramCredentialInfo
+        {
+            Mechanism = (int)info.Mechanism,
+            Iterations = info.Iterations,
+        };
+
+    /// <summary>
+    /// Proto <c>UserScramCredentialAlteration</c>s -&gt; the binding's upsertion / deletion
+    /// objects. <c>is_deletion</c> is the discriminant and cannot be inferred — both forms carry
+    /// a user and a mechanism. An absent salt selects the salt-<em>generating</em> constructor
+    /// while a present-but-empty one selects the salt-supplying constructor with a zero-length
+    /// salt, so presence is the test, not emptiness.
+    /// </summary>
+    internal static List<UserScramCredentialAlteration> ScramAlterations(
+        IEnumerable<Proto.UserScramCredentialAlteration> protos)
+    {
+        List<UserScramCredentialAlteration> alterations = new List<UserScramCredentialAlteration>();
+        foreach (Proto.UserScramCredentialAlteration proto in protos)
+        {
+            if (proto.IsDeletion)
+            {
+                alterations.Add(new UserScramCredentialDeletion(proto.User, (ScramMechanism)proto.Mechanism));
+                continue;
+            }
+
+            alterations.Add(new UserScramCredentialUpsertion(
+                proto.User,
+                new ScramCredentialInfo((ScramMechanism)proto.Mechanism, proto.Iterations),
+                proto.HasPassword ? proto.Password.ToByteArray() : Array.Empty<byte>(),
+                proto.HasSalt ? proto.Salt.ToByteArray() : null));
+        }
+
+        return alterations;
+    }
+
+    /// <summary>Proto <c>KafkaPrincipal</c>s -&gt; binding ones.</summary>
+    internal static List<KafkaPrincipal> Principals(IEnumerable<Proto.KafkaPrincipal> protos)
+    {
+        List<KafkaPrincipal> principals = new List<KafkaPrincipal>();
+        foreach (Proto.KafkaPrincipal proto in protos)
+        {
+            principals.Add(new KafkaPrincipal(proto.PrincipalType, proto.Name, proto.TokenAuthenticated));
+        }
+
+        return principals;
+    }
+
+    /// <summary>
+    /// Binding <see cref="KafkaPrincipal"/> -&gt; proto. <c>token_authenticated</c> crosses even
+    /// though the request messages do not carry it: the broker and the mock report it back, and
+    /// Java's <c>equals</c> ignores it, so it has to be asserted explicitly.
+    /// </summary>
+    internal static Proto.KafkaPrincipal PrincipalToProto(KafkaPrincipal principal) =>
+        new Proto.KafkaPrincipal
+        {
+            PrincipalType = principal.PrincipalType,
+            Name = principal.Name,
+            TokenAuthenticated = principal.TokenAuthenticated,
+        };
+
+    /// <summary>
+    /// <c>optional KafkaPrincipalList owners</c> -&gt; the filter
+    /// <see cref="DescribeDelegationTokenOptions"/> takes. Absent is Java's <b>unset</b> filter
+    /// and present-but-empty is an explicit empty one, so an empty list must stay a list.
+    /// </summary>
+    internal static IReadOnlyList<KafkaPrincipal>? TokenOwners(Proto.KafkaPrincipalList? owners) =>
+        owners is null ? null : Principals(owners.Principals);
+
+    /// <summary>
+    /// Binding <see cref="DelegationToken"/> -&gt; proto. The three timestamps go into the fields
+    /// Java's <em>constructor</em> names, not the C tuple's order; <c>hmac_as_base64</c> is
+    /// derived from <c>hmac</c> and the Rust client re-derives it and fails on a mismatch.
+    /// </summary>
+    internal static Proto.DelegationToken DelegationTokenToProto(DelegationToken token)
+    {
+        TokenInformation info = token.TokenInfo;
+        Proto.TokenInformation protoInfo = new Proto.TokenInformation
+        {
+            TokenId = info.TokenId,
+            Owner = PrincipalToProto(info.Owner),
+            TokenRequester = PrincipalToProto(info.TokenRequester),
+            IssueTimestamp = info.IssueTimestamp,
+            MaxTimestamp = info.MaxTimestamp,
+            ExpiryTimestamp = info.ExpiryTimestamp,
+        };
+        foreach (KafkaPrincipal renewer in info.Renewers)
+        {
+            protoInfo.Renewers.Add(PrincipalToProto(renewer));
+        }
+
+        return new Proto.DelegationToken
+        {
+            TokenInformation = protoInfo,
+            Hmac = ByteString.CopyFrom(token.Hmac),
+            HmacAsBase64 = token.HmacAsBase64String,
+        };
+    }
+
+    /// <summary>
+    /// Binding <see cref="FeatureMetadata"/> -&gt; proto. The two maps are independent and need
+    /// not agree in size or keys; an absent epoch is Java's empty <c>Optional</c> and must not
+    /// become 0.
+    /// </summary>
+    internal static Proto.FeatureMetadata FeatureMetadataToProto(FeatureMetadata metadata)
+    {
+        Proto.FeatureMetadata proto = new Proto.FeatureMetadata();
+        foreach (KeyValuePair<string, FinalizedVersionRange> pair in metadata.FinalizedFeatures)
+        {
+            proto.FinalizedFeatures[pair.Key] = new Proto.FinalizedVersionRange
+            {
+                MinVersionLevel = pair.Value.MinVersionLevel,
+                MaxVersionLevel = pair.Value.MaxVersionLevel,
+            };
+        }
+
+        foreach (KeyValuePair<string, SupportedVersionRange> pair in metadata.SupportedFeatures)
+        {
+            proto.SupportedFeatures[pair.Key] = new Proto.SupportedVersionRange
+            {
+                MinVersion = pair.Value.MinVersion,
+                MaxVersion = pair.Value.MaxVersion,
+            };
+        }
+
+        if (metadata.FinalizedFeaturesEpoch.HasValue)
+        {
+            proto.FinalizedFeaturesEpoch = metadata.FinalizedFeaturesEpoch.Value;
+        }
+
+        return proto;
+    }
+
+    /// <summary>
+    /// <c>map&lt;string, FeatureUpdate&gt;</c> -&gt; the map <see cref="IAdmin.UpdateFeatures"/>
+    /// takes. An empty map is forwarded as such — a real client rejects it synchronously and a
+    /// mock yields an empty result, and both are faithful.
+    /// </summary>
+    /// <returns>
+    /// The map, or <see langword="null"/> with <paramref name="invalid"/> set: a
+    /// <c>max_version_level</c> outside <see langword="short"/> is a protocol error rather than
+    /// something to truncate.
+    /// </returns>
+    internal static Dictionary<string, FeatureUpdate>? FeatureUpdates(
+        IDictionary<string, Proto.FeatureUpdate> updates, out string? invalid)
+    {
+        Dictionary<string, FeatureUpdate> map = new Dictionary<string, FeatureUpdate>(StringComparer.Ordinal);
+        foreach (KeyValuePair<string, Proto.FeatureUpdate> pair in updates)
+        {
+            if (pair.Value.MaxVersionLevel < short.MinValue || pair.Value.MaxVersionLevel > short.MaxValue)
+            {
+                invalid = $"FeatureUpdate for `{pair.Key}` has max_version_level " +
+                    $"{pair.Value.MaxVersionLevel}, outside int16";
+                return null;
+            }
+
+            map[pair.Key] = new FeatureUpdate(
+                (short)pair.Value.MaxVersionLevel, UpgradeTypes.FromCode(pair.Value.UpgradeType));
+        }
+
+        invalid = null;
+        return map;
     }
 
     /// <summary>
