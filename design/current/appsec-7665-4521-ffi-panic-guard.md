@@ -421,3 +421,40 @@ code and record the difference here.
     `5fc83544` (#191), as its comment at 477–487 explains. With
     `kafka-perf-local` accepting connections on 9092, all 7 ctest executables
     pass, so there is no environmental failure to report.
+19. **§2.4 finding 2 — only `committed()` can produce an epoch-bearing
+    entry.** `MockConsumer.offsets_for_times` fails with "Not implemented yet."
+    exactly as Java's does (`MockConsumer.java:535-536`), so
+    `py_OffsetAndTimestampMap_drain` cannot be reached from a unit test. Both
+    drains got the same fix (the pattern at 5588–5597, `(long long)` casts
+    included). `test_committed_does_not_leak_the_leader_epoch` covers
+    `py_OffsetMap_drain` with epoch 1000 and failed (`3 == 2`) against the
+    unfixed extension; the timestamp drain is covered by inspection and by
+    `check-bindings`.
+20. **§2.4 finding 3 — the same unchecked allocation in
+    `py_Producer_on_space_available`.** Its `PyMem_RawRealloc` of the list of
+    senders waiting for space (which starts from empty after every drain,
+    because the send task takes the list) was assigned over the list and then
+    written through, so a failure crashed and lost the callbacks already
+    waiting. It now reallocates into a temporary and, on failure, keeps the
+    list and tells the caller not to wait (returns `True`) instead of raising:
+    `Producer_send` has already queued the record, so a `MemoryError` there
+    would report as failed a send that is still delivered and still fires
+    `on_delivery`. Skipping the wait only lets the C queue pass its soft bound;
+    the next batch node that cannot be allocated fails cleanly. At line 807 the
+    node is checked before it is linked, so on failure nothing is linked,
+    stored or counted, both queue references are given back, and `MemoryError`
+    is raised. Both paths are tested under `_testcapi.set_nomemory` in a child
+    interpreter (skipped where `_testcapi` is missing); both crashed with
+    SIGSEGV against the unfixed extension.
+21. **§2.4 finding 4 — the eight listed casts are all the byte-length casts,
+    and all eight are tested.** The file's other `(int32_t)` casts are element
+    counts, ids, partitions, epochs, enum codes and one stack-buffer size, and
+    were left alone. The limit is `INT32_MAX`, so a buffer of exactly 2 GiB,
+    the tests' `bytes(2**31)`, is already rejected; the plan's message "exceeds
+    2 GiB" is kept, read as "is 2 GiB or more". Beyond the record value the
+    plan asked for, each of the eight sites (`ProducerRecord` key and value,
+    `MockConsumer.add_record` key and value, SCRAM password and salt, renew and
+    expire hmac) has an assertion, sharing a `two_gib_bytes` fixture in the new
+    `bindings/python/test/unit/conftest.py` that skips on a 32-bit Python and
+    on `MemoryError`. Each assertion matches a message only the new check
+    produces, and each of the three tests failed against the unfixed extension.

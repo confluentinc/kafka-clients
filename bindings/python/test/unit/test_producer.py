@@ -17,6 +17,8 @@
 import asyncio
 import gc
 import os
+import subprocess
+import sys
 import threading
 import time
 import pytest
@@ -402,6 +404,16 @@ def test_producer_record_invalid_topic_type():
 def test_producer_record_invalid_value_type():
     with pytest.raises(TypeError):
         ProducerRecord("t", "not bytes")
+
+
+def test_producer_record_rejects_a_2_gib_buffer(two_gib_bytes):
+    # The C API takes int32_t lengths. A plain cast turned 2**31 into a
+    # negative length, which the C API reads as a null value, so the bytes were
+    # silently dropped; the length is now checked before anything is stored.
+    with pytest.raises(OverflowError, match=r"^value exceeds 2 GiB$"):
+        ProducerRecord("t", two_gib_bytes)
+    with pytest.raises(OverflowError, match=r"^key exceeds 2 GiB$"):
+        ProducerRecord("t", b"v", two_gib_bytes)
 
 
 # -- KafkaProducer lifecycle ---------------------------------------------------
@@ -890,6 +902,100 @@ async def test_backpressure_does_not_trigger_when_draining():
         metas = await asyncio.wait_for(
             asyncio.gather(*futures), timeout=FUTURE_TIMEOUT)
         assert len(metas) == 50
+
+
+# =============================================================================
+# Allocation failures in the send path
+#
+# `_testcapi.set_nomemory` makes every CPython allocation fail, including the
+# PyMem_Raw* calls the extension makes with the GIL released. Each check runs
+# in a child interpreter, as CPython's own tests of it do, because an
+# allocation failure the extension does not handle crashes the process.
+# =============================================================================
+
+_NO_MEMORY_PRELUDE = """
+import sys
+BACKPRESSURE_BOUND = int(sys.argv[1])
+FUTURE_TIMEOUT = float(sys.argv[2])
+sys.path[:0] = sys.argv[3:]
+import _testcapi
+import _confluentkafka as _lib
+from producer import MockProducer, ProducerRecord, _completion_to_python
+
+
+def without_memory(call, *args):
+    # Return call(*args), or the MemoryError it raised, with every allocation
+    # failing for the duration of the call. `call(*args)` hands the `args`
+    # tuple to a METH_VARARGS function as it is, and the frame object is
+    # created up front, so only the call itself asks for memory meanwhile.
+    sys._getframe()
+    outcome = None
+    _testcapi.set_nomemory(0)
+    try:
+        outcome = call(*args)
+    except MemoryError as e:
+        outcome = e
+    finally:
+        _testcapi.remove_mem_hooks()
+    return outcome
+
+
+def on_complete(result, error):
+    _completion_to_python(result, error)  # frees the completion handles
+"""
+
+
+def _run_without_memory(body):
+    pytest.importorskip("_testcapi")
+    module_dirs = dict.fromkeys(
+        os.path.dirname(os.path.abspath(module.__file__))
+        for module in (_lib, sys.modules[MockProducer.__module__]))
+    proc = subprocess.run(
+        [sys.executable, "-c", _NO_MEMORY_PRELUDE + body,
+         str(BACKPRESSURE_BOUND), str(FUTURE_TIMEOUT), *module_dirs],
+        capture_output=True, text=True, timeout=120)
+    assert proc.returncode == 0, (proc.returncode, proc.stderr)
+    assert proc.stdout.splitlines()[-1:] == ["ok"], proc.stdout
+
+
+def test_send_without_memory_for_a_new_batch_raises_memory_error():
+    # The first record of a fresh producer needs a new batch node. Its
+    # allocation was unchecked, so a failure crashed on a NULL dereference.
+    _run_without_memory("""
+p = MockProducer(auto_complete=True)
+record = ProducerRecord("t", b"v")
+refs = sys.getrefcount(record), sys.getrefcount(on_complete)
+outcome = without_memory(_lib.Producer_send, p.c_producer, record, on_complete)
+assert isinstance(outcome, MemoryError), outcome
+# Not queued: both references taken for the queue were given back...
+assert (sys.getrefcount(record), sys.getrefcount(on_complete)) == refs
+# ...and no half-built batch was left behind: the producer still delivers.
+p.send(ProducerRecord("t", b"v")).result(timeout=FUTURE_TIMEOUT)
+p.close()
+print("ok")
+""")
+
+
+def test_waiting_for_space_without_memory_does_not_wait():
+    # The list of senders waiting for space grows on demand. A failed realloc
+    # was assigned over the list and then written through; now the sender is
+    # told not to wait, because its record is already queued.
+    _run_without_memory("""
+p = MockProducer(auto_complete=True)
+_lib.Producer_test_set_paused(p.c_producer, True)
+futures = [p.send(ProducerRecord("t", b"v")) for _ in range(BACKPRESSURE_BOUND - 1)]
+assert _lib.Producer_send(p.c_producer, ProducerRecord("t", b"v"), on_complete) is True
+space_cb = lambda: None
+refs = sys.getrefcount(space_cb)
+outcome = without_memory(_lib.Producer_on_space_available, p.c_producer, space_cb)
+assert outcome is True, outcome
+assert sys.getrefcount(space_cb) == refs  # not registered
+_lib.Producer_test_set_paused(p.c_producer, False)
+for future in futures:
+    future.result(timeout=FUTURE_TIMEOUT)
+p.close()
+print("ok")
+""")
 
 
 # =============================================================================
