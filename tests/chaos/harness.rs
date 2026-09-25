@@ -599,6 +599,7 @@ impl ChaosHarness {
             ctx: self.workload_ctx(self.primary_topic()),
             inner: std::rc::Rc::new(WorkloadPoolInner {
                 pending: std::cell::RefCell::new(Vec::new()),
+                pending_added: tokio::sync::Notify::new(),
                 added_consumer_stops: std::cell::RefCell::new(Vec::new()),
                 next_instance: std::cell::Cell::new(1000), // runtime ids start high
             }),
@@ -713,6 +714,15 @@ type PendingWorkload = (Role, Arc<AtomicBool>, std::pin::Pin<Box<dyn std::future
 struct WorkloadPoolInner {
     /// Newly-built consumer futures waiting for the drive loop to poll them.
     pending: std::cell::RefCell<Vec<PendingWorkload>>,
+    /// Fired on every push to `pending`, so the drive loop wakes and absorbs
+    /// the new future *now*. Without it the loop body — where the drain
+    /// happens — only re-runs when the scenario or a workload future
+    /// completes, and a consumer added mid-run would sit in `pending` until
+    /// the whole scenario had finished (then start, see its stop flag already
+    /// set, and close without ever joining the group). `notify_one` stores a
+    /// permit when nobody is waiting, so a push between two loop iterations
+    /// is never lost.
+    pending_added: tokio::sync::Notify,
     /// Stop flags of consumers added at runtime, newest last — `remove` pops.
     added_consumer_stops: std::cell::RefCell<Vec<Arc<AtomicBool>>>,
     next_instance: std::cell::Cell<u32>,
@@ -756,6 +766,7 @@ impl<'h> WorkloadPool<'h> {
         self.inner.added_consumer_stops.borrow_mut().push(stop.clone());
         let fut = workload.run(stop.clone());
         self.inner.pending.borrow_mut().push((Role::Consumer, stop, Box::pin(fut)));
+        self.inner.pending_added.notify_one();
         eprintln!("chaos: added consumer {label} (rebalance)");
     }
 
@@ -895,6 +906,10 @@ impl RunningWorkloads {
             tokio::select! {
                 biased;
                 _ = &mut control, if !control_done => { control_done = true; }
+                // A consumer was pushed into `pending` while we were parked
+                // here: fall through so the drain above runs on this
+                // iteration instead of after the scenario ends.
+                _ = pending.pending_added.notified() => {}
                 next = live.next(), if !live.is_empty() => {
                     let _ = next; // one workload finished; keep going
                 }
