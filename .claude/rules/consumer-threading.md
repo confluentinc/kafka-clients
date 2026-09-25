@@ -139,7 +139,13 @@ trait with `Box<dyn Consumer<K, V>>` for runtime dispatch:
 
 Implementations in Milestone 8:
 
-  - `AsyncKafkaConsumer<K, V>` — KIP-848 consumer.
+  - `AsyncKafkaConsumer<K, V>` — KIP-848 consumer. It lives in
+    `consumer.internals`, so it is `pub(crate)`: users reach it only through
+    `KafkaConsumer::new` / `new_consumer` as a `Box<dyn Consumer<K, V>>`.
+    `ConsumerHandle` (§31, §41), declared in the same file, is a Rust-only type
+    with no Java class; it stays public through an entry in
+    `xtask/public-audience-allowlist.txt`, because listeners need it for
+    in-callback reentrancy.
   - `MockConsumer<K, V>` — user-facing test helper, mirrors Java's
     `MockConsumer`. Exposes mock-specific configuration methods
     (`add_record`, `set_pollable`, etc.) as inherent methods on the concrete
