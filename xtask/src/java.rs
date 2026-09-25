@@ -30,16 +30,37 @@
 //!
 //! A method marker names the method, not an overload: every overload becomes a
 //! Rust function whose name derives from that one Java name (§2, `_with_..`).
+//! Where only some overloads of a name are `@Deprecated`, the marker names the
+//! overload by its parameter types, so the deprecation check can tell them
+//! apart:
+//!
+//! ```text
+//! #[doc(alias = "org.apache.kafka.clients.admin.MemberDescription#MemberDescription(String,Optional,Optional,String,String,MemberAssignment,Optional,Optional,Optional)")]
+//! ```
+//!
+//! The scanner also records `@Deprecated` on classes, overloads and fields
+//! (CLAUDE.md §3: deprecated API is not translated).
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
+use std::io::{Read, Write};
 use std::path::Path;
+use std::process::{Command, Stdio};
 
 /// Where the Java client's main sources live: the `kafka` git submodule.
 pub const JAVA_MAIN_ROOT: &str = "kafka/clients/src/main/java/org/apache/kafka";
 
 /// Where the Java client's tests live.
 pub const JAVA_TEST_ROOT: &str = "kafka/clients/src/test/java/org/apache/kafka";
+
+/// The Kafka versions whose `@Deprecated`s count (CLAUDE.md §3: deprecated API
+/// is not translated): the source reference and the next release.
+pub const DEPRECATION_REFS: &[&str] = &["4.3.1", "4.4.0-rc2"];
+
+/// The checked-in list of the deprecated items of [`DEPRECATION_REFS`],
+/// written by `cargo xtask java-deprecated`. The lint reads it because CI's
+/// shallow `kafka` clone has only the working tree, not the other refs.
+pub const DEPRECATED_LIST: &str = "design/current/java-deprecated.txt";
 
 /// The prefix every marker starts with.
 pub const MARKER_PREFIX: &str = "org.apache.kafka.";
@@ -58,8 +79,47 @@ pub struct JavaClass {
     /// The methods declared directly in the class body, constructors included
     /// (under the class's own name).
     pub methods: BTreeSet<String>,
+    /// Every overload of `methods`, in declaration order.
+    pub overloads: Vec<Overload>,
+    /// The fields and enum constants declared directly in the class body, each
+    /// with whether it is `@Deprecated`.
+    pub fields: BTreeMap<String, bool>,
+    /// Whether the class, or a class enclosing it, is `@Deprecated`.
+    pub deprecated: bool,
     /// Whether it comes from the test tree.
     pub is_test: bool,
+}
+
+/// One method or constructor overload.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Overload {
+    pub name: String,
+    /// The simple names of its parameter types, generics dropped:
+    /// `close(Duration)` → `["Duration"]`, `f(Map<K, V>... m)` → `["Map[]"]`.
+    pub params: Vec<String>,
+    /// Whether it is `@Deprecated` (its class's deprecation not included).
+    pub deprecated: bool,
+}
+
+impl Overload {
+    /// `name(T1,T2)`, the form a marker names it by.
+    pub fn signature(&self) -> String {
+        format!("{}({})", self.name, self.params.join(","))
+    }
+}
+
+/// Whether a marker's target is deprecated.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Deprecation {
+    /// Not deprecated.
+    No,
+    /// Deprecated.
+    Yes,
+    /// A method name some of whose overloads are deprecated and some not: the
+    /// marker must name the overload. Holds the non-deprecated signatures.
+    Ambiguous(Vec<String>),
+    /// The marker names a member the class does not declare.
+    Unknown,
 }
 
 impl JavaClass {
@@ -108,6 +168,53 @@ impl JavaClass {
                     .strip_prefix(base.as_str())
                     .is_some_and(|rest| rest.starts_with("_with_") || rest == "_")
         })
+    }
+}
+
+impl JavaClass {
+    /// Whether `member` — a method name, an overload signature `name(T1,T2)`,
+    /// or a field — is deprecated, directly or through its class.
+    pub fn deprecation(&self, member: Option<&str>) -> Deprecation {
+        let Some(member) = member else {
+            return if self.deprecated {
+                Deprecation::Yes
+            } else {
+                Deprecation::No
+            };
+        };
+        let (name, signature) = match member.split_once('(') {
+            Some((name, _)) => (name, Some(member)),
+            None => (member, None),
+        };
+        let overloads: Vec<&Overload> = self.overloads.iter().filter(|o| o.name == name).collect();
+        let found = if let Some(signature) = signature {
+            match overloads.iter().find(|o| o.signature() == signature) {
+                Some(o) => o.deprecated,
+                None => return Deprecation::Unknown,
+            }
+        } else if !overloads.is_empty() {
+            let live: Vec<String> = overloads.iter().filter(|o| !o.deprecated).map(|o| o.signature()).collect();
+            if live.is_empty() {
+                true
+            } else if live.len() == overloads.len() {
+                false
+            } else {
+                return if self.deprecated {
+                    Deprecation::Yes
+                } else {
+                    Deprecation::Ambiguous(live)
+                };
+            }
+        } else if let Some(&field) = self.fields.get(name) {
+            field
+        } else {
+            return Deprecation::Unknown;
+        };
+        if found || self.deprecated {
+            Deprecation::Yes
+        } else {
+            Deprecation::No
+        }
     }
 }
 
@@ -216,10 +323,145 @@ impl JavaIndex {
             .find(|c| c.package == package && c.path.iter().map(String::as_str).eq(nested.iter().copied()))
     }
 
-    /// The `#method` part of a marker, if any.
+    /// The `#method` part of a marker, if any, without an overload's
+    /// `(params)`.
     pub fn marker_method(marker: &str) -> Option<&str> {
+        Self::marker_member(marker).map(|m| m.split_once('(').map_or(m, |(name, _)| name))
+    }
+
+    /// The `#member` part of a marker, if any, with an overload's `(params)`.
+    pub fn marker_member(marker: &str) -> Option<&str> {
         marker.split_once('#').map(|(_, m)| m)
     }
+
+    /// Whether the item a marker names is deprecated.
+    pub fn deprecation(&self, marker: &str) -> Deprecation {
+        match self.resolve(marker) {
+            Some(class) => class.deprecation(Self::marker_member(marker)),
+            None => Deprecation::Unknown,
+        }
+    }
+
+    /// Adds the deprecations listed in `list`, in the format of
+    /// [`deprecated_items`]: an item is deprecated if the list says so.
+    pub fn merge_deprecation_list(&mut self, list: &str) {
+        for line in list.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#')) {
+            let (class_marker, member) = match line.split_once('#') {
+                Some((c, m)) => (c, Some(m)),
+                None => (line, None),
+            };
+            let Some(path) = class_marker.strip_prefix(MARKER_PREFIX) else {
+                continue;
+            };
+            let Some((package, class)) = path.rsplit_once('.') else {
+                continue;
+            };
+            let nested: Vec<&str> = class.split('$').collect();
+            let nested_prefix = format!("{}$", nested.join("$"));
+            for c in self.classes.iter_mut().filter(|c| !c.is_test && c.package == package) {
+                let joined = c.path.join("$");
+                match member {
+                    None if joined == class || joined.starts_with(&nested_prefix) => c.deprecated = true,
+                    Some(member) if joined == class => {
+                        if let Some(o) = c.overloads.iter_mut().find(|o| o.signature() == member) {
+                            o.deprecated = true;
+                        } else if let Some(f) = c.fields.get_mut(member) {
+                            *f = true;
+                        }
+                    },
+                    _ => {},
+                }
+            }
+        }
+    }
+}
+
+/// Every deprecated item of `classes`' main classes, one per line, sorted:
+///   - a deprecated class, which covers its members and nested classes:
+///     `org.apache.kafka.clients.admin.ConsumerGroupListing`;
+///   - a deprecated overload of a class that is not: `…Consumer#close(Duration)`;
+///   - a deprecated field or enum constant: `…ProducerConfig#SOME_CONFIG`.
+pub fn deprecated_items(classes: &[JavaClass]) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    for class in classes.iter().filter(|c| !c.is_test) {
+        let marker = class.marker();
+        if class.deprecated {
+            // A nested class of a deprecated class is covered by it.
+            let outer_deprecated = classes.iter().any(|o| {
+                !o.is_test
+                    && o.deprecated
+                    && o.package == class.package
+                    && o.path.len() < class.path.len()
+                    && class.path.starts_with(&o.path)
+            });
+            if !outer_deprecated {
+                out.insert(marker);
+            }
+            continue;
+        }
+        for o in class.overloads.iter().filter(|o| o.deprecated) {
+            out.insert(format!("{marker}#{}", o.signature()));
+        }
+        for (name, _) in class.fields.iter().filter(|(_, d)| **d) {
+            out.insert(format!("{marker}#{name}"));
+        }
+    }
+    out
+}
+
+/// The main classes of the Java client at git ref `reference` of the `kafka`
+/// submodule, read with `git` so the working tree need not be checked out
+/// there. `None` if the ref is not available (e.g. a shallow clone).
+pub fn load_ref(reference: &str) -> Option<Vec<JavaClass>> {
+    let root = JAVA_MAIN_ROOT.strip_prefix("kafka/")?;
+    let listing = Command::new("git")
+        .args(["-C", "kafka", "ls-tree", "-r", reference, "--", root])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())?;
+    let mut files = Vec::new();
+    for line in String::from_utf8_lossy(&listing.stdout).lines() {
+        let Some((meta, path)) = line.split_once('\t') else {
+            continue;
+        };
+        let Some(sha) = meta.split_whitespace().nth(2) else {
+            continue;
+        };
+        if path.ends_with(".java") && !path.ends_with("package-info.java") && !path.ends_with("module-info.java") {
+            files.push((sha.to_string(), path.to_string()));
+        }
+    }
+    let mut child = Command::new("git")
+        .args(["-C", "kafka", "cat-file", "--batch"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .ok()?;
+    let mut stdin = child.stdin.take()?;
+    let shas: String = files.iter().map(|(sha, _)| format!("{sha}\n")).collect();
+    let writer = std::thread::spawn(move || stdin.write_all(shas.as_bytes()));
+    let mut out = Vec::new();
+    child.stdout.take()?.read_to_end(&mut out).ok()?;
+    writer.join().ok()?.ok()?;
+    child.wait().ok()?;
+    let mut classes = Vec::new();
+    let mut rest = out.as_slice();
+    for (_, path) in &files {
+        let header_end = rest.iter().position(|&b| b == b'\n')?;
+        let size: usize = std::str::from_utf8(&rest[..header_end])
+            .ok()?
+            .rsplit(' ')
+            .next()?
+            .parse()
+            .ok()?;
+        let body = &rest[header_end + 1..header_end + 1 + size];
+        rest = &rest[header_end + 1 + size + 1..];
+        let rel = path.strip_prefix(root)?.trim_start_matches('/');
+        let mut package: Vec<String> = rel.split('/').map(str::to_string).collect();
+        package.pop();
+        push_classes(&package, &String::from_utf8_lossy(body), false, &mut classes);
+    }
+    Some(classes)
 }
 
 /// Collects the classes of every `*.java` file under `dir`, whose package
@@ -238,14 +480,29 @@ fn collect(dir: &Path, package: &mut Vec<String>, is_test: bool, out: &mut Vec<J
             let Ok(source) = fs::read_to_string(entry.path()) else {
                 continue;
             };
-            let module = match package.split_first() {
-                Some((first, rest)) if first == "clients" => rest.to_vec(),
-                _ => package.clone(),
-            };
-            for (path, methods) in scan(&source) {
-                out.push(JavaClass { module: module.clone(), package: package.join("."), path, methods, is_test });
-            }
+            push_classes(package, &source, is_test, out);
         }
+    }
+}
+
+/// Pushes the classes of one Java file of package `package` (below
+/// `org.apache.kafka`).
+fn push_classes(package: &[String], source: &str, is_test: bool, out: &mut Vec<JavaClass>) {
+    let module = match package.split_first() {
+        Some((first, rest)) if first == "clients" => rest.to_vec(),
+        _ => package.to_vec(),
+    };
+    for class in scan(source) {
+        out.push(JavaClass {
+            module: module.clone(),
+            package: package.join("."),
+            path: class.path,
+            methods: class.overloads.iter().map(|o| o.name.clone()).collect(),
+            overloads: class.overloads,
+            fields: class.fields,
+            deprecated: class.deprecated,
+            is_test,
+        });
     }
 }
 
@@ -346,34 +603,83 @@ const MODIFIERS: &[&str] = &[
     "sealed",
 ];
 
-/// The classes declared in a Java file, each with the methods declared directly
-/// in its body.
-fn scan(src: &str) -> Vec<(Vec<String>, BTreeSet<String>)> {
+/// A class found by [`scan`].
+#[derive(Debug)]
+struct Scanned {
+    path: Vec<String>,
+    overloads: Vec<Overload>,
+    fields: BTreeMap<String, bool>,
+    deprecated: bool,
+}
+
+/// An open class body while scanning.
+struct Open {
+    /// Its index in the output.
+    idx: usize,
+    /// The brace depth inside its body.
+    body: usize,
+    /// Whether it is an enum still in its constant list (before the first `;`).
+    enum_constants: bool,
+}
+
+/// The classes declared in a Java file, each with the methods, constructors
+/// and fields declared directly in its body, and their `@Deprecated`s.
+///
+/// An `@Deprecated` annotation at class-body level (or before a top-level
+/// class) applies to the next declaration — a class, an overload or a field;
+/// any other statement ending first clears it. Other annotations are skipped,
+/// so `@Deprecated @Override void close(Duration)` still counts.
+fn scan(src: &str) -> Vec<Scanned> {
     let toks = tokenize(src);
-    let mut out: Vec<(Vec<String>, BTreeSet<String>)> = Vec::new();
-    // Open class bodies: (index into `out`, brace depth inside the body).
-    let mut stack: Vec<(usize, usize)> = Vec::new();
+    let mut out: Vec<Scanned> = Vec::new();
+    let mut stack: Vec<Open> = Vec::new();
     let mut depth = 0usize;
     let mut paren = 0usize;
-    // A class declaration seen, waiting for its `{`.
-    let mut pending: Option<String> = None;
+    // A class declaration seen, waiting for its `{`: (name, deprecated, is enum).
+    let mut pending: Option<(String, bool, bool)> = None;
+    // An `@Deprecated` seen, waiting for the declaration it annotates.
+    let mut deprecated = false;
     let mut i = 0;
     while i < toks.len() {
+        let member_level = paren == 0 && stack.last().map_or(depth == 0, |o| depth == o.body);
         match &toks[i] {
-            Tok::Punct('{') => {
-                depth += 1;
-                if let Some(name) = pending.take() {
-                    let mut path: Vec<String> = stack.last().map(|(idx, _)| out[*idx].0.clone()).unwrap_or_default();
-                    path.push(name);
-                    out.push((path, BTreeSet::new()));
-                    stack.push((out.len() - 1, depth));
+            Tok::Punct('@') if paren == 0 && toks.get(i + 1) != Some(&Tok::Ident("interface".into())) => {
+                let (name, next) = annotation(&toks, i);
+                if member_level && name == "Deprecated" {
+                    deprecated = true;
                 }
+                i = next;
+                continue;
+            },
+            Tok::Punct('{') => {
+                if let Some((name, dep, is_enum)) = pending.take() {
+                    let parent = stack.last().map(|o| &out[o.idx]);
+                    let mut path: Vec<String> = parent.map(|p| p.path.clone()).unwrap_or_default();
+                    let dep = dep || parent.is_some_and(|p| p.deprecated);
+                    path.push(name);
+                    out.push(Scanned { path, overloads: Vec::new(), fields: BTreeMap::new(), deprecated: dep });
+                    depth += 1;
+                    stack.push(Open { idx: out.len() - 1, body: depth, enum_constants: is_enum });
+                    i += 1;
+                    continue;
+                }
+                if member_level {
+                    deprecated = false;
+                }
+                depth += 1;
             },
             Tok::Punct('}') => {
-                if stack.last().is_some_and(|(_, d)| *d == depth) {
+                if stack.last().is_some_and(|o| o.body == depth) {
                     stack.pop();
                 }
                 depth = depth.saturating_sub(1);
+                deprecated = false;
+            },
+            Tok::Punct(';') if member_level => {
+                deprecated = false;
+                if let Some(o) = stack.last_mut() {
+                    o.enum_constants = false;
+                }
             },
             Tok::Punct('(') => paren += 1,
             Tok::Punct(')') => paren = paren.saturating_sub(1),
@@ -381,16 +687,38 @@ fn scan(src: &str) -> Vec<(Vec<String>, BTreeSet<String>)> {
                 // `Foo.class` is a literal, not a declaration; `@interface` is one.
                 let is_literal = i > 0 && toks[i - 1] == Tok::Punct('.');
                 if let (false, Some(Tok::Ident(name))) = (is_literal, toks.get(i + 1)) {
-                    pending = Some(name.clone());
+                    pending = Some((name.clone(), std::mem::take(&mut deprecated), kw == "enum"));
                     i += 2;
                     continue;
                 }
             },
-            Tok::Ident(name) if paren == 0 && toks.get(i + 1) == Some(&Tok::Punct('(')) => {
-                if let Some(&(idx, body)) = stack.last() {
-                    if depth == body && pending.is_none() && is_method_decl(&toks, i, &out[idx].0) {
-                        out[idx].1.insert(name.clone());
+            Tok::Ident(name) if member_level && pending.is_none() => {
+                let Some(open) = stack.last() else {
+                    i += 1;
+                    continue;
+                };
+                let next = toks.get(i + 1);
+                let is_constant = open.enum_constants
+                    && matches!(next, Some(Tok::Punct(',' | ';' | '(' | '{' | '}')))
+                    && !matches!(toks.get(i - 1), Some(Tok::Punct('.')));
+                let idx = open.idx;
+                if is_constant {
+                    out[idx].fields.insert(name.clone(), std::mem::take(&mut deprecated));
+                } else if next == Some(&Tok::Punct('(')) {
+                    if is_method_decl(&toks, i, &out[idx].path) {
+                        let params = params(&toks, i + 1);
+                        out[idx].overloads.push(Overload {
+                            name: name.clone(),
+                            params,
+                            deprecated: std::mem::take(&mut deprecated),
+                        });
                     }
+                } else if matches!(next, Some(Tok::Punct('=' | ';')))
+                    && name != "\"\""
+                    && name != "0"
+                    && !KEYWORDS.contains(&name.as_str())
+                {
+                    out[idx].fields.insert(name.clone(), std::mem::take(&mut deprecated));
                 }
             },
             _ => {},
@@ -398,6 +726,92 @@ fn scan(src: &str) -> Vec<(Vec<String>, BTreeSet<String>)> {
         i += 1;
     }
     out
+}
+
+/// The annotation starting at `@` index `at`: its simple name, and the index
+/// just past it (and past its `(..)` arguments).
+fn annotation(toks: &[Tok], at: usize) -> (String, usize) {
+    let mut j = at + 1;
+    let mut name = String::new();
+    while let Some(Tok::Ident(part)) = toks.get(j) {
+        name = part.clone();
+        j += 1;
+        if toks.get(j) == Some(&Tok::Punct('.')) && matches!(toks.get(j + 1), Some(Tok::Ident(_))) {
+            j += 1;
+        } else {
+            break;
+        }
+    }
+    if toks.get(j) == Some(&Tok::Punct('(')) {
+        j = past_parens(toks, j);
+    }
+    (name, j)
+}
+
+/// The index just past the `)` matching the `(` at `open`.
+fn past_parens(toks: &[Tok], open: usize) -> usize {
+    let mut depth = 0usize;
+    for (j, t) in toks.iter().enumerate().skip(open) {
+        match t {
+            Tok::Punct('(') => depth += 1,
+            Tok::Punct(')') => {
+                depth -= 1;
+                if depth == 0 {
+                    return j + 1;
+                }
+            },
+            _ => {},
+        }
+    }
+    toks.len()
+}
+
+/// The parameter types of the declaration whose `(` is at `open`, as simple
+/// names: annotations, `final`, generic arguments and parameter names are
+/// dropped, and arrays and varargs become `[]`.
+fn params(toks: &[Tok], open: usize) -> Vec<String> {
+    let close = past_parens(toks, open) - 1;
+    let mut out = Vec::new();
+    let mut current: Vec<Tok> = Vec::new();
+    let mut angle = 0usize;
+    let mut j = open + 1;
+    while j < close {
+        match &toks[j] {
+            Tok::Punct('@') => {
+                j = annotation(toks, j).1;
+                continue;
+            },
+            Tok::Punct('<') => angle += 1,
+            Tok::Punct('>') => angle = angle.saturating_sub(1),
+            Tok::Punct(',') if angle == 0 => out.push(param_type(&std::mem::take(&mut current))),
+            Tok::Ident(f) if f == "final" => {},
+            t if angle == 0 => current.push(t.clone()),
+            _ => {},
+        }
+        j += 1;
+    }
+    if !current.is_empty() {
+        out.push(param_type(&current));
+    }
+    out
+}
+
+/// The simple type of one parameter's tokens (`java.util.Map m` → `Map`,
+/// `byte[] b` / `String... s` → `byte[]` / `String[]`).
+fn param_type(toks: &[Tok]) -> String {
+    let name = toks.iter().rposition(|t| matches!(t, Tok::Ident(_))).unwrap_or(toks.len());
+    let ty = &toks[..name];
+    let simple = ty
+        .iter()
+        .rev()
+        .find_map(|t| match t {
+            Tok::Ident(s) => Some(s.as_str()),
+            Tok::Punct(_) => None,
+        })
+        .unwrap_or_default();
+    let arrays = ty.iter().filter(|t| **t == Tok::Punct('[')).count()
+        + ty.windows(3).filter(|w| w.iter().all(|t| *t == Tok::Punct('.'))).count();
+    format!("{simple}{}", "[]".repeat(arrays))
 }
 
 /// Whether the identifier at `i`, followed by `(` in a class body, declares a
@@ -448,14 +862,138 @@ mod tests {
         let get = |path: &[&str]| {
             classes
                 .iter()
-                .find(|(p, _)| p.iter().map(String::as_str).eq(path.iter().copied()))
-                .map(|(_, m)| m.iter().cloned().collect::<Vec<_>>())
+                .find(|c| c.path.iter().map(String::as_str).eq(path.iter().copied()))
+                .map(|c| {
+                    c.overloads
+                        .iter()
+                        .map(|o| o.name.clone())
+                        .collect::<BTreeSet<_>>()
+                        .into_iter()
+                        .collect::<Vec<_>>()
+                })
                 .unwrap()
         };
         assert_eq!(get(&["Outer"]), ["Outer", "items", "toString", "values"]);
         assert_eq!(get(&["Outer", "Inner"]), ["run"]);
         assert_eq!(get(&["Outer", "Kind"]), ["Kind", "code"]);
         assert_eq!(get(&["Outer", "Api"]), ["call", "ok"]);
+        let outer = classes.iter().find(|c| c.path == ["Outer"]).unwrap();
+        assert_eq!(outer.fields.keys().collect::<Vec<_>>(), ["S", "m"]);
+        let kind = classes.iter().find(|c| c.path == ["Outer", "Kind"]).unwrap();
+        assert_eq!(kind.fields.keys().collect::<Vec<_>>(), ["A", "B"]);
+    }
+
+    fn class_of(src: &str, path: &[&str]) -> JavaClass {
+        let mut out = Vec::new();
+        push_classes(&["clients".into(), "x".into()], src, false, &mut out);
+        out.into_iter()
+            .find(|c| c.path.iter().map(String::as_str).eq(path.iter().copied()))
+            .unwrap()
+    }
+
+    #[test]
+    fn scans_deprecations() {
+        let src = r#"
+            package x;
+            public class Api {
+                /** @deprecated Since 4.0, not an annotation: ignored. */
+                public void docOnly() {}
+                @Deprecated
+                public static final String OLD_CONFIG = "old";
+                public static final String NEW_CONFIG = "new";
+                @Deprecated(since = "4.2", forRemoval = true)
+                public Api(String groupId) {}
+                public Api(String groupId, int generation) {}
+                @Deprecated @Override public void close(java.time.Duration timeout) {}
+                public void close(final CloseOptions options) {}
+                @SuppressWarnings("unchecked") public void keep(@Nullable Map<String, List<Integer>> m, byte[] b, String... s) {}
+                @Deprecated
+                ;
+                public void notLeaked() {}
+                @java.lang.Deprecated
+                public static class Old { void inner() {} public static class Deeper {} }
+                enum Kind { A, @Deprecated B, C("c"); Kind() {} Kind(String s) {} }
+            }
+            @Deprecated
+            class Gone { int x; }
+        "#;
+        let api = class_of(src, &["Api"]);
+        assert!(!api.deprecated);
+        let sigs: Vec<(String, bool)> = api.overloads.iter().map(|o| (o.signature(), o.deprecated)).collect();
+        assert_eq!(
+            sigs,
+            [
+                ("docOnly()".to_string(), false),
+                ("Api(String)".to_string(), true),
+                ("Api(String,int)".to_string(), false),
+                ("close(Duration)".to_string(), true),
+                ("close(CloseOptions)".to_string(), false),
+                ("keep(Map,byte[],String[])".to_string(), false),
+                ("notLeaked()".to_string(), false),
+            ]
+        );
+        assert_eq!(api.fields.get("OLD_CONFIG"), Some(&true));
+        assert_eq!(api.fields.get("NEW_CONFIG"), Some(&false));
+        assert_eq!(api.deprecation(None), Deprecation::No);
+        assert_eq!(api.deprecation(Some("OLD_CONFIG")), Deprecation::Yes);
+        assert_eq!(api.deprecation(Some("NEW_CONFIG")), Deprecation::No);
+        assert_eq!(api.deprecation(Some("docOnly")), Deprecation::No);
+        assert_eq!(
+            api.deprecation(Some("close")),
+            Deprecation::Ambiguous(vec!["close(CloseOptions)".into()])
+        );
+        assert_eq!(api.deprecation(Some("close(Duration)")), Deprecation::Yes);
+        assert_eq!(api.deprecation(Some("close(CloseOptions)")), Deprecation::No);
+        assert_eq!(api.deprecation(Some("close(String)")), Deprecation::Unknown);
+        assert_eq!(
+            api.deprecation(Some("Api")),
+            Deprecation::Ambiguous(vec!["Api(String,int)".into()])
+        );
+        assert_eq!(api.deprecation(Some("missing")), Deprecation::Unknown);
+
+        let old = class_of(src, &["Api", "Old"]);
+        assert!(old.deprecated);
+        assert_eq!(old.deprecation(Some("inner")), Deprecation::Yes);
+        assert!(class_of(src, &["Api", "Old", "Deeper"]).deprecated);
+        let kind = class_of(src, &["Api", "Kind"]);
+        assert!(!kind.deprecated);
+        assert_eq!(
+            kind.fields.iter().map(|(k, v)| (k.as_str(), *v)).collect::<Vec<_>>(),
+            [("A", false), ("B", true), ("C", false)]
+        );
+        assert!(class_of(src, &["Gone"]).deprecated);
+    }
+
+    #[test]
+    fn lists_and_merges_deprecations() {
+        let src = r#"
+            package x;
+            public class Api {
+                @Deprecated public static final String OLD = "o";
+                public static final String LATER = "l";
+                @Deprecated public void close(Duration d) {}
+                public void close(CloseOptions o) {}
+                @Deprecated public static class Old { public static class Deeper {} }
+            }
+        "#;
+        let mut classes = Vec::new();
+        push_classes(&["clients".into(), "x".into()], src, false, &mut classes);
+        let listed: Vec<String> = deprecated_items(&classes).into_iter().collect();
+        assert_eq!(
+            listed,
+            [
+                "org.apache.kafka.clients.x.Api#OLD",
+                "org.apache.kafka.clients.x.Api#close(Duration)",
+                "org.apache.kafka.clients.x.Api$Old",
+            ]
+        );
+
+        let mut index = JavaIndex { classes };
+        assert_eq!(index.deprecation("org.apache.kafka.clients.x.Api#LATER"), Deprecation::No);
+        index.merge_deprecation_list("# header\norg.apache.kafka.clients.x.Api#LATER\n");
+        assert_eq!(index.deprecation("org.apache.kafka.clients.x.Api#LATER"), Deprecation::Yes);
+        assert_eq!(index.deprecation("org.apache.kafka.clients.x.Api$Old$Deeper"), Deprecation::Yes);
+        assert_eq!(JavaIndex::marker_method("a.B#close(Duration)"), Some("close"));
     }
 
     #[test]
@@ -465,6 +1003,9 @@ mod tests {
             package: "clients.producer".into(),
             path: vec!["KafkaProducer".into()],
             methods: BTreeSet::new(),
+            overloads: Vec::new(),
+            fields: BTreeMap::new(),
+            deprecated: false,
             is_test: false,
         };
         assert!(class.is_rust_name_of("send", "send"));
@@ -486,6 +1027,9 @@ mod tests {
             package: package.into(),
             path: vec![name.into()],
             methods: BTreeSet::new(),
+            overloads: Vec::new(),
+            fields: BTreeMap::new(),
+            deprecated: false,
             is_test: false,
         };
         let oor = class(&["consumer"], "clients.consumer", "OffsetOutOfRangeException");

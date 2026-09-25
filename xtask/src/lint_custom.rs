@@ -55,6 +55,7 @@ fn rules() -> Vec<Box<dyn Rule>> {
         Box::new(NoDataCarryingEnumVariants),
         Box::new(NoPublicField),
         Box::new(JavaName::new()),
+        Box::new(NoDeprecatedTranslation::new()),
         // Disabled until every public struct is confirmed to need being public:
         // making traits dyn-compatible is wasted on types that should become
         // `pub(crate)`. The trait changes it requires are parked on branch
@@ -798,6 +799,16 @@ impl JavaName {
                 }
             },
             (Some(method), ItemKind::Fn) => {
+                if let Some(signature) = JavaIndex::marker_member(marker).filter(|m| m.contains('(')) {
+                    if class.deprecation(Some(signature)) == java::Deprecation::Unknown {
+                        findings.push(format!(
+                            "{file}: `{}` is marked {origin}, but `{}` declares no overload `{signature}`",
+                            item.name,
+                            class.name()
+                        ));
+                        return;
+                    }
+                }
                 if !class.methods.contains(method) {
                     findings.push(format!(
                         "{file}: `{}` is marked {origin}, but `{}` declares no `{method}`",
@@ -1033,6 +1044,206 @@ impl Rule for JavaName {
    camelCase -> snake_case, `_with_<params>` for overloads, `new`/`with_..` for
    constructors, a nested class under its bare name). Fix the marker instead if
    it names the wrong Java class or method; a Rust-only helper carries none."
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Rule: check-no-deprecated-translation
+// ---------------------------------------------------------------------------
+
+/// Where the items already shipped in a released major version are listed,
+/// each with the version: Java deprecating one of them later does not remove
+/// it before the next major (CLAUDE.md §3, forward compatibility).
+const DEPRECATED_BASELINE: &str = "xtask/deprecated-baseline.txt";
+
+/// Checks that no public item translates API Java marks `@Deprecated`
+/// (CLAUDE.md §3: deprecated API is not translated from the first major version
+/// on).
+///
+/// An item is deprecated when its marker (see [`crate::java`]) names a
+/// `@Deprecated` class, overload or field, or a member of a `@Deprecated`
+/// class, in the `kafka` working tree or in [`java::DEPRECATED_LIST`] (the
+/// union over [`java::DEPRECATION_REFS`], which a shallow clone cannot read).
+/// A method name some of whose overloads are deprecated must be marked with the
+/// overload it translates, `#name(T1,T2)`, so a translation of a live overload
+/// is not taken for a deprecated one.
+///
+/// Items Java deprecated after they shipped in a released major version are
+/// listed in [`DEPRECATED_BASELINE`]; they stay until the next major but must
+/// carry `#[deprecated]`.
+///
+/// Scope: public items only — a type another crate can name, its `pub`
+/// inherent methods and associated consts, a public trait's methods, `pub` free
+/// functions and consts of a reachable module. A `pub(crate)` translation is
+/// not API: Java's own internals use deprecated constructors
+/// (`ConsumerGroupMetadata`'s, by `AsyncKafkaConsumer`), and so may the crate.
+/// Classes of an `internals` package are `pub(crate)` by rule and skipped.
+struct NoDeprecatedTranslation {
+    index: JavaIndex,
+    /// The markers of [`DEPRECATED_BASELINE`].
+    baseline: BTreeSet<String>,
+    /// Why the checked-in list is out of date with the refs, if it is.
+    stale_list: Option<String>,
+}
+
+impl NoDeprecatedTranslation {
+    fn new() -> Self {
+        let mut index = JavaIndex::load();
+        let list = fs::read_to_string(java::DEPRECATED_LIST).unwrap_or_default();
+        index.merge_deprecation_list(&list);
+        let baseline = fs::read_to_string(DEPRECATED_BASELINE)
+            .unwrap_or_default()
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty() && !l.starts_with('#'))
+            .filter_map(|l| l.split_whitespace().next().map(str::to_string))
+            .collect();
+        NoDeprecatedTranslation { stale_list: Self::stale_list(&list), index, baseline }
+    }
+
+    /// Compares the checked-in list with the refs, when the refs are present.
+    fn stale_list(list: &str) -> Option<String> {
+        let mut expected = BTreeSet::new();
+        for reference in java::DEPRECATION_REFS {
+            expected.extend(java::deprecated_items(&java::load_ref(reference)?));
+        }
+        let listed: BTreeSet<String> = list
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty() && !l.starts_with('#'))
+            .map(str::to_string)
+            .collect();
+        (listed != expected).then(|| {
+            format!(
+                "{} is out of date with Kafka {} (run `cargo xtask java-deprecated`)",
+                java::DEPRECATED_LIST,
+                java::DEPRECATION_REFS.join(" + ")
+            )
+        })
+    }
+}
+
+/// A public item that may carry a marker.
+struct PublicItem {
+    name: String,
+    attrs: Vec<syn::Attribute>,
+}
+
+/// The public items of `krate` (see [`NoDeprecatedTranslation`] for the scope).
+fn public_items(krate: &Crate) -> Vec<(&Path, PublicItem)> {
+    let types = krate.public_types();
+    let is_pub = |vis: &syn::Visibility| matches!(vis, syn::Visibility::Public(_));
+    let mut out = Vec::new();
+    for (path, module) in &krate.modules {
+        let file = module.file.as_path();
+        let reachable = krate.is_reachable(path);
+        let is_public_type = |name: &str| types.contains(&(path.clone(), name.to_string()));
+        for item in &module.items {
+            let mut push = |name: &syn::Ident, attrs: &[syn::Attribute]| {
+                out.push((file, PublicItem { name: name.to_string(), attrs: attrs.to_vec() }))
+            };
+            match item {
+                syn::Item::Struct(s) if is_public_type(&s.ident.to_string()) => push(&s.ident, &s.attrs),
+                syn::Item::Enum(e) if is_public_type(&e.ident.to_string()) => push(&e.ident, &e.attrs),
+                syn::Item::Trait(t) if is_public_type(&t.ident.to_string()) => {
+                    push(&t.ident, &t.attrs);
+                    for it in &t.items {
+                        match it {
+                            syn::TraitItem::Fn(f) => push(&f.sig.ident, &f.attrs),
+                            syn::TraitItem::Const(c) => push(&c.ident, &c.attrs),
+                            _ => {},
+                        }
+                    }
+                },
+                syn::Item::Type(t) if reachable && is_pub(&t.vis) => push(&t.ident, &t.attrs),
+                syn::Item::Fn(f) if reachable && is_pub(&f.vis) => push(&f.sig.ident, &f.attrs),
+                syn::Item::Const(c) if reachable && is_pub(&c.vis) => push(&c.ident, &c.attrs),
+                syn::Item::Impl(i) if i.trait_.is_none() => {
+                    let syn::Type::Path(ty) = &*i.self_ty else { continue };
+                    let Some(ty) = ty.path.segments.last() else { continue };
+                    if !is_public_type(&ty.ident.to_string()) {
+                        continue;
+                    }
+                    for it in &i.items {
+                        match it {
+                            syn::ImplItem::Fn(f) if is_pub(&f.vis) => push(&f.sig.ident, &f.attrs),
+                            syn::ImplItem::Const(c) if is_pub(&c.vis) => push(&c.ident, &c.attrs),
+                            _ => {},
+                        }
+                    }
+                },
+                syn::Item::Macro(m) => {
+                    // The error types are public: every error is a variant of
+                    // the public `Error` (CLAUDE.md §12).
+                    if let Some(def) = error_macro_type_def(m) {
+                        out.push((file, PublicItem { name: def.name, attrs: def.attrs }));
+                    }
+                },
+                _ => {},
+            }
+        }
+    }
+    out
+}
+
+impl Rule for NoDeprecatedTranslation {
+    fn name(&self) -> &'static str {
+        "check-no-deprecated-translation"
+    }
+
+    fn skip_reason(&self) -> Option<String> {
+        self.index.is_empty().then(|| {
+            format!(
+                "no Java sources at `{}` (run `git submodule update --init kafka`)",
+                java::JAVA_MAIN_ROOT
+            )
+        })
+    }
+
+    fn check(&self, krate: &Crate, findings: &mut Vec<String>) -> usize {
+        if let Some(stale) = &self.stale_list {
+            findings.push(stale.clone());
+        }
+        let mut checked = 0usize;
+        for (file, item) in public_items(krate) {
+            for marker in java_markers(&item.attrs) {
+                if marker.split('#').next().is_some_and(|c| c.split('.').any(|p| p == "internals")) {
+                    continue;
+                }
+                checked += 1;
+                let origin = marker.trim_start_matches(java::MARKER_PREFIX);
+                let file = file.display();
+                match self.index.deprecation(&marker) {
+                    java::Deprecation::Yes if self.baseline.contains(&marker) => {
+                        if !item.attrs.iter().any(|a| a.path().is_ident("deprecated")) {
+                            findings.push(format!(
+                                "{file}: `{}` translates `{origin}`, deprecated after it shipped; mark it `#[deprecated]`",
+                                item.name
+                            ));
+                        }
+                    },
+                    java::Deprecation::Yes => findings.push(format!(
+                        "{file}: `{}` translates `{origin}`, which Java deprecates",
+                        item.name
+                    )),
+                    java::Deprecation::Ambiguous(live) => findings.push(format!(
+                        "{file}: `{}` is marked `{origin}`, some of whose overloads Java deprecates; mark the overload it translates: {}",
+                        item.name,
+                        live.iter().map(|s| format!("`#{s}`")).collect::<Vec<_>>().join(", ")
+                    )),
+                    java::Deprecation::No | java::Deprecation::Unknown => {},
+                }
+            }
+        }
+        checked
+    }
+
+    fn hint(&self) -> &'static str {
+        "   Remove the item and move its callers to the replacement Java names in the
+   @deprecated javadoc (CLAUDE.md §3); a `pub(crate)` item may stay if the
+   crate needs it internally, as Java's internals do. An item Java deprecated
+   after it shipped in a released major is listed in
+   xtask/deprecated-baseline.txt and marked `#[deprecated]` instead."
     }
 }
 
