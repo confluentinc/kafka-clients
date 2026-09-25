@@ -27,8 +27,8 @@
 //! dispatch surface, not on per-event traits.
 
 /// Generic event-processor seam. Phase 6 / Phase 10 supply
-/// implementations for the [`super::application_event::ApplicationEvent`]
-/// and [`super::background_event::BackgroundEvent`] enum types.
+/// implementations for the [`super::ApplicationEvent`]
+/// and [`super::BackgroundEvent`] enum types.
 pub(crate) trait EventProcessor<E>: Send + 'static {
     /// Process a single event. Called once per event drained from the
     /// channel; impls dispatch to the appropriate request manager or

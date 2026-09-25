@@ -19,10 +19,10 @@
 use std::collections::HashMap;
 use std::io;
 
+use crate::DeleteTopicsResponseData;
 use crate::common::protocol::{ApiKeys, Errors, Readable};
-use crate::delete_topics_response_data::DeleteTopicsResponseData;
 
-use super::abstract_response::update_error_counts;
+use super::AbstractResponse;
 
 /// A DeleteTopics response.
 ///
@@ -67,7 +67,7 @@ impl DeleteTopicsResponse {
     pub fn error_counts(&self) -> HashMap<Errors, i32> {
         let mut counts = HashMap::new();
         for result in &self.data.responses {
-            update_error_counts(&mut counts, Errors::for_code(result.error_code));
+            AbstractResponse::update_error_counts(&mut counts, Errors::for_code(result.error_code));
         }
         counts
     }

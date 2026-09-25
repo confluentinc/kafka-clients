@@ -206,7 +206,10 @@ async fn seek_into_aborted_case(bootstrap: &str, suffix: &str) -> Result<bool, S
         .assign(vec![tp.clone()])
         .await
         .map_err(|e| format!("seek: assign: {e}"))?;
-    consumer.seek(tp.clone(), 1).await.map_err(|e| format!("seek(1): {e}"))?;
+    consumer
+        .seek_with_offset(tp.clone(), 1)
+        .await
+        .map_err(|e| format!("seek(1): {e}"))?;
     println!("  seek({topic}-0, 1) — offset 1 is the middle of the aborted batch");
     let delivered = drain_until_idle(&mut consumer, true).await?;
     let ok = report(

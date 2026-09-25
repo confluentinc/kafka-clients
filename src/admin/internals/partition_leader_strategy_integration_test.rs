@@ -25,21 +25,21 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use crate::admin::internals::admin_api_driver::{AdminApiDriver, RequestSpec};
-use crate::admin::internals::admin_api_handler::{AdminApiHandler, ApiResult, RequestAndKeys};
-use crate::admin::internals::admin_api_lookup_strategy::AdminApiLookupStrategy;
-use crate::admin::internals::partition_leader_cache::PartitionLeaderCache;
-use crate::admin::internals::partition_leader_strategy::{PartitionLeaderFuture, PartitionLeaderStrategy};
+use crate::ListOffsetsResponseData;
+use crate::MetadataResponseData;
+use crate::admin::internals::AdminApiLookupStrategy;
+use crate::admin::internals::PartitionLeaderCache;
+use crate::admin::internals::{AdminApiDriver, RequestSpec};
+use crate::admin::internals::{AdminApiHandler, ApiResult, RequestAndKeys};
+use crate::admin::internals::{PartitionLeaderFuture, PartitionLeaderStrategy};
 use crate::common::protocol::{ApiKeys, Errors};
 use crate::common::requests::{
     ConcreteResponse, ListOffsetsResponse, MetadataRequestBuilder, MetadataResponse, RequestBuilder,
 };
 use crate::common::utils::{ExponentialBackoff, LogContext};
 use crate::common::{Error, KafkaFuture, Node, TopicPartition};
-use crate::list_offsets_response_data::{
-    ListOffsetsPartitionResponse, ListOffsetsResponseData, ListOffsetsTopicResponse,
-};
-use crate::metadata_response_data::{MetadataResponseData, MetadataResponsePartition, MetadataResponseTopic};
+use crate::list_offsets_response_data::{ListOffsetsPartitionResponse, ListOffsetsTopicResponse};
+use crate::metadata_response_data::{MetadataResponsePartition, MetadataResponseTopic};
 
 const TIMEOUT_MS: i64 = 5000;
 const RETRY_BACKOFF_MS: i64 = 100;
@@ -78,7 +78,8 @@ impl AdminApiHandler<TopicPartition, ()> for MockApiHandler {
 
     fn build_request(&self, _broker_id: i32, keys: &HashSet<TopicPartition>) -> Vec<RequestAndKeys<TopicPartition>> {
         vec![RequestAndKeys {
-            request: Box::new(MetadataRequestBuilder::new(None, false)) as Box<dyn RequestBuilder>,
+            request: Box::new(MetadataRequestBuilder::with_topics_allow_auto_topic_creation(None, false))
+                as Box<dyn RequestBuilder>,
             keys: keys.clone(),
         }]
     }
@@ -159,7 +160,7 @@ fn metadata_response_with_partition_leaders(mapping: &[(TopicPartition, i32)]) -
         }
     }
     data.set_topics(topics);
-    ConcreteResponse::Metadata(MetadataResponse::new(data, ApiKeys::METADATA.latest_version()))
+    ConcreteResponse::Metadata(MetadataResponse::with_version(data, ApiKeys::METADATA.latest_version()))
 }
 
 fn list_offsets_response(keys: &HashSet<TopicPartition>, error: Errors) -> ConcreteResponse {

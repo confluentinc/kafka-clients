@@ -14,7 +14,7 @@
 
 //! `ConsumerHeartbeatRequestManager` — KIP-848 specialization of the
 //! heartbeat lifecycle. Composes
-//! [`super::abstract_heartbeat_request_manager::AbstractHeartbeatRequestManager`]
+//! [`super::AbstractHeartbeatRequestManager`]
 //! and supplies the consumer-group-specific request builder + error
 //! classification.
 //!
@@ -23,37 +23,32 @@
 
 #![allow(dead_code)]
 
+use crate::common::requests::ConsumerGroupHeartbeatRequest;
 use std::sync::Arc;
 use std::sync::Mutex;
 
 use tokio::sync::mpsc;
 
+use crate::ConsumerGroupHeartbeatRequestData;
 use crate::common::Error;
+use crate::common::Errors;
 use crate::common::Uuid;
-use crate::common::protocol::Errors;
 use crate::common::requests::ConcreteResponse;
-use crate::common::requests::consumer_group_heartbeat_request::{
-    ConsumerGroupHeartbeatRequestBuilder, REGEX_RESOLUTION_NOT_SUPPORTED_MSG,
-};
-use crate::common::requests::consumer_group_heartbeat_response::ConsumerGroupHeartbeatResponse;
+use crate::common::requests::ConsumerGroupHeartbeatRequestBuilder;
+use crate::common::requests::ConsumerGroupHeartbeatResponse;
 use crate::consumer::ConsumerConfig;
-use crate::consumer::internals::events::background_event::BackgroundEvent;
-use crate::consumer::internals::events::background_event_handler::BackgroundEventHandler;
-use crate::consumer_group_heartbeat_request_data::{
-    ConsumerGroupHeartbeatRequestData, TopicPartitions as RequestTopicPartitions,
-};
+use crate::consumer::internals::events::BackgroundEvent;
+use crate::consumer::internals::events::BackgroundEventHandler;
+use crate::consumer_group_heartbeat_request_data::TopicPartitions as RequestTopicPartitions;
 
-use super::abstract_heartbeat_request_manager::{
-    AbstractHeartbeatRequestManager, CONSUMER_PROTOCOL_NOT_SUPPORTED_MSG, HeartbeatErrorAction, HeartbeatFailureAction,
-    make_heartbeat_poll_result,
-};
-use super::abstract_membership_manager::LocalAssignment;
-use super::consumer_membership_manager::ConsumerMembershipManager;
-use super::coordinator_request_manager::CoordinatorRequestManager;
-use super::member_state::MemberState;
-use super::network_client_delegate::{PollResult, UnsentRequest};
-use super::request_manager::RequestManager;
-use super::subscription_state::SubscriptionState;
+use super::ConsumerMembershipManager;
+use super::CoordinatorRequestManager;
+use super::LocalAssignment;
+use super::MemberState;
+use super::RequestManager;
+use super::SubscriptionState;
+use super::{AbstractHeartbeatRequestManager, HeartbeatErrorAction, HeartbeatFailureAction};
+use super::{PollResult, UnsentRequest};
 
 /// Envelope for routing a `ConsumerGroupHeartbeatResponse` (or its
 /// transport-level failure) from the spawned response forwarder back
@@ -311,7 +306,7 @@ impl ConsumerHeartbeatRequestManager {
     /// the consumer's `Arc<Metrics>` registry and is wired post-construction.
     pub(crate) fn set_metrics_manager(
         &mut self,
-        metrics_manager: Arc<crate::consumer::internals::heartbeat_metrics_manager::HeartbeatMetricsManager>,
+        metrics_manager: Arc<crate::consumer::internals::HeartbeatMetricsManager>,
     ) {
         self.inner.metrics_manager = Some(metrics_manager);
     }
@@ -344,7 +339,7 @@ impl ConsumerHeartbeatRequestManager {
 
     /// Java: `shouldSendLeaveHeartbeatNow()`.
     fn should_send_leave_heartbeat_now(&self) -> bool {
-        use crate::consumer::close_options::GroupMembershipOperation;
+        use crate::consumer::GroupMembershipOperation;
         if self.membership_manager.group_instance_id().is_none()
             && matches!(
                 self.membership_manager.leave_group_operation(),
@@ -664,13 +659,13 @@ impl ConsumerHeartbeatRequestManager {
     /// attributed to the actual failure time rather than epoch zero.
     pub(crate) fn handle_specific_failure(&mut self, error: &crate::common::Error, current_time_ms: i64) -> bool {
         use crate::common::Error;
-        use crate::common::protocol::Errors;
+        use crate::common::Errors;
         if error.error() == Errors::UnsupportedVersion {
             let msg = error.to_string();
-            let message = if msg.contains(REGEX_RESOLUTION_NOT_SUPPORTED_MSG) {
-                REGEX_RESOLUTION_NOT_SUPPORTED_MSG
+            let message = if msg.contains(ConsumerGroupHeartbeatRequest::REGEX_RESOLUTION_NOT_SUPPORTED_MSG) {
+                ConsumerGroupHeartbeatRequest::REGEX_RESOLUTION_NOT_SUPPORTED_MSG
             } else {
-                CONSUMER_PROTOCOL_NOT_SUPPORTED_MSG
+                AbstractHeartbeatRequestManager::CONSUMER_PROTOCOL_NOT_SUPPORTED_MSG
             };
             log::error!("ConsumerGroupHeartbeatRequest failed due to unsupported version: {message}");
             let fatal_err = Error::unsupported_version(message.to_string());
@@ -679,9 +674,7 @@ impl ConsumerHeartbeatRequestManager {
             // i.e. emits ErrorEvent AND calls
             // `membershipManager().transitionToFatal()`. Mirror both.
             let _ = self.inner.background_event_handler.add(
-                crate::consumer::internals::events::background_event::BackgroundEvent::Error {
-                    error: fatal_err.clone(),
-                },
+                crate::consumer::internals::events::BackgroundEvent::Error { error: fatal_err.clone() },
                 current_time_ms,
             );
             if let Err(e) = self.membership_manager.transition_to_fatal(current_time_ms) {
@@ -697,20 +690,20 @@ impl ConsumerHeartbeatRequestManager {
     /// FENCED_INSTANCE_ID, GROUP_ID_NOT_FOUND).
     pub(crate) fn handle_specific_error_in_response(
         &mut self,
-        error: crate::common::protocol::Errors,
+        error: crate::common::Errors,
         error_message: Option<&str>,
         _current_time_ms: i64,
     ) -> Option<HeartbeatErrorAction> {
         use crate::common::Error;
-        use crate::common::protocol::Errors;
+        use crate::common::Errors;
         match error {
             Errors::UnsupportedVersion => {
                 log::error!(
                     "ConsumerGroupHeartbeatRequest failed due to unsupported version response on broker side: {}",
-                    CONSUMER_PROTOCOL_NOT_SUPPORTED_MSG
+                    AbstractHeartbeatRequestManager::CONSUMER_PROTOCOL_NOT_SUPPORTED_MSG
                 );
                 Some(HeartbeatErrorAction::Fatal(Error::unsupported_version(
-                    CONSUMER_PROTOCOL_NOT_SUPPORTED_MSG.to_string(),
+                    AbstractHeartbeatRequestManager::CONSUMER_PROTOCOL_NOT_SUPPORTED_MSG.to_string(),
                 )))
             },
             Errors::UnreleasedInstanceId => {
@@ -955,7 +948,7 @@ impl RequestManager for ConsumerHeartbeatRequestManager {
         };
 
         if !self.inner.heartbeat_request_state.can_send_request(current_time_ms) && !heartbeat_now {
-            return PollResult::from_wait(
+            return PollResult::with_time_until_next_poll_ms(
                 self.inner.heartbeat_request_state.time_to_next_heartbeat_ms(current_time_ms),
             );
         }
@@ -968,7 +961,7 @@ impl RequestManager for ConsumerHeartbeatRequestManager {
         if let Err(e) = self.membership_manager.abstract_mm.on_heartbeat_request_generated() {
             log::warn!("on_heartbeat_request_generated failed: {}", e);
         }
-        make_heartbeat_poll_result(request, &mut self.inner, current_time_ms)
+        AbstractHeartbeatRequestManager::make_heartbeat_poll_result(request, &mut self.inner, current_time_ms)
     }
 
     fn poll_on_close(&mut self, current_time_ms: i64) -> PollResult {
@@ -1096,9 +1089,9 @@ mod tests {
     use super::*;
     use crate::common::Node;
     use crate::common::internals::ClusterResourceListeners;
+    use crate::consumer::AutoOffsetResetStrategy;
     use crate::consumer::ConsumerConfig;
-    use crate::consumer::internals::auto_offset_reset_strategy::AutoOffsetResetStrategy;
-    use crate::consumer::internals::consumer_metadata::ConsumerMetadata;
+    use crate::consumer::internals::ConsumerMetadata;
     use tokio::sync::mpsc;
 
     /// Default heartbeat interval used by Java's
@@ -1135,11 +1128,11 @@ mod tests {
         ConsumerHeartbeatRequestManager,
         Arc<CoordinatorRequestManager>,
         Arc<ConsumerMembershipManager>,
-        mpsc::UnboundedReceiver<crate::consumer::internals::events::background_event::BackgroundEventEnvelope>,
+        mpsc::UnboundedReceiver<crate::consumer::internals::events::BackgroundEventEnvelope>,
     ) {
-        let config = ConsumerConfig::new(vec!["localhost:9092".to_string()]);
+        let config = ConsumerConfig { bootstrap_servers: vec!["localhost:9092".to_string()], ..Default::default() };
         let subs = Arc::new(Mutex::new(SubscriptionState::new(AutoOffsetResetStrategy::LATEST)));
-        let metadata = Arc::new(ConsumerMetadata::from_config(
+        let metadata = Arc::new(ConsumerMetadata::with_config(
             &config,
             subs.clone(),
             ClusterResourceListeners::new(),
@@ -1159,7 +1152,7 @@ mod tests {
             beh.clone(),
             true,
             None,
-            Arc::new(crate::common::metrics::time::SystemTime),
+            Arc::new(crate::common::metrics::SystemTime),
         ));
         let mut hb = ConsumerHeartbeatRequestManager::new(0, &config, coord.clone(), subs, mm.clone(), beh);
         if let Some(interval) = initial_interval_ms {
@@ -1206,9 +1199,9 @@ mod tests {
         Arc<ConsumerMembershipManager>,
         Arc<Mutex<SubscriptionState>>,
     ) {
-        let config = ConsumerConfig::new(vec!["localhost:9092".to_string()]);
+        let config = ConsumerConfig { bootstrap_servers: vec!["localhost:9092".to_string()], ..Default::default() };
         let subs = Arc::new(Mutex::new(SubscriptionState::new(AutoOffsetResetStrategy::LATEST)));
-        let metadata = Arc::new(ConsumerMetadata::from_config(
+        let metadata = Arc::new(ConsumerMetadata::with_config(
             &config,
             subs.clone(),
             ClusterResourceListeners::new(),
@@ -1228,7 +1221,7 @@ mod tests {
             beh.clone(),
             true,
             None,
-            Arc::new(crate::common::metrics::time::SystemTime),
+            Arc::new(crate::common::metrics::SystemTime),
         ));
         let mut hb = ConsumerHeartbeatRequestManager::new(0, &config, coord.clone(), subs.clone(), mm.clone(), beh);
         if let Some(interval) = initial_interval_ms {
@@ -1262,7 +1255,7 @@ mod tests {
     /// (Java mocks `subscriptions.subscription()`).
     fn set_subscription(subs: &Arc<Mutex<SubscriptionState>>, topics: &[&str]) {
         let set: std::collections::HashSet<String> = topics.iter().map(|s| s.to_string()).collect();
-        subs.lock().unwrap().subscribe_topics(set, None).unwrap();
+        subs.lock().unwrap().subscribe_with_topics(set, None).unwrap();
     }
 
     /// Set (or clear) the RE2J subscription pattern on the shared
@@ -1303,7 +1296,7 @@ mod tests {
     fn handle_specific_unsupported_version_is_fatal() {
         let mut mgr = make();
         let action = mgr.handle_specific_error_in_response(
-            crate::common::protocol::Errors::UnsupportedVersion,
+            crate::common::Errors::UnsupportedVersion,
             Some("broker doesn't support"),
             0,
         );
@@ -1320,8 +1313,7 @@ mod tests {
     #[test]
     fn handle_specific_fenced_instance_id_is_fatal() {
         let mut mgr = make();
-        let action =
-            mgr.handle_specific_error_in_response(crate::common::protocol::Errors::FencedInstanceId, Some("msg"), 0);
+        let action = mgr.handle_specific_error_in_response(crate::common::Errors::FencedInstanceId, Some("msg"), 0);
         assert!(matches!(action, Some(HeartbeatErrorAction::Fatal(_))));
     }
 
@@ -1330,7 +1322,7 @@ mod tests {
     #[test]
     fn handle_specific_returns_none_for_other_errors() {
         let mut mgr = make();
-        let action = mgr.handle_specific_error_in_response(crate::common::protocol::Errors::None, Some(""), 0);
+        let action = mgr.handle_specific_error_in_response(crate::common::Errors::None, Some(""), 0);
         assert!(action.is_none());
     }
 
@@ -1386,11 +1378,8 @@ mod tests {
     fn group_id_not_found_while_unsubscribed_is_skipped() {
         let (mut mgr, _coord, mm) = make_with_coord(None);
         assert_eq!(mm.state(), MemberState::Unsubscribed);
-        let action = mgr.handle_specific_error_in_response(
-            crate::common::protocol::Errors::GroupIdNotFound,
-            Some("group not found"),
-            0,
-        );
+        let action =
+            mgr.handle_specific_error_in_response(crate::common::Errors::GroupIdNotFound, Some("group not found"), 0);
         assert!(
             matches!(action, Some(HeartbeatErrorAction::Handled)),
             "GROUP_ID_NOT_FOUND while UNSUBSCRIBED must be skipped (Handled), not fatal/fenced",
@@ -1500,7 +1489,7 @@ mod tests {
     fn handle_specific_unreleased_instance_id_is_fatal() {
         let mut mgr = make();
         let action = mgr.handle_specific_error_in_response(
-            crate::common::protocol::Errors::UnreleasedInstanceId,
+            crate::common::Errors::UnreleasedInstanceId,
             Some("instance id still in use"),
             0,
         );
@@ -1534,8 +1523,8 @@ mod tests {
         );
         assert!(
             matches!(&events[0].event,
-                crate::consumer::internals::events::background_event::BackgroundEvent::Error { error }
-                    if error.to_string().contains(CONSUMER_PROTOCOL_NOT_SUPPORTED_MSG)),
+                crate::consumer::internals::events::BackgroundEvent::Error { error }
+                    if error.to_string().contains(AbstractHeartbeatRequestManager::CONSUMER_PROTOCOL_NOT_SUPPORTED_MSG)),
             "the ErrorEvent must carry the consumer-protocol-not-supported message, got: {:?}",
             events[0].event
         );
@@ -1563,10 +1552,11 @@ mod tests {
     /// BROKEN, no production callsite of `take_response_receiver`).
     #[tokio::test]
     async fn test_response_routing_through_spawned_forwarder() {
-        use crate::client_response::ClientResponse;
-        use crate::common::protocol::ApiKeys;
-        use crate::common::requests::request_header::RequestHeader;
-        use crate::consumer_group_heartbeat_response_data::{Assignment, ConsumerGroupHeartbeatResponseData};
+        use crate::ClientResponse;
+        use crate::ConsumerGroupHeartbeatResponseData;
+        use crate::common::ApiKeys;
+        use crate::common::requests::{RequestHeader, RequestHeaderOptionsBuilder};
+        use crate::consumer_group_heartbeat_response_data::Assignment;
 
         let (mut mgr, coord, mm) = make_with_coord(Some(0));
         set_coordinator(&coord);
@@ -1590,14 +1580,17 @@ mod tests {
         data.assignment = Some(Assignment { topic_partitions: vec![], unknown_tagged_fields: vec![] });
         let resp = ConsumerGroupHeartbeatResponse::new(data);
 
-        let header = RequestHeader::new(
-            &ApiKeys::CONSUMER_GROUP_HEARTBEAT,
-            ApiKeys::CONSUMER_GROUP_HEARTBEAT.latest_version(),
-            "",
-            1,
+        let header = RequestHeader::with_options(
+            RequestHeaderOptionsBuilder::new()
+                .set_request_api_key(&ApiKeys::CONSUMER_GROUP_HEARTBEAT)
+                .set_request_version(ApiKeys::CONSUMER_GROUP_HEARTBEAT.latest_version())
+                .set_client_id("")
+                .set_correlation_id(1)
+                .build()
+                .unwrap(),
         )
         .expect("header ok");
-        let client_response = ClientResponse::with_timeout(
+        let client_response = ClientResponse::with_timed_out(
             header,
             None,
             "0",
@@ -1667,10 +1660,10 @@ mod tests {
     ///    fired at the top of the error branch.
     #[tokio::test]
     async fn issue3_error_response_resets_sent_fields() {
-        use crate::client_response::ClientResponse;
-        use crate::common::protocol::ApiKeys;
-        use crate::common::requests::request_header::RequestHeader;
-        use crate::consumer_group_heartbeat_response_data::ConsumerGroupHeartbeatResponseData;
+        use crate::ClientResponse;
+        use crate::ConsumerGroupHeartbeatResponseData;
+        use crate::common::ApiKeys;
+        use crate::common::requests::{RequestHeader, RequestHeaderOptionsBuilder};
         use std::collections::HashSet;
 
         let (mut mgr, coord, mm) = make_with_coord(Some(0));
@@ -1683,7 +1676,7 @@ mod tests {
             let mut guard = subs_arc.lock().unwrap();
             let mut topics = HashSet::new();
             topics.insert("t".to_string());
-            guard.subscribe_topics(topics, None).unwrap();
+            guard.subscribe_with_topics(topics, None).unwrap();
         }
         make_joining(&mm);
 
@@ -1708,14 +1701,17 @@ mod tests {
         data.heartbeat_interval_ms = 1_000;
         let resp = ConsumerGroupHeartbeatResponse::new(data);
 
-        let header = RequestHeader::new(
-            &ApiKeys::CONSUMER_GROUP_HEARTBEAT,
-            ApiKeys::CONSUMER_GROUP_HEARTBEAT.latest_version(),
-            "",
-            1,
+        let header = RequestHeader::with_options(
+            RequestHeaderOptionsBuilder::new()
+                .set_request_api_key(&ApiKeys::CONSUMER_GROUP_HEARTBEAT)
+                .set_request_version(ApiKeys::CONSUMER_GROUP_HEARTBEAT.latest_version())
+                .set_client_id("")
+                .set_correlation_id(1)
+                .build()
+                .unwrap(),
         )
         .expect("header ok");
-        let client_response = ClientResponse::with_timeout(
+        let client_response = ClientResponse::with_timed_out(
             header,
             None,
             "0",
@@ -1812,14 +1808,9 @@ mod tests {
         mgr: &mut ConsumerHeartbeatRequestManager,
         mm: &Arc<ConsumerMembershipManager>,
         coord: &Arc<CoordinatorRequestManager>,
-        beh_rx: &mut mpsc::UnboundedReceiver<
-            crate::consumer::internals::events::background_event::BackgroundEventEnvelope,
-        >,
+        beh_rx: &mut mpsc::UnboundedReceiver<crate::consumer::internals::events::BackgroundEventEnvelope>,
         error_code: i16,
-    ) -> (
-        PollResult,
-        Vec<crate::consumer::internals::events::background_event::BackgroundEventEnvelope>,
-    ) {
+    ) -> (PollResult, Vec<crate::consumer::internals::events::BackgroundEventEnvelope>) {
         inject_error_response(mgr, mm, coord, error_code);
         classify_injected_response(mgr, beh_rx).await
     }
@@ -1833,13 +1824,8 @@ mod tests {
     /// changing has to seed it BETWEEN injection and classification.
     async fn classify_injected_response(
         mgr: &mut ConsumerHeartbeatRequestManager,
-        beh_rx: &mut mpsc::UnboundedReceiver<
-            crate::consumer::internals::events::background_event::BackgroundEventEnvelope,
-        >,
-    ) -> (
-        PollResult,
-        Vec<crate::consumer::internals::events::background_event::BackgroundEventEnvelope>,
-    ) {
+        beh_rx: &mut mpsc::UnboundedReceiver<crate::consumer::internals::events::BackgroundEventEnvelope>,
+    ) -> (PollResult, Vec<crate::consumer::internals::events::BackgroundEventEnvelope>) {
         // Wait for the spawned forwarder to hand the completion to the
         // manager's channel. On the current-thread test runtime the
         // forwarder runs while we await.
@@ -1875,10 +1861,10 @@ mod tests {
         coord: &Arc<CoordinatorRequestManager>,
         error_code: i16,
     ) {
-        use crate::client_response::ClientResponse;
-        use crate::common::protocol::ApiKeys;
-        use crate::common::requests::request_header::RequestHeader;
-        use crate::consumer_group_heartbeat_response_data::ConsumerGroupHeartbeatResponseData;
+        use crate::ClientResponse;
+        use crate::ConsumerGroupHeartbeatResponseData;
+        use crate::common::ApiKeys;
+        use crate::common::requests::{RequestHeader, RequestHeaderOptionsBuilder};
 
         set_coordinator(coord);
         make_joining(mm);
@@ -1895,14 +1881,17 @@ mod tests {
         data.heartbeat_interval_ms = 1_000;
         let resp = ConsumerGroupHeartbeatResponse::new(data);
 
-        let header = RequestHeader::new(
-            &ApiKeys::CONSUMER_GROUP_HEARTBEAT,
-            ApiKeys::CONSUMER_GROUP_HEARTBEAT.latest_version(),
-            "",
-            1,
+        let header = RequestHeader::with_options(
+            RequestHeaderOptionsBuilder::new()
+                .set_request_api_key(&ApiKeys::CONSUMER_GROUP_HEARTBEAT)
+                .set_request_version(ApiKeys::CONSUMER_GROUP_HEARTBEAT.latest_version())
+                .set_client_id("")
+                .set_correlation_id(1)
+                .build()
+                .unwrap(),
         )
         .expect("header ok");
-        let client_response = ClientResponse::with_timeout(
+        let client_response = ClientResponse::with_timed_out(
             header,
             None,
             "0",
@@ -1986,10 +1975,9 @@ mod tests {
         // an error. Rust must match: NO `BackgroundEvent::Error`
         // envelope on the fence path.
         assert!(
-            !events.iter().any(|env| matches!(
-                &env.event,
-                crate::consumer::internals::events::background_event::BackgroundEvent::Error { .. }
-            )),
+            !events
+                .iter()
+                .any(|env| matches!(&env.event, crate::consumer::internals::events::BackgroundEvent::Error { .. })),
             "BackgroundEvent::Error must NOT be emitted on the fence path — Java treats the \
              fence as an internal state transition and does not surface an ErrorEvent to the user. \
              Got events: {:?}",
@@ -2049,10 +2037,8 @@ mod tests {
     /// Extracts the `Errors` code of every `BackgroundEvent::Error` in
     /// `events`, so the fatal-path tests can assert on what the
     /// application actually sees.
-    fn error_events(
-        events: &[crate::consumer::internals::events::background_event::BackgroundEventEnvelope],
-    ) -> Vec<Errors> {
-        use crate::consumer::internals::events::background_event::BackgroundEvent;
+    fn error_events(events: &[crate::consumer::internals::events::BackgroundEventEnvelope]) -> Vec<Errors> {
+        use crate::consumer::internals::events::BackgroundEvent;
         events
             .iter()
             .filter_map(|env| match &env.event {
@@ -2623,7 +2609,7 @@ mod tests {
     /// for the cases where the predicate is true.
     #[tokio::test]
     async fn poll_on_leaving() {
-        use crate::consumer::close_options::GroupMembershipOperation;
+        use crate::consumer::GroupMembershipOperation;
         let matrix = [
             (None, GroupMembershipOperation::Default, true),
             (None, GroupMembershipOperation::LeaveGroup, true),
@@ -2670,7 +2656,7 @@ mod tests {
     /// dynamic member with `RemainInGroup` is treated as NOT leaving.
     #[tokio::test]
     async fn poll_on_close_generates_request_if_needed() {
-        use crate::consumer::close_options::GroupMembershipOperation;
+        use crate::consumer::GroupMembershipOperation;
         let matrix = [
             (None, GroupMembershipOperation::Default, true),
             (None, GroupMembershipOperation::LeaveGroup, true),
@@ -2715,7 +2701,7 @@ mod tests {
     #[tokio::test]
     async fn poll_on_close_records_heartbeat_sent_ms() {
         use crate::common::metrics::Metrics;
-        use crate::consumer::internals::heartbeat_metrics_manager::HeartbeatMetricsManager;
+        use crate::consumer::internals::HeartbeatMetricsManager;
 
         let (mut mgr, _coord, mm, _subs) =
             make_field_diff(None, Some(DEFAULT_REMOTE_ASSIGNOR.to_string()), None, 10_000, Some(0));
@@ -2866,11 +2852,11 @@ mod tests {
     /// to compile.
     #[tokio::test]
     async fn error_response_surfaces_the_broker_error_message() {
-        use crate::client_response::ClientResponse;
-        use crate::common::protocol::ApiKeys;
-        use crate::common::requests::request_header::RequestHeader;
-        use crate::consumer::internals::events::background_event::BackgroundEvent;
-        use crate::consumer_group_heartbeat_response_data::ConsumerGroupHeartbeatResponseData;
+        use crate::ClientResponse;
+        use crate::ConsumerGroupHeartbeatResponseData;
+        use crate::common::ApiKeys;
+        use crate::common::requests::{RequestHeader, RequestHeaderOptionsBuilder};
+        use crate::consumer::internals::events::BackgroundEvent;
 
         let (mut mgr, coord, mm, mut rx) = make_with_coord_capturing_events(Some(0));
         set_coordinator(&coord);
@@ -2888,14 +2874,17 @@ mod tests {
         data.heartbeat_interval_ms = 1_000;
         let resp = ConsumerGroupHeartbeatResponse::new(data);
 
-        let header = RequestHeader::new(
-            &ApiKeys::CONSUMER_GROUP_HEARTBEAT,
-            ApiKeys::CONSUMER_GROUP_HEARTBEAT.latest_version(),
-            "",
-            1,
+        let header = RequestHeader::with_options(
+            RequestHeaderOptionsBuilder::new()
+                .set_request_api_key(&ApiKeys::CONSUMER_GROUP_HEARTBEAT)
+                .set_request_version(ApiKeys::CONSUMER_GROUP_HEARTBEAT.latest_version())
+                .set_client_id("")
+                .set_correlation_id(1)
+                .build()
+                .unwrap(),
         )
         .expect("header ok");
-        let client_response = ClientResponse::with_timeout(
+        let client_response = ClientResponse::with_timed_out(
             header,
             None,
             "0",

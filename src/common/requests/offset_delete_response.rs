@@ -33,10 +33,10 @@
 use std::collections::HashMap;
 use std::io;
 
+use crate::OffsetDeleteResponseData;
 use crate::common::protocol::{ApiKeys, Errors, Readable};
-use crate::offset_delete_response_data::OffsetDeleteResponseData;
 
-use super::abstract_response::update_error_counts;
+use super::AbstractResponse;
 
 /// An `OffsetDelete` response.
 ///
@@ -83,10 +83,10 @@ impl OffsetDeleteResponse {
     /// partition responses. Mirrors Java's `errorCounts`.
     pub fn error_counts(&self) -> HashMap<Errors, i32> {
         let mut counts = HashMap::new();
-        update_error_counts(&mut counts, Errors::for_code(self.data.error_code));
+        AbstractResponse::update_error_counts(&mut counts, Errors::for_code(self.data.error_code));
         for topic in &self.data.topics {
             for partition in &topic.partitions {
-                update_error_counts(&mut counts, Errors::for_code(partition.error_code));
+                AbstractResponse::update_error_counts(&mut counts, Errors::for_code(partition.error_code));
             }
         }
         counts
@@ -163,7 +163,7 @@ mod tests {
             0x00, 0x00, 0x00, 0x00, // partition_index 0
             0x00, 0x00, // error_code 0
         ];
-        let mut readable = crate::common::ByteBufferAccessor::from_bytes(bytes);
+        let mut readable = crate::common::ByteBufferAccessor::new(bytes);
         let response = OffsetDeleteResponse::parse(&mut readable, 0).unwrap();
         assert_eq!(response.data().error_code, Errors::CoordinatorNotAvailable.code());
         assert_eq!(response.data().topics.len(), 1);

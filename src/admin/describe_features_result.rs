@@ -19,7 +19,7 @@
 use super::FeatureMetadata;
 use crate::common::KafkaFuture;
 
-/// The result of the [`describe_features`](crate::admin::Admin::describe_features)
+/// The result of the [`describe_features_with_options`](crate::admin::Admin::describe_features_with_options)
 /// call.
 ///
 /// Corresponds to `org.apache.kafka.clients.admin.DescribeFeaturesResult`.
@@ -45,7 +45,7 @@ impl DescribeFeaturesResult {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::kafka_future::KafkaFutureImpl;
+    use crate::common::internals::KafkaFutureImpl;
     use std::collections::HashMap;
 
     #[tokio::test]

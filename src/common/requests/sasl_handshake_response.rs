@@ -21,10 +21,10 @@
 
 use std::collections::HashMap;
 
+use crate::SaslHandshakeResponseData;
 use crate::common::protocol::{ApiKeys, Errors, Readable};
-use crate::sasl_handshake_response_data::SaslHandshakeResponseData;
 
-use super::abstract_response::DEFAULT_THROTTLE_TIME;
+use super::AbstractResponse;
 
 /// Possible error codes:
 /// - [`Errors::UnsupportedSaslMechanism`] (33): Client mechanism not enabled in server
@@ -62,15 +62,15 @@ impl SaslHandshakeResponse {
 
     /// Returns the error counts for this response.
     pub fn error_counts(&self) -> HashMap<Errors, i32> {
-        super::abstract_response::single_error_count(Errors::for_code(self.data.error_code))
+        super::AbstractResponse::single_error_count(Errors::for_code(self.data.error_code))
     }
 
     /// Returns the throttle time in milliseconds.
     ///
-    /// Always returns [`DEFAULT_THROTTLE_TIME`] (0) because the SaslHandshake schema
+    /// Always returns [`AbstractResponse::DEFAULT_THROTTLE_TIME`] (0) because the SaslHandshake schema
     /// does not support throttle time.
     pub fn throttle_time_ms(&self) -> i32 {
-        DEFAULT_THROTTLE_TIME
+        AbstractResponse::DEFAULT_THROTTLE_TIME
     }
 
     /// No-op: the SaslHandshake schema does not support throttle time.
@@ -133,7 +133,7 @@ mod tests {
     fn test_throttle_time_ms() {
         let data = SaslHandshakeResponseData::new();
         let response = SaslHandshakeResponse::new(data);
-        assert_eq!(response.throttle_time_ms(), DEFAULT_THROTTLE_TIME);
+        assert_eq!(response.throttle_time_ms(), AbstractResponse::DEFAULT_THROTTLE_TIME);
     }
 
     #[test]
@@ -142,7 +142,7 @@ mod tests {
         let mut response = SaslHandshakeResponse::new(data);
         response.maybe_set_throttle_time_ms(100);
         // Should still be 0 since it's a no-op
-        assert_eq!(response.throttle_time_ms(), DEFAULT_THROTTLE_TIME);
+        assert_eq!(response.throttle_time_ms(), AbstractResponse::DEFAULT_THROTTLE_TIME);
     }
 
     #[test]

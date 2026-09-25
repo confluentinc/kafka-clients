@@ -26,18 +26,18 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::common::protocol::Errors;
+use crate::DeleteGroupsRequestData;
+use crate::common::Errors;
 use crate::common::requests::{ConcreteResponse, CoordinatorType, DeleteGroupsRequestBuilder, RequestBuilder};
 use crate::common::utils::LogContext;
 use crate::common::{Error, Node};
-use crate::delete_groups_request_data::DeleteGroupsRequestData;
 use crate::{kafka_debug, kafka_error};
 
-use super::admin_api_future::SimpleAdminApiFuture;
-use super::admin_api_handler::{AdminApiHandler, ApiResult, RequestAndKeys};
-use super::admin_api_lookup_strategy::AdminApiLookupStrategy;
-use super::coordinator_key::CoordinatorKey;
-use super::coordinator_strategy::CoordinatorStrategy;
+use super::AdminApiLookupStrategy;
+use super::CoordinatorKey;
+use super::CoordinatorStrategy;
+use super::SimpleAdminApiFuture;
+use super::{AdminApiHandler, ApiResult, RequestAndKeys};
 
 /// The abstract `DeleteGroups` handler.
 ///

@@ -19,10 +19,10 @@
 use std::collections::HashMap;
 use std::io;
 
+use crate::ListGroupsResponseData;
 use crate::common::protocol::{ApiKeys, Errors, Readable};
-use crate::list_groups_response_data::ListGroupsResponseData;
 
-use super::abstract_response::update_error_counts;
+use super::AbstractResponse;
 
 /// A `ListGroups` response.
 ///
@@ -76,7 +76,7 @@ impl ListGroupsResponse {
     /// code.
     pub fn error_counts(&self) -> HashMap<Errors, i32> {
         let mut counts = HashMap::new();
-        update_error_counts(&mut counts, Errors::for_code(self.data.error_code));
+        AbstractResponse::update_error_counts(&mut counts, Errors::for_code(self.data.error_code));
         counts
     }
 

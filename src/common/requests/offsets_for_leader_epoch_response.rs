@@ -27,16 +27,11 @@
 use std::collections::HashMap;
 use std::io;
 
+use crate::OffsetForLeaderEpochResponseData;
 use crate::common::protocol::{ApiKeys, Errors, Readable};
-use crate::offset_for_leader_epoch_response_data::OffsetForLeaderEpochResponseData;
 
+use super::AbstractResponse;
 use super::RECORD_BATCH_NO_PARTITION_LEADER_EPOCH;
-use super::abstract_response::update_error_counts;
-
-/// Sentinel epoch-offset used when the broker has no usable epoch.
-pub const UNDEFINED_EPOCH_OFFSET: i64 = RECORD_BATCH_NO_PARTITION_LEADER_EPOCH as i64;
-/// Sentinel leader-epoch used when the broker has no usable epoch.
-pub const UNDEFINED_EPOCH: i32 = RECORD_BATCH_NO_PARTITION_LEADER_EPOCH;
 
 /// An `OffsetsForLeaderEpoch` response.
 ///
@@ -47,6 +42,12 @@ pub struct OffsetsForLeaderEpochResponse {
 }
 
 impl OffsetsForLeaderEpochResponse {
+    /// Sentinel epoch-offset used when the broker has no usable epoch.
+    pub const UNDEFINED_EPOCH_OFFSET: i64 = RECORD_BATCH_NO_PARTITION_LEADER_EPOCH as i64;
+
+    /// Sentinel leader-epoch used when the broker has no usable epoch.
+    pub const UNDEFINED_EPOCH: i32 = RECORD_BATCH_NO_PARTITION_LEADER_EPOCH;
+
     /// Creates a new `OffsetsForLeaderEpochResponse` from the underlying data.
     pub fn new(data: OffsetForLeaderEpochResponseData) -> Self {
         Self { data }
@@ -82,7 +83,7 @@ impl OffsetsForLeaderEpochResponse {
         let mut counts = HashMap::new();
         for topic in &self.data.topics {
             for partition in &topic.partitions {
-                update_error_counts(&mut counts, Errors::for_code(partition.error_code));
+                AbstractResponse::update_error_counts(&mut counts, Errors::for_code(partition.error_code));
             }
         }
         counts
@@ -141,7 +142,13 @@ mod tests {
     /// Verifies the constants match Java's `OffsetsForLeaderEpochResponse`.
     #[test]
     fn sentinel_constants() {
-        assert_eq!(UNDEFINED_EPOCH, RECORD_BATCH_NO_PARTITION_LEADER_EPOCH);
-        assert_eq!(UNDEFINED_EPOCH_OFFSET, RECORD_BATCH_NO_PARTITION_LEADER_EPOCH as i64);
+        assert_eq!(
+            OffsetsForLeaderEpochResponse::UNDEFINED_EPOCH,
+            RECORD_BATCH_NO_PARTITION_LEADER_EPOCH
+        );
+        assert_eq!(
+            OffsetsForLeaderEpochResponse::UNDEFINED_EPOCH_OFFSET,
+            RECORD_BATCH_NO_PARTITION_LEADER_EPOCH as i64
+        );
     }
 }

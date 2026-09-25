@@ -143,7 +143,7 @@ async fn large_case(bootstrap: &str) -> Result<(), String> {
         }
     }
     for (i, ack) in acks.iter().enumerate() {
-        ack.get_timeout(txn_common::SEND_ACK_TIMEOUT)
+        ack.get_with_timeout(txn_common::SEND_ACK_TIMEOUT)
             .await
             .map_err(|e| format!("large: ack of record {}: {e}", i + 1))?;
     }

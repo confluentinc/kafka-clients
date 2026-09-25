@@ -20,10 +20,10 @@
 use std::collections::HashMap;
 use std::io;
 
-use crate::alter_user_scram_credentials_response_data::AlterUserScramCredentialsResponseData;
+use crate::AlterUserScramCredentialsResponseData;
 use crate::common::protocol::{ApiKeys, Errors, Readable};
 
-use super::abstract_response::update_error_counts;
+use super::AbstractResponse;
 
 /// An AlterUserScramCredentials response.
 ///
@@ -74,7 +74,7 @@ impl AlterUserScramCredentialsResponse {
     pub fn error_counts(&self) -> HashMap<Errors, i32> {
         let mut counts = HashMap::new();
         for result in &self.data.results {
-            update_error_counts(&mut counts, Errors::for_code(result.error_code));
+            AbstractResponse::update_error_counts(&mut counts, Errors::for_code(result.error_code));
         }
         counts
     }
@@ -142,7 +142,7 @@ mod tests {
             0x00, // result tagged fields
             0x00, // response tagged fields
         ];
-        let mut readable = crate::common::ByteBufferAccessor::from_bytes(bytes);
+        let mut readable = crate::common::ByteBufferAccessor::new(bytes);
         let parsed = AlterUserScramCredentialsResponse::parse(&mut readable, 0).unwrap();
         assert_eq!(parsed.data().results.len(), 1);
         assert_eq!(parsed.data().results[0].user, "u0");

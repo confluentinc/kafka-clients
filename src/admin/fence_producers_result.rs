@@ -100,7 +100,7 @@ impl FenceProducersResult {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::kafka_future::KafkaFutureImpl;
+    use crate::common::internals::KafkaFutureImpl;
 
     #[tokio::test]
     async fn producer_id_and_epoch_id_project_the_future() {

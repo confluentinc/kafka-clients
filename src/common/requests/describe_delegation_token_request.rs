@@ -19,9 +19,10 @@
 
 use std::io;
 
+use crate::DescribeDelegationTokenRequestData;
 use crate::common::protocol::{ApiKeys, Errors, Readable};
 use crate::common::security::auth::KafkaPrincipal;
-use crate::describe_delegation_token_request_data::{DescribeDelegationTokenOwner, DescribeDelegationTokenRequestData};
+use crate::describe_delegation_token_request_data::DescribeDelegationTokenOwner;
 
 use super::{ConcreteRequest, ConcreteResponse, DescribeDelegationTokenResponse, RequestBuilder};
 
@@ -72,7 +73,7 @@ impl DescribeDelegationTokenRequest {
     ///
     /// Mirrors `DescribeDelegationTokenRequest.getErrorResponse`.
     pub fn get_error_response(&self, throttle_time_ms: i32, error: &Errors) -> ConcreteResponse {
-        ConcreteResponse::DescribeDelegationToken(DescribeDelegationTokenResponse::error_only(
+        ConcreteResponse::DescribeDelegationToken(DescribeDelegationTokenResponse::with_version_throttle_time_ms_error(
             self.version,
             throttle_time_ms,
             *error,
@@ -117,7 +118,7 @@ impl DescribeDelegationTokenRequestBuilder {
     /// a `None` owners filter maps to a null owners field (describe all tokens
     /// the user is authorized for), while a present filter maps each principal
     /// to a `DescribeDelegationTokenOwner`.
-    pub fn from_owners(owners: Option<&[KafkaPrincipal]>) -> Self {
+    pub fn new(owners: Option<&[KafkaPrincipal]>) -> Self {
         let mut data = DescribeDelegationTokenRequestData::new();
         data.owners = owners.map(|owners| {
             owners
@@ -164,15 +165,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn from_owners_none_leaves_null_owners() {
-        let builder = DescribeDelegationTokenRequestBuilder::from_owners(None);
+    fn new_none_leaves_null_owners() {
+        let builder = DescribeDelegationTokenRequestBuilder::new(None);
         assert!(builder.data.owners.is_none());
     }
 
     #[test]
-    fn from_owners_maps_principals() {
+    fn new_maps_principals() {
         let owners = vec![KafkaPrincipal::new(KafkaPrincipal::USER_TYPE, "alice")];
-        let builder = DescribeDelegationTokenRequestBuilder::from_owners(Some(&owners));
+        let builder = DescribeDelegationTokenRequestBuilder::new(Some(&owners));
         let owners = builder.data.owners.as_ref().unwrap();
         assert_eq!(owners.len(), 1);
         assert_eq!(owners[0].principal_name, "alice");
@@ -196,10 +197,10 @@ mod tests {
     fn serialize_parse_round_trip() {
         let version = ApiKeys::DESCRIBE_DELEGATION_TOKEN.latest_version();
         let owners = vec![KafkaPrincipal::new(KafkaPrincipal::USER_TYPE, "alice")];
-        let mut builder = DescribeDelegationTokenRequestBuilder::from_owners(Some(&owners));
+        let mut builder = DescribeDelegationTokenRequestBuilder::new(Some(&owners));
         let mut request = builder.build_version(version).unwrap();
         let bytes = request.serialize().unwrap();
-        let mut readable = crate::common::ByteBufferAccessor::from_bytes(bytes.into_buffer());
+        let mut readable = crate::common::ByteBufferAccessor::new(bytes.into_buffer());
         let parsed = DescribeDelegationTokenRequest::parse(&mut readable, version).unwrap();
         let parsed_owners = parsed.data().owners.as_ref().unwrap();
         assert_eq!(parsed_owners.len(), 1);
@@ -210,7 +211,7 @@ mod tests {
     #[test]
     fn known_wire_vector_v3() {
         let owners = vec![KafkaPrincipal::new(KafkaPrincipal::USER_TYPE, "alice")];
-        let mut builder = DescribeDelegationTokenRequestBuilder::from_owners(Some(&owners));
+        let mut builder = DescribeDelegationTokenRequestBuilder::new(Some(&owners));
         let mut request = builder.build_version(3).unwrap();
         let bytes = request.serialize().unwrap().into_buffer();
         let expected: Vec<u8> = vec![
@@ -227,7 +228,7 @@ mod tests {
     /// which must encode as the compact-null array marker (0x00).
     #[test]
     fn known_wire_vector_v3_null_owners() {
-        let mut builder = DescribeDelegationTokenRequestBuilder::from_owners(None);
+        let mut builder = DescribeDelegationTokenRequestBuilder::new(None);
         let mut request = builder.build_version(3).unwrap();
         let bytes = request.serialize().unwrap().into_buffer();
         let expected: Vec<u8> = vec![

@@ -19,15 +19,10 @@
 use std::collections::HashMap;
 use std::io;
 
+use crate::DeleteRecordsResponseData;
 use crate::common::protocol::{ApiKeys, Errors, Readable};
-use crate::delete_records_response_data::DeleteRecordsResponseData;
 
-use super::abstract_response::update_error_counts;
-
-/// Sentinel low watermark returned for a partition that failed.
-///
-/// Corresponds to `DeleteRecordsResponse.INVALID_LOW_WATERMARK`.
-pub const INVALID_LOW_WATERMARK: i64 = -1;
+use super::AbstractResponse;
 
 /// A DeleteRecords response.
 ///
@@ -38,6 +33,11 @@ pub struct DeleteRecordsResponse {
 }
 
 impl DeleteRecordsResponse {
+    /// Sentinel low watermark returned for a partition that failed.
+    ///
+    /// Corresponds to `DeleteRecordsResponse.INVALID_LOW_WATERMARK`.
+    pub const INVALID_LOW_WATERMARK: i64 = -1;
+
     /// Creates a new `DeleteRecordsResponse` from the underlying data.
     pub fn new(data: DeleteRecordsResponseData) -> Self {
         Self { data }
@@ -73,7 +73,7 @@ impl DeleteRecordsResponse {
         let mut counts = HashMap::new();
         for topic in &self.data.topics {
             for partition in &topic.partitions {
-                update_error_counts(&mut counts, Errors::for_code(partition.error_code));
+                AbstractResponse::update_error_counts(&mut counts, Errors::for_code(partition.error_code));
             }
         }
         counts

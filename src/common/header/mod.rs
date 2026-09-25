@@ -55,12 +55,21 @@ pub trait Header {
 pub trait Headers {
     /// Adds a header (key inside), to the end, returning if the operation succeeded.
     ///
+    /// Translates Java's `Headers add(Header header)` (`Headers.java:34`). Java
+    /// overloads `add` with `add(String key, byte[] value)`; the two parameter
+    /// lists have nothing in common, so under CLAUDE.md §2 neither overload keeps
+    /// the plain name and both are suffixed with their parameter names.
+    ///
     /// # Errors
     ///
     /// Returns an error if headers are in a read-only state.
-    fn add(&mut self, header: RecordHeader) -> Result<(), LocalIllegalStateError>;
+    fn add_header(&mut self, header: RecordHeader) -> Result<(), LocalIllegalStateError>;
 
     /// Creates and adds a header, to the end, returning if the operation succeeded.
+    ///
+    /// Translates Java's `Headers add(String key, byte[] value)`
+    /// (`Headers.java:44`) — see [`add_header`](Headers::add_header) for why
+    /// neither overload keeps the plain name.
     ///
     /// The key and value are borrowed; the allocation is performed internally.
     ///
@@ -81,7 +90,11 @@ pub trait Headers {
     fn last_header(&self, key: &str) -> Option<&RecordHeader>;
 
     /// Returns all headers for the given key, in the order they were added in.
-    fn headers_for_key(&self, key: &str) -> Vec<&RecordHeader>;
+    ///
+    /// Translates Java's `Iterable<Header> headers(String key)`
+    /// (`Headers.java:71`), which is not overloaded — so the plain translated
+    /// name is the whole name (CLAUDE.md §2).
+    fn headers(&self, key: &str) -> Vec<&RecordHeader>;
 
     /// Returns all headers as a slice.
     ///

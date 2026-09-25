@@ -198,9 +198,9 @@ else
     fi
 fi
 
-TAGS_INSTANCE="ResourceType=instance,Tags=[{Key=Name,Value=$LABEL},{Key=cflt_service,Value=$LABEL},{Key=cflt_managed_by,Value=user},{Key=cflt_managed_id,Value=confluentinc/example-confluent-kafka-rust},{Key=cflt_partition,Value=operational-tools},{Key=cflt_environment,Value=devel}]"
-TAGS_VOLUME="ResourceType=volume,Tags=[{Key=Name,Value=$LABEL},{Key=cflt_service,Value=$LABEL},{Key=cflt_managed_by,Value=user},{Key=cflt_managed_id,Value=confluentinc/example-confluent-kafka-rust},{Key=cflt_partition,Value=operational-tools},{Key=cflt_environment,Value=devel}]"
-TAGS_ENI="ResourceType=network-interface,Tags=[{Key=cflt_service,Value=$LABEL},{Key=cflt_managed_by,Value=user},{Key=cflt_managed_id,Value=confluentinc/example-confluent-kafka-rust},{Key=cflt_partition,Value=operational-tools},{Key=cflt_environment,Value=devel}]"
+TAGS_INSTANCE="ResourceType=instance,Tags=[{Key=Name,Value=$LABEL},{Key=cflt_service,Value=$LABEL},{Key=cflt_managed_by,Value=user},{Key=cflt_managed_id,Value=confluentinc/kafka-clients},{Key=cflt_partition,Value=operational-tools},{Key=cflt_environment,Value=devel}]"
+TAGS_VOLUME="ResourceType=volume,Tags=[{Key=Name,Value=$LABEL},{Key=cflt_service,Value=$LABEL},{Key=cflt_managed_by,Value=user},{Key=cflt_managed_id,Value=confluentinc/kafka-clients},{Key=cflt_partition,Value=operational-tools},{Key=cflt_environment,Value=devel}]"
+TAGS_ENI="ResourceType=network-interface,Tags=[{Key=cflt_service,Value=$LABEL},{Key=cflt_managed_by,Value=user},{Key=cflt_managed_id,Value=confluentinc/kafka-clients},{Key=cflt_partition,Value=operational-tools},{Key=cflt_environment,Value=devel}]"
 BLOCK_DEVICES="[{\"DeviceName\":\"/dev/sda1\",\"Ebs\":{\"VolumeSize\":$VOLUME_SIZE_GB,\"VolumeType\":\"gp3\",\"Iops\":3000,\"Throughput\":125,\"Encrypted\":true,\"DeleteOnTermination\":true}}]"
 
 RUN_ARGS=(

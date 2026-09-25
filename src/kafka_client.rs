@@ -28,7 +28,8 @@ use super::ClientResponse;
 use super::LeastLoadedNode;
 use super::RequestCompletionHandler;
 
-/// The interface for [`NetworkClient`](super::network_client::NetworkClient).
+/// The interface for `NetworkClient`, which is `pub(crate)` and so cannot be linked from
+/// this public trait's documentation.
 ///
 /// Provides methods for managing connections to Kafka brokers and sending
 /// requests/receiving responses.

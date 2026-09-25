@@ -18,16 +18,11 @@
 
 use std::io;
 
+use crate::DescribeClusterRequestData;
+use crate::DescribeClusterResponseData;
 use crate::common::protocol::{ApiKeys, Errors, Readable};
-use crate::describe_cluster_request_data::DescribeClusterRequestData;
-use crate::describe_cluster_response_data::DescribeClusterResponseData;
 
 use super::{ConcreteRequest, ConcreteResponse, DescribeClusterResponse, RequestBuilder};
-
-/// The `EndpointType.BROKER` id (KIP-919).
-pub const ENDPOINT_TYPE_BROKER: i8 = 1;
-/// The `EndpointType.CONTROLLER` id (KIP-919).
-pub const ENDPOINT_TYPE_CONTROLLER: i8 = 2;
 
 /// A DescribeCluster request.
 ///
@@ -39,6 +34,12 @@ pub struct DescribeClusterRequest {
 }
 
 impl DescribeClusterRequest {
+    /// The `EndpointType.BROKER` id (KIP-919).
+    pub const ENDPOINT_TYPE_BROKER: i8 = 1;
+
+    /// The `EndpointType.CONTROLLER` id (KIP-919).
+    pub const ENDPOINT_TYPE_CONTROLLER: i8 = 2;
+
     /// Creates a new `DescribeClusterRequest` from data and version.
     pub fn new(data: DescribeClusterRequestData, version: i16) -> Self {
         Self { data, version }
@@ -105,7 +106,7 @@ pub struct DescribeClusterRequestBuilder {
 
 impl DescribeClusterRequestBuilder {
     /// Creates a builder from existing data.
-    pub fn from_data(data: DescribeClusterRequestData) -> Self {
+    pub fn new(data: DescribeClusterRequestData) -> Self {
         Self {
             data,
             oldest_allowed_version: ApiKeys::DESCRIBE_CLUSTER.oldest_version(),
@@ -155,13 +156,13 @@ mod tests {
     fn serialize_parse_round_trip() {
         let mut data = DescribeClusterRequestData::new();
         data.set_include_cluster_authorized_operations(true);
-        data.set_endpoint_type(ENDPOINT_TYPE_BROKER);
+        data.set_endpoint_type(DescribeClusterRequest::ENDPOINT_TYPE_BROKER);
         let mut request = ConcreteRequest::DescribeCluster(DescribeClusterRequest::new(data, 1));
         let bytes = request.serialize().unwrap();
-        let mut readable = crate::common::ByteBufferAccessor::from_bytes(bytes.into_buffer());
+        let mut readable = crate::common::ByteBufferAccessor::new(bytes.into_buffer());
         let parsed = DescribeClusterRequest::parse(&mut readable, 1).unwrap();
         assert!(parsed.data().include_cluster_authorized_operations);
-        assert_eq!(parsed.data().endpoint_type, ENDPOINT_TYPE_BROKER);
+        assert_eq!(parsed.data().endpoint_type, DescribeClusterRequest::ENDPOINT_TYPE_BROKER);
     }
 
     /// Byte-level encoding test against a known vector. DescribeCluster v1 is
@@ -173,7 +174,7 @@ mod tests {
     fn serialize_known_byte_vector_v1() {
         let mut data = DescribeClusterRequestData::new();
         data.set_include_cluster_authorized_operations(true);
-        data.set_endpoint_type(ENDPOINT_TYPE_BROKER);
+        data.set_endpoint_type(DescribeClusterRequest::ENDPOINT_TYPE_BROKER);
         let mut request = ConcreteRequest::DescribeCluster(DescribeClusterRequest::new(data, 1));
         let bytes = request.serialize().unwrap();
         let expected: &[u8] = &[

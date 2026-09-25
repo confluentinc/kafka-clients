@@ -24,7 +24,7 @@ use crate::common::simple_example_message_data::{
     MyStruct, SimpleExampleMessageData, StructArray, TaggedStruct, TestCommonStruct,
 };
 use confluent_kafka::common::Uuid;
-use confluent_kafka::common::protocol::message_util::to_byte_buffer_accessor;
+use confluent_kafka::common::protocol::MessageUtil;
 use confluent_kafka::common::protocol::{ByteBufferAccessor, Message, ObjectSerializationCache};
 
 /// Helper: compute hash of a value
@@ -36,7 +36,7 @@ fn hash_of<T: Hash>(val: &T) -> u64 {
 
 /// Deserialize a SimpleExampleMessageData from a buffer at a given version.
 fn deserialize(buf: &[u8], version: i16) -> SimpleExampleMessageData {
-    let mut accessor = ByteBufferAccessor::from_bytes(buf.to_vec());
+    let mut accessor = ByteBufferAccessor::new(buf.to_vec());
     let mut message = SimpleExampleMessageData::new();
     Message::read(&mut message, &mut accessor, version).unwrap();
     message
@@ -45,7 +45,7 @@ fn deserialize(buf: &[u8], version: i16) -> SimpleExampleMessageData {
 /// Serialize a SimpleExampleMessageData to a buffer at a given version,
 /// also verifying that the computed size matches the actual serialized size.
 fn round_trip_serde(message: &mut SimpleExampleMessageData, version: i16) -> SimpleExampleMessageData {
-    let acc = to_byte_buffer_accessor(message, version).unwrap();
+    let acc = MessageUtil::to_byte_buffer_accessor(message, version).unwrap();
     let buf = acc.buffer();
     // Check size calculation
     let mut cache = ObjectSerializationCache::new();
@@ -98,34 +98,36 @@ fn test_should_store_field() {
 }
 
 /// Translated from: shouldThrowIfCannotWriteNonIgnorableField
+///
+/// `processId` is a v1+ field and is not marked `"ignorable"`, so writing a non-default
+/// value at v0 must be **rejected**, not silently dropped: Java refuses to encode a
+/// message it cannot represent faithfully
+/// (`FieldSpec.generateNonIgnorableFieldCheck`, `FieldSpec.java:652-665`, gated on
+/// `!field.ignorable()` at `MessageDataGenerator.java:792`).
+///
+/// The check lives on the **write** path only. Java's `generateClassMessageSize` never
+/// emits it, and the Java test likewise sizes nothing — it allocates a fixed 64-byte
+/// buffer and calls `write` — so `size(.., 0)` succeeding here is correct, not a gap.
 #[test]
 fn test_should_return_error_if_cannot_write_non_ignorable_field() {
-    // processId is not supported in v0 and is not marked as ignorable
     let mut out = SimpleExampleMessageData::new();
     out.set_process_id(Uuid::random_uuid());
-    let mut cache = ObjectSerializationCache::new();
-    // The write at version 0 should fail because processId is a non-ignorable
-    // field that doesn't exist in version 0.
-    // Note: In the current generated code, processId is simply not written at v0
-    // (it's guarded by `if version >= 1`). The Java code throws UnsupportedVersionException
-    // because it validates that non-ignorable fields with non-default values can't be
-    // silently dropped. Our generator doesn't implement per-field UVE validation yet,
-    // so we verify the field is silently dropped (not written) at version 0 by checking
-    // that a round-trip at v0 resets processId to the default (zero UUID).
-    let size_result = out.size(&mut cache, 0);
-    if let Ok(size) = size_result {
-        let mut buf = ByteBufferAccessor::new(size as usize);
-        let write_result = Message::write(&mut out, &mut buf, &cache, 0);
-        if write_result.is_ok() {
-            // Field was silently dropped - verify round-trip loses processId
-            buf.set_position(0).unwrap();
-            let mut read_back = SimpleExampleMessageData::new();
-            Message::read(&mut read_back, &mut buf, 0).unwrap();
-            assert_eq!(Uuid::zero(), read_back.process_id);
-        }
-        // If write fails with UVE, that's also acceptable behavior
-    }
-    // If size fails with UVE, that's also acceptable behavior
+    let cache = ObjectSerializationCache::new();
+
+    let mut buf = ByteBufferAccessor::new(Vec::with_capacity(64));
+    let err = Message::write(&mut out, &mut buf, &cache, 0)
+        .expect_err("a non-default processId at v0 must be rejected, not dropped");
+    assert!(
+        err.to_string()
+            .contains("Attempted to write a non-default processId at version 0"),
+        "got: {err}"
+    );
+
+    // The default value is still writable at v0 — the guard tests the value, not the
+    // mere presence of a version-gated field.
+    let mut defaulted = SimpleExampleMessageData::new();
+    let mut buf = ByteBufferAccessor::new(Vec::with_capacity(64));
+    Message::write(&mut defaulted, &mut buf, &cache, 0).expect("a default processId at v0 is fine");
 }
 
 /// Translated from: shouldDefaultField
@@ -152,7 +154,7 @@ fn test_should_round_trip_field_through_buffer() {
     out.set_process_id(uuid);
     out.set_zero_copy_byte_buffer(buf.clone());
 
-    let acc = to_byte_buffer_accessor(&mut out, 1).unwrap();
+    let acc = MessageUtil::to_byte_buffer_accessor(&mut out, 1).unwrap();
     let buffer = acc.buffer();
 
     let read_in = deserialize(buffer, 1);
@@ -176,7 +178,7 @@ fn test_should_round_trip_field_through_buffer_with_nullable() {
     out.set_zero_copy_byte_buffer(buf1.clone());
     out.set_nullable_zero_copy_byte_buffer(Some(buf2.clone()));
 
-    let acc = to_byte_buffer_accessor(&mut out, 1).unwrap();
+    let acc = MessageUtil::to_byte_buffer_accessor(&mut out, 1).unwrap();
     let buffer = acc.buffer();
 
     let read_in = deserialize(buffer, 1);
@@ -429,7 +431,7 @@ fn test_my_struct_unsupported_version() {
     let mut cache = ObjectSerializationCache::new();
     let size_result = msg.size(&mut cache, 1);
     if let Ok(size) = size_result {
-        let mut buf = ByteBufferAccessor::new(size as usize);
+        let mut buf = ByteBufferAccessor::new(Vec::with_capacity(size as usize));
         let result = Message::write(&mut msg, &mut buf, &cache, 1);
         // At version 1, myStruct should not be written (version < 2),
         // so even if non-default, it's silently dropped.

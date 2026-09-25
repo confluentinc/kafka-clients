@@ -16,14 +16,13 @@
 //!
 //! Corresponds to `org.apache.kafka.common.requests.ProduceResponse`.
 
+use crate::common::Error;
 use std::collections::HashMap;
 use std::io;
 
+use crate::ProduceResponseData;
 use crate::common::protocol::{ApiKeys, Errors, Readable};
-use crate::produce_response_data::{LeaderIdAndEpoch, ProduceResponseData};
-
-/// Sentinel value for an invalid offset.
-pub const INVALID_OFFSET: i64 = -1;
+use crate::produce_response_data::LeaderIdAndEpoch;
 
 /// A Produce response.
 ///
@@ -52,6 +51,9 @@ pub struct ProduceResponse {
 }
 
 impl ProduceResponse {
+    /// Sentinel value for an invalid offset.
+    pub const INVALID_OFFSET: i64 = -1;
+
     /// Creates a new `ProduceResponse` from data.
     pub fn new(data: ProduceResponseData) -> Self {
         Self { data }
@@ -80,7 +82,7 @@ impl ProduceResponse {
         for topic in &self.data.responses {
             for partition in &topic.partition_responses {
                 let error = Errors::for_code(partition.error_code);
-                super::abstract_response::update_error_counts(&mut counts, error);
+                super::AbstractResponse::update_error_counts(&mut counts, error);
             }
         }
         counts
@@ -142,14 +144,169 @@ pub struct PartitionResponse {
     pub current_leader: LeaderIdAndEpoch,
 }
 
+/// The parameters of Java's widest `ProduceResponse.PartitionResponse`
+/// constructor (`ProduceResponse.java:188`).
+///
+/// Java's six constructors (`:168`, `:172`, `:176`, `:180`, `:184`, `:188`)
+/// intersect on `{error}`, so the widest form carries six parameters into its
+/// derived name. CLAUDE.md §2 caps that at three parameters and makes this
+/// struct the method's *only* parameter, so every Java parameter lives here —
+/// `error` included. This struct has no Java counterpart: it exists solely to
+/// satisfy that naming rule (DoD #7).
+///
+/// Because the cap applies to the *whole* group, Java's `:184` and `:188` forms
+/// derive the same name — `with_options`, differing only in whether they supply
+/// `currentLeader`. They therefore collapse into the single constructor below,
+/// with `:184`'s `new ProduceResponseData.LeaderIdAndEpoch()` becoming this
+/// struct's initial `current_leader`.
+///
+/// It deliberately has **no** `Default`. Every field *except* `error` is
+/// supplied by a narrower Java overload on the caller's behalf, and
+/// [`PartitionResponseOptionsBuilder::new`] carries exactly those values; `error` is
+/// what even Java's narrowest form (`:168`) takes from its caller, so it has no
+/// Java-derived default — and a synthesised `Errors::None` would silently turn a
+/// failed partition into a successful one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct PartitionResponseOptions {
+    /// Java's `error`.
+    pub error: Errors,
+    /// Java's `baseOffset`. Starts as `INVALID_OFFSET`, as in `:168`.
+    pub base_offset: i64,
+    /// Java's `logAppendTime`. Starts as `RecordBatch.NO_TIMESTAMP`, as in
+    /// `:168`.
+    pub log_append_time: i64,
+    /// Java's `logStartOffset`. Starts as `INVALID_OFFSET`, as in `:168`.
+    pub log_start_offset: i64,
+    /// Java's `recordErrors`. Starts empty, as in `:176`
+    /// (`Collections.emptyList()`).
+    pub record_errors: Vec<RecordError>,
+    /// Java's `errorMessage`. Starts as `None`, as in `:176`/`:180`.
+    pub error_message: Option<String>,
+    /// Java's `currentLeader`. Starts as `new LeaderIdAndEpoch()`, as in `:184`.
+    pub current_leader: LeaderIdAndEpoch,
+}
+
+/// Fluent builder for [`PartitionResponseOptions`].
+///
+/// Per CLAUDE.md §2 [`Self::new`] takes no parameters, every parameter has a
+/// fluent setter, and [`Self::build`] validates the mandatory ones — returning
+/// [`Error::LocalIllegalArgument`] if they were not set. Like [`PartitionResponseOptions`] it has no Java counterpart and
+/// exists solely to satisfy that naming rule (DoD #7).
+pub struct PartitionResponseOptionsBuilder {
+    error: Option<Errors>,
+    base_offset: i64,
+    log_append_time: i64,
+    log_start_offset: i64,
+    record_errors: Vec<RecordError>,
+    error_message: Option<String>,
+    current_leader: LeaderIdAndEpoch,
+}
+
+impl Default for PartitionResponseOptionsBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl PartitionResponseOptionsBuilder {
+    /// Creates a builder with every mandatory parameter unset and every other
+    /// parameter at the value Java passes on the caller's behalf.
+    pub fn new() -> Self {
+        Self {
+            error: None,
+            base_offset: ProduceResponse::INVALID_OFFSET,
+            log_append_time: crate::common::record::internal::RecordBatch::NO_TIMESTAMP,
+            log_start_offset: ProduceResponse::INVALID_OFFSET,
+            record_errors: Vec::new(),
+            error_message: None,
+            current_leader: LeaderIdAndEpoch::new(),
+        }
+    }
+
+    /// Sets [`PartitionResponseOptions::error`], a mandatory parameter: [`Self::build`]
+    /// panics if it was not set.
+    pub fn set_error(mut self, error: Errors) -> Self {
+        self.error = Some(error);
+        self
+    }
+    /// Sets [`PartitionResponseOptions::base_offset`].
+    pub fn set_base_offset(mut self, base_offset: i64) -> Self {
+        self.base_offset = base_offset;
+        self
+    }
+    /// Sets [`PartitionResponseOptions::log_append_time`].
+    pub fn set_log_append_time(mut self, log_append_time: i64) -> Self {
+        self.log_append_time = log_append_time;
+        self
+    }
+    /// Sets [`PartitionResponseOptions::log_start_offset`].
+    pub fn set_log_start_offset(mut self, log_start_offset: i64) -> Self {
+        self.log_start_offset = log_start_offset;
+        self
+    }
+    /// Sets [`PartitionResponseOptions::record_errors`].
+    pub fn set_record_errors(mut self, record_errors: Vec<RecordError>) -> Self {
+        self.record_errors = record_errors;
+        self
+    }
+    /// Sets [`PartitionResponseOptions::error_message`].
+    pub fn set_error_message(mut self, error_message: Option<String>) -> Self {
+        self.error_message = error_message;
+        self
+    }
+    /// Sets [`PartitionResponseOptions::current_leader`].
+    pub fn set_current_leader(mut self, current_leader: LeaderIdAndEpoch) -> Self {
+        self.current_leader = current_leader;
+        self
+    }
+
+    /// Returns the built options.
+    ///
+    /// Per CLAUDE.md §2 the mandatory parameters are validated here rather than
+    /// being named in the constructor, so a later Java version that makes one of
+    /// them optional changes the set this accepts instead of adding a second
+    /// constructor. Today there is one mandatory set: `error`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::LocalIllegalArgument`] naming the first parameter of that
+    /// set which was not given a setter call. Only presence is checked here;
+    /// semantic validation belongs to the method the options are passed to
+    /// (CLAUDE.md §2).
+    pub fn build(self) -> Result<PartitionResponseOptions, Error> {
+        Ok(PartitionResponseOptions {
+            error: self.error.ok_or_else(|| Self::missing("error"))?,
+            base_offset: self.base_offset,
+            log_append_time: self.log_append_time,
+            log_start_offset: self.log_start_offset,
+            record_errors: self.record_errors,
+            error_message: self.error_message,
+            current_leader: self.current_leader,
+        })
+    }
+
+    /// Builds the [`Error::LocalIllegalArgument`] naming a mandatory parameter
+    /// [`Self::build`] found unset.
+    fn missing(parameter: &str) -> Error {
+        Error::local_illegal_argument(format!(
+            "PartitionResponseOptionsBuilder::build: mandatory parameter `{parameter}` was not set"
+        ))
+    }
+}
+
 impl PartitionResponse {
     /// Creates a `PartitionResponse` with just an error code (all offsets invalid).
-    pub fn from_error(error: Errors) -> Self {
+    ///
+    /// Corresponds to Java's `PartitionResponse(Errors)`
+    /// (`ProduceResponse.java:168`), the overload whose parameters equal the
+    /// group's intersection.
+    pub fn new(error: Errors) -> Self {
         Self {
             error,
-            base_offset: INVALID_OFFSET,
+            base_offset: ProduceResponse::INVALID_OFFSET,
             log_append_time: crate::common::record::internal::RecordBatch::NO_TIMESTAMP,
-            log_start_offset: INVALID_OFFSET,
+            log_start_offset: ProduceResponse::INVALID_OFFSET,
             record_errors: Vec::new(),
             error_message: None,
             current_leader: LeaderIdAndEpoch::new(),
@@ -157,48 +314,41 @@ impl PartitionResponse {
     }
 
     /// Creates a `PartitionResponse` with error and message (all offsets invalid).
-    pub fn from_error_with_message(error: Errors, error_message: Option<String>) -> Self {
+    ///
+    /// Corresponds to Java's `PartitionResponse(Errors, String)`
+    /// (`ProduceResponse.java:172`).
+    pub fn with_error_message(error: Errors, error_message: Option<String>) -> Self {
         Self {
             error,
-            base_offset: INVALID_OFFSET,
+            base_offset: ProduceResponse::INVALID_OFFSET,
             log_append_time: crate::common::record::internal::RecordBatch::NO_TIMESTAMP,
-            log_start_offset: INVALID_OFFSET,
+            log_start_offset: ProduceResponse::INVALID_OFFSET,
             record_errors: Vec::new(),
             error_message,
             current_leader: LeaderIdAndEpoch::new(),
         }
     }
 
-    /// Creates a `PartitionResponse` with all fields except `current_leader` (defaults to empty).
-    pub fn new(
-        error: Errors,
-        base_offset: i64,
-        log_append_time: i64,
-        log_start_offset: i64,
-        record_errors: Vec<RecordError>,
-        error_message: Option<String>,
-    ) -> Self {
-        Self::with_leader(
+    /// Creates a `PartitionResponse` with all fields.
+    ///
+    /// Corresponds to Java's `PartitionResponse(Errors, long, long, long,
+    /// List<RecordError>, String)` (`ProduceResponse.java:184`) **and**
+    /// `PartitionResponse(Errors, long, long, long, List<RecordError>, String,
+    /// LeaderIdAndEpoch)` (`:188`): both derive this same name under CLAUDE.md
+    /// §2, so they collapse into one constructor, whose only parameter is
+    /// [`PartitionResponseOptions`]. Leaving that struct's `current_leader` at
+    /// its initial value — `:184`'s own `new LeaderIdAndEpoch()` — gives `:184`'s
+    /// behaviour.
+    pub fn with_options(options: PartitionResponseOptions) -> Self {
+        let PartitionResponseOptions {
             error,
             base_offset,
             log_append_time,
             log_start_offset,
             record_errors,
             error_message,
-            LeaderIdAndEpoch::new(),
-        )
-    }
-
-    /// Creates a `PartitionResponse` with all fields including `current_leader`.
-    pub fn with_leader(
-        error: Errors,
-        base_offset: i64,
-        log_append_time: i64,
-        log_start_offset: i64,
-        record_errors: Vec<RecordError>,
-        error_message: Option<String>,
-        current_leader: LeaderIdAndEpoch,
-    ) -> Self {
+            current_leader,
+        } = options;
         Self {
             error,
             base_offset,
@@ -240,12 +390,12 @@ pub struct RecordError {
 
 impl RecordError {
     /// Creates a `RecordError` with batch index and optional message.
-    pub fn new(batch_index: i32, message: Option<String>) -> Self {
+    pub fn with_message(batch_index: i32, message: Option<String>) -> Self {
         Self { batch_index, message }
     }
 
     /// Creates a `RecordError` with just a batch index (no message).
-    pub fn from_index(batch_index: i32) -> Self {
+    pub fn new(batch_index: i32) -> Self {
         Self { batch_index, message: None }
     }
 }
@@ -267,7 +417,8 @@ impl std::fmt::Display for RecordError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::produce_response_data::{PartitionProduceResponse, ProduceResponseData, TopicProduceResponse};
+    use crate::ProduceResponseData;
+    use crate::produce_response_data::{PartitionProduceResponse, TopicProduceResponse};
 
     #[test]
     fn test_produce_response_basic() {
@@ -320,19 +471,34 @@ mod tests {
 
     #[test]
     fn test_partition_response_from_error() {
-        let pr = PartitionResponse::from_error(Errors::UnknownTopicOrPartition);
+        let pr = PartitionResponse::new(Errors::UnknownTopicOrPartition);
         assert_eq!(pr.error, Errors::UnknownTopicOrPartition);
-        assert_eq!(pr.base_offset, INVALID_OFFSET);
+        assert_eq!(pr.base_offset, ProduceResponse::INVALID_OFFSET);
         assert!(pr.error_message.is_none());
         assert!(pr.record_errors.is_empty());
     }
 
     #[test]
     fn test_record_error_display() {
-        let re = RecordError::new(5, Some("bad record".to_string()));
+        let re = RecordError::with_message(5, Some("bad record".to_string()));
         assert_eq!(re.to_string(), "RecordError(batchIndex=5, message='bad record')");
 
-        let re_none = RecordError::from_index(3);
+        let re_none = RecordError::new(3);
         assert_eq!(re_none.to_string(), "RecordError(batchIndex=3, message=null)");
+    }
+
+    /// CLAUDE.md §2: the mandatory parameters are validated in
+    /// [`PartitionResponseOptionsBuilder::build`], not named in the constructor, so a
+    /// builder left untouched panics naming the first one it finds unset.
+    #[test]
+    fn partition_response_options_builder_build_errors_when_no_mandatory_parameter_is_set() {
+        let Err(error) = PartitionResponseOptionsBuilder::new().build() else {
+            panic!("build must reject the unset mandatory parameter");
+        };
+        assert!(matches!(error, Error::LocalIllegalArgument(_)), "{error:?}");
+        assert_eq!(
+            error.message(),
+            "PartitionResponseOptionsBuilder::build: mandatory parameter `error` was not set"
+        );
     }
 }

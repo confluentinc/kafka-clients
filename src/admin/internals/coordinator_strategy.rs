@@ -21,18 +21,18 @@
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use crate::FindCoordinatorRequestData;
 use crate::common::Error;
-use crate::common::protocol::Errors;
+use crate::common::Errors;
 use crate::common::requests::{
     ConcreteResponse, CoordinatorType, FindCoordinatorRequestBuilder, FindCoordinatorResponse, RequestBuilder,
 };
 use crate::common::utils::LogContext;
-use crate::find_coordinator_request_data::FindCoordinatorRequestData;
 use crate::{kafka_debug, kafka_error};
 
-use super::admin_api_lookup_strategy::{AdminApiLookupStrategy, LookupResult};
-use super::api_request_scope::ApiRequestScope;
-use super::coordinator_key::CoordinatorKey;
+use super::ApiRequestScope;
+use super::CoordinatorKey;
+use super::{AdminApiLookupStrategy, LookupResult};
 
 /// The uppercase Java enum name for a coordinator type (used in error
 /// messages to mirror Java's `CoordinatorType.toString`).
@@ -297,7 +297,8 @@ mod tests {
     use std::collections::{HashMap, HashSet};
 
     use super::*;
-    use crate::find_coordinator_response_data::{Coordinator, FindCoordinatorResponseData};
+    use crate::FindCoordinatorResponseData;
+    use crate::find_coordinator_response_data::Coordinator;
 
     fn strategy(coordinator_type: CoordinatorType) -> CoordinatorStrategy {
         CoordinatorStrategy::new(coordinator_type, LogContext::new(String::new()))
@@ -320,8 +321,8 @@ mod tests {
     fn an_unexpected_response_type_fails_every_lookup_key() {
         let s = strategy(CoordinatorType::Group);
         let requested = keys(&[CoordinatorKey::by_group_id("foo"), CoordinatorKey::by_group_id("bar")]);
-        let wrong = ConcreteResponse::Metadata(crate::common::requests::MetadataResponse::new(
-            crate::metadata_response_data::MetadataResponseData::new(),
+        let wrong = ConcreteResponse::Metadata(crate::common::requests::MetadataResponse::with_version(
+            crate::MetadataResponseData::new(),
             0,
         ));
 

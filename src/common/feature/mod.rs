@@ -14,6 +14,6 @@
 
 //! Feature version range types (org.apache.kafka.common.feature)
 
-pub mod supported_version_range;
+mod supported_version_range;
 
 pub use supported_version_range::SupportedVersionRange;

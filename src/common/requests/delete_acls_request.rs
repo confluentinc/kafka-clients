@@ -18,11 +18,13 @@
 
 use std::io;
 
+use crate::DeleteAclsRequestData;
+use crate::DeleteAclsResponseData;
 use crate::common::acl::{AccessControlEntryFilter, AclBindingFilter, AclOperation, AclPermissionType};
 use crate::common::protocol::{ApiKeys, Errors, Readable};
 use crate::common::resource::{PatternType, ResourcePatternFilter, ResourceType};
-use crate::delete_acls_request_data::{DeleteAclsFilter, DeleteAclsRequestData};
-use crate::delete_acls_response_data::{DeleteAclsFilterResult, DeleteAclsResponseData};
+use crate::delete_acls_request_data::DeleteAclsFilter;
+use crate::delete_acls_response_data::DeleteAclsFilterResult;
 
 use super::{ConcreteRequest, ConcreteResponse, DeleteAclsResponse, RequestBuilder};
 
@@ -145,7 +147,7 @@ pub struct DeleteAclsRequestBuilder {
 
 impl DeleteAclsRequestBuilder {
     /// Creates a builder from existing data.
-    pub fn from_data(data: DeleteAclsRequestData) -> Self {
+    pub fn new(data: DeleteAclsRequestData) -> Self {
         Self {
             data,
             oldest_allowed_version: ApiKeys::DELETE_ACLS.oldest_version(),
@@ -216,7 +218,7 @@ mod tests {
         let version = ApiKeys::DELETE_ACLS.latest_version();
         let mut request = ConcreteRequest::DeleteAcls(DeleteAclsRequest::new(data, version));
         let bytes = request.serialize().unwrap();
-        let mut readable = crate::common::ByteBufferAccessor::from_bytes(bytes.into_buffer());
+        let mut readable = crate::common::ByteBufferAccessor::new(bytes.into_buffer());
         let parsed = DeleteAclsRequest::parse(&mut readable, version).unwrap();
         assert_eq!(parsed.filters(), vec![sample_filter()]);
     }

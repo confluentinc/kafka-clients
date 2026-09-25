@@ -20,23 +20,24 @@
 //! for pure-counter stats, `Mutex` where multi-field mutation needs it). JMX is
 //! replaced by the [`MetricsReporter`] trait seam.
 
-pub mod compound_stat;
-pub mod gauge;
+mod compound_stat;
+mod gauge;
 pub(crate) mod internals;
-pub mod kafka_metric;
-pub mod measurable;
-pub mod measurable_stat;
-pub mod metric_config;
-pub mod metric_value_provider;
+mod kafka_metric;
+mod measurable;
+mod measurable_stat;
+mod metric_config;
+mod metric_value_provider;
 #[allow(clippy::module_inception)]
-pub mod metrics;
-pub mod metrics_reporter;
-pub mod quota;
-pub mod quota_violation_error;
+mod metrics;
+mod metrics_reporter;
+mod quota;
+mod quota_violation_error;
 pub mod sensor;
-pub mod stat;
+mod stat;
 pub mod stats;
-pub mod time;
+mod system_time;
+mod time;
 
 pub use compound_stat::{CompoundStat, NamedMeasurable};
 pub use gauge::{ClosureGauge, Gauge};
@@ -45,13 +46,17 @@ pub use measurable::{ClosureMeasurable, Measurable};
 pub use measurable_stat::MeasurableStat;
 // `Metric` and `MetricValue` live in `org.apache.kafka.common` (→ `common::metric`);
 // re-export `MetricValue` here for convenience since the stats/providers produce it.
-pub use crate::common::metric::MetricValue;
-pub use metric_config::{DEFAULT_NUM_SAMPLES, MetricConfig};
+pub use crate::common::MetricValue;
+pub use metric_config::MetricConfig;
 pub use metric_value_provider::MetricValueProvider;
-pub use metrics::Metrics;
+pub(crate) use metrics::MetricsShared;
+pub use metrics::{Metrics, SensorOptions, SensorOptionsBuilder};
 pub use metrics_reporter::MetricsReporter;
 pub use quota::Quota;
 pub use quota_violation_error::QuotaViolationError;
 pub use sensor::{RecordingLevel, Sensor};
 pub use stat::Stat;
-pub use time::{SystemTime, Time};
+pub use system_time::SystemTime;
+pub use time::Time;
+#[cfg(test)]
+pub(crate) use time::mock::MockTime;

@@ -32,14 +32,14 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::oneshot;
 
 use crate::common::Error;
+use crate::common::Errors;
 use crate::common::PartitionInfo;
-use crate::common::protocol::Errors;
 use crate::common::requests::{ConcreteResponse, MetadataRequestBuilder, MetadataResponse, RequestBuilder};
 use crate::consumer::ConsumerConfig;
 
-use super::network_client_delegate::{PollResult, UnsentRequest};
-use super::request_manager::RequestManager;
-use super::timed_request_state::TimedRequestState;
+use super::RequestManager;
+use super::TimedRequestState;
+use super::{PollResult, UnsentRequest};
 
 /// Result returned by [`TopicMetadataRequestManager::request_topic_metadata`]
 /// and [`TopicMetadataRequestManager::request_all_topics_metadata`].
@@ -368,7 +368,7 @@ impl TopicMetadataRequestManager {
             // `is_authorization_error()` / `is_fatal_error()` where Java
             // answers `false`, and the cause would be dropped. Contrast the
             // `InvalidTopicError` arm above, where Java does name the class.
-            return Err(Error::kafka_with_source(
+            return Err(Error::kafka_message_source(
                 format!("Unexpected error fetching metadata for topic {topic}"),
                 Error::new(error),
             ));
@@ -432,7 +432,7 @@ impl TopicMetadataRequestManager {
             state.timed_state.on_send_attempt(current_time_ms);
 
             let builder: Box<dyn RequestBuilder> = match state.topic.as_deref() {
-                Some(topic) => Box::new(MetadataRequestBuilder::new(
+                Some(topic) => Box::new(MetadataRequestBuilder::with_topics_allow_auto_topic_creation(
                     Some(&[topic]),
                     self.inner.allow_auto_topic_creation,
                 )),
@@ -502,19 +502,20 @@ impl RequestManager for TopicMetadataRequestManager {
 
 #[cfg(test)]
 mod tests {
-    use crate::client_response::ClientResponse;
+    use crate::ClientResponse;
+    use crate::MetadataResponseData;
+    use crate::common::ApiKeys;
     use crate::common::Node;
-    use crate::common::protocol::ApiKeys;
-    use crate::common::requests::{ConcreteResponse, RequestHeader};
-    use crate::metadata_response_data::{MetadataResponseBroker, MetadataResponseData, MetadataResponseTopic};
+    use crate::common::requests::{ConcreteResponse, RequestHeader, RequestHeaderOptionsBuilder};
+    use crate::metadata_response_data::{MetadataResponseBroker, MetadataResponseTopic};
 
     use super::*;
 
     const RETRY_BACKOFF_MS: i64 = 100;
 
     fn setup_manager() -> TopicMetadataRequestManager {
-        let mut config =
-            ConsumerConfig::new(vec!["localhost:9092".to_string()]).with_retry_backoff_ms(RETRY_BACKOFF_MS);
+        let mut config = ConsumerConfig { bootstrap_servers: vec!["localhost:9092".to_string()], ..Default::default() }
+            .set_retry_backoff_ms(RETRY_BACKOFF_MS);
         // Java's `ALLOW_AUTO_CREATE_TOPICS_CONFIG = false` matches Java's
         // `testSetup` properties. The field is `pub(crate)` so we set it
         // directly in tests (no public builder method exposed).
@@ -556,7 +557,7 @@ mod tests {
         data.set_controller_id(0);
         data.set_brokers(brokers);
         data.set_topics(vec![topic_meta]);
-        MetadataResponse::new(data, ApiKeys::METADATA.latest_version())
+        MetadataResponse::with_version(data, ApiKeys::METADATA.latest_version())
     }
 
     /// Builds a `MetadataResponse` carrying two topics (`topic1`, `topic2`),
@@ -592,7 +593,7 @@ mod tests {
         data.set_controller_id(0);
         data.set_brokers(brokers);
         data.set_topics(vec![t1, t2]);
-        MetadataResponse::new(data, ApiKeys::METADATA.latest_version())
+        MetadataResponse::with_version(data, ApiKeys::METADATA.latest_version())
     }
 
     /// Translated from `TopicMetadataRequestManagerTest.testPoll_SuccessfulRequestTopicMetadata`.
@@ -770,7 +771,7 @@ mod tests {
         // which is a *subclass* of `KafkaException` rather than the bare class
         // this test is named for. Retriability is decided by the payload's
         // declared ancestry (`ErrorHierarchy`), not by a table on `Errors`.
-        hard_failures(Error::kafka("non-retriable error"));
+        hard_failures(Error::kafka_message("non-retriable error"));
     }
 
     #[tokio::test]
@@ -1014,7 +1015,7 @@ mod tests {
         data.set_controller_id(0);
         data.set_brokers(brokers);
         data.set_topics(vec![topic_meta]);
-        let response = MetadataResponse::new(data, ApiKeys::METADATA.latest_version());
+        let response = MetadataResponse::with_version(data, ApiKeys::METADATA.latest_version());
 
         let request_id = manager.inflight_snapshot()[0].0;
         manager.on_response(request_id, 0, &response);
@@ -1083,10 +1084,19 @@ mod tests {
         data.set_controller_id(0);
         data.set_brokers(brokers);
         data.set_topics(vec![topic_meta]);
-        let metadata_response = MetadataResponse::new(data, ApiKeys::METADATA.latest_version());
+        let metadata_response = MetadataResponse::with_version(data, ApiKeys::METADATA.latest_version());
 
-        let header = RequestHeader::new(&ApiKeys::METADATA, ApiKeys::METADATA.latest_version(), "", 1).unwrap();
-        let response = ClientResponse::with_timeout(
+        let header = RequestHeader::with_options(
+            RequestHeaderOptionsBuilder::new()
+                .set_request_api_key(&ApiKeys::METADATA)
+                .set_request_version(ApiKeys::METADATA.latest_version())
+                .set_client_id("")
+                .set_correlation_id(1)
+                .build()
+                .unwrap(),
+        )
+        .unwrap();
+        let response = ClientResponse::with_timed_out(
             header,
             None,
             "0",
@@ -1202,7 +1212,7 @@ mod tests {
         assert!(err.is_kafka_error());
         assert!(!err.is_api_error());
         assert!(!err.is_authorization_error());
-        assert!(!crate::common::requests::request_utils::is_fatal_error(&err));
+        assert!(!crate::common::requests::RequestUtils::is_fatal_error(&err));
         // Java's `getCause()` — the typed error the wrapper carries.
         let cause = err.source().expect("the typed error is the cause");
         assert_eq!(cause.error(), Errors::ClusterAuthorizationFailed);

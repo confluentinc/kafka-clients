@@ -5,12 +5,6 @@ A small, self-contained benchmark for the Rust Kafka consumer that measures
 producer** running at a **fixed throughput**, while sampling the consumer
 process's **CPU and RSS** at a regular interval.
 
-It is a separate workspace crate so the client crate's dependency tree stays
-clean (`sysinfo` is a benchmark-only dependency). Design rationale and the
-analysis of prior art (the `example-confluent-kafka-native-java` suite, OMB,
-coordinated omission) live in
-[`design/current/consumer-perf-benchmark-analysis.md`](../design/current/consumer-perf-benchmark-analysis.md).
-
 ## What it does
 
 1. Subscribes with `auto.offset.reset=latest` (KIP-848 `group.protocol=consumer`),

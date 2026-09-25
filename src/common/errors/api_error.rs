@@ -14,7 +14,7 @@
 
 //! Translated from `org.apache.kafka.common.errors.ApiException`.
 
-use crate::common::kafka_error::kafka_error_class;
+use crate::common::error::kafka_error_class;
 
 kafka_error_class! {
     /// Any exception the broker can report through the protocol.

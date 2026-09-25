@@ -18,7 +18,7 @@
 //! which is [`TimeoutError`](crate::common::errors::TimeoutError) — see the type
 //! docs below for why the two must stay apart.
 
-use crate::common::kafka_error::message_only_error;
+use crate::common::error::message_only_error;
 
 message_only_error! {
     /// A wait on a future timed out.

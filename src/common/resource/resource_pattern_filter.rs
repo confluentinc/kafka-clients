@@ -16,7 +16,6 @@
 //!
 //! Corresponds to `org.apache.kafka.common.resource.ResourcePatternFilter`.
 
-use super::resource_pattern::WILDCARD_RESOURCE;
 use super::{PatternType, ResourcePattern, ResourceType};
 
 /// Represents a filter that can match [`ResourcePattern`].
@@ -37,7 +36,7 @@ impl ResourcePatternFilter {
     ///   will ignore the resource type of the pattern. If any other resource
     ///   type, the filter will match only patterns with the same type.
     /// * `name` - resource name or `None`. If `None`, the filter will ignore the
-    ///   name of resources. If [`WILDCARD_RESOURCE`], will match only wildcard
+    ///   name of resources. If [`ResourcePattern::WILDCARD_RESOURCE`], will match only wildcard
     ///   patterns.
     /// * `pattern_type` - resource pattern type. If [`PatternType::Any`], the
     ///   filter will match patterns regardless of pattern type. If
@@ -96,7 +95,7 @@ impl ResourcePatternFilter {
         }
 
         match pattern.pattern_type() {
-            PatternType::Literal => name == pattern.name() || pattern.name() == WILDCARD_RESOURCE,
+            PatternType::Literal => name == pattern.name() || pattern.name() == ResourcePattern::WILDCARD_RESOURCE,
             PatternType::Prefixed => name.starts_with(pattern.name()),
             // Java throws IllegalArgumentException here; this branch is only
             // reachable for MATCH/ANY/UNKNOWN pattern types on the *pattern*

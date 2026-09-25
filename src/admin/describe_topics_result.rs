@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! The result of `Admin::describe_topics`.
+//! The result of `Admin::describe_topics_with_topics`.
 //!
 //! Corresponds to `org.apache.kafka.clients.admin.DescribeTopicsResult`.
 
@@ -21,7 +21,7 @@ use std::collections::HashMap;
 use crate::admin::TopicDescription;
 use crate::common::{KafkaFuture, Uuid};
 
-/// The result of `Admin::describe_topics`.
+/// The result of `Admin::describe_topics_with_topics`.
 ///
 /// Corresponds to `org.apache.kafka.clients.admin.DescribeTopicsResult`. As
 /// with `DeleteTopicsResult`, the "keyed by id XOR name" invariant is a closed
@@ -90,7 +90,7 @@ impl DescribeTopicsResult {
 mod tests {
     use super::*;
     use crate::common::Error;
-    use crate::common::kafka_future::KafkaFutureImpl;
+    use crate::common::internals::KafkaFutureImpl;
 
     fn description(name: &str) -> TopicDescription {
         TopicDescription::new(name, false, vec![])

@@ -29,16 +29,16 @@
 
 use std::collections::{HashMap, HashSet};
 
+use crate::common::Errors;
 use crate::common::TopicPartition;
 use crate::common::errors::TopicAuthorizationError;
-use crate::common::protocol::Errors;
 use crate::common::record::internal::RecordBatch;
+use crate::common::requests::OffsetsForLeaderEpochRequestBuilder;
 use crate::common::requests::OffsetsForLeaderEpochResponse;
-use crate::common::requests::offsets_for_leader_epoch_request::OffsetsForLeaderEpochRequestBuilder;
 use crate::offset_for_leader_epoch_request_data::{OffsetForLeaderPartition, OffsetForLeaderTopic};
 use crate::offset_for_leader_epoch_response_data::EpochEndOffset;
 
-use super::subscription_state::FetchPosition;
+use super::FetchPosition;
 
 /// Result of handling an `OffsetsForLeaderEpoch` response.
 ///
@@ -197,10 +197,11 @@ impl OffsetsForLeaderEpochClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::OffsetForLeaderEpochResponseData;
     use crate::common::Node;
-    use crate::common::requests::abstract_request::RequestBuilder;
+    use crate::common::requests::RequestBuilder;
     use crate::metadata::LeaderAndEpoch;
-    use crate::offset_for_leader_epoch_response_data::{OffsetForLeaderEpochResponseData, OffsetForLeaderTopicResult};
+    use crate::offset_for_leader_epoch_response_data::OffsetForLeaderTopicResult;
 
     fn fetch_position_with_epoch(offset: i64, offset_epoch: i32, current_epoch: i32) -> FetchPosition {
         let leader = Node::new(1, "host".to_string(), 9092);
@@ -237,7 +238,7 @@ mod tests {
         assert_eq!(topic_b.partitions.len(), 1);
         assert_eq!(topic_b.partitions[0].leader_epoch, 2);
         assert_eq!(topic_b.partitions[0].current_leader_epoch, 7);
-        assert_eq!(builder.api_key(), &crate::common::protocol::ApiKeys::OFFSET_FOR_LEADER_EPOCH);
+        assert_eq!(builder.api_key(), &crate::common::ApiKeys::OFFSET_FOR_LEADER_EPOCH);
     }
 
     /// Verifies `handle_response` returns end offsets for successful entries

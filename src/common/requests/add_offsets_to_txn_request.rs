@@ -22,8 +22,8 @@
 
 use std::io;
 
-use crate::add_offsets_to_txn_request_data::AddOffsetsToTxnRequestData;
-use crate::add_offsets_to_txn_response_data::AddOffsetsToTxnResponseData;
+use crate::AddOffsetsToTxnRequestData;
+use crate::AddOffsetsToTxnResponseData;
 use crate::common::protocol::{ApiKeys, Errors, Readable};
 
 use super::AddOffsetsToTxnResponse;
@@ -111,7 +111,7 @@ impl AddOffsetsToTxnRequestBuilder {
             oldest_allowed_version: ApiKeys::ADD_OFFSETS_TO_TXN.oldest_version(),
             // Mirrors Java's `super(ApiKeys)` → `Builder(apiKey, false)` →
             // `latestVersion(false)`: released versions only. Rules §12.
-            latest_allowed_version: ApiKeys::ADD_OFFSETS_TO_TXN.latest_version_with_unstable(false),
+            latest_allowed_version: ApiKeys::ADD_OFFSETS_TO_TXN.latest_version_enable_unstable_last_version(false),
         }
     }
 

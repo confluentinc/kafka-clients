@@ -20,10 +20,10 @@
 use std::collections::HashMap;
 use std::io;
 
+use crate::RenewDelegationTokenResponseData;
 use crate::common::protocol::{ApiKeys, Errors, Readable};
-use crate::renew_delegation_token_response_data::RenewDelegationTokenResponseData;
 
-use super::abstract_response::single_error_count;
+use super::AbstractResponse;
 
 /// A RenewDelegationToken response.
 ///
@@ -99,7 +99,7 @@ impl RenewDelegationTokenResponse {
 
     /// Returns the error counts for this response.
     pub fn error_counts(&self) -> HashMap<Errors, i32> {
-        single_error_count(self.error())
+        AbstractResponse::single_error_count(self.error())
     }
 
     /// Parses a `RenewDelegationTokenResponse` from a readable buffer.

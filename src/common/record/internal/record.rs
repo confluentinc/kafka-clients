@@ -19,7 +19,7 @@
 //!
 //! Corresponds to Java's `org.apache.kafka.common.record.Record` interface.
 
-use crate::common::header::internals::RecordHeader;
+use crate::common::header::RecordHeader;
 use crate::common::record::TimestampType;
 
 /// A log record is a tuple consisting of a unique offset in the log, a sequence

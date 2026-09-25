@@ -23,7 +23,7 @@ use super::{FinalizedVersionRange, SupportedVersionRange};
 /// Encapsulates details about finalized as well as supported features.
 ///
 /// This is particularly useful to hold the result returned by the
-/// [`describe_features`](crate::admin::Admin::describe_features) API.
+/// [`describe_features_with_options`](crate::admin::Admin::describe_features_with_options) API.
 ///
 /// Corresponds to `org.apache.kafka.clients.admin.FeatureMetadata`.
 #[derive(Clone, Debug, PartialEq, Eq)]

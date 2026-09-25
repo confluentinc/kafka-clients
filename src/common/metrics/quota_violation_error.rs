@@ -14,7 +14,7 @@
 
 //! `org.apache.kafka.common.metrics.QuotaViolationException`.
 
-use crate::common::kafka_error::{ErrorCode, ErrorHierarchy, ErrorMessage, ErrorSource};
+use crate::common::error::{ErrorCode, ErrorHierarchy, ErrorMessage, ErrorSource};
 use crate::common::{Error, MetricName};
 
 /// Raised when a sensor records a value that takes a metric outside the bounds

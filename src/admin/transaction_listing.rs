@@ -16,7 +16,7 @@
 //!
 //! Corresponds to `org.apache.kafka.clients.admin.TransactionListing`.
 
-use crate::admin::transaction_state::TransactionState;
+use crate::admin::TransactionState;
 
 /// A transaction listing.
 ///

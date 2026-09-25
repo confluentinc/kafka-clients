@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! The scope used by [`AdminApiDriver`](super::admin_api_driver::AdminApiDriver)
+//! The scope used by [`AdminApiDriver`](super::AdminApiDriver)
 //! to group key lookups and to bridge to the internal `NodeProvider`.
 //!
 //! Corresponds to `org.apache.kafka.clients.admin.internals.ApiRequestScope`.
@@ -28,7 +28,7 @@
 //!   `CoordinatorStrategy.LookupRequestScope`), so each unbatchable coordinator
 //!   key gets its own lookup request.
 
-use super::coordinator_key::CoordinatorKey;
+use super::CoordinatorKey;
 
 /// Indicates how lookup requests can be batched together and the target broker
 /// (if any) for a request.

@@ -15,7 +15,7 @@
 //! Compile-time surface check for the public `Consumer<K, V>` trait.
 //!
 //! Required by Phase 2 PLAN.md verification step 6. The trait must remain
-//! object-safe (`Box<dyn Consumer<K, V>>` from the `new_consumer` factory)
+//! object-safe (`Box<dyn Consumer<K, V>>` from the `KafkaConsumer::new` factory)
 //! and `Send` (consumer instances cross task boundaries on the tokio
 //! multi-thread runtime).
 //!

@@ -34,20 +34,20 @@ impl ListTopicsOptions {
     /// Set the timeout in milliseconds for this operation, or `None` to use the
     /// default API timeout for the `AdminClient`.
     #[must_use]
-    pub fn timeout_ms(mut self, timeout_ms: Option<i32>) -> Self {
+    pub fn set_timeout_ms(mut self, timeout_ms: Option<i32>) -> Self {
         self.timeout_ms = timeout_ms;
         self
     }
 
     /// The timeout in milliseconds for this operation, or `None` if the default
     /// API timeout should be used.
-    pub fn timeout(&self) -> Option<i32> {
+    pub fn timeout_ms(&self) -> Option<i32> {
         self.timeout_ms
     }
 
     /// Set whether we should list internal topics.
     #[must_use]
-    pub fn list_internal(mut self, list_internal: bool) -> Self {
+    pub fn set_list_internal(mut self, list_internal: bool) -> Self {
         self.list_internal = list_internal;
         self
     }
@@ -71,14 +71,14 @@ mod tests {
     #[test]
     fn defaults_match_java() {
         let options = ListTopicsOptions::new();
-        assert_eq!(options.timeout(), None);
+        assert_eq!(options.timeout_ms(), None);
         assert!(!options.should_list_internal());
     }
 
     #[test]
     fn fluent_setters_and_equality() {
-        let a = ListTopicsOptions::new().list_internal(true);
-        let b = ListTopicsOptions::new().list_internal(true);
+        let a = ListTopicsOptions::new().set_list_internal(true);
+        let b = ListTopicsOptions::new().set_list_internal(true);
         assert_eq!(a, b);
         assert!(a.should_list_internal());
         assert_ne!(a, ListTopicsOptions::new());

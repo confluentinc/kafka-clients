@@ -998,10 +998,13 @@ done inside it. Each records what, why deferred, and how to verify the fix.
 
 ### 9.1 Code generator omits Java's non-default-at-unsupported-version guard
 
-**Status:** open. Found in Phase 2 while translating
-`RequestResponseTest.testInitProducerIdRequestVersions`.
+**Status:** **FIXED** on `fix/9.1-version-gate-check` (`d0dd3b52`, `6245ca10`).
+Found in Phase 2 while translating
+`RequestResponseTest.testInitProducerIdRequestVersions`. The description of the
+defect below was right; four of the section's implementation claims were wrong
+and are corrected inline, marked **[correction]**.
 
-For a version-gated non-tagged field, Java's generated `write` emits two halves:
+For a version-gated field, Java's generated `write` emits two halves:
 
 ```java
 if (_version >= 3) { _writable.writeLong(producerId); }
@@ -1011,48 +1014,198 @@ else if (producerId != -1) {
 }
 ```
 
-This project's generator emits only the first. A non-default value at an
-unsupported version is therefore **silently dropped** rather than rejected: Java
+This project's generator emitted only the first. A non-default value at an
+unsupported version was therefore **silently dropped** rather than rejected: Java
 refuses to encode a message it cannot represent faithfully, while this port
-encodes a valid-but-different message and reports nothing. The wire result is a
+encoded a valid-but-different message and reported nothing. The wire result is a
 well-formed *older* request missing the caller's value, so the broker accepts it
-— there is no error anywhere in the path.
+— there was no error anywhere in the path.
 
-**Scope:** systemic. Affects every version-gated non-tagged field across all 197
-generated message types, not only `InitProducerIdRequest`.
+**Severity: a missing safety net, but one the client library itself leans on.**
 
-**Severity:** a missing safety net rather than a live fault. The bad branch is
-only reached when client code sets a field without checking the negotiated
-version — itself a programming error. Java converts that error into an
-exception; here it becomes silent wire divergence. Worth fixing precisely
-because this milestone's guarantee (no duplicate records) depends on
-`producerId` reaching the broker.
+**[correction — a retracted claim.]** A previous revision of this section, and the
+commit message of `6245ca10`, upgraded this to "a demonstrated live fault" on the
+strength of a wave-3 observation: that with
+`transaction.two.phase.commit.enable=true`, `init_transactions` succeeded against
+a 2PC-disabled broker "because `InitProducerId` went out at ≤ v5 with the
+non-ignorable v6 fields `Enable2Pc` / `KeepPreparedTxn` silently dropped".
+**That attribution is false and is withdrawn.** Two independent derivations
+(Critic 51 Issue 1, and a separate audit) reached it, and it is verifiable in
+three lines:
 
-**Fix location:** `generator/src/lib.rs`, the field-write emission function
-(the `has_version_check` block around lines 1176-1187). Three pieces needed:
+  - `transaction_manager.rs:1379-1383` is the only production construction site,
+    and it sets exactly four fields — transactional id, timeout, producer id,
+    producer epoch. Neither `set_enable2_pc` nor `set_keep_prepared_txn` appears.
+  - The only callers of either setter are `#[cfg(test)]`
+    (`transaction_manager.rs:847-852`, `:5287`; `init_producer_id_request.rs:286`).
+  - `is_2pc_enabled()` (`transaction_manager.rs:1860`) has no caller in `src/`
+    outside a test assertion.
 
-  1. The "is this field at its default?" condition. `get_default_check`
-     (line ~1645) is close but was written for *tagged*-field semantics
-     ("should this be written?"), so it needs adapting rather than reusing
-     as-is.
-  2. The original spec field name for the message text — Java's wording is
-     `producerId`, not `producer_id`.
-  3. Emission of the `else if` branch where the code currently just closes the
-     version `if`.
+So `write()` was always called with `enable2_pc == false` — the field's *default*
+— and the guard's condition is false before and after this change. Nothing was
+dropped, and **nothing about the 2PC observation is fixed by this section.** This
+is faithful to Java, which likewise never calls `setEnable2Pc` /
+`setKeepPreparedTxn` in `TransactionManager.initializeTransactions`
+(`TransactionManager.java:317-320`); Java's `keepPreparedTxn` is a local used for
+two log lines at `:311-312`. Wave-3 finding 4 stays **open**, with its actual
+cause: the 2PC config is accepted and inert. It is also moot on the wire —
+`InitProducerIdRequestBuilder`'s `latest_allowed_version` is 5, so v6 is never
+negotiated.
 
-Estimated ~20-30 lines in one function.
+What the guard does catch is a real class, and the client library is the caller:
+several `KafkaAdminClient` paths set a version-gated non-ignorable field
+unconditionally, exactly as Java does, and rely on the generated guard as the
+mechanism that reports it. The plainest is
+`describeConfigs(.., includeDocumentation = true)` against a broker capping
+`DescribeConfigs` at v1/v2 (the field is v3+, and neither Java's builder nor ours
+gates it): before this change the flag was dropped and the user silently got
+configs without documentation; now the send is aborted with
+`UnsupportedVersion`, which is what Java does. `DescribeGroups
+.IncludeAuthorizedOperations` (v3+ in a 0-6 API) has the same shape. The full
+site inventory is in §9.31.
 
-**Unknown, and the reason this is deferred:** enabling the check regenerates all
-197 message types with a new error path. Any existing code that sets a field and
-then serializes at a lower version starts failing. That count cannot be derived
-by reading — it must be measured by making the change locally and running the
-suite (~1 hour).
+The honest summary is therefore the original one — a missing safety net — with
+the correction that its absence produced *silently wrong results*, not merely a
+missing error, and that the callers relying on it are inside this library.
 
-**Test coverage:** exactly **one** Java test in the whole `clients` module
-asserts this behaviour (`RequestResponseTest.testInitProducerIdRequestVersions`),
-and it covers `InitProducerId`. Verified: none of the other Phase 2 pairs'
-dedicated test files contain such an assertion, so no further phases will
-surface additional skips from this gap.
+**Scope, measured:** 227 version-gated fields across the 197 specs in
+`generator/messages/`. 127 are `"ignorable": true` and correctly get nothing;
+**100 fields across 53 specs** get the guard.
+
+  - **[correction]** the original text said "every version-gated **non-tagged**
+    field". Tagged fields are guarded too — Java's outer conditional
+    (`MessageDataGenerator.java:721`) wraps both the tagged and untagged
+    branches, and `cond.ifNotMember` sits outside it. 12 of the 100 are tagged
+    (`FetchResponse.CurrentLeader`, `FetchRequest.ReplicaState`,
+    `ProduceResponse.NodeEndpoints`, ...). This generator writes tagged fields
+    from a separate block, so their guard is emitted standalone, at the same
+    point in field order Java emits it.
+
+**Fix location.**
+
+  - **[correction]** the original text pointed at "the field-write emission
+    function (the `has_version_check` block around lines 1176-1187)". Those
+    lines are `generate_field_add_size` — the **size** function. The naming was
+    right, the coordinates were not.
+  - Java emits the guard into the message classes in **exactly one place**:
+    `generateClassWriter` (`MessageDataGenerator.java:792-797`).
+    `generateClassMessageSize` does **not** emit it — its two
+    `generateNonDefaultValueCheck` calls (`:1163`, `:1219`) are the unrelated
+    "omit a tagged field that is at its default" test.
+    **[correction]** an earlier revision of this bullet, and `6245ca10`'s commit
+    message, supported that with "`generateNonIgnorableFieldCheck` has a single
+    caller". It has **two**: `MessageDataGenerator.java:794` and
+    `JsonConverterGenerator.java:328`, which applies the identical
+    `if (!field.ignorable()) cond.ifNotMember(..)` shape to the `*JsonConverter`
+    classes. The conclusion is unaffected — this project does not translate
+    `*JsonConverter`, and the guard is still absent from
+    `generateClassMessageSize` — but the supporting claim was wrong as written,
+    in a revision whose whole purpose was correcting wrong claims.
+  - So `size()` legitimately succeeds at a version where `write()` refuses.
+    Java's own test agrees: `shouldThrowIfCannotWriteNonIgnorableField` sizes
+    nothing, allocating a fixed 64-byte buffer and calling `write`.
+  - Landed in `generate_field_write` (the `else if` on the version gate) and
+    `generate_write_method` (the standalone guard for tagged fields).
+
+**The default-value condition.**
+
+  - **[correction]** the original text said `get_default_check` "was written for
+    *tagged*-field semantics ('should this be written?'), so it needs adapting
+    rather than reusing as-is". Java says otherwise: **one** function,
+    `FieldSpec.generateNonDefaultValueCheck`, serves both purposes with the same
+    `nullableVersions()` argument — called from `generateNonIgnorableFieldCheck`
+    (`FieldSpec.java:656`) and from the tagged-field path
+    (`MessageDataGenerator.java:779`). It is the right helper to reuse, and it
+    was reused unchanged by the guard commit.
+  - What was actually true is narrower: `get_default_check` had **fidelity
+    gaps** of its own (bool spelled `!= false`; nullable arrays, `records`, and
+    strings with an explicit non-empty default all diverging from
+    `FieldSpec.java:587-641`). None was reachable by any tagged field in the
+    corpus, so all were latent. Commit `d0dd3b52` made it faithful first.
+
+**Effort.**
+
+  - **[correction]** "~20-30 lines in one function" understates it. Java's
+    reachability rule requires `curVersions = parentVersions.intersect(
+    struct.versions())` (`MessageDataGenerator.java:718`), which this generator
+    did not track for nested structs, so `parent_versions` had to be threaded
+    through six functions. Without it the generator emitted 7 guards Java does
+    not, on nested structs whose declared range is wider than the enclosing
+    message's (`ListOffsetsResponse` is 1-11 while its `Partitions` struct is
+    declared "0+", so its "1+" fields have no reachable v0).
+
+**The change's live surface is smaller than "197 message types" suggests.**
+Splitting the 100 guards by message kind gives **60 on `*Request` types, 39 on
+`*Response`, 1 on `LeaderChangeMessage`**. This library is client-only, so it
+never encodes a response outside test code — verifiably, not just structurally:
+`ConcreteResponse::to_send` (`abstract_response.rs:271`) and
+`serialize_with_header` (`:335`) have zero callers repo-wide, and every direct
+`*ResponseData::write` site is test-gated. Java guards responses too, so this is
+not a defect — but roughly 40% of the new guards are unreachable from any
+production path, which is part of why the measured blast radius below is small.
+
+**Blast radius, now measured** (the original text correctly refused to guess):
+**exactly 1 newly-failing test** out of 3677 —
+`MessageTest.testOffsetFetchRequestVersions`, which leaves `Topics` unset at
+v8+. It failed because the field's **default** was wrong, not the guard: an
+unset nullable array must be the *empty list*, not null
+(`FieldSpec.fieldDefault`, `FieldSpec.java:465-475`), and this generator gave it
+`None`. That is CLAUDE.md §2's existing rule for nullable string/bytes, never
+extended to arrays. Fixing it changed 14 fields' defaults and cost 2 further
+test corrections (`create_partitions_request::serialize_known_byte_vector_v3`,
+`describe_log_dirs_request::is_all_topic_partitions_when_topics_null`), both of
+which had pinned our own output rather than Java's. Total: **3 test corrections,
+0 production-code changes.**
+
+That "0 production-code changes" held for the generator commit **and was the
+wrong thing to be reassured by.** Moving a class of condition into `write()`
+made `network_client.rs`'s `request.to_send(&header).expect(..)` reachable, and
+every guarded field would have **panicked the I/O task** where Java catches and
+falls back. Java wraps `builder.build(version)` *and* `request.toSend(header)` in
+one `try` (`NetworkClient.java:582-583` + `:608`); this port caught only the
+first. Fixed in a fixup on `6245ca10`. The lesson is that "no test failed" and
+"no caller regressed" are different questions, and the guard's whole point is to
+make a previously-silent path loud — so the first thing to check is what the
+newly-loud path does when it fires. §9.31 inventories the sites.
+
+**Test coverage.**
+
+  - **[correction, twice over]** the original text said "exactly **one** Java
+    test in the whole `clients` module asserts this behaviour". A first revision
+    of this bullet corrected that to **two**. It is **four**:
+    `RequestResponseTest.testInitProducerIdRequestVersions`,
+    `SimpleExampleMessageTest.shouldThrowIfCannotWriteNonIgnorableField`,
+    `MessageTest.testDefaultValues` (`MessageTest.java:853-865`) and
+    `MessageTest.testNonIgnorableFieldWithDefaultNull` (`:867-884`).
+  - Each revision missed the next pair the same way: by sweeping the **Java**
+    corpus for assertions rather than the **Rust** tree for skips. The last two
+    were recorded as skipped in `tests/common/message/message_test.rs`, in a
+    prose comment naming this exact blocker ("the version-gated UVE checks are a
+    generator-level feature not yet implemented"). They carried no `#[ignore]`,
+    so no `#[ignore]` sweep and no test runner would ever list them. Both are now
+    translated and the comment is deleted; see suggestion S3 in `COMMENTS.51.md`
+    for the general rule.
+  - They are also the sharpest coverage the change has, because they exercise the
+    two `get_default_check` branches the default-value commit *rewrote*, which
+    the other two guard tests (an `int64` and a `uuid`) do not: `testDefaultValues`
+    covers the **array** branch — and its `verify_write_succeeds(5, FetchRequestData::new())`
+    line passes only because an unset nullable array is now empty rather than
+    null — and `testNonIgnorableFieldWithDefaultNull` covers the **nullable
+    string with `"default": "null"`** branch plus its two negative cases.
+  - `SimpleExampleMessageTest.shouldThrowIfCannotWriteNonIgnorableField` was
+    **already translated, and inverted**:
+    `simple_example_message_test::test_should_return_error_if_cannot_write_non_ignorable_field`
+    asserted the silent drop, and — worse — every assertion sat inside an
+    unguarded `if let Ok(..)`, so it could not fail either way. Now rewritten to
+    Java's assertion, plus the exact message text.
+  - One gap the Java corpus does not cover at all: the **tagged**-field guard,
+    which this generator emits from a second site (Java emits both from one).
+    `message_test::test_tagged_non_ignorable_field_raises_uve_below_its_version`
+    pins it on `FetchRequest.ReplicaState` at v14, and
+    `generator::tests::test_nested_struct_guard_respects_the_enclosing_message_versions`
+    pins the `parent_versions` threading at the emission level rather than only
+    in the predicate. Both were verified to fail when the code they cover is
+    reverted.
 
 #### Refinement (found in Phase 2, `TxnOffsetCommit`): the check applies only to
 #### **non-ignorable** fields
@@ -1068,12 +1221,12 @@ the field is not marked ignorable — `MessageDataGenerator.java:792`:
 
 So the spec's `"ignorable": true` flag is load-bearing, and the two cases differ:
 
-| Field | `ignorable` | Java | Rust today |
+| Field | `ignorable` | Java | Rust (after the fix) |
 |---|---|---|---|
-| `InitProducerIdRequest.ProducerId` (v3+) | absent | **throws** | silently drops ← the gap |
+| `InitProducerIdRequest.ProducerId` (v3+) | absent | **throws** | **errors** ← the gap, now closed |
 | `TxnOffsetCommitRequest.CommittedLeaderEpoch` (v2+) | `true` | silently drops | silently drops ← **correct** |
 
-This materially narrows the fix: **the generator must consult the `ignorable`
+This materially narrowed the fix: **the generator must consult the `ignorable`
 flag, not add the check unconditionally.** Adding it everywhere would start
 rejecting legitimate ignorable-field drops that Java accepts — turning a
 missing-error bug into a spurious-error bug, across all 197 message types.
@@ -1083,15 +1236,22 @@ Discovered by an all-versions round-trip test in
 leader epoch survived at v0/v1. The expectation was wrong, not the code; the test
 is now version-aware and documents why.
 
-**How to verify the fix:** remove the `#[ignore]` from
-`test_init_producer_id_request_versions` in
-`src/common/requests/init_producer_id_request.rs`. The assertion is already
-correct and will pass once the generator is fixed. Do **not** weaken it to match
-current behaviour.
+Two tests protect the ignorable side and genuinely fail if the gate ever admits
+an ignorable field — both write a non-default ignorable field at a version that
+does not carry it and require the write to succeed:
+`txn_offset_commit_request::test_serialization_round_trip_all_versions`
+(`CommittedLeaderEpoch` at v0/v1) and
+`message_test::test_throttle_time_ignorable_in_describe_groups_response`
+(`ThrottleTimeMs` at v0).
 
-**Do NOT bundle this into a transactions phase.** It touches every message type;
-mixing it with transaction work makes both changes hard to review and a failure
-ambiguous between the two.
+**How it was verified:** the `#[ignore]` was removed from
+`test_init_producer_id_request_versions` in
+`src/common/requests/init_producer_id_request.rs`. The assertion was already
+correct and was **not** weakened.
+
+**It was not bundled into a transactions phase**, per the original instruction —
+it landed on its own branch, after the transaction work, so a regression is
+attributable.
 
 ### 9.2 Migrate the Java base from 4.2.0 to 4.3.1
 
@@ -2012,47 +2172,153 @@ up 2-3 hours holding ports.
 **Fix:** register teardown as each container starts rather than after all of them do, so
 an abort mid-startup still reclaims what already exists.
 
-**Meanwhile:** `docker ps` before trusting an integration failure that mentions port
-binding, and `docker rm -f` any orphans.
+**A second symptom, and a second failure mode — loop 50 (2026-08-13).** Seven orphans
+were left by an aborted run and the *next* run did not fail on a port bind at all: it
+**hung**, for twenty minutes with no output, while the surviving brokers' logs showed
+`Node 1 disconnected` / `Node 3 disconnected`. A partial KRaft quorum answers TCP and
+never reaches a usable state, so clients block on metadata instead of failing fast. That
+is strictly worse than the port collision this section was filed for, which at least
+*reads* as infrastructural — a hang mimics a client-side defect, and the natural next
+move is to bisect the code.
 
-### 9.18 Split-on-`MESSAGE_TOO_LARGE` panics: the batch's bytes are already gone
+**And the volumes.** `apache/kafka:4.2.0` declares three `VOLUME`s
+(`/etc/kafka/secrets`, `/mnt/shared/config`, `/var/lib/kafka/data` — from
+`docker image inspect`), so every broker container creates three anonymous volumes. This
+machine had accumulated **6687** of them, ≈2200 containers' worth.
 
-**Status:** open. Found in Phase 4 while translating
-`SenderTest.testTooLargeBatchesAreSafelyRemoved` (Java 3004-3049). **Not a Phase 4
-defect** — it predates the transaction manager and affects idempotent and
+**They are the same cause, not a second one, and that is checkable.**
+`ContainerAsync::drop` (`testcontainers-0.27.3/src/core/containers/async_container.rs:277`)
+calls `client.rm(&id)`, and `Client::rm` (`core/client.rs:227-237`) builds its options
+with `.force(true).v(true)` — `v` being "remove anonymous volumes". So a container that
+is dropped normally takes its three volumes with it, and volumes survive exactly when
+the container does: when the process dies without running drops. The fix above therefore
+covers both halves.
+
+Two caveats on that, stated rather than glossed: `env::Command::Keep`
+(`TESTCONTAINERS_COMMAND=keep`) disables removal entirely, and the claim that a *clean*
+run leaves zero volumes behind is derived from the source, **not** measured — Docker was
+wedged when this was written and re-running it would have orphaned more. Measuring it is
+owed.
+
+**And an arithmetic question that measurement should settle** (raised by Critic 50 in the
+pass-3 exchange). 6687 volumes ÷ 3 per container ≈ **2229** containers that were never
+dropped, against this section's original observation of "four found up 2-3 hours". Those
+do not obviously reconcile. Either outcome is informative and both are worth recording
+before anyone prunes:
+
+  - If the ratio *does* reconcile once run frequency over the project's life is counted,
+    then it is this section's stated **frequency** that is wrong — aborts are routine, not
+    the one-off the original wording implies, and the fix's priority rises accordingly.
+  - If it does not, the residual is volumes arriving by a path source-reading cannot
+    see, and the "same cause" conclusion above needs re-opening rather than defending.
+
+Capture `docker volume ls -q | wc -l` before and after one clean integration run to
+settle it. Do not prune first — the count is the evidence.
+
+**Meanwhile:** `docker ps` before trusting an integration failure — not only one that
+mentions port binding, but any hang. Then `docker rm -f -v` the orphans and
+`docker volume prune -f`; without the volume half, the reclaimable set keeps growing
+across runs even once the containers are gone.
+
+### 9.18 Split-on-`MESSAGE_TOO_LARGE` panicked: `build()` was not idempotent
+
+**Status:** **FIXED** (loop 50, branch `investigate/split-panic-and-version-gate`).
+Found in Phase 4 while translating
+`SenderTest.testTooLargeBatchesAreSafelyRemoved` (Java 3004-3036). **Not a Phase 4
+defect** — it predated the transaction manager and affected idempotent and
 non-idempotent producers alike.
 
 `Sender.completeBatch` splits and re-enqueues a batch when the broker answers
-`MESSAGE_TOO_LARGE` (`Sender.java:675-689`). In Rust that path panics with
+`MESSAGE_TOO_LARGE` (`Sender.java:674-688`). In Rust that path panicked with
 `build() called but no records built` (`memory_records_builder.rs:298`).
 
-Cause: `Sender::send_producer_data` obtains the wire bytes with
-`ProducerBatch::records()` (`producer_batch.rs:653`), which is
-`MemoryRecordsBuilder::take_built_records()` — it **moves** the built buffer out of
-the batch. That move is deliberate; it is what makes the send path zero-copy under
-CLAUDE.md §12. But `MESSAGE_TOO_LARGE` can only arrive *after* the batch was sent,
-so `ProducerBatch::split` → `validate_and_get_records` → `build()` finds nothing.
+**Cause.** Java's `MemoryRecordsBuilder.build()` is **idempotent**: it memoises into
+`builtRecords`, `close()` returns early once that field is set
+(`MemoryRecordsBuilder.java:365-366`), and nothing but `reopenAndRewriteProducerState`
+clears it — so `build()` may be called any number of times and returns the same
+`MemoryRecords` view (`:238-244`). `ProducerBatch.records()` is a bare
+`recordsBuilder.build()` (`ProducerBatch.java:483-485`), which is exactly why Java can
+call it once to serialise the produce request and again from `ProducerBatch.split` →
+`validateAndGetRecordBatch` (`:334`).
+
+Rust had grown a second accessor, `MemoryRecordsBuilder::take_built_records()`, which
+*moved* the memoised value out, and `ProducerBatch::records()` used it. By the time
+`split()` called `build()` the field was `None` and the `expect` fired.
 
 Reachability: `completeBatch`'s split arm requires
-`recordCount > 1 && !batch.isDone() && magic >= v2`. The existing
-`test_expired_batch_does_not_split_on_message_too_large_error` passes only because it
+`recordCount > 1 && !batch.isDone() && (magic >= v2 || isCompressed())`. The existing
+`test_expired_batch_does_not_split_on_message_too_large_error` passed only because it
 expires the batch first, taking the `!isDone()` branch and skipping the split. No
 test covered the live path, which is why this went unnoticed.
 
-**Reproducer:** `sender.rs`'s `test_too_large_batches_are_safely_removed`, left in
-place and `#[ignore]`d with this section cited.
+**Two claims in the earlier revision of this section were wrong**, and are corrected
+above rather than silently dropped:
 
-**Fix direction (not attempted here):** the batch needs its serialised bytes to stay
-readable after the send without reintroducing a copy — e.g. keep the `bytes::Bytes`
-in the builder and hand out a cheap clone to the request, since `Bytes` is already
-refcounted. That is a write-path change, so it does not belong in a transactions
-phase; it also needs its own allocation audit against DoD §10.
+  - *"That move is deliberate; it is what makes the send path zero-copy under
+    CLAUDE.md §12."* It made nothing zero-copy. `close()` already copies the finished
+    batch out of the pooled buffer in `take_batch_data`
+    (`bytes::Bytes::from(self.buffer[initial_position..].to_vec())`), and
+    `MemoryRecords` wraps a refcounted `bytes::Bytes`, so the `build()` clone the move
+    was avoiding is an O(1) refcount bump. `take_built_records` was written in
+    c128ae16, when `MemoryRecords` still held a `Vec<u8>` and the clone really was a
+    byte copy; 55b565e8 made it `Bytes` and nobody revisited the special case. By the
+    time this section was written the move was pure cost — its own re-derivation branch
+    re-ran `take_batch_data`, copying the whole batch a second time.
+  - *"the batch's bytes are already gone"* (the old section title). They were never
+    gone: `take_batch_data` copies **out of** `self.buffer` and does not clear it, and
+    the `Bytes` handed to the request is refcounted, so two independent recoveries were
+    available. The builder had simply dropped its own handle.
 
-### 9.19 Three `SenderTest` methods blocked on missing surface
+**Fix.** Delete `take_built_records` and its `built_size` shadow field; point
+`ProducerBatch::records()` at `build()`. `estimated_size_in_bytes()` collapses back to
+Java's exact two-arm form. No production code outside those two files changed.
 
-**Status:** open, with **four** blocked entries. The count has moved twice: three at
-Phase 4, five after Phase 6, four after Phase 8 resolved one of them. Only the §9.18
-split gap and the injected-clock gap remain as causes.
+**Why the `built_size` field could go, which is the part the fix commit understated**
+(raised by Critic 50). Java has no `closed` field: `isClosed()` *is*
+`builtRecords != null` (`MemoryRecordsBuilder.java:885-887`). Rust carries a separate
+`closed` flag, and `take_built_records` made the two predicates disagree — it left
+`closed == true` with `built_records == None`. `built_size` existed only to keep
+`estimated_size_in_bytes()` answering correctly in that impossible-in-Java state. With
+the accessor gone, `closed ⇔ built_records.is_some()` holds at every point (`close()`
+sets both, `reopen_and_rewrite_producer_state` clears both), so the Rust and Java
+predicates are the same predicate again and the shadow field has nothing to shadow.
+Deleting it is a consequence of the invariant, not an independent tidy-up.
+
+**DoD §10, measured with `AllocTrackingGuard`** (`producer_batch.rs`
+`test_records_allocations_do_not_scale_with_the_record_count`), not argued:
+
+| | `close()` | `records()` #1 | `records()` #2 |
+|---|---|---|---|
+| before | 2 | 0 | 1 — *a full re-copy of the batch* |
+| after | 2 | 1 — *a 3-word `bytes::Shared`* | 0 |
+
+The one extra allocation is the `bytes` promotion on a `Bytes::from(Vec)`'s first
+clone. It is per **batch**, never per record — the test pins that by comparing a
+1-record batch against a 64-record batch — and it buys the removal of a whole-batch
+`memcpy` from the split path. `Bytes::from_owner` would move the same allocation into
+`close()` for an identical total, so there is no cheaper shape while the bytes must
+stay readable after the send.
+
+**The reproducer was itself unfaithful, and that was not noticed until the fix.**
+`sender.rs`'s `test_too_large_batches_are_safely_removed` was built on
+`SenderTestContext::idempotent()` where Java builds a *transactional* manager with
+`transactional.id = "testSplitBatchAndSend"` (Java 3006); it stopped after the split
+instead of driving the retry to completion; it omitted Java's closing
+`time.sleep(2000)` + `runOnce()`; and it asserted `deque_size == 2` ("one sub-batch
+per record"), an invention — `splitAndReenqueue` targets `this.batchSize`
+(`RecordAccumulator.java:517`), 16 KiB here, so both small records land in a single
+sub-batch and Java asserts no count at all. It is now a line-by-line translation and
+no longer `#[ignore]`d. **Lesson:** a test parked as a reproducer stops being read as
+a translation. When it is un-parked, diff it against its Java source first — the
+`#[ignore]` reason had been re-verified twice (Phases 6 and 8) by *running* it, which
+proves the panic but says nothing about whether the assertions were right.
+
+### 9.19 `SenderTest` methods blocked on missing surface
+
+**Status:** open, with **one** blocked entry. The count has moved four times: three at
+Phase 4, five after Phase 6, four after Phase 8 resolved one of them, and one now that
+loop 50 fixed §9.18 and translated the three entries it blocked. The injected clock is
+the only remaining cause.
 
 Phase 6 built the end-to-end harness the transactional group needed and translated 4 of
 its 15 (`testTransactionalRequestsSentOnShutdown`,
@@ -2065,10 +2331,12 @@ each in the `sender.rs` accounting block.
 **Phase 8 outcome: 10 of the 11 translated, 1 still blocked.** Of the two that had cited
 named missing surface, one really was blocked and one was not:
 
-  - `testTransactionalSplitBatchAndSend` (2385) — **still blocked** on §9.18's split panic,
-    the same gap as `testIdempotentSplitBatchAndSend`. Re-verified in Phase 8 by running the
-    reproducer rather than by re-reading this note: `test_too_large_batches_are_safely_removed
-    --ignored` still panics at `memory_records_builder.rs:298`.
+  - `testTransactionalSplitBatchAndSend` (2385) — was **still blocked** on §9.18's split
+    panic, the same gap as `testIdempotentSplitBatchAndSend`. Re-verified in Phase 8 by
+    running the reproducer rather than by re-reading this note:
+    `test_too_large_batches_are_safely_removed --ignored` still panicked at
+    `memory_records_builder.rs:298`. **Translated in loop 50** once that was fixed, as
+    `test_transactional_split_batch_and_send`.
   - `testSenderShouldCloseWhenTransactionManagerInErrorState` (3399) — **translated in
     Phase 8; it was never really blocked.** This entry used to say it needed "either a
     `#[cfg(test)]` hook that fails `begin_abort` on demand or a forced state where the real
@@ -2082,9 +2350,9 @@ named missing surface, one really was blocked and one was not:
     Phase 8 recorded: a "blocked on missing surface" note is a claim with a shelf life, and
     the cheapest way to test it is to look for the surface rather than to re-read the note.
 
-The remaining four blocked entries across both groups are `testTransactionalSplitBatchAndSend`
-plus the three below, of which `testSenderShouldRetryWithBackoffOnRetriableError` is the only
-one not on §9.18.
+Of the four entries that were blocked across both groups, three were on §9.18 and are now
+translated; the one that remains,
+`testSenderShouldRetryWithBackoffOnRetriableError`, was never on §9.18.
 
 One further Phase-8 entry is translated but `#[ignore]`d, and is **not** counted as blocked
 because its body is complete and the assertion that fails is a production assertion:
@@ -2114,7 +2382,7 @@ also Phase-4-era and have since moved; the `sender.rs` accounting block is autho
 and now records 53 in-scope methods over 55 entries.) This section records only what is
 left and why.
 
-**Blocked on named missing surface:**
+**Still blocked on named missing surface (1):**
 
   - `testSenderShouldRetryWithBackoffOnRetriableError` (Java 3104) asserts the clock
     advances by exactly `RETRY_BACKOFF_MS` between retries. The `Sender`'s clock is an
@@ -2122,16 +2390,32 @@ left and why.
     `tokio::time::sleep` and cannot move a test's `MockTime`. Needs Java's `Time`
     interface threaded through `Sender` — a producer-wide constructor change that
     belongs with the Phase-6 review of `maybeSendAndPollTransactionalRequest`'s two
-    sleeps (rules §4).
-  - `testIdempotentSplitBatchAndSend` (2372) drives a `MESSAGE_TOO_LARGE` split, which
-    panics. Blocked on §9.18, reproducer
-    `test_too_large_batches_are_safely_removed`.
-  - `testNoBufferReuseWhenBatchExpires` (3605) asserts
-    `assertSame(buffer.array(), batch.records().buffer().array())`. `BufferPool` does
-    accounting only and does not hand back the same backing array, and
-    `ProducerBatch::records()` moves the buffer out. Blocked on §9.18. This one uses no
-    transaction manager, so it is outside the 52; it is listed with the blocked group
-    because the same gap blocks it.
+    sleeps (rules §4). **Untouched by loop 50**, which changed nothing about the clock.
+
+**Unblocked by the §9.18 fix and translated in loop 50 (3):**
+
+  - `testIdempotentSplitBatchAndSend` (2372) → `test_idempotent_split_batch_and_send`.
+    It and its transactional twin share Java's driver (2406-2496), translated as
+    `drive_split_batch_and_send`.
+  - `testTransactionalSplitBatchAndSend` (2385) →
+    `test_transactional_split_batch_and_send`.
+  - `testNoBufferReuseWhenBatchExpires` (3605) →
+    `test_no_buffer_reuse_when_batch_expires`. This one uses no transaction manager, so
+    it is outside the 52; it was listed with the blocked group because the same §9.18 gap
+    blocked it. **Half of its stated blockage was a false claim and is corrected here:**
+    "`BufferPool` does accounting only and does not hand back the same backing array" is
+    wrong — `BufferPool` keeps a `free: VecDeque<Vec<u8>>` free list
+    (`buffer_pool.rs:58`) that `allocate` pops from when
+    `size == poolable_size` (`:166-172`), returning the same allocation. What genuinely
+    does not translate is Java's `batch.records().buffer().array()`: Java's
+    `MemoryRecords` is a slice *view* of the pooled `ByteBuffer`, while
+    `take_batch_data` copies the finished batch out of the pooled `Vec` into a fresh
+    `Bytes` (a documented `bytes` 1.x deviation). So both of Java's identity assertions
+    — the `assertSame` precondition and the closing `assertNotSame` — are made against
+    the pool's free list instead, which is *also* the sounder choice: `assertNotSame` on
+    a freshly allocated buffer is not a valid test in Rust, because the expired batch is
+    dropped and the system allocator may legitimately hand the same address back. The
+    derivation is in the test's doc comment.
 
 **Reclassifications.** Two methods moved on close reading, and Critic 44 issue 7
 corrected which was which:
@@ -2402,7 +2686,8 @@ takes the fail-the-batch path into `handleFailedBatch` instead.
 
 **Reproducer:** `sender.rs`'s
 `test_transactional_unknown_producer_handling_when_retention_limit_reached`, left in place
-and `#[ignore]`d with this section cited — the same treatment §9.18 gives its own.
+and `#[ignore]`d with this section cited — the treatment §9.18 gave its own before it was
+fixed, and that §9.30 now uses.
 
 **Why it was not fixed in Phase 8.** The pool must contain the failing batch, because
 `canRetry` runs *before* any `removeInFlightBatch` and the batch is therefore still
@@ -2606,9 +2891,141 @@ scenarios green with non-vacuous negatives. Open items handed out of the milesto
 §9.18 (the split panic), plus the §9.14 wire-test gap and the §9.17 container leak —
 all with owners and evidence.
 
+*(Later: §9.18 was fixed in loop 50, which also translated the three `SenderTest`
+methods it blocked — see §9.18 and §9.19, both revised. The Phase-8 narrative above
+is left as written.)*
+
 The milestone's closing lesson, in the Critic's words: *"Each rewrite derived the
 part it had been faulted on and hand-wrote the part it added. It ended when the
 artifact stopped containing anything typed by hand."*
+
+### 9.30 `ProduceRequestBuilder::build_version` drains its builder; Java's `build` does not
+
+**Status:** open. Found in loop 50 while correcting a `mock_client.rs` comment that
+had blamed §9.18 for the workaround this causes (Critic 50 issue 1). **Latent, not
+live** — the reachability derivation is below, and it is what keeps this out of the
+loop that found it.
+
+`ProduceRequestBuilder::build_version` (`src/common/requests/produce_request.rs:300`)
+ends with
+
+    std::mem::replace(&mut self.data, ProduceRequestData::new())
+
+so building the same builder twice yields one correct request and one with empty
+`topic_data`, silently and with no error. Java's counterpart validates and then
+returns `new ProduceRequest(data, version)` sharing the reference
+(`ProduceRequest.java:68-74`); the builder is unchanged and may be built any number
+of times. (Java *does* null out a `ProduceRequest`'s `data` — `clearPartitionRecords`,
+`:94-97` — but that is on the **request**, server-side, after the response is queued;
+it is not the builder.)
+
+**It is an outlier, which is the strongest evidence it is unintended.** Of this
+crate's **52** `RequestBuilder` impls, this is the **only one that drains**. Both halves
+are derived, because an earlier revision of this sentence stated a wrong denominator and
+a false universal ("53 impls; every other clones its data") — Critic 50 issue 6.
+
+    # the impls. Tolerant of a qualified path, which is the trap: fetch_request.rs
+    # writes `impl crate::common::requests::RequestBuilder for ..`, so the obvious
+    # `grep -rl "impl RequestBuilder for" src/` misses it and reports 51.
+    grep -rlE "impl [A-Za-z_:]*RequestBuilder for" src/ | wc -l          # -> 52
+
+    # the drain sites, over those impls' own build_version bodies. The predicate is
+    # ANY mutation of the builder's own state, anchored on `self.` — not just the two
+    # spellings produce happens to use. `std::mem::take(&mut self.data)` would have
+    # defeated the narrow form silently (Critic 50 issue 10); checked by making that
+    # substitution, at which point the narrow grep finds nothing and this one still
+    # reports produce. Anchoring matters as much as widening: an unanchored form also
+    # matches `list_groups_request.rs`, which mutates a *local* `HashSet` copy and
+    # returns `self.data.clone()` twice.
+    for f in $(grep -rlE "impl [A-Za-z_:]*RequestBuilder for" src/); do \
+      awk '/fn build_version\(&mut self/,/^    }/' "$f" \
+        | grep -qE "mem::(replace|take)\(&mut self\.|self\.[a-z_]+\.(take|drain|split_off|clear|push|insert|remove)\(|self\.[a-z_]+ = " \
+        && echo "$f"; \
+    done
+    # -> src/common/requests/produce_request.rs, and nothing else
+
+**Three counts, all defensible, all different — which is the point.** `grep -rl "fn
+build_version" src/` gives **53** files, but one is
+`abstract_request.rs:169`, the trait *declaration*. `grep -rl "impl RequestBuilder for"`
+gives **51**, missing `fetch_request.rs`'s fully-qualified impl. The tolerant form gives
+**52**, which is the real number. A figure that three greps count differently should be
+shipped as a command, not stated.
+
+**What the 51 non-draining impls do is deliberately left unquantified, and the reason is
+worth stating because it took three people to find it.** The earlier "every other clones
+its data" was false: `elect_leaders`, `fetch` and `leave_group` have no `data` field and
+construct a fresh `*RequestData`. Two classifiers then disagreed on a fourth,
+`offset_fetch` — 47 direct clones + 4 others by one, 48 + 3 by the other — and **neither
+was wrong; the taxonomy was.** `OffsetFetchRequestBuilder::maybe_downgrade`
+(`offset_fetch_request.rs:309-312`) returns `self.data.clone()` on one version path and
+constructs a downgraded copy on the other, so it is genuinely in both categories at once.
+"Clones vs constructs" is not a partition of these impls and no count of it can be right.
+
+The property the section actually needs **is** checkable, and it is the one nobody
+tested: `maybe_downgrade` takes **`&self`**, so it cannot drain whatever else it does.
+That generalises — a `build_version` that reaches its data only through `&self` borrows
+is safe by signature, whatever it builds. So the claim is narrowed to what the command
+settles: **exactly one drains**.
+
+The command was itself narrower than that claim for one revision, which is worth
+recording because it is the shape this whole review loop kept finding: it grepped the two
+mutation spellings `produce_request.rs` happens to use, under a sentence about `&self`.
+It now tests any `self.`-anchored mutation, and Critic 50 re-derived the same single
+answer independently over all 52 bodies with nine mutation forms.
+
+**Same shape as §9.12 defect 2**, which was ruled a real defect and fixed: there,
+`write` drained a `records` field and so *serialising mutated the message*; here,
+`build` drains `data` and so *building mutates the builder*. Both were justified as
+"zero-copy ownership transfer" and both are unnecessary for that purpose —
+`ProduceRequestData` is `Clone`, and its `records` are `bytes::Bytes`, whose clone is
+a refcount bump. A clone here copies the `Vec<TopicProduceData>` spine and the topic
+name `String`s, not the record payloads.
+
+**Why it is not live.** `network_client.rs:502` is the only production caller of
+`build_version`; it builds once per `ClientRequest` and the request is consumed by
+`do_send_with_request` immediately after. Retries do not rebuild — the `Sender`
+constructs a fresh `ProduceRequestData` per send (the same property §9.12 relied on).
+The three test-side callers are each reachable at most once per request:
+`mock_client.rs`'s `send` builds only for a matched *future* response, after which the
+request never enters `self.requests`; `respond_with_matcher` builds only what is in
+`self.requests`; and `sender.rs`'s `send_idempotent_producer_response` answers with
+`respond`, which does not build.
+
+Two paths a reader will reasonably probe next, both closed (Critic 50 pass 2 checked
+these independently, and they are recorded here so the next reader need not):
+
+  - **The `Err` arm of that same `match` (`network_client.rs:505-536`) does not
+    rebuild.** It calls `request_builder()` — the immutable accessor — for the api-key
+    name and the version bound, and `make_header`, then constructs a `ClientResponse`.
+    No branch of it reaches `build_version` a second time.
+  - **No logging or panic-formatting path can trigger a build.** `Display for
+    ClientRequest` (`client_request.rs:147-161`) prints scalars only — expect-response,
+    whether a callback is present, destination, correlation id, client id, created-time —
+    and never touches the builder. That covers the `kafka_warn!` in the `Err` arm and
+    `MockClient::send`'s not-ready `panic!`, both of which format the request.
+
+So today the divergence costs nothing at runtime — but it has already distorted the
+port. `MockClient::send` builds the request *conditionally* where
+`MockClient.java:259` builds it unconditionally, and that deviation exists solely to
+keep a second build out of reach. Anyone restoring Java's shape there breaks
+`respond_with_matcher`.
+
+**Reproducer:** `produce_request.rs`'s `test_build_is_repeatable`, `#[ignore]`d with
+this section cited — the treatment §9.18 and §9.25 give theirs. It asserts Java's
+contract (two builds, both carrying the topic) and currently fails with
+`left: 0, right: 1` on the second.
+
+**Fix direction (not attempted here):** replace the `mem::replace` with
+`self.data.clone()`. (An earlier revision wrote "matching the other 52 builders", which
+reintroduced three paragraphs later the very universal this section had just deleted, and
+mis-counted it besides — with 52 impls "the other" is 51. Critic 50 issue 8.) That puts a
+per-request clone on
+the send path — a `Vec` spine plus one `String` per topic, no record bytes — so it
+needs its own DoD §10 allocation measurement rather than an argument, which is why it
+is filed rather than folded into loop 50. If the clone proves measurable, the
+alternative is to make `build_version` take `self` by value so a second build cannot
+be written; that is a `RequestBuilder` trait change across all 52 impls and should be
+priced accordingly.
 
 ---
 
@@ -3571,3 +3988,238 @@ Each is documented at its call site as well.
    Java callers being Kafka Streams tests (out of scope per §1.1). Added rather than
    left untested, following the convention the file already had for the four
    non-transactional `*Exception` knobs.
+
+### 9.31 Two request builders drop version gates Java performs at `build`
+
+**Status:** open. Found while auditing the reachability of the §9.1 guard
+(round 2 of the Critic-51 loop). **Independent of §9.1** — these gaps exist
+whether or not the generated guard does, and closing §9.1 neither caused nor
+fixed them. Filed separately for that reason.
+
+Java's `AbstractRequest.Builder.build(short)` sometimes performs its own
+version check before constructing the request, with a message far more
+actionable than the generator's. Two are missing on this side:
+
+| Java | Java's check | Rust |
+|---|---|---|
+| `ListTransactionsRequest.java:37-40` | `durationFilter() >= 0 && version < 1` → throw | `list_transactions_request.rs:118-123` — no check |
+| `ListTransactionsRequest.java:41-44` | `transactionalIdPattern() != null && version < 2` → throw | same, no check |
+| `AlterPartitionReassignmentsRequest.java:44-49` | `!allowReplicationFactorChange() && version < 1` → throw | `alter_partition_reassignments_request.rs:132-136` — no check |
+
+Java's wording is the value of the check — e.g. *"Duration filter can be set
+only when using API version 1 or higher. If client is connected to an older
+broker, do not specify duration filter or set duration filter to -1."*
+
+**[correction]** the `AlterPartitionReassignments` row first cited
+`:60-65`, which is the **private constructor**; the gate is in `build(short)` at
+`:44`, with the check at `:45-49`. Substance unaffected, but this section was
+written to replace a mis-citation, so the coordinates matter here more than
+usual. Verified: `grep -n "build(short version)"` → `:44`;
+`grep -n "allowReplicationFactorChange() && version"` → `:45`;
+`grep -n "private AlterPartitionReassignmentsRequest("` → `:61`.
+
+**Severity: low, and lower than it looks.** With the §9.1 guard and its
+aborted-send handling in place, all three conditions are still *caught* — the
+generated `write` refuses, `NetworkClient` aborts the send, and the caller gets
+`UnsupportedVersion`, which is the same outcome class Java produces (Java's own
+`catch` at `NetworkClient.java:583` covers its builder throw too). What is lost
+is the message: the user is told a field could not be encoded rather than what
+to do about it. Before §9.1 the same conditions were silent, so this is strictly
+better than the status quo ante.
+
+**How to verify the fix:** add the check to each builder's `build_version` with
+Java's message text verbatim, and a unit test asserting that text — the
+`txn_offset_commit_request.rs:405-416` gates are the existing pattern to follow
+(they mirror `TxnOffsetCommitRequest.java:108-110`).
+
+**Do NOT bundle this into the §9.1 branch.** Same reasoning §9.1 gives for
+itself: mixing a generator-wide change with per-builder request changes makes a
+failure ambiguous between them.
+
+#### Site inventory: which production paths can reach the §9.1 guard
+
+Recorded here because it was measured during that audit and is the evidence base
+for §9.1's severity paragraph. Each row sets a version-gated, non-ignorable field
+unconditionally; the guard fires only when the value is **non-default**.
+
+| Field (version added) | Production site | Trips when | Java gates at build? |
+|---|---|---|---|
+| `DescribeConfigs.IncludeDocumentation` (3+, API 1-4) | `kafka_admin_client.rs:1992` | `includeDocumentation(true)` | no |
+| `DescribeGroups.IncludeAuthorizedOperations` (3+, API 0-6) | `describe_consumer_groups_handler.rs:399`, `describe_classic_groups_handler.rs:87` | `includeAuthorizedOperations(true)` | no |
+| `DescribeCluster.IncludeFencedBrokers` (2+, API 0-2) | `kafka_admin_client.rs:3339` | `includeFencedBrokers(true)` | no |
+| `DescribeCluster.EndpointType` (1+, default 1) | `kafka_admin_client.rs:3338` | bootstrap-controllers mode (value 2) | no |
+| `UpdateFeatures.ValidateOnly` (1+, API 0-2) | `kafka_admin_client.rs:4643` | `validateOnly(true)` | no |
+| `UpdateFeatures.FeatureUpdates.UpgradeType` (1+, default 1) | `kafka_admin_client.rs:4638` | any downgrade | no |
+| `AlterPartitionReassignments.AllowReplicationFactorChange` (1+, **default true**) | `kafka_admin_client.rs:1713` | the flag is set **false** | **yes** — see above |
+| `ListTransactions.DurationFilter` (1+) | `list_transactions_handler.rs:70` | a duration filter is set | **yes** — see above |
+| `ListTransactions.TransactionalIdPattern` (2+) | `list_transactions_handler.rs:73-75` | a pattern is supplied | **yes** — see above |
+| `Metadata.IncludeTopicAuthorizedOperations` (8+, API 0-13) | `kafka_admin_client.rs:4772`, `:4850` | `includeAuthorizedOperations(true)` at v4-7 | no |
+| `Metadata.IncludeClusterAuthorizedOperations` (**8-10**, API 0-13) | `kafka_admin_client.rs:3323` | `includeAuthorizedOperations(true)` outside v8-10 | no |
+
+Two notes on that last row. It is the only one whose upper bound can be crossed
+by a *modern* broker (the field was deprecated at v11), and Java is identical —
+same `"versions": "8-10"` in a 0-13 message
+(`kafka/clients/.../MetadataRequest.json:51`), same unconditional set at
+`KafkaAdminClient.java:2477`. But the site is the `describeCluster` fallback used
+only after `DescribeCluster` returns `UnsupportedVersion`, so reaching it needs a
+broker too old for `DescribeCluster` yet new enough for `Metadata` v11+ — a
+window that may be empty. Not claimed as reachable; recorded so the next reader
+does not have to re-derive it.
+
+**The mechanism that made this list urgent is already fixed** (fixup on
+`6245ca10`): every one of these was a *panic* rather than an aborted send,
+because `network_client.rs` `.expect`ed the serialize result while Java catches
+it. See that commit.
+
+**Recorded here, but NOT blocked by this section: the aborted-send log level.**
+Java logs the whole `catch` at `debug` (`NetworkClient.java:586`) — an aborted
+send on a version mismatch is an expected fallback, not an anomaly. This port
+logs two of the three arms at `warn`: `network_client.rs:529` (build failure,
+pre-existing) and `:516` (serialize failure, which copied `:529` for
+consistency). Only `:454`, the api-versions lookup arm, matches Java's `debug`.
+
+**[correction]** it was first suggested that this be folded into §9.31's fix,
+on the reasoning that §9.31's builder gates would intercept these conditions
+earlier. That does not hold: the gates raise from `build_version`, whose error
+arm is `:529` — also `warn`. Adding them would move the log line, not lower its
+level or reduce its volume. It is an independent one-line change on two call
+sites, listed here only because this section is already about these code paths.
+
+### 9.32 Generated `write` emits a null marker at versions outside `nullableVersions`, where Java throws
+
+**Status:** open, with a reproducer. **Latent** — no production path can reach it
+today; see the reachability derivation below. Found in the Critic-51 loop while
+re-reading a skip note that §9.1's fix had made half-false. **Pre-existing and
+independent of §9.1** — the guard neither caused nor fixed it; it only drew
+attention to the comment. Filed rather than fixed for the same reason §9.31 is:
+it is generator-wide, and bundling it with the version-gate work would make a
+failure ambiguous between them.
+
+**Why fix it anyway, given it is latent.** Not because a user can hit it — they
+cannot — but because it is a **class gap in a single generator function**, not a
+per-field oversight. `generate_field_write`'s nullable `else` branch handles the
+struct case correctly and the string/bytes/array cases not at all, so which
+fields are affected is decided entirely by the specs. Any future spec revision
+that narrows a `nullableVersions` range — or adds a field with one — makes it
+live silently, with nothing in the suite to catch it. That reason survives the
+latency finding; an earlier revision of this section also argued from a live wire
+divergence, and that argument does **not** survive (see below).
+
+Java's generated `write` treats "null at a version that does not permit null" as
+an error. `IsNullConditional`'s `ifNull` arm is wrapped in
+`VersionConditional.forVersions(nullableVersions, possibleVersions)`: the
+`ifMember` half emits the length marker (`-1`), and the `ifNotMember` half emits
+
+    throw new NullPointerException();
+
+(`MessageDataGenerator.java:960-970`). This generator emits the marker
+unconditionally — `generate_field_write`'s nullable `else` branch calls
+`generate_null_write` with no gate on `nullable_versions`. The asymmetry is
+visible in one function: **struct** fields already carry the check
+(`generator/src/lib.rs`, the `nullable_versions.lowest()` branch that errors with
+"Null value for non-nullable struct field"); string, bytes and array fields do
+not.
+
+**Scope: 7 fields across 6 specs** — every field with a version at which the field
+is present but null is not permitted. **[correction]** an earlier revision said
+"6 fields across 5 specs" and derived only the **lower** bound ("`nullableVersions`
+starts above…"), while the section title says "outside `nullableVersions`", which
+is two bounds. The two formulations give different numbers, in a section that
+instructs the next person to derive-then-diff. The title's formulation is the
+correct one and the table below matches it.
+
+| Field | present | nullable | null illegal at | bound |
+|---|---|---|---|---|
+| `MetadataRequest.Topics` | 0+ | 1+ | v0 | lower |
+| `MetadataRequest.Topics[].Name` | 0+ | 10+ | v0-9 | lower |
+| `MetadataResponse.Topics[].Name` | 0+ | 12+ | v0-11 | lower |
+| `OffsetFetchRequest.Topics` | 0-7 | 2-7 | v0-1 | lower |
+| `JoinGroupResponse.ProtocolName` | 0+ | 7+ | v0-6 | lower |
+| `DeleteTopicsResponse.Responses[].Name` | 0+ | 6+ | v1-5 | lower |
+| `ShareFetchResponse.Responses[].Partitions[].Records` | 0+ | 0 | v1-2 | **upper** |
+
+The seventh is doubly out of client scope: it is response-side, and share-consumer
+(KIP-932) is excluded by `consumer-threading.md` §20. It changes no behaviour, but
+it is what the title's formulation yields and omitting it would leave the
+derivation unreproducible.
+
+#### Reachability: latent, and the two derivations differ in strength
+
+Two of the seven are set to null by this client on purpose. Both were checked, and
+**neither can reach a version where null is illegal.**
+
+**`OffsetFetchRequest.Topics` — latent by construction, and this is the strong
+one.** `build_version` refuses exactly the illegal window before it can arise:
+`offset_fetch_request.rs:411-418` errors on any group with `topics.is_none()` when
+`version < TOP_LEVEL_ERROR_AND_NULL_TOPICS_MIN_VERSION`, and that constant is **2**
+(`:52`) — the same number as the field's nullable lower bound, because the field
+became nullable at v2 precisely when "fetch all partitions" became expressible.
+The gate runs *before* `maybe_downgrade` (`:425`), which is the only site that can
+produce a null top-level `topics`. Java carries the identical constant and check
+(`throwIfRequestingAllTopicsIsUnsupported`). No broker behaviour can open this.
+
+**`MetadataRequest.Topics` — latent via an exhaustive split over version selection,
+and this one is weaker.** Reaching v0 requires one of three paths: version info
+present → `min(broker.max, 13)`, so it needs a broker advertising `Metadata` max 0;
+version info absent → `network_client.rs:487` uses `latest_allowed_version()`,
+never the oldest; a pinned version → the only `new_with_version` call sites are
+test-only (`network_client.rs:2338` at v3, `metadata_request.rs:399`/`:406`). The
+first path is closed by a dated external fact rather than by code: a broker with
+`Metadata` max 0 predates `ApiVersions` itself (both landed in 0.10.0.0), so it
+cannot supply the `NodeApiVersions` entry that path reads — and without that entry
+the lookup fails with "The node does not support Metadata" rather than selecting
+v0. **Recorded as the weaker leg**: it rests on that one fact, where the
+`OffsetFetch` derivation rests on a constant in the source.
+
+The remaining four rows are latent too — three are response-only, and
+`MetadataRequest.Topics[].Name` is never `None` in production (both `set_name(None)`
+sites are under `#[cfg(test)]`, `metadata_request.rs:422`/`:428`).
+
+**Severity: low, and latent.** **[correction]** an earlier revision of this section
+said, in the present indicative, that "it encodes a `-1` the broker will read as
+'no topics requested'". That describes something that **cannot occur** — the
+`OffsetFetch` builder refuses the window, and the `Metadata` path cannot select
+v0. The accurate statement is conditional: *were* such a version reached, the
+encoding would be a `-1` the broker reads as "no topics requested" where Java
+refuses to encode at all — the same class of silent wire divergence §9.1
+describes, from the other direction. The case for fixing it rests on the class-gap
+argument at the top of this section, not on that.
+
+**Reproducer:** `tests/common/message/message_test.rs::
+test_write_null_for_non_nullable_field_raises_error`, `#[ignore]`d on this
+section. Verified to fail on its own assertion today. It is the second half of
+`MessageTest.testWriteNullForNonNullableFieldRaisesException`
+(`MessageTest.java:887-894`); the first half —
+`CreateTopicsRequestData().setTopics(null)` — is genuinely untranslatable, because
+`topics` is a `Vec` here rather than an `Option<Vec>` and the type system rules
+the state out at compile time.
+
+**How to verify the fix:** gate the nullable `else` branch on
+`field.nullable_versions()` the way the struct arm already is, returning an error
+(CLAUDE.md §10.2 — Java's `NullPointerException` on a public path becomes an
+`Err`, not a `panic!`), then remove the `#[ignore]`. Expect the same
+measure-then-diff discipline §9.1 used: derive the affected field list from the
+specs first, and require the generated diff to match it.
+
+**Note on the interaction with §9.1's aborted-send path.** Java distinguishes the
+two error classes: `NullPointerException` is not an `UnsupportedVersionException`
+and is **not** caught by `NetworkClient.send`'s handler
+(`NetworkClient.java:583`), so in Java it propagates out of `send`, while a
+version-gate failure becomes an aborted send. §9.1's `?` at
+`network_client.rs:607` does not distinguish them: **any** `write` error is folded
+into `UnsupportedVersionError` and an aborted send.
+
+**[correction]** an earlier revision framed that folding as prospective ("once
+this raises"). It is not — the `?` folds every `write` error **today**. What is
+prospective is only whether anything *reaches* it: no field in the table above is
+reachable, and the one null-version check this generator already emits — the
+struct arm — is unreachable as well, since no struct field in either corpus has a
+nullable window narrower than its presence range (the seven affected fields are
+four strings, two arrays and one `records`). So the folding has no live instance
+from either source.
+
+That makes the assignment cleaner rather than muddier: the distinction is
+**§9.32's to make**, because §9.32 is what would mint an error of the
+`NullPointerException` class. §9.1 minted only `UnsupportedVersion`-class errors,
+for which folding is correct. Whoever fixes §9.32 must decide whether to give the
+new error a distinguishable type and let `do_send` propagate rather than abort it.

@@ -18,9 +18,9 @@
 
 use std::io;
 
+use crate::DescribeLogDirsRequestData;
+use crate::DescribeLogDirsResponseData;
 use crate::common::protocol::{ApiKeys, Errors, Readable};
-use crate::describe_log_dirs_request_data::DescribeLogDirsRequestData;
-use crate::describe_log_dirs_response_data::DescribeLogDirsResponseData;
 
 use super::{ConcreteRequest, ConcreteResponse, DescribeLogDirsResponse, RequestBuilder};
 
@@ -108,7 +108,7 @@ pub struct DescribeLogDirsRequestBuilder {
 
 impl DescribeLogDirsRequestBuilder {
     /// Creates a builder from existing data.
-    pub fn from_data(data: DescribeLogDirsRequestData) -> Self {
+    pub fn new(data: DescribeLogDirsRequestData) -> Self {
         Self {
             data,
             oldest_allowed_version: ApiKeys::DESCRIBE_LOG_DIRS.oldest_version(),
@@ -150,15 +150,27 @@ mod tests {
         t
     }
 
+    /// `isAllTopicPartitions` is `data.topics() == null`
+    /// (`DescribeLogDirsRequest.java:66-68`), so only an *explicit* null selects all
+    /// partitions. A default-constructed request does not: an unset nullable array is
+    /// the empty list, not null (`FieldSpec.fieldDefault`, `FieldSpec.java:465-475`),
+    /// which is why `KafkaAdminClient` spells the all-partitions case out as
+    /// `new DescribeLogDirsRequestData().setTopics(null)` (`KafkaAdminClient.java:3014`)
+    /// rather than relying on the default.
     #[test]
     fn is_all_topic_partitions_when_topics_null() {
-        let data = DescribeLogDirsRequestData::new();
+        let mut data = DescribeLogDirsRequestData::new();
+        data.set_topics(None);
         let request = DescribeLogDirsRequest::new(data, 2);
         assert!(request.is_all_topic_partitions());
 
         let mut data = DescribeLogDirsRequestData::new();
         data.set_topics(Some(vec![topic("t", vec![0])]));
         let request = DescribeLogDirsRequest::new(data, 2);
+        assert!(!request.is_all_topic_partitions());
+
+        // A default-constructed request is an empty selection, not "all".
+        let request = DescribeLogDirsRequest::new(DescribeLogDirsRequestData::new(), 2);
         assert!(!request.is_all_topic_partitions());
     }
 
@@ -183,7 +195,7 @@ mod tests {
         data.set_topics(Some(vec![topic("round-trip-topic", vec![1, 2, 3])]));
         let mut request = ConcreteRequest::DescribeLogDirs(DescribeLogDirsRequest::new(data, 2));
         let bytes = request.serialize().unwrap();
-        let mut readable = crate::common::ByteBufferAccessor::from_bytes(bytes.into_buffer());
+        let mut readable = crate::common::ByteBufferAccessor::new(bytes.into_buffer());
         let parsed = DescribeLogDirsRequest::parse(&mut readable, 2).unwrap();
         let topics = parsed.data().topics.as_ref().unwrap();
         assert_eq!(topics.len(), 1);

@@ -23,7 +23,7 @@
 use std::collections::HashSet;
 
 use crate::common::TopicPartition;
-use crate::consumer::internals::member_state::MemberState;
+use crate::consumer::internals::MemberState;
 
 /// Listener for getting notified of membership state changes.
 ///

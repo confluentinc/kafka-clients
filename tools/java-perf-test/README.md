@@ -76,7 +76,7 @@ gradle run
 | `TEST_DURATION_SECONDS` | `600` | |
 | `P99_LIMIT_MS` | `0` (off) | Per-message p99 latency budget (ms); a breach exits non-zero. |
 | `DO_VERIFY` | `True` | Assert RecordMetadata fields are populated. |
-| `VERIFY_CONSUMED` | `False` | Consume back and check murmur2 partition placement. |
+| `VERIFY_CONSUMED` | `False` | Consume back and check murmur2 partition placement (Java default; NOT cross-client — see notes). |
 | `SECURITY_PROTOCOL` | unset | `SSL` / `SASL_PLAINTEXT` / `SASL_SSL` |
 | `SASL_MECHANISM` | unset | `PLAIN` / `SCRAM-SHA-256` / etc. |
 | `SASL_USERNAME` | unset | |
@@ -127,6 +127,10 @@ This test is aligned with `bindings/c/tests/producer_perf_test.c` and
 Java-specific notes:
 
 - No `CLIENT_VERSION` switch — there's only one Java client.
-- The Java client's default partitioner is the same murmur2 as the other
-  clients, so consumer-side partition verification (`VERIFY_CONSUMED`, a
-  Java-only extra) works cross-client.
+- `VERIFY_CONSUMED` (a Java-only extra) checks **murmur2** partition placement,
+  because the Java client's default partitioner is murmur2. It is **not**
+  cross-client: the Rust client and librdkafka default to CRC-32
+  (`consistent_random`), so their keyed records land in different partitions
+  than murmur2 would choose. Only enable `VERIFY_CONSUMED` against a producer
+  actually using murmur2. See `design/current/partitioner.md` for the
+  divergence and the mixed-fleet warning.

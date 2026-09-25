@@ -13,14 +13,14 @@
 // limitations under the License.
 
 //! Unit-level smoke tests for the production `AsyncKafkaConsumer` ctor
-//! reachable via the `new_consumer` factory (Phase 12 commit (4/N)).
+//! reachable via the `KafkaConsumer::new` factory (Phase 12 commit (4/N)).
 //!
 //! These tests deliberately do NOT require a live broker — they target
 //! a closed localhost port. The Kafka client's metadata bootstrap path
 //! does not synchronously connect, so the ctor succeeds even when the
 //! peer refuses connection. This exercises:
 //!
-//! 1. The `new_consumer::<K, V>(...)` factory wires the
+//! 1. The `KafkaConsumer::new::<K, V>(...)` factory wires the
 //!    `GroupProtocol::Consumer` arm through to
 //!    `AsyncKafkaConsumer::new(config, kd, vd)`.
 //! 2. The full RequestManagers + bg-task scaffold builds and spawns
@@ -39,7 +39,7 @@ use confluent_kafka::common::Error;
 use confluent_kafka::common::Errors;
 use confluent_kafka::common::serialization::Deserializer;
 use confluent_kafka::consumer::ConsumerConfig;
-use confluent_kafka::consumer::new_consumer;
+use confluent_kafka::consumer::KafkaConsumer;
 
 /// Local string deserializer for tests — `tests/integration` uses a
 /// similar inline impl pending a shared `StringDeserializer` in
@@ -63,7 +63,7 @@ fn make_smoke_config() -> ConsumerConfig {
         ("auto.offset.reset".to_string(), "earliest".to_string()),
         ("enable.auto.commit".to_string(), "false".to_string()),
     ]);
-    ConsumerConfig::from_properties(&props).expect("smoke-test config should validate")
+    ConsumerConfig::new(&props).expect("smoke-test config should validate")
 }
 
 /// Smoke: the production ctor succeeds against a refuses-connection
@@ -72,9 +72,12 @@ fn make_smoke_config() -> ConsumerConfig {
 /// task. Covers commit (4/N) of Phase 12.
 #[tokio::test(flavor = "multi_thread")]
 async fn new_consumer_builds_and_closes_against_refused_broker() {
-    let mut consumer =
-        new_consumer::<String, String>(make_smoke_config(), Box::new(StringDeserializer), Box::new(StringDeserializer))
-            .expect("new_consumer should succeed even without a reachable broker");
+    let mut consumer = KafkaConsumer::new::<String, String>(
+        make_smoke_config(),
+        Box::new(StringDeserializer),
+        Box::new(StringDeserializer),
+    )
+    .expect("KafkaConsumer::new should succeed even without a reachable broker");
 
     // Trait dispatch through `Box<dyn Consumer<K, V>>`. `client_id` is
     // the Phase-11-translated sync accessor.
@@ -102,9 +105,10 @@ async fn new_consumer_rejects_classic_group_protocol() {
         ("bootstrap.servers".to_string(), "127.0.0.1:1".to_string()),
         ("group.protocol".to_string(), "classic".to_string()),
     ]);
-    let config = ConsumerConfig::from_properties(&props).expect("config should validate");
+    let config = ConsumerConfig::new(&props).expect("config should validate");
 
-    let result = new_consumer::<String, String>(config, Box::new(StringDeserializer), Box::new(StringDeserializer));
+    let result =
+        KafkaConsumer::new::<String, String>(config, Box::new(StringDeserializer), Box::new(StringDeserializer));
 
     let err = result.err().expect("classic protocol must be rejected");
     assert_eq!(

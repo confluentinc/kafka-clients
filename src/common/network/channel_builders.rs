@@ -41,66 +41,75 @@ use crate::common::security::SecurityProtocol;
 use crate::common::security::SslFactory;
 use crate::common::utils::LogContext;
 
-/// Creates a client-side `ChannelBuilder` for the given security protocol.
-///
-/// Translated from `ChannelBuilders.clientChannelBuilder()` (Java).
-///
-/// # Arguments
-///
-/// * `security_protocol` - The security protocol to use
-/// * `ssl_config` - Required for `SSL` and `SASL_SSL` protocols
-/// * `sasl_config` - Required for `SASL_PLAINTEXT` and `SASL_SSL` protocols
-/// * `listener_name` - Optional listener name (server-side only, `None` for clients)
-/// * `client_id` - The Kafka client ID
-/// * `log_context` - Contextual log prefix
-///
-/// # Errors
-///
-/// Returns an error if required configs are missing for the given protocol.
-pub fn client_channel_builder(
-    security_protocol: SecurityProtocol,
-    ssl_config: Option<&SslConfig>,
-    sasl_config: Option<&SaslConfig>,
-    listener_name: Option<ListenerName>,
-    client_id: &str,
-    log_context: LogContext,
-) -> io::Result<Box<dyn ChannelBuilder>> {
-    match security_protocol {
-        SecurityProtocol::Plaintext => Ok(Box::new(PlaintextChannelBuilder::new(listener_name))),
-        SecurityProtocol::Ssl => {
-            let ssl_config = ssl_config
-                .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "SSL protocol requires ssl_config"))?;
-            let ssl_factory = SslFactory::new(ssl_config)?;
-            Ok(Box::new(SslChannelBuilder::new(ssl_factory, listener_name)))
-        },
-        SecurityProtocol::SaslPlaintext => {
-            let sasl_config = sasl_config.ok_or_else(|| {
-                io::Error::new(io::ErrorKind::InvalidInput, "SASL_PLAINTEXT protocol requires sasl_config")
-            })?;
-            Ok(Box::new(SaslChannelBuilder::new(
-                SecurityProtocol::SaslPlaintext,
-                sasl_config.clone(),
-                None,
-                listener_name,
-                client_id,
-                log_context,
-            )?))
-        },
-        SecurityProtocol::SaslSsl => {
-            let ssl_config = ssl_config
-                .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "SASL_SSL protocol requires ssl_config"))?;
-            let sasl_config = sasl_config
-                .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "SASL_SSL protocol requires sasl_config"))?;
-            let ssl_factory = SslFactory::new(ssl_config)?;
-            Ok(Box::new(SaslChannelBuilder::new(
-                SecurityProtocol::SaslSsl,
-                sasl_config.clone(),
-                Some(ssl_factory),
-                listener_name,
-                client_id,
-                log_context,
-            )?))
-        },
+/// Translates the Java static-utility class `org.apache.kafka.common.network.ChannelBuilders`,
+/// which has no instance state, so it becomes a unit struct hosting its
+/// statics as associated items.
+pub struct ChannelBuilders;
+
+impl ChannelBuilders {
+    /// Creates a client-side `ChannelBuilder` for the given security protocol.
+    ///
+    /// Translated from `ChannelBuilders.clientChannelBuilder()` (Java).
+    ///
+    /// # Arguments
+    ///
+    /// * `security_protocol` - The security protocol to use
+    /// * `ssl_config` - Required for `SSL` and `SASL_SSL` protocols
+    /// * `sasl_config` - Required for `SASL_PLAINTEXT` and `SASL_SSL` protocols
+    /// * `listener_name` - Optional listener name (server-side only, `None` for clients)
+    /// * `client_id` - The Kafka client ID
+    /// * `log_context` - Contextual log prefix
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if required configs are missing for the given protocol.
+    pub fn client_channel_builder(
+        security_protocol: SecurityProtocol,
+        ssl_config: Option<&SslConfig>,
+        sasl_config: Option<&SaslConfig>,
+        listener_name: Option<ListenerName>,
+        client_id: &str,
+        log_context: LogContext,
+    ) -> io::Result<Box<dyn ChannelBuilder>> {
+        match security_protocol {
+            SecurityProtocol::Plaintext => Ok(Box::new(PlaintextChannelBuilder::new(listener_name))),
+            SecurityProtocol::Ssl => {
+                let ssl_config = ssl_config
+                    .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "SSL protocol requires ssl_config"))?;
+                let ssl_factory = SslFactory::new(ssl_config)?;
+                Ok(Box::new(SslChannelBuilder::new(ssl_factory, listener_name)))
+            },
+            SecurityProtocol::SaslPlaintext => {
+                let sasl_config = sasl_config.ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidInput, "SASL_PLAINTEXT protocol requires sasl_config")
+                })?;
+                Ok(Box::new(SaslChannelBuilder::new(
+                    SecurityProtocol::SaslPlaintext,
+                    sasl_config.clone(),
+                    None,
+                    listener_name,
+                    client_id,
+                    log_context,
+                )?))
+            },
+            SecurityProtocol::SaslSsl => {
+                let ssl_config = ssl_config.ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidInput, "SASL_SSL protocol requires ssl_config")
+                })?;
+                let sasl_config = sasl_config.ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidInput, "SASL_SSL protocol requires sasl_config")
+                })?;
+                let ssl_factory = SslFactory::new(ssl_config)?;
+                Ok(Box::new(SaslChannelBuilder::new(
+                    SecurityProtocol::SaslSsl,
+                    sasl_config.clone(),
+                    Some(ssl_factory),
+                    listener_name,
+                    client_id,
+                    log_context,
+                )?))
+            },
+        }
     }
 }
 
@@ -110,14 +119,21 @@ mod tests {
 
     #[test]
     fn test_plaintext_builder() {
-        let result = client_channel_builder(SecurityProtocol::Plaintext, None, None, None, "test", LogContext::empty());
+        let result = ChannelBuilders::client_channel_builder(
+            SecurityProtocol::Plaintext,
+            None,
+            None,
+            None,
+            "test",
+            LogContext::empty(),
+        );
         assert!(result.is_ok(), "Plaintext should not require any configs");
     }
 
     #[test]
     fn test_ssl_builder() {
         let ssl_config = SslConfig::default();
-        let result = client_channel_builder(
+        let result = ChannelBuilders::client_channel_builder(
             SecurityProtocol::Ssl,
             Some(&ssl_config),
             None,
@@ -130,7 +146,14 @@ mod tests {
 
     #[test]
     fn test_ssl_missing_config() {
-        let result = client_channel_builder(SecurityProtocol::Ssl, None, None, None, "test", LogContext::empty());
+        let result = ChannelBuilders::client_channel_builder(
+            SecurityProtocol::Ssl,
+            None,
+            None,
+            None,
+            "test",
+            LogContext::empty(),
+        );
         let err = result.err().expect("Should return an error");
         assert!(
             err.to_string().contains("ssl_config"),
@@ -147,7 +170,7 @@ mod tests {
             password: Some("secret".to_string()),
             ..SaslConfig::default()
         };
-        let result = client_channel_builder(
+        let result = ChannelBuilders::client_channel_builder(
             SecurityProtocol::SaslPlaintext,
             None,
             Some(&sasl_config),
@@ -167,7 +190,7 @@ mod tests {
             password: Some("secret".to_string()),
             ..SaslConfig::default()
         };
-        let result = client_channel_builder(
+        let result = ChannelBuilders::client_channel_builder(
             SecurityProtocol::SaslSsl,
             Some(&ssl_config),
             Some(&sasl_config),
@@ -186,7 +209,7 @@ mod tests {
             password: Some("secret".to_string()),
             ..SaslConfig::default()
         };
-        let result = client_channel_builder(
+        let result = ChannelBuilders::client_channel_builder(
             SecurityProtocol::SaslSsl,
             None,
             Some(&sasl_config),
@@ -204,8 +227,14 @@ mod tests {
 
     #[test]
     fn test_sasl_plaintext_missing_sasl_config() {
-        let result =
-            client_channel_builder(SecurityProtocol::SaslPlaintext, None, None, None, "test", LogContext::empty());
+        let result = ChannelBuilders::client_channel_builder(
+            SecurityProtocol::SaslPlaintext,
+            None,
+            None,
+            None,
+            "test",
+            LogContext::empty(),
+        );
         let err = result.err().expect("Should return an error");
         assert!(
             err.to_string().contains("sasl_config"),

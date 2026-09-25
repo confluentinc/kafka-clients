@@ -14,8 +14,8 @@
 
 //! Internal header implementations (org.apache.kafka.common.header.internals).
 
-pub(crate) mod record_header;
-pub(crate) mod record_headers;
+mod record_header;
+mod record_headers;
 
 // The concrete types are part of the public API surface (re-exported at
 // `common::header::{RecordHeader, RecordHeaders}`) so that external code can

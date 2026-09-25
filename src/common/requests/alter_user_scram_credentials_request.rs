@@ -20,10 +20,9 @@
 use std::collections::BTreeSet;
 use std::io;
 
-use crate::alter_user_scram_credentials_request_data::AlterUserScramCredentialsRequestData;
-use crate::alter_user_scram_credentials_response_data::{
-    AlterUserScramCredentialsResponseData, AlterUserScramCredentialsResult,
-};
+use crate::AlterUserScramCredentialsRequestData;
+use crate::AlterUserScramCredentialsResponseData;
+use crate::alter_user_scram_credentials_response_data::AlterUserScramCredentialsResult;
 use crate::common::protocol::{ApiKeys, Errors, Readable};
 
 use super::{AlterUserScramCredentialsResponse, ConcreteRequest, ConcreteResponse, RequestBuilder};
@@ -130,7 +129,7 @@ pub struct AlterUserScramCredentialsRequestBuilder {
 
 impl AlterUserScramCredentialsRequestBuilder {
     /// Creates a builder wrapping the given request data.
-    pub fn from_data(data: AlterUserScramCredentialsRequestData) -> Self {
+    pub fn new(data: AlterUserScramCredentialsRequestData) -> Self {
         Self {
             data,
             oldest_allowed_version: ApiKeys::ALTER_USER_SCRAM_CREDENTIALS.oldest_version(),
@@ -209,10 +208,10 @@ mod tests {
         let mut data = AlterUserScramCredentialsRequestData::new();
         data.set_deletions(vec![deletion("d0", 2)]);
         data.set_upsertions(vec![upsertion("u0")]);
-        let mut builder = AlterUserScramCredentialsRequestBuilder::from_data(data);
+        let mut builder = AlterUserScramCredentialsRequestBuilder::new(data);
         let mut request = builder.build().unwrap();
         let bytes = request.serialize().unwrap();
-        let mut readable = crate::common::ByteBufferAccessor::from_bytes(bytes.into_buffer());
+        let mut readable = crate::common::ByteBufferAccessor::new(bytes.into_buffer());
         let parsed = AlterUserScramCredentialsRequest::parse(&mut readable, version).unwrap();
         assert_eq!(parsed.data().deletions.len(), 1);
         assert_eq!(parsed.data().deletions[0].name, "d0");
@@ -229,7 +228,7 @@ mod tests {
         let mut data = AlterUserScramCredentialsRequestData::new();
         data.set_deletions(vec![deletion("d0", 2)]);
         data.set_upsertions(vec![upsertion("u0")]);
-        let mut builder = AlterUserScramCredentialsRequestBuilder::from_data(data);
+        let mut builder = AlterUserScramCredentialsRequestBuilder::new(data);
         let mut request = builder.build_version(0).unwrap();
         let bytes = request.serialize().unwrap().into_buffer();
         let expected: Vec<u8> = vec![

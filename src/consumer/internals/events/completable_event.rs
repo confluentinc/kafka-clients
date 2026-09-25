@@ -32,6 +32,35 @@ use tokio::sync::oneshot;
 
 use crate::common::Error;
 
+/// Hosts the statics of Java's `CompletableEvent<T>` interface
+/// (`org.apache.kafka.clients.consumer.internals.events.CompletableEvent`).
+///
+/// The Rust translation has no `CompletableEvent` trait — completable events
+/// are enum variants carrying a [`CompletableEventHandle`] (see
+/// `consumer-threading.md` §28) — so the interface survives only as this unit
+/// struct, exactly as Java calls the statics through the interface name rather
+/// than through an implementor.
+pub(crate) struct CompletableEvent;
+
+impl CompletableEvent {
+    /// Helper that constructs a `(handle, receiver, erased_handle)` triple in
+    /// one call. Most callers use this rather than [`CompletableEventHandle::new`]
+    /// directly so they don't forget to register the erased handle with the
+    /// reaper.
+    pub(crate) fn make_completable_event<T: Send + 'static>(deadline_ms: i64) -> CompletableEventTriple<T> {
+        let (handle, rx) = CompletableEventHandle::<T>::new(deadline_ms);
+        let erased = handle.erased();
+        (handle, rx, erased)
+    }
+
+    /// Translate Java's
+    /// `CompletableEvent.calculateDeadlineMs(currentTimeMs, timeoutMs)` —
+    /// saturating addition guarding against `i64::MAX` overflow.
+    pub(crate) fn calculate_deadline_ms(current_time_ms: i64, timeout_ms: i64) -> i64 {
+        current_time_ms.saturating_add(timeout_ms)
+    }
+}
+
 /// Sending end of a completable event paired with its deadline.
 ///
 /// Cloned `Arc<HandleInner<T>>` allows the same logical completion slot to
@@ -205,7 +234,7 @@ impl<T: Send + 'static> CompletableEventErasedHandle for ErasedHandle<T> {
     }
 }
 
-/// Return-type alias for [`make_completable_event`] — keeps the
+/// Return-type alias for [`CompletableEvent::make_completable_event`] — keeps the
 /// `clippy::type_complexity` lint quiet without sacrificing the
 /// explicit-triple ergonomics at the call site.
 pub(crate) type CompletableEventTriple<T> = (
@@ -213,23 +242,6 @@ pub(crate) type CompletableEventTriple<T> = (
     oneshot::Receiver<Result<T, Error>>,
     Arc<dyn CompletableEventErasedHandle>,
 );
-
-/// Helper that constructs a `(handle, receiver, erased_handle)` triple in
-/// one call. Most callers use this rather than [`CompletableEventHandle::new`]
-/// directly so they don't forget to register the erased handle with the
-/// reaper.
-pub(crate) fn make_completable_event<T: Send + 'static>(deadline_ms: i64) -> CompletableEventTriple<T> {
-    let (handle, rx) = CompletableEventHandle::<T>::new(deadline_ms);
-    let erased = handle.erased();
-    (handle, rx, erased)
-}
-
-/// Translate Java's
-/// `CompletableEvent.calculateDeadlineMs(currentTimeMs, timeoutMs)` —
-/// saturating addition guarding against `i64::MAX` overflow.
-pub(crate) fn calculate_deadline_ms(current_time_ms: i64, timeout_ms: i64) -> i64 {
-    current_time_ms.saturating_add(timeout_ms)
-}
 
 #[cfg(test)]
 mod tests {
@@ -262,7 +274,7 @@ mod tests {
 
     #[test]
     fn second_completion_is_noop_after_failed_with_timeout() {
-        let (handle, _rx, erased) = make_completable_event::<()>(1_000);
+        let (handle, _rx, erased) = CompletableEvent::make_completable_event::<()>(1_000);
         assert!(erased.fail_with_timeout(Error::timeout("deadline")));
         assert!(handle.is_done());
         // The handle's own complete() must observe is_done and return false.
@@ -271,14 +283,14 @@ mod tests {
 
     #[test]
     fn calculate_deadline_ms_saturates_on_overflow() {
-        assert_eq!(calculate_deadline_ms(0, 100), 100);
-        assert_eq!(calculate_deadline_ms(i64::MAX, 1), i64::MAX);
-        assert_eq!(calculate_deadline_ms(i64::MAX - 5, 100), i64::MAX);
+        assert_eq!(CompletableEvent::calculate_deadline_ms(0, 100), 100);
+        assert_eq!(CompletableEvent::calculate_deadline_ms(i64::MAX, 1), i64::MAX);
+        assert_eq!(CompletableEvent::calculate_deadline_ms(i64::MAX - 5, 100), i64::MAX);
     }
 
     #[test]
     fn erased_type_name_includes_t() {
-        let (_h, _rx, erased) = make_completable_event::<i64>(0);
+        let (_h, _rx, erased) = CompletableEvent::make_completable_event::<i64>(0);
         // Just ensure type_name is non-empty and contains "i64". Exact
         // value depends on rustc; we don't pin it.
         let name = erased.type_name();

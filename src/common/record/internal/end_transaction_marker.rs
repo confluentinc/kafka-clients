@@ -18,8 +18,7 @@
 
 use crate::common::Error;
 use crate::common::InvalidRecordError;
-use crate::common::protocol::message_util::to_version_prefixed_byte_buffer;
-use crate::common::protocol::{ByteBufferAccessor, Readable};
+use crate::common::protocol::{ByteBufferAccessor, MessageUtil, Readable};
 use crate::common::record::internal::{ControlRecordType, DefaultRecord, Record, RecordBatch};
 use crate::end_txn_marker_data::EndTxnMarkerData;
 
@@ -73,10 +72,11 @@ impl EndTransactionMarker {
         // fail, so an error here is unrecoverable (CLAUDE.md §10.1) — mirroring
         // that Java's `MessageUtil.toVersionPrefixedByteBuffer` does not declare a
         // checked exception here.
-        let buffer = to_version_prefixed_byte_buffer(EndTxnMarkerData::HIGHEST_SUPPORTED_VERSION, &mut marker)
-            .expect("end transaction marker value serialization is infallible")
-            .buffer()
-            .to_vec();
+        let buffer =
+            MessageUtil::to_version_prefixed_byte_buffer(EndTxnMarkerData::HIGHEST_SUPPORTED_VERSION, &mut marker)
+                .expect("end transaction marker value serialization is infallible")
+                .buffer()
+                .to_vec();
         Ok(Self { control_type, coordinator_epoch, buffer })
     }
 
@@ -147,7 +147,7 @@ impl EndTransactionMarker {
     pub(crate) fn deserialize_value(control_type: ControlRecordType, value: &[u8]) -> Result<Self, Error> {
         Self::ensure_transaction_marker_control_type(control_type)?;
 
-        let mut accessor = ByteBufferAccessor::from_bytes(value.to_vec());
+        let mut accessor = ByteBufferAccessor::new(value.to_vec());
         let mut version = accessor.read_short().map_err(|e| {
             Error::InvalidRecord(InvalidRecordError::new(format!(
                 "Failed to read end transaction marker version: {e}"
@@ -211,7 +211,7 @@ impl std::hash::Hash for EndTransactionMarker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::protocol::varint::{size_of_varint, size_of_varlong};
+    use crate::common::protocol::ByteUtils;
 
     /// Java's `VALID_CONTROLLER_RECORD_TYPE`: `[COMMIT, ABORT]`.
     const VALID_CONTROLLER_RECORD_TYPE: [ControlRecordType; 2] = [ControlRecordType::Commit, ControlRecordType::Abort];
@@ -300,20 +300,23 @@ mod tests {
     fn test_end_txn_marker_value_size() {
         for control_type in VALID_CONTROLLER_RECORD_TYPE {
             let marker = EndTransactionMarker::new(control_type, 1).expect("a valid type");
-            let offset_size = size_of_varint(0);
-            let timestamp_size = size_of_varlong(0);
+            let offset_size = ByteUtils::size_of_varint(0);
+            let timestamp_size = ByteUtils::size_of_varlong(0);
             let key_size = control_type.control_record_key_size() as i32;
             let value_size = marker.serialize_value().len() as i32;
-            let header_size = size_of_varint(RecordBatch::EMPTY_HEADERS.len() as i32);
+            let header_size = ByteUtils::size_of_varint(RecordBatch::EMPTY_HEADERS.len() as i32);
             let total_size = 1
                 + offset_size
                 + timestamp_size
-                + size_of_varint(key_size)
+                + ByteUtils::size_of_varint(key_size)
                 + key_size
-                + size_of_varint(value_size)
+                + ByteUtils::size_of_varint(value_size)
                 + value_size
                 + header_size;
-            assert_eq!(size_of_varint(total_size) + total_size, marker.end_txn_marker_value_size());
+            assert_eq!(
+                ByteUtils::size_of_varint(total_size) + total_size,
+                marker.end_txn_marker_value_size()
+            );
         }
     }
 

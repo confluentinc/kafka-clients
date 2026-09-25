@@ -37,9 +37,9 @@ use std::sync::atomic::{AtomicI64, Ordering};
 use tokio::sync::{Notify, mpsc, oneshot};
 
 use crate::common::Error;
-use crate::consumer::internals::async_consumer_metrics::AsyncConsumerMetrics;
+use crate::consumer::internals::AsyncConsumerMetrics;
 
-use super::application_event::{ApplicationEvent, ApplicationEventEnvelope};
+use super::{ApplicationEvent, ApplicationEventEnvelope};
 
 /// Channel-side adapter: the app thread calls
 /// [`ApplicationEventHandler::add`] to enqueue an event; the matching
@@ -151,7 +151,7 @@ impl ApplicationEventHandler {
     ///
     /// Enqueues the event and awaits the matching
     /// [`oneshot::Receiver`] for the typed result. Callers pre-create
-    /// the receiver via [`super::completable_event::make_completable_event`]
+    /// the receiver via [`super::CompletableEvent::make_completable_event`]
     /// so the typed `T` parameter can flow without erasure.
     ///
     /// If the receiver is dropped before completion (only possible if
@@ -178,7 +178,7 @@ impl ApplicationEventHandler {
 
 #[cfg(test)]
 mod tests {
-    use super::super::completable_event::make_completable_event;
+    use super::super::CompletableEvent;
     use super::*;
 
     #[tokio::test]
@@ -225,14 +225,17 @@ mod tests {
     /// (Java records `applicationEventQueue.size() + 1` before adding).
     #[tokio::test]
     async fn add_records_queue_size_when_metrics_wired() {
-        use crate::common::metric::Metric;
+        use crate::common::Metric;
         use crate::common::metrics::Metrics;
-        use crate::consumer::internals::async_consumer_metrics::AsyncConsumerMetrics;
-        use crate::consumer::internals::consumer_utils::CONSUMER_METRIC_GROUP;
+        use crate::consumer::internals::AsyncConsumerMetrics;
+        use crate::consumer::internals::ConsumerUtils;
 
         let (tx, mut rx) = mpsc::unbounded_channel();
         let metrics = Arc::new(Metrics::new());
-        let acm = Arc::new(AsyncConsumerMetrics::new(Arc::clone(&metrics), CONSUMER_METRIC_GROUP));
+        let acm = Arc::new(AsyncConsumerMetrics::new(
+            Arc::clone(&metrics),
+            ConsumerUtils::CONSUMER_METRIC_GROUP,
+        ));
         let queue_size = Arc::new(AtomicI64::new(0));
 
         let mut handler = ApplicationEventHandler::new(tx, Arc::new(Notify::new()));
@@ -244,7 +247,7 @@ mod tests {
         // The shared counter reflects two enqueued events; the recorded size
         // metric reflects the latest `size()+1` value (2).
         assert_eq!(queue_size.load(Ordering::SeqCst), 2);
-        let mn = metrics.metric_name_group("application-event-queue-size", CONSUMER_METRIC_GROUP);
+        let mn = metrics.metric_name("application-event-queue-size", ConsumerUtils::CONSUMER_METRIC_GROUP);
         assert_eq!(metrics.metric(&mn).unwrap().metric_value().as_double(), Some(2.0));
 
         // Drain so the channel does not leak the senders.
@@ -257,13 +260,15 @@ mod tests {
     #[tokio::test]
     async fn add_rolls_back_queue_size_on_send_failure() {
         use crate::common::metrics::Metrics;
-        use crate::consumer::internals::async_consumer_metrics::AsyncConsumerMetrics;
-        use crate::consumer::internals::consumer_utils::CONSUMER_METRIC_GROUP;
+        use crate::consumer::internals::AsyncConsumerMetrics;
 
         let (tx, rx) = mpsc::unbounded_channel::<ApplicationEventEnvelope>();
         drop(rx);
         let metrics = Arc::new(Metrics::new());
-        let acm = Arc::new(AsyncConsumerMetrics::new(Arc::clone(&metrics), CONSUMER_METRIC_GROUP));
+        let acm = Arc::new(AsyncConsumerMetrics::new(
+            Arc::clone(&metrics),
+            crate::consumer::internals::ConsumerUtils::CONSUMER_METRIC_GROUP,
+        ));
         let queue_size = Arc::new(AtomicI64::new(0));
 
         let mut handler = ApplicationEventHandler::new(tx, Arc::new(Notify::new()));
@@ -278,7 +283,7 @@ mod tests {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let handler = ApplicationEventHandler::new(tx, Arc::new(Notify::new()));
 
-        let (handle, receiver, _erased) = make_completable_event::<()>(0);
+        let (handle, receiver, _erased) = CompletableEvent::make_completable_event::<()>(0);
         let event = ApplicationEvent::CreateFetchRequests { handle };
 
         let send_task = tokio::spawn(async move { handler.add_and_get::<()>(event, receiver, 10).await });
@@ -304,7 +309,7 @@ mod tests {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let handler = ApplicationEventHandler::new(tx, Arc::new(Notify::new()));
 
-        let (handle, receiver, _erased) = make_completable_event::<()>(0);
+        let (handle, receiver, _erased) = CompletableEvent::make_completable_event::<()>(0);
         let event = ApplicationEvent::CreateFetchRequests { handle };
 
         let send_task = tokio::spawn(async move { handler.add_and_get::<()>(event, receiver, 0).await });
@@ -327,7 +332,7 @@ mod tests {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let handler = ApplicationEventHandler::new(tx, Arc::new(Notify::new()));
 
-        let (handle, receiver, erased) = make_completable_event::<()>(0);
+        let (handle, receiver, erased) = CompletableEvent::make_completable_event::<()>(0);
         let event = ApplicationEvent::CreateFetchRequests { handle };
 
         let send_task = tokio::spawn(async move { handler.add_and_get::<()>(event, receiver, 0).await });

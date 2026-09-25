@@ -19,10 +19,10 @@
 use std::collections::HashMap;
 use std::io;
 
+use crate::ConsumerGroupDescribeResponseData;
 use crate::common::protocol::{ApiKeys, Errors, Readable};
-use crate::consumer_group_describe_response_data::ConsumerGroupDescribeResponseData;
 
-use super::abstract_response::update_error_counts;
+use super::AbstractResponse;
 
 /// A `ConsumerGroupDescribe` response.
 ///
@@ -77,7 +77,7 @@ impl ConsumerGroupDescribeResponse {
     pub fn error_counts(&self) -> HashMap<Errors, i32> {
         let mut counts = HashMap::new();
         for group in &self.data.groups {
-            update_error_counts(&mut counts, Errors::for_code(group.error_code));
+            AbstractResponse::update_error_counts(&mut counts, Errors::for_code(group.error_code));
         }
         counts
     }

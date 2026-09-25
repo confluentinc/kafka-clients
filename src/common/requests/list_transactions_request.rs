@@ -18,9 +18,9 @@
 
 use std::io;
 
+use crate::ListTransactionsRequestData;
+use crate::ListTransactionsResponseData;
 use crate::common::protocol::{ApiKeys, Errors, Readable};
-use crate::list_transactions_request_data::ListTransactionsRequestData;
-use crate::list_transactions_response_data::ListTransactionsResponseData;
 
 use super::{ConcreteRequest, ConcreteResponse, ListTransactionsResponse, RequestBuilder};
 
@@ -147,7 +147,7 @@ mod tests {
         let mut builder = ListTransactionsRequestBuilder::new(data);
         let mut request = builder.build_version(1).unwrap();
         let bytes = request.serialize().unwrap();
-        let mut readable = crate::common::ByteBufferAccessor::from_bytes(bytes.into_buffer());
+        let mut readable = crate::common::ByteBufferAccessor::new(bytes.into_buffer());
         let parsed = ListTransactionsRequest::parse(&mut readable, 1).unwrap();
         assert_eq!(parsed.data().state_filters, vec!["Ongoing".to_string()]);
         assert_eq!(parsed.data().producer_id_filters, vec![1, 2]);

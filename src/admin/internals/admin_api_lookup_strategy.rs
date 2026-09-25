@@ -23,7 +23,7 @@ use std::hash::Hash;
 use crate::common::Error;
 use crate::common::requests::{ConcreteResponse, RequestBuilder};
 
-use super::api_request_scope::ApiRequestScope;
+use super::ApiRequestScope;
 
 /// The result of a lookup response: which keys mapped to a broker, which failed
 /// fatally, and which completed during lookup.
@@ -54,7 +54,7 @@ impl<K: Clone + Eq + Hash> LookupResult<K> {
     /// `LookupRequestScope` spec to `completeLookupExceptionally(errors)`
     /// (`AdminApiDriver.java:311`).
     ///
-    /// [`ApiResult::failed_all`]: super::admin_api_handler::ApiResult::failed_all
+    /// [`ApiResult::failed_all`]: super::ApiResult::failed_all
     pub(crate) fn failed_all(keys: &HashSet<K>, error: Error) -> Self {
         let failed_keys = keys.iter().map(|key| (key.clone(), error.clone())).collect();
         Self::new(failed_keys, HashMap::new())
@@ -98,7 +98,7 @@ pub(crate) trait AdminApiLookupStrategy<K>: Send {
     /// does not support batching (Java's `NoBatchedFindCoordinatorsException` /
     /// `NoBatchedOffsetFetchRequestException`).
     ///
-    /// The default is a no-op; only [`CoordinatorStrategy`](super::coordinator_strategy::CoordinatorStrategy)
+    /// The default is a no-op; only [`CoordinatorStrategy`](super::CoordinatorStrategy)
     /// overrides it. Java expresses this by downcasting
     /// `handler.lookupStrategy()` to `CoordinatorStrategy` and calling
     /// `disableBatch()`; Rust models the downcast as a defaulted trait method.

@@ -31,21 +31,13 @@
 use std::collections::HashMap;
 use std::io;
 
+use crate::ListOffsetsResponseData;
 use crate::common::TopicPartition;
 use crate::common::protocol::{ApiKeys, Errors, Readable};
-use crate::list_offsets_response_data::{
-    ListOffsetsPartitionResponse, ListOffsetsResponseData, ListOffsetsTopicResponse,
-};
+use crate::list_offsets_response_data::{ListOffsetsPartitionResponse, ListOffsetsTopicResponse};
 
+use super::AbstractResponse;
 use super::RECORD_BATCH_NO_PARTITION_LEADER_EPOCH;
-use super::abstract_response::update_error_counts;
-
-/// Sentinel timestamp used when the broker has no usable timestamp.
-pub const UNKNOWN_TIMESTAMP: i64 = -1;
-/// Sentinel offset used when the broker has no usable offset.
-pub const UNKNOWN_OFFSET: i64 = -1;
-/// Sentinel leader-epoch used when the broker has no usable leader epoch.
-pub const UNKNOWN_EPOCH: i32 = RECORD_BATCH_NO_PARTITION_LEADER_EPOCH;
 
 /// A `ListOffsets` response.
 ///
@@ -56,6 +48,15 @@ pub struct ListOffsetsResponse {
 }
 
 impl ListOffsetsResponse {
+    /// Sentinel timestamp used when the broker has no usable timestamp.
+    pub const UNKNOWN_TIMESTAMP: i64 = -1;
+
+    /// Sentinel offset used when the broker has no usable offset.
+    pub const UNKNOWN_OFFSET: i64 = -1;
+
+    /// Sentinel leader-epoch used when the broker has no usable leader epoch.
+    pub const UNKNOWN_EPOCH: i32 = RECORD_BATCH_NO_PARTITION_LEADER_EPOCH;
+
     /// Creates a new `ListOffsetsResponse` from the underlying data.
     pub fn new(data: ListOffsetsResponseData) -> Self {
         Self { data }
@@ -96,7 +97,7 @@ impl ListOffsetsResponse {
         let mut counts = HashMap::new();
         for topic in &self.data.topics {
             for partition in &topic.partitions {
-                update_error_counts(&mut counts, Errors::for_code(partition.error_code));
+                AbstractResponse::update_error_counts(&mut counts, Errors::for_code(partition.error_code));
             }
         }
         counts

@@ -16,18 +16,18 @@
 //!
 //! Corresponds to the `org.apache.kafka.common.resource` package.
 
-pub mod pattern_type;
+mod pattern_type;
 // The `Resource` class lives in its own `resource.rs` file per CLAUDE.md's
 // "one Java class per file" rule, nested under the `resource` module that
 // mirrors the `org.apache.kafka.common.resource` package.
 #[allow(clippy::module_inception)]
-pub mod resource;
-pub mod resource_pattern;
-pub mod resource_pattern_filter;
-pub mod resource_type;
+mod resource;
+mod resource_pattern;
+mod resource_pattern_filter;
+mod resource_type;
 
 pub use pattern_type::PatternType;
-pub use resource::{CLUSTER_NAME, Resource};
-pub use resource_pattern::{ResourcePattern, WILDCARD_RESOURCE};
+pub use resource::Resource;
+pub use resource_pattern::ResourcePattern;
 pub use resource_pattern_filter::ResourcePatternFilter;
 pub use resource_type::ResourceType;

@@ -14,8 +14,9 @@
 
 //! Tests for Kafka message tagged fields serialization/deserialization
 
-use confluent_kafka::common::protocol::ByteBufferAccessor;
-use confluent_kafka::fetch_request_data::{FetchRequestData, ReplicaState};
+use confluent_kafka::FetchRequestData;
+use confluent_kafka::common::ByteBufferAccessor;
+use confluent_kafka::fetch_request_data::ReplicaState;
 
 #[test]
 fn test_fetch_request_with_cluster_id() {
@@ -32,7 +33,7 @@ fn test_fetch_request_with_cluster_id() {
     request.session_epoch = -1;
 
     // Serialize
-    let mut buffer = ByteBufferAccessor::new(1024);
+    let mut buffer = ByteBufferAccessor::new(Vec::with_capacity(1024));
     request.write(&mut buffer, version).expect("Write failed");
 
     // Deserialize
@@ -66,7 +67,7 @@ fn test_fetch_request_with_replica_state() {
     request.replica_state = replica_state;
 
     // Serialize
-    let mut buffer = ByteBufferAccessor::new(1024);
+    let mut buffer = ByteBufferAccessor::new(Vec::with_capacity(1024));
     request.write(&mut buffer, version).expect("Write failed");
 
     // Deserialize
@@ -100,7 +101,7 @@ fn test_fetch_request_with_both_tagged_fields() {
     request.replica_state = replica_state;
 
     // Serialize
-    let mut buffer = ByteBufferAccessor::new(1024);
+    let mut buffer = ByteBufferAccessor::new(Vec::with_capacity(1024));
     request.write(&mut buffer, version).expect("Write failed");
 
     // Deserialize
@@ -133,7 +134,7 @@ fn test_fetch_request_empty_tagged_fields() {
     // ReplicaState has default values (replica_id=-1, replica_epoch=-1)
 
     // Serialize
-    let mut buffer = ByteBufferAccessor::new(1024);
+    let mut buffer = ByteBufferAccessor::new(Vec::with_capacity(1024));
     request.write(&mut buffer, version).expect("Write failed");
 
     // Deserialize

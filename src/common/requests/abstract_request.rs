@@ -23,64 +23,64 @@
 
 use std::io;
 
-use crate::add_offsets_to_txn_request_data::AddOffsetsToTxnRequestData;
-use crate::add_partitions_to_txn_request_data::AddPartitionsToTxnRequestData;
-use crate::alter_client_quotas_request_data::AlterClientQuotasRequestData;
-use crate::alter_partition_reassignments_request_data::AlterPartitionReassignmentsRequestData;
-use crate::alter_replica_log_dirs_request_data::AlterReplicaLogDirsRequestData;
-use crate::alter_user_scram_credentials_request_data::AlterUserScramCredentialsRequestData;
-use crate::api_versions_request_data::ApiVersionsRequestData;
+use crate::AddOffsetsToTxnRequestData;
+use crate::AddPartitionsToTxnRequestData;
+use crate::AlterClientQuotasRequestData;
+use crate::AlterPartitionReassignmentsRequestData;
+use crate::AlterReplicaLogDirsRequestData;
+use crate::AlterUserScramCredentialsRequestData;
+use crate::ApiVersionsRequestData;
+use crate::ConsumerGroupDescribeRequestData;
+use crate::ConsumerGroupHeartbeatRequestData;
+use crate::CreateAclsRequestData;
+use crate::CreateDelegationTokenRequestData;
+use crate::CreatePartitionsRequestData;
+use crate::CreateTopicsRequestData;
+use crate::DeleteAclsRequestData;
+use crate::DeleteGroupsRequestData;
+use crate::DeleteRecordsRequestData;
+use crate::DeleteTopicsRequestData;
+use crate::DescribeAclsRequestData;
+use crate::DescribeClientQuotasRequestData;
+use crate::DescribeClusterRequestData;
+use crate::DescribeConfigsRequestData;
+use crate::DescribeDelegationTokenRequestData;
+use crate::DescribeGroupsRequestData;
+use crate::DescribeLogDirsRequestData;
+use crate::DescribeProducersRequestData;
+use crate::DescribeTransactionsRequestData;
+use crate::DescribeUserScramCredentialsRequestData;
+use crate::ElectLeadersRequestData;
+use crate::EndTxnRequestData;
+use crate::ExpireDelegationTokenRequestData;
+use crate::FetchRequestData;
+use crate::FindCoordinatorRequestData;
+use crate::IncrementalAlterConfigsRequestData;
+use crate::InitProducerIdRequestData;
+use crate::LeaveGroupRequestData;
+use crate::ListConfigResourcesRequestData;
+use crate::ListGroupsRequestData;
+use crate::ListOffsetsRequestData;
+use crate::ListPartitionReassignmentsRequestData;
+use crate::ListTransactionsRequestData;
+use crate::MetadataRequestData;
+use crate::OffsetCommitRequestData;
+use crate::OffsetDeleteRequestData;
+use crate::OffsetFetchRequestData;
+use crate::OffsetForLeaderEpochRequestData;
+use crate::ProduceRequestData;
+use crate::RenewDelegationTokenRequestData;
+use crate::SaslAuthenticateRequestData;
+use crate::SaslHandshakeRequestData;
+use crate::TxnOffsetCommitRequestData;
 use crate::common::network::ByteBufferSend;
 use crate::common::protocol::Message;
 use crate::common::protocol::{ApiKeys, ByteBufferAccessor, Readable};
-use crate::consumer_group_describe_request_data::ConsumerGroupDescribeRequestData;
-use crate::consumer_group_heartbeat_request_data::ConsumerGroupHeartbeatRequestData;
-use crate::create_acls_request_data::CreateAclsRequestData;
-use crate::create_delegation_token_request_data::CreateDelegationTokenRequestData;
-use crate::create_partitions_request_data::CreatePartitionsRequestData;
-use crate::create_topics_request_data::CreateTopicsRequestData;
-use crate::delete_acls_request_data::DeleteAclsRequestData;
-use crate::delete_groups_request_data::DeleteGroupsRequestData;
-use crate::delete_records_request_data::DeleteRecordsRequestData;
-use crate::delete_topics_request_data::DeleteTopicsRequestData;
-use crate::describe_acls_request_data::DescribeAclsRequestData;
-use crate::describe_client_quotas_request_data::DescribeClientQuotasRequestData;
-use crate::describe_cluster_request_data::DescribeClusterRequestData;
-use crate::describe_configs_request_data::DescribeConfigsRequestData;
-use crate::describe_delegation_token_request_data::DescribeDelegationTokenRequestData;
-use crate::describe_groups_request_data::DescribeGroupsRequestData;
-use crate::describe_log_dirs_request_data::DescribeLogDirsRequestData;
-use crate::describe_producers_request_data::DescribeProducersRequestData;
-use crate::describe_transactions_request_data::DescribeTransactionsRequestData;
-use crate::describe_user_scram_credentials_request_data::DescribeUserScramCredentialsRequestData;
-use crate::elect_leaders_request_data::ElectLeadersRequestData;
-use crate::end_txn_request_data::EndTxnRequestData;
-use crate::expire_delegation_token_request_data::ExpireDelegationTokenRequestData;
-use crate::fetch_request_data::FetchRequestData;
-use crate::find_coordinator_request_data::FindCoordinatorRequestData;
-use crate::incremental_alter_configs_request_data::IncrementalAlterConfigsRequestData;
-use crate::init_producer_id_request_data::InitProducerIdRequestData;
-use crate::leave_group_request_data::LeaveGroupRequestData;
-use crate::list_config_resources_request_data::ListConfigResourcesRequestData;
-use crate::list_groups_request_data::ListGroupsRequestData;
-use crate::list_offsets_request_data::ListOffsetsRequestData;
-use crate::list_partition_reassignments_request_data::ListPartitionReassignmentsRequestData;
-use crate::list_transactions_request_data::ListTransactionsRequestData;
-use crate::metadata_request_data::MetadataRequestData;
-use crate::offset_commit_request_data::OffsetCommitRequestData;
-use crate::offset_delete_request_data::OffsetDeleteRequestData;
-use crate::offset_fetch_request_data::OffsetFetchRequestData;
-use crate::offset_for_leader_epoch_request_data::OffsetForLeaderEpochRequestData;
-use crate::produce_request_data::ProduceRequestData;
-use crate::renew_delegation_token_request_data::RenewDelegationTokenRequestData;
-use crate::sasl_authenticate_request_data::SaslAuthenticateRequestData;
-use crate::sasl_handshake_request_data::SaslHandshakeRequestData;
-use crate::txn_offset_commit_request_data::TxnOffsetCommitRequestData;
 
 use super::AddOffsetsToTxnRequest;
 use super::AddPartitionsToTxnRequest;
-use crate::update_features_request_data::UpdateFeaturesRequestData;
-use crate::write_txn_markers_request_data::WriteTxnMarkersRequestData;
+use crate::UpdateFeaturesRequestData;
+use crate::WriteTxnMarkersRequestData;
 
 use super::AlterClientQuotasRequest;
 use super::AlterPartitionReassignmentsRequest;
@@ -497,160 +497,160 @@ impl ConcreteRequest {
         let version = self.version();
         match self {
             Self::ApiVersions(r) => {
-                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+                super::RequestUtils::serialize(header.data(), header.header_version(), r.data_mut(), version)
             },
             Self::Metadata(r) => {
-                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+                super::RequestUtils::serialize(header.data(), header.header_version(), r.data_mut(), version)
             },
             Self::Produce(r) => {
-                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+                super::RequestUtils::serialize(header.data(), header.header_version(), r.data_mut(), version)
             },
             Self::Fetch(r) => {
-                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+                super::RequestUtils::serialize(header.data(), header.header_version(), r.data_mut(), version)
             },
             Self::SaslHandshake(r) => {
-                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+                super::RequestUtils::serialize(header.data(), header.header_version(), r.data_mut(), version)
             },
             Self::SaslAuthenticate(r) => {
-                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+                super::RequestUtils::serialize(header.data(), header.header_version(), r.data_mut(), version)
             },
             Self::FindCoordinator(r) => {
-                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+                super::RequestUtils::serialize(header.data(), header.header_version(), r.data_mut(), version)
             },
             Self::ListGroups(r) => {
-                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+                super::RequestUtils::serialize(header.data(), header.header_version(), r.data_mut(), version)
             },
             Self::DescribeGroups(r) => {
-                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+                super::RequestUtils::serialize(header.data(), header.header_version(), r.data_mut(), version)
             },
             Self::ConsumerGroupDescribe(r) => {
-                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+                super::RequestUtils::serialize(header.data(), header.header_version(), r.data_mut(), version)
             },
             Self::ListOffsets(r) => {
-                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+                super::RequestUtils::serialize(header.data(), header.header_version(), r.data_mut(), version)
             },
             Self::OffsetsForLeaderEpoch(r) => {
-                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+                super::RequestUtils::serialize(header.data(), header.header_version(), r.data_mut(), version)
             },
             Self::ConsumerGroupHeartbeat(r) => {
-                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+                super::RequestUtils::serialize(header.data(), header.header_version(), r.data_mut(), version)
             },
             Self::OffsetCommit(r) => {
-                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+                super::RequestUtils::serialize(header.data(), header.header_version(), r.data_mut(), version)
             },
             Self::DeleteGroups(r) => {
-                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+                super::RequestUtils::serialize(header.data(), header.header_version(), r.data_mut(), version)
             },
             Self::LeaveGroup(r) => {
-                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+                super::RequestUtils::serialize(header.data(), header.header_version(), r.data_mut(), version)
             },
             Self::OffsetDelete(r) => {
-                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+                super::RequestUtils::serialize(header.data(), header.header_version(), r.data_mut(), version)
             },
             Self::OffsetFetch(r) => {
-                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+                super::RequestUtils::serialize(header.data(), header.header_version(), r.data_mut(), version)
             },
             Self::InitProducerId(r) => {
-                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+                super::RequestUtils::serialize(header.data(), header.header_version(), r.data_mut(), version)
             },
             Self::AddPartitionsToTxn(r) => {
-                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+                super::RequestUtils::serialize(header.data(), header.header_version(), r.data_mut(), version)
             },
             Self::AddOffsetsToTxn(r) => {
-                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+                super::RequestUtils::serialize(header.data(), header.header_version(), r.data_mut(), version)
             },
             Self::EndTxn(r) => {
-                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+                super::RequestUtils::serialize(header.data(), header.header_version(), r.data_mut(), version)
             },
             Self::TxnOffsetCommit(r) => {
-                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+                super::RequestUtils::serialize(header.data(), header.header_version(), r.data_mut(), version)
             },
             Self::CreateTopics(r) => {
-                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+                super::RequestUtils::serialize(header.data(), header.header_version(), r.data_mut(), version)
             },
             Self::DeleteTopics(r) => {
-                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+                super::RequestUtils::serialize(header.data(), header.header_version(), r.data_mut(), version)
             },
             Self::CreatePartitions(r) => {
-                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+                super::RequestUtils::serialize(header.data(), header.header_version(), r.data_mut(), version)
             },
             Self::DeleteRecords(r) => {
-                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+                super::RequestUtils::serialize(header.data(), header.header_version(), r.data_mut(), version)
             },
             Self::DescribeConfigs(r) => {
-                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+                super::RequestUtils::serialize(header.data(), header.header_version(), r.data_mut(), version)
             },
             Self::IncrementalAlterConfigs(r) => {
-                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+                super::RequestUtils::serialize(header.data(), header.header_version(), r.data_mut(), version)
             },
             Self::ListConfigResources(r) => {
-                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+                super::RequestUtils::serialize(header.data(), header.header_version(), r.data_mut(), version)
             },
             Self::DescribeCluster(r) => {
-                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+                super::RequestUtils::serialize(header.data(), header.header_version(), r.data_mut(), version)
             },
             Self::DescribeLogDirs(r) => {
-                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+                super::RequestUtils::serialize(header.data(), header.header_version(), r.data_mut(), version)
             },
             Self::AlterReplicaLogDirs(r) => {
-                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+                super::RequestUtils::serialize(header.data(), header.header_version(), r.data_mut(), version)
             },
             Self::ElectLeaders(r) => {
-                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+                super::RequestUtils::serialize(header.data(), header.header_version(), r.data_mut(), version)
             },
             Self::AlterPartitionReassignments(r) => {
-                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+                super::RequestUtils::serialize(header.data(), header.header_version(), r.data_mut(), version)
             },
             Self::ListPartitionReassignments(r) => {
-                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+                super::RequestUtils::serialize(header.data(), header.header_version(), r.data_mut(), version)
             },
             Self::DescribeAcls(r) => {
-                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+                super::RequestUtils::serialize(header.data(), header.header_version(), r.data_mut(), version)
             },
             Self::CreateAcls(r) => {
-                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+                super::RequestUtils::serialize(header.data(), header.header_version(), r.data_mut(), version)
             },
             Self::DeleteAcls(r) => {
-                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+                super::RequestUtils::serialize(header.data(), header.header_version(), r.data_mut(), version)
             },
             Self::DescribeClientQuotas(r) => {
-                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+                super::RequestUtils::serialize(header.data(), header.header_version(), r.data_mut(), version)
             },
             Self::AlterClientQuotas(r) => {
-                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+                super::RequestUtils::serialize(header.data(), header.header_version(), r.data_mut(), version)
             },
             Self::DescribeUserScramCredentials(r) => {
-                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+                super::RequestUtils::serialize(header.data(), header.header_version(), r.data_mut(), version)
             },
             Self::AlterUserScramCredentials(r) => {
-                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+                super::RequestUtils::serialize(header.data(), header.header_version(), r.data_mut(), version)
             },
             Self::CreateDelegationToken(r) => {
-                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+                super::RequestUtils::serialize(header.data(), header.header_version(), r.data_mut(), version)
             },
             Self::RenewDelegationToken(r) => {
-                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+                super::RequestUtils::serialize(header.data(), header.header_version(), r.data_mut(), version)
             },
             Self::ExpireDelegationToken(r) => {
-                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+                super::RequestUtils::serialize(header.data(), header.header_version(), r.data_mut(), version)
             },
             Self::DescribeDelegationToken(r) => {
-                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+                super::RequestUtils::serialize(header.data(), header.header_version(), r.data_mut(), version)
             },
             Self::UpdateFeatures(r) => {
-                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+                super::RequestUtils::serialize(header.data(), header.header_version(), r.data_mut(), version)
             },
             Self::DescribeProducers(r) => {
-                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+                super::RequestUtils::serialize(header.data(), header.header_version(), r.data_mut(), version)
             },
             Self::DescribeTransactions(r) => {
-                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+                super::RequestUtils::serialize(header.data(), header.header_version(), r.data_mut(), version)
             },
             Self::WriteTxnMarkers(r) => {
-                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+                super::RequestUtils::serialize(header.data(), header.header_version(), r.data_mut(), version)
             },
             Self::ListTransactions(r) => {
-                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+                super::RequestUtils::serialize(header.data(), header.header_version(), r.data_mut(), version)
             },
         }
     }
@@ -724,7 +724,7 @@ impl ConcreteRequest {
     fn serialize_body(msg: &mut impl Message, version: i16) -> io::Result<ByteBufferAccessor> {
         let mut cache = crate::common::protocol::ObjectSerializationCache::new();
         let size = Message::size(msg, &mut cache, version)?;
-        let mut buf = ByteBufferAccessor::new(size as usize);
+        let mut buf = ByteBufferAccessor::new(Vec::with_capacity(size as usize));
         Message::write(msg, &mut buf, &cache, version)?;
         buf.flip();
         Ok(buf)
@@ -735,11 +735,7 @@ impl ConcreteRequest {
     /// Returns `None` when the request type does not expect a response (e.g.,
     /// Produce with acks=0). In Java, `getErrorResponse()` returns `null` in
     /// those cases.
-    pub fn get_error_response(
-        &self,
-        throttle_time_ms: i32,
-        error: &crate::common::protocol::Errors,
-    ) -> Option<ConcreteResponse> {
+    pub fn get_error_response(&self, throttle_time_ms: i32, error: &crate::common::Errors) -> Option<ConcreteResponse> {
         match self {
             Self::ApiVersions(r) => Some(r.get_error_response(throttle_time_ms, error)),
             Self::Metadata(r) => Some(r.get_error_response(throttle_time_ms, error)),
@@ -1126,6 +1122,7 @@ impl std::fmt::Display for ConcreteRequest {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::common::requests::RequestHeaderOptionsBuilder;
 
     /// Java's `AbstractRequest.serializeWithHeader` builds the message by
     /// concatenating the two `ApiKeys` values (`AbstractRequest.java:117`).
@@ -1135,7 +1132,16 @@ mod tests {
     #[test]
     fn test_serialize_with_header_api_key_mismatch_message() {
         let mut request = ConcreteRequest::Metadata(MetadataRequest::new(MetadataRequestData::new(), 12));
-        let header = RequestHeader::new(&ApiKeys::PRODUCE, 12, "client", 1).expect("valid header");
+        let header = RequestHeader::with_options(
+            RequestHeaderOptionsBuilder::new()
+                .set_request_api_key(&ApiKeys::PRODUCE)
+                .set_request_version(12)
+                .set_client_id("client")
+                .set_correlation_id(1)
+                .build()
+                .unwrap(),
+        )
+        .expect("valid header");
 
         let error = match request.serialize_with_header(&header) {
             Err(error) => error,
@@ -1154,7 +1160,16 @@ mod tests {
     #[test]
     fn test_serialize_with_header_version_mismatch_message() {
         let mut request = ConcreteRequest::Metadata(MetadataRequest::new(MetadataRequestData::new(), 12));
-        let header = RequestHeader::new(&ApiKeys::METADATA, 9, "client", 1).expect("valid header");
+        let header = RequestHeader::with_options(
+            RequestHeaderOptionsBuilder::new()
+                .set_request_api_key(&ApiKeys::METADATA)
+                .set_request_version(9)
+                .set_client_id("client")
+                .set_correlation_id(1)
+                .build()
+                .unwrap(),
+        )
+        .expect("valid header");
 
         let error = match request.serialize_with_header(&header) {
             Err(error) => error,
@@ -1169,7 +1184,7 @@ mod tests {
     /// method name is snake_cased per CLAUDE.md §2; the rest is verbatim.
     #[test]
     fn test_parse_request_unhandled_api_key_message() {
-        let mut readable = ByteBufferAccessor::from_bytes(Vec::new());
+        let mut readable = ByteBufferAccessor::new(Vec::new());
         let error = ConcreteRequest::parse_request(&ApiKeys::VOTE, 0, &mut readable)
             .expect_err("VOTE is a broker-only api with no client-side parser");
         assert_eq!(error.kind(), io::ErrorKind::Unsupported);

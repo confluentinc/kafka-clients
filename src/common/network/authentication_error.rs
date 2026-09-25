@@ -31,14 +31,34 @@
 //! rejection surfaced by rustls, SASL mechanism/credential rejection) are
 //! wrapped in an [`AuthenticationError`] and stored inside the [`io::Error`]
 //! payload via [`auth_io_error`]. Downstream callers
-//! ([`KafkaChannel::prepare`](super::kafka_channel::KafkaChannel::prepare)
-//! and the [`Selector`](super::selector::Selector)) recover the distinction
+//! ([`KafkaChannel::prepare`](super::KafkaChannel::prepare)
+//! and the [`Selector`](super::Selector)) recover the distinction
 //! with [`is_authentication_error`].
 //!
 //! Transient transport-level I/O errors (connection reset, broken pipe,
 //! unexpected EOF) are NOT wrapped — their original [`io::ErrorKind`] is
 //! preserved so the selector / network client treat them as a network
 //! disconnect (retriable, reconnect with backoff), exactly as Java does.
+//!
+//! # Why these stay free functions
+//!
+//! The refactor that moved Java statics onto the struct translating their Java
+//! class does not reach this file: there is no Java class here to translate.
+//! Java expresses all of this through the exception **type** (`SSLException` /
+//! `AuthenticationException` vs. a plain `IOException`), so the four functions
+//! below have no Java static to mirror and no Java class to host them. Inventing
+//! a unit struct purely to carry them would add a type absent from the Java
+//! codebase (`definition-of-done.md` §7) and buy nothing: the natural host would
+//! be [`AuthenticationError`], which lives in `common::errors` and is the
+//! *payload*, not the subject — [`is_authentication_error`] and
+//! [`authentication_error_message`] both interrogate an [`io::Error`].
+//!
+//! They are reached through the `common::network` re-export, as CLAUDE.md §2
+//! requires, so this module can still become private without touching them.
+//!
+//! Note [`is_authentication_error`] here takes `&io::Error` and is **not** the
+//! CLAUDE.md §10.4 hierarchy predicate `Error::is_authentication_error()`; the
+//! two share a name and nothing else.
 
 use std::io;
 

@@ -14,8 +14,8 @@
 
 //! Translated from `org.apache.kafka.common.errors.UnreleasedInstanceIdException`.
 
-use crate::common::kafka_error::kafka_error_class;
-use crate::common::protocol::Errors;
+use crate::common::Errors;
+use crate::common::error::kafka_error_class;
 
 kafka_error_class! {
     /// The instance ID is still used by another member in the consumer group.

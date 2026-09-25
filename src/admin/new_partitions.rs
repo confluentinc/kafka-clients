@@ -48,7 +48,7 @@ impl NewPartitions {
     /// `total_count` is the total number of partitions after the operation
     /// succeeds; `new_assignments` are the replica assignments for the new
     /// partitions.
-    pub fn increase_to_with_assignments(total_count: i32, new_assignments: Vec<Vec<i32>>) -> Self {
+    pub fn increase_to_new_assignments(total_count: i32, new_assignments: Vec<Vec<i32>>) -> Self {
         Self { total_count, new_assignments: Some(new_assignments) }
     }
 
@@ -86,8 +86,8 @@ mod tests {
     }
 
     #[test]
-    fn increase_to_with_assignments() {
-        let np = NewPartitions::increase_to_with_assignments(6, vec![vec![1, 2], vec![2, 3], vec![3, 1]]);
+    fn increase_to_new_assignments() {
+        let np = NewPartitions::increase_to_new_assignments(6, vec![vec![1, 2], vec![2, 3], vec![3, 1]]);
         assert_eq!(np.total_count(), 6);
         assert_eq!(np.assignments(), Some(&vec![vec![1, 2], vec![2, 3], vec![3, 1]]));
     }

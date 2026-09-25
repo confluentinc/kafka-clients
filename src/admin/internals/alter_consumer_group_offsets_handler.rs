@@ -19,21 +19,20 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::common::protocol::Errors;
+use crate::OffsetCommitRequestData;
+use crate::common::Errors;
 use crate::common::requests::{ConcreteResponse, CoordinatorType, OffsetCommitRequestBuilder, RequestBuilder};
 use crate::common::utils::LogContext;
 use crate::common::{Error, Node, TopicPartition};
 use crate::consumer::OffsetAndMetadata;
 use crate::kafka_warn;
-use crate::offset_commit_request_data::{
-    OffsetCommitRequestData, OffsetCommitRequestPartition, OffsetCommitRequestTopic,
-};
+use crate::offset_commit_request_data::{OffsetCommitRequestPartition, OffsetCommitRequestTopic};
 
-use super::admin_api_future::SimpleAdminApiFuture;
-use super::admin_api_handler::{AdminApiHandler, ApiResult, RequestAndKeys};
-use super::admin_api_lookup_strategy::AdminApiLookupStrategy;
-use super::coordinator_key::CoordinatorKey;
-use super::coordinator_strategy::CoordinatorStrategy;
+use super::AdminApiLookupStrategy;
+use super::CoordinatorKey;
+use super::CoordinatorStrategy;
+use super::SimpleAdminApiFuture;
+use super::{AdminApiHandler, ApiResult, RequestAndKeys};
 
 /// The per-partition commit result value produced by this handler.
 type PartitionErrors = HashMap<TopicPartition, Errors>;
@@ -299,7 +298,7 @@ mod tests {
     }
 
     fn response(partition_results: &PartitionErrors) -> ConcreteResponse {
-        ConcreteResponse::OffsetCommit(OffsetCommitResponse::from_response_data(0, partition_results))
+        ConcreteResponse::OffsetCommit(OffsetCommitResponse::with_throttle_time_ms_response_data(0, partition_results))
     }
 
     fn partition_errors(error: Errors) -> PartitionErrors {

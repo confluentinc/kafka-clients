@@ -26,9 +26,9 @@
 
 use std::io;
 
+use crate::SaslAuthenticateRequestData;
+use crate::SaslAuthenticateResponseData;
 use crate::common::protocol::{ApiKeys, Errors, Readable};
-use crate::sasl_authenticate_request_data::SaslAuthenticateRequestData;
-use crate::sasl_authenticate_response_data::SaslAuthenticateResponseData;
 
 use super::ConcreteRequest;
 use super::ConcreteResponse;
@@ -244,7 +244,7 @@ mod tests {
     /// fails with the expected error about insufficient bytes.
     #[test]
     fn test_invalid_sasl_authenticate_request() {
-        use crate::common::protocol::ByteBufferAccessor;
+        use crate::common::ByteBufferAccessor;
 
         let version: i16 = 1; // fixed-length encoding for simplicity
         let b: Vec<u8> = vec![
@@ -265,7 +265,7 @@ mod tests {
         corrupted[2] = corrupted_len[2];
         corrupted[3] = corrupted_len[3];
 
-        let mut buf = ByteBufferAccessor::from_bytes(corrupted);
+        let mut buf = ByteBufferAccessor::new(corrupted);
         let err = ConcreteRequest::parse_request(request.api_key(), request.version(), &mut buf).unwrap_err();
         assert_eq!(
             err.to_string(),
@@ -282,7 +282,7 @@ mod tests {
     fn test_valid_tagged_fields_with_sasl_authenticate_request() {
         use crate::common::protocol::{ByteBufferAccessor, RawTaggedField, Writable};
 
-        let mut accessor = ByteBufferAccessor::new(11);
+        let mut accessor = ByteBufferAccessor::new(Vec::with_capacity(11));
 
         // Construct a SASL_AUTHENTICATE request body
         let auth_bytes = b"test";
@@ -320,7 +320,7 @@ mod tests {
     fn test_invalid_tagged_fields_with_sasl_authenticate_request() {
         use crate::common::protocol::{ByteBufferAccessor, RawTaggedField, Writable};
 
-        let mut accessor = ByteBufferAccessor::new(13);
+        let mut accessor = ByteBufferAccessor::new(Vec::with_capacity(13));
 
         // Construct a SASL_AUTHENTICATE request body
         let auth_bytes = b"test";

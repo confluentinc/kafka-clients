@@ -18,6 +18,7 @@
 //!
 //! This class is not thread safe and external synchronization must be used when modifying it.
 
+use crate::producer::RecordMetadata;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicI32, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
@@ -27,19 +28,18 @@ use log::{debug, error, trace};
 use crate::common::Error;
 use crate::common::TopicPartition;
 use crate::common::header::Header;
-use crate::common::header::internals::RecordHeader;
+use crate::common::header::RecordHeader;
 use crate::common::record::TimestampType;
+use crate::common::record::internal::AbstractRecords;
 use crate::common::record::internal::CompressionRatioEstimator;
 use crate::common::record::internal::CompressionType;
 use crate::common::record::internal::MemoryRecords;
 use crate::common::record::internal::MemoryRecordsBuilder;
 use crate::common::record::internal::Record;
 use crate::common::record::internal::RecordBatch;
-use crate::common::record::internal::abstract_records;
 use crate::producer::Callback;
 use crate::producer::internals::FutureRecordMetadata;
 use crate::producer::internals::ProduceRequestResult;
-use crate::producer::record_metadata;
 
 /// The final state of a batch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -122,11 +122,11 @@ pub struct ProducerBatch {
 impl ProducerBatch {
     /// Create a new `ProducerBatch`.
     pub fn new(tp: TopicPartition, records_builder: MemoryRecordsBuilder, created_ms: i64) -> Self {
-        Self::new_with_split(tp, records_builder, created_ms, false)
+        Self::with_split(tp, records_builder, created_ms, false)
     }
 
     /// Create a new `ProducerBatch`, optionally marking it as a split batch.
-    pub fn new_with_split(
+    pub fn with_split(
         tp: TopicPartition,
         mut records_builder: MemoryRecordsBuilder,
         created_ms: i64,
@@ -227,7 +227,7 @@ impl ProducerBatch {
         }
 
         self.records_builder.append(timestamp, key, value, headers);
-        self.max_record_size = self.max_record_size.max(abstract_records::estimate_size_in_bytes_upper_bound(
+        self.max_record_size = self.max_record_size.max(AbstractRecords::estimate_size_in_bytes_upper_bound(
             self.magic(),
             self.records_builder.compression().compression_type(),
             key,
@@ -273,7 +273,7 @@ impl ProducerBatch {
         }
 
         self.records_builder.append(timestamp, key, value, headers);
-        self.max_record_size = self.max_record_size.max(abstract_records::estimate_size_in_bytes_upper_bound(
+        self.max_record_size = self.max_record_size.max(AbstractRecords::estimate_size_in_bytes_upper_bound(
             self.magic(),
             self.records_builder.compression().compression_type(),
             key,
@@ -320,7 +320,7 @@ impl ProducerBatch {
             Arc::new(move |_idx| Some((*err).clone()))
         };
         self.complete_future_and_fire_callbacks(
-            record_metadata::INVALID_OFFSET,
+            RecordMetadata::INVALID_OFFSET,
             RecordBatch::NO_TIMESTAMP,
             Some(error_fn),
         );
@@ -346,7 +346,7 @@ impl ProducerBatch {
         _top_level_error: Error,
         record_errors: Arc<dyn Fn(i32) -> Option<Error> + Send + Sync>,
     ) -> bool {
-        self.done(record_metadata::INVALID_OFFSET, RecordBatch::NO_TIMESTAMP, Some(record_errors))
+        self.done(RecordMetadata::INVALID_OFFSET, RecordBatch::NO_TIMESTAMP, Some(record_errors))
     }
 
     /// Finalize the state of a batch.
@@ -550,7 +550,7 @@ impl ProducerBatch {
         let error_fn: Arc<dyn Fn(i32) -> Option<Error> + Send + Sync> =
             Arc::new(|_idx| Some(Error::record_batch_too_large("Record batch too large".to_string())));
         self.produce_future
-            .set(record_metadata::INVALID_OFFSET, RecordBatch::NO_TIMESTAMP, Some(error_fn));
+            .set(RecordMetadata::INVALID_OFFSET, RecordBatch::NO_TIMESTAMP, Some(error_fn));
         self.produce_future.done();
 
         self.assign_producer_state_to_batches(batches);
@@ -594,7 +594,7 @@ impl ProducerBatch {
         headers: &[RecordHeader],
         batch_size: i32,
     ) -> ProducerBatch {
-        let initial_size = (abstract_records::estimate_size_in_bytes_upper_bound(
+        let initial_size = (AbstractRecords::estimate_size_in_bytes_upper_bound(
             self.magic(),
             self.records_builder.compression().compression_type(),
             key,
@@ -603,14 +603,14 @@ impl ProducerBatch {
         ))
         .max(batch_size) as usize;
 
-        let builder = MemoryRecords::builder_with_magic(
+        let builder = MemoryRecords::builder_with_initial_capacity_magic(
             initial_size,
             self.magic(),
             self.records_builder.compression().clone(),
             TimestampType::CreateTime,
             0,
         );
-        ProducerBatch::new_with_split(self.topic_partition.clone(), builder, self.created_ms, true)
+        ProducerBatch::with_split(self.topic_partition.clone(), builder, self.created_ms, true)
     }
 
     /// Returns whether the batch uses compression.
@@ -666,11 +666,17 @@ impl ProducerBatch {
         self.retry
     }
 
-    /// Take the built memory records, moving ownership without copying.
+    /// The built memory records for this batch.
+    ///
+    /// Translated from `ProducerBatch.records()` (`ProducerBatch.java:483-485`), which
+    /// is a bare `recordsBuilder.build()` and is therefore **re-callable**: the send
+    /// path calls it to serialise the produce request, and `split` calls it again (via
+    /// `validateAndGetRecordBatch`) when the broker answers `MESSAGE_TOO_LARGE`.
+    ///
+    /// The returned [`MemoryRecords`] wraps a refcounted [`bytes::Bytes`], so this
+    /// clones a handle, not the record bytes (CLAUDE.md §12).
     pub fn records(&mut self) -> MemoryRecords {
-        self.records_builder
-            .take_built_records()
-            .expect("records() called but no records built")
+        self.records_builder.build()
     }
 
     /// The estimated size in bytes of the batch.
@@ -746,6 +752,11 @@ impl ProducerBatch {
     }
 
     /// Returns a reference to the underlying buffer.
+    // No Rust caller today (outside tests). Kept because it translates a Java
+    // method and DoD #2 requires the translated class to carry all of them; the
+    // `dead_code` lint only became visible once `KafkaProducer::with_options`
+    // stopped leaking this type through a `pub` signature.
+    #[allow(dead_code)]
     pub fn buffer(&self) -> &Vec<u8> {
         self.records_builder.buffer()
     }
@@ -764,6 +775,7 @@ impl ProducerBatch {
     }
 
     /// Whether the batch is still writable (not closed).
+    #[allow(dead_code)]
     pub fn is_writable(&self) -> bool {
         !self.records_builder.is_closed()
     }
@@ -829,11 +841,13 @@ impl ProducerBatch {
     }
 
     /// The current leader epoch (visible for testing).
+    #[allow(dead_code)]
     pub fn current_leader_epoch(&self) -> Option<i32> {
         self.current_leader_epoch
     }
 
     /// The attempt number when the leader was last changed (visible for testing).
+    #[allow(dead_code)]
     pub fn attempts_when_leader_last_changed(&self) -> i32 {
         self.attempts_when_leader_last_changed
     }
@@ -862,8 +876,8 @@ impl std::fmt::Debug for ProducerBatch {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::common::Errors;
     use crate::common::compress::Compression;
-    use crate::common::protocol::Errors;
 
     const NOW: i64 = 1488748346917;
 
@@ -872,7 +886,7 @@ mod tests {
     }
 
     fn make_builder() -> MemoryRecordsBuilder {
-        MemoryRecords::builder(512, Compression::none(), TimestampType::CreateTime, 128)
+        MemoryRecords::builder_with_initial_capacity(512, Compression::none(), TimestampType::CreateTime, 128)
     }
 
     /// Translated from `ProducerBatchTest.testBatchAbort`.
@@ -1055,7 +1069,7 @@ mod tests {
     /// in record-level iteration.
     #[test]
     fn test_split_preserves_headers() {
-        let builder = MemoryRecords::builder_with_buffer(
+        let builder = MemoryRecords::builder_with_buffer_magic(
             vec![0u8; 1024],
             RecordBatch::CURRENT_MAGIC_VALUE,
             Compression::none(),
@@ -1245,7 +1259,7 @@ mod tests {
         assert!(!batch.is_split_batch());
 
         let builder2 = make_builder();
-        let batch2 = ProducerBatch::new_with_split(make_tp(), builder2, NOW, true);
+        let batch2 = ProducerBatch::with_split(make_tp(), builder2, NOW, true);
         assert!(batch2.is_split_batch());
     }
 
@@ -1265,7 +1279,7 @@ mod tests {
     fn test_split_preserves_magic_and_compression_type() {
         // We only support magic V2 and NONE compression for record-level iteration.
         let magic = RecordBatch::CURRENT_MAGIC_VALUE;
-        let builder = MemoryRecords::builder_with_buffer(
+        let builder = MemoryRecords::builder_with_buffer_magic(
             vec![0u8; 1024],
             magic,
             Compression::none(),
@@ -1299,6 +1313,128 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// A batch is splittable **after** the send path has already read its records.
+    ///
+    /// No Java counterpart, because Java cannot get this wrong:
+    /// `ProducerBatch.records()` is a bare `recordsBuilder.build()`
+    /// (`ProducerBatch.java:483-485`) and Java's `build()` memoises, so it is
+    /// re-callable by construction. Rust's used to hand its only copy away, and
+    /// `Sender.completeBatch`'s `MESSAGE_TOO_LARGE` arm (`Sender.java:674-688`) is
+    /// exactly a `split()` after a `records()` — the batch cannot receive that error
+    /// before being sent. PLAN §9.18; this is the unit-level shape of the end-to-end
+    /// reproducer `sender.rs::test_too_large_batches_are_safely_removed`.
+    #[test]
+    fn test_records_readable_after_send_then_split() {
+        let magic = RecordBatch::CURRENT_MAGIC_VALUE;
+        let builder = MemoryRecords::builder_with_buffer_magic(
+            vec![0u8; 1024],
+            magic,
+            Compression::none(),
+            TimestampType::CreateTime,
+            0,
+        );
+        let mut batch = ProducerBatch::new(make_tp(), builder, NOW);
+
+        let mut appended = 0;
+        loop {
+            if batch.try_append(NOW, Some(b"hi"), Some(b"there"), &[], None, NOW).is_err() {
+                break;
+            }
+            appended += 1;
+        }
+        assert!(appended > 1, "the batch must hold more than one record to be splittable");
+
+        // What `Sender::send_producer_data` does to build the produce request.
+        let sent = batch.records();
+        assert!(sent.size_in_bytes() > 0);
+
+        // What `RecordAccumulator::split_and_reenqueue` does when the broker answers
+        // MESSAGE_TOO_LARGE. Before the §9.18 fix this panicked with
+        // "build() called but no records built".
+        let reread = batch.records();
+        assert_eq!(sent.buffer(), reread.buffer(), "the second read must see the same bytes");
+
+        let sub_batches = batch.split(512);
+        assert!(sub_batches.len() >= 2, "batch should split into multiple sub-batches");
+        let split_record_count: i32 = sub_batches.iter().map(|b| b.record_count).sum();
+        assert_eq!(split_record_count, appended, "no record may be lost by the split");
+    }
+
+    /// `definition-of-done.md` §10 / CLAUDE.md §11-12 for
+    /// [`ProducerBatch::records`], which `Sender::send_producer_data` calls once per
+    /// drained batch.
+    ///
+    /// Two properties, both measured with the same
+    /// [`crate::AllocTrackingGuard`] the consumer's §27 budget
+    /// tests use:
+    ///
+    ///   1. **Nothing scales with the record count.** A 1-record batch and a
+    ///      64-record batch must cost the same, so the per-record component is
+    ///      exactly zero — this is the property DoD §10 is about.
+    ///   2. **Re-reading is free and copies nothing.** Every call after the first
+    ///      allocates zero and hands back the *same* bytes, at the same address. That
+    ///      is what keeps the `MESSAGE_TOO_LARGE` split off the copy path
+    ///      (CLAUDE.md §12) now that it re-reads the batch instead of panicking.
+    ///
+    /// Absolute counts on this build: the first call costs 1 allocation — `bytes`
+    /// promotes a `Bytes::from(Vec)` to a shared representation on its first clone, a
+    /// single 3-word `Shared` — and every later call costs 0. Before the §9.18 fix the
+    /// first call cost 0 (it moved the value out) and the second cost 1, but that one
+    /// was a **full re-copy of the batch** through `take_batch_data`, so the fix trades
+    /// a per-batch 24-byte allocation for removing a whole-batch `memcpy` from the
+    /// split path. Neither is per record.
+    #[test]
+    fn test_records_allocations_do_not_scale_with_the_record_count() {
+        fn records_allocations(record_count: usize) -> usize {
+            let builder = MemoryRecords::builder_with_buffer_magic(
+                vec![0u8; 4096],
+                RecordBatch::CURRENT_MAGIC_VALUE,
+                Compression::none(),
+                TimestampType::CreateTime,
+                0,
+            );
+            let mut batch = ProducerBatch::new(make_tp(), builder, NOW);
+            for _ in 0..record_count {
+                assert!(
+                    batch.try_append(NOW, Some(b"hi"), Some(b"there"), &[], None, NOW).is_ok(),
+                    "the buffer is sized to hold every record"
+                );
+            }
+            // `RecordAccumulator::drain` closes the batch before the Sender reads it.
+            batch.close();
+
+            let _guard = crate::AllocTrackingGuard::new();
+            crate::AllocTrackingGuard::reset();
+            let first = batch.records();
+            let first_count = crate::AllocTrackingGuard::count();
+
+            crate::AllocTrackingGuard::reset();
+            let second = batch.records();
+            let second_count = crate::AllocTrackingGuard::count();
+            let third = batch.records();
+            let third_count = crate::AllocTrackingGuard::count();
+
+            assert_eq!(second_count, 0, "re-reading a batch must not allocate");
+            assert_eq!(third_count, 0, "re-reading a batch must not allocate");
+            assert_eq!(
+                first.buffer().as_ptr(),
+                second.buffer().as_ptr(),
+                "re-reading a batch must not copy it"
+            );
+            assert_eq!(first.buffer().as_ptr(), third.buffer().as_ptr());
+            assert!(first_count > 0, "the tracker must actually be measuring");
+            first_count
+        }
+
+        let one_record = records_allocations(1);
+        let sixty_four_records = records_allocations(64);
+        assert_eq!(
+            one_record, sixty_four_records,
+            "reading a 64-record batch must allocate exactly as much as a 1-record batch; \
+             got {one_record} vs {sixty_four_records}"
+        );
     }
 
     /// Translated from `ProducerBatchTest.testCompleteExceptionallyWithNullRecordErrors`.

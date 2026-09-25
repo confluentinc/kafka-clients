@@ -104,7 +104,7 @@ async fn seed(bootstrap: &str, topic: &str, count: usize) -> Result<(), String> 
 async fn subscribed_consumer(bootstrap: &str, group: &str, topic: &str, count: usize) -> Result<BytesConsumer, String> {
     let mut consumer = build_consumer(bootstrap, group, "read_committed")?;
     consumer
-        .subscribe(vec![topic.to_string()])
+        .subscribe_with_topics(vec![topic.to_string()])
         .await
         .map_err(|e| format!("subscribe {topic}: {e}"))?;
     let consumed = consume_exactly(&mut consumer, count, true).await?;
@@ -263,7 +263,7 @@ async fn stale_metadata_case(bootstrap: &str, suffix: &str) -> Result<bool, Stri
     // captured metadata. Poll both until A observes its epoch advancing.
     let mut member_b = build_consumer(bootstrap, &group, "read_committed")?;
     member_b
-        .subscribe(vec![input.clone()])
+        .subscribe_with_topics(vec![input.clone()])
         .await
         .map_err(|e| format!("stale: B subscribe: {e}"))?;
     let rebalance_started = Instant::now();

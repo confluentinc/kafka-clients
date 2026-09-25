@@ -29,10 +29,10 @@
 use std::collections::HashMap;
 use std::io;
 
+use crate::EndTxnResponseData;
 use crate::common::protocol::{ApiKeys, Errors, Readable};
-use crate::end_txn_response_data::EndTxnResponseData;
 
-use super::abstract_response::update_error_counts;
+use super::AbstractResponse;
 
 /// An `EndTxn` response.
 ///
@@ -88,7 +88,7 @@ impl EndTxnResponse {
     /// Returns error counts by [`Errors`].
     pub fn error_counts(&self) -> HashMap<Errors, i32> {
         let mut counts = HashMap::new();
-        update_error_counts(&mut counts, self.error());
+        AbstractResponse::update_error_counts(&mut counts, self.error());
         counts
     }
 

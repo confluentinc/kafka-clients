@@ -23,33 +23,15 @@
 
 use std::io;
 
+use crate::OffsetForLeaderEpochRequestData;
+use crate::OffsetForLeaderEpochResponseData;
 use crate::common::protocol::{ApiKeys, Errors, Readable};
-use crate::offset_for_leader_epoch_request_data::{OffsetForLeaderEpochRequestData, OffsetForLeaderTopic};
-use crate::offset_for_leader_epoch_response_data::{
-    EpochEndOffset, OffsetForLeaderEpochResponseData, OffsetForLeaderTopicResult,
-};
+use crate::offset_for_leader_epoch_request_data::OffsetForLeaderTopic;
+use crate::offset_for_leader_epoch_response_data::{EpochEndOffset, OffsetForLeaderTopicResult};
 
 use super::ConcreteResponse;
 use super::OffsetsForLeaderEpochResponse;
 use super::abstract_request::{ConcreteRequest, RequestBuilder};
-use super::offsets_for_leader_epoch_response::{UNDEFINED_EPOCH, UNDEFINED_EPOCH_OFFSET};
-
-/// Sentinel replica id used by ordinary consumers.
-///
-/// Mirrors `OffsetsForLeaderEpochRequest.CONSUMER_REPLICA_ID` in Java.
-pub const CONSUMER_REPLICA_ID: i32 = -1;
-
-/// Minimum API version that allows topic-level permission instead of
-/// cluster-level permission. Consumer-side callers always target this
-/// version or higher.
-pub const MIN_CONSUMER_VERSION: i16 = 3;
-
-/// Returns `true` if `latest_usable_version` allows topic-level permission.
-///
-/// Mirrors `OffsetsForLeaderEpochRequest.supportsTopicPermission(short)`.
-pub fn supports_topic_permission(latest_usable_version: i16) -> bool {
-    latest_usable_version >= MIN_CONSUMER_VERSION
-}
 
 /// An `OffsetsForLeaderEpoch` request.
 ///
@@ -61,6 +43,23 @@ pub struct OffsetsForLeaderEpochRequest {
 }
 
 impl OffsetsForLeaderEpochRequest {
+    /// Returns `true` if `latest_usable_version` allows topic-level permission.
+    ///
+    /// Mirrors `OffsetsForLeaderEpochRequest.supportsTopicPermission(short)`.
+    pub fn supports_topic_permission(latest_usable_version: i16) -> bool {
+        latest_usable_version >= OffsetsForLeaderEpochRequest::MIN_CONSUMER_VERSION
+    }
+
+    /// Sentinel replica id used by ordinary consumers.
+    ///
+    /// Mirrors `OffsetsForLeaderEpochRequest.CONSUMER_REPLICA_ID` in Java.
+    pub const CONSUMER_REPLICA_ID: i32 = -1;
+
+    /// Minimum API version that allows topic-level permission instead of
+    /// cluster-level permission. Consumer-side callers always target this
+    /// version or higher.
+    pub const MIN_CONSUMER_VERSION: i16 = 3;
+
     /// Creates a new `OffsetsForLeaderEpochRequest` from data and version.
     pub fn new(data: OffsetForLeaderEpochRequestData, version: i16) -> Self {
         Self { data, version }
@@ -106,8 +105,8 @@ impl OffsetsForLeaderEpochRequest {
                 let mut end_offset = EpochEndOffset::new();
                 end_offset.set_partition(partition.partition);
                 end_offset.set_error_code(error_code);
-                end_offset.set_leader_epoch(UNDEFINED_EPOCH);
-                end_offset.set_end_offset(UNDEFINED_EPOCH_OFFSET);
+                end_offset.set_leader_epoch(OffsetsForLeaderEpochResponse::UNDEFINED_EPOCH);
+                end_offset.set_end_offset(OffsetsForLeaderEpochResponse::UNDEFINED_EPOCH_OFFSET);
                 partitions.push(end_offset);
             }
             topic_result.set_partitions(partitions);
@@ -152,11 +151,11 @@ impl OffsetsForLeaderEpochRequestBuilder {
     /// Mirrors `Builder.forConsumer(OffsetForLeaderTopicCollection)`.
     pub fn for_consumer(epochs_by_partition: Vec<OffsetForLeaderTopic>) -> Self {
         let mut data = OffsetForLeaderEpochRequestData::new();
-        data.set_replica_id(CONSUMER_REPLICA_ID);
+        data.set_replica_id(OffsetsForLeaderEpochRequest::CONSUMER_REPLICA_ID);
         data.set_topics(epochs_by_partition);
         Self {
             data,
-            oldest_allowed_version: MIN_CONSUMER_VERSION,
+            oldest_allowed_version: OffsetsForLeaderEpochRequest::MIN_CONSUMER_VERSION,
             latest_allowed_version: ApiKeys::OFFSET_FOR_LEADER_EPOCH.latest_version(),
         }
     }
@@ -222,12 +221,15 @@ mod tests {
     #[test]
     fn for_consumer_targets_v3_plus() {
         let builder = OffsetsForLeaderEpochRequestBuilder::for_consumer(Vec::new());
-        assert_eq!(builder.oldest_allowed_version(), MIN_CONSUMER_VERSION);
+        assert_eq!(
+            builder.oldest_allowed_version(),
+            OffsetsForLeaderEpochRequest::MIN_CONSUMER_VERSION
+        );
         assert_eq!(
             builder.latest_allowed_version(),
             ApiKeys::OFFSET_FOR_LEADER_EPOCH.latest_version()
         );
-        assert_eq!(builder.data().replica_id, CONSUMER_REPLICA_ID);
+        assert_eq!(builder.data().replica_id, OffsetsForLeaderEpochRequest::CONSUMER_REPLICA_ID);
     }
 
     /// Verifies that `for_follower` pins the version to 4 and uses the
@@ -243,9 +245,9 @@ mod tests {
     /// Verifies `supports_topic_permission` returns true iff version >= 3.
     #[test]
     fn supports_topic_permission_threshold() {
-        assert!(!supports_topic_permission(0));
-        assert!(!supports_topic_permission(2));
-        assert!(supports_topic_permission(3));
-        assert!(supports_topic_permission(4));
+        assert!(!OffsetsForLeaderEpochRequest::supports_topic_permission(0));
+        assert!(!OffsetsForLeaderEpochRequest::supports_topic_permission(2));
+        assert!(OffsetsForLeaderEpochRequest::supports_topic_permission(3));
+        assert!(OffsetsForLeaderEpochRequest::supports_topic_permission(4));
     }
 }

@@ -22,7 +22,7 @@
 //! `org.apache.kafka.common.InvalidRecordException` (never a `record`-package
 //! type in Java; kept here for its long-standing Rust home).
 
-pub mod timestamp_type;
+mod timestamp_type;
 
 pub(crate) mod internal;
 pub use timestamp_type::TimestampType;
@@ -40,5 +40,5 @@ pub use timestamp_type::TimestampType;
 // (the `internal` package name is a convention, not an access modifier), so a
 // public re-export here is Java-faithful. No other moved type is re-exported
 // publicly; everything else stays `pub(crate)` behind `internal`.
-pub use internal::memory_records::MemoryRecords;
-pub use internal::simple_record::SimpleRecord;
+pub use internal::MemoryRecords;
+pub use internal::SimpleRecord;

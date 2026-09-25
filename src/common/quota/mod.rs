@@ -16,10 +16,10 @@
 //!
 //! Corresponds to the `org.apache.kafka.common.quota` package.
 
-pub mod client_quota_alteration;
-pub mod client_quota_entity;
-pub mod client_quota_filter;
-pub mod client_quota_filter_component;
+mod client_quota_alteration;
+mod client_quota_entity;
+mod client_quota_filter;
+mod client_quota_filter_component;
 
 pub use client_quota_alteration::{ClientQuotaAlteration, Op};
 pub use client_quota_entity::ClientQuotaEntity;

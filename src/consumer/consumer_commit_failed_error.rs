@@ -17,12 +17,7 @@
 use std::fmt;
 
 use crate::common::Error;
-use crate::common::kafka_error::{ErrorCode, ErrorHierarchy, ErrorMessage, ErrorSource};
-
-/// Default message used by Java's `CommitFailedException` no-arg constructor.
-///
-/// Kept as a constant so tests can assert exact equality.
-pub const CONSUMER_COMMIT_FAILED_DEFAULT_MESSAGE: &str = "Commit cannot be completed since the group has already rebalanced and assigned the partitions to another member. This means that the time between subsequent calls to poll() was longer than the configured max.poll.interval.ms, which typically implies that the poll loop is spending too much time message processing. You can address this either by increasing max.poll.interval.ms or by reducing the maximum size of batches returned in poll() with max.poll.records.";
+use crate::common::error::{ErrorCode, ErrorHierarchy, ErrorMessage, ErrorSource};
 
 /// An offset commit could not be completed because the group rebalanced.
 ///
@@ -41,6 +36,11 @@ pub struct ConsumerCommitFailedError {
 }
 
 impl ConsumerCommitFailedError {
+    /// Default message used by Java's `CommitFailedException` no-arg constructor.
+    ///
+    /// Kept as a constant so tests can assert exact equality.
+    pub const CONSUMER_COMMIT_FAILED_DEFAULT_MESSAGE: &str = "Commit cannot be completed since the group has already rebalanced and assigned the partitions to another member. This means that the time between subsequent calls to poll() was longer than the configured max.poll.interval.ms, which typically implies that the poll loop is spending too much time message processing. You can address this either by increasing max.poll.interval.ms or by reducing the maximum size of batches returned in poll() with max.poll.records.";
+
     /// Create the error with the given message.
     pub fn new(message: impl Into<String>) -> Self {
         Self { message: message.into() }
@@ -48,7 +48,7 @@ impl ConsumerCommitFailedError {
 
     /// Create the error with Java's no-arg constructor message.
     pub fn with_default_message() -> Self {
-        Self::new(CONSUMER_COMMIT_FAILED_DEFAULT_MESSAGE)
+        Self::new(ConsumerCommitFailedError::CONSUMER_COMMIT_FAILED_DEFAULT_MESSAGE)
     }
 
     /// The error message.
@@ -111,10 +111,13 @@ mod tests {
     #[test]
     fn test_commit_failed_default_message() {
         let e = ConsumerCommitFailedError::with_default_message();
-        assert_eq!(e.message(), CONSUMER_COMMIT_FAILED_DEFAULT_MESSAGE);
+        assert_eq!(e.message(), ConsumerCommitFailedError::CONSUMER_COMMIT_FAILED_DEFAULT_MESSAGE);
         assert_eq!(
             e.to_string(),
-            format!("ConsumerCommitFailedError: {CONSUMER_COMMIT_FAILED_DEFAULT_MESSAGE}")
+            format!(
+                "ConsumerCommitFailedError: {}",
+                ConsumerCommitFailedError::CONSUMER_COMMIT_FAILED_DEFAULT_MESSAGE
+            )
         );
     }
 

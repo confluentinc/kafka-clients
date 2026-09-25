@@ -22,7 +22,7 @@ use bytes::Bytes;
 
 use crate::common::simple_records_message_data::SimpleRecordsMessageData;
 use confluent_kafka::common::compress::Compression;
-use confluent_kafka::common::protocol::message_util::to_byte_buffer_accessor;
+use confluent_kafka::common::protocol::MessageUtil;
 use confluent_kafka::common::protocol::{ByteBufferAccessor, Message, ObjectSerializationCache};
 use confluent_kafka::common::record::{MemoryRecords, SimpleRecord};
 
@@ -34,7 +34,7 @@ fn hash_of<T: Hash>(val: &T) -> u64 {
 
 /// Java: `new SimpleRecordsMessageData(readable, version)`.
 fn deserialize(buf: &[u8], version: i16) -> SimpleRecordsMessageData {
-    let mut accessor = ByteBufferAccessor::from_bytes(buf.to_vec());
+    let mut accessor = ByteBufferAccessor::new(buf.to_vec());
     let mut message = SimpleRecordsMessageData::new();
     Message::read(&mut message, &mut accessor, version).unwrap();
     message
@@ -44,7 +44,7 @@ fn deserialize(buf: &[u8], version: i16) -> SimpleRecordsMessageData {
 /// the sibling test files do — a cheap extra check Java gets from its own
 /// `MessageUtil` path.
 fn test_round_trip(message: &mut SimpleRecordsMessageData, version: i16) {
-    let accessor = to_byte_buffer_accessor(message, version).unwrap();
+    let accessor = MessageUtil::to_byte_buffer_accessor(message, version).unwrap();
     let buf = accessor.buffer();
 
     let mut cache = ObjectSerializationCache::new();
@@ -69,7 +69,7 @@ fn test_all_round_trips(message: &mut SimpleRecordsMessageData) {
 fn records_of(values: &[&str]) -> Bytes {
     let records: Vec<SimpleRecord> = values
         .iter()
-        .map(|value| SimpleRecord::new_with_value(Some(value.as_bytes().to_vec())))
+        .map(|value| SimpleRecord::with_value(Some(value.as_bytes().to_vec())))
         .collect();
     MemoryRecords::with_records(Compression::none(), &records)
         .buffer_bytes()
@@ -130,8 +130,14 @@ fn test_null_and_empty_records_are_distinct_on_the_wire() {
     for version in
         SimpleRecordsMessageData::LOWEST_SUPPORTED_VERSION..=SimpleRecordsMessageData::HIGHEST_SUPPORTED_VERSION
     {
-        let null_bytes = to_byte_buffer_accessor(&mut null_records, version).unwrap().buffer().to_vec();
-        let empty_bytes = to_byte_buffer_accessor(&mut empty_records, version).unwrap().buffer().to_vec();
+        let null_bytes = MessageUtil::to_byte_buffer_accessor(&mut null_records, version)
+            .unwrap()
+            .buffer()
+            .to_vec();
+        let empty_bytes = MessageUtil::to_byte_buffer_accessor(&mut empty_records, version)
+            .unwrap()
+            .buffer()
+            .to_vec();
         assert_ne!(
             null_bytes, empty_bytes,
             "null and empty record sets must encode differently at version {version}"
@@ -140,4 +146,63 @@ fn test_null_and_empty_records_are_distinct_on_the_wire() {
         assert_eq!(deserialize(&null_bytes, version).record_set, None);
         assert_eq!(deserialize(&empty_bytes, version).record_set, Some(Bytes::new()));
     }
+}
+
+/// Not in the Java test: guards the **non-nullable** `records` write path. The
+/// sole non-nullable `records` field in the corpus is
+/// `FetchSnapshotResponse.UnalignedRecords`. Java's `write` never mutates the
+/// message, so the field must survive a `write` intact, two writes must emit the
+/// same bytes, and `size()` computed after a `write` must still match. Before the
+/// fix the non-nullable path used `std::mem::take`, which emptied the field as a
+/// side effect of serialising — a bug a single-write round-trip cannot catch (the
+/// one write still produced correct bytes). This is the non-nullable analog of
+/// [`test_null_and_empty_records_are_distinct_on_the_wire`].
+#[test]
+fn test_non_nullable_records_write_does_not_mutate_the_message() {
+    use confluent_kafka::fetch_snapshot_response_data::{FetchSnapshotResponseData, PartitionSnapshot, TopicSnapshot};
+
+    let records = records_of(&["foo", "bar"]);
+
+    let mut partition = PartitionSnapshot::new();
+    partition.index = 0;
+    partition.unaligned_records = records.clone();
+    let mut topic = TopicSnapshot::new();
+    topic.name = "foo".to_string();
+    topic.partitions = vec![partition];
+    let mut message = FetchSnapshotResponseData::new();
+    message.topics = vec![topic];
+
+    let version = 0;
+
+    // First write.
+    let bytes1 = MessageUtil::to_byte_buffer_accessor(&mut message, version)
+        .unwrap()
+        .buffer()
+        .to_vec();
+
+    // The write must NOT have emptied the (non-nullable) records field — the exact
+    // side effect `std::mem::take` produced.
+    assert_eq!(
+        message.topics[0].partitions[0].unaligned_records, records,
+        "writing a non-nullable records field must not mutate it (no std::mem::take)"
+    );
+
+    // `size()` computed after the write must still agree with the bytes written.
+    let mut cache = ObjectSerializationCache::new();
+    let computed_size = message.size(&mut cache, version).unwrap();
+    assert_eq!(
+        bytes1.len(),
+        computed_size as usize,
+        "size() after write disagrees with bytes written"
+    );
+
+    // A second write of the same message must produce identical bytes.
+    let bytes2 = MessageUtil::to_byte_buffer_accessor(&mut message, version)
+        .unwrap()
+        .buffer()
+        .to_vec();
+    assert_eq!(
+        bytes1, bytes2,
+        "a second write must emit the same bytes (write must be side-effect-free)"
+    );
 }

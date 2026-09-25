@@ -22,38 +22,45 @@
 use std::sync::{Arc, Mutex};
 
 use crate::common::TopicPartition;
-use crate::consumer::internals::consumer_metadata::ConsumerMetadata;
-use crate::consumer::internals::subscription_state::SubscriptionState;
+use crate::consumer::internals::ConsumerMetadata;
+use crate::consumer::internals::SubscriptionState;
 
-/// Performs two combined actions based on the state related to the
-/// given `topic_partition`:
-///
-/// 1. Invokes `Metadata::request_update(false)` to signal that the
-///    metadata is incorrect and needs to be updated.
-/// 2. Invokes `SubscriptionState::clear_preferred_read_replica` to clear
-///    out any read replica information that may be present.
-///
-/// This utility should be invoked if the client detects (or is told by a
-/// node in the broker) that an attempt was made to fetch from a node that
-/// isn't the leader or preferred replica.
-///
-/// Translates `FetchUtils.requestMetadataUpdate(Metadata, SubscriptionState,
-/// TopicPartition)`.
-pub(crate) fn request_metadata_update(
-    metadata: &ConsumerMetadata,
-    subscriptions: &Arc<Mutex<SubscriptionState>>,
-    topic_partition: &TopicPartition,
-) {
-    metadata.metadata_arc().request_update(false);
-    let mut guard = subscriptions.lock().expect("SubscriptionState mutex poisoned");
-    guard.clear_preferred_read_replica(topic_partition);
+/// Translates the Java static-utility class `org.apache.kafka.clients.consumer.internals.FetchUtils`,
+/// which has no instance state, so it becomes a unit struct hosting its
+/// statics as associated items.
+pub(crate) struct FetchUtils;
+
+impl FetchUtils {
+    /// Performs two combined actions based on the state related to the
+    /// given `topic_partition`:
+    ///
+    /// 1. Invokes `Metadata::request_update(false)` to signal that the
+    ///    metadata is incorrect and needs to be updated.
+    /// 2. Invokes `SubscriptionState::clear_preferred_read_replica` to clear
+    ///    out any read replica information that may be present.
+    ///
+    /// This utility should be invoked if the client detects (or is told by a
+    /// node in the broker) that an attempt was made to fetch from a node that
+    /// isn't the leader or preferred replica.
+    ///
+    /// Translates `FetchUtils.requestMetadataUpdate(Metadata, SubscriptionState,
+    /// TopicPartition)`.
+    pub(crate) fn request_metadata_update(
+        metadata: &ConsumerMetadata,
+        subscriptions: &Arc<Mutex<SubscriptionState>>,
+        topic_partition: &TopicPartition,
+    ) {
+        metadata.metadata_arc().request_update(false);
+        let mut guard = subscriptions.lock().expect("SubscriptionState mutex poisoned");
+        guard.clear_preferred_read_replica(topic_partition);
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::common::internals::ClusterResourceListeners;
-    use crate::consumer::internals::auto_offset_reset_strategy::AutoOffsetResetStrategy;
+    use crate::consumer::AutoOffsetResetStrategy;
 
     fn tp(topic: &str, partition: i32) -> TopicPartition {
         TopicPartition::new(topic.to_string(), partition)
@@ -86,7 +93,7 @@ mod tests {
             assert_eq!(Some(7), guard.preferred_read_replica(&tp0, 1_000));
         }
 
-        request_metadata_update(&cm, &subs, &tp0);
+        FetchUtils::request_metadata_update(&cm, &subs, &tp0);
 
         // Preferred replica was cleared (Java's `subscriptions.preferredReadReplica`
         // returns `Optional.empty()`).

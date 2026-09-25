@@ -44,7 +44,7 @@ impl TopicIdPartition {
     /// Creates an instance from a topic ID, partition number, and topic name.
     ///
     /// Translates Java's `TopicIdPartition(Uuid topicId, int partition, String topic)`.
-    pub fn from_parts(topic_id: Uuid, partition: i32, topic: impl Into<String>) -> Self {
+    pub fn with_partition_topic(topic_id: Uuid, partition: i32, topic: impl Into<String>) -> Self {
         Self { topic_id, topic_partition: TopicPartition::new(topic.into(), partition) }
     }
 
@@ -104,7 +104,7 @@ mod tests {
     #[test]
     fn test_construction_via_parts() {
         let id = Uuid::new(1, 2);
-        let tip = TopicIdPartition::from_parts(id, 7, "mytopic");
+        let tip = TopicIdPartition::with_partition_topic(id, 7, "mytopic");
         assert_eq!(id, tip.topic_id());
         assert_eq!("mytopic", tip.topic());
         assert_eq!(7, tip.partition());
@@ -140,17 +140,17 @@ mod tests {
         use std::collections::HashSet;
         let id = Uuid::new(1, 2);
         let mut set = HashSet::new();
-        set.insert(TopicIdPartition::from_parts(id, 0, "t"));
-        set.insert(TopicIdPartition::from_parts(id, 0, "t"));
+        set.insert(TopicIdPartition::with_partition_topic(id, 0, "t"));
+        set.insert(TopicIdPartition::with_partition_topic(id, 0, "t"));
         assert_eq!(set.len(), 1);
-        set.insert(TopicIdPartition::from_parts(id, 1, "t"));
+        set.insert(TopicIdPartition::with_partition_topic(id, 1, "t"));
         assert_eq!(set.len(), 2);
     }
 
     #[test]
     fn test_display() {
         let id = Uuid::new(0x1111_2222_3333_4444, 0x5555_6666_7777_8888);
-        let tip = TopicIdPartition::from_parts(id, 5, "mytopic");
+        let tip = TopicIdPartition::with_partition_topic(id, 5, "mytopic");
         // Display delegates to Uuid::Display + ":<topic>-<partition>".
         let s = format!("{tip}");
         assert!(s.ends_with(":mytopic-5"), "got {s}");

@@ -22,9 +22,10 @@
 
 use std::io;
 
+use crate::DeleteGroupsRequestData;
+use crate::DeleteGroupsResponseData;
 use crate::common::protocol::{ApiKeys, Errors, Readable};
-use crate::delete_groups_request_data::DeleteGroupsRequestData;
-use crate::delete_groups_response_data::{DeletableGroupResult, DeleteGroupsResponseData};
+use crate::delete_groups_response_data::DeletableGroupResult;
 
 use super::ConcreteResponse;
 use super::DeleteGroupsResponse;

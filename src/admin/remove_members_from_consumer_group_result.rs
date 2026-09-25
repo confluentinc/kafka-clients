@@ -20,7 +20,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::admin::MemberToRemove;
-use crate::common::protocol::Errors;
+use crate::common::Errors;
 use crate::common::{Error, KafkaFuture};
 use crate::leave_group_request_data::MemberIdentity;
 
@@ -166,7 +166,7 @@ fn describe_identity(identity: &MemberIdentity) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::kafka_future::KafkaFutureImpl;
+    use crate::common::internals::KafkaFutureImpl;
 
     fn instance_one() -> MemberToRemove {
         MemberToRemove::new("instance-1")

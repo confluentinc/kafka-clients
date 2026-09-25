@@ -87,17 +87,26 @@ echo "root $(find src -maxdepth 1 -name '*.rs' | wc -l) $(find src -maxdepth 1 -
 and public producer API, plus the translated `TransactionManagerTest` and
 `SenderTest` suites, which are the larger half.
 
-All three `#[ignore]`d tests are reproducers for open defects, not gaps in
+Both remaining `#[ignore]`d tests are reproducers for open defects, not gaps in
 translation, and each is tracked in `design/history/Milestone-11/PLAN.md` §9 with a
 fix direction:
 
-  - `test_too_large_batches_are_safely_removed` — §9.18, the
-    split-on-`MESSAGE_TOO_LARGE` panic on the write path.
-  - `test_transactional_unknown_producer_handling_when_retention_limit_reached` —
-    §9.25, an empty batch pool on the transactional log-truncation retry.
-  - `test_init_producer_id_request_versions` — §9.1, the code generator omitting
-    Java's non-default-at-unsupported-version guard. Systemic across all 197
-    generated message types, so it predates Milestone 11.
+  - `test_build_is_repeatable` — §9.30, `ProduceRequestBuilder::build_version`
+    draining its builder where Java's `Builder.build` does not. Latent rather than
+    live; the section carries the reachability derivation.
+  - `test_write_null_for_non_nullable_field_raises_error` — §9.32, generated
+    `write` emitting the null marker at versions outside `nullableVersions`, where
+    Java throws. Generator-wide, so it predates Milestone 11.
+
+Three tests that were on this list have since been un-ignored by their fixes:
+`test_too_large_batches_are_safely_removed` (§9.18, the split-on-`MESSAGE_TOO_LARGE`
+panic on the write path), `test_transactional_unknown_producer_handling_when_retention_limit_reached`
+(§9.25, an empty batch pool on the transactional log-truncation retry), and
+`test_init_producer_id_request_versions` (§9.1, the generator omitting Java's
+non-default-at-unsupported-version guard). All three now run.
+
+(`sensor.rs`'s `#[ignore]` is a timing micro-benchmark, not a defect reproducer —
+run it with `--ignored --nocapture`.)
 
 (Separately, the integration suite `#[ignore]`s 10 tests that need harness
 capabilities the pooled cluster does not expose, such as shutting down a broker;

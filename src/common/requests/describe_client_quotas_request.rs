@@ -18,19 +18,13 @@
 
 use std::io;
 
+use crate::DescribeClientQuotasRequestData;
+use crate::DescribeClientQuotasResponseData;
 use crate::common::protocol::{ApiKeys, Errors, Readable};
 use crate::common::quota::{ClientQuotaFilter, ClientQuotaFilterComponent, ClientQuotaMatch};
-use crate::describe_client_quotas_request_data::{ComponentData, DescribeClientQuotasRequestData};
-use crate::describe_client_quotas_response_data::DescribeClientQuotasResponseData;
+use crate::describe_client_quotas_request_data::ComponentData;
 
 use super::{ConcreteRequest, ConcreteResponse, DescribeClientQuotasResponse, RequestBuilder};
-
-/// Match type: exact name. These values must not change (wire contract).
-pub const MATCH_TYPE_EXACT: i8 = 0;
-/// Match type: default name.
-pub const MATCH_TYPE_DEFAULT: i8 = 1;
-/// Match type: any specified name.
-pub const MATCH_TYPE_SPECIFIED: i8 = 2;
 
 /// A DescribeClientQuotas request.
 ///
@@ -42,6 +36,15 @@ pub struct DescribeClientQuotasRequest {
 }
 
 impl DescribeClientQuotasRequest {
+    /// Match type: exact name. These values must not change (wire contract).
+    pub const MATCH_TYPE_EXACT: i8 = 0;
+
+    /// Match type: default name.
+    pub const MATCH_TYPE_DEFAULT: i8 = 1;
+
+    /// Match type: any specified name.
+    pub const MATCH_TYPE_SPECIFIED: i8 = 2;
+
     /// Creates a new `DescribeClientQuotasRequest` from data and version.
     pub fn new(data: DescribeClientQuotasRequestData, version: i16) -> Self {
         Self { data, version }
@@ -79,12 +82,16 @@ impl DescribeClientQuotasRequest {
         let mut components = Vec::with_capacity(self.data.components.len());
         for component_data in &self.data.components {
             let component = match component_data.match_type {
-                MATCH_TYPE_EXACT => ClientQuotaFilterComponent::of_entity(
+                DescribeClientQuotasRequest::MATCH_TYPE_EXACT => ClientQuotaFilterComponent::of_entity(
                     component_data.entity_type.clone(),
                     component_data.r#match.clone().unwrap_or_default(),
                 ),
-                MATCH_TYPE_DEFAULT => ClientQuotaFilterComponent::of_default_entity(component_data.entity_type.clone()),
-                MATCH_TYPE_SPECIFIED => ClientQuotaFilterComponent::of_entity_type(component_data.entity_type.clone()),
+                DescribeClientQuotasRequest::MATCH_TYPE_DEFAULT => {
+                    ClientQuotaFilterComponent::of_default_entity(component_data.entity_type.clone())
+                },
+                DescribeClientQuotasRequest::MATCH_TYPE_SPECIFIED => {
+                    ClientQuotaFilterComponent::of_entity_type(component_data.entity_type.clone())
+                },
                 other => {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidData,
@@ -144,22 +151,22 @@ pub struct DescribeClientQuotasRequestBuilder {
 impl DescribeClientQuotasRequestBuilder {
     /// Creates a builder from a [`ClientQuotaFilter`], mirroring
     /// `DescribeClientQuotasRequest.Builder(ClientQuotaFilter)`.
-    pub fn from_filter(filter: &ClientQuotaFilter) -> Self {
+    pub fn new(filter: &ClientQuotaFilter) -> Self {
         let mut component_data = Vec::with_capacity(filter.components().len());
         for component in filter.components() {
             let mut fd = ComponentData::new();
             fd.set_entity_type(component.entity_type().to_string());
             match component.match_spec() {
                 ClientQuotaMatch::Any => {
-                    fd.set_match_type(MATCH_TYPE_SPECIFIED);
+                    fd.set_match_type(DescribeClientQuotasRequest::MATCH_TYPE_SPECIFIED);
                     fd.set_match(None);
                 },
                 ClientQuotaMatch::Exact(name) => {
-                    fd.set_match_type(MATCH_TYPE_EXACT);
+                    fd.set_match_type(DescribeClientQuotasRequest::MATCH_TYPE_EXACT);
                     fd.set_match(Some(name.clone()));
                 },
                 ClientQuotaMatch::Default => {
-                    fd.set_match_type(MATCH_TYPE_DEFAULT);
+                    fd.set_match_type(DescribeClientQuotasRequest::MATCH_TYPE_DEFAULT);
                     fd.set_match(None);
                 },
             }
@@ -199,36 +206,36 @@ impl RequestBuilder for DescribeClientQuotasRequestBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::quota::client_quota_entity::USER;
+    use crate::common::quota::ClientQuotaEntity;
 
     #[test]
     fn builder_maps_all_match_types() {
         let filter = ClientQuotaFilter::contains(vec![
-            ClientQuotaFilterComponent::of_entity(USER, "u1"),
-            ClientQuotaFilterComponent::of_default_entity(USER),
-            ClientQuotaFilterComponent::of_entity_type(USER),
+            ClientQuotaFilterComponent::of_entity(ClientQuotaEntity::USER, "u1"),
+            ClientQuotaFilterComponent::of_default_entity(ClientQuotaEntity::USER),
+            ClientQuotaFilterComponent::of_entity_type(ClientQuotaEntity::USER),
         ]);
-        let mut builder = DescribeClientQuotasRequestBuilder::from_filter(&filter);
+        let mut builder = DescribeClientQuotasRequestBuilder::new(&filter);
         let ConcreteRequest::DescribeClientQuotas(r) = builder.build().unwrap() else {
             panic!("expected DescribeClientQuotas request");
         };
         let comps = &r.data().components;
-        assert_eq!(comps[0].match_type, MATCH_TYPE_EXACT);
+        assert_eq!(comps[0].match_type, DescribeClientQuotasRequest::MATCH_TYPE_EXACT);
         assert_eq!(comps[0].r#match.as_deref(), Some("u1"));
-        assert_eq!(comps[1].match_type, MATCH_TYPE_DEFAULT);
+        assert_eq!(comps[1].match_type, DescribeClientQuotasRequest::MATCH_TYPE_DEFAULT);
         assert_eq!(comps[1].r#match, None);
-        assert_eq!(comps[2].match_type, MATCH_TYPE_SPECIFIED);
+        assert_eq!(comps[2].match_type, DescribeClientQuotasRequest::MATCH_TYPE_SPECIFIED);
         assert_eq!(comps[2].r#match, None);
     }
 
     #[test]
     fn filter_round_trips_through_data() {
         let filter = ClientQuotaFilter::contains_only(vec![
-            ClientQuotaFilterComponent::of_entity(USER, "u1"),
-            ClientQuotaFilterComponent::of_default_entity(USER),
-            ClientQuotaFilterComponent::of_entity_type(USER),
+            ClientQuotaFilterComponent::of_entity(ClientQuotaEntity::USER, "u1"),
+            ClientQuotaFilterComponent::of_default_entity(ClientQuotaEntity::USER),
+            ClientQuotaFilterComponent::of_entity_type(ClientQuotaEntity::USER),
         ]);
-        let mut builder = DescribeClientQuotasRequestBuilder::from_filter(&filter);
+        let mut builder = DescribeClientQuotasRequestBuilder::new(&filter);
         let ConcreteRequest::DescribeClientQuotas(r) = builder.build().unwrap() else {
             panic!("expected DescribeClientQuotas request");
         };
@@ -237,12 +244,13 @@ mod tests {
 
     #[test]
     fn serialize_parse_round_trip() {
-        let filter = ClientQuotaFilter::contains(vec![ClientQuotaFilterComponent::of_entity(USER, "u1")]);
+        let filter =
+            ClientQuotaFilter::contains(vec![ClientQuotaFilterComponent::of_entity(ClientQuotaEntity::USER, "u1")]);
         let version = ApiKeys::DESCRIBE_CLIENT_QUOTAS.latest_version();
-        let mut builder = DescribeClientQuotasRequestBuilder::from_filter(&filter);
+        let mut builder = DescribeClientQuotasRequestBuilder::new(&filter);
         let mut request = builder.build().unwrap();
         let bytes = request.serialize().unwrap();
-        let mut readable = crate::common::ByteBufferAccessor::from_bytes(bytes.into_buffer());
+        let mut readable = crate::common::ByteBufferAccessor::new(bytes.into_buffer());
         let parsed = DescribeClientQuotasRequest::parse(&mut readable, version).unwrap();
         assert_eq!(parsed.filter().unwrap(), filter);
     }
@@ -251,7 +259,9 @@ mod tests {
     fn filter_rejects_unexpected_match_type() {
         let mut data = DescribeClientQuotasRequestData::new();
         let mut fd = ComponentData::new();
-        fd.set_entity_type(USER.to_string()).set_match_type(99).set_match(None);
+        fd.set_entity_type(ClientQuotaEntity::USER.to_string())
+            .set_match_type(99)
+            .set_match(None);
         data.set_components(vec![fd]);
         let request = DescribeClientQuotasRequest::new(data, 0);
         let err = request.filter().unwrap_err();
@@ -264,7 +274,7 @@ mod tests {
         // match "u1", strict=false. Asserts the match-type byte (0=EXACT) is on
         // the wire — a wrong match-type byte is wire-incompatible with Java.
         let filter = ClientQuotaFilter::contains(vec![ClientQuotaFilterComponent::of_entity("user", "u1")]);
-        let mut builder = DescribeClientQuotasRequestBuilder::from_filter(&filter);
+        let mut builder = DescribeClientQuotasRequestBuilder::new(&filter);
         let mut request = builder.build_version(1).unwrap();
         let bytes = request.serialize().unwrap().into_buffer();
         let expected: Vec<u8> = vec![
@@ -273,8 +283,8 @@ mod tests {
             b'u',
             b's',
             b'e',
-            b'r',                   // entity_type = "user" (compact string len 4+1)
-            MATCH_TYPE_EXACT as u8, // match_type = 0 (EXACT)
+            b'r',                                                // entity_type = "user" (compact string len 4+1)
+            DescribeClientQuotasRequest::MATCH_TYPE_EXACT as u8, // match_type = 0 (EXACT)
             0x03,
             b'u',
             b'1', // match = "u1" (compact-nullable string len 2+1)
@@ -290,11 +300,17 @@ mod tests {
         // DEFAULT (1) and SPECIFIED/any (2) both encode a null match; assert the
         // distinct match-type bytes and the null (0x00) compact-nullable string.
         for (component, expected_match_type) in [
-            (ClientQuotaFilterComponent::of_default_entity("user"), MATCH_TYPE_DEFAULT),
-            (ClientQuotaFilterComponent::of_entity_type("user"), MATCH_TYPE_SPECIFIED),
+            (
+                ClientQuotaFilterComponent::of_default_entity("user"),
+                DescribeClientQuotasRequest::MATCH_TYPE_DEFAULT,
+            ),
+            (
+                ClientQuotaFilterComponent::of_entity_type("user"),
+                DescribeClientQuotasRequest::MATCH_TYPE_SPECIFIED,
+            ),
         ] {
             let filter = ClientQuotaFilter::contains(vec![component]);
-            let mut builder = DescribeClientQuotasRequestBuilder::from_filter(&filter);
+            let mut builder = DescribeClientQuotasRequestBuilder::new(&filter);
             let mut request = builder.build_version(1).unwrap();
             let bytes = request.serialize().unwrap().into_buffer();
             let expected: Vec<u8> = vec![

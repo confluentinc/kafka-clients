@@ -45,7 +45,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::common::Error;
-use crate::common::metrics::internals::metrics_utils::TimeUnit;
+use crate::common::metrics::internals::TimeUnit;
 use crate::common::metrics::stats::Meter;
 use crate::common::metrics::{Metrics, Sensor};
 
@@ -53,9 +53,6 @@ use crate::common::metrics::{Metrics, Sensor};
 /// Java's `Time.milliseconds()`, used as the timestamp when recording the
 /// wait-time sensor (`SenderMetrics` holds the same shape).
 type TimeProvider = Arc<dyn Fn() -> i64 + Send + Sync>;
-
-/// Sensor name for tracking buffer pool wait time.
-pub const WAIT_TIME_SENSOR_NAME: &str = "bufferpool-wait-time";
 
 /// Mutable state protected by the lock.
 struct PoolInner {
@@ -123,6 +120,9 @@ pub struct BufferPool {
 }
 
 impl BufferPool {
+    /// Sensor name for tracking buffer pool wait time.
+    pub const WAIT_TIME_SENSOR_NAME: &str = "bufferpool-wait-time";
+
     /// Create a new buffer pool.
     ///
     /// # Arguments
@@ -144,22 +144,22 @@ impl BufferPool {
         // `bufferpool-wait-time` sensor: a Meter over the fraction of time an
         // appender waits and the total wait time in nanoseconds.
         let wait_time_sensor = metrics
-            .sensor(WAIT_TIME_SENSOR_NAME)
+            .sensor(BufferPool::WAIT_TIME_SENSOR_NAME)
             .expect("registering bufferpool-wait-time sensor");
-        let rate_metric_name = metrics.metric_name(
+        let rate_metric_name = metrics.metric_name_description_tags(
             "bufferpool-wait-ratio",
             metric_grp_name,
             "The fraction of time an appender waits for space allocation.",
             std::collections::BTreeMap::new(),
         );
-        let total_ns_metric_name = metrics.metric_name(
+        let total_ns_metric_name = metrics.metric_name_description_tags(
             "bufferpool-wait-time-ns-total",
             metric_grp_name,
             "The total time in nanoseconds an appender waits for space allocation.",
             std::collections::BTreeMap::new(),
         );
         wait_time_sensor
-            .add_compound(Box::new(Meter::with_unit(
+            .add(Box::new(Meter::with_unit(
                 TimeUnit::Nanoseconds,
                 rate_metric_name,
                 total_ns_metric_name,
@@ -171,20 +171,20 @@ impl BufferPool {
         let buffer_exhausted_sensor = metrics
             .sensor("buffer-exhausted-records")
             .expect("registering buffer-exhausted-records sensor");
-        let buffer_exhausted_rate_metric_name = metrics.metric_name(
+        let buffer_exhausted_rate_metric_name = metrics.metric_name_description_tags(
             "buffer-exhausted-rate",
             metric_grp_name,
             "The average per-second number of record sends that are dropped due to buffer exhaustion",
             std::collections::BTreeMap::new(),
         );
-        let buffer_exhausted_total_metric_name = metrics.metric_name(
+        let buffer_exhausted_total_metric_name = metrics.metric_name_description_tags(
             "buffer-exhausted-total",
             metric_grp_name,
             "The total number of record sends that are dropped due to buffer exhaustion",
             std::collections::BTreeMap::new(),
         );
         buffer_exhausted_sensor
-            .add_compound(Box::new(Meter::new(
+            .add(Box::new(Meter::new(
                 buffer_exhausted_rate_metric_name,
                 buffer_exhausted_total_metric_name,
             )))
@@ -304,7 +304,7 @@ impl BufferPool {
             // rethrows out of `send()`.
             // `KafkaProducer.doSend` therefore rethrows it out of `send()`
             // without invoking the user callback.
-            AllocResult::Closed => Err(Error::kafka("Producer closed while allocating memory")),
+            AllocResult::Closed => Err(Error::kafka_message("Producer closed while allocating memory")),
             AllocResult::NeedWait(more_memory) => {
                 // Phase 2: blocking wait loop
                 self.allocate_blocking(size, max_block_ms, &more_memory).await
@@ -436,14 +436,14 @@ impl BufferPool {
                 WakeResult::Closed => {
                     // Java `BufferPool.java:157`, the same bare `KafkaException` as
                     // the fast-path check above.
-                    return Err(Error::kafka("Producer closed while allocating memory"));
+                    return Err(Error::kafka_message("Producer closed while allocating memory"));
                 },
                 WakeResult::TimedOut => {
                     // Java records `buffer-exhausted-records` when the wait
                     // elapsed, before throwing `BufferExhaustedException`
                     // (`BufferPool.java:160`). Recorded outside the pool lock
                     // (value/timestamp are independent of pool state).
-                    self.buffer_exhausted_sensor.record_at(1.0, (self.time_provider)());
+                    self.buffer_exhausted_sensor.record_value_time_ms(1.0, (self.time_provider)());
                     return Err(Error::buffer_exhausted(format!(
                         "Failed to allocate {} bytes within the configured max blocking time \
                          {} ms. Total memory: {} bytes. Available memory: {} bytes. \
@@ -473,11 +473,12 @@ impl BufferPool {
         #[cfg(test)]
         if self.fail_record_wait_time.load(Ordering::Relaxed) {
             return Err(Error::with_message(
-                crate::common::protocol::Errors::UnknownServerError,
+                crate::common::Errors::UnknownServerError,
                 "Injected recordWaitTime failure",
             ));
         }
-        self.wait_time_sensor.record_at(time_ns as f64, (self.time_provider)());
+        self.wait_time_sensor
+            .record_value_time_ms(time_ns as f64, (self.time_provider)());
         Ok(())
     }
 
@@ -897,7 +898,8 @@ mod tests {
             "buffer-exhausted-rate",
             "buffer-exhausted-total",
         ] {
-            let mn = metrics.metric_name(name, "producer-metrics", "", std::collections::BTreeMap::new());
+            let mn =
+                metrics.metric_name_description_tags(name, "producer-metrics", "", std::collections::BTreeMap::new());
             assert!(metrics.metric(&mn).is_some(), "metric {name} should be registered");
         }
 
@@ -907,7 +909,7 @@ mod tests {
         let result = pool.allocate(2, 10).await;
         assert!(matches!(result.unwrap_err(), Error::ProducerBufferExhausted(_)));
 
-        let total_ns = metrics.metric_name(
+        let total_ns = metrics.metric_name_description_tags(
             "bufferpool-wait-time-ns-total",
             "producer-metrics",
             "",
@@ -917,7 +919,7 @@ mod tests {
             metrics.metric(&total_ns).unwrap().measurable_value(0) > 0.0,
             "wait-time-ns-total should have recorded"
         );
-        let exhausted_total = metrics.metric_name(
+        let exhausted_total = metrics.metric_name_description_tags(
             "buffer-exhausted-total",
             "producer-metrics",
             "",

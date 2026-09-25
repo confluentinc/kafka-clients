@@ -19,8 +19,8 @@
 
 use std::io;
 
-use crate::alter_partition_reassignments_request_data::AlterPartitionReassignmentsRequestData;
-use crate::alter_partition_reassignments_response_data::AlterPartitionReassignmentsResponseData;
+use crate::AlterPartitionReassignmentsRequestData;
+use crate::AlterPartitionReassignmentsResponseData;
 use crate::common::protocol::{ApiKeys, Errors, Readable};
 
 use super::{AlterPartitionReassignmentsResponse, ConcreteRequest, ConcreteResponse, RequestBuilder};
@@ -107,7 +107,7 @@ pub struct AlterPartitionReassignmentsRequestBuilder {
 
 impl AlterPartitionReassignmentsRequestBuilder {
     /// Creates a builder from existing data.
-    pub fn from_data(data: AlterPartitionReassignmentsRequestData) -> Self {
+    pub fn new(data: AlterPartitionReassignmentsRequestData) -> Self {
         Self {
             data,
             oldest_allowed_version: ApiKeys::ALTER_PARTITION_REASSIGNMENTS.oldest_version(),
@@ -184,7 +184,7 @@ mod tests {
         let mut request =
             ConcreteRequest::AlterPartitionReassignments(AlterPartitionReassignmentsRequest::new(data, 0));
         let bytes = request.serialize().unwrap();
-        let mut readable = crate::common::ByteBufferAccessor::from_bytes(bytes.into_buffer());
+        let mut readable = crate::common::ByteBufferAccessor::new(bytes.into_buffer());
         let parsed = AlterPartitionReassignmentsRequest::parse(&mut readable, 0).unwrap();
         assert_eq!(parsed.data().timeout_ms, 30000);
         assert!(parsed.data().allow_replication_factor_change);

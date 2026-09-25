@@ -18,7 +18,7 @@
 
 use std::collections::HashMap;
 
-use crate::common::protocol::Errors;
+use crate::common::Errors;
 use crate::common::{Error, KafkaFuture, TopicPartition};
 
 /// The per-partition commit errors carried by the underlying future.
@@ -87,7 +87,7 @@ impl AlterConsumerGroupOffsetsResult {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::kafka_future::KafkaFutureImpl;
+    use crate::common::internals::KafkaFutureImpl;
 
     fn t0p0() -> TopicPartition {
         TopicPartition::new("foo", 0)

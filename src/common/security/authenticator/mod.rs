@@ -14,6 +14,6 @@
 
 //! SASL authenticator implementations (org.apache.kafka.common.security.authenticator).
 
-pub mod sasl_client_authenticator;
+mod sasl_client_authenticator;
 
 pub use sasl_client_authenticator::SaslClientAuthenticator;
