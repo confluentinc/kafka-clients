@@ -21,12 +21,14 @@ mod byte_array_deserializer;
 mod byte_array_serializer;
 mod bytes_deserializer;
 mod deserializer;
+mod string_deserializer;
 mod string_serializer;
 
 pub use byte_array_deserializer::ByteArrayDeserializer;
 pub use byte_array_serializer::ByteArraySerializer;
 pub use bytes_deserializer::BytesDeserializer;
 pub use deserializer::Deserializer;
+pub use string_deserializer::StringDeserializer;
 pub use string_serializer::StringSerializer;
 
 use crate::common::Error;
