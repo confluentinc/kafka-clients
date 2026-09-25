@@ -951,7 +951,10 @@ class ProducerServiceImpl final : public ProducerService::Service {
     // enqueued on the dispatcher. It does not guarantee the dispatcher has run
     // that job, so a GetCallbackLog issued immediately after Close may still be
     // one entry behind; see CallbackLog's comment.
-    kafka_producer_Producer_close(producer, &err);
+    // -1 = the default untimed flushing close (Java close()); the timeout_ms
+    // parameter was folded into Producer_close per CLAUDE.md §2 (presence-only
+    // close() / close(Duration) overload → one entry point).
+    kafka_producer_Producer_close(producer, -1, &err);
     if (err != nullptr) {
       fill_proto_error(resp->mutable_error(), err);
     }
