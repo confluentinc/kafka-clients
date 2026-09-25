@@ -189,8 +189,10 @@ CONSUMER_CONFIG_KEYS = frozenset([
 ACCEPTED_CONFIG_PREFIXES = ("ssl.",)
 
 # Protocol error codes (src/common/protocol/errors.rs) used to classify the
-# errors a broker roll produces. Client-side errors (Wakeup, Timeout, ...) all
-# report UnknownServerError (-1), so they are classified by message instead.
+# errors a broker roll produces. Client-side errors (Wakeup, Timeout, ...) have
+# their own negative FFI ids (WAKEUP is -18), which none of these tables list,
+# so a client-side timeout is recognized by DISCONNECT_MESSAGE_MARKERS and a
+# wakeup by its WakeupError type or its message instead.
 COORDINATOR_ERROR_CODES = frozenset([
     14,  # CoordinatorLoadInProgress
     15,  # CoordinatorNotAvailable
