@@ -33,7 +33,7 @@ from typing import Any, Generic, TypeVar, overload
 import _confluentkafka as _lib  # type: ignore[import-not-found]
 
 from confluent_kafka import Duration
-from confluent_kafka._args import at_most_one, exactly_one
+from confluent_kafka._args import Form, java_forms
 from confluent_kafka._config import duration_to_ms
 from confluent_kafka.common.metric import KafkaMetric
 from confluent_kafka.common.partition_info import PartitionInfo
@@ -86,6 +86,8 @@ class Consumer(_ConsumerClientBase, Generic[K, V]):
     def subscribe(self, *, pattern: SubscriptionPattern,
                   callback: ConsumerRebalanceListener | None = None) -> None: ...
 
+    @java_forms(Form("topics"), Form("topics", "callback"),
+                Form("pattern", "callback"), Form("pattern"))
     def subscribe(self, *, topics: Iterable[str] | None = None,
                   pattern: SubscriptionPattern | None = None,
                   callback: ConsumerRebalanceListener | None = None) -> None:
@@ -93,10 +95,9 @@ class Consumer(_ConsumerClientBase, Generic[K, V]):
         with a rebalance ``callback`` (a ``ConsumerRebalanceListener`` invoked on
         the caller's thread during ``poll()`` etc., §31)."""
         self._check_closed()
-        chosen = exactly_one("subscribe", topics=topics, pattern=pattern)
         self._listener = callback
-        if chosen == "topics":
-            topic_list = list(topics)  # type: ignore[arg-type]
+        if topics is not None:
+            topic_list = list(topics)
             self._run_sync(*self._subscribe_topics_spec(topic_list, callback is not None))
         else:
             assert pattern is not None
@@ -202,12 +203,13 @@ class Consumer(_ConsumerClientBase, Generic[K, V]):
     def seek(self, *, partition: TopicPartition,
              offset_and_metadata: OffsetAndMetadata) -> None: ...
 
+    @java_forms(Form("partition", "offset"),
+                Form("partition", "offset_and_metadata"))
     def seek(self, *, partition: TopicPartition, offset: int | None = None,
              offset_and_metadata: OffsetAndMetadata | None = None) -> None:
         """Java ``seek(TopicPartition, long)`` / ``seek(TopicPartition,
         OffsetAndMetadata)``. Also the poison-pill recovery device (§5.4)."""
         self._check_closed()
-        exactly_one("seek", offset=offset, offset_and_metadata=offset_and_metadata)
         if self._in_callback:
             self._reentrant_seek(partition, offset, offset_and_metadata)
             return
@@ -297,12 +299,12 @@ class Consumer(_ConsumerClientBase, Generic[K, V]):
     @overload
     def close(self, *, option: CloseOptions) -> None: ...
 
+    @java_forms(Form(), Form("timeout"), Form("option"))
     def close(self, *, timeout: Duration | None = None,
               option: CloseOptions | None = None) -> None:
         """Java ``close()`` / ``close(Duration)`` / ``close(CloseOptions)``.
         Idempotent; leaves the group per the ``option`` (``DEFAULT`` matches
         Java: static members remain, dynamic members leave)."""
-        at_most_one("close", timeout=timeout, option=option)
         if self._closed or self._h is None:
             return
         self._closed = True

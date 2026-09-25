@@ -387,11 +387,12 @@ def test_consumer_records_by_null_topic_raises() -> None:
     # Java records(null) raises IllegalArgumentException "Topic must be
     # non-null.". In the collapsed Python API, records(topic=None) is
     # indistinguishable from "no argument given", so the combination check
-    # (_args.exactly_one) raises IllegalArgumentError naming both alternatives.
+    # (_args.java_forms) raises IllegalArgumentError naming both overloads.
     cr: ConsumerRecords[int, str] = ConsumerRecords.empty()
     with pytest.raises(IllegalArgumentError) as exc:
         cr.records(topic=None)  # type: ignore[arg-type]
-    assert "takes exactly one of partition, topic" in str(exc.value)
+    assert str(exc.value) == (
+        "records() takes one of (partition), (topic); got ()")
 
 
 def test_consumer_records_by_topic() -> None:

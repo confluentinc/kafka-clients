@@ -33,7 +33,7 @@ from typing import Any, Generic, TypeVar, overload
 import _confluentkafka as _lib  # type: ignore[import-not-found]
 
 from confluent_kafka import Duration
-from confluent_kafka._args import at_most_one, exactly_one
+from confluent_kafka._args import Form, java_forms
 from confluent_kafka._config import duration_to_ms
 from confluent_kafka.common.metric import KafkaMetric
 from confluent_kafka.common.partition_info import PartitionInfo
@@ -79,14 +79,15 @@ class AsyncConsumer(_ConsumerClientBase, Generic[K, V]):
     async def subscribe(self, *, pattern: SubscriptionPattern,
                         callback: ConsumerRebalanceListener | None = None) -> None: ...
 
+    @java_forms(Form("topics"), Form("topics", "callback"),
+                Form("pattern", "callback"), Form("pattern"))
     async def subscribe(self, *, topics: Iterable[str] | None = None,
                         pattern: SubscriptionPattern | None = None,
                         callback: ConsumerRebalanceListener | None = None) -> None:
         self._check_closed()
-        chosen = exactly_one("subscribe", topics=topics, pattern=pattern)
         self._listener = callback
-        if chosen == "topics":
-            topic_list = list(topics)  # type: ignore[arg-type]
+        if topics is not None:
+            topic_list = list(topics)
             await self._run_async(*self._subscribe_topics_spec(topic_list, callback is not None))
         else:
             assert pattern is not None
@@ -130,10 +131,11 @@ class AsyncConsumer(_ConsumerClientBase, Generic[K, V]):
     async def seek(self, *, partition: TopicPartition,
                    offset_and_metadata: OffsetAndMetadata) -> None: ...
 
+    @java_forms(Form("partition", "offset"),
+                Form("partition", "offset_and_metadata"))
     async def seek(self, *, partition: TopicPartition, offset: int | None = None,
                    offset_and_metadata: OffsetAndMetadata | None = None) -> None:
         self._check_closed()
-        exactly_one("seek", offset=offset, offset_and_metadata=offset_and_metadata)
         if self._in_callback:
             self._reentrant_seek(partition, offset, offset_and_metadata)
             return
@@ -262,9 +264,9 @@ class AsyncConsumer(_ConsumerClientBase, Generic[K, V]):
     @overload
     async def close(self, *, option: CloseOptions) -> None: ...
 
+    @java_forms(Form(), Form("timeout"), Form("option"))
     async def close(self, *, timeout: Duration | None = None,
                     option: CloseOptions | None = None) -> None:
-        at_most_one("close", timeout=timeout, option=option)
         if self._closed or self._h is None:
             return
         self._closed = True

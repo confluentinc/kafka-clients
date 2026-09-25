@@ -323,9 +323,11 @@ def test_poll_deserialization_error_leaves_position(monkeypatch=None):
 # ==========================================================================
 def test_subscribe_requires_exactly_one_of_topics_or_pattern():
     with MockConsumer(offset_reset_strategy="earliest") as c:
-        with pytest.raises(IllegalArgumentError,
-                           match="takes exactly one of topics, pattern"):
+        with pytest.raises(IllegalArgumentError) as exc:
             c.subscribe()
+        assert str(exc.value) == (
+            "subscribe() takes one of (topics), (topics, callback), "
+            "(pattern, callback), (pattern); got ()")
         with pytest.raises(IllegalArgumentError):
             c.subscribe(topics=["a"], pattern=SubscriptionPattern(pattern="b"))
 
@@ -333,9 +335,11 @@ def test_subscribe_requires_exactly_one_of_topics_or_pattern():
 def test_seek_requires_exactly_one_of_offset_or_metadata():
     with MockConsumer(offset_reset_strategy="earliest") as c:
         c.assign(partitions=[_tp("t", 0)])
-        with pytest.raises(IllegalArgumentError,
-                           match="takes exactly one of offset, offset_and_metadata"):
+        with pytest.raises(IllegalArgumentError) as exc:
             c.seek(partition=_tp("t", 0))
+        assert str(exc.value) == (
+            "seek() takes one of (partition, offset), "
+            "(partition, offset_and_metadata); got (partition)")
 
 
 def test_poll_rejects_positional():
