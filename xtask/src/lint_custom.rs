@@ -57,11 +57,7 @@ fn rules() -> Vec<Box<dyn Rule>> {
         Box::new(JavaName::new()),
         Box::new(NoDeprecatedTranslation::new()),
         Box::new(PublicAudience::new()),
-        // Disabled until every public struct is confirmed to need being public:
-        // making traits dyn-compatible is wasted on types that should become
-        // `pub(crate)`. The trait changes it requires are parked on branch
-        // `wip/dyn-compatible-traits`.
-        // Box::new(DynCompatible),
+        Box::new(DynCompatible),
     ]
 }
 
@@ -1800,7 +1796,8 @@ impl Rule for PublicAudience {
 /// paid only by callers who need dynamic dispatch.
 ///
 /// The check mirrors the reference's dyn-compatibility rules on the syntax: no
-/// `Sized`-implying or `Self`-parameterized supertrait, no associated consts or
+/// `Sized`-implying or `Self`-parameterized supertrait (nor a trait-level
+/// `where Self: Sized`), no associated consts or
 /// generic associated types, and every method not opted out with
 /// `where Self: Sized` has a receiver, no type parameters, no `impl Trait` in
 /// argument or return position, is not a native `async fn` (an
@@ -1808,11 +1805,8 @@ impl Rule for PublicAudience {
 /// the receiver except through a projection such as `Self::Item`.
 ///
 /// Scope: the same public items as [`NoPublicField`], traits only.
-// Not run yet: see the commented-out entry in `rules()`.
-#[allow(dead_code)]
 struct DynCompatible;
 
-#[allow(dead_code)]
 impl DynCompatible {
     /// The reasons `t` is not dyn-compatible; empty when it is.
     fn violations(t: &syn::ItemTrait) -> Vec<String> {
@@ -1822,6 +1816,9 @@ impl DynCompatible {
             .iter()
             .any(|a| a.path().segments.last().is_some_and(|s| s.ident == "async_trait"));
 
+        if requires_sized(&t.generics) {
+            reasons.push("trait-level `where Self: Sized`".to_string());
+        }
         for bound in &t.supertraits {
             let syn::TypeParamBound::Trait(tb) = bound else {
                 continue;
@@ -1886,7 +1883,6 @@ impl DynCompatible {
 
 /// Whether `generics` has a `where Self: Sized` bound, which exempts a method
 /// from the dyn-compatibility rules.
-#[allow(dead_code)]
 fn requires_sized(generics: &syn::Generics) -> bool {
     generics.where_clause.as_ref().is_some_and(|w| {
         w.predicates.iter().any(|p| {
@@ -1899,7 +1895,6 @@ fn requires_sized(generics: &syn::Generics) -> bool {
 
 /// Whether stringified `tokens` mention `Self` other than as a projection
 /// (`Self :: Item`).
-#[allow(dead_code)]
 fn mentions_bare_self(tokens: &str) -> bool {
     let toks: Vec<&str> = tokens.split_whitespace().collect();
     toks.iter()
@@ -2270,5 +2265,152 @@ mod tests {
             list,
             ["org.apache.kafka.A".to_string(), "org.apache.kafka.B".to_string()].into()
         );
+    }
+}
+
+#[cfg(test)]
+mod dyn_compatible_tests {
+    use super::*;
+
+    /// A crate whose every public trait exercises one outcome of
+    /// `check-dyn-compatible`.
+    const FIXTURE_LIB: &str = r#"
+        pub trait Plain {
+            fn get(&self) -> i32;
+            fn projection(&self) -> Option<Self::Item>;
+            type Item;
+        }
+        pub trait Generic {
+            fn map<T>(&self, t: T);
+        }
+        pub trait ImplReturn {
+            fn run(&self) -> impl std::future::Future<Output = ()>;
+        }
+        pub trait ImplArg {
+            fn run(&self, f: impl Fn());
+        }
+        pub trait SelfReturn {
+            fn dup(&self) -> Self;
+        }
+        pub trait SelfArg {
+            fn merge(&self, other: Self);
+        }
+        pub trait NoReceiver {
+            fn create() -> i32;
+        }
+        pub trait CloneSuper: Clone {}
+        pub trait PartialEqSuper: PartialEq {}
+        pub trait PartialEqOther: PartialEq<i32> {}
+        pub trait TraitSized where Self: Sized {}
+        pub trait Consts {
+            const N: i32;
+        }
+        pub trait Gat {
+            type Out<'a>;
+        }
+        pub trait MethodSized {
+            fn get(&self) -> i32;
+            fn dup(&self) -> Self where Self: Sized;
+            fn create() -> Self where Self: Sized;
+            fn map<T>(&self, t: T) where Self: Sized;
+        }
+        pub trait NativeAsync {
+            async fn run(&self);
+        }
+        #[async_trait::async_trait]
+        pub trait AsyncTrait {
+            async fn run(&self);
+        }
+        pub trait Fast {
+            fn run(&self) -> impl std::future::Future<Output = ()>;
+        }
+        pub trait DynFast {
+            fn run(&self) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + '_>>;
+        }
+        pub trait Slow {
+            fn run(&self) -> impl std::future::Future<Output = ()>;
+        }
+        pub trait DynSlow {
+            fn run<T>(&self, t: T);
+        }
+        pub(crate) trait Hidden {
+            fn map<T>(&self, t: T);
+        }
+        mod private {
+            pub trait Unreachable {
+                fn map<T>(&self, t: T);
+            }
+        }
+    "#;
+
+    /// The findings over the fixture crate, written to its own temp dir `name`
+    /// because the tests run in parallel.
+    fn run(name: &str) -> Vec<String> {
+        let dir = std::env::temp_dir().join(format!("xtask-dyn-compatible-{name}-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("lib.rs"), FIXTURE_LIB).unwrap();
+        let krate = Crate::load(&dir.join("lib.rs")).unwrap();
+        let mut findings = Vec::new();
+        let checked = DynCompatible.check(&krate, &mut findings);
+        fs::remove_dir_all(&dir).unwrap();
+        // Every `pub trait` above except `Hidden` and `Unreachable`.
+        assert_eq!(checked, 20);
+        findings
+    }
+
+    /// The finding for trait `name`, if any.
+    fn finding<'a>(findings: &'a [String], name: &str) -> Option<&'a str> {
+        let needle = format!("public trait `{name}` ");
+        findings.iter().find(|f| f.contains(&needle)).map(String::as_str)
+    }
+
+    #[test]
+    fn test_violations_are_reported_with_their_reason() {
+        let findings = run("violations");
+        for (name, reason) in [
+            ("Generic", "`map` has type or const parameters"),
+            ("ImplReturn", "`run` returns `impl Trait`"),
+            ("ImplArg", "`run` takes `impl Trait`"),
+            ("SelfReturn", "`dup` returns `Self`"),
+            ("SelfArg", "`merge` takes `Self`"),
+            ("NoReceiver", "`create` has no `self` receiver"),
+            ("CloneSuper", "supertrait `Clone`"),
+            ("PartialEqSuper", "supertrait `PartialEq`"),
+            ("TraitSized", "trait-level `where Self: Sized`"),
+            ("Consts", "associated const `N`"),
+            ("Gat", "generic associated type `Out`"),
+            ("NativeAsync", "`run` is a native `async fn`"),
+            ("Slow", "`run` returns `impl Trait`"),
+            ("DynSlow", "`run` has type or const parameters"),
+        ] {
+            let f = finding(&findings, name).unwrap_or_else(|| panic!("no finding for `{name}`: {findings:#?}"));
+            assert!(f.contains(reason), "`{name}` finding lacks `{reason}`: {f}");
+        }
+        assert_eq!(findings.len(), 14, "{findings:#?}");
+    }
+
+    #[test]
+    fn test_dyn_compatible_traits_pass() {
+        let findings = run("pass");
+        // `Self::Item` is a projection, not a bare `Self`; `PartialEq<i32>` does
+        // not default its parameter to `Self`; `where Self: Sized` exempts a
+        // method; `#[async_trait]` boxes the future.
+        for name in ["Plain", "PartialEqOther", "MethodSized", "AsyncTrait", "DynFast"] {
+            assert_eq!(finding(&findings, name), None);
+        }
+    }
+
+    #[test]
+    fn test_dyn_companion_exempts_only_when_itself_dyn_compatible() {
+        let findings = run("companion");
+        assert_eq!(finding(&findings, "Fast"), None);
+        assert!(finding(&findings, "Slow").unwrap().contains("has no dyn-compatible `DynSlow`"));
+    }
+
+    #[test]
+    fn test_non_public_traits_are_ignored() {
+        let findings = run("hidden");
+        assert_eq!(finding(&findings, "Hidden"), None);
+        assert_eq!(finding(&findings, "Unreachable"), None);
     }
 }
