@@ -688,6 +688,21 @@ class TestKafkaProducerConstruction:
                 if r.name == "confluent_kafka.common.config"] == [
             "These configurations '[on_delivery]' were supplied but are not used yet."]
 
+    def test_serializer_argument_wins_over_its_config_key(self):
+        # The argument wins and the config key is ignored: Java's
+        # ProducerConfig.appendSerializerToConfig replaces the key with the
+        # argument's class before ConfigDef parses it (ProducerConfig.java:666).
+        from confluent_kafka.common.serialization import string_serializer
+
+        class NotAClass:
+            pass
+
+        serializer = string_serializer()
+        p = KafkaProducer(configs={**BOOTSTRAP, "key.serializer": NotAClass(),
+                                   "value.serializer": 5},
+                          key_serializer=serializer, value_serializer=serializer)
+        p.close()
+
     def test_config_values_coerced_and_checked(self):
         # ConfigDef.parseType: "true" equals True, a bad value raises
         # ConfigException's message.

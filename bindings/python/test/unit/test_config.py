@@ -170,6 +170,22 @@ def test_prepare_coerces_known_keys_for_the_core() -> None:
     assert originals["key.serializer"] == "x.Y" and originals["transactional.id"] is None
 
 
+def test_a_given_serde_argument_replaces_its_config_key() -> None:
+    # ProducerConfig.appendSerializerToConfig / ConsumerConfig.appendDeserializerToConfig:
+    # the argument's class replaces the key before ConfigDef parses it.
+    instance = object()
+    for client, key in (("producer", "key.serializer"), ("producer", "value.serializer"),
+                        ("consumer", "key.deserializer"), ("consumer", "value.deserializer")):
+        with pytest.raises(ConfigError) as exc:
+            _config.prepare({key: instance}, client=client)  # type: ignore[arg-type]
+        assert str(exc.value) == (
+            f"Invalid value {instance} for configuration {key}: "
+            "Expected a Class instance or class name.")
+        originals, native = _config.prepare({key: instance}, client=client,  # type: ignore[arg-type]
+                                            given_serdes=[key])
+        assert native == {} and originals[key] is instance
+
+
 def test_prepare_uses_the_client_config_def() -> None:
     assert "max.poll.records" in _config_types.CONSUMER
     assert "max.poll.records" not in _config_types.PRODUCER

@@ -422,6 +422,22 @@ def test_config_must_be_dict():
         KafkaConsumer(configs="not a dict")  # type: ignore[arg-type]
 
 
+class _NotAClass:
+    """A config value ConfigDef rejects for a CLASS key (an instance)."""
+
+
+def test_deserializer_argument_wins_over_its_config_key():
+    """The argument wins and the config key is ignored: Java's
+    ConsumerConfig.appendDeserializerToConfig replaces the key with the
+    argument's class before ConfigDef parses it (ConsumerConfig.java:742)."""
+    from confluent_kafka.common.serialization import string_deserializer
+    deserializer = string_deserializer()
+    c = KafkaConsumer(configs=_kafka_config(**{"key.deserializer": _NotAClass(),
+                                                "value.deserializer": 5}),
+                      key_deserializer=deserializer, value_deserializer=deserializer)
+    c.close()
+
+
 def test_deprecated_offset_reset_strategy_enum_constructor():
     with MockConsumer(
         offset_reset_strategy=OffsetResetStrategy.EARLIEST,

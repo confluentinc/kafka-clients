@@ -37,7 +37,7 @@ The keys and types are generated from Java's ``ProducerConfig`` /
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Collection, Mapping
 from datetime import timedelta
 from typing import Any, Literal
 
@@ -183,11 +183,17 @@ def convert_to_string(value: object, type_name: str | None) -> str | None:
     return java_str(value)
 
 
-def prepare(configs: Mapping[str, Any], *,
-            client: Client) -> tuple[RecordingConfigs, dict[str, str]]:
+def prepare(configs: Mapping[str, Any], *, client: Client,
+            given_serdes: Collection[str] = ()) -> tuple[RecordingConfigs, dict[str, str]]:
     """Parse ``configs`` for a ``client``: the user's configs, recording what
     the serdes read, and the string map the core parses (the serde keys and
-    ``None`` values left out)."""
+    ``None`` values left out).
+
+    ``given_serdes`` names the serde keys (``key.serializer``, …) whose
+    constructor argument is given: the argument wins and the key is not
+    parsed, as Java's ``ProducerConfig.appendSerializerToConfig`` /
+    ``ConsumerConfig.appendDeserializerToConfig`` replace it with the
+    argument's class before ``ConfigDef`` parses the configs."""
     if not isinstance(configs, Mapping):
         raise TypeError(f"configs must be a dict, not {type(configs).__name__}")
     for key, value in configs.items():
@@ -196,6 +202,8 @@ def prepare(configs: Mapping[str, Any], *,
     types = _TYPES[client]
     native: dict[str, str] = {}
     for key, value in configs.items():
+        if key in given_serdes:
+            continue
         type_name = types.get(key)
         parsed = coerce(key, value, type_name) if type_name is not None else value
         if key == _INTERCEPTOR_CLASSES and parsed:
