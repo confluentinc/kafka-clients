@@ -247,29 +247,86 @@ def _consumer_family_types(c: object = None) -> None:
 
 
 def _producer_family_types(p: object = None) -> None:
-    """The producer clients' constructor / send generics and overloads.
+    """The producer clients' constructor binding stubs, ``send`` and the async
+    double await.
 
     Type-check-only (guarded early return; never runs the FFI)."""
     if p is None:
         return
+    import asyncio
     from concurrent.futures import Future
+    from typing import Any
 
-    from confluent_kafka.common import PartitionInfo
+    from confluent_kafka.common import MetricName, PartitionInfo
+    from confluent_kafka.common.metric import Metric
     from confluent_kafka.producer import (
-        KafkaProducer, MockProducer, Producer, ProducerRecord, RecordMetadata,
+        AsyncKafkaProducer, AsyncMockProducer, Callback, KafkaProducer, MockProducer,
+        Producer, ProducerRecord, RecordMetadata,
     )
 
-    # send(*, record) returns a Future[RecordMetadata] on the sync producer;
-    # the record carries the K/V generics (the serdes default to Any).
-    pr: MockProducer[bytes, bytes] = MockProducer(auto_complete=True)
-    record: ProducerRecord[bytes, bytes] = ProducerRecord(
-        topic="t", key=b"k", value=b"v")
-    assert_type(pr.send(record=record), "Future[RecordMetadata]")
-    assert_type(pr.partitions_for(topic="t"), "list[PartitionInfo]")
-    del PartitionInfo
-    _kp: type[KafkaProducer[bytes, bytes]] = KafkaProducer
-    _base: type[Producer[bytes, bytes]] = MockProducer
-    del _kp, _base, Future, RecordMetadata
+    configs: dict[str, Any] = {"bootstrap.servers": "localhost:9092"}
+    # An omitted serializer binds bytes; a given one binds its type.
+    assert_type(KafkaProducer(configs=configs), "KafkaProducer[bytes, bytes]")
+    assert_type(KafkaProducer(configs=configs, key_serializer=string_serializer()),
+                "KafkaProducer[str, bytes]")
+    assert_type(KafkaProducer(configs=configs, value_serializer=int_serializer()),
+                "KafkaProducer[bytes, int]")
+    assert_type(KafkaProducer(configs=configs, key_serializer=string_serializer(),
+                              value_serializer=json_serializer()),
+                "KafkaProducer[str, Any]")
+    assert_type(AsyncKafkaProducer(configs=configs), "AsyncKafkaProducer[bytes, bytes]")
+    assert_type(AsyncKafkaProducer(configs=configs, key_serializer=string_serializer(),
+                                   value_serializer=float_serializer()),
+                "AsyncKafkaProducer[str, float]")
+
+    # MockProducer's forms: (cluster, auto_complete, partitioner, …) with
+    # everything optional, and (auto_complete, partitioner, key_serializer,
+    # value_serializer) with everything required, where a None serializer binds
+    # bytes.
+    assert_type(MockProducer(), "MockProducer[bytes, bytes]")
+    assert_type(MockProducer(cluster=object(), auto_complete=True), "MockProducer[bytes, bytes]")
+    assert_type(MockProducer(cluster=object(), key_serializer=string_serializer()),
+                "MockProducer[str, bytes]")
+    assert_type(MockProducer(cluster=object(), value_serializer=string_serializer()),
+                "MockProducer[bytes, str]")
+    assert_type(MockProducer(auto_complete=True, partitioner=None,
+                             key_serializer=string_serializer(),
+                             value_serializer=int_serializer()), "MockProducer[str, int]")
+    assert_type(MockProducer(auto_complete=True, partitioner=None, key_serializer=None,
+                             value_serializer=None), "MockProducer[bytes, bytes]")
+    assert_type(MockProducer(auto_complete=True, partitioner=None,
+                             key_serializer=string_serializer(), value_serializer=None),
+                "MockProducer[str, bytes]")
+    assert_type(MockProducer(auto_complete=True, partitioner=None, key_serializer=None,
+                             value_serializer=string_serializer()), "MockProducer[bytes, str]")
+    assert_type(AsyncMockProducer(auto_complete=True, partitioner=None, key_serializer=None,
+                                  value_serializer=string_serializer()),
+                "AsyncMockProducer[bytes, str]")
+
+    kp = KafkaProducer(configs=configs, key_serializer=string_serializer(),
+                       value_serializer=string_serializer())
+    callback: Callback = lambda metadata, exception: None  # noqa: E731
+    # A record's omitted key binds Never, which fits any producer (covariance).
+    assert_type(kp.send(record=ProducerRecord(topic="t", value="v"), callback=callback),
+                "Future[RecordMetadata]")
+    assert_type(kp.partitions_for(topic="t"), "list[PartitionInfo]")
+    assert_type(kp.metrics(), "dict[MetricName, Metric]")
+    base: Producer[str, str] = kp
+    assert_type(base.send(record=ProducerRecord(topic="t", key="k", value="v")),
+                "Future[RecordMetadata]")
+    mp = MockProducer(auto_complete=True, partitioner=None, key_serializer=string_serializer(),
+                      value_serializer=string_serializer())
+    assert_type(mp.history(), "list[ProducerRecord[str, str]]")
+
+    async def _async() -> None:
+        ap = AsyncKafkaProducer(configs=configs, value_serializer=string_serializer())
+        future = await ap.send(record=ProducerRecord(topic="t", value="v"))
+        assert_type(future, "asyncio.Future[RecordMetadata]")
+        assert_type(await future, RecordMetadata)
+        assert_type(await (await ap.send(record=ProducerRecord(topic="t", value="v"))),
+                    RecordMetadata)
+
+    del _async, Future, asyncio
 
 
 def test_typing_module_imports() -> None:
