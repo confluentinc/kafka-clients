@@ -29,7 +29,8 @@ import threading
 import pytest
 
 from confluent_kafka import IllegalArgumentError, IllegalStateError
-from confluent_kafka.common.errors import KafkaError, WakeupError
+from confluent_kafka.common import KafkaError
+from confluent_kafka.common.errors import WakeupError
 from confluent_kafka.common.topic_partition import TopicPartition
 from confluent_kafka.consumer import (
     AsyncMockConsumer, CloseOptions, Consumer, ConsumerRebalanceListener,
@@ -373,7 +374,7 @@ def test_empty_group_id_rejected():
     The binding now surfaces the wrapper as the outer ``KafkaError`` and chains the
     core error's source into ``__cause__`` (via ``kafka_common_Error_source``), so
     ``e.__cause__`` is the ``InvalidGroupIdError`` — rule 5 / spec §5.5."""
-    from confluent_kafka.common.errors._generated import InvalidGroupIdError
+    from confluent_kafka.common.errors.invalid_group_id_error import InvalidGroupIdError
     with pytest.raises(KafkaError, match="Failed to construct kafka consumer") as ei:
         KafkaConsumer(configs=_kafka_config(**{"group.id": ""}))
     assert isinstance(ei.value.__cause__, InvalidGroupIdError)
@@ -475,7 +476,7 @@ def test_reentrant_commit_on_mock_is_unsupported():
     mock ("drive the MockConsumer directly"). It surfaces a clear error, not a
     deadlock or a crash. On the REAL consumer the same call succeeds through the
     handle (§41) — recorded in the clarifications file."""
-    from confluent_kafka.common.errors import KafkaError
+    from confluent_kafka.common import KafkaError
     seen = {}
 
     class CommitOnAssign(ConsumerRebalanceListener):
@@ -866,3 +867,63 @@ def test_seek_after_close_raises():
     c.close()
     with pytest.raises(IllegalStateError):
         c.seek(partition=_tp("t", 0), offset=1)
+
+
+# ==========================================================================
+# An injected error is raised as the very same instance (CLAUDE.md, Python
+# Binding Conventions, Errors): Java's MockConsumer throws the exception the
+# test set (MockConsumer.java:267-270, :541-544).
+# ==========================================================================
+def test_set_poll_exception_raises_the_injected_instance():
+    from confluent_kafka.common.errors import TopicAuthorizationError
+
+    with MockConsumer(offset_reset_strategy="earliest") as c:
+        c.assign(partitions=[_tp("t", 0)])
+        c.update_beginning_offsets(new_offsets={_tp("t", 0): 0})
+        injected = TopicAuthorizationError(unauthorized_topics={"t"})
+        c.set_poll_exception(exception=injected)
+        with pytest.raises(TopicAuthorizationError) as exc:
+            c.poll(timeout=0)
+        assert exc.value is injected
+        # Thrown once, then cleared (Java nulls pollException).
+        assert c.poll(timeout=0).is_empty()
+
+
+def test_set_poll_exception_keeps_the_instance_of_a_base_or_own_class():
+    class Mine(KafkaError):
+        pass
+
+    with MockConsumer(offset_reset_strategy="earliest") as c:
+        c.assign(partitions=[_tp("t", 0)])
+        for injected in (KafkaError(message="plain"), Mine(message="own class")):
+            c.set_poll_exception(exception=injected)
+            with pytest.raises(KafkaError) as exc:
+                c.poll(timeout=0)
+            assert exc.value is injected
+
+
+def test_set_offsets_exception_raises_the_injected_instance():
+    from confluent_kafka.common.errors import TimeoutError as WireTimeoutError
+
+    with MockConsumer(offset_reset_strategy="earliest") as c:
+        tp = _tp("t", 0)
+        c.update_end_offsets(new_offsets={tp: 5})
+        injected = WireTimeoutError(message="offsets timed out")
+        c.set_offsets_exception(exception=injected)
+        with pytest.raises(WireTimeoutError) as exc:
+            c.end_offsets(partitions=[tp])
+        assert exc.value is injected
+        assert c.end_offsets(partitions=[tp]) == {tp: 5}
+
+
+def test_async_set_poll_exception_raises_the_injected_instance():
+    async def run():
+        async with AsyncMockConsumer(offset_reset_strategy="earliest") as c:
+            await c.assign(partitions=[_tp("t", 0)])
+            injected = KafkaError(message="async")
+            c.set_poll_exception(exception=injected)
+            with pytest.raises(KafkaError) as exc:
+                await c.poll(timeout=0)
+            assert exc.value is injected
+
+    asyncio.run(run())

@@ -135,9 +135,17 @@ static int producer_record_build_headers(ProducerRecordObject* self, PyObject* h
         } else if (PyBytes_Check(v)) {
             entries[i].value = (const uint8_t*)PyBytes_AsString(v);
             entries[i].value_len = (int32_t)PyBytes_Size(v);
+        } else if (PyMemoryView_Check(v)
+                   && PyBuffer_IsContiguous(PyMemoryView_GET_BUFFER(v), 'C')) {
+            // The record's read-form header value: a view of the caller's
+            // bytes, not a copy (CLAUDE.md §12). header_seq keeps the view, and
+            // so its buffer, alive for the record's lifetime.
+            Py_buffer* view = PyMemoryView_GET_BUFFER(v);
+            entries[i].value = (const uint8_t*)view->buf;
+            entries[i].value_len = (int32_t)view->len;
         } else {
             PyErr_SetString(PyExc_TypeError,
-                            "header value must be bytes or None");
+                            "header value must be bytes, a contiguous memoryview or None");
             // keys[i] is set; make header_count cover it so clear() frees it.
             self->record_struct.header_count = (int32_t)(i + 1);
             self->header_keys = keys;

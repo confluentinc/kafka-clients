@@ -25,7 +25,7 @@ from __future__ import annotations
 
 from typing import NoReturn
 
-from confluent_kafka.common.errors._generated import UnsupportedVersionError
+from confluent_kafka.common.errors.unsupported_version_error import UnsupportedVersionError
 
 __all__ = ["raise_unsupported"]
 
@@ -34,6 +34,6 @@ def raise_unsupported(method: str) -> NoReturn:
     """Raise ``UnsupportedVersionError`` for a method the Rust core does not yet
     implement (KIP-714 client telemetry / metric registration)."""
     raise UnsupportedVersionError(
-        f"{method} is not supported by this client: the underlying Rust core "
+        message=f"{method} is not supported by this client: the underlying Rust core "
         "does not implement KIP-714 client telemetry / metric registration yet"
     )

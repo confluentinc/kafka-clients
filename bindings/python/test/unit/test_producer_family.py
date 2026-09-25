@@ -48,8 +48,8 @@ import pytest
 
 from confluent_kafka import IllegalArgumentError, IllegalStateError
 from confluent_kafka.common import TopicPartition
-from confluent_kafka.common.errors import KafkaError
-from confluent_kafka.common.errors._generated import (
+from confluent_kafka.common import KafkaError
+from confluent_kafka.common.errors import (
     ProducerFencedError,
     RecordTooLargeError,
     TimeoutError as WireTimeoutError,
@@ -130,7 +130,7 @@ class TestMockProducer:
 
         # errorNext with an arbitrary error; the completion carries the same
         # class + message (identity is not preserved across the FFI — C23).
-        assert p.error_next(e=IllegalArgumentError("blah"))
+        assert p.error_next(e=IllegalArgumentError(message="blah"))
         with pytest.raises(IllegalArgumentError) as exc:
             md2.result()
         assert str(exc.value) == "blah"
@@ -588,7 +588,7 @@ class TestMockProducer:
             captured["exc"] = exc
 
         md = p.send(record=RECORD2, callback=delivery_callback)
-        assert p.error_next(e=IllegalArgumentError("dummy exception"))
+        assert p.error_next(e=IllegalArgumentError(message="dummy exception"))
         with pytest.raises(IllegalArgumentError) as exc:
             md.result()
         assert str(exc.value) == "dummy exception"
@@ -769,7 +769,7 @@ class TestSurfaceContracts:
         # error_next injects a typed error; the future surfaces the same class.
         p = build_mock(False)
         md = p.send(record=RECORD1)
-        p.error_next(e=RecordTooLargeError("too big"))
+        p.error_next(e=RecordTooLargeError(message="too big"))
         with pytest.raises(RecordTooLargeError):
             md.result()
         p.close()
@@ -888,7 +888,7 @@ class TestMockProducerTransactionFailure:
         p.init_transactions()
         p.begin_transaction()
         p.send(record=RECORD1)
-        p.set_commit_transaction_exception(commit_transaction_exception=TransactionAbortableError("abort me"))
+        p.set_commit_transaction_exception(commit_transaction_exception=TransactionAbortableError(message="abort me"))
         with pytest.raises(TransactionAbortableError):
             p.commit_transaction()
         p.close()
@@ -900,7 +900,7 @@ class TestMockProducerTransactionFailure:
         p.init_transactions()
         p.begin_transaction()
         p.send(record=RECORD1)
-        p.set_commit_transaction_exception(commit_transaction_exception=WireTimeoutError("timed out"))
+        p.set_commit_transaction_exception(commit_transaction_exception=WireTimeoutError(message="timed out"))
         with pytest.raises(WireTimeoutError):
             p.commit_transaction()
         p.close()

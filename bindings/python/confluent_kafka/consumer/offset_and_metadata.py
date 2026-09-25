@@ -39,7 +39,7 @@ class OffsetAndMetadata:
     def __init__(self, *, offset: int, leader_epoch: int | None = None,
                  metadata: str = "") -> None:
         if offset < 0:
-            raise IllegalArgumentError("Invalid negative offset")
+            raise IllegalArgumentError(message="Invalid negative offset")
         self._offset = offset
         # Java stores the leader epoch verbatim (may be negative); the accessor
         # filters null-or-negative to "absent".

@@ -43,8 +43,8 @@ from typing import Any, TypeVar, cast
 import _confluentkafka as _lib  # type: ignore[import-not-found]
 
 from confluent_kafka import IllegalStateError
-from confluent_kafka.common.errors import from_ffi_error, to_ffi_id
-from confluent_kafka.common.errors._base import KafkaError
+from confluent_kafka._errors import from_ffi_error, to_ffi_id
+from confluent_kafka.common.kafka_error import KafkaError
 from confluent_kafka.common.topic_partition import TopicPartition
 
 from .consumer_rebalance_listener import ConsumerRebalanceListener
@@ -67,13 +67,10 @@ def _error_from_exception(exc: BaseException) -> int:
     """Build a C ``kafka_common_Error_t`` handle from a Python exception raised
     by a user listener, so the rebalance fails with it (Java: a listener that
     throws fails the rebalance). A ``KafkaError`` maps by its ``_ffi_id``;
-    anything else becomes the catch-all wire error via its message."""
-    try:
-        code = to_ffi_id(exc)
-    except TypeError:
-        # Not a mapped Kafka/JDK error — surface as UnknownServerError (-1) with
-        # the message, exactly as the FFI does for an unmapped listener throw.
-        code = -1
+    anything else becomes the catch-all wire error via its message
+    (``to_ffi_id`` reports UNKNOWN_SERVER_ERROR, -1, for a class without an
+    id)."""
+    code = to_ffi_id(exc)
     handle: int = _lib.KafkaError_new(code, str(exc))
     return handle
 
@@ -88,7 +85,7 @@ class _ConsumerEngine:
     __slots__ = (
         "_h", "_closed", "_listener", "_key_deserializer", "_value_deserializer",
         "_loop", "_pending_notify_ref", "_pending_event",
-        "_reentrant_handle", "_callback_depth",
+        "_reentrant_handle", "_callback_depth", "_injected",
     )
 
     def _engine_init(
@@ -99,6 +96,10 @@ class _ConsumerEngine:
     ) -> None:
         self._h: int | None = handle
         self._closed = False
+        # A mock's injected errors by slot ("poll", "offsets"): the core reports
+        # the error, and the call raises the very instance the test injected
+        # (CLAUDE.md, Python Binding Conventions, Errors).
+        self._injected: dict[str, BaseException] = {}
         self._listener: ConsumerRebalanceListener | None = None
         self._key_deserializer = key_deserializer
         self._value_deserializer = value_deserializer
@@ -129,7 +130,7 @@ class _ConsumerEngine:
     # ---- lifecycle ------------------------------------------------------
     def _check_closed(self) -> None:
         if self._closed or self._h is None:
-            raise IllegalStateError("This consumer has already been closed.")
+            raise IllegalStateError(message="This consumer has already been closed.")
 
     def _destroy(self) -> None:
         if self._reentrant_handle is not None:

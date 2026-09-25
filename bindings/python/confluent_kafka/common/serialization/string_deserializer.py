@@ -22,7 +22,7 @@ route, by ``key.deserializer.encoding`` / ``value.deserializer.encoding`` /
 
 from __future__ import annotations
 
-from confluent_kafka.common.errors._generated import SerializationError
+from confluent_kafka.common.errors.serialization_error import SerializationError
 from confluent_kafka.common.headers import Headers
 
 from ._encoding import normalize_encoding
@@ -56,5 +56,5 @@ class StringDeserializer:
             return bytes(data).decode(self._encoding)
         except LookupError as exc:
             raise SerializationError(
-                f"Unsupported encoding {self._encoding}"
+                message=f"Unsupported encoding {self._encoding}"
             ) from exc

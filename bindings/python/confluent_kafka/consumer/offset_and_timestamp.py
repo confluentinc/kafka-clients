@@ -39,9 +39,9 @@ class OffsetAndTimestamp:
     def __init__(self, *, offset: int, timestamp: int,
                  leader_epoch: int | None = None) -> None:
         if offset < 0:
-            raise IllegalArgumentError("Invalid negative offset")
+            raise IllegalArgumentError(message="Invalid negative offset")
         if timestamp < 0:
-            raise IllegalArgumentError("Invalid negative timestamp")
+            raise IllegalArgumentError(message="Invalid negative timestamp")
         self._offset = offset
         self._timestamp = timestamp
         self._leader_epoch = leader_epoch

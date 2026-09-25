@@ -138,7 +138,7 @@ class _ProducerState:
     def _check_not_closed(self) -> None:
         # Java: IllegalStateException on use after close (§5.6).
         if self._closed:
-            raise IllegalStateError("Cannot perform operation after "
+            raise IllegalStateError(message="Cannot perform operation after "
                                     "producer has been closed")
 
     def _remove_future(self, future: object) -> None:
@@ -192,4 +192,4 @@ def _as_bytes(value: object) -> bytes | None:
         return bytes(value)
     from confluent_kafka import IllegalArgumentError as _IllegalArgumentError
     raise _IllegalArgumentError(
-        f"serializer must return bytes or None, got {type(value).__name__}")
+        message=f"serializer must return bytes or None, got {type(value).__name__}")

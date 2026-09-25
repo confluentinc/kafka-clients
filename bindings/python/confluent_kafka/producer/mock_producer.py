@@ -37,8 +37,8 @@ from typing import TYPE_CHECKING, Any, Generic, TypeVar, cast
 
 from confluent_kafka import IllegalArgumentError, IllegalStateError
 from confluent_kafka.common import PartitionInfo, TopicPartition
-from confluent_kafka.common.errors import KafkaError
-from confluent_kafka.common.errors._generated import ProducerFencedError
+from confluent_kafka.common.kafka_error import KafkaError
+from confluent_kafka.common.errors.producer_fenced_error import ProducerFencedError
 from confluent_kafka.common.serialization import bytes_serializer, resolve_serde
 
 from .async_producer import AsyncProducer
@@ -50,7 +50,8 @@ from .record_metadata import RecordMetadata
 if TYPE_CHECKING:
     from confluent_kafka import Duration
     from confluent_kafka.common import MetricName
-    from confluent_kafka.common.metric import KafkaMetric, Metric
+    from confluent_kafka.common.kafka_metric import KafkaMetric
+    from confluent_kafka.common.metric import Metric
     from confluent_kafka.common.serialization import Serializer
     from confluent_kafka.consumer import ConsumerGroupMetadata, OffsetAndMetadata
 
@@ -155,20 +156,20 @@ class _MockCore(Generic[K, V]):
     # ---- verify helpers (MockProducer.java:248-282) -------------------------
     def _verify_not_closed(self) -> None:
         if self._closed:
-            raise IllegalStateError("MockProducer is already closed.")
+            raise IllegalStateError(message="MockProducer is already closed.")
 
     def _verify_not_fenced(self) -> None:
         if self._producer_fenced:
-            raise ProducerFencedError("MockProducer is fenced.")
+            raise ProducerFencedError(message="MockProducer is fenced.")
 
     def _verify_transactions_initialized(self) -> None:
         if not self._transaction_initialized:
             raise IllegalStateError(
-                "MockProducer hasn't been initialized for transactions.")
+                message="MockProducer hasn't been initialized for transactions.")
 
     def _verify_transaction_in_flight(self) -> None:
         if not self._transaction_in_flight:
-            raise IllegalStateError("There is no open transaction.")
+            raise IllegalStateError(message="There is no open transaction.")
 
     # ---- transactions (MockProducer.java:154-260) ---------------------------
     def init_transactions(self) -> None:
@@ -176,7 +177,7 @@ class _MockCore(Generic[K, V]):
         self._verify_not_fenced()
         if self._transaction_initialized:
             raise IllegalStateError(
-                "MockProducer has already been initialized for transactions.")
+                message="MockProducer has already been initialized for transactions.")
         if self.init_transaction_exception is not None:
             raise self.init_transaction_exception
         self._transaction_initialized = True
@@ -192,7 +193,7 @@ class _MockCore(Generic[K, V]):
         if self.begin_transaction_exception is not None:
             raise self.begin_transaction_exception
         if self._transaction_in_flight:
-            raise IllegalStateError("Transaction already started")
+            raise IllegalStateError(message="Transaction already started")
         self._transaction_in_flight = True
         self._transaction_committed = False
         self._transaction_aborted = False
@@ -202,7 +203,7 @@ class _MockCore(Generic[K, V]):
             self, offsets: dict[TopicPartition, OffsetAndMetadata],
             group_metadata: ConsumerGroupMetadata) -> None:
         if group_metadata is None:
-            raise IllegalArgumentError("groupMetadata must not be null")
+            raise IllegalArgumentError(message="groupMetadata must not be null")
         self._verify_not_closed()
         self._verify_not_fenced()
         self._verify_transactions_initialized()
@@ -259,11 +260,11 @@ class _MockCore(Generic[K, V]):
     def send(self, record: ProducerRecord[K, V],
              callback: DeliveryCallback | None) -> Future[RecordMetadata]:
         if self._closed:
-            raise IllegalStateError("MockProducer is already closed.")
+            raise IllegalStateError(message="MockProducer is already closed.")
         if self._producer_fenced:
             # Java: KafkaException wrapping ProducerFencedException.
-            err = KafkaError("MockProducer is fenced.")
-            err.__cause__ = ProducerFencedError("Fenced")
+            err = KafkaError(message="MockProducer is fenced.")
+            err.__cause__ = ProducerFencedError(message="Fenced")
             raise err
         if self.send_exception is not None:
             raise self.send_exception
@@ -363,7 +364,7 @@ class _MockCore(Generic[K, V]):
                 self._inject_timeout_counter -= 1
             from confluent_kafka import TimeoutError as _TimeoutError
             raise _TimeoutError(
-                "TimeoutExceptions are successfully injected for test.")
+                message="TimeoutExceptions are successfully injected for test.")
         return self._client_instance_id
 
 
@@ -381,7 +382,7 @@ class _MockSurfaceMixin(Generic[K, V]):
     def error_next(self, *, e: BaseException) -> bool:
         """Java ``errorNext(e)`` — fail the next pending send with ``e``."""
         if e is None:
-            raise IllegalArgumentError("e must not be None")
+            raise IllegalArgumentError(message="e must not be None")
         return self._core.error_next(e)
 
     def flushed(self) -> bool:
@@ -538,7 +539,7 @@ def _reject_cluster(cluster: object | None) -> None:
     is rejected (spec §6.1)."""
     if cluster is not None:
         raise IllegalArgumentError(
-            "cluster is not supported: partition layout is only used by a "
+            message="cluster is not supported: partition layout is only used by a "
             "custom partitioner, which is not yet available (spec §6.1)")
 
 
@@ -546,7 +547,7 @@ def _client_instance_id_with_timeout(
         core: _MockCore[Any, Any], timeout: Duration | None) -> Any:
     from .producer import _timeout_seconds
     if timeout is not None and _timeout_seconds(timeout) < 0:
-        raise IllegalArgumentError("The timeout cannot be negative.")
+        raise IllegalArgumentError(message="The timeout cannot be negative.")
     return core.client_instance_id()
 
 

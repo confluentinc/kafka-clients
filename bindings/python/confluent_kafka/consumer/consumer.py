@@ -35,7 +35,7 @@ import _confluentkafka as _lib  # type: ignore[import-not-found]
 from confluent_kafka import Duration
 from confluent_kafka._args import Form, java_forms
 from confluent_kafka._config import duration_to_ms
-from confluent_kafka.common.metric import KafkaMetric
+from confluent_kafka.common.kafka_metric import KafkaMetric
 from confluent_kafka.common.partition_info import PartitionInfo
 from confluent_kafka.common.uuid import Uuid
 from confluent_kafka.common.topic_partition import TopicPartition
@@ -176,7 +176,7 @@ class Consumer(_ConsumerClientBase, Generic[K, V]):
             else:
                 error = _lib.Consumer_commit_async_offsets(self._h, spec, adapter)
         if error:
-            from confluent_kafka.common.errors import from_ffi_error
+            from confluent_kafka._errors import from_ffi_error
             raise from_ffi_error(error)
 
     def committed(self, *, partitions: Iterable[TopicPartition],

@@ -26,7 +26,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from confluent_kafka.common.errors._generated import SerializationError
+from confluent_kafka.common.errors.serialization_error import SerializationError
 from confluent_kafka.common.headers import Headers
 
 
@@ -45,7 +45,7 @@ class JsonSerializer:
             return json.dumps(value).encode("utf_8")
         except (TypeError, ValueError) as exc:
             raise SerializationError(
-                "Error serializing value to JSON"
+                message="Error serializing value to JSON"
             ) from exc
 
 
@@ -64,5 +64,5 @@ class JsonDeserializer:
             return json.loads(bytes(data))
         except (ValueError, UnicodeDecodeError) as exc:
             raise SerializationError(
-                "Error deserializing JSON value"
+                message="Error deserializing JSON value"
             ) from exc

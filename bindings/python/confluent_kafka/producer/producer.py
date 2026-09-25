@@ -34,7 +34,7 @@ from typing import TYPE_CHECKING, Callable, Generic, TypeVar, cast
 import _confluentkafka as _lib  # type: ignore[import-not-found]
 
 from confluent_kafka import IllegalArgumentError
-from confluent_kafka.common.errors import from_ffi_error
+from confluent_kafka._errors import from_ffi_error
 
 from ._base import (
     _ProducerState,
@@ -54,7 +54,8 @@ if TYPE_CHECKING:
         TopicPartition,
         Uuid,
     )
-    from confluent_kafka.common.metric import KafkaMetric, Metric
+    from confluent_kafka.common.kafka_metric import KafkaMetric
+    from confluent_kafka.common.metric import Metric
     from confluent_kafka.consumer import ConsumerGroupMetadata, OffsetAndMetadata
 
     from ._send import DeliveryCallback
@@ -210,14 +211,14 @@ class Producer(Generic[K, V], _ProducerState):
         # Java's exact message for a negative clientInstanceId timeout
         # (KafkaProducerTest.testClientInstanceIdInvalidTimeout).
         if timeout is not None and _timeout_seconds(timeout) < 0:
-            raise IllegalArgumentError("The timeout cannot be negative.")
+            raise IllegalArgumentError(message="The timeout cannot be negative.")
         raise self._telemetry_unsupported("clientInstanceId")
 
     @staticmethod
     def _telemetry_unsupported(method: str) -> BaseException:
-        from confluent_kafka.common.errors import KafkaError as _KafkaError
+        from confluent_kafka.common.kafka_error import KafkaError as _KafkaError
         return _KafkaError(
-            f"{method} is not supported: the Rust core does not implement "
+            message=f"{method} is not supported: the Rust core does not implement "
             f"client telemetry (KIP-714)")
 
     # ---- lifecycle ----------------------------------------------------------
@@ -302,7 +303,7 @@ def _validate_timeout(timeout: Duration | None) -> None:
     """Java: a negative ``Duration`` raises ``IllegalArgumentException``
     (D7 addendum / D25 A). ``None`` is allowed (default api timeout)."""
     if timeout is not None and _timeout_seconds(timeout) < 0:
-        raise IllegalArgumentError("The timeout cannot be negative.")
+        raise IllegalArgumentError(message="The timeout cannot be negative.")
 
 
 def _close_submit(c_producer: int | None, timeout: Duration | None

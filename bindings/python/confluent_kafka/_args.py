@@ -49,9 +49,7 @@ import warnings
 from collections.abc import Callable, Mapping
 from typing import Any, TypeVar
 
-from . import IllegalArgumentError
-
-__all__ = ["UNSET", "Form", "java_forms"]
+__all__ = ["UNSET", "Form", "is_given", "java_forms"]
 
 _F = TypeVar("_F", bound=Callable[..., Any])
 
@@ -131,6 +129,12 @@ def _is_not_given(value: object, marker: object) -> bool:
         return False
 
 
+def is_given(value: object, default: object) -> bool:
+    """Whether ``value`` counts as given against its implementation default
+    ``default`` (the generated error constructors test given-ness with it)."""
+    return not _is_not_given(value, default)
+
+
 def _method_name(fn: Callable[..., Any], name: str | None) -> str:
     if name is not None:
         return name
@@ -185,6 +189,15 @@ def java_forms(*forms: Form, name: str | None = None) -> Callable[[_F], _F]:
 
         method = _method_name(fn, name)
         form_masks = [mask_of(f.params) for f in forms]
+        # A parameter in every overload that no overload defaults is required: it
+        # always counts as given, even at a None default (the errors' `cause`,
+        # which Java requires but which may be null).
+        always = -1
+        for m in form_masks:
+            always &= m
+        always = always if forms else 0
+        for form in forms:
+            always &= ~mask_of(list(form.defaults))
         # given mask -> (form index, fills, deprecation warning text)
         table: dict[int, tuple[int, tuple[tuple[str, object], ...], str | None]] = {}
         for index, form in enumerate(forms):
@@ -230,7 +243,7 @@ def java_forms(*forms: Form, name: str | None = None) -> Callable[[_F], _F]:
                     f"'{_FORM_KEYWORD}'")
             if len(args) != n_positional:
                 return
-            given = 0
+            given = always
             for key, value in kwargs.items():
                 b = bit.get(key)
                 if b is None:
@@ -242,7 +255,9 @@ def java_forms(*forms: Form, name: str | None = None) -> Callable[[_F], _F]:
                     return
             entry = table.get(given)
             if entry is None:
-                raise IllegalArgumentError(prefix + in_order(given))
+                from .illegal_argument_error import IllegalArgumentError
+
+                raise IllegalArgumentError(message=prefix + in_order(given))
             index, fills, note = entry
             for key, value in fills:
                 kwargs[key] = value

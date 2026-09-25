@@ -12,70 +12,77 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""``Headers`` — the record-header alias and its write-side validator.
+"""``Headers``: the record-header alias (Java's ``Headers`` / ``Header``).
 
-Mirrors ``org.apache.kafka.common.header.Headers`` / ``Header`` (Apache Kafka
-4.3.1) as a lightweight Python alias rather than a class (spec §5.2). A header
-is a ``(key, value)`` pair: the key is a ``str``; the value is a byte-like when
-written and a ``memoryview`` (into the fetch buffer) when read. A ``None`` value
-is a legal header value (Java allows null header values).
-
-Read form:  ``Sequence[tuple[str, memoryview]]``
-Write form: ``Iterable[tuple[str, bytes | bytearray | memoryview | None]]``
+Java's ``org.apache.kafka.common.header.Headers`` has no Python class
+*(deviation)*; headers are ``(key, value)`` pairs (CLAUDE.md, Python Binding
+Conventions, Types). They are written as
+``Iterable[tuple[str, bytes | bytearray | memoryview | None]]`` and handed out
+as the ``Headers`` alias, whose values are ``memoryview`` s (into the fetch
+batch for fetched records) or ``None``, Java's null header value. ``headers()``
+is ``()`` when empty, never ``None``. Header values are not copied (CLAUDE.md
+§12): a written value is viewed, not duplicated.
 """
 
 from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
 
-from confluent_kafka import IllegalArgumentError
+from confluent_kafka.null_pointer_error import NullPointerError
 
-# The public alias used across the record types. On the read path a record hands
-# back header values as ``memoryview``s that borrow the fetch batch; on the
-# write path any byte-like (or ``None``) is accepted (§5.2).
-Headers = Sequence["tuple[str, memoryview]"]
+__all__ = ["Headers"]
 
-# The byte-like types accepted for a written header value.
-_ByteLike = (bytes, bytearray, memoryview)
+#: The headers handed out: ``(key, value)`` pairs, ``value`` a ``memoryview``
+#: or ``None``.
+Headers = Sequence[tuple[str, "memoryview | None"]]
+
+_BYTE_LIKE = (bytes, bytearray, memoryview)
 
 
-def _validate_written_headers(
-    headers: Iterable[tuple[str, bytes | bytearray | memoryview | None]],
-) -> tuple[tuple[str, bytes | None], ...]:
-    """Validate and normalize a written header iterable.
-
-    Binding-internal (leading underscore): Java has no free header-validation
-    function — ``RecordHeaders(Iterable<Header>)`` normalizes internally — so this
-    helper is deliberately kept off the public ``confluent_kafka.common`` surface
-    (rule 2 / DoD #7). It is imported only by the record modules within the
-    package.
-
-    Each element must be a ``(str, byte-like | None)`` 2-tuple. Byte-like values
-    are copied into owned ``bytes``; ``None`` passes through. A malformed
-    element raises :class:`~confluent_kafka.IllegalArgumentError` (the JDK analog
-    of Java's ``IllegalArgumentException``).
-
-    Returns a tuple of ``(key, bytes | None)`` pairs so the caller holds an
-    immutable, owned copy.
-    """
-    result: list[tuple[str, bytes | None]] = []
+def _read_headers(
+    headers: Iterable[tuple[str, bytes | bytearray | memoryview | None]] | None,
+) -> tuple[tuple[str, memoryview | None], ...]:
+    """Java's ``new RecordHeaders(Iterable<Header>)``: the written headers in
+    their read form. ``None`` is no headers, as in Java. A ``None`` key raises
+    ``NullPointerError`` with ``RecordHeader``'s message; an element that is not
+    a ``(str, bytes-like | None)`` pair is a ``TypeError``."""
+    if headers is None:
+        return ()
+    result: list[tuple[str, memoryview | None]] = []
     for index, item in enumerate(headers):
         if not isinstance(item, tuple) or len(item) != 2:
-            raise IllegalArgumentError(
-                f"header[{index}] must be a (key, value) tuple; got {item!r}"
-            )
+            raise TypeError(f"header[{index}] must be a (key, value) tuple; got {item!r}")
         key, value = item
+        if key is None:
+            # RecordHeader: Objects.requireNonNull(key, "Null header keys are not permitted")
+            raise NullPointerError(message="Null header keys are not permitted")
         if not isinstance(key, str):
-            raise IllegalArgumentError(
-                f"header[{index}] key must be a str; got {type(key).__name__}"
-            )
+            raise TypeError(f"header[{index}] key must be a str; got {type(key).__name__}")
         if value is None:
             result.append((key, None))
-        elif isinstance(value, _ByteLike):
-            result.append((key, bytes(value)))
+        elif isinstance(value, _BYTE_LIKE):
+            result.append((key, memoryview(value).toreadonly()))
         else:
-            raise IllegalArgumentError(
-                f"header[{index}] value must be bytes-like or None; "
-                f"got {type(value).__name__}"
-            )
+            raise TypeError(
+                f"header[{index}] value must be bytes-like or None; got {type(value).__name__}")
     return tuple(result)
+
+
+def _headers_to_string(headers: Sequence[tuple[str, memoryview | None]]) -> str:
+    """Java's ``RecordHeaders.toString()``:
+    ``RecordHeaders(headers = [RecordHeader(key = k, value = [1, 2])], isReadOnly = false)``,
+    each value as ``Arrays.toString(byte[])`` (signed bytes)."""
+    parts = []
+    for key, value in headers:
+        if value is None:
+            text = "null"
+        else:
+            text = "[" + ", ".join(str(b - 256 if b > 127 else b) for b in value.tobytes()) + "]"
+        parts.append(f"RecordHeader(key = {key}, value = {text})")
+    return f"RecordHeaders(headers = [{', '.join(parts)}], isReadOnly = false)"
+
+
+def _headers_hash(headers: Sequence[tuple[str, memoryview | None]]) -> int:
+    """A hash over the header keys and value bytes (a ``memoryview`` of a
+    ``bytearray`` is not hashable itself)."""
+    return hash(tuple((k, None if v is None else v.tobytes()) for k, v in headers))

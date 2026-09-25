@@ -26,11 +26,11 @@ raises ``RecordDeserializationError`` and the position does not move (§5.4).
 
 from __future__ import annotations
 
-from typing import Any, Callable
+from typing import Any, Callable, cast
 
 import _confluentkafka as _lib  # type: ignore[import-not-found]
 
-from confluent_kafka.common.errors._generated import RecordDeserializationError
+from confluent_kafka.common.errors.record_deserialization_error import RecordDeserializationError
 from confluent_kafka.common.timestamp_type import TimestampType
 from confluent_kafka.common.topic_partition import TopicPartition
 
@@ -39,44 +39,24 @@ from .consumer_records import ConsumerRecords
 from .offset_and_metadata import OffsetAndMetadata
 
 
-def _attach_deserialization_payload(
-    error: RecordDeserializationError, *,
-    topic: str, partition: int, offset: int,
-    key_buffer: memoryview | None, value_buffer: memoryview | None,
+def _deserialization_error(
+    origin: RecordDeserializationError.DeserializationExceptionOrigin,
+    tp: TopicPartition, nr: Any, key_buffer: memoryview | None,
+    value_buffer: memoryview | None, headers: Any, cause: Exception,
 ) -> RecordDeserializationError:
-    """Attach the typed payload accessors Java's
-    ``RecordDeserializationException`` exposes (``topicPartition()``,
-    ``offset()``, ``keyBuffer()``, ``valueBuffer()``). The generated error class
-    is a plain leaf (P1), so the payload is attached here at raise time (P1
-    deferral C4); the accessors then let the poison-pill recovery
-    ``seek(partition=e.topic_partition(), offset=e.offset() + 1)`` work."""
-    tp = TopicPartition(topic=topic, partition=partition)
-    error._topic_partition = tp  # type: ignore[attr-defined]
-    error._offset = offset  # type: ignore[attr-defined]
-    error._key_buffer = key_buffer  # type: ignore[attr-defined]
-    error._value_buffer = value_buffer  # type: ignore[attr-defined]
-
-    def topic_partition() -> TopicPartition:
-        return tp
-
-    def offset_accessor() -> int:
-        return offset
-
-    def key_buffer_accessor() -> memoryview | None:
-        return key_buffer
-
-    def value_buffer_accessor() -> memoryview | None:
-        return value_buffer
-
-    def origin() -> str:
-        return topic
-
-    error.topic_partition = topic_partition  # type: ignore[attr-defined]
-    error.offset = offset_accessor  # type: ignore[attr-defined]
-    error.key_buffer = key_buffer_accessor  # type: ignore[attr-defined]
-    error.value_buffer = value_buffer_accessor  # type: ignore[attr-defined]
-    error.origin = origin  # type: ignore[attr-defined]
-    return error
+    """Java's ``CompletedFetch.newRecordDeserializationException``: the full
+    constructor, with the record's position, timestamp, bytes and headers, so
+    ``seek(partition=e.topic_partition(), offset=e.offset() + 1)`` skips it."""
+    return RecordDeserializationError(
+        origin=origin, partition=tp, offset=nr.offset, timestamp=nr.timestamp,
+        timestamp_type=TimestampType(nr.timestamp_type),
+        key_buffer=cast(bytes, key_buffer), value_buffer=cast(bytes, value_buffer),
+        headers=headers,
+        message=(f"Error deserializing {origin.name} for partition {tp} at offset "
+                 f"{nr.offset}. If needed, please seek past the record to continue "
+                 "consumption."),
+        cause=cause,
+    )
 
 
 def deserialize_batch(
@@ -105,32 +85,21 @@ def deserialize_batch(
         key_buffer: memoryview | None = nr.key
         value_buffer: memoryview | None = nr.value
         headers = nr.headers
+        origin = RecordDeserializationError.DeserializationExceptionOrigin
         try:
             key = key_deserializer(topic, key_buffer, headers)
         except RecordDeserializationError:
             raise
         except Exception as exc:  # noqa: BLE001 - wrapped like Java
-            raise _attach_deserialization_payload(
-                RecordDeserializationError(
-                    f"Error deserializing key for partition {topic}-{partition} "
-                    f"at offset {nr.offset}"
-                ),
-                topic=topic, partition=partition, offset=nr.offset,
-                key_buffer=key_buffer, value_buffer=value_buffer,
-            ) from exc
+            raise _deserialization_error(
+                origin.KEY, tp, nr, key_buffer, value_buffer, headers, exc) from exc
         try:
             value = value_deserializer(topic, value_buffer, headers)
         except RecordDeserializationError:
             raise
         except Exception as exc:  # noqa: BLE001 - wrapped like Java
-            raise _attach_deserialization_payload(
-                RecordDeserializationError(
-                    f"Error deserializing value for partition "
-                    f"{topic}-{partition} at offset {nr.offset}"
-                ),
-                topic=topic, partition=partition, offset=nr.offset,
-                key_buffer=key_buffer, value_buffer=value_buffer,
-            ) from exc
+            raise _deserialization_error(
+                origin.VALUE, tp, nr, key_buffer, value_buffer, headers, exc) from exc
 
         record: ConsumerRecord[Any, Any] = ConsumerRecord(
             topic=topic,

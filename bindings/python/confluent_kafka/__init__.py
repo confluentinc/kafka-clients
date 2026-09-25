@@ -14,41 +14,41 @@
 
 """The ``confluent_kafka`` package root.
 
-Mirrors Java's package tree with the ``clients`` segment dropped (spec §4). The
-root holds the JDK-type analogs the API surface uses — classes that come from
-Java itself rather than a Kafka package, so they have no Kafka package to mirror
-(``IllegalStateError``, ``IllegalArgumentError``, ``ConcurrentModificationError``
-and the Java-base ``TimeoutError``) — and the ``Duration`` alias.
-
-The everyday client names (``KafkaConsumer``, ``KafkaProducer``, ``KafkaError``,
-…) are **not** re-exported here yet: whether the root re-exports them is not
-decided (spec §4), so importing them goes through their own module for now
-(``from confluent_kafka.consumer import KafkaConsumer``).
+The Python client of the Java client's API (CLAUDE.md, Python Binding
+Conventions). Each Java package is a module here, with ``clients`` dropped
+(``org.apache.kafka.clients.consumer`` -> ``confluent_kafka.consumer``), and
+every type is imported from its module (``from confluent_kafka.consumer import
+KafkaConsumer``). By rule 3 the root exports only ``Duration`` and the Java
+built-in exception classes the translated code throws (``IllegalStateError``,
+``IllegalArgumentError``, ``ConcurrentModificationError``, ``TimeoutError``,
+``NoSuchElementError``, ``NullPointerError``), generated with the rest of the
+error hierarchy by ``cargo xtask generate-error-codes``.
 """
 
 from __future__ import annotations
 
 from datetime import timedelta
 
-# The JDK-type analogs live at the package root (spec §4 / §5.5). They are
-# generated — names, parent chains and ``_ffi_id`` — from the Java exception
-# sources by ``cargo xtask generate-error-codes``; see
-# ``confluent_kafka/_generated_errors.py``.
-from ._generated_errors import (
-    ConcurrentModificationError,
-    IllegalArgumentError,
-    IllegalStateError,
-    TimeoutError,
-)
-
-# ``Duration`` is Java's ``java.time.Duration`` mapped to a number of seconds or
-# a ``timedelta`` (rule 3.7). A negative value is rejected where it is consumed.
+#: Java's ``java.time.Duration`` as an input: seconds, or a ``timedelta``
+#: (CLAUDE.md, Python Binding Conventions, Types). A negative value raises
+#: ``IllegalArgumentError`` where Java rejects it.
 Duration = float | timedelta
 
-__all__ = [
+__all__ = ["Duration"]
+
+# BEGIN GENERATED ERRORS (cargo xtask generate-error-codes; do not edit)
+from .concurrent_modification_error import ConcurrentModificationError as ConcurrentModificationError
+from .illegal_argument_error import IllegalArgumentError as IllegalArgumentError
+from .illegal_state_error import IllegalStateError as IllegalStateError
+from .no_such_element_error import NoSuchElementError as NoSuchElementError
+from .null_pointer_error import NullPointerError as NullPointerError
+from .timeout_error import TimeoutError as TimeoutError
+__all__ += [
     "ConcurrentModificationError",
-    "Duration",
     "IllegalArgumentError",
     "IllegalStateError",
+    "NoSuchElementError",
+    "NullPointerError",
     "TimeoutError",
 ]
+# END GENERATED ERRORS

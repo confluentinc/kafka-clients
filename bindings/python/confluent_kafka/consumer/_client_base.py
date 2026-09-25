@@ -29,7 +29,7 @@ from typing import Any, Callable, TypeVar
 import _confluentkafka as _lib  # type: ignore[import-not-found]
 
 from confluent_kafka import ConcurrentModificationError
-from confluent_kafka.common.errors import from_ffi_error
+from confluent_kafka._errors import from_ffi_error
 from confluent_kafka.common.metric import Metric
 from confluent_kafka.common.metric_name import MetricName
 from confluent_kafka.common.partition_info import PartitionInfo
@@ -63,7 +63,7 @@ def _concurrent_error() -> ConcurrentModificationError:
     # multi-threaded access." The FFI's single-owner guard rejects a concurrent
     # op; a null return from a sync state read means the guard was rejected.
     return ConcurrentModificationError(
-        "KafkaConsumer is not safe for multi-threaded access."
+        message="KafkaConsumer is not safe for multi-threaded access."
     )
 
 

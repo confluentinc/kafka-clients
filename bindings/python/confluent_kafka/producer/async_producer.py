@@ -34,7 +34,7 @@ from typing import TYPE_CHECKING, Callable, Generic, TypeVar, cast
 import _confluentkafka as _lib  # type: ignore[import-not-found]
 
 from confluent_kafka import IllegalArgumentError
-from confluent_kafka.common.errors import from_ffi_error
+from confluent_kafka._errors import from_ffi_error
 
 from ._base import (
     _ProducerState,
@@ -54,7 +54,8 @@ if TYPE_CHECKING:
         TopicPartition,
         Uuid,
     )
-    from confluent_kafka.common.metric import KafkaMetric, Metric
+    from confluent_kafka.common.kafka_metric import KafkaMetric
+    from confluent_kafka.common.metric import Metric
     from confluent_kafka.consumer import ConsumerGroupMetadata, OffsetAndMetadata
 
     from ._send import DeliveryCallback
@@ -217,7 +218,7 @@ class AsyncProducer(Generic[K, V], _ProducerState):
             self, *, timeout: Duration | None = None) -> Uuid:
         self._check_not_closed()
         if timeout is not None and _timeout_seconds(timeout) < 0:
-            raise IllegalArgumentError("The timeout cannot be negative.")
+            raise IllegalArgumentError(message="The timeout cannot be negative.")
         raise _telemetry_unsupported("clientInstanceId")
 
     # ---- lifecycle ----------------------------------------------------------
@@ -325,7 +326,7 @@ def _free_payload(payload: tuple[object, ...], partitions: bool) -> None:
 
 
 def _telemetry_unsupported(method: str) -> BaseException:
-    from confluent_kafka.common.errors import KafkaError as _KafkaError
+    from confluent_kafka.common.kafka_error import KafkaError as _KafkaError
     return _KafkaError(
-        f"{method} is not supported: the Rust core does not implement "
+        message=f"{method} is not supported: the Rust core does not implement "
         f"client telemetry (KIP-714)")

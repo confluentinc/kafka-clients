@@ -32,7 +32,7 @@ from .producer_record import ProducerRecord
 from .record_metadata import RecordMetadata
 
 if TYPE_CHECKING:
-    from confluent_kafka.common.errors import KafkaError
+    from confluent_kafka.common.kafka_error import KafkaError
 
 # Java: org.apache.kafka.clients.producer.Callback. Defined here beside its use
 # (the ``callback`` parameter of ``send``), spec §6.1.
@@ -49,3 +49,10 @@ __all__ = [
     "ProducerRecord",
     "RecordMetadata",
 ]
+
+# BEGIN GENERATED ERRORS (cargo xtask generate-error-codes; do not edit)
+from .buffer_exhausted_error import BufferExhaustedError as BufferExhaustedError
+__all__ += [
+    "BufferExhaustedError",
+]
+# END GENERATED ERRORS

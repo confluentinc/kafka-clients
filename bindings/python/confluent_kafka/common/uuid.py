@@ -110,7 +110,7 @@ class Uuid:
         """
         if len(str) > 24:
             raise IllegalArgumentError(
-                f"Input string with prefix `{str[:24]}` is too long to be "
+                message=f"Input string with prefix `{str[:24]}` is too long to be "
                 f"decoded as a base64 UUID"
             )
         # Java's URL decoder tolerates the missing padding; add it back for
@@ -120,11 +120,11 @@ class Uuid:
             raw = base64.urlsafe_b64decode(padded)
         except Exception as exc:  # noqa: BLE001 - mirror Java's IllegalArgumentException reject
             raise IllegalArgumentError(
-                f"Input string `{str}` could not be decoded as a base64 UUID"
+                message=f"Input string `{str}` could not be decoded as a base64 UUID"
             ) from exc
         if len(raw) != 16:
             raise IllegalArgumentError(
-                f"Input string `{str}` decoded as {len(raw)} bytes, which is not "
+                message=f"Input string `{str}` decoded as {len(raw)} bytes, which is not "
                 f"equal to the expected 16 bytes of a base64-encoded UUID"
             )
         msb = int.from_bytes(raw[0:8], "big", signed=True)

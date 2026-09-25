@@ -718,26 +718,28 @@ def test_error_code_reads_the_ffi_id_of_a_package_error():
     # The FFI id equals Java's wire code for an API error, which is what
     # COORDINATOR_ERROR_CODES / DISCONNECT_ERROR_CODES are keyed by.
     errors = _errors()
-    assert error_code(errors.NotCoordinatorError("x")) == 16
-    assert error_code(errors.NetworkError("x")) == 13
+    assert error_code(errors.NotCoordinatorError(message="x")) == 16
+    assert error_code(errors.NetworkError(message="x")) == 13
 
 
-def test_error_code_is_none_for_the_package_base_error():
-    # The base KafkaError carries no FFI id (Java's KafkaException has no code).
-    errors = _errors()
-    assert error_code(errors.KafkaError("x")) is None
+def test_error_code_is_unknown_server_error_for_the_package_base_error():
+    # The base KafkaError carries the id the core reports for a bare
+    # KafkaException: UNKNOWN_SERVER_ERROR (-1), which UnknownServerError owns
+    # in the id -> class table (CLAUDE.md, Python Binding Conventions, Errors).
+    common = pytest.importorskip("confluent_kafka.common")
+    assert error_code(common.KafkaError(message="x")) == -1
 
 
 def test_error_is_retriable_follows_the_package_hierarchy():
     errors = _errors()
-    assert error_is_retriable(errors.NotCoordinatorError("x")) is True
-    assert error_is_retriable(errors.UnknownServerError("x")) is False
+    assert error_is_retriable(errors.NotCoordinatorError(message="x")) is True
+    assert error_is_retriable(errors.UnknownServerError(message="x")) is False
 
 
 def test_is_wakeup_recognizes_the_package_wakeup_error():
     errors = _errors()
-    assert SoakClient._is_wakeup(errors.WakeupError("")) is True
-    assert SoakClient._is_wakeup(errors.NotCoordinatorError("x")) is False
+    assert SoakClient._is_wakeup(errors.WakeupError()) is True
+    assert SoakClient._is_wakeup(errors.NotCoordinatorError(message="x")) is False
 
 
 # ---------------------------------------------------------------------------

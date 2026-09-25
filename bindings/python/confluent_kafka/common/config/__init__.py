@@ -12,16 +12,20 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""``confluent_kafka.common.config`` — mirror of
-``org.apache.kafka.common.config``.
+"""``confluent_kafka.common.config``: Java's ``org.apache.kafka.common.config``.
 
-For this phase it carries the generated ``ConfigError`` (Java's
-``ConfigException``, which — unlike the JDK API-misuse analogs — extends
-``KafkaException`` and so lives under ``KafkaError``).
+It holds ``ConfigError`` (Java's ``ConfigException``). The config classes
+themselves are not translated: their keys are the keys of ``configs``
+(CLAUDE.md, Python Binding Conventions, Scope).
 """
 
 from __future__ import annotations
 
-from ._generated_errors import ConfigError
+__all__: list[str] = []
 
-__all__ = ["ConfigError"]
+# BEGIN GENERATED ERRORS (cargo xtask generate-error-codes; do not edit)
+from .config_error import ConfigError as ConfigError
+__all__ += [
+    "ConfigError",
+]
+# END GENERATED ERRORS

@@ -46,7 +46,8 @@ from confluent_kafka.common.serialization import (
     uuid_deserializer,
     uuid_serializer,
 )
-from confluent_kafka.common.errors import KafkaError, TopicAuthorizationError
+from confluent_kafka.common import KafkaError
+from confluent_kafka.common.errors import TopicAuthorizationError
 from confluent_kafka.consumer import (
     ConsumerRecord,
     ConsumerRecords,
@@ -135,7 +136,7 @@ def _error_reexport_is_typed() -> None:
     # Without the generated ``common/errors/__init__.pyi`` the star re-export left
     # mypy inferring ``object`` here, which this assert_type would then fail.
     assert_type(TopicAuthorizationError, type[TopicAuthorizationError])
-    err = TopicAuthorizationError("nope")
+    err = TopicAuthorizationError(message="nope")
     assert_type(err, TopicAuthorizationError)
     # A KafkaError-typed slot accepts it (the re-export carries the base relation).
     base: KafkaError = err
@@ -147,7 +148,7 @@ def test_error_reexport_derives_from_kafka_error() -> None:
     subclass (its static typing is enforced by ``_error_reexport_is_typed`` under
     ``mypy --strict``)."""
     assert issubclass(TopicAuthorizationError, KafkaError)
-    assert isinstance(TopicAuthorizationError("x"), KafkaError)
+    assert isinstance(TopicAuthorizationError(message="x"), KafkaError)
 def _consumer_family_types(c: object = None) -> None:
     """P5: the consumer clients' method return types and overloads.
 
