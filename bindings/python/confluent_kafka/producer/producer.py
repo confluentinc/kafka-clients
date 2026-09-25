@@ -38,11 +38,10 @@ from typing import TYPE_CHECKING, Generic, TypeVar
 import _confluentkafka as _lib  # type: ignore[import-not-found]
 
 from confluent_kafka.common.kafka_error import KafkaError
-from confluent_kafka.illegal_state_error import IllegalStateError
 from confluent_kafka.null_pointer_error import NullPointerError
 
 from ._base import (
-    CLOSED_MESSAGE,
+    CLOSED_WHILE_SENDING_MESSAGE,
     FLUSH_IN_CALLBACK_MESSAGE,
     LONG_MAX_VALUE,
     _ProducerState,
@@ -109,7 +108,7 @@ class Producer(Generic[K, V], _ProducerState):
         """
         self._check_not_closed()
         self._drain_sync()
-        run_sync(lambda cb: _lib.Producer_init_transactions_async(self._c_producer, cb))
+        run_sync(lambda cb: self._call(_lib.Producer_init_transactions_async, cb))
 
     def begin_transaction(self) -> None:
         """Should be called before the start of each new transaction. Note that
@@ -124,7 +123,7 @@ class Producer(Generic[K, V], _ProducerState):
         """
         self._check_not_closed()
         self._drain_sync()
-        raise_if_error(_lib.Producer_begin_transaction(self._c_producer))
+        raise_if_error(self._call(_lib.Producer_begin_transaction))
 
     def send_offsets_to_transaction(
             self, *, offsets: Mapping[TopicPartition, OffsetAndMetadata],
@@ -157,8 +156,8 @@ class Producer(Generic[K, V], _ProducerState):
         self._drain_sync()
         spec = offsets_to_spec(offsets)
         fields = group_metadata_fields(group_metadata)
-        run_sync(lambda cb: _lib.Producer_send_offsets_to_transaction_fields_async(
-            self._c_producer, spec, fields, cb))
+        run_sync(lambda cb: self._call(_lib.Producer_send_offsets_to_transaction_fields_async,
+                                       spec, fields, cb))
 
     def commit_transaction(self) -> None:
         """Commits the ongoing transaction. This method will flush any unsent
@@ -183,7 +182,7 @@ class Producer(Generic[K, V], _ProducerState):
         self._check_not_closed()
         sent = list(self._futures)
         self._drain_sync()
-        run_sync(lambda cb: _lib.Producer_commit_transaction_async(self._c_producer, cb))
+        run_sync(lambda cb: self._call(_lib.Producer_commit_transaction_async, cb))
         if not in_callback(self):
             # Their callbacks run on the completion thread, which a callback
             # calling this method is blocking.
@@ -204,7 +203,7 @@ class Producer(Generic[K, V], _ProducerState):
         """
         self._check_not_closed()
         self._drain_sync()
-        run_sync(lambda cb: _lib.Producer_abort_transaction_async(self._c_producer, cb))
+        run_sync(lambda cb: self._call(_lib.Producer_abort_transaction_async, cb))
 
     def send(self, *, record: ProducerRecord[K, V],
              callback: Callback | None = None) -> Future[RecordMetadata]:
@@ -263,18 +262,24 @@ class Producer(Generic[K, V], _ProducerState):
             else:
                 future.set_result(metadata)
 
-        full = _lib.Producer_send(self._c_producer, native, cb)
-        if full is None:
-            # A concurrent close() won the race with this send.
-            raise IllegalStateError(message=CLOSED_MESSAGE)
-        self._track(future)
-        if full:
-            # The buffer is full: wait until the send task frees capacity, as
-            # Java's send() blocks on buffer.memory.
-            space: Future[None] = Future()
-            if not _lib.Producer_on_space_available(
-                    self._c_producer, lambda: space.set_result(None)):
-                space.result()
+        # A close() that began since the check above (the serializers ran in
+        # between) refuses the record as Java's RecordAccumulator.append does.
+        closed_while_sending = KafkaError(message=CLOSED_WHILE_SENDING_MESSAGE)
+        space: Future[None] | None = None
+        with self._use(closed_while_sending) as c_producer:
+            full = _lib.Producer_send(c_producer, native, cb)
+            if full is None:
+                raise closed_while_sending
+            self._track(future)
+            if full:
+                # The buffer is full: wait (below, not as a use) until the send
+                # task frees capacity, as Java's send() blocks on buffer.memory.
+                waiter: Future[None] = Future()
+                if not _lib.Producer_on_space_available(
+                        c_producer, lambda: waiter.set_result(None)):
+                    space = waiter
+        if space is not None:
+            space.result()
         return future
 
     def flush(self) -> None:
@@ -300,7 +305,7 @@ class Producer(Generic[K, V], _ProducerState):
         self._check_not_closed()
         sent = list(self._futures)
         self._drain_sync()
-        run_sync(lambda cb: _lib.Producer_flush_async(self._c_producer, cb))
+        run_sync(lambda cb: self._call(_lib.Producer_flush_async, cb))
         concurrent.futures.wait(sent)
 
     def partitions_for(self, *, topic: str) -> list[PartitionInfo]:
@@ -313,7 +318,7 @@ class Producer(Generic[K, V], _ProducerState):
             raise NullPointerError(message="topic cannot be null")
         self._check_not_closed()
         list_handle, error = await_payload(
-            lambda cb: _lib.Producer_partitions_for_async(self._c_producer, topic, cb))
+            lambda cb: self._call(_lib.Producer_partitions_for_async, topic, cb))
         if error:
             if list_handle:
                 _lib.PartitionInfoList_drain(list_handle)
@@ -323,7 +328,7 @@ class Producer(Generic[K, V], _ProducerState):
     def metrics(self) -> dict[MetricName, Metric]:
         """Get the full set of internal metrics maintained by the producer."""
         self._check_not_closed()
-        return to_metrics_map(_lib.Producer_metrics(self._c_producer))
+        return to_metrics_map(self._call(_lib.Producer_metrics))
 
     def close(self, *, timeout: Duration | None = None) -> None:
         """Close this producer: ``close()`` waits until all previously sent
@@ -342,7 +347,8 @@ class Producer(Generic[K, V], _ProducerState):
         ``IllegalArgumentError``.
         """
         timeout_ms = close_timeout_ms(timeout)
-        if self._closed:
+        # Check and set at once: exactly one close() tears the producer down.
+        if not self._begin_close():
             return
         if in_callback(self):
             if timeout_ms is None or timeout_ms > 0:
@@ -352,7 +358,6 @@ class Producer(Generic[K, V], _ProducerState):
                     "close with a non-zero timeout from the producer call-back.",
                     LONG_MAX_VALUE if timeout_ms is None else timeout_ms)
             timeout_ms = 0
-        self._closed = True
         c_producer = self._c_producer
         # Refuse further records and hand the accumulated ones to the Rust
         # producer, waiting for that within the close timeout (Java's close
@@ -369,6 +374,9 @@ class Producer(Generic[K, V], _ProducerState):
                 run_sync(lambda cb: _lib.Producer_close_with_timeout_async(
                     c_producer, remaining_ms, cb))
         finally:
+            # No call that could still touch the handle is in flight once this
+            # returns; then it is freed.
+            self._wait_for_uses()
             _lib.Producer_destroy(c_producer)
             self._close_serializers()
 
