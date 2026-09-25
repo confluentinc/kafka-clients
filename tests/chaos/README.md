@@ -171,6 +171,15 @@ Run via `cargo xtask chaos …`. Defaults mirror `chaos.py` where they overlap.
   index is written into the first bytes of the value and padded to this size; the
   key stays the 8-byte index (logical identity is preserved even for
   `--msg-size < 8`).
+  Records larger than the default 1 MiB request limit (for example
+  `--msg-size 1048576`) raise the producer's `max.request.size` and the
+  brokers' `message.max.bytes` to the value size plus 16 KiB of headroom for
+  record and batch overhead; both are printed at startup. Nothing else changes:
+  replica and consumer fetches always return at least one batch, however large
+  (KIP-74). At large sizes `--rps` is usually above what one host can carry
+  (1000 × 1 MiB is about 1 GiB/s); the producer is then paced by backpressure,
+  and the achieved rate is printed when it finishes:
+  `chaos: producer-… sent N records in Ts (R records/s, M MiB/s, target X records/s)`.
 - `--commit sync|async` (`sync`). A gRPC consumer performs `async` as a
   synchronous commit on the server side (the offsets are committed, the async
   timing is not exercised); the run prints a notice when this applies.
@@ -281,6 +290,13 @@ failing `committed()` call itself is reported as
 - `--topic-recreate [N]` — also delete/recreate the topic
 - `--reassign-partitions [N]` — also reassign partitions (data moves)
 - `--change-leader [N]` — also do a preferred-leader change (no data move)
+- `--all-brokers-down [N]` — also take **every** broker down at once (SIGKILL,
+  in parallel), keep the whole cluster down for `--outage-s`, then start them
+  all and wait for each to be operational (`--up-wait-s`). Brokers held down by
+  `--leave-broker-down` stay down. Clients see a full outage: sends queue and
+  retry, and the consumer loses its coordinator.
+- `--outage-s N` (30) — how long the cluster stays fully down
+  (`--all-brokers-down` only, `>= 1`)
 - `--cycles N` (3) — number of chaos cycles (`>= 1`)
 - `--unclean` — SIGKILL instead of SIGTERM (broker-roll)
 - `--stop-s N` (5) — seconds a broker stays down per roll
@@ -630,6 +646,55 @@ leaves full diagnostics on disk.
 - **Until-fail loop** (`--repeat N`): run up to N times, stop on the first
   failure, appending one TSV line per iteration to
   `target/chaos-runs/run-history.tsv` (the `chaos_until_fail.sh` analog).
+
+## Matrix runs (`cargo xtask chaos-matrix`)
+
+A matrix file lists scenarios, one per line, as
+`ID | description | flags [| protocols]` (`#` starts a comment). The runner
+executes every scenario at every message size and every security protocol, one
+run at a time. An optional fourth column limits a scenario to the protocols it
+lists, for example `| plaintext`. The runner adds
+`--security-protocol P --msg-size S --rps R --reports` to each run's flags.
+[`matrix/rust-client.txt`](matrix/rust-client.txt) is the Rust client matrix.
+
+```
+cargo xtask chaos-matrix --matrix tests/chaos/matrix/rust-client.txt
+```
+
+Flags and their defaults:
+
+- `--protocols plaintext,ssl,sasl_ssl`
+- `--msg-sizes 100,1048576`
+- `--rps 1000`
+- `--only ID,ID` runs only those scenarios.
+- `--run-timeout-min 240` sends a run SIGINT when it exceeds this, then SIGKILL
+  after 3 minutes. The run is recorded as `TIMEOUT`.
+- `--out DIR` (`target/chaos-matrix/<matrix name>`) sets the output directory.
+  Re-running with the same directory resumes: recorded runs are skipped, and
+  `--rerun-failed` retries the ones that did not pass.
+- `--check-only` builds the test binary, has the harness validate every run's
+  configuration, and stops. A full run does the same check before starting its
+  first cluster, so a bad line fails in seconds.
+
+To stop a matrix cleanly, create a file named `STOP` in the output directory.
+The runner exits before starting the next run, and the same command resumes it.
+
+Runs go in order of size, then protocol, then scenario. Everything is written
+under the output directory:
+
+| Path | Content |
+|---|---|
+| `summary.md` | Pass/fail grid per message size, scenario commands, per-run metrics, and the reasons for every run that did not pass. Rewritten after each run. |
+| `results.tsv` | One machine-readable line per run. |
+| `matrix.log` | Timestamped progress. |
+| `environment.txt` | Commit, host, Docker and broker image, appended per session. |
+| `runs/<id>-<protocol>-<size>/run.log` | The run's complete output. |
+| `runs/<id>-<protocol>-<size>/command.txt` | The equivalent `cargo xtask chaos` command, to replay the run by hand. |
+| `runs/<id>-<protocol>-<size>/reports/` | The run's [reports](#reports---reports). |
+
+Outcomes are `PASS`, `FAIL` (the verdict failed), `FAIL (panic)`,
+`FAIL (watchdog)`, `FAIL (interrupted)`, `TIMEOUT`, `CONFIG-ERROR`, and `ERROR`
+(the run ended before a verdict, for example the cluster did not start).
 
 ## Not yet implemented (vs. `chaos.py`)
 
