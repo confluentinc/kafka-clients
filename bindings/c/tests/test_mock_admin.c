@@ -1916,102 +1916,6 @@ static void test_mock_admin_list_config_resources_async_null_handle(void) {
     TEST_ASSERT_FALSE(r.had_result);
 }
 
-// ---- listClientMetricsResources -------------------------------------------
-
-static void test_mock_admin_list_client_metrics_resources(void) {
-    kafka_admin_AdminClient_t *admin = kafka_admin_MockAdminClient_new(1);
-
-    kafka_admin_ListClientMetricsResourcesResult_t *result = NULL;
-    TEST_ASSERT_NULL(
-        kafka_admin_AdminClient_list_client_metrics_resources(admin, -1, &result));
-    TEST_ASSERT_NOT_NULL(result);
-    TEST_ASSERT_EQUAL_INT32(0, kafka_admin_ListClientMetricsResourcesResult_count(result));
-    kafka_admin_ListClientMetricsResourcesResult_destroy(result);
-
-    /* Altering a CLIENT_METRICS resource creates it, which is how Java's mock
-     * seeds `clientMetricsConfigs` (MockAdminClient
-     * handleIncrementalResourceAlteration, CLIENT_METRICS branch). */
-    alter_one_config(admin, RESOURCE_TYPE_CLIENT_METRICS, "cm-b", "interval.ms", "1000",
-                     OP_TYPE_SET);
-    alter_one_config(admin, RESOURCE_TYPE_CLIENT_METRICS, "cm-a", "interval.ms", "2000",
-                     OP_TYPE_SET);
-
-    TEST_ASSERT_NULL(
-        kafka_admin_AdminClient_list_client_metrics_resources(admin, -1, &result));
-    TEST_ASSERT_NOT_NULL(result);
-    TEST_ASSERT_EQUAL_INT32(2, kafka_admin_ListClientMetricsResourcesResult_count(result));
-    /* Sorted by name. */
-    TEST_ASSERT_EQUAL_STRING("cm-a",
-                             kafka_admin_ListClientMetricsResourcesResult_get_name(result, 0));
-    TEST_ASSERT_EQUAL_STRING("cm-b",
-                             kafka_admin_ListClientMetricsResourcesResult_get_name(result, 1));
-    TEST_ASSERT_NULL(kafka_admin_ListClientMetricsResourcesResult_get_name(result, 2));
-    TEST_ASSERT_NULL(kafka_admin_ListClientMetricsResourcesResult_get_name(result, -1));
-    kafka_admin_ListClientMetricsResourcesResult_destroy(result);
-    kafka_admin_ListClientMetricsResourcesResult_destroy(NULL);
-
-    /* The same resources show up through listConfigResources, the API that
-     * supersedes this deprecated one. */
-    const int32_t cm_only[1] = {RESOURCE_TYPE_CLIENT_METRICS};
-    kafka_admin_ListConfigResourcesResult_t *listed = NULL;
-    TEST_ASSERT_NULL(
-        kafka_admin_AdminClient_list_config_resources(admin, cm_only, 1, -1, &listed));
-    TEST_ASSERT_EQUAL_INT32(2, kafka_admin_ListConfigResourcesResult_count(listed));
-    kafka_admin_ListConfigResourcesResult_destroy(listed);
-
-    kafka_admin_AdminClient_destroy(admin);
-}
-
-typedef struct {
-    atomic_int fired;
-    int had_result;
-    int had_error;
-    int32_t count;
-} list_client_metrics_async_result_t;
-
-static void on_list_client_metrics(kafka_admin_ListClientMetricsResourcesResult_t *result,
-                                   kafka_common_Error_t *error, void *user_data) {
-    list_client_metrics_async_result_t *r = (list_client_metrics_async_result_t *)user_data;
-    if (result != NULL) {
-        r->had_result = 1;
-        r->count = kafka_admin_ListClientMetricsResourcesResult_count(result);
-        kafka_admin_ListClientMetricsResourcesResult_destroy(result);
-    }
-    if (error != NULL) {
-        r->had_error = 1;
-        kafka_common_Error_destroy(error);
-    }
-    atomic_fetch_add(&r->fired, 1);
-}
-
-static void test_mock_admin_list_client_metrics_resources_async(void) {
-    kafka_admin_AdminClient_t *admin = kafka_admin_MockAdminClient_new(1);
-    alter_one_config(admin, RESOURCE_TYPE_CLIENT_METRICS, "cm-async", "interval.ms", "1000",
-                     OP_TYPE_SET);
-
-    list_client_metrics_async_result_t r = {0};
-    atomic_init(&r.fired, 0);
-    kafka_admin_AdminClient_list_client_metrics_resources_async(admin, -1,
-                                                                on_list_client_metrics, &r);
-    TEST_ASSERT_TRUE(wait_for(&r.fired, 1));
-    TEST_ASSERT_EQUAL_INT(1, atomic_load(&r.fired));
-    TEST_ASSERT_TRUE(r.had_result);
-    TEST_ASSERT_FALSE(r.had_error);
-    TEST_ASSERT_EQUAL_INT32(1, r.count);
-    kafka_admin_AdminClient_destroy(admin);
-}
-
-/* A NULL handle must still honor the callback obligation, with an error. */
-static void test_mock_admin_list_client_metrics_resources_async_null_handle(void) {
-    list_client_metrics_async_result_t r = {0};
-    atomic_init(&r.fired, 0);
-    kafka_admin_AdminClient_list_client_metrics_resources_async(NULL, -1,
-                                                                on_list_client_metrics, &r);
-    TEST_ASSERT_EQUAL_INT(1, atomic_load(&r.fired));
-    TEST_ASSERT_TRUE(r.had_error);
-    TEST_ASSERT_FALSE(r.had_result);
-}
-
 // ---- describeLogDirs -------------------------------------------------------
 
 static void test_mock_admin_describe_log_dirs(void) {
@@ -2398,7 +2302,6 @@ static void test_mock_admin_b2_null_out_result(void) {
     TEST_ASSERT_NULL(kafka_admin_AdminClient_incremental_alter_configs(
         admin, types, names, keys, values, ops, 1, -1, false, NULL));
     TEST_ASSERT_NULL(kafka_admin_AdminClient_list_config_resources(admin, NULL, 0, -1, NULL));
-    TEST_ASSERT_NULL(kafka_admin_AdminClient_list_client_metrics_resources(admin, -1, NULL));
     TEST_ASSERT_NULL(kafka_admin_AdminClient_describe_log_dirs(admin, brokers, 1, -1, NULL));
     TEST_ASSERT_NULL(kafka_admin_AdminClient_alter_replica_log_dirs(
         admin, topics, partitions, brokers, log_dirs, 1, -1, NULL));
@@ -3204,12 +3107,12 @@ static void test_mock_admin_b3_null_out_result(void) {
 // ---------------------------------------------------------------------------
 // B4 — groups and group offsets
 //
-// Java's own MockAdminClient implements only two of these nine RPCs
-// (`listGroups` / `listConsumerGroups` from `groupConfigs`, and
-// `listConsumerGroupOffsets` from `committedOffsets`); the other seven throw
+// Java's own MockAdminClient implements only two of these eight RPCs
+// (`listGroups` from `groupConfigs`, and `listConsumerGroupOffsets` from
+// `committedOffsets`); the other six throw
 // `UnsupportedOperationException("Not implemented yet")`, which the Rust mock
 // surfaces as an exceptional future per `admin-client.md` §9. So the tests
-// below split into round-trip tests for the first three and
+// below split into round-trip tests for the first two and
 // where-does-the-error-land tests for the rest — and the latter are not
 // filler: they pin whether a failure arrives per key or as the call's error,
 // which is exactly what each Java `*Result`'s future shape decides.
@@ -3374,74 +3277,6 @@ static void test_mock_admin_list_groups_async_null_handle(void) {
     TEST_ASSERT_EQUAL_INT(1, atomic_load(&r.fired));
     TEST_ASSERT_EQUAL_INT(0, r.had_result);
     TEST_ASSERT_EQUAL_INT(1, r.had_error);
-}
-
-// ---- listConsumerGroups ----------------------------------------------------
-
-static void test_mock_admin_list_consumer_groups_reports_seeded_groups(void) {
-    kafka_admin_AdminClient_t *admin = kafka_admin_MockAdminClient_new(1);
-    seed_group(admin, "lcg-a");
-
-    kafka_admin_ListConsumerGroupsResult_t *result = NULL;
-    TEST_ASSERT_NULL(
-        kafka_admin_AdminClient_list_consumer_groups(admin, NULL, 0, NULL, 0, -1, &result));
-    TEST_ASSERT_NOT_NULL(result);
-    TEST_ASSERT_EQUAL_INT32(1, kafka_admin_ListConsumerGroupsResult_valid_count(result));
-    TEST_ASSERT_EQUAL_INT32(0, kafka_admin_ListConsumerGroupsResult_error_count(result));
-
-    const kafka_admin_ConsumerGroupListing_t *listing =
-        kafka_admin_ListConsumerGroupsResult_get_valid(result, 0);
-    TEST_ASSERT_NOT_NULL(listing);
-    TEST_ASSERT_EQUAL_STRING("lcg-a", kafka_admin_ConsumerGroupListing_group_id(listing));
-    /* MockAdminClient.java:743 uses `new ConsumerGroupListing(g, false)`, whose
-     * state and type are empty Optionals: null strings here, not "Unknown". */
-    TEST_ASSERT_FALSE(kafka_admin_ConsumerGroupListing_is_simple_consumer_group(listing));
-    TEST_ASSERT_NULL(kafka_admin_ConsumerGroupListing_group_state(listing));
-    TEST_ASSERT_NULL(kafka_admin_ConsumerGroupListing_state(listing));
-    TEST_ASSERT_NULL(kafka_admin_ConsumerGroupListing_group_type(listing));
-
-    TEST_ASSERT_NULL(kafka_admin_ListConsumerGroupsResult_get_valid(result, 1));
-    kafka_admin_ListConsumerGroupsResult_destroy(result);
-
-    kafka_admin_AdminClient_destroy(admin);
-}
-
-typedef struct {
-    atomic_int fired;
-    int had_result;
-    int had_error;
-    int32_t valid_count;
-} list_consumer_groups_async_result_t;
-
-static void on_list_consumer_groups(kafka_admin_ListConsumerGroupsResult_t *result,
-                                    kafka_common_Error_t *error, void *user_data) {
-    list_consumer_groups_async_result_t *r = (list_consumer_groups_async_result_t *)user_data;
-    r->had_result = result != NULL;
-    r->had_error = error != NULL;
-    if (result != NULL) {
-        r->valid_count = kafka_admin_ListConsumerGroupsResult_valid_count(result);
-        kafka_admin_ListConsumerGroupsResult_destroy(result);
-    }
-    if (error != NULL) {
-        kafka_common_Error_destroy(error);
-    }
-    atomic_fetch_add(&r->fired, 1);
-}
-
-static void test_mock_admin_list_consumer_groups_async(void) {
-    kafka_admin_AdminClient_t *admin = kafka_admin_MockAdminClient_new(1);
-    seed_group(admin, "lcg-async");
-
-    list_consumer_groups_async_result_t r = {0};
-    atomic_init(&r.fired, 0);
-    kafka_admin_AdminClient_list_consumer_groups_async(admin, NULL, 0, NULL, 0, -1,
-                                                       on_list_consumer_groups, &r);
-    TEST_ASSERT_TRUE(wait_for(&r.fired, 1));
-    TEST_ASSERT_EQUAL_INT(1, r.had_result);
-    TEST_ASSERT_EQUAL_INT(0, r.had_error);
-    TEST_ASSERT_EQUAL_INT32(1, r.valid_count);
-
-    kafka_admin_AdminClient_destroy(admin);
 }
 
 // ---- describeConsumerGroups / describeClassicGroups ------------------------
@@ -4266,7 +4101,6 @@ static void test_mock_admin_b4_null_out_result(void) {
     const char *members[1] = {"i"};
 
     TEST_ASSERT_NULL(kafka_admin_AdminClient_list_groups(admin, NULL, 0, NULL, 0, NULL, 0, -1, NULL));
-    TEST_ASSERT_NULL(kafka_admin_AdminClient_list_consumer_groups(admin, NULL, 0, NULL, 0, -1, NULL));
     TEST_ASSERT_NULL(
         kafka_admin_AdminClient_describe_consumer_groups(admin, groups, 1, -1, false, NULL));
     TEST_ASSERT_NULL(
@@ -6310,9 +6144,6 @@ int main(void) {
     RUN_TEST(test_mock_admin_list_config_resources);
     RUN_TEST(test_mock_admin_list_config_resources_async);
     RUN_TEST(test_mock_admin_list_config_resources_async_null_handle);
-    RUN_TEST(test_mock_admin_list_client_metrics_resources);
-    RUN_TEST(test_mock_admin_list_client_metrics_resources_async);
-    RUN_TEST(test_mock_admin_list_client_metrics_resources_async_null_handle);
     RUN_TEST(test_mock_admin_describe_log_dirs);
     RUN_TEST(test_mock_admin_describe_log_dirs_async);
     RUN_TEST(test_mock_admin_describe_log_dirs_async_null_handle);
@@ -6349,8 +6180,6 @@ int main(void) {
     RUN_TEST(test_mock_admin_list_groups_with_no_groups_is_empty);
     RUN_TEST(test_mock_admin_list_groups_async);
     RUN_TEST(test_mock_admin_list_groups_async_null_handle);
-    RUN_TEST(test_mock_admin_list_consumer_groups_reports_seeded_groups);
-    RUN_TEST(test_mock_admin_list_consumer_groups_async);
     RUN_TEST(test_mock_admin_describe_consumer_groups_reports_unsupported_per_group);
     RUN_TEST(test_mock_admin_describe_classic_groups_reports_unsupported_per_group);
     RUN_TEST(test_mock_admin_describe_consumer_groups_async);

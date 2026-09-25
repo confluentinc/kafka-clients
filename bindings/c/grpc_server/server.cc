@@ -118,7 +118,6 @@ using confluent::kafka::test::AdminService;
 using confluent::kafka::test::AdminTopicListing;
 using confluent::kafka::test::AlterPartitionReassignmentsRequest;
 using confluent::kafka::test::AlterReplicaLogDirsRequest;
-using confluent::kafka::test::ClientMetricsResourceListing;
 using confluent::kafka::test::ClusterDescription;
 using confluent::kafka::test::ConfigEntry;
 using confluent::kafka::test::ConfigResource;
@@ -136,8 +135,6 @@ using confluent::kafka::test::DescribeReplicaLogDirsEntry;
 using confluent::kafka::test::DescribeReplicaLogDirsRequest;
 using confluent::kafka::test::DescribeReplicaLogDirsResponse;
 using confluent::kafka::test::IncrementalAlterConfigsRequest;
-using confluent::kafka::test::ListClientMetricsResourcesRequest;
-using confluent::kafka::test::ListClientMetricsResourcesResponse;
 using confluent::kafka::test::ListConfigResourcesRequest;
 using confluent::kafka::test::ListConfigResourcesResponse;
 using confluent::kafka::test::ListOffsetsEntry;
@@ -178,7 +175,6 @@ using confluent::kafka::test::TopicMetadata;
 using confluent::kafka::test::AlterConsumerGroupOffsetsRequest;
 using confluent::kafka::test::ClassicGroupDescription;
 using confluent::kafka::test::ConsumerGroupDescription;
-using confluent::kafka::test::ConsumerGroupListing;
 using confluent::kafka::test::DeleteConsumerGroupOffsetsRequest;
 using confluent::kafka::test::DeleteConsumerGroupsRequest;
 using confluent::kafka::test::DescribeClassicGroupsEntry;
@@ -193,8 +189,6 @@ using confluent::kafka::test::GroupOffsets;
 using confluent::kafka::test::ListConsumerGroupOffsetsEntry;
 using confluent::kafka::test::ListConsumerGroupOffsetsRequest;
 using confluent::kafka::test::ListConsumerGroupOffsetsResponse;
-using confluent::kafka::test::ListConsumerGroupsRequest;
-using confluent::kafka::test::ListConsumerGroupsResponse;
 using confluent::kafka::test::ListGroupsRequest;
 using confluent::kafka::test::ListGroupsResponse;
 using confluent::kafka::test::MemberAssignment;
@@ -2084,9 +2078,8 @@ class AdminServiceImpl final : public AdminService::Service {
 
   // -- Cluster, configs & log dirs (slice G2) -------------------------------
   //
-  // Same three steps as G1. The three whole-value RPCs (describeCluster,
-  // listConfigResources, listClientMetricsResources) have no per-key errors at
-  // all, so for them the sync entry point's return value carries *every*
+  // Same three steps as G1. The two whole-value RPCs (describeCluster,
+  // listConfigResources) have no per-key errors at all, so for them the sync entry point's return value carries *every*
   // failure; the per-key RPCs keep the two-level split.
 
   grpc::Status DescribeCluster(grpc::ServerContext*, const DescribeClusterRequest* req,
@@ -2268,30 +2261,6 @@ class AdminServiceImpl final : public AdminService::Service {
       dst->set_name(cstr(kafka_admin_ListConfigResourcesResult_get_name(result, i)));
     }
     kafka_admin_ListConfigResourcesResult_destroy(result);
-    return grpc::Status::OK;
-  }
-
-  grpc::Status ListClientMetricsResources(grpc::ServerContext*,
-                                          const ListClientMetricsResourcesRequest* req,
-                                          ListClientMetricsResourcesResponse* resp) override {
-    kafka_admin_AdminClient_t* admin = admin_for(req->admin_id());
-    if (admin == nullptr) {
-      *resp->mutable_error() = unknown_admin(req->admin_id());
-      return grpc::Status::OK;
-    }
-    kafka_admin_ListClientMetricsResourcesResult_t* result = nullptr;
-    kafka_common_Error_t* err = kafka_admin_AdminClient_list_client_metrics_resources(
-        admin, timeout_ms(*req), &result);
-    if (err != nullptr) {
-      fill_proto_error(resp->mutable_error(), err);
-      return grpc::Status::OK;
-    }
-    const int32_t count = kafka_admin_ListClientMetricsResourcesResult_count(result);
-    for (int32_t i = 0; i < count; i++) {
-      ClientMetricsResourceListing* dst = resp->add_resources();
-      dst->set_name(cstr(kafka_admin_ListClientMetricsResourcesResult_get_name(result, i)));
-    }
-    kafka_admin_ListClientMetricsResourcesResult_destroy(result);
     return grpc::Status::OK;
   }
 
@@ -2755,8 +2724,7 @@ class AdminServiceImpl final : public AdminService::Service {
 
   // -- Groups & offsets (slice G4) -------------------------------------------
   //
-  // listGroups / listConsumerGroups are the only RPCs so far whose result handle
-  // has no keys at all: Java splits one future into valid() and an *unkeyed*
+  // listGroups is the only RPC so far whose result handle has no keys at all: Java splits one future into valid() and an *unkeyed*
   // errors() collection, which the C handle exposes as `_valid_count` /
   // `_get_valid` next to `_error_count` / `_get_error`. The two lists are
   // independent and generally of different length, so nothing is zipped.
@@ -2821,59 +2789,6 @@ class AdminServiceImpl final : public AdminService::Service {
       if (listing_err != nullptr) copy_proto_error(resp->add_listing_errors(), listing_err);
     }
     kafka_admin_ListGroupsResult_destroy(result);
-    return grpc::Status::OK;
-  }
-
-  grpc::Status ListConsumerGroups(grpc::ServerContext*, const ListConsumerGroupsRequest* req,
-                                  ListConsumerGroupsResponse* resp) override {
-    kafka_admin_AdminClient_t* admin = admin_for(req->admin_id());
-    if (admin == nullptr) {
-      *resp->mutable_error() = unknown_admin(req->admin_id());
-      return grpc::Status::OK;
-    }
-    StringArray states(req->group_states());
-    StringArray types(req->types());
-
-    kafka_admin_ListConsumerGroupsResult_t* result = nullptr;
-    kafka_common_Error_t* err = kafka_admin_AdminClient_list_consumer_groups(
-        admin, states.data(), states.count(), types.data(), types.count(),
-        timeout_ms(*req), &result);
-    if (err != nullptr) {
-      fill_proto_error(resp->mutable_error(), err);
-      return grpc::Status::OK;
-    }
-
-    const int32_t valid = kafka_admin_ListConsumerGroupsResult_valid_count(result);
-    for (int32_t i = 0; i < valid; i++) {
-      const kafka_admin_ConsumerGroupListing_t* listing =
-          kafka_admin_ListConsumerGroupsResult_get_valid(result, i);
-      if (listing == nullptr) {
-        resp->clear_valid();
-        resp->clear_listing_errors();
-        *resp->mutable_error() = make_synthetic_error("listConsumerGroups valid entry is null");
-        kafka_admin_ListConsumerGroupsResult_destroy(result);
-        return grpc::Status::OK;
-      }
-      ConsumerGroupListing* dst = resp->add_valid();
-      dst->set_group_id(cstr(kafka_admin_ConsumerGroupListing_group_id(listing)));
-      dst->set_is_simple_consumer_group(
-          kafka_admin_ConsumerGroupListing_is_simple_consumer_group(listing));
-      const char* group_state = kafka_admin_ConsumerGroupListing_group_state(listing);
-      if (group_state != nullptr) dst->set_group_state(std::string(group_state));
-      // Java's deprecated state(), derived from group_state. Carried so that a
-      // backend which dropped it is a finding rather than invisible.
-      const char* state = kafka_admin_ConsumerGroupListing_state(listing);
-      if (state != nullptr) dst->set_state(std::string(state));
-      const char* group_type = kafka_admin_ConsumerGroupListing_group_type(listing);
-      if (group_type != nullptr) dst->set_group_type(std::string(group_type));
-    }
-    const int32_t errors = kafka_admin_ListConsumerGroupsResult_error_count(result);
-    for (int32_t i = 0; i < errors; i++) {
-      const kafka_common_Error_t* listing_err =
-          kafka_admin_ListConsumerGroupsResult_get_error(result, i);
-      if (listing_err != nullptr) copy_proto_error(resp->add_listing_errors(), listing_err);
-    }
-    kafka_admin_ListConsumerGroupsResult_destroy(result);
     return grpc::Status::OK;
   }
 
@@ -4782,9 +4697,6 @@ class AdminServiceImpl final : public AdminService::Service {
     dst->set_partition_assignor(
         cstr(kafka_admin_ConsumerGroupDescription_partition_assignor(description)));
     dst->set_group_type(cstr(kafka_admin_ConsumerGroupDescription_group_type(description)));
-    // Java's deprecated state() next to groupState(). Both cross so that a
-    // backend which dropped one is a finding rather than invisible.
-    dst->set_state(cstr(kafka_admin_ConsumerGroupDescription_state(description)));
     dst->set_group_state(cstr(kafka_admin_ConsumerGroupDescription_group_state(description)));
     const int32_t members = kafka_admin_ConsumerGroupDescription_member_count(description);
     for (int32_t i = 0; i < members; i++) {

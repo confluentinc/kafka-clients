@@ -50,10 +50,6 @@ use confluent_kafka::admin::{
     TransactionListing, TransactionState, UpdateFeaturesOptions, UserScramCredentialAlteration,
     UserScramCredentialsDescription,
 };
-#[allow(deprecated)]
-use confluent_kafka::admin::{
-    ClientMetricsResourceListing, ConsumerGroupListing, ListClientMetricsResourcesOptions, ListConsumerGroupsOptions,
-};
 use confluent_kafka::common::acl::{
     AccessControlEntry, AccessControlEntryFilter, AclBinding, AclBindingFilter, AclOperation, AclPermissionType,
 };
@@ -593,61 +589,6 @@ impl MultilanguageAdmin {
         Ok(rebuilt)
     }
 
-    /// Rebuilds a [`ConsumerGroupListing`]. Unlike [`Self::group_listing`],
-    /// `is_simple_consumer_group` is a real constructor argument here, so it is
-    /// carried rather than checked; the deprecated `state` is the derived one and
-    /// is checked instead (see [`Self::check_derived_state`]).
-    #[allow(deprecated)]
-    fn consumer_group_listing(&self, listing: proto::ConsumerGroupListing) -> Result<ConsumerGroupListing, Error> {
-        let group_state = match &listing.group_state {
-            Some(name) => Some(self.group_state(name, "ConsumerGroupListing.group_state")?),
-            None => None,
-        };
-        let group_type = match &listing.group_type {
-            Some(name) => Some(self.group_type(name, "ConsumerGroupListing.group_type")?),
-            None => None,
-        };
-        let rebuilt = ConsumerGroupListing::with_group_state_group_type(
-            listing.group_id.clone(),
-            group_state,
-            group_type,
-            listing.is_simple_consumer_group,
-        );
-        self.check_derived_state(
-            &listing.group_id,
-            "ConsumerGroupListing",
-            listing.state.as_deref(),
-            rebuilt.state().map(|s| s.name()),
-        )?;
-        Ok(rebuilt)
-    }
-
-    /// Checks the wire's deprecated `state` against the value Java derives from
-    /// `groupState()`.
-    ///
-    /// Java defines `state() == ConsumerGroupState.parse(groupState().toString())`
-    /// (`ConsumerGroupDescription.java`, mirrored in
-    /// `src/admin/consumer_group_description.rs`), so the Rust constructors take
-    /// only `group_state` and re-derive `state`. Both bindings nonetheless expose
-    /// both, and without this check a backend that dropped or transposed `state`
-    /// would be invisible: the reconstructed object would derive the right value
-    /// from `group_state` and every scenario assertion would pass.
-    fn check_derived_state(
-        &self,
-        group_id: &str,
-        what: &str,
-        reported: Option<&str>,
-        derived: Option<&str>,
-    ) -> Result<(), Error> {
-        if reported != derived {
-            return Err(self.protocol_error(format!(
-                "{what} for {group_id:?} reported the deprecated state {reported:?}, but Java derives {derived:?} \
-                 from its group state"
-            )));
-        }
-        Ok(())
-    }
-
     /// Rebuilds a [`MemberAssignment`].
     fn member_assignment(&self, assignment: proto::MemberAssignment) -> MemberAssignment {
         MemberAssignment::new(
@@ -698,8 +639,8 @@ impl MultilanguageAdmin {
     ) -> Result<ConsumerGroupDescription, Error> {
         let group_type = self.group_type(&description.group_type, "ConsumerGroupDescription.group_type")?;
         let group_state = self.group_state(&description.group_state, "ConsumerGroupDescription.group_state")?;
-        let rebuilt = ConsumerGroupDescription::new(
-            description.group_id.clone(),
+        Ok(ConsumerGroupDescription::new(
+            description.group_id,
             description.is_simple_consumer_group,
             self.member_descriptions(description.members)?,
             description.partition_assignor,
@@ -709,14 +650,7 @@ impl MultilanguageAdmin {
             description.authorized_operations.map(|ops| acl_operations_from_proto(&ops)),
             description.group_epoch,
             description.target_assignment_epoch,
-        );
-        self.check_derived_state(
-            &description.group_id,
-            "ConsumerGroupDescription",
-            Some(description.state.as_str()),
-            Some(rebuilt.state().name()),
-        )?;
-        Ok(rebuilt)
+        ))
     }
 
     /// Rebuilds a [`ClassicGroupDescription`].
@@ -1640,26 +1574,6 @@ impl AdminBackend for MultilanguageAdmin {
             .collect()
     }
 
-    #[allow(deprecated)]
-    async fn list_client_metrics_resources(
-        &self,
-        options: ListClientMetricsResourcesOptions,
-    ) -> Result<Vec<ClientMetricsResourceListing>, Error> {
-        let request =
-            proto::ListClientMetricsResourcesRequest { admin_id: self.admin_id, timeout_ms: options.timeout_ms() };
-        let response = self
-            .call(|mut c| async move { c.list_client_metrics_resources(request).await })
-            .await?;
-        if let Some(err) = response.error {
-            return Err(kafka_error_from_proto(err));
-        }
-        Ok(response
-            .resources
-            .into_iter()
-            .map(|resource| ClientMetricsResourceListing::new(resource.name))
-            .collect())
-    }
-
     async fn describe_log_dirs(
         &self,
         brokers: &[i32],
@@ -1903,34 +1817,6 @@ impl AdminBackend for MultilanguageAdmin {
                 .valid
                 .into_iter()
                 .map(|listing| self.group_listing(listing))
-                .collect::<Result<Vec<_>, _>>()?,
-            errors: response.listing_errors.into_iter().map(kafka_error_from_proto).collect(),
-        })
-    }
-
-    #[allow(deprecated)]
-    async fn list_consumer_groups(
-        &self,
-        options: ListConsumerGroupsOptions,
-    ) -> Result<Listings<ConsumerGroupListing>, Error> {
-        let request = proto::ListConsumerGroupsRequest {
-            admin_id: self.admin_id,
-            // Java's deprecated `inStates(Set<ConsumerGroupState>)` is defined as
-            // `inGroupStates` over `GroupState.parse` of the same names, so the
-            // single `group_states` field serves both spellings.
-            group_states: options.group_states().iter().map(|s| s.name().to_string()).collect(),
-            types: options.types().iter().map(|t| t.name().to_string()).collect(),
-            timeout_ms: options.timeout_ms(),
-        };
-        let response = self.call(|mut c| async move { c.list_consumer_groups(request).await }).await?;
-        if let Some(err) = response.error {
-            return Err(kafka_error_from_proto(err));
-        }
-        Ok(Listings {
-            valid: response
-                .valid
-                .into_iter()
-                .map(|listing| self.consumer_group_listing(listing))
                 .collect::<Result<Vec<_>, _>>()?,
             errors: response.listing_errors.into_iter().map(kafka_error_from_proto).collect(),
         })

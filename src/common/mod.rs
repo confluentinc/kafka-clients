@@ -21,7 +21,6 @@ mod cluster_resource;
 mod cluster_resource_listener;
 pub mod compress;
 pub mod config;
-mod consumer_group_state;
 mod election_type;
 // `pub(crate)` rather than private: `kafka_error_class!` and
 // `message_only_error!` expand `$crate::common::error::ErrorSource` and eight
@@ -73,8 +72,6 @@ pub use classic_group_state::ClassicGroupState;
 pub use cluster::Cluster;
 pub use cluster_resource::ClusterResource;
 pub use cluster_resource_listener::ClusterResourceListener;
-#[allow(deprecated)]
-pub use consumer_group_state::ConsumerGroupState;
 pub use election_type::ElectionType;
 pub use error::Error;
 pub use group_state::GroupState;

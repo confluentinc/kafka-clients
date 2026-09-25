@@ -30,11 +30,9 @@ mod alter_partition_reassignments_result;
 mod alter_replica_log_dirs_result;
 mod alter_user_scram_credentials_result;
 mod classic_group_description;
-mod client_metrics_resource_listing;
 mod config;
 pub mod config_entry;
 mod consumer_group_description;
-mod consumer_group_listing;
 mod create_acls_result;
 mod create_delegation_token_result;
 mod create_partitions_result;
@@ -67,11 +65,9 @@ mod fence_producers_result;
 mod finalized_version_range;
 mod group_listing;
 mod kafka_admin_client;
-mod list_client_metrics_resources_result;
 mod list_config_resources_result;
 mod list_consumer_group_offsets_result;
 mod list_consumer_group_offsets_spec;
-mod list_consumer_groups_result;
 mod list_groups_result;
 pub mod list_offsets_result;
 mod list_partition_reassignments_result;
@@ -121,8 +117,6 @@ pub use alter_partition_reassignments_result::AlterPartitionReassignmentsResult;
 pub use alter_replica_log_dirs_result::AlterReplicaLogDirsResult;
 pub use alter_user_scram_credentials_result::AlterUserScramCredentialsResult;
 pub use classic_group_description::ClassicGroupDescription;
-#[allow(deprecated)]
-pub use client_metrics_resource_listing::ClientMetricsResourceListing;
 pub use config::Config;
 // `ConfigSource`, `ConfigSynonym` and `ConfigType` are NOT re-exported here:
 // they are nested classes of Java's `ConfigEntry` (`ConfigEntry.java:199/215/230`),
@@ -132,8 +126,6 @@ pub use config::Config;
 // are CLAUDE.md-invented, not Java nested classes, so they stay flat.
 pub use config_entry::{ConfigEntry, ConfigEntryOptions, ConfigEntryOptionsBuilder};
 pub use consumer_group_description::ConsumerGroupDescription;
-#[allow(deprecated)]
-pub use consumer_group_listing::ConsumerGroupListing;
 use std::collections::HashMap;
 
 pub use create_acls_result::CreateAclsResult;
@@ -168,13 +160,9 @@ pub use fence_producers_result::FenceProducersResult;
 pub use finalized_version_range::FinalizedVersionRange;
 pub use group_listing::GroupListing;
 pub use kafka_admin_client::KafkaAdminClient;
-#[allow(deprecated)]
-pub use list_client_metrics_resources_result::ListClientMetricsResourcesResult;
 pub use list_config_resources_result::ListConfigResourcesResult;
 pub use list_consumer_group_offsets_result::{GroupOffsets, ListConsumerGroupOffsetsResult};
 pub use list_consumer_group_offsets_spec::ListConsumerGroupOffsetsSpec;
-#[allow(deprecated)]
-pub use list_consumer_groups_result::ListConsumerGroupsResult;
 pub use list_groups_result::ListGroupsResult;
 pub use list_offsets_result::{ListOffsetsResult, ListOffsetsResultInfo};
 pub use list_partition_reassignments_result::ListPartitionReassignmentsResult;
@@ -189,10 +177,6 @@ pub use new_partition_reassignment::NewPartitionReassignment;
 pub use new_partitions::NewPartitions;
 pub use new_topic::NewTopic;
 pub use offset_spec::OffsetSpec;
-#[allow(deprecated)]
-pub use options::ListClientMetricsResourcesOptions;
-#[allow(deprecated)]
-pub use options::ListConsumerGroupsOptions;
 pub use options::{
     AbortTransactionOptions, AlterClientQuotasOptions, AlterConfigsOptions, AlterConsumerGroupOffsetsOptions,
     AlterPartitionReassignmentsOptions, AlterReplicaLogDirsOptions, AlterUserScramCredentialsOptions,
@@ -558,29 +542,6 @@ pub trait Admin: Send + Sync {
         options: ListConfigResourcesOptions,
     ) -> ListConfigResourcesResult;
 
-    /// List the client metrics resources available in the cluster.
-    ///
-    /// Corresponds to `Admin.listClientMetricsResources()`
-    /// (deprecated since 4.1 in favor of
-    /// [`list_config_resources`](Admin::list_config_resources)).
-    #[allow(deprecated)]
-    #[doc(alias = "org.apache.kafka.clients.admin.Admin#listClientMetricsResources")]
-    fn list_client_metrics_resources(&self) -> ListClientMetricsResourcesResult {
-        self.list_client_metrics_resources_with_options(ListClientMetricsResourcesOptions::default())
-    }
-
-    /// List the client metrics resources available in the cluster.
-    ///
-    /// Corresponds to `Admin.listClientMetricsResources(ListClientMetricsResourcesOptions)`
-    /// (deprecated since 4.1 in favor of
-    /// [`list_config_resources`](Admin::list_config_resources)).
-    #[allow(deprecated)]
-    #[doc(alias = "org.apache.kafka.clients.admin.Admin#listClientMetricsResources")]
-    fn list_client_metrics_resources_with_options(
-        &self,
-        options: ListClientMetricsResourcesOptions,
-    ) -> ListClientMetricsResourcesResult;
-
     /// Query the information of all log directories on the given set of
     /// brokers.
     ///
@@ -765,24 +726,6 @@ pub trait Admin: Send + Sync {
     /// Corresponds to `Admin.listGroups(ListGroupsOptions)`.
     #[doc(alias = "org.apache.kafka.clients.admin.Admin#listGroups")]
     fn list_groups_with_options(&self, options: ListGroupsOptions) -> ListGroupsResult;
-
-    /// List the consumer groups available in the cluster.
-    ///
-    /// Corresponds to `Admin.listConsumerGroups()`
-    /// (deprecated since 4.1 in favor of [`list_groups`](Admin::list_groups)).
-    #[allow(deprecated)]
-    #[doc(alias = "org.apache.kafka.clients.admin.Admin#listConsumerGroups")]
-    fn list_consumer_groups(&self) -> ListConsumerGroupsResult {
-        self.list_consumer_groups_with_options(ListConsumerGroupsOptions::default())
-    }
-
-    /// List the consumer groups available in the cluster.
-    ///
-    /// Corresponds to `Admin.listConsumerGroups(ListConsumerGroupsOptions)`
-    /// (deprecated since 4.1 in favor of [`list_groups`](Admin::list_groups)).
-    #[allow(deprecated)]
-    #[doc(alias = "org.apache.kafka.clients.admin.Admin#listConsumerGroups")]
-    fn list_consumer_groups_with_options(&self, options: ListConsumerGroupsOptions) -> ListConsumerGroupsResult;
 
     /// Describe some consumer groups in the cluster.
     ///

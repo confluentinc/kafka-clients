@@ -97,10 +97,8 @@ from grpc_translate import (  # noqa: E402
     _admin_fence_producers_response,
     _admin_group_offset_commits,
     _admin_group_offset_specs,
-    _admin_list_client_metrics_resources_response,
     _admin_list_config_resources_response,
     _admin_list_consumer_group_offsets_response,
-    _admin_list_consumer_groups_response,
     _admin_list_groups_response,
     _admin_list_offsets_response,
     _admin_list_partition_reassignments_response,
@@ -815,9 +813,9 @@ class AdminService(apb_grpc.AdminServiceServicer):
     # -- Cluster, configs & log dirs (slice G2) -------------------------------
     #
     # Same shape as the sync twin, awaited on the event loop. describe_cluster /
-    # list_config_resources / list_client_metrics_resources have one Java future
-    # each, so admin.py raises and the failure lands in the top-level error; the
-    # per-key RPCs never raise for a single key.
+    # list_config_resources have one Java future each, so admin.py raises and
+    # the failure lands in the top-level error; the per-key RPCs never raise for
+    # a single key.
 
     async def DescribeCluster(self, request, context):
         client = self._get(request.admin_id)
@@ -877,19 +875,6 @@ class AdminService(apb_grpc.AdminServiceServicer):
         except Exception as e:  # noqa: BLE001
             LOG.exception("list_config_resources raised")
             return apb.ListConfigResourcesResponse(error=_kafka_error_to_proto(e))
-
-    async def ListClientMetricsResources(self, request, context):
-        client = self._get(request.admin_id)
-        if client is None:
-            return apb.ListClientMetricsResourcesResponse(
-                error=self._unknown_admin(request.admin_id))
-        try:
-            resources = await client.list_client_metrics_resources(
-                timeout=_admin_timeout(request))
-            return _admin_list_client_metrics_resources_response(resources)
-        except Exception as e:  # noqa: BLE001
-            LOG.exception("list_client_metrics_resources raised")
-            return apb.ListClientMetricsResourcesResponse(error=_kafka_error_to_proto(e))
 
     async def DescribeLogDirs(self, request, context):
         client = self._get(request.admin_id)
@@ -1008,7 +993,7 @@ class AdminService(apb_grpc.AdminServiceServicer):
     #
     # Same three error levels as the sync twin, awaited on the event loop:
     #
-    #   - list_groups / list_consumer_groups hand back a *pair* of lists, so a
+    #   - list_groups hands back a *pair* of lists, so a
     #     per-broker listing failure is inside the second one, unkeyed, and only a
     #     whole-call failure raises.
     #   - describe_consumer_groups / describe_classic_groups /
@@ -1035,20 +1020,6 @@ class AdminService(apb_grpc.AdminServiceServicer):
         except Exception as e:  # noqa: BLE001
             LOG.exception("list_groups raised")
             return apb.ListGroupsResponse(error=_kafka_error_to_proto(e))
-
-    async def ListConsumerGroups(self, request, context):
-        client = self._get(request.admin_id)
-        if client is None:
-            return apb.ListConsumerGroupsResponse(error=self._unknown_admin(request.admin_id))
-        try:
-            outcome = await client.list_consumer_groups(
-                group_states=list(request.group_states),
-                types=list(request.types),
-                timeout=_admin_timeout(request))
-            return _admin_list_consumer_groups_response(outcome)
-        except Exception as e:  # noqa: BLE001
-            LOG.exception("list_consumer_groups raised")
-            return apb.ListConsumerGroupsResponse(error=_kafka_error_to_proto(e))
 
     async def DescribeConsumerGroups(self, request, context):
         client = self._get(request.admin_id)

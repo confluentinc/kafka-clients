@@ -63,11 +63,6 @@ use crate::admin::{
     AlterUserScramCredentialsOptions, AlterUserScramCredentialsResult, DescribeUserScramCredentialsOptions,
     DescribeUserScramCredentialsResult, UserScramCredentialAlteration,
 };
-#[allow(deprecated)]
-use crate::admin::{
-    ClientMetricsResourceListing, ConsumerGroupListing, ListClientMetricsResourcesOptions,
-    ListClientMetricsResourcesResult, ListConsumerGroupsOptions, ListConsumerGroupsResult,
-};
 use crate::common::ElectionType;
 use crate::common::KafkaFuture;
 use crate::common::acl::{AclBinding, AclBindingFilter, AclOperation};
@@ -1205,24 +1200,6 @@ impl Admin for MockAdminClient {
         ListConfigResourcesResult::new(handle.future())
     }
 
-    #[allow(deprecated)]
-    fn list_client_metrics_resources_with_options(
-        &self,
-        _options: ListClientMetricsResourcesOptions,
-    ) -> ListClientMetricsResourcesResult {
-        let state = self.state.lock().unwrap();
-        let handle: KafkaFutureImpl<Vec<ClientMetricsResourceListing>> = KafkaFutureImpl::new();
-        // Mirrors Java's `MockAdminClient.listClientMetricsResources`, which
-        // maps every client-metrics config key to a `ClientMetricsResourceListing`.
-        let listings = state
-            .client_metrics_configs
-            .keys()
-            .map(ClientMetricsResourceListing::new)
-            .collect();
-        handle.complete(listings);
-        ListClientMetricsResourcesResult::new(handle.future())
-    }
-
     /// Mirrors `MockAdminClient.describeLogDirs`.
     fn describe_log_dirs_with_options(
         &self,
@@ -1520,21 +1497,6 @@ impl Admin for MockAdminClient {
         let handle: KafkaFutureImpl<Vec<Result<GroupListing, Error>>> = KafkaFutureImpl::new();
         handle.complete(listings);
         ListGroupsResult::new(handle.future())
-    }
-
-    #[allow(deprecated)]
-    fn list_consumer_groups_with_options(&self, _options: ListConsumerGroupsOptions) -> ListConsumerGroupsResult {
-        // Mirrors Java's `MockAdminClient.listConsumerGroups`: a simple
-        // ConsumerGroupListing per seeded group config.
-        let state = self.state.lock().unwrap();
-        let listings: Vec<Result<ConsumerGroupListing, Error>> = state
-            .group_configs
-            .keys()
-            .map(|g| Ok(ConsumerGroupListing::with_group_state_group_type(g.clone(), None, None, false)))
-            .collect();
-        let handle: KafkaFutureImpl<Vec<Result<ConsumerGroupListing, Error>>> = KafkaFutureImpl::new();
-        handle.complete(listings);
-        ListConsumerGroupsResult::new(handle.future())
     }
 
     fn describe_consumer_groups_with_options(
@@ -2592,54 +2554,6 @@ mod tests {
             .await
             .unwrap();
         assert!(listed.contains(&resource));
-    }
-
-    #[tokio::test]
-    #[allow(deprecated)]
-    async fn list_client_metrics_resources_returns_seeded_names() {
-        use crate::admin::{ClientMetricsResourceListing, ListClientMetricsResourcesOptions};
-        let client = admin();
-
-        // Empty when nothing has been seeded, mirroring Java's mock over an
-        // empty `clientMetricsConfigs`.
-        let empty = client
-            .list_client_metrics_resources_with_options(ListClientMetricsResourcesOptions::new())
-            .all()
-            .get()
-            .await
-            .unwrap();
-        assert!(empty.is_empty());
-
-        // Seed two client-metrics resources via incrementalAlterConfigs.
-        for name in ["one", "two"] {
-            let resource = ConfigResource::new(config_resource::Type::ClientMetrics, name.to_string());
-            let op = AlterConfigOp::new(
-                ConfigEntry::new("interval.ms".to_string(), Some("5000".to_string())),
-                OpType::Set,
-            );
-            let mut configs = HashMap::new();
-            configs.insert(resource, vec![op]);
-            client
-                .incremental_alter_configs_with_options(&configs, AlterConfigsOptions::new())
-                .all()
-                .get()
-                .await
-                .unwrap();
-        }
-
-        let listed = client
-            .list_client_metrics_resources_with_options(ListClientMetricsResourcesOptions::new())
-            .all()
-            .get()
-            .await
-            .unwrap();
-        let expected: HashSet<ClientMetricsResourceListing> = [
-            ClientMetricsResourceListing::new("one"),
-            ClientMetricsResourceListing::new("two"),
-        ]
-        .into_iter()
-        .collect();
-        assert_eq!(listed.into_iter().collect::<HashSet<_>>(), expected);
     }
 
     #[tokio::test]

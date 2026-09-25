@@ -16,7 +16,7 @@
 //! 4.2.0 broker.
 //!
 //! Mirrors the describeCluster / describeConfigs / incrementalAlterConfigs /
-//! listConfigResources / listClientMetricsResources scenarios in Java's
+//! listConfigResources scenarios in Java's
 //! `KafkaAdminClientIntegrationTest`, exercising the real network engine end to
 //! end rather than the `MockClient` unit-test harness.
 //!
@@ -582,92 +582,6 @@ async fn list_config_resources_lists_resources<F: AdminBackendFactory>(ctx: &mut
     ctx.cleanup().await;
 }
 
-/// End-to-end check of the deprecated `listClientMetricsResources` RPC. Seeds a
-/// KIP-714 client-metrics subscription with `incrementalAlterConfigs` on a
-/// `CLIENT_METRICS` config resource, then asserts it shows up in the listing.
-/// Mirrors the intent of Java's `KafkaAdminClientIntegrationTest` client-metrics
-/// coverage.
-async fn list_client_metrics_resources_lists_subscription<F: AdminBackendFactory>(ctx: &mut TestContext, factory: &F) {
-    #[allow(deprecated)]
-    use confluent_kafka::admin::ListClientMetricsResourcesOptions;
-
-    let admin = admin_for(factory, ctx).await;
-    let backend = factory.name();
-
-    // A client-metrics subscription is a CLIENT_METRICS config resource; create
-    // one by setting its subscription configs (KIP-714). `interval.ms` is the
-    // push interval; `metrics` scopes which client metrics are collected.
-    let subscription = ctx.topic("admin_client_metrics_sub");
-    let resource = ConfigResource::new(config_resource::Type::ClientMetrics, subscription.clone());
-    alter(
-        &admin,
-        &resource,
-        vec![
-            AlterConfigOp::new(
-                ConfigEntry::new("interval.ms".to_string(), Some("60000".to_string())),
-                OpType::Set,
-            ),
-            AlterConfigOp::new(ConfigEntry::new("metrics".to_string(), Some(String::new())), OpType::Set),
-        ],
-        "create client-metrics subscription",
-    )
-    .await;
-
-    // The new subscription becomes visible to the listing asynchronously.
-    retry_on_error_with_timeout(CONFIG_PROPAGATION_TIMEOUT, || async {
-        #[allow(deprecated)]
-        let listings = admin
-            .list_client_metrics_resources(ListClientMetricsResourcesOptions::new())
-            .await
-            .map_err(|e| format!("list client metrics resources: {e}"))?;
-        if listings.iter().any(|l| l.name() == subscription) {
-            Ok(())
-        } else {
-            Err(format!(
-                "{backend} backend: expected the created subscription {subscription:?} in {listings:?}"
-            ))
-        }
-    })
-    .await;
-
-    // The same subscription is listable through the non-deprecated route, which
-    // is what Java says `listClientMetricsResources` was replaced by. Both must
-    // agree, on every backend.
-    let via_config_resources = admin
-        .list_config_resources(
-            &HashSet::from([config_resource::Type::ClientMetrics]),
-            ListConfigResourcesOptions::new(),
-        )
-        .await
-        .unwrap_or_else(|e| panic!("{backend} backend: list CLIENT_METRICS config resources: {e}"));
-    assert!(
-        via_config_resources.iter().any(|r| r.name() == subscription),
-        "{backend} backend: listConfigResources(CLIENT_METRICS) must report the same subscription as the \
-         deprecated listClientMetricsResources, got {via_config_resources:?}"
-    );
-
-    // Delete the subscription so the broker is left clean. Unlike the alters
-    // above this is not asserted: the original tolerated a failure here too,
-    // since a leftover subscription cannot fail a later scenario.
-    let mut delete_configs = HashMap::new();
-    delete_configs.insert(
-        resource,
-        vec![AlterConfigOp::new(
-            ConfigEntry::new("interval.ms".to_string(), None),
-            OpType::Delete,
-        )],
-    );
-    let _ = admin
-        .incremental_alter_configs(&delete_configs, AlterConfigsOptions::new())
-        .await;
-
-    admin
-        .close(Some(Duration::from_secs(5)))
-        .await
-        .unwrap_or_else(|e| panic!("{backend} backend: close: {e}"));
-    ctx.cleanup().await;
-}
-
 multilanguage_admin_test!(
     test_describe_cluster_returns_nodes_controller_and_id,
     describe_cluster_returns_nodes_controller_and_id
@@ -691,8 +605,4 @@ multilanguage_admin_test!(
 multilanguage_admin_test!(
     test_list_config_resources_lists_resources,
     list_config_resources_lists_resources
-);
-multilanguage_admin_test!(
-    test_list_client_metrics_resources_lists_subscription,
-    list_client_metrics_resources_lists_subscription
 );

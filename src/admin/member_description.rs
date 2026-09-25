@@ -49,7 +49,9 @@ impl MemberDescription {
     /// member id / client id / host are normalized to empty strings, matching
     /// Java.
     #[allow(clippy::too_many_arguments)]
-    #[doc(alias = "org.apache.kafka.clients.admin.MemberDescription#MemberDescription")]
+    #[doc(
+        alias = "org.apache.kafka.clients.admin.MemberDescription#MemberDescription(String,Optional,Optional,String,String,MemberAssignment,Optional,Optional,Optional)"
+    )]
     pub fn new(
         member_id: impl Into<String>,
         group_instance_id: Option<String>,
