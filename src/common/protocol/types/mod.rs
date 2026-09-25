@@ -100,7 +100,7 @@ pub struct BoundField {
     /// The index of this field in the schema.
     // Package-private in Java, where only `Struct` reads it; `Struct` is not
     // translated, so nothing reads it here yet.
-    #[allow(dead_code)]
+    #[cfg_attr(not(test), expect(dead_code))]
     pub(crate) index: usize,
 }
 

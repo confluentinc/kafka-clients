@@ -98,7 +98,7 @@ impl CompressionRatioEstimator {
     /// Reset the compression ratio estimation to the initial values for a topic.
     ///
     /// Operates on the process-wide global instance.
-    #[allow(dead_code)]
+    #[cfg_attr(not(test), expect(dead_code))]
     #[doc(alias = "org.apache.kafka.common.record.internal.CompressionRatioEstimator#resetEstimation")]
     pub fn reset_estimation(topic: &str) {
         let mut map = INSTANCE.compression_ratio.lock().unwrap();

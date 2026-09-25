@@ -21,7 +21,7 @@
 //! Translated from
 //! `org.apache.kafka.clients.consumer.internals.ConsumerHeartbeatRequestManager`.
 
-#![allow(dead_code)]
+#![cfg_attr(test, expect(dead_code))]
 
 use crate::common::requests::ConsumerGroupHeartbeatRequest;
 use std::sync::Arc;

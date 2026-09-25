@@ -24,12 +24,12 @@ pub mod admin;
 // `@InterfaceAudience.Public`, so they are crate-private. They are translated
 // in full (DoD #2) though the client calls only part of them, hence the
 // `dead_code` allowances.
-#[allow(dead_code)]
+#[expect(dead_code)]
 mod api_versions;
 mod client_request;
 mod client_response;
 mod client_utils;
-#[allow(dead_code)]
+#[cfg_attr(not(test), expect(dead_code))]
 mod cluster_connection_states;
 pub mod common;
 mod common_client_configs;
@@ -38,14 +38,14 @@ pub mod consumer;
 mod default_host_resolver;
 mod fetch_session_handler;
 mod host_resolver;
-#[allow(dead_code)]
+#[cfg_attr(not(test), expect(dead_code))]
 mod in_flight_requests;
-#[allow(dead_code)]
+#[cfg_attr(not(test), expect(dead_code))]
 mod kafka_client;
 mod least_loaded_node;
-#[allow(dead_code)]
+#[expect(dead_code)]
 mod metadata;
-#[allow(dead_code)]
+#[cfg_attr(not(test), expect(dead_code))]
 mod metadata_recovery_strategy;
 mod metadata_snapshot;
 mod metadata_updater;
@@ -53,7 +53,7 @@ mod metadata_updater;
 mod mock_client;
 mod network_client;
 mod network_client_utils;
-#[allow(dead_code)]
+#[cfg_attr(not(test), expect(dead_code))]
 mod node_api_versions;
 pub mod producer;
 #[cfg(test)]
@@ -94,7 +94,7 @@ pub(crate) use node_api_versions::NodeApiVersions;
 // `FetchSessionRequestData`) and `Builder` are Java nested classes
 // (`FetchSessionHandler.java:95,231`), so per CLAUDE.md §2 they keep the
 // file-module path that plays the outer-class qualifier.
-#[allow(unused_imports)]
+#[expect(unused_imports)]
 pub(crate) use fetch_session_handler::FetchSessionHandler;
 #[cfg(test)]
 pub(crate) use mock_client::{MockClient, RequestMatcher};
@@ -105,7 +105,7 @@ pub(crate) use test_alloc_tracker::AllocTrackingGuard;
 
 // Include generated message definitions. They translate Java's generated
 // `org.apache.kafka.common.message` classes, whose package is not Public API.
-#[allow(dead_code, unused_imports, clippy::all)]
+#[expect(dead_code, unused_imports, clippy::all)]
 pub(crate) mod generated {
     include!(concat!(env!("OUT_DIR"), "/generated/mod.rs"));
 }
@@ -116,7 +116,7 @@ pub(crate) use generated::*;
 // tests that also need `pub(crate)` types (e.g. `common::message`'s
 // `RecordsSerdeTest`). `build.rs` always generates them.
 #[cfg(test)]
-#[allow(dead_code, unused_imports, clippy::all)]
+#[expect(unused_imports, clippy::all)]
 pub(crate) mod test_generated {
     include!(concat!(env!("OUT_DIR"), "/test_generated/mod.rs"));
 }

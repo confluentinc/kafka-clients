@@ -51,7 +51,7 @@ macro_rules! multilanguage_admin_test {
     };
     ($name:ident, $body:ident, $cluster_config:expr) => {
         ::paste::paste! {
-            #[allow(non_snake_case)]
+            #[expect(non_snake_case)]
             #[tokio::test(flavor = "multi_thread")]
             async fn [<$name __ rust>]() {
                 let mut ctx = $crate::common::test_context::TestContext::new($cluster_config).await;
@@ -60,7 +60,7 @@ macro_rules! multilanguage_admin_test {
             }
 
             #[cfg(feature = "multilanguage-tests")]
-            #[allow(non_snake_case)]
+            #[expect(non_snake_case)]
             #[tokio::test(flavor = "multi_thread")]
             async fn [<$name __ grpc_python>]() {
                 let mut ctx = $crate::common::test_context::TestContext::new($cluster_config).await;
@@ -75,7 +75,7 @@ macro_rules! multilanguage_admin_test {
             }
 
             #[cfg(feature = "multilanguage-tests")]
-            #[allow(non_snake_case)]
+            #[expect(non_snake_case)]
             #[tokio::test(flavor = "multi_thread")]
             async fn [<$name __ grpc_python_async>]() {
                 let mut ctx = $crate::common::test_context::TestContext::new($cluster_config).await;
@@ -90,7 +90,7 @@ macro_rules! multilanguage_admin_test {
             }
 
             #[cfg(feature = "multilanguage-tests")]
-            #[allow(non_snake_case)]
+            #[expect(non_snake_case)]
             #[tokio::test(flavor = "multi_thread")]
             async fn [<$name __ grpc_c>]() {
                 let mut ctx = $crate::common::test_context::TestContext::new($cluster_config).await;

@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![allow(dead_code)]
+#![expect(dead_code)]
 //! Provides additional utilities for [`NetworkClient`](super::NetworkClient)
 //! (e.g. to implement blocking behaviour).
 //!

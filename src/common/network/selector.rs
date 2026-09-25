@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![allow(dead_code)]
+#![expect(dead_code)]
 //! A selector for doing non-blocking multi-connection network I/O.
 //!
 //! Translated from `org.apache.kafka.common.network.Selector`.

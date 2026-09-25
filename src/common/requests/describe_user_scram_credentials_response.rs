@@ -33,7 +33,7 @@ use super::AbstractResponse;
 #[doc(alias = "org.apache.kafka.common.requests.DescribeUserScramCredentialsResponse")]
 pub struct DescribeUserScramCredentialsResponse {
     data: DescribeUserScramCredentialsResponseData,
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     version: i16,
 }
 

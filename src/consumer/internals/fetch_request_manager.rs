@@ -26,7 +26,7 @@
 //! lifetime/dispatch issues that come with translating Java inheritance
 //! to Rust trait objects.
 
-#![allow(dead_code)]
+#![expect(dead_code)]
 
 use std::sync::{Arc, Mutex};
 
@@ -175,7 +175,7 @@ impl FetchRequestManager {
     /// Translates the 9-arg Java constructor. Drops the `LogContext` (we use
     /// the `log` crate). Phase M3 plumbs the `FetchMetricsManager` (dropped by
     /// Phase 7a); Phase 37 re-introduced `ApiVersions`.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.FetchRequestManager#FetchRequestManager")]
     pub(crate) fn new(
         metadata: Arc<ConsumerMetadata>,
@@ -1124,7 +1124,6 @@ mod round_trip {
 
     /// A full v2 batch with explicit producer / control / transactional flags
     /// (CRC recomputed). For transaction tests.
-    #[allow(clippy::too_many_arguments)]
     fn build_batch_full(
         base_offset: i64,
         count: i32,
@@ -1302,7 +1301,7 @@ mod round_trip {
         }
 
         /// Adds a partition entry for `topic` (topic-id `topic_id`).
-        #[allow(clippy::too_many_arguments)]
+        #[expect(clippy::too_many_arguments)]
         fn partition(
             self,
             topic: &str,

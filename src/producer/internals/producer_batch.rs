@@ -796,7 +796,7 @@ impl ProducerBatch {
     // method and DoD #2 requires the translated class to carry all of them; the
     // `dead_code` lint only became visible once `KafkaProducer::with_options`
     // stopped leaking this type through a `pub` signature.
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     #[doc(alias = "org.apache.kafka.clients.producer.internals.ProducerBatch#buffer")]
     pub fn buffer(&self) -> &Vec<u8> {
         self.records_builder.buffer()
@@ -817,7 +817,7 @@ impl ProducerBatch {
     }
 
     /// Whether the batch is still writable (not closed).
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     #[doc(alias = "org.apache.kafka.clients.producer.internals.ProducerBatch#isWritable")]
     pub fn is_writable(&self) -> bool {
         !self.records_builder.is_closed()
@@ -896,14 +896,14 @@ impl ProducerBatch {
     }
 
     /// The current leader epoch (visible for testing).
-    #[allow(dead_code)]
+    #[cfg_attr(not(test), expect(dead_code))]
     #[doc(alias = "org.apache.kafka.clients.producer.internals.ProducerBatch#currentLeaderEpoch")]
     pub fn current_leader_epoch(&self) -> Option<i32> {
         self.current_leader_epoch
     }
 
     /// The attempt number when the leader was last changed (visible for testing).
-    #[allow(dead_code)]
+    #[cfg_attr(not(test), expect(dead_code))]
     #[doc(alias = "org.apache.kafka.clients.producer.internals.ProducerBatch#attemptsWhenLeaderLastChanged")]
     pub fn attempts_when_leader_last_changed(&self) -> i32 {
         self.attempts_when_leader_last_changed

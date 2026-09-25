@@ -16,8 +16,6 @@
 //!
 //! Translated from `org.apache.kafka.common.requests.FetchMetadata`.
 
-#![allow(dead_code)]
-
 use std::fmt;
 
 /// The metadata for a single fetch request: session id + epoch.

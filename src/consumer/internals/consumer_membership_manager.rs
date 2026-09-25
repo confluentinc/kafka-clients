@@ -21,8 +21,6 @@
 //! Translated from
 //! `org.apache.kafka.clients.consumer.internals.ConsumerMembershipManager`.
 
-#![allow(dead_code)]
-
 use crate::common::requests::ConsumerGroupHeartbeatRequest;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -236,7 +234,7 @@ impl ConsumerMembershipManager {
     /// `Option<Arc<ConsumerRebalanceMetricsManager>>` + a metrics `Time` clock
     /// (M5): `None` in tests that don't exercise rebalance metrics; the live
     /// consumer always supplies them.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerMembershipManager#ConsumerMembershipManager")]
     pub(crate) fn new(
         group_id: impl Into<String>,
@@ -999,7 +997,6 @@ impl ConsumerMembershipManager {
     /// The commit-result logging happens at the call site BEFORE this method
     /// (Java logs in the same `whenComplete`, on both branches, then runs the
     /// abort check + `revokeAndAssign` unconditionally — [`Self::log_commit_result`]).
-    #[allow(clippy::too_many_arguments)]
     async fn continue_after_commit(
         &self,
         resolved: Vec<(Uuid, String, Vec<i32>)>,
@@ -1553,7 +1550,6 @@ impl ConsumerMembershipManager {
     /// runs `on_partitions_assigned` if a listener exists, then completes
     /// the ack — resuming at [`Self::continue_after_assign`]. This
     /// guarantees `consumer.assignment()` changes only within `poll()`.
-    #[allow(clippy::too_many_arguments)]
     async fn continue_after_revoke(
         &self,
         revoke_result: Result<(), Error>,

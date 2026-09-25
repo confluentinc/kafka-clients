@@ -35,7 +35,7 @@ use super::AbstractResponse;
 #[doc(alias = "org.apache.kafka.common.requests.DescribeAclsResponse")]
 pub struct DescribeAclsResponse {
     data: DescribeAclsResponseData,
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     version: i16,
 }
 

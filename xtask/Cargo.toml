@@ -7,3 +7,7 @@ edition = "2021"
 anyhow = "1.0"
 syn = { version = "2", features = ["full", "parsing"] }
 quote = "1"
+
+[lints.clippy]
+# See the root Cargo.toml: `#[expect]`, never `#[allow]`.
+allow_attributes = "deny"

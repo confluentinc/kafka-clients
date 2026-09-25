@@ -23,7 +23,7 @@
 //! Translated from
 //! `org.apache.kafka.clients.consumer.internals.TopicMetadataRequestManager`.
 
-#![allow(dead_code)]
+#![expect(dead_code)]
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};

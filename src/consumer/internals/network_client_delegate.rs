@@ -18,7 +18,7 @@
 //! Translated from
 //! `org.apache.kafka.clients.consumer.internals.NetworkClientDelegate`.
 
-#![allow(dead_code)]
+#![expect(dead_code)]
 
 use std::collections::VecDeque;
 use std::fmt;

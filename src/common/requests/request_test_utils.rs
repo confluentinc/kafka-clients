@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![allow(dead_code)]
+#![cfg_attr(not(test), expect(dead_code))]
 //! Test utilities for creating metadata responses.
 //!
 //! Corresponds to `org.apache.kafka.common.requests.RequestTestUtils`.
@@ -171,7 +171,7 @@ impl RequestTestUtils {
     }
 
     /// The most general metadata update builder used by tests.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     pub fn metadata_update_with_full(
         cluster_id: &str,
         num_nodes: i32,

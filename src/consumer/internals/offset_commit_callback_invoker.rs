@@ -28,10 +28,6 @@
 //! This mirrors Java's `BlockingQueue<OffsetCommitCallbackTask>` precisely:
 //! enqueue from BG, dequeue + invoke from app side.
 
-// Phase 9 lands the invoker; Phase 11 wires it into AsyncKafkaConsumer.
-// Suppress dead-code warnings until then.
-#![allow(dead_code)]
-
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 

@@ -35,7 +35,7 @@ use super::AbstractResponse;
 #[doc(alias = "org.apache.kafka.common.requests.DeleteAclsResponse")]
 pub struct DeleteAclsResponse {
     data: DeleteAclsResponseData,
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     version: i16,
 }
 

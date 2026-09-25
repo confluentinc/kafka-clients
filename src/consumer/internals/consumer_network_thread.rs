@@ -98,7 +98,7 @@
 //! `maybeFailOnMetadataError(List.of(event))` arm) covers "immediately
 //! completed events" — both arms are present and behavior-faithful.
 
-#![allow(dead_code)]
+#![expect(dead_code)]
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
@@ -283,7 +283,7 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
     /// `Supplier<...>` indirections (Rust takes the already-constructed
     /// values directly). The Java `AsyncConsumerMetrics` parameter is wired
     /// post-construction via [`Self::set_async_consumer_metrics`] (Phase M6).
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerNetworkThread#ConsumerNetworkThread")]
     pub(crate) fn new(
         time: Arc<dyn ThreadTime>,

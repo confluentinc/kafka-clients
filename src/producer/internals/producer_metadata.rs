@@ -81,7 +81,7 @@ impl ProducerMetadata {
     // method and DoD #2 requires the translated class to carry all of them; the
     // `dead_code` lint only became visible once `KafkaProducer::with_options`
     // stopped leaking this type through a `pub` signature.
-    #[allow(dead_code)]
+    #[cfg_attr(not(test), expect(dead_code))]
     #[doc(alias = "org.apache.kafka.clients.producer.internals.ProducerMetadata#ProducerMetadata")]
     pub fn new(
         refresh_backoff_ms: i64,
@@ -238,7 +238,7 @@ impl ProducerMetadata {
     }
 
     /// Returns the set of all tracked topic names (visible for testing).
-    #[allow(dead_code)]
+    #[cfg_attr(not(test), expect(dead_code))]
     #[doc(alias = "org.apache.kafka.clients.producer.internals.ProducerMetadata#topics")]
     pub fn topics(&self) -> HashSet<String> {
         let state = self.inner.lock().unwrap();
@@ -246,7 +246,7 @@ impl ProducerMetadata {
     }
 
     /// Returns the set of new (unconfirmed) topic names (visible for testing).
-    #[allow(dead_code)]
+    #[cfg_attr(not(test), expect(dead_code))]
     #[doc(alias = "org.apache.kafka.clients.producer.internals.ProducerMetadata#newTopics")]
     pub fn new_topics(&self) -> HashSet<String> {
         let state = self.inner.lock().unwrap();
@@ -254,7 +254,7 @@ impl ProducerMetadata {
     }
 
     /// Returns whether the given topic is in the metadata cache.
-    #[allow(dead_code)]
+    #[cfg_attr(not(test), expect(dead_code))]
     #[doc(alias = "org.apache.kafka.clients.producer.internals.ProducerMetadata#containsTopic")]
     pub fn contains_topic(&self, topic: &str) -> bool {
         let state = self.inner.lock().unwrap();

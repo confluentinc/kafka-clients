@@ -41,7 +41,7 @@ use tokio::net::TcpStream;
 #[doc(alias = "org.apache.kafka.common.network.PlaintextChannelBuilder")]
 pub struct PlaintextChannelBuilder {
     /// The listener name, if any (server-side only).
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     listener_name: Option<ListenerName>,
 }
 

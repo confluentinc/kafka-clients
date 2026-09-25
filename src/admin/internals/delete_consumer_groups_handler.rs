@@ -46,7 +46,7 @@ impl DeleteConsumerGroupsHandler {
     /// Returns the configured base [`DeleteGroupsHandler`] rather than `Self`
     /// (the subclass adds no state — see the module docs), so
     /// `clippy::new_ret_no_self` does not apply here.
-    #[allow(clippy::new_ret_no_self)]
+    #[expect(clippy::new_ret_no_self)]
     #[doc(alias = "org.apache.kafka.clients.admin.internals.DeleteConsumerGroupsHandler#DeleteConsumerGroupsHandler")]
     pub(crate) fn new(log_context: LogContext) -> DeleteGroupsHandler {
         DeleteGroupsHandler::new(API_NAME, DISPLAY_NAME, log_context)

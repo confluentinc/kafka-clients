@@ -142,9 +142,7 @@ pub struct ConfigSynonym {
 impl ConfigSynonym {
     /// Create a configuration synonym with the provided values.
     ///
-    /// Package-private in Java; the first caller is `describeConfigs` response
-    /// parsing (Tier 1 Phase 3), so it is not yet referenced in Phase 1.
-    #[allow(dead_code)]
+    /// Package-private in Java; the caller is `describeConfigs` response parsing.
     #[doc(alias = "org.apache.kafka.clients.admin.ConfigEntry$ConfigSynonym#ConfigSynonym")]
     pub(crate) fn new(name: String, value: Option<String>, source: ConfigSource) -> Self {
         Self { name, value, source }

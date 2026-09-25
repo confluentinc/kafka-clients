@@ -35,7 +35,7 @@
 //! bool` field — checking-and-setting a single flag is the entire
 //! contract, and the helper class is overkill here.
 
-#![allow(dead_code)]
+#![cfg_attr(not(test), expect(dead_code))]
 
 use std::sync::Arc;
 

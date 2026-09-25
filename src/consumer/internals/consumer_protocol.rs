@@ -84,13 +84,12 @@ pub(crate) struct ConsumerProtocol;
 // just `deserialize_assignment` / `PROTOCOL_TYPE`. The serialize/subscription
 // helpers are exercised by the round-trip unit tests below and become live once
 // the classic-assignor/consumer-join paths are translated in a later milestone.
-#[allow(dead_code)]
+#[cfg_attr(not(test), expect(dead_code))]
 impl ConsumerProtocol {
     /// The consumer protocol type name.
     ///
     /// Corresponds to `ConsumerProtocol.PROTOCOL_TYPE`. Consumed by the admin
-    /// group-describe handlers landing later in this phase.
-    #[allow(dead_code)]
+    /// group-describe handlers.
     pub(crate) const PROTOCOL_TYPE: &str = "consumer";
 
     /// Translate a decode failure the way each Java `deserialize*` method's

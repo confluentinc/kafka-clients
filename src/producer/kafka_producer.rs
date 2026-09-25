@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![allow(dead_code)]
+#![cfg_attr(not(test), expect(dead_code))]
 //! A Kafka client that publishes records to the Kafka cluster.
 //!
 //! Translated from `org.apache.kafka.clients.producer.KafkaProducer`.
@@ -1877,7 +1877,7 @@ impl<K, V> KafkaProducer<K, V> {
     /// [`send`](KafkaProducer::<Vec<u8>, Vec<u8>>::send) (zero-copy borrowed path)
     /// delegate here for partition calculation, size validation, and accumulator
     /// append.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     async fn do_send_bytes(
         &self,
         topic: &str,
@@ -2329,7 +2329,7 @@ impl<K, V> KafkaProducer<K, V> {
     /// The typed `key` / `value` are handed straight to the custom partitioner (Java
     /// passes it `record.key()` / `record.value()` alongside the serialized bytes); the
     /// built-in fallback in step 3 uses only `serialized_key`.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     fn compute_partition(
         &self,
         topic: &str,

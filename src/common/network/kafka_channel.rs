@@ -328,7 +328,6 @@ impl KafkaChannel {
     /// For other muted states (`MutedAnd*`), this is a no-op.
     ///
     /// Returns `true` if the channel is in the `NotMuted` state after the call.
-    #[allow(dead_code)]
     #[doc(alias = "org.apache.kafka.common.network.KafkaChannel#maybeUnmute")]
     pub(crate) fn maybe_unmute(&mut self) -> bool {
         if self.mute_state == ChannelMuteState::Muted {
@@ -404,7 +403,7 @@ impl KafkaChannel {
     }
 
     /// Finish up any processing on `prepare()` failure.
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     #[doc(alias = "org.apache.kafka.common.network.KafkaChannel#completeCloseOnAuthenticationFailure")]
     pub(crate) fn complete_close_on_authentication_failure(&mut self) -> io::Result<()> {
         self.transport_layer.add_interest_ops(InterestOps::OP_WRITE);
@@ -818,13 +817,13 @@ impl KafkaChannel {
     /// Returns a mutable reference to the transport layer.
     ///
     /// This is used by the Selector for non-blocking I/O operations.
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     pub(crate) fn transport_layer(&mut self) -> &mut dyn TransportLayer {
         &mut *self.transport_layer
     }
 
     /// Returns `true` if the transport layer is open.
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     pub(crate) fn is_open(&self) -> bool {
         self.transport_layer.is_open()
     }

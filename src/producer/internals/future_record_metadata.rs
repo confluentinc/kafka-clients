@@ -261,7 +261,7 @@ impl FutureRecordMetadata {
     // method and DoD #2 requires the translated class to carry all of them; the
     // `dead_code` lint only became visible once `KafkaProducer::with_options`
     // stopped leaking this type through a `pub` signature.
-    #[allow(dead_code)]
+    #[cfg_attr(not(test), expect(dead_code))]
     #[doc(alias = "org.apache.kafka.clients.producer.internals.FutureRecordMetadata#chain")]
     pub fn chain(&self, future_record_metadata: FutureRecordMetadata) {
         self.chain_arc(Arc::new(future_record_metadata));

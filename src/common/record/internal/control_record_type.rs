@@ -97,7 +97,6 @@ impl ControlRecordType {
     /// The wire type id.
     ///
     /// Corresponds to Java's `type()` accessor over the enum's `type` field.
-    #[allow(dead_code)]
     pub fn type_id(self) -> i16 {
         match self {
             Self::Abort => 0,
@@ -117,7 +116,6 @@ impl ControlRecordType {
     /// `MessageUtil.toVersionPrefixedByteBuffer(HIGHEST_SUPPORTED_VERSION, schema)`
     /// where `schema` is a [`ControlRecordTypeSchemaData`] with this type set.
     /// The result is the 2-byte version prefix followed by the schema body.
-    #[allow(dead_code)]
     fn key_buffer(self) -> Vec<u8> {
         let mut schema = ControlRecordTypeSchemaData::new();
         schema.set_type(self.type_id());
@@ -144,7 +142,7 @@ impl ControlRecordType {
     /// Returns a [`Error`] for [`Self::Unknown`] — Java throws
     /// `IllegalArgumentException("Cannot serialize UNKNOWN control record type")`
     /// (a recoverable unchecked exception, so a `Result` here per CLAUDE.md §10.2).
-    #[allow(dead_code)]
+    #[cfg_attr(not(test), expect(dead_code))]
     #[doc(alias = "org.apache.kafka.common.record.internal.ControlRecordType#recordKey")]
     pub fn record_key(self) -> Result<Vec<u8>, Error> {
         if self == Self::Unknown {
@@ -161,7 +159,7 @@ impl ControlRecordType {
     /// Java's `buffer` is precomputed once in the enum constructor, so its
     /// `remaining()` is a constant read; returning the constant here mirrors
     /// that amortization instead of re-serializing the key per call.
-    #[allow(dead_code)]
+    #[cfg_attr(not(test), expect(dead_code))]
     #[doc(alias = "org.apache.kafka.common.record.internal.ControlRecordType#controlRecordKeySize")]
     pub fn control_record_key_size(self) -> usize {
         CONTROL_RECORD_KEY_SIZE

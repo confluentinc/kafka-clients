@@ -70,7 +70,7 @@ impl RecordDeserializationError {
     ///
     /// Java's deprecated nine-argument constructor, which records no origin, is
     /// not translated (CLAUDE.md §3).
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     #[doc(
         alias = "org.apache.kafka.common.errors.RecordDeserializationException#RecordDeserializationException(DeserializationExceptionOrigin,TopicPartition,long,long,TimestampType,ByteBuffer,ByteBuffer,Headers,String,Throwable)"
     )]

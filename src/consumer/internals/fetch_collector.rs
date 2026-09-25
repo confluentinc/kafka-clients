@@ -46,8 +46,6 @@
 //!   reads through `peek_current_record` which returns `&DefaultRecord`.
 //! - `DefaultRecord` deep clone — same as above.
 
-#![allow(dead_code)]
-
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 

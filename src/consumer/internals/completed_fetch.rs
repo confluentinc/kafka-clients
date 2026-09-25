@@ -87,7 +87,7 @@
 //! rather than the branch: "rare" was asserted about a *client* behaviour
 //! without checking what the client actually does.
 
-#![allow(dead_code)]
+#![expect(dead_code)]
 
 use std::collections::BinaryHeap;
 use std::sync::{Arc, Mutex};
@@ -1295,7 +1295,7 @@ impl From<DeserializationOrigin> for DeserializationErrorOrigin {
 ///
 /// The message itself carries no "Cause: ..." suffix; the cause is a separate
 /// field reachable through [`Error::source`].
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 fn wrap_deserialization_error(
     origin: DeserializationOrigin,
     partition: &TopicPartition,
@@ -1810,7 +1810,6 @@ mod tests {
     /// and producer id, holding `count` `value-{offset}` records. The CRC is
     /// recomputed after the producer state is written by the builder, so the
     /// batch is valid under `check.crcs=true`.
-    #[allow(clippy::too_many_arguments)]
     fn batch_full(
         base_offset: i64,
         count: i32,

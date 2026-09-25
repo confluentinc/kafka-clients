@@ -22,7 +22,7 @@
 //! (`of(Errors, throttleTimeMs, sessionId, ...)`) and broker-only methods
 //! (`sizeOf`, `toMessage`) are intentionally out of scope.
 
-#![allow(dead_code)]
+#![expect(dead_code)]
 
 use std::collections::{HashMap, HashSet};
 

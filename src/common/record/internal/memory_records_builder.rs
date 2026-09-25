@@ -102,7 +102,7 @@ impl MemoryRecordsBuilder {
     /// at the start for the header, then append records after that.
     ///
     /// Corresponds to Java's `MemoryRecordsBuilder(ByteBufferOutputStream, ...)`.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     #[doc(alias = "org.apache.kafka.common.record.internal.MemoryRecordsBuilder#MemoryRecordsBuilder")]
     pub fn new(
         mut buffer: Vec<u8>,
@@ -204,7 +204,7 @@ impl MemoryRecordsBuilder {
     }
 
     /// Create a new builder with default delete_horizon_ms (NO_TIMESTAMP).
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     #[doc(alias = "org.apache.kafka.common.record.internal.MemoryRecordsBuilder#MemoryRecordsBuilder")]
     pub fn with_default(
         buffer: Vec<u8>,
@@ -584,7 +584,6 @@ impl MemoryRecordsBuilder {
     }
 
     /// Append a new record at the given offset.
-    #[allow(clippy::too_many_arguments)]
     #[doc(alias = "org.apache.kafka.common.record.internal.MemoryRecordsBuilder#append")]
     fn append_with_offset_internal(
         &mut self,

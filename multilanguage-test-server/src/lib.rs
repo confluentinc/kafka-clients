@@ -34,8 +34,9 @@
 // Likewise a proto3 `enum`'s values share the enclosing scope, so
 // `ClientQuotaMatchKind` prefixes all of its with `MATCH_KIND_`. Both sets of
 // names are the wire contract shared with the Python and C++ servers — they
-// cannot be renamed to satisfy a lint on code we do not author.
-#[allow(clippy::enum_variant_names)]
+// cannot be renamed to satisfy a lint on code we do not author. For the same
+// reason tonic's own `#[allow]`s stay, despite `clippy::allow_attributes`.
+#[expect(clippy::enum_variant_names, clippy::allow_attributes)]
 pub mod proto {
     tonic::include_proto!("confluent.kafka.test");
 }

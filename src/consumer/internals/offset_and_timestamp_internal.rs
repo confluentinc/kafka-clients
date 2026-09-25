@@ -71,14 +71,14 @@ impl OffsetAndTimestampInternal {
     /// The timestamp value carried by this entry. May be negative —
     /// `-1` is the broker's sentinel for "no timestamp" on
     /// `LATEST`/`EARLIEST` queries.
-    #[allow(dead_code)] // Used by tests and future internal accessors.
+    #[cfg_attr(not(test), expect(dead_code))] // Used by tests and future internal accessors.
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.OffsetAndTimestampInternal#timestamp")]
     pub(crate) fn timestamp(&self) -> i64 {
         self.timestamp
     }
 
     /// The leader epoch associated with this offset, if any.
-    #[allow(dead_code)] // Used by tests and future internal accessors.
+    #[cfg_attr(not(test), expect(dead_code))] // Used by tests and future internal accessors.
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.OffsetAndTimestampInternal#leaderEpoch")]
     pub(crate) fn leader_epoch(&self) -> Option<i32> {
         self.leader_epoch

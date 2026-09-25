@@ -127,7 +127,7 @@ impl FencedProducer {
 /// through any binding (both are eager at the boundary) and stays covered by the
 /// unit tests in `src/admin`, which use the real trait.
 ///
-/// Methods are `async fn` in the trait (hence `#[allow(async_fn_in_trait)]`,
+/// Methods are `async fn` in the trait (hence `#[expect(async_fn_in_trait)]`,
 /// matching the existing backend factories) and return already-resolved plain
 /// data; the gRPC implementation awaits one round-trip per call.
 ///
@@ -164,7 +164,6 @@ impl FencedProducer {
 ///      method returning a single future cannot express that; a method
 ///      returning a struct of the three resolved values can, and eager
 ///      resolution is already the shape both bindings hand back.
-#[allow(async_fn_in_trait)]
 pub trait AdminBackend {
     /// Create a batch of topics.
     ///

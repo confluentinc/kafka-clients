@@ -26,10 +26,10 @@
 //! [`crate::consumer::internals::events::CompletableEventReaper`] reaper,
 //! channel handlers, and `WakeupTrigger` are exercised by their own tests
 //! and will gain non-test callers in Phase 6 and Phase 10. The
-//! module-level `#[allow(dead_code)]` keeps `cargo build` warning-free
+//! module-level `#[expect(dead_code)]` keeps `cargo build` warning-free
 //! until those phases land.
 
-#![allow(dead_code)]
+#![cfg_attr(not(test), expect(dead_code))]
 
 mod application_event;
 mod application_event_handler;

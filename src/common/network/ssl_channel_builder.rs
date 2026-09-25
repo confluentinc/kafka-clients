@@ -51,7 +51,7 @@ pub struct SslChannelBuilder {
     /// SSL factory for creating TLS connectors.
     ssl_factory: SslFactory,
     /// The listener name, if any (server-side only).
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     listener_name: Option<ListenerName>,
 }
 

@@ -18,7 +18,7 @@
 //! and uses the subset it needs. See `examples/README.md` for the map of
 //! which example covers which transactional use case and the run order.
 
-#![allow(dead_code)] // each example compiles its own copy and uses a subset
+#![expect(dead_code)] // each example compiles its own copy and uses a subset
 
 use std::collections::HashMap;
 use std::time::Duration;

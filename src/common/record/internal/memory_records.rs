@@ -875,42 +875,42 @@ impl MemoryRecordsBuilderOptionsBuilder {
     // the builder can express Java's `:520`/`:531`/`:543`/`:556`/`:571`
     // overloads; the `dead_code` lint sees only the subset today's callers use.
     /// Sets [`MemoryRecordsBuilderOptions::producer_id`].
-    #[allow(dead_code)]
+    #[cfg_attr(not(test), expect(dead_code))]
     pub(crate) fn set_producer_id(mut self, producer_id: i64) -> Self {
         self.producer_id = Some(producer_id);
         self
     }
 
     /// Sets [`MemoryRecordsBuilderOptions::producer_epoch`].
-    #[allow(dead_code)]
+    #[cfg_attr(not(test), expect(dead_code))]
     pub(crate) fn set_producer_epoch(mut self, producer_epoch: i16) -> Self {
         self.producer_epoch = Some(producer_epoch);
         self
     }
 
     /// Sets [`MemoryRecordsBuilderOptions::base_sequence`].
-    #[allow(dead_code)]
+    #[cfg_attr(not(test), expect(dead_code))]
     pub(crate) fn set_base_sequence(mut self, base_sequence: i32) -> Self {
         self.base_sequence = Some(base_sequence);
         self
     }
 
     /// Sets [`MemoryRecordsBuilderOptions::is_transactional`].
-    #[allow(dead_code)]
+    #[cfg_attr(not(test), expect(dead_code))]
     pub(crate) fn set_is_transactional(mut self, is_transactional: bool) -> Self {
         self.is_transactional = Some(is_transactional);
         self
     }
 
     /// Sets [`MemoryRecordsBuilderOptions::is_control_batch`].
-    #[allow(dead_code)]
+    #[cfg_attr(not(test), expect(dead_code))]
     pub(crate) fn set_is_control_batch(mut self, is_control_batch: bool) -> Self {
         self.is_control_batch = Some(is_control_batch);
         self
     }
 
     /// Sets [`MemoryRecordsBuilderOptions::partition_leader_epoch`].
-    #[allow(dead_code)]
+    #[cfg_attr(not(test), expect(dead_code))]
     pub(crate) fn set_partition_leader_epoch(mut self, partition_leader_epoch: i32) -> Self {
         self.partition_leader_epoch = Some(partition_leader_epoch);
         self
@@ -923,7 +923,7 @@ impl MemoryRecordsBuilderOptionsBuilder {
     }
 
     /// Sets [`MemoryRecordsBuilderOptions::delete_horizon_ms`].
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     pub(crate) fn set_delete_horizon_ms(mut self, delete_horizon_ms: i64) -> Self {
         self.delete_horizon_ms = Some(delete_horizon_ms);
         self

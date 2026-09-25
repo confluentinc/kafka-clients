@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![allow(dead_code)]
 //! SASL configuration for Kafka connections.
 //!
 //! Translated from `org.apache.kafka.common.config.SaslConfigs`.

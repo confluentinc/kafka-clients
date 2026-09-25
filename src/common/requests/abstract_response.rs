@@ -295,7 +295,7 @@ impl ConcreteResponse {
     /// Returns an error if serialization fails.
     // `&mut self` rather than `self`: `SendBuilder` takes `&mut impl Message`,
     // so the receiver cannot be by value.
-    #[allow(clippy::wrong_self_convention)]
+    #[expect(clippy::wrong_self_convention)]
     pub fn to_send(&mut self, header: &ResponseHeader, version: i16) -> io::Result<ByteBufferSend> {
         match self {
             Self::ApiVersions(r) => SendBuilder::build_response_send(header, r.data_mut(), version),

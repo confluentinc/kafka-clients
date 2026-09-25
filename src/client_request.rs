@@ -63,7 +63,7 @@ impl ClientRequest {
     ///   once sent
     /// * `request_timeout_ms` - The request timeout in milliseconds
     /// * `callback` - A callback to execute when the response has been received
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     #[doc(alias = "org.apache.kafka.clients.ClientRequest#ClientRequest")]
     pub fn new(
         destination: &str,

@@ -22,7 +22,7 @@
 //! classic-consumer `OffsetFetcher` is out of scope per
 //! `consumer-threading.md` §20.
 
-#![allow(dead_code)]
+#![expect(dead_code)]
 
 use crate::consumer::ConsumerNoOffsetForPartitionError;
 use std::collections::{HashMap, HashSet};

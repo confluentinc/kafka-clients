@@ -46,12 +46,12 @@
 //!
 //! Phase 5 ships the trigger without its in-tree callers (the bg task in
 //! Phase 10, every blocking-style consumer API in Phase 11). The
-//! file-level `#![allow(dead_code)]` keeps `cargo build` warning-free
+//! file-level `#![expect(dead_code)]` keeps `cargo build` warning-free
 //! until those phases land; the inline test module exercises every
 //! method end-to-end so coverage is unaffected. Matches the
 //! Phase-4 `subscription_state.rs` precedent.
 
-#![allow(dead_code)] // Phase 5: trigger lands before its callers (Phases 10-11).
+#![cfg_attr(not(test), expect(dead_code))] // Phase 5: trigger lands before its callers (Phases 10-11).
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};

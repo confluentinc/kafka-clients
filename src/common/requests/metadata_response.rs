@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![allow(dead_code)]
+#![expect(dead_code)]
 //! Metadata response handling.
 //!
 //! Corresponds to `org.apache.kafka.common.requests.MetadataResponse`.
@@ -306,7 +306,6 @@ impl MetadataResponse {
     }
 
     /// Constructs a `MetadataResponse` for testing.
-    #[allow(clippy::too_many_arguments)]
     pub fn prepare_response_version(
         version: i16,
         throttle_time_ms: i32,
@@ -328,7 +327,6 @@ impl MetadataResponse {
     }
 
     /// Constructs a `MetadataResponse` with explicit leader epoch reliability flag.
-    #[allow(clippy::too_many_arguments)]
     pub fn prepare_response_has_reliable_epoch(
         has_reliable_epoch: bool,
         throttle_time_ms: i32,

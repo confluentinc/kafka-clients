@@ -114,7 +114,7 @@ impl<C: KafkaClient> AdminClientRunnable<C> {
     const MAX_POLL_TIMEOUT_MS: i64 = 1_200_000;
 
     /// Creates a new runnable.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     pub(crate) fn new(
         client: C,
         metadata_manager: AdminMetadataManager,

@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![allow(dead_code)]
+#![expect(dead_code)]
 //! The background task that handles sending produce requests to the Kafka cluster.
 //!
 //! This task makes metadata requests to renew its view of the cluster and then
@@ -431,7 +431,6 @@ pub struct Sender<C: KafkaClient> {
     /// The max time to wait for the server to respond to the request.
     request_timeout_ms: i32,
     /// The max time to wait before retrying a request which has failed.
-    #[allow(dead_code)]
     retry_backoff_ms: i64,
     /// True while the sender task is still running.
     running: Arc<AtomicBool>,
@@ -686,7 +685,7 @@ impl<C: KafkaClient> Sender<C> {
     }
 
     /// Creates a new `Sender`.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     #[doc(alias = "org.apache.kafka.clients.producer.internals.Sender#Sender")]
     pub fn new(
         client: C,

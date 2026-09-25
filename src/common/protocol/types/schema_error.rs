@@ -41,7 +41,7 @@ kafka_error_class! {
     /// `common.protocol.types`, which is "not a supported API". Callers match
     /// the variant and use `Display` / `source()`; the payload itself is not
     /// reachable by name.
-    #[allow(unnameable_types)]
+    #[expect(unnameable_types)]
     #[doc(alias = "org.apache.kafka.common.protocol.types.SchemaException")]
     SchemaError,
     extends: [

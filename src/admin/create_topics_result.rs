@@ -182,7 +182,7 @@ impl CreateTopicsResult {
     /// the public surface still matches Java exactly.
     // Only the `ffi` feature consumes this outside tests; without it the method
     // is dead code and `#![deny(warnings)]` would fail the build.
-    #[cfg_attr(not(feature = "ffi"), allow(dead_code))]
+    #[cfg_attr(all(not(feature = "ffi"), not(test)), expect(dead_code))]
     pub(crate) fn futures(&self) -> &HashMap<String, KafkaFuture<TopicMetadataAndConfig>> {
         &self.futures
     }

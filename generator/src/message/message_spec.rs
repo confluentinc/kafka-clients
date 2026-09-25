@@ -31,7 +31,7 @@ pub struct MessageSpec {
 
 impl MessageSpec {
     /// Create a new MessageSpec with validation
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     pub fn new(
         name: String,
         valid_versions: Option<&str>,

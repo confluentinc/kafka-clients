@@ -108,9 +108,7 @@ struct TopicMetadata {
 #[derive(Debug)]
 struct State {
     brokers: Vec<Node>,
-    #[allow(dead_code)]
     controller: Node,
-    #[allow(dead_code)]
     cluster_id: String,
     all_topics: BTreeMap<String, TopicMetadata>,
     topic_ids: BTreeMap<String, Uuid>,

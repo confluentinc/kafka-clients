@@ -18,8 +18,6 @@
 //! Translated from
 //! `org.apache.kafka.clients.consumer.internals.HeartbeatRequestState`.
 
-#![allow(dead_code)]
-
 use std::fmt;
 
 use super::RequestState;

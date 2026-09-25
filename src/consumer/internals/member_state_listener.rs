@@ -18,8 +18,6 @@
 //! Translated from
 //! `org.apache.kafka.clients.consumer.internals.MemberStateListener`.
 
-#![allow(dead_code)]
-
 use std::collections::HashSet;
 
 use crate::common::TopicPartition;

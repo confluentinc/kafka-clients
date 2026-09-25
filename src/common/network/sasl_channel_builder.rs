@@ -69,7 +69,7 @@ pub struct SaslChannelBuilder {
     /// SSL factory for SASL_SSL connections.
     ssl_factory: Option<SslFactory>,
     /// The listener name, if any (server-side only).
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     listener_name: Option<ListenerName>,
     /// The Kafka client ID for request headers.
     client_id: String,

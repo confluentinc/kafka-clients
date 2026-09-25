@@ -42,7 +42,7 @@ use super::format_java_set;
 // Two delegations to the same field. Ambassador takes one trait per
 // `#[delegate]`, so the repeated `target` key is unavoidable; clippy's
 // `duplicated_attributes` reads it as a copy-paste slip.
-#[allow(clippy::duplicated_attributes)]
+#[expect(clippy::duplicated_attributes)]
 #[delegate(ErrorMessage, target = "kafka_error")]
 #[delegate(ErrorSource, target = "kafka_error")]
 #[delegate(ErrorCode, target = "kafka_error")]

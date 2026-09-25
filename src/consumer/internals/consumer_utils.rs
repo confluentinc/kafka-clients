@@ -49,7 +49,7 @@
 //!   to `tokio::time::timeout(...).await` at the call site in Rust; the
 //!   wrapper does not add value.
 
-#![allow(dead_code)] // Phase 11 commit (1/N): helpers land before their callers (commits 2-7).
+#![expect(dead_code)] // Phase 11 commit (1/N): helpers land before their callers (commits 2-7).
 
 use std::sync::{Arc, Mutex};
 

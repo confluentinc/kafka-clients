@@ -47,7 +47,7 @@
 //! drains the channel on its next `poll`, applying the success/failure
 //! handler from `OffsetFetcherUtils`.
 
-#![allow(dead_code)]
+#![expect(dead_code)]
 
 use crate::common::requests::ListOffsetsResponse;
 use std::collections::{HashMap, HashSet};
@@ -651,7 +651,7 @@ impl OffsetsRequestManager {
     /// (out-of-scope) group-less assignor path can pass `None`; Java
     /// requires the commit manager non-null and short-circuits the
     /// `initWithCommittedOffsetsIfNeeded` path internally.
-    #[allow(clippy::too_many_arguments)] // Mirrors Java constructor argument list.
+    #[expect(clippy::too_many_arguments)] // Mirrors Java constructor argument list.
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.OffsetsRequestManager#OffsetsRequestManager")]
     pub(crate) fn new(
         subscription_state: Arc<Mutex<SubscriptionState>>,
@@ -1214,7 +1214,7 @@ impl OffsetsRequestManager {
     /// is the exceptional one — a cached `LogTruncationException` or an
     /// `LocalIllegalState` from `SubscriptionState` — so the allocation is on the
     /// rare branch.
-    #[allow(clippy::type_complexity)] // Java has the same fan-out via try/catch.
+    #[expect(clippy::type_complexity)] // Java has the same fan-out via try/catch.
     fn update_fetch_positions_inner(
         &mut self,
         deadline_ms: i64,

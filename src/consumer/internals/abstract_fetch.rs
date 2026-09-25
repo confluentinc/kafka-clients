@@ -52,7 +52,7 @@
 //! pieces a behavioral exercise can't reach through 7b: per-node
 //! session-handler lifecycle and the pending-fetch tracking set.
 
-#![allow(dead_code)]
+#![cfg_attr(not(test), expect(dead_code))]
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};

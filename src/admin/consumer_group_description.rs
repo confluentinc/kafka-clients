@@ -55,7 +55,7 @@ impl ConsumerGroupDescription {
     /// String, GroupType, GroupState, Node, Set<AclOperation>, Optional<Integer>,
     /// Optional<Integer>)` constructor. `coordinator` is `None` when the
     /// coordinator is not known (Java's nullable `Node`).
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     #[doc(
         alias = "org.apache.kafka.clients.admin.ConsumerGroupDescription#ConsumerGroupDescription(String,boolean,Collection,String,GroupType,GroupState,Node,Set,Optional,Optional)"
     )]

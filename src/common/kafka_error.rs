@@ -136,7 +136,7 @@ impl KafkaError {
     }
 
     /// The protocol error code. Only the C bindings read it back.
-    #[cfg_attr(not(feature = "ffi"), allow(dead_code))]
+    #[cfg_attr(not(feature = "ffi"), expect(dead_code))]
     pub(crate) fn error(&self) -> Errors {
         self.error
     }

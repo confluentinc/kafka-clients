@@ -21,7 +21,7 @@
 // `KafkaProducerMetrics` registers all 8 regardless — but have no call site yet:
 // the transactional API is not present on the `Producer` trait. They are
 // exercised by the tests and wired to record sites when transactions land.
-#![allow(dead_code)]
+#![expect(dead_code)]
 
 use std::sync::Arc;
 

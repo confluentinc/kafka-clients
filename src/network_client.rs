@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![allow(dead_code)]
+#![expect(dead_code)]
 //! A network client for asynchronous request/response network I/O.
 //!
 //! This is an internal class used to implement the user-facing producer and
@@ -91,7 +91,6 @@ struct InProgressData {
 /// This class is not thread-safe!
 ///
 /// Translated from `org.apache.kafka.clients.NetworkClient`.
-#[allow(dead_code)]
 #[doc(alias = "org.apache.kafka.clients.NetworkClient")]
 pub struct NetworkClient<S: Selectable, H: HostResolver> {
     /// The selector used to perform network I/O.
@@ -278,7 +277,7 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
     /// * `rebootstrap_trigger_ms` - Rebootstrap trigger timeout in milliseconds
     /// * `metadata_recovery_strategy` - Metadata recovery strategy
     /// * `log_context` - Contextual log prefix
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     #[doc(alias = "org.apache.kafka.clients.NetworkClient#NetworkClient")]
     pub fn with_metadata_rebootstrap_trigger_ms(
         selector: S,
@@ -356,7 +355,7 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
     /// * `host_resolver` - Host resolver implementation
     /// * `metadata_recovery_strategy` - Metadata recovery strategy
     /// * `log_context` - Contextual log prefix
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     #[doc(alias = "org.apache.kafka.clients.NetworkClient#NetworkClient")]
     pub fn with_metadata_updater(
         selector: S,
@@ -500,7 +499,6 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
     }
 
     /// Initiate a connection to the given node.
-    #[allow(dead_code)]
     #[doc(alias = "org.apache.kafka.clients.NetworkClient#initiateConnect")]
     async fn initiate_connect(&mut self, node: &crate::common::Node, now: i64) {
         let node_connection_id = node.id_string();
@@ -1824,12 +1822,11 @@ mod tests {
     // Translated from `org.apache.kafka.clients.ManualMetadataUpdater`.
     // ---------------------------------------------------------------------------
 
-    #[allow(dead_code)]
     struct ManualMetadataUpdater {
         nodes: Vec<Node>,
     }
 
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     impl ManualMetadataUpdater {
         fn new(nodes: Vec<Node>) -> Self {
             Self { nodes }
@@ -1871,7 +1868,6 @@ mod tests {
 
     struct TestMetadataUpdater {
         nodes: Vec<Node>,
-        #[allow(dead_code)]
         failure: Option<Error>,
     }
 
@@ -1881,7 +1877,7 @@ mod tests {
         }
 
         /// Returns and clears the last failure.
-        #[allow(dead_code)]
+        #[expect(dead_code)]
         fn get_and_clear_failure(&mut self) -> Option<Error> {
             self.failure.take()
         }
@@ -3039,7 +3035,6 @@ mod tests {
             self.use_new_addresses.store(true, std::sync::atomic::Ordering::SeqCst);
         }
 
-        #[allow(dead_code)]
         fn use_new_addresses(&self) -> bool {
             self.use_new_addresses.load(std::sync::atomic::Ordering::SeqCst)
         }

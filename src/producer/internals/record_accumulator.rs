@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![allow(dead_code)]
+#![expect(dead_code)]
 //! Queue that accumulates records into [`MemoryRecords`] instances to be sent
 //! to the server.
 //!
@@ -343,13 +343,7 @@ impl RecordAccumulator {
     /// * `transaction_manager` - The shared transaction state object which tracks
     ///   producer IDs, epochs, and sequence numbers per partition, or `None` when
     ///   idempotence is disabled
-    // `TransactionManager` is `pub(crate)` per CLAUDE.md §2 (its Java package is
-    // `internals`), while this constructor is nominally `pub` inside the
-    // `pub(crate) producer::internals` module and so is not reachable from outside
-    // the crate either. Demoting it instead would make several genuinely-used
-    // `ProducerBatch` / `ProducerMetadata` accessors look dead.
-    #[allow(private_interfaces)]
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     #[doc(alias = "org.apache.kafka.clients.producer.internals.RecordAccumulator#RecordAccumulator")]
     pub fn new(
         batch_size: i32,
@@ -385,7 +379,7 @@ impl RecordAccumulator {
     /// tests passing `new Metrics()`. Java has no metrics-less production
     /// constructor.
     #[cfg(test)]
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     pub(crate) fn new_for_test(
         batch_size: i32,
         compression: crate::common::compress::Compression,
@@ -432,9 +426,7 @@ impl RecordAccumulator {
     ///   producer IDs, epochs, and sequence numbers per partition, or `None` when
     ///   idempotence is disabled
     /// * `log_context` - Contextual log message prefix
-    // See [`Self::new`] for why `private_interfaces` is allowed here.
-    #[allow(private_interfaces)]
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     #[doc(alias = "org.apache.kafka.clients.producer.internals.RecordAccumulator#RecordAccumulator")]
     pub fn with_log_context(
         batch_size: i32,
@@ -559,7 +551,7 @@ impl RecordAccumulator {
     /// unfired (see that type for why) so the caller can honour the
     /// exactly-once callback obligation, exactly as Java's
     /// `KafkaProducer.doSend` `catch (ApiException e)` arm does.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     #[doc(alias = "org.apache.kafka.clients.producer.internals.RecordAccumulator#append")]
     pub async fn append(
         &self,
@@ -619,7 +611,7 @@ impl RecordAccumulator {
         .await
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     async fn append_inner(
         &self,
         topic: &Arc<str>,
@@ -790,7 +782,7 @@ impl RecordAccumulator {
     }
 
     /// Append a new batch to the queue.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     #[doc(alias = "org.apache.kafka.clients.producer.internals.RecordAccumulator#appendNewBatch")]
     fn append_new_batch(
         &self,
@@ -876,7 +868,7 @@ impl RecordAccumulator {
     /// returned back via the second element of the tuple so the caller can retry or
     /// pass it to `append_new_batch`. On error it is returned inside the
     /// [`AppendFailure`] for the same reason.
-    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
+    #[expect(clippy::too_many_arguments)]
     #[doc(alias = "org.apache.kafka.clients.producer.internals.RecordAccumulator#tryAppend")]
     fn try_append(
         &self,
@@ -1128,7 +1120,7 @@ impl RecordAccumulator {
     }
 
     /// Determine if the given partition leader has ready batches.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     #[doc(alias = "org.apache.kafka.clients.producer.internals.RecordAccumulator#batchReady")]
     fn batch_ready(
         &self,
@@ -1170,7 +1162,7 @@ impl RecordAccumulator {
 
     /// Iterate over partitions of a topic to see which have batches ready and
     /// collect leaders of those partitions into the set of ready nodes.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     #[doc(alias = "org.apache.kafka.clients.producer.internals.RecordAccumulator#partitionReady")]
     fn partition_ready(
         &self,
@@ -3425,7 +3417,7 @@ mod tests {
         assert!(total5 >= 1, "Should drain remaining batches after unmute");
     }
 
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     fn make_metadata_snapshot_with_epochs(
         nodes: &[Node],
         topic: &str,

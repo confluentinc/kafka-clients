@@ -23,9 +23,6 @@
 /// Record format versions supported by Kafka.
 ///
 /// Corresponds to Java's `org.apache.kafka.common.record.RecordVersion`.
-// `V0`/`V1` are translated for API completeness (DoD #2); only `V2` has a
-// crate-internal constructor now that the module is `internal`.
-#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[doc(alias = "org.apache.kafka.common.record.internal.RecordVersion")]
 pub enum RecordVersion {
@@ -46,7 +43,7 @@ impl RecordVersion {
     /// Look up a `RecordVersion` by byte value.
     ///
     /// Returns `None` if the value is not recognized.
-    #[allow(dead_code)]
+    #[cfg_attr(not(test), expect(dead_code))]
     #[doc(alias = "org.apache.kafka.common.record.internal.RecordVersion#lookup")]
     pub fn lookup(value: i8) -> Option<Self> {
         match value {
@@ -58,7 +55,7 @@ impl RecordVersion {
     }
 
     /// Returns the current (latest) record version.
-    #[allow(dead_code)]
+    #[cfg_attr(not(test), expect(dead_code))]
     #[doc(alias = "org.apache.kafka.common.record.internal.RecordVersion#current")]
     pub fn current() -> Self {
         Self::V2

@@ -51,7 +51,7 @@
 //! `ClientTelemetryReporter` / `ClientTelemetryUtils` are NOT translated;
 //! the corresponding fields are `None`. Per Phase 11 PLAN.md deferral #6.
 
-#![allow(dead_code)] // Phase 11 commits 5-7 wire commit / state-query / close.
+#![expect(dead_code)] // Phase 11 commits 5-7 wire commit / state-query / close.
 
 use crate::consumer::CloseOptions;
 use std::collections::{HashMap, HashSet};
@@ -1205,7 +1205,6 @@ where
     /// Phase M7 can expose the public `metrics()` accessor over the same
     /// registry the fetch path records into. The fetch managers hold
     /// `Arc<FetchMetricsManager>` clones that reference this same registry.
-    #[allow(dead_code)]
     metrics: Arc<Metrics>,
 
     /// Consumer-level poll/commit timing metrics (`KafkaConsumerMetrics`,
@@ -3669,7 +3668,7 @@ where
     /// with the extra `skip_rebalance_callback` / `skip_assignment_events`
     /// flags forwarded to [`Self::process_background_events_inner`]. See that
     /// method for the close-path / unsubscribe rationale.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     async fn process_background_events_until_inner<T: Send + 'static>(
         &mut self,
         receiver: tokio::sync::oneshot::Receiver<Result<T, Error>>,

@@ -65,7 +65,7 @@
 //! Spawning is per-event (not per-record); the hot-path rule from
 //! CLAUDE.md §11 still applies inside `Fetcher` / `FetchCollector`.
 
-#![allow(dead_code)]
+#![cfg_attr(not(test), expect(dead_code))]
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};

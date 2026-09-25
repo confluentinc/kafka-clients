@@ -282,7 +282,7 @@ impl ProduceRequestResult {
     // method and DoD #2 requires the translated class to carry all of them; the
     // `dead_code` lint only became visible once `KafkaProducer::with_options`
     // stopped leaking this type through a `pub` signature.
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     pub fn subscribe(&self) -> watch::Receiver<bool> {
         self.rx.clone()
     }

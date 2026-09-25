@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![allow(dead_code)]
+#![cfg_attr(not(test), expect(dead_code))]
 //! A pool of byte buffers kept under a given memory limit.
 //!
 //! This class is fairly specific to the needs of the producer. In particular it has the

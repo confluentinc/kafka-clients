@@ -25,7 +25,7 @@
 //! The single-arg name-only retain handles the client-side regex /
 //! transient-topic / explicit subscription paths.
 
-#![allow(dead_code)] // Phase 4: lands before any Rust caller (Phases 5-11).
+#![expect(dead_code)] // Phase 4: lands before any Rust caller (Phases 5-11).
 
 use std::collections::HashSet;
 use std::ops::Deref;
