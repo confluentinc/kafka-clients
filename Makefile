@@ -45,8 +45,17 @@ build-c: submodules build-rust-all-features
 	cmake -S bindings/c -B bindings/c/build -DRUST_PROJECT_ROOT=$(RUST_PROJECT_ROOT) -DCMAKE_C_FLAGS="$(CFLAGS_NATIVE)"
 	cmake --build bindings/c/build
 
+# The second line is a one-time migration: master's `[dev]` extras once
+# installed the PyPI confluent-kafka (librdkafka) into venv/, and it shares the
+# top-level package `confluent_kafka` with this client. Leaving `[dev]` stops new
+# installs but does not remove it from an existing venv, where it shadows the
+# package (`cannot import name 'IllegalArgumentError' from 'confluent_kafka'`).
+# The librdkafka baseline lives in its own venv (init-venv-librdkafka).
 init-venv:
 	[ -d venv ] || python3 -m venv venv
+	@if venv/bin/python -m pip show -q confluent-kafka >/dev/null 2>&1; then \
+	  echo "Removing PyPI confluent-kafka from venv/ (it shadows confluent_kafka)"; \
+	  venv/bin/python -m pip uninstall -y -q confluent-kafka; fi
 
 # The librdkafka venv of the Python perf benchmarks: the PyPI confluent-kafka
 # client for the CLIENT_VERSION=2 baseline and for the librdkafka-backed helpers

@@ -189,10 +189,13 @@ CONSUMER_CONFIG_KEYS = frozenset([
 ACCEPTED_CONFIG_PREFIXES = ("ssl.",)
 
 # Protocol error codes (src/common/protocol/errors.rs) used to classify the
-# errors a broker roll produces. Client-side errors (Wakeup, Timeout, ...) have
-# their own negative FFI ids (WAKEUP is -18), which none of these tables list,
-# so a client-side timeout is recognized by DISCONNECT_MESSAGE_MARKERS and a
-# wakeup by its WakeupError type or its message instead.
+# errors a broker roll produces. Wakeup and the other client-only errors have
+# negative FFI ids (WAKEUP is -18), which these tables do not list, so a wakeup
+# is recognized by its WakeupError type or its message. A client-side
+# TimeoutError (Java's common.errors.TimeoutException) carries REQUEST_TIMED_OUT
+# (7), which DISCONNECT_ERROR_CODES lists; only the root confluent_kafka
+# TimeoutError (java.util.concurrent's, LOCAL_TIMEOUT -5) is negative, and it is
+# caught by DISCONNECT_MESSAGE_MARKERS.
 COORDINATOR_ERROR_CODES = frozenset([
     14,  # CoordinatorLoadInProgress
     15,  # CoordinatorNotAvailable
