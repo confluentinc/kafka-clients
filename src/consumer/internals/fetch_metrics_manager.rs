@@ -419,23 +419,23 @@ impl FetchMetricsManager {
         }
 
         for tp in &new_assigned_partitions {
-            if !assignment.assigned_partitions.contains(tp) {
-                if let Some(metric_name) = self.partition_preferred_read_replica_metric_name(tp) {
-                    let subscription = Arc::clone(subscription);
-                    let tp_owned = tp.clone();
-                    self.metrics.add_metric_if_absent(
-                        metric_name,
-                        None,
-                        MetricValueProvider::Gauge(Box::new(ClosureGauge::new(move |_config, _now| {
-                            let value = subscription
-                                .lock()
-                                .expect("SubscriptionState mutex poisoned")
-                                .preferred_read_replica(&tp_owned, 0)
-                                .unwrap_or(-1);
-                            MetricValue::Int(value)
-                        }))),
-                    );
-                }
+            if !assignment.assigned_partitions.contains(tp)
+                && let Some(metric_name) = self.partition_preferred_read_replica_metric_name(tp)
+            {
+                let subscription = Arc::clone(subscription);
+                let tp_owned = tp.clone();
+                self.metrics.add_metric_if_absent(
+                    metric_name,
+                    None,
+                    MetricValueProvider::Gauge(Box::new(ClosureGauge::new(move |_config, _now| {
+                        let value = subscription
+                            .lock()
+                            .expect("SubscriptionState mutex poisoned")
+                            .preferred_read_replica(&tp_owned, 0)
+                            .unwrap_or(-1);
+                        MetricValue::Int(value)
+                    }))),
+                );
             }
         }
 
