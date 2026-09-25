@@ -20,19 +20,19 @@
 
 use std::net::SocketAddr;
 
-use confluent_kafka::common::network::NetworkSend;
-use confluent_kafka::common::network::PlaintextChannelBuilder;
-use confluent_kafka::common::network::Selectable;
-use confluent_kafka::common::network::Selector;
-use confluent_kafka::common::network::selectable::USE_DEFAULT_BUFFER_SIZE;
-use confluent_kafka::common::protocol::{ApiKeys, ByteBufferAccessor, Errors};
-use confluent_kafka::common::requests::ConcreteResponse;
-use confluent_kafka::common::requests::{
+use crate::common::network::NetworkSend;
+use crate::common::network::PlaintextChannelBuilder;
+use crate::common::network::Selectable;
+use crate::common::network::Selector;
+use crate::common::network::selectable::USE_DEFAULT_BUFFER_SIZE;
+use crate::common::protocol::{ApiKeys, ByteBufferAccessor, Errors};
+use crate::common::requests::ConcreteResponse;
+use crate::common::requests::{
     ApiVersionsResponse, RequestBuilder, RequestHeader, RequestHeaderOptionsBuilder, api_versions_request,
 };
 
-use crate::common::cluster_config::ClusterConfig;
-use crate::common::test_context::TestContext;
+use crate::integration_tests::common::cluster_config::ClusterConfig;
+use crate::integration_tests::common::test_context::TestContext;
 
 /// Maximum time to wait for a poll to make progress, in milliseconds.
 const POLL_TIMEOUT_MS: i64 = 5000;

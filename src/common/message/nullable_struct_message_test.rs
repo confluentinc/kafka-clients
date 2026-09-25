@@ -18,11 +18,11 @@
 //!
 //! Translated from org.apache.kafka.common.message.NullableStructMessageTest
 
-use crate::common::nullable_struct_message_data::{
+use crate::common::protocol::MessageUtil;
+use crate::common::protocol::{ByteBufferAccessor, Message, ObjectSerializationCache};
+use crate::test_generated::nullable_struct_message_data::{
     MyStruct, MyStruct2, MyStruct3, MyStruct4, NullableStructMessageData,
 };
-use confluent_kafka::common::protocol::MessageUtil;
-use confluent_kafka::common::protocol::{ByteBufferAccessor, Message, ObjectSerializationCache};
 
 /// Deserialize a NullableStructMessageData from a buffer at a given version.
 fn deserialize(buf: &[u8], version: i16) -> NullableStructMessageData {

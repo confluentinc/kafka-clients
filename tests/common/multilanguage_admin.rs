@@ -60,7 +60,6 @@ use confluent_kafka::common::quota::{
 use confluent_kafka::common::resource::{PatternType, ResourcePattern, ResourcePatternFilter, ResourceType};
 use confluent_kafka::common::security::auth::KafkaPrincipal;
 use confluent_kafka::common::security::token::delegation::{DelegationToken, TokenInformation};
-use confluent_kafka::common::utils::ProducerIdAndEpoch;
 use confluent_kafka::common::{
     ClassicGroupState, ElectionType, Error, GroupState, GroupType, Node, TopicPartition, TopicPartitionInfo,
     TopicPartitionReplica, Uuid,
@@ -71,8 +70,8 @@ use multilanguage_test_server::proto::{self};
 use tonic::transport::Channel;
 
 use crate::common::admin_backend::{
-    AdminBackend, ClusterDescription, ConfigEntryView, ConfigSynonymView, ConfigView, FeatureMetadataView, Listings,
-    Outcomes, ReplicaLogDirInfoView,
+    AdminBackend, ClusterDescription, ConfigEntryView, ConfigSynonymView, ConfigView, FeatureMetadataView,
+    FencedProducer, Listings, Outcomes, ReplicaLogDirInfoView,
 };
 use crate::common::multilanguage_producer::{kafka_error_from_proto, status_to_kafka_error};
 
@@ -792,10 +791,10 @@ impl MultilanguageAdmin {
         Ok(TransactionListing::new(listing.transactional_id, listing.producer_id, state))
     }
 
-    /// Rebuilds a [`ProducerIdAndEpoch`], narrowing the epoch to Java's `short`.
-    fn producer_id_and_epoch(&self, value: proto::ProducerIdAndEpoch) -> Result<ProducerIdAndEpoch, Error> {
+    /// Rebuilds a [`FencedProducer`], narrowing the epoch to Java's `short`.
+    fn producer_id_and_epoch(&self, value: proto::ProducerIdAndEpoch) -> Result<FencedProducer, Error> {
         let epoch = self.short(value.epoch, "ProducerIdAndEpoch.epoch")?;
-        Ok(ProducerIdAndEpoch::new(value.producer_id, epoch))
+        Ok(FencedProducer::new(value.producer_id, epoch))
     }
 
     /// Parses a canonical (base64) topic id, the form both bindings expose.
@@ -2415,7 +2414,7 @@ impl AdminBackend for MultilanguageAdmin {
         &self,
         transactional_ids: &[String],
         options: FenceProducersOptions,
-    ) -> Result<Outcomes<String, ProducerIdAndEpoch>, Error> {
+    ) -> Result<Outcomes<String, FencedProducer>, Error> {
         let request = proto::FenceProducersRequest {
             admin_id: self.admin_id,
             transactional_ids: transactional_ids.to_vec(),

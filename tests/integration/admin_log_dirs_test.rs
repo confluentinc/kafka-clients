@@ -65,9 +65,9 @@ use std::time::Duration;
 use confluent_kafka::admin::{
     AlterReplicaLogDirsOptions, DescribeClusterOptions, DescribeLogDirsOptions, DescribeReplicaLogDirsOptions,
 };
+use confluent_kafka::common::Error;
 use confluent_kafka::common::TopicPartition;
 use confluent_kafka::common::TopicPartitionReplica;
-use confluent_kafka::common::protocol::Errors;
 use confluent_kafka::common::serialization::ByteArraySerializer;
 use confluent_kafka::producer::{KafkaProducer, Producer, ProducerConfig, ProducerRecord};
 
@@ -271,8 +271,8 @@ async fn alter_replica_log_dirs_nonexistent_dir_errors<F: AdminBackendFactory>(c
         .expect_err(&format!("{backend} backend: moving to an unknown dir must fail"));
     assert!(
         matches!(
-            err.error(),
-            Errors::LogDirNotFound | Errors::KafkaStorageError | Errors::ReplicaNotAvailable
+            err,
+            Error::LogDirNotFound(_) | Error::KafkaStorage(_) | Error::ReplicaNotAvailable(_)
         ),
         "{backend} backend: unexpected error for unknown log dir: {:?}",
         err.error()

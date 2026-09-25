@@ -14,9 +14,9 @@
 
 //! Tests for Kafka message tagged fields serialization/deserialization
 
-use confluent_kafka::FetchRequestData;
-use confluent_kafka::common::protocol::ByteBufferAccessor;
-use confluent_kafka::fetch_request_data::ReplicaState;
+use crate::FetchRequestData;
+use crate::common::protocol::ByteBufferAccessor;
+use crate::fetch_request_data::ReplicaState;
 
 #[test]
 fn test_fetch_request_with_cluster_id() {

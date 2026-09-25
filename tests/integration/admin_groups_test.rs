@@ -88,7 +88,6 @@ use confluent_kafka::admin::{
     DeleteConsumerGroupsOptions, DescribeClassicGroupsOptions, DescribeClusterOptions, DescribeConsumerGroupsOptions,
     ListGroupsOptions, MemberToRemove, RemoveMembersFromConsumerGroupOptions,
 };
-use confluent_kafka::common::protocol::Errors;
 use confluent_kafka::common::serialization::Deserializer;
 use confluent_kafka::common::{ClassicGroupState, Error, GroupState, GroupType, Node, TopicPartition};
 use confluent_kafka::consumer::{Consumer, ConsumerConfig, KafkaConsumer, OffsetAndMetadata};
@@ -734,9 +733,8 @@ async fn describe_consumer_groups_nonexistent_group<F: AdminBackendFactory>(ctx:
         .unwrap_or_else(|| panic!("{backend} backend: {missing} missing from the describe result"))
     {
         Err(err) => {
-            assert_eq!(
-                err.error(),
-                Errors::GroupIdNotFound,
+            assert!(
+                matches!(err, Error::GroupIdNotFound(_)),
                 "{backend} backend: nonexistent group should fail with GROUP_ID_NOT_FOUND, got: {err}"
             );
         },
@@ -812,9 +810,8 @@ async fn describe_classic_groups_rejects_a_kip848_group<F: AdminBackendFactory>(
         .expect_err(&format!(
             "{backend} backend: a KIP-848 group is not a classic group, so describeClassicGroups must fail for it"
         ));
-    assert_eq!(
-        err.error(),
-        Errors::GroupIdNotFound,
+    assert!(
+        matches!(err, Error::GroupIdNotFound(_)),
         "{backend} backend: the coordinator reports GROUP_ID_NOT_FOUND for a group that is not a ClassicGroup, \
          got: {err}"
     );
@@ -1069,9 +1066,8 @@ async fn delete_consumer_groups_empty_and_non_empty<F: AdminBackendFactory>(ctx:
         .unwrap_or_else(|| panic!("{backend} backend: {live_group} missing from the delete result"))
         .as_ref()
         .expect_err(&format!("{backend} backend: deleting a group with active members must fail"));
-    assert_eq!(
-        non_empty_err.error(),
-        Errors::NonEmptyGroup,
+    assert!(
+        matches!(non_empty_err, Error::GroupNotEmpty(_)),
         "{backend} backend: deleting a non-empty group should fail with NON_EMPTY_GROUP, got: {non_empty_err}"
     );
     assert!(
@@ -1100,9 +1096,8 @@ async fn delete_consumer_groups_empty_and_non_empty<F: AdminBackendFactory>(ctx:
         .get(&empty_group)
         .unwrap_or_else(|| panic!("{backend} backend: {empty_group} missing from the describe result"))
     {
-        Err(err) => assert_eq!(
-            err.error(),
-            Errors::GroupIdNotFound,
+        Err(err) => assert!(
+            matches!(err, Error::GroupIdNotFound(_)),
             "{backend} backend: a deleted group is GROUP_ID_NOT_FOUND, got: {err}"
         ),
         Ok(desc) => assert!(
@@ -1249,7 +1244,7 @@ async fn remove_all_members_from_consumer_group<F: AdminBackendFactory>(ctx: &mu
                 emptied = true;
                 break;
             },
-            Some(Err(err)) if err.error() == Errors::GroupIdNotFound => {
+            Some(Err(err)) if matches!(err, Error::GroupIdNotFound(_)) => {
                 emptied = true;
                 break;
             },

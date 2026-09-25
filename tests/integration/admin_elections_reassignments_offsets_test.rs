@@ -42,8 +42,8 @@ use confluent_kafka::admin::{
     DescribeTopicsOptions, ElectLeadersOptions, ListOffsetsOptions, ListPartitionReassignmentsOptions,
     NewPartitionReassignment, OffsetSpec, OpType,
 };
+use confluent_kafka::common::Error;
 use confluent_kafka::common::config::{ConfigResource, config_resource};
-use confluent_kafka::common::protocol::Errors;
 use confluent_kafka::common::serialization::ByteArraySerializer;
 use confluent_kafka::common::{ElectionType, IsolationLevel, TopicPartition, TopicPartitionInfo};
 use confluent_kafka::producer::{KafkaProducer, Producer, ProducerConfig, ProducerRecord};
@@ -209,7 +209,7 @@ async fn partition_zero_of<B: AdminBackend>(admin: &B, topic: &str) -> TopicPart
             .get(topic)
             .unwrap_or_else(|| panic!("{backend} backend: {topic} missing from the describe result"))
         {
-            Err(e) if e.error() == Errors::UnknownTopicOrPartition => Err(format!(
+            Err(e) if matches!(e, Error::UnknownTopicOrPartition(_)) => Err(format!(
                 "{backend} backend: describe topic {topic}: {e} \
                  (the topic has not reached the broker that answered describeTopics yet)"
             )),
@@ -588,9 +588,8 @@ async fn elect_preferred_leaders<F: AdminBackendFactory>(ctx: &mut TestContext, 
     let error = outcome
         .as_ref()
         .expect_err(&format!("{backend} backend: the preferred replica is already the leader"));
-    assert_eq!(
-        error.error(),
-        Errors::ElectionNotNeeded,
+    assert!(
+        matches!(error, Error::ElectionNotNeeded(_)),
         "{backend} backend: on a single-broker cluster the only expected error is ELECTION_NOT_NEEDED, got {error}"
     );
 
@@ -660,9 +659,8 @@ async fn elect_leaders_explicit_set_is_not_cluster_wide<F: AdminBackendFactory>(
             .unwrap_or_else(|| panic!("{backend} backend: {tp} missing from the explicit result"))
             .as_ref()
             .expect_err(&format!("{backend} backend: {election_type:?} election is not needed"));
-        assert_eq!(
-            error.error(),
-            Errors::ElectionNotNeeded,
+        assert!(
+            matches!(error, Error::ElectionNotNeeded(_)),
             "{backend} backend: {election_type:?} on a healthy partition is ELECTION_NOT_NEEDED, got {error}"
         );
 
@@ -680,7 +678,7 @@ async fn elect_leaders_explicit_set_is_not_cluster_wide<F: AdminBackendFactory>(
         assert!(
             cluster_wide
                 .values()
-                .all(|outcome| !matches!(outcome.as_ref().err().map(|e| e.error()), Some(Errors::ElectionNotNeeded))),
+                .all(|outcome| !matches!(outcome, Err(Error::ElectionNotNeeded(_)))),
             "{backend} backend: no entry of a cluster-wide election may be ELECTION_NOT_NEEDED, got {cluster_wide:?}"
         );
     }
@@ -811,9 +809,8 @@ async fn alter_partition_reassignments_cancel_reaches_the_broker<F: AdminBackend
         .expect_err(&format!(
             "{backend} backend: cancelling a partition with no reassignment in progress must fail"
         ));
-    assert_eq!(
-        error.error(),
-        Errors::NoReassignmentInProgress,
+    assert!(
+        matches!(error, Error::NoReassignmentInProgress(_)),
         "{backend} backend: a cancellation with nothing in flight is NO_REASSIGNMENT_IN_PROGRESS; \
          an INVALID_REPLICA_ASSIGNMENT or IllegalArgument here would mean the absent Optional was \
          encoded as an empty replica list. Got {error}"

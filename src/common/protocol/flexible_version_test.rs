@@ -17,8 +17,8 @@
 //! Tests for flexible version support and tagged fields.
 //! Matches Java's MessageDataGeneratorTest patterns.
 
-use confluent_kafka::common::protocol::types::RawTaggedField;
-use confluent_kafka::common::protocol::{ByteBufferAccessor, Readable, Writable};
+use crate::common::protocol::types::RawTaggedField;
+use crate::common::protocol::{ByteBufferAccessor, Readable, Writable};
 
 #[test]
 fn test_read_unsigned_varint() {

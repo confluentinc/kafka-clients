@@ -521,10 +521,18 @@ async fn test_fetch_partitions_after_failed_listener() {
             },
             Err(err) => {
                 // The temporary listener error must not be fatal; keep polling.
-                assert!(
-                    !confluent_kafka::common::requests::RequestUtils::is_fatal_error(&err),
-                    "first-listener failure should be recoverable, got fatal: {err}"
-                );
+                // (Java's `RequestUtils.isFatalException`, from public predicates.)
+                let fatal = err.is_authentication_error()
+                    || err.is_authorization_error()
+                    || matches!(
+                        err,
+                        confluent_kafka::common::Error::MismatchedEndpointType(_)
+                            | confluent_kafka::common::Error::SecurityDisabled(_)
+                            | confluent_kafka::common::Error::UnsupportedVersion(_)
+                            | confluent_kafka::common::Error::UnsupportedEndpointType(_)
+                            | confluent_kafka::common::Error::UnsupportedForMessageFormat(_)
+                    );
+                assert!(!fatal, "first-listener failure should be recoverable, got fatal: {err}");
             },
         }
     }

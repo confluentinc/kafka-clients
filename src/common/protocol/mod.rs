@@ -30,6 +30,13 @@ mod readable;
 pub mod types;
 mod writable;
 
+// Tests of `org.apache.kafka.common.protocol` (Java test package), moved in
+// from `tests/` because the protocol module is not public API.
+#[cfg(test)]
+mod flexible_version_test;
+#[cfg(test)]
+mod tagged_fields_test;
+
 pub use api_keys::ApiKeys;
 pub use api_message::ApiMessage;
 pub use byte_buffer_accessor::ByteBufferAccessor;

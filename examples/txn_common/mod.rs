@@ -403,6 +403,29 @@ pub fn repeated(base: &[&str], times: usize) -> Vec<String> {
     (0..times).flat_map(|_| base.iter().map(|s| (*s).to_string())).collect()
 }
 
+/// The `Error` variant's name, e.g. `RecordTooLarge` — how these reports name
+/// the error class. The crate exposes no public numeric error code: callers
+/// classify an error by its variant and predicates, as Java does by class.
+pub fn variant(error: &Error) -> String {
+    let debug = format!("{error:?}");
+    debug.split(['(', ' ', '{']).next().unwrap_or(&debug).to_string()
+}
+
+/// Java's `RequestUtils.isFatalException` (`RequestUtils.java`), rebuilt from
+/// the public predicates because the crate's translation is not public API.
+pub fn is_fatal(error: &Error) -> bool {
+    error.is_authentication_error()
+        || error.is_authorization_error()
+        || matches!(
+            error,
+            Error::MismatchedEndpointType(_)
+                | Error::SecurityDisabled(_)
+                | Error::UnsupportedVersion(_)
+                | Error::UnsupportedEndpointType(_)
+                | Error::UnsupportedForMessageFormat(_)
+        )
+}
+
 /// Prints one ✅/❌ verdict line and passes `ok` through for folding.
 pub fn report(ok: bool, label: &str, detail: String) -> bool {
     let mark = if ok { "✅" } else { "❌" };

@@ -24,26 +24,24 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
 
-use confluent_kafka::admin::AdminClientConfig;
-use confluent_kafka::common::config::{SaslConfigs, SslConfigs};
-use confluent_kafka::common::network::NetworkSend;
-use confluent_kafka::common::network::SaslChannelBuilder;
-use confluent_kafka::common::network::Selectable;
-use confluent_kafka::common::network::Selector;
-use confluent_kafka::common::network::SslChannelBuilder;
-use confluent_kafka::common::network::selectable::USE_DEFAULT_BUFFER_SIZE;
-use confluent_kafka::common::protocol::{ApiKeys, ByteBufferAccessor, Errors};
-use confluent_kafka::common::requests::ConcreteResponse;
-use confluent_kafka::common::requests::{
-    RequestBuilder, RequestHeader, RequestHeaderOptionsBuilder, api_versions_request,
-};
-use confluent_kafka::common::security::auth::SecurityProtocol;
-use confluent_kafka::common::security::ssl::SslFactory;
-use confluent_kafka::common::utils::LogContext;
+use crate::admin::AdminClientConfig;
+use crate::common::config::{SaslConfigs, SslConfigs};
+use crate::common::network::NetworkSend;
+use crate::common::network::SaslChannelBuilder;
+use crate::common::network::Selectable;
+use crate::common::network::Selector;
+use crate::common::network::SslChannelBuilder;
+use crate::common::network::selectable::USE_DEFAULT_BUFFER_SIZE;
+use crate::common::protocol::{ApiKeys, ByteBufferAccessor, Errors};
+use crate::common::requests::ConcreteResponse;
+use crate::common::requests::{RequestBuilder, RequestHeader, RequestHeaderOptionsBuilder, api_versions_request};
+use crate::common::security::auth::SecurityProtocol;
+use crate::common::security::ssl::SslFactory;
+use crate::common::utils::LogContext;
 
-use crate::common::cluster_config::ClusterConfig;
-use crate::common::kafka_cluster::{SASL_PASSWORD, SASL_USERNAME};
-use crate::common::test_context::TestContext;
+use crate::integration_tests::common::cluster_config::ClusterConfig;
+use crate::integration_tests::common::kafka_cluster::{SASL_PASSWORD, SASL_USERNAME};
+use crate::integration_tests::common::test_context::TestContext;
 
 /// Maximum time to wait for a poll to make progress, in milliseconds.
 const POLL_TIMEOUT_MS: i64 = 5000;

@@ -103,3 +103,8 @@ pub use generated::*;
 pub(crate) mod test_generated {
     include!(concat!(env!("OUT_DIR"), "/test_generated/mod.rs"));
 }
+
+// Docker-backed integration tests that need crate-internal types; see the
+// module docs. The public-API suites stay in `tests/integration`.
+#[cfg(all(test, feature = "integration-tests"))]
+mod integration_tests;

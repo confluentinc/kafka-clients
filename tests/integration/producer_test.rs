@@ -380,16 +380,9 @@ async fn produce_too_large_record_acks_one_inner<F: ProducerBackendFactory>(ctx:
     let err = result.unwrap_err();
     // Java's Producer throws RecordTooLargeException for both client-side
     // (max.request.size) and broker-side (message.max.bytes) rejections.
-    // The Rust client uses the dedicated RecordTooLarge variant only for
-    // client-side rejections; broker-side rejections come back through
-    // the response path as Error(MessageTooLarge). Accept either.
-    let too_large = match &err {
-        confluent_kafka::common::Error::RecordTooLarge(_) => true,
-        confluent_kafka::common::Error::KafkaError(g) => {
-            g.error() == confluent_kafka::common::protocol::Errors::MessageTooLarge
-        },
-        _ => false,
-    };
+    // Both a client-side rejection and a broker `MESSAGE_TOO_LARGE` response
+    // surface as the RecordTooLarge variant (Java's `RecordTooLargeException`).
+    let too_large = matches!(err, confluent_kafka::common::Error::RecordTooLarge(_));
     assert!(
         too_large,
         "Expected RecordTooLarge or Error(MessageTooLarge) from server, got: {err:?}"

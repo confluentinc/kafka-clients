@@ -57,6 +57,7 @@ use confluent_kafka::producer::Producer;
 use confluent_kafka::producer::ProducerConfig;
 
 use txn_common::StringProducer;
+use txn_common::is_fatal;
 use txn_common::read_partition_idle;
 use txn_common::report;
 use txn_common::send_expect_failure;
@@ -64,6 +65,7 @@ use txn_common::send_value_printed;
 use txn_common::string_record;
 use txn_common::transactional_producer;
 use txn_common::transactional_producer_with;
+use txn_common::variant;
 
 /// Shorter drain for the single-topic verifications here.
 const IDLE: Duration = Duration::from_secs(3);
@@ -200,7 +202,7 @@ async fn recovery_loop_case(bootstrap: &str, suffix: &str) -> Result<bool, Strin
         Ok(failure) => {
             let error = failure.error();
             send_flag = error.is_kafka_error();
-            send_detail = format!("send error {:?}: is_kafka_error={send_flag}", error.error());
+            send_detail = format!("send error {}: is_kafka_error={send_flag}", variant(&error));
         },
         Err(unexpected) => ok &= report(false, "the oversized record was rejected", unexpected),
     }
@@ -565,7 +567,7 @@ async fn two_phase_commit_case(bootstrap: &str, suffix: &str) -> Result<bool, St
     )
     .map_err(|e| format!("building the 2pc producer: {e}"))?;
     let observation = match tokio::time::timeout(Duration::from_secs(15), producer.init_transactions()).await {
-        Ok(Err(error)) => format!("returned an error: {:?}: {}", error.error(), first_line(&error.to_string())),
+        Ok(Err(error)) => format!("returned an error: {}: {}", variant(&error), first_line(&error.to_string())),
         Ok(Ok(())) => "succeeded".to_string(),
         Err(_) => "still blocked after 15 s".to_string(),
     };
@@ -594,7 +596,7 @@ async fn retriable_flag_case() -> bool {
                 error.is_retriable_error(),
                 // Java's `RequestUtils.isFatalException` static — fatality is a
                 // classification over an error, not a flag carried by it.
-                confluent_kafka::common::requests::RequestUtils::is_fatal_error(&error)
+                is_fatal(&error)
             ),
         ),
         Ok(Ok(())) => report(

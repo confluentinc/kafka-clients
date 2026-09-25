@@ -12,28 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Shared test helper module providing access to test-only generated message types
-//! (SimpleExampleMessage, NullableStructMessage, SimpleArraysMessage) and
-//! integration test infrastructure (cluster config, pool, context).
+//! Shared integration test infrastructure (cluster config, pool, context,
+//! multi-language backends).
 //!
-//! The generated code uses `crate::common::protocol::*`, `crate::common::utils::*`
-//! and `crate::common::Uuid`. When included from integration tests, `crate` refers
-//! to the test binary crate, so we re-export the library's `common` module here to
-//! satisfy those paths.
-
-// Re-export library types that the generated code references via `crate::common::*`.
-// In integration tests, `crate::common` resolves to this module, so we must
-// provide `protocol`, `utils` and `Uuid` here to satisfy those paths.
-pub use confluent_kafka::common::Uuid;
-pub use confluent_kafka::common::protocol;
-pub use confluent_kafka::common::utils;
-
-#[allow(dead_code, unused_imports, clippy::all)]
-mod test_generated {
-    include!(concat!(env!("OUT_DIR"), "/test_generated/mod.rs"));
-}
-#[allow(unused_imports)]
-pub use test_generated::*;
+//! Only public API may be used here. The generated test-only message types
+//! (`SimpleExampleMessage`, ...) and the tests exercising them live in the
+//! crate (`src/common/message/`), because the generated wire types are not
+//! public API.
 
 // Integration test infrastructure — only compiled when the feature is enabled.
 // Allow dead_code because these modules are utility libraries used by separate

@@ -161,6 +161,9 @@ test-rust-all-features: build-rust-all-features
 # integration` cannot schedule them alongside the functional suite.
 test-integration: build-rust-integration-tests
 	cargo test --features integration-tests --test integration
+	# The integration tests that drive crate internals live in the lib test
+	# binary (src/integration_tests), since those types are not public API.
+	cargo test --features integration-tests --lib -- integration_tests::
 
 # ── Per-backend multilanguage integration tests ──────────────────────────
 #

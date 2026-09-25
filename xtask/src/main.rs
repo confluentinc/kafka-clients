@@ -272,7 +272,7 @@ error classes, so the code alone identifies the class.
     out
 }
 
-fn error_codes_rust(codes: &[(String, i32)]) -> String {
+fn error_codes_rust(codes: &[(String, i32)], classes: &[(String, String)]) -> anyhow::Result<String> {
     let mut out = String::new();
     out.push_str(
         r#"// Copyright 2025 Confluent Inc.
@@ -306,8 +306,145 @@ fn error_codes_rust(codes: &[(String, i32)]) -> String {
 
 "#,
     );
+    out.push_str("use std::collections::HashSet;\n\n");
+    for import in parse_error_class_imports()? {
+        out.push_str(&format!("use {import};\n"));
+    }
+    out.push('\n');
     for (name, value) in codes {
         out.push_str(&format!("pub const {name}: i32 = {value};\n"));
+    }
+    out.push_str(
+        r#"
+/// Rebuild the error class that owns the protocol error `code`, carrying
+/// `message` -- the table of `Errors::error_with_message` (Java's
+/// `Errors.exception(String)`), spelled with the classes' public constructors
+/// because `Errors` itself is not public API.
+///
+/// `None` for a code no broker-side class owns: `NONE`, and the negatives of
+/// the classes only the client raises.
+pub fn error_with_message(code: i32, message: String) -> Option<Error> {
+    match code {
+"#,
+    );
+    for (name, expr) in classes {
+        out.push_str(&format!("        {name} => Some({expr}),\n"));
+    }
+    out.push_str("        _ => None,\n    }\n}\n");
+    rustfmt(&out)
+}
+
+/// Format generated Rust source with the repository's `rustfmt.toml`, so the
+/// generated file also passes `cargo xtask format-check`.
+fn rustfmt(source: &str) -> anyhow::Result<String> {
+    use std::io::Write as _;
+    use std::process::Stdio;
+
+    let mut child = Command::new("rustfmt")
+        .args(["--emit", "stdout", "--config-path", "rustfmt.toml"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()?;
+    child.stdin.take().expect("piped stdin").write_all(source.as_bytes())?;
+    let output = child.wait_with_output()?;
+    if !output.status.success() {
+        anyhow::bail!("rustfmt failed on the generated error-code table");
+    }
+    Ok(String::from_utf8(output.stdout)?)
+}
+
+const ERRORS_SOURCE: &str = "src/common/protocol/errors.rs";
+
+/// Extract `(C enumerator name, constructor expression)` for every arm of
+/// `Errors::error_with_message` that yields an error.
+///
+/// Each arm is `Self::<Variant> => Some(<expr>)`; the enumerator name is the
+/// variant in SCREAMING_SNAKE_CASE, which is how `kafka_common_ErrorCode_t`
+/// spells Java's `Errors` constants. An arm naming no enumerator is an error, so
+/// the two tables cannot drift apart silently.
+fn parse_error_classes(codes: &[(String, i32)]) -> anyhow::Result<Vec<(String, String)>> {
+    use quote::ToTokens as _;
+
+    let file = syn::parse_file(&fs::read_to_string(ERRORS_SOURCE)?)?;
+    let body = file
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            syn::Item::Impl(item) => Some(item),
+            _ => None,
+        })
+        .flat_map(|item| &item.items)
+        .find_map(|item| match item {
+            syn::ImplItem::Fn(f) if f.sig.ident == "error_with_message" => Some(&f.block),
+            _ => None,
+        })
+        .ok_or_else(|| anyhow::anyhow!("{ERRORS_SOURCE}: Errors::error_with_message not found"))?;
+    let arms = body
+        .stmts
+        .iter()
+        .find_map(|stmt| match stmt {
+            syn::Stmt::Expr(syn::Expr::Match(m), _) => Some(&m.arms),
+            _ => None,
+        })
+        .ok_or_else(|| anyhow::anyhow!("{ERRORS_SOURCE}: error_with_message has no match"))?;
+
+    let known: std::collections::HashSet<&str> = codes.iter().map(|(name, _)| name.as_str()).collect();
+    let mut classes = Vec::new();
+    for arm in arms {
+        let syn::Pat::Path(path) = &arm.pat else {
+            anyhow::bail!("{ERRORS_SOURCE}: unexpected error_with_message arm pattern");
+        };
+        let variant = path.path.segments.last().expect("non-empty path").ident.to_string();
+        let mut expr = &*arm.body;
+        if let syn::Expr::Block(block) = expr {
+            match block.block.stmts.as_slice() {
+                [syn::Stmt::Expr(inner, None)] => expr = inner,
+                _ => anyhow::bail!("{ERRORS_SOURCE}: arm `{variant}` is not a single expression"),
+            }
+        }
+        let inner = match expr {
+            syn::Expr::Path(p) if p.path.is_ident("None") => continue,
+            syn::Expr::Call(call) if matches!(&*call.func, syn::Expr::Path(p) if p.path.is_ident("Some")) => {
+                &call.args[0]
+            },
+            _ => anyhow::bail!("{ERRORS_SOURCE}: arm `{variant}` is neither `Some(..)` nor `None`"),
+        };
+        let name = screaming_snake(&variant);
+        if !known.contains(name.as_str()) {
+            anyhow::bail!("{ERRORS_SOURCE}: `Errors::{variant}` has no `kafka_common_ErrorCode_{name}` enumerator");
+        }
+        classes.push((name, inner.to_token_stream().to_string()));
+    }
+    Ok(classes)
+}
+
+/// The `use crate::common::…` imports of [`ERRORS_SOURCE`], re-rooted at
+/// `confluent_kafka`, so the constructor expressions copied out of
+/// `error_with_message` resolve the same way in the generated file. Only the
+/// `common` imports are copied: the arms name error classes, which live there.
+fn parse_error_class_imports() -> anyhow::Result<Vec<String>> {
+    use quote::ToTokens as _;
+
+    let file = syn::parse_file(&fs::read_to_string(ERRORS_SOURCE)?)?;
+    Ok(file
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            syn::Item::Use(item) => Some(item.tree.to_token_stream().to_string().replace(' ', "")),
+            _ => None,
+        })
+        .filter_map(|tree| tree.strip_prefix("crate::common::").map(|rest| format!("confluent_kafka::common::{rest}")))
+        .collect())
+}
+
+/// `UnknownTopicOrPartition` -> `UNKNOWN_TOPIC_OR_PARTITION`.
+fn screaming_snake(camel: &str) -> String {
+    let mut out = String::new();
+    for (i, c) in camel.chars().enumerate() {
+        if c.is_ascii_uppercase() && i > 0 {
+            out.push('_');
+        }
+        out.push(c.to_ascii_uppercase());
     }
     out
 }
@@ -316,8 +453,9 @@ fn generate_error_codes() -> anyhow::Result<()> {
     println!("🔧 Generating error-code constants from {ERROR_CODE_SOURCE}...");
 
     let codes = parse_error_codes()?;
+    let classes = parse_error_classes(&codes)?;
     fs::write(ERROR_CODE_PY, error_codes_python(&codes))?;
-    fs::write(ERROR_CODE_RS, error_codes_rust(&codes))?;
+    fs::write(ERROR_CODE_RS, error_codes_rust(&codes, &classes)?)?;
 
     println!("✅ Wrote {} constants to {ERROR_CODE_PY} and {ERROR_CODE_RS}", codes.len());
     Ok(())
@@ -328,10 +466,11 @@ fn check_error_codes_up_to_date() -> anyhow::Result<()> {
     println!("🔍 Checking generated error-code constants...");
 
     let codes = parse_error_codes()?;
+    let classes = parse_error_classes(&codes)?;
     let mut stale = Vec::new();
     for (path, expected) in [
         (ERROR_CODE_PY, error_codes_python(&codes)),
-        (ERROR_CODE_RS, error_codes_rust(&codes)),
+        (ERROR_CODE_RS, error_codes_rust(&codes, &classes)?),
     ] {
         match fs::read_to_string(path) {
             Ok(actual) if actual == expected => {},
