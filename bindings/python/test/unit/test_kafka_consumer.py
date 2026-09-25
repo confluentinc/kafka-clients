@@ -826,6 +826,92 @@ def test_another_thread_during_the_commit_callback_meets_the_guard() -> None:
         assert seen == {"other": "concurrent"}
 
 
+def _listener_consumer() -> KafkaConsumer[bytes, bytes]:
+    """A consumer subscribed with a listener: commit_nowait() then runs its FFI
+    call on the helper thread (the broker is unreachable; empty-offsets commits
+    complete at once)."""
+    consumer = new_consumer()
+    consumer.subscribe(topics=[TOPIC], callback=ConsumerRebalanceListener())
+    return consumer
+
+
+def test_commit_nowait_from_another_thread_while_one_runs_meets_the_guard() -> None:
+    # Java's commitAsync() calls acquire(): a second thread's commitAsync()
+    # while the first thread's is inside the consumer raises
+    # ConcurrentModificationException, rather than waiting for it.
+    consumer = _listener_consumer()
+    started, release = threading.Event(), threading.Event()
+    ran_on: list[int] = []
+
+    def slow(offsets: Any, exception: Any) -> None:
+        ran_on.append(threading.get_ident())
+        started.set()
+        release.wait(WAIT)
+
+    try:
+        consumer.commit_nowait(offsets={}, callback=slow)
+        # The core queues the completed commit's callback from a task of its
+        # own; let it, so the next commit_nowait() runs it inside its FFI call.
+        time.sleep(0.2)
+        outcome: dict[str, Any] = {}
+
+        def first() -> None:
+            try:
+                consumer.commit_nowait(offsets={}, callback=lambda o, e: None)
+                outcome["first"] = "returned"
+            except BaseException as exc:  # noqa: BLE001
+                outcome["first"] = exc
+
+        worker = threading.Thread(target=first)
+        worker.start()
+        assert started.wait(WAIT)
+        started_at = time.monotonic()
+        with pytest.raises(ConcurrentModificationError) as e:
+            consumer.commit_nowait(offsets={}, callback=lambda o, e: None)
+        assert str(e.value) == CONCURRENT
+        # Refused at once, not queued behind the first call.
+        assert time.monotonic() - started_at < 1.0
+        release.set()
+        worker.join(WAIT)
+        assert outcome == {"first": "returned"}
+        # The earlier commit's callback ran inside the first call, on its thread.
+        assert ran_on == [worker.ident]
+    finally:
+        release.set()
+        consumer.close()
+
+
+def test_commit_callbacks_run_on_the_thread_of_the_call_delivering_them() -> None:
+    # Two threads in turn: each commit_nowait() runs the callbacks of the
+    # earlier commits inside its FFI call on the helper thread, and hands them
+    # back to its own caller (threads by name: an ident is reused).
+    consumer = _listener_consumer()
+    seen: dict[str, str] = {}
+
+    def record(name: str) -> Any:
+        return lambda o, e: seen.__setitem__(name, threading.current_thread().name)
+
+    def commit_nowait_on(thread_name: str, callback_name: str) -> None:
+        worker = threading.Thread(
+            target=lambda: consumer.commit_nowait(offsets={}, callback=record(callback_name)),
+            name=thread_name)
+        worker.start()
+        worker.join(WAIT)
+
+    try:
+        commit_nowait_on("thread-a", "first")
+        time.sleep(0.2)
+        commit_nowait_on("thread-b", "second")
+        # The first commit's callback ran inside thread B's call, on thread B.
+        assert seen == {"first": "thread-b"}
+        time.sleep(0.2)
+        # And the second's inside this thread's call.
+        consumer.commit_nowait(offsets={}, callback=lambda o, e: None)
+        assert seen == {"first": "thread-b", "second": threading.current_thread().name}
+    finally:
+        consumer.close()
+
+
 def test_a_raising_commit_callback_is_logged(caplog: pytest.LogCaptureFixture) -> None:
     with new_consumer() as consumer:
         consumer.assign(partitions=[TP0])
