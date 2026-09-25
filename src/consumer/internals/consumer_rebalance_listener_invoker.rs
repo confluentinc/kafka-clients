@@ -72,8 +72,8 @@ use std::sync::{Arc, Mutex};
 
 use log::{error, info};
 
-use crate::common::metrics::SystemTime;
-use crate::common::metrics::Time;
+use crate::common::utils::SystemTime;
+use crate::common::utils::Time;
 use crate::common::{Error, TopicPartition};
 use crate::consumer::ConsumerRebalanceListener;
 use crate::consumer::internals::RebalanceCallbackMetricsManager;
@@ -501,7 +501,7 @@ mod tests {
     /// Listener that advances a shared `MockTime` by a fixed amount inside each
     /// callback so the invoker measures a deterministic non-zero latency.
     struct SleepingListener {
-        time: Arc<crate::common::metrics::MockTime>,
+        time: Arc<crate::common::utils::MockTime>,
         sleep_ms: i64,
     }
 
@@ -529,8 +529,9 @@ mod tests {
     #[tokio::test]
     async fn invoke_records_per_callback_latency_on_success() {
         use crate::common::Metric;
-        use crate::common::metrics::MockTime;
-        use crate::common::metrics::{Metrics, Time};
+        use crate::common::metrics::Metrics;
+        use crate::common::utils::MockTime;
+        use crate::common::utils::Time;
         use crate::consumer::internals::RebalanceCallbackMetricsManager;
 
         let time = Arc::new(MockTime::new());
@@ -567,8 +568,9 @@ mod tests {
     #[tokio::test]
     async fn invoke_does_not_record_latency_on_error() {
         use crate::common::Metric;
-        use crate::common::metrics::MockTime;
-        use crate::common::metrics::{Metrics, Time};
+        use crate::common::metrics::Metrics;
+        use crate::common::utils::MockTime;
+        use crate::common::utils::Time;
         use crate::consumer::internals::RebalanceCallbackMetricsManager;
 
         let time = Arc::new(MockTime::new());

@@ -57,6 +57,7 @@ use crate::common::TopicPartition;
 use crate::common::protocol::Errors;
 use crate::common::record::internal::MemoryRecords;
 use crate::common::requests::FetchResponse;
+use crate::common::utils::Time;
 use crate::consumer::ConsumerOffsetOutOfRangeError;
 use crate::consumer::ConsumerRecord;
 use crate::consumer::ConsumerRecords;
@@ -73,29 +74,6 @@ use crate::consumer::internals::FetchUtils;
 use crate::consumer::internals::{FetchPosition, SubscriptionState};
 use crate::fetch_response_data::PartitionData;
 
-/// Time source used by `FetchCollector` for the preferred-read-replica
-/// lease window. Mirrors Java's `Time` interface.
-///
-/// Implementations only need to report `milliseconds()`; we don't use
-/// `Time::nanoseconds` or `Time::hiResClockMs` on this path.
-pub(crate) trait FetchCollectorTime: Send + Sync + 'static {
-    fn milliseconds(&self) -> i64;
-}
-
-/// Default time source — wraps `std::time::SystemTime::now()`.
-#[derive(Debug, Default)]
-pub(crate) struct SystemFetchCollectorTime;
-
-impl FetchCollectorTime for SystemFetchCollectorTime {
-    fn milliseconds(&self) -> i64 {
-        use std::time::{SystemTime, UNIX_EPOCH};
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_millis() as i64)
-            .unwrap_or(0)
-    }
-}
-
 /// Drains the [`FetchBuffer`] and produces user-visible
 /// [`ConsumerRecords`].
 ///
@@ -111,7 +89,7 @@ where
     subscriptions: Arc<Mutex<SubscriptionState>>,
     fetch_config: FetchConfig,
     deserializers: Arc<Deserializers<K, V>>,
-    time: Arc<dyn FetchCollectorTime>,
+    time: Arc<dyn Time>,
     /// Records per-partition lag / lead metrics. Phase M3 re-introduces the
     /// `FetchMetricsManager` parameter Phase 7a dropped.
     ///
@@ -160,7 +138,7 @@ where
         fetch_config: FetchConfig,
         deserializers: Arc<Deserializers<K, V>>,
         metrics_manager: Arc<FetchMetricsManager>,
-        time: Arc<dyn FetchCollectorTime>,
+        time: Arc<dyn Time>,
     ) -> Self {
         Self {
             metadata,
@@ -1008,20 +986,7 @@ mod tests {
     const DEFAULT_RECORD_COUNT: i32 = 10;
     const DEFAULT_MAX_POLL_RECORDS: i32 = 500;
 
-    /// Mock time source — `MockTime` analog.
-    struct MockTime {
-        now: std::sync::atomic::AtomicI64,
-    }
-    impl MockTime {
-        fn new() -> Self {
-            Self { now: std::sync::atomic::AtomicI64::new(0) }
-        }
-    }
-    impl FetchCollectorTime for MockTime {
-        fn milliseconds(&self) -> i64 {
-            self.now.load(std::sync::atomic::Ordering::SeqCst)
-        }
-    }
+    use crate::common::utils::MockTime;
 
     struct StringDeserializer;
     impl Deserializer<String> for StringDeserializer {
@@ -1088,7 +1053,8 @@ mod tests {
             FetchConfig::new(1, 50 * 1024 * 1024, 500, 1024 * 1024, max_poll_records, true, "", isolation);
         let deserializers = Arc::new(Deserializers::new(Box::new(StringDeserializer), Box::new(StringDeserializer)));
         let fetch_buffer = Arc::new(FetchBuffer::new());
-        let time: Arc<MockTime> = Arc::new(MockTime::new());
+        let time: Arc<MockTime> =
+            Arc::new(MockTime::with_auto_tick_ms_current_time_ms_current_high_res_time_ns(0, 0, 0));
 
         let collector = FetchCollector::new(
             metadata.clone(),
@@ -2145,7 +2111,7 @@ mod tests {
     #[test]
     fn test_update_partition_state_uses_time_source() {
         let h = build_harness(DEFAULT_MAX_POLL_RECORDS, IsolationLevel::ReadUncommitted);
-        h.time.now.store(42, std::sync::atomic::Ordering::SeqCst);
+        h.time.set_current_time_ms(42).unwrap();
         let partition = tp("topic-a", 0);
         assign_and_seek(&h, &partition);
 

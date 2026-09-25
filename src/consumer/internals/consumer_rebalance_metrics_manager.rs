@@ -298,8 +298,9 @@ mod tests {
     use super::*;
     use crate::common::Metric;
     use crate::common::TopicPartition;
-    use crate::common::metrics::MockTime;
-    use crate::common::metrics::{Metrics, Time};
+    use crate::common::metrics::Metrics;
+    use crate::common::utils::MockTime;
+    use crate::common::utils::Time;
     use crate::consumer::internals::AutoOffsetResetStrategy;
 
     /// Build a manager over a `MockTime`-backed `Metrics` plus a fresh

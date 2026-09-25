@@ -4781,7 +4781,8 @@ mod tests {
     use super::*;
     use crate::common::MetricName;
     use crate::common::MetricValue;
-    use crate::common::metrics::{ClosureGauge, ClosureMeasurable, MetricConfig, MetricValueProvider, SystemTime};
+    use crate::common::metrics::{ClosureGauge, ClosureMeasurable, MetricConfig, MetricValueProvider};
+    use crate::common::utils::SystemTime;
     use crate::consumer::ConsumerGroupMetadataImpl;
     use std::collections::BTreeMap;
 

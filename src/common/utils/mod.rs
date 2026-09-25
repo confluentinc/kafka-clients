@@ -29,7 +29,12 @@ mod exponential_backoff;
 mod log_context;
 #[macro_use]
 mod log_macros;
+// Java ships `MockTime` in the clients test jar.
+#[cfg(test)]
+mod mock_time;
 mod producer_id_and_epoch;
+mod system_time;
+mod time;
 // `utils.rs` inside `utils/` mirrors Java's `org.apache.kafka.common.utils.Utils`
 // sitting inside the `utils` package; the struct is reached through the
 // re-export below, never through this module path (CLAUDE.md §2).
@@ -39,5 +44,9 @@ mod utils;
 pub(crate) use byte_utils::ByteUtils;
 pub(crate) use exponential_backoff::ExponentialBackoff;
 pub(crate) use log_context::LogContext;
+#[cfg(test)]
+pub(crate) use mock_time::MockTime;
 pub(crate) use producer_id_and_epoch::ProducerIdAndEpoch;
+pub(crate) use system_time::SystemTime;
+pub(crate) use time::Time;
 pub(crate) use utils::Utils;

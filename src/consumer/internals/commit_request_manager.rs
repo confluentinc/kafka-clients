@@ -60,11 +60,11 @@ use tokio::sync::oneshot;
 
 use crate::OffsetCommitRequestData;
 use crate::OffsetFetchRequestData;
-use crate::common::metrics::Time;
 use crate::common::protocol::Errors;
 use crate::common::requests::{
     OffsetCommitResponse, RECORD_BATCH_NO_PARTITION_LEADER_EPOCH, offset_commit_request, offset_fetch_request,
 };
+use crate::common::utils::Time;
 use crate::common::{Error, TopicPartition, Uuid};
 use crate::consumer::ConsumerConfig;
 use crate::consumer::OffsetAndMetadata;
@@ -1755,7 +1755,7 @@ fn build_offset_commit_unsent_request(
                 // RequestState.handleClientResponse error arm calls
                 // handleCoordinatorDisconnect before completing exceptionally
                 // (CommitRequestManager.java:947).
-                inner_for_handler.handle_coordinator_disconnect(&err, current_time_ms_now());
+                inner_for_handler.handle_coordinator_disconnect(&err, inner_for_handler.time.milliseconds());
                 request.complete_err(err);
             },
             Err(_recv_err) => {
@@ -1840,7 +1840,7 @@ fn build_offset_fetch_unsent_request(
                 // RequestState.handleClientResponse error arm calls
                 // handleCoordinatorDisconnect before completing exceptionally
                 // (CommitRequestManager.java:947).
-                inner_for_handler.handle_coordinator_disconnect(&err, current_time_ms_now());
+                inner_for_handler.handle_coordinator_disconnect(&err, inner_for_handler.time.milliseconds());
                 if let Some(tx) = future_tx.lock().expect("offset_fetch future_tx poisoned").take() {
                     let _ = tx.send(Err(err));
                 }
@@ -1925,7 +1925,7 @@ fn classify_and_complete_commit(
                     // Java line 801-806: mark coordinator unknown before
                     // surfacing the error so the retry driver's next
                     // commit attempt re-discovers the coordinator.
-                    inner.mark_coordinator_unknown(error.message(), current_time_ms_now());
+                    inner.mark_coordinator_unknown(error.message(), inner.time.milliseconds());
                     request.complete_err(Error::new(error));
                     return;
                 },
@@ -1999,7 +1999,7 @@ fn handle_offset_fetch_response(
         // exceptionally so the retry driver's next OffsetFetch goes to
         // a freshly discovered coordinator.
         if matches!(group_error, Errors::NotCoordinator | Errors::CoordinatorNotAvailable) {
-            inner.mark_coordinator_unknown(&format!("error response {:?}", group_error), current_time_ms_now());
+            inner.mark_coordinator_unknown(&format!("error response {:?}", group_error), inner.time.milliseconds());
         }
         send(Err(classify_fetch_group_error(group_error, group_id)));
         return;
@@ -2101,21 +2101,6 @@ fn classify_fetch_group_error(error: Errors, group_id: &str) -> Error {
         _ if error.error().is_some_and(|e| e.is_retriable_error()) => Error::new(error),
         _ => Error::kafka_message(format!("Unexpected error in fetch offset response: {}", error.message())),
     }
-}
-
-/// Wall-clock `System.currentTimeMillis()` equivalent used by the
-/// coordinator-disconnect / mark-coordinator-unknown response handlers,
-/// which do not carry an injected `current_time_ms` parameter. Mirrors
-/// Java's bg-task `time.milliseconds()` inside
-/// `OffsetFetchRequestState.onFailure`. (The retry drivers no longer rely
-/// on this: they read the injected `inner.time.milliseconds()` at each
-/// response — see `fetch_offsets_with_retries` and the sync-commit driver.)
-fn current_time_ms_now() -> i64 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(i64::MAX)
 }
 
 impl CommitRequestManagerInner {
@@ -2741,7 +2726,7 @@ mod tests {
     //! `deadline_ms` — mirroring Java, which checks `isExpired()` /
     //! `handleRetriablePartitionErrors` against `time.milliseconds()` at
     //! response-handling time. Deadline-expiry tests therefore inject a
-    //! [`MockTime`](crate::common::metrics::MockTime) via
+    //! [`MockTime`](crate::common::utils::MockTime) via
     //! [`make_manager_with_mock_time`] and advance it with `MockTime::sleep`
     //! to trip the deadline (mirroring Java's `MockTime.sleep`), rather than
     //! relying on a model clock advanced by `retry_backoff_ms`. Each retry
@@ -2780,11 +2765,17 @@ mod tests {
         // backoff windows unreachably far ahead of the poll `now`).
         // Deadline-expiry tests use [`make_manager_with_mock_time`] instead so
         // they can advance the clock past the deadline.
-        make_manager_with_time(now_ms, enable_auto_commit, Arc::new(crate::common::metrics::MockTime::new()))
+        make_manager_with_time(
+            now_ms,
+            enable_auto_commit,
+            Arc::new(
+                crate::common::utils::MockTime::with_auto_tick_ms_current_time_ms_current_high_res_time_ns(0, 0, 0),
+            ),
+        )
     }
 
     /// Build a manager over an explicit [`Time`] handle. Deadline-expiry tests
-    /// pass a [`MockTime`](crate::common::metrics::MockTime) so
+    /// pass a [`MockTime`](crate::common::utils::MockTime) so
     /// they can advance the clock past `deadline_ms` deterministically —
     /// mirroring Java's `MockTime.sleep` driving `isExpired()`.
     fn make_manager_with_time(now_ms: i64, enable_auto_commit: bool, time: Arc<dyn Time>) -> CommitRequestManager {
@@ -2805,8 +2796,10 @@ mod tests {
     fn make_manager_with_mock_time(
         now_ms: i64,
         enable_auto_commit: bool,
-    ) -> (CommitRequestManager, Arc<crate::common::metrics::MockTime>) {
-        let time = Arc::new(crate::common::metrics::MockTime::new());
+    ) -> (CommitRequestManager, Arc<crate::common::utils::MockTime>) {
+        let time = Arc::new(
+            crate::common::utils::MockTime::with_auto_tick_ms_current_time_ms_current_high_res_time_ns(0, 0, 0),
+        );
         let mgr = make_manager_with_time(now_ms, enable_auto_commit, Arc::clone(&time) as Arc<dyn Time>);
         (mgr, time)
     }
@@ -2822,14 +2815,16 @@ mod tests {
         let (mgr, subs, _time) = make_manager_with_subs_and_time(
             now_ms,
             enable_auto_commit,
-            Arc::new(crate::common::metrics::MockTime::new()),
+            Arc::new(
+                crate::common::utils::MockTime::with_auto_tick_ms_current_time_ms_current_high_res_time_ns(0, 0, 0),
+            ),
         );
         (mgr, subs)
     }
 
     /// As [`make_manager_with_subs`] but over an explicit [`Time`] handle,
     /// returning the handle too so deadline-expiry tests can advance a
-    /// [`MockTime`](crate::common::metrics::MockTime).
+    /// [`MockTime`](crate::common::utils::MockTime).
     fn make_manager_with_subs_and_time(
         now_ms: i64,
         enable_auto_commit: bool,
@@ -3725,7 +3720,9 @@ mod tests {
         use crate::common::Node;
         use crate::consumer::internals::CoordinatorRequestManager;
 
-        let mock_time = Arc::new(crate::common::metrics::MockTime::new());
+        let mock_time = Arc::new(
+            crate::common::utils::MockTime::with_auto_tick_ms_current_time_ms_current_high_res_time_ns(0, 0, 0),
+        );
         let (manager, subs, _time) = make_manager_with_subs_and_time(0, true, Arc::clone(&mock_time) as Arc<dyn Time>);
         let tp = TopicPartition::new("t".to_string(), 0);
         {
@@ -5199,7 +5196,9 @@ mod tests {
             Arc::clone(&subs),
             ClusterResourceListeners::new(),
         ));
-        let mock_time = Arc::new(crate::common::metrics::MockTime::new());
+        let mock_time = Arc::new(
+            crate::common::utils::MockTime::with_auto_tick_ms_current_time_ms_current_high_res_time_ns(0, 0, 0),
+        );
         let manager =
             CommitRequestManager::new(&cfg, metadata, subs, GROUP_ID, None, Arc::clone(&mock_time) as Arc<dyn Time>, 0);
         let coordinator = coordinator_with_node();
@@ -6035,13 +6034,15 @@ mod tests {
             now_ms,
             enable_auto_commit,
             interval_ms,
-            Arc::new(crate::common::metrics::MockTime::new()),
+            Arc::new(
+                crate::common::utils::MockTime::with_auto_tick_ms_current_time_ms_current_high_res_time_ns(0, 0, 0),
+            ),
         )
     }
 
     /// As [`make_manager_with_subs_interval`] but over an explicit [`Time`]
     /// handle. The rebalance-flush retry test injects a
-    /// [`MockTime`](crate::common::metrics::MockTime) held below
+    /// [`MockTime`](crate::common::utils::MockTime) held below
     /// the deadline so a retriable failure re-queues (rather than being seen
     /// as expired against the wall clock).
     fn make_manager_with_subs_interval_time(

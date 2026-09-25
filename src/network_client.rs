@@ -4640,9 +4640,9 @@ mod tests {
         use crate::ProduceRequestData;
         use crate::ProduceResponseData;
         use crate::common::Metric;
-        use crate::common::metrics::MockTime;
-        use crate::common::metrics::Time;
         use crate::common::metrics::{MetricConfig, Metrics};
+        use crate::common::utils::MockTime;
+        use crate::common::utils::Time;
         use crate::producer::internals::SenderMetricsRegistry;
         use crate::producer::internals::SenderStatics;
 

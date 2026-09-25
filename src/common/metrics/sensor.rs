@@ -22,9 +22,9 @@ use std::sync::{Arc, Mutex};
 use crate::common::Metric;
 use crate::common::metrics::MetricsShared;
 use crate::common::metrics::{
-    CompoundStat, KafkaMetric, Measurable, MeasurableStat, MetricConfig, MetricValueProvider, QuotaViolationError,
-    Stat, Time,
+    CompoundStat, KafkaMetric, Measurable, MeasurableStat, MetricConfig, MetricValueProvider, QuotaViolationError, Stat,
 };
+use crate::common::utils::Time;
 use crate::common::{Error, MetricName};
 
 /// The recording level of a sensor or metric config.
@@ -542,10 +542,11 @@ impl Stat for CompoundStatBox {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::metrics::MockTime;
+    use crate::common::metrics::Quota;
     use crate::common::metrics::stats::{CumulativeCount, Value};
-    use crate::common::metrics::{Quota, SystemTime};
     use crate::common::protocol::Errors;
+    use crate::common::utils::MockTime;
+    use crate::common::utils::SystemTime;
     use std::collections::BTreeMap;
 
     fn level_id(level: RecordingLevel) -> i16 {

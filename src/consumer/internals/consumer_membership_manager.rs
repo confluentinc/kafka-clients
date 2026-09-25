@@ -28,9 +28,9 @@ use std::sync::Mutex;
 
 use tokio::sync::oneshot;
 
-use crate::common::metrics::Time;
 use crate::common::protocol::Errors;
 use crate::common::requests::ConsumerGroupHeartbeatResponse;
+use crate::common::utils::Time;
 
 use crate::common::{Error, TopicPartition, Uuid};
 use crate::consumer::ConsumerRebalanceListenerMethodName;
@@ -2157,7 +2157,7 @@ mod tests {
             beh,
             true,
             None,
-            Arc::new(crate::common::metrics::SystemTime),
+            Arc::new(crate::common::utils::SystemTime),
         );
         (mgr, rx)
     }
@@ -2172,10 +2172,11 @@ mod tests {
         ConsumerMembershipManager,
         Arc<crate::common::metrics::Metrics>,
         Arc<ConsumerRebalanceMetricsManager>,
-        Arc<crate::common::metrics::MockTime>,
+        Arc<crate::common::utils::MockTime>,
     ) {
-        use crate::common::metrics::MockTime;
-        use crate::common::metrics::{Metrics, Time as MetricsTime};
+        use crate::common::metrics::Metrics;
+        use crate::common::utils::MockTime;
+        use crate::common::utils::Time as MetricsTime;
 
         let subs = Arc::new(Mutex::new(SubscriptionState::new(AutoOffsetResetStrategy::LATEST)));
         let time = Arc::new(MockTime::new());
@@ -2213,7 +2214,7 @@ mod tests {
     #[test]
     fn transition_to_reconciling_and_back_records_rebalance_metrics() {
         use crate::common::Metric;
-        use crate::common::metrics::Time as MetricsTime;
+        use crate::common::utils::Time as MetricsTime;
 
         let (mgr, metrics, metrics_manager, time) = make_with_rebalance_metrics();
         let value =
@@ -2299,7 +2300,7 @@ mod tests {
             subs.clone(),
             "test-group",
             None,
-            Arc::new(crate::common::metrics::SystemTime),
+            Arc::new(crate::common::utils::SystemTime),
             0,
         ));
         let (tx, rx) = mpsc::unbounded_channel();
@@ -2316,7 +2317,7 @@ mod tests {
             beh,
             true, // auto_commit_enabled
             None,
-            Arc::new(crate::common::metrics::SystemTime),
+            Arc::new(crate::common::utils::SystemTime),
         );
         (mgr, rx)
     }

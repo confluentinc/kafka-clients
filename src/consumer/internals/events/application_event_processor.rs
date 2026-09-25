@@ -73,6 +73,7 @@ use std::sync::{Arc, Mutex};
 use super::ApplicationEvent;
 use super::CompletableEventReaper;
 use super::EventProcessor;
+use crate::common::utils::Time;
 use crate::common::{Error, IsolationLevel, TopicPartition};
 use crate::consumer::ConsumerRebalanceListener;
 use crate::consumer::OffsetAndMetadata;
@@ -114,6 +115,11 @@ pub(crate) struct ApplicationEventProcessor {
     /// `maybeUpdatePatternSubscription` (commit 5/N — the async-dispatch
     /// arm `AsyncPoll`).
     metadata_version_snapshot: i32,
+    /// The consumer's clock. Not a Java field: Java's request managers read
+    /// their own `time.milliseconds()`, while the Rust managers take the
+    /// current time as a `current_time_ms` / `now_ms` argument, so the
+    /// processor reads it here from the same clock and passes it in.
+    time: Arc<dyn Time>,
 }
 
 impl ApplicationEventProcessor {
@@ -134,6 +140,7 @@ impl ApplicationEventProcessor {
         metadata: Arc<ConsumerMetadata>,
         subscriptions: Arc<Mutex<SubscriptionState>>,
         application_event_reaper: Arc<Mutex<CompletableEventReaper>>,
+        time: Arc<dyn Time>,
     ) -> Self {
         let metadata_version_snapshot = metadata.update_version();
         Self {
@@ -142,6 +149,7 @@ impl ApplicationEventProcessor {
             subscriptions,
             application_event_reaper,
             metadata_version_snapshot,
+            time,
         }
     }
 
@@ -773,7 +781,7 @@ impl ApplicationEventProcessor {
             };
             // Java: `event.markOffsetsReady()` happens after offsets are resolved.
             offsets_ready.complete(());
-            commit.commit_async_no_callback(resolved, current_time_ms_now())
+            commit.commit_async_no_callback(resolved, self.time.milliseconds())
         };
         // Spawn continuation — mirrors Java's `whenComplete(complete(event.future()))`.
         tokio::spawn(async move {
@@ -804,7 +812,7 @@ impl ApplicationEventProcessor {
         offsets: Option<HashMap<TopicPartition, OffsetAndMetadata>>,
     ) {
         let deadline_ms = handle.deadline_ms();
-        let now_ms = current_time_ms_now();
+        let now_ms = self.time.milliseconds();
         let commit_rx = {
             let rm_guard = self.lock_request_managers();
             let Some(commit) = rm_guard.commit.as_ref() else {
@@ -865,7 +873,7 @@ impl ApplicationEventProcessor {
         partitions: HashSet<TopicPartition>,
     ) {
         let deadline_ms = handle.deadline_ms();
-        let now_ms = current_time_ms_now();
+        let now_ms = self.time.milliseconds();
         let fetch_rx = {
             let rm_guard = self.lock_request_managers();
             let Some(commit) = rm_guard.commit.as_ref() else {
@@ -952,7 +960,7 @@ impl ApplicationEventProcessor {
     /// Java: `process(CheckAndUpdatePositionsEvent)`.
     fn process_check_and_update_positions(&mut self, handle: super::CompletableEventHandle<()>) {
         let deadline_ms = handle.deadline_ms();
-        let now_ms = current_time_ms_now();
+        let now_ms = self.time.milliseconds();
         let update_rx = {
             let mut rm_guard = self.lock_request_managers();
             let Some(offsets_mgr) = rm_guard.offsets.as_mut() else {
@@ -1104,7 +1112,7 @@ impl ApplicationEventProcessor {
         };
         match membership_arc {
             Some(mm) => {
-                let now_ms = current_time_ms_now();
+                let now_ms = self.time.milliseconds();
                 tokio::spawn(async move {
                     match mm.leave_group(now_ms).await {
                         Ok(()) => {
@@ -1144,7 +1152,7 @@ impl ApplicationEventProcessor {
         };
         match membership_arc {
             Some(mm) => {
-                let now_ms = current_time_ms_now();
+                let now_ms = self.time.milliseconds();
                 log::debug!(
                     "Signal the ConsumerMembershipManager to leave the consumer group since the consumer is closing"
                 );
@@ -1495,21 +1503,6 @@ impl ApplicationEventProcessor {
 // Helpers
 // ============================================================================
 
-/// Returns the current wall-clock time in milliseconds since the Unix epoch.
-///
-/// Java's `Time.milliseconds()` is mock-friendly; the Rust translation uses
-/// `std::time::SystemTime` directly. Tests that need to control time
-/// either inject a mock time source via the request manager's own clock or
-/// drive the processor's `current_time_ms` arg on events like
-/// `AssignmentChange` (which carries it explicitly per Java).
-fn current_time_ms_now() -> i64 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(i64::MAX)
-}
-
 /// Java: `maybeCompleteAsyncPollEventExceptionally(event, t)`.
 ///
 /// Returns `true` when the error should be IGNORED (logged at trace level
@@ -1714,7 +1707,7 @@ mod tests {
                 Arc::clone(&subscriptions),
                 "test-group",
                 None,
-                Arc::new(crate::common::metrics::SystemTime),
+                Arc::new(crate::common::utils::SystemTime),
                 0,
             )))
         } else {
@@ -1735,6 +1728,7 @@ mod tests {
             Arc::clone(&subscriptions),
             Arc::clone(&metadata),
             IsolationLevel::ReadUncommitted,
+            Arc::new(crate::common::utils::SystemTime),
             100,
             30_000,
             60_000,
@@ -1787,6 +1781,7 @@ mod tests {
             Arc::clone(&metadata),
             Arc::clone(&subscriptions),
             Arc::clone(&reaper),
+            Arc::new(crate::common::utils::SystemTime),
         );
 
         Fixture { processor, request_managers, metadata, subscriptions, reaper }
@@ -1822,7 +1817,7 @@ mod tests {
             Arc::clone(&bg_handler),
             true,
             None,
-            Arc::new(crate::common::metrics::SystemTime),
+            Arc::new(crate::common::utils::SystemTime),
         ));
         ConsumerHeartbeatRequestManager::new(0, config, hb_coordinator, subscriptions, mm, bg_handler)
     }
@@ -2733,6 +2728,7 @@ mod tests {
             Arc::clone(&metadata),
             Arc::clone(&subscriptions),
             reaper,
+            Arc::new(crate::common::utils::SystemTime),
         );
 
         let state = Arc::new(super::super::AsyncPollState::new());

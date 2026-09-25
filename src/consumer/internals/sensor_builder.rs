@@ -176,7 +176,8 @@ impl SensorBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::metrics::{MetricConfig, SystemTime};
+    use crate::common::metrics::MetricConfig;
+    use crate::common::utils::SystemTime;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn metrics() -> Arc<Metrics> {

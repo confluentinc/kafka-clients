@@ -57,7 +57,7 @@ use std::sync::Mutex;
 
 use tokio::sync::oneshot;
 
-use crate::common::metrics::Time;
+use crate::common::utils::Time;
 use crate::common::{Error, TopicPartition, Uuid};
 use crate::consumer::ConsumerRebalanceListenerMethodName;
 use crate::consumer::internals::ConsumerRebalanceMetricsManager;
@@ -1053,7 +1053,7 @@ mod tests {
             beh,
             true,
             None,
-            Arc::new(crate::common::metrics::SystemTime),
+            Arc::new(crate::common::utils::SystemTime),
         );
         let inner = mgr.inner.lock().unwrap();
         assert_eq!(inner.state, MemberState::Unsubscribed);
@@ -1072,7 +1072,7 @@ mod tests {
             beh,
             true,
             None,
-            Arc::new(crate::common::metrics::SystemTime),
+            Arc::new(crate::common::utils::SystemTime),
         );
         let mut inner = mgr.inner.lock().unwrap();
         // UNSUBSCRIBED → STABLE is invalid.
@@ -1090,7 +1090,7 @@ mod tests {
             beh,
             true,
             None,
-            Arc::new(crate::common::metrics::SystemTime),
+            Arc::new(crate::common::utils::SystemTime),
         );
         let mut inner = mgr.inner.lock().unwrap();
         // UNSUBSCRIBED → PREPARE_LEAVING valid.
@@ -1137,7 +1137,7 @@ mod tests {
             beh,
             true,
             None,
-            Arc::new(crate::common::metrics::SystemTime),
+            Arc::new(crate::common::utils::SystemTime),
         );
 
         // Spawn the bg-side invocation.
@@ -1179,7 +1179,7 @@ mod tests {
             beh,
             true,
             None,
-            Arc::new(crate::common::metrics::SystemTime),
+            Arc::new(crate::common::utils::SystemTime),
         );
 
         let mgr_for_bg = Arc::new(mgr);
@@ -1226,7 +1226,7 @@ mod tests {
             beh,
             true,
             None,
-            Arc::new(crate::common::metrics::SystemTime),
+            Arc::new(crate::common::utils::SystemTime),
         );
 
         // Without a listener, the handshake must complete immediately
@@ -1256,7 +1256,7 @@ mod tests {
             beh,
             true,
             None,
-            Arc::new(crate::common::metrics::SystemTime),
+            Arc::new(crate::common::utils::SystemTime),
         );
 
         let mgr_for_bg = Arc::new(mgr);

@@ -1380,8 +1380,9 @@ mod tests {
     use crate::common::record::internal::{MemoryRecords, SimpleRecord};
     use crate::common::requests::FetchMetadata;
     use crate::common::serialization::Deserializer;
+    use crate::common::utils::SystemTime;
     use crate::consumer::internals::Deserializers;
-    use crate::consumer::internals::{FetchCollector, SystemFetchCollectorTime};
+    use crate::consumer::internals::FetchCollector;
     use crate::fetch_response_data::{FetchableTopicResponse, PartitionData as RespPartitionData};
 
     /// Minimal UTF-8 string deserializer for this test module.
@@ -1497,7 +1498,7 @@ mod tests {
             make_fetch_config(),
             deserializers,
             FetchMetricsManager::for_test(),
-            Arc::new(SystemFetchCollectorTime),
+            Arc::new(SystemTime),
         );
         let fetch = collector.collect_fetch(&fetch_buffer).unwrap();
         assert_eq!(COUNT as usize, fetch.count(), "all moved records must survive the move");

@@ -50,6 +50,7 @@
 #![expect(dead_code)]
 
 use crate::common::requests::ListOffsetsResponse;
+use crate::common::utils::Time;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
@@ -547,6 +548,8 @@ pub(crate) struct OffsetsRequestManager {
     /// Shared state accessible to the [`OffsetsClusterListener`] and to
     /// per-response spawned tasks.
     shared: Arc<OffsetsManagerShared>,
+    /// Java: `private final Time time`.
+    time: Arc<dyn Time>,
     /// Java: `defaultApiTimeoutMs`. Used by
     /// [`Self::init_with_committed_offsets_if_needed`] to compute the
     /// internal `fetchCommittedDeadlineMs` (Java
@@ -657,6 +660,7 @@ impl OffsetsRequestManager {
         subscription_state: Arc<Mutex<SubscriptionState>>,
         metadata: Arc<ConsumerMetadata>,
         isolation_level: IsolationLevel,
+        time: Arc<dyn Time>,
         retry_backoff_ms: i64,
         request_timeout_ms: i64,
         default_api_timeout_ms: i64,
@@ -687,6 +691,7 @@ impl OffsetsRequestManager {
         });
         let manager = Self {
             shared: shared.clone(),
+            time,
             default_api_timeout_ms,
             api_versions,
             commit_request_manager,
@@ -1321,6 +1326,7 @@ impl OffsetsRequestManager {
         let subscription_state = Arc::clone(&self.shared.subscription_state);
         let pending_followup_tx = self.pending_followup_tx.clone();
         let cached = Arc::clone(&self.cached_update_positions_error);
+        let time = Arc::clone(&self.time);
         tokio::spawn(async move {
             // Await the committed-offset fetch. The sender can be dropped
             // when the pending-fetch slot is replaced by a later request for
@@ -1370,7 +1376,7 @@ impl OffsetsRequestManager {
             // result completion. We invoke the same logic here. The
             // "current time" is captured at this moment — Java reads
             // `time.milliseconds()` inside the `whenComplete` callback.
-            let now_ms = current_time_ms_for_followup();
+            let now_ms = time.milliseconds();
             if let Err(ref err) = result_for_outer
                 && now_ms >= deadline_ms
             {
@@ -1612,24 +1618,6 @@ impl OffsetsRequestManager {
     }
 }
 
-/// Read the wall-clock time in milliseconds since the unix epoch — used
-/// by the spawned `update_fetch_positions` followup to decide whether
-/// the triggering event has already expired (Java parity:
-/// `time.milliseconds()` inside `cacheExceptionIfEventExpired`).
-///
-/// Java's `Time` abstraction is mock-friendly; the Rust translation uses
-/// `std::time::SystemTime` directly inside the spawned task. Tests that
-/// need to control time can instead pass `current_time_ms` directly via
-/// the synchronous fail path of [`OffsetsRequestManager::update_fetch_positions`]
-/// (where the spawned task is not used).
-fn current_time_ms_for_followup() -> i64 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(i64::MAX)
-}
-
 /// Helper to downcast a `ClientResponse` to a `ListOffsetsResponse`.
 fn downcast_list_offsets(response: &ClientResponse) -> Option<&crate::common::requests::ListOffsetsResponse> {
     match response.response_body() {
@@ -1831,6 +1819,7 @@ mod tests {
             subscription_state,
             metadata,
             IsolationLevel::ReadUncommitted,
+            Arc::new(crate::common::utils::SystemTime),
             100,
             30_000,
             60_000,
@@ -1905,6 +1894,7 @@ mod tests {
             subscription_state.clone(),
             metadata,
             IsolationLevel::ReadUncommitted,
+            Arc::new(crate::common::utils::SystemTime),
             100,
             30_000,
             60_000,
@@ -2015,7 +2005,7 @@ mod tests {
             subscription_state.clone(),
             "g",
             None,
-            Arc::new(crate::common::metrics::SystemTime),
+            Arc::new(crate::common::utils::SystemTime),
             0,
         ));
         let positions_validator = test_positions_validator(&subscription_state, &metadata);
@@ -2023,6 +2013,7 @@ mod tests {
             subscription_state.clone(),
             metadata,
             IsolationLevel::ReadUncommitted,
+            Arc::new(crate::common::utils::SystemTime),
             100,
             30_000,
             60_000,
@@ -4169,6 +4160,7 @@ mod tests {
             subscription_state,
             metadata.clone(),
             IsolationLevel::ReadCommitted,
+            Arc::new(crate::common::utils::SystemTime),
             100,
             30_000,
             60_000,
@@ -4434,6 +4426,7 @@ mod tests {
             subscription_state,
             metadata.clone(),
             IsolationLevel::ReadUncommitted,
+            Arc::new(crate::common::utils::SystemTime),
             500, // retry_backoff
             TEST_REQUEST_TIMEOUT_MS,
             500, // default_api_timeout
@@ -4895,6 +4888,7 @@ mod tests {
             subscription_state.clone(),
             metadata,
             IsolationLevel::ReadUncommitted,
+            Arc::new(crate::common::utils::SystemTime),
             500,
             30_000,
             60_000,
@@ -5078,6 +5072,7 @@ mod tests {
             subscription_state.clone(),
             metadata.clone(),
             isolation_level,
+            Arc::new(crate::common::utils::SystemTime),
             500,
             TEST_REQUEST_TIMEOUT_MS,
             60_000,

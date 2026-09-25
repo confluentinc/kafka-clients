@@ -285,8 +285,8 @@ mod tests {
     #[test]
     fn test_poll_time_metrics() {
         use crate::common::metrics::Metrics;
-        use crate::common::metrics::MockTime;
-        use crate::common::metrics::Time;
+        use crate::common::utils::MockTime;
+        use crate::common::utils::Time;
 
         let time = Arc::new(MockTime::new());
         // Java's `time` starts at a non-zero wall clock; seed a non-zero base
@@ -342,8 +342,8 @@ mod tests {
     #[test]
     fn test_poll_idle_ratio() {
         use crate::common::metrics::Metrics;
-        use crate::common::metrics::MockTime;
-        use crate::common::metrics::Time;
+        use crate::common::utils::MockTime;
+        use crate::common::utils::Time;
 
         let time = Arc::new(MockTime::new());
         time.sleep(1_000_000);

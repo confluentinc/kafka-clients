@@ -95,9 +95,9 @@ impl Measurable for WindowedCount {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::metrics::MockTime;
-    use crate::common::metrics::Time;
     use crate::common::metrics::TimeUnit;
+    use crate::common::utils::MockTime;
+    use crate::common::utils::Time;
 
     #[test]
     fn counts_invocations() {
