@@ -368,10 +368,12 @@ unsafe fn metadata_ref(metadata: *const kafka_producer_RecordMetadata_t) -> &'st
 /// Build [`RecordHeaders`] from a C `kafka_producer_ProducerRecordHeader_t`
 /// array. Preserves insertion order; a `-1` `value_len` is a null header value.
 ///
-/// The core's `RecordHeaders` owns its header values (`Option<Vec<u8>>`), so the
-/// value bytes are copied here at the C→Rust boundary — the same ownership the
-/// batch / owned-record paths already use. Header keys are decoded once. There
-/// is no per-record copy of the record's key/value bytes (those stay borrowed).
+/// The core's `RecordHeader` owns its key (`String`) and its value
+/// (`Option<Vec<u8>>`), so for every record each header key is decoded into a
+/// `String` and each value copied here at the C→Rust boundary — the same
+/// ownership the batch / owned-record paths already use. Borrowing them instead
+/// needs a core `RecordHeader` that borrows through the send path. There is no
+/// per-record copy of the record's key/value bytes (those stay borrowed).
 ///
 /// # Safety
 ///
