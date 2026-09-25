@@ -14,8 +14,8 @@
 
 //! Translated from `org.apache.kafka.common.errors.InconsistentVoterSetException`.
 
-use crate::common::Errors;
 use crate::common::error::kafka_error_class;
+use crate::common::protocol::Errors;
 
 kafka_error_class! {
     /// Indicates that the either the sender or recipient of a voter-only request
@@ -25,6 +25,7 @@ kafka_error_class! {
     ///
     /// Java `extends` chain:
     ///    `InconsistentVoterSetException` -> `ApiException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.InconsistentVoterSetException")]
     InconsistentVoterSetError,
     code: Errors::InconsistentVoterSet,
     extends: [

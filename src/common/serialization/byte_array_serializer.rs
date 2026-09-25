@@ -26,6 +26,8 @@ use crate::common::serialization::Serializer;
 ///
 /// Corresponds to Java's `org.apache.kafka.common.serialization.ByteArraySerializer`.
 #[derive(Clone, Debug, Default)]
+#[non_exhaustive]
+#[doc(alias = "org.apache.kafka.common.serialization.ByteArraySerializer")]
 pub struct ByteArraySerializer;
 
 impl ByteArraySerializer {

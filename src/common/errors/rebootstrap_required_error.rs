@@ -14,8 +14,8 @@
 
 //! Translated from `org.apache.kafka.common.errors.RebootstrapRequiredException`.
 
-use crate::common::Errors;
 use crate::common::error::kafka_error_class;
+use crate::common::protocol::Errors;
 
 kafka_error_class! {
     /// Client metadata is stale. The client should rebootstrap to obtain new
@@ -25,6 +25,7 @@ kafka_error_class! {
     ///
     /// Java `extends` chain:
     ///    `RebootstrapRequiredException` -> `ApiException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.RebootstrapRequiredException")]
     RebootstrapRequiredError,
     code: Errors::RebootstrapRequired,
     extends: [

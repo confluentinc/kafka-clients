@@ -14,8 +14,8 @@
 
 //! Translated from `org.apache.kafka.common.errors.InvalidSessionTimeoutException`.
 
-use crate::common::Errors;
 use crate::common::error::kafka_error_class;
+use crate::common::protocol::Errors;
 
 kafka_error_class! {
     /// The session timeout is not within the range allowed by the broker (as
@@ -26,6 +26,7 @@ kafka_error_class! {
     ///
     /// Java `extends` chain:
     ///    `InvalidSessionTimeoutException` -> `ApiException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.InvalidSessionTimeoutException")]
     InvalidSessionTimeoutError,
     code: Errors::InvalidSessionTimeout,
     extends: [

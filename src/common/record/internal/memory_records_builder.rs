@@ -54,6 +54,7 @@ enum AppendState<W: Write> {
 /// and writes the batch header (attributes, timestamps, CRC).
 ///
 /// Corresponds to Java's `org.apache.kafka.common.record.MemoryRecordsBuilder`.
+#[doc(alias = "org.apache.kafka.common.record.internal.MemoryRecordsBuilder")]
 pub struct MemoryRecordsBuilder {
     timestamp_type: TimestampType,
     compression: Compression,
@@ -101,7 +102,8 @@ impl MemoryRecordsBuilder {
     /// at the start for the header, then append records after that.
     ///
     /// Corresponds to Java's `MemoryRecordsBuilder(ByteBufferOutputStream, ...)`.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
+    #[doc(alias = "org.apache.kafka.common.record.internal.MemoryRecordsBuilder#MemoryRecordsBuilder")]
     pub fn new(
         mut buffer: Vec<u8>,
         initial_position: usize,
@@ -202,7 +204,8 @@ impl MemoryRecordsBuilder {
     }
 
     /// Create a new builder with default delete_horizon_ms (NO_TIMESTAMP).
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
+    #[doc(alias = "org.apache.kafka.common.record.internal.MemoryRecordsBuilder#MemoryRecordsBuilder")]
     pub fn with_default(
         buffer: Vec<u8>,
         initial_position: usize,
@@ -239,6 +242,7 @@ impl MemoryRecordsBuilder {
     }
 
     /// Returns the underlying buffer.
+    #[doc(alias = "org.apache.kafka.common.record.internal.MemoryRecordsBuilder#buffer")]
     pub fn buffer(&self) -> &Vec<u8> {
         &self.buffer
     }
@@ -249,6 +253,7 @@ impl MemoryRecordsBuilder {
     }
 
     /// Returns the initial capacity of the buffer.
+    #[doc(alias = "org.apache.kafka.common.record.internal.MemoryRecordsBuilder#initialCapacity")]
     pub fn initial_capacity(&self) -> usize {
         self.initial_buffer_capacity
     }
@@ -262,26 +267,31 @@ impl MemoryRecordsBuilder {
     }
 
     /// Returns the actual compression ratio after building.
+    #[doc(alias = "org.apache.kafka.common.record.internal.MemoryRecordsBuilder#compressionRatio")]
     pub fn compression_ratio(&self) -> f64 {
         self.actual_compression_ratio as f64
     }
 
     /// Returns the compression configuration.
+    #[doc(alias = "org.apache.kafka.common.record.internal.MemoryRecordsBuilder#compression")]
     pub fn compression(&self) -> &Compression {
         &self.compression
     }
 
     /// Returns whether this is a control batch.
+    #[doc(alias = "org.apache.kafka.common.record.internal.MemoryRecordsBuilder#isControlBatch")]
     pub fn is_control_batch(&self) -> bool {
         self.is_control_batch
     }
 
     /// Returns whether this batch is transactional.
+    #[doc(alias = "org.apache.kafka.common.record.internal.MemoryRecordsBuilder#isTransactional")]
     pub fn is_transactional(&self) -> bool {
         self.is_transactional
     }
 
     /// Returns whether the delete horizon is set.
+    #[doc(alias = "org.apache.kafka.common.record.internal.MemoryRecordsBuilder#hasDeleteHorizonMs")]
     pub fn has_delete_horizon_ms(&self) -> bool {
         self.magic >= RecordBatch::MAGIC_VALUE_V2 && self.delete_horizon_ms >= 0
     }
@@ -305,6 +315,7 @@ impl MemoryRecordsBuilder {
     /// [`take_batch_data`](Self::take_batch_data) and runs once, inside `close()`.
     ///
     /// Panics if the builder has been aborted.
+    #[doc(alias = "org.apache.kafka.common.record.internal.MemoryRecordsBuilder#build")]
     pub fn build(&mut self) -> MemoryRecords {
         if self.aborted {
             panic!("Attempting to build an aborted record batch");
@@ -331,6 +342,7 @@ impl MemoryRecordsBuilder {
     /// Returns info about the records (max timestamp and shallow offset).
     ///
     /// Corresponds to Java's `MemoryRecordsBuilder.info()`.
+    #[doc(alias = "org.apache.kafka.common.record.internal.MemoryRecordsBuilder#info")]
     pub fn info(&self) -> RecordsInfo {
         if self.timestamp_type == TimestampType::LogAppendTime {
             if self.compression.compression_type() != CompressionType::None || self.magic >= RecordBatch::MAGIC_VALUE_V2
@@ -351,12 +363,14 @@ impl MemoryRecordsBuilder {
     }
 
     /// Returns the number of records appended so far.
+    #[doc(alias = "org.apache.kafka.common.record.internal.MemoryRecordsBuilder#numRecords")]
     pub fn num_records(&self) -> i32 {
         self.num_records
     }
 
     /// Return the sum of the size of the batch header (always uncompressed)
     /// and the records (before compression).
+    #[doc(alias = "org.apache.kafka.common.record.internal.MemoryRecordsBuilder#uncompressedBytesWritten")]
     pub fn uncompressed_bytes_written(&self) -> usize {
         self.uncompressed_records_size_in_bytes + self.batch_header_size_in_bytes
     }
@@ -364,6 +378,7 @@ impl MemoryRecordsBuilder {
     /// Set the producer state.
     ///
     /// Panics if the builder is already closed.
+    #[doc(alias = "org.apache.kafka.common.record.internal.MemoryRecordsBuilder#setProducerState")]
     pub fn set_producer_state(
         &mut self,
         producer_id: i64,
@@ -383,6 +398,7 @@ impl MemoryRecordsBuilder {
     /// Override the last offset (for compaction).
     ///
     /// Panics if the records have already been built.
+    #[doc(alias = "org.apache.kafka.common.record.internal.MemoryRecordsBuilder#overrideLastOffset")]
     pub fn override_last_offset(&mut self, last_offset: i64) {
         if self.closed {
             panic!("Cannot override the last offset after the records have been built");
@@ -393,6 +409,7 @@ impl MemoryRecordsBuilder {
     /// Release resources required for record appends.
     ///
     /// After this method is called, it's only possible to update the RecordBatch header.
+    #[doc(alias = "org.apache.kafka.common.record.internal.MemoryRecordsBuilder#closeForRecordAppends")]
     pub fn close_for_record_appends(&mut self) {
         match std::mem::replace(&mut self.append_stream, AppendState::Closed) {
             AppendState::Direct => {
@@ -413,6 +430,7 @@ impl MemoryRecordsBuilder {
     }
 
     /// Abort the builder, releasing resources and resetting the buffer position.
+    #[doc(alias = "org.apache.kafka.common.record.internal.MemoryRecordsBuilder#abort")]
     pub fn abort(&mut self) {
         self.close_for_record_appends();
         self.buffer.truncate(self.initial_position);
@@ -420,6 +438,7 @@ impl MemoryRecordsBuilder {
     }
 
     /// Reopen a closed (but not aborted) batch for rewriting producer state.
+    #[doc(alias = "org.apache.kafka.common.record.internal.MemoryRecordsBuilder#reopenAndRewriteProducerState")]
     pub fn reopen_and_rewrite_producer_state(
         &mut self,
         producer_id: i64,
@@ -441,6 +460,7 @@ impl MemoryRecordsBuilder {
     /// Close the builder and finalize the batch.
     ///
     /// Panics if the builder has been aborted.
+    #[doc(alias = "org.apache.kafka.common.record.internal.MemoryRecordsBuilder#close")]
     pub fn close(&mut self) {
         if self.aborted {
             panic!("Cannot close MemoryRecordsBuilder as it has already been aborted");
@@ -487,6 +507,7 @@ impl MemoryRecordsBuilder {
         bytes::Bytes::from(self.buffer[self.initial_position..].to_vec())
     }
 
+    #[doc(alias = "org.apache.kafka.common.record.internal.MemoryRecordsBuilder#validateProducerState")]
     fn validate_producer_state(&self) {
         if self.is_transactional && self.producer_id == RecordBatch::NO_PRODUCER_ID {
             panic!("Cannot write transactional messages without a valid producer ID");
@@ -509,6 +530,7 @@ impl MemoryRecordsBuilder {
 
     /// Write the header to the default batch and return the number of
     /// compressed bytes written (excluding the header).
+    #[doc(alias = "org.apache.kafka.common.record.internal.MemoryRecordsBuilder#writeDefaultBatchHeader")]
     fn write_default_batch_header(&mut self) -> usize {
         self.ensure_open_for_record_batch_write();
         let size = self.buffer.len() - self.initial_position;
@@ -562,7 +584,7 @@ impl MemoryRecordsBuilder {
     }
 
     /// Append a new record at the given offset.
-    #[allow(clippy::too_many_arguments)]
+    #[doc(alias = "org.apache.kafka.common.record.internal.MemoryRecordsBuilder#append")]
     fn append_with_offset_internal(
         &mut self,
         offset: i64,
@@ -613,6 +635,7 @@ impl MemoryRecordsBuilder {
     /// * `key` - The record key
     /// * `value` - The record value
     /// * `headers` - The record headers if there are any
+    #[doc(alias = "org.apache.kafka.common.record.internal.MemoryRecordsBuilder#appendWithOffset")]
     pub fn append_with_offset(
         &mut self,
         offset: i64,
@@ -625,16 +648,19 @@ impl MemoryRecordsBuilder {
     }
 
     /// Append a new record at the given offset with byte slices.
+    #[doc(alias = "org.apache.kafka.common.record.internal.MemoryRecordsBuilder#append")]
     pub fn append_with_offset_bytes(&mut self, offset: i64, timestamp: i64, key: Option<&[u8]>, value: Option<&[u8]>) {
         self.append_with_offset(offset, timestamp, key, value, RecordBatch::EMPTY_HEADERS);
     }
 
     /// Append a new record at the given offset using a `SimpleRecord`.
+    #[doc(alias = "org.apache.kafka.common.record.internal.MemoryRecordsBuilder#append")]
     pub fn append_with_offset_simple(&mut self, offset: i64, record: &SimpleRecord) {
         self.append_with_offset(offset, record.timestamp(), record.key(), record.value(), record.headers());
     }
 
     /// Append a new record at the next sequential offset.
+    #[doc(alias = "org.apache.kafka.common.record.internal.MemoryRecordsBuilder#append")]
     pub fn append(&mut self, timestamp: i64, key: Option<&[u8]>, value: Option<&[u8]>, headers: &[RecordHeader]) {
         let offset = self.next_sequential_offset();
         self.append_with_offset(offset, timestamp, key, value, headers);
@@ -664,6 +690,7 @@ impl MemoryRecordsBuilder {
     }
 
     /// Append a record without offset/magic validation (for testing).
+    #[doc(alias = "org.apache.kafka.common.record.internal.MemoryRecordsBuilder#appendUncheckedWithOffset")]
     pub fn append_unchecked_with_offset(&mut self, offset: i64, record: &SimpleRecord) -> io::Result<()> {
         if self.magic >= RecordBatch::MAGIC_VALUE_V2 {
             let offset_delta = (offset - self.base_offset) as i32;
@@ -685,6 +712,7 @@ impl MemoryRecordsBuilder {
     }
 
     /// Internal method to append a default (v2) record.
+    #[doc(alias = "org.apache.kafka.common.record.internal.MemoryRecordsBuilder#appendDefaultRecord")]
     fn append_default_record(
         &mut self,
         offset: i64,
@@ -728,6 +756,7 @@ impl MemoryRecordsBuilder {
     }
 
     /// Track that a record was written.
+    #[doc(alias = "org.apache.kafka.common.record.internal.MemoryRecordsBuilder#recordWritten")]
     fn record_written(&mut self, offset: i64, timestamp: i64, size: usize) {
         if self.num_records == i32::MAX {
             panic!("Maximum number of records per batch exceeded, max records: {}", i32::MAX);
@@ -749,12 +778,14 @@ impl MemoryRecordsBuilder {
         }
     }
 
+    #[doc(alias = "org.apache.kafka.common.record.internal.MemoryRecordsBuilder#ensureOpenForRecordAppend")]
     fn ensure_open_for_record_append(&self) {
         if matches!(self.append_stream, AppendState::Closed) {
             panic!("Tried to append a record, but MemoryRecordsBuilder is closed for record appends");
         }
     }
 
+    #[doc(alias = "org.apache.kafka.common.record.internal.MemoryRecordsBuilder#ensureOpenForRecordBatchWrite")]
     fn ensure_open_for_record_batch_write(&self) {
         if self.is_closed() {
             panic!("Tried to write record batch header, but MemoryRecordsBuilder is closed");
@@ -765,6 +796,7 @@ impl MemoryRecordsBuilder {
     }
 
     /// Get an estimate of the number of bytes written.
+    #[doc(alias = "org.apache.kafka.common.record.internal.MemoryRecordsBuilder#estimatedBytesWritten")]
     fn estimated_bytes_written(&self) -> usize {
         if self.compression.compression_type() == CompressionType::None {
             self.batch_header_size_in_bytes + self.uncompressed_records_size_in_bytes
@@ -777,6 +809,7 @@ impl MemoryRecordsBuilder {
     }
 
     /// Set the estimated compression ratio.
+    #[doc(alias = "org.apache.kafka.common.record.internal.MemoryRecordsBuilder#setEstimatedCompressionRatio")]
     pub fn set_estimated_compression_ratio(&mut self, ratio: f32) {
         self.estimated_compression_ratio = ratio;
     }
@@ -784,6 +817,7 @@ impl MemoryRecordsBuilder {
     /// Check if we have room for a new record containing the given key/value pair.
     ///
     /// If no records have been appended, then this returns true.
+    #[doc(alias = "org.apache.kafka.common.record.internal.MemoryRecordsBuilder#hasRoomFor")]
     pub fn has_room_for(
         &self,
         timestamp: i64,
@@ -828,16 +862,19 @@ impl MemoryRecordsBuilder {
     }
 
     /// Returns the maximum number of bytes that can be written for records.
+    #[doc(alias = "org.apache.kafka.common.record.internal.MemoryRecordsBuilder#maxAllowedBytes")]
     pub fn max_allowed_bytes(&self) -> usize {
         self.write_limit.saturating_sub(self.batch_header_size_in_bytes)
     }
 
     /// Returns whether the builder has been closed (records have been built).
+    #[doc(alias = "org.apache.kafka.common.record.internal.MemoryRecordsBuilder#isClosed")]
     pub fn is_closed(&self) -> bool {
         self.closed
     }
 
     /// Returns whether the batch is full.
+    #[doc(alias = "org.apache.kafka.common.record.internal.MemoryRecordsBuilder#isFull")]
     pub fn is_full(&self) -> bool {
         matches!(self.append_stream, AppendState::Closed)
             || (self.num_records > 0 && self.write_limit <= self.estimated_bytes_written())
@@ -847,6 +884,7 @@ impl MemoryRecordsBuilder {
     ///
     /// The returned value is exactly correct if the record set is not compressed
     /// or if the builder has been closed.
+    #[doc(alias = "org.apache.kafka.common.record.internal.MemoryRecordsBuilder#estimatedSizeInBytes")]
     pub fn estimated_size_in_bytes(&self) -> usize {
         if let Some(records) = &self.built_records {
             records.size_in_bytes()
@@ -856,10 +894,12 @@ impl MemoryRecordsBuilder {
     }
 
     /// Returns the magic version.
+    #[doc(alias = "org.apache.kafka.common.record.internal.MemoryRecordsBuilder#magic")]
     pub fn magic(&self) -> i8 {
         self.magic
     }
 
+    #[doc(alias = "org.apache.kafka.common.record.internal.MemoryRecordsBuilder#nextSequentialOffset")]
     fn next_sequential_offset(&self) -> i64 {
         match self.last_offset {
             None => self.base_offset,
@@ -868,16 +908,19 @@ impl MemoryRecordsBuilder {
     }
 
     /// Returns the producer ID.
+    #[doc(alias = "org.apache.kafka.common.record.internal.MemoryRecordsBuilder#producerId")]
     pub fn producer_id(&self) -> i64 {
         self.producer_id
     }
 
     /// Returns the producer epoch.
+    #[doc(alias = "org.apache.kafka.common.record.internal.MemoryRecordsBuilder#producerEpoch")]
     pub fn producer_epoch(&self) -> i16 {
         self.producer_epoch
     }
 
     /// Returns the base sequence.
+    #[doc(alias = "org.apache.kafka.common.record.internal.MemoryRecordsBuilder#baseSequence")]
     pub fn base_sequence(&self) -> i32 {
         self.base_sequence
     }
@@ -899,17 +942,30 @@ impl Drop for MemoryRecordsBuilder {
 ///
 /// Corresponds to Java's `MemoryRecordsBuilder.RecordsInfo`.
 #[derive(Clone, Debug)]
+#[doc(alias = "org.apache.kafka.common.record.internal.MemoryRecordsBuilder$RecordsInfo")]
 pub struct RecordsInfo {
     /// The maximum timestamp in the batch.
-    pub max_timestamp: i64,
+    pub(crate) max_timestamp: i64,
     /// The shallow offset of the record with the maximum timestamp.
-    pub shallow_offset_of_max_timestamp: i64,
+    pub(crate) shallow_offset_of_max_timestamp: i64,
 }
 
 impl RecordsInfo {
     /// Create a new `RecordsInfo`.
+    #[doc(alias = "org.apache.kafka.common.record.internal.MemoryRecordsBuilder$RecordsInfo#RecordsInfo")]
     pub fn new(max_timestamp: i64, shallow_offset_of_max_timestamp: i64) -> Self {
         Self { max_timestamp, shallow_offset_of_max_timestamp }
+    }
+
+    /// The maximum timestamp in the batch. Java's public `RecordsInfo.maxTimestamp`.
+    pub fn max_timestamp(&self) -> i64 {
+        self.max_timestamp
+    }
+
+    /// The shallow offset of the record with the maximum timestamp. Java's public
+    /// `RecordsInfo.shallowOffsetOfMaxTimestamp`.
+    pub fn shallow_offset_of_max_timestamp(&self) -> i64 {
+        self.shallow_offset_of_max_timestamp
     }
 }
 
@@ -921,16 +977,17 @@ mod tests {
     /// All compression types to test with, each only for magic v2.
     fn all_compressions() -> Vec<Compression> {
         vec![
-            Compression::none(),
-            Compression::gzip(),
-            Compression::snappy(),
-            Compression::lz4(),
-            Compression::zstd(),
+            Compression::none().build(),
+            Compression::gzip().build(),
+            Compression::snappy().build(),
+            Compression::lz4().build(),
+            Compression::zstd().build(),
         ]
     }
 
     /// Corresponds to Java's `MemoryRecordsBuilderTest.testWriteEmptyRecordSet`.
     #[test]
+    #[doc(alias = "org.apache.kafka.common.record.internal.MemoryRecordsBuilderTest#testWriteEmptyRecordSet")]
     fn test_write_empty_record_set() {
         for compression in all_compressions() {
             let mut builder = MemoryRecordsBuilder::with_default(
@@ -962,6 +1019,7 @@ mod tests {
 
     /// Corresponds to Java's `MemoryRecordsBuilderTest.testWriteTransactionalRecordSet`.
     #[test]
+    #[doc(alias = "org.apache.kafka.common.record.internal.MemoryRecordsBuilderTest#testWriteTransactionalRecordSet")]
     fn test_write_transactional_record_set() {
         let pid = 9809_i64;
         let epoch = 15_i16;
@@ -995,6 +1053,9 @@ mod tests {
 
     /// Corresponds to Java's `MemoryRecordsBuilderTest.testWriteTransactionalWithInvalidPID`.
     #[test]
+    #[doc(
+        alias = "org.apache.kafka.common.record.internal.MemoryRecordsBuilderTest#testWriteTransactionalWithInvalidPID"
+    )]
     fn test_write_transactional_with_invalid_pid() {
         let pid = RecordBatch::NO_PRODUCER_ID;
         let epoch = 15_i16;
@@ -1030,6 +1091,9 @@ mod tests {
 
     /// Corresponds to Java's `MemoryRecordsBuilderTest.testWriteIdempotentWithInvalidEpoch`.
     #[test]
+    #[doc(
+        alias = "org.apache.kafka.common.record.internal.MemoryRecordsBuilderTest#testWriteIdempotentWithInvalidEpoch"
+    )]
     fn test_write_idempotent_with_invalid_epoch() {
         let pid = 9809_i64;
         let epoch = RecordBatch::NO_PRODUCER_EPOCH;
@@ -1065,6 +1129,9 @@ mod tests {
 
     /// Corresponds to Java's `MemoryRecordsBuilderTest.testWriteIdempotentWithInvalidBaseSequence`.
     #[test]
+    #[doc(
+        alias = "org.apache.kafka.common.record.internal.MemoryRecordsBuilderTest#testWriteIdempotentWithInvalidBaseSequence"
+    )]
     fn test_write_idempotent_with_invalid_base_sequence() {
         let pid = 9809_i64;
         let epoch = 15_i16;
@@ -1100,6 +1167,7 @@ mod tests {
 
     /// Corresponds to Java's `MemoryRecordsBuilderTest.testEstimatedSizeInBytes`.
     #[test]
+    #[doc(alias = "org.apache.kafka.common.record.internal.MemoryRecordsBuilderTest#testEstimatedSizeInBytes")]
     fn test_estimated_size_in_bytes() {
         for compression in all_compressions() {
             let mut builder = MemoryRecordsBuilder::with_default(
@@ -1229,6 +1297,7 @@ mod tests {
 
     /// Corresponds to Java's `MemoryRecordsBuilderTest.testAppendedChecksumConsistency`.
     #[test]
+    #[doc(alias = "org.apache.kafka.common.record.internal.MemoryRecordsBuilderTest#testAppendedChecksumConsistency")]
     fn test_appended_checksum_consistency() {
         for compression in all_compressions() {
             let mut builder = MemoryRecordsBuilder::with_default(
@@ -1256,6 +1325,7 @@ mod tests {
 
     /// Corresponds to Java's `MemoryRecordsBuilderTest.testSmallWriteLimit`.
     #[test]
+    #[doc(alias = "org.apache.kafka.common.record.internal.MemoryRecordsBuilderTest#testSmallWriteLimit")]
     fn test_small_write_limit() {
         let key = b"foo";
         let value = b"bar";
@@ -1348,6 +1418,7 @@ mod tests {
 
     /// Corresponds to Java's `MemoryRecordsBuilderTest.testAppendAtInvalidOffset`.
     #[test]
+    #[doc(alias = "org.apache.kafka.common.record.internal.MemoryRecordsBuilderTest#testAppendAtInvalidOffset")]
     fn test_append_at_invalid_offset() {
         for compression in all_compressions() {
             let mut builder = MemoryRecordsBuilder::with_default(
@@ -1585,6 +1656,9 @@ mod tests {
 
     /// Corresponds to Java's `MemoryRecordsBuilderTest.testRecordTimestampsWithDeleteHorizon`.
     #[test]
+    #[doc(
+        alias = "org.apache.kafka.common.record.internal.MemoryRecordsBuilderTest#testRecordTimestampsWithDeleteHorizon"
+    )]
     fn test_record_timestamps_with_delete_horizon() {
         let delete_horizon = 100_i64;
 

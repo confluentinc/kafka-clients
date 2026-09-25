@@ -27,6 +27,7 @@ use super::{FinalizedVersionRange, SupportedVersionRange};
 ///
 /// Corresponds to `org.apache.kafka.clients.admin.FeatureMetadata`.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[doc(alias = "org.apache.kafka.clients.admin.FeatureMetadata")]
 pub struct FeatureMetadata {
     finalized_features: HashMap<String, FinalizedVersionRange>,
     finalized_features_epoch: Option<i64>,
@@ -35,6 +36,7 @@ pub struct FeatureMetadata {
 
 impl FeatureMetadata {
     /// Creates a new `FeatureMetadata`.
+    #[doc(alias = "org.apache.kafka.clients.admin.FeatureMetadata#FeatureMetadata")]
     pub(crate) fn new(
         finalized_features: HashMap<String, FinalizedVersionRange>,
         finalized_features_epoch: Option<i64>,
@@ -46,12 +48,14 @@ impl FeatureMetadata {
     /// Returns a map of finalized feature versions. Each entry contains a
     /// feature name and the range of version levels supported by every broker
     /// in the cluster.
+    #[doc(alias = "org.apache.kafka.clients.admin.FeatureMetadata#finalizedFeatures")]
     pub fn finalized_features(&self) -> &HashMap<String, FinalizedVersionRange> {
         &self.finalized_features
     }
 
     /// The epoch for the finalized features. If empty, the finalized features
     /// are absent/unavailable.
+    #[doc(alias = "org.apache.kafka.clients.admin.FeatureMetadata#finalizedFeaturesEpoch")]
     pub fn finalized_features_epoch(&self) -> Option<i64> {
         self.finalized_features_epoch
     }
@@ -59,6 +63,7 @@ impl FeatureMetadata {
     /// Returns a map of supported feature versions. Each entry contains a
     /// feature name and the range of versions supported by a particular broker
     /// in the cluster.
+    #[doc(alias = "org.apache.kafka.clients.admin.FeatureMetadata#supportedFeatures")]
     pub fn supported_features(&self) -> &HashMap<String, SupportedVersionRange> {
         &self.supported_features
     }
@@ -82,6 +87,7 @@ impl std::fmt::Display for FeatureMetadata {
 
 /// Formats a feature map as `{(name -> range), ...}`, mirroring Java's
 /// `FeatureMetadata.mapToString`.
+#[doc(alias = "org.apache.kafka.clients.admin.FeatureMetadata#mapToString")]
 fn map_to_string<V: std::fmt::Display>(map: &HashMap<String, V>) -> String {
     let entries: Vec<String> = map.iter().map(|(k, v)| format!("({k} -> {v})")).collect();
     format!("{{{}}}", entries.join(", "))

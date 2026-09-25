@@ -22,6 +22,8 @@ use crate::common::Error;
 ///
 /// Translated from `org.apache.kafka.common.ElectionType`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+#[doc(alias = "org.apache.kafka.common.ElectionType")]
 pub enum ElectionType {
     /// Elect the preferred replica as leader.
     Preferred,
@@ -48,6 +50,7 @@ impl ElectionType {
     ///
     /// Returns an [`Error`] (invalid argument) if `value` is not a valid
     /// election type, mirroring Java's `IllegalArgumentException`.
+    #[doc(alias = "org.apache.kafka.common.ElectionType#valueOf")]
     pub fn value_of(value: i8) -> Result<Self, Error> {
         if value == Self::Preferred.value() {
             Ok(Self::Preferred)

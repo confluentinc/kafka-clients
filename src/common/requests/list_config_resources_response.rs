@@ -20,7 +20,7 @@ use std::collections::HashMap;
 use std::io;
 
 use crate::ListConfigResourcesResponseData;
-use crate::common::config::{ConfigResource, ConfigResourceType};
+use crate::common::config::{ConfigResource, config_resource};
 use crate::common::protocol::{ApiKeys, Errors, Readable};
 
 use super::AbstractResponse;
@@ -29,12 +29,14 @@ use super::AbstractResponse;
 ///
 /// Corresponds to `org.apache.kafka.common.requests.ListConfigResourcesResponse`.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.ListConfigResourcesResponse")]
 pub struct ListConfigResourcesResponse {
     data: ListConfigResourcesResponseData,
 }
 
 impl ListConfigResourcesResponse {
     /// Creates a new `ListConfigResourcesResponse` from the underlying data.
+    #[doc(alias = "org.apache.kafka.common.requests.ListConfigResourcesResponse#ListConfigResourcesResponse")]
     pub fn new(data: ListConfigResourcesResponseData) -> Self {
         Self { data }
     }
@@ -45,6 +47,7 @@ impl ListConfigResourcesResponse {
     }
 
     /// Returns a reference to the underlying data.
+    #[doc(alias = "org.apache.kafka.common.requests.ListConfigResourcesResponse#data")]
     pub fn data(&self) -> &ListConfigResourcesResponseData {
         &self.data
     }
@@ -55,11 +58,13 @@ impl ListConfigResourcesResponse {
     }
 
     /// Returns the throttle time in milliseconds.
+    #[doc(alias = "org.apache.kafka.common.requests.ListConfigResourcesResponse#throttleTimeMs")]
     pub fn throttle_time_ms(&self) -> i32 {
         self.data.throttle_time_ms
     }
 
     /// Sets the throttle time in the response.
+    #[doc(alias = "org.apache.kafka.common.requests.ListConfigResourcesResponse#maybeSetThrottleTimeMs")]
     pub fn maybe_set_throttle_time_ms(&mut self, throttle_time_ms: i32) {
         self.data.set_throttle_time_ms(throttle_time_ms);
     }
@@ -67,6 +72,7 @@ impl ListConfigResourcesResponse {
     /// Returns the top-level error of this response.
     ///
     /// Corresponds to `ListConfigResourcesResponse.error`.
+    #[doc(alias = "org.apache.kafka.common.requests.ListConfigResourcesResponse#error")]
     pub fn error(&self) -> Errors {
         Errors::for_code(self.data.error_code)
     }
@@ -74,17 +80,19 @@ impl ListConfigResourcesResponse {
     /// Returns the listed config resources.
     ///
     /// Corresponds to `ListConfigResourcesResponse.configResources`.
+    #[doc(alias = "org.apache.kafka.common.requests.ListConfigResourcesResponse#configResources")]
     pub fn config_resources(&self) -> Vec<ConfigResource> {
         self.data
             .config_resources
             .iter()
             .map(|entry| {
-                ConfigResource::new(ConfigResourceType::for_id(entry.resource_type), entry.resource_name.clone())
+                ConfigResource::new(config_resource::Type::for_id(entry.resource_type), entry.resource_name.clone())
             })
             .collect()
     }
 
     /// Returns the error counts for this response.
+    #[doc(alias = "org.apache.kafka.common.requests.ListConfigResourcesResponse#errorCounts")]
     pub fn error_counts(&self) -> HashMap<Errors, i32> {
         AbstractResponse::single_error_count(Errors::for_code(self.data.error_code))
     }
@@ -95,6 +103,7 @@ impl ListConfigResourcesResponse {
     /// # Errors
     ///
     /// Returns an error if parsing fails.
+    #[doc(alias = "org.apache.kafka.common.requests.ListConfigResourcesResponse#parse")]
     pub fn parse(readable: &mut dyn Readable, version: i16) -> io::Result<Self> {
         let data = ListConfigResourcesResponseData::read(readable, version)?;
         Ok(Self::new(data))
@@ -123,16 +132,16 @@ mod tests {
         data.set_error_code(Errors::None.code());
         let mut a = WireConfigResource::new();
         a.set_resource_name("topic".to_string());
-        a.set_resource_type(ConfigResourceType::Topic.id());
+        a.set_resource_type(config_resource::Type::Topic.id());
         let mut b = WireConfigResource::new();
         b.set_resource_name("1".to_string());
-        b.set_resource_type(ConfigResourceType::Broker.id());
+        b.set_resource_type(config_resource::Type::Broker.id());
         data.set_config_resources(vec![a, b]);
         let response = ListConfigResourcesResponse::new(data);
         let resources = response.config_resources();
         assert_eq!(resources.len(), 2);
-        assert!(resources.contains(&ConfigResource::new(ConfigResourceType::Topic, "topic".to_string())));
-        assert!(resources.contains(&ConfigResource::new(ConfigResourceType::Broker, "1".to_string())));
+        assert!(resources.contains(&ConfigResource::new(config_resource::Type::Topic, "topic".to_string())));
+        assert!(resources.contains(&ConfigResource::new(config_resource::Type::Broker, "1".to_string())));
     }
 
     #[test]

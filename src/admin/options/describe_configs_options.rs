@@ -20,6 +20,7 @@
 ///
 /// Corresponds to `org.apache.kafka.clients.admin.DescribeConfigsOptions`.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[doc(alias = "org.apache.kafka.clients.admin.DescribeConfigsOptions")]
 pub struct DescribeConfigsOptions {
     timeout_ms: Option<i32>,
     include_synonyms: bool,

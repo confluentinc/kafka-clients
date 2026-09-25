@@ -1,0 +1,10 @@
+# The public API is not stable yet (0.1.0), so clippy should lint exported
+# items like any other code. With the default `true`, clippy silently skips
+# every lint whose fix would change an exported signature — which is how
+# `wrong_self_convention` on `TimeUnit::to_millis`
+# (`src/common/metrics/internals/metrics_utils.rs`) stayed hidden until its
+# module was correctly narrowed to `pub(crate)`.
+#
+# Revisit before 1.0: once the API is stable, `true` is the right value, and
+# any finding it would then suppress must be fixed before that release.
+avoid-breaking-exported-api = false

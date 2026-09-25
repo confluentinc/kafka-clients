@@ -14,8 +14,8 @@
 
 //! Translated from `org.apache.kafka.common.errors.UnknownLeaderEpochException`.
 
-use crate::common::Errors;
 use crate::common::error::kafka_error_class;
+use crate::common::protocol::Errors;
 
 kafka_error_class! {
     /// The leader epoch in the request is newer than the epoch on the broker.
@@ -25,6 +25,7 @@ kafka_error_class! {
     /// Java `extends` chain:
     ///    `UnknownLeaderEpochException` -> `RetriableException` -> `ApiException` ->
     ///   `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.UnknownLeaderEpochException")]
     UnknownLeaderEpochError,
     code: Errors::UnknownLeaderEpoch,
     extends: [

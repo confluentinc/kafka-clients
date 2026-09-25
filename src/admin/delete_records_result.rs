@@ -25,23 +25,27 @@ use crate::common::{KafkaFuture, TopicPartition};
 ///
 /// Corresponds to `org.apache.kafka.clients.admin.DeleteRecordsResult`.
 #[derive(Clone, Debug)]
+#[doc(alias = "org.apache.kafka.clients.admin.DeleteRecordsResult")]
 pub struct DeleteRecordsResult {
     futures: HashMap<TopicPartition, KafkaFuture<DeletedRecords>>,
 }
 
 impl DeleteRecordsResult {
     /// Creates a result from the per-partition futures.
+    #[doc(alias = "org.apache.kafka.clients.admin.DeleteRecordsResult#DeleteRecordsResult")]
     pub(crate) fn new(futures: HashMap<TopicPartition, KafkaFuture<DeletedRecords>>) -> Self {
         Self { futures }
     }
 
     /// Return a map from topic partition to futures which can be used to check
     /// the status of individual deletions.
+    #[doc(alias = "org.apache.kafka.clients.admin.DeleteRecordsResult#lowWatermarks")]
     pub fn low_watermarks(&self) -> &HashMap<TopicPartition, KafkaFuture<DeletedRecords>> {
         &self.futures
     }
 
     /// Return a future which succeeds only if all the records deletions succeed.
+    #[doc(alias = "org.apache.kafka.clients.admin.DeleteRecordsResult#all")]
     pub fn all(&self) -> KafkaFuture<()> {
         KafkaFuture::all_of(self.futures.values().map(|f| f.then_apply(|_| ())).collect())
     }

@@ -14,8 +14,8 @@
 
 //! Translated from `org.apache.kafka.common.errors.TransactionCoordinatorFencedException`.
 
-use crate::common::Errors;
 use crate::common::error::kafka_error_class;
+use crate::common::protocol::Errors;
 
 kafka_error_class! {
     /// Indicates that the transaction coordinator sending a WriteTxnMarker is no
@@ -26,6 +26,7 @@ kafka_error_class! {
     /// Java `extends` chain:
     ///    `TransactionCoordinatorFencedException` -> `ApiException` ->
     ///   `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.TransactionCoordinatorFencedException")]
     TransactionCoordinatorFencedError,
     code: Errors::TransactionCoordinatorFenced,
     extends: [

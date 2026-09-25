@@ -14,8 +14,8 @@
 
 //! Translated from `org.apache.kafka.common.errors.NotLeaderOrFollowerException`.
 
-use crate::common::Errors;
 use crate::common::error::kafka_error_class;
+use crate::common::protocol::Errors;
 
 kafka_error_class! {
     /// For requests intended only for the leader, this error indicates that the
@@ -29,6 +29,7 @@ kafka_error_class! {
     ///    `NotLeaderOrFollowerException` -> `InvalidMetadataException` ->
     ///   `RefreshRetriableException` -> `RetriableException` -> `ApiException` ->
     ///   `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.NotLeaderOrFollowerException")]
     NotLeaderOrFollowerError,
     code: Errors::NotLeaderOrFollower,
     extends: [

@@ -22,6 +22,7 @@ use indexmap::IndexSet;
 /// specified values. The order of the tags is maintained so that the metric
 /// names can be compared and sorted lexicographically.
 #[derive(Clone, Debug)]
+#[doc(alias = "org.apache.kafka.common.MetricNameTemplate")]
 pub struct MetricNameTemplate {
     name: String,
     group: String,
@@ -38,6 +39,7 @@ impl MetricNameTemplate {
     /// * `group` - the name of the group
     /// * `description` - the description of the metric
     /// * `tag_names` - the names of the metric tags in the preferred order
+    #[doc(alias = "org.apache.kafka.common.MetricNameTemplate#MetricNameTemplate")]
     pub fn new(
         name: impl Into<String>,
         group: impl Into<String>,
@@ -53,21 +55,25 @@ impl MetricNameTemplate {
     }
 
     /// Get the name of the metric.
+    #[doc(alias = "org.apache.kafka.common.MetricNameTemplate#name")]
     pub fn name(&self) -> &str {
         &self.name
     }
 
     /// Get the name of the group.
+    #[doc(alias = "org.apache.kafka.common.MetricNameTemplate#group")]
     pub fn group(&self) -> &str {
         &self.group
     }
 
     /// Get the description of the metric.
+    #[doc(alias = "org.apache.kafka.common.MetricNameTemplate#description")]
     pub fn description(&self) -> &str {
         &self.description
     }
 
     /// Get the ordered set of tag names for the metric.
+    #[doc(alias = "org.apache.kafka.common.MetricNameTemplate#getTags")]
     pub fn tags(&self) -> &IndexSet<String> {
         &self.tags
     }

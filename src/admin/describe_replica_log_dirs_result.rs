@@ -25,18 +25,21 @@ use crate::common::TopicPartitionReplica;
 /// The result of the `Admin::describe_replica_log_dirs` call.
 ///
 /// Corresponds to `org.apache.kafka.clients.admin.DescribeReplicaLogDirsResult`.
+#[doc(alias = "org.apache.kafka.clients.admin.DescribeReplicaLogDirsResult")]
 pub struct DescribeReplicaLogDirsResult {
     futures: HashMap<TopicPartitionReplica, KafkaFuture<ReplicaLogDirInfo>>,
 }
 
 impl DescribeReplicaLogDirsResult {
     /// Creates a new result from the per-replica futures.
+    #[doc(alias = "org.apache.kafka.clients.admin.DescribeReplicaLogDirsResult#DescribeReplicaLogDirsResult")]
     pub(crate) fn new(futures: HashMap<TopicPartitionReplica, KafkaFuture<ReplicaLogDirInfo>>) -> Self {
         Self { futures }
     }
 
     /// Returns a map from replica to a future which can be used to check the log
     /// directory information of individual replicas.
+    #[doc(alias = "org.apache.kafka.clients.admin.DescribeReplicaLogDirsResult#values")]
     pub fn values(&self) -> &HashMap<TopicPartitionReplica, KafkaFuture<ReplicaLogDirInfo>> {
         &self.futures
     }
@@ -45,6 +48,7 @@ impl DescribeReplicaLogDirsResult {
     /// replicas is available.
     ///
     /// Corresponds to `DescribeReplicaLogDirsResult.all`.
+    #[doc(alias = "org.apache.kafka.clients.admin.DescribeReplicaLogDirsResult#all")]
     pub fn all(&self) -> KafkaFuture<HashMap<TopicPartitionReplica, ReplicaLogDirInfo>> {
         let entries: Vec<(TopicPartitionReplica, KafkaFuture<ReplicaLogDirInfo>)> =
             self.futures.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
@@ -56,6 +60,7 @@ impl DescribeReplicaLogDirsResult {
 ///
 /// Corresponds to `DescribeReplicaLogDirsResult.ReplicaLogDirInfo`.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[doc(alias = "org.apache.kafka.clients.admin.DescribeReplicaLogDirsResult$ReplicaLogDirInfo")]
 pub struct ReplicaLogDirInfo {
     current_replica_log_dir: Option<String>,
     current_replica_offset_lag: i64,
@@ -65,6 +70,7 @@ pub struct ReplicaLogDirInfo {
 
 impl ReplicaLogDirInfo {
     /// Creates a fully specified `ReplicaLogDirInfo`.
+    #[doc(alias = "org.apache.kafka.clients.admin.DescribeReplicaLogDirsResult$ReplicaLogDirInfo#ReplicaLogDirInfo")]
     pub(crate) fn new(
         current_replica_log_dir: Option<String>,
         current_replica_offset_lag: i64,
@@ -81,11 +87,17 @@ impl ReplicaLogDirInfo {
 
     /// The current log directory of the replica of this partition on the given
     /// broker. `None` if no replica is found for this partition on the broker.
+    #[doc(
+        alias = "org.apache.kafka.clients.admin.DescribeReplicaLogDirsResult$ReplicaLogDirInfo#getCurrentReplicaLogDir"
+    )]
     pub fn current_replica_log_dir(&self) -> Option<&str> {
         self.current_replica_log_dir.as_deref()
     }
 
     /// Defined as `max(HW of partition - LEO of the replica, 0)`.
+    #[doc(
+        alias = "org.apache.kafka.clients.admin.DescribeReplicaLogDirsResult$ReplicaLogDirInfo#getCurrentReplicaOffsetLag"
+    )]
     pub fn current_replica_offset_lag(&self) -> i64 {
         self.current_replica_offset_lag
     }
@@ -93,6 +105,9 @@ impl ReplicaLogDirInfo {
     /// The future log directory of the replica of this partition on the given
     /// broker. `None` if the replica of this partition is not being moved to
     /// another log directory on the given broker.
+    #[doc(
+        alias = "org.apache.kafka.clients.admin.DescribeReplicaLogDirsResult$ReplicaLogDirInfo#getFutureReplicaLogDir"
+    )]
     pub fn future_replica_log_dir(&self) -> Option<&str> {
         self.future_replica_log_dir.as_deref()
     }
@@ -101,6 +116,9 @@ impl ReplicaLogDirInfo {
     /// the destination log directory. `-1` if either there is no replica for
     /// this partition or the replica is not being moved to another log
     /// directory on the given broker.
+    #[doc(
+        alias = "org.apache.kafka.clients.admin.DescribeReplicaLogDirsResult$ReplicaLogDirInfo#getFutureReplicaOffsetLag"
+    )]
     pub fn future_replica_offset_lag(&self) -> i64 {
         self.future_replica_offset_lag
     }

@@ -21,7 +21,7 @@
 // `KafkaProducerMetrics` registers all 8 regardless — but have no call site yet:
 // the transactional API is not present on the `Producer` trait. They are
 // exercised by the tests and wired to record sites when transactions land.
-#![allow(dead_code)]
+#![expect(dead_code)]
 
 use std::sync::Arc;
 
@@ -38,6 +38,7 @@ use crate::common::metrics::{Metrics, Sensor};
 /// methods), never per record. Every one of the 8 latency sensors carries a
 /// single [`CumulativeSum`] metric named `<x>-time-ns-total`, exactly as Java
 /// registers them.
+#[doc(alias = "org.apache.kafka.clients.producer.internals.KafkaProducerMetrics")]
 pub(crate) struct KafkaProducerMetrics {
     metrics: Arc<Metrics>,
     init_time_sensor: Arc<Sensor>,
@@ -77,6 +78,7 @@ impl KafkaProducerMetrics {
     /// Registers all 8 latency sensors in the `producer-metrics` group.
     ///
     /// Java: `KafkaProducerMetrics(Metrics metrics)`.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.KafkaProducerMetrics#KafkaProducerMetrics")]
     pub(crate) fn new(metrics: Arc<Metrics>) -> Self {
         let flush_time_sensor = Self::new_latency_sensor(
             &metrics,
@@ -133,6 +135,7 @@ impl KafkaProducerMetrics {
     }
 
     /// Java: `recordFlush(long duration)`.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.KafkaProducerMetrics#recordFlush")]
     pub(crate) fn record_flush(&self, duration: i64) {
         self.flush_time_sensor.record_value(duration as f64);
     }
@@ -142,6 +145,7 @@ impl KafkaProducerMetrics {
     /// No call site yet: the transactional API is not present on the
     /// [`Producer`](crate::producer::Producer) trait. Retained for parity —
     /// Java registers the sensor regardless — and wired when transactions land.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.KafkaProducerMetrics#recordInit")]
     pub(crate) fn record_init(&self, duration: i64) {
         self.init_time_sensor.record_value(duration as f64);
     }
@@ -149,6 +153,7 @@ impl KafkaProducerMetrics {
     /// Java: `recordBeginTxn(long duration)`.
     ///
     /// No call site yet (see [`record_init`](Self::record_init)).
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.KafkaProducerMetrics#recordBeginTxn")]
     pub(crate) fn record_begin_txn(&self, duration: i64) {
         self.begin_txn_time_sensor.record_value(duration as f64);
     }
@@ -156,6 +161,7 @@ impl KafkaProducerMetrics {
     /// Java: `recordSendOffsets(long duration)`.
     ///
     /// No call site yet (see [`record_init`](Self::record_init)).
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.KafkaProducerMetrics#recordSendOffsets")]
     pub(crate) fn record_send_offsets(&self, duration: i64) {
         self.send_offsets_sensor.record_value(duration as f64);
     }
@@ -163,6 +169,7 @@ impl KafkaProducerMetrics {
     /// Java: `recordCommitTxn(long duration)`.
     ///
     /// No call site yet (see [`record_init`](Self::record_init)).
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.KafkaProducerMetrics#recordCommitTxn")]
     pub(crate) fn record_commit_txn(&self, duration: i64) {
         self.commit_txn_sensor.record_value(duration as f64);
     }
@@ -170,6 +177,7 @@ impl KafkaProducerMetrics {
     /// Java: `recordAbortTxn(long duration)`.
     ///
     /// No call site yet (see [`record_init`](Self::record_init)).
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.KafkaProducerMetrics#recordAbortTxn")]
     pub(crate) fn record_abort_txn(&self, duration: i64) {
         self.abort_txn_sensor.record_value(duration as f64);
     }
@@ -179,16 +187,19 @@ impl KafkaProducerMetrics {
     /// No call site yet, and — mirroring Java — never recorded even once the
     /// transactional API lands (Java registers `txn-prepare` but has no
     /// `recordPrepareTxn` call site of its own either). Retained for parity.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.KafkaProducerMetrics#recordPrepareTxn")]
     pub(crate) fn record_prepare_txn(&self, duration: i64) {
         self.prepare_txn_sensor.record_value(duration as f64);
     }
 
     /// Java: `recordMetadataWait(long duration)`.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.KafkaProducerMetrics#recordMetadataWait")]
     pub(crate) fn record_metadata_wait(&self, duration: i64) {
         self.metadata_wait_sensor.record_value(duration as f64);
     }
 
     /// Java: `close()` (`AutoCloseable`). Removes all 8 latency sensors.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.KafkaProducerMetrics#close")]
     pub(crate) fn close(&self) {
         Self::remove_metric(&self.metrics, KafkaProducerMetrics::FLUSH);
         Self::remove_metric(&self.metrics, KafkaProducerMetrics::TXN_INIT);
@@ -204,6 +215,7 @@ impl KafkaProducerMetrics {
     ///
     /// The sensor is named `<name>-time-ns-total` and carries a single
     /// `CumulativeSum` metric of the same name.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.KafkaProducerMetrics#newLatencySensor")]
     fn new_latency_sensor(metrics: &Arc<Metrics>, name: &str, description: &str) -> Arc<Sensor> {
         let sensor_name = format!("{name}{}", KafkaProducerMetrics::TOTAL_TIME_SUFFIX);
         let sensor = metrics
@@ -220,6 +232,7 @@ impl KafkaProducerMetrics {
     /// `Metrics::metric_name_description_tags` already merges the registry's default tags (the
     /// `client-id` tag), so an empty explicit tag map yields the same effective
     /// name as Java passing `metrics.config().tags()`.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.KafkaProducerMetrics#metricName")]
     fn metric_name(metrics: &Arc<Metrics>, name: &str, description: &str) -> MetricName {
         metrics.metric_name_description_tags(
             format!("{name}{}", KafkaProducerMetrics::TOTAL_TIME_SUFFIX),
@@ -230,6 +243,7 @@ impl KafkaProducerMetrics {
     }
 
     /// Java: `removeMetric(String name)`.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.KafkaProducerMetrics#removeMetric")]
     fn remove_metric(metrics: &Arc<Metrics>, name: &str) {
         metrics.remove_sensor(&format!("{name}{}", KafkaProducerMetrics::TOTAL_TIME_SUFFIX));
     }
@@ -275,6 +289,7 @@ mod tests {
 
     /// Java: `shouldRecordFlushTime`.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.KafkaProducerMetricsTest#shouldRecordFlushTime")]
     fn should_record_flush_time() {
         let f = setup();
         f.producer_metrics.record_flush(METRIC_VALUE);
@@ -283,6 +298,7 @@ mod tests {
 
     /// Java: `shouldRecordInitTime`.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.KafkaProducerMetricsTest#shouldRecordInitTime")]
     fn should_record_init_time() {
         let f = setup();
         f.producer_metrics.record_init(METRIC_VALUE);
@@ -291,6 +307,7 @@ mod tests {
 
     /// Java: `shouldRecordTxBeginTime`.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.KafkaProducerMetricsTest#shouldRecordTxBeginTime")]
     fn should_record_tx_begin_time() {
         let f = setup();
         f.producer_metrics.record_begin_txn(METRIC_VALUE);
@@ -299,6 +316,7 @@ mod tests {
 
     /// Java: `shouldRecordTxCommitTime`.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.KafkaProducerMetricsTest#shouldRecordTxCommitTime")]
     fn should_record_tx_commit_time() {
         let f = setup();
         f.producer_metrics.record_commit_txn(METRIC_VALUE);
@@ -307,6 +325,7 @@ mod tests {
 
     /// Java: `shouldRecordTxAbortTime`.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.KafkaProducerMetricsTest#shouldRecordTxAbortTime")]
     fn should_record_tx_abort_time() {
         let f = setup();
         f.producer_metrics.record_abort_txn(METRIC_VALUE);
@@ -315,6 +334,7 @@ mod tests {
 
     /// Java: `shouldRecordSendOffsetsTime`.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.KafkaProducerMetricsTest#shouldRecordSendOffsetsTime")]
     fn should_record_send_offsets_time() {
         let f = setup();
         f.producer_metrics.record_send_offsets(METRIC_VALUE);
@@ -323,6 +343,7 @@ mod tests {
 
     /// Java: `shouldRecordMetadataWaitTime`.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.KafkaProducerMetricsTest#shouldRecordMetadataWaitTime")]
     fn should_record_metadata_wait_time() {
         let f = setup();
         f.producer_metrics.record_metadata_wait(METRIC_VALUE);
@@ -331,6 +352,7 @@ mod tests {
 
     /// Java: `shouldRemoveMetricsOnClose`.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.KafkaProducerMetricsTest#shouldRemoveMetricsOnClose")]
     fn should_remove_metrics_on_close() {
         let f = setup();
         f.producer_metrics.close();

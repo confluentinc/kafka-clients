@@ -20,6 +20,7 @@
 ///
 /// Corresponds to `org.apache.kafka.clients.admin.DescribeClusterOptions`.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[doc(alias = "org.apache.kafka.clients.admin.DescribeClusterOptions")]
 pub struct DescribeClusterOptions {
     timeout_ms: Option<i32>,
     include_authorized_operations: bool,

@@ -14,8 +14,8 @@
 
 //! Translated from `org.apache.kafka.common.errors.GroupMaxSizeReachedException`.
 
-use crate::common::Errors;
 use crate::common::error::kafka_error_class;
+use crate::common::protocol::Errors;
 
 kafka_error_class! {
     /// The group has reached its maximum size.
@@ -24,6 +24,7 @@ kafka_error_class! {
     ///
     /// Java `extends` chain:
     ///    `GroupMaxSizeReachedException` -> `ApiException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.GroupMaxSizeReachedException")]
     GroupMaxSizeReachedError,
     code: Errors::GroupMaxSizeReached,
     extends: [

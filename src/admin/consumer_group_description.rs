@@ -19,8 +19,6 @@
 use std::collections::BTreeSet;
 
 use crate::admin::MemberDescription;
-#[allow(deprecated)]
-use crate::common::ConsumerGroupState;
 use crate::common::acl::AclOperation;
 use crate::common::{GroupState, GroupType, Node};
 
@@ -29,11 +27,10 @@ use crate::common::{GroupState, GroupType, Node};
 /// Corresponds to `org.apache.kafka.clients.admin.ConsumerGroupDescription`.
 ///
 /// Note: Java's `@Deprecated(forRemoval = true)` constructors that accept a
-/// [`ConsumerGroupState`] are omitted (they only default-fill fields already
-/// expressible through [`new`]); no in-scope caller uses them. The deprecated
-/// [`state`](Self::state) accessor is retained because it is part of the public
-/// surface exercised by callers migrating off `ConsumerGroupState`.
+/// `ConsumerGroupState`, and the deprecated `state()` accessor, are not
+/// translated; use [`new`](Self::new) and [`group_state`](Self::group_state).
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[doc(alias = "org.apache.kafka.clients.admin.ConsumerGroupDescription")]
 pub struct ConsumerGroupDescription {
     group_id: String,
     is_simple_consumer_group: bool,
@@ -58,7 +55,10 @@ impl ConsumerGroupDescription {
     /// String, GroupType, GroupState, Node, Set<AclOperation>, Optional<Integer>,
     /// Optional<Integer>)` constructor. `coordinator` is `None` when the
     /// coordinator is not known (Java's nullable `Node`).
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
+    #[doc(
+        alias = "org.apache.kafka.clients.admin.ConsumerGroupDescription#ConsumerGroupDescription(String,boolean,Collection,String,GroupType,GroupState,Node,Set,Optional,Optional)"
+    )]
     pub fn new(
         group_id: impl Into<String>,
         is_simple_consumer_group: bool,
@@ -86,21 +86,25 @@ impl ConsumerGroupDescription {
     }
 
     /// The id of the consumer group. Mirrors `groupId()`.
+    #[doc(alias = "org.apache.kafka.clients.admin.ConsumerGroupDescription#groupId")]
     pub fn group_id(&self) -> &str {
         &self.group_id
     }
 
     /// Whether the consumer group is simple. Mirrors `isSimpleConsumerGroup()`.
+    #[doc(alias = "org.apache.kafka.clients.admin.ConsumerGroupDescription#isSimpleConsumerGroup")]
     pub fn is_simple_consumer_group(&self) -> bool {
         self.is_simple_consumer_group
     }
 
     /// The members of the consumer group. Mirrors `members()`.
+    #[doc(alias = "org.apache.kafka.clients.admin.ConsumerGroupDescription#members")]
     pub fn members(&self) -> &[MemberDescription] {
         &self.members
     }
 
     /// The consumer group partition assignor. Mirrors `partitionAssignor()`.
+    #[doc(alias = "org.apache.kafka.clients.admin.ConsumerGroupDescription#partitionAssignor")]
     pub fn partition_assignor(&self) -> &str {
         &self.partition_assignor
     }
@@ -110,36 +114,34 @@ impl ConsumerGroupDescription {
         self.group_type
     }
 
-    /// The consumer group state (deprecated). Mirrors `state()`, mapping the
-    /// group state via `ConsumerGroupState.parse(groupState.toString())`.
-    #[allow(deprecated)]
-    pub fn state(&self) -> ConsumerGroupState {
-        ConsumerGroupState::parse(self.group_state.name())
-    }
-
     /// The group state. Mirrors `groupState()`.
+    #[doc(alias = "org.apache.kafka.clients.admin.ConsumerGroupDescription#groupState")]
     pub fn group_state(&self) -> GroupState {
         self.group_state
     }
 
     /// The consumer group coordinator, or `None` if not known. Mirrors
     /// `coordinator()`.
+    #[doc(alias = "org.apache.kafka.clients.admin.ConsumerGroupDescription#coordinator")]
     pub fn coordinator(&self) -> Option<&Node> {
         self.coordinator.as_ref()
     }
 
     /// The authorized operations for this group, or `None` if the broker did not
     /// report them (Java returns `null`). Mirrors `authorizedOperations()`.
+    #[doc(alias = "org.apache.kafka.clients.admin.ConsumerGroupDescription#authorizedOperations")]
     pub fn authorized_operations(&self) -> Option<&BTreeSet<AclOperation>> {
         self.authorized_operations.as_ref()
     }
 
     /// The epoch of the consumer group. Mirrors `groupEpoch()`.
+    #[doc(alias = "org.apache.kafka.clients.admin.ConsumerGroupDescription#groupEpoch")]
     pub fn group_epoch(&self) -> Option<i32> {
         self.group_epoch
     }
 
     /// The epoch of the target assignment. Mirrors `targetAssignmentEpoch()`.
+    #[doc(alias = "org.apache.kafka.clients.admin.ConsumerGroupDescription#targetAssignmentEpoch")]
     pub fn target_assignment_epoch(&self) -> Option<i32> {
         self.target_assignment_epoch
     }
@@ -151,6 +153,7 @@ mod tests {
 
     /// Translated from `ConsumerGroupDescriptionTest.testGroupState`.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.admin.ConsumerGroupDescriptionTest#testGroupState")]
     fn test_group_state() {
         for group_state in [
             GroupState::Unknown,

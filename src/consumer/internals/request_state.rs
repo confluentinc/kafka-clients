@@ -20,7 +20,7 @@
 // later phases (`CommitRequestManager`, `*HeartbeatRequestManager`,
 // `OffsetsRequestManager`, ...). Suppress dead-code warnings for items
 // that are not yet referenced inside the workspace.
-#![allow(dead_code)]
+#![cfg_attr(not(test), expect(dead_code))]
 
 use std::fmt;
 
@@ -49,6 +49,7 @@ use crate::common::utils::ExponentialBackoff;
 /// Java's `Logger` is omitted — the Rust translation uses `log::*` macros
 /// directly inside [`RequestState::can_send_request`] when a backoff
 /// remains.
+#[doc(alias = "org.apache.kafka.clients.consumer.internals.RequestState")]
 pub(crate) struct RequestState {
     owner: String,
     exponential_backoff: ExponentialBackoff,
@@ -75,6 +76,7 @@ impl RequestState {
     ///
     /// Mirrors Java's public constructor
     /// `RequestState(LogContext, String, long, long)`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.RequestState#RequestState")]
     pub(crate) fn new(owner: impl Into<String>, retry_backoff_ms: i64, retry_backoff_max_ms: i64) -> Self {
         Self::with_backoff_params(
             owner,
@@ -88,6 +90,7 @@ impl RequestState {
     /// Creates a new [`RequestState`] with explicit exponential-backoff
     /// parameters. Mirrors Java's package-private (visible-for-testing)
     /// constructor.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.RequestState#RequestState")]
     pub(crate) fn with_backoff_params(
         owner: impl Into<String>,
         retry_backoff_ms: i64,
@@ -113,6 +116,7 @@ impl RequestState {
     /// the backoff is restored to its minimal configuration.
     ///
     /// Java: `reset()`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.RequestState#reset")]
     pub(crate) fn reset(&mut self) {
         self.request_in_flight = false;
         self.last_sent_ms = -1;
@@ -125,6 +129,7 @@ impl RequestState {
     /// request is in flight and the backoff timer has elapsed.
     ///
     /// Java: `canSendRequest(long currentTimeMs)`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.RequestState#canSendRequest")]
     pub(crate) fn can_send_request(&self, current_time_ms: i64) -> bool {
         if self.request_in_flight() {
             log::trace!("An inflight request already exists for {self}");
@@ -143,6 +148,7 @@ impl RequestState {
     /// yet been observed.
     ///
     /// Java: `requestInFlight()`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.RequestState#requestInFlight")]
     pub(crate) fn request_in_flight(&self) -> bool {
         self.request_in_flight
     }
@@ -150,6 +156,7 @@ impl RequestState {
     /// Updates state to reflect that a request was sent at the given time.
     ///
     /// Java: `onSendAttempt(long currentTimeMs)`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.RequestState#onSendAttempt")]
     pub(crate) fn on_send_attempt(&mut self, current_time_ms: i64) {
         self.request_in_flight = true;
         // The timer is updated every send attempt.
@@ -161,6 +168,7 @@ impl RequestState {
     /// new send is allowed. To send immediately, call [`Self::reset`].
     ///
     /// Java: `onSuccessfulAttempt(long currentTimeMs)`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.RequestState#onSuccessfulAttempt")]
     pub(crate) fn on_successful_attempt(&mut self, current_time_ms: i64) {
         self.request_in_flight = false;
         self.last_received_ms = current_time_ms;
@@ -172,6 +180,7 @@ impl RequestState {
     /// attempts, increasing the backoff before the next send attempt.
     ///
     /// Java: `onFailedAttempt(long currentTimeMs)`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.RequestState#onFailedAttempt")]
     pub(crate) fn on_failed_attempt(&mut self, current_time_ms: i64) {
         self.request_in_flight = false;
         self.last_received_ms = current_time_ms;
@@ -192,6 +201,7 @@ impl RequestState {
     /// is allowed, given the current time.
     ///
     /// Java: package-private `remainingBackoffMs(long currentTimeMs)`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.RequestState#remainingBackoffMs")]
     pub(crate) fn remaining_backoff_ms(&self, current_time_ms: i64) -> i64 {
         let time_since_last_receive = current_time_ms - self.last_received_ms;
         (self.backoff_ms - time_since_last_receive).max(0)
@@ -201,6 +211,7 @@ impl RequestState {
     /// `toStringBase()` produces. Visible to subclasses (e.g.
     /// [`super::TimedRequestState`]) so they can append
     /// their own state without duplicating each field.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.RequestState#toStringBase")]
     pub(crate) fn to_string_base(&self) -> String {
         format!(
             "owner='{}', exponentialBackoff={}, lastSentMs={}, lastReceivedMs={}, numAttempts={}, backoffMs={}, \
@@ -229,6 +240,7 @@ mod tests {
     /// Translated from `RequestStateTest.testRequestStateSimple`. The Java
     /// test uses jitter = 0 so backoffs are deterministic.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.RequestStateTest#testRequestStateSimple")]
     fn test_request_state_simple() {
         let mut state = RequestState::with_backoff_params("RequestStateTest", 100, 2, 1000, 0.0);
 
@@ -250,12 +262,14 @@ mod tests {
 
     /// Translated from `RequestStateTest.testTrackInflightOnSuccessfulAttempt`.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.RequestStateTest#testTrackInflightOnSuccessfulAttempt")]
     fn test_track_inflight_on_successful_attempt() {
         test_track_inflight(|state, ms| state.on_successful_attempt(ms));
     }
 
     /// Translated from `RequestStateTest.testTrackInflightOnFailedAttempt`.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.RequestStateTest#testTrackInflightOnFailedAttempt")]
     fn test_track_inflight_on_failed_attempt() {
         test_track_inflight(|state, ms| state.on_failed_attempt(ms));
     }

@@ -38,11 +38,11 @@ const TOPIC_METRIC_GROUP_NAME: &str = "producer-topic-metrics";
 /// mirrors Java's thin delegation to the shared [`Metrics`] registry
 /// (`sensor`/`get_sensor`/`add_metric`), so the `Sender`'s `SenderMetrics` can
 /// route every registration through it exactly as Java does.
+#[doc(alias = "org.apache.kafka.clients.producer.internals.SenderMetricsRegistry")]
 pub(crate) struct SenderMetricsRegistry {
     metrics: Arc<Metrics>,
     /// Every registered template, for `all_templates()`. Only read by the
     /// metric-template parity tests (Java's `SenderTest.testSenderMetricsTemplates`).
-    #[cfg_attr(not(test), allow(dead_code))]
     all_templates: Vec<MetricNameTemplate>,
 
     /* Client level. */
@@ -84,6 +84,7 @@ pub(crate) struct SenderMetricsRegistry {
 impl SenderMetricsRegistry {
     /// Builds the registry over the given [`Metrics`], resolving the client-level
     /// metrics eagerly. Translates Java's `SenderMetricsRegistry(Metrics)`.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.SenderMetricsRegistry#SenderMetricsRegistry")]
     pub(crate) fn new(metrics: Arc<Metrics>) -> Self {
         // Java: `this.tags = this.metrics.config().tags().keySet()` — the set of
         // default tag *keys* (e.g. `client-id`), not the values.
@@ -241,60 +242,73 @@ impl SenderMetricsRegistry {
 
     /* Topic level metrics. `tags` maps `topic` to the topic name. */
 
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.SenderMetricsRegistry#topicRecordSendRate")]
     pub(crate) fn topic_record_send_rate(&self, tags: BTreeMap<String, String>) -> Result<MetricName, Error> {
         self.metrics.metric_instance_tags(&self.topic_record_send_rate, tags)
     }
 
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.SenderMetricsRegistry#topicRecordSendTotal")]
     pub(crate) fn topic_record_send_total(&self, tags: BTreeMap<String, String>) -> Result<MetricName, Error> {
         self.metrics.metric_instance_tags(&self.topic_record_send_total, tags)
     }
 
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.SenderMetricsRegistry#topicByteRate")]
     pub(crate) fn topic_byte_rate(&self, tags: BTreeMap<String, String>) -> Result<MetricName, Error> {
         self.metrics.metric_instance_tags(&self.topic_byte_rate, tags)
     }
 
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.SenderMetricsRegistry#topicByteTotal")]
     pub(crate) fn topic_byte_total(&self, tags: BTreeMap<String, String>) -> Result<MetricName, Error> {
         self.metrics.metric_instance_tags(&self.topic_byte_total, tags)
     }
 
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.SenderMetricsRegistry#topicCompressionRate")]
     pub(crate) fn topic_compression_rate(&self, tags: BTreeMap<String, String>) -> Result<MetricName, Error> {
         self.metrics.metric_instance_tags(&self.topic_compression_rate, tags)
     }
 
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.SenderMetricsRegistry#topicRecordRetryRate")]
     pub(crate) fn topic_record_retry_rate(&self, tags: BTreeMap<String, String>) -> Result<MetricName, Error> {
         self.metrics.metric_instance_tags(&self.topic_record_retry_rate, tags)
     }
 
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.SenderMetricsRegistry#topicRecordRetryTotal")]
     pub(crate) fn topic_record_retry_total(&self, tags: BTreeMap<String, String>) -> Result<MetricName, Error> {
         self.metrics.metric_instance_tags(&self.topic_record_retry_total, tags)
     }
 
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.SenderMetricsRegistry#topicRecordErrorRate")]
     pub(crate) fn topic_record_error_rate(&self, tags: BTreeMap<String, String>) -> Result<MetricName, Error> {
         self.metrics.metric_instance_tags(&self.topic_record_error_rate, tags)
     }
 
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.SenderMetricsRegistry#topicRecordErrorTotal")]
     pub(crate) fn topic_record_error_total(&self, tags: BTreeMap<String, String>) -> Result<MetricName, Error> {
         self.metrics.metric_instance_tags(&self.topic_record_error_total, tags)
     }
 
     /// Returns every registered template, mirroring Java's `allTemplates()`.
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg_attr(not(test), expect(dead_code))]
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.SenderMetricsRegistry#allTemplates")]
     pub(crate) fn all_templates(&self) -> &[MetricNameTemplate] {
         &self.all_templates
     }
 
     /// Get-or-create a sensor by name (Java `sensor(String)`).
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.SenderMetricsRegistry#getSensor")]
     pub(crate) fn sensor(&self, name: &str) -> Result<Arc<Sensor>, Error> {
         self.metrics.sensor(name)
     }
 
     /// Registers a measurable metric (Java `addMetric(MetricName, Measurable)`).
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.SenderMetricsRegistry#addMetric")]
     pub(crate) fn add_metric(&self, metric_name: MetricName, measurable: Box<dyn Measurable>) -> Result<(), Error> {
         self.metrics.add_metric_measurable(metric_name, measurable)
     }
 
     /// Returns the sensor with the given name if it already exists (Java
     /// `getSensor(String)`).
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.SenderMetricsRegistry#getSensor")]
     pub(crate) fn get_sensor(&self, name: &str) -> Option<Arc<Sensor>> {
         self.metrics.get_sensor(name)
     }

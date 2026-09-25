@@ -17,7 +17,7 @@
 //! Corresponds to `org.apache.kafka.common.requests.OffsetCommitRequest`.
 //!
 //! Wraps the auto-generated [`OffsetCommitRequestData`] and exposes an
-//! [`OffsetCommitRequestBuilder`] for the consumer's commit path.
+//! [`Builder`] for the consumer's commit path.
 //!
 //! # Version selection
 //!
@@ -38,12 +38,13 @@ use crate::offset_commit_response_data::{OffsetCommitResponsePartition, OffsetCo
 
 use super::ConcreteResponse;
 use super::OffsetCommitResponse;
-use super::abstract_request::{ConcreteRequest, RequestBuilder};
+use super::abstract_request::{AbstractRequest, RequestBuilder};
 
 /// An `OffsetCommit` request.
 ///
 /// Corresponds to `org.apache.kafka.common.requests.OffsetCommitRequest`.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.OffsetCommitRequest")]
 pub struct OffsetCommitRequest {
     data: OffsetCommitRequestData,
     version: i16,
@@ -69,11 +70,13 @@ impl OffsetCommitRequest {
     /// Creates a new `OffsetCommitRequest` from data and version.
     ///
     /// Mirrors Java's constructor `OffsetCommitRequest(OffsetCommitRequestData, short)`.
+    #[doc(alias = "org.apache.kafka.common.requests.OffsetCommitRequest#OffsetCommitRequest")]
     pub fn new(data: OffsetCommitRequestData, version: i16) -> Self {
         Self { data, version }
     }
 
     /// Returns a reference to the underlying data.
+    #[doc(alias = "org.apache.kafka.common.requests.OffsetCommitRequest#data")]
     pub fn data(&self) -> &OffsetCommitRequestData {
         &self.data
     }
@@ -95,6 +98,7 @@ impl OffsetCommitRequest {
 
     /// Returns a map of `TopicPartition -> committedOffset`, mirroring
     /// Java's `offsets()` accessor.
+    #[doc(alias = "org.apache.kafka.common.requests.OffsetCommitRequest#offsets")]
     pub fn offsets(&self) -> HashMap<TopicPartition, i64> {
         let mut offsets = HashMap::new();
         for topic in &self.data.topics {
@@ -110,6 +114,7 @@ impl OffsetCommitRequest {
 
     /// Builds the canonical error response for this request, matching Java's
     /// `OffsetCommitRequest.getErrorResponse(int, Throwable)`.
+    #[doc(alias = "org.apache.kafka.common.requests.OffsetCommitRequest#getErrorResponse")]
     pub fn get_error_response(&self, throttle_time_ms: i32, error: &Errors) -> ConcreteResponse {
         let mut data = Self::error_response_data(&self.data, *error);
         data.set_throttle_time_ms(throttle_time_ms);
@@ -146,6 +151,7 @@ impl OffsetCommitRequest {
     /// # Errors
     ///
     /// Returns an error if parsing fails.
+    #[doc(alias = "org.apache.kafka.common.requests.OffsetCommitRequest#parse")]
     pub fn parse(readable: &mut dyn Readable, version: i16) -> io::Result<Self> {
         let data = OffsetCommitRequestData::read(readable, version)?;
         Ok(Self::new(data, version))
@@ -168,16 +174,18 @@ impl std::fmt::Display for OffsetCommitRequest {
 /// - [`Self::for_topic_names`] — cap the version at v9 so the request is
 ///   guaranteed to use topic names.
 #[derive(Debug, Clone)]
-pub struct OffsetCommitRequestBuilder {
+#[doc(alias = "org.apache.kafka.common.requests.OffsetCommitRequest$Builder")]
+pub struct Builder {
     data: OffsetCommitRequestData,
     oldest_allowed_version: i16,
     latest_allowed_version: i16,
 }
 
-impl OffsetCommitRequestBuilder {
+impl Builder {
     /// Build a request that can use either topic ids or topic names.
     ///
     /// Mirrors Java's `Builder.forTopicIdsOrNames(OffsetCommitRequestData)`.
+    #[doc(alias = "org.apache.kafka.common.requests.OffsetCommitRequest$Builder#forTopicIdsOrNames")]
     pub fn for_topic_ids_or_names(data: OffsetCommitRequestData) -> Self {
         Self {
             data,
@@ -189,6 +197,7 @@ impl OffsetCommitRequestBuilder {
     /// Build a request that uses topic names — capped at v9.
     ///
     /// Mirrors Java's `Builder.forTopicNames(OffsetCommitRequestData)`.
+    #[doc(alias = "org.apache.kafka.common.requests.OffsetCommitRequest$Builder#forTopicNames")]
     pub fn for_topic_names(data: OffsetCommitRequestData) -> Self {
         Self {
             data,
@@ -203,7 +212,7 @@ impl OffsetCommitRequestBuilder {
     }
 }
 
-impl RequestBuilder for OffsetCommitRequestBuilder {
+impl RequestBuilder for Builder {
     fn api_key(&self) -> &'static ApiKeys {
         &ApiKeys::OFFSET_COMMIT
     }
@@ -216,7 +225,7 @@ impl RequestBuilder for OffsetCommitRequestBuilder {
         self.latest_allowed_version
     }
 
-    fn build_version(&mut self, version: i16) -> io::Result<ConcreteRequest> {
+    fn build_version(&mut self, version: i16) -> io::Result<AbstractRequest> {
         if version < self.oldest_allowed_version || version > self.latest_allowed_version {
             return Err(io::Error::new(
                 io::ErrorKind::Unsupported,
@@ -254,7 +263,7 @@ impl RequestBuilder for OffsetCommitRequestBuilder {
                 }
             }
         }
-        Ok(ConcreteRequest::OffsetCommit(OffsetCommitRequest::new(
+        Ok(AbstractRequest::OffsetCommit(OffsetCommitRequest::new(
             self.data.clone(),
             version,
         )))
@@ -282,7 +291,7 @@ mod tests {
     fn for_topic_ids_or_names_uses_full_range() {
         let mut data = OffsetCommitRequestData::new();
         data.set_group_id("g".to_string());
-        let builder = OffsetCommitRequestBuilder::for_topic_ids_or_names(data);
+        let builder = Builder::for_topic_ids_or_names(data);
         assert_eq!(builder.oldest_allowed_version(), ApiKeys::OFFSET_COMMIT.oldest_version());
         assert_eq!(builder.latest_allowed_version(), ApiKeys::OFFSET_COMMIT.latest_version());
     }
@@ -292,7 +301,7 @@ mod tests {
     fn for_topic_names_caps_at_v9() {
         let mut data = OffsetCommitRequestData::new();
         data.set_group_id("g".to_string());
-        let builder = OffsetCommitRequestBuilder::for_topic_names(data);
+        let builder = Builder::for_topic_names(data);
         assert_eq!(builder.latest_allowed_version(), 9);
     }
 
@@ -314,7 +323,7 @@ mod tests {
     fn build_version_out_of_range_returns_err() {
         let mut data = OffsetCommitRequestData::new();
         data.set_group_id("g".to_string());
-        let mut builder = OffsetCommitRequestBuilder::for_topic_names(data);
+        let mut builder = Builder::for_topic_names(data);
         let result = builder.build_version(10);
         assert!(result.is_err());
     }
@@ -327,7 +336,7 @@ mod tests {
         let mut topic = OffsetCommitRequestTopic::new();
         topic.set_name("t".to_string()); // no topic_id set
         data.set_topics(vec![topic]);
-        let mut builder = OffsetCommitRequestBuilder::for_topic_ids_or_names(data);
+        let mut builder = Builder::for_topic_ids_or_names(data);
         let err = builder.build_version(10).unwrap_err();
         assert!(err.to_string().contains("topic ids"));
     }
@@ -341,7 +350,7 @@ mod tests {
         topic.set_topic_id(Uuid::new(1, 2));
         // name left empty
         data.set_topics(vec![topic]);
-        let mut builder = OffsetCommitRequestBuilder::for_topic_names(data);
+        let mut builder = Builder::for_topic_names(data);
         let err = builder.build_version(9).unwrap_err();
         assert!(err.to_string().contains("topic names"));
     }
@@ -352,7 +361,7 @@ mod tests {
         let mut data = OffsetCommitRequestData::new();
         data.set_group_id("g".to_string());
         data.set_group_instance_id(Some("instance-a".to_string()));
-        let mut builder = OffsetCommitRequestBuilder::for_topic_ids_or_names(data);
+        let mut builder = Builder::for_topic_ids_or_names(data);
         let err = builder.build_version(6).unwrap_err();
         assert!(err.to_string().contains("group.instance.id"));
     }

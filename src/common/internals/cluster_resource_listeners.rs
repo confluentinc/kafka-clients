@@ -32,12 +32,14 @@ use crate::common::{ClusterResource, ClusterResourceListener};
 /// directly since there is no runtime type introspection.
 ///
 /// [`add_listener`]: ClusterResourceListeners::add_listener
+#[doc(alias = "org.apache.kafka.common.internals.ClusterResourceListeners")]
 pub struct ClusterResourceListeners {
     listeners: Vec<Box<dyn ClusterResourceListener>>,
 }
 
 impl ClusterResourceListeners {
     /// Creates an empty `ClusterResourceListeners` collection.
+    #[doc(alias = "org.apache.kafka.common.internals.ClusterResourceListeners#ClusterResourceListeners")]
     pub fn new() -> Self {
         Self { listeners: Vec::new() }
     }
@@ -56,11 +58,13 @@ impl ClusterResourceListeners {
     /// In Java, `maybeAdd` checks if the candidate is a `ClusterResourceListener`
     /// using `instanceof`. In Rust, the caller already knows the type, so this is
     /// equivalent to `add_listener`.
+    #[doc(alias = "org.apache.kafka.common.internals.ClusterResourceListeners#maybeAdd")]
     pub fn maybe_add(&mut self, listener: Box<dyn ClusterResourceListener>) {
         self.add_listener(listener);
     }
 
     /// Sends the updated cluster metadata to all registered listeners.
+    #[doc(alias = "org.apache.kafka.common.internals.ClusterResourceListeners#onUpdate")]
     pub fn on_update(&self, cluster_resource: &ClusterResource) {
         for listener in &self.listeners {
             listener.on_update(cluster_resource);

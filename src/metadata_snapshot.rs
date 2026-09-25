@@ -38,6 +38,7 @@ use crate::common::requests::{MetadataResponse, PartitionMetadata};
 /// Prefer to extend `MetadataSnapshot`'s API for internal client usage vs. the public
 /// [`Cluster`].
 #[derive(Clone, Debug)]
+#[doc(alias = "org.apache.kafka.clients.MetadataSnapshot")]
 pub struct MetadataSnapshot {
     cluster_id: Option<String>,
     nodes: HashMap<i32, Node>,
@@ -53,7 +54,8 @@ pub struct MetadataSnapshot {
 
 impl MetadataSnapshot {
     /// Creates a new `MetadataSnapshot`.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
+    #[doc(alias = "org.apache.kafka.clients.MetadataSnapshot#MetadataSnapshot")]
     pub fn new(
         cluster_id: Option<String>,
         nodes: HashMap<i32, Node>,
@@ -80,7 +82,8 @@ impl MetadataSnapshot {
     /// Creates a new `MetadataSnapshot` with an optional pre-built cluster instance.
     ///
     /// Visible for testing.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
+    #[doc(alias = "org.apache.kafka.clients.MetadataSnapshot#MetadataSnapshot")]
     pub fn with_cluster(
         cluster_id: Option<String>,
         nodes: HashMap<i32, Node>,
@@ -127,6 +130,7 @@ impl MetadataSnapshot {
     }
 
     /// Returns the cached cluster instance.
+    #[doc(alias = "org.apache.kafka.clients.MetadataSnapshot#cluster")]
     pub fn cluster(&self) -> &Cluster {
         &self.cluster_instance
     }
@@ -137,21 +141,25 @@ impl MetadataSnapshot {
     }
 
     /// Returns the partition metadata for the given topic partition.
+    #[doc(alias = "org.apache.kafka.clients.MetadataSnapshot#partitionMetadata")]
     pub fn partition_metadata(&self, topic_partition: &TopicPartition) -> Option<&PartitionMetadata> {
         self.metadata_by_partition.get(topic_partition)
     }
 
     /// Returns the topic IDs mapping (topic name -> topic ID).
+    #[doc(alias = "org.apache.kafka.clients.MetadataSnapshot#topicIds")]
     pub fn topic_ids(&self) -> &HashMap<String, Uuid> {
         &self.topic_ids
     }
 
     /// Returns the topic names mapping (topic ID -> topic name).
+    #[doc(alias = "org.apache.kafka.clients.MetadataSnapshot#topicNames")]
     pub fn topic_names(&self) -> &HashMap<Uuid, String> {
         &self.topic_names
     }
 
     /// Returns the node with the given ID, if present.
+    #[doc(alias = "org.apache.kafka.clients.MetadataSnapshot#nodeById")]
     pub fn node_by_id(&self, id: i32) -> Option<&Node> {
         self.nodes.get(&id)
     }
@@ -159,11 +167,13 @@ impl MetadataSnapshot {
     /// Gets the leader epoch for the given partition.
     ///
     /// Returns `None` if the partition is not found or the leader epoch is not set.
+    #[doc(alias = "org.apache.kafka.clients.MetadataSnapshot#leaderEpochFor")]
     pub fn leader_epoch_for(&self, tp: &TopicPartition) -> Option<i32> {
         self.metadata_by_partition.get(tp).and_then(|pm| pm.leader_epoch)
     }
 
     /// Returns the [`ClusterResource`] for this snapshot.
+    #[doc(alias = "org.apache.kafka.clients.MetadataSnapshot#clusterResource")]
     pub fn cluster_resource(&self) -> ClusterResource {
         ClusterResource::new(self.cluster_id.clone())
     }
@@ -174,7 +184,8 @@ impl MetadataSnapshot {
     /// metadata will be overridden. The `retain_topic` predicate determines whether
     /// a pre-existing topic's metadata should be retained. It receives the topic name
     /// and whether the topic is internal.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
+    #[doc(alias = "org.apache.kafka.clients.MetadataSnapshot#mergeWith")]
     pub fn merge_with<F>(
         &self,
         new_cluster_id: Option<String>,
@@ -240,6 +251,7 @@ impl MetadataSnapshot {
     }
 
     /// Creates a bootstrap metadata snapshot from a list of (hostname, address) pairs.
+    #[doc(alias = "org.apache.kafka.clients.MetadataSnapshot#bootstrap")]
     pub fn bootstrap(addresses: &[(String, SocketAddr)]) -> Self {
         let mut nodes = HashMap::new();
         let mut node_id: i32 = -1;
@@ -261,6 +273,7 @@ impl MetadataSnapshot {
     }
 
     /// Creates an empty metadata snapshot.
+    #[doc(alias = "org.apache.kafka.clients.MetadataSnapshot#empty")]
     pub fn empty() -> Self {
         Self::with_cluster(
             None,
@@ -277,6 +290,7 @@ impl MetadataSnapshot {
 
     /// Copies `base_set` and adds all non-existent elements in `fill_set` for which
     /// the predicate returns `true`.
+    #[doc(alias = "org.apache.kafka.clients.MetadataSnapshot#fillSet")]
     fn fill_set<F>(base_set: &HashSet<String>, fill_set: &HashSet<String>, predicate: &F) -> HashSet<String>
     where
         F: Fn(&str) -> bool,
@@ -290,7 +304,8 @@ impl MetadataSnapshot {
         result
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
+    #[doc(alias = "org.apache.kafka.clients.MetadataSnapshot#computeClusterView")]
     fn compute_cluster_view(
         cluster_id: &Option<String>,
         nodes: &HashMap<i32, Node>,
@@ -335,10 +350,11 @@ impl fmt::Display for MetadataSnapshot {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::Errors;
+    use crate::common::protocol::Errors;
 
     /// Translated from `MetadataSnapshotTest.testMissingLeaderEndpoint`.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.MetadataSnapshotTest#testMissingLeaderEndpoint")]
     fn test_missing_leader_endpoint() {
         let topic_partition = TopicPartition::new("topic".to_string(), 0);
 
@@ -462,6 +478,7 @@ mod tests {
 
     /// Translated from `MetadataSnapshotTest.testTopicNamesCacheBuiltFromTopicIds`.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.MetadataSnapshotTest#testTopicNamesCacheBuiltFromTopicIds")]
     fn test_topic_names_cache_built_from_topic_ids() {
         let mut topic_ids = HashMap::new();
         topic_ids.insert("topic1".to_string(), Uuid::random_uuid());
@@ -487,6 +504,7 @@ mod tests {
 
     /// Translated from `MetadataSnapshotTest.testEmptyTopicNamesCacheBuiltFromTopicIds`.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.MetadataSnapshotTest#testEmptyTopicNamesCacheBuiltFromTopicIds")]
     fn test_empty_topic_names_cache_built_from_topic_ids() {
         let mut nodes = HashMap::new();
         nodes.insert(6, Node::new(6, "localhost".to_string(), 2077));
@@ -507,6 +525,7 @@ mod tests {
 
     /// Translated from `MetadataSnapshotTest.testLeaderEpochFor`.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.MetadataSnapshotTest#testLeaderEpochFor")]
     fn test_leader_epoch_for() {
         // Partition 0 with leader epoch of 10
         let tp1 = TopicPartition::new("topic".to_string(), 0);

@@ -27,11 +27,13 @@ use crate::common::metrics::KafkaMetric;
 /// keeps the registration seam (`init`/`metric_change`/`metric_removal`/`close`)
 /// so non-JMX reporters can be plugged in. All methods have a no-op default,
 /// so a do-nothing reporter only needs an empty `impl`.
+#[doc(alias = "org.apache.kafka.common.metrics.MetricsReporter")]
 pub trait MetricsReporter: Send + Sync {
     /// This is called when the reporter is first registered to initially register
     /// all existing metrics.
     ///
     /// * `metrics` - All currently existing metrics
+    #[doc(alias = "org.apache.kafka.common.metrics.MetricsReporter#init")]
     fn init(&self, metrics: &[Arc<KafkaMetric>]) {
         let _ = metrics;
     }
@@ -39,6 +41,7 @@ pub trait MetricsReporter: Send + Sync {
     /// This is called whenever a metric is updated or added.
     ///
     /// * `metric` - The metric that has been added or changed
+    #[doc(alias = "org.apache.kafka.common.metrics.MetricsReporter#metricChange")]
     fn metric_change(&self, metric: &Arc<KafkaMetric>) {
         let _ = metric;
     }
@@ -46,10 +49,12 @@ pub trait MetricsReporter: Send + Sync {
     /// This is called whenever a metric is removed.
     ///
     /// * `metric` - The metric that has been removed
+    #[doc(alias = "org.apache.kafka.common.metrics.MetricsReporter#metricRemoval")]
     fn metric_removal(&self, metric: &Arc<KafkaMetric>) {
         let _ = metric;
     }
 
     /// Called when the metrics repository is closed.
+    #[doc(alias = "org.apache.kafka.common.metrics.MetricsReporter#close")]
     fn close(&self) {}
 }

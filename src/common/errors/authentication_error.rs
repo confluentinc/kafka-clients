@@ -14,8 +14,8 @@
 
 //! Translated from `org.apache.kafka.common.errors.AuthenticationException`.
 
-use crate::common::Errors;
 use crate::common::error::kafka_error_class;
+use crate::common::protocol::Errors;
 
 kafka_error_class! {
     /// Authentication failed.
@@ -40,6 +40,7 @@ kafka_error_class! {
     /// class itself has no entry of its own. `InvalidConfigurationError` remains
     /// the code's owner: `Errors::error(InvalidConfig)` names that class, not this
     /// one.
+    #[doc(alias = "org.apache.kafka.common.errors.AuthenticationException")]
     AuthenticationError,
     code: Errors::InvalidConfig,
     extends: [

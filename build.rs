@@ -34,6 +34,10 @@ fn main() {
     println!("cargo:rerun-if-changed=generator/messages/");
     println!("cargo:rerun-if-changed=generator/test-messages/");
     println!("cargo:rerun-if-changed=src/bin/message_generator.rs");
+    // The emitted code depends on the generator's own source, not just on the
+    // message specs. Without this, editing the generator leaves the previously
+    // generated files in OUT_DIR untouched and the build silently stale.
+    println!("cargo:rerun-if-changed=generator/src/");
 
     let out_dir = env::var("OUT_DIR").unwrap();
     let generated_dir = Path::new(&out_dir).join("generated");

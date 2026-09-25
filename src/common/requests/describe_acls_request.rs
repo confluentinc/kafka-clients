@@ -24,12 +24,13 @@ use crate::common::acl::{AccessControlEntryFilter, AclBindingFilter, AclOperatio
 use crate::common::protocol::{ApiKeys, Errors, Readable};
 use crate::common::resource::{PatternType, ResourcePatternFilter, ResourceType};
 
-use super::{ConcreteRequest, ConcreteResponse, DescribeAclsResponse, RequestBuilder};
+use super::{AbstractRequest, ConcreteResponse, DescribeAclsResponse, RequestBuilder};
 
 /// A DescribeAcls request.
 ///
 /// Corresponds to `org.apache.kafka.common.requests.DescribeAclsRequest`.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.DescribeAclsRequest")]
 pub struct DescribeAclsRequest {
     data: DescribeAclsRequestData,
     version: i16,
@@ -37,11 +38,13 @@ pub struct DescribeAclsRequest {
 
 impl DescribeAclsRequest {
     /// Creates a new `DescribeAclsRequest` from data and version.
+    #[doc(alias = "org.apache.kafka.common.requests.DescribeAclsRequest#DescribeAclsRequest")]
     pub fn new(data: DescribeAclsRequestData, version: i16) -> Self {
         Self { data, version }
     }
 
     /// Returns a reference to the underlying data.
+    #[doc(alias = "org.apache.kafka.common.requests.DescribeAclsRequest#data")]
     pub fn data(&self) -> &DescribeAclsRequestData {
         &self.data
     }
@@ -64,6 +67,7 @@ impl DescribeAclsRequest {
     /// Reconstructs the [`AclBindingFilter`] from the wire data.
     ///
     /// Mirrors `DescribeAclsRequest.filter()`.
+    #[doc(alias = "org.apache.kafka.common.requests.DescribeAclsRequest#filter")]
     pub fn filter(&self) -> AclBindingFilter {
         let rpf = ResourcePatternFilter::new(
             ResourceType::from_code(self.data.resource_type_filter),
@@ -82,6 +86,7 @@ impl DescribeAclsRequest {
     /// Creates an error response for this request.
     ///
     /// Mirrors `DescribeAclsRequest.getErrorResponse`.
+    #[doc(alias = "org.apache.kafka.common.requests.DescribeAclsRequest#getErrorResponse")]
     pub fn get_error_response(&self, throttle_time_ms: i32, error: &Errors) -> ConcreteResponse {
         let mut response = DescribeAclsResponseData::new();
         response.set_throttle_time_ms(throttle_time_ms);
@@ -96,6 +101,7 @@ impl DescribeAclsRequest {
     /// # Errors
     ///
     /// Returns an error if parsing fails.
+    #[doc(alias = "org.apache.kafka.common.requests.DescribeAclsRequest#parse")]
     pub fn parse(readable: &mut dyn Readable, version: i16) -> io::Result<Self> {
         let data = DescribeAclsRequestData::read(readable, version)?;
         Ok(Self::new(data, version))
@@ -112,15 +118,17 @@ impl std::fmt::Display for DescribeAclsRequest {
 ///
 /// Corresponds to `DescribeAclsRequest.Builder` in Java.
 #[derive(Debug, Clone)]
-pub struct DescribeAclsRequestBuilder {
+#[doc(alias = "org.apache.kafka.common.requests.DescribeAclsRequest$Builder")]
+pub struct Builder {
     data: DescribeAclsRequestData,
     oldest_allowed_version: i16,
     latest_allowed_version: i16,
 }
 
-impl DescribeAclsRequestBuilder {
+impl Builder {
     /// Creates a builder from an [`AclBindingFilter`], mirroring
     /// `DescribeAclsRequest.Builder(AclBindingFilter)`.
+    #[doc(alias = "org.apache.kafka.common.requests.DescribeAclsRequest$Builder#Builder")]
     pub fn new(filter: &AclBindingFilter) -> Self {
         let pattern_filter = filter.pattern_filter();
         let entry_filter = filter.entry_filter();
@@ -140,7 +148,7 @@ impl DescribeAclsRequestBuilder {
     }
 }
 
-impl RequestBuilder for DescribeAclsRequestBuilder {
+impl RequestBuilder for Builder {
     fn api_key(&self) -> &'static ApiKeys {
         &ApiKeys::DESCRIBE_ACLS
     }
@@ -153,7 +161,7 @@ impl RequestBuilder for DescribeAclsRequestBuilder {
         self.latest_allowed_version
     }
 
-    fn build_version(&mut self, version: i16) -> io::Result<ConcreteRequest> {
+    fn build_version(&mut self, version: i16) -> io::Result<AbstractRequest> {
         // Mirrors DescribeAclsRequest.normalizeAndValidate. Version 0 was
         // removed in Kafka 4.0 (valid versions 1-3), so the v0 pattern-type
         // normalization is unreachable; the UNKNOWN-elements guard remains.
@@ -167,7 +175,7 @@ impl RequestBuilder for DescribeAclsRequestBuilder {
                 format!("DescribeAclsRequest contains UNKNOWN elements: {:?}", self.data),
             ));
         }
-        Ok(ConcreteRequest::DescribeAcls(DescribeAclsRequest::new(
+        Ok(AbstractRequest::DescribeAcls(DescribeAclsRequest::new(
             self.data.clone(),
             version,
         )))
@@ -192,9 +200,9 @@ mod tests {
 
     #[test]
     fn builder_maps_filter_fields() {
-        let mut builder = DescribeAclsRequestBuilder::new(&sample_filter());
+        let mut builder = Builder::new(&sample_filter());
         let request = builder.build().unwrap();
-        let ConcreteRequest::DescribeAcls(r) = request else {
+        let AbstractRequest::DescribeAcls(r) = request else {
             panic!("expected DescribeAcls request");
         };
         assert_eq!(r.data().resource_type_filter, ResourceType::Topic.code());
@@ -208,8 +216,8 @@ mod tests {
 
     #[test]
     fn filter_round_trips_through_data() {
-        let mut builder = DescribeAclsRequestBuilder::new(&sample_filter());
-        let ConcreteRequest::DescribeAcls(r) = builder.build().unwrap() else {
+        let mut builder = Builder::new(&sample_filter());
+        let AbstractRequest::DescribeAcls(r) = builder.build().unwrap() else {
             panic!("expected DescribeAcls request");
         };
         assert_eq!(r.filter(), sample_filter());
@@ -217,14 +225,14 @@ mod tests {
 
     #[test]
     fn serialize_parse_round_trip() {
-        let mut builder = DescribeAclsRequestBuilder::new(&sample_filter());
+        let mut builder = Builder::new(&sample_filter());
         let version = ApiKeys::DESCRIBE_ACLS.latest_version();
-        let ConcreteRequest::DescribeAcls(r) = builder.build().unwrap() else {
+        let AbstractRequest::DescribeAcls(r) = builder.build().unwrap() else {
             panic!("expected DescribeAcls request");
         };
-        let mut request = ConcreteRequest::DescribeAcls(r);
+        let mut request = AbstractRequest::DescribeAcls(r);
         let bytes = request.serialize().unwrap();
-        let mut readable = crate::common::ByteBufferAccessor::new(bytes.into_buffer());
+        let mut readable = crate::common::protocol::ByteBufferAccessor::new(bytes.into_buffer());
         let parsed = DescribeAclsRequest::parse(&mut readable, version).unwrap();
         assert_eq!(parsed.filter(), sample_filter());
     }
@@ -235,7 +243,7 @@ mod tests {
             ResourcePatternFilter::new(ResourceType::Unknown, Some("t".to_string()), PatternType::Literal),
             AccessControlEntryFilter::new(None, None, AclOperation::Read, AclPermissionType::Allow),
         );
-        let mut builder = DescribeAclsRequestBuilder::new(&filter);
+        let mut builder = Builder::new(&filter);
         assert!(builder.build().is_err());
     }
 
@@ -252,7 +260,7 @@ mod tests {
                 AclPermissionType::Allow,
             ),
         );
-        let mut builder = DescribeAclsRequestBuilder::new(&filter);
+        let mut builder = Builder::new(&filter);
         let mut request = builder.build_version(3).unwrap();
         let bytes = request.serialize().unwrap().into_buffer();
         // int8 resource_type=2 (TOPIC)

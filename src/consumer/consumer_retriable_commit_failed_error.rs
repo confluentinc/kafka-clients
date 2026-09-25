@@ -30,7 +30,7 @@ use crate::common::error::{ErrorCode, ErrorHierarchy, ErrorMessage, ErrorSource}
 ///   `ApiException` -> `KafkaException`
 ///
 /// Being its own class is what makes it retriable. The previous mapping routed
-/// it through [`Errors::RequestTimedOut`](crate::common::Errors::RequestTimedOut)
+/// it through [`Errors::RequestTimedOut`](crate::common::protocol::Errors::RequestTimedOut)
 /// solely to borrow that code's retriability, which also made it
 /// indistinguishable from a real `TimeoutException`.
 ///
@@ -38,6 +38,7 @@ use crate::common::error::{ErrorCode, ErrorHierarchy, ErrorMessage, ErrorSource}
 /// [`ConsumerCommitFailedError`](super::ConsumerCommitFailedError), which extends
 /// `KafkaException` directly and so is neither retriable nor an `ApiException`.
 #[derive(Clone, Debug)]
+#[doc(alias = "org.apache.kafka.clients.consumer.RetriableCommitFailedException")]
 pub struct ConsumerRetriableCommitFailedError {
     message: String,
     /// The underlying cause — Java's `RetriableCommitFailedException(Throwable)`.
@@ -57,11 +58,13 @@ impl ConsumerRetriableCommitFailedError {
 
     /// Create the error with the given message —
     /// `RetriableCommitFailedException(String)`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.RetriableCommitFailedException#RetriableCommitFailedException")]
     pub fn new(message: impl Into<String>) -> Self {
         Self { message: message.into(), source: None }
     }
 
     /// Create the error with Java's default message.
+    #[doc(alias = "org.apache.kafka.clients.consumer.RetriableCommitFailedException#RetriableCommitFailedException")]
     pub fn with_default_message() -> Self {
         Self::new(ConsumerRetriableCommitFailedError::CONSUMER_RETRIABLE_COMMIT_FAILED_DEFAULT_MESSAGE)
     }
@@ -70,6 +73,7 @@ impl ConsumerRetriableCommitFailedError {
     ///
     /// The cause is retained and readable through [`Self::cause`] /
     /// [`Error::cause`], matching Java's `getCause()`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.RetriableCommitFailedException#RetriableCommitFailedException")]
     pub fn with_source(source: Error) -> Self {
         Self {
             message: ConsumerRetriableCommitFailedError::CONSUMER_RETRIABLE_COMMIT_FAILED_DEFAULT_MESSAGE.to_string(),

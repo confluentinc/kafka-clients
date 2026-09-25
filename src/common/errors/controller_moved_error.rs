@@ -14,8 +14,8 @@
 
 //! Translated from `org.apache.kafka.common.errors.ControllerMovedException`.
 
-use crate::common::Errors;
 use crate::common::error::kafka_error_class;
+use crate::common::protocol::Errors;
 
 kafka_error_class! {
     /// The controller moved to another broker.
@@ -24,6 +24,7 @@ kafka_error_class! {
     ///
     /// Java `extends` chain:
     ///    `ControllerMovedException` -> `ApiException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.ControllerMovedException")]
     ControllerMovedError,
     code: Errors::StaleControllerEpoch,
     extends: [

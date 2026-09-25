@@ -14,8 +14,8 @@
 
 //! Translated from `org.apache.kafka.common.errors.FeatureUpdateFailedException`.
 
-use crate::common::Errors;
 use crate::common::error::kafka_error_class;
+use crate::common::protocol::Errors;
 
 kafka_error_class! {
     /// Unable to update finalized features due to an unexpected server error.
@@ -24,6 +24,7 @@ kafka_error_class! {
     ///
     /// Java `extends` chain:
     ///    `FeatureUpdateFailedException` -> `ApiException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.FeatureUpdateFailedException")]
     FeatureUpdateFailedError,
     code: Errors::FeatureUpdateFailed,
     extends: [

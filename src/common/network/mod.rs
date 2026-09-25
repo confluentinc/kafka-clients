@@ -16,6 +16,16 @@
 //!
 //! This module provides the low-level TCP I/O and Kafka protocol framing.
 //! It sits between the wire protocol and the higher-level channel abstraction.
+//!
+//! # Dead-code lint
+//!
+//! Java marks this package "not a supported API", so it is crate-private. It
+//! is translated in full (DoD #2), but the client uses only part of it; the
+//! rest has no caller yet, or only the translated tests. Nothing outside the
+//! crate can reach it, so the module allows dead code rather than dropping
+//! Java methods.
+
+#![expect(dead_code, unused_imports)]
 
 mod authentication_error;
 mod authenticator;
@@ -37,7 +47,7 @@ mod plaintext_channel_builder;
 mod plaintext_transport_layer;
 mod receive;
 mod sasl_channel_builder;
-mod selectable;
+pub mod selectable;
 mod selector;
 mod send;
 mod ssl_channel_builder;
@@ -71,7 +81,7 @@ pub use receive::Receive;
 pub use sasl_channel_builder::SaslChannelBuilder;
 pub use selectable::Selectable;
 pub use selector::Selector;
-pub use send::KafkaSend;
+pub use send::Send;
 pub use ssl_channel_builder::SslChannelBuilder;
 pub use ssl_transport_layer::SslTransportLayer;
 pub use transport_layer::{InterestOps, TransportLayer};

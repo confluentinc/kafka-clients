@@ -14,8 +14,8 @@
 
 //! Translated from `org.apache.kafka.common.errors.InconsistentTopicIdException`.
 
-use crate::common::Errors;
 use crate::common::error::kafka_error_class;
+use crate::common::protocol::Errors;
 
 kafka_error_class! {
     /// The log's topic ID did not match the topic ID in the request.
@@ -26,6 +26,7 @@ kafka_error_class! {
     ///    `InconsistentTopicIdException` -> `InvalidMetadataException` ->
     ///   `RefreshRetriableException` -> `RetriableException` -> `ApiException` ->
     ///   `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.InconsistentTopicIdException")]
     InconsistentTopicIdError,
     code: Errors::InconsistentTopicId,
     extends: [

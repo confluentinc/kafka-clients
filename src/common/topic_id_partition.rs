@@ -28,6 +28,7 @@ use crate::common::Uuid;
 ///
 /// Corresponds to Java's `org.apache.kafka.common.TopicIdPartition`.
 #[derive(Clone, Debug)]
+#[doc(alias = "org.apache.kafka.common.TopicIdPartition")]
 pub struct TopicIdPartition {
     topic_id: Uuid,
     topic_partition: TopicPartition,
@@ -37,6 +38,7 @@ impl TopicIdPartition {
     /// Creates an instance with the provided topic ID and topic partition.
     ///
     /// Translates Java's `TopicIdPartition(Uuid topicId, TopicPartition topicPartition)`.
+    #[doc(alias = "org.apache.kafka.common.TopicIdPartition#TopicIdPartition")]
     pub fn new(topic_id: Uuid, topic_partition: TopicPartition) -> Self {
         Self { topic_id, topic_partition }
     }
@@ -44,26 +46,31 @@ impl TopicIdPartition {
     /// Creates an instance from a topic ID, partition number, and topic name.
     ///
     /// Translates Java's `TopicIdPartition(Uuid topicId, int partition, String topic)`.
+    #[doc(alias = "org.apache.kafka.common.TopicIdPartition#TopicIdPartition")]
     pub fn with_partition_topic(topic_id: Uuid, partition: i32, topic: impl Into<String>) -> Self {
         Self { topic_id, topic_partition: TopicPartition::new(topic.into(), partition) }
     }
 
     /// Returns the universally unique id representing this topic partition.
+    #[doc(alias = "org.apache.kafka.common.TopicIdPartition#topicId")]
     pub fn topic_id(&self) -> Uuid {
         self.topic_id
     }
 
     /// Returns the topic name (may be empty if unknown).
+    #[doc(alias = "org.apache.kafka.common.TopicIdPartition#topic")]
     pub fn topic(&self) -> &str {
         self.topic_partition.topic()
     }
 
     /// Returns the partition number.
+    #[doc(alias = "org.apache.kafka.common.TopicIdPartition#partition")]
     pub fn partition(&self) -> i32 {
         self.topic_partition.partition()
     }
 
     /// Returns the underlying topic partition.
+    #[doc(alias = "org.apache.kafka.common.TopicIdPartition#topicPartition")]
     pub fn topic_partition(&self) -> &TopicPartition {
         &self.topic_partition
     }

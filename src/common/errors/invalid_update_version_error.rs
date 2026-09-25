@@ -14,8 +14,8 @@
 
 //! Translated from `org.apache.kafka.common.errors.InvalidUpdateVersionException`.
 
-use crate::common::Errors;
 use crate::common::error::kafka_error_class;
+use crate::common::protocol::Errors;
 
 kafka_error_class! {
     /// The given update version was invalid.
@@ -24,6 +24,7 @@ kafka_error_class! {
     ///
     /// Java `extends` chain:
     ///    `InvalidUpdateVersionException` -> `ApiException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.InvalidUpdateVersionException")]
     InvalidUpdateVersionError,
     code: Errors::InvalidUpdateVersion,
     extends: [

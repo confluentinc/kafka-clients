@@ -24,12 +24,14 @@ use crate::producer::internals::SenderMetricsRegistry;
 
 /// Aggregates the producer's metric-name registries. Currently just wraps the
 /// [`SenderMetricsRegistry`], mirroring Java's `ProducerMetrics`.
+#[doc(alias = "org.apache.kafka.clients.producer.internals.ProducerMetrics")]
 pub(crate) struct ProducerMetrics {
     pub(crate) sender_metrics: SenderMetricsRegistry,
 }
 
 impl ProducerMetrics {
     /// Builds the aggregate registry. Translates Java's `ProducerMetrics(Metrics)`.
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.ProducerMetrics#ProducerMetrics")]
     pub(crate) fn new(metrics: Arc<Metrics>) -> Self {
         Self { sender_metrics: SenderMetricsRegistry::new(metrics) }
     }
@@ -38,6 +40,7 @@ impl ProducerMetrics {
     /// Java's private `getAllTemplates()` (used by its `main` to emit the docs
     /// table); exposed here for parity/testing.
     #[cfg(test)]
+    #[doc(alias = "org.apache.kafka.clients.producer.internals.ProducerMetrics#getAllTemplates")]
     pub(crate) fn all_templates(&self) -> Vec<MetricNameTemplate> {
         self.sender_metrics.all_templates().to_vec()
     }

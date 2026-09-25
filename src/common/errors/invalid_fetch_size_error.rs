@@ -14,8 +14,8 @@
 
 //! Translated from `org.apache.kafka.common.errors.InvalidFetchSizeException`.
 
-use crate::common::Errors;
 use crate::common::error::kafka_error_class;
+use crate::common::protocol::Errors;
 
 kafka_error_class! {
     /// The requested fetch size is invalid.
@@ -24,6 +24,7 @@ kafka_error_class! {
     ///
     /// Java `extends` chain:
     ///    `InvalidFetchSizeException` -> `ApiException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.InvalidFetchSizeException")]
     InvalidFetchSizeError,
     code: Errors::InvalidFetchSize,
     extends: [

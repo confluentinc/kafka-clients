@@ -27,6 +27,7 @@ use std::hash::{Hash, Hasher};
 ///
 /// Corresponds to `org.apache.kafka.common.security.auth.KafkaPrincipal`.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.security.auth.KafkaPrincipal")]
 pub struct KafkaPrincipal {
     principal_type: String,
     name: String,
@@ -40,6 +41,7 @@ impl KafkaPrincipal {
     /// Creates a new principal from a type and name (not token-authenticated).
     ///
     /// Mirrors `new KafkaPrincipal(principalType, name)`.
+    #[doc(alias = "org.apache.kafka.common.security.auth.KafkaPrincipal#KafkaPrincipal")]
     pub fn new(principal_type: impl Into<String>, name: impl Into<String>) -> Self {
         Self::with_token_authenticated(principal_type, name, false)
     }
@@ -47,6 +49,7 @@ impl KafkaPrincipal {
     /// Creates a new principal from a type, name, and token-authenticated flag.
     ///
     /// Mirrors `new KafkaPrincipal(principalType, name, tokenAuthenticated)`.
+    #[doc(alias = "org.apache.kafka.common.security.auth.KafkaPrincipal#KafkaPrincipal")]
     pub fn with_token_authenticated(
         principal_type: impl Into<String>,
         name: impl Into<String>,
@@ -66,6 +69,7 @@ impl KafkaPrincipal {
     /// Returns the principal name.
     ///
     /// Mirrors `KafkaPrincipal.getName`.
+    #[doc(alias = "org.apache.kafka.common.security.auth.KafkaPrincipal#getName")]
     pub fn name(&self) -> &str {
         &self.name
     }
@@ -73,6 +77,7 @@ impl KafkaPrincipal {
     /// Returns the principal type.
     ///
     /// Mirrors `KafkaPrincipal.getPrincipalType`.
+    #[doc(alias = "org.apache.kafka.common.security.auth.KafkaPrincipal#getPrincipalType")]
     pub fn principal_type(&self) -> &str {
         &self.principal_type
     }
@@ -87,6 +92,7 @@ impl KafkaPrincipal {
     /// Whether the principal was authenticated with a delegation token.
     ///
     /// Mirrors `KafkaPrincipal.tokenAuthenticated()`.
+    #[doc(alias = "org.apache.kafka.common.security.auth.KafkaPrincipal#tokenAuthenticated")]
     pub fn token_authenticated(&self) -> bool {
         self.token_authenticated
     }

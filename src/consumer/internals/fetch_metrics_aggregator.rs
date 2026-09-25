@@ -31,6 +31,7 @@ use crate::consumer::internals::FetchMetricsManager;
 /// [`FetchMetricsManager`] exactly once (Java's contract). The interior state is
 /// behind a `Mutex` because the `CompletedFetch`es of one response may be
 /// drained on the poll task while the manager is owned by the bg task.
+#[doc(alias = "org.apache.kafka.clients.consumer.internals.FetchMetricsAggregator")]
 pub(crate) struct FetchMetricsAggregator {
     metrics_manager: Arc<FetchMetricsManager>,
     inner: Mutex<Inner>,
@@ -43,12 +44,14 @@ struct Inner {
 }
 
 #[derive(Default)]
+#[doc(alias = "org.apache.kafka.clients.consumer.internals.FetchMetricsAggregator$FetchMetrics")]
 struct FetchMetrics {
     bytes: i32,
     records: i32,
 }
 
 impl FetchMetrics {
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.FetchMetricsAggregator$FetchMetrics#increment")]
     fn increment(&mut self, bytes: i32, records: i32) {
         self.bytes += bytes;
         self.records += records;
@@ -58,6 +61,7 @@ impl FetchMetrics {
 impl FetchMetricsAggregator {
     /// Creates an aggregator tracking the given partitions for one fetch
     /// response.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.FetchMetricsAggregator#FetchMetricsAggregator")]
     pub(crate) fn new(metrics_manager: Arc<FetchMetricsManager>, partitions: HashSet<TopicPartition>) -> Self {
         Self {
             metrics_manager,
@@ -117,7 +121,7 @@ impl FetchMetricsAggregator {
 mod tests {
     use super::*;
     use crate::common::Metric;
-    use crate::common::metrics::MetricValue;
+    use crate::common::MetricValue;
 
     /// The aggregator records the fetch-level bytes/records exactly once, after
     /// every partition of the response has reported via `record`.

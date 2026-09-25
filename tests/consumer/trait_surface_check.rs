@@ -28,7 +28,6 @@
 
 use confluent_kafka::consumer::Consumer;
 
-#[allow(dead_code)]
 fn _assert_object_safe<K, V>(_: Box<dyn Consumer<K, V>>)
 where
     K: Send + 'static,
@@ -39,7 +38,6 @@ where
     // without defaults, etc.).
 }
 
-#[allow(dead_code)]
 fn _assert_send<K, V>(_: Box<dyn Consumer<K, V>>)
 where
     K: Send + 'static,

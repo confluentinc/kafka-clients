@@ -17,8 +17,6 @@
 //! Translated from
 //! `org.apache.kafka.clients.consumer.internals.FetchUtils`.
 
-#![allow(dead_code)]
-
 use std::sync::{Arc, Mutex};
 
 use crate::common::TopicPartition;
@@ -28,6 +26,7 @@ use crate::consumer::internals::SubscriptionState;
 /// Translates the Java static-utility class `org.apache.kafka.clients.consumer.internals.FetchUtils`,
 /// which has no instance state, so it becomes a unit struct hosting its
 /// statics as associated items.
+#[doc(alias = "org.apache.kafka.clients.consumer.internals.FetchUtils")]
 pub(crate) struct FetchUtils;
 
 impl FetchUtils {
@@ -45,6 +44,7 @@ impl FetchUtils {
     ///
     /// Translates `FetchUtils.requestMetadataUpdate(Metadata, SubscriptionState,
     /// TopicPartition)`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.FetchUtils#requestMetadataUpdate")]
     pub(crate) fn request_metadata_update(
         metadata: &ConsumerMetadata,
         subscriptions: &Arc<Mutex<SubscriptionState>>,
@@ -60,7 +60,7 @@ impl FetchUtils {
 mod tests {
     use super::*;
     use crate::common::internals::ClusterResourceListeners;
-    use crate::consumer::AutoOffsetResetStrategy;
+    use crate::consumer::internals::AutoOffsetResetStrategy;
 
     fn tp(topic: &str, partition: i32) -> TopicPartition {
         TopicPartition::new(topic.to_string(), partition)

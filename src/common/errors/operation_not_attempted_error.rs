@@ -14,8 +14,8 @@
 
 //! Translated from `org.apache.kafka.common.errors.OperationNotAttemptedException`.
 
-use crate::common::Errors;
 use crate::common::error::kafka_error_class;
+use crate::common::protocol::Errors;
 
 kafka_error_class! {
     /// The broker did not attempt to execute this operation. This may happen for
@@ -26,6 +26,7 @@ kafka_error_class! {
     ///
     /// Java `extends` chain:
     ///    `OperationNotAttemptedException` -> `ApiException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.OperationNotAttemptedException")]
     OperationNotAttemptedError,
     code: Errors::OperationNotAttempted,
     extends: [

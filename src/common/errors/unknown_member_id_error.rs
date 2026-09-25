@@ -14,8 +14,8 @@
 
 //! Translated from `org.apache.kafka.common.errors.UnknownMemberIdException`.
 
-use crate::common::Errors;
 use crate::common::error::kafka_error_class;
+use crate::common::protocol::Errors;
 
 kafka_error_class! {
     /// The coordinator is not aware of this member.
@@ -25,6 +25,7 @@ kafka_error_class! {
     /// Java `extends` chain:
     ///    `UnknownMemberIdException` -> `ApplicationRecoverableException` ->
     ///   `ApiException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.UnknownMemberIdException")]
     UnknownMemberIdError,
     code: Errors::UnknownMemberId,
     extends: [

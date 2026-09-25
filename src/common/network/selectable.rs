@@ -27,24 +27,32 @@ use std::sync::Arc;
 
 use tokio::sync::Notify;
 
+/// See [`Selectable::connect`] — use the platform default buffer size.
+///
+/// Java `Selectable.USE_DEFAULT_BUFFER_SIZE` (`Selectable.java:36`), an interface
+/// field and therefore implicitly `public static final`.
+///
+/// Module-level rather than an associated const on [`Selectable`], per CLAUDE.md
+/// §2: a constant that Java associates with an interface is exported through the
+/// module containing the trait. An associated const would make the trait
+/// non-dyn-compatible (E0038) and would be unnameable without a `Self` type
+/// (E0790), which forced callers outside an `impl` to write
+/// `<Selector as Selectable>::USE_DEFAULT_BUFFER_SIZE`. Same treatment as
+/// `AdminApiFuture::UNKNOWN_BROKER_ID`.
+///
+/// Note this does not by itself make [`Selectable`] dyn-compatible — [`Selectable::connect`]
+/// and the other I/O methods return `impl Future`, so `dyn Selectable` remains
+/// impossible. The rule is applied because §2 asks for it uniformly, not because the
+/// const was the binding constraint.
+pub const USE_DEFAULT_BUFFER_SIZE: i32 = -1;
+
 /// An interface for asynchronous, multi-channel network I/O.
 ///
 /// Translated from the Java `Selectable` interface.
 ///
 /// All I/O methods are `async` per CLAUDE.md rule 8.
+#[doc(alias = "org.apache.kafka.common.network.Selectable")]
 pub trait Selectable: Send {
-    /// See [`Self::connect`] — use the platform default buffer size.
-    ///
-    /// Java `Selectable.USE_DEFAULT_BUFFER_SIZE` (`Selectable.java:36`), an
-    /// interface field and therefore implicitly `public static final`.
-    ///
-    /// Rust has no way to name a trait constant without a `Self` type
-    /// (E0790), so callers outside an `impl` write the fully-qualified
-    /// `<Selector as Selectable>::USE_DEFAULT_BUFFER_SIZE`. The trait is never
-    /// used as `dyn Selectable`, so the associated const does not cost
-    /// dyn-compatibility here (unlike `AdminApiFuture::UNKNOWN_BROKER_ID`).
-    const USE_DEFAULT_BUFFER_SIZE: i32 = -1;
-
     /// Begin establishing a socket connection to the given address identified by
     /// the given id.
     ///
@@ -54,13 +62,14 @@ pub trait Selectable: Send {
     /// * `address` - The address to connect to
     /// * `peer_host` - The hostname of the remote peer (used for TLS SNI and hostname verification)
     /// * `send_buffer_size` - The send buffer for the socket
-    ///   (use [`Self::USE_DEFAULT_BUFFER_SIZE`] for platform default)
+    ///   (use [`USE_DEFAULT_BUFFER_SIZE`] for platform default)
     /// * `receive_buffer_size` - The receive buffer for the socket
-    ///   (use [`Self::USE_DEFAULT_BUFFER_SIZE`] for platform default)
+    ///   (use [`USE_DEFAULT_BUFFER_SIZE`] for platform default)
     ///
     /// # Errors
     ///
     /// Returns an error if we cannot begin connecting.
+    #[doc(alias = "org.apache.kafka.common.network.Selectable#connect")]
     fn connect(
         &mut self,
         id: &str,
@@ -71,6 +80,7 @@ pub trait Selectable: Send {
     ) -> impl std::future::Future<Output = io::Result<()>> + Send;
 
     /// Wakeup this selector if it is blocked on I/O.
+    #[doc(alias = "org.apache.kafka.common.network.Selectable#wakeup")]
     fn wakeup(&self);
 
     /// Returns a lock-free handle to this selector's wakeup primitive.
@@ -97,6 +107,7 @@ pub trait Selectable: Send {
     }
 
     /// Close this selector.
+    #[doc(alias = "org.apache.kafka.common.network.Selectable#close")]
     fn close(&mut self) -> impl std::future::Future<Output = ()> + Send;
 
     /// Close the connection identified by the given id.
@@ -107,6 +118,7 @@ pub trait Selectable: Send {
     /// # Errors
     ///
     /// Returns an error if the channel does not exist.
+    #[doc(alias = "org.apache.kafka.common.network.Selectable#send")]
     fn send(&mut self, send: NetworkSend) -> Result<(), String>;
 
     /// Do I/O. Reads, writes, connection establishment, etc.
@@ -118,12 +130,15 @@ pub trait Selectable: Send {
     /// # Errors
     ///
     /// Returns an error if I/O fails.
+    #[doc(alias = "org.apache.kafka.common.network.Selectable#poll")]
     fn poll(&mut self, timeout_ms: i64) -> impl std::future::Future<Output = io::Result<()>> + Send;
 
     /// The list of sends that completed on the last `poll()` call.
+    #[doc(alias = "org.apache.kafka.common.network.Selectable#completedSends")]
     fn completed_sends(&self) -> &[NetworkSend];
 
     /// The collection of receives that completed on the last `poll()` call.
+    #[doc(alias = "org.apache.kafka.common.network.Selectable#completedReceives")]
     fn completed_receives(&self) -> Vec<&NetworkReceive>;
 
     /// Drains the receives that completed on the last `poll()` call, returning
@@ -141,23 +156,30 @@ pub trait Selectable: Send {
 
     /// The connections that finished disconnecting on the last `poll()` call.
     /// Channel state indicates the local channel state at the time of disconnection.
+    #[doc(alias = "org.apache.kafka.common.network.Selectable#disconnected")]
     fn disconnected(&self) -> &HashMap<String, ChannelState>;
 
     /// The list of connections that completed their connection on the last `poll()` call.
+    #[doc(alias = "org.apache.kafka.common.network.Selectable#connected")]
     fn connected(&self) -> &[String];
 
     /// Disable reads from the given connection.
+    #[doc(alias = "org.apache.kafka.common.network.Selectable#mute")]
     fn mute(&mut self, id: &str);
 
     /// Re-enable reads from the given connection.
+    #[doc(alias = "org.apache.kafka.common.network.Selectable#unmute")]
     fn unmute(&mut self, id: &str);
 
     /// Disable reads from all connections.
+    #[doc(alias = "org.apache.kafka.common.network.Selectable#muteAll")]
     fn mute_all(&mut self);
 
     /// Re-enable reads from all connections.
+    #[doc(alias = "org.apache.kafka.common.network.Selectable#unmuteAll")]
     fn unmute_all(&mut self);
 
     /// Returns `true` if a channel is ready.
+    #[doc(alias = "org.apache.kafka.common.network.Selectable#isChannelReady")]
     fn is_channel_ready(&self, id: &str) -> bool;
 }

@@ -17,7 +17,7 @@
 //! Corresponds to `org.apache.kafka.common.requests.OffsetsForLeaderEpochRequest`.
 //!
 //! Wraps the auto-generated [`OffsetForLeaderEpochRequestData`] and exposes
-//! a [`OffsetsForLeaderEpochRequestBuilder`] that emits v3+ for consumer
+//! a [`Builder`] that emits v3+ for consumer
 //! callers (the version range required for topic-level permission instead
 //! of cluster permission).
 
@@ -31,12 +31,13 @@ use crate::offset_for_leader_epoch_response_data::{EpochEndOffset, OffsetForLead
 
 use super::ConcreteResponse;
 use super::OffsetsForLeaderEpochResponse;
-use super::abstract_request::{ConcreteRequest, RequestBuilder};
+use super::abstract_request::{AbstractRequest, RequestBuilder};
 
 /// An `OffsetsForLeaderEpoch` request.
 ///
 /// Corresponds to `org.apache.kafka.common.requests.OffsetsForLeaderEpochRequest`.
 #[derive(Debug, Clone)]
+#[doc(alias = "org.apache.kafka.common.requests.OffsetsForLeaderEpochRequest")]
 pub struct OffsetsForLeaderEpochRequest {
     data: OffsetForLeaderEpochRequestData,
     version: i16,
@@ -46,6 +47,7 @@ impl OffsetsForLeaderEpochRequest {
     /// Returns `true` if `latest_usable_version` allows topic-level permission.
     ///
     /// Mirrors `OffsetsForLeaderEpochRequest.supportsTopicPermission(short)`.
+    #[doc(alias = "org.apache.kafka.common.requests.OffsetsForLeaderEpochRequest#supportsTopicPermission")]
     pub fn supports_topic_permission(latest_usable_version: i16) -> bool {
         latest_usable_version >= OffsetsForLeaderEpochRequest::MIN_CONSUMER_VERSION
     }
@@ -61,11 +63,13 @@ impl OffsetsForLeaderEpochRequest {
     pub const MIN_CONSUMER_VERSION: i16 = 3;
 
     /// Creates a new `OffsetsForLeaderEpochRequest` from data and version.
+    #[doc(alias = "org.apache.kafka.common.requests.OffsetsForLeaderEpochRequest#OffsetsForLeaderEpochRequest")]
     pub fn new(data: OffsetForLeaderEpochRequestData, version: i16) -> Self {
         Self { data, version }
     }
 
     /// Returns a reference to the underlying data.
+    #[doc(alias = "org.apache.kafka.common.requests.OffsetsForLeaderEpochRequest#data")]
     pub fn data(&self) -> &OffsetForLeaderEpochRequestData {
         &self.data
     }
@@ -86,12 +90,14 @@ impl OffsetsForLeaderEpochRequest {
     }
 
     /// Returns the wire replica id.
+    #[doc(alias = "org.apache.kafka.common.requests.OffsetsForLeaderEpochRequest#replicaId")]
     pub fn replica_id(&self) -> i32 {
         self.data.replica_id
     }
 
     /// Builds the canonical error response for this request, matching Java's
     /// `OffsetsForLeaderEpochRequest.getErrorResponse(int, Throwable)`.
+    #[doc(alias = "org.apache.kafka.common.requests.OffsetsForLeaderEpochRequest#getErrorResponse")]
     pub fn get_error_response(&self, throttle_time_ms: i32, error: &Errors) -> ConcreteResponse {
         let error_code = error.code();
         let mut response_data = OffsetForLeaderEpochResponseData::new();
@@ -122,6 +128,7 @@ impl OffsetsForLeaderEpochRequest {
     /// # Errors
     ///
     /// Returns an error if parsing fails.
+    #[doc(alias = "org.apache.kafka.common.requests.OffsetsForLeaderEpochRequest#parse")]
     pub fn parse(readable: &mut dyn Readable, version: i16) -> io::Result<Self> {
         let data = OffsetForLeaderEpochRequestData::read(readable, version)?;
         Ok(Self::new(data, version))
@@ -138,17 +145,19 @@ impl std::fmt::Display for OffsetsForLeaderEpochRequest {
 ///
 /// Corresponds to `OffsetsForLeaderEpochRequest.Builder` in Java.
 #[derive(Debug, Clone)]
-pub struct OffsetsForLeaderEpochRequestBuilder {
+#[doc(alias = "org.apache.kafka.common.requests.OffsetsForLeaderEpochRequest$Builder")]
+pub struct Builder {
     data: OffsetForLeaderEpochRequestData,
     oldest_allowed_version: i16,
     latest_allowed_version: i16,
 }
 
-impl OffsetsForLeaderEpochRequestBuilder {
+impl Builder {
     /// Constructs a consumer-side builder targeting v3+ (the version that
     /// allows topic-level permission).
     ///
     /// Mirrors `Builder.forConsumer(OffsetForLeaderTopicCollection)`.
+    #[doc(alias = "org.apache.kafka.common.requests.OffsetsForLeaderEpochRequest$Builder#forConsumer")]
     pub fn for_consumer(epochs_by_partition: Vec<OffsetForLeaderTopic>) -> Self {
         let mut data = OffsetForLeaderEpochRequestData::new();
         data.set_replica_id(OffsetsForLeaderEpochRequest::CONSUMER_REPLICA_ID);
@@ -163,6 +172,7 @@ impl OffsetsForLeaderEpochRequestBuilder {
     /// Constructs a follower-side builder pinned to v4.
     ///
     /// Mirrors `Builder.forFollower(OffsetForLeaderTopicCollection, int)`.
+    #[doc(alias = "org.apache.kafka.common.requests.OffsetsForLeaderEpochRequest$Builder#forFollower")]
     pub fn for_follower(epochs_by_partition: Vec<OffsetForLeaderTopic>, replica_id: i32) -> Self {
         let mut data = OffsetForLeaderEpochRequestData::new();
         data.set_replica_id(replica_id);
@@ -182,7 +192,7 @@ impl OffsetsForLeaderEpochRequestBuilder {
     }
 }
 
-impl RequestBuilder for OffsetsForLeaderEpochRequestBuilder {
+impl RequestBuilder for Builder {
     fn api_key(&self) -> &'static ApiKeys {
         &ApiKeys::OFFSET_FOR_LEADER_EPOCH
     }
@@ -195,7 +205,7 @@ impl RequestBuilder for OffsetsForLeaderEpochRequestBuilder {
         self.latest_allowed_version
     }
 
-    fn build_version(&mut self, version: i16) -> io::Result<ConcreteRequest> {
+    fn build_version(&mut self, version: i16) -> io::Result<AbstractRequest> {
         if version < self.oldest_allowed_version || version > self.latest_allowed_version {
             return Err(io::Error::new(
                 io::ErrorKind::Unsupported,
@@ -205,7 +215,7 @@ impl RequestBuilder for OffsetsForLeaderEpochRequestBuilder {
                 ),
             ));
         }
-        Ok(ConcreteRequest::OffsetsForLeaderEpoch(OffsetsForLeaderEpochRequest::new(
+        Ok(AbstractRequest::OffsetsForLeaderEpoch(OffsetsForLeaderEpochRequest::new(
             self.data.clone(),
             version,
         )))
@@ -220,7 +230,7 @@ mod tests {
     /// requirement.
     #[test]
     fn for_consumer_targets_v3_plus() {
-        let builder = OffsetsForLeaderEpochRequestBuilder::for_consumer(Vec::new());
+        let builder = Builder::for_consumer(Vec::new());
         assert_eq!(
             builder.oldest_allowed_version(),
             OffsetsForLeaderEpochRequest::MIN_CONSUMER_VERSION
@@ -236,7 +246,7 @@ mod tests {
     /// supplied replica id.
     #[test]
     fn for_follower_pins_to_v4() {
-        let builder = OffsetsForLeaderEpochRequestBuilder::for_follower(Vec::new(), 7);
+        let builder = Builder::for_follower(Vec::new(), 7);
         assert_eq!(builder.oldest_allowed_version(), 4);
         assert_eq!(builder.latest_allowed_version(), 4);
         assert_eq!(builder.data().replica_id, 7);

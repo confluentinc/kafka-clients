@@ -14,8 +14,8 @@
 
 //! Translated from `org.apache.kafka.common.errors.BrokerIdNotRegisteredException`.
 
-use crate::common::Errors;
 use crate::common::error::kafka_error_class;
+use crate::common::protocol::Errors;
 
 kafka_error_class! {
     /// The given broker ID was not registered.
@@ -24,6 +24,7 @@ kafka_error_class! {
     ///
     /// Java `extends` chain:
     ///    `BrokerIdNotRegisteredException` -> `ApiException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.BrokerIdNotRegisteredException")]
     BrokerIdNotRegisteredError,
     code: Errors::BrokerIdNotRegistered,
     extends: [

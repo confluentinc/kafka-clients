@@ -14,8 +14,8 @@
 
 //! Translated from `org.apache.kafka.common.errors.InvalidRequiredAcksException`.
 
-use crate::common::Errors;
 use crate::common::error::kafka_error_class;
+use crate::common::protocol::Errors;
 
 kafka_error_class! {
     /// Produce request specified an invalid value for required acks.
@@ -25,6 +25,7 @@ kafka_error_class! {
     /// Java `extends` chain:
     ///    `InvalidRequiredAcksException` -> `InvalidConfigurationException` ->
     ///   `ApiException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.InvalidRequiredAcksException")]
     InvalidRequiredAcksError,
     code: Errors::InvalidRequiredAcks,
     extends: [

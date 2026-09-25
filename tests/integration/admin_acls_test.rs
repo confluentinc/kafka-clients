@@ -65,7 +65,7 @@
 use std::time::Duration;
 
 use confluent_kafka::admin::{CreateAclsOptions, DeleteAclsOptions, DescribeAclsOptions, DescribeTopicsOptions};
-use confluent_kafka::common::Errors;
+use confluent_kafka::common::Error;
 use confluent_kafka::common::acl::{
     AccessControlEntry, AccessControlEntryFilter, AclBinding, AclBindingFilter, AclOperation, AclPermissionType,
 };
@@ -442,9 +442,8 @@ async fn explicit_deny_is_enforced_by_the_authorizer<F: AdminBackendFactory>(ctx
         .await
         .expect("the topic has an outcome")
         .expect_err("describe_topics is denied");
-    assert_eq!(
-        error.error(),
-        Errors::TopicAuthorizationFailed,
+    assert!(
+        matches!(error, Error::TopicAuthorization(_)),
         "{backend} backend: a DENY DESCRIBE rule should surface as TOPIC_AUTHORIZATION_FAILED, got {error:?}"
     );
 

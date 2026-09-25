@@ -18,7 +18,7 @@
 //! Translated from
 //! `org.apache.kafka.clients.consumer.internals.NetworkClientDelegate`.
 
-#![allow(dead_code)]
+#![expect(dead_code)]
 
 use std::collections::VecDeque;
 use std::fmt;
@@ -30,7 +30,7 @@ use crate::ClientResponse;
 use crate::KafkaClient;
 use crate::Metadata;
 use crate::NetworkClientUtils;
-use crate::common::Errors;
+use crate::common::protocol::Errors;
 use crate::common::requests::RequestBuilder;
 use crate::common::{Error, Node};
 use crate::consumer::ConsumerConfig;
@@ -45,6 +45,7 @@ use crate::consumer::internals::events::BackgroundEventHandler;
 /// before re-polling.
 ///
 /// Java: `NetworkClientDelegate.PollResult`.
+#[doc(alias = "org.apache.kafka.clients.consumer.internals.NetworkClientDelegate$PollResult")]
 pub(crate) struct PollResult {
     /// How long the caller can sleep before there is anything new for the
     /// manager to do, when `unsent_requests` is empty.
@@ -86,6 +87,7 @@ impl PollResult {
     /// A result with the given wait time and an empty request list.
     ///
     /// Java: `new PollResult(long timeUntilNextPollMs)`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.NetworkClientDelegate$PollResult#PollResult")]
     pub(crate) fn with_time_until_next_poll_ms(time_until_next_poll_ms: i64) -> Self {
         Self { time_until_next_poll_ms, unsent_requests: Vec::new(), try_connect: Vec::new() }
     }
@@ -93,6 +95,7 @@ impl PollResult {
     /// A result carrying the given requests and `WAIT_FOREVER` wait time.
     ///
     /// Java: `new PollResult(List<UnsentRequest>)`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.NetworkClientDelegate$PollResult#PollResult")]
     pub(crate) fn with_requests(unsent_requests: Vec<UnsentRequest>) -> Self {
         Self {
             time_until_next_poll_ms: Self::WAIT_FOREVER,
@@ -111,6 +114,7 @@ impl PollResult {
     /// Full constructor: explicit wait time + request list.
     ///
     /// Java: `new PollResult(long timeUntilNextPollMs, List<UnsentRequest>)`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.NetworkClientDelegate$PollResult#PollResult")]
     pub(crate) fn new(time_until_next_poll_ms: i64, unsent_requests: Vec<UnsentRequest>) -> Self {
         Self { time_until_next_poll_ms, unsent_requests, try_connect: Vec::new() }
     }
@@ -141,6 +145,7 @@ impl fmt::Debug for PollResult {
 /// - `deadline_ms` and `enqueue_time_ms` — set by the delegate on
 ///   [`super::NetworkClientDelegate::add`] (and
 ///   `add_all`); `-1` means "not yet enqueued".
+#[doc(alias = "org.apache.kafka.clients.consumer.internals.NetworkClientDelegate$UnsentRequest")]
 pub(crate) struct UnsentRequest {
     /// `Some` while the request is on the unsent queue; consumed
     /// (`None`) once the delegate dispatches it via `do_send` and
@@ -169,6 +174,7 @@ impl UnsentRequest {
     /// any node if `node` is `None`).
     ///
     /// Java: `new UnsentRequest(AbstractRequest.Builder<?>, Optional<Node>)`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.NetworkClientDelegate$UnsentRequest#UnsentRequest")]
     pub(crate) fn new(request_builder: Box<dyn RequestBuilder>, node: Option<Node>) -> Self {
         let (handler, rx) = FutureCompletionHandler::new();
         Self {
@@ -203,6 +209,7 @@ impl UnsentRequest {
     /// Java: `handler()`. Cloning is safe — the handler is an
     /// `Arc<Mutex<Option<oneshot::Sender>>>` and idempotent completion
     /// is preserved regardless of which clone the bg task uses.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.NetworkClientDelegate$UnsentRequest#handler")]
     pub(crate) fn handler(&self) -> FutureCompletionHandler {
         self.handler.clone()
     }
@@ -211,6 +218,7 @@ impl UnsentRequest {
     /// already been consumed via [`Self::take_request_builder`].
     ///
     /// Java: `requestBuilder()`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.NetworkClientDelegate$UnsentRequest#requestBuilder")]
     pub(crate) fn request_builder(&self) -> Option<&dyn RequestBuilder> {
         self.request_builder.as_deref()
     }
@@ -231,6 +239,7 @@ impl UnsentRequest {
     /// Returns the optional target node.
     ///
     /// Java: `node()`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.NetworkClientDelegate$UnsentRequest#node")]
     pub(crate) fn node(&self) -> Option<&Node> {
         self.node.as_ref()
     }
@@ -241,6 +250,7 @@ impl UnsentRequest {
     }
 
     /// Returns the enqueue timestamp (ms) or `-1` if not yet enqueued.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.NetworkClientDelegate$UnsentRequest#enqueueTimeMs")]
     pub(crate) fn enqueue_time_ms(&self) -> i64 {
         self.enqueue_time_ms
     }
@@ -282,6 +292,7 @@ impl fmt::Debug for UnsentRequest {
 /// request manager (via `whenComplete`-equivalent) while keeping its own
 /// copy for cleanup paths.
 #[derive(Clone)]
+#[doc(alias = "org.apache.kafka.clients.consumer.internals.NetworkClientDelegate$FutureCompletionHandler")]
 pub(crate) struct FutureCompletionHandler {
     inner: Arc<FutureCompletionInner>,
 }
@@ -304,6 +315,9 @@ impl FutureCompletionHandler {
     /// results off the receiver; the manager calls `on_complete` /
     /// `on_failure` on the handle. Each `UnsentRequest` owns the
     /// receiver inside `UnsentRequest::new`.
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.NetworkClientDelegate$FutureCompletionHandler#FutureCompletionHandler"
+    )]
     pub(crate) fn new() -> (Self, oneshot::Receiver<Result<ClientResponse, Error>>) {
         let (tx, rx) = oneshot::channel();
         let inner = Arc::new(FutureCompletionInner { sender: Mutex::new(Some(tx)), completion_time_ms: Mutex::new(0) });
@@ -313,6 +327,9 @@ impl FutureCompletionHandler {
     /// Java: `onFailure(long currentTimeMs, RuntimeException e)`. Records
     /// the completion time and completes the receiver with `Err(error)`.
     /// Idempotent — only the first call wins.
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.NetworkClientDelegate$FutureCompletionHandler#onFailure"
+    )]
     pub(crate) fn on_failure(&self, current_time_ms: i64, error: Error) {
         self.set_completion_time(current_time_ms);
         let sender_opt = {
@@ -335,6 +352,9 @@ impl FutureCompletionHandler {
     /// occurred, with the synthesised error.
     ///
     /// Sends the owned `ClientResponse` through the receiver on success.
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.NetworkClientDelegate$FutureCompletionHandler#onComplete"
+    )]
     pub(crate) fn on_complete(&self, response: ClientResponse) {
         let completion_time_ms = response.received_time_ms();
         if let Some(auth_error) = response.authentication_error() {
@@ -348,7 +368,7 @@ impl FutureCompletionHandler {
             return;
         }
         if response.was_disconnected() {
-            self.on_failure(completion_time_ms, Error::new(crate::common::Errors::NetworkError));
+            self.on_failure(completion_time_ms, Error::new(crate::common::protocol::Errors::NetworkError));
             return;
         }
         if let Some(msg) = response.version_mismatch() {
@@ -404,6 +424,9 @@ impl FutureCompletionHandler {
 
     /// Java: `completionTimeMs()`. Time (ms) at which `on_complete` /
     /// `on_failure` was first called. Zero before completion.
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.NetworkClientDelegate$FutureCompletionHandler#completionTimeMs"
+    )]
     pub(crate) fn completion_time_ms(&self) -> i64 {
         match self.inner.completion_time_ms.lock() {
             Ok(g) => *g,
@@ -462,6 +485,7 @@ impl fmt::Debug for FutureCompletionHandler {
 /// `KafkaClient::poll` is sync-blocking on a Java thread. In Rust,
 /// [`KafkaClient::poll`] is `async`, so [`NetworkClientDelegate::poll`]
 /// must also be `async`.
+#[doc(alias = "org.apache.kafka.clients.consumer.internals.NetworkClientDelegate")]
 pub(crate) struct NetworkClientDelegate<K: KafkaClient + Send> {
     client: K,
     background_event_handler: Arc<BackgroundEventHandler>,
@@ -486,6 +510,7 @@ impl<K: KafkaClient + Send> NetworkClientDelegate<K> {
     /// AsyncConsumerMetrics)`. The `AsyncConsumerMetrics` is wired
     /// post-construction via [`Self::set_async_consumer_metrics`] (Phase M6,
     /// M4/M5 setter precedent) rather than passed to the constructor.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.NetworkClientDelegate#NetworkClientDelegate")]
     pub(crate) fn new(
         config: &ConsumerConfig,
         client: K,
@@ -516,6 +541,7 @@ impl<K: KafkaClient + Send> NetworkClientDelegate<K> {
 
     /// Visible-for-testing accessor for the unsent-requests queue.
     /// Java: package-private `unsentRequests()`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.NetworkClientDelegate#unsentRequests")]
     pub(crate) fn unsent_requests(&self) -> &VecDeque<UnsentRequest> {
         &self.unsent_requests
     }
@@ -540,6 +566,7 @@ impl<K: KafkaClient + Send> NetworkClientDelegate<K> {
     /// underlying [`KafkaClient`]).
     ///
     /// Java: `inflightRequestCount()`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.NetworkClientDelegate#inflightRequestCount")]
     pub(crate) fn inflight_request_count(&self) -> i32 {
         self.client.in_flight_request_count()
     }
@@ -548,6 +575,7 @@ impl<K: KafkaClient + Send> NetworkClientDelegate<K> {
     /// immediate reconnection (i.e. inside the reconnect backoff window).
     ///
     /// Java: `isUnavailable(Node)`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.NetworkClientDelegate#isUnavailable")]
     pub(crate) fn is_unavailable(&self, node: &Node, current_time_ms: i64) -> bool {
         NetworkClientUtils::is_unavailable(&self.client, node, current_time_ms)
     }
@@ -559,6 +587,7 @@ impl<K: KafkaClient + Send> NetworkClientDelegate<K> {
     /// `client.authenticationException(node)` verbatim
     /// (`NetworkClientUtils.java:141-145`) — so the class is returned unchanged
     /// rather than rebuilt as a SASL failure.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.NetworkClientDelegate#maybeThrowAuthFailure")]
     pub(crate) fn maybe_return_auth_failure(&self, node: &Node) -> Result<(), Error> {
         match self.client.authentication_error(node) {
             Some(error) => Err(error),
@@ -570,6 +599,7 @@ impl<K: KafkaClient + Send> NetworkClientDelegate<K> {
     /// resetting the failed status of a socket.
     ///
     /// Java: `tryConnect(Node)`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.NetworkClientDelegate#tryConnect")]
     pub(crate) async fn try_connect(&mut self, node: &Node, current_time_ms: i64) {
         NetworkClientUtils::try_connect(&mut self.client, node, current_time_ms).await;
     }
@@ -578,6 +608,7 @@ impl<K: KafkaClient + Send> NetworkClientDelegate<K> {
     /// unsent request.
     ///
     /// Java: `hasAnyPendingRequests()`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.NetworkClientDelegate#hasAnyPendingRequests")]
     pub(crate) fn has_any_pending_requests(&self) -> bool {
         self.client.has_in_flight_requests() || !self.unsent_requests.is_empty()
     }
@@ -585,6 +616,7 @@ impl<K: KafkaClient + Send> NetworkClientDelegate<K> {
     /// Returns and clears the most recent metadata error.
     ///
     /// Java: `getAndClearMetadataError()`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.NetworkClientDelegate#getAndClearMetadataError")]
     pub(crate) fn get_and_clear_metadata_error(&mut self) -> Option<Error> {
         self.metadata_error.take()
     }
@@ -592,6 +624,7 @@ impl<K: KafkaClient + Send> NetworkClientDelegate<K> {
     /// Returns the least-loaded node from the underlying client.
     ///
     /// Java: `leastLoadedNode()`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.NetworkClientDelegate#leastLoadedNode")]
     pub(crate) fn least_loaded_node(&self, current_time_ms: i64) -> Option<Node> {
         self.client.least_loaded_node(current_time_ms).node().cloned()
     }
@@ -600,6 +633,7 @@ impl<K: KafkaClient + Send> NetworkClientDelegate<K> {
     /// `poll`).
     ///
     /// Java: `wakeup()`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.NetworkClientDelegate#wakeup")]
     pub(crate) fn wakeup(&self) {
         self.client.wakeup();
     }
@@ -627,6 +661,7 @@ impl<K: KafkaClient + Send> NetworkClientDelegate<K> {
     /// inside the connection-delay backoff window.
     ///
     /// Java: `nodeUnavailable(Node)`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.NetworkClientDelegate#nodeUnavailable")]
     pub(crate) fn node_unavailable(&self, node: &Node, current_time_ms: i64) -> bool {
         self.client.connection_failed(node) && self.client.connection_delay(node, current_time_ms) > 0
     }
@@ -634,6 +669,7 @@ impl<K: KafkaClient + Send> NetworkClientDelegate<K> {
     /// Close the underlying client.
     ///
     /// Java: `close()` (declared `throws IOException`).
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.NetworkClientDelegate#close")]
     pub(crate) async fn close(&mut self) -> Result<(), Error> {
         self.client.close().await;
         Ok(())
@@ -643,6 +679,7 @@ impl<K: KafkaClient + Send> NetworkClientDelegate<K> {
     /// request_timeout_ms`) and enqueue time.
     ///
     /// Java: `add(UnsentRequest)`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.NetworkClientDelegate#add")]
     pub(crate) fn add(&mut self, mut request: UnsentRequest, current_time_ms: i64) {
         request.set_timing(current_time_ms.saturating_add(self.request_timeout_ms as i64), current_time_ms);
         self.unsent_requests.push_back(request);
@@ -651,6 +688,7 @@ impl<K: KafkaClient + Send> NetworkClientDelegate<K> {
     /// Adds all unsent requests from the slice to the queue.
     ///
     /// Java: `addAll(List<UnsentRequest>)`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.NetworkClientDelegate#addAll")]
     pub(crate) fn add_all(&mut self, requests: Vec<UnsentRequest>, current_time_ms: i64) {
         for r in requests {
             self.add(r, current_time_ms);
@@ -682,6 +720,7 @@ impl<K: KafkaClient + Send> NetworkClientDelegate<K> {
     ///
     /// Java: `poll(timeoutMs, currentTimeMs)` and `poll(timeoutMs,
     /// currentTimeMs, onClose)`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.NetworkClientDelegate#poll")]
     pub(crate) async fn poll(&mut self, timeout_ms: i64, current_time_ms: i64, on_close: bool) {
         self.try_send(current_time_ms).await;
 
@@ -725,6 +764,7 @@ impl<K: KafkaClient + Send> NetworkClientDelegate<K> {
     /// completed with a [`Error::Timeout`].
     ///
     /// Java: package-private `trySend(long currentTimeMs)`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.NetworkClientDelegate#trySend")]
     async fn try_send(&mut self, current_time_ms: i64) {
         // We pull each request out, decide whether to keep it (re-queue),
         // and at the end swap the rebuilt queue back in. This sidesteps
@@ -776,6 +816,7 @@ impl<K: KafkaClient + Send> NetworkClientDelegate<K> {
     /// be retried next poll.
     ///
     /// Java: package-private `doSend(UnsentRequest, long)`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.NetworkClientDelegate#doSend")]
     async fn do_send(&mut self, unsent: &mut UnsentRequest, current_time_ms: i64) -> bool {
         // Pick the target node: the request's preference, or the
         // least-loaded node returned by the client.
@@ -829,6 +870,7 @@ impl<K: KafkaClient + Send> NetworkClientDelegate<K> {
     /// Check unsent requests for disconnected target nodes.
     ///
     /// Java: protected `checkDisconnects(long, boolean)`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.NetworkClientDelegate#checkDisconnects")]
     fn check_disconnects(&mut self, current_time_ms: i64, on_close: bool) {
         let mut requeue: VecDeque<UnsentRequest> = VecDeque::with_capacity(self.unsent_requests.len());
         let mut queue = std::mem::take(&mut self.unsent_requests);
@@ -862,6 +904,7 @@ impl<K: KafkaClient + Send> NetworkClientDelegate<K> {
     /// Propagate the latest metadata error either to the
     /// `BackgroundEventHandler` (if `notifyMetadataErrorsViaErrorQueue`)
     /// or store it locally for `get_and_clear_metadata_error`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.NetworkClientDelegate#maybePropagateMetadataError")]
     fn maybe_propagate_metadata_error(&mut self, current_time_ms: i64) {
         if let Err(err) = self.metadata.maybe_return_any_error() {
             if self.notify_metadata_errors_via_error_queue {
@@ -879,7 +922,7 @@ impl<K: KafkaClient + Send> NetworkClientDelegate<K> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicI64, Ordering};
+    use crate::common::utils::{MockTime, Time};
 
     use tokio::sync::mpsc;
 
@@ -888,8 +931,7 @@ mod tests {
     use crate::MockClient;
     use crate::common::internals::ClusterResourceListeners;
     use crate::common::requests::{
-        ConcreteResponse, FindCoordinatorRequestBuilder, FindCoordinatorResponse, MetadataRequestBuilder,
-        RequestBuilder,
+        ConcreteResponse, FindCoordinatorResponse, RequestBuilder, find_coordinator_request, metadata_request,
     };
 
     const GROUP_ID: &str = "group";
@@ -912,7 +954,7 @@ mod tests {
         let mut data = FindCoordinatorRequestData::new();
         data.set_key(GROUP_ID.to_string());
         data.set_key_type(crate::common::requests::CoordinatorType::Group.id());
-        let builder: Box<dyn RequestBuilder> = Box::new(FindCoordinatorRequestBuilder::new(data));
+        let builder: Box<dyn RequestBuilder> = Box::new(find_coordinator_request::Builder::new(data));
         UnsentRequest::new(builder, None)
     }
 
@@ -921,7 +963,7 @@ mod tests {
     /// owned by the delegate (Arc-wrapped) so the test can inspect
     /// metadata-error events as needed.
     fn new_delegate(
-        time: Arc<AtomicI64>,
+        time: Arc<MockTime>,
         notify_via_queue: bool,
     ) -> (
         NetworkClientDelegate<MockClient>,
@@ -930,11 +972,7 @@ mod tests {
     ) {
         let (tx, rx) = mpsc::unbounded_channel();
         let handler = Arc::new(BackgroundEventHandler::new(tx));
-        let time_provider: Arc<dyn Fn() -> i64 + Send + Sync> = {
-            let time = Arc::clone(&time);
-            Arc::new(move || time.load(Ordering::SeqCst))
-        };
-        let client = MockClient::with_static_nodes(vec![mock_node()], Arc::clone(&time_provider));
+        let client = MockClient::with_static_nodes(vec![mock_node()], Arc::clone(&time) as Arc<dyn Time>);
         let metadata = Arc::new(Metadata::new(100, 1_000, 60_000, ClusterResourceListeners::new()));
         let config = test_config();
         let delegate = NetworkClientDelegate::new(&config, client, Arc::clone(&metadata), handler, notify_via_queue);
@@ -957,7 +995,7 @@ mod tests {
 
     #[test]
     fn unsent_request_defaults() {
-        let builder: Box<dyn RequestBuilder> = Box::new(MetadataRequestBuilder::all_topics());
+        let builder: Box<dyn RequestBuilder> = Box::new(metadata_request::Builder::all_topics());
         let req = UnsentRequest::new(builder, None);
         assert_eq!(req.deadline_ms(), -1);
         assert_eq!(req.enqueue_time_ms(), -1);
@@ -968,21 +1006,25 @@ mod tests {
     /// Verifies that `add_all_from_poll_result` returns the wait hint
     /// even when the poll result carries one or zero requests.
     #[tokio::test(flavor = "current_thread")]
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.NetworkClientDelegateTest#testPollResultTimer")]
     async fn test_poll_result_timer() {
-        let time = Arc::new(AtomicI64::new(0));
+        let time = Arc::new(MockTime::with_auto_tick_ms_current_time_ms_current_high_res_time_ns(0, 0, 0));
         let (mut ncd, _meta, _rx) = new_delegate(Arc::clone(&time), false);
         let req = new_unsent_find_coordinator_request();
         let success = PollResult::new(10, vec![req]);
-        assert_eq!(10, ncd.add_all_from_poll_result(success, time.load(Ordering::SeqCst)));
+        assert_eq!(10, ncd.add_all_from_poll_result(success, time.milliseconds()));
 
         let failure = PollResult::new(10, Vec::new());
-        assert_eq!(10, ncd.add_all_from_poll_result(failure, time.load(Ordering::SeqCst)));
+        assert_eq!(10, ncd.add_all_from_poll_result(failure, time.milliseconds()));
     }
 
     /// Translated from `NetworkClientDelegateTest.testEnsureCorrectCompletionTimeOnFailure`.
     /// The completion time stored on the handler must reflect the time
     /// of the failure, not a later sleep.
     #[test]
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.NetworkClientDelegateTest#testEnsureCorrectCompletionTimeOnFailure"
+    )]
     fn test_ensure_correct_completion_time_on_failure() {
         let unsent = new_unsent_find_coordinator_request();
         let handler = unsent.handler();
@@ -995,19 +1037,20 @@ mod tests {
     /// Verifies that `add` and `add_all` stamp the timing fields on
     /// every request enqueued.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.NetworkClientDelegateTest#testEnsureTimerSetOnAdd")]
     fn test_ensure_timer_set_on_add() {
-        let time = Arc::new(AtomicI64::new(0));
+        let time = Arc::new(MockTime::with_auto_tick_ms_current_time_ms_current_high_res_time_ns(0, 0, 0));
         let (mut ncd, _meta, _rx) = new_delegate(Arc::clone(&time), false);
         let req = new_unsent_find_coordinator_request();
         assert_eq!(req.deadline_ms(), -1);
-        ncd.add(req, time.load(Ordering::SeqCst));
+        ncd.add(req, time.milliseconds());
         assert_eq!(1, ncd.unsent_requests().len());
         let head = ncd.unsent_requests().front().unwrap();
         assert_eq!(REQUEST_TIMEOUT_MS as i64, head.deadline_ms() - head.enqueue_time_ms());
 
         // add_all path.
         let req2 = new_unsent_find_coordinator_request();
-        ncd.add_all(vec![req2], time.load(Ordering::SeqCst));
+        ncd.add_all(vec![req2], time.milliseconds());
         assert_eq!(2, ncd.unsent_requests().len());
         let last = ncd.unsent_requests().back().unwrap();
         assert_eq!(REQUEST_TIMEOUT_MS as i64, last.deadline_ms() - last.enqueue_time_ms());
@@ -1019,13 +1062,14 @@ mod tests {
     /// step that drains the responses is exercised by
     /// [`test_successful_response`].
     #[tokio::test(flavor = "current_thread")]
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.NetworkClientDelegateTest#testHasAnyPendingRequests")]
     async fn test_has_any_pending_requests() {
         // Start at a non-zero time so MockClient.not_throttled (strict `>`)
         // returns true on the very first send.
-        let time = Arc::new(AtomicI64::new(1));
+        let time = Arc::new(MockTime::with_auto_tick_ms_current_time_ms_current_high_res_time_ns(0, 1, 0));
         let (mut ncd, _meta, _rx) = new_delegate(Arc::clone(&time), false);
         let req = new_unsent_find_coordinator_request();
-        ncd.add(req, time.load(Ordering::SeqCst));
+        ncd.add(req, time.milliseconds());
 
         // Unsent
         assert!(ncd.has_any_pending_requests());
@@ -1035,7 +1079,7 @@ mod tests {
         let response = FindCoordinatorResponse::prepare_response(Errors::None, GROUP_ID, &mock_node());
         ncd.client.prepare_response(ConcreteResponse::FindCoordinator(response));
 
-        ncd.poll(0, time.load(Ordering::SeqCst), false).await;
+        ncd.poll(0, time.milliseconds(), false).await;
 
         // Response delivered — queue is empty and no in-flight remains.
         assert!(ncd.unsent_requests().is_empty());
@@ -1046,10 +1090,11 @@ mod tests {
     /// response on the mock client, poll the delegate, and verify the
     /// future resolves.
     #[tokio::test(flavor = "current_thread")]
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.NetworkClientDelegateTest#testSuccessfulResponse")]
     async fn test_successful_response() {
         // Start at a non-zero time so MockClient.not_throttled (strict `>`)
         // returns true on the very first send.
-        let time = Arc::new(AtomicI64::new(1));
+        let time = Arc::new(MockTime::with_auto_tick_ms_current_time_ms_current_high_res_time_ns(0, 1, 0));
         let (mut ncd, _meta, _rx) = new_delegate(Arc::clone(&time), false);
         let mut req = new_unsent_find_coordinator_request();
         let mut rx = req.take_response_receiver().expect("receiver still present");
@@ -1057,8 +1102,8 @@ mod tests {
         let response = FindCoordinatorResponse::prepare_response(Errors::None, GROUP_ID, &mock_node());
         ncd.client.prepare_response(ConcreteResponse::FindCoordinator(response));
 
-        ncd.add(req, time.load(Ordering::SeqCst));
-        ncd.poll(0, time.load(Ordering::SeqCst), false).await;
+        ncd.add(req, time.milliseconds());
+        ncd.poll(0, time.milliseconds(), false).await;
 
         // The handler's oneshot must resolve with Ok(ClientResponse).
         let result = rx.try_recv().expect("response delivered");
@@ -1072,13 +1117,14 @@ mod tests {
     /// Verifies the legacy path: metadata errors are stored locally and
     /// returned by `get_and_clear_metadata_error`.
     #[tokio::test(flavor = "current_thread")]
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.NetworkClientDelegateTest#testPropagateMetadataError")]
     async fn test_propagate_metadata_error() {
-        let time = Arc::new(AtomicI64::new(0));
+        let time = Arc::new(MockTime::with_auto_tick_ms_current_time_ms_current_high_res_time_ns(0, 0, 0));
         let (mut ncd, meta, _rx) = new_delegate(Arc::clone(&time), false);
         meta.fatal_error(Error::timeout("Test auth failure"));
         assert!(ncd.get_and_clear_metadata_error().is_none());
 
-        ncd.poll(0, time.load(Ordering::SeqCst), false).await;
+        ncd.poll(0, time.milliseconds(), false).await;
 
         let metadata_error = ncd.get_and_clear_metadata_error().expect("error captured");
         assert!(metadata_error.message().contains("Test auth failure"), "got: {metadata_error}");
@@ -1089,12 +1135,15 @@ mod tests {
     /// path: errors flow as `BackgroundEvent::Error` through the
     /// handler's channel.
     #[tokio::test(flavor = "current_thread")]
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.NetworkClientDelegateTest#testPropagateMetadataErrorWithErrorEvent"
+    )]
     async fn test_propagate_metadata_error_with_error_event() {
-        let time = Arc::new(AtomicI64::new(0));
+        let time = Arc::new(MockTime::with_auto_tick_ms_current_time_ms_current_high_res_time_ns(0, 0, 0));
         let (mut ncd, meta, mut bg_rx) = new_delegate(Arc::clone(&time), true);
         meta.fatal_error(Error::timeout("Test auth failure"));
 
-        ncd.poll(0, time.load(Ordering::SeqCst), false).await;
+        ncd.poll(0, time.milliseconds(), false).await;
 
         let envelope = bg_rx.try_recv().expect("metadata error delivered to bg queue");
         match envelope.event {
@@ -1133,6 +1182,9 @@ mod tests {
     /// success path (`on_complete`), the handler's completion-time
     /// records the response's `received_time_ms`, not any later time.
     #[test]
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.NetworkClientDelegateTest#testEnsureCorrectCompletionTimeOnComplete"
+    )]
     fn test_ensure_correct_completion_time_on_complete() {
         let unsent = new_unsent_find_coordinator_request();
         let handler = unsent.handler();
@@ -1143,7 +1195,7 @@ mod tests {
         // `received_time_ms` off the response and stores it.
         let header = crate::common::requests::RequestHeader::with_options(
             crate::common::requests::RequestHeaderOptionsBuilder::new()
-                .set_request_api_key(&crate::common::ApiKeys::FIND_COORDINATOR)
+                .set_request_api_key(&crate::common::protocol::ApiKeys::FIND_COORDINATOR)
                 .set_request_version(0)
                 .set_client_id("")
                 .set_correlation_id(1)
@@ -1175,11 +1227,12 @@ mod tests {
     /// `try_send` fires `on_failure(Error::Timeout)` and the
     /// receiver resolves with that error.
     #[tokio::test(flavor = "current_thread")]
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.NetworkClientDelegateTest#testTimeoutBeforeSend")]
     async fn test_timeout_before_send() {
         // Start at a non-zero time so MockClient.not_throttled (strict
         // `>`) returns true on the first send attempt — though for this
         // test the request never actually sends.
-        let time = Arc::new(AtomicI64::new(1));
+        let time = Arc::new(MockTime::with_auto_tick_ms_current_time_ms_current_high_res_time_ns(0, 1, 0));
         let (mut ncd, _meta, _rx) = new_delegate(Arc::clone(&time), false);
 
         // Mark the sole node unreachable for the full request timeout
@@ -1188,19 +1241,19 @@ mod tests {
 
         let mut req = new_unsent_find_coordinator_request();
         let mut rx = req.take_response_receiver().expect("receiver still present");
-        ncd.add(req, time.load(Ordering::SeqCst));
+        ncd.add(req, time.milliseconds());
 
         // First poll: do_send returns false because the node is
         // unreachable. Request stays on the unsent queue.
-        ncd.poll(0, time.load(Ordering::SeqCst), false).await;
+        ncd.poll(0, time.milliseconds(), false).await;
         assert!(!ncd.unsent_requests().is_empty());
 
         // Advance past the request's deadline.
-        time.fetch_add(REQUEST_TIMEOUT_MS as i64, Ordering::SeqCst);
+        time.sleep(REQUEST_TIMEOUT_MS as i64);
 
         // Second poll: try_send sees `current_time_ms >= deadline_ms`
         // and fires `on_failure(Error::timeout(...))`.
-        ncd.poll(0, time.load(Ordering::SeqCst), false).await;
+        ncd.poll(0, time.milliseconds(), false).await;
         assert!(ncd.unsent_requests().is_empty(), "expired request was removed");
 
         let received = rx.try_recv().expect("response delivered");
@@ -1217,17 +1270,18 @@ mod tests {
     /// the in-flight request out (Java: `DisconnectException`; Rust:
     /// `Error` carrying `Errors::NetworkError`).
     #[tokio::test(flavor = "current_thread")]
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.NetworkClientDelegateTest#testTimeoutAfterSend")]
     async fn test_timeout_after_send() {
-        let time = Arc::new(AtomicI64::new(1));
+        let time = Arc::new(MockTime::with_auto_tick_ms_current_time_ms_current_high_res_time_ns(0, 1, 0));
         let (mut ncd, _meta, _rx) = new_delegate(Arc::clone(&time), false);
 
         let mut req = new_unsent_find_coordinator_request();
         let mut rx = req.take_response_receiver().expect("receiver still present");
-        ncd.add(req, time.load(Ordering::SeqCst));
+        ncd.add(req, time.milliseconds());
 
         // First poll dispatches the request successfully — node is
         // reachable, so `do_send` puts it into `client.requests`.
-        ncd.poll(0, time.load(Ordering::SeqCst), false).await;
+        ncd.poll(0, time.milliseconds(), false).await;
         assert!(ncd.unsent_requests().is_empty(), "request was sent");
         assert!(ncd.client.has_in_flight_requests(), "request is in-flight");
 
@@ -1236,8 +1290,8 @@ mod tests {
         // and synthesise a `disconnected=true` `ClientResponse` — the
         // FutureCompletionHandler then routes that to
         // `on_failure(Error::new(Errors::NetworkError))`.
-        time.fetch_add(REQUEST_TIMEOUT_MS as i64, Ordering::SeqCst);
-        ncd.poll(0, time.load(Ordering::SeqCst), false).await;
+        time.sleep(REQUEST_TIMEOUT_MS as i64);
+        ncd.poll(0, time.milliseconds(), false).await;
 
         let received = rx.try_recv().expect("response delivered");
         match received {
@@ -1257,29 +1311,30 @@ mod tests {
     /// on `UnsentRequest`), so the in-flight survives onClose; the
     /// final poll respond-and-drain empties the queue.
     #[tokio::test(flavor = "current_thread")]
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.NetworkClientDelegateTest#testPollWithOnClose")]
     async fn test_poll_with_on_close() {
-        let time = Arc::new(AtomicI64::new(1));
+        let time = Arc::new(MockTime::with_auto_tick_ms_current_time_ms_current_high_res_time_ns(0, 1, 0));
         let (mut ncd, _meta, _rx) = new_delegate(Arc::clone(&time), false);
 
         let req = new_unsent_find_coordinator_request();
-        ncd.add(req, time.load(Ordering::SeqCst));
+        ncd.add(req, time.milliseconds());
 
         // First poll (on_close=false): request dispatches successfully.
-        ncd.poll(0, time.load(Ordering::SeqCst), false).await;
+        ncd.poll(0, time.milliseconds(), false).await;
         assert!(ncd.has_any_pending_requests(), "in-flight after dispatch");
 
         // Poll on close: the in-flight has no `node` on `UnsentRequest`
         // (it was resolved via least_loaded_node inside do_send, never
         // written back), so `check_disconnects` does not affect the
         // in-flight. The MockClient retains the in-flight request.
-        ncd.poll_on_close(0, time.load(Ordering::SeqCst)).await;
+        ncd.poll_on_close(0, time.milliseconds()).await;
         assert!(ncd.has_any_pending_requests(), "still pending after on-close poll");
 
         // Respond to the in-flight request (Java: `client.respond(...)`),
         // then poll-on-close again to drain.
         let response = FindCoordinatorResponse::prepare_response(Errors::None, GROUP_ID, &mock_node());
         ncd.client.respond(ConcreteResponse::FindCoordinator(response));
-        ncd.poll_on_close(0, time.load(Ordering::SeqCst)).await;
+        ncd.poll_on_close(0, time.milliseconds()).await;
         assert!(!ncd.has_any_pending_requests(), "drained after response");
     }
 
@@ -1289,13 +1344,16 @@ mod tests {
     /// unreachable) are removed and completed with `NetworkException`
     /// when the delegate polls on close.
     #[tokio::test(flavor = "current_thread")]
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.NetworkClientDelegateTest#testCheckDisconnectsWithOnClose"
+    )]
     async fn test_check_disconnects_with_on_close() {
-        let time = Arc::new(AtomicI64::new(1));
+        let time = Arc::new(MockTime::with_auto_tick_ms_current_time_ms_current_high_res_time_ns(0, 1, 0));
         let (mut ncd, _meta, _rx) = new_delegate(Arc::clone(&time), false);
 
         let mut req = new_unsent_find_coordinator_request();
         let mut rx = req.take_response_receiver().expect("receiver still present");
-        ncd.add(req, time.load(Ordering::SeqCst));
+        ncd.add(req, time.milliseconds());
 
         // Mark the sole node unreachable so `do_send` cannot succeed.
         // `set_unreachable` also calls `disconnect_node`, which would
@@ -1305,14 +1363,14 @@ mod tests {
 
         // Poll with on_close = false: do_send fails (unreachable), so
         // the request stays in the unsent queue.
-        ncd.poll(0, time.load(Ordering::SeqCst), false).await;
+        ncd.poll(0, time.milliseconds(), false).await;
         assert!(ncd.has_any_pending_requests());
 
         // Poll with on_close = true: `check_disconnects` matches
         // `None if on_close` (the unsent never had a node assigned to
         // its `UnsentRequest` field) and fires
         // `on_failure(Error::new(Errors::NetworkError))`.
-        ncd.poll_on_close(0, time.load(Ordering::SeqCst)).await;
+        ncd.poll_on_close(0, time.milliseconds()).await;
         assert!(!ncd.has_any_pending_requests(), "unsent dropped on close");
 
         let received = rx.try_recv().expect("response delivered");

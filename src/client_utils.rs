@@ -27,6 +27,7 @@ use crate::common::Error;
 /// Translates the Java static-utility class `org.apache.kafka.clients.ClientUtils`,
 /// which has no instance state, so it becomes a unit struct hosting its
 /// statics as associated items.
+#[doc(alias = "org.apache.kafka.clients.ClientUtils")]
 pub struct ClientUtils;
 
 impl ClientUtils {
@@ -37,6 +38,7 @@ impl ClientUtils {
     ///
     /// # Errors
     /// Returns an `io::Error` if the hostname cannot be resolved.
+    #[doc(alias = "org.apache.kafka.clients.ClientUtils#resolve")]
     pub async fn resolve<H: HostResolver>(host: &str, host_resolver: &H) -> io::Result<Vec<IpAddr>> {
         let addresses = host_resolver.resolve(host).await?;
         let result = Self::filter_preferred_addresses(&addresses);
@@ -48,6 +50,7 @@ impl ClientUtils {
     /// that are the same type (IPv4 or IPv6) as the first address.
     ///
     /// The outcome is that all returned addresses are either IPv4 or IPv6.
+    #[doc(alias = "org.apache.kafka.clients.ClientUtils#filterPreferredAddresses")]
     fn filter_preferred_addresses(all_addresses: &[IpAddr]) -> Vec<IpAddr> {
         if all_addresses.is_empty() {
             return Vec::new();
@@ -75,6 +78,7 @@ impl ClientUtils {
     /// - No valid addresses can be resolved after validation.
     ///
     /// These correspond to Java's `ConfigException`.
+    #[doc(alias = "org.apache.kafka.clients.ClientUtils#parseAndValidateAddresses")]
     pub fn parse_and_validate_addresses(urls: &[String]) -> Result<Vec<(String, SocketAddr)>, Error> {
         let mut addresses = Vec::new();
         for url in urls {
@@ -337,6 +341,7 @@ mod tests {
     ///
     /// Tests that an address without a port is rejected with an error.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.ClientUtilsTest#testNoPort")]
     fn test_no_port() {
         let urls = vec!["127.0.0.1".to_string()];
         let result = ClientUtils::parse_and_validate_addresses(&urls);
@@ -357,6 +362,7 @@ mod tests {
     ///
     /// Tests that an address with a port > 65535 is rejected.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.ClientUtilsTest#testInvalidPort")]
     fn test_invalid_port() {
         let urls = vec!["localhost:70000".to_string()];
         let result = ClientUtils::parse_and_validate_addresses(&urls);
@@ -430,6 +436,7 @@ mod tests {
     ///
     /// Tests that a list of valid broker addresses is accepted.
     #[test]
+    #[doc(alias = "org.apache.kafka.clients.ClientUtilsTest#testValidBrokerAddress")]
     fn test_valid_broker_address() {
         let urls = vec![
             "localhost:9997".to_string(),

@@ -14,8 +14,8 @@
 
 //! Translated from `org.apache.kafka.common.errors.StaleBrokerEpochException`.
 
-use crate::common::Errors;
 use crate::common::error::kafka_error_class;
+use crate::common::protocol::Errors;
 
 kafka_error_class! {
     /// Broker epoch has changed.
@@ -24,6 +24,7 @@ kafka_error_class! {
     ///
     /// Java `extends` chain:
     ///    `StaleBrokerEpochException` -> `ApiException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.StaleBrokerEpochException")]
     StaleBrokerEpochError,
     code: Errors::StaleBrokerEpoch,
     extends: [

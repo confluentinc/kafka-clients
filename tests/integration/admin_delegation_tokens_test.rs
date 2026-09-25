@@ -79,7 +79,7 @@ use confluent_kafka::admin::{
     CreateDelegationTokenOptions, DescribeDelegationTokenOptions, ExpireDelegationTokenOptions,
     RenewDelegationTokenOptions,
 };
-use confluent_kafka::common::Errors;
+use confluent_kafka::common::Error;
 use confluent_kafka::common::security::auth::KafkaPrincipal;
 
 use crate::common::admin_backend::{AdminBackend, admin_for};
@@ -97,9 +97,8 @@ const UNKNOWN_HMAC: &[u8] = b"not-a-real-hmac";
 /// Asserts an error is Java's `DELEGATION_TOKEN_REQUEST_NOT_ALLOWED`, with the
 /// message the broker sends.
 fn assert_not_allowed(backend: &str, what: &str, error: &confluent_kafka::common::Error) {
-    assert_eq!(
-        error.error(),
-        Errors::DelegationTokenRequestNotAllowed,
+    assert!(
+        matches!(error, Error::UnsupportedByAuthentication(_)),
         "{backend} backend: {what} over PLAINTEXT should be DELEGATION_TOKEN_REQUEST_NOT_ALLOWED, got {error:?}"
     );
     assert!(
@@ -329,9 +328,8 @@ async fn delegation_token_round_trip_on_the_mock_client<F: AdminBackendFactory>(
         .renew_delegation_token(UNKNOWN_HMAC, RenewDelegationTokenOptions::new())
         .await
         .expect_err("renewing an unknown HMAC fails");
-    assert_eq!(
-        error.error(),
-        Errors::DelegationTokenNotFound,
+    assert!(
+        matches!(error, Error::DelegationTokenNotFound(_)),
         "{backend} backend: an unknown HMAC should be DELEGATION_TOKEN_NOT_FOUND, got {error:?}"
     );
 

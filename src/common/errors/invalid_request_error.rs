@@ -14,8 +14,8 @@
 
 //! Translated from `org.apache.kafka.common.errors.InvalidRequestException`.
 
-use crate::common::Errors;
 use crate::common::error::kafka_error_class;
+use crate::common::protocol::Errors;
 
 kafka_error_class! {
     /// This most likely occurs because of a request being malformed by the client
@@ -26,6 +26,7 @@ kafka_error_class! {
     ///
     /// Java `extends` chain:
     ///    `InvalidRequestException` -> `ApiException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.InvalidRequestException")]
     InvalidRequestError,
     code: Errors::InvalidRequest,
     extends: [

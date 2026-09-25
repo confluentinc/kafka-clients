@@ -14,8 +14,8 @@
 
 //! Translated from `org.apache.kafka.common.errors.OutOfOrderSequenceException`.
 
-use crate::common::Errors;
 use crate::common::error::kafka_error_class;
+use crate::common::protocol::Errors;
 
 kafka_error_class! {
     /// The broker received an out of order sequence number.
@@ -24,6 +24,7 @@ kafka_error_class! {
     ///
     /// Java `extends` chain:
     ///    `OutOfOrderSequenceException` -> `ApiException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.OutOfOrderSequenceException")]
     OutOfOrderSequenceError,
     code: Errors::OutOfOrderSequenceNumber,
     extends: [

@@ -20,6 +20,7 @@
 ///
 /// Corresponds to `org.apache.kafka.clients.admin.DeleteAclsOptions`.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[doc(alias = "org.apache.kafka.clients.admin.DeleteAclsOptions")]
 pub struct DeleteAclsOptions {
     timeout_ms: Option<i32>,
 }

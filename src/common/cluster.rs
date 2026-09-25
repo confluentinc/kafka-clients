@@ -30,6 +30,7 @@ use super::Uuid;
 /// An immutable representation of a subset of the nodes, topics, and partitions
 /// in the Kafka cluster.
 #[derive(Clone, Debug)]
+#[doc(alias = "org.apache.kafka.common.Cluster")]
 pub struct Cluster {
     is_bootstrap_configured: bool,
     nodes: Vec<Node>,
@@ -61,6 +62,7 @@ impl Cluster {
     ///
     /// * `nodes` - The nodes in the cluster
     /// * `partitions` - Information about a subset of the topic-partitions this cluster hosts
+    #[doc(alias = "org.apache.kafka.common.Cluster#Cluster")]
     pub fn new(
         cluster_id: Option<String>,
         nodes: Vec<Node>,
@@ -91,6 +93,7 @@ impl Cluster {
     ///
     /// * `nodes` - The nodes in the cluster
     /// * `partitions` - Information about a subset of the topic-partitions this cluster hosts
+    #[doc(alias = "org.apache.kafka.common.Cluster#Cluster")]
     pub fn with_controller(
         cluster_id: Option<String>,
         nodes: Vec<Node>,
@@ -122,7 +125,7 @@ impl Cluster {
     ///
     /// * `nodes` - The nodes in the cluster
     /// * `partitions` - Information about a subset of the topic-partitions this cluster hosts
-    #[allow(clippy::too_many_arguments)]
+    #[doc(alias = "org.apache.kafka.common.Cluster#Cluster")]
     pub fn with_invalid_topics_controller(
         cluster_id: Option<String>,
         nodes: Vec<Node>,
@@ -153,7 +156,8 @@ impl Cluster {
     ///
     /// * `nodes` - The nodes in the cluster
     /// * `partitions` - Information about a subset of the topic-partitions this cluster hosts
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
+    #[doc(alias = "org.apache.kafka.common.Cluster#Cluster")]
     pub fn with_invalid_topics_controller_topic_ids(
         cluster_id: Option<String>,
         nodes: Vec<Node>,
@@ -177,7 +181,7 @@ impl Cluster {
         )
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     fn new_internal(
         cluster_id: Option<String>,
         is_bootstrap_configured: bool,
@@ -257,6 +261,7 @@ impl Cluster {
     }
 
     /// Create an empty cluster instance with no nodes and no topic-partitions.
+    #[doc(alias = "org.apache.kafka.common.Cluster#empty")]
     pub fn empty() -> Self {
         Self::with_invalid_topics_controller_topic_ids(
             None,
@@ -271,6 +276,7 @@ impl Cluster {
     }
 
     /// Create a "bootstrap" cluster using the given list of (hostname, address) pairs.
+    #[doc(alias = "org.apache.kafka.common.Cluster#bootstrap")]
     pub fn bootstrap(addresses: &[(String, SocketAddr)]) -> Self {
         let mut nodes = Vec::with_capacity(addresses.len());
         let mut node_id: i32 = -1;
@@ -292,6 +298,7 @@ impl Cluster {
     }
 
     /// Return a copy of this cluster combined with additional partitions.
+    #[doc(alias = "org.apache.kafka.common.Cluster#withPartitions")]
     pub fn with_partitions(&self, partitions: HashMap<TopicPartition, PartitionInfo>) -> Self {
         let mut combined = self.partitions_by_topic_partition.clone();
         combined.extend(partitions);
@@ -309,16 +316,19 @@ impl Cluster {
     }
 
     /// The known set of nodes.
+    #[doc(alias = "org.apache.kafka.common.Cluster#nodes")]
     pub fn nodes(&self) -> &[Node] {
         &self.nodes
     }
 
     /// Get the node by the node id (or `None` if the node is not online or does not exist).
+    #[doc(alias = "org.apache.kafka.common.Cluster#nodeById")]
     pub fn node_by_id(&self, id: i32) -> Option<&Node> {
         self.nodes_by_id.get(&id)
     }
 
     /// Get the node by node id if the replica for the given partition is online.
+    #[doc(alias = "org.apache.kafka.common.Cluster#nodeIfOnline")]
     pub fn node_if_online(&self, partition: &TopicPartition, id: i32) -> Option<&Node> {
         let node = self.nodes_by_id.get(&id)?;
         let info = self.partitions_by_topic_partition.get(partition)?;
@@ -330,6 +340,7 @@ impl Cluster {
     }
 
     /// Get the current leader for the given topic-partition.
+    #[doc(alias = "org.apache.kafka.common.Cluster#leaderFor")]
     pub fn leader_for(&self, topic_partition: &TopicPartition) -> Option<&Node> {
         self.partitions_by_topic_partition
             .get(topic_partition)
@@ -337,21 +348,25 @@ impl Cluster {
     }
 
     /// Get the metadata for the specified partition.
+    #[doc(alias = "org.apache.kafka.common.Cluster#partition")]
     pub fn partition(&self, topic_partition: &TopicPartition) -> Option<&PartitionInfo> {
         self.partitions_by_topic_partition.get(topic_partition)
     }
 
     /// Get the list of partitions for this topic.
+    #[doc(alias = "org.apache.kafka.common.Cluster#partitionsForTopic")]
     pub fn partitions_for_topic(&self, topic: &str) -> &[PartitionInfo] {
         self.partitions_by_topic.get(topic).map(|v| v.as_slice()).unwrap_or(&[])
     }
 
     /// Get the number of partitions for the given topic.
+    #[doc(alias = "org.apache.kafka.common.Cluster#partitionCountForTopic")]
     pub fn partition_count_for_topic(&self, topic: &str) -> Option<usize> {
         self.partitions_by_topic.get(topic).map(|v| v.len())
     }
 
     /// Get the list of available partitions for this topic.
+    #[doc(alias = "org.apache.kafka.common.Cluster#availablePartitionsForTopic")]
     pub fn available_partitions_for_topic(&self, topic: &str) -> &[PartitionInfo] {
         self.available_partitions_by_topic
             .get(topic)
@@ -360,56 +375,67 @@ impl Cluster {
     }
 
     /// Get the list of partitions whose leader is this node.
+    #[doc(alias = "org.apache.kafka.common.Cluster#partitionsForNode")]
     pub fn partitions_for_node(&self, node_id: i32) -> &[PartitionInfo] {
         self.partitions_by_node.get(&node_id).map(|v| v.as_slice()).unwrap_or(&[])
     }
 
     /// Get all topics.
+    #[doc(alias = "org.apache.kafka.common.Cluster#topics")]
     pub fn topics(&self) -> impl Iterator<Item = &str> {
         self.partitions_by_topic.keys().map(|s| s.as_str())
     }
 
     /// Unauthorized topics.
+    #[doc(alias = "org.apache.kafka.common.Cluster#unauthorizedTopics")]
     pub fn unauthorized_topics(&self) -> &HashSet<String> {
         &self.unauthorized_topics
     }
 
     /// Invalid topics.
+    #[doc(alias = "org.apache.kafka.common.Cluster#invalidTopics")]
     pub fn invalid_topics(&self) -> &HashSet<String> {
         &self.invalid_topics
     }
 
     /// Internal topics.
+    #[doc(alias = "org.apache.kafka.common.Cluster#internalTopics")]
     pub fn internal_topics(&self) -> &HashSet<String> {
         &self.internal_topics
     }
 
     /// Whether bootstrap is configured.
+    #[doc(alias = "org.apache.kafka.common.Cluster#isBootstrapConfigured")]
     pub fn is_bootstrap_configured(&self) -> bool {
         self.is_bootstrap_configured
     }
 
     /// The cluster resource metadata.
+    #[doc(alias = "org.apache.kafka.common.Cluster#clusterResource")]
     pub fn cluster_resource(&self) -> &ClusterResource {
         &self.cluster_resource
     }
 
     /// The controller node, if known.
+    #[doc(alias = "org.apache.kafka.common.Cluster#controller")]
     pub fn controller(&self) -> Option<&Node> {
         self.controller.as_ref()
     }
 
     /// All topic IDs.
+    #[doc(alias = "org.apache.kafka.common.Cluster#topicIds")]
     pub fn topic_ids(&self) -> impl Iterator<Item = &Uuid> {
         self.topic_ids.values()
     }
 
     /// Get the topic ID for a given topic name.
+    #[doc(alias = "org.apache.kafka.common.Cluster#topicId")]
     pub fn topic_id(&self, topic: &str) -> Uuid {
         self.topic_ids.get(topic).copied().unwrap_or(Uuid::zero())
     }
 
     /// Get the topic name for a given topic ID.
+    #[doc(alias = "org.apache.kafka.common.Cluster#topicName")]
     pub fn topic_name(&self, topic_id: &Uuid) -> Option<&str> {
         self.topic_names.get(topic_id).map(|s| s.as_str())
     }
@@ -642,6 +668,7 @@ mod tests {
     }
 
     #[test]
+    #[doc(alias = "org.apache.kafka.common.ClusterTest#testNotEquals")]
     fn test_not_equals() {
         let cluster_id1 = "clusterId1";
         let cluster_id2 = "clusterId2";
@@ -776,6 +803,7 @@ mod tests {
     }
 
     #[test]
+    #[doc(alias = "org.apache.kafka.common.ClusterTest#testEquals")]
     fn test_equals() {
         let cluster_id1 = "clusterId1";
         let node1 = Node::new(1, "host0".to_string(), 100);

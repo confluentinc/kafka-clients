@@ -14,8 +14,8 @@
 
 //! Translated from `org.apache.kafka.common.errors.IneligibleReplicaException`.
 
-use crate::common::Errors;
 use crate::common::error::kafka_error_class;
+use crate::common::protocol::Errors;
 
 kafka_error_class! {
     /// The new ISR contains at least one ineligible replica.
@@ -24,6 +24,7 @@ kafka_error_class! {
     ///
     /// Java `extends` chain:
     ///    `IneligibleReplicaException` -> `ApiException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.IneligibleReplicaException")]
     IneligibleReplicaError,
     code: Errors::IneligibleReplica,
     extends: [

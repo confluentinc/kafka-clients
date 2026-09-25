@@ -20,6 +20,7 @@ use crate::common::metrics::{Measurable, Stat};
 /// A `MeasurableStat` is a [`Stat`] that is also [`Measurable`] (i.e. can produce
 /// a single floating point value). This is the interface used for most of the
 /// simple statistics such as `Avg`, `Max`, `CumulativeCount`, etc.
+#[doc(alias = "org.apache.kafka.common.metrics.MeasurableStat")]
 pub trait MeasurableStat: Stat + Measurable {}
 
 // Blanket impl so any type implementing both `Stat` and `Measurable` is a

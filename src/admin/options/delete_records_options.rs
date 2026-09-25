@@ -22,6 +22,7 @@
 /// Java this class only extends `AbstractOptions` (a `timeout_ms` field) with
 /// no additional fields.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[doc(alias = "org.apache.kafka.clients.admin.DeleteRecordsOptions")]
 pub struct DeleteRecordsOptions {
     timeout_ms: Option<i32>,
 }
