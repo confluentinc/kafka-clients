@@ -469,7 +469,8 @@ def check_group_metadata(group_metadata: ConsumerGroupMetadata | None) -> None:
     """Java's ``throwIfInvalidGroupMetadata`` (KafkaProducer.java:1491-1498),
     which ``sendOffsetsToTransaction`` calls first: the null arm, which the core
     cannot receive, and the generation / member id arm, which the core checks
-    too but only on an open producer that has a transaction manager."""
+    too, but the binding reaches the core only once the transaction manager and
+    closed checks have passed."""
     if group_metadata is None:
         raise IllegalArgumentError(message=NULL_GROUP_METADATA_MESSAGE)
     if group_metadata.generation_id() > 0 and group_metadata.member_id() == _UNKNOWN_MEMBER_ID:
