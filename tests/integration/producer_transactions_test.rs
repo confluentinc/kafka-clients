@@ -363,8 +363,7 @@ async fn test_idempotent_produce_survives_a_forced_epoch_bump() {
     // arrives depends on request ordering rather than on anything under test.
     assert!(
         matches!(fenced, Error::InvalidProducerEpoch(_) | Error::ProducerFenced(_)),
-        "a fenced producer's send must fail with a fencing error, got {fenced} ({:?})",
-        fenced.error()
+        "a fenced producer's send must fail with a fencing error, got {fenced:?}"
     );
 
     // Exactly the five committed records are readable, in order, with no

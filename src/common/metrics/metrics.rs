@@ -250,7 +250,8 @@ impl Metrics {
     /// no reporters. Mirrors Java's `Metrics(MetricConfig defaultConfig, Time time)`
     /// (`:101`).
     #[doc(alias = "org.apache.kafka.common.metrics.Metrics#Metrics")]
-    pub fn with_default_config_time(default_config: Arc<MetricConfig>, time: Arc<dyn Time>) -> Self {
+    #[cfg_attr(not(test), allow(dead_code))] // translated overload; only tests pass a clock
+    pub(crate) fn with_default_config_time(default_config: Arc<MetricConfig>, time: Arc<dyn Time>) -> Self {
         Self::with_default_config_reporters_time(default_config, Vec::new(), time)
     }
 
@@ -271,7 +272,8 @@ impl Metrics {
     /// Create a metrics repository with the supplied clock.
     /// Mirrors Java's `Metrics(Time time)` (`:93`).
     #[doc(alias = "org.apache.kafka.common.metrics.Metrics#Metrics")]
-    pub fn with_time(time: Arc<dyn Time>) -> Self {
+    #[cfg_attr(not(test), allow(dead_code))] // translated overload; only tests pass a clock
+    pub(crate) fn with_time(time: Arc<dyn Time>) -> Self {
         Self::with_default_config_reporters_time(Arc::new(MetricConfig::new()), Vec::new(), time)
     }
 
@@ -280,7 +282,7 @@ impl Metrics {
     /// `Metrics(MetricConfig defaultConfig, List<MetricsReporter> reporters, Time time)`
     /// (`:122`).
     #[doc(alias = "org.apache.kafka.common.metrics.Metrics#Metrics")]
-    pub fn with_default_config_reporters_time(
+    pub(crate) fn with_default_config_reporters_time(
         default_config: Arc<MetricConfig>,
         reporters: Vec<Arc<dyn MetricsReporter>>,
         time: Arc<dyn Time>,
@@ -1289,7 +1291,7 @@ mod tests {
     #[test]
     #[doc(alias = "org.apache.kafka.common.metrics.MetricsTest#testSimpleStats")]
     fn test_simple_stats() {
-        use crate::common::metrics::internals::TimeUnit;
+        use crate::common::metrics::TimeUnit;
         use crate::common::metrics::stats::{Avg, Max, Meter, Min, WindowedCount};
 
         let (metrics, time) = metrics_with_mock();
@@ -1387,7 +1389,8 @@ mod tests {
     #[test]
     #[doc(alias = "org.apache.kafka.common.metrics.MetricsTest#testRateWindowing")]
     fn test_rate_windowing() {
-        use crate::common::metrics::internals::{MetricsUtils, TimeUnit};
+        use crate::common::metrics::TimeUnit;
+        use crate::common::metrics::internals::MetricsUtils;
         use crate::common::metrics::stats::{Meter, WindowedCount};
 
         let time = Arc::new(MockTime::new());

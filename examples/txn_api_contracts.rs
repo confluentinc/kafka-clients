@@ -202,7 +202,7 @@ async fn recovery_loop_case(bootstrap: &str, suffix: &str) -> Result<bool, Strin
         Ok(failure) => {
             let error = failure.error();
             send_flag = error.is_kafka_error();
-            send_detail = format!("send error {}: is_kafka_error={send_flag}", variant(&error));
+            send_detail = format!("send error {}: is_kafka_error={send_flag}", variant(error));
         },
         Err(unexpected) => ok &= report(false, "the oversized record was rejected", unexpected),
     }

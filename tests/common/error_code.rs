@@ -29,9 +29,9 @@
 
 use std::collections::HashSet;
 
-use confluent_kafka::common::errors::*;
 use confluent_kafka::common::Error;
 use confluent_kafka::common::InvalidRecordError;
+use confluent_kafka::common::errors::*;
 
 pub const UNKNOWN_SERVER_ERROR: i32 = -1;
 pub const NONE: i32 = 0;
@@ -274,9 +274,7 @@ pub fn error_with_message(code: i32, message: String) -> Option<Error> {
         INVALID_RECORD => Some(Error::InvalidRecord(InvalidRecordError::new(message))),
         INVALID_RECORD_STATE => Some(Error::InvalidRecordState(InvalidRecordStateError::new(message))),
         INVALID_REGISTRATION => Some(Error::InvalidRegistration(InvalidRegistrationError::new(message))),
-        INVALID_REGULAR_EXPRESSION => {
-            Some(Error::InvalidRegularExpression(InvalidRegularExpressionError::new(message)))
-        },
+        INVALID_REGULAR_EXPRESSION => Some(Error::InvalidRegularExpression(InvalidRegularExpression::new(message))),
         INVALID_REPLICATION_FACTOR => {
             Some(Error::InvalidReplicationFactor(InvalidReplicationFactorError::new(message)))
         },
@@ -315,7 +313,7 @@ pub fn error_with_message(code: i32, message: String) -> Option<Error> {
         NO_REASSIGNMENT_IN_PROGRESS => {
             Some(Error::NoReassignmentInProgress(NoReassignmentInProgressError::new(message)))
         },
-        OFFSET_METADATA_TOO_LARGE => Some(Error::OffsetMetadataTooLarge(OffsetMetadataTooLargeError::new(message))),
+        OFFSET_METADATA_TOO_LARGE => Some(Error::OffsetMetadataTooLarge(OffsetMetadataTooLarge::new(message))),
         OFFSET_MOVED_TO_TIERED_STORAGE => {
             Some(Error::OffsetMovedToTieredStorage(OffsetMovedToTieredStorageError::new(message)))
         },

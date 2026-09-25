@@ -12,20 +12,21 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Translated from `org.apache.kafka.common.errors.InvalidRegularExpression`.
+//! Translated from `org.apache.kafka.common.errors.OffsetMetadataTooLarge`.
 
 use crate::common::error::kafka_error_class;
 use crate::common::protocol::Errors;
 
 kafka_error_class! {
-    /// The regular expression is not valid.
+    /// The metadata field of the offset request was too large.
     ///
-    /// Corresponds to Java's `InvalidRegularExpression`, error code [`Errors::InvalidRegularExpression`].
+    /// Corresponds to Java's `OffsetMetadataTooLarge`, error code [`Errors::OffsetMetadataTooLarge`].
     ///
     /// Java `extends` chain:
-    ///    `InvalidRegularExpression` -> `ApiException` -> `KafkaException`
-    InvalidRegularExpressionError,
-    code: Errors::InvalidRegularExpression,
+    ///    `OffsetMetadataTooLarge` -> `ApiException` -> `KafkaException`
+    #[doc(alias = "org.apache.kafka.common.errors.OffsetMetadataTooLarge")]
+    OffsetMetadataTooLarge,
+    code: Errors::OffsetMetadataTooLarge,
     extends: [
         is_kafka_error,
         is_api_error,

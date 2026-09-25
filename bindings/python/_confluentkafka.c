@@ -5700,43 +5700,43 @@ static int build_acl_arrays(PyObject* seq, int nullable, acl_arrays_t* a) {
 
 // (resource_type, resource_name, pattern_type, principal, host, operation,
 //  permission_type) — the field order `_to_acl_binding` unpacks.
-static PyObject* acl_binding_to_py(const kafka_common_AclBinding_t* b) {
+static PyObject* acl_binding_to_py(const kafka_common_acl_AclBinding_t* b) {
     if (b == NULL) Py_RETURN_NONE;
     return Py_BuildValue("(isissii)",
-                         kafka_common_AclBinding_resource_type(b),
-                         kafka_common_AclBinding_resource_name(b),
-                         kafka_common_AclBinding_pattern_type(b),
-                         kafka_common_AclBinding_principal(b),
-                         kafka_common_AclBinding_host(b),
-                         kafka_common_AclBinding_operation(b),
-                         kafka_common_AclBinding_permission_type(b));
+                         kafka_common_acl_AclBinding_resource_type(b),
+                         kafka_common_acl_AclBinding_resource_name(b),
+                         kafka_common_acl_AclBinding_pattern_type(b),
+                         kafka_common_acl_AclBinding_principal(b),
+                         kafka_common_acl_AclBinding_host(b),
+                         kafka_common_acl_AclBinding_operation(b),
+                         kafka_common_acl_AclBinding_permission_type(b));
 }
 
 // Same seven fields, but the three strings use 'z' so a NULL (Java's "match
 // any") becomes None rather than crashing on PyUnicode_FromString(NULL).
-static PyObject* acl_binding_filter_to_py(const kafka_common_AclBindingFilter_t* f) {
+static PyObject* acl_binding_filter_to_py(const kafka_common_acl_AclBindingFilter_t* f) {
     if (f == NULL) Py_RETURN_NONE;
     return Py_BuildValue("(izizzii)",
-                         kafka_common_AclBindingFilter_resource_type(f),
-                         kafka_common_AclBindingFilter_resource_name(f),
-                         kafka_common_AclBindingFilter_pattern_type(f),
-                         kafka_common_AclBindingFilter_principal(f),
-                         kafka_common_AclBindingFilter_host(f),
-                         kafka_common_AclBindingFilter_operation(f),
-                         kafka_common_AclBindingFilter_permission_type(f));
+                         kafka_common_acl_AclBindingFilter_resource_type(f),
+                         kafka_common_acl_AclBindingFilter_resource_name(f),
+                         kafka_common_acl_AclBindingFilter_pattern_type(f),
+                         kafka_common_acl_AclBindingFilter_principal(f),
+                         kafka_common_acl_AclBindingFilter_host(f),
+                         kafka_common_acl_AclBindingFilter_operation(f),
+                         kafka_common_acl_AclBindingFilter_permission_type(f));
 }
 
 // [(entity_type, entity_name_or_None)] — a None name is Java's null map value,
 // the built-in default entity, which is not the empty name.
-static PyObject* client_quota_entity_to_py(const kafka_common_ClientQuotaEntity_t* e) {
+static PyObject* client_quota_entity_to_py(const kafka_common_quota_ClientQuotaEntity_t* e) {
     if (e == NULL) Py_RETURN_NONE;
-    int32_t n = kafka_common_ClientQuotaEntity_entry_count(e);
+    int32_t n = kafka_common_quota_ClientQuotaEntity_entry_count(e);
     PyObject* pairs = PyTuple_New(n < 0 ? 0 : n);
     if (pairs == NULL) return NULL;
     for (int32_t i = 0; i < n; i++) {
         PyObject* pair = Py_BuildValue("(sz)",
-                                       kafka_common_ClientQuotaEntity_get_entry_type(e, i),
-                                       kafka_common_ClientQuotaEntity_get_entry_name(e, i));
+                                       kafka_common_quota_ClientQuotaEntity_get_entry_type(e, i),
+                                       kafka_common_quota_ClientQuotaEntity_get_entry_name(e, i));
         if (pair == NULL) { Py_DECREF(pairs); return NULL; }
         PyTuple_SET_ITEM(pairs, i, pair);
     }
@@ -6131,36 +6131,36 @@ static void admin_update_features_trampoline(kafka_admin_UpdateFeaturesResult_t*
 
 // (principal_type, name, token_authenticated) — the field order
 // `_to_kafka_principal` unpacks.
-static PyObject* kafka_principal_to_py(const kafka_common_KafkaPrincipal_t* p) {
+static PyObject* kafka_principal_to_py(const kafka_common_security_auth_KafkaPrincipal_t* p) {
     if (p == NULL) Py_RETURN_NONE;
-    return Py_BuildValue("(ssO)", kafka_common_KafkaPrincipal_principal_type(p),
-                         kafka_common_KafkaPrincipal_name(p),
-                         kafka_common_KafkaPrincipal_token_authenticated(p) ? Py_True : Py_False);
+    return Py_BuildValue("(ssO)", kafka_common_security_auth_KafkaPrincipal_principal_type(p),
+                         kafka_common_security_auth_KafkaPrincipal_name(p),
+                         kafka_common_security_auth_KafkaPrincipal_token_authenticated(p) ? Py_True : Py_False);
 }
 
 // (token_id, owner, requester, [renewers], issue_ts, expiry_ts, max_ts,
 //  hmac_bytes, hmac_base64) — the field order `_to_delegation_token` unpacks.
 // The HMAC crosses as `bytes` rather than `str`: it is a raw MAC and can
 // contain interior NULs, so it needs the explicit length that `y#` carries.
-static PyObject* delegation_token_to_py(const kafka_common_DelegationToken_t* t) {
+static PyObject* delegation_token_to_py(const kafka_common_security_token_delegation_DelegationToken_t* t) {
     if (t == NULL) Py_RETURN_NONE;
-    const kafka_common_TokenInformation_t* info = kafka_common_DelegationToken_token_info(t);
-    int32_t renewer_count = kafka_common_TokenInformation_renewer_count(info);
+    const kafka_common_security_token_delegation_TokenInformation_t* info = kafka_common_security_token_delegation_DelegationToken_token_info(t);
+    int32_t renewer_count = kafka_common_security_token_delegation_TokenInformation_renewer_count(info);
     PyObject* renewers = PyList_New(renewer_count < 0 ? 0 : renewer_count);
     if (renewers == NULL) return NULL;
     for (int32_t i = 0; i < renewer_count; i++) {
-        PyObject* renewer = kafka_principal_to_py(kafka_common_TokenInformation_get_renewer(info, i));
+        PyObject* renewer = kafka_principal_to_py(kafka_common_security_token_delegation_TokenInformation_get_renewer(info, i));
         if (renewer == NULL) { Py_DECREF(renewers); return NULL; }
         PyList_SET_ITEM(renewers, i, renewer);
     }
-    PyObject* owner = kafka_principal_to_py(kafka_common_TokenInformation_owner(info));
-    PyObject* requester = kafka_principal_to_py(kafka_common_TokenInformation_token_requester(info));
+    PyObject* owner = kafka_principal_to_py(kafka_common_security_token_delegation_TokenInformation_owner(info));
+    PyObject* requester = kafka_principal_to_py(kafka_common_security_token_delegation_TokenInformation_token_requester(info));
     if (owner == NULL || requester == NULL) {
         Py_XDECREF(owner); Py_XDECREF(requester); Py_DECREF(renewers);
         return NULL;
     }
     int32_t hmac_len = 0;
-    const uint8_t* hmac = kafka_common_DelegationToken_hmac(t, &hmac_len);
+    const uint8_t* hmac = kafka_common_security_token_delegation_DelegationToken_hmac(t, &hmac_len);
     // 'O' (not 'N') plus an explicit, unconditional Py_DECREF below: 'N'
     // steals its reference only when do_mkvalue actually runs for that item,
     // which do_mktuple skips entirely if its own PyTuple_New fails (OOM) —
@@ -6168,13 +6168,13 @@ static PyObject* delegation_token_to_py(const kafka_common_DelegationToken_t* t)
     // decref that runs regardless of Py_BuildValue's outcome makes ownership
     // independent of that internal control flow. See node_to_py() above for
     // the established precedent of this pattern in this file.
-    PyObject* out = Py_BuildValue("(sOOOLLLy#s)", kafka_common_TokenInformation_token_id(info),
+    PyObject* out = Py_BuildValue("(sOOOLLLy#s)", kafka_common_security_token_delegation_TokenInformation_token_id(info),
                          owner, requester, renewers,
-                         (long long)kafka_common_TokenInformation_issue_timestamp(info),
-                         (long long)kafka_common_TokenInformation_expiry_timestamp(info),
-                         (long long)kafka_common_TokenInformation_max_timestamp(info),
+                         (long long)kafka_common_security_token_delegation_TokenInformation_issue_timestamp(info),
+                         (long long)kafka_common_security_token_delegation_TokenInformation_expiry_timestamp(info),
+                         (long long)kafka_common_security_token_delegation_TokenInformation_max_timestamp(info),
                          (const char*)hmac, (Py_ssize_t)(hmac_len < 0 ? 0 : hmac_len),
-                         kafka_common_DelegationToken_hmac_as_base64_string(t));
+                         kafka_common_security_token_delegation_DelegationToken_hmac_as_base64_string(t));
     Py_DECREF(owner); Py_DECREF(requester); Py_DECREF(renewers);
     return out;
 }

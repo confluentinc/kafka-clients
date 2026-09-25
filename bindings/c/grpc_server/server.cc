@@ -3307,7 +3307,7 @@ class AdminServiceImpl final : public AdminService::Service {
     const int32_t count = kafka_admin_CreateAclsResult_count(result);
     for (int32_t i = 0; i < count; i++) {
       VoidResultEntry* entry = resp->add_entries();
-      const kafka_common_AclBinding_t* binding =
+      const kafka_common_acl_AclBinding_t* binding =
           kafka_admin_CreateAclsResult_get_binding(result, i);
       if (binding == nullptr) {
         // Unreachable for i < count, but a keyless entry would be silently
@@ -3353,7 +3353,7 @@ class AdminServiceImpl final : public AdminService::Service {
 
     const int32_t count = kafka_admin_DescribeAclsResult_count(result);
     for (int32_t i = 0; i < count; i++) {
-      const kafka_common_AclBinding_t* binding =
+      const kafka_common_acl_AclBinding_t* binding =
           kafka_admin_DescribeAclsResult_get_binding(result, i);
       if (binding == nullptr) {
         resp->clear_acls();
@@ -3390,7 +3390,7 @@ class AdminServiceImpl final : public AdminService::Service {
     const int32_t count = kafka_admin_DeleteAclsResult_count(result);
     for (int32_t i = 0; i < count; i++) {
       DeleteAclsEntry* entry = resp->add_entries();
-      const kafka_common_AclBindingFilter_t* filter =
+      const kafka_common_acl_AclBindingFilter_t* filter =
           kafka_admin_DeleteAclsResult_get_filter(result, i);
       if (filter == nullptr) {
         resp->clear_entries();
@@ -3414,7 +3414,7 @@ class AdminServiceImpl final : public AdminService::Service {
       const int32_t inner = kafka_admin_DeleteAclsResult_get_result_count(result, i);
       for (int32_t j = 0; j < inner; j++) {
         DeletedAcl* deleted = value->add_values();
-        const kafka_common_AclBinding_t* deleted_binding =
+        const kafka_common_acl_AclBinding_t* deleted_binding =
             kafka_admin_DeleteAclsResult_get_binding(result, i, j);
         if (deleted_binding != nullptr) {
           acl_binding_to_proto(deleted_binding, deleted->mutable_binding());
@@ -3502,7 +3502,7 @@ class AdminServiceImpl final : public AdminService::Service {
 
     const int32_t count = kafka_admin_DescribeClientQuotasResult_count(result);
     for (int32_t i = 0; i < count; i++) {
-      const kafka_common_ClientQuotaEntity_t* entity =
+      const kafka_common_quota_ClientQuotaEntity_t* entity =
           kafka_admin_DescribeClientQuotasResult_get_entity(result, i);
       if (entity == nullptr) {
         resp->clear_entities();
@@ -3611,7 +3611,7 @@ class AdminServiceImpl final : public AdminService::Service {
 
     const int32_t count = kafka_admin_AlterClientQuotasResult_count(result);
     for (int32_t i = 0; i < count; i++) {
-      const kafka_common_ClientQuotaEntity_t* entity =
+      const kafka_common_quota_ClientQuotaEntity_t* entity =
           kafka_admin_AlterClientQuotasResult_get_entity(result, i);
       if (entity == nullptr) {
         resp->clear_entries();
@@ -3778,7 +3778,7 @@ class AdminServiceImpl final : public AdminService::Service {
       return grpc::Status::OK;
     }
 
-    const kafka_common_DelegationToken_t* token =
+    const kafka_common_security_token_delegation_DelegationToken_t* token =
         kafka_admin_CreateDelegationTokenResult_get_token(result);
     if (token == nullptr) {
       *resp->mutable_error() = make_synthetic_error("createDelegationToken returned neither a token nor an error");
@@ -3861,7 +3861,7 @@ class AdminServiceImpl final : public AdminService::Service {
 
     const int32_t count = kafka_admin_DescribeDelegationTokenResult_count(result);
     for (int32_t i = 0; i < count; i++) {
-      const kafka_common_DelegationToken_t* token =
+      const kafka_common_security_token_delegation_DelegationToken_t* token =
           kafka_admin_DescribeDelegationTokenResult_get_token(result, i);
       if (token == nullptr || !delegation_token_to_proto(token, resp->add_tokens())) {
         resp->clear_tokens();
@@ -4424,50 +4424,50 @@ class AdminServiceImpl final : public AdminService::Service {
     const char* const* names;
   };
 
-  static void acl_binding_to_proto(const kafka_common_AclBinding_t* binding, AclBinding* dst) {
-    dst->set_resource_type(kafka_common_AclBinding_resource_type(binding));
-    dst->set_resource_name(cstr(kafka_common_AclBinding_resource_name(binding)));
-    dst->set_pattern_type(kafka_common_AclBinding_pattern_type(binding));
-    dst->set_principal(cstr(kafka_common_AclBinding_principal(binding)));
-    dst->set_host(cstr(kafka_common_AclBinding_host(binding)));
-    dst->set_operation(kafka_common_AclBinding_operation(binding));
-    dst->set_permission_type(kafka_common_AclBinding_permission_type(binding));
+  static void acl_binding_to_proto(const kafka_common_acl_AclBinding_t* binding, AclBinding* dst) {
+    dst->set_resource_type(kafka_common_acl_AclBinding_resource_type(binding));
+    dst->set_resource_name(cstr(kafka_common_acl_AclBinding_resource_name(binding)));
+    dst->set_pattern_type(kafka_common_acl_AclBinding_pattern_type(binding));
+    dst->set_principal(cstr(kafka_common_acl_AclBinding_principal(binding)));
+    dst->set_host(cstr(kafka_common_acl_AclBinding_host(binding)));
+    dst->set_operation(kafka_common_acl_AclBinding_operation(binding));
+    dst->set_permission_type(kafka_common_acl_AclBinding_permission_type(binding));
   }
 
   // The three nullable strings stay absent when the C accessor returns NULL:
   // that is Java's match-any, and `cstr` would turn it into "".
-  static void acl_filter_to_proto(const kafka_common_AclBindingFilter_t* filter,
+  static void acl_filter_to_proto(const kafka_common_acl_AclBindingFilter_t* filter,
                                   AclBindingFilter* dst) {
-    dst->set_resource_type(kafka_common_AclBindingFilter_resource_type(filter));
-    dst->set_pattern_type(kafka_common_AclBindingFilter_pattern_type(filter));
-    dst->set_operation(kafka_common_AclBindingFilter_operation(filter));
-    dst->set_permission_type(kafka_common_AclBindingFilter_permission_type(filter));
-    const char* name = kafka_common_AclBindingFilter_resource_name(filter);
+    dst->set_resource_type(kafka_common_acl_AclBindingFilter_resource_type(filter));
+    dst->set_pattern_type(kafka_common_acl_AclBindingFilter_pattern_type(filter));
+    dst->set_operation(kafka_common_acl_AclBindingFilter_operation(filter));
+    dst->set_permission_type(kafka_common_acl_AclBindingFilter_permission_type(filter));
+    const char* name = kafka_common_acl_AclBindingFilter_resource_name(filter);
     if (name != nullptr) dst->set_resource_name(std::string(name));
-    const char* principal = kafka_common_AclBindingFilter_principal(filter);
+    const char* principal = kafka_common_acl_AclBindingFilter_principal(filter);
     if (principal != nullptr) dst->set_principal(std::string(principal));
-    const char* host = kafka_common_AclBindingFilter_host(filter);
+    const char* host = kafka_common_acl_AclBindingFilter_host(filter);
     if (host != nullptr) dst->set_host(std::string(host));
   }
 
   // An absent entity name stays absent: that is Java's built-in *default*
   // entity for the type, not the entity named "".
-  static void quota_entity_to_proto(const kafka_common_ClientQuotaEntity_t* entity,
+  static void quota_entity_to_proto(const kafka_common_quota_ClientQuotaEntity_t* entity,
                                     ClientQuotaEntity* dst) {
-    const int32_t n = kafka_common_ClientQuotaEntity_entry_count(entity);
+    const int32_t n = kafka_common_quota_ClientQuotaEntity_entry_count(entity);
     for (int32_t i = 0; i < n; i++) {
       auto* pair = dst->add_entries();
-      pair->set_entity_type(cstr(kafka_common_ClientQuotaEntity_get_entry_type(entity, i)));
-      const char* name = kafka_common_ClientQuotaEntity_get_entry_name(entity, i);
+      pair->set_entity_type(cstr(kafka_common_quota_ClientQuotaEntity_get_entry_type(entity, i)));
+      const char* name = kafka_common_quota_ClientQuotaEntity_get_entry_name(entity, i);
       if (name != nullptr) pair->set_entity_name(std::string(name));
     }
   }
 
-  static void principal_to_proto(const kafka_common_KafkaPrincipal_t* principal,
+  static void principal_to_proto(const kafka_common_security_auth_KafkaPrincipal_t* principal,
                                  KafkaPrincipal* dst) {
-    dst->set_principal_type(cstr(kafka_common_KafkaPrincipal_principal_type(principal)));
-    dst->set_name(cstr(kafka_common_KafkaPrincipal_name(principal)));
-    dst->set_token_authenticated(kafka_common_KafkaPrincipal_token_authenticated(principal));
+    dst->set_principal_type(cstr(kafka_common_security_auth_KafkaPrincipal_principal_type(principal)));
+    dst->set_name(cstr(kafka_common_security_auth_KafkaPrincipal_name(principal)));
+    dst->set_token_authenticated(kafka_common_security_auth_KafkaPrincipal_token_authenticated(principal));
   }
 
   // Returns false when the token has no `token_info`, which the caller turns
@@ -4478,34 +4478,34 @@ class AdminServiceImpl final : public AdminService::Service {
   // getting that pair wrong is a live defect class, which is why the Rust client
   // asserts each one by its own getter (Java's `TokenInformation.equals` ignores
   // the expiry, so an equality check could not see it).
-  static bool delegation_token_to_proto(const kafka_common_DelegationToken_t* token,
+  static bool delegation_token_to_proto(const kafka_common_security_token_delegation_DelegationToken_t* token,
                                         DelegationToken* dst) {
-    const kafka_common_TokenInformation_t* info =
-        kafka_common_DelegationToken_token_info(token);
+    const kafka_common_security_token_delegation_TokenInformation_t* info =
+        kafka_common_security_token_delegation_DelegationToken_token_info(token);
     if (info == nullptr) return false;
     TokenInformation* out = dst->mutable_token_information();
-    out->set_token_id(cstr(kafka_common_TokenInformation_token_id(info)));
-    const kafka_common_KafkaPrincipal_t* owner = kafka_common_TokenInformation_owner(info);
+    out->set_token_id(cstr(kafka_common_security_token_delegation_TokenInformation_token_id(info)));
+    const kafka_common_security_auth_KafkaPrincipal_t* owner = kafka_common_security_token_delegation_TokenInformation_owner(info);
     if (owner != nullptr) principal_to_proto(owner, out->mutable_owner());
-    const kafka_common_KafkaPrincipal_t* requester =
-        kafka_common_TokenInformation_token_requester(info);
+    const kafka_common_security_auth_KafkaPrincipal_t* requester =
+        kafka_common_security_token_delegation_TokenInformation_token_requester(info);
     if (requester != nullptr) principal_to_proto(requester, out->mutable_token_requester());
-    const int32_t renewers = kafka_common_TokenInformation_renewer_count(info);
+    const int32_t renewers = kafka_common_security_token_delegation_TokenInformation_renewer_count(info);
     for (int32_t i = 0; i < renewers; i++) {
-      const kafka_common_KafkaPrincipal_t* renewer =
-          kafka_common_TokenInformation_get_renewer(info, i);
+      const kafka_common_security_auth_KafkaPrincipal_t* renewer =
+          kafka_common_security_token_delegation_TokenInformation_get_renewer(info, i);
       if (renewer != nullptr) principal_to_proto(renewer, out->add_renewers());
     }
-    out->set_issue_timestamp(kafka_common_TokenInformation_issue_timestamp(info));
-    out->set_max_timestamp(kafka_common_TokenInformation_max_timestamp(info));
-    out->set_expiry_timestamp(kafka_common_TokenInformation_expiry_timestamp(info));
+    out->set_issue_timestamp(kafka_common_security_token_delegation_TokenInformation_issue_timestamp(info));
+    out->set_max_timestamp(kafka_common_security_token_delegation_TokenInformation_max_timestamp(info));
+    out->set_expiry_timestamp(kafka_common_security_token_delegation_TokenInformation_expiry_timestamp(info));
     int32_t hmac_len = 0;
-    const uint8_t* hmac = kafka_common_DelegationToken_hmac(token, &hmac_len);
+    const uint8_t* hmac = kafka_common_security_token_delegation_DelegationToken_hmac(token, &hmac_len);
     if (hmac != nullptr && hmac_len > 0) {
       dst->set_hmac(std::string(reinterpret_cast<const char*>(hmac),
                                 static_cast<size_t>(hmac_len)));
     }
-    dst->set_hmac_as_base64(cstr(kafka_common_DelegationToken_hmac_as_base64_string(token)));
+    dst->set_hmac_as_base64(cstr(kafka_common_security_token_delegation_DelegationToken_hmac_as_base64_string(token)));
     return true;
   }
 

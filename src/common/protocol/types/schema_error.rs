@@ -36,6 +36,12 @@ kafka_error_class! {
     /// site in the client that raises it: a buffer underflow while parsing a
     /// response, and a correlation-id mismatch on a response that is unrelated
     /// to a SASL request.
+    ///
+    /// Crate-private although `Error::Schema` is public: Java's class sits in
+    /// `common.protocol.types`, which is "not a supported API". Callers match
+    /// the variant and use `Display` / `source()`; the payload itself is not
+    /// reachable by name.
+    #[allow(unnameable_types)]
     #[doc(alias = "org.apache.kafka.common.protocol.types.SchemaException")]
     SchemaError,
     extends: [

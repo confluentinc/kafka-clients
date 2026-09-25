@@ -18,7 +18,7 @@
 
 use crate::common::Error;
 use crate::common::serialization::Deserializer;
-use crate::consumer::{Consumer, ConsumerConfig, GroupProtocol, async_kafka_consumer};
+use crate::consumer::{AsyncKafkaConsumer, Consumer, ConsumerConfig, GroupProtocol};
 
 /// The public entry point for constructing a [`Consumer`].
 ///
@@ -81,7 +81,7 @@ impl KafkaConsumer {
     {
         // Phase 12 commit (4/N) wires the `GroupProtocol::Consumer` arm to
         // the production constructor at
-        // [`async_kafka_consumer::AsyncKafkaConsumer::new`], which translates
+        // [`AsyncKafkaConsumer::new`], which translates
         // the Java primary constructor at `AsyncKafkaConsumer.java:285-518`
         // end-to-end. The ctor builds the full dependency closure
         // (`SubscriptionState`, `ConsumerMetadata`, `NetworkClient` +
@@ -97,7 +97,7 @@ impl KafkaConsumer {
         // later milestone).
         let protocol = GroupProtocol::of(config.group_protocol())?;
         match protocol {
-            GroupProtocol::Consumer => Ok(Box::new(async_kafka_consumer::AsyncKafkaConsumer::<K, V>::new(
+            GroupProtocol::Consumer => Ok(Box::new(AsyncKafkaConsumer::<K, V>::new(
                 config,
                 key_deserializer,
                 value_deserializer,

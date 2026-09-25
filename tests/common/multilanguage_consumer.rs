@@ -55,7 +55,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use confluent_kafka::common::header::{RecordHeader, RecordHeaders};
-use confluent_kafka::common::metrics::{ClosureGauge, KafkaMetric, MetricConfig, MetricValueProvider, SystemTime};
+use confluent_kafka::common::metrics::{ClosureGauge, KafkaMetric, MetricValueProvider, Metrics};
 use confluent_kafka::common::record::TimestampType;
 use confluent_kafka::common::{Error, MetricName, MetricValue, PartitionInfo, TopicPartition};
 use confluent_kafka::consumer::{
@@ -878,13 +878,10 @@ fn metric_from_proto(m: proto::Metric) -> (MetricName, Arc<KafkaMetric>) {
         None => MetricValue::Double(0.0),
     };
     let gauge = ClosureGauge::new(move |_config, _now| value.clone());
-    let metric = KafkaMetric::new(
-        name.clone(),
-        MetricValueProvider::Gauge(Box::new(gauge)),
-        Arc::new(MetricConfig::new()),
-        Arc::new(SystemTime::default()),
-    );
-    (name, Arc::new(metric))
+    // A standalone registry mints the `KafkaMetric`, as Java code obtains one
+    // (its constructor is public only "for testing"); the metric outlives it.
+    let metric = Metrics::new().add_metric_if_absent(name.clone(), None, MetricValueProvider::Gauge(Box::new(gauge)));
+    (name, metric)
 }
 
 fn long_offset_map_from_proto(map: proto::LongOffsetMap) -> HashMap<TopicPartition, i64> {

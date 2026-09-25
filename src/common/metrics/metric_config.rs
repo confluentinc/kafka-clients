@@ -16,7 +16,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::common::metrics::internals::TimeUnit;
+use crate::common::metrics::TimeUnit;
 use crate::common::metrics::{Quota, RecordingLevel};
 
 /// Configuration values for metrics.

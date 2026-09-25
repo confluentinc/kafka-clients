@@ -18,6 +18,7 @@
 use std::collections::BTreeMap;
 
 use crate::common::Error;
+use crate::common::metrics::TimeUnit;
 
 /// Translates the Java static-utility class `org.apache.kafka.common.metrics.internals.MetricsUtils`,
 /// which has no instance state, so it becomes a unit struct hosting its
@@ -59,58 +60,6 @@ impl MetricsUtils {
             i += 2;
         }
         Ok(tags)
-    }
-}
-
-/// A subset of `java.util.concurrent.TimeUnit` used by the metrics rate stats.
-///
-/// Only the variants the metrics framework needs are modelled; the conversion
-/// factors in [`MetricsUtils::convert`] are exactly Java's `TimeUnit` semantics.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum TimeUnit {
-    /// Nanoseconds.
-    Nanoseconds,
-    /// Microseconds.
-    Microseconds,
-    /// Milliseconds.
-    Milliseconds,
-    /// Seconds.
-    Seconds,
-    /// Minutes.
-    Minutes,
-    /// Hours.
-    Hours,
-    /// Days.
-    Days,
-}
-
-impl TimeUnit {
-    /// The `name()` of the unit, matching Java's enum constant name.
-    pub fn name(&self) -> &'static str {
-        match self {
-            TimeUnit::Nanoseconds => "NANOSECONDS",
-            TimeUnit::Microseconds => "MICROSECONDS",
-            TimeUnit::Milliseconds => "MILLISECONDS",
-            TimeUnit::Seconds => "SECONDS",
-            TimeUnit::Minutes => "MINUTES",
-            TimeUnit::Hours => "HOURS",
-            TimeUnit::Days => "DAYS",
-        }
-    }
-
-    /// Convert a duration expressed in this unit to milliseconds, mirroring
-    /// `TimeUnit.MILLISECONDS.convert(window, unit)`. Integer truncation matches
-    /// Java's `long` arithmetic.
-    pub fn to_millis(self, window: i64) -> i64 {
-        match self {
-            TimeUnit::Nanoseconds => window / 1_000_000,
-            TimeUnit::Microseconds => window / 1_000,
-            TimeUnit::Milliseconds => window,
-            TimeUnit::Seconds => window.saturating_mul(1_000),
-            TimeUnit::Minutes => window.saturating_mul(60 * 1_000),
-            TimeUnit::Hours => window.saturating_mul(60 * 60 * 1_000),
-            TimeUnit::Days => window.saturating_mul(24 * 60 * 60 * 1_000),
-        }
     }
 }
 

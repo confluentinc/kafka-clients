@@ -42,7 +42,8 @@ mod subscription_pattern;
 
 pub(crate) mod internals;
 
-pub use async_kafka_consumer::{AsyncKafkaConsumer, ConsumerHandle};
+pub(crate) use async_kafka_consumer::AsyncKafkaConsumer;
+pub use async_kafka_consumer::ConsumerHandle;
 pub use close_options::{CloseOptions, GroupMembershipOperation};
 pub use consumer_config::ConsumerConfig;
 pub use consumer_group_metadata::ConsumerGroupMetadata;

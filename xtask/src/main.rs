@@ -433,7 +433,10 @@ fn parse_error_class_imports() -> anyhow::Result<Vec<String>> {
             syn::Item::Use(item) => Some(item.tree.to_token_stream().to_string().replace(' ', "")),
             _ => None,
         })
-        .filter_map(|tree| tree.strip_prefix("crate::common::").map(|rest| format!("confluent_kafka::common::{rest}")))
+        .filter_map(|tree| {
+            tree.strip_prefix("crate::common::")
+                .map(|rest| format!("confluent_kafka::common::{rest}"))
+        })
         .collect())
 }
 

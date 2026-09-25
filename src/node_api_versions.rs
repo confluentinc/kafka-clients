@@ -441,18 +441,18 @@ mod tests {
     fn test_unsupported_api_message_uses_the_enum_constant_name() {
         let versions = NodeApiVersions::new(&[], &[]);
         let err = versions.latest_usable_version(&ApiKeys::FETCH).unwrap_err();
-        assert_eq!(err.to_string(), "The node does not support FETCH");
+        assert_eq!(err.message(), "The node does not support FETCH");
 
         // Multi-word keys keep the SCREAMING_SNAKE_CASE spelling too.
         let err = versions.latest_usable_version(&ApiKeys::LIST_OFFSETS).unwrap_err();
-        assert_eq!(err.to_string(), "The node does not support LIST_OFFSETS");
+        assert_eq!(err.message(), "The node does not support LIST_OFFSETS");
 
         let api_versions = NodeApiVersions::create_single(ApiKeys::PRODUCE.id(), 1, 2);
         let err = api_versions
             .latest_usable_version_in_range(&ApiKeys::PRODUCE, 3, 4)
             .unwrap_err();
         assert_eq!(
-            err.to_string(),
+            err.message(),
             "The node does not support PRODUCE with version in range [3,4]. The supported range is [1,2]."
         );
     }
