@@ -611,6 +611,16 @@ def test_every_java_forms_error_class_has_a_rejection_case() -> None:
     assert ThrottlingQuotaExceededError(throttle_time_ms=0, message="m").throttle_time_ms() == 0
 
 
+def test_group_authorization_for_group_id() -> None:
+    # Java's public static GroupAuthorizationException.forGroupId(String).
+    e = GroupAuthorizationError.for_group_id(group_id="g")
+    assert type(e) is GroupAuthorizationError
+    assert str(e) == "Not authorized to access group: g"
+    assert e.group_id() == "g"
+    with pytest.raises(TypeError):
+        GroupAuthorizationError.for_group_id("g")  # type: ignore[misc]
+
+
 def test_singletons() -> None:
     assert isinstance(DisconnectError.INSTANCE, DisconnectError)
     assert str(DisconnectError.INSTANCE) == ""

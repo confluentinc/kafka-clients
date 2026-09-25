@@ -43,7 +43,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::java_parse::{self, CallKind, Ctor, Expr, GetterBody, JavaClass, Param, Visibility};
+use crate::java_parse::{self, CallKind, Ctor, Expr, Factory, GetterBody, JavaClass, Param, Visibility};
 
 /// Root of the Java source tree (Apache Kafka 4.3.1), relative to the repo root.
 const JAVA_ROOT: &str = "kafka/clients/src/main/java";
@@ -786,6 +786,7 @@ fn jdk_class(fqn: &str, parent: &str, ctors: &[JdkCtor]) -> JavaClass {
             .collect(),
         fields: Vec::new(),
         getters: Vec::new(),
+        factories: Vec::new(),
         enums: Vec::new(),
         singletons: Vec::new(),
     }
@@ -2128,6 +2129,59 @@ fn stub_param(
     })
 }
 
+/// Java's public static factories (`GroupAuthorizationException.forGroupId`) as
+/// `@staticmethod`s building the class through the constructor Java calls
+/// (CLAUDE.md, Class family: "Java static methods -> `@staticmethod`"): each
+/// with its code and stub lines.
+type RenderedFactory<'a> = (&'a Factory, Vec<String>, Vec<String>);
+
+fn render_factories<'a>(
+    g: &Graph,
+    info: &'a ClassInfo,
+    model: &PyModel,
+    used: &mut BTreeSet<String>,
+) -> anyhow::Result<Vec<RenderedFactory<'a>>> {
+    let py_name = &info.py_name;
+    let mut out = Vec::new();
+    for f in &info.java.factories {
+        let mut env = Env::new();
+        let mut params = Vec::new();
+        for p in &f.params {
+            let py = snake(&p.name);
+            let ty = py_type(&p.ty, true, info, used)?;
+            params.push(format!("{py}: {ty}"));
+            env.insert(p.name.clone(), PyVal::param(&py, &p.ty));
+        }
+        let vals: Vec<PyVal> = f.args.iter().map(|a| g.translate(a, &env)).collect::<anyhow::Result<_>>()?;
+        let target = g.resolve(&info.java_fqn, &vals, false)?;
+        let form = model
+            .forms
+            .iter()
+            .find(|form| form.ctor == target)
+            .ok_or_else(|| anyhow::anyhow!("{}.{}: calls a non-public constructor", info.java_fqn, f.name))?;
+        let kwargs: Vec<String> = form.params.iter().zip(&vals).map(|(k, v)| format!("{k}={}", v.expr)).collect();
+        let name = snake(&f.name);
+        let args = if params.is_empty() {
+            String::new()
+        } else {
+            format!("*, {}", params.join(", "))
+        };
+        let java_params: Vec<&str> = f.params.iter().map(|p| p.name.as_str()).collect();
+        let code = vec![
+            "    @staticmethod".to_string(),
+            format!("    def {name}({args}) -> {py_name}:"),
+            format!("        \"\"\"Java's static ``{}({})``.\"\"\"", f.name, java_params.join(", ")),
+            format!("        return {py_name}({})", kwargs.join(", ")),
+        ];
+        let sig = vec![
+            "    @staticmethod".to_string(),
+            format!("    def {name}({args}) -> {py_name}: ..."),
+        ];
+        out.push((f, code, sig));
+    }
+    Ok(out)
+}
+
 struct Rendered {
     py: String,
     pyi: String,
@@ -2347,9 +2401,20 @@ fn render_class(g: &Graph, info: &ClassInfo) -> anyhow::Result<Rendered> {
     let kwargs: Vec<String> = model.params.iter().map(|p| format!("{0}={0}", p.name)).collect();
     body.push(format!("        self._java_kwargs = _throwable.kwargs({})", kwargs.join(", ")));
 
-    // getters
+    // getters, with the public static factories in their declaration places
     let mut getter_sigs: Vec<String> = Vec::new();
-    for gt in &info.java.getters {
+    let factories = render_factories(g, info, &model, &mut used)?;
+    let emit_factories = |at: usize, body: &mut Vec<String>, sigs: &mut Vec<String>| {
+        for (f, code, sig) in &factories {
+            if f.after_getters == at {
+                body.push(String::new());
+                body.extend(code.iter().cloned());
+                sigs.extend(sig.iter().cloned());
+            }
+        }
+    };
+    for (gi, gt) in info.java.getters.iter().enumerate() {
+        emit_factories(gi, &mut body, &mut getter_sigs);
         let name = getter_name(&gt.name);
         let mut ret = py_type(&gt.ret, false, info, &mut used)?;
         let code = match &gt.body {
@@ -2372,6 +2437,7 @@ fn render_class(g: &Graph, info: &ClassInfo) -> anyhow::Result<Rendered> {
         body.push(format!("        {code}"));
         getter_sigs.push(format!("    def {name}(self) -> {ret}: ..."));
     }
+    emit_factories(info.java.getters.len(), &mut body, &mut getter_sigs);
     if is_root_class(info) {
         body.push(String::new());
         body.push("    def __str__(self) -> str:".into());
