@@ -12,25 +12,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Serde supply routes and lifecycle helpers (spec §5.4, D6).
+"""Serde supply routes and lifecycle calls, shared by every client.
 
-The clients (P4/P5) do not construct serdes themselves; they call
-``resolve_serde`` to pick one from the two supply routes, ``configure_if_defined``
-after construction on the config route, and ``close_if_defined`` at client close.
-These live here so the two client families share one implementation and cannot
-diverge on the error messages or the route precedence.
+The clients call ``resolve_serde`` to pick a serde, ``configure_if_defined``
+after construction on the config route and ``close_if_defined`` at client close
+(CLAUDE.md, Python Binding Conventions, Serialization):
 
-Route precedence (Java-exact):
-
-* **Kwarg wins.** A constructor kwarg (a callable or instance) is used and the
-  matching config key is ignored — Java's ``config.ignore(...)``. ``configure``
-  is *not* called on the kwarg route (constructor args are the injection
-  channel). A **class** passed as a kwarg is rejected with a redirect error.
-* **Config route.** ``key.deserializer`` / ``value.deserializer`` (or the
-  serializer keys) may be a dotted-path string or a class object (Java's
-  ``Type.CLASS``); it is resolved, no-arg constructed, then ``configure(conf,
-  is_key)``-called if defined. Instances are rejected in config.
-* **Neither** → the ``bytes_*`` default.
+* a constructor argument (any callable or instance) wins and the config key is
+  ignored; it is not configured; a class raises ``IllegalArgumentError``;
+* else the config key (``key.serializer``, ``value.deserializer``, ...), a
+  dotted path or a class, is resolved, no-arg constructed and configured; an
+  instance or an unresolvable name raises ``ConfigError``;
+* else the ``bytes_*`` default.
 """
 
 from __future__ import annotations
@@ -41,8 +34,9 @@ import logging
 from collections.abc import Callable
 from typing import cast
 
-from confluent_kafka import IllegalArgumentError
 from confluent_kafka.common.config.config_error import ConfigError
+from confluent_kafka.common.kafka_error import KafkaError
+from confluent_kafka.illegal_argument_error import IllegalArgumentError
 
 _LOG = logging.getLogger("confluent_kafka")
 
@@ -50,9 +44,9 @@ _LOG = logging.getLogger("confluent_kafka")
 def configure_if_defined(serde: object, configs: dict[str, object], is_key: bool) -> None:
     """Call ``serde.configure(configs, is_key)`` iff it is defined.
 
-    Used only on the config route — Java skips ``configure`` for a kwarg
-    instance (``Deserializers.java:52-64``). An absent method is a no-op, so a
-    bare function is a complete serde.
+    Used only on the config route: Java configures only the serdes it
+    constructs from config (``Deserializers``). An absent method is a no-op,
+    so a bare function is a complete serde.
     """
     configure = getattr(serde, "configure", None)
     if callable(configure):
@@ -63,8 +57,7 @@ def close_if_defined(serde: object) -> None:
     """Call ``serde.close()`` iff it is defined, logging any exception.
 
     Java's ``Utils.closeQuietly``: a failing ``close`` must not mask the
-    client's own shutdown, so the exception is logged, never raised (spec §5.4).
-    ``close`` must be idempotent.
+    client's own shutdown, so the exception is logged, never raised.
     """
     close = getattr(serde, "close", None)
     if callable(close):
@@ -74,42 +67,45 @@ def close_if_defined(serde: object) -> None:
             _LOG.warning("Exception while closing serde %r", serde, exc_info=True)
 
 
-def _resolve_class(dotted_path: str) -> type:
-    """Resolve a dotted path ``pkg.mod.Cls`` to the class object.
-
-    Java's ``Class.forName``; here ``importlib.import_module`` + ``getattr``. A
-    bad path raises ``ConfigError`` at construction time (Java's
-    ``ConfigException`` timing).
-    """
-    module_name, _, attr = dotted_path.rpartition(".")
-    if not module_name:
-        raise ConfigError(message=f"Class {dotted_path} could not be found.")
-    try:
-        module = importlib.import_module(module_name)
-        obj = getattr(module, attr)
-    except (ImportError, AttributeError) as exc:
-        raise ConfigError(message=f"Class {dotted_path} could not be found.") from exc
+def _resolve_class(key: str, dotted_path: str) -> type:
+    """Resolve a dotted path ``pkg.mod.Cls`` to the class, as Java's
+    ``ConfigDef`` parses a ``CLASS`` value with ``Class.forName``: an
+    unresolvable name raises ``ConfigError(name=key, value=dotted_path,
+    message="Class <name> could not be found.")``."""
+    trimmed = dotted_path.strip()
+    module_name, _, attr = trimmed.rpartition(".")
+    obj: object = None
+    cause: BaseException | None = None
+    if module_name:
+        try:
+            obj = getattr(importlib.import_module(module_name), attr)
+        except (ImportError, AttributeError) as exc:
+            cause = exc
     if not isinstance(obj, type):
-        raise ConfigError(
-            message=f"Class {dotted_path} could not be found."
-        )
+        raise ConfigError(name=key, value=dotted_path,
+                          message=f"Class {trimmed} could not be found.") from cause
     return obj
 
 
-def _construct_from_class(cls: type, configs: dict[str, object], is_key: bool) -> Callable[..., object]:
-    """No-arg construct ``cls`` and ``configure`` it — Java's ``newInstance`` + ``configure``."""
+def _class_name(cls: type) -> str:
+    return f"{cls.__module__}.{cls.__qualname__}"
+
+
+def _construct_from_class(key: str, cls: type, configs: dict[str, object],
+                          is_key: bool) -> Callable[..., object]:
+    """No-arg construct ``cls`` and configure it, as Java's
+    ``AbstractConfig.getConfiguredInstance`` does."""
     try:
         instance = cls()
     except TypeError as exc:
-        # Java: "Could not find a public no-argument constructor for <cls>".
-        raise ConfigError(
-            message=f"Could not find a public no-argument constructor for "
-            f"{cls.__module__}.{cls.__qualname__}"
+        raise KafkaError(
+            message="Could not find a public no-argument constructor for " + _class_name(cls)
         ) from exc
     if not callable(instance):
-        raise ConfigError(
-            message=f"{cls.__module__}.{cls.__qualname__} is not a serializer/deserializer"
-        )
+        base = "Deserializer" if key.endswith("deserializer") else "Serializer"
+        raise KafkaError(
+            message=f"class {_class_name(cls)} is not an instance of "
+            f"confluent_kafka.common.serialization.{base}")
     configure_if_defined(instance, configs, is_key)
     return cast("Callable[..., object]", instance)
 
@@ -146,13 +142,9 @@ def resolve_serde(
     if config_value is None:
         return default
     if isinstance(config_value, str):
-        cls = _resolve_class(config_value)
-        return _construct_from_class(cls, config, is_key)
+        return _construct_from_class(key, _resolve_class(key, config_value), config, is_key)
     if inspect.isclass(config_value):
-        return _construct_from_class(config_value, config, is_key)
-    # An instance (or any non-str, non-class value) in config is rejected —
-    # Java's config dict stays pure data (Type.CLASS accepts a name or a Class).
-    raise ConfigError(
-        message=f"Invalid value {config_value!r} for configuration {key}: "
-        f"Expected a Class instance or class name."
-    )
+        return _construct_from_class(key, config_value, config, is_key)
+    # Java's ConfigDef takes a name or a Class for a CLASS key, never an instance.
+    raise ConfigError(name=key, value=config_value,
+                      message="Expected a Class instance or class name.")

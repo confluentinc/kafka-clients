@@ -30,14 +30,13 @@ import logging
 import pytest
 
 from confluent_kafka import IllegalArgumentError
+from confluent_kafka.common import KafkaError
 from confluent_kafka.common.config import ConfigError
-from confluent_kafka.common.serialization import (
-    StringDeserializer,
-    bytes_deserializer,
+from confluent_kafka.common.serialization import bytes_deserializer, string_deserializer
+from confluent_kafka.common.serialization._supply import (
     close_if_defined,
     configure_if_defined,
     resolve_serde,
-    string_deserializer,
 )
 
 KEY = "value.deserializer"
@@ -77,7 +76,7 @@ class TestResolveSerde:
         inst = string_deserializer()
         got = resolve_serde(
             inst,
-            {KEY: "confluent_kafka.common.serialization.StringDeserializer"},
+            {KEY: f"{__name__}._RecordingSerde"},
             KEY,
             is_key=False,
             default=default,
@@ -96,8 +95,9 @@ class TestResolveSerde:
     def test_kwarg_class_rejected_with_redirect(self) -> None:
         default = bytes_deserializer()
         with pytest.raises(IllegalArgumentError) as exc:
-            resolve_serde(StringDeserializer, {}, KEY, is_key=False, default=default)
-        assert "pass an instance, not the class" in str(exc.value)
+            resolve_serde(_RecordingSerde, {}, KEY, is_key=False, default=default)
+        assert str(exc.value) == (
+            "value.deserializer: pass an instance, not the class — did you forget '()'?")
 
     def test_kwarg_non_callable_rejected(self) -> None:
         default = bytes_deserializer()
@@ -106,63 +106,66 @@ class TestResolveSerde:
 
     def test_config_dotted_path_resolved_and_configured(self) -> None:
         default = bytes_deserializer()
-        got = resolve_serde(
-            None,
-            {
-                KEY: "confluent_kafka.common.serialization.StringDeserializer",
-                "value.deserializer.encoding": "utf_16",
-            },
-            KEY,
-            is_key=False,
-            default=default,
-        )
-        assert isinstance(got, StringDeserializer)
-        # configure() picked the per-slot key out of the client config.
-        assert got._encoding == "utf_16"
+        configs: dict[str, object] = {KEY: f"{__name__}._RecordingSerde"}
+        got = resolve_serde(None, configs, KEY, is_key=False, default=default)
+        assert isinstance(got, _RecordingSerde)
+        # configure() got the whole client config and the slot.
+        assert got.configured == (configs, False)
 
     def test_config_is_key_flag_selects_key_slot(self) -> None:
         default = bytes_deserializer()
-        got = resolve_serde(
-            None,
-            {
-                "key.deserializer": (
-                    "confluent_kafka.common.serialization.StringDeserializer"
-                ),
-                "key.deserializer.encoding": "ascii",
-            },
-            "key.deserializer",
-            is_key=True,
-            default=default,
-        )
-        assert isinstance(got, StringDeserializer)
-        assert got._encoding == "ascii"
+        configs: dict[str, object] = {"key.deserializer": f" {__name__}._RecordingSerde "}
+        got = resolve_serde(None, configs, "key.deserializer", is_key=True, default=default)
+        assert isinstance(got, _RecordingSerde)
+        assert got.configured == (configs, True)
 
     def test_config_class_object_resolved(self) -> None:
         default = bytes_deserializer()
-        got = resolve_serde(
-            None, {KEY: StringDeserializer}, KEY, is_key=False, default=default
-        )
-        assert isinstance(got, StringDeserializer)
+        got = resolve_serde(None, {KEY: _RecordingSerde}, KEY, is_key=False, default=default)
+        assert isinstance(got, _RecordingSerde)
+        assert got.configured is not None
 
     def test_config_instance_rejected(self) -> None:
         default = bytes_deserializer()
+        serde = _RecordingSerde()
         with pytest.raises(ConfigError) as exc:
-            resolve_serde(
-                None,
-                {KEY: string_deserializer()},
-                KEY,
-                is_key=False,
-                default=default,
-            )
-        assert "Class instance or class name" in str(exc.value)
+            resolve_serde(None, {KEY: serde}, KEY, is_key=False, default=default)
+        # Java's ConfigDef: a CLASS value is a name or a Class.
+        assert str(exc.value) == (
+            f"Invalid value {serde} for configuration value.deserializer: "
+            "Expected a Class instance or class name.")
 
     def test_config_unresolvable_path_raises_config_error(self) -> None:
         default = bytes_deserializer()
-        with pytest.raises(ConfigError) as exc:
-            resolve_serde(
-                None, {KEY: "no.such.Module"}, KEY, is_key=False, default=default
-            )
-        assert "could not be found" in str(exc.value)
+        for path in ("no.such.Module", "NoModule", f"{__name__}.Missing"):
+            with pytest.raises(ConfigError) as exc:
+                resolve_serde(None, {KEY: path}, KEY, is_key=False, default=default)
+            assert str(exc.value) == (
+                f"Invalid value {path} for configuration value.deserializer: "
+                f"Class {path} could not be found.")
+
+    def test_config_class_without_no_arg_constructor(self) -> None:
+        class NeedsArgument:
+            def __init__(self, required: int) -> None:
+                self.required = required
+
+        with pytest.raises(KafkaError) as exc:
+            resolve_serde(None, {KEY: NeedsArgument}, KEY, is_key=False,
+                          default=bytes_deserializer())
+        assert str(exc.value) == (
+            "Could not find a public no-argument constructor for "
+            f"{NeedsArgument.__module__}.{NeedsArgument.__qualname__}")
+
+    def test_config_class_that_is_not_a_serde(self) -> None:
+        class NotCallable:
+            pass
+
+        with pytest.raises(KafkaError) as exc:
+            resolve_serde(None, {KEY: NotCallable}, KEY, is_key=False,
+                          default=bytes_deserializer())
+        assert str(exc.value) == (
+            f"class {NotCallable.__module__}.{NotCallable.__qualname__} is not an instance of "
+            "confluent_kafka.common.serialization.Deserializer")
 
 
 class TestLifecycleHelpers:

@@ -26,7 +26,8 @@ from typing import TYPE_CHECKING, Any, TypeVar, cast
 
 from confluent_kafka import IllegalArgumentError
 from confluent_kafka._config import reject_callback_config_keys
-from confluent_kafka.common.serialization import bytes_serializer, resolve_serde
+from confluent_kafka.common.serialization import bytes_serializer
+from confluent_kafka.common.serialization._supply import resolve_serde
 
 from .async_producer import AsyncProducer
 from .producer import Producer
@@ -129,6 +130,6 @@ def _reject_partitioner(partitioner: object | None) -> None:
 def _close_serializers(producer: object) -> None:
     """Java `Serializer.close()` on both serializers at producer close
     (spec §5.4). Idempotent; a failing close is logged, not raised."""
-    from confluent_kafka.common.serialization import close_if_defined
+    from confluent_kafka.common.serialization._supply import close_if_defined
     close_if_defined(producer._key_serializer)   # type: ignore[attr-defined]
     close_if_defined(producer._value_serializer)  # type: ignore[attr-defined]

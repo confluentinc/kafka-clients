@@ -26,9 +26,8 @@ from typing import Any, Callable
 import _confluentkafka as _lib  # type: ignore[import-not-found]
 
 from confluent_kafka._errors import from_ffi_error
-from confluent_kafka.common.serialization import (
-    bytes_deserializer, resolve_serde,
-)
+from confluent_kafka.common.serialization import bytes_deserializer
+from confluent_kafka.common.serialization._supply import resolve_serde
 from confluent_kafka._config import reject_callback_config_keys
 
 # Config keys that carry the serde class on the config route.

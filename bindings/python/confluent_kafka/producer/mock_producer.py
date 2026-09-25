@@ -39,7 +39,8 @@ from confluent_kafka import IllegalArgumentError, IllegalStateError
 from confluent_kafka.common import PartitionInfo, TopicPartition
 from confluent_kafka.common.kafka_error import KafkaError
 from confluent_kafka.common.errors.producer_fenced_error import ProducerFencedError
-from confluent_kafka.common.serialization import bytes_serializer, resolve_serde
+from confluent_kafka.common.serialization import bytes_serializer
+from confluent_kafka.common.serialization._supply import resolve_serde
 
 from .async_producer import AsyncProducer
 from .kafka_producer import _reject_partitioner

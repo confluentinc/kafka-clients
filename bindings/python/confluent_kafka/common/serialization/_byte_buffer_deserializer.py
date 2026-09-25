@@ -12,11 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""``ByteArraySerializer`` — Java's ``org.apache.kafka.common.serialization.ByteArraySerializer``.
+"""``memoryview_deserializer()``: Java's ``org.apache.kafka.common.serialization.ByteBufferDeserializer``.
 
-Passthrough: the bytes go to the wire unchanged. ``None`` maps to ``None``
-(Java returns ``data``, which is ``null`` for ``null``). This is the producer
-default (D10).
+Returns the record data itself, a ``memoryview`` into the fetch batch, as Java's
+``deserialize(topic, headers, ByteBuffer)`` returns its buffer. One held view
+pins its whole batch; ``bytes_deserializer()`` copies instead.
 """
 
 from __future__ import annotations
@@ -24,13 +24,11 @@ from __future__ import annotations
 from confluent_kafka.common.headers import Headers
 
 
-class ByteArraySerializer:
-    """Passes bytes through unchanged; ``None`` maps to ``None``."""
+class ByteBufferDeserializer:
+    """Returns the record data as the borrowing ``memoryview``."""
 
-    def __call__(
-        self,
-        topic: str,
-        value: bytes | None,
-        headers: Headers | None = None,
-    ) -> bytes | None:
-        return value
+    __slots__ = ()
+
+    def __call__(self, topic: str, data: memoryview | None,
+                 headers: Headers | None = None) -> memoryview | None:
+        return data

@@ -12,13 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""``ByteArrayDeserializer`` — Java's ``org.apache.kafka.common.serialization.ByteArrayDeserializer``.
+"""``bytes_deserializer()``: Java's ``org.apache.kafka.common.serialization.ByteArrayDeserializer``.
 
-Returns an **owned ``bytes`` copy** of the record data — the consumer default
-(D10). On the receive path ``data`` is a ``memoryview`` borrowing the fetch
-batch; ``bytes(data)`` copies it out so the returned object does not pin the
-batch. Zero-copy is the explicit ``memoryview_deserializer()`` opt-in instead.
-``None`` maps to ``None``.
+Java hands out the record's own array; the record data here is a ``memoryview``
+into the fetch batch, so an owned ``bytes`` copy is made when the deserializer
+runs, and the result does not pin the batch (``memoryview_deserializer()`` is
+the view). The consumer default.
 """
 
 from __future__ import annotations
@@ -27,15 +26,12 @@ from confluent_kafka.common.headers import Headers
 
 
 class ByteArrayDeserializer:
-    """Copies the record data into owned ``bytes``; ``None`` maps to ``None``."""
+    """Copies the record data into owned ``bytes``."""
 
-    def __call__(
-        self,
-        topic: str,
-        data: memoryview | None,
-        headers: Headers | None = None,
-    ) -> bytes | None:
+    __slots__ = ()
+
+    def __call__(self, topic: str, data: memoryview | None,
+                 headers: Headers | None = None) -> bytes | None:
         if data is None:
             return None
-        # Owned copy: the returned bytes must not borrow the fetch batch.
         return bytes(data)

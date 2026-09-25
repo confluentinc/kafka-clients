@@ -25,6 +25,7 @@ one, which is how the ``@overload`` stubs on ``TopicIdPartition``,
 from __future__ import annotations
 
 import sys
+import uuid
 from typing import TYPE_CHECKING, assert_type
 
 from confluent_kafka.common import TimestampType, TopicIdPartition, TopicPartition, Uuid
@@ -132,7 +133,7 @@ def _sentinel_return_types() -> None:
 
 
 def _serde_factory_types() -> None:
-    # Each factory returns a typed callable, so K/V infer from it (D11).
+    # Each factory returns a typed callable, so K/V infer from it.
     assert_type(bytes_serializer(), "Serializer[bytes]")
     assert_type(bytes_deserializer(), "Deserializer[bytes]")
     assert_type(memoryview_deserializer(), "Deserializer[memoryview]")
@@ -144,8 +145,8 @@ def _serde_factory_types() -> None:
     assert_type(float_deserializer(), "Deserializer[float]")
     assert_type(bool_serializer(), "Serializer[bool]")
     assert_type(bool_deserializer(), "Deserializer[bool]")
-    assert_type(uuid_serializer(), "Serializer[Uuid]")
-    assert_type(uuid_deserializer(), "Deserializer[Uuid]")
+    assert_type(uuid_serializer(), "Serializer[uuid.UUID]")
+    assert_type(uuid_deserializer(), "Deserializer[uuid.UUID]")
     # json_* are Object-typed (Java Object), so they are Serializer[Any] /
     # Deserializer[Any]; assign to a concrete-typed name to confirm they satisfy
     # the protocol (assert_type on Any is a no-op).
@@ -198,7 +199,7 @@ def _consumer_family_types(c: object = None) -> None:
         bytes_deserializer, string_deserializer,
     )
 
-    # K/V are inferred from the typed deserializers (spec §3 principle 7).
+    # K/V are inferred from the typed deserializers.
     c = MockConsumer(
         offset_reset_strategy="earliest",
         key_deserializer=bytes_deserializer(),
@@ -232,7 +233,8 @@ def _consumer_family_types(c: object = None) -> None:
     from confluent_kafka.consumer.offset_reset_strategy import OffsetResetStrategy
     c.close()
     c.close(timeout=1.0)
-    c.close(option=CloseOptions())
+    c.close(option=CloseOptions.timeout(1.0))
+    assert_type(CloseOptions.timeout(1.0).timeout(), "float | None")
     # MockConsumer's constructor @overload stubs accept str OR OffsetResetStrategy
     # (the enum form is Java's deprecated-but-kept variant).
     _cs: MockConsumer[bytes, bytes] = MockConsumer(offset_reset_strategy="earliest")

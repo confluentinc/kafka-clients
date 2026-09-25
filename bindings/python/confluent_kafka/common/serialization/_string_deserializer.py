@@ -12,49 +12,39 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""``StringDeserializer`` — Java's ``org.apache.kafka.common.serialization.StringDeserializer``.
-
-String encoding defaults to UTF-8 and can be customized either by the
-``string_deserializer(*, encoding=...)`` factory argument or, on the config
-route, by ``key.deserializer.encoding`` / ``value.deserializer.encoding`` /
-``deserializer.encoding`` — the first two take precedence, as Java does.
-"""
+"""``string_deserializer()``: Java's ``org.apache.kafka.common.serialization.StringDeserializer``."""
 
 from __future__ import annotations
 
 from confluent_kafka.common.errors.serialization_error import SerializationError
 from confluent_kafka.common.headers import Headers
 
-from ._encoding import normalize_encoding
+from ._encoding import decode, normalize_encoding
 
 
 class StringDeserializer:
-    """Deserializes encoded bytes to a ``str``; ``None`` maps to ``None``."""
+    """String encoding defaults to UTF8 and can be customized by setting the
+    property ``key.deserializer.encoding``, ``value.deserializer.encoding`` or
+    ``deserializer.encoding``. The first two take precedence over the last."""
+
+    __slots__ = ("_encoding",)
 
     def __init__(self, encoding: str = "utf_8") -> None:
-        self._encoding = encoding
+        self._encoding = normalize_encoding(encoding)
 
     def configure(self, configs: dict[str, object], is_key: bool) -> None:
-        property_name = (
-            "key.deserializer.encoding" if is_key else "value.deserializer.encoding"
-        )
+        property_name = "key.deserializer.encoding" if is_key else "value.deserializer.encoding"
         encoding_value = configs.get(property_name)
         if encoding_value is None:
             encoding_value = configs.get("deserializer.encoding")
         if isinstance(encoding_value, str):
             self._encoding = normalize_encoding(encoding_value)
 
-    def __call__(
-        self,
-        topic: str,
-        data: memoryview | None,
-        headers: Headers | None = None,
-    ) -> str | None:
+    def __call__(self, topic: str, data: memoryview | None,
+                 headers: Headers | None = None) -> str | None:
         if data is None:
             return None
         try:
-            return bytes(data).decode(self._encoding)
-        except LookupError as exc:
-            raise SerializationError(
-                message=f"Unsupported encoding {self._encoding}"
-            ) from exc
+            return decode(data, self._encoding)
+        except LookupError as exc:  # the name was validated; kept for safety
+            raise SerializationError(message=f"Unsupported encoding {self._encoding}") from exc
