@@ -38,7 +38,6 @@ mod mock_consumer;
 mod offset_and_metadata;
 mod offset_and_timestamp;
 mod offset_commit_callback;
-mod offset_reset_strategy;
 mod subscription_pattern;
 
 pub(crate) mod internals;
@@ -58,8 +57,6 @@ pub use mock_consumer::MockConsumer;
 pub use offset_and_metadata::OffsetAndMetadata;
 pub use offset_and_timestamp::OffsetAndTimestamp;
 pub use offset_commit_callback::OffsetCommitCallback;
-#[allow(deprecated)]
-pub use offset_reset_strategy::OffsetResetStrategy;
 pub use subscription_pattern::SubscriptionPattern;
 
 use std::collections::{HashMap, HashSet};
