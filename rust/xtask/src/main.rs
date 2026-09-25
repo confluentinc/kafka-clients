@@ -19,6 +19,9 @@ use std::env;
 use std::fs;
 use std::path::PathBuf;
 use std::process::{exit, Command};
+
+mod chaos_matrix;
+
 fn main() -> anyhow::Result<()> {
     let task = env::args().nth(1);
 
@@ -40,6 +43,7 @@ fn main() -> anyhow::Result<()> {
         Some("producer-perf-test") => producer_perf_test()?,
         Some("package-check") => package_check()?,
         Some("chaos") => chaos()?,
+        Some("chaos-matrix") => chaos_matrix::run(&env::args().skip(2).collect::<Vec<_>>())?,
         _ => print_help(),
     }
 
@@ -635,6 +639,9 @@ fn producer_perf_test() -> anyhow::Result<()> {
 ///   --topic-recreate [N]      also delete/recreate the topic
 ///   --reassign-partitions [N] also reassign partitions (data moves)
 ///   --change-leader [N]       also do a preferred-leader change (no data move)
+///   --all-brokers-down [N]    also kill every broker at once (SIGKILL), keep the
+///                             cluster down for --outage-s, then restart it all
+///   --outage-s N           whole-cluster outage for --all-brokers-down (30)
 ///   --unclean              SIGKILL instead of SIGTERM for broker roll
 ///   --workload role:backend  repeatable; role=producer|consumer,
 ///                            backend=rust|python|python-async|c
@@ -834,6 +841,7 @@ fn parse_chaos_flags(raw: &[String]) -> anyhow::Result<Vec<(String, String)>> {
         ("--topic-recreate", "CHAOS_TOPIC_RECREATE"),
         ("--reassign-partitions", "CHAOS_REASSIGN_PARTITIONS"),
         ("--change-leader", "CHAOS_CHANGE_LEADER"),
+        ("--all-brokers-down", "CHAOS_ALL_BROKERS_DOWN"),
     ];
 
     // (flag, env-var) pairs that take a value.
@@ -855,6 +863,7 @@ fn parse_chaos_flags(raw: &[String]) -> anyhow::Result<Vec<(String, String)>> {
         ("--seed", "CHAOS_SEED"),
         ("--action-prob", "CHAOS_ACTION_PROB"),
         ("--dwell-s", "CHAOS_DWELL_S"),
+        ("--outage-s", "CHAOS_OUTAGE_S"),
         ("--rebalance-add-cycle", "CHAOS_REBALANCE_ADD_CYCLE"),
         ("--rebalance-remove-cycle", "CHAOS_REBALANCE_REMOVE_CYCLE"),
         ("--log-budget-mb", "CHAOS_LOG_BUDGET_MB"),
@@ -1516,6 +1525,14 @@ fn print_help() {
                     e.g. cargo xtask chaos --brokers 3 --cycles 3 --unclean \
                              --workload producer:rust --workload consumer:rust
                     --scenario NAME runs a named #[ignore] smoke test instead
+  chaos-matrix    Run every scenario of a matrix file across security protocols and
+                  message sizes, one after another, saving each run's logs and
+                  reports and keeping a running summary (requires Docker)
+                    e.g. cargo xtask chaos-matrix --matrix tests/chaos/matrix/rust-client.txt \
+                             --protocols plaintext,ssl,sasl_ssl --msg-sizes 100,1048576 --rps 1000
+                    --out DIR (default target/chaos-matrix/<matrix name>; re-running resumes)
+                    --only ID,ID  --run-timeout-min N (default 240)  --rerun-failed
+                    --check-only (validate every run's configuration, then stop)
 
 Usage:
   cargo xtask format
@@ -1533,7 +1550,8 @@ Usage:
   cargo xtask test-multilanguage
   cargo xtask producer-perf-test
   cargo xtask package-check
-  cargo xtask chaos"
+  cargo xtask chaos
+  cargo xtask chaos-matrix --matrix FILE"
     );
 }
 

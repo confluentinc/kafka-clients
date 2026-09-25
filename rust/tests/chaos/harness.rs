@@ -35,7 +35,11 @@ use super::common::kafka_cluster::KafkaCluster;
 use super::config::SecurityProtocol;
 use super::verifier::{ConservationVerifier, ExpectedLossHint, Verifier};
 use super::workload::{CommitMode, Role, TopicIds, Workload, WorkloadContext, WorkloadSpec, build_workload};
-use super::workload_config::security_props;
+use super::workload_config::{record_size_limit, security_props};
+
+/// Producer value size when the caller does not choose one (`--msg-size`'s
+/// default).
+const DEFAULT_MSG_SIZE: usize = 100;
 
 /// Drain-settle signal shared between [`ChaosHarness::recreate_topic`] and the
 /// drain loop (`drain_wait`).
@@ -141,6 +145,7 @@ impl ChaosHarness {
             partitions,
             None,
             SecurityProtocol::Plaintext,
+            DEFAULT_MSG_SIZE,
             verifier,
         )
         .await
@@ -151,13 +156,18 @@ impl ChaosHarness {
     /// `min(brokers, 3)` when `None`). Panics (librdkafka's FATAL) if an explicit
     /// replication exceeds the broker count. Every client of the run — the
     /// harness's admin and the workloads — connects through the broker listener
-    /// selected by `security_protocol` (`--security-protocol`).
+    /// selected by `security_protocol` (`--security-protocol`). `msg_size` is
+    /// the producer's value size (`--msg-size`): a value too large for the
+    /// broker's default `message.max.bytes` raises it cluster-wide
+    /// ([`record_size_limit`]).
+    #[allow(clippy::too_many_arguments)]
     pub async fn start_with_topics(
         topics: &[String],
         brokers: u16,
         partitions: i32,
         replication: Option<i16>,
         security_protocol: SecurityProtocol,
+        msg_size: usize,
         verifier: Arc<dyn Verifier>,
     ) -> Self {
         assert!(brokers >= 1, "chaos cluster needs >= 1 broker");
@@ -191,6 +201,17 @@ impl ChaosHarness {
         config
             .server_properties
             .insert("KAFKA_AUTO_CREATE_TOPICS_ENABLE".to_string(), "false".to_string());
+        // A 1 MiB record batch is just over the broker's default
+        // `message.max.bytes`; without this every such produce is rejected
+        // with RecordTooLarge. Replica fetches need no change: a follower
+        // always receives at least one batch whatever `replica.fetch.max.bytes`
+        // says (KIP-74), and so does a consumer fetch.
+        if let Some(limit) = record_size_limit(msg_size) {
+            eprintln!("chaos: raising broker message.max.bytes to {limit} for {msg_size}-byte records");
+            config
+                .server_properties
+                .insert("KAFKA_MESSAGE_MAX_BYTES".to_string(), limit.to_string());
+        }
         let cluster = KafkaCluster::start_with_config(&config).await;
 
         // The harness's own admin (create/delete topic, elect leaders,
@@ -696,8 +717,11 @@ impl Drop for ChaosHarness {
     /// Runs both on the success path (via [`ChaosHarness::shutdown`]) and on
     /// panic unwind, so a failed run cannot leak its brokers into the next one.
     fn drop(&mut self) {
+        // `-v` also removes the anonymous volumes the broker image declares
+        // (`/var/lib/kafka/data` among them); without it every run left three
+        // volumes behind per broker.
         for id in self.cluster.container_ids() {
-            let _ = std::process::Command::new("docker").args(["rm", "-f", id]).output();
+            let _ = std::process::Command::new("docker").args(["rm", "-f", "-v", id]).output();
         }
         let network = self.cluster.network_name();
         // Anything still attached (the gRPC backend sidecar lives in a

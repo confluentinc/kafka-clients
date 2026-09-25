@@ -423,7 +423,12 @@ where
         let bootstrap = self.ctx.bootstrap_for(self.spec.backend).to_string();
         let producer = self
             .factory
-            .create(producer_props(&bootstrap, &self.spec.label(), &self.ctx.security))
+            .create(producer_props(
+                &bootstrap,
+                &self.spec.label(),
+                self.ctx.msg_size,
+                &self.ctx.security,
+            ))
             .await
             .expect("failed to build chaos producer");
 
@@ -440,6 +445,7 @@ where
             Duration::from_secs_f64(1.0 / f64::from(self.ctx.target_rps))
         };
         let mut next_due = tokio::time::Instant::now();
+        let started = Instant::now();
 
         let topic = self.ctx.topic.clone();
         let msg_size = self.ctx.msg_size;
@@ -513,6 +519,19 @@ where
                 }
             }
         }
+
+        // The achieved send rate, against the `--rps` target: under a fault the
+        // client's backpressure (`buffer.memory` / `max.block.ms`) can hold the
+        // loop below the target, and at large `--msg-size` the cluster's
+        // bandwidth caps it outright. Measured over the send loop only, before
+        // `close()` drains the tail. The matrix runner parses this line.
+        let secs = started.elapsed().as_secs_f64().max(f64::EPSILON);
+        eprintln!(
+            "chaos: {producer_label} sent {index} records in {secs:.1}s ({:.0} records/s, {:.1} MiB/s, target {} records/s)",
+            index as f64 / secs,
+            index as f64 * msg_size as f64 / secs / (1024.0 * 1024.0),
+            self.ctx.target_rps
+        );
 
         // Close waits for every buffered record's outcome, so all callbacks
         // have fired, and every in-flight window is closed, when it returns.
