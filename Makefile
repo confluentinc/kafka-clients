@@ -25,7 +25,7 @@ endif
 	consumer-perf-test-python producer-perf-test-python \
 	verify verify-c verify-python verify-rust \
 	verify-rust-macos-docker verify-python-macos-docker verify-c-macos-docker \
-	verify-sandbox format-check lint install-rust-analyzer clean
+	verify-sandbox format-check lint doc-check install-rust-analyzer clean
 
 build: init-hooks build-all
 
@@ -360,6 +360,12 @@ format-check:
 
 lint:
 	cargo xtask lint
+
+# Build the rustdoc of every workspace crate with warnings denied, so a broken
+# or private intra-doc link fails CI instead of surfacing only when someone
+# runs `cargo doc`. The doctests themselves run as part of `cargo test`.
+doc-check:
+	RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features
 
 # Static arity check of the hand-written CPython extension's variadic calls.
 # A Py_BuildValue / PyArg_Parse* format one unit short of its argument list

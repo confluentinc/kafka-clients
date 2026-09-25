@@ -36,6 +36,8 @@ name: build-test-release
 #   5. "Build + unit test bindings (macOS)" -- verify-c (ctest) and
 #      verify-python (pytest test/unit). No container is used, so the block sets
 #      MACOS_SKIP_COLIMA=true and dependencies-macos.sh skips Colima.
+#   6. "Check Rust docs (Linux amd64)" -- builds the rustdoc of every workspace
+#      crate with warnings denied.
 #
 # All blocks declare `dependencies: []`, so every job starts immediately
 # and runs in parallel. Each rebuilds the Rust library it needs. Sharing one
@@ -175,6 +177,21 @@ blocks:
         - name: "verify-python (macOS arm64)"
           commands:
             - make verify-python-macos-docker
+
+  - name: "Check Rust docs (Linux amd64)"
+    # Its own block so a documentation failure is attributable at a glance and
+    # does not wait behind the test suite. `make doc-check` runs `cargo doc`
+    # with `-D warnings` over the whole workspace; the doctests already run in
+    # "Verify Rust" as part of `cargo test`.
+    dependencies: []
+    task:
+      prologue:
+        commands:
+          - ./.semaphore/dependencies.sh
+      jobs:
+        - name: "doc-check (Linux amd64)"
+          commands:
+            - make doc-check
 
 promotions:
   - name: Start translation plan
