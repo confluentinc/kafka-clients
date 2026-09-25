@@ -175,6 +175,78 @@ Run via `cargo xtask chaos …`. Defaults mirror `chaos.py` where they overlap.
   The run header prints `security=SASL_SSL` and the listener addresses the
   workloads use.
 
+### Rebalance listener contract
+Every Rust consumer workload registers a `ConsumerRebalanceListener`. Each
+callback is recorded and, in `on_partitions_revoked`, the listener commits
+through a `ConsumerHandle` the way a real application flushes offsets before
+its partitions move. The verifier replays the callbacks into a per-consumer
+ownership model and **fails the run** on any of:
+
+- `on_partitions_assigned` for a partition the consumer already owns (a second
+  assigned with no revoked/lost in between);
+- `on_partitions_revoked` / `on_partitions_lost` for a partition the consumer
+  does not own;
+- `on_partitions_revoked` for a partition another consumer had already been
+  assigned while this one still owned it. The broker moves a partition without
+  waiting for its owner only when the owner is fenced, and a fenced member must
+  be told `on_partitions_lost`, so a clean revocation here is a handoff that
+  did not happen;
+- `close()` returning while the consumer still owns partitions (Java's
+  `runRebalanceCallbacksOnClose` releases the whole assignment first).
+
+The verdict prints the callback counts:
+
+```
+  rebalance callbacks       : revoked=7 assigned=9 lost=0 (2 consumer(s) with listener)
+```
+
+All zeros means no consumer had a listener — the gRPC (python / c) backends
+cannot carry one across the bridge — so the contract was not exercised on that
+run. A commit failing inside `on_partitions_revoked` is reported under
+`commit errors in revoked` and in the error breakdown, not scored, like the
+other consumer errors. Broker rolls, consumer churn and the `--rebalance-*`
+flags are what provoke the callbacks.
+
+### Committed offsets
+A commit is the consumer telling the broker "I have processed up to here"; the
+next owner of the partition (after a crash, a rebalance or a restart) resumes
+from it. A commit that runs *ahead* of what was really consumed loses records
+on that handoff; one that falls *behind* re-delivers them. Conservation only
+catches this indirectly, and only if a handoff happens to occur, so each Rust
+consumer reads its committed offsets back from the broker (`committed()`) at
+the points where they matter, and the verifier compares them with that
+consumer's own consumption since it was assigned the partition:
+
+- right after the commit inside `on_partitions_revoked` (what the next owner
+  will resume from) — except for the revoke that `close()` itself fires: once
+  closing, the client only drains commits, so an offset fetch from inside that
+  callback would wait out `default.api.timeout.ms` (Java behaves the same);
+- after the final commit before `close()`, which covers that last handoff;
+- every 5 s after a successful post-poll commit, in sync-commit mode only (an
+  async commit may not have reached the broker yet, so its read-back would
+  prove nothing).
+
+Each read-back happens right after a successful `commit_sync` with no poll in
+between, so the committed offset must be exactly *last consumed + 1*. Any other
+value **fails the run**:
+
+```
+FAIL: committed offsets: 1 violation(s) (sample: ["consumer-rust-1: committed offset 50 on chaos-run-0 is ahead of its own consumption (last consumed 41, expected 42)"])
+```
+
+Partitions the consumer has not consumed from since it was (re)assigned are
+skipped: their committed offset is the previous owner's. The verdict shows how
+many comparisons actually ran:
+
+```
+  committed offsets checked : 37 (0 violation(s))
+```
+
+Zero means the check never ran (gRPC consumers have no rebalance listener, so
+their progress-since-assignment is unknown and they are not checked). A
+failing `committed()` call itself is reported as
+`consumer committed() read-back` in the error breakdown, not scored.
+
 ### Chaos
 - **Broker rolling is the default fault** — no flag needed. Layer additional
   faults on with the flags below; each takes an **optional cadence `N`** (every
