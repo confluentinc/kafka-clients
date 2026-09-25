@@ -413,6 +413,74 @@ pub fn deprecated_items(classes: &[JavaClass]) -> BTreeSet<String> {
 /// submodule, read with `git` so the working tree need not be checked out
 /// there. `None` if the ref is not available (e.g. a shallow clone).
 pub fn load_ref(reference: &str) -> Option<Vec<JavaClass>> {
+    let files = ref_files(reference, |path| {
+        path.ends_with(".java") && !path.ends_with("package-info.java") && !path.ends_with("module-info.java")
+    })?;
+    let mut classes = Vec::new();
+    for (rel, body) in &files {
+        let mut package: Vec<String> = rel.split('/').map(str::to_string).collect();
+        package.pop();
+        push_classes(&package, &String::from_utf8_lossy(body), false, &mut classes);
+    }
+    Some(classes)
+}
+
+/// The Kafka version whose `@InterfaceAudience.Public` annotations and
+/// unsupported-API disclaimers decide what the crate may make public.
+pub const AUDIENCE_REF: &str = "4.4.0-rc2";
+
+/// The sentence a `package-info.java` carries when its package is not part of
+/// the supported API ("This package is not a supported Kafka API; the
+/// implementation may change without warning ...").
+const UNSUPPORTED_API_DISCLAIMER: &str = "is not a supported Kafka API";
+
+/// The dotted package (below `org.apache.kafka`) of `package-info.java` file
+/// `rel` (a path below [`JAVA_MAIN_ROOT`]), if its `source` carries the
+/// unsupported-API disclaimer.
+pub fn unsupported_package(rel: &str, source: &str) -> Option<String> {
+    let dir = rel.strip_suffix("package-info.java")?.trim_end_matches('/');
+    (!dir.is_empty() && source.contains(UNSUPPORTED_API_DISCLAIMER)).then(|| dir.replace('/', "."))
+}
+
+/// The packages carrying the unsupported-API disclaimer at git ref
+/// `reference` of the `kafka` submodule; `None` if the ref is not available.
+pub fn unsupported_packages_at_ref(reference: &str) -> Option<BTreeSet<String>> {
+    let files = ref_files(reference, |path| path.ends_with("/package-info.java"))?;
+    Some(
+        files
+            .iter()
+            .filter_map(|(rel, body)| unsupported_package(rel, &String::from_utf8_lossy(body)))
+            .collect(),
+    )
+}
+
+/// The packages carrying the unsupported-API disclaimer in the `kafka` working
+/// tree; empty when it is not checked out.
+pub fn unsupported_packages_in_tree() -> BTreeSet<String> {
+    fn walk(dir: &Path, rel: &mut Vec<String>, out: &mut BTreeSet<String>) {
+        let Ok(entries) = fs::read_dir(dir) else { return };
+        for entry in entries.filter_map(Result::ok) {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if entry.path().is_dir() {
+                rel.push(name);
+                walk(&entry.path(), rel, out);
+                rel.pop();
+            } else if name == "package-info.java" {
+                let source = fs::read_to_string(entry.path()).unwrap_or_default();
+                let path = [rel.as_slice(), &[name]].concat().join("/");
+                out.extend(unsupported_package(&path, &source));
+            }
+        }
+    }
+    let mut out = BTreeSet::new();
+    walk(Path::new(JAVA_MAIN_ROOT), &mut Vec::new(), &mut out);
+    out
+}
+
+/// The files below [`JAVA_MAIN_ROOT`] at git ref `reference` whose path
+/// satisfies `keep`, as (path below the root, contents). `None` if the ref is
+/// not available (e.g. a shallow clone).
+fn ref_files(reference: &str, keep: impl Fn(&str) -> bool) -> Option<Vec<(String, Vec<u8>)>> {
     let root = JAVA_MAIN_ROOT.strip_prefix("kafka/")?;
     let listing = Command::new("git")
         .args(["-C", "kafka", "ls-tree", "-r", reference, "--", root])
@@ -427,7 +495,7 @@ pub fn load_ref(reference: &str) -> Option<Vec<JavaClass>> {
         let Some(sha) = meta.split_whitespace().nth(2) else {
             continue;
         };
-        if path.ends_with(".java") && !path.ends_with("package-info.java") && !path.ends_with("module-info.java") {
+        if keep(path) {
             files.push((sha.to_string(), path.to_string()));
         }
     }
@@ -444,7 +512,7 @@ pub fn load_ref(reference: &str) -> Option<Vec<JavaClass>> {
     child.stdout.take()?.read_to_end(&mut out).ok()?;
     writer.join().ok()?.ok()?;
     child.wait().ok()?;
-    let mut classes = Vec::new();
+    let mut bodies = Vec::with_capacity(files.len());
     let mut rest = out.as_slice();
     for (_, path) in &files {
         let header_end = rest.iter().position(|&b| b == b'\n')?;
@@ -454,14 +522,12 @@ pub fn load_ref(reference: &str) -> Option<Vec<JavaClass>> {
             .next()?
             .parse()
             .ok()?;
-        let body = &rest[header_end + 1..header_end + 1 + size];
+        let body = rest[header_end + 1..header_end + 1 + size].to_vec();
         rest = &rest[header_end + 1 + size + 1..];
         let rel = path.strip_prefix(root)?.trim_start_matches('/');
-        let mut package: Vec<String> = rel.split('/').map(str::to_string).collect();
-        package.pop();
-        push_classes(&package, &String::from_utf8_lossy(body), false, &mut classes);
+        bodies.push((rel.to_string(), body));
     }
-    Some(classes)
+    Some(bodies)
 }
 
 /// Collects the classes of every `*.java` file under `dir`, whose package
@@ -1039,5 +1105,25 @@ mod tests {
         let acl = class(&["common", "acl"], "common.acl", "AclBinding");
         assert_eq!(acl.rust_name(), "AclBinding");
         assert!(same_name("SslFactory", "SSLFactory"));
+    }
+
+    #[test]
+    fn test_unsupported_package_reads_the_disclaimer() {
+        let disclaimer = "/**\n * Provides the network API.\n * <strong>This package is not a supported Kafka API; \
+                          the implementation may change without warning between minor or patch releases.</strong>\n */\n\
+                          package org.apache.kafka.common.network;\n";
+        assert_eq!(
+            unsupported_package("common/network/package-info.java", disclaimer).as_deref(),
+            Some("common.network")
+        );
+        assert_eq!(
+            unsupported_package("common/record/internal/package-info.java", disclaimer).as_deref(),
+            Some("common.record.internal")
+        );
+        // A supported package, and a file that is no package-info.
+        let supported =
+            "/**\n * Provides the API used by Kafka clients.\n */\npackage org.apache.kafka.clients.producer;\n";
+        assert_eq!(unsupported_package("clients/producer/package-info.java", supported), None);
+        assert_eq!(unsupported_package("common/network/Selector.java", disclaimer), None);
     }
 }
