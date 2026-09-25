@@ -63,6 +63,7 @@ import _error_code as ec  # noqa: E402
 # grpc_translate.py); client-agnostic, so reused verbatim.
 from grpc_translate import (  # noqa: E402
     CallbackLog,
+    GroupMetadataStore,
     LoggingRebalanceListener,
     _admin_abort_transaction_spec,
     _admin_acl_bindings,
@@ -130,13 +131,13 @@ from grpc_translate import (  # noqa: E402
     _admin_transaction_id_pattern,
     _admin_transaction_states,
     _admin_void_response,
+    _group_metadata_to_proto,
     _kafka_error_to_proto,
     _metric_to_proto,
     _oam_to_proto,
     _partition_info_to_proto,
     _proto_offset_entries_to_dict,
     _proto_offsets_to_dict,
-    _proto_to_group_metadata,
     _proto_to_producer_record,
     _record_metadata_to_proto,
     _record_to_proto,
@@ -155,8 +156,10 @@ class ProducerService(pb_grpc.ProducerServiceServicer):
     The producer id map needs no lock: all handlers run on one event loop and id
     allocation happens without an intervening await."""
 
-    def __init__(self):
+    def __init__(self, group_metadata):
         self._producers = {}
+        # GroupMetadataStore shared with the other service.
+        self._group_metadata = group_metadata
         self._next_id = 1
         # AsyncProducer invokes on_delivery on the loop (inside its completion
         # drain), so this log is in fact only touched from the loop; CallbackLog
@@ -287,11 +290,15 @@ class ProducerService(pb_grpc.ProducerServiceServicer):
             return pb.StatusResponse(error=pb.KafkaError(
                 code=ec.LOCAL_ILLEGAL_STATE,
                 message=f"unknown producer_id {request.producer_id}"))
-        # Rebuild the consumer's group-metadata handle from the wire fields and
-        # translate the flat OffsetEntry list; the producer stages the offsets in
-        # the ongoing transaction (they commit only if the transaction commits).
+        group_metadata = self._group_metadata.get(request.group_metadata_id)
+        if group_metadata is None:
+            return pb.StatusResponse(error=pb.KafkaError(
+                code=ec.LOCAL_ILLEGAL_STATE,
+                message=f"unknown group_metadata_id {request.group_metadata_id}"))
+        # Translate the flat OffsetEntry list and pass the consumer's stored
+        # group-metadata object; the producer stages the offsets in the ongoing
+        # transaction (they commit only if the transaction commits).
         offsets = _proto_offset_entries_to_dict(request.offsets)
-        group_metadata = _proto_to_group_metadata(request.group_metadata)
         try:
             await producer.send_offsets_to_transaction(offsets, group_metadata)
         except kp.KafkaError as e:
@@ -367,8 +374,10 @@ class ConsumerService(cpb_grpc.ConsumerServiceServicer):
     the non-blocking state reads (assignment/subscription/paused/wakeup) live on
     the shared _ConsumerBase and are sync — called directly, never awaited."""
 
-    def __init__(self):
+    def __init__(self, group_metadata):
         self._consumers = {}
+        # GroupMetadataStore shared with the other service.
+        self._group_metadata = group_metadata
         self._next_id = 1
         # This one genuinely needs CallbackLog's lock: rebalance-listener and
         # commit callbacks fire on the Rust dispatcher thread (the listener
@@ -640,6 +649,25 @@ class ConsumerService(cpb_grpc.ConsumerServiceServicer):
             return cpb.TopicPartitionListResponse(error=_kafka_error_to_proto(e))
         return cpb.TopicPartitionListResponse(
             partitions=cpb.TopicPartitionList(partitions=[_tp_to_proto(tp) for tp in tps]))
+
+    async def GroupMetadata(self, request, context):
+        # Java groupMetadata(): store the object and return its id and fields.
+        consumer = self._get(request.consumer_id)
+        if consumer is None:
+            return cpb.GroupMetadataResponse(error=pb.KafkaError(
+                code=ec.LOCAL_ILLEGAL_STATE,
+                message=f"unknown consumer_id {request.consumer_id}"))
+        try:
+            group_metadata = consumer.group_metadata()
+        except Exception as e:  # noqa: BLE001
+            return cpb.GroupMetadataResponse(error=_kafka_error_to_proto(e))
+        return cpb.GroupMetadataResponse(
+            group_metadata_id=self._group_metadata.add(group_metadata),
+            group_metadata=_group_metadata_to_proto(group_metadata))
+
+    async def ReleaseGroupMetadata(self, request, context):
+        self._group_metadata.release(request.group_metadata_id)
+        return pb.StatusResponse()
 
     async def Wakeup(self, request, context):
         consumer = self._get(request.consumer_id)
@@ -1453,8 +1481,11 @@ class AdminService(apb_grpc.AdminServiceServicer):
 async def serve():
     port = int(os.environ.get("GRPC_PORT", "50051"))
     server = grpc.aio.server()
-    pb_grpc.add_ProducerServiceServicer_to_server(ProducerService(), server)
-    cpb_grpc.add_ConsumerServiceServicer_to_server(ConsumerService(), server)
+    # One store, shared: a producer takes the group metadata its consumers
+    # handed out.
+    group_metadata = GroupMetadataStore()
+    pb_grpc.add_ProducerServiceServicer_to_server(ProducerService(group_metadata), server)
+    cpb_grpc.add_ConsumerServiceServicer_to_server(ConsumerService(group_metadata), server)
     apb_grpc.add_AdminServiceServicer_to_server(AdminService(), server)
     server.add_insecure_port(f"0.0.0.0:{port}")
     await server.start()

@@ -86,6 +86,7 @@ using confluent::kafka::test::ConsumerRecordList;
 using confluent::kafka::test::ConsumerService;
 using confluent::kafka::test::CreateConsumerRequest;
 using confluent::kafka::test::CreateConsumerResponse;
+using confluent::kafka::test::GroupMetadataResponse;
 using confluent::kafka::test::ListTopicsResponse;
 using confluent::kafka::test::LongOffsetMap;
 using confluent::kafka::test::LongOffsetsResponse;
@@ -97,6 +98,7 @@ using confluent::kafka::test::PollRequest;
 using confluent::kafka::test::PollResponse;
 using confluent::kafka::test::PositionRequest;
 using confluent::kafka::test::PositionResponse;
+using confluent::kafka::test::ReleaseGroupMetadataRequest;
 using confluent::kafka::test::SeekRequest;
 using confluent::kafka::test::SubscribeRequest;
 using confluent::kafka::test::Metric;
@@ -588,8 +590,60 @@ extern "C" void log_delivery(kafka_producer_RecordMetadata_t* metadata,
   state->log->append(state->client_id, std::move(entry));
 }
 
+// Server-side group-metadata handles, by id. ConsumerService.GroupMetadata
+// adds the handle kafka_consumer_Consumer_group_metadata returns, and
+// ProducerService.SendOffsetsToTransaction passes it back to the FFI: the C API
+// has no ConsumerGroupMetadata constructor, so a handle the consumer handed out
+// is the only one the producer can take. ConsumerService.ReleaseGroupMetadata
+// removes it, when the Rust client drops its last reference.
+//
+// Handles sit in shared_ptrs whose deleter is
+// kafka_consumer_ConsumerGroupMetadata_destroy, so a release that races a
+// send_offsets_to_transaction destroys the handle only after the FFI call
+// returns. The handle holds its own reference to the metadata, so it stays
+// valid after its consumer closes.
+class GroupMetadataStore {
+ public:
+  uint64_t add(kafka_consumer_ConsumerGroupMetadata_t* handle) {
+    const uint64_t id = next_id_.fetch_add(1);
+    std::lock_guard<std::mutex> lock(mu_);
+    handles_[id] = std::shared_ptr<kafka_consumer_ConsumerGroupMetadata_t>(
+        handle, kafka_consumer_ConsumerGroupMetadata_destroy);
+    return id;
+  }
+
+  // nullptr for an unknown (or already released) id.
+  std::shared_ptr<kafka_consumer_ConsumerGroupMetadata_t> get(uint64_t id) {
+    std::lock_guard<std::mutex> lock(mu_);
+    auto it = handles_.find(id);
+    return it == handles_.end() ? nullptr : it->second;
+  }
+
+  void release(uint64_t id) {
+    std::shared_ptr<kafka_consumer_ConsumerGroupMetadata_t> handle;
+    {
+      std::lock_guard<std::mutex> lock(mu_);
+      auto it = handles_.find(id);
+      if (it == handles_.end()) return;
+      handle = std::move(it->second);
+      handles_.erase(it);
+    }
+    // `handle` goes out of scope here, outside the lock.
+  }
+
+ private:
+  std::mutex mu_;
+  std::unordered_map<uint64_t,
+                     std::shared_ptr<kafka_consumer_ConsumerGroupMetadata_t>>
+      handles_;
+  std::atomic<uint64_t> next_id_{1};
+};
+
 class ProducerServiceImpl final : public ProducerService::Service {
  public:
+  explicit ProducerServiceImpl(GroupMetadataStore* group_metadata)
+      : group_metadata_(group_metadata) {}
+
   grpc::Status CreateProducer(grpc::ServerContext*,
                               const CreateProducerRequest* req,
                               CreateProducerResponse* resp) override {
@@ -780,8 +834,8 @@ class ProducerServiceImpl final : public ProducerService::Service {
 
   // Java sendOffsetsToTransaction(offsets, groupMetadata): the producer half of
   // consume-transform-produce. Flattens the repeated OffsetEntry into the
-  // parallel arrays the sync FFI expects and rebuilds a ConsumerGroupMetadata
-  // handle from the wire fields.
+  // parallel arrays the sync FFI expects, and passes the group-metadata handle
+  // stored under the request's id by ConsumerService.GroupMetadata.
   grpc::Status SendOffsetsToTransaction(
       grpc::ServerContext*, const SendOffsetsToTransactionRequest* req,
       StatusResponse* resp) override {
@@ -814,21 +868,21 @@ class ProducerServiceImpl final : public ProducerService::Service {
       leader_epochs.push_back(e.has_leader_epoch() ? e.leader_epoch() : -1);
       metadata.push_back(e.has_metadata() ? e.metadata().c_str() : nullptr);
     }
-    // Rebuild the group-metadata handle from its wire fields. The const char*
-    // borrow into `req` and only need to survive the _new call, which copies
-    // them; group_instance_id is absent for a dynamic (non-static) member.
-    const ConsumerGroupMetadata& gm = req->group_metadata();
-    kafka_consumer_ConsumerGroupMetadata_t* group_meta =
-        kafka_consumer_ConsumerGroupMetadata_new(
-            gm.group_id().c_str(), gm.generation_id(), gm.member_id().c_str(),
-            gm.has_group_instance_id() ? gm.group_instance_id().c_str()
-                                       : nullptr);
+    // Holding the shared_ptr keeps the handle alive through the FFI call even
+    // if a ReleaseGroupMetadata for it arrives meanwhile.
+    std::shared_ptr<kafka_consumer_ConsumerGroupMetadata_t> group_meta =
+        group_metadata_->get(req->group_metadata_id());
+    if (group_meta == nullptr) {
+      *resp->mutable_error() = make_synthetic_error(
+          "unknown group_metadata_id " +
+          std::to_string(req->group_metadata_id()));
+      return grpc::Status::OK;
+    }
     kafka_common_Error_t* err =
         kafka_producer_Producer_send_offsets_to_transaction(
             producer, topics.data(), partitions.data(), offsets.data(),
             leader_epochs.data(), metadata.data(),
-            static_cast<int32_t>(topics.size()), group_meta);
-    kafka_consumer_ConsumerGroupMetadata_destroy(group_meta);
+            static_cast<int32_t>(topics.size()), group_meta.get());
     if (err != nullptr) {
       fill_proto_error(resp->mutable_error(), err);
     }
@@ -993,6 +1047,8 @@ class ProducerServiceImpl final : public ProducerService::Service {
   }
 
 
+  // Shared with ConsumerServiceImpl; owned by main().
+  GroupMetadataStore* group_metadata_;
   std::mutex mu_;
   std::unordered_map<uint64_t, kafka_producer_Producer_t*> producers_;
   // user_data for the delivery callbacks; owned here, one per producer, for the
@@ -1118,6 +1174,9 @@ void tp_to_proto(const kafka_consumer_TopicPartition_t* tp, TopicPartition* dst)
 
 class ConsumerServiceImpl final : public ConsumerService::Service {
  public:
+  explicit ConsumerServiceImpl(GroupMetadataStore* group_metadata)
+      : group_metadata_(group_metadata) {}
+
   grpc::Status CreateConsumer(grpc::ServerContext*,
                               const CreateConsumerRequest* req,
                               CreateConsumerResponse* resp) override {
@@ -1560,6 +1619,39 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
     return grpc::Status::OK;
   }
 
+  // Java groupMetadata(): store the handle and return its id together with the
+  // fields read through the accessors (group_instance_id is null for a dynamic
+  // member).
+  grpc::Status GroupMetadata(grpc::ServerContext*, const ConsumerIdRequest* req,
+                             GroupMetadataResponse* resp) override {
+    kafka_consumer_Consumer_t* c = consumer_for(req->consumer_id());
+    if (c == nullptr) {
+      *resp->mutable_error() = make_synthetic_error(
+          "unknown consumer_id " + std::to_string(req->consumer_id()));
+      return grpc::Status::OK;
+    }
+    kafka_consumer_ConsumerGroupMetadata_t* handle =
+        kafka_consumer_Consumer_group_metadata(c);
+    ConsumerGroupMetadata* fields = resp->mutable_group_metadata();
+    fields->set_group_id(kafka_consumer_ConsumerGroupMetadata_group_id(handle));
+    fields->set_generation_id(
+        kafka_consumer_ConsumerGroupMetadata_generation_id(handle));
+    fields->set_member_id(kafka_consumer_ConsumerGroupMetadata_member_id(handle));
+    if (const char* instance =
+            kafka_consumer_ConsumerGroupMetadata_group_instance_id(handle)) {
+      fields->set_group_instance_id(instance);
+    }
+    resp->set_group_metadata_id(group_metadata_->add(handle));
+    return grpc::Status::OK;
+  }
+
+  grpc::Status ReleaseGroupMetadata(grpc::ServerContext*,
+                                    const ReleaseGroupMetadataRequest* req,
+                                    StatusResponse*) override {
+    group_metadata_->release(req->group_metadata_id());
+    return grpc::Status::OK;
+  }
+
   grpc::Status Wakeup(grpc::ServerContext*, const ConsumerIdRequest* req,
                       StatusResponse*) override {
     kafka_consumer_Consumer_t* c = consumer_for(req->consumer_id());
@@ -1702,6 +1794,8 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
     }
   }
 
+  // Shared with ProducerServiceImpl; owned by main().
+  GroupMetadataStore* group_metadata_;
   std::mutex mu_;
   std::unordered_map<uint64_t, kafka_consumer_Consumer_t*> consumers_;
   // user_data for the rebalance-listener and commit callbacks; owned here, one
@@ -4870,8 +4964,10 @@ int main(int /*argc*/, char** /*argv*/) {
 
   grpc::ServerBuilder builder;
   builder.AddListeningPort(address, grpc::InsecureServerCredentials());
-  ProducerServiceImpl producer_service;
-  ConsumerServiceImpl consumer_service;
+  // Outlives both services, which share it.
+  GroupMetadataStore group_metadata;
+  ProducerServiceImpl producer_service(&group_metadata);
+  ConsumerServiceImpl consumer_service(&group_metadata);
   AdminServiceImpl admin_service;
   builder.RegisterService(&producer_service);
   builder.RegisterService(&consumer_service);

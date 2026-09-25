@@ -116,7 +116,9 @@ trait with `Box<dyn Consumer<K, V>>` for runtime dispatch:
         fn subscription(&self) -> HashSet<String>;
         fn paused(&self) -> HashSet<TopicPartition>;
         fn wakeup(&self);
-        fn group_metadata(&self) -> ConsumerGroupMetadata;
+        // A trait object: `ConsumerGroupMetadata` is a trait (Java deprecated
+        // its constructors; it becomes an interface in Kafka 5.0).
+        fn group_metadata(&self) -> Arc<dyn ConsumerGroupMetadata>;
         fn client_id(&self) -> &str;
     }
 

@@ -1064,8 +1064,8 @@ impl<K: Send + Sync, V: Send + Sync> Producer<K, V> for MockProducer<K, V> {
     /// Corresponds to Java's `MockProducer.sendOffsetsToTransaction(Map,
     /// ConsumerGroupMetadata)` (`MockProducer.java:182`). Java's
     /// `Objects.requireNonNull(groupMetadata)` (`:184`) has no counterpart: the
-    /// parameter is taken by value and is not an `Option`, so a missing metadata is
-    /// not expressible.
+    /// parameter is a reference and not an `Option`, so a missing metadata is not
+    /// expressible.
     ///
     /// An empty `offsets` map is ignored and leaves
     /// [`sent_offsets()`](MockProducer::sent_offsets) `false` (Java `:194-196`).
@@ -1078,7 +1078,7 @@ impl<K: Send + Sync, V: Send + Sync> Producer<K, V> for MockProducer<K, V> {
     async fn send_offsets_to_transaction(
         &self,
         offsets: HashMap<TopicPartition, OffsetAndMetadata>,
-        group_metadata: ConsumerGroupMetadata,
+        group_metadata: &dyn ConsumerGroupMetadata,
     ) -> Result<(), Error> {
         let mut inner = self.inner.lock().unwrap();
         inner.verify_not_closed()?;
@@ -1339,6 +1339,7 @@ fn next_offset(offsets: &mut HashMap<TopicPartition, i64>, tp: &TopicPartition) 
 mod tests {
     use super::*;
     use crate::common::serialization::StringSerializer;
+    use crate::consumer::ConsumerGroupMetadataImpl;
     use crate::producer::RoundRobinPartitioner;
 
     // -----------------------------------------------------------------------
@@ -1379,12 +1380,11 @@ mod tests {
         MockProducer::with_auto_complete(auto_complete)
     }
 
-    /// Java's `new ConsumerGroupMetadata(groupId)`. The Rust constructor carries
-    /// `#[deprecated]`, mirroring Java's `@Deprecated(since = "4.2")`; the tests
-    /// must still exercise it, so the allowance sits at this one call site.
-    #[allow(deprecated)]
-    fn group_metadata(group_id: &str) -> ConsumerGroupMetadata {
-        ConsumerGroupMetadata::new(group_id)
+    /// Java's `new ConsumerGroupMetadata(groupId)`. Java has deprecated that
+    /// constructor since 4.2 and the public Rust API has none, so the tests build
+    /// the crate-internal implementation.
+    fn group_metadata(group_id: &str) -> ConsumerGroupMetadataImpl {
+        ConsumerGroupMetadataImpl::new(group_id)
     }
 
     /// Assert `result` failed the way Java's `IllegalStateException` does, with
@@ -1821,7 +1821,7 @@ mod tests {
         let producer = build_mock_producer(true);
         assert_illegal_state(
             producer
-                .send_offsets_to_transaction(HashMap::new(), group_metadata(GROUP_ID))
+                .send_offsets_to_transaction(HashMap::new(), &group_metadata(GROUP_ID))
                 .await,
             "MockProducer hasn't been initialized for transactions.",
         );
@@ -1837,7 +1837,7 @@ mod tests {
         producer.init_transactions().await.unwrap();
         assert_illegal_state(
             producer
-                .send_offsets_to_transaction(HashMap::new(), group_metadata(GROUP_ID))
+                .send_offsets_to_transaction(HashMap::new(), &group_metadata(GROUP_ID))
                 .await,
             "There is no open transaction.",
         );
@@ -2016,7 +2016,7 @@ mod tests {
         producer.fence_producer().unwrap();
         assert_producer_fenced(
             producer
-                .send_offsets_to_transaction(HashMap::new(), group_metadata(GROUP_ID))
+                .send_offsets_to_transaction(HashMap::new(), &group_metadata(GROUP_ID))
                 .await,
         );
     }
@@ -2031,7 +2031,7 @@ mod tests {
         producer.fence_producer().unwrap();
         assert_producer_fenced(
             producer
-                .send_offsets_to_transaction(HashMap::new(), group_metadata(GROUP_ID))
+                .send_offsets_to_transaction(HashMap::new(), &group_metadata(GROUP_ID))
                 .await,
         );
     }
@@ -2101,7 +2101,7 @@ mod tests {
         producer.close().await.unwrap();
         assert_illegal_state(
             producer
-                .send_offsets_to_transaction(HashMap::new(), group_metadata(GROUP_ID))
+                .send_offsets_to_transaction(HashMap::new(), &group_metadata(GROUP_ID))
                 .await,
             "MockProducer is already closed.",
         );
@@ -2116,7 +2116,7 @@ mod tests {
         producer.close().await.unwrap();
         assert_illegal_state(
             producer
-                .send_offsets_to_transaction(HashMap::new(), group_metadata(GROUP_ID))
+                .send_offsets_to_transaction(HashMap::new(), &group_metadata(GROUP_ID))
                 .await,
             "MockProducer is already closed.",
         );
@@ -2283,11 +2283,11 @@ mod tests {
         let group2 = "g2";
         let group2_commit = offsets(&[(0, 101), (1, 21)]);
         producer
-            .send_offsets_to_transaction(group1_commit.clone(), group_metadata(group1))
+            .send_offsets_to_transaction(group1_commit.clone(), &group_metadata(group1))
             .await
             .unwrap();
         producer
-            .send_offsets_to_transaction(group2_commit.clone(), group_metadata(group2))
+            .send_offsets_to_transaction(group2_commit.clone(), &group_metadata(group2))
             .await
             .unwrap();
 
@@ -2312,7 +2312,7 @@ mod tests {
         producer.init_transactions().await.unwrap();
         producer.begin_transaction().unwrap();
         producer
-            .send_offsets_to_transaction(HashMap::new(), group_metadata("groupId"))
+            .send_offsets_to_transaction(HashMap::new(), &group_metadata("groupId"))
             .await
             .unwrap();
         assert!(!producer.sent_offsets());
@@ -2334,7 +2334,7 @@ mod tests {
 
         let group_commit = offsets(&[(0, 42)]);
         producer
-            .send_offsets_to_transaction(group_commit, group_metadata("groupId"))
+            .send_offsets_to_transaction(group_commit, &group_metadata("groupId"))
             .await
             .unwrap();
         assert!(producer.sent_offsets());
@@ -2356,7 +2356,7 @@ mod tests {
 
         let group_commit = offsets(&[(0, 42)]);
         producer
-            .send_offsets_to_transaction(group_commit.clone(), group_metadata("groupId"))
+            .send_offsets_to_transaction(group_commit.clone(), &group_metadata("groupId"))
             .await
             .unwrap();
         producer.commit_transaction().await.unwrap(); // commit should not reset "sentOffsets"
@@ -2366,7 +2366,7 @@ mod tests {
         assert!(!producer.sent_offsets());
 
         producer
-            .send_offsets_to_transaction(group_commit, group_metadata("groupId"))
+            .send_offsets_to_transaction(group_commit, &group_metadata("groupId"))
             .await
             .unwrap();
         producer.commit_transaction().await.unwrap(); // commit should not reset "sentOffsets"
@@ -2397,11 +2397,11 @@ mod tests {
         let group_commit1 = offsets(&[(0, 42), (1, 73)]);
         let group_commit2 = offsets(&[(1, 101), (2, 21)]);
         producer
-            .send_offsets_to_transaction(group_commit1, group_metadata(group))
+            .send_offsets_to_transaction(group_commit1, &group_metadata(group))
             .await
             .unwrap();
         producer
-            .send_offsets_to_transaction(group_commit2, group_metadata(group))
+            .send_offsets_to_transaction(group_commit2, &group_metadata(group))
             .await
             .unwrap();
 
@@ -2429,7 +2429,7 @@ mod tests {
         let group = "g";
         let group_commit = offsets(&[(0, 42), (1, 73)]);
         producer
-            .send_offsets_to_transaction(group_commit.clone(), group_metadata(group))
+            .send_offsets_to_transaction(group_commit.clone(), &group_metadata(group))
             .await
             .unwrap();
         producer.abort_transaction().await.unwrap();
@@ -2440,7 +2440,7 @@ mod tests {
 
         producer.begin_transaction().unwrap();
         producer
-            .send_offsets_to_transaction(group_commit, group_metadata(group))
+            .send_offsets_to_transaction(group_commit, &group_metadata(group))
             .await
             .unwrap();
         producer.abort_transaction().await.unwrap();
@@ -2465,7 +2465,7 @@ mod tests {
         let group = "g";
         let group_commit = offsets(&[(0, 42), (1, 73)]);
         producer
-            .send_offsets_to_transaction(group_commit.clone(), group_metadata(group))
+            .send_offsets_to_transaction(group_commit.clone(), &group_metadata(group))
             .await
             .unwrap();
         producer.commit_transaction().await.unwrap();
@@ -2497,7 +2497,7 @@ mod tests {
         let group = "g";
         let group_commit = offsets(&[(0, 42), (1, 73)]);
         producer
-            .send_offsets_to_transaction(group_commit.clone(), group_metadata(group))
+            .send_offsets_to_transaction(group_commit.clone(), &group_metadata(group))
             .await
             .unwrap();
         producer.commit_transaction().await.unwrap();
@@ -2507,7 +2507,7 @@ mod tests {
         let group2 = "g2";
         let group_commit2 = offsets(&[(2, 53), (3, 84)]);
         producer
-            .send_offsets_to_transaction(group_commit2, group_metadata(group2))
+            .send_offsets_to_transaction(group_commit2, &group_metadata(group2))
             .await
             .unwrap();
         producer.abort_transaction().await.unwrap();
@@ -2790,7 +2790,7 @@ mod tests {
         producer.send(record1()).await.unwrap();
         let group_commit = offsets(&[(0, 42)]);
         producer
-            .send_offsets_to_transaction(group_commit.clone(), group_metadata(GROUP_ID))
+            .send_offsets_to_transaction(group_commit.clone(), &group_metadata(GROUP_ID))
             .await
             .unwrap();
 
@@ -2817,7 +2817,7 @@ mod tests {
         producer.begin_transaction().unwrap();
         producer.send(record1()).await.unwrap();
         producer
-            .send_offsets_to_transaction(offsets(&[(0, 42)]), group_metadata(GROUP_ID))
+            .send_offsets_to_transaction(offsets(&[(0, 42)]), &group_metadata(GROUP_ID))
             .await
             .unwrap();
         producer.commit_transaction().await.unwrap();
@@ -2825,7 +2825,7 @@ mod tests {
         producer.begin_transaction().unwrap();
         producer.send(record2()).await.unwrap();
         producer
-            .send_offsets_to_transaction(offsets(&[(1, 73)]), group_metadata(GROUP_ID))
+            .send_offsets_to_transaction(offsets(&[(1, 73)]), &group_metadata(GROUP_ID))
             .await
             .unwrap();
 
@@ -2895,7 +2895,7 @@ mod tests {
         // empty map surfaces it.
         producer.set_send_offsets_to_transaction_error(Some(injected()));
         let error = producer
-            .send_offsets_to_transaction(HashMap::new(), group_metadata(GROUP_ID))
+            .send_offsets_to_transaction(HashMap::new(), &group_metadata(GROUP_ID))
             .await
             .unwrap_err();
         assert_eq!(Errors::CoordinatorNotAvailable, error.error());

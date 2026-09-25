@@ -71,6 +71,8 @@ use multilanguage_test_server::proto::{
 };
 use tonic::transport::Channel;
 
+use crate::common::multilanguage_consumer::remote_group_metadata_id;
+
 /// gRPC-backed `Producer` whose calls are executed by an out-of-process
 /// server in another language (Python or C++) that ultimately drives the
 /// same Rust client through a language binding.
@@ -161,16 +163,19 @@ impl Producer<Vec<u8>, Vec<u8>> for MultilanguageProducer {
     }
 
     /// Java `sendOffsetsToTransaction(offsets, groupMetadata)` tunneled over
-    /// gRPC — the producer half of consume-transform-produce. The offsets and
-    /// the consuming group's metadata are marshaled onto the wire; the server
-    /// rebuilds a `ConsumerGroupMetadata` handle and drives its own binding's
-    /// `send_offsets_to_transaction`. See [`Self::init_transactions`] for the
-    /// `StatusResponse` convention.
+    /// gRPC — the producer half of consume-transform-produce. The offsets are
+    /// marshaled onto the wire. The group metadata must come from a consumer on
+    /// the same backend: it travels as the id of the server-side handle that
+    /// consumer handed out, and the server passes that handle to its own
+    /// binding's `send_offsets_to_transaction`. Other metadata returns an
+    /// `illegal_state` error without an RPC. See [`Self::init_transactions`] for
+    /// the `StatusResponse` convention.
     async fn send_offsets_to_transaction(
         &self,
         offsets: HashMap<TopicPartition, OffsetAndMetadata>,
-        group_metadata: ConsumerGroupMetadata,
+        group_metadata: &dyn ConsumerGroupMetadata,
     ) -> Result<(), Error> {
+        let group_metadata_id = remote_group_metadata_id(group_metadata, self.backend)?;
         let mut client = self.client.clone();
         // The offsets reach the wire, so impose a deterministic order before
         // encoding (producer-transactions.md §10): a `HashMap` iterates
@@ -189,16 +194,8 @@ impl Producer<Vec<u8>, Vec<u8>> for MultilanguageProducer {
             })
             .collect();
         entries.sort_by(|a, b| a.topic.cmp(&b.topic).then_with(|| a.partition.cmp(&b.partition)));
-        let request = SendOffsetsToTransactionRequest {
-            producer_id: self.producer_id,
-            offsets: entries,
-            group_metadata: Some(proto::ConsumerGroupMetadata {
-                group_id: group_metadata.group_id().to_string(),
-                generation_id: group_metadata.generation_id(),
-                member_id: group_metadata.member_id().to_string(),
-                group_instance_id: group_metadata.group_instance_id().map(str::to_string),
-            }),
-        };
+        let request =
+            SendOffsetsToTransactionRequest { producer_id: self.producer_id, offsets: entries, group_metadata_id };
         let response = client
             .send_offsets_to_transaction(request)
             .await

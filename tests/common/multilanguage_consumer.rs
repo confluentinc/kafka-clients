@@ -35,14 +35,22 @@
 //!
 //! The trait's blocking-in-Java methods are `async` and forward to a unary RPC
 //! that the server awaits. The handful of methods that are *sync* in the trait
-//! (`assignment`, `subscription`, `paused`, `wakeup`) still need a server
-//! round-trip; they use `block_in_place` + `Handle::block_on`, which is valid
-//! because the multilanguage tests run on the multi-thread runtime.
+//! (`assignment`, `subscription`, `paused`, `group_metadata`, `wakeup`) still
+//! need a server round-trip; they use `block_in_place` + `Handle::block_on`,
+//! which is valid because the multilanguage tests run on the multi-thread
+//! runtime.
+//!
+//! `group_metadata` returns a [`MultilanguageGroupMetadata`]: the id of a
+//! group-metadata handle the server keeps in its store, plus the fields read
+//! through it. The bindings have no `ConsumerGroupMetadata` constructor (Java
+//! deprecated it), so the server-side handle is the only thing the server's
+//! producer can take; `MultilanguageProducer::send_offsets_to_transaction`
+//! sends the id back. Dropping the last reference releases the handle.
 //!
 //! Used only when `--features multilanguage-tests` is enabled.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -61,6 +69,143 @@ use multilanguage_test_server::proto::{self};
 use tonic::transport::Channel;
 
 use crate::common::multilanguage_producer::{kafka_error_from_proto, partition_info_from_proto, status_to_kafka_error};
+
+/// Where each live [`MultilanguageGroupMetadata`] came from, keyed by the
+/// address of the object: `(server-side handle id, backend label)`.
+///
+/// `send_offsets_to_transaction` receives a `&dyn ConsumerGroupMetadata`, and
+/// the public trait deliberately offers no downcast. The address identifies
+/// the object instead: a `&dyn` to a live object points at the same data as
+/// the `Arc` that registered it, and an entry is removed before its object is
+/// freed, so a stale address can never match.
+static REMOTE_GROUP_METADATA: LazyLock<Mutex<HashMap<usize, (u64, &'static str)>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+fn metadata_address(group_metadata: &dyn ConsumerGroupMetadata) -> usize {
+    group_metadata as *const dyn ConsumerGroupMetadata as *const () as usize
+}
+
+/// The server-side handle id behind `group_metadata`, which must come from a
+/// consumer on the same `backend`.
+///
+/// Returns an `illegal_state` error for metadata built in this process (a
+/// native consumer's), or from another backend: the server can only use a
+/// handle it handed out itself.
+pub fn remote_group_metadata_id(group_metadata: &dyn ConsumerGroupMetadata, backend: &str) -> Result<u64, Error> {
+    let registry = REMOTE_GROUP_METADATA.lock().unwrap();
+    match registry.get(&metadata_address(group_metadata)) {
+        Some(&(id, origin)) if origin == backend => Ok(id),
+        Some(&(_, origin)) => Err(Error::local_illegal_state(format!(
+            "send_offsets_to_transaction on the {backend} gRPC multilanguage backend was given group metadata from the {origin} backend; get it from a consumer on the same backend"
+        ))),
+        None => Err(Error::local_illegal_state(format!(
+            "send_offsets_to_transaction on the {backend} gRPC multilanguage backend needs group metadata from a consumer on the same backend (Consumer::group_metadata); metadata created in this process cannot cross the wire"
+        ))),
+    }
+}
+
+/// [`ConsumerGroupMetadata`] of a consumer living in a gRPC server: the id of
+/// the server-side handle and the fields read through it.
+///
+/// Dropping it removes its registry entry and sends `ReleaseGroupMetadata`,
+/// so the server destroys the handle. It is handed out as an
+/// `Arc<dyn ConsumerGroupMetadata>`, so that happens when the last clone goes.
+#[derive(Debug)]
+pub struct MultilanguageGroupMetadata {
+    group_id: String,
+    generation_id: i32,
+    member_id: String,
+    group_instance_id: Option<String>,
+    release: GroupMetadataRelease,
+}
+
+/// Issues `ReleaseGroupMetadata` for one handle when dropped.
+struct GroupMetadataRelease {
+    group_metadata_id: u64,
+    client: ConsumerServiceClient<Channel>,
+}
+
+impl std::fmt::Debug for GroupMetadataRelease {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GroupMetadataRelease")
+            .field("group_metadata_id", &self.group_metadata_id)
+            .finish()
+    }
+}
+
+impl MultilanguageGroupMetadata {
+    fn register(
+        response: proto::GroupMetadataResponse,
+        client: ConsumerServiceClient<Channel>,
+        backend: &'static str,
+    ) -> Arc<dyn ConsumerGroupMetadata> {
+        let fields = response.group_metadata.unwrap_or_default();
+        let metadata = Arc::new(Self {
+            group_id: fields.group_id,
+            generation_id: fields.generation_id,
+            member_id: fields.member_id,
+            group_instance_id: fields.group_instance_id,
+            release: GroupMetadataRelease { group_metadata_id: response.group_metadata_id, client },
+        });
+        REMOTE_GROUP_METADATA.lock().unwrap().insert(
+            Arc::as_ptr(&metadata) as *const () as usize,
+            (response.group_metadata_id, backend),
+        );
+        metadata
+    }
+}
+
+impl ConsumerGroupMetadata for MultilanguageGroupMetadata {
+    fn group_id(&self) -> &str {
+        &self.group_id
+    }
+
+    fn generation_id(&self) -> i32 {
+        self.generation_id
+    }
+
+    fn member_id(&self) -> &str {
+        &self.member_id
+    }
+
+    fn group_instance_id(&self) -> Option<&str> {
+        self.group_instance_id.as_deref()
+    }
+}
+
+impl Drop for MultilanguageGroupMetadata {
+    fn drop(&mut self) {
+        // Unregister first, while the address is still this object's.
+        REMOTE_GROUP_METADATA.lock().unwrap().remove(&metadata_address(self));
+    }
+}
+
+impl Drop for GroupMetadataRelease {
+    fn drop(&mut self) {
+        // Outside a runtime (the test's runtime is gone) nothing can reach the
+        // server; it frees the handle when the session ends.
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let mut client = self.client.clone();
+        let req = proto::ReleaseGroupMetadataRequest { group_metadata_id: self.group_metadata_id };
+        // Best effort, like `wakeup`: a failed release only leaks the handle
+        // until the server exits.
+        let release = async move {
+            let _ = client.release_group_metadata(req).await;
+        };
+        match handle.runtime_flavor() {
+            // Same pattern as `MultilanguageConsumer::block`.
+            tokio::runtime::RuntimeFlavor::MultiThread => {
+                tokio::task::block_in_place(|| handle.block_on(release));
+            },
+            // `block_in_place` panics on a current-thread runtime.
+            _ => {
+                handle.spawn(release);
+            },
+        }
+    }
+}
 
 /// gRPC-backed `Consumer` driven by an out-of-process server in another
 /// language that ultimately calls the same Rust client through a binding.
@@ -315,8 +460,24 @@ impl Consumer<Vec<u8>, Vec<u8>> for MultilanguageConsumer {
         })
     }
 
-    fn group_metadata(&self) -> ConsumerGroupMetadata {
-        unimplemented!("group_metadata is not supported on the gRPC multilanguage backend")
+    fn group_metadata(&self) -> Arc<dyn ConsumerGroupMetadata> {
+        let mut client = self.client.clone();
+        let id = self.consumer_id;
+        let backend = self.backend;
+        let response = self.block(async move {
+            client
+                .group_metadata(proto::ConsumerIdRequest { consumer_id: id })
+                .await
+                .map_err(|s| status_to_kafka_error(&s, backend))
+                .expect("group_metadata RPC failed")
+                .into_inner()
+        });
+        // The trait method is infallible, as in Java; a server-side failure
+        // (e.g. an unknown consumer id) is a harness bug.
+        if let Some(err) = response.error {
+            panic!("{backend} backend failed group_metadata: {}", kafka_error_from_proto(err));
+        }
+        MultilanguageGroupMetadata::register(response, self.client.clone(), backend)
     }
 
     fn client_id(&self) -> &str {

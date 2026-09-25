@@ -39,7 +39,7 @@ use crate::common::requests::{
 };
 use crate::common::utils::{LogContext, ProducerIdAndEpoch};
 use crate::common::{Error, KafkaError, LocalIllegalStateError, Node, TopicPartition};
-use crate::consumer::{ConsumerCommitFailedError, ConsumerGroupMetadata, OffsetAndMetadata};
+use crate::consumer::{ConsumerCommitFailedError, ConsumerGroupMetadata, ConsumerGroupMetadataImpl, OffsetAndMetadata};
 use crate::producer::internals::{
     InFlightBatchKey, ProducerBatch, TransactionalRequestResult, TxnPartitionEntry, TxnPartitionMap,
 };
@@ -576,7 +576,7 @@ pub(crate) enum TxnRequestHandlerKind {
         /// The offsets the follow-on `TxnOffsetCommit` will carry (Java 1798).
         offsets: HashMap<TopicPartition, OffsetAndMetadata>,
         /// The consumer group the offsets belong to (Java 1799).
-        group_metadata: ConsumerGroupMetadata,
+        group_metadata: ConsumerGroupMetadataImpl,
     },
     /// `TxnOffsetCommitHandler` (Java 1856-1951).
     TxnOffsetCommit {
@@ -1672,7 +1672,7 @@ impl TransactionManager {
     pub(crate) fn send_offsets_to_transaction(
         &mut self,
         offsets: HashMap<TopicPartition, OffsetAndMetadata>,
-        group_metadata: ConsumerGroupMetadata,
+        group_metadata: ConsumerGroupMetadataImpl,
         pending_requests: &mut PendingRequests,
     ) -> Result<Arc<TransactionalRequestResult>, Error> {
         self.ensure_transactional()?;
@@ -1742,7 +1742,7 @@ impl TransactionManager {
         &mut self,
         result: Option<Arc<TransactionalRequestResult>>,
         offsets: &HashMap<TopicPartition, OffsetAndMetadata>,
-        group_metadata: &ConsumerGroupMetadata,
+        group_metadata: &dyn ConsumerGroupMetadata,
     ) -> TxnRequestHandler {
         for (topic_partition, offset_and_metadata) in offsets {
             // Java's `OffsetAndMetadata.metadata()` is nullable and passed straight
@@ -5395,7 +5395,7 @@ mod tests {
         coordinators: &mut CoordinatorNodes,
         pending_requests: &mut PendingRequests,
         consumer_group_id: &str,
-        group_metadata: Option<&ConsumerGroupMetadata>,
+        group_metadata: Option<&dyn ConsumerGroupMetadata>,
         errors: &[(TopicPartition, Errors)],
     ) -> Result<(), Error> {
         let handler = manager
@@ -5538,22 +5538,19 @@ mod tests {
     }
 
     /// `new ConsumerGroupMetadata(consumerGroupId)`.
-    fn consumer_group_metadata() -> ConsumerGroupMetadata {
-        #[allow(deprecated)]
-        ConsumerGroupMetadata::new(CONSUMER_GROUP_ID)
+    fn consumer_group_metadata() -> ConsumerGroupMetadataImpl {
+        ConsumerGroupMetadataImpl::new(CONSUMER_GROUP_ID)
     }
 
     /// The throwaway group metadata Java's fence check passes — `"dummyId"`
     /// (Java 2054) — where the call is expected to fail before the group is used.
-    fn dummy_group_metadata() -> ConsumerGroupMetadata {
-        #[allow(deprecated)]
-        ConsumerGroupMetadata::new("dummyId")
+    fn dummy_group_metadata() -> ConsumerGroupMetadataImpl {
+        ConsumerGroupMetadataImpl::new("dummyId")
     }
 
     /// As [`dummy_group_metadata`], for Java's `"fake-group-id"` (Java 3837).
-    fn fake_group_metadata() -> ConsumerGroupMetadata {
-        #[allow(deprecated)]
-        ConsumerGroupMetadata::new("fake-group-id")
+    fn fake_group_metadata() -> ConsumerGroupMetadataImpl {
+        ConsumerGroupMetadataImpl::new("fake-group-id")
     }
 
     /// Acquires a producer id for an idempotent producer.
@@ -6978,7 +6975,7 @@ mod tests {
         manager: &mut TransactionManager,
         coordinators: &mut CoordinatorNodes,
         pending: &mut PendingRequests,
-        group_metadata: ConsumerGroupMetadata,
+        group_metadata: ConsumerGroupMetadataImpl,
         offsets: &[(TopicPartition, i64)],
     ) -> Arc<TransactionalRequestResult> {
         do_init_transactions(manager, pending, PRODUCER_ID, EPOCH).await;
@@ -7172,8 +7169,7 @@ mod tests {
         let mut manager = transactional_manager(false);
         let mut pending = PendingRequests::new();
         let mut coordinators = CoordinatorNodes::new();
-        #[allow(deprecated)]
-        let group_metadata = ConsumerGroupMetadata::with_generation_id_member_id_group_instance_id(
+        let group_metadata = ConsumerGroupMetadataImpl::with_generation_id_member_id_group_instance_id(
             CONSUMER_GROUP_ID,
             GENERATION_ID,
             fenced_member_id,
@@ -7242,8 +7238,7 @@ mod tests {
             let mut manager = transactional_manager(false);
             let mut pending = PendingRequests::new();
             let mut coordinators = CoordinatorNodes::new();
-            #[allow(deprecated)]
-            let group_metadata = ConsumerGroupMetadata::with_generation_id_member_id_group_instance_id(
+            let group_metadata = ConsumerGroupMetadataImpl::with_generation_id_member_id_group_instance_id(
                 CONSUMER_GROUP_ID,
                 generation_id,
                 member_id,

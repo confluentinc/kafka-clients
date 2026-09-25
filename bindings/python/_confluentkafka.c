@@ -237,6 +237,11 @@ static PyTypeObject ProducerRecordType = {
 // reliable — interpreter-shutdown ordering, non-prompt collection, swallowed
 // exceptions). Each Consumer.group_metadata() call returns a fresh owned handle
 // (the FFI clones internally), so two objects never alias one handle.
+//
+// Consumer.group_metadata() is the only way to get one: Java deprecated the
+// ConsumerGroupMetadata constructors in 4.2 (the class becomes an interface in
+// 5.0), and the C API has none, so the type disallows instantiation. That also
+// guarantees `handle` is never NULL outside dealloc.
 typedef struct {
     PyObject_HEAD
     kafka_consumer_ConsumerGroupMetadata_t* handle;  // owned; freed in dealloc
@@ -302,56 +307,14 @@ static PyObject* ConsumerGroupMetadata_repr(ConsumerGroupMetadataObject* self) {
     return r;
 }
 
-// Python-callable constructor:
-//   ConsumerGroupMetadata(group_id, generation_id, member_id, group_instance_id=None)
-// Synthesises a fresh owned handle from the four fields via the FFI — the same
-// path a caller that is not a consumer (e.g. a gRPC server rebuilding the
-// metadata from the wire to drive send_offsets_to_transaction) uses; a consumer
-// normally gets one from Consumer.group_metadata() instead. group_instance_id
-// accepts str or None: an absent / None one (proto3 `optional`, a static member
-// only) is passed to the FFI as NULL, becoming Java's Optional.empty(). The
-// handle is freed exactly once in tp_dealloc, identically to the
-// group_metadata() path — that path uses PyObject_New and this one tp_alloc, but
-// both allocate an object freed via tp_free, so there is no leak and no
-// double-free regardless of which created the object.
-static PyObject* ConsumerGroupMetadata_new(PyTypeObject* type, PyObject* args, PyObject* kwds) {
-    static char* kwlist[] = {"group_id", "generation_id", "member_id",
-                             "group_instance_id", NULL};
-    const char* group_id = NULL;
-    int generation_id = 0;
-    const char* member_id = NULL;
-    const char* group_instance_id = NULL;  // z: None / absent -> NULL
-    if (!PyArg_ParseTupleAndKeywords(args, kwds, "sis|z", kwlist,
-                                     &group_id, &generation_id, &member_id,
-                                     &group_instance_id)) {
-        return NULL;
-    }
-    kafka_consumer_ConsumerGroupMetadata_t* handle =
-        kafka_consumer_ConsumerGroupMetadata_new(
-            group_id, generation_id, member_id, group_instance_id);
-    if (handle == NULL) {
-        PyErr_SetString(PyExc_RuntimeError,
-                        "Failed to create ConsumerGroupMetadata");
-        return NULL;
-    }
-    ConsumerGroupMetadataObject* self =
-        (ConsumerGroupMetadataObject*)type->tp_alloc(type, 0);
-    if (self == NULL) {
-        kafka_consumer_ConsumerGroupMetadata_destroy(handle);
-        return NULL;
-    }
-    self->handle = handle;
-    return (PyObject*)self;
-}
-
 static PyTypeObject ConsumerGroupMetadataType = {
     PyVarObject_HEAD_INIT(NULL, 0)
     .tp_name = "_confluentkafka.ConsumerGroupMetadata",
     .tp_doc = "Consumer group membership metadata (owns a live Rust handle)",
     .tp_basicsize = sizeof(ConsumerGroupMetadataObject),
     .tp_itemsize = 0,
-    .tp_flags = Py_TPFLAGS_DEFAULT,
-    .tp_new = ConsumerGroupMetadata_new,
+    // No constructor; see the type's comment.
+    .tp_flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_DISALLOW_INSTANTIATION,
     .tp_dealloc = (destructor)ConsumerGroupMetadata_dealloc,
     .tp_getset = ConsumerGroupMetadata_getsetters,
     .tp_repr = (reprfunc)ConsumerGroupMetadata_repr,

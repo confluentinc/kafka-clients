@@ -3429,10 +3429,9 @@ unsafe fn send_offsets_to_transaction_inner(
             // Marshaling stays inside the guard because it feeds `op`; its failure
             // path is one of the early returns the guard must survive.
             let offsets_map = read_offset_map(topics, partitions, offsets, leader_epochs, metadata, count)?;
-            // The Rust API takes the metadata by value (the transaction manager
-            // moves it into the `AddOffsetsToTxn` handler), so clone out of the
-            // borrowed handle.
-            let group = group_metadata_ref(group_metadata).clone();
+            // The handle outlives this blocking call, so the metadata is borrowed
+            // straight out of it.
+            let group = &**group_metadata_ref(group_metadata);
             match inner {
                 ProducerStaticRef::Kafka(k) => runtime.block_on(k.send_offsets_to_transaction(offsets_map, group)),
                 ProducerStaticRef::Mock(m) => runtime.block_on(m.send_offsets_to_transaction(offsets_map, group)),
@@ -3893,14 +3892,15 @@ unsafe fn send_offsets_to_transaction_async_inner(
             // marshaling failure is the early return the flag must survive, handled
             // by `with_txn_control_async`.
             let offsets_map = read_offset_map(topics, partitions, offsets, leader_epochs, metadata, count)?;
-            // The Rust API takes the metadata by value (the transaction manager moves
-            // it into the `AddOffsetsToTxn` handler), so clone out of the borrowed
-            // handle. The owned map + metadata are then moved into the spawned op.
-            let group = group_metadata_ref(group_metadata).clone();
+            // The caller may destroy the handle as soon as this returns, so the
+            // spawned op holds its own reference to the metadata: an `Arc` clone
+            // of the one inside the handle. The owned map + metadata are then
+            // moved into the spawned op.
+            let group = Arc::clone(group_metadata_ref(group_metadata));
             Ok(move |inner| async move {
                 match inner {
-                    ProducerStaticRef::Kafka(k) => k.send_offsets_to_transaction(offsets_map, group).await,
-                    ProducerStaticRef::Mock(m) => m.send_offsets_to_transaction(offsets_map, group).await,
+                    ProducerStaticRef::Kafka(k) => k.send_offsets_to_transaction(offsets_map, &*group).await,
+                    ProducerStaticRef::Mock(m) => m.send_offsets_to_transaction(offsets_map, &*group).await,
                 }
             })
         });

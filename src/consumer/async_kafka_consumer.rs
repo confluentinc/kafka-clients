@@ -66,7 +66,6 @@ use crate::common::metrics::{KafkaMetric, MetricConfig, Metrics, RecordingLevel}
 use crate::common::utils::LogContext;
 use crate::common::{Error, IsolationLevel, MetricName, TopicPartition};
 use crate::consumer::ConsumerConfig;
-use crate::consumer::ConsumerGroupMetadata;
 use crate::consumer::ConsumerRebalanceListener;
 use crate::consumer::ConsumerRecords;
 use crate::consumer::OffsetAndMetadata;
@@ -97,6 +96,7 @@ use crate::consumer::internals::events::CompletableEvent;
 use crate::consumer::internals::events::CompletableEventReaper;
 use crate::consumer::internals::events::{ApplicationEvent, AsyncPollState};
 use crate::consumer::internals::events::{BackgroundEvent, BackgroundEventEnvelope};
+use crate::consumer::{ConsumerGroupMetadata, ConsumerGroupMetadataImpl};
 
 /// Backing join mechanism for the consumer background task.
 ///
@@ -1241,7 +1241,7 @@ where
     /// `MemberStateListener` registered with the membership manager
     /// (production wire-up in Phase 12; for tests, callers register
     /// [`Self::state_notifier`] directly on the membership manager).
-    group_metadata: Arc<Mutex<Option<ConsumerGroupMetadata>>>,
+    group_metadata: Arc<Mutex<Option<Arc<ConsumerGroupMetadataImpl>>>>,
     /// Java: `private final AtomicReference<Set<TopicPartition>> groupAssignmentSnapshot`
     /// (`AsyncKafkaConsumer.java:317`).
     ///
@@ -1423,7 +1423,7 @@ pub(crate) struct ConsumerStateNotifier {
     /// [`ConsumerGroupMetadata`].
     group_instance_id: Option<String>,
     /// Shared with [`AsyncKafkaConsumer::group_metadata`].
-    group_metadata: Arc<Mutex<Option<ConsumerGroupMetadata>>>,
+    group_metadata: Arc<Mutex<Option<Arc<ConsumerGroupMetadataImpl>>>>,
     /// Shared with [`AsyncKafkaConsumer::group_assignment_snapshot`].
     group_assignment_snapshot: Arc<Mutex<HashSet<TopicPartition>>>,
     /// Shared with [`AsyncKafkaConsumer::has_pending_reconciliation`]
@@ -1442,7 +1442,7 @@ impl ConsumerStateNotifier {
     pub(crate) fn new(
         group_id: impl Into<String>,
         group_instance_id: Option<String>,
-        group_metadata: Arc<Mutex<Option<ConsumerGroupMetadata>>>,
+        group_metadata: Arc<Mutex<Option<Arc<ConsumerGroupMetadataImpl>>>>,
         group_assignment_snapshot: Arc<Mutex<HashSet<TopicPartition>>>,
         has_pending_reconciliation: Arc<AtomicBool>,
     ) -> Self {
@@ -1472,14 +1472,13 @@ impl ConsumerStateNotifier {
             return;
         };
         let mut guard = self.group_metadata.lock().unwrap();
-        #[allow(deprecated)]
-        let next = ConsumerGroupMetadata::with_generation_id_member_id_group_instance_id(
+        let next = ConsumerGroupMetadataImpl::with_generation_id_member_id_group_instance_id(
             self.group_id.clone(),
             epoch,
             member_id.to_string(),
             self.group_instance_id.clone(),
         );
-        *guard = Some(next);
+        *guard = Some(Arc::new(next));
     }
 
     /// Java: `private void resetGroupMetadata()`
@@ -1510,14 +1509,13 @@ impl ConsumerStateNotifier {
             // Mirror Java's `initializeConsumerGroupMetadata(oldGroupId, oldGroupInstanceId)`:
             // build fresh metadata with UNKNOWN epoch + member, preserving
             // the old group_id + group_instance_id.
-            #[allow(deprecated)]
-            let next = ConsumerGroupMetadata::with_generation_id_member_id_group_instance_id(
+            let next = ConsumerGroupMetadataImpl::with_generation_id_member_id_group_instance_id(
                 old.group_id().to_string(),
                 -1, // JoinGroupRequest.UNKNOWN_GENERATION_ID
                 "", // JoinGroupRequest.UNKNOWN_MEMBER_ID
                 old.group_instance_id().map(str::to_string),
             );
-            *guard = Some(next);
+            *guard = Some(Arc::new(next));
         }
         // Java's `oldGroupMetadataOptional.map(...)` short-circuits when
         // the slot is empty (assignment-only consumer never populated the
@@ -1590,7 +1588,7 @@ pub(crate) struct AsyncKafkaConsumerComponents<K: Send + Sync + 'static, V: Send
     pub interceptors: Arc<Mutex<ConsumerInterceptors<K, V>>>,
     pub isolation_level: IsolationLevel,
     pub time: Arc<dyn ThreadTime>,
-    /// Shared `Arc<Mutex<Option<ConsumerGroupMetadata>>>` slot. Java has a
+    /// Shared `Arc<Mutex<Option<Arc<ConsumerGroupMetadataImpl>>>>` slot. Java has a
     /// **single** `AtomicReference<Optional<ConsumerGroupMetadata>>` field
     /// (`AsyncKafkaConsumer.java:289`); the same slot is referenced by
     /// the `MemberStateListener` registered on the membership manager AND
@@ -1600,7 +1598,7 @@ pub(crate) struct AsyncKafkaConsumerComponents<K: Send + Sync + 'static, V: Send
     /// through here — the same Arc is then registered on
     /// `ConsumerMembershipManager` via [`Self::state_notifier`] AND
     /// stored on the consumer struct's `group_metadata` field.
-    pub group_metadata: Arc<Mutex<Option<ConsumerGroupMetadata>>>,
+    pub group_metadata: Arc<Mutex<Option<Arc<ConsumerGroupMetadataImpl>>>>,
     /// Shared `Arc<Mutex<HashSet<TopicPartition>>>` slot mirroring
     /// Java's `groupAssignmentSnapshot` field
     /// (`AsyncKafkaConsumer.java:317`). Same single-source-of-truth
@@ -2296,7 +2294,7 @@ where
         // built TWO notifiers (one here, one inside `with_components`),
         // so `group_metadata` updates went to a slot the app side never
         // read. Single-notifier wiring now closes that gap.
-        let group_metadata: Arc<Mutex<Option<ConsumerGroupMetadata>>> = Arc::new(Mutex::new(None));
+        let group_metadata: Arc<Mutex<Option<Arc<ConsumerGroupMetadataImpl>>>> = Arc::new(Mutex::new(None));
         let group_assignment_snapshot: Arc<Mutex<HashSet<TopicPartition>>> = Arc::new(Mutex::new(HashSet::new()));
         let state_notifier = Arc::new(ConsumerStateNotifier::new(
             group_id.clone().unwrap_or_default(),
@@ -2759,11 +2757,11 @@ where
     /// Java's `groupMetadata()` throws `InvalidGroupIdException` when
     /// `group.id` is unset (`AsyncKafkaConsumer.java:1428-1436` calls
     /// `throwIfGroupIdNotDefined()` inside `acquireAndEnsureOpen`).
-    /// The Rust translation returns a stub
-    /// `ConsumerGroupMetadata::new("")` for groupless consumers,
+    /// The Rust translation returns a stub metadata with an empty group id
+    /// and unknown generation / member ids for groupless consumers,
     /// because:
     ///   (a) the [`Consumer`] trait surface returns
-    ///       `ConsumerGroupMetadata` with no error channel (Phase 2
+    ///       `Arc<dyn ConsumerGroupMetadata>` with no error channel (Phase 2
     ///       decision), and panicking on a pure accessor diverges
     ///       sharply from idiomatic Rust;
     ///   (b) the strict-Java behavior IS surfaced via `commit_*` /
@@ -2778,7 +2776,8 @@ where
     /// **Returns a stub value silently when the consumer is closed**
     /// (Java throws `IllegalStateException`).
     ///
-    /// The returned struct is a clone of the cached value. The cache
+    /// The returned value shares the cached `Arc`, as Java returns the cached
+    /// object. The cache
     /// is populated by [`ConsumerStateNotifier::on_member_epoch_updated`]
     /// which is the [`MemberStateListener`] registered on the
     /// `ConsumerMembershipManager` at production wire-up time
@@ -2786,18 +2785,15 @@ where
     /// receives its first heartbeat response with a member-epoch
     /// (or until tests invoke the notifier directly), the cache is
     /// empty and this method returns a fresh stub.
-    pub fn group_metadata(&self) -> ConsumerGroupMetadata {
+    pub fn group_metadata(&self) -> Arc<dyn ConsumerGroupMetadata> {
         let guard = self.group_metadata.lock().unwrap();
         match guard.as_ref() {
-            Some(meta) => meta.clone(),
+            Some(meta) => Arc::clone(meta) as Arc<dyn ConsumerGroupMetadata>,
             None => {
                 // Stub matching Java's `initializeGroupMetadata` default for
                 // groupless consumers.
-                #[allow(deprecated)]
-                {
-                    let group = self.group_id.clone().unwrap_or_default();
-                    ConsumerGroupMetadata::new(group)
-                }
+                let group = self.group_id.clone().unwrap_or_default();
+                Arc::new(ConsumerGroupMetadataImpl::new(group))
             },
         }
     }
@@ -5887,7 +5883,7 @@ where
         AsyncKafkaConsumer::paused(self)
     }
 
-    fn group_metadata(&self) -> ConsumerGroupMetadata {
+    fn group_metadata(&self) -> Arc<dyn ConsumerGroupMetadata> {
         AsyncKafkaConsumer::group_metadata(self)
     }
 
@@ -6313,7 +6309,7 @@ mod tests {
         // that need the listener registered on a membership manager
         // call `consumer.state_notifier()` and pass the Arc to
         // `AbstractMembershipManager::register_state_listener`.
-        let group_metadata_slot: Arc<Mutex<Option<ConsumerGroupMetadata>>> = Arc::new(Mutex::new(None));
+        let group_metadata_slot: Arc<Mutex<Option<Arc<ConsumerGroupMetadataImpl>>>> = Arc::new(Mutex::new(None));
         let group_assignment_snapshot_slot: Arc<Mutex<HashSet<TopicPartition>>> = Arc::new(Mutex::new(HashSet::new()));
         let state_notifier = Arc::new(ConsumerStateNotifier::new(
             "test-group".to_string(),
@@ -7361,7 +7357,7 @@ mod tests {
     /// groupless consumer's `group_metadata()`.
     ///
     /// Rust divergence: Java throws `InvalidGroupIdException` from
-    /// `group_metadata()`; Rust returns a stub `ConsumerGroupMetadata::new("")`
+    /// `group_metadata()`; Rust returns a stub metadata with an empty group id
     /// for groupless consumers (see `group_metadata` doc, line 615+).
     /// The exact-message assertion is on the equivalent error surface:
     /// `commit_sync()`'s `return_error_if_group_id_not_defined` (line 758-766),

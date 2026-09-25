@@ -2901,7 +2901,7 @@ mod tests {
     use crate::common::requests::TransactionResult;
     use crate::common::requests::{PartitionResponse, ProduceResponse};
     use crate::common::utils::ProducerIdAndEpoch;
-    use crate::consumer::{ConsumerGroupMetadata, OffsetAndMetadata};
+    use crate::consumer::{ConsumerGroupMetadata, ConsumerGroupMetadataImpl, OffsetAndMetadata};
     use crate::produce_response_data::{PartitionProduceResponse, TopicProduceResponse};
     use crate::producer::internals::BufferPool;
     use crate::producer::internals::FutureRecordMetadata;
@@ -11076,7 +11076,7 @@ mod tests {
         ctx: &mut SenderTestContext,
         producer_id: i64,
         producer_epoch: i16,
-        group_metadata: &ConsumerGroupMetadata,
+        group_metadata: &dyn ConsumerGroupMetadata,
         responses: &[(TopicPartition, Errors)],
     ) {
         prepare_txn_offset_commit_response_inner(
@@ -11292,7 +11292,7 @@ mod tests {
     fn send_offsets_to_transaction(
         ctx: &SenderTestContext,
         offsets: HashMap<TopicPartition, OffsetAndMetadata>,
-        group_metadata: ConsumerGroupMetadata,
+        group_metadata: ConsumerGroupMetadataImpl,
     ) -> Arc<TransactionalRequestResult> {
         let pending_requests = ctx.pending_requests();
         let mut pending_requests = pending_requests.lock().unwrap();
@@ -11304,16 +11304,14 @@ mod tests {
     }
 
     /// `new ConsumerGroupMetadata(consumerGroupId)`.
-    fn consumer_group_metadata() -> ConsumerGroupMetadata {
-        #[allow(deprecated)]
-        ConsumerGroupMetadata::new(CONSUMER_GROUP_ID)
+    fn consumer_group_metadata() -> ConsumerGroupMetadataImpl {
+        ConsumerGroupMetadataImpl::new(CONSUMER_GROUP_ID)
     }
 
     /// `new ConsumerGroupMetadata(consumerGroupId, generationId, memberId,
     /// Optional.of(groupInstanceId))` (Java 2691).
-    fn full_consumer_group_metadata() -> ConsumerGroupMetadata {
-        #[allow(deprecated)]
-        ConsumerGroupMetadata::with_generation_id_member_id_group_instance_id(
+    fn full_consumer_group_metadata() -> ConsumerGroupMetadataImpl {
+        ConsumerGroupMetadataImpl::with_generation_id_member_id_group_instance_id(
             CONSUMER_GROUP_ID,
             GENERATION_ID,
             MEMBER_ID,
@@ -12418,8 +12416,7 @@ mod tests {
         manager
             .begin_abort(&mut pending_requests, Caller::App)
             .expect_err("beginAbort is refused");
-        #[allow(deprecated)]
-        let dummy = ConsumerGroupMetadata::new("dummyId");
+        let dummy = ConsumerGroupMetadataImpl::new("dummyId");
         manager
             .send_offsets_to_transaction(HashMap::new(), dummy, &mut pending_requests)
             .expect_err("sendOffsetsToTransaction is refused");
