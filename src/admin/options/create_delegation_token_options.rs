@@ -94,25 +94,6 @@ impl CreateDelegationTokenOptions {
         self.max_lifetime_ms
     }
 
-    /// Sets the maximum lifetime of the token in milliseconds.
-    ///
-    /// Mirrors the deprecated `CreateDelegationTokenOptions.maxlifeTimeMs(long)`
-    /// (deprecated since 4.0; use [`Self::set_max_lifetime_ms`]).
-    #[deprecated(note = "use set_max_lifetime_ms")]
-    #[must_use]
-    pub fn set_maxlife_time_ms(self, max_lifetime_ms: i64) -> Self {
-        self.set_max_lifetime_ms(max_lifetime_ms)
-    }
-
-    /// The maximum lifetime of the token in milliseconds.
-    ///
-    /// Mirrors the deprecated `CreateDelegationTokenOptions.maxlifeTimeMs()`
-    /// (deprecated since 4.0; use [`Self::max_lifetime_ms`]).
-    #[deprecated(note = "use max_lifetime_ms")]
-    pub fn maxlife_time_ms(&self) -> i64 {
-        self.max_lifetime_ms
-    }
-
     /// Set the timeout in milliseconds for this operation, or `None` to use the
     /// default API timeout for the `AdminClient`.
     #[must_use]

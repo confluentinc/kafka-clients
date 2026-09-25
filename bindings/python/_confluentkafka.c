@@ -4137,8 +4137,6 @@ static void admin_alter_configs_trampoline(kafka_admin_AlterConfigsResult_t* r,
                                            kafka_common_Error_t* e, void* ud) { fire_handle_cb(r, e, ud); }
 static void admin_list_config_resources_trampoline(kafka_admin_ListConfigResourcesResult_t* r,
                                                    kafka_common_Error_t* e, void* ud) { fire_handle_cb(r, e, ud); }
-static void admin_list_client_metrics_trampoline(kafka_admin_ListClientMetricsResourcesResult_t* r,
-                                                 kafka_common_Error_t* e, void* ud) { fire_handle_cb(r, e, ud); }
 static void admin_describe_log_dirs_trampoline(kafka_admin_DescribeLogDirsResult_t* r,
                                                kafka_common_Error_t* e, void* ud) { fire_handle_cb(r, e, ud); }
 static void admin_alter_replica_log_dirs_trampoline(kafka_admin_AlterReplicaLogDirsResult_t* r,
@@ -4263,16 +4261,6 @@ static PyObject* py_Admin_list_config_resources_async(PyObject* self, PyObject* 
         (kafka_admin_AdminClient_t*)(uintptr_t)h, types, (int32_t)n, timeout_ms,
         admin_list_config_resources_trampoline, cb);
     PyMem_Free(types);
-    Py_RETURN_NONE;
-}
-
-static PyObject* py_Admin_list_client_metrics_resources_async(PyObject* self, PyObject* args) {
-    unsigned long long h; int timeout_ms; PyObject* cb;
-    if (!PyArg_ParseTuple(args, "KiO", &h, &timeout_ms, &cb)) return NULL;
-    Py_INCREF(cb);
-    kafka_admin_AdminClient_list_client_metrics_resources_async(
-        (kafka_admin_AdminClient_t*)(uintptr_t)h, timeout_ms,
-        admin_list_client_metrics_trampoline, cb);
     Py_RETURN_NONE;
 }
 
@@ -4499,25 +4487,6 @@ static PyObject* py_ListConfigResourcesResult_drain(PyObject* self, PyObject* ar
         PyList_SET_ITEM(out, i, item);
     }
     kafka_admin_ListConfigResourcesResult_destroy(r);
-    return out;
-}
-
-// [name]
-static PyObject* py_ListClientMetricsResourcesResult_drain(PyObject* self, PyObject* args) {
-    unsigned long long ptr;
-    if (!PyArg_ParseTuple(args, "K", &ptr)) return NULL;
-    kafka_admin_ListClientMetricsResourcesResult_t* r =
-        (kafka_admin_ListClientMetricsResourcesResult_t*)(uintptr_t)ptr;
-    int32_t n = kafka_admin_ListClientMetricsResourcesResult_count(r);
-    PyObject* out = PyList_New(n < 0 ? 0 : n);
-    if (out == NULL) { kafka_admin_ListClientMetricsResourcesResult_destroy(r); return NULL; }
-    for (int32_t i = 0; i < n; i++) {
-        PyObject* name = PyUnicode_FromString(
-            kafka_admin_ListClientMetricsResourcesResult_get_name(r, i));
-        if (name == NULL) { Py_DECREF(out); kafka_admin_ListClientMetricsResourcesResult_destroy(r); return NULL; }
-        PyList_SET_ITEM(out, i, name);
-    }
-    kafka_admin_ListClientMetricsResourcesResult_destroy(r);
     return out;
 }
 
@@ -5011,8 +4980,6 @@ static PyObject* py_ListOffsetsResult_drain(PyObject* self, PyObject* args) {
 
 static void admin_list_groups_trampoline(kafka_admin_ListGroupsResult_t* r,
                                          kafka_common_Error_t* e, void* ud) { fire_handle_cb(r, e, ud); }
-static void admin_list_consumer_groups_trampoline(kafka_admin_ListConsumerGroupsResult_t* r,
-                                                  kafka_common_Error_t* e, void* ud) { fire_handle_cb(r, e, ud); }
 static void admin_describe_consumer_groups_trampoline(kafka_admin_DescribeConsumerGroupsResult_t* r,
                                                       kafka_common_Error_t* e, void* ud) { fire_handle_cb(r, e, ud); }
 static void admin_describe_classic_groups_trampoline(kafka_admin_DescribeClassicGroupsResult_t* r,
@@ -5070,24 +5037,6 @@ static PyObject* py_Admin_list_groups_async(PyObject* self, PyObject* args) {
         (kafka_admin_AdminClient_t*)(uintptr_t)h, s, (int32_t)ns, p, (int32_t)np, t, (int32_t)nt,
         timeout_ms, admin_list_groups_trampoline, cb);
     PyMem_Free(s); PyMem_Free(p); PyMem_Free(t);
-    Py_RETURN_NONE;
-}
-
-static PyObject* py_Admin_list_consumer_groups_async(PyObject* self, PyObject* args) {
-    unsigned long long h; PyObject* states; PyObject* types; int timeout_ms; PyObject* cb;
-    if (!PyArg_ParseTuple(args, "KOOiO", &h, &states, &types, &timeout_ms, &cb)) return NULL;
-
-    const char** s = NULL; const char** t = NULL;
-    Py_ssize_t ns = build_string_array(states, &s);
-    if (ns < 0) return NULL;
-    Py_ssize_t nt = build_string_array(types, &t);
-    if (nt < 0) { PyMem_Free(s); return NULL; }
-
-    Py_INCREF(cb);
-    kafka_admin_AdminClient_list_consumer_groups_async(
-        (kafka_admin_AdminClient_t*)(uintptr_t)h, s, (int32_t)ns, t, (int32_t)nt, timeout_ms,
-        admin_list_consumer_groups_trampoline, cb);
-    PyMem_Free(s); PyMem_Free(t);
     Py_RETURN_NONE;
 }
 
@@ -5365,7 +5314,7 @@ static const kafka_admin_MemberDescription_t* classic_group_member_at(const void
         (const kafka_admin_ClassicGroupDescription_t*)d, i);
 }
 
-// (group_id, is_simple, members, partition_assignor, group_type, state,
+// (group_id, is_simple, members, partition_assignor, group_type,
 //  group_state, coordinator, authorized_operations, group_epoch,
 //  target_assignment_epoch)
 static PyObject* consumer_group_description_to_py(const kafka_admin_ConsumerGroupDescription_t* d) {
@@ -5393,20 +5342,19 @@ static PyObject* consumer_group_description_to_py(const kafka_admin_ConsumerGrou
         return NULL;
     }
     return Py_BuildValue(
-        // Eleven format units for eleven arguments, in the order
+        // Ten format units for ten arguments, in the order
         // `_to_consumer_group_description` unpacks them:
-        //   s     O          N        s                   s           s
-        //   group is_simple  members  partition_assignor  group_type  state
+        //   s     O          N        s                   s
+        //   group is_simple  members  partition_assignor  group_type
         //   s            N            N     N            N
         //   group_state  coordinator  acls  group_epoch  target_epoch
         // Worth counting by hand: no test can reach this branch, because Java's
         // own MockAdminClient throws for describeConsumerGroups, so a wrong
         // arity would surface only against a real broker.
-        "(sONssssNNNN)", kafka_admin_ConsumerGroupDescription_group_id(d),
+        "(sONsssNNNN)", kafka_admin_ConsumerGroupDescription_group_id(d),
         kafka_admin_ConsumerGroupDescription_is_simple_consumer_group(d) ? Py_True : Py_False,
         members, kafka_admin_ConsumerGroupDescription_partition_assignor(d),
         kafka_admin_ConsumerGroupDescription_group_type(d),
-        kafka_admin_ConsumerGroupDescription_state(d),
         kafka_admin_ConsumerGroupDescription_group_state(d), coordinator, acls, group_epoch,
         target_epoch);
 }
@@ -5470,47 +5418,6 @@ static PyObject* py_ListGroupsResult_drain(PyObject* self, PyObject* args) {
 fail:
     Py_XDECREF(valid); Py_XDECREF(errors);
     kafka_admin_ListGroupsResult_destroy(r);
-    return NULL;
-}
-
-// ([(group_id, is_simple, group_state, state, group_type), ...], [error, ...])
-static PyObject* py_ListConsumerGroupsResult_drain(PyObject* self, PyObject* args) {
-    unsigned long long ptr;
-    if (!PyArg_ParseTuple(args, "K", &ptr)) return NULL;
-    kafka_admin_ListConsumerGroupsResult_t* r =
-        (kafka_admin_ListConsumerGroupsResult_t*)(uintptr_t)ptr;
-    int32_t nv = kafka_admin_ListConsumerGroupsResult_valid_count(r);
-    int32_t ne = kafka_admin_ListConsumerGroupsResult_error_count(r);
-    PyObject* valid = PyList_New(nv < 0 ? 0 : nv);
-    PyObject* errors = PyList_New(ne < 0 ? 0 : ne);
-    if (!valid || !errors) goto fail;
-    for (int32_t i = 0; i < nv; i++) {
-        const kafka_admin_ConsumerGroupListing_t* g =
-            kafka_admin_ListConsumerGroupsResult_get_valid(r, i);
-        PyObject* group_state =
-            optional_str_to_py(kafka_admin_ConsumerGroupListing_group_state(g));
-        PyObject* state = optional_str_to_py(kafka_admin_ConsumerGroupListing_state(g));
-        PyObject* type = optional_str_to_py(kafka_admin_ConsumerGroupListing_group_type(g));
-        if (!group_state || !state || !type) {
-            Py_XDECREF(group_state); Py_XDECREF(state); Py_XDECREF(type); goto fail;
-        }
-        PyObject* row = Py_BuildValue(
-            "(sONNN)", kafka_admin_ConsumerGroupListing_group_id(g),
-            kafka_admin_ConsumerGroupListing_is_simple_consumer_group(g) ? Py_True : Py_False,
-            group_state, state, type);
-        if (row == NULL) goto fail;
-        PyList_SET_ITEM(valid, i, row);
-    }
-    for (int32_t i = 0; i < ne; i++) {
-        PyObject* e = borrowed_error_to_py(kafka_admin_ListConsumerGroupsResult_get_error(r, i));
-        if (e == NULL) goto fail;
-        PyList_SET_ITEM(errors, i, e);
-    }
-    kafka_admin_ListConsumerGroupsResult_destroy(r);
-    return Py_BuildValue("(NN)", valid, errors);
-fail:
-    Py_XDECREF(valid); Py_XDECREF(errors);
-    kafka_admin_ListConsumerGroupsResult_destroy(r);
     return NULL;
 }
 
@@ -7300,8 +7207,6 @@ static PyMethodDef ProducerNativeMethods[] = {
      "Async incrementalAlterConfigs; cb(result_int, error_int)"},
     {"Admin_list_config_resources_async", py_Admin_list_config_resources_async, METH_VARARGS,
      "Async listConfigResources; cb(result_int, error_int)"},
-    {"Admin_list_client_metrics_resources_async", py_Admin_list_client_metrics_resources_async, METH_VARARGS,
-     "Async listClientMetricsResources; cb(result_int, error_int)"},
     {"Admin_describe_log_dirs_async", py_Admin_describe_log_dirs_async, METH_VARARGS,
      "Async describeLogDirs; cb(result_int, error_int)"},
     {"Admin_alter_replica_log_dirs_async", py_Admin_alter_replica_log_dirs_async, METH_VARARGS,
@@ -7316,8 +7221,6 @@ static PyMethodDef ProducerNativeMethods[] = {
      "Drain+destroy an AlterConfigsResult handle into a dict"},
     {"ListConfigResourcesResult_drain", py_ListConfigResourcesResult_drain, METH_VARARGS,
      "Drain+destroy a ListConfigResourcesResult handle into a list"},
-    {"ListClientMetricsResourcesResult_drain", py_ListClientMetricsResourcesResult_drain, METH_VARARGS,
-     "Drain+destroy a ListClientMetricsResourcesResult handle into a list"},
     {"DescribeLogDirsResult_drain", py_DescribeLogDirsResult_drain, METH_VARARGS,
      "Drain+destroy a DescribeLogDirsResult handle into a dict"},
     {"AlterReplicaLogDirsResult_drain", py_AlterReplicaLogDirsResult_drain, METH_VARARGS,
@@ -7345,8 +7248,6 @@ static PyMethodDef ProducerNativeMethods[] = {
      "Mock: seed committed consumer-group offsets; returns error_int"},
     {"Admin_list_groups_async", py_Admin_list_groups_async, METH_VARARGS,
      "Async listGroups; cb(result_int, error_int)"},
-    {"Admin_list_consumer_groups_async", py_Admin_list_consumer_groups_async, METH_VARARGS,
-     "Async listConsumerGroups; cb(result_int, error_int)"},
     {"Admin_describe_consumer_groups_async", py_Admin_describe_consumer_groups_async,
      METH_VARARGS, "Async describeConsumerGroups; cb(result_int, error_int)"},
     {"Admin_describe_classic_groups_async", py_Admin_describe_classic_groups_async, METH_VARARGS,
@@ -7364,8 +7265,6 @@ static PyMethodDef ProducerNativeMethods[] = {
      "Async removeMembersFromConsumerGroup; cb(result_int, error_int)"},
     {"ListGroupsResult_drain", py_ListGroupsResult_drain, METH_VARARGS,
      "Drain+destroy a ListGroupsResult handle into (valid, errors)"},
-    {"ListConsumerGroupsResult_drain", py_ListConsumerGroupsResult_drain, METH_VARARGS,
-     "Drain+destroy a ListConsumerGroupsResult handle into (valid, errors)"},
     {"DescribeConsumerGroupsResult_drain", py_DescribeConsumerGroupsResult_drain, METH_VARARGS,
      "Drain+destroy a DescribeConsumerGroupsResult handle into a dict"},
     {"DescribeClassicGroupsResult_drain", py_DescribeClassicGroupsResult_drain, METH_VARARGS,

@@ -46,7 +46,6 @@
 use crate::admin::CreateTopicsResult;
 use crate::common::requests::DescribeClusterRequest;
 use crate::common::requests::MetadataResponse;
-use crate::consumer::internals::ConsumerProtocol;
 use crate::{kafka_debug, kafka_error};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -175,11 +174,6 @@ use super::{
     AlterUserScramCredentialsOptions, AlterUserScramCredentialsResult, DescribeUserScramCredentialsOptions,
     DescribeUserScramCredentialsResult, ScramMechanism, UserScramCredentialAlteration, UserScramCredentialDeletion,
     UserScramCredentialUpsertion,
-};
-#[allow(deprecated)]
-use super::{
-    ClientMetricsResourceListing, ConsumerGroupListing, ListClientMetricsResourcesOptions,
-    ListClientMetricsResourcesResult, ListConsumerGroupsOptions, ListConsumerGroupsResult,
 };
 use super::{
     DescribeFeaturesOptions, DescribeFeaturesResult, FeatureMetadata, FeatureUpdate, FinalizedVersionRange,
@@ -515,34 +509,35 @@ impl KafkaAdminClient {
         .expect("ExponentialBackoff::new only fails on invalid jitter")
     }
 
-    /// Drives a `listGroups` / `listConsumerGroups` broker-enumeration RPC: a
-    /// `findAllBrokers` metadata call whose response fans out one per-broker
-    /// `ListGroups` call, all feeding a shared [`ListGroupsResults`] accumulator.
+    /// Drives the `listGroups` broker-enumeration RPC: a `findAllBrokers`
+    /// metadata call whose response fans out one per-broker `ListGroups` call,
+    /// all feeding a shared [`ListGroupsResults`] accumulator.
     ///
     /// `maybe_add` maps a wire `ListedGroup` to an optional keyed listing
-    /// (returning `None` filters the group out). Mirrors the shared structure of
-    /// `KafkaAdminClient.listGroups` / `listConsumerGroups`.
-    fn submit_list_groups<L, F>(
+    /// (returning `None` filters the group out). Mirrors the structure of
+    /// `KafkaAdminClient.listGroups`.
+    fn submit_list_groups<F>(
         &self,
-        call_name: &'static str,
         deadline: i64,
         states_filter: Vec<String>,
         types_filter: Vec<String>,
         maybe_add: F,
-    ) -> KafkaFuture<Vec<Result<L, Error>>>
+    ) -> KafkaFuture<Vec<Result<GroupListing, Error>>>
     where
-        L: Clone + Send + Sync + 'static,
-        F: Fn(&crate::list_groups_response_data::ListedGroup) -> Option<(String, L)> + Clone + Send + Sync + 'static,
+        F: Fn(&crate::list_groups_response_data::ListedGroup) -> Option<(String, GroupListing)>
+            + Clone
+            + Send
+            + Sync
+            + 'static,
     {
-        let all: KafkaFutureImpl<Vec<Result<L, Error>>> = KafkaFutureImpl::new();
+        let all: KafkaFutureImpl<Vec<Result<GroupListing, Error>>> = KafkaFutureImpl::new();
         let public = all.future();
         let ctx = self.driver_context();
 
         let fail_all = all.clone();
         let handle_failure = Box::new(move |error: &Error| {
             // `new KafkaException("Failed to find brokers to send ListGroups", throwable)`
-            // (`KafkaAdminClient.java:3565`, and the identical `:3723` reached from
-            // `listConsumerGroups` — Java hardcodes "ListGroups" in both). A *bare*
+            // (`KafkaAdminClient.java:3565`). A *bare*
             // `KafkaException`: `is_kafka_error()` true, `is_api_error()` /
             // `is_retriable_error()` / `is_authorization_error()` all false, the cause
             // reachable through `source()`, and the message fixed — it does not carry
@@ -630,7 +625,7 @@ impl KafkaAdminClient {
                 });
 
                 let list_call = Call::new(
-                    call_name,
+                    "listGroups",
                     deadline,
                     NodeProvider::ConstantNodeId(node_id),
                     create_list_request,
@@ -975,23 +970,22 @@ fn coordinator_keyed_by_id<V: Send + 'static>(
     map.into_iter().map(|(key, future)| (key.id_value, future)).collect()
 }
 
-/// Accumulates the per-broker results of a `listGroups` / `listConsumerGroups`
-/// broker-enumeration RPC, completing the combined future once every broker has
-/// reported. Mirrors `KafkaAdminClient.ListGroupsResults` /
-/// `ListConsumerGroupsResults` (generic over the listing type `L`).
+/// Accumulates the per-broker results of a `listGroups` broker-enumeration RPC,
+/// completing the combined future once every broker has reported. Mirrors
+/// `KafkaAdminClient.ListGroupsResults`.
 #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClient$ListGroupsResults")]
-struct ListGroupsResults<L: Clone + Send + Sync + 'static> {
+struct ListGroupsResults {
     errors: Vec<Error>,
-    listings: HashMap<String, L>,
+    listings: HashMap<String, GroupListing>,
     remaining: HashSet<i32>,
-    future: KafkaFutureImpl<Vec<Result<L, Error>>>,
+    future: KafkaFutureImpl<Vec<Result<GroupListing, Error>>>,
 }
 
-impl<L: Clone + Send + Sync + 'static> ListGroupsResults<L> {
+impl ListGroupsResults {
     /// Creates the accumulator for the given broker node ids, completing the
     /// future immediately if there are no brokers.
     #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClient$ListGroupsResults#ListGroupsResults")]
-    fn new(node_ids: HashSet<i32>, future: KafkaFutureImpl<Vec<Result<L, Error>>>) -> Arc<Mutex<Self>> {
+    fn new(node_ids: HashSet<i32>, future: KafkaFutureImpl<Vec<Result<GroupListing, Error>>>) -> Arc<Mutex<Self>> {
         let results = Arc::new(Mutex::new(Self {
             errors: Vec::new(),
             listings: HashMap::new(),
@@ -1017,7 +1011,7 @@ impl<L: Clone + Send + Sync + 'static> ListGroupsResults<L> {
 
     /// Records a listing keyed by group id.
     #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClient$ListGroupsResults#addListing")]
-    fn add_listing(&mut self, group_id: String, listing: L) {
+    fn add_listing(&mut self, group_id: String, listing: GroupListing) {
         self.listings.insert(group_id, listing);
     }
 
@@ -1030,7 +1024,7 @@ impl<L: Clone + Send + Sync + 'static> ListGroupsResults<L> {
     #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClient$ListGroupsResults#tryComplete")]
     fn try_complete(&mut self) {
         if self.remaining.is_empty() {
-            let mut results: Vec<Result<L, Error>> = self.listings.values().cloned().map(Ok).collect();
+            let mut results: Vec<Result<GroupListing, Error>> = self.listings.values().cloned().map(Ok).collect();
             results.extend(self.errors.iter().cloned().map(Err));
             self.future.complete(results);
         }
@@ -3755,64 +3749,6 @@ impl Admin for KafkaAdminClient {
         ListConfigResourcesResult::new(public)
     }
 
-    #[allow(deprecated)]
-    fn list_client_metrics_resources_with_options(
-        &self,
-        options: ListClientMetricsResourcesOptions,
-    ) -> ListClientMetricsResourcesResult {
-        let now = self.now();
-        let deadline = calc_deadline_ms(now, options.timeout_ms(), self.shared.default_api_timeout_ms);
-        let handle: KafkaFutureImpl<Vec<ClientMetricsResourceListing>> = KafkaFutureImpl::new();
-        let public = handle.future();
-
-        // Reuse the `ListConfigResources` wire path, filtered to the
-        // `CLIENT_METRICS` resource type (mirrors Java's
-        // `ListConfigResourcesRequest.Builder` seeded with
-        // `List.of(ConfigResource.Type.CLIENT_METRICS.id())`).
-        let create_request = Box::new(move |_timeout_ms: i32| {
-            let mut data = ListConfigResourcesRequestData::new();
-            data.set_resource_types(vec![config_resource::Type::ClientMetrics.id()]);
-            Ok(Box::new(list_config_resources_request::Builder::new(data)) as Box<dyn RequestBuilder>)
-        });
-
-        let resp_handle = handle.clone();
-        let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64, _cur_node: Option<&Node>| {
-            let ConcreteResponse::ListConfigResources(list_response) = response else {
-                return HandleResult::Retry(Error::local_illegal_state("Expected a ListConfigResources response"));
-            };
-            let error = list_response.error();
-            if error != Errors::None {
-                resp_handle.complete_with_error(Error::new(error));
-            } else {
-                let listings: Vec<ClientMetricsResourceListing> = list_response
-                    .config_resources()
-                    .into_iter()
-                    .filter(|resource| resource.resource_type() == config_resource::Type::ClientMetrics)
-                    .map(|resource| ClientMetricsResourceListing::new(resource.name()))
-                    .collect();
-                resp_handle.complete(listings);
-            }
-            HandleResult::Done
-        });
-
-        let fail_handle = handle.clone();
-        let handle_failure = Box::new(move |error: &Error| {
-            fail_handle.complete_with_error(error.clone());
-        });
-
-        let call = Call::new(
-            "listClientMetricsResources",
-            deadline,
-            NodeProvider::LeastLoaded,
-            create_request,
-            handle_response,
-            handle_failure,
-            Box::new(|| false),
-        );
-        self.submit(call);
-        ListClientMetricsResourcesResult::new(public)
-    }
-
     fn describe_log_dirs_with_options(
         &self,
         brokers: &[i32],
@@ -4146,7 +4082,7 @@ impl Admin for KafkaAdminClient {
         let types: Vec<String> = options.types().iter().map(GroupType::to_string).collect();
         let protocol_types: HashSet<String> = options.protocol_types().clone();
 
-        let future = self.submit_list_groups("listGroups", deadline, states, types, move |group| {
+        let future = self.submit_list_groups(deadline, states, types, move |group| {
             if !protocol_types.is_empty() && !protocol_types.contains(&group.protocol_type) {
                 return None;
             }
@@ -4166,40 +4102,6 @@ impl Admin for KafkaAdminClient {
             ))
         });
         ListGroupsResult::new(future)
-    }
-
-    #[allow(deprecated)]
-    fn list_consumer_groups_with_options(&self, options: ListConsumerGroupsOptions) -> ListConsumerGroupsResult {
-        let now = self.now();
-        let deadline = calc_deadline_ms(now, options.timeout_ms(), self.shared.default_api_timeout_ms);
-        let states: Vec<String> = options.group_states().iter().map(GroupState::to_string).collect();
-        let types: Vec<String> = options.types().iter().map(GroupType::to_string).collect();
-
-        let future = self.submit_list_groups("listConsumerGroups", deadline, states, types, move |group| {
-            if group.protocol_type != ConsumerProtocol::PROTOCOL_TYPE && !group.protocol_type.is_empty() {
-                return None;
-            }
-            let group_state = if group.group_state.is_empty() {
-                None
-            } else {
-                Some(GroupState::parse(&group.group_state))
-            };
-            let group_type = if group.group_type.is_empty() {
-                None
-            } else {
-                Some(GroupType::parse(&group.group_type))
-            };
-            Some((
-                group.group_id.clone(),
-                ConsumerGroupListing::with_group_state_group_type(
-                    group.group_id.clone(),
-                    group_state,
-                    group_type,
-                    group.protocol_type.is_empty(),
-                ),
-            ))
-        });
-        ListConsumerGroupsResult::new(future)
     }
 
     fn describe_consumer_groups_with_options(
@@ -5247,6 +5149,7 @@ mod tests {
     use crate::common::requests::{CreatePartitionsResponse, DeleteRecordsResponse};
     use crate::common::requests::{CreateTopicsResponse, DeleteTopicsResponse};
     use crate::common::{TopicCollection, TopicPartition, Uuid};
+    use crate::consumer::internals::ConsumerProtocol;
     use crate::create_partitions_response_data::CreatePartitionsTopicResult;
     use crate::create_topics_response_data::CreatableTopicResult;
     use crate::delete_records_response_data::{DeleteRecordsPartitionResult, DeleteRecordsTopicResult};
@@ -8653,64 +8556,6 @@ mod tests {
         assert_eq!(err.error(), Errors::UnsupportedVersion);
     }
 
-    // --- listClientMetricsResources ------------------------------------------
-
-    /// Translated from `KafkaAdminClientTest.testListClientMetricsResources`.
-    #[tokio::test]
-    #[allow(deprecated)]
-    #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testListClientMetricsResources")]
-    async fn test_list_client_metrics_resources() {
-        use crate::admin::{ClientMetricsResourceListing, ListClientMetricsResourcesOptions};
-        let (admin, mut runnable, _time, _nodes) = env();
-        let client_metrics_id = config_resource::Type::ClientMetrics.id();
-        let expected: HashSet<ClientMetricsResourceListing> = [
-            ClientMetricsResourceListing::new("one"),
-            ClientMetricsResourceListing::new("two"),
-        ]
-        .into_iter()
-        .collect();
-        runnable.client_mut().prepare_response(list_config_resources_response(
-            Errors::None,
-            &[("one", client_metrics_id), ("two", client_metrics_id)],
-        ));
-        let result = admin.list_client_metrics_resources_with_options(ListClientMetricsResourcesOptions::new());
-        pump(&mut runnable, 5).await;
-        let listed = result.all().get().await.unwrap();
-        assert_eq!(listed.into_iter().collect::<HashSet<_>>(), expected);
-    }
-
-    /// Translated from `KafkaAdminClientTest.testListClientMetricsResourcesEmpty`.
-    #[tokio::test]
-    #[allow(deprecated)]
-    #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testListClientMetricsResourcesEmpty")]
-    async fn test_list_client_metrics_resources_empty() {
-        use crate::admin::ListClientMetricsResourcesOptions;
-        let (admin, mut runnable, _time, _nodes) = env();
-        runnable
-            .client_mut()
-            .prepare_response(list_config_resources_response(Errors::None, &[]));
-        let result = admin.list_client_metrics_resources_with_options(ListClientMetricsResourcesOptions::new());
-        pump(&mut runnable, 5).await;
-        assert!(result.all().get().await.unwrap().is_empty());
-    }
-
-    /// Translated from `KafkaAdminClientTest.testListClientMetricsResourcesNotSupported`.
-    #[tokio::test]
-    #[allow(deprecated)]
-    #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testListClientMetricsResourcesNotSupported")]
-    async fn test_list_client_metrics_resources_not_supported() {
-        use crate::admin::ListClientMetricsResourcesOptions;
-        let (admin, mut runnable, _time, _nodes) = env();
-        runnable
-            .client_mut()
-            .prepare_response(list_config_resources_response(Errors::UnsupportedVersion, &[]));
-        let result = admin.list_client_metrics_resources_with_options(ListClientMetricsResourcesOptions::new());
-        pump(&mut runnable, 5).await;
-        let err = result.all().get().await.unwrap_err();
-        assert_eq!(err.error(), Errors::UnsupportedVersion);
-        assert_eq!(err.message(), "The version of API is not supported.");
-    }
-
     // Branch (2) coverage at the `Call` bridge: the `maybe_retry` hook installed
     // by `new_driver_call` turns a disconnect into a lookup retry driven through
     // the `AdminApiDriver` and reports `MaybeRetryOutcome::Handled`, instead of
@@ -10854,34 +10699,85 @@ mod tests {
         assert_eq!(ids, vec!["g1".to_string()]);
     }
 
-    /// Broker enumeration: `list_consumer_groups` fans out per broker.
+    /// Translated from `KafkaAdminClientTest.testListConsumerGroups`.
+    ///
+    /// `list_groups(for_consumer_groups())` fans out one `ListGroups` per broker:
+    /// an empty metadata response is retried, retriable per-broker errors are
+    /// retried, `connector` groups are filtered out by the protocol-type filter,
+    /// and a fatal broker error is surfaced through `all()` / `errors()` while
+    /// `valid()` still carries the three consumer groups.
     #[tokio::test]
-    #[allow(deprecated)]
     #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testListConsumerGroups")]
     async fn test_list_consumer_groups() {
-        let (admin, mut runnable, _time, nodes) = env();
+        fn list_groups_error(error: Errors) -> ConcreteResponse {
+            use crate::ListGroupsResponseData;
+            let mut data = ListGroupsResponseData::new();
+            data.set_error_code(error.code());
+            ConcreteResponse::ListGroups(crate::common::requests::ListGroupsResponse::new(data))
+        }
+
+        let (admin, mut runnable, time, nodes) = env_nodes_with_props(4, &[("retries", "2")]);
+        let consumer = ConsumerProtocol::PROTOCOL_TYPE;
+
+        // Empty metadata response should be retried
+        runnable.client_mut().prepare_response(metadata_resp(&[], Vec::new()));
         runnable.client_mut().prepare_response(metadata_resp(&nodes, Vec::new()));
+
+        runnable.client_mut().prepare_response_from(
+            listed_groups(&[
+                ("group-1", consumer, "Stable", ""),
+                ("group-connect-1", "connector", "Stable", ""),
+            ]),
+            &nodes[0],
+        );
+        // handle retriable errors
         runnable
             .client_mut()
-            .prepare_response_from(listed_group("g1", "consumer", "Stable", "Consumer"), &nodes[0]);
+            .prepare_response_from(list_groups_error(Errors::CoordinatorNotAvailable), &nodes[1]);
         runnable
             .client_mut()
-            .prepare_response_from(listed_group("connect", "connect", "Stable", "Classic"), &nodes[1]);
-        runnable.client_mut().prepare_response_from(empty_list_groups_resp(), &nodes[2]);
+            .prepare_response_from(list_groups_error(Errors::CoordinatorLoadInProgress), &nodes[1]);
+        runnable.client_mut().prepare_response_from(
+            listed_groups(&[
+                ("group-2", consumer, "Stable", ""),
+                ("group-connect-2", "connector", "Stable", ""),
+            ]),
+            &nodes[1],
+        );
+        runnable.client_mut().prepare_response_from(
+            listed_groups(&[
+                ("group-3", consumer, "Stable", ""),
+                ("group-connect-3", "connector", "Stable", ""),
+            ]),
+            &nodes[2],
+        );
+        // fatal error
+        runnable
+            .client_mut()
+            .prepare_response_from(list_groups_error(Errors::UnknownServerError), &nodes[3]);
 
-        let result = admin.list_consumer_groups_with_options(ListConsumerGroupsOptions::new());
-        pump_until(&mut runnable, 40, |_r| result.valid().is_done()).await;
+        let result = admin.list_groups_with_options(ListGroupsOptions::for_consumer_groups());
+        for _ in 0..80 {
+            if result.all().is_done() {
+                break;
+            }
+            runnable.run_once().await;
+            time.sleep(100);
+        }
+        assert_eq!(result.all().get().await.unwrap_err().error(), Errors::UnknownServerError);
 
-        // Only the consumer-protocol group is retained.
-        let ids: Vec<String> = result
-            .valid()
-            .get()
-            .await
-            .unwrap()
-            .iter()
-            .map(|g| g.group_id().to_string())
-            .collect();
-        assert_eq!(ids, vec!["g1".to_string()]);
+        let listings = result.valid().get().await.unwrap();
+        assert_eq!(listings.len(), 3);
+        let mut group_ids = HashSet::new();
+        for listing in &listings {
+            group_ids.insert(listing.group_id().to_string());
+            assert!(listing.group_state().is_some());
+        }
+        assert_eq!(
+            group_ids,
+            HashSet::from(["group-1".to_string(), "group-2".to_string(), "group-3".to_string()])
+        );
+        assert_eq!(result.errors().get().await.unwrap().len(), 1);
     }
 
     /// Translated from `KafkaAdminClientTest.testListGroupsWithTypes`.
@@ -11095,73 +10991,19 @@ mod tests {
         assert_eq!(result.all().get().await.unwrap_err().error(), Errors::UnsupportedVersion);
     }
 
-    /// Translated from the deprecated
-    /// `KafkaAdminClientTest.testListConsumerGroupsWithStates` /
-    /// `...WithTypes` variants: the deprecated `list_consumer_groups` API also
-    /// carries the states/types filter to the wire request.
-    #[tokio::test]
-    #[allow(deprecated)]
-    #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testListConsumerGroupsDeprecated")]
-    async fn test_list_consumer_groups_deprecated_with_states_and_types() {
-        use crate::common::requests::AbstractRequest;
-
-        let (admin, mut runnable, _time, nodes) = env_nodes_with_props(1, &[]);
-        runnable.client_mut().prepare_response(metadata_resp(&nodes, Vec::new()));
-
-        let options = ListConsumerGroupsOptions::new()
-            .in_group_states(HashSet::from([GroupState::Stable]))
-            .with_types(HashSet::from([GroupType::Consumer]));
-        let result = admin.list_consumer_groups_with_options(options);
-        pump_until_request_queued(&mut runnable).await;
-        {
-            let reqs = runnable.client_mut().requests_mut();
-            match reqs[0].request_builder_mut().build().unwrap() {
-                AbstractRequest::ListGroups(req) => {
-                    assert_eq!(req.data().states_filter, vec![GroupState::Stable.to_string()]);
-                    assert_eq!(req.data().types_filter, vec![GroupType::Consumer.to_string()]);
-                },
-                other => panic!("expected a ListGroups request, got {other:?}"),
-            }
-        }
-        runnable.client_mut().respond_from(
-            listed_groups(&[("group-1", ConsumerProtocol::PROTOCOL_TYPE, "Stable", "Consumer")]),
-            &nodes[0],
-        );
-        pump_until(&mut runnable, 40, |_r| result.valid().is_done()).await;
-        assert_eq!(result.valid().get().await.unwrap().len(), 1);
-    }
-
-    /// Translated from the deprecated
-    /// `KafkaAdminClientTest.testListConsumerGroupsWithTypesOlderBrokerVersion`:
-    /// a SHARE types filter surfaces `UnsupportedVersion` through the deprecated
-    /// API's future.
-    #[tokio::test]
-    #[allow(deprecated)]
-    async fn test_list_consumer_groups_deprecated_older_broker_version() {
-        let (admin, mut runnable, _time, nodes) = env_nodes_with_props(1, &[]);
-        runnable.client_mut().prepare_response(metadata_resp(&nodes, Vec::new()));
-        runnable.client_mut().prepare_unsupported_version_response();
-
-        let options = ListConsumerGroupsOptions::new().with_types(HashSet::from([GroupType::Share]));
-        let result = admin.list_consumer_groups_with_options(options);
-        pump_until(&mut runnable, 40, |_r| result.all().is_done()).await;
-        assert_eq!(result.all().get().await.unwrap_err().error(), Errors::UnsupportedVersion);
-    }
-
     /// Translated from `KafkaAdminClientTest.testListConsumerGroupsMetadataFailure`.
     ///
     /// An empty metadata response leaves no brokers to send `ListGroups` to; with
     /// `retries=0` the metadata call fails terminally and `handle_failure` wraps
-    /// it as "Failed to find brokers to send listConsumerGroups".
+    /// it as "Failed to find brokers to send ListGroups".
     #[tokio::test]
-    #[allow(deprecated)]
     #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testListConsumerGroupsMetadataFailure")]
     async fn test_list_consumer_groups_metadata_failure() {
-        let (admin, mut runnable, time, nodes) = env_nodes_with_props(3, &[("retries", "0")]);
+        let (admin, mut runnable, time, _nodes) = env_nodes_with_props(3, &[("retries", "0")]);
         // Empty broker list → no brokers to send to.
         runnable.client_mut().prepare_response(metadata_resp(&[], Vec::new()));
 
-        let result = admin.list_consumer_groups_with_options(ListConsumerGroupsOptions::new());
+        let result = admin.list_groups_with_options(ListGroupsOptions::for_consumer_groups());
         for _ in 0..40 {
             if result.all().is_done() {
                 break;
@@ -11170,20 +11012,16 @@ mod tests {
             time.sleep(100);
         }
         let err = result.all().get().await.unwrap_err();
-        // Java hardcodes "ListGroups" in the message at both call sites
-        // (`KafkaAdminClient.java:3565` and `:3723`), and
-        // `testListConsumerGroupsMetadataFailure` / `testListGroupsMetadataFailure`
+        // Java hardcodes "ListGroups" in the message (`KafkaAdminClient.java:3565`),
+        // and `testListConsumerGroupsMetadataFailure` / `testListGroupsMetadataFailure`
         // assert only `KafkaException.class`. The Rust message used to substitute
         // the lower-cased Rust call name and append the cause's text (finding 243).
         assert_eq!(err.message(), "Failed to find brokers to send ListGroups");
         assert!(err.is_kafka_error(), "Java's assertFutureThrows(KafkaException.class): {err:?}");
         assert!(!err.is_api_error(), "a bare KafkaException is not an ApiException: {err:?}");
-        let _ = &nodes;
     }
 
-    /// The `list_groups` metadata-failure counterpart of
-    /// `testListConsumerGroupsMetadataFailure` (Java exercises the shared
-    /// `findAllBrokers` path from both entry points).
+    /// Translated from `KafkaAdminClientTest.testListGroupsMetadataFailure`.
     #[tokio::test]
     #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testListGroupsMetadataFailure")]
     async fn test_list_groups_metadata_failure() {
@@ -11199,9 +11037,8 @@ mod tests {
             time.sleep(100);
         }
         let err = result.all().get().await.unwrap_err();
-        // Java hardcodes "ListGroups" in the message at both call sites
-        // (`KafkaAdminClient.java:3565` and `:3723`), and
-        // `testListConsumerGroupsMetadataFailure` / `testListGroupsMetadataFailure`
+        // Java hardcodes "ListGroups" in the message (`KafkaAdminClient.java:3565`),
+        // and `testListConsumerGroupsMetadataFailure` / `testListGroupsMetadataFailure`
         // assert only `KafkaException.class`. The Rust message used to substitute
         // the lower-cased Rust call name and append the cause's text (finding 243).
         assert_eq!(err.message(), "Failed to find brokers to send ListGroups");
@@ -11530,20 +11367,6 @@ mod tests {
         assert_eq!(listings[0].group_id(), "g1");
         assert_eq!(listings[0].group_type(), Some(GroupType::Consumer));
         assert_eq!(listings[0].group_state(), Some(GroupState::Stable));
-    }
-
-    /// The mock's `list_consumer_groups` returns one listing per seeded group.
-    #[tokio::test]
-    #[allow(deprecated)]
-    async fn test_mock_list_consumer_groups() {
-        use crate::admin::MockAdminClient;
-        let mock = MockAdminClient::create(1).expect("num_brokers is at least 1");
-        seed_mock_group(&mock, "g1").await;
-        let result = mock.list_consumer_groups_with_options(ListConsumerGroupsOptions::new());
-        let listings = result.valid().get().await.unwrap();
-        assert_eq!(listings.len(), 1);
-        assert_eq!(listings[0].group_id(), "g1");
-        assert!(!listings[0].is_simple_consumer_group());
     }
 
     /// The mock's `describe_consumer_groups` mirrors Java's
@@ -13074,15 +12897,13 @@ mod tests {
     /// Regression for finding 243(a). `handleFailure` on the `findAllBrokers`
     /// metadata call builds
     /// `new KafkaException("Failed to find brokers to send ListGroups", throwable)`
-    /// (`KafkaAdminClient.java:3565`, and the identical `:3723` reached from
-    /// `listConsumerGroups`) — a **bare** `KafkaException`, which is a *sibling* of
-    /// `ApiException`, not a subclass. So:
+    /// (`KafkaAdminClient.java:3565`) — a **bare** `KafkaException`, which is a
+    /// *sibling* of `ApiException`, not a subclass. So:
     ///
     ///   * `is_kafka_error()` is `true`, `is_api_error()` / `is_retriable_error()`
     ///     are `false`;
     ///   * the cause is reachable through `getCause()`;
-    ///   * the message is fixed — it does NOT carry the cause's text, and Java
-    ///     hardcodes "ListGroups" even for `listConsumerGroups`.
+    ///   * the message is fixed — it does NOT carry the cause's text.
     ///
     /// Reusing the inner error's code made the wrapper *inherit* the inner class,
     /// so a metadata timeout came back retriable and causeless.

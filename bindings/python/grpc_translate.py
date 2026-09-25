@@ -854,13 +854,6 @@ def _admin_list_config_resources_response(resources):
         resources=[_admin_config_resource_to_proto(r) for r in resources])
 
 
-def _admin_list_client_metrics_resources_response(resources):
-    """`[ClientMetricsResourceListing]` ->
-    ListClientMetricsResourcesResponse. Whole-value, as above."""
-    return apb.ListClientMetricsResourcesResponse(
-        resources=[apb.ClientMetricsResourceListing(name=r.name) for r in resources])
-
-
 def _admin_log_dir_description_to_proto(description):
     """admin.py LogDirDescription -> proto LogDirDescription.
 
@@ -1055,7 +1048,7 @@ def _admin_list_offsets_response(outcomes):
 # admin.py's group methods hand back the same resolved shapes as the earlier
 # slices, with two exceptions worth naming here:
 #
-#   - list_groups / list_consumer_groups return a *pair* of lists,
+#   - list_groups returns a *pair* of lists,
 #     `([listing], [KafkaError])`, because Java's ListGroupsResult splits one
 #     future into valid() and an unkeyed errors() collection. The two are
 #     independent and generally of different length, so nothing may be zipped or
@@ -1099,34 +1092,6 @@ def _admin_list_groups_response(outcome):
         # error, which is what the C++ server does (`if (listing_err != nullptr)`
         # shortens `listing_errors`). Mapping it would preserve the length and
         # invent content, so the two servers would disagree on both.
-        listing_errors=[_kafka_error_to_proto(e) for e in errors if e is not None])
-
-
-def _admin_consumer_group_listing_to_proto(listing):
-    """admin.py ConsumerGroupListing -> proto ConsumerGroupListing.
-
-    Both `group_state` and the deprecated `state` cross even though Java derives
-    the second from the first: a backend that dropped one is a finding, and the
-    Rust client checks the pair.
-    """
-    out = apb.ConsumerGroupListing(
-        group_id=listing.group_id,
-        is_simple_consumer_group=bool(listing.is_simple_consumer_group))
-    if listing.group_state is not None:
-        out.group_state = listing.group_state
-    if listing.state is not None:
-        out.state = listing.state
-    if listing.group_type is not None:
-        out.group_type = listing.group_type
-    return out
-
-
-def _admin_list_consumer_groups_response(outcome):
-    """`([ConsumerGroupListing], [KafkaError])` -> ListConsumerGroupsResponse."""
-    valid, errors = outcome
-    return apb.ListConsumerGroupsResponse(
-        valid=[_admin_consumer_group_listing_to_proto(listing) for listing in valid],
-        # Null entries skipped, as in [_admin_list_groups_response].
         listing_errors=[_kafka_error_to_proto(e) for e in errors if e is not None])
 
 
@@ -1186,7 +1151,6 @@ def _admin_consumer_group_description_to_proto(description):
         members=[_admin_member_description_to_proto(m) for m in description.members],
         partition_assignor=description.partition_assignor,
         group_type=description.group_type,
-        state=description.state,
         group_state=description.group_state)
     node = _node_to_proto(description.coordinator)
     if node is not None:

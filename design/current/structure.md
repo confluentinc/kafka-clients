@@ -115,7 +115,7 @@ src/common/
     topic_collection.rs, uuid.rs, kafka_error.rs, kafka_future.rs,
     partition_info.rs, isolation_level.rs, election_type.rs,
     group_state.rs, group_type.rs, classic_group_state.rs,
-    consumer_group_state.rs, cluster_resource{,_listener}.rs,
+    cluster_resource{,_listener}.rs,
     metric{,_name,_name_template}.rs
 ```
 
@@ -313,10 +313,10 @@ The 46 RPCs, in `Admin` trait declaration order:
 `abort_transaction`, `describe_transactions`, `fence_producers`,
 `list_transactions`, `force_terminate_transaction`, `describe_cluster`,
 `describe_configs`, `incremental_alter_configs`, `list_config_resources`,
-`list_client_metrics_resources`, `describe_log_dirs`, `alter_replica_log_dirs`,
+`describe_log_dirs`, `alter_replica_log_dirs`,
 `describe_replica_log_dirs`, `elect_leaders`, `alter_partition_reassignments`,
 `list_partition_reassignments`, `list_offsets`, `list_groups`,
-`list_consumer_groups`, `describe_consumer_groups`, `describe_classic_groups`,
+`describe_consumer_groups`, `describe_classic_groups`,
 `list_consumer_group_offsets`, `alter_consumer_group_offsets`,
 `delete_consumer_group_offsets`, `delete_consumer_groups`,
 `remove_members_from_consumer_group`, `create_acls`, `describe_acls`,
@@ -427,11 +427,11 @@ tests/integration/admin_elections_reassignments_offsets_test.rs
 
 ```
 src/admin/
-├── group_listing.rs, consumer_group_listing.rs,
+├── group_listing.rs,
 │   consumer_group_description.rs, classic_group_description.rs,
 │   member_description.rs, member_assignment.rs, member_to_remove.rs,
 │   list_consumer_group_offsets_spec.rs
-├── {list_groups,list_consumer_groups,describe_consumer_groups,
+├── {list_groups,describe_consumer_groups,
 │    describe_classic_groups,list_consumer_group_offsets,
 │    alter_consumer_group_offsets,delete_consumer_group_offsets,
 │    delete_consumer_groups,remove_members_from_consumer_group}_result.rs
@@ -443,8 +443,7 @@ src/admin/
     └── delete_groups_handler.rs, delete_consumer_groups_handler.rs,
         remove_members_from_consumer_group_handler.rs
 
-src/common/{group_state.rs, group_type.rs, classic_group_state.rs,
-            consumer_group_state.rs}
+src/common/{group_state.rs, group_type.rs, classic_group_state.rs}
 src/consumer/internals/consumer_protocol.rs   # decodes a classic member's
 src/consumer/consumer_partition_assignor.rs   # assignment bytes (data holders
                                               # only; no assignor trait)
@@ -470,8 +469,6 @@ src/admin/
 │   transaction_listing.rs, abort_transaction_spec.rs,
 │   {describe_producers,describe_transactions,abort_transaction,
 │    fence_producers,list_transactions,terminate_transaction}_result.rs
-├── client_metrics_resource_listing.rs,
-│   list_client_metrics_resources_result.rs
 └── internals/{describe_producers,describe_transactions,abort_transaction,
               fence_producers,list_transactions}_handler.rs
 
@@ -487,8 +484,7 @@ src/common/security/{auth/kafka_principal.rs,
 tests/integration/admin_{acls,quotas,scram,features,transactions}_test.rs
 ```
 
-`list_client_metrics_resources` reuses the `ListConfigResources` wire type
-rather than adding one. The transaction RPCs are the users of
+The transaction RPCs are the users of
 `AllBrokersStrategy` and `StaticBrokerStrategy`. `force_terminate_transaction`
 is the one RPC whose files are named for the Java `terminateTransaction`
 spelling (`terminate_transaction_{result,options}.rs`).

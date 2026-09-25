@@ -19,8 +19,6 @@
 use std::collections::BTreeSet;
 
 use crate::admin::MemberDescription;
-#[allow(deprecated)]
-use crate::common::ConsumerGroupState;
 use crate::common::acl::AclOperation;
 use crate::common::{GroupState, GroupType, Node};
 
@@ -29,10 +27,8 @@ use crate::common::{GroupState, GroupType, Node};
 /// Corresponds to `org.apache.kafka.clients.admin.ConsumerGroupDescription`.
 ///
 /// Note: Java's `@Deprecated(forRemoval = true)` constructors that accept a
-/// [`ConsumerGroupState`] are omitted (they only default-fill fields already
-/// expressible through [`new`]); no in-scope caller uses them. The deprecated
-/// [`state`](Self::state) accessor is retained because it is part of the public
-/// surface exercised by callers migrating off `ConsumerGroupState`.
+/// `ConsumerGroupState`, and the deprecated `state()` accessor, are not
+/// translated; use [`new`](Self::new) and [`group_state`](Self::group_state).
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[doc(alias = "org.apache.kafka.clients.admin.ConsumerGroupDescription")]
 pub struct ConsumerGroupDescription {
@@ -60,7 +56,9 @@ impl ConsumerGroupDescription {
     /// Optional<Integer>)` constructor. `coordinator` is `None` when the
     /// coordinator is not known (Java's nullable `Node`).
     #[allow(clippy::too_many_arguments)]
-    #[doc(alias = "org.apache.kafka.clients.admin.ConsumerGroupDescription#ConsumerGroupDescription")]
+    #[doc(
+        alias = "org.apache.kafka.clients.admin.ConsumerGroupDescription#ConsumerGroupDescription(String,boolean,Collection,String,GroupType,GroupState,Node,Set,Optional,Optional)"
+    )]
     pub fn new(
         group_id: impl Into<String>,
         is_simple_consumer_group: bool,
@@ -114,14 +112,6 @@ impl ConsumerGroupDescription {
     /// The group type. Mirrors `type()`.
     pub fn group_type(&self) -> GroupType {
         self.group_type
-    }
-
-    /// The consumer group state (deprecated). Mirrors `state()`, mapping the
-    /// group state via `ConsumerGroupState.parse(groupState.toString())`.
-    #[allow(deprecated)]
-    #[doc(alias = "org.apache.kafka.clients.admin.ConsumerGroupDescription#state")]
-    pub fn state(&self) -> ConsumerGroupState {
-        ConsumerGroupState::parse(self.group_state.name())
     }
 
     /// The group state. Mirrors `groupState()`.

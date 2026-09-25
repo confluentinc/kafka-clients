@@ -43,10 +43,6 @@ use confluent_kafka::admin::{
     TopicMetadataAndConfig, TransactionDescription, TransactionListing, UpdateFeaturesOptions,
     UserScramCredentialAlteration, UserScramCredentialsDescription,
 };
-#[allow(deprecated)]
-use confluent_kafka::admin::{
-    ClientMetricsResourceListing, ConsumerGroupListing, ListClientMetricsResourcesOptions, ListConsumerGroupsOptions,
-};
 use confluent_kafka::common::acl::{AclBinding, AclBindingFilter, AclOperation};
 use confluent_kafka::common::config::{ConfigResource, config_resource};
 use confluent_kafka::common::protocol::Errors;
@@ -248,18 +244,6 @@ pub trait AdminBackend {
         options: ListConfigResourcesOptions,
     ) -> Result<Vec<ConfigResource>, Error>;
 
-    /// List the cluster's client-metrics resources (KIP-714).
-    ///
-    /// Deprecated in Java since 4.1 in favour of
-    /// `listConfigResources(Set.of(CLIENT_METRICS))`, and carried here because
-    /// both bindings still expose it. Not an [`Outcomes`], for the same reason as
-    /// [`AdminBackend::list_config_resources`].
-    #[allow(deprecated)]
-    async fn list_client_metrics_resources(
-        &self,
-        options: ListClientMetricsResourcesOptions,
-    ) -> Result<Vec<ClientMetricsResourceListing>, Error>;
-
     /// Query the log directories of each broker.
     ///
     /// The per-broker value is *nested* — Java's future resolves to
@@ -362,17 +346,6 @@ pub trait AdminBackend {
     /// collection, and the two are independent — a partial success has both
     /// non-empty. See [`Listings`].
     async fn list_groups(&self, options: ListGroupsOptions) -> Result<Listings<GroupListing>, Error>;
-
-    /// List the consumer groups in the cluster.
-    ///
-    /// Deprecated in Java since 4.1 in favour of
-    /// [`AdminBackend::list_groups`], which covers every group type, and carried
-    /// here because both bindings still expose it. Same [`Listings`] shape.
-    #[allow(deprecated)]
-    async fn list_consumer_groups(
-        &self,
-        options: ListConsumerGroupsOptions,
-    ) -> Result<Listings<ConsumerGroupListing>, Error>;
 
     /// Describe the given groups, classic or KIP-848 consumer protocol.
     async fn describe_consumer_groups(
@@ -682,8 +655,7 @@ pub trait AdminBackend {
 pub type Outcomes<K, V> = HashMap<K, Result<V, Error>>;
 
 /// The already-resolved outcome of an RPC whose Java `*Result` splits **one**
-/// future into `valid()` and an *unkeyed* `errors()` collection: `listGroups` and
-/// `listConsumerGroups`.
+/// future into `valid()` and an *unkeyed* `errors()` collection: `listGroups`.
 ///
 /// # DoD #7 justification (a type with no Java counterpart)
 ///
@@ -833,11 +805,10 @@ where
 // factories cover both `strict` values.)
 //
 // Slice G4 added none either, for the same reason: `GroupListing::new`,
-// `ConsumerGroupListing::with_group_state_group_type`, `ConsumerGroupDescription::new`,
-// `ClassicGroupDescription::new`, `MemberDescription::new`,
+// `ConsumerGroupDescription::new`, `ClassicGroupDescription::new`, `MemberDescription::new`,
 // `MemberAssignment::new`, `MemberToRemove::new` and
 // `OffsetAndMetadata::{new, new_metadata, new_leader_epoch_metadata}` are all public, so
-// the nine group RPCs cross entirely as production types. It did add
+// the group RPCs cross entirely as production types. It did add
 // [`Listings`], but that is not a stand-in for an unreachable constructor — it is
 // the resolved form of a Java result shape that has no class at all.
 // ---------------------------------------------------------------------------
@@ -1255,18 +1226,6 @@ impl AdminBackend for RustNativeAdmin {
             .await
     }
 
-    #[allow(deprecated)]
-    async fn list_client_metrics_resources(
-        &self,
-        options: ListClientMetricsResourcesOptions,
-    ) -> Result<Vec<ClientMetricsResourceListing>, Error> {
-        self.admin
-            .list_client_metrics_resources_with_options(options)
-            .all()
-            .get_with_timeout(NATIVE_FUTURE_TIMEOUT)
-            .await
-    }
-
     async fn describe_log_dirs(
         &self,
         brokers: &[i32],
@@ -1375,17 +1334,6 @@ impl AdminBackend for RustNativeAdmin {
         let result = self.admin.list_groups_with_options(options);
         // Both views are awaited before either error is reported, so neither is
         // abandoned. Identical to the FFI's `submit_list_groups`.
-        let valid = result.valid().get_with_timeout(NATIVE_FUTURE_TIMEOUT).await;
-        let errors = result.errors().get_with_timeout(NATIVE_FUTURE_TIMEOUT).await;
-        Ok(Listings { valid: valid?, errors: errors? })
-    }
-
-    #[allow(deprecated)]
-    async fn list_consumer_groups(
-        &self,
-        options: ListConsumerGroupsOptions,
-    ) -> Result<Listings<ConsumerGroupListing>, Error> {
-        let result = self.admin.list_consumer_groups_with_options(options);
         let valid = result.valid().get_with_timeout(NATIVE_FUTURE_TIMEOUT).await;
         let errors = result.errors().get_with_timeout(NATIVE_FUTURE_TIMEOUT).await;
         Ok(Listings { valid: valid?, errors: errors? })
