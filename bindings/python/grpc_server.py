@@ -53,6 +53,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 # ``producer.py`` / ``consumer.py``.
 from confluent_kafka.producer import KafkaProducer, MockProducer  # noqa: E402
 from confluent_kafka.consumer import (  # noqa: E402
+    CloseOptions,
     KafkaConsumer,
     MockConsumer,
     OffsetAndMetadata,
@@ -151,6 +152,7 @@ from grpc_translate import (  # noqa: E402
     _record_to_proto,
     _tp,
     _tp_to_proto,
+    ignore_commit_completion,
     make_logging_commit_callback,
     make_logging_delivery_callback,
 )
@@ -389,7 +391,7 @@ class ProducerService(pb_grpc.ProducerServiceServicer):
 
 
 class ConsumerService(cpb_grpc.ConsumerServiceServicer):
-    """Maps ConsumerService RPCs onto bindings/python/consumer.py. The sync
+    """Maps ConsumerService RPCs onto confluent_kafka.consumer. The sync
     consumer API blocks the gRPC worker thread on its threading.Event, which
     is fine in the thread-pool server."""
 
@@ -398,8 +400,9 @@ class ConsumerService(cpb_grpc.ConsumerServiceServicer):
         self._next_id = 1
         self._lock = threading.Lock()
         # Rebalance-listener / commit-callback log, keyed by consumer_id. Both
-        # callback families are invoked from the Rust dispatcher thread, never
-        # the gRPC worker that serves GetCallbackLog — hence CallbackLog's lock.
+        # callback families run on the gRPC worker thread whose consumer call
+        # delivers them, not the one that serves GetCallbackLog — hence
+        # CallbackLog's lock.
         self._callback_log = CallbackLog()
 
     def _get(self, consumer_id):
@@ -490,10 +493,14 @@ class ConsumerService(cpb_grpc.ConsumerServiceServicer):
             callback = make_logging_commit_callback(self._callback_log, request.consumer_id)
 
         def do(c):
-            # commit_async is non-blocking in both clients (a local op on the
-            # shared _ConsumerBase, not a coroutine) — the callback fires on a
-            # later poll/commit/close, exactly as in Java.
-            c.commit_nowait(offsets=_proto_offsets_to_dict(request.offsets) or None, callback=callback)
+            # commit_nowait (Java's commitAsync) does not wait; the callback runs
+            # inside a later poll/commit/close, on that call's thread, as in Java.
+            offsets = _proto_offsets_to_dict(request.offsets)
+            if offsets:
+                c.commit_nowait(offsets=offsets,
+                                callback=callback or ignore_commit_completion)
+            else:
+                c.commit_nowait(callback=callback)
         return self._run_status(request.consumer_id, do)
 
     def Committed(self, request, context):
@@ -688,11 +695,13 @@ class ConsumerService(cpb_grpc.ConsumerServiceServicer):
         if consumer is None:
             return pb.StatusResponse()
         try:
-            # KafkaConsumer.close(*, timeout=...) has a timed FFI form (D7); an
-            # absent timeout_ms is Java's no-argument close(). timeout_ms is
-            # milliseconds; Duration is seconds / timedelta.
+            # A timeout_ms is Java's close(CloseOptions.timeout(timeout)) (the
+            # deprecated close(Duration) delegates to it); an absent one is the
+            # no-argument close(). timeout_ms is milliseconds; Duration is
+            # seconds / timedelta.
             if request.HasField("timeout_ms"):
-                consumer.close(timeout=_dt.timedelta(milliseconds=request.timeout_ms))
+                consumer.close(option=CloseOptions.timeout(
+                    _dt.timedelta(milliseconds=request.timeout_ms)))
             else:
                 consumer.close()
         except KafkaError as e:

@@ -46,8 +46,9 @@ is never a public import path.
 
 Each async client lives in the same module as its sync peer, `Async`-prefixed
 (`AsyncKafkaProducer`, `AsyncKafkaConsumer`). A method is `async def` on the
-async class iff it blocks in Java or awaits the background task; in-memory reads
-(`assignment()`, `subscription()`, `metrics()`, `group_metadata()`) stay plain
+async class iff Java waits in it (on the background thread, the network, or a
+rebalance listener it runs); the others (`assignment()`, `subscription()`,
+`metrics()`, `group_metadata()`, `commit_nowait()`, `wakeup()`) stay plain
 `def` on both.
 
 ## Producer
@@ -66,6 +67,35 @@ async class iff it blocks in Java or awaits the background task; in-memory reads
 - `MockProducer` is Java's `MockProducer`: sends complete, and callbacks run, on
   the calling thread.
 
+## Consumer
+
+- `poll(timeout=…)` runs the deserializers on the caller's thread. A failing one
+  raises `RecordDeserializationError` (after the records before it, if any, were
+  returned) and leaves the position at the record:
+  `seek(partition=e.topic_partition(), offset=e.offset() + 1)` skips it.
+- `commit()` is Java's `commitSync` and waits; `commit_nowait(callback=cb)` is
+  Java's `commitAsync`. `cb(offsets, exception)` is Java's
+  `OffsetCommitCallback`.
+- The `ConsumerRebalanceListener` methods and the `commit_nowait()` callback run
+  on the caller's thread, inside the call that delivers them (`poll()`,
+  `commit()`, `unsubscribe()`, `close()`, …), and the rebalance does not advance
+  until the listener returns. A listener may call back into its consumer
+  (`commit()`, `seek()`, `position()`, …). On `AsyncKafkaConsumer` a listener
+  method may be `async def`; it is awaited on the event loop.
+- `KafkaConsumer` is not thread-safe: a call while another thread is inside it
+  raises `ConcurrentModificationError`. `wakeup()` is the exception: from any
+  thread, it makes the waiting call raise `WakeupError`.
+- `close(option=CloseOptions.timeout(…))` bounds the close;
+  `close(timeout=…)` is Java's deprecated `close(Duration)` and warns.
+- A deserializer defaults to the `key.deserializer` / `value.deserializer`
+  config key, else to `bytes_deserializer()`; the consumer closes both when it
+  closes.
+- `MockConsumer` is Java's `MockConsumer`: `add_record(record=…)` takes the
+  `ConsumerRecord` the test builds and `poll()` returns it as is (the mock has no
+  deserializers). Nothing binds its type parameters, so annotate it as Java
+  writes them: `c: MockConsumer[str, str] =
+  MockConsumer(offset_reset_strategy="earliest")`.
+
 ## Errors
 
 Errors are a typed hierarchy caught by class, not a flat error with a `code()`.
@@ -82,8 +112,8 @@ This is a different API, not a drop-in bump. The two rules that explain most
 call-site changes:
 
 - **Every argument is keyword-only.** `poll(1.0)` → `poll(timeout=1.0)`,
-  `subscribe(topics)` → `subscribe(topics=topics)`, `close(5)` →
-  `close(timeout=5)`.
+  `subscribe(topics)` → `subscribe(topics=topics)`, a producer's `close(5)`
+  → `close(timeout=5)`.
 - **Collections come back as Java's types** — `set` where Java returns `Set`,
   `dict` where Java returns `Map` — not the old client's lists.
 
