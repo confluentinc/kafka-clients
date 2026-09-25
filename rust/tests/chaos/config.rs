@@ -276,7 +276,7 @@ impl ChaosConfig {
             between_s: env_parse("CHAOS_BETWEEN_S", 3)?,
             drain_s: env_parse("CHAOS_DRAIN_S", 15)?,
             idle_threshold_s: env_parse("CHAOS_IDLE_THRESHOLD_S", 3)?,
-            rps: env_parse("CHAOS_RPS", 200)?,
+            rps: env_parse("CHAOS_RPS", 1000)?,
             leave_broker_down,
             seed: env_parse("CHAOS_SEED", 0)?,
             random,
