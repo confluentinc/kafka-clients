@@ -79,7 +79,11 @@ e.g. a Rust producer feeding a C consumer):
   (their gRPC-server Docker images must be built first — see
   [Dependencies](#dependencies)).
 
-Consumers commit with `--commit sync|async`.
+Consumers commit with `--commit sync|async`. Two things only the Rust backend
+does: it registers a rebalance listener (the bridge cannot carry one), which
+is what the [rebalance listener contract](#rebalance-listener-contract) and
+[committed offsets](#committed-offsets) checks rely on, and it pipelines sends
+(see `--rps` under [CLI flags](#cli-flags)).
 
 ## How verification works (any producer/consumer mix)
 
@@ -125,18 +129,23 @@ Run via `cargo xtask chaos …`. Defaults mirror `chaos.py` where they overlap.
   aggregate rate is `N × rps`); consumers subscribe to **all** topics. Leader
   migrations (change-leader/reassign) iterate every topic per librdkafka.
 
-  > **Known limitation — multi-topic + topic-recreate is not yet supported.**
+  > **Known limitation — multi-topic + topic-recreate is not supported yet.**
   > `--num-topics > 1` together with `--topic-recreate` is **rejected** up front
-  > with a clear error (clean exit, not a mid-run panic); `--random` under
-  > multi-topic silently **drops** topic-recreate from its candidate set (broker
-  > roll / change-leader / reassign still randomize across topics) and prints a
-  > notice. The reason is a genuine consumer offset-reset gap, not a harness
-  > artifact: a new-generation (new topic-id) recreate leaves the KIP-848
-  > consumer positioned past the new generation's tail **without** an offset
-  > reset, so that topic's post-recreate tail is genuinely unconsumed. Diagnosed
-  > and deferred as a separate consumer-side investigation. Single-topic recreate
-  > (`--num-topics 1 --topic-recreate`) and multi-topic without recreate both
-  > work and are covered.
+  > with a clear error (before any cluster is started); `--random` under
+  > multi-topic **drops** topic-recreate from its candidate set (broker roll /
+  > change-leader / reassign still randomize across all topics) and prints a
+  > notice. The reason is a consumer-side gap the harness surfaces, not a
+  > harness artifact: when one of several subscribed topics is recreated under
+  > a new topic id, the KIP-848 consumer keeps the old generation's fetch
+  > positions on some of that topic's partitions after the revoke/assign cycle,
+  > never resets onto the new generation, and keeps committing the stale
+  > positions under the old topic id (the revoke-time commit then runs into its
+  > 60 s timeout). Last reproduced on 2026-09-25 (`--num-topics 2
+  > --topic-recreate --cycles 2 --drain-s 180 --seed 5`: 461 records lost on 3
+  > of the recreated topic's 6 partitions after the second recreate). Single-topic
+  > recreate (`--num-topics 1 --topic-recreate`) and multi-topic without recreate
+  > both work and are covered. Lift the guard in `config.rs` and `run_test.rs`
+  > once the consumer fix lands, and re-run that command to confirm.
 - `--partitions N` (6) — partitions on each chaos topic
 - `--replication-factor N` — replication factor per topic; default `min(brokers,
   3)`. FATAL (panics) if `N > brokers`, matching librdkafka.
@@ -144,12 +153,27 @@ Run via `cargo xtask chaos …`. Defaults mirror `chaos.py` where they overlap.
 
 ### Workload
 - `--workload role:backend` (`producer:rust`, `consumer:rust`) — repeatable
-- `--rps N` (1000) — producer target records/sec (per topic), `0` = max rate
+- `--consumers N` — shorthand for one Rust producer plus N Rust consumers
+  (librdkafka's `--consumers`); not combinable with `--workload`
+- `--consumer-churn-min M` / `--consumer-churn-max X` — consumer churn: keep the
+  live consumer count within `[M, X]`. `M` Rust consumers are built up front and
+  never removed; every cycle stops a random batch of the churn-added consumers
+  and then starts a random batch, within the `X - M` headroom (librdkafka's
+  chaos consumer churn). Both flags are required together, `M >= 1`, `X > M`,
+  and they own the consumer set (not combinable with `--consumers` or
+  `--workload`).
+- `--rps N` (1000) — producer target records/sec (per topic), `0` = max rate.
+  A gRPC (`python` / `python-async` / `c`) producer cannot pipeline: the bridge
+  returns each send only once the binding has the broker's acknowledgement, so
+  it produces one record per round trip, `--rps` is a ceiling it will not reach,
+  and its in-flight peak reads 1. The run prints a notice when this applies.
 - `--msg-size N` (100) — producer value payload size in bytes. The 8-byte logical
   index is written into the first bytes of the value and padded to this size; the
   key stays the 8-byte index (logical identity is preserved even for
   `--msg-size < 8`).
-- `--commit sync|async` (`sync`)
+- `--commit sync|async` (`sync`). A gRPC consumer performs `async` as a
+  synchronous commit on the server side (the offsets are committed, the async
+  timing is not exercised); the run prints a notice when this applies.
 
 ### Security protocol
 - `--security-protocol plaintext|ssl|sasl_plaintext|sasl_ssl` (`plaintext`) —
@@ -257,21 +281,35 @@ failing `committed()` call itself is reported as
 - `--topic-recreate [N]` — also delete/recreate the topic
 - `--reassign-partitions [N]` — also reassign partitions (data moves)
 - `--change-leader [N]` — also do a preferred-leader change (no data move)
-- `--cycles N` (3) — number of chaos cycles
+- `--cycles N` (3) — number of chaos cycles (`>= 1`)
 - `--unclean` — SIGKILL instead of SIGTERM (broker-roll)
 - `--stop-s N` (5) — seconds a broker stays down per roll
 - `--up-wait-s N` (60) — max seconds to wait for a broker to rejoin
-- `--leave-broker-down N` — keep broker N down for the whole run
+- `--leave-broker-down N` — keep broker N down for the whole run (`1..=brokers`,
+  and not with a single broker: nothing would be left to roll)
 - `--seed N` (0) — reproducibility seed; `0` = auto-pick and print it
 - `--dwell-s N` (0) — delete→recreate dwell (topic-recreate)
+
+Every flag is validated up front and a bad combination fails before the
+cluster is started: a cadence of 0, a rebalance cycle past `--cycles`, a
+remove cycle at or before its add cycle, a zero log budget, and so on.
 
 #### Random (chaos-monkey) mode
 - `--random` — instead of the fixed per-fault cadences, each cycle the seeded
   RNG decides **whether** a fault fires, **which** one (broker-roll,
-  topic-recreate, reassign-partitions, change-leader — all candidates), and its
-  **parameters** (broker index, clean/unclean, down duration, dwell), plus a
-  random pre-action delay within the cycle. Any action, any time.
-- `--action-prob P` (0.7) — per-cycle probability that a fault fires (`--random`).
+  topic-recreate, reassign-partitions, change-leader — all four are candidates
+  on a single-topic run; under `--num-topics > 1` topic-recreate is excluded,
+  see the known limitation above), and its **parameters** (which broker,
+  clean or unclean, a down duration of 3–12 s, an immediate or 3–8 s dwell),
+  plus a random pre-action delay of up to `--between-s` within the cycle. Any
+  action, any time. Because the mode draws all of that itself, the per-fault
+  flags are **rejected** with it: `--unclean`, `--stop-s`, `--dwell-s`,
+  `--no-broker-roll`, `--topic-recreate`, `--reassign-partitions`,
+  `--change-leader` and `--rebalance-mid-roll`. The run header prints
+  `unclean=random`. `--rebalance-add-cycle` / `--rebalance-remove-cycle` and
+  consumer churn still apply.
+- `--action-prob P` (0.7) — per-cycle probability that a fault fires; `0..=1`,
+  only with `--random`.
 - **Reproducible**: the entire random run is driven by one RNG seeded from
   `--seed`. Rerun with the printed seed to replay it byte-for-byte:
   ```
@@ -286,6 +324,7 @@ failing `committed()` call itself is reported as
 ### Rebalance chaos
 - `--rebalance-add-cycle N` — add a consumer at the start of cycle N (rebalance)
 - `--rebalance-remove-cycle N` — remove that consumer at the start of cycle N
+  (`N` must be after the add cycle, or a churn run must be adding consumers)
 - `--rebalance-mid-roll` — fire the add/remove **inside the broker-roll
   down-window** instead of at the top of the cycle, so the group reassignment is
   in flight *while a broker is down and leaders are migrating* — a leader change
@@ -299,21 +338,23 @@ failing `committed()` call itself is reported as
 ### Timing
 - `--warmup-s N` (5) — traffic before the first fault
 - `--between-s N` (3) — pause between cycles
-- `--drain-s N` (15) — **max** time for consumers to catch up at cooldown
-- `--idle-threshold-s N` (3) — end the drain early once consumption has been
-  quiet this long (0 = always wait the full `--drain-s`). Keeps runs that end on
-  a heavy fault (reassign/recreate) from falsely reporting loss, without a large
-  fixed drain. A topic recreate **arms a settle**: the early-drain will not
-  declare quiescence until the consumer has demonstrably resumed after the most
-  recent recreate (a post-recreate consume-progress advance), so the transient
-  re-discovery / truncation-rewind stall right after a recreate is never mistaken
-  for "caught up" and the just-recreated topic's tail is not dropped as false
-  loss. Still capped by `--drain-s`.
+- `--drain-s N` (15) — **max** time for consumers to catch up at cooldown. With
+  the default verifier the drain ends as soon as every acknowledged record has
+  been observed (it polls the verifier's outstanding count), so a healthy run
+  finishes the drain in a second or two and only a run with real loss waits the
+  full window. Runs ending on a heavy fault (reassign, recreate) need a larger
+  value so the consumer has time to recover before the window closes.
+- `--idle-threshold-s N` (3) — **no effect with the default verifier** (the run
+  prints a notice if you pass it). It is the fallback drain for a custom
+  `Verifier` that does not report outstanding records: end the drain once
+  consumption has been quiet this long (0 = always wait the full `--drain-s`),
+  where a topic recreate arms a per-topic settle so the drain does not declare
+  quiescence until the recreated topic's own consumption has resumed.
 
 ### Reports & loop
 - `--reports` — write `target/chaos-runs/<id>/` (verdict, leader changes,
   per-workload client logs, signature summary)
-- `--log-budget-mb N` (64) — per-workload client-log rotation budget
+- `--log-budget-mb N` (64) — per-workload client-log rotation budget (`>= 1`)
 - `--repeat N` (1) — run up to N times, stop on first failure, append
   `target/chaos-runs/run-history.tsv`
 
@@ -351,17 +392,28 @@ The default `ConservationVerifier` renders a verdict:
   duplicates (by index)     : 0      # redelivery of the same logical record
   duplicates (by offset)    : 0      # same physical (topic_id, partition, offset) seen twice
   duplicates (double write) : 0      # same logical record at 2+ offsets of one generation → FAIL if > 0
-  partitions covered        : 6
+  partitions covered        : 6      # distinct partitions consumed on the least-covered topic → FAIL if < half
   in-flight peak (producer) : 37     # most records one producer had in flight at once (reported)
-  expected-lost (recreate)  : 0      # records legitimately destroyed by topic-recreate
+  expected-lost (recreate)  : 0      # records legitimately destroyed by topic-recreate (only when > 0)
   lost (delivered, unseen)  : 0      # acked-but-never-consumed  → FAIL if > 0
   lost by partition:                 # only when lost > 0: where the loss sits
     chaos-run p0: 143 lost at offsets 1..=143; last acked offset 143, last consumed offset none
+  rebalance callbacks       : revoked=7 assigned=9 lost=0 (2 consumer(s) with listener)
+  committed offsets checked : 37 (0 violation(s))      # → FAIL if violations > 0
+  ordering violations       : 0 (0 unscored on recreated topics)   # → FAIL if > 0
   consumer poll errors      : 0      # poll() calls that returned an error (reported)
   consumer commit errors    : 7      # commit calls that returned an error (reported)
+  commit errors in revoked  : 1      # commits failing inside on_partitions_revoked (only when > 0)
   errors by kind:                    # every client-reported error, grouped, most frequent first
     7x consumer commit: IllegalStateError: OffsetCommit failed with stale member epoch. ...
 ```
+
+The **ordering** line counts partitions where records arrived out of index
+order within one topic generation: the producer's acknowledgements must come
+back in index order per partition (idempotence guarantees it), and the consumer
+must see offsets ascend. Anomalies on a topic that was recreated during the run
+are reported as *unscored*, because a recreate resets the offsets and restarts
+the consumer's position legitimately.
 
 The last block is the **error summary**: every error a workload received from
 the client (failed sends, consumer `poll` errors, consumer commit errors) is
@@ -373,7 +425,9 @@ occurred. Each error is also printed on stderr as it happens, prefixed with the
 workload label, so it can be placed against the fault in progress.
 
 The run **fails** if any acknowledged record is never consumed
-(`lost > 0`), or if partition coverage is below the expected minimum.
+(`lost > 0`), or if partition coverage is below the expected minimum: on every
+topic, records must have been consumed from at least half of the partitions
+(the verdict prints the least-covered topic's count).
 
 It also **fails** on any **failed send** (`failed sends > 0`). The producer
 runs with `acks=all`, `enable.idempotence=true`, a 60 s `max.block.ms` and a
@@ -420,35 +474,40 @@ legitimately committed again in the new one.
 
 ## What a run prints
 
-Everything goes to the test's **stderr** as human-readable progress (there are
-no on-disk report files yet — see [Not yet implemented](#not-yet-implemented-vs-chaospy)).
-A full run prints, in order:
+Everything goes to the test's **stderr** as human-readable progress; with
+`--reports` the same verdict, the leader-change log and the client logs are
+also written to disk (see [Reports](#reports---reports)). A full run prints,
+in order:
 
 ```
-chaos: brokers=3 partitions=6 cycles=1 action=ReassignPartitions unclean=false rps=120 workloads=[producer-rust-1, consumer-rust-1]
+chaos: brokers=3 topics=1 partitions=6 replication=min(3,3) msg_size=100 cycles=1 actions=[BrokerRoll, ReassignPartitions] unclean=false rps=120 seed=7 security=PLAINTEXT workloads=[producer-rust-1, consumer-rust-1]
 chaos: starting workload producer-rust-1
+chaos consumer-rust-1: on_partitions_assigned ["chaos-run-0", "chaos-run-1", ...]
 chaos: cycle 1/1
 chaos:   p0 leader Some(2)->Some(3)  replicas [2, 3, 1]->[3, 1, 2]     # per-action effect proof
 ...
 chaos: reassignment complete for topic chaos-run (6 partition(s) with changed replicas, 6 with changed leader)
+chaos: drain complete — all delivered records observed
+chaos consumer-rust-1: on_partitions_revoked ["chaos-run-0", ...]
 === Chaos verdict: PASS ===
   delivered (acked) records : 362
-  failed sends              : 0
-  duplicates (by index)     : 0
-  duplicates (by offset)    : 0
-  partitions covered        : 6
-  lost (delivered, unseen)  : 0
+  ...
 test result: ok. 1 passed; 0 failed; ...
 ```
 
-Lines fall into three groups:
+Lines fall into four groups:
 
-- **Run header** — the resolved config and the workload list.
+- **Run header** — the resolved config and the workload list, plus any
+  notices about flags that do not apply to the run (a gRPC producer's rate
+  ceiling, `--idle-threshold-s` with the default verifier, ...).
 - **Chaos progress + effect proof** — per cycle and per action: which broker
   rolled, the before→after `leader`/`replicas` per partition (reassign /
   change-leader), or the `topic_id` change (recreate), and an
   `N changed`-style summary that the action **asserts** on (a no-op fails the
   run).
+- **Client-side events** — each rebalance callback as the consumer receives
+  it, and every error a workload gets from the client, prefixed with the
+  workload label so it can be placed against the fault in progress.
 - **Verdict** — the conservation + dual-key bookkeeping and the pass/fail.
 
 Add `--nocapture` (the `xtask chaos` path already sets it) to see these live;
@@ -459,15 +518,16 @@ without it libtest buffers them until the test ends.
 | librdkafka | Ours |
 |---|---|
 | Per-record JSON event lines on the workload's **stdout** (`{"e":"consumed",…}`), parsed by the orchestrator | No per-record printing — workloads emit typed events **in-process** to the verifier; only the aggregate verdict is printed |
-| Client debug logs on the workload's **stderr**, greppable for signatures | Not captured yet (would come from the Rust `log` facade — a parity gap) |
-| Report **files**: `verify.txt`, `summary.txt`, `leader_changes.txt`, `metadata-trigger.txt`, per-consumer stdout/stderr/stats, with rotation + budget | A single stderr verdict + progress; no files, no rotation yet |
-| Leader-change log written per cycle to `leader_changes.txt` | The same before→after leader/replica diff, printed inline to stderr |
+| Client debug logs on the workload's **stderr**, greppable for signatures | With `--reports`: the Rust client's `log` output captured per workload into `client-<clientId>.log`, signature counts in `summary.txt` |
+| Report **files**: `verify.txt`, `summary.txt`, `leader_changes.txt`, `metadata-trigger.txt`, per-consumer stdout/stderr/stats, with rotation + budget | With `--reports`: `verdict.txt`, `summary.txt`, `leader-changes.txt`, per-workload client logs rotating at `--log-budget-mb`; no per-consumer stats file |
+| Leader-change log written per cycle to `leader_changes.txt` | The same before→after leader/replica diff, printed inline to stderr and, with `--reports`, appended to `leader-changes.txt` |
 | Redelivery via a `delivery_count` (`dc`) field | Redelivery via `duplicates (by index)`; `dc` is share-consumer-specific (future) |
 
 So the **information** overlaps (conservation, per-record identity, leader
-diffs, redelivery), but librdkafka serializes it to files across processes
-while we keep it in-process and print an aggregate. On-disk reports and Rust
-client-log capture are the main remaining output gaps.
+diffs, redelivery), but librdkafka collects it from separate processes through
+files, while we keep it in-process and print an aggregate, writing files only
+on request. Per-consumer statistics files and the metadata-trigger report are
+the remaining output gaps.
 
 ## Quick start
 
@@ -540,10 +600,13 @@ files):
   workload's file by the `clientId=` in the line; lines with no client id fall
   back to `client.log`). Each file rotates at `--log-budget-mb` (default 64,
   one backup kept) — the per-consumer-stderr + `--log-budget-bytes` analog.
-- `summary.txt` — counts of known diagnostic signatures grepped from
-  `client.log` (transport disconnects, metadata refreshes, leader-change /
-  not-coordinator errors, timeouts, retries — the `summary.txt` /
-  `metadata-trigger.txt` analog).
+- `summary.txt` — counts of known diagnostic signatures in the captured client
+  logs (transport disconnects, connection resets, metadata refreshes,
+  not-leader and not-coordinator errors, timeouts, retries — the `summary.txt`
+  / `metadata-trigger.txt` analog). The error signatures match the broker
+  error's message or variant name, not the bare words "leader" /
+  "coordinator", so routine lines such as "Discovered group coordinator" are
+  not counted.
 
 Files are written **before** the pass/fail assertion, so a failing run still
 leaves full diagnostics on disk.
@@ -574,5 +637,5 @@ Tracked in
 [`design/current/chaos-parity-gap.md`](../../design/current/chaos-parity-gap.md):
 
 - The interactive manual REPL.
-- The idle-based early-drain exit.
+- Per-consumer statistics files and the `metadata-trigger.txt` report.
 - The share consumer (KIP-932, blocked on the client — §20).

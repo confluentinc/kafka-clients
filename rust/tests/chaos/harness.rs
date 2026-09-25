@@ -175,6 +175,14 @@ impl ChaosHarness {
         };
         let mut config = kip848_3_broker(partitions as u16);
         config.brokers = brokers;
+        // The 3-broker preset pins the offsets topic to RF 3. With fewer brokers
+        // the coordinator can never auto-create `__consumer_offsets`
+        // (InvalidReplicationFactor), FindCoordinator answers
+        // COORDINATOR_NOT_AVAILABLE forever, no consumer joins, and the verdict
+        // is total loss blamed on the client. Size it to the cluster.
+        config
+            .server_properties
+            .insert("KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR".to_string(), brokers.min(3).to_string());
         // Disable broker-side auto topic creation: the topic-recreate action
         // deletes the topic while workloads keep running, and their metadata
         // requests would otherwise silently recreate it with the broker's
@@ -691,9 +699,29 @@ impl Drop for ChaosHarness {
         for id in self.cluster.container_ids() {
             let _ = std::process::Command::new("docker").args(["rm", "-f", id]).output();
         }
-        let _ = std::process::Command::new("docker")
-            .args(["network", "rm", self.cluster.network_name()])
-            .output();
+        let network = self.cluster.network_name();
+        // Anything still attached (the gRPC backend sidecar lives in a
+        // process-wide pool and outlives this cluster) makes `network rm` fail
+        // with "network has active endpoints", which used to leak one
+        // `kafka-net-*` per gRPC run. Detach every endpoint first; that only
+        // removes the container's membership of THIS network, nothing else.
+        if let Ok(out) = std::process::Command::new("docker")
+            .args([
+                "network",
+                "inspect",
+                "-f",
+                "{{range .Containers}}{{.Name}}\n{{end}}",
+                network,
+            ])
+            .output()
+        {
+            for attached in String::from_utf8_lossy(&out.stdout).lines().filter(|l| !l.is_empty()) {
+                let _ = std::process::Command::new("docker")
+                    .args(["network", "disconnect", "-f", network, attached])
+                    .output();
+            }
+        }
+        let _ = std::process::Command::new("docker").args(["network", "rm", network]).output();
     }
 }
 
