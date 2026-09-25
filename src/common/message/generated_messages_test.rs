@@ -16,7 +16,7 @@
 
 #[cfg(test)]
 mod tests {
-    use confluent_kafka::*;
+    use crate::*;
 
     #[test]
     fn test_generated_messages_accessible() {
@@ -91,7 +91,7 @@ mod tests {
     #[test]
     fn test_uuid_type_generation() {
         // Test that UUID fields are properly generated
-        use confluent_kafka::common::Uuid;
+        use crate::common::Uuid;
         use share_group_describe_response_data::*;
 
         // Create a TopicPartitions with UUID

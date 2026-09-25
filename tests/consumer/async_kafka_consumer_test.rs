@@ -36,7 +36,6 @@
 use std::collections::HashMap;
 
 use confluent_kafka::common::Error;
-use confluent_kafka::common::protocol::Errors;
 use confluent_kafka::common::serialization::Deserializer;
 use confluent_kafka::consumer::ConsumerConfig;
 use confluent_kafka::consumer::KafkaConsumer;
@@ -111,9 +110,8 @@ async fn new_consumer_rejects_classic_group_protocol() {
         KafkaConsumer::new::<String, String>(config, Box::new(StringDeserializer), Box::new(StringDeserializer));
 
     let err = result.err().expect("classic protocol must be rejected");
-    assert_eq!(
-        err.error(),
-        Errors::UnsupportedVersion,
+    assert!(
+        matches!(err, Error::UnsupportedVersion(_)),
         "expected UnsupportedVersion, got: {:?}",
         err
     );

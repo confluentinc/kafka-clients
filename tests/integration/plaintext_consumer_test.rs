@@ -104,7 +104,6 @@ use confluent_kafka::common::TopicPartition;
 use confluent_kafka::common::header::Header;
 use confluent_kafka::common::header::Headers;
 use confluent_kafka::common::header::RecordHeaders;
-use confluent_kafka::common::protocol::Errors;
 use confluent_kafka::common::record::TimestampType;
 use confluent_kafka::common::serialization::ByteArraySerializer;
 use confluent_kafka::common::serialization::Deserializer;
@@ -616,7 +615,7 @@ async fn test_async_consumer_partitions_for_invalid_topic() {
         .expect_err("partitions_for on an invalid topic should fail");
     let msg = err.to_string();
     assert!(
-        msg.contains("Invalid topic") || msg.contains("invalid topic") || err.error() == Errors::InvalidTopicError,
+        msg.contains("Invalid topic") || msg.contains("invalid topic") || matches!(err, Error::InvalidTopic(_)),
         "expected InvalidTopic error, got: {msg}"
     );
 
@@ -1015,12 +1014,12 @@ async fn test_async_consumer_consuming_with_null_group_id() {
     let num_records1 = poll_count(consumer1.as_mut(), 3, Duration::from_secs(15)).await;
     // Java: commitSync / committed raise InvalidGroupId for groupless.
     let c1_commit = consumer1.commit_sync().await.expect_err("groupless commit_sync should fail");
-    assert_eq!(c1_commit.error(), Errors::InvalidGroupId, "got {c1_commit:?}");
+    assert!(matches!(c1_commit, Error::InvalidGroupId(_)), "got {c1_commit:?}");
     let c2_committed = consumer2
         .committed(std::slice::from_ref(&tp))
         .await
         .expect_err("groupless committed should fail");
-    assert_eq!(c2_committed.error(), Errors::InvalidGroupId, "got {c2_committed:?}");
+    assert!(matches!(c2_committed, Error::InvalidGroupId(_)), "got {c2_committed:?}");
 
     let num_records2 = poll_count(consumer2.as_mut(), 0, Duration::from_secs(5)).await;
     let num_records3 = poll_count(consumer3.as_mut(), 2, Duration::from_secs(15)).await;
@@ -1061,7 +1060,7 @@ async fn test_async_consumer_null_group_id_not_supported_if_committing() {
     consumer.assign(vec![tp.clone()]).await.expect("assign");
 
     let err = consumer.commit_sync().await.expect_err("groupless commit_sync should fail");
-    assert_eq!(err.error(), Errors::InvalidGroupId, "got {err:?}");
+    assert!(matches!(err, Error::InvalidGroupId(_)), "got {err:?}");
     // Java: `InvalidGroupIdException` message verbatim.
     assert_eq!(
         err.message(),

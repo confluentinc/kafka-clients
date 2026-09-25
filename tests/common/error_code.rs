@@ -27,6 +27,12 @@
 //! negatives for the classes only the client raises. They are injective over
 //! the error classes, so the code alone identifies the class.
 
+use std::collections::HashSet;
+
+use confluent_kafka::common::errors::*;
+use confluent_kafka::common::Error;
+use confluent_kafka::common::InvalidRecordError;
+
 pub const UNKNOWN_SERVER_ERROR: i32 = -1;
 pub const NONE: i32 = 0;
 pub const OFFSET_OUT_OF_RANGE: i32 = 1;
@@ -189,3 +195,207 @@ pub const INVALID_RECEIVE: i32 = -25;
 pub const QUOTA_VIOLATION: i32 = -26;
 pub const RECORD_DESERIALIZATION: i32 = -27;
 pub const PRODUCER_BUFFER_EXHAUSTED: i32 = -28;
+
+/// Rebuild the error class that owns the protocol error `code`, carrying
+/// `message` -- the table of `Errors::error_with_message` (Java's
+/// `Errors.exception(String)`), spelled with the classes' public constructors
+/// because `Errors` itself is not public API.
+///
+/// `None` for a code no broker-side class owns: `NONE`, and the negatives of
+/// the classes only the client raises.
+pub fn error_with_message(code: i32, message: String) -> Option<Error> {
+    match code {
+        BROKER_ID_NOT_REGISTERED => Some(Error::BrokerIdNotRegistered(BrokerIdNotRegisteredError::new(message))),
+        BROKER_NOT_AVAILABLE => Some(Error::BrokerNotAvailable(BrokerNotAvailableError::new(message))),
+        CLUSTER_AUTHORIZATION_FAILED => Some(Error::ClusterAuthorization(ClusterAuthorizationError::new(message))),
+        CONCURRENT_TRANSACTIONS => Some(Error::ConcurrentTransactions(ConcurrentTransactionsError::new(message))),
+        COORDINATOR_LOAD_IN_PROGRESS => {
+            Some(Error::CoordinatorLoadInProgress(CoordinatorLoadInProgressError::new(message)))
+        },
+        COORDINATOR_NOT_AVAILABLE => Some(Error::CoordinatorNotAvailable(CoordinatorNotAvailableError::new(message))),
+        CORRUPT_MESSAGE => Some(Error::CorruptRecord(CorruptRecordError::new(message))),
+        DELEGATION_TOKEN_AUTHORIZATION_FAILED => Some(Error::DelegationTokenAuthorization(
+            DelegationTokenAuthorizationError::new(message),
+        )),
+        DELEGATION_TOKEN_AUTH_DISABLED => {
+            Some(Error::DelegationTokenDisabled(DelegationTokenDisabledError::new(message)))
+        },
+        DELEGATION_TOKEN_EXPIRED => Some(Error::DelegationTokenExpired(DelegationTokenExpiredError::new(message))),
+        DELEGATION_TOKEN_NOT_FOUND => Some(Error::DelegationTokenNotFound(DelegationTokenNotFoundError::new(message))),
+        DELEGATION_TOKEN_OWNER_MISMATCH => Some(Error::DelegationTokenOwnerMismatch(
+            DelegationTokenOwnerMismatchError::new(message),
+        )),
+        DELEGATION_TOKEN_REQUEST_NOT_ALLOWED => Some(Error::UnsupportedByAuthentication(
+            UnsupportedByAuthenticationError::new(message),
+        )),
+        DUPLICATE_BROKER_REGISTRATION => Some(Error::DuplicateBrokerRegistration(
+            DuplicateBrokerRegistrationError::new(message),
+        )),
+        DUPLICATE_RESOURCE => Some(Error::DuplicateResource(DuplicateResourceError::new(message))),
+        DUPLICATE_SEQUENCE_NUMBER => Some(Error::DuplicateSequence(DuplicateSequenceError::new(message))),
+        DUPLICATE_VOTER => Some(Error::DuplicateVoter(DuplicateVoterError::new(message))),
+        ELECTION_NOT_NEEDED => Some(Error::ElectionNotNeeded(ElectionNotNeededError::new(message))),
+        ELIGIBLE_LEADERS_NOT_AVAILABLE => Some(Error::EligibleLeadersNotAvailable(
+            EligibleLeadersNotAvailableError::new(message),
+        )),
+        FEATURE_UPDATE_FAILED => Some(Error::FeatureUpdateFailed(FeatureUpdateFailedError::new(message))),
+        FENCED_INSTANCE_ID => Some(Error::FencedInstanceId(FencedInstanceIdError::new(message))),
+        FENCED_LEADER_EPOCH => Some(Error::FencedLeaderEpoch(FencedLeaderEpochError::new(message))),
+        FENCED_MEMBER_EPOCH => Some(Error::FencedMemberEpoch(FencedMemberEpochError::new(message))),
+        FENCED_STATE_EPOCH => Some(Error::FencedStateEpoch(FencedStateEpochError::new(message))),
+        FETCH_SESSION_ID_NOT_FOUND => Some(Error::FetchSessionIdNotFound(FetchSessionIdNotFoundError::new(message))),
+        FETCH_SESSION_TOPIC_ID_ERROR => Some(Error::FetchSessionTopicId(FetchSessionTopicIdError::new(message))),
+        GROUP_AUTHORIZATION_FAILED => {
+            Some(Error::GroupAuthorization(GroupAuthorizationError::new(String::new(), message)))
+        },
+        GROUP_ID_NOT_FOUND => Some(Error::GroupIdNotFound(GroupIdNotFoundError::new(message))),
+        GROUP_MAX_SIZE_REACHED => Some(Error::GroupMaxSizeReached(GroupMaxSizeReachedError::new(message))),
+        GROUP_SUBSCRIBED_TO_TOPIC => Some(Error::GroupSubscribedToTopic(GroupSubscribedToTopicError::new(message))),
+        ILLEGAL_GENERATION => Some(Error::IllegalGeneration(IllegalGenerationError::new(message))),
+        ILLEGAL_SASL_STATE => Some(Error::IllegalSaslState(IllegalSaslStateError::new(message))),
+        INCONSISTENT_CLUSTER_ID => Some(Error::InconsistentClusterId(InconsistentClusterIdError::new(message))),
+        INCONSISTENT_GROUP_PROTOCOL => {
+            Some(Error::InconsistentGroupProtocol(InconsistentGroupProtocolError::new(message)))
+        },
+        INCONSISTENT_TOPIC_ID => Some(Error::InconsistentTopicId(InconsistentTopicIdError::new(message))),
+        INCONSISTENT_VOTER_SET => Some(Error::InconsistentVoterSet(InconsistentVoterSetError::new(message))),
+        INELIGIBLE_REPLICA => Some(Error::IneligibleReplica(IneligibleReplicaError::new(message))),
+        INVALID_COMMIT_OFFSET_SIZE => Some(Error::InvalidCommitOffsetSize(InvalidCommitOffsetSizeError::new(message))),
+        INVALID_CONFIG => Some(Error::InvalidConfiguration(InvalidConfigurationError::new(message))),
+        INVALID_FETCH_SESSION_EPOCH => {
+            Some(Error::InvalidFetchSessionEpoch(InvalidFetchSessionEpochError::new(message)))
+        },
+        INVALID_FETCH_SIZE => Some(Error::InvalidFetchSize(InvalidFetchSizeError::new(message))),
+        INVALID_GROUP_ID => Some(Error::InvalidGroupId(InvalidGroupIdError::new(message))),
+        INVALID_PARTITIONS => Some(Error::InvalidPartitions(InvalidPartitionsError::new(message))),
+        INVALID_PRINCIPAL_TYPE => Some(Error::InvalidPrincipalType(InvalidPrincipalTypeError::new(message))),
+        INVALID_PRODUCER_EPOCH => Some(Error::InvalidProducerEpoch(InvalidProducerEpochError::new(message))),
+        INVALID_PRODUCER_ID_MAPPING => Some(Error::InvalidPidMapping(InvalidPidMappingError::new(message))),
+        INVALID_RECORD => Some(Error::InvalidRecord(InvalidRecordError::new(message))),
+        INVALID_RECORD_STATE => Some(Error::InvalidRecordState(InvalidRecordStateError::new(message))),
+        INVALID_REGISTRATION => Some(Error::InvalidRegistration(InvalidRegistrationError::new(message))),
+        INVALID_REGULAR_EXPRESSION => {
+            Some(Error::InvalidRegularExpression(InvalidRegularExpressionError::new(message)))
+        },
+        INVALID_REPLICATION_FACTOR => {
+            Some(Error::InvalidReplicationFactor(InvalidReplicationFactorError::new(message)))
+        },
+        INVALID_REPLICA_ASSIGNMENT => {
+            Some(Error::InvalidReplicaAssignment(InvalidReplicaAssignmentError::new(message)))
+        },
+        INVALID_REQUEST => Some(Error::InvalidRequest(InvalidRequestError::new(message))),
+        INVALID_REQUIRED_ACKS => Some(Error::InvalidRequiredAcks(InvalidRequiredAcksError::new(message))),
+        INVALID_SESSION_TIMEOUT => Some(Error::InvalidSessionTimeout(InvalidSessionTimeoutError::new(message))),
+        INVALID_SHARE_SESSION_EPOCH => {
+            Some(Error::InvalidShareSessionEpoch(InvalidShareSessionEpochError::new(message)))
+        },
+        INVALID_TIMESTAMP => Some(Error::InvalidTimestamp(InvalidTimestampError::new(message))),
+        INVALID_TOPIC_ERROR => Some(Error::InvalidTopic(InvalidTopicError::with_message(HashSet::new(), message))),
+        INVALID_TRANSACTION_TIMEOUT => Some(Error::InvalidTxnTimeout(InvalidTxnTimeoutError::new(message))),
+        INVALID_TXN_STATE => Some(Error::InvalidTxnState(InvalidTxnStateError::new(message))),
+        INVALID_UPDATE_VERSION => Some(Error::InvalidUpdateVersion(InvalidUpdateVersionError::new(message))),
+        INVALID_VOTER_KEY => Some(Error::InvalidVoterKey(InvalidVoterKeyError::new(message))),
+        KAFKA_STORAGE_ERROR => Some(Error::KafkaStorage(KafkaStorageError::new(message))),
+        LEADER_NOT_AVAILABLE => Some(Error::LeaderNotAvailable(LeaderNotAvailableError::new(message))),
+        LISTENER_NOT_FOUND => Some(Error::ListenerNotFound(ListenerNotFoundError::new(message))),
+        LOG_DIR_NOT_FOUND => Some(Error::LogDirNotFound(LogDirNotFoundError::new(message))),
+        MEMBER_ID_REQUIRED => Some(Error::MemberIdRequired(MemberIdRequiredError::new(message))),
+        MESSAGE_TOO_LARGE => Some(Error::RecordTooLarge(RecordTooLargeError::new(message))),
+        MISMATCHED_ENDPOINT_TYPE => Some(Error::MismatchedEndpointType(MismatchedEndpointTypeError::new(message))),
+        NETWORK_ERROR => Some(Error::Network(NetworkError::new(message))),
+        NEW_LEADER_ELECTED => Some(Error::NewLeaderElected(NewLeaderElectedError::new(message))),
+        NON_EMPTY_GROUP => Some(Error::GroupNotEmpty(GroupNotEmptyError::new(message))),
+        NOT_CONTROLLER => Some(Error::NotController(NotControllerError::new(message))),
+        NOT_COORDINATOR => Some(Error::NotCoordinator(NotCoordinatorError::new(message))),
+        NOT_ENOUGH_REPLICAS => Some(Error::NotEnoughReplicas(NotEnoughReplicasError::new(message))),
+        NOT_ENOUGH_REPLICAS_AFTER_APPEND => Some(Error::NotEnoughReplicasAfterAppend(
+            NotEnoughReplicasAfterAppendError::new(message),
+        )),
+        NOT_LEADER_OR_FOLLOWER => Some(Error::NotLeaderOrFollower(NotLeaderOrFollowerError::new(message))),
+        NO_REASSIGNMENT_IN_PROGRESS => {
+            Some(Error::NoReassignmentInProgress(NoReassignmentInProgressError::new(message)))
+        },
+        OFFSET_METADATA_TOO_LARGE => Some(Error::OffsetMetadataTooLarge(OffsetMetadataTooLargeError::new(message))),
+        OFFSET_MOVED_TO_TIERED_STORAGE => {
+            Some(Error::OffsetMovedToTieredStorage(OffsetMovedToTieredStorageError::new(message)))
+        },
+        OFFSET_NOT_AVAILABLE => Some(Error::OffsetNotAvailable(OffsetNotAvailableError::new(message))),
+        OFFSET_OUT_OF_RANGE => Some(Error::OffsetOutOfRange(OffsetOutOfRangeError::new(message))),
+        OPERATION_NOT_ATTEMPTED => Some(Error::OperationNotAttempted(OperationNotAttemptedError::new(message))),
+        OUT_OF_ORDER_SEQUENCE_NUMBER => Some(Error::OutOfOrderSequence(OutOfOrderSequenceError::new(message))),
+        POLICY_VIOLATION => Some(Error::PolicyViolation(PolicyViolationError::new(message))),
+        POSITION_OUT_OF_RANGE => Some(Error::PositionOutOfRange(PositionOutOfRangeError::new(message))),
+        PREFERRED_LEADER_NOT_AVAILABLE => Some(Error::PreferredLeaderNotAvailable(
+            PreferredLeaderNotAvailableError::new(message),
+        )),
+        PRINCIPAL_DESERIALIZATION_FAILURE => {
+            Some(Error::PrincipalDeserialization(PrincipalDeserializationError::new(message)))
+        },
+        PRODUCER_FENCED => Some(Error::ProducerFenced(ProducerFencedError::new(message))),
+        REASSIGNMENT_IN_PROGRESS => Some(Error::ReassignmentInProgress(ReassignmentInProgressError::new(message))),
+        REBALANCE_IN_PROGRESS => Some(Error::RebalanceInProgress(RebalanceInProgressError::new(message))),
+        REBOOTSTRAP_REQUIRED => Some(Error::RebootstrapRequired(RebootstrapRequiredError::new(message))),
+        RECORD_LIST_TOO_LARGE => Some(Error::RecordBatchTooLarge(RecordBatchTooLargeError::new(message))),
+        REPLICA_NOT_AVAILABLE => Some(Error::ReplicaNotAvailable(ReplicaNotAvailableError::new(message))),
+        REQUEST_TIMED_OUT => Some(Error::Timeout(TimeoutError::new(message))),
+        RESOURCE_NOT_FOUND => Some(Error::ResourceNotFound(ResourceNotFoundError::new(message))),
+        SASL_AUTHENTICATION_FAILED => Some(Error::SaslAuthentication(SaslAuthenticationError::new(message))),
+        SECURITY_DISABLED => Some(Error::SecurityDisabled(SecurityDisabledError::new(message))),
+        SHARE_SESSION_LIMIT_REACHED => {
+            Some(Error::ShareSessionLimitReached(ShareSessionLimitReachedError::new(message)))
+        },
+        SHARE_SESSION_NOT_FOUND => Some(Error::ShareSessionNotFound(ShareSessionNotFoundError::new(message))),
+        SNAPSHOT_NOT_FOUND => Some(Error::SnapshotNotFound(SnapshotNotFoundError::new(message))),
+        STALE_BROKER_EPOCH => Some(Error::StaleBrokerEpoch(StaleBrokerEpochError::new(message))),
+        STALE_CONTROLLER_EPOCH => Some(Error::ControllerMoved(ControllerMovedError::new(message))),
+        STALE_MEMBER_EPOCH => Some(Error::StaleMemberEpoch(StaleMemberEpochError::new(message))),
+        STREAMS_INVALID_TOPOLOGY => Some(Error::StreamsInvalidTopology(StreamsInvalidTopologyError::new(message))),
+        STREAMS_INVALID_TOPOLOGY_EPOCH => Some(Error::StreamsInvalidTopologyEpoch(
+            StreamsInvalidTopologyEpochError::new(message),
+        )),
+        STREAMS_TOPOLOGY_FENCED => Some(Error::StreamsTopologyFenced(StreamsTopologyFencedError::new(message))),
+        TELEMETRY_TOO_LARGE => Some(Error::TelemetryTooLarge(TelemetryTooLargeError::new(message))),
+        THROTTLING_QUOTA_EXCEEDED => {
+            Some(Error::ThrottlingQuotaExceeded(ThrottlingQuotaExceededError::new(0, message)))
+        },
+        TOPIC_ALREADY_EXISTS => Some(Error::TopicExists(TopicExistsError::new(message))),
+        TOPIC_AUTHORIZATION_FAILED => Some(Error::TopicAuthorization(TopicAuthorizationError::with_message(
+            HashSet::new(),
+            message,
+        ))),
+        TOPIC_DELETION_DISABLED => Some(Error::TopicDeletionDisabled(TopicDeletionDisabledError::new(message))),
+        TRANSACTIONAL_ID_AUTHORIZATION_FAILED => Some(Error::TransactionalIdAuthorization(
+            TransactionalIdAuthorizationError::new(message),
+        )),
+        TRANSACTIONAL_ID_NOT_FOUND => Some(Error::TransactionalIdNotFound(TransactionalIdNotFoundError::new(message))),
+        TRANSACTION_ABORTABLE => Some(Error::TransactionAbortable(TransactionAbortableError::new(message))),
+        TRANSACTION_COORDINATOR_FENCED => Some(Error::TransactionCoordinatorFenced(
+            TransactionCoordinatorFencedError::new(message),
+        )),
+        UNACCEPTABLE_CREDENTIAL => Some(Error::UnacceptableCredential(UnacceptableCredentialError::new(message))),
+        UNKNOWN_CONTROLLER_ID => Some(Error::UnknownControllerId(UnknownControllerIdError::new(message))),
+        UNKNOWN_LEADER_EPOCH => Some(Error::UnknownLeaderEpoch(UnknownLeaderEpochError::new(message))),
+        UNKNOWN_MEMBER_ID => Some(Error::UnknownMemberId(UnknownMemberIdError::new(message))),
+        UNKNOWN_PRODUCER_ID => Some(Error::UnknownProducerId(UnknownProducerIdError::new(message))),
+        UNKNOWN_SERVER_ERROR => Some(Error::UnknownServer(UnknownServerError::new(message))),
+        UNKNOWN_SUBSCRIPTION_ID => Some(Error::UnknownSubscriptionId(UnknownSubscriptionIdError::new(message))),
+        UNKNOWN_TOPIC_ID => Some(Error::UnknownTopicId(UnknownTopicIdError::new(message))),
+        UNKNOWN_TOPIC_OR_PARTITION => Some(Error::UnknownTopicOrPartition(UnknownTopicOrPartitionError::new(message))),
+        UNRELEASED_INSTANCE_ID => Some(Error::UnreleasedInstanceId(UnreleasedInstanceIdError::new(message))),
+        UNSTABLE_OFFSET_COMMIT => Some(Error::UnstableOffsetCommit(UnstableOffsetCommitError::new(message))),
+        UNSUPPORTED_ASSIGNOR => Some(Error::UnsupportedAssignor(UnsupportedAssignorError::new(message))),
+        UNSUPPORTED_COMPRESSION_TYPE => {
+            Some(Error::UnsupportedCompressionType(UnsupportedCompressionTypeError::new(message)))
+        },
+        UNSUPPORTED_ENDPOINT_TYPE => Some(Error::UnsupportedEndpointType(UnsupportedEndpointTypeError::new(message))),
+        UNSUPPORTED_FOR_MESSAGE_FORMAT => Some(Error::UnsupportedForMessageFormat(
+            UnsupportedForMessageFormatError::new(message),
+        )),
+        UNSUPPORTED_SASL_MECHANISM => {
+            Some(Error::UnsupportedSaslMechanism(UnsupportedSaslMechanismError::new(message)))
+        },
+        UNSUPPORTED_VERSION => Some(Error::UnsupportedVersion(UnsupportedVersionError::new(message))),
+        VOTER_NOT_FOUND => Some(Error::VoterNotFound(VoterNotFoundError::new(message))),
+        _ => None,
+    }
+}

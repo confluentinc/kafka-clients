@@ -66,7 +66,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use confluent_kafka::admin::{DescribeFeaturesOptions, FeatureUpdate, UpdateFeaturesOptions, UpgradeType};
-use confluent_kafka::common::protocol::Errors;
+use confluent_kafka::common::Error;
 
 use crate::common::admin_backend::{AdminBackend, admin_for};
 use crate::common::backend_factory::AdminBackendFactory;
@@ -308,9 +308,8 @@ async fn update_features_on_the_mock_client<F: AdminBackendFactory>(_ctx: &mut T
          above 0\". Got {:?}",
         error.message()
     );
-    assert_eq!(
-        error.error(),
-        Errors::InvalidRequest,
+    assert!(
+        matches!(error, Error::InvalidRequest(_)),
         "{backend} backend: the mock composes Java's InvalidRequestException, got {error:?}"
     );
 

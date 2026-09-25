@@ -54,8 +54,6 @@ use confluent_kafka::common::errors::InvalidOffsetError;
 use confluent_kafka::common::errors::SslAuthenticationError;
 use confluent_kafka::common::header::Header;
 use confluent_kafka::common::metrics::{ClosureGauge, KafkaMetric, MetricConfig, MetricValueProvider, SystemTime};
-use confluent_kafka::common::network::InvalidReceiveError;
-use confluent_kafka::common::protocol::Errors;
 use confluent_kafka::consumer::ConsumerCommitFailedError;
 use confluent_kafka::consumer::ConsumerGroupMetadata;
 use confluent_kafka::consumer::ConsumerRetriableCommitFailedError;
@@ -477,45 +475,30 @@ pub(crate) fn kafka_error_from_proto(p: proto::KafkaError) -> Error {
         CONSUMER_RETRIABLE_COMMIT_FAILED => {
             Error::ConsumerRetriableCommitFailed(ConsumerRetriableCommitFailedError::new(p.message))
         },
-        INVALID_RECEIVE => Error::InvalidReceive(InvalidReceiveError::new(p.message)),
+        INVALID_RECEIVE => Error::invalid_receive(p.message),
         PRODUCER_BUFFER_EXHAUSTED => Error::buffer_exhausted(p.message),
 
         // Everything else is a class that owns its protocol code, which is
-        // exactly what `Errors::error_with_message` reconstructs — including
-        // `REQUEST_TIMED_OUT` -> `Error::Timeout` and `MESSAGE_TOO_LARGE` ->
-        // `Error::RecordTooLarge`, the two the C++ server used to guess at from
-        // the message text.
+        // exactly what the generated `error_with_message` table (a copy of
+        // `Errors::error_with_message`, Java's `Errors.exception(String)`)
+        // reconstructs — including `REQUEST_TIMED_OUT` -> `Error::Timeout` and
+        // `MESSAGE_TOO_LARGE` -> `Error::RecordTooLarge`, the two the C++ server
+        // used to guess at from the message text.
         //
-        // Six negatives also fall here, deliberately, as
-        // `Error::KafkaError(UnknownServerError)` carrying the message. They
-        // are exactly the client-side classes that hold structured payload the
-        // proto does not transport — `CorrelationIdMismatch`'s two correlation
-        // ids, `QuotaViolation`'s metric and bounds,
-        // `RecordDeserialization`'s partition and offset, and
+        // A code the table has no class for falls back to `UNKNOWN_SERVER_ERROR`,
+        // as `Errors.forCode` does in Java. Six negatives land there,
+        // deliberately, carrying the message. They are exactly the client-side
+        // classes that hold structured payload the proto does not transport —
+        // `CorrelationIdMismatch`'s two correlation ids, `QuotaViolation`'s
+        // metric and bounds, `RecordDeserialization`'s partition and offset, and
         // `ConsumerLogTruncation` / `ConsumerNoOffsetForPartition` /
         // `ConsumerOffsetOutOfRange`'s partition maps — so an arm above could
         // only reconstruct the class by fabricating that payload. Widening the
         // proto is the fix if a test ever needs to assert on one of them.
-        code => Error::with_message(errors_from_code(code), p.message),
-    }
-}
-
-/// Best-effort `i32` → `Errors` mapping. Falls back to `UnknownServerError`
-/// when the code is out of `i16` range — which is also what
-/// [`Errors::for_code`] answers for an unrecognised in-range code, so the
-/// negatives that reach this function (the client-side classes with no
-/// `Errors` entry) resolve there too.
-///
-/// The code is *not* informational — it is the only type-level information on
-/// the wire — and this is where the coded classes are reconstructed:
-/// [`Errors::error_with_message`] turns a code its class owns straight back
-/// into that class. The client-side classes, which `Errors` has no code for,
-/// are handled by the explicit arms in [`kafka_error_from_proto`] instead and
-/// reach this function only for the six the proto cannot carry.
-fn errors_from_code(code: i32) -> Errors {
-    match i16::try_from(code) {
-        Ok(c) => Errors::for_code(c),
-        Err(_) => Errors::UnknownServerError,
+        code => match error_with_message(code, p.message.clone()) {
+            Some(error) => error,
+            None => error_with_message(UNKNOWN_SERVER_ERROR, p.message).expect("UNKNOWN_SERVER_ERROR owns a class"),
+        },
     }
 }
 

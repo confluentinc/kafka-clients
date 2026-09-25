@@ -1454,6 +1454,16 @@ impl Error {
         ))
     }
 
+    /// Create an invalid-receive error.
+    ///
+    /// Corresponds to Java's `InvalidReceiveException(String)`. The class is not
+    /// public API (`common.network`), so this constructor is how code outside
+    /// the crate — e.g. a test backend decoding an error sent over the wire —
+    /// builds the variant.
+    pub fn invalid_receive(message: impl Into<String>) -> Self {
+        Self::InvalidReceive(InvalidReceiveError::new(message))
+    }
+
     /// Create a protocol-schema error.
     ///
     /// Corresponds to Java's `SchemaException(String)`.

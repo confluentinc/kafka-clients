@@ -63,7 +63,6 @@ use std::time::Instant;
 
 use confluent_kafka::common::Error;
 use confluent_kafka::common::TopicPartition;
-use confluent_kafka::common::protocol::Errors;
 use confluent_kafka::common::serialization::ByteArraySerializer;
 use confluent_kafka::common::serialization::Deserializer;
 use confluent_kafka::consumer::Consumer;
@@ -363,7 +362,7 @@ async fn test_idempotent_produce_survives_a_forced_epoch_bump() {
     // first — both are Java's "this producer has been superseded", and which one
     // arrives depends on request ordering rather than on anything under test.
     assert!(
-        matches!(fenced.error(), Errors::InvalidProducerEpoch | Errors::ProducerFenced),
+        matches!(fenced, Error::InvalidProducerEpoch(_) | Error::ProducerFenced(_)),
         "a fenced producer's send must fail with a fencing error, got {fenced} ({:?})",
         fenced.error()
     );

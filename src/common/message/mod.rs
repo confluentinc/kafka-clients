@@ -13,8 +13,15 @@
 // limitations under the License.
 
 //! In-crate tests of `org.apache.kafka.common.message`. The message types
-//! themselves are generated into [`crate::generated`]; the tests that need
-//! `pub(crate)` types (`common::record::internal`) live here rather than in
-//! `tests/common/message/`.
+//! themselves are generated into [`crate::generated`], which is not public
+//! API (`org.apache.kafka.common.message` is not `@InterfaceAudience.Public`),
+//! so all of the package's tests live here rather than under `tests/`.
 
+mod generated_messages_test;
+mod message_round_trip_test;
+mod message_serialization_test;
+mod message_test;
+mod nullable_struct_message_test;
 mod records_serde_test;
+mod simple_arrays_message_test;
+mod simple_example_message_test;

@@ -49,7 +49,6 @@ use confluent_kafka::admin::{
     AlterConsumerGroupOffsetsOptions, DeleteConsumerGroupOffsetsOptions, GroupOffsets, ListConsumerGroupOffsetsOptions,
     ListConsumerGroupOffsetsSpec,
 };
-use confluent_kafka::common::protocol::Errors;
 use confluent_kafka::common::serialization::{ByteArraySerializer, Deserializer};
 use confluent_kafka::common::{Error, TopicPartition};
 use confluent_kafka::consumer::{Consumer, ConsumerConfig, KafkaConsumer, OffsetAndMetadata};
@@ -587,9 +586,8 @@ async fn delete_consumer_group_offsets_on_active_group_errors<F: AdminBackendFac
         .expect_err(&format!(
             "{backend} backend: deleting offsets of a partition an active group is subscribed to should fail"
         ));
-    assert_eq!(
-        err.error(),
-        Errors::GroupSubscribedToTopic,
+    assert!(
+        matches!(err, Error::GroupSubscribedToTopic(_)),
         "{backend} backend: unexpected error deleting active-group offsets: {err:?}"
     );
 

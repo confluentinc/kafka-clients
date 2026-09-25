@@ -45,10 +45,8 @@ use confluent_kafka::admin::{
 };
 use confluent_kafka::common::acl::{AclBinding, AclBindingFilter, AclOperation};
 use confluent_kafka::common::config::{ConfigResource, config_resource};
-use confluent_kafka::common::protocol::Errors;
 use confluent_kafka::common::quota::{ClientQuotaAlteration, ClientQuotaEntity, ClientQuotaFilter};
 use confluent_kafka::common::security::token::delegation::DelegationToken;
-use confluent_kafka::common::utils::ProducerIdAndEpoch;
 use confluent_kafka::common::{
     ElectionType, Error, KafkaFuture, Node, TopicCollection, TopicPartition, TopicPartitionReplica, Uuid,
 };
@@ -65,6 +63,29 @@ use crate::common::test_utils::{
 /// uses for a negative `timeout_ms` (`src/ffi/admin.rs::close_with_timeout`).
 fn close_with_timeout(timeout: Option<Duration>) -> Duration {
     timeout.unwrap_or_else(|| Duration::from_millis(i64::MAX as u64))
+}
+
+/// The producer id and epoch `fenceProducers` allocated for one transactional
+/// id: Java's `FenceProducersResult.producerId(id)` / `epochId(id)` reassembled
+/// into one value. (The client's own `ProducerIdAndEpoch` is not public API.)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FencedProducer {
+    producer_id: i64,
+    epoch: i16,
+}
+
+impl FencedProducer {
+    pub fn new(producer_id: i64, epoch: i16) -> Self {
+        Self { producer_id, epoch }
+    }
+
+    pub fn producer_id(&self) -> i64 {
+        self.producer_id
+    }
+
+    pub fn epoch(&self) -> i16 {
+        self.epoch
+    }
 }
 
 /// The admin surface the multilanguage scenarios are written against.
@@ -125,7 +146,7 @@ fn close_with_timeout(timeout: Option<Duration>) -> Duration {
 ///      `result.low_watermarks()[&tp].get().await`. Against an owned map of
 ///      per-key `Result`s that becomes `map[&topic].clone()` /
 ///      `map.get(&topic).unwrap()`, with the same `expect` / `expect_err` and
-///      the same `err.error() == Errors::X` assertion after it. `K` needs
+///      the same `matches!(err, Error::X(_))` assertion after it. `K` needs
 ///      `Hash + Eq`; the key types in use are `String`, `TopicPartition` and
 ///      `ConfigResource`.
 ///   2. **The `.all()`-shaped call sites are served by the same map.** Most
@@ -622,7 +643,7 @@ pub trait AdminBackend {
     /// Fence out any producer currently using each transactional id, returning
     /// the newly allocated producer id and epoch.
     ///
-    /// Java never exposes the `ProducerIdAndEpoch` as one value —
+    /// Java never exposes the producer id and epoch as one value —
     /// `producerId(id)` and `epochId(id)` are two `then_apply` projections of the
     /// same per-id future — so the pair is reassembled here exactly as
     /// `src/ffi/admin.rs`'s `submit_fence_producers` does. Both projections
@@ -631,7 +652,7 @@ pub trait AdminBackend {
         &self,
         transactional_ids: &[String],
         options: FenceProducersOptions,
-    ) -> Result<Outcomes<String, ProducerIdAndEpoch>, Error>;
+    ) -> Result<Outcomes<String, FencedProducer>, Error>;
 
     /// Close the admin client, joining its background task.
     ///
@@ -1715,7 +1736,7 @@ impl AdminBackend for RustNativeAdmin {
         &self,
         transactional_ids: &[String],
         options: FenceProducersOptions,
-    ) -> Result<Outcomes<String, ProducerIdAndEpoch>, Error> {
+    ) -> Result<Outcomes<String, FencedProducer>, Error> {
         let result = self.admin.fence_producers_with_options(transactional_ids, options);
         // Java has no accessor for the pair, only the two `then_apply`
         // projections `producerId(id)` and `epochId(id)`. They resolve from the
@@ -1730,7 +1751,7 @@ impl AdminBackend for RustNativeAdmin {
             let producer_id = result.producer_id(id)?.get_with_timeout(NATIVE_FUTURE_TIMEOUT).await;
             let epoch = result.epoch_id(id)?.get_with_timeout(NATIVE_FUTURE_TIMEOUT).await;
             let outcome = match (producer_id, epoch) {
-                (Ok(producer_id), Ok(epoch)) => Ok(ProducerIdAndEpoch::new(producer_id, epoch)),
+                (Ok(producer_id), Ok(epoch)) => Ok(FencedProducer::new(producer_id, epoch)),
                 // Both projections share one future, so the two errors are the
                 // same one; report whichever is present.
                 (Err(e), _) | (_, Err(e)) => Err(e),
@@ -2004,7 +2025,7 @@ pub async fn alter_consumer_group_offsets_awaiting_propagation<B: AdminBackend>(
             .await
             .unwrap_or_else(|e| panic!("{backend} backend: {what}: {e}"));
         if let Some(tp) = outcomes.iter().find_map(|(tp, outcome)| match outcome {
-            Err(e) if e.error() == Errors::UnknownTopicOrPartition => Some(tp),
+            Err(e) if matches!(e, Error::UnknownTopicOrPartition(_)) => Some(tp),
             _ => None,
         }) {
             return Err(format!(

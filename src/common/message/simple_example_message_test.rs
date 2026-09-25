@@ -20,12 +20,12 @@
 
 use std::hash::{DefaultHasher, Hash, Hasher};
 
-use crate::common::simple_example_message_data::{
+use crate::common::Uuid;
+use crate::common::protocol::MessageUtil;
+use crate::common::protocol::{ByteBufferAccessor, Message, ObjectSerializationCache};
+use crate::test_generated::simple_example_message_data::{
     MyStruct, SimpleExampleMessageData, StructArray, TaggedStruct, TestCommonStruct,
 };
-use confluent_kafka::common::Uuid;
-use confluent_kafka::common::protocol::MessageUtil;
-use confluent_kafka::common::protocol::{ByteBufferAccessor, Message, ObjectSerializationCache};
 
 /// Helper: compute hash of a value
 fn hash_of<T: Hash>(val: &T) -> u64 {

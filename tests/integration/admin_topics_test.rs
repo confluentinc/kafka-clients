@@ -36,7 +36,7 @@ use std::time::Duration;
 use confluent_kafka::admin::{
     CreateTopicsOptions, DeleteTopicsOptions, DescribeTopicsOptions, ListTopicsOptions, NewTopic,
 };
-use confluent_kafka::common::protocol::Errors;
+use confluent_kafka::common::Error;
 
 use crate::common::admin_backend::{
     AdminBackend, admin_config, admin_for, all_of, bootstrap_for, create_topic, wait_for_all_partitions_metadata,
@@ -131,9 +131,8 @@ async fn describe_nonexistent_topic_is_unknown<F: AdminBackendFactory>(ctx: &mut
     let err = described[&topic]
         .as_ref()
         .expect_err(&format!("{backend} backend: describing a nonexistent topic should fail"));
-    assert_eq!(
-        err.error(),
-        Errors::UnknownTopicOrPartition,
+    assert!(
+        matches!(err, Error::UnknownTopicOrPartition(_)),
         "{backend} backend: expected UNKNOWN_TOPIC_OR_PARTITION, got {err:?}"
     );
 
@@ -168,7 +167,7 @@ async fn delete_topics_removes_them<F: AdminBackendFactory>(ctx: &mut TestContex
     let err = described[&topic]
         .as_ref()
         .expect_err(&format!("{backend} backend: describing a deleted topic should fail"));
-    assert_eq!(err.error(), Errors::UnknownTopicOrPartition, "{backend} backend");
+    assert!(matches!(err, Error::UnknownTopicOrPartition(_)), "{backend} backend");
 
     admin
         .close(Some(Duration::from_secs(5)))
@@ -291,9 +290,8 @@ async fn describe_and_delete_topics_by_ids<F: AdminBackendFactory>(ctx: &mut Tes
         })
         .as_ref()
         .expect_err(&format!("{backend} backend: a random topic id cannot describe"));
-    assert_eq!(
-        unknown_err.error(),
-        Errors::UnknownTopicId,
+    assert!(
+        matches!(unknown_err, Error::UnknownTopicId(_)),
         "{backend} backend: an unknown *id* is UNKNOWN_TOPIC_ID, not the by-name \
          UNKNOWN_TOPIC_OR_PARTITION. Got {unknown_err}"
     );
@@ -533,7 +531,7 @@ async fn create_topics_validate_only_does_not_create<F: AdminBackendFactory>(ctx
         let err = described[&topic]
             .as_ref()
             .expect_err(&format!("{backend} backend: validate_only must not create the topic"));
-        assert_eq!(err.error(), Errors::UnknownTopicOrPartition, "{backend} backend");
+        assert!(matches!(err, Error::UnknownTopicOrPartition(_)), "{backend} backend");
 
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
@@ -586,7 +584,7 @@ async fn create_topics_against_unreachable_broker_fails<F: AdminBackendFactory>(
             let err = all_of(&outcomes)
                 .expect_err(&format!("{backend} backend: createTopics must not succeed with no broker"));
             assert!(
-                err.is_retriable_error() || matches!(err.error(), Errors::RequestTimedOut),
+                err.is_retriable_error() || matches!(err, Error::Timeout(_)),
                 "{backend} backend: expected a timeout, got {err:?}"
             );
         },

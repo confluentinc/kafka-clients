@@ -86,8 +86,8 @@ use confluent_kafka::admin::{
     FenceProducersOptions, ListOffsetsOptions, ListTransactionsOptions, OffsetSpec, TerminateTransactionOptions,
     TransactionListing, TransactionState,
 };
+use confluent_kafka::common::Error;
 use confluent_kafka::common::TopicPartition;
-use confluent_kafka::common::protocol::Errors;
 
 use crate::common::admin_backend::{AdminBackend, Outcomes, admin_for, all_of_exactly, create_topic};
 use crate::common::backend_factory::AdminBackendFactory;
@@ -468,9 +468,8 @@ async fn list_transactions_rejects_a_malformed_id_pattern<F: AdminBackendFactory
         let error = outcomes[broker_id]
             .as_ref()
             .expect_err("a malformed regular expression should be rejected");
-        assert_eq!(
-            error.error(),
-            Errors::InvalidRegularExpression,
+        assert!(
+            matches!(error, Error::InvalidRegularExpression(_)),
             "{backend} backend: broker {broker_id} should reject the pattern with \
              INVALID_REGULAR_EXPRESSION, got {error:?}"
         );
@@ -634,9 +633,8 @@ async fn describe_transactions_unknown_id_not_found<F: AdminBackendFactory>(ctx:
         .unwrap_or_else(|| panic!("{backend} backend: no entry for {unknown}"))
         .as_ref()
         .expect_err("describing an unknown transactional id should fail");
-    assert_eq!(
-        error.error(),
-        Errors::TransactionalIdNotFound,
+    assert!(
+        matches!(error, Error::TransactionalIdNotFound(_)),
         "{backend} backend: expected TRANSACTIONAL_ID_NOT_FOUND, got {error:?}"
     );
 
