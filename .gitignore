@@ -28,3 +28,8 @@ tools/java-perf-test/bin/
 # credentials and is not matched by `*.config`.
 /bindings/python/soak/*.config
 
+# The bare `bin` rule above ignores any `bin/` dir at any depth, which would
+# swallow the verifiable-clients binary sources. Keep them tracked.
+!/tools/verifiable-clients/src/bin/
+!/tools/verifiable-clients/src/bin/*.rs
+
