@@ -39,7 +39,7 @@ async fn simple_flow_clean_broker_roll() {
         WorkloadSpec::parse("producer:rust", 1).unwrap(),
         WorkloadSpec::parse("consumer:rust", 1).unwrap(),
     ];
-    let workloads = harness.build_workloads(&specs, 200, 100, CommitMode::Sync).await;
+    let workloads = harness.build_workloads(&specs, 1000, 100, CommitMode::Sync).await;
     let verifier = harness.verifier();
 
     // The chaos timeline: warm up, roll broker 2 cleanly once, let traffic
