@@ -32,23 +32,28 @@ typedef struct {
     PyObject* key;          // PyBytesObject or Py_None
     PyObject* value;        // PyBytesObject or Py_None (null value = tombstone)
     kafka_producer_ProducerRecord_t record_struct;
-    char* topic_owned;      // owned copy of topic string
-    // Headers: `header_seq` is the INCREF'd Python sequence of (str, buffer|None)
-    // pairs; `header_views` holds one buffer export (PyObject_GetBuffer) per
-    // non-None value, so the value bytes stay valid, and a memoryview value
-    // cannot be released, while the record lives; `header_keys` are the owned
-    // NUL-terminated key strings; `header_entries` is the FFI array the send
-    // path reads (points into header_keys / the exported value bytes). All
-    // parallel, length record_struct.header_count.
+    // The topic str, held so record_struct.topic can point into its cached,
+    // NUL-terminated UTF-8 buffer for the record's lifetime: no copy of the
+    // topic per record (CLAUDE.md §11/§12).
+    PyObject* topic_obj;
+    // Headers: `header_seq` is a tuple of (str, buffer|None) pairs (the given
+    // tuple itself, or a tuple snapshot of another sequence), held so each key
+    // str, and so its cached UTF-8 buffer the FFI array points into, lives as
+    // long as the record: no copy of a key. `header_views` holds one buffer
+    // export (PyObject_GetBuffer) per non-None value, so the value bytes stay
+    // valid, and a memoryview value cannot be released, while the record lives.
+    // `header_entries` is the FFI array the send path reads (points into the key
+    // strs / the exported value bytes). Parallel, length
+    // record_struct.header_count.
     PyObject* header_seq;
     Py_buffer* header_views;
-    char** header_keys;
     kafka_producer_ProducerRecordHeader_t* header_entries;
 } ProducerRecordObject;
 
 static int ProducerRecord_traverse(ProducerRecordObject* self, visitproc visit, void* arg) {
     Py_VISIT(self->key);
     Py_VISIT(self->value);
+    Py_VISIT(self->topic_obj);
     Py_VISIT(self->header_seq);
     return 0;
 }
@@ -56,8 +61,8 @@ static int ProducerRecord_traverse(ProducerRecordObject* self, visitproc visit, 
 static int ProducerRecord_clear(ProducerRecordObject* self) {
     Py_CLEAR(self->key);
     Py_CLEAR(self->value);
-    PyMem_Free(self->topic_owned);
-    self->topic_owned = NULL;
+    self->record_struct.topic = NULL;
+    Py_CLEAR(self->topic_obj);
     if (self->header_views != NULL) {
         // A zeroed Py_buffer (a None value, or one never exported) has no
         // obj, and PyBuffer_Release ignores it.
@@ -67,17 +72,10 @@ static int ProducerRecord_clear(ProducerRecordObject* self) {
         PyMem_Free(self->header_views);
         self->header_views = NULL;
     }
-    Py_CLEAR(self->header_seq);
-    if (self->header_keys != NULL) {
-        for (int32_t i = 0; i < self->record_struct.header_count; i++) {
-            PyMem_Free(self->header_keys[i]);
-        }
-        PyMem_Free(self->header_keys);
-        self->header_keys = NULL;
-    }
     PyMem_Free(self->header_entries);
     self->header_entries = NULL;
-    self->record_struct.topic = NULL;
+    // The keys the entries pointed into go with the header tuple.
+    Py_CLEAR(self->header_seq);
     self->record_struct.key = NULL;
     self->record_struct.value = NULL;
     self->record_struct.headers = NULL;
@@ -97,66 +95,90 @@ static PyObject* ProducerRecord_new(PyTypeObject* type, PyObject* args, PyObject
     if (self != NULL) {
         self->key = NULL;
         self->value = NULL;
-        self->topic_owned = NULL;
+        self->topic_obj = NULL;
         self->header_seq = NULL;
         self->header_views = NULL;
-        self->header_keys = NULL;
         self->header_entries = NULL;
         memset(&self->record_struct, 0, sizeof(self->record_struct));
     }
     return (PyObject*)self;
 }
 
+// The NUL-terminated UTF-8 buffer str `obj` caches (valid while `obj` lives),
+// or NULL with ValueError for an embedded NUL, which a C string cannot carry
+// (as PyArg_Parse's "s" rejects it).
+static const char* str_utf8_borrowed(PyObject* obj) {
+    Py_ssize_t size = 0;
+    const char* utf8 = PyUnicode_AsUTF8AndSize(obj, &size);
+    if (utf8 == NULL) {
+        return NULL;
+    }
+    if ((Py_ssize_t)strlen(utf8) != size) {
+        PyErr_SetString(PyExc_ValueError, "embedded null character");
+        return NULL;
+    }
+    return utf8;
+}
+
 // Build the FFI header array from a Python sequence of (str, buffer|None) pairs.
-// Each non-None value is exported with PyObject_GetBuffer (C-contiguous), and the
-// export is held until clear(): the bytes are borrowed, never copied (CLAUDE.md
-// §12), and a released memoryview is rejected (ValueError) instead of read after
-// its buffer is freed. Only the header KEY strings are copied (they must be
-// NUL-terminated). Returns 0 on success, -1 with a Python exception set on
-// failure; everything allocated or exported so far is owned by the record, so
-// clear() releases it.
+// The pairs are held as a tuple (the given tuple, or a snapshot of another
+// sequence), so each key str lives as long as the record and the FFI array
+// points into its cached UTF-8 buffer: no key is copied. Each non-None value is
+// exported with PyObject_GetBuffer (C-contiguous), and the export is held until
+// clear(): the bytes are borrowed, never copied (CLAUDE.md §12), and a released
+// memoryview is rejected (ValueError) instead of read after its buffer is freed.
+// Returns 0 on success, -1 with a Python exception set on failure; everything
+// allocated or exported so far is owned by the record, so clear() releases it.
 static int producer_record_build_headers(ProducerRecordObject* self, PyObject* headers) {
     if (headers == NULL || headers == Py_None) {
         return 0;
     }
-    PyObject* seq = PySequence_Fast(headers, "headers must be a sequence of (str, bytes) pairs");
-    if (seq == NULL) return -1;
-    Py_ssize_t n = PySequence_Fast_GET_SIZE(seq);
+    PyObject* seq;
+    if (PyTuple_CheckExact(headers)) {
+        Py_INCREF(headers);
+        seq = headers;
+    } else {
+        PyObject* fast = PySequence_Fast(headers, "headers must be a sequence of (str, bytes) pairs");
+        if (fast == NULL) return -1;
+        seq = PySequence_Tuple(fast);
+        Py_DECREF(fast);
+        if (seq == NULL) return -1;
+    }
+    Py_ssize_t n = PyTuple_GET_SIZE(seq);
     if (n == 0) { Py_DECREF(seq); return 0; }
 
-    char** keys = PyMem_Calloc((size_t)n, sizeof(char*));
     Py_buffer* views = PyMem_Calloc((size_t)n, sizeof(Py_buffer));
     kafka_producer_ProducerRecordHeader_t* entries =
         PyMem_Calloc((size_t)n, sizeof(kafka_producer_ProducerRecordHeader_t));
-    if (keys == NULL || views == NULL || entries == NULL) {
-        PyMem_Free(keys); PyMem_Free(views); PyMem_Free(entries); Py_DECREF(seq);
+    if (views == NULL || entries == NULL) {
+        PyMem_Free(views); PyMem_Free(entries); Py_DECREF(seq);
         PyErr_NoMemory();
         return -1;
     }
-    // Owned by the record from here on: clear() frees the keys and releases the
-    // views of the first header_count entries (the arrays are zeroed).
-    Py_INCREF(headers);
-    self->header_seq = headers;
+    // Owned by the record from here on: clear() releases the views of the first
+    // header_count entries (the arrays are zeroed) and drops the tuple.
+    self->header_seq = seq;
     self->header_views = views;
-    self->header_keys = keys;
     self->header_entries = entries;
     self->record_struct.header_count = (int32_t)n;
 
     int rc = 0;
     for (Py_ssize_t i = 0; i < n; i++) {
-        PyObject* pair = PySequence_Fast_GET_ITEM(seq, i);  // borrowed
-        const char* k = NULL;
+        PyObject* pair = PyTuple_GET_ITEM(seq, i);  // borrowed, held by seq
+        PyObject* k = NULL;
         PyObject* v = NULL;
         // (key: str, value: buffer|None)
-        if (!PyArg_ParseTuple(pair, "sO", &k, &v)) {
+        if (!PyArg_ParseTuple(pair, "UO", &k, &v)) {
             rc = -1;
             break;
         }
-        size_t klen = strlen(k);
-        keys[i] = PyMem_Malloc(klen + 1);
-        if (keys[i] == NULL) { PyErr_NoMemory(); rc = -1; break; }
-        memcpy(keys[i], k, klen + 1);
-        entries[i].key = keys[i];
+        // The pair tuple, held by seq, holds k.
+        const char* key = str_utf8_borrowed(k);
+        if (key == NULL) {
+            rc = -1;
+            break;
+        }
+        entries[i].key = key;
         if (v == Py_None) {
             entries[i].value = NULL;
             entries[i].value_len = -1;  // null header value (Java allows it)
@@ -177,7 +199,6 @@ static int producer_record_build_headers(ProducerRecordObject* self, PyObject* h
         entries[i].value = (const uint8_t*)views[i].buf;
         entries[i].value_len = (int32_t)views[i].len;
     }
-    Py_DECREF(seq);
     if (rc == 0) {
         self->record_struct.headers = entries;
     }
@@ -187,22 +208,22 @@ static int producer_record_build_headers(ProducerRecordObject* self, PyObject* h
 static int ProducerRecord_init(ProducerRecordObject* self, PyObject* args, PyObject* kwds) {
     static char* kwlist[] = {"topic", "value", "key", "partition", "timestamp",
                              "headers", NULL};
-    const char* topic = NULL;
+    PyObject* topic_obj = NULL;
     PyObject* value = NULL;
     PyObject* key = Py_None;  // Default to Py_None instead of NULL
     int partition = -1;
     long long timestamp = -1;
     PyObject* headers = Py_None;
 
-    if (!PyArg_ParseTupleAndKeywords(args, kwds, "sO|OiLO", kwlist,
-                                      &topic, &value, &key, &partition, &timestamp,
+    // "U": the topic str itself (a None topic is a TypeError), whose UTF-8
+    // buffer the record borrows below.
+    if (!PyArg_ParseTupleAndKeywords(args, kwds, "UO|OiLO", kwlist,
+                                      &topic_obj, &value, &key, &partition, &timestamp,
                                       &headers)) {
         return -1;
     }
-
-    // Validate topic
+    const char* topic = str_utf8_borrowed(topic_obj);
     if (topic == NULL) {
-        PyErr_SetString(PyExc_ValueError, "Topic cannot be None");
         return -1;
     }
 
@@ -249,18 +270,10 @@ static int ProducerRecord_init(ProducerRecordObject* self, PyObject* args, PyObj
     Py_INCREF(value);
     self->value = value;
 
-    // Populate record_struct
-    self->topic_owned = PyMem_Malloc(strlen(topic) + 1);
-    if (self->topic_owned == NULL) {
-        PyErr_NoMemory();
-        Py_DECREF(self->key);
-        self->key = NULL;
-        Py_DECREF(self->value);
-        self->value = NULL;
-        return -1;
-    }
-    strcpy(self->topic_owned, topic);
-    self->record_struct.topic = self->topic_owned;
+    // Populate record_struct: the topic points into the held str's UTF-8 buffer.
+    Py_INCREF(topic_obj);
+    self->topic_obj = topic_obj;
+    self->record_struct.topic = topic;
     self->record_struct.partition = partition;
     self->record_struct.timestamp = timestamp;
 
@@ -290,10 +303,11 @@ static int ProducerRecord_init(ProducerRecordObject* self, PyObject* args, PyObj
 
 // Getters
 static PyObject* ProducerRecord_get_topic(ProducerRecordObject* self, void* closure) {
-    if (self->topic_owned == NULL) {
+    if (self->topic_obj == NULL) {
         Py_RETURN_NONE;
     }
-    return PyUnicode_FromString(self->topic_owned);
+    Py_INCREF(self->topic_obj);
+    return self->topic_obj;
 }
 
 static PyObject* ProducerRecord_get_partition(ProducerRecordObject* self, void* closure) {
@@ -357,6 +371,28 @@ static PyObject* ProducerRecord_get_value_len(ProducerRecordObject* self, void* 
     return PyLong_FromLong((long)self->record_struct.value_len);
 }
 
+// Test-only: the addresses the FFI struct the send path reads points at —
+// (topic, key, value, [(header_key, header_value), ...]), 0 for NULL — so a
+// test can show they are the Python objects' own buffers, not copies.
+static PyObject* ProducerRecord_get_ffi_addresses(ProducerRecordObject* self, void* closure) {
+    int32_t n = self->record_struct.headers == NULL ? 0 : self->record_struct.header_count;
+    PyObject* headers = PyList_New(n < 0 ? 0 : n);
+    if (headers == NULL) return NULL;
+    for (int32_t i = 0; i < n; i++) {
+        const kafka_producer_ProducerRecordHeader_t* h = &self->record_struct.headers[i];
+        PyObject* pair = Py_BuildValue("(KK)",
+            (unsigned long long)(uintptr_t)h->key,
+            (unsigned long long)(uintptr_t)h->value);
+        if (pair == NULL) { Py_DECREF(headers); return NULL; }
+        PyList_SET_ITEM(headers, i, pair);  // steals pair
+    }
+    return Py_BuildValue("(KKKN)",
+        (unsigned long long)(uintptr_t)self->record_struct.topic,
+        (unsigned long long)(uintptr_t)self->record_struct.key,
+        (unsigned long long)(uintptr_t)self->record_struct.value,
+        headers);  // "N" steals headers
+}
+
 static PyGetSetDef ProducerRecord_getsetters[] = {
     {"topic", (getter)ProducerRecord_get_topic, NULL, "Topic name", NULL},
     {"partition", (getter)ProducerRecord_get_partition, NULL, "Partition number", NULL},
@@ -367,6 +403,9 @@ static PyGetSetDef ProducerRecord_getsetters[] = {
      "Headers from the FFI struct as (str, bytes|None) pairs", NULL},
     {"value_len", (getter)ProducerRecord_get_value_len, NULL,
      "FFI value length (-1 = null value/tombstone)", NULL},
+    {"ffi_addresses", (getter)ProducerRecord_get_ffi_addresses, NULL,
+     "Test-only: (topic, key, value, [(header_key, header_value)]) addresses the "
+     "FFI struct holds", NULL},
     {NULL}
 };
 
