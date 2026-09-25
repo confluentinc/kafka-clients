@@ -24,24 +24,26 @@ built-in serde classes are private: a factory is the way to get one.
 
 from __future__ import annotations
 
-from ._factories import (
-    bool_deserializer,
-    bool_serializer,
-    bytes_deserializer,
-    bytes_serializer,
-    float_deserializer,
-    float_serializer,
-    int_deserializer,
-    int_serializer,
-    json_deserializer,
-    json_serializer,
-    memoryview_deserializer,
-    string_deserializer,
-    string_serializer,
-    uuid_deserializer,
-    uuid_serializer,
-)
-from ._protocols import Closeable, Configurable, Deserializer, SerdeBase, Serializer
+from ._factories import bool_deserializer as bool_deserializer
+from ._factories import bool_serializer as bool_serializer
+from ._factories import bytes_deserializer as bytes_deserializer
+from ._factories import bytes_serializer as bytes_serializer
+from ._factories import float_deserializer as float_deserializer
+from ._factories import float_serializer as float_serializer
+from ._factories import int_deserializer as int_deserializer
+from ._factories import int_serializer as int_serializer
+from ._factories import json_deserializer as json_deserializer
+from ._factories import json_serializer as json_serializer
+from ._factories import memoryview_deserializer as memoryview_deserializer
+from ._factories import string_deserializer as string_deserializer
+from ._factories import string_serializer as string_serializer
+from ._factories import uuid_deserializer as uuid_deserializer
+from ._factories import uuid_serializer as uuid_serializer
+from ._lifecycle import Closeable as Closeable
+from ._lifecycle import Configurable as Configurable
+from ._lifecycle import SerdeBase as SerdeBase
+from .deserializer import Deserializer as Deserializer
+from .serializer import Serializer as Serializer
 
 __all__ = [
     "Serializer",

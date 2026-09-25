@@ -37,11 +37,12 @@ from ._float_serializer import FloatSerializer
 from ._int_deserializer import IntDeserializer
 from ._int_serializer import IntSerializer
 from ._json_serde import JsonDeserializer, JsonSerializer
-from ._protocols import Deserializer, Serializer
 from ._string_deserializer import StringDeserializer
 from ._string_serializer import StringSerializer
 from ._uuid_deserializer import UUIDDeserializer
 from ._uuid_serializer import UUIDSerializer
+from .deserializer import Deserializer
+from .serializer import Serializer
 
 __all__ = [
     "bool_deserializer", "bool_serializer", "bytes_deserializer", "bytes_serializer",

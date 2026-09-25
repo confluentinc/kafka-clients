@@ -12,30 +12,32 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""``confluent_kafka.producer`` — mirror of
-``org.apache.kafka.clients.producer`` (the ``clients`` segment dropped, spec §4).
+"""``confluent_kafka.producer``: Java's ``org.apache.kafka.clients.producer``.
 
-``ProducerRecord`` / ``RecordMetadata`` are the value types (P2); ``Producer`` /
-``KafkaProducer`` / ``MockProducer`` and their ``Async`` peers, plus the
-``DeliveryCallback`` alias, are the client family (P4).
+The records (``ProducerRecord``, ``RecordMetadata``), the client family
+(``Producer``, ``KafkaProducer``, ``MockProducer`` and their ``Async`` peers),
+the delivery callback alias and the errors Java declares in this package
+(CLAUDE.md, Python Binding Conventions, Modules).
 """
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Callable
 
-from .async_producer import AsyncProducer
-from .kafka_producer import AsyncKafkaProducer, KafkaProducer
-from .mock_producer import AsyncMockProducer, MockProducer
-from .producer import Producer
-from .producer_record import ProducerRecord
-from .record_metadata import RecordMetadata
+from .async_producer import AsyncProducer as AsyncProducer
+from .kafka_producer import AsyncKafkaProducer as AsyncKafkaProducer
+from .kafka_producer import KafkaProducer as KafkaProducer
+from .mock_producer import AsyncMockProducer as AsyncMockProducer
+from .mock_producer import MockProducer as MockProducer
+from .producer import Producer as Producer
+from .producer_record import ProducerRecord as ProducerRecord
+from .record_metadata import RecordMetadata as RecordMetadata
 
 if TYPE_CHECKING:
     from confluent_kafka.common.kafka_error import KafkaError
 
 # Java: org.apache.kafka.clients.producer.Callback. Defined here beside its use
-# (the ``callback`` parameter of ``send``), spec §6.1.
+# (the ``callback`` parameter of ``send``).
 DeliveryCallback = Callable[["RecordMetadata | None", "KafkaError | None"], None]
 
 __all__ = [
