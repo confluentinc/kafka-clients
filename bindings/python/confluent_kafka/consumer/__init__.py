@@ -12,34 +12,34 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""``confluent_kafka.consumer`` — mirror of
-``org.apache.kafka.clients.consumer`` (the ``clients`` segment dropped, spec §4).
+"""``confluent_kafka.consumer``: Java's ``org.apache.kafka.clients.consumer``.
 
-The record and offset value types, ``CloseOptions``, ``SubscriptionPattern`` and
-``OffsetResetStrategy`` live here (P2). ``Consumer`` / ``KafkaConsumer`` /
-``MockConsumer`` and their ``Async`` peers, ``ConsumerRebalanceListener`` and the
-rest of §6.2 land here in P5. It also carries the consumer-package exceptions,
-which Java places in this package (``CommitFailedException``,
-``OffsetOutOfRangeException``, …).
+The records and offset types, ``CloseOptions``, ``SubscriptionPattern``,
+``OffsetResetStrategy``, the client family (``Consumer``, ``KafkaConsumer``,
+``MockConsumer`` and their ``Async`` peers), ``ConsumerRebalanceListener`` and
+the commit callback alias, and the errors Java declares in this package
+(``CommitFailedException``, ``OffsetOutOfRangeException``, …) (CLAUDE.md,
+Python Binding Conventions, Modules).
 """
 
 from __future__ import annotations
 
-from .async_consumer import AsyncConsumer
-from .async_kafka_consumer import AsyncKafkaConsumer
-from .async_mock_consumer import AsyncMockConsumer
-from .close_options import CloseOptions
-from .consumer import Consumer
-from .consumer_group_metadata import ConsumerGroupMetadata
-from .consumer_rebalance_listener import CommitCallback, ConsumerRebalanceListener
-from .consumer_record import ConsumerRecord
-from .consumer_records import ConsumerRecords
-from .kafka_consumer import KafkaConsumer
-from .mock_consumer import MockConsumer
-from .offset_and_metadata import OffsetAndMetadata
-from .offset_and_timestamp import OffsetAndTimestamp
-from .offset_reset_strategy import OffsetResetStrategy
-from .subscription_pattern import SubscriptionPattern
+from .async_consumer import AsyncConsumer as AsyncConsumer
+from .async_kafka_consumer import AsyncKafkaConsumer as AsyncKafkaConsumer
+from .async_mock_consumer import AsyncMockConsumer as AsyncMockConsumer
+from .close_options import CloseOptions as CloseOptions
+from .consumer import Consumer as Consumer
+from .consumer_group_metadata import ConsumerGroupMetadata as ConsumerGroupMetadata
+from .consumer_rebalance_listener import CommitCallback as CommitCallback
+from .consumer_rebalance_listener import ConsumerRebalanceListener as ConsumerRebalanceListener
+from .consumer_record import ConsumerRecord as ConsumerRecord
+from .consumer_records import ConsumerRecords as ConsumerRecords
+from .kafka_consumer import KafkaConsumer as KafkaConsumer
+from .mock_consumer import MockConsumer as MockConsumer
+from .offset_and_metadata import OffsetAndMetadata as OffsetAndMetadata
+from .offset_and_timestamp import OffsetAndTimestamp as OffsetAndTimestamp
+from .offset_reset_strategy import OffsetResetStrategy as OffsetResetStrategy
+from .subscription_pattern import SubscriptionPattern as SubscriptionPattern
 
 __all__ = [
     "AsyncConsumer",
