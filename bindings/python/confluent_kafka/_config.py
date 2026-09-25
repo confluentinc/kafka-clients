@@ -42,7 +42,7 @@ from datetime import timedelta
 from typing import Any, Literal
 
 from confluent_kafka import _config_types
-from confluent_kafka._java import java_str, java_trim, parse_double, parse_int, parse_long
+from confluent_kafka._java import java_str, java_trim, parse_double, parse_int, parse_long_string
 from confluent_kafka.common.config.config_error import ConfigError
 from confluent_kafka.illegal_argument_error import IllegalArgumentError
 
@@ -96,12 +96,13 @@ def _type_name(value: object) -> str:
 
 def _parse_number(name: str, value: object, parse: Callable[[Any], Any], type_name: str) -> Any:
     """``parse`` the value, a ``NumberFormatException`` reported as
-    ``ConfigDef.parseType`` reports it."""
+    ``ConfigDef.parseType`` reports it: a new ``ConfigException`` with no
+    cause."""
     try:
         return parse(java_trim(value) if isinstance(value, str) else value)
-    except IllegalArgumentError as exc:
+    except IllegalArgumentError:
         raise ConfigError(name=name, value=value,
-                          message=f"Not a number of type {type_name}") from exc
+                          message=f"Not a number of type {type_name}") from None
 
 
 def _fits(bits: int) -> Callable[[int], int]:
@@ -138,7 +139,7 @@ def coerce(name: str, value: object, type_name: str) -> object:
             return _parse_number(name, value, _fits(bits), type_name)
         if isinstance(value, str):
             if bits == 64:
-                return _parse_number(name, value, parse_long, type_name)
+                return _parse_number(name, value, parse_long_string, type_name)
             return _parse_number(name, value, lambda s: parse_int(s, bits), type_name)
         raise ConfigError(
             name=name, value=value,
