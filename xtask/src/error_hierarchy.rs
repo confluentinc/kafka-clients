@@ -1370,6 +1370,13 @@ struct PyParam {
     name: String,
     java_ty: String,
     default: Dflt,
+    /// Java's null is one of its Java-given defaults, so the implementation
+    /// signature types it `T | None` even when its default is `UNSET`.
+    nullable: bool,
+    /// Its Java-given default `null` is a field default (a shorter
+    /// constructor assigns null to the field this parameter fills), so the
+    /// stubs of the forms that require it take `T | None` too.
+    field_nullable: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -1377,7 +1384,15 @@ struct PyForm {
     /// Index into the class's Java constructors.
     ctor: usize,
     params: Vec<String>,
+    /// The Java-given defaults `java_forms` fills: values a shorter
+    /// constructor passes to this one through `this(...)`.
     defaults: BTreeMap<String, String>,
+    /// Signature defaults only: constants a shorter constructor assigns to the
+    /// fields this one fills from parameters. They give a parameter its
+    /// default value but never let `java_forms` leave it out (CLAUDE.md,
+    /// Python Binding Conventions, Signatures: "Only such values are O's
+    /// Java-given defaults").
+    field_defaults: BTreeMap<String, String>,
     deprecated: Option<String>,
     effect: Effect,
 }
@@ -1518,6 +1533,7 @@ fn build_model(g: &Graph, info: &ClassInfo) -> anyhow::Result<PyModel> {
             ctor: ci,
             params: names,
             defaults: BTreeMap::new(),
+            field_defaults: BTreeMap::new(),
             deprecated: ctor.deprecated.clone(),
             effect,
         });
@@ -1559,8 +1575,11 @@ fn build_model(g: &Graph, info: &ClassInfo) -> anyhow::Result<PyModel> {
         }
     }
 
-    // Java-given defaults (b): a shorter constructor that is the longer one with
+    // Signature defaults (b): a shorter constructor that is the longer one with
     // constants assigned to the fields the longer one fills from parameters.
+    // The default rule counts them ("or the constant it assigns to that
+    // parameter's field"); matching does not, since the shorter constructor
+    // passes nothing to the longer one.
     for si in 0..forms.len() {
         if matches!(info.java.ctors[forms[si].ctor].call, Some((CallKind::This, _))) {
             continue;
@@ -1615,7 +1634,7 @@ fn build_model(g: &Graph, info: &ClassInfo) -> anyhow::Result<PyModel> {
                     } else {
                         k
                     };
-                    forms[ti].defaults.insert(p, k);
+                    forms[ti].field_defaults.insert(p, k);
                 }
             }
         }
@@ -1655,14 +1674,21 @@ fn build_model(g: &Graph, info: &ClassInfo) -> anyhow::Result<PyModel> {
             |members: &Vec<usize>| members.iter().any(|m| forms[*m].params.contains(p)) && !group_required(members);
         let required_somewhere = stub_groups.iter().any(|(_, m)| group_required(m));
         let optional_somewhere = stub_groups.iter().any(|(_, m)| group_optional(m));
-        let java_defaults: Vec<String> = forms.iter().filter_map(|f| f.defaults.get(p).cloned()).collect();
+        let java_defaults: Vec<String> = forms
+            .iter()
+            .filter_map(|f| f.defaults.get(p).or_else(|| f.field_defaults.get(p)).cloned())
+            .collect();
         let non_null_default = java_defaults.iter().any(|d| d != "None");
+        let field_default = forms.iter().any(|f| f.field_defaults.contains_key(p));
         let required_by_one = forms.iter().any(|f| f.params.contains(p) && !f.defaults.contains_key(p));
         let default = if p == "cause" {
             Dflt::NoneDefault
         } else if in_every {
             Dflt::Required
-        } else if (required_somewhere && optional_somewhere) || (non_null_default && required_by_one) {
+        } else if (required_somewhere && optional_somewhere) || ((non_null_default || field_default) && required_by_one)
+        {
+            // A field default is a value, not an overload: the form that
+            // requires the parameter must still see `None` as given.
             Dflt::Unset
         } else if let Some(first) = java_defaults.first() {
             if java_defaults.iter().any(|d| d != first) {
@@ -1678,7 +1704,11 @@ fn build_model(g: &Graph, info: &ClassInfo) -> anyhow::Result<PyModel> {
         } else {
             Dflt::NoneDefault
         };
-        params.push(PyParam { name: p.clone(), java_ty: jty, default });
+        let nullable = java_defaults.iter().any(|d| d == "None");
+        let field_nullable = forms
+            .iter()
+            .any(|f| f.field_defaults.get(p).map(String::as_str) == Some("None"));
+        params.push(PyParam { name: p.clone(), java_ty: jty, default, nullable, field_nullable });
     }
 
     // The java_forms table, replicated: which form each set of given names
@@ -2061,6 +2091,7 @@ fn param_decl(p: &PyParam, info: &ClassInfo, used: &mut BTreeSet<String>) -> any
         Dflt::Required => format!("{}: {ty}", p.name),
         Dflt::NoneDefault if ty == "Any" => format!("{}: Any = None", p.name),
         Dflt::NoneDefault => format!("{}: {ty} | None = None", p.name),
+        Dflt::Unset if p.nullable && ty != "Any" => format!("{}: {ty} | None = UNSET", p.name),
         Dflt::Unset => format!("{}: {ty} = UNSET", p.name),
         Dflt::Const(c) => format!("{}: {ty} = {c}", p.name),
     })
@@ -2079,6 +2110,9 @@ fn stub_param(
         return Ok(format!("cause: {ty} | None = None"));
     }
     if !optional {
+        if p.field_nullable && ty != "Any" {
+            return Ok(format!("{}: {ty} | None", p.name));
+        }
         return Ok(format!("{}: {ty}", p.name));
     }
     let java_value = model.forms.iter().find_map(|f| f.defaults.get(&p.name).cloned());
@@ -3020,20 +3054,41 @@ mod tests {
     }
 
     #[test]
-    fn field_assigned_constants_are_java_given_defaults() {
+    fn field_assigned_constants_are_signature_defaults_not_match_defaults() {
         let classes = build_graph(&repo_root()).unwrap();
+        // (String message) assigns nothing and passes nothing to (int, String):
+        // the field default 0 is no Java-given default for matching, so the
+        // two forms are matched strictly and throttle_time_ms is UNSET.
         let m = model_of(&classes, "org.apache.kafka.common.errors.ThrottlingQuotaExceededException");
-        assert_eq!(param(&m, "throttle_time_ms").default, Dflt::Const("0".into()));
+        assert_eq!(param(&m, "throttle_time_ms").default, Dflt::Unset);
+        assert!(m.decorated);
         let m = model_of(&classes, "org.apache.kafka.common.errors.RecordDeserializationException");
         let full = &m.forms[1];
-        assert_eq!(full.defaults.get("origin").map(String::as_str), Some("None"));
-        assert_eq!(full.defaults.get("timestamp").map(String::as_str), Some("-1"));
+        // The deprecated constructor assigns the fields itself; it passes
+        // nothing to the full one, so no parameter of the full one may be left
+        // out (CLAUDE.md, Signatures: "Only such values are O's Java-given
+        // defaults").
+        assert!(full.defaults.is_empty());
+        assert_eq!(full.field_defaults.get("origin").map(String::as_str), Some("None"));
+        assert_eq!(full.field_defaults.get("timestamp").map(String::as_str), Some("-1"));
         assert_eq!(
-            full.defaults.get("timestamp_type").map(String::as_str),
+            full.field_defaults.get("timestamp_type").map(String::as_str),
             Some("TimestampType.NO_TIMESTAMP_TYPE")
         );
         // A header parameter defaults to ().
-        assert_eq!(full.defaults.get("headers").map(String::as_str), Some("()"));
+        assert_eq!(full.field_defaults.get("headers").map(String::as_str), Some("()"));
+        assert!(m.decorated);
+        for p in [
+            "origin",
+            "timestamp",
+            "timestamp_type",
+            "key_buffer",
+            "value_buffer",
+            "headers",
+        ] {
+            assert_eq!(param(&m, p).default, Dflt::Unset, "{p}");
+        }
+        assert!(param(&m, "key_buffer").field_nullable);
         assert!(m.forms[0].deprecated.as_deref().unwrap().starts_with("Since 3.9."));
     }
 

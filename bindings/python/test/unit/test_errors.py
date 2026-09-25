@@ -56,6 +56,7 @@ from confluent_kafka.common import (
 )
 from confluent_kafka.common.config import ConfigError
 from confluent_kafka.common.errors import (
+    AuthenticationError,
     CoordinatorNotAvailableError,
     CorruptRecordError,
     DisconnectError,
@@ -64,9 +65,11 @@ from confluent_kafka.common.errors import (
     InterruptError,
     InvalidMetadataError,
     InvalidTopicError,
+    LogDirNotFoundError,
     NotLeaderOrFollowerError,
     RecordDeserializationError,
     RecordTooLargeError,
+    ReplicaNotAvailableError,
     ResourceNotFoundError,
     RetriableError,
     ThrottlingQuotaExceededError,
@@ -263,8 +266,9 @@ def _instance(cls: type[BaseException]) -> BaseException:
         {"fetch_offsets": {_TP: 1}, "divergent_offsets": {}},
         {"metric": KafkaMetric._snapshot(name="n", group="g", value=1.0), "value": 1.0,
          "bound": 0.5},
-        {"origin": None, "partition": _TP, "offset": 1, "timestamp": 5, "message": "m",
-         "cause": ValueError("v")},
+        {"origin": None, "partition": _TP, "offset": 1, "timestamp": 5,
+         "timestamp_type": TimestampType.CREATE_TIME, "key_buffer": None, "value_buffer": b"v",
+         "headers": (), "message": "m", "cause": ValueError("v")},
         {"message": "m", "request_correlation_id": 1, "response_correlation_id": 2},
     ]
     for kwargs in tries:
@@ -499,7 +503,98 @@ def test_record_deserialization_constructors() -> None:
     assert d.timestamp() == -1
     assert d.timestamp_type() is TimestampType.NO_TIMESTAMP_TYPE
     assert d.key_buffer() is None and d.value_buffer() is None
-    assert d.headers() == ()
+    # Java's deprecated constructor assigns headers = null.
+    assert d.headers() is None
+    # Java's null buffers and origin are values of the full constructor.
+    n = RecordDeserializationError(
+        origin=None, partition=_TP, offset=2, timestamp=-1,
+        timestamp_type=TimestampType.NO_TIMESTAMP_TYPE, key_buffer=None, value_buffer=None,
+        headers=(), message="m")
+    assert (n.origin(), n.key_buffer(), n.value_buffer(), n.headers()) == (None, None, None, ())
+
+
+def test_record_deserialization_accepts_exactly_java_s_constructors() -> None:
+    # The deprecated constructor assigns the fields itself and passes nothing
+    # to the full one, so none of the full one's parameters may be left out
+    # (CLAUDE.md, Python Binding Conventions, Signatures).
+    forms = ("RecordDeserializationError() takes one of (partition, offset, message, cause), "
+             "(origin, partition, offset, timestamp, timestamp_type, key_buffer, value_buffer, "
+             "headers, message, cause); got ")
+    origin = RecordDeserializationError.DeserializationExceptionOrigin.KEY
+    for kwargs, got in [
+        ({"origin": origin, "partition": _TP, "offset": 1, "message": "m"},
+         "(origin, partition, offset, message, cause)"),
+        ({"partition": _TP, "offset": 1, "message": "m", "key_buffer": b"x"},
+         "(partition, offset, key_buffer, message, cause)"),
+        ({"origin": None, "partition": _TP, "offset": 1, "timestamp": 5, "message": "m"},
+         "(origin, partition, offset, timestamp, message, cause)"),
+    ]:
+        with pytest.raises(IllegalArgumentError) as exc:
+            RecordDeserializationError(**kwargs)  # type: ignore[call-overload]
+        assert str(exc.value) == forms + got
+
+
+# Every generated error class with java_forms: each given set Java has no
+# constructor for, with the exact message (CLAUDE.md, Tests and typing).
+_REJECTED: list[tuple[type[BaseException], dict[str, Any], str]] = [
+    (AuthenticationError, {},
+     "AuthenticationError() takes one of (message), (cause), (message, cause); got ()"),
+    (InterruptError, {},
+     "InterruptError() takes one of (cause), (message, cause), (message); got ()"),
+    (LogDirNotFoundError, {},
+     "LogDirNotFoundError() takes one of (message), (message, cause), (cause); got ()"),
+    (ReplicaNotAvailableError, {},
+     "ReplicaNotAvailableError() takes one of (message), (message, cause), (cause); got ()"),
+    (TransactionAbortedError, {"cause": ValueError("c")},
+     "TransactionAbortedError() takes one of (message, cause), (message), (); got (cause)"),
+    (InvalidTopicError, {"cause": ValueError("c"), "invalid_topics": ["t"]},
+     "InvalidTopicError() takes one of (), (message, cause), (message), (cause), "
+     "(invalid_topics), (message, invalid_topics); got (cause, invalid_topics)"),
+    (InvalidTopicError, {"message": "m", "cause": ValueError("c"), "invalid_topics": ["t"]},
+     "InvalidTopicError() takes one of (), (message, cause), (message), (cause), "
+     "(invalid_topics), (message, invalid_topics); got (message, cause, invalid_topics)"),
+    (RecordTooLargeError, {"cause": ValueError("c"), "record_too_large_partitions": {_TP: 1}},
+     "RecordTooLargeError() takes one of (), (message, cause), (message), (cause), "
+     "(message, record_too_large_partitions); got (cause, record_too_large_partitions)"),
+    (RecordTooLargeError, {"record_too_large_partitions": {_TP: 1}},
+     "RecordTooLargeError() takes one of (), (message, cause), (message), (cause), "
+     "(message, record_too_large_partitions); got (record_too_large_partitions)"),
+    (NoOffsetForPartitionError, {},
+     "NoOffsetForPartitionError() takes one of (partition), (partitions); got ()"),
+    (NoOffsetForPartitionError, {"partition": _TP, "partitions": [_TP]},
+     "NoOffsetForPartitionError() takes one of (partition), (partitions); "
+     "got (partition, partitions)"),
+    (TopicAuthorizationError, {},
+     "TopicAuthorizationError() takes one of (message, unauthorized_topics), "
+     "(unauthorized_topics), (message); got ()"),
+    (ConfigError, {}, "ConfigError() takes one of (message), (name, value), "
+     "(name, value, message); got ()"),
+    (ConfigError, {"name": "n"}, "ConfigError() takes one of (message), (name, value), "
+     "(name, value, message); got (name)"),
+    (RetriableCommitFailedError, {},
+     "RetriableCommitFailedError() takes one of (cause), (message), (message, cause); got ()"),
+]
+
+
+@pytest.mark.parametrize("cls,kwargs,message", _REJECTED,
+                         ids=[f"{c.__name__}-{'-'.join(k) or 'none'}" for c, k, _ in _REJECTED])
+def test_generated_errors_reject_what_java_has_no_constructor_for(
+        cls: type[BaseException], kwargs: dict[str, Any], message: str) -> None:
+    with pytest.raises(IllegalArgumentError) as exc:
+        cls(**kwargs)
+    assert str(exc.value) == message
+
+
+def test_every_java_forms_error_class_has_a_rejection_case() -> None:
+    decorated = {cls for cls in error_classes()
+                 if getattr(cls.__init__, "__wrapped__", None) is not None}
+    covered = {cls for cls, _, _ in _REJECTED} | {RecordDeserializationError}
+    # ThrottlingQuotaExceededError's forms both take message: every given set
+    # is a Java constructor, java_forms only picks the one (throttle_time_ms is
+    # UNSET), so there is nothing to reject.
+    assert decorated - covered == {ThrottlingQuotaExceededError}
+    assert ThrottlingQuotaExceededError(message="m").throttle_time_ms() == 0
+    assert ThrottlingQuotaExceededError(throttle_time_ms=0, message="m").throttle_time_ms() == 0
 
 
 def test_singletons() -> None:
