@@ -12,10 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""``BooleanSerializer`` — Java's ``org.apache.kafka.common.serialization.BooleanSerializer``.
-
-One byte: ``0x01`` for true, ``0x00`` for false. ``None`` maps to ``None``.
-"""
+"""``bool_serializer()``: Java's ``org.apache.kafka.common.serialization.BooleanSerializer``."""
 
 from __future__ import annotations
 
@@ -26,14 +23,12 @@ _FALSE = b"\x00"
 
 
 class BooleanSerializer:
-    """Serializes a ``bool`` to a single byte; ``None`` maps to ``None``."""
+    """One byte: ``0x01`` for true, ``0x00`` for false."""
 
-    def __call__(
-        self,
-        topic: str,
-        value: bool | None,
-        headers: Headers | None = None,
-    ) -> bytes | None:
+    __slots__ = ()
+
+    def __call__(self, topic: str, value: bool | None,
+                 headers: Headers | None = None) -> bytes | None:
         if value is None:
             return None
         return _TRUE if value else _FALSE

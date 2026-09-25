@@ -12,11 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""``BooleanDeserializer`` — Java's ``org.apache.kafka.common.serialization.BooleanDeserializer``.
-
-Requires exactly one byte, ``0x01`` (true) or ``0x00`` (false); anything else
-raises ``SerializationException``. ``None`` maps to ``None``.
-"""
+"""``bool_deserializer()``: Java's ``org.apache.kafka.common.serialization.BooleanDeserializer``."""
 
 from __future__ import annotations
 
@@ -28,28 +24,22 @@ _FALSE = 0x00
 
 
 class BooleanDeserializer:
-    """Deserializes a single byte to a ``bool``; ``None`` maps to ``None``."""
+    """Exactly one byte, ``0x01`` (true) or ``0x00`` (false)."""
 
-    def __call__(
-        self,
-        topic: str,
-        data: memoryview | None,
-        headers: Headers | None = None,
-    ) -> bool | None:
+    __slots__ = ()
+
+    def __call__(self, topic: str, data: memoryview | None,
+                 headers: Headers | None = None) -> bool | None:
         if data is None:
             return None
         if len(data) != 1:
             raise SerializationError(
-                message="Size of data received by BooleanDeserializer is not 1"
-            )
+                message="Size of data received by BooleanDeserializer is not 1")
         b = data[0]
         if b == _TRUE:
             return True
         if b == _FALSE:
             return False
-        # Java's byte is signed; its message prints the signed value (-1 for
-        # 0xFF). Convert so the text matches Java exactly.
-        signed = b - 256 if b > 127 else b
+        # Java's byte is signed: 0xFF prints as -1.
         raise SerializationError(
-            message=f"Unexpected byte received by BooleanDeserializer: {signed}"
-        )
+            message=f"Unexpected byte received by BooleanDeserializer: {b - 256 if b > 127 else b}")

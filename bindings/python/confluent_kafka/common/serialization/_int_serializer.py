@@ -12,13 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""``IntSerializer`` — collapses Java's ``IntegerSerializer`` (size 4) and
-``LongSerializer`` (size 8).
+"""``int_serializer(size=4)`` / ``int_serializer(size=8)``: Java's
+``org.apache.kafka.common.serialization.IntegerSerializer`` /
+``LongSerializer``.
 
-Both Java serializers emit big-endian two's-complement bytes of a signed fixed
-width (``IntegerSerializer`` 32-bit, ``LongSerializer`` 64-bit). One
-``size``-parameterized class covers both; the ``int_serializer(*, size=4)``
-factory picks the width. ``None`` maps to ``None`` (Java's tombstone).
+Both write a signed big-endian two's-complement integer of a fixed width. A
+Python ``int`` outside the width raises ``OverflowError``, where Java's
+``Integer`` / ``Long`` cannot hold such a value.
 """
 
 from __future__ import annotations
@@ -29,17 +29,13 @@ from confluent_kafka.common.headers import Headers
 class IntSerializer:
     """Serializes a signed integer to ``size`` big-endian bytes."""
 
+    __slots__ = ("_size",)
+
     def __init__(self, size: int = 4) -> None:
         self._size = size
 
-    def __call__(
-        self,
-        topic: str,
-        value: int | None,
-        headers: Headers | None = None,
-    ) -> bytes | None:
+    def __call__(self, topic: str, value: int | None,
+                 headers: Headers | None = None) -> bytes | None:
         if value is None:
             return None
-        # Big-endian, signed two's complement — matches Java's byte-shift emit
-        # (``(byte)(data >>> 24)`` … ) which is a signed big-endian encoding.
-        return int(value).to_bytes(self._size, "big", signed=True)
+        return value.to_bytes(self._size, "big", signed=True)

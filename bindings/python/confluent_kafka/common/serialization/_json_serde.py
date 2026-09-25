@@ -12,13 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""JSON serde — a Python-natural addition with no Java counterpart.
+"""``json_serializer()`` / ``json_deserializer()`` *(deviation: no Java
+counterpart)*.
 
-Serializes via ``json.dumps(...).encode("utf_8")`` and deserializes via
-``json.loads(bytes(data))``. A serde/deserde error is wrapped in
-``SerializationError`` (its ``__cause__`` is the original ``json`` /
-``UnicodeDecodeError``), matching how the Kafka serdes surface failures.
-``None`` maps to ``None`` (Java's tombstone contract).
+UTF-8 JSON through the ``json`` module. A failure raises ``SerializationError``
+whose ``__cause__`` is the ``json`` or decoding error, as Java's serdes wrap
+theirs in a ``SerializationException``.
 """
 
 from __future__ import annotations
@@ -33,36 +32,28 @@ from confluent_kafka.common.headers import Headers
 class JsonSerializer:
     """Serializes any JSON-encodable object to UTF-8 JSON bytes."""
 
-    def __call__(
-        self,
-        topic: str,
-        value: Any | None,
-        headers: Headers | None = None,
-    ) -> bytes | None:
+    __slots__ = ()
+
+    def __call__(self, topic: str, value: Any | None,
+                 headers: Headers | None = None) -> bytes | None:
         if value is None:
             return None
         try:
             return json.dumps(value).encode("utf_8")
         except (TypeError, ValueError) as exc:
-            raise SerializationError(
-                message="Error serializing value to JSON"
-            ) from exc
+            raise SerializationError(message="Error serializing value to JSON") from exc
 
 
 class JsonDeserializer:
     """Deserializes UTF-8 JSON bytes to a Python object."""
 
-    def __call__(
-        self,
-        topic: str,
-        data: memoryview | None,
-        headers: Headers | None = None,
-    ) -> Any | None:
+    __slots__ = ()
+
+    def __call__(self, topic: str, data: memoryview | None,
+                 headers: Headers | None = None) -> Any | None:
         if data is None:
             return None
         try:
             return json.loads(bytes(data))
         except (ValueError, UnicodeDecodeError) as exc:
-            raise SerializationError(
-                message="Error deserializing JSON value"
-            ) from exc
+            raise SerializationError(message="Error deserializing JSON value") from exc

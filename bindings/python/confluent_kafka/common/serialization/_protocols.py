@@ -14,21 +14,19 @@
 
 """The serde protocols and the optional lifecycle capabilities.
 
-Mirrors ``org.apache.kafka.common.serialization.Serializer`` /
-``Deserializer`` (Apache Kafka 4.3.1). Java's three ``serialize`` /
-``deserialize`` overloads collapse to one callable shape whose ``headers`` are
-always passed (spec §5.4; Design Decisions D6 "one callable shape"). ``data`` /
-``value`` may be ``None`` — Java's tombstone passthrough, where the serde is
-*invoked* on null and decides what it maps to.
+*(deviation)* Java's ``Serializer`` / ``Deserializer`` interfaces, with their
+three ``serialize`` / ``deserialize`` overloads, are one callable shape whose
+headers are always passed (CLAUDE.md, Python Binding Conventions,
+Serialization). A serde is any callable of that shape: a function, a
+``lambda``, a ``functools.partial`` or an instance with ``__call__``; the
+protocols exist for the type checker. ``None`` in is Java's null, and the serde
+decides what it maps to.
 
-A serde is **any callable of the right shape** — a function, ``lambda``,
-``functools.partial`` or an instance with ``__call__``. These ``Protocol``s
-exist only for the type checker; nothing is required to inherit from them.
-
-The optional lifecycle (``configure`` / ``close``) is duck-typed. ``Configurable``
-and ``Closable`` name the two capabilities as ``@runtime_checkable`` protocols so
-the client can ``isinstance``-check them; ``SerdeBase`` is a no-op convenience
-base for Java-style porting (each method is Java's ``default {}``).
+The lifecycle is duck-typed: ``configure(configs, is_key)`` runs once after
+construction on the config route only, ``close()`` at client close (its
+exceptions logged, never raised), and an absent method is a no-op.
+``Configurable`` and ``Closeable`` are ``@runtime_checkable`` protocols for the
+two methods, and ``SerdeBase`` is a no-op base with both.
 """
 
 from __future__ import annotations
@@ -37,82 +35,75 @@ from typing import Protocol, TypeVar, runtime_checkable
 
 from confluent_kafka.common.headers import Headers
 
-# ``T_contra`` on the serializer (it consumes ``T``); ``T_co`` on the
-# deserializer (it produces ``T``) — so ``Serializer[bytes]`` accepts a
-# ``bytes`` subtype and ``Deserializer[str]`` is usable where a supertype is
-# expected, matching Java's ``Serializer<T>`` / ``Deserializer<T>`` variance.
+__all__ = ["Closeable", "Configurable", "Deserializer", "SerdeBase", "Serializer"]
+
 T_contra = TypeVar("T_contra", contravariant=True)
 T_co = TypeVar("T_co", covariant=True)
 
 
 class Serializer(Protocol[T_contra]):
-    """Converts an object to bytes — Java's ``Serializer<T>``.
+    """An interface for converting objects to bytes.
 
-    ``value`` may be ``None`` (Java's tombstone); every built-in returns
-    ``None`` for ``None``. ``headers`` are always passed but may be empty.
+    Java: ``org.apache.kafka.common.serialization.Serializer<T>``.
     """
 
-    def __call__(
-        self,
-        topic: str,
-        value: T_contra | None,
-        headers: Headers | None = None,
-    ) -> bytes | None: ...
+    def __call__(self, topic: str, value: T_contra | None,
+                 headers: Headers | None = None) -> bytes | None:
+        """Convert ``value`` into bytes: ``topic`` is the topic associated
+        with the data, ``headers`` the headers associated with the record, and
+        ``value`` the typed data. Returns the serialized bytes."""
+        ...
 
 
 class Deserializer(Protocol[T_co]):
-    """Converts bytes to an object — Java's ``Deserializer<T>``.
+    """An interface for converting bytes to objects.
 
-    ``data`` is a ``memoryview`` into the fetch batch on the receive path (a
-    ``bytes``-like on other paths) and may be ``None`` (Java's tombstone).
-    ``headers`` are always passed but may be empty.
+    Java: ``org.apache.kafka.common.serialization.Deserializer<T>``.
     """
 
-    def __call__(
-        self,
-        topic: str,
-        data: memoryview | None,
-        headers: Headers | None = None,
-    ) -> T_co | None: ...
+    def __call__(self, topic: str, data: memoryview | None,
+                 headers: Headers | None = None) -> T_co | None:
+        """Deserialize a record value from a ``memoryview`` into a value or
+        object: ``topic`` is the topic associated with the data, ``headers``
+        the headers associated with the record, and ``data`` the serialized
+        bytes, a view into the fetch batch. Returns the deserialized typed
+        data; may be ``None``."""
+        ...
 
 
 @runtime_checkable
 class Configurable(Protocol):
-    """Serdes that accept post-construction configuration on the config route.
+    """A serde configured after construction on the config route.
 
-    Java's ``Configurable`` / the ``configure(Map, boolean)`` default method:
-    called once, after no-arg construction, with the whole client config plus
-    which slot the serde occupies. Never called on the kwarg (instance) route.
-    """
-
-    def configure(self, configs: dict[str, object], is_key: bool) -> None: ...
-
-
-@runtime_checkable
-class Closable(Protocol):
-    """Serdes that hold resources to release at client close.
-
-    Java's ``Closeable.close()`` default method. Called at client close;
-    exceptions are logged, never raised (Java's ``Utils.closeQuietly``). Must be
-    idempotent — it may be called multiple times.
-    """
-
-    def close(self) -> None: ...
-
-
-class SerdeBase:
-    """A no-op lifecycle base for Java-style serde classes.
-
-    Subclass and override only ``__call__`` (and, if needed, ``configure`` /
-    ``close``). Each method here is Java's ``default {}`` — a bare function is
-    already a complete serde, so inheriting this is a convenience, never a
-    requirement.
+    Java: the ``configure(Map<String, ?> configs, boolean isKey)`` method of
+    ``Serializer`` / ``Deserializer``.
     """
 
     def configure(self, configs: dict[str, object], is_key: bool) -> None:
-        # Java's default {} — intentionally left blank.
-        pass
+        """Configure this class: ``configs`` are the configs in key/value
+        pairs, ``is_key`` whether it is for the key or the value."""
+        ...
+
+
+@runtime_checkable
+class Closeable(Protocol):
+    """A serde holding resources to release at client close.
+
+    Java: ``java.io.Closeable``, which ``Serializer`` / ``Deserializer``
+    extend. This method must be idempotent as it may be called multiple times.
+    """
 
     def close(self) -> None:
-        # Java's default {} — intentionally left blank.
-        pass
+        """Close this serializer or deserializer."""
+        ...
+
+
+class SerdeBase:
+    """A no-op base with both lifecycle methods, Java's ``default`` bodies,
+    for a serde written as a class."""
+
+    def configure(self, configs: dict[str, object], is_key: bool) -> None:
+        """Configure this class; intentionally left blank."""
+
+    def close(self) -> None:
+        """Close this serde; intentionally left blank."""
