@@ -1,0 +1,43 @@
+version: v1.0
+name: chaos-matrix
+
+agent:
+  machine:
+    type: s1-prod-ubuntu24-04-amd64-2
+
+execution_time_limit:
+  hours: 4
+
+global_job_config:
+  prologue:
+    commands:
+      - checkout
+      - |
+        if [ -n "${SEMAPHORE_GIT_BRANCH_CHECKOUT}" ]; then
+          git fetch origin "${SEMAPHORE_GIT_BRANCH_CHECKOUT}"
+          git checkout -B "${SEMAPHORE_GIT_BRANCH_CHECKOUT}" FETCH_HEAD
+        fi
+      - sem-version python 3.10
+
+blocks:
+  - name: "Chaos matrix (1-16, 18-19)"
+    dependencies: []
+    task:
+      env_vars:
+        - name: RUST_BACKTRACE
+          value: full
+      prologue:
+        commands:
+          - ./.semaphore/dependencies.sh
+          - docker info >/dev/null 2>&1 || { echo "Docker is required for chaos tests"; exit 1; }
+      epilogue:
+        always:
+          commands:
+            - artifact push job target/chaos-runs --destination chaos-runs --force || true
+            - docker rm -f $(docker ps -aq --filter "name=kafka-") 2>/dev/null || true
+            - docker network prune -f || true
+      jobs:
+        - name: "chaos-matrix"
+          commands:
+            - chmod +x ./.semaphore/chaos-matrix.sh
+            - ./.semaphore/chaos-matrix.sh
