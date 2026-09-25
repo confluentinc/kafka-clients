@@ -30,15 +30,16 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 
-use confluent_kafka::common::Uuid;
+use confluent_kafka::common::{KafkaError, TopicPartition, Uuid};
+use confluent_kafka::consumer::{ConsumerHandle, ConsumerRebalanceListener, OffsetAndMetadata};
 use confluent_kafka::producer::{Callback, Producer, ProducerRecord};
 
 use super::common::backend_factory::{ConsumerBackendFactory, ProducerBackendFactory, RustNativeFactory};
-use super::verifier::{ConsumerOp, Verifier, WorkloadEvent};
+use super::verifier::{ConsumerOp, RebalanceCallback, Verifier, WorkloadEvent};
 use super::workload_config::{consumer_props, producer_props};
 
 /// Which binding drives a workload.
@@ -517,6 +518,125 @@ struct ConsumerWorkload<F: ConsumerBackendFactory> {
     verifier: Arc<dyn Verifier>,
 }
 
+/// The `ConsumerRebalanceListener` every Rust consumer workload registers.
+///
+/// It records each callback as a [`WorkloadEvent::Rebalance`] so the verifier
+/// can replay the ownership changes and check the listener contract (each
+/// partition assigned once before it is released, released before it is
+/// assigned elsewhere, everything released before close), and it does what a
+/// real application does in `on_partitions_revoked`: commit the offsets of the
+/// partitions being taken away before the rebalance completes. The commit goes
+/// through a [`ConsumerHandle`], the reentrant-safe path a listener has back
+/// into its consumer. It succeeds only if the client really waits for the
+/// callback before acknowledging the revocation; a client that fired the
+/// callback and moved on would let this commit race the reassignment.
+///
+/// `on_partitions_lost` is overridden (the trait's default delegates to
+/// `on_partitions_revoked`) so a fenced member's callback is recorded as lost,
+/// which the verifier treats differently from a clean revocation.
+struct ChaosRebalanceListener {
+    consumer: String,
+    handle: ConsumerHandle,
+    verifier: Arc<dyn Verifier>,
+    /// Set by the workload right before `close()`. The close-time
+    /// `on_partitions_revoked` still commits, but must not read committed
+    /// offsets back: once closing, the client's commit manager only drains
+    /// commits (Java `CommitRequestManager.poll` with `closing == true`), so an
+    /// offset fetch queued from inside that callback is never sent and waits
+    /// out `default.api.timeout.ms`. The workload's own read-back after its
+    /// final commit already covers the state `close()` hands over.
+    closing: Arc<AtomicBool>,
+}
+
+impl ChaosRebalanceListener {
+    fn record(&self, callback: RebalanceCallback, partitions: &[TopicPartition]) {
+        let mut partitions: Vec<(String, i32)> =
+            partitions.iter().map(|tp| (tp.topic().to_string(), tp.partition())).collect();
+        partitions.sort();
+        let shown: Vec<String> = partitions.iter().map(|(t, p)| format!("{t}-{p}")).collect();
+        eprintln!("chaos {}: {callback} {shown:?}", self.consumer);
+        self.verifier
+            .record(WorkloadEvent::Rebalance { consumer: self.consumer.clone(), callback, partitions });
+    }
+}
+
+#[async_trait]
+impl ConsumerRebalanceListener for ChaosRebalanceListener {
+    async fn on_partitions_revoked(&self, partitions: &[TopicPartition]) -> Result<(), KafkaError> {
+        self.record(RebalanceCallback::Revoked, partitions);
+        // Flush offsets before the partitions move — the canonical listener
+        // pattern. The workload already commits after every poll, so this is
+        // normally a small or empty commit; its outcome is recorded either way.
+        match self.handle.commit_sync().await {
+            // Read back what the broker now holds for the partitions being
+            // handed over: the next owner resumes from there, so it must be
+            // exactly this consumer's progress + 1 (the verifier checks). Not
+            // during close — see `closing`.
+            Ok(()) if !self.closing.load(Ordering::Relaxed) => {
+                record_committed(self.verifier.as_ref(), &self.consumer, self.handle.committed(partitions).await);
+            },
+            Ok(()) => {},
+            Err(err) => {
+                eprintln!("chaos {}: commit inside on_partitions_revoked failed: {err}", self.consumer);
+                self.verifier.record(WorkloadEvent::ConsumerError {
+                    consumer: self.consumer.clone(),
+                    op: ConsumerOp::RevokeCommit,
+                    error: err.to_string(),
+                });
+            },
+        }
+        Ok(())
+    }
+
+    async fn on_partitions_assigned(&self, partitions: &[TopicPartition]) -> Result<(), KafkaError> {
+        self.record(RebalanceCallback::Assigned, partitions);
+        Ok(())
+    }
+
+    async fn on_partitions_lost(&self, partitions: &[TopicPartition]) -> Result<(), KafkaError> {
+        self.record(RebalanceCallback::Lost, partitions);
+        Ok(())
+    }
+}
+
+/// How often a sync-committing consumer reads its committed offsets back from
+/// the broker (one OffsetFetch) so the verifier can compare them with its own
+/// progress. Also done inside `on_partitions_revoked` and before `close()`.
+const COMMIT_CHECK_INTERVAL: Duration = Duration::from_secs(5);
+
+/// Record what the broker reports as committed for `consumer` — one
+/// [`WorkloadEvent::Committed`] per partition — or the error of the read-back
+/// itself. Callers invoke it only right after one of the consumer's own
+/// `commit_sync` calls succeeded with no poll in between, so each committed
+/// offset must equal the consumer's last consumed offset + 1; the verifier
+/// does the comparison (`ConservationState::record_committed`).
+fn record_committed(
+    verifier: &dyn Verifier,
+    consumer: &str,
+    committed: Result<HashMap<TopicPartition, OffsetAndMetadata>, KafkaError>,
+) {
+    match committed {
+        Ok(offsets) => {
+            for (tp, offset) in offsets {
+                verifier.record(WorkloadEvent::Committed {
+                    consumer: consumer.to_string(),
+                    topic: tp.topic().to_string(),
+                    partition: tp.partition(),
+                    offset: offset.offset(),
+                });
+            }
+        },
+        Err(err) => {
+            eprintln!("chaos {consumer}: committed() read-back failed: {err}");
+            verifier.record(WorkloadEvent::ConsumerError {
+                consumer: consumer.to_string(),
+                op: ConsumerOp::ReadCommitted,
+                error: err.to_string(),
+            });
+        },
+    }
+}
+
 #[async_trait(?Send)]
 impl<F> Workload for ConsumerWorkload<F>
 where
@@ -537,11 +657,32 @@ where
 
         // Subscribe to EVERY topic in the run (librdkafka passes all `-t` flags
         // to each consumer), not just one — so a multi-topic run's consumers
-        // cover all topics.
-        consumer
-            .subscribe(self.ctx.topics.clone())
-            .await
-            .expect("chaos consumer subscribe failed");
+        // cover all topics. The Rust backend registers a rebalance listener
+        // (see `ChaosRebalanceListener`); the gRPC bridge cannot carry a
+        // listener across the wire, so those consumers subscribe plainly and
+        // the verdict's callback counts show they did not exercise it.
+        let closing = Arc::new(AtomicBool::new(false));
+        let subscribed = if self.spec.backend.is_grpc() {
+            consumer.subscribe(self.ctx.topics.clone()).await
+        } else {
+            let listener = Arc::new(ChaosRebalanceListener {
+                consumer: label.clone(),
+                handle: consumer.handle(),
+                verifier: self.verifier.clone(),
+                closing: closing.clone(),
+            });
+            consumer.subscribe_with_listener(self.ctx.topics.clone(), listener).await
+        };
+        subscribed.expect("chaos consumer subscribe failed");
+
+        // Committed-offset read-backs need the rebalance listener: the
+        // verifier compares each committed offset with this consumer's
+        // consumption *since the partition was assigned*, and only the
+        // listener's `on_partitions_assigned` events tell it when that
+        // restarts. gRPC consumers have no listener (see above), so a
+        // read-back from them would be compared against stale progress.
+        let check_commits = !self.spec.backend.is_grpc();
+        let mut last_commit_check = Instant::now();
 
         while !stop.load(Ordering::Relaxed) {
             let records = match consumer.poll(Duration::from_millis(500)).await {
@@ -569,6 +710,7 @@ where
                     // recreate generation). Falls back to zero if unresolved.
                     let topic_id = self.ctx.topic_id_for(topic);
                     self.verifier.record(WorkloadEvent::Consumed {
+                        consumer: label.clone(),
                         index: u64::from_be_bytes(arr),
                         topic: topic.to_string(),
                         topic_id,
@@ -583,34 +725,66 @@ where
                     CommitMode::Sync => consumer.commit_sync().await,
                     CommitMode::Async => consumer.commit_async().await,
                 };
-                if let Err(err) = commit {
-                    eprintln!("chaos {label}: commit error: {err}");
-                    self.verifier.record(WorkloadEvent::ConsumerError {
-                        consumer: label.clone(),
-                        op: ConsumerOp::Commit,
-                        error: err.to_string(),
-                    });
+                match commit {
+                    Err(err) => {
+                        eprintln!("chaos {label}: commit error: {err}");
+                        self.verifier.record(WorkloadEvent::ConsumerError {
+                            consumer: label.clone(),
+                            op: ConsumerOp::Commit,
+                            error: err.to_string(),
+                        });
+                    },
+                    // Periodically read the committed offsets back for the
+                    // verifier to compare with this consumer's progress. Only
+                    // after a *sync* commit: an async one may not have reached
+                    // the broker yet, so its read-back would prove nothing.
+                    Ok(())
+                        if check_commits
+                            && matches!(self.ctx.commit_mode, CommitMode::Sync)
+                            && last_commit_check.elapsed() >= COMMIT_CHECK_INTERVAL =>
+                    {
+                        last_commit_check = Instant::now();
+                        let assigned: Vec<TopicPartition> = consumer.assignment().into_iter().collect();
+                        record_committed(self.verifier.as_ref(), &label, consumer.committed(&assigned).await);
+                    },
+                    Ok(()) => {},
                 }
             }
         }
 
         // Final commit before leaving; an error here is recorded like any other
         // commit error so the summary accounts for it.
-        if let Err(err) = consumer.commit_sync().await {
-            eprintln!("chaos {label}: final commit error: {err}");
-            self.verifier.record(WorkloadEvent::ConsumerError {
-                consumer: label.clone(),
-                op: ConsumerOp::Commit,
-                error: err.to_string(),
-            });
+        match consumer.commit_sync().await {
+            // Last read-back: with no poll after this commit, every assigned
+            // partition's committed offset must be this consumer's last
+            // consumed offset + 1, or the next owner starts in the wrong place.
+            Ok(()) if check_commits => {
+                let assigned: Vec<TopicPartition> = consumer.assignment().into_iter().collect();
+                record_committed(self.verifier.as_ref(), &label, consumer.committed(&assigned).await);
+            },
+            Ok(()) => {},
+            Err(err) => {
+                eprintln!("chaos {label}: final commit error: {err}");
+                self.verifier.record(WorkloadEvent::ConsumerError {
+                    consumer: label.clone(),
+                    op: ConsumerOp::Commit,
+                    error: err.to_string(),
+                });
+            },
         }
+        // The close-time revoke callback commits but must not read back (see
+        // `ChaosRebalanceListener::closing`).
+        closing.store(true, Ordering::Relaxed);
         consumer.close().await.expect("chaos consumer close failed");
+        // `close()` must have released every owned partition through the
+        // listener first; the verifier checks that on this event.
+        self.verifier.record(WorkloadEvent::ConsumerClosed { consumer: label });
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use confluent_kafka::common::{KafkaError, TopicPartition};
+    use confluent_kafka::consumer::{AutoOffsetResetStrategy, Consumer, MockConsumer};
     use confluent_kafka::producer::{MockProducer, RecordMetadata};
 
     use super::*;
@@ -630,6 +804,95 @@ mod tests {
             msg_size: 0,
             commit_mode: CommitMode::Sync,
         }
+    }
+
+    /// The production listener, driven directly: each callback lands in the
+    /// verifier as the matching `Rebalance` event (lost is NOT folded into
+    /// revoked), and the revoke-time commit's failure is recorded under its own
+    /// operation. `MockConsumer`'s handle cannot commit, which stands in for a
+    /// commit that fails under chaos.
+    #[tokio::test]
+    async fn rebalance_listener_records_each_callback_and_commits_on_revoke() {
+        let verifier = Arc::new(ConservationVerifier::new());
+        let mock: MockConsumer<Vec<u8>, Vec<u8>> = MockConsumer::new(AutoOffsetResetStrategy::EARLIEST);
+        let listener = ChaosRebalanceListener {
+            consumer: "consumer-rust-1".into(),
+            handle: mock.handle(),
+            verifier: verifier.clone(),
+            closing: Arc::new(AtomicBool::new(false)),
+        };
+        let tp = |p: i32| TopicPartition::new("t".to_string(), p);
+
+        listener.on_partitions_assigned(&[tp(1), tp(0)]).await.unwrap();
+        listener.on_partitions_revoked(&[tp(1)]).await.unwrap();
+        listener.on_partitions_lost(&[tp(0)]).await.unwrap();
+
+        let verdict = verifier.verdict(0);
+        assert!(verdict.rebalance_violations.is_empty(), "{verdict}");
+        assert_eq!(
+            (verdict.assigned_callbacks, verdict.revoked_callbacks, verdict.lost_callbacks),
+            (1, 1, 1)
+        );
+        assert_eq!(verdict.listener_consumers, 1);
+        // One revoked callback → one commit attempt, which the mock handle rejects.
+        assert_eq!(verdict.revoke_commit_errors, 1);
+        assert_eq!(verdict.commit_errors, 0);
+        assert!(
+            verdict
+                .error_breakdown
+                .iter()
+                .any(|(text, n)| *n == 1 && text.starts_with("consumer commit inside on_partitions_revoked: ")),
+            "{verdict}"
+        );
+    }
+
+    /// A successful `committed()` read-back becomes one `Committed` event per
+    /// partition, which the verifier compares with that consumer's own
+    /// progress; a failed read-back is recorded under its own operation.
+    #[test]
+    fn record_committed_emits_one_event_per_partition_and_reports_read_back_errors() {
+        let verifier = ConservationVerifier::new();
+        let tp = |p: i32| TopicPartition::new("t".to_string(), p);
+        for (p, offset) in [(0, 41), (1, 7)] {
+            verifier.record(WorkloadEvent::Consumed {
+                consumer: "consumer-rust-1".into(),
+                index: offset as u64,
+                topic: "t".into(),
+                topic_id: Uuid::zero(),
+                partition: p,
+                offset,
+            });
+        }
+        let offsets: HashMap<TopicPartition, OffsetAndMetadata> = [
+            (tp(0), OffsetAndMetadata::new(42).unwrap()),
+            (tp(1), OffsetAndMetadata::new(3).unwrap()),
+        ]
+        .into_iter()
+        .collect();
+        record_committed(&verifier, "consumer-rust-1", Ok(offsets));
+        record_committed(
+            &verifier,
+            "consumer-rust-1",
+            Err(KafkaError::unsupported_version("no committed()")),
+        );
+
+        let verdict = verifier.verdict(0);
+        assert_eq!(verdict.commit_checks, 2);
+        assert_eq!(
+            verdict.commit_violations,
+            vec![
+                "consumer-rust-1: committed offset 3 on t-1 is behind its own consumption (last consumed 7, \
+                 expected 8)"
+                    .to_string()
+            ]
+        );
+        assert!(
+            verdict
+                .error_breakdown
+                .iter()
+                .any(|(text, n)| *n == 1 && text == "consumer committed() read-back: no committed()"),
+            "{verdict}"
+        );
     }
 
     /// Backend factory over the crate's `MockProducer` (auto-complete: every
