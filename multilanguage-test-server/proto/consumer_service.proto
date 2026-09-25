@@ -145,7 +145,10 @@ message CreateConsumerResponse {
 
 message ConsumerCloseRequest {
   uint64 consumer_id = 1;
-  optional int64 timeout_ms = 2;
+  // Was `timeout_ms`, carrying Java's deprecated `close(Duration)`, which is
+  // not translated.
+  reserved 2;
+  reserved "timeout_ms";
 }
 
 // ---------------------------------------------------------------------------

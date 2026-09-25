@@ -1059,15 +1059,6 @@ where
         .await
     }
 
-    #[allow(deprecated)]
-    async fn close_with_timeout(&mut self, _timeout: Duration) -> Result<(), Error> {
-        // Java line 578-582: `@Deprecated close(Duration)` sets the flag
-        // directly; unlike `AsyncKafkaConsumer` it does NOT forward to
-        // `close(CloseOptions.timeout(..))`.
-        self.closed = true;
-        Ok(())
-    }
-
     async fn close_with_options(&mut self, _options: CloseOptions) -> Result<(), Error> {
         // Java line 594-596: ignores the options.
         self.closed = true;

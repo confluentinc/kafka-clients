@@ -638,25 +638,15 @@ impl Consumer<Vec<u8>, Vec<u8>> for MultilanguageConsumer {
     // ── lifecycle ──
     async fn close(&mut self) -> Result<(), Error> {
         let mut client = self.client.clone();
-        self.status_rpc(client.close(proto::ConsumerCloseRequest { consumer_id: self.consumer_id, timeout_ms: None }))
+        self.status_rpc(client.close(proto::ConsumerCloseRequest { consumer_id: self.consumer_id }))
             .await
-    }
-
-    #[allow(deprecated)]
-    async fn close_with_timeout(&mut self, timeout: Duration) -> Result<(), Error> {
-        let mut client = self.client.clone();
-        let timeout_ms = i64::try_from(timeout.as_millis()).unwrap_or(i64::MAX);
-        self.status_rpc(
-            client.close(proto::ConsumerCloseRequest { consumer_id: self.consumer_id, timeout_ms: Some(timeout_ms) }),
-        )
-        .await
     }
 
     async fn close_with_options(&mut self, _options: CloseOptions) -> Result<(), Error> {
         // The server-side close ignores per-call timeouts, so `CloseOptions::timeout`
         // is deliberately not forwarded and this maps to a plain close.
         let mut client = self.client.clone();
-        self.status_rpc(client.close(proto::ConsumerCloseRequest { consumer_id: self.consumer_id, timeout_ms: None }))
+        self.status_rpc(client.close(proto::ConsumerCloseRequest { consumer_id: self.consumer_id }))
             .await
     }
 }
