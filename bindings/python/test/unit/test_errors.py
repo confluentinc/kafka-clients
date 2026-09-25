@@ -56,6 +56,7 @@ from confluent_kafka.common import (
 )
 from confluent_kafka.common.config import ConfigError
 from confluent_kafka.common.errors import (
+    AuthenticationError,
     CoordinatorNotAvailableError,
     CorruptRecordError,
     DisconnectError,
@@ -64,9 +65,11 @@ from confluent_kafka.common.errors import (
     InterruptError,
     InvalidMetadataError,
     InvalidTopicError,
+    LogDirNotFoundError,
     NotLeaderOrFollowerError,
     RecordDeserializationError,
     RecordTooLargeError,
+    ReplicaNotAvailableError,
     ResourceNotFoundError,
     RetriableError,
     ThrottlingQuotaExceededError,
@@ -216,6 +219,20 @@ def test_every_python_error_class_is_a_java_class() -> None:
     assert len(_BY_JAVA) == 169
 
 
+def test_only_an_exception_suffix_becomes_error() -> None:
+    # CLAUDE.md, Idiom translations: "a class name's Exception suffix becomes
+    # Error, nothing else changes", so the two suffixless Java exceptions keep
+    # their names.
+    for _module, name, java in ERRORS:
+        simple = java.rsplit(".", 1)[1]
+        expected = simple[: -len("Exception")] + "Error" if simple.endswith("Exception") else simple
+        assert name == expected, java
+    from confluent_kafka.common.errors import InvalidRegularExpression, OffsetMetadataTooLarge
+
+    assert InvalidRegularExpression.__name__ == "InvalidRegularExpression"
+    assert OffsetMetadataTooLarge.__module__ == "confluent_kafka.common.errors"
+
+
 def test_each_error_lives_in_the_module_of_its_java_package() -> None:
     for module, name, java in ERRORS:
         cls = _BY_JAVA[java]
@@ -263,8 +280,9 @@ def _instance(cls: type[BaseException]) -> BaseException:
         {"fetch_offsets": {_TP: 1}, "divergent_offsets": {}},
         {"metric": KafkaMetric._snapshot(name="n", group="g", value=1.0), "value": 1.0,
          "bound": 0.5},
-        {"origin": None, "partition": _TP, "offset": 1, "timestamp": 5, "message": "m",
-         "cause": ValueError("v")},
+        {"origin": None, "partition": _TP, "offset": 1, "timestamp": 5,
+         "timestamp_type": TimestampType.CREATE_TIME, "key_buffer": None, "value_buffer": b"v",
+         "headers": (), "message": "m", "cause": ValueError("v")},
         {"message": "m", "request_correlation_id": 1, "response_correlation_id": 2},
     ]
     for kwargs in tries:
@@ -499,7 +517,138 @@ def test_record_deserialization_constructors() -> None:
     assert d.timestamp() == -1
     assert d.timestamp_type() is TimestampType.NO_TIMESTAMP_TYPE
     assert d.key_buffer() is None and d.value_buffer() is None
-    assert d.headers() == ()
+    # Java's deprecated constructor assigns headers = null.
+    assert d.headers() is None
+    # Java's null buffers and origin are values of the full constructor.
+    n = RecordDeserializationError(
+        origin=None, partition=_TP, offset=2, timestamp=-1,
+        timestamp_type=TimestampType.NO_TIMESTAMP_TYPE, key_buffer=None, value_buffer=None,
+        headers=(), message="m")
+    assert (n.origin(), n.key_buffer(), n.value_buffer(), n.headers()) == (None, None, None, ())
+
+
+def test_record_deserialization_accepts_exactly_java_s_constructors() -> None:
+    # The deprecated constructor assigns the fields itself and passes nothing
+    # to the full one, so none of the full one's parameters may be left out
+    # (CLAUDE.md, Python Binding Conventions, Signatures).
+    forms = ("RecordDeserializationError() takes one of (partition, offset, message, cause), "
+             "(origin, partition, offset, timestamp, timestamp_type, key_buffer, value_buffer, "
+             "headers, message, cause); got ")
+    origin = RecordDeserializationError.DeserializationExceptionOrigin.KEY
+    for kwargs, got in [
+        ({"origin": origin, "partition": _TP, "offset": 1, "message": "m"},
+         "(origin, partition, offset, message, cause)"),
+        ({"partition": _TP, "offset": 1, "message": "m", "key_buffer": b"x"},
+         "(partition, offset, key_buffer, message, cause)"),
+        ({"origin": None, "partition": _TP, "offset": 1, "timestamp": 5, "message": "m"},
+         "(origin, partition, offset, timestamp, message, cause)"),
+    ]:
+        with pytest.raises(IllegalArgumentError) as exc:
+            RecordDeserializationError(**kwargs)  # type: ignore[call-overload]
+        assert str(exc.value) == forms + got
+
+
+# Every generated error class with java_forms: each given set Java has no
+# constructor for, with the exact message (CLAUDE.md, Tests and typing).
+_REJECTED: list[tuple[type[BaseException], dict[str, Any], str]] = [
+    (AuthenticationError, {},
+     "AuthenticationError() takes one of (message), (cause), (message, cause); got ()"),
+    (InterruptError, {},
+     "InterruptError() takes one of (cause), (message, cause), (message); got ()"),
+    (LogDirNotFoundError, {},
+     "LogDirNotFoundError() takes one of (message), (message, cause), (cause); got ()"),
+    (ReplicaNotAvailableError, {},
+     "ReplicaNotAvailableError() takes one of (message), (message, cause), (cause); got ()"),
+    (TransactionAbortedError, {"cause": ValueError("c")},
+     "TransactionAbortedError() takes one of (message, cause), (message), (); got (cause)"),
+    (InvalidTopicError, {"cause": ValueError("c"), "invalid_topics": ["t"]},
+     "InvalidTopicError() takes one of (), (message, cause), (message), (cause), "
+     "(invalid_topics), (message, invalid_topics); got (cause, invalid_topics)"),
+    (InvalidTopicError, {"message": "m", "cause": ValueError("c"), "invalid_topics": ["t"]},
+     "InvalidTopicError() takes one of (), (message, cause), (message), (cause), "
+     "(invalid_topics), (message, invalid_topics); got (message, cause, invalid_topics)"),
+    (RecordTooLargeError, {"cause": ValueError("c"), "record_too_large_partitions": {_TP: 1}},
+     "RecordTooLargeError() takes one of (), (message, cause), (message), (cause), "
+     "(message, record_too_large_partitions); got (cause, record_too_large_partitions)"),
+    (RecordTooLargeError, {"record_too_large_partitions": {_TP: 1}},
+     "RecordTooLargeError() takes one of (), (message, cause), (message), (cause), "
+     "(message, record_too_large_partitions); got (record_too_large_partitions)"),
+    (NoOffsetForPartitionError, {},
+     "NoOffsetForPartitionError() takes one of (partition), (partitions); got ()"),
+    (NoOffsetForPartitionError, {"partition": _TP, "partitions": [_TP]},
+     "NoOffsetForPartitionError() takes one of (partition), (partitions); "
+     "got (partition, partitions)"),
+    (TopicAuthorizationError, {},
+     "TopicAuthorizationError() takes one of (message, unauthorized_topics), "
+     "(unauthorized_topics), (message); got ()"),
+    (ConfigError, {}, "ConfigError() takes one of (message), (name, value), "
+     "(name, value, message); got ()"),
+    (ConfigError, {"name": "n"}, "ConfigError() takes one of (message), (name, value), "
+     "(name, value, message); got (name)"),
+    (RetriableCommitFailedError, {},
+     "RetriableCommitFailedError() takes one of (cause), (message), (message, cause); got ()"),
+]
+
+
+@pytest.mark.parametrize("cls,kwargs,message", _REJECTED,
+                         ids=[f"{c.__name__}-{'-'.join(k) or 'none'}" for c, k, _ in _REJECTED])
+def test_generated_errors_reject_what_java_has_no_constructor_for(
+        cls: type[BaseException], kwargs: dict[str, Any], message: str) -> None:
+    with pytest.raises(IllegalArgumentError) as exc:
+        cls(**kwargs)
+    assert str(exc.value) == message
+
+
+def test_every_java_forms_error_class_has_a_rejection_case() -> None:
+    # A class gets java_forms only when its union accepts a combination that
+    # matches no Java constructor (CLAUDE.md, Signatures), and each such class
+    # has its rejections tested above.
+    decorated = {cls for cls in error_classes()
+                 if getattr(cls.__init__, "__wrapped__", None) is not None}
+    covered = {cls for cls, _, _ in _REJECTED} | {RecordDeserializationError}
+    assert decorated == covered
+
+
+def test_throttling_quota_exceeded_tells_its_forms_apart_without_java_forms() -> None:
+    # Every combination is a Java constructor, (String) and (int, String), so
+    # the class has no decorator and one signature; the body tells the forms
+    # apart by whether throttle_time_ms is given.
+    assert getattr(ThrottlingQuotaExceededError.__init__, "__wrapped__", None) is None
+    assert ThrottlingQuotaExceededError(message="m").throttle_time_ms() == 0
+    assert ThrottlingQuotaExceededError(throttle_time_ms=0, message="m").throttle_time_ms() == 0
+    assert ThrottlingQuotaExceededError(throttle_time_ms=7, message="m").throttle_time_ms() == 7
+    assert str(ThrottlingQuotaExceededError(throttle_time_ms=7, message="m")) == "m"
+    clone = pickle.loads(pickle.dumps(ThrottlingQuotaExceededError(throttle_time_ms=7, message="m")))
+    assert clone.throttle_time_ms() == 7
+
+
+def test_group_authorization_for_group_id() -> None:
+    # Java's public static GroupAuthorizationException.forGroupId(String).
+    e = GroupAuthorizationError.for_group_id(group_id="g")
+    assert type(e) is GroupAuthorizationError
+    assert str(e) == "Not authorized to access group: g"
+    assert e.group_id() == "g"
+    with pytest.raises(TypeError):
+        GroupAuthorizationError.for_group_id("g")  # type: ignore[misc]
+
+
+def test_iterable_arguments_are_read_once() -> None:
+    # An Iterable argument is materialized as Java's Set.copyOf does, so a
+    # generator gives the same message, payload and pickled arguments.
+    cases: list[tuple[BaseException, str, Any]] = [
+        (TopicAuthorizationError(unauthorized_topics=(t for t in ["a", "b"])),
+         "Not authorized to access topics: [a, b]", lambda e: e.unauthorized_topics()),
+        (InvalidTopicError(invalid_topics=(t for t in ["x"])), "Invalid topics: [x]",
+         lambda e: e.invalid_topics()),
+        (NoOffsetForPartitionError(partitions=(p for p in [_TP])),
+         "Undefined offset with no reset policy for partitions: [t-0]",
+         lambda e: e.partitions()),
+    ]
+    for error, message, payload in cases:
+        assert str(error) == message
+        clone = pickle.loads(pickle.dumps(error))
+        assert str(clone) == message
+        assert payload(clone) == payload(error) and payload(error)
 
 
 def test_singletons() -> None:

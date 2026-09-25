@@ -72,7 +72,7 @@ from .invalid_principal_type_error import InvalidPrincipalTypeError as InvalidPr
 from .invalid_producer_epoch_error import InvalidProducerEpochError as InvalidProducerEpochError
 from .invalid_record_state_error import InvalidRecordStateError as InvalidRecordStateError
 from .invalid_registration_error import InvalidRegistrationError as InvalidRegistrationError
-from .invalid_regular_expression_error import InvalidRegularExpressionError as InvalidRegularExpressionError
+from .invalid_regular_expression import InvalidRegularExpression as InvalidRegularExpression
 from .invalid_replica_assignment_error import InvalidReplicaAssignmentError as InvalidReplicaAssignmentError
 from .invalid_replication_factor_error import InvalidReplicationFactorError as InvalidReplicationFactorError
 from .invalid_request_error import InvalidRequestError as InvalidRequestError
@@ -99,7 +99,7 @@ from .not_coordinator_error import NotCoordinatorError as NotCoordinatorError
 from .not_enough_replicas_after_append_error import NotEnoughReplicasAfterAppendError as NotEnoughReplicasAfterAppendError
 from .not_enough_replicas_error import NotEnoughReplicasError as NotEnoughReplicasError
 from .not_leader_or_follower_error import NotLeaderOrFollowerError as NotLeaderOrFollowerError
-from .offset_metadata_too_large_error import OffsetMetadataTooLargeError as OffsetMetadataTooLargeError
+from .offset_metadata_too_large import OffsetMetadataTooLarge as OffsetMetadataTooLarge
 from .offset_moved_to_tiered_storage_error import OffsetMovedToTieredStorageError as OffsetMovedToTieredStorageError
 from .offset_not_available_error import OffsetNotAvailableError as OffsetNotAvailableError
 from .offset_out_of_range_error import OffsetOutOfRangeError as OffsetOutOfRangeError
@@ -223,7 +223,7 @@ __all__ = [
     "InvalidProducerEpochError",
     "InvalidRecordStateError",
     "InvalidRegistrationError",
-    "InvalidRegularExpressionError",
+    "InvalidRegularExpression",
     "InvalidReplicaAssignmentError",
     "InvalidReplicationFactorError",
     "InvalidRequestError",
@@ -250,7 +250,7 @@ __all__ = [
     "NotEnoughReplicasAfterAppendError",
     "NotEnoughReplicasError",
     "NotLeaderOrFollowerError",
-    "OffsetMetadataTooLargeError",
+    "OffsetMetadataTooLarge",
     "OffsetMovedToTieredStorageError",
     "OffsetNotAvailableError",
     "OffsetOutOfRangeError",

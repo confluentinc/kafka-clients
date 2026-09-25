@@ -51,7 +51,7 @@ class ConfigError(KafkaError):
         *,
         name: str | None = None,
         value: Any = None,
-        message: str = UNSET,
+        message: str | None = UNSET,
         _java_form: int = -1,
     ) -> None:
         if _java_form == 0:

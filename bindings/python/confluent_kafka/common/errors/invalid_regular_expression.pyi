@@ -12,14 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# GENERATED, DO NOT EDIT (stub for confluent_kafka.common.errors.InvalidRegularExpressionError).
+# GENERATED, DO NOT EDIT (stub for confluent_kafka.common.errors.InvalidRegularExpression).
 
 from typing import ClassVar
 
 from confluent_kafka.common.errors.api_error import ApiError
 
-__all__ = ["InvalidRegularExpressionError"]
+__all__ = ["InvalidRegularExpression"]
 
-class InvalidRegularExpressionError(ApiError):
+class InvalidRegularExpression(ApiError):
     _ffi_id: ClassVar[int]
     def __init__(self, *, message: str) -> None: ...

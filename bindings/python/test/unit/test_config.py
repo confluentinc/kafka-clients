@@ -109,6 +109,26 @@ def test_bad_inputs(type_name: str, value: object, message: str) -> None:
     with pytest.raises(ConfigError) as exc:
         _config.coerce("name", value, type_name)
     assert str(exc.value) == f"Invalid value {java_str(value)} for configuration name: {message}"
+    # ConfigDef.parseType throws a new ConfigException: getCause() is null.
+    assert exc.value.__cause__ is None
+
+
+def test_java_number_parsers_report_java_s_messages() -> None:
+    from confluent_kafka._java import parse_int, parse_long, parse_long_string
+
+    for parse, text, message in [
+        (lambda s: parse_int(s), "x", 'For input string: "x"'),
+        (lambda s: parse_int(s), "3000000000", 'For input string: "3000000000"'),
+        (lambda s: parse_int(s, 16), "40000", 'Value out of range. Value:"40000" Radix:10'),
+        (parse_long_string, "", 'For input string: ""'),
+        (parse_long_string, "1_0", 'For input string: "1_0"'),
+        # The CharSequence overload (UUID.fromString) reports the index.
+        (lambda s: parse_long(s, 0, len(s), 16), "1g", 'Error at index 1 in: "1g"'),
+    ]:
+        with pytest.raises(IllegalArgumentError) as exc:
+            parse(text)
+        assert str(exc.value) == message
+    assert parse_int("-32768", 16) == -32768 and parse_long_string("+9") == 9
 
 
 def test_bad_class_name_is_rejected_where_the_class_is_loaded() -> None:
@@ -123,6 +143,14 @@ def test_bad_class_name_is_rejected_where_the_class_is_loaded() -> None:
     assert str(exc.value) == (
         "Invalid value ClassDoesNotExist for configuration key.serializer: "
         "Class ClassDoesNotExist could not be found.")
+    assert exc.value.__cause__ is None
+    # Java loads the trimmed name and prints the value as given.
+    originals, _ = _config.prepare({"key.serializer": " no.Such "}, client="producer")
+    with pytest.raises(ConfigError) as exc:
+        resolve_serde(None, originals, "key.serializer", is_key=True, default=bytes_serializer())
+    assert str(exc.value) == (
+        "Invalid value  no.Such  for configuration key.serializer: Class  no.Such  could not be "
+        "found.")
 
 
 # --------------------------------------------------------------------------- #
@@ -168,6 +196,22 @@ def test_prepare_coerces_known_keys_for_the_core() -> None:
                       "acks": "all", "unknown.key": "1"}
     # The user's configs, as given, for the serde route.
     assert originals["key.serializer"] == "x.Y" and originals["transactional.id"] is None
+
+
+def test_a_given_serde_argument_replaces_its_config_key() -> None:
+    # ProducerConfig.appendSerializerToConfig / ConsumerConfig.appendDeserializerToConfig:
+    # the argument's class replaces the key before ConfigDef parses it.
+    instance = object()
+    for client, key in (("producer", "key.serializer"), ("producer", "value.serializer"),
+                        ("consumer", "key.deserializer"), ("consumer", "value.deserializer")):
+        with pytest.raises(ConfigError) as exc:
+            _config.prepare({key: instance}, client=client)  # type: ignore[arg-type]
+        assert str(exc.value) == (
+            f"Invalid value {instance} for configuration {key}: "
+            "Expected a Class instance or class name.")
+        originals, native = _config.prepare({key: instance}, client=client,  # type: ignore[arg-type]
+                                            given_serdes=[key])
+        assert native == {} and originals[key] is instance
 
 
 def test_prepare_uses_the_client_config_def() -> None:

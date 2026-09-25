@@ -43,7 +43,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::java_parse::{self, CallKind, Ctor, Expr, GetterBody, JavaClass, Param, Visibility};
+use crate::java_parse::{self, CallKind, Ctor, Expr, Factory, GetterBody, JavaClass, Param, Visibility};
 
 /// Root of the Java source tree (Apache Kafka 4.3.1), relative to the repo root.
 const JAVA_ROOT: &str = "kafka/clients/src/main/java";
@@ -716,12 +716,15 @@ fn snake(name: &str) -> String {
     out
 }
 
-/// The Python class name for a Java simple class name: a trailing `Exception`
-/// becomes `Error`; a name without it just gets `Error`
-/// (`InvalidRegularExpression` -> `InvalidRegularExpressionError`).
+/// The Python class name for a Java simple class name: "a class name's
+/// `Exception` suffix becomes `Error`, nothing else changes" (CLAUDE.md,
+/// Python Binding Conventions, Idiom translations), so a name without the
+/// suffix is kept (`InvalidRegularExpression`, `OffsetMetadataTooLarge`).
 fn python_name(java_simple: &str) -> String {
-    let stem = java_simple.strip_suffix("Exception").unwrap_or(java_simple);
-    format!("{stem}Error")
+    match java_simple.strip_suffix("Exception") {
+        Some(stem) => format!("{stem}Error"),
+        None => java_simple.to_string(),
+    }
 }
 
 /// The Python module of a Java package: `clients` dropped, `java.*` at the root.
@@ -783,6 +786,7 @@ fn jdk_class(fqn: &str, parent: &str, ctors: &[JdkCtor]) -> JavaClass {
             .collect(),
         fields: Vec::new(),
         getters: Vec::new(),
+        factories: Vec::new(),
         enums: Vec::new(),
         singletons: Vec::new(),
     }
@@ -1370,6 +1374,13 @@ struct PyParam {
     name: String,
     java_ty: String,
     default: Dflt,
+    /// Java's null is one of its Java-given defaults, so the implementation
+    /// signature types it `T | None` even when its default is `UNSET`.
+    nullable: bool,
+    /// Its Java-given default `null` is a field default (a shorter
+    /// constructor assigns null to the field this parameter fills), so the
+    /// stubs of the forms that require it take `T | None` too.
+    field_nullable: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -1377,14 +1388,21 @@ struct PyForm {
     /// Index into the class's Java constructors.
     ctor: usize,
     params: Vec<String>,
+    /// The Java-given defaults `java_forms` fills: values a shorter
+    /// constructor passes to this one through `this(...)`.
     defaults: BTreeMap<String, String>,
+    /// Signature defaults only: constants a shorter constructor assigns to the
+    /// fields this one fills from parameters. They give a parameter its
+    /// default value but never let `java_forms` leave it out (CLAUDE.md,
+    /// Python Binding Conventions, Signatures: "Only such values are O's
+    /// Java-given defaults").
+    field_defaults: BTreeMap<String, String>,
     deprecated: Option<String>,
     effect: Effect,
 }
 
 struct Selection {
     form: usize,
-    fills: Vec<(String, String)>,
 }
 
 struct PyModel {
@@ -1518,6 +1536,7 @@ fn build_model(g: &Graph, info: &ClassInfo) -> anyhow::Result<PyModel> {
             ctor: ci,
             params: names,
             defaults: BTreeMap::new(),
+            field_defaults: BTreeMap::new(),
             deprecated: ctor.deprecated.clone(),
             effect,
         });
@@ -1559,8 +1578,11 @@ fn build_model(g: &Graph, info: &ClassInfo) -> anyhow::Result<PyModel> {
         }
     }
 
-    // Java-given defaults (b): a shorter constructor that is the longer one with
+    // Signature defaults (b): a shorter constructor that is the longer one with
     // constants assigned to the fields the longer one fills from parameters.
+    // The default rule counts them ("or the constant it assigns to that
+    // parameter's field"); matching does not, since the shorter constructor
+    // passes nothing to the longer one.
     for si in 0..forms.len() {
         if matches!(info.java.ctors[forms[si].ctor].call, Some((CallKind::This, _))) {
             continue;
@@ -1615,7 +1637,7 @@ fn build_model(g: &Graph, info: &ClassInfo) -> anyhow::Result<PyModel> {
                     } else {
                         k
                     };
-                    forms[ti].defaults.insert(p, k);
+                    forms[ti].field_defaults.insert(p, k);
                 }
             }
         }
@@ -1655,14 +1677,21 @@ fn build_model(g: &Graph, info: &ClassInfo) -> anyhow::Result<PyModel> {
             |members: &Vec<usize>| members.iter().any(|m| forms[*m].params.contains(p)) && !group_required(members);
         let required_somewhere = stub_groups.iter().any(|(_, m)| group_required(m));
         let optional_somewhere = stub_groups.iter().any(|(_, m)| group_optional(m));
-        let java_defaults: Vec<String> = forms.iter().filter_map(|f| f.defaults.get(p).cloned()).collect();
+        let java_defaults: Vec<String> = forms
+            .iter()
+            .filter_map(|f| f.defaults.get(p).or_else(|| f.field_defaults.get(p)).cloned())
+            .collect();
         let non_null_default = java_defaults.iter().any(|d| d != "None");
+        let field_default = forms.iter().any(|f| f.field_defaults.contains_key(p));
         let required_by_one = forms.iter().any(|f| f.params.contains(p) && !f.defaults.contains_key(p));
         let default = if p == "cause" {
             Dflt::NoneDefault
         } else if in_every {
             Dflt::Required
-        } else if (required_somewhere && optional_somewhere) || (non_null_default && required_by_one) {
+        } else if (required_somewhere && optional_somewhere) || ((non_null_default || field_default) && required_by_one)
+        {
+            // A field default is a value, not an overload: the form that
+            // requires the parameter must still see `None` as given.
             Dflt::Unset
         } else if let Some(first) = java_defaults.first() {
             if java_defaults.iter().any(|d| d != first) {
@@ -1678,11 +1707,15 @@ fn build_model(g: &Graph, info: &ClassInfo) -> anyhow::Result<PyModel> {
         } else {
             Dflt::NoneDefault
         };
-        params.push(PyParam { name: p.clone(), java_ty: jty, default });
+        let nullable = java_defaults.iter().any(|d| d == "None");
+        let field_nullable = forms
+            .iter()
+            .any(|f| f.field_defaults.get(p).map(String::as_str) == Some("None"));
+        params.push(PyParam { name: p.clone(), java_ty: jty, default, nullable, field_nullable });
     }
 
     // The java_forms table, replicated: which form each set of given names
-    // selects, and with which fills.
+    // selects.
     let bit: BTreeMap<&str, u64> = order.iter().enumerate().map(|(i, p)| (p.as_str(), 1u64 << i)).collect();
     let mask_of = |names: &[String]| names.iter().fold(0u64, |m, p| m | bit[p.as_str()]);
     let mut table: BTreeMap<u64, Selection> = BTreeMap::new();
@@ -1701,13 +1734,7 @@ fn build_model(g: &Graph, info: &ClassInfo) -> anyhow::Result<PyModel> {
                     continue;
                 }
             }
-            table.insert(
-                given,
-                Selection {
-                    form: fi,
-                    fills: left_out.iter().map(|p| ((*p).clone(), form.defaults[*p].clone())).collect(),
-                },
-            );
+            table.insert(given, Selection { form: fi });
         }
     }
     // A parameter in every overload is required: it always counts as given
@@ -1729,21 +1756,17 @@ fn build_model(g: &Graph, info: &ClassInfo) -> anyhow::Result<PyModel> {
                 given |= b;
             }
         }
+        // The decorator exists iff a combination the union accepts matches no
+        // Java overload (CLAUDE.md, Signatures: "A method whose every
+        // combination matches an overload has no decorator"); otherwise the
+        // body tells the forms apart by what is given, filling a form's
+        // Java-given defaults itself.
         match table.get(&given) {
             None => decorated = true,
             Some(sel) => {
                 reachable_set.insert(sel.form);
-                for (p, v) in &sel.fills {
-                    let d = &params.iter().find(|x| &x.name == p).unwrap().default;
-                    if &d.python() != v {
-                        decorated = true;
-                    }
-                }
             },
         }
-    }
-    if params.iter().any(|p| p.default == Dflt::Unset) {
-        decorated = true;
     }
     if decorated {
         // With the decorator every form a table entry selects is reachable.
@@ -1997,7 +2020,7 @@ fn given_expr(p: &PyParam) -> String {
     match &p.default {
         Dflt::Required => "True".into(),
         Dflt::NoneDefault => format!("{} is not None", p.name),
-        Dflt::Unset => format!("{} is not UNSET", p.name),
+        Dflt::Unset => format!("is_given({}, UNSET)", p.name),
         Dflt::Const(c) => format!("is_given({}, {})", p.name, c),
     }
 }
@@ -2006,7 +2029,7 @@ fn not_given_expr(p: &PyParam) -> String {
     match &p.default {
         Dflt::Required => "False".into(),
         Dflt::NoneDefault => format!("{} is None", p.name),
-        Dflt::Unset => format!("{} is UNSET", p.name),
+        Dflt::Unset => format!("not is_given({}, UNSET)", p.name),
         Dflt::Const(c) => format!("not is_given({}, {})", p.name, c),
     }
 }
@@ -2061,6 +2084,7 @@ fn param_decl(p: &PyParam, info: &ClassInfo, used: &mut BTreeSet<String>) -> any
         Dflt::Required => format!("{}: {ty}", p.name),
         Dflt::NoneDefault if ty == "Any" => format!("{}: Any = None", p.name),
         Dflt::NoneDefault => format!("{}: {ty} | None = None", p.name),
+        Dflt::Unset if p.nullable && ty != "Any" => format!("{}: {ty} | None = UNSET", p.name),
         Dflt::Unset => format!("{}: {ty} = UNSET", p.name),
         Dflt::Const(c) => format!("{}: {ty} = {c}", p.name),
     })
@@ -2079,9 +2103,15 @@ fn stub_param(
         return Ok(format!("cause: {ty} | None = None"));
     }
     if !optional {
+        if p.field_nullable && ty != "Any" {
+            return Ok(format!("{}: {ty} | None", p.name));
+        }
         return Ok(format!("{}: {ty}", p.name));
     }
-    let java_value = model.forms.iter().find_map(|f| f.defaults.get(&p.name).cloned());
+    let java_value = model
+        .forms
+        .iter()
+        .find_map(|f| f.defaults.get(&p.name).or_else(|| f.field_defaults.get(&p.name)).cloned());
     Ok(match (&p.default, java_value) {
         (Dflt::NoneDefault, _) => format!("{}: {ty} | None = None", p.name),
         (_, Some(v)) if v == "None" => format!("{}: {ty} | None = None", p.name),
@@ -2089,6 +2119,59 @@ fn stub_param(
         (Dflt::Const(c), None) => format!("{}: {ty} = {c}", p.name),
         _ => format!("{}: {ty} = ...", p.name),
     })
+}
+
+/// Java's public static factories (`GroupAuthorizationException.forGroupId`) as
+/// `@staticmethod`s building the class through the constructor Java calls
+/// (CLAUDE.md, Class family: "Java static methods -> `@staticmethod`"): each
+/// with its code and stub lines.
+type RenderedFactory<'a> = (&'a Factory, Vec<String>, Vec<String>);
+
+fn render_factories<'a>(
+    g: &Graph,
+    info: &'a ClassInfo,
+    model: &PyModel,
+    used: &mut BTreeSet<String>,
+) -> anyhow::Result<Vec<RenderedFactory<'a>>> {
+    let py_name = &info.py_name;
+    let mut out = Vec::new();
+    for f in &info.java.factories {
+        let mut env = Env::new();
+        let mut params = Vec::new();
+        for p in &f.params {
+            let py = snake(&p.name);
+            let ty = py_type(&p.ty, true, info, used)?;
+            params.push(format!("{py}: {ty}"));
+            env.insert(p.name.clone(), PyVal::param(&py, &p.ty));
+        }
+        let vals: Vec<PyVal> = f.args.iter().map(|a| g.translate(a, &env)).collect::<anyhow::Result<_>>()?;
+        let target = g.resolve(&info.java_fqn, &vals, false)?;
+        let form = model
+            .forms
+            .iter()
+            .find(|form| form.ctor == target)
+            .ok_or_else(|| anyhow::anyhow!("{}.{}: calls a non-public constructor", info.java_fqn, f.name))?;
+        let kwargs: Vec<String> = form.params.iter().zip(&vals).map(|(k, v)| format!("{k}={}", v.expr)).collect();
+        let name = snake(&f.name);
+        let args = if params.is_empty() {
+            String::new()
+        } else {
+            format!("*, {}", params.join(", "))
+        };
+        let java_params: Vec<&str> = f.params.iter().map(|p| p.name.as_str()).collect();
+        let code = vec![
+            "    @staticmethod".to_string(),
+            format!("    def {name}({args}) -> {py_name}:"),
+            format!("        \"\"\"Java's static ``{}({})``.\"\"\"", f.name, java_params.join(", ")),
+            format!("        return {py_name}({})", kwargs.join(", ")),
+        ];
+        let sig = vec![
+            "    @staticmethod".to_string(),
+            format!("    def {name}({args}) -> {py_name}: ..."),
+        ];
+        out.push((f, code, sig));
+    }
+    Ok(out)
 }
 
 struct Rendered {
@@ -2186,6 +2269,14 @@ fn render_class(g: &Graph, info: &ClassInfo) -> anyhow::Result<Rendered> {
         ));
         body.push("            )".into());
     }
+    // An Iterable argument is read once, as Java's Set.copyOf reads its
+    // collection: the message, the payload and the pickled arguments then
+    // see the same elements, even for a generator.
+    for p in &model.params {
+        if py_type(&p.java_ty, true, info, &mut used)?.starts_with("Iterable[") {
+            body.push(format!("        {0} = _throwable.materialize({0})", p.name));
+        }
+    }
     if !model.decorated {
         // Undecorated: a deprecated form is recognized by its given names.
         for form in model.forms.iter().filter(|f| f.deprecated.is_some()) {
@@ -2247,7 +2338,20 @@ fn render_class(g: &Graph, info: &ClassInfo) -> anyhow::Result<Rendered> {
                 })
                 .collect()
         };
-        branches.push((conds, branch_code(g, info, form, "            ")));
+        let mut code = Vec::new();
+        if !model.decorated {
+            // Without the decorator nothing fills the form's Java-given
+            // defaults: a left-out parameter gets its value here.
+            for (name, value) in &form.defaults {
+                let p = model.params.iter().find(|p| &p.name == name).unwrap();
+                if p.default.python() != *value {
+                    code.push(format!("            if {}:", not_given_expr(p)));
+                    code.push(format!("                {name} = {value}"));
+                }
+            }
+        }
+        code.extend(branch_code(g, info, form, "            "));
+        branches.push((conds, code));
     }
     if !model.decorated {
         // A branch that differs from a longer one only by a None-default
@@ -2310,9 +2414,20 @@ fn render_class(g: &Graph, info: &ClassInfo) -> anyhow::Result<Rendered> {
     let kwargs: Vec<String> = model.params.iter().map(|p| format!("{0}={0}", p.name)).collect();
     body.push(format!("        self._java_kwargs = _throwable.kwargs({})", kwargs.join(", ")));
 
-    // getters
+    // getters, with the public static factories in their declaration places
     let mut getter_sigs: Vec<String> = Vec::new();
-    for gt in &info.java.getters {
+    let factories = render_factories(g, info, &model, &mut used)?;
+    let emit_factories = |at: usize, body: &mut Vec<String>, sigs: &mut Vec<String>| {
+        for (f, code, sig) in &factories {
+            if f.after_getters == at {
+                body.push(String::new());
+                body.extend(code.iter().cloned());
+                sigs.extend(sig.iter().cloned());
+            }
+        }
+    };
+    for (gi, gt) in info.java.getters.iter().enumerate() {
+        emit_factories(gi, &mut body, &mut getter_sigs);
         let name = getter_name(&gt.name);
         let mut ret = py_type(&gt.ret, false, info, &mut used)?;
         let code = match &gt.body {
@@ -2335,6 +2450,7 @@ fn render_class(g: &Graph, info: &ClassInfo) -> anyhow::Result<Rendered> {
         body.push(format!("        {code}"));
         getter_sigs.push(format!("    def {name}(self) -> {ret}: ..."));
     }
+    emit_factories(info.java.getters.len(), &mut body, &mut getter_sigs);
     if is_root_class(info) {
         body.push(String::new());
         body.push("    def __str__(self) -> str:".into());
@@ -2511,7 +2627,17 @@ fn render_class(g: &Graph, info: &ClassInfo) -> anyhow::Result<Rendered> {
         for p in &model.params {
             let decl = param_decl(p, info, &mut stub_used)?;
             ps.push(if p.default == Dflt::Unset {
-                decl.replace("= UNSET", "= ...")
+                // The stub shows the Java value (CLAUDE.md, Signatures: "the
+                // stubs show the Java value") when the forms agree on one.
+                let values: BTreeSet<&String> = model
+                    .forms
+                    .iter()
+                    .filter_map(|f| f.defaults.get(&p.name).or_else(|| f.field_defaults.get(&p.name)))
+                    .collect();
+                match values.iter().next() {
+                    Some(v) if values.len() == 1 => decl.replace("= UNSET", &format!("= {v}")),
+                    _ => decl.replace("= UNSET", "= ..."),
+                }
             } else {
                 decl
             });
@@ -2727,8 +2853,83 @@ pub fn generate(repo_root: &Path) -> anyhow::Result<()> {
         }
         fs::write(path, content)?;
     }
-    println!("✅ Wrote {} generated error-hierarchy file(s)", outputs.len());
+    // A class Java renamed or dropped leaves its old output behind: remove it.
+    let orphans = orphaned_outputs(repo_root, &outputs)?;
+    for path in &orphans {
+        fs::remove_file(path)?;
+    }
+    println!(
+        "✅ Wrote {} generated error-hierarchy file(s), removed {} orphaned",
+        outputs.len(),
+        orphans.len()
+    );
+    let unlisted = unlisted_packages(repo_root, &outputs)?;
+    if !unlisted.is_empty() {
+        anyhow::bail!("generated packages missing from bindings/python/pyproject.toml: {unlisted:?}");
+    }
     Ok(())
+}
+
+/// The marker every generated error module and stub carries.
+const GENERATED_MARKER: &str = "GENERATED, DO NOT EDIT";
+
+/// Generated files under the package that the Java sources no longer produce
+/// (a renamed or dropped exception class): files carrying the generated
+/// marker that are not among `outputs`.
+fn orphaned_outputs(repo_root: &Path, outputs: &[(PathBuf, String)]) -> anyhow::Result<Vec<PathBuf>> {
+    let expected: BTreeSet<&PathBuf> = outputs.iter().map(|(p, _)| p).collect();
+    let mut orphans = Vec::new();
+    let mut stack = vec![repo_root.join(PY_ROOT).join("confluent_kafka")];
+    while let Some(dir) = stack.pop() {
+        for entry in fs::read_dir(&dir)? {
+            let path = entry?.path();
+            if path.is_dir() {
+                if path.file_name().is_some_and(|n| n != "__pycache__") {
+                    stack.push(path);
+                }
+                continue;
+            }
+            let is_source = path.extension().is_some_and(|e| e == "py" || e == "pyi");
+            if !is_source || expected.contains(&path) {
+                continue;
+            }
+            let text = fs::read_to_string(&path)?;
+            // Hand-written package inits carry only a spliced block, not the
+            // file marker.
+            if text.lines().take(25).any(|l| l.contains(GENERATED_MARKER)) {
+                orphans.push(path);
+            }
+        }
+    }
+    orphans.sort();
+    Ok(orphans)
+}
+
+/// The generated packages (directories with a generated `__init__.py`) that
+/// `pyproject.toml`'s hand-kept `packages` list lacks, so the wheel would
+/// leave them out.
+fn unlisted_packages(repo_root: &Path, outputs: &[(PathBuf, String)]) -> anyhow::Result<Vec<String>> {
+    let pyproject = fs::read_to_string(repo_root.join(PY_ROOT).join("pyproject.toml"))?;
+    let root = repo_root.join(PY_ROOT);
+    let mut missing = Vec::new();
+    for (path, _) in outputs {
+        if path.file_name().is_none_or(|n| n != "__init__.py") {
+            continue;
+        }
+        let Some(dir) = path.parent() else { continue };
+        let Ok(rel) = dir.strip_prefix(&root) else { continue };
+        let package = rel
+            .components()
+            .map(|c| c.as_os_str().to_string_lossy())
+            .collect::<Vec<_>>()
+            .join(".");
+        if !pyproject.contains(&format!("\"{package}\"")) {
+            missing.push(package);
+        }
+    }
+    missing.sort();
+    missing.dedup();
+    Ok(missing)
 }
 
 /// Fail when a generated file no longer matches what the Java sources + FFI enum
@@ -2742,6 +2943,14 @@ pub fn check_up_to_date(repo_root: &Path) -> anyhow::Result<Vec<PathBuf>> {
             _ => stale.push(path.clone()),
         }
     }
+    // Output left behind for a renamed or dropped Java class is stale too.
+    stale.extend(orphaned_outputs(repo_root, &outputs)?);
+    // So is a generated package the wheel would leave out.
+    stale.extend(
+        unlisted_packages(repo_root, &outputs)?
+            .into_iter()
+            .map(|p| PathBuf::from(format!("{PY_ROOT}/pyproject.toml (package {p} not listed)"))),
+    );
     Ok(stale)
 }
 
@@ -2928,7 +3137,8 @@ mod tests {
     #[test]
     fn names_and_modules() {
         assert_eq!(python_name("TopicAuthorizationException"), "TopicAuthorizationError");
-        assert_eq!(python_name("InvalidRegularExpression"), "InvalidRegularExpressionError");
+        assert_eq!(python_name("InvalidRegularExpression"), "InvalidRegularExpression");
+        assert_eq!(python_name("OffsetMetadataTooLarge"), "OffsetMetadataTooLarge");
         assert_eq!(snake("TopicAuthorizationError"), "topic_authorization_error");
         assert_eq!(snake("throttleTimeMs"), "throttle_time_ms");
         assert_eq!(snake("SslAuthenticationError"), "ssl_authentication_error");
@@ -3020,21 +3230,110 @@ mod tests {
     }
 
     #[test]
-    fn field_assigned_constants_are_java_given_defaults() {
+    fn field_assigned_constants_are_signature_defaults_not_match_defaults() {
         let classes = build_graph(&repo_root()).unwrap();
+        // (String message) assigns nothing and passes nothing to (int, String):
+        // the field default 0 is no Java-given default for matching, so the
+        // two forms are matched strictly and throttle_time_ms is UNSET.
         let m = model_of(&classes, "org.apache.kafka.common.errors.ThrottlingQuotaExceededException");
-        assert_eq!(param(&m, "throttle_time_ms").default, Dflt::Const("0".into()));
+        assert_eq!(param(&m, "throttle_time_ms").default, Dflt::Unset);
+        // Both given sets are Java constructors: no decorator, no stubs.
+        assert!(!m.decorated);
+        assert!(m.stubs.is_empty());
         let m = model_of(&classes, "org.apache.kafka.common.errors.RecordDeserializationException");
         let full = &m.forms[1];
-        assert_eq!(full.defaults.get("origin").map(String::as_str), Some("None"));
-        assert_eq!(full.defaults.get("timestamp").map(String::as_str), Some("-1"));
+        // The deprecated constructor assigns the fields itself; it passes
+        // nothing to the full one, so no parameter of the full one may be left
+        // out (CLAUDE.md, Signatures: "Only such values are O's Java-given
+        // defaults").
+        assert!(full.defaults.is_empty());
+        assert_eq!(full.field_defaults.get("origin").map(String::as_str), Some("None"));
+        assert_eq!(full.field_defaults.get("timestamp").map(String::as_str), Some("-1"));
         assert_eq!(
-            full.defaults.get("timestamp_type").map(String::as_str),
+            full.field_defaults.get("timestamp_type").map(String::as_str),
             Some("TimestampType.NO_TIMESTAMP_TYPE")
         );
         // A header parameter defaults to ().
-        assert_eq!(full.defaults.get("headers").map(String::as_str), Some("()"));
+        assert_eq!(full.field_defaults.get("headers").map(String::as_str), Some("()"));
+        assert!(m.decorated);
+        for p in [
+            "origin",
+            "timestamp",
+            "timestamp_type",
+            "key_buffer",
+            "value_buffer",
+            "headers",
+        ] {
+            assert_eq!(param(&m, p).default, Dflt::Unset, "{p}");
+        }
+        assert!(param(&m, "key_buffer").field_nullable);
         assert!(m.forms[0].deprecated.as_deref().unwrap().starts_with("Since 3.9."));
+    }
+
+    #[test]
+    fn orphaned_outputs_and_unlisted_packages_are_found() {
+        let root = std::env::temp_dir().join(format!("xtask-orphans-{}", std::process::id()));
+        let errors = root.join(PY_ROOT).join("confluent_kafka/common/errors");
+        fs::create_dir_all(&errors).unwrap();
+        let kept = errors.join("kept_error.py");
+        let gone = errors.join("gone_error.pyi");
+        let hand = errors.join("_helper.py");
+        fs::write(&kept, format!("\"\"\"x\n\n{GENERATED_MARKER}.\n\"\"\"\n")).unwrap();
+        fs::write(&gone, format!("# {GENERATED_MARKER} (stub)\n")).unwrap();
+        fs::write(&hand, "\"\"\"Hand-written.\"\"\"\n").unwrap();
+        let init = errors.join("__init__.py");
+        let outputs = vec![(kept.clone(), String::new()), (init, String::new())];
+        assert_eq!(orphaned_outputs(&root, &outputs).unwrap(), vec![gone]);
+        fs::write(root.join(PY_ROOT).join("pyproject.toml"), "packages = [\"confluent_kafka\"]\n").unwrap();
+        assert_eq!(
+            unlisted_packages(&root, &outputs).unwrap(),
+            vec!["confluent_kafka.common.errors"]
+        );
+        fs::write(
+            root.join(PY_ROOT).join("pyproject.toml"),
+            "packages = [\"confluent_kafka\", \"confluent_kafka.common.errors\"]\n",
+        )
+        .unwrap();
+        assert!(unlisted_packages(&root, &outputs).unwrap().is_empty());
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn decorated_iff_the_union_accepts_a_set_no_java_constructor_takes() {
+        let classes = build_graph(&repo_root()).unwrap();
+        let g = Graph { classes: &classes };
+        for info in classes.values() {
+            let m = build_model(&g, info).unwrap();
+            let names: Vec<&String> = m.params.iter().map(|p| &p.name).collect();
+            let always: BTreeSet<&String> = m
+                .params
+                .iter()
+                .filter(|p| m.forms.iter().all(|f| f.params.contains(&p.name)) && p.name != "cause")
+                .map(|p| &p.name)
+                .collect();
+            let mut rejects = false;
+            for combo in 0..(1u64 << names.len()) {
+                let given: BTreeSet<&String> = names
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, _)| combo & (1 << i) != 0)
+                    .map(|(_, n)| *n)
+                    .collect();
+                if !always.is_subset(&given) {
+                    continue; // a required parameter left out is Python's TypeError
+                }
+                let cause_everywhere = m.forms.iter().all(|f| f.params.iter().any(|p| p == "cause"));
+                if cause_everywhere && !given.iter().any(|n| *n == "cause") {
+                    continue; // cause in every form is always given
+                }
+                let matches = m.forms.iter().any(|f| {
+                    given.iter().all(|n| f.params.contains(n))
+                        && f.params.iter().all(|p| given.contains(p) || f.defaults.contains_key(p))
+                });
+                rejects |= !matches;
+            }
+            assert_eq!(m.decorated, rejects, "{}", info.java_fqn);
+        }
     }
 
     #[test]

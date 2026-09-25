@@ -199,10 +199,15 @@ class _ProducerState:
         """Java's ``KafkaProducer(configs, keySerializer, valueSerializer)``:
         parse ``configs``, take the serializers (an argument wins over the
         config key; neither means ``bytes_serializer()``), build the core
-        producer, then log the unused configs. A construction failure raises its
-        typed error (Java's ``KafkaException("Failed to construct kafka
-        producer", cause)``) after closing the serializers built so far."""
-        originals, native = prepare(configs, client="producer")
+        producer, then log the unused configs. A given serializer argument
+        replaces its config key, which is then not parsed
+        (``ProducerConfig.appendSerializerToConfig``). A construction failure
+        raises its typed error (Java's ``KafkaException("Failed to construct
+        kafka producer", cause)``) after closing the serializers built so far."""
+        given = [key for key, argument in ((_KEY_SERIALIZER, key_serializer),
+                                           (_VALUE_SERIALIZER, value_serializer))
+                 if argument is not None]
+        originals, native = prepare(configs, client="producer", given_serdes=given)
         key = cast("Serializer[Any]", resolve_serde(
             key_serializer, originals, _KEY_SERIALIZER, is_key=True, default=bytes_serializer()))
         value: Serializer[Any] | None = None

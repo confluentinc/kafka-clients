@@ -45,7 +45,13 @@ def _read_headers(
     """Java's ``new RecordHeaders(Iterable<Header>)``: the written headers in
     their read form. ``None`` is no headers, as in Java. A ``None`` key raises
     ``NullPointerError`` with ``RecordHeader``'s message; an element that is not
-    a ``(str, bytes-like | None)`` pair is a ``TypeError``."""
+    a ``(str, bytes-like | None)`` pair, or a value that is not one C-contiguous
+    run of bytes, is a ``TypeError``; a released ``memoryview`` is a
+    ``ValueError``.
+
+    Each value is kept as the record's own read-only view of the caller's
+    bytes, not a copy (CLAUDE.md §12): the caller releasing its view does not
+    release the record's."""
     if headers is None:
         return ()
     result: list[tuple[str, memoryview | None]] = []
@@ -60,14 +66,23 @@ def _read_headers(
             raise TypeError(f"header[{index}] key must be a str; got {type(key).__name__}")
         if value is None:
             result.append((key, None))
-        elif isinstance(value, memoryview) and value.readonly:
-            result.append((key, value))
-        elif isinstance(value, _BYTE_LIKE):
-            result.append((key, memoryview(value).toreadonly()))
-        else:
+            continue
+        if not isinstance(value, _BYTE_LIKE):
             raise TypeError(
                 f"header[{index}] value must be bytes-like or None; got {type(value).__name__}")
+        view = memoryview(value)  # a released memoryview raises ValueError here
+        if not view.c_contiguous:
+            raise TypeError(f"header[{index}] value must be a C-contiguous buffer")
+        if view.format != "B" or view.ndim != 1:
+            view = view.cast("B")
+        result.append((key, view if view.readonly else view.toreadonly()))
     return tuple(result)
+
+
+def _hand_out(headers: tuple[tuple[str, memoryview | None], ...]) -> Headers:
+    """The record's headers for a caller: fresh views of the same bytes, so a
+    caller releasing one (``with value:``) leaves the record's intact."""
+    return tuple((key, None if value is None else value[:]) for key, value in headers)
 
 
 def _headers_to_string(headers: Sequence[tuple[str, memoryview | None]]) -> str:

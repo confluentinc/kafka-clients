@@ -31,7 +31,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, Generic, TypeVar, overload
 
 from confluent_kafka._args import UNSET, Form, java_forms
 from confluent_kafka._java import java_str
-from confluent_kafka.common.headers import Headers, _headers_to_string, _read_headers
+from confluent_kafka.common.headers import Headers, _hand_out, _headers_to_string, _read_headers
 from confluent_kafka.common.timestamp_type import TimestampType
 from confluent_kafka.illegal_argument_error import IllegalArgumentError
 
@@ -146,7 +146,7 @@ class ConsumerRecord(Generic[K_co, V_co]):
         self._serialized_value_size = serialized_value_size
         self._key: K_co | None = key
         self._value: V_co | None = value
-        self._headers: Headers = _read_headers(headers)
+        self._headers = _read_headers(headers)
         self._leader_epoch = leader_epoch
         self._delivery_count = delivery_count
 
@@ -160,7 +160,7 @@ class ConsumerRecord(Generic[K_co, V_co]):
 
     def headers(self) -> Headers:
         """The headers (never ``None``)."""
-        return self._headers
+        return _hand_out(self._headers)
 
     def key(self) -> K_co | None:
         """The key (or ``None`` if no key is specified)."""

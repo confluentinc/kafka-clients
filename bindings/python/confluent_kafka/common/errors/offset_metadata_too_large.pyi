@@ -12,14 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# GENERATED, DO NOT EDIT (stub for confluent_kafka.common.errors.OffsetMetadataTooLargeError).
+# GENERATED, DO NOT EDIT (stub for confluent_kafka.common.errors.OffsetMetadataTooLarge).
 
 from typing import ClassVar
 
 from confluent_kafka.common.errors.api_error import ApiError
 
-__all__ = ["OffsetMetadataTooLargeError"]
+__all__ = ["OffsetMetadataTooLarge"]
 
-class OffsetMetadataTooLargeError(ApiError):
+class OffsetMetadataTooLarge(ApiError):
     _ffi_id: ClassVar[int]
     def __init__(self, *, message: str | None = None, cause: BaseException | None = None) -> None: ...

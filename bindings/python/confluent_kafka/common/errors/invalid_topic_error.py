@@ -51,7 +51,7 @@ class InvalidTopicError(InvalidConfigurationError):
         Form("message"),
         Form("cause"),
         Form("invalid_topics"),
-        Form("message", "invalid_topics", defaults={"invalid_topics": ()}),
+        Form("message", "invalid_topics"),
     )
     def __init__(
         self,
@@ -61,11 +61,15 @@ class InvalidTopicError(InvalidConfigurationError):
         invalid_topics: Iterable[str] = UNSET,
         _java_form: int = -1,
     ) -> None:
+        invalid_topics = _throwable.materialize(invalid_topics)
         if _java_form == 0:
             _throwable.init(self, None, None)
             self._invalid_topics = set()
         elif _java_form == 1:
             _throwable.init(self, message, cause)
+            self._invalid_topics = set()
+        elif _java_form == 2:
+            _throwable.init(self, message, None)
             self._invalid_topics = set()
         elif _java_form == 3:
             _throwable.init(self, _throwable.cause_message(cause), cause)

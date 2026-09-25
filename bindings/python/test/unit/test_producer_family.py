@@ -341,6 +341,21 @@ def test_kafka_producer_config_route_serializer() -> None:
     _UpperSerializer.configured.clear()
 
 
+def test_serializer_argument_wins_over_its_config_key() -> None:
+    # Critic 74 F1 (Actor 74): the argument wins and the config key is ignored,
+    # not even parsed: Java's ProducerConfig.appendSerializerToConfig replaces
+    # the key with the argument's class before ConfigDef parses it
+    # (ProducerConfig.java:666).
+    class NotAClass:
+        pass
+
+    serializer = string_serializer()
+    for cls in (KafkaProducer, AsyncKafkaProducer):
+        p = cls(configs={**UNREACHABLE, "key.serializer": NotAClass(), "value.serializer": 5},
+                key_serializer=serializer, value_serializer=serializer)
+        _close_now(p)
+
+
 def _close_now(p: KafkaProducer[Any, Any] | AsyncKafkaProducer[Any, Any]) -> None:
     if isinstance(p, AsyncKafkaProducer):
         asyncio.run(p.close(timeout=0))
