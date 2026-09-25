@@ -1477,33 +1477,20 @@ pub unsafe extern "C" fn kafka_common_Error_record_deserialization(
     }
 }
 
-/// Returns which side of the record failed to deserialize
-/// (`0` = key, `1` = value), writing it to `*out_origin` and returning `true`
-/// if recorded; returns `false` (leaving `*out_origin` untouched) if absent —
-/// Java's deprecated four-argument constructor does not record it.
+/// Returns which side of the record failed to deserialize, as the ordinal of
+/// Java's `DeserializationExceptionOrigin` (`0` = key, `1` = value).
 ///
 /// # Safety
 ///
-/// `handle` must be a valid, non-null [`kafka_common_RecordDeserializationError_t`];
-/// `out_origin` must be a valid pointer.
+/// `handle` must be a valid, non-null [`kafka_common_RecordDeserializationError_t`].
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_RecordDeserializationError_origin(
     handle: *const kafka_common_RecordDeserializationError_t,
-    out_origin: *mut i32,
-) -> bool {
+) -> i32 {
     let e = unsafe { &*(handle as *const crate::common::errors::RecordDeserializationError) };
     match e.origin() {
-        Some(origin) => {
-            if !out_origin.is_null() {
-                let id = match origin {
-                    crate::common::errors::DeserializationErrorOrigin::Key => 0,
-                    crate::common::errors::DeserializationErrorOrigin::Value => 1,
-                };
-                unsafe { *out_origin = id };
-            }
-            true
-        },
-        None => false,
+        crate::common::errors::DeserializationErrorOrigin::Key => 0,
+        crate::common::errors::DeserializationErrorOrigin::Value => 1,
     }
 }
 
@@ -2809,9 +2796,7 @@ mod tests {
             let handle = kafka_common_Error_record_deserialization(error);
             assert!(!handle.is_null());
 
-            let mut origin = -1;
-            assert!(kafka_common_RecordDeserializationError_origin(handle, &mut origin));
-            assert_eq!(origin, 0, "Key -> 0");
+            assert_eq!(kafka_common_RecordDeserializationError_origin(handle), 0, "Key -> 0");
 
             let partition = kafka_common_RecordDeserializationError_partition(handle);
             assert!(!partition.is_null());
@@ -2860,10 +2845,8 @@ mod tests {
             // No key/value/headers -> absent conventions.
             let sparse = box_error(Error::RecordDeserialization(Box::new(record_deserialization_error())));
             let sparse_handle = kafka_common_Error_record_deserialization(sparse);
-            let mut no_origin = -1;
             // `record_deserialization_error()` uses `DeserializationErrorOrigin::Value`.
-            assert!(kafka_common_RecordDeserializationError_origin(sparse_handle, &mut no_origin));
-            assert_eq!(no_origin, 1, "Value -> 1");
+            assert_eq!(kafka_common_RecordDeserializationError_origin(sparse_handle), 1, "Value -> 1");
             let mut none_len = -2;
             assert!(kafka_common_RecordDeserializationError_key_buffer(sparse_handle, &mut none_len).is_null());
             assert_eq!(none_len, -1);

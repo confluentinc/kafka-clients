@@ -38,7 +38,6 @@ mod mock_consumer;
 mod offset_and_metadata;
 mod offset_and_timestamp;
 mod offset_commit_callback;
-mod offset_reset_strategy;
 mod subscription_pattern;
 
 pub(crate) mod internals;
@@ -58,8 +57,6 @@ pub use mock_consumer::MockConsumer;
 pub use offset_and_metadata::OffsetAndMetadata;
 pub use offset_and_timestamp::OffsetAndTimestamp;
 pub use offset_commit_callback::OffsetCommitCallback;
-#[allow(deprecated)]
-pub use offset_reset_strategy::OffsetResetStrategy;
 pub use subscription_pattern::SubscriptionPattern;
 
 use std::collections::{HashMap, HashSet};
@@ -130,7 +127,7 @@ use crate::common::{Error, MetricName, PartitionInfo, TopicPartition};
 ///   superseded by the [`SubscriptionPattern`] variants which match
 ///   server-side regex semantics.
 /// - `poll(long timeoutMs)`, `close(Duration timeout)` (both
-///   `@Deprecated` in Java): not translated per CLAUDE.md §5.
+///   `@Deprecated` in Java): not translated per CLAUDE.md §3.
 #[async_trait]
 #[doc(alias = "org.apache.kafka.clients.consumer.Consumer")]
 pub trait Consumer<K, V>: Send + 'static
@@ -494,19 +491,15 @@ where
 
     /// Translates Java's `void close()`. Closes the consumer with default
     /// timeout.
-    #[doc(alias = "org.apache.kafka.clients.consumer.Consumer#close")]
+    #[doc(alias = "org.apache.kafka.clients.consumer.Consumer#close()")]
     async fn close(&mut self) -> Result<(), Error>;
 
-    /// Translates Java's `@Deprecated void close(Duration timeout)`
-    /// (`Consumer.java:283`).
-    #[deprecated(
-        note = "mirroring Java's @Deprecated close(Duration); use close_with_options with CloseOptions::timeout"
-    )]
-    #[doc(alias = "org.apache.kafka.clients.consumer.Consumer#close")]
-    async fn close_with_timeout(&mut self, timeout: Duration) -> Result<(), Error>;
-
     /// Translates Java's `void close(CloseOptions option)`.
-    #[doc(alias = "org.apache.kafka.clients.consumer.Consumer#close")]
+    ///
+    /// Java's `@Deprecated void close(Duration timeout)` is not translated
+    /// (CLAUDE.md §3); pass `CloseOptions::new_timeout(timeout)` here instead,
+    /// which is what the Java overload's body does.
+    #[doc(alias = "org.apache.kafka.clients.consumer.Consumer#close(CloseOptions)")]
     async fn close_with_options(&mut self, options: CloseOptions) -> Result<(), Error>;
 
     /// Translates Java's `void wakeup()`. Sync — callable from any task,

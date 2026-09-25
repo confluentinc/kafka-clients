@@ -2225,7 +2225,7 @@ mod tests {
         let Error::RecordDeserialization(rde) = &err else {
             panic!("expected Error::RecordDeserialization, got: {err:?}");
         };
-        assert_eq!(Some(DeserializationErrorOrigin::Key), rde.origin());
+        assert_eq!(DeserializationErrorOrigin::Key, rde.origin());
         assert_eq!(&TopicPartition::new("test", 0), rde.topic_partition());
         assert_eq!(1, rde.offset());
         // Timestamp type is a batch-level property, so it matches the record

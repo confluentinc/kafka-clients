@@ -74,9 +74,11 @@ pub type PollTask<K, V> = Box<dyn FnOnce(&mut MockConsumer<K, V>) + Send>;
 /// # Java mapping
 ///
 /// Java's `MockConsumer(String offsetResetStrategy)` is [`MockConsumer::new`].
-/// The deprecated `MockConsumer(OffsetResetStrategy)` only forwards
-/// `offsetResetStrategy.toString()` to it, so Rust callers pass
-/// `strategy.to_string()` to [`MockConsumer::new`] instead.
+/// The deprecated `MockConsumer(OffsetResetStrategy)` and the deprecated
+/// `OffsetResetStrategy` enum are not translated (CLAUDE.md §3); that
+/// constructor only forwards `offsetResetStrategy.toString()`, so Rust callers
+/// pass the `auto.offset.reset` string (`"earliest"`, `"latest"`, `"none"`) to
+/// [`MockConsumer::new`] instead.
 #[doc(alias = "org.apache.kafka.clients.consumer.MockConsumer")]
 pub struct MockConsumer<K, V> {
     partitions: HashMap<String, Vec<PartitionInfo>>,
@@ -120,7 +122,7 @@ impl<K, V> MockConsumer<K, V> {
     /// Returns an `IllegalArgumentError` when `offset_reset_strategy` is not
     /// a valid `auto.offset.reset` value, as Java's
     /// `AutoOffsetResetStrategy.fromString` throws.
-    #[doc(alias = "org.apache.kafka.clients.consumer.MockConsumer#MockConsumer")]
+    #[doc(alias = "org.apache.kafka.clients.consumer.MockConsumer#MockConsumer(String)")]
     pub fn new(offset_reset_strategy: &str) -> Result<Self, Error> {
         Ok(Self::with_auto_offset_reset_strategy(AutoOffsetResetStrategy::from_string(
             offset_reset_strategy,
@@ -1057,15 +1059,6 @@ where
             CloseOptions::DEFAULT_CLOSE_TIMEOUT_MS,
         )))
         .await
-    }
-
-    #[allow(deprecated)]
-    async fn close_with_timeout(&mut self, _timeout: Duration) -> Result<(), Error> {
-        // Java line 578-582: `@Deprecated close(Duration)` sets the flag
-        // directly; unlike `AsyncKafkaConsumer` it does NOT forward to
-        // `close(CloseOptions.timeout(..))`.
-        self.closed = true;
-        Ok(())
     }
 
     async fn close_with_options(&mut self, _options: CloseOptions) -> Result<(), Error> {

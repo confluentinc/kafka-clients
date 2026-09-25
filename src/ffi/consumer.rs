@@ -64,8 +64,8 @@ use crate::consumer::AsyncKafkaConsumer;
 // is an unrelated concept.
 use crate::consumer::internals::AutoOffsetResetStrategy;
 use crate::consumer::{
-    CloseOptions, Consumer, ConsumerGroupMetadata, ConsumerHandle, ConsumerRebalanceListener, ConsumerRecord,
-    ConsumerRecords, GroupProtocol, MockConsumer, OffsetAndMetadata, OffsetAndTimestamp, OffsetCommitCallback,
+    Consumer, ConsumerGroupMetadata, ConsumerHandle, ConsumerRebalanceListener, ConsumerRecord, ConsumerRecords,
+    GroupProtocol, MockConsumer, OffsetAndMetadata, OffsetAndTimestamp, OffsetCommitCallback,
 };
 
 use super::common::{
@@ -4131,21 +4131,6 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_close(
     consumer: *const kafka_consumer_Consumer_t,
 ) -> *mut kafka_common_Error_t {
     unsafe { sync_void_op(consumer, |c| Box::pin(c.close())) }
-}
-
-/// Closes the consumer with a timeout in milliseconds (sync).
-///
-/// # Safety
-///
-/// `consumer` must be a valid handle.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_consumer_Consumer_close_with_timeout(
-    consumer: *const kafka_consumer_Consumer_t,
-    timeout_ms: i64,
-) -> *mut kafka_common_Error_t {
-    let timeout = Duration::from_millis(timeout_ms.max(0) as u64);
-    let options = CloseOptions::new_timeout(timeout);
-    unsafe { sync_void_op(consumer, move |c| Box::pin(c.close_with_options(options))) }
 }
 
 /// Closes the consumer asynchronously (default timeout).

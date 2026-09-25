@@ -56,7 +56,7 @@ impl ProduceResponse {
     pub const INVALID_OFFSET: i64 = -1;
 
     /// Creates a new `ProduceResponse` from data.
-    #[doc(alias = "org.apache.kafka.common.requests.ProduceResponse#ProduceResponse")]
+    #[doc(alias = "org.apache.kafka.common.requests.ProduceResponse#ProduceResponse(ProduceResponseData)")]
     pub fn new(data: ProduceResponseData) -> Self {
         Self { data }
     }

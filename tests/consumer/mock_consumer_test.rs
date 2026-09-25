@@ -386,31 +386,17 @@ async fn should_return_max_poll_records() {
     assert!(records.is_empty());
 }
 
-/// The three `close` forms Java declares (`Consumer.java:277,283,288`) are one
-/// overload group, so CLAUDE.md §2 gives the no-arg form the plain name and
-/// suffixes the other two with their parameter names. This asserts the split
-/// preserves `MockConsumer`'s observable behaviour: all three set `closed()`.
-///
-/// `close(Duration)` is checked separately rather than by forwarding, because
-/// Java's `MockConsumer.close(Duration)` (`MockConsumer.java:578-582`) sets the
-/// flag *directly* — unlike `AsyncKafkaConsumer.close(Duration)`
-/// (`AsyncKafkaConsumer.java:1543-1545`), which forwards to
-/// `close(CloseOptions.timeout(timeout))`.
+/// Java declares three `close` forms (`Consumer.java:277,283,288`). The
+/// deprecated `close(Duration)` is not translated (CLAUDE.md §3); CLAUDE.md §2
+/// gives the no-arg form the plain name and suffixes `close(CloseOptions)` with
+/// its parameter name. This asserts both preserve `MockConsumer`'s observable
+/// behaviour: each sets `closed()`.
 #[tokio::test]
-async fn close_overloads_all_mark_the_consumer_closed() {
+async fn close_overloads_mark_the_consumer_closed() {
     let mut consumer: MockConsumer<String, String> = MockConsumer::new("earliest").unwrap();
     assert!(!consumer.closed(), "fresh mock is open");
     consumer.close().await.expect("close");
     assert!(consumer.closed(), "close() closes");
-
-    let mut consumer: MockConsumer<String, String> = MockConsumer::new("earliest").unwrap();
-    assert!(!consumer.closed());
-    #[allow(deprecated)]
-    consumer
-        .close_with_timeout(std::time::Duration::from_secs(1))
-        .await
-        .expect("close_with_timeout");
-    assert!(consumer.closed(), "close_with_timeout(..) closes");
 
     let mut consumer: MockConsumer<String, String> = MockConsumer::new("earliest").unwrap();
     assert!(!consumer.closed());

@@ -24,7 +24,8 @@ blocks in Java:
     `async fn subscribe_with_pattern(...)`,
     `async fn subscribe_with_pattern_listener(...)`
   - `async fn unsubscribe()`, `async fn close()`,
-    `async fn close_with_timeout(...)`, `async fn close_with_options(...)`
+    `async fn close_with_options(...)` (Java's `@Deprecated close(Duration)`
+    is not translated — pass `CloseOptions::new_timeout(..)` instead)
   - `async fn partitions_for(...)`, `async fn list_topics(...)`
 
 Java methods that do not block remain synchronous:
@@ -45,7 +46,7 @@ Two notes on the names above, so neither is "corrected" back later:
   - **The `_with_` infixes are mandated by CLAUDE.md §2**, which requires
     `<base>_with_<param1>_<param2>` for every overload beyond the
     intersection-of-parameters one. `subscribe_with_topics`,
-    `close_with_timeout`, `close_with_options`, `commit_sync_with_offsets` etc.
+    `close_with_options`, `commit_sync_with_offsets` etc.
     are therefore not verbose spellings to be shortened — the plain name is
     reserved for the overload that exists in Java with the intersection
     parameter set.
@@ -374,7 +375,7 @@ compatibility but is NOT in scope now.
     `ConsumerConfig`, `ConsumerRecord`, `ConsumerRecords`,
     `ConsumerGroupMetadata`, `ConsumerRebalanceListener`,
     `OffsetCommitCallback`, `OffsetAndMetadata`, `OffsetAndTimestamp`,
-    `OffsetResetStrategy`, `GroupProtocol`, `CloseOptions`,
+    `GroupProtocol`, `CloseOptions`,
     `SubscriptionPattern`, the consumer exception hierarchy.
 
 **Out of scope (do NOT translate):**
