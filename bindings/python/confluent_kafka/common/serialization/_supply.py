@@ -34,6 +34,7 @@ import logging
 from collections.abc import Callable
 from typing import cast
 
+from confluent_kafka._java import java_trim
 from confluent_kafka.common.config.config_error import ConfigError
 from confluent_kafka.common.kafka_error import KafkaError
 from confluent_kafka.illegal_argument_error import IllegalArgumentError
@@ -69,21 +70,20 @@ def close_if_defined(serde: object) -> None:
 
 def _resolve_class(key: str, dotted_path: str) -> type:
     """Resolve a dotted path ``pkg.mod.Cls`` to the class, as Java's
-    ``ConfigDef`` parses a ``CLASS`` value with ``Class.forName``: an
-    unresolvable name raises ``ConfigError(name=key, value=dotted_path,
-    message="Class <name> could not be found.")``."""
-    trimmed = dotted_path.strip()
-    module_name, _, attr = trimmed.rpartition(".")
+    ``ConfigDef`` parses a ``CLASS`` value with ``Class.forName`` on the
+    trimmed name: an unresolvable name raises ``ConfigError(name=key,
+    value=dotted_path, message="Class <value> could not be found.")`` with the
+    value as given and no cause (``ConfigDef.parseType``)."""
+    module_name, _, attr = java_trim(dotted_path).rpartition(".")
     obj: object = None
-    cause: BaseException | None = None
     if module_name:
         try:
             obj = getattr(importlib.import_module(module_name), attr)
-        except (ImportError, AttributeError) as exc:
-            cause = exc
+        except (ImportError, AttributeError):
+            obj = None
     if not isinstance(obj, type):
         raise ConfigError(name=key, value=dotted_path,
-                          message=f"Class {trimmed} could not be found.") from cause
+                          message=f"Class {dotted_path} could not be found.")
     return obj
 
 

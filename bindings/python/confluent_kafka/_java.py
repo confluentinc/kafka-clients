@@ -35,7 +35,8 @@ import uuid
 from collections.abc import Mapping
 from decimal import Decimal
 
-__all__ = ["java_str", "java_trim", "parse_double", "parse_int", "parse_long", "uuid_from_string"]
+__all__ = ["java_str", "java_trim", "parse_double", "parse_int", "parse_long", "parse_long_string",
+           "uuid_from_string"]
 
 
 def _double_to_string(d: float) -> str:
@@ -158,13 +159,31 @@ def parse_long(s: str, begin: int = 0, end: int | None = None, radix: int = 10) 
     return result if negative else -result
 
 
-def parse_int(s: str, bits: int = 32) -> int:
-    """Java's ``Integer.parseInt(s)`` (``bits=32``) or ``Short.parseShort(s)``
-    (``bits=16``): ``Long.parseLong`` limited to the width."""
+def parse_long_string(s: str) -> int:
+    """Java's ``Long.parseLong(String)``: the whole string, and
+    ``NumberFormatException.forInputString``'s message (``For input string:
+    "…"``), where the ``CharSequence`` overload (:func:`parse_long`) reports
+    the index."""
     from .illegal_argument_error import IllegalArgumentError
 
-    value = parse_long(s)
-    if not -(1 << (bits - 1)) <= value < (1 << (bits - 1)):
+    try:
+        return parse_long(s)
+    except IllegalArgumentError:
+        raise IllegalArgumentError(message=f'For input string: "{s}"') from None
+
+
+def parse_int(s: str, bits: int = 32) -> int:
+    """Java's ``Integer.parseInt(String)`` (``bits=32``), with
+    ``forInputString``'s message for bad text or a value out of range, or
+    ``Short.parseShort(String)`` (``bits=16``), which parses an ``int`` and
+    reports a value out of the ``short`` range as ``Value out of range.
+    Value:"…" Radix:10``."""
+    from .illegal_argument_error import IllegalArgumentError
+
+    value = parse_long_string(s)
+    if not -(1 << 31) <= value < (1 << 31):
+        raise IllegalArgumentError(message=f'For input string: "{s}"')
+    if bits == 16 and not -(1 << 15) <= value < (1 << 15):
         raise IllegalArgumentError(message=f'Value out of range. Value:"{s}" Radix:10')
     return value
 
