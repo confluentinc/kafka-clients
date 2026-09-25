@@ -61,6 +61,7 @@ class InvalidTopicError(InvalidConfigurationError):
         invalid_topics: Iterable[str] = UNSET,
         _java_form: int = -1,
     ) -> None:
+        invalid_topics = _throwable.materialize(invalid_topics)
         if _java_form == 0:
             _throwable.init(self, None, None)
             self._invalid_topics = set()

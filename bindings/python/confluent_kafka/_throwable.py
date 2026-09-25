@@ -27,8 +27,8 @@ Private: the generated classes call these helpers; nothing else should.
 from __future__ import annotations
 
 import warnings
-from collections.abc import Iterable, Mapping
-from typing import Any
+from collections.abc import Collection, Iterable, Mapping
+from typing import Any, TypeVar, cast
 
 from ._args import UNSET
 
@@ -154,6 +154,18 @@ def singleton(cls: type[BaseException], name: str, message: str | None,
     setattr(error, _KWARGS, {})
     setattr(error, _SINGLETON, name)
     return error
+
+
+_I = TypeVar("_I", bound="Iterable[Any] | None")
+
+
+def materialize(value: _I) -> _I:
+    """An ``Iterable`` argument read once, as Java's ``Set.copyOf`` does: a
+    collection (or ``None``, ``UNSET``) as it is, any other iterable (a
+    generator) as a tuple of its elements, in order."""
+    if value is None or value is UNSET or isinstance(value, Collection):
+        return value
+    return cast(_I, tuple(value))
 
 
 def copy_set(value: Iterable[Any] | None) -> set[Any] | None:

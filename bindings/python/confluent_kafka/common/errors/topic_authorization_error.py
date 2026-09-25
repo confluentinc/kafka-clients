@@ -51,6 +51,7 @@ class TopicAuthorizationError(AuthorizationError):
         unauthorized_topics: Iterable[str] = UNSET,
         _java_form: int = -1,
     ) -> None:
+        unauthorized_topics = _throwable.materialize(unauthorized_topics)
         if _java_form == 0:
             _throwable.init(self, message, None)
             self._unauthorized_topics = _throwable.copy_set(unauthorized_topics)

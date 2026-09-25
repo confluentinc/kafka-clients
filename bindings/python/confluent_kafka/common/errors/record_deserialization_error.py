@@ -80,6 +80,7 @@ class RecordDeserializationError(SerializationError):
         cause: BaseException | None = None,
         _java_form: int = -1,
     ) -> None:
+        headers = _throwable.materialize(headers)
         if _java_form == 0:
             _throwable.init(self, message, cause)
             self._origin = None
