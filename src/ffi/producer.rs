@@ -1411,9 +1411,15 @@ pub unsafe extern "C" fn kafka_producer_Producer_send(
 /// `out_error` reports synchronous validation errors (null topic / bad
 /// key/value length) and synchronous send failures (closed producer), in which
 /// case `callback` is **not** invoked.
-/// A caught panic is reported the same way: the function returns null,
-/// `*out_error` receives a `kafka_common_ErrorCode_LOCAL_ILLEGAL_STATE` error,
-/// and `callback` is not invoked.
+/// A caught panic also returns null, with a
+/// `kafka_common_ErrorCode_LOCAL_ILLEGAL_STATE` error in `*out_error`, and the
+/// guard itself never invokes `callback`. The record is handed off when the
+/// producer appends it, with `callback`, to a batch; a panic raised after that
+/// leaves the record in its batch, so `callback` can still fire for it later.
+/// On a return that reports a panic, do not release `user_data` yourself: only
+/// `callback` may release it, if it fires. A caller that releases `user_data`
+/// on a null return must therefore pass a non-null `out_error`: with a null
+/// one, the panic is only logged and cannot be told from the failures above.
 ///
 /// # Zero-copy / lifetime contract
 ///
@@ -1836,8 +1842,15 @@ pub unsafe extern "C" fn kafka_producer_Producer_send_async(
 /// `out_errors[i]` receives a non-null handle for records that fail synchronous
 /// validation (those do not produce a callback); null otherwise. Returns the
 /// number of records accepted for delivery.
-/// A caught panic returns `-1`; it is not stored in `out_errors`, and `callback`
-/// is not invoked for it.
+/// A caught panic returns `-1`; it is not stored in `out_errors`, and the guard
+/// itself never invokes `callback`. Each record is handed off when it is queued
+/// for the producer's submission task. A panic raised after that, even inside
+/// the queueing step, leaves every record queued by then in flight, so
+/// `callback` can still fire for each of them. That includes the record whose
+/// queueing panicked, although its `out_errors` slot is left unwritten. `-1`
+/// does not say which records were queued, so treat every record as possibly
+/// queued: keep its `key`/`value` valid until its callback fires, and do not
+/// release `user_data`, which all the records share, yourself.
 ///
 /// The same zero-copy / lifetime contract as
 /// [`kafka_producer_Producer_send_async`] applies to every record's

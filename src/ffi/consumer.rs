@@ -4128,8 +4128,17 @@ fn make_commit_callback(
 /// returns as soon as the commit has been initiated (null on success, a non-null
 /// error handle on failure).
 /// A caught panic returns a `kafka_common_ErrorCode_LOCAL_ILLEGAL_STATE` error
-/// handle and does not invoke `callback`; `user_data_destroy` still fires, as
-/// for any other error.
+/// handle, and the guard itself never invokes `callback`. Against a real broker
+/// the callback is handed off when the consumer spawns the task that waits for
+/// the commit's result. A panic before that drops the registration during the
+/// unwind: `callback` never fires, and `user_data_destroy` fires exactly once,
+/// before this function returns. A panic raised after the task is queued, even
+/// inside the spawn, does not cancel it: `callback` can still fire later with
+/// the commit's outcome, although this call returned an error, and
+/// `user_data_destroy` still fires exactly once, after `callback` if it fires.
+/// On a return that reports a panic, do not release `user_data` yourself:
+/// `user_data_destroy` releases it, or, with no destroy hook, `callback` does
+/// if it fires.
 ///
 /// # Callback contract
 ///
@@ -4193,9 +4202,18 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_commit_async_with_callback(
 /// offsets fail to marshal (e.g. a negative offset) this returns the error
 /// **without registering the callback** — the callback never fires, but
 /// `user_data_destroy` still does.
-/// A caught panic is handled the same way: it returns a
-/// `kafka_common_ErrorCode_LOCAL_ILLEGAL_STATE` error handle, `callback` does
-/// not fire, and `user_data_destroy` still does.
+/// A caught panic returns a `kafka_common_ErrorCode_LOCAL_ILLEGAL_STATE` error
+/// handle, and the guard itself never invokes `callback`. Against a real broker
+/// the callback is handed off when the consumer spawns the task that waits for
+/// the commit's result. A panic before that drops the registration during the
+/// unwind: `callback` never fires, and `user_data_destroy` fires exactly once,
+/// before this function returns. A panic raised after the task is queued, even
+/// inside the spawn, does not cancel it: `callback` can still fire later with
+/// the commit's outcome, although this call returned an error, and
+/// `user_data_destroy` still fires exactly once, after `callback` if it fires.
+/// On a return that reports a panic, do not release `user_data` yourself:
+/// `user_data_destroy` releases it, or, with no destroy hook, `callback` does
+/// if it fires.
 ///
 /// # Safety
 ///

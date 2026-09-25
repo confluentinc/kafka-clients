@@ -258,6 +258,39 @@ proved wrong or incomplete). The Manager keeps §5.
 5. **Panics inside tokio tasks spawned by the FFI** are contained by tokio
    and surface as a dropped completion; this plan does not change that path.
    It is pre-existing and separate from the boundary guard.
+6. **Known limitation, decision deferred to the user (Critic 79 Note C): at a
+   D4 site, a panic after the spawn fires the callback twice.** Where the D4
+   hand-off is a `tokio::spawn`, the spawn can unwind after it has queued the
+   task. The C caller's thread is not one of the runtime's workers, so tokio
+   schedules the task through `schedule_task`'s remote path, and
+   `expect("failed to wake I/O driver")` (`runtime/io/driver.rs:260`, tokio
+   1.52.0) fires after `push_remote_task` has put the task on the inject
+   queue (§6 note 22). The task then runs and fires the callback, and the
+   guard's `on_panic` fires it too, so a callback that releases `user_data`
+   releases it twice. Before 4521 the same panic aborted the process.
+   Example: `kafka_producer_FutureRecordMetadata_get_async`
+   (`src/ffi/producer.rs:2124-2143` after loop 79's round 4, `2111-2130`
+   before it), whose `on_panic` and spawned task share no at-most-once flag.
+   The trigger is the same OS-level wake failure as note 22's post-hand-off
+   panics. Candidate fix: an at-most-once flag shared by the spawned task and
+   `on_panic`, for example set just before the spawn, with `on_panic` firing
+   only while it is clear. That is a D4 amendment touching `ffi-macros` and
+   the 80 `on_panic` sites, so loop 79 does not make it; the user decides.
+7. **Pre-existing, outside 4521 (Critic 79 Note B): `send_async` and
+   `send_batch_async` do not document their "producer is closed" failure.**
+   When the submission task has gone, `send_async` stores
+   `Error::local_illegal_state("producer is closed")` in `*out_error`
+   (`src/ffi/producer.rs:1828`) and `send_batch_async` stores it in the
+   record's `out_errors` slot (`:1945`); the request is dropped and its
+   callback never fires. The code is
+   `kafka_common_ErrorCode_LOCAL_ILLEGAL_STATE`, the panic's code, so only
+   the message prefix tells the two apart. `send_async`'s "`out_error`
+   reports only synchronous validation errors" (`:1722`) and
+   `send_batch_async`'s "`out_errors[i]` receives a non-null handle for
+   records that fail synchronous validation" (`:1842`) omit the case. Both
+   are on master `dfade0be` (`src/ffi/producer.rs:1678` / `:1778` and
+   `:1792` / `:1883` there), so neither is 4521's doing. The Manager tracks
+   it in `OPEN-BUGS.md`; loop 79 leaves the text as it is.
 
 ## 5. Status
 
@@ -421,9 +454,24 @@ code and record the difference here.
     `-1` carries no index, so entries already written to `out_futures` /
     `out_errors` go unreported (a caller that does not zero the arrays and free
     what is non-null leaks them), and records `send_batch_async` had already
-    accepted still deliver their callbacks. Reachable only through a bug — the
-    asserts run before the first write — and not documented in the header
-    (D9); the preamble's "destroy that handle" is the guidance.
+    accepted still deliver their callbacks. So does the record whose own
+    queueing panicked: `submit_tx.send` (`src/ffi/producer.rs:1943`) queues
+    the request and then wakes the submission task, and a panic in that wake
+    leaves the record queued with its `out_errors` slot unwritten (the slot is
+    written only after `send` returns, `:1948`, and `accepted` never counts
+    it, `:1949`). The asserts run before the first write, but a mid-loop panic
+    does not need a bug. Short of a bug in tokio, that wake's one panic is
+    `expect("failed to wake I/O driver")` (`runtime/io/driver.rs:260`, tokio
+    1.52.0), the OS failing to signal the I/O driver (note 22). `send_batch`
+    has the same wake after each append (`src/producer/kafka_producer.rs:1992`),
+    and a call to it from inside a tokio runtime panics in the first
+    `block_on`, after the slots of any invalid records before it were
+    written. (Round 1 wrote here "Reachable only through a bug — the asserts
+    run before the first write"; Critic 79 issue 3 showed that the wake
+    reaches it too, and note 24 records the correction.) The out-array leak
+    stays out of the header (D9). `send_batch_async`'s header paragraph now
+    says that queued records can still get their callbacks and that
+    `user_data` must not be released on a panic return (note 24).
 17. **§2.2 — §4.5 extends to the dispatcher thread.** It runs completion jobs
     without catching, so a panicking job ends that thread; `enqueue_or_run_inline`
     then runs later jobs inline on the task that produced them. Nothing crosses
@@ -499,23 +547,43 @@ code and record the difference here.
       the callback. "Does not invoke the callback" is what the guard does. A
       panic raised after the callback was handed on can still see it delivered:
       - note 16's mid-loop `send_batch_async` case (hence "not invoked *for
-        it*" in that sentence);
-      - the Critic's not-filed panic after registration in
-        `commit_async_with_callback`;
+        it*" in that sentence), including the record whose own queueing
+        panicked;
+      - in the two commits, a panic once the `tokio::spawn` of the
+        continuation that owns the callback
+        (`src/consumer/async_kafka_consumer.rs:4658`) has queued it, the spawn
+        itself included (the Critic's pass-1 "considered and not filed" note
+        on this case said only a bug reaches it; issue 3 item 2 shows that
+        the spawn does);
       - in `send_with_callback`, the `transaction_manager.lock().unwrap()` at
         `src/producer/kafka_producer.rs:1936`, which runs after `append`
         (`:1897`) has moved the callback into a batch: on a poisoned
         transaction-manager lock the function returns null with the panic in
         `*out_error`, and the batch still fires the callback when it
-        completes;
+        completes. The sender wakeup `self.wakeup.notify_one()` (`:1992`)
+        runs after the same `append`, whenever it created or filled a batch;
       - in `send_async`, the wake of the submission receiver after the request
         is queued (the `send_async` bullet below): the submission task still
         sends the record and fires its callback once.
 
-      Only a bug reaches the first three, and only a failure in tokio or the
-      OS reaches the fourth. The preamble's "destroy that handle" covers all
-      four. `send_async`, whose only unwinding panic is the fourth, now also
-      says in its own docs that the callback still fires (note 23).
+      A failure in tokio or the OS reaches all four. Each of these hand-offs,
+      or a step after it, schedules a task from the C caller's thread, which
+      is not one of the runtime's workers, so tokio takes `schedule_task`'s
+      remote path: `push_remote_task`, then `notify_parked_remote`
+      (`runtime/scheduler/multi_thread/worker.rs:1333-1334`, `1439-1442`),
+      then `driver.unpark()` (`park.rs:287`). Short of a bug in tokio, the one
+      panic there is `expect("failed to wake I/O driver")`
+      (`runtime/io/driver.rs:260`, tokio 1.52.0), raised after the task is
+      queued. Only the transaction-manager lock of the third item needs a bug.
+      (Round 3 wrote here: "Only a bug reaches the first three, and only a
+      failure in tokio or the OS reaches the fourth. The preamble's "destroy
+      that handle" covers all four." That was the stated reason why only
+      `send_async` said its callback still fires. Critic 79 issue 3 showed it
+      was wrong, and destroying the handle does not stop a late callback;
+      note 24 records the correction.) All five functions' docs now say what
+      happens: `send_async` that its callback still fires (note 23), the other
+      four that it can still fire, and the preamble that `user_data` must not
+      be released on a return that reports a panic (note 24).
     - **Header diff against `a0b5065b`:** 21 lines added and 3 removed, in six
       hunks (15744 → 15762 lines). The preamble's last three lines become seven
       (header lines 11–17), and the five sentences add 14 lines: 3 each for
@@ -685,3 +753,144 @@ code and record the difference here.
       `send_async` clause of issue 1's round-2 resolution. `COMMENTS.79.md`
       keeps a pointer where issue 2 was, and Note A, which is the Manager's
       to settle. Both files are gitignored (note 22).
+24. **Critic 79 issue 3 (round 4) — a panic after the hand-off can still fire
+    the callback in four more functions, and the header now says so.**
+    Documentation only: no guard, behaviour or test changed. Note 22's "Only a
+    bug reaches the first three" and note 16's "Reachable only through a bug"
+    were false, because the post-hand-off wake that note 22 found in
+    `send_async` also reaches `send_batch_async`, `send_with_callback` and the
+    two commits. Both notes are corrected in place.
+    - **Preamble.** Both copies (`cbindgen.toml` and the `src/ffi/mod.rs`
+      module docs) change one sentence and gain one, with the same wording
+      apart from backticks and wrapping: "Such a function reports the panic as
+      a synchronous failure, through its return value and out_error where it
+      has one, and the guard itself does not invoke the callback. If such a
+      panic is raised after the record or request was already handed to the
+      library's background work, the callback can still fire for it later; on
+      a return that reports a panic, do not release user_data yourself: the
+      callback, or the user_data_destroy hook where there is one, releases it
+      when it runs." Every other sentence is unchanged, "exactly once"
+      included: the D4 double completion that qualifies it is recorded in §4
+      item 6, not in the header. Where no destroy hook will run, following the
+      advice costs a leak: after a panic before the hand-off, which the caller
+      cannot tell from one after it, `callback` never fires and nothing
+      releases `user_data` (nor, in `send_batch_async`, the `key`/`value`
+      buffers of a record that was never queued). The wording accepts that
+      leak to rule out a use-after-free.
+    - **Per-function docs.** Each of the four panic sentences became a short
+      paragraph saying what the function returns and stores, that the guard
+      itself never invokes `callback`, where the hand-off is, that a panic
+      after it leaves the record or request in flight so `callback` can still
+      fire, and what to do with `user_data`. They say "can still fire", not
+      `send_async`'s "still fires", because each of the four also has panics
+      before its hand-off (the ones round 2 pinned). What each paragraph rests
+      on, with line numbers as of this commit:
+      - `send_with_callback`. The hand-off is `append`
+        (`src/producer/kafka_producer.rs:1897`), which puts the record in a
+        batch with its callback. After that point come, inside `append`, the
+        built-in partitioner lock
+        (`src/producer/internals/record_accumulator.rs:668`, `:744`, `:769`)
+        and, where another append created the batch first (`:736-747`), the
+        `AppendGuard` returning the unused buffer (`:256-263`) through
+        `BufferPool::deallocate_with_size`
+        (`src/producer/internals/buffer_pool.rs:517-528`), with its lock and
+        its `notify_one` to a waiting append (`:526`); and, after `append`,
+        the transaction-manager lock (`kafka_producer.rs:1936`) and the
+        sender wakeup (`:1992`). The locks need a bug; the two wakes need the
+        OS failure. The paragraph also says that a caller that releases
+        `user_data` on a null return must pass a non-null `out_error`: with a
+        null one the guard only logs the panic (`src/ffi/common.rs:103`), and
+        the return looks like the synchronous failures of the sentence before
+        it.
+      - `send_batch_async`. Each record's hand-off is `submit_tx.send`
+        (`src/ffi/producer.rs:1943`). Note 23's audit of `send_async`'s body
+        covers the loop's steps too, and the loop adds only pointer reads and
+        writes and an `accepted` counter that cannot pass `count`, so nothing
+        else after the first hand-off can unwind; the asserts come before the
+        loop, and a record's slot is written only after its `send` returns
+        (`:1948`). Besides `user_data`, one pointer that every record's
+        callback receives, the paragraph names each record's `key`/`value`:
+        the submission task reads them when it sends a queued record (the
+        zero-copy contract), so a record that may be queued must keep them
+        valid.
+      - The two commits. The hand-off is the `tokio::spawn` of the
+        continuation that owns the callback
+        (`src/consumer/async_kafka_consumer.rs:4658`), inside `sync_void_op`'s
+        `block_on` (`src/ffi/consumer.rs:2966`) on the C caller's thread.
+        Before it, the adapter from `make_commit_callback`
+        (`src/ffi/consumer.rs:4109`) is the callback's only owner, so a panic
+        drops it during the unwind and `CallbackTarget::drop`
+        (`src/ffi/common.rs:2271-2280`) fires `user_data_destroy` once, before
+        the function returns. That includes a panic in the wakes of
+        `ApplicationEventHandler::add`
+        (`src/consumer/internals/events/application_event_handler.rs:112-128`)
+        after `commit_inner` has queued the commit event
+        (`async_kafka_consumer.rs:4441`): the commit can still be sent, but no
+        callback reports it. After the spawn, the continuation enqueues the
+        callback (`:4666`, `:4671`), and `invoke_pending_callbacks` drops the
+        adapter only once `on_complete` has returned
+        (`src/consumer/internals/offset_commit_callback_invoker.rs:231-233`),
+        so the hook fires after the callback, or without it if the queue or
+        the task is dropped first. `MockConsumer` runs the callback inline
+        (`src/consumer/mock_consumer.rs:1062-1084`), and nothing after that
+        can unwind, hence "Against a real broker". The two paragraphs are
+        identical.
+    - **Header diff against `1d105ed0`:** five hunks, 12 lines removed and 47
+      added (15764 → 15799 lines): `14,15c14,19` (preamble),
+      `13410,13411c13414,13424` (`commit_async_with_callback`),
+      `13470,13472c13483,13494` (`commit_async_offsets_with_callback`),
+      `14434,14436c14456,14464` (`send_with_callback`) and
+      `14577,14578c14605,14613` (`send_batch_async`). No other line changed,
+      and `send_async`'s paragraph is untouched.
+    - **Left as they are.**
+      - `send_async`'s paragraph and the 80 `on_panic` sites, as the brief
+        required.
+      - The commits' "Fires **exactly once** per successful call": still
+        true, and the new paragraph states the panic case.
+      - The round-2 test doc comments
+        (`test_send_with_callback_panic_is_a_synchronous_failure`,
+        `test_send_batch_async_panic_is_a_synchronous_failure`,
+        `assert_commit_panic_is_a_synchronous_failure`): each pins a panic
+        before the hand-off, for which "no callback" is right.
+      - `send_batch`'s header text: it has no callback, and its mid-loop case
+        is in note 16.
+    - **Recorded, not fixed.**
+      - Critic 79 Note C, the D4 double completion, is §4 item 6; Note B, the
+        undocumented "producer is closed" failure, is §4 item 7.
+      - `send_with_callback`'s paragraph does not promise the callback by
+        `destroy` at the latest. `destroy` force-closes the producer, which
+        only signals the sender task (`initiate_close`,
+        `src/producer/kafka_producer.rs:2370-2382`), and then drops the
+        runtime, whose shutdown drops the tasks it has not polled. Whether the
+        sender always aborts its batches first was not verified. Note 23's
+        "whose close fires any callback still in flight", for a record queued
+        just before `destroy`, rests on the same step; that is for the
+        Manager.
+      - `send_with_callback`'s "synchronous send failures (closed producer),
+        in which case `callback` is **not** invoked" is true of a closed
+        producer, but not of the non-API error that `maybe_add_partition`
+        returns after `append` has moved the callback into a batch
+        (`kafka_producer.rs:1982`): that return is null, with the callback
+        still to fire, as in Java, where the record stays appended when
+        `doSend` rethrows. This is Critic 79's pass-2 Note A, which the
+        Manager holds; the sentence is on master, and the brief allowed no
+        other doc change.
+    - **Gates** (logs in the session scratchpad, `p79r4/`): `cargo build
+      --features ffi` and the header diff above; `cargo test --features ffi
+      --lib` 4278 passed / 0 failed / 2 ignored (the pre-existing
+      `bench_sensor_record_ns` and `test_build_is_repeatable`), with
+      `test_every_exported_function_is_guarded` and
+      `test_preceded_by_ffi_guard` among them; `cargo test -p ffi-macros` 12
+      unit tests and 2 doctests; `cargo xtask format-check` clean; `cargo
+      clippy --features ffi --lib --tests -- -D warnings` clean. `cargo xtask
+      lint`: its doc-hygiene and module-path-hygiene steps pass, and its
+      clippy step fails only on the untracked `examples/eos_app.rs` (note 7);
+      `cargo clippy --workspace --lib --bins --tests --benches --all-features
+      -- -D warnings` is clean. No test was added, because the brief allowed
+      no test change. The Critic's probe (issue 3 item 1) would pin
+      `send_batch_async`'s new clause about the record whose queueing
+      panicked; that is left for the Manager. The existing `send_batch_async`
+      test still fails against a callback-firing `on_panic` (note 22's teeth).
+    - `COMMENTS.DONE.79.md` now holds issue 3, and `COMMENTS.79.md` keeps a
+      pointer where it was, next to Notes B and C, which are the Manager's.
+      Both files are gitignored (note 22).
