@@ -31,38 +31,69 @@
 //! of librdkafka's "grep the debug log" reporting.
 
 use std::fs::{self, File, OpenOptions};
-use std::io::Write as _;
+use std::io::{BufWriter, Write as _};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Once, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// Diagnostic signatures counted for `summary.txt`. Each is a (label,
-/// substring) pair matched case-insensitively against captured log lines —
-/// the Rust-client analog of librdkafka's gap-signature grep.
-const SIGNATURES: &[(&str, &str)] = &[
-    ("transport disconnects", "disconnect"),
-    ("connection resets", "connection reset"),
-    ("metadata refreshes", "updating metadata"),
-    ("leader-change errors", "leader"),
-    ("not-coordinator errors", "coordinator"),
-    ("timeouts", "timed out"),
-    ("retries", "retrying"),
+/// Diagnostic signatures counted for `summary.txt`. Each is a label plus the
+/// substrings that identify it, matched case-insensitively against captured
+/// log lines (a line counts once per label however many of its substrings it
+/// contains) — the Rust-client analog of librdkafka's gap-signature grep.
+///
+/// The error signatures name the error, not the subject: a bare "leader" or
+/// "coordinator" also matched routine lines ("Discovered group coordinator",
+/// "Leader for partition ... is unknown", the leader-epoch validation chatter)
+/// and inflated the counts on a quiet run. The client renders a broker error
+/// either by its message (`Errors::message`, e.g. "not the current leader" /
+/// "This is not the correct coordinator.") or by its variant name.
+const SIGNATURES: &[(&str, &[&str])] = &[
+    ("transport disconnects", &["disconnect"]),
+    ("connection resets", &["connection reset"]),
+    ("metadata refreshes", &["updating metadata"]),
+    (
+        "leader-change errors",
+        &[
+            "not the current leader",
+            "notleaderorfollower",
+            "not_leader_or_follower",
+        ],
+    ),
+    (
+        "not-coordinator errors",
+        &["not the correct coordinator", "notcoordinator", "not_coordinator"],
+    ),
+    ("timeouts", &["timed out"]),
+    ("retries", &["retrying"]),
 ];
+
+/// Indices into [`SIGNATURES`] whose substrings occur in `line` (already
+/// lower-cased). Computed outside the sink lock: it is the per-line work.
+fn matched_signatures(lower: &str) -> impl Iterator<Item = usize> + '_ {
+    SIGNATURES
+        .iter()
+        .enumerate()
+        .filter(move |(_, (_, needles))| needles.iter().any(|needle| lower.contains(needle)))
+        .map(|(i, _)| i)
+}
 
 /// A single rotating log file: writes append to `path`; when it exceeds
 /// `budget` bytes it rolls to `path.1` (dropping any previous `.1`) and starts
 /// fresh — the `--log-budget-bytes` analog, one backup kept.
 struct RotatingFile {
     path: PathBuf,
-    file: File,
+    /// Buffered: the client logs thousands of lines a second under a fault,
+    /// and every line is written while the process-wide sink lock is held, so
+    /// one `write(2)` per line stalled every logging task behind the disk.
+    file: BufWriter<File>,
     written: u64,
     budget: u64,
 }
 
 impl RotatingFile {
     fn create(path: PathBuf, budget: u64) -> Self {
-        let file = File::create(&path).expect("create rotating log file");
+        let file = BufWriter::new(File::create(&path).expect("create rotating log file"));
         Self { path, file, written: 0, budget }
     }
 
@@ -70,14 +101,19 @@ impl RotatingFile {
         let bytes = line.as_bytes();
         if self.written + bytes.len() as u64 > self.budget {
             // Rotate: current -> .1 (overwriting an old .1), then fresh file.
+            let _ = self.file.flush();
             let backup = self.path.with_extension("log.1");
             let _ = fs::rename(&self.path, &backup);
-            self.file = File::create(&self.path).expect("recreate rotated log file");
+            self.file = BufWriter::new(File::create(&self.path).expect("recreate rotated log file"));
             self.written = 0;
         }
         if self.file.write_all(bytes).is_ok() {
             self.written += bytes.len() as u64;
         }
+    }
+
+    fn flush(&mut self) {
+        let _ = self.file.flush();
     }
 }
 
@@ -114,22 +150,36 @@ impl LogSink {
     /// Route a line to its per-client file (or the fallback), creating the file
     /// on first use.
     fn route(&mut self, line: &str) {
-        let Some(dir) = self.dir.clone() else { return };
+        let Some(dir) = self.dir.as_deref() else { return };
+        let budget = self.budget;
         match Self::client_id(line) {
             Some(id) => {
-                let id = id.to_string();
-                let budget = self.budget;
-                self.per_client
-                    .entry(id.clone())
-                    .or_insert_with(|| RotatingFile::create(dir.join(format!("client-{id}.log")), budget))
-                    .write_line(line);
+                // Look up before allocating: the id is only owned when the
+                // file is created, once per client.
+                if let Some(file) = self.per_client.get_mut(id) {
+                    file.write_line(line);
+                } else {
+                    self.per_client
+                        .entry(id.to_string())
+                        .or_insert_with(|| RotatingFile::create(dir.join(format!("client-{id}.log")), budget))
+                        .write_line(line);
+                }
             },
             None => {
-                let budget = self.budget;
                 self.fallback
                     .get_or_insert_with(|| RotatingFile::create(dir.join("client.log"), budget))
                     .write_line(line);
             },
+        }
+    }
+
+    /// Flush every open file's buffer to disk.
+    fn flush_all(&mut self) {
+        for file in self.per_client.values_mut() {
+            file.flush();
+        }
+        if let Some(file) = self.fallback.as_mut() {
+            file.flush();
         }
     }
 }
@@ -168,28 +218,27 @@ impl log::Log for ChaosLogger {
         if !CAPTURING.load(Ordering::Relaxed) {
             return;
         }
+        // Every workload task logs through this one sink, so the lock is a
+        // process-wide serialization point: do the formatting and the
+        // signature scan first, and hold the lock only to tally and append.
         let line = format!("[{:<5}] {}: {}\n", record.level(), record.target(), record.args());
-        let mut s = sink().lock().expect("log sink poisoned");
-        let lower = line.to_lowercase();
-        for (i, (_, needle)) in SIGNATURES.iter().enumerate() {
-            if lower.contains(needle) {
+        let matched: Vec<usize> = matched_signatures(&line.to_lowercase()).collect();
+        let echo = {
+            let mut s = sink().lock().expect("log sink poisoned");
+            for i in matched {
                 s.counts[i] += 1;
             }
-        }
-        if s.echo {
+            s.route(&line);
+            s.echo
+        };
+        if echo {
             eprint!("{line}");
         }
-        s.route(&line);
     }
 
     fn flush(&self) {
         if let Ok(mut s) = sink().lock() {
-            for f in s.per_client.values_mut() {
-                let _ = f.file.flush();
-            }
-            if let Some(f) = s.fallback.as_mut() {
-                let _ = f.file.flush();
-            }
+            s.flush_all();
         }
     }
 }
@@ -256,10 +305,15 @@ impl RunReports {
     /// Flush the signature summary to `summary.txt` and disarm capture. The
     /// run directory path is returned for the caller to log.
     pub fn finish(self) -> PathBuf {
-        log::logger().flush();
         CAPTURING.store(false, Ordering::Relaxed);
 
-        let counts = { sink().lock().expect("log sink poisoned").counts.clone() };
+        // Flush the sink directly rather than through `log::logger()`: if another
+        // logger won the global slot, ours is not the one `log::logger()` returns.
+        let counts = {
+            let mut s = sink().lock().expect("log sink poisoned");
+            s.flush_all();
+            s.counts.clone()
+        };
         let mut summary = String::from("=== Client-log signature summary ===\n");
         for ((label, _), count) in SIGNATURES.iter().zip(counts) {
             summary.push_str(&format!("  {label:<24}: {count}\n"));
