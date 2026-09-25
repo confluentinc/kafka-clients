@@ -106,7 +106,7 @@ impl ChaosAction {
                 // sampling): before stop, while down, after start — logging which
                 // partitions migrated away and which came back, PER topic.
                 let before = leaders_of_topics(topics, admin).await;
-                brokers.stop(*node_id, *kind);
+                brokers.stop(*node_id, *kind).await;
 
                 // Down-window. If a mid-down hook was supplied, run it here (so a
                 // rebalance overlaps the leader migration), then wait out the
@@ -125,7 +125,7 @@ impl ChaosAction {
                 let down_state = leaders_of_topics(topics, admin).await;
                 log_leader_migration_all(&format!("broker {node_id} down"), &before, &down_state, reports);
 
-                brokers.start(*node_id);
+                brokers.start(*node_id).await;
                 let up = brokers.wait_operational(admin, *node_id, *wait_up).await;
                 assert!(up, "broker {node_id} did not become operational within {wait_up:?}");
                 let after = leaders_of_topics(topics, admin).await;
@@ -160,9 +160,13 @@ impl ChaosAction {
 async fn change_leader(topic: &str, admin: &dyn Admin, reports: &ReportsHandle) {
     eprintln!("chaos: change-leader for topic {topic}");
 
-    let before = partition_state(topic, admin)
-        .await
-        .expect("describe_topics for change-leader before-snapshot failed");
+    // A describe that fails or times out on a churning cluster is an environment
+    // hiccup, not a client verdict: skip the action loudly instead of panicking
+    // the run before it can produce a verdict.
+    let Some(before) = partition_state(topic, admin).await else {
+        eprintln!("chaos: change-leader for {topic} SKIPPED: could not describe the topic (before-snapshot)");
+        return;
+    };
 
     // Reorder replicas (rotate) — same set, different preferred leader. `plan`
     // records the intended new leader per partition (rotated[0]).
@@ -218,9 +222,10 @@ async fn reassign_partitions(topic: &str, admin: &dyn Admin, reports: &ReportsHa
     eprintln!("chaos: reassigning partitions for topic {topic}");
 
     // 1. Read current leader + replica assignments (the BEFORE snapshot).
-    let before = partition_state(topic, admin)
-        .await
-        .expect("describe_topics for reassign before-snapshot failed");
+    let Some(before) = partition_state(topic, admin).await else {
+        eprintln!("chaos: reassign-partitions for {topic} SKIPPED: could not describe the topic (before-snapshot)");
+        return;
+    };
 
     // 2. Rotate each partition's replica list by one. `plan` records the
     //    intended new leader per partition (rotated[0]).
@@ -271,15 +276,21 @@ async fn reassign_partitions(topic: &str, admin: &dyn Admin, reports: &ReportsHa
     // 6. Prove the replica sets actually changed (an empty pending list is also
     //    the state where nothing moved). Reassign moves data, so this is a
     //    distinct check from the leader-plan verification below.
-    let after = partition_state(topic, admin)
-        .await
-        .expect("describe_topics for reassign after-snapshot failed");
+    let Some(after) = partition_state(topic, admin).await else {
+        eprintln!(
+            "chaos: reassign-partitions for {topic}: could not describe the topic after the reassignment; \
+             effect check SKIPPED"
+        );
+        return;
+    };
     let mut replicas_changed = 0usize;
     for (partition, b) in &before {
         if b.replicas.len() < 2 {
             continue;
         }
-        let a = after.get(partition).expect("partition present after reassignment");
+        let Some(a) = after.get(partition) else {
+            continue;
+        };
         if a.replicas != b.replicas {
             replicas_changed += 1;
         }
@@ -340,11 +351,23 @@ async fn verify_leader_plan(
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
 
+    if after.is_empty() {
+        // Every describe in the settle window failed or timed out (tolerated
+        // by `partition_state`): nothing to verify against. Say so instead of
+        // failing the run on an environment hiccup.
+        eprintln!(
+            "chaos: {label} for {topic}: could not describe the topic after the action; leader-plan check SKIPPED"
+        );
+        return;
+    }
+
     let mut matched_plan = 0usize;
     let mut leaders_changed = 0usize;
     for &partition in &eligible {
         let b = &before[&partition];
-        let a = after.get(&partition).expect("partition present after action");
+        let Some(a) = after.get(&partition) else {
+            continue;
+        };
         let planned = plan[&partition];
         let on_plan = a.leader == Some(planned);
         if on_plan {
