@@ -374,20 +374,11 @@ class Producer(_ProducerBase):
                     ret.set_result(metadata)
             _invoke_on_delivery(on_delivery, metadata, exception)
 
-        full = _lib.Producer_send(self.c_producer, producer_record, cb)
-        fut = self._add_future(ret)
-        if full:
-            # Outbox is full: block until the Rust submission task drains it
-            # below the bound so a fast producer cannot queue records without
-            # limit. Mirrors Java's send() blocking when buffer.memory is
-            # exhausted. concurrent.futures.Future.result() releases the GIL
-            # while waiting, so the Rust dispatcher thread can run the space
-            # callback.
-            space = Future()
-            if not _lib.Producer_on_space_available(
-                    self.c_producer, lambda: space.set_result(None)):
-                space.result()
-        return fut
+        # Blocks (GIL released) until the Rust submission task has handed the
+        # record to the producer -- Java's send() return point. Backpressure is
+        # buffer.memory / max.block.ms only; there is no outbox cap.
+        _lib.Producer_send(self.c_producer, producer_record, cb)
+        return self._add_future(ret)
 
     def _run_sync(self, submit, resolve):
         """Submit an async FFI op and wait on an interruptible event.
@@ -694,22 +685,20 @@ class AsyncProducer(_ProducerBase):
                 self._drain_scheduled = True
                 loop.call_soon_threadsafe(self._drain)
 
-        full = _lib.Producer_send(self.c_producer, producer_record, cb)
+        # Await (yielding the loop) until the Rust submission task has handed
+        # the record to the producer -- Java's send() return point. The
+        # acceptance callback runs on the Rust dispatcher thread, so it hops
+        # onto the loop via call_soon_threadsafe.
+        accepted = loop.create_future()
+
+        def accepted_cb():
+            if not loop.is_closed():
+                loop.call_soon_threadsafe(self._resolve_space, accepted)
+
+        already = _lib.Producer_send(self.c_producer, producer_record, cb, accepted_cb)
         self._add_future(ret)
-        if full:
-            # Outbox is full: await (yielding the loop, non-blocking) until the
-            # Rust submission task drains it below the bound — Java's send()
-            # blocks on buffer.memory here. Awaiting also yields to the
-            # completion drain. The space callback runs on the Rust dispatcher
-            # thread, so it hops onto the loop via call_soon_threadsafe.
-            space = loop.create_future()
-
-            def space_cb():
-                if not loop.is_closed():
-                    loop.call_soon_threadsafe(self._resolve_space, space)
-
-            if not _lib.Producer_on_space_available(self.c_producer, space_cb):
-                await space
+        if not already:
+            await accepted
         return ret
 
     async def _run_async(self, submit, resolve, free):

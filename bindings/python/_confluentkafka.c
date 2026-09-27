@@ -606,11 +606,13 @@ static PyObject* py_KafkaProducer_new(PyObject* self, PyObject* args) {
 // user_data) until its completion is reported, because send_async borrows the
 // record's key/value buffers until the callback fires; that pin is what makes
 // the buffers safe to read while the GIL is released.
+static void space_trampoline(void* ud);  // defined below; reused for acceptance callbacks
+
 static PyObject* py_Producer_send(PyObject* self, PyObject* args) {
     unsigned long long producer_ptr;
-    PyObject *record_obj, *complete_cb;
+    PyObject *record_obj, *complete_cb, *accepted_cb = NULL;
 
-    if (!PyArg_ParseTuple(args, "KOO", &producer_ptr, &record_obj, &complete_cb)) {
+    if (!PyArg_ParseTuple(args, "KOO|O", &producer_ptr, &record_obj, &complete_cb, &accepted_cb)) {
         return NULL;
     }
 
@@ -640,9 +642,9 @@ static PyObject* py_Producer_send(PyObject* self, PyObject* args) {
     ProducerRecordObject* record = (ProducerRecordObject*)record_obj;
     kafka_producer_ProducerRecord_t* rs = &record->record_struct;
     kafka_common_Error_t* err = NULL;
-    bool full;
+    kafka_producer_SendAccepted_t* acc;
     Py_BEGIN_ALLOW_THREADS
-    full = kafka_producer_Producer_send_async(
+    acc = kafka_producer_Producer_send_async(
         producer->producer,
         rs->topic, rs->partition, rs->timestamp,
         rs->key, rs->key_len, rs->value, rs->value_len,
@@ -656,7 +658,41 @@ static PyObject* py_Producer_send(PyObject* self, PyObject* args) {
         kafka_common_Error_destroy(err);
         return NULL;
     }
-    return PyBool_FromLong(full);
+
+    if (accepted_cb == NULL || accepted_cb == Py_None) {
+        // Sync caller: wait until the Rust submission task has handed the record
+        // to the producer (Java's send() return point). Wait in slices with the
+        // GIL released, checking for signals between them so Ctrl+C raises.
+        int interrupted = 0;
+        Py_BEGIN_ALLOW_THREADS
+        while (!kafka_producer_SendAccepted_wait_timeout(acc, 20)) {
+            Py_BLOCK_THREADS
+            int sig = PyErr_CheckSignals();
+            Py_UNBLOCK_THREADS
+            if (sig < 0) {
+                interrupted = 1;
+                break;
+            }
+        }
+        Py_END_ALLOW_THREADS
+        kafka_producer_SendAccepted_destroy(acc);
+        if (interrupted) {
+            // KeyboardInterrupt is set. The record stays queued and cb still fires.
+            return NULL;
+        }
+        Py_RETURN_NONE;
+    }
+
+    // asyncio caller: `accepted_cb` fires once from the dispatcher thread when the
+    // record is accepted. True means it already was (callback not kept).
+    Py_INCREF(accepted_cb);
+    bool already = kafka_producer_SendAccepted_get_async(acc, space_trampoline, accepted_cb);
+    kafka_producer_SendAccepted_destroy(acc);
+    if (already) {
+        Py_DECREF(accepted_cb);
+        Py_RETURN_TRUE;
+    }
+    Py_RETURN_FALSE;
 }
 
 // Bell fired by Rust (on its dispatcher thread) once the outbox has room again.
@@ -6947,7 +6983,8 @@ static PyMethodDef ProducerNativeMethods[] = {
     {"Producer_new", py_Producer_new, METH_VARARGS, "Create mock producer"},
     {"KafkaProducer_new", py_KafkaProducer_new, METH_VARARGS, "Create Kafka producer"},
     {"Producer_send", py_Producer_send, METH_VARARGS,
-     "Queue record on the Rust outbox; returns True if the outbox is now full"},
+     "Queue record on the Rust outbox and wait until the producer accepts it; "
+     "with an accepted_cb, return True if already accepted else fire it later"},
     {"Producer_on_space_available", py_Producer_on_space_available, METH_VARARGS,
      "Register a callback fired when outbox space frees; returns True if "
      "space is already available"},

@@ -657,6 +657,79 @@ struct SpaceWaiter {
 // SAFETY: see `RecordCallbackTarget`.
 unsafe impl Send for SpaceWaiter {}
 
+/// Callback fired once a record queued with [`kafka_producer_Producer_send_async`]
+/// has been handed to the producer (appended to the accumulator, or rejected).
+/// Registered through [`kafka_producer_SendAccepted_get_async`]; invoked exactly
+/// once, on the dispatcher thread.
+pub type kafka_producer_SendAccepted_callback_t = unsafe extern "C" fn(*mut std::ffi::c_void);
+
+/// Opaque handle to one record's "accepted by the producer" signal.
+///
+/// Prototype of the per-record acceptance wait: `send_async` returns one of these
+/// instead of the outbox-full flag, and the caller waits on it (or registers a
+/// callback) until the submission task has handed the record to the producer.
+/// Internally wraps an `Arc<AcceptState>`.
+#[repr(C)]
+pub struct kafka_producer_SendAccepted_t {
+    _private: [u8; 0],
+}
+
+struct AcceptWaiter {
+    callback: kafka_producer_SendAccepted_callback_t,
+    user_data: *mut std::ffi::c_void,
+}
+// SAFETY: see `RecordCallbackTarget`.
+unsafe impl Send for AcceptWaiter {}
+
+#[derive(Default)]
+struct AcceptInner {
+    completed: bool,
+    waiter: Option<AcceptWaiter>,
+}
+
+/// Shared between the handle returned to the caller and the guard travelling with
+/// the queued send. Completed exactly once, on the submission task, right after the
+/// producer's `send` returns (Ok or Err) -- Java's `send()` return point -- or when
+/// the request is dropped unprocessed (producer torn down).
+#[derive(Default)]
+struct AcceptState {
+    inner: std::sync::Mutex<AcceptInner>,
+    cv: std::sync::Condvar,
+}
+
+impl AcceptState {
+    fn complete(&self, completion_tx: &std::sync::mpsc::Sender<CompletionJob>) {
+        let waiter = {
+            let mut inner = self.inner.lock().unwrap();
+            if inner.completed {
+                return;
+            }
+            inner.completed = true;
+            self.cv.notify_all();
+            inner.waiter.take()
+        };
+        if let Some(waiter) = waiter {
+            let job: CompletionJob = Box::new(move || {
+                let waiter = waiter;
+                unsafe { (waiter.callback)(waiter.user_data) }
+            });
+            enqueue_or_run_inline(completion_tx, job);
+        }
+    }
+}
+
+/// Completes the acceptance signal when dropped, so every path (Ok, Err, torn-down
+/// producer) releases a waiting caller.
+struct AcceptGuard {
+    state: std::sync::Arc<AcceptState>,
+    completion_tx: std::sync::mpsc::Sender<CompletionJob>,
+}
+impl Drop for AcceptGuard {
+    fn drop(&mut self) {
+        self.state.complete(&self.completion_tx);
+    }
+}
+
 /// Builds a native producer [`Callback`] that, when fired on completion,
 /// converts the borrowed metadata/error into owned C handles and enqueues a
 /// [`CompletionJob`] for the dispatcher thread.
@@ -729,6 +802,8 @@ fn make_record_callback(
 struct SendRequest {
     record: ProducerRecord<&'static [u8], &'static [u8]>,
     target: RecordCallbackTarget,
+    /// Completes the caller's acceptance handle when dropped (see `AcceptGuard`).
+    accepted: AcceptGuard,
 }
 
 /// An item on the submission channel.
@@ -848,7 +923,7 @@ async fn submission_loop(ptr: usize, mut rx: tokio::sync::mpsc::UnboundedReceive
         while handle.test_paused.load(std::sync::atomic::Ordering::Acquire) {
             handle.pause_notify.notified().await;
         }
-        let SendRequest { record, target } = match request {
+        let SendRequest { record, target, accepted } = match request {
             SubmitRequest::Send(send) => send,
             SubmitRequest::Barrier { ack } => {
                 // FIFO delivery means reaching this marker proves every send ahead
@@ -889,6 +964,8 @@ async fn submission_loop(ptr: usize, mut rx: tokio::sync::mpsc::UnboundedReceive
                 if let Err(e) = kp.send(record, Some(callback)).await {
                     fire_error(e);
                 }
+                // The record is in the accumulator (or rejected): release the caller.
+                drop(accepted);
             },
             ProducerStaticRef::Mock(mp) => {
                 // MockProducer takes an owned record; copy the borrowed bytes
@@ -1831,12 +1908,12 @@ pub unsafe extern "C" fn kafka_producer_Producer_send_async(
     callback: kafka_producer_Producer_send_callback_t,
     user_data: *mut std::ffi::c_void,
     out_error: *mut *mut kafka_common_Error_t,
-) -> bool {
+) -> *mut kafka_producer_SendAccepted_t {
     if producer.is_null() || topic.is_null() {
         if !out_error.is_null() {
             unsafe { *out_error = box_error(Error::new(Errors::InvalidRequest)) };
         }
-        return false;
+        return std::ptr::null_mut();
     }
 
     let topic_str = unsafe { CStr::from_ptr(topic) }.to_string_lossy().into_owned();
@@ -1848,7 +1925,7 @@ pub unsafe extern "C" fn kafka_producer_Producer_send_async(
             if !out_error.is_null() {
                 unsafe { *out_error = box_error(Error::new(Errors::InvalidRequest)) };
             }
-            return false;
+            return std::ptr::null_mut();
         }
         Some(unsafe { std::slice::from_raw_parts(key, key_len as usize) })
     } else {
@@ -1860,7 +1937,7 @@ pub unsafe extern "C" fn kafka_producer_Producer_send_async(
             if !out_error.is_null() {
                 unsafe { *out_error = box_error(Error::new(Errors::InvalidRequest)) };
             }
-            return false;
+            return std::ptr::null_mut();
         }
         Some(unsafe { std::slice::from_raw_parts(value, value_len as usize) })
     } else {
@@ -1887,14 +1964,19 @@ pub unsafe extern "C" fn kafka_producer_Producer_send_async(
             if !out_error.is_null() {
                 unsafe { *out_error = box_error(e) };
             }
-            return false;
+            return std::ptr::null_mut();
         },
     };
 
     let handle = unsafe { producer_handle(producer) };
     // Carry the target, not a pre-built callback: the submission task builds the
     // callback and can re-fire on `send`'s error paths (see `SendRequest`).
-    let request = SubmitRequest::Send(SendRequest { record, target: RecordCallbackTarget { callback, user_data } });
+    let state = std::sync::Arc::new(AcceptState::default());
+    let request = SubmitRequest::Send(SendRequest {
+        record,
+        target: RecordCallbackTarget { callback, user_data },
+        accepted: AcceptGuard { state: std::sync::Arc::clone(&state), completion_tx: handle.completion_tx.clone() },
+    });
 
     // Count the send before it is visible on the channel, so a concurrent
     // flush/close drain can never observe a depth lower than reality.
@@ -1906,17 +1988,68 @@ pub unsafe extern "C" fn kafka_producer_Producer_send_async(
         if !out_error.is_null() {
             unsafe { *out_error = box_error(Error::local_illegal_state("producer is closed")) };
         }
-        return false;
+        return std::ptr::null_mut();
     }
 
     if !out_error.is_null() {
         unsafe { *out_error = std::ptr::null_mut() };
     }
-    // "Full" is judged on the depth this send produced, not on the live counter:
-    // the submission task may already have drained below the bound again, but the
-    // caller asked whether *its* send crossed it, and `on_space_available` answers
-    // the live question when it is consulted.
-    depth_before + 1 >= MAX_QUEUED_SENDS
+    let _ = depth_before;
+    // The caller waits on this handle until the submission task has handed the
+    // record to the producer (prototype: replaces the outbox-full flag).
+    Box::into_raw(Box::new(state)) as *mut kafka_producer_SendAccepted_t
+}
+
+/// Blocks until the record behind `accepted` has been handed to the producer, or
+/// `timeout_ms` elapses. Returns `true` once accepted. Meant to be called in short
+/// slices so the caller can check for signals between them.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_producer_SendAccepted_wait_timeout(
+    accepted: *mut kafka_producer_SendAccepted_t,
+    timeout_ms: i64,
+) -> bool {
+    if accepted.is_null() {
+        return true;
+    }
+    let state = unsafe { &*(accepted as *const std::sync::Arc<AcceptState>) };
+    let inner = state.inner.lock().unwrap();
+    if inner.completed {
+        return true;
+    }
+    let (guard, _) = state
+        .cv
+        .wait_timeout_while(inner, std::time::Duration::from_millis(timeout_ms.max(0) as u64), |i| !i.completed)
+        .unwrap();
+    guard.completed
+}
+
+/// Registers `callback` to fire exactly once, on the dispatcher thread, when the
+/// record is accepted. Returns `true` if it already was (callback not stored).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_producer_SendAccepted_get_async(
+    accepted: *mut kafka_producer_SendAccepted_t,
+    callback: kafka_producer_SendAccepted_callback_t,
+    user_data: *mut std::ffi::c_void,
+) -> bool {
+    if accepted.is_null() {
+        return true;
+    }
+    let state = unsafe { &*(accepted as *const std::sync::Arc<AcceptState>) };
+    let mut inner = state.inner.lock().unwrap();
+    if inner.completed {
+        return true;
+    }
+    inner.waiter = Some(AcceptWaiter { callback, user_data });
+    false
+}
+
+/// Frees the handle. The acceptance state lives on with the queued send until it
+/// completes, so a registered callback still fires.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_producer_SendAccepted_destroy(accepted: *mut kafka_producer_SendAccepted_t) {
+    if !accepted.is_null() {
+        unsafe { drop(Box::from_raw(accepted as *mut std::sync::Arc<AcceptState>)) };
+    }
 }
 
 /// Registers a one-shot bell to ring once the number of records queued for the
@@ -2091,7 +2224,16 @@ pub unsafe extern "C" fn kafka_producer_Producer_send_batch_async(
         };
         // Carry the target, not a pre-built callback: the submission task builds
         // the callback and can re-fire on `send`'s error paths (see `SendRequest`).
-        let request = SubmitRequest::Send(SendRequest { record, target: RecordCallbackTarget { callback, user_data } });
+        // Batch callers get no acceptance handle: the guard completes a state nobody
+        // waits on.
+        let request = SubmitRequest::Send(SendRequest {
+            record,
+            target: RecordCallbackTarget { callback, user_data },
+            accepted: AcceptGuard {
+                state: std::sync::Arc::new(AcceptState::default()),
+                completion_tx: handle.completion_tx.clone(),
+            },
+        });
 
         handle.queued_sends.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
         if handle.submit_tx.send(request).is_err() {
