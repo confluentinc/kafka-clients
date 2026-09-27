@@ -4,7 +4,7 @@ CFLAGS_EXTRA ?=
 GRPC_IMAGE_TAG ?= confluent-kafka-rust/python-grpc-server:dev
 GRPC_ASYNC_IMAGE_TAG ?= confluent-kafka-rust/python-async-grpc-server:dev
 
-.PHONY: build test test-soak test-performance grpc-image grpc-image-async clean
+.PHONY: build test check-static test-soak test-performance grpc-image grpc-image-async clean
 
 build:
 	CONFLUENT_KAFKA_LIB_DIR=$(RUST_PROJECT_ROOT)/target/$(PROFILE) \
@@ -14,8 +14,16 @@ build:
 test: build
 	pip install .[dev] || pip install --no-dependencies .[dev]
 	cd $(RUST_PROJECT_ROOT)/bindings/python && python -m pytest test/unit -v
+	$(MAKE) check-static
 	$(MAKE) test-soak
 	$(MAKE) -C $(RUST_PROJECT_ROOT) test-integration-python
+
+# Static checks (test/static): the Py_BuildValue / PyArg_Parse* /
+# PyObject_CallFunction format-arity scan of _confluentkafka.c, and the
+# staleness check of the generated _error_code.py. They read source files
+# only, so they need neither the Rust library nor the C extension built.
+check-static:
+	cd $(RUST_PROJECT_ROOT)/bindings/python && python -m pytest test/static -v
 
 # Soak client unit tests (soak/test): the payload round-trip, the
 # duplicate/gap accounting and the startup config validation. Pure logic, no

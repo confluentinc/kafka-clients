@@ -367,22 +367,17 @@ lint:
 doc-check:
 	RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features
 
-# Static arity check of the hand-written CPython extension's variadic calls.
-# A Py_BuildValue / PyArg_Parse* format one unit short of its argument list
-# compiles silently and reads a garbage pointer at run time; for every admin
-# RPC that Java's MockAdminClient leaves unsupported, the affected drain's
-# success path is unreachable from the test suite, so this defect class must
-# be caught statically. Needs no build artifacts, so it is cheap to run.
-#
-# The scanner's own unit tests run first: `cargo test` at the workspace root
-# only tests the root package, so nothing else exercises them, and a gate is
-# only worth as much as the parser behind it.
+# Static checks of the Python binding, run by its own test suite
+# (bindings/python/test/static): the format-arity scan of the hand-written
+# CPython extension's variadic calls, and the staleness check of the generated
+# _error_code.py. A Py_BuildValue / PyArg_Parse* format one unit short of its
+# argument list compiles silently and reads a garbage pointer at run time; for
+# every admin RPC that Java's MockAdminClient leaves unsupported, the affected
+# drain's success path is unreachable from the test suite, so this defect class
+# must be caught statically. Needs no build artifacts, so it is cheap to run.
 check-bindings:
-	# Kept even though `test-rust` is now `--workspace`, so that
-	# `make check-bindings` on its own still exercises the scanner's own tests
-	# before trusting its verdict.
-	cargo test -p xtask
-	cargo xtask check-bindings
+	@(. venv/bin/activate && \
+	$(MAKE) -C bindings/python RUST_PROJECT_ROOT=$(RUST_PROJECT_ROOT) check-static)
 
 clean:
 	cargo clean
