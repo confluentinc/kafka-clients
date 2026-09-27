@@ -5608,7 +5608,7 @@ static PyObject* py_RemoveMembersFromConsumerGroupResult_drain(PyObject* self, P
 //
 // Java's MockAdminClient throws for all five RPCs, so the success branch of
 // every drain below is unreachable from the test suite. Their Py_BuildValue
-// arity is instead checked statically by `cargo xtask check-bindings`, and the
+// arity is instead checked statically by `test/static/test_format_arity.py`, and the
 // field *order* by review against the matching `_to_*` unpacker in admin.py.
 // ---------------------------------------------------------------------------
 
@@ -5674,7 +5674,7 @@ static int build_acl_arrays(PyObject* seq, int nullable, acl_arrays_t* a) {
         int rt = 0, pt = 0, op = 0, pm = 0;
         const char* name = NULL; const char* principal = NULL; const char* host = NULL;
         // Two literal formats rather than one conditional expression: a
-        // non-literal format is unverifiable by `cargo xtask check-bindings`,
+        // non-literal format is unverifiable by `test/static/test_format_arity.py`,
         // and this is precisely the call shape that gate exists to guard.
         int ok = item != NULL;
         if (ok) {
@@ -6102,7 +6102,7 @@ static PyObject* py_AlterClientQuotasResult_drain(PyObject* self, PyObject* args
 // Java's MockAdminClient throws for the two SCRAM RPCs
 // (MockAdminClient.java:1251-1259), so the success branch of those two drains
 // is unreachable from the test suite; their Py_BuildValue arity is checked
-// statically by `cargo xtask check-bindings` and their field order by review
+// statically by `test/static/test_format_arity.py` and their field order by review
 // against the matching `_to_*` unpacker in admin.py. The mock *does* implement
 // the four delegation-token RPCs and both feature RPCs, so those drains are
 // exercised end to end by test_admin.py.
@@ -6660,7 +6660,7 @@ static PyObject* py_UpdateFeaturesResult_drain(PyObject* self, PyObject* args) {
 // Java's MockAdminClient throws for all six (MockAdminClient.java:1368-1395),
 // so the *success* branch of every drain below is unreachable from the test
 // suite; their Py_BuildValue arity is checked statically by
-// `cargo xtask check-bindings` and their field order by review against the
+// `test/static/test_format_arity.py` and their field order by review against the
 // matching `_to_*` unpacker in admin.py. What the suite does exercise is the
 // error branch of each: the mocks that throw per key still echo the requested
 // key set, so key columns and per-key errors flow end to end.
