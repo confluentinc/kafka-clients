@@ -43,7 +43,7 @@ import admin as ka  # noqa: E402  (NewTopic / NewPartitions / RecordsToDelete / 
 import producer_service_pb2 as pb  # noqa: E402  (generated)
 import consumer_service_pb2 as cpb  # noqa: E402  (generated)
 import admin_service_pb2 as apb  # noqa: E402  (generated)
-import _error_code as ec  # noqa: E402  (generated: cargo xtask generate-error-codes)
+import _error_code as ec  # noqa: E402  (generated: python tools/generate_error_code.py)
 
 
 class AdminRequestError(ValueError):

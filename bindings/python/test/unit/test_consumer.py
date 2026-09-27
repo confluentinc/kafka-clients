@@ -27,7 +27,7 @@ from consumer import (
 )
 from producer import KafkaError
 
-# Generated from kafka_common_ErrorCode_t (cargo xtask generate-error-codes).
+# Generated from kafka_common_ErrorCode_t (python tools/generate_error_code.py).
 # Private plumbing, not public API -- imported here because asserting the error
 # code is the point: it identifies the class, which message text only hinted at.
 import _error_code as ec

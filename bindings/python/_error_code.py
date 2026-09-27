@@ -15,8 +15,8 @@
 """Error-code constants -- GENERATED, DO NOT EDIT.
 
 Generated from kafka_common_ErrorCode_t in src/ffi/common.rs by
-`cargo xtask generate-error-codes`, and checked for staleness by
-`cargo xtask check-generated`.
+`python tools/generate_error_code.py`, and checked for staleness by
+test/static/test_error_code_generated.py.
 
 Private plumbing, not public API: KafkaError exposes `code`, `message` and
 `is_retriable`, and neither producer.py nor consumer.py re-exports this module.
