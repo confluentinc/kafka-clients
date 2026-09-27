@@ -374,10 +374,20 @@ class Producer(_ProducerBase):
                     ret.set_result(metadata)
             _invoke_on_delivery(on_delivery, metadata, exception)
 
-        # Blocks (GIL released) until the Rust submission task has handed the
-        # record to the producer -- Java's send() return point. Backpressure is
-        # buffer.memory / max.block.ms only; there is no outbox cap.
-        _lib.Producer_send(self.c_producer, producer_record, cb)
+        # Java's send() return point: return once the Rust submission task has
+        # handed the record to the producer. C queues the record and returns at
+        # once; `accepted_cb` fires once from the dispatcher thread and resolves
+        # `accepted`, on which this thread waits. The wait is Python's own lock
+        # wait, so Ctrl+C is handled by Python. Backpressure is buffer.memory /
+        # max.block.ms only; there is no outbox cap.
+        accepted = Future()
+
+        def accepted_cb():
+            accepted.set_result(None)
+
+        already = _lib.Producer_send(self.c_producer, producer_record, cb, accepted_cb)
+        if not already:
+            accepted.result()
         return self._add_future(ret)
 
     def _run_sync(self, submit, resolve):
