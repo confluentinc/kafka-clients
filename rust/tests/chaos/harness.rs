@@ -23,10 +23,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use confluent_kafka::admin::{
-    Admin, AdminClientConfig, CreateTopicsOptions, CreateTopicsResult, DescribeTopicsOptions, NewTopic,
-    new_admin_client,
-};
+use confluent_kafka::admin::{Admin, AdminClientConfig, CreateTopicsResult, KafkaAdminClient, NewTopic};
 use confluent_kafka::common::{TopicCollection, Uuid};
 
 use super::common::broker_control::BrokerControl;
@@ -233,13 +230,15 @@ impl ChaosHarness {
         // switch these props to `protocol_bootstrap` + `security_props` so the
         // control plane is exercised over the secured listener too. The
         // workloads — the clients under test — already use it.
-        let admin = {
+        let admin: Box<dyn Admin> = {
             let props = HashMap::from([
                 ("bootstrap.servers".to_string(), cluster.bootstrap_servers().to_string()),
                 ("client.id".to_string(), "chaos-admin".to_string()),
             ]);
-            new_admin_client(AdminClientConfig::from_properties(&props).expect("valid admin config"))
-                .expect("admin client")
+            Box::new(
+                KafkaAdminClient::new(AdminClientConfig::new(&props).expect("valid admin config"))
+                    .expect("admin client"),
+            )
         };
         if security_protocol != SecurityProtocol::Plaintext {
             eprintln!(
@@ -304,8 +303,12 @@ impl ChaosHarness {
 
     /// Create `topic` and cache its id (see [`Self::cache_created_topic_id`]).
     async fn create_topic(&self, topic: &str) {
-        let new_topic = NewTopic::new(topic.to_string(), self.partitions, self.replication);
-        let result = self.admin.create_topics(&[new_topic], CreateTopicsOptions::new());
+        let new_topic = NewTopic::with_num_partitions_replication_factor(
+            topic.to_string(),
+            Some(self.partitions),
+            Some(self.replication),
+        );
+        let result = self.admin.create_topics(&[new_topic]);
         result.all().get().await.expect("chaos topic creation failed");
         self.cache_created_topic_id(topic, &result).await;
     }
@@ -355,10 +358,7 @@ impl ChaosHarness {
         loop {
             let described = self
                 .admin
-                .describe_topics(
-                    TopicCollection::of_topic_names(vec![topic.to_string()]),
-                    DescribeTopicsOptions::new(),
-                )
+                .describe_topics_with_topics(TopicCollection::of_topic_names(vec![topic.to_string()]))
                 .all_topic_names()
                 .expect("describe by name yields a name-keyed result")
                 .get()
@@ -424,10 +424,9 @@ impl ChaosHarness {
         self.verifier.note_expected_loss(expected_lost_hint());
 
         self.admin
-            .delete_topics(
-                confluent_kafka::common::TopicCollection::of_topic_names(vec![topic.to_string()]),
-                confluent_kafka::admin::DeleteTopicsOptions::new(),
-            )
+            .delete_topics(confluent_kafka::common::TopicCollection::of_topic_names(vec![
+                topic.to_string(),
+            ]))
             .all()
             .get()
             .await
@@ -528,10 +527,9 @@ impl ChaosHarness {
         loop {
             let described = self
                 .admin
-                .describe_topics(
-                    confluent_kafka::common::TopicCollection::of_topic_names(vec![topic.to_string()]),
-                    confluent_kafka::admin::DescribeTopicsOptions::new(),
-                )
+                .describe_topics_with_topics(confluent_kafka::common::TopicCollection::of_topic_names(vec![
+                    topic.to_string(),
+                ]))
                 .all_topic_names()
                 .expect("describe by name")
                 .get()
@@ -560,8 +558,12 @@ impl ChaosHarness {
     async fn create_topic_retrying(&self, topic: &str, timeout: Duration) {
         let deadline = std::time::Instant::now() + timeout;
         loop {
-            let new_topic = NewTopic::new(topic.to_string(), self.partitions, self.replication);
-            let result = self.admin.create_topics(&[new_topic], CreateTopicsOptions::new());
+            let new_topic = NewTopic::with_num_partitions_replication_factor(
+                topic.to_string(),
+                Some(self.partitions),
+                Some(self.replication),
+            );
+            let result = self.admin.create_topics(&[new_topic]);
             match result.all().get().await {
                 Ok(()) => {
                     self.cache_created_topic_id(topic, &result).await;
