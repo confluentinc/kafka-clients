@@ -31,7 +31,7 @@
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-use confluent_kafka::admin::{Admin, DescribeClusterOptions};
+use confluent_kafka::admin::Admin;
 
 use super::kafka_cluster::KafkaCluster;
 
@@ -189,7 +189,7 @@ impl<'a> BrokerControl<'a> {
                 return false;
             }
             let attempt = remaining.min(Duration::from_secs(5));
-            let result = admin.describe_cluster(DescribeClusterOptions::new());
+            let result = admin.describe_cluster();
             let node_future = result.nodes();
             let describe = node_future.get();
             if let Ok(Ok(nodes)) = tokio::time::timeout(attempt, describe).await
