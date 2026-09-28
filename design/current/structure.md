@@ -353,7 +353,7 @@ rust/src/ffi/           # feature-gated: --features ffi
 └── admin.rs            # 490 exported symbols (47 of them *_async)
 
 c/
-├── CMakeLists.txt, Makefile, Dockerfile.grpc
+├── CMakeLists.txt, Makefile, Dockerfile.grpc, README.md
 ├── tests/{test_kafka_producer,test_kafka_consumer,test_kafka_admin,
 │          test_mock_producer,test_mock_consumer,test_mock_admin,
 │          test_consumer_callbacks,producer_perf_test}.c + unity/ (submodule)
@@ -367,7 +367,7 @@ python/
 ├── grpc_server.py, grpc_server_async.py, grpc_translate.py
 ├── Dockerfile.grpc, Dockerfile.grpc.async
 ├── test/{unit,static,performance}/, soak/, tools/
-└── setup.py, pyproject.toml, Makefile
+└── setup.py, pyproject.toml, Makefile, README.md
 ```
 
 Symbol counts are `#[unsafe(no_mangle)]` occurrences per file (2026-09-27).
