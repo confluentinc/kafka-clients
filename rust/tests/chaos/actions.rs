@@ -23,10 +23,7 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-use confluent_kafka::admin::{
-    Admin, AlterPartitionReassignmentsOptions, DescribeTopicsOptions, ElectLeadersOptions,
-    ListPartitionReassignmentsOptions, NewPartitionReassignment,
-};
+use confluent_kafka::admin::{Admin, NewPartitionReassignment};
 use confluent_kafka::common::{ElectionType, TopicCollection, TopicPartition};
 
 use super::common::broker_control::{BrokerControl, StopKind};
@@ -299,7 +296,7 @@ async fn change_leader(topic: &str, admin: &dyn Admin, reports: &ReportsHandle) 
     }
 
     admin
-        .alter_partition_reassignments(&reassignments, AlterPartitionReassignmentsOptions::new())
+        .alter_partition_reassignments(&reassignments)
         .all()
         .get()
         .await
@@ -307,12 +304,7 @@ async fn change_leader(topic: &str, admin: &dyn Admin, reports: &ReportsHandle) 
     wait_reassignments_complete(topic, admin).await;
 
     // Elect the new preferred leaders.
-    if let Err(err) = admin
-        .elect_leaders(ElectionType::Preferred, None, ElectLeadersOptions::new())
-        .all()
-        .get()
-        .await
-    {
+    if let Err(err) = admin.elect_leaders(ElectionType::Preferred, None).all().get().await {
         eprintln!("chaos: preferred-leader election returned: {err} (often benign)");
     }
 
@@ -358,7 +350,7 @@ async fn reassign_partitions(topic: &str, admin: &dyn Admin, reports: &ReportsHa
 
     // 3. Submit.
     admin
-        .alter_partition_reassignments(&reassignments, AlterPartitionReassignmentsOptions::new())
+        .alter_partition_reassignments(&reassignments)
         .all()
         .get()
         .await
@@ -373,12 +365,7 @@ async fn reassign_partitions(topic: &str, admin: &dyn Admin, reports: &ReportsHa
     //    Trigger the election explicitly so the leader change is deterministic
     //    and observable — the same step `kafka-reassign-partitions.sh` users
     //    take.
-    if let Err(err) = admin
-        .elect_leaders(ElectionType::Preferred, None, ElectLeadersOptions::new())
-        .all()
-        .get()
-        .await
-    {
+    if let Err(err) = admin.elect_leaders(ElectionType::Preferred, None).all().get().await {
         eprintln!("chaos: preferred-leader election after reassign returned: {err} (often benign)");
     }
 
@@ -464,12 +451,7 @@ async fn verify_leader_plan(
         }
         if Instant::now() >= next_election {
             next_election = Instant::now() + LEADER_PLAN_REELECT_EVERY;
-            if let Err(err) = admin
-                .elect_leaders(ElectionType::Preferred, None, ElectLeadersOptions::new())
-                .all()
-                .get()
-                .await
-            {
+            if let Err(err) = admin.elect_leaders(ElectionType::Preferred, None).all().get().await {
                 eprintln!("chaos:   {label}: preferred-leader re-election returned: {err} (often benign)");
             }
         }
@@ -589,7 +571,7 @@ async fn wait_reassignments_complete(topic: &str, admin: &dyn Admin) {
     let deadline = Instant::now() + Duration::from_secs(60);
     loop {
         let pending = admin
-            .list_partition_reassignments(None, ListPartitionReassignmentsOptions::new())
+            .list_partition_reassignments()
             .reassignments()
             .get()
             .await
@@ -620,10 +602,7 @@ struct PartitionState {
 /// describe could not complete (tolerated on the leader-sampling path).
 async fn partition_state(topic: &str, admin: &dyn Admin) -> Option<std::collections::BTreeMap<i32, PartitionState>> {
     let described = admin
-        .describe_topics(
-            TopicCollection::of_topic_names(vec![topic.to_string()]),
-            DescribeTopicsOptions::new(),
-        )
+        .describe_topics_with_topics(TopicCollection::of_topic_names(vec![topic.to_string()]))
         .all_topic_names()
         .expect("describe_topics by name yields a name-keyed result");
     // Bound the describe: on a degraded cluster (a broker just killed for the
