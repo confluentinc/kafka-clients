@@ -403,13 +403,27 @@ impl ChaosConfig {
         // after the second recreate. Single-topic recreate does recover (the whole
         // assignment is rebuilt). This is a consumer-side defect the harness
         // surfaces, not a harness artifact; the guard stays until it is fixed.
-        if num_topics > 1 && actions.iter().any(|a| a.kind == ActionKind::TopicRecreate) {
+        //
+        // `--allow-multi-topic-recreate` runs the combination anyway, for a matrix
+        // that wants the original scenarios: the verifier then labels a failure
+        // matching this defect's exact signature as KNOWN DEFECT (see
+        // `ChaosVerdict::known_defect`), so the matrix runner can retry it, while
+        // any other failure stays an ordinary failure.
+        let allow_multi_topic_recreate = env_str("CHAOS_ALLOW_MULTI_TOPIC_RECREATE", "0") == "1";
+        let multi_topic_recreate = num_topics > 1 && actions.iter().any(|a| a.kind == ActionKind::TopicRecreate);
+        if multi_topic_recreate && !allow_multi_topic_recreate {
             return Err(format!(
                 "--topic-recreate with --num-topics {num_topics} is not supported yet: after a recreate of one of \
                  several subscribed topics the KIP-848 consumer keeps stale positions on some partitions of the \
                  recreated topic and never reads its new generation (a known consumer-side gap, see \
-                 tests/chaos/README.md). Use --num-topics 1 with --topic-recreate, or drop --topic-recreate"
+                 tests/chaos/README.md). Use --num-topics 1 with --topic-recreate, drop --topic-recreate, or pass \
+                 --allow-multi-topic-recreate to run it with the defect labelled"
             ));
+        }
+        if allow_multi_topic_recreate && !multi_topic_recreate {
+            return Err(
+                "--allow-multi-topic-recreate only applies with --topic-recreate and --num-topics > 1".to_string(),
+            );
         }
 
         let commit_mode = match env_str("CHAOS_COMMIT", "sync").as_str() {

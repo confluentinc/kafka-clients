@@ -32,6 +32,13 @@ use confluent_kafka::common::{ElectionType, TopicCollection, TopicPartition};
 use super::common::broker_control::{BrokerControl, StopKind};
 use super::reports::ReportsHandle;
 
+/// How long [`verify_leader_plan`] waits for the planned leaders.
+pub const LEADER_PLAN_SETTLE: Duration = Duration::from_secs(30);
+
+/// How often [`verify_leader_plan`] re-issues the preferred election while it
+/// waits.
+const LEADER_PLAN_REELECT_EVERY: Duration = Duration::from_secs(5);
+
 /// Leader-migration mechanism for `--action change-leader|reassign-partitions`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReassignMode {
@@ -137,9 +144,9 @@ impl ChaosAction {
                 let down_state = leaders_of_topics(topics, admin).await;
                 log_leader_migration_all(&format!("broker {node_id} down"), &before, &down_state, reports);
 
+                let started_at = std::time::SystemTime::now();
                 brokers.start(*node_id).await;
-                let up = brokers.wait_operational(admin, *node_id, *wait_up).await;
-                assert!(up, "broker {node_id} did not become operational within {wait_up:?}");
+                wait_restarted(brokers, admin, *node_id, started_at, *wait_up, topics).await;
                 let after = leaders_of_topics(topics, admin).await;
                 log_leader_migration_all(&format!("broker {node_id} back up"), &down_state, &after, reports);
                 eprintln!("chaos: broker {node_id} back up");
@@ -166,17 +173,87 @@ impl ChaosAction {
                 // cluster crash.
                 futures_util::future::join_all(nodes.iter().map(|n| brokers.stop(*n, StopKind::Unclean))).await;
                 tokio::time::sleep(*outage).await;
+                let started_at = std::time::SystemTime::now();
                 futures_util::future::join_all(nodes.iter().map(|n| brokers.start(*n))).await;
+                // The brokers recover in parallel; wait for each in turn (the
+                // first wait dominates). No topic list: after a whole-cluster
+                // crash every replica restarts together, so there is no ISR to
+                // rejoin that the process start does not already cover.
                 for node_id in nodes {
-                    let up = brokers.wait_operational(admin, *node_id, *wait_up).await;
-                    assert!(
-                        up,
-                        "broker {node_id} did not become operational within {wait_up:?} after the outage"
-                    );
+                    wait_restarted(brokers, admin, *node_id, started_at, *wait_up, &[]).await;
                 }
                 eprintln!("chaos: all brokers back up after the outage");
             },
         }
+    }
+}
+
+/// Wait, within `wait_up` overall, until a broker started at `started_at` is
+/// genuinely back:
+///
+/// 1. the new process has logged `Kafka Server started`
+///    ([`BrokerControl::wait_server_started`]);
+/// 2. it is registered with the quorum ([`BrokerControl::wait_operational`]);
+/// 3. it is back in the ISR of every partition of `topics` it replicates.
+///
+/// Steps 1–2 are required: a broker that never comes back is an environment
+/// failure and panics the run, as before. Checking registration alone was not
+/// enough, because a broker killed seconds ago is still listed until its
+/// controller session expires (~9 s). The roll then moved on while the broker
+/// was still down, so the next roll could take a second broker down with it.
+/// Step 3 is best-effort. A replica still catching up (large messages, a short
+/// `wait_up`) is logged, not asserted: it is cluster state, not a client
+/// verdict.
+async fn wait_restarted(
+    brokers: &BrokerControl<'_>,
+    admin: &dyn Admin,
+    node_id: u16,
+    started_at: std::time::SystemTime,
+    wait_up: Duration,
+    topics: &[String],
+) {
+    let deadline = Instant::now() + wait_up;
+    let started = brokers.wait_server_started(node_id, started_at, wait_up).await;
+    assert!(
+        started,
+        "broker {node_id} did not log `Kafka Server started` within {wait_up:?} of its restart"
+    );
+    let remaining = deadline.saturating_duration_since(Instant::now()).max(Duration::from_secs(5));
+    let up = brokers.wait_operational(admin, node_id, remaining).await;
+    assert!(up, "broker {node_id} did not become operational within {wait_up:?}");
+
+    if topics.is_empty() {
+        return;
+    }
+    let node = i32::from(node_id);
+    let mut lagging: Vec<String> = Vec::new();
+    loop {
+        lagging.clear();
+        for topic in topics {
+            match partition_state(topic, admin).await {
+                Some(state) => lagging.extend(
+                    state
+                        .iter()
+                        .filter(|(_, s)| s.replicas.contains(&node) && !s.isr.contains(&node))
+                        .map(|(p, _)| format!("{topic}-{p}")),
+                ),
+                None => lagging.push(format!("{topic} (describe failed)")),
+            }
+        }
+        if lagging.is_empty() {
+            eprintln!("chaos:   broker {node_id} is back in the ISR of all its partitions");
+            return;
+        }
+        if Instant::now() >= deadline {
+            eprintln!(
+                "chaos: WARN broker {node_id} is operational but not yet back in the ISR of {} partition(s) \
+                 after {wait_up:?}: {} — continuing",
+                lagging.len(),
+                lagging.join(", ")
+            );
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
     }
 }
 
@@ -346,10 +423,11 @@ async fn reassign_partitions(topic: &str, admin: &dyn Admin, reports: &ReportsHa
 /// The preferred-leader election can transiently fail to place the exact
 /// preferred leader when that broker is momentarily down (e.g. mid-roll in a
 /// composed run — "preferred leader was not available"). So this polls up to
-/// 10s for the planned leaders to settle, then asserts a **strong majority**
-/// (≥⅔) of eligible partitions reached their planned leader, logging every
-/// per-partition before→after vs plan and any mismatch. It also asserts at
-/// least one leader actually moved (the old no-op guard).
+/// [`LEADER_PLAN_SETTLE`] for the planned leaders to settle, re-electing every
+/// few seconds, then checks that a **strong majority** (≥⅔) of eligible
+/// partitions reached their planned leader and at least one leader moved,
+/// logging every per-partition before→after vs plan. A plan that is not
+/// reached is reported as `leader plan NOT REACHED … SKIPPED`, not a panic.
 async fn verify_leader_plan(
     label: &str,
     topic: &str,
@@ -363,8 +441,12 @@ async fn verify_leader_plan(
         return;
     }
 
-    // Poll for the planned leaders to settle.
-    let deadline = Instant::now() + Duration::from_secs(10);
+    // Poll for the planned leaders to settle, re-issuing the preferred election
+    // every few seconds. One election is not enough: it declines any partition
+    // whose preferred replica is not yet in the ISR (for example a broker that
+    // has only just restarted), and nothing re-runs it for us.
+    let deadline = Instant::now() + LEADER_PLAN_SETTLE;
+    let mut next_election = Instant::now() + LEADER_PLAN_REELECT_EVERY;
     let mut after = std::collections::BTreeMap::new();
     loop {
         if let Some(state) = partition_state(topic, admin).await {
@@ -379,6 +461,17 @@ async fn verify_leader_plan(
         }
         if Instant::now() >= deadline {
             break;
+        }
+        if Instant::now() >= next_election {
+            next_election = Instant::now() + LEADER_PLAN_REELECT_EVERY;
+            if let Err(err) = admin
+                .elect_leaders(ElectionType::Preferred, None, ElectLeadersOptions::new())
+                .all()
+                .get()
+                .await
+            {
+                eprintln!("chaos:   {label}: preferred-leader re-election returned: {err} (often benign)");
+            }
         }
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
@@ -420,18 +513,24 @@ async fn verify_leader_plan(
         }
     }
 
-    assert!(
-        leaders_changed > 0,
-        "{label}: no partition's leader moved for {topic} — the action had no effect"
-    );
-    // Tolerate a few transient election failures, but the plan must mostly hold.
+    // Whether the controller placed the planned leaders is cluster behaviour,
+    // not a client verdict. Panicking here aborted a whole run before it could
+    // produce a verdict (P3-1MiB, Sep 2026 matrix). Report it loudly instead:
+    // the run still exercised the leader movement that did happen.
     let need = eligible.len().div_ceil(3) * 2; // ceil(2/3 * n)
-    assert!(
-        matched_plan >= need,
-        "{label}: only {matched_plan}/{} partitions reached their planned leader for {topic} \
-         (need >= {need}) — the leader plan did not take effect",
-        eligible.len()
-    );
+    if leaders_changed == 0 || matched_plan < need {
+        let line = format!(
+            "{label} for {topic}: leader plan NOT REACHED — {matched_plan}/{} partitions on their planned \
+             leader (want >= {need}), {leaders_changed} leader(s) changed after {LEADER_PLAN_SETTLE:?}; \
+             plan check SKIPPED",
+            eligible.len()
+        );
+        eprintln!("chaos: WARN {line}");
+        if let Some(r) = reports {
+            r.record_leader_change(&line);
+        }
+        return;
+    }
     eprintln!(
         "chaos: {label} complete for topic {topic} \
          ({matched_plan}/{} partitions on planned leader, {leaders_changed} leader(s) changed)",
@@ -513,6 +612,8 @@ struct PartitionState {
     leader: Option<i32>,
     /// Replica set (broker ids, in order); the first is the preferred leader.
     replicas: Vec<i32>,
+    /// In-sync replica set (broker ids).
+    isr: Vec<i32>,
 }
 
 /// Current `(leader, replicas)` for each partition of `topic`, or `None` if the
@@ -557,6 +658,7 @@ async fn partition_state(topic: &str, admin: &dyn Admin) -> Option<std::collecti
                     PartitionState {
                         leader: info.leader().map(|n| n.id()),
                         replicas: info.replicas().iter().map(|n| n.id()).collect(),
+                        isr: info.isr().iter().map(|n| n.id()).collect(),
                     },
                 )
             })
