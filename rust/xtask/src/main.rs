@@ -44,6 +44,7 @@ fn main() -> anyhow::Result<()> {
         Some("package-check") => package_check()?,
         Some("chaos") => chaos()?,
         Some("chaos-matrix") => chaos_matrix::run(&env::args().skip(2).collect::<Vec<_>>())?,
+        Some("chaos-matrix-status") => chaos_matrix::status::run(&env::args().skip(2).collect::<Vec<_>>())?,
         _ => print_help(),
     }
 
@@ -642,6 +643,9 @@ fn producer_perf_test() -> anyhow::Result<()> {
 ///   --all-brokers-down [N]    also kill every broker at once (SIGKILL), keep the
 ///                             cluster down for --outage-s, then restart it all
 ///   --outage-s N           whole-cluster outage for --all-brokers-down (30)
+///   --allow-multi-topic-recreate  run --topic-recreate with --num-topics > 1
+///                          despite the known consumer defect; a failure with
+///                          exactly its signature is labelled KNOWN DEFECT
 ///   --unclean              SIGKILL instead of SIGTERM for broker roll
 ///   --workload role:backend  repeatable; role=producer|consumer,
 ///                            backend=rust|python|python-async|c
@@ -897,6 +901,9 @@ fn parse_chaos_flags(raw: &[String]) -> anyhow::Result<Vec<(String, String)>> {
             i += 1;
         } else if arg == "--random" {
             out.push(("CHAOS_RANDOM".to_string(), "1".to_string()));
+            i += 1;
+        } else if arg == "--allow-multi-topic-recreate" {
+            out.push(("CHAOS_ALLOW_MULTI_TOPIC_RECREATE".to_string(), "1".to_string()));
             i += 1;
         } else if let Some((_, envk)) = fault.iter().find(|(f, _)| *f == arg) {
             // Fault flag with an OPTIONAL cadence: `--topic-recreate` (every
@@ -1439,7 +1446,13 @@ fn print_help() {
                              --protocols plaintext,ssl,sasl_ssl --msg-sizes 100,1048576 --rps 1000
                     --out DIR (default target/chaos-matrix/<matrix name>; re-running resumes)
                     --only ID,ID  --run-timeout-min N (default 240)  --rerun-failed
+                    --rerun RUN,RUN (run again these run ids, e.g. 15-ssl-1MiB, whatever their outcome)
                     --check-only (validate every run's configuration, then stop)
+                    --stall-min N (default 20)  --known-defect-attempts N (default 3)
+  chaos-matrix-status  Show a running (or finished) matrix's progress: current run and
+                  cycle, pass/fail counts, recent results, failures, time estimate
+                    e.g. cargo xtask chaos-matrix-status --watch 30
+                    --out DIR (default: the most recently active matrix)
 
 Usage:
   cargo xtask format
@@ -1458,6 +1471,7 @@ Usage:
   cargo xtask producer-perf-test
   cargo xtask package-check
   cargo xtask chaos
-  cargo xtask chaos-matrix --matrix FILE"
+  cargo xtask chaos-matrix --matrix FILE
+  cargo xtask chaos-matrix-status [--watch [SECS]]"
     );
 }
