@@ -1,0 +1,179 @@
+M17/P1 CP0 gate record: baselines at the base (76629aea)
+=========================================================
+
+Recorded by dotnet-actor 84 on 2026-09-28 (host clock IST, UTC+05:30).
+Plan: design/history/M17/P1-producer-transactions/PLAN.md, §4.2 (gates), the
+§4.3 CP0 row and §4.5 (G10). This file is a summary (Q20). Raw logs stay in
+the Actor's scratch directory and are not committed. CP0 changes no code.
+
+Baseline files next to this one (one test name per line, sorted with LC_ALL=C):
+  CP0-roster.txt   152 names: the __grpc_dotnet roster (§4.5 step 5)
+  CP0-failed.txt     6 names: the FAILED list of the CP0 run (§4.5 step 4)
+CP7 must build its own two lists with the same pipelines before running comm:
+  roster: cargo test --features integration-tests,multilanguage-tests --test integration \
+            -- __grpc_dotnet --list 2>/dev/null | grep -E ': test$' | sed -E 's/: test$//' | LC_ALL=C sort
+  failed: grep -E '^test .* \.\.\. FAILED$' <run log> | sed -E 's/^test (.*) \.\.\. FAILED$/\1/' | LC_ALL=C sort
+
+Preconditions
+-------------
+- git rev-parse HEAD on prashah_dev_dotnet_binding was
+  76629aeafae1265b512348fb9f80f869aad30c5b, as required.
+- Branch prashah_dev_dotnet_producer_transactions was created there with
+  `git switch -c` (Q22).
+- The pre-existing worktree state was carried along and never staged:
+  ' M kafka', ' D bindings/dotnet/.claude/agents/dotnet-{actor,critic}.md',
+  '?? .claude/agents/dotnet-{actor,critic}.md'.
+- bindings/dotnet/COMMENTS.84.md did not exist, so there was nothing to fix first.
+
+Environment
+-----------
+- Host: macOS 26.5.2 (Darwin 25.5.0), arm64. rustc and cargo 1.95.0
+  (rust-toolchain.toml pins 1.95.0).
+- .NET, host default (/usr/local/share/dotnet). Used by G2, G3, G4 and G9.
+    --list-sdks      10.0.401
+    --list-runtimes  Microsoft.AspNetCore.App 10.0.12
+                     Microsoft.NETCore.App 10.0.12
+- .NET, $HOME/.dotnet (Q18). Used by G5 only. Each command set, in its own shell:
+  DOTNET_ROOT=$HOME/.dotnet PATH=$HOME/.dotnet:$PATH DOTNET_MULTILEVEL_LOOKUP=0.
+  DOTNET_ROLL_FORWARD was unset, checked inside that shell.
+    --list-sdks      10.0.401
+    --list-runtimes  Microsoft.AspNetCore.App 10.0.12
+                     Microsoft.NETCore.App 8.0.31
+                     Microsoft.NETCore.App 10.0.12
+- Q18 install: `.semaphore/install-dotnet.sh` exited 0 after 47 s. It installed
+  SDK 10.0.401, then the Microsoft.NETCore.App 8.0.31 runtime, into
+  $HOME/.dotnet. No shell profile or global config was edited.
+- Docker: server 29.6.1, aarch64, 18 CPUs, 31.3 GiB. amd64 containers run
+  under Rosetta (their /proc/cpuinfo reports "VirtualApple @ 2.50GHz").
+
+G1 Mode A
+---------
+- git diff 76629aea..HEAD -- src/ src/ffi/ cbindgen.toml generator/ tests/
+  prints nothing (0 bytes).
+- shasum -a 256 target/include/confluent_kafka.h
+    e8d39f09f4ac71c4e21c0196c0534dd06f353c475a741104c8d37a6a7da5d111
+  This value is the same before G2, after G2's cargo build and after the G10
+  cross-build. The cross-build's build script did regenerate the header (its
+  stderr reads "C header generated: /work/target/include/confluent_kafka.h").
+  The content was identical, and the file's mtime did not change.
+
+G2 Build
+--------
+- cargo build --features ffi --release: exit 0. It was already up to date
+  ("Finished ... in 0.33s"). The artifacts (2026-09-25 18:22) are newer than
+  the last commit that touches src/, generator/, cbindgen.toml, build.rs or
+  Cargo.* (f01fa6c6, 2026-09-25 15:34).
+- dotnet build -c Release bindings/dotnet/Confluent.Kafka.sln: exit 0,
+  0 Warning(s), 0 Error(s). The build was incremental and took 1.1 s.
+- Supplementary run of the same command with --no-incremental: exit 0,
+  0 Warning(s), 0 Error(s), 5.3 s. It rewrote all six outputs.
+- All six TFM outputs exist:
+    src/Confluent.Kafka/bin/Release/{netstandard2.0,net8.0,net10.0}/Confluent.Kafka.dll
+    tests/Confluent.Kafka.UnitTests/bin/Release/{net462,net8.0,net10.0}/Confluent.Kafka.UnitTests.dll
+
+G3 Format
+---------
+- dotnet format bindings/dotnet/Confluent.Kafka.sln --verify-no-changes: exit 0.
+
+G4 net10.0
+----------
+- dotnet test -c Release -f net10.0 bindings/dotnet/Confluent.Kafka.sln: exit 0.
+  Passed 2317, Failed 0, Skipped 0, Total 2317.
+  The suite took 14 s (the R9 baseline); the whole command took 16.5 s.
+
+G5 net8.0 (in the $HOME/.dotnet environment)
+--------------------------------------------
+- dotnet test -c Release -f net8.0 bindings/dotnet/Confluent.Kafka.sln: exit 0.
+  Passed 2317, Failed 0, Skipped 0, Total 2317, the same as G4. The suite took
+  12 s. The test run line reads "(.NETCoreApp,Version=v8.0)".
+- Negative control: the same net8.0 assembly, run with --no-build in the host
+  environment, exits 1 with "You must install or update .NET to run this
+  application. Framework: 'Microsoft.NETCore.App', version '8.0.0' (arm64)".
+  Only 10.0.12 is found there. So G5 ran on the 8.0.31 runtime; it did not
+  roll forward.
+
+G6 P/Invoke count
+-----------------
+- grep -r --include='*.cs' 'internal static extern' bindings/dotnet/src | wc -l
+  prints 697:
+    Internal/Interop/NativeMethods.cs         218
+    Internal/Interop/NativeMethods.Admin.cs   479
+
+G7 Hygiene
+----------
+- Commit 1 stages exactly one path: design/history/M17/P1-producer-transactions/PLAN.md.
+- The CP0 record is exactly three files: gate/CP0.txt, gate/CP0-roster.txt
+  and gate/CP0-failed.txt.
+- The marker grep over bindings/dotnet/src, bindings/dotnet/tests,
+  bindings/dotnet/grpc-server and Makefile prints nothing.
+
+grpc-server build route (§4.1)
+------------------------------
+- The host route works on this host:
+    dotnet build -c Release bindings/dotnet/grpc-server/Confluent.Kafka.GrpcServer.csproj
+      exit 0, 0 Warning(s), 0 Error(s), 12.3 s
+    dotnet format bindings/dotnet/grpc-server/Confluent.Kafka.GrpcServer.csproj --verify-no-changes
+      exit 0
+  Grpc.Tools 2.71.0 ships no macOS arm64 protoc. Here it ran
+  tools/macosx_x64/protoc, an x86_64 Mach-O binary, under Rosetta, and codegen
+  did not crash. The recorded SIGSEGV is the linux_arm64 protoc inside an
+  arm64 Linux container (Makefile:267-271). This route does not use that binary.
+- The image route (G10 step 3) also works.
+- grep -c 'public override': ProducerServiceImpl.cs 8, AsyncProducerServiceImpl.cs 8.
+
+G10 local Docker baseline (§4.5 steps 0-5, run as written)
+----------------------------------------------------------
+0. docker info: exit 0.
+1. docker run --rm --platform linux/amd64 -v "$PWD":/work -w /work rust:1-bookworm \
+     cargo build --features ffi --release --target-dir target/linux-amd64
+   exit 0. Compiling took 8m05s; the step took 723 s in all, including the
+   container's install of toolchain 1.95.0 and the crate downloads.
+   Image rust:1-bookworm (amd64) sha256:93ce27a88655.
+   target/linux-amd64/release/libconfluent_kafka.so is an x86-64 ELF, sha256
+   7b7590a08580b04761201801aeabf6c11724ffe93b8c3de75be6667a467391ee.
+   The header hash afterwards is unchanged (see G1).
+2. cp target/linux-amd64/release/libconfluent_kafka.so target/release/libconfluent_kafka.so
+   The exact §4.5 nm selector, run inside a linux/amd64 rust:1-bookworm
+   container, prints 18. (The same .so exports 836 " T kafka_" symbols in all.)
+3. DOCKER_DEFAULT_PLATFORM=linux/amd64 make -C bindings/dotnet grpc-image grpc-image-async
+   exit 0 after 48 s. It built:
+     confluent-kafka-rust/dotnet-grpc-server:dev        amd64, CONSUMER_FLAVOR=sync
+     confluent-kafka-rust/dotnet-async-grpc-server:dev  amd64, CONSUMER_FLAVOR=async
+   The sync build ran `dotnet publish` (38.7 s, no warnings, under
+   TreatWarningsAsErrors). The async build's builder stage was a full cache
+   hit, because it is identical to the sync builder stage.
+   Base images: mcr.microsoft.com/dotnet/sdk:10.0 sha256:35d40304542c and
+   mcr.microsoft.com/dotnet/aspnet:8.0-noble sha256:84892b9bf258
+   (DOTNET_VERSION=8.0.31).
+4. With DOCKER_DEFAULT_PLATFORM unset (env -u, checked inside the shell):
+     cargo test --features integration-tests,multilanguage-tests --test integration -- __grpc_dotnet
+   No --skip. Exit 101. It ran from 10:53:29 to 10:54:25.
+     running 152 tests
+     test result: FAILED. 146 passed; 6 failed; 0 ignored; 0 measured; 570 filtered out; finished in 44.39s
+   The FAILED list (CP0-failed.txt) is exactly the six transaction arms:
+     producer_transactions_test::test_aborted_transaction_records_are_discarded__grpc_dotnet
+     producer_transactions_test::test_aborted_transaction_records_are_discarded__grpc_dotnet_async
+     producer_transactions_test::test_consume_transform_produce_with_offsets__grpc_dotnet
+     producer_transactions_test::test_consume_transform_produce_with_offsets__grpc_dotnet_async
+     producer_transactions_test::test_transactional_records_are_visible_only_after_commit__grpc_dotnet
+     producer_transactions_test::test_transactional_records_are_visible_only_after_commit__grpc_dotnet_async
+   Each panics at initTransactions with "dotnet gRPC backend transport error
+   (Unimplemented)" (the _async arms say "dotnet_async"), at
+   producer_transactions_test.rs:431, :501 and :604. The servicer base answers
+   Unimplemented, as §4.5 expects.
+   There was no other failure. The known shared-broker flake
+   test_ml_assign_and_consume__grpc_dotnet_async (STATUS, M14/P2 note (v))
+   passed. The ok list has 146 names (113 __grpc_dotnet, 33 __grpc_dotnet_async),
+   and ok plus failed equals the roster exactly.
+   Environment note: the Docker daemon was not idle during this run. An
+   unrelated 5-broker `xtask chaos` run from another checkout (containers
+   kafka-{1..5}-ce04b4667b58d8f0) was running at the same time. None of its
+   containers was touched. This run left no container or network behind.
+5. cargo test --features integration-tests,multilanguage-tests --test integration -- __grpc_dotnet --list
+   prints "152 tests, 0 benchmarks": 116 __grpc_dotnet and 36 __grpc_dotnet_async.
+   The list is identical before and after step 4 and contains the six arms.
+   It is stored as CP0-roster.txt.
+
+Not run at CP0 (per the plan's schedule)
+----------------------------------------
+G8 (CP4, CP5, CP7), G11 (CP7), and G9's target override count of 13 (CP6, CP7).
