@@ -73,7 +73,7 @@ impl MetricNameTemplate {
     }
 
     /// Get the ordered set of tag names for the metric.
-    #[doc(alias = "org.apache.kafka.common.MetricNameTemplate#getTags")]
+    #[doc(alias = "org.apache.kafka.common.MetricNameTemplate#tags")]
     pub fn tags(&self) -> &IndexSet<String> {
         &self.tags
     }
