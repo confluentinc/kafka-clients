@@ -46,7 +46,7 @@ name: build-test-release
 #
 # Split per language so a failure is attributable to one job, and so the gRPC
 # arm of the multilanguage suite runs in the job for the binding it exercises
-# (see the `__grpc_` naming convention in tests/common/multilanguage_test_macro.rs).
+# (see the `__grpc_` naming convention in rust/tests/common/multilanguage_test_macro.rs).
 #
 # The translation agent is a separate manual promotion (start-translation-plan.yml).
 # It runs in a detached git worktree and pushes new commits when promotions

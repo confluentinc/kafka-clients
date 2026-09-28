@@ -1,6 +1,6 @@
 # The consumer background-task loop: one `run_once()` iteration.
 #
-# Source of truth for design/current/consumer-bg-loop.svg.
+# Source of truth for design/current/img/consumer-bg-loop.svg.
 # Render with: make -C design/current d2
 #
 # The point of this diagram: the phase numbers are Java's
@@ -13,8 +13,8 @@ direction: down
 p1: "Phase 1 — drain application events\ntry_recv in a while-let loop"
 guard: "acquire the NetworkClientDelegate guard\nONCE for the whole iteration"
 p2: "Phase 2 — poll RMs (before-membership)\ncoordinator -> commit -> heartbeat"
-p24: "Phase 2.4 — drive a pending §31 release\nfinishes on_partitions_lost"
-p25: "Phase 2.5 — membership.reconcile(now, false)"
+p24: "Phase 2.4 — drive a pending release\nfinishes on_partitions_lost (fence / fatal / stale)"
+p25: "Phase 2.5 — membership.reconcile(now, false)\ntry_recv any pending listener ack"
 p26: "Phase 2.6 — poll RMs (after-membership)\noffsets -> topic_metadata -> fetch -> dyn"
 p4: "Phase 4 — poll the network client\npoll_default(poll_wait_time_ms, now).await" {
   style.fill: "#ffe6e6"

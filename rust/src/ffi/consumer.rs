@@ -4948,7 +4948,7 @@ mod tests {
     // ── FfiRebalanceListener ──
     //
     // The dispatcher-thread callback behavior of the listener is covered by the
-    // Unity suite `bindings/c/tests/test_consumer_callbacks.c` (matching the
+    // Unity suite `c/tests/test_consumer_callbacks.c` (matching the
     // existing split: the C surface is tested from C). What cannot be reached
     // from there is `on_partitions_lost` with a NULL `lost` callback, because
     // `MockConsumer::rebalance` never fires `on_partitions_lost` (neither does

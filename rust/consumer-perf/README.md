@@ -35,6 +35,10 @@ cache warm-up).
 
 ## Usage
 
+Run the commands below from `rust/`, the Cargo workspace root: that is where
+`rust-toolchain.toml` and the workspace `Cargo.toml` are picked up, and the
+default `--results-dir` resolves to `rust/consumer-perf/results`.
+
 ```sh
 # Defaults: localhost:9092, topic consumer-perf-bench, 50k msg/s, 60s, 1KiB
 cargo run -p consumer-perf --release
@@ -87,7 +91,9 @@ platform.
 
 ## Output
 
-Each run writes to `consumer-perf/results/<group-id>/` (git-ignored):
+Each run writes to `consumer-perf/results/<group-id>/`, relative to the
+current directory (so `rust/consumer-perf/results/` when run from `rust/`,
+git-ignored):
 
 - `config.json` — the run parameters.
 - `metrics.jsonl` — one `{"type":"interval", ...}` line per interval plus a

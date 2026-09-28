@@ -5,7 +5,7 @@ producer's idempotence and transaction support
 (`org.apache.kafka.clients.producer.internals.TransactionManager` and its
 dependency closure) from Java to Rust. It supplements `CLAUDE.md` — when these
 rules conflict with general translation guidance, the transaction-specific rule
-wins inside `src/producer/`.
+wins inside `rust/src/producer/`.
 
 Rules are grouped by topic. Each numbered section is a single design decision:
 the rule itself, **Why** (rationale, usually referencing the Java contract), and
@@ -367,7 +367,7 @@ than a clean local error.
 
 Phase 1 deliberately did not create typed error structs for the transaction
 exceptions, because none of them carries payload beyond a message and every wire
-code already exists in `src/common/protocol/errors.rs`. That decision stands.
+code already exists in `rust/src/common/protocol/errors.rs`. That decision stands.
 
 But it reasons about *payload*, and Java's transaction dispatch also reasons
 about *subtyping*. Two relations are load-bearing and MUST be preserved
@@ -486,7 +486,7 @@ for *any* field". That is no longer true: the generator now emits the check,
 gated on `!field.ignorable()` exactly as Java gates it, for the 100 of 227
 version-gated fields that are non-ignorable. The normative rule below is
 unchanged — it is now enforced by `non_ignorable_check_applies` in
-`generator/src/lib.rs` and pinned by
+`rust/generator/src/lib.rs` and pinned by
 `generator::tests::test_non_ignorable_check_skips_ignorable_fields`.
 
 **How to apply:**
@@ -527,15 +527,15 @@ compounding was *potential*, not observed: neither `Enable2Pc` nor
 so no value was being dropped on that path. PLAN §9.1 records the retraction of
 the claim that it was.
 
-Only `INIT_PRODUCER_ID` sets the flag true in **`generator/messages/`** — the corpus
+Only `INIT_PRODUCER_ID` sets the flag true in **`rust/generator/messages/`** — the corpus
 `build.rs` compiles, and therefore the one that decides what the Rust accessors
-return. (`generator/messages/` now matches `kafka/` 4.2 on this flag: only
+return. (`rust/generator/messages/` now matches `kafka/` 4.2 on this flag: only
 `InitProducerIdRequest.json` sets it true in either corpus.) For every other API the
 two accessors agree **today**.
 
 **The corpus matters, so always name it.** In `kafka/` 4.2 — what CLAUDE.md's
 "Source Reference" points at — only `InitProducerIdRequest.json` sets the flag true;
-the other four had their latest versions released by 4.2. `generator/messages/` is a
+the other four had their latest versions released by 4.2. `rust/generator/messages/` is a
 pre-4.2 snapshot (36 of 197 specs differ; PLAN §9.9), so a flag claim checked
 against `kafka/` will appear false when it is true of the built code, and vice
 versa. Three findings in the Phase 2 review loop were this one error. Cite the file.

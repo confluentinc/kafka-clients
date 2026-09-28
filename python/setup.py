@@ -18,7 +18,8 @@ from setuptools import setup, Extension
 import os
 import sys
 
-project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
+# The Rust workspace, whose target/ holds the FFI header and the library.
+project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'rust'))
 include_dir = os.path.join(project_root, 'target', 'include')
 lib_dir = os.environ.get('CONFLUENT_KAFKA_LIB_DIR',
                          os.path.join(project_root, 'target', 'release'))
