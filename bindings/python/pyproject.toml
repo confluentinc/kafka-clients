@@ -24,6 +24,8 @@ dev = [
     "pytest",
     "pytest-asyncio",
     "testcontainers>=4.0",
+    # assert_type / Never for the typing tests on Python 3.10 (in `typing` from 3.11)
+    "typing_extensions>=4.2",
 ]
 
 [tool.setuptools]

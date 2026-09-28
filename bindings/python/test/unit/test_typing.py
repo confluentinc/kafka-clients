@@ -26,7 +26,12 @@ from __future__ import annotations
 
 import sys
 import uuid
-from typing import TYPE_CHECKING, assert_type
+from typing import TYPE_CHECKING
+
+if sys.version_info >= (3, 11):
+    from typing import assert_type
+else:
+    from typing_extensions import assert_type
 
 from confluent_kafka.common import TimestampType, TopicIdPartition, TopicPartition, Uuid
 from confluent_kafka.common.serialization import (
