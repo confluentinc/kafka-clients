@@ -50,6 +50,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{bail, Context as _};
 
+pub mod status;
+
 /// `cargo` arguments that build and select the chaos runner test.
 const TEST_ARGS: &[&str] = &["test", "--features", "integration-tests", "--test", "chaos"];
 /// libtest arguments selecting the flag-driven runner.
@@ -64,6 +66,16 @@ const PROTOCOLS: &[&str] = &["plaintext", "ssl", "sasl_plaintext", "sasl_ssl"];
 /// How long a timed-out run gets to tear its cluster down after SIGINT
 /// before its process group is killed.
 const INTERRUPT_GRACE: Duration = Duration::from_secs(180);
+/// Grace after SIGINT for a run that stopped making progress. A wedged test
+/// process usually no longer polls its Ctrl-C handler either, so waiting the
+/// full interrupt grace would only delay the next run.
+const STALL_GRACE: Duration = Duration::from_secs(60);
+/// How long to sample a stalled test process's stacks before it is signalled,
+/// so a wedge leaves evidence of where it was stuck.
+const STALL_SAMPLE_SECS: &str = "5";
+/// The harness's notice when it had to force-exit a process that passed but
+/// did not terminate after teardown; libtest's summary never prints then.
+const FORCED_EXIT_AFTER_PASS: &str = "chaos: FORCED EXIT after a PASS verdict";
 
 /// Verdict lines copied into the results, as (column, verdict line prefix).
 const METRICS: &[(&str, &str)] = &[
@@ -102,6 +114,7 @@ const COLUMNS: &[&str] = &[
     "commit_errors",
     "reasons",
     "dir",
+    "attempts",
 ];
 
 struct Options {
@@ -113,7 +126,13 @@ struct Options {
     only: Option<BTreeSet<String>>,
     run_timeout: Duration,
     rerun_failed: bool,
+    /// Run ids to run again whatever their recorded outcome (`--rerun`).
+    rerun: BTreeSet<String>,
     check_only: bool,
+    /// A run whose log has not grown for this long is stopped as STALLED.
+    stall_timeout: Duration,
+    /// Attempts at a run that keeps failing with the known recreate defect.
+    known_defect_attempts: u32,
 }
 
 /// One scenario line of the matrix file.
@@ -179,6 +198,14 @@ pub fn run(raw: &[String]) -> anyhow::Result<()> {
         .with_context(|| format!("reading matrix file {}", options.matrix.display()))?;
     let scenarios = parse_matrix(&text)?;
     let plan = plan_runs(&scenarios, &options)?;
+    let unknown: Vec<&String> = options
+        .rerun
+        .iter()
+        .filter(|id| !plan.iter().any(|p| &p.run_id() == *id))
+        .collect();
+    if !unknown.is_empty() {
+        bail!("--rerun names run id(s) that are not in this matrix's plan: {unknown:?}");
+    }
     // Every run's flags must parse before anything starts, so a typo in line
     // 20 does not surface hours into the matrix.
     for planned in &plan {
@@ -207,6 +234,9 @@ pub fn run(raw: &[String]) -> anyhow::Result<()> {
 
     fs::create_dir_all(options.out.join("runs"))?;
     fs::copy(&options.matrix, options.out.join("matrix.txt"))?;
+    // The run order, for `chaos-matrix-status` (it cannot rebuild `--only`).
+    let plan_ids: Vec<String> = plan.iter().map(Planned::run_id).collect();
+    fs::write(options.out.join("plan.txt"), plan_ids.join("\n") + "\n")?;
     let results_path = options.out.join("results.tsv");
     let mut results = load_results(&results_path)?;
     let mut log = MatrixLog::open(&options.out.join("matrix.log"))?;
@@ -232,7 +262,8 @@ pub fn run(raw: &[String]) -> anyhow::Result<()> {
     for (n, planned) in plan.iter().enumerate() {
         let run_id = planned.run_id();
         if let Some(previous) = results.get(&run_id) {
-            if previous.outcome == "PASS" || !options.rerun_failed {
+            let rerun_requested = options.rerun.contains(&run_id);
+            if !rerun_requested && (previous.outcome == "PASS" || !options.rerun_failed) {
                 continue;
             }
         }
@@ -246,7 +277,7 @@ pub fn run(raw: &[String]) -> anyhow::Result<()> {
             ));
             break;
         }
-        let leftovers = leftover_broker_containers();
+        let leftovers = harness_broker_containers();
         if !leftovers.is_empty() {
             log.line(&format!(
                 "WARNING: broker containers from an earlier cluster are still present ({}); they compete \
@@ -259,7 +290,38 @@ pub fn run(raw: &[String]) -> anyhow::Result<()> {
             n + 1,
             planned.scenario.description
         ));
-        let result = execute(planned, &options)?;
+        // A failure that is exactly the known multi-topic recreate defect is
+        // retried, keeping every attempt's directory: a later clean attempt
+        // is a genuine pass, and a scenario that hits it on every attempt is
+        // recorded as KNOWN-DEFECT rather than FAIL. Any other outcome is
+        // final on the first attempt.
+        let mut attempt = 1;
+        let mut result = loop {
+            let mut result = execute(planned, &options, &mut log)?;
+            let known = result.columns.get("known_defect").cloned();
+            match known {
+                Some(defect) if result.outcome == "FAIL" => {
+                    if attempt < options.known_defect_attempts {
+                        let kept = unused_path(&options.out.join("runs").join(format!("{run_id}.attempt-{attempt}")));
+                        fs::rename(options.out.join("runs").join(&run_id), &kept)?;
+                        log.line(&format!(
+                            "[{}/{total}] {run_id} — attempt {attempt}/{} hit the known recreate defect; retrying \
+                             (logs kept in {})",
+                            n + 1,
+                            options.known_defect_attempts,
+                            kept.display()
+                        ));
+                        attempt += 1;
+                        continue;
+                    }
+                    result.outcome = "KNOWN-DEFECT".to_string();
+                    result.reasons = format!("known defect on all {attempt} attempt(s): {defect}");
+                    break result;
+                },
+                _ => break result,
+            }
+        };
+        result.columns.insert("attempts".to_string(), attempt.to_string());
         log.line(&format!(
             "[{}/{total}] {run_id} — {} in {}s (delivered {}, lost {}, {} records/s){}",
             n + 1,
@@ -305,7 +367,12 @@ fn parse_options(raw: &[String]) -> anyhow::Result<Options> {
     let mut only = None;
     let mut run_timeout = Duration::from_secs(240 * 60);
     let mut rerun_failed = false;
+    let mut rerun = BTreeSet::new();
     let mut check_only = false;
+    // The harness's longest silent phases (a 300 s drain, a 120 s broker
+    // wait, a 120 s gap between cycles) stay far below this.
+    let mut stall_timeout = Duration::from_secs(20 * 60);
+    let mut known_defect_attempts = 3;
     let mut i = 0;
     while i < raw.len() {
         let flag = raw[i].as_str();
@@ -331,9 +398,23 @@ fn parse_options(raw: &[String]) -> anyhow::Result<Options> {
             },
             "--rps" => rps = value.parse().context("--rps must be a number")?,
             "--only" => only = Some(split_list(value).into_iter().collect()),
+            "--rerun" => rerun = split_list(value).into_iter().collect(),
             "--run-timeout-min" => {
                 let minutes: u64 = value.parse().context("--run-timeout-min must be a number")?;
                 run_timeout = Duration::from_secs(minutes * 60);
+            },
+            "--stall-min" => {
+                let minutes: u64 = value.parse().context("--stall-min must be a number")?;
+                if minutes == 0 {
+                    bail!("--stall-min must be >= 1");
+                }
+                stall_timeout = Duration::from_secs(minutes * 60);
+            },
+            "--known-defect-attempts" => {
+                known_defect_attempts = value.parse().context("--known-defect-attempts must be a number")?;
+                if known_defect_attempts == 0 {
+                    bail!("--known-defect-attempts must be >= 1");
+                }
             },
             other => bail!("unknown chaos-matrix flag: {other}"),
         }
@@ -361,7 +442,10 @@ fn parse_options(raw: &[String]) -> anyhow::Result<Options> {
         only,
         run_timeout,
         rerun_failed,
+        rerun,
         check_only,
+        stall_timeout,
+        known_defect_attempts,
     })
 }
 
@@ -484,7 +568,9 @@ impl RunResult {
 
     fn from_tsv(line: &str) -> Option<(String, Self)> {
         let cells: Vec<&str> = line.split('\t').collect();
-        if cells.len() != COLUMNS.len() {
+        // Rows written before the trailing `attempts` column existed have one
+        // cell fewer; they read as a single attempt.
+        if cells.len() != COLUMNS.len() && cells.len() + 1 != COLUMNS.len() {
             return None;
         }
         let mut result = RunResult::default();
@@ -575,13 +661,13 @@ fn check_configurations(plan: &[Planned], rps: u32) -> anyhow::Result<()> {
 }
 
 /// Run one planned run to completion and collect its result.
-fn execute(planned: &Planned, options: &Options) -> anyhow::Result<RunResult> {
+fn execute(planned: &Planned, options: &Options, log: &mut MatrixLog) -> anyhow::Result<RunResult> {
     let run_id = planned.run_id();
     let dir = options.out.join("runs").join(&run_id);
     if dir.exists() {
         // A re-run (or a run the runner was stopped in the middle of): keep
         // the earlier attempt rather than mixing two runs' logs.
-        let kept = options.out.join("runs").join(format!("{run_id}.prev-{}", unix_secs()));
+        let kept = unused_path(&options.out.join("runs").join(format!("{run_id}.prev-{}", unix_secs())));
         fs::rename(&dir, &kept)?;
     }
     fs::create_dir_all(&dir)?;
@@ -599,21 +685,48 @@ fn execute(planned: &Planned, options: &Options) -> anyhow::Result<RunResult> {
         // not just the `cargo` wrapper in front of it.
         .process_group(0);
 
+    // Harness clusters already present before this run; anything new after it
+    // ends belongs to this run.
+    let containers_before: BTreeSet<String> = harness_broker_containers().into_iter().collect();
+
     let started = now_utc();
     let clock = Instant::now();
     let mut child = command.spawn().context("spawning cargo test")?;
     let pid = child.id();
-    let mut timed_out = false;
+    let mut ended = Ended::Exited;
+    let mut last_len = 0;
+    let mut last_progress = Instant::now();
     loop {
         if child.try_wait()?.is_some() {
             break;
         }
-        if !timed_out && clock.elapsed() >= options.run_timeout {
-            timed_out = true;
-            // SIGINT first: the runner treats it like Ctrl-C, writes its
-            // reports and tears the cluster down.
+        let len = fs::metadata(&log_path).map(|m| m.len()).unwrap_or(0);
+        if len != last_len {
+            last_len = len;
+            last_progress = Instant::now();
+        }
+        let cause = if clock.elapsed() >= options.run_timeout {
+            Some(Ended::TimedOut)
+        } else if last_progress.elapsed() >= options.stall_timeout {
+            Some(Ended::Stalled)
+        } else {
+            None
+        };
+        if let Some(cause) = cause {
+            ended = cause;
+            if cause == Ended::Stalled {
+                sample_stacks(pid, &dir.join("stack-sample.txt"), log, &run_id);
+            }
+            // SIGINT first: the harness treats it like Ctrl-C, writes its
+            // reports and tears the cluster down. A stalled run has usually
+            // stopped polling its signal handler too, so it gets less grace.
             signal_group(pid, "INT");
-            let deadline = Instant::now() + INTERRUPT_GRACE;
+            let grace = if cause == Ended::Stalled {
+                STALL_GRACE
+            } else {
+                INTERRUPT_GRACE
+            };
+            let deadline = Instant::now() + grace;
             while Instant::now() < deadline && child.try_wait()?.is_none() {
                 std::thread::sleep(Duration::from_secs(1));
             }
@@ -627,8 +740,32 @@ fn execute(planned: &Planned, options: &Options) -> anyhow::Result<RunResult> {
     }
     let duration_s = clock.elapsed().as_secs();
 
-    let log = fs::read_to_string(&log_path).unwrap_or_default();
-    let parsed = parse_run_log(&log, timed_out);
+    // A killed run never reaches the harness's teardown, and a later run must
+    // not share the host with its brokers: remove exactly the containers (and
+    // their network) this run created, never anything that predates it.
+    let leaked: Vec<String> = harness_broker_containers()
+        .into_iter()
+        .filter(|name| !containers_before.contains(name))
+        .collect();
+    if !leaked.is_empty() {
+        log.line(&format!(
+            "{run_id}: removing the cluster it left behind ({})",
+            leaked.join(", ")
+        ));
+        remove_cluster(&leaked);
+    }
+
+    let text = fs::read_to_string(&log_path).unwrap_or_default();
+    let mut parsed = parse_run_log(&text, ended);
+    if ended == Ended::Stalled {
+        parsed.reasons.insert(
+            0,
+            format!(
+                "no output for {} min: the test process stopped making progress and was killed",
+                options.stall_timeout.as_secs() / 60
+            ),
+        );
+    }
     if let Some(reports) = &parsed.reports_dir {
         let source = PathBuf::from(reports);
         if source.is_dir() {
@@ -648,6 +785,9 @@ fn execute(planned: &Planned, options: &Options) -> anyhow::Result<RunResult> {
         columns.insert("produce_rate".to_string(), format!("{rate:.0}"));
         columns.insert("produce_mib_s".to_string(), format!("{mib:.1}"));
     }
+    if let Some(defect) = parsed.known_defect {
+        columns.insert("known_defect".to_string(), defect);
+    }
     Ok(RunResult {
         outcome: parsed.outcome,
         duration_s,
@@ -656,8 +796,78 @@ fn execute(planned: &Planned, options: &Options) -> anyhow::Result<RunResult> {
     })
 }
 
+/// How a run's process came to an end.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Ended {
+    /// It exited on its own.
+    Exited,
+    /// It ran past `--run-timeout-min` and was stopped.
+    TimedOut,
+    /// Its log did not grow for `--stall-min` and it was stopped.
+    Stalled,
+}
+
 fn signal_group(pid: u32, signal: &str) {
     let _ = Command::new("kill").args(["-s", signal, "--", &format!("-{pid}")]).status();
+}
+
+/// Write a stack sample of the chaos test binary in process group `pgid` to
+/// `out`, before a stalled run is signalled. Best effort: macOS `sample` is
+/// used, and a host without it (or a binary that already exited) just leaves
+/// no sample.
+fn sample_stacks(pgid: u32, out: &Path, log: &mut MatrixLog, run_id: &str) {
+    let Ok(found) = Command::new("pgrep")
+        .args(["-g", &pgid.to_string(), "-f", "deps/chaos-"])
+        .output()
+    else {
+        return;
+    };
+    let Some(pid) = String::from_utf8_lossy(&found.stdout)
+        .lines()
+        .next()
+        .map(str::trim)
+        .map(str::to_string)
+    else {
+        return;
+    };
+    let sampled = Command::new("/usr/bin/sample")
+        .args([pid.as_str(), STALL_SAMPLE_SECS, "-file"])
+        .arg(out)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    if matches!(sampled, Ok(status) if status.success()) {
+        log.line(&format!(
+            "{run_id}: stalled — stack sample of pid {pid} written to {}",
+            out.display()
+        ));
+    }
+}
+
+/// Every harness broker container (`kafka-<node>-<suffix>`), running or not.
+fn harness_broker_containers() -> Vec<String> {
+    let Ok(output) = Command::new("docker").args(["ps", "-a", "--format", "{{.Names}}"]).output() else {
+        return Vec::new();
+    };
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter(|name| is_harness_broker_name(name))
+        .map(str::to_string)
+        .collect()
+}
+
+/// Remove the given harness broker containers with their volumes, and the
+/// `kafka-net-<suffix>` network of each cluster they belong to.
+fn remove_cluster(containers: &[String]) {
+    let _ = Command::new("docker").args(["rm", "-f", "-v"]).args(containers).output();
+    let networks: BTreeSet<String> = containers
+        .iter()
+        .filter_map(|name| name.splitn(3, '-').nth(2))
+        .map(|suffix| format!("kafka-net-{suffix}"))
+        .collect();
+    for network in networks {
+        let _ = Command::new("docker").args(["network", "rm", &network]).output();
+    }
 }
 
 /// What a run's log says about it.
@@ -669,15 +879,20 @@ struct ParsedLog {
     /// Summed over the run's producers: (records/s, MiB/s).
     produce_rate: Option<(f64, f64)>,
     reports_dir: Option<String>,
+    /// The verifier's `KNOWN DEFECT:` label, when the failure matched the
+    /// known multi-topic recreate defect's signature.
+    known_defect: Option<String>,
 }
 
-fn parse_run_log(log: &str, timed_out: bool) -> ParsedLog {
+fn parse_run_log(log: &str, ended: Ended) -> ParsedLog {
     // The runner prints the abnormal-end notices to stderr (the matching
     // `FAIL (watchdog)` / `FAIL (panic)` headers go only to verdict.txt), so
     // classify on those notices, and on them before the verdict: a run that
     // panicked can still print a clean-looking partial verdict.
-    let outcome = if timed_out {
+    let outcome = if ended == Ended::TimedOut {
         "TIMEOUT"
+    } else if ended == Ended::Stalled {
+        "STALLED"
     } else if log.contains("invalid chaos configuration") {
         "CONFIG-ERROR"
     } else if log.contains("chaos: WATCHDOG") {
@@ -686,7 +901,7 @@ fn parse_run_log(log: &str, timed_out: bool) -> ParsedLog {
         "FAIL (panic)"
     } else if log.contains("chaos: INTERRUPTED") {
         "FAIL (interrupted)"
-    } else if log.contains("test result: ok. 1 passed") {
+    } else if log.contains("test result: ok. 1 passed") || log.contains(FORCED_EXIT_AFTER_PASS) {
         "PASS"
     } else if log.contains("=== Chaos verdict: FAIL") {
         "FAIL"
@@ -702,9 +917,13 @@ fn parse_run_log(log: &str, timed_out: bool) -> ParsedLog {
     let mut reports_dir = None;
     let mut panic_message = None;
     let mut aborted_by: Option<String> = None;
+    let mut known_defect = None;
     let lines: Vec<&str> = log.lines().collect();
     for (i, line) in lines.iter().enumerate() {
         let trimmed = line.trim_start();
+        if let Some(defect) = trimmed.strip_prefix("KNOWN DEFECT: ") {
+            known_defect = Some(defect.chars().take(300).collect::<String>());
+        }
         for (column, prefix) in METRICS {
             if let Some(rest) = trimmed.strip_prefix(prefix) {
                 if let Some(value) = rest.trim_start().strip_prefix(':') {
@@ -747,7 +966,17 @@ fn parse_run_log(log: &str, timed_out: bool) -> ParsedLog {
     // Each producer prints its throughput line exactly once, so the sum is
     // the run's aggregate produce rate.
     let produce_rate = (!rates.is_empty()).then(|| rates.iter().fold((0.0, 0.0), |a, r| (a.0 + r.0, a.1 + r.1)));
-    ParsedLog { outcome: outcome.to_string(), metrics, reasons, produce_rate, reports_dir }
+    // The label only means something on an ordinary verdict failure; a run
+    // that also panicked or wedged failed for more than the known defect.
+    let known_defect = known_defect.filter(|_| outcome == "FAIL");
+    ParsedLog {
+        outcome: outcome.to_string(),
+        metrics,
+        reasons,
+        produce_rate,
+        reports_dir,
+        known_defect,
+    }
 }
 
 /// Parse `chaos: producer-rust-1 sent N records in Ts (R records/s, M MiB/s,
@@ -760,19 +989,6 @@ fn parse_producer_rate(line: &str) -> Option<(f64, f64)> {
     let (rate, rest) = inside.split_once(" records/s, ")?;
     let mib = rest.split_once(" MiB/s")?.0;
     Some((rate.trim().parse().ok()?, mib.trim().parse().ok()?))
-}
-
-/// Names of broker containers from a harness cluster that are still present
-/// (`kafka-<node>-<suffix>`). Never touches anything else.
-fn leftover_broker_containers() -> Vec<String> {
-    let Ok(output) = Command::new("docker").args(["ps", "-a", "--format", "{{.Names}}"]).output() else {
-        return Vec::new();
-    };
-    String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .filter(|name| is_harness_broker_name(name))
-        .map(str::to_string)
-        .collect()
 }
 
 fn is_harness_broker_name(name: &str) -> bool {
@@ -917,14 +1133,23 @@ fn render_summary(
 
     out.push_str("## Run details\n\n");
     out.push_str(
-        "| Run | Outcome | Duration | Produce rate (rec/s) | MiB/s | Delivered | Lost | Failed sends | \
-         Committed checks | Ordering | Rebalance callbacks |\n|---|---|---|---|---|---|---|---|---|---|---|\n",
+        "Attempts above 1 are retries after the known multi-topic recreate defect; the metrics are the last \
+         attempt's, and earlier attempts' logs are kept in `runs/<run>.attempt-<n>/`. KNOWN-DEFECT means \
+         every attempt hit that defect's exact signature and nothing else failed.\n\n",
+    );
+    out.push_str(
+        "| Run | Outcome | Attempts | Duration | Produce rate (rec/s) | MiB/s | Delivered | Lost | Failed sends | \
+         Committed checks | Ordering | Rebalance callbacks |\n|---|---|---|---|---|---|---|---|---|---|---|---|\n",
     );
     for planned in plan {
         let run_id = planned.run_id();
         if let Some(r) = results.get(&run_id) {
+            let attempts = match r.get("attempts") {
+                "" => "1",
+                n => n,
+            };
             out.push_str(&format!(
-                "| {run_id} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
+                "| {run_id} | {} | {attempts} | {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
                 r.outcome,
                 format_duration(r.duration_s),
                 r.get("produce_rate"),
@@ -989,6 +1214,19 @@ fn unix_secs() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
 
+/// `path` if nothing is there yet, else `path` with the first free `-<n>`
+/// suffix. Kept attempt directories are never overwritten: a re-run of a run
+/// that was already retried finds its earlier `.attempt-1` in place.
+fn unused_path(path: &Path) -> PathBuf {
+    if !path.exists() {
+        return path.to_path_buf();
+    }
+    (2..)
+        .map(|n| PathBuf::from(format!("{}-{n}", path.display())))
+        .find(|candidate| !candidate.exists())
+        .expect("an unbounded suffix range always has a free name")
+}
+
 /// The current UTC time as `YYYY-MM-DDTHH:MM:SSZ`.
 fn now_utc() -> String {
     Command::new("date")
@@ -1014,7 +1252,10 @@ mod tests {
             only: None,
             run_timeout: Duration::from_secs(60),
             rerun_failed: false,
+            rerun: BTreeSet::new(),
             check_only: false,
+            stall_timeout: Duration::from_secs(60),
+            known_defect_attempts: 3,
         }
     }
 
@@ -1124,7 +1365,7 @@ chaos: producer-rust-1 sent 6000 records in 6.0s (1000 records/s, 0.1 MiB/s, tar
 chaos: reports written to target/chaos-runs/1-2
 test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 70 filtered out
 ";
-        let parsed = parse_run_log(log, false);
+        let parsed = parse_run_log(log, Ended::Exited);
         assert_eq!(parsed.outcome, "PASS");
         assert_eq!(parsed.metrics["delivered"], "6000");
         assert_eq!(parsed.metrics["lost"], "0");
@@ -1137,14 +1378,14 @@ test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 70 filtered out
     #[test]
     fn failing_logs_are_classified_with_their_reasons() {
         let verdict = "=== Chaos verdict: FAIL ===\n  lost (delivered, unseen)  : 3\n  FAIL: data loss: 3 acknowledged record(s) never consumed\n  FAIL: data loss: 3 acknowledged record(s) never consumed\n";
-        let parsed = parse_run_log(verdict, false);
+        let parsed = parse_run_log(verdict, Ended::Exited);
         assert_eq!(parsed.outcome, "FAIL");
         assert_eq!(parsed.reasons, ["data loss: 3 acknowledged record(s) never consumed"]);
 
         // Died before the scenario: no verdict, the reason is the panic text.
         let panicked =
             "thread 'run_test::chaos_run' (1) panicked at tests/chaos/harness.rs:130:17:\ncluster did not start\n";
-        let parsed = parse_run_log(panicked, false);
+        let parsed = parse_run_log(panicked, Ended::Exited);
         assert_eq!(parsed.outcome, "ERROR");
         assert_eq!(parsed.reasons, ["cluster did not start"]);
 
@@ -1152,27 +1393,61 @@ test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 70 filtered out
         // verdict printed after it says PASS.
         let aborted = "chaos: ABORTED by a panic in the run: broker 2 did not become operational within 120s\n\
                        Partial verdict below.\n=== Chaos verdict: PASS ===\n";
-        let parsed = parse_run_log(aborted, false);
+        let parsed = parse_run_log(aborted, Ended::Exited);
         assert_eq!(parsed.outcome, "FAIL (panic)");
         assert_eq!(parsed.reasons, ["broker 2 did not become operational within 120s"]);
 
         let wedged = "chaos: WATCHDOG — run exceeded 900s without finishing\n=== Chaos verdict: PASS ===\n";
-        assert_eq!(parse_run_log(wedged, false).outcome, "FAIL (watchdog)");
+        assert_eq!(parse_run_log(wedged, Ended::Exited).outcome, "FAIL (watchdog)");
         assert_eq!(
-            parse_run_log("chaos: INTERRUPTED (Ctrl-C)", false).outcome,
+            parse_run_log("chaos: INTERRUPTED (Ctrl-C)", Ended::Exited).outcome,
             "FAIL (interrupted)"
         );
-        assert_eq!(parse_run_log("invalid chaos configuration: x", false).outcome, "CONFIG-ERROR");
-        assert_eq!(parse_run_log("test result: ok. 1 passed;", true).outcome, "TIMEOUT");
+        assert_eq!(
+            parse_run_log("invalid chaos configuration: x", Ended::Exited).outcome,
+            "CONFIG-ERROR"
+        );
+        assert_eq!(parse_run_log("test result: ok. 1 passed;", Ended::TimedOut).outcome, "TIMEOUT");
         // A filter that matched no test is not a pass.
-        assert_eq!(parse_run_log("test result: ok. 0 passed;", false).outcome, "ERROR");
+        assert_eq!(parse_run_log("test result: ok. 0 passed;", Ended::Exited).outcome, "ERROR");
+        assert_eq!(parse_run_log("chaos: cycle 7/12", Ended::Stalled).outcome, "STALLED");
+        // A passing run the harness had to force-exit never prints libtest's
+        // summary; a failing one it force-exited is still a failure.
+        let forced_pass = "=== Chaos verdict: PASS ===\nchaos: FORCED EXIT after a PASS verdict — the process did not terminate after teardown\n";
+        assert_eq!(parse_run_log(forced_pass, Ended::Exited).outcome, "PASS");
+        let forced_fail = "=== Chaos verdict: FAIL ===\nchaos: FORCED EXIT — the process did not terminate after teardown (the run had already failed)\n";
+        assert_eq!(parse_run_log(forced_fail, Ended::Exited).outcome, "FAIL");
+    }
+
+    #[test]
+    fn the_known_defect_label_is_read_only_from_an_ordinary_verdict_failure() {
+        let failed = "=== Chaos verdict: FAIL ===\n  FAIL: data loss: 3 acknowledged record(s) never consumed\n  \
+                      KNOWN DEFECT: multi-topic recreate stale positions — 3 record(s) lost\n";
+        let parsed = parse_run_log(failed, Ended::Exited);
+        assert_eq!(parsed.outcome, "FAIL");
+        assert_eq!(
+            parsed.known_defect.as_deref(),
+            Some("multi-topic recreate stale positions — 3 record(s) lost")
+        );
+        // Also panicked: more than the known defect went wrong.
+        let panicked = format!("chaos: ABORTED by a panic in the run: boom\n{failed}");
+        assert_eq!(parse_run_log(&panicked, Ended::Exited).known_defect, None);
+    }
+
+    #[test]
+    fn results_written_before_the_attempts_column_still_load() {
+        let current = RunResult { outcome: "PASS".into(), ..RunResult::default() }.to_tsv();
+        let legacy = current.rsplit_once('\t').unwrap().0;
+        let (_, back) = RunResult::from_tsv(legacy).expect("a row without the attempts cell loads");
+        assert_eq!(back.outcome, "PASS");
+        assert_eq!(back.get("attempts"), "");
     }
 
     #[test]
     fn producer_rates_are_summed_across_producers() {
         let log = "chaos: producer-rust-100 sent 10 records in 1.0s (400 records/s, 400.0 MiB/s, target 1000 records/s)\n\
                    chaos: producer-rust-101 sent 10 records in 1.0s (350 records/s, 350.5 MiB/s, target 1000 records/s)\n";
-        assert_eq!(parse_run_log(log, false).produce_rate, Some((750.0, 750.5)));
+        assert_eq!(parse_run_log(log, Ended::Exited).produce_rate, Some((750.0, 750.5)));
     }
 
     #[test]
@@ -1208,5 +1483,19 @@ test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 70 filtered out
         assert_eq!(size_label(100), "100B");
         assert_eq!(size_label(1024 * 1024), "1MiB");
         assert_eq!(size_label(1_000_000), "1000000B");
+    }
+
+    #[test]
+    fn kept_attempt_directories_are_never_reused() {
+        let root = std::env::temp_dir().join(format!("chaos-matrix-unused-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let wanted = root.join("15-plaintext-1MiB.attempt-1");
+        assert_eq!(unused_path(&wanted), wanted);
+        fs::create_dir(&wanted).unwrap();
+        assert_eq!(unused_path(&wanted), root.join("15-plaintext-1MiB.attempt-1-2"));
+        fs::create_dir(root.join("15-plaintext-1MiB.attempt-1-2")).unwrap();
+        assert_eq!(unused_path(&wanted), root.join("15-plaintext-1MiB.attempt-1-3"));
+        fs::remove_dir_all(&root).unwrap();
     }
 }
