@@ -26,6 +26,16 @@
 > makes every commit; its gate commands per finding 84.2), a new RULE-DRAFT, RD10
 > (with finding 84.3's count fix), and a note under §4.2's table on copying
 > commands out of it.
+>
+> **Amended at the CP1 review (2026-09-28).** Four corrections and two
+> additions, each marked in place. The corrections: CP7's two `Makefile` checks
+> move out of §4.3's table into a list with before-values (Critic finding 84.6);
+> §4.2's copy note lists every escaped command (84.6); D8's remarks instruction
+> carries B5's and B6's qualifiers (84.5); and three new RULE-DRAFTs, RD11-RD13,
+> come from Critic 84's CP1 suggestions. The additions: two watch items for CP4
+> in D12, and a Rust ABI doc item in D15's file-forward list. That item made
+> §7's count of the list stale, so the count is deleted; a deletion carries no
+> marker.
 
 **Requirement (verbatim):** "Make sure we implement all the public producer
 transaction and idempotency apis for .NET."
@@ -744,10 +754,20 @@ test-setup-only, like the hook. An embedded NUL in the metadata ends the string 
 a limitation of the NUL-terminated ABI, documented, not worked around.
 
 **Remarks updates.** `MockProducer.cs:36-43` and the `AsyncMockProducer` remarks
-list the new helpers. They also state which Java helpers are **absent** and why:
-the Mode-B rows B1-B7, "not exported at the C ABI". That keeps the mock's surface
-honest about `fenceProducer`, `transactionInitialized()` and the others, per the
-"never silently drop" requirement.
+list the new helpers. They also state which Java helpers are **absent** and why,
+per §2.2's C ABI column (⚠ B5's and B6's qualifiers added at the CP1 review,
+finding 84.5):
+
+- B1-B4 and B7 are not exported at the C ABI.
+- B5: the `history()` list and `uncommittedRecords()` are not exported. Only
+  `history()`'s count is, as the existing `HistoryCount()`.
+- B6: the full `consumerGroupOffsetsHistory()` list and `uncommittedOffsets()` are
+  not exported. Only a single-entry projection is, as `CommittedOffset`.
+
+That keeps the mock's surface honest about `fenceProducer`,
+`transactionInitialized()` and the others, per the "never silently drop"
+requirement, without saying that `history()` is missing from a type that exposes
+`HistoryCount()`.
 
 **Why.** These are exactly the three mock controls the ABI exports (T10-T12). The
 Makefile comment that scopes this phase names them too (`Makefile:287-290`).
@@ -902,6 +922,17 @@ there is no native abort, and cancelling the awaiter would hide the core's outco
 - **New handle category, documented in ffi §A2 (RD7):** a *transient owned input
   handle*. `ConsumerGroupMetadata_t` is built by the binding from managed values,
   lent to exactly one call, and destroyed in the same frame.
+- ⚠ **Watch items for CP4, recorded at the CP1 review** (Critic 84's notes, not
+  findings):
+  - `SubmitVoidOperation`'s `catch` assumes native never ran
+    (`NativeProducer.cs:1384-1389`). So the send-offsets submit delegate must not
+    throw once its P/Invoke has returned. The transient `ConsumerGroupMetadata_t`
+    destroy and the array unpins go in `finally` blocks, and nothing that can throw
+    runs after the call. A throw there would run `AbandonBeforeSubmit` for an
+    operation native already owns: it releases the span-the-op ref and frees the
+    `GCHandle` while the callback can still fire.
+  - The `CommittedOffset` grow helper always passes `metadataCap == buffer.Length`.
+    A larger cap lets native write past the pinned array (h:16625).
 
 **Why.** It reuses every shipped lifetime mechanism, and adds only the transient
 input handle, whose whole lifetime sits inside one method.
@@ -1000,6 +1031,9 @@ Manager-drafted rules, which the **user** applies or signs off (Q12):
 | RD8 | `.claude/rules/ffi-marshalling.md:115` (§0.1 tests) | Add the five predicates to the "each `bool`-returning fn is correct (`I1`)" list. |
 | RD9 | `bindings/dotnet/CLAUDE.md` §8.4 or the STATUS header | No change unless the user wants the per-checkpoint gate-log location (Q20) recorded as a standing convention. |
 | RD10 | `bindings/dotnet/CLAUDE.md` §7.5 (DoD) | New rule: a gate step that runs a filtered test selection passes only when the reported selected count is asserted (`running N tests`, `N passed`, or VSTest's `Total: N`), not on its exit code alone. It covers a libtest `-- <filter>`, `--exact` or `--skip` and `dotnet test --filter`; a libtest filter that selects nothing exits 0. Proposed by Critic 84 at the CP0 review (finding 84.1), added after approval. |
+| RD11 | `.claude/rules/ffi-marshalling.md` §0.1 (tests) | New rule: a structural P/Invoke sweep pins each parameter's **name** as well as its type and its `out` / `[Out]` mark, and its mutation list includes a swap of two same-typed names. P/Invoke passes arguments by position, so where parameters share a type the names are the declaration's only statement of which header parameter sits where. Proposed by Critic 84 at the CP1 review (finding 84.4), added after approval. |
+| RD12 | `bindings/dotnet/CLAUDE.md` §7.5 (DoD), next to RD10 | New rule for phase plans: a gate command lives in a list item or a code block, never in a table cell, and every "= 0" count check records its before-value as the control positive. Where a table cell cannot be avoided, the plan says for each escaped pipe whether it is markdown's escape or regex alternation. Proposed by Critic 84 at the CP1 review (finding 84.6), added after approval. |
+| RD13 | `bindings/dotnet/CLAUDE.md` §7.4 (test conventions) for the test half; §7.5 (DoD), next to RD12, for the record half | New rule: a test's doc comment claims only what its assertions can detect; mutation-check the claim or drop it. It is the test-side twin of ffi §A6's round-5 rule that a claim which is not made cannot go stale. The same holds for gate records, commit messages and plan hand-offs: a count or cause they state is measured when it is written, at the base and at the worktree with both values quoted, and a claim about the ABI is counted from the header rather than from the binding's bound subset. A claim that something is absent is checked by a search that does not depend on one phrasing, such as reading every matching block whole, or it is not made. Proposed by Critic 84 at the CP1 review (findings 84.4, 84.7, 84.8 and 84.9), added after approval. |
 
 **Stale in-code sentences removed as part of the work** (not RULE-DRAFTs):
 `IAsyncProducer.cs:50` ("Transactions remain deferred."), `AsyncKafkaProducer.cs:37`,
@@ -1052,6 +1086,32 @@ round-5 rule: delete a stale claim, do not re-word it. The grep gate is in §4 C
     and every test compare `Code` with a number (`90` for PRODUCER_FENCED). The ABI's
     `kafka_common_ErrorCode_t` enum (h:60 ff.) is the natural source; adding it is a
     public-surface decision of its own, like Q11's config constants.
+13. Rust ABI doc wording, for `kafka-critic` (trivial; recorded at the CP1 review,
+    corrected by findings 84.8 and 84.9). Eight async producer entry points say
+    their callback "fires on the producer's dispatcher thread", yet also route a
+    null handle through `callback`, and a null handle names no producer whose
+    dispatcher could fire it:
+    - the five transaction entry points, including `begin_transaction_async`,
+      which .NET leaves unbound (B8). Their dispatcher sentences are at h:16278,
+      h:16313, h:16339, h:16406 and h:16445, their null-producer clauses ("is
+      reported through `callback`") at h:16291, h:16320, h:16353, h:16418 and
+      h:16454, and their prototypes at h:16300, h:16329, h:16384, h:16427 and
+      h:16463;
+    - `flush_async` (h:16009) and `partitions_for_async` (h:16044), whose null
+      producer is "reported via `callback`" (h:16015, h:16051);
+    - `FutureRecordMetadata_get_async` (h:15579), whose null future "is reported
+      as an error through `callback`" (h:15586-15587).
+
+    Two neighbours word it differently and belong in the same fix. `close_async`
+    (h:16026) calls a null producer "a no-op success" (h:16032) without saying
+    whether `callback` fires. `FutureRecordMetadata_get_all_async` says only "the
+    dispatcher thread" (h:15599) and turns a null entry into a per-index
+    `InvalidRequest` error (h:15600-15601), without saying which dispatcher fires
+    when no entry is non-null. Read in full, the producer's doc blocks that mention
+    a dispatcher, in any wording, give these eight; a second sweep, of the producer
+    blocks whose null clauses mention `callback`, gives the same eight. Both ran on
+    header SHA-256 `e8d39f09…d111`, which this phase does not change. A grep for
+    one phrase is how 84.8 missed "reported via `callback`".
 
 **Recommendation.** As Rule (Q12, Q19, Q20, Q21, Q27).
 
@@ -1135,11 +1195,26 @@ directory; Q20).
 | G10 Docker | §4.5 | §4.5 | CP0 (baseline), CP7 (gate) |
 | G11 Rust hygiene | `cargo xtask format-check` and `cargo xtask lint` from the **repo root** (they false-fail from `bindings/dotnet/`, M15/P12 PLAN §0) | exit 0 — a no-op proof for a Mode A phase whose only non-binding edit is the `Makefile` | CP7 |
 
-⚠ **Copying a command from this table (added at the CP0 review).** Markdown needs
-each `|` inside a table's code span escaped as `\|`, so the raw file shows G6's
-`\| wc -l` and G7's `(TODO\|FIXME\|XXX\|HACK)`. Remove those backslashes when
-copying from the raw file. Left in, G7's pattern searches for a literal `|` and can
-never match, so the gate passes without being able to fail. While work is
+⚠ **Copying a command out of a table (added at the CP0 review; completed at the CP1
+review, finding 84.6).** Markdown needs each `|` inside a table's code span escaped
+as `\|`, and the raw file keeps the backslash. These are the escapes in this plan's
+tables. In each of them the backslash is markdown's, so remove it when copying from
+the raw file:
+
+- G6's `\| wc -l`. Left in, the command is not a pipeline.
+- G7's `Makefile \| grep`. Left in, everything after `--` is a pathspec, so the
+  command prints the diff itself: a loud false fail.
+- G7's pattern `(TODO\|FIXME\|XXX\|HACK)`, which runs under `-E`. Left in, it
+  searches for a literal `|` and can never match, so the gate passes without being
+  able to fail.
+- The CP1 row's `nm -gU … \| grep -cw _<symbol>`. Left in, the command is not a
+  pipeline.
+- §7.1 X2's `\|\|`, which is C#'s `||`.
+
+CP7's two `Makefile` checks used to sit in §4.3's table as well. The first of them
+used `\|` as basic-regex alternation, where the backslash must stay, so the advice
+above would have turned a live check into one that cannot fail. Both now sit in a
+list under §4.3's table, written with `-E` and bare pipes. While work is
 uncommitted, use the list forms in §10.2's execution note, which need no escaping.
 Run gate greps as `command grep`: in the agents' shell `grep` is a wrapper function,
 and a wrapper must not decide what a gate counts.
@@ -1159,7 +1234,20 @@ explained in the commit message.
 | **CP4** | `NativeProducer`: the five sync and four async control operations, the bounded blocking drain helper extracted from `FlushWithAccumulatorDrainBound` (the flush message byte-identical), the D3 seams (including the `NativeSubmit` widening), D4 wiring (barrier after the drain, awaited only on native success), D5, the three mock helpers' internal plumbing (grow rule, D8), the transient `ConsumerGroupMetadata_t` (D12). | `Internal/NativeProducer.cs`, `AsyncMockProducer.cs` (the internal settings-seam ctor overload only, D3); new tests `Interop/ProducerTransactionDrainTests.cs`, `Interop/ProducerTransactionCancellationTests.cs`, `Interop/MockProducerTransactionHelperTests.cs` | S5, S6, S7 |
 | **CP5** | The public surface: five members on each interface with the xmldoc of §7, one-line forwarders in the four types, the mock helpers public on both mocks, remarks updates, and removal of the stale sentences. Stale-sentence gate: `grep -rn 'Transactions remain deferred' bindings/dotnet/src bindings/dotnet/grpc-server` prints nothing (today: `IAsyncProducer.cs:50`, `AsyncKafkaProducer.cs:37`). xmldoc non-vacuity: each new member's doc ID (e.g. `M:Confluent.Kafka.IProducer`2.InitTransactions`) appears in all three emitted `Confluent.Kafka.xml` files. | `IProducer.cs`, `IAsyncProducer.cs`, `KafkaProducer.cs`, `AsyncKafkaProducer.cs`, `MockProducer.cs`, `AsyncMockProducer.cs`; new tests `PublicProducerTransactionTests.cs`, `PublicSyncProducerTransactionTests.cs`, `PublicProducerTransactionMockControlTests.cs`, `PublicProducerTransactionErrorTests.cs`, `PublicProducerIdempotenceTests.cs`, `PublicProducerTransactionConcurrencyTests.cs`, `PublicProducerTransactionTeardownTests.cs`, `PublicProducerSendOffsetsToTransactionTests.cs` (S3's control-path half) | S3 (control-path half), S8, S9, S10, S11, S12 |
 | **CP6** | D14: five overrides in each servicer, the two `Translate` helpers, the class-summary counts. G9 by the route CP0 recorded. | `grpc-server/ProducerServiceImpl.cs`, `grpc-server/AsyncProducerServiceImpl.cs`, `grpc-server/Translate.cs` | none in the unit suite (grpc-server is outside the sln and has no test project — the recorded M14/P2 constraint); covered by G10 at CP7 |
-| **CP7** | Root `Makefile`: delete the comment block `:272-291` and the three `--skip` lines `:309-311`, re-terminate `:308` with `-- __grpc_dotnet; \`. Checks: `grep -c 'producer_transactions\|THREE TESTS ARE SKIPPED\|--skip test_' Makefile` = 0 and `make -n test-integration-dotnet \| grep -c -- '--skip'` = 0. Then the full G1-G11 with `--no-incremental`, the G10 gate, and the hand-offs: the RULE-DRAFTs to the user (§7.2, Q12; non-blocking), STATUS entry drafted for the Manager's Step 7, the user pushes for CI (Q25). | `Makefile` | none |
+| **CP7** | Root `Makefile`: delete the comment block `:272-291` and the three `--skip` lines `:309-311`, re-terminate `:308` with `-- __grpc_dotnet; \`. Checks: the two `Makefile` checks in the list under this table, each recorded before and after the edit (⚠ moved out of the table at the CP1 review). Then the full G1-G11 with `--no-incremental`, the G10 gate, and the hand-offs: the RULE-DRAFTs to the user (§7.2, Q12; non-blocking), STATUS entry drafted for the Manager's Step 7, the user pushes for CI (Q25). | `Makefile` | none |
+
+⚠ **CP7's `Makefile` checks (moved out of the table at the CP1 review, finding
+84.6).** Run both from the repo root, and record each value before and after the
+edit. The before-value is the control positive: it proves the check can fail.
+
+- `command grep -cE 'producer_transactions|THREE TESTS ARE SKIPPED|--skip test_' Makefile`
+  prints 5 before the edit, all inside what CP7 deletes, and must print 0 after it.
+- `make -n test-integration-dotnet | command grep -c -- '--skip'` prints 3 before
+  the edit and must print 0 after it. The count is scoped to this one target,
+  because other targets and comments in the `Makefile` use `--skip` legitimately.
+  Run it on the macOS host only. The recipe line calls `$(MAKE)`, so GNU make
+  executes that line even under `-n`. Here it only prints the non-Linux SKIP
+  banner, but on a Linux host the same command runs the integration suite for real.
 
 ### 4.4 The P/Invoke set (CP1)
 
@@ -1810,7 +1898,7 @@ where the Critic finds the evidence.
 
 | # | DoD item | How M17/P1 meets it | Evidence |
 |---|---|---|---|
-| 1 | Consistent with every rule | Java shape, Rust logic: the binding adds no Kafka behaviour (`bindings/CLAUDE.md` §1.2, §2.6). Each decision cites the rule it applies: sync versus async per `bindings/dotnet/CLAUDE.md` §4 (**Stays sync**, `:575`); ffi §A2's sync-`SafeHandle` / async span-the-op split (D12); ffi §A5's two surfaces with verbatim codes (D6, D10); ffi §A6 / §A7 for the pump and callbacks (D4); `producer-transactions.md` §13's drain contract mirrored for the binding's own buffer (D3); root `CLAUDE.md` §10.4's predicate naming, polarity and both-directions test (D6, S2). Rule changes the phase needs are RULE-DRAFTs the user applies (RD1-RD10, Q12); the phase edits no rule file. | Critic 84 at each CP; G2 (missing xmldoc, dangling `cref` and unsuppressed CS0618 are build errors) |
+| 1 | Consistent with every rule | Java shape, Rust logic: the binding adds no Kafka behaviour (`bindings/CLAUDE.md` §1.2, §2.6). Each decision cites the rule it applies: sync versus async per `bindings/dotnet/CLAUDE.md` §4 (**Stays sync**, `:575`); ffi §A2's sync-`SafeHandle` / async span-the-op split (D12); ffi §A5's two surfaces with verbatim codes (D6, D10); ffi §A6 / §A7 for the pump and callbacks (D4); `producer-transactions.md` §13's drain contract mirrored for the binding's own buffer (D3); root `CLAUDE.md` §10.4's predicate naming, polarity and both-directions test (D6, S2). Rule changes the phase needs are RULE-DRAFTs the user applies (RD1-RD13, Q12); the phase edits no rule file. | Critic 84 at each CP; G2 (missing xmldoc, dangling `cref` and unsuppressed CS0618 are build errors) |
 | 2 | Every method implemented | T1-T12 on every flavour they exist on (§2.1): five members on each interface and its two implementers, the two `ConsumerGroupMetadata` constructors, five predicates, four mock-helper members on each mock, five RPCs in each servicer. Every Java member without an ABI symbol is listed (B1-B7), named as absent in the mock remarks (D8) and gated to the user (Q4); `begin_transaction_async` is unbound by decision (B8). Nothing is dropped silently. | S1 reflection sweep; G6 = 715; G9 override count 13 |
 | 3 | Every test translated | §5.3 maps every `MockProducerTest` transaction test, every `ConsumerGroupMetadataTest` test and the in-scope `KafkaProducerTest` tests, with a status and a reason for each N/A. Every negative test asserts `Code` and the exact `Message` (§5.1 principle 2). No mapped Java test is `@RepeatedTest` / `@ParameterizedTest` (the five parameterized `KafkaProducerTest` metadata tests are out of scope, §5.3.3). Per-message-type files and byte-level wire vectors: N/A — the phase adds no wire type; the encoding is the core's, exercised end to end by G10. | §5.3, §5.4 |
 | 4 | Blockers implemented | B1-B7 block only full `MockProducerTest` coverage, not the requirement. Each needs an ABI shim over an existing core function (Mode B, `bindings/dotnet/CLAUDE.md` §6.3), which the .NET personas may not author (§8.1), so each is a user decision (Q4), neither implemented nor invented. Every bound symbol is exported today (§2.5). | §2.2, Q4 |
@@ -1864,11 +1952,13 @@ precedent's format (`design/history/M15/P3-cluster-configs-logdirs/RULE-DRAFT-D2
 a "**Status: NOT APPLIED. Handed to the maintainer <date>.**" header, the reason, the
 exact insertion point, and verbatim proposed text):
 
-- `RULE-DRAFT-RD1-RD6-RD9-RD10-claude-md.md` — RD1-RD6, RD9 and RD10 against
-  `bindings/dotnet/CLAUDE.md` (RD10 was added at the CP0 review). RD2 is flagged separately: it corrects **pre-existing**
-  drift (the never-shipped `IsFatal`) and needs its own sign-off.
-- `RULE-DRAFT-RD7-RD8-ffi-marshalling.md` — RD7-RD8 against
-  `bindings/dotnet/.claude/rules/ffi-marshalling.md`.
+- `RULE-DRAFT-RD1-RD6-RD9-RD10-RD12-RD13-claude-md.md` — RD1-RD6, RD9, RD10, RD12
+  and RD13 against `bindings/dotnet/CLAUDE.md` (RD10 was added at the CP0 review,
+  RD12 and RD13 at the CP1 review). RD2 is flagged separately: it corrects
+  **pre-existing** drift (the never-shipped `IsFatal`) and needs its own sign-off.
+- `RULE-DRAFT-RD7-RD8-RD11-ffi-marshalling.md` — RD7, RD8 and RD11 against
+  `bindings/dotnet/.claude/rules/ffi-marshalling.md` (RD11 was added at the CP1
+  review).
 
 No agent edits either rule file. The user applies, edits or declines each draft; the
 phase close does not wait on that (Q12).
@@ -1889,7 +1979,7 @@ entry's shape:
 - the Critic 84 record, archived as
   `design/history/M17/P1-producer-transactions/COMMENTS.DONE.84.md` (the
   binding-root file is never committed, `bindings/dotnet/CLAUDE.md` §8.4);
-- the file-forward list (D15, 12 items), the Mode-B rows B1-B7 with Q4's outcome, the
+- the file-forward list (D15), the Mode-B rows B1-B7 with Q4's outcome, the
   RULE-DRAFT status, and the local gate logs' location (Q20).
 
 The root `marked_classes.txt` is **not** touched: it tracks Java classes translated
