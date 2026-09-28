@@ -4,8 +4,8 @@ project(confluent-kafka-c VERSION 1.0.0 LANGUAGES C)
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 
-# Path to the Rust project root
-set(RUST_PROJECT_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../.." CACHE PATH "Path to Rust project root")
+# Path to the Rust project root (the cargo workspace, rust/ in the repository)
+set(RUST_PROJECT_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../rust" CACHE PATH "Path to Rust project root")
 
 # Rust FFI header directory
 set(RUST_INCLUDE_DIR "${RUST_PROJECT_ROOT}/target/include")

@@ -17,10 +17,10 @@
 //
 // Used by:
 //   - the Rust MultilanguageAdmin client (under tests/common)
-//   - the Python gRPC servers (bindings/python/grpc_server.py, sync, driving
+//   - the Python gRPC servers (python/grpc_server.py, sync, driving
 //     admin.py AdminClient/MockAdminClient; grpc_server_async.py, asyncio,
 //     driving AsyncAdminClient/AsyncMockAdminClient)
-//   - the C++ gRPC server (bindings/c/grpc_server/server.cc), which drives the
+//   - the C++ gRPC server (c/grpc_server/server.cc), which drives the
 //     bare *sync* C entry points (kafka_admin_AdminClient_*)
 //
 // Same package as producer_service.proto / consumer_service.proto; shared
@@ -2188,7 +2188,7 @@ message UserScramCredentialAlteration {
   //     `read_scram_alterations_distinguishes_an_absent_salt_from_a_present_empty_one`
   //     (`src/ffi/admin.rs`) and
   //     `test_scram_alteration_rows_keep_an_absent_salt_apart_from_an_empty_one`
-  //     (`bindings/python/test/unit/test_admin.py`).
+  //     (`python/test/unit/test_admin.py`).
   //
   // An earlier revision of this comment reported the C boundary as collapsing the
   // two, which it did: `read_scram_alterations` decided with `if salt.is_empty()`

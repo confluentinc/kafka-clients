@@ -27,7 +27,7 @@
 //! (or `make test-integration-perf-rust`, which runs them after the
 //! functional suite has finished and released its clusters).
 //!
-//! The Python counterparts live in `bindings/python/test/performance` and are
+//! The Python counterparts live in `python/test/performance` and are
 //! likewise excluded from the normal `pytest test/unit` run; see
 //! `make test-integration-perf-python`.
 

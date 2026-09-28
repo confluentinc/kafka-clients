@@ -7,10 +7,10 @@
 #     http://www.apache.org/licenses/LICENSE-2.0
 
 # Standalone CMake project for the C++ gRPC server image. Kept separate
-# from the parent bindings/c/CMakeLists.txt so the existing C unit-test
+# from the parent c/CMakeLists.txt so the existing C unit-test
 # build doesn't pull in gRPC / protobuf.
 #
-# Builds inside Dockerfile.grpc — see bindings/c/Dockerfile.grpc for the
+# Builds inside Dockerfile.grpc — see c/Dockerfile.grpc for the
 # expected layout (libconfluent_kafka.a in /build/lib, header in
 # /build/include, proto in /build/proto).
 

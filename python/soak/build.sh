@@ -24,10 +24,10 @@
 # The local-directory mode is not a convenience: the Rust repository is not
 # public yet, so on a host that cannot clone it, the sources arrive by scp.
 #
-# Ordering is mandatory. `pip install -e bindings/python` compiles the C
-# extension against target/include/confluent_kafka.h and links
+# Ordering is mandatory. `pip install -e python` compiles the C
+# extension against rust/target/include/confluent_kafka.h and links
 # libconfluent_kafka from CONFLUENT_KAFKA_LIB_DIR, so cargo must run first.
-# This mirrors the repo's `make build-python` / bindings/python/Makefile.
+# This mirrors the repo's `make build-python` / python/Makefile.
 
 set -euo pipefail
 
@@ -53,7 +53,7 @@ Options:
   --label <text>    Free-form build label recorded alongside the sha.
   -h, --help        This message.
 
-Writes <source>/bindings/python/soak/build-manifest.json (git SHA, rustc
+Writes <source>/python/soak/build-manifest.json (git SHA, rustc
 version, build time), which soakclient.py logs at startup so a two-week run is
 traceable to an exact commit.
 EOF
@@ -126,19 +126,19 @@ if [[ -n "$GIT_REF" ]]; then
     # Submodules are deliberately NOT initialised: `kafka` is a multi-GB Java
     # source reference and `unity` only backs the C unit tests. Neither is a
     # prerequisite of `cargo build --features ffi` (build.rs generates from the
-    # in-repo generator/messages/ specs), which is why the repo's own
+    # in-repo rust/generator/messages/ specs), which is why the repo's own
     # `build-rust` target does not depend on them either.
 else
     ROOT="$(cd "$SRC_DIR" && pwd)"
-    if [[ ! -f "$ROOT/Cargo.toml" ]]; then
+    if [[ ! -f "$ROOT/rust/Cargo.toml" ]]; then
         echo "ERROR: $ROOT does not look like the client source tree "\
-             "(no Cargo.toml)" >&2
+             "(no rust/Cargo.toml)" >&2
         exit 2
     fi
     echo ">>> Building the source tree at $ROOT in place"
 fi
 
-SOAK_DIR="$ROOT/bindings/python/soak"
+SOAK_DIR="$ROOT/python/soak"
 if [[ ! -d "$SOAK_DIR" ]]; then
     echo "ERROR: $SOAK_DIR not found — is this source tree too old?" >&2
     exit 1
@@ -147,23 +147,23 @@ fi
 # ---------------------------------------------------------------------------
 # 2. Build the Rust client with the FFI feature
 #
-# Produces target/<profile>/libconfluent_kafka.{so,dylib,a} and
-# target/include/confluent_kafka.h (the cbindgen header the C extension
+# Produces rust/target/<profile>/libconfluent_kafka.{so,dylib,a} and
+# rust/target/include/confluent_kafka.h (the cbindgen header the C extension
 # includes).
 # ---------------------------------------------------------------------------
 CARGO_ARGS=(build --features ffi)
 [[ "$PROFILE" == "release" ]] && CARGO_ARGS+=(--release)
 
 echo ">>> cargo ${CARGO_ARGS[*]}"
-( cd "$ROOT" && cargo "${CARGO_ARGS[@]}" )
+( cd "$ROOT/rust" && cargo "${CARGO_ARGS[@]}" )
 
-LIB_DIR="$ROOT/target/$PROFILE"
+LIB_DIR="$ROOT/rust/target/$PROFILE"
 if ! ls "$LIB_DIR"/libconfluent_kafka.* >/dev/null 2>&1; then
     echo "ERROR: no libconfluent_kafka.* in $LIB_DIR after the cargo build" >&2
     exit 1
 fi
-if [[ ! -f "$ROOT/target/include/confluent_kafka.h" ]]; then
-    echo "ERROR: target/include/confluent_kafka.h missing after the cargo build" >&2
+if [[ ! -f "$ROOT/rust/target/include/confluent_kafka.h" ]]; then
+    echo "ERROR: rust/target/include/confluent_kafka.h missing after the cargo build" >&2
     exit 1
 fi
 
@@ -194,14 +194,14 @@ fi
 echo ">>> pip install -r requirements.txt"
 "$PYTHON" -m pip install -r "$SOAK_DIR/requirements.txt"
 
-echo ">>> pip install -e bindings/python (CONFLUENT_KAFKA_LIB_DIR=$LIB_DIR)"
+echo ">>> pip install -e python (CONFLUENT_KAFKA_LIB_DIR=$LIB_DIR)"
 CONFLUENT_KAFKA_LIB_DIR="$LIB_DIR" \
-    "$PYTHON" -m pip install -e "$ROOT/bindings/python"
+    "$PYTHON" -m pip install -e "$ROOT/python"
 
 # Fail loudly here rather than three days into a soak. Run from $ROOT (which
 # contains no producer.py / consumer.py) and assert the modules resolved inside
 # the tree we just built: `python -` puts the cwd first on sys.path, so running
-# this from another checkout's bindings/python would import that one instead and
+# this from another checkout's python/ would import that one instead and
 # the check would pass while the install was broken.
 ( cd "$ROOT" && CONFLUENT_KAFKA_LIB_DIR="$LIB_DIR" ROOT="$ROOT" \
     SOAK_DIR="$SOAK_DIR" "$PYTHON" - <<'PYEOF'
