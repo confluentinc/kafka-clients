@@ -125,6 +125,50 @@ impl<'a> BrokerControl<'a> {
         out.status.success() && String::from_utf8_lossy(&out.stdout).trim() == "true"
     }
 
+    /// Wait until the broker's container has logged the image's readiness line
+    /// (`Kafka Server started`, the same line [`KafkaCluster`] gates startup
+    /// on) at or after `since`. Returns `false` on timeout.
+    ///
+    /// Use this after [`BrokerControl::start`] rather than relying on
+    /// [`BrokerControl::wait_operational`] alone: a broker killed moments ago
+    /// stays in `describe_cluster().nodes()` until its controller session
+    /// expires (~9 s), so presence there can be observed before the restarted
+    /// process is up at all. The log line is written by the new process only.
+    pub async fn wait_server_started(&self, node_id: u16, since: std::time::SystemTime, timeout: Duration) -> bool {
+        // `docker logs --since` takes whole or fractional unix seconds; back
+        // off one second so a clock-granularity edge cannot hide the line.
+        let since_secs = since
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs().saturating_sub(1))
+            .unwrap_or(0)
+            .to_string();
+        let deadline = Instant::now() + timeout;
+        loop {
+            let id = self.container_id(node_id).to_string();
+            let since_arg = since_secs.clone();
+            let started = tokio::task::spawn_blocking(move || {
+                Command::new("docker")
+                    .args(["logs", "--since", &since_arg, &id])
+                    .output()
+                    .map(|out| {
+                        out.status.success()
+                            && (String::from_utf8_lossy(&out.stdout).contains("Kafka Server started")
+                                || String::from_utf8_lossy(&out.stderr).contains("Kafka Server started"))
+                    })
+                    .unwrap_or(false)
+            })
+            .await
+            .unwrap_or(false);
+            if started {
+                return true;
+            }
+            if Instant::now() >= deadline {
+                return false;
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+    }
+
     /// Wait until `admin` reports `node_id` present in the cluster's broker
     /// set — the `broker.wait_operational()` analog. Returns `false` on
     /// timeout.
