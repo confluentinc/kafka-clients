@@ -9,7 +9,7 @@
 
 direction: right
 
-specs: "generator/messages/ — 197 JSON RPC specs\ngenerator/test-messages/ — 3 test-only specs" {
+specs: "rust/generator/messages/ — 198 JSON RPC specs (Kafka 4.3.1)\nrust/generator/test-messages/ — 4 test-only specs" {
   style.fill: "#eef6ff"
 }
 
@@ -25,9 +25,9 @@ out: "OUT_DIR/generated/*.rs — one file per message type\nstructs + Message im
   style.fill: "#f3f0ff"
 }
 
-lib: "src/lib.rs:74-80 — pub mod generated { include!(...) }\nre-exported flat via `pub use generated::*`"
+lib: "src/lib.rs:109-113 — pub(crate) mod generated { include!(...) }\nre-exported flat via `pub(crate) use generated::*`"
 
-wrap: "src/common/requests/ — hand-written wire wrappers\nwrap the generated *Data structs in ConcreteRequest / ConcreteResponse"
+wrap: "src/common/requests/ — hand-written wire wrappers\nwrap the generated *Data structs in AbstractRequest / ConcreteResponse"
 
 specs -> gen: "parse"
 gen -> out: "emit (already rustfmt-shaped)"

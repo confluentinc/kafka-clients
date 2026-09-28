@@ -47,11 +47,15 @@ use std::io::{Read, Write};
 use std::path::Path;
 use std::process::{Command, Stdio};
 
+/// The `kafka` git submodule, at the repository root. xtask runs from the Rust
+/// workspace (`rust/`), so the submodule is one level up.
+pub const KAFKA_SUBMODULE: &str = "../kafka";
+
 /// Where the Java client's main sources live: the `kafka` git submodule.
-pub const JAVA_MAIN_ROOT: &str = "kafka/clients/src/main/java/org/apache/kafka";
+pub const JAVA_MAIN_ROOT: &str = "../kafka/clients/src/main/java/org/apache/kafka";
 
 /// Where the Java client's tests live.
-pub const JAVA_TEST_ROOT: &str = "kafka/clients/src/test/java/org/apache/kafka";
+pub const JAVA_TEST_ROOT: &str = "../kafka/clients/src/test/java/org/apache/kafka";
 
 /// The Kafka versions whose `@Deprecated`s count (CLAUDE.md §3: deprecated API
 /// is not translated): the source reference and the next release.
@@ -60,7 +64,7 @@ pub const DEPRECATION_REFS: &[&str] = &["4.3.1", "4.4.0-rc2"];
 /// The checked-in list of the deprecated items of [`DEPRECATION_REFS`],
 /// written by `cargo xtask java-deprecated`. The lint reads it because CI's
 /// shallow `kafka` clone has only the working tree, not the other refs.
-pub const DEPRECATED_LIST: &str = "design/current/java-deprecated.txt";
+pub const DEPRECATED_LIST: &str = "../design/current/java-deprecated.txt";
 
 /// The prefix every marker starts with.
 pub const MARKER_PREFIX: &str = "org.apache.kafka.";
@@ -526,9 +530,9 @@ pub fn unsupported_packages_in_tree() -> BTreeSet<String> {
 /// satisfies `keep`, as (path below the root, contents). `None` if the ref is
 /// not available (e.g. a shallow clone).
 fn ref_files(reference: &str, keep: impl Fn(&str) -> bool) -> Option<Vec<(String, Vec<u8>)>> {
-    let root = JAVA_MAIN_ROOT.strip_prefix("kafka/")?;
+    let root = JAVA_MAIN_ROOT.strip_prefix(KAFKA_SUBMODULE)?.strip_prefix('/')?;
     let listing = Command::new("git")
-        .args(["-C", "kafka", "ls-tree", "-r", reference, "--", root])
+        .args(["-C", KAFKA_SUBMODULE, "ls-tree", "-r", reference, "--", root])
         .output()
         .ok()
         .filter(|o| o.status.success())?;
@@ -545,7 +549,7 @@ fn ref_files(reference: &str, keep: impl Fn(&str) -> bool) -> Option<Vec<(String
         }
     }
     let mut child = Command::new("git")
-        .args(["-C", "kafka", "cat-file", "--batch"])
+        .args(["-C", KAFKA_SUBMODULE, "cat-file", "--batch"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()

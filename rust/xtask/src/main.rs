@@ -153,8 +153,8 @@ fn find_generated_files() -> anyhow::Result<Vec<PathBuf>> {
 // cannot use the enum itself: `src/ffi` is behind the `ffi` feature, which the
 // multilanguage test targets do not enable.
 //
-// The Python binding's copy, `bindings/python/_error_code.py`, is generated and
-// checked by the binding itself (`bindings/python/tools/generate_error_code.py`
+// The Python binding's copy, `python/_error_code.py`, is generated and
+// checked by the binding itself (`python/tools/generate_error_code.py`
 // and `test/static/test_error_code_generated.py`).
 //
 // `check-generated` re-runs the generation and fails on any difference, so a
@@ -534,9 +534,9 @@ fn test_multilanguage() -> anyhow::Result<()> {
     println!("Running multilanguage integration tests (requires Docker)...");
     println!("This builds the python + c gRPC server images, then runs");
     println!("`cargo test --features integration-tests,multilanguage-tests`.");
-    // Delegated to the Makefile target so the image-build steps stay in
-    // one place; the Makefile shells out to bindings/{python,c}/Makefile.
-    run_command("make", &["test-multilanguage"])
+    // Delegated to the repository root's Makefile so the image-build steps
+    // stay in one place; it shells out to python/Makefile and c/Makefile.
+    run_command("make", &["-C", "..", "test-integration-python", "test-integration-c"])
 }
 
 /// Run the producer performance test as an env-driven benchmark binary.
@@ -915,7 +915,7 @@ fn java_deprecated() -> anyhow::Result<()> {
     let mut items = std::collections::BTreeSet::new();
     for reference in &refs {
         let classes = java::load_ref(reference).ok_or_else(|| {
-            anyhow::anyhow!("ref `{reference}` is not in the `kafka` submodule (run `git -C kafka fetch --tags`)")
+            anyhow::anyhow!("ref `{reference}` is not in the `kafka` submodule (run `git -C ../kafka fetch --tags`)")
         })?;
         items.extend(java::deprecated_items(&classes));
     }
@@ -942,7 +942,7 @@ fn print_help() {
   format-check    Check if code is formatted correctly
   check-generated Check generated code formatting and error-code staleness (no changes)
   generate-error-codes  Regenerate the error-code constants for the multilanguage test harness
-  java-deprecated List the Java client's @Deprecated API in design/current/java-deprecated.txt
+  java-deprecated List the Java client's @Deprecated API in ../design/current/java-deprecated.txt
   lint-custom     Run the source-level rules clippy cannot express
                   (also runs as the first step of `lint`):
                     check-no-data-carrying-enum-variants  public enum variants hold no data inline

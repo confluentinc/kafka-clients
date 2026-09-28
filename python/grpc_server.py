@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""gRPC server exposing bindings/python/{producer,consumer,admin}.py over
+"""gRPC server exposing python/{producer,consumer,admin}.py over
 the ProducerService / ConsumerService / AdminService defined in
 multilanguage-test-server/proto/.
 
@@ -380,7 +380,7 @@ class ProducerService(pb_grpc.ProducerServiceServicer):
 
 
 class ConsumerService(cpb_grpc.ConsumerServiceServicer):
-    """Maps ConsumerService RPCs onto bindings/python/consumer.py. The sync
+    """Maps ConsumerService RPCs onto python/consumer.py. The sync
     consumer API blocks the gRPC worker thread on its threading.Event, which
     is fine in the thread-pool server."""
 
@@ -712,7 +712,7 @@ class ConsumerService(cpb_grpc.ConsumerServiceServicer):
 
 
 class AdminService(apb_grpc.AdminServiceServicer):
-    """Maps AdminService RPCs onto bindings/python/admin.py's *synchronous*
+    """Maps AdminService RPCs onto python/admin.py's *synchronous*
     AdminClient / MockAdminClient (the async twin is driven by
     grpc_server_async.py).
 
