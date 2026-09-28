@@ -11,8 +11,8 @@ It also contains bindings for multiple languages, automatically generated follow
 
 ```
 rust/                   # The Rust client — see rust/README.md
-python/                 # Python binding
-c/                      # C binding (CMake project, Unity tests, gRPC server)
+python/                 # Python binding — see python/README.md
+c/                      # C binding — see c/README.md
 kafka/                  # Apache Kafka Java sources (submodule), the translation reference
 design/                 # Design documents (design/current describes the code as it stands)
 rfc/                    # Repository-level RFCs
@@ -69,8 +69,9 @@ Per-language targets exist too, e.g. `make build-c`, `make test-python`,
 directly, e.g. `make -C rust test`. The root only orders the builds across
 languages and sets up what they share (submodules, git hooks, the Python venv).
 
-For working on the Rust client with `cargo` directly — building, formatting,
-linting, tests, coverage — see [rust/README.md](rust/README.md).
+To work on one language directly, see its README:
+[rust/README.md](rust/README.md) (cargo: building, formatting, linting, tests,
+coverage), [python/README.md](python/README.md) and [c/README.md](c/README.md).
 
 ## License
 
