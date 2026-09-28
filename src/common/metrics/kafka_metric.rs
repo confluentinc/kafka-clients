@@ -108,7 +108,7 @@ impl KafkaMetric {
     /// should be a measurable. Returns the measured value if measurable,
     /// otherwise `0`.
     #[doc(alias = "org.apache.kafka.common.metrics.KafkaMetric#measurableValue")]
-    pub fn measurable_value(&self, time_ms: i64) -> f64 {
+    pub(crate) fn measurable_value(&self, time_ms: i64) -> f64 {
         let config = self.config();
         match &self.metric_value_provider {
             MetricValueProvider::Measurable(m) => m.measure(&config, time_ms),

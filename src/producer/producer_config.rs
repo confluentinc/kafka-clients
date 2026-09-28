@@ -833,7 +833,7 @@ impl ProducerConfig {
     /// hierarchy: returning a `String` here erased the class at the boundary and
     /// left the caller free to pick the wrong one.
     #[doc(alias = "org.apache.kafka.clients.producer.ProducerConfig#parseAcks")]
-    pub fn parse_acks(acks_string: &str) -> Result<i16, Error> {
+    pub(crate) fn parse_acks(acks_string: &str) -> Result<i16, Error> {
         let trimmed = acks_string.trim();
         if trimmed.eq_ignore_ascii_case("all") {
             Ok(-1)

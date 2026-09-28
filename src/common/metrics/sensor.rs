@@ -498,7 +498,7 @@ impl Sensor {
 
     /// The metrics registered with this sensor.
     #[doc(alias = "org.apache.kafka.common.metrics.Sensor#metrics")]
-    pub fn metrics(&self) -> Vec<Arc<KafkaMetric>> {
+    pub(crate) fn metrics(&self) -> Vec<Arc<KafkaMetric>> {
         self.inner
             .lock()
             .expect("sensor mutex poisoned")

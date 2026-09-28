@@ -1372,6 +1372,16 @@ fn glob_match(pattern: &str, text: &str) -> bool {
 /// catches them under `cargo xtask lint`. `private_interfaces` /
 /// `private_bounds` do not, because they ignore a `pub` item declared inside a
 /// `pub(crate)` module — the shape every privatised package here has.
+///
+/// **Members are not checked.** Only module-level items are walked, never the
+/// `fn`s, `const`s and associated items of an `impl` block, and the Java scan
+/// ([`crate::java`]) records no member modifiers. So a `pub fn` on a public
+/// type that translates a Java `private` or package-private member (a
+/// "Visible for testing" getter, a private static helper) passes this rule;
+/// keep such members `pub(crate)` by review. A member check would need the
+/// scan to record each overload's visibility (an interface member being
+/// public by default) and the rule to walk the inherent `impl`s of every
+/// public type.
 struct PublicAudience {
     index: JavaIndex,
     /// [`PUBLIC_AUDIENCE_LIST`].

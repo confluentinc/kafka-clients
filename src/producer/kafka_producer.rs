@@ -1354,7 +1354,7 @@ impl<K, V> KafkaProducer<K, V> {
 
     /// Returns the client ID for this producer.
     #[doc(alias = "org.apache.kafka.clients.producer.KafkaProducer#getClientId")]
-    pub fn client_id(&self) -> &str {
+    pub(crate) fn client_id(&self) -> &str {
         &self.client_id
     }
 
