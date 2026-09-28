@@ -46,8 +46,6 @@ async fn simple_flow_clean_broker_roll() {
     // flow after recovery. Runs concurrently with the workloads.
     let brokers = harness.brokers();
     let admin = harness.admin();
-    // This smoke test does not add/remove consumers, but drive still needs a pool.
-    let pool = harness.workload_pool();
     let scenario = async {
         tokio::time::sleep(Duration::from_secs(5)).await;
         ChaosAction::BrokerRoll {
@@ -64,7 +62,6 @@ async fn simple_flow_clean_broker_roll() {
 
     workloads
         .drive(
-            &pool,
             Duration::from_secs(15),
             Duration::from_secs(3),
             verifier.clone(),
