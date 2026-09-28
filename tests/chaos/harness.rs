@@ -20,7 +20,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use confluent_kafka::admin::{
@@ -33,8 +33,9 @@ use super::common::broker_control::BrokerControl;
 use super::common::cluster_config::kip848_3_broker;
 use super::common::kafka_cluster::KafkaCluster;
 use super::config::SecurityProtocol;
+use super::isolation::{ClusterTeardown, Heartbeat, WorkloadThreads};
 use super::verifier::{ConservationVerifier, ExpectedLossHint, Verifier};
-use super::workload::{CommitMode, Role, TopicIds, Workload, WorkloadContext, WorkloadSpec, build_workload};
+use super::workload::{CommitMode, Role, TopicIds, WorkloadContext, WorkloadSpec};
 use super::workload_config::{record_size_limit, security_props};
 
 /// Producer value size when the caller does not choose one (`--msg-size`'s
@@ -127,6 +128,12 @@ pub struct ChaosHarness {
     /// conservation). Swap this to check something else (e.g. share-consumer
     /// acks) without touching the orchestrator.
     verifier: Arc<dyn Verifier>,
+    /// Every workload thread of the run (see [`WorkloadThreads`]), shared
+    /// with [`RunningWorkloads`] and the [`WorkloadPool`].
+    workload_threads: Arc<WorkloadThreads>,
+    /// Beaten by [`RunningWorkloads::drive`] while it runs; see
+    /// [`super::isolation::start_heartbeat_watchdog`].
+    heartbeat: Arc<Heartbeat>,
 }
 
 impl ChaosHarness {
@@ -255,6 +262,8 @@ impl ChaosHarness {
             msg_size: std::sync::atomic::AtomicU32::new(100),
             commit_mode: std::sync::Mutex::new(CommitMode::Sync),
             verifier,
+            workload_threads: Arc::new(WorkloadThreads::default()),
+            heartbeat: Heartbeat::new(),
         };
         for t in &harness.topics {
             harness.create_topic(t).await;
@@ -411,6 +420,7 @@ impl ChaosHarness {
                 ExpectedLossHint::AllDeliveredForTopic(topic.to_string())
             }
         };
+        let delete_started = std::time::Instant::now();
         self.verifier.note_expected_loss(expected_lost_hint());
 
         self.admin
@@ -432,6 +442,27 @@ impl ChaosHarness {
 
         self.verifier.note_expected_loss(expected_lost_hint());
 
+        // Mark the topic as a recreate BLACKOUT now, while it does not exist:
+        // the blackout floor (the highest index delivered so far) must be taken
+        // before the new generation can acknowledge anything. Taken after the
+        // create, as this once was, records the new generation acknowledged in
+        // between fell at or below the floor, were classified as old-generation
+        // and could never be excused (the floor race, Sep 2026 matrix F9).
+        //
+        // Why a blackout at all: the consumer can carry its old-generation
+        // position or committed offset into the new generation, which starts
+        // at offset 0 again, so it skips the new generation's low offsets.
+        // The in-process producer's index does NOT reset across the recreate
+        // (librdkafka restarts its per-topic producer; we cannot), so it keeps
+        // acking records into that window. Rather than guess the window with a
+        // wall-clock snapshot, the verifier computes it from observed data: a
+        // delivered-but-unobserved new-generation record below where the
+        // consumer started reading that partition was skipped and is
+        // expected-lost; records above remain in the loss check. See
+        // `ExpectedLossHint::RecreateBlackout` / `NewGeneration`.
+        self.verifier
+            .note_expected_loss(ExpectedLossHint::RecreateBlackout(topic.to_string()));
+
         if !dwell.is_zero() {
             tokio::time::sleep(dwell).await;
         }
@@ -448,39 +479,23 @@ impl ChaosHarness {
 
         eprintln!("chaos: topic {topic} recreated: id {old_id} -> {new_id}");
 
-        // The old generation's records are gone. Mark its topic_id destroyed so the
-        // verifier excuses every record acked to it — even acks that land AFTER the
-        // topic vanished from metadata (the async-ack race the point-in-time
-        // snapshots above cannot close; see `DestroyedGeneration`). Only when the
-        // recreate minted a genuinely new id (delayed recreate); an immediate
-        // recreate that reuses the id relies on the `RecreateBlackout` heuristic
-        // below, since old and new records then share a topic_id.
+        // The old generation's records are gone. Mark its topic_id destroyed —
+        // this also covers acks that land AFTER the topic vanished from metadata
+        // (the async-ack race the point-in-time snapshots above cannot close).
+        // The verifier excuses only the records of it that were still unread
+        // when the delete began; see `DestroyedGeneration`. And mark the new
+        // generation, so its skipped head is judged by id rather than by the
+        // index floor. Only when the recreate minted a genuinely new id (KRaft
+        // always does); a recreate that reused the id or could not resolve it
+        // relies on the snapshots and the blackout floor, since old and new
+        // records then cannot be told apart by topic_id.
         if old_id != new_id && old_id != Uuid::zero() {
-            self.verifier.note_expected_loss(ExpectedLossHint::DestroyedGeneration(old_id));
+            self.verifier
+                .note_expected_loss(ExpectedLossHint::DestroyedGeneration { id: old_id, deleted_at: delete_started });
+            if new_id != Uuid::zero() {
+                self.verifier.note_expected_loss(ExpectedLossHint::NewGeneration(new_id));
+            }
         }
-
-        // Mark the topic as a recreate BLACKOUT. An immediate recreate (dwell 0)
-        // can reuse the SAME topic id (in-place topic_id mutation — a
-        // librdkafka-documented mode); when it does, the consumer's committed
-        // offset from the old generation still points into this topic_id, so it
-        // is now *past* the recreated topic's reset offsets and
-        // `auto.offset.reset` does not fire — the new generation's low-offset
-        // records are silently skipped until the topic's offsets climb back past
-        // the stale commit and the consumer resumes. The in-process producer's
-        // index does NOT reset across the recreate (librdkafka restarts its
-        // per-topic producer; we cannot), so it keeps acking records into that
-        // whole blackout window.
-        //
-        // Rather than guess the window with a wall-clock snapshot, the verifier
-        // computes it from observed data: a delivered-but-unobserved record on a
-        // blackout topic below the highest index the consumer eventually observed
-        // on it was skipped in the blackout and is expected-lost; records above
-        // the resume point remain in the loss check. This is librdkafka's
-        // per-topic pre-delete-HWM window, and it is robust to whether the
-        // recreate reused the id, minted a new one, or the id could not be
-        // resolved under churn (all three occur — see the `old_id`/`new_id` log).
-        self.verifier
-            .note_expected_loss(ExpectedLossHint::RecreateBlackout(topic.to_string()));
 
         // Effect check — but only for recreate-DELAYED. With a dwell long enough
         // for the deletion to propagate, the recreate MUST be a genuinely new
@@ -592,12 +607,27 @@ impl ChaosHarness {
         self.recreate_settle.clone()
     }
 
-    /// Build the given workloads. They are **not** spawned onto separate
-    /// threads (the client futures are not `Send`-guaranteed at the trait
-    /// boundary); instead [`RunningWorkloads::drive`] runs them concurrently
-    /// with the chaos actions on the scenario's own multi-thread task via
-    /// `join_all`. Each carries an independent stop flag so producers can be
-    /// drained before consumers.
+    /// Every workload thread of the run. The runner stops and waits for them
+    /// when it abandons a run ([`WorkloadThreads::stop_and_wait`]).
+    pub fn workload_threads(&self) -> Arc<WorkloadThreads> {
+        self.workload_threads.clone()
+    }
+
+    /// The scenario heartbeat [`RunningWorkloads::drive`] beats; hand it to
+    /// [`super::isolation::start_heartbeat_watchdog`].
+    pub fn heartbeat(&self) -> Arc<Heartbeat> {
+        self.heartbeat.clone()
+    }
+
+    /// What removing this cluster takes, for a thread that must do it without
+    /// the harness (the heartbeat watchdog). [`Drop`] uses the same.
+    pub fn cluster_teardown(&self) -> ClusterTeardown {
+        ClusterTeardown {
+            containers: self.cluster.container_ids().to_vec(),
+            network: self.cluster.network_name().to_string(),
+        }
+    }
+
     /// Build the immutable per-workload context from current cluster state,
     /// bound to `topic` as the producer's target topic. Consumers ignore
     /// `topic` and subscribe to the full `topics` set. Shared by
@@ -627,8 +657,6 @@ impl ChaosHarness {
             harness: self,
             ctx: self.workload_ctx(self.primary_topic()),
             inner: std::rc::Rc::new(WorkloadPoolInner {
-                pending: std::cell::RefCell::new(Vec::new()),
-                pending_added: tokio::sync::Notify::new(),
                 added_consumer_stops: std::cell::RefCell::new(Vec::new()),
                 next_instance: std::cell::Cell::new(1000), // runtime ids start high
             }),
@@ -675,28 +703,23 @@ impl ChaosHarness {
                             s.instance = spec.instance * 100 + topic_idx as u32;
                             s
                         };
-                        let workload: Box<dyn Workload> =
-                            build_workload(&per_topic_spec, ctx, self.verifier.clone(), self.cluster.network_name())
-                                .await
-                                .expect("failed to build producer workload");
-                        let stop = Arc::new(AtomicBool::new(false));
-                        running.push(RunningWorkload { role: spec.role, stop, workload });
+                        running.push((per_topic_spec, ctx));
                     }
                 },
                 // One consumer per spec, subscribing to ALL topics.
                 Role::Consumer => {
-                    let ctx = self.workload_ctx(self.primary_topic());
-                    let workload: Box<dyn Workload> =
-                        build_workload(spec, ctx, self.verifier.clone(), self.cluster.network_name())
-                            .await
-                            .expect("failed to build consumer workload");
-                    let stop = Arc::new(AtomicBool::new(false));
-                    running.push(RunningWorkload { role: spec.role, stop, workload });
+                    running.push((spec.clone(), self.workload_ctx(self.primary_topic())));
                 },
             }
         }
 
-        RunningWorkloads { workloads: running }
+        RunningWorkloads {
+            workloads: running,
+            threads: self.workload_threads.clone(),
+            heartbeat: self.heartbeat.clone(),
+            verifier: self.verifier.clone(),
+            broker_network: self.cluster.network_name().to_string(),
+        }
     }
 
     /// Tear down the cluster's containers. Call at the end of every scenario.
@@ -717,64 +740,13 @@ impl Drop for ChaosHarness {
     /// Runs both on the success path (via [`ChaosHarness::shutdown`]) and on
     /// panic unwind, so a failed run cannot leak its brokers into the next one.
     fn drop(&mut self) {
-        // `-v` also removes the anonymous volumes the broker image declares
-        // (`/var/lib/kafka/data` among them); without it every run left three
-        // volumes behind per broker.
-        for id in self.cluster.container_ids() {
-            let _ = std::process::Command::new("docker").args(["rm", "-f", "-v", id]).output();
-        }
-        let network = self.cluster.network_name();
-        // Anything still attached (the gRPC backend sidecar lives in a
-        // process-wide pool and outlives this cluster) makes `network rm` fail
-        // with "network has active endpoints", which used to leak one
-        // `kafka-net-*` per gRPC run. Detach every endpoint first; that only
-        // removes the container's membership of THIS network, nothing else.
-        if let Ok(out) = std::process::Command::new("docker")
-            .args([
-                "network",
-                "inspect",
-                "-f",
-                "{{range .Containers}}{{.Name}}\n{{end}}",
-                network,
-            ])
-            .output()
-        {
-            for attached in String::from_utf8_lossy(&out.stdout).lines().filter(|l| !l.is_empty()) {
-                let _ = std::process::Command::new("docker")
-                    .args(["network", "disconnect", "-f", network, attached])
-                    .output();
-            }
-        }
-        let _ = std::process::Command::new("docker").args(["network", "rm", network]).output();
+        self.cluster_teardown().run();
     }
 }
 
-/// One built (unspawned) workload plus its stop flag.
-struct RunningWorkload {
-    role: Role,
-    stop: Arc<AtomicBool>,
-    workload: Box<dyn Workload>,
-}
-
-/// A pending workload the scenario asked to add mid-run: its role, stop flag,
-/// and run future, waiting to be pushed into the live `FuturesUnordered`.
-type PendingWorkload = (Role, Arc<AtomicBool>, std::pin::Pin<Box<dyn std::future::Future<Output = ()>>>);
-
 /// Shared inner state of a [`WorkloadPool`], held behind `Rc` so the scenario
-/// future can capture a clone and still let [`RunningWorkloads::drive`] poll
-/// the queue it pushes into.
+/// future can capture a clone.
 struct WorkloadPoolInner {
-    /// Newly-built consumer futures waiting for the drive loop to poll them.
-    pending: std::cell::RefCell<Vec<PendingWorkload>>,
-    /// Fired on every push to `pending`, so the drive loop wakes and absorbs
-    /// the new future *now*. Without it the loop body — where the drain
-    /// happens — only re-runs when the scenario or a workload future
-    /// completes, and a consumer added mid-run would sit in `pending` until
-    /// the whole scenario had finished (then start, see its stop flag already
-    /// set, and close without ever joining the group). `notify_one` stores a
-    /// permit when nobody is waiting, so a push between two loop iterations
-    /// is never lost.
-    pending_added: tokio::sync::Notify,
     /// Stop flags of consumers added at runtime, newest last — `remove` pops.
     added_consumer_stops: std::cell::RefCell<Vec<Arc<AtomicBool>>>,
     next_instance: std::cell::Cell<u32>,
@@ -783,9 +755,10 @@ struct WorkloadPoolInner {
 /// Handle the scenario uses to add or remove **consumer** workloads mid-run,
 /// forcing a group rebalance (librdkafka's `--rebalance-add-cycle` /
 /// `--rebalance-remove-cycle`). `Rc`-cloneable and not `Send`/`Sync` — it lives
-/// on the single scenario task alongside the workload futures. Obtain one from
-/// [`ChaosHarness::workload_pool`], capture it in the scenario, and pass its
-/// [`WorkloadPool::pending_queue`] to `drive`.
+/// on the scenario task. Obtain one from [`ChaosHarness::workload_pool`] and
+/// capture it in the scenario. Added consumers run on their own threads in the
+/// harness's [`WorkloadThreads`], so `drive` stops them at the end of the drain
+/// along with the base consumers.
 #[derive(Clone)]
 pub struct WorkloadPool<'h> {
     harness: &'h ChaosHarness,
@@ -794,31 +767,24 @@ pub struct WorkloadPool<'h> {
 }
 
 impl<'h> WorkloadPool<'h> {
-    /// The shared pending-workload queue `drive` drains into its live set.
-    fn pending_queue(&self) -> std::rc::Rc<WorkloadPoolInner> {
-        self.inner.clone()
-    }
-
-    /// Add a consumer workload of `backend` to the running set. It joins the
-    /// group on its next poll, triggering a rebalance.
+    /// Start a consumer workload of `backend` on its own thread. It joins the
+    /// group on its first poll, triggering a rebalance.
     pub async fn add_consumer(&self, backend: super::workload::Backend) {
         let instance = self.inner.next_instance.get();
         self.inner.next_instance.set(instance + 1);
         let spec = WorkloadSpec { role: Role::Consumer, backend, instance };
         let label = spec.label();
-        let workload = build_workload(
-            &spec,
-            self.ctx.clone(),
-            self.harness.verifier.clone(),
-            self.harness.cluster.network_name(),
-        )
-        .await
-        .expect("failed to build dynamic consumer workload");
-        let stop = Arc::new(AtomicBool::new(false));
-        self.inner.added_consumer_stops.borrow_mut().push(stop.clone());
-        let fut = workload.run(stop.clone());
-        self.inner.pending.borrow_mut().push((Role::Consumer, stop, Box::pin(fut)));
-        self.inner.pending_added.notify_one();
+        let stop = self
+            .harness
+            .workload_threads
+            .spawn_workload(
+                spec,
+                self.ctx.clone(),
+                self.harness.verifier.clone(),
+                self.harness.cluster.network_name().to_string(),
+            )
+            .await;
+        self.inner.added_consumer_stops.borrow_mut().push(stop);
         eprintln!("chaos: added consumer {label} (rebalance)");
     }
 
@@ -843,25 +809,36 @@ impl<'h> WorkloadPool<'h> {
 
 /// All workloads for a scenario, ready to be driven concurrently with chaos.
 pub struct RunningWorkloads {
-    workloads: Vec<RunningWorkload>,
+    /// The workloads to start, with each one's context.
+    workloads: Vec<(WorkloadSpec, WorkloadContext)>,
+    threads: Arc<WorkloadThreads>,
+    heartbeat: Arc<Heartbeat>,
+    verifier: Arc<dyn Verifier>,
+    broker_network: String,
 }
 
+/// How often the drive loop wakes to beat the heartbeat and check the
+/// workload threads.
+const DRIVE_TICK: Duration = Duration::from_millis(250);
+
 impl RunningWorkloads {
-    /// Run all workloads concurrently with `scenario` (the chaos timeline),
-    /// then perform the cooldown → drain: stop producers, give consumers
-    /// `drain` to catch up on the tail, stop consumers, and wait for every
-    /// workload to finish. `pool` is the [`WorkloadPool`] the scenario captured
-    /// (from [`ChaosHarness::workload_pool`]); consumers it adds mid-run are
-    /// absorbed into the live set here. Everything runs on the caller's
-    /// (multi-thread) task — no cross-thread spawn — so the non-`Send` client
-    /// futures are fine. Mirrors the librdkafka cooldown→drain sequence.
+    /// Start every workload on its own thread ([`WorkloadThreads`]), run
+    /// `scenario` (the chaos timeline) on the caller's task, then perform the
+    /// cooldown → drain: stop producers and wait for them to finish, give
+    /// consumers `drain` to catch up on the tail, stop consumers (including
+    /// any the scenario added through its [`WorkloadPool`]), and wait for every
+    /// workload to finish. Mirrors the librdkafka cooldown→drain sequence.
     /// `drain` is the maximum cooldown wait; `idle_threshold` (if non-zero)
     /// ends the drain early once consumption has been quiet for that long
-    /// (idle-based early drain — see [`Self::drain_wait`]). `verifier` supplies
-    /// the consume-progress signal.
+    /// (idle-based early drain — see `drain_wait`). `verifier` supplies the
+    /// consume-progress signal.
+    ///
+    /// The workloads run on their own threads, so a client that never yields
+    /// cannot stop the scenario from restarting brokers. This task only waits
+    /// for them. A workload that panics aborts the drive with its panic
+    /// message, after every workload has been told to stop.
     pub async fn drive<Fut>(
         self,
-        pool: &WorkloadPool<'_>,
         drain: Duration,
         idle_threshold: Duration,
         verifier: Arc<dyn Verifier>,
@@ -870,107 +847,53 @@ impl RunningWorkloads {
     ) where
         Fut: std::future::Future<Output = ()>,
     {
-        use futures_util::stream::{FuturesUnordered, StreamExt};
-
-        let producer_stops: Vec<Arc<AtomicBool>> = self
-            .workloads
-            .iter()
-            .filter(|w| matches!(w.role, Role::Producer))
-            .map(|w| w.stop.clone())
-            .collect();
-        let consumer_stops: Vec<Arc<AtomicBool>> = self
-            .workloads
-            .iter()
-            .filter(|w| matches!(w.role, Role::Consumer))
-            .map(|w| w.stop.clone())
-            .collect();
-
-        // Wait for producers to FINISH (not just be signalled) before draining: a
-        // producer still flushes its backlog after the stop flag is set (largest
-        // right after a recreate), and draining first would deliver its tail with
-        // no live consumer — the flaky tail loss. Each producer future bumps
-        // `producers_done` on completion.
-        let producer_count = producer_stops.len();
-        let producers_done = Arc::new(AtomicUsize::new(0));
-
-        // Live set of running workload futures; new ones are pushed in while it
-        // is being polled (that is what `FuturesUnordered` allows and a static
-        // `join_all` does not — required for mid-run add/remove).
-        let mut live: FuturesUnordered<std::pin::Pin<Box<dyn std::future::Future<Output = ()>>>> =
-            FuturesUnordered::new();
-        for w in self.workloads {
-            match w.role {
-                Role::Producer => {
-                    let done = producers_done.clone();
-                    live.push(Box::pin(async move {
-                        w.workload.run(w.stop).await;
-                        done.fetch_add(1, Ordering::Relaxed);
-                    }));
-                },
-                Role::Consumer => {
-                    live.push(Box::pin(w.workload.run(w.stop)));
-                },
-            }
+        self.heartbeat.arm();
+        for (spec, ctx) in self.workloads {
+            self.threads
+                .spawn_workload(spec, ctx, self.verifier.clone(), self.broker_network.clone())
+                .await;
         }
 
-        // The scenario (which may push consumers into the pool) followed by the
-        // cooldown → drain sequence. `pool_inner` gives the control future access
-        // to the runtime-added (churn / rebalance-add) consumers' stop flags so it
-        // can stop them too at shutdown.
-        let pool_inner = pool.pending_queue();
+        let threads = self.threads.clone();
         let control = async move {
             scenario.await;
-            // (1) Signal producers, then wait for them to finish so the delivered
-            // set is final before draining (they run concurrently via `select!`).
-            for stop in &producer_stops {
-                stop.store(true, Ordering::Relaxed);
-            }
-            while producers_done.load(Ordering::Relaxed) < producer_count {
+            // (1) Stop producers, then wait for them to FINISH (not just be
+            // signalled): a producer still flushes its backlog after the stop
+            // flag is set (largest right after a recreate), and draining first
+            // would deliver its tail with no live consumer — the flaky tail loss.
+            threads.stop_role(Role::Producer);
+            while !threads.all_finished(Some(Role::Producer)) {
                 tokio::time::sleep(Duration::from_millis(50)).await;
             }
-            // (2) Drain until all delivered observed (or `drain` elapses); (3) stop consumers.
+            // (2) Drain until all delivered observed (or `drain` elapses); (3)
+            // stop every consumer, including those added at runtime (consumer
+            // churn / --rebalance-add-cycle): the registry holds them all.
             drain_wait(drain, idle_threshold, verifier.as_ref(), settle.as_ref()).await;
-            for stop in &consumer_stops {
-                stop.store(true, Ordering::Relaxed);
-            }
-            // Also stop consumers added at runtime (consumer churn /
-            // --rebalance-add-cycle): their stop flags live in the pool, NOT in
-            // `consumer_stops` (which only holds the base workloads). Without this,
-            // any churn-added consumer still alive at drain never terminates, so the
-            // drive loop's live set never empties and the run hangs AFTER a
-            // successful drain (the churn-scenario post-drain hang).
-            for stop in pool_inner.added_consumer_stops.borrow().iter() {
-                stop.store(true, Ordering::Relaxed);
-            }
+            threads.stop_role(Role::Consumer);
         };
-        let mut control = Box::pin(control);
+        let mut control = std::pin::pin!(control);
         let mut control_done = false;
-        let pending = pool.pending_queue();
+        let mut tick = tokio::time::interval(DRIVE_TICK);
 
-        // Drive loop: advance the control future and the live workload set
-        // together, absorbing any consumers the scenario adds. Ends when the
-        // control future has finished AND every workload future has drained.
+        // Ends when the control future has finished AND every workload thread
+        // has finished.
         loop {
-            // Absorb newly-added workloads before polling the set.
-            for (_role, _stop, fut) in pending.pending.borrow_mut().drain(..) {
-                live.push(fut);
-            }
             tokio::select! {
                 biased;
                 _ = &mut control, if !control_done => { control_done = true; }
-                // A consumer was pushed into `pending` while we were parked
-                // here: fall through so the drain above runs on this
-                // iteration instead of after the scenario ends.
-                _ = pending.pending_added.notified() => {}
-                next = live.next(), if !live.is_empty() => {
-                    let _ = next; // one workload finished; keep going
-                }
-                else => {}
+                _ = tick.tick() => {}
             }
-            if control_done && live.is_empty() && pending.pending.borrow().is_empty() {
+            self.heartbeat.beat();
+            if let Some((label, message)) = self.threads.first_panic() {
+                self.threads.stop_all();
+                self.heartbeat.disarm();
+                std::panic::panic_any(format!("workload {label} panicked: {message}"));
+            }
+            if control_done && self.threads.all_finished(None) {
                 break;
             }
         }
+        self.heartbeat.disarm();
     }
 }
 

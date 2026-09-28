@@ -34,8 +34,22 @@ without changing the orchestrator — see [Extending the harness](#extending-the
   SIGTERM), `docker kill` (unclean, SIGKILL), `docker start`, and a
   metadata-based "broker is operational again" wait — the Docker analog of
   trivup's `broker.stop(force=…)` / `broker.start()` / `wait_operational()`.
+  A restart is only considered complete once the broker's own log says
+  `Kafka Server started` (after the `docker start`), it answers metadata, and
+  it is back in the ISR of every partition it replicates. An ISR catch-up that
+  outlasts the wait prints `chaos: WARN … not yet back in the ISR` and the run
+  continues. The metadata check alone passed while the broker was still
+  replaying its log.
 - **Workloads** (`workload.rs`): pluggable produce/consume units (see
-  [Workloads](#workloads-pluggable)).
+  [Workloads](#workloads-pluggable)). Each workload is built and run on its own
+  OS thread with its own runtime (`isolation.rs`), so a workload that stops
+  yielding cannot starve the scenario, the verifier or the other workloads. A
+  panic in any workload aborts the run with that workload's message. The
+  scenario task heartbeats every 250 ms, and a separate watchdog thread prints
+  `chaos: WATCHDOG — the scenario task made no progress …`, tears the cluster
+  down and exits if the heartbeat stops for 2 minutes. A process that has not
+  exited 60 s after teardown is force-exited, printing
+  `chaos: FORCED EXIT after a PASS verdict` when the run had passed.
 - **Verification** (`verifier.rs`): pluggable event recording + verdict (see
   [Event format & verification](#event-format--verification)).
 - **Runner** (`run_test.rs`, `config.rs`): the flag-driven entry point.
@@ -56,7 +70,7 @@ so several can compose in one run:
 | Action | Restarts brokers? | Data movement? | Mechanism |
 |---|:---:|:---:|---|
 | `broker-roll` (default) | yes | no | `docker stop`/`kill` each broker in turn, then `docker start` and wait until it rejoins the quorum |
-| `change-leader` | no | no | AdminClient preferred-leader election (`elect_leaders`) |
+| `change-leader` | no | no | AdminClient preferred-leader election (`elect_leaders`), re-issued every 5 s for up to 30 s until the leader plan is reached; if it never is, `chaos: WARN … leader plan NOT REACHED` and the plan check is skipped |
 | `reassign-partitions` | no | yes | AdminClient `alter_partition_reassignments` (rotate replicas), then poll until complete |
 | `topic-recreate` | no | yes (destroys the topic) | AdminClient delete → wait-absent → optional dwell → recreate |
 
@@ -146,6 +160,21 @@ Run via `cargo xtask chaos …`. Defaults mirror `chaos.py` where they overlap.
   > recreate (`--num-topics 1 --topic-recreate`) and multi-topic without recreate
   > both work and are covered. Lift the guard in `config.rs` and `run_test.rs`
   > once the consumer fix lands, and re-run that command to confirm.
+  >
+  > `--allow-multi-topic-recreate` runs the combination anyway. The verdict
+  > still fails on the loss, and adds a `KNOWN DEFECT:` line when the failure
+  > has exactly this defect's signature. Every lost partition incarnation must
+  > be on a recreated topic and lose records from offset 0. Each one must also
+  > be either:
+  >
+  > - a **skipped head**: the consumer read that incarnation, but only above
+  >   the lost range; or
+  > - **stuck**: the consumer never read that incarnation.
+  >
+  > The only other failure allowed is committed-offset violations. Anything
+  > else fails without the label.
+  > [`cargo xtask chaos-matrix`](#matrix-runs-cargo-xtask-chaos-matrix) retries
+  > a labelled run.
 - `--partitions N` (6) — partitions on each chaos topic
 - `--replication-factor N` — replication factor per topic; default `min(brokers,
   3)`. FATAL (panics) if `N > brokers`, matching librdkafka.
@@ -227,6 +256,15 @@ ownership model and **fails the run** on any of:
 - `close()` returning while the consumer still owns partitions (Java's
   `runRebalanceCallbacksOnClose` releases the whole assignment first).
 
+The one exception is `close()` itself. It revokes the assignment the member
+holds on the *broker's* side, which can include partitions whose assignment
+callback had not yet run on the consumer. Java does the same. Such releases
+from a closing consumer are counted and not scored:
+
+```
+  close-time releases of never-assigned partitions (Java-faithful, not scored): 2
+```
+
 The verdict prints the callback counts:
 
 ```
@@ -276,7 +314,20 @@ many comparisons actually ran:
 ```
 
 Zero means the check never ran (gRPC consumers have no rebalance listener, so
-their progress-since-assignment is unknown and they are not checked). A
+their progress-since-assignment is unknown and they are not checked).
+
+A topic recreate does **not** reset committed offsets. The broker keys them by
+topic *name*, so the old incarnation's commits outlive the delete. For a while
+after a recreate, one consumer can still own a partition of the old
+incarnation while another owns the same partition of the new one. Both commit
+to the same name, so a read-back may return the other owner's offset. The
+harness skips such a comparison and counts it:
+
+```
+  committed offsets skipped : 3 (partition shared by two owners of different incarnations)
+```
+
+A
 failing `committed()` call itself is reported as
 `consumer committed() read-back` in the error breakdown, not scored.
 
@@ -399,6 +450,34 @@ Every record carries **two identities**:
   So a record written to the new generation always carries the new id, and
   the destroyed-generation excusal cannot hide loss on the new generation.
 
+**Recreate loss excusal.** Records a recreate legitimately destroys are
+counted as `expected-lost (recreate)`, not lost. The rules below are applied
+per incarnation, which is the `(topic, partition, topic id)` triple:
+
+- **Old incarnation.** A record is excused only if it was *unread when the
+  delete began*. Its offset must be above the highest offset the consumer read
+  on that incarnation, and its ack must have arrived no more than 60 s before
+  the delete (or at any time after it). Two cases are still lost:
+  - a gap below the consumer's position;
+  - a partition the consumer never read, whose records were acked long before
+    the delete.
+
+  Excusing the whole old generation would hide exactly the "consumer stuck on
+  one partition" failure.
+- **New incarnation.** A record the consumer skipped past is excused: its
+  offset is below the first offset the consumer read on that incarnation (the
+  consumer resumed from a stale position and moved past it). A partition of the
+  new incarnation the consumer never read is lost.
+- **Fallback.** For records without an identified generation (a zero topic
+  id), the older snapshot and blackout-floor rules apply.
+
+The per-partition loss report reads its "highest consumed offset" from the
+same incarnation as the lost records, and tags the incarnation's id:
+
+```
+    chaos-run_0 p1 [Uuid…]: 22 lost at offsets 0..=21; last acked offset 21, highest consumed offset none
+```
+
 The default `ConservationVerifier` renders a verdict:
 
 ```
@@ -413,7 +492,7 @@ The default `ConservationVerifier` renders a verdict:
   expected-lost (recreate)  : 0      # records legitimately destroyed by topic-recreate (only when > 0)
   lost (delivered, unseen)  : 0      # acked-but-never-consumed  → FAIL if > 0
   lost by partition:                 # only when lost > 0: where the loss sits
-    chaos-run p0: 143 lost at offsets 1..=143; last acked offset 143, last consumed offset none
+    chaos-run p0: 143 lost at offsets 1..=143; last acked offset 143, highest consumed offset none
   rebalance callbacks       : revoked=7 assigned=9 lost=0 (2 consumer(s) with listener)
   committed offsets checked : 37 (0 violation(s))      # → FAIL if violations > 0
   ordering violations       : 0 (0 unscored on recreated topics)   # → FAIL if > 0
@@ -669,9 +748,23 @@ Flags and their defaults:
 - `--only ID,ID` runs only those scenarios.
 - `--run-timeout-min 240` sends a run SIGINT when it exceeds this, then SIGKILL
   after 3 minutes. The run is recorded as `TIMEOUT`.
+- `--stall-min 20` stops a run whose log has not grown for this long, which
+  catches a wedged test process long before the run timeout. The run is
+  recorded as `STALLED`. The harness's longest silent phases are about 5
+  minutes.
+- `--known-defect-attempts 3` sets how many times a run that fails with the
+  known multi-topic recreate defect's signature is tried. Earlier attempts'
+  logs are kept in `runs/<run>.attempt-<n>/`. A clean attempt is a genuine
+  `PASS`. A run that hits the defect on every attempt is `KNOWN-DEFECT`.
+- After every run, the runner removes any harness broker containers and
+  network the run created and left behind, which a killed run always does.
+  Containers that existed before the run are never touched.
 - `--out DIR` (`target/chaos-matrix/<matrix name>`) sets the output directory.
   Re-running with the same directory resumes: recorded runs are skipped, and
-  `--rerun-failed` retries the ones that did not pass.
+  `--rerun-failed` retries the ones that did not pass. `--rerun RUN,RUN` runs
+  just the named runs again (for example `15-ssl-1MiB`), for instance after an
+  infrastructure failure. Earlier attempts' directories are kept as
+  `runs/<run>.prev-<time>/`.
 - `--check-only` builds the test binary, has the harness validate every run's
   configuration, and stops. A full run does the same check before starting its
   first cluster, so a bad line fails in seconds.
@@ -692,9 +785,22 @@ under the output directory:
 | `runs/<id>-<protocol>-<size>/command.txt` | The equivalent `cargo xtask chaos` command, to replay the run by hand. |
 | `runs/<id>-<protocol>-<size>/reports/` | The run's [reports](#reports---reports). |
 
-Outcomes are `PASS`, `FAIL` (the verdict failed), `FAIL (panic)`,
-`FAIL (watchdog)`, `FAIL (interrupted)`, `TIMEOUT`, `CONFIG-ERROR`, and `ERROR`
-(the run ended before a verdict, for example the cluster did not start).
+Outcomes are `PASS`, `FAIL` (the verdict failed), `KNOWN-DEFECT`,
+`FAIL (panic)`, `FAIL (watchdog)`, `FAIL (interrupted)`, `STALLED`, `TIMEOUT`,
+`CONFIG-ERROR`, and `ERROR` (the run ended before a verdict, for example the
+cluster did not start).
+
+To follow a matrix from another terminal:
+
+```
+cargo xtask chaos-matrix-status --watch 30
+```
+
+It shows whether the runner is alive, progress and pass counts, the current
+run with its cycle and latest harness line, a time estimate, recent results,
+and every run that did not pass. It only reads files, so quitting it never
+affects the matrix. `--out DIR` picks a matrix other than the most recently
+active one.
 
 ## Not yet implemented (vs. `chaos.py`)
 
