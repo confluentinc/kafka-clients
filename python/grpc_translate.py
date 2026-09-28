@@ -17,7 +17,7 @@
 by the sync and async gRPC test servers (grpc_server.py / grpc_server_async.py).
 
 These are client-agnostic: they convert between the generated protobuf messages
-and the bindings/python producer.py / consumer.py / admin.py value types, and do
+and the python producer.py / consumer.py / admin.py value types, and do
 not depend on whether the driving Kafka client is the sync or the asyncio-native
 one (`ProducerRecord`, `KafkaError` and admin.py's value types are the same
 C-backed types in both). Kept in one module so the two servers don't duplicate

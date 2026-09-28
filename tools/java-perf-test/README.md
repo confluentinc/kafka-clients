@@ -1,6 +1,6 @@
 # Java producer performance test
 
-A Java equivalent of `bindings/python/test/performance/producer_performance_test.py`.
+A Java equivalent of `python/test/performance/producer_performance_test.py`.
 Same env-variable interface, same `metrics.jsonl` output schema, same
 test workflow (warmup → measured → drain → optional consumer verification).
 Lets you benchmark the upstream Apache Kafka Java client against the same
@@ -106,7 +106,7 @@ Empty bucket max is the literal string `"-inf"` (matches Python's
 
 ## Consistency with the C and Rust tests
 
-This test is aligned with `bindings/c/tests/producer_perf_test.c` and
+This test is aligned with `c/tests/producer_perf_test.c` and
 `tests/integration/producer_perf_test.rs` so all three are directly comparable:
 
 - **CPU** is an interval rate from `/proc/self/stat` (utime+stime over each

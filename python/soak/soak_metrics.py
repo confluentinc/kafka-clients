@@ -14,7 +14,7 @@
 
 """Metric primitives for the soak client.
 
-PROVENANCE: copied from `bindings/python/test/performance/performance_common.py`
+PROVENANCE: copied from `python/test/performance/performance_common.py`
 and deliberately duplicated rather than imported.
 
 The soak is a long-lived operational tool: a two-week run must not break because
@@ -55,7 +55,7 @@ MAX_LATENCY_MS = 10000
 
 def recreate_topic(config, topic, partitions=-1):
     """Delete `topic` (ignoring "does not exist"), wait 10s, re-create it, wait
-    10s — using this repo's Rust-backed AdminClient (bindings/python/admin.py).
+    10s — using this repo's Rust-backed AdminClient (python/admin.py).
     Replication factor and (unless `partitions` > 0) partition count use the
     broker default (`-1`), so this works on Confluent Cloud where RF=1 is
     rejected. The two sleeps let the delete/create metadata propagate across the

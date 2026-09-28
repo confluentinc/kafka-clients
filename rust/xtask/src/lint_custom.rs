@@ -1286,7 +1286,7 @@ impl Rule for NoDeprecatedTranslation {
 
 /// The types annotated `@InterfaceAudience.Public` at [`java::AUDIENCE_REF`],
 /// one fully-qualified top-level name per line.
-const PUBLIC_AUDIENCE_LIST: &str = "design/current/interface-audience-public-4.4.txt";
+const PUBLIC_AUDIENCE_LIST: &str = "../design/current/interface-audience-public-4.4.txt";
 
 /// The public items [`PublicAudience`] lets through although no Public Java
 /// class backs them, one per line: `<key>  # <reason>`.

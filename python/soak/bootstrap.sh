@@ -26,7 +26,7 @@
 # The Rust repository is not public yet and CANNOT be cloned on the box (the
 # Confluent GitHub org IP allow list blocks it — auth succeeds, the IP check
 # fails). Ship the source with `git archive | scp`, unpack it, and run this from
-# the unpacked bindings/python/soak directory. Because an scp'd tree has no .git,
+# the unpacked python/soak directory. Because an scp'd tree has no .git,
 # the commit SHA must be passed explicitly (build.sh --sha requires it).
 #
 # Usage:
@@ -44,7 +44,7 @@ SHA="$1"
 LABEL="${2:-bootstrap}"
 
 SOAK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SRC_DIR="$(cd "$SOAK_DIR/../../.." && pwd)"   # bindings/python/soak -> repo root
+SRC_DIR="$(cd "$SOAK_DIR/../.." && pwd)"   # python/soak -> repo root
 
 otel_collector_version=0.130.0
 otel_collector_package_url="https://github.com/open-telemetry/"\

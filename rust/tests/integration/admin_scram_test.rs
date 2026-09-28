@@ -56,9 +56,9 @@
 //! `read_scram_alterations_distinguishes_an_absent_salt_from_a_present_empty_one`
 //! (`src/ffi/admin.rs`),
 //! `test_scram_alteration_rows_keep_an_absent_salt_apart_from_an_empty_one`
-//! (`bindings/python/test/unit/test_admin.py`) and the mixed-salt row in
+//! (`python/test/unit/test_admin.py`) and the mixed-salt row in
 //! `test_mock_admin_alter_user_scram_credentials_reports_unsupported_per_user`
-//! (`bindings/c/tests/test_mock_admin.c`). Compare
+//! (`c/tests/test_mock_admin.c`). Compare
 //! `create_partitions_with_an_empty_assignment_list_is_rejected`
 //! (`admin_partitions_records_test.rs`), where the same class of defect *is*
 //! broker-observable because the controller compares the assignment count.

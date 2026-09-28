@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Asyncio-native gRPC server exposing the *async* bindings/python client
+"""Asyncio-native gRPC server exposing the *async* python client
 (AsyncKafkaProducer / AsyncKafkaConsumer / AsyncAdminClient) over the same
 ProducerService / ConsumerService / AdminService protos as grpc_server.py.
 

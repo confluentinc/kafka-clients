@@ -1,7 +1,7 @@
 # Rust client soak test
 
 A long-running (2+ week) producer/consumer soak for the Rust Kafka client,
-driven through `bindings/python`. It produces and consumes continuously,
+driven through `python`. It produces and consumes continuously,
 detects duplicates, gaps and latency drift, and survives a cluster being rolled
 underneath it.
 
@@ -517,7 +517,7 @@ client repeatedly and a restart must not discard the soak's history.
 only.
 
 Topic creation goes through **this repo's Rust-backed** `AdminClient`
-(`bindings/python/admin.py`) — the soak now drives the Rust client for admin,
+(`python/admin.py`) — the soak now drives the Rust client for admin,
 produce and consume alike. The admin client takes the **same Java-style config
 namespace** as the producer/consumer (`bootstrap.servers`, `security.protocol`,
 `sasl.mechanism`, `sasl.jaas.config`, `ssl.*`), so the soak passes its admin
@@ -581,7 +581,7 @@ purpose in exactly the mode this README recommends — `build.sh` warns loudly a
 build time when that happens, and the soak repeats the warning at every startup
 for the life of the run),
 runs `cargo build --release --features ffi` (which produces
-`target/include/confluent_kafka.h` and `target/release/libconfluent_kafka.*`),
+`rust/target/include/confluent_kafka.h` and `rust/target/release/libconfluent_kafka.*`),
 creates a venv, installs `requirements.txt`, then installs the bindings with
 `CONFLUENT_KAFKA_LIB_DIR` pointing at the cargo output — that order is
 mandatory, since the C extension compiles against the generated header and
@@ -661,7 +661,7 @@ mode, so a restart adds to the series instead of truncating it.
 ## Tests
 
 ```bash
-cd bindings/python && python -m pytest soak/test -v
+cd python && python -m pytest soak/test -v
 ```
 
 Unit tests cover the pure logic no broker can verify: the `SoakRecord`
@@ -683,7 +683,7 @@ actionable message and exit code 2 — never mid-run:
 
 ```
 soakclient: startup error: the Rust client's Python bindings are not importable
-(No module named '_confluentkafka'). Run bindings/python/soak/build.sh, or
+(No module named '_confluentkafka'). Run python/soak/build.sh, or
 activate the venv it created. ...
 ```
 

@@ -14,7 +14,7 @@
 
 """Generates ``_error_code.py`` from ``kafka_common_ErrorCode_t``.
 
-``src/ffi/common.rs``'s ``kafka_common_ErrorCode_t`` is the one place the
+``rust/src/ffi/common.rs``'s ``kafka_common_ErrorCode_t`` is the one place the
 error codes are declared. The C extension sees them through the
 cbindgen-generated header; the pure-Python modules cannot include that header,
 so they get a generated copy of the values. Copies are what drift, so
@@ -31,7 +31,7 @@ import sys
 from pathlib import Path
 
 _PYTHON_DIR = Path(__file__).resolve().parent.parent
-ERROR_CODE_SOURCE = _PYTHON_DIR.parent.parent / "src" / "ffi" / "common.rs"
+ERROR_CODE_SOURCE = _PYTHON_DIR.parent / "rust" / "src" / "ffi" / "common.rs"
 ERROR_CODE_PY = _PYTHON_DIR / "_error_code.py"
 
 _HEADER = '''\
@@ -51,7 +51,7 @@ _HEADER = '''\
 
 """Error-code constants -- GENERATED, DO NOT EDIT.
 
-Generated from kafka_common_ErrorCode_t in src/ffi/common.rs by
+Generated from kafka_common_ErrorCode_t in rust/src/ffi/common.rs by
 `python tools/generate_error_code.py`, and checked for staleness by
 test/static/test_error_code_generated.py.
 
