@@ -49,8 +49,6 @@ async fn run() -> Result<(), Error> {
 }
 
 async fn produce_transactionally(producer: &KafkaProducer<String, String>) -> Result<(), Error> {
-    // Called first and once. It fences any earlier producer with the same
-    // `transactional.id` and aborts any transaction that producer left open.
     producer.init_transactions().await?;
     println!("Transactions initialized for transactional.id={TRANSACTIONAL_ID}");
 
@@ -60,8 +58,7 @@ async fn produce_transactionally(producer: &KafkaProducer<String, String>) -> Re
             Ok(())
         },
         Err(e) if is_unrecoverable(&e) => {
-            // We can't recover from these errors, so our only option is to
-            // close the producer and exit (`run()` closes it).
+            // We can't recover from these errors, so close the producer and exit.
             eprintln!("Unrecoverable error, closing the producer: {e}");
             Err(e)
         },
@@ -70,9 +67,7 @@ async fn produce_transactionally(producer: &KafkaProducer<String, String>) -> Re
             eprintln!("Aborting transaction: {e}");
             producer.abort_transaction().await.and(Err(e))
         },
-        // Not a Kafka error (e.g. an illegal state): Java's
-        // `catch (KafkaException e)` would not catch it either, so it
-        // propagates unchanged.
+        // Not a Kafka error: nothing to abort, so it propagates unchanged.
         Err(e) => Err(e),
     }
 }
@@ -83,8 +78,7 @@ async fn produce_in_transaction(producer: &KafkaProducer<String, String>) -> Res
 
     for i in 0..NUM_RECORDS {
         let record = ProducerRecord::with_key(TOPIC_NAME.to_string(), Some(i.to_string()), Some(i.to_string()));
-        // The returned future is not awaited: `commit_transaction` flushes
-        // every record sent in the transaction and fails if any of them failed.
+        // The future is not awaited: `commit_transaction` fails if any send failed.
         producer.send(record).await?;
     }
     println!("Sent {NUM_RECORDS} records, committing the transaction.");
@@ -105,9 +99,7 @@ fn bootstrap_servers() -> String {
 fn create_kafka_producer() -> Result<KafkaProducer<String, String>, Error> {
     let props = HashMap::from([
         (ProducerConfig::BOOTSTRAP_SERVERS_CONFIG.to_string(), bootstrap_servers()),
-        // Setting `transactional.id` enables idempotence and `acks=all`. It must
-        // be unique to each producer instance, so that a restarted instance
-        // fences its predecessor.
+        // Enables transactions and idempotence; must be unique per producer instance.
         (
             ProducerConfig::TRANSACTIONAL_ID_CONFIG.to_string(),
             TRANSACTIONAL_ID.to_string(),
