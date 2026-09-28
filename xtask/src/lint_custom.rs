@@ -24,6 +24,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use quote::ToTokens;
+use syn::punctuated::Punctuated;
 
 use crate::java::{self, rust_method_bases, same_name, squash, JavaIndex};
 
@@ -381,10 +382,46 @@ fn flatten_use(tree: &syn::UseTree, prefix: &mut Vec<String>, out: &mut Vec<(Vec
     }
 }
 
+/// Whether one of `attrs` is a `#[cfg(..)]` whose predicate holds only when
+/// `test` is set — `cfg(test)`, `cfg(all(test, ..))` — so the item never ships
+/// in a non-test build. `cfg(not(test))`, `cfg(feature = "..test..")` and any
+/// predicate that can hold without `test` do not count: those items ship.
 fn is_cfg_test(attrs: &[syn::Attribute]) -> bool {
     attrs
         .iter()
-        .any(|a| a.path().is_ident("cfg") && a.meta.to_token_stream().to_string().contains("test"))
+        .filter(|a| a.path().is_ident("cfg"))
+        .any(|a| a.parse_args::<syn::Meta>().is_ok_and(|pred| cfg_implies_test(&pred)))
+}
+
+/// Whether cfg predicate `pred` can hold only when `test` is set. Errs toward
+/// `false`, which keeps the item under the lint rules.
+fn cfg_implies_test(pred: &syn::Meta) -> bool {
+    match pred {
+        syn::Meta::Path(path) => path.is_ident("test"),
+        syn::Meta::NameValue(_) => false,
+        syn::Meta::List(list) => {
+            let Ok(args) = list.parse_args_with(Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated) else {
+                return false;
+            };
+            if list.path.is_ident("all") {
+                // Every conjunct must hold, so one requiring `test` suffices.
+                args.iter().any(cfg_implies_test)
+            } else if list.path.is_ident("any") {
+                // Any disjunct may hold, so each must require `test`.
+                !args.is_empty() && args.iter().all(cfg_implies_test)
+            } else if list.path.is_ident("not") {
+                // `not(not(p))` is `p`; any other negation can hold without `test`.
+                match args.first() {
+                    Some(syn::Meta::List(inner)) if args.len() == 1 && inner.path.is_ident("not") => {
+                        inner.parse_args::<syn::Meta>().is_ok_and(|p| cfg_implies_test(&p))
+                    },
+                    _ => false,
+                }
+            } else {
+                false
+            }
+        },
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2422,5 +2459,39 @@ mod dyn_compatible_tests {
         let findings = run("hidden");
         assert_eq!(finding(&findings, "Hidden"), None);
         assert_eq!(finding(&findings, "Unreachable"), None);
+    }
+}
+
+#[cfg(test)]
+mod cfg_test_tests {
+    use super::*;
+
+    fn cfg_test(attr: &str) -> bool {
+        let item: syn::ItemMod = syn::parse_str(&format!("{attr} mod m {{}}")).unwrap();
+        is_cfg_test(&item.attrs)
+    }
+
+    #[test]
+    fn test_only_cfgs_are_test_only() {
+        assert!(cfg_test("#[cfg(test)]"));
+        assert!(cfg_test(r#"#[cfg(all(test, feature = "x"))]"#));
+        assert!(cfg_test(r#"#[cfg(all(feature = "x", test))]"#));
+        assert!(cfg_test(r#"#[cfg(any(test, all(test, feature = "x")))]"#));
+        assert!(cfg_test("#[cfg(not(not(test)))]"));
+        assert!(cfg_test("#[doc = \"m\"] #[cfg(test)]"));
+    }
+
+    #[test]
+    fn cfgs_that_ship_are_not_test_only() {
+        assert!(!cfg_test("#[cfg(not(test))]"));
+        assert!(!cfg_test(r#"#[cfg(feature = "foo-tests")]"#));
+        assert!(!cfg_test(r#"#[cfg(feature = "integration-tests")]"#));
+        assert!(!cfg_test(r#"#[cfg(feature = "test")]"#));
+        assert!(!cfg_test(r#"#[cfg(any(test, feature = "test-utils"))]"#));
+        assert!(!cfg_test("#[cfg(any())]"));
+        assert!(!cfg_test("#[cfg(unix)]"));
+        assert!(!cfg_test("#[cfg_attr(test, allow(dead_code))]"));
+        assert!(!cfg_test(r#"#[doc = "test"]"#));
+        assert!(!cfg_test(""));
     }
 }
