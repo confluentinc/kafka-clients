@@ -41,6 +41,7 @@ mod common;
 mod actions;
 mod config;
 mod harness;
+mod isolation;
 mod reports;
 mod verifier;
 mod workload;

@@ -255,10 +255,12 @@ fn delivery_callback(
 /// A pluggable chaos workload. The orchestrator only starts it and, via the
 /// shared `stop` flag, tells it to drain — it never touches the client type.
 ///
-/// `?Send`: workloads are driven with `join_all` on the scenario's own task
-/// (never `tokio::spawn`ed across threads), and the underlying client futures
-/// (`Producer` / `Consumer` / the backend factories) are not `Send`-guaranteed
-/// at their trait boundary. See [`super::harness::RunningWorkloads::drive`].
+/// `?Send`: the underlying client futures (`Producer` / `Consumer` / the
+/// backend factories) are not `Send`-guaranteed at their trait boundary, so a
+/// workload is built and run entirely on its own OS thread with its own
+/// runtime (never moved across threads). That also keeps a workload that stops
+/// yielding from starving the scenario or the other workloads. See
+/// [`super::isolation::WorkloadThreads`].
 #[async_trait(?Send)]
 pub trait Workload {
     /// Human-readable label (role-backend-instance).
@@ -494,12 +496,11 @@ where
             if interval.is_zero() {
                 // Unlimited rate (`--rps 0`): `send` returns ready without ever
                 // touching a tokio resource while the accumulator has room, so
-                // the loop would never return `Pending`. The drive loop polls
-                // this workload, the consumers and the scenario timer from one
-                // task, so without an explicit yield they run only when the
-                // producer blocks on a full buffer: the warmup timer fired
-                // minutes late and the consumer starved. One yield per record
-                // costs well under a microsecond.
+                // the loop would never return `Pending`. It runs on its own
+                // thread, but shares that thread's runtime with the client's
+                // background tasks and its own stop-flag checks, which would
+                // then run only when the producer blocks on a full buffer. One
+                // yield per record costs well under a microsecond.
                 tokio::task::yield_now().await;
             } else {
                 next_due += interval;
@@ -702,7 +703,13 @@ where
         }
         let mut consumer = self
             .factory
-            .create(consumer_props(&bootstrap, &self.ctx.group, &label, &self.ctx.security))
+            .create(consumer_props(
+                &bootstrap,
+                &self.ctx.group,
+                &label,
+                self.ctx.msg_size,
+                &self.ctx.security,
+            ))
             .await
             .expect("failed to build chaos consumer");
 
@@ -829,8 +836,11 @@ where
             },
         }
         // The close-time revoke callback commits but must not read back (see
-        // `ChaosRebalanceListener::closing`).
+        // `ChaosRebalanceListener::closing`). The verifier learns the consumer
+        // is closing too: close may release partitions it was never told it
+        // owned (see `ConservationState::closing`).
         closing.store(true, Ordering::Relaxed);
+        self.verifier.record(WorkloadEvent::ConsumerClosing { consumer: label.clone() });
         consumer.close().await.expect("chaos consumer close failed");
         // `close()` must have released every owned partition through the
         // listener first; the verifier checks that on this event.
@@ -1091,7 +1101,7 @@ mod tests {
 
         // The recreate lands before the ack does.
         ids.lock().unwrap().insert("t".to_string(), new_id);
-        verifier.note_expected_loss(ExpectedLossHint::DestroyedGeneration(old_id));
+        verifier.note_expected_loss(ExpectedLossHint::DestroyedGeneration { id: old_id, deleted_at: Instant::now() });
 
         let meta = RecordMetadata::new(TopicPartition::new("t".to_string(), 3), 5, 0, 0, 8, 8);
         callback(Some(&meta), None);
@@ -1163,7 +1173,7 @@ mod tests {
         // The harness recreates the topic: re-resolves the id into the shared map
         // and marks the old generation destroyed.
         ids.lock().unwrap().insert("t".to_string(), new_id);
-        v.note_expected_loss(ExpectedLossHint::DestroyedGeneration(old_id));
+        v.note_expected_loss(ExpectedLossHint::DestroyedGeneration { id: old_id, deleted_at: Instant::now() });
 
         // After the recreate: the SAME context now stamps the new generation.
         assert_eq!(ctx.topic_id_for("t"), new_id);
