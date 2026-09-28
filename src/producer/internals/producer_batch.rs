@@ -1533,6 +1533,95 @@ mod tests {
         assert_eq!(1, invocations.load(Ordering::SeqCst), "Callback should not be invoked again");
     }
 
+    /// Regression test for the sentinel-metadata substitution in
+    /// `complete_future_and_fire_callbacks`.
+    ///
+    /// Java's thunk callback is the `AppendCallbacks` wrapper from
+    /// `KafkaProducer.doSend` (`KafkaProducer.java:1793-1800`), which replaces a
+    /// `null` `RecordMetadata` with a sentinel — the real topic-partition, and
+    /// `-1` for offset, timestamp and both serialized sizes — before the user's
+    /// `Callback` sees it. Rust stores the raw user `Callback` in the thunk, so
+    /// the batch must perform that substitution itself on **every** failure
+    /// path. This test drives both: `complete_with_error` (the `Sender` failure
+    /// path, `Sender.failBatch`) and `abort` (the accumulator / expiry path),
+    /// with several records carrying real keys and values, so a leak of either
+    /// `None` or the per-record `FutureRecordMetadata` value (which would carry
+    /// the real key/value sizes) is caught.
+    #[test]
+    fn test_failed_batch_callbacks_receive_sentinel_metadata_on_every_failure_path() {
+        type Seen = Arc<Mutex<Vec<(Option<RecordMetadata>, Option<String>)>>>;
+
+        fn append_records_with_callbacks(batch: &mut ProducerBatch, count: usize) -> Seen {
+            let seen: Seen = Arc::new(Mutex::new(Vec::new()));
+            for i in 0..count {
+                let seen = Arc::clone(&seen);
+                let callback: Callback = Box::new(move |metadata, error| {
+                    seen.lock()
+                        .unwrap()
+                        .push((metadata.cloned(), error.map(|e| e.message().to_string())));
+                });
+                let key = format!("key-{i}");
+                let value = vec![0u8; 10 + i];
+                batch
+                    .try_append(NOW, Some(key.as_bytes()), Some(&value), &[], Some(callback), NOW)
+                    .unwrap_or_else(|_| panic!("Append should succeed"));
+            }
+            seen
+        }
+
+        fn assert_sentinel(metadata: &Option<RecordMetadata>, expected_tp: &TopicPartition) {
+            let metadata = metadata
+                .as_ref()
+                .expect("callback must receive Some metadata on failure, never None");
+            assert_eq!(
+                expected_tp,
+                metadata.topic_partition(),
+                "sentinel keeps the batch's real topic-partition"
+            );
+            assert_eq!(RecordMetadata::INVALID_OFFSET, metadata.offset());
+            assert!(!metadata.has_offset());
+            assert_eq!(RecordBatch::NO_TIMESTAMP, metadata.timestamp());
+            assert!(!metadata.has_timestamp());
+            // Java's sentinel passes -1 for both sizes even though the record had a
+            // real key and value — this distinguishes the sentinel from the
+            // per-record `FutureRecordMetadata::value()` used on the success path.
+            assert_eq!(-1, metadata.serialized_key_size());
+            assert_eq!(-1, metadata.serialized_value_size());
+        }
+
+        let record_count = 3;
+
+        // Path 1: `complete_with_error` with distinct per-record errors (Sender's
+        // `fail_batch` path). Each callback must get the sentinel plus *its own*
+        // record error, in record order.
+        let mut batch = ProducerBatch::new(make_tp(), make_builder(), NOW);
+        let seen = append_records_with_callbacks(&mut batch, record_count);
+        let record_errors: Arc<dyn Fn(i32) -> Option<Error> + Send + Sync> =
+            Arc::new(|idx| Some(Error::with_message(Errors::UnknownServerError, format!("record error {idx}"))));
+        assert!(batch.complete_with_error(Error::with_message(Errors::UnknownServerError, "top level"), record_errors));
+
+        let seen = seen.lock().unwrap();
+        assert_eq!(record_count, seen.len(), "every record's callback fires exactly once");
+        for (i, (metadata, error)) in seen.iter().enumerate() {
+            assert_sentinel(metadata, &make_tp());
+            assert_eq!(Some(format!("record error {i}")), *error);
+        }
+        drop(seen);
+
+        // Path 2: `abort` (accumulator `abort_batches` / expiry path). Every
+        // callback gets the sentinel plus the single abort error.
+        let mut batch = ProducerBatch::new(make_tp(), make_builder(), NOW);
+        let seen = append_records_with_callbacks(&mut batch, record_count);
+        batch.abort(Error::with_message(Errors::RequestTimedOut, "expired"));
+
+        let seen = seen.lock().unwrap();
+        assert_eq!(record_count, seen.len(), "every record's callback fires exactly once");
+        for (metadata, error) in seen.iter() {
+            assert_sentinel(metadata, &make_tp());
+            assert_eq!(Some("expired".to_string()), *error);
+        }
+    }
+
     /// Translated from `ProducerBatchTest.testBatchCannotCompleteTwice` - extended version
     /// with callback verification.
     ///

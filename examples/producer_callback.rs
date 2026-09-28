@@ -14,9 +14,12 @@
 
 use std::collections::HashMap;
 use std::process::ExitCode;
+use std::sync::Arc;
+use std::sync::Mutex;
 
 use confluent_kafka::common::Error;
 use confluent_kafka::common::serialization::StringSerializer;
+use confluent_kafka::producer::Callback;
 use confluent_kafka::producer::KafkaProducer;
 use confluent_kafka::producer::Producer;
 use confluent_kafka::producer::ProducerConfig;
@@ -42,12 +45,25 @@ async fn run() -> Result<(), Error> {
     let producer = create_kafka_producer()?;
     println!("Kafka producer created successfully.");
 
-    let result = produce_records(&producer).await;
+    // Delivery callbacks run on the producer's background task, so the first
+    // delivery error is recorded here and checked once `close()` has flushed
+    // every outstanding record and invoked every callback.
+    let first_delivery_error: Arc<Mutex<Option<Error>>> = Arc::new(Mutex::new(None));
+
+    let result = produce_records(&producer, &first_delivery_error).await;
     let close_result = producer.close().await;
-    result.and(close_result)
+
+    let delivery_result = match first_delivery_error.lock().unwrap().take() {
+        Some(e) => Err(e),
+        None => Ok(()),
+    };
+    result.and(delivery_result).and(close_result)
 }
 
-async fn produce_records(producer: &KafkaProducer<String, String>) -> Result<(), Error> {
+async fn produce_records(
+    producer: &KafkaProducer<String, String>,
+    first_delivery_error: &Arc<Mutex<Option<Error>>>,
+) -> Result<(), Error> {
     for i in 0..NUM_RECORDS {
         let key = format!("key-{i}");
         let value = format!("value-{i}");
@@ -55,24 +71,31 @@ async fn produce_records(producer: &KafkaProducer<String, String>) -> Result<(),
         println!("Producing record: key={key}, value={value}");
         let record = ProducerRecord::with_key(TOPIC_NAME.to_string(), Some(key), Some(value));
 
-        // Synchronous produce: `send` returns a future for the record's delivery,
-        // and awaiting `get` blocks until the broker has acknowledged it (or the
-        // delivery has failed) before the next record is sent.
-        let future = producer.send(record).await?;
-        match future.get().await {
-            Ok(metadata) => println!(
-                "Delivered record {i} to topic {}, partition {} at offset {}",
+        let callback = delivery_callback(i, Arc::clone(first_delivery_error));
+        producer.send_with_callback(record, Some(callback)).await?;
+    }
+    Ok(())
+}
+
+fn delivery_callback(index: usize, first_delivery_error: Arc<Mutex<Option<Error>>>) -> Callback {
+    // Per the `Callback` contract, on failure `metadata` is still `Some` but holds a
+    // sentinel `-1` offset (and `-1` partition if none could be resolved), so `error`
+    // must be checked first to tell success from failure.
+    Box::new(move |metadata, error| match error {
+        Some(error) => {
+            eprintln!("Failed to deliver record {index}: {error}");
+            first_delivery_error.lock().unwrap().get_or_insert_with(|| error.clone());
+        },
+        None => match metadata {
+            Some(metadata) => println!(
+                "Delivered record {index} to topic {}, partition {} at offset {}",
                 metadata.topic(),
                 metadata.partition(),
                 metadata.offset()
             ),
-            Err(error) => {
-                eprintln!("Failed to deliver record {i}: {error}");
-                return Err(error);
-            },
-        }
-    }
-    Ok(())
+            None => eprintln!("Record {index} completed with neither metadata nor error"),
+        },
+    })
 }
 
 fn bootstrap_servers() -> String {
