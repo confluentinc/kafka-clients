@@ -152,7 +152,7 @@ impl BackendKind {
             BackendKind::Python | BackendKind::PythonAsync => {
                 let python = std::env::var_os("MULTILANG_PYTHON")
                     .map(PathBuf::from)
-                    .unwrap_or_else(|| root.join("venv/bin/python"));
+                    .unwrap_or_else(|| root.join("../venv/bin/python"));
                 let script = match self {
                     BackendKind::Python => "grpc_server.py",
                     _ => "grpc_server_async.py",
@@ -167,9 +167,7 @@ impl BackendKind {
                     python_path.push(existing);
                 }
                 let mut command = Command::new(python);
-                command
-                    .arg(root.join("bindings/python").join(script))
-                    .env("PYTHONPATH", python_path);
+                command.arg(root.join("../python").join(script)).env("PYTHONPATH", python_path);
                 (command, "build-grpc-native-python")
             },
             BackendKind::C => {

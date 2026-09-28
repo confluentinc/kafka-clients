@@ -51,7 +51,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
- * Java equivalent of {@code bindings/python/test/performance/producer_performance_test.py}.
+ * Java equivalent of {@code python/test/performance/producer_performance_test.py}.
  *
  * Configuration via environment variables (matches the Python harness):
  *

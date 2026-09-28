@@ -1,0 +1,25 @@
+# The assign half of the rebalance handshake, as a sequence.
+#
+# Source of truth for design/current/img/consumer-assign-handshake.svg.
+# Render with: make -C design/current d2
+#
+# The point of this diagram: the subscription state is mutated on the bg
+# task, but only when the app task asks for it from inside poll() -- so
+# `assignment()` can change only within poll(), and fetching for the added
+# partitions starts only after the listener has returned.
+
+shape: sequence_diagram
+
+bg: "bg task\n(ConsumerMembershipManager)"
+app: "app task\n(poll → process_background_events)"
+listener: "ConsumerRebalanceListener"
+
+bg -> app: "BackgroundEvent::PartitionsAssigned\n{ assigned_partitions, added_partitions, ack }"
+bg -> bg: "stores the ack receiver;\nloop keeps spinning (heartbeats, fetches)"
+app -> bg: "ApplicationEvent::ApplyAssignment { handle, .. }\n(awaited by the app task)"
+bg -> bg: "assign_from_subscribed_awaiting_callback\n+ notify_assignment_change"
+bg -> app: "handle completed"
+app -> listener: "on_partitions_assigned(added)\n(only if a listener is registered)"
+listener -> app: "Result<(), Error>"
+app -> bg: "ack.send(result) + poke wakeup Notify"
+bg -> bg: "next run_once: try_recv sees the ack,\nreconcile resumes, added partitions become fetchable"

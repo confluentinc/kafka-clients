@@ -57,7 +57,7 @@ import time
 import pytest
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-_BINDINGS = os.path.dirname(os.path.dirname(_HERE))  # bindings/python (consumer.py, _confluentkafka)
+_BINDINGS = os.path.dirname(os.path.dirname(_HERE))  # python (consumer.py, _confluentkafka)
 for _p in (_HERE, _BINDINGS):
     if _p not in sys.path:
         sys.path.insert(0, _p)
@@ -154,7 +154,7 @@ class Config:
 # Consumer backends — normalized to a poll() yielding (timestamp_ms, nbytes).
 # ---------------------------------------------------------------------------
 class _RustConsumer:
-    """bindings/python/consumer.py KafkaConsumer (CLIENT_VERSION=3)."""
+    """python/consumer.py KafkaConsumer (CLIENT_VERSION=3)."""
 
     def __init__(self, cfg):
         from consumer import KafkaConsumer
@@ -273,7 +273,7 @@ def build_consumer(cfg):
 # async; poll_batch is an async generator.
 # ---------------------------------------------------------------------------
 class _AsyncRustConsumer:
-    """bindings/python/consumer.py AsyncKafkaConsumer (CLIENT_VERSION=3)."""
+    """python/consumer.py AsyncKafkaConsumer (CLIENT_VERSION=3)."""
 
     def __init__(self, cfg):
         from consumer import AsyncKafkaConsumer

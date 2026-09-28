@@ -506,7 +506,7 @@ async fn list_offsets_covers_every_offset_spec_variant<F: AdminBackendFactory>(c
 /// 20 000 ms one both let a healthy call finish, so the 1 ms truncation the two
 /// Python servers used to apply is invisible from here by construction. That
 /// regression is pinned by a unit test on the conversion itself
-/// (`bindings/python/test/unit/test_admin.py`,
+/// (`python/test/unit/test_admin.py`,
 /// `test_timeout_conversion_is_exact_for_whole_milliseconds`); what this scenario
 /// proves is that a non-default value crosses at all.
 ///

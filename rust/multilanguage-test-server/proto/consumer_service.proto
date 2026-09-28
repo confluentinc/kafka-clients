@@ -17,8 +17,8 @@
 //
 // Used by:
 //   - the Rust MultilanguageConsumer client (under tests/common)
-//   - the Python gRPC server (bindings/python/grpc_server.py)
-//   - the C++ gRPC server (bindings/c/grpc_server/server.cc)
+//   - the Python gRPC server (python/grpc_server.py)
+//   - the C++ gRPC server (c/grpc_server/server.cc)
 //
 // Same package as producer_service.proto; shared messages (KafkaError,
 // PartitionInfo, Node, Header, StatusResponse, PartitionsForResponse) are

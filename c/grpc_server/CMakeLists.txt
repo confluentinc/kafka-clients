@@ -7,11 +7,11 @@
 #     http://www.apache.org/licenses/LICENSE-2.0
 
 # Standalone CMake project for the C++ gRPC server used by the multilanguage
-# integration tests. Kept separate from the parent bindings/c/CMakeLists.txt
-# so the existing C unit-test build doesn't pull in gRPC / protobuf.
+# integration tests. Kept separate from the parent c/CMakeLists.txt so the
+# existing C unit-test build doesn't pull in gRPC / protobuf.
 #
 # Built in two places:
-#   - inside bindings/c/Dockerfile.grpc, which stages the default layout below
+#   - inside c/Dockerfile.grpc, which stages the default layout below
 #     (libconfluent_kafka.a in lib/, the header in include/, protos in proto/);
 #   - natively on the host by `make build-grpc-native-c`, which passes
 #     RUST_LIB_DIR, RUST_INCLUDE_DIR and PROTO_DIR to point at the repo tree.

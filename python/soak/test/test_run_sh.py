@@ -178,7 +178,7 @@ def test_preflight_refuses_an_interpreter_that_cannot_import_soakclient(tmp_path
         "cat >&2 <<'ERR'\n"
         "Traceback (most recent call last):\n"
         '  File "<string>", line 4, in <module>\n'
-        '  File "/w/bindings/python/soak/soakclient.py", line 59, in <module>\n'
+        '  File "/w/python/soak/soakclient.py", line 59, in <module>\n'
         "    import psutil\n"
         "ModuleNotFoundError: No module named 'psutil'\n"
         "ERR\n"

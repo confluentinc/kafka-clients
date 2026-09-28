@@ -33,7 +33,7 @@ Tear down with `docker rm -f kafka-examples`. This also deletes all topic data.
 cargo run --example <name>
 ```
 
-where `<name>` is the file name without `.rs`.
+from the `rust/` directory, where `<name>` is the file name without `.rs`.
 
 Every example connects to `localhost:9092` by default. Set
 `KAFKA_BOOTSTRAP_SERVERS` to use another broker:

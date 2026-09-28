@@ -130,7 +130,7 @@ def test_admin_client_rejects_empty_bootstrap():
 # the mock-only drivers rejecting a production handle.
 #
 # No broker is needed: construction only parses the config, and every RPC below
-# carries a short explicit timeout. Mirrors bindings/c/tests/test_kafka_admin.c
+# carries a short explicit timeout. Mirrors c/tests/test_kafka_admin.c
 # and the broker-less consumer/producer suites.
 
 PRODUCTION_CONFIG = {

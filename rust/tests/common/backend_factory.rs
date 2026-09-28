@@ -265,7 +265,7 @@ mod grpc_backends {
         Ok((Box::new(consumer), log))
     }
 
-    /// Backend that drives bindings/python/producer.py through a gRPC
+    /// Backend that drives python/producer.py through a gRPC
     /// server running in the
     /// `confluent-kafka-rust/python-grpc-server:dev` Docker image.
     pub struct PythonGrpcFactory {
@@ -346,7 +346,7 @@ mod grpc_backends {
         }
     }
 
-    /// Backend that drives the *asyncio-native* bindings/python client
+    /// Backend that drives the *asyncio-native* python client
     /// (`AsyncKafkaProducer` / `AsyncKafkaConsumer`) through a gRPC server
     /// running in the `confluent-kafka-rust/python-async-grpc-server:dev`
     /// Docker image. Identical wiring to [`PythonGrpcFactory`] — only the

@@ -17,8 +17,8 @@
 //
 // This proto is used by:
 //   - the Rust MultilanguageProducer client (under tests/common)
-//   - the Python gRPC server (bindings/python/grpc_server.py)
-//   - the C++ gRPC server (bindings/c/grpc_server/server.cc)
+//   - the Python gRPC server (python/grpc_server.py)
+//   - the C++ gRPC server (c/grpc_server/server.cc)
 //
 // All three regenerate stubs from this single source of truth.
 //
@@ -328,7 +328,7 @@ message ProducerCallbackLogRequest {
 // ---------------------------------------------------------------------------
 
 // Mirrors crate::common::KafkaError. `code` is the sole discriminator: it is
-// the FFI error code (kafka_common_ErrorCode_t in target/include/confluent_kafka.h),
+// the FFI error code (kafka_common_ErrorCode_t in rust/target/include/confluent_kafka.h),
 // which is injective over the client's error classes, so the receiver derives
 // the class from it alone.
 message KafkaError {

@@ -1231,7 +1231,7 @@ impl<K: Send + Sync, V: Send + Sync> Producer<K, V> for MockProducer<K, V> {
             // error surfaces as Java's would, but honours an explicit
             // `record.partition()` before falling back to 0 so the C FFI
             // empty-cluster mock keeps working
-            // (`bindings/c/tests/test_mock_producer.c:133,600,640,735,1637`).
+            // (`c/tests/test_mock_producer.c:133,600,640,735,1637`).
             if let Some(key_serializer) = inner.key_serializer.as_ref() {
                 key_serializer.serialize_headers(record.topic(), &RecordHeaders::new(), record.key())?;
             }

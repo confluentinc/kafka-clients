@@ -284,7 +284,7 @@ def _bindings():
         except ImportError as ex:
             raise RuntimeError(
                 "the Rust client's Python bindings are not importable ({}). Run "
-                "bindings/python/soak/build.sh, or activate the venv it created. "
+                "python/soak/build.sh, or activate the venv it created. "
                 "Note the bindings only build on Linux: _confluentkafka.c "
                 "includes <threads.h> (C11 threads), which macOS does not "
                 "ship.".format(ex)) from ex
@@ -1223,7 +1223,7 @@ class SoakClient(object):
         validate_config(cconf, CONSUMER_CONFIG_KEYS, "consumer")
 
         # Topic creation goes through this repo's Rust-backed AdminClient
-        # (bindings/python/admin.py), which takes the same Java-style config
+        # (python/admin.py), which takes the same Java-style config
         # namespace as the producer/consumer — no librdkafka translation. The
         # security.protocol fix on this branch makes it work against SASL/SSL
         # clusters (Confluent Cloud). Create-if-absent by default: run.sh
@@ -1329,7 +1329,7 @@ class SoakClient(object):
     def create_topic(self, topic, aconf, partitions, replication_factor, recreate):
         """Create the topic if it doesn't already exist.
 
-        Uses this repo's Rust-backed AdminClient (bindings/python/admin.py),
+        Uses this repo's Rust-backed AdminClient (python/admin.py),
         which accepts the same Java-style config namespace as the
         producer/consumer (bootstrap.servers, security.protocol, sasl.mechanism,
         sasl.jaas.config, ssl.*). ``recreate`` (``--recreate-topic``)

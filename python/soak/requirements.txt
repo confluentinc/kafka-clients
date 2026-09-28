@@ -1,10 +1,10 @@
 # Soak client dependencies. Installed by build.sh into the soak venv, before
-# the bindings themselves (`pip install -e bindings/python`).
+# the bindings themselves (`pip install -e python`).
 
 # Process RSS/CPU sampling, used by soak_metrics.py's MemoryBucket/CPUBucket.
 psutil>=5.9
 
-# Unit tests (bindings/python/soak/test).
+# Unit tests (python/soak/test).
 pytest>=7.0
 
 # Optional: OpenTelemetry export. The soak runs fully without these — the JSONL
