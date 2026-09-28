@@ -100,10 +100,14 @@ impl RotatingFile {
     fn write_line(&mut self, line: &str) {
         let bytes = line.as_bytes();
         if self.written + bytes.len() as u64 > self.budget {
-            // Rotate: current -> .1 (overwriting an old .1), then fresh file.
+            // Rotate: shift .1 -> .2 ... (dropping the oldest), current -> .1,
+            // then a fresh file. More than one backup, so the lead-up to a
+            // fault survives the log storm that follows it.
             let _ = self.file.flush();
-            let backup = self.path.with_extension("log.1");
-            let _ = fs::rename(&self.path, &backup);
+            for n in (1..LOG_BACKUPS).rev() {
+                let _ = fs::rename(self.backup(n), self.backup(n + 1));
+            }
+            let _ = fs::rename(&self.path, self.backup(1));
             self.file = BufWriter::new(File::create(&self.path).expect("recreate rotated log file"));
             self.written = 0;
         }
@@ -115,6 +119,22 @@ impl RotatingFile {
     fn flush(&mut self) {
         let _ = self.file.flush();
     }
+
+    /// The path of rotated backup `n` (`client-x.log.<n>`, 1 = newest).
+    fn backup(&self, n: usize) -> PathBuf {
+        self.path.with_extension(format!("log.{n}"))
+    }
+}
+
+/// Rotated backups kept per client log, besides the live file.
+const LOG_BACKUPS: usize = 4;
+
+/// `HH:MM:SS.mmm` (UTC) of a Unix time in milliseconds, the prefix of every
+/// captured client-log line so it can be lined up with the broker logs and
+/// `leader-changes.txt`. The date is in the run directory's name.
+fn utc_time_of_day(millis: u128) -> String {
+    let secs = (millis / 1000) % 86_400;
+    format!("{:02}:{:02}:{:02}.{:03}", secs / 3600, secs / 60 % 60, secs % 60, millis % 1000)
 }
 
 /// Shared sink the global logger writes into. Routes each line to a
@@ -221,7 +241,13 @@ impl log::Log for ChaosLogger {
         // Every workload task logs through this one sink, so the lock is a
         // process-wide serialization point: do the formatting and the
         // signature scan first, and hold the lock only to tally and append.
-        let line = format!("[{:<5}] {}: {}\n", record.level(), record.target(), record.args());
+        let line = format!(
+            "{} [{:<5}] {}: {}\n",
+            utc_time_of_day(now_millis()),
+            record.level(),
+            record.target(),
+            record.args()
+        );
         let matched: Vec<usize> = matched_signatures(&line.to_lowercase()).collect();
         let echo = {
             let mut s = sink().lock().expect("log sink poisoned");
@@ -345,3 +371,37 @@ fn now_millis() -> u128 {
 /// A cheap handle the actions/harness can hold to append leader-change lines
 /// without threading `&RunReports` everywhere. `None` when reports are off.
 pub type ReportsHandle = Option<Arc<RunReports>>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn time_of_day_is_utc_with_millis() {
+        // 2026-09-25T13:04:05.007Z
+        assert_eq!(utc_time_of_day(1_790_341_445_007), "13:04:05.007");
+        assert_eq!(utc_time_of_day(0), "00:00:00.000");
+    }
+
+    #[test]
+    fn rotation_keeps_the_newest_backups_and_drops_the_oldest() {
+        let dir = std::env::temp_dir().join(format!("chaos-rotation-{}-{}", std::process::id(), now_millis()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("client-x.log");
+        // Each 4-byte line fills the 4-byte budget, so every line after the
+        // first rotates.
+        let mut file = RotatingFile::create(path.clone(), 4);
+        for i in 0..=LOG_BACKUPS + 2 {
+            file.write_line(&format!("{i:03}\n"));
+        }
+        file.flush();
+        let read = |p: PathBuf| fs::read_to_string(p).unwrap();
+        let last = LOG_BACKUPS + 2;
+        assert_eq!(read(path.clone()), format!("{last:03}\n"));
+        for n in 1..=LOG_BACKUPS {
+            assert_eq!(read(file.backup(n)), format!("{:03}\n", last - n), "backup {n}");
+        }
+        assert!(!file.backup(LOG_BACKUPS + 1).exists(), "only {LOG_BACKUPS} backups are kept");
+        let _ = fs::remove_dir_all(dir);
+    }
+}
