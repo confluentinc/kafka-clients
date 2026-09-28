@@ -37,8 +37,8 @@ use tokio::sync::Notify;
 
 use crate::common::{Error, IsolationLevel, PartitionInfo, TopicPartition};
 use crate::consumer::ConsumerRebalanceListener;
-use crate::consumer::ConsumerRebalanceListenerMethodName;
 use crate::consumer::internals::AutoOffsetResetStrategy;
+use crate::consumer::internals::ConsumerRebalanceListenerMethodName;
 use crate::consumer::internals::OffsetAndTimestampInternal;
 use crate::consumer::{GroupMembershipOperation, OffsetAndMetadata, SubscriptionPattern};
 

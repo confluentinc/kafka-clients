@@ -118,7 +118,7 @@ mod tests {
     use tokio::sync::oneshot;
 
     use crate::common::TopicPartition;
-    use crate::consumer::ConsumerRebalanceListenerMethodName;
+    use crate::consumer::internals::ConsumerRebalanceListenerMethodName;
 
     use super::*;
 

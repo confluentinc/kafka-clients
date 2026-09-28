@@ -615,7 +615,7 @@ impl ApplicationEventProcessor {
     /// future diagnostics (e.g. tracing the original Java event lifecycle).
     fn process_consumer_rebalance_listener_callback_completed(
         &mut self,
-        method_name: crate::consumer::ConsumerRebalanceListenerMethodName,
+        method_name: crate::consumer::internals::ConsumerRebalanceListenerMethodName,
         error: Option<Error>,
     ) {
         let _ = error;
@@ -1640,12 +1640,12 @@ mod tests {
     use crate::common::internals::ClusterResourceListeners;
     use crate::common::{Error, IsolationLevel, TopicPartition};
     use crate::consumer::ConsumerConfig;
-    use crate::consumer::ConsumerRebalanceListenerMethodName;
     use crate::consumer::SubscriptionPattern;
     use crate::consumer::internals::AutoOffsetResetStrategy;
     use crate::consumer::internals::CommitRequestManager;
     use crate::consumer::internals::ConsumerHeartbeatRequestManager;
     use crate::consumer::internals::ConsumerMembershipManager;
+    use crate::consumer::internals::ConsumerRebalanceListenerMethodName;
     use crate::consumer::internals::CoordinatorRequestManager;
     use crate::consumer::internals::OffsetsRequestManager;
     use crate::consumer::internals::RequestManager;

@@ -30,7 +30,7 @@
 use tokio::sync::oneshot;
 
 use crate::common::{Error, TopicPartition};
-use crate::consumer::ConsumerRebalanceListenerMethodName;
+use crate::consumer::internals::ConsumerRebalanceListenerMethodName;
 
 /// Single-enum translation of Java's `BackgroundEvent` hierarchy.
 #[doc(alias = "org.apache.kafka.clients.consumer.internals.events.BackgroundEvent")]

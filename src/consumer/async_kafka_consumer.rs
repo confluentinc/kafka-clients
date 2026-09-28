@@ -3411,7 +3411,7 @@ where
                     let result = match listener {
                         Some(listener) => {
                             // Invoke on the caller's task — never `tokio::spawn`.
-                            use crate::consumer::ConsumerRebalanceListenerMethodName as M;
+                            use crate::consumer::internals::ConsumerRebalanceListenerMethodName as M;
                             match method_name {
                                 M::OnPartitionsRevoked => {
                                     self.rebalance_listener_invoker
@@ -7143,7 +7143,7 @@ mod tests {
     /// registration.
     #[tokio::test]
     async fn unsubscribe_keeps_the_registered_listener() {
-        use crate::consumer::ConsumerRebalanceListenerMethodName;
+        use crate::consumer::internals::ConsumerRebalanceListenerMethodName;
         use async_trait::async_trait;
         use std::sync::atomic::AtomicUsize;
         use tokio::sync::oneshot;
@@ -7655,7 +7655,7 @@ mod tests {
     /// `listener.isPresent() == false` no-op branch.
     #[tokio::test]
     async fn process_background_events_with_no_listener_acks_ok() {
-        use crate::consumer::ConsumerRebalanceListenerMethodName;
+        use crate::consumer::internals::ConsumerRebalanceListenerMethodName;
         use tokio::sync::oneshot;
         let (mut consumer, handles) = make_test_consumer_with_channels();
         // AK 4.3.1: the revoke path (`PartitionsRemoved`) exercises the same
@@ -7685,7 +7685,7 @@ mod tests {
     /// process the ApplyAssignmentEvent.)
     #[tokio::test]
     async fn process_background_events_invokes_registered_listener() {
-        use crate::consumer::ConsumerRebalanceListenerMethodName;
+        use crate::consumer::internals::ConsumerRebalanceListenerMethodName;
         use async_trait::async_trait;
         use std::sync::atomic::AtomicUsize;
         use tokio::sync::oneshot;
@@ -7756,7 +7756,7 @@ mod tests {
     /// user-visible wakeup is pending afterwards.
     #[tokio::test]
     async fn process_background_events_ack_pokes_bg_notify_not_user_wakeup() {
-        use crate::consumer::ConsumerRebalanceListenerMethodName;
+        use crate::consumer::internals::ConsumerRebalanceListenerMethodName;
         use async_trait::async_trait;
         use tokio::sync::oneshot;
 
@@ -7842,7 +7842,7 @@ mod tests {
     /// missing in the other, and no test noticed.
     #[tokio::test]
     async fn process_background_events_close_arm_pokes_bg_notify() {
-        use crate::consumer::ConsumerRebalanceListenerMethodName;
+        use crate::consumer::internals::ConsumerRebalanceListenerMethodName;
         use tokio::sync::oneshot;
 
         let (mut consumer, handles) = make_test_consumer_with_channels();
@@ -8244,7 +8244,7 @@ mod tests {
     async fn test_record_background_event_queue_size_and_time() {
         use crate::common::Metric;
         use crate::common::utils::MockTime;
-        use crate::consumer::ConsumerRebalanceListenerMethodName;
+        use crate::consumer::internals::ConsumerRebalanceListenerMethodName;
         use tokio::sync::oneshot;
 
         // Mock clock so the recorded queue-time (now - enqueuedMs) is exactly
@@ -8517,7 +8517,7 @@ mod tests {
     /// the commit_sync timeout.
     #[tokio::test]
     async fn issue_10_commit_sync_drains_listener_callback_while_waiting() {
-        use crate::consumer::ConsumerRebalanceListenerMethodName;
+        use crate::consumer::internals::ConsumerRebalanceListenerMethodName;
         use async_trait::async_trait;
         use std::sync::atomic::AtomicBool;
         use tokio::sync::oneshot;
@@ -8634,7 +8634,7 @@ mod tests {
     /// `process_background_events` is removed from `commit_sync`).
     #[tokio::test]
     async fn section_31_commit_sync_from_inside_revoked_callback_succeeds() {
-        use crate::consumer::ConsumerRebalanceListenerMethodName;
+        use crate::consumer::internals::ConsumerRebalanceListenerMethodName;
         use async_trait::async_trait;
         use std::sync::atomic::AtomicBool;
         use tokio::sync::oneshot;
@@ -8744,7 +8744,7 @@ mod tests {
     /// the ack arrives.
     #[tokio::test]
     async fn section_31_rebalance_does_not_advance_until_listener_resolves() {
-        use crate::consumer::ConsumerRebalanceListenerMethodName;
+        use crate::consumer::internals::ConsumerRebalanceListenerMethodName;
         use async_trait::async_trait;
         use tokio::sync::oneshot;
         use tokio::time::timeout;

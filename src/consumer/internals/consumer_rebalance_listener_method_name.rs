@@ -31,10 +31,17 @@ use std::fmt;
 // listener methods do (`onPartitionsRevoked` / `onPartitionsAssigned` /
 // `onPartitionsLost`); the names are the translation contract.
 #[expect(clippy::enum_variant_names)]
-pub enum ConsumerRebalanceListenerMethodName {
+#[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerRebalanceListenerMethodName")]
+pub(crate) enum ConsumerRebalanceListenerMethodName {
     /// Corresponds to `ConsumerRebalanceListener::on_partitions_revoked`.
     OnPartitionsRevoked,
     /// Corresponds to `ConsumerRebalanceListener::on_partitions_assigned`.
+    // Java names it in the `ConsumerRebalanceListenerCallbackCompletedEvent`
+    // that `AsyncKafkaConsumer.applyNewAssignment` sends back when applying an
+    // assignment fails. Rust acks a `PartitionsAssigned` event through its
+    // oneshot instead (consumer-threading.md §31), so outside tests the
+    // variant is only matched, never built.
+    #[cfg_attr(not(test), expect(dead_code))]
     OnPartitionsAssigned,
     /// Corresponds to `ConsumerRebalanceListener::on_partitions_lost`.
     OnPartitionsLost,
@@ -44,7 +51,10 @@ impl ConsumerRebalanceListenerMethodName {
     /// Returns the fully-qualified method name, e.g.
     /// `ConsumerRebalanceListener.onPartitionsRevoked`. Mirrors Java's
     /// `fullyQualifiedMethodName()` which is used in log messages.
-    pub fn fully_qualified_method_name(&self) -> &'static str {
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.ConsumerRebalanceListenerMethodName#fullyQualifiedMethodName"
+    )]
+    pub(crate) fn fully_qualified_method_name(&self) -> &'static str {
         match self {
             Self::OnPartitionsRevoked => "ConsumerRebalanceListener.onPartitionsRevoked",
             Self::OnPartitionsAssigned => "ConsumerRebalanceListener.onPartitionsAssigned",

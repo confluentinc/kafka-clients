@@ -26,7 +26,6 @@ crate::common::metrics::gauge::ClosureGauge  # a Gauge from a closure, standing 
 crate::common::metrics::measurable::ClosureMeasurable  # a Measurable from a closure, standing in for a Java lambda
 crate::common::metrics::stats::sampled_stat::SampledStatKind  # selects the SampledStat subclass, which Rust models as one struct
 crate::common::quota::client_quota_filter_component::ClientQuotaMatch  # the match kind Java encodes as nullable Optional fields of ClientQuotaFilterComponent
-crate::consumer::ConsumerRebalanceListenerMethodName  # names the listener method in the rebalance-callback error returned to users
 crate::consumer::consumer_partition_assignor::DEFAULT_GENERATION  # Java's Subscription.DEFAULT_GENERATION, lifted out as Rust has no nested-class constants
 crate::admin::list_consumer_group_offsets_result::GroupOffsets  # the per-group map type of ListConsumerGroupOffsetsResult, a Java `Map<TopicPartition, OffsetAndMetadata>`
 crate::producer::DynProducer  # the dyn-compatible companion of the `Producer` trait (CLAUDE.md §3)
