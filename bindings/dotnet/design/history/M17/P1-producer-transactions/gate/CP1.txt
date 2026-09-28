@@ -1,0 +1,331 @@
+M17/P1 CP1 gate record: the 18 P/Invoke declarations and S1
+============================================================
+
+Recorded by dotnet-actor 84 on 2026-09-28 (host clock IST, UTC+05:30), and
+updated the same day by the CP1 fix round for Critic 84's cycle 3. The last
+section lists that round's edits. The mutation records and G1-G7 were re-run
+on the final tree after it. The symbol verification is the first run's; G1
+shows that the header it read is unchanged.
+Plan: design/history/M17/P1-producer-transactions/PLAN.md, the §4.3 CP1 row,
+§4.4 (the P/Invoke set), §5.2 S1 and the §10.2 execution note. This file is a
+summary (Q20). Raw logs stay in the Actor's scratch directory and are not
+committed. Per §10.2, CP1 is reviewed uncommitted: CP1 stages nothing, and the
+CP0 record (PLAN.md staged, gate/CP0*.txt untracked) is untouched.
+
+Preconditions
+-------------
+- git rev-parse HEAD is 76629aeafae1265b512348fb9f80f869aad30c5b on
+  prashah_dev_dotnet_producer_transactions, in the first run and at the end of
+  the fix round. CP0's commit is still with the user.
+- First run: bindings/dotnet/COMMENTS.84.md was empty (0 bytes), so there was
+  nothing to fix first. COMMENTS.DONE.84.md (84.1-84.3, the CP0 review) was
+  read for context only.
+- Fix round: COMMENTS.84.md held Critic cycle 3, findings 84.4-84.6. The round
+  fixes 84.4 and 84.5 (a) and (b), plus the Manager's item (d). 84.5 (c) and
+  84.6 are plan findings, which the Manager resolved in the worktree copy of
+  PLAN.md. The whole cycle-3 block was then moved to COMMENTS.DONE.84.md, and
+  COMMENTS.84.md is 0 bytes again.
+- PLAN.md's staged blob is still ea653cbb, the CP0-reviewed one. The unstaged
+  diff on top of it is the Manager's. CP1 did not edit, stage or restore it.
+
+Symbol verification (§2.5; done before any declaration was written)
+-------------------------------------------------------------------
+Per symbol: grep -nE 'pub unsafe extern "C" fn <symbol>\(' src/ffi/*.rs, the
+same name in target/include/confluent_kafka.h, and
+nm -gU target/release/libconfluent_kafka.dylib | grep -cw _<symbol>.
+  row  symbol                                                     src/ffi            header    nm
+   1   kafka_producer_Producer_init_transactions                  producer.rs:3260   h:16090   1
+   2   kafka_producer_Producer_begin_transaction                  producer.rs:3294   h:16117   1
+   3   kafka_producer_Producer_send_offsets_to_transaction        producer.rs:3369   h:16185   1
+   4   kafka_producer_Producer_commit_transaction                 producer.rs:3480   h:16232   1
+   5   kafka_producer_Producer_abort_transaction                  producer.rs:3527   h:16272   1
+   6   kafka_producer_Producer_init_transactions_async            producer.rs:3712   h:16300   1
+   7   kafka_producer_Producer_send_offsets_to_transaction_async  producer.rs:3819   h:16384   1
+   8   kafka_producer_Producer_commit_transaction_async           producer.rs:3940   h:16427   1
+   9   kafka_producer_Producer_abort_transaction_async            producer.rs:3987   h:16463   1
+  10   kafka_producer_MockProducer_set_commit_transaction_error   producer.rs:4160   h:16571   1
+  11   kafka_producer_MockProducer_sent_offsets                   producer.rs:4205   h:16588   1
+  12   kafka_producer_MockProducer_committed_offset               producer.rs:4253   h:16628   1
+  13   kafka_consumer_ConsumerGroupMetadata_new                   consumer.rs:1720   h:13216   1
+  14   kafka_common_Error_is_transaction_abortable_error          common.rs:1109     h:12074   1
+  15   kafka_common_Error_is_application_recoverable_error        common.rs:927      h:11919   1
+  16   kafka_common_Error_is_invalid_configuration_error          common.rs:901      h:11896   1
+  17   kafka_common_Error_is_authorization_error                  common.rs:874      h:11872   1
+  18   kafka_common_Error_is_out_of_order_sequence_error          common.rs:979      h:11963   1
+  B8   kafka_producer_Producer_begin_transaction_async            producer.rs:3752   h:16329   1  (present, deliberately not declared)
+Each prototype was read in the header and agrees with its §4.4 row on
+parameter order, C types and return type. No prototype disagrees on any of
+those, so there was nothing to stop and report. §4.4's parameter names are the
+header's, camelCased, except row 12's three out-params: §4.4 drops the
+header's out_ prefix, and the declarations keep it (see the first note). The C
+bools are the returns of rows 10-12 and 14-18 and row 10's `clear`, and
+nothing else. Row 12 has two scalar out slots and a caller-owned char buffer.
+No ABI or core issue was found. The file lines match §2.1/§4.4.
+
+Files
+-----
+- M  bindings/dotnet/src/Confluent.Kafka/Internal/Interop/NativeMethods.cs
+     +419 / -2 (3021 -> 3438 lines), in four blocks:
+       rows 14-18 after IsRetriable;
+       row 13 after ConsumerGroupMetadata(SafeConsumerHandle);
+       rows 1-9 in a new "transaction control" section, before the MockProducer
+       send-control helpers;
+       rows 10-12 in a new "MockProducer transaction helpers" section, after
+       MockProducerClear.
+     The two deleted lines are pre-existing comments that stated a count. Each
+     is replaced by one line:
+       the class summary's "already holds 218 of them" now reads "already held
+       218 of them at the time", because the file holds 236;
+       ConsumerCommitAsync's "the 18 genuine <c>_async</c> declarations" now
+       reads "the genuine <c>_async</c> declarations". The number was already
+       stale at 76629aea, where this file declares 22 void _async externs (19
+       consumer, 3 producer); CP1's four async rows make 26 (19 and 7). So it
+       is deleted rather than recounted (ffi §A6's round-5 rule; fix-round
+       item (d)). Measured with
+         git show 76629aea:bindings/dotnet/src/Confluent.Kafka/Internal/Interop/NativeMethods.cs \
+           | command grep -A1 'EntryPoint = "[^"]*_async' | command grep -c 'internal static extern void '
+       (22), and the same grep over the worktree file (26). No scope gives 18:
+       the file's _async EntryPoints number 27 at the base and 31 in the
+       worktree (the five that are not void, ConsumerCommitAsync among them,
+       return IntPtr and take a SafeHandle), and NativeMethods.Admin.cs, the
+       class's other part, adds 49 void _async externs at both trees.
+- ?? bindings/dotnet/tests/Confluent.Kafka.UnitTests/Interop/ProducerTransactionNativeMethodsTests.cs
+     new, 588 lines: S1.
+- ?? bindings/dotnet/design/history/M17/P1-producer-transactions/gate/CP1.txt
+     this file.
+Nothing under src/, cbindgen.toml, generator/ or the root tests/ changed.
+
+S1: 9 facts in Confluent.Kafka.UnitTests.Interop.ProducerTransactionNativeMethodsTests
+--------------------------------------------------------------------------------------
+  TheEighteenDeclarations_BindTheirSymbols_WithCdecl
+  TheEighteenDeclarations_HaveTheHeaderParameterShapes
+  EveryBoolOnTheEighteen_IsMarshalledAsI1
+  BeginTransactionAsync_IsNotDeclared
+  TheProducerTransactionFamily_IsExactlyTheBoundSymbols
+  TheSyncControlOperations_AndTheMockHelpers_ResolveAndRun_OnAMockHandle
+  ConsumerGroupMetadataNew_Resolves_AndPassesItsFieldsInHeaderOrder
+  TheFivePredicates_Resolve_AndAnswerFalseForANullHandle
+  TheFivePredicates_OnATransactionAbortableError_OnlyTheTransactionAbortableOneHolds
+- The sweep compares each of the 18 against a table of §4.4's rows: exactly
+  one declaration by name, the DllImport value confluent_kafka, the EntryPoint,
+  Cdecl, and the full signature. The signature is the return type plus, for
+  each parameter in order, its type, its out / [Out] mark and its name. The
+  table's names are the header's, camelCased (for row 12 that differs from
+  §4.4; see the first note). The names matter because P/Invoke binds
+  arguments by position: where parameters share a type (rows 3, 6-9, 12 and
+  13), the name is the only record of which header parameter sits at a
+  position, so a comparison of types alone passes a reorder among them. The
+  first run compared types and marks but not names; the fix round added them
+  (84.4, M3).
+- The bool sweep counts 8 bool returns and 1 bool parameter, all I1. The B8
+  negative has a control positive (the sync begin_transaction and the four
+  async operations are found by the same sweep).
+- The resolution smoke calls the 14 synchronous symbols (rows 1-5 and 10-18).
+  Rows 6-9 are pinned structurally here and resolved by S6 at CP4, as §5.2 S1
+  says. Every wait goes through TestTimeout.Run (30 s). There are no sleeps.
+- Two fact summaries now claim only what their facts can detect (84.4):
+    ConsumerGroupMetadataNew_Resolves_AndPassesItsFieldsInHeaderOrder proves
+    that the native reads its arguments in the header's order. Its call
+    passes them by position, so it cannot see the declaration's names; those
+    are the shape sweep's job.
+    The code-120 fact catches an entry-point swap only if the swap involves
+    IsTransactionAbortableError, because the other four predicates all read
+    false on code 120. TheEighteenDeclarations_BindTheirSymbols_WithCdecl
+    catches every swap.
+- Values measured from the core at this CP (§5.1 item 2):
+    kafka_common_Error_new(120, NULL): code 120. transaction_abortable is true,
+      the other four predicates false. All five are false on NULL.
+    On a NativeProducer.CreateMock() handle:
+      set_commit_transaction_error(false, 120, "S1 installed commit error") = true;
+      set_commit_transaction_error(true, 0, NULL) = true;
+      init, begin, send_offsets (count 0, a transient group metadata), commit,
+      begin, abort: each returns NULL;
+      sent_offsets after the empty send = false (mock_producer.rs:1070-1071
+      returns before setting it, as MockProducer.java:194-200 does);
+      committed_offset("s1-group", "s1-topic", 0, cap 16) = false.
+    ConsumerGroupMetadata_new("s1-group-ü", 7, "s1-member", "s1-instance"):
+      the four shipped accessors read back each value. With a null instance id,
+      group_instance_id returns NULL.
+  S1 asserts no error message, so no message needed recording.
+
+Mutation check (§5.1 item 7; not committed)
+-------------------------------------------
+Run on the final test file, after the fix round. Procedure for each: save a
+copy of NativeMethods.cs, apply the edit with GNU sed -i, and confirm with diff
+against the copy that exactly the intended lines changed. Then
+dotnet build -c Release (0 W, 0 E) and
+  dotnet test -c Release -f net10.0 --no-build bindings/dotnet/Confluent.Kafka.sln \
+    --filter 'FullyQualifiedName~ProducerTransactionNativeMethodsTests'
+Restore by copying back the saved file, confirm with cmp that it is
+byte-identical, rebuild (0 W, 0 E) and rerun.
+  M1  NativeMethods.cs:2755, the EntryPoint of ProducerInitTransactions,
+      "kafka_producer_Producer_init_transactions" -> "kafka_producer_Producer_init_transaction".
+      applied: diff shows that one line.
+      red:   9 run, 6 passed, 3 failed, exit 1:
+               TheEighteenDeclarations_BindTheirSymbols_WithCdecl
+               TheProducerTransactionFamily_IsExactlyTheBoundSymbols
+               TheSyncControlOperations_AndTheMockHelpers_ResolveAndRun_OnAMockHandle
+                 System.EntryPointNotFoundException: Unable to find an entry
+                 point named 'kafka_producer_Producer_init_transaction' in
+                 shared library 'confluent_kafka'.
+      green: restored (cmp identical), 9 run, 9 passed, exit 0.
+      The red set is the same as the first run's.
+  M2  NativeMethods.cs:3064, [MarshalAs(UnmanagedType.I1)] removed from `clear`
+      of MockProducerSetCommitTransactionError.
+      applied: diff shows that one line.
+      red:   9 run, 8 passed, 1 failed, exit 1:
+               EveryBoolOnTheEighteen_IsMarshalledAsI1
+                 Expected [], Actual ["MockProducerSetCommitTransactionError(clear)"]
+      green: restored (cmp identical), 9 run, 9 passed, exit 0.
+      The red set is the same as the first run's. Only the line number moved,
+      from 3062 to 3064, because the fix round's comment edit above it is two
+      lines longer.
+  M3  NativeMethods.cs:412 and :414, the names of ConsumerGroupMetadataNew's
+      IntPtr groupId and IntPtr memberId swapped (new in the fix round, for
+      84.4). Both are IntPtr, so every type and mark is unchanged.
+      applied: diff shows only lines 412-414 changed, now memberId,
+      generationId, groupId.
+      red:   9 run, 8 passed, 1 failed, exit 1:
+               TheEighteenDeclarations_HaveTheHeaderParameterShapes
+                 Assert.Equal() Failure: Collections differ (pos 12):
+                 expected "#13 ConsumerGroupMetadataNew: IntPtr (IntPtr group"...
+                 actual   "#13 ConsumerGroupMetadataNew: IntPtr (IntPtr membe"...
+      green: restored (cmp identical), 9 run, 9 passed, exit 0.
+      ConsumerGroupMetadataNew_Resolves_AndPassesItsFieldsInHeaderOrder stays
+      green under M3: its call passes arguments by position, so it cannot see
+      the declaration's names (its summary now says so).
+      control: M3 with the pre-fix S1 file in place: 9 run, 9 passed, exit 0.
+      That reproduces 84.4, and shows that M3's red comes from the fix: the
+      same mutation passes the pre-fix sweep. Both files were then restored
+      from the final copies (cmp identical), and S1 passed 9/9.
+  §5.2 requires only M1. M2 shows the I1 sweep is not vacuous: the smoke stays
+  green under M2, which is the behavioural blind spot the sweep exists for. M3
+  shows the shape sweep now sees a reorder among same-typed parameters.
+
+G1 Mode A (the §10.2 uncommitted forms)
+---------------------------------------
+- git diff 76629aea -- src/ src/ffi/ cbindgen.toml generator/ tests/
+  prints nothing (0 bytes).
+- git ls-files --others --exclude-standard -- src/ cbindgen.toml generator/ tests/
+  prints nothing.
+- shasum -a 256 target/include/confluent_kafka.h
+    e8d39f09f4ac71c4e21c0196c0534dd06f353c475a741104c8d37a6a7da5d111
+  This is the CP0 value.
+- Control positive:
+  git diff --stat 76629aea -- bindings/dotnet/src bindings/dotnet/tests bindings/dotnet/grpc-server
+    .../Internal/Interop/NativeMethods.cs | 421 ++++-
+    1 file changed, 419 insertions(+), 2 deletions(-)
+  (The S1 file is untracked, so --stat cannot list it. G7's new-file form reads it.)
+
+G2 Build
+--------
+- cargo build --features ffi --release: exit 0. It was already up to date
+  ("Finished ... in 0.24s").
+- dotnet build -c Release bindings/dotnet/Confluent.Kafka.sln: exit 0,
+  0 Warning(s), 0 Error(s).
+- Supplementary run with --no-incremental: exit 0, 0 Warning(s), 0 Error(s).
+  It wrote all six outputs (13:26:55-13:26:57):
+    src/Confluent.Kafka/bin/Release/{netstandard2.0,net8.0,net10.0}/Confluent.Kafka.dll
+    tests/Confluent.Kafka.UnitTests/bin/Release/{net462,net8.0,net10.0}/Confluent.Kafka.UnitTests.dll
+  GenerateDocumentationFile plus TreatWarningsAsErrors: every new cref resolves.
+
+G3 Format
+---------
+- dotnet format bindings/dotnet/Confluent.Kafka.sln --verify-no-changes: exit 0,
+  no output.
+
+G4 net10.0
+----------
+- dotnet test -c Release -f net10.0 bindings/dotnet/Confluent.Kafka.sln: exit 0.
+  Passed 2326, Failed 0, Skipped 0, Total 2326 = 2317 (CP0) + 9 (S1).
+  The suite took 13 s. The fix round added no fact, so the total is unchanged.
+
+G5 net8.0 (in the $HOME/.dotnet environment)
+--------------------------------------------
+- Each command set DOTNET_ROOT=$HOME/.dotnet PATH=$HOME/.dotnet:$PATH
+  DOTNET_MULTILEVEL_LOOKUP=0. DOTNET_ROLL_FORWARD was unset, checked inside that
+  shell. dotnet resolved to $HOME/.dotnet/dotnet (runtimes 8.0.31 and 10.0.12).
+- dotnet test -c Release -f net8.0 bindings/dotnet/Confluent.Kafka.sln: exit 0.
+  Passed 2326, Failed 0, Skipped 0, Total 2326, the same as G4. The test run
+  line reads "(.NETCoreApp,Version=v8.0)". The suite took 12 s.
+
+G6 P/Invoke count
+-----------------
+- command grep -r --include='*.cs' 'internal static extern' bindings/dotnet/src | wc -l
+  prints 715:
+    Internal/Interop/NativeMethods.cs         236 (218 + 18)
+    Internal/Interop/NativeMethods.Admin.cs   479
+  The base NativeMethods.cs holds 218. The diff adds 18 extern lines and
+  removes none.
+
+G7 Hygiene (the §10.2 uncommitted forms)
+----------------------------------------
+- Tracked marker grep (git diff 76629aea -- bindings/dotnet/src
+  bindings/dotnet/tests bindings/dotnet/grpc-server Makefile | command grep ...)
+  prints nothing (grep exit 1). Control: the same diff has 18 added DllImport
+  lines.
+- New-file marker grep (git ls-files -z --others ... | xargs -0 /usr/bin/grep ...)
+  prints nothing (xargs exit 123: grep found no match). Control: the same
+  pipeline, grepping for "Apache License" instead, prints the S1 file's line 3.
+  The new-file list in scope is exactly the S1 file.
+- git diff --cached --name-only prints only
+  bindings/dotnet/design/history/M17/P1-producer-transactions/PLAN.md, the CP0
+  commit's path, and its staged blob is ea653cbb. CP1 staged nothing.
+
+Notes and deviations
+--------------------
+- Row 12's out-parameters are named outOffset / outLeaderEpoch / outMetadata;
+  §4.4 writes offset / leaderEpoch / metadata. The names mirror the header's
+  out_offset / out_leader_epoch / out_metadata and the file's usual out* style
+  (outError, outEpoch, outLen, outMap). Types, order and the out / [Out] marks
+  are exactly §4.4's. Since the fix round, S1 pins every parameter name too:
+  its table carries these header names for row 12, and a reorder among
+  same-typed parameters in any row turns the shape sweep red (M3). Before the
+  fix round, S1 pinned types, marks and the order of differently-typed
+  parameters only.
+- S1 has one fact beyond §5.2's list,
+  TheProducerTransactionFamily_IsExactlyTheBoundSymbols. It widens the B8
+  negative: every kafka_producer_* entry point whose name contains
+  "transaction" is one of the ten bound here. The header has eleven such
+  functions; the eleventh is B8.
+- M2 and M3 go beyond §5.2, which requires only M1.
+- Size: 421 changed production lines (419 insertions, 2 deletions) and 588 test
+  lines, against §10.1's scheduling estimates of 180-220 and 200-300. Most of
+  the production excess is ownership xmldoc taken in substance from the
+  header. Most of the test excess is the 18-row expectation table and the
+  signature-rendering helpers.
+
+CP1 fix round (Critic 84, cycle 3)
+----------------------------------
+- 84.4, S1 did not pin parameter names:
+    ShapeOf renders each parameter's name after its type and mark.
+    Every table row carries the header's parameter names, camelCased. Row 12
+    keeps outOffset / outLeaderEpoch / outMetadata (the first note).
+    The class remarks, the table's summary and the shape fact's summary say
+    that names are compared, and why.
+    The row-13 and code-120 fact summaries claim only what their facts detect
+    (the S1 section).
+    This record's first note no longer claims that S1 pinned the order of
+    same-typed parameters before names were compared.
+    M3 is the name-swap mutation the finding asked for.
+- 84.5 (a): the mock-helper section comment in NativeMethods.cs no longer
+  lists history() among the helpers with no C symbol. history() is exported
+  only as its count, bound as MockProducerHistoryCount (B5), and
+  consumerGroupOffsetsHistory() only as the single-entry projection (B6). The
+  comment names the helpers with no C symbol at all: B1-B4, uncommittedRecords,
+  uncommittedOffsets and B7.
+- 84.5 (b): MockProducerCommittedOffset's xmldoc no longer says that all three
+  out-params always pass storage. The two scalar out-params always pass an
+  address, because a by-reference parameter always marshals one. A null
+  outMetadata array marshals as NULL, which the header allows
+  (h:16605-16609, h:16624-16625).
+- (d): ConsumerCommitAsync's xmldoc drops its count of the genuine _async
+  declarations (see Files).
+- Unchanged by the fix round: every declaration, and the nine facts' names
+  and bodies. No fact was added, so G4 and G5 stay at 2326.
+- Not CP1's: 84.5 (c) and 84.6 are plan findings, resolved by the Manager in
+  the worktree PLAN.md.
+
+Not run at CP1 (per the plan's schedule)
+----------------------------------------
+G8 (CP4, CP5, CP7), G9 (CP6, CP7), G10 (CP7) and G11 (CP7).

@@ -84,7 +84,7 @@ namespace Confluent.Kafka.Internal.Interop;
 /// getter trio used to round-trip a UTF-8 config value (ffi §B3).
 ///
 /// <b><c>partial</c> (M15/P1).</b> CA1060 requires the P/Invoke declarations to live
-/// in <em>one</em> class, but this file already holds 218 of them; the admin family
+/// in <em>one</em> class, but this file already held 218 of them at the time; the admin family
 /// therefore lands in <c>NativeMethods.Admin.cs</c> as another part of this same
 /// class, keeping both files navigable without splitting the boundary type.
 /// </summary>
@@ -110,6 +110,65 @@ internal static partial class NativeMethods
     [DllImport(DllName, EntryPoint = "kafka_common_Error_is_retriable_error", CallingConvention = CallingConvention.Cdecl)]
     [return: MarshalAs(UnmanagedType.I1)]
     internal static extern bool IsRetriable(IntPtr error);
+
+    // The five Java-hierarchy predicates bound in M17/P1 (PLAN §4.4 rows 14-18, decision D6). Each
+    // is `bool (const kafka_common_Error_t*)`, the shape of IsRetriable above: the handle is
+    // BORROWED — read it while it is alive, never free it here — and a null handle answers false
+    // (the header). The C `bool` is 1 byte, hence `[return: MarshalAs(I1)]` on every one (ffi §0.1).
+    // They encode Java's `extends` chain, so they are NOT complements of one another (root
+    // CLAUDE.md §10.4): one error can satisfy several of them, or none.
+
+    /// <summary>
+    /// <c>kafka_common_Error_is_transaction_abortable_error</c> — whether the error's Java class
+    /// extends <c>TransactionAbortableException</c>: the transaction may be aborted and retried. The
+    /// header names it as the test that decides whether a failed
+    /// <see cref="ProducerSendOffsetsToTransaction"/> or <see cref="ProducerCommitTransaction"/> must
+    /// be followed by <see cref="ProducerAbortTransaction"/>. <paramref name="error"/> is
+    /// <b>borrowed</b> (the caller still frees it); <see langword="false"/> for a null handle.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_common_Error_is_transaction_abortable_error", CallingConvention = CallingConvention.Cdecl)]
+    [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool IsTransactionAbortableError(IntPtr error);
+
+    /// <summary>
+    /// <c>kafka_common_Error_is_application_recoverable_error</c> — whether the error's Java class
+    /// extends <c>ApplicationRecoverableException</c>: recoverable by re-initialising the producer or
+    /// rejoining the group. <paramref name="error"/> is <b>borrowed</b>;
+    /// <see langword="false"/> for a null handle.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_common_Error_is_application_recoverable_error", CallingConvention = CallingConvention.Cdecl)]
+    [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool IsApplicationRecoverableError(IntPtr error);
+
+    /// <summary>
+    /// <c>kafka_common_Error_is_invalid_configuration_error</c> — whether the error's Java class
+    /// extends <c>InvalidConfigurationException</c>, the parent of both the authentication and the
+    /// authorization families (a broad classification the numeric code alone cannot give).
+    /// <paramref name="error"/> is <b>borrowed</b>; <see langword="false"/> for a null handle.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_common_Error_is_invalid_configuration_error", CallingConvention = CallingConvention.Cdecl)]
+    [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool IsInvalidConfigurationError(IntPtr error);
+
+    /// <summary>
+    /// <c>kafka_common_Error_is_authorization_error</c> — whether the error is an authorization
+    /// failure, a missing ACL (Java <c>AuthorizationException</c>, whose subclasses include
+    /// <c>TransactionalIdAuthorizationException</c>). <paramref name="error"/> is <b>borrowed</b>;
+    /// <see langword="false"/> for a null handle.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_common_Error_is_authorization_error", CallingConvention = CallingConvention.Cdecl)]
+    [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool IsAuthorizationError(IntPtr error);
+
+    /// <summary>
+    /// <c>kafka_common_Error_is_out_of_order_sequence_error</c> — whether the error's Java class
+    /// extends <c>OutOfOrderSequenceException</c>, whose subclass <c>UnknownProducerIdException</c>
+    /// it therefore covers too (the idempotence failure family). <paramref name="error"/> is
+    /// <b>borrowed</b>; <see langword="false"/> for a null handle.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_common_Error_is_out_of_order_sequence_error", CallingConvention = CallingConvention.Cdecl)]
+    [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool IsOutOfOrderSequenceError(IntPtr error);
 
     [DllImport(DllName, EntryPoint = "kafka_common_Error_destroy", CallingConvention = CallingConvention.Cdecl)]
     internal static extern void ErrorDestroy(IntPtr error);
@@ -323,6 +382,37 @@ internal static partial class NativeMethods
     /// </summary>
     [DllImport(DllName, EntryPoint = "kafka_consumer_Consumer_group_metadata", CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr ConsumerGroupMetadata(SafeConsumerHandle consumer);
+
+    /// <summary>
+    /// <c>kafka_consumer_ConsumerGroupMetadata_new</c> — builds a group-metadata handle from its four
+    /// fields: the constructor for a caller that is not a consumer (Java's public
+    /// <c>ConsumerGroupMetadata</c> constructors; the header's motivating caller is a gRPC server that
+    /// drives <see cref="ProducerSendOffsetsToTransaction"/> from fields received over the wire). A
+    /// consumer obtains its handle from <see cref="ConsumerGroupMetadata"/> instead. Returns an
+    /// <b>owned</b> handle the caller frees with <see cref="ConsumerGroupMetadataDestroy"/>.
+    /// <para>
+    /// <b>A transient owned <em>input</em> handle (M17/P1, decision D12).</b> The binding builds it
+    /// from managed values, lends it to exactly one <see cref="ProducerSendOffsetsToTransaction"/> or
+    /// <see cref="ProducerSendOffsetsToTransactionAsync"/> call — both <b>borrow</b> it (the header:
+    /// "borrowed, not consumed") — and destroys it in the same frame, in a <c>finally</c>. It is never
+    /// cached on the managed <c>ConsumerGroupMetadata</c> value.
+    /// </para>
+    /// <para>
+    /// <paramref name="groupId"/> and <paramref name="memberId"/> are <b>always read</b>, so each must
+    /// be a pinned NUL-terminated UTF-8 buffer and never <see cref="IntPtr.Zero"/> (the core reads
+    /// them with <c>CStr::from_ptr</c>; an unknown member id is the empty string, never null).
+    /// <paramref name="groupInstanceId"/> is <see cref="IntPtr.Zero"/> for a non-static member (Java's
+    /// <c>Optional.empty()</c>). <paramref name="generationId"/> is <c>-1</c> when unknown. The core
+    /// copies all three strings during the call (<c>to_string_lossy().to_string()</c>,
+    /// <c>src/ffi/consumer.rs</c>), so their pins are call-scoped (ffi §A3).
+    /// </para>
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_consumer_ConsumerGroupMetadata_new", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ConsumerGroupMetadataNew(
+        IntPtr groupId,
+        int generationId,
+        IntPtr memberId,
+        IntPtr groupInstanceId);
 
     /// <summary>
     /// <c>kafka_consumer_ConsumerGroupMetadata_group_id</c> — the group id as a
@@ -1515,7 +1605,7 @@ internal static partial class NativeMethods
     /// <see cref="SafeConsumerHandle"/> so the marshaller holds a reference for the whole
     /// call (ffi §A2; M9/P4 H1) — note this is an <c>_async</c> <b>name</b> but a
     /// <b>sync</b> ABI function, so it takes the call-scoped sync convention, not the
-    /// span-the-op one the 18 genuine <c>_async</c> declarations use.
+    /// span-the-op one the genuine <c>_async</c> declarations use.
     /// </summary>
     [DllImport(DllName, EntryPoint = "kafka_consumer_Consumer_commit_async", CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr ConsumerCommitAsync(SafeConsumerHandle consumer);
@@ -2618,6 +2708,229 @@ internal static partial class NativeMethods
     [DllImport(DllName, EntryPoint = "kafka_producer_MetricMap_destroy", CallingConvention = CallingConvention.Cdecl)]
     internal static extern void ProducerMetricMapDestroy(IntPtr map);
 
+    // ---- kafka_producer_Producer_t — transaction control (M17/P1, ffi §A2/§A5/§A7) ----
+    //
+    // Java's five Producer transaction methods (Producer.java:45-66) over the C ABI that already
+    // exists (Mode A; PLAN §4.4 rows 1-9). The two handle conventions split exactly as ffi §A2
+    // prescribes (decision D12):
+    //
+    //   * The five SYNC operations take the SafeProducerHandle, so the marshaller's call-scoped
+    //     DangerousAddRef/DangerousRelease brackets the blocking native call (the ProducerSend
+    //     precedent). Each returns the error handle directly: null = success, non-null = an OWNED
+    //     kafka_common_Error_t the caller reads and frees with KafkaException.FromHandle.
+    //   * The four ASYNC operations take a raw IntPtr, because the submit helper holds a manual
+    //     span-the-op reference from before the submit until the completion releases it; a
+    //     marshaller-scoped ref would end when the submit returns, long before the callback fires.
+    //     Their completion is the void-result shape: the header's *_transaction(s)_callback_t
+    //     typedefs all alias the flush/close (kafka_common_Error_t*, void*) signature, so the rooted
+    //     ProducerCallbacks.Operation delegate serves them. The callback OWNS a non-null error (the
+    //     typedef doc: "owned by the callee") and frees it.
+    //
+    // All five control operations, sync and async alike, share ONE mutual-exclusion flag in the
+    // core: an overlapping control call fails with a ConcurrentModification error ("Transactional
+    // methods of KafkaProducer are not safe for concurrent access."), which is a caller-sequencing
+    // bug that leaves the transaction untouched and is NOT a reason to abort (the header; D10).
+    //
+    // kafka_producer_Producer_begin_transaction_async exists in the header and is deliberately NOT
+    // declared (PLAN B8, Q5): Java's beginTransaction() never blocks, so BeginTransaction stays
+    // synchronous on both producer surfaces and there is no async member for it to back.
+    //
+    // The core's commit and abort first drain ITS OWN send_async submission queue (the header;
+    // producer-transactions.md §13). The binding never uses that queue: its async send path hands
+    // records to the core through the synchronous kafka_producer_Producer_send_batch, from a
+    // binding-side accumulator. Draining that accumulator before a control call is therefore the
+    // binding's job (PLAN D3), not the core's.
+
+    /// <summary>
+    /// <c>kafka_producer_Producer_init_transactions</c> — Java <c>initTransactions()</c>: initializes
+    /// the transactional state, <b>blocking</b> until the producer id and epoch have been obtained (or
+    /// <c>max.block.ms</c> expires). Called exactly once, before any other transactional method, when
+    /// <c>transactional.id</c> is configured; it also completes or aborts any transaction a previous
+    /// producer with the same <c>transactional.id</c> left open. Returns <see cref="IntPtr.Zero"/> on
+    /// success, or an <b>owned</b> error handle the caller reads and frees with
+    /// <see cref="KafkaException.FromHandle(IntPtr)"/>. A timeout error is safe to retry.
+    /// <paramref name="producer"/> is the <see cref="SafeProducerHandle"/>: the call-scoped auto-ref of
+    /// the ffi §A2 sync convention, so a closed handle marshals to <see cref="ObjectDisposedException"/>.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_producer_Producer_init_transactions", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ProducerInitTransactions(SafeProducerHandle producer);
+
+    /// <summary>
+    /// <c>kafka_producer_Producer_begin_transaction</c> — Java <c>beginTransaction()</c>: begins a new
+    /// transaction. A pure state transition that <b>never waits</b> (the header: no <c>block_on</c>),
+    /// which is why the binding keeps <c>BeginTransaction</c> synchronous on both producer surfaces
+    /// (D1). <see cref="ProducerInitTransactions"/> must have succeeded exactly once before the first
+    /// call. Returns <see cref="IntPtr.Zero"/> on success, or an <b>owned</b> error handle (including
+    /// the <c>ConcurrentModification</c> rejection) read and freed with
+    /// <see cref="KafkaException.FromHandle(IntPtr)"/>. <paramref name="producer"/> is the
+    /// <see cref="SafeProducerHandle"/> (the ffi §A2 sync convention).
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_producer_Producer_begin_transaction", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ProducerBeginTransaction(SafeProducerHandle producer);
+
+    /// <summary>
+    /// <c>kafka_producer_Producer_send_offsets_to_transaction</c> — Java
+    /// <c>sendOffsetsToTransaction(Map, ConsumerGroupMetadata)</c>: sends consumer-group offsets to the
+    /// group coordinator as part of the ongoing transaction, <b>blocking</b> until the coordinator has
+    /// acknowledged them. The offsets count as committed only if the transaction commits. Returns
+    /// <see cref="IntPtr.Zero"/> on success, or an <b>owned</b> error handle read and freed with
+    /// <see cref="KafkaException.FromHandle(IntPtr)"/>. If <see cref="IsTransactionAbortableError"/>
+    /// holds for that error the transaction must be aborted; the <c>ConcurrentModification</c>
+    /// rejection is <b>not</b> a reason to abort.
+    /// <para>
+    /// <b>Inputs — all borrowed for this call only.</b> <paramref name="topics"/>,
+    /// <paramref name="partitions"/>, <paramref name="offsets"/>, <paramref name="leaderEpochs"/> and
+    /// <paramref name="metadata"/> are parallel arrays of <paramref name="count"/> entries, marshalled
+    /// exactly like <see cref="ConsumerCommitSyncOffsets"/>'s (the pinned pointers
+    /// <c>NativeConsumer.WithPinnedCommitOffsets</c> produces): a <paramref name="leaderEpochs"/> entry
+    /// <c>&lt; 0</c> means "no epoch", <paramref name="metadata"/> may hold null entries, and each
+    /// offset is that of the <b>next</b> record to consume. A repeated <c>(topic, partition)</c> keeps
+    /// the last entry. <paramref name="groupMetadata"/> is a
+    /// <c>kafka_consumer_ConsumerGroupMetadata_t</c> the call <b>borrows, not consumes</b>: the caller
+    /// still destroys it (built transiently by <see cref="ConsumerGroupMetadataNew"/> and freed with
+    /// <see cref="ConsumerGroupMetadataDestroy"/>, D12). Nothing is retained past the return, so every
+    /// pin and the transient handle may be released as soon as this returns.
+    /// </para>
+    /// <para>
+    /// <b><paramref name="count"/> must be <c>&gt;= 0</c></b>: the core <b>panics</b> on a negative
+    /// count (a violated precondition, as for <see cref="ProducerSendBatch"/>), so it is only ever a
+    /// real collection size. When <paramref name="count"/> <c>&gt; 0</c> the first three arrays are not
+    /// null-checked by the core. <c>count == 0</c> reads no array and stages nothing, and whether it
+    /// <b>succeeds</b> depends on the backend, each faithful to its Java counterpart:
+    /// <c>KafkaProducer</c> returns success before consulting the transaction state
+    /// (<c>KafkaProducer.java:738</c>), while <c>MockProducer</c> checks the state first, so an empty
+    /// call outside an open transaction fails on the mock. The binding forwards it either way (D13).
+    /// <paramref name="producer"/> is the <see cref="SafeProducerHandle"/> (the ffi §A2 sync
+    /// convention).
+    /// </para>
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_producer_Producer_send_offsets_to_transaction", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ProducerSendOffsetsToTransaction(
+        SafeProducerHandle producer,
+        IntPtr[] topics,
+        int[] partitions,
+        long[] offsets,
+        int[] leaderEpochs,
+        IntPtr[] metadata,
+        int count,
+        IntPtr groupMetadata);
+
+    /// <summary>
+    /// <c>kafka_producer_Producer_commit_transaction</c> — Java <c>commitTransaction()</c>: commits the
+    /// ongoing transaction, <b>blocking</b> until it has completed. It flushes unsent records first, so
+    /// every send in the transaction must have succeeded for the commit to succeed. Returns
+    /// <see cref="IntPtr.Zero"/> on success, or an <b>owned</b> error handle read and freed with
+    /// <see cref="KafkaException.FromHandle(IntPtr)"/>. If <see cref="IsTransactionAbortableError"/>
+    /// holds, abort. A <b>timeout</b> does not say whether the commit reached the broker: it may be
+    /// retried as a commit but not answered with an abort (the only other option is to close the
+    /// producer). The <c>ConcurrentModification</c> rejection is not a reason to abort.
+    /// <paramref name="producer"/> is the <see cref="SafeProducerHandle"/> (the ffi §A2 sync
+    /// convention).
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_producer_Producer_commit_transaction", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ProducerCommitTransaction(SafeProducerHandle producer);
+
+    /// <summary>
+    /// <c>kafka_producer_Producer_abort_transaction</c> — Java <c>abortTransaction()</c>: aborts the
+    /// ongoing transaction, <b>blocking</b> until it has completed. Unflushed records are discarded, as
+    /// Java discards accumulator records on abort; abort is the recovery operation and stays available
+    /// when a commit cannot make progress. Returns <see cref="IntPtr.Zero"/> on success, or an
+    /// <b>owned</b> error handle read and freed with <see cref="KafkaException.FromHandle(IntPtr)"/>. A
+    /// timeout is safe to retry as an abort but does not permit switching to a different operation.
+    /// <paramref name="producer"/> is the <see cref="SafeProducerHandle"/> (the ffi §A2 sync
+    /// convention).
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_producer_Producer_abort_transaction", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ProducerAbortTransaction(SafeProducerHandle producer);
+
+    /// <summary>
+    /// <c>kafka_producer_Producer_init_transactions_async</c> — the async counterpart of
+    /// <see cref="ProducerInitTransactions"/>. Returns immediately; <paramref name="callback"/> fires
+    /// <b>once</b>, on the producer's dispatcher thread, with a null error on success or a non-null
+    /// <c>kafka_common_Error_t</c> that the callback <b>owns</b> and frees (the
+    /// <c>kafka_producer_Producer_init_transactions_callback_t</c> typedef: "owned by the callee"). The
+    /// shipped <see cref="ProducerCallbacks.Operation"/> → <see cref="OperationCompletionSource"/> path
+    /// frees it through <see cref="KafkaException.FromHandle(IntPtr)"/>. A timeout error is safe to
+    /// retry. The <c>ConcurrentModification</c> rejection of an overlapping control call, and a null
+    /// <paramref name="producer"/>, are reported through <paramref name="callback"/> too.
+    /// <para>
+    /// <paramref name="producer"/> is a raw <see cref="IntPtr"/>, not the
+    /// <see cref="SafeProducerHandle"/>: the caller holds a manual span-the-op <c>DangerousAddRef</c>
+    /// from before this submit until the completion releases it in <c>FreeGcHandle</c> (the ffi §A2
+    /// async convention, D12), because a marshaller-scoped ref would end when this returns, before the
+    /// callback fires. <paramref name="userData"/> is the <see cref="GCHandle"/> over the per-op
+    /// <see cref="OperationCompletionSource"/>.
+    /// </para>
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_producer_Producer_init_transactions_async", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void ProducerInitTransactionsAsync(
+        IntPtr producer,
+        ProducerCallbacks.OperationCallback callback,
+        IntPtr userData);
+
+    /// <summary>
+    /// <c>kafka_producer_Producer_send_offsets_to_transaction_async</c> — the async counterpart of
+    /// <see cref="ProducerSendOffsetsToTransaction"/>, with the same inputs, the same
+    /// <paramref name="count"/> rules (<c>&gt;= 0</c> or the core panics; <c>count == 0</c> reads no
+    /// array and its success is backend-specific) and the same abort guidance for its error. Returns
+    /// immediately; <paramref name="callback"/> fires once, on the producer's dispatcher thread, and
+    /// <b>owns</b> a non-null error, exactly as for <see cref="ProducerInitTransactionsAsync"/>. A null
+    /// <paramref name="producer"/> or <paramref name="groupMetadata"/> is reported through
+    /// <paramref name="callback"/>.
+    /// <para>
+    /// <b>Every input is marshalled on the calling thread, before this returns</b> (the header), so the
+    /// pinned topic and metadata strings and the transient <paramref name="groupMetadata"/> handle are
+    /// released as soon as the submit returns, in <c>finally</c> blocks around it, and are never held
+    /// until the callback (D12). Only <paramref name="producer"/>'s reference outlives the call: a raw
+    /// <see cref="IntPtr"/> under the manual span-the-op <c>DangerousAddRef</c>, taken before the submit
+    /// and released in <c>FreeGcHandle</c> (the ffi §A2 async convention). <paramref name="userData"/>
+    /// is the <see cref="GCHandle"/> over the per-op <see cref="OperationCompletionSource"/>.
+    /// </para>
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_producer_Producer_send_offsets_to_transaction_async", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void ProducerSendOffsetsToTransactionAsync(
+        IntPtr producer,
+        IntPtr[] topics,
+        int[] partitions,
+        long[] offsets,
+        int[] leaderEpochs,
+        IntPtr[] metadata,
+        int count,
+        IntPtr groupMetadata,
+        ProducerCallbacks.OperationCallback callback,
+        IntPtr userData);
+
+    /// <summary>
+    /// <c>kafka_producer_Producer_commit_transaction_async</c> — the async counterpart of
+    /// <see cref="ProducerCommitTransaction"/>, with the same flush-first semantics and the same
+    /// guidance for its error (abort when <see cref="IsTransactionAbortableError"/> holds; a timeout
+    /// may be retried as a commit but not answered with an abort). Returns immediately;
+    /// <paramref name="callback"/> fires once, on the producer's dispatcher thread, and <b>owns</b> a
+    /// non-null error. <paramref name="producer"/> and <paramref name="userData"/> follow
+    /// <see cref="ProducerInitTransactionsAsync"/>: a raw pointer under the caller's span-the-op
+    /// reference, and the <see cref="GCHandle"/> over the per-op <see cref="OperationCompletionSource"/>.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_producer_Producer_commit_transaction_async", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void ProducerCommitTransactionAsync(
+        IntPtr producer,
+        ProducerCallbacks.OperationCallback callback,
+        IntPtr userData);
+
+    /// <summary>
+    /// <c>kafka_producer_Producer_abort_transaction_async</c> — the async counterpart of
+    /// <see cref="ProducerAbortTransaction"/>: unflushed records are discarded, and a timeout may be
+    /// retried as an abort but does not permit switching to a different operation. Returns
+    /// immediately; <paramref name="callback"/> fires once, on the producer's dispatcher thread, and
+    /// <b>owns</b> a non-null error. <paramref name="producer"/> and <paramref name="userData"/> follow
+    /// <see cref="ProducerInitTransactionsAsync"/>: a raw pointer under the caller's span-the-op
+    /// reference, and the <see cref="GCHandle"/> over the per-op <see cref="OperationCompletionSource"/>.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_producer_Producer_abort_transaction_async", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void ProducerAbortTransactionAsync(
+        IntPtr producer,
+        ProducerCallbacks.OperationCallback callback,
+        IntPtr userData);
+
     // ---- kafka_producer_MockProducer_t — send-control helpers (M11/P3, mock only) ----
     //
     // Inherent on the public AsyncMockProducer (NOT on IAsyncProducer): Java MockProducer /
@@ -2701,6 +3014,110 @@ internal static partial class NativeMethods
     /// </summary>
     [DllImport(DllName, EntryPoint = "kafka_producer_MockProducer_clear", CallingConvention = CallingConvention.Cdecl)]
     internal static extern void MockProducerClear(SafeProducerHandle producer);
+
+    // ---- kafka_producer_MockProducer_t — transaction helpers (M17/P1, mock only) ----
+    //
+    // The three transaction controls the ABI exports for the mock (PLAN §4.4 rows 10-12, D8): Java's
+    // public MockProducer.commitTransactionException field, sentOffsets(), and a single-entry
+    // projection of consumerGroupOffsetsHistory(), which is exported only as that projection, not as
+    // the full list (B6). history() is likewise exported only as its count, bound above as
+    // MockProducerHistoryCount (B5). The other Java MockProducer helpers PLAN §2.2 lists have no C
+    // symbol at all, so nothing is declared for them: fenceProducer (B1),
+    // transactionInitialized/InFlight/Committed/Aborted (B2), commitCount (B3), flushed (B4),
+    // uncommittedRecords (B5), uncommittedOffsets (B6) and the sibling *TransactionException fields
+    // (B7). All three are synchronous and take the SafeProducerHandle (the ffi §A2 sync convention,
+    // the MockProducerErrorNext precedent), and each answers false for a producer that is not a mock.
+
+    /// <summary>
+    /// <c>kafka_producer_MockProducer_set_commit_transaction_error</c> — installs (or clears) the error
+    /// every subsequent commit returns on a mock producer: Java's public
+    /// <c>MockProducer.commitTransactionException</c> field, sticky until cleared. Installing
+    /// <c>TransactionAbortable</c> (code 120) makes the commit fail with an error for which
+    /// <see cref="IsTransactionAbortableError"/> holds, leaving the transaction open so it can then be
+    /// aborted.
+    /// <para>
+    /// With <paramref name="clear"/> <see langword="true"/> the installed error is removed and
+    /// <paramref name="errorCode"/> / <paramref name="errorMessage"/> are ignored; clearing is signalled
+    /// out of band because every <c>i16</c> is a legitimate code. Otherwise <paramref name="errorCode"/>
+    /// must be non-zero (<c>0</c> is <c>Errors.NONE</c>) and fit in an <c>i16</c>: anything else is
+    /// <b>rejected, not truncated</b> (a deliberate divergence from <see cref="MockProducerErrorNext"/>'s
+    /// truncating cast), and an in-range but unassigned code resolves to <c>UnknownServerError</c>.
+    /// <paramref name="errorMessage"/> is a pinned NUL-terminated UTF-8 buffer
+    /// (<see cref="Utf8Marshal.Pin(string)"/>, call-scoped), or <see cref="IntPtr.Zero"/> for the code's
+    /// default message. Returns <see langword="true"/> if the hook was applied; <see langword="false"/>
+    /// for a null or non-mock producer, or, when not clearing, a rejected code. Both C <c>bool</c>s, the
+    /// <paramref name="clear"/> argument and the return, need <c>[MarshalAs(I1)]</c> (ffi §0.1).
+    /// </para>
+    /// <para>
+    /// <b>Setup-only.</b> It writes the mock's installed-error field without taking the core's
+    /// transaction-control flag, so it must not overlap a transaction-control call on the same producer:
+    /// racing it against a commit leaves it undefined whether that commit observes the new value (a
+    /// logical race, not undefined behaviour, because the mock has its own lock). Call it before the
+    /// control calls it is meant to affect. <paramref name="producer"/> is the
+    /// <see cref="SafeProducerHandle"/> (the ffi §A2 sync convention).
+    /// </para>
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_producer_MockProducer_set_commit_transaction_error", CallingConvention = CallingConvention.Cdecl)]
+    [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool MockProducerSetCommitTransactionError(
+        SafeProducerHandle producer,
+        [MarshalAs(UnmanagedType.I1)] bool clear,
+        int errorCode,
+        IntPtr errorMessage);
+
+    /// <summary>
+    /// <c>kafka_producer_MockProducer_sent_offsets</c> — Java <c>MockProducer.sentOffsets()</c>: whether
+    /// the mock has staged consumer-group offsets in the current transaction. <see langword="false"/>
+    /// for a null or non-mock producer. The 1-byte C <c>bool</c> return needs <c>[MarshalAs(I1)]</c>
+    /// (ffi §0.1). <paramref name="producer"/> is the <see cref="SafeProducerHandle"/> (the ffi §A2 sync
+    /// convention).
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_producer_MockProducer_sent_offsets", CallingConvention = CallingConvention.Cdecl)]
+    [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool MockProducerSentOffsets(SafeProducerHandle producer);
+
+    /// <summary>
+    /// <c>kafka_producer_MockProducer_committed_offset</c> — looks up the offset a <b>committed</b>
+    /// transaction staged for (<paramref name="groupId"/>, <paramref name="topic"/>,
+    /// <paramref name="partition"/>) on a mock producer: a single-entry projection of Java's
+    /// <c>MockProducer.consumerGroupOffsetsHistory()</c>, searched latest transaction first, so the
+    /// newest entry for that key wins. Returns <see langword="true"/> if an entry was found, and
+    /// <see langword="false"/> if not, for a null or non-mock producer, or when
+    /// <paramref name="groupId"/> or <paramref name="topic"/> is <see cref="IntPtr.Zero"/> (which
+    /// matches nothing). <paramref name="groupId"/> and <paramref name="topic"/> are pinned
+    /// NUL-terminated UTF-8 buffers (call-scoped). The 1-byte C <c>bool</c> return needs
+    /// <c>[MarshalAs(I1)]</c>.
+    /// <para>
+    /// <b>The out-params are caller-owned storage.</b> <paramref name="outOffset"/> receives the
+    /// committed offset, and <paramref name="outLeaderEpoch"/> the leader epoch or <c>-1</c> when the
+    /// entry has none. <paramref name="outMetadata"/> is a caller-owned buffer of
+    /// <paramref name="metadataCap"/> bytes (the runtime pins the blittable array for the call) that
+    /// receives the commit metadata NUL-terminated, and is left untouched when
+    /// <paramref name="metadataCap"/> <c>&lt;= 0</c>. The header allows a null pointer for each of the
+    /// three. The two scalar out-params always pass storage, because a by-reference parameter always
+    /// marshals an address; a <see langword="null"/> <paramref name="outMetadata"/> array marshals as
+    /// NULL, which the header allows. Metadata that does not fit is <b>truncated at a UTF-8 character
+    /// boundary without any report</b> (the return means "found", not "fit"), so a caller that needs
+    /// the whole value sizes the buffer generously and retries larger while the result is ambiguous:
+    /// the D8 grow rule.
+    /// </para>
+    /// <para>
+    /// <paramref name="producer"/> is the <see cref="SafeProducerHandle"/> (the ffi §A2 sync
+    /// convention).
+    /// </para>
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_producer_MockProducer_committed_offset", CallingConvention = CallingConvention.Cdecl)]
+    [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool MockProducerCommittedOffset(
+        SafeProducerHandle producer,
+        IntPtr groupId,
+        IntPtr topic,
+        int partition,
+        out long outOffset,
+        out int outLeaderEpoch,
+        [Out] byte[] outMetadata,
+        int metadataCap);
+
     // ---- ConsumerHandle_t — the in-callback reentrancy handle (M9/P8, ffi §B1/§B2/§B5) ----
     //
     // 23 declarations: `Consumer_handle` plus the 22 `ConsumerHandle_*`. Three properties set
