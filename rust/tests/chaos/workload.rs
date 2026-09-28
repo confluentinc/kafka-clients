@@ -34,7 +34,7 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 
-use confluent_kafka::common::{KafkaError, TopicPartition, Uuid};
+use confluent_kafka::common::{Error, TopicPartition, Uuid};
 use confluent_kafka::consumer::{ConsumerHandle, ConsumerRebalanceListener, OffsetAndMetadata};
 use confluent_kafka::producer::{Callback, Producer, ProducerRecord};
 
@@ -598,7 +598,7 @@ impl ChaosRebalanceListener {
     /// so it must be exactly this consumer's progress + 1 (the verifier checks).
     /// Not during close — see `closing`. A failed commit is recorded under its
     /// own operation so the verdict tells it apart from the poll-loop commits.
-    async fn after_revoke_commit(&self, partitions: &[TopicPartition], commit: Result<(), KafkaError>) {
+    async fn after_revoke_commit(&self, partitions: &[TopicPartition], commit: Result<(), Error>) {
         match commit {
             Ok(()) if !self.closing.load(Ordering::Relaxed) => {
                 record_committed(self.verifier.as_ref(), &self.consumer, self.handle.committed(partitions).await);
@@ -618,7 +618,7 @@ impl ChaosRebalanceListener {
 
 #[async_trait]
 impl ConsumerRebalanceListener for ChaosRebalanceListener {
-    async fn on_partitions_revoked(&self, partitions: &[TopicPartition]) -> Result<(), KafkaError> {
+    async fn on_partitions_revoked(&self, partitions: &[TopicPartition]) -> Result<(), Error> {
         self.record(RebalanceCallback::Revoked, partitions);
         // Flush offsets before the partitions move — the canonical listener
         // pattern. The workload already commits after every poll, so this is
@@ -628,12 +628,12 @@ impl ConsumerRebalanceListener for ChaosRebalanceListener {
         Ok(())
     }
 
-    async fn on_partitions_assigned(&self, partitions: &[TopicPartition]) -> Result<(), KafkaError> {
+    async fn on_partitions_assigned(&self, partitions: &[TopicPartition]) -> Result<(), Error> {
         self.record(RebalanceCallback::Assigned, partitions);
         Ok(())
     }
 
-    async fn on_partitions_lost(&self, partitions: &[TopicPartition]) -> Result<(), KafkaError> {
+    async fn on_partitions_lost(&self, partitions: &[TopicPartition]) -> Result<(), Error> {
         self.record(RebalanceCallback::Lost, partitions);
         Ok(())
     }
@@ -656,7 +656,7 @@ const COMMIT_CHECK_INTERVAL: Duration = Duration::from_secs(5);
 fn record_committed(
     verifier: &dyn Verifier,
     consumer: &str,
-    committed: Result<HashMap<TopicPartition, OffsetAndMetadata>, KafkaError>,
+    committed: Result<HashMap<TopicPartition, OffsetAndMetadata>, Error>,
 ) {
     match committed {
         Ok(offsets) => {
@@ -721,7 +721,7 @@ where
         // the verdict's callback counts show they did not exercise it.
         let closing = Arc::new(AtomicBool::new(false));
         let subscribed = if self.spec.backend.is_grpc() {
-            consumer.subscribe(self.ctx.topics.clone()).await
+            consumer.subscribe_with_topics(self.ctx.topics.clone()).await
         } else {
             let listener = Arc::new(ChaosRebalanceListener {
                 consumer: label.clone(),
@@ -729,7 +729,7 @@ where
                 verifier: self.verifier.clone(),
                 closing: closing.clone(),
             });
-            consumer.subscribe_with_listener(self.ctx.topics.clone(), listener).await
+            consumer.subscribe_with_topics_listener(self.ctx.topics.clone(), listener).await
         };
         subscribed.expect("chaos consumer subscribe failed");
 
@@ -953,7 +953,7 @@ mod tests {
         // A failed commit is never followed by a read-back, closing or not.
         closing.store(false, Ordering::Relaxed);
         listener
-            .after_revoke_commit(std::slice::from_ref(&tp), Err(KafkaError::timeout("commit timed out")))
+            .after_revoke_commit(std::slice::from_ref(&tp), Err(Error::timeout("commit timed out")))
             .await;
         let verdict = verifier.verdict(0);
         assert_eq!(read_back_errors(&verifier), 1, "{verdict}");
@@ -992,11 +992,7 @@ mod tests {
         .into_iter()
         .collect();
         record_committed(&verifier, "consumer-rust-1", Ok(offsets));
-        record_committed(
-            &verifier,
-            "consumer-rust-1",
-            Err(KafkaError::unsupported_version("no committed()")),
-        );
+        record_committed(&verifier, "consumer-rust-1", Err(Error::unsupported_version("no committed()")));
 
         let verdict = verifier.verdict(0);
         assert_eq!(verdict.commit_checks, 2);
@@ -1029,15 +1025,15 @@ mod tests {
             "mock"
         }
 
-        async fn create(&self, _config: HashMap<String, String>) -> Result<Self::Producer, KafkaError> {
+        async fn create(&self, _config: HashMap<String, String>) -> Result<Self::Producer, Error> {
             Ok(MockProducer::with_auto_complete(true))
         }
 
         async fn create_with_callback_log(
             &self,
             _config: HashMap<String, String>,
-        ) -> Result<(Self::Producer, ProducerCallbackLog), KafkaError> {
-            Err(KafkaError::illegal_state("not used by the chaos producer workload"))
+        ) -> Result<(Self::Producer, ProducerCallbackLog), Error> {
+            Err(Error::local_illegal_state("not used by the chaos producer workload"))
         }
     }
 
@@ -1090,8 +1086,8 @@ mod tests {
     /// have been silently excused.
     #[test]
     fn delivery_callback_stamps_the_generation_current_at_ack_time() {
-        let old_id = Uuid::from_bytes([7u8; 16]);
-        let new_id = Uuid::from_bytes([8u8; 16]);
+        let old_id = Uuid::with_bytes([7u8; 16]);
+        let new_id = Uuid::with_bytes([8u8; 16]);
         let ids: TopicIds = Arc::new(std::sync::Mutex::new(HashMap::from([("t".to_string(), old_id)])));
         let verifier = Arc::new(ConservationVerifier::new());
 
@@ -1128,7 +1124,7 @@ mod tests {
         verifier.record(WorkloadEvent::Sent { index: 4, topic: "t".into(), producer: "p".into() });
         let callback = delivery_callback(4, "t".into(), ids, "p".into(), verifier.clone());
 
-        let err = KafkaError::timeout("Expiring 1 record(s) for t-0: 120000 ms has passed");
+        let err = Error::timeout("Expiring 1 record(s) for t-0: 120000 ms has passed");
         callback(None, Some(&err));
 
         let verdict = verifier.verdict(0);
@@ -1150,8 +1146,8 @@ mod tests {
     /// real loss went undetected.
     #[test]
     fn records_after_recreate_are_stamped_with_new_generation_and_still_checked() {
-        let old_id = Uuid::from_bytes([7u8; 16]);
-        let new_id = Uuid::from_bytes([8u8; 16]);
+        let old_id = Uuid::with_bytes([7u8; 16]);
+        let new_id = Uuid::with_bytes([8u8; 16]);
         let ids: TopicIds = Arc::new(std::sync::Mutex::new(std::collections::HashMap::from([(
             "t".to_string(),
             old_id,
@@ -1201,8 +1197,8 @@ mod tests {
     /// the other.
     #[test]
     fn topic_id_for_is_per_topic_and_zero_when_unresolved() {
-        let a = Uuid::from_bytes([1u8; 16]);
-        let b = Uuid::from_bytes([2u8; 16]);
+        let a = Uuid::with_bytes([1u8; 16]);
+        let b = Uuid::with_bytes([2u8; 16]);
         let ids: TopicIds = Arc::new(std::sync::Mutex::new(std::collections::HashMap::from([
             ("t0".to_string(), a),
             ("t1".to_string(), b),
@@ -1212,7 +1208,7 @@ mod tests {
         assert_eq!(ctx.topic_id_for("t1"), b);
         assert_eq!(ctx.topic_id_for("absent"), Uuid::zero());
 
-        let b2 = Uuid::from_bytes([3u8; 16]);
+        let b2 = Uuid::with_bytes([3u8; 16]);
         ids.lock().unwrap().insert("t1".to_string(), b2);
         assert_eq!(ctx.topic_id_for("t0"), a, "recreating t1 must not change t0's id");
         assert_eq!(ctx.topic_id_for("t1"), b2);
