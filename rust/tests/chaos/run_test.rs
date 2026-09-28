@@ -29,10 +29,11 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use super::actions::{ChaosAction, ReassignMode};
+use super::actions::{ChaosAction, LEADER_PLAN_SETTLE, ReassignMode};
 use super::common::broker_control::{BrokerControl, StopKind};
 use super::config::{ActionKind, ChaosConfig};
 use super::harness::{ChaosHarness, WorkloadPool};
+use super::isolation;
 use super::reports::{self, ReportsHandle, RunReports};
 use confluent_kafka::admin::Admin;
 use futures_util::FutureExt as _;
@@ -62,6 +63,22 @@ enum PlannedAction {
 const RANDOM_MAX_DOWN_S: u64 = 12;
 /// Longest a randomly-planned topic recreate dwells between delete and create.
 const RANDOM_MAX_DWELL_S: u64 = 8;
+
+/// How long the scenario task may go without a heartbeat before the heartbeat
+/// watchdog ends the run. Every await in the scenario yields well within this;
+/// only a blocked task reaches it.
+const HEARTBEAT_STALE: Duration = Duration::from_secs(120);
+
+/// How long an abandoned run waits for its workloads to close.
+const ABORT_STOP_WAIT: Duration = Duration::from_secs(30);
+
+/// How long after teardown the process is forced to exit if it has not.
+const FORCED_EXIT_AFTER: Duration = Duration::from_secs(60);
+
+/// Printed when a passing run is forced to exit; the matrix runner classifies
+/// it as a pass (`xtask/src/chaos_matrix.rs`).
+const FORCED_EXIT_AFTER_PASS: &str =
+    "chaos: FORCED EXIT after a PASS verdict — the process did not terminate after teardown";
 
 /// Draw one cycle's action in `--random` mode from the seeded `rng`. Returns
 /// `None` for a quiet cycle (probability `1 - action_prob`). All four fault
@@ -554,6 +571,7 @@ async fn chaos_run() {
     } else {
         (0, 0, config.dwell_s, 0)
     };
+    let leader_plan_extra = u64::from(config.num_topics.max(1)) * LEADER_PLAN_SETTLE.as_secs().saturating_sub(10);
     let per_cycle = rolled_per_cycle * (config.up_wait_s + down_s + 30)
         + jitter_s
         + if has(|k| matches!(k, ActionKind::TopicRecreate)) {
@@ -561,13 +579,15 @@ async fn chaos_run() {
         } else {
             0
         }
+        // The leader-plan check waits up to `LEADER_PLAN_SETTLE` per topic
+        // (the base figures below were sized for a 10 s settle).
         + if has(|k| matches!(k, ActionKind::ReassignPartitions)) {
-            90
+            90 + leader_plan_extra
         } else {
             0
         }
         + if has(|k| matches!(k, ActionKind::ChangeLeader)) {
-            30
+            30 + leader_plan_extra
         } else {
             0
         }
@@ -582,8 +602,10 @@ async fn chaos_run() {
         + config.between_s
         + 30;
     let watchdog = Duration::from_secs(config.warmup_s + u64::from(config.cycles) * per_cycle + config.drain_s + 120);
+    // Last-resort net for the scenario task itself blocking, which would stop
+    // the watchdog below as well (see `isolation`).
+    isolation::start_heartbeat_watchdog(harness.heartbeat(), HEARTBEAT_STALE, harness.cluster_teardown());
     let drive = workloads.drive(
-        &pool,
         config.drain_dur(),
         config.idle_threshold_dur(),
         verifier.clone(),
@@ -612,6 +634,24 @@ async fn chaos_run() {
         },
         _ = tokio::signal::ctrl_c() => DriveOutcome::Interrupted,
     };
+    // The drive no longer beats, whichever way it ended.
+    harness.heartbeat().disarm();
+
+    // An abandoned drive leaves its workloads running on their threads. Stop
+    // them and give them a bounded time to close. A producer's close settles
+    // its in-flight sends, so the verdict does not score sends that only the
+    // abort left open. A workload that does not finish is named and left
+    // behind; the forced exit below ends it.
+    if !matches!(outcome, DriveOutcome::Finished) {
+        let stuck = harness.workload_threads().stop_and_wait(ABORT_STOP_WAIT).await;
+        if !stuck.is_empty() {
+            eprintln!(
+                "chaos: {} workload(s) did not stop within {ABORT_STOP_WAIT:?} of the abort and are abandoned: {}",
+                stuck.len(),
+                stuck.join(", ")
+            );
+        }
+    }
 
     let verdict = verifier.verdict(config.min_partitions());
     let failure_header = match &outcome {
@@ -626,11 +666,7 @@ async fn chaos_run() {
             ))
         },
         DriveOutcome::Panicked(payload) => {
-            let message = payload
-                .downcast_ref::<String>()
-                .cloned()
-                .or_else(|| payload.downcast_ref::<&str>().map(|s| s.to_string()))
-                .unwrap_or_else(|| "non-string panic payload".to_string());
+            let message = isolation::panic_message(payload.as_ref());
             eprintln!("chaos: ABORTED by a panic in the run: {message}\nPartial verdict below.");
             Some(format!("=== Chaos verdict: FAIL (panic) ===\n  {message}"))
         },
@@ -655,6 +691,21 @@ async fn chaos_run() {
     }
 
     harness.shutdown();
+
+    // Reports are on disk and the cluster is gone. A client task that never
+    // yields keeps the test runtime from shutting down, so the process could
+    // still hang here (P3-1MiB, Sep 2026 matrix). Bound it.
+    let passed = matches!(outcome, DriveOutcome::Finished) && verdict.is_pass() && verdict.delivered > 0;
+    if passed {
+        isolation::arm_forced_exit(FORCED_EXIT_AFTER, 0, FORCED_EXIT_AFTER_PASS.to_string());
+    } else {
+        isolation::arm_forced_exit(
+            FORCED_EXIT_AFTER,
+            101,
+            "chaos: FORCED EXIT — the process did not terminate after teardown (the run had already failed)"
+                .to_string(),
+        );
+    }
 
     match outcome {
         DriveOutcome::Finished => {},

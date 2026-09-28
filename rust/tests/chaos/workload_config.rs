@@ -111,13 +111,30 @@ pub fn producer_props(
     props
 }
 
+/// How many maximum-size batches one partition may return per fetch when
+/// [`record_size_limit`] raises the batch size (see [`consumer_props`]).
+const LARGE_RECORD_BATCHES_PER_FETCH: usize = 8;
+
+/// The consumer's default `fetch.max.bytes` (50 MiB).
+const DEFAULT_FETCH_MAX_BYTES: usize = 50 * 1024 * 1024;
+
 /// Consumer properties: KIP-848 group protocol, `earliest` reset, manual
 /// commit (the workload commits explicitly so the ledger reflects committed
 /// offsets). `security` (from [`security_props`]) is merged in last.
+///
+/// When `msg_size` needs a raised batch limit ([`record_size_limit`]), every
+/// batch is larger than the default `max.partition.fetch.bytes` (1 MiB). The
+/// broker then returns exactly one batch (one record) per partition per fetch,
+/// so the consumer drains about one record per partition per round trip. That
+/// is far slower than the producer, and the drain window runs out (P2-1MiB, Sep
+/// 2026 matrix). Such runs let a partition return
+/// [`LARGE_RECORD_BATCHES_PER_FETCH`] batches per fetch. Smaller runs keep the
+/// defaults.
 pub fn consumer_props(
     bootstrap: &str,
     group_id: &str,
     client_id: &str,
+    msg_size: usize,
     security: &HashMap<String, String>,
 ) -> HashMap<String, String> {
     let mut props = HashMap::from([
@@ -131,6 +148,15 @@ pub fn consumer_props(
         // just deleted — the harness owns topic lifecycle.
         ("allow.auto.create.topics".to_string(), "false".to_string()),
     ]);
+    if let Some(limit) = record_size_limit(msg_size) {
+        let per_partition = limit * LARGE_RECORD_BATCHES_PER_FETCH;
+        props.insert("max.partition.fetch.bytes".to_string(), per_partition.to_string());
+        // Keep `fetch.max.bytes` at least one partition's worth.
+        props.insert(
+            "fetch.max.bytes".to_string(),
+            per_partition.max(DEFAULT_FETCH_MAX_BYTES).to_string(),
+        );
+    }
     props.extend(security.iter().map(|(k, v)| (k.clone(), v.clone())));
     props
 }
@@ -207,11 +233,24 @@ mod tests {
         assert_eq!(p["enable.idempotence"], "true");
         assert_eq!(p["client.id"], "producer-rust-1");
 
-        let c = consumer_props("b:1", "g", "consumer-rust-1", &sec);
+        let c = consumer_props("b:1", "g", "consumer-rust-1", 100, &sec);
         assert_eq!(c["security.protocol"], "SASL_SSL");
         assert_eq!(c["sasl.jaas.config"], JAAS);
         assert_eq!(c["group.protocol"], "consumer");
         assert_eq!(c["enable.auto.commit"], "false");
         assert_eq!(c["group.id"], "g");
+    }
+
+    #[test]
+    fn consumer_fetch_sizes_are_raised_only_for_oversized_records() {
+        let small = consumer_props("b:1", "g", "c", 100, &HashMap::new());
+        assert!(!small.contains_key("max.partition.fetch.bytes"));
+        assert!(!small.contains_key("fetch.max.bytes"));
+
+        let mib = 1024 * 1024;
+        let large = consumer_props("b:1", "g", "c", mib, &HashMap::new());
+        let limit = record_size_limit(mib).expect("1 MiB needs a raised limit");
+        assert_eq!(large["max.partition.fetch.bytes"], (limit * 8).to_string());
+        assert_eq!(large["fetch.max.bytes"], (50 * mib).to_string());
     }
 }
