@@ -75,8 +75,9 @@ def recreate_topic(config, topic, partitions=-1):
     The admin binding is imported lazily so this module stays importable (and
     unit-testable) without the Rust bindings, which build on Linux only.
     """
-    from admin import AdminClient, NewTopic
-    from producer import KafkaError
+    # The paused admin binding's flat ``KafkaError`` (``code`` / ``message``
+    # properties); admin.py re-exports it from confluent_kafka._legacy_compat.
+    from admin import AdminClient, KafkaError, NewTopic
     # Reuse the startup fatal/transient classification so an ACL / auth failure
     # here surfaces as EXIT_FATAL rather than looping under the supervisor
     # (imported lazily to avoid a soakclient <-> soak_metrics import cycle).
