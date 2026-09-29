@@ -66,11 +66,12 @@ namespace Confluent.Kafka.UnitTests.Interop;
 /// take the test host down, which is the loud half of the ownership contract.
 /// </para>
 /// <para>
-/// ⚠ <c>removeMembersFromConsumerGroup</c>'s sync entry point produces a root only in
-/// member-list mode. In <c>removeAll</c> mode it returns the error instead ("A non-null return
-/// means the request could not be submitted at all — or that <c>remove_all</c> was true and
-/// <c>all()</c> failed"), so no in-process root carries a <c>removeAll</c> result: its
-/// <c>_all</c> read is pinned by <c>AdminP4ReaderWiringTests</c>, not driven on native memory.
+/// ⚠ In <c>removeAll</c> mode, <c>removeMembersFromConsumerGroup</c>'s sync entry point
+/// returns a <b>failed</b> <c>all()</c> as the error, with no root ("A non-null return means the
+/// request could not be submitted at all — or that <c>remove_all</c> was true and <c>all()</c>
+/// failed"), and against the mock <c>all()</c> always fails, so no in-process root carries a
+/// <c>removeAll</c> result: its <c>_all</c> read is pinned by <c>AdminP4ReaderWiringTests</c>,
+/// not driven on native memory.
 /// </para>
 /// </remarks>
 public sealed class AdminP13GroupOffsetsSingleCallbackTests
@@ -588,11 +589,12 @@ public sealed class AdminP13GroupOffsetsSingleCallbackTests
     }
 
     /// <summary>
-    /// ⚠ The removeAll half of D7 has <b>no</b> root to feed: the sync entry point returns the
-    /// failed <c>all()</c> directly (header: "A non-null return means … or that
-    /// <c>remove_all</c> was true and <c>all()</c> failed") and writes nothing to
-    /// <c>out_result</c>. Pinned here so the reachability claim in this class's remarks rests
-    /// on an observation, not on a reading of the header alone.
+    /// ⚠ The removeAll half of D7 has <b>no</b> root to feed against the mock: its
+    /// <c>all()</c> fails, and the sync entry point returns that failed <c>all()</c> directly
+    /// (header: "A non-null return means … or that <c>remove_all</c> was true and
+    /// <c>all()</c> failed") and writes nothing to <c>out_result</c>. Pinned here so the
+    /// reachability claim in this class's remarks rests on an observation, not on a reading of
+    /// the header alone.
     /// </summary>
     [Fact]
     public void RemoveMembersSync_RemoveAllMode_ReturnsTheErrorAndWritesNoRoot()
@@ -802,7 +804,7 @@ public sealed class AdminP13GroupOffsetsSingleCallbackTests
 
         /// <summary>
         /// <c>kafka_admin_AdminClient_remove_members_from_consumer_group</c> — returns the owned
-        /// error (null on success) and, in member-list mode, writes the owned result root to
+        /// error (null on success) and, on success, writes the owned result root to
         /// <paramref name="outResult"/>. In <c>removeAll</c> mode a failed <c>all()</c> is the
         /// return value instead, and nothing is written. <c>ref</c>, not <c>out</c>, so a caller
         /// can pre-zero the slot and observe that.

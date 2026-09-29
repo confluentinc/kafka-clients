@@ -224,10 +224,14 @@ public sealed class AdminP9PerKeyStage6Tests
     /// <remarks>
     /// <para>
     /// A duplicate id in the request collapses in the options' member set, so the core is
-    /// handed exactly the three distinct ids. Before M15/P13.1 this row armed a countdown for
-    /// that distinct count and needed one callback per member to reach zero; on the
-    /// single-callback ABI there is nothing to count down, and a leftover per-member arming
-    /// would leave the handle open below (no second callback ever arrives).
+    /// handed exactly the three distinct ids. What this test discriminates is the fire count —
+    /// one callback resolves <c>All()</c> and every member's accessor, and exactly one fire is
+    /// asserted after a settle window — and the release: a trampoline that resolved the
+    /// accessors without freeing would leave <c>IsClosed</c> false below. For which submit-side
+    /// mutations are and are not reachable on this RPC, see the remarks on
+    /// <c>AdminP13GroupOffsetsSingleCallbackTests.RemoveMembers_UntilTheCallbackFires_TheOperationStaysPendingAndRooted</c>.
+    /// Arming <c>SetPendingCallbacks(0)</c> + <c>ReleaseSubmitToken()</c> around the submit
+    /// fails this test (<c>All()</c> does not resolve within the deadline).
     /// </para>
     /// <para>
     /// <c>IsClosed</c> is the witness for "the <c>GCHandle</c> was freed" as well as for the
