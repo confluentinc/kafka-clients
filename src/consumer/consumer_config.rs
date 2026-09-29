@@ -292,6 +292,10 @@ impl ConsumerConfig {
 
     /// Config key: `bootstrap.servers`.
     pub const BOOTSTRAP_SERVERS_CONFIG: &'static str = "bootstrap.servers";
+    /// Config key: `client.dns.lookup` (see
+    /// [`CommonClientConfigs::CLIENT_DNS_LOOKUP_CONFIG`]). Java's `ConsumerConfig.java`
+    /// declares its own public alias of the `CommonClientConfigs` constant.
+    pub const CLIENT_DNS_LOOKUP_CONFIG: &'static str = CommonClientConfigs::CLIENT_DNS_LOOKUP_CONFIG;
     /// Config key: `client.id`.
     pub const CLIENT_ID_CONFIG: &'static str = "client.id";
     /// Config key: `client.rack`.
@@ -586,7 +590,7 @@ impl ConsumerConfig {
                 Self::BOOTSTRAP_SERVERS_CONFIG => {
                     config.bootstrap_servers = split_csv(value);
                 },
-                CommonClientConfigs::CLIENT_DNS_LOOKUP_CONFIG => {
+                Self::CLIENT_DNS_LOOKUP_CONFIG => {
                     config.client_dns_lookup = ClientDnsLookup::parse_config_value(value)?;
                 },
                 Self::CLIENT_ID_CONFIG => {
@@ -1024,6 +1028,7 @@ mod tests {
     /// typed [`ClientDnsLookup`], as `ConsumerConfig`'s `ConfigDef` defines it.
     #[test]
     fn test_client_dns_lookup() {
+        assert_eq!(ConsumerConfig::CLIENT_DNS_LOOKUP_CONFIG, "client.dns.lookup");
         assert_eq!(
             ConsumerConfig::new(&HashMap::new()).unwrap().client_dns_lookup(),
             ClientDnsLookup::UseAllDnsIps
