@@ -226,6 +226,29 @@ static void test_admin_client_new_rejects_empty_bootstrap(void) {
     kafka_admin_AdminClientProperties_destroy(props);
 }
 
+/* Java wraps a construction failure as `new KafkaException("Failed to create
+ * new KafkaAdminClient", exc)`; `kafka_common_Error_cause` hands back `exc`, an
+ * owned handle that outlives its parent, and a cause-less error yields NULL. */
+static void test_admin_client_new_failure_exposes_its_cause(void) {
+    kafka_admin_AdminClientProperties_t *props = kafka_admin_AdminClientProperties_new();
+    kafka_admin_AdminClientProperties_put(props, "bootstrap.servers", "not-a-host-port");
+    kafka_common_Error_t *err = NULL;
+    TEST_ASSERT_NULL(kafka_admin_AdminClient_new(props, &err));
+    TEST_ASSERT_NOT_NULL(err);
+    TEST_ASSERT_EQUAL_STRING("Failed to create new KafkaAdminClient", kafka_common_Error_message(err));
+    kafka_common_Error_t *cause = kafka_common_Error_cause(err);
+    TEST_ASSERT_NOT_NULL(cause);
+    kafka_common_Error_destroy(err);
+    /* Owned: still readable after the parent is gone. */
+    TEST_ASSERT_NOT_NULL(kafka_common_Error_message(cause));
+    kafka_common_Error_destroy(cause);
+    kafka_admin_AdminClientProperties_destroy(props);
+
+    kafka_common_Error_t *leaf = kafka_common_Error_new(-1, "no cause");
+    TEST_ASSERT_NULL(kafka_common_Error_cause(leaf));
+    kafka_common_Error_destroy(leaf);
+}
+
 static void test_admin_client_new_null_props(void) {
     kafka_common_Error_t *err = NULL;
     TEST_ASSERT_NULL(kafka_admin_AdminClient_new(NULL, &err));
@@ -7290,6 +7313,7 @@ int main(void) {
     RUN_TEST(test_admin_properties_from_configs);
     RUN_TEST(test_admin_client_new_rejects_empty_bootstrap);
     RUN_TEST(test_admin_client_new_null_props);
+    RUN_TEST(test_admin_client_new_failure_exposes_its_cause);
     RUN_TEST(test_mock_admin_create_topics_sync);
     RUN_TEST(test_mock_admin_create_topics_partial_failure);
     RUN_TEST(test_mock_admin_create_topics_broker_defaults);
