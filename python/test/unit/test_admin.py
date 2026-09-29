@@ -2289,6 +2289,35 @@ async def test_create_acls_resolves_an_undefined_enum_code_async():
         assert str(exc.value) == "Not implemented yet"
 
 
+def test_delete_acls_resolves_a_filter_with_an_undefined_enum_code():
+    """The native `delete_acls` callback is keyed by the Java-normalised
+    filter (an undefined code is UNKNOWN), so a filter with operation 99 used
+    to leave its Future pending forever. It must resolve, as must a filter
+    differing only in another undefined code (the same filter to Java)."""
+    with MockAdminClient(1) as admin:
+        a = AclBindingFilter(ResourceType.TOPIC, "t", PatternType.LITERAL, None, None, 99,
+                             AclPermissionType.ANY)
+        b = AclBindingFilter(ResourceType.TOPIC, "t", PatternType.LITERAL, None, None, 98,
+                             AclPermissionType.ANY)
+        futures = admin.delete_acls([a, b, AclBindingFilter()])
+        assert len(futures) == 3
+        for future in futures.values():
+            with pytest.raises(KafkaError) as exc:
+                future.result(timeout=5)
+            assert str(exc.value) == "Not implemented yet"
+
+
+@pytest.mark.asyncio
+async def test_delete_acls_resolves_an_undefined_enum_code_async():
+    async with AsyncMockAdminClient(1) as admin:
+        f = AclBindingFilter(ResourceType.TOPIC, "t", 99, None, None, AclOperation.ANY,
+                             AclPermissionType.ANY)
+        (future,) = (await admin.delete_acls([f])).values()
+        with pytest.raises(KafkaError) as exc:
+            await asyncio.wait_for(future, timeout=5)
+        assert str(exc.value) == "Not implemented yet"
+
+
 def test_describe_acls_raises_because_it_has_one_future_for_the_whole_call():
     with MockAdminClient(1) as admin:
         with pytest.raises(KafkaError) as exc:
