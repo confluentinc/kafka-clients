@@ -23,7 +23,7 @@ name = "verifiable_consumer"
 path = "src/bin/verifiable_consumer.rs"
 
 [dependencies]
-confluent-kafka-rust = { path = "../.." }
+confluent-kafka = { path = "../.." }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "signal"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

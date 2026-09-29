@@ -14,6 +14,12 @@
  * limitations under the License.
  */
 
+// The generator's sources, compiled into this build script rather than taken
+// as a `generator` dependency: a path-only dependency cannot be published, and
+// these sources ship inside the package (see `generator/crate/Cargo.toml`).
+#[path = "generator/src/lib.rs"]
+mod generator;
+
 use std::env;
 use std::fs;
 use std::path::Path;
@@ -33,7 +39,6 @@ fn format_generated_dir(dir: &Path) {
 fn main() {
     println!("cargo:rerun-if-changed=generator/messages/");
     println!("cargo:rerun-if-changed=generator/test-messages/");
-    println!("cargo:rerun-if-changed=src/bin/message_generator.rs");
     // The emitted code depends on the generator's own source, not just on the
     // message specs. Without this, editing the generator leaves the previously
     // generated files in OUT_DIR untouched and the build silently stale.
@@ -107,6 +112,16 @@ fn main() {
     // Generate C header when the ffi feature is enabled
     #[cfg(feature = "ffi")]
     {
+        // The published package leaves the C FFI out (see the `include` list in
+        // `Cargo.toml`): fail with a clear message rather than rustc's "file not
+        // found for module `ffi`".
+        if !Path::new("src/ffi").exists() {
+            panic!(
+                "the `ffi` feature is not available in the published crate: \
+                 the C FFI is built from the source repository (c/ and python/)"
+            );
+        }
+
         println!("cargo:rerun-if-changed=src/");
         println!("cargo:rerun-if-changed=cbindgen.toml");
 

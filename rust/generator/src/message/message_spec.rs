@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-use crate::message::{FieldSpec, MessageSpecType, RequestListenerType, StructSpec, Versions};
+use super::{FieldSpec, MessageSpecType, RequestListenerType, StructSpec, Versions};
 use serde::{Deserialize, Deserializer};
 
 /// Top-level message specification for Kafka messages
@@ -215,7 +215,7 @@ impl<'de> Deserialize<'de> for MessageSpec {
             #[serde(
                 rename = "latestVersionUnstable",
                 default,
-                deserialize_with = "crate::message::deserialize_lenient_bool"
+                deserialize_with = "super::deserialize_lenient_bool"
             )]
             latest_version_unstable: bool,
         }
