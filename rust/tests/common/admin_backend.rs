@@ -23,6 +23,7 @@ use std::time::Duration;
 
 use confluent_kafka::admin::ConfigEntryOptionsBuilder;
 use confluent_kafka::admin::config_entry::{ConfigSource, ConfigType};
+use confluent_kafka::admin::mock_admin_client::Builder;
 use confluent_kafka::admin::{
     AbortTransactionOptions, AbortTransactionSpec, Admin, AdminClient, AdminClientConfig, AlterClientQuotasOptions,
     AlterConfigOp, AlterConfigsOptions, AlterConsumerGroupOffsetsOptions, AlterPartitionReassignmentsOptions,
@@ -37,11 +38,11 @@ use confluent_kafka::admin::{
     FenceProducersOptions, FinalizedVersionRange, GroupListing, GroupOffsets, ListConfigResourcesOptions,
     ListConsumerGroupOffsetsOptions, ListConsumerGroupOffsetsSpec, ListGroupsOptions, ListOffsetsOptions,
     ListOffsetsResultInfo, ListPartitionReassignmentsOptions, ListTopicsOptions, ListTransactionsOptions,
-    LogDirDescription, MockAdminClient, NewPartitionReassignment, NewPartitions, NewTopic, OffsetSpec,
-    PartitionProducerState, PartitionReassignment, RecordsToDelete, RemoveMembersFromConsumerGroupOptions,
-    RenewDelegationTokenOptions, SupportedVersionRange, TerminateTransactionOptions, TopicDescription, TopicListing,
-    TopicMetadataAndConfig, TransactionDescription, TransactionListing, UpdateFeaturesOptions,
-    UserScramCredentialAlteration, UserScramCredentialsDescription,
+    LogDirDescription, NewPartitionReassignment, NewPartitions, NewTopic, OffsetSpec, PartitionProducerState,
+    PartitionReassignment, RecordsToDelete, RemoveMembersFromConsumerGroupOptions, RenewDelegationTokenOptions,
+    SupportedVersionRange, TerminateTransactionOptions, TopicDescription, TopicListing, TopicMetadataAndConfig,
+    TransactionDescription, TransactionListing, UpdateFeaturesOptions, UserScramCredentialAlteration,
+    UserScramCredentialsDescription,
 };
 use confluent_kafka::common::acl::{AclBinding, AclBindingFilter, AclOperation};
 use confluent_kafka::common::config::{ConfigResource, config_resource};
@@ -1104,14 +1105,16 @@ impl RustNativeAdmin {
         Ok(Self { admin: AdminClient::create(config)? })
     }
 
-    /// Build a broker-less [`MockAdminClient`] with `num_brokers` brokers.
+    /// Build a broker-less [`MockAdminClient`](confluent_kafka::admin::MockAdminClient) with `num_brokers` brokers.
     ///
     /// # Errors
     ///
-    /// Propagates [`MockAdminClient::create`]'s rejection of `num_brokers < 1`,
-    /// which is Java's `brokers.get(0)` throw.
+    /// Propagates the [`Builder`]'s rejection of `num_brokers < 1`: Java's
+    /// `subList(0, n)` throw for a negative count, and its `brokers.get(0)` throw
+    /// in `build()` for zero.
     pub fn mock(num_brokers: i32) -> Result<Self, Error> {
-        Ok(Self { admin: Box::new(MockAdminClient::create(num_brokers)?) })
+        let mock = Builder::new().set_num_brokers(num_brokers)?.build()?;
+        Ok(Self { admin: Box::new(mock) })
     }
 }
 
