@@ -1,0 +1,11 @@
+# The librdkafka venv of the Python perf benchmarks (`make init-venv-librdkafka`,
+# venv-librdkafka/ at the repo root). It holds the PyPI confluent-kafka client
+# for the CLIENT_VERSION=2 baseline and for librdkafka_helpers.py (topic
+# recreation, end-of-run verification). It must not share a venv with this
+# repo's package: both install the top-level package `confluent_kafka`.
+confluent-kafka>=2.13.0
+# performance_common.py (process CPU/RSS sampling).
+psutil
+# consumer_performance_test.py imports pytest at module level (its in-suite
+# test entry), also when run as the CLIENT_VERSION=2 script.
+pytest
