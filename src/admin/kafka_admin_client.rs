@@ -6981,7 +6981,7 @@ mod tests {
         let error = failure.lock().unwrap().take().expect("the call must be failed");
         assert_eq!(
             error.message(),
-            "Internal error sending createRequestBoom to localhost:9092 (id: 0 rack: None isFenced: false)."
+            "Internal error sending createRequestBoom to localhost:9092 (id: 0 rack: null isFenced: false)."
         );
         // Java's replacement is a bare `KafkaException`.
         assert!(error.is_kafka_error(), "Java's replacement is a Kafka error: {error:?}");
