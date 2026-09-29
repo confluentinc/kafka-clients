@@ -433,7 +433,7 @@ def test_kafka_producer_send_after_close_raises():
 
 def test_kafka_producer_invalid_config():
     with pytest.raises(RuntimeError):
-        KafkaProducer({"batch.size": "not-a-number"})
+        KafkaProducer({"bootstrap.servers": "localhost:9092", "batch.size": "not-a-number"})
 
 
 def test_kafka_producer_config_not_dict():
@@ -781,7 +781,7 @@ async def test_async_kafka_producer_metrics_after_close_raises():
 
 async def test_async_kafka_producer_invalid_config():
     with pytest.raises(RuntimeError):
-        AsyncKafkaProducer({"batch.size": "not-a-number"})
+        AsyncKafkaProducer({"bootstrap.servers": "localhost:9092", "batch.size": "not-a-number"})
 
 
 async def test_async_kafka_producer_config_not_dict():
