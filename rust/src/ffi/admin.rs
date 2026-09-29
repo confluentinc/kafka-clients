@@ -18816,25 +18816,15 @@ unsafe fn read_client_quota_entity(
 ///
 /// # Errors
 ///
-/// Propagates the per-row errors of [`read_client_quota_entity`], and rejects a
-/// duplicate entity across rows.
+/// Propagates the per-row errors of [`read_client_quota_entity`].
 ///
-/// **Deviation from Java, deliberate.** Java does *not* reject: it keeps the
-/// `Collection<ClientQuotaAlteration>` intact and hands it verbatim to
+/// A repeated entity **across** rows is kept, exactly as Java keeps it: Java
+/// hands the `Collection<ClientQuotaAlteration>` verbatim to
 /// `new AlterClientQuotasRequest.Builder(entries, ...)`, so both alterations
-/// reach the broker; only the *future* map collapses, because
-/// `futures.put(entry.entity(), ...)` overwrites the earlier entry
-/// (`KafkaAdminClient.java:4301-4313`). `src/admin/kafka_admin_client.rs`
-/// mirrors that. The C layer is stricter because the collapse is not
-/// attributable here: the result crosses as a flat, index-addressed array of
-/// entities built from that map, so a duplicate silently yields fewer rows than
-/// the request had and the caller — who passed parallel arrays, not a map —
-/// has no way to learn which of its two rows the surviving outcome describes.
-/// A Java caller holds the map and can see it shrink. Rejecting at the exact
-/// row index turns unattributable data loss into a named error; the cost is
-/// that a C caller cannot express "send two alterations for one entity and let
-/// the broker apply both in order", which is the only thing Java can do here
-/// that this cannot.
+/// reach the broker, and only the *future* map collapses, because
+/// `futures.put(entry.entity(), ...)` keys it by entity
+/// (`KafkaAdminClient.java:4314-4342`). `src/admin/kafka_admin_client.rs`
+/// mirrors that, and so the result has one entry per distinct entity.
 ///
 /// # Safety
 ///
@@ -18856,7 +18846,6 @@ unsafe fn read_client_quota_alterations(
         return Ok(Vec::new());
     }
     let mut out: Vec<ClientQuotaAlteration> = Vec::with_capacity(n);
-    let mut seen: HashSet<ClientQuotaEntity> = HashSet::with_capacity(n);
     for row in 0..n {
         // SAFETY: `entity_types` is non-null (checked above) and, per this helper's `#
         // Safety` (upheld by `kafka_admin_AdminClient_alter_client_quotas` / `_async`:
@@ -18889,11 +18878,6 @@ unsafe fn read_client_quota_alterations(
         // inner array has the matching per-row count of entries, with string entries NULL
         // or valid C strings.
         let entity = unsafe { read_client_quota_entity(types, names, *entity_counts.add(row), row)? };
-        if !seen.insert(entity.clone()) {
-            return Err(Error::local_illegal_argument(format!(
-                "quota alteration at index {row} repeats an entity already altered by an earlier entry"
-            )));
-        }
 
         let op_count = if op_counts.is_null() {
             0
@@ -21167,18 +21151,11 @@ pub type kafka_admin_AdminClient_alter_client_quotas_callback_t =
 ///   without applying.
 /// - `timeout_ms`: per-request timeout, or negative for the client default.
 ///
-/// A repeated entity type within one alteration, or a repeated entity across
-/// alterations, is rejected: Java keys both by a `Map`, so a duplicate could
-/// only be silently dropped.
-///
-/// This rejection is a deliberate divergence from
-/// [`kafka_admin_AdminClient_alter_user_scram_credentials`], which lets
-/// duplicate users through even though `KafkaAdminClient` collapses their
-/// futures the same way. The difference is whether the caller can re-derive the
-/// key: a quota entity is a compound key **this layer assembles** from
-/// `entity_types[i]` / `entity_names[i]`, so a C caller holding parallel rows
-/// cannot tell which row the one surviving outcome describes; a SCRAM user is a
-/// plain string the caller already holds and can match by name.
+/// A repeated entity type **within** one alteration is rejected: Java's
+/// `ClientQuotaEntity` is a `Map`, so it cannot express one. A repeated entity
+/// **across** alterations is sent as Java sends it — both alterations reach the
+/// broker, in order — and, as Java's per-entity future map collapses it, the
+/// result holds one entry for that entity (`KafkaAdminClient.java:4314-4342`).
 ///
 /// # Safety
 ///
@@ -21251,7 +21228,8 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_alter_client_quotas(
 /// runs **synchronously on the calling thread, before this function returns,
 /// for every key**, when the RPC cannot be submitted at all (a NULL `admin`
 /// handle, a NULL entity type or op key, an alteration with no entity types,
-/// or a repeated entity type or entity). And it runs on a **tokio worker
+/// or a repeated entity type within one entity). A repeated entity across
+/// alterations is sent twice, as in Java, and is one key. And it runs on a **tokio worker
 /// thread** if the dispatcher's completion queue can no longer be reached
 /// when a given entity's result arrives. Destroying the handle does not cause
 /// that — an outstanding operation holds its own sender, so it cannot
@@ -21293,10 +21271,10 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_alter_client_quotas_async(
     user_data: *mut c_void,
 ) {
     // Computed independently of `read_client_quota_alterations`'s validated
-    // (and duplicate-rejecting) parse, so every requested row still gets its
-    // own callback via `admin_async_per_key_op`'s fan-out even when that
-    // parse fails. `ClientQuotaEntity::new` does not validate, so this is a
-    // real entity, not a raw-tuple stand-in.
+    // parse, so every requested entity still gets its callback via
+    // `admin_async_per_key_op`'s fan-out even when that parse fails.
+    // `ClientQuotaEntity::new` does not validate, so this is a real entity,
+    // not a raw-tuple stand-in; a repeated entity is one key there.
     let keys = unsafe { read_client_quota_entity_keys(entity_types, entity_names, entity_counts, count) };
     // SAFETY: `read_client_quota_alterations` requires each outer array to be null or have
     // `count` entries, each entry null or with the matching per-row count of entries, which
@@ -32036,7 +32014,7 @@ mod tests {
     }
 
     #[test]
-    fn read_client_quota_alterations_rejects_duplicate_entity_types_and_entities() {
+    fn read_client_quota_alterations_rejects_a_repeated_type_but_keeps_a_repeated_entity() {
         let (_dup, dup) = c_array(&["user", "user"]);
         let (_names, names) = c_array_opt(&[Some("alice"), Some("bob")]);
         let entity_types = [dup.as_ptr()];
@@ -32062,9 +32040,8 @@ mod tests {
         .expect_err("rejected");
         assert_eq!(err.message(), "quota alteration at index 0 repeats entity type `user`");
 
-        // The same entity twice across two alterations. Java accepts it and
-        // sends both; this layer rejects because the flat C result could not
-        // attribute the one surviving outcome to either row.
+        // The same entity twice across two alterations: Java sends both, in
+        // order (`KafkaAdminClient.java:4314-4342`), and so does this layer.
         let (_t, t) = c_array(&["user"]);
         let (_n, n) = c_array_opt(&[Some("alice")]);
         let entity_types = [t.as_ptr(), t.as_ptr()];
@@ -32073,8 +32050,8 @@ mod tests {
         // matching `count` 2, each row pointing at the one-entry inner arrays `t` / `n`
         // (into `CString`s held by `_t` / `_n`) that `[1i32, 1]` declares; the four op
         // arrays are NULL as `read_client_quota_alterations`'s `# Safety` permits, and the
-        // repeated entity is passed deliberately to exercise the documented error path.
-        let err = unsafe {
+        // repeated entity is passed deliberately to show it is accepted, as in Java.
+        let alterations = unsafe {
             read_client_quota_alterations(
                 entity_types.as_ptr(),
                 entity_names.as_ptr(),
@@ -32086,11 +32063,9 @@ mod tests {
                 2,
             )
         }
-        .expect_err("rejected");
-        assert_eq!(
-            err.message(),
-            "quota alteration at index 1 repeats an entity already altered by an earlier entry"
-        );
+        .expect("a repeated entity is sent, as in Java");
+        assert_eq!(alterations.len(), 2);
+        assert_eq!(alterations[0].entity(), alterations[1].entity());
     }
 
     // -- Client-quota result flattening --------------------------------------

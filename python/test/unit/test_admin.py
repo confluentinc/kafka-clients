@@ -2416,17 +2416,15 @@ def test_alter_client_quotas_keeps_the_default_entity_distinct():
         assert by_name["alice"].entries == {ClientQuotaEntity.USER: "alice"}
 
 
-def test_alter_client_quotas_rejects_a_duplicate_entity():
-    """A deliberate deviation: Java accepts a duplicate entity -- both
-    alterations are sent and only the future map collapses
-    (`KafkaAdminClient.java:4301-4313`) -- but the C result is a flat array
-    built from that map, so the surviving outcome could not be attributed to
-    either row.
+def test_alter_client_quotas_sends_a_repeated_entity_like_java():
+    """Java sends both alterations of a repeated entity and only its future
+    map collapses (`KafkaAdminClient.java:4314-4342`), so the one distinct
+    entity's one Future carries the RPC's own outcome -- here the mock's
+    "Not implement yet", as Java's `MockAdminClient.alterClientQuotas` throws.
 
-    Phase F: the whole submission fails, so the one distinct entity's own
-    Future -- `_alter_client_quotas_keys_and_spec` still only makes one dict
-    entry for the (deduplicated) repeated entity -- raises rather than the
-    call raising synchronously."""
+    (This used to assert a C-layer rejection, "quota alteration at index 1
+    repeats an entity already altered by an earlier entry", a deliberate
+    deviation from Java that the FFI no longer makes.)"""
     with MockAdminClient(1) as admin:
         entity = ClientQuotaEntity({ClientQuotaEntity.USER: "alice"})
         (future,) = admin.alter_client_quotas([
@@ -2435,8 +2433,7 @@ def test_alter_client_quotas_rejects_a_duplicate_entity():
         ]).values()
         with pytest.raises(KafkaError) as exc:
             future.result(timeout=5)
-        assert str(exc.value) == (
-            "quota alteration at index 1 repeats an entity already altered by an earlier entry")
+        assert str(exc.value) == "Not implement yet"
 
 
 def test_client_quota_op_none_value_means_remove():
