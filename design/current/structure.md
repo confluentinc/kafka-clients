@@ -509,13 +509,17 @@ rust/src/admin/
 
 rust/src/common/topic_collection.rs, rust/src/common/topic_partition_info.rs
 rust/src/common/requests/{create_topics,delete_topics,create_partitions,
-                     delete_records}_{request,response}.rs
+                     delete_records,describe_topic_partitions}_{request,response}.rs
 rust/tests/integration/admin_{topics,partitions_records}_test.rs
 ```
 
-`describe_topics` (by name and by id) goes through the Metadata API, mirroring
-Java's `generateDescribeTopicsCallWithMetadataApi` / `handleDescribeTopicsByIds`
-rather than `DescribeTopicPartitions` cursor pagination.
+`describe_topics` by name mirrors Java's
+`handleDescribeTopicsByNamesWithDescribeTopicPartitionsApi`: a `describeCluster`
+call for the node map, then the paginated `DescribeTopicPartitions` call
+(`rust/src/common/requests/describe_topic_partitions_{request,response}.rs`), which
+falls back to the Metadata-API call (`generateDescribeTopicsCallWithMetadataApi`)
+on `UnsupportedVersionException`. By id it uses the Metadata API
+(`handleDescribeTopicsByIds`), as Java does.
 
 ## Cluster, configs, log dirs
 
