@@ -124,12 +124,13 @@ public sealed class AlterConsumerGroupOffsetsResult
     /// failure it sees — it first collects every failed partition
     /// (<c>partitionsFailed</c>, <c>:61-64</c>) and only then throws, so the thrown
     /// exception's message names <b>every</b> failed partition, not only the first. The
-    /// exception itself carries the <b>first</b> failing partition's error code and
-    /// retriable flag (there is no way to merge two different codes into one), matching
-    /// Java throwing that partition's own <c>error.exception(message)</c> — Java
-    /// overrides the message on the thrown instance (<c>:66</c>), which is mirrored here
-    /// by constructing a fresh <see cref="KafkaException"/> carrying the same code/
-    /// retriable pair with the aggregate message.
+    /// exception itself carries the <b>first</b> failing partition's classification: its
+    /// error code, retriable flag and hierarchy predicates (there is no way to merge two
+    /// different codes into one), matching Java throwing that partition's own
+    /// <c>error.exception(message)</c> — Java overrides the message on the thrown instance
+    /// (<c>:76-77</c>), which is mirrored here by constructing a fresh
+    /// <see cref="KafkaException"/> carrying the same classification with the aggregate
+    /// message.
     /// </para>
     /// <para>
     /// A fresh task per call, as Java allocates a fresh <c>KafkaFutureImpl</c> via
@@ -159,14 +160,22 @@ public sealed class AlterConsumerGroupOffsetsResult
         }
 
         // Java's `"Failed altering group offsets for the following partitions: " +
-        // partitionsFailed` (:65), where `partitionsFailed` is a `List<TopicPartition>`
-        // whose `toString()` renders as "[tp1, tp2]".
+        // partitionsFailed` (:76-77), where `partitionsFailed` is a `List<TopicPartition>`
+        // whose `toString()` renders as "[tp1, tp2]". Java throws it as
+        // `error.exception(message)`, a new instance of the failure's own exception class
+        // (Errors.java:462-469). That keeps the failure's class, so the rebuild keeps its
+        // classification: the code, the retriable flag and the hierarchy predicates.
         throw new KafkaException(
             firstFailure.Code,
             string.Format(
                 CultureInfo.InvariantCulture,
                 "Failed altering group offsets for the following partitions: [{0}]",
                 string.Join(", ", failedPartitions!)),
-            firstFailure.IsRetriable);
+            firstFailure.IsRetriable,
+            firstFailure.IsTransactionAbortableError,
+            firstFailure.IsApplicationRecoverableError,
+            firstFailure.IsInvalidConfigurationError,
+            firstFailure.IsAuthorizationError,
+            firstFailure.IsOutOfOrderSequenceError);
     }
 }

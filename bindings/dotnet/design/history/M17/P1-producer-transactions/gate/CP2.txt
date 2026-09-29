@@ -1,0 +1,1667 @@
+M17/P1 CP2 gate record: D6's predicates, D2's constructors, S2, S3's CP2 half
+=============================================================================
+
+Recorded by dotnet-actor 84. Times are the host clock (IST, UTC+05:30), on
+2026-09-28 from 12:00 and on 2026-09-29 before 12:00, unless a date is
+given. This file replaces its 00:33 version, which was written before Critic
+84's CP2 findings 84.10 and 84.11 (now in COMMENTS.DONE.84.md). That version
+replaced one of 23:02, written before the Manager's decision on observation
+(b), which itself replaced a draft of 16:38. This version was amended for
+Critic 84's cycle-8 noted item, which changed one xmldoc line at 04:21:26,
+Admin/TopicMetadataAndConfig.cs:72, and then for the Manager's decision on
+observation (n), which changed eight more of its xmldoc lines, :20, :25-30
+and :71, at 05:06:23 (section "Critic cycle 8"). Unless they say
+otherwise, the figures below were measured on the bytes of 03:08:30, final
+but for those lines; the Files, SHA-256 and Size figures include them. The
+record check (scratch tmac/recheck/record_check.sh, 03:37:37-03:37:38)
+re-measured the file state and the counts marked with its time, scratch
+c8/record_check.sh (04:37:38) the values the cycle-8 amendments cite, and
+scratch n/record_check.sh (05:24:25) the values the (n) amendments cite.
+Plan: design/history/M17/P1-producer-transactions/PLAN.md, blob ff2f0224 at
+HEAD (committed in eb5e3073; git diff --quiet HEAD on it exits 0), which is
+the contract: the §4.3 CP2 row, D2's constructor rule (:268-288), D6
+(:568-628), §5.1, §5.2 S2 (:1480-1505) and S3's CP2 half (:1507-1520), §5.3.2
+and the §10.2 execution note. For the change to
+AlterConsumerGroupOffsetsResult.All(), the contract is the Manager's decision
+on observation (b). For the change to TopicMetadataAndConfig.EnsureSuccess
+and the eight-argument ctor's new parameter, it is the Manager's choice of
+option (a) for 84.10; for that ctor's summary, 84.11's text; for
+Admin/TopicMetadataAndConfig.cs:72, the Manager's direction on Critic 84's
+cycle-8 noted item; for that file's :20, :25-30 and :71, the Manager's
+decision on observation (n). PLAN.md is not edited at CP2: the Manager is
+updating the amendment draft (F1/F2). This file is a summary (Q20). Raw
+logs stay in the Actor's scratch directory and are not committed. Per
+§10.2, CP2 is reviewed uncommitted: CP2 stages nothing.
+Timing.
+- The six D6/D2 files had their D6/D2 content by 17:33:20, and
+  Admin/AlterConsumerGroupOffsetsResult.cs its final content by 23:25:12.
+  For 84.10 and 84.11, on 2026-09-29, KafkaException.cs was last written at
+  03:05:36, Admin/TopicMetadataAndConfig.cs at 03:05:47, and
+  PublicAdminCreateTopicsTests.cs and
+  PublicAdminAlterConsumerGroupOffsetsTests.cs at 03:08:30.
+  Admin/TopicMetadataAndConfig.cs was written again at 04:21:26, for the
+  cycle-8 line, and at 05:06:23, for (n)'s lines.
+- The restore points were copied with their mtimes kept, and each is
+  cmp-identical to its file (03:38, scratch tmac/recheck/restore_cmp.out):
+  scratch tmac/mut/restore/
+  (KafkaException.cs 03:05:36, TopicMetadataAndConfig.cs 03:05:47,
+  PublicAdminCreateTopicsTests.cs 03:08:30, Admin/CreateTopicsResult.cs
+  2026-09-25 18:08:53), mut/restore/ (KafkaException.cs 03:11:14;
+  ConsumerGroupMetadata.cs and KafkaExceptionTests.cs 17:08:37) and
+  admin/mut/restore/ (AlterConsumerGroupOffsetsResult.cs 23:25:12,
+  PublicAdminAlterConsumerGroupOffsetsTests.cs 03:08:30). The mutated files'
+  mtimes are their runs' last restores: KafkaException.cs 03:17:20,
+  KafkaExceptionTests.cs 03:17:25, ConsumerGroupMetadata.cs 03:17:31,
+  AlterConsumerGroupOffsetsResult.cs 03:18:23, TopicMetadataAndConfig.cs
+  03:10:52 (04:21:26 after the cycle-8 edit, 05:06:23 after (n)'s) and
+  Admin/CreateTopicsResult.cs 03:19:29. Since (n)'s edit
+  TopicMetadataAndConfig.cs differs from its restore point in lines 20,
+  25-30, 71 and 72 alone (scratch n/record_check.sh).
+- These ran after 03:08:30 on 2026-09-29, on the bytes all ten code files
+  had then: the TopicMetadataAndConfig mutations T1-T3 (03:10:06-03:10:15),
+  their swap sweep (03:10:26-03:10:52), K1 (03:11:12-03:11:16), the
+  compiler probe (03:11:35-03:11:40), the reader probe (03:12:09), G1-G7
+  (03:13:22-03:14:15), size.sh (03:14:16), the re-runs of the earlier
+  mutation sets (03:17:10-03:17:33, 03:17:51-03:17:59 and 03:17:59-03:18:23),
+  R1 (03:19:27-03:19:31) and the record recheck (03:21:15). The G sections
+  below report the 03:13:22 run. After the cycle-8 edit: the sweep (04:20:16
+  and 04:21:36), the re-gate (04:22:09-04:24:40) and the measurements of
+  observation (o) (04:25:52-04:30:51). For (n)'s edit: the sweep (05:06:03
+  before it, 05:06:47 after), the final re-gate (05:07:51-05:08:52) and
+  size.sh (05:09:42).
+
+Preconditions
+-------------
+- git rev-parse HEAD is 5e11692533fead13dc3a027bf006253f9108806c on
+  prashah_dev_dotnet_producer_transactions, at the start of this round and
+  at 03:14:15 on 2026-09-29 (G7). The four CP0/CP1 commits are on the
+  branch above 76629aea: aaa3d9e8 (the CP0 plan), b8d2b3d1 (the CP0
+  baselines), eb5e3073 (the plan amendments) and 5e116925 (CP1). The index
+  is empty (G7). git diff --quiet HEAD over the committed CP0/CP1 paths
+  (PLAN.md, gate/CP0.txt, gate/CP0-roster.txt, gate/CP0-failed.txt,
+  gate/CP1.txt, NativeMethods.cs and
+  Interop/ProducerTransactionNativeMethodsTests.cs) exits 0 (03:14:15).
+  Each tracked CP2 file's HEAD blob equals its 76629aea blob (03:37:37), so
+  each CP2 file's diff against 76629aea is CP2's alone.
+- The earlier versions' 13-file no-overlap guard covered those then
+  uncommitted CP0/CP1 files, COMMENTS.84.md, COMMENTS.DONE.84.md and four
+  scratch messages. The git diff --quiet HEAD check above replaces it.
+- bindings/dotnet/COMMENTS.84.md held Critic 84's CP2 findings 84.10 and
+  84.11 (11029 bytes) at the start of this round, and still at 03:14:15.
+  Both are fixed (What CP2 adds; note 12; observation (k)) and moved
+  to COMMENTS.DONE.84.md, and COMMENTS.84.md is left empty.
+- Admin/RemoveMembersFromConsumerGroupResult.cs, which the Manager's
+  decision leaves alone: its SHA-256 (e76b1e71b5ce2ef2) is OK at 03:14:15
+  and 03:37:37, and git diff --quiet 76629aea on it exits 0 at both times.
+  Admin/CreateTopicsResult.cs, which R1 mutates and restores, is unchanged
+  too: SHA-256 741dd929fd24b570 after R1's restore (03:19:31) and at
+  03:37:37, when git diff --quiet 76629aea on it exits 0.
+
+Files
+-----
+The +/- counts are git diff --numstat 76629aea. The line counts are wc -l at
+76629aea and in the worktree.
+- M  bindings/dotnet/src/Confluent.Kafka/KafkaException.cs
+     +213 / -16 (210 -> 407 lines)
+- M  bindings/dotnet/src/Confluent.Kafka/ConsumerGroupMetadata.cs
+     +104 / -19 (65 -> 150 lines)
+- M  bindings/dotnet/src/Confluent.Kafka/Internal/Interop/ConsumerGroupMetadataMarshal.cs
+     +2 / -1 (58 -> 59 lines)
+- M  bindings/dotnet/src/Confluent.Kafka/SerializationException.cs
+     +5 / -5 (75 -> 75 lines); all ten changed lines are xmldoc, none is
+     code. Outside §4.3's list; see note 3.
+- M  bindings/dotnet/tests/Confluent.Kafka.UnitTests/KafkaExceptionTests.cs
+     +303 / -4 (105 -> 404 lines), in three hunks:
+       @@ -14,8 +14,11 @@ three usings (System.Globalization, System.Linq,
+         Confluent.Kafka.Internal.Interop);
+       @@ -23,10 +26,12 @@ the class summary. Its four deleted lines described
+         the exception as "code + retriable + fatal + message"; the type has
+         no fatal flag;
+       @@ -102,4 +107,298 @@ the S2 block, appended.
+     The five existing facts are unchanged, each 5 lines lower.
+- ?? bindings/dotnet/tests/Confluent.Kafka.UnitTests/ConsumerGroupMetadataTests.cs
+     new, 271 lines (absent at 76629aea)
+- M  bindings/dotnet/src/Confluent.Kafka/Admin/AlterConsumerGroupOffsetsResult.cs
+     +18 / -9 (172 -> 181 lines), in two hunks:
+       @@ -124,12 +124,13 @@ All()'s remarks;
+       @@ -159,14 +160,22 @@ the comment above the ctor call in All(), and
+         the call.
+     Outside §4.3's list; see note 12.
+- M  bindings/dotnet/tests/Confluent.Kafka.UnitTests/PublicAdminAlterConsumerGroupOffsetsTests.cs
+     +169 / -0 (223 -> 392 lines), in four hunks:
+       @@ -14,9 +14,12 @@ three usings (System.Globalization, System.Linq,
+         Confluent.Kafka.Internal.Interop);
+       @@ -58,6 +61,9 @@ the constant GroupAuthorizationFailedCode (30);
+       @@ -199,6 +205,99 @@ the two new tests;
+       @@ -220,4 +319,74 @@ the helpers FromNewError, WithFlags and Flags
+         (two overloads).
+     The six existing tests are unchanged. Outside §4.3's list; see note 12.
+- M  bindings/dotnet/src/Confluent.Kafka/Admin/TopicMetadataAndConfig.cs
+     +24 / -15 (138 -> 147 lines), in three hunks:
+       @@ -17,17 +17,17 @@ the type summary's first line (:20) and six lines
+         of the remarks' first paragraph (:25-30), for observation (n);
+       @@ -68,8 +68,8 @@ the error ctor's summary, lines 71 (observation (n))
+         and 72 (Critic cycle 8);
+       @@ -122,17 +122,26 @@ EnsureSuccess and its summary.
+     Outside §4.3's list; see note 12.
+- M  bindings/dotnet/tests/Confluent.Kafka.UnitTests/PublicAdminCreateTopicsTests.cs
+     +175 / -0 (462 -> 637 lines), in four hunks:
+       @@ -14,9 +14,11 @@ two usings (System.Globalization,
+         Confluent.Kafka.Internal.Interop);
+       @@ -38,6 +40,9 @@ the constant TopicAuthorizationFailedCode (29);
+       @@ -202,6 +207,93 @@ the two new tests;
+       @@ -459,4 +551,87 @@ the helpers AssertRethrowsHeld, FromNewError,
+         WithFlags and Flags (two overloads).
+     The existing tests are unchanged. Outside §4.3's list; see note 12.
+- ?? bindings/dotnet/design/history/M17/P1-producer-transactions/gate/CP2.txt
+     this file
+SHA-256 of the ten code files, printed by scratch gates5/size.sh at 03:14:16
+on 2026-09-29, right after the recorded gate run (scratch gates5/size.log).
+shasum -c of the same list reports OK for all ten in the gate run (03:14:15)
+and at 03:37:37:
+  c86fba11307ed132ce61e08feded812c6e739b4e5cd3e20e1ff1a9486e3efdf7  KafkaException.cs
+  116dd0879d30c7a04654a25d4498cfc420df6a6f017f56bd4adfdfe53027240a  ConsumerGroupMetadata.cs
+  85b6ca558865a88022f8c98754030b3c88af1bfae42eab38191bc3765f2110ab  ConsumerGroupMetadataMarshal.cs
+  4c4ce5a55a5ea67c2a053d976815a67e4e79be42972a2894cddcad7ecd8a1b2c  SerializationException.cs
+  6aee5afc4cfceeea983faeabd830f881c532cc9a3e9a2af2bbd33b90863409a3  AlterConsumerGroupOffsetsResult.cs
+  0f132a737427904e68062e4850e41206ef1bbbdc6e8d3715deefc639474db2df  TopicMetadataAndConfig.cs
+  0cd24efb81f89aa7c9ecd418d312be65d695562ab8db333105b5751c3fbd3966  KafkaExceptionTests.cs
+  69072f86e6389ebc0d582d8d48d585ea2aa12ebaa282b6012c52703e8db6fb07  ConsumerGroupMetadataTests.cs
+  f0f02fc6d5f605bad8cf562757f1a28ed5c9e29d8e5992be38fb4a267f7b6450  PublicAdminAlterConsumerGroupOffsetsTests.cs
+  5695b50bda446c05c041451cf5eb26adf0c2c2eb86fdde436a6e28fee476c590  PublicAdminCreateTopicsTests.cs
+After the cycle-8 edit TopicMetadataAndConfig.cs was
+  b54ddc83bbda911e21300910c97132248b3b470f5e1c9634654f6ad06a44040b
+(scratch gates6/size.log, 04:23:11). shasum -c of the list with that line
+changed (scratch gates6/cp2-code-final.sha256) reported OK for all ten in
+that re-gate (04:23:10) and at 04:37:38. Since (n)'s edit it is
+  a47d141b9af1bf1a798cf2721a8b1d28bc8f9fe9d4277c03b0222e5d1c3d9c5f
+(scratch gates7/size.log, 05:09:42). shasum -c of the list with that line
+changed again (scratch gates7/cp2-code-final.sha256) reports OK for all ten
+in the final re-gate (05:08:52) and at 05:24:25.
+Nothing under src/, cbindgen.toml, generator/ or the root tests/ changed
+(G1). NativeMethods.cs and CP1's test file are unchanged since 5e116925, and
+Admin/RemoveMembersFromConsumerGroupResult.cs and Admin/CreateTopicsResult.cs
+since 76629aea (Preconditions).
+
+What CP2 adds
+-------------
+D6, in KafkaException.cs:
+- Five public get-only bool properties: IsTransactionAbortableError (:200),
+  IsApplicationRecoverableError (:223), IsInvalidConfigurationError (:257),
+  IsAuthorizationError (:280) and IsOutOfOrderSequenceError (:299). Each
+  summary names the fully qualified Java class and the C predicate:
+    kafka_common_Error_is_transaction_abortable_error      (:185)
+    kafka_common_Error_is_application_recoverable_error    (:207)
+    kafka_common_Error_is_invalid_configuration_error      (:228)
+    kafka_common_Error_is_authorization_error              (:262)
+    kafka_common_Error_is_out_of_order_sequence_error      (:285)
+  Each remarks block lists the codes the property answers true for and has
+  a "Polarity." paragraph (root CLAUDE.md §10.4; §7.1 X9).
+- FromBorrowedHandle (:378) reads the five through CP1's P/Invokes
+  (:391-395), after Code, Message and IsRetriable (:385-387), and passes them
+  to a new eight-argument internal ctor (:148-167). For 84.10 it takes a
+  trailing optional innerException (:157, default null), passed to
+  base(message, innerException) (:158); FromBorrowedHandle does not pass it.
+  Its summary (:141-147) is 84.11's contract-only text and names that
+  parameter. FromHandle (:321) is
+  unchanged: it still calls FromBorrowedHandle inside the try (:328) whose
+  finally frees the handle (:336-338).
+- The three-argument internal ctor (:128) chains to the eight-argument one
+  with all five false (:129-137); its summary says it derives nothing from
+  code (ffi §B5). The three public ctors (:91, :101, :117) leave all five
+  false, as they leave Code 0 and IsRetriable false.
+- There is no IsFatal; the class remarks' fatality paragraph (a8205c5c) is
+  unchanged. In the class remarks (:26-83), the first two paragraphs are
+  reworded (Code and the hierarchy predicates carry the classification; the
+  ABI answers Java's class-hierarchy questions through predicates), and
+  three paragraphs are added:
+    the predicates are not complements: 29 and 53 answer true to both
+    IsAuthorizationError and IsInvalidConfigurationError, 48
+    (INVALID_TXN_STATE) to none;
+    each answer follows the error's class, not its Code: an error the core
+    raises as Java's base KafkaException answers false to every hierarchy
+    predicate whatever Code it carries (measured; see "Values measured from
+    the core" and note 9);
+    a leaf class needs no predicate, so a fenced producer is recognized by
+    Code == 90.
+D2, in ConsumerGroupMetadata.cs and ConsumerGroupMetadataMarshal.cs:
+- Two public ctors, (string, int, string, string?) at :76 and (string) at
+  :102, each [Obsolete] (:75, :101) with D2's text, at warning level:
+    "Deprecated since Kafka 4.2: use IConsumerCommon.GroupMetadata() instead.
+    ConsumerGroupMetadata becomes an interface in Kafka 5.0."
+  The four-argument ctor throws ArgumentNullException for groupId ("group.id
+  can't be null") and then for memberId ("member.id can't be null"), Java's
+  order (ConsumerGroupMetadata.java:42, :44). The one-argument ctor chains to
+  (groupId, -1, "", null), as java :52-57 does.
+- A private unchecked ctor (:109), (string groupId, string memberId, int
+  generationId, string? groupInstanceId). Its parameter order differs from
+  the public four-argument ctor's so that the two signatures are distinct.
+- internal static FromCopiedValues(groupId, generationId, memberId,
+  groupInstanceId) (:147-149), not obsolete. The marshal's construction site
+  (ConsumerGroupMetadataMarshal.cs:50 at the base, :51 now) calls it; the
+  comment at :50 says why. FromCopiedValues does not exist at 76629aea (git
+  grep exit 1).
+- The class remarks and property summaries no longer say that a real
+  consumer's pre-join GroupInstanceId is the configured id (note 4).
+The admin rebuild, in Admin/AlterConsumerGroupOffsetsResult.cs (the Manager's
+decision on observation (b)):
+- All() (:141-180) throws a fresh KafkaException for the aggregate. Its ctor
+  call (:168-179) is now the eight-argument ctor, given the first failure's
+  Code, the aggregate message, the first failure's IsRetriable and its five
+  predicates, in parameter order. At 76629aea it called the three-argument
+  ctor, which leaves the five false.
+- The comment above the call (:162-167) cites :76-77 for Java's message (it
+  cited :65), and says that Java throws it as error.exception(message), a
+  new instance of the failure's own exception class (Errors.java:462-469),
+  so the rebuild keeps the failure's classification.
+- All()'s remarks (:123-133) say the exception carries the first failure's
+  classification, "its error code, retriable flag and hierarchy
+  predicates", and cite :76-77 (they cited :66); note 12.
+- Admin/RemoveMembersFromConsumerGroupResult.cs is unchanged
+  (Preconditions; observation (b)).
+The held-failure rethrow, in Admin/TopicMetadataAndConfig.cs (84.10, the
+Manager's option (a)):
+- EnsureSuccess (:131-146), which TopicId, NumPartitions, ReplicationFactor
+  and Config call first, throws a fresh KafkaException through the
+  eight-argument ctor (:135-144), given the held failure's Code, Message,
+  IsRetriable and five predicates, in parameter order, and the held failure
+  as innerException. At 76629aea it threw new
+  KafkaException(_exception.Message, _exception), the public ctor, which
+  leaves Code 0 and the six flags false.
+- Its summary (:124-130) says that Java's ensureSuccess() throws the held
+  failure itself (CreateTopicsResult.java:151-154), and that this throws a
+  fresh exception per call, so each accessor call gets its own stack trace
+  and the held failure stays available as InnerException. The base summary
+  said "Java wraps in new KafkaException(exception)", which Java does not do.
+- The held failure is the one TopicMetadataAndConfigMarshal.CopyOut reads
+  with FromBorrowedHandle (Internal/Interop/TopicMetadataAndConfigMarshal.cs
+  :59-63).
+- The summary of the ctor that takes the held failure (:70-74) names Java's
+  ctor TopicMetadataAndConfig(ApiException), its signature at
+  CreateTopicsResult.java:123. Until 04:21:26 it said Throwable, as at
+  76629aea (Critic cycle 8). Since 05:06:23 it says the topic "was
+  accepted", where it said "was created" (observation (n)).
+- The type summary (:20) says "a topic it accepted", where it said "a newly
+  created topic". The remarks' first paragraph (:25-33) names the two cases
+  in which Java builds the failure-holding instance
+  (KafkaAdminClient.java:1852-1857): a topic-config error, for example
+  TOPIC_AUTHORIZATION_FAILED (29), and a broker too old to report the
+  metadata. Until 05:06:23 it gave "an older broker, or a validateOnly
+  request", as at 76629aea (observation (n)).
+CP2 adds no public type. §6's DoD row 7 lists "the internal constructor and
+factory overloads (D2, D3, D6), which carry no behaviour"; CP2's are D6's
+eight-argument internal ctor and D2's internal factory. 84.10 gives that ctor
+an optional parameter; it adds no overload. D2's private ctor,
+which the four-argument ctor and the factory call, assigns the four
+properties without checking them (:109-115).
+
+CS0618 and the construction sites
+---------------------------------
+- CP2 adds no CS0618 suppression to src/ (D2: "prefer zero"). Counts in the
+  worktree (grep -rn --include='*.cs', obj/ and bin/ excluded) against
+  76629aea (git grep), worktree / base; the gate run re-measured them at
+  03:14:15, with the same values:
+    scope         '#pragma warning disable'   'disable CS0618'   'CS0618'
+    src           9 / 9                       9 / 9              22 / 21
+    tests         34 / 26                     34 / 26            70 / 52
+    grpc-server   4 / 4                       4 / 4              8 / 8
+  The src 'CS0618' difference is one line, the factory's doc
+  (ConsumerGroupMetadata.cs:145, "<c>CS0618</c> suppression (M17/P1 D2).").
+  The tests' difference equals ConsumerGroupMetadataTests.cs's own count (8
+  disable/restore pairs, 18 lines; absent at the base); KafkaExceptionTests.cs
+  has 0 at both trees, and CP1's ProducerTransactionNativeMethodsTests.cs has
+  0; PublicAdminAlterConsumerGroupOffsetsTests.cs and
+  PublicAdminCreateTopicsTests.cs have 0 at both trees (03:37:37). A grep of
+  CP2's six src files, whole, for a pragma, SuppressMessage or NoWarn exits
+  1 (03:21:15, scratch tmac/recheck/recheck.out).
+- The four admin files' diffs (the two results and their test files): no
+  changed line names a pragma, CS0618, Obsolete, ConsumerGroupMetadata,
+  SuppressMessage or NoWarn (grep exit 1; 03:21:15, scratch
+  tmac/recheck/recheck.out). Control, the same pipeline with KafkaException:
+  56 lines.
+- The build is the canonical check. TreatWarningsAsErrors
+  (Directory.Build.props:17) makes CS0618 an error; neither the library nor
+  the unit-test csproj has a NoWarn, and .editorconfig has no
+  dotnet_diagnostic.CS entry (grep exit 1). So G2's 0-error solution build
+  shows no unsuppressed use of an obsolete ctor in the solution's two
+  projects.
+- A use inside an existing suppression region would compile silently, so the
+  9 disable regions in src were read whole: AdminCallbacks.cs 874-885,
+  1935-1984, 3104-3113, 3186-3258; GroupMarshal.cs 105-119, 176-202, 268-306;
+  NativeAdminClient.cs 1830-1887, 5564-5701. None contains a target-typed new
+  or names ConsumerGroupMetadata (control: the same target-typed-new regex
+  matches ConsumerGroupMetadata.cs:149). Each of the 9 disables has a restore.
+  The three files are unchanged since 76629aea (git diff --name-only), so the
+  regions are the same at both trees.
+- Explicit construction, regex new[[:space:]]+ConsumerGroupMetadata[[:space:]]*\(:
+    src + grpc-server: base 1 line (ConsumerGroupMetadataMarshal.cs:50);
+    worktree 0 (grep exit 1).
+    tests: base 0; worktree 5 (ConsumerGroupMetadataTests.cs :101, :118, :134,
+    :154, and the xmldoc at :144).
+  The regex does not see a target-typed new(...), which is why the build and
+  the region reads above carry the claim.
+- Outside the solution (grpc-server, soak, tests/Performance), .cs files
+  naming ConsumerGroupMetadata as a word, obj/ and bin/ excluded: 0 at both
+  trees. With obj/ included, two files in the worktree name it,
+  grpc-server/obj/Release/net8.0/ProducerService.cs and
+  grpc-server/obj/Debug/net8.0/ProducerService.cs, whose header reads
+  "Generated by the protocol buffer compiler." Control, the same command
+  over bindings/dotnet/src: 11 files at both trees.
+- using-alias directives in src: 3 at both trees (Token twice, Metadata);
+  none aliases ConsumerGroupMetadata.
+- [Obsolete] lines in src ('^[[:space:]]*\[Obsolete'): base 16, worktree 18.
+  CP2's are ConsumerGroupMetadata.cs:75 and :101. The unanchored
+  '\[Obsolete' also matches the comment at ConsumerGroupMetadataMarshal.cs:50
+  (19 / 16).
+
+Size against §10.1's scheduling estimates
+-----------------------------------------
+Measured by scratch gates7/size.sh, run right after the final re-gate
+(05:09:42), against 76629aea:
+- Production: 431 changed lines (366 added, 65 deleted) against 130-180. The
+  366 added lines are 255 xmldoc, 14 other comment, 12 blank and 85 code:
+    KafkaException.cs          +213 -16   xmldoc 158, comment 2, blank 7, code 46
+    ConsumerGroupMetadata.cs   +104 -19   xmldoc 71,  comment 6, blank 5, code 22
+    the marshal                +2 -1      comment 1, code 1
+    SerializationException.cs  +5 -5      xmldoc 5
+    the admin result           +18 -9     xmldoc 7,   comment 5, code 6
+    TopicMetadataAndConfig.cs  +24 -15    xmldoc 14,  code 10
+- Tests: 922 changed lines against 450-550: KafkaExceptionTests.cs +303 -4
+  (xmldoc 55, comment 16, blank 28, code 204 of the added lines), the new
+  ConsumerGroupMetadataTests.cs, 271 (xmldoc 82, comment 15, blank 29,
+  code 145), PublicAdminAlterConsumerGroupOffsetsTests.cs +169 -0 (xmldoc
+  51, blank 17, code 101) and PublicAdminCreateTopicsTests.cs +175 -0
+  (xmldoc 57, blank 15, code 103).
+- Earlier versions: 415 production lines (358 added) at 04:23:11, before
+  (n)'s lines; 413 (357 added) at 03:14:16, before the cycle-8 line; 390
+  production and 745 test lines at 00:33, before 84.10 and 84.11; 363 (323
+  added, 40 deleted) and 578 at 23:02, before the admin change. §10.1's
+  estimates predate the Manager's decisions.
+See note 6.
+
+S2: Confluent.Kafka.UnitTests.KafkaExceptionTests
+-------------------------------------------------
+Cases: 5 at 76629aea (5 Fact), 23 in the worktree (6 Fact, and 3 Theory with
+17 InlineData rows). The new tests:
+  TheD6TruthTable_EachRowReadsBackWhole                      Theory (:185), D6's ten rows
+  ACodeWithNoAssignedError_ReadsBackAsUnknownServerError     Theory (:225), 1000 and 40000
+  TheConstructorsWithoutAHandle_LeaveEveryPredicateFalse     Fact (:250)
+  EachPredicate_MatchesTheJavaExtendsChain_InBothDirections  Theory (:290), one row per predicate
+- Each error handle is built with kafka_common_Error_new(code, message)
+  (NativeMethods.KafkaErrorNew, the message pinned with Utf8Marshal.Pin) and
+  mapped through KafkaException.FromHandle, which frees it (FromNewError,
+  :365).
+- The truth table's rows are D6's (PLAN :612-621). A row's message is "S2
+  row " plus its Errors name, for example "S2 row TRANSACTION_ABORTABLE"
+  (:206). Each asserts Code and Message (ordinal), and the six flags as one
+  string in which each flag carries its column's name (Flags, :379 and
+  :388), so a failure names the column.
+- The unassigned-code Theory's message is "S2 unassigned " plus the code
+  (:230). It expects Code -1 (UNKNOWN_SERVER_ERROR), the message verbatim,
+  and all six flags false.
+- The ctor fact covers KafkaException's (), (message), (message, inner) and
+  internal (code, message, isRetriable), and SerializationException's (),
+  (message) and (message, inner). The internal ctor is given 29 and
+  isRetriable true, and must keep both, with the five false.
+- The sweep runs over -1..200 except 0.
+    A code other than -1 that reads back as -1 is skipped: the core test's
+    rule (src/common/protocol/errors.rs:2016-2020).
+    A code that is not skipped must read back as itself.
+    The property must equal membership in the Java-derived set.
+    Every member of the set must be among the codes checked (Assert.Subset).
+  The sets (:122-176) are TransactionAbortable {120}, ApplicationRecoverable
+  {22, 25, 47, 49, 82, 90}, Authorization {29, 30, 31, 53, 65},
+  Authentication {33, 34, 58}, InvalidConfigurationProper {17, 18, 21, 35, 38,
+  40, 43, 87} and OutOfOrderSequence {45, 59}. IsInvalidConfigurationError's
+  expected set is InvalidConfigurationProper with Authentication and
+  Authorization added (PredicateUnderTest, :343). The comments cite the Java
+  sources (errors/*.java, common/InvalidRecordException.java,
+  protocol/Errors.java) and say that a disagreement with the core is a core
+  finding (PLAN §5.2 S2), not a test to adjust.
+
+S3, CP2 half: Confluent.Kafka.UnitTests.ConsumerGroupMetadataTests (new)
+------------------------------------------------------------------------
+16 cases (9 Fact, and 2 Theory with 7 InlineData rows); the file is absent at
+76629aea.
+  :60   AssignmentConstructor_KeepsAllFourValues         CGMT testAssignmentConstructor (:36)
+  :79   GroupIdConstructor_SuppliesTheUnknownDefaults    CGMT testGroupIdConstructor (:52)
+  :97   NullGroupId_Throws                               CGMT testInvalidGroupId (:62)
+  :114  NullMemberId_Throws                              CGMT testInvalidMemberId (:72)
+  :130  NullGroupIdAndMemberId_ReportsTheGroupId         Java's check order (ConsumerGroupMetadata.java:42-44)
+  :150  GroupIdConstructor_NullGroupId_Throws            MPT shouldThrowOnNullConsumerGroupMetadataWhenSendOffsetsToTransaction (:430)
+  :173  GenerationId_IsKeptAsGiven                       Theory: 0, -1, -2, int.MinValue, int.MaxValue (java :43)
+  :191  EmptyAndNonAsciiStrings_AreKeptVerbatim          Theory: "" and "grüße-café-Ω-日本語-😀"
+  :209  ThePublicConstructors_AreObsolete_WithDecisionD2sMessage_AtWarningLevel   reflection
+  :230  TheInternalFactory_AndTheNonPublicConstructors_AreNotObsolete             reflection
+  :251  TheInternalFactory_KeepsEachValueInItsOwnProperty
+- CGMT testInvalidInstanceId (:81) is not translated, per §5.3.2: a null
+  Optional reference has no .NET analogue.
+- Each null-argument test asserts ParamName, and compares Message with new
+  ArgumentNullException(paramName, message).Message (§5.1 item 2).
+- The obsolete fact asserts the ordinally sorted list of public ctors, each
+  with D2's message and IsError false. That assertion backs its summary's
+  "exactly the two Java has": a third public ctor would add an element and
+  fail it. The not-obsolete fact covers the factory, which must be internal,
+  and every non-public instance ctor.
+- Each use of an obsolete ctor has its own disable/restore CS0618 pair
+  (§5.1 item 9): 8 pairs.
+- The existing consumer GroupMetadata() tests are unchanged, and green in G4
+  and G5. Mutation C3 shows that they reach the factory.
+
+The All() rebuild: PublicAdminAlterConsumerGroupOffsetsTests
+------------------------------------------------------------
+Class Confluent.Kafka.UnitTests.PublicAdminAlterConsumerGroupOffsetsTests.
+Cases: 6 at 76629aea (6 Fact), 10 in the worktree (7 Fact, and 1 Theory with
+3 InlineData rows). The six existing tests are unchanged. The new tests, at
+their attribute lines:
+  All_KeepsTheFirstFailuresCoreClassification             Fact (:223)
+  All_PassesEachFlagOfTheFirstFailureToItsOwnParameter    Theory (:273), rows 0, 1 and 2
+- The Fact's failure is a core error handle, mapped the way production
+  maps each partition's error. alterConsumerGroupOffsets' trampoline,
+  OnAlterConsumerGroupOffsets
+  (Internal/Interop/AdminCallbacks.cs:2841-2844), calls CompletePerKeyFanIn
+  (:2535-2566), which maps the partition's owned error with
+  KafkaException.FromHandle (:2551); FromHandle reads the values through
+  FromBorrowedHandle and then frees the handle. The test's FromNewError
+  (:329) builds the handle with kafka_common_Error_new(30, "group
+  authorization failed") (GROUP_AUTHORIZATION_FAILED) and maps it through
+  FromHandle. The Fact first asserts the core's answers for that failure:
+  Code 30, and the flags F F F T T F (the order of "Values measured from the
+  core"). It then asserts that the exception All() throws has Code 30, the
+  message "Failed altering group offsets for the following partitions: ["
+  plus the failed partition plus "]" (ordinal), and the same six flags.
+- The Theory's failures take their flags directly, through the internal
+  eight-argument ctor (WithFlags, :347), with no relation to the code. The
+  six flag parameters are numbered by position, isRetriable 1 to
+  isOutOfOrderSequenceError 6. In row b, the failure on partition 1 (code
+  11) sets flag n to bit b of n, and the failure on partition 2 (code 12)
+  sets each flag to the opposite value:
+      row   R  TA AR IC Az OOS   (partition 1; partition 2 is the complement)
+      0     T  F  T  F  T  F
+      1     F  T  T  F  F  T
+      2     F  F  F  T  T  T
+  Two different numbers from 1 to 6 differ in at least one of bits 0, 1 and
+  2, so for each pair of flag parameters some row sets them differently. The
+  test takes the first failure from the map's pair enumeration, which is the
+  enumeration All()'s foreach uses (note 12), and asserts that the thrown
+  exception's Code and six flags equal that failure's.
+- Both tests compare the six flags as one string in which each flag carries
+  its name (Flags, :366 and :375), so a failure names the flag.
+- The existing All_ListsEveryFailedPartition_AndCarriesTheFirstFailuresCode
+  (:173) builds its failures with the three-argument ctor (codes 11 and 12,
+  IsRetriable true and false) and asserts the first failure's Code and
+  IsRetriable. It is unchanged (observation (l)).
+
+The held-failure rethrow: PublicAdminCreateTopicsTests (84.10)
+--------------------------------------------------------------
+Class Confluent.Kafka.UnitTests.PublicAdminCreateTopicsTests. Cases: 18 at
+76629aea (14 Fact, and 1 Theory with 4 InlineData rows), 22 in the worktree
+(15 Fact, and 2 Theory with 7 InlineData rows). The existing tests are
+unchanged. The new tests, at their attribute lines:
+  MetadataAccessors_KeepTheHeldFailuresCoreClassification          Fact (:227)
+  MetadataAccessors_PassEachFlagOfTheHeldFailureToItsOwnParameter  Theory (:282), rows 0, 1 and 2
+- The Fact's held failure is a core error handle. FromNewError (:574)
+  builds it with kafka_common_Error_new(29, "topic authorization failed")
+  (TOPIC_AUTHORIZATION_FAILED) and maps it through FromHandle, which reads
+  the values with FromBorrowedHandle, as TopicMetadataAndConfigMarshal.CopyOut
+  does, and then frees the handle. The Fact first asserts the core's answers
+  for it: Code 29, the message, and the flags F F F T T F. It then calls
+  TopicId, NumPartitions, ReplicationFactor and Config on a
+  TopicMetadataAndConfig that holds it (:250-253), and the CreateTopicsResult
+  methods of the same names on a result whose topic's task completed with
+  that object (:255-262). For each of the eight calls, AssertRethrowsHeld
+  (:560) asserts that the thrown exception's Code, Message (ordinal) and six
+  flags equal the held failure's, and Assert.Same(held,
+  thrown.InnerException).
+- The Theory's held failure takes its flags directly, through the internal
+  eight-argument ctor (WithFlags, :592), with no relation to its code (11).
+  In row b it sets flag n to bit b of n, as the admin Theory does for
+  partition 1:
+      row   R  TA AR IC Az OOS
+      0     T  F  T  F  T  F
+      1     F  T  T  F  F  T
+      2     F  F  F  T  T  T
+  So for each pair of flag parameters some row sets them differently. The
+  Theory calls the four accessors on the object and asserts as the Fact
+  does.
+- Both tests compare the six flags as one string in which each flag carries
+  its name (Flags, :611 and :620).
+- The CreateTopicsResult methods reach the accessors through Apply (:145)
+  and its local async Project (:170-172), which awaits the topic's task and
+  then calls the accessor; the accessor's exception faults the returned
+  task, and the test's await rethrows it. The Fact covers that path for the
+  four methods (R1 reddens it there); the Theory calls the accessors
+  directly.
+- Not reached by a unit test: CopyOut's own construction of the held
+  failure from kafka_admin_TopicMetadataAndConfig_error. The header declares
+  no constructor for kafka_admin_TopicMetadataAndConfig_t: the non-comment
+  lines naming it are its typedef (h:316), a callback typedef's parameter
+  (h:418), the ten accessors and _destroy (h:2968-3091) and
+  kafka_admin_CreateTopicsResult_get_value (h:3402). The mock builds each
+  TopicMetadataAndConfig it returns with TopicMetadataAndConfig::new
+  (src/admin/mock_admin_client.rs:760): a grep of that file for with_error,
+  complete_with_error excluded, exits 1. The Rust client's with_error calls
+  are at src/admin/kafka_admin_client.rs:2568 and :2572.
+
+Values measured from the core (§5.1 item 2)
+-------------------------------------------
+Measured through the binding by the tests above, and again with ctypes probes
+of target/release/libconfluent_kafka.dylib. CP2 changes no Rust and the
+header is CP0's (G1), so each value holds at both trees. Flags in the order
+Retriable, TransactionAbortable, ApplicationRecoverable,
+InvalidConfiguration, Authorization, OutOfOrderSequence.
+- D6's ten rows each read back their code and message, and the flags D6's
+  table gives:
+    120 F T F F F F;  90 and 47 F F T F F F;  29 and 53 F F F T T F;
+    35 F F F T F F;   45 and 59 F F F F F T;  7 T F F F F F;  48 all F.
+  No core finding.
+- Unassigned codes: 1000, 134, -2 and 40000 (outside int16) each read back
+  as -1, with the message verbatim and all six flags false. On a 120 handle,
+  a null message reads back as empty, and "café ü" verbatim.
+- The sweep range: 134 codes read back as themselves (-1 and 1..133); 67 are
+  skipped (134..200, contiguous).
+- The codes each predicate answers true for, among those 134:
+    IsRetriable (not an S2 column)  2 3 5 6 7 9 13 14 15 16 19 20 41 51 56 70 71 72
+                                    74 75 78 80 83 84 88 89 100 103 106 122 123 133
+    IsTransactionAbortableError     120
+    IsApplicationRecoverableError   22 25 47 49 82 90
+    IsInvalidConfigurationError     17 18 21 29 30 31 33 34 35 38 40 43 53 58 65 87
+    IsAuthorizationError            29 30 31 53 65
+    IsOutOfOrderSequenceError       45 59
+  The five S2 predicates each equal the Java-derived set below. No core
+  finding.
+- Code 30 (GROUP_AUTHORIZATION_FAILED), a kafka_common_Error_new(30) handle
+  mapped through FromHandle: F F F T T F. The admin Fact asserts it. It
+  agrees with the lists above: 30 is in the IsInvalidConfigurationError and
+  IsAuthorizationError lists, and not in the other four.
+- Code 29 (TOPIC_AUTHORIZATION_FAILED), a kafka_common_Error_new(29) handle
+  mapped through FromHandle: F F F T T F. The CreateTopics Fact asserts it.
+  It agrees with the lists above: 29 is in the IsInvalidConfigurationError
+  and IsAuthorizationError lists, and not in the other four.
+- Class, not code (probe_bare35). kafka_consumer_KafkaConsumer_new, with
+  bootstrap.servers localhost:9092, group.id g1 and group.protocol=classic,
+  returns a null consumer handle and an error with code 35 and the message
+  "Classic group protocol is not yet supported in this client; set
+  group.protocol=consumer (KIP-848)." All six predicates read false on it;
+  kafka_common_Error_new(35) reads IsInvalidConfigurationError true. The core
+  raises the first as Error::unsupported_version, a bare KafkaError
+  (src/common/error.rs:1482-1485, reached at src/ffi/consumer.rs:438). CP2's
+  tests do not assert this answer: S2's predicate assertions use handles from
+  kafka_common_Error_new, and the existing classic-protocol fact
+  (KafkaExceptionTests.cs:48) asserts Code 35, IsRetriable false and a
+  "Classic group protocol" substring.
+- Local codes (probe_local_codes): kafka_common_Error_new(-7), (-9) and (-16)
+  each read back as -1, with IsInvalidConfigurationError and
+  IsAuthorizationError false; (40) reads back as 40 with
+  IsInvalidConfigurationError true.
+- Pre-join group metadata (probe_prejoin): a real consumer with group.id g1
+  and group.instance.id inst-1 reports group_id "g1" and a NULL
+  group_instance_id before it joins; with no instance id configured, also
+  NULL (note 4, observation (a)).
+
+The Java-derived sets
+---------------------
+Derived by a script from the kafka checkout at ccacf8a (note 10),
+independently of the core. With comments stripped, it reads each
+`class X extends Y` declaration (X may carry type parameters) under
+kafka/clients/src/main/java in which X or Y ends in Exception, and the code
+and exception class (its X::new reference) of each Errors.java entry (135
+entries; NONE (0) has no ::new reference), then closes the extends relation
+transitively.
+- TransactionAbortableException: 120. It extends ApiException.
+- ApplicationRecoverableException (abstract): 22 IllegalGeneration,
+  25 UnknownMemberId, 47 InvalidProducerEpoch, 49 InvalidPidMapping,
+  82 FencedInstanceId, 90 ProducerFenced.
+- AuthorizationException: 29, 30, 31, 53, 65. It extends
+  InvalidConfigurationException and owns no Errors.java code.
+- AuthenticationException: 33, 34, 58. It extends
+  InvalidConfigurationException and owns no Errors.java code.
+- InvalidConfigurationException, 16 codes: its own, 40; 17
+  (InvalidTopicException), 18 (RecordBatchTooLargeException), 21, 35, 38, 43
+  and 87 (org.apache.kafka.common.InvalidRecordException, outside errors/),
+  each owned by a direct subclass; and the codes of the subclasses of
+  AuthorizationException and AuthenticationException, both direct
+  subclasses that own no code. The set equals the core test's
+  (errors.rs:1957-1980).
+- OutOfOrderSequenceException: 45, and 59 (UnknownProducerIdException).
+- The script warns of a duplicate simple name, InvalidOffsetException
+  (clients/consumer, extends KafkaException; common/errors, extends
+  ApiException). Neither parent is one of the five classes, so the sets do
+  not depend on which one the script kept.
+Absence checks, over the same checkout. Every .java and .scala file is read
+whole (perl -0777), so an extends clause split across lines or qualified
+with a package still matches:
+- Classes extending TransactionAbortableException or
+  SslAuthenticationException: 0. Control, same pipeline,
+  OutOfOrderSequenceException|AuthenticationException: 6
+  (DelayedResponseAuthentication, SaslAuthentication, UnknownProducerId,
+  IllegalSaslState, UnsupportedSaslMechanism, SslAuthentication). Files
+  naming TransactionAbortableException at all: 7, so the scan had text to
+  read.
+- Errors.java lines naming the bare AuthorizationException,
+  AuthenticationException or SslAuthenticationException: none (grep exit 1).
+  Control, same flags, ApiException: 7 lines.
+
+Not swept: -7, -9 and -16
+-------------------------
+- AuthenticationException, AuthorizationException and
+  SslAuthenticationException extend InvalidConfigurationException (the last
+  through AuthenticationException) and own no protocol code. The header's
+  kafka_common_ErrorCode_t has the local codes named after them:
+  kafka_common_ErrorCode_AUTHENTICATION = -7,
+  kafka_common_ErrorCode_AUTHORIZATION = -9 and
+  kafka_common_ErrorCode_SSL_AUTHENTICATION = -16 (h:200, :202, :209).
+  IsInvalidConfigurationError's remarks name all three and cite the
+  header's kafka_common_ErrorCode_t (KafkaException.cs:243-248);
+  IsAuthorizationError's name -9 (:270-272).
+- kafka_common_Error_new cannot build them: it maps a code with no protocol
+  error to -1 (src/ffi/common.rs:127-131; measured above). So S2 cannot reach
+  them, and no CP2 test asserts them.
+
+Mutation check (§5.1 item 7; not committed)
+-------------------------------------------
+Procedure (scratch mut/run.sh and mut/apply.py):
+1. cmp confirms the file equals its restore point; otherwise the run stops.
+2. apply.py makes one exact-text replacement. It refuses unless the old text
+   matches once.
+3. diff -u against the restore point shows the applied lines.
+4. dotnet test -c Release -f net10.0
+     bindings/dotnet/tests/Confluent.Kafka.UnitTests/Confluent.Kafka.UnitTests.csproj
+     --filter <filter> --logger "console;verbosity=normal"
+   (this rebuilds first).
+5. The restore point is copied back, cmp confirms byte identity, and the run
+   prints the file's SHA-256 prefix.
+The restore points are the copies named under Timing. Filters: the M and F
+runs, KafkaExceptionTests (23 cases); C1 and C2, ConsumerGroupMetadataTests
+(16); C3, FullyQualifiedName~GroupMetadata (38, including the existing
+consumer GroupMetadata tests); the two baselines, both classes (39).
+
+  baseline-before  39 run, 39 passed, exit 0.
+  M1  KafkaException.cs, FromBorrowedHandle:
+        bool isTransactionAbortableError = NativeMethods.IsTransactionAbortableError(error);
+      replaced with
+        bool isTransactionAbortableError = false;
+      red: 23 run, 21 passed, 2 failed, exit 1:
+        the IsTransactionAbortableError sweep case, mismatch list
+          ["code 120: ..."];
+        row 120, first difference at pos 21 (TransactionAbortable).
+  M2  The same replacement on the IsApplicationRecoverableError read.
+      red: 23 run, 20 passed, 3 failed:
+        its sweep case; the list starts 22, 25, 47, 49, 82 (xUnit shows five
+          items and elides the rest);
+        rows 90 and 47, pos 50 (ApplicationRecoverable).
+  M3  The same on the IsInvalidConfigurationError read.
+      red: 23 run, 19 passed, 4 failed:
+        its sweep case; the list starts 17, 18, 21, 29, 30 and is elided;
+        rows 29, 53 and 35, pos 77 (InvalidConfiguration).
+  M4  The same on the IsAuthorizationError read.
+      red: 23 run, 20 passed, 3 failed:
+        its sweep case; the list is 29, 30, 31, 53, 65 in full;
+        rows 29 and 53, pos 96 (Authorization).
+  M5  The same on the IsOutOfOrderSequenceError read.
+      red: 23 run, 20 passed, 3 failed:
+        its sweep case; the list is 45, 59;
+        rows 59 and 45, pos 122 (OutOfOrderSequence).
+  So removing each read reddens its own sweep case and the table rows with T
+  in its column, and no other case of the class (§5.2 S2: "reddens exactly
+  its column").
+  In each red row the first difference xUnit reports is in that column.
+  xUnit reports the first difference, so the output does not show that the
+  other columns are unchanged; that follows from the mutation, which
+  changes one read.
+  F1  KafkaExceptionTests.cs: the line
+        65, // DELEGATION_TOKEN_AUTHORIZATION_FAILED: DelegationTokenAuthorizationException
+      deleted from s_authorization.
+      red: 23 run, 21 passed, 2 failed: the IsInvalidConfigurationError and
+      IsAuthorizationError sweep cases, each reporting "code 65: ... is
+      True". The sweep catches a code the core answers true for that the set
+      lacks.
+  F2  "33, // mutation F2" added to s_authorization, after the 29 line.
+      red: 23 run, 22 passed, 1 failed: the IsAuthorizationError sweep case,
+      "code 33: ... is False". The sweep catches a set member the core
+      answers false for. The InvalidConfiguration case stays green, because
+      33 is in its union through s_authentication.
+  F3  "150, // mutation F3" added to s_outOfOrderSequence, after the 59 line.
+      150 has no assigned error, so the sweep skips it.
+      red: 23 run, 22 passed, 1 failed: the IsOutOfOrderSequenceError sweep
+      case, through Assert.Subset ("Value is not a subset", Actual [45, 59,
+      150]). A set member the sweep never checks fails the test instead of
+      passing unseen.
+  C1  ConsumerGroupMetadata.cs: the four-argument ctor checks the member id
+      first. The two checked arguments of its this(...) call become
+        memberId is null
+            ? throw new ArgumentNullException(nameof(memberId), "member.id can't be null")
+            : groupId ?? throw new ArgumentNullException(nameof(groupId), "group.id can't be null"),
+        memberId,
+      red: 16 run, 15 passed, 1 failed: NullGroupIdAndMemberId_ReportsTheGroupId
+      (ParamName expected "groupId", actual "memberId").
+      Non-result: C1's first form used named arguments in the this(...) call.
+      It did not compile: "error CS0121: The call is ambiguous between
+      ConsumerGroupMetadata(string, int, string, string?) and
+      ConsumerGroupMetadata(string, string, int, string?)" (the public and
+      private ctors share parameter names), so no test ran. Its log is
+      archived in scratch (mut/run1/C1-first-form-CS0121.log), and the
+      positional form above replaced it.
+  C2  [Obsolete(ObsoleteMessage + " ")] on the one-argument ctor.
+      red: 16 run, 15 passed, 1 failed:
+      ThePublicConstructors_AreObsolete_WithDecisionD2sMessage_AtWarningLevel,
+      "Collections differ" at pos 0, the (String) entry.
+  C3  FromCopiedValues:
+        => new(groupId, memberId, generationId, groupInstanceId);
+      replaced with
+        => new(memberId, groupId, generationId, groupInstanceId);
+      red: 38 run, 29 passed, 9 failed:
+        TheInternalFactory_KeepsEachValueInItsOwnProperty (expected
+          "factory-group", actual "factory-member");
+        PublicConsumerApiTests: GroupMetadata_MockConsumer_ReturnsMockSentinels,
+          GroupMetadata_IsSync_ReturnsSynchronously,
+          GroupMetadata_RealConsumer_PreJoinDefaults,
+          GroupMetadata_RealConsumer_NonAsciiGroupId_RoundTrips;
+        Interop.ConsumerUnsubscribeSeekGroupMetadataTests:
+          GroupMetadata_RealConsumer_WithGroupInstanceId_IsNullPreJoin,
+          GroupMetadata_MockConsumer_ReturnsMockSentinels,
+          GroupMetadata_RealConsumer_NonAsciiGroupId_RoundTrips,
+          GroupMetadata_RealConsumer_PreJoin_ReturnsConfiguredGroupIdAndDefaults.
+      So the existing consumer tests exercise the marshal's switch to the
+      factory.
+  baseline-after   39 run, 39 passed, exit 0.
+  Each mutation applied as shown (the diff -u lines are in the run's
+  output), exited 1, and was restored cmp-identical. At the run's end each
+  mutated file was identical to its restore point, SHA-256 prefixes
+  KafkaException.cs 33338f395551f9c8, KafkaExceptionTests.cs
+  0cd24efb81f89aa7, ConsumerGroupMetadata.cs 116dd0879d30c7a0. The last
+  two are the Files section's values; KafkaException.cs's is its value
+  before 84.10 and 84.11, and the re-run below is on c86fba11307ed132.
+  §5.2 names the five read removals for S2 and no mutation for S3. F1-F3 and
+  C1-C3 go beyond it (note 5).
+  Red then green (§5.1 item 7): each mutation's test run above is red, its
+  restore is cmp-identical, baseline-after passes 39 of 39, and G4 and G5
+  pass on the same bytes. The fixture (F1-F3) and production (M1-M5, C1-C3) are mutated
+  separately, one mutation at a time (ffi §A1).
+Earlier runs. Runs 1-4 (16:05 to 17:09, archived in scratch) used files
+whose diff against the final ones has 0 changed lines other than comment and
+blank lines (runs_compare.sh, re-run at 22:42:19); some of those files are
+identical to the final ones. In each of them every mutation's red set equals
+run 5's (30 red entries; run 1, which has no summary file, was compared per
+log). Runs 3 and 4 list C3's reds in a different order. Run 5 is the
+recorded run.
+
+Admin mutations (the Manager's decision, item 3). Procedure as above, with
+scratch admin/mut/run.sh and admin/mut/apply.py, on
+AlterConsumerGroupOffsetsResult.cs, whose restore point is named under
+Timing. Filter (its trailing dot included)
+  FullyQualifiedName~Confluent.Kafka.UnitTests.PublicAdminAlterConsumerGroupOffsetsTests.
+(10 cases). The recorded run, 23:44:42-23:45:04:
+  baseline-before  10 run, 10 passed, exit 0.
+  A1  (i) Revert to the three-argument ctor. The six flag lines of All()'s
+      ctor call,
+        firstFailure.IsRetriable,
+        firstFailure.IsTransactionAbortableError,
+        firstFailure.IsApplicationRecoverableError,
+        firstFailure.IsInvalidConfigurationError,
+        firstFailure.IsAuthorizationError,
+        firstFailure.IsOutOfOrderSequenceError);
+      replaced with
+        firstFailure.IsRetriable);
+      red: 10 run, 6 passed, 4 failed, exit 1:
+        Theory rows 0, 1 and 2, first differences at
+          IsApplicationRecoverableError (row 0, pos 81),
+          IsTransactionAbortableError (row 1, pos 46) and
+          IsInvalidConfigurationError (row 2, pos 116), each expected True;
+        All_KeepsTheFirstFailuresCoreClassification, first difference at
+          IsInvalidConfigurationError (pos 116), expected True.
+  A2  (ii) Swap two flag arguments: the lines
+        firstFailure.IsInvalidConfigurationError,
+        firstFailure.IsAuthorizationError,
+      in the opposite order (parameters 4 and 5).
+      red: 10 run, 9 passed, 1 failed, exit 1: Theory row 0, first
+      difference at IsInvalidConfigurationError (pos 114), expected False,
+      actual True. Flags 4 and 5 differ in bit 0 alone. The Fact stays
+      green, since code 30 answers true for both.
+  A3  (extra) Take the classification from the last failure:
+        firstFailure ??= entry.Value;
+      replaced with
+        firstFailure = entry.Value;
+      red: 10 run, 6 passed, 4 failed, exit 1: Theory rows 0, 1 and 2, and
+      All_ListsEveryFailedPartition_AndCarriesTheFirstFailuresCode, each
+      "Values differ" on Code, expected 11, actual 12.
+  baseline-after   10 run, 10 passed, exit 0.
+  Each mutation applied as shown (the diff -u lines are in the run's
+  output), exited 1, and was restored cmp-identical. At the run's end both
+  admin files were identical to their restore points, SHA-256 prefixes
+  6aee5afc4cfceeea and 843a654c90310dd3. The first is the Files section's
+  value; the test file's is its value before 84.10's two doc edits (note
+  12), and the re-run below is on f0f02fc6d5f605ba.
+Swap sweep (scratch admin/mut/sweep.sh and swap.py, 23:45:04-23:46:00).
+Each of the 15 pairs of the six flag arguments is swapped in turn, with the
+same filter, restore and cmp check. For a swap of parameters p and q,
+sweep.sh computes the red set it expects from p and q alone:
+  the Theory rows b in which p and q differ in bit b;
+  the Fact, when code 30's flags differ at p and q (flags 4 and 5 are true,
+    the others false);
+  "list", the existing
+    All_ListsEveryFailedPartition_AndCarriesTheFirstFailuresCode, when p is
+    1 (its first failure has IsRetriable true and the five predicates
+    false, and it asserts IsRetriable).
+Every swap exits 1, reddens at least one Theory row, and reddens exactly the
+expected set (mismatches: 0):
+    swap  red                         swap  red
+    1,2   list, rows 0 1              2,6   row 2
+    1,3   list, row 1                 3,4   Fact, rows 0 1 2
+    1,4   Fact, list, rows 0 2        3,5   Fact, rows 1 2
+    1,5   Fact, list, row 2           3,6   rows 0 2
+    1,6   list, rows 0 1 2            4,5   row 0
+    2,3   row 0                       4,6   Fact, row 1
+    2,4   Fact, rows 1 2              5,6   Fact, rows 0 1
+    2,5   Fact, rows 0 1 2
+40 red entries in all. Swaps 2,3, 2,6, 3,6 and 4,5 redden Theory rows and no
+other test of the class. At the end the file was identical to its restore
+point.
+Earlier admin runs, archived in scratch: a mutation run at 23:25:35 with a
+sweep at 23:26:58, a mutation run at 23:34:42, and sweeps at 23:34:53 and
+23:36:14. They used the final production bytes and earlier copies of the
+test file (note 12): the 23:25 copy differs from the final file in the
+Fact's doc comment (4 lines) and the Theory's first-failure line; the copy
+used from 23:34:42, in that line alone. runs_compare.sh (23:49) compares the
+red set of each of their 51 logs with the recorded run's: 0 differ. The
+sweeps at 23:26:58 and 23:34:53 expected no red for the list test, and so
+reported the five swaps of parameter 1 as mismatches; with the expected sets
+above, their logs match.
+
+TopicMetadataAndConfig mutations (84.10). Procedure as above, with scratch
+tmac/mut/run.sh and tmac/mut/apply.py, on TopicMetadataAndConfig.cs, whose
+restore point is named under Timing. Filter (its trailing dot included)
+  FullyQualifiedName~Confluent.Kafka.UnitTests.PublicAdminCreateTopicsTests.
+(22 cases). The run, 03:10:06-03:10:15:
+  baseline-before  22 run, 22 passed, exit 0.
+  T1  (i) Revert to the public (message, inner) ctor: EnsureSuccess's ctor
+      call (:135-144) replaced with
+        throw new KafkaException(_exception.Message, _exception);
+      red: 22 run, 18 passed, 4 failed, exit 1: the Fact and Theory rows 0,
+      1 and 2.
+  T2  (ii) Swap two flag arguments, IsInvalidConfigurationError and
+      IsAuthorizationError (flags 4 and 5). red: 21 passed, 1 failed, exit
+      1: Theory row 0, the row that sets them differently. Code 29's flags
+      4 and 5 are both true, so the Fact passes.
+  T3  (iii) Drop the inner exception: the trailing _exception argument
+      removed, so innerException takes its default, null. red: 18 passed, 4
+      failed, exit 1: the Fact and rows 0, 1 and 2, each at Assert.Same
+      ("Values are not the same instance", Actual null).
+  baseline-after   22 run, 22 passed, exit 0.
+  Each was restored cmp-identical. At the run's end TopicMetadataAndConfig.cs
+  and the test file were identical to their restore points, SHA-256
+  prefixes 0f132a737427904e and 5695b50bda446c05 (the Files section's
+  values).
+Swap sweep (scratch tmac/mut/sweep.sh and swap.py, 03:10:26-03:10:52), as
+the admin sweep: each of the 15 pairs of EnsureSuccess's six flag arguments
+is swapped in turn, with the same filter, restore and cmp check. For a swap
+of p and q, the expected red set is the Theory rows b in which p and q
+differ in bit b, plus the Fact when code 29's flags differ at p and q
+(flags 4 and 5 are true, the others false). Every swap exits 1, reddens at
+least one Theory row, and reddens exactly the expected set (35 red entries,
+27 Theory and 8 Fact; mismatches: 0):
+    swap  red                    swap  red
+    1,2   rows 0 1               2,6   row 2
+    1,3   row 1                  3,4   Fact, rows 0 1 2
+    1,4   Fact, rows 0 2         3,5   Fact, rows 1 2
+    1,5   Fact, row 2            3,6   rows 0 2
+    1,6   rows 0 1 2             4,5   row 0
+    2,3   row 0                  4,6   Fact, row 1
+    2,4   Fact, rows 1 2         5,6   Fact, rows 0 1
+    2,5   Fact, rows 0 1 2
+  At its end TopicMetadataAndConfig.cs was identical to its restore point
+  (0f132a737427904e).
+K1 (scratch tmac/mut/k1.sh, 03:11:12-03:11:16), (iii) on the ctor side:
+KafkaException.cs's ": base(message, innerException)" (:158) replaced with
+": base(message)". Filter: the PublicAdminCreateTopicsTests,
+PublicAdminAlterConsumerGroupOffsetsTests and KafkaExceptionTests classes
+(55 cases). red: 51 passed, 4 failed, exit 1: the CreateTopics Fact and rows
+0, 1 and 2. Restored cmp-identical (c86fba11307ed132); baseline-after 55 of
+55, exit 0.
+R1 (scratch tmac/mut/r1.sh, 03:19:27-03:19:31), the CreateTopicsResult
+path: Admin/CreateTopicsResult.cs's Project (:170-172) rewritten to catch
+the accessor's KafkaException and throw new KafkaException(e.Message, e).
+Filter as T1 (22 cases). red: 21 passed, 1 failed, exit 1: the Fact, at
+PublicAdminCreateTopicsTests.cs:255, its first CreateTopicsResult call, with
+Expected 29, Actual 0 (AssertRethrowsHeld, :562). The Theory calls the
+accessors directly and passes. Restored cmp-identical (741dd929fd24b570);
+baseline-after 22 of 22, exit 0.
+Re-runs on the 03:08:30 bytes. The earlier sets ran again after 84.10 and
+84.11: the first mutation run's (scratch mut/, 03:17:10-03:17:33), the
+admin mutations (admin/mut/, 03:17:51-03:17:59) and the admin swap sweep
+(03:17:59-03:18:23; mismatches: 0). Each mutation exited 1 and was restored
+cmp-identical; the restore points are the Files section's values.
+scratch tmac/compare/compare_old.sh (03:28:52) compares each of their 33
+logs with the recorded run's: the red sets are equal in all 33. With
+timestamps, durations and stack-trace line numbers removed (the admin test
+file is two lines longer), 30 logs are identical and 3 (C3 and the two
+baselines of the first run) hold the same lines in a different order.
+
+Compiler probe: callers of the three-argument internal ctor
+-----------------------------------------------------------
+In a scratch copy of the library (a git archive of 76629aea and a tar of the
+worktree, both taken by the 03:11:35-03:11:40 run; scratch tmac/probe3.log),
+the ctor gets a fourth
+parameter of a new type, ProbeMarker, and the library is built (scratch
+probe3.sh). The compiler then reports every call of that ctor, whatever its
+spelling.
+- 76629aea: build exit 1, 9 errors: CS7036 at
+    Admin/AlterConsumerGroupOffsetsResult.cs(164,19),
+    Admin/RemoveMembersFromConsumerGroupResult.cs(99,31) and
+    KafkaException.cs(208,20), each for three TFMs.
+- worktree: build exit 1, 3 errors: CS1729 ("'KafkaException' does not
+  contain a constructor that takes 3 arguments") at
+  Admin/RemoveMembersFromConsumerGroupResult.cs(99,31), for net10.0, net8.0
+  and netstandard2.0.
+- Before the admin fix (the 23:02 version): 6 errors, CS1729 at both Admin
+  sites, each for three TFMs.
+At the base, FromBorrowedHandle (:208) was one of three callers. CP2 moves it
+and All()'s rebuild to the eight-argument ctor, which leaves
+RemoveMembersFromConsumerGroupResult's rebuild (observation (b)). The error
+and exit lines of both builds equal those of the 23:46 run, before 84.10:
+EnsureSuccess called the public (message, inner) ctor then and calls the
+eight-argument ctor now, neither of which the probe patches.
+
+Compiler probe: which borrowed error readers the library calls
+--------------------------------------------------------------
+AdminCallbacks.cs defines five readers built on BorrowedOptionalError:
+ListTransactionsOptionalError (:1620),
+RemoveMembersFromConsumerGroupOptionalError (:1685),
+ElectLeadersOptionalError (:1734), AlterConsumerGroupOffsetsOptionalError
+(:1765) and DeleteConsumerGroupOffsetsOptionalError (:1783). In a tar of the
+worktree taken by the 03:12:09 run (scratch tmac/probe_readers.log, whose
+error and exit lines equal the 23:46 run's), each is retyped as a ReaderProbeMarker? field
+set to null, which cannot be invoked or passed as a Func, and the library is
+built (scratch probe_readers.sh). Build exit 1, 6 errors, each site for three
+TFMs:
+    CS1955 at the ListTransactionsOptionalError call (worktree :1635);
+    CS0411 at OnElectLeaders' CompleteAggregateRpc call (worktree :2822),
+    which passes ElectLeadersOptionalError at :2828.
+The copy reports them at :1634 and :2817, because each retyped definition is
+one line shorter than the original. The three other readers produce no
+error. A grep for their names in the .cs files under src finds, besides the
+definitions, doc comment lines only (AdminCallbacks.cs:1677 and :1770;
+Admin/AlterConsumerGroupOffsetsResult.cs:46). In the .cs files under tests
+they appear in Interop/AdminP4ReaderWiringTests.cs, which checks the
+accessor each reader captures. alterConsumerGroupOffsets maps its
+per-partition errors through CompletePerKeyFanIn and FromHandle (the admin
+test section); observation (j).
+
+G1 Mode A (the §10.2 uncommitted forms; 03:14:14)
+-------------------------------------------------
+- git diff 76629aea -- src/ src/ffi/ cbindgen.toml generator/ tests/
+  prints nothing (0 bytes).
+- git ls-files --others --exclude-standard -- src/ cbindgen.toml generator/ tests/
+  prints nothing.
+- shasum -a 256 target/include/confluent_kafka.h
+    e8d39f09f4ac71c4e21c0196c0534dd06f353c475a741104c8d37a6a7da5d111
+  This is the CP0 value (gate/CP0.txt:54).
+- Control positive:
+  git diff --stat 76629aea -- bindings/dotnet/src bindings/dotnet/tests bindings/dotnet/grpc-server
+    .../Admin/AlterConsumerGroupOffsetsResult.cs       |  27 +-
+    .../Admin/TopicMetadataAndConfig.cs                |  21 +-
+    .../src/Confluent.Kafka/ConsumerGroupMetadata.cs   | 123 ++++-
+    .../Interop/ConsumerGroupMetadataMarshal.cs        |   3 +-
+    .../Internal/Interop/NativeMethods.cs              | 421 ++++++++++++++-
+    .../dotnet/src/Confluent.Kafka/KafkaException.cs   | 229 +++++++-
+    .../src/Confluent.Kafka/SerializationException.cs  |  10 +-
+    .../ProducerTransactionNativeMethodsTests.cs       | 588 +++++++++++++++++++++
+    .../KafkaExceptionTests.cs                         | 307 ++++++++++-
+    .../PublicAdminAlterConsumerGroupOffsetsTests.cs   | 169 ++++++
+    .../PublicAdminCreateTopicsTests.cs                | 175 ++++++
+    11 files changed, 2011 insertions(+), 62 deletions(-)
+  NativeMethods.cs and ProducerTransactionNativeMethodsTests.cs are CP1's,
+  committed at 5e116925. The same command against HEAD lists CP2's nine
+  tracked files: 9 files changed, 1004 insertions(+), 60 deletions(-). The
+  new ConsumerGroupMetadataTests.cs is untracked, so --stat cannot list it;
+  G7's new-file form reads it.
+
+G2 Build (03:13:22)
+-------------------
+- cargo build --features ffi --release: exit 0. It was already up to date
+  ("Finished `release` profile [optimized] target(s) in 0.28s").
+- dotnet build -c Release bindings/dotnet/Confluent.Kafka.sln: exit 0,
+  0 Warning(s), 0 Error(s).
+- Supplementary, dotnet build -c Release --no-incremental, started 03:13:24:
+  exit 0, 0 Warning(s), 0 Error(s), 00:00:02.16. It wrote all six outputs:
+    03:13:25 src/Confluent.Kafka/bin/Release/{netstandard2.0,net8.0,net10.0}/Confluent.Kafka.dll
+    03:13:26 tests/Confluent.Kafka.UnitTests/bin/Release/{net462,net8.0,net10.0}/Confluent.Kafka.UnitTests.dll
+- TreatWarningsAsErrors (Directory.Build.props:17) with
+  GenerateDocumentationFile (src/Confluent.Kafka/Confluent.Kafka.csproj:19)
+  makes CS1591 (missing xmldoc), CS1574 (unresolved cref) and CS0618
+  (obsolete use) build errors, and neither project has a NoWarn. So the
+  0-error build shows: each new public member has xmldoc; each cref
+  resolves; and no obsolete ctor is used unsuppressed in the library or the
+  unit tests.
+- Doc IDs, occurrences in the three emitted Confluent.Kafka.xml files
+  (netstandard2.0 / net8.0 / net10.0). The worktree figures are this run's;
+  the base figures come from a scratch build of 76629aea's library (exit 0,
+  0 W, 0 E, 22:28):
+    doc ID                                                          base    worktree
+    P:Confluent.Kafka.KafkaException.IsTransactionAbortableError    0 0 0   1 1 1
+    P:Confluent.Kafka.KafkaException.IsApplicationRecoverableError  0 0 0   1 1 1
+    P:Confluent.Kafka.KafkaException.IsInvalidConfigurationError    0 0 0   1 1 1
+    P:Confluent.Kafka.KafkaException.IsAuthorizationError           0 0 0   1 1 1
+    P:Confluent.Kafka.KafkaException.IsOutOfOrderSequenceError      0 0 0   1 1 1
+    M:Confluent.Kafka.ConsumerGroupMetadata.#ctor(System.String,System.Int32,System.String,System.String)
+                                                                    1 1 1   1 1 1
+    M:Confluent.Kafka.ConsumerGroupMetadata.#ctor(System.String)    0 0 0   1 1 1
+  Control: P:Confluent.Kafka.KafkaException.Code, 1 1 1 at both trees
+  (22:28), and 1 1 1 in the worktree's XML (counted at 03:21:15, scratch
+  tmac/recheck/recheck.out). The netstandard2.0 and net8.0 files are this
+  run's (03:13:25); the net10.0 file was rewritten at 03:19:30 by R1's
+  baseline-after build, on the restored bytes.
+  The four-argument ID is present at the base, where that ctor was internal,
+  so the XML shows emission, not accessibility. Accessibility is pinned by
+  S3's reflection facts.
+
+G3 Format (03:13:27)
+--------------------
+- dotnet format bindings/dotnet/Confluent.Kafka.sln --verify-no-changes:
+  exit 0, no output (the log is 0 bytes).
+
+G4 net10.0 (03:13:43)
+---------------------
+- The default environment: the gate script sets no DOTNET_* variable for
+  G4, and DOTNET_ROLL_FORWARD was unset in its shell (env shows 0 matches,
+  printed at G5's start). The gate log does not print which dotnet ran;
+  measured at 22:50:56, 00:04:18 and 03:36:49, command -v dotnet in
+  this environment is /usr/local/share/dotnet/dotnet, and env holds no
+  DOTNET_ variable.
+- dotnet test -c Release -f net10.0 bindings/dotnet/Confluent.Kafka.sln: exit 0.
+    Passed!  - Failed:     0, Passed:  2368, Skipped:     0, Total:  2368,
+    Duration: 10 s - Confluent.Kafka.UnitTests.dll (net10.0)
+  2317 at 76629aea (CP0), 2326 after CP1, 2368 now: +42 since CP1, that is
+  18 in KafkaExceptionTests (5 -> 23), 16 in ConsumerGroupMetadataTests
+  (new), 4 in PublicAdminAlterConsumerGroupOffsetsTests (6 -> 10) and 4 in
+  PublicAdminCreateTopicsTests (18 -> 22). The 00:33 version recorded 2364,
+  before 84.10's tests, and the 23:02 version 2360, before the admin
+  tests.
+- §6's DoD row 10 names the files of three send-path allocation-budget
+  classes. They are unchanged since 76629aea, and hold [Fact]/[Theory]
+  attributes at both trees (measured 22:28) as follows:
+  PublicProducerSendAllocationBudgetTests 1,
+  PublicSyncProducerSendAllocationBudgetTests 2,
+  PublicProducerDeliveryCallbackAllocationBudgetTests 3. They pass in G4,
+  and in a separate filtered run (03:14:12): 6 of 6, exit 0:
+    PublicProducerDeliveryCallbackAllocationBudgetTests: CallbackSend_AddsOnlyTheRegistration,
+      CallbackSend_HasNoValueSizedCopy,
+      PlainSend_PerRecordAllocation_IsNotRegressedByTheCallbackField
+    PublicProducerSendAllocationBudgetTests: Send_PerRecordAllocation_HasNoValueSizedCopy
+    PublicSyncProducerSendAllocationBudgetTests: Send_MutatingBufferAfterSend_ProducesUnchangedRecord,
+      Send_PerRecordAllocation_HasNoValueSizedCopy
+
+G5 net8.0 (in the $HOME/.dotnet environment; 03:13:55)
+------------------------------------------------------
+- Each command set DOTNET_ROOT=$HOME/.dotnet PATH=$HOME/.dotnet:$PATH
+  DOTNET_MULTILEVEL_LOOKUP=0, and DOTNET_ROLL_FORWARD was unset (the env
+  check above). In that environment dotnet --list-runtimes lists
+  Microsoft.AspNetCore.App 10.0.12, Microsoft.NETCore.App 8.0.31 and
+  Microsoft.NETCore.App 10.0.12, all under /Users/ankithl/.dotnet/shared.
+  Measured at 22:50:56, 00:04:18 and 03:36:49, command -v dotnet in
+  this environment is /Users/ankithl/.dotnet/dotnet.
+- dotnet test -c Release -f net8.0 bindings/dotnet/Confluent.Kafka.sln: exit 0.
+    Passed!  - Failed:     0, Passed:  2368, Skipped:     0, Total:  2368,
+    Duration: 14 s - Confluent.Kafka.UnitTests.dll (net8.0)
+  The same total as G4.
+- net462 is built in G2, not run: "net462 is build-only everywhere (no Mono
+  host); its TFM smoke tests are compiled, never run" (PLAN :1160-1161;
+  bindings/dotnet/Makefile:51-56, :67-69).
+
+G6 P/Invoke count (03:14:14)
+----------------------------
+- command grep -r --include='*.cs' 'internal static extern' bindings/dotnet/src | wc -l
+  prints 715:
+    Internal/Interop/NativeMethods.cs         236
+    Internal/Interop/NativeMethods.Admin.cs   479
+  git grep -c at 76629aea: 218 and 479 (697). The +18 are CP1's. CP2's six
+  src files add and remove no extern line (+0 -0 each).
+
+G7 Hygiene (the §10.2 uncommitted forms; 03:14:14)
+--------------------------------------------------
+- Tracked marker grep (git diff 76629aea -- bindings/dotnet/src
+  bindings/dotnet/tests bindings/dotnet/grpc-server Makefile | command grep ...):
+  prints nothing (grep exit 1). Control: the same diff adds 27 lines matching
+  \b(Obsolete|IsAuthorizationError)\b; per file (03:37:37): KafkaException.cs
+  6, ConsumerGroupMetadata.cs 2, the marshal 1, AlterConsumerGroupOffsetsResult.cs
+  1, TopicMetadataAndConfig.cs 1, KafkaExceptionTests.cs 5, the two admin
+  test files 3 each, and CP1's NativeMethods.cs 1 and test file 4. The 00:33
+  version counted 19, and the 23:02 version 15.
+- New files in scope (git ls-files --others --exclude-standard over
+  bindings/dotnet/src, tests and grpc-server): ConsumerGroupMetadataTests.cs
+  (CP2). CP1's ProducerTransactionNativeMethodsTests.cs is committed.
+  New-file marker grep (git ls-files -z --others ... | xargs -0 grep ...):
+  prints nothing (xargs exit 123: grep found no match). Control: the same
+  pipeline, grepping for "Apache License" instead, prints its line 3
+  (exit 0).
+- git diff --cached --name-only prints nothing: the index is empty. git
+  ls-files -s shows PLAN.md's index entry at ff2f0224, HEAD's blob. CP2
+  staged nothing.
+- git status --short shows, at 03:14:15:
+    CP2's paths: the six src files, KafkaExceptionTests.cs, the two admin
+    test files, the new ConsumerGroupMetadataTests.cs, and gate/CP2.txt
+    (this file, untracked);
+    bindings/dotnet/COMMENTS.DONE.84.md, untracked (changed after the gate
+    run, when 84.10 and 84.11 moved into it);
+    the user's own changes, untouched: the two deleted
+    bindings/dotnet/.claude/agents/dotnet-{actor,critic}.md, the modified
+    kafka submodule, the untracked .claude/agents/dotnet-*.md and
+    .claude/agent-memory/dotnet-{actor,critic}/.
+
+Critic cycle 8: the error ctor's summary (noted, not filed); observation (n)
+----------------------------------------------------------------------------
+Critic 84's cycle-8 re-check of CP2 filed no finding (COMMENTS.84.md is 0
+bytes at 04:23:10, 04:37:38, 05:08:52 and 05:24:25) and noted one item,
+which the Manager took into CP2: the summary of the ctor that takes the
+held failure named Java's parameter type as Throwable. At ccacf8a the ctor
+is public TopicMetadataAndConfig(ApiException exception)
+(CreateTopicsResult.java:123; the field, :109). The Manager then took
+observation (n), which the sweep below raised, into CP2 as well.
+- The fix (scratch c8/fix72.py, an exact-match edit, 04:21:26). Against the
+  file's copy taken just before it (scratch c8/pre, cp -p) and against its
+  mutation restore point (03:05:47), the whole diff was, until (n)'s edit
+  (below):
+    72c72
+    <     /// the broker did not return — Java's <c>TopicMetadataAndConfig(Throwable)</c>.
+    ---
+    >     /// the broker did not return — Java's <c>TopicMetadataAndConfig(ApiException)</c>.
+- The sweep (scratch c8/sweep.sh, at 04:20:16 before the fix and 04:21:36
+  after it; below their header lines the outputs differ in line 72's text
+  alone). Six patterns select the comment lines that name Java, a Java
+  member, or a Java type or parameter: the word Java; <c> spans; backtick
+  spans; camelCase identifiers; the type names CreateTopicsResult,
+  TopicMetadataAndConfig, ApiException, Throwable, NewTopic, KafkaFuture,
+  UnsupportedVersion, TopicAuthorization, CreateTopicsOptions and
+  KafkaAdminClient; and the stems counterpart, mirror, realiz, translat,
+  port, equivalent, faithful, "same as" and models. The comment lines no
+  pattern selects were read: none refers to Java, and :60-61 and :75-76
+  name C# parameters. Each selected line, against the checkout at ccacf8a:
+    :20-21    CreateTopicsResult.TopicMetadataAndConfig (:30, :108). Holds.
+    :25-27    "(an older broker, or a validateOnly request)": the
+              validateOnly clause does not hold. Observation (n), since
+              resolved (below).
+    :27-30    the per-topic future completes successfully with an instance
+              whose accessors throw, ensureSuccess() (KafkaAdminClient.java
+              :1851-1867; CreateTopicsResult.java:131-154). Holds.
+    :37       no Java counterpart, Java offering only the throwing
+              accessors: the public members are the ctors (:115, :123) and
+              the four accessors (:131-149). Holds.
+    :48-50    int replicationFactor at :112, :115 and :141;
+              NewTopic.replicationFactor() returns short (NewTopic.java:95);
+              the ABI's int32_t (confluent_kafka.h:3000). Holds.
+    :72       TopicMetadataAndConfig(Throwable), where :123 takes
+              ApiException. Fixed.
+    :84       no Java counterpart, as :37. Holds.
+    :88, :97, :106, :115
+              topicId(), numPartitions(), replicationFactor() and config()
+              (:131, :136, :141, :146). Hold.
+    :125-126  ensureSuccess() throws the held failure (:151-154). Holds.
+  Selected, but not remarks about Java: :33 names the binding's
+  IConsumerCommon methods (IConsumerCommon.cs:89, :101, :113), and :57-59
+  are C# <param> names. The Manager's list, :21, :27-29, :37, :48-49, :88,
+  :97, :106, :115 and :125-126, is corrected by :30 (ensureSuccess()), :50
+  (NewTopic.replicationFactor()) and :84, and by :26-27's validateOnly
+  clause, which does not hold. That clause is at 76629aea too. The
+  direction limited the cycle-8 change to :72; the Manager's decision on
+  observation (n) then changed the clause (below).
+- The re-gate after the cycle-8 fix (scratch gates6/gates.sh, the gates5
+  script with its log directory moved; 04:22:09-04:23:10):
+    G2 04:22:09  cargo exit 0; dotnet build and --no-incremental each exit
+                 0, 0 Warning(s), 0 Error(s); the six outputs rebuilt
+                 (04:22:18, 04:22:21); each of the seven doc IDs once in
+                 each Confluent.Kafka.xml, where the ctor's member doc now
+                 reads TopicMetadataAndConfig(ApiException).
+    G3 04:22:22  dotnet format --verify-no-changes exit 0, empty log.
+    G4 04:22:37  net10.0: 2368 of 2368, exit 0.
+    G5 04:22:52  net8.0: 2367 of 2368, exit 1. The red is
+                 ProducerSubmitHandleRefTests.SubmitVoidOperation_WhenAddRefThrows_DoesNotRootTheCompletionContext:
+                 "managed memory grew 2860840 bytes across 20000 iterations
+                 (budget 2000000)". The same command again (scratch
+                 gates6/g5-rerun.sh, 04:24:22-04:24:35): 2368 of 2368, exit
+                 0. Observation (o).
+    G6 04:23:09  715 (NativeMethods.Admin.cs 479, NativeMethods.cs 236;
+                 76629aea 479 and 218); CP2's six production diffs add and
+                 delete no extern line.
+    G7 04:23:09  the tracked and untracked marker greps find nothing (exit
+                 1 and 123; control positives 27 lines and 1); the index is
+                 empty.
+  The script's other runs (G1, the budget run, the commit-state and hash
+  guards, the CS0618 counts) ran too. With times and durations removed,
+  gates6/gates.out differs from gates5's in G5's first result,
+  TopicMetadataAndConfig.cs's two --stat lines (21 -> 23) and their totals
+  (+1 -1), and COMMENTS.84.md's size (11029 -> 0: it was emptied when 84.10
+  and 84.11 moved to COMMENTS.DONE.84.md).
+- Not re-run: the mutations and the probes. The edit is one xmldoc line; G2
+  builds the xmldoc, and G4 and G5 run every test on that build.
+- Observation (n), resolved by the Manager's decision on it. The fix
+  (scratch n/fixn.py, an exact-match edit that refuses unless each old
+  block occurs once and keeps its line count, 05:06:23). Against the
+  file's copy taken just before it (scratch n/pre, cp -p), the whole diff
+  is:
+    20c20
+    < /// The metadata a broker returned for a newly created topic — the .NET realization of
+    ---
+    > /// The metadata a broker returned for a topic it accepted — the .NET realization of
+    25,30c25,30
+    < /// ⚠ <b>Creation can succeed while the metadata is unavailable</b> — the broker may
+    < /// create the topic and still return nothing about it (an older broker, or a
+    < /// <c>validateOnly</c> request). Java models that with a second, inner error: the
+    < /// per-topic future completes <em>successfully</em> with a
+    < /// <c>TopicMetadataAndConfig</c> whose accessors then throw
+    < /// (<c>ensureSuccess()</c>). This type does the same: every accessor is a
+    ---
+    > /// ⚠ <b>A topic can be accepted while the metadata is unavailable</b> — the broker may accept the
+    > /// topic and still report a topic-config error (for example <c>TOPIC_AUTHORIZATION_FAILED</c>,
+    > /// code 29, when the caller may not describe the topic's configs) or be too old to report the
+    > /// metadata (<c>KafkaAdminClient.java:1852-1857</c>). Java models that with a second, inner error:
+    > /// the per-topic future completes <em>successfully</em> with a <c>TopicMetadataAndConfig</c> whose
+    > /// accessors then throw (<c>ensureSuccess()</c>). This type does the same: every accessor is a
+    71c71
+    <     /// Initializes an instance for a topic that <b>was created</b> but whose metadata
+    ---
+    >     /// Initializes an instance for a topic that <b>was accepted</b> but whose metadata
+  From "Java models that" on, lines 28-30 keep their words and are only
+  rewrapped; the paragraph keeps its six lines, so the file keeps its 147
+  lines and the line numbers this record cites below :30 still hold. The
+  clause names the two conditions KafkaAdminClient.java:1852-1857 tests,
+  and no longer says that the broker returns "nothing about it": in the
+  authorization branch the response still carries the topic's name and id
+  (CreateTopicsResponse.json:44-46;
+  ReplicationControlManager.java:811-816).
+- The sweep again (scratch c8/sweep.sh, at 05:06:03 before the fix and
+  05:06:47 after it). The outputs differ in their header lines (the file's
+  hash and time, the hits of five of the six patterns, the union) and in
+  the text of lines 20, 25-30 and 71 alone. After the fix the patterns
+  select :20-21, :26, :28-30, :33, :37, :48-50, :57-59, :72, :84, :88,
+  :97, :106, :115 and :125-126; the rows above still apply to the lines the
+  fix did not change. Each changed line, against the checkout at ccacf8a:
+    :20-21    "a topic it accepted": the per-topic error is NONE, the
+              branch in which the future completes with an instance
+              (KafkaAdminClient.java:1836-1837, :1850-1867); a
+              validate-only request reaches it too
+              (ReplicationControlManager.java:666, :697-702), and creates
+              no topic (CreateTopicsOptions.java:41-47).
+              CreateTopicsResult.TopicMetadataAndConfig (:30, :108). Holds.
+    :25-28    the two branches that build the failure-holding instance
+              (KafkaAdminClient.java:1852-1857). A TopicConfigErrorCode
+              other than NONE: TOPIC_AUTHORIZATION_FAILED is code 29
+              (Errors.java:244), which the controller sets when the caller
+              may not describe the topic's configs
+              (ReplicationControlManager.java:666, :817-835;
+              ControllerApis.scala:373-374), as CreateTopicsResult.java
+              :60-62 describes. NumPartitions == UNKNOWN (:1855-1857), a
+              v5+ field defaulting to -1 (CreateTopicsResponse.json:53;
+              CreateTopicsResult.java:31), the case CreateTopicsResult.java
+              :58-59 describes as a broker version that does not support
+              the replication factor in the response. validateOnly is no
+              longer named. Holds.
+    :28-30    "Java models that ... (ensureSuccess())": the sentence the
+              :27-30 row above checks, rewrapped with its words unchanged.
+              Holds.
+    :71-72    "was accepted", as :20; TopicMetadataAndConfig(ApiException)
+              (:123). Holds.
+  :25, :27 and :71 are selected by no pattern; they carry the sentences of
+  :26 and :28, and of :72, and were read with them.
+- The final re-gate, on the final bytes (scratch gates7/gates.sh, gates6's
+  script with only its log directory changed; 05:07:51-05:08:52):
+    G2 05:07:51  cargo exit 0; dotnet build and --no-incremental each exit
+                 0, 0 Warning(s), 0 Error(s); the six outputs rebuilt
+                 (05:08:02, 05:08:04-05:08:05); each of the seven doc IDs
+                 once in each Confluent.Kafka.xml. Each of the three XMLs
+                 (05:08:01) holds each of four phrases of the new summary,
+                 remarks and ctor text once, and each of four of the old
+                 text 0 times (scratch n/record_check.sh, 05:24:25).
+    G3 05:08:05  dotnet format --verify-no-changes exit 0, empty log.
+    G4 05:08:21  net10.0: 2368 of 2368, exit 0.
+    G5 05:08:35  net8.0: 2368 of 2368, exit 0, on its first run, so no
+                 re-run. DOTNET_ROLL_FORWARD was not set.
+    G6 05:08:51  715 (NativeMethods.Admin.cs 479, NativeMethods.cs 236;
+                 76629aea 479 and 218); CP2's six production diffs add and
+                 delete no extern line.
+    G7 05:08:51  the tracked and untracked marker greps find nothing (exit
+                 1 and 123; control positives 27 lines and 1); the index is
+                 empty.
+  The script's other runs (G1, the budget run, 6 of 6, the commit-state and
+  hash guards, the CS0618 counts) ran too. With times, durations and the
+  directory name removed, gates7/gates.out differs from gates6's in G5's
+  first result (gates6: 2367 of 2368, exit 1), TopicMetadataAndConfig.cs's
+  two --stat lines (23 -> 39) and their totals (+8 -8) alone (scratch
+  n/record_check.sh).
+- Not re-run: the mutations and the probes. (n)'s edit is xmldoc only; G2
+  builds the xmldoc, and G4 and G5 run every test on that build.
+
+Notes and deviations
+--------------------
+1. S2's second bullet says the rows also prove that "the construction site
+   reads them before the handle is freed". No test can prove that order:
+   reading a freed handle is undefined behaviour, not a reliable failure. So
+   no test doc claims it. The order is structural: FromBorrowedHandle reads
+   every value before it returns (:385-395), and FromHandle calls it inside
+   the try (:328) whose finally frees the handle (:336-338).
+2. The plan's "one extra row" (S2 bullet 3) for a code with no assigned
+   error is a Theory with two rows: 1000, inside int16, and 40000, outside
+   it. These are the two branches of kafka_common_Error_new
+   (src/ffi/common.rs:127-131).
+3. SerializationException.cs is outside §4.3's CP2 list. Its remarks said
+   "Its classification fields (Code, IsRetriable) are left at their
+   defaults"; with five more predicates, that list was incomplete. They now
+   say Code is 0 and every hierarchy predicate of KafkaException is false.
+   The change is to doc comments (its three ctors are unchanged), and S2's
+   ctor fact pins the behaviour (S2 bullet 1: "so does every
+   SerializationException ctor").
+4. ConsumerGroupMetadata's class remarks and property summaries were stale,
+   and are fixed. The remarks said that a real consumer's pre-join
+   GroupInstanceId is "the configured group.instance.id (or null)":
+     probe_prejoin measured NULL with inst-1 configured;
+     the existing, unchanged test
+     GroupMetadata_RealConsumer_WithGroupInstanceId_IsNullPreJoin
+     (ConsumerUnsubscribeSeekGroupMetadataTests.cs:172, Assert.Null at :188)
+     pins null.
+   The property summaries called the values "the configured group.id" and
+   "the configured group.instance.id", which does not hold for an instance a
+   caller constructs. The core side is observation (a).
+5. Beyond §5.2's lists: the tests NullGroupIdAndMemberId_ReportsTheGroupId
+   (Java's check order; C1 is its mutation) and
+   TheInternalFactory_KeepsEachValueInItsOwnProperty (C3); the not-obsolete
+   fact's non-public ctors, where §5.2 names the factory; and the mutations
+   F1-F3 and C1-C3.
+6. Size: 431 changed production lines against 130-180, and 922 test lines
+   against 450-550. 255 of the 366 added production lines are xmldoc and 85
+   are code. D6 and root CLAUDE.md §10.4 require each predicate to document
+   its set, its Java class and its polarity; D2's ctors need their exception
+   and default rules; and G2 makes a missing xmldoc a build error. The admin
+   change (27 production and 169 test lines) comes from the Manager's
+   decision on observation (b), and the TopicMetadataAndConfig change (21
+   production and 175 test lines, plus the ctor's parameter) from its
+   option (a) for 84.10, with 2 more production lines (line 72, changed)
+   from its direction on Critic 84's cycle-8 noted item and 16 more (lines
+   20, 25-30 and 71, changed) from its decision on observation (n);
+   §10.1's estimates predate all four.
+7. §7.1: X9 (the predicates' docs) and X10 (the ctors' docs) land now, with
+   their members, because G2 needs the xmldoc at CP2. X2's pointers from the
+   five predicates wait for CP5, which writes the interface remarks they
+   point to (X2's canonical home).
+8. Q27 takes its default, filed forward: ConsumerGroupMetadata gets no
+   Equals, GetHashCode or ToString.
+9. The docs describe each predicate by class. probe_bare35 shows a core error
+   that carries code 35 but was raised as a bare KafkaError, and answers
+   false to all six predicates, while a kafka_common_Error_new(35) handle
+   answers IsInvalidConfigurationError true. A code-based wording ("true for
+   code 35") would be false for the first. So each remarks block lists the
+   codes of the classes the property answers true for, and the class remarks
+   say the answer follows the class, not the Code.
+10. The Java sets come from the kafka checkout at ccacf8a (2026-08-17,
+    KAFKA-20870). The superproject's recorded gitlink is 26b251a4; the
+    difference is the user's " M kafka", which CP2 does not touch. Every
+    Java line this file cites was read at that checkout, whose tracked files
+    are unmodified (git -C kafka status lists one untracked directory). The
+    gitlink's commit is not in the submodule's object store (git cat-file:
+    invalid object name), so no citation was checked there.
+11. The CP2 message and the plan. The message described S2 as the ten-row
+    table plus the sweep. The plan's S2 also has the ctor bullet, the extra
+    row and the mutation bullet; all three are implemented. D6's truth table
+    says each row is produced through ErrorNext(code, msg) on both mocks
+    (PLAN :606-608); that is the CP5 test's contract, and CP2 builds the rows
+    with KafkaErrorNew -> FromHandle, as S2's text says. A citation
+    difference: PLAN :278 and T7 (:153) cite ConsumerGroupMetadata.java:51-56
+    for the one-argument ctor; ConsumerGroupMetadata.cs cites :51-57,
+    through the closing brace, as it cites :37-46 for the four-argument one.
+12. Four files outside §4.3's CP2 list. Per the Manager's decision on
+    observation (b): Admin/AlterConsumerGroupOffsetsResult.cs and its test
+    file, PublicAdminAlterConsumerGroupOffsetsTests.cs. Per its option (a)
+    for 84.10: Admin/TopicMetadataAndConfig.cs and its test file,
+    PublicAdminCreateTopicsTests.cs. Within the first change:
+    - Beyond the comment and the ctor call the decision names, All()'s
+      remarks (:123-133) changed. They said the exception carries the first
+      failure's "error code and retriable flag" and "the same code/retriable
+      pair", which the fix made incomplete, and cited :66 for the message.
+    - The Fact's doc comment first said that production reads each
+      partition's error with FromBorrowedHandle, citing
+      AdminCallbacks.AlterConsumerGroupOffsetsOptionalError. The reader probe
+      shows that the library does not call that reader. The doc now names
+      CompletePerKeyFanIn and FromHandle, the path OnAlterConsumerGroupOffsets
+      takes. The decision's "FromBorrowedHandle is production's path" holds
+      here through FromHandle, which calls FromBorrowedHandle and then frees
+      the handle.
+    - The Theory first took its first failure from outcomes.Values.
+      Dictionary documents that Values is in the same order as Keys, and
+      that the order of its pair enumeration is undefined; so Values is not
+      documented to match the order All()'s foreach sees. The test now takes
+      the first failure from the pair enumeration.
+    - Mutation A3 and the swap sweep go beyond the decision's (i) and (ii).
+    - At 84.10, two doc comments in the admin test file changed, with no
+      code change: the Theory's doc names the ctor by its signature,
+      KafkaException(int, string?, bool, bool, bool, bool, bool, bool,
+      Exception?), where it said "the internal eight-argument ctor", which
+      the new optional parameter made ambiguous; and WithFlags' summary says
+      "The constructor it calls keeps each flag as given."
+    Within the second change:
+    - The Manager asked for (i) the public-ctor revert, (ii) a swap of two
+      flag arguments and (iii) dropping the inner exception (T1-T3). The
+      swap sweep, K1 (iii on the ctor side) and R1 (the CreateTopicsResult
+      path) go beyond them.
+    - The ctor's new parameter is optional, so FromBorrowedHandle, the
+      three-argument ctor and All() compile unchanged and pass null.
+
+Observations for the Manager (not CP2 blockers)
+-----------------------------------------------
+(a) Core divergence from Java: the pre-join GroupInstanceId. The core's
+    group_metadata() (src/consumer/async_kafka_consumer.rs:2789-2803)
+    returns the stub ConsumerGroupMetadata::new(group) (:2798-2799) while
+    its cache is empty. Its doc says the cache is populated by
+    ConsumerStateNotifier::on_member_epoch_updated, and stays empty until
+    the background task receives its first heartbeat response with a member
+    epoch (:2781-2788). Until then the configured group.instance.id is
+    dropped (probe_prejoin). Java's AsyncKafkaConsumer passes it
+    (AsyncKafkaConsumer.java:447 -> :736-739 -> :754 -> :761-768, new
+    ConsumerGroupMetadata(groupId, UNKNOWN_GENERATION_ID, UNKNOWN_MEMBER_ID,
+    groupInstanceId)), and AsyncKafkaConsumerTest.java asserts it (:1376,
+    :1386). The core's test group_metadata_with_instance_id (:7405-7426)
+    claims propagation in its doc (:7402-7404), defers it in a comment
+    (:7421-7424), and asserts the config (:7425). The .NET comment at
+    ConsumerUnsubscribeSeekGroupMetadataTests.cs:175 cites
+    "async_kafka_consumer.rs:1639"; that line is part of a doc comment on a
+    test seam, not the stub. For kafka-critic.
+(b) Resolved by the Manager's decision. At 23:02 the compiler probe found
+    two callers of the three-argument ctor in the worktree:
+      Admin/AlterConsumerGroupOffsetsResult.cs:164-170, at its 76629aea
+      content. Java throws the typed
+      error.exception(message) (AlterConsumerGroupOffsetsResult.java:76-77),
+      a new instance of the failure's own class (Errors.java:462-469), so
+      Java's instanceof answers follow the failure; the rebuild answered
+      false by construction (Code 30 with IsAuthorizationError false, for
+      example). Fixed at CP2: All() now passes the first failure's Code,
+      IsRetriable and five predicates to the eight-argument ctor (What CP2
+      adds; the admin tests; the admin mutations and the sweep).
+      Admin/RemoveMembersFromConsumerGroupResult.cs:99-105. Java wraps the
+      failure in a bare KafkaException
+      (RemoveMembersFromConsumerGroupResult.java:59-60), so false matches
+      Java's instanceof on the thrown exception. Unchanged, per the
+      decision; the Manager files its IsRetriable pass-through forward in
+      D15. In the library, the probe's worktree build now reports one call
+      site of the three-argument ctor, this one (base: three sites).
+    A third rebuild site, which the probe cannot see because it called the
+    public (message, inner) ctor, is Critic finding 84.10:
+      Admin/TopicMetadataAndConfig.cs:124-137, at its 76629aea content. Java's
+      ensureSuccess() throws the held failure itself
+      (CreateTopicsResult.java:151-154). Fixed at CP2 under the Manager's
+      option (a) (What CP2 adds; the CreateTopics tests; T1-T3, the sweep,
+      K1 and R1).
+    PLAN :580-581 ("FromBorrowedHandle ... the only classified construction
+    site") is for the Manager's D6 amendment. The base ctor summary's "the
+    only place a classified KafkaException is constructed" was already false
+    at the base, which had three callers.
+(c) A stale type name. The header has no kafka_common_KafkaError (0 lines);
+    src names it on 29 lines and the tests on 14, at both trees. It also
+    appears in ffi-marshalling.md, bindings/dotnet/CLAUDE.md and
+    bindings/CLAUDE.md. FromBorrowedHandle's pre-existing remarks still say
+    "borrowed kafka_common_KafkaError_t pointer". One binding-wide rename,
+    for the Manager to schedule.
+(d) §6's DoD row 11 says "N/A (no consumer file changes)". CP2 changes
+    ConsumerGroupMetadata.cs and its marshal. The N/A holds in substance:
+    IConsumerCommon.GroupMetadata() keeps its signature and values, the
+    consumer tests are unchanged and green, and C3 shows that they reach
+    the factory. Plan wording.
+(e) src/common/error.rs:1797-1801, the core's list of the configuration
+    errors proper in IsInvalidConfigurationError's doc, omits
+    Errors::InvalidRecord (87). The core answers true for 87 (measured), and
+    Java's InvalidRecordException extends InvalidConfigurationException.
+    For kafka-critic.
+(f) PLAN :1500 cites errors.rs:1957-1981; the set's statement ends at :1980
+    (:1981 is blank). A nit.
+(g) .NET comment nits: ConsumerUnsubscribeSeekGroupMetadataTests.cs:175
+    (see (a)), unchanged; and AlterConsumerGroupOffsetsResult.cs's "(:65)"
+    for the Java message (AlterConsumerGroupOffsetsResult.java:76-77; :65
+    is javadoc), fixed at CP2 per the decision, with the remarks' ":66"
+    (:66 closes the same javadoc).
+(h) Bare core constructors, read in the source (for kafka-critic):
+      Error::unsupported_version (src/common/error.rs:1482-1485) builds a
+      bare KafkaError. It is reached at src/ffi/consumer.rs:438, where all
+      six predicates read false on it (probe_bare35), though Java's
+      UnsupportedVersionException extends InvalidConfigurationException.
+      Error::record_batch_too_large (:1534-1539, documented "Corresponds to
+      Java's RecordBatchTooLargeException") stores Errors::MessageTooLarge
+      (10), not 18. It is called at
+      src/producer/internals/producer_batch.rs:551 (a reading, not measured).
+      Error::invalid_group_id (:1350-1352) is bare too; for it, none of the
+      six predicates the binding reads differs from Java's answer.
+    These contradict src/common/kafka_error.rs:188-190 ("Error::KafkaError
+    is now only reached for Errors::None").
+(i) Java cites in AlterConsumerGroupOffsetsResult.cs, apart from the
+    message cites (observation (g)), that do not match the checkout at
+    ccacf8a (note 10). The decision names the message cite, so these are
+    unchanged:
+      .cs line  what                                 cites    ccacf8a
+      :73       partitionResult                      :39-53   :39-62
+      :85       the IllegalArgumentException check   :47-48   :48-50
+      :89       a fresh KafkaFutureImpl              :40      :43
+      :95       the throwable != null branch         :42-43   :46-47
+      :100      the IllegalArgumentException         :44-46   :49-50
+      :108      Errors.NONE                          :49-50   :53-54
+      :109      error.exception()                    :51-52   :55-56
+      :118      all()                                :58-71   :64-82
+      :125      partitionsFailed                     :61-64   :69-73
+    The cites :33 (the field) and :35-37 (the ctor) match. In the test
+    file, "AlterConsumerGroupOffsetsResult.java:44-46" (:148) is :49-50
+    there, and "MockAdminClient.java:1213" (:37), cited for the throw, is
+    the method's closing brace; the throw is at :1212. The gitlink's commit
+    is not in the submodule's object store, so none of these was checked
+    against it.
+(j) AlterConsumerGroupOffsetsResult.cs:46-47 points at
+    AdminCallbacks.AlterConsumerGroupOffsetsOptionalError as "the reader
+    that carries this". The library does not call that reader (the reader
+    probe): OnAlterConsumerGroupOffsets maps each partition's owned error
+    through CompletePerKeyFanIn and FromHandle. The library does not call
+    RemoveMembersFromConsumerGroupOptionalError or
+    DeleteConsumerGroupOffsetsOptionalError either; the unit tests check
+    which accessor each of the three captures (AdminP4ReaderWiringTests.cs).
+    Unchanged: outside the decision.
+(k) Resolved by 84.11. The eight-argument ctor's summary (KafkaException.cs
+    :141-148 at 00:33) said what FromBorrowedHandle, FromHandle and the
+    three-argument ctor pass to it, and did not mention All()'s rebuild. It
+    is now 84.11's contract-only text (:141-147), which names no caller and
+    names the new innerException parameter.
+(l) The existing All_ListsEveryFailedPartition_AndCarriesTheFirstFailuresCode
+    (:173) expects the first failure in insertion order: it asserts the Code
+    of the failure inserted first (11), while Dictionary documents its
+    enumeration order as undefined. Mutation A3 reddens it, as expected. The
+    new Theory takes its first failure from the enumeration instead
+    (note 12). Pre-existing, unchanged.
+(m) A gRPC side effect of 84.10, untested at CP2. The grpc-server's
+    CreateTopics handler turns a metadata accessor's KafkaException into its
+    proto error through Translate.ToProto
+    (bindings/dotnet/grpc-server/AdminServiceImpl.cs:2243-2246;
+    Translate.cs:148-157), which copies Code. That error arm now carries the
+    held failure's code where it carried 0. The Python harness converts the
+    held error itself (bindings/python/grpc_translate.py:707-708). No
+    CP2 test covers the arm; it is for the Manager (a later checkpoint's
+    gRPC gate, or D15).
+(n) Resolved by the Manager's decision on it (05:06:23; section "Critic
+    cycle 8"). The type remarks (Admin/TopicMetadataAndConfig.cs:25-27)
+    gave "an older broker, or a validateOnly request" as the cases in
+    which the broker creates a topic and returns no metadata for it. At
+    ccacf8a the client builds the failure-holding instance in two branches
+    (KafkaAdminClient.java:1852-1857): a TopicConfigErrorCode other than
+    NONE, and NumPartitions == UNKNOWN, answered with an
+    UnsupportedVersionException ("Topic metadata and configs in
+    CreateTopics response not supported"). NumPartitions is a v5+ field
+    defaulting to -1 (CreateTopicsResponse.json:53): the older broker. The
+    controller sets the metadata when the caller may describe the topic's
+    configs, and TOPIC_AUTHORIZATION_FAILED otherwise
+    (ReplicationControlManager.java:817-835), and it does so for a
+    validate-only request too: the per-topic results are built (:666)
+    before the validateOnly branch, which drops only the records
+    (:697-702), and ControllerApis.scala's createTopics (:391-449) does not
+    read the flag. CreateTopicsOptions.java:41-47 says a validate-only
+    request does not create the topic. So the clause named a flag that does
+    not withhold the metadata, and omitted the authorization case, whose
+    code (29) the 84.10 Fact uses. The type summary (:20, "a newly created
+    topic"), :25-26 ("may create the topic") and the ctor summary (:71,
+    "was created") described a created topic, and a validate-only request
+    can also yield this instance, through the authorization branch. All of
+    it was at 76629aea too. The remarks now name the two branches, a
+    topic-config error (for example TOPIC_AUTHORIZATION_FAILED, code 29,
+    when the caller may not describe the topic's configs) and a broker too
+    old to report the metadata, citing KafkaAdminClient.java:1852-1857
+    (:25-28), and :20, :25-26 and :71 speak of an accepted topic where they
+    spoke of a created one.
+(o) G5's first cycle-8 run failed ProducerSubmitHandleRefTests
+    .SubmitVoidOperation_WhenAddRefThrows_DoesNotRootTheCompletionContext
+    (growth 2,860,840 B against its 2,000,000 B budget), and the re-run
+    passed. The M15/P3 plan records it as a marginal allocation-budget
+    false-fail that passed 3/3 in isolation, and says to re-run, confirm
+    and move on (design/history/M15/P3-cluster-configs-logdirs/PLAN.md
+    :1330-1338; also M15/P4's PLAN.md:546-548). CP2 leaves its file
+    unchanged (git diff --quiet 76629aea exits 0). Run alone in the repo on
+    net8.0 (scratch gates6/g5-rerun.out), it failed twice in three runs
+    (2,329,992 B and 2,341,160 B). In scratch copies, each built with the
+    native library symlinked and run alone on net8.0, the copies taking
+    turns (scratch c8/flake-ab.sh, flake-growth.sh, flake-split.sh and
+    flake-count.sh, 04:25:52-04:30:51):
+      copy                                   budget     runs  >0  >2,000,000 B
+      HEAD, a git archive of 5e116925        2,000,000     6   -   0
+      the worktree                           2,000,000     6   -   2
+      HEAD                                   0            16   0   0
+      the worktree                           0            24  14   5
+      the worktree's src with HEAD's tests   0             8   1   0
+      the worktree less ConsumerGroupMetadataTests.cs
+                                             0             8   3   0
+      HEAD plus a file of 42 empty [Fact]s   0             8   4   1
+    ">0" counts the runs whose growth was positive. With budget 0 each such
+    run fails and prints its growth; with the real budget a pass prints
+    nothing ("-"). The worktree's src with HEAD's tests grew in one run of
+    eight, by 59,560 B. In these runs the growth follows the unit-test
+    assembly's contents rather than CP2's library code: 42 empty facts added
+    to HEAD reproduce it. The test's remarks call its reading,
+    GC.GetTotalMemory, process-global (ProducerSubmitHandleRefTests.cs
+    :46-49). Not a CP2 blocker by M15/P3's rule, but a checkpoint that adds
+    cases can make it likelier; M15/P3's plan files the remedy, a wider
+    budget or a stabler measurement, as its own slice (:1338-1340).
+    Accepted by the Manager, per M15's rule. The final re-gate's G5
+    (05:08:35) passed 2368 of 2368 on its first run.
+(p) Recorded, not fixed. The <returns> of NumPartitions and
+    ReplicationFactor (Admin/TopicMetadataAndConfig.cs:98 and :107) say
+    "the topic was created with". Those accessors return on the success
+    path, which a validate-only request also reaches: when the caller may
+    describe the topic's configs, the controller sets the partition count
+    and replication factor in the per-topic result
+    (ReplicationControlManager.java:817, :831-832), which it builds before
+    the validateOnly branch drops the records (:666, :697-702); no topic is
+    created (CreateTopicsOptions.java:41-47). CP2 changes the
+    failure-holding state, not the success path, so the stopping rule
+    leaves them. Admin/CreateTopicsResult.cs, which CP2 does not change,
+    words its accessors the same way (for example :80, :123 and :133). For
+    the Manager.
+(q) Recorded, not fixed: ABI text, for kafka-critic. The C header's doc of
+    kafka_admin_TopicMetadataAndConfig_error
+    (target/include/confluent_kafka.h:2957-2960, from src/ffi/admin.rs
+    :2023-2026) says "the topic creation itself succeeded (so the per-key
+    error from kafka_admin_CreateTopicsResult_get_error is null), but the
+    broker did not return the topic's metadata". A validate-only request
+    creates no topic and can still reach that state, through the
+    authorization branch (observation (n)). CP2 changes no Rust and not
+    the header (G1). For the Manager, to route to the Rust side.
+
+Not run at CP2 (per the plan's schedule)
+----------------------------------------
+G8 (CP4, CP5, CP7), G9 (CP6, CP7), G10 (CP7) and G11 (CP7).

@@ -47,7 +47,8 @@ internal static class ConsumerGroupMetadataMarshal
             string memberId = Utf8Marshal.PtrToString(NativeMethods.ConsumerGroupMetadataMemberId(metadata)) ?? string.Empty;
             string? groupInstanceId = Utf8Marshal.PtrToString(NativeMethods.ConsumerGroupMetadataGroupInstanceId(metadata));
 
-            return new ConsumerGroupMetadata(groupId, generationId, memberId, groupInstanceId);
+            // The non-obsolete factory, not the public [Obsolete] constructor (M17/P1 D2).
+            return ConsumerGroupMetadata.FromCopiedValues(groupId, generationId, memberId, groupInstanceId);
         }
         finally
         {

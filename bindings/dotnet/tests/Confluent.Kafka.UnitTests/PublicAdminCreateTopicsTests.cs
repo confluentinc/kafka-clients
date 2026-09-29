@@ -14,9 +14,11 @@
 
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Threading.Tasks;
 
 using Confluent.Kafka.Admin;
+using Confluent.Kafka.Internal.Interop;
 
 using Xunit;
 
@@ -37,6 +39,9 @@ public sealed class PublicAdminCreateTopicsTests
 
     /// <summary>The C code Kafka assigns to <c>TOPIC_ALREADY_EXISTS</c>.</summary>
     private const int TopicAlreadyExistsCode = 36;
+
+    /// <summary>The C code Kafka assigns to <c>TOPIC_AUTHORIZATION_FAILED</c>.</summary>
+    private const int TopicAuthorizationFailedCode = 29;
 
     /// <summary>
     /// <b>The discriminating bridge test.</b> One call, one topic that succeeds and one
@@ -200,6 +205,93 @@ public sealed class PublicAdminCreateTopicsTests
         ArgumentNullException nullTopic =
             Assert.Throws<ArgumentNullException>(() => { _ = result.TopicId(null!); });
         Assert.Equal("topic", nullTopic.ParamName);
+    }
+
+    /// <summary>
+    /// The metadata accessors of a <see cref="TopicMetadataAndConfig"/> that holds a failure
+    /// keep the classification the core gave that failure. The failure is built from a core
+    /// error handle, <c>kafka_common_Error_new(29, message)</c>
+    /// (<c>TOPIC_AUTHORIZATION_FAILED</c>), and mapped through <c>KafkaException.FromHandle</c>,
+    /// which reads its values with <c>KafkaException.FromBorrowedHandle</c>, the method
+    /// production reads the held failure with (<c>TopicMetadataAndConfigMarshal.CopyOut</c>).
+    /// The test first asserts the core's answers for that failure: code 29,
+    /// <see cref="KafkaException.IsInvalidConfigurationError"/> and
+    /// <see cref="KafkaException.IsAuthorizationError"/> true, and
+    /// <see cref="KafkaException.IsRetriable"/> and the other hierarchy predicates false.
+    /// It then calls <c>TopicId</c>, <c>NumPartitions</c>, <c>ReplicationFactor</c> and
+    /// <c>Config</c> on the object, and the <see cref="CreateTopicsResult"/> methods of the
+    /// same names on a result holding it, and asserts that each thrown exception has code
+    /// 29, the failure's message and flags, and the failure itself as its
+    /// <see cref="Exception.InnerException"/>.
+    /// </summary>
+    [Fact]
+    public async Task MetadataAccessors_KeepTheHeldFailuresCoreClassification()
+    {
+        const string Topic = "classified-topic";
+        const string Message = "topic authorization failed";
+
+        KafkaException held = FromNewError(TopicAuthorizationFailedCode, Message);
+        Assert.Equal(TopicAuthorizationFailedCode, held.Code);
+        Assert.Equal(Message, held.Message);
+        Assert.Equal(
+            Flags(
+                isRetriable: false,
+                isTransactionAbortableError: false,
+                isApplicationRecoverableError: false,
+                isInvalidConfigurationError: true,
+                isAuthorizationError: true,
+                isOutOfOrderSequenceError: false),
+            Flags(held));
+
+        TopicMetadataAndConfig metadata = new TopicMetadataAndConfig(held);
+        CreateTopicsResult result = new CreateTopicsResult(
+            new Dictionary<string, Task<TopicMetadataAndConfig>> { [Topic] = Task.FromResult(metadata) });
+
+        AssertRethrowsHeld(held, Assert.Throws<KafkaException>(() => { _ = metadata.TopicId(); }));
+        AssertRethrowsHeld(held, Assert.Throws<KafkaException>(() => { _ = metadata.NumPartitions(); }));
+        AssertRethrowsHeld(held, Assert.Throws<KafkaException>(() => { _ = metadata.ReplicationFactor(); }));
+        AssertRethrowsHeld(held, Assert.Throws<KafkaException>(() => { _ = metadata.Config(); }));
+
+        AssertRethrowsHeld(held, await TestTimeout.Run(
+            () => Assert.ThrowsAsync<KafkaException>(() => result.TopicId(Topic)), s_deadline));
+        AssertRethrowsHeld(held, await TestTimeout.Run(
+            () => Assert.ThrowsAsync<KafkaException>(() => result.NumPartitions(Topic)), s_deadline));
+        AssertRethrowsHeld(held, await TestTimeout.Run(
+            () => Assert.ThrowsAsync<KafkaException>(() => result.ReplicationFactor(Topic)), s_deadline));
+        AssertRethrowsHeld(held, await TestTimeout.Run(
+            () => Assert.ThrowsAsync<KafkaException>(() => result.Config(Topic)), s_deadline));
+    }
+
+    /// <summary>
+    /// The metadata accessors pass each flag of the held failure to the same parameter of
+    /// the exception they throw. The flag parameters of the internal constructor
+    /// <c>KafkaException(int, string?, bool, bool, bool, bool, bool, bool, Exception?)</c>
+    /// are numbered in order: <c>isRetriable</c> 1,
+    /// <c>isTransactionAbortableError</c> 2, <c>isApplicationRecoverableError</c> 3,
+    /// <c>isInvalidConfigurationError</c> 4, <c>isAuthorizationError</c> 5 and
+    /// <c>isOutOfOrderSequenceError</c> 6. In row <paramref name="bit"/>, the held failure
+    /// sets each flag to that bit of its number. The flags are set directly, with no
+    /// relation to the code. The test calls <c>TopicId</c>, <c>NumPartitions</c>,
+    /// <c>ReplicationFactor</c> and <c>Config</c> on the object and asserts that each thrown
+    /// exception has the held failure's code, message and flags, and the held failure
+    /// itself as its <see cref="Exception.InnerException"/>. Two different numbers differ in
+    /// some bit, so for any two flag parameters some row sets them differently, and a
+    /// rethrow that passes one flag in another's parameter fails that row.
+    /// </summary>
+    /// <param name="bit">Which bit of each flag's number the held failure uses.</param>
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    [InlineData(2)]
+    public void MetadataAccessors_PassEachFlagOfTheHeldFailureToItsOwnParameter(int bit)
+    {
+        KafkaException held = WithFlags(11, bit);
+        TopicMetadataAndConfig metadata = new TopicMetadataAndConfig(held);
+
+        AssertRethrowsHeld(held, Assert.Throws<KafkaException>(() => { _ = metadata.TopicId(); }));
+        AssertRethrowsHeld(held, Assert.Throws<KafkaException>(() => { _ = metadata.NumPartitions(); }));
+        AssertRethrowsHeld(held, Assert.Throws<KafkaException>(() => { _ = metadata.ReplicationFactor(); }));
+        AssertRethrowsHeld(held, Assert.Throws<KafkaException>(() => { _ = metadata.Config(); }));
     }
 
     /// <summary>
@@ -459,4 +551,87 @@ public sealed class PublicAdminCreateTopicsTests
 
         Assert.Throws<ArgumentOutOfRangeException>(() => new MockAdminClient(-5));
     }
+
+    /// <summary>
+    /// Asserts that <paramref name="thrown"/> has the code, message and flags of
+    /// <paramref name="held"/>, and <paramref name="held"/> itself as its
+    /// <see cref="Exception.InnerException"/>.
+    /// </summary>
+    private static void AssertRethrowsHeld(KafkaException held, KafkaException thrown)
+    {
+        Assert.Equal(held.Code, thrown.Code);
+        Assert.Equal(held.Message, thrown.Message);
+        Assert.Equal(Flags(held), Flags(thrown));
+        Assert.Same(held, thrown.InnerException);
+    }
+
+    /// <summary>
+    /// Builds an owned error with <c>kafka_common_Error_new</c> and maps it through
+    /// <c>KafkaException.FromHandle</c>, which reads every value out with
+    /// <c>KafkaException.FromBorrowedHandle</c> and then frees the handle. The core copies
+    /// the message, so its pin may end after the call.
+    /// </summary>
+    private static KafkaException FromNewError(int code, string message)
+    {
+        using Utf8Marshal.PinnedUtf8String pinned = Utf8Marshal.Pin(message);
+        IntPtr error = NativeMethods.KafkaErrorNew(code, pinned.Pointer);
+        Assert.NotEqual(IntPtr.Zero, error);
+
+        KafkaException? ex = KafkaException.FromHandle(error);
+        Assert.NotNull(ex);
+        return ex!;
+    }
+
+    /// <summary>
+    /// A failure carrying <paramref name="code"/> in which the flag numbered <c>n</c> (the
+    /// numbering of
+    /// <see cref="MetadataAccessors_PassEachFlagOfTheHeldFailureToItsOwnParameter(int)"/>) is
+    /// bit <paramref name="bit"/> of <c>n</c>. The constructor it calls keeps each flag as
+    /// given.
+    /// </summary>
+    private static KafkaException WithFlags(int code, int bit)
+    {
+        bool Flag(int number) => ((number >> bit) & 1) == 1;
+
+        return new KafkaException(
+            code,
+            "flag pattern",
+            isRetriable: Flag(1),
+            isTransactionAbortableError: Flag(2),
+            isApplicationRecoverableError: Flag(3),
+            isInvalidConfigurationError: Flag(4),
+            isAuthorizationError: Flag(5),
+            isOutOfOrderSequenceError: Flag(6));
+    }
+
+    /// <summary>
+    /// The retriable flag and the hierarchy predicates of <paramref name="ex"/>, each named,
+    /// in the order of the constructor's parameters.
+    /// </summary>
+    private static string Flags(KafkaException ex) =>
+        Flags(
+            ex.IsRetriable,
+            ex.IsTransactionAbortableError,
+            ex.IsApplicationRecoverableError,
+            ex.IsInvalidConfigurationError,
+            ex.IsAuthorizationError,
+            ex.IsOutOfOrderSequenceError);
+
+    private static string Flags(
+        bool isRetriable,
+        bool isTransactionAbortableError,
+        bool isApplicationRecoverableError,
+        bool isInvalidConfigurationError,
+        bool isAuthorizationError,
+        bool isOutOfOrderSequenceError) =>
+        string.Format(
+            CultureInfo.InvariantCulture,
+            "IsRetriable={0} IsTransactionAbortableError={1} IsApplicationRecoverableError={2} "
+                + "IsInvalidConfigurationError={3} IsAuthorizationError={4} IsOutOfOrderSequenceError={5}",
+            isRetriable,
+            isTransactionAbortableError,
+            isApplicationRecoverableError,
+            isInvalidConfigurationError,
+            isAuthorizationError,
+            isOutOfOrderSequenceError);
 }

@@ -17,17 +17,17 @@ using System;
 namespace Confluent.Kafka.Admin;
 
 /// <summary>
-/// The metadata a broker returned for a newly created topic — the .NET realization of
+/// The metadata a broker returned for a topic it accepted — the .NET realization of
 /// Java's <c>CreateTopicsResult.TopicMetadataAndConfig</c>.
 /// </summary>
 /// <remarks>
 /// <para>
-/// ⚠ <b>Creation can succeed while the metadata is unavailable</b> — the broker may
-/// create the topic and still return nothing about it (an older broker, or a
-/// <c>validateOnly</c> request). Java models that with a second, inner error: the
-/// per-topic future completes <em>successfully</em> with a
-/// <c>TopicMetadataAndConfig</c> whose accessors then throw
-/// (<c>ensureSuccess()</c>). This type does the same: every accessor is a
+/// ⚠ <b>A topic can be accepted while the metadata is unavailable</b> — the broker may accept the
+/// topic and still report a topic-config error (for example <c>TOPIC_AUTHORIZATION_FAILED</c>,
+/// code 29, when the caller may not describe the topic's configs) or be too old to report the
+/// metadata (<c>KafkaAdminClient.java:1852-1857</c>). Java models that with a second, inner error:
+/// the per-topic future completes <em>successfully</em> with a <c>TopicMetadataAndConfig</c> whose
+/// accessors then throw (<c>ensureSuccess()</c>). This type does the same: every accessor is a
 /// <b>method</b>, not a property, precisely because it can throw
 /// <see cref="KafkaException"/> — the same reason the consumer's
 /// <c>Assignment()</c> / <c>Subscription()</c> / <c>Paused()</c> are methods.
@@ -68,8 +68,8 @@ public sealed class TopicMetadataAndConfig
     }
 
     /// <summary>
-    /// Initializes an instance for a topic that <b>was created</b> but whose metadata
-    /// the broker did not return — Java's <c>TopicMetadataAndConfig(Throwable)</c>.
+    /// Initializes an instance for a topic that <b>was accepted</b> but whose metadata
+    /// the broker did not return — Java's <c>TopicMetadataAndConfig(ApiException)</c>.
     /// Every accessor then throws.
     /// </summary>
     /// <param name="exception">The reason the metadata is unavailable.</param>
@@ -122,17 +122,26 @@ public sealed class TopicMetadataAndConfig
     }
 
     /// <summary>
-    /// Java's <c>ensureSuccess()</c>: rethrows the metadata failure wrapped in a fresh
-    /// <see cref="KafkaException"/> (Java wraps in <c>new KafkaException(exception)</c>),
-    /// so the original stays available as
-    /// <see cref="System.Exception.InnerException"/> and each accessor call gets its own
-    /// stack trace.
+    /// Java's <c>ensureSuccess()</c>, which throws the held failure itself
+    /// (<c>CreateTopicsResult.java:151-154</c>). This throws a fresh
+    /// <see cref="KafkaException"/> with the held failure's code, message, retriable flag
+    /// and hierarchy predicates, so each accessor call gets its own stack trace and the
+    /// held failure stays available as <see cref="System.Exception.InnerException"/>.
     /// </summary>
     private void EnsureSuccess()
     {
         if (_exception is not null)
         {
-            throw new KafkaException(_exception.Message, _exception);
+            throw new KafkaException(
+                _exception.Code,
+                _exception.Message,
+                _exception.IsRetriable,
+                _exception.IsTransactionAbortableError,
+                _exception.IsApplicationRecoverableError,
+                _exception.IsInvalidConfigurationError,
+                _exception.IsAuthorizationError,
+                _exception.IsOutOfOrderSequenceError,
+                _exception);
         }
     }
 }

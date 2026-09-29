@@ -27,11 +27,11 @@ namespace Confluent.Kafka;
 /// (<c>SerializationException extends KafkaException</c>) and the binding's flat
 /// error-model convention (ffi-marshalling.md §A5/§B5). Being a
 /// <see cref="KafkaException"/>, it is caught by an existing
-/// <c>catch (KafkaException)</c>. Its classification fields
-/// (<see cref="KafkaException.Code"/>, <see cref="KafkaException.IsRetriable"/>)
-/// are left at their defaults — a serde failure originates in the binding/user
-/// layer, not from a <c>kafka_common_Error_t</c> handle, so it carries no core
-/// error code.
+/// <c>catch (KafkaException)</c>. Its error classification is left at the
+/// defaults (<see cref="KafkaException.Code"/> is 0 and every hierarchy predicate
+/// of <see cref="KafkaException"/> is <see langword="false"/>) — a serde failure
+/// originates in the binding/user layer, not from a <c>kafka_common_Error_t</c>
+/// handle, so it carries no core error code.
 /// </para>
 /// <para>
 /// The built-in <see cref="Serdes"/> throw this on malformed input (e.g. a fixed-width

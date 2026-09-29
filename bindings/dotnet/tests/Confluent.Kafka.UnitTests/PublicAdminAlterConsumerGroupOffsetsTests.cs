@@ -14,9 +14,12 @@
 
 using System;
 using System.Collections.Generic;
+using System.Globalization;
+using System.Linq;
 using System.Threading.Tasks;
 
 using Confluent.Kafka.Admin;
+using Confluent.Kafka.Internal.Interop;
 
 using Xunit;
 
@@ -57,6 +60,9 @@ public sealed class PublicAdminAlterConsumerGroupOffsetsTests
 
     /// <summary>The code Kafka assigns to <c>UNSUPPORTED_VERSION</c>.</summary>
     private const int UnsupportedVersionCode = 35;
+
+    /// <summary>The code Kafka assigns to <c>GROUP_AUTHORIZATION_FAILED</c>.</summary>
+    private const int GroupAuthorizationFailedCode = 30;
 
     /// <summary>
     /// The exact message Java's <c>MockAdminClient</c> throws (with its own typo) and the
@@ -199,6 +205,99 @@ public sealed class PublicAdminAlterConsumerGroupOffsetsTests
         await TestTimeout.Run(clean.All, s_deadline);
     }
 
+    /// <summary>
+    /// <see cref="AlterConsumerGroupOffsetsResult.All"/> keeps the classification the core
+    /// gave the first failure. The failure is built from a core error handle,
+    /// <c>kafka_common_Error_new(30, message)</c> (<c>GROUP_AUTHORIZATION_FAILED</c>), and
+    /// mapped through <c>KafkaException.FromHandle</c>, as production maps each partition's
+    /// owned error (<c>AdminCallbacks.CompletePerKeyFanIn</c>, which the
+    /// <c>alterConsumerGroupOffsets</c> trampoline <c>OnAlterConsumerGroupOffsets</c> calls).
+    /// The test first asserts the core's answers for that failure: code 30,
+    /// <see cref="KafkaException.IsInvalidConfigurationError"/> and
+    /// <see cref="KafkaException.IsAuthorizationError"/> true, and
+    /// <see cref="KafkaException.IsRetriable"/> and the other hierarchy predicates false.
+    /// It then asserts that the exception <see cref="AlterConsumerGroupOffsetsResult.All"/>
+    /// throws has code 30, the aggregate message naming the failed partition, and the
+    /// failure's flags.
+    /// </summary>
+    [Fact]
+    public async Task All_KeepsTheFirstFailuresCoreClassification()
+    {
+        TopicPartition good = new TopicPartition("p5-classified", 0);
+        TopicPartition bad = new TopicPartition("p5-classified", 1);
+
+        KafkaException failure = FromNewError(GroupAuthorizationFailedCode, "group authorization failed");
+        Assert.Equal(GroupAuthorizationFailedCode, failure.Code);
+        Assert.Equal(
+            Flags(
+                isRetriable: false,
+                isTransactionAbortableError: false,
+                isApplicationRecoverableError: false,
+                isInvalidConfigurationError: true,
+                isAuthorizationError: true,
+                isOutOfOrderSequenceError: false),
+            Flags(failure));
+
+        AlterConsumerGroupOffsetsResult result = new AlterConsumerGroupOffsetsResult(
+            Task.FromResult<IReadOnlyDictionary<TopicPartition, KafkaException?>>(
+                new Dictionary<TopicPartition, KafkaException?> { [good] = null, [bad] = failure }));
+
+        KafkaException thrown = await TestTimeout.Run(
+            () => Assert.ThrowsAsync<KafkaException>(result.All), s_deadline);
+
+        Assert.Equal(GroupAuthorizationFailedCode, thrown.Code);
+        Assert.Equal(
+            "Failed altering group offsets for the following partitions: [" + bad + "]",
+            thrown.Message);
+        Assert.Equal(Flags(failure), Flags(thrown));
+    }
+
+    /// <summary>
+    /// <see cref="AlterConsumerGroupOffsetsResult.All"/> passes each flag of the first
+    /// failure to the same parameter of the rebuilt exception. The flag parameters of the
+    /// internal constructor
+    /// <c>KafkaException(int, string?, bool, bool, bool, bool, bool, bool, Exception?)</c>
+    /// are numbered in order: <c>isRetriable</c> 1, <c>isTransactionAbortableError</c> 2,
+    /// <c>isApplicationRecoverableError</c> 3,
+    /// <c>isInvalidConfigurationError</c> 4, <c>isAuthorizationError</c> 5 and
+    /// <c>isOutOfOrderSequenceError</c> 6. In row <paramref name="bit"/>, one failure sets
+    /// each flag to that bit of its number, and another failure, with another code, sets
+    /// each flag to the opposite value. The flags are set directly, with no relation to
+    /// the code. The test asserts that the thrown exception's code and flags equal those
+    /// of the failure the map enumerates first. Two different numbers differ in some bit,
+    /// so for any two flag parameters some row sets them differently, and a rebuild that
+    /// passes one flag in another's parameter fails that row. A code or flag taken from the
+    /// other failure fails every row.
+    /// </summary>
+    /// <param name="bit">Which bit of each flag's number the first failure uses.</param>
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    [InlineData(2)]
+    public async Task All_PassesEachFlagOfTheFirstFailureToItsOwnParameter(int bit)
+    {
+        TopicPartition good = new TopicPartition("p5-flags", 0);
+        TopicPartition bad = new TopicPartition("p5-flags", 1);
+        TopicPartition worse = new TopicPartition("p5-flags", 2);
+
+        Dictionary<TopicPartition, KafkaException?> outcomes = new Dictionary<TopicPartition, KafkaException?>
+        {
+            [good] = null,
+            [bad] = WithFlags(11, bit, opposite: false),
+            [worse] = WithFlags(12, bit, opposite: true),
+        };
+        KafkaException first = outcomes.First(entry => entry.Value is not null).Value!;
+
+        AlterConsumerGroupOffsetsResult result = new AlterConsumerGroupOffsetsResult(
+            Task.FromResult<IReadOnlyDictionary<TopicPartition, KafkaException?>>(outcomes));
+
+        KafkaException thrown = await TestTimeout.Run(
+            () => Assert.ThrowsAsync<KafkaException>(result.All), s_deadline);
+
+        Assert.Equal(first.Code, thrown.Code);
+        Assert.Equal(Flags(first), Flags(thrown));
+    }
+
     /// <summary>A call-level failure of the aggregate future propagates from both accessors.</summary>
     [Fact]
     public async Task AFaultedFuture_PropagatesFromBothAccessors()
@@ -220,4 +319,74 @@ public sealed class PublicAdminAlterConsumerGroupOffsetsTests
             () => Assert.ThrowsAsync<KafkaException>(result.All), s_deadline);
         Assert.Same(callLevel, fromAll);
     }
+
+    /// <summary>
+    /// Builds an owned error with <c>kafka_common_Error_new</c> and maps it through
+    /// <c>KafkaException.FromHandle</c>, which reads every value out with
+    /// <c>KafkaException.FromBorrowedHandle</c> and then frees the handle. The core copies
+    /// the message, so its pin may end after the call.
+    /// </summary>
+    private static KafkaException FromNewError(int code, string message)
+    {
+        using Utf8Marshal.PinnedUtf8String pinned = Utf8Marshal.Pin(message);
+        IntPtr error = NativeMethods.KafkaErrorNew(code, pinned.Pointer);
+        Assert.NotEqual(IntPtr.Zero, error);
+
+        KafkaException? ex = KafkaException.FromHandle(error);
+        Assert.NotNull(ex);
+        return ex!;
+    }
+
+    /// <summary>
+    /// A failure carrying <paramref name="code"/> in which the flag numbered <c>n</c> (the
+    /// numbering of <see cref="All_PassesEachFlagOfTheFirstFailureToItsOwnParameter(int)"/>)
+    /// is bit <paramref name="bit"/> of <c>n</c>, inverted when
+    /// <paramref name="opposite"/> is set. The constructor it calls keeps each flag as
+    /// given.
+    /// </summary>
+    private static KafkaException WithFlags(int code, int bit, bool opposite)
+    {
+        bool Flag(int number) => (((number >> bit) & 1) == 1) != opposite;
+
+        return new KafkaException(
+            code,
+            "flag pattern",
+            isRetriable: Flag(1),
+            isTransactionAbortableError: Flag(2),
+            isApplicationRecoverableError: Flag(3),
+            isInvalidConfigurationError: Flag(4),
+            isAuthorizationError: Flag(5),
+            isOutOfOrderSequenceError: Flag(6));
+    }
+
+    /// <summary>
+    /// The retriable flag and the hierarchy predicates of <paramref name="ex"/>, each named,
+    /// in the order of the constructor's parameters.
+    /// </summary>
+    private static string Flags(KafkaException ex) =>
+        Flags(
+            ex.IsRetriable,
+            ex.IsTransactionAbortableError,
+            ex.IsApplicationRecoverableError,
+            ex.IsInvalidConfigurationError,
+            ex.IsAuthorizationError,
+            ex.IsOutOfOrderSequenceError);
+
+    private static string Flags(
+        bool isRetriable,
+        bool isTransactionAbortableError,
+        bool isApplicationRecoverableError,
+        bool isInvalidConfigurationError,
+        bool isAuthorizationError,
+        bool isOutOfOrderSequenceError) =>
+        string.Format(
+            CultureInfo.InvariantCulture,
+            "IsRetriable={0} IsTransactionAbortableError={1} IsApplicationRecoverableError={2} "
+                + "IsInvalidConfigurationError={3} IsAuthorizationError={4} IsOutOfOrderSequenceError={5}",
+            isRetriable,
+            isTransactionAbortableError,
+            isApplicationRecoverableError,
+            isInvalidConfigurationError,
+            isAuthorizationError,
+            isOutOfOrderSequenceError);
 }
