@@ -549,7 +549,7 @@ impl ConsumerConfig {
     /// Returns [`Error::LocalIllegalArgument`] if a value cannot be parsed
     /// for its expected type, or fails its validator.
     pub fn new(props: &HashMap<String, String>) -> Result<Self, Error> {
-        // NOTE: 14 of Java's per-field `atLeast(..)` numeric validators
+        // NOTE: 13 of Java's per-field `atLeast(..)` numeric validators
         // (ConsumerConfig.java lines 415-710) are intentionally deferred to
         // Phase 11, when `post_process_parsed_config` is translated. Until
         // that lands, negative / out-of-range values are silently accepted
@@ -572,9 +572,9 @@ impl ConsumerConfig {
         //   - `retry.backoff.max.ms`                          atLeast(0L) (536)
         //   - `request.timeout.ms`                            atLeast(0)  (590)
         //   - `default.api.timeout.ms`                        atLeast(0)  (596)
-        //   - `metadata.recovery.rebootstrap.trigger.ms`      atLeast(0)  (689)
         // The currently-translated validators are `max.poll.records >= 1`,
         // `metrics.num.samples >= 1`, `metrics.sample.window.ms >= 0`,
+        // `metadata.recovery.rebootstrap.trigger.ms >= 0`,
         // and the string-enum keys.
         let mut config = Self::default();
 
@@ -723,7 +723,13 @@ impl ConsumerConfig {
                     config.metadata_recovery_strategy = value.clone();
                 },
                 Self::METADATA_RECOVERY_REBOOTSTRAP_TRIGGER_MS_CONFIG => {
-                    config.metadata_recovery_rebootstrap_trigger_ms = parse_i64(key, value)?;
+                    // Java `ConsumerConfig` (`:686-689`):
+                    // `metadata.recovery.rebootstrap.trigger.ms` is `atLeast(0)`.
+                    let v = parse_i64(key, value)?;
+                    if v < 0 {
+                        return Err(Error::config_name_value_message(key, v, "Value must be at least 0"));
+                    }
+                    config.metadata_recovery_rebootstrap_trigger_ms = v;
                 },
                 Self::EXCLUDE_INTERNAL_TOPICS_CONFIG => {
                     config.exclude_internal_topics = parse_bool(key, value)?;
@@ -919,6 +925,29 @@ mod tests {
         let mut props = HashMap::new();
         props.insert("metrics.num.samples".to_string(), "-1".to_string());
         assert!(ConsumerConfig::new(&props).is_err());
+    }
+
+    /// `metadata.recovery.rebootstrap.trigger.ms` is `atLeast(0)` (Java
+    /// `ConsumerConfig.java:686-689`): 0 is accepted, -1 is rejected with
+    /// Java's `ConfigDef.Range.atLeast` message.
+    #[test]
+    fn test_metadata_recovery_rebootstrap_trigger_ms_validator() {
+        let mut props = HashMap::new();
+        props.insert("metadata.recovery.rebootstrap.trigger.ms".to_string(), "0".to_string());
+        let c = ConsumerConfig::new(&props).unwrap();
+        assert_eq!(c.metadata_recovery_rebootstrap_trigger_ms, 0);
+
+        let mut props = HashMap::new();
+        props.insert("metadata.recovery.rebootstrap.trigger.ms".to_string(), "-1".to_string());
+        let err = ConsumerConfig::new(&props).unwrap_err();
+        let Error::Config(config_error) = err else {
+            panic!("expected a config error, got {err:?}");
+        };
+        assert_eq!(
+            config_error.message(),
+            "Invalid value -1 for configuration metadata.recovery.rebootstrap.trigger.ms: \
+             Value must be at least 0"
+        );
     }
 
     /// `metrics.sample.window.ms` is `atLeast(0)` (Java ConsumerConfig). A

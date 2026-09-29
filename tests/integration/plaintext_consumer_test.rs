@@ -25,8 +25,8 @@
 //! `position` timeout + wakeup, and zero-timeout offset queries.
 //!
 //! KIP-848 (`GroupProtocol.CONSUMER`) arm only; classic twins, metrics /
-//! quota, coordinator-failover, broker-shutdown, and
-//! close-on-interrupt are OUT_OF_SCOPE per `consumer-threading.md` §20.
+//! quota, and close-on-interrupt are OUT_OF_SCOPE per
+//! `consumer-threading.md` §20.
 //!
 //! ## Translated (CONSUMER arm)
 //!
@@ -61,6 +61,12 @@
 //!   → `test_async_consumer_position_with_error_connection_respects_wakeup`
 //! - `testAsyncConsumerOffsetRelatedWhenTimeoutZero`
 //!   → `test_async_consumer_offset_related_when_timeout_zero`
+//! - `testAsyncConsumeCoordinatorFailover` (line 180)
+//!   → `test_async_consume_coordinator_failover` (Phase 16; dedicated
+//!   `Type::Kraft` cluster, stops the group coordinator)
+//! - `testAsyncConsumerCloseOnBrokerShutdown` (line 214)
+//!   → `test_async_consumer_close_on_broker_shutdown` (Phase 16; dedicated
+//!   single-broker `Type::Kraft` cluster, stops the broker)
 //!
 //! ## SKIPped (documented gaps — see PLAN.md)
 //!
@@ -89,15 +95,21 @@
 //!   covered by `consumer_test.rs` and the assign/fetch suites (subscribe /
 //!   assign / seek / poll / CreateTime full per-record field verification).
 //! - SKIP (OUT_OF_SCOPE §20): all `testClassicConsumer*` twins,
-//!   `*MetricsCleanUp*` / `QuotaMetrics*`, `testAsyncConsumeCoordinatorFailover`,
-//!   `testAsyncConsumerCloseOnBrokerShutdown`,
+//!   `*MetricsCleanUp*` / `QuotaMetrics*`,
 //!   `testAsyncConsumerCloseLeavesGroupOnInterrupt`,
 //!   `testAsyncConsumerClusterResourceListener`.
 
+use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 use std::time::Instant;
+
+use async_trait::async_trait;
 
 use confluent_kafka::common::Error;
 use confluent_kafka::common::Errors;
@@ -110,7 +122,10 @@ use confluent_kafka::common::serialization::ByteArraySerializer;
 use confluent_kafka::common::serialization::Deserializer;
 use confluent_kafka::consumer::Consumer;
 use confluent_kafka::consumer::ConsumerConfig;
+use confluent_kafka::consumer::ConsumerRebalanceListener;
 use confluent_kafka::consumer::KafkaConsumer;
+use confluent_kafka::consumer::OffsetAndMetadata;
+use confluent_kafka::consumer::OffsetCommitCallback;
 use confluent_kafka::producer::KafkaProducer;
 use confluent_kafka::producer::Producer;
 use confluent_kafka::producer::ProducerConfig;
@@ -127,27 +142,11 @@ type BytesConsumer = dyn Consumer<Vec<u8>, Vec<u8>>;
 
 /// Cluster config matching the Java `@ClusterTestDefaults`: 3 brokers,
 /// KIP-848 enabled, plus the broker properties from the `serverProperties`
-/// annotation. `num.partitions=2` reproduces Java's
-/// `cluster.createTopic(name, 2, BROKER_COUNT)` for auto-created topics
-/// (the Rust harness has no admin client).
+/// annotation. Topics Java creates explicitly are created by
+/// [`create_test_topic`]; `num.partitions=2` applies to auto-created topics.
 fn cluster_config_kip848() -> ClusterConfig {
-    // `num.partitions=2` reproduces Java's `cluster.createTopic(name, 2, ...)`
-    // for auto-created topics; the canonical helper supplies the shared
-    // KIP-848 broker tuning.
+    // The canonical helper supplies the shared KIP-848 broker tuning.
     kip848_3_broker(2)
-}
-
-/// Like [`cluster_config_kip848`] but with `LogAppendTime` as the
-/// broker-wide message timestamp type. The Rust harness has no admin
-/// client, so the per-topic `message.timestamp.type=LogAppendTime` config
-/// that Java sets on `createTopic` is applied at the broker level instead —
-/// every topic in this (dedicated, pool-keyed) cluster gets LogAppendTime,
-/// which is exactly what the LogAppendTime test needs.
-fn cluster_config_log_append_time() -> ClusterConfig {
-    let mut cfg = kip848_3_broker(2);
-    cfg.server_properties
-        .insert("KAFKA_LOG_MESSAGE_TIMESTAMP_TYPE".to_string(), "LogAppendTime".to_string());
-    cfg
 }
 
 // ── Byte-array deserializer (Java uses `byte[]` keys and values) ──────
@@ -265,16 +264,52 @@ async fn send_records(
     }
 }
 
-/// Creates `topic` EMPTY by triggering broker metadata auto-creation and
-/// waiting until it materializes with the expected partition count. Mirrors
-/// Java's `cluster.createTopic(name, partitions, replicationFactor)` (no data
-/// records, so the first produced record lands at offset 0).
-///
-/// The Rust harness has no admin client, but `partitions_for` over the
-/// METADATA path triggers broker auto-create (`auto.create.topics.enable` is
-/// on by default) with `num.partitions=2` — exactly an empty topic, matching
-/// Java. This replaces the earlier provisioner-record approach, which placed
-/// a record at offset 0 and shifted every real record by one.
+/// Java `PlaintextConsumerTest.BROKER_COUNT`.
+const BROKER_COUNT: i16 = 3;
+
+/// Translates Java's `cluster.createTopic(name, partitions, replicationFactor)`:
+/// creates `topic` EMPTY through the admin client (the first produced record
+/// lands at offset 0), then waits until every partition leader accepts
+/// leader-only requests, before the test produces. Auto-creating the topic
+/// instead races leader election on the 3-broker cluster
+/// (`NOT_LEADER_OR_FOLLOWER` retries reorder non-idempotent sends).
+async fn create_test_topic(bootstrap_servers: &str, topic: &str, num_partitions: i32, replication_factor: i16) {
+    create_test_topic_with_configs(bootstrap_servers, topic, num_partitions, replication_factor, BTreeMap::new()).await;
+}
+
+/// [`create_test_topic`] with topic-level configs — Java's
+/// `cluster.createTopic(name, partitions, replicationFactor, configs)`.
+async fn create_test_topic_with_configs(
+    bootstrap_servers: &str,
+    topic: &str,
+    num_partitions: i32,
+    replication_factor: i16,
+    configs: BTreeMap<String, String>,
+) {
+    use confluent_kafka::admin::Admin;
+    use confluent_kafka::admin::AdminClientConfig;
+    use confluent_kafka::admin::KafkaAdminClient;
+
+    use crate::common::test_utils;
+
+    let props = HashMap::from([
+        ("bootstrap.servers".to_string(), bootstrap_servers.to_string()),
+        ("client.id".to_string(), "plaintext-consumer-test-admin".to_string()),
+        ("request.timeout.ms".to_string(), "30000".to_string()),
+        ("default.api.timeout.ms".to_string(), "30000".to_string()),
+    ]);
+    let config = AdminClientConfig::new(&props).expect("valid admin config");
+    let admin: Box<dyn Admin> = Box::new(KafkaAdminClient::new(config).expect("admin client"));
+    test_utils::create_topic_with_configs(admin.as_ref(), topic, num_partitions, replication_factor, configs).await;
+    test_utils::wait_for_partition_leaders(admin.as_ref(), topic, 0..num_partitions).await;
+    admin.close_with_timeout(Duration::from_secs(5)).await;
+}
+
+/// Creates `topic` EMPTY by triggering broker metadata auto-creation
+/// (`partitions_for` over the METADATA path; `auto.create.topics.enable` is on
+/// by default, `num.partitions=2`) and waits until it materializes with the
+/// expected partition count. Used only by tests whose Java counterpart relies
+/// on broker auto-create rather than `cluster.createTopic`.
 async fn create_topic(consumer: &mut BytesConsumer, topic: &str, partitions: usize) {
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
@@ -561,14 +596,15 @@ async fn test_async_consumer_partitions_for() {
     let topic = ctx.topic("topic");
     let group_id = ctx.group_id("g_partitions_for");
 
+    // Java: `cluster.createTopic(TOPIC, 2, BROKER_COUNT)` and
+    // `cluster.createTopic("part-test", numParts, 1)`
+    // (`PlaintextConsumerTest.java:470-471`).
+    let part_test = ctx.topic("part-test");
+    create_test_topic(ctx.bootstrap_servers(), &topic, 2, BROKER_COUNT).await;
+    create_test_topic(ctx.bootstrap_servers(), &part_test, 2, 1).await;
+
     let mut consumer = make_consumer(ctx.bootstrap_servers(), &group_id, &[]);
-    // The topic may take a moment to appear in fresh metadata; poll a few
-    // times if needed (Java relies on createTopic being synchronous).
-    let deadline = Instant::now() + Duration::from_secs(30);
-    let mut partitions = consumer.partitions_for(&topic).await.expect("partitions_for");
-    while partitions.len() < 2 && Instant::now() < deadline {
-        partitions = consumer.partitions_for(&topic).await.expect("partitions_for");
-    }
+    let partitions = consumer.partitions_for(&topic).await.expect("partitions_for");
     assert_eq!(partitions.len(), 2, "topic should have 2 partitions");
 
     consumer.close().await.expect("consumer close");
@@ -603,7 +639,7 @@ async fn test_async_consumer_partitions_for_auto_create() {
     consumer.close().await.expect("consumer close");
 }
 
-/// Translates Java's `testAsyncConsumerPartitionsForInvalidTopic` (line 440).
+/// Translates Java's `testAsyncConsumerPartitionsForInvalidTopic` (PlaintextConsumerTest.java:513).
 #[tokio::test(flavor = "multi_thread")]
 async fn test_async_consumer_partitions_for_invalid_topic() {
     let ctx = TestContext::new(cluster_config_kip848()).await;
@@ -614,11 +650,15 @@ async fn test_async_consumer_partitions_for_invalid_topic() {
         .partitions_for(";3# ads,{234")
         .await
         .expect_err("partitions_for on an invalid topic should fail");
-    let msg = err.to_string();
+    // Java: `assertThrows(InvalidTopicException.class, ...)`, raised by
+    // TopicMetadataRequestManager.java:260 as
+    // `new InvalidTopicException("Topic '" + topic + "' is invalid")`.
     assert!(
-        msg.contains("Invalid topic") || msg.contains("invalid topic") || err.error() == Errors::InvalidTopicError,
-        "expected InvalidTopic error, got: {msg}"
+        matches!(err, Error::InvalidTopic(_)),
+        "expected Error::InvalidTopic, got: {err:?}"
     );
+    assert_eq!(err.error(), Errors::InvalidTopicError);
+    assert_eq!(err.message(), "Topic ';3# ads,{234' is invalid");
 
     consumer.close().await.expect("consumer close");
 }
@@ -634,9 +674,9 @@ async fn test_async_consumer_list_topics() {
 
     let producer = build_producer(ctx.bootstrap_servers());
     let mut consumer = make_consumer(ctx.bootstrap_servers(), &group_id, &[]);
-    create_topic(consumer.as_mut(), &topic1, 2).await;
-    create_topic(consumer.as_mut(), &topic2, 2).await;
-    create_topic(consumer.as_mut(), &topic3, 2).await;
+    create_test_topic(ctx.bootstrap_servers(), &topic1, 2, 1).await;
+    create_test_topic(ctx.bootstrap_servers(), &topic2, 2, 1).await;
+    create_test_topic(ctx.bootstrap_servers(), &topic3, 2, 1).await;
     send_records(&producer, &TopicPartition::new(topic1.clone(), 0), 1, current_time_ms()).await;
     producer.close().await.expect("producer close");
 
@@ -693,7 +733,7 @@ async fn test_async_consumer_seek() {
     let mut consumer = make_consumer(ctx.bootstrap_servers(), &group_id, &[]);
     // Java uses `startingTimestamp = 0`. Empty topic so records start at
     // offset 0, matching Java's offset==index expectation.
-    create_topic(consumer.as_mut(), &topic, 2).await;
+    create_test_topic(ctx.bootstrap_servers(), &topic, 2, BROKER_COUNT).await;
     let starting_timestamp: i64 = 0;
     send_records(&producer, &tp, total_records, starting_timestamp).await;
     producer.close().await.expect("producer close");
@@ -731,7 +771,7 @@ async fn test_async_consumer_seek_throws_illegal_state_if_partitions_not_assigne
     let group_id = ctx.group_id("g_seek_illegal_state");
 
     let mut consumer = make_consumer(ctx.bootstrap_servers(), &group_id, &[]);
-    create_topic(consumer.as_mut(), &topic, 2).await;
+    create_test_topic(ctx.bootstrap_servers(), &topic, 2, BROKER_COUNT).await;
     let err = consumer
         .seek_to_end(std::slice::from_ref(&tp))
         .await
@@ -748,7 +788,8 @@ async fn test_async_consumer_seek_throws_illegal_state_if_partitions_not_assigne
 }
 
 /// Translates Java's `testAsyncConsumerConsumeMessagesWithLogAppendTime`
-/// (line 735). Uses a dedicated broker-wide-LogAppendTime cluster; asserts
+/// (line 735). Creates the topic with `message.timestamp.type=LogAppendTime`
+/// (2 partitions, RF 2, `PlaintextConsumerTest.java:818`); asserts
 /// `timestamp_type == LogAppendTime` and the broker-stamped timestamp is in
 /// `[startTime, now]` widened by a clock-skew slack (see
 /// `CLOCK_SKEW_SLACK_MS` below).
@@ -759,7 +800,7 @@ async fn test_async_consumer_seek_throws_illegal_state_if_partitions_not_assigne
 /// does not need.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_async_consumer_consume_messages_with_log_append_time() {
-    let mut ctx = TestContext::new(cluster_config_log_append_time()).await;
+    let mut ctx = TestContext::new(cluster_config_kip848()).await;
     let topic = ctx.topic("log-append-time");
     let tp = TopicPartition::new(topic.clone(), 0);
     let group_id = ctx.group_id("g_log_append_time");
@@ -770,7 +811,14 @@ async fn test_async_consumer_consume_messages_with_log_append_time() {
     let producer = build_producer(ctx.bootstrap_servers());
     let mut consumer = make_consumer(ctx.bootstrap_servers(), &group_id, &[]);
     // Empty topic so records start at offset 0 (Java parity).
-    create_topic(consumer.as_mut(), &topic, 2).await;
+    create_test_topic_with_configs(
+        ctx.bootstrap_servers(),
+        &topic,
+        2,
+        2,
+        BTreeMap::from([("message.timestamp.type".to_string(), "LogAppendTime".to_string())]),
+    )
+    .await;
     // Producer-supplied timestamps are IGNORED by a LogAppendTime topic;
     // the broker stamps each record with its append time.
     send_records(&producer, &tp, num_records, start_time).await;
@@ -864,7 +912,7 @@ async fn test_async_consumer_end_offsets() {
     let producer = build_producer(ctx.bootstrap_servers());
     let mut consumer = make_consumer(ctx.bootstrap_servers(), &group_id, &[]);
     // Empty topic so records start at offset 0 (Java parity).
-    create_topic(consumer.as_mut(), &topic, 2).await;
+    create_test_topic(ctx.bootstrap_servers(), &topic, 2, BROKER_COUNT).await;
     send_records(&producer, &tp, num_records, current_time_ms()).await;
     producer.close().await.expect("producer close");
 
@@ -899,22 +947,17 @@ async fn test_async_consumer_fetch_offsets_for_time() {
     let tp1 = TopicPartition::new(topic.clone(), 1);
     let group_id = ctx.group_id("g_offsets_for_time");
 
+    // Java: `cluster.createTopic(TOPIC, 2, BROKER_COUNT)`
+    // (`PlaintextConsumerTest.java:1503`) — an EMPTY topic, so offset 0 on
+    // each partition is a real `ts==0` record.
+    create_test_topic(ctx.bootstrap_servers(), &topic, 2, BROKER_COUNT).await;
     let producer = build_producer(ctx.bootstrap_servers());
-    // Do NOT provision: the `__provisioner__` record at offset 0 carries a
-    // broker wall-clock `CreateTime` timestamp, which is `>=` any small
-    // search target, so `offsets_for_times(ts=0/20)` would resolve to the
-    // provisioner (offset 0) rather than the produced records. Instead,
-    // send the 100 timestamped records directly — the first send to
-    // partition 0 auto-creates the topic with `KAFKA_NUM_PARTITIONS=2`, so
-    // offset 0 on each partition IS a real `ts==0` record (Java's
-    // "key/val/timestamp == sequence number, starting at offset 0").
-    //
     // partition 0: key/val/timestamp == sequence number; partition 1: same.
     send_records(&producer, &tp0, 100, 0).await;
     send_records(&producer, &tp1, 100, 0).await;
     producer.close().await.expect("producer close");
 
-    // No provisioner ⇒ the produced records start at offset 0 on each
+    // Empty topic ⇒ the produced records start at offset 0 on each
     // partition.
     let base0 = 0i64;
     let base1 = 0i64;
@@ -989,7 +1032,7 @@ async fn test_async_consumer_consuming_with_null_group_id() {
     // Java: createTopic(TOPIC, 1, 1) — an EMPTY topic, so the 3 records below
     // land at offsets 0, 1, 2. Create it via metadata auto-create (the broker
     // gives 2 partitions; only partition 0 is used).
-    create_topic(consumer1.as_mut(), &topic, 1).await;
+    create_test_topic(ctx.bootstrap_servers(), &topic, 1, 1).await;
     for i in 1..=3 {
         let record = ProducerRecord::with_partition_key(
             topic.clone(),
@@ -1057,7 +1100,7 @@ async fn test_async_consumer_null_group_id_not_supported_if_committing() {
         Box::new(ByteArrayDeserializer),
     )
     .expect("KafkaConsumer::new");
-    create_topic(consumer.as_mut(), &topic, 2).await;
+    create_test_topic(ctx.bootstrap_servers(), &topic, 2, BROKER_COUNT).await;
     consumer.assign(vec![tp.clone()]).await.expect("assign");
 
     let err = consumer.commit_sync().await.expect_err("groupless commit_sync should fail");
@@ -1175,7 +1218,7 @@ async fn test_async_consumer_offset_related_when_timeout_zero() {
     let group_id = ctx.group_id("g_timeout_zero");
 
     let mut consumer = make_consumer(ctx.bootstrap_servers(), &group_id, &[]);
-    create_topic(consumer.as_mut(), &topic, 2).await;
+    create_test_topic(ctx.bootstrap_servers(), &topic, 2, BROKER_COUNT).await;
 
     let result1 = consumer
         .beginning_offsets_with_timeout(std::slice::from_ref(&tp), Duration::ZERO)
@@ -1205,6 +1248,268 @@ async fn test_async_consumer_offset_related_when_timeout_zero() {
     );
 
     consumer.close().await.expect("consumer close");
+}
+
+// ── Broker fault injection (Phase 16) ─────────────────────────────────
+
+/// The class-level `@ClusterTestDefaults(serverProperties = ...)` of
+/// `PlaintextConsumerTest` (`PlaintextConsumerTest.java:120-129`), plus the
+/// KIP-848 opt-in the rest of this file's clusters carry.
+fn plaintext_consumer_test_defaults() -> BTreeMap<String, String> {
+    BTreeMap::from([
+        (
+            "KAFKA_GROUP_COORDINATOR_REBALANCE_PROTOCOLS".to_string(),
+            "classic,consumer".to_string(),
+        ),
+        ("KAFKA_OFFSETS_TOPIC_NUM_PARTITIONS".to_string(), "1".to_string()),
+        ("KAFKA_GROUP_MIN_SESSION_TIMEOUT_MS".to_string(), "100".to_string()),
+        ("KAFKA_GROUP_MAX_SESSION_TIMEOUT_MS".to_string(), "60000".to_string()),
+        ("KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS".to_string(), "10".to_string()),
+    ])
+}
+
+/// Mirrors Java's `ClientsTestUtils.TestConsumerReassignmentListener`: counts
+/// `on_partitions_assigned` / `on_partitions_revoked` invocations.
+#[derive(Clone, Default)]
+struct TestConsumerReassignmentListener {
+    calls_to_assigned: Arc<AtomicUsize>,
+    calls_to_revoked: Arc<AtomicUsize>,
+}
+
+impl TestConsumerReassignmentListener {
+    fn calls_to_assigned(&self) -> usize {
+        self.calls_to_assigned.load(Ordering::SeqCst)
+    }
+
+    fn calls_to_revoked(&self) -> usize {
+        self.calls_to_revoked.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl ConsumerRebalanceListener for TestConsumerReassignmentListener {
+    async fn on_partitions_revoked(&self, _partitions: &[TopicPartition]) -> Result<(), Error> {
+        self.calls_to_revoked.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+
+    async fn on_partitions_assigned(&self, _partitions: &[TopicPartition]) -> Result<(), Error> {
+        self.calls_to_assigned.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+/// Java's `TestUtils.waitForCondition` default bound.
+const DEFAULT_MAX_WAIT: Duration = Duration::from_secs(15);
+
+/// Translates `ClientsTestUtils.awaitRebalance(consumer, listener)`
+/// (`ClientsTestUtils.java:325`): `poll(100ms)` until `callsToAssigned`
+/// advances, within `waitForCondition`'s default 15 s.
+async fn await_rebalance(consumer: &mut BytesConsumer, listener: &TestConsumerReassignmentListener) {
+    let num_reassignments = listener.calls_to_assigned();
+    let deadline = Instant::now() + DEFAULT_MAX_WAIT;
+    loop {
+        consumer.poll(Duration::from_millis(100)).await.expect("poll should succeed");
+        if listener.calls_to_assigned() > num_reassignments {
+            return;
+        }
+        assert!(Instant::now() < deadline, "Timed out before expected rebalance completed");
+    }
+}
+
+/// Mirrors Java's `ClientsTestUtils.RetryCommitCallback`: a
+/// `RetriableCommitFailedException` asks for a resend, anything else completes
+/// the callback with that (possibly absent) error.
+///
+/// Java's callback holds the consumer and resends itself; a Rust callback
+/// cannot hold the consumer while the caller polls it, so it records the
+/// retriable failure and [`send_and_await_async_commit`] resends.
+#[derive(Clone, Default)]
+struct RetryCommitCallback {
+    is_complete: Arc<AtomicUsize>,
+    error: Arc<Mutex<Option<Error>>>,
+    retriable: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl OffsetCommitCallback for RetryCommitCallback {
+    async fn on_complete(&self, _offsets: &HashMap<TopicPartition, OffsetAndMetadata>, error: Option<&Error>) {
+        match error {
+            Some(Error::ConsumerRetriableCommitFailed(_)) => {
+                self.retriable.fetch_add(1, Ordering::SeqCst);
+            },
+            other => {
+                *self.error.lock().expect("commit error mutex poisoned") = other.cloned();
+                self.is_complete.fetch_add(1, Ordering::SeqCst);
+            },
+        }
+    }
+}
+
+/// Translates `ClientsTestUtils.sendAndAwaitAsyncCommit(consumer,
+/// Optional.empty())` (`ClientsTestUtils.java:309`): `commitAsync(callback)`,
+/// `poll(100ms)` until the callback completes (15 s), then assert no error.
+async fn send_and_await_async_commit(consumer: &mut BytesConsumer) {
+    let callback = RetryCommitCallback::default();
+    let handle: Arc<dyn OffsetCommitCallback> = Arc::new(callback.clone());
+    consumer
+        .commit_async_with_callback(Arc::clone(&handle))
+        .await
+        .expect("commitAsync should enqueue");
+    let deadline = Instant::now() + DEFAULT_MAX_WAIT;
+    loop {
+        consumer.poll(Duration::from_millis(100)).await.expect("poll should succeed");
+        if callback.is_complete.load(Ordering::SeqCst) > 0 {
+            break;
+        }
+        if callback.retriable.swap(0, Ordering::SeqCst) > 0 {
+            consumer
+                .commit_async_with_callback(Arc::clone(&handle))
+                .await
+                .expect("retriable resend should enqueue");
+        }
+        assert!(Instant::now() < deadline, "Failed to observe commit callback before timeout");
+    }
+    let error = callback.error.lock().expect("commit error mutex poisoned").clone();
+    assert!(error.is_none(), "async commit failed: {error:?}");
+}
+
+/// Translates `ClientsTestUtils.ensureNoRebalance(consumer, listener)`
+/// (`ClientsTestUtils.java:336`).
+async fn ensure_no_rebalance(consumer: &mut BytesConsumer, listener: &TestConsumerReassignmentListener) {
+    // The best way to verify that the current membership is still active is
+    // to commit offsets. This would fail if the group had rebalanced.
+    let initial_revoke_calls = listener.calls_to_revoked();
+    send_and_await_async_commit(consumer).await;
+    assert_eq!(initial_revoke_calls, listener.calls_to_revoked());
+}
+
+/// Translates `testAsyncConsumeCoordinatorFailover`
+/// (`PlaintextConsumerTest.java:180`, body
+/// `BaseConsumerTestcase.testCoordinatorFailover`, `ClientsTestUtils.java:422`)
+/// on the class shape: `Type.KRAFT`, `BROKER_COUNT` = 3 brokers, the
+/// `@ClusterTestDefaults` broker properties — as a dedicated cluster with an
+/// isolated controller, since the test stops a broker.
+///
+/// The consumer joins, then the broker leading the single `__consumer_offsets`
+/// partition (the group coordinator) is shut down; the consumer must find the
+/// new coordinator and keep its membership, proven by a successful async
+/// commit with no revocation.
+///
+/// **Deviation:** Java never creates `topic` (it relies on auto-creation, or
+/// on the empty first assignment firing the listener). The Rust test creates
+/// it the way the class's other tests do (`createTopic(TOPIC, 2,
+/// BROKER_COUNT)`) so the first assignment is deterministic.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_async_consume_coordinator_failover() {
+    use confluent_kafka::admin::Admin;
+    use confluent_kafka::admin::AdminClientConfig;
+    use confluent_kafka::admin::KafkaAdminClient;
+
+    use crate::common::test_utils;
+
+    let mut ctx = TestContext::new(
+        ClusterConfig::kraft_dedicated(3, 1).set_server_properties(plaintext_consumer_test_defaults()),
+    )
+    .await;
+    let bootstrap = ctx.bootstrap_servers().to_string();
+    let topic = ctx.topic("topic");
+    let admin = KafkaAdminClient::new(
+        AdminClientConfig::new(&HashMap::from([("bootstrap.servers".to_string(), bootstrap.clone())]))
+            .expect("valid admin config"),
+    )
+    .expect("admin client");
+    test_utils::create_topic(&admin, &topic, 2, 3).await;
+    admin.close_with_timeout(Duration::from_secs(5)).await;
+
+    // Use higher poll timeout to avoid consumer leaving the group due to timeout
+    let mut consumer = make_consumer(
+        &bootstrap,
+        &ctx.group_id("coordinator_failover"),
+        &[("max.poll.interval.ms", "15000")],
+    );
+    let listener = TestConsumerReassignmentListener::default();
+    consumer
+        .subscribe_with_topics_listener(vec![topic.clone()], Arc::new(listener.clone()))
+        .await
+        .expect("subscribe should succeed");
+    // the initial subscription should cause a callback execution
+    await_rebalance(consumer.as_mut(), &listener).await;
+    assert_eq!(1, listener.calls_to_assigned());
+
+    // get metadata for the topic. `Topic.GROUP_METADATA_TOPIC_NAME`; the Rust
+    // `Topic` lives in a crate-internal module, so the name is spelled out.
+    // Java loops while `partitionsFor` returns null; the Rust API returns a
+    // `Result`, so the loop retries a failed or empty lookup, bounded at 60 s.
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let parts = loop {
+        match consumer.partitions_for("__consumer_offsets").await {
+            Ok(parts) if !parts.is_empty() => break parts,
+            other => assert!(Instant::now() < deadline, "no metadata for __consumer_offsets: {other:?}"),
+        }
+    };
+    assert_eq!(1, parts.len());
+    let coordinator = parts[0].leader().expect("offsets partition has a leader").id();
+
+    // shutdown the coordinator
+    ctx.cluster().shutdown_broker(coordinator).await;
+
+    // the failover should not cause a rebalance
+    ensure_no_rebalance(consumer.as_mut(), &listener).await;
+
+    consumer.close().await.expect("consumer close should succeed");
+}
+
+/// Translates `testAsyncConsumerCloseOnBrokerShutdown`
+/// (`PlaintextConsumerTest.java:214`, body `testConsumerCloseOnBrokerShutdown`
+/// :223) on its `@ClusterTest(brokers = 1, ...)` shape — the class defaults
+/// merged with the method's `serverProperties` (offsets topic 1 partition /
+/// RF 1, transaction log RF 1 / min ISR 1) — as a dedicated `Type.KRAFT`
+/// cluster with an isolated controller.
+///
+/// After the consumer has polled once, the only broker is shut down; one more
+/// poll must not fail, and `close()` must return within 5 s instead of
+/// retrying the coordinator lookup for its full default timeout. Auto-commit
+/// is disabled so that commitSync() does not block the close timeout.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_async_consumer_close_on_broker_shutdown() {
+    let mut props = plaintext_consumer_test_defaults();
+    props.extend([
+        ("KAFKA_OFFSETS_TOPIC_NUM_PARTITIONS".to_string(), "1".to_string()),
+        ("KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR".to_string(), "1".to_string()),
+        ("KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR".to_string(), "1".to_string()),
+        ("KAFKA_TRANSACTION_STATE_LOG_MIN_ISR".to_string(), "1".to_string()),
+    ]);
+    let mut ctx = TestContext::new(ClusterConfig::kraft_dedicated(1, 1).set_server_properties(props)).await;
+    let topic = ctx.topic("topic");
+    // `make_consumer` already sets `enable.auto.commit=false`, as Java's config does.
+    let mut consumer = make_consumer(ctx.bootstrap_servers(), &ctx.group_id("close_on_broker_shutdown"), &[]);
+    consumer
+        .subscribe_with_topics(vec![topic])
+        .await
+        .expect("subscribe should succeed");
+
+    // Force consumer to discover coordinator by doing a poll
+    // This ensures coordinator is discovered before we shutdown the broker
+    consumer.poll(Duration::from_millis(100)).await.expect("poll should succeed");
+
+    // Now shutdown broker.
+    assert_eq!(1, ctx.cluster().broker_ids().len());
+    let broker = *ctx.cluster().broker_ids().first().expect("one broker");
+    ctx.cluster().shutdown_broker(broker).await;
+
+    // Do another poll to force the consumer to retry finding the coordinator.
+    consumer
+        .poll(Duration::from_millis(100))
+        .await
+        .expect("poll after broker shutdown should not fail");
+
+    // Close should not hang waiting for retries when broker is already down
+    // (Java: `assertTimeoutPreemptively(Duration.ofSeconds(5), () -> consumer.close(), ...)`).
+    tokio::time::timeout(Duration::from_secs(5), consumer.close())
+        .await
+        .expect("Consumer close should not wait for full timeout when broker is already shutdown")
+        .expect("consumer close should succeed");
 }
 
 // ── Local utilities ────────────────────────────────────────────────────
