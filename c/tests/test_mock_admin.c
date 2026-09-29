@@ -6544,11 +6544,28 @@ static void test_mock_admin_b5b_token_and_feature_async(void) {
     atomic_init(&u.fired, 0);
     atomic_init(&u.error_count, 0);
     atomic_init(&u.ok_count, 0);
-    kafka_admin_AdminClient_update_features_async(admin, seed, targets, upgrade, 1, -1, false,
-                                                  on_update_features, &u);
+    TEST_ASSERT_NULL(kafka_admin_AdminClient_update_features_async(
+        admin, seed, targets, upgrade, 1, -1, false, on_update_features, &u));
     TEST_ASSERT_TRUE(wait_for(&u.fired, 1));
     TEST_ASSERT_EQUAL_INT(1, atomic_load(&u.ok_count));
     TEST_ASSERT_EQUAL_INT(0, atomic_load(&u.error_count));
+
+    /* An update Java's FeatureUpdate constructor rejects is a submission error,
+     * returned as Java throws it, and the callback never fires. */
+    const int16_t zero[1] = {0};
+    update_features_async_result_t bad = {0};
+    atomic_init(&bad.fired, 0);
+    atomic_init(&bad.error_count, 0);
+    atomic_init(&bad.ok_count, 0);
+    kafka_common_Error_t *submit_err = kafka_admin_AdminClient_update_features_async(
+        admin, seed, zero, upgrade, 1, -1, false, on_update_features, &bad);
+    TEST_ASSERT_NOT_NULL(submit_err);
+    TEST_ASSERT_EQUAL_STRING(
+        "feature update at index 0: The upgradeType flag should be set to SAFE_DOWNGRADE or "
+        "UNSAFE_DOWNGRADE when the provided maxVersionLevel:0 is < 1.",
+        kafka_common_Error_message(submit_err));
+    kafka_common_Error_destroy(submit_err);
+    TEST_ASSERT_EQUAL_INT(0, atomic_load(&bad.fired));
 
     kafka_admin_AdminClient_destroy(admin);
 }
@@ -6592,11 +6609,13 @@ static void test_mock_admin_b5b_async_null_handle(void) {
     atomic_init(&u.fired, 0);
     atomic_init(&u.error_count, 0);
     atomic_init(&u.ok_count, 0);
-    kafka_admin_AdminClient_update_features_async(NULL, NULL, NULL, NULL, 0, -1, false,
-                                                  on_update_features, &u);
-    /* Zero requested features -> zero keys -> the callback never fires, even
-     * with a NULL handle - there is no per-call callback slot to report a
-     * whole-call failure through when zero keys were requested. */
+    /* A NULL handle is a submission error, returned rather than delivered
+     * through the callback, which never fires. */
+    kafka_common_Error_t *submit_err = kafka_admin_AdminClient_update_features_async(
+        NULL, NULL, NULL, NULL, 0, -1, false, on_update_features, &u);
+    TEST_ASSERT_NOT_NULL(submit_err);
+    TEST_ASSERT_EQUAL_STRING("admin handle must not be null", kafka_common_Error_message(submit_err));
+    kafka_common_Error_destroy(submit_err);
     TEST_ASSERT_EQUAL_INT(0, atomic_load(&u.fired));
 }
 
@@ -6609,10 +6628,11 @@ static void test_mock_admin_update_features_async_null_handle_with_features(void
     atomic_init(&u.fired, 0);
     atomic_init(&u.error_count, 0);
     atomic_init(&u.ok_count, 0);
-    kafka_admin_AdminClient_update_features_async(NULL, seed, targets, upgrade, 1, -1, false,
-                                                  on_update_features, &u);
-    TEST_ASSERT_EQUAL_INT(1, atomic_load(&u.fired));
-    TEST_ASSERT_EQUAL_INT(1, atomic_load(&u.error_count));
+    kafka_common_Error_t *submit_err = kafka_admin_AdminClient_update_features_async(
+        NULL, seed, targets, upgrade, 1, -1, false, on_update_features, &u);
+    TEST_ASSERT_NOT_NULL(submit_err);
+    kafka_common_Error_destroy(submit_err);
+    TEST_ASSERT_EQUAL_INT(0, atomic_load(&u.fired));
 }
 
 static void test_mock_admin_b5b_null_out_result(void) {
