@@ -33,8 +33,8 @@ than holding them all back for a single large proposal.
 
 Each per-language RFC starts as **Draft**, moves to **Proposed** when it is ready for
 community feedback, and links back to this umbrella document. Go is included on the same
-terms as the other languages; the shared Rust core reaching Go is under evaluation, and its
-API RFC follows once that path is settled.
+terms as the other languages; the details of the Go client based on the shared Rust core
+are under evaluation, and its API RFC follows once that path is settled.
 
 ## Why align with the Java API
 
