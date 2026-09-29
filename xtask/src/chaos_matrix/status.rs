@@ -31,6 +31,9 @@ use super::{
 };
 
 const MATRIX_ROOT: &str = "target/chaos-matrix";
+/// The file, in the output directory, holding the pid of the runner working
+/// on it.
+pub const PID_FILE: &str = "runner.pid";
 
 /// Entry point for `cargo xtask chaos-matrix-status`.
 pub fn run(raw: &[String]) -> anyhow::Result<()> {
@@ -147,19 +150,60 @@ fn parse_size_label(label: &str) -> Option<usize> {
     label.strip_suffix('B')?.parse().ok()
 }
 
-/// The run the runner last started and has not recorded, from `matrix.log`.
-fn current_run(log: &str, results: &BTreeMap<String, RunResult>) -> Option<String> {
-    let line = log.lines().rev().find(|l| l.ends_with("— starting"))?;
+/// The run the runner last started and has not finished, from `matrix.log`.
+/// Decided from the log alone: during a rerun, `results.tsv` still holds the
+/// previous attempt's row until the new one finishes.
+fn current_run(log: &str) -> Option<String> {
+    let mut lines = log.lines().rev();
+    let line = lines.by_ref().find(|l| l.ends_with("— starting"))?;
     let id = line.split_once("] ")?.1.split(" — ").next()?.to_string();
-    (!results.contains_key(&id)).then_some(id)
+    // Every later line is newer; the run's `<outcome> in <N>s (delivered …)`
+    // line among them means it finished.
+    let prefix = format!("] {id} — ");
+    let finished = log
+        .lines()
+        .rev()
+        .take_while(|l| *l != line)
+        .any(|l| l.split_once(&prefix).is_some_and(|(_, rest)| rest.contains("s (delivered ")));
+    (!finished).then_some(id)
 }
 
-fn runner_pids() -> Vec<String> {
-    Command::new("pgrep")
-        .args(["-f", "xtask chaos-matrix --matrix"])
-        .output()
-        .map(|o| String::from_utf8_lossy(&o.stdout).lines().map(str::to_string).collect())
-        .unwrap_or_default()
+/// The line that ended the latest runner session (`matrix finished` or `stop
+/// requested`), if that session ended; a marker from an earlier session of a
+/// resumed matrix does not count.
+fn session_end_marker(log: &str) -> Option<&str> {
+    for line in log.lines().rev() {
+        let message = line.split_once(' ').map_or(line, |x| x.1);
+        // Every session starts with `matrix <file> — N scenario(s), …`.
+        if message.starts_with("matrix ") && message.contains(" scenario(s), ") {
+            return None;
+        }
+        if message.starts_with("matrix finished") || message.starts_with("stop requested") {
+            return Some(line);
+        }
+    }
+    None
+}
+
+/// The pid of the runner working on `out`, from the pid file it writes, if
+/// that process is still a chaos-matrix runner.
+fn runner_pid(out: &Path) -> Option<String> {
+    let pid = fs::read_to_string(out.join(PID_FILE)).ok()?.trim().to_string();
+    pid.parse::<u32>().ok()?;
+    let output = Command::new("ps").args(["-o", "args=", "-p", &pid]).output().ok()?;
+    is_runner_command(&String::from_utf8_lossy(&output.stdout)).then_some(pid)
+}
+
+/// Whether a process command line is a `chaos-matrix` runner (and not, say,
+/// an unrelated process that later reused a stale pid).
+fn is_runner_command(args: &str) -> bool {
+    args.split_whitespace().any(|a| a == "chaos-matrix")
+}
+
+/// The scenario id of a run id `<scenario>-<protocol>-<size>`. Scenario ids
+/// may contain dashes; protocols and size labels never do.
+fn scenario_of(run_id: &str) -> &str {
+    run_id.rsplitn(3, '-').nth(2).unwrap_or("")
 }
 
 fn running_brokers() -> Vec<String> {
@@ -191,17 +235,14 @@ fn render(out: &Path) -> anyhow::Result<String> {
     let finished: Vec<(&String, &RunResult)> = plan.iter().filter_map(|id| results.get(id).map(|r| (id, r))).collect();
     let passed = finished.iter().filter(|(_, r)| r.outcome == "PASS").count();
     let remaining = plan.len() - finished.len();
-    let pids = runner_pids();
-    let finished_marker = log
-        .lines()
-        .rev()
-        .find(|l| l.contains("matrix finished") || l.contains("stop requested"));
+    let pid = runner_pid(out);
+    let finished_marker = session_end_marker(&log);
 
     let mut s = String::new();
     s.push_str(&format!("Chaos matrix  {}\n", out.display()));
     s.push_str(&format!("Now           {}\n", now_utc()));
-    let runner = if !pids.is_empty() {
-        format!("running (pid {})", pids.join(", "))
+    let runner = if let Some(pid) = &pid {
+        format!("running (pid {pid})")
     } else if let Some(line) = finished_marker {
         format!("not running — {}", line.split_once(' ').map(|x| x.1).unwrap_or(line))
     } else {
@@ -215,15 +256,11 @@ fn render(out: &Path) -> anyhow::Result<String> {
         finished.len() - passed
     ));
 
-    let current = if pids.is_empty() {
-        None
-    } else {
-        current_run(&log, &results)
-    };
+    let current = if pid.is_none() { None } else { current_run(&log) };
     let mut current_elapsed = 0;
     if let Some(id) = &current {
         let position = plan.iter().position(|p| p == id).map(|n| n + 1).unwrap_or(0);
-        let scenario = id.split('-').next().unwrap_or("");
+        let scenario = scenario_of(id);
         s.push_str(&format!(
             "Current       [{position}/{}] {id} — {}\n",
             plan.len(),
@@ -318,12 +355,51 @@ mod tests {
     }
 
     #[test]
-    fn the_current_run_is_the_last_started_and_unrecorded() {
-        let log = "t [1/3] 1-plaintext-100B — a — starting\nt [1/3] 1-plaintext-100B — PASS in 5s\n\
+    fn the_current_run_is_the_last_started_and_unfinished() {
+        let log = "t [1/3] 1-plaintext-100B — a — starting\n\
+                   t [1/3] 1-plaintext-100B — PASS in 5s (delivered 10, lost 0, 2 records/s)\n\
                    t [2/3] 2-plaintext-100B — b — starting\n";
-        let mut results = BTreeMap::new();
-        assert_eq!(current_run(log, &results).as_deref(), Some("2-plaintext-100B"));
-        results.insert("2-plaintext-100B".to_string(), RunResult::default());
-        assert_eq!(current_run(log, &results), None);
+        assert_eq!(current_run(log).as_deref(), Some("2-plaintext-100B"));
+        let finished = format!("{log}t [2/3] 2-plaintext-100B — FAIL in 9s (delivered 5, lost 1, 1 records/s)\n");
+        assert_eq!(current_run(&finished), None);
+        // A retry after the known defect is not the end of the run.
+        let retrying = format!(
+            "{log}t [2/3] 2-plaintext-100B — attempt 1/3 hit the known recreate defect; retrying (logs kept in x)\n"
+        );
+        assert_eq!(current_run(&retrying).as_deref(), Some("2-plaintext-100B"));
+    }
+
+    #[test]
+    fn a_rerun_is_current_although_its_previous_attempt_is_recorded() {
+        // Session 1 recorded a FAIL; session 2 (`--rerun-failed`) started it
+        // again. Only the log tells the rerun is in progress.
+        let log = "t1 matrix m.txt — 1 scenario(s), up to 1 protocol(s), 1 size(s): 1 run(s); 0 already recorded\n\
+                   t1 [1/1] 1-plaintext-100B — a — starting\n\
+                   t1 [1/1] 1-plaintext-100B — FAIL in 5s (delivered 10, lost 1, 2 records/s)\n\
+                   t1 matrix finished: 0/1 passed, 0 known-defect; summary in s\n\
+                   t2 matrix m.txt — 1 scenario(s), up to 1 protocol(s), 1 size(s): 1 run(s); 1 already recorded\n\
+                   t2 [1/1] 1-plaintext-100B — a — starting\n";
+        assert_eq!(current_run(log).as_deref(), Some("1-plaintext-100B"));
+        // And session 1's end marker does not describe session 2.
+        assert_eq!(session_end_marker(log), None);
+        let ended = format!("{log}t2 stop requested; 2-plaintext-100B and later runs not started — re-run to resume\n");
+        assert!(session_end_marker(&ended).is_some_and(|l| l.starts_with("t2 stop requested")));
+    }
+
+    #[test]
+    fn only_a_chaos_matrix_process_counts_as_the_runner() {
+        assert!(is_runner_command(
+            "target/debug/xtask chaos-matrix --out o --matrix tests/chaos/matrix/rust-client.txt\n"
+        ));
+        assert!(!is_runner_command("target/debug/xtask chaos-matrix-status --watch 30"));
+        assert!(!is_runner_command("/usr/bin/vim notes.txt"));
+        assert!(!is_runner_command(""));
+    }
+
+    #[test]
+    fn scenario_ids_may_contain_dashes() {
+        assert_eq!(scenario_of("1-plaintext-100B"), "1");
+        assert_eq!(scenario_of("broker-roll-sasl_ssl-1MiB"), "broker-roll");
+        assert_eq!(scenario_of("junk"), "");
     }
 }
