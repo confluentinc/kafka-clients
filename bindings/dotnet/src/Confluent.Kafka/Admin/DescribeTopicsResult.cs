@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+using System;
 using System.Collections.Generic;
 using System.Threading.Tasks;
 
@@ -52,19 +53,75 @@ public sealed class DescribeTopicsResult
 {
     private readonly IReadOnlyDictionary<Uuid, Task<TopicDescription>>? _topicIdValues;
     private readonly IReadOnlyDictionary<string, Task<TopicDescription>>? _topicNameValues;
-    private readonly IEqualityComparer<Uuid>? _topicIdComparer;
-    private readonly IEqualityComparer<string>? _topicNameComparer;
+    private readonly IEqualityComparer<Uuid> _topicIdComparer;
+    private readonly IEqualityComparer<string> _topicNameComparer;
 
-    /// <inheritdoc cref="DeleteTopicsResult" path="/remarks"/>
-    private DescribeTopicsResult(
-        IReadOnlyDictionary<Uuid, Task<TopicDescription>>? topicIdValues,
-        IEqualityComparer<Uuid>? topicIdComparer,
-        IReadOnlyDictionary<string, Task<TopicDescription>>? topicNameValues,
-        IEqualityComparer<string>? topicNameComparer)
+    /// <summary>
+    /// Wraps one awaitable per topic, keyed by id <b>or</b> by name — Java's
+    /// <c>protected DescribeTopicsResult(Map&lt;Uuid, KafkaFuture&lt;TopicDescription&gt;&gt; topicIdFutures,
+    /// Map&lt;String, KafkaFuture&lt;TopicDescription&gt;&gt; nameFutures)</c>
+    /// (<c>DescribeTopicsResult.java:37-44</c>, marked <c>// VisibleForTesting</c>), so a
+    /// test or a mock can fabricate a result.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Exactly one of the two must be non-null, and that is <b>checked</b> here with
+    /// Java's own two messages, verbatim (<c>:38-41</c>).
+    /// </para>
+    /// <para>
+    /// The aggregate a user-built result hands back from <see cref="AllTopicNames"/> /
+    /// <see cref="AllTopicIds"/> is keyed with <see cref="StringComparer.Ordinal"/> /
+    /// <see cref="EqualityComparer{T}.Default"/> — Java's own key semantics for a
+    /// <c>String</c> / <see cref="Uuid"/> <c>HashMap</c>. (A result built by the client
+    /// keys it with the bridge's own comparer instead, so the aggregate and
+    /// <see cref="TopicNameValues"/> cannot disagree about a key.)
+    /// </para>
+    /// <para>
+    /// <b>Public rather than <c>protected</c>, on a <see langword="sealed"/> type</b>
+    /// (M15/P13.2, D5) — see <see cref="CreateTopicsResult(IReadOnlyDictionary{string, Task{TopicMetadataAndConfig}})"/>.
+    /// The parameter types are the ones <see cref="TopicIdValues"/> and
+    /// <see cref="TopicNameValues"/> publish, and the dictionaries are held by reference, as
+    /// Java holds its maps.
+    /// </para>
+    /// </remarks>
+    /// <param name="topicIdFutures">One awaitable per topic id, or <see langword="null"/> for a by-name result.</param>
+    /// <param name="nameFutures">One awaitable per topic name, or <see langword="null"/> for a by-id result.</param>
+    /// <exception cref="ArgumentException">
+    /// Both are non-null (<c>"topicIdFutures and nameFutures cannot both be specified."</c>)
+    /// or both are null (<c>"topicIdFutures and nameFutures cannot both be null."</c>) —
+    /// Java's <c>IllegalArgumentException</c>, with no parameter name because neither
+    /// argument is wrong on its own.
+    /// </exception>
+    public DescribeTopicsResult(
+        IReadOnlyDictionary<Uuid, Task<TopicDescription>>? topicIdFutures,
+        IReadOnlyDictionary<string, Task<TopicDescription>>? nameFutures)
+        : this(topicIdFutures, EqualityComparer<Uuid>.Default, nameFutures, StringComparer.Ordinal)
     {
-        _topicIdValues = topicIdValues;
+    }
+
+    /// <summary>
+    /// The one constructor body — the public constructor and the two factories all reach
+    /// the exactly-one check through it; only the aggregate's key comparers differ.
+    /// </summary>
+    private DescribeTopicsResult(
+        IReadOnlyDictionary<Uuid, Task<TopicDescription>>? topicIdFutures,
+        IEqualityComparer<Uuid> topicIdComparer,
+        IReadOnlyDictionary<string, Task<TopicDescription>>? nameFutures,
+        IEqualityComparer<string> topicNameComparer)
+    {
+        if (topicIdFutures is not null && nameFutures is not null)
+        {
+            throw new ArgumentException("topicIdFutures and nameFutures cannot both be specified.");
+        }
+
+        if (topicIdFutures is null && nameFutures is null)
+        {
+            throw new ArgumentException("topicIdFutures and nameFutures cannot both be null.");
+        }
+
+        _topicIdValues = topicIdFutures;
         _topicIdComparer = topicIdComparer;
-        _topicNameValues = topicNameValues;
+        _topicNameValues = nameFutures;
         _topicNameComparer = topicNameComparer;
     }
 
@@ -116,14 +173,14 @@ public sealed class DescribeTopicsResult
     /// </summary>
     internal static DescribeTopicsResult OfTopicIds(
         IReadOnlyDictionary<Uuid, Task<TopicDescription>> values, IEqualityComparer<Uuid> comparer) =>
-        new DescribeTopicsResult(values, comparer, null, null);
+        new DescribeTopicsResult(values, comparer, null, StringComparer.Ordinal);
 
     /// <summary>
     /// Builds the by-name result — Java's package-private <c>ofTopicNames</c>.
     /// </summary>
     internal static DescribeTopicsResult OfTopicNames(
         IReadOnlyDictionary<string, Task<TopicDescription>> values, IEqualityComparer<string> comparer) =>
-        new DescribeTopicsResult(null, null, values, comparer);
+        new DescribeTopicsResult(null, EqualityComparer<Uuid>.Default, values, comparer);
 
     /// <summary>
     /// Java's private <c>all(Map)</c> helper (<c>:97-114</c>): <see langword="null"/> in,
@@ -131,11 +188,13 @@ public sealed class DescribeTopicsResult
     /// into one map.
     /// </summary>
     /// <remarks>
-    /// The map is built with the bridge's own key comparer, so a lookup in the aggregate
-    /// and a lookup in <see cref="TopicNameValues"/> can never disagree about a key.
+    /// The map is built with the comparer the constructor recorded — the bridge's own for a
+    /// client-built result, so a lookup in the aggregate and a lookup in
+    /// <see cref="TopicNameValues"/> can never disagree about a key; Java's key semantics
+    /// for a user-built one.
     /// </remarks>
     private static Task<IReadOnlyDictionary<TKey, TopicDescription>>? All<TKey>(
-        IReadOnlyDictionary<TKey, Task<TopicDescription>>? values, IEqualityComparer<TKey>? comparer)
+        IReadOnlyDictionary<TKey, Task<TopicDescription>>? values, IEqualityComparer<TKey> comparer)
         where TKey : notnull
     {
         if (values is null)
@@ -143,7 +202,7 @@ public sealed class DescribeTopicsResult
             return null;
         }
 
-        return Gather(values, comparer!);
+        return Gather(values, comparer);
 
         static async Task<IReadOnlyDictionary<TKey, TopicDescription>> Gather(
             IReadOnlyDictionary<TKey, Task<TopicDescription>> values, IEqualityComparer<TKey> comparer)

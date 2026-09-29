@@ -38,16 +38,11 @@ namespace Confluent.Kafka.Admin;
 /// broker-rejected request into an accepted one.
 /// </para>
 /// <para>
-/// <b>Recorded sub-divergence (<c>definition-of-done.md</c> §7): a
-/// <see langword="null"/> assignment list is rejected, where Java's
-/// <c>increaseTo(totalCount, null)</c> is accepted</b> and behaves as
-/// <c>increaseTo(totalCount)</c>. The parameter is non-nullable under
-/// <c>#nullable enable</c>, <see cref="IncreaseTo(int)"/> already spells "let the broker
-/// decide", and ffi §B5 mandates precondition validation before the FFI call — so
-/// accepting <see langword="null"/> would add a second spelling of an existing factory
-/// while weakening the annotation. Same family as the consumer's
-/// <c>CommitAsync(callback)</c> null guard: deliberately stricter than the reference,
-/// recorded rather than silent.
+/// A <see langword="null"/> assignment list is accepted and is the same request as
+/// <see cref="IncreaseTo(int)"/>, as Java's <c>increaseTo(totalCount, null)</c> is
+/// <c>increaseTo(totalCount)</c> — both build <c>new NewPartitions(totalCount, null)</c>
+/// (<c>NewPartitions.java:42-44, :71-73</c>). Only a <see langword="null"/> <em>inner</em>
+/// list is rejected, because the ABI would drop it rather than report it.
 /// </para>
 /// </remarks>
 public sealed class NewPartitions
@@ -97,19 +92,23 @@ public sealed class NewPartitions
     /// leader first. Its length should be <paramref name="totalCount"/> minus the topic's
     /// current partition count, and each inner list should have the topic's replication
     /// factor many entries. An <b>empty</b> outer list is meaningful and preserved — see
-    /// the null-versus-empty note in the type remarks.
+    /// the null-versus-empty note in the type remarks. <see langword="null"/> lets the
+    /// broker decide, exactly as <see cref="IncreaseTo(int)"/> does.
     /// </param>
-    /// <returns>The request entry, with <see cref="Assignments"/> non-null.</returns>
+    /// <returns>
+    /// The request entry, with <see cref="Assignments"/> non-null — or
+    /// <see langword="null"/> when <paramref name="newAssignments"/> is.
+    /// </returns>
     /// <exception cref="ArgumentNullException">
-    /// <paramref name="newAssignments"/> is null, or contains a null inner list. Pass no
-    /// assignments at all by calling <see cref="IncreaseTo(int)"/> — see the recorded
-    /// sub-divergence in the type remarks.
+    /// <paramref name="newAssignments"/> contains a null inner list.
     /// </exception>
-    public static NewPartitions IncreaseTo(int totalCount, IReadOnlyList<IReadOnlyList<int>> newAssignments)
+    public static NewPartitions IncreaseTo(int totalCount, IReadOnlyList<IReadOnlyList<int>>? newAssignments)
     {
         if (newAssignments is null)
         {
-            throw new ArgumentNullException(nameof(newAssignments));
+            // Java's increaseTo(totalCount, null) is increaseTo(totalCount): the same
+            // `new NewPartitions(totalCount, null)`, i.e. the controller decides.
+            return new NewPartitions(totalCount, null);
         }
 
         // Copy + validate BEFORE anything native (ffi §B5): the ABI silently no-ops on a

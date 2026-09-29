@@ -243,7 +243,13 @@ public sealed class AdminP4Stage2SubmitArgumentTests
         Assert.False(submitted, "both must be rejected before the native call");
     }
 
-    /// <summary>A null spec, and a null map, are rejected.</summary>
+    /// <summary>
+    /// A null spec, and a null map, are rejected. The null spec is a documented
+    /// precondition (M15/P13.2 D2): Java queries LATEST for it only by an
+    /// <c>instanceof</c> fall-through in <c>getOffsetFromSpec</c>
+    /// (<c>KafkaAdminClient.java:5176-5192</c>), not by contract, and Python rejects it
+    /// too — so the rejection is kept and pinned with its exact message.
+    /// </summary>
     [Fact]
     public void ListOffsets_RejectsANullSpecAndANullMap()
     {
@@ -257,6 +263,10 @@ public sealed class AdminP4Stage2SubmitArgumentTests
                     isolationLevel, callback, userData) =>
                 { }));
         Assert.Equal("topicPartitionOffsets", nullSpec.ParamName);
+        Assert.StartsWith(
+            "The offset spec for 't-0' must not be null.",
+            nullSpec.Message,
+            StringComparison.Ordinal);
 
         Assert.Equal(
             "topicPartitionOffsets",

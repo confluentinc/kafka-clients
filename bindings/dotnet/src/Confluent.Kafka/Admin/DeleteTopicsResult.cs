@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+using System;
 using System.Collections.Generic;
 using System.Threading.Tasks;
 
@@ -49,18 +50,49 @@ public sealed class DeleteTopicsResult
     private readonly IReadOnlyDictionary<string, Task>? _topicNameValues;
 
     /// <summary>
-    /// The invariant is structural rather than checked: the only two callers are the
-    /// factories below, and each supplies exactly one map. (Java checks, because its
-    /// constructor is <c>protected</c> and therefore reachable by a subclass; this class
-    /// is <see langword="sealed"/> with a private constructor, so there is no caller to
-    /// check against.)
+    /// Wraps one awaitable per topic, keyed by id <b>or</b> by name — Java's
+    /// <c>protected DeleteTopicsResult(Map&lt;Uuid, KafkaFuture&lt;Void&gt;&gt; topicIdFutures,
+    /// Map&lt;String, KafkaFuture&lt;Void&gt;&gt; nameFutures)</c>
+    /// (<c>DeleteTopicsResult.java:34-41</c>), so a test or a mock can fabricate a result.
     /// </summary>
-    private DeleteTopicsResult(
-        IReadOnlyDictionary<Uuid, Task>? topicIdValues,
-        IReadOnlyDictionary<string, Task>? topicNameValues)
+    /// <remarks>
+    /// <para>
+    /// Exactly one of the two must be non-null, and that is <b>checked</b> here with
+    /// Java's own two messages, verbatim (<c>:35-38</c>). The factories below satisfy it by
+    /// construction and go through the same check.
+    /// </para>
+    /// <para>
+    /// <b>Public rather than <c>protected</c>, on a <see langword="sealed"/> type</b>
+    /// (M15/P13.2, D5) — see <see cref="CreateTopicsResult(IReadOnlyDictionary{string, Task{TopicMetadataAndConfig}})"/>.
+    /// The parameter types are the ones <see cref="TopicIdValues"/> and
+    /// <see cref="TopicNameValues"/> publish, and the dictionaries are held by reference, as
+    /// Java holds its maps.
+    /// </para>
+    /// </remarks>
+    /// <param name="topicIdFutures">One awaitable per topic id, or <see langword="null"/> for a by-name result.</param>
+    /// <param name="nameFutures">One awaitable per topic name, or <see langword="null"/> for a by-id result.</param>
+    /// <exception cref="ArgumentException">
+    /// Both are non-null (<c>"topicIdFutures and nameFutures cannot both be specified."</c>)
+    /// or both are null (<c>"topicIdFutures and nameFutures cannot both be null."</c>) —
+    /// Java's <c>IllegalArgumentException</c>, with no parameter name because neither
+    /// argument is wrong on its own.
+    /// </exception>
+    public DeleteTopicsResult(
+        IReadOnlyDictionary<Uuid, Task>? topicIdFutures,
+        IReadOnlyDictionary<string, Task>? nameFutures)
     {
-        _topicIdValues = topicIdValues;
-        _topicNameValues = topicNameValues;
+        if (topicIdFutures is not null && nameFutures is not null)
+        {
+            throw new ArgumentException("topicIdFutures and nameFutures cannot both be specified.");
+        }
+
+        if (topicIdFutures is null && nameFutures is null)
+        {
+            throw new ArgumentException("topicIdFutures and nameFutures cannot both be null.");
+        }
+
+        _topicIdValues = topicIdFutures;
+        _topicNameValues = nameFutures;
     }
 
     /// <summary>
@@ -98,7 +130,7 @@ public sealed class DeleteTopicsResult
     /// </remarks>
     public Task All() =>
         // Java's own ternary, literally (:73-74): whichever map exists is the one to
-        // aggregate. The null-forgiving operator is the structural invariant above.
+        // aggregate. The null-forgiving operator is the constructor's exactly-one check.
         Task.WhenAll(_topicIdValues is not null ? _topicIdValues.Values : _topicNameValues!.Values);
 
     /// <summary>

@@ -270,6 +270,12 @@ public sealed class PublicAdminListPartitionsRecordsTests
         Assert.True(NewPartitionsMarshal.HasAssignments(empty));
         Assert.True(NewPartitionsMarshal.HasAssignments(explicitAssignment));
 
+        // Java's increaseTo(n, null) is increaseTo(n) (M15/P13.2 G1-4): the null list is
+        // the broker-chooses request, not the present-but-empty one.
+        NewPartitions viaNull = NewPartitions.IncreaseTo(3, null);
+        Assert.Null(viaNull.Assignments);
+        Assert.False(NewPartitionsMarshal.HasAssignments(viaNull));
+
         // A count-based discriminant would agree with the flag for the third case and
         // disagree for the second — which is exactly what makes the second the probe.
         Assert.Empty(empty.Assignments!);

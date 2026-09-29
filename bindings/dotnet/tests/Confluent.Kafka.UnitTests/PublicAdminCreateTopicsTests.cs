@@ -90,8 +90,12 @@ public sealed class PublicAdminCreateTopicsTests
         await TestTimeout.Run(() => result.Values["solo-ok"], s_deadline);
 
         // The failed sibling is deliberately left unawaited above; observe it now so the
-        // test leaves no unobserved fault behind.
-        Assert.NotNull(result.Values["solo-bad"].Exception);
+        // test leaves no unobserved fault behind. AWAIT it rather than read `.Exception`:
+        // the per-key tasks are completed one callback at a time and the await above
+        // resumes asynchronously (RunContinuationsAsynchronously), so the sibling can
+        // still be pending when it does — reading `.Exception` there raced (it failed
+        // about 1 run in 8 on net8.0, at 61097faa too).
+        await Assert.ThrowsAsync<KafkaException>(() => TestTimeout.Run(() => result.Values["solo-bad"], s_deadline));
     }
 
     /// <summary>
@@ -404,26 +408,74 @@ public sealed class PublicAdminCreateTopicsTests
     }
 
     /// <summary>
-    /// <see cref="NewTopic"/>'s own preconditions, likewise before anything native: the
-    /// ABI reads a negative partition count / replication factor as "unset", so a
-    /// negative must be rejected rather than silently reinterpreted.
+    /// <see cref="NewTopic"/>'s own preconditions, likewise before anything native.
+    /// <c>-1</c> is Java-legal for both counts — it is <c>NO_NUM_PARTITIONS</c> /
+    /// <c>NO_REPLICATION_FACTOR</c> (<c>CreateTopicsRequest.java:82-83</c>), what Java's
+    /// <c>NewTopic</c> sends for an empty <c>Optional</c> — so it is accepted by both
+    /// constructors and <b>stored as <c>-1</c></b>, not folded to <see langword="null"/>
+    /// (Java keeps <c>Optional.of(-1)</c> apart from <c>Optional.empty()</c>). Below
+    /// <c>-1</c> stays rejected (M15/P13.2 D7): the ABI reads <em>every</em> negative as
+    /// "unset", so <c>-2</c> would silently create with the broker defaults where Java's
+    /// broker rejects it.
     /// </summary>
     [Fact]
-    public void NewTopicPreconditions_RejectWhatTheAbiWouldReinterpret()
+    public void NewTopicPreconditions_AcceptMinusOne_AndRejectWhatTheAbiWouldReinterpret()
     {
         Assert.Equal("name", Assert.Throws<ArgumentNullException>(() => new NewTopic(null!, 1, 1)).ParamName);
 
-        ArgumentOutOfRangeException partitions =
-            Assert.Throws<ArgumentOutOfRangeException>(() => new NewTopic("t", -1, (short?)1));
-        Assert.Equal("numPartitions", partitions.ParamName);
-        Assert.StartsWith(
-            "Number of partitions must not be negative; pass null to use the broker default.",
-            partitions.Message,
-            StringComparison.Ordinal);
+        // -1 through both count constructors, and stored as -1.
+        NewTopic viaNonNullable = new NewTopic("t", -1, (short)-1);
+        Assert.Equal(-1, viaNonNullable.NumPartitions);
+        Assert.Equal((short)-1, viaNonNullable.ReplicationFactor);
 
-        ArgumentOutOfRangeException factor =
-            Assert.Throws<ArgumentOutOfRangeException>(() => new NewTopic("t", (int?)1, -1));
-        Assert.Equal("replicationFactor", factor.ParamName);
+        NewTopic viaNullable = new NewTopic("t", (int?)-1, (short?)-1);
+        Assert.Equal(-1, viaNullable.NumPartitions);
+        Assert.Equal((short)-1, viaNullable.ReplicationFactor);
+
+        // Each independently of the other.
+        Assert.Equal(-1, new NewTopic("t", (int?)-1, (short?)3).NumPartitions);
+        Assert.Equal((short)-1, new NewTopic("t", (int?)3, (short?)-1).ReplicationFactor);
+
+        // And null stays null — the two spellings of "broker default" are distinct values.
+        NewTopic unset = new NewTopic("t", (int?)null, (short?)null);
+        Assert.Null(unset.NumPartitions);
+        Assert.Null(unset.ReplicationFactor);
+
+        foreach (Func<NewTopic> belowMinusOne in new Func<NewTopic>[]
+        {
+            () => new NewTopic("t", (int?)-2, (short?)1),
+            () => new NewTopic("t", -2, (short)1),
+            () => new NewTopic("t", (int?)int.MinValue, (short?)1),
+        })
+        {
+            ArgumentOutOfRangeException partitions = Assert.Throws<ArgumentOutOfRangeException>(belowMinusOne);
+            Assert.Equal("numPartitions", partitions.ParamName);
+            Assert.StartsWith(
+                "Number of partitions must be non-negative, or -1 (or null) for the broker default.",
+                partitions.Message,
+                StringComparison.Ordinal);
+        }
+
+        Assert.Equal(-2, Assert.Throws<ArgumentOutOfRangeException>(() => new NewTopic("t", (int?)-2, (short?)1)).ActualValue);
+
+        foreach (Func<NewTopic> belowMinusOne in new Func<NewTopic>[]
+        {
+            () => new NewTopic("t", (int?)1, (short?)-2),
+            () => new NewTopic("t", 1, (short)-2),
+            () => new NewTopic("t", (int?)1, (short?)short.MinValue),
+        })
+        {
+            ArgumentOutOfRangeException factor = Assert.Throws<ArgumentOutOfRangeException>(belowMinusOne);
+            Assert.Equal("replicationFactor", factor.ParamName);
+            Assert.StartsWith(
+                "Replication factor must be non-negative, or -1 (or null) for the broker default.",
+                factor.Message,
+                StringComparison.Ordinal);
+        }
+
+        Assert.Equal(
+            (short)-2,
+            Assert.Throws<ArgumentOutOfRangeException>(() => new NewTopic("t", (int?)1, (short?)-2)).ActualValue);
 
         Assert.Equal(
             "replicasAssignments",
@@ -439,6 +491,40 @@ public sealed class PublicAdminCreateTopicsTests
             "replicasAssignments",
             Assert.Throws<ArgumentNullException>(
                 () => new NewTopic("t", new Dictionary<int, IReadOnlyList<int>> { [0] = null! })).ParamName);
+    }
+
+    /// <summary>
+    /// <c>-1</c> reaches the core as Java's wire value and means "the broker default" —
+    /// driven end to end: the mock resolves it to its own defaults, exactly as it does an
+    /// unset count (<c>mock_admin_client.rs</c> <c>default_partitions</c> = 1,
+    /// <c>default_replication_factor</c> = <c>min(brokers, 3)</c> = 2 here). The ABI has no
+    /// <c>NewTopic</c> getter and <c>NewTopicMarshal</c> calls the P/Invoke directly, so
+    /// the argument is observed through its effect rather than captured.
+    /// </summary>
+    [Fact]
+    public async Task MinusOneCounts_CreateWithTheBrokerDefaults_LikeUnsetOnes()
+    {
+        using MockAdminClient admin = new MockAdminClient(2);
+
+        CreateTopicsResult result = admin.CreateTopics(new[]
+        {
+            new NewTopic("minus-one", -1, (short)-1),
+            new NewTopic("unset", (int?)null, (short?)null),
+            new NewTopic("explicit", 3, 1),
+        });
+
+        int[] partitions = new int[3];
+        int[] factors = new int[3];
+        string[] topics = { "minus-one", "unset", "explicit" };
+        for (int i = 0; i < topics.Length; i++)
+        {
+            int index = i;
+            await TestTimeout.Run(async () => partitions[index] = await result.NumPartitions(topics[index]), s_deadline);
+            await TestTimeout.Run(async () => factors[index] = await result.ReplicationFactor(topics[index]), s_deadline);
+        }
+
+        Assert.Equal(new[] { 1, 1, 3 }, partitions);
+        Assert.Equal(new[] { 2, 2, 1 }, factors);
     }
 
     /// <summary>

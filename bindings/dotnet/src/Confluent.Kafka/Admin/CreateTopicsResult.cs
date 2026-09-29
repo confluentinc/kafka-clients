@@ -48,9 +48,28 @@ public sealed class CreateTopicsResult
     private readonly IReadOnlyDictionary<string, Task<TopicMetadataAndConfig>> _values;
     private readonly IReadOnlyDictionary<string, Task> _erasedValues;
 
-    internal CreateTopicsResult(IReadOnlyDictionary<string, Task<TopicMetadataAndConfig>> values)
+    /// <summary>
+    /// Wraps one awaitable per topic — Java's
+    /// <c>protected CreateTopicsResult(Map&lt;String, KafkaFuture&lt;TopicMetadataAndConfig&gt;&gt; futures)</c>
+    /// (<c>CreateTopicsResult.java:35</c>), so a test or a mock can fabricate a result.
+    /// </summary>
+    /// <remarks>
+    /// <b>Public rather than <c>protected</c>, on a <see langword="sealed"/> type</b>
+    /// (M15/P13.2, D5). Every admin result in this binding is sealed and none of its
+    /// accessors is virtual, so Java's subclass-and-override route would let a user
+    /// subclass but override nothing; fabricating a result — the Java use case — needs only
+    /// the constructor. <see cref="DeleteRecordsResult"/> is the precedent. The parameter's
+    /// type is the one the typed accessors read, and the dictionary is held by reference,
+    /// as Java holds its map.
+    /// </remarks>
+    /// <param name="futures">One awaitable per topic, keyed by topic name.</param>
+    /// <exception cref="ArgumentNullException">
+    /// <paramref name="futures"/> is null — where Java stores the null and throws
+    /// <c>NullPointerException</c> on first use.
+    /// </exception>
+    public CreateTopicsResult(IReadOnlyDictionary<string, Task<TopicMetadataAndConfig>> futures)
     {
-        _values = values;
+        _values = futures ?? throw new ArgumentNullException(nameof(futures));
 
         // Java's `values()` publishes `Map<String, KafkaFuture<Void>>` — the metadata is
         // deliberately erased and the private map is never handed out. Restore that:
@@ -61,8 +80,8 @@ public sealed class CreateTopicsResult
         // the typed map's, so the view adds no per-key allocation and introduces no second
         // Task whose fault could go unobserved.
         Dictionary<string, Task> erased =
-            new Dictionary<string, Task>(values.Count, StringComparer.Ordinal);
-        foreach (KeyValuePair<string, Task<TopicMetadataAndConfig>> entry in values)
+            new Dictionary<string, Task>(futures.Count, StringComparer.Ordinal);
+        foreach (KeyValuePair<string, Task<TopicMetadataAndConfig>> entry in futures)
         {
             erased.Add(entry.Key, entry.Value);
         }

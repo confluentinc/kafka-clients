@@ -13,6 +13,9 @@
 // limitations under the License.
 
 using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Reflection;
 
 using Xunit;
 
@@ -247,5 +250,193 @@ public sealed class PublicUuidTests
 
         Assert.True(Uuid.TryParse("AAAAAAAAAAEAAAAAAAAAAg", out Uuid parsed));
         Assert.Equal(new Uuid(1L, 2L), parsed);
+    }
+
+    /// <summary>
+    /// Java's reserved constants (<c>Uuid.java:37-52</c>): <c>ONE_UUID</c> is
+    /// <c>(0, 1)</c>, <c>METADATA_TOPIC_ID</c> <b>is</b> <c>ONE_UUID</c>, and
+    /// <c>RESERVED</c> holds exactly <c>ZERO_UUID</c> and <c>ONE_UUID</c> — read-only, so a
+    /// caller cannot un-reserve one by casting.
+    /// </summary>
+    [Fact]
+    public void ReservedConstants_MirrorJava()
+    {
+        Assert.Equal(new Uuid(0L, 1L), Uuid.One);
+        Assert.Equal("AAAAAAAAAAAAAAAAAAAAAQ", Uuid.One.ToString());
+        Assert.Equal(Uuid.One, Uuid.MetadataTopicId);
+
+        Assert.Equal(2, Uuid.Reserved.Count);
+        Assert.Contains(Uuid.Zero, Uuid.Reserved);
+        Assert.Contains(Uuid.One, Uuid.Reserved);
+        Assert.Equal(
+            new HashSet<Uuid> { Uuid.Zero, Uuid.One },
+            new HashSet<Uuid>(Uuid.Reserved));
+
+        ICollection<Uuid> asCollection = Assert.IsAssignableFrom<ICollection<Uuid>>(Uuid.Reserved);
+        Assert.True(asCollection.IsReadOnly);
+        Assert.Throws<NotSupportedException>(() => asCollection.Remove(Uuid.Zero));
+        Assert.Throws<NotSupportedException>(() => asCollection.Add(new Uuid(0L, 2L)));
+    }
+
+    /// <summary>
+    /// The public shape of the members G1-7 adds: Java's three constants as static
+    /// read-only properties of Java's types, <c>randomUuid()</c> as one public
+    /// parameterless static (the source-taking overload is the <b>internal</b> test seam,
+    /// not surface), and exactly Java's interface list — <c>Comparable&lt;Uuid&gt;</c> is
+    /// the only one Java implements, so no non-generic <see cref="IComparable"/> either.
+    /// </summary>
+    [Fact]
+    public void Shape_AddsJavasConstants_RandomUuid_AndComparable()
+    {
+        Assert.Equal(
+            new HashSet<Type> { typeof(IEquatable<Uuid>), typeof(IComparable<Uuid>) },
+            new HashSet<Type>(typeof(Uuid).GetInterfaces()));
+
+        foreach ((string name, Type type) in new[]
+        {
+            (nameof(Uuid.One), typeof(Uuid)),
+            (nameof(Uuid.MetadataTopicId), typeof(Uuid)),
+            (nameof(Uuid.Reserved), typeof(IReadOnlyCollection<Uuid>)),
+        })
+        {
+            PropertyInfo property = typeof(Uuid).GetProperty(name, BindingFlags.Public | BindingFlags.Static)!;
+            Assert.NotNull(property);
+            Assert.Equal(type, property.PropertyType);
+            Assert.Null(property.SetMethod);
+        }
+
+        MethodInfo randomUuid = Assert.Single(
+            typeof(Uuid).GetMethods(BindingFlags.Public | BindingFlags.Static),
+            method => method.Name == nameof(Uuid.RandomUuid));
+        Assert.Equal(typeof(Uuid), randomUuid.ReturnType);
+        Assert.Empty(randomUuid.GetParameters());
+
+        MethodInfo compareTo = typeof(Uuid).GetMethod(nameof(Uuid.CompareTo), new[] { typeof(Uuid) })!;
+        Assert.Equal(typeof(int), compareTo.ReturnType);
+    }
+
+    /// <summary>
+    /// ⚠ <b>Signed, as Java compares</b> (<c>Uuid.java:154-167</c>): a <c>long</c> with the
+    /// high bit set is <em>negative</em>, so it sorts before <see cref="Uuid.Zero"/>. An
+    /// unsigned comparison — the natural reading of "128-bit value" — would put
+    /// <c>long.MinValue</c> last instead. The return values are Java's exact
+    /// <c>1</c> / <c>-1</c> / <c>0</c>, not merely their signs.
+    /// </summary>
+    [Fact]
+    public void CompareTo_IsJavasSignedOrder_MostSignificantFirst()
+    {
+        Uuid[] ascending =
+        {
+            new Uuid(long.MinValue, 0L),
+            new Uuid(-1L, 0L),
+            new Uuid(0L, long.MinValue),
+            new Uuid(0L, -1L),
+            new Uuid(0L, 0L),
+            new Uuid(0L, 1L),
+            new Uuid(0L, long.MaxValue),
+            new Uuid(1L, long.MinValue),
+            new Uuid(1L, 0L),
+            new Uuid(long.MaxValue, 0L),
+        };
+
+        for (int i = 0; i < ascending.Length; i++)
+        {
+            for (int j = 0; j < ascending.Length; j++)
+            {
+                int expected = i < j ? -1 : i > j ? 1 : 0;
+                Assert.Equal(expected, ascending[i].CompareTo(ascending[j]));
+
+                // CompareTo == 0 exactly when Equals — Java's consistent-with-equals.
+                Assert.Equal(expected == 0, ascending[i].Equals(ascending[j]));
+            }
+        }
+
+        // The most significant half decides before the least significant one is read.
+        Assert.Equal(-1, new Uuid(0L, long.MaxValue).CompareTo(new Uuid(1L, long.MinValue)));
+        Assert.Equal(1, new Uuid(long.MaxValue, long.MinValue).CompareTo(new Uuid(long.MinValue, long.MaxValue)));
+
+        // And a sort uses it: a scrambled copy sorts back into Java's order.
+        List<Uuid> scrambled = new List<Uuid>
+        {
+            ascending[4], ascending[9], ascending[0], ascending[6], ascending[2],
+            ascending[8], ascending[1], ascending[5], ascending[3], ascending[7],
+        };
+        scrambled.Sort();
+        Assert.Equal(ascending, scrambled);
+    }
+
+    /// <summary>
+    /// <see cref="Uuid.RandomUuid()"/> over many draws: never reserved, never
+    /// <c>'-'</c>-leading, and always Java's <c>UUID.randomUUID()</c> layout — version
+    /// nibble <c>4</c> and the IETF variant bits <c>10</c>.
+    /// </summary>
+    /// <remarks>
+    /// This also discriminates the <em>wiring</em> between the public method and the seam:
+    /// one raw version-4 draw in 64 prints with a leading <c>'-'</c> (the first six bits are
+    /// fully random), so a public method that bypassed the seam's loop would fail the
+    /// <c>'-'</c> assertion within 1000 draws with probability
+    /// <c>1 - (63/64)^1000 &gt; 0.9999998</c>.
+    /// </remarks>
+    [Fact]
+    public void RandomUuid_IsVersion4_NeverReserved_AndNeverDashLeading()
+    {
+        HashSet<Uuid> seen = new HashSet<Uuid>();
+        for (int i = 0; i < 1000; i++)
+        {
+            Uuid uuid = Uuid.RandomUuid();
+
+            Assert.DoesNotContain(uuid, Uuid.Reserved);
+            Assert.NotEqual('-', uuid.ToString()[0]);
+            Assert.Equal(4L, (uuid.MostSignificantBits >> 12) & 0xF);
+            Assert.Equal(2UL, (ulong)uuid.LeastSignificantBits >> 62);
+            Assert.True(seen.Add(uuid), "a random 122-bit draw repeated");
+        }
+    }
+
+    /// <summary>
+    /// Java's loop, through the seam the public method uses: the source is drawn until a
+    /// candidate is neither reserved nor <c>'-'</c>-leading. <c>0xF8…</c> encodes to a
+    /// leading <c>'-'</c> (its first six bits are <c>111110</c>, index 62 of the URL-safe
+    /// alphabet). All four candidates are consumed, and the fourth is returned.
+    /// </summary>
+    [Fact]
+    public void RandomUuid_Seam_SkipsReservedAndDashLeadingCandidates()
+    {
+        Uuid dashLeading = new Uuid(unchecked((long)0xF800000000000000UL), 1L);
+        Uuid valid = new Uuid(0x0123456789ABCDEFL, 0x1122334455667788L);
+        Assert.Equal('-', dashLeading.ToString()[0]);
+
+        Queue<Uuid> candidates = new Queue<Uuid>(new[] { Uuid.Zero, Uuid.One, dashLeading, valid });
+
+        Uuid chosen = Uuid.RandomUuid(candidates.Dequeue);
+
+        Assert.Equal(valid, chosen);
+        Assert.Empty(candidates);
+
+        // Only '-' is rejected — '_' (index 63, 0xFC…) is Java-legal and returned at once.
+        Uuid underscoreLeading = new Uuid(unchecked((long)0xFC00000000000000UL), 1L);
+        Assert.Equal('_', underscoreLeading.ToString()[0]);
+        Queue<Uuid> single = new Queue<Uuid>(new[] { underscoreLeading, valid });
+        Assert.Equal(underscoreLeading, Uuid.RandomUuid(single.Dequeue));
+        Assert.Single(single);
+    }
+
+    /// <summary>
+    /// The bit layout <c>java.util.UUID.randomUUID()</c> stamps onto its 16 random bytes —
+    /// <c>bytes[6]</c> version <c>0100</c>, <c>bytes[8]</c> variant <c>10</c>, everything
+    /// else untouched — checked at both extremes so a wrong mask cannot hide behind random
+    /// input: all-ones keeps every other bit set, all-zeros keeps every other bit clear.
+    /// </summary>
+    [Fact]
+    public void FromVersion4Bytes_StampsJavasVersionAndVariantBits()
+    {
+        byte[] ones = Enumerable.Repeat((byte)0xFF, 16).ToArray();
+        Uuid fromOnes = Uuid.FromVersion4Bytes(ones);
+        Assert.Equal(unchecked((long)0xFFFFFFFFFFFF4FFFUL), fromOnes.MostSignificantBits);
+        Assert.Equal(unchecked((long)0xBFFFFFFFFFFFFFFFUL), fromOnes.LeastSignificantBits);
+
+        Uuid fromZeros = Uuid.FromVersion4Bytes(new byte[16]);
+        Assert.Equal(0x0000000000004000L, fromZeros.MostSignificantBits);
+        Assert.Equal(long.MinValue, fromZeros.LeastSignificantBits);
     }
 }

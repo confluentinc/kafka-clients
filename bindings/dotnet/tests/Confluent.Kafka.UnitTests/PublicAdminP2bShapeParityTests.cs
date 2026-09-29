@@ -234,6 +234,8 @@ public sealed class PublicAdminP2bShapeParityTests
     /// partitions, <b>or null if the assignment will be done by the controller</b>", and
     /// the body confirms it — <c>increaseTo(int)</c> passes <c>null</c>
     /// (<c>:44</c>). Collapsing that to an empty list would change the wire request.
+    /// Since M15/P13.2 (G1-4) the list-taking factory's parameter is nullable too, and a
+    /// null there builds the same null-assignments entry.
     /// </summary>
     [Fact]
     public void NewPartitions_AssignmentsIsNullable_AndTheFactoriesMirrorJava()
@@ -260,11 +262,36 @@ public sealed class PublicAdminP2bShapeParityTests
             new[] { typeof(int), typeof(IReadOnlyList<IReadOnlyList<int>>) },
             factories[1].GetParameters().Select(p => p.ParameterType));
 
-        // The list parameter is NON-nullable: `IncreaseTo(int)` already spells "no
-        // assignments", so accepting null would be a second spelling of it (recorded
-        // sub-divergence — Java's increaseTo(n, null) is accepted).
-        Assert.Equal(1, NullableFlag(factories[1].GetParameters()[1]));
-        Assert.Throws<ArgumentNullException>(() => NewPartitions.IncreaseTo(3, null!));
+        // The list parameter is NULLABLE (M15/P13.2 G1-4): Java's increaseTo(n, null) is
+        // increaseTo(n) — both build `new NewPartitions(totalCount, null)`
+        // (NewPartitions.java:42-44, :71-73). Only the OUTER list is nullable; an inner
+        // broker-id list is not (position 1 of the flattened type).
+        ParameterInfo newAssignments = factories[1].GetParameters()[1];
+        Assert.Equal("newAssignments", newAssignments.Name);
+        Assert.Equal(2, NullableAnnotation.Flag(newAssignments, 0));
+        Assert.Equal(1, NullableAnnotation.Flag(newAssignments, 1));
+
+        NewPartitions viaNull = NewPartitions.IncreaseTo(3, null);
+        Assert.Equal(3, viaNull.TotalCount);
+        Assert.Null(viaNull.Assignments);
+        Assert.Equal(NewPartitions.IncreaseTo(3).ToString(), viaNull.ToString());
+        Assert.Equal("(totalCount=3, newAssignments=null)", viaNull.ToString());
+
+        // An empty list is still the present-but-empty request, not the null one.
+        NewPartitions viaEmpty = NewPartitions.IncreaseTo(3, Array.Empty<IReadOnlyList<int>>());
+        Assert.NotNull(viaEmpty.Assignments);
+        Assert.Empty(viaEmpty.Assignments!);
+        Assert.Equal("(totalCount=3, newAssignments=[])", viaEmpty.ToString());
+
+        // A null INNER list stays rejected: the ABI would drop it, shifting every later
+        // partition's assignment.
+        ArgumentNullException nullInner = Assert.Throws<ArgumentNullException>(
+            () => NewPartitions.IncreaseTo(3, new IReadOnlyList<int>[] { new[] { 1 }, null! }));
+        Assert.Equal("newAssignments", nullInner.ParamName);
+        Assert.StartsWith(
+            "A replica assignment must not be a null broker-id list.",
+            nullInner.Message,
+            StringComparison.Ordinal);
     }
 
     /// <summary>

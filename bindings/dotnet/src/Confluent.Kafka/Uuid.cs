@@ -13,7 +13,10 @@
 // limitations under the License.
 
 using System;
+using System.Collections.Generic;
+using System.Collections.ObjectModel;
 using System.Globalization;
+using System.Security.Cryptography;
 
 namespace Confluent.Kafka;
 
@@ -35,8 +38,12 @@ namespace Confluent.Kafka;
 /// so this type lives in the root <c>Confluent.Kafka</c> namespace, not under
 /// <c>Confluent.Kafka.Admin</c>.
 /// </para>
+/// <para>
+/// Ordered as Java orders it (<c>Comparable&lt;Uuid&gt;</c>, <c>Uuid.java:154-167</c>):
+/// the two halves compared as <b>signed</b> 64-bit values, most significant first.
+/// </para>
 /// </remarks>
-public readonly struct Uuid : IEquatable<Uuid>
+public readonly struct Uuid : IEquatable<Uuid>, IComparable<Uuid>
 {
     /// <summary>The number of bytes a Kafka <see cref="Uuid"/> occupies.</summary>
     private const int ByteCount = 16;
@@ -50,6 +57,17 @@ public readonly struct Uuid : IEquatable<Uuid>
     /// 24-character input as "too long" where Java reports the decoded byte count.
     /// </summary>
     private const int MaxTextLength = 24;
+
+    /// <summary>
+    /// The backing store of <see cref="Reserved"/>, and the set <see cref="RandomUuid(Func{Uuid})"/>
+    /// tests against — one instance, so the published set and the one the generator avoids
+    /// cannot drift apart. Read-only, so a caller cannot un-reserve a value by casting.
+    /// </summary>
+    private static readonly ReadOnlyCollection<Uuid> s_reserved =
+        new ReadOnlyCollection<Uuid>(new[] { Zero, One });
+
+    /// <summary>The real v4 source <see cref="RandomUuid()"/> hands to the seam.</summary>
+    private static readonly Func<Uuid> s_unsafeRandomUuid = UnsafeRandomUuid;
 
     /// <summary>
     /// Initializes a new instance from its two 64-bit halves (Java's
@@ -68,6 +86,32 @@ public readonly struct Uuid : IEquatable<Uuid>
     /// <see cref="Uuid"/> takes when a broker returned no topic id.
     /// </summary>
     public static Uuid Zero => default;
+
+    /// <summary>
+    /// A reserved identifier, <c>(0, 1)</c> — Java's <c>Uuid.ONE_UUID</c>
+    /// (<c>Uuid.java:37</c>). <see cref="RandomUuid()"/> never returns it.
+    /// </summary>
+    public static Uuid One => new Uuid(0L, 1L);
+
+    /// <summary>
+    /// The id of the metadata topic in KRaft mode — Java's <c>Uuid.METADATA_TOPIC_ID</c>,
+    /// which is <see cref="One"/> (<c>Uuid.java:42</c>). <see cref="RandomUuid()"/> never
+    /// returns it.
+    /// </summary>
+    public static Uuid MetadataTopicId => One;
+
+    /// <summary>
+    /// The identifiers <see cref="RandomUuid()"/> never returns — exactly
+    /// <see cref="Zero"/> and <see cref="One"/> — Java's <c>Uuid.RESERVED</c>
+    /// (<c>Uuid.java:52</c>).
+    /// </summary>
+    /// <remarks>
+    /// Java's type is <c>Set&lt;Uuid&gt;</c>; <c>IReadOnlySet&lt;T&gt;</c> post-dates
+    /// netstandard2.0, so this is the binding's standing read-only collection substitute
+    /// (the same as <c>ListTopicsResult</c>). Java's <c>Set.of</c> has no defined iteration
+    /// order, so none is promised here either.
+    /// </remarks>
+    public static IReadOnlyCollection<Uuid> Reserved => s_reserved;
 
     /// <summary>The high 64 bits (Java's <c>getMostSignificantBits()</c>).</summary>
     public long MostSignificantBits { get; }
@@ -217,6 +261,60 @@ public readonly struct Uuid : IEquatable<Uuid>
             .Replace('/', '_');
     }
 
+    /// <summary>
+    /// A random version-4 identifier that is neither reserved nor prints with a leading
+    /// <c>'-'</c> — Java's <c>Uuid.randomUuid()</c> (<c>Uuid.java:71-82</c>).
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Java's loop, literally: draw a version-4, IETF-variant UUID (the same kind
+    /// <c>java.util.UUID.randomUUID()</c> produces, from a cryptographically strong source),
+    /// and draw again while it is in <see cref="Reserved"/> or its text form starts with
+    /// <c>'-'</c>. The second condition is why a Kafka topic id never looks like a
+    /// command-line flag.
+    /// </para>
+    /// <para>
+    /// This is a C# helper rather than an ABI call (M15/P13.2, D4): no ABI function
+    /// generates a <see cref="Uuid"/>, and the type's text form is already C#, so the
+    /// generator is value-type scaffolding of the same kind, not Kafka behaviour.
+    /// </para>
+    /// </remarks>
+    /// <returns>A random identifier.</returns>
+    public static Uuid RandomUuid() => RandomUuid(s_unsafeRandomUuid);
+
+    /// <summary>
+    /// Compares two identifiers exactly as Java's <c>compareTo</c> does
+    /// (<c>Uuid.java:154-167</c>): <see cref="MostSignificantBits"/> first, then
+    /// <see cref="LeastSignificantBits"/>, each as a <b>signed</b> <see cref="long"/> — so an
+    /// identifier whose high bit is set sorts <em>before</em> <see cref="Zero"/>.
+    /// </summary>
+    /// <param name="other">The identifier to compare with.</param>
+    /// <returns>Exactly <c>1</c>, <c>-1</c> or <c>0</c>, as Java returns.</returns>
+    public int CompareTo(Uuid other)
+    {
+        if (MostSignificantBits > other.MostSignificantBits)
+        {
+            return 1;
+        }
+
+        if (MostSignificantBits < other.MostSignificantBits)
+        {
+            return -1;
+        }
+
+        if (LeastSignificantBits > other.LeastSignificantBits)
+        {
+            return 1;
+        }
+
+        if (LeastSignificantBits < other.LeastSignificantBits)
+        {
+            return -1;
+        }
+
+        return 0;
+    }
+
     /// <inheritdoc/>
     public bool Equals(Uuid other) =>
         MostSignificantBits == other.MostSignificantBits &&
@@ -230,6 +328,64 @@ public readonly struct Uuid : IEquatable<Uuid>
     {
         long value = MostSignificantBits ^ LeastSignificantBits;
         return (int)(value ^ (value >> 32));
+    }
+
+    /// <summary>
+    /// <see cref="RandomUuid()"/>'s loop over an injectable candidate source — the test
+    /// seam. <see cref="RandomUuid()"/> is this method called with the real source, so the
+    /// loop a test drives is the loop production runs (<c>definition-of-done.md</c> §12).
+    /// </summary>
+    /// <param name="unsafeRandomUuid">
+    /// Java's <c>unsafeRandomUuid()</c>: yields one candidate per call, reserved or not.
+    /// </param>
+    /// <returns>The first candidate that is neither reserved nor <c>'-'</c>-leading.</returns>
+    internal static Uuid RandomUuid(Func<Uuid> unsafeRandomUuid)
+    {
+        Uuid uuid = unsafeRandomUuid();
+
+        // `ToString()[0] == '-'` is Java's `toString().startsWith("-")`: the text form is
+        // always 22 characters, so index 0 exists.
+        while (s_reserved.Contains(uuid) || uuid.ToString()[0] == '-')
+        {
+            uuid = unsafeRandomUuid();
+        }
+
+        return uuid;
+    }
+
+    /// <summary>
+    /// Stamps 16 random bytes as a version-4, IETF-variant UUID — the bit layout of
+    /// <c>java.util.UUID.randomUUID()</c> — and reads them as the two big-endian halves
+    /// (Java's <c>getMostSignificantBits</c> / <c>getLeastSignificantBits</c>).
+    /// </summary>
+    /// <param name="randomBytes">Exactly 16 random bytes; stamped in place.</param>
+    /// <returns>The identifier.</returns>
+    internal static Uuid FromVersion4Bytes(byte[] randomBytes)
+    {
+        randomBytes[6] &= 0x0f; // clear the version
+        randomBytes[6] |= 0x40; // version 4
+        randomBytes[8] &= 0x3f; // clear the variant
+        randomBytes[8] |= 0x80; // the IETF variant (10xx)
+        return new Uuid(ReadBigEndianInt64(randomBytes, 0), ReadBigEndianInt64(randomBytes, 8));
+    }
+
+    /// <summary>
+    /// Java's <c>unsafeRandomUuid()</c> (<c>Uuid.java:66-69</c>): one version-4 candidate,
+    /// which may still be reserved or <c>'-'</c>-leading.
+    /// </summary>
+    private static Uuid UnsafeRandomUuid()
+    {
+        byte[] bytes = new byte[ByteCount];
+
+        // A fresh instance per draw: RandomNumberGenerator's instance members carry no
+        // documented thread-safety guarantee on every target, and RandomUuid() may be
+        // called concurrently. It is not a hot path.
+        using (RandomNumberGenerator random = RandomNumberGenerator.Create())
+        {
+            random.GetBytes(bytes);
+        }
+
+        return FromVersion4Bytes(bytes);
     }
 
     /// <summary>
