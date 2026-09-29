@@ -5103,7 +5103,14 @@ fn get_describe_topics_by_ids_call(
             return HandleResult::Retry(Error::local_illegal_state("Expected a Metadata response"));
         };
         let cluster = metadata_response.build_cluster();
-        let errors = metadata_response.errors_by_topic_id();
+        // Java's `errorsByTopicId()` throws `IllegalStateException` on a zero topic
+        // id, and `handleResponses` catches it with `call.fail(now, t)`
+        // (`KafkaAdminClient.java:1394-1403`). `Retry` routes the error through
+        // `fail_call` the same way; it is not retriable, so only this call fails.
+        let errors = match metadata_response.errors_by_topic_id() {
+            Ok(errors) => errors,
+            Err(error) => return HandleResult::Retry(error),
+        };
         for (topic_id, future) in resp_futures.iter() {
             let Some(topic_name) = cluster.topic_name(topic_id) else {
                 future.complete_with_error(Error::with_message(
@@ -7237,6 +7244,51 @@ mod tests {
             err.message(),
             "The given topic id 'AAAAAAAAAAAAAAAAAAAAAA' cannot be represented in a request."
         );
+    }
+
+    /// Regression for A13: a zero topic id in a by-id Metadata response fails
+    /// only that call.
+    ///
+    /// A 4.x broker returns the zero id for a topic deleted while a by-id
+    /// `describeTopics` is being answered: it resolves the id to a name, then
+    /// finds the topic gone and builds the entry with
+    /// `metadataCache.getTopicId(topic)` (`KafkaApis.scala:866-871`), which is
+    /// now the zero id. Java's `MetadataResponse.errorsByTopicId()` throws
+    /// `IllegalStateException("Use errors() when managing topic using topic
+    /// name")` (`MetadataResponse.java:118-120`), and `handleResponses` catches
+    /// it with `call.fail(now, t)` (`KafkaAdminClient.java:1394-1403`). The
+    /// error is not retriable, so only that call fails and the client goes on.
+    /// Rust used to `assert!`, which ended the whole I/O task: the call never
+    /// resolved, and every later call was rejected.
+    #[tokio::test]
+    async fn a_zero_topic_id_in_a_by_id_describe_fails_only_that_call() {
+        let (admin, mut runnable, _time, nodes) = env();
+        let requested = Uuid::new(7, 7);
+        // The topic was deleted mid-request: the broker reports it under its
+        // name with the zero id and an error.
+        let mut deleted = topic_meta("deleted-topic", false, Uuid::ZERO_UUID, 0);
+        deleted.error = Errors::UnknownTopicOrPartition;
+        runnable.client_mut().prepare_response(metadata_resp(&nodes, vec![deleted]));
+
+        let result = admin.describe_topics_with_topics_options(
+            TopicCollection::of_topic_ids(vec![requested]),
+            DescribeTopicsOptions::new(),
+        );
+        let future = result.topic_id_values().unwrap()[&requested].clone();
+        pump_until(&mut runnable, 20, |_| future.is_done()).await;
+        let error = future.get().await.expect_err("the zero topic id must fail the call");
+        assert!(matches!(error, Error::LocalIllegalState(_)), "got {error:?}");
+        assert_eq!(error.message(), "Use errors() when managing topic using topic name");
+
+        // The client is still usable: an unrelated call on the same runnable
+        // succeeds.
+        runnable
+            .client_mut()
+            .prepare_response(metadata_resp(&nodes, vec![topic_meta("other", false, Uuid::new(8, 8), 1)]));
+        let names = admin.list_topics_with_options(ListTopicsOptions::new()).names();
+        pump_until(&mut runnable, 20, |_| names.is_done()).await;
+        let names = names.get().await.expect("a later listTopics must succeed");
+        assert_eq!(names, HashSet::from(["other".to_string()]));
     }
 
     #[tokio::test]
