@@ -157,8 +157,9 @@ pub struct ChaosConfig {
     /// cycle, let the seeded RNG choose whether an action fires, WHICH fault
     /// (broker-roll / topic-recreate / reassign / change-leader — all four are
     /// candidates for a single-topic run; topic-recreate is EXCLUDED under
-    /// `--num-topics > 1`, the same known consumer-side limitation that makes
-    /// `from_env` reject the fixed-cadence combination) and that fault's
+    /// `--num-topics > 1` unless `--allow-multi-topic-recreate`, the same known
+    /// consumer-side limitation for which `from_env` rejects the fixed-cadence
+    /// combination without that flag) and that fault's
     /// parameters (broker index, clean/unclean, down duration, dwell). The
     /// per-fault flags are rejected in this mode (`from_env`). Fully
     /// reproducible for a given `seed`.
@@ -210,12 +211,19 @@ pub struct ChaosConfig {
     /// producer runs per topic (each at `rps`, so aggregate = `num_topics *
     /// rps`) and consumers subscribe to all topics — mirrors librdkafka.
     pub num_topics: u16,
+    /// Run topic-recreate under `--num-topics > 1` despite the known consumer
+    /// defect (`--allow-multi-topic-recreate`); a failure with the defect's
+    /// signature is labelled KNOWN DEFECT. In `--random` mode this puts
+    /// topic-recreate back among the candidates of a multi-topic run.
+    pub allow_multi_topic_recreate: bool,
     /// Producer value payload size in bytes (`--msg-size`, default 100). The
     /// 8-byte big-endian logical index is written into the first bytes of the
     /// value, padded to this size; the key stays the 8-byte index.
     pub msg_size: usize,
     /// Explicit replication factor override (`--replication-factor`). `None` =
-    /// librdkafka's default of `min(brokers, 3)`.
+    /// librdkafka's default of `min(brokers, 3)`. Always within
+    /// `1..=live brokers`; with `--leave-broker-down` and no explicit factor it
+    /// is resolved to `min(live brokers, 3)` (see `from_env`).
     pub replication_factor: Option<i16>,
     /// Broker listener / client `security.protocol` for every client in the run
     /// (`--security-protocol`, default `plaintext`).
@@ -226,16 +234,32 @@ impl ChaosConfig {
     /// Read the configuration from `CHAOS_*` environment variables, applying
     /// librdkafka's defaults for anything unset.
     pub fn from_env() -> Result<Self, String> {
-        let brokers = env_parse("CHAOS_BROKERS", 3)?;
-        let num_topics: u16 = env_parse("CHAOS_NUM_TOPICS", 1)?;
-        let random = env_str("CHAOS_RANDOM", "0") == "1";
+        Self::from_vars(&|key| std::env::var(key).ok())
+    }
+
+    /// [`Self::from_env`] over an arbitrary variable source (`lookup(key)` is
+    /// the value of `key`, if set), so the validation can be unit-tested without
+    /// mutating the process environment. An empty value counts as unset.
+    fn from_vars(lookup: &dyn Fn(&str) -> Option<String>) -> Result<Self, String> {
+        let var = |key: &str| lookup(key).filter(|v| !v.is_empty());
+        let var: &dyn Fn(&str) -> Option<String> = &var;
+        let brokers: u16 = env_parse(var, "CHAOS_BROKERS", 3)?;
+        if brokers == 0 {
+            return Err("--brokers must be >= 1".to_string());
+        }
+        let partitions: i32 = env_parse(var, "CHAOS_PARTITIONS", 6)?;
+        if partitions < 1 {
+            return Err(format!("--partitions must be >= 1, got {partitions}"));
+        }
+        let num_topics: u16 = env_parse(var, "CHAOS_NUM_TOPICS", 1)?;
+        let random = env_str(var, "CHAOS_RANDOM", "0") == "1";
         // Consumer churn (`--consumer-churn-min`/`--consumer-churn-max`): both
         // must be given together; `min >= 1` and `max >= min`. When set, churn
         // owns the consumer set (1 producer + `min` fixed consumers built up
         // front; churn adds/removes up to `max - min` more), so it is mutually
         // exclusive with --consumers and --workload.
-        let consumer_churn_min = env_opt_u32("CHAOS_CONSUMER_CHURN_MIN")?;
-        let consumer_churn_max = env_opt_u32("CHAOS_CONSUMER_CHURN_MAX")?;
+        let consumer_churn_min = env_opt_u32(var, "CHAOS_CONSUMER_CHURN_MIN")?;
+        let consumer_churn_max = env_opt_u32(var, "CHAOS_CONSUMER_CHURN_MAX")?;
         match (consumer_churn_min, consumer_churn_max) {
             (Some(_), None) | (None, Some(_)) => {
                 return Err("use both --consumer-churn-min and --consumer-churn-max together".to_string());
@@ -264,10 +288,10 @@ impl ChaosConfig {
         // `--consumers N`: 1 rust producer + N rust consumers (librdkafka's
         // --consumers). Mutually exclusive with --workload.
         let workloads = if let Some(lo) = consumer_churn_min {
-            if env_opt_u32("CHAOS_CONSUMERS")?.is_some() {
+            if env_opt_u32(var, "CHAOS_CONSUMERS")?.is_some() {
                 return Err("use either --consumer-churn-* or --consumers, not both".to_string());
             }
-            if std::env::var("CHAOS_WORKLOADS").is_ok_and(|v| !v.is_empty()) {
+            if var("CHAOS_WORKLOADS").is_some() {
                 return Err("use either --consumer-churn-* or --workload, not both".to_string());
             }
             let mut spec = String::from("producer:rust");
@@ -276,9 +300,9 @@ impl ChaosConfig {
             }
             parse_workloads(&spec)?
         } else {
-            match env_opt_u32("CHAOS_CONSUMERS")? {
+            match env_opt_u32(var, "CHAOS_CONSUMERS")? {
                 Some(n) => {
-                    if std::env::var("CHAOS_WORKLOADS").is_ok_and(|v| !v.is_empty()) {
+                    if var("CHAOS_WORKLOADS").is_some() {
                         return Err("use either --consumers or --workload, not both".to_string());
                     }
                     if n == 0 {
@@ -290,11 +314,29 @@ impl ChaosConfig {
                     }
                     parse_workloads(&spec)?
                 },
-                None => parse_workloads(&env_str("CHAOS_WORKLOADS", "producer:rust,consumer:rust"))?,
+                None => parse_workloads(&env_str(var, "CHAOS_WORKLOADS", "producer:rust,consumer:rust"))?,
             }
         };
         if workloads.is_empty() {
             return Err("CHAOS_WORKLOADS resolved to no workloads".to_string());
+        }
+        // The verifier keys every record on `(topic, index)` and each producer
+        // numbers its records from 0, so two producer specs would write the same
+        // keys: their records would read as idempotence violations (a false
+        // FAIL) and one copy's ack would hide the other's loss (a false PASS).
+        let producers: Vec<String> = workloads
+            .iter()
+            .filter(|w| w.role == Role::Producer)
+            .map(WorkloadSpec::label)
+            .collect();
+        if producers.len() > 1 {
+            return Err(format!(
+                "only one producer workload is supported, got {} ({}): the verifier identifies a record by \
+                 (topic, index) and every producer numbers its records from 0. Use one producer:<backend> and \
+                 as many consumer:<backend> as needed",
+                producers.len(),
+                producers.join(", ")
+            ));
         }
 
         // `--security-protocol`: which broker listener every client uses. The
@@ -302,7 +344,7 @@ impl ChaosConfig {
         // broker through its container-network listener, which on this branch
         // exists only for PLAINTEXT — so a secured run is Rust-workload only.
         let security_protocol = {
-            let raw = env_str("CHAOS_SECURITY_PROTOCOL", "plaintext");
+            let raw = env_str(var, "CHAOS_SECURITY_PROTOCOL", "plaintext");
             let protocol = SecurityProtocol::parse(&raw).ok_or_else(|| {
                 format!("CHAOS_SECURITY_PROTOCOL must be plaintext, ssl, sasl_plaintext or sasl_ssl, got '{raw}'")
             })?;
@@ -326,7 +368,7 @@ impl ChaosConfig {
         // broker-roll first, then change-leader, reassign, topic-recreate — so
         // a cycle bounces brokers before migrating/recreating on top.
         let mut actions = Vec::new();
-        if env_str("CHAOS_NO_BROKER_ROLL", "0") != "1" {
+        if env_str(var, "CHAOS_NO_BROKER_ROLL", "0") != "1" {
             actions.push(ActionSpec { kind: ActionKind::BrokerRoll, every: 1 });
         }
         for (env_key, flag, kind) in [
@@ -339,7 +381,7 @@ impl ChaosConfig {
             ("CHAOS_TOPIC_RECREATE", "--topic-recreate", ActionKind::TopicRecreate),
             ("CHAOS_ALL_BROKERS_DOWN", "--all-brokers-down", ActionKind::AllBrokersDown),
         ] {
-            if let Some(every) = env_opt_u32(env_key)? {
+            if let Some(every) = env_opt_u32(var, env_key)? {
                 // `cycle % 0` never matches: a cadence of 0 would configure a
                 // fault that never fires, and the run would PASS having injected
                 // nothing.
@@ -377,7 +419,7 @@ impl ChaosConfig {
                 ("CHAOS_REBALANCE_MID_ROLL", "--rebalance-mid-roll"),
             ]
             .into_iter()
-            .filter(|(key, _)| std::env::var(key).is_ok_and(|v| !v.is_empty()))
+            .filter(|(key, _)| var(key).is_some())
             .map(|(_, flag)| flag)
             .collect();
             if !ignored.is_empty() {
@@ -409,7 +451,11 @@ impl ChaosConfig {
         // matching this defect's exact signature as KNOWN DEFECT (see
         // `ChaosVerdict::known_defect`), so the matrix runner can retry it, while
         // any other failure stays an ordinary failure.
-        let allow_multi_topic_recreate = env_str("CHAOS_ALLOW_MULTI_TOPIC_RECREATE", "0") == "1";
+        //
+        // `--random` has no `--topic-recreate` flag to reject: under multi-topic
+        // it leaves topic-recreate out of its candidates instead, and puts it back
+        // with `--allow-multi-topic-recreate` (`random_plan` in `run_test.rs`).
+        let allow_multi_topic_recreate = env_str(var, "CHAOS_ALLOW_MULTI_TOPIC_RECREATE", "0") == "1";
         let multi_topic_recreate = num_topics > 1 && actions.iter().any(|a| a.kind == ActionKind::TopicRecreate);
         if multi_topic_recreate && !allow_multi_topic_recreate {
             return Err(format!(
@@ -420,27 +466,26 @@ impl ChaosConfig {
                  --allow-multi-topic-recreate to run it with the defect labelled"
             ));
         }
-        if allow_multi_topic_recreate && !multi_topic_recreate {
+        if allow_multi_topic_recreate && !(multi_topic_recreate || (random && num_topics > 1)) {
             return Err(
-                "--allow-multi-topic-recreate only applies with --topic-recreate and --num-topics > 1".to_string(),
+                "--allow-multi-topic-recreate only applies with --num-topics > 1 and either --topic-recreate or \
+                 --random"
+                    .to_string(),
             );
         }
 
-        let commit_mode = match env_str("CHAOS_COMMIT", "sync").as_str() {
+        let commit_mode = match env_str(var, "CHAOS_COMMIT", "sync").as_str() {
             "sync" => CommitMode::Sync,
             "async" => CommitMode::Async,
             other => return Err(format!("CHAOS_COMMIT must be sync or async, got '{other}'")),
         };
 
-        if brokers == 0 {
-            return Err("--brokers must be >= 1".to_string());
-        }
-        let leave_broker_down: Option<u16> = match std::env::var("CHAOS_LEAVE_BROKER_DOWN") {
-            Ok(v) if !v.is_empty() => Some(
+        let leave_broker_down: Option<u16> = match var("CHAOS_LEAVE_BROKER_DOWN") {
+            Some(v) => Some(
                 v.parse()
                     .map_err(|_| "CHAOS_LEAVE_BROKER_DOWN must be a broker index".to_string())?,
             ),
-            _ => None,
+            None => None,
         };
         // Brokers are addressed by 1-based node id; an index outside the
         // cluster would panic inside `BrokerControl::container_id` mid-run, and
@@ -456,15 +501,49 @@ impl ChaosConfig {
             }
         }
 
-        let cycles: u32 = env_parse("CHAOS_CYCLES", 3)?;
+        // Replication factor. The broker kept down by --leave-broker-down is
+        // stopped before any workload starts, so a topic created afterwards
+        // (every topic-recreate) can only be placed on the live brokers: a
+        // factor above that count fails with InvalidReplicationFactor mid-run.
+        // So the factor must fit the live brokers, and with a broker left down
+        // the default `min(brokers, 3)` becomes `min(live brokers, 3)`, resolved
+        // here so the harness creates every topic with it.
+        let live_brokers = brokers - u16::from(leave_broker_down.is_some());
+        let replication_factor: Option<i16> = match var("CHAOS_REPLICATION_FACTOR") {
+            Some(v) => Some(
+                v.parse()
+                    .map_err(|_| "CHAOS_REPLICATION_FACTOR must be an integer".to_string())?,
+            ),
+            None => None,
+        };
+        if let Some(rf) = replication_factor {
+            if rf < 1 {
+                return Err(format!("--replication-factor must be >= 1, got {rf}"));
+            }
+            if i32::from(rf) > i32::from(live_brokers) {
+                return Err(match leave_broker_down {
+                    Some(node) => format!(
+                        "--replication-factor {rf} exceeds the {live_brokers} live broker(s): --brokers {brokers} \
+                         with broker {node} kept down by --leave-broker-down"
+                    ),
+                    None => format!("--replication-factor {rf} exceeds --brokers {brokers}"),
+                });
+            }
+        }
+        let replication_factor = match (replication_factor, leave_broker_down) {
+            (None, Some(_)) => Some(live_brokers.min(3) as i16),
+            (rf, _) => rf,
+        };
+
+        let cycles: u32 = env_parse(var, "CHAOS_CYCLES", 3)?;
         if cycles == 0 {
             return Err("--cycles must be >= 1".to_string());
         }
         // Rebalance add/remove are 1-based cycle numbers; a cycle past the end
         // never fires, and a remove needs something to remove (a consumer added
         // earlier in the run, or churn-added consumers).
-        let rebalance_add_cycle = env_opt_u32("CHAOS_REBALANCE_ADD_CYCLE")?;
-        let rebalance_remove_cycle = env_opt_u32("CHAOS_REBALANCE_REMOVE_CYCLE")?;
+        let rebalance_add_cycle = env_opt_u32(var, "CHAOS_REBALANCE_ADD_CYCLE")?;
+        let rebalance_remove_cycle = env_opt_u32(var, "CHAOS_REBALANCE_REMOVE_CYCLE")?;
         for (flag, value) in [
             ("--rebalance-add-cycle", rebalance_add_cycle),
             ("--rebalance-remove-cycle", rebalance_remove_cycle),
@@ -491,69 +570,62 @@ impl ChaosConfig {
             _ => {},
         }
 
-        let outage_s: u64 = env_parse("CHAOS_OUTAGE_S", 30)?;
-        if std::env::var("CHAOS_OUTAGE_S").is_ok_and(|v| !v.is_empty())
-            && !actions.iter().any(|a| a.kind == ActionKind::AllBrokersDown)
-        {
+        let outage_s: u64 = env_parse(var, "CHAOS_OUTAGE_S", 30)?;
+        if var("CHAOS_OUTAGE_S").is_some() && !actions.iter().any(|a| a.kind == ActionKind::AllBrokersDown) {
             return Err("--outage-s only applies with --all-brokers-down".to_string());
         }
         if outage_s == 0 && actions.iter().any(|a| a.kind == ActionKind::AllBrokersDown) {
             return Err("--outage-s must be >= 1".to_string());
         }
 
-        let action_prob: f64 = env_parse("CHAOS_ACTION_PROB", 0.7_f64)?;
+        let action_prob: f64 = env_parse(var, "CHAOS_ACTION_PROB", 0.7_f64)?;
         if !(0.0..=1.0).contains(&action_prob) {
             return Err(format!("--action-prob must be within 0..=1, got {action_prob}"));
         }
-        if !random && std::env::var("CHAOS_ACTION_PROB").is_ok_and(|v| !v.is_empty()) {
+        if !random && var("CHAOS_ACTION_PROB").is_some() {
             return Err("--action-prob only applies with --random".to_string());
         }
 
         // A zero budget would rotate the client log on every line (each line
         // creates a fresh file), producing nothing usable.
-        let log_budget_mb: u64 = env_parse("CHAOS_LOG_BUDGET_MB", 64)?;
+        let log_budget_mb: u64 = env_parse(var, "CHAOS_LOG_BUDGET_MB", 64)?;
         if log_budget_mb == 0 {
             return Err("--log-budget-mb must be >= 1".to_string());
         }
 
         Ok(Self {
             brokers,
-            partitions: env_parse("CHAOS_PARTITIONS", 6)?,
+            partitions,
             cycles,
             actions,
-            unclean: env_str("CHAOS_UNCLEAN", "0") == "1",
-            stop_s: env_parse("CHAOS_STOP_S", 5)?,
-            up_wait_s: env_parse("CHAOS_UP_WAIT_S", 60)?,
-            warmup_s: env_parse("CHAOS_WARMUP_S", 5)?,
-            between_s: env_parse("CHAOS_BETWEEN_S", 3)?,
-            drain_s: env_parse("CHAOS_DRAIN_S", 15)?,
-            idle_threshold_s: env_parse("CHAOS_IDLE_THRESHOLD_S", 3)?,
-            rps: env_parse("CHAOS_RPS", 1000)?,
+            unclean: env_str(var, "CHAOS_UNCLEAN", "0") == "1",
+            stop_s: env_parse(var, "CHAOS_STOP_S", 5)?,
+            up_wait_s: env_parse(var, "CHAOS_UP_WAIT_S", 60)?,
+            warmup_s: env_parse(var, "CHAOS_WARMUP_S", 5)?,
+            between_s: env_parse(var, "CHAOS_BETWEEN_S", 3)?,
+            drain_s: env_parse(var, "CHAOS_DRAIN_S", 15)?,
+            idle_threshold_s: env_parse(var, "CHAOS_IDLE_THRESHOLD_S", 3)?,
+            rps: env_parse(var, "CHAOS_RPS", 1000)?,
             leave_broker_down,
-            seed: env_parse("CHAOS_SEED", 0)?,
+            seed: env_parse(var, "CHAOS_SEED", 0)?,
             random,
             action_prob,
             outage_s,
-            dwell_s: env_parse("CHAOS_DWELL_S", 0)?,
-            reports: env_str("CHAOS_REPORTS", "0") == "1",
+            dwell_s: env_parse(var, "CHAOS_DWELL_S", 0)?,
+            reports: env_str(var, "CHAOS_REPORTS", "0") == "1",
             rebalance_add_cycle,
             rebalance_remove_cycle,
-            rebalance_mid_roll: env_str("CHAOS_REBALANCE_MID_ROLL", "0") == "1",
+            rebalance_mid_roll: env_str(var, "CHAOS_REBALANCE_MID_ROLL", "0") == "1",
             consumer_churn_min,
             consumer_churn_max,
             log_budget_mb,
             workloads,
             commit_mode,
-            topic: env_str("CHAOS_TOPIC", "chaos-run"),
+            topic: env_str(var, "CHAOS_TOPIC", "chaos-run"),
             num_topics,
-            msg_size: env_parse("CHAOS_MSG_SIZE", 100)?,
-            replication_factor: match std::env::var("CHAOS_REPLICATION_FACTOR") {
-                Ok(v) if !v.is_empty() => Some(
-                    v.parse()
-                        .map_err(|_| "CHAOS_REPLICATION_FACTOR must be an integer".to_string())?,
-                ),
-                _ => None,
-            },
+            allow_multi_topic_recreate,
+            msg_size: env_parse(var, "CHAOS_MSG_SIZE", 100)?,
+            replication_factor,
             security_protocol,
         })
     }
@@ -567,6 +639,22 @@ impl ChaosConfig {
         } else {
             (0..self.num_topics).map(|i| format!("{}_{i}", self.topic)).collect()
         }
+    }
+
+    /// Ids of the brokers that are up for the run: `1..=brokers` minus the one
+    /// kept down by `--leave-broker-down`.
+    pub fn live_broker_ids(&self) -> Vec<i32> {
+        (1..=self.brokers)
+            .filter(|b| self.leave_broker_down != Some(*b))
+            .map(i32::from)
+            .collect()
+    }
+
+    /// Whether `--random` leaves topic-recreate out of its candidates: under
+    /// `--num-topics > 1` (the known multi-topic recreate defect), unless
+    /// `--allow-multi-topic-recreate` was given.
+    pub fn random_excludes_topic_recreate(&self) -> bool {
+        self.num_topics > 1 && !self.allow_multi_topic_recreate
     }
 
     pub fn stop_dur(&self) -> Duration {
@@ -601,7 +689,12 @@ impl ChaosConfig {
             self.unclean.to_string()
         };
         let actions_desc = if self.random {
-            format!("RANDOM(prob={}, all-faults)", self.action_prob)
+            let faults = if self.random_excludes_topic_recreate() {
+                "no-topic-recreate"
+            } else {
+                "all-faults"
+            };
+            format!("RANDOM(prob={}, {faults})", self.action_prob)
         } else {
             let actions: Vec<String> = self
                 .actions
@@ -637,25 +730,22 @@ impl ChaosConfig {
     }
 }
 
-fn env_str(key: &str, default: &str) -> String {
-    std::env::var(key)
-        .ok()
-        .filter(|v| !v.is_empty())
-        .unwrap_or_else(|| default.to_string())
+fn env_str(var: &dyn Fn(&str) -> Option<String>, key: &str, default: &str) -> String {
+    var(key).unwrap_or_else(|| default.to_string())
 }
 
-fn env_parse<T: std::str::FromStr>(key: &str, default: T) -> Result<T, String> {
-    match std::env::var(key) {
-        Ok(v) if !v.is_empty() => v.parse().map_err(|_| format!("{key} is not a valid value: '{v}'")),
-        _ => Ok(default),
+fn env_parse<T: std::str::FromStr>(var: &dyn Fn(&str) -> Option<String>, key: &str, default: T) -> Result<T, String> {
+    match var(key) {
+        Some(v) => v.parse().map_err(|_| format!("{key} is not a valid value: '{v}'")),
+        None => Ok(default),
     }
 }
 
 /// Parse an optional u32 env var: unset/empty → `None`, else parsed.
-fn env_opt_u32(key: &str) -> Result<Option<u32>, String> {
-    match std::env::var(key) {
-        Ok(v) if !v.is_empty() => v.parse().map(Some).map_err(|_| format!("{key} must be a cycle number: '{v}'")),
-        _ => Ok(None),
+fn env_opt_u32(var: &dyn Fn(&str) -> Option<String>, key: &str) -> Result<Option<u32>, String> {
+    match var(key) {
+        Some(v) => v.parse().map(Some).map_err(|_| format!("{key} must be a cycle number: '{v}'")),
+        None => Ok(None),
     }
 }
 
@@ -721,6 +811,170 @@ mod tests {
         ] {
             assert_eq!(SecurityProtocol::parse(p.config_value()), Some(p));
         }
+    }
+
+    /// `ChaosConfig::from_vars` over the given `CHAOS_*` variables only.
+    fn parse(vars: &[(&str, &str)]) -> Result<ChaosConfig, String> {
+        let vars: std::collections::HashMap<String, String> =
+            vars.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+        ChaosConfig::from_vars(&|key| vars.get(key).cloned())
+    }
+
+    fn parse_err(vars: &[(&str, &str)]) -> String {
+        parse(vars).expect_err("configuration should be rejected")
+    }
+
+    #[test]
+    fn defaults_parse() {
+        let cfg = parse(&[]).expect("defaults are valid");
+        assert_eq!((cfg.brokers, cfg.partitions, cfg.cycles), (3, 6, 3));
+        assert_eq!(cfg.replication_factor, None);
+        assert_eq!(cfg.live_broker_ids(), vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn empty_value_counts_as_unset() {
+        let cfg = parse(&[("CHAOS_BROKERS", ""), ("CHAOS_TOPIC_RECREATE", "")]).expect("empty values are unset");
+        assert_eq!(cfg.brokers, 3);
+        assert!(cfg.actions.iter().all(|a| a.kind != ActionKind::TopicRecreate));
+    }
+
+    #[test]
+    fn rejects_zero_brokers_and_non_positive_partitions() {
+        assert_eq!(parse_err(&[("CHAOS_BROKERS", "0")]), "--brokers must be >= 1");
+        assert_eq!(parse_err(&[("CHAOS_PARTITIONS", "0")]), "--partitions must be >= 1, got 0");
+        assert_eq!(parse_err(&[("CHAOS_PARTITIONS", "-2")]), "--partitions must be >= 1, got -2");
+    }
+
+    #[test]
+    fn rejects_leave_broker_down_outside_the_cluster() {
+        for node in ["0", "4"] {
+            assert_eq!(
+                parse_err(&[("CHAOS_LEAVE_BROKER_DOWN", node)]),
+                format!("--leave-broker-down {node} is out of range: brokers are numbered 1..=3")
+            );
+        }
+        // Nothing would be left to roll, and `--random`'s broker draw would have
+        // no eligible broker.
+        for random in ["0", "1"] {
+            assert_eq!(
+                parse_err(&[
+                    ("CHAOS_BROKERS", "1"),
+                    ("CHAOS_LEAVE_BROKER_DOWN", "1"),
+                    ("CHAOS_RANDOM", random)
+                ]),
+                "--leave-broker-down with --brokers 1 leaves no broker to roll"
+            );
+        }
+        let cfg = parse(&[("CHAOS_LEAVE_BROKER_DOWN", "2")]).expect("broker 2 of 3 may be left down");
+        assert_eq!(cfg.live_broker_ids(), vec![1, 3]);
+    }
+
+    /// `ActionSpec::fires` divides by the cadence, so 0 must never get through.
+    #[test]
+    fn rejects_a_zero_fault_cadence() {
+        for (key, flag) in [
+            ("CHAOS_CHANGE_LEADER", "--change-leader"),
+            ("CHAOS_REASSIGN_PARTITIONS", "--reassign-partitions"),
+            ("CHAOS_TOPIC_RECREATE", "--topic-recreate"),
+            ("CHAOS_ALL_BROKERS_DOWN", "--all-brokers-down"),
+        ] {
+            assert_eq!(
+                parse_err(&[(key, "0")]),
+                format!("{flag} cadence must be >= 1 (0 would never fire the fault)")
+            );
+        }
+        let cfg = parse(&[("CHAOS_TOPIC_RECREATE", "2")]).expect("cadence 2 is valid");
+        let recreate = cfg.actions.iter().find(|a| a.kind == ActionKind::TopicRecreate).unwrap();
+        assert!(!recreate.fires(1) && recreate.fires(2) && !recreate.fires(3) && recreate.fires(4));
+    }
+
+    #[test]
+    fn replication_factor_must_fit_the_live_brokers() {
+        assert_eq!(
+            parse_err(&[("CHAOS_REPLICATION_FACTOR", "0")]),
+            "--replication-factor must be >= 1, got 0"
+        );
+        assert_eq!(
+            parse_err(&[("CHAOS_REPLICATION_FACTOR", "4")]),
+            "--replication-factor 4 exceeds --brokers 3"
+        );
+        // The left-down broker is stopped before any workload starts, so it
+        // cannot host a replica of a topic created during the run.
+        assert_eq!(
+            parse_err(&[("CHAOS_REPLICATION_FACTOR", "3"), ("CHAOS_LEAVE_BROKER_DOWN", "2")]),
+            "--replication-factor 3 exceeds the 2 live broker(s): --brokers 3 with broker 2 kept down by \
+             --leave-broker-down"
+        );
+        let cfg = parse(&[("CHAOS_REPLICATION_FACTOR", "2"), ("CHAOS_LEAVE_BROKER_DOWN", "2")])
+            .expect("replication 2 fits 2 live brokers");
+        assert_eq!(cfg.replication_factor, Some(2));
+        // With a broker left down, the default is sized from the live brokers.
+        let cfg = parse(&[("CHAOS_LEAVE_BROKER_DOWN", "2")]).expect("default replication fits");
+        assert_eq!(cfg.replication_factor, Some(2));
+        let cfg = parse(&[("CHAOS_BROKERS", "5"), ("CHAOS_LEAVE_BROKER_DOWN", "2")]).expect("valid");
+        assert_eq!(cfg.replication_factor, Some(3));
+        assert_eq!(parse(&[("CHAOS_REPLICATION_FACTOR", "3")]).unwrap().replication_factor, Some(3));
+    }
+
+    #[test]
+    fn rejects_more_than_one_producer_workload() {
+        assert_eq!(
+            parse_err(&[("CHAOS_WORKLOADS", "producer:rust,producer:rust,consumer:rust")]),
+            "only one producer workload is supported, got 2 (producer-rust-1, producer-rust-2): the verifier \
+             identifies a record by (topic, index) and every producer numbers its records from 0. Use one \
+             producer:<backend> and as many consumer:<backend> as needed"
+        );
+        assert!(parse_err(&[("CHAOS_WORKLOADS", "producer:rust,producer:python,consumer:rust")]).contains("got 2"));
+        let cfg = parse(&[("CHAOS_WORKLOADS", "producer:rust,consumer:rust,consumer:rust")])
+            .expect("one producer with several consumers is valid");
+        assert_eq!(cfg.workloads.len(), 3);
+        // The --consumers and churn shorthands always build a single producer.
+        assert!(parse(&[("CHAOS_CONSUMERS", "4")]).is_ok());
+        assert!(parse(&[("CHAOS_CONSUMER_CHURN_MIN", "1"), ("CHAOS_CONSUMER_CHURN_MAX", "3")]).is_ok());
+    }
+
+    #[test]
+    fn random_multi_topic_excludes_topic_recreate_unless_allowed() {
+        let cfg = parse(&[("CHAOS_RANDOM", "1"), ("CHAOS_NUM_TOPICS", "2")]).expect("valid");
+        assert!(cfg.random_excludes_topic_recreate());
+        assert!(cfg.summary().contains("RANDOM(prob=0.7, no-topic-recreate)"));
+
+        let cfg = parse(&[
+            ("CHAOS_RANDOM", "1"),
+            ("CHAOS_NUM_TOPICS", "2"),
+            ("CHAOS_ALLOW_MULTI_TOPIC_RECREATE", "1"),
+        ])
+        .expect("--allow-multi-topic-recreate applies to a multi-topic --random run");
+        assert!(!cfg.random_excludes_topic_recreate());
+        assert!(cfg.summary().contains("RANDOM(prob=0.7, all-faults)"));
+
+        let cfg = parse(&[("CHAOS_RANDOM", "1")]).expect("valid");
+        assert!(!cfg.random_excludes_topic_recreate());
+    }
+
+    #[test]
+    fn allow_multi_topic_recreate_needs_multi_topic_and_recreate_or_random() {
+        let expected = "--allow-multi-topic-recreate only applies with --num-topics > 1 and either --topic-recreate \
+                        or --random";
+        for vars in [
+            &[("CHAOS_ALLOW_MULTI_TOPIC_RECREATE", "1"), ("CHAOS_NUM_TOPICS", "2")][..],
+            &[("CHAOS_ALLOW_MULTI_TOPIC_RECREATE", "1"), ("CHAOS_RANDOM", "1")][..],
+            &[("CHAOS_ALLOW_MULTI_TOPIC_RECREATE", "1"), ("CHAOS_TOPIC_RECREATE", "1")][..],
+        ] {
+            assert_eq!(parse_err(vars), expected, "for {vars:?}");
+        }
+        assert!(
+            parse_err(&[("CHAOS_NUM_TOPICS", "2"), ("CHAOS_TOPIC_RECREATE", "1")])
+                .starts_with("--topic-recreate with --num-topics 2 is not supported yet")
+        );
+        let cfg = parse(&[
+            ("CHAOS_NUM_TOPICS", "2"),
+            ("CHAOS_TOPIC_RECREATE", "1"),
+            ("CHAOS_ALLOW_MULTI_TOPIC_RECREATE", "1"),
+        ])
+        .expect("the fixed-cadence combination runs with the flag");
+        assert!(cfg.allow_multi_topic_recreate);
     }
 
     #[test]
