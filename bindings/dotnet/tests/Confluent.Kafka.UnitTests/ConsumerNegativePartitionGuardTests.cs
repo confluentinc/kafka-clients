@@ -34,14 +34,17 @@ namespace Confluent.Kafka.UnitTests;
 /// <see cref="ArgumentOutOfRangeException.ActualValue"/> and the exact message (DoD §3).
 /// </para>
 /// <para>
-/// <b>"No native call" is witnessed, not assumed.</b> Every guard on a consumer runs before
-/// <c>ThrowIfClosed</c>, the gate in front of every native call, so on a <em>disposed</em>
-/// consumer a negative partition still surfaces as <see cref="ArgumentOutOfRangeException"/>:
-/// had the check run later — or not at all — the result would be
-/// <see cref="ObjectDisposedException"/>. On a live consumer the witnesses are the native
-/// outcomes the guard pre-empts: <c>Assign</c> would assign the partition (the core accepts a
-/// negative one, as Java does), and a <see cref="ConsumerHandle"/> op on a partition this
-/// consumer does not own would report a <see cref="KafkaException"/> from the core.
+/// <b>"No native call" is witnessed, not assumed.</b> Each guard exercised here on a
+/// <em>disposed</em> consumer runs before <c>ThrowIfClosed</c>, the closed-consumer gate those
+/// operations pass before their native call, so a negative partition still surfaces as
+/// <see cref="ArgumentOutOfRangeException"/>: had the check run later — or not at all — the
+/// result would be <see cref="ObjectDisposedException"/>. On a live consumer the witnesses are
+/// the native outcomes the guard pre-empts: <c>Assign</c> would assign the partition (the core
+/// accepts a negative one, as Java does), and the <see cref="ConsumerHandle"/> ops would reach
+/// the core, which answers them on a <c>MockConsumer</c>-derived handle with an
+/// <c>UnsupportedVersion</c> <see cref="KafkaException"/> whatever the partition (core
+/// behaviour, <c>ffi-marshalling.md</c> §B5). So an <see cref="ArgumentOutOfRangeException"/>
+/// from a handle op proves the guard ran first.
 /// </para>
 /// </remarks>
 public sealed class ConsumerNegativePartitionGuardTests
@@ -158,8 +161,9 @@ public sealed class ConsumerNegativePartitionGuardTests
         using MockConsumer<byte[], byte[]> consumer = NewMock();
         using ConsumerHandle handle = consumer.Handle();
 
-        // Each of these would reach the core (and fail there with a KafkaException for a
-        // partition this consumer does not own) if the guard did not run first.
+        // Without the guard each of these would reach the core, which answers them on a
+        // MockConsumer-derived handle with an UnsupportedVersion KafkaException whatever the
+        // partition (ffi §B5) — so ArgumentOutOfRangeException proves the guard ran first.
         AssertGuard(Assert.Throws<ArgumentOutOfRangeException>(() => handle.Seek(s_negative, 0)), "partition");
         AssertGuard(
             Assert.Throws<ArgumentOutOfRangeException>(() => handle.Seek(s_negative, new OffsetAndMetadata(0))),

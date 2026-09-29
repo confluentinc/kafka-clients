@@ -33,9 +33,15 @@ namespace Confluent.Kafka.UnitTests;
 /// <para>
 /// The mock test is also the proof that a negative key <b>round-trips the per-key callback
 /// echo</b>: the result reader rebuilds each key from the native row
-/// (<c>AdminCallbacks.s_topicPartitionKey</c>), so a reader that still rejected a negative
-/// partition would throw inside the no-throw callback boundary and leave the key's task
-/// pending — which the bounded wait here turns into a failure rather than a hang.
+/// (<c>AdminCallbacks.s_topicPartitionKey</c>). A reader that still rejected a negative
+/// partition would throw inside the per-callback no-throw boundary, which swallows the throw
+/// and still releases the countdown. When the countdown reaches zero,
+/// <c>AdminOperation.FailUncompleted</c> faults the unanswered key at once — no wait is involved
+/// — with a code-0 <see cref="KafkaException"/>: "The alterPartitionReassignments result
+/// contained no entry for '…'.". That fault is itself a <see cref="KafkaException"/>, so an
+/// <c>Assert.ThrowsAsync&lt;KafkaException&gt;</c> on its own cannot tell it from the core's
+/// per-key answer; the <see cref="KafkaException.Code"/> and message assertions on the
+/// negative key do.
 /// </para>
 /// <para>
 /// The real-client tests need no broker: both answers are client-side in the core, before
@@ -123,7 +129,12 @@ public sealed class PublicAdminNegativePartitionTests
         Assert.Equal(InvalidTopicCode, failure.Code);
         Assert.Equal(InvalidPartitionMessage, failure.Message);
 
-        await TestTimeout.Run(() => Assert.ThrowsAsync<KafkaException>(result.All), s_deadline);
+        // All() surfaces the same per-key failure; a bare ThrowsAsync<KafkaException> would also
+        // accept the countdown's code-0 "result contained no entry" fault (see the remarks).
+        KafkaException allFailure = await TestTimeout.Run(
+            () => Assert.ThrowsAsync<KafkaException>(result.All), s_deadline);
+        Assert.Equal(InvalidTopicCode, allFailure.Code);
+        Assert.Equal(InvalidPartitionMessage, allFailure.Message);
     }
 
     private static KafkaAdminClient NewUnconnectedClient() =>

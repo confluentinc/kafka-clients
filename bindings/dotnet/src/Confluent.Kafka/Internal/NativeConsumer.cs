@@ -3875,9 +3875,12 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
     /// Both element checks are this method's own, <b>not</b> a backstop for
     /// <see cref="TopicPartition"/>'s constructor, which — like Java's
     /// (<c>TopicPartition.java:32-35</c>) — stores a null topic and a negative partition as
-    /// given (M15/P13.2 G3-4). The null-topic check is the only thing between such a value and
-    /// undefined behaviour in the ABI (<c>read_topic_partitions</c> calls <c>CStr::from_ptr</c>
-    /// on every topic; M15/P13.2 D1). The negative-partition check is a stricter-than-Java
+    /// given (M15/P13.2 G3-4). The null-topic check raises the documented
+    /// <see cref="ArgumentException"/> (parameter <c>partitions</c>) before any topic is pinned;
+    /// without it, the pin (<c>Utf8Marshal.Pin</c>) would throw an undocumented
+    /// <see cref="ArgumentNullException"/> (parameter <c>s</c>) instead. On neither path does a
+    /// null topic cross the ABI, where <c>read_topic_partitions</c> would hand the NULL pointer to
+    /// <c>CStr::from_ptr</c> (M15/P13.2 D1). The negative-partition check is a stricter-than-Java
     /// precondition — Java's <c>assign</c> accepts a negative partition — kept deliberately
     /// (M15/P13.2 D11).
     /// </remarks>

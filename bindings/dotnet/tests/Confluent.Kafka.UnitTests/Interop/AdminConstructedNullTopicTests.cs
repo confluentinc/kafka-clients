@@ -34,7 +34,8 @@ namespace Confluent.Kafka.UnitTests.Interop;
 /// silently skips a NULL-topic row, or fails the whole call, rather than answering it as Java
 /// would. Each test goes through the RPC's submit seam, so "never submitted" is observed
 /// rather than inferred. The two constructions are value-identical, which is the point: the
-/// constructor no longer stands in front of the guard, so the guard alone decides.
+/// constructor no longer throws ahead of the guard, so what each test observes is the guard's
+/// own exception.
 /// </remarks>
 public sealed class AdminConstructedNullTopicTests
 {
