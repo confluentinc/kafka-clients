@@ -1624,12 +1624,12 @@ fn config_type_name(config_type: ConfigType) -> &'static str {
 
 /// A `ConfigEntry` flattened for C.
 ///
-/// Every field Java's `ConfigEntry` exposes is carried. `createTopics` only
-/// populates the first five (the broker's `CreateTopicsResponse` carries no
-/// source, type, documentation or synonyms), which is why
-/// [`kafka_admin_TopicMetadataAndConfig_t`] keeps its own flat `_config_*`
-/// accessors for them; `describeConfigs` populates all of them and hands out a
-/// [`kafka_admin_ConfigEntry_t`] instead.
+/// Every field Java's `ConfigEntry` exposes is carried. `createTopics` entries
+/// carry what Java's `configEntry(CreatableTopicConfigs)` sets — name, value,
+/// source, sensitivity and read-only — with no synonyms and a null type and
+/// documentation; `describeConfigs` populates every field. Both are reachable
+/// as [`kafka_admin_ConfigEntry_t`] (for `createTopics` through
+/// [`kafka_admin_TopicMetadataAndConfig_config`]).
 struct ConfigEntryC {
     name_c: CString,
     /// `None` for a null config value (Java's `ConfigEntry.value()` is nullable).
@@ -1638,7 +1638,9 @@ struct ConfigEntryC {
     is_sensitive: bool,
     is_read_only: bool,
     source_c: CString,
-    config_type_c: CString,
+    /// `None` for a null type (Java's `ConfigEntry.type()`; `createTopics`
+    /// entries have none).
+    config_type_c: Option<CString>,
     /// `None` for null documentation (Java's `ConfigEntry.documentation()`).
     documentation_c: Option<CString>,
     synonyms: Vec<ConfigSynonymC>,
@@ -1655,7 +1657,7 @@ impl ConfigEntryC {
             is_sensitive: entry.is_sensitive(),
             is_read_only: entry.is_read_only(),
             source_c: to_cstring(config_source_name(entry.source())),
-            config_type_c: to_cstring(config_type_name(entry.config_type())),
+            config_type_c: entry.config_type().map(|t| to_cstring(config_type_name(t))),
             documentation_c: entry.documentation().map(to_cstring),
             synonyms: entry
                 .synonyms()
@@ -1866,17 +1868,22 @@ pub unsafe extern "C" fn kafka_admin_ConfigEntry_is_read_only(entry: *const kafk
 }
 
 /// Returns the config type as Java's enum constant name (borrowed), e.g.
-/// `"STRING"` or `"UNKNOWN"`.
+/// `"STRING"` or `"UNKNOWN"`, or null where Java's `type()` is null.
 ///
 /// `ConfigEntry.ConfigType` has no numeric id in Java, so the name is the
-/// contract.
+/// contract. A `describeConfigs` entry always has a type (`"UNKNOWN"` when the
+/// broker did not report one); a `createTopics` entry never has one, because
+/// Java builds it with a null type (`KafkaAdminClient.java:1884-1893`).
 ///
 /// # Safety
 ///
 /// `entry` must be a valid borrowed pointer from a `Config` getter.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ConfigEntry_type(entry: *const kafka_admin_ConfigEntry_t) -> *const c_char {
-    unsafe { config_entry_ref(entry) }.config_type_c.as_ptr()
+    match &unsafe { config_entry_ref(entry) }.config_type_c {
+        Some(config_type) => config_type.as_ptr(),
+        None => std::ptr::null(),
+    }
 }
 
 /// Returns the entry documentation (borrowed), or null when the broker did not
@@ -1982,7 +1989,10 @@ struct TopicMetadataAndConfigInner {
     topic_id_c: CString,
     num_partitions: i32,
     replication_factor: i32,
-    configs: Vec<ConfigEntryC>,
+    /// The topic's config, handed out whole by
+    /// [`kafka_admin_TopicMetadataAndConfig_config`] and entry by entry by the
+    /// flat `_config_*` accessors. Empty when the metadata is unavailable.
+    config: ConfigInner,
 }
 
 impl TopicMetadataAndConfigInner {
@@ -1997,7 +2007,9 @@ impl TopicMetadataAndConfigInner {
                 // same `ensure_success` gate, which just returned `Ok`.
                 num_partitions: value.num_partitions().unwrap_or(-1),
                 replication_factor: value.replication_factor().unwrap_or(-1),
-                configs: value.config().map(|c| ConfigEntryC::from_config(&c)).unwrap_or_default(),
+                config: ConfigInner {
+                    entries: value.config().map(|c| ConfigEntryC::from_config(&c)).unwrap_or_default(),
+                },
             },
             Err(e) => Self {
                 error: Some(error_inner(e)),
@@ -2005,7 +2017,7 @@ impl TopicMetadataAndConfigInner {
                 // Matches `create_topics_result::UNKNOWN`.
                 num_partitions: -1,
                 replication_factor: -1,
-                configs: Vec::new(),
+                config: ConfigInner { entries: Vec::new() },
             },
         }
     }
@@ -2077,6 +2089,35 @@ pub unsafe extern "C" fn kafka_admin_TopicMetadataAndConfig_replication_factor(
     unsafe { metadata_ref(mc) }.replication_factor
 }
 
+/// Returns the topic's config (borrowed) — Java's
+/// `TopicMetadataAndConfig.config()` — or null if the metadata is unavailable
+/// (Java's `config()` throws the error [`kafka_admin_TopicMetadataAndConfig_error`]
+/// returns).
+///
+/// Read it with the `kafka_admin_Config_*` accessors; each entry is a full
+/// [`kafka_admin_ConfigEntry_t`], so `kafka_admin_ConfigEntry_source` is
+/// reachable. As in Java, a `createTopics` entry has no synonyms and a null type
+/// and documentation (`kafka_admin_ConfigEntry_type` returns null). Entries are
+/// sorted by name, in the same order as the flat `_config_*` accessors. It is
+/// borrowed from `mc`: valid until `mc` is freed — by
+/// [`kafka_admin_TopicMetadataAndConfig_destroy`] for a per-key async value, or
+/// by [`kafka_admin_CreateTopicsResult_destroy`] for one borrowed from a
+/// synchronous result. Do not destroy it.
+///
+/// # Safety
+///
+/// `mc` must be a valid `TopicMetadataAndConfig` pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_TopicMetadataAndConfig_config(
+    mc: *const kafka_admin_TopicMetadataAndConfig_t,
+) -> *const kafka_admin_Config_t {
+    let inner = unsafe { metadata_ref(mc) };
+    if inner.error.is_some() {
+        return std::ptr::null();
+    }
+    &inner.config as *const ConfigInner as *const kafka_admin_Config_t
+}
+
 /// Returns the number of topic config entries (0 if the metadata is
 /// unavailable).
 ///
@@ -2087,7 +2128,7 @@ pub unsafe extern "C" fn kafka_admin_TopicMetadataAndConfig_replication_factor(
 pub unsafe extern "C" fn kafka_admin_TopicMetadataAndConfig_config_count(
     mc: *const kafka_admin_TopicMetadataAndConfig_t,
 ) -> i32 {
-    unsafe { metadata_ref(mc) }.configs.len() as i32
+    unsafe { metadata_ref(mc) }.config.entries.len() as i32
 }
 
 /// Returns the name of the config entry at `index` (borrowed), or null if out of
@@ -2172,7 +2213,7 @@ fn config_entry_at(inner: &TopicMetadataAndConfigInner, index: i32) -> Option<&C
     if index < 0 {
         return None;
     }
-    inner.configs.get(index as usize)
+    inner.config.entries.get(index as usize)
 }
 
 /// Destroys a `TopicMetadataAndConfig` handle delivered **individually** by
@@ -22713,7 +22754,7 @@ mod tests {
                     ),
                     ConfigSynonym::new("log.retention.ms".to_string(), None, ConfigSource::StaticBrokerConfig),
                 ])
-                .set_config_type(ConfigType::Long)
+                .set_config_type(Some(ConfigType::Long))
                 .set_documentation(Some("The retention window.".to_string()))
                 .build()
                 .unwrap(),
@@ -22728,7 +22769,7 @@ mod tests {
         assert!(flat.is_sensitive);
         assert!(!flat.is_read_only);
         assert_eq!(text(&flat.source_c), "DYNAMIC_TOPIC_CONFIG");
-        assert_eq!(text(&flat.config_type_c), "LONG");
+        assert_eq!(opt_text(&flat.config_type_c), Some("LONG"));
         assert_eq!(opt_text(&flat.documentation_c), Some("The retention window."));
 
         assert_eq!(flat.synonyms.len(), 2);
@@ -22740,6 +22781,60 @@ mod tests {
         assert_eq!(text(&flat.synonyms[1].source_c), "STATIC_BROKER_CONFIG");
     }
 
+    /// A `createTopics` entry reaches C as a full `kafka_admin_ConfigEntry_t`
+    /// through `kafka_admin_TopicMetadataAndConfig_config`, so its source is
+    /// readable, and its type is null, as Java's `configEntry(CreatableTopicConfigs)`
+    /// leaves it — not the `"UNKNOWN"` a `describeConfigs` entry reports.
+    #[test]
+    fn topic_metadata_and_config_hands_out_full_config_entries() {
+        let entry = ConfigEntry::with_options(
+            ConfigEntryOptionsBuilder::new()
+                .set_name("cleanup.policy".to_string())
+                .set_value(Some("compact".to_string()))
+                .set_source(ConfigSource::DynamicTopicConfig)
+                .set_is_read_only(true)
+                .set_config_type(None)
+                .build()
+                .unwrap(),
+        );
+        let metadata = TopicMetadataAndConfig::new(Uuid::new(1, 2), 3, 1, Config::new([entry]));
+        let mc = Box::into_raw(Box::new(TopicMetadataAndConfigInner::new(&metadata)))
+            as *mut kafka_admin_TopicMetadataAndConfig_t;
+        unsafe {
+            let config = kafka_admin_TopicMetadataAndConfig_config(mc);
+            assert!(!config.is_null());
+            assert_eq!(kafka_admin_Config_entry_count(config), 1);
+            let entry = kafka_admin_Config_get_entry(config, 0);
+            assert_eq!(
+                CStr::from_ptr(kafka_admin_ConfigEntry_name(entry)).to_str(),
+                Ok("cleanup.policy")
+            );
+            assert_eq!(CStr::from_ptr(kafka_admin_ConfigEntry_value(entry)).to_str(), Ok("compact"));
+            assert_eq!(
+                CStr::from_ptr(kafka_admin_ConfigEntry_source(entry)).to_str(),
+                Ok("DYNAMIC_TOPIC_CONFIG")
+            );
+            assert!(kafka_admin_ConfigEntry_is_read_only(entry));
+            assert!(kafka_admin_ConfigEntry_type(entry).is_null());
+            assert!(kafka_admin_ConfigEntry_documentation(entry).is_null());
+            assert_eq!(kafka_admin_ConfigEntry_synonym_count(entry), 0);
+            // The flat accessors read the same entries.
+            assert_eq!(kafka_admin_TopicMetadataAndConfig_config_count(mc), 1);
+            assert!(kafka_admin_TopicMetadataAndConfig_config_is_read_only(mc, 0));
+            kafka_admin_TopicMetadataAndConfig_destroy(mc);
+        }
+
+        // Metadata unavailable: Java's `config()` throws, so C gets null.
+        let failed = TopicMetadataAndConfig::with_error(Error::new(Errors::TopicAuthorizationFailed));
+        let mc = Box::into_raw(Box::new(TopicMetadataAndConfigInner::new(&failed)))
+            as *mut kafka_admin_TopicMetadataAndConfig_t;
+        unsafe {
+            assert!(kafka_admin_TopicMetadataAndConfig_config(mc).is_null());
+            assert!(!kafka_admin_TopicMetadataAndConfig_error(mc).is_null());
+            kafka_admin_TopicMetadataAndConfig_destroy(mc);
+        }
+    }
+
     #[test]
     fn config_entry_c_preserves_null_value_and_documentation() {
         // Java's `ConfigEntry.value()` and `.documentation()` are both nullable;
@@ -22749,7 +22844,7 @@ mod tests {
         assert_eq!(opt_text(&flat.documentation_c), None);
         assert!(flat.synonyms.is_empty());
         assert_eq!(text(&flat.source_c), "UNKNOWN");
-        assert_eq!(text(&flat.config_type_c), "UNKNOWN");
+        assert_eq!(opt_text(&flat.config_type_c), Some("UNKNOWN"));
     }
 
     #[test]
@@ -22760,7 +22855,7 @@ mod tests {
                 .set_value(Some("v".to_string()))
                 .set_source(ConfigSource::DefaultConfig)
                 .set_is_read_only(true)
-                .set_config_type(ConfigType::String)
+                .set_config_type(Some(ConfigType::String))
                 .build()
                 .unwrap(),
         ));

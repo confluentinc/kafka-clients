@@ -1039,7 +1039,7 @@ fn config_view(config: &Config) -> ConfigView {
                 is_sensitive: entry.is_sensitive(),
                 is_read_only: entry.is_read_only(),
                 source: Some(config_source_name(entry.source()).to_string()),
-                config_type: Some(config_type_name(entry.config_type()).to_string()),
+                config_type: entry.config_type().map(|t| config_type_name(t).to_string()),
                 documentation: entry.documentation().map(str::to_string),
                 synonyms: entry
                     .synonyms()
