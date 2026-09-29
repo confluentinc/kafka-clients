@@ -73,6 +73,12 @@ pub(crate) enum HandleResult {
     /// Enqueue a fresh follow-up call (e.g. quota-exceeded retry topics). The
     /// current call is finished.
     NewCall(Box<Call>),
+    /// Issue this same call again, keeping its deadline, tries and backoff
+    /// state: Java's `runnable.call(this, now)` from inside `handleResponse`,
+    /// which `describeTopicPartitions` uses to request the next page
+    /// (`KafkaAdminClient.java:2306-2308`). The Rust hook cannot hand back
+    /// `self`, so the runnable re-queues the call it just dispatched.
+    CallAgain,
     /// The whole call must be retried; route the error through
     /// [`fail`](super::admin_client_runnable) (respecting backoff / retries).
     /// Mirrors an exception escaping Java's `handleResponse` (e.g.

@@ -99,7 +99,13 @@ impl CreateTopicsResult {
     pub(crate) const UNKNOWN: i32 = -1;
 
     /// Creates a result from a map of topic name to per-topic future.
-    pub(crate) fn new(futures: HashMap<String, KafkaFuture<TopicMetadataAndConfig>>) -> Self {
+    ///
+    /// Java declares this constructor `protected`
+    /// (`CreateTopicsResult.java:35`). Rust has no `protected`: Java code outside the
+    /// package reaches it by constructing an anonymous subclass, for example in
+    /// a hand-written `Admin` fake, so `pub` is what gives user code the same
+    /// ability here.
+    pub fn new(futures: HashMap<String, KafkaFuture<TopicMetadataAndConfig>>) -> Self {
         Self { futures }
     }
 

@@ -187,9 +187,7 @@ impl<T: Clone + Send + Sync + 'static> KafkaFutureImpl<T> {
     ///
     /// Translated from the eager side of `KafkaFuture.whenComplete` — used by
     /// the admin client to chain a follow-up `Call` when a prerequisite future
-    /// (e.g. `describeCluster().nodes()`) resolves. That chaining arrives with a
-    /// later admin tier (Phase-1 topic RPCs do not chain calls).
-    #[allow(dead_code)]
+    /// resolves (e.g. `describeTopics` by name on `describeCluster().nodes()`).
     pub(crate) fn when_complete<F>(&self, action: F)
     where
         F: FnOnce(&Result<T, Error>) + Send + 'static,

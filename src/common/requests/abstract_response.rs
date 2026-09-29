@@ -55,6 +55,7 @@ use super::DescribeDelegationTokenResponse;
 use super::DescribeGroupsResponse;
 use super::DescribeLogDirsResponse;
 use super::DescribeProducersResponse;
+use super::DescribeTopicPartitionsResponse;
 use super::DescribeTransactionsResponse;
 use super::DescribeUserScramCredentialsResponse;
 use super::ElectLeadersResponse;
@@ -178,6 +179,8 @@ pub enum ConcreteResponse {
     ListConfigResources(ListConfigResourcesResponse),
     /// A DescribeCluster response.
     DescribeCluster(DescribeClusterResponse),
+    /// A DescribeTopicPartitions response.
+    DescribeTopicPartitions(DescribeTopicPartitionsResponse),
     /// A DescribeLogDirs response.
     DescribeLogDirs(DescribeLogDirsResponse),
     /// An AlterReplicaLogDirs response.
@@ -258,6 +261,7 @@ impl ConcreteResponse {
             Self::IncrementalAlterConfigs(r) => r.api_key(),
             Self::ListConfigResources(r) => r.api_key(),
             Self::DescribeCluster(r) => r.api_key(),
+            Self::DescribeTopicPartitions(r) => r.api_key(),
             Self::DescribeLogDirs(r) => r.api_key(),
             Self::AlterReplicaLogDirs(r) => r.api_key(),
             Self::ElectLeaders(r) => r.api_key(),
@@ -322,6 +326,7 @@ impl ConcreteResponse {
             Self::IncrementalAlterConfigs(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
             Self::ListConfigResources(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
             Self::DescribeCluster(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
+            Self::DescribeTopicPartitions(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
             Self::DescribeLogDirs(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
             Self::AlterReplicaLogDirs(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
             Self::ElectLeaders(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
@@ -448,6 +453,9 @@ impl ConcreteResponse {
             Self::DescribeCluster(r) => {
                 super::RequestUtils::serialize(header.data(), header.header_version(), r.data_mut(), version)
             },
+            Self::DescribeTopicPartitions(r) => {
+                super::RequestUtils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
             Self::DescribeLogDirs(r) => {
                 super::RequestUtils::serialize(header.data(), header.header_version(), r.data_mut(), version)
             },
@@ -554,6 +562,7 @@ impl ConcreteResponse {
             Self::IncrementalAlterConfigs(r) => Self::serialize_body(r.data_mut(), version),
             Self::ListConfigResources(r) => Self::serialize_body(r.data_mut(), version),
             Self::DescribeCluster(r) => Self::serialize_body(r.data_mut(), version),
+            Self::DescribeTopicPartitions(r) => Self::serialize_body(r.data_mut(), version),
             Self::DescribeLogDirs(r) => Self::serialize_body(r.data_mut(), version),
             Self::AlterReplicaLogDirs(r) => Self::serialize_body(r.data_mut(), version),
             Self::ElectLeaders(r) => Self::serialize_body(r.data_mut(), version),
@@ -622,6 +631,7 @@ impl ConcreteResponse {
             Self::IncrementalAlterConfigs(r) => r.error_counts(),
             Self::ListConfigResources(r) => r.error_counts(),
             Self::DescribeCluster(r) => r.error_counts(),
+            Self::DescribeTopicPartitions(r) => r.error_counts(),
             Self::DescribeLogDirs(r) => r.error_counts(),
             Self::AlterReplicaLogDirs(r) => r.error_counts(),
             Self::ElectLeaders(r) => r.error_counts(),
@@ -682,6 +692,7 @@ impl ConcreteResponse {
             Self::IncrementalAlterConfigs(r) => r.throttle_time_ms(),
             Self::ListConfigResources(r) => r.throttle_time_ms(),
             Self::DescribeCluster(r) => r.throttle_time_ms(),
+            Self::DescribeTopicPartitions(r) => r.throttle_time_ms(),
             Self::DescribeLogDirs(r) => r.throttle_time_ms(),
             Self::AlterReplicaLogDirs(r) => r.throttle_time_ms(),
             Self::ElectLeaders(r) => r.throttle_time_ms(),
@@ -741,6 +752,7 @@ impl ConcreteResponse {
             Self::IncrementalAlterConfigs(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
             Self::ListConfigResources(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
             Self::DescribeCluster(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
+            Self::DescribeTopicPartitions(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
             Self::DescribeLogDirs(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
             Self::AlterReplicaLogDirs(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
             Self::ElectLeaders(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
@@ -799,6 +811,7 @@ impl ConcreteResponse {
             Self::IncrementalAlterConfigs(r) => r.should_client_throttle(version),
             Self::ListConfigResources(r) => r.should_client_throttle(version),
             Self::DescribeCluster(r) => r.should_client_throttle(version),
+            Self::DescribeTopicPartitions(r) => r.should_client_throttle(version),
             Self::DescribeLogDirs(r) => r.should_client_throttle(version),
             Self::AlterReplicaLogDirs(r) => r.should_client_throttle(version),
             Self::ElectLeaders(r) => r.should_client_throttle(version),
@@ -983,6 +996,10 @@ impl ConcreteResponse {
                 let response = DescribeClusterResponse::parse(readable, version)?;
                 Ok(Self::DescribeCluster(response))
             },
+            ApiKeys::DESCRIBE_TOPIC_PARTITIONS => {
+                let response = DescribeTopicPartitionsResponse::parse(readable, version)?;
+                Ok(Self::DescribeTopicPartitions(response))
+            },
             ApiKeys::DESCRIBE_LOG_DIRS => {
                 let response = DescribeLogDirsResponse::parse(readable, version)?;
                 Ok(Self::DescribeLogDirs(response))
@@ -1131,6 +1148,7 @@ impl std::fmt::Display for ConcreteResponse {
             Self::IncrementalAlterConfigs(r) => write!(f, "{r}"),
             Self::ListConfigResources(r) => write!(f, "{r}"),
             Self::DescribeCluster(r) => write!(f, "{r}"),
+            Self::DescribeTopicPartitions(r) => write!(f, "{r}"),
             Self::DescribeLogDirs(r) => write!(f, "{r}"),
             Self::AlterReplicaLogDirs(r) => write!(f, "{r}"),
             Self::ElectLeaders(r) => write!(f, "{r}"),

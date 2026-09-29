@@ -31,7 +31,7 @@ pub struct DescribeConsumerGroupsResult {
 
 impl DescribeConsumerGroupsResult {
     /// Creates a result from the per-group-id futures.
-    pub(crate) fn new(futures: HashMap<String, KafkaFuture<ConsumerGroupDescription>>) -> Self {
+    pub fn new(futures: HashMap<String, KafkaFuture<ConsumerGroupDescription>>) -> Self {
         Self { futures }
     }
 
