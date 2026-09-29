@@ -1,0 +1,46 @@
+# Ownership and lock order of the producer's transaction state.
+#
+# Source of truth for design/current/img/producer-txn-locks.svg.
+# Render with: make -C design/current d2
+#
+# The point of this diagram: the TransactionManager is shared three ways
+# behind one std Mutex, but the fields Java confines to the Sender thread
+# stay unlocked on the Sender, and every path takes the locks in the same
+# order: partition deque -> pending_requests -> TransactionManager.
+
+direction: right
+
+owners: "Holders of Arc<Mutex<TransactionManager>>" {
+  style.fill: "#eef6ff"
+
+  kp: "KafkaProducer\n(Caller::App)"
+  acc: "RecordAccumulator\ndrain assigns sequences\n(Caller::Sender)"
+  snd: "Sender\n(Caller::Sender)"
+}
+
+locks: "Lock order (never inverted)" {
+  style.fill: "#fff7e6"
+
+  deque: "1. per-partition deque\nMutex<VecDeque<ProducerBatch>>"
+  pend: "2. pending_requests\nArc<Mutex<PendingRequests>>"
+  tm: "3. TransactionManager\nstate, last_error, producer id/epoch,\nTxnPartitionMap"
+
+  deque -> pend -> tm
+}
+
+confined: "Sender-owned, no lock\ncoordinators: CoordinatorNodes,\nin_flight_request_correlation_id" {
+  style.fill: "#e8f5e9"
+}
+
+owners.kp -> locks.pend
+owners.kp -> locks.tm
+owners.acc -> locks.deque
+owners.snd -> locks.pend
+owners.snd -> confined: "plain fields" {style.stroke-dash: 3}
+
+note: |md
+  No guard is held across an `.await`: the Sender re-acquires the manager
+  around every `client.poll(...)`. `Caller` is passed explicitly at each
+  call site and decides whether an invalid transition returns an error
+  (App) or poisons the manager into `FATAL_ERROR` (Sender).
+| {near: bottom-center}

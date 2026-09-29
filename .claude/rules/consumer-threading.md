@@ -144,7 +144,7 @@ Implementations in Milestone 8:
     `KafkaConsumer::new` / `new_consumer` as a `Box<dyn Consumer<K, V>>`.
     `ConsumerHandle` (§31, §41), declared in the same file, is a Rust-only type
     with no Java class; it stays public through an entry in
-    `xtask/public-audience-allowlist.txt`, because listeners need it for
+    `rust/xtask/public-audience-allowlist.txt`, because listeners need it for
     in-callback reentrancy.
   - `MockConsumer<K, V>` — user-facing test helper, mirrors Java's
     `MockConsumer`. Exposes mock-specific configuration methods
@@ -184,7 +184,7 @@ Benefits over an enum-dispatch alternative:
 **How to apply:**
 
   - Define `Consumer<K, V>` as one `#[async_trait]` trait in
-    `src/consumer/mod.rs`. Public method surface mirrors
+    `rust/src/consumer/mod.rs`. Public method surface mirrors
     `Consumer.java` (Apache Kafka 4.2).
   - Expose `Box<dyn Consumer<K, V>>` from the `new_consumer` factory.
   - `AsyncKafkaConsumer` and `MockConsumer` both `impl Consumer<K, V> for ...`.
@@ -407,8 +407,8 @@ compatibility but is NOT in scope now.
     `ConsumerProtocol.deserializeAssignment(...)` to decode a classic member's
     raw assignment bytes into a `Set<TopicPartition>`. So `ConsumerProtocol`
     (translated in full per DoD #2 →
-    `src/consumer/internals/consumer_protocol.rs`) and the `Assignment` /
-    `Subscription` data holders (→ `src/consumer/consumer_partition_assignor.rs`)
+    `rust/src/consumer/internals/consumer_protocol.rs`) and the `Assignment` /
+    `Subscription` data holders (→ `rust/src/consumer/consumer_partition_assignor.rs`)
     ARE in scope; only the `ConsumerPartitionAssignor` **trait** and the
     client-side assignors remain out of scope. `ConsumerProtocolTest` remains
     listed below as out-of-scope, but the Admin-exercised (de)serialization
