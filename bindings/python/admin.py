@@ -1743,6 +1743,32 @@ class AclBindingFilter:
                 f"operation={self.operation}, permission_type={self.permission_type})")
 
 
+def _defined_codes(enum_cls):
+    """The wire codes an ACL enum class defines (its upper-case int members)."""
+    return frozenset(v for k, v in vars(enum_cls).items() if k.isupper() and isinstance(v, int))
+
+
+_ACL_ENUM_CODES = (
+    _defined_codes(ResourceType), _defined_codes(PatternType),
+    _defined_codes(AclOperation), _defined_codes(AclPermissionType))
+
+
+def _normalized_acl_key(key):
+    """``key`` (an :class:`AclBinding` or :class:`AclBindingFilter`) with each
+    enum code Java does not define replaced by ``UNKNOWN`` (0).
+
+    This is what Java's ``ResourceType`` / ``PatternType`` / ``AclOperation`` /
+    ``AclPermissionType`` ``fromCode`` do, and what the native layer applies
+    before building the Java-shaped binding or filter, so it is the form the
+    native per-key callbacks deliver their key in. The per-key futures stay
+    keyed by the caller's own objects; this is only the lookup form."""
+    rt, name, pt, principal, host, op, perm = key._as_tuple()
+    rt_codes, pt_codes, op_codes, perm_codes = _ACL_ENUM_CODES
+    return type(key)(rt if rt in rt_codes else 0, name, pt if pt in pt_codes else 0,
+                     principal, host, op if op in op_codes else 0,
+                     perm if perm in perm_codes else 0)
+
+
 class DeletedAcl:
     """One ACL a :meth:`Admin.delete_acls` filter matched (Java
     ``DeleteAclsResult.FilterResult``).
@@ -2757,22 +2783,53 @@ class _AdminBase:
                 self._resolve_keyed_value, futures[(topic, partition)], value, error, convert)
         return cb
 
+    @staticmethod
+    def _futures_by_normalized_acl_key(futures):
+        """``{normalized key: [Future]}`` over ``futures`` (see
+        `_normalized_acl_key`): the native callback delivers the normalised
+        key, and two of the caller's keys that differ only in undefined enum
+        codes are one key to Java, so both of their Futures take its outcome."""
+        groups = {}
+        for key, fut in futures.items():
+            groups.setdefault(_normalized_acl_key(key), []).append(fut)
+        return groups
+
+    @staticmethod
+    def _resolve_keyed_void_group(futs, error):
+        """`_resolve_keyed_void` for every Future in ``futs``, converting (and
+        so destroying) the owned ``error`` handle once."""
+        exc = KafkaError._from_c(error) if error else None
+        for fut in futs:
+            if fut.cancelled() or fut.done():
+                continue
+            if exc is not None:
+                fut.set_exception(exc)
+            else:
+                fut.set_result(None)
+
     def _keyed_acl_binding_void_cb(self, futures, loop=None):
         """Builds the `cb(key_tuple, error)` native callback for `create_acls`
         (Phase F), whose key is an `AclBinding` delivered as its seven-field
         tuple - mirrors `_keyed_config_resource_void_cb`'s pattern of
-        rebuilding a compound key from the native callback's raw fields."""
+        rebuilding a compound key from the native callback's raw fields.
+
+        The key arrives normalised (an undefined enum code is UNKNOWN), so it
+        is looked up through `_futures_by_normalized_acl_key`; a direct
+        ``futures[key]`` lookup would miss the caller's un-normalised key and
+        leave its Future pending forever."""
+        groups = self._futures_by_normalized_acl_key(futures)
         if loop is None:
             def cb(key_tuple, error):
-                self._resolve_keyed_void(futures[_to_acl_binding(key_tuple)], error)
+                futs = groups.get(_normalized_acl_key(_to_acl_binding(key_tuple)), [])
+                self._resolve_keyed_void_group(futs, error)
             return cb
 
         def cb(key_tuple, error):
-            key = _to_acl_binding(key_tuple)
+            futs = groups.get(_normalized_acl_key(_to_acl_binding(key_tuple)), [])
             if loop.is_closed():
                 self._free_keyed_void(error)
                 return
-            loop.call_soon_threadsafe(self._resolve_keyed_void, futures[key], error)
+            loop.call_soon_threadsafe(self._resolve_keyed_void_group, futs, error)
         return cb
 
     def _keyed_acl_binding_filter_value_cb(self, futures, loop=None):
@@ -3254,9 +3311,16 @@ class _AdminBase:
         avoids the raw C per-key fan-out's generic fallback for a repeated
         key (`admin_async_per_key_op`'s claimed-entries mask), mirroring the
         Rust core's own `Entry::Vacant`-based dedup in
-        `KafkaAdminClient::create_acls`."""
+        `KafkaAdminClient::create_acls`.
+
+        The rows sent are the distinct NORMALISED bindings
+        (`_normalized_acl_key`), which the native layer would have built
+        anyway: that keeps the C extension's distinct-row incref count equal to
+        the number of callbacks the native layer fires (one per distinct
+        normalised binding) when two keys differ only in undefined codes."""
         deduped = list(dict.fromkeys(acls))
-        return deduped, self._acl_binding_rows(deduped)
+        normalized = list(dict.fromkeys(_normalized_acl_key(a) for a in deduped))
+        return deduped, self._acl_binding_rows(normalized)
 
     def _describe_acls_spec(self, acl_filter, timeout):
         row = self._acl_filter_rows([acl_filter])[0]
