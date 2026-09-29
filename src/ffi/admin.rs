@@ -169,9 +169,9 @@ use crate::admin::{
     ExpireDelegationTokenOptions, FeatureMetadata, FeatureUpdate, FenceProducersOptions, FilterResults, GroupListing,
     GroupOffsets, ListConfigResourcesOptions, ListConsumerGroupOffsetsOptions, ListConsumerGroupOffsetsSpec,
     ListGroupsOptions, ListOffsetsOptions, ListOffsetsResultInfo, ListPartitionReassignmentsOptions, ListTopicsOptions,
-    ListTransactionsOptions, LogDirDescription, MemberAssignment, MemberDescription, MemberToRemove, MockAdminClient,
-    NewPartitionReassignment, NewPartitions, NewTopic, OffsetSpec, OpType, PartitionProducerState,
-    PartitionReassignment, RecordsToDelete, RemoveMembersFromConsumerGroupOptions,
+    ListTransactionsOptions, ListTransactionsResult, LogDirDescription, MemberAssignment, MemberDescription,
+    MemberToRemove, MockAdminClient, NewPartitionReassignment, NewPartitions, NewTopic, OffsetSpec, OpType,
+    PartitionProducerState, PartitionReassignment, RecordsToDelete, RemoveMembersFromConsumerGroupOptions,
     RemoveMembersFromConsumerGroupResult, RenewDelegationTokenOptions, ReplicaLogDirInfo, ScramCredentialInfo,
     ScramMechanism, TerminateTransactionOptions, TopicDescription, TopicListing, TopicMetadataAndConfig,
     TransactionDescription, TransactionListing, TransactionState, UpdateFeaturesOptions, UpgradeType,
@@ -20458,9 +20458,11 @@ fn fence_producers_options(timeout_ms: i32) -> FenceProducersOptions {
 /// `duration_ms` keeps Java's own "negative means no duration filter" contract
 /// (`ListTransactionsOptions.filteredDuration()` defaults to `-1`), so it needs
 /// no separate flag. `transactional_id_pattern` is a nullable string: a null
-/// pointer is Java's null pattern (no pattern filter), which cannot collide with
-/// a pointer to `""` — an empty pattern is a distinct, legal value the broker
-/// evaluates.
+/// pointer is Java's null pattern (no pattern filter). A pointer to `""` is
+/// stored as `Some("")` exactly as Java's `filterOnTransactionalIdPattern("")`
+/// stores it, and — as in Java's `ListTransactionsHandler.buildBatchedRequest`,
+/// which only sets a non-empty pattern — it is dropped from the request, so it
+/// filters nothing either.
 ///
 /// The two filter arrays are passed as `(pointer, count)` tuples rather than as
 /// four flat parameters. The `extern "C"` surface still takes four separate
@@ -21541,21 +21543,14 @@ fn box_list_transactions_result(outcomes: ListTransactionsOutcomes) -> *mut kafk
     let brokers: Vec<BrokerTransactionRow> = sorted_entries(outcomes)
         .into_iter()
         .map(|(broker_id, outcome)| match outcome {
-            Ok(mut listings) => {
-                // Sorted so the second index is stable: Java's value is an
-                // unordered `Collection`.
-                listings.sort_by(|a, b| {
-                    a.transactional_id()
-                        .cmp(b.transactional_id())
-                        .then(a.producer_id().cmp(&b.producer_id()))
-                });
-                BrokerTransactionRow {
-                    broker_id,
-                    transactional_ids: listings.iter().map(|l| to_cstring(l.transactional_id())).collect(),
-                    producer_ids: listings.iter().map(|l| l.producer_id()).collect(),
-                    states: listings.iter().map(|l| to_cstring(&l.state().to_string())).collect(),
-                    error: None,
-                }
+            // Listings keep the order the broker's `ListTransactionsResponse`
+            // returned them in, as Java's per-broker `Collection` does.
+            Ok(listings) => BrokerTransactionRow {
+                broker_id,
+                transactional_ids: listings.iter().map(|l| to_cstring(l.transactional_id())).collect(),
+                producer_ids: listings.iter().map(|l| l.producer_id()).collect(),
+                states: listings.iter().map(|l| to_cstring(&l.state().to_string())).collect(),
+                error: None,
             },
             Err(e) => BrokerTransactionRow {
                 broker_id,
@@ -22369,14 +22364,46 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_fence_producers_async(
 // listTransactions
 // ---------------------------------------------------------------------------
 
-/// Completion callback for [`kafka_admin_AdminClient_list_transactions_async`].
+/// Broker-discovery callback for
+/// [`kafka_admin_AdminClient_list_transactions_async`]: the outcome of Java's
+/// `ListTransactionsResult.byBrokerId()` outer future, which completes once the
+/// admin client knows which brokers it is listing from.
 ///
-/// Exactly one of `result` / `error` is non-null and the callback owns it: free
-/// `result` with [`kafka_admin_ListTransactionsResult_destroy`] or `error` with
-/// `kafka_common_Error_destroy`. A per-broker failure arrives inside
-/// `result`; only a failure of the broker-discovery step arrives as `error`.
-pub type kafka_admin_AdminClient_list_transactions_callback_t =
-    unsafe extern "C" fn(*mut kafka_admin_ListTransactionsResult_t, *mut kafka_common_Error_t, *mut c_void);
+/// Fired exactly once. On success `broker_ids` holds `broker_count` distinct
+/// broker ids — the keys of Java's `Map<Integer, KafkaFuture<..>>`, sorted
+/// ascending (Java's map order is unspecified) — borrowed and valid only for
+/// the duration of this call, and `error` is null; each listed broker then gets
+/// exactly one [`kafka_admin_AdminClient_list_transactions_callback_t`] call,
+/// always **after** this one returns. On failure (Java: `byBrokerId()`,
+/// `all()` and `allByBrokerId()` all fail) `broker_ids` is null,
+/// `broker_count` is 0, `error` is owned by the callback (free it with
+/// `kafka_common_Error_destroy`), and no per-broker callback follows.
+pub type kafka_admin_ListTransactionsResult_by_broker_id_callback_t =
+    unsafe extern "C" fn(*const i32, i32, *mut kafka_common_Error_t, *mut c_void);
+
+/// Per-broker completion callback for
+/// [`kafka_admin_AdminClient_list_transactions_async`], fired **once per broker
+/// named by the broker-discovery callback, as that broker's own future
+/// resolves** — independently of the other brokers, matching the per-broker
+/// `KafkaFuture<Collection<TransactionListing>>` values of Java's
+/// `byBrokerId()` map.
+///
+/// Exactly one of `value` / `error` is non-null and the callback owns it.
+/// `value` is a [`kafka_admin_ListTransactionsResult_t`] carrying exactly this
+/// one broker (readable at index 0; its row error is null) with the listings
+/// in the broker's response order — free it with
+/// [`kafka_admin_ListTransactionsResult_destroy`]. `error` is that broker's
+/// failure — free it with `kafka_common_Error_destroy`.
+///
+/// Java's `all()` / `allByBrokerId()` are derived from these calls: they
+/// complete when every broker has succeeded and fail on the first broker
+/// error, without waiting for the rest.
+pub type kafka_admin_AdminClient_list_transactions_callback_t = unsafe extern "C" fn(
+    i32, /* broker id */
+    *mut kafka_admin_ListTransactionsResult_t,
+    *mut kafka_common_Error_t,
+    *mut c_void,
+);
 
 /// Lists the cluster's transactions, blocking until every broker's future has
 /// resolved (synchronous).
@@ -22405,8 +22432,9 @@ pub type kafka_admin_AdminClient_list_transactions_callback_t =
 ///   means no duration filter, which is Java's own `-1` default — no separate
 ///   flag is needed.
 /// - `transactional_id_pattern`: list only transactional ids matching this
-///   pattern, or NULL for no pattern filter. NULL and `""` are distinct: an
-///   empty pattern is a legal value the broker evaluates.
+///   pattern, or NULL for no pattern filter. An empty pattern `""` also filters
+///   nothing: as in Java (`ListTransactionsHandler.buildBatchedRequest` only
+///   sets a non-empty pattern), it is dropped from the request.
 /// - `timeout_ms`: per-request timeout, or negative for the client default.
 ///
 /// # Safety
@@ -22441,21 +22469,32 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_list_transactions(
     unsafe { finish_sync(outcome, out_result, box_list_transactions_result) }
 }
 
-/// Lists the cluster's transactions asynchronously. See
-/// [`kafka_admin_AdminClient_list_transactions`].
+/// Lists the cluster's transactions asynchronously, in Java's `byBrokerId()`
+/// shape. See [`kafka_admin_AdminClient_list_transactions`] for the filters.
 ///
-/// The callback fires exactly once, but not always on the same thread. It
-/// normally runs on the handle's dispatcher thread. It runs **synchronously on
-/// the calling thread, before this function returns**, when the RPC cannot be
-/// submitted at all (a NULL `admin` handle). And it runs on a **tokio worker
-/// thread** if the dispatcher's completion queue can no longer be reached when
-/// the result arrives. Destroying the handle does not cause that — an
-/// outstanding operation holds its own sender, so it cannot disconnect the
-/// queue; what remains is a dispatcher thread that terminated abnormally, i.e. a
-/// panic inside an earlier callback. So callbacks are not guaranteed to be
-/// serialised on one thread. Do not hold a lock across this call and re-acquire
-/// it in the callback, and publish everything the callback needs (including
-/// `user_data`) before calling rather than after.
+/// Two callbacks share `user_data`:
+///
+/// 1. `by_broker_id_callback` fires **exactly once**, when the brokers are
+///    discovered (Java's `byBrokerId()` outer future): with the broker ids, or
+///    with the error that failed the whole call.
+/// 2. `callback` then fires **exactly once per broker id** from step 1, as that
+///    broker's own listing future resolves — a fast broker is not held up by a
+///    slow or failing one — and never before `by_broker_id_callback` has
+///    returned. It never fires if step 1 reported an error.
+///
+/// So `by_broker_id_callback` + `broker_count` × `callback` invocations in
+/// total. They normally run on the handle's dispatcher thread, but not always
+/// on the same thread. `by_broker_id_callback` runs **synchronously on the
+/// calling thread, before this function returns**, when the RPC cannot be
+/// submitted at all (a NULL `admin` handle). And any callback runs on a
+/// **tokio worker thread** if the dispatcher's completion queue can no longer
+/// be reached when its result arrives. Destroying the handle does not cause
+/// that — an outstanding operation holds its own sender, so it cannot
+/// disconnect the queue; what remains is a dispatcher thread that terminated
+/// abnormally, i.e. a panic inside an earlier callback. So callbacks are not
+/// guaranteed to be serialised on one thread. Do not hold a lock across this
+/// call and re-acquire it in a callback, and publish everything the callbacks
+/// need (including `user_data`) before calling rather than after.
 ///
 /// # Safety
 ///
@@ -22474,6 +22513,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_list_transactions_async(
     duration_ms: i64,
     transactional_id_pattern: *const c_char,
     timeout_ms: i32,
+    by_broker_id_callback: kafka_admin_ListTransactionsResult_by_broker_id_callback_t,
     callback: kafka_admin_AdminClient_list_transactions_callback_t,
     user_data: *mut c_void,
 ) {
@@ -22486,20 +22526,90 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_list_transactions_async(
             transactional_id_pattern,
         )
     };
-    unsafe {
-        admin_async_future_op(
-            admin,
-            user_data,
-            move |a| Ok(submit_list_transactions(a, options)),
-            move |outcome, ud| {
-                let (result, error) = match outcome {
-                    Ok(outcomes) => (box_list_transactions_result(outcomes), std::ptr::null_mut()),
-                    Err(e) => (std::ptr::null_mut(), box_error(e)),
-                };
-                callback(result, error, ud);
-            },
-        )
+    if admin.is_null() {
+        // Honor the callback obligation even for a null handle.
+        let error = box_error(Error::local_illegal_argument("admin handle must not be null"));
+        unsafe { by_broker_id_callback(std::ptr::null(), 0, error, user_data) };
+        return;
+    }
+    let h = unsafe { handle_ref(admin) };
+    // Submitted on the calling thread, as Java's `listTransactions` is.
+    let result = {
+        let _guard = h.runtime.enter();
+        h.admin().list_transactions_with_options(options)
     };
+    unsafe { deliver_list_transactions_by_broker_id(h, result, by_broker_id_callback, callback, user_data) };
+}
+
+/// Delivers a [`ListTransactionsResult`] through the two
+/// [`kafka_admin_AdminClient_list_transactions_async`] callbacks: once for
+/// `by_broker_id()`'s outer future, then once per broker future.
+///
+/// The per-broker `when_complete` registrations are made only after the
+/// broker-discovery job is enqueued, on the same FIFO completion queue, so a
+/// per-broker callback can never overtake the discovery callback.
+///
+/// # Safety
+///
+/// `h` must be a live admin handle.
+unsafe fn deliver_list_transactions_by_broker_id(
+    h: &AdminHandle,
+    result: ListTransactionsResult,
+    by_broker_id_callback: kafka_admin_ListTransactionsResult_by_broker_id_callback_t,
+    callback: kafka_admin_AdminClient_list_transactions_callback_t,
+    user_data: *mut c_void,
+) {
+    let tx = h.completion_tx.clone();
+    let ud = SendUserData(user_data);
+    let by_broker_id = result.by_broker_id();
+    h.runtime_handle.spawn(async move {
+        let ud = ud;
+        let outcome = by_broker_id.get().await;
+        // No `.await` below this point, so the raw pointer never crosses one.
+        let ud_ptr = ud.into_ptr();
+        let brokers = match outcome {
+            Ok(brokers) => brokers,
+            Err(e) => {
+                let ud = SendUserData(ud_ptr);
+                let job: CompletionJob = Box::new(move || unsafe {
+                    by_broker_id_callback(std::ptr::null(), 0, box_error(e), ud.into_ptr())
+                });
+                enqueue_or_run_inline(&tx, job);
+                return;
+            },
+        };
+        let entries = sorted_entries(brokers);
+        let broker_ids: Vec<i32> = entries.iter().map(|(id, _)| *id).collect();
+        let ud = SendUserData(ud_ptr);
+        let job: CompletionJob = Box::new(move || unsafe {
+            by_broker_id_callback(
+                broker_ids.as_ptr(),
+                broker_ids.len() as i32,
+                std::ptr::null_mut(),
+                ud.into_ptr(),
+            )
+        });
+        enqueue_or_run_inline(&tx, job);
+        for (broker_id, future) in entries {
+            let tx = tx.clone();
+            let ud = SendUserData(ud_ptr);
+            future.when_complete(move |outcome| {
+                let outcome = outcome.clone();
+                let ud = ud;
+                let job: CompletionJob = Box::new(move || {
+                    let (value, error) = match outcome {
+                        Ok(listings) => (
+                            box_list_transactions_result(HashMap::from([(broker_id, Ok(listings))])),
+                            std::ptr::null_mut(),
+                        ),
+                        Err(e) => (std::ptr::null_mut(), box_error(e)),
+                    };
+                    unsafe { callback(broker_id, value, error, ud.into_ptr()) };
+                });
+                enqueue_or_run_inline(&tx, job);
+            });
+        }
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -26688,7 +26798,8 @@ mod tests {
         assert_eq!(options.filtered_duration(), -1);
         assert_eq!(options.filtered_transactional_id_pattern(), None);
 
-        // An empty pattern is a distinct, legal value -- not the same as NULL.
+        // An empty pattern is stored as given, as Java's option stores it; the
+        // request handler then drops it (see `list_transactions_handler`).
         let empty = CString::new("").expect("no NUL");
         let options =
             unsafe { list_transactions_options(-1, (std::ptr::null(), 0), (std::ptr::null(), 0), 0, empty.as_ptr()) };
@@ -26999,17 +27110,17 @@ mod tests {
             assert!(kafka_admin_ListTransactionsResult_get_error(result, 0).is_null());
             assert_eq!(kafka_admin_ListTransactionsResult_get_listing_count(result, 0), 2);
 
-            // Listings sorted by transactional id, so "txn-a" precedes "txn-z".
+            // Listings keep the broker's response order: "txn-z" stays first.
             let id0 = CStr::from_ptr(kafka_admin_ListTransactionsResult_get_transactional_id(result, 0, 0));
-            assert_eq!(id0.to_str().expect("utf8"), "txn-a");
-            assert_eq!(kafka_admin_ListTransactionsResult_get_producer_id(result, 0, 0), 70);
+            assert_eq!(id0.to_str().expect("utf8"), "txn-z");
+            assert_eq!(kafka_admin_ListTransactionsResult_get_producer_id(result, 0, 0), 71);
             let state0 = CStr::from_ptr(kafka_admin_ListTransactionsResult_get_state(result, 0, 0));
-            assert_eq!(state0.to_str().expect("utf8"), "CompleteAbort");
+            assert_eq!(state0.to_str().expect("utf8"), "Ongoing");
             let id1 = CStr::from_ptr(kafka_admin_ListTransactionsResult_get_transactional_id(result, 0, 1));
-            assert_eq!(id1.to_str().expect("utf8"), "txn-z");
-            assert_eq!(kafka_admin_ListTransactionsResult_get_producer_id(result, 0, 1), 71);
+            assert_eq!(id1.to_str().expect("utf8"), "txn-a");
+            assert_eq!(kafka_admin_ListTransactionsResult_get_producer_id(result, 0, 1), 70);
             let state1 = CStr::from_ptr(kafka_admin_ListTransactionsResult_get_state(result, 0, 1));
-            assert_eq!(state1.to_str().expect("utf8"), "Ongoing");
+            assert_eq!(state1.to_str().expect("utf8"), "CompleteAbort");
 
             let error = kafka_admin_ListTransactionsResult_get_error(result, 1);
             assert!(!error.is_null());
@@ -27023,6 +27134,174 @@ mod tests {
             assert!(kafka_admin_ListTransactionsResult_get_state(result, 9, 0).is_null());
             kafka_admin_ListTransactionsResult_destroy(result);
         }
+    }
+
+    /// One event observed by the `listTransactions` async callbacks.
+    #[derive(Debug, PartialEq)]
+    enum ListTransactionsEvent {
+        Brokers(Result<Vec<i32>, String>),
+        Broker(i32, Result<Vec<String>, String>),
+    }
+
+    unsafe extern "C" fn record_list_transactions_brokers(
+        broker_ids: *const i32,
+        broker_count: i32,
+        error: *mut kafka_common_Error_t,
+        user_data: *mut c_void,
+    ) {
+        let tx = unsafe { &*(user_data as *const std::sync::mpsc::Sender<ListTransactionsEvent>) };
+        let event = if error.is_null() {
+            let ids = unsafe { std::slice::from_raw_parts(broker_ids, broker_count as usize) };
+            ListTransactionsEvent::Brokers(Ok(ids.to_vec()))
+        } else {
+            assert!(broker_ids.is_null());
+            assert_eq!(broker_count, 0);
+            let message = unsafe { CStr::from_ptr(common::kafka_common_Error_message(error)) };
+            let message = message.to_str().expect("utf8").to_string();
+            unsafe { common::kafka_common_Error_destroy(error) };
+            ListTransactionsEvent::Brokers(Err(message))
+        };
+        tx.send(event).unwrap();
+    }
+
+    unsafe extern "C" fn record_list_transactions_broker(
+        broker_id: i32,
+        value: *mut kafka_admin_ListTransactionsResult_t,
+        error: *mut kafka_common_Error_t,
+        user_data: *mut c_void,
+    ) {
+        let tx = unsafe { &*(user_data as *const std::sync::mpsc::Sender<ListTransactionsEvent>) };
+        assert!(value.is_null() != error.is_null(), "exactly one of value / error");
+        let outcome = unsafe {
+            if error.is_null() {
+                assert_eq!(kafka_admin_ListTransactionsResult_count(value), 1);
+                assert_eq!(kafka_admin_ListTransactionsResult_get_broker_id(value, 0), broker_id);
+                assert!(kafka_admin_ListTransactionsResult_get_error(value, 0).is_null());
+                let ids = (0..kafka_admin_ListTransactionsResult_get_listing_count(value, 0))
+                    .map(|j| {
+                        CStr::from_ptr(kafka_admin_ListTransactionsResult_get_transactional_id(value, 0, j))
+                            .to_str()
+                            .expect("utf8")
+                            .to_string()
+                    })
+                    .collect();
+                kafka_admin_ListTransactionsResult_destroy(value);
+                Ok(ids)
+            } else {
+                let message = CStr::from_ptr(common::kafka_common_Error_message(error))
+                    .to_str()
+                    .expect("utf8");
+                let message = message.to_string();
+                common::kafka_common_Error_destroy(error);
+                Err(message)
+            }
+        };
+        tx.send(ListTransactionsEvent::Broker(broker_id, outcome)).unwrap();
+    }
+
+    /// Java's `byBrokerId()` shape: one discovery callback with the broker ids,
+    /// then one callback per broker as that broker resolves — a resolved broker
+    /// is delivered while another is still pending, listings keep the broker's
+    /// response order (not sorted), and a failed broker does not hold up or
+    /// fail the others.
+    #[test]
+    fn list_transactions_async_delivers_discovery_then_each_broker_independently() {
+        use crate::common::internals::KafkaFutureImpl;
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let admin = build_admin_handle(AdminKind::Mock(Box::new(MockAdminClient::create(1).unwrap())), runtime, true);
+
+        let top: KafkaFutureImpl<HashMap<i32, KafkaFuture<Vec<TransactionListing>>>> = KafkaFutureImpl::new();
+        let slow: KafkaFutureImpl<Vec<TransactionListing>> = KafkaFutureImpl::new();
+        let fast: KafkaFutureImpl<Vec<TransactionListing>> = KafkaFutureImpl::new();
+        let failed: KafkaFutureImpl<Vec<TransactionListing>> = KafkaFutureImpl::new();
+        let (tx, rx) = std::sync::mpsc::channel::<ListTransactionsEvent>();
+        let tx_ptr = &tx as *const std::sync::mpsc::Sender<ListTransactionsEvent> as *mut c_void;
+        unsafe {
+            deliver_list_transactions_by_broker_id(
+                handle_ref(admin),
+                ListTransactionsResult::new(top.future()),
+                record_list_transactions_brokers,
+                record_list_transactions_broker,
+                tx_ptr,
+            );
+        }
+        let wait = || rx.recv_timeout(Duration::from_secs(5)).expect("callback must fire");
+
+        // Nothing fires before the brokers are discovered.
+        assert!(rx.recv_timeout(Duration::from_millis(100)).is_err());
+        top.complete(HashMap::from([(3, slow.future()), (1, fast.future()), (2, failed.future())]));
+        assert_eq!(wait(), ListTransactionsEvent::Brokers(Ok(vec![1, 2, 3])));
+
+        fast.complete(vec![
+            TransactionListing::new("txn-z", 71, TransactionState::Ongoing),
+            TransactionListing::new("txn-a", 70, TransactionState::CompleteAbort),
+        ]);
+        assert_eq!(
+            wait(),
+            ListTransactionsEvent::Broker(1, Ok(vec!["txn-z".to_string(), "txn-a".to_string()]))
+        );
+        failed.complete_with_error(Error::unsupported_version("broker 2 failed"));
+        assert_eq!(wait(), ListTransactionsEvent::Broker(2, Err("broker 2 failed".to_string())));
+        // Broker 3 is still pending and has not fired.
+        assert!(rx.recv_timeout(Duration::from_millis(100)).is_err());
+        slow.complete(vec![]);
+        assert_eq!(wait(), ListTransactionsEvent::Broker(3, Ok(vec![])));
+        assert!(rx.recv_timeout(Duration::from_millis(100)).is_err(), "one callback per broker");
+
+        unsafe { kafka_admin_AdminClient_destroy(admin) };
+    }
+
+    /// A failed discovery (Java: all three views fail) fires the discovery
+    /// callback once with the error and no per-broker callback — which is what
+    /// the mock's "Not implemented yet" `listTransactions` produces end to end.
+    #[test]
+    fn list_transactions_async_reports_a_discovery_failure_once() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let admin = build_admin_handle(AdminKind::Mock(Box::new(MockAdminClient::create(1).unwrap())), runtime, true);
+        let (tx, rx) = std::sync::mpsc::channel::<ListTransactionsEvent>();
+        let tx_ptr = &tx as *const std::sync::mpsc::Sender<ListTransactionsEvent> as *mut c_void;
+        unsafe {
+            kafka_admin_AdminClient_list_transactions_async(
+                admin,
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+                0,
+                -1,
+                std::ptr::null(),
+                -1,
+                record_list_transactions_brokers,
+                record_list_transactions_broker,
+                tx_ptr,
+            );
+        }
+        assert_eq!(
+            rx.recv_timeout(Duration::from_secs(5)).expect("discovery callback fires"),
+            ListTransactionsEvent::Brokers(Err("Not implemented yet".to_string()))
+        );
+        assert!(rx.recv_timeout(Duration::from_millis(100)).is_err());
+
+        // A NULL handle reports through the discovery callback, inline.
+        unsafe {
+            kafka_admin_AdminClient_list_transactions_async(
+                std::ptr::null(),
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+                0,
+                -1,
+                std::ptr::null(),
+                -1,
+                record_list_transactions_brokers,
+                record_list_transactions_broker,
+                tx_ptr,
+            );
+        }
+        assert_eq!(
+            rx.try_recv().expect("fired inline"),
+            ListTransactionsEvent::Brokers(Err("admin handle must not be null".to_string()))
+        );
+        unsafe { kafka_admin_AdminClient_destroy(admin) };
     }
 
     #[test]
@@ -29959,10 +30238,12 @@ mod tests {
     // carrying a single key (index 0), since these three RPCs have no
     // standalone value handle in the synchronous path (unlike describeConfigs'
     // `Config`) and their Java value types have no C handle of their own.
-    // `listTransactions` is deliberately NOT converted: Java's
-    // `ListTransactionsResult` is a single `KafkaFuture<Map<Integer,
-    // KafkaFuture<..>>>` fanned across brokers, with no per-transactional-id
-    // future map — like `listTopics`/`listGroups`, it stays joined.
+    // `listTransactions` does not use this mechanism: Java's
+    // `ListTransactionsResult` has no per-transactional-id future map but a
+    // `byBrokerId()` `KafkaFuture<Map<Integer, KafkaFuture<..>>>`, which the
+    // async entry point delivers in two stages (broker discovery, then one
+    // callback per broker; see `deliver_list_transactions_by_broker_id`). Only
+    // the synchronous entry point joins every broker into one result.
     // -----------------------------------------------------------------------
 
     // The same temporal-independence property as the Phase A/B tests
