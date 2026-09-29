@@ -8,8 +8,33 @@
 Align each client's public API and configuration with the Apache Kafka Java client. This
 umbrella document states the shared principles that apply across all languages.
 
-The Python, .NET, JavaScript, and C/C++ bindings, and the Go client, are covered separately
-and are not part of this RFC set.
+The API for each supported language is specified in its own RFC under this `apis/`
+directory, following the shared principles stated here. See
+[Per-language RFCs](#per-language-rfcs).
+
+## Per-language RFCs
+
+This umbrella RFC states the principles shared across all clients. Each language then has
+its own RFC in this `apis/` directory that specifies its public API in that language's
+idiom, applying the principles below.
+
+The supported languages are Rust, Python, .NET, JavaScript, C, C++, and Go. We publish the
+per-language RFCs incrementally, adding each one as its design is ready for review rather
+than holding them all back for a single large proposal.
+
+| Language | RFC | Status |
+| --- | --- | --- |
+| Rust | `apis/rust.md` | Planned |
+| Python | `apis/python.md` | Planned |
+| .NET | `apis/dotnet.md` | Planned |
+| JavaScript | `apis/javascript.md` | Planned |
+| C / C++ | `apis/c-cpp.md` | Planned |
+| Go | `apis/go.md` | Planned |
+
+Each per-language RFC starts as **Draft**, moves to **Proposed** when it is ready for
+community feedback, and links back to this umbrella document. Go is included on the same
+terms as the other languages; the shared Rust core reaching Go is under evaluation, and its
+API RFC follows once that path is settled.
 
 ## Why align with the Java API
 
