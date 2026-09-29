@@ -25,13 +25,14 @@ use std::sync::atomic::{self, AtomicI32};
 
 use log::{info, warn};
 
-use crate::CommonClientConfigs;
 use crate::common::Error;
+use crate::common::config::config_def::ValidList;
 use crate::common::config::{SaslConfig, SaslConfigs, SslConfig};
 use crate::common::record::internal::CompressionType;
 use crate::common::security::SecurityProtocol;
 use crate::producer::internals::KeyHasher;
 use crate::producer::{Partitioner, RoundRobinPartitioner};
+use crate::{ClientDnsLookup, CommonClientConfigs};
 
 /// Process-wide counter for deriving a default `client.id`.
 ///
@@ -56,6 +57,10 @@ pub struct ProducerConfig {
     /// `bootstrap.servers` - A list of host/port pairs to use for establishing the
     /// initial connection to the Kafka cluster.
     pub(crate) bootstrap_servers: Vec<String>,
+
+    /// `client.dns.lookup` - Controls how the client uses DNS lookups.
+    /// Default: [`ClientDnsLookup::UseAllDnsIps`].
+    pub(crate) client_dns_lookup: ClientDnsLookup,
 
     /// `client.id` - An id string to pass to the server when making requests.
     pub(crate) client_id: String,
@@ -270,6 +275,7 @@ impl Default for ProducerConfig {
     fn default() -> Self {
         Self {
             bootstrap_servers: Vec::new(),
+            client_dns_lookup: ClientDnsLookup::UseAllDnsIps,
             client_id: String::new(),
             security_protocol: SecurityProtocol::Plaintext,
             sasl_config: SaslConfig::default(),
@@ -320,6 +326,10 @@ impl ProducerConfig {
 
     /// Config key: `bootstrap.servers`
     pub const BOOTSTRAP_SERVERS_CONFIG: &'static str = "bootstrap.servers";
+    /// Config key: `client.dns.lookup` (see
+    /// [`CommonClientConfigs::CLIENT_DNS_LOOKUP_CONFIG`]). Java's `ProducerConfig.java`
+    /// declares its own public alias of the `CommonClientConfigs` constant.
+    pub const CLIENT_DNS_LOOKUP_CONFIG: &'static str = CommonClientConfigs::CLIENT_DNS_LOOKUP_CONFIG;
     /// Config key: `client.id`
     pub const CLIENT_ID_CONFIG: &'static str = "client.id";
     /// Config key: `batch.size`
@@ -428,7 +438,11 @@ impl ProducerConfig {
         for (key, value) in props {
             match key.as_str() {
                 Self::BOOTSTRAP_SERVERS_CONFIG => {
-                    config.bootstrap_servers = value.split(',').map(|s| s.trim().to_string()).collect();
+                    // `ValidList.anyNonDuplicateValues(false, false)` (`ProducerConfig.java:379`).
+                    config.bootstrap_servers = ValidList::parse_any_non_duplicate_values(key, value, false)?;
+                },
+                Self::CLIENT_DNS_LOOKUP_CONFIG => {
+                    config.client_dns_lookup = ClientDnsLookup::parse_config_value(value)?;
                 },
                 Self::CLIENT_ID_CONFIG => {
                     config.client_id = value.to_string();
@@ -607,7 +621,7 @@ impl ProducerConfig {
                     };
                 },
                 key if key.starts_with("ssl.") => {
-                    SslConfig::apply_ssl_config_key(&mut config.ssl_config, key, value);
+                    SslConfig::apply_ssl_config_key(&mut config.ssl_config, key, value)?;
                 },
                 _ => {
                     warn!("Unknown producer configuration key: {}", key);
@@ -621,6 +635,9 @@ impl ProducerConfig {
         config.post_process_and_validate_idempotence_configs()?;
         config.maybe_override_client_id();
 
+        config
+            .client_dns_lookup
+            .warn_if_tls_hostname_verification_affected(config.security_protocol, &config.ssl_config);
         Ok(config)
     }
 
@@ -1280,6 +1297,35 @@ mod tests {
         }
     }
 
+    /// `client.dns.lookup` defaults to `use_all_dns_ips` and parses into the
+    /// typed [`ClientDnsLookup`], as `ProducerConfig`'s `ConfigDef` defines it.
+    #[test]
+    fn test_client_dns_lookup() {
+        assert_eq!(ProducerConfig::CLIENT_DNS_LOOKUP_CONFIG, "client.dns.lookup");
+        let mut props = HashMap::new();
+        props.insert("bootstrap.servers".to_string(), "localhost:9092".to_string());
+        assert_eq!(
+            ProducerConfig::new(&props).unwrap().client_dns_lookup,
+            ClientDnsLookup::UseAllDnsIps
+        );
+
+        props.insert(
+            CommonClientConfigs::CLIENT_DNS_LOOKUP_CONFIG.to_string(),
+            "resolve_canonical_bootstrap_servers_only".to_string(),
+        );
+        assert_eq!(
+            ProducerConfig::new(&props).unwrap().client_dns_lookup,
+            ClientDnsLookup::ResolveCanonicalBootstrapServersOnly
+        );
+
+        props.insert(CommonClientConfigs::CLIENT_DNS_LOOKUP_CONFIG.to_string(), "default".to_string());
+        assert_eq!(
+            ProducerConfig::new(&props).unwrap_err().message(),
+            "Invalid value default for configuration client.dns.lookup: String must be one of: \
+             use_all_dns_ips, resolve_canonical_bootstrap_servers_only"
+        );
+    }
+
     /// Translated from `ProducerConfigTest.testInvalidSecurityProtocol`.
     #[test]
     fn test_invalid_security_protocol() {
@@ -1652,5 +1698,71 @@ mod tests {
         assert_ne!(first.client_id, second.client_id);
         let n: i32 = first.client_id.trim_start_matches("producer-").parse().expect("numeric suffix");
         assert!(n >= 1, "Java's sequence starts at 1");
+    }
+
+    /// `bootstrap.servers` is a `Type.LIST`: `ConfigDef.parseType` trims the
+    /// value and splits it on `\\s*,\\s*`, so whitespace around the commas
+    /// and at the ends never reaches `ClientUtils.parseAndValidateAddresses`
+    /// (which does not trim, and rejects it).
+    #[test]
+    fn test_bootstrap_servers_list_parsing() {
+        for value in [
+            "localhost:1,localhost:2",
+            "localhost:1, localhost:2",
+            " localhost:1 ,localhost:2 ",
+        ] {
+            let props = HashMap::from([("bootstrap.servers".to_string(), value.to_string())]);
+            let config = ProducerConfig::new(&props).unwrap();
+            assert_eq!(
+                config.bootstrap_servers,
+                ["localhost:1".to_string(), "localhost:2".to_string()],
+                "{value:?}"
+            );
+            let addresses =
+                crate::ClientUtils::parse_and_validate_addresses(&config.bootstrap_servers, config.client_dns_lookup)
+                    .unwrap();
+            assert_eq!(addresses.len(), 2, "{value:?}");
+        }
+    }
+
+    /// `bootstrap.servers` is validated with Java's
+    /// `ValidList.anyNonDuplicateValues(false, false)` (`ProducerConfig.java:379`): an empty
+    /// element is rejected with `ConfigDef`'s exact message and duplicates are removed
+    /// (single-message `ConfigException`, no `Invalid value` prefix). An empty list is rejected too.
+    #[test]
+    fn test_bootstrap_servers_valid_list() {
+        let error_message = |value: &str| {
+            let props = HashMap::from([("bootstrap.servers".to_string(), value.to_string())]);
+            match ProducerConfig::new(&props) {
+                Err(Error::Config(e)) => e.message().to_string(),
+                other => panic!("expected a ConfigError for {value:?}, got {other:?}"),
+            }
+        };
+        for value in ["localhost:9092,,localhost:9093", "a:1, ,b:1", "a:1,"] {
+            assert_eq!(
+                error_message(value),
+                "Configuration 'bootstrap.servers' values must not be empty.",
+                "{value:?}"
+            );
+        }
+        // `ConfigDef.parseValue` removes duplicates (with a warning) before validating.
+        let props = HashMap::from([("bootstrap.servers".to_string(), "a:1,a:1".to_string())]);
+        assert_eq!(ProducerConfig::new(&props).unwrap().bootstrap_servers, ["a:1".to_string()]);
+        assert_eq!(
+            error_message(",,"),
+            "Configuration 'bootstrap.servers' values must not be empty."
+        );
+        for value in ["", "  "] {
+            assert_eq!(
+                error_message(value),
+                "Configuration 'bootstrap.servers' must not be empty. Valid values include: any non-empty value",
+                "{value:?}"
+            );
+        }
+        let props = HashMap::from([("bootstrap.servers".to_string(), "a:1,b:1".to_string())]);
+        assert_eq!(
+            ProducerConfig::new(&props).unwrap().bootstrap_servers,
+            ["a:1".to_string(), "b:1".to_string()]
+        );
     }
 }
