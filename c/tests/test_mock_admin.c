@@ -1420,6 +1420,8 @@ static void test_mock_admin_describe_cluster_sync(void) {
     TEST_ASSERT_EQUAL_INT32(9, host_len);
     TEST_ASSERT_EQUAL_INT(0, strncmp(host, "localhost", 9));
     TEST_ASSERT_EQUAL_INT32(1000, kafka_common_Node_port(node));
+    /* The mock's brokers are never fenced (Java's `Node(id, host, port)`). */
+    TEST_ASSERT_FALSE(kafka_common_Node_is_fenced(node));
     TEST_ASSERT_NULL(kafka_admin_DescribeClusterResult_get_node(result, 3));
     TEST_ASSERT_NULL(kafka_admin_DescribeClusterResult_get_node(result, -1));
 
