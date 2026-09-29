@@ -25,6 +25,7 @@ use std::fmt;
 
 use crate::common::Error;
 use crate::common::IsolationLevel;
+use crate::common::record::internal::DefaultRecordBatch;
 use crate::consumer::ConsumerConfig;
 
 /// Immutable bundle of fetch settings derived from [`ConsumerConfig`].
@@ -48,6 +49,16 @@ pub(crate) struct FetchConfig {
     pub client_rack_id: String,
     /// `isolation.level`.
     pub isolation_level: IsolationLevel,
+    /// The most bytes one compressed record batch may decompress to
+    /// (APPSEC-7665 D4).
+    ///
+    /// A Rust-only field, not a configuration key: Java decompresses a batch
+    /// record by record (`DefaultRecordBatch.java:279-297`) and needs no bound,
+    /// while this client decompresses it once into the buffer its records borrow
+    /// from (`consumer-threading.md` §27). Both constructors set it to
+    /// [`MAX_DECOMPRESSED_BATCH_BYTES`], keeping Java's arity; tests lower it by
+    /// assigning the field.
+    pub(crate) max_decompressed_batch_bytes: usize,
 }
 
 impl FetchConfig {
@@ -74,6 +85,7 @@ impl FetchConfig {
             check_crcs,
             client_rack_id: client_rack_id.into(),
             isolation_level,
+            max_decompressed_batch_bytes: DefaultRecordBatch::MAX_DECOMPRESSED_BATCH_BYTES,
         }
     }
 
@@ -105,6 +117,7 @@ impl FetchConfig {
             check_crcs: config.check_crcs,
             client_rack_id: config.client_rack.clone(),
             isolation_level,
+            max_decompressed_batch_bytes: DefaultRecordBatch::MAX_DECOMPRESSED_BATCH_BYTES,
         })
     }
 }
@@ -155,6 +168,11 @@ mod tests {
         assert!(cfg.check_crcs);
         assert_eq!("", cfg.client_rack_id);
         assert_eq!(IsolationLevel::ReadUncommitted, cfg.isolation_level);
+        // Rust-only (APPSEC-7665 D4): no Java counterpart, defaulted by the constructor.
+        assert_eq!(
+            DefaultRecordBatch::MAX_DECOMPRESSED_BATCH_BYTES,
+            cfg.max_decompressed_batch_bytes
+        );
     }
 
     /// Translated from
@@ -173,6 +191,10 @@ mod tests {
         assert!(fetch_config.check_crcs);
         assert_eq!("", fetch_config.client_rack_id);
         assert_eq!(IsolationLevel::ReadUncommitted, fetch_config.isolation_level);
+        assert_eq!(
+            DefaultRecordBatch::MAX_DECOMPRESSED_BATCH_BYTES,
+            fetch_config.max_decompressed_batch_bytes
+        );
     }
 
     /// `from_consumer_config` honors a non-default isolation level.
