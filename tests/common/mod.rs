@@ -38,6 +38,9 @@ pub use test_generated::*;
 // integration test crates, so rustc can't see the cross-crate usage.
 #[cfg(feature = "integration-tests")]
 #[allow(dead_code)]
+pub mod broker_control;
+#[cfg(feature = "integration-tests")]
+#[allow(dead_code)]
 pub mod cluster_config;
 #[cfg(feature = "integration-tests")]
 #[allow(dead_code)]
