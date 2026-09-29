@@ -2575,13 +2575,13 @@ static void test_mock_admin_describe_replica_log_dirs_async_null_handle(void) {
     TEST_ASSERT_EQUAL_INT(0, atomic_load(&r.value_count));
 }
 
-/* COMMENTS.67 fixup: a replica of a topic the mock does not know is skipped
- * entirely by `MockAdminClient::describe_replica_log_dirs` (no future is ever
- * created for it - MockAdminClient.java:1112), so its callback must still
- * fire exactly once, with an explicit error, rather than never firing at all
- * (which, before the fix in `admin_async_per_key_op`, would have hung this
- * test until the harness's own timeout). */
-static void test_mock_admin_describe_replica_log_dirs_async_unknown_topic_resolves_with_error(void) {
+/* A replica of a topic the mock does not know is skipped entirely by
+ * `MockAdminClient::describe_replica_log_dirs` (no future is ever created for
+ * it - MockAdminClient.java:1112), so a Java caller finds the key absent from
+ * the result map. Its callback still fires exactly once (never firing would
+ * hang a caller holding a per-key future, COMMENTS.67), carrying neither a
+ * value nor an error: Java's absent key. */
+static void test_mock_admin_describe_replica_log_dirs_async_unknown_topic_is_absent(void) {
     kafka_admin_AdminClient_t *admin = kafka_admin_MockAdminClient_new(1);
     create_one(admin, "drld-known-async", 1, 1);
 
@@ -2601,7 +2601,7 @@ static void test_mock_admin_describe_replica_log_dirs_async_unknown_topic_resolv
     TEST_ASSERT_TRUE(wait_for(&r.fired, 2));
     TEST_ASSERT_EQUAL_INT(2, atomic_load(&r.fired));
     TEST_ASSERT_EQUAL_INT(1, atomic_load(&r.value_count));
-    TEST_ASSERT_EQUAL_INT(1, atomic_load(&r.error_count));
+    TEST_ASSERT_EQUAL_INT(0, atomic_load(&r.error_count));
     kafka_admin_AdminClient_destroy(admin);
 }
 
@@ -2610,8 +2610,7 @@ static void test_mock_admin_describe_replica_log_dirs_async_unknown_topic_resolv
  * TopicPartitionReplica), so the callback must fire exactly ONCE with the real
  * outcome - never a spurious "not present" error for the second occurrence.
  * This is distinct from the unknown-topic case above (a genuinely-omitted key,
- * which still gets its explicit error): a duplicate of a KNOWN replica must NOT
- * error. */
+ * reported absent): a duplicate of a KNOWN replica must NOT error. */
 static void test_mock_admin_describe_replica_log_dirs_async_dedups_duplicate_replica(void) {
     kafka_admin_AdminClient_t *admin = kafka_admin_MockAdminClient_new(1);
     create_one(admin, "drld-dup-async", 1, 1);
@@ -7313,7 +7312,7 @@ int main(void) {
     RUN_TEST(test_mock_admin_alter_replica_log_dirs_async_null_handle);
     RUN_TEST(test_mock_admin_describe_replica_log_dirs);
     RUN_TEST(test_mock_admin_describe_replica_log_dirs_async);
-    RUN_TEST(test_mock_admin_describe_replica_log_dirs_async_unknown_topic_resolves_with_error);
+    RUN_TEST(test_mock_admin_describe_replica_log_dirs_async_unknown_topic_is_absent);
     RUN_TEST(test_mock_admin_describe_replica_log_dirs_async_dedups_duplicate_replica);
     RUN_TEST(test_mock_admin_describe_replica_log_dirs_async_null_handle);
     RUN_TEST(test_mock_admin_b2_null_out_result);
