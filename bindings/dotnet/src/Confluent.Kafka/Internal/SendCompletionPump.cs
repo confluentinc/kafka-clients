@@ -73,7 +73,8 @@ namespace Confluent.Kafka.Internal;
 /// <para>
 /// <b>Teardown (<see cref="Stop"/>).</b> Called on the disposing thread after the
 /// <see cref="NativeProducer"/> close latch is won: signals the loop to stop, joins the thread
-/// (so no future handle is in use), then faults + frees anything still queued. A
+/// (so no future handle is in use), then faults + frees every send still queued and completes every
+/// completion barrier still queued (M17/P1 D4, below). A
 /// <see cref="Enqueue"/> that races a completed <see cref="Stop"/> is caught under
 /// <see cref="_stopLock"/> and faulted + freed in place — so no send is stranded or leaked
 /// (deterministic — no <em>strand or leak</em> residual on the enqueue-vs-stop race). That branch
@@ -94,6 +95,15 @@ namespace Confluent.Kafka.Internal;
 /// Option-C bounded residual, ffi §A7). Once the flush has resolved the pending sends, the in-flight
 /// <c>get_all</c> returns and <see cref="Stop"/>'s join completes; the loop is never interrupted
 /// mid-<c>get_all</c>.
+/// </para>
+/// <para>
+/// <b>Completion barriers (M17/P1 D4).</b> <see cref="EnqueueBarrier"/> queues an entry that holds
+/// no send. The loop takes entries in FIFO order and finishes each group —
+/// <see cref="ProcessGroup"/> and, if that throws, <see cref="FaultGroupCompletions"/> — before it
+/// takes the next entry. So when it reaches a barrier, every group queued before it has had each of
+/// its awaiters completed or faulted, and each delivery callback those passes invoked has returned;
+/// the loop then completes the barrier and continues. A barrier runs no <c>get_all</c> pass, and no
+/// pass spans one.
 /// </para>
 /// <para>
 /// <b>Background thread.</b> The pump thread is a background thread, so a producer leaked without
@@ -152,6 +162,7 @@ internal sealed class SendCompletionPump
         SendAccumulatorSettings.DefaultSlotThreshold + SendAccumulatorSettings.SlotCapacityHeadroom;
 
     // One entry per send_batch CALL (M11/P3.2 §3B.1), not per record: the anchor's completion unit.
+    // A completion barrier (EnqueueBarrier, M17/P1 D4) is an entry too, and holds no send.
     private readonly ConcurrentQueue<PendingSendBatch> _queue = new ConcurrentQueue<PendingSendBatch>();
 
     // The three marshalling arrays get_all reads and writes, allocated ONCE (§12.3) — the anchor
@@ -217,7 +228,8 @@ internal sealed class SendCompletionPump
     /// <summary>The number of <c>ProcessBatch</c> passes the pump thread has run.</summary>
     /// <remarks>
     /// One per queued group, except that a group larger than <see cref="DrainCap"/> is split into
-    /// <c>ceil(count / DrainCap)</c> passes (<see cref="ProcessGroup"/>).
+    /// <c>ceil(count / DrainCap)</c> passes (<see cref="ProcessGroup"/>). A completion barrier runs
+    /// no pass, so it leaves this count unchanged.
     /// </remarks>
     internal long ProcessedBatchCount => Interlocked.Read(ref _processedBatches);
 
@@ -229,6 +241,9 @@ internal sealed class SendCompletionPump
     /// the number that reached <see cref="Enqueue"/> while the gate was still <b>open</b>. The
     /// witness for the M11/P3.1 §3.8 teardown ordering (see <c>_drainedSends</c>).
     /// </summary>
+    /// <remarks>
+    /// A completion barrier holds no send, so taking one off the queue adds 0.
+    /// </remarks>
     internal long DrainedSendCount => Interlocked.Read(ref _drainedSends);
 
     /// <summary>
@@ -303,6 +318,69 @@ internal sealed class SendCompletionPump
     }
 
     /// <summary>
+    /// Enqueues a <b>completion barrier</b> (M17/P1 D4): an entry that holds no send, whose task
+    /// completes once the pump has finished every group queued before it. If the enqueue gate is
+    /// closed, it queues nothing and returns a completed task.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>The invariant, and why FIFO gives it.</b> The barrier completes only after every group
+    /// queued before it has had each of its awaiters completed or faulted, and each delivery
+    /// callback its passes invoked has returned. <see cref="RunLoop"/> takes entries in FIFO order
+    /// and finishes one group before it takes the next entry, so it completes the barrier when it
+    /// reaches it. A pass never spans two groups, so no <c>get_all</c> spans a barrier.
+    /// </para>
+    /// <para>
+    /// <b>It waits as long as the groups ahead of it take.</b> It completes only when the loop
+    /// reaches it, so whatever holds the loop on a group ahead of it holds the barrier too: a
+    /// future that never resolves (M17/P1 D4 residual R-a), or a delivery callback that does not
+    /// return, such as one that waits on this barrier (R-b).
+    /// </para>
+    /// <para>
+    /// <b>It is not a group.</b> <see cref="RunLoop"/> runs no <see cref="ProcessGroup"/> for it,
+    /// so there is no <c>get_all</c> with count 0 and <see cref="ProcessedBatchCount"/> is not
+    /// incremented, and <see cref="DequeueGroup"/> adds its <c>Count</c>, 0, to
+    /// <see cref="DrainedSendCount"/>.
+    /// </para>
+    /// <para>
+    /// <b>Its task source is built with
+    /// <see cref="TaskCreationOptions.RunContinuationsAsynchronously"/></b>, so a continuation on
+    /// the returned task does not run on the pump thread, and one that blocks does not block the
+    /// loop.
+    /// </para>
+    /// <para>
+    /// <b>Gate and stop.</b> It follows <see cref="Enqueue"/>'s protocol under
+    /// <see cref="_stopLock"/>. Where <see cref="Enqueue"/> faults a group in place — after
+    /// <see cref="CloseGate"/> or <see cref="Stop"/> — this returns a completed task instead.
+    /// M17/P1 D4 records that teardown race as benign: the control call the barrier orders reports
+    /// the closed producer itself. A barrier still queued when <see cref="Stop"/> runs is completed
+    /// with success by its terminal drain (<see cref="DrainAndFaultRemaining"/>).
+    /// </para>
+    /// </remarks>
+    /// <returns>
+    /// The barrier's task, which the pump completes with success; or, when the gate is closed, a
+    /// completed task.
+    /// </returns>
+    internal Task EnqueueBarrier()
+    {
+        lock (_stopLock)
+        {
+            if (_stopped)
+            {
+                // Where Enqueue faults a group in place, a barrier completes: it orders completions
+                // and holds no record (D4). Nothing is queued, and _signal is not touched — after
+                // Stop it is disposed.
+                return Task.CompletedTask;
+            }
+
+            PendingSendBatch barrier = PendingSendBatch.CreateBarrier();
+            _queue.Enqueue(barrier);
+            _signal.Set();
+            return barrier.Barrier!.Task;
+        }
+    }
+
+    /// <summary>
     /// Closes the enqueue gate <b>without</b> stopping the loop, so a send that races teardown
     /// faults in place instead of being queued into a pump that is about to be joined (M11/P8,
     /// Major 5). Called by <see cref="NativeProducer"/> teardown <b>before</b> the teardown flush.
@@ -329,6 +407,10 @@ internal sealed class SendCompletionPump
     /// harmless (idempotent). The accepted semantic is unchanged from today's <c>_stopped</c>
     /// branch: a send faulted in place has already been handed to native, so the record may still
     /// be delivered while its <see cref="Task"/> faults — pre-existing teardown-race behavior.
+    /// </para>
+    /// <para>
+    /// <see cref="EnqueueBarrier"/> reads the same flag under the same lock: once the gate is
+    /// closed it queues nothing and returns a completed task (M17/P1 D4).
     /// </para>
     /// </remarks>
     internal void CloseGate()
@@ -366,11 +448,13 @@ internal sealed class SendCompletionPump
     /// </para>
     /// <para>
     /// <b>It cannot hang, because the wait is MONOTONE.</b> Its caller runs it only after
-    /// <see cref="CloseGate"/>, so <see cref="Enqueue"/> faults in place and <b>no new item can
-    /// enter the queue</b>: the queue only ever shrinks while this runs, and the wait is bounded
-    /// besides. On expiry the behaviour degrades to exactly the pre-S4 one — <see cref="Stop"/>
-    /// faults the remainder — which is a <em>defined</em> outcome, not a hang. That residual is
-    /// recorded as <b>DV-4</b>, narrowed by this method to the pathological case.
+    /// <see cref="CloseGate"/>, so <see cref="Enqueue"/> faults in place,
+    /// <see cref="EnqueueBarrier"/> returns a completed task, and <b>no new item can enter the
+    /// queue</b>: the queue only ever shrinks while this runs, and the wait is bounded besides. On
+    /// expiry the behaviour degrades to exactly the pre-S4 one — <see cref="Stop"/> faults the
+    /// sends that remain (and completes any barrier that remains) — which is a <em>defined</em>
+    /// outcome, not a hang. That residual is recorded as <b>DV-4</b>, narrowed by this method to
+    /// the pathological case.
     /// </para>
     /// <para>
     /// ⚠ <b>Two shapes were evaluated and REJECTED. Do not reach for either.</b>
@@ -395,7 +479,8 @@ internal sealed class SendCompletionPump
     /// <para>
     /// <b>The predicate reads a queue of GROUPS, not of records</b> (M11/P3.2 §3B.2) — which is why
     /// S4 was sequenced after S3 rather than written twice. "Empty" therefore means "no
-    /// <c>send_batch</c> group is left unclaimed"; a group the pump has already dequeued is
+    /// <c>send_batch</c> group and no completion barrier is left unclaimed" (the loop takes a
+    /// barrier without a <c>get_all</c>); a group the pump has already dequeued is
     /// <em>in flight</em>, and <see cref="Stop"/>'s <c>_thread.Join()</c> is what covers it, since
     /// the loop cannot exit mid-<see cref="ProcessGroup"/>. The <b>record</b> count remains
     /// <see cref="DrainedSendCount"/>'s job, counted in <see cref="DequeueGroup"/>.
@@ -443,10 +528,10 @@ internal sealed class SendCompletionPump
 
     /// <summary>
     /// Stops the pump: signals the loop, joins the thread (so no future handle is in use), then
-    /// faults + frees anything still queued. Called by <see cref="NativeProducer"/> teardown after
-    /// the close latch is won and before <c>Producer_destroy</c> (the producer-outlives-pump
-    /// ordering, ffi §A2). Idempotent-safe under the one-shot latch (only the latch winner calls
-    /// it).
+    /// faults + frees every send still queued and completes every completion barrier still queued.
+    /// Called by <see cref="NativeProducer"/> teardown after the close latch is won and before
+    /// <c>Producer_destroy</c> (the producer-outlives-pump ordering, ffi §A2). Idempotent-safe
+    /// under the one-shot latch (only the latch winner calls it).
     /// </summary>
     /// <remarks>
     /// Teardown calls <see cref="WaitForQueueDrain"/> first, so on the normal path there is nothing
@@ -460,7 +545,9 @@ internal sealed class SendCompletionPump
         _thread.Join();
 
         // The pump thread has exited. Under the lock, latch "stopped" and drain the remainder so a
-        // concurrent Enqueue either was queued (drained here) or will fault-in-place (sees _stopped).
+        // concurrent Enqueue either was queued (drained here) or will fault-in-place (sees
+        // _stopped), and a concurrent EnqueueBarrier either was queued (completed here) or returns
+        // a completed task.
         lock (_stopLock)
         {
             _stopped = true;
@@ -513,6 +600,21 @@ internal sealed class SendCompletionPump
             {
                 try
                 {
+                    if (group.IsBarrier)
+                    {
+                        // M17/P1 D4: every group queued ahead of this barrier has been through
+                        // ProcessGroup (and, if that threw, the catch below), so complete it and
+                        // take the next entry. It holds no send: no ProcessGroup, so no get_all
+                        // with count 0 and no ProcessedBatchCount increment, and DequeueGroup
+                        // added its Count, 0, to _drainedSends. Its task source runs
+                        // continuations asynchronously, so a continuation does not run on this
+                        // thread. If TrySetResult throws (an out-of-memory-class case), the catch
+                        // below runs FaultGroupCompletions, bounded by Count — 0 for a barrier —
+                        // so it touches no awaiter, and the barrier stays pending.
+                        group.Barrier!.TrySetResult(true);
+                        continue;
+                    }
+
                     ProcessGroup(group);
                 }
                 catch (Exception exception)
@@ -540,8 +642,8 @@ internal sealed class SendCompletionPump
     }
 
     /// <summary>
-    /// Takes the next queued <c>send_batch</c> group, or <see langword="null"/> when the queue is
-    /// empty (lock-free).
+    /// Takes the next queued entry — a <c>send_batch</c> group or a completion barrier — or
+    /// <see langword="null"/> when the queue is empty (lock-free).
     /// </summary>
     /// <remarks>
     /// <b>The one point every queued send passes through exactly once</b>, whichever of the two
@@ -557,6 +659,7 @@ internal sealed class SendCompletionPump
             return null;
         }
 
+        // A completion barrier (M17/P1 D4) holds no send: its Count is 0, so it adds 0.
         Interlocked.Add(ref _drainedSends, group.Count);
         return group;
     }
@@ -797,7 +900,8 @@ internal sealed class SendCompletionPump
     /// <summary>
     /// Faults + frees every still-queued send at teardown (no blocking <c>get_all</c>): the sends
     /// were accepted but the producer is closing, so their tasks fault with a teardown exception
-    /// and their futures are destroyed. Runs under <see cref="_stopLock"/> from <see cref="Stop"/>.
+    /// and their futures are destroyed. A still-queued completion barrier completes with success.
+    /// Runs under <see cref="_stopLock"/> from <see cref="Stop"/>.
     /// </summary>
     /// <remarks>
     /// <b>This path does NOT invoke the sends' <see cref="IDeliveryCallback"/>s</b> — recorded
@@ -808,6 +912,13 @@ internal sealed class SendCompletionPump
     /// <c>close()</c> cancels the pending futures without invoking <c>on_delivery</c>). Firing a
     /// fabricated failure here would also reintroduce a double-fire hazard, since the core may still
     /// deliver these records.
+    /// <para>
+    /// <b>A completion barrier completes with success here, not with the teardown fault
+    /// (M17/P1 D4).</b> It represents ordering, not a record. This loop takes entries in FIFO
+    /// order, so by the time it reaches a barrier every group queued before it has been faulted
+    /// here or finished by <see cref="RunLoop"/>, which <see cref="Stop"/> joined first. The
+    /// barrier holds no future, so <see cref="DestroyFutures"/> is not called for it.
+    /// </para>
     /// <para>
     /// ⚠ <b>This drain is deliberately UNCAPPED, and capping it would be a defect, not a symmetry</b>
     /// (M11/P3.1 §12.2.2, unchanged by the M11/P3.2 §3B.5 rewrite to groups). Two reasons, either
@@ -832,6 +943,14 @@ internal sealed class SendCompletionPump
         PendingSendBatch? group;
         while ((group = DequeueGroup()) is not null)
         {
+            if (group.IsBarrier)
+            {
+                // D4: success, not the teardown fault (see the remarks). It holds no future, so it
+                // skips DestroyFutures.
+                group.Barrier!.TrySetResult(true);
+                continue;
+            }
+
             teardown ??= TeardownException();
 
             // Bounded by the group's `Count`, never by its arrays' `Length`: the tail past it is the
@@ -899,7 +1018,9 @@ internal sealed class SendCompletionPump
     /// <summary>
     /// One <c>send_batch</c> call's accepted sends awaiting resolution: their future handles, their
     /// awaiters, and — where the caller supplied an <see cref="IDeliveryCallback"/> — the carriers to
-    /// invoke on completion. The pump's completion unit (M11/P3.2 §3B.2).
+    /// invoke on completion. The pump's completion unit (M11/P3.2 §3B.2). Its barrier form
+    /// (<see cref="CreateBarrier"/>, M17/P1 D4) holds no send: <see cref="Count"/> is 0, the three
+    /// arrays are empty, and <see cref="Barrier"/> is the barrier's task source.
     /// </summary>
     /// <remarks>
     /// <para>
@@ -942,6 +1063,15 @@ internal sealed class SendCompletionPump
             Count = count;
         }
 
+        private PendingSendBatch(TaskCompletionSource<bool> barrier)
+        {
+            Futures = Array.Empty<IntPtr>();
+            Completions = Array.Empty<TaskCompletionSource<RecordMetadata>>();
+            Deliveries = Array.Empty<DeliveryRegistration?>();
+            Count = 0;
+            Barrier = barrier;
+        }
+
         internal IntPtr[] Futures { get; }
 
         internal TaskCompletionSource<RecordMetadata>[] Completions { get; }
@@ -951,5 +1081,23 @@ internal sealed class SendCompletionPump
 
         /// <summary>How many leading entries of the three arrays this group holds.</summary>
         internal int Count { get; }
+
+        /// <summary>
+        /// The completion barrier's task source (M17/P1 D4), or <see langword="null"/> for a send
+        /// group.
+        /// </summary>
+        internal TaskCompletionSource<bool>? Barrier { get; }
+
+        /// <summary>Whether this entry is a completion barrier rather than a send group.</summary>
+        internal bool IsBarrier => Barrier is not null;
+
+        /// <summary>
+        /// Creates a completion barrier: no send, and a task source built with
+        /// <see cref="TaskCreationOptions.RunContinuationsAsynchronously"/>, so its continuations
+        /// run off the thread that completes it.
+        /// </summary>
+        internal static PendingSendBatch CreateBarrier() =>
+            new PendingSendBatch(
+                new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously));
     }
 }

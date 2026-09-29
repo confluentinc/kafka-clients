@@ -1,0 +1,333 @@
+M17/P1 CP3 gate record: D4's completion barrier in the send pump, and S4
+========================================================================
+
+Recorded by dotnet-actor 84 on 2026-09-29. Times are the host clock (IST,
+UTC+05:30). Plan: design/history/M17/P1-producer-transactions/PLAN.md, blob
+8976ec80 at HEAD (committed in 8041731b), which is the contract: the §4.3
+CP3 row (:1334), D4 (:460-546), §5.1 items 3, 5 and 7 (:1505-1530) and
+§5.2 S4 (:1655-1675). This file is a short summary (§4.2, :1282; Q20). Raw
+logs stay in the Actor's scratch directory; "cp3/" below is its cp3 folder.
+Per §10.2, CP3 is reviewed uncommitted: CP3 stages nothing.
+
+Base and timing. HEAD is 8ccb0f8d (CP2, on 8041731b, the CP2 plan
+amendment), read at 11:37:28 (cp3/gates2/rehead.out). The gates ran at
+08:09:51-08:10:57, at HEAD 5e116925 with CP2 uncommitted. The two commits
+(11:34:54, 11:35:27, git reflog) changed no worktree byte: 8041731b holds
+PLAN.md alone and 8ccb0f8d the 11 CP2 files (git show --stat); each entry
+of the two CP2 manifests equals its blob at 8ccb0f8d; CP3's two files hash
+as in the gate run. So the results stand; the HEAD-relative git facts were
+re-measured at 8ccb0f8d (rehead.sh, rehead2.sh 11:42:01), with no build or
+test re-run. The pump was last written at 06:59:21, the tests at 07:59:49
+(their mtimes, 08:09:06 and 08:03:44, are the last cmp-identical restores).
+All runs below used those bytes, except sweep stages 1-3 (07:08-07:44) on
+the tests' 07:00 copy (c6917b8d), whose only difference is the wording of
+the class remarks at :57-60, at the same line positions (diff).
+
+Files (git diff --numstat HEAD; wc -l)
+--------------------------------------
+- M  bindings/dotnet/src/Confluent.Kafka/Internal/SendCompletionPump.cs
+     +165 / -17 (955 -> 1103 lines), 20 hunks (git diff -U0 HEAD). Its blob
+     at HEAD is 76629aea's (f3baa382), so the diff is CP3's alone.
+     sha256 486b7accda05ab46e56cc0d125a35c09da6c55af58f0a2a41824ccd99d65f7a1
+- ?? bindings/dotnet/tests/Confluent.Kafka.UnitTests/Interop/SendCompletionPumpBarrierTests.cs
+     new, 831 lines
+     sha256 5793532c06f5f83d7a17d19b4bf21762277117e517fb5ce720b11fea2d5e68a2
+- ?? bindings/dotnet/design/history/M17/P1-producer-transactions/gate/CP3.txt
+     this file
+No other file under src/, cbindgen.toml, generator/, tests/ or
+bindings/dotnet/{src,tests,grpc-server} changed (G1, G7).
+
+What CP3 adds (SendCompletionPump.cs; worktree lines)
+-----------------------------------------------------
+- EnqueueBarrier() (:364-381), internal. Under _stopLock, as Enqueue: when
+  _stopped it returns Task.CompletedTask, queues nothing and leaves _signal
+  (disposed by Stop) alone; otherwise it queues CreateBarrier(), sets
+  _signal and returns the barrier's task. Its xmldoc is :320-363.
+- PendingSendBatch's barrier form: a private ctor (:1066-1073), Count 0 and
+  Array.Empty for the three arrays; Barrier (:1089), a
+  TaskCompletionSource<bool>, null on a send group; IsBarrier (:1092);
+  CreateBarrier (:1099-1101), with RunContinuationsAsynchronously.
+- RunLoop (:603-616) completes a dequeued barrier and takes the next entry:
+  no ProcessGroup, so no get_all with count 0 and no ProcessedBatchCount
+  increment. DequeueGroup adds its Count, 0, to _drainedSends (:662-663).
+  The comments state both.
+- DrainAndFaultRemaining (:946-952) completes a queued barrier with success
+  and skips DestroyFutures for it.
+- Remarks updated for the barrier on the class, the two counters,
+  CloseGate, WaitForQueueDrain, Stop, DequeueGroup, the drain and the type.
+- No new type declaration and no added public line (rehead2: 0 and 0); no
+  P/Invoke (G6); no production caller (the sweep: with EnqueueBarrier
+  obsolete-as-error the library builds with 0 errors). CP4 adds callers.
+Size (cp3/gates2/size.log, 08:11:33), over §10.1's estimates: production
+182 changed lines against 100-150 (165 added: xmldoc 101, comment 19, blank
+8, code 37; 17 deleted: xmldoc 16, comment 1); tests 831 against 400-500
+(xmldoc 248, comment 24, blank 93, code 466).
+
+S4: Confluent.Kafka.UnitTests.Interop.SendCompletionPumpBarrierTests (new)
+--------------------------------------------------------------------------
+7 Fact (rehead2). Each drives the production pump over a manual
+MockProducer, so the test picks the completion order; hanging waits go
+through TestTimeout.Run (s_deadline 30 s), and holds (s_hold 60 s) outlast
+them. The short names are used below.
+  :104 Idle           EnqueueBarrier_OnAnIdlePump_CompletesAndLeavesBothCountersUnchanged
+  :162 BehindSeveral  EnqueueBarrier_BehindSeveralGroups_CompletesOnlyAfterTheirCompletionsAndCallbacks
+  :250 Coalescing     EnqueueBarrier_BetweenAResolvedAndAWithheldGroup_CompletesWhileTheWithheldGroupIsPending
+  :327 Stop           Stop_WithABarrierQueued_CompletesItWithSuccessBetweenTheSendsAroundIt
+  :384 CloseGate      EnqueueBarrier_AfterCloseGate_ReturnsACompletedTaskWhereEnqueueFaults
+  :427 AfterStop      EnqueueBarrier_AfterStop_ReturnsACompletedTaskWhereEnqueueFaults
+  :459 Blocking       EnqueueBarrier_WithABlockingContinuation_DoesNotStallALaterGroup
+Idle: counters 0/0, then 1/2 after a two-record group and after a second
+barrier. BehindSeveral: pending while G1 is unresolved and while the 8th
+callback is held; a probe in its continuation sees 8 completions set and 8
+callbacks returned. Coalescing: H, A, barrier, B; it completes with B
+withheld. Stop: it completes while the 3 sends before it and the 2 after
+it fault; read on Stop's thread it is pending as each send before it
+faults and complete as each one after it does; DrainedSendCount 5.
+CloseGate, AfterStop: RanToCompletion where Enqueue faults. Blocking: a
+blocking continuation runs off the pump thread and a later group resolves.
+S4's "DestroyFutures is not called for it" is not asserted: nothing can
+observe it (M3c; observation (a)).
+
+Mutation check (§5.1 item 7; not committed)
+-------------------------------------------
+Procedure as at CP2 (cp3/mut/run.sh, apply.py): one exact-text
+replacement, then dotnet test -c Release -f net10.0 on the unit-test csproj
+--filter FullyQualifiedName~Confluent.Kafka.UnitTests.Interop.SendCompletion
+at normal verbosity (20 cases: this class 7, Grouping 4, DrainCap 4, Gate
+3, PreStopDrain 2), then a cmp-identical restore (SHA-256 prefix
+486b7accda05ab46 each time). Run 4 (cp3/mut/run4.out, 08:04:12-08:08:13):
+baselines 20 of 20, exit 0; each red run exits 1; [n] is a test's time.
+  M1  RunLoop's barrier branch removed: 16/4 [30 s]. Blocking :490 "the
+      barrier's continuation never ran"; Coalescing :266, Idle :110,
+      BehindSeveral :201 TimeoutException "... treated as a hang".
+  M2a RunLoop completes a barrier queued next before ProcessGroup: 19/1,
+      BehindSeveral :195 "the barrier completed while a delivery callback
+      of a group queued before it was still running".
+  M2b EnqueueBarrier completes it before _queue.Enqueue: 17/3, Blocking
+      :470, Stop :339, BehindSeveral :179 ("the barrier completed ...").
+  M3  Drain faults it (TrySetException): 19/1, Stop :346 Expected
+      RanToCompletion, Actual Faulted.
+  M3b Drain's barrier branch removed: 19/1, Stop :346 Actual
+      WaitingForActivation; no process abort.
+  M3c Drain calls DestroyFutures for it too: green 20/20 on net10.0 and on
+      net8.0 (cp3/mut/run4-net8.out, 08:09:03). Observation (a).
+  M3d Drain completes every barrier before faulting any group: 19/1, Stop
+      :356 Expected False, Actual True.
+  M4  RunLoop merges a group, the barriers behind it and the next group
+      into one pass: 19/1, Coalescing [30 s] timeout at :266.
+  M4b RunLoop defers barriers until the queue is empty: 19/1, Coalescing
+      [30 s] timeout at :266.
+  M5  Stopped EnqueueBarrier returns Task.FromException(...): 18/2,
+      CloseGate :398 and AfterStop :435 Actual Faulted.
+  M5b EnqueueBarrier's _stopped check removed: 18/2, :398 and :435 Actual
+      WaitingForActivation (Set on the disposed _signal did not throw).
+  M6  CreateBarrier without RunContinuationsAsynchronously: 19/1, Blocking
+      :491 Assert.NotEqual, the thread was the pump's.
+  M7  RunLoop's branch counts a pass: 17/3, Coalescing :282 (3 -> 4), Idle
+      :113 (0 -> 1), BehindSeveral :218 (3 -> 4).
+  M8  DequeueGroup adds 1 for a barrier: 17/3, Stop :349 (5 -> 6), Idle
+      :114 (0 -> 1), BehindSeveral :219 (8 -> 9).
+  M9  EnqueueBarrier's _signal.Set() removed: 19/1, Idle [30 s] timeout at
+      :110.
+S4's three are M1, M2a (M2b is its enqueue-side form) and M3. 15
+production mutations, 14 red, 25 red entries (cp3/mut/run4.reds), all in
+this class; the 13 other cases stay green. Each red is at an assertion
+whose test remarks claim that defect, and none is elsewhere (read against
+run4.reds). Runs 1-3 (06:41:24-07:04:27, earlier bytes) give the same
+reds, but for one extra in run 2 (observation (g)).
+Fixture, mutated separately (ffi §A1; cp3/fmut/run1.out 08:02:08-08:03:07,
+run2.out 08:03:40-08:03:46; baselines 20 of 20):
+  F1  Stop test's completions before and after the barrier made
+      asynchronous: 19/1, :356 Expected False, Actual null.
+  F1b Only those after it: 19/1, :361 Expected True, Actual null.
+  F1c F1b with the reading's s_insideStop gate removed: green 20/20 (the
+      first form failed to compile, CS0414). The gate fails an off-thread
+      reading.
+  F2  The thread-name assertion (:491) removed, with M6: 19/1, [30 s]
+      timeout at :493.
+  F2b F2 with s_hold 5 s: 19/1, [5 s] :496 "the continuation returned
+      before the later group was checked".
+Red then green: each red run is followed by a cmp-identical restore, the
+baselines after pass, and G4 and G5 pass on the same bytes.
+
+Reader sweep: the readers of PendingSendBatch and of the queue
+--------------------------------------------------------------
+Method (cp3/sweep/). In scratch copies of the library and tests (base: a
+git archive of 5e116925, whose pump blob f3baa382 is also 8ccb0f8d's;
+worktree: a tar), a probe renames one declaration or marks it
+[Obsolete(..., true)] and builds, so the compiler reports every use
+whatever its spelling (an inserted attribute's +1 line shift mapped back).
+Stage 1 (probe.sh, 07:08): the type, its members, the queue and gate
+fields. Stage 2 (probe2.sh, 07:12): the type with its signature uses, so
+csc reaches the bodies, and each ctor. Stage 3 (probe3.sh, probe3b.sh,
+07:43-07:44): the pump's members. Stage 4 (probe4.sh, 08:33): the other
+fields and helpers; probe5.sh (08:40) ran stages 3-4 at the base. Each copy
+was restored cmp-identical. Stage 1's build errors, base / worktree (sites
+in sweep/sites.out): PendingSendBatch 15 / 18, Futures 15 / 21,
+Completions 15 / 21, Deliveries 9 / 15, Count 26 / 29, _queue 18 / 21,
+_stopped 15 / 18, _signal 15 / 18, _stopLock 9 / 12, _stopping 12 / 12;
+worktree only, Barrier 15, IsBarrier 6, CreateBarrier 3. EnqueueBarrier
+obsolete: library 0 errors, tests 24 CS0619 on 8 lines. Text searches
+(probe.sh; text2.out, 11:29:24) cover string literals and crefs; a nameof
+search and one over grpc-server and soak exit 1 at both trees.
+  site (worktree lines)                handling of a barrier
+  Enqueue :292-316                     unchanged: gated under _stopLock
+                                       (:298), faults in place when stopped,
+                                       queues the send form (:315)
+  EnqueueBarrier :364-381              the same gate and lock; when stopped,
+                                       a completed task and nothing queued
+  _signal.Set in EnqueueBarrier :378   only when not _stopped, under the
+                                       lock; Stop sets _stopped under it
+                                       (:553) before disposing _signal (:557)
+  CloseGate :422, Stop :553            set _stopped under _stopLock; unchanged
+  WaitForQueueDrain :502, :516, :526   reads _queue.IsEmpty only: a queued
+                                       barrier counts until the loop takes it
+  RunLoop :599-618                     branch (:603) before ProcessGroup (:618)
+  RunLoop catch :638, and              loop bounded by Count, 0 for a barrier
+    FaultGroupCompletions :1000-1009
+  DequeueGroup :657, :663              FIFO; adds Count, 0, to _drainedSends
+  ProcessGroup :701-723, ProcessBatch  not reached for a barrier, so neither
+    :783-806, DrainCap (:161; used at  are the counters (:710-713), the
+    :174-176, :704)                    arrays (:785-787) or get_all (:801)
+  Drain :939-963, from Stop :554       branch (:946) before the fault loop and
+                                       DestroyFutures (:954-963)
+  DestroyFutures :311, :963;           not reached for a barrier
+    TeardownException :305, :954
+  PendingSendBatch ctors (stage 2)     send form at :315, barrier at :1100
+  _stopping: write :543, read :577     unchanged; set by reflection in
+                                       DrainCapTests :213 and here (:627)
+  NativeProducer.cs :997, :1104,       unchanged callers of the ctor,
+    :1224, :1293, :1256, :1321,        DrainedSendCount, CloseGate,
+    :1261, :1325 (stage 3)             WaitForQueueDrain and Stop
+  SendAccumulator.cs :1302 (stage 3)   Enqueue's caller; unchanged
+  "Deliveries", "Count", "Completions" SendAccumulatorTests :2107, :2150,
+    as string literals                 :2182 (SendAccumulator's node) and
+                                       AdminKeySeamShapeTests :259 (the admin
+                                       seam): not the pump
+
+Gates (cp3/gates2/gates.sh: gates.out, g*.log; git facts: rehead.out)
+---------------------------------------------------------------------
+G2 (08:09:51) cargo build --features ffi --release: exit 0 ("in 0.24s").
+   dotnet build -c Release bindings/dotnet/Confluent.Kafka.sln: exit 0, 0
+   Warning(s), 0 Error(s); --no-incremental (08:09:53) the same, 00:00:02.26,
+   all six outputs (3 library, 3 test TFMs) written 08:09:54-08:09:56.
+G3 (08:09:56) dotnet format bindings/dotnet/Confluent.Kafka.sln
+   --verify-no-changes: exit 0, log 0 bytes.
+G4 (08:10:12) dotnet test -c Release -f net10.0 bindings/dotnet/Confluent.Kafka.sln:
+   exit 0, Passed 2375, Failed 0, Total 2375; /usr/local/share/dotnet/dotnet,
+   no DOTNET_ variable set.
+G5 (08:10:26) env DOTNET_ROOT=$HOME/.dotnet PATH=$HOME/.dotnet:$PATH
+   DOTNET_MULTILEVEL_LOOKUP=0 dotnet test -c Release -f net8.0 <the sln>:
+   exit 0, Passed 2375 of 2375 on the first run (the known flake did not
+   occur); /Users/ankithl/.dotnet/dotnet, NETCore 8.0.31 and 10.0.12,
+   DOTNET_ROLL_FORWARD unset. net462 is built in G2, not run (PLAN
+   :1261-1262; bindings/dotnet/Makefile:51-56, :67-69).
+   Totals 2368 (CP2) -> 2375: the new class's 7. The class alone
+   (cp3/gates2/s4.out, 08:10:55-57): 7 of 7 per runtime; 20 repeats per
+   runtime (cp3/repeat3/repeat.out, 08:10:58-08:11:25): 140 of 140 each.
+   Budget, DoD row 10 (budget.log, 08:10:40): 6 of 6, exit 0.
+G1 (rehead, 11:37:28) git diff 76629aea -- src/ src/ffi/ cbindgen.toml
+   generator/ tests/: 0 bytes, and 0 against HEAD; untracked there: 0
+   lines (rehead2). shasum -a 256 target/include/confluent_kafka.h:
+     e8d39f09f4ac71c4e21c0196c0534dd06f353c475a741104c8d37a6a7da5d111
+   the CP0 value (gate/CP0.txt:54). git diff --stat HEAD --
+   bindings/dotnet/src bindings/dotnet/tests bindings/dotnet/grpc-server:
+   1 file changed, 165 insertions(+), 17 deletions(-), the pump.
+G6 (rehead) internal static extern: 715 in the worktree (NativeMethods.cs
+   236, NativeMethods.Admin.cs 479) and at HEAD (git grep -c); the pump's
+   diff adds and removes none; the test file has none.
+G7 (rehead) git diff HEAD over bindings/dotnet/src, tests, grpc-server and
+   Makefile, piped to command grep -nE for the marker pattern on added
+   lines: exit 1. Control, (EnqueueBarrier|IsBarrier|CreateBarrier): 12
+   lines. The one new file in scope is the test file; the marker grep over
+   it exits 123 (no match), the control 'Apache License' prints its line 3.
+   WaitAsync: 0 added in the pump, 0 in the test file (gates.out).
+   git diff --cached --name-only printed 0 lines at 08:10:42 and at
+   11:37:28: no path, inside the snapshot manifests or outside. The
+   Manager's staging of the CP2 snapshots fell between those two checks.
+   git status --short (rehead): the pump (M), the test file and
+   COMMENTS.DONE.84.md (??), and the user's own entries, untouched.
+CP2 freeze (08:10:43, 11:37:30) shasum -a 256 -c on
+   .git/claude-m17p1-snapshots/{cp2,cp2-plan}/MANIFEST.sha256: every entry
+   OK, exit 0, both times. COMMENTS.84.md is 0 bytes.
+
+Notes
+-----
+1. The test file's two lines over 100 characters are declarations, :162
+   (105) and :250 (112); 21 other unit-test files hold 28 such lines
+   (cp3/gates2/longlines.log). gates.sh's per-class count read "passed 0"
+   (its logs name no test at minimal verbosity); s4.sh replaced it.
+2. StopTheLoopWithoutDraining (:624-634) is a copy of the one in
+   SendCompletionPumpDrainCapTests.cs (:210-220), diff exit 0 (rehead2). It
+   sets _stopping by reflection, so that Stop's drain meets the barrier.
+3. The test file has no Thread.Sleep, Task.Delay, SpinWait or Stopwatch
+   (rehead2, grep exit 1). TestTimeout.Run bounds 16 waits; the bounded
+   .Wait calls are :193 and :490 (s_deadline); the holds :479 and :808.
+
+Observations for the Manager (not CP3 blockers)
+-----------------------------------------------
+(a) Decision: DestroyFutures for a stopped barrier is skipped by structure,
+    and no test can see it: M3c (the call added) is green on net10.0 and
+    net8.0, and M3b (no branch) also reaches destroy_all(Array.Empty, 0)
+    without an abort. producer.rs:2228 asserts a non-null array and an
+    unwind out of extern "C" aborts (rustc 1.95.0; Cargo.toml:115-116 keeps
+    unwinding), so by inference the empty array was passed non-null there;
+    net462 is unmeasured. Accept, or ask CP4 for a seam that can assert it.
+(b) Decision: D4 (:482-484) says EnqueueBarrier "completes the barrier
+    successfully"; the code, as briefed, returns Task.CompletedTask and
+    creates none. Either way the caller sees RanToCompletion. Reword D4?
+(c) Decision: §5.1 principle 3 names two timing windows, D10's retry loop
+    and S5's hold; S4's holds and bounded direct waits (note 3) are not
+    named. Accept, or amend principle 3.
+(d) Decision: DoD row 6, the StopTheLoopWithoutDraining copy (note 2).
+    Hoisting it to a shared helper edits SendCompletionPumpDrainCapTests.cs,
+    outside §4.3's CP3 list.
+(e) Decision: DoD row 10. Every PendingSendBatch carries one more reference
+    field, Barrier. The carrier is allocated on the batch thread once per
+    send_batch call, not per record (remarks :1042-1049); the six budget
+    tests are unchanged and pass. Its size increase was not measured. The
+    alternative is a barrier subclass with a type test.
+(f) The pump's EnqueueBarrier xmldoc (:333-338) names D4's R-a and R-b for
+    local reasons; X5 enumerates the residuals on the public surface at
+    CP5. Check they still agree then.
+(g) Run 2's M2b had one extra red, Coalescing at :640 via :269
+    (WaitingForActivation), absent from runs 1, 3 and 4: timing-dependent,
+    and claimed by no test's remarks.
+(h) BehindSeveral's probe runs in a pool continuation, so a mutation that
+    completed the barrier after the 8th callback returned but before that
+    record's TrySetResult would race it. Not run; the remarks do not claim
+    that window.
+(i) Plan wording: D4 cites PendingSendBatch as :931-958, past the end of
+    the 955-line base file, where it spans :931-954.
+
+84.12 fix (Critic CP3 review; comments only, cp3/fix8412/)
+----------------------------------------------------------
+The sections above record the gate-run bytes (pump 486b7acc, tests
+5793532c). 84.12: the test class remarks stated D4's invariant with no
+exception, which the Stop and CloseGate tests contradict.
+- SendCompletionPumpBarrierTests.cs class remarks: the invariant is scoped
+  to a running pump, in EnqueueBarrier's terms (awaiters set or faulted,
+  each callback its passes invoked returned). A new paragraph states that
+  Stop's drain faults the sends ahead of a barrier with no read and no
+  callback and completes it with success, and that after CloseGate or
+  Stop EnqueueBarrier queues nothing and returns a completed task. +7
+  lines (831 -> 838), so this file's line numbers from :40 on are +7
+  against the citations above. sha256
+  b65c7700542602c269233e5f67c2ca52912f02249254d7bd8afe4f165c23c79e
+- SendCompletionPump.cs, RunLoop's barrier comment (:611-613): a throwing
+  TrySetResult is an out-of-memory-class case, and the barrier then stays
+  pending. Same line count (1103); numstat still +165 / -17. sha256
+  6fda36b0e222a682083306b42b15d932f3552f117c2993ac74bed70a9f95b023
+- commit-cp3.msg: the invariant sentence scoped the same way.
+Checks (12:06:38-12:07:15): dotnet build -c Release <the sln>: exit 0, 0
+Warning(s), 0 Error(s), library outputs written 12:06. dotnet format
+--verify-no-changes: exit 0, log 0 bytes. dotnet test --no-build --filter
+FullyQualifiedName~SendCompletionPumpBarrierTests: net10.0 7 of 7, net8.0
+(the G5 environment) 7 of 7, exit 0 each. CP2 freeze: both manifest
+checks exit 0. git diff --cached --name-only: 0 lines. Header sha256
+unchanged (e8d39f09); internal static extern 236 + 479 = 715; the marker
+grep over both files exits 1. No full re-gate: the change is comments.
+
+Not run at CP3 (per the plan's schedule)
+----------------------------------------
+G8 (CP4, CP5, CP7), G9 (CP6, CP7), G10 (CP7) and G11 (CP7).
