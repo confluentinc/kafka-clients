@@ -187,7 +187,7 @@ impl<C: KafkaClient> AdminClientRunnable<C> {
         kafka_debug!(self.log_context, "Starting the Kafka admin client I/O task.");
 
         // Java wraps the loop in `try { processRequests(); } finally { ... }`
-        // (`KafkaAdminClient.java:1459-1476`), and it is the `finally` that
+        // (`KafkaAdminClient.java:1469-1493`), and it is the `finally` that
         // guarantees every pending call is failed — however `processRequests`
         // terminated. Straight-line code after the loop is NOT that guarantee: a
         // panic anywhere inside an iteration skipped both `fail_all_remaining` and
@@ -319,7 +319,7 @@ impl<C: KafkaClient> AdminClientRunnable<C> {
         // `should_exit` no later than that deadline. Without this an in-flight
         // external call keeps `should_exit` false while the poll itself waits on
         // the (far larger) call deadline, and `close(timeout)` overruns by up to
-        // `request.timeout.ms`. Mirrors `KafkaAdminClient.java:1500-1502`.
+        // `request.timeout.ms`. Mirrors `KafkaAdminClient.java:1512-1515`.
         let hard_shutdown_deadline_ms = self.shutdown.hard_shutdown_deadline_ms.load(Ordering::Acquire);
         if hard_shutdown_deadline_ms != KafkaAdminClient::NO_HARD_SHUTDOWN {
             poll_timeout = poll_timeout.min(hard_shutdown_deadline_ms.saturating_sub(now));
