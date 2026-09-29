@@ -2428,6 +2428,19 @@ async fn auto_commit_sync_before_rebalance_with_retries(
     }
 }
 
+/// Wakes the bg task's network poll after a spawned retry driver
+/// ([`fetch_offsets_with_retries`], [`commit_sync_with_retries`],
+/// [`auto_commit_sync_before_rebalance_with_retries`]) re-enqueues a retry, so the next `poll` sees the retry and
+/// sleeps only for its backoff. See
+/// `CommitRequestManagerInner::completion_notify` for why Java needs no
+/// equivalent (its retry is enqueued on the network thread itself). The guard
+/// on `inner.state` MUST already be dropped (the poke is lock-free anyway).
+fn wake_background_task(inner: &CommitRequestManagerInner) {
+    if let Some(notify) = inner.completion_notify.get() {
+        notify.notify_one();
+    }
+}
+
 /// Drive an `OffsetFetch` retry loop.
 ///
 /// Mirrors Java's `CommitRequestManager.fetchOffsetsWithRetries`
@@ -2469,19 +2482,6 @@ async fn auto_commit_sync_before_rebalance_with_retries(
 ///
 /// Deadline expiry (Java's `maybeWrapAsTimeoutException`) surfaces as
 /// [`Error::timeout`] wrapping the original error message.
-/// Wakes the bg task's network poll after a spawned retry driver
-/// ([`fetch_offsets_with_retries`], [`commit_sync_with_retries`],
-/// [`auto_commit_sync_before_rebalance_with_retries`]) re-enqueues a retry, so the next `poll` sees the retry and
-/// sleeps only for its backoff. See
-/// `CommitRequestManagerInner::completion_notify` for why Java needs no
-/// equivalent (its retry is enqueued on the network thread itself). The guard
-/// on `inner.state` MUST already be dropped (the poke is lock-free anyway).
-fn wake_background_task(inner: &CommitRequestManagerInner) {
-    if let Some(notify) = inner.completion_notify.get() {
-        notify.notify_one();
-    }
-}
-
 #[allow(clippy::too_many_arguments)]
 async fn fetch_offsets_with_retries(
     inner: Arc<CommitRequestManagerInner>,

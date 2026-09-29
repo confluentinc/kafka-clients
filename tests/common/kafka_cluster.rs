@@ -312,9 +312,16 @@ impl BrokerProxy {
         let cancel = tokio_util::sync::CancellationToken::new();
         let (alive, exited) = tokio::sync::mpsc::channel(1);
         for &(front, backend) in &self.routes {
-            let listener = tokio::net::TcpListener::bind(("127.0.0.1", front)).await.map_err(|err| {
-                format!("broker proxy failed to bind 127.0.0.1:{front} (address already in use?): {err}")
-            })?;
+            let listener = match tokio::net::TcpListener::bind(("127.0.0.1", front)).await {
+                Ok(listener) => listener,
+                Err(err) => {
+                    // Nothing else holds `cancel` yet, so stop the routes already bound.
+                    cancel.cancel();
+                    return Err(format!(
+                        "broker proxy failed to bind 127.0.0.1:{front} (address already in use?): {err}"
+                    ));
+                },
+            };
             tokio::spawn(Self::accept_loop(listener, backend, cancel.clone(), alive.clone()));
         }
         let previous = self
@@ -347,7 +354,11 @@ impl BrokerProxy {
                 _ = cancel.cancelled() => return,
                 accepted = listener.accept() => accepted,
             };
-            let Ok((mut client, _)) = accepted else { continue };
+            let Ok((mut client, _)) = accepted else {
+                // Back off so a persistent accept error (e.g. fd exhaustion) cannot spin.
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                continue;
+            };
             let cancel = cancel.clone();
             let alive = alive.clone();
             tokio::spawn(async move {
@@ -1040,7 +1051,13 @@ impl KafkaCluster {
             let Some(ports) = node.ports.as_ref() else { continue };
             if let Some(backend) = node.backend_ports.as_ref() {
                 let proxy = BrokerProxy::new(ports, backend);
-                proxy.start().await?;
+                if let Err(err) = proxy.start().await {
+                    // Earlier nodes' proxies are dropped with this attempt; stop them first.
+                    for started in proxies.values() {
+                        BrokerProxy::stop(started).await;
+                    }
+                    return Err(err);
+                }
                 proxies.insert(node.node_id, proxy);
             }
             plaintext_addrs.push(format!("127.0.0.1:{}", ports.plaintext));

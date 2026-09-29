@@ -9937,17 +9937,6 @@ mod tests {
         drop(drainer);
     }
 
-    /// CLAUDE.md §2 splits Java's three `close` overloads
-    /// (`Consumer.java:277,283,288`) into `close` / `close_with_timeout` /
-    /// `close_with_options`. The deprecated `close_with_timeout` must agree with the
-    /// form it forwards to: Java's `close(Duration timeout)` body is exactly
-    /// `close(CloseOptions.timeout(timeout))`
-    /// (`AsyncKafkaConsumer.java:1543-1545`).
-    ///
-    /// Asserting `is_closed()` alone would not catch a forward that dropped
-    /// the timeout, so this compares the *deadline* carried on the
-    /// `LeaveGroupOnClose` event — the only place the timeout is observable —
-    /// between the two forms.
     /// `close(CloseOptions.timeout(t))` must bound the bg task's `cleanup()`
     /// by what is left of the close timer: Java hands
     /// `Duration.ofMillis(closeTimer.remainingMs())` to
@@ -9988,6 +9977,17 @@ mod tests {
         );
     }
 
+    /// CLAUDE.md §2 splits Java's three `close` overloads
+    /// (`Consumer.java:277,283,288`) into `close` / `close_with_timeout` /
+    /// `close_with_options`. The deprecated `close_with_timeout` must agree with the
+    /// form it forwards to: Java's `close(Duration timeout)` body is exactly
+    /// `close(CloseOptions.timeout(timeout))`
+    /// (`AsyncKafkaConsumer.java:1543-1545`).
+    ///
+    /// Asserting `is_closed()` alone would not catch a forward that dropped
+    /// the timeout, so this compares the *deadline* carried on the
+    /// `LeaveGroupOnClose` event — the only place the timeout is observable —
+    /// between the two forms.
     #[tokio::test]
     async fn close_timeout_agrees_with_close_options_timeout() {
         use crate::consumer::CloseOptions;
