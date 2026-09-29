@@ -704,31 +704,9 @@ fn chaos() -> anyhow::Result<()> {
     let raw: Vec<String> = env::args().skip(2).collect();
 
     // `--scenario NAME`: run that named smoke test instead of the generic
-    // runner; forward remaining args straight through to libtest.
-    if let Some(pos) = raw.iter().position(|a| a == "--scenario") {
-        let name = raw.get(pos + 1).cloned().unwrap_or_default();
-        if name.is_empty() {
-            anyhow::bail!("--scenario requires a test name");
-        }
-        let mut args: Vec<String> = vec![
-            "test".into(),
-            "--features".into(),
-            "integration-tests".into(),
-            "--test".into(),
-            "chaos".into(),
-        ];
-        // any flags before/after --scenario NAME (besides the pair) pass through
-        for (i, a) in raw.iter().enumerate() {
-            if i == pos || i == pos + 1 {
-                continue;
-            }
-            args.push(a.clone());
-        }
-        args.push("--".into());
-        args.push("--ignored".into());
-        args.push("--nocapture".into());
-        args.push("--exact".into());
-        args.push(name);
+    // runner.
+    if raw.iter().any(|a| a == "--scenario") {
+        let args = scenario_test_args(&raw)?;
         let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
         return run_command("cargo", &arg_refs);
     }
@@ -745,20 +723,8 @@ fn chaos() -> anyhow::Result<()> {
         unsafe { env::set_var(k, v) };
     }
 
-    // A python/c workload backend needs the gRPC bridge, which only compiles
-    // under `multilanguage-tests`. Auto-select the wider feature when such a
-    // workload is requested so the user does not have to.
-    let needs_grpc = env_vars
-        .iter()
-        .find(|(k, _)| k == "CHAOS_WORKLOADS")
-        .map(|(_, v)| v.contains(":python") || v.contains(":c"))
-        .unwrap_or(false);
-    let feature = if needs_grpc {
-        "multilanguage-tests"
-    } else {
-        "integration-tests"
-    };
-    if needs_grpc {
+    let feature = chaos_test_feature(&env_vars);
+    if feature == "multilanguage-tests" {
         println!("   python/c workload requested → building with `--features multilanguage-tests`");
     }
 
@@ -796,6 +762,54 @@ fn chaos() -> anyhow::Result<()> {
         println!("✅ all {repeat} chaos iterations passed (history: {history})");
     }
     Ok(())
+}
+
+/// The `cargo` arguments for `cargo xtask chaos --scenario NAME`. Arguments
+/// before a `--` (besides the `--scenario NAME` pair) go to `cargo test`; the
+/// ones after it go to libtest, after the flags selecting the named test.
+fn scenario_test_args(raw: &[String]) -> anyhow::Result<Vec<String>> {
+    let (xtask_args, libtest_args) = match raw.iter().position(|a| a == "--") {
+        Some(split) => (&raw[..split], &raw[split + 1..]),
+        None => (raw, &raw[raw.len()..]),
+    };
+    let pos = xtask_args
+        .iter()
+        .position(|a| a == "--scenario")
+        .ok_or_else(|| anyhow::anyhow!("--scenario must come before `--`"))?;
+    let name = match xtask_args.get(pos + 1) {
+        Some(name) if !name.is_empty() && !name.starts_with('-') => name.clone(),
+        _ => anyhow::bail!("--scenario requires a test name"),
+    };
+    let mut args: Vec<String> = ["test", "--features", "integration-tests", "--test", "chaos"]
+        .map(String::from)
+        .to_vec();
+    args.extend(
+        xtask_args
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| *i != pos && *i != pos + 1)
+            .map(|(_, a)| a.clone()),
+    );
+    args.extend(["--", "--ignored", "--nocapture", "--exact"].map(String::from));
+    args.push(name);
+    args.extend(libtest_args.iter().cloned());
+    Ok(args)
+}
+
+/// The cargo feature the chaos test must be built with for a run with these
+/// `CHAOS_*` settings. A python/c workload backend needs the gRPC bridge,
+/// which only compiles under `multilanguage-tests`, so that feature is picked
+/// whenever such a workload is requested and the user does not have to.
+fn chaos_test_feature(env_vars: &[(String, String)]) -> &'static str {
+    let needs_grpc = env_vars
+        .iter()
+        .find(|(k, _)| k == "CHAOS_WORKLOADS")
+        .is_some_and(|(_, v)| v.contains(":python") || v.contains(":c"));
+    if needs_grpc {
+        "multilanguage-tests"
+    } else {
+        "integration-tests"
+    }
 }
 
 /// Extract `--repeat N` from the raw args, returning N (default 1). The flag
@@ -1531,7 +1545,8 @@ fn print_help() {
   chaos           Flag-driven chaos / fault-injection runner for producer + consumer (requires Docker)
                     e.g. cargo xtask chaos --brokers 3 --cycles 3 --unclean \
                              --workload producer:rust --workload consumer:rust
-                    --scenario NAME runs a named #[ignore] smoke test instead
+                    --scenario NAME runs a named #[ignore] smoke test instead;
+                    arguments after `--` go to libtest (e.g. -- --test-threads 1)
   chaos-matrix    Run every scenario of a matrix file across security protocols and
                   message sizes, one after another, saving each run's logs and
                   reports and keeping a running summary (requires Docker)
@@ -1542,6 +1557,7 @@ fn print_help() {
                     --rerun RUN,RUN (run again these run ids, e.g. 15-ssl-1MiB, whatever their outcome)
                     --check-only (validate every run's configuration, then stop)
                     --stall-min N (default 20)  --known-defect-attempts N (default 3)
+                    exits non-zero when a recorded run did not pass (KNOWN-DEFECT excepted)
   chaos-matrix-status  Show a running (or finished) matrix's progress: current run and
                   cycle, pass/fail counts, recent results, failures, time estimate
                     e.g. cargo xtask chaos-matrix-status --watch 30
@@ -1683,5 +1699,57 @@ version = "0.1.0"
         ] {
             assert!(pipeline.contains(&command), "publish-crates-io.yml does not run `{command}`");
         }
+    }
+
+    fn strings(args: &[&str]) -> Vec<String> {
+        args.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn scenario_args_after_the_separator_go_to_libtest() {
+        let args = scenario_test_args(&strings(&[
+            "--release",
+            "--scenario",
+            "simple_flow_clean_broker_roll",
+            "--",
+            "--test-threads",
+            "1",
+        ]))
+        .unwrap();
+        assert_eq!(
+            args.join(" "),
+            "test --features integration-tests --test chaos --release -- --ignored --nocapture --exact \
+             simple_flow_clean_broker_roll --test-threads 1"
+        );
+        let bare = scenario_test_args(&strings(&["--scenario", "x"])).unwrap();
+        assert_eq!(
+            bare.join(" "),
+            "test --features integration-tests --test chaos -- --ignored --nocapture --exact x"
+        );
+    }
+
+    #[test]
+    fn scenario_requires_a_name_before_the_separator() {
+        let missing = scenario_test_args(&strings(&["--scenario"])).unwrap_err();
+        assert_eq!(missing.to_string(), "--scenario requires a test name");
+        let flag = scenario_test_args(&strings(&["--scenario", "--", "--nocapture"])).unwrap_err();
+        assert_eq!(flag.to_string(), "--scenario requires a test name");
+        let late = scenario_test_args(&strings(&["--", "--scenario", "x"])).unwrap_err();
+        assert_eq!(late.to_string(), "--scenario must come before `--`");
+    }
+
+    #[test]
+    fn python_and_c_workloads_select_the_multilanguage_feature() {
+        let env = |flags: &[&str]| parse_chaos_flags(&strings(flags)).unwrap();
+        assert_eq!(chaos_test_feature(&env(&["--cycles", "1"])), "integration-tests");
+        assert_eq!(
+            chaos_test_feature(&env(&["--workload", "producer:rust", "--workload", "consumer:rust"])),
+            "integration-tests"
+        );
+        assert_eq!(
+            chaos_test_feature(&env(&["--workload", "producer:rust", "--workload", "consumer:python"])),
+            "multilanguage-tests"
+        );
+        assert_eq!(chaos_test_feature(&env(&["--workload", "producer:c"])), "multilanguage-tests");
     }
 }

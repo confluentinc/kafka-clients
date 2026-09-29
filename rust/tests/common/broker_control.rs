@@ -86,10 +86,11 @@ impl<'a> BrokerControl<'a> {
     /// period at all.
     ///
     /// The docker command runs on a blocking thread: a clean stop waits out the
-    /// broker's controlled shutdown (seconds), and the chaos scenario is driven
-    /// on the same task as every producer and consumer future, so blocking here
-    /// would freeze all of them for exactly the leader-handoff window the fault
-    /// exists to exercise.
+    /// broker's controlled shutdown (seconds). The chaos workloads run on their
+    /// own threads (`tests/chaos/isolation.rs`), but the scenario task that calls
+    /// this also beats the heartbeat and times the other actions, and a
+    /// concurrent stop of several brokers (`join_all`) would run one after the
+    /// other on a blocked task.
     pub async fn stop(&self, node_id: u16, kind: StopKind) {
         let id = self.container_id(node_id).to_string();
         let status = tokio::task::spawn_blocking(move || match kind {
@@ -115,13 +116,18 @@ impl<'a> BrokerControl<'a> {
     }
 
     /// Whether the broker's container is currently running (the `pid()`
-    /// liveness analog). Reads `docker inspect -f '{{.State.Running}}'`.
-    pub fn is_running(&self, node_id: u16) -> bool {
-        let id = self.container_id(node_id);
-        let out = Command::new("docker")
-            .args(["inspect", "-f", "{{.State.Running}}", id])
-            .output()
-            .expect("failed to spawn docker inspect");
+    /// liveness analog). Reads `docker inspect -f '{{.State.Running}}'`. Runs
+    /// off-task like [`BrokerControl::stop`].
+    pub async fn is_running(&self, node_id: u16) -> bool {
+        let id = self.container_id(node_id).to_string();
+        let out = tokio::task::spawn_blocking(move || {
+            Command::new("docker")
+                .args(["inspect", "-f", "{{.State.Running}}", &id])
+                .output()
+        })
+        .await
+        .expect("docker inspect task panicked")
+        .expect("failed to spawn docker inspect");
         out.status.success() && String::from_utf8_lossy(&out.stdout).trim() == "true"
     }
 
