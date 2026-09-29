@@ -32,9 +32,13 @@
 //! suite's 13 distinct configs produce 24 broker JVMs that stay resident for
 //! the whole run — measured at 7.1 GiB, which starves brokers on a 15 GB host
 //! until they fail Raft quorum registration and self-terminate.
+//!
+//! [`ClusterConfig::dedicated`] clusters are not pooled — each belongs to one
+//! test — but they are resident all the same, so [`start_dedicated`] counts them
+//! toward the same target (see [`LIVE_DEDICATED_CLUSTERS`]).
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, Once};
 
 use super::cluster_config::ClusterConfig;
@@ -52,7 +56,10 @@ type ClusterCell = Arc<OnceCell<Arc<KafkaCluster>>>;
 /// reclaim idle clusters, so when every live cluster is in use the new one is
 /// started anyway rather than waiting. Nothing serializes that check either,
 /// so concurrent misses can each overshoot — the hard upper bound remains the
-/// number of distinct [`ClusterConfig`]s in the suite.
+/// number of distinct [`ClusterConfig`]s in the suite plus the dedicated
+/// clusters of concurrently running tests. Dedicated clusters
+/// ([`start_dedicated`]) count toward the target and trigger the same
+/// eviction, but are never themselves evicted.
 ///
 /// Blocking instead would *not* deadlock (no test holds two clusters at once
 /// — each creates exactly one `TestContext`, which releases its cluster when
@@ -62,6 +69,17 @@ type ClusterCell = Arc<OnceCell<Arc<KafkaCluster>>>;
 /// 16 brokers / 4.8 GiB against 24 brokers / 7.1 GiB unbounded — enough
 /// headroom that the starvation failures disappeared.
 const TARGET_LIVE_CLUSTERS: usize = 5;
+
+/// Number of [`ClusterConfig::dedicated`] clusters currently starting or
+/// running.
+///
+/// They live outside [`CLUSTER_POOL`] and can never be evicted (their test holds
+/// them until it ends), but they occupy the same memory, so
+/// [`evict_lru_until`] adds them to the live count. Incremented by
+/// [`start_dedicated`] *before* its eviction step, so concurrent dedicated
+/// starts see each other; decremented by [`teardown_dedicated`], or by
+/// [`DedicatedSlot`]'s `Drop` if the start itself fails.
+static LIVE_DEDICATED_CLUSTERS: AtomicUsize = AtomicUsize::new(0);
 
 /// One pool slot: the cell plus the LRU stamp of its last request.
 struct PoolEntry {
@@ -130,7 +148,10 @@ fn register_cleanup_hook() {
 /// leaked network consumes a slice of Docker's address pool for the rest of the
 /// process, and once the pool is exhausted *every* subsequent cluster start
 /// fails.
-fn teardown(cluster: &KafkaCluster) {
+///
+/// Also the teardown path of a dedicated (non-pooled) cluster, via
+/// [`teardown_dedicated`] from [`super::test_context::TestContext`]'s `Drop`.
+pub(super) fn teardown(cluster: &KafkaCluster) {
     for id in cluster.container_ids() {
         let _ = std::process::Command::new("docker").args(["rm", "-f", id]).output();
     }
@@ -219,7 +240,10 @@ async fn evict_lru_until(keep: usize) {
     let evicted: Vec<Arc<KafkaCluster>> = {
         let mut pool = CLUSTER_POOL.lock().expect("cluster pool lock poisoned");
 
-        let live = pool.values().filter(|entry| entry.cell.get().is_some()).count();
+        // Dedicated clusters are resident too; they only cannot be evicted, so
+        // they raise `live` without adding candidates.
+        let live = pool.values().filter(|entry| entry.cell.get().is_some()).count()
+            + LIVE_DEDICATED_CLUSTERS.load(Ordering::Relaxed);
         if live <= keep {
             return;
         }
@@ -315,4 +339,60 @@ pub async fn get_or_create(config: &ClusterConfig) -> Arc<KafkaCluster> {
     cell.get_or_init(|| async { Arc::new(KafkaCluster::start_with_config(config).await) })
         .await
         .clone()
+}
+
+/// Reserves one [`LIVE_DEDICATED_CLUSTERS`] slot, releasing it on drop unless
+/// [`DedicatedSlot::keep`] hands it to the running cluster.
+///
+/// The guard covers a panicking [`KafkaCluster::start_with_config`] (it panics
+/// on a failed start), which would otherwise leak the slot and shrink the
+/// target for the rest of the run.
+struct DedicatedSlot;
+
+impl DedicatedSlot {
+    fn acquire() -> Self {
+        LIVE_DEDICATED_CLUSTERS.fetch_add(1, Ordering::Relaxed);
+        Self
+    }
+
+    /// Transfers the slot to the started cluster; [`teardown_dedicated`]
+    /// releases it.
+    fn keep(self) {
+        std::mem::forget(self);
+    }
+}
+
+impl Drop for DedicatedSlot {
+    fn drop(&mut self) {
+        LIVE_DEDICATED_CLUSTERS.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+/// Starts a [`ClusterConfig::dedicated`] cluster, owned by the calling test.
+///
+/// Not pooled, but counted toward [`TARGET_LIVE_CLUSTERS`]: idle pooled
+/// clusters are evicted first, exactly as [`get_or_create`] does before a new
+/// start. The same "target, not ceiling" rule applies — when nothing is idle
+/// the cluster starts anyway — so this never blocks and cannot deadlock.
+///
+/// Must be paired with [`teardown_dedicated`] once the test is done with it.
+pub async fn start_dedicated(config: &ClusterConfig) -> Arc<KafkaCluster> {
+    // Reserve first so this cluster is in the live count the eviction sees,
+    // and so concurrent starts count each other. Hence `keep` is the full
+    // target here, where `get_or_create` (whose new cluster is not yet
+    // counted) trims to one less.
+    let slot = DedicatedSlot::acquire();
+    evict_lru_until(TARGET_LIVE_CLUSTERS).await;
+    let cluster = Arc::new(KafkaCluster::start_with_config(config).await);
+    slot.keep();
+    cluster
+}
+
+/// Tears down a cluster from [`start_dedicated`] and releases its
+/// [`LIVE_DEDICATED_CLUSTERS`] slot.
+///
+/// Call exactly once per started dedicated cluster.
+pub(super) fn teardown_dedicated(cluster: &KafkaCluster) {
+    teardown(cluster);
+    LIVE_DEDICATED_CLUSTERS.fetch_sub(1, Ordering::Relaxed);
 }
