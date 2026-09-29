@@ -112,32 +112,6 @@ Java sources). The Java built-in exception classes (`IllegalStateError`,
 `IllegalArgumentError`, `ConcurrentModificationError`, `TimeoutError`,
 `NoSuchElementError`, `NullPointerError`) live at the package root.
 
-## Migrating from `confluent-kafka-python`
-
-This is a different API, not a drop-in bump. The two rules that explain most
-call-site changes:
-
-- **Every argument is keyword-only.** `poll(1.0)` → `poll(timeout=1.0)`,
-  `subscribe(topics)` → `subscribe(topics=topics)`, a producer's `close(5)`
-  → `close(timeout=5)`.
-- **Collections come back as Java's types** — `set` where Java returns `Set`,
-  `dict` where Java returns `Map` — not the old client's lists.
-
-Highlights:
-
-| Old client | New client |
-|---|---|
-| `Producer(conf)` / `Consumer(conf)` | `KafkaProducer(configs=conf)` / `KafkaConsumer(configs=conf)` (`Producer`/`Consumer` are non-instantiable bases) |
-| `produce(topic, value, key, …, on_delivery=cb)` | `send(record=ProducerRecord(topic=…, key=…, value=…), callback=cb)` → `Future[RecordMetadata]` |
-| `p.poll(0)` in the produce loop | delete it — completions are delivered by the core |
-| `poll(timeout)` → `Message \| None` | `poll(*, timeout=…)` → `ConsumerRecords` (a batch, never `None`) |
-| `msg.error()` in band / `_PARTITION_EOF` | `except KafkaError` (typed) — no EOF event |
-| `subscribe(topics, on_assign=…, on_revoke=…)` | `subscribe(*, topics=…, callback=ConsumerRebalanceListener())` |
-| `commit()` (fire-and-forget by default) | `commit()` blocks (Java `commitSync`); `commit_nowait(callback=cb)` is Java `commitAsync` |
-| flat `err.code` / `err.is_retriable()` | typed `except SpecificError` / `except RetriableError` |
-| `AIOProducer` / `AIOConsumer` (thread-pool async) | `AsyncKafkaProducer` / `AsyncKafkaConsumer` (native async, no worker knobs) |
-| `error_cb`, `logger`, `on_delivery`, … in the config dict | not config entries: an unknown key is accepted and logged once as unused (Java's `logUnused()`); errors raise or fail their future, logs go to the `confluent_kafka.*` Python loggers |
-
 ## Development
 
 ```
