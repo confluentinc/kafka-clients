@@ -6955,16 +6955,31 @@ static void on_fence_producers(const char *id,
     atomic_fetch_add(&r->fired, 1);
 }
 
-static void on_list_transactions(kafka_admin_ListTransactionsResult_t *result,
-                                 kafka_common_Error_t *error, void *user_data) {
+/* listTransactions_async has Java's byBrokerId() shape: one broker-discovery
+ * callback, then one callback per discovered broker. `had_result` / `count`
+ * record the discovery outcome; `broker_fired` counts per-broker callbacks. */
+static atomic_int list_transactions_broker_fired;
+
+static void on_list_transactions_by_broker_id(const int32_t *broker_ids, int32_t broker_count,
+                                              kafka_common_Error_t *error, void *user_data) {
     acl_async_result_t *r = (acl_async_result_t *)user_data;
-    r->had_result = result != NULL;
-    if (result != NULL) {
-        r->count = kafka_admin_ListTransactionsResult_count(result);
-        kafka_admin_ListTransactionsResult_destroy(result);
+    r->had_result = error == NULL;
+    r->count = broker_count;
+    if (error != NULL) {
+        TEST_ASSERT_NULL(broker_ids);
+        TEST_ASSERT_EQUAL_INT32(0, broker_count);
     }
     record_async_error(r, error);
     atomic_fetch_add(&r->fired, 1);
+}
+
+static void on_list_transactions(int32_t broker_id, kafka_admin_ListTransactionsResult_t *value,
+                                 kafka_common_Error_t *error, void *user_data) {
+    (void)broker_id;
+    (void)user_data;
+    if (value != NULL) kafka_admin_ListTransactionsResult_destroy(value);
+    if (error != NULL) kafka_common_Error_destroy(error);
+    atomic_fetch_add(&list_transactions_broker_fired, 1);
 }
 
 /* The two void-result RPCs share the result-less callback shape, so one handler
@@ -7028,16 +7043,22 @@ static void test_mock_admin_b6_async_fires_per_key(void) {
     TEST_ASSERT_EQUAL_INT(1, atomic_load(&dedup.error_count));
     TEST_ASSERT_EQUAL_INT32(UNSUPPORTED_VERSION_CODE, dedup.last_error_code);
 
-    /* listTransactions fails wholesale on the mock, so the callback gets the
-     * error rather than a result. */
+    /* listTransactions fails wholesale on the mock (its byBrokerId() future
+     * fails), so the discovery callback gets the error and no per-broker
+     * callback follows. */
     acl_async_result_t l = {0};
     atomic_init(&l.fired, 0);
+    atomic_store(&list_transactions_broker_fired, 0);
     kafka_admin_AdminClient_list_transactions_async(admin, NULL, 0, NULL, 0, -1, NULL, -1,
+                                                    on_list_transactions_by_broker_id,
                                                     on_list_transactions, &l);
     TEST_ASSERT_TRUE(wait_for(&l.fired, 1));
     TEST_ASSERT_EQUAL_INT(0, l.had_result);
     TEST_ASSERT_EQUAL_INT(1, l.had_error);
     TEST_ASSERT_EQUAL_STRING("Not implemented yet", l.message);
+    struct timespec lt_ts = {0, 100000000}; /* 100ms */
+    nanosleep(&lt_ts, NULL);
+    TEST_ASSERT_EQUAL_INT(0, atomic_load(&list_transactions_broker_fired));
 
     acl_async_result_t a = {0};
     atomic_init(&a.fired, 0);
@@ -7114,6 +7135,7 @@ static void test_mock_admin_b6_async_null_handle_and_marshaling_failure(void) {
     acl_async_result_t l = {0};
     atomic_init(&l.fired, 0);
     kafka_admin_AdminClient_list_transactions_async(NULL, NULL, 0, NULL, 0, -1, NULL, -1,
+                                                    on_list_transactions_by_broker_id,
                                                     on_list_transactions, &l);
     TEST_ASSERT_EQUAL_INT(1, atomic_load(&l.fired));
     TEST_ASSERT_EQUAL_INT(1, l.had_error);
