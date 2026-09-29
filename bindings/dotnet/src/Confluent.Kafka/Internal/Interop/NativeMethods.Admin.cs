@@ -2818,7 +2818,8 @@ internal static partial class NativeMethods
     [return: MarshalAs(UnmanagedType.I1)]
     internal static extern bool OffsetAndMetadataMapGetLeaderEpoch(IntPtr map, int index, out int outEpoch);
 
-    // ---- M15/P5: alterConsumerGroupOffsets (result shape 2, composite key — RPC 4.6) ----
+    // ---- M15/P5: alterConsumerGroupOffsets (RPC 4.6) — M15/P13.1: result shape 3, ONE ----
+    // ---- callback over the per-partition map (composite key) plus the core's all() ----
 
     /// <summary>
     /// <c>kafka_admin_AdminClient_alter_consumer_group_offsets_async</c> — Java's
@@ -2921,7 +2922,8 @@ internal static partial class NativeMethods
     [DllImport(DllName, EntryPoint = "kafka_admin_AlterConsumerGroupOffsetsResult_destroy", CallingConvention = CallingConvention.Cdecl)]
     internal static extern void AlterConsumerGroupOffsetsResultDestroy(IntPtr result);
 
-    // ---- M15/P5: deleteConsumerGroupOffsets (result shape 2, composite key — RPC 4.7) ----
+    // ---- M15/P5: deleteConsumerGroupOffsets (RPC 4.7) — M15/P13.1: result shape 3, ONE ----
+    // ---- callback over the per-partition map (composite key) plus the core's all() ----
 
     /// <summary>
     /// <c>kafka_admin_AdminClient_delete_consumer_group_offsets_async</c> — Java's
@@ -3043,7 +3045,8 @@ internal static partial class NativeMethods
     [DllImport(DllName, EntryPoint = "kafka_admin_DeleteConsumerGroupsResult_destroy", CallingConvention = CallingConvention.Cdecl)]
     internal static extern void DeleteConsumerGroupsResultDestroy(IntPtr result);
 
-    // ---- M15/P5: removeMembersFromConsumerGroup (result shape 3 — RPC 4.9) ----
+    // ---- M15/P5: removeMembersFromConsumerGroup (RPC 4.9) — M15/P13.1: result shape 3, ONE ----
+    // ---- callback over the per-member map plus the core's all() (the only outcome in removeAll) ----
 
     /// <summary>
     /// <c>kafka_admin_AdminClient_remove_members_from_consumer_group_async</c> — Java's

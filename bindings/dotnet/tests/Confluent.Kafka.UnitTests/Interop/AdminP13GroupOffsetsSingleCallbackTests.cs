@@ -268,11 +268,10 @@ public sealed class AdminP13GroupOffsetsSingleCallbackTests
     /// one callback, fired later through the production trampoline, is what releases it.
     /// </summary>
     /// <remarks>
-    /// The empty row is the discriminating one for PLAN R1: a leftover submit-side
-    /// <c>SetPendingCallbacks(0)</c> + <c>ReleaseSubmitToken()</c> reaches zero at the submit
-    /// boundary, so <c>IsClosed</c> reads <see langword="true"/> after <c>Dispose</c> below and
-    /// the <c>user_data</c> the callback later recovers is already freed. The non-empty row
-    /// pins that a request with keys takes the same one-callback path.
+    /// Two rows — an empty request and one with keys — each owed the same one callback. Which
+    /// submit-side mutations each row discriminates (PLAN R1) is stated once, for all three
+    /// RPCs, in the remarks on
+    /// <see cref="RemoveMembers_UntilTheCallbackFires_TheOperationStaysPendingAndRooted"/>.
     /// </remarks>
     [Theory]
     [InlineData(0)]
@@ -324,8 +323,10 @@ public sealed class AdminP13GroupOffsetsSingleCallbackTests
     /// The same lifetime for <c>deleteConsumerGroupOffsets</c>.
     /// </summary>
     /// <remarks>
-    /// See <see cref="AlterConsumerGroupOffsets_UntilTheCallbackFires_TheOperationStaysPendingAndRooted"/>
-    /// for why the empty row discriminates.
+    /// The same two rows as
+    /// <see cref="AlterConsumerGroupOffsets_UntilTheCallbackFires_TheOperationStaysPendingAndRooted"/>;
+    /// which submit-side mutations they discriminate is stated once, in the remarks on
+    /// <see cref="RemoveMembers_UntilTheCallbackFires_TheOperationStaysPendingAndRooted"/>.
     /// </remarks>
     [Theory]
     [InlineData(0)]
@@ -385,14 +386,26 @@ public sealed class AdminP13GroupOffsetsSingleCallbackTests
     /// armed for one callback per member there.
     /// </para>
     /// <para>
-    /// ⚠ Unlike the empty group-offsets row, <b>neither</b> row here is reachable by a
-    /// replay of the pre-CP2 <c>SetPendingCallbacks(pendingCallbacks)</c> +
-    /// <c>ReleaseSubmitToken()</c> lines: <c>pendingCallbacks</c> was 1 in removeAll mode and
-    /// the member count otherwise, and the options reject an empty member set, so that
-    /// countdown is armed at two or more and one submit release never reaches zero. What
-    /// these rows discriminate is any submit-side release that <em>does</em> reach zero —
+    /// ⚠ <b>Which submit-side mutations the three RPCs' lifetime tests can see — the one
+    /// statement of it; every other site points here.</b> What PLAN R1 guards against is a
+    /// submit-side release that reaches zero before the callback fires —
     /// <c>SetPendingCallbacks(0)</c> + <c>ReleaseSubmitToken()</c>, or a direct
-    /// <c>FreeGcHandle</c>.
+    /// <c>FreeGcHandle</c> — which frees the <c>user_data</c> the callback later recovers, so
+    /// <c>IsClosed</c> reads <see langword="true"/> after the client's <c>Dispose</c>. Every
+    /// row of the three <c>*_UntilTheCallbackFires_TheOperationStaysPendingAndRooted</c>
+    /// theories catches that.
+    /// </para>
+    /// <para>
+    /// A <em>replay</em> of the pre-M15/P13.1 submit lines is a narrower thing. The
+    /// group-offsets RPCs armed <c>SetPendingCallbacks(keys.Count)</c> + the submit token, so
+    /// only their <b>empty</b> row replays into a zero-reaching release; with keys that
+    /// countdown sits at one or more after the submit release. Here the replayed
+    /// <c>SetPendingCallbacks(pendingCallbacks)</c> + <c>ReleaseSubmitToken()</c> lines armed
+    /// 1 in removeAll mode and the member count otherwise, and the options reject an empty
+    /// member set, so the countdown is armed at two or more and one submit release never
+    /// reaches zero — in <b>neither</b> row. Wherever a replayed countdown stays above zero it
+    /// is an equivalent mutant rather than a defect: the callback's <c>finally</c> frees the
+    /// handle exactly once and nothing leaks, double-frees or is observable.
     /// </para>
     /// </remarks>
     [Theory]

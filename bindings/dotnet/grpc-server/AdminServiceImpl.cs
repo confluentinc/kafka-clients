@@ -1516,8 +1516,14 @@ internal sealed class AdminServiceImpl : Proto.AdminService.AdminServiceBase, ID
             // The result exposes no keyed future map (Java holds one future over the whole
             // per-partition map), so the requested keys drive the walk — Java's own
             // partitionResult(tp) pattern. With an EMPTY request there is no per-partition
-            // slot at all and the response is simply empty, which is all Java's all() could
-            // report in that case; the RPC is still submitted.
+            // slot at all and the response is simply empty; the RPC is still submitted.
+            // ⚠ That empty response DROPS a whole-call error. Java's all() is a thenApply over
+            // the one future, so it propagates a whole-call failure whatever the key count,
+            // and since M15/P13.1 (single-callback ABI) an empty request here waits for the
+            // core's real outcome too, so result.All() carries that error even at zero keys.
+            // This servicer does not await it. Python's servicer has the identical gap, so
+            // the behaviour change is deferred to a cross-binding harness item rather than
+            // made here alone.
             Dictionary<TopicPartition, Task> futures = new Dictionary<TopicPartition, Task>();
             foreach (TopicPartition partition in offsets.Keys)
             {
@@ -1553,7 +1559,8 @@ internal sealed class AdminServiceImpl : Proto.AdminService.AdminServiceBase, ID
                     TimeoutMs = TranslateAdmin.Timeout(request.HasTimeoutMs, request.TimeoutMs),
                 });
 
-            // Same single-future shape as AlterConsumerGroupOffsets above, empty case included.
+            // Same single-future shape as AlterConsumerGroupOffsets above, empty case included —
+            // including the dropped whole-call error at zero keys and its deferral.
             Dictionary<TopicPartition, Task> futures = new Dictionary<TopicPartition, Task>();
             foreach (TopicPartition partition in partitions)
             {

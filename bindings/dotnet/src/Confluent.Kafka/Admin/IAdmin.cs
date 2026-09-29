@@ -561,8 +561,10 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// <returns>
     /// ⚠ <b>One</b> awaitable over the whole request, and a per-partition failure is a
     /// <b>value in its map</b> rather than a faulted awaitable — Java's
-    /// <c>Map&lt;TopicPartition, Errors&gt;</c>. See <see cref="AlterConsumerGroupOffsetsResult"/>;
-    /// the task itself faults only when the request could not be run at all.
+    /// <c>Map&lt;TopicPartition, Errors&gt;</c>. See <see cref="AlterConsumerGroupOffsetsResult"/>.
+    /// The task itself faults only when the whole request failed or could not be submitted
+    /// at all — never for one partition's own outcome — and it resolves only when the core
+    /// reports, an empty <paramref name="offsets"/> included.
     /// </returns>
     /// <exception cref="ArgumentNullException">
     /// <paramref name="groupId"/> or <paramref name="offsets"/> is null.
@@ -594,8 +596,10 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// <returns>
     /// ⚠ <b>One</b> awaitable over the whole request, and a per-partition failure is a
     /// <b>value in its map</b> rather than a faulted awaitable — Java's
-    /// <c>Map&lt;TopicPartition, Errors&gt;</c>. See <see cref="DeleteConsumerGroupOffsetsResult"/>;
-    /// the task itself faults only when the request could not be run at all.
+    /// <c>Map&lt;TopicPartition, Errors&gt;</c>. See <see cref="DeleteConsumerGroupOffsetsResult"/>.
+    /// The task itself faults only when the whole request failed or could not be submitted
+    /// at all — never for one partition's own outcome — and it resolves only when the core
+    /// reports, an empty <paramref name="partitions"/> included.
     /// </returns>
     /// <exception cref="ArgumentNullException">
     /// <paramref name="groupId"/> or <paramref name="partitions"/> is null.
@@ -954,8 +958,10 @@ public interface IAdmin : IDisposable, IAsyncDisposable
     /// ⚠ <b>One</b> awaitable over the whole request, and a per-member failure is a
     /// <b>value in its map</b> rather than a faulted awaitable — Java's
     /// <c>Map&lt;MemberIdentity, Errors&gt;</c>. See
-    /// <see cref="RemoveMembersFromConsumerGroupResult"/>; the task itself faults only
-    /// when the request could not be run at all.
+    /// <see cref="RemoveMembersFromConsumerGroupResult"/>. The task itself faults only when
+    /// the whole request failed or could not be submitted at all — never for one member's
+    /// own outcome, which in <c>removeAll</c> mode only
+    /// <see cref="RemoveMembersFromConsumerGroupResult.All"/> reports.
     /// </returns>
     /// <exception cref="ArgumentNullException">
     /// <paramref name="groupId"/> or <paramref name="options"/> is null.

@@ -13,7 +13,6 @@
 // limitations under the License.
 
 using System;
-using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using System.Threading.Tasks;
 
@@ -218,70 +217,6 @@ public sealed class AdminP9CountdownTests
             () => operation.Tasks["failed"]);
         Assert.Equal(42, failure.Code);
         Assert.Equal("that key failed", failure.Message);
-    }
-
-    /// <summary>
-    /// Shape 4c: N per-key arrivals resolve <b>one</b> aggregate task, once, and a per-key
-    /// error is carried as the map's <b>value</b> — not as a fault (the <c>ElectLeaders</c>
-    /// lesson).
-    /// </summary>
-    [Fact]
-    public async Task FanIn_CompletesOnceWithPerKeyErrorsAsValues()
-    {
-        using NativeAdminClient admin = NativeAdminClient.CreateMock(1);
-
-        FanInAdminOperation<TopicPartition, KafkaException?> operation =
-            new FanInAdminOperation<TopicPartition, KafkaException?>(
-                2, EqualityComparer<TopicPartition>.Default);
-        Arm(operation, admin.Handle, callbacks: 2);
-
-        TopicPartition ok = new TopicPartition("t", 0);
-        TopicPartition bad = new TopicPartition("t", 1);
-
-        operation.Add(ok, null);
-        operation.ReleaseOne();
-        Assert.False(operation.Task.IsCompleted, "the aggregate task must wait for the last key");
-
-        operation.Add(bad, new KafkaException(37, "partition failed", false));
-        operation.ReleaseOne();
-        operation.ReleaseSubmitToken();
-
-        IReadOnlyDictionary<TopicPartition, KafkaException?> entries =
-            await operation.Task;
-
-        Assert.Equal(TaskStatus.RanToCompletion, operation.Task.Status);
-        Assert.Equal(2, entries.Count);
-        Assert.Null(entries[ok]);
-        Assert.Equal(37, entries[bad]!.Code);
-
-        // Completing once: a stray extra release must not replace or re-resolve the result.
-        operation.ReleaseOne();
-        Assert.Same(entries, await operation.Task);
-    }
-
-    /// <summary>
-    /// Shape 4c with no keys at all: Java's map is empty and the ABI never calls back, so
-    /// the submit token both resolves the task and releases the operation.
-    /// </summary>
-    [Fact]
-    public async Task FanIn_ZeroCallbacks_ResolvesEmptyAtTheSubmitBoundary()
-    {
-        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
-        SafeAdminHandle handle = admin.Handle;
-
-        FanInAdminOperation<TopicPartition, KafkaException?> operation =
-            new FanInAdminOperation<TopicPartition, KafkaException?>(
-                0, EqualityComparer<TopicPartition>.Default);
-        Arm(operation, handle, callbacks: 0);
-
-        TestTimeout.Run(admin.Dispose, s_deadline);
-        Assert.False(operation.Task.IsCompleted);
-        Assert.False(handle.IsClosed);
-
-        operation.ReleaseSubmitToken();
-
-        Assert.Empty(await operation.Task);
-        Assert.True(handle.IsClosed);
     }
 
     /// <summary>

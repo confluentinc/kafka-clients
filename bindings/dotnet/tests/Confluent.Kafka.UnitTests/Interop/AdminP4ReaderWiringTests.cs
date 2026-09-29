@@ -876,10 +876,12 @@ public sealed class AdminP4ReaderWiringTests
     }
 
     /// <summary>
-    /// ⚠⚠ <b>The four count-less P7 trampolines each destroy THEIR OWN result root.</b> The
-    /// four types declare byte-identical destroys, so a cross-wired one frees the right
-    /// pointer through the wrong destructor — undetectable by any behavioural assertion
-    /// (M15/P7).
+    /// ⚠⚠ <b>Each single-root trampoline listed here destroys ITS OWN result root.</b> The
+    /// types declare byte-identical destroys, so a cross-wired one frees the right pointer
+    /// through the wrong destructor — undetectable by any behavioural assertion. The rows are
+    /// the count-less P7 trampolines (M15/P7) and the three single-callback group-RPC
+    /// trampolines (M15/P13.1), whose destroy is a separate argument to the shared
+    /// single-awaiter shell beside the outcome reader the other wiring tests pin.
     /// </summary>
     [Theory]
     [InlineData(
@@ -900,7 +902,16 @@ public sealed class AdminP4ReaderWiringTests
     [InlineData(
         "s_destroyDescribeUserScramCredentialsResult",
         "kafka_admin_DescribeUserScramCredentialsResult_destroy")]
-    public void EachP7Destroy_BindsItsOwnAbiSymbol(string fieldName, string entryPoint) =>
+    [InlineData(
+        "s_destroyAlterConsumerGroupOffsetsResult",
+        "kafka_admin_AlterConsumerGroupOffsetsResult_destroy")]
+    [InlineData(
+        "s_destroyDeleteConsumerGroupOffsetsResult",
+        "kafka_admin_DeleteConsumerGroupOffsetsResult_destroy")]
+    [InlineData(
+        "s_destroyRemoveMembersFromConsumerGroupResult",
+        "kafka_admin_RemoveMembersFromConsumerGroupResult_destroy")]
+    public void EachRootDestroy_BindsItsOwnAbiSymbol(string fieldName, string entryPoint) =>
         Assert.Equal(entryPoint, EntryPointOf(Reader(fieldName)));
 
     /// <summary>

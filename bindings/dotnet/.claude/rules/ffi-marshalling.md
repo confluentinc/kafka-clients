@@ -1987,7 +1987,17 @@ everything after that differs.
     these entry points takes a `user_data_destroy`**, and the callback *is* invoked
     on every path including the core's inline guard rejection — which is what makes
     "the callback is the sole owner of the per-op `GCHandle` free" *total* for them,
-    and only for them.
+    and only for this family.
+    **Admin's single-callback group RPCs belong here too (M15/P13.1)** —
+    `alterConsumerGroupOffsets` / `deleteConsumerGroupOffsets` /
+    `removeMembersFromConsumerGroup`. Each fires **exactly once** per submit — also for
+    an empty request, in `removeAll` mode, and inline on the submitting thread when the
+    RPC cannot be submitted — with either an **owned result root** or an **owned**
+    whole-call error. The root's per-key errors are **borrowed**
+    (`_get_error(i)` → `FromBorrowedHandle`, never destroyed) while its `_all` is
+    **owned** (`FromHandle`); the root is destroyed once, after every read, and the
+    callback's `finally` is the **sole** `GCHandle` free — no countdown and no submit
+    token. The hookless Rule below, written for the consumer's eight, holds for them.
   - **Multi-shot registrations** — the **rebalance listener** (M9/P6:
     `on_partitions_revoked` / `_assigned` / `_lost`, registered once by
     `Consumer_subscribe_with_listener[_async]`). Registered once, fires **N** times,
@@ -2005,12 +2015,18 @@ everything after that differs.
     root to borrow from, so both go through `FromHandle` / their own `_destroy`, never
     `FromBorrowedHandle`. Sub-shapes follow **Java's return type**, not the accessor
     set: **4a** value-carrying → one `Task` per key; **4b** void → one `Task` per key,
-    where a null error *is* the success value; **4c** per-key fan-in → **one**
-    aggregate `Task` whose map *value* is the per-key error. Hookless, so the callback
-    family still owns the `GCHandle` free — but as a **countdown released by the last
-    of N**, armed at `n + 1` with a submit-owned token (which is what makes `n == 0`
-    releasable at all), where `n` is read from that RPC's own ABI doc comment and is
-    **not** uniformly the key count.
+    where a null error *is* the success value. Hookless, so the callback family still
+    owns the `GCHandle` free — but as a **countdown released by the last of N**, armed
+    at `n + 1` with a submit-owned token (which is what makes `n == 0` releasable at
+    all), where `n` is read from that RPC's own ABI doc comment and is **not**
+    uniformly the key count. Each callback resolves **its own key's** `Task`; the
+    countdown decides only when the operation is released and settles, at zero, any
+    requested key no callback answered — it assembles no aggregate.
+    ⚠ **Sub-shape 4c (per-key fan-in → one aggregate `Task`) is retired (M15/P13.1).**
+    Its three RPCs moved to the single-callback ABI and now belong to the first family
+    above; the fan-in bridge was deleted with them. A Java `KafkaFuture<Map<K, V>>` now
+    has one ABI shape here — one callback over a result root — not a countdown over
+    per-key callbacks.
 
 ⚠ **The one-shot "sole owner is the callback" invariant does NOT generalize.**
 Everything §B6/§B7 says about freeing the per-op `GCHandle` is scoped to the
@@ -2252,6 +2268,14 @@ and the keep-alive spans the whole op (submit→fire), not a synchronous call.
     **production's own builder** (`definition-of-done.md` §12), so removing the hook
     from production turns those tests red rather than leaving them measuring a hook
     only the test supplied.
+  - **Converting a shape-4 countdown RPC to a single callback (M15/P13.1):** a
+    leftover countdown armed at **≥ 2** is an **equivalent mutant** — it never reaches
+    zero, the callback's `finally` frees once, and nothing leaks, double-frees or is
+    observable — so replaying the old submit lines proves nothing on those rows. The
+    discriminating test is a **count-0 / pending** row: a seam that does not fire, then
+    assert the operation is still pending and rooted after the submit returns (and past
+    the client's `Dispose`). The mutation `SetPendingCallbacks(0)` +
+    `ReleaseSubmitToken()` frees the handle before the callback and turns that row red.
 
 ---
 

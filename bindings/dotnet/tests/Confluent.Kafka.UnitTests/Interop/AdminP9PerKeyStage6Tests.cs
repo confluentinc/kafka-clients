@@ -378,8 +378,9 @@ public sealed class AdminP9PerKeyStage6Tests
     /// already faulted when <c>All()</c> is first called races the dispatcher, but it is
     /// never <see cref="TaskStatus.RanToCompletion"/>, which is exactly what the pre-P13.1
     /// submit-boundary resolution produced. The "pending at submit return" half needs a seam
-    /// that does not fire, and lives in
-    /// <c>AdminP13GroupOffsetsSingleCallbackTests.UntilTheCallbackFires_TheOperationStaysPendingAndRooted</c>.
+    /// that does not fire, and lives in the empty rows of
+    /// <c>AdminP13GroupOffsetsSingleCallbackTests.AlterConsumerGroupOffsets_UntilTheCallbackFires_TheOperationStaysPendingAndRooted</c>
+    /// and its <c>DeleteConsumerGroupOffsets_</c> twin.
     /// </remarks>
     [Fact]
     public async Task EmptyConsumerGroupOffsetRequests_CarryTheCoresOutcome()
