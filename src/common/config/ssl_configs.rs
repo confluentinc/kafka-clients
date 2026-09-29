@@ -220,7 +220,7 @@ impl SslConfig {
     ///
     /// [`Error::Config`] if `ssl.enabled.protocols` or `ssl.cipher.suites`
     /// fails Java's `ValidList.anyNonDuplicateValues(true, false)`
-    /// (`SslConfigs.java:129-130`): an empty or duplicated element.
+    /// (`SslConfigs.java:129-130`): an empty element (duplicates are removed).
     pub(crate) fn apply_ssl_config_key(ssl: &mut SslConfig, key: &str, value: &str) -> Result<(), Error> {
         match key {
             SslConfigs::SSL_TRUSTSTORE_LOCATION_CONFIG => {
@@ -461,8 +461,8 @@ mod tests {
 
     /// `ssl.enabled.protocols` is validated with Java's
     /// `ValidList.anyNonDuplicateValues(true, false)` (`SslConfigs.java:130`):
-    /// an empty or duplicated protocol is rejected with `ConfigDef`'s exact
-    /// message; an empty list is allowed.
+    /// an empty protocol is rejected with `ConfigDef`'s exact message,
+    /// duplicates are removed, and an empty list is allowed.
     #[test]
     fn test_enabled_protocols_valid_list() {
         for (value, expected) in [
@@ -470,10 +470,7 @@ mod tests {
                 "TLSv1.2,,TLSv1.3",
                 "Configuration 'ssl.enabled.protocols' values must not be empty.",
             ),
-            (
-                "TLSv1.2, TLSv1.2",
-                "Configuration 'ssl.enabled.protocols' values must not be duplicated.",
-            ),
+            (",,", "Configuration 'ssl.enabled.protocols' values must not be empty."),
         ] {
             let mut ssl = SslConfig::default();
             match SslConfig::apply_ssl_config_key(&mut ssl, SslConfigs::SSL_ENABLED_PROTOCOLS_CONFIG, value) {
@@ -484,6 +481,10 @@ mod tests {
         let mut ssl = SslConfig::default();
         SslConfig::apply_ssl_config_key(&mut ssl, SslConfigs::SSL_ENABLED_PROTOCOLS_CONFIG, "").unwrap();
         assert!(ssl.enabled_protocols.is_empty());
+        // Duplicates are removed by `ConfigDef.parseValue`, not rejected.
+        SslConfig::apply_ssl_config_key(&mut ssl, SslConfigs::SSL_ENABLED_PROTOCOLS_CONFIG, "TLSv1.2, TLSv1.2")
+            .unwrap();
+        assert_eq!(ssl.enabled_protocols, vec!["TLSv1.2".to_string()]);
     }
 
     /// `ssl.cipher.suites` is not modelled, but is validated like Java
@@ -492,7 +493,7 @@ mod tests {
     fn test_cipher_suites_valid_list() {
         for (value, expected) in [
             ("A,,B", "Configuration 'ssl.cipher.suites' values must not be empty."),
-            ("A,A", "Configuration 'ssl.cipher.suites' values must not be duplicated."),
+            (",,", "Configuration 'ssl.cipher.suites' values must not be empty."),
         ] {
             let mut ssl = SslConfig::default();
             match SslConfig::apply_ssl_config_key(&mut ssl, SslConfigs::SSL_CIPHER_SUITES_CONFIG, value) {
@@ -502,5 +503,6 @@ mod tests {
         }
         let mut ssl = SslConfig::default();
         SslConfig::apply_ssl_config_key(&mut ssl, SslConfigs::SSL_CIPHER_SUITES_CONFIG, "A, B").unwrap();
+        SslConfig::apply_ssl_config_key(&mut ssl, SslConfigs::SSL_CIPHER_SUITES_CONFIG, "A,A").unwrap();
     }
 }

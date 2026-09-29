@@ -165,6 +165,11 @@ impl ValidList {
     /// and validate it with `anyNonDuplicateValues(is_empty_allowed, false)`,
     /// which is what `ConfigDef.parse` does for each such key.
     ///
+    /// As in `ConfigDef.parseValue` (`ConfigDef.java:541-548`), duplicates are
+    /// removed first, keeping the order of first occurrence, with a warning;
+    /// the deduplicated list is validated and returned. The duplicate check in
+    /// [`Self::ensure_valid`] therefore cannot fire here, as in Java.
+    ///
     /// # Errors
     ///
     /// As [`Self::ensure_valid`].
@@ -173,7 +178,22 @@ impl ValidList {
         value: &str,
         is_empty_allowed: bool,
     ) -> Result<Vec<String>, Error> {
-        let values = ConfigDef::parse_list(value);
+        let original = ConfigDef::parse_list(value);
+        let mut values: Vec<String> = Vec::with_capacity(original.len());
+        for v in &original {
+            if !values.contains(v) {
+                values.push(v.clone());
+            }
+        }
+        if values.len() != original.len() {
+            log::warn!(
+                "Configuration key \"{}\" contains duplicate values. Duplicates will be removed. \
+                 The original value is: [{}], the updated value is: [{}]",
+                name,
+                original.join(", "),
+                values.join(", ")
+            );
+        }
         Self::any_non_duplicate_values(is_empty_allowed, false).ensure_valid(name, Some(&values))?;
         Ok(values)
     }
@@ -244,16 +264,34 @@ mod tests {
         }
     }
 
-    /// A repeated element is rejected, after whitespace around the commas is
-    /// stripped. Java checks duplicates before empty elements, so `",,"`
-    /// (three empty elements) reports the duplicate.
+    /// `ConfigDef.parseValue` removes repeated elements (after whitespace
+    /// around the commas is stripped), keeping first-occurrence order, before
+    /// validating. `",,"` dedupes to `[""]`, which fails as empty.
     #[test]
-    fn test_valid_list_rejects_duplicate() {
-        for value in ["a,a", "a, b ,a", ",,"] {
-            assert_eq!(
-                config_error_message(ValidList::parse_any_non_duplicate_values("k", value, true)),
-                "Configuration 'k' values must not be duplicated."
-            );
+    fn test_valid_list_removes_duplicates() {
+        assert_eq!(
+            ValidList::parse_any_non_duplicate_values("k", "a:1,a:1", false).unwrap(),
+            vec!["a:1"]
+        );
+        assert_eq!(ValidList::parse_any_non_duplicate_values("k", "a,a", true).unwrap(), vec!["a"]);
+        assert_eq!(
+            ValidList::parse_any_non_duplicate_values("k", "b, a ,b", true).unwrap(),
+            vec!["b", "a"]
+        );
+        assert_eq!(
+            config_error_message(ValidList::parse_any_non_duplicate_values("k", ",,", true)),
+            "Configuration 'k' values must not be empty."
+        );
+    }
+
+    /// `ensure_valid` itself still rejects duplicates, as Java's
+    /// `anyNonDuplicateValues` does when called directly.
+    #[test]
+    fn test_valid_list_ensure_valid_rejects_duplicate() {
+        let values = vec!["a".to_string(), "a".to_string()];
+        match ValidList::any_non_duplicate_values(true, false).ensure_valid("k", Some(&values)) {
+            Err(Error::Config(e)) => assert_eq!(e.message(), "Configuration 'k' values must not be duplicated."),
+            other => panic!("expected a ConfigError, got {other:?}"),
         }
     }
 

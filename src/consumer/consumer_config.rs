@@ -1202,8 +1202,8 @@ mod tests {
     }
 
     /// `bootstrap.servers` is validated with Java's
-    /// `ValidList.anyNonDuplicateValues(false, false)` (`ConsumerConfig.java:419`): an empty or
-    /// duplicated element is rejected with `ConfigDef`'s exact message
+    /// `ValidList.anyNonDuplicateValues(false, false)` (`ConsumerConfig.java:419`): an empty
+    /// element is rejected with `ConfigDef`'s exact message and duplicates are removed
     /// (single-message `ConfigException`, no `Invalid value` prefix). An empty list is rejected too.
     #[test]
     fn test_bootstrap_servers_valid_list() {
@@ -1221,9 +1221,12 @@ mod tests {
                 "{value:?}"
             );
         }
+        // `ConfigDef.parseValue` removes duplicates (with a warning) before validating.
+        let props = HashMap::from([("bootstrap.servers".to_string(), "a:1,a:1".to_string())]);
+        assert_eq!(ConsumerConfig::new(&props).unwrap().bootstrap_servers(), ["a:1".to_string()]);
         assert_eq!(
-            error_message("a:1,a:1"),
-            "Configuration 'bootstrap.servers' values must not be duplicated."
+            error_message(",,"),
+            "Configuration 'bootstrap.servers' values must not be empty."
         );
         for value in ["", "  "] {
             assert_eq!(
@@ -1241,8 +1244,8 @@ mod tests {
 
     /// The consumer's other list keys use
     /// `ValidList.anyNonDuplicateValues(true, false)` (`ConsumerConfig.java`
-    /// 449, 576, 618, 707): empty and duplicated elements are rejected, and an
-    /// empty list is allowed.
+    /// 449, 576, 618, 707): empty elements are rejected, duplicates are
+    /// removed, and an empty list is allowed.
     #[test]
     fn test_other_list_configs_valid_list() {
         for key in [
@@ -1259,7 +1262,7 @@ mod tests {
             };
             for (value, expected) in [
                 ("a,,b", format!("Configuration '{key}' values must not be empty.")),
-                ("a, a", format!("Configuration '{key}' values must not be duplicated.")),
+                (",,", format!("Configuration '{key}' values must not be empty.")),
             ] {
                 match ConsumerConfig::new(&with(value)) {
                     Err(Error::Config(e)) => assert_eq!(e.message(), expected, "{key}={value:?}"),
@@ -1268,6 +1271,8 @@ mod tests {
             }
             assert!(ConsumerConfig::new(&with("")).is_ok(), "{key}");
             assert!(ConsumerConfig::new(&with("a, b")).is_ok(), "{key}");
+            // Duplicates are removed by `ConfigDef.parseValue`, not rejected.
+            assert!(ConsumerConfig::new(&with("a, a")).is_ok(), "{key}");
         }
     }
 }
