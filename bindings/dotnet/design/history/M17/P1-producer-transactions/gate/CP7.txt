@@ -1,0 +1,282 @@
+M17/P1 CP7 gate record: the root Makefile edit and the full gate run (G1-G11)
+===========================================================================
+
+Recorded by dotnet-actor 84 on 2026-09-29. Times are the host clock (IST,
+UTC+05:30). Plan: PLAN.md as frozen at the CP5 close (cp5-plan manifest,
+OK). The contract is §0's "Non-binding edits" row, §4.2 G1-G11, the §4.3
+CP7 row and its "CP7's Makefile checks" list, §4.5 (G10 steps 0-5 and
+"Gate at CP7"), §4.6 and §6 DoD #5 and #9. This file is a short summary
+(§4.2). Raw logs are in the Actor's scratch directory; "cp7/" below means
+its cp7 folder. CP7 stages nothing.
+
+Base. HEAD was 8ccb0f8d (CP2) at the start (16:05:50), at the start and end
+of the host gates (16:07:46, 16:12:51) and after G10 (16:24). The index
+held the Manager's three CP3 paths (gate/CP3.txt, SendCompletionPump.cs,
+SendCompletionPumpBarrierTests.cs) each time, untouched.
+Freeze at the start and in the gate (16:12:51): shasum -a 256 -c on the
+cp3 (3 OK), cp5 (17 OK), cp5-plan (1 OK) and cp6 (4 OK) manifests and on
+cp5/freeze-cp4.sha256 (5 OK); each exits 0. COMMENTS.84.md is 0 bytes.
+
+Files
+-----
+- M  Makefile                                  +1 / -24, 517 -> 494 lines
+     before 00bd4371be759e75cc06e05336032aa840cda4a167101b879b2e96e14d6c8421
+            (the HEAD blob, ceb18cfe)
+     after  48412c020bb183d33f3f9a7f1e85fda70ed26ab3f8d01e7c1745030057ed393e
+- ?? gate/CP7-roster.txt   152 names, byte-identical to CP0-roster.txt
+- ?? gate/CP7-failed.txt   0 names (0 bytes)
+- ?? this file.
+No other file changed (G7). Nothing under bindings/dotnet/src, tests or
+grpc-server changed at CP7.
+
+The Makefile edit (§0, §4.3 CP7 row)
+------------------------------------
+- Deleted :272-291: the lone "#" separator and the 19-line "THREE TESTS
+  ARE SKIPPED FOR .NET ONLY" block, ending "# them is the last step of
+  that phase, not a follow-up to it.". The line checks before the edit
+  were :272 "#", :273 "# THREE TESTS ARE SKIPPED ...", :291 as quoted.
+- Deleted :309-311, the three --skip test_... lines.
+- Re-terminated :308 with "-- __grpc_dotnet; \". It keeps its two leading
+  tabs (cat -A shows ^I^I; it is :288 after the edit).
+- The comment above the target now ends at "amd64 Linux verify-dotnet job
+  (see .semaphore/semaphore.yml)." and is followed by the target line.
+Final recipe block (Makefile:272-289 after the edit):
+    test-integration-dotnet:
+    	@if [ "$$(uname -s)" != "Linux" ]; then \
+    		printf '\n========================================================================\n'; \
+    		printf 'SKIP test-integration-dotnet: host is %s, not Linux.\n' "$$(uname -s)"; \
+    		printf '\n'; \
+    		printf 'The .NET gRPC-server images COPY the host-built\n'; \
+    		printf '  target/release/libconfluent_kafka.so\n'; \
+    		printf 'into a Linux container. On this host that artifact is\n'; \
+    		printf 'Mach-O / absent (no ELF .so), so the image cannot build.\n'; \
+    		printf '\n'; \
+    		printf 'There is no -macos variant for .NET (Grpc.Tools arm64 protoc\n'; \
+    		printf 'SIGSEGVs during C# codegen), so this arm runs only in CI'"'"'s\n'; \
+    		printf 'amd64 Linux verify-dotnet job. Unit tests still run: make test-dotnet.\n'; \
+    		printf '========================================================================\n\n'; \
+    	else \
+    		$(MAKE) build-grpc-images-dotnet && \
+    		cargo test --features integration-tests,multilanguage-tests --test integration -- __grpc_dotnet; \
+    	fi
+The whole diff is in cp7/after/Makefile.diff.
+
+The two Makefile checks (§4.3 list), from the repo root
+-------------------------------------------------------
+                                                         before  after
+  command grep -cE 'producer_transactions|THREE TESTS
+    ARE SKIPPED|--skip test_' Makefile                        5      0 (exit 1)
+  make -n test-integration-dotnet | command grep -c
+    -- '--skip'                                               3      0
+- Before, the 5 hits were :273, :275, :309, :310 and :311, all inside the
+  deleted lines. That is the control positive.
+- make -n ran on this macOS host only (GNU Make 4.4.1, Darwin), exit 0
+  both times. As §4.3 warns, make executes the $(MAKE) line under -n, so
+  its output also carries the SKIP banner; on this host that is all it
+  runs. The printed recipe passes `sh -n` before and after (exit 0).
+- A plain `make test-integration-dotnet` on this host prints the SKIP
+  banner and exits 0 (cp7/after/make-real.out). The Linux branch is not
+  runnable here; G10 runs its cargo command by hand, and CI's verify-dotnet
+  runs the target as written (§4.6).
+
+Gates (cp7/gates/gates.sh: gates.out, g*.log; 16:07:46-16:12:51)
+----------------------------------------------------------------
+DOTNET_ROLL_FORWARD: unset in the gate shell (count 0).
+G2 (16:07:46)
+- cargo build --features ffi --release: exit 0 ("in 0.26s").
+- dotnet build -c Release --no-incremental <sln>: exit 0, 0 Warning(s),
+  0 Error(s), 00:00:04.73. All six outputs written 16:07:50-16:07:51:
+  library netstandard2.0/net8.0/net10.0, tests net462/net8.0/net10.0.
+G3 (16:07:51): dotnet format <sln> --verify-no-changes: exit 0, 0 bytes.
+G4 (16:08:07): dotnet test -c Release -f net10.0 <sln>: exit 0, Passed
+  2627 of 2627, suite 18 s (default dotnet, /usr/local/share/dotnet).
+G5 (16:08:27): the same with -f net8.0 under DOTNET_ROOT=$HOME/.dotnet
+  PATH=$HOME/.dotnet:$PATH DOTNET_MULTILEVEL_LOOKUP=0: exit 0, 2627 of
+  2627, suite 14 s; the run line reads "(.NETCoreApp,Version=v8.0)".
+  Totals are unchanged from CP5/CP6 (2627), as planned: CP7 adds no test.
+  The known flake (ProducerSubmitHandleRefTests.SubmitVoidOperation_When
+  AddRefThrows_DoesNotRootTheCompletionContext) did not fail on either
+  runtime (0 mentions in either log), so there was nothing to re-run.
+  net462 is built in G2 and not run (§4.1).
+G8 (16:08:44-16:09:14)
+- make -C bindings/dotnet test-soak-dotnet under the $HOME/.dotnet env:
+  exit 0; 0W/0E twice; SoakClient.Tests 165/165 on net8.0 and 165/165 on
+  net10.0.
+- dotnet build -c Release bindings/dotnet/tests/Performance/PerfV3: exit 0,
+  0W/0E.
+- dotnet test -c Release -f net10.0 <PerformanceTests.csproj> --filter
+  'FullyQualifiedName!~PerfV3SmokeTests': exit 0, 25/25.
+G9 (16:09:14, host route as CP0 recorded)
+- dotnet build -c Release --no-incremental <grpc-server csproj>: exit 0,
+  0W/0E, 00:00:01.84.
+- dotnet format <grpc-server csproj> --verify-no-changes: exit 0, 0 bytes.
+- command grep -c 'public override': ProducerServiceImpl.cs 13,
+  AsyncProducerServiceImpl.cs 13.
+- Image route: G10 step 3 below (dotnet publish under
+  TreatWarningsAsErrors, both images).
+G11 (16:09:22, repo root)
+- cargo xtask format-check: exit 0 ("All code is properly formatted!").
+- cargo xtask lint: exit 0 ("No lint issues found!"), 16:09:28-16:12:50.
+  It first waited on "file lock on build directory"; no other cargo
+  command of this run was active at the time.
+G1 (16:12:50)
+- git diff 76629aea -- src/ src/ffi/ cbindgen.toml generator/ tests/:
+  0 bytes, and 0 untracked files there.
+- confluent_kafka.h sha256
+  e8d39f09f4ac71c4e21c0196c0534dd06f353c475a741104c8d37a6a7da5d111, the
+  CP0 value. It is the same before G2, after G2, after the G10
+  cross-build (16:19:50) and after the G10 runs (16:24). The file's mtime
+  is still 2026-09-25 18:20:23.
+- Control positive: git diff --stat 76629aea -- bindings/dotnet/ is 34
+  files, +10048 / -201.
+G6: command grep -r --include='*.cs' 'internal static extern'
+  bindings/dotnet/src | wc -l prints 715.
+G7
+- git diff 76629aea -- bindings/dotnet/src bindings/dotnet/tests
+  bindings/dotnet/grpc-server Makefile | command grep -nE
+  '^\+.*\b(TODO|FIXME|XXX|HACK)\b': exit 1, no output. Control positive:
+  the same diff with (InitTransactions|SendOffsetsToTransaction) gives 38.
+- The same marker grep over git diff HEAD -- Makefile: exit 1.
+- git status --short: " M Makefile", the CP4-CP6 paths (M and ??),
+  COMMENTS.DONE.84.md, the agent-memory folders and the user's own
+  entries (kafka, the persona files), all untouched.
+
+G10 local Docker gate (§4.5, run as written; 16:10:04-16:24:17)
+---------------------------------------------------------------
+Foreign workloads: docker ps showed no running container at 16:10:04 and
+16:21:48, and ps found no chaos or integration process. The networks were
+bridge, ducknet, host and none before and after. docker ps -a lists 14
+exited "ducker*" containers (3 days old) and nothing else; they were not
+ours and were not touched.
+0. docker info: exit 0 (server 29.6.1, aarch64, 18 CPUs).
+1. docker run --rm --platform linux/amd64 -v "$PWD":/work -w /work \
+     rust:1-bookworm cargo build --features ffi --release \
+     --target-dir target/linux-amd64
+   exit 0, 16:13:06-16:19:50 (6m43s; compile "5m 22s", 53 crates
+   recompiled, and the container installed toolchain 1.95.0). The image
+   is rust:1-bookworm sha256:93ce27a88655, the CP0 image; the log has no
+   "Unable to find image" line. (A plain `docker image inspect` printed
+   "No such image" before the run and the id after it; see (c).)
+   target/linux-amd64/release/libconfluent_kafka.so is an x86-64 ELF,
+   sha256 7b7590a08580b04761201801aeabf6c11724ffe93b8c3de75be6667a467391ee,
+   the same bytes as at CP0. The header hash afterwards is unchanged (G1).
+2. cp target/linux-amd64/release/libconfluent_kafka.so
+     target/release/libconfluent_kafka.so: exit 0, same sha256.
+   The exact §4.5 nm selector, inside a linux/amd64 rust:1-bookworm
+   container, prints 18. The same .so exports 836 " T kafka_" symbols.
+3. DOCKER_DEFAULT_PLATFORM=linux/amd64 make -C bindings/dotnet grpc-image
+   grpc-image-async: exit 0, 16:20:54-16:21:31 (36.5 s). It built
+     confluent-kafka-rust/dotnet-grpc-server:dev        sha256:20427f034463
+       amd64, CONSUMER_FLAVOR=sync
+     confluent-kafka-rust/dotnet-async-grpc-server:dev  sha256:395f8fbc6fac
+       amd64, CONSUMER_FLAVOR=async
+   The builder's dotnet publish ran (27.9 s, not cached) with no warning
+   or error line in the log; the async build reused that builder stage.
+   DOTNET_VERSION=8.0.31 in both.
+4. With DOCKER_DEFAULT_PLATFORM unset (env -u; the shell printed "unset"):
+     cargo test --features integration-tests,multilanguage-tests \
+       --test integration -- __grpc_dotnet
+   No --skip. Exit 0, 16:21:58-16:22:53.
+     running 152 tests
+     test result: ok. 152 passed; 0 failed; 0 ignored; 0 measured;
+     570 filtered out; finished in 46.69s
+5. The roster (the CP0.txt pipeline, --list) prints "152 tests, 0
+   benchmarks" before (16:21:49) and after step 4; the two sorted lists
+   are identical, and each is byte-identical to CP0-roster.txt. It is
+   stored as CP7-roster.txt. It holds 116 __grpc_dotnet and 36
+   __grpc_dotnet_async names, as at CP0.
+
+Gate at CP7 (§4.5), with the CP0.txt pipelines
+-----------------------------------------------
+  check                                          required     measured
+  roster CP7 vs CP0-roster.txt                   identical    identical (152)
+  CP7 FAILED list (CP7-failed.txt)               -            0 names
+  comm -13 CP0-failed CP7-failed (new failures)  empty        empty
+  comm -23 CP0-failed CP7-failed (fixed)         the 6 arms   the 6 arms, 6 lines
+  six arms in the CP7 ok list (grep -cxF -f)     6            6
+  CP7 total vs roster                            152          152 (152 ok, 0 failed)
+  ok list vs roster                              -            identical
+  each arm alone, --exact, full path             1 run/1 ok   6 of 6 (below)
+The six isolated runs (cp7/gates/alone/1-6.log), each named by its full
+path from CP0-failed.txt; every log prints "running 1 test" and "test
+result: ok. 1 passed", and each exits 0:
+  16:23:15 ...test_aborted_transaction_records_are_discarded__grpc_dotnet
+  16:23:30 ...test_aborted_transaction_records_are_discarded__grpc_dotnet_async
+  16:23:46 ...test_consume_transform_produce_with_offsets__grpc_dotnet
+  16:23:53 ...test_consume_transform_produce_with_offsets__grpc_dotnet_async
+  16:24:02 ...test_transactional_records_are_visible_only_after_commit__grpc_dotnet
+  16:24:17 ...test_transactional_records_are_visible_only_after_commit__grpc_dotnet_async
+  ("..." is producer_transactions_test::.)
+Negative control for §4.5's WARNING: the short name
+test_transactional_records_are_visible_only_after_commit__grpc_dotnet with
+--exact prints "running 0 tests" and "ok. 0 passed ... 722 filtered out",
+exit 0. So exit codes alone are not evidence, as the plan says.
+No re-run was needed: there was no new failure.
+The known shared-broker flake (test_ml_assign_and_consume__grpc_dotnet_async,
+M14/P2 note (v)) passed.
+
+Stale-text sweep (brief item 3; cp7/stale/)
+-------------------------------------------
+Scope: the worktree, excluding target/, kafka/, bin/, obj/, .git/ and
+node_modules/, binary files skipped. Nothing was fixed outside the
+Makefile.
+Single-line searches (command grep -rniIE; cp7/stale/sweep.sh, P1-P14):
+  'unimplemented', 'not implemented', 'remains? deferred', 'three tests
+  are skipped', '--skip test_', 'transaction parity', 'parity with
+  python', 'not exposed', 'exposes no', 'no transaction(al)? surface',
+  'has no transaction', 'transactions? (are|is) (not|un|deferred|skipped|
+  missing)', 'deferred.{0,40}transaction|transaction.{0,40}deferred',
+  'skip.{0,40}transaction|transaction.{0,60}skip'.
+Wrap-independent search (cp7/stale/multiline.pl): three patterns where a
+word gap is any run of whitespace and comment leaders (/, #, *, >, |), over
+727 git-listed files in bindings/dotnet, Makefile, tests, design/current,
+.semaphore, bindings/CLAUDE.md, .claude/rules, CLAUDE.md and README.md,
+design/history and agent-memory excluded. It found bindings/dotnet/
+CLAUDE.md:58, which the single-line searches miss (the sentence wraps).
+Hits that still say .NET transactions are absent, deferred or skipped:
+  1. bindings/dotnet/CLAUDE.md:58-59  "Admin / transactions are **not**
+     exposed yet." (Admin is stale too: Admin/IAdmin.cs exists.)
+  2. bindings/dotnet/soak/README.md:109-111  "... and the .NET surface
+     exposes no transactions."
+  3. bindings/dotnet/soak/ccloud.config.example:63-65  "... and
+     transactions are not exposed at the .NET surface."
+  4. bindings/dotnet/design/current/STATUS.md:15 (before the M17/P1
+     entry was added; annotated in place since) the M15/P12 entry's
+     residual (b): "3 pre-existing producer_transactions_test::
+     *__grpc_dotnet arms -- the .NET producer has no transactional
+     surface, so the generated servicer base answers Unimplemented".
+  5. bindings/dotnet/design/current/STATUS.md:384 (before the M17/P1
+     entry was added; annotated in place since) the M11/P5 entry:
+     "still-deferred producer work: transactions, clientInstanceId, ...".
+The Makefile now has 0 hits for every pattern above.
+Hits that are not .NET-transaction staleness (listed, not acted on):
+- tests/integration/producer_transactions_test.rs:674-678  says the
+  Python gRPC servers have no transaction handlers (PR #175) and the
+  __grpc_python* arms fail UNIMPLEMENTED. Not .NET; tests/ is under G1.
+- bindings/python/soak/README.md:151, bindings/python/soak/
+  ccloud.config.example:59  the Python soak's "transactions are not
+  exposed". Not .NET.
+- grpc-server/ProducerServiceImpl.cs:416, AsyncProducerServiceImpl.cs:432
+  "Unimplemented": the GetCallbackLog history (M14/P2), still accurate.
+- design/history/**, COMMENTS.DONE.84.md, PLAN.md and gate/CP0-CP6.txt:
+  archival records of the pre-CP7 state (for example CP0.txt's
+  "Unimplemented" and PLAN.md:1388's check pattern).
+
+Observations for the Manager
+----------------------------
+(a) Decision: the five live hits above are yours (STATUS.md is the
+    Manager's; bindings/dotnet/CLAUDE.md is a rule file this phase does
+    not edit; the soak files are outside §4.3's CP7 list). Hits 2 and 3
+    also call enable.idempotence "inert"; I did not measure that clause.
+(b) G10 is local evidence only. CI's verify-dotnet (Linux amd64) is the
+    verifier and runs test-integration-dotnet as written, now with no
+    --skip (§4.6, Q25). Nothing is pushed.
+(c) Before step 1, `docker image inspect rust:1-bookworm` (no --platform)
+    printed "No such image"; after the run the same command printed
+    sha256:93ce27a88655 with an empty Architecture. The run itself used the
+    local amd64 image without a pull. This looks like a per-platform lookup
+    in the daemon's image store; it did not affect the gate.
+(d) Step 3 re-tagged the two :dev images. The CP0 builds (fca1c70b73b2,
+    01a5cb8f8074) lose their tag but were not removed.
+(e) The cross-build recompiled 53 crates although target/linux-amd64 was
+    warm from CP0; the output .so is byte-identical to CP0's.
