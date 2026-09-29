@@ -19430,7 +19430,12 @@ pub struct kafka_admin_DeleteAclsResult_t {
     _private: [u8; 0],
 }
 
-/// One `DeleteAclsResult.FilterResult`: exactly one of the two is present.
+/// One `DeleteAclsResult.FilterResult`. Java builds it as
+/// `new FilterResult(aclBinding, aclError.exception(message))`
+/// (`KafkaAdminClient.java:2705-2708`): the matched binding is always there and
+/// the exception is non-null when deleting it failed, so **both** can be
+/// present (`binding` is absent only if the response's binding cannot be
+/// decoded).
 struct DeleteAclsFilterResultInner {
     binding: Option<AclBindingInner>,
     error: Option<ErrorInner>,
@@ -19604,13 +19609,14 @@ pub unsafe extern "C" fn kafka_admin_DeleteAclsResult_get_result_count(
     }
 }
 
-/// Returns the ACL binding deleted by the filter at `index`, entry
-/// `result_index` (borrowed), or null when that entry carries an exception
-/// instead, or when either index is out of range. Do not free it.
+/// Returns the ACL binding the filter at `index` matched, entry `result_index`
+/// (borrowed), or null when either index is out of range (or the broker's
+/// binding could not be decoded). Do not free it.
 ///
-/// Java's `FilterResult` holds exactly one of a binding or an exception, so
-/// this and [`kafka_admin_DeleteAclsResult_get_result_error`] are
-/// complementary: for an in-range entry, precisely one of them is non-null.
+/// As in Java's `FilterResult`, the binding and
+/// [`kafka_admin_DeleteAclsResult_get_result_error`] are **not** exclusive:
+/// Java builds each entry with the matched binding and, when deleting it
+/// failed, the exception too, so a failed entry has both.
 ///
 /// # Safety
 ///
@@ -19642,8 +19648,8 @@ pub unsafe extern "C" fn kafka_admin_DeleteAclsResult_get_binding(
 }
 
 /// Returns the exception for the filter at `index`, entry `result_index`
-/// (borrowed), or null when that entry carries a deleted binding instead, or
-/// when either index is out of range. Do not destroy it.
+/// (borrowed), or null when deleting that entry's binding succeeded, or when
+/// either index is out of range. Do not destroy it.
 ///
 /// This is Java's `FilterResult.error()`: the filter matched this ACL but
 /// deleting it failed. It is independent of
@@ -19786,12 +19792,12 @@ pub unsafe extern "C" fn kafka_admin_FilterResults_count(results: *const kafka_a
 }
 
 /// Returns the ACL binding at `index` (borrowed, valid until this handle is
-/// destroyed), or null when that entry carries an exception instead, or
-/// `index` is out of range. Do not free it directly.
+/// destroyed), or null when `index` is out of range (or the broker's binding
+/// could not be decoded). Do not free it directly.
 ///
-/// Exactly one of this and [`kafka_admin_FilterResults_get_error`]
-/// is non-null for an in-range entry, mirroring Java's `FilterResult` holding
-/// exactly one of a binding or an exception.
+/// As in Java's `FilterResult`, this and
+/// [`kafka_admin_FilterResults_get_error`] are **not** exclusive: a
+/// failed deletion has both the matched binding and the exception.
 ///
 /// # Safety
 ///
@@ -19814,8 +19820,8 @@ pub unsafe extern "C" fn kafka_admin_FilterResults_get_binding(
 }
 
 /// Returns the exception for the entry at `index` (borrowed), or null when
-/// that entry carries a deleted binding instead, or `index` is out of range.
-/// Do not destroy it directly.
+/// deleting that entry's binding succeeded, or `index` is out of range. Do not
+/// destroy it directly.
 ///
 /// # Safety
 ///
@@ -20732,8 +20738,8 @@ fn delete_acls_options(timeout_ms: i32) -> DeleteAclsOptions {
 /// handle — the same opaque type [`kafka_admin_DeleteAclsResult_get_filter`]
 /// returns borrowed from the synchronous result — which the callback must
 /// free with [`kafka_common_acl_AclBindingFilter_destroy`]. Exactly one of
-/// `value` / `error` is non-null: `value` is the filter's own future failing
-/// (nothing was deleted for it) mapping to
+/// `value` / `error` is non-null: a non-null `error` is the filter's own future
+/// failing (nothing was deleted for it), mapping to
 /// [`kafka_admin_DeleteAclsResult_get_error`]'s condition, while a non-null
 /// `value` is an owned [`kafka_admin_FilterResults_t`] — the per-ACL
 /// results this filter matched, mirroring
@@ -24746,9 +24752,11 @@ struct ScramAllRow {
 ///     credentials — a successful description); `Err` is the first user-level
 ///     error whose code is neither NONE nor RESOURCE_NOT_FOUND, which faults the
 ///     whole view.
-///   - `users_view` — Java `users()` (`:92-104`): the distinct users whose error
-///     is not RESOURCE_NOT_FOUND (so RNF users are **excluded**, hard-error users
-///     are included), in response order.
+///   - `users_view` — Java `users()` (`:92-104`): every response row whose error
+///     is not RESOURCE_NOT_FOUND, as the row's user, in response order and not
+///     de-duplicated (Java filters the rows into a `List`), so RNF users are
+///     **excluded** and users with a credential that could not be described
+///     (another error) are **included**.
 ///   - `description(user)` is served on demand from `core` (Java `:114-138`): it
 ///     **faults** with RESOURCE_NOT_FOUND for an RNF user (":128 RESOURCE_NOT_FOUND
 ///     is included here") and for a user not present ("No such user: <user>").
@@ -24928,8 +24936,11 @@ pub unsafe extern "C" fn kafka_admin_DescribeUserScramCredentialsResult_all_get_
     }
 }
 
-/// `users()` view: number of distinct users with at least one credential (Java
-/// `users()`, RESOURCE_NOT_FOUND users excluded).
+/// `users()` view: the number of users Java's `users()` lists — every response
+/// row whose error is not RESOURCE_NOT_FOUND, in response order and not
+/// de-duplicated. Users that do not exist or have no credential are excluded;
+/// users that have a credential but could not be described (any other error)
+/// are included, as Java's javadoc states.
 ///
 /// # Safety
 ///
