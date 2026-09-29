@@ -6589,6 +6589,26 @@ static PyObject* py_Admin_describe_client_quotas_async(PyObject* self, PyObject*
     Py_RETURN_NONE;
 }
 
+// Distinct entities across alter_client_quotas `entries` rows ((pairs, ops)),
+// compared as Java's ClientQuotaEntity compares them -- as a map, so the order
+// of a row's (type, name) pairs does not matter. The Rust FFI fires one
+// callback per distinct entity. Returns -1 with an exception set on failure.
+static Py_ssize_t count_distinct_quota_entities(PyObject* entries, Py_ssize_t n) {
+    PyObject* seen = PySet_New(NULL);
+    if (seen == NULL) return -1;
+    for (Py_ssize_t i = 0; i < n; i++) {
+        PyObject* item = PySequence_GetItem(entries, i);  // new ref
+        PyObject* pairs = item ? PySequence_GetItem(item, 0) : NULL;  // new ref
+        PyObject* entity = pairs ? PyFrozenSet_New(pairs) : NULL;
+        int added = entity ? PySet_Add(seen, entity) : -1;
+        Py_XDECREF(entity); Py_XDECREF(pairs); Py_XDECREF(item);
+        if (added < 0) { Py_DECREF(seen); return -1; }
+    }
+    Py_ssize_t distinct = PySet_Size(seen);
+    Py_DECREF(seen);
+    return distinct;
+}
+
 static PyObject* py_Admin_alter_client_quotas_async(PyObject* self, PyObject* args) {
     unsigned long long h; PyObject* entries; int timeout_ms; int validate_only; PyObject* cb;
     if (!PyArg_ParseTuple(args, "KOipO", &h, &entries, &timeout_ms, &validate_only, &cb))
@@ -6691,15 +6711,14 @@ static PyObject* py_Admin_alter_client_quotas_async(PyObject* self, PyObject* ar
         if (!ok) { failed = 1; built++; break; }
     }
 
+    // One callback invocation per DISTINCT entity: Java's per-entity future
+    // map collapses a repeated entity, and admin_async_per_key_op fires once
+    // per distinct key. admin.py sends every row (a repeated entity is sent
+    // twice, as in Java), so the row count `n` can exceed the callback count.
+    Py_ssize_t distinct = failed ? 0 : count_distinct_quota_entities(entries, n);
+    if (distinct < 0) failed = 1;
     if (!failed) {
-        // One callback invocation per requested row - Java's per-entity
-        // future map collapses a duplicate entity, but the native `keys` for
-        // the fan-out is built from these raw rows, not deduplicated by
-        // entity (see admin_async_per_key_op / read_client_quota_entity_keys
-        // in src/ffi/admin.rs), so the increment count is the row count `n`,
-        // not the (possibly smaller) distinct-entity count the Python
-        // `futures` dict holds.
-        admin_incref_n(cb, n);
+        admin_incref_n(cb, distinct);
         kafka_admin_AdminClient_alter_client_quotas_async(
             (kafka_admin_AdminClient_t*)(uintptr_t)h,
             (const char* const* const*)entity_types, (const char* const* const*)entity_names,
