@@ -25,13 +25,13 @@ use std::sync::atomic::{self, AtomicI32};
 
 use log::{info, warn};
 
-use crate::CommonClientConfigs;
 use crate::common::Error;
 use crate::common::config::{SaslConfig, SaslConfigs, SslConfig};
 use crate::common::record::internal::CompressionType;
 use crate::common::security::SecurityProtocol;
 use crate::producer::internals::KeyHasher;
 use crate::producer::{Partitioner, RoundRobinPartitioner};
+use crate::{ClientDnsLookup, CommonClientConfigs};
 
 /// Process-wide counter for deriving a default `client.id`.
 ///
@@ -56,6 +56,10 @@ pub struct ProducerConfig {
     /// `bootstrap.servers` - A list of host/port pairs to use for establishing the
     /// initial connection to the Kafka cluster.
     pub(crate) bootstrap_servers: Vec<String>,
+
+    /// `client.dns.lookup` - Controls how the client uses DNS lookups.
+    /// Default: [`ClientDnsLookup::UseAllDnsIps`].
+    pub(crate) client_dns_lookup: ClientDnsLookup,
 
     /// `client.id` - An id string to pass to the server when making requests.
     pub(crate) client_id: String,
@@ -270,6 +274,7 @@ impl Default for ProducerConfig {
     fn default() -> Self {
         Self {
             bootstrap_servers: Vec::new(),
+            client_dns_lookup: ClientDnsLookup::UseAllDnsIps,
             client_id: String::new(),
             security_protocol: SecurityProtocol::Plaintext,
             sasl_config: SaslConfig::default(),
@@ -320,6 +325,10 @@ impl ProducerConfig {
 
     /// Config key: `bootstrap.servers`
     pub const BOOTSTRAP_SERVERS_CONFIG: &'static str = "bootstrap.servers";
+    /// Config key: `client.dns.lookup` (see
+    /// [`CommonClientConfigs::CLIENT_DNS_LOOKUP_CONFIG`]). Java's `ProducerConfig.java`
+    /// declares its own public alias of the `CommonClientConfigs` constant.
+    pub const CLIENT_DNS_LOOKUP_CONFIG: &'static str = CommonClientConfigs::CLIENT_DNS_LOOKUP_CONFIG;
     /// Config key: `client.id`
     pub const CLIENT_ID_CONFIG: &'static str = "client.id";
     /// Config key: `batch.size`
@@ -429,6 +438,9 @@ impl ProducerConfig {
             match key.as_str() {
                 Self::BOOTSTRAP_SERVERS_CONFIG => {
                     config.bootstrap_servers = value.split(',').map(|s| s.trim().to_string()).collect();
+                },
+                Self::CLIENT_DNS_LOOKUP_CONFIG => {
+                    config.client_dns_lookup = ClientDnsLookup::parse_config_value(value)?;
                 },
                 Self::CLIENT_ID_CONFIG => {
                     config.client_id = value.to_string();
@@ -1278,6 +1290,35 @@ mod tests {
             );
             assert!(error.is_kafka_error(), "for {props:?}: a config error is a Kafka error");
         }
+    }
+
+    /// `client.dns.lookup` defaults to `use_all_dns_ips` and parses into the
+    /// typed [`ClientDnsLookup`], as `ProducerConfig`'s `ConfigDef` defines it.
+    #[test]
+    fn test_client_dns_lookup() {
+        assert_eq!(ProducerConfig::CLIENT_DNS_LOOKUP_CONFIG, "client.dns.lookup");
+        let mut props = HashMap::new();
+        props.insert("bootstrap.servers".to_string(), "localhost:9092".to_string());
+        assert_eq!(
+            ProducerConfig::new(&props).unwrap().client_dns_lookup,
+            ClientDnsLookup::UseAllDnsIps
+        );
+
+        props.insert(
+            CommonClientConfigs::CLIENT_DNS_LOOKUP_CONFIG.to_string(),
+            "resolve_canonical_bootstrap_servers_only".to_string(),
+        );
+        assert_eq!(
+            ProducerConfig::new(&props).unwrap().client_dns_lookup,
+            ClientDnsLookup::ResolveCanonicalBootstrapServersOnly
+        );
+
+        props.insert(CommonClientConfigs::CLIENT_DNS_LOOKUP_CONFIG.to_string(), "default".to_string());
+        assert_eq!(
+            ProducerConfig::new(&props).unwrap_err().message(),
+            "Invalid value default for configuration client.dns.lookup: String must be one of: \
+             use_all_dns_ips, resolve_canonical_bootstrap_servers_only"
+        );
     }
 
     /// Translated from `ProducerConfigTest.testInvalidSecurityProtocol`.

@@ -18,10 +18,10 @@
 
 use std::collections::HashMap;
 
-use crate::CommonClientConfigs;
 use crate::common::Error;
 use crate::common::config::{SaslConfig, SaslConfigs, SslConfig};
 use crate::common::security::SecurityProtocol;
+use crate::{ClientDnsLookup, CommonClientConfigs};
 
 /// Configuration for the admin client.
 ///
@@ -30,6 +30,7 @@ use crate::common::security::SecurityProtocol;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AdminClientConfig {
     bootstrap_servers: Vec<String>,
+    client_dns_lookup: ClientDnsLookup,
     client_id: String,
     request_timeout_ms: i32,
     default_api_timeout_ms: i32,
@@ -57,6 +58,10 @@ pub struct AdminClientConfig {
 impl AdminClientConfig {
     /// `bootstrap.servers`
     pub const BOOTSTRAP_SERVERS_CONFIG: &'static str = "bootstrap.servers";
+    /// Config key: `client.dns.lookup` (see
+    /// [`CommonClientConfigs::CLIENT_DNS_LOOKUP_CONFIG`]). Java's `AdminClientConfig.java`
+    /// declares its own public alias of the `CommonClientConfigs` constant.
+    pub const CLIENT_DNS_LOOKUP_CONFIG: &'static str = CommonClientConfigs::CLIENT_DNS_LOOKUP_CONFIG;
     /// `client.id`
     pub const CLIENT_ID_CONFIG: &'static str = "client.id";
     /// `request.timeout.ms`
@@ -101,6 +106,9 @@ impl AdminClientConfig {
                 Self::BOOTSTRAP_SERVERS_CONFIG => {
                     config.bootstrap_servers = value.split(',').map(|s| s.trim().to_string()).collect();
                     bootstrap_set = true;
+                },
+                Self::CLIENT_DNS_LOOKUP_CONFIG => {
+                    config.client_dns_lookup = ClientDnsLookup::parse_config_value(value)?;
                 },
                 Self::CLIENT_ID_CONFIG => config.client_id = value.to_string(),
                 Self::REQUEST_TIMEOUT_MS_CONFIG => config.request_timeout_ms = parse_i32(key, value)?,
@@ -154,6 +162,11 @@ impl AdminClientConfig {
     /// The `bootstrap.servers` list.
     pub fn bootstrap_servers(&self) -> &[String] {
         &self.bootstrap_servers
+    }
+
+    /// `client.dns.lookup`.
+    pub fn client_dns_lookup(&self) -> ClientDnsLookup {
+        self.client_dns_lookup
     }
 
     /// The `client.id`.
@@ -232,6 +245,7 @@ impl Default for AdminClientConfig {
     fn default() -> Self {
         Self {
             bootstrap_servers: Vec::new(),
+            client_dns_lookup: ClientDnsLookup::UseAllDnsIps,
             client_id: String::new(),
             request_timeout_ms: 30_000,
             default_api_timeout_ms: 60_000,
@@ -294,6 +308,35 @@ mod tests {
         let config = AdminClientConfig::new(&props).unwrap();
         assert_eq!(config.client_id(), "admin-1");
         assert_eq!(config.request_timeout_ms(), 5000);
+    }
+
+    /// `client.dns.lookup` defaults to `use_all_dns_ips` and parses into the
+    /// typed [`ClientDnsLookup`], as `AdminClientConfig`'s `ConfigDef` defines it.
+    #[test]
+    fn test_client_dns_lookup() {
+        assert_eq!(AdminClientConfig::CLIENT_DNS_LOOKUP_CONFIG, "client.dns.lookup");
+        let mut props = HashMap::new();
+        props.insert("bootstrap.servers".to_string(), "a:9092".to_string());
+        assert_eq!(
+            AdminClientConfig::new(&props).unwrap().client_dns_lookup(),
+            ClientDnsLookup::UseAllDnsIps
+        );
+
+        props.insert(
+            CommonClientConfigs::CLIENT_DNS_LOOKUP_CONFIG.to_string(),
+            "resolve_canonical_bootstrap_servers_only".to_string(),
+        );
+        assert_eq!(
+            AdminClientConfig::new(&props).unwrap().client_dns_lookup(),
+            ClientDnsLookup::ResolveCanonicalBootstrapServersOnly
+        );
+
+        props.insert(CommonClientConfigs::CLIENT_DNS_LOOKUP_CONFIG.to_string(), "default".to_string());
+        assert_eq!(
+            AdminClientConfig::new(&props).unwrap_err().message(),
+            "Invalid value default for configuration client.dns.lookup: String must be one of: \
+             use_all_dns_ips, resolve_canonical_bootstrap_servers_only"
+        );
     }
 
     #[test]
