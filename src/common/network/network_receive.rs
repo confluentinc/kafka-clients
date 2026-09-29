@@ -68,6 +68,22 @@ impl NetworkReceive {
     /// Value indicating no maximum size limit for receives.
     pub const UNLIMITED: i32 = -1;
 
+    /// The most bytes this client's producer and admin client accept in one
+    /// receive, and the headroom the consumer adds to `fetch.max.bytes`
+    /// (APPSEC-7665 D5).
+    ///
+    /// Java's clients receive with no limit: `ClientUtils.createNetworkClient`
+    /// (`ClientUtils.java:198`) builds its `Selector` with a constructor that passes
+    /// [`UNLIMITED`](Self::UNLIMITED) (`Selector.java:229`, `:233`), so a broker's
+    /// 4-byte size header alone decides how much a client allocates. 100 MiB is a
+    /// broker's own default `socket.request.max.bytes`
+    /// (`SocketServerConfigs.java:96`), far above the responses a producer or an
+    /// admin client receives. A constant rather than a configuration key. An
+    /// oversized receive fails its size check in [`NetworkReceive`]'s reads with an
+    /// [`InvalidReceiveError`], which closes the connection as Java's `Selector`
+    /// does.
+    pub const DEFAULT_MAX_RECEIVE_SIZE: i32 = 100 * 1024 * 1024;
+
     /// Size of the header that precedes each message (4 bytes for the i32 size).
     const SIZE_LENGTH: usize = 4;
 
@@ -944,5 +960,34 @@ mod tests {
         let (source, buffer) = receive.into_source_and_payload();
         assert_eq!("node-9", source);
         assert!(buffer.is_none());
+    }
+
+    /// APPSEC-7665 D5: the production cap is a broker's default
+    /// `socket.request.max.bytes`, and a receive declaring one byte more is
+    /// refused with Java's `InvalidReceiveException` text before any payload
+    /// buffer exists — on the async path and on the `try_read` drain path.
+    #[tokio::test]
+    async fn test_default_max_receive_size_rejects_one_byte_more() {
+        assert_eq!(100 * 1024 * 1024, NetworkReceive::DEFAULT_MAX_RECEIVE_SIZE);
+        let header = (NetworkReceive::DEFAULT_MAX_RECEIVE_SIZE + 1).to_be_bytes().to_vec();
+        let expected = "Invalid receive (size = 104857601 larger than 104857600)";
+
+        let mut receive = NetworkReceive::with_max_size_source(NetworkReceive::DEFAULT_MAX_RECEIVE_SIZE, "0");
+        let err = receive
+            .read_from(&mut MockTransportLayer::new(header.clone()))
+            .await
+            .expect_err("one byte over the cap");
+        assert_eq!(io::ErrorKind::InvalidData, err.kind());
+        let invalid = err.get_ref().and_then(|e| e.downcast_ref::<InvalidReceiveError>());
+        assert_eq!(Some(expected), invalid.map(InvalidReceiveError::message));
+        assert!(!receive.memory_allocated(), "a refused receive allocates no payload buffer");
+
+        let mut receive = NetworkReceive::with_max_size_source(NetworkReceive::DEFAULT_MAX_RECEIVE_SIZE, "0");
+        let err = receive
+            .try_read_from(&mut ChunkedTryReadMock::new(header, 16, false))
+            .expect_err("one byte over the cap");
+        let invalid = err.get_ref().and_then(|e| e.downcast_ref::<InvalidReceiveError>());
+        assert_eq!(Some(expected), invalid.map(InvalidReceiveError::message));
+        assert!(!receive.memory_allocated());
     }
 }

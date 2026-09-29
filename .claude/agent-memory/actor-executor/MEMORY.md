@@ -160,7 +160,7 @@
 - [M11 G6 admin producers/transactions](m11_g6_admin_transactions_notes.md) — final slice 46/46; 4 questions that overturn "unreachable"; script truncation trap
 - [M11 Critic r17 claim accuracy](m11_round17_claim_accuracy_patterns.md) — expand predicates before claiming STRONGER; check-generated exit-1 trap
 - [Metadata-propagation races](integration_metadata_propagation_races.md) — create_topic proves ONE broker; coordinator-routed RPCs still race; retry idiom
-- [Integration flake hunting](integration_flake_hunting.md) — full target 534 tests/~80s so repeat it; prove lifetime fixes by reverting to HEAD~1
+- [Integration flake hunting](integration_flake_hunting.md) — full target 534 tests/~80s so repeat it; prove lifetime fixes by reverting to HEAD~1; suite can kill the Docker engine + user broker; docker rm is user's call
 - [M11 known-defect fixes](m11_known_defect_fixes.md) — Result-not-panic at FFI-reachable sites; python unit tests via the gRPC image
 - [Merge reconciliation test/impl hazard](merge_reconciliation_test_impl_hazard.md) — adopting side A's impl can break side B's auto-merged tests; run B's suite too
 - [Python bindings local build/test on macOS](python_bindings_local_build_test_macos.md) — build+run the C-extension + pytest locally; setuptools/pip workarounds
@@ -178,3 +178,5 @@
 - [Nullable array default](generator_nullable_array_default.md) — a new guard's first failures are wrong defaults; Java's array default is empty, not null
 - [Docker wedged → --no-verify](workflow_docker_wedged_no_verify.md) — pre-commit runs make verify-sandbox (needs Docker); run the non-Docker gate and say the rest is owed
 - [M14 verifiable-clients](m14_verifiable_clients_notes.md) — tools crate; EventReporter Arc split for listener/callback; Box<dyn Consumer> (dyn-compatible) not generic; StringDeserializer in main crate; JSON stdout is the wire
+- [APPSEC-7665 decode hardening](appsec7665_4520_decode_hardening_notes.md) — firstBatchSize≠hasNext; unsupported_version≠variant; alloc-bound tests
+- [Autosquash vs append-only logs](workflow_autosquash_append_only_logs.md) — fixups must not append to a list later commits extend; verify with a scratch-clone autosquash
