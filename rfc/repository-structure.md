@@ -42,6 +42,7 @@ its existing name:
 | `./javascript` | `confluent-kafka-javascript` |
 | `./c` | `confluent-kafka-c` |
 | `./cpp` | `confluent-kafka-cpp` |
+| `./go` | `confluent-kafka-go` |
 
 **Read-only** means the `main` branch of each mirror is published from the monorepo and is
 not edited directly; all new-client changes are made in `confluentinc/kafka-clients` and
