@@ -2149,7 +2149,7 @@ fn describe_config_result(result: &crate::describe_configs_response_data::Descri
                 .set_is_sensitive(config.is_sensitive)
                 .set_is_read_only(config.read_only)
                 .set_synonyms(synonyms)
-                .set_config_type(ConfigType::for_id(config.config_type))
+                .set_config_type(Some(ConfigType::for_id(config.config_type)))
                 .set_documentation(config.documentation.clone())
                 .build()
                 .expect("ConfigEntryOptionsBuilder::build: every mandatory parameter is set above"),
@@ -2634,6 +2634,11 @@ fn get_create_topics_call(
                                     .set_source(ConfigSource::for_id(c.config_source))
                                     .set_is_sensitive(c.is_sensitive)
                                     .set_is_read_only(c.read_only)
+                                    // `configEntry(CreatableTopicConfigs)`
+                                    // (`KafkaAdminClient.java:1884-1893`) passes
+                                    // `Collections.emptyList()` synonyms and a
+                                    // null type and documentation.
+                                    .set_config_type(None)
                                     .build()
                                     .expect("ConfigEntryOptionsBuilder::build: every mandatory parameter is set above"),
                             )
@@ -7249,6 +7254,11 @@ mod tests {
         assert!(entry.is_read_only());
         assert!(!entry.is_sensitive());
         assert_eq!(entry.source(), ConfigSource::DynamicTopicConfig);
+        // `configEntry(CreatableTopicConfigs)` (`KafkaAdminClient.java:1884-1893`):
+        // no synonyms, and a null type and documentation.
+        assert!(entry.synonyms().is_empty());
+        assert_eq!(entry.config_type(), None);
+        assert_eq!(entry.documentation(), None);
     }
 
     #[tokio::test]
