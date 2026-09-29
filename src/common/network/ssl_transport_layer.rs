@@ -869,6 +869,7 @@ impl io::Read for TryReadAdapter<'_> {
 mod tests {
     use super::*;
     use crate::common::config::SslConfig;
+    use crate::common::config::types::Password;
     use crate::common::network::is_authentication_error;
     use crate::common::security::SslFactory;
     use std::sync::Arc;
@@ -1484,9 +1485,11 @@ mod tests {
 
         let (cert_der, key_der, cert_pem) = make_self_signed();
 
-        let client_factory =
-            SslFactory::new(&SslConfig { truststore_certificates: Some(cert_pem), ..SslConfig::default() })
-                .expect("client SslFactory");
+        let client_factory = SslFactory::new(&SslConfig {
+            truststore_certificates: Some(Password::new(cert_pem)),
+            ..SslConfig::default()
+        })
+        .expect("client SslFactory");
 
         let cert = rustls::pki_types::CertificateDer::from(cert_der);
         let key = rustls::pki_types::PrivateKeyDer::Pkcs8(rustls::pki_types::PrivatePkcs8KeyDer::from(key_der));

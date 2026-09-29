@@ -23,6 +23,7 @@
 
 use std::net::SocketAddr;
 
+use confluent_kafka::common::config::types::Password;
 use confluent_kafka::common::config::{SaslConfig, SslConfig};
 use confluent_kafka::common::network::NetworkSend;
 use confluent_kafka::common::network::SaslChannelBuilder;
@@ -65,7 +66,7 @@ fn parse_bootstrap_addr(bootstrap_servers: &str) -> SocketAddr {
 /// Helper: create a Selector with SslChannelBuilder.
 fn create_ssl_selector(ca_cert_pem: &str) -> Selector {
     let ssl_config = SslConfig {
-        truststore_certificates: Some(ca_cert_pem.to_string()),
+        truststore_certificates: Some(Password::new(ca_cert_pem)),
         // Disable hostname verification for tests (connect via 127.0.0.1)
         endpoint_identification_algorithm: String::new(),
         ..SslConfig::default()
@@ -80,7 +81,7 @@ fn create_sasl_plaintext_selector(username: &str, password: &str) -> Selector {
     let sasl_config = SaslConfig {
         mechanism: "PLAIN".to_string(),
         username: Some(username.to_string()),
-        password: Some(password.to_string()),
+        password: Some(Password::new(password)),
         ..SaslConfig::default()
     };
     let channel_builder = SaslChannelBuilder::new(
@@ -98,7 +99,7 @@ fn create_sasl_plaintext_selector(username: &str, password: &str) -> Selector {
 /// Helper: create a Selector with SaslChannelBuilder for SASL_SSL.
 fn create_sasl_ssl_selector(username: &str, password: &str, ca_cert_pem: &str) -> Selector {
     let ssl_config = SslConfig {
-        truststore_certificates: Some(ca_cert_pem.to_string()),
+        truststore_certificates: Some(Password::new(ca_cert_pem)),
         endpoint_identification_algorithm: String::new(),
         ..SslConfig::default()
     };
@@ -106,7 +107,7 @@ fn create_sasl_ssl_selector(username: &str, password: &str, ca_cert_pem: &str) -
     let sasl_config = SaslConfig {
         mechanism: "PLAIN".to_string(),
         username: Some(username.to_string()),
-        password: Some(password.to_string()),
+        password: Some(Password::new(password)),
         ..SaslConfig::default()
     };
     let channel_builder = SaslChannelBuilder::new(
@@ -324,7 +325,7 @@ async fn test_sasl_unsupported_mechanism() {
     let sasl_config = SaslConfig {
         mechanism: "SCRAM-SHA-256".to_string(),
         username: Some(SASL_USERNAME.to_string()),
-        password: Some(SASL_PASSWORD.to_string()),
+        password: Some(Password::new(SASL_PASSWORD)),
         ..SaslConfig::default()
     };
     let channel_builder = SaslChannelBuilder::new(

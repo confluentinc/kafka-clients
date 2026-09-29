@@ -34,6 +34,7 @@ use std::collections::HashMap;
 use log::warn;
 
 use crate::common::Error;
+use crate::common::config::types::Password;
 use crate::common::config::{SaslConfig, SaslConfigs, SslConfig};
 use crate::common::security::SecurityProtocol;
 use crate::consumer::AutoOffsetResetStrategy;
@@ -808,7 +809,11 @@ impl ConsumerConfig {
                     config.sasl_config.mechanism = value.clone();
                 },
                 Self::SASL_JAAS_CONFIG => {
-                    config.sasl_config.jaas_config = if value.is_empty() { None } else { Some(value.clone()) };
+                    config.sasl_config.jaas_config = if value.is_empty() {
+                        None
+                    } else {
+                        Some(Password::new(value))
+                    };
                 },
                 key if key.starts_with("ssl.") => {
                     SslConfig::apply_ssl_config_key(&mut config.ssl_config, key, value);
@@ -1031,6 +1036,58 @@ mod tests {
         assert_eq!(c.sasl_config.mechanism, "PLAIN");
         assert_eq!(c.sasl_config.resolve_username(), Some("alice"));
         assert_eq!(c.sasl_config.resolve_password(), Some("secret"));
+    }
+
+    /// `{:?}` of a config built from every `Type.PASSWORD` key the client
+    /// parses (`sasl.jaas.config` and the six SSL keys) renders none of their
+    /// values. The derived `Debug` is safe because the embedded `SaslConfig`
+    /// and `SslConfig` hold those values as `Password`s.
+    #[test]
+    fn test_debug_redacts_password_configs() {
+        let secrets = [
+            (
+                "sasl.jaas.config",
+                "org.apache.kafka.common.security.plain.PlainLoginModule required \
+                 username=\"jaas-user\" password=\"jaas-S3cr3t\";",
+            ),
+            ("ssl.truststore.password", "truststore-S3cr3t"),
+            ("ssl.truststore.certificates", "TRUSTSTORE-CERTIFICATES-PEM"),
+            ("ssl.keystore.password", "keystore-S3cr3t"),
+            ("ssl.keystore.key", "KEYSTORE-KEY-PEM"),
+            ("ssl.keystore.certificate.chain", "KEYSTORE-CERTIFICATE-CHAIN-PEM"),
+            ("ssl.key.password", "key-S3cr3t"),
+        ];
+        let mut props: HashMap<String, String> = secrets
+            .iter()
+            .map(|(key, value)| (key.to_string(), value.to_string()))
+            .collect();
+        props.insert("bootstrap.servers".to_string(), "visible-host:9092".to_string());
+        props.insert("group.id".to_string(), "visible-group".to_string());
+        props.insert("sasl.mechanism".to_string(), "PLAIN".to_string());
+        props.insert("ssl.truststore.location".to_string(), "/visible/truststore.pem".to_string());
+        let c = ConsumerConfig::new(&props).unwrap();
+
+        // The secrets did reach the config; they are only hidden from `Debug`.
+        assert_eq!(c.sasl_config.resolve_password(), Some("jaas-S3cr3t"));
+        assert_eq!(c.ssl_config.key_password.as_ref().map(Password::value), Some("key-S3cr3t"));
+
+        for rendered in [format!("{c:?}"), format!("{c:#?}")] {
+            for (key, value) in secrets {
+                assert!(!rendered.contains(value), "{key} leaked: {rendered}");
+            }
+            for fragment in ["jaas-S3cr3t", "jaas-user", "PlainLoginModule", "S3cr3t", "-PEM"] {
+                assert!(!rendered.contains(fragment), "{fragment:?} leaked: {rendered}");
+            }
+            assert_eq!(rendered.matches(Password::HIDDEN).count(), secrets.len(), "{rendered}");
+            for visible in [
+                "visible-host:9092",
+                "visible-group",
+                "\"PLAIN\"",
+                "/visible/truststore.pem",
+            ] {
+                assert!(rendered.contains(visible), "{visible} missing: {rendered}");
+            }
+        }
     }
 
     /// Empty `sasl.jaas.config` → `None`.

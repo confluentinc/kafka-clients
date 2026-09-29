@@ -12,17 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Configuration types for Kafka clients (org.apache.kafka.common.config).
+//! Configuration value types (org.apache.kafka.common.config.types).
 
-mod config_error;
-mod config_resource;
-mod sasl_configs;
-mod ssl_client_auth;
-mod ssl_configs;
-pub mod types;
+mod password;
 
-pub use config_error::ConfigError;
-pub use config_resource::{ConfigResource, ConfigResourceType};
-pub use sasl_configs::{SaslConfig, SaslConfigs};
-pub use ssl_client_auth::SslClientAuth;
-pub use ssl_configs::{SslConfig, SslConfigs};
+pub use password::Password;

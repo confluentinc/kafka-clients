@@ -194,6 +194,7 @@ impl ChannelBuilder for SaslChannelBuilder {
 mod tests {
     use super::*;
     use crate::common::config::SslConfig;
+    use crate::common::config::types::Password;
     use crate::common::network::DefaultChannelMetadataRegistry;
 
     /// Test 1: Build channel with SASL_PLAINTEXT creates a channel that is not ready.
@@ -207,7 +208,7 @@ mod tests {
         let sasl_config = SaslConfig {
             mechanism: "PLAIN".to_string(),
             username: Some("alice".to_string()),
-            password: Some("secret".to_string()),
+            password: Some(Password::new("secret")),
             ..SaslConfig::default()
         };
         let builder = SaslChannelBuilder::new(
@@ -241,7 +242,7 @@ mod tests {
         let sasl_config = SaslConfig {
             mechanism: "PLAIN".to_string(),
             username: Some("alice".to_string()),
-            password: Some("secret".to_string()),
+            password: Some(Password::new("secret")),
             ..SaslConfig::default()
         };
         let ssl_factory = SslFactory::new(&SslConfig::default()).unwrap();
@@ -271,7 +272,7 @@ mod tests {
         // Missing username
         let sasl_config = SaslConfig {
             mechanism: "PLAIN".to_string(),
-            password: Some("secret".to_string()),
+            password: Some(Password::new("secret")),
             ..SaslConfig::default()
         };
         let result = SaslChannelBuilder::new(
@@ -309,7 +310,7 @@ mod tests {
         let sasl_config = SaslConfig {
             mechanism: "PLAIN".to_string(),
             username: Some("alice".to_string()),
-            password: Some("secret".to_string()),
+            password: Some(Password::new("secret")),
             ..SaslConfig::default()
         };
         let result = SaslChannelBuilder::new(

@@ -27,6 +27,7 @@ use log::{info, warn};
 
 use crate::CommonClientConfigs;
 use crate::common::Error;
+use crate::common::config::types::Password;
 use crate::common::config::{SaslConfig, SaslConfigs, SslConfig};
 use crate::common::record::internal::CompressionType;
 use crate::common::security::SecurityProtocol;
@@ -603,7 +604,7 @@ impl ProducerConfig {
                     config.sasl_config.jaas_config = if value.is_empty() {
                         None
                     } else {
-                        Some(value.to_string())
+                        Some(Password::new(value))
                     };
                 },
                 key if key.starts_with("ssl.") => {

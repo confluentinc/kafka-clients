@@ -209,7 +209,7 @@ fn build_root_cert_store(ssl_config: &SslConfig) -> io::Result<RootCertStore> {
             })?;
         }
     } else if let Some(ref pem_data) = ssl_config.truststore_certificates {
-        let mut reader = io::BufReader::new(pem_data.as_bytes());
+        let mut reader = io::BufReader::new(pem_data.value().as_bytes());
         let certs = rustls_pemfile::certs(&mut reader).collect::<Result<Vec<_>, _>>().map_err(|e| {
             io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -246,7 +246,7 @@ fn load_client_identity(
 ) -> io::Result<Option<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>)>> {
     // Check for inline PEM cert chain + key
     let certs = if let Some(ref chain_pem) = ssl_config.keystore_certificate_chain {
-        let mut reader = io::BufReader::new(chain_pem.as_bytes());
+        let mut reader = io::BufReader::new(chain_pem.value().as_bytes());
         let certs = rustls_pemfile::certs(&mut reader).collect::<Result<Vec<_>, _>>().map_err(|e| {
             io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -282,7 +282,7 @@ fn load_client_identity(
     };
 
     let key = if let Some(ref key_pem) = ssl_config.keystore_key {
-        let mut reader = io::BufReader::new(key_pem.as_bytes());
+        let mut reader = io::BufReader::new(key_pem.value().as_bytes());
         let key = rustls_pemfile::private_key(&mut reader)
             .map_err(|e| {
                 io::Error::new(
@@ -445,6 +445,7 @@ impl ServerCertVerifier for NoHostnameVerifier {
 mod tests {
     use super::*;
     use crate::common::config::SslConfig;
+    use crate::common::config::types::Password;
 
     /// Self-signed CA certificate for testing (generated with openssl).
     const TEST_CA_CERT: &str = "\
@@ -529,7 +530,10 @@ B2V9lhUZNk+pRjtJw9unpXsM
 
     #[test]
     fn test_build_with_inline_truststore() {
-        let config = SslConfig { truststore_certificates: Some(TEST_CA_CERT.to_string()), ..SslConfig::default() };
+        let config = SslConfig {
+            truststore_certificates: Some(Password::new(TEST_CA_CERT)),
+            ..SslConfig::default()
+        };
         let factory = SslFactory::new(&config).unwrap();
         assert!(factory.hostname_verification());
     }
@@ -556,9 +560,9 @@ B2V9lhUZNk+pRjtJw9unpXsM
     #[test]
     fn test_build_with_client_cert() {
         let config = SslConfig {
-            truststore_certificates: Some(TEST_CA_CERT.to_string()),
-            keystore_certificate_chain: Some(TEST_CLIENT_CERT.to_string()),
-            keystore_key: Some(TEST_CLIENT_KEY.to_string()),
+            truststore_certificates: Some(Password::new(TEST_CA_CERT)),
+            keystore_certificate_chain: Some(Password::new(TEST_CLIENT_CERT)),
+            keystore_key: Some(Password::new(TEST_CLIENT_KEY)),
             ..SslConfig::default()
         };
         let factory = SslFactory::new(&config);
@@ -639,7 +643,7 @@ B2V9lhUZNk+pRjtJw9unpXsM
     #[test]
     fn test_invalid_pem_truststore() {
         let config = SslConfig {
-            truststore_certificates: Some("not a valid PEM".to_string()),
+            truststore_certificates: Some(Password::new("not a valid PEM")),
             ..SslConfig::default()
         };
         let result = SslFactory::new(&config);
@@ -653,7 +657,7 @@ B2V9lhUZNk+pRjtJw9unpXsM
     #[test]
     fn test_cert_without_key_error() {
         let config = SslConfig {
-            keystore_certificate_chain: Some(TEST_CLIENT_CERT.to_string()),
+            keystore_certificate_chain: Some(Password::new(TEST_CLIENT_CERT)),
             // No key provided
             ..SslConfig::default()
         };

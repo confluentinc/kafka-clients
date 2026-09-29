@@ -116,6 +116,7 @@ impl ChannelBuilders {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::common::config::types::Password;
 
     #[test]
     fn test_plaintext_builder() {
@@ -167,7 +168,7 @@ mod tests {
         let sasl_config = SaslConfig {
             mechanism: "PLAIN".to_string(),
             username: Some("alice".to_string()),
-            password: Some("secret".to_string()),
+            password: Some(Password::new("secret")),
             ..SaslConfig::default()
         };
         let result = ChannelBuilders::client_channel_builder(
@@ -187,7 +188,7 @@ mod tests {
         let sasl_config = SaslConfig {
             mechanism: "PLAIN".to_string(),
             username: Some("alice".to_string()),
-            password: Some("secret".to_string()),
+            password: Some(Password::new("secret")),
             ..SaslConfig::default()
         };
         let result = ChannelBuilders::client_channel_builder(
@@ -206,7 +207,7 @@ mod tests {
         let sasl_config = SaslConfig {
             mechanism: "PLAIN".to_string(),
             username: Some("alice".to_string()),
-            password: Some("secret".to_string()),
+            password: Some(Password::new("secret")),
             ..SaslConfig::default()
         };
         let result = ChannelBuilders::client_channel_builder(
