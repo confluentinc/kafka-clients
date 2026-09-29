@@ -18473,9 +18473,11 @@ unsafe fn read_acl_bindings(
     Ok(out)
 }
 
-/// Raw `(resource_type, resource_name, pattern_type, principal, host,
-/// operation, permission_type)` tuple: the per-key identity used for
-/// `createAcls`'s [`admin_async_per_key_op`] fan-out.
+/// `(resource_type, resource_name, pattern_type, principal, host, operation,
+/// permission_type)` tuple: the per-key identity used for `createAcls`'s
+/// [`admin_async_per_key_op`] delivery — built by [`acl_binding_key`] from the
+/// validated bindings, or, when the bindings cannot be built, read raw from the
+/// rows by [`read_acl_binding_keys`] for the submission-failure fan-out.
 ///
 /// `AclBinding`'s constructor validates its constituent `ResourcePattern` /
 /// `AccessControlEntry` (rejecting e.g. an ANY resource type — see
@@ -18491,8 +18493,11 @@ unsafe fn read_acl_bindings(
 /// `type Row = (...)` alias below.
 type AclBindingKey = (i32, String, i32, String, String, i32, i32);
 
-/// Converts an already-validated [`AclBinding`] to its [`AclBindingKey`] raw
-/// form, for matching against [`read_acl_binding_keys`]'s output.
+/// Converts an already-validated [`AclBinding`] to its [`AclBindingKey`] form
+/// — the key `createAcls`'s per-binding callback is delivered under whenever
+/// the bindings parse. Enum codes are the binding's own `code()`s, so an
+/// undefined input code comes back as UNKNOWN's code, as Java's `fromCode`
+/// maps it.
 fn acl_binding_key(binding: &AclBinding) -> AclBindingKey {
     let pattern = binding.pattern();
     let entry = binding.entry();
@@ -20239,7 +20244,10 @@ fn create_acls_options(timeout_ms: i32) -> CreateAclsOptions {
 /// [`kafka_common_acl_AclBinding_t`] handle — the same opaque type
 /// [`kafka_admin_CreateAclsResult_get_binding`] returns borrowed from the
 /// synchronous result — which the callback must free with
-/// [`kafka_common_acl_AclBinding_destroy`].
+/// [`kafka_common_acl_AclBinding_destroy`]. It is Java's `AclBinding` as built from
+/// the request row, so an enum code Java does not define reads back as that
+/// enum's UNKNOWN code, as Java's `fromCode` maps it; only when the whole
+/// submission fails does the key echo the row's raw values.
 ///
 /// There is no value parameter: Java's per-binding future is
 /// `KafkaFuture<Void>`, so a null `error` *is* the success value. A non-null
@@ -20404,38 +20412,6 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_create_acls_async(
     callback: kafka_admin_AdminClient_create_acls_callback_t,
     user_data: *mut c_void,
 ) {
-    // Computed independently of `read_acl_bindings`'s validated per-row parse
-    // (see `AclBindingKey`), so every requested row still gets its own
-    // callback via `admin_async_per_key_op`'s fan-out even when that parse
-    // fails.
-    //
-    // Deduplicated to DISTINCT bindings (first-occurrence order): the Rust core's
-    // `create_acls` dedups its result map via `Entry::Vacant`
-    // (Java keys `createAcls` on the `AclBinding`), so two equal bindings
-    // collapse to ONE outcome future — the shape `submit_create_acls_entries`
-    // returns. A raw `keys` with duplicates would make the second occurrence find
-    // no unclaimed entry and fire `admin_async_per_key_op`'s synthetic
-    // "not present" error, racing ahead of and winning the caller's real
-    // per-binding outcome. The C incref count must match: distinct bindings
-    // (`count_distinct_acls`).
-    let keys = {
-        let mut seen = std::collections::HashSet::new();
-        unsafe {
-            read_acl_binding_keys(
-                resource_types,
-                resource_names,
-                pattern_types,
-                principals,
-                hosts,
-                operations,
-                permission_types,
-                count,
-            )
-        }
-        .into_iter()
-        .filter(|k| seen.insert(k.clone()))
-        .collect::<Vec<_>>()
-    };
     // SAFETY: `read_acl_bindings` requires each array to be null or have `count` entries,
     // with string entries NULL or valid C strings, which this function's `# Safety`
     // promises (every non-null array has `count` entries, string entries NULL or valid C
@@ -20453,6 +20429,36 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_create_acls_async(
             permission_types,
             count,
         )
+    };
+    // The keys are the validated bindings' own `acl_binding_key`s — the form
+    // the result's entries are keyed by, with each enum code normalised the
+    // way Java's `fromCode` normalises it (an undefined code becomes
+    // UNKNOWN) — so a code Java does not define cannot mis-key: its binding
+    // is matched by its own entry, not reported missing with a second,
+    // foreign-keyed callback beside it. Only when the parse fails, and no
+    // binding exists, are the raw rows the identities for the fan-out (see
+    // `AclBindingKey`). A repeated binding is one key
+    // (`admin_async_per_key_op` de-duplicates), matching the C incref count
+    // (`count_distinct_acls`).
+    let keys = match &acls {
+        Ok(bindings) => bindings.iter().map(acl_binding_key).collect(),
+        // SAFETY: `read_acl_binding_keys` has the same requirements as `read_acl_bindings`
+        // above (each array null or with `count` entries, string entries NULL or valid C
+        // strings), which this function's `# Safety` promises; it treats a NULL array as no
+        // rows, clamps a negative `count` to zero, tolerates NULL string entries, and copies
+        // every row into owned keys on the calling thread during this call.
+        Err(_) => unsafe {
+            read_acl_binding_keys(
+                resource_types,
+                resource_names,
+                pattern_types,
+                principals,
+                hosts,
+                operations,
+                permission_types,
+                count,
+            )
+        },
     };
     let options = create_acls_options(timeout_ms);
     // SAFETY: `admin_async_value_op` requires `admin` to be a valid handle from an
@@ -35958,6 +35964,72 @@ mod tests {
 
         unsafe { kafka_admin_AdminClient_destroy(admin) };
         drop(slow);
+    }
+
+    /// An operation code Java's `AclOperation.fromCode` does not define (99)
+    /// becomes UNKNOWN in the binding, and the callback is keyed by that
+    /// binding: one callback, carrying the RPC's real outcome under operation
+    /// UNKNOWN — not a synthetic "not present" error for the raw row plus a
+    /// second callback under a key the caller never passed.
+    #[test]
+    fn create_acls_async_keys_an_undefined_enum_code_by_the_normalised_binding() {
+        let admin = kafka_admin_MockAdminClient_new(1);
+        let resource_types = [i32::from(ResourceType::Topic.code())];
+        let pattern_types = [i32::from(PatternType::Literal.code())];
+        let operations = [99i32];
+        let permission_types = [i32::from(AclPermissionType::Allow.code())];
+        let (_names_owned, name_ptrs) = c_array(&["ca-topic"]);
+        let (_principals_owned, principal_ptrs) = c_array(&["User:alice"]);
+        let (_hosts_owned, host_ptrs) = c_array(&["*"]);
+
+        let (tx, rx) = std::sync::mpsc::channel::<(i32, Option<String>)>();
+        struct Ctx(std::sync::mpsc::Sender<(i32, Option<String>)>);
+        extern "C" fn on_create(
+            key: *mut kafka_common_acl_AclBinding_t,
+            error: *mut kafka_common_Error_t,
+            user_data: *mut c_void,
+        ) {
+            let ctx = unsafe { &*(user_data as *const Ctx) };
+            let operation = unsafe { kafka_common_acl_AclBinding_operation(key) };
+            let message = if error.is_null() {
+                None
+            } else {
+                let text = unsafe { CStr::from_ptr(common::kafka_common_Error_message(error)) }
+                    .to_string_lossy()
+                    .into_owned();
+                unsafe { crate::ffi::common::kafka_common_Error_destroy(error) };
+                Some(text)
+            };
+            unsafe { kafka_common_acl_AclBinding_destroy(key) };
+            ctx.0.send((operation, message)).unwrap();
+        }
+        let ctx_ptr = Box::into_raw(Box::new(Ctx(tx)));
+        unsafe {
+            kafka_admin_AdminClient_create_acls_async(
+                admin,
+                resource_types.as_ptr(),
+                name_ptrs.as_ptr(),
+                pattern_types.as_ptr(),
+                principal_ptrs.as_ptr(),
+                host_ptrs.as_ptr(),
+                operations.as_ptr(),
+                permission_types.as_ptr(),
+                1,
+                -1,
+                on_create,
+                ctx_ptr as *mut c_void,
+            );
+        }
+        let (operation, message) = rx.recv_timeout(Duration::from_secs(5)).expect("one callback");
+        assert_eq!(operation, i32::from(AclOperation::Unknown.code()));
+        // The mock's real per-binding outcome (`MockAdminClient.createAcls`
+        // throws "Not implemented yet"), not the synthetic "not present" error.
+        assert_eq!(message.as_deref(), Some("Not implemented yet"));
+        assert!(rx.recv_timeout(Duration::from_millis(200)).is_err(), "exactly one callback");
+        unsafe {
+            drop(Box::from_raw(ctx_ptr));
+            kafka_admin_AdminClient_destroy(admin);
+        }
     }
 
     /// End-to-end through the real async entry point and `MockAdminClient`
