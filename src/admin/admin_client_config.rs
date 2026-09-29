@@ -59,6 +59,10 @@ pub struct AdminClientConfig {
 impl AdminClientConfig {
     /// `bootstrap.servers`
     pub const BOOTSTRAP_SERVERS_CONFIG: &'static str = "bootstrap.servers";
+    /// `bootstrap.controllers` (KIP-919). Accepted and validated as in Java,
+    /// but connecting through controllers is not implemented, so setting it
+    /// makes [`Self::new`] fail (see there).
+    pub const BOOTSTRAP_CONTROLLERS_CONFIG: &'static str = "bootstrap.controllers";
     /// Config key: `client.dns.lookup` (see
     /// [`CommonClientConfigs::CLIENT_DNS_LOOKUP_CONFIG`]). Java's `AdminClientConfig.java`
     /// declares its own public alias of the `CommonClientConfigs` constant.
@@ -97,15 +101,27 @@ impl AdminClientConfig {
     /// # Errors
     ///
     /// Returns [`Error::Config`] if `bootstrap.servers` is missing or empty, and
-    /// an error if a value fails to parse or validate.
+    /// an error if a value fails to parse or validate. Following Java's
+    /// `AdminBootstrapAddresses.fromConfig`, setting both `bootstrap.servers`
+    /// and `bootstrap.controllers` is an [`Error::Config`]. Setting only
+    /// `bootstrap.controllers` returns an `UNSUPPORTED_VERSION` error
+    /// ([`Error::unsupported_version`]): Java
+    /// accepts it (KIP-919), but this client does not implement bootstrapping
+    /// through controllers, and silently ignoring the key would leave the
+    /// client with no bootstrap address at all.
     pub fn new(props: &HashMap<String, String>) -> Result<Self, Error> {
         let mut config = Self::default();
+        let mut bootstrap_controllers: Vec<String> = Vec::new();
 
         for (key, value) in props {
             match key.as_str() {
                 Self::BOOTSTRAP_SERVERS_CONFIG => {
                     // `ValidList.anyNonDuplicateValues(true, false)` (`AdminClientConfig.java:159`).
                     config.bootstrap_servers = ValidList::parse_any_non_duplicate_values(key, value, true)?;
+                },
+                Self::BOOTSTRAP_CONTROLLERS_CONFIG => {
+                    // `ValidList.anyNonDuplicateValues(true, false)` (`AdminClientConfig.java:162-167`).
+                    bootstrap_controllers = ValidList::parse_any_non_duplicate_values(key, value, true)?;
                 },
                 Self::CLIENT_DNS_LOOKUP_CONFIG => {
                     config.client_dns_lookup = ClientDnsLookup::parse_config_value(value)?;
@@ -150,14 +166,34 @@ impl AdminClientConfig {
             }
         }
 
-        // `AdminBootstrapAddresses.fromConfig` (`AdminBootstrapAddresses.java:59-63`):
-        // `bootstrap.servers` defaults to the empty list, and `bootstrap.controllers`
-        // is not modelled here, so it is always empty.
-        if config.bootstrap_servers.is_empty() {
-            return Err(Error::config_message(format!(
-                "You must set either {} or bootstrap.controllers",
-                Self::BOOTSTRAP_SERVERS_CONFIG
-            )));
+        // `AdminBootstrapAddresses.fromConfig` (`AdminBootstrapAddresses.java:59-79`),
+        // in Java's branch order.
+        match (config.bootstrap_servers.is_empty(), bootstrap_controllers.is_empty()) {
+            (true, true) => {
+                return Err(Error::config_message(format!(
+                    "You must set either {} or {}",
+                    Self::BOOTSTRAP_SERVERS_CONFIG,
+                    Self::BOOTSTRAP_CONTROLLERS_CONFIG
+                )));
+            },
+            // Java bootstraps through the controllers here
+            // (`usingBootstrapControllers = true`); that path is not
+            // implemented, so fail explicitly rather than drop the key.
+            (true, false) => {
+                return Err(Error::unsupported_version(format!(
+                    "{} is not supported by this client; set {} instead",
+                    Self::BOOTSTRAP_CONTROLLERS_CONFIG,
+                    Self::BOOTSTRAP_SERVERS_CONFIG
+                )));
+            },
+            (false, false) => {
+                return Err(Error::config_message(format!(
+                    "You cannot set both {} and {}",
+                    Self::BOOTSTRAP_SERVERS_CONFIG,
+                    Self::BOOTSTRAP_CONTROLLERS_CONFIG
+                )));
+            },
+            (false, true) => {},
         }
         config
             .client_dns_lookup
@@ -299,6 +335,46 @@ mod tests {
         let props = HashMap::new();
         let err = AdminClientConfig::new(&props).unwrap_err();
         assert_eq!(err.message(), "You must set either bootstrap.servers or bootstrap.controllers");
+    }
+
+    /// `AdminBootstrapAddresses.fromConfig`'s branches for
+    /// `bootstrap.controllers`: only controllers is an explicit unsupported
+    /// error (never silently dropped), both is Java's `ConfigException`, and
+    /// an empty controllers list counts as unset.
+    #[test]
+    fn bootstrap_controllers() {
+        let props = HashMap::from([("bootstrap.controllers".to_string(), "c:9093".to_string())]);
+        let error = AdminClientConfig::new(&props).unwrap_err();
+        assert_eq!(error.error(), crate::common::protocol::Errors::UnsupportedVersion, "{error:?}");
+        assert_eq!(
+            error.message(),
+            "bootstrap.controllers is not supported by this client; set bootstrap.servers instead"
+        );
+
+        let props = HashMap::from([
+            ("bootstrap.servers".to_string(), "a:9092".to_string()),
+            ("bootstrap.controllers".to_string(), "c:9093".to_string()),
+        ]);
+        match AdminClientConfig::new(&props) {
+            Err(Error::Config(e)) => {
+                assert_eq!(e.message(), "You cannot set both bootstrap.servers and bootstrap.controllers")
+            },
+            other => panic!("Expected Config, got: {other:?}"),
+        }
+
+        let props = HashMap::from([("bootstrap.controllers".to_string(), " ".to_string())]);
+        assert_eq!(
+            AdminClientConfig::new(&props).unwrap_err().message(),
+            "You must set either bootstrap.servers or bootstrap.controllers"
+        );
+        let props = HashMap::from([
+            ("bootstrap.servers".to_string(), "a:9092".to_string()),
+            ("bootstrap.controllers".to_string(), String::new()),
+        ]);
+        assert_eq!(
+            AdminClientConfig::new(&props).unwrap().bootstrap_servers(),
+            ["a:9092".to_string()]
+        );
     }
 
     #[test]

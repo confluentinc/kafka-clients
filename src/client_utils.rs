@@ -167,7 +167,10 @@ impl ClientUtils {
     ///   Java, trimming is the config layer's job (`ConfigDef`'s `LIST`
     ///   parsing, [`ConfigDef::parse_list`](crate::common::config::ConfigDef)),
     ///   which already strips the whitespace around each comma.
-    /// - Any URL has a port number outside 0-65535.
+    /// - Any URL has a port number outside 0-65535 ("Invalid port"). As in
+    ///   Java, in canonical mode the host is resolved first, so a host that
+    ///   cannot be resolved is "Unknown host" whatever its port; digits too
+    ///   many for an `int` are "Invalid port" in both modes.
     /// - In canonical mode, a host cannot be resolved at all.
     /// - No valid addresses can be resolved after validation.
     pub fn parse_and_validate_addresses(
@@ -232,28 +235,47 @@ impl ClientUtils {
                 ))
             })?;
 
-            // `Integer.parseInt` overflowing (`NumberFormatException`) and
-            // `new InetSocketAddress` rejecting a port outside 0-65535 are both
-            // `IllegalArgumentException`s, which Java rethrows as "Invalid port".
-            let port = port.parse::<u16>().map_err(|_| {
+            // `Integer.parseInt` overflowing is a `NumberFormatException`, an
+            // `IllegalArgumentException`, which Java rethrows as "Invalid port"
+            // before either branch runs. The pattern admits digits only, so
+            // this fails only on overflow.
+            let invalid_port = || {
                 Error::config_message(format!(
                     "Invalid port in {}: {}",
                     CommonClientConfigs::BOOTSTRAP_SERVERS_CONFIG,
                     url
                 ))
-            })?;
+            };
+            let port = port.parse::<i32>().map_err(|_| invalid_port())?;
+            // `InetSocketAddress.checkPort`: a port outside 0-65535 is an
+            // `IllegalArgumentException` too, so also "Invalid port".
+            let check_port = |port: i32| u16::try_from(port).map_err(|_| invalid_port());
 
             match client_dns_lookup {
                 ClientDnsLookup::ResolveCanonicalBootstrapServersOnly => {
-                    let inet_addresses = resolve_all(host, port).map_err(|_| {
+                    // `InetAddress.getAllByName(host)` runs before any port
+                    // check, so an unresolvable host is "Unknown host" even
+                    // when its port is also out of range. The port given here
+                    // is a placeholder: only the addresses are used.
+                    let mut inet_addresses = resolve_all(host, 0).map_err(|_| {
                         Error::config_message(format!(
                             "Unknown host in {}: {}",
                             CommonClientConfigs::BOOTSTRAP_SERVERS_CONFIG,
                             url
                         ))
                     })?;
+                    // Java includes both families here, in `getAllByName`
+                    // order, which on a default JVM is IPv4 first
+                    // (`java.net.preferIPv6Addresses=false`). `getaddrinfo`
+                    // has no such order, so stable-sort IPv4 first; nothing
+                    // is filtered. Same reasoning as the IPv4 preference in
+                    // `filter_preferred_addresses` (see its doc).
+                    inet_addresses.sort_by_key(|address| !address.is_ipv4());
                     for inet_address in inet_addresses {
                         let resolved_canonical_name = canonical_host_name(inet_address.ip());
+                        // `new InetSocketAddress(resolvedCanonicalName, port)`
+                        // checks the port after resolving the canonical name.
+                        let port = check_port(port)?;
                         match resolve_one(&resolved_canonical_name, port) {
                             Some(address) => addresses.push((resolved_canonical_name, address)),
                             None => warn!(
@@ -266,17 +288,35 @@ impl ClientUtils {
                         }
                     }
                 },
-                ClientDnsLookup::UseAllDnsIps => match resolve_one(host, port) {
-                    // Preserve the original hostname: it is what the bootstrap
-                    // node connects by (re-resolved per connection attempt) and
-                    // what TLS SNI uses (Java's `getHostString()`).
-                    Some(address) => addresses.push((host.to_string(), address)),
-                    None => warn!(
-                        "Couldn't resolve server {} from {} as DNS resolution failed for {}",
-                        url,
-                        CommonClientConfigs::BOOTSTRAP_SERVERS_CONFIG,
-                        host
-                    ),
+                ClientDnsLookup::UseAllDnsIps => {
+                    // `new InetSocketAddress(host, port)` resolves the host and
+                    // then checks the port, but it catches the
+                    // `UnknownHostException` itself, so an out-of-range port is
+                    // "Invalid port" whether or not the host resolves. Checking
+                    // the port first gives the same result without the lookup.
+                    let port = check_port(port)?;
+                    match resolve_one(host, port) {
+                        // Preserve the original hostname: it is what the
+                        // bootstrap node connects by (re-resolved per
+                        // connection attempt) and what TLS SNI uses (Java's
+                        // `getHostString()`). For an empty host that is the
+                        // loopback address's name, `localhost`, since the
+                        // resolved `InetSocketAddress` keeps no literal name.
+                        Some(address) => {
+                            let host = if host.is_empty() {
+                                DefaultHostResolver::EMPTY_HOST_NAME
+                            } else {
+                                host
+                            };
+                            addresses.push((host.to_string(), address));
+                        },
+                        None => warn!(
+                            "Couldn't resolve server {} from {} as DNS resolution failed for {}",
+                            url,
+                            CommonClientConfigs::BOOTSTRAP_SERVERS_CONFIG,
+                            host
+                        ),
+                    }
                 },
             }
         }
@@ -307,7 +347,9 @@ impl ClientUtils {
     ///
     /// The host group is `*`, so an empty host (`":9092"`, `"[]:9092"`) matches
     /// and is returned as `""`; resolving it yields the loopback address
-    /// ([`DefaultHostResolver::EMPTY_HOST_ADDRESS`]), as `InetAddress` does.
+    /// ([`DefaultHostResolver::EMPTY_HOST_ADDRESS`]), as `InetAddress` does,
+    /// and the bootstrap entry is keyed by its name
+    /// ([`DefaultHostResolver::EMPTY_HOST_NAME`]).
     fn parse_host_port(address: &str) -> Option<(&str, &str)> {
         let is_scheme_char = |c: char| c.is_ascii_alphanumeric() || matches!(c, '-' | '%' | '.' | '_');
         let is_host_char = |c: char| is_scheme_char(c) || c == ':';
@@ -689,24 +731,109 @@ mod tests {
 
     /// An empty host (`":9092"`) is accepted, as in Java, and resolves to the
     /// loopback address the way `InetAddress.getAllByName("")` does, with no
-    /// name-service lookup. In `use_all_dns_ips` mode the node host stays `""`
-    /// (Java's `getHostString()`), which `DefaultHostResolver` later resolves
-    /// to loopback too. In canonical mode the one address is keyed by its
-    /// canonical name, the textual IP (see the canonical-name deviation;
-    /// Java gets `localhost` from the PTR lookup).
+    /// name-service lookup. In `use_all_dns_ips` mode the node host is
+    /// `localhost`: Java's `getHostString()` of the resolved
+    /// `InetSocketAddress("", port)` is the loopback address's name. In
+    /// canonical mode the one address is keyed by its canonical name, the
+    /// textual IP (see the canonical-name deviation; Java gets `localhost`
+    /// from the PTR lookup). Either way the bootstrap node is not empty, so
+    /// `NetworkClient::ready` (which rejects an empty node) can connect to it.
     #[test]
     fn test_empty_host_resolves_to_loopback() {
         let loopback = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 9092);
-        let urls = [":9092".to_string()];
-        assert_eq!(
-            ClientUtils::parse_and_validate_addresses(&urls, ClientDnsLookup::UseAllDnsIps).unwrap(),
-            vec![(String::new(), loopback)]
+        for url in [":9092", "[]:9092", "PLAINTEXT://:9092"] {
+            let urls = [url.to_string()];
+            let addrs = ClientUtils::parse_and_validate_addresses(&urls, ClientDnsLookup::UseAllDnsIps).unwrap();
+            assert_eq!(addrs, vec![("localhost".to_string(), loopback)], "url {url}");
+            let cluster = crate::common::Cluster::bootstrap(&addrs);
+            let node = &cluster.nodes()[0];
+            assert!(!node.is_empty(), "url {url}: {node}");
+            assert_eq!(node.host(), "localhost");
+
+            let addrs =
+                ClientUtils::parse_and_validate_addresses(&urls, ClientDnsLookup::ResolveCanonicalBootstrapServersOnly)
+                    .unwrap();
+            assert_eq!(addrs, vec![("127.0.0.1".to_string(), loopback)], "url {url}");
+            assert!(!crate::common::Cluster::bootstrap(&addrs).nodes()[0].is_empty());
+        }
+    }
+
+    /// Canonical mode keeps both families, IPv4 first, whatever order the
+    /// resolver returns them in (Java's `getAllByName` order on a default
+    /// JVM); within a family the resolver's order is kept.
+    #[test]
+    fn test_parse_and_validate_addresses_with_reverse_lookup_dual_stack() {
+        let v6a: IpAddr = "2001:db8::1".parse().unwrap();
+        let v4a: IpAddr = "192.0.2.1".parse().unwrap();
+        let v6b: IpAddr = "2001:db8::2".parse().unwrap();
+        let v4b: IpAddr = "192.0.2.2".parse().unwrap();
+        let resolve_all = |host: &str, port: u16| -> io::Result<Vec<SocketAddr>> {
+            if host == "dual.example" {
+                return Ok([v6a, v4a, v6b, v4b].iter().map(|ip| SocketAddr::new(*ip, port)).collect());
+            }
+            host.parse::<IpAddr>()
+                .map(|ip| vec![SocketAddr::new(ip, port)])
+                .map_err(|_| io::Error::new(io::ErrorKind::NotFound, host.to_string()))
+        };
+        let addrs = ClientUtils::parse_and_validate_addresses_with_lookup(
+            &["dual.example:9092".to_string()],
+            ClientDnsLookup::ResolveCanonicalBootstrapServersOnly,
+            resolve_all,
+            |address| address.to_string(),
+        )
+        .unwrap();
+        let expected: Vec<(String, SocketAddr)> = [v4a, v4b, v6a, v6b]
+            .iter()
+            .map(|ip| (ip.to_string(), SocketAddr::new(*ip, 9092)))
+            .collect();
+        assert_eq!(addrs, expected);
+    }
+
+    /// Error precedence between the host and the port, per mode, as in Java:
+    /// canonical mode calls `getAllByName(host)` before
+    /// `new InetSocketAddress(canonical, port)` checks the port, so an
+    /// unresolvable host wins; the default mode's `InetSocketAddress(host,
+    /// port)` swallows the unknown host, so the port wins. An `int` overflow
+    /// fails `Utils.getPort` before either branch, so it is "Invalid port" in
+    /// both modes.
+    #[test]
+    fn test_invalid_port_versus_unknown_host() {
+        let unresolvable = |host: &str, _: u16| -> io::Result<Vec<SocketAddr>> {
+            Err(io::Error::new(io::ErrorKind::NotFound, host.to_string()))
+        };
+        let resolvable = |_: &str, port: u16| -> io::Result<Vec<SocketAddr>> {
+            Ok(vec![SocketAddr::new("192.0.2.1".parse().unwrap(), port)])
+        };
+        let run = |url: &str, mode, resolve_all: &dyn Fn(&str, u16) -> io::Result<Vec<SocketAddr>>| {
+            ClientUtils::parse_and_validate_addresses_with_lookup(&[url.to_string()], mode, resolve_all, |a| {
+                a.to_string()
+            })
+        };
+        let canonical = ClientDnsLookup::ResolveCanonicalBootstrapServersOnly;
+        let default = ClientDnsLookup::UseAllDnsIps;
+
+        assert_config_error(
+            run("bad.host:70000", canonical, &unresolvable),
+            "Unknown host in bootstrap.servers: bad.host:70000",
         );
-        assert_eq!(
-            ClientUtils::parse_and_validate_addresses(&urls, ClientDnsLookup::ResolveCanonicalBootstrapServersOnly)
-                .unwrap(),
-            vec![("127.0.0.1".to_string(), loopback)]
+        assert_config_error(
+            run("good.host:70000", canonical, &resolvable),
+            "Invalid port in bootstrap.servers: good.host:70000",
         );
+        assert_config_error(
+            run("bad.host:70000", default, &unresolvable),
+            "Invalid port in bootstrap.servers: bad.host:70000",
+        );
+        assert_config_error(
+            run("good.host:70000", default, &resolvable),
+            "Invalid port in bootstrap.servers: good.host:70000",
+        );
+        for mode in [canonical, default] {
+            assert_config_error(
+                run("bad.host:99999999999", mode, &unresolvable),
+                "Invalid port in bootstrap.servers: bad.host:99999999999",
+            );
+        }
     }
 
     /// A port too large for `Integer.parseInt` is a `NumberFormatException`,
