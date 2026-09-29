@@ -2,8 +2,8 @@
 
 **Status:** COMPLETE (2026-09-29) on the branch below; the user opens the PR. Phase 1 done via
 Actor/Critic 85: Commit A `5e28201b`, Commit B `11348821`, fixup `868ea49d` after one Critic finding
-(§4.3 amendment, §10.2, `COMMENTS.DONE.85.md` in this directory). **Phase 2 (§11) APPROVED 2026-09-30**,
-executing as Actor/Critic 85 on the same branch.
+(§4.3 amendment, §10.2, `COMMENTS.DONE.85.md` in this directory). **Phase 2 (§11) COMPLETE 2026-09-30**
+(commit `35d399fa`, Actor/Critic 85, same branch).
 **Origin:** security code-review finding (severity Low): secret-bearing structs derive `Debug`.
 **Baseline:** `master` at `b76de2e1`. Java reference: Apache Kafka 4.3.1 — the `kafka/` submodule
 is pinned at `26b251a451ce941d3d7a55e6487bcb7f16b5ad48` but is **not checked out in this clone** (§10.4).
@@ -378,7 +378,7 @@ loop (Actor 85 → Critic 85 → fix → handoff) on the same branch.
 6. No zeroize-on-drop (§3.5).
 7. Breaking the `pub` field types of `SslConfig` / `SaslConfig` is acceptable below 1.0.
 
-## 11. Phase 2 (APPROVED 2026-09-30) — the same defect beyond the Phase-1 list
+## 11. Phase 2 (COMPLETE 2026-09-30, commit `35d399fa`) — the same defect beyond the Phase-1 list
 
 Found by Actor 85 and independently verified by Critic 85 against the Java `toString()` at the
 pinned commit. Same technique as Phase 1 (§3.3): drop `Debug` from the derive list and delegate to
@@ -405,15 +405,15 @@ drops, a request times out, or a node is disconnected or closed. Java logs the r
 | 1 | `network_client.rs:1161-1175`: log the request with `{}` (Display), as Java logs `toString()` | `NetworkClient.java:405-409` | **live path** |
 | 2 | `AlterUserScramCredentialsRequest`: `Debug` delegates to redacting `Display` | `AlterUserScramCredentialsRequest.java:85-97` | **live via #1** |
 | 3 | `IncrementalAlterConfigsRequest`: `Debug` delegates to redacting `Display` | `IncrementalAlterConfigsRequest.java:111-123` | **live via #1** |
-| 4 | `AlterUserScramCredentialsRequestBuilder`: `Debug` prints type only, as Java's `Builder.toString()` | `AlterUserScramCredentialsRequest.java:45-46` | latent |
-| 5 | `IncrementalAlterConfigsRequestBuilder`: same | `IncrementalAlterConfigsRequest.java:74-75` | latent |
+| 4 | `AlterUserScramCredentialsRequestBuilder`: `Debug` delegates to a new `Display` rendering `maskData(data)` as Java's `Builder.toString()` does (this row first said "prints type only"; Java masks, it does not omit) | `AlterUserScramCredentialsRequest.java:45-46` | latent |
+| 5 | `IncrementalAlterConfigsRequestBuilder`: same, every config value rendered `REDACTED` | `IncrementalAlterConfigsRequest.java:74-75` | latent |
 | 6 | `SaslAuthenticateRequestBuilder`: `Debug` delegates to its existing Java-matching `Display` | `SaslAuthenticateRequest.java:49-50` | latent |
 | 7 | `RenewDelegationTokenRequestBuilder`: same pattern | `RenewDelegationTokenRequest.java:66-74` | latent |
 | 8 | `ExpireDelegationTokenRequestBuilder`: same pattern | `ExpireDelegationTokenRequest.java:76-84` | latent |
 | 9 | `ConfigEntry`: `Debug` delegates to its redacting `Display`; this also fixes the derived `Debug` of `Config` and `AlterConfigOp`, which embed it | `ConfigEntry.java:183-186`, `Config.java:74-75`, `AlterConfigOp.java:119-124` | latent |
 | 10 | `ConfigEntryOptions` (Rust-only): hide `value` when `is_sensitive` | `ConfigEntry.java:183-186` | latent |
 | 11 | `CreateDelegationTokenResponseOptions` (Rust-only): hide `token_id` and `hmac` | `CreateDelegationTokenResponse.java:109-113` | latent |
-| 12 | `MockAdminClient` state holds mock config values unredacted; Java has no `toString()` | — | lowest; fold into #9 if its maps hold `ConfigEntry`, else document and skip |
+| 12 | `MockAdminClient` state holds mock config values unredacted; Java has no `toString()` | — | lowest; the maps hold raw strings, so `State` and `TopicMetadata` got hand-written `Debug` rendering every config map as its key set (this row first said "document and skip") |
 
 Tests: one `Debug` redaction test per item, same shape as Phase 1 (§7.2): distinctive secret literal
 absent, a non-secret field present, byte secrets asserted in their `Debug` rendering. For #1, a test
@@ -444,6 +444,46 @@ depends on a key list (§4.3 as amended), so nothing else needs updating for the
    map in `Debug` as its key set only, because the map holds keys this client does not parse, so no per-key
    filter can match what Java hides.
 
+4. **Testing a log line whose logger cannot be captured** (Critic 85, round 3): pass the logged value
+   through a private helper returning `&dyn Display`, mark it `#[deny(dead_code)]` so a file-level
+   `allow(dead_code)` cannot hide a reverted call site, and assert on the helper's output. Used for item 1.
+
 The full rationale, with the evidence from this milestone, is in `critic-85-final-review.md` in this
 directory (the final state of Critic 85's `COMMENTS.85.md`: round-2 verification, the Phase 2 candidates
 with line references, and these rule suggestions; that filename is git-ignored everywhere by design).
+
+### 11.5 As landed (commit `35d399fa`, Critic 85 round 3 clean)
+
+- All twelve items done, one `Debug` redaction test each, 25 new tests. Verified arm by arm as in §6:
+  workspace 4398 / ffi 4467 / all-features 4691 passed, 0 failed; release build, `check-bindings`,
+  `format-check`, `lint` clean. Critic 85 reran the workspace tests, lint and format-check at the same tree.
+- **Item 1 shape.** The cancel log formats the in-flight request through a private `loggable_request`
+  helper returning `&dyn Display`, so `{:?}` on it cannot compile. A missing request (only the tests build
+  one, mirroring `InFlightRequestsTest.java:123-124`) renders as `null`, as SLF4J prints a null argument.
+  The helper carries `#[deny(dead_code)]` because `network_client.rs` has a file-level `allow(dead_code)`:
+  reverting the log line to `{:?}` passed lint until the attribute was added. The test asserts on the helper's
+  output for a request holding SCRAM secrets, not on captured log text, because the process-wide `log`
+  logger is already installed by `src/ffi/common.rs` in the `--features ffi` test binary (§11.4 item 4).
+- **Found and fixed on the way:** the metadata send log (`NetworkClient.java:1342`) also used `{:?}`; it now
+  uses `{}` through a new `Display` on `MetadataRequestBuilder` mirroring `Builder.toString()`
+  (`MetadataRequest.java:146-147`). The two `{:?}` left in the file format an `Errors` value and a caught
+  error, not a request. `in_flight_requests.rs` has no log lines.
+- **Builders 4, 5, 7, 8** got a `Display` translating `Builder.toString()` = `maskData(data)` through a
+  private `mask_data` on each request that clones and masks the copy (salt and salted password emptied;
+  every config value, null included, set to `REDACTED`; HMAC emptied). Renew/Expire's request `Display`
+  now shares it; output unchanged, the Phase 1 tests still pass.
+- **Accepted pre-existing deviation (Critic 85 verdict):** the `Display` of `AlterUserScramCredentialsRequest`
+  and `IncrementalAlterConfigsRequest` prints counts only (from `3e84b9bd`, PR #127), while Java's request
+  `toString()` prints `maskData(data)` (`AlterUserScramCredentialsRequest.java:96-97`,
+  `IncrementalAlterConfigsRequest.java:122-123`). It hides more than Java, so nothing leaks; the DEBUG line
+  loses the names Java prints. Optional follow-up: render `mask_data` in both `Display`s (the Renew/Expire
+  shape), updating the two tests and two comments that pin the current strings.
+- **Item 12** also gave `TopicMetadata` a hand-written `Debug` (it is inside `State`), and removed two
+  `allow(dead_code)` on `State.controller` / `State.cluster_id`.
+- **Sweep result (Critic 85):** nine Java request/response classes have a masking `toString()`; eight are now
+  covered in Rust. The ninth, `AlterConfigsRequest`, has no Rust translation.
+- **Notes for later, all pre-existing and none leaking a secret:** (a) 38 setter docs in 13 files say
+  "panics if it was not set" while `build()` returns `Err`, a doc-only sweep; (b) the version-mismatch log
+  prints the API key name where Java prints the builder and the error (`NetworkClient.java:586-587`), fixing
+  it needs a `Display` bound on `RequestBuilder`; (c) `Errors` logged with `{:?}` shows the Rust variant
+  name instead of Java's constant name.

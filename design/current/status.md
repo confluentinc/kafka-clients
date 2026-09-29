@@ -5,7 +5,9 @@
 > of `SslConfig` / `SaslConfig` are typed `Password`, `ProducerConfig` renders its
 > raw `originals` map as keys only, and `DelegationToken`,
 > `UserScramCredentialUpsertion` and the six SASL / delegation-token wrappers
-> delegate `Debug` to their redacting `Display`. Milestone 14 added the
+> delegate `Debug` to their redacting `Display`; its Phase 2 fixed the
+> `NetworkClient` disconnect log (`{:?}` → `Display`) and the remaining request,
+> builder and admin-config types whose Java `toString()` masks. Milestone 14 added the
 > `verifiable-clients` crate (`VerifiableProducer` / `VerifiableConsumer`) for
 > ducktape system tests. See `design/history/MILESTONES.md` and
 > `design/history/Milestone-15-password-redaction/PLAN.md`.
