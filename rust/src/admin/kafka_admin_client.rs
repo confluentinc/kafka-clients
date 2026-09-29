@@ -2110,19 +2110,44 @@ fn get_list_partition_reassignments_call(
 /// Returns the broker id pertaining to the given resource, or `None` if the
 /// resource is not associated with a particular broker.
 ///
-/// Mirrors `KafkaAdminClient.nodeFor`.
+/// Mirrors `KafkaAdminClient.nodeFor`, including its
+/// `Integer.valueOf(resource.name())`: a BROKER / BROKER_LOGGER name that is
+/// not a decimal `int` is Java's `NumberFormatException`, returned as an
+/// error with Java's message (see [`parse_java_int`]).
 #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClient#nodeFor")]
-fn node_for(resource: &ConfigResource) -> Option<i32> {
+fn node_for(resource: &ConfigResource) -> Result<Option<i32>, Error> {
     if (resource.resource_type() == config_resource::Type::Broker && !resource.is_default())
         || resource.resource_type() == config_resource::Type::BrokerLogger
     {
-        // Java parses `Integer.valueOf(resource.name())`; a non-numeric name
-        // would throw. Here a parse failure degrades to "any broker" rather
-        // than panicking on a recoverable path (CLAUDE.md §12).
-        resource.name().parse::<i32>().ok()
+        parse_java_int(resource.name()).map(Some)
     } else {
-        None
+        Ok(None)
     }
+}
+
+/// Java's `Integer.parseInt(s)` / `Integer.valueOf(s)`: an optional `+` / `-`
+/// followed by decimal digits, within `int` range. Anything else is Java's
+/// `NumberFormatException` — an `IllegalArgumentException` subclass, so
+/// [`Error::LocalIllegalArgument`] — with its message, `For input string:
+/// "<s>"`. (Java also accepts non-ASCII Unicode decimal digits; this does not.)
+pub(crate) fn parse_java_int(s: &str) -> Result<i32, Error> {
+    s.parse::<i32>()
+        .map_err(|_| Error::local_illegal_argument(format!("For input string: \"{s}\"")))
+}
+
+/// One already-failed future per resource, for a `describeConfigs` /
+/// `incrementalAlterConfigs` call Java would have aborted with a throw.
+fn failed_config_futures<'a, T: Clone + Send + Sync + 'static>(
+    resources: impl Iterator<Item = &'a ConfigResource>,
+    error: &Error,
+) -> HashMap<ConfigResource, KafkaFuture<T>> {
+    resources
+        .map(|resource| {
+            let handle: KafkaFutureImpl<T> = KafkaFutureImpl::new();
+            handle.complete_with_error(error.clone());
+            (resource.clone(), handle.future())
+        })
+        .collect()
 }
 
 /// Converts a `DescribeConfigsResult` wire result into a [`Config`], mirroring
@@ -3658,11 +3683,18 @@ impl Admin for KafkaAdminClient {
         config_resources: &[ConfigResource],
         options: DescribeConfigsOptions,
     ) -> DescribeConfigsResult {
+        // Java's `nodeFor` throws `NumberFormatException` from `describeConfigs`
+        // itself, before any future exists or any request is sent. This result
+        // type cannot carry a synchronous error, so the closest form is used:
+        // every requested resource fails with that error and nothing is sent.
+        let brokers = match config_resources.iter().map(node_for).collect::<Result<Vec<_>, Error>>() {
+            Ok(brokers) => brokers,
+            Err(error) => return DescribeConfigsResult::new(failed_config_futures(config_resources.iter(), &error)),
+        };
         // Partition the requested config resources based on which broker they
         // must be sent to (null broker == obtainable from any broker).
         let mut node_futures: HashMap<Option<i32>, HashMap<ConfigResource, KafkaFutureImpl<Config>>> = HashMap::new();
-        for resource in config_resources {
-            let broker = node_for(resource);
+        for (resource, broker) in config_resources.iter().zip(brokers) {
             node_futures
                 .entry(broker)
                 .or_default()
@@ -3704,8 +3736,18 @@ impl Admin for KafkaAdminClient {
         // so the controller special-casing never triggers).
         let mut unified_request_resources: Vec<ConfigResource> = Vec::new();
 
-        for resource in configs.keys() {
-            let mut node = node_for(resource);
+        // Java's `nodeFor` throws `NumberFormatException` from
+        // `incrementalAlterConfigs` itself; see `describe_configs_with_options`
+        // for why every resource's future carries it instead. Residual
+        // difference: Java has already sent the requests for the node-specific
+        // resources its `HashMap` iteration reached before the bad one; this
+        // validates first and sends nothing.
+        let nodes = match configs.keys().map(node_for).collect::<Result<Vec<_>, Error>>() {
+            Ok(nodes) => nodes,
+            Err(error) => return AlterConfigsResult::new(failed_config_futures(configs.keys(), &error)),
+        };
+
+        for (resource, mut node) in configs.keys().zip(nodes) {
             if self.shared.metadata_manager.using_bootstrap_controllers()
                 && resource.resource_type() != config_resource::Type::BrokerLogger
             {
@@ -8433,6 +8475,62 @@ mod tests {
         assert_eq!(keys, [broker.clone(), broker_logger.clone()].into_iter().collect());
         result.values().get(&broker).unwrap().get().await.unwrap();
         result.values().get(&broker_logger).unwrap().get().await.unwrap();
+    }
+
+    /// Java's `nodeFor` is `Integer.valueOf(resource.name())`, so a non-numeric
+    /// BROKER or BROKER_LOGGER name throws `NumberFormatException` from the
+    /// call itself, before any request. Here every requested resource fails
+    /// with Java's message and no request is sent.
+    #[tokio::test]
+    async fn test_describe_configs_rejects_a_non_numeric_broker_name_like_java() {
+        for resource_type in [config_resource::Type::Broker, config_resource::Type::BrokerLogger] {
+            let (admin, mut runnable, _time, _nodes) = env();
+            let topic = ConfigResource::new(config_resource::Type::Topic, "topic".to_string());
+            let bad = ConfigResource::new(resource_type, "x".to_string());
+            let before = runnable.client_mut().request_count();
+            let result =
+                admin.describe_configs_with_options(&[topic.clone(), bad.clone()], DescribeConfigsOptions::new());
+            pump(&mut runnable, 5).await;
+            assert_eq!(runnable.client_mut().request_count(), before, "nothing is sent");
+            for resource in [&topic, &bad] {
+                let err = result.values()[resource].get().await.unwrap_err();
+                assert!(matches!(err, Error::LocalIllegalArgument(_)), "{err:?}");
+                assert_eq!(err.message(), "For input string: \"x\"");
+            }
+        }
+    }
+
+    /// The same `nodeFor` throw for `incrementalAlterConfigs`.
+    #[tokio::test]
+    async fn test_incremental_alter_configs_rejects_a_non_numeric_broker_name_like_java() {
+        let (admin, mut runnable, _time, _nodes) = env();
+        let bad = ConfigResource::new(config_resource::Type::BrokerLogger, "".to_string());
+        let ops = vec![AlterConfigOp::new(
+            ConfigEntry::new("log4j.logger.kafka".to_string(), Some("DEBUG".to_string())),
+            OpType::Set,
+        )];
+        let before = runnable.client_mut().request_count();
+        let result = admin
+            .incremental_alter_configs_with_options(&HashMap::from([(bad.clone(), ops)]), AlterConfigsOptions::new());
+        pump(&mut runnable, 5).await;
+        assert_eq!(runnable.client_mut().request_count(), before, "nothing is sent");
+        let err = result.values()[&bad].get().await.unwrap_err();
+        assert!(matches!(err, Error::LocalIllegalArgument(_)), "{err:?}");
+        assert_eq!(err.message(), "For input string: \"\"");
+    }
+
+    /// `Integer.parseInt` accepts a sign and decimal digits within `int` range;
+    /// everything else is `NumberFormatException("For input string: \"s\"")`.
+    #[test]
+    fn parse_java_int_matches_integer_parse_int() {
+        assert_eq!(parse_java_int("42").unwrap(), 42);
+        assert_eq!(parse_java_int("+7").unwrap(), 7);
+        assert_eq!(parse_java_int("-3").unwrap(), -3);
+        for bad in ["", "x", " 1", "1 ", "0x10", "2147483648", "+", "-"] {
+            let err = parse_java_int(bad).unwrap_err();
+            assert!(matches!(err, Error::LocalIllegalArgument(_)), "{bad:?}");
+            assert_eq!(err.message(), format!("For input string: \"{bad}\""));
+        }
     }
 
     #[tokio::test]
